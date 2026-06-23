@@ -1,0 +1,30 @@
+# secrets & local config
+.env
+.env.local
+agents/*/settings.local.json
+**/credentials.json
+**/*.secret
+
+# runtime I/O (keep folders, ignore content)
+planning/inbox/*
+planning/briefs/*
+!planning/**/.gitkeep
+
+# claude code per-agent runtime state (sessions/history/cache live in CLAUDE_CONFIG_DIR)
+agents/*/projects/
+agents/*/sessions/
+agents/*/logs/
+agents/*/.credentials.json
+agents/*/*.local.json
+
+# node / ui
+node_modules/
+ui/node_modules/
+ui/.next/
+dist/
+build/
+
+# os / editor
+.DS_Store
+Thumbs.db
+*.log
