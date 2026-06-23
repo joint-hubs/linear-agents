@@ -1,0 +1,48 @@
+@startuml
+!pragma layout smetana
+title Linear state machine (v2) — 4 statuses + label signals\n(transition = trigger + model)
+
+skinparam state {
+  BackgroundColor #EAF3FF
+  BorderColor #336699
+  FontName Helvetica
+}
+
+[*] --> Todo
+
+Todo --> Todo : DEV asks @Mateusz\n(needs:answer, PL · MiniMax M3)
+Todo --> InProgress : plan approved (emoji V)\n(HITL · GLM-5.2)
+Todo --> Canceled : dropped
+InProgress --> InReview : code done + DoD + checklist\n(ai:coded · GLM-5.2)
+InProgress --> InProgress : checkpoint -> STATE.md
+InReview --> InProgress : changes requested\n(Conventional Comments · round++)
+InReview --> Done : review clean + tests pass\n(ai:reviewed · GLM-5.2 deep + DeepSeek V4 Pro)
+Done --> [*]
+
+state InReview {
+  [*] --> Reviewing
+  Reviewing --> Testing : approve (stage:testing)
+  Testing --> [*] : deploy+tests pass
+  Testing --> Reviewing : retest
+}
+
+note right of Todo
+  Entry gate = dor-ok flag
+  (Why/AC/scope-out/deps).
+  type:spike -> ADR, skips deploy.
+end note
+
+note right of InReview
+  Max 2 dev<->review rounds,
+  then escalated -> @Mateusz.
+  Testing = deploy GCP (OpenRouter)
+  with health-check + rollback;
+  Ollama/GPU -> Lambda AI.
+end note
+
+note bottom of InProgress
+  Flags any state: needs:* ·
+  blocked · risk:high ·
+  escalated · over-budget.
+end note
+@enduml

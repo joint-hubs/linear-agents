@@ -1,0 +1,35 @@
+@startuml
+title CADENCE (v2) — weekly loop that closes the line into a cycle
+
+skinparam defaultFontName Helvetica
+skinparam ActivityBackgroundColor #FFFFFF
+skinparam ActivityBorderColor #666666
+
+legend top
+|<#BAFFC9> | MiniMax M3 (read 100+ issues, cheap) |
+|<#FFB3BA> | GLM-5.2 (retro / drift — short, weekly) |
+|<#FFD9BA> | DeepSeek V4 Pro (Polish digest to Mateusz) |
+endlegend
+
+start
+:cron: weekly (or morning_planner / Hermes);
+#BAFFC9:Collect state from Linear:\nthroughput, In Progress / In Review,\nblocked, escalated, over-budget, aging WIP;
+#FFB3BA:Detect drift:\ntasks without Initiative (no outcome),\nstale needs:* (> X days), old open tasks, WIP overflow;
+#BAFFC9:Roadmap refresh: Now / Next / Later\n(update Initiatives);
+#FFB3BA:Retro (blameless): went well / badly /\nsurprised + 1-3 action items;
+#FFD9BA:Digest (PL) -> @Mateusz:\ntop priorities, blockers, decisions, view links;
+if (new input or scope change?) then (yes)
+  :feed into PLAN launcher\n(new voice memo / brief);
+else (no)
+  :wait for next week;
+endif
+stop
+
+note right
+  Read-mostly: does NOT change scope
+  without Mateusz (priority changes =
+  proposal in the digest).
+  This is the 5th element wrapping
+  PLAN -> DEV -> REVIEW -> TEST into a loop.
+end note
+@enduml

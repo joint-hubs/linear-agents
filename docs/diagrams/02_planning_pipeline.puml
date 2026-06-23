@@ -1,0 +1,53 @@
+@startuml
+title PLAN launcher (v2) — discovery, DoR, spec+ADR, estimate, idempotent push
+
+skinparam defaultFontName Helvetica
+skinparam sequenceMessageAlign center
+
+actor "Mateusz" as M #D7BAFF
+participant "Inbox / UI" as IN
+participant "Discovery\nMiniMax M3" as D #FFB3BA
+participant "DoR-gate\nDeepSeek V4 Flash" as DOR #E0E0E0
+participant "Spec / design\nGLM-5.2" as S #BAE1FF
+participant "Spec review\nMiniMax M3" as R #FFB3BA
+participant "Decompose+Enrich\nMiniMax M3" as DEC #BAFFC9
+participant "Linear API\nDeepSeek V4 Flash (idempotent)" as L
+
+M -> IN : voice note + artifacts (+STATE.md)
+IN -> D : transcript + artifacts
+activate D
+D -> D : jobs-to-be-done, current vs desired,\nrisks, corner cases, echo-back
+D --> M : brief (<=1 page) + open questions\n(flag transcript-uncertain)
+deactivate D
+D -> DOR : validate completeness
+DOR --> M : missing? needs:answer (async)
+
+== GATE 1 (HITL async: approve / defer-to-spike) ==
+M -> S : approve + answers (emoji V)
+activate S
+S -> S : tech design + test scenarios + prod plan
+S -> S : emit ADR (docs/adr/) for decisions
+S -> R : draft spec
+activate R
+R --> S : holes / risks
+deactivate R
+note over S, R : loop <= 2
+S -> DEC : final spec
+deactivate S
+
+activate DEC
+DEC -> DEC : vertical slices + estimate (t-shirt; XL->re-split)\n+ type:* + relations(blocked by)
+loop per slice (parallel)
+  DEC -> DEC : AC + DoD + scope (link to parent, no copy)
+end
+DEC --> M : sample 2-3 enriched subtasks
+deactivate DEC
+
+== GATE 2 (HITL async: approve batch) ==
+M -> L : approve (emoji V)
+activate L
+L -> L : check existing (idempotent)
+L -> L : create parent(Initiative) + N subtasks -> Todo\n(ai:planned, type:*, slice:N)
+L --> M : Linear issues in Todo (rollback on >1 fail)
+deactivate L
+@enduml

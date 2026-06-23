@@ -1,0 +1,54 @@
+@startuml
+title REVIEW + TEST (v2) — parallel review (max 2 rounds), safe deploy
+
+skinparam defaultFontName Helvetica
+
+actor "Mateusz" as M #D7BAFF
+participant "Linear" as L
+participant "first-pass\nDeepSeek V4 Pro" as FP #E0E0E0
+participant "security scan\nSAST/secret" as SEC #E0E0E0
+participant "deep review\nGLM-5.2" as DR #FFB3BA
+participant "TEST agent\nMiniMax M3" as T #BAFFC9
+participant "GCP VM\nOpenRouter build" as GCP
+
+L -> FP : task In Review (risk-tiered)
+par parallel review
+  FP -> FP : lint / style / obvious / missing tests
+else
+  SEC -> SEC : SAST / SCA / secret scan
+else
+  DR -> DR : correctness / arch / edge / business
+end
+DR -> DR : merge -> Conventional Comments
+
+alt issues (round <= 2)
+  DR -> L : issue: comments -> In Progress (round++)
+else round > 2
+  DR -> L : escalated -> @Mateusz
+else clean
+  DR -> L : approve -> stage:testing (ai:reviewed)
+  L -> T : task stage:testing
+  activate T
+  T -> GCP : deploy OpenRouter build (configured VM)
+  alt health-check fail
+    T -> GCP : auto-rollback to previous
+    T -> L : comment -> In Progress
+  else healthy
+    T -> T : gen scenarios (synthetic data, no PII)
+    T -> GCP : run smoke + critical-path + observability
+    alt pass
+      T -> L : -> Done (+ deploy URL)
+    else fail
+      T -> L : root-cause (GLM-5.2) -> In Progress
+      T --> M : notify if risk:high
+    end
+  end
+  deactivate T
+end
+
+note over GCP
+  Ollama / GPU builds -> Lambda AI (GPU) instead of GCP.
+  Solo profile: smoke + critical-path + security-scan
+  (NOT full mutation/contract/chaos).
+end note
+@enduml

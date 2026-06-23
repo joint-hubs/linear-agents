@@ -1,0 +1,47 @@
+@startuml
+title DEV launcher (v2) — dep-aware pick, type routing, async clarify, checkpoint
+
+skinparam defaultFontName Helvetica
+
+actor "Mateusz" as M #D7BAFF
+participant "Linear" as L
+participant "DEV agent\nGLM-5.2 (base)" as DEV #BAE1FF
+participant "Recon\nMiniMax M3" as REC #BAFFC9
+participant "Repo\n(config/projects.json)" as REPO
+
+DEV -> L : query Todo (priority/deadline), skip blocked-by
+L --> DEV : top task (desc+comments+checklist+type)
+DEV -> REC : analyze task + scan code
+activate REC
+REC --> DEV : context packet (key files, patterns, gaps)
+deactivate REC
+DEV -> REPO : env-check (docker compose up / seed)
+
+alt type = spike / tech
+  DEV -> REPO : spike -> ADR (no prod code) / tech -> technical criteria
+  DEV -> L : update + (spike) Done with ADR
+else feature / bug
+  alt task unclear
+    DEV -> L : comment @Mateusz (PL · MiniMax M3) + needs:answer
+    note over DEV : agent sleeps (async)
+    M -> L : answer / emoji
+    L --> DEV : clarification
+  end
+  DEV -> DEV : plan mode (verify desc vs code)
+  DEV --> M : present plan
+  == HITL: approve via emoji V ==
+  M -> DEV : approve
+  DEV -> L : pull/rebase ; In Progress
+  activate DEV
+  DEV -> REPO : implement (GLM · multi-file->Kimi · hard->DeepSeek V4 Pro)
+  DEV -> REPO : checkpoint per slice -> STATE.md
+  DEV -> REPO : self-verify (build/test, delivery-loop)
+  deactivate DEV
+  DEV -> L : comment "how to test" + DoD -> In Review (ai:coded)
+end
+
+note over DEV, L
+  Safeguards: WIP=1 · tool-call fail -> retry -> Kimi/Opus ·
+  cost guardrail (over-budget) · 2 failed tries -> escalated + @Mateusz.
+end note
+@enduml

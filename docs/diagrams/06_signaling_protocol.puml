@@ -1,0 +1,43 @@
+@startuml
+title Signaling protocol (v2) — async human<->agent via Linear metadata\nsolves the HITL bottleneck (W3)
+
+skinparam defaultFontName Helvetica
+
+participant "Agent @flow\n(any launcher)" as A #BAFFC9
+participant "Linear\n(labels · comments · reactions · webhooks)" as L
+actor "Mateusz" as M #D7BAFF
+
+== agent blocked -> signal & sleep (no interactive wait) ==
+A -> L : set label needs:answer + comment (PL · MiniMax M3) + @Mateusz
+A -> A : sleep / move to other task (WIP allows)
+L -> M : inbox notification (webhook)
+
+== Mateusz answers in batch (saved view) ==
+M -> L : open view "needs:*" (his queue)
+alt quick approve
+  M -> L : react V on agent comment
+else needs detail
+  M -> L : comment "@flow ..." (answer)
+else pause / redo
+  M -> L : react X (changes) or reload (redo)
+end
+
+== webhook wakes the right agent ==
+L -> A : webhook (reaction / mention / comment)
+A -> L : react eyes ("received, working")
+A -> L : clear needs:* ; continue work
+
+note over A, L
+  Native first: status · priority · estimate(t-shirt) ·
+  relations(blocked by) · assignee(@flow) · Initiative.
+  Labels only for: type:* · needs:* · risk:high · ai:* ·
+  flags dor-ok/dod-ok/escalated/over-budget/transcript-uncertain.
+  Emoji = micro-acks. NO custom fields (Linear has none).
+end note
+
+note right of M
+  Views = control plane:
+  bell My input · robot Agent working ·
+  warn Attention · blocked Blocked · test Review/Test
+end note
+@enduml

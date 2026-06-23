@@ -1,0 +1,78 @@
+@startuml
+title Linear AI Workflow — End-to-End Overview (v2)\nCADENCE + 4 launchers · 4 statuses · task typing · metadata HITL · P0 safeguards
+
+skinparam defaultFontName Helvetica
+skinparam ActivityBackgroundColor #FFFFFF
+skinparam ActivityBorderColor #666666
+skinparam ActivityDiamondBackgroundColor #FFFFFF
+
+legend top
+|=   |= model |= when (cost strategy) |
+|<#FFB3BA>   | Opus 4.8 | PLAN lead only (1 point) |
+|<#BAE1FF>   | GLM-5.2 | base coding workhorse (default) |
+|<#BAFFC9>   | MiniMax M3 | fast agent loops / multimodal — used most |
+|<#FFFFBA>   | Kimi K2.7 Code | multi-file / MCP-heavy (escalate) |
+|<#E0E0E0>   | DeepSeek V4 Flash | bulk / cheapest |
+|<#FFD9BA>   | MiniMax M3 | Polish, to Mateusz — tiny |
+|<#D7BAFF>   | Mateusz | async HITL (needs:* + emoji ✅) |
+endlegend
+
+|#EAF3FF|1 - PLAN launcher|
+start
+#D7BAFF:Voice note + artifacts (+STATE.md) via UI inbox;
+#FFB3BA:Discovery synthesis: current vs desired,\nrisks, corner cases, echo-back\n(flag transcript-uncertain);
+if (DoR ok? Why/AC/scope-out/deps) then (no)
+  #D7BAFF:needs:answer -> @Mateusz (async);
+endif
+#D7BAFF:GATE 1 (HITL async): brief review -> approve / defer-to-spike;
+#BAE1FF:Spec + test scenarios + prod plan\n(emit ADR for decisions);
+#FFB3BA:Spec review (skeptic): holes / corner cases (<=2 loops);
+#BAFFC9:Decompose -> vertical slices + estimate (t-shirt; XL->re-split)\n+ type:* + relations(blocked by);
+fork
+  #BAFFC9:Enrich slice 1 (AC+DoD, link to parent);
+fork again
+  #BAFFC9:Enrich slice N (AC+DoD, link to parent);
+end fork
+#D7BAFF:GATE 2 (HITL async): sample 2-3 -> approve;
+#E0E0E0:Push to Linear (idempotent): parent(Initiative)+subtasks\n-> Todo, ai:planned, type:*;
+
+|#EAFBF0|2 - DEV launcher|
+#BAFFC9:Pick Todo (priority/deadline, dep-aware, WIP=1)\n-> recon (context packet) -> env-check;
+if (task type?) then (spike/tech)
+  #BAE1FF:spike -> ADR (no deploy) / tech -> technical criteria;
+  stop
+else (feature/bug)
+endif
+if (clear?) then (no)
+  #FFD9BA:Comment @Mateusz (PL) + needs:answer (async);
+endif
+#BAE1FF:Plan mode (verify desc vs code);
+#D7BAFF:GATE 3 (HITL): approve plan via emoji ✅;
+#BAE1FF:In Progress -> implement (checkpoint->STATE.md)\nmulti-file->Kimi · hard->DeepSeek V4 Pro;
+#BAFFC9:self-verify (delivery-loop) + DoD -> In Review, ai:coded;
+
+|#FFF6EA|3 - REVIEW launcher|
+fork
+  #E0E0E0:first-pass + SAST/secret-scan;
+fork again
+  #FFB3BA:deep: correctness/security/arch/edge (risk-tiered);
+end fork
+if (issues? round<=2) then (issues)
+  #BAE1FF:Conventional Comments -> In Progress (round++);
+  stop
+else (clean)
+  #BAE1FF:approve -> stage:testing, ai:reviewed;
+endif
+
+|#FFEAEA|4 - TEST launcher|
+#BAFFC9:Deploy OpenRouter build -> GCP VM\nhealth-check (+ auto-rollback on fail);
+#E0E0E0:Generate scenarios (synthetic data, no PII);
+#BAFFC9:Run smoke + critical-path + observability\n(root-cause fail -> GLM-5.2);
+if (pass?) then (yes)
+  #BAE1FF:-> Done;
+  stop
+else (no)
+  #BAFFC9:comment failures -> In Progress;
+  stop
+endif
+@enduml
