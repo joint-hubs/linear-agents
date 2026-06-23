@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "defaultMode": "default",
+    "allow": [
+      "Read", "Grep", "Glob", "Write",
+      "mcp__linear__*"
+    ],
+    "deny": [
+      "Edit", "Bash(rm -rf:*)", "Bash(git push:*)"
+    ]
+  },
+  "mcpServers": {
+    "linear": { "type": "sse", "url": "https://mcp.linear.app/sse" }
+  }
+}

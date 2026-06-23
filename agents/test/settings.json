@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "defaultMode": "default",
+    "allow": [
+      "Read", "Grep", "Glob", "Write",
+      "Bash(docker:*)", "Bash(docker compose:*)", "Bash(gcloud:*)", "Bash(ssh:*)", "Bash(scp:*)",
+      "Bash(curl:*)", "Bash(npx playwright:*)", "Bash(k6:*)", "Bash(make:*)", "Bash(npm run:*)",
+      "mcp__linear__*"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)", "Bash(git push:*)"
+    ]
+  },
+  "mcpServers": {
+    "linear": { "type": "sse", "url": "https://mcp.linear.app/sse" }
+  }
+}
