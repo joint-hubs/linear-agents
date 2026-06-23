@@ -1,0 +1,14 @@
+{
+  "_doc": "4 statusy robocze (+Canceled). 'Ready' i 'Testing' NIE są statusami (anty-over-engineering, Linear≠Jira) — patrz mapping.",
+  "workflowStates": [
+    { "name": "Todo",        "type": "unstarted" },
+    { "name": "In Progress", "type": "started" },
+    { "name": "In Review",   "type": "started" },
+    { "name": "Done",        "type": "completed" },
+    { "name": "Canceled",    "type": "canceled" }
+  ],
+  "mapping": {
+    "Ready":   "flaga dor-ok na tasku w Todo (gotowy do wzięcia przez DEV)",
+    "Testing": "label stage:testing w obrębie In Review (deploy + testy przez TEST)"
+  }
+}

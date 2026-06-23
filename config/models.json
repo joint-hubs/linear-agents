@@ -1,0 +1,42 @@
+{
+  "_doc": "Źródło prawdy routingu modeli per rola. Odzwierciedlone w bin/*.bat i agents/*/settings.json. Pełne uzasadnienie: docs/model-comparison-and-routing.md",
+  "providers": {
+    "openrouter": "https://openrouter.ai/api/v1",
+    "anthropic": "https://api.anthropic.com",
+    "zai_anthropic": "https://api.z.ai/api/anthropic"
+  },
+  "ids": {
+    "opus": "anthropic/claude-opus-4-8",
+    "sonnet": "anthropic/claude-sonnet-4-6",
+    "glm": "z-ai/glm-5.2",
+    "minimax": "minimax/minimax-m3",
+    "deepseek_flash": "deepseek/deepseek-v4-flash",
+    "deepseek_pro": "deepseek/deepseek-v4-pro",
+    "kimi": "moonshotai/kimi-k2.7-code",
+    "gpt": "openai/gpt-5.5"
+  },
+  "routing": {
+    "cadence": { "default": "minimax", "retro": "glm", "pl": "deepseek_pro" },
+    "plan":    { "discovery": "minimax", "dor_gate": "deepseek_flash", "spec": "glm", "spec_review": "minimax", "decompose": "minimax", "enrich": "minimax", "push": "deepseek_flash", "pl": "minimax" },
+    "dev":     { "recon": "minimax", "implement": "glm", "multifile": "kimi", "hard": "deepseek_pro", "pl": "minimax" },
+    "review":  { "first_pass": "deepseek_pro", "security": "kimi", "deep": "glm", "pl": "minimax" },
+    "test":    { "deploy": "deepseek_pro", "scenarios": "deepseek_flash", "run": "minimax", "root_cause": "glm", "terminal": "gpt" }
+  },
+  "pricing": {
+    "_doc": "USD per 1M tokens (input/output). Źródło: docs/model-comparison-and-routing.md",
+    "anthropic/claude-opus-4-8":       { "input": 5,     "output": 25   },
+    "anthropic/claude-sonnet-4-6":     { "input": 3,     "output": 15   },
+    "z-ai/glm-5.2":                    { "input": 1.40,  "output": 4.40 },
+    "minimax/minimax-m3":              { "input": 0.30,  "output": 1.20 },
+    "deepseek/deepseek-v4-flash":      { "input": 0.14,  "output": 0.28 },
+    "deepseek/deepseek-v4-pro":        { "input": 0.435, "output": 0.87 },
+    "moonshotai/kimi-k2.7-code":       { "input": 0.95,  "output": 4.00 },
+    "openai/gpt-5.5":                  { "input": 5,     "output": 30   }
+  },
+  "fallback": {
+    "_note": "tool-call/MCP fail -> retry -> eskalacja (W5)",
+    "glm": ["kimi", "opus"],
+    "minimax": ["deepseek_flash", "glm"],
+    "deepseek_flash": ["minimax"]
+  }
+}

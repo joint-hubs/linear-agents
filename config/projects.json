@@ -1,0 +1,38 @@
+{
+  "_doc": "Mapa: Linear project -> workspace + repo + deploy target. Workspace: joi (Neo/AU/Fenix) or pisi (PISI). Deploy: gcp-vm via SSH. GPU platform (lambda-gpu) deferred — see platforms.lambda-gpu.",
+  "default": {
+    "deploy": { "type": "gcp-vm", "vm": "${GCP_VM_NAME}", "ssh": "${GCP_SSH_USER}", "project": "${GCP_PROJECT}", "zone": "${GCP_ZONE}" }
+  },
+  "platforms": {
+    "lambda-gpu": {
+      "status": "deferred",
+      "note": "GPU VM platform for Ollama deploys via SSH, not a project. Separate from gcp-vm. Deferred until needed."
+    }
+  },
+  "projects": [
+    {
+      "linearProject": "Neo",
+      "workspace": "joi",
+      "repo": "C:/Users/mateu/Documents/GitHub/joint-flows",
+      "deploy": { "type": "gcp-vm", "vm": "TODO-vm-name", "ssh": "TODO" }
+    },
+    {
+      "linearProject": "AU",
+      "workspace": "joi",
+      "repo": "C:/Users/mateu/Documents/GitHub/office",
+      "deploy": { "type": "gcp-vm", "vm": "TODO-vm-name", "ssh": "TODO" }
+    },
+    {
+      "linearProject": "Fenix",
+      "workspace": "joi",
+      "repo": "C:/Users/mateu/Documents/GitHub/fenix",
+      "deploy": { "type": "gcp-vm", "vm": "TODO-vm-name", "ssh": "TODO" }
+    },
+    {
+      "linearProject": "PISI",
+      "workspace": "pisi",
+      "repo": "C:/Users/mateu/Documents/GitHub/gantt-pisi",
+      "deploy": { "type": "gcp-vm", "vm": "TODO-vm-name", "ssh": "TODO" }
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "_doc": "Definicje labelek/grup Linear (signaling protocol). bootstrap-linear.mjs tworzy je idempotentnie. Linear ma label GROUPS (single-select) + opisy. Brak custom fields → labelki + pola natywne.",
+  "groups": {
+    "type":  { "exclusive": true, "labels": ["feature", "bug", "spike", "tech"] },
+    "needs": { "exclusive": true, "labels": ["answer", "approval", "decision", "access"] },
+    "risk":  { "exclusive": true, "labels": ["high"] },
+    "ai":    { "exclusive": false, "labels": ["planned", "coded", "reviewed"] }
+  },
+  "flags": ["dor-ok", "dod-ok", "escalated", "over-budget", "transcript-uncertain", "blocked", "stage:testing"],
+  "descriptions": {
+    "type:spike": "Research/decyzja; output ADR, bez deploy, timebox 1-2 dni",
+    "type:tech": "Tech-debt/refactor/infra; technical success criteria, bez user-AC",
+    "needs:answer": "Agent czeka na odpowiedź Mateusza (komentarz/emoji)",
+    "needs:approval": "Bramka HITL — czeka na ✅",
+    "needs:decision": "Wymaga decyzji architektonicznej",
+    "needs:access": "Brak dostępu/env/sekretu",
+    "risk:high": "Ryzykowna zmiana → głębszy review (GLM-5.2)",
+    "ai:coded": "Kod tknięty przez AI → wyższy sampling review",
+    "dor-ok": "Definition of Ready spełnione (Why/AC/scope-out/deps)",
+    "dod-ok": "Definition of Done spełnione",
+    "escalated": "Przekroczono loop-limit → eskalacja do człowieka",
+    "over-budget": "Przekroczono budżet kosztowy → stop (kill-switch)",
+    "transcript-uncertain": "Niepewna transkrypcja głosu — do potwierdzenia",
+    "stage:testing": "Pod-faza In Review: deploy + testy"
+  },
+  "nativeFields": {
+    "_note": "używaj pól natywnych zamiast labelek",
+    "status": ["Todo", "In Progress", "In Review", "Done", "Canceled"],
+    "priority": "sort dev",
+    "estimate": "skala t-shirt (XS/S/M/L/XL); XL -> re-decompose",
+    "relations": "blocked by -> dependency-aware pick",
+    "assignee": "bot @flow vs Mateusz (handoff)",
+    "initiative": "outcome/theme",
+    "project": "repo"
+  }
+}
