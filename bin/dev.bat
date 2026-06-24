@@ -2,7 +2,7 @@
 setlocal
 call "%~dp0_lib.bat" || exit /b 1
 REM Agent 2 - DEV. Spec: docs/agent-2-dev.md
-REM Main = GLM-5.2 (base coding). Escalacja: multi-file/MCP -> Kimi, hard -> DeepSeek V4 Pro (przez /model lub subagentów).
+REM Main = GLM-5.2 (base coding). Escalacja: multi-file/MCP -> Kimi, hard -> DeepSeek V4 Pro (przez /model lub subagent??w).
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\dev"
 set "ANTHROPIC_MODEL=z-ai/glm-5.2"
 set "ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8"

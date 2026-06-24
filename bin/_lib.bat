@@ -14,8 +14,10 @@ if not defined OPENROUTER_API_KEY (
 )
 
 REM provider: OpenRouter serves every model id (anthropic/*, z-ai/*, minimax/*, deepseek/*, moonshotai/*, openai/*)
-set "ANTHROPIC_BASE_URL=https://openrouter.ai/api/v1"
+set "ANTHROPIC_BASE_URL=https://openrouter.ai/api"  REM no /v1 here -- Claude Code SDK appends /v1/messages
 set "ANTHROPIC_AUTH_TOKEN=%OPENROUTER_API_KEY%"
 set "ANTHROPIC_API_KEY="
+set "CLAUDE_CODE_SUBAGENT_MODEL="
+REM clear inherited override; else all subagents flatten onto one model (see ADR-0002)
 set "API_TIMEOUT_MS=3000000"
 exit /b 0
