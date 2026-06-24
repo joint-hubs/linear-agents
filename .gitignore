@@ -6,7 +6,9 @@ agents/*/settings.local.json
 **/*.secret
 
 # runtime I/O (keep folders, ignore content)
+.state/
 planning/inbox/*
+!planning/inbox/sample.md
 planning/briefs/*
 !planning/**/.gitkeep
 
@@ -16,6 +18,15 @@ agents/*/sessions/
 agents/*/logs/
 agents/*/.credentials.json
 agents/*/*.local.json
+agents/*/.claude.json
+agents/*/.last-cleanup
+agents/*/backups/
+
+# spike scratch (re-runnable T-A1 evidence; see docs/adr/0002)
+.spike-*/
+
+# throwaway test scripts (kept locally for re-verification, not committed)
+scripts/_test_*.mjs
 
 # node / ui
 node_modules/
