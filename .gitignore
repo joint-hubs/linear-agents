@@ -17,6 +17,7 @@ agents/*/projects/
 agents/*/sessions/
 agents/*/logs/
 agents/*/.credentials.json
+agents/*/mcp-needs-auth-cache.json
 agents/*/*.local.json
 agents/*/.claude.json
 agents/*/.last-cleanup

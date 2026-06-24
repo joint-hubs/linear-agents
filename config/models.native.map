@@ -1,0 +1,8 @@
+# Anthropic-subscription (NATIVE) profile for PLAN — real Anthropic model IDs (Claude Pro verified).
+# plan.bat sets these as ANTHROPIC_* env in NATIVE mode (bare aliases do not resolve; real IDs do).
+plan.lead=claude-opus-4-8
+plan.discovery=claude-sonnet-4-6
+plan.spec=claude-sonnet-4-6
+plan.spec-review=claude-opus-4-8
+plan.decomposer=claude-sonnet-4-6
+plan.push=claude-haiku-4-5-20251001

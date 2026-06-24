@@ -7,6 +7,7 @@
  *   2. Every area.role key in models.map has a corresponding subagent file
  *   3. Every Linear label clearly referenced in agent prompts exists in labels.json
  *   4. Every config/*.json parses as valid JSON
+ *   5. config/models.native.map: format, required roles, allowed values
  *
  * Usage: node scripts/check.mjs
  * Exit 0 = clean, 1 = drift
@@ -309,7 +310,61 @@ for (const abs of configJsonFiles) {
   }
 }
 
-// ── 7. Report ───────────────────────────────────────────────────────
+// ── 7. Check 5: config/models.native.map ──────────────────────────────
+
+const NATIVE_MAP_PATH = path.join(ROOT, 'config', 'models.native.map');
+const nativeMapRaw = readFileSafe(NATIVE_MAP_PATH);
+
+const REQUIRED_NATIVE_ROLES = [
+  'plan.lead',
+  'plan.discovery',
+  'plan.spec',
+  'plan.spec-review',
+  'plan.decomposer',
+  'plan.push',
+];
+
+const ALLOWED_NATIVE_VALUES = new Set(['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001']);
+
+if (nativeMapRaw === null) {
+  report('config/models.native.map', 'MISSING');
+} else {
+  const seenRoles = new Set();
+  const lines = nativeMapRaw.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) {
+      report(`config/models.native.map:${i + 1}`, `no '=' found in line`);
+      continue;
+    }
+
+    const key = trimmed.slice(0, eqIdx).trim();
+    const value = trimmed.slice(eqIdx + 1).trim();
+
+    if (!key.includes('.')) {
+      report(`config/models.native.map:${i + 1}`, `key '${key}' is not in area.role format`);
+      continue;
+    }
+
+    if (!ALLOWED_NATIVE_VALUES.has(value)) {
+      report(`config/models.native.map:${i + 1}`, `value '${value}' not in {claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5-20251001}`);
+    }
+
+    seenRoles.add(key);
+  }
+
+  for (const role of REQUIRED_NATIVE_ROLES) {
+    if (!seenRoles.has(role)) {
+      report('config/models.native.map', `missing required role '${role}'`);
+    }
+  }
+}
+
+// ── 8. Report ───────────────────────────────────────────────────────
 
 violations.sort();
 
@@ -319,7 +374,7 @@ for (const v of violations) {
 
 const count = violations.length;
 if (count === 0) {
-  console.log(`OK: 4 checks, 0 violations`);
+  console.log(`OK: 5 checks, 0 violations`);
   process.exit(0);
 } else {
   console.log(`DRIFT: ${count} violations`);
