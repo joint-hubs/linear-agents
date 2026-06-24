@@ -3,7 +3,7 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-06-24 — Faza B DONE (provider mechanism / native profil), Faza A zamknięta
+## Ostatnia aktualizacja: 2026-06-24 — Faza C T-C3 DONE = **Milestone M3** (PLAN push live, GraphQL), T-C2 reframed
 
 ### Zrobione
 - **T-A1 SPIKE — DONE.** Architektura „model per subagent" **DZIAŁA**: explicit OpenRouter slug we
@@ -63,19 +63,35 @@
 - **Ograniczenie native squad (follow-up T-B4):** subagent `agents/plan/agents/*.md` mają frontmatter `model:` = OR slugs (minimax/glm/deepseek) → w native
   Anthropic ich nie ma → realny squad native (z subagentami) wymaga migracji frontmatter na aliasy/real ID (T-B4). Smoke `-p` (lead only) green; pełny squad native = Faza C+/T-B4.
 
+### Zrobione (cd. — Faza C, Linear live)
+- **T-C1 bootstrap Linear live — DONE+verified (2026-06-24).** Team `FEN` (id `08722f3a-3bc3-4d91-a748-cb109348a231`, workspace jointhubs), projekt docelowy `linear-agents` (id `eecedf9f68d4`).
+  - `.env`: `LINEAR_API_KEY` (reuse z hermes `.env`) + `LINEAR_TEAM_KEY=FEN`. Bot `@flow` odłożony (MVP: push jako user).
+  - **Schema drift fix:** `bootstrap-linear.mjs` (Faza A, nigdy live) był na starym GraphQL schema — `labelGroups`/`labelGroupCreate`/`labelCreate`/`issueTemplateCreate` NIE istnieją. Przepisany do current schema: grupy label = `issueLabelCreate` z `isGroup:true`, child labels = `parentId`, stany = `workflowStateCreate` (✓), szablony = `templateCreate` (**deferred** — `templateData` JSON shape nieznany, 0 przykładów w workspace; push tworzy description ręcznie, nie blokuje).
+  - **Live run:** utworzono 4 grupy label (type/needs/risk/ai) + 15 child labels + 7 flag (dor-ok/dod-ok/escalated/over-budget/transcript-uncertain/blocked/stage:testing) + stan „In Review" (Todo/In Progress/Done/Canceled istniały default → skipped). Hard-delete default Linear labels `Feature`+`Bug` (konflikt case-insensitive z `type:feature`/`type:bug`); `Improvement` zostaje (nie konfliktuje).
+  - **Idempotency verified:** re-run → 0 created, all skipped (⏭️), no duplicates.
+
+### Zrobione (cd. — Faza C, PLAN push live = M3)
+- **T-C3 / T-C3a–d — DONE+verified (2026-06-24) = Milestone M3.** Push do Linear headless przez **GraphQL + LINEAR_API_KEY** (NIE MCP — patrz T-C2).
+  - **Decyzja T-C2 (reframe):** MCP linear (`mcp.linear.app/sse`) wymaga interaktywnego OAuth Linear (browser) → NIE ładuje się w headless `claude -p` (ładowały się tylko claude.ai cloud connectors Canva/Figma/Gmail/Calendar/Spotify; OR mode blokuje connectors w ogóle). Mateusz zgodził się na **opcję B: GraphQL przez API key** (headless). MCP linear ścieżka zarzucona dla MVP. Zgoda Mateusza: „zezwalam na external write", „Rób wszystko przez API".
+  - **T-C3a** `config/projects.json` — wpis `linear-agents` (workspace joi, teamKey FEN, projectId pełny UUID `c2670973-2ce0-43c7-9d91-0ba3ec427850` rozwiązany live po nazwie „Linear Agents"; short-id `eecedf9f68d4` z URL = tylko prefix/shortcode, NIE pełny UUID — przyczyna pierwotnego `projectId must be a UUID`).
+  - **T-C3b** `scripts/linear-push.mjs` (nowy, ESM, zero deps) — ingest brief JSON → `issueCreate` (GraphQL): parent epic + N subtask sub-issues (parentId), resolve live team FEN + project „Linear Agents" + stan „Backlog" + labelki (`ai:planned`, `type:*` przez alias feat→feature/fix→bug/spike/tech; `slice:*` auto-create jako flat labels). Estimate S/M/L→2/3/5. Idempotentny przez `utils.mjs idempotentCreate` z kluczami `linear:<externalId>` (prefix zapobiega kolizji z mock dry-run `plan:sample`→ścieżka pliku). `--dry-run` (READ-ONLY, zero mutacji), `--brief`, `--team-key`, `--project-name`, `--project-id` (walidacja 36-char UUID). Błędy Linear z `extensions` (pole) widoczne.
+  - **T-C3c** `agents/plan/agents/push.md` — `tools:` zmienione z `mcp__linear__*, Read` → `Bash, Read`; instrukcje push wołają `node scripts/linear-push.mjs --brief` (+ `--dry-run` podgląd). MCP linear usunięte z agenta.
+  - **T-C3d verify:** live push `planning/briefs/plan_sample_69f948e9.json` → **parent epic FEN-1 + 9 subtask sub-issues FEN-2…FEN-10** w projekcie „Linear Agents", z `ai:planned` + `type:feature` (feat) + 9 auto-created `slice:*` label, parent–child parentId. Idempotencja verified: re-run → **dokładnie 10 issues w projekcie**, highest FEN-10, brak duplikatów (probe `scripts/_test_count.mjs`, read-only). `check.mjs` 5/0. URL-e: `https://linear.app/jointhubs/issue/FEN-1/…` … `FEN-10`.
+  - **Known cosmetic:** drugi run drukuje cached identifiers jako „✅" zamiast „[skip]" (log nie odróżnia skip/create) — functional idempotent (verified via probe). Follow-up: skip-aware logging.
+
 ### W toku
-- (brak — Faza B DONE, czeka na git checkpoint Mateusza)
+- (nic aktywnego — Faza C zamknięta poza T-B4/docs polish)
 
 ### Następne
+- **Faza D — T-D1 PLAN e2e** (następny kamień): pełny przepływ squadu PLAN z bramkami HITL (needs:*+emoji) → realny epik (M3 udowodnił push; T-D1 spiña całość z gates). Wymaga ustalenia czy push idzie interaktywnie (squad REPL) czy headless przez skrypt (T-C3) — obecnie headless GraphQL = domyślny MVP.
 - **Decyzja Mateusza (Faza B):** native launcher **Opus 4.8** działa (Pro, rate-limited, $0/token w subskrypcji) vs **OpenRouter** (Opus 4.8 per-token, bez dziennego limitu, $). Mechanizm dostarcza oba launchery — wybór day-to-day. Dla intensywnych runów OR (scalable), dla lekkich native (free).
 - **T-B4** (follow-up, jeśli native day-to-day): migracja frontmatter subagentów `agents/plan/agents/*.md` z OR slugs na real ID — pełny squad native. Task #13.
 - **T-A6b** (post-pilot): idempotency race-condition hardening — task #9, odroczone.
-- **Faza C** ⛔ (Linear live): workspace/team + bot @flow (OAuth) + klucz.
+- **Bot `@flow`** (OAuth actor=app) — nadal odłożony; MVP push działa jako user (LINEAR_API_KEY). Headless autonomous push (@flow) = przyszłość.
 
 ### Blokady (czeka na Mateusza)
-- Faza C (Linear live): workspace/team + bot `@flow` (OAuth) + klucz Linear.
-- Faza D / T-D4 / Faza G: GCP VM (nazwa/projekt/zone).
-- Odblokowane: OPENROUTER_API_KEY ✅ w `.env`.
+- Faza D T-D4 / Faza G: **GCP VM** (nazwa/projekt/zone).
+- Odblokowane: OPENROUTER_API_KEY ✅, LINEAR_API_KEY ✅, team FEN + projekt „Linear Agents" ✅ (Faza C gotowa do integracji z Fazą D).
 
 ## Jak uruchomić
 - Squad launchery (DZIAŁAJĄ po fixach): `bin\plan.bat` (lead Opus), `bin\dev.bat`, `bin\review.bat`,

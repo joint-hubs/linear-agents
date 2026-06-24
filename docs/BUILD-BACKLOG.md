@@ -72,11 +72,11 @@ maturity: backlog-v1
 
 ---
 
-## FAZA C — Linear live  ⛔ BLOCKED (czeka na Mateusza: workspace/team, bot @flow OAuth, klucz Linear)
+## FAZA C — Linear live  ✅ DONE (2026-06-24) — workspace jointhubs / team FEN / projekt „Linear Agents" / klucz LINEAR_API_KEY; bot @flow odłożony (MVP push jako user)
 
-- [ ] **T-C1 · `bootstrap-linear.mjs` live** — utwórz grupy/labelki/flagi/statusy/templates z `config/linear/`. AC: idempotentne (re-run bez dup). Verify: `--dry-run` → live → sprawdź w Linear.
-- [ ] **T-C2 · Linear MCP verify** — potwierdź endpoint/auth w `agents/*/settings.json` (transport, OAuth/token). Verify: agent czyta/komentuje issue.
-- [ ] **T-C3 · PLAN push live** — podmień mock (T-A4) na realny Linear MCP; 1 realny epik. = **Milestone M3**. Verify: epik+subtaski w Linear z metadanymi.
+- [x] **T-C1 · `bootstrap-linear.mjs` live** *(DONE 2026-06-24)* — utworzono grupy/labelki/flagi/statusy z `config/linear/` w teamie FEN (schema drift fix: `issueLabelCreate` isGroup/parentId, `workflowStateCreate`; templates deferred). Idempotentne (re-run 0 created).
+- [x] **T-C2 · Reframe: push via `LINEAR_API_KEY` GraphQL (headless), NIE MCP linear** *(decyzja 2026-06-24)* — MCP linear (claude.ai connector) wymaga interaktywnego OAuth Linear → nie ładuje się w headless `claude -p` (OR mode blokuje connectors w ogóle). Mateusz: opcja B (GraphQL). Ścieżka MCP zarzucona dla MVP. Verify: pokryte przez T-C3.
+- [x] **T-C3 · PLAN push live = Milestone M3** *(DONE 2026-06-24)* — push przez `scripts/linear-push.mjs` (GraphQL, nie mock/MCP): 1 parent epic (FEN-1) + 9 subtask sub-issues (FEN-2…FEN-10) w projekcie „Linear Agents", labelki `ai:planned`+`type:feature`+9 `slice:*` (auto-create), estimate, stan Backlog, parentId. Idempotent (re-run → 10 issues, no dupes). `config/projects.json` wpis linear-agents; `agents/plan/agents/push.md` wired do skryptu.
 
 ---
 

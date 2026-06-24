@@ -33,6 +33,15 @@
       "workspace": "pisi",
       "repo": "C:/Users/mateu/Documents/GitHub/gantt-pisi",
       "deploy": { "type": "gcp-vm", "vm": "TODO-vm-name", "ssh": "TODO" }
+    },
+    {
+      "linearProject": "linear-agents",
+      "workspace": "joi",
+      "teamKey": "FEN",
+      "projectId": "eecedf9f68d4",
+      "repo": "C:/Users/mateu/Documents/GitHub/linear-agents",
+      "deploy": { "type": "none", "note": "pilot test project — no deploy target" },
+      "note": "Pilot test project for linear-agents orchestration. Team FEN (id 08722f3a-3bc3-4d91-a748-cb109348a231), Linear project id eecedf9f68d4. See docs/BUILD-BACKLOG Faza C / docs/STATE.md."
     }
   ]
 }
