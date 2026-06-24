@@ -83,7 +83,7 @@ maturity: research-v2
 - **Caveat:** brak niezależnych SWE-bench/Terminal-Bench (tylko vendor); VentureBeat: praktycy mówią, że headline'y „nie replikują się czysto"; nie zgłoszony do DeepSWE; thinking-only, brak kontroli temperatury.
 - Źródła: [totalum](https://www.totalum.app/blog/kimi-k2-7-code-vs-claude-2026) · [flowtivity](https://flowtivity.ai/blog/kimi-k2-7-complete-review) · [VentureBeat](https://venturebeat.com/technology/kimi-k2-7-code-cuts-thinking-tokens-30-practitioners-say-benchmarks-dont-check-out) · [Cloudflare](https://developers.cloudflare.com/changelog/post/2026-06-12-kimi-k2-7-code-workers-ai) · [devops.com](https://devops.com/moonshot-ais-kimi-k2-7-code-targets-token-efficiency-in-agentic-coding) · [reddit r/kimi](https://www.reddit.com/r/kimi/comments/1u3ri2w/)
 
-### Claude Opus 4.8 — KRYTYCZNE (Anthropic, 28.05.2026, `claude-opus-4-8`, 1M, 128K out)
+### Claude Opus 4.8 — KRYTYCZNE (Anthropic, 28.05.2026, `claude-opus-4.8`, 1M, 128K out)
 | Benchmark | Wynik | Źródło |
 |---|---|---|
 | SWE-bench Verified | **88.6%** (niezależnie, $1.92) / 85.8 Claude Code | vals.ai |
@@ -93,9 +93,9 @@ maturity: research-v2
 | Terminal-Bench 2.1 | 74.6–85.0 | morphllm / z.ai |
 - **Cena:** **$5 in / $25 out**, cache do −90%, batch −50%. Fast mode $10/$50 (2.5×, research preview).
 - **Killer feature dla review:** „**~4× rzadziej przepuszcza błędy w code review**" niż 4.7 + najniższa halucynacja (abstynencja). Najlepszy PL.
-- Źródła: [Anthropic](https://www.anthropic.com/news/claude-opus-4-8) · [vals.ai](https://vals.ai/benchmarks/swebench) · [morphllm](https://www.morphllm.com/claude-benchmarks) · [vm0](https://www.vm0.ai/en/models/claude-opus-4-8) · [Totalum](https://www.totalum.app/blog/claude-opus-4-8-totalum) · [Finout](https://www.finout.io/blog/claude-opus-4.8-pricing-2026-everything-you-need-to-know) · [simonwillison](https://simonwillison.net/2026/May/28/claude-opus-4-8)
+- Źródła: [Anthropic](https://www.anthropic.com/news/claude-opus-4.8) · [vals.ai](https://vals.ai/benchmarks/swebench) · [morphllm](https://www.morphllm.com/claude-benchmarks) · [vm0](https://www.vm0.ai/en/models/claude-opus-4.8) · [Totalum](https://www.totalum.app/blog/claude-opus-4.8-totalum) · [Finout](https://www.finout.io/blog/claude-opus-4.8-pricing-2026-everything-you-need-to-know) · [simonwillison](https://simonwillison.net/2026/May/28/claude-opus-4.8)
 
-### Claude Sonnet 4.6 — PL / KRYTYCZNY WORKHORSE (`claude-sonnet-4-6`, 200K/1M beta, 64K out)
+### Claude Sonnet 4.6 — PL / KRYTYCZNY WORKHORSE (`claude-sonnet-4.6`, 200K/1M beta, 64K out)
 | Benchmark | Wynik | Źródło |
 |---|---|---|
 | SWE-bench Verified | 79.6% | reddit r/compsci / onyx |
@@ -167,13 +167,13 @@ set ANTHROPIC_BASE_URL=https://openrouter.ai/api/v1
 set ANTHROPIC_AUTH_TOKEN=%OPENROUTER_API_KEY%
 set ANTHROPIC_API_KEY=
 set ANTHROPIC_MODEL=z-ai/glm-5.2
-set ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4-8
+set ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8
 set ANTHROPIC_SMALL_FAST_MODEL=deepseek/deepseek-v4-flash
 claude
 ```
 - `ANTHROPIC_API_KEY=` pusty (inaczej CC wraca do Anthropic).
 - Provider wymienny: OpenRouter / Z.ai (`/api/anthropic`) / Ollama / DeepSeek (Anthropic-format) / Kimi / MiniMax.
-- ID modeli (OpenRouter): `z-ai/glm-5.2`, `minimax/minimax-m3`, `deepseek/deepseek-v4-pro`, `deepseek/deepseek-v4-flash`, `moonshotai/kimi-k2.7-code`, `anthropic/claude-opus-4-8`, `anthropic/claude-sonnet-4-6`, `openai/gpt-5.5`.
+- ID modeli (OpenRouter): `z-ai/glm-5.2`, `minimax/minimax-m3`, `deepseek/deepseek-v4-pro`, `deepseek/deepseek-v4-flash`, `moonshotai/kimi-k2.7-code`, `anthropic/claude-opus-4.8`, `anthropic/claude-sonnet-4.6`, `openai/gpt-5.5`.
 
 ---
 

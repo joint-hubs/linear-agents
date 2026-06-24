@@ -106,7 +106,7 @@
 │  └──────────────────────────────────────────────────────────────────────┘    │
 │                                                                               │
 │  ┌── PLAN  (voice → Linear) ────────────────────────────────────────────┐    │
-│  │  lead: claude-opus-4-8 · spec: z-ai/glm-5.2 · discovery: minimax-m3 │    │
+│  │  lead: claude-opus-4.8 · spec: z-ai/glm-5.2 · discovery: minimax-m3 │    │
 │  │  ● Idle · Last: 1d ago                                                │    │
 │  │  [▶ Open Terminal — PLAN @ JOI]   [▶ Open Terminal — PLAN @ PISI]  │    │
 │  └──────────────────────────────────────────────────────────────────────┘    │
@@ -198,8 +198,8 @@
 │  ┌──────────────────────────────────────────────────────────────────────┐    │
 │  │  Model ID                          In $/1M   Out $/1M  SWE-bench    │    │
 │  │  ────────────────────────────────────────────────────────────────    │    │
-│  │  ○ anthropic/claude-opus-4-8       $5.00     $25.00    88.6%        │    │
-│  │  ○ anthropic/claude-sonnet-4-6     $3.00     $15.00    79.6%        │    │
+│  │  ○ anthropic/claude-opus-4.8       $5.00     $25.00    88.6%        │    │
+│  │  ○ anthropic/claude-sonnet-4.6     $3.00     $15.00    79.6%        │    │
 │  │  ● z-ai/glm-5.2                    $1.40     $4.40     82.8%        │    │
 │  │  ○ minimax/minimax-m3              $0.30     $1.20     80.5%        │    │
 │  │  ○ deepseek/deepseek-v4-flash      $0.14     $0.28     79.0%        │    │
@@ -312,7 +312,7 @@ Note: "Fenix" row here is the orchestrator repo tracked in Linear — it appears
 │  │ z-ai/glm-5.2                       │1.20M │0.80M │0.10M │ $5.28  │$5.20 │ │
 │  │ minimax/minimax-m3                 │0.50M │0.30M │  —   │ $0.51  │$0.51 │ │
 │  │ deepseek/deepseek-v4-pro           │0.25M │0.12M │0.08M │ $0.21  │$0.21 │ │
-│  │ anthropic/claude-opus-4-8          │0.08M │0.05M │  —   │ $1.65  │$1.65 │ │
+│  │ anthropic/claude-opus-4.8          │0.08M │0.05M │  —   │ $1.65  │$1.65 │ │
 │  │ deepseek/deepseek-v4-flash         │0.04M │0.02M │  —   │ $0.01  │$0.01 │ │
 │  │ moonshotai/kimi-k2.7-code          │0.03M │0.01M │  —   │ $0.78  │$0.78 │ │
 │  ├────────────────────────────────────┼──────┼──────┼──────┼────────┼──────┤ │
