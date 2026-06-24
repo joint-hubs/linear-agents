@@ -148,15 +148,23 @@ async function resolveTeam(key, teamKey) {
 // ---------------------------------------------------------------------------
 
 async function fetchExistingLabelGroups(teamId, key) {
+  // Current schema: Team has NO `labelGroups` field. A label GROUP is just an
+  // IssueLabel with isGroup:true; its children are IssueLabels whose parent is
+  // the group. We fetch all labels and keep only the groups (each carrying its
+  // children) so downstream provisioning can match by name.
   const data = await graphql(
     gql`
       query ($teamId: String!) {
         team(id: $teamId) {
-          labelGroups(first: 100) {
+          labels(first: 100) {
             nodes {
               id
               name
-              labels(first: 100) {
+              isGroup
+              parent {
+                id
+              }
+              children {
                 nodes {
                   id
                   name
@@ -170,10 +178,13 @@ async function fetchExistingLabelGroups(teamId, key) {
     { teamId },
     key,
   );
-  return data.team?.labelGroups?.nodes || [];
+  const labels = data.team?.labels?.nodes || [];
+  return labels.filter((l) => l.isGroup === true);
 }
 
 async function fetchExistingLabels(teamId, key) {
+  // Current schema: label→group link is via `parent` (an IssueLabel with
+  // isGroup:true), not `labelGroup`. Standalone flags have a null parent.
   const data = await graphql(
     gql`
       query ($teamId: String!) {
@@ -182,10 +193,9 @@ async function fetchExistingLabels(teamId, key) {
             nodes {
               id
               name
-              description
-              labelGroup {
+              isGroup
+              parent {
                 id
-                name
               }
             }
           }
@@ -220,16 +230,16 @@ async function fetchExistingStates(teamId, key) {
 }
 
 async function fetchExistingTemplates(teamId, key) {
+  // Current schema: Team.templates (was issueTemplates). Kept for the live
+  // fetch step; templates provisioning itself is DEFERRED (see provisionTemplates).
   const data = await graphql(
     gql`
       query ($teamId: String!) {
         team(id: $teamId) {
-          issueTemplates(first: 100) {
+          templates(first: 100) {
             nodes {
               id
               name
-              description
-              templateData
             }
           }
         }
@@ -238,7 +248,7 @@ async function fetchExistingTemplates(teamId, key) {
     { teamId },
     key,
   );
-  return data.team?.issueTemplates?.nodes || [];
+  return data.team?.templates?.nodes || [];
 }
 
 // ---------------------------------------------------------------------------
@@ -246,34 +256,38 @@ async function fetchExistingTemplates(teamId, key) {
 // ---------------------------------------------------------------------------
 
 async function createLabelGroup(teamId, name, color, key) {
+  // Current schema: there is no labelGroupCreate. A group is an IssueLabel with
+  // isGroup:true, created via issueLabelCreate.
   return graphql(
     gql`
-      mutation ($input: LabelGroupCreateInput!) {
-        labelGroupCreate(input: $input) {
+      mutation ($input: IssueLabelCreateInput!) {
+        issueLabelCreate(input: $input) {
           success
-          labelGroup {
+          issueLabel {
             id
             name
           }
         }
       }
     `,
-    { input: { teamId, name, color } },
+    { input: { teamId, name, color, isGroup: true } },
     key,
   );
 }
 
-async function createLabel(teamId, name, description, color, labelGroupId, key) {
+async function createLabel(teamId, name, description, color, parentId, key) {
+  // Current schema: child labels are IssueLabels whose parent is the group
+  // IssueLabel (parentId). Standalone flags pass parentId=null.
   const input = { teamId, name };
   if (description) input.description = description;
   if (color) input.color = color;
-  if (labelGroupId) input.labelGroupId = labelGroupId;
+  if (parentId) input.parentId = parentId;
   return graphql(
     gql`
-      mutation ($input: LabelCreateInput!) {
-        labelCreate(input: $input) {
+      mutation ($input: IssueLabelCreateInput!) {
+        issueLabelCreate(input: $input) {
           success
-          label {
+          issueLabel {
             id
             name
           }
@@ -306,16 +320,21 @@ async function createWorkflowState(teamId, name, type, color, position, key) {
   );
 }
 
-async function createIssueTemplate(teamId, name, description, templateData, templateOrder, key) {
-  const input = { teamId, name, templateData };
+async function createIssueTemplate(teamId, name, description, templateData, sortOrder, key) {
+  // Current schema: templateCreate (was issueTemplateCreate), input
+  // TemplateCreateInput. type is NON_NULL and templateData is NON_NULL JSON.
+  // NOTE: currently UNUSED — templates provisioning is deferred until the
+  // templateData JSON shape is confirmed (see provisionTemplates).
+  const input = { type: "issue", name, templateData };
+  if (teamId) input.teamId = teamId;
   if (description) input.description = description;
-  if (templateOrder != null) input.templateOrder = templateOrder;
+  if (sortOrder != null) input.sortOrder = sortOrder;
   return graphql(
     gql`
-      mutation ($input: IssueTemplateCreateInput!) {
-        issueTemplateCreate(input: $input) {
+      mutation ($input: TemplateCreateInput!) {
+        templateCreate(input: $input) {
           success
-          issueTemplate {
+          template {
             id
             name
           }
@@ -349,8 +368,9 @@ async function provisionLabelGroups(teamId, groups, descriptions, existingGroups
       }
       skipped++;
 
-      // Check child labels within the existing group
-      const existingGroupLabels = existingGroup.labels?.nodes || [];
+      // Check child labels within the existing group (children are IssueLabels
+      // whose parent is this group IssueLabel).
+      const existingGroupLabels = existingGroup.children?.nodes || [];
       for (const labelName of groupCfg.labels) {
         const existingLabel = existingGroupLabels.find((l) => l.name === labelName);
         if (existingLabel) {
@@ -379,13 +399,13 @@ async function provisionLabelGroups(teamId, groups, descriptions, existingGroups
         }
         created += 1 + groupCfg.labels.length;
       } else {
-        // Create the group first
+        // Create the group first (an IssueLabel with isGroup:true)
         const groupResult = await createLabelGroup(teamId, groupName, groupColor, process.env.LINEAR_API_KEY);
-        if (!groupResult?.labelGroupCreate?.success) {
+        if (!groupResult?.issueLabelCreate?.success) {
           console.error(`  ❌ failed to create label group "${groupName}"`);
           continue;
         }
-        const newGroupId = groupResult.labelGroupCreate.labelGroup.id;
+        const newGroupId = groupResult.issueLabelCreate.issueLabel.id;
         console.log(`  ✅ created label group "${groupName}"`);
 
         // Then create each label in the group
@@ -414,9 +434,9 @@ async function provisionFlags(teamId, flags, descriptions, existingLabels, key, 
   let skipped = 0;
 
   for (const flagName of flags) {
-    // Check if a standalone label (not in a group) with this name exists
+    // Check if a standalone label (no parent group) with this name exists
     const existing = existingLabels.find(
-      (l) => l.name === flagName && !l.labelGroup,
+      (l) => l.name === flagName && !l.parent && !l.isGroup,
     );
 
     if (existing) {
@@ -475,39 +495,18 @@ async function provisionStates(teamId, states, existingStates, key, dryRun) {
 
 /**
  * Provision issue templates from config/linear/templates/*.md.
- * Returns { created: number, skipped: number, manual: string[] }
+ *
+ * DEFERRED: TemplateCreateInput.templateData is a NON_NULL JSON scalar, but its
+ * expected shape is not derivable from introspection alone (the workspace has
+ * zero existing templates to copy from). Writing a guessed templateData would
+ * create broken templates in Linear. Labels + states are provisioned now;
+ * templates will be wired up once the templateData schema is confirmed.
+ *
+ * Returns { created: 0, skipped: 0, manual: [], deferred: true }
  */
 async function provisionTemplates(teamId, templates, existingTemplates, key, dryRun) {
-  let created = 0;
-  let skipped = 0;
-  const manual = [];
-
-  for (const tpl of templates) {
-    const existing = existingTemplates.find(
-      (t) => t.name.toLowerCase() === tpl.name.toLowerCase(),
-    );
-
-    if (existing) {
-      if (dryRun) console.log(`  ⏭️  template "${tpl.name}" exists`);
-      skipped++;
-    } else {
-      if (dryRun) {
-        console.log(`  ➕ create template "${tpl.name}" — ${tpl.description}`);
-        created++;
-      } else {
-        try {
-          await createIssueTemplate(teamId, tpl.name, tpl.description, tpl.body, tpl.order, key);
-          console.log(`  ✅ created template "${tpl.name}"`);
-          created++;
-        } catch (err) {
-          console.log(`  ⚠️  MANUAL: template "${tpl.name}" — ${err.message}`);
-          manual.push(tpl.name);
-        }
-      }
-    }
-  }
-
-  return { created, skipped, manual };
+  console.log(`  ⏭️  templates: deferred (templateData format TBD — labels+states provisioned)`);
+  return { created: 0, skipped: 0, manual: [], deferred: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -561,9 +560,7 @@ function printDryRun(team, workspace, labelsCfg, statesCfg, templates) {
 
   // Issue templates
   out("Issue templates:");
-  for (const tpl of templates) {
-    out(`  ➕ "${tpl.name}" — ${tpl.description}`);
-  }
+  out("  ⏭️  templates: deferred (templateData format TBD — labels+states provisioned)");
   out("");
 
   out("GraphQL operations:");
@@ -571,16 +568,14 @@ function printDryRun(team, workspace, labelsCfg, statesCfg, templates) {
   const labelCount = Object.values(labelsCfg.groups).reduce((s, g) => s + g.labels.length, 0);
   const flagCount = labelsCfg.flags.length;
   const stateCount = statesCfg.workflowStates.length;
-  const tplCount = templates.length;
-  out(`  Queries:    4 (teams, labelGroups+labels, states, templates)`);
-  out(`  Mutations:  ${groupCount + labelCount + flagCount + stateCount + tplCount} total`);
-  out(`    labelGroupCreate:     ${groupCount}`);
-  out(`    labelCreate:          ${labelCount + flagCount}`);
-  out(`    workflowStateCreate:  ${stateCount}`);
-  out(`    issueTemplateCreate:  ${tplCount}`);
+  out(`  Queries:    4 (teams, labels(groups+children), states, templates)`);
+  out(`  Mutations:  ${groupCount + labelCount + flagCount + stateCount} total (templates deferred)`);
+  out(`    issueLabelCreate:     ${groupCount + labelCount + flagCount}  (label groups + child labels + flags)`);
+  out(`    workflowStateCreate: ${stateCount}`);
+  out(`    templateCreate:      0 (deferred — templateData format TBD)`);
   out("");
 
-  out("Idempotency: each create is preceded by an existence check (by name).");
+  out("Idempotency: each create is preceded by an existence check (by name + isGroup).");
   out("Existing items are skipped (⏭️).");
   out("");
   out("Dry-run complete. Remove --dry-run to execute.");
@@ -700,9 +695,13 @@ async function main() {
   console.log(`  Label groups:  ${lgResult.created} created, ${lgResult.skipped} skipped`);
   console.log(`  Flags:         ${flResult.created} created, ${flResult.skipped} skipped`);
   console.log(`  States:        ${stResult.created} created, ${stResult.skipped} skipped`);
-  console.log(`  Templates:     ${tplResult.created} created, ${tplResult.skipped} skipped`);
-  if (tplResult.manual.length) {
-    console.log(`  ⚠️  Manual: ${tplResult.manual.join(", ")} (create via Linear UI)`);
+  if (tplResult.deferred) {
+    console.log(`  Templates:     deferred (templateData format TBD)`);
+  } else {
+    console.log(`  Templates:     ${tplResult.created} created, ${tplResult.skipped} skipped`);
+    if (tplResult.manual.length) {
+      console.log(`  ⚠️  Manual: ${tplResult.manual.join(", ")} (create via Linear UI)`);
+    }
   }
   console.log("✅ Bootstrap complete.");
 }
