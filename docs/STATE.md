@@ -29,12 +29,24 @@
   25/25 testów. Pro review: input-validation fix (TypeError brak key/existsFn) + race TODO.
 - **T-A6b** (follow-up, post-pilot): race-condition hardening (lock/CAS) — task #9, odroczone.
 
+### Zrobione (cd.)
+- **T-A4 PLAN dry-run — DONE+verified (2026-06-24).** Realny squad `bin\plan-dry.bat` (lead Opus, OpenRouter)
+  na `planning/inbox/sample.md`: discovery(minimax)→spec(glm-5.2, 18KB tech design + ADR-0003)→spec-review→
+  decomposer(minimax, draft JSON 14.4KB). Mock `scripts/mock-linear.mjs` waliduje + idempotentny ingest (reużywa T-A6).
+  **AC spełnione:** 9 subtasków (≥3) z type/estimate(t-shirt)/AC(Given/When/Then)/slice; DoR (rejected=0, <3→fail);
+  idempotencja (re-ingest → `idempotent_skip=1`, 1 brief, 1 store entry, 0 duplikatów); check.mjs zielony.
+  Tryb normalny squadu nietknięty (push zostaje realny dla Fazy C).
+- **Bug-fixy w locie (T-A4):** (1) `plan-dry.bat` KICKOFF — multiline `^` continuation rozbijał prompt → cmd wykonywał
+  `Read`/`Run…` jako komendy + `>` redirect; naprawione na 1 linię (literał `<>` w cudzysłowach). (2) `decomposer.md`
+  `tools:` brak `Write` → nie mógł zapisać draft JSON; dodano `Write`.
+
 ### W toku
-- (brak — czeka na decyzję Mateusza: commit checkpoint + start T-A4)
+- (brak — T-A4 DONE, czeka na checkpoint Mateusza)
 
 ### Następne
-- **T-A4** PLAN dry-run (mock Linear) — deps spełnione (T-A1 ✅, T-A3 ✅, launchery działają). Ostatni milstone offline Fazy A.
 - **Faza B** (T-B1..B3, provider mechanism / native profil) — po Fazie A.
+- **T-A6b** (post-pilot): idempotency race-condition hardening — task #9, odroczone.
+- **Faza C** ⛔ (Linear live): workspace/team + bot @flow (OAuth) + klucz.
 
 ### Blokady (czeka na Mateusza)
 - Faza C (Linear live): workspace/team + bot `@flow` (OAuth) + klucz Linear.
@@ -46,13 +58,15 @@
   `bin\test.bat`, `bin\cadence.bat`, `bin\all.bat`, `bin\agent.bat <area> <role>`. Wszystkie wołają `bin\_lib.bat`.
 - Spike T-A1 (re-runnable): `.spike-a1\run-spike.ps1`, `.spike-a1\run-clean.ps1`, `.spike-a2\run-spike.ps1`.
 
-## Niecommitowane zmiany w working tree (proponuję git-checkpoint gdy Mateusz zgodzi)
-- `bin/_lib.bat` (base URL + clear SUBAGENT_MODEL)
-- `bin/*.bat` (LF→CRLF, 8 plików)
-- `.gitattributes` (nowy)
-- `docs/adr/0002-subagent-model-mechanism.md` (nowy)
-- `docs/BUILD-BACKLOG.md`, `docs/STATE.md` (higiena)
-- `.spike-a1/`, `.spike-a2/` (scratch — usunąć przed commit lub zostawić jako re-runnable dowód)
+## Git checkpoint (2026-06-24)
+Branch `feat/phase-a-offline-foundation` (NIE zmergowany, NIE pushowany — czeka na Mateusza):
+- `b3fc4f3` fix(bin): base URL + clear SUBAGENT_MODEL + .gitattributes (CRLF)
+- `5efc05d` feat(scripts): check.mjs + cost-guard.mjs + utils.mjs + cost-report.mjs wire + .gitignore
+- `e0491dc` docs(adr): ADR-0002 + BUILD-BACKLOG + STATE
+- `2862972` feat(planning): inbox/sample.md
+
+Working tree czyste (poza STATE.md — ten plik jest living-doc). Scratch `.spike-a1/`/`.spike-a2/`
+i `scripts/_test_*.mjs` gitignored (na dysku jako re-runnable dowód/testy).
 
 ## Notatki
 - Orkiestrator (GLM) biegnie przez **Ollama** (`ANTHROPIC_BASE_URL=127.0.0.1:11434`), NIE OpenRouter.
