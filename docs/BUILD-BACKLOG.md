@@ -66,9 +66,9 @@ maturity: backlog-v1
 
 ## FAZA B — Mechanizm providera (ADR-0001; po A)
 
-- [ ] **T-B1 · `_lib.bat` tryb NATIVE** *(DeepSeek)* — `NATIVE=1` ⇒ pomiń `ANTHROPIC_BASE_URL`/`AUTH` (subskrypcja); brak ⇒ OpenRouter. Verify: echo env w obu trybach.
-- [ ] **T-B2 · `config/models.native.map` + profil w `plan.bat`** *(DeepSeek)* — profil Anthropic dla PLAN wg tabeli ADR-0001 (lead=opus, discovery/spec/decompose=sonnet, push=haiku, spec-review=opus). `plan.bat` wybiera profil native vs openrouter. Verify: oba profile ładują właściwe modele.
-- [ ] **T-B3 · fallback native→OpenRouter w `plan.bat`** *(orchestrator)* — na 401/429 z Anthropic relaunch z OR + profil openrouter. MVP: jeśli auto-detekcja trudna, flaga `--or` + przełącznik z UI. Verify: symulowany fail → relaunch.
+- [x] **T-B1 · `_lib.bat` tryb NATIVE** *(DeepSeek)* — `NATIVE=1` ⇒ pomiń `ANTHROPIC_BASE_URL`/`AUTH` (subskrypcja) + jawnie wyczyść dziedziczone `ANTHROPIC_*` (env Ollama/.env leak — bez tego native cicho trafia do Ollamy); brak ⇒ OpenRouter. Verify: echo env w obu trybach — PASS.
+- [x] **T-B2 · `config/models.native.map` + profil w `plan.bat`** *(DeepSeek)* — profil Anthropic dla PLAN wg tabeli ADR-0001 (lead=opus, discovery/spec/decompose=sonnet, push=haiku, spec-review=opus), wartości = **realne Anthropic ID** (`claude-opus-4-8`/`claude-sonnet-4-6`/`claude-haiku-4-5-20251001` — bare aliasy NIE rozwiązywane jako main model). `plan.bat` conditional (`NATIVE`→native real ID, else→OR slugi) + `bin/plan-native.bat` wrapper. `check.mjs` lint `models.native.map` (check 5, allowed=real ID). Verify: native `main=claude-opus-4-8`, OR unchanged; `check.mjs` 5/0; smoke `plan-native.bat -p "Reply OK"` → `OK`.
+- [x] **T-B3 · fallback native→OpenRouter w `plan.bat`** *(orchestrator)* — **zmiana per Mateusz:** brak auto-relaunch; dwie osobne wersje (launchery), user sam wybiera. Po `claude %*`: `if defined NATIVE if errorlevel 1 echo Native (subscription) failed — re-run: bin\plan.bat %*`. Verify: smoke native (not-logged-in fail) ⇒ hint wyświetlony — PASS. Realny "Reply OK" wymaga jednorazowego interaktywnego `/login` (OAuth claude.ai, po stronie Mateusza).
 
 ---
 

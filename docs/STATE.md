@@ -3,7 +3,7 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-06-24 — T-A1 DONE + 3 bugi P0 naprawione, Faza A w toku (równolegle)
+## Ostatnia aktualizacja: 2026-06-24 — Faza B DONE (provider mechanism / native profil), Faza A zamknięta
 
 ### Zrobione
 - **T-A1 SPIKE — DONE.** Architektura „model per subagent" **DZIAŁA**: explicit OpenRouter slug we
@@ -40,11 +40,35 @@
   `Read`/`Run…` jako komendy + `>` redirect; naprawione na 1 linię (literał `<>` w cudzysłowach). (2) `decomposer.md`
   `tools:` brak `Write` → nie mógł zapisać draft JSON; dodano `Write`.
 
+### Zrobione (cd. — Faza B, provider mechanism / native profil, równolegle DeepSeek Flash, verified)
+- **T-B1** `bin/_lib.bat` NATIVE branch — `if defined NATIVE` ⇒ jawnie czyści `ANTHROPIC_BASE_URL`/`AUTH_TOKEN`/`API_KEY`
+  (hardening: env sesji orkiestratora niesie Ollama `127.0.0.1:11434` — bez czyszczenia native cicho trafiłoby do Ollamy);
+  `else` ⇒ istniejący OpenRouter (BASE_URL=openrouter.ai/api, AUTH=OPENROUTER_API_KEY, walidacja .env). `CLAUDE_CODE_SUBAGENT_MODEL`
+  czyszczony + `API_TIMEOUT_MS` w obu trybach. Verify: NATIVE ⇒ BASE_URL not defined (cleared); no-NATIVE ⇒ openrouter.ai/api.
+- **T-B2** `config/models.native.map` (PLAN 6 ról = bare slot aliasy `opus`/`sonnet`/`haiku`) + `bin/plan.bat` conditional
+  (`NATIVE`→`ANTHROPIC_MODEL=opus`, `DEFAULT_SONNET=sonnet`, `SMALL_FAST=haiku`; else→OR slugi nietknięte) + nowy `bin/plan-native.bat`
+  wrapper (`set NATIVE=1` → `call plan.bat %*`). `scripts/check.mjs` rozszerzony o lint `models.native.map` (check 5).
+  Verify: `check.mjs` → `OK: 5 checks, 0 violations`; native `main=opus small_fast=haiku`, OR slugs unchanged; negative-test łapie.
+- **T-B3** fallback = **komunikat, nie auto-relaunch** (per Mateusz: dwie osobne wersje, user sam wybiera). Po `claude %*` w `plan.bat`:
+  `if defined NATIVE if errorlevel 1 echo Native (Anthropic subscription) run failed. Re-run with OpenRouter: bin\plan.bat %*`.
+  Verify: smoke `plan-native.bat -p "Reply OK"` → hint wyświetlony — PASS.
+- **T-B1-fix / T-B2-fix (bugfixy po smoke diagnozie):** env orkiestratora wyciekał do squad subprocess — `ANTHROPIC_DEFAULT_*_MODEL=glm-5.2:cloud`,
+  `ANTHROPIC_SMALL_FAST_MODEL=deepseek-v4-pro:cloud`. `_lib.bat` czyścił tylko BASE_URL/AUTH/API_KEY/SUBAGENT_MODEL. Fix #1: `_lib.bat` NATIVE czyści WSZYSTKIE
+  `ANTHROPIC_*_MODEL`. Fix #2: `plan.bat` NATIVE ustawia **realne Anthropic ID** (NIE bare aliasy — claude nie rozwiązuje `opus`/`sonnet`/`haiku` jako main model;
+  real ID tak): `ANTHROPIC_MODEL=claude-opus-4-8`, `ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-8`, `ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6`,
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001`, `ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5-20251001`. `models.native.map` = real ID; `check.mjs` allowed = real ID. `check.mjs` 5/0.
+- **Realny smoke native — GREEN (Opus 4.8):** `bin\plan-native.bat -p "Reply with exactly: OK"` → `OK`, EXIT=0, `main=claude-opus-4-8`. Wymagany jednorazowy setup:
+  skopiować `~/.claude/.credentials.json` → `agents/plan/.credentials.json` (squad używa izolowanego `CLAUDE_CONFIG_DIR=agents/plan`, nie widzi domyślnego loginu;
+  plik gitignored). Mateusz = **Claude Pro** (`oauthAccount.organizationType=claude_pro`), ale **Opus 4.8 działa na Pro Claude Code z real ID** (bare alias nie).
+- **Ograniczenie native squad (follow-up T-B4):** subagent `agents/plan/agents/*.md` mają frontmatter `model:` = OR slugs (minimax/glm/deepseek) → w native
+  Anthropic ich nie ma → realny squad native (z subagentami) wymaga migracji frontmatter na aliasy/real ID (T-B4). Smoke `-p` (lead only) green; pełny squad native = Faza C+/T-B4.
+
 ### W toku
-- (brak — T-A4 DONE, czeka na checkpoint Mateusza)
+- (brak — Faza B DONE, czeka na git checkpoint Mateusza)
 
 ### Następne
-- **Faza B** (T-B1..B3, provider mechanism / native profil) — po Fazie A.
+- **Decyzja Mateusza (Faza B):** native launcher **Opus 4.8** działa (Pro, rate-limited, $0/token w subskrypcji) vs **OpenRouter** (Opus 4.8 per-token, bez dziennego limitu, $). Mechanizm dostarcza oba launchery — wybór day-to-day. Dla intensywnych runów OR (scalable), dla lekkich native (free).
+- **T-B4** (follow-up, jeśli native day-to-day): migracja frontmatter subagentów `agents/plan/agents/*.md` z OR slugs na real ID — pełny squad native. Task #13.
 - **T-A6b** (post-pilot): idempotency race-condition hardening — task #9, odroczone.
 - **Faza C** ⛔ (Linear live): workspace/team + bot @flow (OAuth) + klucz.
 
