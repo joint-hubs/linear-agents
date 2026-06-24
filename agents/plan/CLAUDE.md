@@ -19,3 +19,27 @@ spec → spec-review → decomposer → **GATE 2 HITL** (sample 2–3) → push 
 
 ## Metadane
 status `Todo` · `dor-ok` · `transcript-uncertain` · bot `@flow`. Definicje: `config/linear/`.
+
+## DRY-RUN mode
+
+Trigger: env `PLAN_DRY_RUN=1` OR when the kickoff prompt explicitly says "dry-run".
+
+**Behaviors in dry-run:**
+- **Skip HITL gates** (GATE 1 and GATE 2): auto-approve immediately, do NOT set `needs:approval` or wait for ✅/@Mateusz. Proceed straight through discovery→spec→(spec-review)→decompose.
+- **Do NOT invoke the `push` subagent** and do NOT call `mcp__linear__*`. After the `decomposer` writes its draft JSON, STOP. The mock (separate shell step) ingests it.
+- **Validation gate (DoR):** if the decomposition yields fewer than 3 subtasks WITH acceptance criteria, the decomposer must emit a draft whose `rejected[]` lists the offenders; fewer than 3 valid subtasks is a failed plan — note it, do not fake success.
+
+**DRAFT JSON schema** the decomposer must emit:
+```json
+{
+  "source": "planning/inbox/sample.md",
+  "parent": { "externalId": "plan:<slug-of-source>", "title": "...", "description": "...", "type": "epic", "labels": ["ai:planned"] },
+  "subtasks": [
+    { "externalId": "plan:<slug>:s1", "title": "...", "type": "feat|fix|chore|test|docs|refactor", "estimate": "S|M|L|XL", "slice": "<slice id>", "ac": [ { "given": "...", "when": "...", "then": "..." } ], "dod": ["..."], "blockedBy": ["<externalId>"] }
+  ]
+}
+```
+
+The decomposer writes this to `planning/briefs/.draft.<parent.externalId>.json` (one file) using the Write tool, then the lead stops.
+
+**Normal mode** (PLAN_DRY_RUN unset and kickoff says nothing about dry-run): UNCHANGED — full workflow with HITL gates + real push.

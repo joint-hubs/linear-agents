@@ -21,6 +21,8 @@ agents/*/*.local.json
 agents/*/.claude.json
 agents/*/.last-cleanup
 agents/*/backups/
+agents/*/shell-snapshots/
+agents/*/tasks/
 
 # spike scratch (re-runnable T-A1 evidence; see docs/adr/0002)
 .spike-*/
