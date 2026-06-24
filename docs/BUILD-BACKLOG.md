@@ -29,11 +29,17 @@ maturity: backlog-v1
 
 ## FAZA A — Offline foundation (start TERAZ; tylko OPENROUTER_API_KEY)
 
-- [ ] **T-A1 · SPIKE: subagent model-pinning** *(rób PIERWSZE; orchestrator/interaktywnie)*
+- [x] **T-A1 · SPIKE: subagent model-pinning** *(orchestrator/interaktywnie; DONE 2026-06-24)*
   - Cel: ustalić, czy Claude Code honoruje `model: <openrouter-id>` we frontmatter subagenta (cała architektura „model per subagent" na tym stoi).
   - Kroki: odpal `bin\agent.bat plan discovery` lub `bin\plan.bat`; niech lead spawnuje subagenta z `model: minimax/minimax-m3`; sprawdź `/status`/logi który model realnie poszedł.
   - AC: notatka `docs/adr/0002-subagent-model-mechanism.md` z wynikiem. Jeśli NIE działa → zaproponuj mechanizm: osobny `CLAUDE_CONFIG_DIR` per subagent **lub** mapowanie na sloty opus/sonnet/haiku.
   - Verify: notatka istnieje + decyzja. **Blokuje D (squady e2e), nie blokuje A2-A6.**
+  - **RESULT:** architektura DZIAŁA — explicit OR slug we frontmatter honorowany (pass-through do API); aliasy mapują przez `ANTHROPIC_DEFAULT_*_MODEL`; warunek: `CLAUDE_CODE_SUBAGENT_MODEL` nie ustawiony. Dowód: `.spike-a1`/`.spike-a2` Test 3a/3b (subagent `model:`=`minimax/minimax-m3`, HTTP 200). ADR: `docs/adr/0002-subagent-model-mechanism.md` (Accepted).
+  - **Wykryto 2 bugi P0** → **T-A1-fix**: (1) `bin/_lib.bat:17` base URL `…/api/v1` → podwójne `/v1/v1/` → 404 we wszystkich squadach (fix `/api`); (2) dziedziczony `CLAUDE_CODE_SUBAGENT_MODEL` nadpisuje frontmatter (fix: czyścić w `_lib.bat`).
+
+- [ ] **T-A1-fix · `_lib.bat` base URL + clear SUBAGENT_MODEL** *(DeepSeek Flash; BLOCKS D)*
+  - Cel: naprawić P0 z T-A1, odblokować squady. (1) `ANTHROPIC_BASE_URL=https://openrouter.ai/api` (bez `/v1`); (2) `set "CLAUDE_CODE_SUBAGENT_MODEL="` w `_lib.bat`.
+  - Verify: smoke `bin\plan.bat -p "spawn discovery subagent, ask it to print PING"` z debug → subagent request `model:`=`minimax/minimax-m3`, HTTP 200. Patrz ADR-0002.
 
 - [ ] **T-A2 · `scripts/check.mjs` (consistency linter)** *(DeepSeek; parallel)*
   - Cel: zielony/czerwony sygnał spójności repo (zapobiega driftowi z czasów współedycji).
