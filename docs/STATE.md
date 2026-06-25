@@ -3,7 +3,7 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-06-24 — Faza C T-C3 DONE = **Milestone M3** (PLAN push live, GraphQL), T-C2 reframed
+## Ostatnia aktualizacja: 2026-06-25 — Faza D T-D1 DONE (interaktywny pilotaż PLAN squad → realny epik FEN-11 + tool refinement), Faza C zamknięta
 
 ### Zrobione
 - **T-A1 SPIKE — DONE.** Architektura „model per subagent" **DZIAŁA**: explicit OpenRouter slug we
@@ -79,8 +79,15 @@
   - **T-C3d verify:** live push `planning/briefs/plan_sample_69f948e9.json` → **parent epic FEN-1 + 9 subtask sub-issues FEN-2…FEN-10** w projekcie „Linear Agents", z `ai:planned` + `type:feature` (feat) + 9 auto-created `slice:*` label, parent–child parentId. Idempotencja verified: re-run → **dokładnie 10 issues w projekcie**, highest FEN-10, brak duplikatów (probe `scripts/_test_count.mjs`, read-only). `check.mjs` 5/0. URL-e: `https://linear.app/jointhubs/issue/FEN-1/…` … `FEN-10`.
   - **Known cosmetic:** drugi run drukuje cached identifiers jako „✅" zamiast „[skip]" (log nie odróżnia skip/create) — functional idempotent (verified via probe). Follow-up: skip-aware logging.
 
+### Zrobione (cd. — Faza D T-D1, interaktywny pilotaż PLAN squad)
+- **T-D1a — DONE.** Naprawa handoffu decomposer→push (tryb normalny zapisuje brief JSON `planning/briefs/plan_<slug>.json`, `dryRun:false`) + doprecyzowanie bramek w `agents/plan/CLAUDE.md` jako **synchonicznych inline REPL** (GATE 1 po discovery, GATE 2 po decompose przed push — prezentuj, zapytaj, CZEKAJ na ✅; `needs:*`+emoji = tryb async/@flow, Faza G, odłożone). check.mjs 5/0; dry-run nienaruszony.
+- **T-D1b — DONE+verified (2026-06-25).** Interaktywny pilotaż squadu PLAN na `planning/inbox/roast-app.md` (pomysł Mateusza: apk roastująca pomysł biznesowy). Mateusz odpalił `bin\plan.bat` (OR, lead Opus 4.8) i aprobował bramki inline. Pipeline przeszedł end-to-end: discovery → spec (+ADR-0004) → spec-review (1 pętla, 6 hardeningów K1-K6) → decompose (13 slice'ów) → GATE 2 → push → **realny epik FEN-11** + subtaski w projekcie „Linear Agents" (team FEN).
+  - **Weryfikacja orkiestratora (probe read-only):** epik FEN-11 + subtaski FEN-12…FEN-25 istnieją, parent-child połączone, `type:feature` na feat-subtaskach, `ai:planned` na wszystkich.
+  - **Ujawnione defekty narzędzia (naprawione w T-D1c):** (1) slice labelki nie tworzone dla bare slice (brief roast używa "corpus" bez prefixu); (2) duplikat s13 (FEN-24==FEN-25) — Linear zwrócił błąd po udanym create → brak klucza idempotencji → re-run zrobił dup (Mateusz: dup zostawić, narzędzie dopracować).
+- **T-D1c — DONE+verified (2026-06-25).** Dopracowanie narzędzia push (bez zapisu do Linear): `utils.idempotentCreate` + opcjonalny `onSkip` (non-breaking, _test_utils 25/25); `linear-push.mjs` + `normalizeSlice` (bare→`slice:corpus`, dry-run pokazuje auto-create), `isValidationError` + `reconcileAfterTransient` (po błędzie sieci/transient — query team issues po tytule+5min, 1 match → zwróć istniejący id → idempotencja rejestruje → brak dup przy re-run; 0/>1 → null bezpiecznie), `createIssue` z uporządkowaną obsługą validation/estimate/transient, skip-aware logging (`✅` create vs `⏭️` skip); `decomposer.md` slice format `slice:<name>`; `.gitignore` + runtime artefakty claude (`cache/`, `history.jsonl`, `plugins/`, `.last-update-result.json`). Self-test `_test_linear-push.mjs` 18/18; dry-run na `plan_roast-app.json` pokazuje slice auto-create; check.mjs 5/0. Recenzja reconcile logic (orkiestrator) — konserwatywna, poprawna.
+
 ### W toku
-- (nic aktywnego — Faza C zamknięta poza T-B4/docs polish)
+- (nic aktywnego — Faza D T-D1 zamknięta; kolejny krok zależny od decyzji Mateusza o dalszym „dobudowaniu" stacku)
 
 ### Następne
 - **Faza D — T-D1 PLAN e2e** (następny kamień): pełny przepływ squadu PLAN z bramkami HITL (needs:*+emoji) → realny epik (M3 udowodnił push; T-D1 spiña całość z gates). Wymaga ustalenia czy push idzie interaktywnie (squad REPL) czy headless przez skrypt (T-C3) — obecnie headless GraphQL = domyślny MVP.
@@ -99,14 +106,23 @@
 - Spike T-A1 (re-runnable): `.spike-a1\run-spike.ps1`, `.spike-a1\run-clean.ps1`, `.spike-a2\run-spike.ps1`.
 
 ## Git checkpoint (2026-06-24)
-Branch `feat/phase-a-offline-foundation` (NIE zmergowany, NIE pushowany — czeka na Mateusza):
+Branch `feat/phase-a-offline-foundation` (12 commitów ahead of `main`; NIE zmergowany, NIE pushowany — czeka na Mateusza).
+Faza A (offline foundation):
 - `b3fc4f3` fix(bin): base URL + clear SUBAGENT_MODEL + .gitattributes (CRLF)
 - `5efc05d` feat(scripts): check.mjs + cost-guard.mjs + utils.mjs + cost-report.mjs wire + .gitignore
 - `e0491dc` docs(adr): ADR-0002 + BUILD-BACKLOG + STATE
 - `2862972` feat(planning): inbox/sample.md
+Faza B (provider mechanism / native):
+- `545eeec` feat(bin): NATIVE provider profile — Opus 4.8 on Pro, fallback hint (T-B1/B2/B3)
+- `b04286f` docs: Faza B done — native Opus 4.8 smoke green, T-B1..B3 odhaczone + STATE
+Faza C (Linear live):
+- `6aaa25d` fix(scripts): bootstrap-linear.mjs current Linear GraphQL schema (T-C1 live)
+- `eba770c` feat(phase-c): live PLAN push to Linear via GraphQL = M3 (T-C3)
 
-Working tree czyste (poza STATE.md — ten plik jest living-doc). Scratch `.spike-a1/`/`.spike-a2/`
-i `scripts/_test_*.mjs` gitignored (na dysku jako re-runnable dowód/testy).
+Working tree: czyste poza STATE.md (living-doc). Scratch `.spike-a1/`/`.spike-a2/`,
+`scripts/_test_*.mjs` (throwaway probes, m.in. `_test_count.mjs` — idempotency verify FEN),
+`.state/`, `agents/plan/.credentials.json` — gitignored. Commit messages: **bez trailera
+Co-Authored-By** (preferencja Mateusza).
 
 ## Notatki
 - Orkiestrator (GLM) biegnie przez **Ollama** (`ANTHROPIC_BASE_URL=127.0.0.1:11434`), NIE OpenRouter.
