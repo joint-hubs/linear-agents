@@ -94,7 +94,16 @@ maturity: backlog-v1
 
 ## FAZA E — Control-panel UI (wg `ux-design.md` §11 + `ux-improvements.md`)
 Rozszerz `Desktop/experiments/0_linear` (Next.js). MVP→Phase2→Phase3 jak w ux-design.
-- [ ] **T-E1** top bar + nav · **T-E2** workspace switch (JOI/PISI) · **T-E3** Keys (.env r/w + Test) · **T-E4** signal views (5 filtrów + akcje emoji) · **T-E5** agent launch + terminal spawn · **T-E6** Config Model Routing **+ kolumna Provider/Fallback** (ux-improvements §1) · **T-E7** Cost dashboard **+ token-log per-agent/per-task** (ux-improvements §2, przesunięte do Phase 2).
+- [x] **T-E0a** `scripts/ledger.mjs` — parser transkryptów claude (`~/.claude/projects/<hash>/*.jsonl`) → per-turn tokens+model+`attributionAgent`; `costTokens` × `config/models.json`; `aggregateRun`/`scanRuns`/`liveRuns`. PRD: `docs/telemetry-panel-prd.md`. Self-test 20/20. *(DeepSeek Flash)*
+- [x] **T-E0b** `scripts/run-manifest.mjs` (gen-id/start/end) + wire `bin/_lib.bat` (start, single chokepoint) + end-call w każdym launcherze. Manifest `.state/runs/<runId>.json`. CRLF preserved. *(DeepSeek Flash)*
+- [x] **T-E0c** `scripts/telemetry-server.mjs` — HTTP `localhost:7331` (`/api/runs`, `/runs/:id`, `/summary`, `/live`), zero deps, CORS. *(DeepSeek Flash)*
+- [x] **T-E0a-fix** `byAgent.<agent>.costUSD` — per-turn model cost do obu kubełków (byModel+byAgent); był 0. *(DeepSeek Flash)*
+- [x] **T-E1d** `0_linear` `app/api/agents-cost/route.ts` — server-side proxy do `localhost:7331` (same-origin, bez CORS w przeglądarce). `?view=runs|live|summary` / `?runId=`. tsc czysty. *(DeepSeek Flash)*
+- [x] **T-E7a** `0_linear` `components/AgentsCostView.tsx` + tab „Agents & Cost" w Dashboard — live strip + summary + runs table + drill-down (recharts by-model/by-agent). Cost „$ (est.)". tsc czysty. *(DeepSeek Flash)*
+- [x] **T-E0d** E2E verified: `plan.bat -p` → manifest → transcript → ledger → telemetry-server → 0_linear proxy → JSON. Real run `2026-06-25T11-35-29-plan`, $0.067, byAgent cost>0. *(orkiestrator — final approval)*
+- [ ] **T-E0e (Phase 2)** exact `sessionId` w manifeście (łapać z runu claude) zamiast dopasowania po oknie `cwd`+`gitBranch`+czas — obecnie okno nadpuchla liczniki gdy sesja orkiestratora w tym samym cwd (PRD §7.1).
+- [ ] **T-E7b (Phase 2)** Live runtime panel „co pracuje teraz" (obecnie live = lista zakończonych <10min temu) + code-production stream (git/commity) + link run→Linear issue + budget bar (cost-guard).
+- [ ] **T-E1** top bar + nav · **T-E2** workspace switch (JOI/PISI) · **T-E3** Keys (.env r/w + Test) · **T-E4** signal views (5 filtrów + akcje emoji) · **T-E5** agent launch + terminal spawn · **T-E6** Config Model Routing **+ kolumna Provider/Fallback** (ux-improvements §1).
 
 ---
 

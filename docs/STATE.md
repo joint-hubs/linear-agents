@@ -3,7 +3,7 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-06-25 — Faza D T-D1 DONE (interaktywny pilotaż PLAN squad → realny epik FEN-11 + tool refinement), Faza C zamknięta
+## Ostatnia aktualizacja: 2026-06-25 — Faza E foundation DONE (telemetry ledger + cost panel MVP e2e verified), Faza D T-D1 DONE, Faza C zamknięta
 
 ### Zrobione
 - **T-A1 SPIKE — DONE.** Architektura „model per subagent" **DZIAŁA**: explicit OpenRouter slug we
@@ -88,6 +88,39 @@
 
 ### W toku
 - (nic aktywnego — Faza D T-D1 zamknięta; kolejny krok zależny od decyzji Mateusza o dalszym „dobudowaniu" stacku)
+
+### Zrobione (cd. — Faza E foundation, telemetry + cost panel MVP, równolegle DeepSeek Flash, e2e verified)
+- **T-E0a — DONE.** `scripts/ledger.mjs` (ESM, zero deps): `parseTranscript` czyta transkrypty claude code
+  (`~/.claude/projects/C--Users-mateu-.../*.jsonl`, NDJSON) — każda linia `assistant` ma realny `message.usage`
+  (input/output/cache) + `message.model`; subagenty (`<session>/subagents/agent-*.jsonl`) mają `attributionAgent`.
+  `costTokens` × pricing `config/models.json` (match cost-report.mjs). `aggregateRun`/`scanRuns`/`liveRuns`.
+  Self-test `scripts/_test_ledger.mjs` 20/20 (gitignored). **Wybór źródła:** transkrypty, NIE stream-json — działają
+  dla interaktywnego REPL i `-p`, nie psują bramek. PRD: `docs/telemetry-panel-prd.md`.
+- **T-E0b — DONE.** `scripts/run-manifest.mjs` (`gen-id`/`start`/`end`, atomic) + wire `bin/_lib.bat` (start =
+  single chokepoint; każdy launcher nadpisuje `SQUAD_SLUG`/`SOURCE_PATH` przed `call _lib.bat`) + `end`-call w każdym
+  launcherze (plan/dev/review/test/cadence/agent) po `claude %*`. Manifest `.state/runs/<runId>.json` (runId = ISO+squad).
+  CRLF preserved (LF psuł .bat wcześniej — weryfikacja `file` → CRLF). `all.bat` nietknięty (sub-procesy = osobne runy).
+- **T-E0c — DONE.** `scripts/telemetry-server.mjs` — Node `http`, zero deps, `localhost:7331` (env `TELEMETRY_PORT`),
+  GET `/api/runs` `/api/runs/:runId` `/api/summary` `/api/live`, CORS `*`, OPTIONS 204, log per-request, `--smoke`
+  (auto-close 10s). Dynamiczny `import('./ledger.mjs')`.
+- **T-E0a-fix — DONE.** Bug: `byAgent.<agent>.costUSD` był 0 (kosztowano klucz agenta zamiast modelu turna).
+  Fix: per-turn `costTokens(usage, turn.model)` dodawany do OBU kubełków (byModel+byAgent). Test 20/20; live re-verify
+  `byAgent._lead.costUSD = byModel... = totals = $0.237` ✓.
+- **T-E1d — DONE.** `0_linear` `app/api/agents-cost/route.ts` — Next, `force-dynamic`, server-side proxy do
+  `localhost:7331` (env `AGENTS_COST_URL`). `?view=runs|live|summary` / `?runId=`. Same-origin (frontend woła `/api/...`,
+  nigdy cross-origin — brak CORS w przeglądarce). 502 + hint gdy serwer nie działa. tsc czysty.
+- **T-E7a — DONE.** `0_linear` `components/AgentsCostView.tsx` (560 linii, `'use client'`) + tab „Agents & Cost"
+  w `Dashboard.tsx` (Tab union + TABS + JSX branch). Sekcje: live strip (aktywne runy) + summary (total cost/runs/tokens)
+  + runs table (klik → drill-down) + drill-down (recharts: cost&tokens by model, tokens by agent; `_lead`→„lead").
+  Cost „$ (est.)" wszędzie. Poll live co 5s. tsc czysty.
+- **T-E0d — DONE+verified (orkiestrator, final approval).** E2E: `bin/plan.bat -p "Reply with exactly: OK"`
+  → manifest `.state/runs/2026-06-25T11-35-29-plan.json` → transkrypt → ledger → telemetry-server (`:7331`)
+  → 0_linear proxy (`localhost:3000/api/agents-cost`) → JSON. Real run, `costUSD>0`, `byAgent._lead.costUSD>0`.
+  Wszystkie 4 endpointy proxy realne dane (bez 502/500). **Znane ograniczenie (T-E0e/Phase 2):** `aggregateRun`
+  dopasowuje transkrypty po oknie `cwd`+`gitBranch`+czas — długa sesja orkiestratora w tym samym cwd wpada w okno
+  i nadpuchla liczniki (proxy $0.123 vs direct $0.067). Fix = exact `sessionId` w manifeście (łapać z runu claude).
+- **Jak uruchomić panel:** (1) `node scripts/telemetry-server.mjs` (linear-agents, port 7331); (2) `cd Desktop/experiments/0_linear && npm run dev`;
+  (3) otwórz `http://localhost:3000`, tab „Agents & Cost". Dane pojawiają się po squad runie (launchery piszą manifesty automatycznie).
 
 ### Następne
 - **Faza D — T-D1 PLAN e2e** (następny kamień): pełny przepływ squadu PLAN z bramkami HITL (needs:*+emoji) → realny epik (M3 udowodnił push; T-D1 spiña całość z gates). Wymaga ustalenia czy push idzie interaktywnie (squad REPL) czy headless przez skrypt (T-C3) — obecnie headless GraphQL = domyślny MVP.
