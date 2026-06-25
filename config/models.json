@@ -24,7 +24,8 @@
   },
   "pricing": {
     "_doc": "USD per 1M tokens (input/output). Źródło: docs/model-comparison-and-routing.md",
-    "anthropic/claude-opus-4.8":       { "input": 5,     "output": 25   },
+    "anthropic/claude-opus-4.8":              { "input": 5,     "output": 25   },
+    "anthropic/claude-4.8-opus-20260528":     { "input": 5,     "output": 25   },
     "anthropic/claude-sonnet-4.6":     { "input": 3,     "output": 15   },
     "z-ai/glm-5.2":                    { "input": 1.40,  "output": 4.40 },
     "minimax/minimax-m3":              { "input": 0.30,  "output": 1.20 },

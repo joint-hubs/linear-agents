@@ -85,15 +85,6 @@ function normalizePathForHash(p) {
   return normalized.replace(/\//g, "\\");
 }
 
-/**
- * Compute the transcript directory hash name from a cwd path.
- * Replaces `:` with empty and `\` with `-`.
- * E.g. `C:\Users\mateu\Documents\GitHub\linear-agents` → `C--Users-mateu-Documents-GitHub-linear-agents`
- */
-function cwdToHashName(cwd) {
-  return normalizePathForHash(cwd).replace(/:/g, "").replace(/\\/g, "-");
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -104,6 +95,12 @@ function cwdToHashName(cwd) {
  * Derives the expected hash from process.cwd(), then falls back to globbing
  * for `*linear-agents` in the projects dir.
  */
+export function cwdToHashName(cwd) {
+  // Match the claude CLI's hash: replace `:` with `-` first, then `\` with `-`.
+  // E.g. C:\Users\... → C-\Users\... → C--Users-...
+  return normalizePathForHash(cwd).replace(/:/g, "-").replace(/\\/g, "-");
+}
+
 export function listTranscriptDir() {
   const projectsDir = join(homedir(), ".claude", "projects");
   const hashName = cwdToHashName(process.cwd());
@@ -254,23 +251,60 @@ export function costTokens(usage, modelSlug) {
 }
 
 /**
+ * Aggregate parsed transcript turns into a result accumulator.
+ *
+ * Shared between exact-match (sessionId) and window-based (legacy) paths.
+ *
+ * @param {object} result  Mutable result accumulator (totals, byModel, byAgent)
+ * @param {object} parsed  Return value from parseTranscript()
+ */
+function aggregateTurns(result, parsed) {
+  for (const turn of parsed.turns) {
+    // Totals
+    result.totals.inputTokens += turn.inputTokens;
+    result.totals.outputTokens += turn.outputTokens;
+    result.totals.cacheReadTokens += turn.cacheRead;
+
+    // By model
+    const modelKey = turn.model || "unknown";
+    if (!result.byModel[modelKey]) {
+      result.byModel[modelKey] = { inputTokens: 0, outputTokens: 0, costUSD: 0 };
+    }
+    result.byModel[modelKey].inputTokens += turn.inputTokens;
+    result.byModel[modelKey].outputTokens += turn.outputTokens;
+
+    // By agent
+    const agentKey = turn.attributionAgent || "_lead";
+    if (!result.byAgent[agentKey]) {
+      result.byAgent[agentKey] = { inputTokens: 0, outputTokens: 0, costUSD: 0 };
+    }
+    result.byAgent[agentKey].inputTokens += turn.inputTokens;
+    result.byAgent[agentKey].outputTokens += turn.outputTokens;
+
+    // Per-turn cost — computed once using turn.model, added to both buckets
+    const turnCost = costTokens(
+      { inputTokens: turn.inputTokens, outputTokens: turn.outputTokens, cacheCreation: turn.cacheCreation, cacheRead: turn.cacheRead },
+      turn.model,
+    );
+    result.byModel[modelKey].costUSD += turnCost;
+    result.byAgent[agentKey].costUSD += turnCost;
+    result.totals.costUSD += turnCost;
+  }
+}
+
+/**
  * Find transcripts matching a run manifest and aggregate tokens/cost.
  *
- * Matching criteria: transcript cwd === manifest.cwd && gitBranch === manifest.gitBranch
- * && first-assistant timestamp within [manifest.startedAt - 2min, manifest.endedAt + 2min].
- * If manifest.endedAt is null, the upper bound is now + 2min.
- *
- * If multiple transcripts match, all are aggregated and `ambiguous: true` is set.
+ * Two matching modes:
+ *   1. EXACT (sessionId set) — parse ONLY the named transcript file.
+ *      Sets `ambiguous` from manifest.sessionAmbiguous.
+ *   2. WINDOW (sessionId null/undefined) — legacy: match by cwd + gitBranch +
+ *      timestamp window [startedAt-2min, endedAt+2min].
  *
  * @param {object} manifest  Run manifest object from .state/runs/<runId>.json
  * @returns {object} Aggregated run result
  */
 export function aggregateRun(manifest) {
-  const startedAt = new Date(manifest.startedAt);
-  const endedAt = manifest.endedAt ? new Date(manifest.endedAt) : new Date();
-  const windowStart = new Date(startedAt.getTime() - 2 * 60 * 1000);
-  const windowEnd = new Date(endedAt.getTime() + 2 * 60 * 1000);
-
   const transcriptDir = listTranscriptDir();
   const result = {
     runId: manifest.runId,
@@ -285,6 +319,46 @@ export function aggregateRun(manifest) {
     byModel: {},
     byAgent: {},
   };
+
+  // -----------------------------------------------------------------------
+  // EXACT MATCH: manifest has a captured sessionId
+  // -----------------------------------------------------------------------
+  if (manifest.sessionId) {
+    const transcriptPath =
+      manifest.transcriptPath || join(transcriptDir, manifest.sessionId + ".jsonl");
+    const parsed = parseTranscript(transcriptPath);
+
+    if (parsed.turns.length === 0) {
+      result.missing = true;
+      return result;
+    }
+
+    result.ambiguous = manifest.sessionAmbiguous || false;
+
+    // Filter turns to those within the run window [startedAt, endedAt+60s]
+    // so that pre-existing session data (same sessionId, earlier turns) is excluded.
+    const runStart = new Date(manifest.startedAt).getTime();
+    const runEnd = manifest.endedAt
+      ? new Date(manifest.endedAt).getTime() + 60 * 1000
+      : Date.now() + 60 * 1000;
+
+    const filtered = { turns: parsed.turns.filter((t) => {
+      if (!t.ts) return false;
+      const ts = new Date(t.ts).getTime();
+      return ts >= runStart && ts <= runEnd;
+    })};
+
+    aggregateTurns(result, filtered);
+    return result;
+  }
+
+  // -----------------------------------------------------------------------
+  // WINDOW-BASED MATCHING (legacy, for manifests without sessionId)
+  // -----------------------------------------------------------------------
+  const startedAt = new Date(manifest.startedAt);
+  const endedAt = manifest.endedAt ? new Date(manifest.endedAt) : new Date();
+  const windowStart = new Date(startedAt.getTime() - 2 * 60 * 1000);
+  const windowEnd = new Date(endedAt.getTime() + 2 * 60 * 1000);
 
   if (!existsSync(transcriptDir)) return result;
 
@@ -317,39 +391,7 @@ export function aggregateRun(manifest) {
     if (firstTs < windowStart || firstTs > windowEnd) continue;
 
     matchedCount++;
-
-    // Aggregate turns
-    for (const turn of parsed.turns) {
-      // Totals
-      result.totals.inputTokens += turn.inputTokens;
-      result.totals.outputTokens += turn.outputTokens;
-      result.totals.cacheReadTokens += turn.cacheRead;
-
-      // By model
-      const modelKey = turn.model || "unknown";
-      if (!result.byModel[modelKey]) {
-        result.byModel[modelKey] = { inputTokens: 0, outputTokens: 0, costUSD: 0 };
-      }
-      result.byModel[modelKey].inputTokens += turn.inputTokens;
-      result.byModel[modelKey].outputTokens += turn.outputTokens;
-
-      // By agent
-      const agentKey = turn.attributionAgent || "_lead";
-      if (!result.byAgent[agentKey]) {
-        result.byAgent[agentKey] = { inputTokens: 0, outputTokens: 0, costUSD: 0 };
-      }
-      result.byAgent[agentKey].inputTokens += turn.inputTokens;
-      result.byAgent[agentKey].outputTokens += turn.outputTokens;
-
-      // Per-turn cost — computed once using turn.model, added to both buckets
-      const turnCost = costTokens(
-        { inputTokens: turn.inputTokens, outputTokens: turn.outputTokens, cacheCreation: turn.cacheCreation, cacheRead: turn.cacheRead },
-        turn.model,
-      );
-      result.byModel[modelKey].costUSD += turnCost;
-      result.byAgent[agentKey].costUSD += turnCost;
-      result.totals.costUSD += turnCost;
-    }
+    aggregateTurns(result, parsed);
   }
 
   if (matchedCount > 1) result.ambiguous = true;

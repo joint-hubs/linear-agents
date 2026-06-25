@@ -7,10 +7,11 @@
 //
 // ESM, zero runtime deps (Node 18+).
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, statSync, readdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
@@ -84,6 +85,7 @@ function cmdStart(runId, squad, sourcePath) {
     gitBranch: getGitBranch(),
     native: process.env.NATIVE !== undefined,
     interactive: true,
+    claudeConfigDir: process.env.CLAUDE_CONFIG_DIR || null,
   };
 
   ensureRunsDir();
@@ -91,7 +93,7 @@ function cmdStart(runId, squad, sourcePath) {
   atomicWriteJSON(filePath, manifest);
 }
 
-function cmdEnd(runId, exitCodeStr) {
+async function cmdEnd(runId, exitCodeStr) {
   if (!runId) {
     console.error("Usage: node scripts/run-manifest.mjs end <runId> [exitCode]");
     process.exit(1);
@@ -117,6 +119,120 @@ function cmdEnd(runId, exitCodeStr) {
 
   manifest.endedAt = new Date().toISOString();
   manifest.exitCode = exitCode;
+
+  // Discover squad session transcript
+  try {
+    const { cwdToHashName } = await import("./ledger.mjs");
+
+    // Capture claudeConfigDir from env if not set at start time
+    // (launcher .bat files set CLAUDE_CONFIG_DIR after _lib.bat runs start)
+    if (!manifest.claudeConfigDir) {
+      manifest.claudeConfigDir = process.env.CLAUDE_CONFIG_DIR || null;
+    }
+
+    // Build candidate roots for transcript discovery.
+    // Squad launchers set CLAUDE_CONFIG_DIR=agents/<squad>, so the squad's
+    // claude subprocess writes its transcript to <claudeConfigDir>/projects/<hash>/,
+    // NOT to ~/.claude/projects/<hash>/.
+    const hashName = cwdToHashName(manifest.cwd || process.cwd());
+    const candidateRoots = [];
+
+    // Root A: squad's config dir (if set) — e.g. agents/plan/projects/<hash>/
+    if (manifest.claudeConfigDir) {
+      const resolvedConfigDir = resolve(manifest.cwd || process.cwd(), manifest.claudeConfigDir);
+      candidateRoots.push(join(resolvedConfigDir, "projects", hashName));
+    }
+
+    // Root B: default ~/.claude/projects/<hash>/
+    candidateRoots.push(join(homedir(), ".claude", "projects", hashName));
+
+    // Collect top-level *.jsonl files from all candidate roots (skip subagents/ dirs)
+    const allFiles = [];
+    for (const rootDir of candidateRoots) {
+      if (!existsSync(rootDir)) continue;
+      const entries = readdirSync(rootDir).filter(
+        (f) => f.endsWith(".jsonl") && statSync(join(rootDir, f)).isFile(),
+      );
+      for (const f of entries) {
+        allFiles.push({ file: f, rootDir });
+      }
+    }
+
+    if (allFiles.length > 0) {
+      const startedAt = new Date(manifest.startedAt).getTime();
+      const endedAt = new Date(manifest.endedAt).getTime();
+      const birthWindowStart = startedAt - 30 * 1000;
+      const birthWindowEnd = endedAt + 60 * 1000;
+      // Content-based fallback window: wider, since the session may have started before the run
+      const contentWindowStart = startedAt - 5 * 1000;
+      const contentWindowEnd = endedAt + 60 * 1000;
+
+      // --- Pass 1: birthtime fast path ---
+      const candidates = [];
+      for (const { file, rootDir } of allFiles) {
+        const absPath = join(rootDir, file);
+        const stats = statSync(absPath);
+        const birthtime =
+          stats.birthtime && stats.birthtime.getTime()
+            ? stats.birthtime.getTime()
+            : stats.mtime.getTime();
+        if (birthtime >= birthWindowStart && birthtime <= birthWindowEnd) {
+          candidates.push({ file, rootDir, birthtime, diff: Math.abs(birthtime - startedAt) });
+        }
+      }
+
+      if (candidates.length > 0) {
+        // Sort by closest to startedAt, tie-break by newest birthtime
+        candidates.sort((a, b) => a.diff - b.diff || b.birthtime - a.birthtime);
+        const best = candidates[0];
+        manifest.sessionId = best.file.replace(/\.jsonl$/, "");
+        manifest.transcriptPath = join(best.rootDir, best.file);
+        manifest.sessionAmbiguous =
+          candidates.length > 1 && candidates[1].diff - best.diff < 2000;
+      } else {
+        // --- Pass 2: content-based fallback ---
+        // The claude CLI may reuse an existing session whose birthtime predates the run.
+        // Scan each transcript for a timestamp within the run window [startedAt, endedAt+60s].
+        const contentCandidates = [];
+        for (const { file, rootDir } of allFiles) {
+          const absPath = join(rootDir, file);
+          try {
+            const allLines = readFileSync(absPath, "utf8").split("\n").filter(Boolean);
+            for (const raw of allLines) {
+              let line;
+              try { line = JSON.parse(raw); } catch { continue; }
+              if (line && line.timestamp) {
+                const ts = new Date(line.timestamp).getTime();
+                if (ts >= contentWindowStart && ts <= contentWindowEnd) {
+                  contentCandidates.push({ file, rootDir, ts, diff: Math.abs(ts - startedAt) });
+                  break; // first in-window timestamp for this file
+                }
+              }
+            }
+          } catch {
+            continue; // skip unreadable files
+          }
+        }
+
+        if (contentCandidates.length > 0) {
+          contentCandidates.sort((a, b) => a.diff - b.diff || b.ts - a.ts);
+          const best = contentCandidates[0];
+          manifest.sessionId = best.file.replace(/\.jsonl$/, "");
+          manifest.transcriptPath = join(best.rootDir, best.file);
+          manifest.sessionAmbiguous =
+            contentCandidates.length > 1 && contentCandidates[1].diff - best.diff < 2000;
+        } else {
+          manifest.sessionId = null;
+          console.error(
+            `[run-manifest] Warning: no session transcript found for run ${runId} (will fall back to window match)`,
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[run-manifest] Warning: transcript discovery failed: ${err.message}`);
+  }
+
   atomicWriteJSON(filePath, manifest);
 }
 
@@ -126,20 +242,22 @@ function cmdEnd(runId, exitCodeStr) {
 
 const command = process.argv[2];
 
-switch (command) {
-  case "gen-id":
-    cmdGenId(process.argv[3]);
-    break;
-  case "start":
-    cmdStart(process.argv[3], process.argv[4], process.argv[5]);
-    break;
-  case "end":
-    cmdEnd(process.argv[3], process.argv[4]);
-    break;
-  default:
-    console.error("Usage:");
-    console.error("  node scripts/run-manifest.mjs gen-id <squad>");
-    console.error("  node scripts/run-manifest.mjs start <runId> <squad> [sourcePath]");
-    console.error("  node scripts/run-manifest.mjs end <runId> [exitCode]");
-    process.exit(1);
-}
+(async () => {
+  switch (command) {
+    case "gen-id":
+      cmdGenId(process.argv[3]);
+      break;
+    case "start":
+      cmdStart(process.argv[3], process.argv[4], process.argv[5]);
+      break;
+    case "end":
+      await cmdEnd(process.argv[3], process.argv[4]);
+      break;
+    default:
+      console.error("Usage:");
+      console.error("  node scripts/run-manifest.mjs gen-id <squad>");
+      console.error("  node scripts/run-manifest.mjs start <runId> <squad> [sourcePath]");
+      console.error("  node scripts/run-manifest.mjs end <runId> [exitCode]");
+      process.exit(1);
+  }
+})();
