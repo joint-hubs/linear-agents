@@ -97,7 +97,7 @@ function writeReviewStore(store) {
  *                                      Confirms the cached entity still exists.
  * @returns {Promise<string>} The entity ID (cached or freshly created).
  */
-export async function idempotentCreate({ key, externalId, slice, createFn, existsFn }) {
+export async function idempotentCreate({ key, externalId, slice, createFn, existsFn, onSkip }) {
   // Input validation
   if (!key && !externalId && !slice) {
     throw new TypeError("idempotentCreate: provide one of key | externalId | slice");
@@ -119,7 +119,10 @@ export async function idempotentCreate({ key, externalId, slice, createFn, exist
   if (cached !== undefined && existsFn) {
     try {
       const stillExists = await existsFn(cached);
-      if (stillExists) return cached;
+      if (stillExists) {
+        if (typeof onSkip === "function") onSkip(cached);
+        return cached;
+      }
     } catch {
       // existsFn threw (e.g. network error) — treat as "entity gone" and
       // re-create to be safe.

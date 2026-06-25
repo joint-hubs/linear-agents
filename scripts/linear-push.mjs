@@ -20,7 +20,7 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { idempotentCreate } from "./utils.mjs";
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,30 @@ function loadEnv() {
 }
 
 const ENDPOINT = "https://api.linear.app/graphql";
+
+/**
+ * Normalize a slice value to "slice:<name>" format.
+ * @param {string|null|undefined} value
+ * @returns {string|null} "slice:<name>" or null if falsy.
+ */
+export function normalizeSlice(value) {
+  if (!value) return null;
+  if (value.startsWith("slice:")) return value;
+  return "slice:" + value;
+}
+
+/**
+ * Check if an error message indicates a validation error (nothing was created).
+ * @param {string} msg
+ * @returns {boolean}
+ */
+export function isValidationError(msg) {
+  const s = String(msg);
+  return s.includes("Validation Error") ||
+         s.includes("INVALID_INPUT") ||
+         s.includes("must be a UUID") ||
+         s.includes("validationErrors");
+}
 
 /**
  * Execute a GraphQL query/mutation against the Linear API.
@@ -235,18 +259,74 @@ const VERIFY_ISSUE_QUERY = `
   }
 `;
 
+const RECONCILE_QUERY = `
+  query($teamId: String!) {
+    team(id: $teamId) {
+      issues(first: 50, orderBy: updatedAt) {
+        nodes {
+          id
+          identifier
+          title
+          createdAt
+        }
+      }
+    }
+  }
+`;
+
 /**
- * Create a Linear issue via GraphQL, with diagnostic input dump on failure
- * and automatic retry-without-estimate for teams that reject it.
+ * Try to find an issue that was created successfully despite a transient error.
+ * Uses title-match within the last 5 minutes. Returns the issue id if exactly
+ * one match is found, null otherwise.
  *
- * @param {object} input  IssueCreateInput object.
- * @param {string} key    Linear API key.
- * @returns {Promise<string>} The created issue id.
+ * Limitation: title-collision across briefs could mis-reconcile; acceptable
+ * for MVP since titles are long/unique.
  */
-async function createIssue(input, key) {
+async function reconcileAfterTransient(input, key) {
+  try {
+    const data = await graphql(RECONCILE_QUERY, { teamId: input.teamId }, key);
+    const issues = data.team?.issues?.nodes || [];
+    const fiveMinAgo = Date.now() - 5 * 60 * 1000;
+    const matches = issues.filter((n) => {
+      const created = new Date(n.createdAt).getTime();
+      return n.title === input.title && created >= fiveMinAgo;
+    });
+
+    if (matches.length === 1) {
+      const m = matches[0];
+      console.log(`  ⚠ transient create error — reconciled existing ${m.identifier} (${m.id}) for "${m.title}"`);
+      return m.id;
+    }
+
+    if (matches.length === 0) {
+      console.log("  ⚠ reconcile: no matching issue found in last 5 min");
+    } else {
+      console.log(`  ⚠ reconcile: ${matches.length} matching issues found — cannot safely reconcile`);
+    }
+  } catch (reconcileErr) {
+    console.log(`  ⚠ reconcile query failed: ${reconcileErr.message}`);
+  }
+
+  return null;
+}
+
+/**
+ * Create a Linear issue via GraphQL, with diagnostic input dump on failure,
+ * automatic retry-without-estimate for teams that reject it, and reconcile
+ * on transient errors to prevent duplicate creation.
+ *
+ * @param {object} input      IssueCreateInput object.
+ * @param {string} key        Linear API key.
+ * @param {string} [kind]     "parent" or "subtask" — used in success logging.
+ * @param {string} [externalId] External ID for logging.
+ * @returns {Promise<string>} The created (or reconciled) issue id.
+ */
+async function createIssue(input, key, kind, externalId) {
   try {
     const d = await graphql(ISSUE_CREATE_MUTATION, { input }, key);
-    return d.issueCreate.issue.id;
+    const issue = d.issueCreate.issue;
+    console.log(`  ✅ [${kind || "issue"}] ${externalId || ""} ${issue.identifier} ${issue.url}`.trim());
+    return issue.id;
   } catch (err) {
     // Dump the exact input for debugging (truncate description)
     const dump = { ...input };
@@ -255,13 +335,40 @@ async function createIssue(input, key) {
     }
     console.error("[input]", JSON.stringify(dump, null, 2));
 
+    const errStr = String(err.message);
+
+    // Validation error — nothing was created, hard fail
+    if (isValidationError(errStr)) {
+      throw err;
+    }
+
     // Estimate retry: if error mentions estimate, retry without it
-    const errStr = err.message.toLowerCase();
-    if (input.estimate != null && errStr.includes("estimate")) {
-      console.log("⚠ estimate rejected by team — creating without estimate");
+    if (input.estimate != null && errStr.toLowerCase().includes("estimate")) {
+      console.log("  ⚠ estimate rejected by team — creating without estimate");
       const { estimate: _omit, ...rest } = input;
-      const d = await graphql(ISSUE_CREATE_MUTATION, { input: rest }, key);
-      return d.issueCreate.issue.id;
+      try {
+        const d = await graphql(ISSUE_CREATE_MUTATION, { input: rest }, key);
+        const issue = d.issueCreate.issue;
+        console.log(`  ✅ [${kind || "issue"}] ${externalId || ""} ${issue.identifier} ${issue.url}`.trim());
+        return issue.id;
+      } catch (retryErr) {
+        // Retry also failed — try reconcile for non-validation errors
+        if (!isValidationError(String(retryErr.message))) {
+          const reconciled = await reconcileAfterTransient(input, key);
+          if (reconciled) {
+            console.log(`  ✅ [${kind || "issue"}] ${externalId || ""} ${reconciled} (reconciled)`.trim());
+            return reconciled;
+          }
+        }
+        throw retryErr;
+      }
+    }
+
+    // Transient (non-validation) error — try reconcile
+    const reconciled = await reconcileAfterTransient(input, key);
+    if (reconciled) {
+      console.log(`  ✅ [${kind || "issue"}] ${externalId || ""} ${reconciled} (reconciled)`.trim());
+      return reconciled;
     }
 
     throw err;
@@ -617,7 +724,7 @@ async function main() {
     for (const st of subtasks) {
       const typeNormalized = TYPE_ALIAS[st.type] || st.type;
       const typeLabel = `type:${typeNormalized}`;
-      const sliceLabel = st.slice || null;
+      const sliceLabel = normalizeSlice(st.slice);
       const estimate = ESTIMATE_MAP[st.estimate];
 
       // Always include type label in requested set (will warn+skip if not provisioned)
@@ -690,18 +797,9 @@ async function main() {
         projectId,
         stateId: defaultState.id,
         labelIds: parentLabelIds,
-      }, KEY),
+      }, KEY, "parent", parent.externalId),
+      onSkip: (cachedId) => console.log(`  ⏭️ skip (idempotent) ${parent.externalId} -> ${cachedId}`),
     });
-    // Fetch the created issue to get identifier/url
-    const parentData = await graphql(VERIFY_ISSUE_QUERY, { id: parentIssueId }, KEY);
-    // Re-fetch with more fields
-    const parentFull = await graphql(
-      `query($id:String!){ issue(id:$id){ id identifier url title } }`,
-      { id: parentIssueId },
-      KEY,
-    );
-    const pi = parentFull.issue;
-    console.log(`  ✅ [parent] ${pi.identifier} ${pi.url}`);
   } catch (err) {
     console.error(`  ❌ [parent] ${parent.externalId}: ${err.message}`);
     hasError = true;
@@ -713,7 +811,7 @@ async function main() {
   for (const st of subtasks) {
     const typeNormalized = TYPE_ALIAS[st.type] || st.type;
     const typeLabel = `type:${typeNormalized}`;
-    const sliceLabel = st.slice || null;
+    const sliceLabel = normalizeSlice(st.slice);
     const estimate = ESTIMATE_MAP[st.estimate];
 
     // Build label names — always include type label (will warn+skip if not provisioned)
@@ -754,17 +852,9 @@ async function main() {
             return false;
           }
         },
-        createFn: async () => createIssue(createInput, KEY),
+        createFn: async () => createIssue(createInput, KEY, "subtask", st.externalId),
+        onSkip: (cachedId) => console.log(`  ⏭️ skip (idempotent) ${st.externalId} -> ${cachedId}`),
       });
-
-      // Fetch identifier/url
-      const stFull = await graphql(
-        `query($id:String!){ issue(id:$id){ id identifier url title } }`,
-        { id: subtaskId },
-        KEY,
-      );
-      const si = stFull.issue;
-      console.log(`  ✅ [subtask] ${si.identifier} ${si.url}`);
     } catch (err) {
       console.error(`  ❌ [subtask] ${st.externalId}: ${err.message}`);
       hasError = true;
@@ -779,7 +869,11 @@ async function main() {
   console.log("\n✅ Push complete.");
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// Guard: only run main() when called directly (not when imported as module)
+const __filename = fileURLToPath(import.meta.url);
+if (process.argv[1] && resolve(process.argv[1]) === __filename) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
