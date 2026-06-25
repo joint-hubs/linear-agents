@@ -1,5 +1,7 @@
 @echo off
 setlocal
+set "SQUAD_SLUG=test"
+set "SOURCE_PATH=%~1"
 call "%~dp0_lib.bat" || exit /b 1
 REM Agent 4 - TEST. Spec: docs/agent-4-test.md
 REM Main = MiniMax M3 (deploy/run, multimodal screenshoty). scenarios = DeepSeek V4 Flash (small_fast). root-cause -> GLM-5.2.
@@ -11,4 +13,6 @@ set "ANTHROPIC_SMALL_FAST_MODEL=deepseek/deepseek-v4-flash"
 echo [test] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [test] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL%
 claude %*
+set "EXIT_CODE=%errorlevel%"
+if defined RUN_ID node scripts\run-manifest.mjs end "%RUN_ID%" %EXIT_CODE%
 endlocal

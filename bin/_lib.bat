@@ -32,4 +32,11 @@ if defined NATIVE (
 set "CLAUDE_CODE_SUBAGENT_MODEL="
 REM clear inherited override; else all subagents flatten onto one model (see ADR-0002)
 set "API_TIMEOUT_MS=3000000"
+
+REM --- Run manifest (telemetry) ---
+REM SQUAD_SLUG and SOURCE_PATH are set by each launcher BEFORE calling _lib.bat.
+if not defined SQUAD_SLUG set "SQUAD_SLUG=unknown"
+if not defined SOURCE_PATH set "SOURCE_PATH="
+for /f "delims=" %%i in ('node scripts\run-manifest.mjs gen-id %SQUAD_SLUG%') do set "RUN_ID=%%i"
+node scripts\run-manifest.mjs start "%RUN_ID%" %SQUAD_SLUG% "%SOURCE_PATH%"
 exit /b 0

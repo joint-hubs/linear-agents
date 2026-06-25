@@ -1,5 +1,7 @@
 @echo off
 setlocal
+set "SQUAD_SLUG=plan"
+set "SOURCE_PATH=%~1"
 call "%~dp0_lib.bat" || exit /b 1
 REM Agent 1 - PLAN. Spec: docs/agent-1-planner.md
 REM Main = Opus (PLAN lead). discovery/spec-review = MiniMax M3. Tanie etapy (spec=GLM-5.2, decompose/enrich=MiniMax M3,
@@ -20,5 +22,7 @@ if defined NATIVE (
 echo [plan] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [plan] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL%
 claude %*
-if defined NATIVE if errorlevel 1 echo Native (Anthropic subscription) run failed. Re-run with OpenRouter: bin\plan.bat %*
+set "EXIT_CODE=%errorlevel%"
+if defined NATIVE if %EXIT_CODE% neq 0 echo Native (Anthropic subscription) run failed. Re-run with OpenRouter: bin\plan.bat %*
+if defined RUN_ID node scripts\run-manifest.mjs end "%RUN_ID%" %EXIT_CODE%
 endlocal

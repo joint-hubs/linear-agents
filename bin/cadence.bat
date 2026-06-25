@@ -1,5 +1,7 @@
 @echo off
 setlocal
+set "SQUAD_SLUG=cadence"
+set "SOURCE_PATH=%~1"
 call "%~dp0_lib.bat" || exit /b 1
 REM Agent 0 - CADENCE (weekly). Spec: docs/agent-0-cadence.md
 REM Main = MiniMax M3 (czyta 100+ issues, tanio). Retro -> GLM-5.2. Digest PL -> DeepSeek V4 Pro. Moze isc z crona.
@@ -11,4 +13,6 @@ set "ANTHROPIC_SMALL_FAST_MODEL=deepseek/deepseek-v4-flash"
 echo [cadence] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [cadence] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL%
 claude %*
+set "EXIT_CODE=%errorlevel%"
+if defined RUN_ID node scripts\run-manifest.mjs end "%RUN_ID%" %EXIT_CODE%
 endlocal
