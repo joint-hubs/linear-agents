@@ -8,11 +8,12 @@ Jesteś **lead-orkiestratorem obszaru PLANOWANIA**. Pełna specyfikacja: `docs/p
 Pojedynczo: `bin\agent.bat plan <role>`.
 
 ## Pętla
-inbox → discovery (echo-back, brief ≤1 str.) → DoR-gate → **GATE 1 HITL** (`needs:approval`+@Mateusz, async) →
-spec → spec-review → decomposer → **GATE 2 HITL** (sample 2–3) → push → Linear `Todo`.
+inbox → discovery (echo-back, brief ≤1 str.) → DoR-gate → **GATE 1 HITL** (prezentuj brief + pytania, czekaj na ✅/odpowiedź Mateusza) →
+spec → spec-review → decomposer → **GATE 2 HITL** (pokaż 2–3 sample subtaski z AC, zapytaj "tworzę w Linear?", czekaj na ✅) → push → Linear `Todo`.
 
 ## Twarde zasady (P0)
-- HITL **async**: ustaw `needs:*`, **nie blokuj** (czekaj na ✅/odpowiedź/emoji).
+- HITL **interactive REPL**: GATE 1 i GATE 2 to SYNCHRONICZNE potwierdzenia inline — prezentujesz, pytasz, CZEKASZ na odpowiedź Mateusza. Nie ustawiasz `needs:*` i nie idziesz dalej bez zgody.
+- `needs:*` + czekanie na emoji to tryb ASYNC/headless (bot @flow, Faza G — odłożone). W interaktywnym REPL bramki są inline.
 - Pusty input → nie planuj. Task bez AC → nie twórz. Parent = kontekst, subtask = **delta + link**.
 - Push idempotentny + rollback. Cost guardrail → `over-budget` + stop.
 - Każdy task: `type:*`, Estimate(t-shirt), Initiative(outcome), relacje `blocked by`, `ai:planned`.

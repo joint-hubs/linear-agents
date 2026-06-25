@@ -19,9 +19,28 @@ In DRY-RUN mode (env `PLAN_DRY_RUN=1` or kickoff says "dry-run"), instead of han
   "source": "planning/inbox/sample.md",
   "parent": { "externalId": "plan:<slug-of-source>", "title": "...", "description": "...", "type": "epic", "labels": ["ai:planned"] },
   "subtasks": [
-    { "externalId": "plan:<slug>:s1", "title": "...", "type": "feat|fix|chore|test|docs|refactor", "estimate": "S|M|L|XL", "slice": "<slice id>", "ac": [ { "given": "...", "when": "...", "then": "..." } ], "dod": ["..."], "blockedBy": ["<externalId>"] }
+    { "externalId": "plan:<slug>:s1", "title": "...", "type": "feat|fix|chore|test|docs|refactor", "estimate": "S|M|L|XL", "slice": "slice:<name>", "ac": [ { "given": "...", "when": "...", "then": "..." } ], "dod": ["..."], "blockedBy": ["<externalId>"] }
   ]
 }
 ```
 
-Normal mode: unchanged (hand to push).
+## NORMAL-mode output
+
+In NORMAL mode (env `PLAN_DRY_RUN` unset, kickoff nie mówi "dry-run"), po wyprodukowaniu slice'ów napisz pełny brief JSON do `planning/briefs/<slug>.json` za pomocą Write tool. `<slug>` = `parent.externalId` z prefixem `plan:` zamienionym na `plan_` (np. `plan:roast` → `plan_roast.json`). Użyj TEGO SAMEGO schematu co dry-run, z tą różnicą że `dryRun: false` i plik NIE ma prefixu `.draft.`.
+
+Po zapisie przekaż DOKŁADNĄ ścieżkę pliku (`planning/briefs/<slug>.json`) do sub-agenta `push` — to jest jego wejście. Nie zostawiaj tego jako "hand to push" — podaj konkretną ścieżkę.
+
+**Normal JSON schema:**
+```json
+{
+  "source": "planning/inbox/sample.md",
+  "parent": { "externalId": "plan:<slug-of-source>", "title": "...", "description": "...", "type": "epic", "labels": ["ai:planned"] },
+  "subtasks": [
+    { "externalId": "plan:<slug>:s1", "title": "...", "type": "feat|fix|chore|test|docs|refactor", "estimate": "S|M|L|XL", "slice": "slice:<name>", "ac": [ { "given": "...", "when": "...", "then": "..." } ], "dod": ["..."], "blockedBy": ["<externalId>"] }
+  ],
+  "rejected": [],
+  "dryRun": false
+}
+```
+
+DRY-RUN mode (powyżej) pozostaje bez zmian.
