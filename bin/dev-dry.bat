@@ -18,7 +18,7 @@ set "DEV_DRY_RUN=1"
 echo [dev-dry] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [dev-dry] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL% DRY_RUN=%DEV_DRY_RUN%
 
-set "KICKOFF=DRY-RUN mode (DEV_DRY_RUN=1). Read fixture from .state\mock\dev-task.json. Do NOT call mcp__linear__*. Do NOT git push. Auto-approve HITL gates. Run the DEV workflow per docs/agent-2-dev.md. Stop after the squad output artifact is written."
+set "KICKOFF=DRY-RUN mode (DEV_DRY_RUN=1). Read fixture from .state\mock\dev-task.json. Do NOT call mcp__linear__*. Do NOT git push. Auto-approve HITL gates. Run the DEV workflow per docs/agent-2-dev.md. Execute the FULL DEV loop INCLUDING the linear-ops hand-off step (transition -> In Review, comment --dedup-tag, label) with --dry-run, THEN stop after the hand-off."
 
 claude -p "%KICKOFF%" --permission-mode default --max-turns 40
 

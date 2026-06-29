@@ -14,10 +14,17 @@
  * Dependencies: Node 18+ (global fetch). No npm install required.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { loadEnv, graphql, resolveTeam, resolveIssue } from "./linear-client.mjs";
+
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
+
+const __dir = dirname(fileURLToPath(import.meta.url));
+const root = join(__dir, "..");
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -34,6 +41,73 @@ const ESTIMATE_MAP = { XS: 1, S: 2, M: 3, L: 5, XL: 8 };
 function extractTeamKey(identifier) {
   const m = identifier.match(/^([A-Za-z]+)-\d+$/);
   return m ? m[1] : null;
+}
+
+// ---------------------------------------------------------------------------
+// Dry-run detection (mirrors linear-query.mjs)
+// ---------------------------------------------------------------------------
+
+/**
+ * Scan process.env for the first var matching /^([A-Z]+)_DRY_RUN=1$/.
+ * When found, load the fixture from .state/mock/<squad>-task.json.
+ * @returns {{ dryRun: boolean, squad?: string, fixture?: object }}
+ */
+function dryRunContext() {
+  for (const [key, val] of Object.entries(process.env)) {
+    if (val === "1" && key.endsWith("_DRY_RUN")) {
+      const squad = key.slice(0, -"_DRY_RUN".length).toLowerCase();
+      const fixturePath = join(root, ".state", "mock", `${squad}-task.json`);
+      if (!existsSync(fixturePath)) {
+        console.error(`[dry-run:${squad}] fixture .state/mock/${squad}-task.json missing`);
+        process.exit(1);
+      }
+      const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
+      return { dryRun: true, squad, fixture };
+    }
+  }
+  return { dryRun: false };
+}
+
+/**
+ * Resolve an issue from a dry-run fixture by identifier or id.
+ * Exits 1 if not found.
+ */
+function resolveIssueFromFixture(fixture, identifier) {
+  const issue = fixture.issue;
+  if (issue && (issue.identifier === identifier || issue.id === identifier)) {
+    return issue;
+  }
+  const fromArray = (fixture.issues || []).find(
+    (i) => i.identifier === identifier || i.id === identifier,
+  );
+  if (fromArray) return fromArray;
+  console.error(`[dry-run] issue ${identifier} not in fixture (fixture has ${fixture.issue?.identifier || "none"})`);
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// Labels config (dry-run validation)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read labels.json and build valid label names + group key set.
+ * @returns {{ valid: Set<string>, groupKeys: Set<string> }}
+ */
+function loadLabelsConfig() {
+  const labelsPath = join(root, "config", "linear", "labels.json");
+  const config = JSON.parse(readFileSync(labelsPath, "utf8"));
+  const valid = new Set();
+  const groupKeys = new Set();
+  for (const [groupKey, groupDef] of Object.entries(config.groups)) {
+    groupKeys.add(groupKey);
+    for (const label of groupDef.labels) {
+      valid.add(`${groupKey}:${label}`);
+    }
+  }
+  for (const flag of config.flags) {
+    valid.add(flag);
+  }
+  return { valid, groupKeys };
 }
 
 /**
@@ -107,7 +181,18 @@ function printUsage() {
 // Subcommand: transition
 // ---------------------------------------------------------------------------
 
-async function handleTransition(identifier, args) {
+async function handleTransition(identifier, args, dryRunCtx) {
+  // --- Dry-run: fully offline ---
+  if (dryRunCtx.dryRun) {
+    const issue = resolveIssueFromFixture(dryRunCtx.fixture, identifier);
+    if (!args.status) {
+      console.error("Error: --status <name> is required for transition");
+      process.exit(2);
+    }
+    console.log(`[dry-run:${dryRunCtx.squad}] would transition ${issue.identifier} -> ${args.status}`);
+    return;
+  }
+
   const { issue, teamId } = await resolveIssueWithTeam(identifier);
   const oldState = issue.state?.name || "(unknown)";
 
@@ -155,7 +240,52 @@ async function handleTransition(identifier, args) {
 // Subcommand: label
 // ---------------------------------------------------------------------------
 
-async function handleLabel(identifier, args) {
+async function handleLabel(identifier, args, dryRunCtx) {
+  // --- Dry-run: fully offline ---
+  if (dryRunCtx.dryRun) {
+    const issue = resolveIssueFromFixture(dryRunCtx.fixture, identifier);
+    if (!args.add && !args.remove) {
+      console.error("Error: --add or --remove is required for label");
+      printUsage();
+      process.exit(2);
+    }
+    const currentNames = (issue.labels?.nodes || []).map((l) => l.name).sort();
+    const { valid, groupKeys } = loadLabelsConfig();
+
+    // Validate --add names
+    for (const name of args.add || []) {
+      if (!valid.has(name)) {
+        console.error(`Error: unknown label '${name}' (not in config/linear/labels.json)`);
+        process.exit(1);
+      }
+      if (groupKeys.has(name)) {
+        console.error(`Cannot add group label '${name}' (only leaf labels attach to issues)`);
+        process.exit(1);
+      }
+    }
+
+    // Validate --remove names
+    for (const name of args.remove || []) {
+      if (!valid.has(name)) {
+        console.error(`Error: unknown label '${name}' (not in config/linear/labels.json)`);
+        process.exit(1);
+      }
+      if (groupKeys.has(name)) {
+        console.error(`Cannot remove group label '${name}' (group labels are never attached to issues)`);
+        process.exit(1);
+      }
+    }
+
+    // Compute planned set (by name)
+    const planned = new Set(currentNames);
+    for (const name of args.remove || []) planned.delete(name);
+    for (const name of args.add || []) planned.add(name);
+    const plannedNames = [...planned].sort();
+
+    console.log(`[dry-run] would set labels: current=[${currentNames.join(", ")}] planned=[${plannedNames.join(", ")}]`);
+    return;
+  }
+
   const { issue, teamId } = await resolveIssueWithTeam(identifier);
 
   // BUG 1.4: require at least one of --add or --remove
@@ -297,7 +427,41 @@ async function handleLabel(identifier, args) {
 // Subcommand: comment
 // ---------------------------------------------------------------------------
 
-async function handleComment(identifier, args) {
+async function handleComment(identifier, args, dryRunCtx) {
+  // --- Dry-run: fully offline ---
+  if (dryRunCtx.dryRun) {
+    const issue = resolveIssueFromFixture(dryRunCtx.fixture, identifier);
+
+    // Resolve body
+    let body;
+    if (args.body && args.bodyFile) {
+      console.error("Error: provide --body OR --body-file, not both");
+      process.exit(2);
+    }
+    if (args.body) {
+      body = args.body;
+    } else if (args.bodyFile) {
+      try {
+        body = readFileSync(args.bodyFile, "utf8");
+      } catch (err) {
+        console.error(`Error reading --body-file "${args.bodyFile}": ${err.message}`);
+        process.exit(1);
+      }
+    } else {
+      console.error("Error: --body <text> or --body-file <path> is required for comment");
+      process.exit(2);
+    }
+
+    if (args.dedupTag) {
+      const marker = `<!-- run:${args.dedupTag} -->`;
+      body = `${marker}\n${body}`;
+    }
+
+    console.log(`[dry-run:${dryRunCtx.squad}] ${issue.identifier}: would post comment:`);
+    console.log(body);
+    return;
+  }
+
   const { issue } = await resolveIssueWithTeam(identifier);
 
   // Resolve body
@@ -381,7 +545,24 @@ async function handleComment(identifier, args) {
 // Subcommand: estimate
 // ---------------------------------------------------------------------------
 
-async function handleEstimate(identifier, args) {
+async function handleEstimate(identifier, args, dryRunCtx) {
+  // --- Dry-run: fully offline ---
+  if (dryRunCtx.dryRun) {
+    const issue = resolveIssueFromFixture(dryRunCtx.fixture, identifier);
+    if (!args.estimate) {
+      console.error("Error: --estimate <XS|S|M|L|XL> is required for estimate");
+      process.exit(2);
+    }
+    const upper = args.estimate.toUpperCase();
+    const value = ESTIMATE_MAP[upper];
+    if (value === undefined) {
+      console.error(`Error: invalid estimate "${args.estimate}". Valid: ${Object.keys(ESTIMATE_MAP).join(", ")}`);
+      process.exit(2);
+    }
+    console.log(`[dry-run:${dryRunCtx.squad}] would set estimate ${upper} (${value}) on ${issue.identifier}`);
+    return;
+  }
+
   const { issue } = await resolveIssueWithTeam(identifier);
 
   if (!args.estimate) {
@@ -424,9 +605,17 @@ async function handleEstimate(identifier, args) {
 async function main() {
   loadEnv();
 
+  const dryRunCtx = dryRunContext();
+
   const args = parseArgs(process.argv);
   const cmd = args._[0];
   const identifier = args._[1];
+
+  // Env DRY_RUN forces no-write regardless of --dry-run flag (mechanical safety)
+  if (dryRunCtx.dryRun) {
+    args.dryRun = true;
+    console.error(`[dry-run:${dryRunCtx.squad}] using fixture .state/mock/${dryRunCtx.squad}-task.json (env forces offline + no-write)`);
+  }
 
   if (!cmd || !identifier) {
     printUsage();
@@ -435,16 +624,16 @@ async function main() {
 
   switch (cmd) {
     case "transition":
-      await handleTransition(identifier, args);
+      await handleTransition(identifier, args, dryRunCtx);
       break;
     case "label":
-      await handleLabel(identifier, args);
+      await handleLabel(identifier, args, dryRunCtx);
       break;
     case "comment":
-      await handleComment(identifier, args);
+      await handleComment(identifier, args, dryRunCtx);
       break;
     case "estimate":
-      await handleEstimate(identifier, args);
+      await handleEstimate(identifier, args, dryRunCtx);
       break;
     default:
       console.error(`Error: unknown subcommand "${cmd}"`);
