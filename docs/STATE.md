@@ -3,7 +3,7 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-06-25 — Faza E foundation DONE (telemetry ledger + cost panel MVP e2e verified + data-quality fix T-E0e + UI polish), Faza D T-D1 DONE, Faza C zamknięta
+## Ostatnia aktualizacja: 2026-06-29 — Faza F (finish squads) start: F0 shared Linear scripts DONE + F1 DEV squad wiring DONE (dry-run verified), live pilot + F2/F3 pending
 
 ### Zrobione
 - **T-A1 SPIKE — DONE.** Architektura „model per subagent" **DZIAŁA**: explicit OpenRouter slug we
@@ -131,6 +131,27 @@
 - **T-B4** (follow-up, jeśli native day-to-day): migracja frontmatter subagentów `agents/plan/agents/*.md` z OR slugs na real ID — pełny squad native. Task #13.
 - **T-A6b** (post-pilot): idempotency race-condition hardening — task #9, odroczone.
 - **Bot `@flow`** (OAuth actor=app) — nadal odłożony; MVP push działa jako user (LINEAR_API_KEY). Headless autonomous push (@flow) = przyszłość.
+
+## Faza F — finish DEV/REVIEW/CADENCE squads (plan: docs/plans/finish-squads-plan.md)
+
+**F0 — DONE + verified (2026-06-29).** Shared headless Linear access layer (unblocks DEV/REVIEW/CADENCE; MCP mcp__linear__* does not work headless per T-C2):
+- scripts/linear-client.mjs — shared GraphQL client (loadEnv, graphql, resolveTeam, resolveIssue via issue(id:) + searchIssues fallback; validates LINEAR_API_KEY before fetch).
+- scripts/linear-query.mjs — read CLI (team/issues/issue/comments/search); server-side state+label filters via GraphQL vars; <SQUAD>_DRY_RUN=1 -> serves .state/mock/<squad>-task.json fixture (mechanical dry-run safety, no API call).
+- scripts/linear-ops.mjs — write mutations on existing issues (transition/label/comment/estimate); --dry-run; comment --dedup-tag (dedup marker scan); label resolve via group:child map (ai:coded); TOCTOU note on labelIds.
+- scripts/check.mjs — +2 lint checks (dry-run launcher sets *_DRY_RUN=1; linear scripts CLI surface). 7 checks total.
+- Fixtures .state/mock/{dev,review,cadence}-task.json (gitignored — .state/).
+- Sonnet review adopted (C1 dry-run safety, C2 forbid mcp__linear_*, C3 issue(id:) first, C4 --dedup-tag, C6 prompt-file, C7 needs:answer resume). Pro review of scripts: 5 MAJOR + 8 minor fixed.
+- Commits: 23bf28b, a5be642, db14995.
+- KNOWN FINDING: live team FEN unstarted state is "Backlog" (not "Todo" as config/linear/states.json claims). Code queries live states so works with any name; squad prompts aligned to "Backlog". No FEN issue has the dor-ok label yet (only "planned") — live DEV pilot must add dor-ok to a chosen task as setup.
+
+**F1 (DEV squad) — wiring DONE + dry-run verified (2026-06-29); LIVE PILOT DEFERRED.**
+- agents/dev/CLAUDE.md rewritten: Step 0 resume check (.state/dev-wip.json, WIP=1), Backlog+dor-ok pick, linear-ops transition/label, dev-branch.mjs, self-verify, hand-off (comment --dedup-tag + In Review), needs:answer -> WIP + exit + resume, DRY-RUN. Subagents: no-mcp note.
+- scripts/dev-branch.mjs — branch naming + checkout (no push, rebase if exists, --dry-run).
+- bin/dev-dry.bat — mirrors plan-dry.bat (SQUAD_SLUG=dev, DEV_DRY_RUN=1, run-manifest end).
+- Pro review: 4 MAJOR + 8 minor fixed (Step 0, slug/placeholder clarification, dry-run dev-branch, misleading check.mjs flags).
+- Dry-run pilot VERIFIED (run 2026-06-29T17-43-31-dev): agent ran full loop on fixture FEN-30 (pick -> dev-branch --dry-run -> wrote lib/*.mjs in .state/runs workspace -> self-verify 6 pass/2 skip/0 fail -> hand-off artifact), 0 mcp__linear, 0 git push. Finding: Bash was permission-gated in `claude -p --permission-mode default` (non-interactive) -> agent delegated self-verify to subagent; live bin\dev.bat is interactive so Mateusz approves Bash inline (not an issue live). Optional launcher tweak: dry-run could use --permission-mode acceptEdits.
+- Commits: c9fcfa2, c791463 (chore gitignore .agent-io).
+- NEXT: F1 live pilot on a real FEN task (pick smallest Backlog+planned, e.g. FEN-2; add dor-ok; run bin\dev.bat interactively). Then F2 (REVIEW), F3 (CADENCE). TEST deferred until GCP VM.
 
 ### Blokady (czeka na Mateusza)
 - Faza D T-D4 / Faza G: **GCP VM** (nazwa/projekt/zone).
