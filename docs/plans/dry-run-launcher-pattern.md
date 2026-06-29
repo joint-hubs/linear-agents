@@ -40,7 +40,7 @@ claude -p "%KICKOFF%" --permission-mode default --max-turns 40
 
 REM --- 6. Post-run verify (squad-specific) ---
 REM dev / review: run mock verify
-REM   node scripts/check.mjs --squad <squad> --dry
+REM   node scripts/check.mjs
 REM cadence: read-only — verify digest file exists
 REM   if not exist "%ROOT%\.state\runs\%RUN_ID%\digest.md" echo [WARN] No digest produced
 
@@ -60,7 +60,7 @@ endlocal
 | `<N>` (agent doc) | `2` | `3` | `0` |
 | Model (from `bin/<squad>.bat`) | `z-ai/glm-5.2` | `z-ai/glm-5.2` | `minimax/minimax-m3` |
 | Fixture file | `.state/mock/dev-task.json` | `.state/mock/review-task.json` | `.state/mock/cadence-task.json` |
-| Post-run verify | `node scripts/check.mjs --squad dev --dry` | `node scripts/check.mjs --squad review --dry` | check `.state/runs/<RUN_ID>/digest.md` exists |
+| Post-run verify | `node scripts/check.mjs` | `node scripts/check.mjs` | check `.state/runs/<RUN_ID>/digest.md` exists |
 
 ## Contract (all squads)
 
