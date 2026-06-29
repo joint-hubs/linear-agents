@@ -5,14 +5,10 @@
       "Read", "Grep", "Glob", "Edit", "Write",
       "Bash(git add:*)", "Bash(git commit:*)", "Bash(git checkout:*)", "Bash(git switch:*)",
       "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git pull:*)", "Bash(git rebase:*)",
-      "Bash(npm:*)", "Bash(pnpm:*)", "Bash(yarn:*)", "Bash(docker:*)", "Bash(docker compose:*)", "Bash(make:*)", "Bash(pytest:*)",
-      "mcp__linear__*"
+      "Bash(npm:*)", "Bash(pnpm:*)", "Bash(yarn:*)", "Bash(docker:*)", "Bash(docker compose:*)", "Bash(make:*)", "Bash(pytest:*)"
     ],
     "deny": [
-      "Bash(git push:*)", "Bash(rm -rf:*)", "Bash(gcloud:*)"
+      "Bash(git push:*)", "Bash(rm -rf:*)", "Bash(gcloud:*)", "mcp__linear__*"
     ]
-  },
-  "mcpServers": {
-    "linear": { "type": "sse", "url": "https://mcp.linear.app/sse" }
   }
 }
