@@ -3,7 +3,7 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-06-25 — Faza E foundation DONE (telemetry ledger + cost panel MVP e2e verified), Faza D T-D1 DONE, Faza C zamknięta
+## Ostatnia aktualizacja: 2026-06-25 — Faza E foundation DONE (telemetry ledger + cost panel MVP e2e verified + data-quality fix T-E0e + UI polish), Faza D T-D1 DONE, Faza C zamknięta
 
 ### Zrobione
 - **T-A1 SPIKE — DONE.** Architektura „model per subagent" **DZIAŁA**: explicit OpenRouter slug we
@@ -119,6 +119,9 @@
   Wszystkie 4 endpointy proxy realne dane (bez 502/500). **Znane ograniczenie (T-E0e/Phase 2):** `aggregateRun`
   dopasowuje transkrypty po oknie `cwd`+`gitBranch`+czas — długa sesja orkiestratora w tym samym cwd wpada w okno
   i nadpuchla liczniki (proxy $0.123 vs direct $0.067). Fix = exact `sessionId` w manifeście (łapać z runu claude).
+- **T-E0e + T-E0e-fix2 — DONE+verified.** Exact `sessionId` w manifeście: `run-manifest end` odkrywa sesję squadu po `birthtime` szukając w OBU korzeniach — `<CLAUDE_CONFIG_DIR>/projects/<hash>/` (gdzie squad pisze transkrypt, bo launchery ustawiają `CLAUDE_CONFIG_DIR=agents/<squad>`) i `~/.claude/projects/<hash>/`; wybiera najbliższy `startedAt`; zapisuje `sessionId`+`transcriptPath`+`claudeConfigDir`. `aggregateRun` przy `sessionId` parsuje TYLKO ten transkrypt (exact) zamiast okna. **Wyciek usunięty:** realny `plan.bat -p` run: 1.49M leaked input tok → **6 genuine**, $0.21 → **$0.0214**. Fix po drodze: `cwdToHashName` (`:`→`-`, było `:`→`` → `C-Users` zamiast `C--Users`, hash nigdy nie pasował); pricing `anthropic/claude-4.8-opus-20260528` w `config/models.json`. Tests 23/23. Known minor: `cache_read` nie kosztowane (konwencja cost-report) → genuine ~$0.05 vs raport ~$0.02 (T-E0f/Phase 2).
+- **T-E7a-polish — DONE.** `AgentsCostView`: null-safe formatters (był Runtime TypeError — `costUSD` undefined), nazwy pól wyrównane do API (`costUsd`→`costUSD` 14×, `totalRuns`→`totals.runs`, usunięto `calls`), relative time (date-fns), status pills z kolorem, sticky header, zebra, empty states, responsywność, inline error banner. tsc czysto.
+- **T-E0f + T-E7a-fix2 — DONE+verified.** Kosztowanie `cache_read`/`cache_creation` (były ignorowane → panel mylnie pokazywał input=6/$0.02 dla squadu; real ctx=158k/$0.31). `costTokens`: cacheRead × `pricing.cacheRead` (default 0.1×input, konwencja Anthropic) + cacheCreation × input. `byModel`/`byAgent` eksponują `cacheReadInputTokens`+`cacheCreationInputTokens`. `config/models.json`: cacheRead dla Anthropic (Opus $0.50, Sonnet $0.30 /M). UI: kolumna „Context"=fresh+cacheRead+cacheCreation z tooltip-breakdown, tabele byModel/byAgent z rozbiciem Fresh/Cache read/Cache write, wykres po total context, legenda. Realny run `17-38`: ctx=157,737, out=855, **$0.3095** (cacheCreation $0.232 dominuje — zimny run tworzy cache). Tests 26/26.
 - **Jak uruchomić panel:** (1) `node scripts/telemetry-server.mjs` (linear-agents, port 7331); (2) `cd Desktop/experiments/0_linear && npm run dev`;
   (3) otwórz `http://localhost:3000`, tab „Agents & Cost". Dane pojawiają się po squad runie (launchery piszą manifesty automatycznie).
 
