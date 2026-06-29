@@ -84,11 +84,11 @@ maturity: backlog-v1
 
 - [ ] **T-D1 · PLAN e2e** (bramki HITL przez `needs:*`+emoji) → realny epik.
 - [~] **T-D2 · DEV squad** — pick(dep-aware,WIP=1)→plan-mode(✅)→kod→In Review; safeguards (checkpoint→STATE.md, fallback, escalation). **wiring DONE + dry-run verified 2026-06-29 (commits c9fcfa2 etc.); live pilot DEFERRED (needs real FEN task + interactive dev.bat). See docs/STATE.md Faza F.**
-- [ ] **T-D3 · REVIEW squad** — first-pass+security ∥ deep; max 2 rundy→escalated; Conventional Comments.
+- [x] **T-D3 · REVIEW squad** — wiring DONE + dry-run verified 2026-06-29 (c5a3b4d); live pilot deferred.
 - [ ] **T-D4 · TEST squad** ⛔ (czeka na GCP VM) — deployer **przygotowuje + prosi Mateusza o ręczny trigger CI/CD** (nie deployuje sam po SSH); runner testuje zdeployowaną apkę (synthetic data) → Done. Patrz `docs/ci-cd.md`.
 - [ ] **T-D4a · CI/CD workflows** *(DeepSeek)* — `.github/workflows/deploy-vm.yml` + `deploy-lambda.yml` (manual `workflow_dispatch`; inputy; **Lambda `instance_ip` required**) + `scripts/notify-linear.mjs`. Szkielety w `docs/ci-cd.md`. ⛔ secrets od Mateusza. Verify: `gh workflow run` z parametrami → deploy + health-check.
 - [ ] **T-D4b · TEST reconcile** *(DeepSeek)* — zaktualizuj `prd-testing.md` / `agent-4-test.md` / `agents/test/agents/deployer.md`: deployer = prepare + prompt(trigger CI/CD) + verify, nie SSH-deploy.
-- [ ] **T-D5 · CADENCE** — weekly digest + roadmap refresh (cron/morning_planner).
+- [x] **T-D5 · CADENCE** — wiring DONE + dry-run verified 2026-06-29 (6287216).
 
 ---
 
