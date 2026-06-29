@@ -228,12 +228,16 @@ export function parseTranscript(absPath) {
 /**
  * Compute USD cost for a set of token counts given a model slug.
  *
- * Pricing is loaded from config/models.json. Matches cost-report.mjs approach:
- *   cost = (inputTokens / 1_000_000) * pricing.input
- *        + (outputTokens / 1_000_000) * pricing.output
+ * Pricing is loaded from config/models.json. Cost components:
+ *   input  = (inputTokens / 1_000_000) * pricing.input
+ *   output = (outputTokens / 1_000_000) * pricing.output
+ *   cacheRead = (cacheRead / 1_000_000) * cacheReadRate
+ *   cacheCreation = (cacheCreation / 1_000_000) * inputRate
  *
- * Cache tokens are NOT costed separately (matching cost-report.mjs which only
- * handles prompt + completion tokens from OpenRouter activity).
+ * Cache read rate: uses pricing.cacheRead if present, else defaults to
+ * 10% of input rate (Anthropic-style prompt caching convention).
+ * Cache creation is costed at the input (write) rate, matching Anthropic's
+ * cache-write pricing (≈ input price).
  *
  * @param {{ inputTokens: number, outputTokens: number, cacheCreation: number, cacheRead: number }} usage
  * @param {string} modelSlug
@@ -246,8 +250,19 @@ export function costTokens(usage, modelSlug) {
 
   const input = usage.inputTokens ?? 0;
   const output = usage.outputTokens ?? 0;
+  const cacheRead = usage.cacheRead ?? 0;
+  const cacheCreation = usage.cacheCreation ?? 0;
 
-  return (input / 1_000_000) * p.input + (output / 1_000_000) * p.output;
+  // Cache read: explicit rate if configured, else default 10% of input rate
+  const cacheReadRate = p.cacheRead != null ? p.cacheRead : 0.1 * p.input;
+
+  // Cache creation: cost at input (write) rate
+  const cacheCreationRate = p.input;
+
+  return (input / 1_000_000) * p.input
+       + (output / 1_000_000) * p.output
+       + (cacheRead / 1_000_000) * cacheReadRate
+       + (cacheCreation / 1_000_000) * cacheCreationRate;
 }
 
 /**
@@ -264,22 +279,28 @@ function aggregateTurns(result, parsed) {
     result.totals.inputTokens += turn.inputTokens;
     result.totals.outputTokens += turn.outputTokens;
     result.totals.cacheReadTokens += turn.cacheRead;
+    result.totals.cacheReadInputTokens += turn.cacheRead;
+    result.totals.cacheCreationInputTokens += turn.cacheCreation;
 
     // By model
     const modelKey = turn.model || "unknown";
     if (!result.byModel[modelKey]) {
-      result.byModel[modelKey] = { inputTokens: 0, outputTokens: 0, costUSD: 0 };
+      result.byModel[modelKey] = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 };
     }
     result.byModel[modelKey].inputTokens += turn.inputTokens;
     result.byModel[modelKey].outputTokens += turn.outputTokens;
+    result.byModel[modelKey].cacheReadInputTokens += turn.cacheRead;
+    result.byModel[modelKey].cacheCreationInputTokens += turn.cacheCreation;
 
     // By agent
     const agentKey = turn.attributionAgent || "_lead";
     if (!result.byAgent[agentKey]) {
-      result.byAgent[agentKey] = { inputTokens: 0, outputTokens: 0, costUSD: 0 };
+      result.byAgent[agentKey] = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 };
     }
     result.byAgent[agentKey].inputTokens += turn.inputTokens;
     result.byAgent[agentKey].outputTokens += turn.outputTokens;
+    result.byAgent[agentKey].cacheReadInputTokens += turn.cacheRead;
+    result.byAgent[agentKey].cacheCreationInputTokens += turn.cacheCreation;
 
     // Per-turn cost — computed once using turn.model, added to both buckets
     const turnCost = costTokens(
@@ -315,7 +336,7 @@ export function aggregateRun(manifest) {
     endedAt: manifest.endedAt || null,
     status: manifest.endedAt ? "completed" : "running",
     ambiguous: false,
-    totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUSD: 0 },
+    totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 },
     byModel: {},
     byAgent: {},
   };
