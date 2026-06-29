@@ -35,6 +35,9 @@ agents/*/.last-update-result.json
 # throwaway test scripts (kept locally for re-verification, not committed)
 scripts/_test_*.mjs
 
+# agent bridge scratch (Pro review reports, worker io)
+.agent-io/
+
 # node / ui
 node_modules/
 ui/node_modules/
