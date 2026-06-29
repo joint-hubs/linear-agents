@@ -15,6 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -364,7 +365,51 @@ if (nativeMapRaw === null) {
   }
 }
 
-// ── 8. Report ───────────────────────────────────────────────────────
+// ── 8. Check 6: dry-run launcher sets its env flag ──────────────────
+//
+// For every bin/*-dry.bat, assert it sets a *_DRY_RUN=1 env var.
+
+const dryBatFiles = glob('bin/*-dry.bat');
+for (const abs of dryBatFiles) {
+  const rel = path.relative(ROOT, abs).replace(/\\/g, '/');
+  const content = readFileSafe(abs);
+  if (content === null) {
+    report(rel, 'MISSING — cannot read');
+    continue;
+  }
+  const m = content.match(/set\s+"?([A-Z]+_DRY_RUN)=1"?/);
+  if (!m) {
+    report(rel, 'missing `set "<VAR>_DRY_RUN=1"` line');
+  } else {
+    console.log(`  PASS  ${rel}  →  ${m[1]}=1`);
+  }
+}
+
+// ── 9. Check 7: linear scripts CLI surface intact ───────────────────
+//
+// Run linear-query.mjs and linear-ops.mjs with no args; assert exit 2
+// and "Usage" in output.
+
+const linearScripts = ['linear-query.mjs', 'linear-ops.mjs'];
+for (const script of linearScripts) {
+  const scriptPath = path.join(ROOT, 'scripts', script);
+  let exitCode = -1;
+  let output = '';
+  try {
+    output = execFileSync('node', [scriptPath], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+    exitCode = 0;
+  } catch (e) {
+    exitCode = e.status ?? 1;
+    output = e.stdout + e.stderr;
+  }
+  if (exitCode === 2 && /Usage/i.test(output)) {
+    console.log(`  PASS  scripts/${script}  →  exit ${exitCode}, has "Usage"`);
+  } else {
+    report(`scripts/${script}`, `expected exit 2 + "Usage", got exit ${exitCode}`);
+  }
+}
+
+// ── 10. Report ──────────────────────────────────────────────────────
 
 violations.sort();
 
@@ -374,7 +419,7 @@ for (const v of violations) {
 
 const count = violations.length;
 if (count === 0) {
-  console.log(`OK: 5 checks, 0 violations`);
+  console.log(`OK: 7 checks, 0 violations`);
   process.exit(0);
 } else {
   console.log(`DRIFT: ${count} violations`);
