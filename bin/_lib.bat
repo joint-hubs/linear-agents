@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 REM Shared launcher logic. Called by each agent .bat via: call "%~dp0_lib.bat" || exit /b 1
 REM Loads .env, validates keys, sets common provider env (OpenRouter for ALL model ids).
 
@@ -7,6 +8,22 @@ pushd "%~dp0.." & set "ROOT=%CD%" & popd
 
 REM load .env (eol=# skips comments, blank lines ignored)
 if exist "%ROOT%\.env" for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%ROOT%\.env") do set "%%A=%%B"
+
+REM --- New workspace provisioning check ---
+if defined LINEAR_TEAM_KEY (
+    if not exist "%ROOT%\.state\teams\%LINEAR_TEAM_KEY%.provisioned" (
+        echo [INFO] Team key %LINEAR_TEAM_KEY% has no provisioning marker. Checking labels...
+        node scripts\bootstrap-linear.mjs --check --team-key %LINEAR_TEAM_KEY%
+        if errorlevel 1 (
+            set /p PROVISION=Provision labels/states for team %LINEAR_TEAM_KEY%? (y/N):
+            if /i "!PROVISION!"=="y" (
+                node scripts\bootstrap-linear.mjs
+            ) else (
+                echo [WARN] Skipping provisioning. linear-push may fail on missing labels.
+            )
+        )
+    )
+)
 
 if defined NATIVE (
     REM native Anthropic subscription — clear any inherited/leaked ANTHROPIC_* vars (from .env or parent env)
