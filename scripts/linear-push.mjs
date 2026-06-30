@@ -728,7 +728,7 @@ async function main() {
       const estimate = ESTIMATE_MAP[st.estimate];
 
       // Always include type label in requested set (will warn+skip if not provisioned)
-      const labelNames = ["ai:planned", typeLabel];
+      const labelNames = ["ai:planned", "dor-ok", typeLabel];
       if (sliceLabel) {
         labelNames.push(sliceLabel);
       }
@@ -815,7 +815,7 @@ async function main() {
     const estimate = ESTIMATE_MAP[st.estimate];
 
     // Build label names — always include type label (will warn+skip if not provisioned)
-    const labelNames = ["ai:planned", typeLabel];
+    const labelNames = ["ai:planned", "dor-ok", typeLabel];
     if (sliceLabel) {
       labelNames.push(sliceLabel);
     }

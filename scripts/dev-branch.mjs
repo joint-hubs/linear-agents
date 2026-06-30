@@ -10,8 +10,8 @@
  * Subcommands:
  *   name <identifier> [slug] [--team-key <KEY>]
  *       Print branch name to stdout, no git ops.
- *   start <identifier> [slug] [--team-key <KEY>] [--dry-run]
- *       Create branch from main, or checkout + rebase existing branch onto main.
+ *   start <identifier> [slug] [--team-key <KEY>] [--base <git-ref>] [--dry-run]
+ *       Create branch from <base> (default: current HEAD), or checkout + rebase existing.
  *
  * Dependencies: Node 18+, zero npm deps.
  */
@@ -77,6 +77,38 @@ function buildBranchName(identifier, slug, teamKeyFlag) {
   return `${teamKey}-${number}-${safeSlug}`;
 }
 
+/**
+ * Resolve the git ref to use as branch base.
+ * Defaults to current HEAD. When --base is provided, validates it resolves.
+ * Exits 1 on failure.
+ */
+function resolveBaseRef(baseFlag) {
+  if (baseFlag) {
+    try {
+      execFileSync("git", ["rev-parse", "--verify", baseFlag], {
+        cwd: root,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch {
+      console.error(`[dev-branch] --base '${baseFlag}' does not resolve to a valid git ref`);
+      process.exit(1);
+    }
+    return baseFlag;
+  }
+
+  // Default: current HEAD
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: root,
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf-8",
+    }).toString().trim();
+  } catch {
+    console.error(`[dev-branch] failed to resolve current HEAD`);
+    process.exit(1);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Subcommands
 // ---------------------------------------------------------------------------
@@ -87,19 +119,19 @@ function cmdName(identifier, slug, teamKeyFlag) {
   console.log(branch);
 }
 
-/** `start` subcommand: create branch from main, or checkout + rebase existing. */
-function cmdStart(identifier, slug, teamKeyFlag, dryRun) {
+/** `start` subcommand: create branch from baseRef, or checkout + rebase existing. */
+function cmdStart(identifier, slug, teamKeyFlag, dryRun, baseRef) {
   const branch = buildBranchName(identifier, slug, teamKeyFlag);
 
   if (dryRun) {
-    console.log(`git checkout -b ${branch} main`);
-    console.log(`# (if ${branch} exists locally: git checkout ${branch} && git rebase main)`);
+    console.log(`git checkout -b ${branch} ${baseRef}`);
+    console.log(`# (if ${branch} exists locally: git checkout ${branch} && git rebase ${baseRef})`);
     return;
   }
 
-  // Attempt to create the branch from main
+  // Attempt to create the branch from baseRef
   try {
-    execFileSync("git", ["checkout", "-b", branch, "main"], {
+    execFileSync("git", ["checkout", "-b", branch, baseRef], {
       cwd: root,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -108,7 +140,7 @@ function cmdStart(identifier, slug, teamKeyFlag, dryRun) {
   } catch (createErr) {
     const stderr = (createErr.stderr || "").toString().toLowerCase();
 
-    // Branch already exists locally — checkout and rebase onto main
+    // Branch already exists locally — checkout and rebase onto baseRef
     if (stderr.includes("already exists")) {
       try {
         execFileSync("git", ["checkout", branch], {
@@ -122,13 +154,13 @@ function cmdStart(identifier, slug, teamKeyFlag, dryRun) {
       }
 
       try {
-        execFileSync("git", ["rebase", "main"], {
+        execFileSync("git", ["rebase", baseRef], {
           cwd: root,
           stdio: ["ignore", "pipe", "pipe"],
         });
       } catch (rebaseErr) {
         const msg = (rebaseErr.stderr || "").toString().trim();
-        console.error(`[dev-branch] rebase onto main failed — resolve manually`);
+        console.error(`[dev-branch] rebase onto ${baseRef} failed — resolve manually`);
         if (msg) console.error(`  stderr: ${msg}`);
         process.exit(1);
       }
@@ -139,7 +171,7 @@ function cmdStart(identifier, slug, teamKeyFlag, dryRun) {
 
     // Unexpected error
     const msg = (createErr.stderr || "").toString().trim();
-    console.error(`[dev-branch] git checkout -b ${branch} main failed: ${msg}`);
+    console.error(`[dev-branch] git checkout -b ${branch} ${baseRef} failed: ${msg}`);
     process.exit(1);
   }
 }
@@ -155,7 +187,7 @@ function main() {
   if (args.length < 2) {
     console.error("Usage:");
     console.error("  node scripts/dev-branch.mjs name <identifier> [slug] [--team-key <KEY>]");
-    console.error("  node scripts/dev-branch.mjs start <identifier> [slug] [--team-key <KEY>] [--dry-run]");
+    console.error("  node scripts/dev-branch.mjs start <identifier> [slug] [--team-key <KEY>] [--base <git-ref>] [--dry-run]");
     process.exit(2);
   }
 
@@ -165,11 +197,14 @@ function main() {
   // Parse optional slug and flags from remaining args
   let slug = null;
   let teamKeyFlag = null;
+  let baseFlag = null;
   let dryRun = false;
 
   for (let i = 2; i < args.length; i++) {
     if (args[i] === "--team-key" && i + 1 < args.length) {
       teamKeyFlag = args[++i];
+    } else if (args[i] === "--base" && i + 1 < args.length) {
+      baseFlag = args[++i];
     } else if (args[i] === "--dry-run") {
       dryRun = true;
     } else if (slug === null) {
@@ -181,9 +216,11 @@ function main() {
     case "name":
       cmdName(identifier, slug, teamKeyFlag);
       break;
-    case "start":
-      cmdStart(identifier, slug, teamKeyFlag, dryRun);
+    case "start": {
+      const baseRef = resolveBaseRef(baseFlag);
+      cmdStart(identifier, slug, teamKeyFlag, dryRun, baseRef);
       break;
+    }
     default:
       console.error(`Unknown subcommand: ${subcommand} (expected name|start)`);
       process.exit(2);
