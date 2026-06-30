@@ -1,7 +1,7 @@
 {
   "_doc": "Definicje labelek/grup Linear (signaling protocol). bootstrap-linear.mjs tworzy je idempotentnie. Linear ma label GROUPS (single-select) + opisy. Brak custom fields → labelki + pola natywne.",
   "groups": {
-    "type":  { "exclusive": true, "labels": ["feature", "bug", "spike", "tech"] },
+    "type":  { "exclusive": true, "labels": ["feature", "bug", "spike", "tech", "docs", "test", "chore"] },
     "needs": { "exclusive": true, "labels": ["answer", "approval", "decision", "access"] },
     "risk":  { "exclusive": true, "labels": ["high"] },
     "ai":    { "exclusive": false, "labels": ["planned", "coded", "reviewed"] }
@@ -10,6 +10,9 @@
   "descriptions": {
     "type:spike": "Research/decyzja; output ADR, bez deploy, timebox 1-2 dni",
     "type:tech": "Tech-debt/refactor/infra; technical success criteria, bez user-AC",
+    "type:docs": "Zadanie dokumentacyjne (README/ADR/docs)",
+    "type:test": "Autoring/automatyzacja testów",
+    "type:chore": "Konserwacja/refactor/cleanup (non-feature)",
     "needs:answer": "Agent czeka na odpowiedź Mateusza (komentarz/emoji)",
     "needs:approval": "Bramka HITL — czeka na ✅",
     "needs:decision": "Wymaga decyzji architektonicznej",
