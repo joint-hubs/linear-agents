@@ -190,13 +190,14 @@
 - **#3 DEV no auto-commit → FIXED: agents/dev/CLAUDE.md hand-off now commits on branch before comment/transition (commit pending).**
 - **#4 settings.json runtime noise → FIXED: .gitignore extended to cover file-history/ and paste-cache/; theme:dark handled via config (commit pending).**
 - **#5 file-history/ + paste-cache/ not gitignored → FIXED: .gitignore extended (commit pending).**
-- **#6a `type:docs/test/chore` labels nie istnieją w workspace** → push skipuje (tylko `type:feature` istnieje). **Pending Mateusz OK:** dodać labels w Linear lub auto-create w push.
-- **#6b PRD: agents generate docs → Linear comment** — agents should push documentation/retro/digest as Linear comments automatically. **Pending Mateusz decision.**
+- **#6a `type:docs/test/chore` labels nie istnieją w workspace** → **DONE (2026-06-30):** `config/linear/labels.json` rozszerzony o `type:docs/test/chore`; `scripts/bootstrap-linear.mjs` zyskał `--check` + `--emit-checklist` + marker `.state/teams/<KEY>.provisioned`; `scripts/linear-push.mjs` fail-fast (throw na brak `type:*`/`ai:*`) + pre-flight `checkRequiredLabels` (live path, exit 3); `bin/_lib.bat` auto-detect unprovisioned workspace (marker check + y/N prompt); `docs/ACCESS.md` stworzony (workspace onboarding story). FEN provisioned: `type:docs/test/chore` created, `--check` exits 0, marker `FEN.provisioned` written. `linear-push` tests 24/24 green.
+- **#6b PRD: agents generate docs → Linear comment** — agents should push documentation/retro/digest as Linear comments automatically. **PRD written (2026-06-30):** `docs/prd/prd-docs-to-linear-comments.md` (jointhubs only; T1 commit+link / T2 gitignored inline / T3 inline+mirror; state-change not per-run; secrets hard-refuse). Implementation pending (future slices).
 
 **Follow-ups pending (2026-06-30):**
-- #6a Linear label provision (type:docs/test/chore) — needs Mateusz OK (auto-create in push vs manual Linear labels)
-- #6b PRD: agents generate docs → Linear comment — needs Mateusz decision
+- #6b PRD: agents generate docs → Linear comment — PRD written, implementation pending (future slices)
 - Branch `fen-28-scaffold-dummy-ui` deletion — pending Mateusz OK
+
+**#6a implemented (2026-06-30):** bootstrap `--check`/`--emit-checklist` + marker, linear-push fail-fast + pre-flight, `_lib.bat` auto-detect, `docs/ACCESS.md` onboarding. FEN provisioned (`type:docs/test/chore`). 24/24 tests. **#6b PRD** at `docs/prd/prd-docs-to-linear-comments.md` (impl pending).
 
 **CADENCE retro — red flagi + action items (do decyzji Mateusza):**
 - 🔴 A1 (WYSOKI, do pt): zdefiniuj merge-gate + zamknij FEN-28 (ma pełen dor-ok/dod-ok/reviewed/stage:testing, a wisi w In Review — nikt nie klika merge & Done).
