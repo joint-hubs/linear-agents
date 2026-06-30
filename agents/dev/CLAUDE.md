@@ -60,7 +60,14 @@ node scripts/linear-ops.mjs label <id> --add escalated --add needs:answer
 Write a short WIP note, then EXIT cleanly (see step 5). Do NOT busy-wait.
 
 ### 4. Hand-off (success)
-Write a markdown summary (what changed, self-verify result, open questions) to a temp file, then:
+Write a markdown summary (what changed, self-verify result, open questions) to a temp file.
+
+First commit all work on the current squad branch so REVIEW has a real diff:
+```
+git add -A
+git commit -m "<type>(<scope>): <subject> (<Linear-id>)"
+```
+Then:
 ```
 node scripts/linear-ops.mjs comment <id> --body-file <summary.md> --dedup-tag dev-handoff-<identifier>
 node scripts/linear-ops.mjs transition <id> --status "In Review"
