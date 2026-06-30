@@ -519,10 +519,9 @@ async function resolveLabels(labelNames, teamId, key, dryRun) {
       continue;
     }
 
-    // Type labels that don't exist — warn and skip
-    if (name.startsWith("type:")) {
-      console.warn(`  ⚠️  type label "${name}" not provisioned — skipping type label`);
-      continue;
+    // Required labels (type:* and ai:*) that don't exist — hard fail
+    if (name.startsWith("type:") || name.startsWith("ai:")) {
+      throw new Error(`Required label "${name}" not provisioned in workspace — run: node scripts/bootstrap-linear.mjs`);
     }
 
     // Other missing labels — warn and skip
@@ -530,6 +529,60 @@ async function resolveLabels(labelNames, teamId, key, dryRun) {
   }
 
   return ids;
+}
+
+/**
+ * Pre-flight check: verify all required label groups (type, ai) and their
+ * children are provisioned in the Linear workspace. Loads the expected label
+ * definitions from config/linear/labels.json. Exits with code 3 if any are
+ * missing.
+ *
+ * @param {Array<{id:string,name:string,isGroup:boolean,parent:{id:string,name:string}|null}>} allLabels
+ */
+function checkRequiredLabels(allLabels) {
+  const labelsCfgPath = join(root, "config/linear/labels.json");
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync(labelsCfgPath, "utf8"));
+  } catch (err) {
+    console.error(`❌ Failed to read ${labelsCfgPath}: ${err.message}`);
+    process.exit(3);
+  }
+
+  const groups = cfg.groups || {};
+  const missing = [];
+
+  for (const [groupName, groupDef] of Object.entries(groups)) {
+    // Only check type and ai groups
+    if (groupName !== "type" && groupName !== "ai") continue;
+
+    const groupLabel = allLabels.find((l) => l.isGroup === true && l.name === groupName);
+    if (!groupLabel) {
+      missing.push(`group:${groupName}`);
+      // Can't check children if group is missing
+      continue;
+    }
+
+    for (const childName of groupDef.labels || []) {
+      const child = allLabels.find(
+        (l) => !l.isGroup && l.parent?.id === groupLabel.id && l.name === childName,
+      );
+      if (!child) {
+        missing.push(`${groupName}:${childName}`);
+      }
+    }
+  }
+
+  if (missing.length > 0) {
+    console.error("❌ Missing required labels:");
+    for (const m of missing) {
+      console.error(`   - ${m}`);
+    }
+    console.error("\nRun: node scripts/bootstrap-linear.mjs");
+    process.exit(3);
+  }
+
+  console.log("🔍 Pre-flight: all required labels (type/*, ai/*) are provisioned");
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +749,11 @@ async function main() {
   }
   console.log(`🔍 Labels: ${allLabels.length} found — groups: [${groupNames.join(", ")}] — children-by-group: ${sampleChildren.join(", ")}`);
 
+  // Pre-flight: verify required labels are provisioned (live path only)
+  if (!dryRun) {
+    checkRequiredLabels(allLabels);
+  }
+
   // Dry-run: print plan and exit
   if (dryRun) {
     console.log("");
@@ -814,7 +872,7 @@ async function main() {
     const sliceLabel = normalizeSlice(st.slice);
     const estimate = ESTIMATE_MAP[st.estimate];
 
-    // Build label names — always include type label (will warn+skip if not provisioned)
+    // Build label names — type:* and ai:* are required (hard fail if not provisioned)
     const labelNames = ["ai:planned", "dor-ok", typeLabel];
     if (sliceLabel) {
       labelNames.push(sliceLabel);
