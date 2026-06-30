@@ -4,11 +4,13 @@
 // Usage:
 //   LINEAR_API_KEY=lin_api_... LINEAR_TEAM_KEY=JOI node scripts/bootstrap-linear.mjs
 //   LINEAR_API_KEY=lin_api_... LINEAR_TEAM_KEY=JOI node scripts/bootstrap-linear.mjs --dry-run
+//   LINEAR_API_KEY=lin_api_... LINEAR_TEAM_KEY=JOI node scripts/bootstrap-linear.mjs --check
+//   LINEAR_API_KEY=lin_api_... LINEAR_TEAM_KEY=JOI node scripts/bootstrap-linear.mjs --emit-checklist <path>
 //
 // Reads .env for LINEAR_API_KEY, LINEAR_TEAM_KEY, LINEAR_WORKSPACE.
 // Config: config/linear/labels.json, config/linear/states.json, config/linear/templates/*.md
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -582,6 +584,68 @@ function printDryRun(team, workspace, labelsCfg, statesCfg, templates) {
 }
 
 // ---------------------------------------------------------------------------
+// Check / checklist helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare config against existing Linear resources.
+ * Returns { groups: [{ name, exclusive, children[] }], flags: [string] }
+ * where each entry is something missing from the workspace.
+ */
+function checkLabels(labelsCfg, existingGroups, existingLabels) {
+  const missing = { groups: [], flags: [] };
+
+  for (const [groupName, groupCfg] of Object.entries(labelsCfg.groups)) {
+    const existingGroup = existingGroups.find((g) => g.name === groupName);
+    if (!existingGroup) {
+      missing.groups.push({ name: groupName, exclusive: groupCfg.exclusive, children: [...groupCfg.labels] });
+    } else {
+      const existingChildren = existingGroup.children?.nodes || [];
+      const missingChildren = groupCfg.labels.filter(
+        (ln) => !existingChildren.find((l) => l.name === ln),
+      );
+      if (missingChildren.length) {
+        missing.groups.push({ name: groupName, exclusive: groupCfg.exclusive, children: missingChildren });
+      }
+    }
+  }
+
+  for (const flagName of labelsCfg.flags) {
+    const existing = existingLabels.find(
+      (l) => l.name === flagName && !l.parent && !l.isGroup,
+    );
+    if (!existing) missing.flags.push(flagName);
+  }
+
+  return missing;
+}
+
+/**
+ * Write a markdown checklist of missing labels to the given path.
+ */
+function writeChecklist(path, missing, workspace, teamKey) {
+  mkdirSync(dirname(path), { recursive: true });
+  const lines = [];
+  lines.push(`# Linear provisioning checklist — workspace ${workspace}, team ${teamKey}`);
+  lines.push("");
+  if (missing.groups.length === 0 && missing.flags.length === 0) {
+    lines.push("All labels provisioned.");
+  } else {
+    lines.push("Missing labels to create manually in Linear UI:");
+    lines.push("");
+    for (const g of missing.groups) {
+      const excl = g.exclusive ? "exclusive" : "multi-select";
+      lines.push(`- [ ] Group \`${g.name}\` (${excl}) with children: ${g.children.join(", ")}`);
+    }
+    for (const f of missing.flags) {
+      lines.push(`- [ ] Flag \`${f}\` (standalone)`);
+    }
+  }
+  lines.push("");
+  writeFileSync(path, lines.join("\n"), "utf8");
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -616,6 +680,64 @@ async function main() {
     const fakeTeam = { name: displayTeam, key: displayTeam, id: "(resolved at runtime)" };
     printDryRun(fakeTeam, workspace, labelsCfg, statesCfg, templates);
     return;
+  }
+
+  // --check / --emit-checklist: read-only verification (needs API key)
+  const isCheck = process.argv.includes("--check");
+  const checklistIdx = process.argv.indexOf("--emit-checklist");
+  const checklistPath = checklistIdx >= 0 ? process.argv[checklistIdx + 1] : null;
+
+  if (isCheck || checklistPath) {
+    if (!KEY) {
+      console.error("Missing LINEAR_API_KEY — set in .env or environment");
+      process.exit(2);
+    }
+    if (!teamKey) {
+      console.error("Missing LINEAR_TEAM_KEY — set in .env or environment (e.g. JOI, PISI)");
+      process.exit(1);
+    }
+
+    let team;
+    try {
+      team = await resolveTeam(KEY, teamKey);
+    } catch (err) {
+      if (err.message.includes("401") || err.message.includes("403") || err.message.includes("Authentication")) {
+        console.error(`❌ Auth failure: ${err.message}`);
+        process.exit(2);
+      }
+      console.error(`❌ ${err.message}`);
+      process.exit(1);
+    }
+
+    console.log(`🔍 Resolved team: ${team.name} (${team.key})${workspace ? ` in workspace "${workspace}"` : ""}`);
+    console.log("📡 Fetching existing resources...");
+    const [existingGroups, existingLabels] = await Promise.all([
+      fetchExistingLabelGroups(team.id, KEY),
+      fetchExistingLabels(team.id, KEY),
+    ]);
+    console.log(`   Found ${existingGroups.length} label groups, ${existingLabels.length} labels`);
+
+    const missing = checkLabels(labelsCfg, existingGroups, existingLabels);
+
+    if (isCheck) {
+      if (missing.groups.length === 0 && missing.flags.length === 0) {
+        console.log(`✅ All labels provisioned for team ${teamKey}.`);
+        process.exit(0);
+      }
+      console.log(`❌ Missing labels for team ${teamKey}:`);
+      for (const g of missing.groups) {
+        console.log(`   Group "${g.name}" missing children: ${g.children.join(", ")}`);
+      }
+      for (const f of missing.flags) {
+        console.log(`   Flag "${f}" missing`);
+      }
+      process.exit(1);
+    }
+
+    // --emit-checklist
+    writeChecklist(checklistPath, missing, workspace, teamKey);
+    console.log(`📝 Checklist written to ${checklistPath}`);
+    process.exit(0);
   }
 
   if (!KEY) {
@@ -704,6 +826,13 @@ async function main() {
     }
   }
   console.log("✅ Bootstrap complete.");
+
+  // Provisioning marker — lets bin/_lib.bat skip the check next time
+  const markerDir = join(root, ".state", "teams");
+  mkdirSync(markerDir, { recursive: true });
+  const markerPath = join(markerDir, `${teamKey}.provisioned`);
+  writeFileSync(markerPath, `${new Date().toISOString()} ${workspace}\n`, "utf8");
+  console.log(`📌 Provisioning marker written to ${markerPath}`);
 }
 
 main().catch((e) => {
