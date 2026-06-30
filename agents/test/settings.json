@@ -11,6 +11,7 @@
       "Bash(rm -rf:*)", "Bash(git push:*)"
     ]
   },
+  "theme": "dark",
   "mcpServers": {
     "linear": { "type": "sse", "url": "https://mcp.linear.app/sse" }
   }

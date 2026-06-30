@@ -9,5 +9,6 @@
     "deny": [
       "Edit", "Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "mcp__linear__*"
     ]
-  }
+  },
+  "theme": "dark"
 }

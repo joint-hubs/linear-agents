@@ -10,5 +10,6 @@
     "deny": [
       "Bash(git push:*)", "Bash(rm -rf:*)", "Bash(gcloud:*)", "mcp__linear__*"
     ]
-  }
+  },
+  "theme": "dark"
 }
