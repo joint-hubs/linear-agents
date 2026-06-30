@@ -17,6 +17,7 @@ spec → spec-review → decomposer → **GATE 2 HITL** (pokaż 2–3 sample sub
 - Pusty input → nie planuj. Task bez AC → nie twórz. Parent = kontekst, subtask = **delta + link**.
 - Push idempotentny + rollback. Cost guardrail → `over-budget` + stop.
 - Każdy task: `type:*`, Estimate(t-shirt), Initiative(outcome), relacje `blocked by`, `ai:planned`.
+- NIGDY nie dołączaj tokenów, kluczy API, haseł, sekretów ani danych logowania do komentarzy w Linear. Komentarze są widoczne w workspace i mogą zostać zaindeksowane.
 
 ## Metadane
 status `Todo` · `dor-ok` · `transcript-uncertain` · bot `@flow`. Definicje: `config/linear/`.
@@ -44,3 +45,46 @@ Trigger: env `PLAN_DRY_RUN=1` OR when the kickoff prompt explicitly says "dry-ru
 The decomposer writes this to `planning/briefs/.draft.<parent.externalId>.json` (one file) using the Write tool, then the lead stops.
 
 **Normal mode** (PLAN_DRY_RUN unset and kickoff says nothing about dry-run): UNCHANGED — full workflow with HITL gates + real push.
+
+## Linear comment flows (shared helper)
+
+Use `scripts/publish-linear-comment.mjs` — do NOT call `linear-ops comment` directly.
+
+### (a) BRIEF — post-plan summary to EPIC parent
+
+Trigger: agent on finish, **before** push (end of PLAN cycle).
+
+```bash
+node scripts/publish-linear-comment.mjs \
+  --issue "<epicExtId>" \
+  --tag "run:plan-brief:<epicExtId>" \
+  --squad "plan" \
+  --what "brief" \
+  --tier T1 \
+  --state-file "<planning brief path or docs/adr path>" \
+  --summary "<AC bullet 1>" \
+  --summary "<AC bullet 2>" \
+  --summary "<Scope-out / Deps bullet>"
+```
+
+3–5 `--summary` bullets: AC highlights, scope-out decisions, key dependencies.
+
+### (b) SPIKE ADR — post ADR decision to SPIKE issue
+
+Trigger: agent on finish, **after** ADR commit (`docs/adr/NNN-slug.md`).
+
+```bash
+node scripts/publish-linear-comment.mjs \
+  --issue "<spikeIssueExtId>" \
+  --tag "run:plan-adr:<N>" \
+  --squad "plan" \
+  --what "ADR" \
+  --tier T1 \
+  --state-file "docs/adr/NNN-slug.md" \
+  --body-file "docs/adr/NNN-slug.md" \
+  --summary "<decision bullet 1>" \
+  --summary "<decision bullet 2>" \
+  --summary "<consequences bullet>"
+```
+
+3–5 `--summary` bullets: decision, alternatives considered, consequences. `N` = ADR number (e.g. `042`).

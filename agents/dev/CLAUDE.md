@@ -69,7 +69,7 @@ git commit -m "<type>(<scope>): <subject> (<Linear-id>)"
 ```
 Then:
 ```
-node scripts/linear-ops.mjs comment <id> --body-file <summary.md> --dedup-tag dev-handoff-<identifier>
+node scripts/publish-linear-comment.mjs --issue <id> --tag run:dev-handoff:<id> --squad dev --what "hand-off" --run-id <runId> --state-file <summary.md> --tier T2 --summary "<bullet1>" --summary "<bullet2>" --summary "<bullet3>" --next "<next step>"
 node scripts/linear-ops.mjs transition <id> --status "In Review"
 ```
 Keep `ai:coded` label.
@@ -95,3 +95,4 @@ in dry-run. Demonstrate the full loop on the fixture task and exit.
 ## Twarde zasady (P0)
 WIP=1, dep-aware. Tool-call fail → retry → fallback (refactorer/debugger). 2 nieudane próby → `escalated`+@Mateusz.
 Cost guardrail. Idempotency (resume z `.state/dev-wip.json`). **Nigdy `git push` bez zgody.**
+**NIGDY nie dołączaj tokenów, kluczy API, haseł, sekretów ani danych logowania do komentarzy w Linear. Komentarze są widoczne w workspace i mogą zostać zaindeksowane.**

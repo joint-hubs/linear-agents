@@ -67,14 +67,16 @@ Capture `{round, status}` from JSON output.
 ### 5. Verdict
 
 **If findings require changes** (any non-praise `issue:`):
-1. Post review as Linear comment: `node scripts/linear-ops.mjs comment <identifier> --body-file .state/reviews/<identifier>-round<N>.md --dedup-tag review-<identifier>-round<N>`
-2. Send back to DEV: `node scripts/linear-ops.mjs transition <identifier> --status "In Progress"`
-3. Add `risk:high` if any high-severity finding: `node scripts/linear-ops.mjs label <identifier> --add risk:high`
-4. Round already incremented in step 4.
-5. If `status==="escalated"` (round > 2, i.e. 3rd review attempt — 2 dev↔review cycles allowed): `node scripts/linear-ops.mjs label <identifier> --add escalated` and stop (human escalation).
+1. Send back to DEV: `node scripts/linear-ops.mjs transition <identifier> --status "In Progress"`
+2. Add `risk:high` if any high-severity finding: `node scripts/linear-ops.mjs label <identifier> --add risk:high`
+3. Round already incremented in step 4.
+4. **Post comment only on state-change** (🔴 blocker found or final verdict):
+   - If any finding is severity `🔴 blocker`: `node scripts/publish-linear-comment.mjs --issue <identifier> --tag run:review-round:<identifier>:<N> --squad review --what "review round <N>" --run-id <runId> --state-file .state/reviews/<identifier>-round<N>.md --tier T2 --summary <findings count / blockers / verdict bullets> --next "Sent back to DEV — round <N>"`
+   - If `status==="escalated"` (round > 2, i.e. 3rd review attempt — 2 dev↔review cycles allowed): `node scripts/linear-ops.mjs label <identifier> --add escalated` and post final verdict comment via helper (same command as above with `--next "Escalated — human review needed"`) and stop.
+5. **No comment posted for intermediate rounds** without blockers — state is communicated via Linear status transition only.
 
 **If clean** (no actionable issues):
-1. Post review comment (same `--dedup-tag`).
+1. Post final verdict comment: `node scripts/publish-linear-comment.mjs --issue <identifier> --tag run:review-round:<identifier>:<N> --squad review --what "review round <N>" --run-id <runId> --state-file .state/reviews/<identifier>-round<N>.md --tier T2 --summary "Clean — no actionable issues" --next "Handing to TEST"`
 2. `node scripts/linear-ops.mjs label <identifier> --add ai:reviewed --add dod-ok --add stage:testing`
 3. Keep status "In Review" (hand to TEST). Do NOT transition to Done.
 
@@ -94,6 +96,7 @@ issues → `In Progress` (round++) | clean → `stage:testing` + `ai:reviewed`.
 - **Max 2 rundy** dev↔review → `escalated` + @Mateusz (licznik w komentarzu).
 - Security **zawsze narzędziami** (model łapie 60–80%). **Nie edytujesz kodu** — tylko komentarze.
 - Zero „LGTM bez czytania". Cost guardrail.
+- **NIGDY nie dołączaj tokenów, kluczy API, haseł, sekretów ani danych logowania do komentarzy w Linear.** Komentarze są widoczne w workspace i mogą zostać zaindeksowane.
 
 ## Metadane
 status `In Review→In Progress|stage:testing` · `ai:reviewed` · `risk:high` · `escalated`.

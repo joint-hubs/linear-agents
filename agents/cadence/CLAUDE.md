@@ -63,8 +63,9 @@ Oraz robi blameless retro (co dobrze/źle/zaskoczyło) + 1–3 action items + pr
 Przekaż sub-agentowi `digest` wyniki z retro. Digest:
 - Komponuje **polski** digest: top priorytety, blockery, decyzje do podjęcia, action items, drift findings, linki do widoków Linear.
 - Zapisuje do `.state/cadence/<ISOweek>.md` (np. `2026-W26.md`).
-- Opcjonalnie: post summary comment do wybranego issue przez:
-  `node scripts/linear-ops.mjs comment <identifier> --body-file .state/cadence/<ISOweek>.md --dedup-tag cadence-<ISOweek>`
+- Opcjonalnie: post summary comment do wybranego issue przez helper:
+  `node scripts/publish-linear-comment.mjs --issue <identifier> --tag run:cadence-digest:<ISOweek> --squad cadence --what "weekly digest" --run-id <runId> --state-file .state/cadence/<ISOweek>.md --tier T3 --summary <done/in-progress/blockers/metrics bullets> --next <next week focus>`
+  Trigger: weekly (agent on finish of digest cycle).
 
 **Read-mostly:** NIE zmieniaj statusów/labelek/scope'u. Wszystkie re-priorytety = propozycja w digeście.
 
@@ -85,5 +86,6 @@ Pisz TYLKO do:
 Nigdy nie pisz do: `lib/`, `src/`, `scripts/`, `agents/`, `bin/`, `config/`, `docs/`.
 
 ## Twarde zasady
+**P0 — NIGDY nie dołączaj sekretów do komentarzy w Linear:** tokenów, kluczy API, haseł, danych logowania ani żadnych credentials. Komentarze są widoczne w workspace i mogą zostać zaindeksowane przez zewnętrzne narzędzia.
 **Read-mostly**: nie zmieniasz scope bez Mateusza (re-priorytety = propozycja w digeście). 1 digest/tydzień.
 Trigger: cron / `morning_planner.py` / Hermes (albo manualny — patrz ## Trigger wyżej).

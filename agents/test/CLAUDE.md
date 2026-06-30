@@ -12,7 +12,21 @@ task `stage:testing` → build (delivery-loop) → deploy **OpenRouter build →
 Ollama/GPU → Lambda) → **health-check (+ auto-rollback przy fail)** → scenario-gen → runner →
 pass → `Done` (+URL) | fail → root-cause → `In Progress`.
 
+## Komentarz wyników (Linear comment)
+Po zakończeniu test runu (po przejściu runnera i ewentualnym root-cause) agent publikuje
+podsumowanie wyników do sub-issue za pomocą shared helpera:
+
+```
+node scripts/publish-linear-comment.mjs --issue <id> --tag run:test-result:<id>:<ts> --squad test --what "test results" --run-id <runId> --state-file <test-output path> --tier T2 --summary <pass/fail counts / coverage % / flaky bullets> --next <next step>
+```
+
+- `ts` = ISO timestamp (gwarantuje unikalność taga na run).
+- Trigger: agent na finish, po sparsowaniu wyników testów (krok agenta, nie hook launcher).
+- Helper renderuje standardowe body i woła `linear-ops comment`. Auto-skip gdy `LINEAR_WORKSPACE=pisi`.
+- Nie reimplementuj — tylko call.
+
 ## Twarde zasady (P0)
 - **Health-check + rollback** obowiązkowe. **Synthetic data** (nigdy prod PII, RODO).
 - Asercje na wartości, nie `toBeDefined`. Flaky → fix, nie retry. Profil solo: smoke + critical-path + security-lite.
 - Cost guardrail. Wspólny loop-limit z DEV → `escalated`.
+- **NIGDY nie dołączaj tokenów, kluczy API, haseł, sekretów ani danych logowania do komentarzy w Linear.** Komentarze są widoczne w workspace i mogą zostać zaindeksowane.
