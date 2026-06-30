@@ -16,12 +16,14 @@ planning/briefs/*
 agents/*/projects/
 agents/*/sessions/
 agents/*/logs/
+agents/*/paste-cache/
 agents/*/.credentials.json
 agents/*/mcp-needs-auth-cache.json
 agents/*/*.local.json
 agents/*/.claude.json
 agents/*/.last-cleanup
 agents/*/backups/
+agents/*/file-history/
 agents/*/shell-snapshots/
 agents/*/tasks/
 agents/*/cache/
