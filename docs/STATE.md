@@ -174,6 +174,40 @@
 
 **KNOWN dry-run limitation.** Dry-run launchers use `claude -p --permission-mode default`; in non-interactive -p mode some Bash(node) calls are HITL-gated (no one to approve) -> agents adapt (Read fixture directly, delegate to subagents). Does NOT affect live runs (bin/<squad>.bat is interactive; Mateusz approves inline). An attempt to switch dry-run to --permission-mode bypassPermissions was BLOCKED by the safety classifier (correctly — bypass is unauthorized); dry-run stays default mode.
 
+## F4 — pilot E2E LIVE (2026-06-30): PLAN → DEV → REVIEW → CADENCE
+
+**Pierwszy pełny pilot end-to-end w real mode (nie dry-run) na gałęzi `feat/phase-a-offline-foundation`.** Pipeline przeszedł całościowo; CADENCE retro odkrył realne red flagi systemowe. Wszystkie 4 squady interaktywne (REPL, Mateusz aprobuje inline); CLAUDE.md auto-ładowane przez `CLAUDE_CONFIG_DIR=agents/<squad>`; launchery NIE auto-startują — wymagają kickoffu w REPL (patrz tabela prompty poniżej).
+
+**Przepływ:**
+- **PLAN** (`bin\plan.bat`, kickoff: "Przeczytaj planning/inbox/dummy-ui.md i wykonaj pełną pętlę PLAN") → GATE 1 (discovery ✅) → spec + ADR-0005 → spec-review → decompose → GATE 2 (✅) → push → **epic FEN-27 "Dummy UI — deployability proof" + 6 subtasków FEN-28..33** (Backlog, `ai:planned`+`slice:*`+`type:*`, AC Given/When/Then + DoD w opisie, relacje `blockedBy`: s3,s4→s1; s5→s2,s3,s4; s6→s5). Artefakty: `planning/briefs/{discovery,spec,plan}-dummy-ui.*` (gitignored), `docs/adr/0005-dummy-ui-deploy.md` (commit pending).
+- **DEV** (`bin\dev.bat`, kickoff: "Wykonaj pełną pętlę DEV dla FEN-28 — zacznij od start") → pick FEN-28 (s1, Backlog+dor-ok) → transition In Progress + `ai:coded` → `dev-branch.mjs start` (branch `fen-28-scaffold-dummy-ui`, base=feat tip — defekt #1 naprawiony zadziałał) → implementer: `apps/dummy-ui/` 7 plików (server.js zero-dep, Dockerfile node:22-alpine, compose, .dockerignore, .gitattributes LF, .env.example, README stub) → self-verify live (docker build/up, curl /health `/`/404, LF, SIGTERM graceful) → hand-off comment `dev-handoff-FEN-28` + transition In Review. **Commit `2df3919` na `fen-28`** (po interwencji — defekt #3).
+- **REVIEW** (`bin\review.bat`, kickoff: "Wykonaj pełną pętlę REVIEW — zacznij od pick In Review task") → pick FEN-28 (`coded`) → diff `fen-28...feat` (7 plików, +100) → 3 passes równoległe (first-pass∥security∥deep) → merge → Conventional Comments do `.state/reviews/FEN-28-round1.md` → werdykt **CLEAN** (AC1-4 + każde DoD pass, zero blokujących `issue:`) → `reviewed` (zastąpił `coded`) + `dod-ok` + `stage:testing`, status In Review (hand to TEST, bez transition). Nieblokujące: `suggestion:` USER node, `suggestion:` log-injection CRLF, `nitpick:` route matching.
+- **CADENCE** (`bin\cadence.bat`, kickoff: "START IMMEDIATELY — wykonaj pełną pętlę CADENCE — zacznij od collector") → collector (real mode, 6 issues: 1 In Review, 5 Backlog/Epic, 0 throughput, 0 blockerzy) → retro (3 red flagi + 3 action items + Now/Next/Later) → digest `.state/cadence/2026-W27.md` (109 linii, gitignored). Read-mostly — 0 zmian w Linear. Digest push do FEN-27 (comment `cadence-2026-W27`).
+
+**Defekty pilota (6):**
+- **#1 `scripts/dev-branch.mjs` hardcoded base `main`** → squad na branch z `main` traci F0–F3 scripts (linear-*.mjs znikają) → hand-off pada. **NAPRAWIONE (commit pending):** base = aktualny HEAD (`git rev-parse HEAD`) + opcjonalny `--base <ref>` (walidacja `git rev-parse --verify`); 4 hardcoded `main` zastąpione; 22/22 tests.
+- **#2 `scripts/linear-push.mjs` `dor-ok` tylko w dry-run path (linia 731)**, live path (linia 818) pominięty → pushed subtaski bez `dor-ok` → DEV "No Ready tasks". **NAPRAWIONE (commit pending):** `dor-ok` dodane do live label-list (subtask only, parent nietknięty); flat-label resolve OK; 24/24 tests. (Błąd weryfikacji orkiestratora — spot-check testował helper/dry-run, nie live path.)
+- **#3 DEV nie commituje implementacji na branch w hand-off** (interpretacja "no push" → "no commit") → REVIEW bez diff. **Follow-up:** naprawa `agents/dev/CLAUDE.md` — jasne "commit on branch before hand-off comment + transition".
+- **#4 claude zapisuje `theme:dark` + reformatuje squad `settings.json`** (runtime noise brudzi working tree). **Follow-up:** .gitignore lub config claude (theme poza squad config).
+- **#5 `agents/<squad>/file-history/`, `paste-cache/` NIE gitignored** (claude runtime). **Follow-up:** rozszerzyć `.gitignore`.
+- **#6 `type:docs/test/chore` labels nie istnieją w workspace** → push skipuje (tylko `type:feature` istnieje). **Minor:** dodać labels w Linear lub auto-create w push.
+
+**CADENCE retro — red flagi + action items (do decyzji Mateusza):**
+- 🔴 A1 (WYSOKI, do pt): zdefiniuj merge-gate + zamknij FEN-28 (ma pełen dor-ok/dod-ok/reviewed/stage:testing, a wisi w In Review — nikt nie klika merge & Done).
+- 🟡 A2 (WYSOKI, do pt): start FEN-30 zaraz po FEN-28 (flow gap = 0 In Progress).
+- 🟡 A3 (ŚREDNI, W27–W28): dodaj estimate + assignee do FEN-30..33 (Backlog niegotowy do wzięcia).
+- 🟡 Single-epic concentration: 100% pracy pod FEN-27.
+
+**Launchery — prompty do REPL (interaktywne, NIE auto-startują):**
+| Launcher | Kickoff w REPL |
+|---|---|
+| `bin\plan.bat` | `Przeczytaj planning/inbox/<plik>.md i wykonaj pełną pętlę PLAN zgodnie z CLAUDE.md` |
+| `bin\dev.bat` | `Wykonaj pełną pętlę DEV zgodnie z CLAUDE.md — zacznij od resume check i pick` (lub `dla FEN-XX — pomiń pick, zacznij od start`) |
+| `bin\review.bat` | `Wykonaj pełną pętlę REVIEW zgodnie z CLAUDE.md — zacznij od pick In Review task` |
+| `bin\cadence.bat` | `START IMMEDIATELY — wykonaj pełną pętlę CADENCE zgodnie z CLAUDE.md, zacznij od collector` |
+
+**Git po pilocie:** `feat/phase-a-offline-foundation` — 2 batche commitów pending (naprawy scripts #1#2 + ADR-0005). Branch `fen-28-scaffold-dummy-ui` (DEV commit `2df3919`, apps/dummy-ui) zostaje osobno. `planning/`, `.state/`, `scripts/_test_*.mjs` gitignored.
+
 ### Blokady (czeka na Mateusza)
 - Faza D T-D4 / Faza G: **GCP VM** (nazwa/projekt/zone).
 - Odblokowane: OPENROUTER_API_KEY ✅, LINEAR_API_KEY ✅, team FEN + projekt „Linear Agents" ✅ (Faza C gotowa do integracji z Fazą D).
