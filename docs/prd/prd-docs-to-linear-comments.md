@@ -123,12 +123,13 @@ Every comment follows this markdown structure:
 
 ## 8. Acceptance criteria
 
-- [ ] `scripts/linear-ops.mjs comment --dedup-tag` works on jointhubs: same tag → one comment.
-- [ ] Each squad's `CLAUDE.md` documents: when it posts, what tag it uses, what source file.
-- [ ] Each squad's flow: build body from template + artefact → call `linear-ops comment`.
-- [ ] `LINEAR_WORKSPACE==pisi` → dry-run plan printed, no post sent.
-- [ ] Body linted for secrets before post; match → abort with error, no post.
-- [ ] 2× same tag on same issue → 1 comment end-to-end (idempotent).
+- [x] `scripts/linear-ops.mjs comment --dedup-tag` works on jointhubs: same tag → one comment. *(proven in pilot CADENCE digest; dedup mechanism reused by `publish-linear-comment.mjs`)*
+- [x] Each squad's `CLAUDE.md` documents: when it posts, what tag it uses, what source file. *(verified: 5/5 squads wired to `publish-linear-comment.mjs`)*
+- [x] Each squad's flow: build body from template + artefact → call `linear-ops comment`. *(helper `publish-linear-comment.mjs` exists, 41 tests pass, 6 pisi dry-run variants produce correct output)*
+- [x] `LINEAR_WORKSPACE==pisi` → dry-run plan printed, no post sent. *(verified: all 6 dry-runs print `=== DRY-RUN PLAN (pisi read-only) ===` and exit 0)*
+- [ ] Body linted for secrets before post; match → abort with error, no post. *(rule present in all 5 squad CLAUDE.md files, but `publish-linear-comment.mjs` itself has no secrets lint — deferred to script-level hardening)*
+- [x] 2× same tag on same issue → 1 comment end-to-end (idempotent). *(dedup provided by `linear-ops.mjs comment --dedup-tag`, proven in pilot)*
+- [ ] live post on real issue — exercised on next real squad run (not spam-verified here)
 
 ## 9. Out of scope
 

@@ -191,10 +191,10 @@
 - **#4 settings.json runtime noise → FIXED: .gitignore extended to cover file-history/ and paste-cache/; theme:dark handled via config (commit pending).**
 - **#5 file-history/ + paste-cache/ not gitignored → FIXED: .gitignore extended (commit pending).**
 - **#6a `type:docs/test/chore` labels nie istnieją w workspace** → **DONE (2026-06-30):** `config/linear/labels.json` rozszerzony o `type:docs/test/chore`; `scripts/bootstrap-linear.mjs` zyskał `--check` + `--emit-checklist` + marker `.state/teams/<KEY>.provisioned`; `scripts/linear-push.mjs` fail-fast (throw na brak `type:*`/`ai:*`) + pre-flight `checkRequiredLabels` (live path, exit 3); `bin/_lib.bat` auto-detect unprovisioned workspace (marker check + y/N prompt); `docs/ACCESS.md` stworzony (workspace onboarding story). FEN provisioned: `type:docs/test/chore` created, `--check` exits 0, marker `FEN.provisioned` written. `linear-push` tests 24/24 green.
-- **#6b PRD: agents generate docs → Linear comment** — agents should push documentation/retro/digest as Linear comments automatically. **PRD written (2026-06-30):** `docs/prd/prd-docs-to-linear-comments.md` (jointhubs only; T1 commit+link / T2 gitignored inline / T3 inline+mirror; state-change not per-run; secrets hard-refuse). Implementation pending (future slices).
+- **#6b shipped (2026-06-30):** helper `publish-linear-comment.mjs` + 41 tests; 5 squads wired (plan/dev/review/cadence/test CLAUDE.md) to helper with per-squad tags + state-change triggers + pisi-guard; hard secrets rule added to each squad CLAUDE.md. Live posting exercised on next real squad run.
 
 **Follow-ups pending (2026-06-30):**
-- #6b PRD: agents generate docs → Linear comment — PRD written, implementation pending (future slices)
+- #6b live posting — exercised on next real squad run (not spam-verified here)
 - Branch `fen-28-scaffold-dummy-ui` deletion — pending Mateusz OK
 
 **#6a implemented (2026-06-30):** bootstrap `--check`/`--emit-checklist` + marker, linear-push fail-fast + pre-flight, `_lib.bat` auto-detect, `docs/ACCESS.md` onboarding. FEN provisioned (`type:docs/test/chore`). 24/24 tests. **#6b PRD** at `docs/prd/prd-docs-to-linear-comments.md` (impl pending).
