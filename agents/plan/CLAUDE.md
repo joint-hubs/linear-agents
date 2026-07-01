@@ -46,6 +46,10 @@ Trigger: env `PLAN_DRY_RUN=1` OR when the kickoff prompt explicitly says "dry-ru
 
 The decomposer writes this to `planning/briefs/.draft.<parent.externalId>.json` (one file) using the Write tool, then the lead stops.
 
+```bash
+if [ -n "$LA_RUN_ID" ]; then node "$LA_ROOT/scripts/run-manifest.mjs" tag "$LA_RUN_ID" "$externalId"; fi
+```
+
 **Normal mode** (PLAN_DRY_RUN unset and kickoff says nothing about dry-run): UNCHANGED — full workflow with HITL gates + real push.
 
 ## Linear comment flows (shared helper)

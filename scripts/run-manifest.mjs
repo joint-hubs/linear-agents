@@ -79,6 +79,8 @@ function cmdStart(runId, squad, sourcePath) {
     squad,
     source: sourcePath && sourcePath.length > 0 ? sourcePath : null,
     brief: null,
+    taskId: process.env.LA_TASK_ID || null,
+    taskIdAuto: null,
     startedAt: new Date().toISOString(),
     endedAt: null,
     cwd: process.cwd(),
@@ -91,6 +93,68 @@ function cmdStart(runId, squad, sourcePath) {
   ensureRunsDir();
   const filePath = join(RUNS_DIR, `${runId}.json`);
   atomicWriteJSON(filePath, manifest);
+}
+
+function cmdTag(runId, taskId) {
+  if (!runId || !taskId) {
+    console.error("Usage: node scripts/run-manifest.mjs tag <runId> <taskId>");
+    process.exit(1);
+  }
+
+  const filePath = join(RUNS_DIR, `${runId}.json`);
+  if (!existsSync(filePath)) {
+    process.exit(0); // idempotent, non-fatal
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(filePath, "utf8"));
+  } catch {
+    process.exit(0);
+  }
+
+  const normalized = normalizeTaskId(taskId);
+
+  if (manifest.taskId === null) {
+    manifest.taskIdAuto = normalized;
+  }
+  // else: explicit env tag wins — leave taskIdAuto unchanged
+
+  atomicWriteJSON(filePath, manifest);
+}
+
+function cmdSetTask(runId, taskId) {
+  if (!runId || !taskId) {
+    console.error("Usage: node scripts/run-manifest.mjs set-task <runId> <taskId>");
+    process.exit(1);
+  }
+
+  const filePath = join(RUNS_DIR, `${runId}.json`);
+  if (!existsSync(filePath)) {
+    console.error(`set-task: manifest not found: ${runId}`);
+    process.exit(0);
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(filePath, "utf8"));
+  } catch {
+    console.error(`set-task: manifest not found: ${runId}`);
+    process.exit(0);
+  }
+
+  manifest.taskId = normalizeTaskId(taskId);
+  atomicWriteJSON(filePath, manifest);
+}
+
+/** Normalize a task id: uppercase if it matches /^[A-Za-z]+-\d+$/, else warn on stderr. */
+function normalizeTaskId(taskId) {
+  const trimmed = taskId.trim();
+  if (/^[A-Za-z]+-\d+$/.test(trimmed)) {
+    return trimmed.toUpperCase();
+  }
+  console.error(`tag: invalid task id format "${taskId}", storing as-is`);
+  return trimmed;
 }
 
 async function cmdEnd(runId, exitCodeStr) {
@@ -253,11 +317,19 @@ const command = process.argv[2];
     case "end":
       await cmdEnd(process.argv[3], process.argv[4]);
       break;
+    case "tag":
+      cmdTag(process.argv[3], process.argv[4]);
+      break;
+    case "set-task":
+      cmdSetTask(process.argv[3], process.argv[4]);
+      break;
     default:
       console.error("Usage:");
       console.error("  node scripts/run-manifest.mjs gen-id <squad>");
       console.error("  node scripts/run-manifest.mjs start <runId> <squad> [sourcePath]");
       console.error("  node scripts/run-manifest.mjs end <runId> [exitCode]");
+      console.error("  node scripts/run-manifest.mjs tag <runId> <taskId>");
+      console.error("  node scripts/run-manifest.mjs set-task <runId> <taskId>");
       process.exit(1);
   }
 })();

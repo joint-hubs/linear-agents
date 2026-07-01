@@ -40,6 +40,10 @@ reuse them in all subsequent linear-ops and dev-branch calls. In linear-ops comm
 passing the `<identifier>` (the `FEN-30` form) over the raw UUID `<id>` — both are accepted,
 but the identifier is more readable in logs and dry-run output.
 
+```bash
+if [ -n "$LA_RUN_ID" ]; then node "$LA_ROOT/scripts/run-manifest.mjs" tag "$LA_RUN_ID" "$identifier"; fi
+```
+
 > **Pilot note:** a `dor-ok` label may be added manually to seed a pilot task.
 
 ### 2. Start

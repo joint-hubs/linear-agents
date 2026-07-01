@@ -87,7 +87,7 @@ function buildSummary(runs) {
     }
   }
 
-  return { totals, bySquad, byModel, byDay };
+  return { totals, bySquad, byModel, byDay, byTask: ledger.aggregateByTask(runs) };
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +152,14 @@ const server = createServer(async (req, res) => {
       const runs = await ledger.scanRuns();
       const summary = buildSummary(runs);
       json(res, 200, summary);
+      log(method, path, 200);
+      return;
+    }
+
+    // GET /api/cost-per-task
+    if (path === '/api/cost-per-task') {
+      const data = await ledger.aggregateByTask(await ledger.scanRuns());
+      json(res, 200, data);
       log(method, path, 200);
       return;
     }

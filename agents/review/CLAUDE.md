@@ -24,6 +24,11 @@ Write tool is ONLY for `.state/reviews/<identifier>-round<N>.md` and temporary b
 node $LA_ROOT/scripts/linear-query.mjs issues --status "In Review" --first 20
 ```
 Prefer one with `ai:coded` label (DEV just handed off). Capture its `identifier` (e.g. FEN-30) + `id` (UUID). Both are accepted by linear-query/linear-ops/review-round, but `<identifier>` is preferred in command examples below.
+
+```bash
+if [ -n "$LA_RUN_ID" ]; then node "$LA_ROOT/scripts/run-manifest.mjs" tag "$LA_RUN_ID" "$identifier"; fi
+```
+
 If empty → **"No In Review tasks — nothing to review. Exiting."** Stop cleanly.
 
 ### 2. Load context

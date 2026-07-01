@@ -9,6 +9,8 @@
 //   scanRuns()                -> array of aggregateRun results
 //   liveRuns(now)             -> scanRuns() filtered to active runs
 //   listTranscriptDir()       -> resolved project transcript directory
+//   inferTaskIdFromBranch(branch) -> "FEN-98" | null
+//   aggregateByTask(runs)     -> { [taskId]: { runs, costUSD, ... } }
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join, dirname, basename, extname, resolve } from "node:path";
@@ -99,6 +101,23 @@ export function cwdToHashName(cwd) {
   // Match the claude CLI's hash: replace `:` with `-` first, then `\` with `-`.
   // E.g. C:\Users\... → C-\Users\... → C--Users-...
   return normalizePathForHash(cwd).replace(/:/g, "-").replace(/\\/g, "-");
+}
+
+/**
+ * Infer a Linear-style task ID from a git branch name.
+ *
+ * Matches patterns like `fen-98-...` or `feat/pisi-98-...` and returns
+ * normalized IDs like `FEN-98` or `PISI-98`. Returns null for branches
+ * that don't match (e.g. `feat/phase-a-offline-foundation`).
+ *
+ * @param {string|null|undefined} branch
+ * @returns {string|null}
+ */
+export function inferTaskIdFromBranch(branch) {
+  if (!branch || typeof branch !== "string") return null;
+  const m = branch.match(/(?:^|\/)(fen|pisi)-(\d+)/i);
+  if (m) return `${m[1].toUpperCase()}-${m[2]}`;
+  return null;
 }
 
 export function listTranscriptDir() {
@@ -336,6 +355,10 @@ export function aggregateRun(manifest) {
     endedAt: manifest.endedAt || null,
     status: manifest.endedAt ? "completed" : "running",
     ambiguous: false,
+    taskId: manifest.taskId || manifest.taskIdAuto || inferTaskIdFromBranch(manifest.gitBranch) || null,
+    taskIdExplicit: manifest.taskId || null,
+    taskIdAuto: manifest.taskIdAuto || null,
+    taskIdInferred: inferTaskIdFromBranch(manifest.gitBranch) || null,
     totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 },
     byModel: {},
     byAgent: {},
@@ -475,4 +498,83 @@ export async function liveRuns(now) {
     const ended = new Date(r.endedAt).getTime();
     return ended >= cutoff;
   });
+}
+
+/**
+ * Aggregate an array of aggregateRun results by task ID.
+ *
+ * Groups runs by `run.taskId` (or `"__untagged__"` when null), summing
+ * token/cost totals and tracking squad-level breakdowns. Sorted by costUSD
+ * descending, with `__untagged__` last.
+ *
+ * @param {Array<object>} runs  Array of aggregateRun results (from scanRuns())
+ * @returns {object}  Keyed by taskId, each value:
+ *   { runs: number, costUSD: number, inputTokens: number, outputTokens: number,
+ *     cacheReadTokens: number, cacheCreationInputTokens: number,
+ *     firstStartedAt: string|null, lastEndedAt: string|null,
+ *     squads: { [squad]: { runs: number, costUSD: number } } }
+ */
+export function aggregateByTask(runs) {
+  const buckets = {};
+
+  for (const run of runs) {
+    const key = run.taskId || "__untagged__";
+    if (!buckets[key]) {
+      buckets[key] = {
+        runs: 0,
+        costUSD: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationInputTokens: 0,
+        firstStartedAt: null,
+        lastEndedAt: null,
+        squads: {},
+      };
+    }
+
+    const b = buckets[key];
+    const t = run.totals || {};
+
+    b.runs += 1;
+    b.costUSD += t.costUSD || 0;
+    b.inputTokens += t.inputTokens || 0;
+    b.outputTokens += t.outputTokens || 0;
+    b.cacheReadTokens += t.cacheReadTokens || 0;
+    b.cacheCreationInputTokens += t.cacheCreationInputTokens || 0;
+
+    // firstStartedAt: min of existing and run.startedAt (null-safe)
+    if (run.startedAt != null) {
+      if (b.firstStartedAt == null || run.startedAt < b.firstStartedAt) {
+        b.firstStartedAt = run.startedAt;
+      }
+    }
+
+    // lastEndedAt: if any run.endedAt is null, bucket stays null (running)
+    if (run.endedAt == null) {
+      b.lastEndedAt = null;
+    } else if (b.lastEndedAt == null || run.endedAt > b.lastEndedAt) {
+      b.lastEndedAt = run.endedAt;
+    }
+
+    // Squad breakdown
+    const squadKey = run.squad || "unknown";
+    if (!b.squads[squadKey]) {
+      b.squads[squadKey] = { runs: 0, costUSD: 0 };
+    }
+    b.squads[squadKey].runs += 1;
+    b.squads[squadKey].costUSD += t.costUSD || 0;
+  }
+
+  // Sort: non-untagged by costUSD desc, then __untagged__ last
+  const entries = Object.entries(buckets);
+  const untagged = entries.filter(([k]) => k === "__untagged__");
+  const tagged = entries.filter(([k]) => k !== "__untagged__");
+  tagged.sort((a, b) => b[1].costUSD - a[1].costUSD);
+
+  const ordered = {};
+  for (const [k, v] of tagged) ordered[k] = v;
+  for (const [k, v] of untagged) ordered[k] = v;
+
+  return ordered;
 }
