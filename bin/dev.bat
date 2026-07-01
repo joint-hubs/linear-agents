@@ -14,5 +14,5 @@ echo [dev] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [dev] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL%
 claude %*
 set "EXIT_CODE=%errorlevel%"
-if defined RUN_ID node scripts\run-manifest.mjs end "%RUN_ID%" %EXIT_CODE%
+if defined RUN_ID node "%ROOT%\scripts\run-manifest.mjs" end "%RUN_ID%" %EXIT_CODE%
 endlocal

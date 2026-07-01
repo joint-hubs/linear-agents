@@ -24,5 +24,5 @@ echo [plan] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL%
 claude %*
 set "EXIT_CODE=%errorlevel%"
 if defined NATIVE if %EXIT_CODE% neq 0 echo Native (Anthropic subscription) run failed. Re-run with OpenRouter: bin\plan.bat %*
-if defined RUN_ID node scripts\run-manifest.mjs end "%RUN_ID%" %EXIT_CODE%
+if defined RUN_ID node "%ROOT%\scripts\run-manifest.mjs" end "%RUN_ID%" %EXIT_CODE%
 endlocal

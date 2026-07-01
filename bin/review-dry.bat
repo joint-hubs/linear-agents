@@ -24,9 +24,9 @@ set "KICKOFF=DRY-RUN mode (REVIEW_DRY_RUN=1). Read fixture from .state\mock\revi
 claude -p "%KICKOFF%" --permission-mode default --max-turns 40
 
 echo [review-dry] Verifying no drift...
-node scripts/check.mjs
+node "%ROOT%\scripts\check.mjs"
 set "EXIT_CODE=%errorlevel%"
-if defined RUN_ID node scripts\run-manifest.mjs end "%RUN_ID%" %EXIT_CODE%
+if defined RUN_ID node "%ROOT%\scripts\run-manifest.mjs" end "%RUN_ID%" %EXIT_CODE%
 echo REVIEW-DRY-RUN complete
 endlocal
 exit /b 0

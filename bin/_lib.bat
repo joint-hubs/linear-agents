@@ -5,6 +5,7 @@ REM Loads .env, validates keys, sets common provider env (OpenRouter for ALL mod
 
 REM repo root (absolute)
 pushd "%~dp0.." & set "ROOT=%CD%" & popd
+set "LA_ROOT=%ROOT%"
 
 REM load .env (eol=# skips comments, blank lines ignored)
 if exist "%ROOT%\.env" for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%ROOT%\.env") do set "%%A=%%B"
@@ -13,11 +14,11 @@ REM --- New workspace provisioning check ---
 if defined LINEAR_TEAM_KEY (
     if not exist "%ROOT%\.state\teams\%LINEAR_TEAM_KEY%.provisioned" (
         echo [INFO] Team key %LINEAR_TEAM_KEY% has no provisioning marker. Checking labels...
-        node scripts\bootstrap-linear.mjs --check --team-key %LINEAR_TEAM_KEY%
+        node "%ROOT%\scripts\bootstrap-linear.mjs" --check --team-key %LINEAR_TEAM_KEY%
         if errorlevel 1 (
             set /p PROVISION=Provision labels/states for team %LINEAR_TEAM_KEY%? (y/N):
             if /i "!PROVISION!"=="y" (
-                node scripts\bootstrap-linear.mjs
+                node "%ROOT%\scripts\bootstrap-linear.mjs"
             ) else (
                 echo [WARN] Skipping provisioning. linear-push may fail on missing labels.
             )
@@ -54,6 +55,6 @@ REM --- Run manifest (telemetry) ---
 REM SQUAD_SLUG and SOURCE_PATH are set by each launcher BEFORE calling _lib.bat.
 if not defined SQUAD_SLUG set "SQUAD_SLUG=unknown"
 if not defined SOURCE_PATH set "SOURCE_PATH="
-for /f "delims=" %%i in ('node scripts\run-manifest.mjs gen-id %SQUAD_SLUG%') do set "RUN_ID=%%i"
-node scripts\run-manifest.mjs start "%RUN_ID%" %SQUAD_SLUG% "%SOURCE_PATH%"
+for /f "delims=" %%i in ('node "%ROOT%\scripts\run-manifest.mjs" gen-id %SQUAD_SLUG%') do set "RUN_ID=%%i"
+node "%ROOT%\scripts\run-manifest.mjs" start "%RUN_ID%" %SQUAD_SLUG% "%SOURCE_PATH%"
 exit /b 0

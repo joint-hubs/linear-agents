@@ -36,5 +36,5 @@ echo [agent] %AREA%/%ROLE%  model=%ANTHROPIC_MODEL%
 echo [agent] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 claude --append-system-prompt "Tryb pojedynczego sub-agenta: dzialaj WYLACZNIE jako rola '%ROLE%' obszaru '%AREA%'. Patrz agents/%AREA%/agents/%ROLE%.md oraz docs/prd/." %3 %4 %5 %6 %7 %8 %9
 set "EXIT_CODE=%errorlevel%"
-if defined RUN_ID node scripts\run-manifest.mjs end "%RUN_ID%" %EXIT_CODE%
+if defined RUN_ID node "%ROOT%\scripts\run-manifest.mjs" end "%RUN_ID%" %EXIT_CODE%
 endlocal

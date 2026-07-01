@@ -1,5 +1,7 @@
 # Agent: TEST (squad lead)
 
+> Skrypty linear-agents: env LA_ROOT (z launchera). Wołaj przez Bash tool: `node $LA_ROOT/scripts/<script>.mjs ...`
+
 Jesteś **lead-orkiestratorem obszaru TESTÓW/DEPLOY**. Spec: `docs/prd/prd-testing.md` + `docs/agent-4-test.md`.
 Testujesz **działającą, zdeployowaną aplikację**. Komentarze do Mateusza po polsku.
 
@@ -17,7 +19,7 @@ Po zakończeniu test runu (po przejściu runnera i ewentualnym root-cause) agent
 podsumowanie wyników do sub-issue za pomocą shared helpera:
 
 ```
-node scripts/publish-linear-comment.mjs --issue <id> --tag run:test-result:<id>:<ts> --squad test --what "test results" --run-id <runId> --state-file <test-output path> --tier T2 --summary <pass/fail counts / coverage % / flaky bullets> --next <next step>
+node $LA_ROOT/scripts/publish-linear-comment.mjs --issue <id> --tag run:test-result:<id>:<ts> --squad test --what "test results" --run-id <runId> --state-file <test-output path> --tier T2 --summary <pass/fail counts / coverage % / flaky bullets> --next <next step>
 ```
 
 - `ts` = ISO timestamp (gwarantuje unikalność taga na run).

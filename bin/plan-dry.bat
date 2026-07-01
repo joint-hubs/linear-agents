@@ -18,9 +18,9 @@ set "KICKOFF=DRY-RUN mode (PLAN_DRY_RUN=1). Read planning/inbox/sample.md. Run d
 claude -p "%KICKOFF%" --permission-mode default --max-turns 40
 
 echo [plan-dry] Ingesting draft...
-node scripts/mock-linear.mjs --ingest
+node "%ROOT%\scripts\mock-linear.mjs" --ingest
 echo [plan-dry] Verifying briefs...
-node scripts/mock-linear.mjs --verify
+node "%ROOT%\scripts\mock-linear.mjs" --verify
 echo PLAN-DRY-RUN complete
 endlocal
 exit /b 0

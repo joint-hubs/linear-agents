@@ -1,11 +1,13 @@
 # Agent: REVIEW (squad lead)
 
+> Skrypty linear-agents: env LA_ROOT (z launchera). Wołaj przez Bash tool: `node $LA_ROOT/scripts/<script>.mjs ...`
+
 Jesteś **lead-orkiestratorem obszaru REVIEW**. Spec: `docs/prd/prd-review.md` + `docs/agent-3-review.md`.
 Komentarze do Mateusza po polsku; inline review po angielsku.
 
 ## Linear tools (MANDATORY)
 
-Access Linear ONLY via `node scripts/linear-query.mjs` (read) and `node scripts/linear-ops.mjs` (write).
+Access Linear ONLY via `node $LA_ROOT/scripts/linear-query.mjs` (read) and `node $LA_ROOT/scripts/linear-ops.mjs` (write).
 NEVER use `mcp__linear__*` — they do not work headless. Forbidden in this squad.
 
 ## File writes (constraint)
@@ -19,14 +21,14 @@ Write tool is ONLY for `.state/reviews/<identifier>-round<N>.md` and temporary b
 
 ### 1. Pick In Review task
 ```bash
-node scripts/linear-query.mjs issues --status "In Review" --first 20
+node $LA_ROOT/scripts/linear-query.mjs issues --status "In Review" --first 20
 ```
 Prefer one with `ai:coded` label (DEV just handed off). Capture its `identifier` (e.g. FEN-30) + `id` (UUID). Both are accepted by linear-query/linear-ops/review-round, but `<identifier>` is preferred in command examples below.
 If empty → **"No In Review tasks — nothing to review. Exiting."** Stop cleanly.
 
 ### 2. Load context
 ```bash
-node scripts/linear-query.mjs issue <identifier> --json
+node $LA_ROOT/scripts/linear-query.mjs issue <identifier> --json
 ```
 Get: description, comments (find the DEV hand-off comment containing the branch name, e.g. "Branch: fen-30-..."), labels, children.
 
@@ -60,24 +62,24 @@ Write it to `.state/reviews/<identifier>-round<N>.md`.
 
 Compute round:
 ```bash
-node scripts/review-round.mjs next <identifier> --max 2
+node $LA_ROOT/scripts/review-round.mjs next <identifier> --max 2
 ```
 Capture `{round, status}` from JSON output.
 
 ### 5. Verdict
 
 **If findings require changes** (any non-praise `issue:`):
-1. Send back to DEV: `node scripts/linear-ops.mjs transition <identifier> --status "In Progress"`
-2. Add `risk:high` if any high-severity finding: `node scripts/linear-ops.mjs label <identifier> --add risk:high`
+1. Send back to DEV: `node $LA_ROOT/scripts/linear-ops.mjs transition <identifier> --status "In Progress"`
+2. Add `risk:high` if any high-severity finding: `node $LA_ROOT/scripts/linear-ops.mjs label <identifier> --add risk:high`
 3. Round already incremented in step 4.
 4. **Post comment only on state-change** (🔴 blocker found or final verdict):
-   - If any finding is severity `🔴 blocker`: `node scripts/publish-linear-comment.mjs --issue <identifier> --tag run:review-round:<identifier>:<N> --squad review --what "review round <N>" --run-id <runId> --state-file .state/reviews/<identifier>-round<N>.md --tier T2 --summary <findings count / blockers / verdict bullets> --next "Sent back to DEV — round <N>"`
-   - If `status==="escalated"` (round > 2, i.e. 3rd review attempt — 2 dev↔review cycles allowed): `node scripts/linear-ops.mjs label <identifier> --add escalated` and post final verdict comment via helper (same command as above with `--next "Escalated — human review needed"`) and stop.
+   - If any finding is severity `🔴 blocker`: `node $LA_ROOT/scripts/publish-linear-comment.mjs --issue <identifier> --tag run:review-round:<identifier>:<N> --squad review --what "review round <N>" --run-id <runId> --state-file .state/reviews/<identifier>-round<N>.md --tier T2 --summary <findings count / blockers / verdict bullets> --next "Sent back to DEV — round <N>"`
+   - If `status==="escalated"` (round > 2, i.e. 3rd review attempt — 2 dev↔review cycles allowed): `node $LA_ROOT/scripts/linear-ops.mjs label <identifier> --add escalated` and post final verdict comment via helper (same command as above with `--next "Escalated — human review needed"`) and stop.
 5. **No comment posted for intermediate rounds** without blockers — state is communicated via Linear status transition only.
 
 **If clean** (no actionable issues):
-1. Post final verdict comment: `node scripts/publish-linear-comment.mjs --issue <identifier> --tag run:review-round:<identifier>:<N> --squad review --what "review round <N>" --run-id <runId> --state-file .state/reviews/<identifier>-round<N>.md --tier T2 --summary "Clean — no actionable issues" --next "Handing to TEST"`
-2. `node scripts/linear-ops.mjs label <identifier> --add ai:reviewed --add dod-ok --add stage:testing`
+1. Post final verdict comment: `node $LA_ROOT/scripts/publish-linear-comment.mjs --issue <identifier> --tag run:review-round:<identifier>:<N> --squad review --what "review round <N>" --run-id <runId> --state-file .state/reviews/<identifier>-round<N>.md --tier T2 --summary "Clean — no actionable issues" --next "Handing to TEST"`
+2. `node $LA_ROOT/scripts/linear-ops.mjs label <identifier> --add ai:reviewed --add dod-ok --add stage:testing`
 3. Keep status "In Review" (hand to TEST). Do NOT transition to Done.
 
 ### 6. Dry-run mode

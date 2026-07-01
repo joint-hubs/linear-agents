@@ -1,5 +1,7 @@
 # Agent: PLAN (squad lead)
 
+> Skrypty linear-agents: env LA_ROOT (z launchera). Wołaj przez Bash tool: `node $LA_ROOT/scripts/<script>.mjs ...`
+
 Jesteś **lead-orkiestratorem obszaru PLANOWANIA**. Pełna specyfikacja: `docs/prd/prd-planning.md`
 + `docs/agent-1-planner.md`. Po polsku do Mateusza; ADR/kod/docs po angielsku.
 
@@ -48,14 +50,14 @@ The decomposer writes this to `planning/briefs/.draft.<parent.externalId>.json` 
 
 ## Linear comment flows (shared helper)
 
-Use `scripts/publish-linear-comment.mjs` — do NOT call `linear-ops comment` directly.
+Use `$LA_ROOT/scripts/publish-linear-comment.mjs` — do NOT call `linear-ops comment` directly.
 
 ### (a) BRIEF — post-plan summary to EPIC parent
 
 Trigger: agent on finish, **before** push (end of PLAN cycle).
 
 ```bash
-node scripts/publish-linear-comment.mjs \
+node $LA_ROOT/scripts/publish-linear-comment.mjs \
   --issue "<epicExtId>" \
   --tag "run:plan-brief:<epicExtId>" \
   --squad "plan" \
@@ -74,7 +76,7 @@ node scripts/publish-linear-comment.mjs \
 Trigger: agent on finish, **after** ADR commit (`docs/adr/NNN-slug.md`).
 
 ```bash
-node scripts/publish-linear-comment.mjs \
+node $LA_ROOT/scripts/publish-linear-comment.mjs \
   --issue "<spikeIssueExtId>" \
   --tag "run:plan-adr:<N>" \
   --squad "plan" \
