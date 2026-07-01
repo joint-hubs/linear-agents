@@ -55,6 +55,19 @@ function loadEnv() {
 const ENDPOINT = "https://api.linear.app/graphql";
 
 /**
+ * Choose the Linear API key based on workspace.
+ * When LINEAR_WORKSPACE === "pisi", uses LINEAR_API_KEY_PISI (full-write per Mateusz 2026-07).
+ * Otherwise uses LINEAR_API_KEY (jointhubs, default).
+ * @returns {string|undefined}
+ */
+function chooseApiKey() {
+  if (process.env.LINEAR_WORKSPACE === "pisi") {
+    return process.env.LINEAR_API_KEY_PISI;
+  }
+  return process.env.LINEAR_API_KEY;
+}
+
+/**
  * Normalize a slice value to "slice:<name>" format.
  * @param {string|null|undefined} value
  * @returns {string|null} "slice:<name>" or null if falsy.
@@ -636,7 +649,7 @@ async function main() {
   }
 
   const dryRun = args.dryRun || false;
-  const KEY = process.env.LINEAR_API_KEY;
+  const KEY = chooseApiKey();
   const teamKey = (args.teamKey || process.env.LINEAR_TEAM_KEY || "").trim();
   const projectName = args.projectName || process.env.LINEAR_PROJECT_NAME || "Linear Agents";
 

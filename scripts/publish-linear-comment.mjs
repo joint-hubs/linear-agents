@@ -146,17 +146,16 @@ export function renderBody({ issue, tag, squad, what, runId, stateFile, next, ex
 // ---------------------------------------------------------------------------
 
 /**
- * If LINEAR_WORKSPACE is "pisi", print dry-run plan and return true.
- * Caller should exit 0 when this returns true.
- * @param {string} body
- * @returns {boolean}
+ * pisi workspace guard — always returns false (no skip).
+ *
+ * pisi is now full-write per Mateusz 2026-07. The LINEAR_API_KEY_PISI env var
+ * is used when LINEAR_WORKSPACE === "pisi" (see chooseApiKey in linear-client.mjs).
+ * This function is kept exported for test compatibility but never skips posting.
+ *
+ * @param {string} _body  Ignored — kept for API compatibility.
+ * @returns {boolean} Always false (never skip).
  */
-export function pisiGuard(body) {
-  if (process.env.LINEAR_WORKSPACE === "pisi") {
-    console.log("=== DRY-RUN PLAN (pisi read-only) ===");
-    console.log(body);
-    return true;
-  }
+export function pisiGuard(_body) {
   return false;
 }
 

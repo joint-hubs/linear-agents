@@ -22,7 +22,7 @@ node scripts/publish-linear-comment.mjs --issue <id> --tag run:test-result:<id>:
 
 - `ts` = ISO timestamp (gwarantuje unikalność taga na run).
 - Trigger: agent na finish, po sparsowaniu wyników testów (krok agenta, nie hook launcher).
-- Helper renderuje standardowe body i woła `linear-ops comment`. Auto-skip gdy `LINEAR_WORKSPACE=pisi`.
+- Helper renderuje standardowe body i woła `linear-ops comment`. Pisi jest teraz full-write (Mateusz 2026-07) — postuje normalnie przez `LINEAR_API_KEY_PISI`.
 - Nie reimplementuj — tylko call.
 
 ## Twarde zasady (P0)

@@ -52,15 +52,28 @@ export function loadEnv() {
 export const ENDPOINT = "https://api.linear.app/graphql";
 
 /**
+ * Choose the Linear API key based on workspace.
+ * When LINEAR_WORKSPACE === "pisi", uses LINEAR_API_KEY_PISI (full-write per Mateusz 2026-07).
+ * Otherwise uses LINEAR_API_KEY (jointhubs, default).
+ * @returns {string|undefined}
+ */
+export function chooseApiKey() {
+  if (process.env.LINEAR_WORKSPACE === "pisi") {
+    return process.env.LINEAR_API_KEY_PISI;
+  }
+  return process.env.LINEAR_API_KEY;
+}
+
+/**
  * Execute a GraphQL query/mutation against the Linear API.
- * Validates LINEAR_API_KEY before making any network call.
+ * Validates the chosen API key before making any network call.
  * @param {string} query  The GraphQL operation string.
  * @param {object} vars   Variables object (default {}).
  * @returns {object}      The `data` portion of the response.
  * @throws {Error}        If key missing, on network error, auth failure, or GraphQL errors.
  */
 export async function graphql(query, vars = {}) {
-  const key = process.env.LINEAR_API_KEY;
+  const key = chooseApiKey();
   if (!key) {
     throw new Error("LINEAR_API_KEY not set (check .env)");
   }
