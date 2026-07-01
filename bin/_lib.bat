@@ -4,7 +4,7 @@ REM Shared launcher logic. Called by each agent .bat via: call "%~dp0_lib.bat" |
 REM Loads .env, validates keys, sets common provider env (OpenRouter for ALL model ids).
 
 REM repo root (absolute)
-pushd "%~dp0.." & set "ROOT=%CD%" & popd
+pushd "%~dp0.." & set "ROOT=!CD!" & popd
 set "LA_ROOT=%ROOT%"
 
 REM load .env (eol=# skips comments, blank lines ignored)
@@ -16,7 +16,7 @@ if defined LINEAR_TEAM_KEY (
         echo [INFO] Team key %LINEAR_TEAM_KEY% has no provisioning marker. Checking labels...
         node "%ROOT%\scripts\bootstrap-linear.mjs" --check --team-key %LINEAR_TEAM_KEY%
         if errorlevel 1 (
-            set /p PROVISION=Provision labels/states for team %LINEAR_TEAM_KEY%? (y/N):
+            set /p PROVISION=Provision labels/states for team %LINEAR_TEAM_KEY%? [y/N]:
             if /i "!PROVISION!"=="y" (
                 node "%ROOT%\scripts\bootstrap-linear.mjs"
             ) else (
@@ -57,4 +57,5 @@ if not defined SQUAD_SLUG set "SQUAD_SLUG=unknown"
 if not defined SOURCE_PATH set "SOURCE_PATH="
 for /f "delims=" %%i in ('node "%ROOT%\scripts\run-manifest.mjs" gen-id %SQUAD_SLUG%') do set "RUN_ID=%%i"
 node "%ROOT%\scripts\run-manifest.mjs" start "%RUN_ID%" %SQUAD_SLUG% "%SOURCE_PATH%"
+endlocal & set "ROOT=%ROOT%" & set "LA_ROOT=%LA_ROOT%" & set "ANTHROPIC_BASE_URL=%ANTHROPIC_BASE_URL%" & set "ANTHROPIC_AUTH_TOKEN=%ANTHROPIC_AUTH_TOKEN%" & set "ANTHROPIC_API_KEY=%ANTHROPIC_API_KEY%" & set "API_TIMEOUT_MS=%API_TIMEOUT_MS%" & set "CLAUDE_CODE_SUBAGENT_MODEL=%CLAUDE_CODE_SUBAGENT_MODEL%" & set "LINEAR_API_KEY=%LINEAR_API_KEY%" & set "LINEAR_API_KEY_PISI=%LINEAR_API_KEY_PISI%" & set "LINEAR_WORKSPACE=%LINEAR_WORKSPACE%" & set "LINEAR_TEAM_KEY=%LINEAR_TEAM_KEY%" & set "OPENROUTER_API_KEY=%OPENROUTER_API_KEY%" & set "COST_BUDGET_USD_PER_TASK=%COST_BUDGET_USD_PER_TASK%"
 exit /b 0
