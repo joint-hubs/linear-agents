@@ -68,6 +68,12 @@ export const KICKOFF_TEMPLATES = {
 // Pure validation. Returns {ok,...} or {ok:false, status, error}. Never throws.
 // AC2: bad taskId or off-allowlist squad → 400, and the caller spawns nothing
 // (it only spawns after ok:true && !dryRun && target!=='vm').
+//
+// Note (D-Q1, review round 1): control-plane-plan §3.1 payload is
+// {taskId, squad, target, mode} — `mode` is intentionally NOT validated or
+// propagated here; its semantics are deferred to L2/L3 and the AC doesn't
+// mention it. Extra body fields are silently ignored, so a `mode` value never
+// reaches the spawned shell. Wire it when its meaning is specified.
 export function validateLaunch(body) {
   const taskId = String((body && body.taskId) || '').trim();
   if (!TASK_ID_RE.test(taskId)) {
@@ -103,6 +109,21 @@ export function isLocalOrigin(remoteAddress) {
   );
 }
 
+// D-S1 (review round 1, 🟠 security): the remoteAddress check alone can't tell
+// the dashboard apart from a malicious website in Mateusz's browser — both have
+// remoteAddress=127.0.0.1 because the browser runs locally. A cross-site page
+// can `fetch('http://127.0.0.1:7331/api/launch', ...)` and the bind/remoteAddress
+// checks pass, spawning a credential-bearing agent (CSRF). Browsers always send
+// an `Origin` header on POST, so when it's present we require it to be loopback
+// too. Absent Origin (curl, the server's own --smoke, server-to-server) is
+// allowed — non-browser clients can't mount a browser-CSRF vector. This is
+// defense-in-depth on the launch crown jewel (§5) before JOI-70 wires the UI.
+const ALLOWED_ORIGIN_RE = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i;
+export function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  return ALLOWED_ORIGIN_RE.test(origin);
+}
+
 // Build the wrapper .bat content. The wrapper sets LA_TASK_ID and calls the
 // squad launcher with the kickoff prompt as the initial claude argument. We
 // write a .bat file (instead of spawning `start ... <cmd>` directly from Node)
@@ -123,14 +144,24 @@ export function buildLaunchBat(squad, taskId, kickoff, rootPath) {
   ].join('\r\n') + '\r\n';
 }
 
-// Open a NEW console window running the wrapper .bat. `start cmd /k <wrapper>`
-// creates the window; cmd /k keeps it open after the launcher exits so any
-// error stays visible. The wrapper path must have no spaces (validated
-// squad/taskId + a no-space repo root), so cmd arg-splitting is clean and Node
-// doesn't re-quote anything into cmd's broken \" escaping. detached + unref so
-// the spawned window outlives the server process.
+// Open a NEW console window running the wrapper .bat. `start "" cmd /k
+// <wrapper>` creates the window — the empty quoted arg is `start`'s window
+// title (the standard batch idiom: an explicit title prevents `start` from
+// treating the first path token as a title if a future clone has spaces).
+// `cmd /k` keeps the window open after the launcher exits so any error stays
+// visible. detached + unref so the spawned window outlives the server process.
+//
+// D-N1 (review round 1) note on the path-quoting trap: the review suggested
+// quoting the path too (`start "launch" cmd /k "<path>"`), but Node's Windows
+// arg-quoting mangles an arg that contains embedded `"` chars (it triggers
+// escape mode and corrupts the command line) — verified: that form FAILS to
+// spawn (marker .bat never runs). The path is therefore left UNquoted, which
+// works because the wrapper path has NO spaces (validated squad/taskId +
+// no-space repo root + `.state`). Full spaced-path support isn't achievable
+// through Node's arg array; the no-space precondition is enforced upstream
+// (TASK_ID_RE + SQUAD_ALLOWLIST + a no-space repo root) and documented here.
 export function spawnLauncher(wrapperPath, cwd) {
-  const child = spawn('cmd.exe', ['/c', 'start', 'cmd', '/k', wrapperPath], {
+  const child = spawn('cmd.exe', ['/c', 'start', '""', 'cmd', '/k', wrapperPath], {
     cwd,
     detached: true,
     stdio: 'ignore',

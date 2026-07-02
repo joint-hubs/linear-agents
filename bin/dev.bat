@@ -1,6 +1,11 @@
 @echo off
 setlocal
 set "SQUAD_SLUG=dev"
+REM L1b contract change (JOI-69): when launched via POST /api/launch, %1 is the
+REM server-built kickoff prompt (HOW-TO §4), not a file path. It is recorded as
+REM SOURCE_PATH (provenance in the run manifest) and re-passed to claude as the
+REM initial input by `claude %*` below. A path-style arg still works when the
+REM launcher is invoked by hand. See scripts/launch.mjs buildLaunchBat.
 set "SOURCE_PATH=%~1"
 call "%~dp0_lib.bat" || exit /b 1
 REM Agent 2 - DEV. Spec: docs/agent-2-dev.md

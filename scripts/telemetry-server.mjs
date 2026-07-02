@@ -22,6 +22,7 @@ import {
   validateLaunch,
   kickoffPrompt,
   isLocalOrigin,
+  isAllowedOrigin,
   buildLaunchBat,
   spawnLauncher,
 } from './launch.mjs';
@@ -360,9 +361,21 @@ const server = createServer(async (req, res) => {
     // squad allowlist + taskId regex (AC2). dryRun returns the kickoff + wrapper
     // content without spawning (UI preview §3.3 + smoke). target:"vm" is
     // recognized but not built in L1 (blocked on VM provisioning, §4) → 501.
+    //
+    // D-S1 (review round 1, 🟠 security): the bind + remoteAddress check alone
+    // can't stop a cross-site browser CSRF (a malicious page in Mateusz's
+    // browser has remoteAddress=127.0.0.1). Browsers send `Origin` on POST, so
+    // when present we require it to be loopback — blocks cross-site spawn of a
+    // credential-bearing agent while keeping the dashboard (Vite :5173) working.
+    // Absent Origin (curl, --smoke, server-to-server) is allowed.
     if (method === 'POST' && path === '/api/launch') {
       if (!isLocalOrigin(req.socket.remoteAddress)) {
         json(res, 403, { error: 'forbidden: /api/launch is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden origin: /api/launch is same-origin loopback only' });
         log(method, path, 403);
         return;
       }
@@ -579,12 +592,16 @@ server.listen(PORT, '127.0.0.1', () => {
     ];
     // L1b: also exercise POST /api/launch validation. dryRun=true returns 200
     // WITHOUT spawning a window (so smoke is safe to run in CI / headless);
-    // the two bad-input cases assert 400 (AC2). No real agent is started.
+    // the bad-input cases assert 400 (AC2). No real agent is started.
+    // D-S1: the two origin cases assert the CSRF defense — a cross-site Origin
+    // → 403, the dashboard's loopback Origin → 200 (with dryRun, no spawn).
     const smokePosts = [
       { name: 'dryRun valid', body: { taskId: 'JOI-51', squad: 'dev', target: 'local', dryRun: true }, expect: 200 },
       { name: 'bad taskId', body: { taskId: 'evil!', squad: 'dev', target: 'local' }, expect: 400 },
       { name: 'bad squad', body: { taskId: 'JOI-51', squad: 'pwn', target: 'local' }, expect: 400 },
       { name: 'bad target', body: { taskId: 'JOI-51', squad: 'dev', target: 'mars' }, expect: 400 },
+      { name: 'cross-site origin', body: { taskId: 'JOI-51', squad: 'dev', target: 'local', dryRun: true }, origin: 'https://evil.com', expect: 403 },
+      { name: 'dashboard origin', body: { taskId: 'JOI-51', squad: 'dev', target: 'local', dryRun: true }, origin: 'http://localhost:5173', expect: 200 },
     ];
     setTimeout(async () => {
       let failed = false;
@@ -597,9 +614,11 @@ server.listen(PORT, '127.0.0.1', () => {
           if (!ok) failed = true;
         }
         for (const c of smokePosts) {
+          const headers = { 'Content-Type': 'application/json' };
+          if (c.origin) headers.Origin = c.origin;
           const res = await fetch(base + '/api/launch', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify(c.body),
           });
           const ok = res.status === c.expect;
