@@ -53,12 +53,18 @@ export const ENDPOINT = "https://api.linear.app/graphql";
 
 /**
  * Choose the Linear API key based on workspace.
- * When LINEAR_WORKSPACE === "pisi", uses LINEAR_API_KEY_PISI (full-write per Mateusz 2026-07).
- * Otherwise uses LINEAR_API_KEY (jointhubs, default).
+ * @param {string} [workspace]  Explicit workspace ("jointhubs" | "pisi").
+ *   When passed, selects the key for THAT workspace regardless of env — this
+ *   is what lets /api/linear/queue?workspace=pisi actually query pisi instead
+ *   of falling back to the LINEAR_WORKSPACE env default (JOI-68 review round 1:
+ *   the env-only path silently returned jointhubs data for ?workspace=pisi).
+ *   When omitted/undefined, falls back to LINEAR_WORKSPACE env (jointhubs by
+ *   default) — preserves the behavior linear-query.mjs / linear-ops.mjs rely on.
  * @returns {string|undefined}
  */
-export function chooseApiKey() {
-  if (process.env.LINEAR_WORKSPACE === "pisi") {
+export function chooseApiKey(workspace) {
+  const ws = workspace || process.env.LINEAR_WORKSPACE;
+  if (ws === "pisi") {
     return process.env.LINEAR_API_KEY_PISI;
   }
   return process.env.LINEAR_API_KEY;
@@ -67,15 +73,23 @@ export function chooseApiKey() {
 /**
  * Execute a GraphQL query/mutation against the Linear API.
  * Validates the chosen API key before making any network call.
- * @param {string} query  The GraphQL operation string.
- * @param {object} vars   Variables object (default {}).
- * @returns {object}      The `data` portion of the response.
- * @throws {Error}        If key missing, on network error, auth failure, or GraphQL errors.
+ * @param {string} query      The GraphQL operation string.
+ * @param {object} [vars]     Variables object (default {}).
+ * @param {string} [workspace] Optional explicit workspace ("jointhubs"|"pisi")
+ *   — selects the API key for that workspace, overriding LINEAR_WORKSPACE env.
+ *   Callers that loop over both workspaces (e.g. /api/linear/queue) pass this
+ *   so the request authenticates against the right workspace.
+ * @returns {object}          The `data` portion of the response.
+ * @throws {Error}            If key missing, on network error, auth failure, or GraphQL errors.
  */
-export async function graphql(query, vars = {}) {
-  const key = chooseApiKey();
+export async function graphql(query, vars = {}, workspace) {
+  const key = chooseApiKey(workspace);
   if (!key) {
-    throw new Error("LINEAR_API_KEY not set (check .env)");
+    throw new Error(
+      workspace
+        ? `LINEAR_API_KEY not set for workspace '${workspace}' (check .env)`
+        : "LINEAR_API_KEY not set (check .env)",
+    );
   }
 
   const res = await fetch(ENDPOINT, {

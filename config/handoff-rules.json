@@ -1,6 +1,6 @@
 [
   {
-    "comment": "needs:* → human (HOW-TO §6: any needs:answer/approval/decision/access = waiting on Mateusz, stop). Evaluated first so a blocked task always routes to the human regardless of state.",
+    "comment": "needs:* → human (HOW-TO §6: any needs:answer/approval/decision/access = waiting on Mateusz, stop). Evaluated first so a blocked task always routes to the human regardless of state. Wildcard is separator-agnostic in the matcher — matches both the colon form (needs:answer, HOW-TO §6 doc convention) and the hyphen form (needs-decision, the actual Linear label name in this workspace).",
     "when": { "labels": ["needs:*"] },
     "next": "human"
   },
@@ -10,8 +10,8 @@
     "next": "dev"
   },
   {
-    "comment": "In Review + ai:coded → review (DEV→REVIEW handoff).",
-    "when": { "state": "In Review", "labels": ["ai:coded"] },
+    "comment": "In Review + coded → review (DEV→REVIEW handoff). Linear exposes the leaf label `coded` (linear-ops.mjs accepts `ai:coded` as an add-alias, but the API returns `coded`).",
+    "when": { "state": "In Review", "labels": ["coded"] },
     "next": "review"
   },
   {

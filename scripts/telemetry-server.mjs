@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 // expressible via the team-scoped linear-query CLI, so we call graphql()
 // directly. No MCP, no new client (control-plane-plan §3.1, DoD "reuse
 // scripts/linear-query.mjs" = reuse the Linear query layer).
-import { loadEnv, graphql } from './linear-client.mjs';
+import { loadEnv, graphql, chooseApiKey } from './linear-client.mjs';
 // Pure launch logic (validation, kickoff prompt, wrapper .bat, loopback check)
 // lives in scripts/launch.mjs so it's unit-testable without the HTTP server.
 import {
@@ -206,6 +206,14 @@ const TEAM_ISSUES_QUERY = `
 // config is significant. `labels:["needs:*"]` is a wildcard matching any
 // `needs:` label, so a blocked task routes to the human regardless of state
 // (put that rule first in the config, per HOW-TO §6 "dowolny → człowiek").
+//
+// The wildcard is separator-agnostic: it matches BOTH the colon form
+// (`needs:answer`, the HOW-TO §6 doc convention) AND the hyphen form
+// (`needs-decision`, the actual label name Linear returns in this workspace).
+// Linear lets you name a label either way; the doc uses `needs:` while the
+// live workspace uses `needs-`, and the matcher must not let that discrepancy
+// silently drop blocked tasks (JOI-68 review round 1 found 6 needs-decision
+// tasks routing to null instead of human).
 function suggestedSquad(task, rules) {
   const labels = new Set(task.labels || []);
   for (const rule of rules) {
@@ -214,8 +222,13 @@ function suggestedSquad(task, rules) {
     if (w.labels && w.labels.length) {
       const ok = w.labels.every((l) => {
         if (l.endsWith(':*')) {
-          const prefix = l.slice(0, -1);
-          return [...labels].some((t) => t.startsWith(prefix));
+          // Strip ":*" → stem (e.g. "needs:*" → "needs"). Match the stem
+          // exactly or followed by either separator, so colon- and hyphen-
+          // named labels both route.
+          const stem = l.slice(0, -2);
+          return [...labels].some(
+            (t) => t === stem || t.startsWith(stem + ':') || t.startsWith(stem + '-'),
+          );
         }
         return labels.has(l);
       });
@@ -237,8 +250,11 @@ let queueCache = null; // { workspace, ts, payload }
 // returns a 200-grade degrade payload (tasks:[], error note) so the dashboard
 // stays up and --smoke passes without network.
 async function fetchLinearQueue(workspace) {
-  const apiKey =
-    workspace === 'pisi' ? process.env.LINEAR_API_KEY_PISI : process.env.LINEAR_API_KEY;
+  // Pass the workspace through to graphql() so the request authenticates
+  // against the RIGHT workspace key (?workspace=pisi → PISI key → pisi teams),
+  // not the LINEAR_WORKSPACE env default. JOI-68 review round 1: the env-only
+  // path silently returned jointhubs data for ?workspace=pisi.
+  const apiKey = chooseApiKey(workspace);
   if (!apiKey) {
     return {
       workspace,
@@ -254,12 +270,12 @@ async function fetchLinearQueue(workspace) {
     );
     const result = await Promise.race([
       (async () => {
-        const teamsData = await graphql(TEAMS_QUERY);
+        const teamsData = await graphql(TEAMS_QUERY, {}, workspace);
         const teams = teamsData?.teams?.nodes || [];
         // Fetch each team's issues in parallel — one low-complexity query each.
         const perTeam = await Promise.all(
           teams.map((t) =>
-            graphql(TEAM_ISSUES_QUERY, { teamId: t.id }).then((d) => ({
+            graphql(TEAM_ISSUES_QUERY, { teamId: t.id }, workspace).then((d) => ({
               team: t,
               nodes: d?.team?.issues?.nodes || [],
             })),
