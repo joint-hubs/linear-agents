@@ -9,6 +9,8 @@
  *   transition <id|identifier> --status <name> [--dry-run]
  *   label <id|identifier> --add <l> [--add <l> ...] --remove <l> [--remove <l> ...] [--dry-run]
  *   comment <id|identifier> (--body <text> | --body-file <path>) [--dedup-tag <tag>] [--dry-run]
+ *   comment-replace <id|identifier> --dedup-tag <tag> (--body <text> | --body-file <path>) [--dry-run]
+ *   update-description <id|identifier> (--body <text> | --body-file <path>) [--dry-run]
  *   estimate <id|identifier> --estimate <XS|S|M|L|XL> [--dry-run]
  *
  * Dependencies: Node 18+ (global fetch). No npm install required.
@@ -174,6 +176,8 @@ function printUsage() {
   console.error("  node scripts/linear-ops.mjs transition <id|identifier> --status <name> [--dry-run]");
   console.error("  node scripts/linear-ops.mjs label <id|identifier> --add <l> [--add <l> ...] --remove <l> [--remove <l> ...] [--dry-run]");
   console.error("  node scripts/linear-ops.mjs comment <id|identifier> (--body <text> | --body-file <path>) [--dedup-tag <tag>] [--dry-run]");
+  console.error("  node scripts/linear-ops.mjs comment-replace <id|identifier> --dedup-tag <tag> (--body <text> | --body-file <path>) [--dry-run]");
+  console.error("  node scripts/linear-ops.mjs update-description <id|identifier> (--body <text> | --body-file <path>) [--dry-run]");
   console.error("  node scripts/linear-ops.mjs estimate <id|identifier> --estimate <XS|S|M|L|XL> [--dry-run]");
 }
 
@@ -542,6 +546,135 @@ async function handleComment(identifier, args, dryRunCtx) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared body resolution for comment-replace / update-description
+// ---------------------------------------------------------------------------
+
+/** Resolve --body / --body-file into a string, exiting on bad usage. */
+function readBodyArg(args, cmdName) {
+  if (args.body && args.bodyFile) {
+    console.error("Error: provide --body OR --body-file, not both");
+    process.exit(2);
+  }
+  if (args.body) return args.body;
+  if (args.bodyFile) {
+    try {
+      return readFileSync(args.bodyFile, "utf8");
+    } catch (err) {
+      console.error(`Error reading --body-file "${args.bodyFile}": ${err.message}`);
+      process.exit(1);
+    }
+  }
+  console.error(`Error: --body <text> or --body-file <path> is required for ${cmdName}`);
+  process.exit(2);
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: comment-replace — update-in-place by dedup marker (create if absent)
+// ---------------------------------------------------------------------------
+
+async function handleCommentReplace(identifier, args, dryRunCtx) {
+  if (!args.dedupTag) {
+    console.error("Error: --dedup-tag <tag> is required for comment-replace");
+    process.exit(2);
+  }
+
+  const marker = `<!-- run:${args.dedupTag} -->`;
+  const body = `${marker}\n${readBodyArg(args, "comment-replace")}`;
+
+  if (dryRunCtx.dryRun) {
+    const issue = resolveIssueFromFixture(dryRunCtx.fixture, identifier);
+    console.log(`[dry-run:${dryRunCtx.squad}] ${issue.identifier}: would replace comment (tag=${args.dedupTag}):`);
+    console.log(body);
+    return;
+  }
+
+  const { issue } = await resolveIssueWithTeam(identifier);
+
+  if (args.dryRun) {
+    console.log(`[dry-run] ${issue.identifier}: would replace comment (tag=${args.dedupTag}):`);
+    console.log(body);
+    return;
+  }
+
+  const commentData = await graphql(
+    `query($id:String!){
+      issue(id:$id){ comments(first:250){ nodes{ id body createdAt } } }
+    }`,
+    { id: issue.id },
+  );
+  const comments = commentData.issue?.comments?.nodes || [];
+  if (comments.length === 250) {
+    console.error(`[comment-replace] comment list capped at 250; marker older than that may be missed`);
+  }
+
+  const existing = comments.find((c) => c.body && c.body.trimStart().startsWith(marker));
+
+  if (existing) {
+    const result = await graphql(
+      `mutation($id:String!,$input:CommentUpdateInput!){
+        commentUpdate(id:$id,input:$input){ success comment{ id } }
+      }`,
+      { id: existing.id, input: { body } },
+    );
+    if (result.commentUpdate.success) {
+      console.log(`${issue.identifier}: comment replaced (tag=${args.dedupTag}, id=${existing.id})`);
+    } else {
+      console.error(`Error: comment replace failed for ${issue.identifier}`);
+      process.exit(1);
+    }
+  } else {
+    const result = await graphql(
+      `mutation($input:CommentCreateInput!){
+        commentCreate(input:$input){ success comment{ id } }
+      }`,
+      { input: { issueId: issue.id, body } },
+    );
+    if (result.commentCreate.success) {
+      console.log(`${issue.identifier}: comment posted (new, tag=${args.dedupTag}, id=${result.commentCreate.comment.id})`);
+    } else {
+      console.error(`Error: comment creation failed for ${issue.identifier}`);
+      process.exit(1);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: update-description — replace the issue description
+// ---------------------------------------------------------------------------
+
+async function handleUpdateDescription(identifier, args, dryRunCtx) {
+  const body = readBodyArg(args, "update-description");
+
+  if (dryRunCtx.dryRun) {
+    const issue = resolveIssueFromFixture(dryRunCtx.fixture, identifier);
+    console.log(`[dry-run:${dryRunCtx.squad}] ${issue.identifier}: would update description (${body.length} chars)`);
+    return;
+  }
+
+  const { issue } = await resolveIssueWithTeam(identifier);
+
+  if (args.dryRun) {
+    console.log(`[dry-run] ${issue.identifier}: would update description (${body.length} chars):`);
+    console.log(body);
+    return;
+  }
+
+  const result = await graphql(
+    `mutation($id:String!,$input:IssueUpdateInput!){
+      issueUpdate(id:$id,input:$input){ success issue{ id identifier } }
+    }`,
+    { id: issue.id, input: { description: body } },
+  );
+
+  if (result.issueUpdate.success) {
+    console.log(`${issue.identifier}: description updated (${body.length} chars)`);
+  } else {
+    console.error(`Error: description update failed for ${issue.identifier}`);
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Subcommand: estimate
 // ---------------------------------------------------------------------------
 
@@ -631,6 +764,12 @@ async function main() {
       break;
     case "comment":
       await handleComment(identifier, args, dryRunCtx);
+      break;
+    case "comment-replace":
+      await handleCommentReplace(identifier, args, dryRunCtx);
+      break;
+    case "update-description":
+      await handleUpdateDescription(identifier, args, dryRunCtx);
       break;
     case "estimate":
       await handleEstimate(identifier, args, dryRunCtx);
