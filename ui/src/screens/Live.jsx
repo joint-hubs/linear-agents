@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { getRuns } from '../api';
+import { getRuns, getBudget } from '../api';
 import { linearUrl } from '../config';
 import {
   fmtUSD,
@@ -71,6 +71,7 @@ function ModelBars({ run }) {
 
 export default function Live() {
   const [runs, setRuns] = useState([]);
+  const [overBudgetTasks, setOverBudgetTasks] = useState([]);
   const [error, setError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [now, setNow] = useState(new Date());
@@ -79,19 +80,24 @@ export default function Live() {
   useEffect(() => {
     let alive = true;
     const tick = () => {
-      getRuns()
-        .then((data) => {
-          if (!alive) return;
-          setRuns(data);
+      // allSettled: a /api/budget failure must NOT take down the runs dashboard —
+      // the attention list simply omits over-budget entries then. (Review
+      // cross-ref JOI-66→67 pt 1: no unreachable error-banner, budget is non-fatal.)
+      Promise.allSettled([getRuns(), getBudget()]).then(([runsRes, budgetRes]) => {
+        if (!alive) return;
+        if (runsRes.status === 'fulfilled') {
+          setRuns(runsRes.value);
           setError(null);
           setLastUpdated(new Date());
           retryRef.current = 0;
-        })
-        .catch((err) => {
-          if (!alive) return;
-          setError(err.message || String(err));
+        } else {
+          setError(runsRes.reason?.message || String(runsRes.reason));
           retryRef.current += 1;
-        });
+        }
+        if (budgetRes.status === 'fulfilled') {
+          setOverBudgetTasks(budgetRes.value?.tasksOverBudget || []);
+        }
+      });
     };
     tick();
     const id = setInterval(() => {
@@ -108,7 +114,7 @@ export default function Live() {
   // Recently finished = ended runs, newest first (scanRuns is already newest-first).
   const recent = runs.filter((r) => r.endedAt).slice(0, 10);
   const today = todayTotals(runs, now);
-  const attention = attentionList(runs, now);
+  const attention = attentionList(runs, now, overBudgetTasks);
   const todayTokens = today.inputTokens + today.outputTokens;
 
   return (
@@ -243,10 +249,14 @@ export default function Live() {
                   const msg =
                     it.reason === 'stale'
                       ? `running > 2 h — stale?`
-                      : `transcript match ambiguous → verify cost`;
+                      : it.reason === 'over-budget'
+                        ? `task exceeds per-task budget`
+                        : `transcript match ambiguous → verify cost`;
+                  const badgeClass =
+                    it.reason === 'over-budget' ? 'badge badge-fail' : 'badge badge-warn';
                   return (
                     <li className="att-item" key={run.runId + ':' + it.reason}>
-                      <span className="badge badge-warn">{it.reason}</span>
+                      <span className={badgeClass}>{it.reason}</span>
                       <span className="muted">{fmtTime(run.startedAt)}</span>
                       <span>{run.squad || '—'}</span>
                       <TaskChip run={run} />

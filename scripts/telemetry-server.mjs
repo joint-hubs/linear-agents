@@ -4,6 +4,7 @@
 //   --smoke: start, print ready, auto-shutdown after 10s (for CI/manual smoke test)
 
 import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
 
 const PORT = parseInt(process.env.TELEMETRY_PORT, 10) || 7331;
 const isSmoke = process.argv.includes('--smoke');
@@ -164,6 +165,37 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // GET /api/budget (B2 — ux-design-v3 §4)
+    //   { budgetPerTaskUSD: env COST_BUDGET_USD_PER_TASK|null,
+    //     overBudget: <.state/over-budget.json>|[],
+    //     tasksOverBudget: [taskId…] derived from aggregateByTask }
+    // budgetPerTaskUSD is null when the env var is unset/empty/non-numeric → the
+    // panel degrades gracefully (no threshold, no over-budget list). __untagged__
+    // is never treated as an over-budget "task" (it has no Linear identity).
+    if (path === '/api/budget') {
+      const raw = process.env.COST_BUDGET_USD_PER_TASK;
+      const budget =
+        raw != null && raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) : null;
+      const byTask = ledger.aggregateByTask(await ledger.scanRuns());
+      const tasksOverBudget =
+        budget != null
+          ? Object.keys(byTask).filter(
+              (k) => k !== '__untagged__' && (byTask[k].costUSD || 0) > budget,
+            )
+          : [];
+      let overBudget = [];
+      try {
+        const txt = await readFile('.state/over-budget.json', 'utf8');
+        const parsed = JSON.parse(txt);
+        if (Array.isArray(parsed)) overBudget = parsed;
+      } catch {
+        // file absent / unreadable / invalid → empty (graceful)
+      }
+      json(res, 200, { budgetPerTaskUSD: budget, overBudget, tasksOverBudget });
+      log(method, path, 200);
+      return;
+    }
+
     // GET /api/live
     if (path === '/api/live') {
       const data = await ledger.liveRuns();
@@ -194,7 +226,7 @@ server.listen(PORT, () => {
     // B1: smoke now also exercises the API surface (ledger load + endpoints
     // return 200) so that additive changes to aggregateRun()'s result shape
     // are covered by more than just process startup.
-    const smokePaths = ['/api/runs', '/api/summary', '/api/cost-per-task', '/api/live'];
+    const smokePaths = ['/api/runs', '/api/summary', '/api/cost-per-task', '/api/budget', '/api/live'];
     setTimeout(async () => {
       let failed = false;
       try {

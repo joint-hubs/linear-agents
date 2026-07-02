@@ -371,6 +371,12 @@
   transition: width 0.3s ease;
 }
 
+/* Over-budget bar variant (§3.4 pt 5 Budget panel) — red fill when a task's
+   cost exceeds COST_BUDGET_USD_PER_TASK. */
+.bar-fill-over {
+  background: var(--danger);
+}
+
 .bar-label {
   display: flex;
   justify-content: space-between;

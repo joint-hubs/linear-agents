@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getRuns, getSummary } from '../api';
+import { getRuns, getSummary, getBudget } from '../api';
 import { linearUrl } from '../config';
 import { fmtUSD, fmtUSD0, fmtTokens, fmtNum, fmtDate, topByCost } from '../utils';
 
@@ -46,6 +46,10 @@ function sumByAgent(runs) {
 export default function Costs() {
   const [summary, setSummary] = useState(null);
   const [runs, setRuns] = useState([]);
+  // Budget response { budgetPerTaskUSD, overBudget, tasksOverBudget } or null
+  // when /api/budget failed. Fetched independently so a budget outage never
+  // affects the rest of the dashboard (review cross-ref JOI-66→67 pt 1).
+  const [budget, setBudget] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   // Stable "now" — period windows are relative to page load. Costs is a history
@@ -72,6 +76,16 @@ export default function Costs() {
         if (cancelled) return;
         setError(err.message || String(err));
         setLoading(false);
+      });
+    // Budget is fetched independently — its failure is non-fatal (panel degrades).
+    getBudget()
+      .then((b) => {
+        if (cancelled) return;
+        setBudget(b);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setBudget(null);
       });
     return () => {
       cancelled = true;
@@ -174,6 +188,80 @@ export default function Costs() {
               <div className="stat-label">Output</div>
               <div className="stat-value">{fmtTokens(kpi.outputTokens)}</div>
             </div>
+          </div>
+
+          {/* Budget panel (§3.4 pt 5 + §4 B2): per-task cost vs
+             COST_BUDGET_USD_PER_TASK. Red bar when over; graceful degrade when no
+             budget set or /api/budget unreachable. */}
+          <div className="section">
+            <div className="section-h">Per-task budget</div>
+            {budget == null ? (
+              <div className="muted" style={{ fontSize: 13 }}>
+                Budget data unavailable.
+              </div>
+            ) : budget.budgetPerTaskUSD == null ? (
+              <div className="muted" style={{ fontSize: 13 }}>
+                No per-task budget set — set{' '}
+                <code className="path-mono">COST_BUDGET_USD_PER_TASK</code> to track per-task overruns.
+              </div>
+            ) : (
+              (() => {
+                const b = budget.budgetPerTaskUSD;
+                const entries = Object.entries(summary.byTask || {})
+                  .filter(([k]) => k !== '__untagged__')
+                  .sort(([, a], [, b2]) => (b2.costUSD || 0) - (a.costUSD || 0));
+                return (
+                  <>
+                    <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+                      Threshold {fmtUSD(b)} per task · {budget.tasksOverBudget.length} over budget
+                    </div>
+                    {entries.length === 0 && <div className="empty">No tagged tasks.</div>}
+                    {entries.map(([key, v]) => {
+                      const over = (v.costUSD || 0) > b;
+                      const pct = b > 0 ? Math.min(100, ((v.costUSD || 0) / b) * 100) : 0;
+                      const url = linearUrl(key);
+                      return (
+                        <div key={key} style={{ marginBottom: 8 }}>
+                          <div className="bar-label">
+                            <span>
+                              {key}
+                              {url && (
+                                <>
+                                  {' '}
+                                  <a
+                                    className="link"
+                                    href={url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    ↗
+                                  </a>
+                                </>
+                              )}
+                            </span>
+                            <span>
+                              {fmtUSD(v.costUSD || 0)}
+                              {over && <span className="muted"> / {fmtUSD(b)}</span>}
+                            </span>
+                          </div>
+                          <div
+                            className="bar-track"
+                            style={{ cursor: 'pointer' }}
+                            onClick={() => navigate(`/runs?task=${encodeURIComponent(key)}`)}
+                          >
+                            <div
+                              className={'bar-fill' + (over ? ' bar-fill-over' : '')}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </>
+                );
+              })()
+            )}
           </div>
 
           {/* By agent — NEW (§3.4 pt 2): sum run.byAgent across period-filtered runs. */}

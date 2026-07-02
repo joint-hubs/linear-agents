@@ -17,3 +17,7 @@ export async function getRun(id) {
 export async function getSummary() {
   return apiFetch('/api/summary');
 }
+
+export async function getBudget() {
+  return apiFetch('/api/budget');
+}

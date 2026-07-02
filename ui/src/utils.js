@@ -112,9 +112,11 @@ export function todayTotals(runs, now = new Date()) {
   return t;
 }
 
-// Attention list = ambiguous runs (last 24 h) + stale runs.
-// Each entry: { run, reason: 'ambiguous' | 'stale' }.
-export function attentionList(runs, now = new Date()) {
+// Attention list = ambiguous runs (last 24 h) + stale runs + over-budget tasks.
+// Each entry: { run, reason: 'ambiguous' | 'stale' | 'over-budget' }.
+// overBudgetTasks (optional, F5) = tasksOverBudget from /api/budget — one item per
+// task, represented by its latest run. Empty when no per-task budget is set.
+export function attentionList(runs, now = new Date(), overBudgetTasks = []) {
   const cutoff = now.getTime() - 24 * 60 * 60 * 1000;
   const items = [];
   for (const r of runs || []) {
@@ -124,6 +126,20 @@ export function attentionList(runs, now = new Date()) {
     }
     if (isStale(r, now)) {
       items.push({ run: r, reason: 'stale' });
+    }
+  }
+  if (overBudgetTasks.length > 0) {
+    const latestByTask = {};
+    for (const r of runs || []) {
+      if (!r || !r.taskId) continue;
+      const cur = latestByTask[r.taskId];
+      if (!cur || (r.startedAt && (!cur.startedAt || r.startedAt > cur.startedAt))) {
+        latestByTask[r.taskId] = r;
+      }
+    }
+    for (const taskId of overBudgetTasks) {
+      const run = latestByTask[taskId];
+      if (run) items.push({ run, reason: 'over-budget' });
     }
   }
   // De-dup by runId (a run could be both ambiguous and stale).
