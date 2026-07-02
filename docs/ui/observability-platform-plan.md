@@ -32,11 +32,17 @@ Dashboard konsumujący `telemetry-server`: **obserwacja** runów (live + histori
 - **B) Zakładka w `0_linear`** (Next.js) — więcej integracji z widokami Linear, ale sprzęga dwa światy.
 → **A na MVP** (port do 0_linear później, gdy dojdzie warstwa Linear-collab).
 
+Komentarz: Tutaj chodzi o to że mamy już część czegoś zrobione w Linearze ale też bardzo mi się podoba wizualizacja Gantt Chartu w innej aplikacji która też ma zastosowane jakieś fajne inne funkcje które pozwalają na data persistence. Fajna jest integracja z Linearem. Fajne jest też klastrowanie i tak dalej jest dużo ciekawych Feature'ów w obydwóch więc można je obydwa wziąć pod uwagę. Wybierając robiąc design takiego jednego konkretnego nowego UX w którym jest jeden Gantt Chart. Do tego chcę mieć monitoring agentów. No jakiś taki panel główny w którym widzę które taski obecnie są na rozpatrywane przez różnych agentów który agent nad czym pracuje No i też ważne jest to że ci agenci mogą pracować z zupełnie różnych repo więc to też trzeba wziąć pod uwage 
+
 ## 3. Gaps do dobudowania w backendzie (małe — ledger już to umie)
-- **`/api/tasks`** — wystaw `aggregateByTask(scanRuns())` (funkcja JEST w ledger, brak w serverze). → koszt per Linear task (PISI-98!).
-- **`/api/summary` +`byAgent`** — dołóż per-agent do sumaryki (ledger liczy `byAgent` per run).
-- **`/api/budget`** — over-budget z `.state/over-budget.json` + taski > `COST_BUDGET_USD_PER_TASK` (z aggregateByTask).
-- **`/api/live` +krok** — dla aktywnych runów dołóż „ostatni tool/model" (ogon transkryptu) → „co agent robi TERAZ".
+> **Update 2026-07-02:** `byTask` w `/api/summary` i `/api/cost-per-task` JUŻ SĄ w telemetry-server —
+> nie budować drugi raz. Sumaryczne `byAgent` liczy się client-side z `/api/runs`.
+> Aktualna lista gapów: **B1/B2/B3 w [ux-design-v3.md](ux-design-v3.md) §4** (B1 = passthrough
+> `cwd/repo/gitBranch/exitCode/native/transcriptPath` w `aggregateRun` — wymagane dla multi-repo i statusu `failed`).
+- ~~**`/api/tasks`** — wystaw `aggregateByTask(scanRuns())`~~ ✅ jest jako `/api/cost-per-task` + `byTask` w summary.
+- ~~**`/api/summary` +`byAgent`**~~ → client-side z `/api/runs` (zero backendu).
+- **`/api/budget`** — over-budget z `.state/over-budget.json` + taski > `COST_BUDGET_USD_PER_TASK` (z aggregateByTask). *(= B2)*
+- **`/api/live` +krok** — dla aktywnych runów dołóż „ostatni tool/model" (ogon transkryptu) → „co agent robi TERAZ". *(= B3, P3)*
 - (opcja) npm script / launcher startujący `telemetry-server` razem z dashboardem.
 
 ## 4. Dashboard — ekrany (główna praca = frontend)
@@ -67,4 +73,12 @@ Dashboard konsumujący `telemetry-server`: **obserwacja** runów (live + histori
 - **Bez sekretów w UI** — dashboard tylko czyta `.state`/API lokalnie; klucze zostają w `.env`.
 
 ## 8. Następny krok
-Rozbić **P1 (Dashboard MVP)** na taski dla GLM (komponenty Live/Runs/Costs + fetch z `:7331`) — to najmniejszy krok z największym efektem, bo backend + dane już są.
+~~Rozbić **P1 (Dashboard MVP)** na taski dla GLM~~ ✅ **P1 scaffold DOWIEZIONY** (commit `e849ff0`:
+Vite+React w `ui/`, ekrany Live/Runs/RunDetail/Costs na żywym API) — decyzja §2 = **A (standalone)**, przesądzona.
+
+**Aktualny kontrakt budowy: [ux-design-v3.md](ux-design-v3.md)** — user journeys, wireframe per ekran,
+nowy ekran **Timeline (gantt aktywności agentów)**, wymiar multi-repo, backend gap B1/B2/B3,
+kolejność F1→F5 z acceptance criteria. Mockup klikalny: `mockups/observability-v3.html`.
+
+**Warstwa 2 (launch z UI, VM/tmux, meta-agent): [control-plane-plan.md](control-plane-plan.md)** —
+ekran Tasks z „suggested next agent" + `/api/launch`, tryb remote-interactive w tmux, fazy L1–L4.
