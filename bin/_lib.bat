@@ -7,8 +7,19 @@ REM repo root (absolute)
 pushd "%~dp0.." & set "ROOT=!CD!" & popd
 set "LA_ROOT=%ROOT%"
 
+REM window-level overrides beat .env for team/workspace switches
+REM (e.g. `set LINEAR_TEAM_KEY=JOI&& bin\plan.bat`; platform /api/launch relies on this too)
+set "_PRE_LINEAR_TEAM_KEY=%LINEAR_TEAM_KEY%"
+set "_PRE_LINEAR_WORKSPACE=%LINEAR_WORKSPACE%"
+
 REM load .env (eol=# skips comments, blank lines ignored)
 if exist "%ROOT%\.env" for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%ROOT%\.env") do set "%%A=%%B"
+
+REM restore window-level overrides
+if defined _PRE_LINEAR_TEAM_KEY set "LINEAR_TEAM_KEY=%_PRE_LINEAR_TEAM_KEY%"
+if defined _PRE_LINEAR_WORKSPACE set "LINEAR_WORKSPACE=%_PRE_LINEAR_WORKSPACE%"
+set "_PRE_LINEAR_TEAM_KEY="
+set "_PRE_LINEAR_WORKSPACE="
 
 REM --- New workspace provisioning check ---
 if defined LINEAR_TEAM_KEY (
