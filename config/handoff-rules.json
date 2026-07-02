@@ -1,0 +1,22 @@
+[
+  {
+    "comment": "needs:* → human (HOW-TO §6: any needs:answer/approval/decision/access = waiting on Mateusz, stop). Evaluated first so a blocked task always routes to the human regardless of state.",
+    "when": { "labels": ["needs:*"] },
+    "next": "human"
+  },
+  {
+    "comment": "Todo + dor-ok → dev (PLAN→DEV handoff).",
+    "when": { "state": "Todo", "labels": ["dor-ok"] },
+    "next": "dev"
+  },
+  {
+    "comment": "In Review + ai:coded → review (DEV→REVIEW handoff).",
+    "when": { "state": "In Review", "labels": ["ai:coded"] },
+    "next": "review"
+  },
+  {
+    "comment": "stage:testing → test (REVIEW→TEST handoff, after approve + version).",
+    "when": { "labels": ["stage:testing"] },
+    "next": "test"
+  }
+]

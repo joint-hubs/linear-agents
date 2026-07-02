@@ -5,6 +5,22 @@
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+// Reuse the shared Linear GraphQL client (linear-client.mjs) — the same layer
+// linear-query.mjs is built on. A workspace-wide query (all teams) isn't
+// expressible via the team-scoped linear-query CLI, so we call graphql()
+// directly. No MCP, no new client (control-plane-plan §3.1, DoD "reuse
+// scripts/linear-query.mjs" = reuse the Linear query layer).
+import { loadEnv, graphql } from './linear-client.mjs';
+
+const __dir = dirname(fileURLToPath(import.meta.url));
+const root = join(__dir, '..');
+
+// Load .env so the Linear API keys (LINEAR_API_KEY / LINEAR_API_KEY_PISI) are
+// available to chooseApiKey() inside graphql(). Benign for other endpoints —
+// loadEnv only sets vars that aren't already set.
+loadEnv();
 
 const PORT = parseInt(process.env.TELEMETRY_PORT, 10) || 7331;
 const isSmoke = process.argv.includes('--smoke');
@@ -19,6 +35,22 @@ try {
 } catch (err) {
   console.error('Ledger module not available —', err.message);
   console.error('Endpoints will return 500 until scripts/ledger.mjs exists.');
+}
+
+// ---------------------------------------------------------------------------
+// Handoff rules — declarative mapping from Linear task metadata to the squad
+// that should pick it up next (control-plane-plan.md §3.1 + HOW-TO §6).
+// Read once at startup. Missing/invalid file → empty rules, so every task gets
+// suggestedSquad:null (queue still serves; UI shows "no suggestion").
+// ---------------------------------------------------------------------------
+let handoffRules = [];
+try {
+  const txt = await readFile(join(root, 'config', 'handoff-rules.json'), 'utf8');
+  const parsed = JSON.parse(txt);
+  if (Array.isArray(parsed)) handoffRules = parsed;
+  else console.error('config/handoff-rules.json: expected an array');
+} catch (err) {
+  console.error('config/handoff-rules.json not loaded —', err.message);
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +121,149 @@ function buildSummary(runs) {
   }
 
   return { totals, bySquad, byModel, byDay, byTask: ledger.aggregateByTask(runs) };
+}
+
+// ---------------------------------------------------------------------------
+// Linear queue — /api/linear/queue (L1a, control-plane-plan §3.1)
+// ---------------------------------------------------------------------------
+
+// Two-step query: first list teams (cheap), then fetch each team's issues
+// separately. A single nested `teams → issues(100) → labels/assignee/parent`
+// query exceeds Linear's query-complexity limit ("Query too complex"), so we
+// split it — each per-team query is low complexity. The handoff rules engine
+// then derives suggestedSquad client-side from state + labels (read-only).
+const TEAMS_QUERY = `
+  query {
+    teams {
+      nodes {
+        id
+        key
+        name
+      }
+    }
+  }
+`;
+
+const TEAM_ISSUES_QUERY = `
+  query($teamId: String!) {
+    team(id: $teamId) {
+      issues(first: 50, orderBy: updatedAt) {
+        nodes {
+          id
+          identifier
+          title
+          url
+          state { id name type }
+          priority
+          estimate
+          updatedAt
+          assignee { id name displayName }
+          labels(first: 20) { nodes { id name } }
+          parent { id identifier title }
+        }
+      }
+    }
+  }
+`;
+
+// Evaluate handoff rules against a task. First match wins — rule order in the
+// config is significant. `labels:["needs:*"]` is a wildcard matching any
+// `needs:` label, so a blocked task routes to the human regardless of state
+// (put that rule first in the config, per HOW-TO §6 "dowolny → człowiek").
+function suggestedSquad(task, rules) {
+  const labels = new Set(task.labels || []);
+  for (const rule of rules) {
+    const w = rule.when || {};
+    if (w.state && task.state !== w.state) continue;
+    if (w.labels && w.labels.length) {
+      const ok = w.labels.every((l) => {
+        if (l.endsWith(':*')) {
+          const prefix = l.slice(0, -1);
+          return [...labels].some((t) => t.startsWith(prefix));
+        }
+        return labels.has(l);
+      });
+      if (!ok) continue;
+    }
+    return rule.next;
+  }
+  return null;
+}
+
+// 60 s cache per workspace (Linear rate limits). AC3: a second call within
+// 60 s is served from cache — no second Linear hit (response carries
+// `cached:true` so it is observable without inspecting server logs).
+const QUEUE_TTL_MS = 60_000;
+let queueCache = null; // { workspace, ts, payload }
+
+// Fetch all teams' issues for the workspace and enrich each with
+// suggestedSquad. Never throws — on missing key / Linear error / timeout it
+// returns a 200-grade degrade payload (tasks:[], error note) so the dashboard
+// stays up and --smoke passes without network.
+async function fetchLinearQueue(workspace) {
+  const apiKey =
+    workspace === 'pisi' ? process.env.LINEAR_API_KEY_PISI : process.env.LINEAR_API_KEY;
+  if (!apiKey) {
+    return {
+      workspace,
+      tasks: [],
+      error: `Linear API key not configured for workspace '${workspace}'`,
+      fetchedAt: null,
+    };
+  }
+  try {
+    // Safety net so a hanging Linear call can't stall --smoke or the dashboard.
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Linear API timeout (8s)')), 8000),
+    );
+    const result = await Promise.race([
+      (async () => {
+        const teamsData = await graphql(TEAMS_QUERY);
+        const teams = teamsData?.teams?.nodes || [];
+        // Fetch each team's issues in parallel — one low-complexity query each.
+        const perTeam = await Promise.all(
+          teams.map((t) =>
+            graphql(TEAM_ISSUES_QUERY, { teamId: t.id }).then((d) => ({
+              team: t,
+              nodes: d?.team?.issues?.nodes || [],
+            })),
+          ),
+        );
+        return perTeam;
+      })(),
+      timeout,
+    ]);
+    const tasks = [];
+    for (const { team, nodes } of result) {
+      for (const n of nodes) {
+        const labels = (n.labels?.nodes || []).map((l) => l.name);
+        const task = {
+          id: n.id,
+          identifier: n.identifier,
+          title: n.title,
+          url: n.url,
+          team: team.key,
+          state: n.state?.name || null,
+          stateType: n.state?.type || null,
+          priority: n.priority ?? null,
+          estimate: n.estimate ?? null,
+          updatedAt: n.updatedAt,
+          assignee: n.assignee?.displayName || n.assignee?.name || null,
+          labels,
+          parent: n.parent ? { identifier: n.parent.identifier, title: n.parent.title } : null,
+        };
+        task.suggestedSquad = suggestedSquad(task, handoffRules);
+        tasks.push(task);
+      }
+    }
+    // Most recently updated first. Tasks with suggestedSquad:null are kept
+    // (Done/Canceled/Backlog) — the UI groups by suggestedSquad and ignores
+    // null, but keeping them lets a future "all tasks" view reuse the payload.
+    tasks.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+    return { workspace, tasks, error: null, fetchedAt: new Date().toISOString() };
+  } catch (err) {
+    return { workspace, tasks: [], error: err.message, fetchedAt: null };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +371,35 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // GET /api/linear/queue?workspace=jointhubs (L1a — control-plane-plan §3.1)
+    //   Linear tasks enriched with `suggestedSquad` (read-only). 60 s cache per
+    //   workspace. Graceful degrade: missing key / Linear error → 200 with
+    //   `tasks:[]` + `error` (never 5xx) so the dashboard stays up and --smoke
+    //   passes without network. `cached:true` marks a cache hit (AC3).
+    if (path === '/api/linear/queue') {
+      const workspace = (url.searchParams.get('workspace') || 'jointhubs').toLowerCase();
+      if (workspace !== 'jointhubs' && workspace !== 'pisi') {
+        json(res, 400, { error: `unknown workspace: ${workspace}` });
+        log(method, path, 400);
+        return;
+      }
+      const nowMs = Date.now();
+      if (
+        queueCache &&
+        queueCache.workspace === workspace &&
+        nowMs - queueCache.ts < QUEUE_TTL_MS
+      ) {
+        json(res, 200, { ...queueCache.payload, cached: true });
+        log(method, path, 200);
+        return;
+      }
+      const payload = await fetchLinearQueue(workspace);
+      queueCache = { workspace, ts: nowMs, payload };
+      json(res, 200, { ...payload, cached: false });
+      log(method, path, 200);
+      return;
+    }
+
     // GET /api/live
     if (path === '/api/live') {
       const data = await ledger.liveRuns();
@@ -226,7 +430,14 @@ server.listen(PORT, () => {
     // B1: smoke now also exercises the API surface (ledger load + endpoints
     // return 200) so that additive changes to aggregateRun()'s result shape
     // are covered by more than just process startup.
-    const smokePaths = ['/api/runs', '/api/summary', '/api/cost-per-task', '/api/budget', '/api/live'];
+    const smokePaths = [
+      '/api/runs',
+      '/api/summary',
+      '/api/cost-per-task',
+      '/api/budget',
+      '/api/linear/queue?workspace=jointhubs',
+      '/api/live',
+    ];
     setTimeout(async () => {
       let failed = false;
       try {
