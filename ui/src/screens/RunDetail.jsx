@@ -42,7 +42,7 @@ export default function RunDetail() {
                 const s = statusLabel(run);
                 if (s === 'done') return <span className="badge badge-ok">done</span>;
                 if (s === 'running') return <span className="badge badge-ok">running</span>;
-                if (s === 'stale') return <span className="badge badge-warn">stale</span>;
+                if (s === 'failed') return <span className="badge badge-fail">failed</span>;
                 return null;
               })()}
               {run.ambiguous && (

@@ -196,6 +196,159 @@
   color: var(--warn);
 }
 
+.badge-fail {
+  background: rgba(255, 59, 48, 0.15);
+  color: var(--danger);
+}
+
+/* Status dot (active run cards) */
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.dot-ok {
+  background: var(--ok);
+}
+
+/* KPI strip (Live) */
+.kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+.kpi {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px 16px;
+}
+
+.kpi-label {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.kpi-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-top: 4px;
+}
+
+.kpi-warn {
+  border-color: var(--warn);
+}
+
+.kpi-warn .kpi-value {
+  color: var(--warn);
+}
+
+/* Active run cards (Live) */
+.run-cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.run-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px;
+}
+
+.run-card-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.run-card-squad {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.run-card-meta {
+  font-size: 12px;
+  margin: 6px 0 8px;
+}
+
+.run-card-foot {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  margin-top: 10px;
+}
+
+.modelbars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.modelbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.modelbar-label {
+  min-width: 140px;
+  color: var(--muted);
+}
+
+.modelbar-pct {
+  color: var(--muted);
+  min-width: 34px;
+  text-align: right;
+}
+
+/* Attention list (Live) */
+.att-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.att-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.att-msg {
+  flex: 1;
+}
+
+/* API-down card (Live) */
+.api-down code,
+.empty code,
+.run-card code {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  background: var(--bg);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
 /* Bar */
 .bar {
   display: flex;

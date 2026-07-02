@@ -14,10 +14,6 @@ export async function getRun(id) {
   return apiFetch('/api/runs/' + id);
 }
 
-export async function getLive() {
-  return apiFetch('/api/live');
-}
-
 export async function getSummary() {
   return apiFetch('/api/summary');
 }

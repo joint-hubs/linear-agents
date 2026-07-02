@@ -62,12 +62,71 @@ export function taskLabel(run) {
   return run.taskId || 'untagged';
 }
 
+// Canonical run status (ux-design-v3 §3.1):
+//   running  = endedAt null (still active)
+//   failed   = endedAt set AND exitCode >= 1
+//   done     = endedAt set AND exitCode 0 / unknown
+// Mirrors ledger.mjs statusFromManifest(). A missing/null exitCode with
+// endedAt set is treated as "done" (preserves legacy manifests).
 export function statusLabel(run) {
-  if (run.endedAt) return 'done';
-  if (!run.startedAt) return 'stale';
-  const tenMinAgo = Date.now() - 10 * 60 * 1000;
-  if (new Date(run.startedAt).getTime() > tenMinAgo) return 'running';
-  return 'stale';
+  if (!run) return 'done';
+  if (!run.endedAt) return 'running';
+  const ec = typeof run.exitCode === 'number' ? run.exitCode : parseInt(run.exitCode, 10);
+  if (Number.isFinite(ec) && ec >= 1) return 'failed';
+  return 'done';
+}
+
+// A run is stale when it is still active but started more than 2 h ago.
+export function isStale(run, now = new Date()) {
+  if (!run || !run.startedAt || run.endedAt) return false;
+  return new Date(run.startedAt).getTime() < now.getTime() - 2 * 60 * 60 * 1000;
+}
+
+function isLocalToday(iso, now) {
+  if (!iso) return false;
+  const d = new Date(iso);
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  );
+}
+
+// Sum cost + tokens over runs that started on local today.
+export function todayTotals(runs, now = new Date()) {
+  const t = { costUSD: 0, inputTokens: 0, outputTokens: 0 };
+  for (const r of runs || []) {
+    if (!isLocalToday(r.startedAt, now)) continue;
+    const rt = r.totals || {};
+    t.costUSD += rt.costUSD || 0;
+    t.inputTokens += rt.inputTokens || 0;
+    t.outputTokens += rt.outputTokens || 0;
+  }
+  return t;
+}
+
+// Attention list = ambiguous runs (last 24 h) + stale runs.
+// Each entry: { run, reason: 'ambiguous' | 'stale' }.
+export function attentionList(runs, now = new Date()) {
+  const cutoff = now.getTime() - 24 * 60 * 60 * 1000;
+  const items = [];
+  for (const r of runs || []) {
+    if (!r) continue;
+    if (r.ambiguous && r.startedAt && new Date(r.startedAt).getTime() >= cutoff) {
+      items.push({ run: r, reason: 'ambiguous' });
+    }
+    if (isStale(r, now)) {
+      items.push({ run: r, reason: 'stale' });
+    }
+  }
+  // De-dup by runId (a run could be both ambiguous and stale).
+  const seen = new Set();
+  return items.filter((it) => {
+    const key = it.run.runId + ':' + it.reason;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export function modelMix(byModel) {

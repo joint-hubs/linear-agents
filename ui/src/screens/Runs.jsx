@@ -99,7 +99,7 @@ export default function Runs() {
                   <td className="td">
                     {status === 'done' && <span className="badge badge-ok">done</span>}
                     {status === 'running' && <span className="badge badge-ok">running</span>}
-                    {status === 'stale' && <span className="badge badge-warn">stale</span>}
+                    {status === 'failed' && <span className="badge badge-fail">failed</span>}
                     {run.ambiguous && (
                       <span className="badge badge-warn" style={{ marginLeft: 4 }}>
                         amb
