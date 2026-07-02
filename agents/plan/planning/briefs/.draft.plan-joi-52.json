@@ -1,0 +1,266 @@
+{
+  "source": "Second Brain/Personal/Finances/home/docs/PRD-panel-analityczny.md",
+  "parent": {
+    "externalId": "plan:joi-52",
+    "title": "Home Finances",
+    "description": "Panel analityczny finansów — porównywanie okresów. PRD: home/docs/PRD-panel-analityczny.md (5 zakładek, offline, transfery wykluczone, domyślna grupa kont Dom).",
+    "type": "epic",
+    "labels": ["ai:planned"]
+  },
+  "subtasks": [
+    {
+      "externalId": "plan:joi-52:s1",
+      "title": "Napraw build_master: ścieżka personal + sanity-check",
+      "type": "fix",
+      "estimate": "S",
+      "slice": "master",
+      "ac": [
+        {
+          "given": "w build_master.py OLD_SOURCES zawiera ścieżkę personal z numerem konta 0233176520, a realny plik w home/personal/ to 0233176771",
+          "when": "uruchamiam python build_master.py",
+          "then": "skrypt kończy się bez FileNotFoundError, generuje panel/master.csv i raport sanity"
+        },
+        {
+          "given": "wygenerowany master.csv obejmuje okres 2024-01→2026-07",
+          "when": "porównuję sumy miesięczne per konto z analiza_20260701/comparison_summary.md i monthly_pnl.csv",
+          "then": "różnica dla każdej pary (konto, miesiąc) wynosi ≤ 1 PLN (różnica zaokrągleń)"
+        },
+        {
+          "given": "master.csv zawiera zarówno rekordy z kont dom, osobiste, firma, podatki",
+          "when": "sprawdzam raport sanity_report.txt",
+          "then": "widnieje lista niesparowanych transferów wewnętrznych (jeśli są) oraz liczba sparowanych par transferów"
+        }
+      ],
+      "dod": [
+        "Plik build_master.py odpalony czysto (exit 0) na pełnych danych",
+        "Poprawiona ścieżka w OLD_SOURCES zweryfikowana (plik istnieje, rekordy wczytane)",
+        "Raport sanity porównany z comparison_summary.md — różnice udokumentowane w komentarzu"
+      ],
+      "blockedBy": []
+    },
+    {
+      "externalId": "plan:joi-52:s2",
+      "title": "Agregaty per (miesiąc × kategoria × grupa kont) → data.json",
+      "type": "feat",
+      "estimate": "M",
+      "slice": "aggregate",
+      "ac": [
+        {
+          "given": "istnieje panel/master.csv z kolumnami date, account_group, category, amount, is_transfer",
+          "when": "uruchamiam python aggregate.py",
+          "then": "panel/data.json zawiera struktury: monthly[group][category][YYYY-MM] = sum, weekday[group][category][0-6] = sum, counts.transactions_total, counts.transfers_excluded, categories_per_group"
+        },
+        {
+          "given": "agregaty liczone są w panel/aggregate.py",
+          "when": "sprawdzam pokrycie miesięcy w data.json dla grupy 'dom'",
+          "then": "miesiące tworzą ciągły zakres od 2024-01 (lub od pierwszego niepustego) do 2026-07 bez dziur (puste miesiące = 0)"
+        },
+        {
+          "given": "w master.csv niektóre rekordy mają is_transfer=true",
+          "when": "sprawdzam sumy monthly[dom][category][YYYY-MM] w data.json",
+          "then": "transfery wewnętrzne nie są wliczane ani do wydatków (kwoty ujemne), ani do przychodów (kwoty dodatnie); liczba wykluczonych transferów zapisana w counts.transfers_excluded"
+        },
+        {
+          "given": "rekordy w master.csv mają przypisany account_group ∈ {dom, osobiste, firma, podatki}",
+          "when": "iteruję po data.json[monthly]",
+          "then": "widzę dokładnie 4 klucze grup kont, każdy z podziałem na kategorie"
+        }
+      ],
+      "dod": [
+        "Moduł aggregate.py z czystymi funkcjami (importowalny, testowalny)",
+        "data.json poprawnie wczytuje się w panel/render.py bez wyjątków",
+        "Schema data.json udokumentowana w komentarzu na górze aggregate.py"
+      ],
+      "blockedBy": ["plan:joi-52:s1"]
+    },
+    {
+      "externalId": "plan:joi-52:s3",
+      "title": "Render pipeline + zakładka Przegląd (offline, plotly lokalnie)",
+      "type": "feat",
+      "estimate": "L",
+      "slice": "overview",
+      "ac": [
+        {
+          "given": "data.json istnieje i build.py woła aggregate.py → render.py",
+          "when": "uruchamiam python build.py",
+          "then": "generowany jest panel/panel.html (jeden plik, self-contained) bez błędów"
+        },
+        {
+          "given": "panel.html otwarty w przeglądarce przez file://",
+          "when": "ładuje się strona",
+          "then": "widzę 5 zakładek (Przegląd, Porównanie A vs B, Limity, Dni tygodnia, Raport), domyślnie aktywna 'Przegląd' i domyślnie wybrana grupa kont 'Dom'"
+        },
+        {
+          "given": "zakładka Przegląd aktywna, grupa 'Dom'",
+          "when": "renderuję wykres ciągłości przychodów/wydatków/netto",
+          "then": "oś X obejmuje ciągły zakres 2024-01→2026-07 z adnotacjami okien dostępności danych per grupa kont (np. 'dom od 2025-08', 'osobiste od 2024-01')"
+        },
+        {
+          "given": "panel.html + template.html + plotly.min.js w panel/",
+          "when": "odłączam komputer od internetu i otwieram panel.html",
+          "then": "panel w pełni działa (wykresy się renderują, zakładki się przełączają, brak żądań HTTP do CDN)"
+        }
+      ],
+      "dod": [
+        "render.py + template.html + plotly.min.js + (katalog z assetami) istnieją w panel/",
+        "plotly.min.js pobrany i zapisany lokalnie (nie ładowany z CDN)",
+        "build.py orkiestruje: build_master → aggregate → render w jednym wywołaniu"
+      ],
+      "blockedBy": ["plan:joi-52:s2"]
+    },
+    {
+      "externalId": "plan:joi-52:s4",
+      "title": "Zakładka Porównanie A vs B: presety, wykresy A|B, tabela delt",
+      "type": "feat",
+      "estimate": "L",
+      "slice": "compare",
+      "ac": [
+        {
+          "given": "panel.html otwarty, aktywna zakładka 'Porównanie A vs B', grupa 'Dom'",
+          "when": "wybieram preset 'Q1 2026' dla okresu A i 'Q2 2026' dla okresu B",
+          "then": "widzę dwa wykresy obok siebie (siatka 2-kolumnowa): A po lewej, B po prawej, każdy z sumami per kategoria za dany kwartał"
+        },
+        {
+          "given": "wybrane okresy A i B (dowolne)",
+          "when": "patrzę pod wykresy",
+          "then": "widzę tabelę delt per kategoria z kolumnami: kategoria, A [PLN/mies.], B [PLN/mies.], delta PLN, delta %, werdykt ('lepiej' / 'gorzej' / 'neutralnie'), posortowaną malejąco po |delta PLN|"
+        },
+        {
+          "given": "presety w selektorze A i B",
+          "when": "otwieram listę",
+          "then": "widzę co najmniej: 'Stary eksport (do 2026-03)', 'Nowy eksport (od 2026-03)', 'Kwartały', 'Ostatnie 3 miesiące', 'Dowolny zakres' (od–do miesiąc)"
+        }
+      ],
+      "dod": [
+        "Presety działają bez ręcznego wpisywania dat (poza trybem 'Dowolny zakres')",
+        "Werdykt 'lepiej/gorzej' uwzględnia kierunek (dla wydatków mniej = lepiej, dla przychodów więcej = lepiej)"
+      ],
+      "blockedBy": ["plan:joi-52:s3"]
+    },
+    {
+      "externalId": "plan:joi-52:s5",
+      "title": "Zakładka Limity: mediana+10%, status, trend regresja",
+      "type": "feat",
+      "estimate": "M",
+      "slice": "limits",
+      "ac": [
+        {
+          "given": "panel.html otwarty, aktywna zakładka 'Limity', grupa 'Dom', wybrany okres",
+          "when": "patrzę na listę kategorii z ≥3 miesiącami danych",
+          "then": "dla każdej widzę: limit [PLN/mies.] = mediana miesięczna z okresu × 1.10, bieżące zużycie w miesiącu, status kolorystyczny (zielony ≤ limit, żółty ≤ 110% limitu, czerwony > 110% limitu), strzałka trendu z regresji liniowej (PLN/mies.)"
+        },
+        {
+          "given": "kategoria ma <3 miesiące danych w wybranym okresie",
+          "when": "wyświetlam ją w zakładce Limity",
+          "then": "widzę adnotację 'za mało danych' zamiast limitu/statusu/trendu"
+        },
+        {
+          "given": "trend liczony regresją liniową po miesięcznych sumach",
+          "when": "kategoria ma stabilne (rosnące/malejące) wydatki w okresie",
+          "then": "strzałka trendu wskazuje kierunek, a wartość PLN/mies. odpowiada nachyleniu regresji (nie chwilowej zmianie)"
+        }
+      ],
+      "dod": [
+        "Kolory statusów zgodne ze specyfikacją UX (PRD §UX)",
+        "Regresja liczona w przeglądarce (vanilla JS) na danych z data.json — bez dodatkowych zależności"
+      ],
+      "blockedBy": ["plan:joi-52:s3"]
+    },
+    {
+      "externalId": "plan:joi-52:s6",
+      "title": "Zakładka Dni tygodnia: heatmapa A|B, kategoria × dzień",
+      "type": "feat",
+      "estimate": "M",
+      "slice": "weekday",
+      "ac": [
+        {
+          "given": "panel.html otwarty, aktywna zakładka 'Dni tygodnia', grupa 'Dom'",
+          "when": "wybieram okres A i okres B (dowolny preset lub zakres)",
+          "then": "widzę dwie heatmapy obok siebie: kategoria (oś Y) × dzień tygodnia (oś X, PL: Poniedziałek…Niedziela), wartość = suma wydatków w komórce (PLN)"
+        },
+        {
+          "given": "heatmapa A i B wyrenderowana",
+          "when": "porównuję komórki tej samej kategorii i dnia tygodnia",
+          "then": "wartości są porównywalne (ta sama skala kolorów lub wyraźna legenda dla każdej heatmapy)"
+        },
+        {
+          "given": "agregaty w data.json mają strukturę weekday[group][category][0-6]",
+          "when": "panel renderuje heatmapę",
+          "then": "indeksy 0-6 mapowane są na dni tygodnia PL (0=Poniedziałek … 6=Niedziela) zgodnie z konwencją używaną w analizie"
+        }
+      ],
+      "dod": [
+        "Heatmapa renderowana przez plotly (offline, ten sam plotly.min.js co reszta panelu)",
+        "Puste komórki (0 PLN) wyświetlane jako jaśniejszy kolor, nie jako błąd"
+      ],
+      "blockedBy": ["plan:joi-52:s3"]
+    },
+    {
+      "externalId": "plan:joi-52:s7",
+      "title": "Zakładka Raport + Revolut wydzielony + overrides.csv",
+      "type": "feat",
+      "estimate": "M",
+      "slice": "report",
+      "ac": [
+        {
+          "given": "panel.html otwarty, aktywna zakładka 'Raport'",
+          "when": "strona się ładuje",
+          "then": "widzę: (1) licznik wykluczonych transferów wewnętrznych, (2) tekstowe podsumowanie z wnioskami (top 5 kategorii wg wydatków, top 5 największych zmian m/m), (3) rekomendacje oszczędnościowe na bazie limitów i trendów"
+        },
+        {
+          "given": "build.py importuje moduł kategoryzacji i wczytuje panel/overrides.csv",
+          "when": "master.csv zawiera rekordy z kontem Revolut (np. Revolut One)",
+          "then": "w master.csv mają one kategorię 'Revolut (mieszane)' (osobna, widoczna w panelu) i nie są klasyfikowane do 'Inne' / 'Prywatne'"
+        },
+        {
+          "given": "panel/overrides.csv istnieje w formacie date,match,amount,category,split",
+          "when": "dodaję wpis pasujący do istniejącego rekordu w master (np. data + match na kontrahenta/frazę + kwota) i uruchamiam build.py",
+          "then": "kategoria tego rekordu zostaje nadpisana wartością z overrides (lub split % jeśli pole split niepuste)"
+        },
+        {
+          "given": "overrides.csv ma zły format lub nieznany rekord",
+          "when": "uruchamiam build.py",
+          "then": "build.log zawiera ostrzeżenie per wadliwy wiersz, ale build nie przerywa się (graceful)"
+        }
+      ],
+      "dod": [
+        "Plik overrides.csv wgrany z przykładowym wpisem (np. 1 testowy Revolut z komentarzem jak dodać kolejny)",
+        "Kategoria 'Revolut (mieszane)' widoczna w panelu (Przegląd, Porównanie, Limity) z pełną obsługą",
+        "Licznik wykluczonych transferów generowany w data.json (counts.transfers_excluded) i wyświetlany w zakładce Raport"
+      ],
+      "blockedBy": ["plan:joi-52:s4"]
+    },
+    {
+      "externalId": "plan:joi-52:s8",
+      "title": "Weryfikacja end-to-end + README panelu (delivery-loop)",
+      "type": "docs",
+      "estimate": "S",
+      "slice": "verify",
+      "ac": [
+        {
+          "given": "wszystkie poprzednie slices (S1-S7) ukończone, build.py + panel.html istnieją",
+          "when": "uruchamiam python build.py na świeżo (czysty panel/) i otwieram panel.html offline",
+          "then": "sprawdzam checklist 8 punktów z PRD §Kryteria akceptacji — każdy punkt odhaczony (build przechodzi; sumy zgadzają się ± zaokrąglenia; transfery wykluczone; Q1 vs Q2 działa; limity/trendy/heatmapy widoczne; panel offline; Revolut wydzielony)"
+        },
+        {
+          "given": "panel/README.md istnieje w panel/",
+          "when": "czytam sekcję 'Jak odświeżyć po nowym eksporcie ING'",
+          "then": "instrukcja krok-po-kroku opisuje: (1) gdzie wrzucić nowy CSV, (2) czy trzeba coś dodać do OLD_SOURCES / merged, (3) jak uruchomić build.py, (4) jak zweryfikować sanity, (5) jak dodać wpis w overrides.csv"
+        },
+        {
+          "given": "delivery-loop na danych (PRD §Faza 5)",
+          "when": "uruchamiam panel lokalnie i klikam kolejno wszystkie 5 zakładek dla grupy 'Dom'",
+          "then": "każda zakładka renderuje się bez błędów w konsoli JS, brak żądań HTTP poza file://"
+        }
+      ],
+      "dod": [
+        "README.md w panel/ z sekcjami: 'Co to jest', 'Jak uruchomić', 'Jak odświeżyć po nowym eksporcie', 'Struktura plików', 'Znane ograniczenia'",
+        "Checklist weryfikacyjna (8 punktów z PRD) odhaczona w commicie / komentarzu",
+        "Brak wrażliwych danych (pełnych numerów kont, kwot) w README — użyte przykłady zanonimizowane"
+      ],
+      "blockedBy": ["plan:joi-52:s5", "plan:joi-52:s6", "plan:joi-52:s7"]
+    }
+  ],
+  "rejected": [],
+  "dryRun": true
+}
