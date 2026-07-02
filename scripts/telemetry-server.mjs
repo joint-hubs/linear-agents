@@ -189,10 +189,34 @@ server.listen(PORT, () => {
   console.log(`Telemetry server listening on http://localhost:${PORT}`);
 
   if (isSmoke) {
-    console.log('Smoke mode — will auto-shutdown in 10s');
-    setTimeout(() => {
-      console.log('Smoke test complete, shutting down.');
-      server.close();
-    }, 10_000);
+    console.log('Smoke mode — will self-check endpoints then shut down');
+
+    // B1: smoke now also exercises the API surface (ledger load + endpoints
+    // return 200) so that additive changes to aggregateRun()'s result shape
+    // are covered by more than just process startup.
+    const smokePaths = ['/api/runs', '/api/summary', '/api/cost-per-task', '/api/live'];
+    setTimeout(async () => {
+      let failed = false;
+      try {
+        const base = `http://localhost:${PORT}`;
+        for (const p of smokePaths) {
+          const res = await fetch(base + p);
+          const ok = res.ok;
+          console.log(`  smoke ${p} -> ${res.status} ${ok ? 'OK' : 'FAIL'}`);
+          if (!ok) failed = true;
+        }
+      } catch (err) {
+        console.error('  smoke fetch error:', err.message);
+        failed = true;
+      }
+
+      if (failed) {
+        console.error('Smoke test FAILED.');
+        server.close(() => process.exit(1));
+      } else {
+        console.log('Smoke test complete, shutting down.');
+        server.close(() => process.exit(0));
+      }
+    }, 500);
   }
 });

@@ -106,16 +106,16 @@ export function cwdToHashName(cwd) {
 /**
  * Infer a Linear-style task ID from a git branch name.
  *
- * Matches patterns like `fen-98-...` or `feat/pisi-98-...` and returns
- * normalized IDs like `FEN-98` or `PISI-98`. Returns null for branches
- * that don't match (e.g. `feat/phase-a-offline-foundation`).
+ * Matches patterns like `fen-98-...` or `feat/pisi-98-...` or `feat/joi-51`
+ * and returns normalized IDs like `FEN-98`, `PISI-98`, or `JOI-51`. Returns
+ * null for branches that don't match (e.g. `feat/phase-a-offline-foundation`).
  *
  * @param {string|null|undefined} branch
  * @returns {string|null}
  */
 export function inferTaskIdFromBranch(branch) {
   if (!branch || typeof branch !== "string") return null;
-  const m = branch.match(/(?:^|\/)(fen|pisi)-(\d+)/i);
+  const m = branch.match(/(?:^|\/)(fen|pisi|joi)-(\d+)/i);
   if (m) return `${m[1].toUpperCase()}-${m[2]}`;
   return null;
 }
@@ -344,6 +344,45 @@ function aggregateTurns(result, parsed) {
  * @param {object} manifest  Run manifest object from .state/runs/<runId>.json
  * @returns {object} Aggregated run result
  */
+/**
+ * Derive a short repo name from a cwd path — the last path segment.
+ * Handles Windows backslashes, POSIX forward slashes, and trailing
+ * separators. Returns null for empty/invalid input.
+ *
+ * @param {string|null|undefined} cwd
+ * @returns {string|null}
+ */
+function repoFromCwd(cwd) {
+  if (!cwd || typeof cwd !== "string") return null;
+  const stripped = cwd.replace(/[\\/]+$/, "");
+  if (!stripped) return null;
+  const parts = stripped.split(/[\\/]/);
+  return parts[parts.length - 1] || null;
+}
+
+/**
+ * Derive the run status from a manifest.
+ *
+ * - `"running"`  when `endedAt` is unset (still active).
+ * - `"failed"`   when `endedAt` is set AND `exitCode >= 1`.
+ * - `"completed"` otherwise (ended cleanly or exit code unknown).
+ *
+ * A missing/null/non-numeric `exitCode` with `endedAt` set is treated as
+ * `"completed"` (preserves legacy behavior for manifests without exit code).
+ *
+ * @param {object} manifest
+ * @returns {"running"|"failed"|"completed"}
+ */
+function statusFromManifest(manifest) {
+  if (!manifest.endedAt) return "running";
+  const exitNum =
+    typeof manifest.exitCode === "number"
+      ? manifest.exitCode
+      : parseInt(manifest.exitCode, 10);
+  if (Number.isFinite(exitNum) && exitNum >= 1) return "failed";
+  return "completed";
+}
+
 export function aggregateRun(manifest) {
   const transcriptDir = listTranscriptDir();
   const result = {
@@ -353,7 +392,16 @@ export function aggregateRun(manifest) {
     brief: manifest.brief || null,
     startedAt: manifest.startedAt,
     endedAt: manifest.endedAt || null,
-    status: manifest.endedAt ? "completed" : "running",
+    status: statusFromManifest(manifest),
+    // B1 pass-through fields (additive — straight from the manifest).
+    cwd: manifest.cwd || null,
+    repo: repoFromCwd(manifest.cwd),
+    gitBranch: manifest.gitBranch || null,
+    exitCode: manifest.exitCode ?? null,
+    native: manifest.native ?? null,
+    sessionId: manifest.sessionId || null,
+    transcriptPath: manifest.transcriptPath || null,
+    claudeConfigDir: manifest.claudeConfigDir || null,
     ambiguous: false,
     taskId: manifest.taskId || manifest.taskIdAuto || inferTaskIdFromBranch(manifest.gitBranch) || null,
     taskIdExplicit: manifest.taskId || null,
