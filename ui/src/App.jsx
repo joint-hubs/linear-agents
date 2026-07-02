@@ -5,6 +5,7 @@ import Timeline from './screens/Timeline.jsx';
 import Runs from './screens/Runs.jsx';
 import RunDetail from './screens/RunDetail.jsx';
 import Costs from './screens/Costs.jsx';
+import Tasks from './screens/Tasks.jsx';
 
 export default function App() {
   return (
@@ -25,6 +26,9 @@ export default function App() {
             <NavLink to="/costs" className={({ isActive }) => isActive ? 'tab tab-active' : 'tab'}>
               Costs
             </NavLink>
+            <NavLink to="/tasks" className={({ isActive }) => isActive ? 'tab tab-active' : 'tab'}>
+              Tasks
+            </NavLink>
           </div>
         </nav>
         <div className="page">
@@ -34,6 +38,7 @@ export default function App() {
             <Route path="/runs" element={<Runs />} />
             <Route path="/runs/:id" element={<RunDetail />} />
             <Route path="/costs" element={<Costs />} />
+            <Route path="/tasks" element={<Tasks />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>

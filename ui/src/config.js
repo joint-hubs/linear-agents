@@ -17,3 +17,13 @@ export function linearUrl(taskId) {
   const base = LINEAR_PREFIXES[m[1]];
   return base ? base + taskId : null;
 }
+
+// Linear workspaces the queue endpoint (JOI-68) accepts via ?workspace=.
+// The picker on the Tasks screen (JOI-70) switches between them — each resolves
+// to its own API key server-side (linear-client.chooseApiKey). The first entry
+// is the default. See control-plane-plan §3.3 (workspace: FEN ▾).
+export const WORKSPACES = [
+  { id: 'jointhubs', label: 'FEN' },
+  { id: 'pisi', label: 'PISI' },
+];
+export const DEFAULT_WORKSPACE = WORKSPACES[0].id;
