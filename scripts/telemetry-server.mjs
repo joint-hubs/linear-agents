@@ -4,7 +4,7 @@
 //   --smoke: start, print ready, auto-shutdown after 10s (for CI/manual smoke test)
 
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 // Reuse the shared Linear GraphQL client (linear-client.mjs) — the same layer
@@ -13,6 +13,18 @@ import { dirname, join } from 'node:path';
 // directly. No MCP, no new client (control-plane-plan §3.1, DoD "reuse
 // scripts/linear-query.mjs" = reuse the Linear query layer).
 import { loadEnv, graphql } from './linear-client.mjs';
+// Pure launch logic (validation, kickoff prompt, wrapper .bat, loopback check)
+// lives in scripts/launch.mjs so it's unit-testable without the HTTP server.
+import {
+  SQUAD_ALLOWLIST,
+  TASK_ID_RE,
+  KICKOFF_TEMPLATES,
+  validateLaunch,
+  kickoffPrompt,
+  isLocalOrigin,
+  buildLaunchBat,
+  spawnLauncher,
+} from './launch.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
@@ -69,10 +81,34 @@ function json(res, status, data) {
 function corsPreflight(res) {
   res.writeHead(204, {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   });
   res.end();
+}
+
+// Read + parse a small JSON request body (POST /api/launch). Caps at 8 KB so a
+// runaway client can't stream forever. Rejects invalid JSON as a thrown error.
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (c) => {
+      data += c;
+      if (data.length > 8192) {
+        req.destroy();
+        reject(new Error('body too large (>8KB)'));
+      }
+    });
+    req.on('end', () => {
+      if (!data) return resolve({});
+      try {
+        resolve(JSON.parse(data));
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on('error', reject);
+  });
 }
 
 function log(method, path, status) {
@@ -267,6 +303,26 @@ async function fetchLinearQueue(workspace) {
 }
 
 // ---------------------------------------------------------------------------
+// Launch — POST /api/launch (L1b, control-plane-plan §3.1 + §5)
+// Spawns a NEW local terminal window running bin/<squad>.bat with LA_TASK_ID
+// set (so the run is tagged → appears in Live within 5 s) and the HOW-TO §4
+// kickoff prompt passed as the initial claude input (Q3 decision: full
+// auto-inject — zero manual paste; overrides the §3.3 clipboard trade-off).
+// Locked down: 127.0.0.1 bind + origin check, squad allowlist, taskId regex.
+// ---------------------------------------------------------------------------
+
+// Squads with a launcher (bin/<squad>.bat) AND a HOW-TO §4 kickoff template.
+// (Imported from launch.mjs — see SQUAD_ALLOWLIST, KICKOFF_TEMPLATES there.)
+
+// Write the wrapper to .state/ (gitignored) and return its path. One stable
+// name per (squad, taskId) — re-launching overwrites, no file accumulation.
+async function writeLaunchBat(squad, taskId, kickoff) {
+  const wrapper = join(root, '.state', `launch-${squad}-${taskId}.bat`);
+  await writeFile(wrapper, buildLaunchBat(squad, taskId, kickoff, root), 'utf8');
+  return wrapper;
+}
+
+// ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
@@ -283,7 +339,74 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // --- Only GET is supported (POST/PUT/DELETE → 404) ---
+    // --- POST /api/launch (L1b) ---
+    // Spawns a local agent window. Bound to 127.0.0.1 + origin-checked (AC3),
+    // squad allowlist + taskId regex (AC2). dryRun returns the kickoff + wrapper
+    // content without spawning (UI preview §3.3 + smoke). target:"vm" is
+    // recognized but not built in L1 (blocked on VM provisioning, §4) → 501.
+    if (method === 'POST' && path === '/api/launch') {
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/launch is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      let body;
+      try {
+        body = await readJsonBody(req);
+      } catch (err) {
+        json(res, 400, { error: 'invalid JSON body: ' + err.message });
+        log(method, path, 400);
+        return;
+      }
+      const v = validateLaunch(body);
+      if (!v.ok) {
+        json(res, v.status, { error: v.error });
+        log(method, path, v.status);
+        return;
+      }
+      const { taskId, squad, target, dryRun } = v;
+      const kickoff = kickoffPrompt(squad, taskId);
+      if (dryRun) {
+        json(res, 200, {
+          ok: true,
+          dryRun: true,
+          taskId,
+          squad,
+          target,
+          kickoffPrompt: kickoff,
+          launchBat: buildLaunchBat(squad, taskId, kickoff, root),
+        });
+        log(method, path, 200);
+        return;
+      }
+      if (target === 'vm') {
+        json(res, 501, {
+          error: 'vm target not implemented in L1 (blocked on VM provisioning; see control-plane-plan §4)',
+        });
+        log(method, path, 501);
+        return;
+      }
+      try {
+        const launchBatPath = await writeLaunchBat(squad, taskId, kickoff);
+        spawnLauncher(launchBatPath, root);
+        json(res, 200, {
+          ok: true,
+          taskId,
+          squad,
+          target,
+          spawned: true,
+          kickoffPrompt: kickoff,
+          launchBat: launchBatPath,
+        });
+        log(method, path, 200);
+      } catch (err) {
+        json(res, 500, { error: 'spawn failed: ' + err.message });
+        log(method, path, 500);
+      }
+      return;
+    }
+
+    // --- Only GET is supported beyond this point (other POST/PUT/DELETE → 404) ---
     if (method !== 'GET') {
       json(res, 404, { error: 'not found' });
       log(method, path, 404);
@@ -421,8 +544,8 @@ const server = createServer(async (req, res) => {
 // Start
 // ---------------------------------------------------------------------------
 
-server.listen(PORT, () => {
-  console.log(`Telemetry server listening on http://localhost:${PORT}`);
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`Telemetry server listening on http://127.0.0.1:${PORT} (loopback only — POST /api/launch is local-only, §5)`);
 
   if (isSmoke) {
     console.log('Smoke mode — will self-check endpoints then shut down');
@@ -438,14 +561,33 @@ server.listen(PORT, () => {
       '/api/linear/queue?workspace=jointhubs',
       '/api/live',
     ];
+    // L1b: also exercise POST /api/launch validation. dryRun=true returns 200
+    // WITHOUT spawning a window (so smoke is safe to run in CI / headless);
+    // the two bad-input cases assert 400 (AC2). No real agent is started.
+    const smokePosts = [
+      { name: 'dryRun valid', body: { taskId: 'JOI-51', squad: 'dev', target: 'local', dryRun: true }, expect: 200 },
+      { name: 'bad taskId', body: { taskId: 'evil!', squad: 'dev', target: 'local' }, expect: 400 },
+      { name: 'bad squad', body: { taskId: 'JOI-51', squad: 'pwn', target: 'local' }, expect: 400 },
+      { name: 'bad target', body: { taskId: 'JOI-51', squad: 'dev', target: 'mars' }, expect: 400 },
+    ];
     setTimeout(async () => {
       let failed = false;
       try {
-        const base = `http://localhost:${PORT}`;
+        const base = `http://127.0.0.1:${PORT}`;
         for (const p of smokePaths) {
           const res = await fetch(base + p);
           const ok = res.ok;
-          console.log(`  smoke ${p} -> ${res.status} ${ok ? 'OK' : 'FAIL'}`);
+          console.log(`  smoke GET ${p} -> ${res.status} ${ok ? 'OK' : 'FAIL'}`);
+          if (!ok) failed = true;
+        }
+        for (const c of smokePosts) {
+          const res = await fetch(base + '/api/launch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(c.body),
+          });
+          const ok = res.status === c.expect;
+          console.log(`  smoke POST /api/launch ${c.name} -> ${res.status} ${ok ? 'OK' : 'FAIL'}`);
           if (!ok) failed = true;
         }
       } catch (err) {
