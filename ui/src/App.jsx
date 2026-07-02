@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import Live from './screens/Live.jsx';
+import Timeline from './screens/Timeline.jsx';
 import Runs from './screens/Runs.jsx';
 import RunDetail from './screens/RunDetail.jsx';
 import Costs from './screens/Costs.jsx';
@@ -15,6 +16,9 @@ export default function App() {
             <NavLink to="/" end className={({ isActive }) => isActive ? 'tab tab-active' : 'tab'}>
               Live
             </NavLink>
+            <NavLink to="/timeline" className={({ isActive }) => isActive ? 'tab tab-active' : 'tab'}>
+              Timeline
+            </NavLink>
             <NavLink to="/runs" className={({ isActive }) => isActive ? 'tab tab-active' : 'tab'}>
               Runs
             </NavLink>
@@ -26,6 +30,7 @@ export default function App() {
         <div className="page">
           <Routes>
             <Route path="/" element={<Live />} />
+            <Route path="/timeline" element={<Timeline />} />
             <Route path="/runs" element={<Runs />} />
             <Route path="/runs/:id" element={<RunDetail />} />
             <Route path="/costs" element={<Costs />} />
