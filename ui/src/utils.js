@@ -66,10 +66,17 @@ export function taskLabel(run) {
 //   running  = endedAt null (still active)
 //   failed   = endedAt set AND exitCode >= 1
 //   done     = endedAt set AND exitCode 0 / unknown
-// Mirrors ledger.mjs statusFromManifest(). A missing/null exitCode with
-// endedAt set is treated as "done" (preserves legacy manifests).
+// The backend (ledger.mjs statusFromManifest) is the source of truth and
+// exposes `run.status` on every aggregated run. It uses "completed" where the
+// UI vocabulary is "done" — we normalize that here. Any other backend status
+// (e.g. a future "cancelled") falls through to the derived fallback so legacy
+// manifests without `status` keep working. (Review cross-ref D2.)
 export function statusLabel(run) {
   if (!run) return 'done';
+  if (run.status) {
+    if (run.status === 'running' || run.status === 'failed') return run.status;
+    if (run.status === 'completed' || run.status === 'done') return 'done';
+  }
   if (!run.endedAt) return 'running';
   const ec = typeof run.exitCode === 'number' ? run.exitCode : parseInt(run.exitCode, 10);
   if (Number.isFinite(ec) && ec >= 1) return 'failed';
