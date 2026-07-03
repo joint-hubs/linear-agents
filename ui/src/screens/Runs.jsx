@@ -22,7 +22,7 @@ function TaskChip({ run }) {
   const url = linearUrl(id);
   if (url)
     return (
-      <a className="link" href={url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+      <a className="link" href={url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
         {id} ↗
       </a>
     );

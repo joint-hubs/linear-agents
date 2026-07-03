@@ -127,7 +127,7 @@ export default function RunDetail() {
             <div style={{ fontSize: '1.2em', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               {run.squad || '—'} ·{' '}
               {taskUrl ? (
-                <a className="link" href={taskUrl} target="_blank" rel="noreferrer">
+                <a className="link" href={taskUrl} target="_blank" rel="noopener noreferrer">
                   {taskId} ↗
                 </a>
               ) : (

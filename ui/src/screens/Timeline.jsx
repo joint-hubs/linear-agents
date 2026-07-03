@@ -27,12 +27,20 @@ function topModel(run) {
   return mix.length ? mix[0].slug : '—';
 }
 
+function ErrorBanner({ message }) {
+  return (
+    <div className="api-banner" role="alert">
+      <span>⚠ Telemetry server unreachable: {message}. Retrying…</span>
+    </div>
+  );
+}
+
 function TaskLink({ taskId }) {
   if (!taskId) return <span className="chip">(untagged)</span>;
   const url = linearUrl(taskId);
   if (url)
     return (
-      <a className="link" href={url} target="_blank" rel="noreferrer">
+      <a className="link" href={url} target="_blank" rel="noopener noreferrer">
         {taskId} ↗
       </a>
     );
@@ -97,7 +105,7 @@ export default function Timeline() {
     (groups[k] = groups[k] || []).push(r);
   }
   const recent = (list) =>
-    Math.max(...list.map((r) => new Date(r.endedAt || r.startedAt || nowTs).getTime()));
+    Math.max(...list.map((r) => new Date(r.endedAt || nowTs).getTime()));
   const rows = Object.entries(groups)
     .filter(([k]) => k !== '(untagged)')
     .sort((a, b) => recent(b[1]) - recent(a[1]));
@@ -134,7 +142,7 @@ export default function Timeline() {
       <div className="page-title">Timeline</div>
       <div className="page-sub">Agent activity per task · bars = runs, color = squad</div>
 
-      {error && (
+      {error && !(runs && runs.length > 0) && (
         <div className="card api-down">
           <div className="card-h">Telemetry server unreachable</div>
           <div>
@@ -143,8 +151,9 @@ export default function Timeline() {
         </div>
       )}
 
-      {!error && (
+      {(!error || (runs && runs.length > 0)) && (
         <>
+          {error && <ErrorBanner message={error} />}
           <div className="tl-controls">
             {ZOOMS.map((z) => (
               <button
@@ -198,6 +207,7 @@ export default function Timeline() {
               </div>
 
               {rows.map(([task, list]) => {
+                const anyEnded = list.some((r) => r.endedAt);
                 const total = list.reduce((s, r) => s + (r.totals?.costUSD || 0), 0);
                 const repos = [...new Set(list.map((r) => r.repo).filter(Boolean))];
                 const bars = list
@@ -208,7 +218,7 @@ export default function Timeline() {
                     <div className="tl-rowlabel">
                       <TaskLink taskId={task === '(untagged)' ? null : task} />
                       <div className="cost">
-                        {fmtUSD(total)}
+                        {anyEnded ? fmtUSD(total) : '…'}
                         {repos.map((rp) => (
                           <span className="chip" key={rp} style={{ marginLeft: 6 }}>
                             {rp}
@@ -236,6 +246,15 @@ export default function Timeline() {
                           }
                           onMouseLeave={() => setHover(null)}
                           onClick={() => navigate('/runs/' + b.run.runId)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              navigate('/runs/' + b.run.runId);
+                            }
+                          }}
+                          tabIndex={0}
+                          role="button"
+                          aria-label={`${b.run.taskId || 'untagged'} — ${fmtUSD(b.run.totals?.costUSD || 0)} — ${b.run.squad || '—'}`}
                         />
                       ))}
                       {nowVisible && <div className="nowline" style={{ left: nowPct + '%' }} />}

@@ -35,7 +35,7 @@ function TaskChip({ run }) {
   const url = linearUrl(id);
   if (url) {
     return (
-      <a className="link" href={url} target="_blank" rel="noreferrer">
+      <a className="link" href={url} target="_blank" rel="noopener noreferrer">
         {id} ↗
       </a>
     );
@@ -65,6 +65,16 @@ function ModelBars({ run }) {
         </div>
       ))}
       {mix.length > 2 && <span className="muted">+{mix.length - 2} more</span>}
+    </div>
+  );
+}
+
+// Dismissible-looking but non-dismissing warning bar shown over last-known
+// dashboard data when the telemetry poll fails but prior runs still exist.
+function ErrorBanner({ message }) {
+  return (
+    <div className="api-banner" role="alert">
+      <span>⚠ Telemetry server unreachable: {message}. Retrying…</span>
     </div>
   );
 }
@@ -122,7 +132,7 @@ export default function Live() {
       <div className="page-title">Live</div>
       <div className="page-sub">Active runs · poll {POLL_MS / 1000}s</div>
 
-      {error && (
+      {error && !(runs && runs.length > 0) && (
         <div className="card api-down">
           <div className="card-h">Telemetry server unreachable</div>
           <div>
@@ -134,8 +144,9 @@ export default function Live() {
         </div>
       )}
 
-      {!error && (
+      {(error ? runs && runs.length > 0 : true) && (
         <>
+          {error && runs && runs.length > 0 && <ErrorBanner message={error} />}
           {/* KPI strip */}
           <div className="kpi-strip">
             <div className="kpi">

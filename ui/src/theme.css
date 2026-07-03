@@ -339,6 +339,17 @@
   flex: 1;
 }
 
+/* API-down banner (error banner over last-known state) */
+.api-banner {
+  background: rgba(255, 69, 58, 0.12);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
 /* API-down card (Live) */
 .api-down code,
 .empty code,

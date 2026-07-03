@@ -23,7 +23,7 @@ function TaskChip({ id }) {
   const url = linearUrl(id);
   if (url) {
     return (
-      <a className="link" href={url} target="_blank" rel="noreferrer">
+      <a className="link" href={url} target="_blank" rel="noopener noreferrer">
         {id} ↗
       </a>
     );
@@ -65,7 +65,7 @@ function WaitingRow({ task }) {
       </div>
       <div className="task-row-title">{task.title}</div>
       <div className="task-row-foot">
-        <a className="link" href={task.url || linearUrl(task.identifier)} target="_blank" rel="noreferrer">
+        <a className="link" href={task.url || linearUrl(task.identifier)} target="_blank" rel="noopener noreferrer">
           otwórz w Linear ↗
         </a>
       </div>

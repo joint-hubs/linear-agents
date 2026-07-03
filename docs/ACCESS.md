@@ -55,6 +55,23 @@ Serwery pomocnicze (opcjonalne):
 
 ---
 
+## Prywatność i ekspozycja danych (JOI-71, pt 4)
+
+**Decyzja: AKCEPTUJEMY** ekspozycję ścieżek FS i nazwy użytkownika OS w `/api/runs` oraz DOM — **bez maskowania**. Dotyczy pól emitowanych przez `scripts/ledger.mjs` (`aggregateRun`): `transcriptPath`, `claudeConfigDir`, `cwd`, `repo`, `gitBranch`. Serwer telemetryczny (`scripts/telemetry-server.mjs`) podaje je bez redakcji do UI.
+
+**Uzasadnienie:**
+- Serwer telemetryczny jest **localhost-only** (`localhost:7331`, uruchamiany ręcznie, nie przez launcher — patrz wyżej), jednoużytkownikowy dev (maszyna Mateusza). Brak zewnętrznej ekspozycji.
+- `transcriptPath` jest **funkcjonalnie potrzebny** w UI: `RunDetail.jsx` (`CopyPath`) kopiuje pełną ścieżkę do schowka, by Mateusz mógł otworzyć plik transcriptu lokalnie. Maskowanie (`C:\Users\mateu\` → `~/`) łamałoby ten przepływ.
+- Pole `title=` na `<code>` (tooltip) oraz `navigator.clipboard.writeText` również potrzebują pełnej ścieżki.
+
+**Twarde ograniczenie (P0):**
+- Serwer telemetryczny **NIGDY** nie może być proxy-owany zewnętrznie (ngrok / reverse-proxy / tunnel) bez dodania wcześniej maskowania. W takim przypadku wdrożyć redakcję w warstwie API (`scripts/telemetry-server.mjs` przed `json(res, ...)`) lub env-gate `TELEMETRY_REDACT_PATHS=1`, który maskuje `C:\Users\<user>\` → `~/` w `transcriptPath`/`claudeConfigDir`/`cwd` i wyłącza `CopyPath`.
+- Przed ew. external exposure potwierdzić z Mateuszem.
+
+**Status:** decyzja udokumentowana (DoD JOI-71 pt 4). Jeśli polityka się zmieni — zaktualizować ten punkt i wdrożyć maskowanie.
+
+---
+
 ## Label signaling
 
 - Definicje labelek/grup: `config/linear/labels.json`
