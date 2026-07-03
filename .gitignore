@@ -29,6 +29,8 @@ agents/*/tasks/
 agents/*/cache/
 agents/*/history.jsonl
 agents/*/plugins/
+agents/*/plans/
+agents/*/todos/
 agents/*/.last-update-result.json
 
 # spike scratch (re-runnable T-A1 evidence; see docs/adr/0002)
