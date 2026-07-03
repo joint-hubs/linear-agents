@@ -72,7 +72,11 @@ function resolveTeamKey(teamKeyFlag) {
 /** Build branch name from identifier, optional slug, and optional team-key override. */
 function buildBranchName(identifier, slug, teamKeyFlag) {
   const { key, number } = parseIdentifier(identifier);
-  const teamKey = resolveTeamKey(teamKeyFlag).toLowerCase();
+  // The identifier carries the authoritative team prefix (JOI-70 → joi-70-…).
+  // Using env LINEAR_TEAM_KEY here produced wrong-team branches (JOI-70 with
+  // LINEAR_TEAM_KEY=FEN → fen-70-…), which then poisoned branch-based task
+  // attribution in telemetry. --team-key stays as an explicit override.
+  const teamKey = (teamKeyFlag ? resolveTeamKey(teamKeyFlag) : key).toLowerCase();
   const safeSlug = sanitizeSlug(slug);
   return `${teamKey}-${number}-${safeSlug}`;
 }
