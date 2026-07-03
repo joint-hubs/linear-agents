@@ -1,16 +1,26 @@
 {
   "permissions": {
-    "defaultMode": "default",
     "allow": [
-      "Read", "Grep", "Glob", "Write",
-      "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)",
+      "Read",
+      "Grep",
+      "Glob",
+      "Write",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
       "mcp__linear__*"
     ],
     "deny": [
-      "Bash(rm -rf:*)", "Bash(git push:*)"
-    ]
+      "Bash(rm -rf:*)",
+      "Bash(git push:*)"
+    ],
+    "defaultMode": "default"
   },
+  "theme": "dark",
   "mcpServers": {
-    "linear": { "type": "sse", "url": "https://mcp.linear.app/sse" }
+    "linear": {
+      "type": "sse",
+      "url": "https://mcp.linear.app/sse"
+    }
   }
 }

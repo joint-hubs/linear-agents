@@ -9,6 +9,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { assertBudget, checkOverBudgetMarker } from "./cost-guard.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -290,6 +291,23 @@ async function main() {
   const budget = Number(process.env.COST_BUDGET_USD_PER_TASK ?? 2);
   const pricing = loadPricing();
 
+  // Pre-flight: if a prior over-budget marker exists, refuse to proceed
+  // unless --force is passed (not yet implemented — delete marker manually).
+  if (!flags.dryRun) {
+    const marker = checkOverBudgetMarker();
+    if (marker) {
+      console.error(
+        `\nPRE-FLIGHT BLOCKED: over-budget marker from previous session exists.\n` +
+        `  Task:   ${marker.task}\n` +
+        `  Spent:  $${marker.spent.toFixed(2)}\n` +
+        `  Budget: $${marker.budget.toFixed(2)}\n` +
+        `  At:     ${marker.at}\n` +
+        `\nDelete .state/over-budget.json to override.\n`,
+      );
+      process.exit(1);
+    }
+  }
+
   // --dry-run: print plan and exit (no API key required)
   if (flags.dryRun) {
     const key = process.env.OPENROUTER_API_KEY || "(not set — set OPENROUTER_API_KEY in .env)";
@@ -340,6 +358,12 @@ async function main() {
 
   // Aggregate
   const { models, total } = aggregate(filtered, pricing);
+
+  // Loop check: if spend exceeds budget, write marker and exit non-zero
+  const guard = assertBudget({ spent: total.cost, budget, label: "cost-report" });
+  if (guard.stop) {
+    process.exit(1);
+  }
 
   // Output
   if (flags.json) {

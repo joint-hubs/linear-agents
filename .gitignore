@@ -6,7 +6,9 @@ agents/*/settings.local.json
 **/*.secret
 
 # runtime I/O (keep folders, ignore content)
+.state/
 planning/inbox/*
+!planning/inbox/sample.md
 planning/briefs/*
 !planning/**/.gitkeep
 
@@ -14,8 +16,31 @@ planning/briefs/*
 agents/*/projects/
 agents/*/sessions/
 agents/*/logs/
+agents/*/paste-cache/
 agents/*/.credentials.json
+agents/*/mcp-needs-auth-cache.json
 agents/*/*.local.json
+agents/*/.claude.json
+agents/*/.last-cleanup
+agents/*/backups/
+agents/*/file-history/
+agents/*/shell-snapshots/
+agents/*/tasks/
+agents/*/cache/
+agents/*/history.jsonl
+agents/*/plugins/
+agents/*/plans/
+agents/*/todos/
+agents/*/.last-update-result.json
+
+# spike scratch (re-runnable T-A1 evidence; see docs/adr/0002)
+.spike-*/
+
+# throwaway test scripts (kept locally for re-verification, not committed)
+scripts/_test_*.mjs
+
+# agent bridge scratch (Pro review reports, worker io)
+.agent-io/
 
 # node / ui
 node_modules/
@@ -28,3 +53,5 @@ build/
 .DS_Store
 Thumbs.db
 *.log
+
+.env.backup-fen

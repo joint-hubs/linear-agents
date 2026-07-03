@@ -1,15 +1,23 @@
-# Control panel (UI) — plan
+# LA Observability
 
-> Later. Cel: jeden panel do zarządzania całością. Rekomendacja: **rozszerzyć istniejący
-> `Desktop/experiments/0_linear`** (Next.js, ma już LINEAR_API_KEY + OPENROUTER_API_KEY).
+Vite + React dashboard for Linear Agents telemetry.
 
-## Zakres (MVP)
-1. **Przełącznik workspace/team Linear** — łatwa zmiana na którym Linearze pracujesz.
-2. **Uruchamianie agentów** — przyciski odpalające `bin/*.bat` (lub agenty w tle), status każdego.
-3. **Inbox artefaktów** — drag&drop voice memo + plików → `planning/inbox/` (wejście PLAN).
-4. **Widoki sygnałów** — odbicie zapisanych filtrów Linear: 🔔 needs / 🤖 working / ⚠️ attention / 🚧 blocked.
-5. **Cost dashboard** — `scripts/cost-report.mjs` → wydatki per agent/task, alert `over-budget`.
+## Run
 
-## Uwagi
-- Sekrety przez `.env` (nie w UI).
-- Decyzja do potwierdzenia: rozszerzyć `0_linear` czy osobny minimalny panel? (patrz STATE.md §5).
+**Terminal 1** — start the telemetry server:
+
+```
+node scripts/telemetry-server.mjs
+```
+
+**Terminal 2** — start the dev server:
+
+```
+cd ui
+npm install
+npm run dev
+```
+
+Open http://localhost:5173.
+
+The `/api` path is proxied to `http://localhost:7331` in dev mode. Override the API base URL by setting the `VITE_API_BASE` environment variable.

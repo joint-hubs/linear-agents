@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LA Observability — UX v3 mockup</title>
+<!--
+  Interactive mockup for docs/ui/ux-design-v3.md. Single file, no deps — open directly.
+  Demo clock is frozen at 2026-07-02 12:04 so the dataset always renders the same.
+  The timeline math (window → bar left/width) is the reference implementation for F2.
+-->
+<style>
+  :root {
+    --bg:#f5f5f7; --surface:#fff; --text:#1d1d1f; --muted:#6e6e73; --accent:#0071e3;
+    --warn:#ff9500; --ok:#34c759; --danger:#ff3b30; --border:#d2d2d7;
+    --sq-plan:#5e5ce6; --sq-dev:#0071e3; --sq-review:#ff9500; --sq-test:#34c759; --sq-cadence:#6e6e73;
+    --radius:12px; --shadow:0 1px 3px rgba(0,0,0,.06);
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif; }
+  .shell { max-width:1100px; margin:0 auto; padding:20px 24px 60px; }
+  .mono { font-family:ui-monospace,Consolas,monospace; font-size:12px; }
+
+  /* top nav */
+  .topnav { position:sticky; top:0; z-index:50; display:flex; align-items:center; gap:24px;
+            background:var(--surface); border-bottom:1px solid var(--border); padding:12px 0; }
+  .brand { font-size:17px; font-weight:600; }
+  .tabs { display:flex; gap:22px; flex:1; }
+  .tab { color:var(--muted); font-weight:500; cursor:pointer; padding:4px 2px 10px;
+         border-bottom:2px solid transparent; }
+  .tab:hover { color:var(--text); }
+  .tab.on { color:var(--accent); border-color:var(--accent); }
+  .apidot { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--ok); }
+
+  .h1 { font-size:26px; font-weight:700; margin:22px 0 2px; }
+  .sub { color:var(--muted); margin:0 0 18px; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+          box-shadow:var(--shadow); padding:14px 16px; }
+  .grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+  .klabel { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  .kval { font-size:23px; font-weight:700; margin-top:2px; }
+  .kpi-warn { border-color:var(--warn); }
+  .kpi-warn .kval { color:var(--warn); }
+  .sec { color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:.05em;
+         margin:26px 0 10px; }
+  table { width:100%; border-collapse:collapse; background:var(--surface);
+          border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
+  th { text-align:left; color:var(--muted); font-size:11px; text-transform:uppercase;
+       letter-spacing:.04em; padding:9px 12px; border-bottom:1px solid var(--border);
+       background:var(--surface); font-weight:600; }
+  td { padding:8px 12px; border-bottom:1px solid #ececee; font-size:13px; }
+  tr:last-child td { border-bottom:none; }
+  tr.click { cursor:pointer; }
+  tr.click:hover td { background:#fafafa; }
+
+  .badge { display:inline-block; font-size:11px; border-radius:4px; padding:2px 8px; font-weight:500; }
+  .b-ok { background:rgba(52,199,89,.14); color:#1e8f43; }
+  .b-warn { background:rgba(255,149,0,.14); color:#b56a00; }
+  .b-fail { background:rgba(255,59,48,.12); color:#c22e26; }
+  .b-run { background:rgba(0,113,227,.12); color:var(--accent); }
+  .chip { display:inline-block; font-size:11px; border-radius:4px; padding:2px 7px;
+          background:var(--bg); color:var(--muted); border:1px solid var(--border); }
+  .chip.click { cursor:pointer; }
+  .chip.click:hover { border-color:var(--accent); color:var(--accent); }
+  a.task { color:var(--accent); text-decoration:none; font-weight:500; }
+  a.task:hover { text-decoration:underline; }
+
+  /* live cards */
+  .livegrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:14px; }
+  .runcard { cursor:pointer; }
+  .runcard:hover { border-color:var(--accent); }
+  .rc-top { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .pulse { width:9px; height:9px; border-radius:50%; animation:pu 1.6s ease infinite; }
+  @keyframes pu { 0%,100%{opacity:1} 50%{opacity:.25} }
+  .rc-squad { font-weight:700; text-transform:uppercase; font-size:13px; }
+  .rc-meta { color:var(--muted); font-size:12px; margin:2px 0; }
+  .mixbar { display:flex; height:6px; border-radius:3px; overflow:hidden; margin:8px 0 6px; background:#ececee; }
+  .rc-foot { display:flex; justify-content:space-between; font-size:12px; color:var(--muted); }
+  .rc-foot b { color:var(--text); }
+
+  .alert { display:flex; align-items:center; gap:10px; padding:10px 14px; margin-bottom:8px;
+           background:rgba(255,149,0,.09); border:1px solid rgba(255,149,0,.35);
+           border-radius:10px; font-size:13px; }
+  .alert .go { margin-left:auto; color:var(--accent); cursor:pointer; white-space:nowrap; }
+
+  .banner { padding:10px 14px; border-radius:10px; margin-bottom:14px; font-size:13px;
+            background:rgba(255,149,0,.09); border:1px solid rgba(255,149,0,.35); }
+
+  /* filters */
+  .frow { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+  .frow input[type=text], .frow select { padding:6px 10px; border:1px solid var(--border);
+      border-radius:8px; font:inherit; background:var(--surface); }
+  .count { margin-left:auto; color:var(--muted); font-size:12px; }
+
+  /* timeline */
+  .tl-controls { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .zbtn { padding:5px 12px; border:1px solid var(--border); background:var(--surface);
+          border-radius:8px; cursor:pointer; font:inherit; font-size:12px; }
+  .zbtn.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .sqf { display:flex; gap:10px; margin-left:auto; font-size:12px; color:var(--muted); flex-wrap:wrap; }
+  .sqf label { display:flex; gap:4px; align-items:center; cursor:pointer; }
+  .swatch { width:10px; height:10px; border-radius:2px; display:inline-block; }
+  .tl { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+        overflow:hidden; }
+  .tl-axis { display:flex; border-bottom:1px solid var(--border); color:var(--muted);
+             font-size:11px; height:26px; align-items:center; position:relative; }
+  .tl-label { width:170px; min-width:170px; padding:0 12px; border-right:1px solid var(--border); }
+  .tl-track { position:relative; flex:1; height:100%; }
+  .tl-tick { position:absolute; top:0; bottom:0; border-left:1px solid #ececee; padding:4px 0 0 5px; }
+  .tl-row { display:flex; border-bottom:1px solid #ececee; min-height:52px; }
+  .tl-row:last-child { border-bottom:none; }
+  .tl-rowlabel { width:170px; min-width:170px; padding:8px 12px; border-right:1px solid var(--border); }
+  .tl-rowlabel .cost { color:var(--muted); font-size:11px; }
+  .bar { position:absolute; top:14px; height:20px; border-radius:4px; cursor:pointer; opacity:.9; }
+  .bar:hover { opacity:1; outline:2px solid rgba(0,0,0,.18); }
+  .bar.live { animation:pu 1.6s ease infinite; }
+  .bar.fail { box-shadow:inset 3px 0 0 var(--danger); }
+  .nowline { position:absolute; top:0; bottom:0; width:0; border-left:2px solid var(--danger); z-index:5; }
+  .nowline:after { content:"now"; position:absolute; top:2px; left:3px; color:var(--danger); font-size:10px; }
+  .legend { display:flex; gap:16px; margin-top:10px; color:var(--muted); font-size:12px; flex-wrap:wrap; }
+
+  #tip { position:fixed; display:none; z-index:99; background:#1d1d1f; color:#fff; font-size:12px;
+         padding:8px 11px; border-radius:8px; pointer-events:none; max-width:280px; line-height:1.5; }
+
+  .meta { display:grid; grid-template-columns:repeat(3,1fr); gap:10px 22px; margin:14px 0; }
+  .meta .klabel { margin-bottom:1px; }
+  .back { color:var(--accent); cursor:pointer; font-size:13px; display:inline-block; margin-bottom:12px; }
+  .copy { cursor:pointer; border:1px solid var(--border); background:var(--surface);
+          border-radius:6px; padding:2px 8px; font-size:11px; margin-left:8px; }
+  .hbar { height:8px; background:#ececee; border-radius:4px; overflow:hidden; }
+  .hfill { height:100%; background:var(--accent); border-radius:4px; }
+  .brow { margin-bottom:9px; }
+  .blab { display:flex; justify-content:space-between; font-size:12px; margin-bottom:3px; }
+  .note { color:var(--muted); font-size:12px; margin-top:18px; }
+  .empty { color:var(--muted); text-align:center; padding:34px; }
+  .ptoggle { display:flex; gap:0; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .ptoggle .zbtn { border:none; border-radius:0; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="topnav">
+    <span class="brand">LA Observability</span>
+    <div class="tabs" id="tabs"></div>
+    <span class="apidot"><span class="dot"></span> api :7331 · updated 12:04:00</span>
+  </div>
+  <div id="view"></div>
+</div>
+<div id="tip"></div>
+
+<script>
+/* ============================== demo dataset ============================== */
+const NOW = new Date('2026-07-02T12:04:00');
+const LINEAR = { PISI:'https://linear.app/pisi/issue/', FEN:'https://linear.app/jointhubs/issue/' };
+const SQCOLOR = { plan:'var(--sq-plan)', dev:'var(--sq-dev)', review:'var(--sq-review)',
+                  test:'var(--sq-test)', cadence:'var(--sq-cadence)' };
+
+// Shape mirrors /api/runs after backend change B1 (repo/branch/exitCode exposed).
+const RUNS = [
+ r('2026-06-30T09-02-plan','plan','PISI-98','office','main','2026-06-30T09:02','2026-06-30T09:41',0,
+   {'claude-opus-4.8':1.92,'minimax-m3':.39},{_lead:1.92,decomposer:.27,'spec-reviewer':.12},512,38),
+ r('2026-06-30T10-12-dev','dev','PISI-98','office','feat/pisi-98-similarity','2026-06-30T10:12','2026-06-30T12:35',0,
+   {'glm-5.2':1.51,'minimax-m3':.33},{_lead:1.51,implementer:.24,'test-writer':.09},640,52),
+ r('2026-06-30T13-05-review','review','PISI-98','office','feat/pisi-98-similarity','2026-06-30T13:05','2026-06-30T13:42',0,
+   {'glm-5.2':.62,'deepseek-v4-pro':.21,'kimi-k2.7':.11},{_lead:.62,'first-pass':.21,security:.11},310,18),
+ r('2026-07-01T09-30-dev','dev','PISI-98','office','feat/pisi-98-similarity','2026-07-01T09:30','2026-07-01T09:47',1,
+   {'glm-5.2':.31},{_lead:.31},120,9),                                        // review return → fix attempt failed
+ r('2026-07-01T10-05-dev','dev','PISI-98','office','feat/pisi-98-similarity','2026-07-01T10:05','2026-07-01T11:12',0,
+   {'glm-5.2':.98,'minimax-m3':.18},{_lead:.98,implementer:.18},420,33),
+ r('2026-07-01T12-40-test','test','PISI-98','office','feat/pisi-98-similarity','2026-07-01T12:40','2026-07-01T13:18',0,
+   {'minimax-m3':.36,'deepseek-v4-flash':.08},{_lead:.36,'e2e-runner':.08},260,14),
+ r('2026-07-02T11-49-dev','dev','PISI-98','office','feat/pisi-98-similarity','2026-07-02T11:49',null,null,
+   {},{},0,0),                                                                // RUNNING now
+ r('2026-06-30T09-15-plan','plan','FEN-11','linear-agents','main','2026-06-30T09:15','2026-06-30T09:58',0,
+   {'claude-opus-4.8':1.74,'minimax-m3':.22},{_lead:1.74,decomposer:.22},450,31),
+ r('2026-06-30T14-20-dev','dev','FEN-11','linear-agents','feat/fen-11-roast','2026-06-30T14:20','2026-06-30T16:02',0,
+   {'glm-5.2':1.12,'minimax-m3':.26},{_lead:1.12,implementer:.26},520,44),
+ r('2026-07-01T08-45-review','review','FEN-11','linear-agents','feat/fen-11-roast','2026-07-01T08:45','2026-07-01T09:20',0,
+   {'glm-5.2':.44,'deepseek-v4-pro':.12},{_lead:.44,'first-pass':.12},240,12),
+ r('2026-07-01T14-00-test','test','FEN-11','linear-agents','feat/fen-11-roast','2026-07-01T14:00','2026-07-01T14:26',1,
+   {'minimax-m3':.29},{_lead:.29},180,10),                                    // deploy failed (exit 1)
+ r('2026-07-01T15-10-plan','plan','FEN-12','linear-agents','main','2026-07-01T15:10','2026-07-01T15:55',0,
+   {'claude-opus-4.8':2.05},{_lead:2.05},380,27,true),                        // ambiguous transcript match
+ r('2026-07-02T09-02-dev','dev','FEN-12','linear-agents','feat/fen-12','2026-07-02T09:02','2026-07-02T10:44',0,
+   {'glm-5.2':1.31,'minimax-m3':.21},{_lead:1.31,implementer:.21},560,47),
+ r('2026-07-02T12-01-review','review','FEN-12','linear-agents','feat/fen-12','2026-07-02T12:01',null,null,{},{},0,0), // RUNNING
+ r('2026-07-02T09-00-cadence','cadence',null,'linear-agents','main','2026-07-02T09:00',null,null,{},{},0,0),          // STALE >2h
+];
+function r(runId,squad,taskId,repo,branch,startedAt,endedAt,exitCode,byModel,byAgent,inK,outK,amb){
+  const costUSD = Object.values(byModel).reduce((s,v)=>s+v,0);
+  return { runId,squad,taskId,repo,gitBranch:branch,startedAt,endedAt,exitCode,
+           ambiguous:!!amb, byModel, byAgent,
+           totals:{ inputTokens:inK*1000, outputTokens:outK*1000, costUSD },
+           transcriptPath:'agents\\'+squad+'\\projects\\C--...-'+(repo||'x')+'\\'+runId+'.jsonl' };
+}
+
+/* ============================== derivations =============================== */
+const fmt$ = n => n>=10 ? '$'+Math.round(n) : '$'+n.toFixed(2);
+const fmtTok = n => n>=1e6 ? (n/1e6).toFixed(1)+'M' : n>=1e3 ? Math.round(n/1e3)+'k' : n;
+const hhmm = iso => iso ? iso.slice(11,16) : '—';
+const dmy = iso => iso ? iso.slice(5,10).replace('-','/') : '—';
+const P = iso => new Date(iso).getTime();
+function status(run){ if(!run.endedAt) return (NOW-P(run.startedAt) > 2*3600e3) ? 'stale' : 'running';
+                      return run.exitCode>=1 ? 'failed' : 'done'; }
+function dur(run){ const ms=(run.endedAt?P(run.endedAt):+NOW)-P(run.startedAt);
+                   const m=Math.floor(ms/60000); return m>=60?Math.floor(m/60)+'h '+String(m%60).padStart(2,'0')+'m':m+'m'; }
+function taskLink(id){ if(!id) return '<span class="chip">(untagged)</span>';
+  const pfx=id.split('-')[0], url=LINEAR[pfx];
+  return url?`<a class="task" href="${url}${id}" target="_blank" onclick="event.stopPropagation()">${id} ↗</a>`:id; }
+const stBadge = { done:'<span class="badge b-ok">done</span>', failed:'<span class="badge b-fail">failed</span>',
+  running:'<span class="badge b-run">running</span>', stale:'<span class="badge b-warn">stale</span>' };
+function topModel(run){ const e=Object.entries(run.byModel).sort((a,b)=>b[1]-a[1]);
+  if(!e.length) return '—'; const t=run.totals.costUSD;
+  return e[0][0]+(e.length>1?` (+${e.length-1})`:''); }
+
+/* ============================== app state ================================ */
+const state = { tab:'live', detail:null, tlWin:72, tlSquads:{plan:1,dev:1,review:1,test:1,cadence:1},
+                runsF:{q:'',squad:'',status:'',repo:'',task:'',amb:false}, period:'all' };
+const TABS = [['live','Live'],['timeline','Timeline'],['runs','Runs'],['costs','Costs']];
+function go(tab,patch){ state.tab=tab; state.detail=null; if(patch) Object.assign(state.runsF,patch); render(); }
+function openRun(id){ state.detail=id; state.tab='runs'; render(); window.scrollTo(0,0); }
+
+/* ============================== views ==================================== */
+function vLive(){
+  const act = RUNS.filter(x=>!x.endedAt);
+  const today = RUNS.filter(x=>x.startedAt.startsWith('2026-07-02'));
+  const c = today.reduce((s,x)=>s+x.totals.costUSD,0);
+  const tok = today.reduce((s,x)=>s+x.totals.inputTokens+x.totals.outputTokens,0);
+  const attn = RUNS.filter(x=>x.ambiguous).map(x=>({run:x,msg:'transcript match ambiguous → verify cost'}))
+    .concat(act.filter(x=>status(x)==='stale').map(x=>({run:x,msg:'running > 2 h — stale?'})));
+  return `<div class="h1">Live</div><p class="sub">Agent monitor · poll 5 s</p>
+  <div class="grid4">
+    <div class="card"><div class="klabel">Active now</div><div class="kval">${act.length}</div></div>
+    <div class="card"><div class="klabel">Cost today</div><div class="kval">${fmt$(c)}</div></div>
+    <div class="card"><div class="klabel">Tokens today</div><div class="kval">${fmtTok(tok)}</div></div>
+    <div class="card ${attn.length?'kpi-warn':''}"><div class="klabel">Needs attention</div><div class="kval">${attn.length?'⚠ '+attn.length:'0'}</div></div>
+  </div>
+  <div class="sec">Active runs</div>
+  ${act.length?`<div class="livegrid">`+act.map(x=>{
+    const st=status(x);
+    return `<div class="card runcard" onclick="openRun('${x.runId}')">
+      <div class="rc-top"><span class="pulse" style="background:${st==='stale'?'var(--warn)':'var(--ok)'}"></span>
+        <span class="rc-squad" style="color:${SQCOLOR[x.squad]}">${x.squad}</span>
+        ${taskLink(x.taskId)} <span class="chip">${x.repo}</span>
+        ${st==='stale'?stBadge.stale:''}</div>
+      <div class="rc-meta mono">${x.gitBranch}</div>
+      <div class="mixbar"><div style="flex:1;background:${SQCOLOR[x.squad]};opacity:.35"></div></div>
+      <div class="rc-foot"><span>elapsed <b>${dur(x)}</b></span>
+        <span title="cost appears after the run ends">cost <b>…</b></span></div>
+    </div>`;}).join('')+`</div>`
+  :`<div class="empty">No agents running. Start one: <span class="mono">bin\\dev.bat</span></div>`}
+  <div class="sec">Recently finished</div>
+  <table><tr><th>Ended</th><th>Squad</th><th>Task</th><th>Repo</th><th>Dur</th><th>Cost</th><th>Status</th></tr>
+  ${RUNS.filter(x=>x.endedAt).sort((a,b)=>P(b.endedAt)-P(a.endedAt)).slice(0,10).map(x=>{
+    const st=status(x);
+    return `<tr class="click" onclick="openRun('${x.runId}')"><td>${dmy(x.endedAt)} ${hhmm(x.endedAt)}</td>
+     <td style="color:${SQCOLOR[x.squad]};font-weight:600">${x.squad}</td><td>${taskLink(x.taskId)}</td>
+     <td><span class="chip">${x.repo}</span></td><td>${dur(x)}</td><td>${fmt$(x.totals.costUSD)}</td>
+     <td>${stBadge[st]}${x.ambiguous?' <span class="badge b-warn">ambiguous</span>':''}</td></tr>`;}).join('')}
+  </table>
+  ${attn.length?`<div class="sec">Needs attention</div>`+attn.map(a=>
+    `<div class="alert">⚠ <span class="mono">${a.run.runId}</span> — ${a.msg}
+     <span class="go" onclick="openRun('${a.run.runId}')">open →</span></div>`).join(''):''}`;
+}
+
+function vTimeline(){
+  const winMs = state.tlWin*3600e3, end = +NOW + winMs*.04, start = end - winMs;
+  const runs = RUNS.filter(x=>state.tlSquads[x.squad]);
+  const groups = {};
+  runs.forEach(x=>{ const k=x.taskId||'(untagged)'; (groups[k]=groups[k]||[]).push(x); });
+  const rows = Object.entries(groups).sort((a,b)=>Math.max(...b[1].map(x=>P(x.endedAt||NOW)))-Math.max(...a[1].map(x=>P(x.endedAt||NOW))));
+  const pct = t => ((t-start)/(end-start)*100);
+  // axis ticks: one per day (72h window) or per 6h (24h)
+  const step = state.tlWin<=24 ? 6*3600e3 : 24*3600e3;
+  let ticks=''; for(let t=Math.ceil(start/step)*step; t<end; t+=step){
+    const d=new Date(t); ticks+=`<div class="tl-tick" style="left:${pct(t)}%">${state.tlWin<=24?d.getHours()+':00':(d.getMonth()+1)+'/'+d.getDate()}</div>`; }
+  return `<div class="h1">Timeline</div><p class="sub">Agent activity per task · bars = runs, color = squad</p>
+  <div class="tl-controls">
+    ${[24,72,168].map(h=>`<button class="zbtn ${state.tlWin===h?'on':''}"
+       onclick="state.tlWin=${h};render()">${h===24?'Day':h===72?'3 days':'Week'}</button>`).join('')}
+    <div class="sqf">${Object.keys(SQCOLOR).map(s=>`<label><input type="checkbox" ${state.tlSquads[s]?'checked':''}
+       onchange="state.tlSquads['${s}']^=1;render()"><span class="swatch" style="background:${SQCOLOR[s]}"></span>${s}</label>`).join('')}</div>
+  </div>
+  <div class="tl">
+    <div class="tl-axis"><div class="tl-label">task</div><div class="tl-track">${ticks}
+      <div class="nowline" style="left:${pct(+NOW)}%"></div></div></div>
+    ${rows.map(([task,list])=>{
+      const total=list.reduce((s,x)=>s+x.totals.costUSD,0);
+      const repos=[...new Set(list.map(x=>x.repo))];
+      const bars=list.filter(x=>P(x.endedAt||NOW)>start && P(x.startedAt)<end).map(x=>{
+        const l=Math.max(0,pct(P(x.startedAt))), w=Math.max(.5,pct(P(x.endedAt||NOW))-l);
+        const st=status(x);
+        return `<div class="bar ${!x.endedAt?'live':''} ${st==='failed'?'fail':''}"
+          style="left:${l}%;width:${w}%;background:${SQCOLOR[x.squad]}"
+          onclick="openRun('${x.runId}')"
+          onmousemove="tip(event,'<b>${x.runId}</b><br>${x.squad} · ${dur(x)} · ${st}<br>${fmt$(x.totals.costUSD)} · ${topModel(x)}')"
+          onmouseout="tipOff()"></div>`;}).join('');
+      return `<div class="tl-row"><div class="tl-rowlabel">${taskLink(task==='(untagged)'?null:task)}
+        <div class="cost">${fmt$(total)} · ${repos.map(rp=>`<span class="chip">${rp}</span>`).join(' ')}</div></div>
+        <div class="tl-track">${bars}<div class="nowline" style="left:${pct(+NOW)}%"></div></div></div>`;
+    }).join('')}
+  </div>
+  <div class="legend">${Object.entries(SQCOLOR).map(([s,c])=>`<span><span class="swatch" style="background:${c}"></span> ${s}</span>`).join('')}
+    <span>▮ pulsing = running</span><span style="color:var(--danger)">▏red edge = failed</span></div>`;
+}
+
+function vRuns(){
+  if(state.detail) return vDetail(RUNS.find(x=>x.runId===state.detail));
+  const f=state.runsF;
+  const list=RUNS.filter(x=>{
+    if(f.q && !(x.runId+(x.taskId||'')+x.squad).toLowerCase().includes(f.q.toLowerCase())) return false;
+    if(f.squad && x.squad!==f.squad) return false;
+    if(f.status && status(x)!==f.status) return false;
+    if(f.repo && x.repo!==f.repo) return false;
+    if(f.task && x.taskId!==f.task) return false;
+    if(f.amb && !x.ambiguous) return false;
+    return true;
+  }).sort((a,b)=>P(b.startedAt)-P(a.startedAt));
+  const opts=(arr,cur,lab)=>`<option value="">${lab}</option>`+arr.map(v=>`<option ${v===cur?'selected':''}>${v}</option>`).join('');
+  return `<div class="h1">Runs</div><p class="sub">History &amp; drilldown</p>
+  <div class="frow">
+    <input type="text" placeholder="search…" value="${f.q}" oninput="state.runsF.q=this.value;render()">
+    <select onchange="state.runsF.squad=this.value;render()">${opts(Object.keys(SQCOLOR),f.squad,'squad: all')}</select>
+    <select onchange="state.runsF.status=this.value;render()">${opts(['running','done','failed','stale'],f.status,'status: all')}</select>
+    <select onchange="state.runsF.repo=this.value;render()">${opts([...new Set(RUNS.map(x=>x.repo))],f.repo,'repo: all')}</select>
+    <select onchange="state.runsF.task=this.value;render()">${opts([...new Set(RUNS.map(x=>x.taskId).filter(Boolean))],f.task,'task: all')}</select>
+    <label style="font-size:12px;color:var(--muted)"><input type="checkbox" ${f.amb?'checked':''}
+      onchange="state.runsF.amb=this.checked;render()"> only ambiguous</label>
+    <span class="count">${list.length} runs</span></div>
+  <table><tr><th>Started</th><th>Squad</th><th>Task</th><th>Repo</th><th>Dur</th><th>Cost</th><th>Tokens</th><th>Models</th><th>Status</th></tr>
+  ${list.map(x=>{const st=status(x);
+    return `<tr class="click" onclick="openRun('${x.runId}')">
+    <td>${dmy(x.startedAt)} ${hhmm(x.startedAt)}</td>
+    <td style="color:${SQCOLOR[x.squad]};font-weight:600">${x.squad}</td>
+    <td>${taskLink(x.taskId)}</td><td><span class="chip">${x.repo}</span></td>
+    <td>${dur(x)}</td><td>${x.endedAt?fmt$(x.totals.costUSD):'…'}</td>
+    <td>${fmtTok(x.totals.inputTokens+x.totals.outputTokens)}</td>
+    <td class="mono">${topModel(x)}</td>
+    <td>${stBadge[st]}${x.ambiguous?' <span class="badge b-warn">amb</span>':''}</td></tr>`;}).join('')
+   ||'<tr><td colspan="9" class="empty">No runs match.</td></tr>'}
+  </table>`;
+}
+
+function vDetail(x){
+  const st=status(x);
+  const rows=(obj,name)=>Object.entries(obj).sort((a,b)=>b[1]-a[1]).map(([k,v])=>{
+    const max=Math.max(...Object.values(obj));
+    return `<tr><td class="mono">${k}</td><td>${fmt$(v)}</td>
+     <td style="width:45%"><div class="hbar"><div class="hfill" style="width:${v/max*100}%"></div></div></td></tr>`;}).join('')
+    ||`<tr><td colspan="3" class="empty">— (transcript parsed after run ends)</td></tr>`;
+  return `<span class="back" onclick="state.detail=null;render()">← Runs</span>
+  ${x.ambiguous?`<div class="banner">⚠ <b>Transcript match was ambiguous</b> — cost may belong to another
+    session. Verify: <span class="mono">${x.transcriptPath}</span></div>`:''}
+  <div class="card">
+    <div style="font-size:19px;font-weight:700"><span style="color:${SQCOLOR[x.squad]}">${x.squad}</span>
+      · ${taskLink(x.taskId)} ${stBadge[st]}</div>
+    <div class="mono" style="color:var(--muted);margin-top:2px">${x.runId}</div>
+    <div class="meta">
+      <div><div class="klabel">repo</div><span class="chip">${x.repo}</span></div>
+      <div><div class="klabel">branch</div><span class="mono">${x.gitBranch}</span></div>
+      <div><div class="klabel">provider</div>openrouter</div>
+      <div><div class="klabel">started → ended</div>${hhmm(x.startedAt)} → ${x.endedAt?hhmm(x.endedAt):'…'} (${dur(x)})</div>
+      <div><div class="klabel">exit code</div>${x.exitCode==null?'—':x.exitCode}</div>
+      <div><div class="klabel">tokens in / out</div>${fmtTok(x.totals.inputTokens)} / ${fmtTok(x.totals.outputTokens)}</div>
+    </div>
+    <div class="klabel">transcript</div>
+    <span class="mono">${x.transcriptPath}</span><button class="copy" onclick="copyPath(this,'${x.runId}')">copy</button>
+    <div style="margin-top:12px"><span class="back" style="margin:0"
+      onclick="go('runs',{task:'${x.taskId||''}',squad:'',status:'',repo:'',q:'',amb:false})">View all runs of this task →</span></div>
+  </div>
+  <div class="grid4" style="margin-top:14px">
+    <div class="card"><div class="klabel">Cost</div><div class="kval">${fmt$(x.totals.costUSD)}</div></div>
+    <div class="card"><div class="klabel">Input</div><div class="kval">${fmtTok(x.totals.inputTokens)}</div></div>
+    <div class="card"><div class="klabel">Output</div><div class="kval">${fmtTok(x.totals.outputTokens)}</div></div>
+    <div class="card"><div class="klabel">Duration</div><div class="kval">${dur(x)}</div></div>
+  </div>
+  <div class="sec">By model</div><table><tr><th>Model</th><th>Cost</th><th></th></tr>${rows(x.byModel)}</table>
+  <div class="sec">By agent</div><table><tr><th>Agent</th><th>Cost</th><th></th></tr>${rows(x.byAgent)}</table>`;
+}
+
+function vCosts(){
+  const inPeriod = x => state.period==='all' ? true :
+    P(x.startedAt) >= +NOW - (state.period==='7d'?7:30)*86400e3;
+  const runs=RUNS.filter(inPeriod);
+  const tot=runs.reduce((s,x)=>s+x.totals.costUSD,0);
+  const agg=key=>{const o={};runs.forEach(x=>{const k=x[key]||'—';o[k]=(o[k]||0)+x.totals.costUSD});return o;};
+  const byDay={},byModel={},byAgent={},byTask={};
+  runs.forEach(x=>{
+    byDay[x.startedAt.slice(0,10)]=(byDay[x.startedAt.slice(0,10)]||0)+x.totals.costUSD;
+    Object.entries(x.byModel).forEach(([k,v])=>byModel[k]=(byModel[k]||0)+v);
+    Object.entries(x.byAgent).forEach(([k,v])=>byAgent[k]=(byAgent[k]||0)+v);
+    const t=x.taskId||'(untagged)';
+    byTask[t]=byTask[t]||{cost:0,runs:0,squads:new Set(),repos:new Set()};
+    byTask[t].cost+=x.totals.costUSD; byTask[t].runs++; byTask[t].squads.add(x.squad); byTask[t].repos.add(x.repo);
+  });
+  const bars=o=>{const max=Math.max(...Object.values(o),0.001);
+    return Object.entries(o).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div class="brow">
+    <div class="blab"><span class="mono">${k}</span><span>${fmt$(v)}</span></div>
+    <div class="hbar"><div class="hfill" style="width:${v/max*100}%"></div></div></div>`).join('');};
+  return `<div class="h1">Costs</div><p class="sub">Where the money goes</p>
+  <div class="frow"><div class="ptoggle">${['7d','30d','all'].map(p=>
+    `<button class="zbtn ${state.period===p?'on':''}" onclick="state.period='${p}';render()">${p}</button>`).join('')}</div></div>
+  <div class="grid4">
+    <div class="card"><div class="klabel">Total</div><div class="kval">${fmt$(tot)}</div></div>
+    <div class="card"><div class="klabel">Runs</div><div class="kval">${runs.length}</div></div>
+    <div class="card"><div class="klabel">Avg $/run</div><div class="kval">${fmt$(runs.length?tot/runs.length:0)}</div></div>
+    <div class="card"><div class="klabel">Tasks</div><div class="kval">${Object.keys(byTask).length}</div></div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
+    <div><div class="sec">By squad</div>${bars(agg('squad'))}
+         <div class="sec">By day</div>${bars(byDay)}</div>
+    <div><div class="sec">By model</div>${bars(byModel)}
+         <div class="sec">By agent (subagent attribution)</div>${bars(byAgent)}</div>
+  </div>
+  <div class="sec">By task</div>
+  <table><tr><th>Task</th><th>Repo</th><th>Squads</th><th>Runs</th><th>Cost</th><th></th></tr>
+  ${Object.entries(byTask).sort((a,b)=>b[1].cost-a[1].cost).map(([t,v])=>{
+    const max=Math.max(...Object.values(byTask).map(z=>z.cost));
+    return `<tr class="click" onclick="go('runs',{task:'${t==='(untagged)'?'':t}',q:'',squad:'',status:'',repo:'',amb:false})">
+    <td>${taskLink(t==='(untagged)'?null:t)}</td>
+    <td>${[...v.repos].map(rp=>`<span class="chip">${rp}</span>`).join(' ')}</td>
+    <td>${[...v.squads].map(s=>`<span class="swatch" style="background:${SQCOLOR[s]};margin-right:3px" title="${s}"></span>`).join('')}</td>
+    <td>${v.runs}</td><td>${fmt$(v.cost)}</td>
+    <td style="width:30%"><div class="hbar"><div class="hfill" style="width:${v.cost/max*100}%"></div></div></td></tr>`;}).join('')}
+  </table>
+  <p class="note">Costs computed from transcripts × config/models.json pricing.
+  Cross-check billed $: <span class="mono">node scripts/cost-report.mjs</span> (OpenRouter Activity).</p>`;
+}
+
+/* ============================== plumbing ================================= */
+function tip(ev,html){ const t=document.getElementById('tip'); t.innerHTML=html; t.style.display='block';
+  t.style.left=Math.min(ev.clientX+14,innerWidth-300)+'px'; t.style.top=(ev.clientY+14)+'px'; }
+function tipOff(){ document.getElementById('tip').style.display='none'; }
+function copyPath(btn,runId){ const p=RUNS.find(z=>z.runId===runId).transcriptPath;
+  try{ navigator.clipboard.writeText(p); btn.textContent='copied ✓';
+  setTimeout(()=>btn.textContent='copy',1200);}catch(e){ prompt('Copy path:',p); } }
+function render(){
+  document.getElementById('tabs').innerHTML = TABS.map(([id,l]) =>
+    `<span class="tab ${state.tab===id?'on':''}" onclick="go('${id}')">${l}</span>`).join('');
+  document.getElementById('view').innerHTML =
+    state.tab==='live'?vLive():state.tab==='timeline'?vTimeline():state.tab==='runs'?vRuns():vCosts();
+}
+render();
+</script>
+</body>
+</html>
