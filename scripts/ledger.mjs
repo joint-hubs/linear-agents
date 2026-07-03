@@ -383,7 +383,44 @@ function statusFromManifest(manifest) {
   return "completed";
 }
 
-export function aggregateRun(manifest) {
+/**
+ * Parse every session .jsonl in the transcript dir ONCE into a shared index.
+ *
+ * `scanRuns()` passes this index to each WINDOW-mode `aggregateRun` so the
+ * transcript directory is parsed a single time across all runs, instead of
+ * each run re-globbing + re-parsing the whole dir. This turns the old
+ * O(runs × transcripts) scan into O(transcripts + runs) — critical once the
+ * transcript dir grows past a handful of sessions (161 files / 43 MB here
+ * made /api/runs take 5–11 s; the index path parses them once total).
+ *
+ * EXACT-mode runs (sessionId set) don't use the index — they parse only their
+ * own single transcript file, which is already cheap.
+ *
+ * Returns `null` when the transcript dir is missing/unreadable so callers can
+ * fall through to the empty-result path. Each entry is `{ path, parsed }`
+ * where `parsed` is the full `parseTranscript()` result (cwd, gitBranch,
+ * turns) — the match + aggregation logic in `aggregateRun` is unchanged, it
+ * just iterates this pre-parsed list instead of globbing itself.
+ */
+function buildTranscriptIndex(transcriptDir) {
+  if (!transcriptDir || !existsSync(transcriptDir)) return null;
+  let sessionFiles;
+  try {
+    sessionFiles = readdirSync(transcriptDir).filter(
+      (f) => f.endsWith(".jsonl") && statSync(join(transcriptDir, f)).isFile(),
+    );
+  } catch {
+    return null;
+  }
+  const index = [];
+  for (const sessionFile of sessionFiles) {
+    const sessionPath = join(transcriptDir, sessionFile);
+    index.push({ path: sessionPath, parsed: parseTranscript(sessionPath) });
+  }
+  return index;
+}
+
+export function aggregateRun(manifest, transcriptIndex) {
   const transcriptDir = listTranscriptDir();
   const result = {
     runId: manifest.runId,
@@ -452,23 +489,32 @@ export function aggregateRun(manifest) {
   const windowStart = new Date(startedAt.getTime() - 2 * 60 * 1000);
   const windowEnd = new Date(endedAt.getTime() + 2 * 60 * 1000);
 
-  if (!existsSync(transcriptDir)) return result;
-
-  let sessionFiles;
-  try {
-    sessionFiles = readdirSync(transcriptDir).filter(
-      (f) => f.endsWith(".jsonl") && statSync(join(transcriptDir, f)).isFile(),
-    );
-  } catch {
-    return result;
+  // Session list to match against. `scanRuns()` passes a pre-parsed
+  // `transcriptIndex` (built once for ALL runs) so we don't re-glob + re-parse
+  // the whole transcript dir per run. Direct callers (e.g. _test_ledger) omit
+  // it and we fall back to glob+parse inline — same behavior as before.
+  let sessions;
+  if (transcriptIndex) {
+    sessions = transcriptIndex;
+  } else {
+    if (!existsSync(transcriptDir)) return result;
+    let sessionFiles;
+    try {
+      sessionFiles = readdirSync(transcriptDir).filter(
+        (f) => f.endsWith(".jsonl") && statSync(join(transcriptDir, f)).isFile(),
+      );
+    } catch {
+      return result;
+    }
+    sessions = sessionFiles.map((f) => {
+      const sessionPath = join(transcriptDir, f);
+      return { path: sessionPath, parsed: parseTranscript(sessionPath) };
+    });
   }
 
   let matchedCount = 0;
 
-  for (const sessionFile of sessionFiles) {
-    const sessionPath = join(transcriptDir, sessionFile);
-    const parsed = parseTranscript(sessionPath);
-
+  for (const { parsed } of sessions) {
     // Check cwd + gitBranch match
     if (parsed.cwd !== manifest.cwd && normalizePathForHash(parsed.cwd) !== normalizePathForHash(manifest.cwd)) {
       continue;
@@ -507,6 +553,12 @@ export async function scanRuns() {
     return [];
   }
 
+  // Build the transcript index ONCE and share it across all WINDOW-mode runs.
+  // Without this, each of the N window-mode runs re-parses the entire
+  // transcript dir → O(runs × transcripts). EXACT-mode runs ignore the index
+  // (they parse only their own sessionId file).
+  const transcriptIndex = buildTranscriptIndex(listTranscriptDir());
+
   const results = [];
   for (const f of files) {
     let manifest;
@@ -515,7 +567,7 @@ export async function scanRuns() {
     } catch {
       continue; // skip malformed manifests
     }
-    results.push(aggregateRun(manifest));
+    results.push(aggregateRun(manifest, transcriptIndex));
   }
 
   // Sort by startedAt descending (newest first)
