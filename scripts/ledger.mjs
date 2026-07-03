@@ -120,6 +120,32 @@ export function inferTaskIdFromBranch(branch) {
   return null;
 }
 
+/**
+ * Infer a Linear task ID from free text (a kickoff prompt). First match wins —
+ * kickoffs lead with the task ("Weź task JOI-61…", "DEV task PISI-98: …").
+ *
+ * @param {string|null|undefined} text
+ * @returns {string|null}
+ */
+export function inferTaskIdFromText(text) {
+  if (!text || typeof text !== "string") return null;
+  const m = text.match(/\b(FEN|PISI|JOI)-(\d{1,5})\b/i);
+  if (m) return `${m[1].toUpperCase()}-${m[2]}`;
+  return null;
+}
+
+/**
+ * Fold kickoff-derived task id into an aggregateRun result. Kickoff evidence
+ * beats branch inference (branches go stale between runs and have carried the
+ * wrong team prefix); explicit `taskId` and `taskIdAuto` still win.
+ */
+function applyKickoffTaskId(result, parsed, manifest) {
+  const kickoff = inferTaskIdFromText(parsed.firstUserText);
+  if (!kickoff) return;
+  result.taskIdKickoff = kickoff;
+  if (!manifest.taskId && !manifest.taskIdAuto) result.taskId = kickoff;
+}
+
 export function listTranscriptDir() {
   const projectsDir = join(homedir(), ".claude", "projects");
   const hashName = cwdToHashName(process.cwd());
@@ -157,6 +183,7 @@ export function parseTranscript(absPath) {
     sessionId: null,
     cwd: null,
     gitBranch: null,
+    firstUserText: null,
     turns: [],
   };
 
@@ -179,6 +206,21 @@ export function parseTranscript(absPath) {
     if (line.cwd && !result.cwd) result.cwd = line.cwd;
     if (line.gitBranch && !result.gitBranch) result.gitBranch = line.gitBranch;
 
+    // First non-sidechain user message — the operator's kickoff. Used for
+    // task-id inference: branches go stale between runs, kickoffs don't.
+    if (!result.firstUserText && line.type === "user" && !line.isSidechain) {
+      const c = line.message?.content ?? line.content;
+      let text = "";
+      if (typeof c === "string") text = c;
+      else if (Array.isArray(c)) {
+        text = c
+          .filter((p) => p && p.type === "text" && typeof p.text === "string")
+          .map((p) => p.text)
+          .join("\n");
+      }
+      if (text.trim()) result.firstUserText = text.slice(0, 2000);
+    }
+
     // Only assistant lines carry usage data
     if (line.type !== "assistant") continue;
     if (!line.message || !line.message.usage) continue;
@@ -197,9 +239,18 @@ export function parseTranscript(absPath) {
     });
   }
 
-  // Merge subagent transcripts from sibling subagents/ directory
-  const subagentsDir = join(parentDir, "subagents");
-  if (existsSync(subagentsDir) && statSync(subagentsDir).isDirectory()) {
+  // Merge subagent transcripts. Real Claude Code layout: a directory NAMED
+  // like the session (transcript path minus .jsonl) containing subagents/ —
+  // i.e. <dir>/<sessionId>/subagents/agent-*.jsonl. The flat sibling
+  // <dir>/subagents/ is kept as a fallback for older/synthetic layouts.
+  const subagentsDirCandidates = [
+    join(parentDir, basename(absPath, ".jsonl"), "subagents"),
+    join(parentDir, "subagents"),
+  ];
+  const subagentsDir = subagentsDirCandidates.find(
+    (d) => existsSync(d) && statSync(d).isDirectory(),
+  );
+  if (subagentsDir) {
     let agentFiles;
     try {
       agentFiles = readdirSync(subagentsDir).filter(
@@ -230,7 +281,9 @@ export function parseTranscript(absPath) {
 
         result.turns.push({
           model: msg.model || null,
-          attributionAgent: line.attributionAgent || null,
+          // Sidechain lines carry attributionAgent (role name); fall back to
+          // the agentId so subagent usage never collapses into "_lead".
+          attributionAgent: line.attributionAgent || (line.agentId ? `agent-${line.agentId}` : null),
           inputTokens: usage.input_tokens ?? 0,
           outputTokens: usage.output_tokens ?? 0,
           cacheCreation: usage.cache_creation_input_tokens ?? 0,
@@ -310,6 +363,11 @@ function aggregateTurns(result, parsed) {
     result.byModel[modelKey].outputTokens += turn.outputTokens;
     result.byModel[modelKey].cacheReadInputTokens += turn.cacheRead;
     result.byModel[modelKey].cacheCreationInputTokens += turn.cacheCreation;
+
+    // Last activity (ISO strings compare lexicographically)
+    if (turn.ts && (!result.lastActivityAt || turn.ts > result.lastActivityAt)) {
+      result.lastActivityAt = turn.ts;
+    }
 
     // By agent
     const agentKey = turn.attributionAgent || "_lead";
@@ -420,7 +478,132 @@ function buildTranscriptIndex(transcriptDir) {
   return index;
 }
 
-export function aggregateRun(manifest, transcriptIndex) {
+// ---------------------------------------------------------------------------
+// Late transcript discovery — for manifests whose launcher never ran
+// `run-manifest end` (killed terminal, crash): sessionId is null, EXACT mode
+// can't run, and the legacy WINDOW match looks in the wrong pool (the
+// server's own cwd hash — NOT the squad's CLAUDE_CONFIG_DIR, NOT other
+// repos' hashes). Mirrors the candidate-root logic of run-manifest cmdEnd,
+// but assigns files to runs GLOBALLY (greedy closest-start, strictly 1:1)
+// so a burst of aborted launches can't all claim the same session file and
+// double-count its cost.
+// ---------------------------------------------------------------------------
+
+const BIRTH_BEFORE_MS = 30 * 1000; // session file may slightly predate manifest start
+const BIRTH_AFTER_MS = 120 * 1000; // claude creates the session file right after launch
+const AMBIGUOUS_MARGIN_MS = 2000;
+
+/** All hash subdirectories of a `<configDir>/projects` root (existing dirs only). */
+function projectHashDirs(projectsRoot) {
+  try {
+    return readdirSync(projectsRoot)
+      .map((e) => join(projectsRoot, e))
+      .filter((p) => statSync(p).isDirectory());
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Candidate transcript roots for a manifest.
+ *
+ * manifest.cwd is NOT trusted for hash derivation: launchers spawned from an
+ * arbitrary directory (dashboard /api/launch, .bat double-clicked elsewhere)
+ * record that directory as cwd, while the claude process itself runs from the
+ * repo — so the transcript lands under a different hash. Instead we scan ALL
+ * hash dirs under the squad/config projects root (there are few) and let the
+ * birthtime window + global 1:1 assignment discriminate.
+ *
+ * The ~/.claude fallback is used ONLY when no squad/config root exists —
+ * squad launchers always run with CLAUDE_CONFIG_DIR, so matching a squad run
+ * against the user's personal sessions would be a false positive.
+ */
+function candidateRootsForManifest(manifest) {
+  const roots = [];
+  if (manifest.claudeConfigDir && manifest.cwd) {
+    roots.push(...projectHashDirs(join(resolve(manifest.cwd, manifest.claudeConfigDir), "projects")));
+  }
+  if (roots.length === 0 && manifest.squad) {
+    // Killed-window manifests never got claudeConfigDir (launchers set it
+    // AFTER `run-manifest start`; `end` backfills it — which never ran).
+    // Squad config dirs are deterministic: <repo>/agents/<squad>.
+    roots.push(...projectHashDirs(join(root, "agents", manifest.squad, "projects")));
+  }
+  if (roots.length === 0 && manifest.cwd) {
+    roots.push(join(homedir(), ".claude", "projects", cwdToHashName(manifest.cwd)));
+  }
+  return roots;
+}
+
+/**
+ * Batch-discover transcripts for sessionId-less manifests.
+ *
+ * Returns Map<runId, { path, ambiguous }>. A transcript file is assigned to
+ * at most ONE run (the one whose startedAt is closest to the file birthtime,
+ * within [start-30s, start+120s]). `ambiguous` is set when a competing
+ * run/file was within 2 s of the winning assignment.
+ *
+ * @param {Array<object>} manifests
+ * @returns {Map<string, {path: string, ambiguous: boolean}>}
+ */
+export function discoverTranscriptsForRuns(manifests) {
+  const dirCache = new Map();
+  const pairs = [];
+
+  for (const manifest of manifests) {
+    if (manifest.sessionId || !manifest.startedAt || !manifest.cwd) continue;
+    const started = new Date(manifest.startedAt).getTime();
+    if (!Number.isFinite(started)) continue;
+
+    for (const rootDir of candidateRootsForManifest(manifest)) {
+      if (!dirCache.has(rootDir)) {
+        let files = [];
+        try {
+          files = readdirSync(rootDir)
+            .filter((f) => f.endsWith(".jsonl"))
+            .map((f) => {
+              const p = join(rootDir, f);
+              const st = statSync(p);
+              if (!st.isFile()) return null;
+              const birth =
+                st.birthtime && st.birthtime.getTime() ? st.birthtime.getTime() : st.mtime.getTime();
+              return { path: p, birth };
+            })
+            .filter(Boolean);
+        } catch {
+          files = [];
+        }
+        dirCache.set(rootDir, files);
+      }
+
+      for (const { path, birth } of dirCache.get(rootDir)) {
+        if (birth >= started - BIRTH_BEFORE_MS && birth <= started + BIRTH_AFTER_MS) {
+          pairs.push({ runId: manifest.runId, path, diff: Math.abs(birth - started) });
+        }
+      }
+    }
+  }
+
+  pairs.sort((a, b) => a.diff - b.diff);
+  const byRun = new Map();
+  const usedFiles = new Set();
+  for (const pair of pairs) {
+    if (byRun.has(pair.runId) || usedFiles.has(pair.path)) continue;
+    const contested = pairs.some(
+      (o) =>
+        o !== pair &&
+        (o.runId === pair.runId || o.path === pair.path) &&
+        !byRun.has(o.runId) &&
+        !usedFiles.has(o.path) &&
+        o.diff - pair.diff < AMBIGUOUS_MARGIN_MS,
+    );
+    byRun.set(pair.runId, { path: pair.path, ambiguous: contested });
+    usedFiles.add(pair.path);
+  }
+  return byRun;
+}
+
+export function aggregateRun(manifest, transcriptIndex, discoveredMatch) {
   const transcriptDir = listTranscriptDir();
   const result = {
     runId: manifest.runId,
@@ -444,6 +627,7 @@ export function aggregateRun(manifest, transcriptIndex) {
     taskIdExplicit: manifest.taskId || null,
     taskIdAuto: manifest.taskIdAuto || null,
     taskIdInferred: inferTaskIdFromBranch(manifest.gitBranch) || null,
+    lastActivityAt: null,
     totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 },
     byModel: {},
     byAgent: {},
@@ -463,6 +647,7 @@ export function aggregateRun(manifest, transcriptIndex) {
     }
 
     result.ambiguous = manifest.sessionAmbiguous || false;
+    applyKickoffTaskId(result, parsed, manifest);
 
     // Filter turns to those within the run window [startedAt, endedAt+60s]
     // so that pre-existing session data (same sessionId, earlier turns) is excluded.
@@ -479,6 +664,43 @@ export function aggregateRun(manifest, transcriptIndex) {
 
     aggregateTurns(result, filtered);
     return result;
+  }
+
+  // -----------------------------------------------------------------------
+  // LATE DISCOVERY: no sessionId (launcher never ran `end`) — locate the
+  // run's own transcript via config-dir-aware roots + birthtime instead of
+  // falling straight into the legacy window match. `scanRuns()` passes the
+  // batch-assigned match (or null when none); standalone callers trigger a
+  // single-run discovery here (discoveredMatch === undefined).
+  // -----------------------------------------------------------------------
+  const lateMatch =
+    discoveredMatch === undefined
+      ? discoverTranscriptsForRuns([manifest]).get(manifest.runId) || null
+      : discoveredMatch;
+
+  if (lateMatch) {
+    const parsed = parseTranscript(lateMatch.path);
+    const runStart = new Date(manifest.startedAt).getTime();
+    const runEnd = manifest.endedAt
+      ? new Date(manifest.endedAt).getTime() + 60 * 1000
+      : Date.now() + 60 * 1000;
+    const filtered = {
+      turns: parsed.turns.filter((t) => {
+        if (!t.ts) return false;
+        const ts = new Date(t.ts).getTime();
+        return ts >= runStart && ts <= runEnd;
+      }),
+    };
+    if (filtered.turns.length > 0) {
+      result.ambiguous = lateMatch.ambiguous || false;
+      result.sessionId = basename(lateMatch.path, ".jsonl");
+      result.transcriptPath = lateMatch.path;
+      result.discovered = true;
+      applyKickoffTaskId(result, parsed, manifest);
+      aggregateTurns(result, filtered);
+      return result;
+    }
+    // Discovered file had no in-window turns — fall through to legacy window.
   }
 
   // -----------------------------------------------------------------------
@@ -559,15 +781,23 @@ export async function scanRuns() {
   // (they parse only their own sessionId file).
   const transcriptIndex = buildTranscriptIndex(listTranscriptDir());
 
-  const results = [];
+  // Read all manifests first, then batch-discover transcripts for the
+  // sessionId-less ones (1:1 file↔run assignment across the whole scan).
+  const manifests = [];
   for (const f of files) {
-    let manifest;
     try {
-      manifest = JSON.parse(readFileSync(join(runsDir, f), "utf8"));
+      manifests.push(JSON.parse(readFileSync(join(runsDir, f), "utf8")));
     } catch {
       continue; // skip malformed manifests
     }
-    results.push(aggregateRun(manifest, transcriptIndex));
+  }
+  const discovered = discoverTranscriptsForRuns(manifests);
+
+  const results = [];
+  for (const manifest of manifests) {
+    results.push(
+      aggregateRun(manifest, transcriptIndex, discovered.get(manifest.runId) || null),
+    );
   }
 
   // Sort by startedAt descending (newest first)
