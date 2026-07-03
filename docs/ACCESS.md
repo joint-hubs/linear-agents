@@ -75,6 +75,6 @@ Serwery pomocnicze (opcjonalne):
 ## Label signaling
 
 - Definicje labelek/grup: `config/linear/labels.json`
-- Protokół: `docs/linear-signaling-protocol.md`
+- Protokół: `docs/decisions/linear-signaling-protocol.md`
 - Bootstrap: `node scripts/bootstrap-linear.mjs` (idempotentny)
 - Push: `node scripts/linear-push.mjs` (GraphQL, zero deps)

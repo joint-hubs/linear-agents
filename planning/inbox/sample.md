@@ -9,7 +9,7 @@ chciałbym żeby digest cadence pokazywał wiek zadań w WIP bo teraz nie wiem k
 - `docs/prd/prd-cadence.md` — PRD CADENCE squad: collector zbiera stan (throughput, In Progress/Review, blocked, escalated, over-budget, aging WIP), retro wykrywa drift, digest raportuje.
 - `agents/cadence/agents/collector.md` — obecny sub-agent collector: co zwraca, jakie pola z Linear czyta.
 - `agents/cadence/agents/digest.md` — obecny sub-agent digest: format raportu, sekcje, target audience (Mateusz).
-- `docs/agent-0-cadence.md` — spec koncepcyjna CADENCE: pętla, read-mostly, trigger.
+- `docs/agents/agent-0-cadence.md` — spec koncepcyjna CADENCE: pętla, read-mostly, trigger.
 
 ## Kontekst
 

@@ -23,13 +23,30 @@ Fenix/
 ├── .env.example               # szablon kluczy (OPENROUTER/ANTHROPIC/LINEAR/GCP/LAMBDA)
 │
 ├── docs/                      # cała koncepcja (źródło prawdy projektu)
+│   ├── README.md              # indeks docs
 │   ├── 00-overview.md         # master workflow
 │   ├── REPO-STRUCTURE.md      # ten plik
-│   ├── agent-0..4-*.md        # specyfikacje 5 agentów
-│   ├── model-comparison-and-routing.md
-│   ├── design-review-and-gaps.md
-│   ├── linear-signaling-protocol.md
-│   ├── README.md              # indeks docs
+│   ├── ACCESS.md              # loginy/porty/URL/sekrety (rule #6)
+│   ├── STATE.md               # stan budowy: zrobione / w toku / jak uruchomić (rule #7)
+│   ├── FENIX_WORKFLOW.md      # model workflowu (stany/labelki/DoR/DoD/escalation)
+│   ├── HOW-TO-RUN-AGENTS.md   # operator runbook (kolejność launcherów + prompty)
+│   ├── BUILD-BACKLOG.md       # plan wykonawczy (backlog zadań)
+│   ├── agents/                # specyfikacje 5 agentów + dev-readiness
+│   │   ├── agent-0-cadence.md … agent-4-test.md
+│   │   └── dev-readiness.md
+│   ├── decisions/             # decyzje/konwencje/krytyka
+│   │   ├── model-comparison-and-routing.md
+│   │   ├── design-review-and-gaps.md
+│   │   ├── linear-signaling-protocol.md
+│   │   └── cost-optimization.md
+│   ├── ops/                   # devops: deploy + remote execution
+│   │   ├── ci-cd.md
+│   │   └── remote-agent-execution.md
+│   ├── prd/                   # PRDy per squad + panel (prd-planning/development/review/testing/cadence, gantt-panel-prd, telemetry-panel-prd, prd-docs-to-linear-comments)
+│   ├── plans/                 # plany implementacji (00-build-plan, dry-run-launcher-pattern, finish-squads-plan)
+│   ├── adr/                   # Architecture Decision Records (0001–0005 + template)
+│   ├── backlog/               # pozycje backlogu (model-candidates, pr-review-loop-release-versioning)
+│   ├── ui/                    # kontrakty UI + mockup (ux-design-v3, observability-platform-plan, control-plane-plan, monitoring-collab-spec, mockups/)
 │   ├── diagrams/              # *.puml (źródło) + *.png (render, zweryfikowane)
 │   └── research/              # 13 notatek research (snapshot; kanon w Second Brain vault)
 │
@@ -70,7 +87,7 @@ Fenix/
 - **Izolacja:** każdy `.bat` ustawia `CLAUDE_CONFIG_DIR=agents/<agent>` → własne settings/agents/skills/MCP. Nigdy nie dziedziczy `~/.claude` (freestyle).
 - **Sekrety poza gitem:** `.bat` czyta klucze z `.env` (gitignored) / zmiennych środowiskowych. `settings.json` zawiera tylko nie-sekretne: model ids, mcpServers, permissions.
 - **Routing modeli:** źródło prawdy = `config/models.json`; odzwierciedlone w `.bat` (ANTHROPIC_MODEL + DEFAULT_OPUS/SONNET/HAIKU) i `settings.json`.
-- **Linear metadane:** definicje w `config/linear/` (labelki/statusy/templates); bootstrap przez skrypt. Patrz [signaling-protocol](linear-signaling-protocol.md).
+- **Linear metadane:** definicje w `config/linear/` (labelki/statusy/templates); bootstrap przez skrypt. Patrz [signaling-protocol](decisions/linear-signaling-protocol.md).
 - **Język:** kod/commity/docs techniczne EN; treści user-facing do Mateusza PL (przez MiniMax M3).
 - **Diagramy:** `.puml` to źródło; `.png` render lokalny (`scripts/render-diagrams.sh`, Java 21 + smetana).
 
@@ -84,4 +101,4 @@ Fenix/
 2. **Po podaniu 5 wejść** (workspace+bot `@flow`, projects.json, GCP VM, Lambda, klucze): wypełnić sekrety/configi, `bootstrap-linear.mjs`, P0 safeguards (cost/idempotency/rollback).
 3. **Pilot:** 1 agent end-to-end (PLAN→Linear) ręcznie, potem DEV.
 4. **UI:** control-panel (rozszerzenie 0_linear).
-5. **Autonomia:** dopiero gdy P0 spełnione (patrz [design-review §6](design-review-and-gaps.md)).
+5. **Autonomia:** dopiero gdy P0 spełnione (patrz [design-review §6](decisions/design-review-and-gaps.md)).

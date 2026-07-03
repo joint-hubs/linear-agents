@@ -85,16 +85,16 @@ maturity: backlog-v1
 - [ ] **T-D1 · PLAN e2e** (bramki HITL przez `needs:*`+emoji) → realny epik.
 - [~] **T-D2 · DEV squad** — pick(dep-aware,WIP=1)→plan-mode(✅)→kod→In Review; safeguards (checkpoint→STATE.md, fallback, escalation). **wiring DONE + dry-run verified 2026-06-29 (commits c9fcfa2 etc.); live pilot DEFERRED (needs real FEN task + interactive dev.bat). See docs/STATE.md Faza F.**
 - [x] **T-D3 · REVIEW squad** — wiring DONE + dry-run verified 2026-06-29 (c5a3b4d); live pilot deferred.
-- [ ] **T-D4 · TEST squad** ⛔ (czeka na GCP VM) — deployer **przygotowuje + prosi Mateusza o ręczny trigger CI/CD** (nie deployuje sam po SSH); runner testuje zdeployowaną apkę (synthetic data) → Done. Patrz `docs/ci-cd.md`.
-- [ ] **T-D4a · CI/CD workflows** *(DeepSeek)* — `.github/workflows/deploy-vm.yml` + `deploy-lambda.yml` (manual `workflow_dispatch`; inputy; **Lambda `instance_ip` required**) + `scripts/notify-linear.mjs`. Szkielety w `docs/ci-cd.md`. ⛔ secrets od Mateusza. Verify: `gh workflow run` z parametrami → deploy + health-check.
-- [ ] **T-D4b · TEST reconcile** *(DeepSeek)* — zaktualizuj `prd-testing.md` / `agent-4-test.md` / `agents/test/agents/deployer.md`: deployer = prepare + prompt(trigger CI/CD) + verify, nie SSH-deploy.
+- [ ] **T-D4 · TEST squad** ⛔ (czeka na GCP VM) — deployer **przygotowuje + prosi Mateusza o ręczny trigger CI/CD** (nie deployuje sam po SSH); runner testuje zdeployowaną apkę (synthetic data) → Done. Patrz `docs/ops/ci-cd.md`.
+- [ ] **T-D4a · CI/CD workflows** *(DeepSeek)* — `.github/workflows/deploy-vm.yml` + `deploy-lambda.yml` (manual `workflow_dispatch`; inputy; **Lambda `instance_ip` required**) + `scripts/notify-linear.mjs`. Szkielety w `docs/ops/ci-cd.md`. ⛔ secrets od Mateusza. Verify: `gh workflow run` z parametrami → deploy + health-check.
+- [ ] **T-D4b · TEST reconcile** *(DeepSeek)* — zaktualizuj `../prd/prd-testing.md` / `../agents/agent-4-test.md` / `agents/test/agents/deployer.md`: deployer = prepare + prompt(trigger CI/CD) + verify, nie SSH-deploy.
 - [x] **T-D5 · CADENCE** — wiring DONE + dry-run verified 2026-06-29 (6287216).
 
 ---
 
 ## FAZA E — Control-panel UI (wg `ux-design.md` §11 + `ux-improvements.md`)
 Rozszerz `Desktop/experiments/0_linear` (Next.js). MVP→Phase2→Phase3 jak w ux-design.
-- [x] **T-E0a** `scripts/ledger.mjs` — parser transkryptów claude (`~/.claude/projects/<hash>/*.jsonl`) → per-turn tokens+model+`attributionAgent`; `costTokens` × `config/models.json`; `aggregateRun`/`scanRuns`/`liveRuns`. PRD: `docs/telemetry-panel-prd.md`. Self-test 20/20. *(DeepSeek Flash)*
+- [x] **T-E0a** `scripts/ledger.mjs` — parser transkryptów claude (`~/.claude/projects/<hash>/*.jsonl`) → per-turn tokens+model+`attributionAgent`; `costTokens` × `config/models.json`; `aggregateRun`/`scanRuns`/`liveRuns`. PRD: `docs/prd/telemetry-panel-prd.md`. Self-test 20/20. *(DeepSeek Flash)*
 - [x] **T-E0b** `scripts/run-manifest.mjs` (gen-id/start/end) + wire `bin/_lib.bat` (start, single chokepoint) + end-call w każdym launcherze. Manifest `.state/runs/<runId>.json`. CRLF preserved. *(DeepSeek Flash)*
 - [x] **T-E0c** `scripts/telemetry-server.mjs` — HTTP `localhost:7331` (`/api/runs`, `/runs/:id`, `/summary`, `/live`), zero deps, CORS. *(DeepSeek Flash)*
 - [x] **T-E0a-fix** `byAgent.<agent>.costUSD` — per-turn model cost do obu kubełków (byModel+byAgent); był 0. *(DeepSeek Flash)*
@@ -117,11 +117,11 @@ Rozszerz `Desktop/experiments/0_linear` (Next.js). MVP→Phase2→Phase3 jak w u
 
 ---
 
-## FAZA G — Remote/headless execution: spawn agentów z Actions na VM (`docs/remote-agent-execution.md`)
+## FAZA G — Remote/headless execution: spawn agentów z Actions na VM (`docs/ops/remote-agent-execution.md`)
 **Prereq: T-A5 (cost kill-switch) + T-A6 (idempotency) — bo agent na VM działa bez nadzoru.**
 - [ ] **T-G1 · VM agent-runner (provisioning)** ⛔ (GCP VM) — Claude Code CLI + Node + Docker + git + repo clones + **self-hosted GitHub runner**; klucze z Secrets do env joba. Verify: runner widoczny w repo, `claude` na PATH.
 - [ ] **T-G2 · `bin/run-agent.sh`** *(DeepSeek)* — headless launcher (Linux), parytet z `.bat`: `CLAUDE_CONFIG_DIR`, provider OpenRouter, `LINEAR_WORKSPACE`/`PROJECT`/`BASIS`, odpala `claude -p`/Agent SDK detached. Verify: dry-run spawn loguje właściwy model+config.
-- [ ] **T-G3 · `.github/workflows/spawn-agent.yml`** *(DeepSeek)* — `workflow_dispatch` inputs: stack, project, linear_issue, feature, ref, mode; runner self-hosted; szkielet w `docs/remote-agent-execution.md`. Verify: `gh workflow run` startuje agenta na VM.
+- [ ] **T-G3 · `.github/workflows/spawn-agent.yml`** *(DeepSeek)* — `workflow_dispatch` inputs: stack, project, linear_issue, feature, ref, mode; runner self-hosted; szkielet w `docs/ops/remote-agent-execution.md`. Verify: `gh workflow run` startuje agenta na VM.
 - [ ] **T-G4 · async-HITL headless** *(orchestrator)* — w trybie headless plan-mode zastąp bramką Linear (`needs:approval` + komentarz planu + checkpoint/resume). Dotyczy gł. DEV. Verify: agent czeka na ✅ bez TUI.
 - [ ] **T-G5 · SPIKE: `claude -p` vs Agent SDK** *(orchestrator)* — który lepszy do headless multi-turn pętli agenta. Verify: notatka + decyzja.
 

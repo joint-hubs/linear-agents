@@ -16,10 +16,10 @@ maturity: design-v2
 > punktach. Ten plik spina wszystko — szczegóły w plikach per agent + dokumentach pomocniczych.
 
 **Dokumenty powiązane:**
-[model-comparison-and-routing.md](model-comparison-and-routing.md) ·
-[design-review-and-gaps.md](design-review-and-gaps.md) ·
-[linear-signaling-protocol.md](linear-signaling-protocol.md) ·
-agenci: [0-cadence](agent-0-cadence.md) · [1-planner](agent-1-planner.md) · [2-dev](agent-2-dev.md) · [3-review](agent-3-review.md) · [4-test](agent-4-test.md) ·
+[model-comparison-and-routing.md](decisions/model-comparison-and-routing.md) ·
+[design-review-and-gaps.md](decisions/design-review-and-gaps.md) ·
+[linear-signaling-protocol.md](decisions/linear-signaling-protocol.md) ·
+agenci: [0-cadence](agents/agent-0-cadence.md) · [1-planner](agents/agent-1-planner.md) · [2-dev](agents/agent-2-dev.md) · [3-review](agents/agent-3-review.md) · [4-test](agents/agent-4-test.md) ·
 diagramy: [`diagrams/`](diagrams/)
 
 ---
@@ -30,7 +30,7 @@ diagramy: [`diagrams/`](diagrams/)
 2. **Discovery drożeje, delivery tanieje.** Najmocniejszy model (Opus) idzie tam, gdzie myślenie ma dźwignię; resztę robią tanie modele (`planning` §8.1).
 3. **Task samowystarczalny.** Agent bierze, rozumie w „10 min", zamyka — nie zgaduje (`cognitive_load` §15). Parent = kontekst, subtask = delta + link.
 4. **Linear ≠ Jira.** Minimalizm: 4 statusy, ~5 grup labelek, pola natywne > labelki (`planning_tools` §11.4 + docs Lineara).
-5. **Pole natywne > labelka > komentarz.** Metadane Lineara to magistrala sygnałów człowiek↔agent ([protokół](linear-signaling-protocol.md)).
+5. **Pole natywne > labelka > komentarz.** Metadane Lineara to magistrala sygnałów człowiek↔agent ([protokół](decisions/linear-signaling-protocol.md)).
 6. **HITL async i batchowane.** Agent nigdy nie blokuje interaktywnie — sygnalizuje `needs:*` i idzie spać; Mateusz odpowiada zbiorczo (reakcja ✅ / `@flow`).
 
 ---
@@ -49,7 +49,7 @@ Każdy launcher = **osobny `.bat`** ustawiający izolowany `CLAUDE_CONFIG_DIR` +
 
 ---
 
-## 3. Linear: statusy, typy, metadane (skrót — pełnia w [protokole](linear-signaling-protocol.md))
+## 3. Linear: statusy, typy, metadane (skrót — pełnia w [protokole](decisions/linear-signaling-protocol.md))
 
 **Statusy (4):** `Todo → In Progress → In Review → Done` (+ `Canceled`).
 - „Ready" = flaga `dor-ok` (nie osobny status). „Testing" = label `stage:testing` w obrębie `In Review`.
@@ -101,7 +101,7 @@ Diagramy: [00_overview](diagrams/00_overview.puml) (całość), [01_state_machin
 
 ## 5. P0 — twarde wymogi PRZED autonomią (bezpieczeństwo/koszt/poprawność)
 
-Z [design-review](design-review-and-gaps.md) §6. Bez tych mechanizmów agenci NIE działają autonomicznie:
+Z [design-review](decisions/design-review-and-gaps.md) §6. Bez tych mechanizmów agenci NIE działają autonomicznie:
 
 1. **Loop-limit + escalation ladder** — max 2 rundy review / N follow-upów → eskalacja (poniżej). (W4)
 2. **Cost guardrail** — budżet $/task + kill-switch; przekroczenie → flaga `over-budget` + stop. (W6)
@@ -140,11 +140,11 @@ linear-workflow/
     projects.json   (Linear project → repo path, deploy target GCP VM / Lambda)
 ```
 
-Szczegóły mechaniki w [model-comparison §4](model-comparison-and-routing.md) i w plikach per agent.
+Szczegóły mechaniki w [model-comparison §4](decisions/model-comparison-and-routing.md) i w plikach per agent.
 
 ---
 
-## 7. Routing modeli (skrót — pełnia w [porównaniu](model-comparison-and-routing.md))
+## 7. Routing modeli (skrót — pełnia w [porównaniu](decisions/model-comparison-and-routing.md))
 
 Baza **GLM-5.2** (review/deep, dev lead, test root-cause, cadence retro); **Opus 4.8** tylko na leadzie PLAN; **MiniMax M3** (discovery/spec-review/decompose, recon, cadence); **DeepSeek V4 Pro** (debugger/first-pass/deployer/digest) + **Flash** (push/scenariusze); **Kimi K2.7 Code** (refaktor/security); **GPT-5.5** (terminal).
 
@@ -163,4 +163,4 @@ Baza **GLM-5.2** (review/deep, dev lead, test root-cause, cadence retro); **Opus
 ---
 
 ## 9. Co świadomie pominięte na teraz (anty-over-engineering)
-Pełna piramida testów (mutation/contract/chaos), formalne OKR/RICE/Monte-Carlo, release/portfolio review, 7 statusów, custom fields (Linear ich nie ma), Productboard/Aha!. Dodajemy, gdy zaboli (skala/historia). Patrz [design-review §5](design-review-and-gaps.md).
+Pełna piramida testów (mutation/contract/chaos), formalne OKR/RICE/Monte-Carlo, release/portfolio review, 7 statusów, custom fields (Linear ich nie ma), Productboard/Aha!. Dodajemy, gdy zaboli (skala/historia). Patrz [design-review §5](decisions/design-review-and-gaps.md).

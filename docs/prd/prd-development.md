@@ -10,7 +10,7 @@ maturity: prd-v1
 # PRD — DEVELOPMENT squad
 
 > Obszar DEVELOPMENTU jako zestaw agentów (lead + 4 subagentów). Bierze task z `Todo`, planuje,
-> koduje, oddaje do `In Review`. Spec: [agent-2-dev](../agent-2-dev.md). Launchery — na końcu.
+> koduje, oddaje do `In Review`. Spec: [agent-2-dev](../agents/agent-2-dev.md). Launchery — na końcu.
 
 ## 1. Cel
 Z taska w `Todo` (dep-aware, WIP=1) dowieźć branch z kodem + self-test + komentarz „jak testować",

@@ -17,16 +17,16 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 1. **[00-overview.md](00-overview.md)** — master: 5 elementów (CADENCE + 4 launchery), 4 statusy, task typing, P0 safeguards, escalation, izolacja `.bat`, otwarte wejścia konfiguracyjne.
 
 ## Agenci (specyfikacje)
-- **[agent-0-cadence.md](agent-0-cadence.md)** — weekly digest + roadmap refresh + retro (pętla).
-- **[agent-1-planner.md](agent-1-planner.md)** — voice+artefakty → discovery → DoR → spec(+ADR) → decompose+estimate → push.
-- **[agent-2-dev.md](agent-2-dev.md)** — pick(dep-aware,WIP=1) → recon → env-check → plan → kod → In Review.
-- **[agent-3-review.md](agent-3-review.md)** — first-pass+security ∥ deep(GLM-5.2), max 2 rundy.
-- **[agent-4-test.md](agent-4-test.md)** — deploy GCP (health+rollback) → synthetic tests → Done.
+- **[agent-0-cadence.md](agents/agent-0-cadence.md)** — weekly digest + roadmap refresh + retro (pętla).
+- **[agent-1-planner.md](agents/agent-1-planner.md)** — voice+artefakty → discovery → DoR → spec(+ADR) → decompose+estimate → push.
+- **[agent-2-dev.md](agents/agent-2-dev.md)** — pick(dep-aware,WIP=1) → recon → env-check → plan → kod → In Review.
+- **[agent-3-review.md](agents/agent-3-review.md)** — first-pass+security ∥ deep(GLM-5.2), max 2 rundy.
+- **[agent-4-test.md](agents/agent-4-test.md)** — deploy GCP (health+rollback) → synthetic tests → Done.
 
 ## Decyzje i konwencje
-- **[model-comparison-and-routing.md](model-comparison-and-routing.md)** — zweryfikowane benchmarki (≥5 źródeł/model) + routing kosztowy + mechanika providerów w `.bat`.
-- **[design-review-and-gaps.md](design-review-and-gaps.md)** — sceptyczna krytyka: weak points / corner cases / braki + priorytety P0/P1/P2.
-- **[linear-signaling-protocol.md](linear-signaling-protocol.md)** — komunikacja człowiek↔agent przez labelki/metadane/emoji/webhooki.
+- **[model-comparison-and-routing.md](decisions/model-comparison-and-routing.md)** — zweryfikowane benchmarki (≥5 źródeł/model) + routing kosztowy + mechanika providerów w `.bat`.
+- **[design-review-and-gaps.md](decisions/design-review-and-gaps.md)** — sceptyczna krytyka: weak points / corner cases / braki + priorytety P0/P1/P2.
+- **[linear-signaling-protocol.md](decisions/linear-signaling-protocol.md)** — komunikacja człowiek↔agent przez labelki/metadane/emoji/webhooki.
 
 ## Diagramy (PlantUML — `.puml` ładowalne, `.png` wyrenderowane i zweryfikowane)
 | Plik | Co pokazuje |

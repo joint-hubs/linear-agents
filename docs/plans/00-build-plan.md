@@ -79,7 +79,7 @@ Repo, docs (v2 + diagramy + research), config templates, bin launchery (set), ag
 - [ ] Cadence weekly (cron/morning_planner) → digest + roadmap refresh.
 - [ ] P0: cost guardrail (`cost-report.mjs` + kill-switch), idempotency, observability po deployu.
 - [ ] (opcjonalnie) Control-panel UI (rozszerzenie `0_linear`).
-- **Acceptance:** P0 spełnione → dopiero teraz autonomiczny tryb (patrz [design-review §6](design-review-and-gaps.md)).
+- **Acceptance:** P0 spełnione → dopiero teraz autonomiczny tryb (patrz [design-review §6](../decisions/design-review-and-gaps.md)).
 
 ---
 

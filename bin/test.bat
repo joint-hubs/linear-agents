@@ -3,7 +3,7 @@ setlocal
 set "SQUAD_SLUG=test"
 set "SOURCE_PATH=%~1"
 call "%~dp0_lib.bat" || exit /b 1
-REM Agent 4 - TEST. Spec: docs/agent-4-test.md
+REM Agent 4 - TEST. Spec: docs/agents/agent-4-test.md
 REM Main = MiniMax M3 (deploy/run, multimodal screenshoty). scenarios = DeepSeek V4 Flash (small_fast). root-cause -> GLM-5.2.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\test"
 set "ANTHROPIC_MODEL=minimax/minimax-m3"

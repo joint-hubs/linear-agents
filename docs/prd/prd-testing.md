@@ -10,7 +10,7 @@ maturity: prd-v1
 # PRD — TESTING squad
 
 > Obszar TESTÓW/DEPLOY jako zestaw agentów (lead + 3 subagentów). Deployuje i testuje
-> **działającą aplikację**. Spec: [agent-4-test](../agent-4-test.md). Launchery — na końcu.
+> **działającą aplikację**. Spec: [agent-4-test](../agents/agent-4-test.md). Launchery — na końcu.
 
 ## 1. Cel
 Task `stage:testing` → deploy (OpenRouter build → GCP VM, **health-check + rollback**) → testy na

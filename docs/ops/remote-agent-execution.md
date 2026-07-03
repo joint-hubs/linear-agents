@@ -11,7 +11,7 @@ maturity: design-v1
 > Cel: z GitHub Actions (ręcznie, `workflow_dispatch`) **odpalić agenta lub cały stack** (np. planowy)
 > **na VM-ce GCP**, z wybraną konfiguracją (projekt, basis = link do taska / nazwa featura). Agent
 > headless wczytuje basis (np. task z brainstormem + załącznikami) i pracuje wg swojego CLAUDE.md.
-> Komplementarne do `docs/ci-cd.md` (deploy): razem = **GitHub Actions = manualny control-plane (deploy + spawn agentów)**.
+> Komplementarne do `docs/ops/ci-cd.md` (deploy): razem = **GitHub Actions = manualny control-plane (deploy + spawn agentów)**.
 
 ## 1. Dwie twarde konsekwencje (zmieniają design — przeczytaj)
 1. **Headless = brak interaktywnego plan-mode.** Agent na VM nie ma TUI do „✅ approve plan". HITL musi iść **w pełni async przez Linear** (agent: post planu w komentarzu + `needs:approval` → checkpoint/sleep → wznowienie po ✅/webhooku). To dokładnie po to powstał signaling-protocol — tu się spłaca. DEV: plan-mode → zastąpione bramką Linear.

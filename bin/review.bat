@@ -3,7 +3,7 @@ setlocal
 set "SQUAD_SLUG=review"
 set "SOURCE_PATH=%~1"
 call "%~dp0_lib.bat" || exit /b 1
-REM Agent 3 - REVIEW. Spec: docs/agent-3-review.md
+REM Agent 3 - REVIEW. Spec: docs/agents/agent-3-review.md
 REM Main = GLM-5.2 (lead + deep review). first-pass = DeepSeek V4 Pro (small_fast). security = Kimi K2.7 Code.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\review"
 set "ANTHROPIC_MODEL=z-ai/glm-5.2"

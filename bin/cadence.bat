@@ -3,7 +3,7 @@ setlocal
 set "SQUAD_SLUG=cadence"
 set "SOURCE_PATH=%~1"
 call "%~dp0_lib.bat" || exit /b 1
-REM Agent 0 - CADENCE (weekly). Spec: docs/agent-0-cadence.md
+REM Agent 0 - CADENCE (weekly). Spec: docs/agents/agent-0-cadence.md
 REM Main = MiniMax M3 (czyta 100+ issues, tanio). Retro -> GLM-5.2. Digest PL -> DeepSeek V4 Pro. Moze isc z crona.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\cadence"
 set "ANTHROPIC_MODEL=minimax/minimax-m3"

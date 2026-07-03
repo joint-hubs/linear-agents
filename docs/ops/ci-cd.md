@@ -28,7 +28,7 @@ maturity: design-v1
 4. Workflow: build → deploy → health-check → (VM) rollback na fail → `notify-linear` (status+URL).
 5. Agent TEST (`runner`/`scenario-gen`) testuje apkę pod URL (synthetic data) → raport → przesuwa stan (Done / In Progress); `root-cause` diagnozuje faile.
 
-> Zmiana vs `prd-testing.md`/`agent-4-test.md`: rola `deployer` = **przygotuj + poproś o trigger + zweryfikuj deploy**, nie bezpośredni SSH-deploy. Do zaktualizowania w PRD (patrz backlog task).
+> Zmiana vs `../prd/prd-testing.md`/`../agents/agent-4-test.md`: rola `deployer` = **przygotuj + poproś o trigger + zweryfikuj deploy**, nie bezpośredni SSH-deploy. Do zaktualizowania w PRD (patrz backlog task).
 
 ## 3. Inputs — szczegóły
 | Input | deploy-vm | deploy-lambda | Uwaga |

@@ -3,7 +3,45 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-06-29 — Faza F: F0–F3 DONE (shared Linear scripts + DEV/REVIEW/CADENCE wiring, dry-run verified). Live pilots + TEST deferred.
+## Ostatnia aktualizacja: 2026-07-03 — Faza G: Platforma v1 (JOI-51) DOWIEZIONA + PR #1 otwarty. Branch `feat/observability` wypchnięty, komentarz na JOI-51. Czeka na review/merge Mateusza.
+
+## Faza G — Platforma v1 (JOI-51) dowieziona (2026-07-03)
+
+**Pierwsza wersja platformy obserwowalności + control-plane dowieziona na branchu `feat/observability`.** Branch wypchnięty do `origin` i otwarty **PR #1** → `main`: https://github.com/joint-hubs/linear-agents/pull/1 (80 commitów, 118 plików, ~16.9k LOC). Komentarz podsumowujący opublikowany na **JOI-51** (tag `pr:joi-51-delivery`, comment id `3483c935`). Stan taska NIE ruszony — per konwencje statuty przesuwa Mateusz; po merge'u → Under Review / Done.
+
+Budowano na istniejącym backendzie telemetrycznym (Faza E) — **rozszerzono, nie przebudowano**. Kontrakty źródłowe: `docs/ui/observability-platform-plan.md`, `docs/ui/ux-design-v3.md` (F1–F5 + gapy B1–B3), `docs/ui/control-plane-plan.md` (L1), mockup `docs/ui/mockups/observability-v3.html`.
+
+### Co wjechało
+- **Telemetry backend** (`scripts/`): `run-manifest.mjs` (manifest + sessionId/transcript discovery) · `ledger.mjs` (cost per model/agent/task, cache_read/cache_creation aware) · `telemetry-server.mjs` (`:7331` — `/api/runs`, `/api/runs/:id`, `/api/summary` w/ `byTask`, `/api/cost-per-task`, `/api/live`, `/api/budget`, `/api/linear/queue`) · `cost-per-task.mjs`/`cost-guard.mjs`/`cost-report.mjs`/`backfill-task-ids.mjs`/`reconcile-runs.mjs` · headless Linear layer (`linear-client`/`linear-query`/`linear-ops`/`linear-push`/`bootstrap-linear`/`publish-linear-comment`/`mock-linear`) · `dev-branch.mjs`/`launch.mjs`/`review-round.mjs`/`check.mjs` (linter).
+- **Dashboard** (`ui/`, Vite+React, standalone): 6 ekranów na żywym API — **Live** (KPI strip + active cards) · **Timeline** (gantt aktywności agentów, multi-repo) · **Runs + RunDetail** (filtry, URL params, per-agent/model breakdown, `ambiguous` badge) · **Costs** (period toggle, by-agent/by-model/by-day, byTask links) · **Budget** (over-budget + per-task alerts) · **Tasks** (5. tab, 3 sekcje, launch modal).
+- **Control-plane**: `POST /api/launch` (local auto-spawn squadu + ready prompt) · `handoff-rules.json` + matcher + workspace routing · CSRF Origin check + spawn hardening (injection-resistant `taskId`).
+- **Squady**: delegation policy P0 + worker/flash cheap subagents we wszystkich squadach.
+- **Docs**: `HOW-TO-RUN-AGENTS.md` (operator runbook), ADRy 0002–0005, `decisions/cost-optimization.md` (93% lead cost analysis), PRDy (`telemetry-panel-prd`, `gantt-panel-prd`), kontrakty UX + mockup.
+
+### Subtaski dowiezione w tej fali
+JOI-52 (dekompozycja) · JOI-62 (B1 manifest passthrough + failed status + JOI branch regex) · JOI-63 (Live rework) · JOI-64 (Timeline gantt) · JOI-65 (Runs filtry + RunDetail meta) · JOI-66 (Costs period toggle) · JOI-67 (Budget panel + `/api/budget`) · JOI-68 (`handoff-rules.json` + `/api/linear/queue`) · JOI-69 (`/api/launch` + CSRF + spawn hardening + tests) · JOI-70 (Tasks screen) · JOI-71 (UI hardening: noopener + error-banner + utils tests).
+
+### Weryfikacja
+- **E2E**: pipeline udowodniony na realnym tasku **PISI-98** (22+ runów w `.state/runs/`).
+- **Testy zielone**: `ledger` 32/32 · `linear-push` 24/24 · `utils` 25/25 · `launch` 37/37.
+- `node scripts/check.mjs` czysty.
+- Dashboard czyta live dane z `.state/runs/` przez API.
+
+### Jak uruchomić
+```bash
+node scripts/telemetry-server.mjs   # :7331
+cd ui && npm install && npm run dev # http://localhost:5173
+```
+
+### Po stronie Mateusza
+- **Review + merge PR #1**.
+- **Stan JOI-51** — przesunięcie po merge'u (Under Review / Done).
+- **Niezatwierdzona zmiana `agents/test/settings.json`** w working tree (czysta reformatyzacja JSON, zero zmiany semantycznej) — nie weszła do PR; do decyzji: zostawić / zcommitować osobno / odrzucić (`git checkout -- agents/test/settings.json`).
+
+### Otwarte na v2 (poza scopem v1)
+- Control-plane **L2+**: remote-interactive w tmux / GCP VM (`control-plane-plan.md`).
+- Retencja `.state/runs/` (rotacja po N dni/runów).
+- Reconcile `cache_read` vs `cost-report.mjs` (OpenRouter Activity) w Costs.
 
 ### Zrobione
 - **T-A1 SPIKE — DONE.** Architektura „model per subagent" **DZIAŁA**: explicit OpenRouter slug we
@@ -95,7 +133,7 @@
   (input/output/cache) + `message.model`; subagenty (`<session>/subagents/agent-*.jsonl`) mają `attributionAgent`.
   `costTokens` × pricing `config/models.json` (match cost-report.mjs). `aggregateRun`/`scanRuns`/`liveRuns`.
   Self-test `scripts/_test_ledger.mjs` 20/20 (gitignored). **Wybór źródła:** transkrypty, NIE stream-json — działają
-  dla interaktywnego REPL i `-p`, nie psują bramek. PRD: `docs/telemetry-panel-prd.md`.
+  dla interaktywnego REPL i `-p`, nie psują bramek. PRD: `docs/prd/telemetry-panel-prd.md`.
 - **T-E0b — DONE.** `scripts/run-manifest.mjs` (`gen-id`/`start`/`end`, atomic) + wire `bin/_lib.bat` (start =
   single chokepoint; każdy launcher nadpisuje `SQUAD_SLUG`/`SOURCE_PATH` przed `call _lib.bat`) + `end`-call w każdym
   launcherze (plan/dev/review/test/cadence/agent) po `claude %*`. Manifest `.state/runs/<runId>.json` (runId = ISO+squad).
@@ -228,7 +266,10 @@
   `bin\test.bat`, `bin\cadence.bat`, `bin\all.bat`, `bin\agent.bat <area> <role>`. Wszystkie wołają `bin\_lib.bat`.
 - Spike T-A1 (re-runnable): `.spike-a1\run-spike.ps1`, `.spike-a1\run-clean.ps1`, `.spike-a2\run-spike.ps1`.
 
-## Git checkpoint (2026-06-24)
+## Git checkpoint (2026-06-24 — historyczny, Faza A–C)
+
+> Stan bieżący: patrz **Faza G** na górze. Branch `feat/observability` (80 commitów ahead of `main`) — **WYPCHNĘTY** do `origin`, **PR #1** otwarty (https://github.com/joint-hubs/linear-agents/pull/1), czeka na review/merge. Poniższe dotyczy zamkniętej Fazy A–C na `feat/phase-a-offline-foundation`.
+
 Branch `feat/phase-a-offline-foundation` (12 commitów ahead of `main`; NIE zmergowany, NIE pushowany — czeka na Mateusza).
 Faza A (offline foundation):
 - `b3fc4f3` fix(bin): base URL + clear SUBAGENT_MODEL + .gitattributes (CRLF)
