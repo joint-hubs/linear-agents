@@ -7,7 +7,7 @@ set "SQUAD_SLUG=review"
 set "SOURCE_PATH="
 call "%~dp0_lib.bat" || exit /b 1
 
-REM Agent 3 - REVIEW (DRY-RUN). Spec: docs/agent-3-review.md
+REM Agent 3 - REVIEW (DRY-RUN). Spec: docs/agents/agent-3-review.md
 REM DRY-RUN: no push, no Linear MCP, auto-approve HITL gates.
 REM Review is read-only analysis — no code edits or writes.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\review"
@@ -19,7 +19,7 @@ set "REVIEW_DRY_RUN=1"
 echo [review-dry] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [review-dry] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL% DRY_RUN=%REVIEW_DRY_RUN%
 
-set "KICKOFF=DRY-RUN mode (REVIEW_DRY_RUN=1). Read fixture from .state\mock\review-task.json. Do NOT call mcp__linear__*. Do NOT git push. Do NOT edit or write code (review is read-only analysis). Auto-approve HITL gates. Run the REVIEW workflow per docs/agent-3-review.md: parallel first-pass/security/deep review, merge findings, format as Conventional Comments, produce verdict. Execute the FULL REVIEW loop INCLUDING the linear-ops verdict step (comment --dedup-tag with the Conventional Comments, transition/label per verdict) with --dry-run, THEN stop after the verdict hand-off."
+set "KICKOFF=DRY-RUN mode (REVIEW_DRY_RUN=1). Read fixture from .state\mock\review-task.json. Do NOT call mcp__linear__*. Do NOT git push. Do NOT edit or write code (review is read-only analysis). Auto-approve HITL gates. Run the REVIEW workflow per docs/agents/agent-3-review.md: parallel first-pass/security/deep review, merge findings, format as Conventional Comments, produce verdict. Execute the FULL REVIEW loop INCLUDING the linear-ops verdict step (comment --dedup-tag with the Conventional Comments, transition/label per verdict) with --dry-run, THEN stop after the verdict hand-off."
 
 claude -p "%KICKOFF%" --permission-mode default --max-turns 40
 

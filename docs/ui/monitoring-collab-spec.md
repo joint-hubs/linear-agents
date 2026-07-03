@@ -10,7 +10,7 @@ maturity: spec-v1
 # Spec — Agent monitoring + Linear collaboration (kokpit)
 
 > Doprecyzowuje części **Dashboard / Agents / Costs** z `docs/ui/ux-design.md` o **konkretny kontrakt
-> telemetrii**. Rozszerza `0_linear` (Next.js). Gantt = osobny, niższy priorytet (`gantt-panel-prd.md`).
+> telemetrii**. Rozszerza `0_linear` (Next.js). Gantt = osobny, niższy priorytet (`../prd/gantt-panel-prd.md`).
 > Dwa filary: **(A) monitoring agentów**, **(B) współpraca z Linearem**. Fundament obu = telemetria runów.
 
 ## 0. Najważniejsze (czytaj najpierw)

@@ -10,7 +10,7 @@ maturity: prd-v1
 # PRD — PLANNING squad
 
 > Obszar PLANOWANIA jako **zestaw agentów** (lead + 5 subagentów). Zamienia notatkę głosową +
-> artefakty w parent epic + sub-issues w Linear. Spec koncepcyjny: [agent-1-planner](../agent-1-planner.md).
+> artefakty w parent epic + sub-issues w Linear. Spec koncepcyjny: [agent-1-planner](../agents/agent-1-planner.md).
 > Launchery (funkcjonalne) — na końcu.
 
 ## 1. Cel
@@ -40,7 +40,7 @@ z 2 bramkami HITL (async).
 ## 4. Bramki HITL (async, przez metadane)
 - **GATE 1** (po discovery): lead ustawia `needs:approval` + @Mateusz; czeka na ✅ (lub defer-to-spike).
 - **GATE 2** (po decompose): sample 2–3 sub-issues → `needs:approval` → ✅.
-Patrz [signaling-protocol](../linear-signaling-protocol.md).
+Patrz [signaling-protocol](../decisions/linear-signaling-protocol.md).
 
 ## 5. Safeguards (P0)
 Pusty input → nie planuj. Task bez AC → nie twórz. Push idempotentny + rollback. Cost guardrail (`over-budget`). HITL nie blokuje (sleep).

@@ -1,5 +1,5 @@
 {
-  "_doc": "Źródło prawdy routingu modeli per rola. Odzwierciedlone w bin/*.bat i agents/*/settings.json. Pełne uzasadnienie: docs/model-comparison-and-routing.md",
+  "_doc": "Źródło prawdy routingu modeli per rola. Odzwierciedlone w bin/*.bat i agents/*/settings.json. Pełne uzasadnienie: docs/decisions/model-comparison-and-routing.md",
   "providers": {
     "openrouter": "https://openrouter.ai/api/v1",
     "anthropic": "https://api.anthropic.com",
@@ -23,7 +23,7 @@
     "test":    { "deploy": "deepseek_pro", "scenarios": "deepseek_flash", "run": "minimax", "root_cause": "glm", "terminal": "gpt", "worker": "minimax", "flash": "deepseek_flash" }
   },
   "pricing": {
-    "_doc": "USD per 1M tokens (input/output). Źródło: docs/model-comparison-and-routing.md",
+    "_doc": "USD per 1M tokens (input/output). Źródło: docs/decisions/model-comparison-and-routing.md",
     "anthropic/claude-opus-4.8":              { "input": 5,     "output": 25,   "cacheRead": 0.5   },
     "anthropic/claude-4.8-opus-20260528":     { "input": 5,     "output": 25,   "cacheRead": 0.5   },
     "anthropic/claude-sonnet-4.6":     { "input": 3,     "output": 15,   "cacheRead": 0.3   },

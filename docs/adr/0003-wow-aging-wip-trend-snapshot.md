@@ -9,7 +9,7 @@
 CADENCE digest must show a week-over-week warning when the average age of WIP
 (`In Progress` + `In Review`) tasks is rising. Computing a WoW trend requires a
 **previous-week snapshot** of `meanWipAgeDays`. CADENCE is read-mostly by
-constraint (`docs/agent-0-cadence.md` §Safeguards) and in dry-run there is no
+constraint (`docs/agents/agent-0-cadence.md` §Safeguards) and in dry-run there is no
 live Linear; the squad is launched once per week via cron. The question is
 **where the previous snapshot lives** so the digest agent can read it next run.
 

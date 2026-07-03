@@ -10,7 +10,7 @@ maturity: prd-v1
 # PRD — CADENCE squad
 
 > Obszar CADENCE jako zestaw agentów (lead + 3 subagentów). Tygodniowa pętla domykająca linię
-> w cykl. Spec: [agent-0-cadence](../agent-0-cadence.md). Launchery — na końcu.
+> w cykl. Spec: [agent-0-cadence](../agents/agent-0-cadence.md). Launchery — na końcu.
 
 ## 1. Cel
 Raz w tygodniu: zebrać stan z Linear, wykryć drift, odświeżyć Now/Next/Later, zrobić retro,

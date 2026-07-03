@@ -5,7 +5,7 @@ audience: Mateusz (approval) → GLM (build)
 tags: [type/plan, area/ui, area/devops, topic/launch, topic/vm, topic/tmux, topic/meta-agent]
 created: 2026-07-02
 maturity: plan-v1
-depends: [observability-platform-plan.md, ux-design-v3.md, ../remote-agent-execution.md, ../HOW-TO-RUN-AGENTS.md]
+depends: [observability-platform-plan.md, ux-design-v3.md, ../ops/remote-agent-execution.md, ../HOW-TO-RUN-AGENTS.md]
 ---
 
 # Control plane — uruchamianie agentów z platformy + zdalne sesje + (później) meta-agent
@@ -19,7 +19,7 @@ depends: [observability-platform-plan.md, ux-design-v3.md, ../remote-agent-execu
 - **Reguły handoffu** = [HOW-TO-RUN-AGENTS §6](../HOW-TO-RUN-AGENTS.md): `Todo+dor-ok→dev`,
   `In Review+ai:coded→review`, `stage:testing→test`, `needs:*→człowiek`. To jest gotowa logika
   „który agent powinien przejąć taska" — wystarczy ją zakodować w config.
-- **Spawn z Actions na VM** = [remote-agent-execution.md](../remote-agent-execution.md):
+- **Spawn z Actions na VM** = [remote-agent-execution.md](../ops/remote-agent-execution.md):
   `spawn-agent.yml` (workflow_dispatch: stack/project/linear_issue/mode), self-hosted runner na GCP VM,
   `bin/run-agent.sh`, szkic już odpala sesję **w tmux**. Faza G backlogu (T-G1…T-G5) zostaje w mocy.
 - **Linear read/write** = `scripts/linear-query.mjs` / `linear-ops.mjs` (obowiązkowe toole squadów).

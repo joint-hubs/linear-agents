@@ -8,8 +8,8 @@ przy minimalnym koszcie; human-in-the-loop **async** przez metadane Lineara.
 ## Mapa
 - **Koncepcja:** [`docs/00-overview.md`](docs/00-overview.md) — start tutaj · [`docs/README.md`](docs/README.md) — indeks
 - **Struktura repo:** [`docs/REPO-STRUCTURE.md`](docs/REPO-STRUCTURE.md)
-- **Agenci:** [`docs/agent-0-cadence.md`](docs/agent-0-cadence.md) … [`agent-4-test.md`](docs/agent-4-test.md)
-- **Decyzje:** [model routing](docs/model-comparison-and-routing.md) · [krytyka/luki](docs/design-review-and-gaps.md) · [protokół Linear](docs/linear-signaling-protocol.md)
+- **Agenci:** [`docs/agents/agent-0-cadence.md`](docs/agents/agent-0-cadence.md) … [`agent-4-test.md`](docs/agents/agent-4-test.md)
+- **Decyzje:** [model routing](docs/decisions/model-comparison-and-routing.md) · [krytyka/luki](docs/decisions/design-review-and-gaps.md) · [protokół Linear](docs/decisions/linear-signaling-protocol.md)
 - **Diagramy:** [`docs/diagrams/`](docs/diagrams/) (PlantUML + PNG)
 
 ## 5 elementów

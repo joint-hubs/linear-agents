@@ -2,7 +2,7 @@
 setlocal
 if /i "%~1"=="--parse-check" exit /b 0
 call "%~dp0_lib.bat" || exit /b 1
-REM Agent 1 - PLAN (DRY-RUN). Spec: docs/agent-1-planner.md
+REM Agent 1 - PLAN (DRY-RUN). Spec: docs/agents/agent-1-planner.md
 REM DRY-RUN: no push, no Linear MCP, auto-approve HITL gates.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\plan"
 set "ANTHROPIC_MODEL=anthropic/claude-opus-4.8"

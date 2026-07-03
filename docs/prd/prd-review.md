@@ -10,7 +10,7 @@ maturity: prd-v1
 # PRD — REVIEW squad
 
 > Obszar REVIEW jako zestaw agentów (lead + 3 subagentów) + narzędzia security.
-> Spec: [agent-3-review](../agent-3-review.md). Launchery — na końcu.
+> Spec: [agent-3-review](../agents/agent-3-review.md). Launchery — na końcu.
 
 ## 1. Cel
 Task w `In Review` zrecenzować: równolegle tani first-pass + security tooling + głęboki review (GLM-5.2),
