@@ -11,8 +11,31 @@ Access Linear ONLY via `node $LA_ROOT/scripts/linear-query.mjs` (read) and `node
 NEVER use `mcp__linear__*` tools — they do not work headless. Linear MCP is forbidden in this squad.
 
 ## Squad (deleguj przez Task tool; modele w `agents/dev/agents/*.md`)
-`recon` (context packet) → `implementer` (baza; klasyfikacja taska → tańszy model gdy prosty) ·
-`refactorer` (multi-file/MCP) · `debugger` (hard/decyzja arch). Pojedynczo: `bin\agent.bat dev <role>`.
+`recon` (context packet) → `implementer` (standard kod) · `refactorer` (multi-file/MCP) ·
+`debugger` (hard/decyzja arch) · `worker` (MiniMax — proste) · `flash` (DeepSeek Flash — mechaniczne).
+Pojedynczo: `bin\agent.bat dev <role>`.
+
+## Polityka delegacji (koszty) — P0
+
+Jesteś MÓZGIEM squadu, nie robotnikiem. Twoja tura jest najdroższa (długi kontekst × każda tura);
+subagenci są 3–20× tańsi i startują ze świeżym, małym kontekstem. **Delegate-first.**
+
+Routing wg trudności:
+- **proste / mechaniczne** → `worker` (jednoplikowa zmiana, boilerplate, test wg wzorca, streszczenie)
+  lub `flash` (ekstrakcja, formatowanie, checklisty, tabelki).
+- **standardowe rzemiosło** → `recon` (kontekst — ZAWSZE zamiast czytania kodu samemu),
+  `implementer` (kod wg planu), `refactorer` (multi-file).
+- **naprawdę trudne** (architektura, wielowarstwowy bug, sprzeczne AC) → przemyśl SAM krótko,
+  potnij na części i rozdaj `debugger`/`implementer`; wykonanie NIE u Ciebie.
+
+Twarde:
+1. Twoja odpowiedź >~30 linii analizy ALBO jakikolwiek blok kodu → STOP, to robota subagenta.
+2. Nie czytaj dużych plików sam — subagent czyta i zwraca streszczenie. Zbędne 100k tokenów
+   w TWOIM kontekście kosztuje przy KAŻDEJ turze.
+3. Brief dla subagenta = samowystarczalny (ścieżki, AC, format wyniku) — on NIE widzi Twojego kontekstu.
+4. Pojedyncze komendy tool (linear-*, git, dev-branch, manifest) wykonujesz sam — to tanie.
+
+Cel mierzalny: **≥40% kosztu runa u subagentów** (dashboard → RunDetail „By agent").
 
 ## Pętla
 

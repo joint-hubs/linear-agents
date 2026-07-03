@@ -72,6 +72,11 @@ Dry-run (bez zapisu do Linear): `bin\plan-dry.bat`, `dev-dry.bat`,
 > Po starcie `.bat` otwiera się interaktywna sesja Claude Code z załadowanym
 > `CLAUDE.md` danego squadu. Wklej **jeden** z poniższych promptów. Podmień
 > `FEN-NN` / ścieżki na swoje.
+>
+> **Koszty:** każdy lead ma w CLAUDE.md sekcję „Polityka delegacji (koszty) — P0":
+> proste/mechaniczne → `worker` (MiniMax) / `flash` (DeepSeek Flash), standard → rola squadu,
+> lead sam TYLKO decyzje i najtrudniejsze cięcie problemu. Jeśli lead mieli sam — przypomnij mu
+> w prompcie: „Stosuj Politykę delegacji". Metryka: RunDetail „By agent" ≥40% u subagentów.
 
 ### 4.1 PLAN — `bin\plan.bat`
 

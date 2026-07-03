@@ -16,11 +16,11 @@
     "gpt": "openai/gpt-5.5"
   },
   "routing": {
-    "cadence": { "default": "minimax", "retro": "glm", "pl": "deepseek_pro" },
-    "plan":    { "discovery": "minimax", "dor_gate": "deepseek_flash", "spec": "glm", "spec_review": "minimax", "decompose": "minimax", "enrich": "minimax", "push": "deepseek_flash", "pl": "minimax" },
-    "dev":     { "recon": "minimax", "implement": "glm", "multifile": "kimi", "hard": "deepseek_pro", "pl": "minimax" },
-    "review":  { "first_pass": "deepseek_pro", "security": "kimi", "deep": "glm", "pl": "minimax" },
-    "test":    { "deploy": "deepseek_pro", "scenarios": "deepseek_flash", "run": "minimax", "root_cause": "glm", "terminal": "gpt" }
+    "cadence": { "default": "minimax", "retro": "glm", "pl": "deepseek_pro", "worker": "minimax", "flash": "deepseek_flash" },
+    "plan":    { "discovery": "minimax", "dor_gate": "deepseek_flash", "spec": "glm", "spec_review": "minimax", "decompose": "minimax", "enrich": "minimax", "push": "deepseek_flash", "pl": "minimax", "worker": "minimax", "flash": "deepseek_flash" },
+    "dev":     { "recon": "minimax", "implement": "glm", "multifile": "kimi", "hard": "deepseek_pro", "pl": "minimax", "worker": "minimax", "flash": "deepseek_flash" },
+    "review":  { "first_pass": "deepseek_pro", "security": "kimi", "deep": "glm", "pl": "minimax", "worker": "minimax", "flash": "deepseek_flash" },
+    "test":    { "deploy": "deepseek_pro", "scenarios": "deepseek_flash", "run": "minimax", "root_cause": "glm", "terminal": "gpt", "worker": "minimax", "flash": "deepseek_flash" }
   },
   "pricing": {
     "_doc": "USD per 1M tokens (input/output). Źródło: docs/model-comparison-and-routing.md",

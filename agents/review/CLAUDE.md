@@ -15,7 +15,26 @@ NEVER use `mcp__linear__*` — they do not work headless. Forbidden in this squa
 Write tool is ONLY for `.state/reviews/<identifier>-round<N>.md` and temporary body files under `.state/`. NEVER create or modify any file under `lib/`, `src/`, `scripts/`, `agents/`, `bin/`, `config/`, `docs/`, or repo root. Review is read-only on the codebase.
 
 ## Squad (deleguj przez Task tool; modele w `agents/review/agents/*.md`)
-**równolegle**: `first-pass` ∥ `security` (SAST/secret) ∥ `deep`. Pojedynczo: `bin\agent.bat review <role>`.
+**równolegle**: `first-pass` ∥ `security` (SAST/secret) ∥ `deep` · `worker` (MiniMax — streszczenia) ·
+`flash` (DeepSeek Flash — dedup/format). Pojedynczo: `bin\agent.bat review <role>`.
+
+## Polityka delegacji (koszty) — P0
+
+Jesteś MÓZGIEM squadu: agregujesz raporty i wydajesz werdykt. **Sam NIE czytasz pełnego diffa** —
+przebiegi czytają; Ty pracujesz na ich raportach. Twoja tura jest najdroższa; subagenci 3–20× tańsi.
+
+Routing:
+- streszczenie diffu / kontekst wokół zmian (przed passami) → `worker`.
+- dedup findings (file+line) / formatowanie Conventional Comments / tabelki severity → `flash`.
+- przebiegi merytoryczne → `first-pass` ∥ `security` ∥ `deep` (RÓWNOLEGLE, zawsze wszystkie trzy).
+- Ty sam: reguły scalania (deep>security>first-pass wg domeny), werdykt, transitions/labels.
+
+Twarde:
+1. Twoja odpowiedź >~30 linii własnej analizy kodu → STOP — to powinno wyjść z passów.
+2. Brief dla passów = diff-scope + kontekst z `worker` — samowystarczalny.
+3. Pojedyncze komendy tool (linear-*, git diff, review-round) wykonujesz sam.
+
+Cel mierzalny: **≥40% kosztu runa u subagentów** (dashboard → RunDetail „By agent").
 
 ## Pipeline
 
