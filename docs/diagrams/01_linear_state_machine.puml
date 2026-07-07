@@ -1,6 +1,6 @@
 @startuml
 !pragma layout smetana
-title Linear state machine (v2) — 4 statuses + label signals\n(transition = trigger + model)
+title Linear state machine (v2.2 · sync 2026-07-03) — 4 statuses + label signals\n(transition = trigger + model)
 
 skinparam state {
   BackgroundColor #EAF3FF
@@ -8,41 +8,43 @@ skinparam state {
   FontName Helvetica
 }
 
-[*] --> Todo
+[*] --> Todo : PLAN push (idempotent)\nai:planned · type:* · estimate · blocked-by
 
-Todo --> Todo : DEV asks @Mateusz\n(needs:answer, PL · MiniMax M3)
-Todo --> InProgress : plan approved (emoji V)\n(HITL · GLM-5.2)
+Todo --> Todo : DEV asks @Mateusz\n(needs:answer / needs:approval, PL)
+Todo --> InProgress : DEV pick (dor-ok, dep-aware, WIP=1)\n+ plan approved (emoji ✅) · 👀 + assignee @flow
 Todo --> Canceled : dropped
-InProgress --> InReview : code done + DoD + checklist\n(ai:coded · GLM-5.2)
-InProgress --> InProgress : checkpoint -> STATE.md
-InReview --> InProgress : changes requested\n(Conventional Comments · round++)
-InReview --> Done : review clean + tests pass\n(ai:reviewed · GLM-5.2 deep + DeepSeek V4 Pro)
-Done --> [*]
+InProgress --> InReview : deliver_task(): DoD check + actual_hours\n+ summary PL/EN · ai:coded · clears needs:*
+InProgress --> InProgress : checkpoint -> STATE.md\nresume via .state/*-wip.json
+InReview --> InProgress : changes requested\n(Conventional Comments · round++ · max 2 -> escalated)
+InReview --> Done : review clean + tests pass\nai:reviewed + dod-ok
+Done --> [*] : CADENCE digest (weekly)
 
 state InReview {
   [*] --> Reviewing
-  Reviewing --> Testing : approve (stage:testing)
-  Testing --> [*] : deploy+tests pass
+  Reviewing --> Testing : approve -> assign VERSION\n(stage:testing)
+  Testing --> [*] : deploy (health-check + rollback)\n+ synthetic tests pass
   Testing --> Reviewing : retest
 }
 
 note right of Todo
   Entry gate = dor-ok flag
-  (Why/AC/scope-out/deps).
+  (Why/AC/scope-out/deps/type/estimate).
+  XL estimate -> re-decompose.
   type:spike -> ADR, skips deploy.
 end note
 
 note right of InReview
-  Max 2 dev<->review rounds,
-  then escalated -> @Mateusz.
-  Testing = deploy GCP (OpenRouter)
-  with health-check + rollback;
-  Ollama/GPU -> Lambda AI.
+  3 parallel passes: first-pass (DeepSeek V4 Pro)
+  · security (Kimi K2.7) · deep (GLM-5.2, risk-tiered).
+  Max 2 dev<->review rounds -> escalated.
+  Testing = deploy GCP VM
+  (health-check + auto-rollback, no prod PII).
 end note
 
 note bottom of InProgress
-  Flags any state: needs:* ·
-  blocked · risk:high ·
-  escalated · over-budget.
+  Flags any state: needs:{answer|approval|decision|access}
+  · blocked · risk:high · escalated · over-budget.
+  Escalation ladder: retry -> Kimi/Opus -> needs:* + STOP.
+  1 task = 1 commit · no git push without approval.
 end note
 @enduml

@@ -1,5 +1,5 @@
 @startuml
-title Linear AI Workflow — End-to-End Overview (v2)\nCADENCE + 4 launchers · 4 statuses · task typing · metadata HITL · P0 safeguards
+title Fenix — End-to-End Overview (v2.2 · sync 2026-07-03)\n5 squads (lead + subagents, delegate-first) · 4 statuses · async HITL via Linear · P0 safeguards
 
 skinparam defaultFontName Helvetica
 skinparam ActivityBackgroundColor #FFFFFF
@@ -7,72 +7,84 @@ skinparam ActivityBorderColor #666666
 skinparam ActivityDiamondBackgroundColor #FFFFFF
 
 legend top
-|=   |= model |= when (cost strategy) |
-|<#FFB3BA>   | Opus 4.8 | PLAN lead only (1 point) |
-|<#BAE1FF>   | GLM-5.2 | base coding workhorse (default) |
-|<#BAFFC9>   | MiniMax M3 | fast agent loops / multimodal — used most |
-|<#FFFFBA>   | Kimi K2.7 Code | multi-file / MCP-heavy (escalate) |
-|<#E0E0E0>   | DeepSeek V4 Flash | bulk / cheapest |
-|<#FFD9BA>   | MiniMax M3 | Polish, to Mateusz — tiny |
-|<#D7BAFF>   | Mateusz | async HITL (needs:* + emoji ✅) |
+|=   |= model |= role (cost strategy) |
+|<#FFB3BA>   | Opus 4.8 | PLAN lead (orchestration) + escalation fallback |
+|<#BAE1FF>   | GLM-5.2 | DEV/REVIEW lead · spec · implement · deep review · root-cause |
+|<#BAFFC9>   | MiniMax M3 | TEST/CADENCE lead · discovery/recon/decompose · worker subagent |
+|<#FFFFBA>   | Kimi K2.7 Code | multi-file/MCP refactor · security review |
+|<#FFD9BA>   | DeepSeek V4 Pro | first-pass review · deploy · hard debug · digest PL |
+|<#E0E0E0>   | DeepSeek V4 Flash | flash subagent: DoR gate · push · scenarios · mechanical bulk |
+|<#C2F0F0>   | GPT-5.5 | TEST terminal ops |
+|<#D7BAFF>   | Mateusz | async HITL (needs:* + emoji ✅, batch) |
+| | policy | delegate-first: worker+flash in every squad · ≥40% run cost in subagents |
 endlegend
 
-|#EAF3FF|1 - PLAN launcher|
+|#EAF3FF|1 - PLAN squad (lead: Opus 4.8)|
 start
-#D7BAFF:Voice note + artifacts (+STATE.md) via UI inbox;
-#FFB3BA:Discovery synthesis: current vs desired,\nrisks, corner cases, echo-back\n(flag transcript-uncertain);
-if (DoR ok? Why/AC/scope-out/deps) then (no)
-  #D7BAFF:needs:answer -> @Mateusz (async);
+#D7BAFF:Voice memo + artifacts (+STATE.md) via inbox;
+#BAFFC9:Discovery: current vs desired, risks,\ncorner cases, echo-back\n(flag transcript-uncertain);
+#E0E0E0:DoR gate: Why/AC/scope-out/deps;
+if (DoR ok?) then (no)
+  #D7BAFF:needs:answer -> @Mateusz (async) + sleep;
 endif
-#D7BAFF:GATE 1 (HITL async): brief review -> approve / defer-to-spike;
+#D7BAFF:GATE 1 (HITL async): brief -> ✅ / defer-to-spike;
 #BAE1FF:Spec + test scenarios + prod plan\n(emit ADR for decisions);
-#FFB3BA:Spec review (skeptic): holes / corner cases (<=2 loops);
+#BAFFC9:Spec review (skeptic): holes / corner cases (<=2 loops);
 #BAFFC9:Decompose -> vertical slices + estimate (t-shirt; XL->re-split)\n+ type:* + relations(blocked by);
 fork
-  #BAFFC9:Enrich slice 1 (AC+DoD, link to parent);
+  #BAFFC9:Enrich slice 1 (AC+DoD, delta + link to parent);
 fork again
-  #BAFFC9:Enrich slice N (AC+DoD, link to parent);
+  #BAFFC9:Enrich slice N (AC+DoD, delta + link to parent);
 end fork
-#D7BAFF:GATE 2 (HITL async): sample 2-3 -> approve;
-#E0E0E0:Push to Linear (idempotent): parent(Initiative)+subtasks\n-> Todo, ai:planned, type:*;
+#D7BAFF:GATE 2 (HITL async): sample 2-3 -> ✅;
+#E0E0E0:Push to Linear (idempotent): parent(Initiative)+sub-issues\n-> Todo, ai:planned, type:* -> deliver_task();
 
-|#EAFBF0|2 - DEV launcher|
-#BAFFC9:Pick Todo (priority/deadline, dep-aware, WIP=1)\n-> recon (context packet) -> env-check;
+|#EAFBF0|2 - DEV squad (lead: GLM-5.2)|
+#BAE1FF:Resume check (.state/dev-wip.json) -> enforce WIP=1;
+#BAFFC9:Pick Todo+dor-ok (priority, dep-aware, smallest first)\n-> 👀 + assignee @flow -> recon (context packet) -> env-check;
 if (task type?) then (spike/tech)
   #BAE1FF:spike -> ADR (no deploy) / tech -> technical criteria;
   stop
 else (feature/bug)
 endif
 if (clear?) then (no)
-  #FFD9BA:Comment @Mateusz (PL) + needs:answer (async);
+  #BAFFC9:Comment @Mateusz (PL) + needs:answer -> sleep;
 endif
 #BAE1FF:Plan mode (verify desc vs code);
 #D7BAFF:GATE 3 (HITL): approve plan via emoji ✅;
-#BAE1FF:In Progress -> implement (checkpoint->STATE.md)\nmulti-file->Kimi · hard->DeepSeek V4 Pro;
-#BAFFC9:self-verify (delivery-loop) + DoD -> In Review, ai:coded;
+#BAE1FF:In Progress -> implement (checkpoint->STATE.md)\nmulti-file->Kimi · hard->DeepSeek V4 Pro\nsimple->worker · mechanical->flash;
+#BAFFC9:self-verify + DoD -> 1 task = 1 commit (no silent push)\n-> deliver_task() -> In Review, ai:coded;
 
-|#FFF6EA|3 - REVIEW launcher|
+|#FFF6EA|3 - REVIEW squad (lead: GLM-5.2)|
 fork
-  #E0E0E0:first-pass + SAST/secret-scan;
+  #FFD9BA:first-pass;
 fork again
-  #FFB3BA:deep: correctness/security/arch/edge (risk-tiered);
+  #FFFFBA:security: SAST + secret-scan;
+fork again
+  #BAE1FF:deep: correctness/arch/edge (risk-tiered);
 end fork
 if (issues? round<=2) then (issues)
-  #BAE1FF:Conventional Comments -> In Progress (round++);
+  #BAE1FF:Conventional Comments -> In Progress (round++)\n(>2 rounds -> escalated + @Mateusz);
   stop
 else (clean)
-  #BAE1FF:approve -> stage:testing, ai:reviewed;
+  #BAE1FF:approve -> assign VERSION -> stage:testing, ai:reviewed\n-> deliver_task();
 endif
 
-|#FFEAEA|4 - TEST launcher|
-#BAFFC9:Deploy OpenRouter build -> GCP VM\nhealth-check (+ auto-rollback on fail);
+|#FFEAEA|4 - TEST squad (lead: MiniMax M3)|
+#FFD9BA:Deploy new version -> GCP VM\nhealth-check (+ auto-rollback on fail);
 #E0E0E0:Generate scenarios (synthetic data, no PII);
-#BAFFC9:Run smoke + critical-path + observability\n(root-cause fail -> GLM-5.2);
+#BAFFC9:Run smoke + critical-path + observability\n(terminal ops: GPT-5.5);
 if (pass?) then (yes)
-  #BAE1FF:-> Done;
-  stop
+  #BAE1FF:-> Done (dod-ok) -> deliver_task();
 else (no)
-  #BAFFC9:comment failures -> In Progress;
+  #BAE1FF:root-cause (GLM-5.2) -> comment failures -> In Progress;
   stop
 endif
+
+|#F3EAFB|0 - CADENCE squad (weekly · read-mostly)|
+#BAFFC9:Collect: board state + telemetry + costs;
+#BAE1FF:Retro: drift / loops / estimate accuracy;
+#FFD9BA:Digest (PL) -> Mateusz\n+ Now/Next/Later roadmap refresh;
+#E0E0E0:-> new input for PLAN (weekly loop);
+stop
 @enduml
