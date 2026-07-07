@@ -11,6 +11,8 @@
 //   listTranscriptDir()       -> resolved project transcript directory
 //   inferTaskIdFromBranch(branch) -> "FEN-98" | null
 //   aggregateByTask(runs)     -> { [taskId]: { runs, costUSD, ... } }
+//   aggregateFlow(runs)       -> { squads: { [squad]: { agents: {...} } } } (Flow screen)
+//   extractAgentTurns(path, agentKey, opts) -> turn log with text (Flow screen)
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join, dirname, basename, extname, resolve } from "node:path";
@@ -372,12 +374,16 @@ function aggregateTurns(result, parsed) {
     // By agent
     const agentKey = turn.attributionAgent || "_lead";
     if (!result.byAgent[agentKey]) {
-      result.byAgent[agentKey] = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 };
+      result.byAgent[agentKey] = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0, turns: 0, models: {} };
     }
     result.byAgent[agentKey].inputTokens += turn.inputTokens;
     result.byAgent[agentKey].outputTokens += turn.outputTokens;
     result.byAgent[agentKey].cacheReadInputTokens += turn.cacheRead;
     result.byAgent[agentKey].cacheCreationInputTokens += turn.cacheCreation;
+    // Flow screen (additive): per-agent turn count + model mix so /api/flow
+    // can show which model actually executed a pipeline step and how often.
+    result.byAgent[agentKey].turns += 1;
+    result.byAgent[agentKey].models[modelKey] = (result.byAgent[agentKey].models[modelKey] || 0) + 1;
 
     // Per-turn cost — computed once using turn.model, added to both buckets
     const turnCost = costTokens(
@@ -490,8 +496,26 @@ function buildTranscriptIndex(transcriptDir) {
 // ---------------------------------------------------------------------------
 
 const BIRTH_BEFORE_MS = 30 * 1000; // session file may slightly predate manifest start
-const BIRTH_AFTER_MS = 120 * 1000; // claude creates the session file right after launch
+const BIRTH_AFTER_MS = 120 * 1000; // fallback upper bound for still-running manifests
 const AMBIGUOUS_MARGIN_MS = 2000;
+
+/**
+ * Upper bound for a transcript's birthtime, given a manifest.
+ *
+ * BIRTH_AFTER_MS assumes claude starts writing its session file within ~2 min
+ * of launch — false for a cold start in a brand-new project directory (first
+ * MCP/indexing overhead can push it past that). A COMPLETED run has a much
+ * better bound available: the transcript must have been born before the run
+ * ended (a session can't end before its own file exists) — a logical
+ * constraint, not a heuristic, and typically far more generous. Manifests
+ * still running (no endedAt) fall back to the fixed window.
+ */
+export function birthUpperBound(manifest, startedMs) {
+  const fallback = startedMs + BIRTH_AFTER_MS;
+  if (!manifest.endedAt) return fallback;
+  const ended = new Date(manifest.endedAt).getTime();
+  return Number.isFinite(ended) ? Math.max(fallback, ended) : fallback;
+}
 
 /** All hash subdirectories of a `<configDir>/projects` root (existing dirs only). */
 function projectHashDirs(projectsRoot) {
@@ -554,6 +578,7 @@ export function discoverTranscriptsForRuns(manifests) {
     if (manifest.sessionId || !manifest.startedAt || !manifest.cwd) continue;
     const started = new Date(manifest.startedAt).getTime();
     if (!Number.isFinite(started)) continue;
+    const upper = birthUpperBound(manifest, started);
 
     for (const rootDir of candidateRootsForManifest(manifest)) {
       if (!dirCache.has(rootDir)) {
@@ -577,7 +602,7 @@ export function discoverTranscriptsForRuns(manifests) {
       }
 
       for (const { path, birth } of dirCache.get(rootDir)) {
-        if (birth >= started - BIRTH_BEFORE_MS && birth <= started + BIRTH_AFTER_MS) {
+        if (birth >= started - BIRTH_BEFORE_MS && birth <= upper) {
           pairs.push({ runId: manifest.runId, path, diff: Math.abs(birth - started) });
         }
       }
@@ -907,4 +932,214 @@ export function aggregateByTask(runs) {
   for (const [k, v] of untagged) ordered[k] = v;
 
   return ordered;
+}
+
+// ---------------------------------------------------------------------------
+// Flow screen (interactive Overview) — per-step aggregation + log extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Aggregate runs into a pipeline-flow view: squad → agent(step) → stats + runs.
+ *
+ * Consumes the output of scanRuns() (each run carries byAgent with turn counts
+ * and model mix — see aggregateTurns). Pure function, no I/O — testable.
+ *
+ * @param {Array<object>} runs  Output of scanRuns()
+ * @returns {{ squads: { [squad]: { agents: { [agentKey]: {
+ *   executions, turns, inputTokens, outputTokens, costUSD,
+ *   models: {[slug]: turns}, lastActivityAt,
+ *   runs: [{runId, taskId, startedAt, endedAt, status, turns, costUSD, models}]
+ * } } } } }}
+ */
+export function aggregateFlow(runs) {
+  const squads = {};
+
+  for (const run of runs) {
+    const squadKey = run.squad || "_unknown";
+    if (!squads[squadKey]) squads[squadKey] = { agents: {} };
+
+    for (const [agentKey, a] of Object.entries(run.byAgent || {})) {
+      if (!squads[squadKey].agents[agentKey]) {
+        squads[squadKey].agents[agentKey] = {
+          executions: 0,
+          turns: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          costUSD: 0,
+          models: {},
+          lastActivityAt: null,
+          runs: [],
+        };
+      }
+      const node = squads[squadKey].agents[agentKey];
+
+      node.executions += 1;
+      node.turns += a.turns || 0;
+      node.inputTokens += a.inputTokens || 0;
+      node.outputTokens += a.outputTokens || 0;
+      node.costUSD += a.costUSD || 0;
+      for (const [slug, n] of Object.entries(a.models || {})) {
+        node.models[slug] = (node.models[slug] || 0) + n;
+      }
+      if (
+        run.lastActivityAt &&
+        (!node.lastActivityAt || run.lastActivityAt > node.lastActivityAt)
+      ) {
+        node.lastActivityAt = run.lastActivityAt;
+      }
+
+      node.runs.push({
+        runId: run.runId,
+        taskId: run.taskId || null,
+        startedAt: run.startedAt || null,
+        endedAt: run.endedAt || null,
+        status: run.status || null,
+        turns: a.turns || 0,
+        costUSD: a.costUSD || 0,
+        models: Object.keys(a.models || {}),
+      });
+    }
+  }
+
+  // Newest execution first inside each node.
+  for (const squad of Object.values(squads)) {
+    for (const node of Object.values(squad.agents)) {
+      node.runs.sort((x, y) => (y.startedAt || "").localeCompare(x.startedAt || ""));
+    }
+  }
+
+  return { squads };
+}
+
+/** Extract text blocks from a transcript message content. */
+function contentText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((p) => p && p.type === "text" && typeof p.text === "string")
+    .map((p) => p.text)
+    .join("\n");
+}
+
+/** Extract tool_use summaries from a transcript message content. */
+function contentToolUses(content, maxInput = 300) {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((p) => p && p.type === "tool_use")
+    .map((p) => {
+      let input = "";
+      try {
+        input = JSON.stringify(p.input);
+      } catch {
+        input = "";
+      }
+      if (input.length > maxInput) input = input.slice(0, maxInput) + "…";
+      return { name: p.name || "?", input };
+    });
+}
+
+/**
+ * Extract the full turn log (model responses) for ONE agent in ONE transcript.
+ *
+ * Same file layout as parseTranscript (lead .jsonl + optional subagents/ dir),
+ * but keeps the assistant message CONTENT: text blocks + tool_use summaries.
+ * This is the data source for the Flow screen's log viewer.
+ *
+ * @param {string} absPath   Lead transcript path (.jsonl)
+ * @param {string} agentKey  attributionAgent value, or "_lead" for the lead
+ * @param {object} [opts]    { windowStart, windowEnd (ms epoch), maxTextLen }
+ * @returns {Array<{ts, model, agent, text, truncated, toolUses, usage}>}
+ */
+export function extractAgentTurns(absPath, agentKey, opts = {}) {
+  const { windowStart = null, windowEnd = null, maxTextLen = 8000 } = opts;
+  const out = [];
+  if (!existsSync(absPath)) return out;
+
+  const inWindow = (ts) => {
+    if (!ts) return false;
+    const t = new Date(ts).getTime();
+    if (windowStart != null && t < windowStart) return false;
+    if (windowEnd != null && t > windowEnd) return false;
+    return true;
+  };
+
+  const pushTurn = (line, attribution) => {
+    if (line.type !== "assistant" || !line.message) return;
+    if ((attribution || "_lead") !== agentKey) return;
+    if ((windowStart != null || windowEnd != null) && !inWindow(line.timestamp)) return;
+
+    const msg = line.message;
+    let text = contentText(msg.content);
+    const truncated = text.length > maxTextLen;
+    if (truncated) text = text.slice(0, maxTextLen) + "…";
+
+    const usage = msg.usage || {};
+    out.push({
+      ts: line.timestamp || null,
+      model: msg.model || null,
+      agent: agentKey,
+      text,
+      truncated,
+      toolUses: contentToolUses(msg.content),
+      usage: {
+        inputTokens: usage.input_tokens ?? 0,
+        outputTokens: usage.output_tokens ?? 0,
+        cacheRead: usage.cache_read_input_tokens ?? 0,
+        cacheCreation: usage.cache_creation_input_tokens ?? 0,
+      },
+    });
+  };
+
+  const readJsonl = (p) => {
+    let lines;
+    try {
+      lines = readFileSync(p, "utf8").split("\n").filter(Boolean);
+    } catch {
+      return [];
+    }
+    const parsed = [];
+    for (const raw of lines) {
+      try {
+        const line = JSON.parse(raw);
+        if (line && typeof line === "object") parsed.push(line);
+      } catch {
+        // skip malformed lines
+      }
+    }
+    return parsed;
+  };
+
+  // Lead transcript
+  for (const line of readJsonl(absPath)) {
+    pushTurn(line, line.attributionAgent || null);
+  }
+
+  // Subagent transcripts (same discovery as parseTranscript)
+  const parentDir = dirname(absPath);
+  const subagentsDirCandidates = [
+    join(parentDir, basename(absPath, ".jsonl"), "subagents"),
+    join(parentDir, "subagents"),
+  ];
+  const subagentsDir = subagentsDirCandidates.find(
+    (d) => existsSync(d) && statSync(d).isDirectory(),
+  );
+  if (subagentsDir) {
+    let agentFiles = [];
+    try {
+      agentFiles = readdirSync(subagentsDir).filter(
+        (f) => f.startsWith("agent-") && f.endsWith(".jsonl") && !f.endsWith(".meta.json"),
+      );
+    } catch {
+      agentFiles = [];
+    }
+    for (const agentFile of agentFiles) {
+      for (const line of readJsonl(join(subagentsDir, agentFile))) {
+        pushTurn(line, line.attributionAgent || (line.agentId ? `agent-${line.agentId}` : null));
+      }
+    }
+  }
+
+  // Chronological order (ISO strings compare lexicographically).
+  out.sort((x, y) => (x.ts || "").localeCompare(y.ts || ""));
+  return out;
 }
