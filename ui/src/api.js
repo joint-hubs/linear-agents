@@ -43,3 +43,16 @@ export async function postLaunch(payload) {
   if (!r.ok) throw new Error(data?.error || ('API ' + r.status));
   return data;
 }
+
+// Flow screen — interactive Overview. getFlow() returns squad -> agent(step)
+// aggregation across all runs; getFlowLog() returns the full turn log (model
+// responses) for one step in one run.
+export async function getFlow() {
+  return apiFetch('/api/flow');
+}
+
+export async function getFlowLog(runId, agent) {
+  return apiFetch(
+    '/api/flow/log?runId=' + encodeURIComponent(runId) + '&agent=' + encodeURIComponent(agent)
+  );
+}
