@@ -12,6 +12,11 @@
  *   comment-replace <id|identifier> --dedup-tag <tag> (--body <text> | --body-file <path>) [--dry-run]
  *   update-description <id|identifier> (--body <text> | --body-file <path>) [--dry-run]
  *   estimate <id|identifier> --estimate <XS|S|M|L|XL> [--dry-run]
+ *   create-child <parentId|parentIdentifier> --title <text> (--body <text> | --body-file <path>)
+ *                [--type feat|bug|spike|tech] [--estimate <XS|S|M|L|XL>] [--label <l> ...] [--dry-run]
+ *     Creates a NEW issue as a real Linear sub-issue (parentId) of an EXISTING
+ *     issue — e.g. adding a follow-up under an epic like JOI-73. Distinct from
+ *     linear-push.mjs, which always creates a brand-new top-level parent.
  *
  * Dependencies: Node 18+ (global fetch). No npm install required.
  */
@@ -34,6 +39,18 @@ const root = join(__dir, "..");
 
 /** T-shirt → Linear numeric estimate (mirrors linear-push.mjs ESTIMATE_MAP + XS). */
 const ESTIMATE_MAP = { XS: 1, S: 2, M: 3, L: 5, XL: 8 };
+
+/** feat/fix/... -> type:<name> label suffix (mirrors linear-push.mjs TYPE_ALIAS). */
+const TYPE_ALIAS = { feat: "feature", feature: "feature", fix: "bug", bug: "bug", spike: "spike", tech: "tech", refactor: "tech" };
+
+const ISSUE_CREATE_MUTATION = `
+  mutation IssueCreate($input: IssueCreateInput!) {
+    issueCreate(input: $input) {
+      success
+      issue { id identifier url title }
+    }
+  }
+`;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -160,6 +177,13 @@ function parseArgs(argv) {
       args.dedupTag = argv[++i];
     } else if (a === "--estimate" && i + 1 < argv.length) {
       args.estimate = argv[++i];
+    } else if (a === "--title" && i + 1 < argv.length) {
+      args.title = argv[++i];
+    } else if (a === "--type" && i + 1 < argv.length) {
+      args.type = argv[++i];
+    } else if (a === "--label" && i + 1 < argv.length) {
+      if (!args.label) args.label = [];
+      args.label.push(argv[++i]);
     } else if (a.startsWith("--")) {
       // Unknown flag — skip
     } else {
@@ -179,6 +203,7 @@ function printUsage() {
   console.error("  node scripts/linear-ops.mjs comment-replace <id|identifier> --dedup-tag <tag> (--body <text> | --body-file <path>) [--dry-run]");
   console.error("  node scripts/linear-ops.mjs update-description <id|identifier> (--body <text> | --body-file <path>) [--dry-run]");
   console.error("  node scripts/linear-ops.mjs estimate <id|identifier> --estimate <XS|S|M|L|XL> [--dry-run]");
+  console.error("  node scripts/linear-ops.mjs create-child <parentId|parentIdentifier> --title <text> (--body <text> | --body-file <path>) [--type feat|bug|spike|tech] [--estimate <XS|S|M|L|XL>] [--label <l> ...] [--dry-run]");
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +757,122 @@ async function handleEstimate(identifier, args, dryRunCtx) {
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: create-child — real Linear sub-issue under an EXISTING issue
+// ---------------------------------------------------------------------------
+
+async function handleCreateChild(identifier, args, dryRunCtx) {
+  if (dryRunCtx.dryRun) {
+    console.error(`[dry-run:${dryRunCtx.squad}] create-child has no fixture path — run without a *_DRY_RUN env to preview with --dry-run`);
+    process.exit(2);
+  }
+
+  if (!args.title) {
+    console.error("Error: --title <text> is required for create-child");
+    process.exit(2);
+  }
+  const body = readBodyArg(args, "create-child");
+
+  const { issue: parent, teamId } = await resolveIssueWithTeam(identifier);
+
+  // Team labels — same G:C (group:child) resolution as `label` (handleLabel).
+  const teamData = await graphql(
+    `query($teamId:String!){
+      team(id:$teamId){
+        states(first:50){ nodes{ id name type } }
+        labels(first:200){ nodes{ id name isGroup parent{ id name } } }
+      }
+    }`,
+    { teamId },
+  );
+  const allLabels = teamData.team?.labels?.nodes || [];
+  const labelByName = new Map(allLabels.map((l) => [l.name, l]));
+  const groupById = new Map();
+  for (const lbl of allLabels) if (lbl.isGroup) groupById.set(lbl.id, lbl.name);
+  const childByNameInGroup = new Map();
+  for (const lbl of allLabels) {
+    if (!lbl.isGroup && lbl.parent?.id) {
+      const parentName = groupById.get(lbl.parent.id) || lbl.parent.name;
+      if (parentName) childByNameInGroup.set(`${parentName}::${lbl.name}`, lbl);
+    }
+  }
+  function resolveLabelId(name) {
+    const exact = labelByName.get(name);
+    if (exact) return exact;
+    const colonIdx = name.indexOf(":");
+    if (colonIdx > 0) {
+      const found = childByNameInGroup.get(`${name.slice(0, colonIdx)}::${name.slice(colonIdx + 1)}`);
+      if (found) return found;
+    }
+    throw new Error(`Label not found in team: ${name}`);
+  }
+
+  const labelNames = [...(args.label || [])];
+  if (args.type) {
+    const normalized = TYPE_ALIAS[args.type] || args.type;
+    labelNames.push(`type:${normalized}`);
+  }
+  const labelIds = [];
+  for (const name of labelNames) {
+    const lbl = resolveLabelId(name);
+    if (lbl.isGroup) {
+      console.error(`Cannot add group label '${name}' (only leaf labels attach to issues)`);
+      process.exit(1);
+    }
+    labelIds.push(lbl.id);
+  }
+
+  const states = teamData.team?.states?.nodes || [];
+  const defaultState =
+    states.find((s) => s.name === "Backlog") ||
+    states.find((s) => s.type === "backlog") ||
+    states.find((s) => s.name === "Todo") ||
+    states.find((s) => s.type === "unstarted") ||
+    states[0];
+  if (!defaultState) {
+    console.error("No workflow states found for team");
+    process.exit(1);
+  }
+
+  let estimateValue;
+  if (args.estimate) {
+    const upper = args.estimate.toUpperCase();
+    estimateValue = ESTIMATE_MAP[upper];
+    if (estimateValue === undefined) {
+      console.error(`Error: invalid estimate "${args.estimate}". Valid: ${Object.keys(ESTIMATE_MAP).join(", ")}`);
+      process.exit(2);
+    }
+  }
+
+  const input = {
+    teamId,
+    parentId: parent.id,
+    title: args.title,
+    description: body,
+    stateId: defaultState.id,
+    ...(labelIds.length > 0 ? { labelIds } : {}),
+    ...(estimateValue !== undefined ? { estimate: estimateValue } : {}),
+  };
+
+  if (args.dryRun) {
+    console.log(`[dry-run] would create child of ${parent.identifier} ("${parent.title}")`);
+    console.log(`  title: ${args.title}`);
+    console.log(`  stateId: ${defaultState.id} ("${defaultState.name}")`);
+    console.log(`  labels: ${labelNames.join(", ") || "(none)"}`);
+    console.log(`  estimate: ${args.estimate || "(none)"}`);
+    return;
+  }
+
+  const result = await graphql(ISSUE_CREATE_MUTATION, { input });
+  if (result.issueCreate.success) {
+    const issue = result.issueCreate.issue;
+    console.log(`✅ ${issue.identifier} (child of ${parent.identifier}) ${issue.url}`);
+  } else {
+    console.error("Error: issue creation failed");
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -773,6 +914,9 @@ async function main() {
       break;
     case "estimate":
       await handleEstimate(identifier, args, dryRunCtx);
+      break;
+    case "create-child":
+      await handleCreateChild(identifier, args, dryRunCtx);
       break;
     default:
       console.error(`Error: unknown subcommand "${cmd}"`);
