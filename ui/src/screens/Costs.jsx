@@ -271,7 +271,8 @@ export default function Costs() {
               {(() => {
                 const entries = topByCost(byAgent);
                 const max = maxCost(entries);
-                return entries.map(([k, v]) => barRow(k, v, max, k));
+                // "_lead" is an internal attribution key — display as "lead".
+                return entries.map(([k, v]) => barRow(k, v, max, k === '_lead' ? 'lead' : k));
               })()}
             </div>
           )}

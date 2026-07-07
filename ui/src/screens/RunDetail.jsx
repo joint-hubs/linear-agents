@@ -68,10 +68,12 @@ function CopyPath({ path }) {
 }
 
 // One model/agent row with in / out / cache token columns.
+// "_lead" is an internal attribution key — display it as "lead".
 function TokenRow({ name, v, pct }) {
+  const display = name === '_lead' ? 'lead' : name;
   return (
     <tr key={name} className="row">
-      <td className="td">{name}</td>
+      <td className="td">{display}</td>
       <td className="td">{fmtUSD(v.costUSD || 0)}</td>
       <td className="td">{fmtTokens(v.inputTokens || 0)}</td>
       <td className="td">{fmtTokens(v.outputTokens || 0)}</td>
@@ -141,7 +143,7 @@ export default function RunDetail() {
               {(() => {
                 const s = statusLabel(run);
                 if (s === 'done') return <span className="badge badge-ok">done</span>;
-                if (s === 'running') return <span className="badge badge-ok">running</span>;
+                if (s === 'running') return <span className="badge badge-run">running</span>;
                 if (s === 'failed') return <span className="badge badge-fail">failed</span>;
                 return null;
               })()}

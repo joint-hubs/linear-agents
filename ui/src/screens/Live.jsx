@@ -45,10 +45,19 @@ function TaskChip({ run }) {
 
 function StatusBadge({ run }) {
   const s = statusLabel(run);
-  if (s === 'running') return <span className="badge badge-ok">running</span>;
+  if (s === 'running') return <span className="badge badge-run">running</span>;
   if (s === 'failed') return <span className="badge badge-fail">failed</span>;
   return <span className="badge badge-ok">done</span>;
 }
+
+// Squad accent color (CSS var set in theme.css) for run-card left border.
+const SQ_VAR = {
+  plan: 'var(--sq-plan)',
+  dev: 'var(--sq-dev)',
+  review: 'var(--sq-review)',
+  test: 'var(--sq-test)',
+  cadence: 'var(--sq-cadence)',
+};
 
 function ModelBars({ run }) {
   const mix = modelMix(run.byModel || {});
@@ -162,7 +171,7 @@ export default function Live() {
               <div className="kpi-value">{fmtTokens(todayTokens)}</div>
             </div>
             <div className={'kpi' + (attention.length > 0 ? ' kpi-warn' : '')}>
-              <div className="kpi-label">⚠ Attention</div>
+              <div className="kpi-label">Attention</div>
               <div className="kpi-value">{attention.length}</div>
             </div>
           </div>
@@ -179,7 +188,11 @@ export default function Live() {
             {active.length > 0 && (
               <div className="run-cards">
                 {active.map((run) => (
-                  <div className="run-card" key={run.runId}>
+                  <div
+                    className="run-card"
+                    key={run.runId}
+                    style={{ '--sq': SQ_VAR[run.squad] || 'var(--border-strong)' }}
+                  >
                     <div className="run-card-h">
                       <span className="dot dot-ok" />
                       <span className="run-card-squad">{run.squad || '—'}</span>
@@ -235,7 +248,11 @@ export default function Live() {
                       <td className="td">
                         <StatusBadge run={run} />
                         {run.ambiguous && (
-                          <span className="badge badge-warn" style={{ marginLeft: 4 }}>
+                          <span
+                            className="badge badge-warn"
+                            style={{ marginLeft: 4 }}
+                            title="Transcript matched by start-time heuristic — cost may belong to another session. Open the run to verify."
+                          >
                             ambiguous
                           </span>
                         )}
@@ -249,7 +266,7 @@ export default function Live() {
 
           {/* Needs attention */}
           <div className="section">
-            <div className="section-h">⚠ Needs attention</div>
+            <div className="section-h">Needs attention</div>
             {attention.length === 0 && (
               <div className="empty">Nothing needs attention.</div>
             )}

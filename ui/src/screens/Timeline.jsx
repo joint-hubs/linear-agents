@@ -6,13 +6,13 @@ import { fmtUSD, elapsed, statusLabel, modelMix } from '../utils';
 
 const POLL_MS = 5000;
 
-// Fixed squad palette (ux-design-v3 §3.2).
+// Fixed squad palette (ux-design-v3 §3.2) — mirrors --sq-* vars in theme.css.
 const SQCOLOR = {
-  plan: '#5e5ce6',
-  dev: '#0071e3',
-  review: '#ff9500',
-  test: '#34c759',
-  cadence: '#6e6e73',
+  plan: '#6e56cf',
+  dev: '#2563eb',
+  review: '#d97706',
+  test: '#059669',
+  cadence: '#64748b',
 };
 const SQUADS = ['plan', 'dev', 'review', 'test', 'cadence'];
 const ZOOMS = [
@@ -231,7 +231,7 @@ export default function Timeline() {
                         <div
                           key={b.run.runId}
                           className={
-                            'bar' +
+                            'tl-bar' +
                             (b.st === 'running' ? ' live' : '') +
                             (b.st === 'failed' ? ' fail' : '')
                           }
@@ -239,7 +239,8 @@ export default function Timeline() {
                             left: b.left + '%',
                             width: b.width + '%',
                             minWidth: 4,
-                            background: SQCOLOR[b.run.squad] || '#6e6e73',
+                            background: SQCOLOR[b.run.squad] || '#64748b',
+                            color: SQCOLOR[b.run.squad] || '#64748b',
                           }}
                           onMouseMove={(e) =>
                             setHover({ run: b.run, x: e.clientX, y: e.clientY })

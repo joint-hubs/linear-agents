@@ -34,7 +34,7 @@ function StatusCell({ run, now }) {
   return (
     <>
       {s === 'done' && <span className="badge badge-ok">done</span>}
-      {s === 'running' && <span className="badge badge-ok">running</span>}
+      {s === 'running' && <span className="badge badge-run">running</span>}
       {s === 'failed' && <span className="badge badge-fail">failed</span>}
       {s === 'running' && isStale(run, now) && (
         <span className="badge badge-warn" style={{ marginLeft: 4 }} title="active > 2h — stale?">
@@ -42,7 +42,11 @@ function StatusCell({ run, now }) {
         </span>
       )}
       {run.ambiguous && (
-        <span className="badge badge-warn" style={{ marginLeft: 4 }}>
+        <span
+          className="badge badge-warn"
+          style={{ marginLeft: 4 }}
+          title="Transcript matched by start-time heuristic — cost may belong to another session."
+        >
           amb
         </span>
       )}
@@ -195,11 +199,11 @@ export default function Runs() {
               <td>Squad</td>
               <td>Task</td>
               <td>Repo</td>
-              <td>Dur</td>
+              <td>Duration</td>
               <td>Cost</td>
               <td>Tokens</td>
               <td>Models</td>
-              <td>St</td>
+              <td>Status</td>
             </tr>
           </thead>
           <tbody>
@@ -208,10 +212,17 @@ export default function Runs() {
               const totalTokens =
                 (run.totals?.inputTokens || 0) + (run.totals?.outputTokens || 0);
 
+              // Short model name: vendor prefix + date suffix stripped
+              // ("z-ai/glm-5.2-20260616" → "glm-5.2") — full slug in tooltip.
+              const short = (s) => s.split('/').pop().replace(/-\d{8}$/, '');
               let modelsCell = '—';
+              let modelsTitle = '';
               if (mix.length > 0) {
-                const top = mix.slice(0, 2);
-                modelsCell = mix.length > 2 ? `${top[0].slug} (+${mix.length - 1})` : top.map((m) => m.slug).join(', ');
+                modelsTitle = mix.map((m) => m.slug).join(', ');
+                modelsCell =
+                  mix.length > 2
+                    ? `${short(mix[0].slug)} (+${mix.length - 1})`
+                    : mix.slice(0, 2).map((m) => short(m.slug)).join(', ');
               }
 
               return (
@@ -230,7 +241,9 @@ export default function Runs() {
                   <td className="td">{elapsed(run.startedAt, run.endedAt)}</td>
                   <td className="td">{fmtUSD(run.totals?.costUSD || 0)}</td>
                   <td className="td">{fmtTokens(totalTokens)}</td>
-                  <td className="td">{modelsCell}</td>
+                  <td className="td" title={modelsTitle} style={{ whiteSpace: 'nowrap' }}>
+                    {modelsCell}
+                  </td>
                   <td className="td">
                     <StatusCell run={run} now={now} />
                   </td>
