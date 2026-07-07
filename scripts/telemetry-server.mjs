@@ -560,6 +560,103 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // GET /api/flow/trace?taskId=… + GET /api/flow/patterns — read from the
+    // flow DB (.state/flowdb/flow.db, populated by `node scripts/flow-db.mjs
+    // ingest`). Graceful degrade (200 + error field) when the DB or
+    // node:sqlite is unavailable, matching /api/linear/queue.
+    if (path === '/api/flow/trace' || path === '/api/flow/patterns') {
+      let flowDb;
+      try {
+        flowDb = await import('./flow-db.mjs');
+      } catch (e) {
+        json(res, 200, { error: 'flow-db unavailable: ' + e.message });
+        log(method, path, 200);
+        return;
+      }
+      if (!flowDb.sqliteAvailable()) {
+        json(res, 200, { error: 'node:sqlite unavailable — flow DB requires Node >= 22.5' });
+        log(method, path, 200);
+        return;
+      }
+      const { existsSync: dbExists } = await import('node:fs');
+      if (!dbExists(flowDb.DEFAULT_DB_PATH)) {
+        json(res, 200, { error: 'flow DB not found — run: node scripts/flow-db.mjs ingest' });
+        log(method, path, 200);
+        return;
+      }
+      const db = flowDb.openDb(flowDb.DEFAULT_DB_PATH);
+      try {
+        if (path === '/api/flow/trace') {
+          const taskId = url.searchParams.get('taskId') || '';
+          if (!taskId) {
+            json(res, 400, { error: 'taskId query param is required' });
+            log(method, path, 400);
+            return;
+          }
+          json(res, 200, flowDb.queryTrace(db, taskId));
+        } else {
+          json(res, 200, flowDb.queryPatterns(db, {
+            squad: url.searchParams.get('squad') || undefined,
+            agent: url.searchParams.get('agent') || undefined,
+          }));
+        }
+        log(method, path, 200);
+      } finally {
+        db.close();
+      }
+      return;
+    }
+
+    // GET /api/flow — interactive Overview: squad -> agent(step) aggregation.
+    // Data source: scanRuns() byAgent (turn counts + model mix, see ledger).
+    if (path === '/api/flow') {
+      const runs = await ledger.scanRuns();
+      const flow = ledger.aggregateFlow(runs);
+      json(res, 200, { generatedAt: new Date().toISOString(), squads: flow.squads });
+      log(method, path, 200);
+      return;
+    }
+
+    // GET /api/flow/log?runId=<id>&agent=<key> — full turn log (model
+    // responses + tool_use summaries) for one pipeline step in one run.
+    // Graceful degrade: run without a locatable transcript -> 200 + error
+    // field (matches /api/linear/queue convention), so the UI stays up.
+    if (path === '/api/flow/log') {
+      const runId = url.searchParams.get('runId') || '';
+      const agent = url.searchParams.get('agent') || '';
+      if (!runId || !agent) {
+        json(res, 400, { error: 'runId and agent query params are required' });
+        log(method, path, 400);
+        return;
+      }
+      const runs = await ledger.scanRuns();
+      const run = runs.find((r) => r.runId === runId);
+      if (!run) {
+        json(res, 404, { error: 'run not found: ' + runId });
+        log(method, path, 404);
+        return;
+      }
+      const transcriptPath =
+        run.transcriptPath ||
+        (run.sessionId ? join(ledger.listTranscriptDir(), run.sessionId + '.jsonl') : null);
+      if (!transcriptPath) {
+        json(res, 200, {
+          runId, agent, squad: run.squad, taskId: run.taskId,
+          turns: [], error: 'no transcript located for this run',
+        });
+        log(method, path, 200);
+        return;
+      }
+      const windowStart = run.startedAt ? new Date(run.startedAt).getTime() : null;
+      const windowEnd = run.endedAt
+        ? new Date(run.endedAt).getTime() + 60 * 1000
+        : Date.now() + 60 * 1000;
+      const turns = ledger.extractAgentTurns(transcriptPath, agent, { windowStart, windowEnd });
+      json(res, 200, { runId, agent, squad: run.squad, taskId: run.taskId, turns });
+      log(method, path, 200);
+      return;
+    }
+
     // --- Fallback: unknown path ---
     json(res, 404, { error: 'not found' });
     log(method, path, 404);
@@ -589,6 +686,8 @@ server.listen(PORT, '127.0.0.1', () => {
       '/api/budget',
       '/api/linear/queue?workspace=jointhubs',
       '/api/live',
+      '/api/flow',
+      '/api/flow/patterns',
     ];
     // L1b: also exercise POST /api/launch validation. dryRun=true returns 200
     // WITHOUT spawning a window (so smoke is safe to run in CI / headless);
