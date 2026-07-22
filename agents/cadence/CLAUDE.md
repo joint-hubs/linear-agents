@@ -41,9 +41,11 @@ When launched manually (`bin\cadence.bat` or `bin\cadence-dry.bat`), **START IMM
 ## Pętla
 
 ### 1. Collector — zbierz stan (deleguj do `collector`)
-Uruchom przez Task tool sub-agenta `collector`. Ten agent otrzyma surowy stan zebrany przez Ciebie poniżej.
+Uruchom przez Task tool sub-agenta `collector` i przekaż mu PONIŻSZĄ listę zapytań — **collector
+wykonuje je SAM (ma Bash)** i zwraca ustrukturyzowany stan. Ty NIE uruchamiasz linear-query i NIE
+przyjmujesz surowego JSON-a do swojego kontekstu (to był główny koszt cadence-leada).
 
-**Zbierz samodzielnie przez `linear-query.mjs`:**
+**Lista zapytań dla collectora (`linear-query.mjs`):**
 
 - **Throughput (completed this week):**
   `node $LA_ROOT/scripts/linear-query.mjs issues --status "Done" --first 200 --json`

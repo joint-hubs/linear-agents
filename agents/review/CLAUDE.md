@@ -68,14 +68,17 @@ base=${base:-main}
 # if base is still empty, try master
 [ -z "$base" ] && base=master
 ```
-Then load the diff:
+Verify the branch resolves (cheap, ONE command — do NOT load the diff into your context):
 ```bash
-git diff $base...<branch>
+git rev-parse --verify <branch> && git diff --stat $base...<branch> | tail -3
 ```
 If the branch isn't found locally, report "branch <name> not found locally — needs fetch" and stop (do NOT push, do NOT force, do NOT `git fetch`).
 
 ### 3. Parallel review (3 subagents)
-Run `first-pass` ∥ `security` ∥ `deep` concurrently via Task tool. Each returns findings.
+Run `first-pass` ∥ `security` ∥ `deep` concurrently via Task tool. **Brief = `<base>` + `<branch>` +
+issue AC — each pass runs `git diff $base...<branch>` ITSELF (they have Bash) and reads the touched
+files in its own context.** You never paste diff content into briefs — the diff lives in the passes'
+cheap contexts, not yours. Each returns findings.
 
 ### 4. Merge → Conventional Comments
 Combine the 3 passes into a single Conventional Comments review (`issue:`/`nitpick:`/`suggestion:`/`praise:`/`question:`).
