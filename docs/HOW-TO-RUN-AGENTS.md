@@ -77,6 +77,11 @@ Dry-run (bez zapisu do Linear): `bin\plan-dry.bat`, `dev-dry.bat`,
 > proste/mechaniczne → `worker` (MiniMax) / `flash` (DeepSeek Flash), standard → rola squadu,
 > lead sam TYLKO decyzje i najtrudniejsze cięcie problemu. Jeśli lead mieli sam — przypomnij mu
 > w prompcie: „Stosuj Politykę delegacji". Metryka: RunDetail „By agent" ≥40% u subagentów.
+>
+> **Od 2026-07-22 (F0+F1):** subagenci wykonawczy mają Bash — faza implement+verify+commit to
+> **JEDEN `Task(implementer)`** (pełna pętla u niego, lead dostaje streszczenie + hash commita;
+> dev CLAUDE.md §3). Lead, który sam odpala Edit/build/test, łamie protokół — wytknij mu to
+> w prompcie. Analiza-uzasadnienie: `docs/decisions/cost-optimization.md` → Addendum v2.
 
 ### 4.1 PLAN — `bin\plan.bat`
 
