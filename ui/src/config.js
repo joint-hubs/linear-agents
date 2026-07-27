@@ -6,6 +6,7 @@ export const LINEAR_PREFIXES = {
   PISI: 'https://linear.app/pisi/issue/',
   FEN: 'https://linear.app/jointhubs/issue/',
   JOI: 'https://linear.app/jointhubs/issue/',
+  FOC: 'https://linear.app/jointhubs/issue/',
 };
 
 // Resolve a Linear task ID (e.g. "PISI-98") to its issue URL, or null when
