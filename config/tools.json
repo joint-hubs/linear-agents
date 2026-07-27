@@ -1,0 +1,23 @@
+{
+  "_doc": "Katalog narzędzi agenta: opis po polsku + poziom ryzyka. Używany przez checklistę narzędzi w dashboardzie.",
+  "tools": {
+    "Read":  { "label": "Read",  "description": "Czyta zawartość pliku.", "risk": "safe" },
+    "Grep":  { "label": "Grep",  "description": "Szuka tekstu lub wzorca w plikach.", "risk": "safe" },
+    "Glob":  { "label": "Glob",  "description": "Znajduje pliki po wzorcu nazwy.", "risk": "safe" },
+    "Edit":  { "label": "Edit",  "description": "Zmienia istniejący plik.", "risk": "writes-code" },
+    "Write": { "label": "Write", "description": "Tworzy nowy plik lub nadpisuje istniejący.", "risk": "writes-code" },
+    "Bash":  { "label": "Bash",  "description": "Uruchamia komendy w systemie: build, testy, git.", "risk": "writes-system" },
+    "Task":  { "label": "Task",  "description": "Zleca pracę kolejnemu subagentowi. UWAGA: żadna rola Fenixa dziś tego nie ma — hierarchia jest celowo płaska (lead → subagent). Nadanie tego narzędzia pozwala schodzić głębiej i zmienia architekturę.", "risk": "architecture" },
+    "WebFetch":  { "label": "WebFetch",  "description": "Pobiera zawartość strony internetowej.", "risk": "external" },
+    "WebSearch": { "label": "WebSearch", "description": "Szuka w internecie.", "risk": "external" },
+    "NotebookEdit": { "label": "NotebookEdit", "description": "Edytuje notatnik Jupyter.", "risk": "writes-code" },
+    "TodoWrite": { "label": "TodoWrite", "description": "Prowadzi listę zadań agenta.", "risk": "safe" }
+  },
+  "riskLevels": {
+    "safe": { "label": "bezpieczne", "hint": "tylko odczyt" },
+    "writes-code": { "label": "zmienia kod", "hint": "może modyfikować pliki repozytorium" },
+    "writes-system": { "label": "zmienia system", "hint": "uruchamia komendy, może commitować i instalować" },
+    "architecture": { "label": "zmienia architekturę", "hint": "pozwala zagnieżdżać delegację" },
+    "external": { "label": "wychodzi na zewnątrz", "hint": "sięga poza ten komputer" }
+  }
+}

@@ -1108,10 +1108,55 @@ export function extractAgentTurns(absPath, agentKey, opts = {}) {
   const out = [];
   if (!existsSync(absPath)) return out;
 
-  const inWindow = (ts) => {
+  const readJsonl = (p) => {
+    let lines;
+    try {
+      lines = readFileSync(p, "utf8").split("\n").filter(Boolean);
+    } catch {
+      return [];
+    }
+    const parsed = [];
+    for (const raw of lines) {
+      try {
+        const line = JSON.parse(raw);
+        if (line && typeof line === "object") parsed.push(line);
+      } catch {
+        // skip malformed lines
+      }
+    }
+    return parsed;
+  };
+
+  // Pre-scan: locate the first user turn with non-empty text (the kickoff).
+  // This turn is always included when includeUser is true, regardless of the
+  // time window — it's the prompt that opened the conversation, and on some
+  // runs it lands before the manifest's startedAt (the agent starts a few
+  // seconds after the user sends the message).
+  let firstUserTextTs = null;
+  if (includeUser && agentKey === "_lead") {
+    for (const line of readJsonl(absPath)) {
+      if (line.type === "user" && !line.isSidechain) {
+        const rawText = contentText(line.message?.content);
+        if (rawText.trim()) {
+          firstUserTextTs = line.timestamp || null;
+          break;
+        }
+      }
+    }
+  }
+
+  // User-turn window is widened 5 minutes back vs the assistant window.
+  // The kickoff prompt often lands seconds before the run's startedAt, and
+  // without this margin it's silently dropped — the conversation appears to
+  // start mid-response with no opening prompt (FOC-38 root cause).
+  const userWindowStart =
+    includeUser && windowStart != null ? windowStart - 5 * 60 * 1000 : windowStart;
+
+  const inWindow = (ts, isUser) => {
     if (!ts) return false;
     const t = new Date(ts).getTime();
-    if (windowStart != null && t < windowStart) return false;
+    const ws = isUser ? userWindowStart : windowStart;
+    if (ws != null && t < ws) return false;
     if (windowEnd != null && t > windowEnd) return false;
     return true;
   };
@@ -1127,7 +1172,12 @@ export function extractAgentTurns(absPath, agentKey, opts = {}) {
     if (includeUser && line.type === "user") {
       if (agentKey !== "_lead") return;
       if (line.isSidechain) return;
-      if ((windowStart != null || windowEnd != null) && !inWindow(line.timestamp)) return;
+
+      const isKickoff = firstUserTextTs !== null && line.timestamp === firstUserTextTs;
+
+      // Kickoff is always included, regardless of the time window.
+      // Other user turns use the widened userWindowStart.
+      if (!isKickoff && (windowStart != null || windowEnd != null) && !inWindow(line.timestamp, true)) return;
 
       const rawText = contentText(line.message?.content);
       // Most "user" lines in a Claude Code transcript are tool_result envelopes
@@ -1146,6 +1196,7 @@ export function extractAgentTurns(absPath, agentKey, opts = {}) {
         toolUses: [],
         usage: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreation: 0 },
         role: "user",
+        ...(isKickoff ? { isKickoff: true } : {}),
       });
       return;
     }
@@ -1153,7 +1204,7 @@ export function extractAgentTurns(absPath, agentKey, opts = {}) {
     // Assistant turns
     if (line.type !== "assistant" || !line.message) return;
     if ((attribution || "_lead") !== agentKey) return;
-    if ((windowStart != null || windowEnd != null) && !inWindow(line.timestamp)) return;
+    if ((windowStart != null || windowEnd != null) && !inWindow(line.timestamp, false)) return;
 
     const msg = line.message;
     const rawText = contentText(msg.content);
@@ -1175,25 +1226,6 @@ export function extractAgentTurns(absPath, agentKey, opts = {}) {
       },
       role: "assistant",
     });
-  };
-
-  const readJsonl = (p) => {
-    let lines;
-    try {
-      lines = readFileSync(p, "utf8").split("\n").filter(Boolean);
-    } catch {
-      return [];
-    }
-    const parsed = [];
-    for (const raw of lines) {
-      try {
-        const line = JSON.parse(raw);
-        if (line && typeof line === "object") parsed.push(line);
-      } catch {
-        // skip malformed lines
-      }
-    }
-    return parsed;
   };
 
   // Lead transcript

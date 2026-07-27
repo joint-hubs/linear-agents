@@ -1,11 +1,13 @@
-// squad-config — read/write LLM model configuration per squad.
+// squad-config — read/write LLM model + tool configuration per squad.
 //
 // ESM, zero runtime deps (Node 18+).
 //
 // Exports:
-//   readSquadConfig(root?)  → { squads, pricing }
-//   validateSlug(slug)      → { ok, warning }
-//   writeSquadConfig(patch, root?) → { changed, warnings }
+//   readSquadConfig(root?)   → { squads, pricing }
+//   readToolCatalog(root?)   → { tools, riskLevels }
+//   validateSlug(slug)       → { ok, warning }
+//   validateTools(tools, cat) → { ok, unknown, warnings }
+//   writeSquadConfig(patch, root?, {dryRun}) → { changed, warnings }
 
 import {
   readFileSync,
@@ -107,6 +109,7 @@ function readLeadFromBat(filePath) {
 // ---------------------------------------------------------------------------
 
 const FRONTMATTER_MODEL_RE = /^model:\s*(.+)$/;
+const FRONTMATTER_TOOLS_RE = /^tools:\s*(.+)$/;
 
 /** Read a single agent's model from its .md file. Returns null if not found. */
 function readAgentModel(filePath) {
@@ -122,7 +125,26 @@ function readAgentModel(filePath) {
   return null;
 }
 
-function readAgentModels(squadDir) {
+/** Read a single agent's tools from its .md file. Returns array (empty if not found). */
+function readAgentTools(filePath) {
+  if (!existsSync(filePath)) return [];
+  const content = readFileSync(filePath, "utf8");
+  const lines = content.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return [];
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "---") break;
+    const m = lines[i].match(FRONTMATTER_TOOLS_RE);
+    if (m) {
+      return m[1]
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+  }
+  return [];
+}
+
+function readAgentConfigs(squadDir) {
   const agentsDir = join(squadDir, "agents");
   if (!existsSync(agentsDir)) return {};
 
@@ -143,20 +165,26 @@ function readAgentModels(squadDir) {
     // Parse frontmatter (between first two --- lines)
     const lines = content.split(/\r?\n/);
     if (lines[0]?.trim() !== "---") {
-      result[role] = null;
+      result[role] = { model: null, tools: [] };
       continue;
     }
-    let inFrontmatter = false;
     let model = null;
+    let tools = [];
     for (let i = 1; i < lines.length; i++) {
       if (lines[i].trim() === "---") break;
-      const m = lines[i].match(FRONTMATTER_MODEL_RE);
-      if (m) {
-        model = m[1].trim();
-        break;
+      const mm = lines[i].match(FRONTMATTER_MODEL_RE);
+      if (mm) {
+        model = mm[1].trim();
+      }
+      const tm = lines[i].match(FRONTMATTER_TOOLS_RE);
+      if (tm) {
+        tools = tm[1]
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
       }
     }
-    result[role] = model;
+    result[role] = { model, tools };
   }
 
   return result;
@@ -201,7 +229,7 @@ export function readSquadConfig(root) {
     const lead = readLeadFromBat(mainBat);
 
     const squadDir = join(r, "agents", squad);
-    const agents = readAgentModels(squadDir);
+    const agents = readAgentConfigs(squadDir);
 
     squads[squad] = { lead, leadFiles, agents };
   }
@@ -209,6 +237,65 @@ export function readSquadConfig(root) {
   const pricing = readPricing(r);
 
   return { squads, pricing };
+}
+
+// ---------------------------------------------------------------------------
+// Public: readToolCatalog
+// ---------------------------------------------------------------------------
+
+export function readToolCatalog(root) {
+  const r = root ? root : repoRoot();
+  const toolsPath = join(r, "config", "tools.json");
+  try {
+    if (!existsSync(toolsPath)) {
+      console.error("readToolCatalog: config/tools.json not found");
+      return { tools: {}, riskLevels: {} };
+    }
+    const raw = readFileSync(toolsPath, "utf8");
+    const data = JSON.parse(raw);
+    const tools = {};
+    for (const [k, v] of Object.entries(data.tools || {})) {
+      if (!k.startsWith("_")) tools[k] = v;
+    }
+    const riskLevels = {};
+    for (const [k, v] of Object.entries(data.riskLevels || {})) {
+      if (!k.startsWith("_")) riskLevels[k] = v;
+    }
+    return { tools, riskLevels };
+  } catch (err) {
+    console.error("readToolCatalog: failed to parse config/tools.json:", err.message);
+    return { tools: {}, riskLevels: {} };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public: validateTools
+// ---------------------------------------------------------------------------
+
+export function validateTools(tools, catalog) {
+  const warnings = [];
+  const unknown = [];
+
+  if (!Array.isArray(tools) || tools.length === 0 || tools.some((t) => typeof t !== "string" || t.trim() === "")) {
+    return { ok: false, unknown: [], warnings: ["Lista narzędzi musi być niepustą tablicą stringów."] };
+  }
+
+  const catalogNames = new Set(Object.keys(catalog.tools || {}));
+
+  for (const t of tools) {
+    if (!catalogNames.has(t)) {
+      unknown.push(t);
+      warnings.push(`Narzędzie "${t}" nie występuje w katalogu config/tools.json — katalog może być niepełny.`);
+    }
+  }
+
+  if (tools.includes("Task")) {
+    warnings.push(
+      "Narzędzie Task pozwala na zagnieżdżoną delegację — zmienia to architekturę hierarchii agentów z płaskiej (lead → subagent) na wielopoziomową."
+    );
+  }
+
+  return { ok: true, unknown, warnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +429,74 @@ function writeAgentModel(filePath, newModel) {
 }
 
 // ---------------------------------------------------------------------------
+// Write: subagent tools to agents/<squad>/agents/<role>.md
+// ---------------------------------------------------------------------------
+
+function writeAgentTools(filePath, newTools) {
+  const content = readFileSync(filePath, "utf8");
+  const eol = detectEOL(content);
+  const lines = content.split(/\r?\n/);
+
+  if (lines[0]?.trim() !== "---") {
+    return { changed: false, before: null, after: null };
+  }
+
+  const toolsLine = newTools.join(", ");
+  let changed = false;
+  let before = null;
+  let toolsLineIdx = -1;
+  let modelLineIdx = -1;
+  let frontmatterEnd = -1;
+
+  // Find frontmatter boundaries and existing lines
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "---") {
+      frontmatterEnd = i;
+      break;
+    }
+    if (FRONTMATTER_TOOLS_RE.test(lines[i])) {
+      toolsLineIdx = i;
+    }
+    if (FRONTMATTER_MODEL_RE.test(lines[i])) {
+      modelLineIdx = i;
+    }
+  }
+
+  if (toolsLineIdx >= 0) {
+    // Replace existing tools line
+    const m = lines[toolsLineIdx].match(FRONTMATTER_TOOLS_RE);
+    before = m[1]
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const beforeStr = before.join(", ");
+    if (beforeStr !== toolsLine) {
+      lines[toolsLineIdx] = `tools: ${toolsLine}`;
+      changed = true;
+    }
+  } else if (modelLineIdx >= 0) {
+    // Insert after model: line
+    before = [];
+    lines.splice(modelLineIdx + 1, 0, `tools: ${toolsLine}`);
+    changed = true;
+  } else if (frontmatterEnd >= 0) {
+    // No model line either — insert before closing ---
+    before = [];
+    lines.splice(frontmatterEnd, 0, `tools: ${toolsLine}`);
+    changed = true;
+  } else {
+    return { changed: false, before: null, after: null };
+  }
+
+  if (changed) {
+    const newContent = lines.join(eol);
+    atomicWriteText(filePath, newContent, eol);
+  }
+
+  return { changed, before, after: changed ? newTools : before };
+}
+
+// ---------------------------------------------------------------------------
 // Write: merge pricing into config/models.json
 // ---------------------------------------------------------------------------
 
@@ -423,9 +578,9 @@ export function writeSquadConfig(patch, root, { dryRun = false } = {}) {
         }
       }
 
-      // 2. Agent models
+      // 2. Agent config (model + tools)
       if (squadPatch.agents) {
-        for (const [role, model] of Object.entries(squadPatch.agents)) {
+        for (const [role, value] of Object.entries(squadPatch.agents)) {
           const agentFile = join(
             r,
             "agents",
@@ -439,24 +594,85 @@ export function writeSquadConfig(patch, root, { dryRun = false } = {}) {
             );
             continue;
           }
-          if (dryRun) {
-            // Compute what WOULD change without writing
-            const before = readAgentModel(agentFile);
-            if (before !== model) {
-              changed.push({
-                file: agentFile,
-                before,
-                after: model,
-              });
+
+          // Backward compat: string = model-only patch
+          if (typeof value === "string") {
+            if (dryRun) {
+              const before = readAgentModel(agentFile);
+              if (before !== value) {
+                changed.push({
+                  file: agentFile,
+                  field: "model",
+                  before,
+                  after: value,
+                });
+              }
+            } else {
+              const result = writeAgentModel(agentFile, value);
+              if (result.changed) {
+                changed.push({
+                  file: agentFile,
+                  field: "model",
+                  before: result.before,
+                  after: result.after,
+                });
+              }
             }
-          } else {
-            const result = writeAgentModel(agentFile, model);
-            if (result.changed) {
-              changed.push({
-                file: agentFile,
-                before: result.before,
-                after: result.after,
-              });
+            continue;
+          }
+
+          // Object patch: { model?, tools? }
+          if (typeof value === "object" && value !== null) {
+            // Model
+            if (value.model !== undefined) {
+              if (dryRun) {
+                const before = readAgentModel(agentFile);
+                if (before !== value.model) {
+                  changed.push({
+                    file: agentFile,
+                    field: "model",
+                    before,
+                    after: value.model,
+                  });
+                }
+              } else {
+                const result = writeAgentModel(agentFile, value.model);
+                if (result.changed) {
+                  changed.push({
+                    file: agentFile,
+                    field: "model",
+                    before: result.before,
+                    after: result.after,
+                  });
+                }
+              }
+            }
+
+            // Tools
+            if (value.tools !== undefined) {
+              if (dryRun) {
+                const before = readAgentTools(agentFile);
+                const beforeStr = before.join(", ");
+                const afterStr = value.tools.join(", ");
+                if (beforeStr !== afterStr) {
+                  changed.push({
+                    file: agentFile,
+                    field: "tools",
+                    before,
+                    after: value.tools,
+                  });
+                }
+              } else {
+                const result = writeAgentTools(agentFile, value.tools);
+                if (result.changed) {
+                  changed.push({
+                    file: agentFile,
+                    field: "tools",
+                    before: result.before,
+                    after: result.after,
+                  });
+                }
+              }
             }
           }
         }

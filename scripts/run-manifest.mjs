@@ -85,6 +85,14 @@ function cmdStart(runId, squad, sourcePath) {
 
   const cwd = process.cwd();
   const gitBranch = getGitBranch(cwd);
+  // process.ppid is the PID of the cmd.exe that owns the console window.
+  // run-manifest.mjs is called by _lib.bat, which is called from the squad's
+  // .bat launcher running inside that cmd.exe — so ppid is the stable console
+  // handle. The terminal panel uses this to focus/stop the right window.
+  //
+  // windowTitle is recorded as a human-readable label and fallback, but it is
+  // EPHEMERAL: Claude Code overwrites the console title at startup. Do NOT use
+  // windowTitle for window lookup — use consolePid instead.
   const manifest = {
     runId,
     squad,
@@ -92,6 +100,9 @@ function cmdStart(runId, squad, sourcePath) {
     brief: null,
     taskId: process.env.LA_TASK_ID || null,
     taskIdAuto: null,
+    launchedBy: process.env.LA_LAUNCHED_BY || null,
+    windowTitle: process.env.LA_WINDOW_TITLE || null,
+    consolePid: process.ppid,
     startedAt: new Date().toISOString(),
     endedAt: null,
     cwd,

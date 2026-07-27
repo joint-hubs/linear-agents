@@ -1,0 +1,43 @@
+{
+  "_doc": "Szablony kickoff per skład. {taskId} podstawiane przy uruchomieniu. Edytowalne z dashboardu.",
+  "kickoff": {
+    "plan": [
+      "Feature approved do zaplanowania: {taskId} (albo: planning/inbox/<plik>.md).",
+      "Przejdź pełny cykl PLAN: discovery → spec (+ADR jeśli decyzja architektoniczna)",
+      "→ spec-review → decompose na vertical slices z AC/DoD/estimate(t-shirt).",
+      "GATE 1: pokaż brief (≤1 str.) + pytania, czekaj na moje ✅.",
+      "GATE 2: pokaż 2–3 przykładowe subtaski z AC, zapytaj \"tworzę w Linear?\", czekaj ✅.",
+      "Po ✅ pushnij do Linear (team FEN) jako epic + subtaski w Todo z dor-ok."
+    ],
+    "dev": [
+      "Weź task {taskId} (Todo, dor-ok). Krok po kroku wg FENIX_WORKFLOW §5:",
+      "1) update status → In Progress, assignee @flow, label ai:coded, komentarz 👀.",
+      "2) recon: przeczytaj task + AC + powiązany kod (nie zgaduj — niejasne → needs:answer + @Mateusz + stop).",
+      "3) zaimplementuj NAJMNIEJSZY pełny slice spełniający AC.",
+      "4) self-test (logi/curl/UI; docker → rebuild+redeploy).",
+      "5) commit (jeden task = jeden commit, format §3, BEZ Co-Authored-By). NIE pushuj bez mojej zgody.",
+      "6) deliver_task → In Review + podsumowanie PL: co zrobione, wyniki testów, jak testować."
+    ],
+    "review": [
+      "Zrób review taska {taskId} (In Review). Trzy przebiegi: first-pass (DeepSeek Pro),",
+      "security (Kimi), deep (GLM-5.2). Zwróć verdykt:",
+      "- APPROVE → dodaj ai:reviewed + dod-ok, nadaj wersję (label version:<sesja>, patrz §5),",
+      "  ustaw stage:testing i przekaż do TEST; komentarz PL z findings (liczba/severity, co przeszło).",
+      "- RETURN → wypisz konkretne poprawki, status → In Progress, licznik rundy +1.",
+      "Limit 2 rundy DEV↔REVIEW; po 2 bez zbieżności → label escalated + @Mateusz + stop."
+    ],
+    "test": [
+      "Zdeployuj i przetestuj {taskId} (stage:testing, wersja version:<sesja>).",
+      "1) deploy nowej wersji na target z config/projects.json (health-check).",
+      "2) uruchom scenariusze testowe wg AC + smoke golden path + edge cases.",
+      "3) PASS → status Done + dod-ok + komentarz PL (deploy URL, wyniki, health).",
+      "   FAIL → auto-rollback, status → In Progress, opis błędu + jak powtórzyć.",
+      "Dane testowe syntetyczne (żadnego prod PII)."
+    ],
+    "cadence": [
+      "Tygodniowy przebieg CADENCE: zbierz stan tablicy (wszystkie squady),",
+      "zrób retro (cycle time, throughput, rundy review, $/task) i wygeneruj",
+      "digest po polsku dla Mateusza. Read-only — żadnych zmian scope."
+    ]
+  }
+}

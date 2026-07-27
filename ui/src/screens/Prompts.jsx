@@ -5,8 +5,10 @@ import {
   getPromptLead,
   getPromptRuns,
   postLaunch,
+  postKickoff,
 } from '../api';
 import { LogDrawer } from './Flow.jsx';
+import Modal from '../components/Modal';
 import { fmtTime, fmtUSD, fmtCost, costValue, statusLabel } from '../utils';
 
 // ---------------------------------------------------------------------------
@@ -75,6 +77,14 @@ function SquadLeaf({ squad, data, taskId, setTaskId, onLaunchResult, onOpenLog }
   const [runs, setRuns] = useState(null);
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef(null);
+
+  // Prompt editor modal
+  const [editOpen, setEditOpen] = useState(false);
+  const [editLines, setEditLines] = useState('');
+  const [editPreview, setEditPreview] = useState(null);
+  const [editErr, setEditErr] = useState(null);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editSuccess, setEditSuccess] = useState(false);
 
   const kickoff = data.kickoff || [];
   const promptOneLine = renderKickoff(kickoff, taskId);
@@ -195,6 +205,19 @@ function SquadLeaf({ squad, data, taskId, setTaskId, onLaunchResult, onOpenLog }
         <div style={{ marginTop: 6, display: 'flex', gap: 8, alignItems: 'center' }}>
           <button className="btn-secondary" onClick={handleCopy} style={{ fontSize: 12 }}>
             {copied ? '✓ Skopiowano' : 'Kopiuj'}
+          </button>
+          <button
+            className="btn-secondary"
+            style={{ fontSize: 12 }}
+            onClick={() => {
+              setEditLines((data.kickoff || []).join('\n'));
+              setEditPreview(null);
+              setEditErr(null);
+              setEditSuccess(false);
+              setEditOpen(true);
+            }}
+          >
+            Edytuj prompt
           </button>
           <span style={{ fontSize: 11, color: 'var(--text-2)' }}>
             Kopiuje jako jedną linię (linie łączone &quot; | &quot;)
@@ -427,6 +450,179 @@ function SquadLeaf({ squad, data, taskId, setTaskId, onLaunchResult, onOpenLog }
           </table>
         )}
       </div>
+
+      {/* Prompt editor modal */}
+      <Modal
+        open={editOpen}
+        onClose={() => setEditOpen(false)}
+        title={`Edytuj prompt — ${squad}`}
+      >
+        {(() => {
+          const lines = editLines.split('\n');
+          const hasTaskId = editLines.includes('{taskId}');
+          const previewText = renderKickoff(lines, taskId);
+
+          const handlePreview = async () => {
+            setEditSaving(true);
+            setEditErr(null);
+            setEditPreview(null);
+            try {
+              const res = await postKickoff({ squad, lines, dryRun: true });
+              setEditPreview(res);
+            } catch (e) {
+              setEditErr(e.message || String(e));
+            } finally {
+              setEditSaving(false);
+            }
+          };
+
+          const handleSave = async () => {
+            setEditSaving(true);
+            setEditErr(null);
+            setEditSuccess(false);
+            try {
+              await postKickoff({ squad, lines, dryRun: false });
+              setEditSuccess(true);
+              setEditPreview(null);
+            } catch (e) {
+              setEditErr(e.message || String(e));
+            } finally {
+              setEditSaving(false);
+            }
+          };
+
+          return (
+            <>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4, color: 'var(--text-2)' }}>
+                  Linie szablonu (jedna linia = jedna linia tekstu)
+                </div>
+                <textarea
+                  className="filter-search"
+                  style={{
+                    width: '100%',
+                    minHeight: 160,
+                    fontFamily: 'var(--mono)',
+                    fontSize: 12,
+                    resize: 'vertical',
+                  }}
+                  value={editLines}
+                  onChange={(e) => {
+                    setEditLines(e.target.value);
+                    setEditSuccess(false);
+                    setEditPreview(null);
+                  }}
+                  aria-label="Linie szablonu promptu"
+                />
+              </div>
+
+              {!hasTaskId && (
+                <div className="banner banner-warn">
+                  ⚠ W treści brak <code>{'{taskId}'}</code> — prompt nie będzie zawierał numeru zadania.
+                </div>
+              )}
+
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4, color: 'var(--text-2)' }}>
+                  Podgląd (linie łączone &quot; | &quot;)
+                </div>
+                <pre
+                  style={{
+                    background: 'var(--surface-2)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)',
+                    padding: 10,
+                    fontFamily: 'var(--mono)',
+                    fontSize: 11.5,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    maxHeight: 120,
+                    overflow: 'auto',
+                  }}
+                >
+                  {previewText || '(pusty prompt)'}
+                </pre>
+              </div>
+
+              {editErr && (
+                <div className="banner banner-warn">Błąd: {editErr}</div>
+              )}
+
+              {editSuccess && (
+                <div
+                  className="banner"
+                  style={{
+                    background: 'var(--ok-soft)',
+                    borderColor: '#a3d5b3',
+                    color: 'var(--ok)',
+                  }}
+                >
+                  ✓ Prompt zapisany. Zmiana obowiązuje od następnego uruchomienia.
+                </div>
+              )}
+
+              {editPreview && (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4, color: 'var(--text-2)' }}>
+                    Podgląd zmian {editPreview.dryRun && <span className="muted">(dry run)</span>}
+                  </div>
+                  {editPreview.changed && editPreview.changed.length === 0 && (
+                    <div className="empty" style={{ padding: '12px 16px', fontSize: 12 }}>
+                      Brak zmian.
+                    </div>
+                  )}
+                  {editPreview.changed && editPreview.changed.length > 0 && (
+                    <table className="table">
+                      <thead>
+                        <tr className="th">
+                          <th>Plik</th>
+                          <th>Przed</th>
+                          <th>Po</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {editPreview.changed.map((c) => (
+                          <tr key={c.file}>
+                            <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
+                              {c.file}
+                            </td>
+                            <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--danger)' }}>
+                              {c.before}
+                            </td>
+                            <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--ok)' }}>
+                              {c.after}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              )}
+
+              <div className="modal-foot">
+                <button className="btn-secondary" onClick={() => setEditOpen(false)}>
+                  Anuluj
+                </button>
+                <button
+                  className="btn-secondary"
+                  onClick={handlePreview}
+                  disabled={editSaving}
+                >
+                  {editSaving ? 'Wysyłanie…' : 'Podgląd zmian'}
+                </button>
+                <button
+                  className="launch-btn"
+                  onClick={handleSave}
+                  disabled={editSaving}
+                >
+                  {editSaving ? 'Zapisywanie…' : 'Zapisz'}
+                </button>
+              </div>
+            </>
+          );
+        })()}
+      </Modal>
     </div>
   );
 }

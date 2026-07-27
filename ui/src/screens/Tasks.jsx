@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { getLinearQueue, getRuns, postLaunch } from '../api';
+import { getLinearQueue, getRuns, postLaunch, getTerminals, focusTerminal, stopTerminal } from '../api';
 import { linearUrl, WORKSPACES, DEFAULT_WORKSPACE } from '../config';
-import { fmtTime, elapsed, taskLabel, fmtUSD, costValue, isStale } from '../utils';
+import { fmtTime, elapsed, taskLabel, fmtUSD, fmtCost, costValue, isStale } from '../utils';
 
 const POLL_MS = 10000;
 
@@ -190,13 +190,20 @@ export default function Tasks() {
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
 
+  // Terminale
+  const [terminals, setTerminals] = useState([]);
+  const [terminalError, setTerminalError] = useState(null);
+  const [stopConfirm, setStopConfirm] = useState(null); // runId to confirm stop
+  const [focusError, setFocusError] = useState(null); // {runId, message}
+  const [relaunchConfirm, setRelaunchConfirm] = useState(null); // terminal to relaunch
+
   useEffect(() => {
     let alive = true;
     const tick = () => {
       // allSettled: a Linear outage must NOT take down the active-runs (W TOKU)
       // view — queue degrades to an error note, runs still render. Mirrors Live's
       // budget-is-non-fatal pattern (JOI-66→67).
-      Promise.allSettled([getLinearQueue(workspace), getRuns()]).then(([qRes, rRes]) => {
+      Promise.allSettled([getLinearQueue(workspace), getRuns(), getTerminals()]).then(([qRes, rRes, tRes]) => {
         if (!alive) return;
         if (qRes.status === 'fulfilled') {
           setTasks(qRes.value?.tasks || []);
@@ -211,6 +218,12 @@ export default function Tasks() {
         }
         if (rRes.status === 'fulfilled') {
           setRuns(rRes.value || []);
+        }
+        if (tRes.status === 'fulfilled') {
+          setTerminals(tRes.value || []);
+          setTerminalError(null);
+        } else {
+          setTerminalError(tRes.reason?.message || String(tRes.reason));
         }
       });
     };
@@ -247,6 +260,36 @@ export default function Tasks() {
     taskCosts[r.taskId].cost += costValue(r.totals);
   }
 
+  // Terminal handlers
+  const handleFocus = async (runId) => {
+    try {
+      await focusTerminal(runId);
+      setFocusError(null);
+    } catch (e) {
+      setFocusError({ runId, message: e.message || String(e) });
+    }
+  };
+
+  const handleStop = async (runId) => {
+    setStopConfirm(null);
+    try {
+      await stopTerminal(runId);
+    } catch (e) {
+      // surface error — terminal may already be gone
+      setTerminalError(e.message || String(e));
+    }
+  };
+
+  const handleRelaunch = async (t) => {
+    setRelaunchConfirm(null);
+    try {
+      await postLaunch({ squad: t.squad, taskId: t.taskId, target: 'local', dryRun: false });
+      setToast({ ok: true, squad: t.squad, taskId: t.taskId });
+    } catch (e) {
+      setToast({ ok: false, error: e.message });
+    }
+  };
+
   // Health stats.
   const now = new Date();
   const staleRuns = runs.filter((r) => isStale(r, now));
@@ -281,6 +324,229 @@ export default function Tasks() {
           <div>Start it: <code>node scripts/telemetry-server.mjs</code></div>
         </div>
       )}
+
+      {/* TERMINALE */}
+      <div className="section">
+        <div className="section-h">
+          Terminale{' '}
+          <span className="muted">
+            ({terminals.filter((t) => t.alive).length} żywych)
+          </span>
+        </div>
+        <details style={{ marginBottom: 12 }}>
+          <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--text)' }}>
+            Jak z tego korzystać?
+          </summary>
+          <div className="muted" style={{ marginTop: 8, lineHeight: 1.65, fontSize: 13 }}>
+            <p style={{ marginTop: 0 }}>
+              Ten ekran to pilot do agentów. Na górze widzisz <b>terminale</b> — czyli agentów,
+              którzy pracują teraz. Niżej <b>kolejkę zadań</b> z Linear, gotowych do wzięcia.
+            </p>
+
+            <p><b>Co jest czym</b></p>
+            <ul style={{ marginTop: 4, paddingLeft: 18 }}>
+              <li><b>Skład</b> (plan, dev, review, test, cadence) — zespół agentów od jednego etapu
+                pracy. Plan rozpisuje zadania, dev koduje, review recenzuje, test wdraża,
+                cadence robi tygodniowe podsumowanie.</li>
+              <li><b>Przebieg</b> — jedno uruchomienie składu. Ma swój koszt, czas i przypisane zadanie.</li>
+              <li><b>Terminal</b> — okno, w którym ten przebieg naprawdę działa na Twoim komputerze.</li>
+              <li><b>Zadanie</b> (np. <code>JOI-53</code>) — pozycja z Linear. Agent uruchomiony stąd
+                dostaje ją automatycznie przypisaną, więc koszt trafia we właściwe miejsce.</li>
+            </ul>
+
+            <p><b>Co możesz zrobić</b></p>
+            <ul style={{ marginTop: 4, paddingLeft: 18 }}>
+              <li><b>Pokaż okno</b> — podnosi okno agenta na wierzch. Jeśli system odmówi,
+                zamiast tego zamiga przyciskiem na pasku zadań, żebyś je znalazł wzrokiem.</li>
+              <li><b>Zatrzymaj</b> — zamyka okno i przerywa pracę agenta. Wymaga potwierdzenia,
+                bo przerwana praca nie jest zapisywana.</li>
+              <li><b>Launch local</b> przy zadaniu — otwiera nowe okno agenta i od razu wkleja mu
+                polecenie startowe. Skład jest podpowiadany z reguł handoffu.</li>
+              <li><b>Uruchom ponownie</b> w zwiniętej liście zakończonych — startuje ten sam skład
+                z tym samym zadaniem.</li>
+            </ul>
+
+            <p><b>Warto wiedzieć</b></p>
+            <ul style={{ marginTop: 4, paddingLeft: 18 }}>
+              <li><b>uruchomiony ręcznie</b> — agent odpalony poza dashboardem (np. w terminalu
+                VS Code). Taki nie jest osobnym oknem systemu, więc nie da się go podnieść;
+                pokazujemy katalog roboczy, żebyś go rozpoznał.</li>
+              <li>Dashboard <b>nie prowadzi rozmowy za Ciebie</b> — pytania agenta (np. bramki
+                w składzie plan) odpowiadasz w jego oknie.</li>
+              <li>Lista odświeża się co 10 sekund. Zakończone przebiegi są zwinięte, żeby nie
+                zaśmiecać widoku.</li>
+            </ul>
+          </div>
+        </details>
+
+        {terminalError && (
+          <div className="banner banner-warn" style={{ marginBottom: 10 }}>
+            Błąd terminali: {terminalError}
+          </div>
+        )}
+
+        {/* Live terminals */}
+        {terminals.filter((t) => t.alive).length === 0 && (
+          <div className="empty">Żaden agent nie działa.</div>
+        )}
+        {terminals
+          .filter((t) => t.alive)
+          .map((t) => (
+            <div className="task-row" key={t.runId}>
+              <div className="task-row-main">
+                <span className="dot dot-ok" />
+                <span className="run-card-squad">{t.squad || '—'}</span>
+                <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
+                  {t.taskId || '—'}
+                </span>
+                <span className="muted">{elapsed(t.startedAt, null)}</span>
+                <span className="muted" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                  {fmtCost(t)}
+                </span>
+                {t.status && (
+                  <span
+                    className={
+                      'badge ' +
+                      (t.status === 'failed' ? 'badge-fail' : t.status === 'running' ? 'badge-run' : 'badge-ok')
+                    }
+                  >
+                    {t.status}
+                  </span>
+                )}
+              </div>
+              <div className="task-row-foot">
+                {t.launchedBy === 'dashboard' ? (
+                  <>
+                    <button
+                      className="btn-secondary"
+                      style={{ fontSize: 12 }}
+                      onClick={() => handleFocus(t.runId)}
+                    >
+                      Pokaż okno
+                    </button>
+                    {focusError && focusError.runId === t.runId && (
+                      <span style={{ fontSize: 11, color: 'var(--warn)' }}>
+                        {focusError.message}
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span
+                    className="muted"
+                    style={{ fontSize: 11 }}
+                    title={t.cwd || ''}
+                  >
+                    uruchomiony ręcznie
+                    {t.cwd ? ' · ' + (t.cwd.length > 30 ? '…' + t.cwd.slice(-28) : t.cwd) : ''}
+                  </span>
+                )}
+                {stopConfirm === t.runId ? (
+                  <>
+                    <span style={{ fontSize: 12, color: 'var(--warn)', fontWeight: 600 }}>
+                      Zatrzymać agenta?
+                    </span>
+                    <button
+                      className="launch-btn"
+                      style={{ background: 'var(--danger)', fontSize: 11, padding: '4px 10px' }}
+                      onClick={() => handleStop(t.runId)}
+                    >
+                      Tak, zatrzymaj
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      style={{ fontSize: 11, padding: '4px 10px' }}
+                      onClick={() => setStopConfirm(null)}
+                    >
+                      Anuluj
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="btn-secondary"
+                    style={{ fontSize: 12 }}
+                    onClick={() => setStopConfirm(t.runId)}
+                  >
+                    Zatrzymaj
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+
+        {/* Recently finished */}
+        {(() => {
+          const finished = terminals.filter((t) => !t.alive).slice(0, 15);
+          if (finished.length === 0) return null;
+          return (
+            <details
+              style={{
+                background: 'var(--surface)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius)',
+                padding: '10px 14px',
+                marginTop: 12,
+                fontSize: 13,
+              }}
+            >
+              <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--text-2)' }}>
+                Ostatnio zakończone ({finished.length})
+              </summary>
+              <div style={{ marginTop: 8 }}>
+                {finished.map((t) => (
+                  <div
+                    key={t.runId}
+                    className="task-row"
+                    style={{ marginBottom: 6, opacity: 0.75 }}
+                  >
+                    <div className="task-row-main">
+                      <span className="dot" style={{ background: 'var(--faint)' }} />
+                      <span className="run-card-squad">{t.squad || '—'}</span>
+                      <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
+                        {t.taskId || '—'}
+                      </span>
+                      <span className="muted">{elapsed(t.startedAt, t.endedAt)}</span>
+                      <span className="muted" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                        {fmtCost(t)}
+                      </span>
+                    </div>
+                    <div className="task-row-foot">
+                      {relaunchConfirm && relaunchConfirm.runId === t.runId ? (
+                        <>
+                          <span style={{ fontSize: 12, color: 'var(--warn)', fontWeight: 600 }}>
+                            Uruchomić ponownie?
+                          </span>
+                          <button
+                            className="launch-btn"
+                            style={{ fontSize: 11, padding: '4px 10px' }}
+                            onClick={() => handleRelaunch(t)}
+                          >
+                            Tak, uruchom
+                          </button>
+                          <button
+                            className="btn-secondary"
+                            style={{ fontSize: 11, padding: '4px 10px' }}
+                            onClick={() => setRelaunchConfirm(null)}
+                          >
+                            Anuluj
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          className="btn-secondary"
+                          style={{ fontSize: 11 }}
+                          onClick={() => setRelaunchConfirm(t)}
+                        >
+                          Uruchom ponownie z tym zadaniem
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </details>
+          );
+        })()}
+      </div>
 
       {/* NEXT UP */}
       <div className="section">

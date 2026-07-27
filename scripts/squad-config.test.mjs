@@ -94,6 +94,13 @@ function buildFixture() {
     "utf8"
   );
 
+  // agents/dev/agents/notool.md (LF, no tools line — for insert-after-model test)
+  writeFileSync(
+    join(root, "agents", "dev", "agents", "notool.md"),
+    "---\nname: notool\ndescription: DEV squad — no tools yet\nmodel: z-ai/glm-5.2\n---\nJesteś sub-agentem BEZ NARZĘDZI.\n",
+    "utf8"
+  );
+
   // agents/dev/plugins/foo/agents/ignored.md — should be IGNORED
   mkdirSync(join(root, "agents", "dev", "plugins", "foo", "agents"), {
     recursive: true,
@@ -104,9 +111,39 @@ function buildFixture() {
     "utf8"
   );
 
+  // config/ directory
+  mkdirSync(join(root, "config"), { recursive: true });
+
+  // config/tools.json (LF)
+  writeFileSync(
+    join(root, "config", "tools.json"),
+    JSON.stringify(
+      {
+        _doc: "Katalog narzędzi",
+        tools: {
+          Read: { label: "Read", description: "Czyta plik.", risk: "safe" },
+          Grep: { label: "Grep", description: "Szuka tekstu.", risk: "safe" },
+          Glob: { label: "Glob", description: "Znajduje pliki.", risk: "safe" },
+          Edit: { label: "Edit", description: "Zmienia plik.", risk: "writes-code" },
+          Write: { label: "Write", description: "Tworzy plik.", risk: "writes-code" },
+          Bash: { label: "Bash", description: "Uruchamia komendy.", risk: "writes-system" },
+          Task: { label: "Task", description: "Deleguje.", risk: "architecture" },
+        },
+        riskLevels: {
+          safe: { label: "bezpieczne", hint: "tylko odczyt" },
+          "writes-code": { label: "zmienia kod", hint: "modyfikuje pliki" },
+          "writes-system": { label: "zmienia system", hint: "uruchamia komendy" },
+          architecture: { label: "zmienia architekturę", hint: "zagnieżdża delegację" },
+        },
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
+
   // config/models.json (CRLF) — includes _doc metadata in pricing and
   // top-level keys (ids, routing, providers, fallback) that must survive writes.
-  mkdirSync(join(root, "config"), { recursive: true });
   writeFileSync(
     join(root, "config", "models.json"),
     '{\r\n' +
@@ -142,7 +179,7 @@ function buildFixture() {
 // ---------------------------------------------------------------------------
 
 async function runTests() {
-  const { readSquadConfig, validateSlug, writeSquadConfig } = await import(
+  const { readSquadConfig, readToolCatalog, validateSlug, validateTools, writeSquadConfig } = await import(
     MODULE_PATH
   );
 
@@ -174,19 +211,31 @@ async function runTests() {
     rmSync(root, { recursive: true, force: true });
   }
 
-  // ---- Test 3: read subagent models, skip plugins/ ----
+  // ---- Test 3: read subagent configs (model + tools), skip plugins/ ----
   {
     const root = buildFixture();
     const config = readSquadConfig(root);
     assertEq(
-      config.squads.dev.agents.implementer,
+      config.squads.dev.agents.implementer.model,
       "z-ai/glm-5.2",
       "read implementer model"
     );
+    assert(
+      Array.isArray(config.squads.dev.agents.implementer.tools),
+      "read implementer tools is array"
+    );
+    assert(
+      config.squads.dev.agents.implementer.tools.includes("Read"),
+      "read implementer tools includes Read"
+    );
     assertEq(
-      config.squads.dev.agents.recon,
+      config.squads.dev.agents.recon.model,
       "minimax/minimax-m3",
       "read recon model"
+    );
+    assert(
+      config.squads.dev.agents.recon.tools.includes("Bash"),
+      "read recon tools includes Bash"
     );
     // plugins/ignored.md should NOT appear
     assert(
@@ -277,7 +326,7 @@ async function runTests() {
     rmSync(root, { recursive: true, force: true });
   }
 
-  // ---- Test 7: write agent model preserves rest of frontmatter ----
+  // ---- Test 7: write agent model (string patch) preserves rest of frontmatter ----
   {
     const root = buildFixture();
     const result = writeSquadConfig(
@@ -287,6 +336,11 @@ async function runTests() {
     assert(
       result.changed.length === 1,
       "write agent model changes 1 file"
+    );
+    assertEq(
+      result.changed[0].field,
+      "model",
+      "changed entry has field=model"
     );
 
     const md = readFileSync(
@@ -461,7 +515,7 @@ async function runTests() {
         squads: {
           dev: {
             lead: "deepseek/deepseek-v4-pro",
-            agents: { implementer: "some/other-model" },
+            agents: { implementer: { model: "some/other-model" } },
           },
         },
         pricing: { "z-ai/glm-5.2": { input: 9.99, output: 9.99 } },
@@ -505,7 +559,7 @@ async function runTests() {
       squads: {
         dev: {
           lead: "deepseek/deepseek-v4-pro",
-          agents: { implementer: "some/other-model" },
+          agents: { implementer: { model: "some/other-model" } },
         },
       },
       pricing: { "z-ai/glm-5.2": { input: 9.99, output: 9.99 } },
@@ -522,13 +576,13 @@ async function runTests() {
     );
     for (let i = 0; i < dryResult.changed.length; i++) {
       assertEq(
-        dryResult.changed[i].before,
-        realResult.changed[i].before,
+        JSON.stringify(dryResult.changed[i].before),
+        JSON.stringify(realResult.changed[i].before),
         `dryRun vs real: same before [${i}]`
       );
       assertEq(
-        dryResult.changed[i].after,
-        realResult.changed[i].after,
+        JSON.stringify(dryResult.changed[i].after),
+        JSON.stringify(realResult.changed[i].after),
         `dryRun vs real: same after [${i}]`
       );
     }
@@ -685,6 +739,389 @@ async function runTests() {
       data.pricing["new/model"] !== undefined,
       "writeSquadConfig: new pricing entry added"
     );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 20: readToolCatalog returns tools and riskLevels, skips _doc ----
+  {
+    const root = buildFixture();
+    const catalog = readToolCatalog(root);
+    assert(
+      Object.keys(catalog.tools).length >= 7,
+      "readToolCatalog: has tools"
+    );
+    assertEq(
+      catalog.tools["_doc"],
+      undefined,
+      "readToolCatalog: _doc key is absent from tools"
+    );
+    assert(
+      catalog.tools.Read !== undefined,
+      "readToolCatalog: Read tool present"
+    );
+    assertEq(
+      catalog.tools.Read.risk,
+      "safe",
+      "readToolCatalog: Read risk is safe"
+    );
+    assert(
+      Object.keys(catalog.riskLevels).length >= 4,
+      "readToolCatalog: has riskLevels"
+    );
+    assert(
+      catalog.riskLevels.safe !== undefined,
+      "readToolCatalog: safe risk level present"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 21: readToolCatalog with broken file returns empty catalog ----
+  {
+    const root = buildFixture();
+    // Corrupt the file
+    writeFileSync(join(root, "config", "tools.json"), "not valid json {{{", "utf8");
+    const catalog = readToolCatalog(root);
+    assertEq(
+      Object.keys(catalog.tools).length,
+      0,
+      "readToolCatalog: broken file → empty tools"
+    );
+    assertEq(
+      Object.keys(catalog.riskLevels).length,
+      0,
+      "readToolCatalog: broken file → empty riskLevels"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 22: readToolCatalog with missing file returns empty catalog ----
+  {
+    const root = buildFixture();
+    rmSync(join(root, "config", "tools.json"));
+    const catalog = readToolCatalog(root);
+    assertEq(
+      Object.keys(catalog.tools).length,
+      0,
+      "readToolCatalog: missing file → empty tools"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 23: write tools changes ONLY the tools line ----
+  {
+    const root = buildFixture();
+    const result = writeSquadConfig(
+      {
+        squads: {
+          dev: {
+            agents: { implementer: { tools: ["Read", "Bash"] } },
+          },
+        },
+      },
+      root
+    );
+    assert(
+      result.changed.length === 1,
+      "write tools changes 1 file"
+    );
+    assertEq(
+      result.changed[0].field,
+      "tools",
+      "changed entry has field=tools"
+    );
+
+    const md = readFileSync(
+      join(root, "agents", "dev", "agents", "implementer.md"),
+      "utf8"
+    );
+    assert(
+      md.includes("tools: Read, Bash"),
+      "implementer.md has new tools line"
+    );
+    assert(
+      md.includes("name: implementer"),
+      "implementer.md name preserved"
+    );
+    assert(
+      md.includes("model: z-ai/glm-5.2"),
+      "implementer.md model preserved"
+    );
+    assert(
+      md.includes("Jesteś sub-agentem IMPLEMENTER."),
+      "implementer.md body preserved"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 24: write tools preserves CRLF ----
+  {
+    const root = buildFixture();
+    // Create a CRLF agent file
+    writeFileSync(
+      join(root, "agents", "dev", "agents", "crlf-agent.md"),
+      "---\r\nname: crlf-agent\r\nmodel: test/model\r\ntools: Read, Grep\r\n---\r\nBody.\r\n",
+      "utf8"
+    );
+    writeSquadConfig(
+      {
+        squads: {
+          dev: {
+            agents: { "crlf-agent": { tools: ["Read", "Bash", "Glob"] } },
+          },
+        },
+      },
+      root
+    );
+    const md = readFileSync(
+      join(root, "agents", "dev", "agents", "crlf-agent.md"),
+      "utf8"
+    );
+    assert(
+      md.includes("\r\n"),
+      "CRLF preserved after tools write"
+    );
+    assert(
+      md.includes("tools: Read, Bash, Glob\r\n"),
+      "tools line has correct format with CRLF"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 25: role without tools line → line inserted after model ----
+  {
+    const root = buildFixture();
+    const result = writeSquadConfig(
+      {
+        squads: {
+          dev: {
+            agents: { notool: { tools: ["Read", "Glob"] } },
+          },
+        },
+      },
+      root
+    );
+    assert(
+      result.changed.length === 1,
+      "write tools for notool changes 1 file"
+    );
+
+    const md = readFileSync(
+      join(root, "agents", "dev", "agents", "notool.md"),
+      "utf8"
+    );
+    assert(
+      md.includes("tools: Read, Glob"),
+      "notool.md now has tools line"
+    );
+    // Verify tools line is after model line
+    const lines = md.split("\n");
+    const modelIdx = lines.findIndex((l) => l.startsWith("model:"));
+    const toolsIdx = lines.findIndex((l) => l.startsWith("tools:"));
+    assert(
+      toolsIdx === modelIdx + 1,
+      "tools line inserted directly after model line"
+    );
+    assert(
+      md.includes("name: notool"),
+      "notool.md name preserved"
+    );
+    assert(
+      md.includes("Jesteś sub-agentem BEZ NARZĘDZI."),
+      "notool.md body preserved"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 26: string patch still changes model (backward compat) ----
+  {
+    const root = buildFixture();
+    const result = writeSquadConfig(
+      {
+        squads: {
+          dev: {
+            agents: { implementer: "deepseek/deepseek-v4-pro" },
+          },
+        },
+      },
+      root
+    );
+    assert(
+      result.changed.length === 1,
+      "string patch changes 1 file"
+    );
+    assertEq(
+      result.changed[0].field,
+      "model",
+      "string patch → field=model"
+    );
+    assertEq(
+      result.changed[0].after,
+      "deepseek/deepseek-v4-pro",
+      "string patch → model updated"
+    );
+
+    const md = readFileSync(
+      join(root, "agents", "dev", "agents", "implementer.md"),
+      "utf8"
+    );
+    assert(
+      md.includes("model: deepseek/deepseek-v4-pro"),
+      "implementer.md model changed"
+    );
+    assert(
+      md.includes("tools: Read, Grep, Glob, Edit, Write, Bash"),
+      "implementer.md tools untouched"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 27: object patch with both model and tools changes both ----
+  {
+    const root = buildFixture();
+    const result = writeSquadConfig(
+      {
+        squads: {
+          dev: {
+            agents: {
+              implementer: {
+                model: "deepseek/deepseek-v4-pro",
+                tools: ["Read", "Bash"],
+              },
+            },
+          },
+        },
+      },
+      root
+    );
+    assert(
+      result.changed.length === 2,
+      "object patch with model+tools changes 2 entries"
+    );
+    assert(
+      result.changed.some((c) => c.field === "model"),
+      "has model change"
+    );
+    assert(
+      result.changed.some((c) => c.field === "tools"),
+      "has tools change"
+    );
+
+    const md = readFileSync(
+      join(root, "agents", "dev", "agents", "implementer.md"),
+      "utf8"
+    );
+    assert(
+      md.includes("model: deepseek/deepseek-v4-pro"),
+      "implementer.md model changed"
+    );
+    assert(
+      md.includes("tools: Read, Bash"),
+      "implementer.md tools changed"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 28: dryRun for tools does NOT write file ----
+  {
+    const root = buildFixture();
+    const agentBefore = readFileSync(
+      join(root, "agents", "dev", "agents", "implementer.md"),
+      "utf8"
+    );
+
+    const result = writeSquadConfig(
+      {
+        squads: {
+          dev: {
+            agents: { implementer: { tools: ["Read", "Bash"] } },
+          },
+        },
+      },
+      root,
+      { dryRun: true }
+    );
+
+    const agentAfter = readFileSync(
+      join(root, "agents", "dev", "agents", "implementer.md"),
+      "utf8"
+    );
+    assertEq(agentAfter, agentBefore, "dryRun tools: implementer.md unchanged on disk");
+    assert(
+      result.changed.length === 1,
+      "dryRun tools: changed has 1 entry"
+    );
+    assertEq(
+      result.changed[0].field,
+      "tools",
+      "dryRun tools: field=tools"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 29: validateTools — empty/not-array → ok=false ----
+  {
+    const root = buildFixture();
+    const catalog = readToolCatalog(root);
+
+    const r1 = validateTools([], catalog);
+    assertEq(r1.ok, false, "validateTools: empty array → ok=false");
+
+    const r2 = validateTools(null, catalog);
+    assertEq(r2.ok, false, "validateTools: null → ok=false");
+
+    const r3 = validateTools("not array", catalog);
+    assertEq(r3.ok, false, "validateTools: string → ok=false");
+
+    const r4 = validateTools(["Read", ""], catalog);
+    assertEq(r4.ok, false, "validateTools: empty string in array → ok=false");
+
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 30: validateTools — unknown tool → warning, ok=true ----
+  {
+    const root = buildFixture();
+    const catalog = readToolCatalog(root);
+
+    const r = validateTools(["Read", "NonExistentTool"], catalog);
+    assertEq(r.ok, true, "validateTools: unknown tool → ok=true (non-blocking)");
+    assert(
+      r.unknown.includes("NonExistentTool"),
+      "validateTools: unknown tool listed"
+    );
+    assert(
+      r.warnings.length >= 1,
+      "validateTools: warning generated for unknown tool"
+    );
+
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 31: validateTools — Task → architecture warning ----
+  {
+    const root = buildFixture();
+    const catalog = readToolCatalog(root);
+
+    const r = validateTools(["Read", "Task"], catalog);
+    assertEq(r.ok, true, "validateTools: Task → ok=true");
+    assert(
+      r.warnings.some((w) => w.includes("zagnieżdżoną delegację")),
+      "validateTools: Task triggers architecture warning"
+    );
+
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 32: validateTools — all known tools → clean ----
+  {
+    const root = buildFixture();
+    const catalog = readToolCatalog(root);
+
+    const r = validateTools(["Read", "Grep", "Bash"], catalog);
+    assertEq(r.ok, true, "validateTools: all known → ok=true");
+    assertEq(r.unknown.length, 0, "validateTools: no unknown tools");
+    assertEq(r.warnings.length, 0, "validateTools: no warnings");
+
     rmSync(root, { recursive: true, force: true });
   }
 }

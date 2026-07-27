@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getSquadConfig, postSquadConfig } from '../api';
+import { getSquadConfig, postSquadConfig, getTools } from '../api';
+import Modal from '../components/Modal';
 
 const SQUADS = ['plan', 'dev', 'review', 'test', 'cadence'];
 const SQUAD_LABELS = {
@@ -21,6 +22,20 @@ function deepClone(obj) {
   return JSON.parse(JSON.stringify(obj));
 }
 
+/** Normalize agents from old shape (string) to new shape ({model, tools}). */
+function normalizeAgents(agents) {
+  if (!agents) return agents;
+  const out = {};
+  for (const [role, val] of Object.entries(agents)) {
+    if (typeof val === 'object' && val !== null) {
+      out[role] = { model: val.model || '', tools: val.tools || [] };
+    } else {
+      out[role] = { model: val || '', tools: [] };
+    }
+  }
+  return out;
+}
+
 function hasPrice(slug, pricing) {
   return !!(pricing && pricing[slug]);
 }
@@ -34,8 +49,13 @@ function countDirty(orig, edit) {
     if (!o || !e) continue;
     if (o.lead !== e.lead) n++;
     if (o.agents) {
-      for (const [role, model] of Object.entries(o.agents)) {
-        if (e.agents?.[role] !== model) n++;
+      for (const [role, agent] of Object.entries(o.agents)) {
+        const ea = e.agents?.[role];
+        if (!ea) { n++; continue; }
+        if (agent.model !== ea.model) n++;
+        const ot = JSON.stringify([...(agent.tools || [])].sort());
+        const et = JSON.stringify([...(ea.tools || [])].sort());
+        if (ot !== et) n++;
       }
     }
   }
@@ -55,7 +75,7 @@ function countDirty(orig, edit) {
 
 // ---- Squad card (one per squad) -------------------------------------------
 
-function SquadCard({ squad, data, edited, pricing, onLeadChange, onAgentChange }) {
+function SquadCard({ squad, data, edited, pricing, onLeadChange, onAgentChange, onToolsOpen }) {
   const s = edited || data;
   if (!s) return null;
 
@@ -114,7 +134,9 @@ function SquadCard({ squad, data, edited, pricing, onLeadChange, onAgentChange }
       </div>
 
       {/* Agent rows */}
-      {Object.entries(agents).map(([role, model]) => (
+      {Object.entries(agents).map(([role, agent]) => {
+        const modelSlug = typeof agent === 'object' && agent ? agent.model || '' : (agent || '');
+        return (
         <div
           key={role}
           style={{
@@ -136,12 +158,12 @@ function SquadCard({ squad, data, edited, pricing, onLeadChange, onAgentChange }
           <input
             className="filter-search"
             style={{ flex: 1 }}
-            value={model || ''}
+            value={modelSlug}
             onChange={(e) => onAgentChange(squad, role, e.target.value)}
             aria-label={`Model dla ${role} w ${SQUAD_LABELS[squad]}`}
             placeholder="provider/model-slug"
           />
-          {!hasPrice(model, pricing) && model && (
+          {!hasPrice(modelSlug, pricing) && modelSlug && (
             <span
               style={{
                 color: 'var(--warn)',
@@ -155,8 +177,17 @@ function SquadCard({ squad, data, edited, pricing, onLeadChange, onAgentChange }
               ⚠ brak ceny
             </span>
           )}
+          <button
+            className="btn-secondary"
+            style={{ fontSize: 11, padding: '3px 8px', flex: 'none' }}
+            onClick={() => onToolsOpen && onToolsOpen(squad, role)}
+            title={`Edytuj narzędzia dla ${role}`}
+          >
+            Narzędzia
+          </button>
         </div>
-      ))}
+        );
+      })}
 
       {Object.keys(agents).length === 0 && (
         <div className="muted" style={{ padding: '5px 10px', fontSize: 12 }}>
@@ -184,6 +215,14 @@ export default function SquadConfig() {
   const [newInput, setNewInput] = useState('');
   const [newOutput, setNewOutput] = useState('');
 
+  // Tool editor modal
+  const [toolsCatalog, setToolsCatalog] = useState(null);
+  const [toolEditor, setToolEditor] = useState(null); // {squad, role, selectedTools}
+  const [toolEditPreview, setToolEditPreview] = useState(null);
+  const [toolEditErr, setToolEditErr] = useState(null);
+  const [toolEditSaving, setToolEditSaving] = useState(false);
+  const [toolEditSuccess, setToolEditSuccess] = useState(false);
+
   const dirtyCount = countDirty(config, edited);
 
   const fetchConfig = useCallback(async () => {
@@ -192,8 +231,13 @@ export default function SquadConfig() {
       setError(null);
       setErrorDetails(null);
       const data = await getSquadConfig();
-      setConfig(data);
-      setEdited({ squads: deepClone(data.squads || {}), pricing: deepClone(data.pricing || {}) });
+      // Normalize agents to {model, tools} shape (backward-compat with old string-only API)
+      const squads = deepClone(data.squads || {});
+      for (const s of Object.keys(squads)) {
+        if (squads[s].agents) squads[s].agents = normalizeAgents(squads[s].agents);
+      }
+      setConfig({ ...data, squads });
+      setEdited({ squads: deepClone(squads), pricing: deepClone(data.pricing || {}) });
       setPreview(null);
       setSuccess(null);
     } catch (e) {
@@ -222,16 +266,20 @@ export default function SquadConfig() {
   };
 
   const handleAgentChange = (squad, role, value) => {
-    setEdited((prev) => ({
-      ...prev,
-      squads: {
-        ...prev.squads,
-        [squad]: {
-          ...prev.squads[squad],
-          agents: { ...prev.squads[squad].agents, [role]: value },
+    setEdited((prev) => {
+      const existing = prev.squads[squad]?.agents?.[role];
+      const tools = (existing && typeof existing === 'object') ? (existing.tools || []) : [];
+      return {
+        ...prev,
+        squads: {
+          ...prev.squads,
+          [squad]: {
+            ...prev.squads[squad],
+            agents: { ...prev.squads[squad].agents, [role]: { model: value, tools } },
+          },
         },
-      },
-    }));
+      };
+    });
     setPreview(null);
     setSuccess(null);
   };
@@ -337,6 +385,92 @@ export default function SquadConfig() {
       setErrorDetails(e.data?.details || null);
     } finally {
       setSaving(false);
+    }
+  };
+
+  // ---- tool editor --------------------------------------------------------
+
+  const handleToolsOpen = useCallback(async (squad, role) => {
+    // Fetch tools catalog lazily
+    if (!toolsCatalog) {
+      try {
+        const cat = await getTools();
+        setToolsCatalog(cat);
+      } catch {
+        setToolEditErr('Nie udało się załadować katalogu narzędzi.');
+        return;
+      }
+    }
+    // Read current tools from the edited config
+    const currentTools = edited?.squads?.[squad]?.agents?.[role]
+      ? (edited.squads[squad].agents[role].tools || [])
+      : [];
+    setToolEditor({ squad, role, selectedTools: [...currentTools] });
+    setToolEditPreview(null);
+    setToolEditErr(null);
+    setToolEditSuccess(false);
+  }, [edited, toolsCatalog]);
+
+  const handleToolToggle = (toolName) => {
+    if (!toolEditor) return;
+    setToolEditor((prev) => {
+      const sel = prev.selectedTools.includes(toolName)
+        ? prev.selectedTools.filter((t) => t !== toolName)
+        : [...prev.selectedTools, toolName];
+      return { ...prev, selectedTools: sel };
+    });
+    setToolEditPreview(null);
+    setToolEditSuccess(false);
+  };
+
+  const handleToolsPreview = async () => {
+    if (!toolEditor) return;
+    setToolEditSaving(true);
+    setToolEditErr(null);
+    setToolEditSuccess(false);
+    try {
+      const result = await postSquadConfig({
+        squads: {
+          [toolEditor.squad]: {
+            agents: {
+              [toolEditor.role]: { tools: toolEditor.selectedTools },
+            },
+          },
+        },
+        dryRun: true,
+      });
+      setToolEditPreview(result);
+    } catch (e) {
+      setToolEditErr(e.message || String(e));
+    } finally {
+      setToolEditSaving(false);
+    }
+  };
+
+  const handleToolsSave = async () => {
+    if (!toolEditor) return;
+    setToolEditSaving(true);
+    setToolEditErr(null);
+    setToolEditSuccess(false);
+    try {
+      const result = await postSquadConfig({
+        squads: {
+          [toolEditor.squad]: {
+            agents: {
+              [toolEditor.role]: { tools: toolEditor.selectedTools },
+            },
+          },
+        },
+        dryRun: false,
+      });
+      setToolEditSuccess(true);
+      setToolEditPreview(null);
+      // Refresh config from server
+      await fetchConfig();
+    } catch (e) {
+      setToolEditErr(e.message || String(e));
+    } finally {
+      setToolEditSaving(false);
     }
   };
 
@@ -487,6 +621,7 @@ export default function SquadConfig() {
               pricing={pricing}
               onLeadChange={handleLeadChange}
               onAgentChange={handleAgentChange}
+              onToolsOpen={handleToolsOpen}
             />
           ))}
         </div>
@@ -702,6 +837,180 @@ export default function SquadConfig() {
           )}
         </div>
       )}
+
+      {/* ---- Tool editor modal -------------------------------------------- */}
+      <Modal
+        open={!!toolEditor}
+        onClose={() => setToolEditor(null)}
+        title={toolEditor ? `Narzędzia — ${toolEditor.squad} / ${toolEditor.role}` : 'Narzędzia'}
+      >
+        {toolEditor && (() => {
+          const tools = toolsCatalog?.tools || {};
+          const riskLevels = toolsCatalog?.riskLevels || {};
+          const toolNames = Object.keys(tools).sort();
+          const hasTask = toolEditor.selectedTools.includes('Task');
+
+          return (
+            <>
+              {toolEditErr && (
+                <div className="banner banner-warn">Błąd: {toolEditErr}</div>
+              )}
+
+              {toolEditSuccess && (
+                <div
+                  className="banner"
+                  style={{
+                    background: 'var(--ok-soft)',
+                    borderColor: '#a3d5b3',
+                    color: 'var(--ok)',
+                  }}
+                >
+                  ✓ Narzędzia zapisane. Zmiana obowiązuje od następnego uruchomienia.
+                </div>
+              )}
+
+              {hasTask && (
+                <div
+                  className="banner banner-warn"
+                  style={{ borderColor: '#f4cf9e', fontWeight: 600 }}
+                >
+                  ⚠ Uwaga: przyznajesz narzędzie <code>Task</code>. Dziś żadna rola go nie ma —
+                  hierarchia jest celowo płaska (lead → subagent). Nadanie <code>Task</code> zmienia
+                  architekturę na zagnieżdżoną delegację. Upewnij się, że to zamierzone.
+                </div>
+              )}
+
+              <table className="table">
+                <thead>
+                  <tr className="th">
+                    <th style={{ width: 36, textAlign: 'center' }}>✓</th>
+                    <th>Narzędzie</th>
+                    <th>Co robi</th>
+                    <th>Ryzyko</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {toolNames.length === 0 && (
+                    <tr>
+                      <td className="td muted" colSpan={4} style={{ textAlign: 'center' }}>
+                        Brak danych o narzędziach
+                      </td>
+                    </tr>
+                  )}
+                  {toolNames.map((name) => {
+                    const t = tools[name];
+                    const risk = t.risk || '';
+                    const riskInfo = riskLevels[risk];
+                    const isHighRisk = risk === 'writes-code' || risk === 'writes-system';
+                    const checked = toolEditor.selectedTools.includes(name);
+
+                    return (
+                      <tr
+                        key={name}
+                        style={
+                          isHighRisk
+                            ? { background: 'var(--warn-soft)' }
+                            : undefined
+                        }
+                      >
+                        <td className="td" style={{ textAlign: 'center' }}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => handleToolToggle(name)}
+                            aria-label={`Narzędzie ${name}`}
+                          />
+                        </td>
+                        <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 600 }}>
+                          {name}
+                        </td>
+                        <td className="td" style={{ fontSize: 12.5 }}>
+                          {t.description || '—'}
+                        </td>
+                        <td className="td" style={{ fontSize: 12 }}>
+                          {riskInfo ? (
+                            <span
+                              style={{
+                                color: isHighRisk ? 'var(--warn)' : 'var(--text-2)',
+                                fontWeight: isHighRisk ? 600 : 400,
+                              }}
+                              title={riskInfo.hint || ''}
+                            >
+                              {riskInfo.label || risk}
+                              {isHighRisk ? ' ⚠' : ''}
+                            </span>
+                          ) : (
+                            <span className="muted">{risk || '—'}</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+
+              {toolEditPreview && (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4, color: 'var(--text-2)' }}>
+                    Podgląd zmian {toolEditPreview.dryRun && <span className="muted">(dry run)</span>}
+                  </div>
+                  {toolEditPreview.changed && toolEditPreview.changed.length === 0 && (
+                    <div className="empty" style={{ padding: '12px 16px', fontSize: 12 }}>
+                      Brak zmian.
+                    </div>
+                  )}
+                  {toolEditPreview.changed && toolEditPreview.changed.length > 0 && (
+                    <table className="table">
+                      <thead>
+                        <tr className="th">
+                          <th>Plik</th>
+                          <th>Przed</th>
+                          <th>Po</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {toolEditPreview.changed.map((c) => (
+                          <tr key={c.file}>
+                            <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
+                              {c.file}
+                            </td>
+                            <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--danger)' }}>
+                              {c.before}
+                            </td>
+                            <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--ok)' }}>
+                              {c.after}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              )}
+
+              <div className="modal-foot">
+                <button className="btn-secondary" onClick={() => setToolEditor(null)}>
+                  Anuluj
+                </button>
+                <button
+                  className="btn-secondary"
+                  onClick={handleToolsPreview}
+                  disabled={toolEditSaving}
+                >
+                  {toolEditSaving ? 'Wysyłanie…' : 'Podgląd zmian'}
+                </button>
+                <button
+                  className="launch-btn"
+                  onClick={handleToolsSave}
+                  disabled={toolEditSaving}
+                >
+                  {toolEditSaving ? 'Zapisywanie…' : 'Zapisz'}
+                </button>
+              </div>
+            </>
+          );
+        })()}
+      </Modal>
     </div>
   );
 }

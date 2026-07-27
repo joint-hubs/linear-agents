@@ -162,18 +162,20 @@ test("maxTextLen:100 truncates long text", () => {
   assert(turns[0].text.endsWith("…"), "truncated text ends with …");
 });
 
-// Test 6: time window works for user turns too
-test("time window filters user turns", () => {
+// Test 6: time window works for user turns too (kickoff always included)
+test("time window filters user turns (kickoff always included)", () => {
   const turns = ledger.extractAgentTurns(leadPath, "_lead", {
     includeUser: true,
     windowStart: new Date("2026-07-01T10:00:30Z").getTime(),
     windowEnd: new Date("2026-07-01T10:01:15Z").getTime(),
   });
-  // Should include: assistant at 10:00:10? No, windowStart is 10:00:30.
-  // Should include: user at 10:01:00, assistant at 10:01:30? No, windowEnd is 10:01:15.
-  // So only user at 10:01:00.
-  assert(turns.length === 1, `expected 1 in-window turn, got ${turns.length}`);
-  assert(turns[0].role === "user", "in-window turn is user");
+  // Kickoff at 10:00:00 is always included (isKickoff).
+  // User at 10:01:00 is within widened window (10:00:30 - 5min = 09:55:30).
+  // Assistant at 10:00:10 is before windowStart → dropped.
+  // Assistant at 10:01:30 is after windowEnd → dropped.
+  assert(turns.length === 2, `expected 2 turns (kickoff + in-window user), got ${turns.length}`);
+  assert(turns[0].role === "user" && turns[0].isKickoff === true, "first is kickoff user");
+  assert(turns[1].role === "user" && turns[1].isKickoff === undefined, "second is in-window user");
 });
 
 // Test 7: sidechain user messages are excluded
@@ -241,6 +243,141 @@ test("subagent turns get role=assistant", () => {
   const turns = ledger.extractAgentTurns(leadPath, "recon");
   assert(turns.length === 1, "1 recon turn");
   assert(turns[0].role === "assistant", "subagent turn has role=assistant");
+});
+
+// ---------------------------------------------------------------------------
+// Kickoff fix (FOC-38): first user turn is always included, user window widened
+// ---------------------------------------------------------------------------
+
+// Transcript where kickoff is BEFORE the run window.
+// Run starts at 08:19:20, kickoff at 08:19:00 — 20s gap.
+const kickoffPath = join(tmp, "session-kickoff.jsonl");
+writeFileSync(
+  kickoffPath,
+  jsonl([
+    // Kickoff — 20s before run start
+    { type: "user", timestamp: "2026-07-24T08:19:00.072Z", message: { content: "check Claude.md i zrób recon JOI-9" } },
+    // Assistant response — also before run start (should be dropped)
+    {
+      type: "assistant",
+      timestamp: "2026-07-24T08:19:10.000Z",
+      message: {
+        model: "z-ai/glm-5.2",
+        usage: { input_tokens: 10, output_tokens: 5 },
+        content: [{ type: "text", text: "OK, sprawdzam Claude.md." }],
+      },
+    },
+    // Assistant response — inside window
+    {
+      type: "assistant",
+      timestamp: "2026-07-24T08:19:25.000Z",
+      message: {
+        model: "z-ai/glm-5.2",
+        usage: { input_tokens: 20, output_tokens: 10 },
+        content: [{ type: "text", text: "Recon gotowy." }],
+      },
+    },
+    // User follow-up — inside window
+    { type: "user", timestamp: "2026-07-24T08:20:00.000Z", message: { content: "dodaj testy" } },
+    // Assistant response — inside window
+    {
+      type: "assistant",
+      timestamp: "2026-07-24T08:20:15.000Z",
+      message: {
+        model: "z-ai/glm-5.2",
+        usage: { input_tokens: 15, output_tokens: 8 },
+        content: [{ type: "text", text: "Testy dodane." }],
+      },
+    },
+  ]),
+);
+
+// Test 11: kickoff before window is included and has isKickoff:true
+test("kickoff before window is included with isKickoff:true", () => {
+  const windowStart = new Date("2026-07-24T08:19:20.044Z").getTime();
+  const windowEnd = new Date("2026-07-24T08:21:00.000Z").getTime();
+
+  const turns = ledger.extractAgentTurns(kickoffPath, "_lead", {
+    includeUser: true,
+    windowStart,
+    windowEnd,
+  });
+
+  // Expected: kickoff (user, 08:19:00) + assistant (08:19:25) + user (08:20:00) + assistant (08:20:15)
+  // The assistant at 08:19:10 is before windowStart and should be dropped
+  assert(turns.length === 4, `expected 4 turns (kickoff + 2 assistant + 1 user), got ${turns.length}`);
+
+  // First turn is the kickoff
+  assert(turns[0].role === "user", "first turn is user (kickoff)");
+  assert(turns[0].isKickoff === true, "first turn has isKickoff:true");
+  assert(turns[0].text.includes("check Claude.md"), "kickoff text preserved");
+
+  // Second turn is the in-window assistant (08:19:25)
+  assert(turns[1].role === "assistant", "second turn is assistant");
+  assert(turns[1].text === "Recon gotowy.", "in-window assistant text");
+
+  // Third turn is the in-window user (08:20:00)
+  assert(turns[2].role === "user", "third turn is user");
+  assert(turns[2].isKickoff === undefined, "follow-up user does NOT have isKickoff");
+
+  // Fourth turn is the in-window assistant (08:20:15)
+  assert(turns[3].role === "assistant", "fourth turn is assistant");
+});
+
+// Test 12: assistant turn before window is still rejected
+test("assistant turn before window is still rejected", () => {
+  const windowStart = new Date("2026-07-24T08:19:20.044Z").getTime();
+  const windowEnd = new Date("2026-07-24T08:21:00.000Z").getTime();
+
+  const turns = ledger.extractAgentTurns(kickoffPath, "_lead", {
+    includeUser: true,
+    windowStart,
+    windowEnd,
+  });
+
+  // The assistant at 08:19:10 (before window) must NOT appear
+  const earlyAssistant = turns.filter(
+    (t) => t.role === "assistant" && t.text.includes("sprawdzam Claude.md"),
+  );
+  assert(earlyAssistant.length === 0, "assistant before window is dropped");
+});
+
+// Test 13: without includeUser nothing changes (no user turns at all)
+test("without includeUser nothing changes", () => {
+  const windowStart = new Date("2026-07-24T08:19:20.044Z").getTime();
+  const windowEnd = new Date("2026-07-24T08:21:00.000Z").getTime();
+
+  const turns = ledger.extractAgentTurns(kickoffPath, "_lead", {
+    windowStart,
+    windowEnd,
+  });
+
+  // Only assistant turns in window: 08:19:25 + 08:20:15
+  assert(turns.length === 2, `expected 2 assistant turns, got ${turns.length}`);
+  assert(turns.every((t) => t.role === "assistant"), "all turns are assistant");
+  assert(turns[0].text === "Recon gotowy.", "first assistant");
+  assert(turns[1].text === "Testy dodane.", "second assistant");
+});
+
+// Test 14: user turn within widened window (5min back) is included
+test("user turn within widened 5min window is included", () => {
+  // Window starts at 08:24:00, user turn at 08:20:00 — within 5min margin
+  const windowStart = new Date("2026-07-24T08:24:00.000Z").getTime();
+  const windowEnd = new Date("2026-07-24T08:30:00.000Z").getTime();
+
+  const turns = ledger.extractAgentTurns(kickoffPath, "_lead", {
+    includeUser: true,
+    windowStart,
+    windowEnd,
+  });
+
+  // Kickoff (08:19:00) is always included (isKickoff)
+  // User at 08:20:00 is within widened window (08:24:00 - 5min = 08:19:00)
+  const userTurns = turns.filter((t) => t.role === "user");
+  assert(userTurns.length === 2, `expected 2 user turns (kickoff + widened), got ${userTurns.length}`);
+  assert(userTurns[0].isKickoff === true, "first user is kickoff");
+  assert(userTurns[1].isKickoff === undefined, "second user is NOT kickoff");
+  assert(userTurns[1].text === "dodaj testy", "widened user turn included");
 });
 
 // ---------------------------------------------------------------------------
