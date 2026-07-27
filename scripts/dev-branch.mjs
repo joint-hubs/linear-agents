@@ -17,16 +17,42 @@
  */
 
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { loadEnv } from "./linear-client.mjs";
 
 // ---------------------------------------------------------------------------
-// Paths
+// Git target
 // ---------------------------------------------------------------------------
 
-const __dir = dirname(fileURLToPath(import.meta.url));
-const root = join(__dir, "..");
+/**
+ * Resolve the repository the branch operations must run in.
+ *
+ * Deliberately NOT LA_ROOT. `bin/<squad>.bat` starts `claude` in whatever
+ * directory it was launched from, so a DEV run for an `sce` task has cwd=sce
+ * while LA_ROOT still points at linear-agents. This used to be hardcoded to
+ * the script's own parent, which meant every task belonging to another repo
+ * created its branch in the ORCHESTRATOR repo and left it checked out there:
+ * linear-agents collected stray foc-15-…/foc-49-… branches while the real work
+ * happened in sce/ and office/. Same root cause as the cwd-vs-gitBranch
+ * mismatch recorded in docs/STATE.md.
+ *
+ * Exits 1 rather than falling back — a silent fallback is what produced the
+ * branches in the wrong repo in the first place.
+ */
+export function resolveGitRoot(cwd = process.cwd()) {
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf-8",
+    }).toString().trim();
+  } catch {
+    console.error(`[dev-branch] not inside a git repository: ${cwd}`);
+    console.error(`[dev-branch] run this from the repo the task belongs to — LA_ROOT is the orchestrator, not the target`);
+    process.exit(1);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -36,7 +62,7 @@ const root = join(__dir, "..");
  * Sanitize a slug: lowercase, trim, replace any run of non-[a-z0-9] with
  * single hyphen, strip leading/trailing hyphen. Returns "task" if empty.
  */
-function sanitizeSlug(raw) {
+export function sanitizeSlug(raw) {
   if (!raw || !raw.trim()) return "task";
   return raw
     .toLowerCase()
@@ -49,7 +75,7 @@ function sanitizeSlug(raw) {
  * Parse identifier like "FEN-30" into { key, number }.
  * Validates /^[A-Z]+-\d+$/i — exits 2 on mismatch.
  */
-function parseIdentifier(id) {
+export function parseIdentifier(id) {
   const m = String(id).match(/^([A-Za-z]+)-(\d+)$/);
   if (!m) {
     console.error(`Invalid identifier: ${id} (expected TEAM-NUM)`);
@@ -70,7 +96,7 @@ function resolveTeamKey(teamKeyFlag) {
 }
 
 /** Build branch name from identifier, optional slug, and optional team-key override. */
-function buildBranchName(identifier, slug, teamKeyFlag) {
+export function buildBranchName(identifier, slug, teamKeyFlag) {
   const { key, number } = parseIdentifier(identifier);
   // The identifier carries the authoritative team prefix (JOI-70 → joi-70-…).
   // Using env LINEAR_TEAM_KEY here produced wrong-team branches (JOI-70 with
@@ -86,15 +112,15 @@ function buildBranchName(identifier, slug, teamKeyFlag) {
  * Defaults to current HEAD. When --base is provided, validates it resolves.
  * Exits 1 on failure.
  */
-function resolveBaseRef(baseFlag) {
+function resolveBaseRef(baseFlag, gitRoot) {
   if (baseFlag) {
     try {
       execFileSync("git", ["rev-parse", "--verify", baseFlag], {
-        cwd: root,
+        cwd: gitRoot,
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch {
-      console.error(`[dev-branch] --base '${baseFlag}' does not resolve to a valid git ref`);
+      console.error(`[dev-branch] --base '${baseFlag}' does not resolve to a valid git ref in ${gitRoot}`);
       process.exit(1);
     }
     return baseFlag;
@@ -103,12 +129,12 @@ function resolveBaseRef(baseFlag) {
   // Default: current HEAD
   try {
     return execFileSync("git", ["rev-parse", "HEAD"], {
-      cwd: root,
+      cwd: gitRoot,
       stdio: ["ignore", "pipe", "pipe"],
       encoding: "utf-8",
     }).toString().trim();
   } catch {
-    console.error(`[dev-branch] failed to resolve current HEAD`);
+    console.error(`[dev-branch] failed to resolve current HEAD in ${gitRoot}`);
     process.exit(1);
   }
 }
@@ -124,11 +150,12 @@ function cmdName(identifier, slug, teamKeyFlag) {
 }
 
 /** `start` subcommand: create branch from baseRef, or checkout + rebase existing. */
-function cmdStart(identifier, slug, teamKeyFlag, dryRun, baseRef) {
+function cmdStart(identifier, slug, teamKeyFlag, dryRun, baseRef, gitRoot) {
   const branch = buildBranchName(identifier, slug, teamKeyFlag);
 
   if (dryRun) {
     console.log(`git checkout -b ${branch} ${baseRef}`);
+    console.log(`# in: ${gitRoot}`);
     console.log(`# (if ${branch} exists locally: git checkout ${branch} && git rebase ${baseRef})`);
     return;
   }
@@ -136,10 +163,11 @@ function cmdStart(identifier, slug, teamKeyFlag, dryRun, baseRef) {
   // Attempt to create the branch from baseRef
   try {
     execFileSync("git", ["checkout", "-b", branch, baseRef], {
-      cwd: root,
+      cwd: gitRoot,
       stdio: ["ignore", "pipe", "pipe"],
     });
     console.log(`branch: ${branch}`);
+    console.log(`repo: ${gitRoot}`);
     return;
   } catch (createErr) {
     const stderr = (createErr.stderr || "").toString().toLowerCase();
@@ -148,7 +176,7 @@ function cmdStart(identifier, slug, teamKeyFlag, dryRun, baseRef) {
     if (stderr.includes("already exists")) {
       try {
         execFileSync("git", ["checkout", branch], {
-          cwd: root,
+          cwd: gitRoot,
           stdio: ["ignore", "pipe", "pipe"],
         });
       } catch (checkoutErr) {
@@ -159,7 +187,7 @@ function cmdStart(identifier, slug, teamKeyFlag, dryRun, baseRef) {
 
       try {
         execFileSync("git", ["rebase", baseRef], {
-          cwd: root,
+          cwd: gitRoot,
           stdio: ["ignore", "pipe", "pipe"],
         });
       } catch (rebaseErr) {
@@ -221,8 +249,10 @@ function main() {
       cmdName(identifier, slug, teamKeyFlag);
       break;
     case "start": {
-      const baseRef = resolveBaseRef(baseFlag);
-      cmdStart(identifier, slug, teamKeyFlag, dryRun, baseRef);
+      // Resolved from cwd, NOT LA_ROOT — see resolveGitRoot.
+      const gitRoot = resolveGitRoot();
+      const baseRef = resolveBaseRef(baseFlag, gitRoot);
+      cmdStart(identifier, slug, teamKeyFlag, dryRun, baseRef, gitRoot);
       break;
     }
     default:
@@ -231,4 +261,8 @@ function main() {
   }
 }
 
-main();
+// Only run the CLI when executed directly — the tests import the helpers above
+// and must not trigger argv parsing or process.exit on import.
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  main();
+}
