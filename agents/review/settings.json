@@ -3,6 +3,9 @@
     "defaultMode": "default",
     "allow": [
       "Read", "Grep", "Glob", "Write",
+      "Bash(node:*)",
+      "Bash(graphify query:*)", "Bash(graphify affected:*)", "Bash(graphify god-nodes:*)",
+      "Bash(graphify path:*)", "Bash(graphify explain:*)",
       "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
       "Bash(semgrep:*)", "Bash(snyk:*)", "Bash(trivy:*)", "Bash(gitleaks:*)", "Bash(npx eslint:*)", "Bash(ruff:*)"
     ],

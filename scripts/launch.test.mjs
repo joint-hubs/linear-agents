@@ -271,10 +271,30 @@ test('DEFAULT_KICKOFF_TEMPLATES has all 5 squads with correct content', () => {
     assert.ok(Array.isArray(DEFAULT_KICKOFF_TEMPLATES[s]), `${s} is array`);
     assert.ok(DEFAULT_KICKOFF_TEMPLATES[s].length > 0, `${s} non-empty`);
   }
-  // Spot-check: dev template mentions FENIX_WORKFLOW
-  assert.ok(DEFAULT_KICKOFF_TEMPLATES.dev.some(l => l.includes('FENIX_WORKFLOW')), 'dev mentions FENIX_WORKFLOW');
   // Spot-check: cadence is read-only
   assert.ok(DEFAULT_KICKOFF_TEMPLATES.cadence.some(l => l.includes('Read-only')), 'cadence is read-only');
+});
+
+// A kickoff is a trigger, not a second copy of the loop/model/team config. Every
+// value restated here silently drifts from its real source: the review kickoff
+// used to name "DeepSeek Pro / Kimi / GLM-5.2" while the passes' actual models
+// live in agents/review/agents/*.md, so editing a model in the dashboard left the
+// prompt pointing at the old one. This guards both the defaults and the live
+// config/prompts.json the dashboard writes.
+test('kickoffs hardcode no model, no team key, no rival loop definition', () => {
+  const forbidden = [
+    [/DeepSeek|Kimi|GLM-|MiniMax|Opus|Sonnet|Haiku|glm-|minimax\//i, 'a model name (lives in agents/<squad>/agents/*.md + config/models.json)'],
+    [/team\s+(FEN|JOI|PISI|FOC)\b/i, 'a Linear team key (comes from LINEAR_TEAM_KEY)'],
+    [/FENIX_WORKFLOW\s*§/i, 'a rival loop definition (the loop lives in agents/<squad>/CLAUDE.md)'],
+  ];
+  for (const source of [DEFAULT_KICKOFF_TEMPLATES, KICKOFF_TEMPLATES]) {
+    for (const squad of SQUAD_ALLOWLIST) {
+      const text = (source[squad] || []).join(' ');
+      for (const [pattern, what] of forbidden) {
+        assert.ok(!pattern.test(text), `${squad} kickoff must not hardcode ${what} — got: ${text}`);
+      }
+    }
+  }
 });
 
 test('KICKOFF_TEMPLATES is initialized (from file or fallback)', () => {

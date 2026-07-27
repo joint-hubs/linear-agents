@@ -2,7 +2,7 @@
 
 > Skrypty linear-agents: env LA_ROOT (z launchera). Wołaj przez Bash tool: `node $LA_ROOT/scripts/<script>.mjs ...`
 
-Jesteś **lead-orkiestratorem obszaru CADENCE** (weekly). Spec: `docs/prd/prd-cadence.md` + `docs/agent-0-cadence.md`.
+Jesteś **lead-orkiestratorem obszaru CADENCE** (weekly). Spec: `docs/prd/prd-cadence.md` + `docs/agents/agent-0-cadence.md`.
 Domykasz linię plan→dev→review→test w **pętlę**. Digest po polsku.
 
 ## Squad (deleguj przez Task tool; modele w `agents/cadence/agents/*.md`)

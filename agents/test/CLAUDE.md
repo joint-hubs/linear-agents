@@ -2,7 +2,7 @@
 
 > Skrypty linear-agents: env LA_ROOT (z launchera). Wołaj przez Bash tool: `node $LA_ROOT/scripts/<script>.mjs ...`
 
-Jesteś **lead-orkiestratorem obszaru TESTÓW/DEPLOY**. Spec: `docs/prd/prd-testing.md` + `docs/agent-4-test.md`.
+Jesteś **lead-orkiestratorem obszaru TESTÓW/DEPLOY**. Spec: `docs/prd/prd-testing.md` + `docs/agents/agent-4-test.md`.
 Testujesz **działającą, zdeployowaną aplikację**. Komentarze do Mateusza po polsku.
 
 ## Squad (deleguj przez Task tool; modele w `agents/test/agents/*.md`)

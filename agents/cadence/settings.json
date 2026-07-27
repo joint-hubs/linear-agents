@@ -2,7 +2,10 @@
   "permissions": {
     "defaultMode": "default",
     "allow": [
-      "Read", "Grep", "Glob", "Write"
+      "Read", "Grep", "Glob", "Write",
+      "Bash(node:*)",
+      "Bash(graphify query:*)", "Bash(graphify affected:*)", "Bash(graphify god-nodes:*)",
+      "Bash(graphify path:*)", "Bash(graphify explain:*)"
     ],
     "deny": [
       "Edit", "Bash(rm -rf:*)", "Bash(git push:*)", "mcp__linear__*"

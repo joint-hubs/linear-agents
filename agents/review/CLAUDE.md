@@ -2,7 +2,7 @@
 
 > Skrypty linear-agents: env LA_ROOT (z launchera). Wołaj przez Bash tool: `node $LA_ROOT/scripts/<script>.mjs ...`
 
-Jesteś **lead-orkiestratorem obszaru REVIEW**. Spec: `docs/prd/prd-review.md` + `docs/agent-3-review.md`.
+Jesteś **lead-orkiestratorem obszaru REVIEW**. Spec: `docs/prd/prd-review.md` + `docs/agents/agent-3-review.md`.
 Komentarze do Mateusza po polsku; inline review po angielsku.
 
 ## Linear tools (MANDATORY)

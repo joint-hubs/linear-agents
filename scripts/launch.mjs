@@ -33,44 +33,40 @@ export const TASK_ID_RE = /^[A-Z]+-\d+$/;
 // Primary source: config/prompts.json (editable from dashboard). If the file is
 // missing, unparsable, or missing a squad, we fall back to these defaults so
 // agent launch NEVER breaks on a config typo.
+//
+// A kickoff is a TRIGGER, not a second definition of the loop. The loop lives in
+// agents/<squad>/CLAUDE.md, the models in agents/<squad>/agents/*.md +
+// config/models.json, the team in LINEAR_TEAM_KEY. Restating any of those here
+// creates a copy that silently drifts from the original — which is exactly what
+// happened: this fallback named "DeepSeek Pro / Kimi / GLM-5.2" for the review
+// passes and hardcoded "team FEN", so editing a model in the dashboard left the
+// prompt pointing at the old one. Keep these lines pointing AT the source.
 export const DEFAULT_KICKOFF_TEMPLATES = {
   plan: [
     'Feature approved do zaplanowania: {taskId} (albo: planning/inbox/<plik>.md).',
-    'Przejdź pełny cykl PLAN: discovery → spec (+ADR jeśli decyzja architektoniczna)',
-    '→ spec-review → decompose na vertical slices z AC/DoD/estimate(t-shirt).',
-    'GATE 1: pokaż brief (≤1 str.) + pytania, czekaj na moje ✅.',
-    'GATE 2: pokaż 2–3 przykładowe subtaski z AC, zapytaj "tworzę w Linear?", czekaj ✅.',
-    'Po ✅ pushnij do Linear (team FEN) jako epic + subtaski w Todo z dor-ok.',
+    'Przejdź pełny cykl PLAN wg swojego CLAUDE.md (sekcja Pętla), z bramkami GATE 1 i GATE 2.',
+    'Push idzie do teamu z LINEAR_TEAM_KEY — nie zakładaj innego.',
   ],
   dev: [
-    'Weź task {taskId} (Todo, dor-ok). Krok po kroku wg FENIX_WORKFLOW §5:',
-    '1) update status → In Progress, assignee @flow, label ai:coded, komentarz 👀.',
-    '2) recon: przeczytaj task + AC + powiązany kod (nie zgaduj — niejasne → needs:answer + @Mateusz + stop).',
-    '3) zaimplementuj NAJMNIEJSZY pełny slice spełniający AC.',
-    '4) self-test (logi/curl/UI; docker → rebuild+redeploy).',
-    '5) commit (jeden task = jeden commit, format §3, BEZ Co-Authored-By). NIE pushuj bez mojej zgody.',
-    '6) deliver_task → In Review + podsumowanie PL: co zrobione, wyniki testów, jak testować.',
+    'Weź task {taskId}. Pełna pętla jest w Twoim CLAUDE.md (sekcja Pętla) —',
+    'od resume-checku po hand-off. Trzymaj się jej, nie improwizuj kolejności.',
+    'Przypomnienie o dwóch rzeczach, na których najłatwiej się potknąć:',
+    'niejasne AC → needs:answer + @Mateusz i STOP (nie zgaduj);',
+    'NIE pushuj bez mojej zgody.',
   ],
   review: [
-    'Zrób review taska {taskId} (In Review). Trzy przebiegi: first-pass (DeepSeek Pro),',
-    'security (Kimi), deep (GLM-5.2). Zwróć verdykt:',
-    '- APPROVE → dodaj ai:reviewed + dod-ok, nadaj wersję (label version:<sesja>, patrz §5),',
-    '  ustaw stage:testing i przekaż do TEST; komentarz PL z findings (liczba/severity, co przeszło).',
-    '- RETURN → wypisz konkretne poprawki, status → In Progress, licznik rundy +1.',
-    'Limit 2 rundy DEV↔REVIEW; po 2 bez zbieżności → label escalated + @Mateusz + stop.',
+    'Zrób review taska {taskId} (In Review) wg swojego CLAUDE.md (sekcja Pipeline).',
+    'Trzy przebiegi równolegle, potem scal w Conventional Comments i wydaj werdykt.',
+    'Modele przebiegów bierzesz z agents/review/agents/*.md — nie wybieraj ich sam.',
   ],
   test: [
-    'Zdeployuj i przetestuj {taskId} (stage:testing, wersja version:<sesja>).',
-    '1) deploy nowej wersji na target z config/projects.json (health-check).',
-    '2) uruchom scenariusze testowe wg AC + smoke golden path + edge cases.',
-    '3) PASS → status Done + dod-ok + komentarz PL (deploy URL, wyniki, health).',
-    '   FAIL → auto-rollback, status → In Progress, opis błędu + jak powtórzyć.',
-    'Dane testowe syntetyczne (żadnego prod PII).',
+    'Zdeployuj i przetestuj {taskId} (stage:testing) wg swojego CLAUDE.md (sekcja Pętla).',
+    'Target deployu z config/projects.json, health-check obowiązkowy,',
+    'przy failu auto-rollback. Dane testowe syntetyczne (żadnego prod PII).',
   ],
   cadence: [
-    'Tygodniowy przebieg CADENCE: zbierz stan tablicy (wszystkie squady),',
-    'zrób retro (cycle time, throughput, rundy review, $/task) i wygeneruj',
-    'digest po polsku dla Mateusza. Read-only — żadnych zmian scope.',
+    'Tygodniowy przebieg CADENCE wg swojego CLAUDE.md: collector → retro → digest.',
+    'Digest po polsku dla Mateusza. Read-only — żadnych zmian scope.',
   ],
 };
 
