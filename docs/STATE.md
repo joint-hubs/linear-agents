@@ -3,7 +3,119 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-07-03 — Faza G: Platforma v1 (JOI-51) DOWIEZIONA + PR #1 otwarty. Branch `feat/observability` wypchnięty, komentarz na JOI-51. Czeka na review/merge Mateusza.
+## Ostatnia aktualizacja: 2026-07-26 — Desktop launcher + zakładka „Konfiguracja składów" (dowiezione, zweryfikowane e2e).
+
+## Biblioteka promptów + czytanie konwersacji (2026-07-26)
+
+PRD: `docs/ui/prompt-library.md`.
+
+**Dowiezione:**
+- `scripts/prompt-library.mjs` — drzewo (6 intencji × 5 składów), instrukcje ról i leadów,
+  warunki wejścia; kickoff bierze z `KICKOFF_TEMPLATES` (jedno źródło, zero duplikatu),
+  modele z `readSquadConfig`. Walidacja squad/role chroni przed path traversal.
+- Endpointy: `/api/prompts`, `/api/prompts/role`, `/api/prompts/lead`, `/api/prompts/runs`.
+- `extractAgentTurns`: opcje `includeUser` i `maxTextLen:null` + pole `role` na każdej turze.
+  Domyślne wywołanie bez zmian (Flow i flow-db działają jak dotąd).
+- Zakładka **Prompty** — drzewo, liść składu (prompt + Kopiuj + dry-run + Uruchom + warunek
+  wejścia + skład + ostatnie przebiegi), liść roli (model, uprawnienia, instrukcja).
+  `LogDrawer` wyeksportowany z `Flow.jsx` i użyty ponownie — bez duplikacji komponentu.
+
+**Znalezione i naprawione przy weryfikacji:** `extractAgentTurns` z `includeUser` zwracał tury
+`user` bez tekstu — na realnym przebiegu **48 z 56** to puste koperty `tool_result`, które
+renderowałyby się jako puste wiersze rozmowy. Dodany filtr + test.
+
+**Weryfikacja e2e:** drzewo → DEV → wpisanie `JOI-53` → prompt podstawiony → dry-run zwrócił
+finalny prompt (sklejony `' | '` jak przy realnym starcie) bez otwierania okna → szuflada
+konwersacji z etykietami TY (8) / AGENT (101).
+
+**Testy:** prompt-library 47 · flow-turns 11 · squad-config 76 · telemetry-store 11 ·
+telemetry-ingest 2 · telemetry-concurrency 1 · _test_flow 13 · ui/_test_utils 47 — zielone.
+
+**Znane szlify (nieblokujące):** `<task-notification>` (powiadomienie o powrocie subagenta)
+renderuje się jako wypowiedź „TY" — do odróżnienia osobną etykietą. Podgląd uruchomienia pokazuje
+prompt, ale nie planowany `.bat`.
+
+### Poprawki kosztów (2026-07-26, zgłoszone przez Mateusza ze zrzutów)
+
+1. **Prompty pokazywały `$0.00`** przy każdym przebiegu. API zwracało poprawne wartości —
+   `Prompts.jsx` czytał `costValue(r.totals)`, a `/api/prompts/runs` zwraca kształt PŁASKI.
+   Fix: endpoint dokłada `partialCostUSD` + `unpricedUsageCount`, UI używa `fmtCost(r)`
+   (ten sam prefiks „≥" co w Costs). Po fixie: `$21.64` / `$14.45` / `$27.60`.
+2. **`CACHE SAVED $0.00`** przy 89.9% hit rate i 1,114,359,842 tokenach z cache.
+   Przyczyna: `telemetry-store.mjs` miał **zahardkodowane `cacheSavingsUSD: 0`** — przy przejściu
+   odczytu na SQLite zgubiono wyliczenie, które stara ścieżka (`ledger.mjs`) robiła poprawnie.
+   Fix: liczone per model z `model_prices` danego `price_set_id` przez istniejące `resolvePrice()`,
+   sumowane w `querySummary`, przeliczane przy repricingu. Po fixie: **$1641.64**
+   (sanity check: $1.473 na 1M tokenów — GLM daje $1.26, Opus $4.50, miks się zgadza).
+   Test dopisany do `telemetry-store.test.mjs` (12 testów).
+
+## Dashboard launcher + konfiguracja składów (2026-07-26)
+
+PRD: `docs/ui/dashboard-launcher-and-squad-config.md`.
+
+**Dowiezione:**
+- **Single-process dashboard:** `telemetry-server.mjs` serwuje `ui/dist` (statyka + SPA fallback +
+  MIME + ochrona path traversal + 503 z instrukcją gdy brak builda). Ścieżki `/api/*` nigdy nie
+  trafiają do statyki. Koniec z osobnym Vite w codziennym użyciu.
+- **Ikona na pulpicie:** „Fenix Dashboard" → `wscript` → `bin/dashboard-hidden.vbs` →
+  `bin/dashboard.bat` (health-check → start w tle bez konsoli → poll → otwórz przeglądarkę).
+  Stop: `bin/dashboard-stop.bat` (ubija po porcie, nie po nazwie procesu).
+  Ikona generowana bez zależności: `scripts/gen-icon.mjs` (czysty zlib+PNG+ICO, 4 rozmiary).
+- **Zakładka „Konfiguracja"** (`/squad-config`): edycja modelu leada i wszystkich subagentów per
+  skład + panel cennika, dry-run podgląd diffa, potem zapis. Zapis idzie do plików repo
+  (`bin/*.bat`, frontmatter ról, `config/models.json`), działa od następnego uruchomienia składu.
+- **`scripts/squad-config.mjs`** — read/write/validate, zapis atomowy, zachowuje CRLF i całą
+  resztę frontmatteru; dla `plan.bat` rusza tylko gałąź OpenRouter, nie NATIVE.
+
+**Błędy złapane przy weryfikacji (nie przez testy jednostkowe):**
+1. Skrót wskazywał poziom nad repo (`Split-Path -Parent` ×2) — martwy skrót.
+2. `dashboard.bat` używał `pushd/popd`, więc procesy dziedziczyły zły CWD.
+3. `pricing._doc` (klucz opisowy w `models.json`) trafiał do UI jako wiersz cennika i wracał w
+   POST → walidacja odrzucała każdy zapis (400). Fix: klucze `_*` filtrowane przy odczycie,
+   zachowywane przy zapisie; zapis `models.json` jest merge'em, nie nadpisaniem.
+
+**Weryfikacja e2e:** uruchomienie przez skrót z pulpitu → `:7331` (tylko ten port) → zakładka
+Konfiguracja → zmiana `dev/implementer` → podgląd → Zastosuj → `agents/dev/agents/implementer.md`
+zmieniony (dokładnie 1 linia, frontmatter i treść nietknięte), `models.json` zachował `_doc`,
+`ids`, `routing`, `providers`, `fallback`. Zmiana testowa cofnięta.
+
+**Testy:** squad-config 76 · telemetry-store 11 · telemetry-ingest 2 · telemetry-concurrency 1 ·
+ui/_test_utils 47 — wszystkie zielone, zero regresji na Telemetry v2.
+
+## Telemetry v2 — centralny tracing run/task/worktree (implemented, 2026-07-24)
+
+PRD: `docs/prd/telemetry-v2-central-tracing-prd.md`.
+
+**Zweryfikowana diagnoza:**
+- `run-manifest start` zapisuje `cwd` z katalogu uruchomienia, ale Git odpytuje zawsze w root `linear-agents`; `cwd` i `gitBranch` mogą opisywać dwa różne repo.
+- Manifest nie aktualizuje workspace/ref/HEAD po `EnterWorktree`. Transkrypt ma poprawne eventy `relocated`/`worktree-state`, lecz dashboard ich nie modeluje.
+- Realny run FOC-36: manifest `cwd=office`, `gitBranch=main`, potem sesja pracuje w `office/.claude/worktrees/foc-36-design-system` na branchu `foc-36-design-system`.
+- FOC-36 zrobił cold start ~236 s po starcie manifestu, poza limitem 120 s dla aktywnego late discovery; Live może pokazywać `$0.00` do końca/reconcile.
+- Jawny `run-manifest tag` poprawnie zapisał `FOC-36`; branch ma zostać tylko niepewnym fallbackiem legacy.
+- Istniejący `.state/flowdb/flow.db` jest ręcznie zasilaną, niepełną projekcją. Główne API nadal wykonuje `ledger.scanRuns()` i skanuje pliki na żądanie.
+- Brak ceny modelu daje dziś cichy koszt `0`, zamiast `pricing_missing`.
+
+**Decyzje Mateusza:**
+- jedna baza użytkownika na komputerze: `%LOCALAPPDATA%/linear-agents/telemetry/telemetry.sqlite`;
+- surowe eventy/transkrypty zostają audytem, SQLite jest centralnym indeksem/projekcją;
+- domyślny koszt historyczny według snapshotu cen z runa + opcjonalny reprice aktualnymi cenami;
+- explicit task link z launch/pick jest autorytatywny; kickoff/branch tylko fallback legacy z confidence;
+- immutable spool + idempotentny ingest + rotacja; eksport JSONL/CSV/SQLite.
+
+**Wdrożone:**
+- `scripts/telemetry-store.mjs`: user-level SQLite (WAL), immutable event spool, idempotentne source offsets, run/session/worktree/task/usage/cost projections, snapshot cen, reprice `current`, health i eksport.
+- `scripts/telemetry-hook.mjs` + `SessionStart` hook w 5 squadach: exact `LA_RUN_ID -> CLAUDE_CODE_SESSION_ID`, bez dopasowania po czasie.
+- `run-manifest.mjs`: Git branch pobierany z obserwowanego `cwd`, dual-write manifestu i task linku do centralnego store.
+- `scripts/telemetry-ingest.mjs`: backfill legacy, incrementalny parser transkryptów, eventy `relocated`/`worktree-state`, lead/subagent usage; discovery legacy preferuje bezpośredni ślad `runId` w transkrypcie.
+- `telemetry-server.mjs`: `/api/runs`, `/api/summary`, `/api/cost-per-task`, `/api/live`, `/api/budget` i `/api/flow` czytają SQLite, nie `ledger.scanRuns()`; `/api/telemetry/health`; startup backfill pustej bazy + spool/incremental ingest co 15 s. `LA_TELEMETRY_READ_SOURCE=files` = fallback legacy.
+
+**Weryfikacja:** centralny backfill zaimportował 99 manifestów, 333 pliki transkryptów i 23k+ usage events. FOC-36 został odzyskany z exact `sessionId`, worktree `office/.claude/worktrees/foc-36-design-system`, branch `foc-36-design-system`, task `FOC-36` i kosztem `$5.19782782`. Health raportuje 0 pending eventów; brakujące transkrypty oraz modele bez ceny są jawne jako quality issues, nie `$0.00`.
+
+**Self-review hardening (2026-07-24):** schema v2 przypina price set przy `run.started`; `byTask`/Flow trace liczą każdą turę według task linku aktywnego w jej timestampie (pre-pick pozostaje untagged); legacy `taskIdAuto` odzyskuje czas komendy `run-manifest tag`; repo grupuje wszystkie worktree po `git-common-dir`; detached HEAD jest osobnym ref type. Ingest jednego pliku jest transakcyjny, usage używa `INSERT OR IGNORE`, cursor jest monotoniczny, replay ma cross-process lock, a eksport SQLite używa `VACUUM INTO` (WAL-safe). Flow trace/patterns czytają centralną bazę zamiast ręcznie zasilanego FlowDB. UI pokazuje niepełny koszt jako `≥$known`, nie `$0.00`.
+
+Final review: wieloprocesowy test potwierdził 1× event, 1× usage i 1× replay przy równoległych procesach; ujawnił i domknął lock przy równoczesnym pierwszym `openTelemetryDb` (busy timeout przed WAL). Częściowy bootstrap jest automatycznie dokańczany przez porównanie liczby manifestów/runów (`LA_TELEMETRY_FORCE_BACKFILL=1` wymusza pełny reindex). Awaryjny `files` mode ma tę samą semantykę `costUSD:null + partialCostUSD`; legacy ambiguity jest trwałym quality issue.
+
+**Operator:** baza i komendy są w `docs/ACCESS.md`. Wymagany Node `22.5+`. Przy pierwszym starcie pustej bazy server robi automatyczny backfill; ręcznie: `node scripts/telemetry-ingest.mjs backfill --json`.
 
 ## Faza G — Platforma v1 (JOI-51) dowieziona (2026-07-03)
 

@@ -195,10 +195,24 @@ Ty odpalasz launcher danego squadu, gdy w jego kolejce jest robota.
 
 ## 7. Telemetria (co powstaje przy każdym uruchomieniu)
 
-Każdy `.bat` przez `_lib.bat` generuje `RUN_ID` i zapisuje
-`.state/runs/<runId>.json` (start/koniec, squad, źródło, exit code). `ledger.mjs`
-parsuje transkrypty Claude Code → koszt per model/agent/task; `telemetry-server.mjs`
-serwuje API na `:7331`. Dashboard (w budowie) czyta to API — patrz
-[`docs/ui/observability-platform-plan.md`](ui/observability-platform-plan.md).
+Każdy `.bat` przez `_lib.bat` generuje `RUN_ID` i zapisuje kompatybilny manifest
+`.state/runs/<runId>.json`. Równolegle zapisuje zdarzenia do user-level SQLite:
+`%LOCALAPPDATA%\linear-agents\telemetry\telemetry.sqlite`.
 
+`SessionStart` hook łączy `LA_RUN_ID` z runtime `sessionId` bez dopasowania po
+czasie. Ingestor czyta transkrypty poza ścieżką HTTP, zapisuje usage leadów i
+subagentów oraz obserwacje repo/worktree/ref/HEAD. Po `EnterWorktree` Run Detail
+pokazuje aktualny worktree i branch, a nie tylko branch z chwili startu.
+
+`telemetry-server.mjs` domyślnie czyta SQLite; `LA_TELEMETRY_READ_SOURCE=files`
+jest awaryjnym trybem legacy. Przy pierwszym pustym starcie serwer importuje
+manifesty/transkrypty, a potem odtwarza spool i odświeża ingest co 15 s. Health:
+`GET /api/telemetry/health`. Ceny API są `as-run`; dodaj `?pricing=current`, aby
+przeliczyć sam odczyt bieżącym `config/models.json`. Gdy część usage nie ma
+ceny, API zwraca `costUSD:null` + `partialCostUSD`; dashboard pokazuje
+`≥$known`, a nie fałszywe `$0.00`. Koszt per task jest temporalny: tury przed
+`pick/tag` pozostają `__untagged__`.
+
+Ręczny backfill: `node scripts/telemetry-ingest.mjs backfill --json`. Eksport:
+`node scripts/telemetry-export.mjs --format csv --output telemetry.csv`.
 Szybki koszt sesji: `node scripts/cost-report.mjs` · per task: `node scripts/cost-per-task.mjs`.

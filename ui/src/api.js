@@ -51,8 +51,53 @@ export async function getFlow() {
   return apiFetch('/api/flow');
 }
 
-export async function getFlowLog(runId, agent) {
+export async function getFlowLog(runId, agent, opts = {}) {
+  let url =
+    '/api/flow/log?runId=' + encodeURIComponent(runId) + '&agent=' + encodeURIComponent(agent);
+  if (opts.includeUser) url += '&includeUser=1';
+  if (opts.full) url += '&full=1';
+  return apiFetch(url);
+}
+
+// Prompts screen — decision tree for launching squads/roles.
+export async function getPrompts() {
+  return apiFetch('/api/prompts');
+}
+
+export async function getPromptRole(squad, role) {
   return apiFetch(
-    '/api/flow/log?runId=' + encodeURIComponent(runId) + '&agent=' + encodeURIComponent(agent)
+    '/api/prompts/role?squad=' + encodeURIComponent(squad) + '&role=' + encodeURIComponent(role)
   );
+}
+
+export async function getPromptLead(squad) {
+  return apiFetch('/api/prompts/lead?squad=' + encodeURIComponent(squad));
+}
+
+export async function getPromptRuns(squad, limit = 10) {
+  return apiFetch(
+    '/api/prompts/runs?squad=' + encodeURIComponent(squad) + '&limit=' + encodeURIComponent(limit)
+  );
+}
+
+// Squad config — read current squad model assignments + pricing table.
+export async function getSquadConfig() {
+  return apiFetch('/api/squad-config');
+}
+
+// Squad config — preview (dryRun:true) or apply (dryRun:false) changes.
+// Returns parsed JSON even on 4xx so the UI can surface error details.
+export async function postSquadConfig(payload) {
+  const r = await fetch(API_BASE + '/api/squad-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.data = data;
+    throw err;
+  }
+  return data;
 }

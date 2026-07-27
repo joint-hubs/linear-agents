@@ -34,4 +34,4 @@ Szkielet + pełna dokumentacja koncepcji (v2). Do wypełnienia: sekrety, `config
 bot `@flow` (OAuth+webhooks), UI. Patrz [`STATE.md`](STATE.md).
 
 ## Wymagania
-Windows · Claude Code · Node 20+ · Java 21 (render diagramów) · klucze: OpenRouter, Anthropic, Linear.
+Windows · Claude Code · Node 22.5+ (centralna telemetria używa `node:sqlite`) · Java 21 (render diagramów) · klucze: OpenRouter, Anthropic, Linear.

@@ -7,6 +7,8 @@ import RunDetail from './screens/RunDetail.jsx';
 import Costs from './screens/Costs.jsx';
 import Tasks from './screens/Tasks.jsx';
 import Flow from './screens/Flow.jsx';
+import SquadConfig from './screens/SquadConfig.jsx';
+import Prompts from './screens/Prompts.jsx';
 
 // Minimal 17px stroke icons (no icon-lib dependency).
 const I = {
@@ -48,6 +50,18 @@ const I = {
       <path d="M7 7.5 10.5 16M17 7.5 13.5 16" />
     </svg>
   ),
+  config: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  ),
+  prompts: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+      <path d="M8 9h8M8 13h5" />
+    </svg>
+  ),
 };
 
 function NavItem({ to, end, icon, children }) {
@@ -82,6 +96,8 @@ export default function App() {
             <NavItem to="/costs" icon={I.costs}>Costs</NavItem>
             <NavItem to="/tasks" icon={I.tasks}>Tasks</NavItem>
             <NavItem to="/flow" icon={I.flow}>Flow</NavItem>
+            <NavItem to="/squad-config" icon={I.config}>Konfiguracja</NavItem>
+            <NavItem to="/prompts" icon={I.prompts}>Prompty</NavItem>
           </nav>
           <div className="sidebar-foot">
             <span className="dot dot-ok" style={{ width: 7, height: 7 }} />
@@ -98,6 +114,8 @@ export default function App() {
               <Route path="/costs" element={<Costs />} />
               <Route path="/tasks" element={<Tasks />} />
               <Route path="/flow" element={<Flow />} />
+              <Route path="/squad-config" element={<SquadConfig />} />
+              <Route path="/prompts" element={<Prompts />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>

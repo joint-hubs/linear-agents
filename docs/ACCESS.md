@@ -50,8 +50,42 @@ Wszystkie klucze w **`.env`** (gitignored — nigdy nie commitować). Wzór: `.e
 (brak lokalnych serwisów; squad launchery nie otwierają portów)
 
 Serwery pomocnicze (opcjonalne):
-- **Telemetry panel:** `node scripts/telemetry-server.mjs` → `localhost:7331` (env `TELEMETRY_PORT`). Uruchamiany ręcznie, nie przez launcher.
+- **Dashboard Fenix (zalecane wejście):** ikona **„Fenix Dashboard"** na pulpicie → `localhost:7331`.
+  Jeden proces: `telemetry-server.mjs` serwuje zbudowane UI z `ui/dist` i API pod `/api/*`.
+  - Skrót instaluje się raz: `powershell -ExecutionPolicy Bypass -File scripts\install-desktop-shortcut.ps1`
+  - Ręcznie: `bin\dashboard.bat` (start, bez okna konsoli) · `bin\dashboard-stop.bat` (stop, ubija po porcie)
+  - Po zmianach w `ui/src` trzeba przebudować: `npm --prefix ui run build`
+  - Tryb dev UI (Vite + HMR na `:5173`): w `bin\dashboard.bat` ustaw `START_UI=1` i `DASHBOARD_URL=http://localhost:5173`
+- **Telemetry API samodzielnie:** `node scripts/telemetry-server.mjs` → `localhost:7331` (env `TELEMETRY_PORT`).
 - **0_linear dashboard:** `cd Desktop/experiments/0_linear && npm run dev` → `localhost:3000`. Wymaga działającego telemetry-server.
+
+### Biblioteka promptów (z dashboardu)
+Zakładka **Prompty** (`localhost:7331/prompts`) — drzewo decyzyjne „co chcesz zrobić?".
+- Liść składu: prompt z podstawionym numerem zadania, *Kopiuj*, *Podgląd uruchomienia* (dry-run,
+  nie otwiera okna), *Uruchom* (otwiera prawdziwe okno agenta), warunek wejścia, skład + modele,
+  instrukcja leada, lista ostatnich przebiegów z odnośnikiem do konwersacji.
+- Liść roli: komenda `bin\agent.bat <squad> <rola>`, model, uprawnienia, pełna instrukcja roli.
+- Read-only (prompty edytuje się w plikach; edycja z UI to faza 2).
+- Konwersacje: `?includeUser=1&full=1` na `/api/flow/log` — tury użytkownika i pełny tekst bez ucinania.
+
+### Konfiguracja modeli składów (z dashboardu)
+Zakładka **Konfiguracja** (`localhost:7331/squad-config`) edytuje modele per skład i cennik.
+- Zapisuje **bezpośrednio do plików repo**: `bin/<squad>.bat` (+ `-dry`) dla leada, frontmatter
+  `agents/<squad>/agents/<rola>.md` dla subagentów, `config/models.json` dla cennika.
+- Zmiana działa **od następnego uruchomienia składu** (nie w trwającej sesji).
+- Zapis chroniony localhost-only. Zawsze najpierw „Podgląd zmian" (dry-run pokazuje diff plików).
+- Po zmianie pliki są zmodyfikowane w gicie — przejrzyj `git diff` i zacommituj świadomie.
+
+### Centralna telemetria
+
+- **Baza:** `%LOCALAPPDATA%\linear-agents\telemetry\telemetry.sqlite` (override: `LA_TELEMETRY_DB`; katalog: `LA_TELEMETRY_HOME`).
+- **Spool awaryjny:** `%LOCALAPPDATA%\linear-agents\telemetry\spool\pending\`; serwer odtwarza go przy starcie i co 15 s wykonuje incrementalny ingest transkryptów.
+- **Pierwszy start pustej bazy:** serwer wykonuje backfill automatycznie. Ręcznie: `node scripts/telemetry-ingest.mjs backfill --json`.
+- **Naprawa indeksu:** serwer automatycznie dokańcza backfill, gdy liczba runów jest mniejsza od liczby manifestów; pełne wymuszenie: `LA_TELEMETRY_FORCE_BACKFILL=1` przy starcie serwera.
+- **Eksport:** `node scripts/telemetry-export.mjs --format jsonl --output telemetry.jsonl` (formaty: `jsonl`, `csv`, `sqlite`).
+- **Health:** `http://127.0.0.1:7331/api/telemetry/health` pokazuje pending spool i nierozwiązane problemy jakości danych.
+- **Ceny:** API domyślnie zwraca estimate `as-run` według snapshotu cen; `?pricing=current` przelicza wyłącznie odczyt według bieżącego `config/models.json`.
+- **Niepełny koszt:** `costUSD:null` oznacza brak ceny co najmniej jednego modelu; `partialCostUSD` jest znanym minimum i UI pokazuje je jako `≥$...`.
 
 ---
 

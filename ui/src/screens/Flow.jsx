@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { getFlow, getFlowLog } from '../api';
-import { fmtUSD, fmtTokens, fmtDateTime, fmtTime, taskLabel } from '../utils';
+import { fmtCost, fmtTokens, fmtDateTime, fmtTime, taskLabel } from '../utils';
 
 // ---------------------------------------------------------------------------
 // Static pipeline config — mirrors docs/diagrams/00_overview.puml (v2.2).
@@ -162,7 +162,7 @@ function NodeCard({ node, stats, selected, onClick }) {
       <div className="flow-node-m">
         {has ? (
           <>
-            {stats.executions}× · {fmtUSD(stats.costUSD)} ·{' '}
+            {stats.executions}× · {fmtCost(stats)} ·{' '}
             <code style={{ fontSize: 10 }}>{modelShort(topModel(stats.models))}</code>
           </>
         ) : (
@@ -176,17 +176,18 @@ function NodeCard({ node, stats, selected, onClick }) {
 // ---------------------------------------------------------------------------
 // Execution log drawer: analysis strip + tool histogram + filterable stream.
 // ---------------------------------------------------------------------------
-function LogDrawer({ squad, node, run, onClose }) {
+export function LogDrawer({ squad, node, run, onClose }) {
   const [log, setLog] = useState(null);
   const [error, setError] = useState(null);
   const [mode, setMode] = useState('all'); // all | text | tools
   const [q, setQ] = useState('');
+  const [expanded, setExpanded] = useState({}); // turn index → bool for long-text collapse
 
   useEffect(() => {
     let alive = true;
     setLog(null);
     setError(null);
-    getFlowLog(run.runId, node.key)
+    getFlowLog(run.runId, node?.key || '_lead', { includeUser: true, full: true })
       .then((d) => alive && setLog(d))
       .catch((e) => alive && setError(e.message || String(e)));
     return () => {
@@ -277,7 +278,7 @@ function LogDrawer({ squad, node, run, onClose }) {
             tool calls <b>{stats.toolCalls}</b>
           </span>
           <span>
-            cost <b>{fmtUSD(run.costUSD)}</b>
+            cost <b>{fmtCost(run)}</b>
           </span>
         </div>
 
@@ -314,28 +315,77 @@ function LogDrawer({ squad, node, run, onClose }) {
               {turns.length === 0 ? 'no turns recorded for this step in this run' : 'no turns match'}
             </div>
           )}
-          {shown.map((t) => (
-            <div className="turn" key={t.n}>
-              <div className="turn-meta">
-                <span className="n">#{t.n}</span>
-                <span>{t.ts ? fmtTime(t.ts) : '—'}</span>
-                <code style={{ background: 'none', padding: 0 }}>{modelShort(t.model)}</code>
-                {t.usage?.outputTokens > 0 && <span>{fmtTokens(t.usage.outputTokens)} out</span>}
-                {t.truncated && <span>(truncated)</span>}
-              </div>
-              {t.text && t.text.trim() && <pre className="turn-text">{t.text}</pre>}
-              {t.tools.length > 0 && (
-                <div style={{ marginTop: t.text && t.text.trim() ? 8 : 0 }}>
-                  {t.tools.map((u, j) => (
-                    <span className="tool-chip" key={j} title={u.sum}>
-                      <span className="tname">{u.name}</span>
-                      <span className="tsum">{u.sum}</span>
-                    </span>
-                  ))}
+          {shown.map((t) => {
+            const isUser = t.role === 'user';
+            const isLong = t.text && t.text.length > 1200;
+            const showFull = expanded[t.n];
+            const displayText =
+              isLong && !showFull
+                ? t.text.slice(0, 1200) + '…'
+                : t.text;
+
+            return (
+              <div
+                className="turn"
+                key={t.n}
+                style={
+                  isUser
+                    ? { borderLeft: '3px solid var(--accent)', background: 'var(--surface-2)' }
+                    : undefined
+                }
+              >
+                <div className="turn-meta">
+                  <span className="n">#{t.n}</span>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 700,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.5px',
+                      color: isUser ? 'var(--accent)' : 'var(--text-2)',
+                      background: isUser ? 'var(--accent-soft)' : 'var(--surface-2)',
+                      padding: '1px 6px',
+                      borderRadius: 3,
+                    }}
+                  >
+                    {isUser ? 'Ty' : 'Agent'}
+                  </span>
+                  <span>{t.ts ? fmtTime(t.ts) : '—'}</span>
+                  {t.model && (
+                    <code style={{ background: 'none', padding: 0 }}>{modelShort(t.model)}</code>
+                  )}
+                  {t.usage?.outputTokens > 0 && <span>{fmtTokens(t.usage.outputTokens)} out</span>}
+                  {t.truncated && <span>(truncated)</span>}
                 </div>
-              )}
-            </div>
-          ))}
+                {displayText && displayText.trim() && (
+                  <div>
+                    <pre className="turn-text">{displayText}</pre>
+                    {isLong && (
+                      <button
+                        className="btn-secondary"
+                        style={{ fontSize: 11, padding: '2px 8px', marginTop: 4 }}
+                        onClick={() =>
+                          setExpanded((prev) => ({ ...prev, [t.n]: !prev[t.n] }))
+                        }
+                      >
+                        {showFull ? 'zwiń' : 'pokaż pełny tekst'}
+                      </button>
+                    )}
+                  </div>
+                )}
+                {t.tools.length > 0 && (
+                  <div style={{ marginTop: displayText && displayText.trim() ? 8 : 0 }}>
+                    {t.tools.map((u, j) => (
+                      <span className="tool-chip" key={j} title={u.sum}>
+                        <span className="tname">{u.name}</span>
+                        <span className="tsum">{u.sum}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </aside>
     </>
@@ -353,7 +403,7 @@ function ExecutionsPanel({ squad, node, stats, onOpenLog }) {
         {squad.label} → {node.label}
         <span className="muted" style={{ marginLeft: 10, textTransform: 'none', letterSpacing: 0 }}>
           {stats.executions} execution{stats.executions === 1 ? '' : 's'} · {stats.turns} turns ·{' '}
-          {fmtUSD(stats.costUSD)} · {fmtTokens(stats.inputTokens + stats.outputTokens)} tokens
+          {fmtCost(stats)} · {fmtTokens(stats.inputTokens + stats.outputTokens)} tokens
         </span>
       </div>
 
@@ -406,7 +456,7 @@ function ExecutionsPanel({ squad, node, stats, onOpenLog }) {
                 ))}
               </td>
               <td className="td" style={{ textAlign: 'right' }}>{r.turns}</td>
-              <td className="td" style={{ textAlign: 'right' }}>{fmtUSD(r.costUSD)}</td>
+              <td className="td" style={{ textAlign: 'right' }}>{fmtCost(r)}</td>
               <td className="td" style={{ textAlign: 'right' }}>
                 <button className="btn-secondary" onClick={() => onOpenLog(r)}>
                   view log

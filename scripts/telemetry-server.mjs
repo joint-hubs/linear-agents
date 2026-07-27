@@ -4,15 +4,17 @@
 //   --smoke: start, print ready, auto-shutdown after 10s (for CI/manual smoke test)
 
 import { createServer } from 'node:http';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, readdir, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, extname } from 'node:path';
 // Reuse the shared Linear GraphQL client (linear-client.mjs) — the same layer
 // linear-query.mjs is built on. A workspace-wide query (all teams) isn't
 // expressible via the team-scoped linear-query CLI, so we call graphql()
 // directly. No MCP, no new client (control-plane-plan §3.1, DoD "reuse
 // scripts/linear-query.mjs" = reuse the Linear query layer).
 import { loadEnv, graphql, chooseApiKey } from './linear-client.mjs';
+import * as telemetryStore from './telemetry-store.mjs';
+import { backfill, ingestKnownRuns } from './telemetry-ingest.mjs';
 // Pure launch logic (validation, kickoff prompt, wrapper .bat, loopback check)
 // lives in scripts/launch.mjs so it's unit-testable without the HTTP server.
 import {
@@ -26,6 +28,8 @@ import {
   buildLaunchBat,
   spawnLauncher,
 } from './launch.mjs';
+import { readSquadConfig, writeSquadConfig, validateSlug } from './squad-config.mjs';
+import { buildPromptTree, readRoleDoc, readLeadDoc } from './prompt-library.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
@@ -37,6 +41,7 @@ loadEnv();
 
 const PORT = parseInt(process.env.TELEMETRY_PORT, 10) || 7331;
 const isSmoke = process.argv.includes('--smoke');
+const telemetryReadSource = (process.env.LA_TELEMETRY_READ_SOURCE || 'sqlite').toLowerCase();
 
 // ---------------------------------------------------------------------------
 // Ledger — dynamically imported; T-E0a builds scripts/ledger.mjs in parallel.
@@ -116,48 +121,127 @@ function log(method, path, status) {
   console.log(`${method} ${path} -> ${status}`);
 }
 
+function useCentralStore() {
+  return telemetryReadSource !== 'files' && telemetryStore.sqliteAvailable();
+}
+
+async function telemetryRuns(options = {}) {
+  if (!useCentralStore()) return ledger.scanRuns();
+  const db = telemetryStore.openTelemetryDb();
+  try { return telemetryStore.queryRuns(db, options); } finally { db.close(); }
+}
+
+async function telemetrySummary(options = {}) {
+  if (!useCentralStore()) return buildSummary(await ledger.scanRuns());
+  const db = telemetryStore.openTelemetryDb();
+  try { return telemetryStore.querySummary(db, options); } finally { db.close(); }
+}
+
+async function telemetryHealth() {
+  if (!useCentralStore()) return { readSource: 'files', warning: 'Central SQLite store disabled or unavailable' };
+  const db = telemetryStore.openTelemetryDb();
+  try { return { readSource: 'sqlite', ...telemetryStore.queryHealth(db) }; } finally { db.close(); }
+}
+
+function ingestTelemetry() {
+  if (!useCentralStore()) return;
+  try {
+    const replay = telemetryStore.replayPending();
+    const result = ingestKnownRuns();
+    if (replay.ingested || result.usageEvents) {
+      console.log(`[telemetry] replayed=${replay.ingested} usage=${result.usageEvents}`);
+    }
+  } catch (error) {
+    console.error(`[telemetry] background ingest failed: ${error.message}`);
+  }
+}
+
+async function bootstrapTelemetry() {
+  if (!useCentralStore()) return;
+  const db = telemetryStore.openTelemetryDb();
+  let runCount = 0;
+  try { runCount = db.prepare('SELECT COUNT(*) AS count FROM runs').get().count; } finally { db.close(); }
+  let manifestCount = 0;
+  try {
+    manifestCount = (await readdir(join(root, '.state', 'runs'))).filter((name) => name.endsWith('.json')).length;
+  } catch {
+    manifestCount = 0;
+  }
+  const forceBackfill = process.env.LA_TELEMETRY_FORCE_BACKFILL === '1';
+  if (runCount < manifestCount || forceBackfill) {
+    const result = await backfill();
+    console.log(`[telemetry] backfill manifests=${result.manifests} usage=${result.usageEvents} force=${forceBackfill}`);
+  }
+  ingestTelemetry();
+}
+
 // ---------------------------------------------------------------------------
 // Summary builder — aggregates scanRuns() output into the /api/summary shape
 // ---------------------------------------------------------------------------
 
 function buildSummary(runs) {
-  const totals = { runs: 0, inputTokens: 0, outputTokens: 0, costUSD: 0 };
+  const totals = { runs: 0, inputTokens: 0, outputTokens: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, cacheSavingsUSD: 0, cacheReadTokens: 0 };
   const bySquad = {};
   const byModel = {};
   const byDay = {};
+  const byRepo = {};
 
   for (const run of runs) {
     const t = run.totals || {};
     totals.runs += 1;
     totals.inputTokens += t.inputTokens || 0;
     totals.outputTokens += t.outputTokens || 0;
-    totals.costUSD += t.costUSD || 0;
+    totals.partialCostUSD += t.partialCostUSD ?? t.costUSD ?? 0;
+    totals.unpricedUsageCount += t.unpricedUsageCount || 0;
+    totals.cacheSavingsUSD += t.cacheSavingsUSD || 0;
+    totals.cacheReadTokens += t.cacheReadTokens || 0;
 
     // bySquad
     const squad = run.squad || 'unknown';
-    if (!bySquad[squad]) bySquad[squad] = { runs: 0, costUSD: 0, tokens: 0 };
+    if (!bySquad[squad]) bySquad[squad] = { runs: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, tokens: 0 };
     bySquad[squad].runs += 1;
-    bySquad[squad].costUSD += t.costUSD || 0;
+    bySquad[squad].partialCostUSD += t.partialCostUSD ?? t.costUSD ?? 0;
+    bySquad[squad].unpricedUsageCount += t.unpricedUsageCount || 0;
     bySquad[squad].tokens += (t.inputTokens || 0) + (t.outputTokens || 0);
 
     // byModel
     const models = run.byModel || {};
     for (const [slug, m] of Object.entries(models)) {
-      if (!byModel[slug]) byModel[slug] = { tokens: 0, costUSD: 0 };
+      if (!byModel[slug]) byModel[slug] = { tokens: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0 };
       byModel[slug].tokens += (m.inputTokens || 0) + (m.outputTokens || 0);
-      byModel[slug].costUSD += m.costUSD || 0;
+      byModel[slug].partialCostUSD += m.partialCostUSD ?? m.costUSD ?? 0;
+      byModel[slug].unpricedUsageCount += m.unpricedUsageCount || 0;
     }
 
     // byDay — extract YYYY-MM-DD from startedAt ISO string
     const day = (run.startedAt || '').slice(0, 10);
     if (day) {
-      if (!byDay[day]) byDay[day] = { runs: 0, costUSD: 0 };
+      if (!byDay[day]) byDay[day] = { runs: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0 };
       byDay[day].runs += 1;
-      byDay[day].costUSD += t.costUSD || 0;
+      byDay[day].partialCostUSD += t.partialCostUSD ?? t.costUSD ?? 0;
+      byDay[day].unpricedUsageCount += t.unpricedUsageCount || 0;
     }
+
+    // byRepo
+    const repo = run.repo || 'unknown';
+    if (!byRepo[repo]) byRepo[repo] = { runs: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0 };
+    byRepo[repo].runs += 1;
+    byRepo[repo].partialCostUSD += t.partialCostUSD ?? t.costUSD ?? 0;
+    byRepo[repo].unpricedUsageCount += t.unpricedUsageCount || 0;
   }
 
-  return { totals, bySquad, byModel, byDay, byTask: ledger.aggregateByTask(runs) };
+  totals.costUSD = totals.unpricedUsageCount ? null : totals.partialCostUSD;
+  for (const bucket of [...Object.values(bySquad), ...Object.values(byModel), ...Object.values(byDay), ...Object.values(byRepo)]) {
+    bucket.costUSD = bucket.unpricedUsageCount ? null : bucket.partialCostUSD;
+  }
+
+  // Cache hit rate: cacheRead / (freshInput + cacheRead). Expressed as 0–100.
+  const cacheHitRate =
+    totals.cacheReadTokens + totals.inputTokens > 0
+      ? (totals.cacheReadTokens / (totals.cacheReadTokens + totals.inputTokens)) * 100
+      : 0;
+
+  return { totals, bySquad, byModel, byDay, byRepo, cacheHitRate, byTask: ledger.aggregateByTask(runs) };
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +519,82 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // --- POST /api/squad-config ---
+    // Update squad lead/agent models and pricing. Localhost-only (same
+    // origin/host check as /api/launch). dryRun=true previews without writing.
+    if (method === 'POST' && path === '/api/squad-config') {
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/squad-config is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden origin: /api/squad-config is same-origin loopback only' });
+        log(method, path, 403);
+        return;
+      }
+      let body;
+      try {
+        body = await readJsonBody(req);
+      } catch (err) {
+        json(res, 400, { error: 'invalid JSON body: ' + err.message });
+        log(method, path, 400);
+        return;
+      }
+
+      // Validate slugs
+      const slugErrors = [];
+      const slugWarnings = [];
+      if (body.squads) {
+        for (const [squad, squadPatch] of Object.entries(body.squads)) {
+          if (squadPatch.lead !== undefined) {
+            const v = validateSlug(squadPatch.lead);
+            if (!v.ok) slugErrors.push(`squads.${squad}.lead: ${v.warning}`);
+            else if (v.warning) slugWarnings.push(`squads.${squad}.lead: ${v.warning}`);
+          }
+          if (squadPatch.agents) {
+            for (const [role, model] of Object.entries(squadPatch.agents)) {
+              const v = validateSlug(model);
+              if (!v.ok) slugErrors.push(`squads.${squad}.agents.${role}: ${v.warning}`);
+              else if (v.warning) slugWarnings.push(`squads.${squad}.agents.${role}: ${v.warning}`);
+            }
+          }
+        }
+      }
+      if (body.pricing) {
+        for (const [slug, price] of Object.entries(body.pricing)) {
+          // Silently skip metadata keys (_doc, _note, etc.)
+          if (slug.startsWith('_')) continue;
+          if (typeof price.input !== 'number' || price.input < 0 || typeof price.output !== 'number' || price.output < 0) {
+            slugErrors.push(`pricing.${slug}: input/output must be numbers >= 0`);
+            continue;
+          }
+          const v = validateSlug(slug);
+          if (!v.ok) slugErrors.push(`pricing.${slug}: ${v.warning}`);
+          else if (v.warning) slugWarnings.push(`pricing.${slug}: ${v.warning}`);
+        }
+      }
+      if (slugErrors.length > 0) {
+        json(res, 400, { error: 'validation failed', details: slugErrors });
+        log(method, path, 400);
+        return;
+      }
+
+      const dryRun = body.dryRun === true;
+      const result = writeSquadConfig(
+        { squads: body.squads, pricing: body.pricing },
+        root,
+        { dryRun },
+      );
+      json(res, 200, {
+        changed: result.changed,
+        warnings: [...slugWarnings, ...result.warnings],
+        dryRun,
+      });
+      log(method, path, 200);
+      return;
+    }
+
     // --- Only GET is supported beyond this point (other POST/PUT/DELETE → 404) ---
     if (method !== 'GET') {
       json(res, 404, { error: 'not found' });
@@ -451,9 +611,17 @@ const server = createServer(async (req, res) => {
 
     // --- Route matching ---
 
+    // GET /api/telemetry/health — central-store status plus unresolved quality
+    // signals. This endpoint never scans manifests/transcripts.
+    if (path === '/api/telemetry/health') {
+      json(res, 200, await telemetryHealth());
+      log(method, path, 200);
+      return;
+    }
+
     // GET /api/runs
     if (path === '/api/runs') {
-      const data = await ledger.scanRuns();
+      const data = await telemetryRuns({ priceMode: url.searchParams.get('pricing') || 'as-run' });
       json(res, 200, data);
       log(method, path, 200);
       return;
@@ -463,7 +631,7 @@ const server = createServer(async (req, res) => {
     const runsMatch = path.match(/^\/api\/runs\/(.+)$/);
     if (runsMatch) {
       const runId = runsMatch[1];
-      const runs = await ledger.scanRuns();
+      const runs = await telemetryRuns({ priceMode: url.searchParams.get('pricing') || 'as-run' });
       const run = runs.find(r => r.runId === runId);
       if (!run) {
         json(res, 404, { error: 'not found' });
@@ -477,8 +645,7 @@ const server = createServer(async (req, res) => {
 
     // GET /api/summary
     if (path === '/api/summary') {
-      const runs = await ledger.scanRuns();
-      const summary = buildSummary(runs);
+      const summary = await telemetrySummary({ priceMode: url.searchParams.get('pricing') || 'as-run' });
       json(res, 200, summary);
       log(method, path, 200);
       return;
@@ -486,7 +653,7 @@ const server = createServer(async (req, res) => {
 
     // GET /api/cost-per-task
     if (path === '/api/cost-per-task') {
-      const data = await ledger.aggregateByTask(await ledger.scanRuns());
+      const data = (await telemetrySummary({ priceMode: url.searchParams.get('pricing') || 'as-run' })).byTask;
       json(res, 200, data);
       log(method, path, 200);
       return;
@@ -503,11 +670,11 @@ const server = createServer(async (req, res) => {
       const raw = process.env.COST_BUDGET_USD_PER_TASK;
       const budget =
         raw != null && raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) : null;
-      const byTask = ledger.aggregateByTask(await ledger.scanRuns());
+      const byTask = (await telemetrySummary()).byTask;
       const tasksOverBudget =
         budget != null
           ? Object.keys(byTask).filter(
-              (k) => k !== '__untagged__' && (byTask[k].costUSD || 0) > budget,
+              (k) => k !== '__untagged__' && (byTask[k].partialCostUSD ?? byTask[k].costUSD ?? 0) > budget,
             )
           : [];
       let overBudget = [];
@@ -554,17 +721,40 @@ const server = createServer(async (req, res) => {
 
     // GET /api/live
     if (path === '/api/live') {
-      const data = await ledger.liveRuns();
+      const cutoff = Date.now() - 10 * 60 * 1000;
+      const data = (await telemetryRuns()).filter((run) =>
+        !run.endedAt || new Date(run.endedAt).getTime() >= cutoff,
+      );
       json(res, 200, data);
       log(method, path, 200);
       return;
     }
 
-    // GET /api/flow/trace?taskId=… + GET /api/flow/patterns — read from the
-    // flow DB (.state/flowdb/flow.db, populated by `node scripts/flow-db.mjs
-    // ingest`). Graceful degrade (200 + error field) when the DB or
-    // node:sqlite is unavailable, matching /api/linear/queue.
+    // GET /api/flow/trace?taskId=… + GET /api/flow/patterns. The default path
+    // reads the central store; legacy FlowDB remains only for files fallback.
     if (path === '/api/flow/trace' || path === '/api/flow/patterns') {
+      const taskId = url.searchParams.get('taskId') || '';
+      if (path === '/api/flow/trace' && !taskId) {
+        json(res, 400, { error: 'taskId query param is required' });
+        log(method, path, 400);
+        return;
+      }
+      if (useCentralStore()) {
+        const db = telemetryStore.openTelemetryDb();
+        try {
+          const result = path === '/api/flow/trace'
+            ? telemetryStore.queryTrace(db, taskId)
+            : telemetryStore.queryPatterns(db, {
+                squad: url.searchParams.get('squad') || undefined,
+                agent: url.searchParams.get('agent') || undefined,
+              });
+          json(res, 200, result);
+          log(method, path, 200);
+        } finally {
+          db.close();
+        }
+        return;
+      }
       let flowDb;
       try {
         flowDb = await import('./flow-db.mjs');
@@ -587,12 +777,6 @@ const server = createServer(async (req, res) => {
       const db = flowDb.openDb(flowDb.DEFAULT_DB_PATH);
       try {
         if (path === '/api/flow/trace') {
-          const taskId = url.searchParams.get('taskId') || '';
-          if (!taskId) {
-            json(res, 400, { error: 'taskId query param is required' });
-            log(method, path, 400);
-            return;
-          }
           json(res, 200, flowDb.queryTrace(db, taskId));
         } else {
           json(res, 200, flowDb.queryPatterns(db, {
@@ -610,7 +794,7 @@ const server = createServer(async (req, res) => {
     // GET /api/flow — interactive Overview: squad -> agent(step) aggregation.
     // Data source: scanRuns() byAgent (turn counts + model mix, see ledger).
     if (path === '/api/flow') {
-      const runs = await ledger.scanRuns();
+      const runs = await telemetryRuns();
       const flow = ledger.aggregateFlow(runs);
       json(res, 200, { generatedAt: new Date().toISOString(), squads: flow.squads });
       log(method, path, 200);
@@ -621,6 +805,9 @@ const server = createServer(async (req, res) => {
     // responses + tool_use summaries) for one pipeline step in one run.
     // Graceful degrade: run without a locatable transcript -> 200 + error
     // field (matches /api/linear/queue convention), so the UI stays up.
+    // Query params:
+    //   includeUser=1 — also return user turns (operator messages)
+    //   full=1        — disable text truncation (maxTextLen: null)
     if (path === '/api/flow/log') {
       const runId = url.searchParams.get('runId') || '';
       const agent = url.searchParams.get('agent') || '';
@@ -629,7 +816,7 @@ const server = createServer(async (req, res) => {
         log(method, path, 400);
         return;
       }
-      const runs = await ledger.scanRuns();
+      const runs = await telemetryRuns();
       const run = runs.find((r) => r.runId === runId);
       if (!run) {
         json(res, 404, { error: 'run not found: ' + runId });
@@ -651,11 +838,189 @@ const server = createServer(async (req, res) => {
       const windowEnd = run.endedAt
         ? new Date(run.endedAt).getTime() + 60 * 1000
         : Date.now() + 60 * 1000;
-      const turns = ledger.extractAgentTurns(transcriptPath, agent, { windowStart, windowEnd });
+      const extractOpts = { windowStart, windowEnd };
+      if (url.searchParams.get('includeUser') === '1') extractOpts.includeUser = true;
+      if (url.searchParams.get('full') === '1') extractOpts.maxTextLen = null;
+      const turns = ledger.extractAgentTurns(transcriptPath, agent, extractOpts);
       json(res, 200, { runId, agent, squad: run.squad, taskId: run.taskId, turns });
       log(method, path, 200);
       return;
     }
+
+    // GET /api/prompts — full prompt tree for the UI
+    if (path === '/api/prompts') {
+      json(res, 200, buildPromptTree(root));
+      log(method, path, 200);
+      return;
+    }
+
+    // GET /api/prompts/role?squad=&role= — single role doc
+    if (path === '/api/prompts/role') {
+      const squad = url.searchParams.get('squad') || '';
+      const role = url.searchParams.get('role') || '';
+      if (!squad || !role) {
+        json(res, 400, { error: 'squad and role query params are required' });
+        log(method, path, 400);
+        return;
+      }
+      const doc = readRoleDoc(squad, role, root);
+      if (doc.error) {
+        const status = doc.error === 'not found' ? 404 : 400;
+        json(res, status, doc);
+        log(method, path, status);
+        return;
+      }
+      json(res, 200, doc);
+      log(method, path, 200);
+      return;
+    }
+
+    // GET /api/prompts/lead?squad= — squad lead CLAUDE.md
+    if (path === '/api/prompts/lead') {
+      const squad = url.searchParams.get('squad') || '';
+      if (!squad) {
+        json(res, 400, { error: 'squad query param is required' });
+        log(method, path, 400);
+        return;
+      }
+      const doc = readLeadDoc(squad, root);
+      if (doc.error) {
+        const status = doc.error === 'not found' ? 404 : 400;
+        json(res, status, doc);
+        log(method, path, status);
+        return;
+      }
+      json(res, 200, doc);
+      log(method, path, 200);
+      return;
+    }
+
+    // GET /api/prompts/runs?squad=&limit=10 — recent runs for a squad
+    if (path === '/api/prompts/runs') {
+      const squad = url.searchParams.get('squad') || '';
+      let limit = parseInt(url.searchParams.get('limit'), 10) || 10;
+      if (limit > 50) limit = 50;
+      if (limit < 1) limit = 10;
+      if (!squad) {
+        json(res, 400, { error: 'squad query param is required' });
+        log(method, path, 400);
+        return;
+      }
+      const allRuns = await telemetryRuns();
+      const filtered = allRuns
+        .filter((r) => r.squad === squad)
+        .slice(0, limit)
+        .map((r) => ({
+          runId: r.runId,
+          taskId: r.taskId || null,
+          status: r.status,
+          startedAt: r.startedAt,
+          costUSD: r.totals?.costUSD ?? null,
+          partialCostUSD: r.totals?.partialCostUSD ?? null,
+          unpricedUsageCount: r.totals?.unpricedUsageCount ?? 0,
+          squad: r.squad,
+        }));
+      json(res, 200, filtered);
+      log(method, path, 200);
+      return;
+    }
+
+    // GET /api/squad-config
+    if (path === '/api/squad-config') {
+      json(res, 200, readSquadConfig(root));
+      log(method, path, 200);
+      return;
+    }
+
+    // --- Static file serving (ui/dist) ---
+    // Only for non-/api/ paths. Serves the built React dashboard so the whole
+    // app runs as a single process (no Vite dev server needed in production).
+    if (!path.startsWith('/api/')) {
+      const uiDist = join(root, 'ui', 'dist');
+      const indexPath = join(uiDist, 'index.html');
+
+      // Resolve the requested path relative to ui/dist
+      let relPath = path.replace(/^\/+/, ''); // strip leading slashes
+      if (!relPath) relPath = 'index.html';
+      const filePath = join(uiDist, relPath);
+
+      // Path traversal guard: normalized path must stay inside ui/dist
+      const normalized = join(uiDist, relPath);
+      if (!normalized.startsWith(uiDist + '\\') && !normalized.startsWith(uiDist + '/')) {
+        json(res, 403, { error: 'forbidden' });
+        log(method, path, 403);
+        return;
+      }
+
+      // Try to serve the file
+      try {
+        const st = await stat(normalized);
+        const servePath = st.isDirectory() ? join(normalized, 'index.html') : normalized;
+
+        // MIME by extension
+        const ext = extname(servePath).toLowerCase();
+        const mime = {
+          '.html': 'text/html',
+          '.js': 'text/javascript',
+          '.css': 'text/css',
+          '.json': 'application/json',
+          '.svg': 'image/svg+xml',
+          '.ico': 'image/x-icon',
+          '.png': 'image/png',
+          '.jpg': 'image/jpeg',
+          '.jpeg': 'image/jpeg',
+          '.woff2': 'font/woff2',
+          '.map': 'application/json',
+        }[ext] || 'application/octet-stream';
+
+        // Cache: hashed assets get immutable, index.html gets no-cache
+        const cacheControl = servePath.includes('assets' + '\\') || servePath.includes('assets/')
+          ? 'public, max-age=31536000, immutable'
+          : ext === '.html'
+            ? 'no-cache'
+            : 'public, max-age=3600';
+
+        const content = await readFile(servePath);
+        res.writeHead(200, {
+          'Content-Type': mime,
+          'Cache-Control': cacheControl,
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(content);
+        log(method, path, 200);
+        return;
+      } catch (err) {
+        if (err.code === 'ENOENT') {
+          // SPA fallback: paths without a file extension → index.html
+          const hasExt = extname(path) !== '';
+          if (!hasExt) {
+            try {
+              const indexContent = await readFile(indexPath);
+              res.writeHead(200, {
+                'Content-Type': 'text/html',
+                'Cache-Control': 'no-cache',
+                'Access-Control-Allow-Origin': '*',
+              });
+              res.end(indexContent);
+              log(method, path, 200);
+              return;
+            } catch (indexErr) {
+              if (indexErr.code === 'ENOENT') {
+                json(res, 503, { error: 'UI nie został zbudowany. Uruchom: npm --prefix ui run build' });
+                log(method, path, 503);
+                return;
+              }
+              throw indexErr;
+            }
+          }
+          // File with extension not found → 404
+          json(res, 404, { error: 'not found' });
+          log(method, path, 404);
+          return;
+        }
+        throw err;
+      }
+    } // end static file serving (non-/api/ paths)
 
     // --- Fallback: unknown path ---
     json(res, 404, { error: 'not found' });
@@ -673,6 +1038,10 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Telemetry server listening on http://127.0.0.1:${PORT} (loopback only — POST /api/launch is local-only, §5)`);
 
+  void bootstrapTelemetry().catch((error) => console.error(`[telemetry] bootstrap failed: ${error.message}`));
+  const ingestTimer = isSmoke ? null : setInterval(ingestTelemetry, 15_000);
+  ingestTimer?.unref();
+
   if (isSmoke) {
     console.log('Smoke mode — will self-check endpoints then shut down');
 
@@ -684,6 +1053,7 @@ server.listen(PORT, '127.0.0.1', () => {
       '/api/summary',
       '/api/cost-per-task',
       '/api/budget',
+      '/api/telemetry/health',
       '/api/linear/queue?workspace=jointhubs',
       '/api/live',
       '/api/flow',
