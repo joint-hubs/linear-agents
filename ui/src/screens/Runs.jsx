@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getRuns } from '../api';
 import { linearUrl } from '../config';
@@ -11,22 +11,50 @@ import {
   statusLabel,
   isStale,
   modelMix,
+  costValue,
 } from '../utils';
+import RunTaskModal from '../components/RunTaskModal';
 
 const STATUSES = ['running', 'failed', 'done'];
 
 // Task chip: ↗ link to Linear when the prefix is known, plain text otherwise.
-function TaskChip({ run }) {
+// Also renders a small "zmień" button that opens the RunTaskModal.
+function TaskChip({ run, onChangeTask }) {
   const id = taskLabel(run);
-  if (id === 'untagged') return <span className="muted">—</span>;
-  const url = linearUrl(id);
-  if (url)
+  const btn = (
+    <button
+      className="copy-btn"
+      style={{ marginLeft: 4, fontSize: 10, padding: '1px 5px' }}
+      title="Zmień zadanie"
+      onClick={(e) => {
+        e.stopPropagation();
+        onChangeTask(run);
+      }}
+    >
+      zmień
+    </button>
+  );
+
+  if (id === 'untagged')
     return (
-      <a className="link" href={url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
-        {id} ↗
-      </a>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+        <span className="muted">—</span>
+        {btn}
+      </span>
     );
-  return <span>{id}</span>;
+  const url = linearUrl(id);
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+      {url ? (
+        <a className="link" href={url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
+          {id} ↗
+        </a>
+      ) : (
+        <span>{id}</span>
+      )}
+      {btn}
+    </span>
+  );
 }
 
 function StatusCell({ run, now }) {
@@ -62,6 +90,21 @@ export default function Runs() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
 
+  // RunTaskModal state
+  const [taskModalRun, setTaskModalRun] = useState(null);
+
+  const fetchRuns = useCallback(() => {
+    getRuns()
+      .then((data) => {
+        setRuns(data);
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(err.message || String(err));
+        setLoading(false);
+      });
+  }, []);
+
   // Read filters from URL query (single source of truth).
   const q = params.get('q') || '';
   const squad = params.get('squad') || '';
@@ -78,19 +121,11 @@ export default function Runs() {
   };
 
   useEffect(() => {
-    getRuns()
-      .then((data) => {
-        setRuns(data);
-        setLoading(false);
-      })
-      .catch((err) => {
-        setError(err.message || String(err));
-        setLoading(false);
-      });
+    fetchRuns();
     // Refresh `now` so the stale badge stays accurate while the page is open.
     const id = setInterval(() => setNow(new Date()), 30000);
     return () => clearInterval(id);
-  }, []);
+  }, [fetchRuns]);
 
   // Filter option sets derived from loaded runs.
   const squads = useMemo(() => [...new Set(runs.map((r) => r.squad).filter(Boolean))].sort(), [runs]);
@@ -235,7 +270,7 @@ export default function Runs() {
                   <td className="td">{fmtDateTime(run.startedAt)}</td>
                   <td className="td">{run.squad || '—'}</td>
                   <td className="td">
-                    <TaskChip run={run} />
+                    <TaskChip run={run} onChangeTask={setTaskModalRun} />
                   </td>
                   <td className="td">{run.repo || '—'}</td>
                   <td className="td">{elapsed(run.startedAt, run.endedAt)}</td>
@@ -252,6 +287,18 @@ export default function Runs() {
             })}
           </tbody>
         </table>
+      )}
+
+      {/* RunTaskModal */}
+      {taskModalRun && (
+        <RunTaskModal
+          runId={taskModalRun.runId}
+          runCostUSD={costValue(taskModalRun.totals)}
+          runStatus={statusLabel(taskModalRun)}
+          currentTaskId={taskModalRun.taskId || null}
+          onClose={() => setTaskModalRun(null)}
+          onSaved={() => { setTaskModalRun(null); fetchRuns(); }}
+        />
       )}
     </div>
   );

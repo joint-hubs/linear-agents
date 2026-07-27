@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getRuns, getSummary, getBudget } from '../api';
 import { linearUrl } from '../config';
-import { fmtUSD, fmtCost, costValue, fmtTokens, fmtNum, fmtDate, topByCost } from '../utils';
+import { fmtUSD, fmtCost, costValue, fmtTokens, fmtNum, fmtDate, topByCost, statusLabel } from '../utils';
+import RunTaskModal from '../components/RunTaskModal';
 
 // ux-design-v3 §3.4 — Costs upgrade.
 // Period toggle (7d / 30d / All) recomputes the KPI strip, byDay chart and
@@ -76,10 +77,10 @@ export default function Costs() {
   const [period, setPeriod] = useState('all');
   const navigate = useNavigate();
 
-  // Fetch both endpoints. On error, KEEP the last good summary/runs visible and
-  // surface a banner — a transient network blip must not wipe the dashboard.
-  // (Review cross-ref from JOI-65: error-state = banner over last known state.)
-  useEffect(() => {
+  // RunTaskModal state
+  const [taskModalRun, setTaskModalRun] = useState(null);
+
+  const fetchData = useCallback(() => {
     let cancelled = false;
     setLoading(true);
     Promise.all([getSummary(), getRuns()])
@@ -109,6 +110,14 @@ export default function Costs() {
       cancelled = true;
     };
   }, []);
+
+  // Fetch both endpoints. On error, KEEP the last good summary/runs visible and
+  // surface a banner — a transient network blip must not wipe the dashboard.
+  // (Review cross-ref from JOI-65: error-state = banner over last known state.)
+  useEffect(() => {
+    const cancel = fetchData();
+    return cancel;
+  }, [fetchData]);
 
   const periodMs = PERIODS.find((p) => p.key === period)?.ms ?? null;
   const periodRuns = useMemo(() => {
@@ -209,7 +218,32 @@ export default function Costs() {
           {/* Waste warnings: untagged + failed costs */}
           {kpi.untaggedCost > 0 && (
             <div className="banner banner-warn" style={{ marginBottom: 12 }}>
-              <strong>⚠ Untagged waste:</strong> {fmtUSD(kpi.untaggedCost)} across {kpi.untaggedRuns} run{kpi.untaggedRuns === 1 ? '' : 's'} with no taskId — runs may belong to the wrong project or were started without a Linear task.
+              <div style={{ marginBottom: 6 }}>
+                <strong>⚠ Untagged waste:</strong> {fmtUSD(kpi.untaggedCost)} across {kpi.untaggedRuns} run{kpi.untaggedRuns === 1 ? '' : 's'} with no taskId — runs may belong to the wrong project or were started without a Linear task.
+              </div>
+              {(() => {
+                const untaggedRuns = periodRuns.filter((r) => !r.taskId && costValue(r.totals) > 0);
+                if (untaggedRuns.length === 0) return null;
+                return (
+                  <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                    {untaggedRuns.map((r) => (
+                      <div key={r.runId} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span>
+                          <span className="muted" style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r.runId}</span>
+                          {' '}· {fmtCost(r.totals)} · {r.squad || '—'}
+                        </span>
+                        <button
+                          className="copy-btn"
+                          style={{ fontSize: 10, padding: '1px 5px' }}
+                          onClick={() => setTaskModalRun(r)}
+                        >
+                          zmień
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
           )}
           {kpi.failedRuns > 0 && (
@@ -493,6 +527,18 @@ export default function Costs() {
             Costs computed from transcripts × config/models.json pricing. Cross-check billed $:{' '}
             <code className="path-mono">node scripts/cost-report.mjs</code> (OpenRouter Activity).
           </div>
+
+          {/* RunTaskModal */}
+          {taskModalRun && (
+            <RunTaskModal
+              runId={taskModalRun.runId}
+              runCostUSD={costValue(taskModalRun.totals)}
+              runStatus={statusLabel(taskModalRun)}
+              currentTaskId={taskModalRun.taskId || null}
+              onClose={() => setTaskModalRun(null)}
+              onSaved={() => { setTaskModalRun(null); fetchData(); }}
+            />
+          )}
         </>
       )}
     </div>

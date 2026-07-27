@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   applyEvent,
+  clearRunTask,
+  getRunTaskLinks,
   makeEvent,
   openTelemetryDb,
   queryHealth,
@@ -12,6 +14,7 @@ import {
   queryRuns,
   querySummary,
   queryTrace,
+  recordTaskLink,
 } from "./telemetry-store.mjs";
 
 let passed = 0;
@@ -167,6 +170,253 @@ test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
   // Summary must aggregate cacheSavingsUSD
   const summary = querySummary(db);
   assert(summary.totals.cacheSavingsUSD > 0, `summary cacheSavingsUSD=${summary.totals.cacheSavingsUSD} (expected > 0)`);
+});
+
+test("getRunTaskLinks returns current=null when no links exist", () => {
+  const links = getRunTaskLinks(db, "run-no-links");
+  assert(links.current === null, `current=${JSON.stringify(links.current)}`);
+  assert(links.history.length === 0, `history.length=${links.history.length}`);
+});
+
+test("link with validFrom=startedAt moves ALL run cost to the task (retroactive)", () => {
+  const runId = "run-retroactive";
+  const startedAt = "2026-07-26T08:00:00.000Z";
+  const ev = (type, payload, observedAt, sourceOffset = null) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test", sourcePath: sourceOffset == null ? null : "C:/retro.jsonl", sourceOffset,
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt }, startedAt);
+  ev("usage.recorded", { runId, model: "deepseek-v4-flash", inputTokens: 100_000, outputTokens: 10_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: "2026-07-26T08:01:00.000Z" }, "2026-07-26T08:01:00.000Z", 1);
+  ev("usage.recorded", { runId, model: "deepseek-v4-flash", inputTokens: 200_000, outputTokens: 20_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: "2026-07-26T08:02:00.000Z" }, "2026-07-26T08:02:00.000Z", 2);
+  // Link with validFrom = startedAt (retroactive)
+  ev("task.linked", { runId, taskId: "RETRO-1", source: "manual", confidence: 1, validFrom: startedAt }, "2026-07-26T08:03:00.000Z");
+  const summary = querySummary(db);
+  const bucket = summary.byTask["RETRO-1"];
+  assert(bucket != null, "RETRO-1 must exist in byTask");
+  assert(bucket.inputTokens === 300_000, `RETRO-1 inputTokens=${bucket.inputTokens} (expected 300000 — both pre and post link usage)`);
+});
+
+test("link with validFrom=now does NOT move historical usage", () => {
+  const runId = "run-now-scope";
+  const startedAt = "2026-07-26T09:00:00.000Z";
+  const ev = (type, payload, observedAt, sourceOffset = null) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test", sourcePath: sourceOffset == null ? null : "C:/now.jsonl", sourceOffset,
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt }, startedAt);
+  ev("usage.recorded", { runId, model: "deepseek-v4-flash", inputTokens: 100_000, outputTokens: 10_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: "2026-07-26T09:01:00.000Z" }, "2026-07-26T09:01:00.000Z", 1);
+  // Link with validFrom = now (AFTER the usage timestamp)
+  ev("task.linked", { runId, taskId: "NOW-1", source: "manual", confidence: 1, validFrom: "2026-07-26T09:02:00.000Z" }, "2026-07-26T09:02:00.000Z");
+  ev("usage.recorded", { runId, model: "deepseek-v4-flash", inputTokens: 200_000, outputTokens: 20_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: "2026-07-26T09:03:00.000Z" }, "2026-07-26T09:03:00.000Z", 2);
+  const summary = querySummary(db);
+  // Pre-link usage should be untagged
+  assert(summary.byTask.__untagged__.inputTokens >= 100_000, `untagged inputTokens=${summary.byTask.__untagged__?.inputTokens} (expected >=100000)`);
+  // Post-link usage should be on NOW-1
+  const bucket = summary.byTask["NOW-1"];
+  assert(bucket != null, "NOW-1 must exist in byTask");
+  assert(bucket.inputTokens === 200_000, `NOW-1 inputTokens=${bucket.inputTokens} (expected 200000 — only post-link usage)`);
+});
+
+test("changing task: old link gets valid_to, new link is active, history has 2 entries", () => {
+  const runId = "run-reassign";
+  const ev = (type, payload, observedAt) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test",
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt: "2026-07-26T10:00:00.000Z" }, "2026-07-26T10:00:00.000Z");
+  ev("task.linked", { runId, taskId: "FIRST-1", source: "manual", confidence: 1 }, "2026-07-26T10:01:00.000Z");
+  ev("task.linked", { runId, taskId: "SECOND-2", source: "manual", confidence: 1 }, "2026-07-26T10:02:00.000Z");
+  const links = getRunTaskLinks(db, runId);
+  assert(links.current != null, "must have a current link");
+  assert(links.current.taskId === "SECOND-2", `current.taskId=${links.current.taskId}`);
+  assert(links.history.length === 2, `history.length=${links.history.length}`);
+  assert(links.history[0].taskId === "SECOND-2", `history[0].taskId=${links.history[0].taskId}`);
+  assert(links.history[0].validTo === null, `history[0].validTo=${links.history[0].validTo}`);
+  assert(links.history[1].taskId === "FIRST-1", `history[1].taskId=${links.history[1].taskId}`);
+  assert(links.history[1].validTo != null, "old link must have validTo set");
+});
+
+test("clearRunTask: current becomes null, history preserved, validTo collapsed to validFrom", () => {
+  const runId = "run-clear";
+  const ev = (type, payload, observedAt) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test",
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt: "2026-07-26T11:00:00.000Z" }, "2026-07-26T11:00:00.000Z");
+  ev("task.linked", { runId, taskId: "CLEAR-1", source: "manual", confidence: 1 }, "2026-07-26T11:01:00.000Z");
+  const before = getRunTaskLinks(db, runId);
+  assert(before.current != null, "must have current before clear");
+  assert(before.history.length === 1, "one link before clear");
+
+  const result = clearRunTask(runId, { dbPath });
+  assert(result.closed === true, "clearRunTask must report closed=true");
+  assert(result.runId === runId, `runId=${result.runId}`);
+
+  const after = getRunTaskLinks(db, runId);
+  assert(after.current === null, "current must be null after clear");
+  assert(after.history.length === 1, "history still has 1 entry (preserved, not deleted)");
+  assert(after.history[0].taskId === "CLEAR-1", "history entry preserved");
+  assert(after.history[0].validTo === after.history[0].validFrom, `validTo=${after.history[0].validTo} must equal validFrom=${after.history[0].validFrom} (zero-duration collapse)`);
+});
+
+test("clearRunTask returns cost to untagged (the core bug fix)", () => {
+  const runId = "run-clear-cost";
+  const startedAt = "2026-07-27T08:00:00.000Z";
+  const ev = (type, payload, observedAt, sourceOffset = null) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test", sourcePath: sourceOffset == null ? null : "C:/clear.jsonl", sourceOffset,
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt }, startedAt);
+  ev("usage.recorded", { runId, model: "deepseek-v4-flash", inputTokens: 100_000, outputTokens: 10_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: "2026-07-27T08:01:00.000Z" }, "2026-07-27T08:01:00.000Z", 1);
+  ev("task.linked", { runId, taskId: "CLEARME-1", source: "manual", confidence: 1, validFrom: startedAt }, "2026-07-27T08:02:00.000Z");
+  ev("usage.recorded", { runId, model: "deepseek-v4-flash", inputTokens: 50_000, outputTokens: 5_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: "2026-07-27T08:03:00.000Z" }, "2026-07-27T08:03:00.000Z", 2);
+
+  // Before clear: all usage on CLEARME-1
+  let summary = querySummary(db);
+  assert(summary.byTask["CLEARME-1"] != null, "CLEARME-1 must exist before clear");
+  assert(summary.byTask["CLEARME-1"].inputTokens === 150_000, `CLEARME-1 tokens=${summary.byTask["CLEARME-1"].inputTokens} (expected 150000)`);
+
+  clearRunTask(runId, { dbPath });
+
+  // After clear: CLEARME-1 gone, usage in __untagged__
+  summary = querySummary(db);
+  assert(summary.byTask["CLEARME-1"] == null, "CLEARME-1 must be ABSENT after clear (cost returned to untagged)");
+  const untagged = summary.byTask.__untagged__;
+  assert(untagged.inputTokens >= 150_000, `untagged tokens=${untagged.inputTokens} (expected >=150000, got cost back)`);
+});
+
+test("clearRunTask with options.at preserves old 'close from now' behavior", () => {
+  const runId = "run-clear-at";
+  const startedAt = "2026-07-27T09:00:00.000Z";
+  const ev = (type, payload, observedAt, sourceOffset = null) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test", sourcePath: sourceOffset == null ? null : "C:/clearat.jsonl", sourceOffset,
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt }, startedAt);
+  ev("usage.recorded", { runId, model: "deepseek-v4-flash", inputTokens: 100_000, outputTokens: 10_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: "2026-07-27T09:01:00.000Z" }, "2026-07-27T09:01:00.000Z", 1);
+  ev("task.linked", { runId, taskId: "AT-1", source: "manual", confidence: 1, validFrom: startedAt }, "2026-07-27T09:02:00.000Z");
+  ev("usage.recorded", { runId, model: "deepseek-v4-flash", inputTokens: 50_000, outputTokens: 5_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: "2026-07-27T09:03:00.000Z" }, "2026-07-27T09:03:00.000Z", 2);
+
+  // Close from 09:02:30 — first usage (09:01) stays on AT-1, second (09:03) becomes untagged
+  clearRunTask(runId, { dbPath, at: "2026-07-27T09:02:30.000Z" });
+
+  const summary = querySummary(db);
+  // AT-1 should still have the first usage (100k tokens, observed at 09:01 < 09:02:30)
+  assert(summary.byTask["AT-1"] != null, "AT-1 must still exist (pre-at usage stays)");
+  assert(summary.byTask["AT-1"].inputTokens === 100_000, `AT-1 tokens=${summary.byTask["AT-1"].inputTokens} (expected 100000 — only pre-at usage)`);
+  // Second usage (50k, observed at 09:03 > 09:02:30) should be untagged
+  assert(summary.byTask.__untagged__.inputTokens >= 50_000, `untagged tokens=${summary.byTask.__untagged__.inputTokens} (expected >=50000)`);
+});
+
+test("clearRunTask on run with no link → closed:false, no exception", () => {
+  const result = clearRunTask("run-no-links-ever", { dbPath });
+  assert(result.closed === false, "closed must be false when no active link exists");
+  assert(result.runId === "run-no-links-ever", "runId preserved");
+});
+
+test("manual link PROTECTED: branch (conf 0.5) does NOT override manual (conf 1)", () => {
+  const runId = "run-protect-branch";
+  const ev = (type, payload, observedAt) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test",
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt: "2026-07-26T12:00:00.000Z" }, "2026-07-26T12:00:00.000Z");
+  ev("task.linked", { runId, taskId: "MANUAL-1", source: "manual", confidence: 1 }, "2026-07-26T12:01:00.000Z");
+  // Branch detection tries to override — must be IGNORED
+  const result = applyEvent(db, makeEvent("task.linked", {
+    runId, taskId: "BRANCH-2", source: "branch", confidence: 0.5,
+  }, { runId, observedAt: "2026-07-26T12:02:00.000Z", sourceKind: "test" }));
+  assert(result.ignored === true, `result.ignored=${result.ignored}`);
+  assert(result.reason === "manual link wins", `reason=${result.reason}`);
+  const links = getRunTaskLinks(db, runId);
+  assert(links.current.taskId === "MANUAL-1", `current.taskId=${links.current.taskId} — manual survives branch`);
+  assert(links.history.length === 1, `history.length=${links.history.length} — no new entry from ignored branch`);
+});
+
+test("manual link PROTECTED: kickoff (conf <1) does NOT override manual", () => {
+  const runId = "run-protect-kickoff";
+  const ev = (type, payload, observedAt) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test",
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt: "2026-07-26T13:00:00.000Z" }, "2026-07-26T13:00:00.000Z");
+  ev("task.linked", { runId, taskId: "MANUAL-1", source: "manual", confidence: 1 }, "2026-07-26T13:01:00.000Z");
+  const result = applyEvent(db, makeEvent("task.linked", {
+    runId, taskId: "KICKOFF-9", source: "kickoff", confidence: 0.5,
+  }, { runId, observedAt: "2026-07-26T13:02:00.000Z", sourceKind: "test" }));
+  assert(result.ignored === true, "kickoff must be ignored when manual is active");
+  const links = getRunTaskLinks(db, runId);
+  assert(links.current.taskId === "MANUAL-1", "manual survives kickoff");
+  assert(links.history.length === 1, "no new entry from ignored kickoff");
+});
+
+test("manual → manual (different task): newer wins (user correcting themselves)", () => {
+  const runId = "run-manual-reassign";
+  const ev = (type, payload, observedAt) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test",
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt: "2026-07-26T14:00:00.000Z" }, "2026-07-26T14:00:00.000Z");
+  ev("task.linked", { runId, taskId: "WRONG-1", source: "manual", confidence: 1 }, "2026-07-26T14:01:00.000Z");
+  ev("task.linked", { runId, taskId: "CORRECT-2", source: "manual", confidence: 1 }, "2026-07-26T14:02:00.000Z");
+  const links = getRunTaskLinks(db, runId);
+  assert(links.current.taskId === "CORRECT-2", `current.taskId=${links.current.taskId} — manual→manual must work`);
+  assert(links.history.length === 2, `history.length=${links.history.length}`);
+  assert(links.history[1].taskId === "WRONG-1", "old manual link closed");
+  assert(links.history[1].validTo != null, "old manual link has validTo");
+});
+
+test("manual → launch (conf 1): newer wins (explicit dashboard launch)", () => {
+  const runId = "run-launch-over-manual";
+  const ev = (type, payload, observedAt) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test",
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt: "2026-07-26T15:00:00.000Z" }, "2026-07-26T15:00:00.000Z");
+  ev("task.linked", { runId, taskId: "MANUAL-1", source: "manual", confidence: 1 }, "2026-07-26T15:01:00.000Z");
+  ev("task.linked", { runId, taskId: "LAUNCH-2", source: "launch", confidence: 1 }, "2026-07-26T15:02:00.000Z");
+  const links = getRunTaskLinks(db, runId);
+  assert(links.current.taskId === "LAUNCH-2", `current.taskId=${links.current.taskId} — launch must override manual`);
+  assert(links.history.length === 2, "history has 2 entries");
+});
+
+test("branch → branch: newer wins (no change from before)", () => {
+  const runId = "run-branch-branch";
+  const ev = (type, payload, observedAt) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test",
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt: "2026-07-26T16:00:00.000Z" }, "2026-07-26T16:00:00.000Z");
+  ev("task.linked", { runId, taskId: "BRANCH-1", source: "branch", confidence: 0.5 }, "2026-07-26T16:01:00.000Z");
+  ev("task.linked", { runId, taskId: "BRANCH-2", source: "branch", confidence: 0.5 }, "2026-07-26T16:02:00.000Z");
+  const links = getRunTaskLinks(db, runId);
+  assert(links.current.taskId === "BRANCH-2", "newer branch wins over older branch");
+  assert(links.history.length === 2, "history has 2 entries");
+});
+
+test("clearRunTask closes manual link (explicit user action bypasses protection)", () => {
+  const runId = "run-clear-manual";
+  const ev = (type, payload, observedAt) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test",
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt: "2026-07-26T17:00:00.000Z" }, "2026-07-26T17:00:00.000Z");
+  ev("task.linked", { runId, taskId: "MANUAL-1", source: "manual", confidence: 1 }, "2026-07-26T17:01:00.000Z");
+  const result = clearRunTask(runId, { dbPath });
+  assert(result.closed === true, "clearRunTask must close manual link");
+  const links = getRunTaskLinks(db, runId);
+  assert(links.current === null, "current must be null after clear");
+  assert(links.history.length === 1, "history preserved");
+});
+
+test("ignored branch does NOT move cost — usage stays on manual task", () => {
+  const runId = "run-cost-protection";
+  const startedAt = "2026-07-26T18:00:00.000Z";
+  const ev = (type, payload, observedAt, sourceOffset = null) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test", sourcePath: sourceOffset == null ? null : "C:/cost.jsonl", sourceOffset,
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt }, startedAt);
+  ev("usage.recorded", { runId, model: "deepseek-v4-flash", inputTokens: 50_000, outputTokens: 5_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: "2026-07-26T18:01:00.000Z" }, "2026-07-26T18:01:00.000Z", 1);
+  ev("task.linked", { runId, taskId: "MANUAL-1", source: "manual", confidence: 1, validFrom: startedAt }, "2026-07-26T18:02:00.000Z");
+  ev("usage.recorded", { runId, model: "deepseek-v4-flash", inputTokens: 30_000, outputTokens: 3_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: "2026-07-26T18:03:00.000Z" }, "2026-07-26T18:03:00.000Z", 2);
+  // Branch tries to steal — must be ignored
+  applyEvent(db, makeEvent("task.linked", {
+    runId, taskId: "BRANCH-9", source: "branch", confidence: 0.5,
+  }, { runId, observedAt: "2026-07-26T18:04:00.000Z", sourceKind: "test" }));
+  ev("usage.recorded", { runId, model: "deepseek-v4-flash", inputTokens: 20_000, outputTokens: 2_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: "2026-07-26T18:05:00.000Z" }, "2026-07-26T18:05:00.000Z", 3);
+  const summary = querySummary(db);
+  const bucket = summary.byTask["MANUAL-1"];
+  assert(bucket != null, "MANUAL-1 must exist in byTask");
+  assert(bucket.inputTokens === 100_000, `MANUAL-1 inputTokens=${bucket.inputTokens} (expected 100000 — ALL usage, branch was ignored)`);
+  assert(summary.byTask["BRANCH-9"] == null, "BRANCH-9 must NOT appear in byTask (link was ignored)");
 });
 
 db.close();

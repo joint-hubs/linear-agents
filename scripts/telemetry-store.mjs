@@ -264,6 +264,12 @@ export function migrate(db) {
   `);
   const runColumns = db.prepare("PRAGMA table_info(runs)").all().map((column) => column.name);
   if (!runColumns.includes("price_set_id")) db.exec("ALTER TABLE runs ADD COLUMN price_set_id TEXT");
+  // Terminal panel: the console window a run owns. console_pid is the stable
+  // identifier — the window title is overwritten by Claude Code at startup, so
+  // window_title and launched_by are labels for the UI, never lookup keys.
+  if (!runColumns.includes("console_pid")) db.exec("ALTER TABLE runs ADD COLUMN console_pid INTEGER");
+  if (!runColumns.includes("window_title")) db.exec("ALTER TABLE runs ADD COLUMN window_title TEXT");
+  if (!runColumns.includes("launched_by")) db.exec("ALTER TABLE runs ADD COLUMN launched_by TEXT");
   const migrationPriceSet = ensurePriceSet(db);
   db.prepare("UPDATE runs SET price_set_id=? WHERE price_set_id IS NULL").run(migrationPriceSet.id);
   db.exec(`
@@ -451,15 +457,19 @@ function applyRunStarted(db, event) {
   if (!runId) throw new Error("run.started requires runId");
   const priceSet = ensurePriceSet(db);
   db.prepare(
-    `INSERT INTO runs (run_id, squad, source, brief, started_at, status, native, interactive, launch_cwd, claude_config_dir, price_set_id, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)
+    `INSERT INTO runs (run_id, squad, source, brief, started_at, status, native, interactive, launch_cwd, claude_config_dir, price_set_id, console_pid, window_title, launched_by, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(run_id) DO UPDATE SET squad=excluded.squad, source=excluded.source, brief=excluded.brief,
        started_at=COALESCE(runs.started_at, excluded.started_at), native=excluded.native,
        interactive=excluded.interactive, launch_cwd=excluded.launch_cwd,
        claude_config_dir=COALESCE(excluded.claude_config_dir, runs.claude_config_dir),
-       price_set_id=COALESCE(runs.price_set_id, excluded.price_set_id), updated_at=excluded.updated_at`,
+       price_set_id=COALESCE(runs.price_set_id, excluded.price_set_id),
+       console_pid=COALESCE(excluded.console_pid, runs.console_pid),
+       window_title=COALESCE(excluded.window_title, runs.window_title),
+       launched_by=COALESCE(excluded.launched_by, runs.launched_by), updated_at=excluded.updated_at`,
   ).run(runId, run.squad || null, run.source || null, run.brief || null, run.startedAt || event.observedAt,
-    run.native ? 1 : 0, run.interactive === false ? 0 : 1, run.cwd || null, run.claudeConfigDir || null, priceSet.id, now());
+    run.native ? 1 : 0, run.interactive === false ? 0 : 1, run.cwd || null, run.claudeConfigDir || null, priceSet.id,
+    Number.isInteger(run.consolePid) ? run.consolePid : null, run.windowTitle || null, run.launchedBy || null, now());
   return { runId };
 }
 
@@ -560,6 +570,16 @@ function applyTaskLinked(db, event) {
   const active = db.prepare(
     "SELECT link_id, task_id, source, valid_from FROM run_task_links WHERE run_id=? AND role='primary' AND valid_to IS NULL ORDER BY valid_from DESC LIMIT 1",
   ).get(runId);
+  // Manual link protection: automatic sources (branch, kickoff, agent_pick,
+  // etc.) must not override a manual assignment. Manual→manual and
+  // launch→manual still work (user correcting themselves, or explicit launch
+  // from the dashboard). clearRunTask bypasses this entirely (direct SQL).
+  if (payload.role !== "related" && active && active.source === "manual") {
+    const isAutoSource = source !== "manual" && source !== "launch";
+    if (isAutoSource) {
+      return { ignored: true, reason: "manual link wins", runId, taskId };
+    }
+  }
   const validFrom = payload.validFrom || event.observedAt || now();
   if (payload.correctExisting && active?.task_id === taskId && active.source === source) {
     db.prepare(
@@ -770,6 +790,7 @@ export function recordTaskLink(runId, taskId, source = "manual", options = {}) {
     taskId,
     source,
     confidence: options.confidence,
+    validFrom: options.validFrom,
     correctExisting: options.correctExisting || false,
   }, {
     runId,
@@ -778,6 +799,57 @@ export function recordTaskLink(runId, taskId, source = "manual", options = {}) {
     sourcePath: options.sourcePath || null,
     sourceOffset: options.sourceOffset,
   }), options);
+}
+
+export function getRunTaskLinks(db, runId) {
+  const rows = db.prepare(
+    `SELECT link_id, task_id, source, confidence, valid_from, valid_to
+     FROM run_task_links WHERE run_id=? AND role='primary'
+     ORDER BY valid_from DESC`,
+  ).all(runId);
+  const currentRow = rows.find((r) => r.valid_to == null) || null;
+  const current = currentRow
+    ? {
+        taskId: currentRow.task_id,
+        source: currentRow.source,
+        confidence: currentRow.confidence,
+        validFrom: currentRow.valid_from,
+        linkId: currentRow.link_id,
+      }
+    : null;
+  const history = rows.map((r) => ({
+    taskId: r.task_id,
+    source: r.source,
+    confidence: r.confidence,
+    validFrom: r.valid_from,
+    validTo: r.valid_to,
+    linkId: r.link_id,
+  }));
+  return { current, history };
+}
+
+export function clearRunTask(runId, options = {}) {
+  const db = openTelemetryDb(options.dbPath);
+  try {
+    if (options.at != null) {
+      // Explicit timestamp: close from that point (for running runs where
+      // the operator wants to keep past usage on the task).
+      const result = db.prepare(
+        `UPDATE run_task_links SET valid_to=? WHERE run_id=? AND role='primary' AND valid_to IS NULL`,
+      ).run(options.at, runId);
+      return { closed: result.changes > 0, runId };
+    }
+    // Default: collapse to zero duration (valid_to = valid_from) so no usage
+    // falls within the window — the run returns to untagged. Same pattern as
+    // applyTaskLinked's correctExisting path.
+    const result = db.prepare(
+      `UPDATE run_task_links SET valid_to = valid_from
+       WHERE run_id=? AND role='primary' AND valid_to IS NULL`,
+    ).run(runId);
+    return { closed: result.changes > 0, runId };
+  } finally {
+    db.close();
+  }
 }
 
 export function recordSessionLink(runId, sessionId, payload = {}, options = {}) {
@@ -917,6 +989,7 @@ function makeRunProjection(db, row, options = {}) {
     repository: workspace?.common_dir || null, worktreePath: workspace?.worktree_path || null,
     launchWorkspace: launch ? { cwd: launch.cwd, refType: launch.ref_type, refName: launch.ref_name, headSha: launch.head_sha } : null,
     exitCode: row.exit_code, native: Boolean(row.native), sessionId: row.session_id, transcriptPath: row.transcript_path,
+    consolePid: row.console_pid ?? null, windowTitle: row.window_title || null, launchedBy: row.launched_by || null,
     claudeConfigDir: row.claude_config_dir, taskId: task, taskIdExplicit: taskLink?.confidence === 1 ? task : null,
     taskAttribution: task ? { source: taskLink?.source || "unknown", confidence: taskLink?.confidence ?? 0 } : null,
     lastActivityAt: totals.last_activity_at || null, ambiguous,

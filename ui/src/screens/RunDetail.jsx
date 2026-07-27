@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, NavLink, useNavigate } from 'react-router-dom';
 import { getRun } from '../api';
 import { linearUrl } from '../config';
@@ -12,6 +12,7 @@ import {
   statusLabel,
   isStale,
 } from '../utils';
+import RunTaskModal from '../components/RunTaskModal';
 
 // Provider label from the `native` flag (ux-design-v3 §3.3.1).
 function providerLabel(run) {
@@ -95,7 +96,10 @@ export default function RunDetail() {
   const [error, setError] = useState(null);
   const [now, setNow] = useState(() => new Date());
 
-  useEffect(() => {
+  // RunTaskModal state
+  const [taskModalOpen, setTaskModalOpen] = useState(false);
+
+  const fetchRun = useCallback(() => {
     setLoading(true);
     setError(null);
     getRun(id)
@@ -107,9 +111,13 @@ export default function RunDetail() {
         setError(err.message || String(err));
         setLoading(false);
       });
+  }, [id]);
+
+  useEffect(() => {
+    fetchRun();
     const tick = setInterval(() => setNow(new Date()), 30000);
     return () => clearInterval(tick);
-  }, [id]);
+  }, [fetchRun]);
 
   const taskId = run ? taskLabel(run) : null;
   const taskUrl = taskId && taskId !== 'untagged' ? linearUrl(taskId) : null;
@@ -135,6 +143,14 @@ export default function RunDetail() {
               ) : (
                 taskId
               )}
+              <button
+                className="copy-btn"
+                style={{ fontSize: 10, padding: '1px 5px' }}
+                title="Zmień zadanie"
+                onClick={() => setTaskModalOpen(true)}
+              >
+                zmień
+              </button>
             </div>
             <div className="muted" style={{ fontFamily: "'SF Mono', 'Consolas', monospace" }}>
               {run.runId}
@@ -284,6 +300,18 @@ export default function RunDetail() {
               </tbody>
             </table>
           </div>
+
+          {/* RunTaskModal */}
+          {taskModalOpen && run && (
+            <RunTaskModal
+              runId={run.runId}
+              runCostUSD={costValue(run.totals)}
+              runStatus={statusLabel(run)}
+              currentTaskId={run.taskId || null}
+              onClose={() => setTaskModalOpen(false)}
+              onSaved={() => { setTaskModalOpen(false); fetchRun(); }}
+            />
+          )}
         </>
       )}
     </div>

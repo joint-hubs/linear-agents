@@ -101,3 +101,84 @@ export async function postSquadConfig(payload) {
   }
   return data;
 }
+
+// Terminals — list live + recently finished agent windows.
+export async function getTerminals() {
+  return apiFetch('/api/terminals');
+}
+
+// Focus a terminal window (bring to foreground). Returns {ok:true} or 409.
+export async function focusTerminal(runId) {
+  const r = await fetch(API_BASE + '/api/terminals/focus', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ runId }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+// Stop a terminal (kill the agent process). Returns {ok:true} or 409.
+export async function stopTerminal(runId) {
+  const r = await fetch(API_BASE + '/api/terminals/stop', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ runId }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+// Tools catalog — returns {tools, riskLevels} for the tool editor modal.
+export async function getTools() {
+  return apiFetch('/api/tools');
+}
+
+// Run task assignment — read current + history.
+export async function getRunTask(runId) {
+  return apiFetch('/api/runs/task?runId=' + encodeURIComponent(runId));
+}
+
+// Run task assignment — set or clear (taskId: null = untag).
+// Returns parsed JSON even on 4xx so the UI can surface error details.
+export async function postRunTask(payload) {
+  const r = await fetch(API_BASE + '/api/runs/task', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+// Kickoff prompt editor — preview (dryRun:true) or save (dryRun:false).
+// Returns parsed JSON even on 4xx so the UI can surface error details.
+export async function postKickoff(payload) {
+  const r = await fetch(API_BASE + '/api/prompts/kickoff', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.data = data;
+    throw err;
+  }
+  return data;
+}

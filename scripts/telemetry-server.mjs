@@ -4,7 +4,8 @@
 //   --smoke: start, print ready, auto-shutdown after 10s (for CI/manual smoke test)
 
 import { createServer } from 'node:http';
-import { readFile, writeFile, readdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, readdir, stat, rename } from 'node:fs/promises';
+import { readFileSync as readFileSyncNode } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
 // Reuse the shared Linear GraphQL client (linear-client.mjs) — the same layer
@@ -27,8 +28,10 @@ import {
   isAllowedOrigin,
   buildLaunchBat,
   spawnLauncher,
+  reloadKickoffTemplates,
 } from './launch.mjs';
-import { readSquadConfig, writeSquadConfig, validateSlug } from './squad-config.mjs';
+import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools } from './squad-config.mjs';
+import { listTerminals, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive } from './terminals.mjs';
 import { buildPromptTree, readRoleDoc, readLeadDoc } from './prompt-library.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -117,6 +120,34 @@ function readJsonBody(req) {
   });
 }
 
+/**
+ * Fill in consolePid from the run manifest for runs the store doesn't have it for.
+ *
+ * The central store ingests each manifest exactly once (immutable spool +
+ * source offsets), so runs that were imported before `console_pid` existed as
+ * a column never gain it — including a run that is live right now. Reading the
+ * manifest directly is a cheap, bounded repair: only unfinished runs are
+ * checked, and that set is a handful at most.
+ */
+function withManifestConsolePid(runs) {
+  return runs.map((run) => {
+    if (run.endedAt || run.consolePid) return run;
+    try {
+      const raw = readFileSyncNode(join(root, '.state', 'runs', `${run.runId}.json`), 'utf8');
+      const manifest = JSON.parse(raw);
+      if (!Number.isInteger(manifest.consolePid)) return run;
+      return {
+        ...run,
+        consolePid: manifest.consolePid,
+        windowTitle: run.windowTitle || manifest.windowTitle || null,
+        launchedBy: run.launchedBy || manifest.launchedBy || null,
+      };
+    } catch {
+      return run; // no manifest on disk, or unreadable — leave the run as-is
+    }
+  });
+}
+
 function log(method, path, status) {
   console.log(`${method} ${path} -> ${status}`);
 }
@@ -143,6 +174,47 @@ async function telemetryHealth() {
   try { return { readSource: 'sqlite', ...telemetryStore.queryHealth(db) }; } finally { db.close(); }
 }
 
+/**
+ * Close runs whose console window is gone.
+ *
+ * A run is marked `running` until the launcher calls `run-manifest end`. Close
+ * the window (or let it crash) and that call never happens, so the run stays
+ * "active" forever — Live kept counting a review whose window had already been
+ * closed while the terminal panel, which checks the process, correctly did not.
+ *
+ * Only acts on definitive evidence: a recorded consolePid whose process no
+ * longer exists. Runs without a pid (legacy or started outside the dashboard)
+ * are left alone rather than guessed at.
+ *
+ * @returns {number} how many runs were closed
+ */
+async function reconcileDeadRuns() {
+  if (!useCentralStore()) return 0;
+  let closed = 0;
+  try {
+    const active = withManifestConsolePid(await telemetryRuns()).filter((r) => !r.endedAt);
+    for (const run of active) {
+      if (!Number.isInteger(run.consolePid) || run.consolePid <= 0) continue;
+      if (isProcessAlive(run.consolePid)) continue;
+      telemetryStore.recordManifest(
+        {
+          runId: run.runId,
+          squad: run.squad,
+          startedAt: run.startedAt,
+          endedAt: run.lastActivityAt || new Date().toISOString(),
+          exitCode: null,
+        },
+        'ended',
+      );
+      closed++;
+      console.log(`[telemetry] reconcile: closed ${run.runId} (console pid ${run.consolePid} gone)`);
+    }
+  } catch (error) {
+    console.error(`[telemetry] reconcile failed: ${error.message}`);
+  }
+  return closed;
+}
+
 function ingestTelemetry() {
   if (!useCentralStore()) return;
   try {
@@ -154,6 +226,7 @@ function ingestTelemetry() {
   } catch (error) {
     console.error(`[telemetry] background ingest failed: ${error.message}`);
   }
+  reconcileDeadRuns();
 }
 
 async function bootstrapTelemetry() {
@@ -553,10 +626,33 @@ const server = createServer(async (req, res) => {
             else if (v.warning) slugWarnings.push(`squads.${squad}.lead: ${v.warning}`);
           }
           if (squadPatch.agents) {
-            for (const [role, model] of Object.entries(squadPatch.agents)) {
-              const v = validateSlug(model);
-              if (!v.ok) slugErrors.push(`squads.${squad}.agents.${role}: ${v.warning}`);
-              else if (v.warning) slugWarnings.push(`squads.${squad}.agents.${role}: ${v.warning}`);
+            for (const [role, value] of Object.entries(squadPatch.agents)) {
+              // Backward compat: string = model-only patch
+              if (typeof value === 'string') {
+                const v = validateSlug(value);
+                if (!v.ok) slugErrors.push(`squads.${squad}.agents.${role}: ${v.warning}`);
+                else if (v.warning) slugWarnings.push(`squads.${squad}.agents.${role}: ${v.warning}`);
+                continue;
+              }
+              // Object patch: { model?, tools? }
+              if (typeof value === 'object' && value !== null) {
+                if (value.model !== undefined) {
+                  const v = validateSlug(value.model);
+                  if (!v.ok) slugErrors.push(`squads.${squad}.agents.${role}.model: ${v.warning}`);
+                  else if (v.warning) slugWarnings.push(`squads.${squad}.agents.${role}.model: ${v.warning}`);
+                }
+                if (value.tools !== undefined) {
+                  const catalog = readToolCatalog(root);
+                  const tv = validateTools(value.tools, catalog);
+                  if (!tv.ok) {
+                    slugErrors.push(`squads.${squad}.agents.${role}.tools: ${tv.warnings.join('; ')}`);
+                  } else {
+                    slugWarnings.push(...tv.warnings.map((w) => `squads.${squad}.agents.${role}.tools: ${w}`));
+                  }
+                }
+                continue;
+              }
+              slugErrors.push(`squads.${squad}.agents.${role}: must be a string (model) or object {model?, tools?}`);
             }
           }
         }
@@ -595,6 +691,340 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // --- POST /api/terminals/focus ---
+    // Flash the taskbar button by consolePid. Localhost-only.
+    // Windows blocks SetForegroundWindow from background processes, so we use
+    // FlashWindowEx (taskbar flash) instead — the system-allowed attention signal.
+    // 409 when no consolePid (launched before PID tracking or manually).
+    if (method === 'POST' && path === '/api/terminals/focus') {
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/terminals/focus is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden origin' });
+        log(method, path, 403);
+        return;
+      }
+      let body;
+      try { body = await readJsonBody(req); } catch (err) {
+        json(res, 400, { error: 'invalid JSON body: ' + err.message });
+        log(method, path, 400);
+        return;
+      }
+      const runId = String(body.runId || '').trim();
+      if (!runId) {
+        json(res, 400, { error: 'runId is required' });
+        log(method, path, 400);
+        return;
+      }
+      const runs = withManifestConsolePid(await telemetryRuns());
+      const run = runs.find((r) => r.runId === runId);
+      if (!run) {
+        json(res, 404, { error: 'run not found: ' + runId });
+        log(method, path, 404);
+        return;
+      }
+      if (!run.consolePid || !Number.isInteger(run.consolePid) || run.consolePid <= 0) {
+        json(res, 409, { error: 'terminal uruchomiony przed wprowadzeniem śledzenia PID lub ręcznie — nie można go namierzyć' });
+        log(method, path, 409);
+        return;
+      }
+      // Try to raise the window first — that is what the operator actually
+      // wants. Taskbar flashing is the fallback for the cases Windows does
+      // refuse (e.g. the console is a tab inside Windows Terminal / VS Code,
+      // where the process owns no window of its own).
+      let result = focusWindowByPid(run.consolePid);
+      let action = 'focus';
+      if (!result.ok) {
+        const flashed = flashWindowByPid(run.consolePid);
+        if (flashed.ok) {
+          result = flashed;
+          action = 'flash';
+        }
+      }
+      if (!result.ok) {
+        json(res, 409, { error: result.error });
+        log(method, path, 409);
+        return;
+      }
+      json(res, 200, { ok: true, action });
+      log(method, path, 200);
+      return;
+    }
+
+    // --- POST /api/terminals/flash ---
+    // Flash the taskbar button by consolePid. Localhost-only.
+    // Dedicated endpoint for the new UI — same logic as /focus but with a
+    // clearer name. Windows allows FlashWindowEx from background processes.
+    if (method === 'POST' && path === '/api/terminals/flash') {
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/terminals/flash is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden origin' });
+        log(method, path, 403);
+        return;
+      }
+      let body;
+      try { body = await readJsonBody(req); } catch (err) {
+        json(res, 400, { error: 'invalid JSON body: ' + err.message });
+        log(method, path, 400);
+        return;
+      }
+      const runId = String(body.runId || '').trim();
+      if (!runId) {
+        json(res, 400, { error: 'runId is required' });
+        log(method, path, 400);
+        return;
+      }
+      const runs = withManifestConsolePid(await telemetryRuns());
+      const run = runs.find((r) => r.runId === runId);
+      if (!run) {
+        json(res, 404, { error: 'run not found: ' + runId });
+        log(method, path, 404);
+        return;
+      }
+      if (!run.consolePid || !Number.isInteger(run.consolePid) || run.consolePid <= 0) {
+        json(res, 409, { error: 'terminal uruchomiony przed wprowadzeniem śledzenia PID lub ręcznie — nie można go namierzyć' });
+        log(method, path, 409);
+        return;
+      }
+      const result = flashWindowByPid(run.consolePid);
+      if (!result.ok) {
+        json(res, 409, { error: result.error });
+        log(method, path, 409);
+        return;
+      }
+      json(res, 200, { ok: true });
+      log(method, path, 200);
+      return;
+    }
+
+    // --- POST /api/terminals/stop ---
+    // Kill a terminal process by consolePid. Localhost-only.
+    if (method === 'POST' && path === '/api/terminals/stop') {
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/terminals/stop is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden origin' });
+        log(method, path, 403);
+        return;
+      }
+      let body;
+      try { body = await readJsonBody(req); } catch (err) {
+        json(res, 400, { error: 'invalid JSON body: ' + err.message });
+        log(method, path, 400);
+        return;
+      }
+      const runId = String(body.runId || '').trim();
+      if (!runId) {
+        json(res, 400, { error: 'runId is required' });
+        log(method, path, 400);
+        return;
+      }
+      const runs = withManifestConsolePid(await telemetryRuns());
+      const run = runs.find((r) => r.runId === runId);
+      if (!run) {
+        json(res, 404, { error: 'run not found: ' + runId });
+        log(method, path, 404);
+        return;
+      }
+      if (!run.consolePid || !Number.isInteger(run.consolePid) || run.consolePid <= 0) {
+        json(res, 409, { error: 'terminal uruchomiony przed wprowadzeniem śledzenia PID lub ręcznie — nie można go namierzyć' });
+        log(method, path, 409);
+        return;
+      }
+      const result = stopByPid(run.consolePid);
+      if (!result.ok) {
+        json(res, 409, { error: result.error });
+        log(method, path, 409);
+        return;
+      }
+      json(res, 200, { ok: true });
+      log(method, path, 200);
+      return;
+    }
+
+    // --- POST /api/prompts/kickoff ---
+    // Update kickoff templates in config/prompts.json. Localhost-only.
+    // Atomic write (temp + rename), preserves _* keys and other squads.
+    if (method === 'POST' && path === '/api/prompts/kickoff') {
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/prompts/kickoff is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden origin' });
+        log(method, path, 403);
+        return;
+      }
+      let body;
+      try { body = await readJsonBody(req); } catch (err) {
+        json(res, 400, { error: 'invalid JSON body: ' + err.message });
+        log(method, path, 400);
+        return;
+      }
+      const squad = String(body.squad || '').trim().toLowerCase();
+      if (!SQUAD_ALLOWLIST.includes(squad)) {
+        json(res, 400, { error: `invalid squad: must be one of ${SQUAD_ALLOWLIST.join(', ')}` });
+        log(method, path, 400);
+        return;
+      }
+      const lines = body.lines;
+      if (!Array.isArray(lines) || lines.length === 0 || lines.some((l) => typeof l !== 'string' || l.trim() === '')) {
+        json(res, 400, { error: 'lines must be a non-empty array of non-empty strings' });
+        log(method, path, 400);
+        return;
+      }
+      const dryRun = body.dryRun === true;
+      const promptsPath = join(root, 'config', 'prompts.json');
+
+      // Read current file, preserving all _* keys and other squads
+      let current;
+      try {
+        const raw = await readFile(promptsPath, 'utf8');
+        current = JSON.parse(raw);
+      } catch {
+        current = { kickoff: {} };
+      }
+      if (!current.kickoff) current.kickoff = {};
+
+      const before = current.kickoff[squad] ? [...current.kickoff[squad]] : null;
+      const after = [...lines];
+
+      // Check if actually changed
+      const beforeStr = JSON.stringify(before);
+      const afterStr = JSON.stringify(after);
+      if (beforeStr === afterStr) {
+        json(res, 200, { changed: [], dryRun, warnings: ['brak zmian — treść identyczna'] });
+        log(method, path, 200);
+        return;
+      }
+
+      const changed = [{ file: promptsPath, before, after }];
+
+      if (dryRun) {
+        json(res, 200, { changed, dryRun: true });
+        log(method, path, 200);
+        return;
+      }
+
+      // Atomic write: temp file → rename
+      current.kickoff[squad] = after;
+      const tmp = promptsPath + '.' + Math.random().toString(36).slice(2, 10);
+      try {
+        await writeFile(tmp, JSON.stringify(current, null, 2) + '\n', 'utf8');
+        await rename(tmp, promptsPath);
+      } catch (err) {
+        json(res, 500, { error: 'write failed: ' + err.message });
+        log(method, path, 500);
+        return;
+      }
+
+      // Reload so the next launch uses the new template without server restart
+      reloadKickoffTemplates();
+
+      json(res, 200, { changed, dryRun: false });
+      log(method, path, 200);
+      return;
+    }
+
+    // --- POST /api/runs/task ---
+    // Change or clear the task assigned to a run. Localhost-only.
+    // scope: 'run' (default) → validFrom = run.startedAt (retroactive, moves all cost).
+    // scope: 'now' → validFrom = now (only future usage counts toward this task).
+    if (method === 'POST' && path === '/api/runs/task') {
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/runs/task is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden origin' });
+        log(method, path, 403);
+        return;
+      }
+      let body;
+      try { body = await readJsonBody(req); } catch (err) {
+        json(res, 400, { error: 'invalid JSON body: ' + err.message });
+        log(method, path, 400);
+        return;
+      }
+      const runId = String(body.runId || '').trim();
+      if (!runId) {
+        json(res, 400, { error: 'runId is required' });
+        log(method, path, 400);
+        return;
+      }
+
+      // Verify run exists and capture previous task
+      let run, previousTaskId;
+      {
+        const db = telemetryStore.openTelemetryDb();
+        try {
+          const runs = telemetryStore.queryRuns(db, { runId });
+          if (runs.length === 0) {
+            json(res, 404, { error: 'przebieg nie znaleziony: ' + runId });
+            log(method, path, 404);
+            return;
+          }
+          run = runs[0];
+          previousTaskId = telemetryStore.getRunTaskLinks(db, runId).current?.taskId || null;
+        } finally { db.close(); }
+      }
+
+      const rawTaskId = body.taskId != null ? String(body.taskId).trim() : '';
+
+      if (!rawTaskId) {
+        // Clear task assignment — run becomes untagged
+        telemetryStore.clearRunTask(runId);
+        const db = telemetryStore.openTelemetryDb();
+        try {
+          const updated = telemetryStore.queryRuns(db, { runId })[0];
+          json(res, 200, {
+            ok: true, runId, taskId: null, scope: null,
+            previousTaskId, movedCostUSD: updated.totals.partialCostUSD,
+          });
+        } finally { db.close(); }
+        log(method, path, 200);
+        return;
+      }
+
+      // Validate taskId format
+      const taskId = rawTaskId.toUpperCase();
+      if (!/^[A-Z]+-\d+$/.test(taskId)) {
+        json(res, 400, { error: 'Nieprawidłowy format taskId. Wymagany format: PROJEKT-NUMER (np. FOC-123)' });
+        log(method, path, 400);
+        return;
+      }
+
+      const scope = body.scope || 'run';
+      const validFrom = scope === 'now'
+        ? new Date().toISOString()
+        : (run.startedAt || new Date().toISOString());
+
+      telemetryStore.recordTaskLink(runId, taskId, 'manual', { validFrom, confidence: 1 });
+
+      const db = telemetryStore.openTelemetryDb();
+      try {
+        const updated = telemetryStore.queryRuns(db, { runId })[0];
+        json(res, 200, {
+          ok: true, runId, taskId, scope,
+          previousTaskId, movedCostUSD: updated.totals.partialCostUSD,
+        });
+      } finally { db.close(); }
+      log(method, path, 200);
+      return;
+    }
+
     // --- Only GET is supported beyond this point (other POST/PUT/DELETE → 404) ---
     if (method !== 'GET') {
       json(res, 404, { error: 'not found' });
@@ -624,6 +1054,29 @@ const server = createServer(async (req, res) => {
       const data = await telemetryRuns({ priceMode: url.searchParams.get('pricing') || 'as-run' });
       json(res, 200, data);
       log(method, path, 200);
+      return;
+    }
+
+    // GET /api/runs/task?runId=<id> — task link history for a run
+    if (path === '/api/runs/task') {
+      const runId = url.searchParams.get('runId') || '';
+      if (!runId) {
+        json(res, 400, { error: 'runId query param is required' });
+        log(method, path, 400);
+        return;
+      }
+      const db = telemetryStore.openTelemetryDb();
+      try {
+        const runs = telemetryStore.queryRuns(db, { runId });
+        if (runs.length === 0) {
+          json(res, 404, { error: 'przebieg nie znaleziony: ' + runId });
+          log(method, path, 404);
+          return;
+        }
+        const links = telemetryStore.getRunTaskLinks(db, runId);
+        json(res, 200, links);
+        log(method, path, 200);
+      } finally { db.close(); }
       return;
     }
 
@@ -928,6 +1381,22 @@ const server = createServer(async (req, res) => {
     // GET /api/squad-config
     if (path === '/api/squad-config') {
       json(res, 200, readSquadConfig(root));
+      log(method, path, 200);
+      return;
+    }
+
+    // GET /api/terminals — terminal panel: alive + finished runs with window info
+    if (path === '/api/terminals') {
+      const runs = withManifestConsolePid(await telemetryRuns());
+      const data = listTerminals(runs, { finishedLimit: 15 });
+      json(res, 200, data);
+      log(method, path, 200);
+      return;
+    }
+
+    // GET /api/tools — tool catalog from config/tools.json
+    if (path === '/api/tools') {
+      json(res, 200, readToolCatalog(root));
       log(method, path, 200);
       return;
     }
