@@ -1,0 +1,32 @@
+# Corpus scope for `graphify`. Patterns follow gitignore semantics and are also
+# matched against any single path segment — so a bare `plugins` drops every path
+# containing a `plugins/` segment.
+#
+# The point of this file: `agents/<squad>/` is a CLAUDE_CONFIG_DIR, so it holds
+# Claude Code's own runtime state (vendored plugin marketplace, session
+# transcripts, the upstream changelog) alongside our squad prompts. Without this
+# file the corpus is 1603 files / 3.0M words, of which ~93% is that runtime
+# state — roughly 60 LLM subagents per full build, for no knowledge at all.
+#
+# We keep exactly two things out of agents/: `CLAUDE.md` and `agents/*/agents/*.md`
+# (the squad and role prompts). Those ARE project knowledge. Do not add a bare
+# `agents` pattern here — it would match that path segment and drop them.
+
+# --- Claude Code runtime state (vendored, not ours) ---
+plugins
+projects
+shell-snapshots
+statsig
+todos
+agents/*/cache
+agents/*/jobs
+agents/*/plans
+
+# --- Telemetry and run artifacts (regenerated, not knowledge) ---
+.state
+graphify-out
+
+# --- Build output and vendored deps ---
+node_modules
+ui/dist
+.spike-a1

@@ -32,6 +32,8 @@ agents/*/plugins/
 agents/*/plans/
 agents/*/todos/
 agents/*/.last-update-result.json
+agents/*/jobs/
+agents/*/daemon/
 
 # spike scratch (re-runnable T-A1 evidence; see docs/adr/0002)
 .spike-*/
@@ -48,6 +50,11 @@ ui/node_modules/
 ui/.next/
 dist/
 build/
+
+# knowledge graph — regenerated locally by the post-commit hook (AST only, no LLM),
+# so committing it would churn ~700 nodes of JSON on every commit. The corpus
+# scope lives in .graphifyignore, which IS tracked.
+graphify-out/
 
 # os / editor
 .DS_Store
