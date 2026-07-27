@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict';
 
-import { statusLabel, isStale, todayTotals, attentionList } from './utils.js';
+import { statusLabel, isStale, todayTotals, attentionList, costValue, fmtCost } from './utils.js';
 import { linearUrl } from './config.js';
 
 // --- Minimal test harness -------------------------------------------------
@@ -26,6 +26,18 @@ async function test(name, fn) {
     console.log(`× ${name} — ${err && err.message ? err.message : err}`);
   }
 }
+
+test('costValue prefers partial known cost when total is unpriced', () => {
+  assert.equal(costValue({ costUSD: null, partialCostUSD: 5.2, unpricedUsageCount: 1 }), 5.2);
+});
+
+test('fmtCost marks partial cost as a lower bound', () => {
+  assert.equal(fmtCost({ costUSD: null, partialCostUSD: 5.2, unpricedUsageCount: 1 }), '≥$5.20');
+});
+
+test('fmtCost renders complete cost normally', () => {
+  assert.equal(fmtCost({ costUSD: 5.2, partialCostUSD: 5.2, unpricedUsageCount: 0 }), '$5.20');
+});
 
 function eq(actual, expected, msg) {
   assert.deepEqual(actual, expected, msg);
@@ -177,21 +189,21 @@ await test('todayTotals sums same-local-day runs only', () => {
     // previous local day — must be excluded even with large cost
     { startedAt: '2026-07-02T23:00:00', totals: { costUSD: 100.0, inputTokens: 9999, outputTokens: 9999 } },
   ];
-  eq(todayTotals(runs, now), { costUSD: 3.5, inputTokens: 300, outputTokens: 125 });
+  eq(todayTotals(runs, now), { costUSD: 3.5, partialCostUSD: 3.5, unpricedUsageCount: 0, inputTokens: 300, outputTokens: 125 });
 });
 
 await test('todayTotals([]) -> zeros', () => {
   const now = new Date('2026-07-03T12:00:00');
-  eq(todayTotals([], now), { costUSD: 0, inputTokens: 0, outputTokens: 0 });
+  eq(todayTotals([], now), { costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, inputTokens: 0, outputTokens: 0 });
 });
 
 await test('todayTotals(null) -> zeros (for..of guards runs||[])', () => {
-  eq(todayTotals(null), { costUSD: 0, inputTokens: 0, outputTokens: 0 });
+  eq(todayTotals(null), { costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, inputTokens: 0, outputTokens: 0 });
 });
 
 await test('todayTotals(undefined, now) -> zeros', () => {
   const now = new Date('2026-07-03T12:00:00');
-  eq(todayTotals(undefined, now), { costUSD: 0, inputTokens: 0, outputTokens: 0 });
+  eq(todayTotals(undefined, now), { costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, inputTokens: 0, outputTokens: 0 });
 });
 
 await test('todayTotals run with missing totals contributes 0', () => {
@@ -200,7 +212,17 @@ await test('todayTotals run with missing totals contributes 0', () => {
     { startedAt: '2026-07-03T08:00:00' }, // no totals
     { startedAt: '2026-07-03T09:00:00', totals: { costUSD: 1.0, inputTokens: 10, outputTokens: 5 } },
   ];
-  eq(todayTotals(runs, now), { costUSD: 1.0, inputTokens: 10, outputTokens: 5 });
+  eq(todayTotals(runs, now), { costUSD: 1.0, partialCostUSD: 1.0, unpricedUsageCount: 0, inputTokens: 10, outputTokens: 5 });
+});
+
+await test('todayTotals preserves known minimum for unpriced usage', () => {
+  const now = new Date('2026-07-03T12:00:00');
+  const runs = [{
+    startedAt: '2026-07-03T09:00:00',
+    totals: { costUSD: null, partialCostUSD: 2.5, unpricedUsageCount: 1, inputTokens: 10, outputTokens: 5 },
+  }];
+  eq(todayTotals(runs, now), { costUSD: null, partialCostUSD: 2.5, unpricedUsageCount: 1, inputTokens: 10, outputTokens: 5 });
+  eq(fmtCost(todayTotals(runs, now)), '≥$2.50');
 });
 
 // --- attentionList --------------------------------------------------------

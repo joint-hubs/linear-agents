@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { getLinearQueue, getRuns, postLaunch } from '../api';
 import { linearUrl, WORKSPACES, DEFAULT_WORKSPACE } from '../config';
-import { fmtTime, elapsed, taskLabel } from '../utils';
+import { fmtTime, elapsed, taskLabel, fmtUSD, costValue, isStale } from '../utils';
 
 const POLL_MS = 10000;
 
@@ -32,7 +32,7 @@ function TaskChip({ id }) {
 }
 
 // One NEXT UP row: identifier, title, state · labels, →SQUAD, Launch button.
-function NextUpRow({ task, onLaunch }) {
+function NextUpRow({ task, onLaunch, taskCost }) {
   const squad = task.suggestedSquad;
   return (
     <div className="task-row">
@@ -43,6 +43,11 @@ function NextUpRow({ task, onLaunch }) {
           {task.estimate != null ? ` · ${task.estimate}pt` : ''}
         </span>
         <span className="pill">→ {squad}</span>
+        {taskCost && taskCost.runs > 0 && (
+          <span className="muted" style={{ fontSize: 11 }} title={`${taskCost.runs} previous run${taskCost.runs === 1 ? '' : 's'}`}>
+            {fmtUSD(taskCost.cost)} · {taskCost.runs}r
+          </span>
+        )}
       </div>
       <div className="task-row-title">{task.title}</div>
       <div className="task-row-foot">
@@ -55,13 +60,18 @@ function NextUpRow({ task, onLaunch }) {
 }
 
 // One CZEKA NA CIEBIE row: a blocked (needs:*) task — NO Launch, only Linear link.
-function WaitingRow({ task }) {
+function WaitingRow({ task, taskCost }) {
   const nl = needsLabel(task);
   return (
     <div className="task-row">
       <div className="task-row-main">
         <TaskChip id={task.identifier} />
         {nl && <span className="badge badge-warn">{nl}</span>}
+        {taskCost && taskCost.runs > 0 && (
+          <span className="muted" style={{ fontSize: 11 }} title={`${taskCost.runs} previous run${taskCost.runs === 1 ? '' : 's'}`}>
+            {fmtUSD(taskCost.cost)} · {taskCost.runs}r
+          </span>
+        )}
       </div>
       <div className="task-row-title">{task.title}</div>
       <div className="task-row-foot">
@@ -228,6 +238,24 @@ export default function Tasks() {
   const waiting = tasks.filter((t) => t.suggestedSquad === 'human');
   const active = runs.filter((r) => !r.endedAt);
 
+  // Per-task cost summary from historical runs (computed client-side from runs).
+  const taskCosts = {};
+  for (const r of runs) {
+    if (!r.taskId) continue;
+    if (!taskCosts[r.taskId]) taskCosts[r.taskId] = { runs: 0, cost: 0 };
+    taskCosts[r.taskId].runs += 1;
+    taskCosts[r.taskId].cost += costValue(r.totals);
+  }
+
+  // Health stats.
+  const now = new Date();
+  const staleRuns = runs.filter((r) => isStale(r, now));
+  const untaggedRuns = runs.filter((r) => !r.taskId && costValue(r.totals) > 0);
+  const untaggedCost = untaggedRuns.reduce((a, r) => a + costValue(r.totals), 0);
+  const failedRuns = runs.filter((r) => r.status === 'failed');
+  const failedCost = failedRuns.reduce((a, r) => a + costValue(r.totals), 0);
+  const hasHealthIssues = staleRuns.length > 0 || untaggedRuns.length > 0 || failedRuns.length > 0;
+
   return (
     <div className="page">
       <div className="page-title-row">
@@ -260,7 +288,7 @@ export default function Tasks() {
         {queueError && <div className="empty">Linear unavailable: {queueError}</div>}
         {!queueError && nextUp.length === 0 && <div className="empty">No tasks ready to hand off.</div>}
         {nextUp.map((t) => (
-          <NextUpRow key={t.id} task={t} onLaunch={setModalTask} />
+          <NextUpRow key={t.id} task={t} onLaunch={setModalTask} taskCost={taskCosts[t.identifier]} />
         ))}
       </div>
 
@@ -269,7 +297,7 @@ export default function Tasks() {
         <div className="section-h">CZEKA NA CIEBIE <span className="muted">(needs:*)</span></div>
         {waiting.length === 0 && <div className="empty">Nothing blocked on you.</div>}
         {waiting.map((t) => (
-          <WaitingRow key={t.id} task={t} />
+          <WaitingRow key={t.id} task={t} taskCost={taskCosts[t.identifier]} />
         ))}
       </div>
 
@@ -281,6 +309,55 @@ export default function Tasks() {
           <ActiveRow key={r.runId} run={r} />
         ))}
       </div>
+
+      {/* HEALTH — stale runs, untagged cost, failed cost */}
+      {hasHealthIssues && (
+        <div className="section">
+          <div className="section-h">⚠ Health</div>
+          {staleRuns.length > 0 && (
+            <div className="task-row" style={{ borderLeft: '3px solid var(--yellow, #d97706)' }}>
+              <div className="task-row-main">
+                <span className="badge badge-warn">stale</span>
+                <span>{staleRuns.length} run{staleRuns.length === 1 ? '' : 's'} active &gt; 2h</span>
+              </div>
+              <div className="task-row-title">
+                {staleRuns.map((r) => (
+                  <span key={r.runId} style={{ marginRight: 12 }}>
+                    <Link className="link" to={`/runs/${r.runId}`}>{r.squad} {r.taskId || '(untagged)'}</Link>
+                    {' '}<span className="muted">{elapsed(r.startedAt, null)}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {untaggedRuns.length > 0 && (
+            <div className="task-row" style={{ borderLeft: '3px solid var(--yellow, #d97706)' }}>
+              <div className="task-row-main">
+                <span className="badge badge-warn">untagged</span>
+                <span>{fmtUSD(untaggedCost)} in {untaggedRuns.length} run{untaggedRuns.length === 1 ? '' : 's'} without taskId</span>
+              </div>
+              <div className="task-row-title muted" style={{ fontSize: 12 }}>
+                Runs started without a Linear task — cost is not attributed. Launch via Tasks screen to auto-tag.
+              </div>
+            </div>
+          )}
+          {failedRuns.length > 0 && (
+            <div className="task-row" style={{ borderLeft: '3px solid var(--red, #dc2626)' }}>
+              <div className="task-row-main">
+                <span className="badge badge-fail">failed</span>
+                <span>{fmtUSD(failedCost)} lost in {failedRuns.length} failed run{failedRuns.length === 1 ? '' : 's'}</span>
+              </div>
+              <div className="task-row-title">
+                {failedRuns.map((r) => (
+                  <span key={r.runId} style={{ marginRight: 12 }}>
+                    <Link className="link" to={`/runs/${r.runId}`}>{r.squad} {r.taskId || '(untagged)'}</Link>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="muted" style={{ marginTop: 16 }}>
         updated {lastUpdated ? fmtTime(lastUpdated.toISOString()) : '—'}

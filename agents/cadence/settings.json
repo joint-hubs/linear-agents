@@ -8,5 +8,10 @@
       "Edit", "Bash(rm -rf:*)", "Bash(git push:*)", "mcp__linear__*"
     ]
   },
-  "theme": "dark"
+  "theme": "dark",
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{ "type": "command", "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"", "timeout": 5 }]
+    }]
+  }
 }

@@ -67,11 +67,18 @@ function resolvePricing(modelSlug, pricing) {
     if (keyShort.replace(/\./g, "-") === short.replace(/\./g, "-")) return val;
   }
 
-  // 3. Substring containment (versioned slugs)
+  // 3. Substring containment (versioned slugs). Reverse containment is used
+  // only when unambiguous; a short slug such as "deepseek-v4" must not pick
+  // flash/pro based on config object order.
+  const contained = [];
+  const containing = [];
   for (const [key, val] of Object.entries(pricing)) {
     const keyShort = key.split("/").pop();
-    if (slug.includes(keyShort) || keyShort.includes(slug)) return val;
+    if (slug.includes(keyShort)) contained.push({ val, length: keyShort.length });
+    else if (keyShort.includes(slug)) containing.push(val);
   }
+  if (contained.length > 0) return contained.sort((a, b) => b.length - a.length)[0].val;
+  if (containing.length === 1) return containing[0];
 
   return null;
 }
@@ -108,8 +115,8 @@ export function cwdToHashName(cwd) {
 /**
  * Infer a Linear-style task ID from a git branch name.
  *
- * Matches patterns like `fen-98-...` or `feat/pisi-98-...` or `feat/joi-51`
- * and returns normalized IDs like `FEN-98`, `PISI-98`, or `JOI-51`. Returns
+ * Matches patterns like `foc-36-...`, `fen-98-...`, or `feat/joi-51`
+ * and returns normalized IDs like `FOC-36`, `FEN-98`, or `JOI-51`. Returns
  * null for branches that don't match (e.g. `feat/phase-a-offline-foundation`).
  *
  * @param {string|null|undefined} branch
@@ -117,7 +124,7 @@ export function cwdToHashName(cwd) {
  */
 export function inferTaskIdFromBranch(branch) {
   if (!branch || typeof branch !== "string") return null;
-  const m = branch.match(/(?:^|\/)(fen|pisi|joi)-(\d+)/i);
+  const m = branch.match(/(?:^|\/)([a-z][a-z0-9]{1,9})-(\d+)/i);
   if (m) return `${m[1].toUpperCase()}-${m[2]}`;
   return null;
 }
@@ -359,7 +366,7 @@ function aggregateTurns(result, parsed) {
     // By model
     const modelKey = turn.model || "unknown";
     if (!result.byModel[modelKey]) {
-      result.byModel[modelKey] = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 };
+      result.byModel[modelKey] = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0 };
     }
     result.byModel[modelKey].inputTokens += turn.inputTokens;
     result.byModel[modelKey].outputTokens += turn.outputTokens;
@@ -374,7 +381,7 @@ function aggregateTurns(result, parsed) {
     // By agent
     const agentKey = turn.attributionAgent || "_lead";
     if (!result.byAgent[agentKey]) {
-      result.byAgent[agentKey] = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0, turns: 0, models: {} };
+      result.byAgent[agentKey] = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, turns: 0, models: {} };
     }
     result.byAgent[agentKey].inputTokens += turn.inputTokens;
     result.byAgent[agentKey].outputTokens += turn.outputTokens;
@@ -390,10 +397,38 @@ function aggregateTurns(result, parsed) {
       { inputTokens: turn.inputTokens, outputTokens: turn.outputTokens, cacheCreation: turn.cacheCreation, cacheRead: turn.cacheRead },
       turn.model,
     );
-    result.byModel[modelKey].costUSD += turnCost;
-    result.byAgent[agentKey].costUSD += turnCost;
-    result.totals.costUSD += turnCost;
+    const priced = turn.model === "synthetic" || Boolean(resolvePricing(turn.model, getPricing()));
+    result.byModel[modelKey].partialCostUSD += turnCost;
+    result.byAgent[agentKey].partialCostUSD += turnCost;
+    result.totals.partialCostUSD += turnCost;
+    if (!priced) {
+      result.byModel[modelKey].unpricedUsageCount++;
+      result.byAgent[agentKey].unpricedUsageCount++;
+      result.totals.unpricedUsageCount++;
+      if (!result.dataQuality.some((issue) => issue.type === "pricing_missing" && issue.model === modelKey)) {
+        result.dataQuality.push({ type: "pricing_missing", severity: "warning", model: modelKey });
+      }
+    }
+
+    // Cache savings: what we would have paid for cacheRead tokens at full
+    // input rate vs the discounted cache-read rate. Savings = 0 when model
+    // is unknown (no pricing entry).
+    if (turn.cacheRead > 0) {
+      const pricing = getPricing();
+      const p = resolvePricing(turn.model, pricing);
+      if (p) {
+        const cacheReadRate = p.cacheRead != null ? p.cacheRead : 0.1 * p.input;
+        result.totals.cacheSavingsUSD += (turn.cacheRead / 1_000_000) * (p.input - cacheReadRate);
+      }
+    }
   }
+  for (const model of Object.values(result.byModel)) {
+    model.costUSD = model.unpricedUsageCount ? null : model.partialCostUSD;
+  }
+  for (const agent of Object.values(result.byAgent)) {
+    agent.costUSD = agent.unpricedUsageCount ? null : agent.partialCostUSD;
+  }
+  result.totals.costUSD = result.totals.unpricedUsageCount ? null : result.totals.partialCostUSD;
 }
 
 /**
@@ -653,9 +688,10 @@ export function aggregateRun(manifest, transcriptIndex, discoveredMatch) {
     taskIdAuto: manifest.taskIdAuto || null,
     taskIdInferred: inferTaskIdFromBranch(manifest.gitBranch) || null,
     lastActivityAt: null,
-    totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 },
+    totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, cacheSavingsUSD: 0 },
     byModel: {},
     byAgent: {},
+    dataQuality: [],
   };
 
   // -----------------------------------------------------------------------
@@ -878,6 +914,8 @@ export function aggregateByTask(runs) {
       buckets[key] = {
         runs: 0,
         costUSD: 0,
+        partialCostUSD: 0,
+        unpricedUsageCount: 0,
         inputTokens: 0,
         outputTokens: 0,
         cacheReadTokens: 0,
@@ -892,7 +930,8 @@ export function aggregateByTask(runs) {
     const t = run.totals || {};
 
     b.runs += 1;
-    b.costUSD += t.costUSD || 0;
+    b.partialCostUSD += t.partialCostUSD ?? t.costUSD ?? 0;
+    b.unpricedUsageCount += t.unpricedUsageCount || 0;
     b.inputTokens += t.inputTokens || 0;
     b.outputTokens += t.outputTokens || 0;
     b.cacheReadTokens += t.cacheReadTokens || 0;
@@ -915,17 +954,25 @@ export function aggregateByTask(runs) {
     // Squad breakdown
     const squadKey = run.squad || "unknown";
     if (!b.squads[squadKey]) {
-      b.squads[squadKey] = { runs: 0, costUSD: 0 };
+      b.squads[squadKey] = { runs: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0 };
     }
     b.squads[squadKey].runs += 1;
-    b.squads[squadKey].costUSD += t.costUSD || 0;
+    b.squads[squadKey].partialCostUSD += t.partialCostUSD ?? t.costUSD ?? 0;
+    b.squads[squadKey].unpricedUsageCount += t.unpricedUsageCount || 0;
+  }
+
+  for (const bucket of Object.values(buckets)) {
+    bucket.costUSD = bucket.unpricedUsageCount ? null : bucket.partialCostUSD;
+    for (const squad of Object.values(bucket.squads)) {
+      squad.costUSD = squad.unpricedUsageCount ? null : squad.partialCostUSD;
+    }
   }
 
   // Sort: non-untagged by costUSD desc, then __untagged__ last
   const entries = Object.entries(buckets);
   const untagged = entries.filter(([k]) => k === "__untagged__");
   const tagged = entries.filter(([k]) => k !== "__untagged__");
-  tagged.sort((a, b) => b[1].costUSD - a[1].costUSD);
+  tagged.sort((a, b) => b[1].partialCostUSD - a[1].partialCostUSD);
 
   const ordered = {};
   for (const [k, v] of tagged) ordered[k] = v;
@@ -966,6 +1013,8 @@ export function aggregateFlow(runs) {
           inputTokens: 0,
           outputTokens: 0,
           costUSD: 0,
+          partialCostUSD: 0,
+          unpricedUsageCount: 0,
           models: {},
           lastActivityAt: null,
           runs: [],
@@ -977,7 +1026,8 @@ export function aggregateFlow(runs) {
       node.turns += a.turns || 0;
       node.inputTokens += a.inputTokens || 0;
       node.outputTokens += a.outputTokens || 0;
-      node.costUSD += a.costUSD || 0;
+      node.partialCostUSD += a.partialCostUSD ?? a.costUSD ?? 0;
+      node.unpricedUsageCount += a.unpricedUsageCount || 0;
       for (const [slug, n] of Object.entries(a.models || {})) {
         node.models[slug] = (node.models[slug] || 0) + n;
       }
@@ -995,7 +1045,9 @@ export function aggregateFlow(runs) {
         endedAt: run.endedAt || null,
         status: run.status || null,
         turns: a.turns || 0,
-        costUSD: a.costUSD || 0,
+        costUSD: a.costUSD,
+        partialCostUSD: a.partialCostUSD ?? a.costUSD ?? 0,
+        unpricedUsageCount: a.unpricedUsageCount || 0,
         models: Object.keys(a.models || {}),
       });
     }
@@ -1004,6 +1056,7 @@ export function aggregateFlow(runs) {
   // Newest execution first inside each node.
   for (const squad of Object.values(squads)) {
     for (const node of Object.values(squad.agents)) {
+      node.costUSD = node.unpricedUsageCount ? null : node.partialCostUSD;
       node.runs.sort((x, y) => (y.startedAt || "").localeCompare(x.startedAt || ""));
     }
   }
@@ -1051,7 +1104,7 @@ function contentToolUses(content, maxInput = 300) {
  * @returns {Array<{ts, model, agent, text, truncated, toolUses, usage}>}
  */
 export function extractAgentTurns(absPath, agentKey, opts = {}) {
-  const { windowStart = null, windowEnd = null, maxTextLen = 8000 } = opts;
+  const { windowStart = null, windowEnd = null, maxTextLen = 8000, includeUser = false } = opts;
   const out = [];
   if (!existsSync(absPath)) return out;
 
@@ -1063,15 +1116,48 @@ export function extractAgentTurns(absPath, agentKey, opts = {}) {
     return true;
   };
 
+  const truncateText = (text) => {
+    if (maxTextLen === null) return { text, truncated: false };
+    const truncated = text.length > maxTextLen;
+    return { text: truncated ? text.slice(0, maxTextLen) + "…" : text, truncated };
+  };
+
   const pushTurn = (line, attribution) => {
+    // User turns (only when includeUser is true and agentKey is _lead)
+    if (includeUser && line.type === "user") {
+      if (agentKey !== "_lead") return;
+      if (line.isSidechain) return;
+      if ((windowStart != null || windowEnd != null) && !inWindow(line.timestamp)) return;
+
+      const rawText = contentText(line.message?.content);
+      // Most "user" lines in a Claude Code transcript are tool_result envelopes
+      // carrying no text part. In a conversation view they render as blank rows
+      // (48 of 56 on a real dev run), so drop them — only user lines that
+      // actually say something belong in the readable conversation.
+      if (!rawText.trim()) return;
+      const { text, truncated } = truncateText(rawText);
+
+      out.push({
+        ts: line.timestamp || null,
+        model: null,
+        agent: agentKey,
+        text,
+        truncated,
+        toolUses: [],
+        usage: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreation: 0 },
+        role: "user",
+      });
+      return;
+    }
+
+    // Assistant turns
     if (line.type !== "assistant" || !line.message) return;
     if ((attribution || "_lead") !== agentKey) return;
     if ((windowStart != null || windowEnd != null) && !inWindow(line.timestamp)) return;
 
     const msg = line.message;
-    let text = contentText(msg.content);
-    const truncated = text.length > maxTextLen;
-    if (truncated) text = text.slice(0, maxTextLen) + "…";
+    const rawText = contentText(msg.content);
+    const { text, truncated } = truncateText(rawText);
 
     const usage = msg.usage || {};
     out.push({
@@ -1087,6 +1173,7 @@ export function extractAgentTurns(absPath, agentKey, opts = {}) {
         cacheRead: usage.cache_read_input_tokens ?? 0,
         cacheCreation: usage.cache_creation_input_tokens ?? 0,
       },
+      role: "assistant",
     });
   };
 

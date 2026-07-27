@@ -5,11 +5,17 @@
       "Read", "Grep", "Glob", "Edit", "Write",
       "Bash(git add:*)", "Bash(git commit:*)", "Bash(git checkout:*)", "Bash(git switch:*)",
       "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git pull:*)", "Bash(git rebase:*)",
-      "Bash(npm:*)", "Bash(pnpm:*)", "Bash(yarn:*)", "Bash(docker:*)", "Bash(docker compose:*)", "Bash(make:*)", "Bash(pytest:*)"
+      "Bash(npm:*)", "Bash(pnpm:*)", "Bash(yarn:*)", "Bash(docker:*)", "Bash(docker compose:*)", "Bash(make:*)", "Bash(pytest:*)",
+      "Bash(gcloud:*)", "Bash(ssh:*)", "Bash(scp:*)"
     ],
     "deny": [
-      "Bash(git push:*)", "Bash(rm -rf:*)", "Bash(gcloud:*)", "mcp__linear__*"
+      "Bash(git push:*)", "Bash(rm -rf:*)", "mcp__linear__*"
     ]
   },
-  "theme": "dark"
+  "theme": "dark",
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{ "type": "command", "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"", "timeout": 5 }]
+    }]
+  }
 }

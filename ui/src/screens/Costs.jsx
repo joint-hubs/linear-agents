@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getRuns, getSummary, getBudget } from '../api';
 import { linearUrl } from '../config';
-import { fmtUSD, fmtUSD0, fmtTokens, fmtNum, fmtDate, topByCost } from '../utils';
+import { fmtUSD, fmtCost, costValue, fmtTokens, fmtNum, fmtDate, topByCost } from '../utils';
 
 // ux-design-v3 §3.4 — Costs upgrade.
 // Period toggle (7d / 30d / All) recomputes the KPI strip, byDay chart and
@@ -21,9 +21,11 @@ function computeByDay(runs) {
   for (const r of runs) {
     const day = (r.startedAt || '').slice(0, 10);
     if (!day) continue;
-    if (!out[day]) out[day] = { runs: 0, costUSD: 0 };
+    if (!out[day]) out[day] = { runs: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0 };
     out[day].runs += 1;
-    out[day].costUSD += (r.totals && r.totals.costUSD) || 0;
+    out[day].partialCostUSD += costValue(r.totals);
+    out[day].unpricedUsageCount += r.totals?.unpricedUsageCount || 0;
+    out[day].costUSD = out[day].unpricedUsageCount ? null : out[day].partialCostUSD;
   }
   return out;
 }
@@ -33,12 +35,28 @@ function sumByAgent(runs) {
   const out = {};
   for (const r of runs) {
     for (const [k, v] of Object.entries(r.byAgent || {})) {
-      if (!out[k]) out[k] = { costUSD: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 };
-      out[k].costUSD += v.costUSD || 0;
+      if (!out[k]) out[k] = { costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 };
+      out[k].partialCostUSD += costValue(v);
+      out[k].unpricedUsageCount += v.unpricedUsageCount || 0;
+      out[k].costUSD = out[k].unpricedUsageCount ? null : out[k].partialCostUSD;
       out[k].inputTokens += v.inputTokens || 0;
       out[k].outputTokens += v.outputTokens || 0;
       out[k].cacheReadInputTokens += v.cacheReadInputTokens || 0;
     }
+  }
+  return out;
+}
+
+// Sum run costs by repo → { repo: { costUSD, runs } }.
+function sumByRepo(runs) {
+  const out = {};
+  for (const r of runs) {
+    const repo = r.repo || 'unknown';
+    if (!out[repo]) out[repo] = { costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, runs: 0 };
+    out[repo].partialCostUSD += costValue(r.totals);
+    out[repo].unpricedUsageCount += r.totals?.unpricedUsageCount || 0;
+    out[repo].costUSD = out[repo].unpricedUsageCount ? null : out[repo].partialCostUSD;
+    out[repo].runs += 1;
   }
   return out;
 }
@@ -101,31 +119,48 @@ export default function Costs() {
 
   // KPI strip — recomputed from period-filtered runs (§3.4 pt 1).
   const kpi = useMemo(() => {
-    const a = { costUSD: 0, runs: 0, inputTokens: 0, outputTokens: 0 };
+    const a = { costUSD: 0, runs: 0, inputTokens: 0, outputTokens: 0,
+                cacheSavingsUSD: 0, cacheReadTokens: 0,
+                unpricedUsageCount: 0, untaggedCost: 0, untaggedRuns: 0, failedCost: 0, failedRuns: 0 };
     for (const r of periodRuns) {
       const t = r.totals || {};
-      a.costUSD += t.costUSD || 0;
+      a.costUSD += costValue(t);
       a.inputTokens += t.inputTokens || 0;
       a.outputTokens += t.outputTokens || 0;
+      a.cacheSavingsUSD += t.cacheSavingsUSD || 0;
+      a.cacheReadTokens += t.cacheReadTokens || 0;
+      a.unpricedUsageCount += t.unpricedUsageCount || 0;
       a.runs += 1;
+      if (!r.taskId && costValue(t) > 0) {
+        a.untaggedCost += costValue(t);
+        a.untaggedRuns += 1;
+      }
+      if (r.status === 'failed') {
+        a.failedCost += costValue(t);
+        a.failedRuns += 1;
+      }
     }
+    a.cacheHitRate = (a.cacheReadTokens + a.inputTokens) > 0
+      ? (a.cacheReadTokens / (a.cacheReadTokens + a.inputTokens)) * 100
+      : 0;
     return a;
   }, [periodRuns]);
 
   const byDay = useMemo(() => computeByDay(periodRuns), [periodRuns]);
   const byAgent = useMemo(() => sumByAgent(periodRuns), [periodRuns]);
+  const byRepo = useMemo(() => sumByRepo(periodRuns), [periodRuns]);
 
   function maxCost(entries) {
-    return Math.max(0, ...entries.map(([, v]) => v.costUSD || 0));
+    return Math.max(0, ...entries.map(([, v]) => costValue(v)));
   }
 
   function barRow(key, v, max, labelLeft) {
-    const pct = max ? ((v.costUSD || 0) / max) * 100 : 0;
+    const pct = max ? (costValue(v) / max) * 100 : 0;
     return (
       <div key={key} style={{ marginBottom: 8 }}>
         <div className="bar-label">
           <span>{labelLeft || key}</span>
-          <span>{fmtUSD(v.costUSD || 0)}</span>
+          <span>{fmtCost(v)}</span>
         </div>
         <div className="bar-track">
           <div className="bar-fill" style={{ width: `${pct}%` }} />
@@ -171,10 +206,21 @@ export default function Costs() {
 
       {hasData && (
         <>
+          {/* Waste warnings: untagged + failed costs */}
+          {kpi.untaggedCost > 0 && (
+            <div className="banner banner-warn" style={{ marginBottom: 12 }}>
+              <strong>⚠ Untagged waste:</strong> {fmtUSD(kpi.untaggedCost)} across {kpi.untaggedRuns} run{kpi.untaggedRuns === 1 ? '' : 's'} with no taskId — runs may belong to the wrong project or were started without a Linear task.
+            </div>
+          )}
+          {kpi.failedRuns > 0 && (
+            <div className="banner banner-warn" style={{ marginBottom: 12 }}>
+              <strong>⚠ Failed runs:</strong> {fmtUSD(kpi.failedCost)} spent on {kpi.failedRuns} failed run{kpi.failedRuns === 1 ? '' : 's'}.
+            </div>
+          )}
           <div className="grid grid-4">
             <div className="card stat">
               <div className="stat-label">Total cost</div>
-              <div className="stat-value">{fmtUSD0(kpi.costUSD)}</div>
+              <div className="stat-value">{fmtCost({ costUSD: kpi.unpricedUsageCount ? null : kpi.costUSD, partialCostUSD: kpi.costUSD, unpricedUsageCount: kpi.unpricedUsageCount })}</div>
             </div>
             <div className="card stat">
               <div className="stat-label">Runs</div>
@@ -187,6 +233,16 @@ export default function Costs() {
             <div className="card stat">
               <div className="stat-label">Output</div>
               <div className="stat-value">{fmtTokens(kpi.outputTokens)}</div>
+            </div>
+            <div className="card stat" title="Tokens read from cache instead of billed at full input rate">
+              <div className="stat-label">Cache saved</div>
+              <div className="stat-value" style={{ color: 'var(--green, #059669)' }}>{fmtUSD(kpi.cacheSavingsUSD)}</div>
+            </div>
+            <div className="card stat" title="% of input tokens served from cache (cacheRead / freshInput + cacheRead)">
+              <div className="stat-label">Cache hit rate</div>
+              <div className="stat-value" style={{ color: kpi.cacheHitRate >= 80 ? 'var(--green, #059669)' : kpi.cacheHitRate >= 50 ? 'var(--yellow, #d97706)' : 'inherit' }}>
+                {kpi.cacheHitRate.toFixed(1)}%
+              </div>
             </div>
           </div>
 
@@ -209,7 +265,7 @@ export default function Costs() {
                 const b = budget.budgetPerTaskUSD;
                 const entries = Object.entries(summary.byTask || {})
                   .filter(([k]) => k !== '__untagged__')
-                  .sort(([, a], [, b2]) => (b2.costUSD || 0) - (a.costUSD || 0));
+                  .sort(([, a], [, b2]) => costValue(b2) - costValue(a));
                 return (
                   <>
                     <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
@@ -217,8 +273,8 @@ export default function Costs() {
                     </div>
                     {entries.length === 0 && <div className="empty">No tagged tasks.</div>}
                     {entries.map(([key, v]) => {
-                      const over = (v.costUSD || 0) > b;
-                      const pct = b > 0 ? Math.min(100, ((v.costUSD || 0) / b) * 100) : 0;
+                      const over = costValue(v) > b;
+                      const pct = b > 0 ? Math.min(100, (costValue(v) / b) * 100) : 0;
                       const url = linearUrl(key);
                       return (
                         <div key={key} style={{ marginBottom: 8 }}>
@@ -241,7 +297,7 @@ export default function Costs() {
                               )}
                             </span>
                             <span>
-                              {fmtUSD(v.costUSD || 0)}
+                              {fmtCost(v)}
                               {over && <span className="muted"> / {fmtUSD(b)}</span>}
                             </span>
                           </div>
@@ -284,6 +340,31 @@ export default function Costs() {
                 const entries = topByCost(summary.bySquad);
                 const max = maxCost(entries);
                 return entries.map(([k, v]) => barRow(k, v, max, k));
+              })()}
+            </div>
+          )}
+
+          {/* byRepo — computed client-side from period-filtered runs. */}
+          {Object.keys(byRepo).length > 0 && (
+            <div className="section">
+              <div className="section-h">Cost by repo</div>
+              {(() => {
+                const entries = topByCost(byRepo);
+                const max = maxCost(entries);
+                return entries.map(([k, v]) => (
+                  <div key={k} style={{ marginBottom: 8 }}>
+                    <div className="bar-label">
+                      <span>
+                        {k}
+                        <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>{v.runs} run{v.runs === 1 ? '' : 's'}</span>
+                      </span>
+                      <span>{fmtCost(v)}</span>
+                    </div>
+                    <div className="bar-track">
+                      <div className="bar-fill" style={{ width: `${max ? (costValue(v) / max) * 100 : 0}%` }} />
+                    </div>
+                  </div>
+                ));
               })()}
             </div>
           )}
@@ -333,7 +414,7 @@ export default function Costs() {
                     <tbody>
                       {entries.map(([key, v]) => {
                         const untagged = key === '__untagged__';
-                        const pct = max ? ((v.costUSD || 0) / max) * 100 : 0;
+                        const pct = max ? (costValue(v) / max) * 100 : 0;
                         const url = untagged ? null : linearUrl(key);
                         const squads = v.squads ? Object.keys(v.squads).sort() : [];
                         return (
@@ -391,7 +472,7 @@ export default function Costs() {
                                 <span className="muted">—</span>
                               )}
                             </td>
-                            <td className="td">{fmtUSD(v.costUSD)}</td>
+                            <td className="td">{fmtCost(v)}</td>
                             <td className="td">
                               <div className="bar-track">
                                 <div className="bar-fill" style={{ width: `${pct}%` }} />

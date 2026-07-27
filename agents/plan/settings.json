@@ -22,5 +22,10 @@
       "type": "sse",
       "url": "https://mcp.linear.app/sse"
     }
+  },
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{ "type": "command", "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"", "timeout": 5 }]
+    }]
   }
 }

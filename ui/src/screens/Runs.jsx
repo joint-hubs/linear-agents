@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getRuns } from '../api';
 import { linearUrl } from '../config';
 import {
-  fmtUSD,
+  fmtCost,
   fmtTokens,
   fmtDateTime,
   elapsed,
@@ -239,7 +239,7 @@ export default function Runs() {
                   </td>
                   <td className="td">{run.repo || '—'}</td>
                   <td className="td">{elapsed(run.startedAt, run.endedAt)}</td>
-                  <td className="td">{fmtUSD(run.totals?.costUSD || 0)}</td>
+                  <td className="td">{fmtCost(run.totals)}</td>
                   <td className="td">{fmtTokens(totalTokens)}</td>
                   <td className="td" title={modelsTitle} style={{ whiteSpace: 'nowrap' }}>
                     {modelsCell}

@@ -8,6 +8,18 @@ export function fmtUSD0(n) {
   return '$' + Math.round(n);
 }
 
+export function costValue(value) {
+  if (value == null || typeof value !== 'object') return value || 0;
+  return value.partialCostUSD ?? value.costUSD ?? 0;
+}
+
+export function fmtCost(value) {
+  if (value == null || typeof value !== 'object') return fmtUSD(value);
+  if (value.costUSD != null) return fmtUSD(value.costUSD);
+  if ((value.unpricedUsageCount || 0) > 0) return '≥' + fmtUSD(costValue(value));
+  return fmtUSD(value.partialCostUSD);
+}
+
 export function fmtTokens(n) {
   if (n == null) return '—';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
@@ -101,14 +113,16 @@ function isLocalToday(iso, now) {
 
 // Sum cost + tokens over runs that started on local today.
 export function todayTotals(runs, now = new Date()) {
-  const t = { costUSD: 0, inputTokens: 0, outputTokens: 0 };
+  const t = { costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, inputTokens: 0, outputTokens: 0 };
   for (const r of runs || []) {
     if (!isLocalToday(r.startedAt, now)) continue;
     const rt = r.totals || {};
-    t.costUSD += rt.costUSD || 0;
+    t.partialCostUSD += costValue(rt);
+    t.unpricedUsageCount += rt.unpricedUsageCount || 0;
     t.inputTokens += rt.inputTokens || 0;
     t.outputTokens += rt.outputTokens || 0;
   }
+  t.costUSD = t.unpricedUsageCount ? null : t.partialCostUSD;
   return t;
 }
 
@@ -154,15 +168,15 @@ export function attentionList(runs, now = new Date(), overBudgetTasks = []) {
 
 export function modelMix(byModel) {
   const entries = Object.entries(byModel || {});
-  const total = entries.reduce((s, [, v]) => s + (v.costUSD || 0), 0);
+  const total = entries.reduce((s, [, v]) => s + costValue(v), 0);
   return entries
-    .map(([slug, v]) => ({ slug, costUSD: v.costUSD || 0, pct: total > 0 ? ((v.costUSD || 0) / total) * 100 : 0 }))
+    .map(([slug, v]) => ({ slug, costUSD: costValue(v), pct: total > 0 ? (costValue(v) / total) * 100 : 0 }))
     .sort((a, b) => b.costUSD - a.costUSD);
 }
 
 export function topByCost(obj, n = 10) {
   if (!obj) return [];
   return Object.entries(obj)
-    .sort(([, a], [, b]) => (b.costUSD || 0) - (a.costUSD || 0))
+    .sort(([, a], [, b]) => costValue(b) - costValue(a))
     .slice(0, n);
 }

@@ -13,6 +13,7 @@ import { randomBytes } from "node:crypto";
 import { join, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { recordManifest, recordTaskLink } from "./telemetry-store.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -41,16 +42,24 @@ function atomicWriteJSON(filePath, data) {
   renameSync(tmp, filePath);
 }
 
-/** Get current git branch, swallowing errors. */
-function getGitBranch() {
+/** Get current git branch from the observed workspace, swallowing errors. */
+function getGitBranch(cwd) {
   try {
     return execSync("git rev-parse --abbrev-ref HEAD", {
       encoding: "utf8",
-      cwd: root,
+      cwd,
       timeout: 5000,
     }).trim();
   } catch {
     return "unknown";
+  }
+}
+
+function getGitHeadSha(cwd) {
+  try {
+    return execSync("git rev-parse HEAD", { encoding: "utf8", cwd, timeout: 5000 }).trim();
+  } catch {
+    return null;
   }
 }
 
@@ -64,8 +73,8 @@ function cmdGenId(squad) {
     process.exit(1);
   }
   const now = new Date().toISOString(); // "2026-06-25T13:02:07.000Z"
-  const ts = now.replace(/:/g, "-").replace(/\.\d+Z$/, "");
-  console.log(`${ts}-${squad}`);
+  const ts = now.replace(/:/g, "-").replace(".", "-").replace(/Z$/, "");
+  console.log(`${ts}-${squad}-${randomBytes(2).toString("hex")}`);
 }
 
 function cmdStart(runId, squad, sourcePath) {
@@ -74,6 +83,8 @@ function cmdStart(runId, squad, sourcePath) {
     process.exit(1);
   }
 
+  const cwd = process.cwd();
+  const gitBranch = getGitBranch(cwd);
   const manifest = {
     runId,
     squad,
@@ -83,8 +94,10 @@ function cmdStart(runId, squad, sourcePath) {
     taskIdAuto: null,
     startedAt: new Date().toISOString(),
     endedAt: null,
-    cwd: process.cwd(),
-    gitBranch: getGitBranch(),
+    cwd,
+    gitBranch,
+    gitRefType: gitBranch === "HEAD" ? "detached" : gitBranch === "unknown" ? "unknown" : "branch",
+    gitHeadSha: getGitHeadSha(cwd),
     native: process.env.NATIVE !== undefined,
     interactive: true,
     claudeConfigDir: process.env.CLAUDE_CONFIG_DIR || null,
@@ -93,6 +106,11 @@ function cmdStart(runId, squad, sourcePath) {
   ensureRunsDir();
   const filePath = join(RUNS_DIR, `${runId}.json`);
   atomicWriteJSON(filePath, manifest);
+  try {
+    recordManifest(manifest, "started", { sourcePath: filePath });
+  } catch (err) {
+    console.error(`[run-manifest] Warning: central telemetry start write failed: ${err.message}`);
+  }
 }
 
 function cmdTag(runId, taskId) {
@@ -121,6 +139,11 @@ function cmdTag(runId, taskId) {
   // else: explicit env tag wins — leave taskIdAuto unchanged
 
   atomicWriteJSON(filePath, manifest);
+  try {
+    recordTaskLink(runId, normalized, "agent_pick");
+  } catch (err) {
+    console.error(`[run-manifest] Warning: central telemetry task tag failed: ${err.message}`);
+  }
 }
 
 function cmdSetTask(runId, taskId) {
@@ -145,6 +168,11 @@ function cmdSetTask(runId, taskId) {
 
   manifest.taskId = normalizeTaskId(taskId);
   atomicWriteJSON(filePath, manifest);
+  try {
+    recordTaskLink(runId, manifest.taskId, "manual");
+  } catch (err) {
+    console.error(`[run-manifest] Warning: central telemetry task set failed: ${err.message}`);
+  }
 }
 
 /** Normalize a task id: uppercase if it matches /^[A-Za-z]+-\d+$/, else warn on stderr. */
@@ -298,6 +326,11 @@ async function cmdEnd(runId, exitCodeStr) {
   }
 
   atomicWriteJSON(filePath, manifest);
+  try {
+    recordManifest(manifest, "ended", { sourcePath: filePath });
+  } catch (err) {
+    console.error(`[run-manifest] Warning: central telemetry end write failed: ${err.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------

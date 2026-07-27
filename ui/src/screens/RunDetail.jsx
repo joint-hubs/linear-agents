@@ -3,14 +3,14 @@ import { useParams, NavLink, useNavigate } from 'react-router-dom';
 import { getRun } from '../api';
 import { linearUrl } from '../config';
 import {
-  fmtUSD,
+  fmtCost,
+  costValue,
   fmtTokens,
   fmtDateTime,
   elapsed,
   taskLabel,
   statusLabel,
   isStale,
-  modelMix,
 } from '../utils';
 
 // Provider label from the `native` flag (ux-design-v3 §3.3.1).
@@ -74,7 +74,7 @@ function TokenRow({ name, v, pct }) {
   return (
     <tr key={name} className="row">
       <td className="td">{display}</td>
-      <td className="td">{fmtUSD(v.costUSD || 0)}</td>
+      <td className="td">{fmtCost(v)}</td>
       <td className="td">{fmtTokens(v.inputTokens || 0)}</td>
       <td className="td">{fmtTokens(v.outputTokens || 0)}</td>
       <td className="td">{fmtTokens(v.cacheReadInputTokens || 0)}</td>
@@ -203,7 +203,7 @@ export default function RunDetail() {
           <div className="grid grid-4">
             <div className="card stat">
               <div className="stat-label">Cost</div>
-              <div className="stat-value">{fmtUSD(run.totals?.costUSD || 0)}</div>
+              <div className="stat-value">{fmtCost(run.totals)}</div>
             </div>
             <div className="card stat">
               <div className="stat-label">Input</div>
@@ -242,10 +242,10 @@ export default function RunDetail() {
                         <td className="td" colSpan={6}>—</td>
                       </tr>
                     );
-                  const sum = entries.reduce((acc, [, v]) => acc + (v.costUSD || 0), 0);
+                  const sum = entries.reduce((acc, [, v]) => acc + costValue(v), 0);
                   return entries
-                    .map(([name, v]) => ({ name, v, pct: sum > 0 ? ((v.costUSD || 0) / sum) * 100 : 0 }))
-                    .sort((a, b) => (b.v.costUSD || 0) - (a.v.costUSD || 0))
+                    .map(([name, v]) => ({ name, v, pct: sum > 0 ? (costValue(v) / sum) * 100 : 0 }))
+                    .sort((a, b) => costValue(b.v) - costValue(a.v))
                     .map((r) => <TokenRow key={r.name} name={r.name} v={r.v} pct={r.pct} />);
                 })()}
               </tbody>
@@ -275,10 +275,10 @@ export default function RunDetail() {
                         <td className="td" colSpan={6}>—</td>
                       </tr>
                     );
-                  const sum = entries.reduce((acc, [, v]) => acc + (v.costUSD || 0), 0);
+                  const sum = entries.reduce((acc, [, v]) => acc + costValue(v), 0);
                   return entries
-                    .map(([name, v]) => ({ name, v, pct: sum > 0 ? ((v.costUSD || 0) / sum) * 100 : 0 }))
-                    .sort((a, b) => (b.v.costUSD || 0) - (a.v.costUSD || 0))
+                    .map(([name, v]) => ({ name, v, pct: sum > 0 ? (costValue(v) / sum) * 100 : 0 }))
+                    .sort((a, b) => costValue(b.v) - costValue(a.v))
                     .map((r) => <TokenRow key={r.name} name={r.name} v={r.v} pct={r.pct} />);
                 })()}
               </tbody>

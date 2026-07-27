@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getRuns } from '../api';
 import { linearUrl } from '../config';
-import { fmtUSD, elapsed, statusLabel, modelMix } from '../utils';
+import { fmtUSD, fmtCost, costValue, elapsed, statusLabel, modelMix } from '../utils';
 
 const POLL_MS = 5000;
 
@@ -208,7 +208,7 @@ export default function Timeline() {
 
               {rows.map(([task, list]) => {
                 const anyEnded = list.some((r) => r.endedAt);
-                const total = list.reduce((s, r) => s + (r.totals?.costUSD || 0), 0);
+                const total = list.reduce((s, r) => s + costValue(r.totals), 0);
                 const repos = [...new Set(list.map((r) => r.repo).filter(Boolean))];
                 const bars = list
                   .map(barFor)
@@ -255,7 +255,7 @@ export default function Timeline() {
                           }}
                           tabIndex={0}
                           role="button"
-                          aria-label={`${b.run.taskId || 'untagged'} — ${fmtUSD(b.run.totals?.costUSD || 0)} — ${b.run.squad || '—'}`}
+                          aria-label={`${b.run.taskId || 'untagged'} — ${fmtCost(b.run.totals)} — ${b.run.squad || '—'}`}
                         />
                       ))}
                       {nowVisible && <div className="nowline" style={{ left: nowPct + '%' }} />}
@@ -292,7 +292,7 @@ export default function Timeline() {
             {hover.run.squad || '—'} · {elapsed(hover.run.startedAt, hover.run.endedAt)} · {statusLabel(hover.run)}
           </div>
           <div>
-            {fmtUSD(hover.run.totals?.costUSD || 0)} · {topModel(hover.run)}
+            {fmtCost(hover.run.totals)} · {topModel(hover.run)}
           </div>
         </div>
       )}

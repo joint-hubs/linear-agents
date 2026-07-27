@@ -4,6 +4,7 @@ import { getRuns, getBudget } from '../api';
 import { linearUrl } from '../config';
 import {
   fmtUSD,
+  fmtCost,
   fmtTokens,
   fmtTime,
   elapsed,
@@ -26,7 +27,7 @@ function CostCell({ run }) {
       </span>
     );
   }
-  return <span>{fmtUSD(run.totals?.costUSD || 0)}</span>;
+  return <span>{fmtCost(run.totals)}</span>;
 }
 
 // Task chip: ↗ link to Linear when the prefix is known, plain text otherwise.
@@ -164,7 +165,7 @@ export default function Live() {
             </div>
             <div className="kpi">
               <div className="kpi-label">Cost today</div>
-              <div className="kpi-value">{fmtUSD(today.costUSD)}</div>
+              <div className="kpi-value">{fmtCost(today)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Tokens today</div>
