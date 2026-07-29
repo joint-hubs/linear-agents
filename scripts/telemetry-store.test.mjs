@@ -146,8 +146,14 @@ test("health exposes store state", () => {
 test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
   const runId = "run-cache-savings";
   applyEvent(db, makeEvent("run.started", { runId, squad: "dev", startedAt: "2026-07-25T08:00:00.000Z" }, { runId, observedAt: "2026-07-25T08:00:00.000Z", sourceKind: "test" }));
-  // deepseek-v4-flash: input=0.14, no cacheRead → cacheReadPrice=0.014
-  // savings = (1M / 1M) * (0.14 - 0.014) = 0.126
+  // deepseek-v4-flash: input=0.14, cacheRead=0.028 (real, from OpenRouter — JOI-79)
+  // savings = (1M / 1M) * (0.14 - 0.028) = 0.112
+  //
+  // This used to expect 0.126, which is what the input*0.1 FALLBACK produces when
+  // config carries no cacheRead. That fallback is wrong in both directions — 12x too
+  // high for DeepSeek V4 Pro, 2x too low for MiniMax — so config now carries real
+  // per-model rates and this asserts the configured value wins. The fallback itself
+  // is covered by the unpriced case below.
   applyEvent(db, makeEvent("usage.recorded", {
     runId, model: "deepseek-v4-flash", inputTokens: 1_000_000, outputTokens: 100_000,
     cacheReadTokens: 1_000_000, cacheCreationTokens: 0, observedAt: "2026-07-25T08:01:00.000Z",
@@ -159,11 +165,11 @@ test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
   }, { runId, observedAt: "2026-07-25T08:02:00.000Z", sourceKind: "transcript", sourcePath: "C:/sessions/cache.jsonl", sourceOffset: 2, eventId: "cache-usage-2" }));
   const run = queryRuns(db, { runId })[0];
   assert(run.totals.cacheSavingsUSD > 0, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected > 0)`);
-  assert(Math.abs(run.totals.cacheSavingsUSD - 0.126) < 0.001, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected ~0.126)`);
+  assert(Math.abs(run.totals.cacheSavingsUSD - 0.112) < 0.001, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected ~0.112 from the configured cacheRead=0.028)`);
   // Per-model: deepseek-v4-flash has savings, unknown model does not
   const flashEntry = run.byModel["deepseek-v4-flash"];
   assert(flashEntry != null, "deepseek-v4-flash entry missing from byModel");
-  assert(Math.abs(flashEntry.cacheSavingsUSD - 0.126) < 0.001, `byModel flash cacheSavingsUSD=${flashEntry.cacheSavingsUSD}`);
+  assert(Math.abs(flashEntry.cacheSavingsUSD - 0.112) < 0.001, `byModel flash cacheSavingsUSD=${flashEntry.cacheSavingsUSD}`);
   const unknownEntry = run.byModel["unknown-model-v99"];
   assert(unknownEntry != null, "unknown-model-v99 entry missing from byModel");
   assert(unknownEntry.cacheSavingsUSD === 0, `byModel unknown cacheSavingsUSD=${unknownEntry.cacheSavingsUSD} (expected 0)`);
