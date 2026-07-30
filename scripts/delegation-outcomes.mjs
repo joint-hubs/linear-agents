@@ -30,6 +30,7 @@
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { homedir } from "node:os";
 
@@ -145,12 +146,14 @@ const isNoiseAgent = (a) => !a || /^agent-[0-9a-f]{8,}/i.test(a);
 
 // ── report ────────────────────────────────────────────────────────────────────
 
-function main() {
+/**
+ * Compute the whole report. Exported so telemetry-server can serve it without
+ * shelling out to this CLI. Returns null when there is nothing to read, rather
+ * than throwing — a dashboard panel must degrade, not take the page down.
+ */
+export function computeOutcomes({ dbPath = DB_PATH } = {}) {
   const reviews = loadReviews();
-  if (!reviews.length) {
-    console.error("[delegation-outcomes] brak plików w .state/reviews/ — nie ma z czego liczyć");
-    process.exit(1);
-  }
+  if (!reviews.length) return null;
   const taskOutcomes = outcomesByTask(reviews);
 
   // The round counter is REVIEW's own state; it may know about tasks whose round
@@ -166,7 +169,7 @@ function main() {
     }
   }
 
-  const db = new DatabaseSync(DB_PATH, { readOnly: true });
+  const db = new DatabaseSync(dbPath, { readOnly: true });
   const delegations = delegationsByTask(db);
 
   // model x role: how did work from this pairing fare downstream
@@ -194,12 +197,27 @@ function main() {
     }
   }
 
+  return {
+    tasksWithVerdict: taskOutcomes.size,
+    matched,
+    unmatched,
+    byTask: [...taskOutcomes.values()],
+    byPair: [...pair.values()].sort((a, b) => b.tasks - a.tasks),
+  };
+}
+
+function main() {
+  const result = computeOutcomes();
+  if (!result) {
+    console.error("[delegation-outcomes] brak plików w .state/reviews/ — nie ma z czego liczyć");
+    process.exit(1);
+  }
+  const { tasksWithVerdict, matched, unmatched, byTask, byPair } = result;
+  const taskOutcomes = new Map(byTask.map((t) => [t.taskId, t]));
+  const pair = new Map(byPair.map((p) => [`${p.agent}|${p.model}`, p]));
+
   if (AS_JSON) {
-    console.log(JSON.stringify({
-      tasksWithVerdict: taskOutcomes.size, matched, unmatched,
-      byTask: [...taskOutcomes.values()],
-      byPair: [...pair.values()],
-    }, null, 2));
+    console.log(JSON.stringify(result, null, 2));
     return;
   }
 
@@ -235,4 +253,9 @@ function main() {
   console.log(`  Przy próbce rzędu kilku zadań to sygnał do obserwacji, nie werdykt o modelu.\n`);
 }
 
-main();
+// Only run the CLI when executed directly. telemetry-server imports
+// computeOutcomes() from here; without this guard every server start would print
+// the whole report to stdout.
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  main();
+}

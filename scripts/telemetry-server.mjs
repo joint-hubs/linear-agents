@@ -33,6 +33,7 @@ import {
 import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools } from './squad-config.mjs';
 import { listTerminals, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive } from './terminals.mjs';
 import { buildPromptTree, readRoleDoc, readLeadDoc } from './prompt-library.mjs';
+import { computeOutcomes } from './delegation-outcomes.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
@@ -1110,6 +1111,24 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // GET /api/delegation-outcomes (JOI-210)
+    // Quality signal per delegation: REVIEW's own verdicts joined back onto the
+    // DEV roles that produced the code. Recomputed per request — it reads 34 small
+    // files and one grouped query, and a stale panel would be worse than a slow one.
+    if (path === '/api/delegation-outcomes') {
+      let data = null;
+      try {
+        data = computeOutcomes();
+      } catch (error) {
+        console.error('[delegation-outcomes]', error.message);
+      }
+      // No reviews yet is a legitimate empty state, not a failure: the panel says
+      // so rather than the page breaking.
+      json(res, 200, data || { tasksWithVerdict: 0, matched: 0, unmatched: 0, byTask: [], byPair: [] });
+      log(method, path, 200);
+      return;
+    }
+
     // GET /api/cost-per-task
     if (path === '/api/cost-per-task') {
       const data = (await telemetrySummary({ priceMode: url.searchParams.get('pricing') || 'current' })).byTask;
@@ -1527,6 +1546,7 @@ server.listen(PORT, '127.0.0.1', () => {
       '/api/runs',
       '/api/summary',
       '/api/cost-per-task',
+      '/api/delegation-outcomes',
       '/api/budget',
       '/api/telemetry/health',
       '/api/linear/queue?workspace=jointhubs',

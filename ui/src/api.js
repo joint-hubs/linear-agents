@@ -22,6 +22,13 @@ export async function getBudget() {
   return apiFetch('/api/budget');
 }
 
+// JOI-210: quality signal per delegation — REVIEW's own verdicts joined back onto
+// the DEV roles that produced the code. Lives next to cost so the two read
+// together: a cheap role that keeps coming back from review is not cheap.
+export async function getDelegationOutcomes() {
+  return apiFetch('/api/delegation-outcomes');
+}
+
 // L1a (JOI-68): Linear task queue enriched with `suggestedSquad` per
 // handoff-rules.json. `workspace` selects the Linear key server-side
 // (?workspace=jointhubs|pisi). Returns {workspace, tasks[], error, fetchedAt}.

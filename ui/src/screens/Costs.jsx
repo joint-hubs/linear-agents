@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getRuns, getSummary, getBudget } from '../api';
+import { getRuns, getSummary, getBudget, getDelegationOutcomes } from '../api';
 import { linearUrl } from '../config';
 import { fmtUSD, fmtCost, costValue, fmtTokens, fmtNum, fmtDate, topByCost, statusLabel } from '../utils';
 import RunTaskModal from '../components/RunTaskModal';
@@ -79,6 +79,8 @@ export default function Costs() {
 
   // RunTaskModal state
   const [taskModalRun, setTaskModalRun] = useState(null);
+  // JOI-210 — fetched independently; its failure must not take the page down.
+  const [outcomes, setOutcomes] = useState(null);
 
   const fetchData = useCallback(() => {
     let cancelled = false;
@@ -96,6 +98,11 @@ export default function Costs() {
         setError(err.message || String(err));
         setLoading(false);
       });
+    // Quality signal (JOI-210). Same contract as budget: independent, non-fatal.
+    getDelegationOutcomes()
+      .then((o) => { if (!cancelled) setOutcomes(o); })
+      .catch(() => { if (!cancelled) setOutcomes(null); });
+
     // Budget is fetched independently — its failure is non-fatal (panel degrades).
     getBudget()
       .then((b) => {
@@ -364,6 +371,62 @@ export default function Costs() {
                 // "_lead" is an internal attribution key — display as "lead".
                 return entries.map(([k, v]) => barRow(k, v, max, k === '_lead' ? 'lead' : k));
               })()}
+            </div>
+          )}
+
+          {/* Quality by role (JOI-210). Deliberately next to "Cost by agent": the
+              two only mean something together — a cheap role that keeps coming back
+              from review is not cheap. */}
+          {outcomes && outcomes.byPair && outcomes.byPair.length > 0 && (
+            <div className="section">
+              <div className="section-h">
+                Jakość wg roli DEV
+                <span style={{ fontWeight: 400, color: 'var(--muted)', marginLeft: 8, fontSize: '0.85em' }}>
+                  werdykty REVIEW · {outcomes.matched} z {outcomes.tasksWithVerdict} zadań dopasowanych
+                </span>
+              </div>
+              <table className="table" style={{ width: '100%' }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: 'left' }}>ROLA</th>
+                    <th style={{ textAlign: 'left' }}>MODEL</th>
+                    <th style={{ textAlign: 'right' }}>ZADAŃ</th>
+                    <th style={{ textAlign: 'right' }}>CZYSTO</th>
+                    <th style={{ textAlign: 'right' }}>ŚR. RUND</th>
+                    <th style={{ textAlign: 'right' }}>KOSZT</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {outcomes.byPair.map((p) => {
+                    const pct = p.tasks ? Math.round((p.clean / p.tasks) * 100) : 0;
+                    // Under ~5 tasks the percentage is noise; show it greyed so the
+                    // table cannot be read as a verdict on a model.
+                    const thin = p.tasks < 5;
+                    return (
+                      <tr key={`${p.agent}|${p.model}`}>
+                        <td>{p.agent === '_lead' ? 'lead' : p.agent}</td>
+                        <td style={{ color: 'var(--muted)' }}>{p.model}</td>
+                        <td style={{ textAlign: 'right' }}>{p.tasks}</td>
+                        <td style={{ textAlign: 'right', color: thin ? 'var(--muted)' : undefined }}>
+                          {pct}%{thin ? ' ?' : ''}
+                        </td>
+                        <td style={{ textAlign: 'right' }}>{(p.rounds / p.tasks).toFixed(1)}</td>
+                        <td style={{ textAlign: 'right' }}>{fmtUSD(p.usd)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <div className="hint" style={{ marginTop: 8 }}>
+                „Czysto" = review przeszedł za pierwszym razem bez zwrotu. <strong>?</strong> oznacza
+                próbkę poniżej 5 zadań — to sygnał do obserwacji, nie werdykt o modelu.
+                Werdykt zadania liczy się każdej roli DEV, która go dotknęła, więc gdy recon
+                i implementer robili to samo zadanie, oba mają ten sam wynik.
+                {outcomes.unmatched > 0 && (
+                  <> {outcomes.unmatched} zadań z werdyktem nie ma delegacji w telemetrii
+                  (praca poza przebiegami składów albo dry-run).</>
+                )}
+              </div>
             </div>
           )}
 
