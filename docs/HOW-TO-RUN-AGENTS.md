@@ -204,11 +204,12 @@ czasie. Ingestor czyta transkrypty poza ścieżką HTTP, zapisuje usage leadów 
 subagentów oraz obserwacje repo/worktree/ref/HEAD. Po `EnterWorktree` Run Detail
 pokazuje aktualny worktree i branch, a nie tylko branch z chwili startu.
 
-`telemetry-server.mjs` domyślnie czyta SQLite; `LA_TELEMETRY_READ_SOURCE=files`
-jest awaryjnym trybem legacy. Przy pierwszym pustym starcie serwer importuje
-manifesty/transkrypty, a potem odtwarza spool i odświeża ingest co 15 s. Health:
-`GET /api/telemetry/health`. Ceny API są `as-run`; dodaj `?pricing=current`, aby
-przeliczyć sam odczyt bieżącym `config/models.json`. Gdy część usage nie ma
+`telemetry-server.mjs` czyta wyłącznie centralny SQLite (twardy wymóg — serwer
+odmawia startu bez `node:sqlite`, Node < 22.5). Przy pierwszym pustym starcie
+serwer importuje manifesty/transkrypty, a potem odtwarza spool i odświeża
+ingest co 15 s. Health: `GET /api/telemetry/health`. Ceny API domyślnie są
+`current` (żywy `config/models.json`); dodaj `?pricing=as-run`, aby zobaczyć
+cennik zapisany przy danym przebiegu (audyt historyczny). Gdy część usage nie ma
 ceny, API zwraca `costUSD:null` + `partialCostUSD`; dashboard pokazuje
 `≥$known`, a nie fałszywe `$0.00`. Koszt per task jest temporalny: tury przed
 `pick/tag` pozostają `__untagged__`.

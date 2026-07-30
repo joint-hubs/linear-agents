@@ -15,8 +15,9 @@ const PERIODS = [
   { key: 'all', ms: null, label: 'All' },
 ];
 
-// Recompute the byDay map from a set of runs (mirrors telemetry-server.buildSummary
-// — YYYY-MM-DD is the first 10 chars of startedAt).
+// Recompute the byDay map from a set of runs — YYYY-MM-DD is the first 10
+// chars of startedAt. Mirrors the bucketing querySummary does server-side
+// in telemetry-store.mjs, applied client-side to the period-filtered subset.
 function computeByDay(runs) {
   const out = {};
   for (const r of runs) {

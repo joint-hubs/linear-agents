@@ -107,7 +107,7 @@ PRD: `docs/prd/telemetry-v2-central-tracing-prd.md`.
 - `scripts/telemetry-hook.mjs` + `SessionStart` hook w 5 squadach: exact `LA_RUN_ID -> CLAUDE_CODE_SESSION_ID`, bez dopasowania po czasie.
 - `run-manifest.mjs`: Git branch pobierany z obserwowanego `cwd`, dual-write manifestu i task linku do centralnego store.
 - `scripts/telemetry-ingest.mjs`: backfill legacy, incrementalny parser transkryptów, eventy `relocated`/`worktree-state`, lead/subagent usage; discovery legacy preferuje bezpośredni ślad `runId` w transkrypcie.
-- `telemetry-server.mjs`: `/api/runs`, `/api/summary`, `/api/cost-per-task`, `/api/live`, `/api/budget` i `/api/flow` czytają SQLite, nie `ledger.scanRuns()`; `/api/telemetry/health`; startup backfill pustej bazy + spool/incremental ingest co 15 s. `LA_TELEMETRY_READ_SOURCE=files` = fallback legacy.
+- `telemetry-server.mjs`: `/api/runs`, `/api/summary`, `/api/cost-per-task`, `/api/live`, `/api/budget` i `/api/flow` czytają wyłącznie SQLite; serwer odmawia startu bez `node:sqlite`. `LA_TELEMETRY_READ_SOURCE=files` (legacy files-fallback, `buildSummary()`, flow-db.mjs jako runtime lane) usunięte 2026-07-30 — zero użytkowników, zero testów, patrz `docs/decisions/code-audit-2026-07-30.md`. `/api/telemetry/health`; startup backfill pustej bazy + spool/incremental ingest co 15 s.
 
 **Weryfikacja:** centralny backfill zaimportował 99 manifestów, 333 pliki transkryptów i 23k+ usage events. FOC-36 został odzyskany z exact `sessionId`, worktree `office/.claude/worktrees/foc-36-design-system`, branch `foc-36-design-system`, task `FOC-36` i kosztem `$5.19782782`. Health raportuje 0 pending eventów; brakujące transkrypty oraz modele bez ceny są jawne jako quality issues, nie `$0.00`.
 

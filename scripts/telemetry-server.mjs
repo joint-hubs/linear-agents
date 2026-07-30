@@ -1,5 +1,7 @@
 // scripts/telemetry-server.mjs
-// Telemetry HTTP API — reads .state/runs + transcripts via ledger.mjs
+// Telemetry HTTP API — reads the central SQLite store (telemetry-store.mjs).
+// ledger.mjs is used only for /api/flow's overview + turn-log extraction, which
+// still read transcripts directly.
 // Usage: node scripts/telemetry-server.mjs [--smoke]
 //   --smoke: start, print ready, auto-shutdown after 10s (for CI/manual smoke test)
 
@@ -45,7 +47,18 @@ loadEnv();
 
 const PORT = parseInt(process.env.TELEMETRY_PORT, 10) || 7331;
 const isSmoke = process.argv.includes('--smoke');
-const telemetryReadSource = (process.env.LA_TELEMETRY_READ_SOURCE || 'sqlite').toLowerCase();
+
+// Central SQLite store is a hard requirement (README: "Node 22.5+ — centralna
+// telemetria używa node:sqlite"), not an optional lane. It used to have a
+// files-based fallback selectable via LA_TELEMETRY_READ_SOURCE=files, but
+// nothing ever set that var and no test ever exercised the path — it was 130+
+// untested lines pretending to be a safety net. Fail loudly instead: a real
+// node:sqlite outage should stop the server, not silently degrade into code
+// nobody has run.
+if (!telemetryStore.sqliteAvailable()) {
+  console.error('[telemetry] node:sqlite unavailable — requires Node >= 22.5. Cannot start.');
+  process.exit(1);
+}
 
 // ---------------------------------------------------------------------------
 // Ledger — dynamically imported; T-E0a builds scripts/ledger.mjs in parallel.
@@ -153,24 +166,17 @@ function log(method, path, status) {
   console.log(`${method} ${path} -> ${status}`);
 }
 
-function useCentralStore() {
-  return telemetryReadSource !== 'files' && telemetryStore.sqliteAvailable();
-}
-
 async function telemetryRuns(options = {}) {
-  if (!useCentralStore()) return ledger.scanRuns();
   const db = telemetryStore.openTelemetryDb();
   try { return telemetryStore.queryRuns(db, options); } finally { db.close(); }
 }
 
 async function telemetrySummary(options = {}) {
-  if (!useCentralStore()) return buildSummary(await ledger.scanRuns());
   const db = telemetryStore.openTelemetryDb();
   try { return telemetryStore.querySummary(db, options); } finally { db.close(); }
 }
 
 async function telemetryHealth() {
-  if (!useCentralStore()) return { readSource: 'files', warning: 'Central SQLite store disabled or unavailable' };
   const db = telemetryStore.openTelemetryDb();
   try { return { readSource: 'sqlite', ...telemetryStore.queryHealth(db) }; } finally { db.close(); }
 }
@@ -190,7 +196,6 @@ async function telemetryHealth() {
  * @returns {number} how many runs were closed
  */
 async function reconcileDeadRuns() {
-  if (!useCentralStore()) return 0;
   let closed = 0;
   try {
     const active = withManifestConsolePid(await telemetryRuns()).filter((r) => !r.endedAt);
@@ -217,7 +222,6 @@ async function reconcileDeadRuns() {
 }
 
 function ingestTelemetry() {
-  if (!useCentralStore()) return;
   try {
     const replay = telemetryStore.replayPending();
     const result = ingestKnownRuns();
@@ -231,7 +235,6 @@ function ingestTelemetry() {
 }
 
 async function bootstrapTelemetry() {
-  if (!useCentralStore()) return;
   const db = telemetryStore.openTelemetryDb();
   let runCount = 0;
   try { runCount = db.prepare('SELECT COUNT(*) AS count FROM runs').get().count; } finally { db.close(); }
@@ -247,75 +250,6 @@ async function bootstrapTelemetry() {
     console.log(`[telemetry] backfill manifests=${result.manifests} usage=${result.usageEvents} force=${forceBackfill}`);
   }
   ingestTelemetry();
-}
-
-// ---------------------------------------------------------------------------
-// Summary builder — aggregates scanRuns() output into the /api/summary shape
-// ---------------------------------------------------------------------------
-
-function buildSummary(runs) {
-  const totals = { runs: 0, inputTokens: 0, outputTokens: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, cacheSavingsUSD: 0, cacheReadTokens: 0 };
-  const bySquad = {};
-  const byModel = {};
-  const byDay = {};
-  const byRepo = {};
-
-  for (const run of runs) {
-    const t = run.totals || {};
-    totals.runs += 1;
-    totals.inputTokens += t.inputTokens || 0;
-    totals.outputTokens += t.outputTokens || 0;
-    totals.partialCostUSD += t.partialCostUSD ?? t.costUSD ?? 0;
-    totals.unpricedUsageCount += t.unpricedUsageCount || 0;
-    totals.cacheSavingsUSD += t.cacheSavingsUSD || 0;
-    totals.cacheReadTokens += t.cacheReadTokens || 0;
-
-    // bySquad
-    const squad = run.squad || 'unknown';
-    if (!bySquad[squad]) bySquad[squad] = { runs: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0, tokens: 0 };
-    bySquad[squad].runs += 1;
-    bySquad[squad].partialCostUSD += t.partialCostUSD ?? t.costUSD ?? 0;
-    bySquad[squad].unpricedUsageCount += t.unpricedUsageCount || 0;
-    bySquad[squad].tokens += (t.inputTokens || 0) + (t.outputTokens || 0);
-
-    // byModel
-    const models = run.byModel || {};
-    for (const [slug, m] of Object.entries(models)) {
-      if (!byModel[slug]) byModel[slug] = { tokens: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0 };
-      byModel[slug].tokens += (m.inputTokens || 0) + (m.outputTokens || 0);
-      byModel[slug].partialCostUSD += m.partialCostUSD ?? m.costUSD ?? 0;
-      byModel[slug].unpricedUsageCount += m.unpricedUsageCount || 0;
-    }
-
-    // byDay — extract YYYY-MM-DD from startedAt ISO string
-    const day = (run.startedAt || '').slice(0, 10);
-    if (day) {
-      if (!byDay[day]) byDay[day] = { runs: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0 };
-      byDay[day].runs += 1;
-      byDay[day].partialCostUSD += t.partialCostUSD ?? t.costUSD ?? 0;
-      byDay[day].unpricedUsageCount += t.unpricedUsageCount || 0;
-    }
-
-    // byRepo
-    const repo = run.repo || 'unknown';
-    if (!byRepo[repo]) byRepo[repo] = { runs: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0 };
-    byRepo[repo].runs += 1;
-    byRepo[repo].partialCostUSD += t.partialCostUSD ?? t.costUSD ?? 0;
-    byRepo[repo].unpricedUsageCount += t.unpricedUsageCount || 0;
-  }
-
-  totals.costUSD = totals.unpricedUsageCount ? null : totals.partialCostUSD;
-  for (const bucket of [...Object.values(bySquad), ...Object.values(byModel), ...Object.values(byDay), ...Object.values(byRepo)]) {
-    bucket.costUSD = bucket.unpricedUsageCount ? null : bucket.partialCostUSD;
-  }
-
-  // Cache hit rate: cacheRead / (freshInput + cacheRead). Expressed as 0–100.
-  const cacheHitRate =
-    totals.cacheReadTokens + totals.inputTokens > 0
-      ? (totals.cacheReadTokens / (totals.cacheReadTokens + totals.inputTokens)) * 100
-      : 0;
-
-  return { totals, bySquad, byModel, byDay, byRepo, cacheHitRate, byTask: ledger.aggregateByTask(runs) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,8 +1142,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // GET /api/flow/trace?taskId=… + GET /api/flow/patterns. The default path
-    // reads the central store; legacy FlowDB remains only for files fallback.
+    // GET /api/flow/trace?taskId=… + GET /api/flow/patterns.
     if (path === '/api/flow/trace' || path === '/api/flow/patterns') {
       const taskId = url.searchParams.get('taskId') || '';
       if (path === '/api/flow/trace' && !taskId) {
@@ -1217,51 +1150,15 @@ const server = createServer(async (req, res) => {
         log(method, path, 400);
         return;
       }
-      if (useCentralStore()) {
-        const db = telemetryStore.openTelemetryDb();
-        try {
-          const result = path === '/api/flow/trace'
-            ? telemetryStore.queryTrace(db, taskId)
-            : telemetryStore.queryPatterns(db, {
-                squad: url.searchParams.get('squad') || undefined,
-                agent: url.searchParams.get('agent') || undefined,
-              });
-          json(res, 200, result);
-          log(method, path, 200);
-        } finally {
-          db.close();
-        }
-        return;
-      }
-      let flowDb;
+      const db = telemetryStore.openTelemetryDb();
       try {
-        flowDb = await import('./flow-db.mjs');
-      } catch (e) {
-        json(res, 200, { error: 'flow-db unavailable: ' + e.message });
-        log(method, path, 200);
-        return;
-      }
-      if (!flowDb.sqliteAvailable()) {
-        json(res, 200, { error: 'node:sqlite unavailable — flow DB requires Node >= 22.5' });
-        log(method, path, 200);
-        return;
-      }
-      const { existsSync: dbExists } = await import('node:fs');
-      if (!dbExists(flowDb.DEFAULT_DB_PATH)) {
-        json(res, 200, { error: 'flow DB not found — run: node scripts/flow-db.mjs ingest' });
-        log(method, path, 200);
-        return;
-      }
-      const db = flowDb.openDb(flowDb.DEFAULT_DB_PATH);
-      try {
-        if (path === '/api/flow/trace') {
-          json(res, 200, flowDb.queryTrace(db, taskId));
-        } else {
-          json(res, 200, flowDb.queryPatterns(db, {
-            squad: url.searchParams.get('squad') || undefined,
-            agent: url.searchParams.get('agent') || undefined,
-          }));
-        }
+        const result = path === '/api/flow/trace'
+          ? telemetryStore.queryTrace(db, taskId)
+          : telemetryStore.queryPatterns(db, {
+              squad: url.searchParams.get('squad') || undefined,
+              agent: url.searchParams.get('agent') || undefined,
+            });
+        json(res, 200, result);
         log(method, path, 200);
       } finally {
         db.close();
