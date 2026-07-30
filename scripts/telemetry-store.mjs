@@ -107,7 +107,11 @@ export function openTelemetryDb(path = telemetryDbPath()) {
   return db;
 }
 
-export function migrate(db) {
+// Full current schema, created once via IF NOT EXISTS. New columns on existing
+// tables are NOT added here — see the migration steps below migrate(), which
+// keep a paper trail of what changed and why instead of silently rewriting
+// this block (and losing that history) every time the schema grows.
+function createBaseSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -262,16 +266,42 @@ export function migrate(db) {
       UNIQUE(run_id, issue_type, resolved_at)
     );
   `);
-  const runColumns = db.prepare("PRAGMA table_info(runs)").all().map((column) => column.name);
-  if (!runColumns.includes("price_set_id")) db.exec("ALTER TABLE runs ADD COLUMN price_set_id TEXT");
+}
+
+// Columns added to `runs` after its initial CREATE TABLE. Declarative list
+// instead of one `if (!columns.includes(...)) ALTER` per line, so "which
+// columns exist and why" reads in one place — this is exactly the block that
+// gets a new line every time a feature needs a new column (console_pid,
+// window_title, launched_by all landed here for the terminal panel).
+const RUN_COLUMNS = [
+  ["price_set_id", "TEXT"],
   // Terminal panel: the console window a run owns. console_pid is the stable
   // identifier — the window title is overwritten by Claude Code at startup, so
   // window_title and launched_by are labels for the UI, never lookup keys.
-  if (!runColumns.includes("console_pid")) db.exec("ALTER TABLE runs ADD COLUMN console_pid INTEGER");
-  if (!runColumns.includes("window_title")) db.exec("ALTER TABLE runs ADD COLUMN window_title TEXT");
-  if (!runColumns.includes("launched_by")) db.exec("ALTER TABLE runs ADD COLUMN launched_by TEXT");
+  ["console_pid", "INTEGER"],
+  ["window_title", "TEXT"],
+  ["launched_by", "TEXT"],
+];
+
+function addRunColumns(db) {
+  const existing = new Set(db.prepare("PRAGMA table_info(runs)").all().map((c) => c.name));
+  for (const [name, type] of RUN_COLUMNS) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE runs ADD COLUMN ${name} ${type}`);
+  }
+}
+
+// One-time backfill: every pre-existing run gets the price set that was live
+// at migration time, so cost queries never see a NULL price_set_id.
+function backfillPriceSetId(db) {
   const migrationPriceSet = ensurePriceSet(db);
   db.prepare("UPDATE runs SET price_set_id=? WHERE price_set_id IS NULL").run(migrationPriceSet.id);
+}
+
+// Data-integrity backfill: close any 'primary' task link left open (valid_to
+// IS NULL) despite a newer 'primary' link existing for the same run — a state
+// that predates the "one active primary link" invariant enforced by the
+// unique index below.
+function closeSupersededPrimaryLinks(db) {
   db.exec(`
     UPDATE run_task_links SET valid_to=(
       SELECT newer.valid_from FROM run_task_links newer
@@ -287,8 +317,23 @@ export function migrate(db) {
           (newer.valid_from=run_task_links.valid_from AND newer.rowid>run_task_links.rowid))
     )
   `);
+}
+
+function ensureOneActivePrimaryLinkIndex(db) {
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_run_task_links_one_active_primary
     ON run_task_links(run_id) WHERE role='primary' AND valid_to IS NULL`);
+}
+
+// Order matters: base schema before column adds (ALTER needs the table to
+// exist); columns before the price-set backfill (it writes price_set_id);
+// superseded-links cleanup before the unique index (the index would reject
+// the very rows that cleanup fixes).
+export function migrate(db) {
+  createBaseSchema(db);
+  addRunColumns(db);
+  backfillPriceSetId(db);
+  closeSupersededPrimaryLinks(db);
+  ensureOneActivePrimaryLinkIndex(db);
   db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(SCHEMA_VERSION, now());
 }
 
