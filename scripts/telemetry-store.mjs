@@ -614,8 +614,21 @@ function pricingSnapshot() {
   return { id: hash(source), configHash: hash(source), prices: config.pricing || {} };
 }
 
+/**
+ * Placeholder usage rows carry a sentinel instead of a real model id. It is written
+ * as `<synthetic>` but every guard here checked for bare `synthetic`, so the guard
+ * never fired: 16 zero-token rows were counted as unpriced and dragged
+ * summary.costUSD to null — which is why the dashboard showed no total at all,
+ * despite every real model being priced. Accept both spellings.
+ */
+const SYNTHETIC_MODELS = new Set(["synthetic", "<synthetic>"]);
+
+export function isSyntheticModel(model) {
+  return !model || SYNTHETIC_MODELS.has(model);
+}
+
 function resolvePrice(model, prices) {
-  if (!model || model === "synthetic") return null;
+  if (isSyntheticModel(model)) return null;
   if (prices[model]) return { key: model, price: prices[model] };
   const short = model.split("/").pop().replace(/\./g, "-");
   const exactShort = [];
@@ -711,7 +724,7 @@ function applyUsageRecorded(db, event) {
     db.prepare("UPDATE runs SET price_set_id=? WHERE run_id=?").run(snapshot.id, runId);
   }
   const cost = calculateCost(payload, payload.model, snapshot.prices);
-  if (cost == null && payload.model && payload.model !== "synthetic") {
+  if (cost == null && !isSyntheticModel(payload.model)) {
     raiseIssue(db, runId, "pricing_missing", "warning", { model: payload.model, usageId });
   }
   db.prepare("INSERT OR REPLACE INTO cost_facts (usage_id, price_set_id, cost_usd) VALUES (?, ?, ?)")
@@ -914,7 +927,7 @@ function makeRunProjection(db, row, options = {}) {
     `SELECT u.model, SUM(u.input_tokens) AS input_tokens, SUM(u.output_tokens) AS output_tokens,
        SUM(u.cache_read_tokens) AS cache_read_tokens, SUM(u.cache_creation_tokens) AS cache_creation_tokens,
        SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END) AS cost_usd,
-       SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model != 'synthetic' THEN 1 ELSE 0 END) AS unpriced
+       SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced
        FROM usage_facts u LEFT JOIN cost_facts c ON c.usage_id=u.usage_id
        WHERE u.run_id=? GROUP BY u.model`,
   ).all(row.run_id);
@@ -922,7 +935,7 @@ function makeRunProjection(db, row, options = {}) {
     `SELECT u.agent_key, SUM(u.input_tokens) AS input_tokens, SUM(u.output_tokens) AS output_tokens,
        SUM(u.cache_read_tokens) AS cache_read_tokens, SUM(u.cache_creation_tokens) AS cache_creation_tokens,
       SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END) AS cost_usd,
-      SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model != 'synthetic' THEN 1 ELSE 0 END) AS unpriced,
+      SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced,
       COUNT(*) AS turns,
        MAX(u.observed_at) AS last_activity_at FROM usage_facts u LEFT JOIN cost_facts c ON c.usage_id=u.usage_id
        WHERE u.run_id=? GROUP BY u.agent_key`,
@@ -931,7 +944,7 @@ function makeRunProjection(db, row, options = {}) {
     `SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens,
        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
        COALESCE(SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END), 0) AS cost_usd,
-       SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model != 'synthetic' THEN 1 ELSE 0 END) AS unpriced,
+       SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced,
        MAX(u.observed_at) AS last_activity_at FROM usage_facts u LEFT JOIN cost_facts c ON c.usage_id=u.usage_id WHERE u.run_id=?`,
   ).get(row.run_id);
   const byModel = {};
@@ -951,7 +964,7 @@ function makeRunProjection(db, row, options = {}) {
     const priceSet = loadPriceSet(db, row.price_set_id);
     for (const item of byModelRows) {
       const model = item.model;
-      if (!model || model === "synthetic") continue;
+      if (isSyntheticModel(model)) continue;
       const resolved = resolvePrice(model, priceSet.prices);
       if (!resolved) continue;
       const price = resolved.price;
@@ -1035,7 +1048,7 @@ function repriceCurrent(db, runs) {
       inputTokens: item.input_tokens, outputTokens: item.output_tokens,
       cacheReadTokens: item.cache_read_tokens, cacheCreationTokens: item.cache_creation_tokens,
     }, item.model, prices);
-    if (cost == null && item.model && item.model !== "synthetic") {
+    if (cost == null && !isSyntheticModel(item.model)) {
       run.totals.unpricedUsageCount++;
       if (run.byModel[modelKey]) run.byModel[modelKey].unpricedUsageCount++;
       if (run.byAgent[item.agent_key]) run.byAgent[item.agent_key].unpricedUsageCount++;
@@ -1052,7 +1065,7 @@ function repriceCurrent(db, runs) {
       run.byAgent[item.agent_key].partialCostUSD += value;
     }
     // Compute cache savings for this usage item
-    if (item.cache_read_tokens > 0 && item.model && item.model !== "synthetic") {
+    if (item.cache_read_tokens > 0 && !isSyntheticModel(item.model)) {
       const resolved = resolvePrice(item.model, prices);
       if (resolved) {
         const price = resolved.price;
@@ -1119,7 +1132,7 @@ function aggregateUsageByTask(db, priceMode) {
     bucket.outputTokens += row.output_tokens;
     bucket.cacheReadTokens += row.cache_read_tokens;
     bucket.cacheCreationInputTokens += row.cache_creation_tokens;
-    if (cost == null && row.model && row.model !== "synthetic") bucket.unpricedUsageCount++;
+    if (cost == null && !isSyntheticModel(row.model)) bucket.unpricedUsageCount++;
     else bucket.partialCostUSD += cost || 0;
     bucket._runs.add(row.run_id);
     if (!bucket.firstStartedAt || row.started_at < bucket.firstStartedAt) bucket.firstStartedAt = row.started_at;

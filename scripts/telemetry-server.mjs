@@ -1051,7 +1051,13 @@ const server = createServer(async (req, res) => {
 
     // GET /api/runs
     if (path === '/api/runs') {
-      const data = await telemetryRuns({ priceMode: url.searchParams.get('pricing') || 'as-run' });
+      // Default is 'current', not 'as-run'. 'as-run' replays the price set stored with
+      // each run, which is the right call when prices genuinely change — but ours were
+      // wrong, not old: GLM-5.2 sat at 2.03x its real rate, no model carried cacheRead
+      // (so the store guessed input*0.1), and Haiku 4.5 had no price at all, which left
+      // summary.costUSD null. Replaying that reproduces the error. 'as-run' stays
+      // reachable via ?pricing=as-run for audit.
+      const data = await telemetryRuns({ priceMode: url.searchParams.get('pricing') || 'current' });
       json(res, 200, data);
       log(method, path, 200);
       return;
@@ -1084,7 +1090,7 @@ const server = createServer(async (req, res) => {
     const runsMatch = path.match(/^\/api\/runs\/(.+)$/);
     if (runsMatch) {
       const runId = runsMatch[1];
-      const runs = await telemetryRuns({ priceMode: url.searchParams.get('pricing') || 'as-run' });
+      const runs = await telemetryRuns({ priceMode: url.searchParams.get('pricing') || 'current' });
       const run = runs.find(r => r.runId === runId);
       if (!run) {
         json(res, 404, { error: 'not found' });
@@ -1098,7 +1104,7 @@ const server = createServer(async (req, res) => {
 
     // GET /api/summary
     if (path === '/api/summary') {
-      const summary = await telemetrySummary({ priceMode: url.searchParams.get('pricing') || 'as-run' });
+      const summary = await telemetrySummary({ priceMode: url.searchParams.get('pricing') || 'current' });
       json(res, 200, summary);
       log(method, path, 200);
       return;
@@ -1106,7 +1112,7 @@ const server = createServer(async (req, res) => {
 
     // GET /api/cost-per-task
     if (path === '/api/cost-per-task') {
-      const data = (await telemetrySummary({ priceMode: url.searchParams.get('pricing') || 'as-run' })).byTask;
+      const data = (await telemetrySummary({ priceMode: url.searchParams.get('pricing') || 'current' })).byTask;
       json(res, 200, data);
       log(method, path, 200);
       return;
