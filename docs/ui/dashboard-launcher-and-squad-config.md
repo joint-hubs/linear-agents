@@ -139,7 +139,7 @@ cennik osobno w `models.json`.
 - Zmiana providera (zawsze OpenRouter).
 
 ### Architektura / zmiany techniczne
-- **`scripts/squad-config.mjs`** (nowy, czysty, z testami `_test_squad-config.mjs`):
+- **`scripts/squad-config.mjs`** (nowy, czysty, z testami `squad-config-{read,write,tools}.test.mjs`):
   - `readSquadConfig()` → `{ squads: { plan: { lead, agents: {role: slug} }, … }, pricing }`.
     - lead: regex na `set "ANTHROPIC_MODEL=<slug>"` w `bin/<squad>.bat`.
     - agents: parse frontmatter `model:` w każdym `agents/<squad>/agents/*.md`.
@@ -168,8 +168,8 @@ cennik osobno w `models.json`.
 - [ ] Slug spoza wzorca → ostrzeżenie, ale zapis możliwy.
 - [ ] Przed zapisem widać **diff** dotykanych plików; po zapisie komunikat o
       „następnym uruchomieniu".
-- [ ] `node scripts/_test_squad-config.mjs` zielony (odczyt+zapis na fixturach,
-      brak uszkodzenia frontmatteru/`.bat`).
+- [ ] `node --test scripts/squad-config-*.test.mjs` zielony (odczyt+zapis na
+      fixturach, brak uszkodzenia frontmatteru/`.bat`).
 - [ ] Pliki pozostają git-tracked — po zmianie `git diff` pokazuje edycje do
       commita.
 
