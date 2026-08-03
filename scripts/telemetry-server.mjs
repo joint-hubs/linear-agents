@@ -34,7 +34,13 @@ import {
 } from './launch.mjs';
 import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools } from './squad-config.mjs';
 import { listTerminals, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive } from './terminals.mjs';
-import { buildPromptTree, readRoleDoc, readLeadDoc } from './prompt-library.mjs';
+import {
+  buildPromptTree,
+  readRoleDoc,
+  readLeadDoc,
+  resolvePromptRefs,
+  readContextFile,
+} from './prompt-library.mjs';
 import { computeOutcomes } from './delegation-outcomes.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -1261,6 +1267,49 @@ const server = createServer(async (req, res) => {
       const doc = readLeadDoc(squad, root);
       if (doc.error) {
         const status = doc.error === 'not found' ? 404 : 400;
+        json(res, status, doc);
+        log(method, path, status);
+        return;
+      }
+      json(res, 200, doc);
+      log(method, path, 200);
+      return;
+    }
+
+    // GET /api/prompts/refs?squad=&role= — context graph behind a prompt
+    // (which files the squad/role actually pulls in — docs/ui/prompt-context-tracing.md)
+    if (path === '/api/prompts/refs') {
+      const squad = url.searchParams.get('squad') || '';
+      const role = url.searchParams.get('role') || null;
+      if (!squad) {
+        json(res, 400, { error: 'squad query param is required' });
+        log(method, path, 400);
+        return;
+      }
+      const result = resolvePromptRefs(root, { squad, role });
+      if (result.error) {
+        const status = result.error === 'not found' ? 404 : 400;
+        json(res, status, result);
+        log(method, path, status);
+        return;
+      }
+      json(res, 200, result);
+      log(method, path, 200);
+      return;
+    }
+
+    // GET /api/prompts/file?path= — content of one context file.
+    // Authorisation lives in readContextFile: the path must be referenced by
+    // some prompt AND resolve inside the repo. Do not loosen it here.
+    if (path === '/api/prompts/file') {
+      const relPath = url.searchParams.get('path') || '';
+      const doc = readContextFile(root, relPath);
+      if (doc.error) {
+        const status = doc.error.startsWith('forbidden')
+          ? 403
+          : doc.error === 'not found'
+            ? 404
+            : 400;
         json(res, status, doc);
         log(method, path, status);
         return;

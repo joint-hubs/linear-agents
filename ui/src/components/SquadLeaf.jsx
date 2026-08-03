@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { getPromptLead, getPromptRuns, postLaunch, postKickoff } from '../api';
+import PromptContext from './PromptContext';
 import Modal from './Modal';
 import { fmtTime, fmtCost, statusLabel } from '../utils';
 
@@ -348,6 +349,9 @@ export default function SquadLeaf({ squad, data, taskId, setTaskId, onLaunchResu
           </pre>
         )}
       </details>
+
+      {/* Context files pulled in by this squad's prompt chain */}
+      <PromptContext squad={squad} />
 
       {/* Recent runs */}
       <div>

@@ -4,6 +4,7 @@
 // Extracted from screens/Prompts.jsx (code-audit-2026-07-30 §4).
 
 import { useState, useRef } from 'react';
+import PromptContext from './PromptContext';
 
 export default function RoleLeaf({ squad, role, data }) {
   const [copied, setCopied] = useState(false);
@@ -96,6 +97,9 @@ export default function RoleLeaf({ squad, role, data }) {
           ))}
         </div>
       </div>
+
+      {/* Context files this role's instruction pulls in */}
+      <PromptContext squad={squad} role={role} />
 
       {/* Role instruction */}
       <div>

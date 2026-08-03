@@ -81,6 +81,17 @@ export async function getPromptLead(squad) {
   return apiFetch('/api/prompts/lead?squad=' + encodeURIComponent(squad));
 }
 
+// Context tracing — which files a prompt pulls in (docs/ui/prompt-context-tracing.md).
+export async function getPromptRefs(squad, role = null) {
+  let url = '/api/prompts/refs?squad=' + encodeURIComponent(squad);
+  if (role) url += '&role=' + encodeURIComponent(role);
+  return apiFetch(url);
+}
+
+export async function getPromptFile(path) {
+  return apiFetch('/api/prompts/file?path=' + encodeURIComponent(path));
+}
+
 export async function getPromptRuns(squad, limit = 10) {
   return apiFetch(
     '/api/prompts/runs?squad=' + encodeURIComponent(squad) + '&limit=' + encodeURIComponent(limit)

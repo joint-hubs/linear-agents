@@ -87,6 +87,9 @@ Co chcesz zrobić?
    └─ [skład] → [rola] ......................... → bin\agent.bat <area> <rola>
 ```
 
+> Kontekst promptu (jakie pliki skład realnie zaciąga przez `CLAUDE.md` i dalej) opisuje
+> osobny dokument: `docs/ui/prompt-context-tracing.md`.
+
 **Liść składu** pokazuje:
 - **Prompt do wklejenia** — szablon z podstawionym `{taskId}`, przycisk *Kopiuj*, przycisk *Uruchom*.
 - **Warunek wejścia** — co musi być prawdą, żeby ten skład miał co robić (np. DEV: zadanie w `Todo`
