@@ -1,22 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getSquadConfig, postSquadConfig, getTools } from '../api';
-import Modal from '../components/Modal';
+import { getSquadConfig, postSquadConfig } from '../api';
+import SquadCard from '../components/SquadCard';
+import ToolEditorModal from '../components/ToolEditorModal';
 
 const SQUADS = ['plan', 'dev', 'review', 'test', 'cadence'];
-const SQUAD_LABELS = {
-  plan: 'Plan',
-  dev: 'Dev',
-  review: 'Review',
-  test: 'Test',
-  cadence: 'Cadence',
-};
-const SQUAD_COLOR = {
-  plan: 'var(--sq-plan)',
-  dev: 'var(--sq-dev)',
-  review: 'var(--sq-review)',
-  test: 'var(--sq-test)',
-  cadence: 'var(--sq-cadence)',
-};
 
 function deepClone(obj) {
   return JSON.parse(JSON.stringify(obj));
@@ -34,10 +21,6 @@ function normalizeAgents(agents) {
     }
   }
   return out;
-}
-
-function hasPrice(slug, pricing) {
-  return !!(pricing && pricing[slug]);
 }
 
 function countDirty(orig, edit) {
@@ -73,131 +56,6 @@ function countDirty(orig, edit) {
   return n;
 }
 
-// ---- Squad card (one per squad) -------------------------------------------
-
-function SquadCard({ squad, data, edited, pricing, onLeadChange, onAgentChange, onToolsOpen }) {
-  const s = edited || data;
-  if (!s) return null;
-
-  const leadSlug = s.lead || '';
-  const agents = s.agents || {};
-  const color = SQUAD_COLOR[squad] || 'var(--border-strong)';
-
-  return (
-    <div className="card" style={{ borderLeft: `3px solid ${color}` }}>
-      <div className="card-h" style={{ color }}>{SQUAD_LABELS[squad] || squad}</div>
-
-      {/* Lead row */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          padding: '7px 10px',
-          borderRadius: 7,
-          background: 'var(--surface-2)',
-          marginBottom: 4,
-        }}
-      >
-        <label
-          style={{
-            fontSize: 12.5,
-            fontWeight: 600,
-            color: 'var(--text)',
-            minWidth: 100,
-          }}
-        >
-          Lead
-        </label>
-        <input
-          className="filter-search"
-          style={{ flex: 1 }}
-          value={leadSlug}
-          onChange={(e) => onLeadChange(squad, e.target.value)}
-          aria-label={`Lead model dla ${SQUAD_LABELS[squad]}`}
-          placeholder="provider/model-slug"
-        />
-        {!hasPrice(leadSlug, pricing) && leadSlug && (
-          <span
-            style={{
-              color: 'var(--warn)',
-              fontSize: 11,
-              fontWeight: 600,
-              cursor: 'help',
-              flex: 'none',
-            }}
-            title="Ten model nie ma wpisu w cenniku — telemetria pokaże dla niego $0"
-          >
-            ⚠ brak ceny
-          </span>
-        )}
-      </div>
-
-      {/* Agent rows */}
-      {Object.entries(agents).map(([role, agent]) => {
-        const modelSlug = typeof agent === 'object' && agent ? agent.model || '' : (agent || '');
-        return (
-        <div
-          key={role}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            padding: '5px 10px',
-          }}
-        >
-          <label
-            style={{
-              fontSize: 12.5,
-              color: 'var(--text-2)',
-              minWidth: 100,
-            }}
-          >
-            {role}
-          </label>
-          <input
-            className="filter-search"
-            style={{ flex: 1 }}
-            value={modelSlug}
-            onChange={(e) => onAgentChange(squad, role, e.target.value)}
-            aria-label={`Model dla ${role} w ${SQUAD_LABELS[squad]}`}
-            placeholder="provider/model-slug"
-          />
-          {!hasPrice(modelSlug, pricing) && modelSlug && (
-            <span
-              style={{
-                color: 'var(--warn)',
-                fontSize: 11,
-                fontWeight: 600,
-                cursor: 'help',
-                flex: 'none',
-              }}
-              title="Ten model nie ma wpisu w cenniku — telemetria pokaże dla niego $0"
-            >
-              ⚠ brak ceny
-            </span>
-          )}
-          <button
-            className="btn-secondary"
-            style={{ fontSize: 11, padding: '3px 8px', flex: 'none' }}
-            onClick={() => onToolsOpen && onToolsOpen(squad, role)}
-            title={`Edytuj narzędzia dla ${role}`}
-          >
-            Narzędzia
-          </button>
-        </div>
-        );
-      })}
-
-      {Object.keys(agents).length === 0 && (
-        <div className="muted" style={{ padding: '5px 10px', fontSize: 12 }}>
-          Brak subagentów
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ---- Main screen ----------------------------------------------------------
 
 export default function SquadConfig() {
@@ -216,12 +74,7 @@ export default function SquadConfig() {
   const [newOutput, setNewOutput] = useState('');
 
   // Tool editor modal
-  const [toolsCatalog, setToolsCatalog] = useState(null);
-  const [toolEditor, setToolEditor] = useState(null); // {squad, role, selectedTools}
-  const [toolEditPreview, setToolEditPreview] = useState(null);
-  const [toolEditErr, setToolEditErr] = useState(null);
-  const [toolEditSaving, setToolEditSaving] = useState(false);
-  const [toolEditSuccess, setToolEditSuccess] = useState(false);
+  const [toolEditor, setToolEditor] = useState(null); // {squad, role, tools} | null
 
   const dirtyCount = countDirty(config, edited);
 
@@ -390,89 +243,10 @@ export default function SquadConfig() {
 
   // ---- tool editor --------------------------------------------------------
 
-  const handleToolsOpen = useCallback(async (squad, role) => {
-    // Fetch tools catalog lazily
-    if (!toolsCatalog) {
-      try {
-        const cat = await getTools();
-        setToolsCatalog(cat);
-      } catch {
-        setToolEditErr('Nie udało się załadować katalogu narzędzi.');
-        return;
-      }
-    }
-    // Read current tools from the edited config
-    const currentTools = edited?.squads?.[squad]?.agents?.[role]
-      ? (edited.squads[squad].agents[role].tools || [])
-      : [];
-    setToolEditor({ squad, role, selectedTools: [...currentTools] });
-    setToolEditPreview(null);
-    setToolEditErr(null);
-    setToolEditSuccess(false);
-  }, [edited, toolsCatalog]);
-
-  const handleToolToggle = (toolName) => {
-    if (!toolEditor) return;
-    setToolEditor((prev) => {
-      const sel = prev.selectedTools.includes(toolName)
-        ? prev.selectedTools.filter((t) => t !== toolName)
-        : [...prev.selectedTools, toolName];
-      return { ...prev, selectedTools: sel };
-    });
-    setToolEditPreview(null);
-    setToolEditSuccess(false);
-  };
-
-  const handleToolsPreview = async () => {
-    if (!toolEditor) return;
-    setToolEditSaving(true);
-    setToolEditErr(null);
-    setToolEditSuccess(false);
-    try {
-      const result = await postSquadConfig({
-        squads: {
-          [toolEditor.squad]: {
-            agents: {
-              [toolEditor.role]: { tools: toolEditor.selectedTools },
-            },
-          },
-        },
-        dryRun: true,
-      });
-      setToolEditPreview(result);
-    } catch (e) {
-      setToolEditErr(e.message || String(e));
-    } finally {
-      setToolEditSaving(false);
-    }
-  };
-
-  const handleToolsSave = async () => {
-    if (!toolEditor) return;
-    setToolEditSaving(true);
-    setToolEditErr(null);
-    setToolEditSuccess(false);
-    try {
-      const result = await postSquadConfig({
-        squads: {
-          [toolEditor.squad]: {
-            agents: {
-              [toolEditor.role]: { tools: toolEditor.selectedTools },
-            },
-          },
-        },
-        dryRun: false,
-      });
-      setToolEditSuccess(true);
-      setToolEditPreview(null);
-      // Refresh config from server
-      await fetchConfig();
-    } catch (e) {
-      setToolEditErr(e.message || String(e));
-    } finally {
-      setToolEditSaving(false);
-    }
-  };
+  const handleToolsOpen = useCallback((squad, role) => {
+    const tools = edited?.squads?.[squad]?.agents?.[role]?.tools || [];
+    setToolEditor({ squad, role, tools: [...tools] });
+  }, [edited]);
 
   const handleDiscard = () => {
     if (!config) return;
@@ -839,178 +613,11 @@ export default function SquadConfig() {
       )}
 
       {/* ---- Tool editor modal -------------------------------------------- */}
-      <Modal
-        open={!!toolEditor}
+      <ToolEditorModal
+        target={toolEditor}
         onClose={() => setToolEditor(null)}
-        title={toolEditor ? `Narzędzia — ${toolEditor.squad} / ${toolEditor.role}` : 'Narzędzia'}
-      >
-        {toolEditor && (() => {
-          const tools = toolsCatalog?.tools || {};
-          const riskLevels = toolsCatalog?.riskLevels || {};
-          const toolNames = Object.keys(tools).sort();
-          const hasTask = toolEditor.selectedTools.includes('Task');
-
-          return (
-            <>
-              {toolEditErr && (
-                <div className="banner banner-warn">Błąd: {toolEditErr}</div>
-              )}
-
-              {toolEditSuccess && (
-                <div
-                  className="banner"
-                  style={{
-                    background: 'var(--ok-soft)',
-                    borderColor: '#a3d5b3',
-                    color: 'var(--ok)',
-                  }}
-                >
-                  ✓ Narzędzia zapisane. Zmiana obowiązuje od następnego uruchomienia.
-                </div>
-              )}
-
-              {hasTask && (
-                <div
-                  className="banner banner-warn"
-                  style={{ borderColor: '#f4cf9e', fontWeight: 600 }}
-                >
-                  ⚠ Uwaga: przyznajesz narzędzie <code>Task</code>. Dziś żadna rola go nie ma —
-                  hierarchia jest celowo płaska (lead → subagent). Nadanie <code>Task</code> zmienia
-                  architekturę na zagnieżdżoną delegację. Upewnij się, że to zamierzone.
-                </div>
-              )}
-
-              <table className="table">
-                <thead>
-                  <tr className="th">
-                    <th style={{ width: 36, textAlign: 'center' }}>✓</th>
-                    <th>Narzędzie</th>
-                    <th>Co robi</th>
-                    <th>Ryzyko</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {toolNames.length === 0 && (
-                    <tr>
-                      <td className="td muted" colSpan={4} style={{ textAlign: 'center' }}>
-                        Brak danych o narzędziach
-                      </td>
-                    </tr>
-                  )}
-                  {toolNames.map((name) => {
-                    const t = tools[name];
-                    const risk = t.risk || '';
-                    const riskInfo = riskLevels[risk];
-                    const isHighRisk = risk === 'writes-code' || risk === 'writes-system';
-                    const checked = toolEditor.selectedTools.includes(name);
-
-                    return (
-                      <tr
-                        key={name}
-                        style={
-                          isHighRisk
-                            ? { background: 'var(--warn-soft)' }
-                            : undefined
-                        }
-                      >
-                        <td className="td" style={{ textAlign: 'center' }}>
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => handleToolToggle(name)}
-                            aria-label={`Narzędzie ${name}`}
-                          />
-                        </td>
-                        <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 600 }}>
-                          {name}
-                        </td>
-                        <td className="td" style={{ fontSize: 12.5 }}>
-                          {t.description || '—'}
-                        </td>
-                        <td className="td" style={{ fontSize: 12 }}>
-                          {riskInfo ? (
-                            <span
-                              style={{
-                                color: isHighRisk ? 'var(--warn)' : 'var(--text-2)',
-                                fontWeight: isHighRisk ? 600 : 400,
-                              }}
-                              title={riskInfo.hint || ''}
-                            >
-                              {riskInfo.label || risk}
-                              {isHighRisk ? ' ⚠' : ''}
-                            </span>
-                          ) : (
-                            <span className="muted">{risk || '—'}</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-
-              {toolEditPreview && (
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4, color: 'var(--text-2)' }}>
-                    Podgląd zmian {toolEditPreview.dryRun && <span className="muted">(dry run)</span>}
-                  </div>
-                  {toolEditPreview.changed && toolEditPreview.changed.length === 0 && (
-                    <div className="empty" style={{ padding: '12px 16px', fontSize: 12 }}>
-                      Brak zmian.
-                    </div>
-                  )}
-                  {toolEditPreview.changed && toolEditPreview.changed.length > 0 && (
-                    <table className="table">
-                      <thead>
-                        <tr className="th">
-                          <th>Plik</th>
-                          <th>Przed</th>
-                          <th>Po</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {toolEditPreview.changed.map((c) => (
-                          <tr key={c.file}>
-                            <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
-                              {c.file}
-                            </td>
-                            <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--danger)' }}>
-                              {c.before}
-                            </td>
-                            <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--ok)' }}>
-                              {c.after}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              )}
-
-              <div className="modal-foot">
-                <button className="btn-secondary" onClick={() => setToolEditor(null)}>
-                  Anuluj
-                </button>
-                <button
-                  className="btn-secondary"
-                  onClick={handleToolsPreview}
-                  disabled={toolEditSaving}
-                >
-                  {toolEditSaving ? 'Wysyłanie…' : 'Podgląd zmian'}
-                </button>
-                <button
-                  className="launch-btn"
-                  onClick={handleToolsSave}
-                  disabled={toolEditSaving}
-                >
-                  {toolEditSaving ? 'Zapisywanie…' : 'Zapisz'}
-                </button>
-              </div>
-            </>
-          );
-        })()}
-      </Modal>
+        onSaved={fetchConfig}
+      />
     </div>
   );
 }
