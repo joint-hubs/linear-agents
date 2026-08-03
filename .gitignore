@@ -51,6 +51,16 @@ ui/.next/
 dist/
 build/
 
+# python (notebooks/)
+__pycache__/
+*.pyc
+.venv/
+
+# generated analysis report — same reasoning as graphify-out/ below, but 17 MB:
+# data.json (9.4 MB) and index.html (7.5 MB) are regenerated output, and the
+# .pkl files are caches. Rebuild with notebooks/agent_intelligence.py.
+report/
+
 # knowledge graph — regenerated locally by the post-commit hook (AST only, no LLM),
 # so committing it would churn ~700 nodes of JSON on every commit. The corpus
 # scope lives in .graphifyignore, which IS tracked.
