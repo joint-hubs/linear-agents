@@ -7,13 +7,14 @@
 //
 // ESM, zero runtime deps (Node 18+).
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, statSync, readdirSync } from "node:fs";
+import { readFileSync, mkdirSync, existsSync, statSync, readdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { join, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { recordManifest, recordTaskLink } from "./telemetry-store.mjs";
+import { atomicWriteJSON } from "./utils.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -30,16 +31,6 @@ const RUNS_DIR = join(root, ".state", "runs");
 /** Ensure .state/runs/ exists. */
 function ensureRunsDir() {
   if (!existsSync(RUNS_DIR)) mkdirSync(RUNS_DIR, { recursive: true });
-}
-
-/**
- * Atomically write a JSON file: write to a temp path, then rename over target.
- * Prevents partial reads by concurrent processes on most filesystems.
- */
-function atomicWriteJSON(filePath, data) {
-  const tmp = filePath + "." + randomBytes(4).readUInt32BE(0).toString(36);
-  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
-  renameSync(tmp, filePath);
 }
 
 /** Get current git branch from the observed workspace, swallowing errors. */

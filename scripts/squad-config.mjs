@@ -19,6 +19,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { atomicWriteJSON } from "./utils.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,14 +36,6 @@ function repoRoot(custom) {
 /** Detect line ending of a file: "\r\n" or "\n". */
 function detectEOL(content) {
   return content.includes("\r\n") ? "\r\n" : "\n";
-}
-
-/** Atomic JSON write: temp file → rename. */
-function atomicWriteJSON(filePath, data) {
-  const tmp =
-    filePath + "." + randomBytes(4).readUInt32BE(0).toString(36);
-  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
-  renameSync(tmp, filePath);
 }
 
 /** Atomic text write preserving original EOL. */

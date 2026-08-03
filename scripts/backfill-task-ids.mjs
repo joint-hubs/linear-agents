@@ -21,11 +21,11 @@
 //
 // ESM, zero deps (Node 18+).
 
-import { readFileSync, writeFileSync, renameSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes } from "node:crypto";
 import { inferTaskIdFromBranch, discoverTranscriptsForRuns } from "./ledger.mjs";
+import { atomicWriteJSON } from "./utils.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -34,13 +34,6 @@ const RUNS_DIR = join(root, ".state", "runs");
 const TASK_RE = /\b(FEN|PISI|JOI)-(\d{1,5})\b/i;
 const apply = process.argv.includes("--apply");
 const recheckBranch = process.argv.includes("--recheck-branch");
-
-/** Atomic JSON write (same pattern as run-manifest.mjs). */
-function atomicWriteJSON(filePath, data) {
-  const tmp = filePath + "." + randomBytes(4).readUInt32BE(0).toString(36);
-  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
-  renameSync(tmp, filePath);
-}
 
 /** Extract plain text from a transcript user line (string or content-array). */
 function userText(line) {

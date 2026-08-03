@@ -27,8 +27,12 @@ function ensureStateDir() {
 /**
  * Atomically write a JSON file: write to a temp path, then rename over target.
  * This prevents partial reads by concurrent processes on most filesystems.
+ *
+ * Exported because four other scripts used to carry a byte-identical private
+ * copy (code-review-2026-08-03 §3) — they could not import it while it lived
+ * here unexported.
  */
-function atomicWriteJSON(filePath, data) {
+export function atomicWriteJSON(filePath, data) {
   const tmp = filePath + "." + randomBytes(4).readUInt32BE(0).toString(36);
   writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
   renameSync(tmp, filePath);

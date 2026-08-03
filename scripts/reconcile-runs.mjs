@@ -25,11 +25,11 @@
 //
 // Safe to re-run any time (idempotent). ESM, zero deps (Node 18+).
 
-import { readFileSync, writeFileSync, renameSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes } from "node:crypto";
 import { parseTranscript, discoverTranscriptsForRuns } from "./ledger.mjs";
+import { atomicWriteJSON } from "./utils.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -40,12 +40,6 @@ const ORPHAN_MS = 24 * 60 * 60 * 1000; // no transcript + this old → aborted l
 
 const apply = process.argv.includes("--apply");
 const now = Date.now();
-
-function atomicWriteJSON(filePath, data) {
-  const tmp = filePath + "." + randomBytes(4).readUInt32BE(0).toString(36);
-  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
-  renameSync(tmp, filePath);
-}
 
 // --- Load manifests ---
 const files = existsSync(RUNS_DIR)
