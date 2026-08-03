@@ -109,7 +109,13 @@ export async function graphql(query, vars = {}, workspace) {
   }
 
   if (body.errors?.length) {
-    throw new Error("GraphQL error: " + JSON.stringify(body.errors[0]));
+    // Join the human-readable messages; fall back to the raw shape only for
+    // errors that carry no `message`. bootstrap-linear.mjs had this readable
+    // form while linear-push.mjs stringified the raw object — consolidating on
+    // the worse one would have made diagnostics harder on the push path
+    // (code-review-2026-08-03 §2).
+    const msgs = body.errors.map((e) => e?.message).filter(Boolean).join("; ");
+    throw new Error(`GraphQL error: ${msgs || JSON.stringify(body.errors[0])}`);
   }
 
   return body.data;
@@ -122,10 +128,13 @@ export async function graphql(query, vars = {}, workspace) {
 /**
  * Resolve a Linear team by its key (case-insensitive).
  * @param {string} teamKey  Team key, e.g. "FEN" or "fen".
+ * @param {string} [workspace]  Optional explicit workspace, forwarded to
+ *   graphql(). bootstrap-linear.mjs pins "jointhubs" because it has always
+ *   authenticated with LINEAR_API_KEY regardless of LINEAR_WORKSPACE.
  * @returns {Promise<{id:string, name:string, key:string}>}
  * @throws {Error} If team not found.
  */
-export async function resolveTeam(teamKey) {
+export async function resolveTeam(teamKey, workspace) {
   const data = await graphql(
     `query {
       teams {
@@ -136,6 +145,8 @@ export async function resolveTeam(teamKey) {
         }
       }
     }`,
+    {},
+    workspace,
   );
 
   const teams = data.teams?.nodes || [];

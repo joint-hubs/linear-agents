@@ -22,6 +22,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { idempotentCreate } from "./utils.mjs";
+import { loadEnv, chooseApiKey, graphql, resolveTeam } from "./linear-client.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -31,41 +32,8 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
 
 // ---------------------------------------------------------------------------
-// Helpers (copied verbatim from bootstrap-linear.mjs)
+// Helpers
 // ---------------------------------------------------------------------------
-
-/** Manual .env parser — zero deps, mirrors cost-report.mjs convention. */
-function loadEnv() {
-  try {
-    const text = readFileSync(join(root, ".env"), "utf8");
-    for (const line of text.split("\n")) {
-      const s = line.trim();
-      if (!s || s.startsWith("#")) continue;
-      const eq = s.indexOf("=");
-      if (eq < 0) continue;
-      const k = s.slice(0, eq).trim();
-      const v = s.slice(eq + 1).trim();
-      if (!process.env[k]) process.env[k] = v;
-    }
-  } catch {
-    // .env missing — user may have set env vars directly
-  }
-}
-
-const ENDPOINT = "https://api.linear.app/graphql";
-
-/**
- * Choose the Linear API key based on workspace.
- * When LINEAR_WORKSPACE === "pisi", uses LINEAR_API_KEY_PISI (full-write per Mateusz 2026-07).
- * Otherwise uses LINEAR_API_KEY (jointhubs, default).
- * @returns {string|undefined}
- */
-function chooseApiKey() {
-  if (process.env.LINEAR_WORKSPACE === "pisi") {
-    return process.env.LINEAR_API_KEY_PISI;
-  }
-  return process.env.LINEAR_API_KEY;
-}
 
 /**
  * Normalize a slice value to "slice:<name>" format.
@@ -92,75 +60,12 @@ export function isValidationError(msg) {
 }
 
 /**
- * Execute a GraphQL query/mutation against the Linear API.
- * @param {string} query  The GraphQL operation string.
- * @param {object} vars   Variables object.
- * @param {string} key    Linear API key.
- * @returns {object}      The `data` portion of the response.
- * @throws {Error}        On network error, auth failure, or GraphQL errors.
- */
-async function graphql(query, vars, key) {
-  const res = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: key,
-    },
-    body: JSON.stringify({ query, variables: vars }),
-  });
-
-  const body = await res.json();
-
-  if (!res.ok) {
-    const msg = body?.error || body?.errors?.[0]?.message || `${res.status} ${res.statusText}`;
-    throw new Error(`Linear API ${res.status}: ${msg}`);
-  }
-
-  if (body.errors?.length) {
-    throw new Error("GraphQL error: " + JSON.stringify(body.errors[0]));
-  }
-
-  return body.data;
-}
-
-// ---------------------------------------------------------------------------
-// Team resolution (copied from bootstrap-linear.mjs)
-// ---------------------------------------------------------------------------
-
-async function resolveTeam(key, teamKey) {
-  const data = await graphql(
-    `query {
-      teams {
-        nodes {
-          id
-          name
-          key
-        }
-      }
-    }`,
-    {},
-    key,
-  );
-
-  const teams = data.teams?.nodes || [];
-  const team = teams.find((t) => t.key.toUpperCase() === teamKey.toUpperCase());
-  if (!team) {
-    const available = teams.map((t) => `${t.key} (${t.name})`).join(", ");
-    throw new Error(
-      `Team "${teamKey}" not found. Available teams: ${available || "(none — check API key permissions)"}`,
-    );
-  }
-  return team;
-}
-
-/**
  * Resolve a project by name within a team.
  * @param {string} teamId       Team id.
  * @param {string} projectName  Project name to find (case-insensitive).
- * @param {string} key          Linear API key.
  * @returns {{ id: string, name: string }}
  */
-async function resolveProject(teamId, projectName, key) {
+async function resolveProject(teamId, projectName) {
   const data = await graphql(
     `query ($teamId: String!) {
       team(id: $teamId) {
@@ -173,7 +78,6 @@ async function resolveProject(teamId, projectName, key) {
       }
     }`,
     { teamId },
-    key,
   );
 
   const projects = data.team?.projects?.nodes || [];
@@ -191,7 +95,7 @@ async function resolveProject(teamId, projectName, key) {
 // Existing resources queries (copied from bootstrap-linear.mjs)
 // ---------------------------------------------------------------------------
 
-async function fetchExistingStates(teamId, key) {
+async function fetchExistingStates(teamId) {
   const data = await graphql(
     `query ($teamId: String!) {
       team(id: $teamId) {
@@ -205,12 +109,11 @@ async function fetchExistingStates(teamId, key) {
       }
     }`,
     { teamId },
-    key,
   );
   return data.team?.states?.nodes || [];
 }
 
-async function fetchExistingLabels(teamId, key) {
+async function fetchExistingLabels(teamId) {
   const data = await graphql(
     `query ($teamId: String!) {
       team(id: $teamId) {
@@ -228,7 +131,6 @@ async function fetchExistingLabels(teamId, key) {
       }
     }`,
     { teamId },
-    key,
   );
   return data.team?.labels?.nodes || [];
 }
@@ -295,9 +197,9 @@ const RECONCILE_QUERY = `
  * Limitation: title-collision across briefs could mis-reconcile; acceptable
  * for MVP since titles are long/unique.
  */
-async function reconcileAfterTransient(input, key) {
+async function reconcileAfterTransient(input) {
   try {
-    const data = await graphql(RECONCILE_QUERY, { teamId: input.teamId }, key);
+    const data = await graphql(RECONCILE_QUERY, { teamId: input.teamId });
     const issues = data.team?.issues?.nodes || [];
     const fiveMinAgo = Date.now() - 5 * 60 * 1000;
     const matches = issues.filter((n) => {
@@ -329,14 +231,13 @@ async function reconcileAfterTransient(input, key) {
  * on transient errors to prevent duplicate creation.
  *
  * @param {object} input      IssueCreateInput object.
- * @param {string} key        Linear API key.
  * @param {string} [kind]     "parent" or "subtask" — used in success logging.
  * @param {string} [externalId] External ID for logging.
  * @returns {Promise<string>} The created (or reconciled) issue id.
  */
-async function createIssue(input, key, kind, externalId) {
+async function createIssue(input, kind, externalId) {
   try {
-    const d = await graphql(ISSUE_CREATE_MUTATION, { input }, key);
+    const d = await graphql(ISSUE_CREATE_MUTATION, { input });
     const issue = d.issueCreate.issue;
     console.log(`  ✅ [${kind || "issue"}] ${externalId || ""} ${issue.identifier} ${issue.url}`.trim());
     return issue.id;
@@ -360,14 +261,14 @@ async function createIssue(input, key, kind, externalId) {
       console.log("  ⚠ estimate rejected by team — creating without estimate");
       const { estimate: _omit, ...rest } = input;
       try {
-        const d = await graphql(ISSUE_CREATE_MUTATION, { input: rest }, key);
+        const d = await graphql(ISSUE_CREATE_MUTATION, { input: rest });
         const issue = d.issueCreate.issue;
         console.log(`  ✅ [${kind || "issue"}] ${externalId || ""} ${issue.identifier} ${issue.url}`.trim());
         return issue.id;
       } catch (retryErr) {
         // Retry also failed — try reconcile for non-validation errors
         if (!isValidationError(String(retryErr.message))) {
-          const reconciled = await reconcileAfterTransient(input, key);
+          const reconciled = await reconcileAfterTransient(input);
           if (reconciled) {
             console.log(`  ✅ [${kind || "issue"}] ${externalId || ""} ${reconciled} (reconciled)`.trim());
             return reconciled;
@@ -378,7 +279,7 @@ async function createIssue(input, key, kind, externalId) {
     }
 
     // Transient (non-validation) error — try reconcile
-    const reconciled = await reconcileAfterTransient(input, key);
+    const reconciled = await reconcileAfterTransient(input);
     if (reconciled) {
       console.log(`  ✅ [${kind || "issue"}] ${externalId || ""} ${reconciled} (reconciled)`.trim());
       return reconciled;
@@ -488,11 +389,10 @@ function resolveLabelName(canonical) {
  * Uses resolveLabelName (G:C group/child resolution) for lookups.
  * @param {string[]} labelNames  Array of canonical label names
  * @param {string} teamId
- * @param {string} key          Linear API key
  * @param {boolean} dryRun
  * @returns {Promise<string[]>} Array of resolved label IDs
  */
-async function resolveLabels(labelNames, teamId, key, dryRun) {
+async function resolveLabels(labelNames, teamId, dryRun) {
   const ids = [];
 
   for (const name of labelNames) {
@@ -515,7 +415,6 @@ async function resolveLabels(labelNames, teamId, key, dryRun) {
         const result = await graphql(
           LABEL_CREATE_MUTATION,
           { input: { teamId, name, isGroup: false } },
-          key,
         );
         if (result?.issueLabelCreate?.success) {
           const newId = result.issueLabelCreate.issueLabel.id;
@@ -691,7 +590,7 @@ async function main() {
   // Resolve team
   let team;
   try {
-    team = await resolveTeam(KEY, teamKey);
+    team = await resolveTeam(teamKey);
   } catch (err) {
     console.error(`❌ Team resolution failed: ${err.message}`);
     process.exit(1);
@@ -706,7 +605,7 @@ async function main() {
     resolvedProjectName = "(by --project-id)";
   } else {
     try {
-      const project = await resolveProject(team.id, projectName, KEY);
+      const project = await resolveProject(team.id, projectName);
       projectId = project.id;
       resolvedProjectName = project.name;
     } catch (err) {
@@ -717,7 +616,7 @@ async function main() {
   console.log(`🔍 Project: "${resolvedProjectName}" (id: ${projectId})`);
 
   // Resolve default state
-  const states = await fetchExistingStates(team.id, KEY);
+  const states = await fetchExistingStates(team.id);
   const candidateStates = states.filter((s) => s.type === "unstarted" || s.type === "backlog");
   const defaultState = candidateStates.find((s) => s.name === "Backlog")
     || candidateStates.find((s) => s.name === "Todo")
@@ -730,7 +629,7 @@ async function main() {
   console.log(`🔍 Default state: "${defaultState.name}" (type: ${defaultState.type}, id: ${defaultState.id})`);
 
   // Pre-fetch labels and build G:C resolver structures (module-level)
-  const allLabels = await fetchExistingLabels(team.id, KEY);
+  const allLabels = await fetchExistingLabels(team.id);
 
   groupById = new Map();
   childByNameInGroup = new Map();
@@ -844,7 +743,6 @@ async function main() {
   const parentLabelIds = await resolveLabels(
     parent.labels || [],
     team.id,
-    KEY,
     dryRun,
   );
 
@@ -855,7 +753,7 @@ async function main() {
       key: `linear:${parent.externalId}`,
       existsFn: async (cachedId) => {
         try {
-          const d = await graphql(VERIFY_ISSUE_QUERY, { id: cachedId }, KEY);
+          const d = await graphql(VERIFY_ISSUE_QUERY, { id: cachedId });
           return Boolean(d && d.issue && d.issue.id);
         } catch {
           return false;
@@ -868,7 +766,7 @@ async function main() {
         projectId,
         stateId: defaultState.id,
         labelIds: parentLabelIds,
-      }, KEY, "parent", parent.externalId),
+      }, "parent", parent.externalId),
       onSkip: (cachedId) => console.log(`  ⏭️ skip (idempotent) ${parent.externalId} -> ${cachedId}`),
     });
   } catch (err) {
@@ -894,7 +792,6 @@ async function main() {
     const resolvedLabelIds = await resolveLabels(
       labelNames,
       team.id,
-      KEY,
       dryRun,
     );
 
@@ -917,13 +814,13 @@ async function main() {
         key: `linear:${st.externalId}`,
         existsFn: async (cachedId) => {
           try {
-            const d = await graphql(VERIFY_ISSUE_QUERY, { id: cachedId }, KEY);
+            const d = await graphql(VERIFY_ISSUE_QUERY, { id: cachedId });
             return Boolean(d && d.issue && d.issue.id);
           } catch {
             return false;
           }
         },
-        createFn: async () => createIssue(createInput, KEY, "subtask", st.externalId),
+        createFn: async () => createIssue(createInput, "subtask", st.externalId),
         onSkip: (cachedId) => console.log(`  ⏭️ skip (idempotent) ${st.externalId} -> ${cachedId}`),
       });
     } catch (err) {

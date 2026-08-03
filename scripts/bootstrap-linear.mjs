@@ -13,31 +13,21 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { loadEnv, graphql, resolveTeam } from "./linear-client.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
 
+// This script has always authenticated with LINEAR_API_KEY directly — it reads
+// LINEAR_WORKSPACE only to label its dry-run output. Pinning the workspace here
+// preserves that exactly: without it the shared client would follow
+// LINEAR_WORKSPACE and could provision with the pisi key.
+// (code-review-2026-08-03 §2)
+const WORKSPACE = "jointhubs";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Manual .env parser — zero deps, mirrors cost-report.mjs convention. */
-function loadEnv() {
-  try {
-    const text = readFileSync(join(root, ".env"), "utf8");
-    for (const line of text.split("\n")) {
-      const s = line.trim();
-      if (!s || s.startsWith("#")) continue;
-      const eq = s.indexOf("=");
-      if (eq < 0) continue;
-      const k = s.slice(0, eq).trim();
-      const v = s.slice(eq + 1).trim();
-      if (!process.env[k]) process.env[k] = v;
-    }
-  } catch {
-    // .env missing — user may have set env vars directly
-  }
-}
 
 /** Load a JSON config file from config/linear/. */
 function loadJSON(name) {
@@ -55,45 +45,6 @@ function gql(strings) {
 }
 
 // ---------------------------------------------------------------------------
-// Linear GraphQL client
-// ---------------------------------------------------------------------------
-
-const ENDPOINT = "https://api.linear.app/graphql";
-
-/**
- * Execute a GraphQL query/mutation against the Linear API.
- * @param {string} query  The GraphQL operation string.
- * @param {object} vars   Variables object.
- * @param {string} key    Linear API key.
- * @returns {object}      The `data` portion of the response.
- * @throws {Error}        On network error, auth failure, or GraphQL errors.
- */
-async function graphql(query, vars, key) {
-  const res = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: key,
-    },
-    body: JSON.stringify({ query, variables: vars }),
-  });
-
-  const body = await res.json();
-
-  if (!res.ok) {
-    const msg = body?.error || body?.errors?.[0]?.message || `${res.status} ${res.statusText}`;
-    throw new Error(`Linear API ${res.status}: ${msg}`);
-  }
-
-  if (body.errors?.length) {
-    const msgs = body.errors.map((e) => e.message).join("; ");
-    throw new Error(`GraphQL error: ${msgs}`);
-  }
-
-  return body.data;
-}
-
-// ---------------------------------------------------------------------------
 // Color palette
 // ---------------------------------------------------------------------------
 
@@ -108,48 +59,10 @@ const COLORS = {
 };
 
 // ---------------------------------------------------------------------------
-// Team resolution
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve a team by its key (slug).
- * @param {string} key  Linear API key.
- * @param {string} teamKey  Team slug/key to find.
- * @returns {{ id: string, name: string, key: string }}
- */
-async function resolveTeam(key, teamKey) {
-  const data = await graphql(
-    gql`
-      query {
-        teams {
-          nodes {
-            id
-            name
-            key
-          }
-        }
-      }
-    `,
-    {},
-    key,
-  );
-
-  const teams = data.teams?.nodes || [];
-  const team = teams.find((t) => t.key.toUpperCase() === teamKey.toUpperCase());
-  if (!team) {
-    const available = teams.map((t) => `${t.key} (${t.name})`).join(", ");
-    throw new Error(
-      `Team "${teamKey}" not found. Available teams: ${available || "(none — check API key permissions)"}`,
-    );
-  }
-  return team;
-}
-
-// ---------------------------------------------------------------------------
 // Existing resources queries
 // ---------------------------------------------------------------------------
 
-async function fetchExistingLabelGroups(teamId, key) {
+async function fetchExistingLabelGroups(teamId) {
   // Current schema: Team has NO `labelGroups` field. A label GROUP is just an
   // IssueLabel with isGroup:true; its children are IssueLabels whose parent is
   // the group. We fetch all labels and keep only the groups (each carrying its
@@ -178,13 +91,13 @@ async function fetchExistingLabelGroups(teamId, key) {
       }
     `,
     { teamId },
-    key,
+    WORKSPACE,
   );
   const labels = data.team?.labels?.nodes || [];
   return labels.filter((l) => l.isGroup === true);
 }
 
-async function fetchExistingLabels(teamId, key) {
+async function fetchExistingLabels(teamId) {
   // Current schema: label→group link is via `parent` (an IssueLabel with
   // isGroup:true), not `labelGroup`. Standalone flags have a null parent.
   const data = await graphql(
@@ -205,12 +118,12 @@ async function fetchExistingLabels(teamId, key) {
       }
     `,
     { teamId },
-    key,
+    WORKSPACE,
   );
   return data.team?.labels?.nodes || [];
 }
 
-async function fetchExistingStates(teamId, key) {
+async function fetchExistingStates(teamId) {
   const data = await graphql(
     gql`
       query ($teamId: String!) {
@@ -226,12 +139,12 @@ async function fetchExistingStates(teamId, key) {
       }
     `,
     { teamId },
-    key,
+    WORKSPACE,
   );
   return data.team?.states?.nodes || [];
 }
 
-async function fetchExistingTemplates(teamId, key) {
+async function fetchExistingTemplates(teamId) {
   // Current schema: Team.templates (was issueTemplates). Kept for the live
   // fetch step; templates provisioning itself is DEFERRED (see provisionTemplates).
   const data = await graphql(
@@ -248,7 +161,7 @@ async function fetchExistingTemplates(teamId, key) {
       }
     `,
     { teamId },
-    key,
+    WORKSPACE,
   );
   return data.team?.templates?.nodes || [];
 }
@@ -257,7 +170,7 @@ async function fetchExistingTemplates(teamId, key) {
 // Mutations
 // ---------------------------------------------------------------------------
 
-async function createLabelGroup(teamId, name, color, key) {
+async function createLabelGroup(teamId, name, color) {
   // Current schema: there is no labelGroupCreate. A group is an IssueLabel with
   // isGroup:true, created via issueLabelCreate.
   return graphql(
@@ -273,11 +186,11 @@ async function createLabelGroup(teamId, name, color, key) {
       }
     `,
     { input: { teamId, name, color, isGroup: true } },
-    key,
+    WORKSPACE,
   );
 }
 
-async function createLabel(teamId, name, description, color, parentId, key) {
+async function createLabel(teamId, name, description, color, parentId) {
   // Current schema: child labels are IssueLabels whose parent is the group
   // IssueLabel (parentId). Standalone flags pass parentId=null.
   const input = { teamId, name };
@@ -297,11 +210,11 @@ async function createLabel(teamId, name, description, color, parentId, key) {
       }
     `,
     { input },
-    key,
+    WORKSPACE,
   );
 }
 
-async function createWorkflowState(teamId, name, type, color, position, key) {
+async function createWorkflowState(teamId, name, type, color, position) {
   const input = { teamId, name, type };
   if (color) input.color = color;
   if (position != null) input.position = position;
@@ -318,11 +231,11 @@ async function createWorkflowState(teamId, name, type, color, position, key) {
       }
     `,
     { input },
-    key,
+    WORKSPACE,
   );
 }
 
-async function createIssueTemplate(teamId, name, description, templateData, sortOrder, key) {
+async function createIssueTemplate(teamId, name, description, templateData, sortOrder) {
   // Current schema: templateCreate (was issueTemplateCreate), input
   // TemplateCreateInput. type is NON_NULL and templateData is NON_NULL JSON.
   // NOTE: currently UNUSED — templates provisioning is deferred until the
@@ -344,7 +257,7 @@ async function createIssueTemplate(teamId, name, description, templateData, sort
       }
     `,
     { input },
-    key,
+    WORKSPACE,
   );
 }
 
@@ -356,7 +269,7 @@ async function createIssueTemplate(teamId, name, description, templateData, sort
  * Provision label groups and their child labels.
  * Returns { created: number, skipped: number }
  */
-async function provisionLabelGroups(teamId, groups, descriptions, existingGroups, existingLabels, key, dryRun) {
+async function provisionLabelGroups(teamId, groups, descriptions, existingGroups, existingLabels, dryRun) {
   let created = 0;
   let skipped = 0;
 
@@ -385,7 +298,7 @@ async function provisionLabelGroups(teamId, groups, descriptions, existingGroups
             const descKey = `${groupName}:${labelName}`;
             const desc = descriptions[descKey] || "";
             const color = COLORS[groupName]?.[labelName] || groupColor;
-            await createLabel(teamId, labelName, desc, color, existingGroup.id, process.env.LINEAR_API_KEY);
+            await createLabel(teamId, labelName, desc, color, existingGroup.id);
             console.log(`  ✅ created label "${groupName}:${labelName}"`);
             created++;
           }
@@ -402,7 +315,7 @@ async function provisionLabelGroups(teamId, groups, descriptions, existingGroups
         created += 1 + groupCfg.labels.length;
       } else {
         // Create the group first (an IssueLabel with isGroup:true)
-        const groupResult = await createLabelGroup(teamId, groupName, groupColor, process.env.LINEAR_API_KEY);
+        const groupResult = await createLabelGroup(teamId, groupName, groupColor);
         if (!groupResult?.issueLabelCreate?.success) {
           console.error(`  ❌ failed to create label group "${groupName}"`);
           continue;
@@ -415,7 +328,7 @@ async function provisionLabelGroups(teamId, groups, descriptions, existingGroups
           const descKey = `${groupName}:${labelName}`;
           const desc = descriptions[descKey] || "";
           const color = COLORS[groupName]?.[labelName] || groupColor;
-          await createLabel(teamId, labelName, desc, color, newGroupId, process.env.LINEAR_API_KEY);
+          await createLabel(teamId, labelName, desc, color, newGroupId);
           console.log(`  ✅ created label "${groupName}:${labelName}"`);
           created++;
         }
@@ -431,7 +344,7 @@ async function provisionLabelGroups(teamId, groups, descriptions, existingGroups
  * Provision standalone flag labels (not in any group).
  * Returns { created: number, skipped: number }
  */
-async function provisionFlags(teamId, flags, descriptions, existingLabels, key, dryRun) {
+async function provisionFlags(teamId, flags, descriptions, existingLabels, dryRun) {
   let created = 0;
   let skipped = 0;
 
@@ -451,7 +364,7 @@ async function provisionFlags(teamId, flags, descriptions, existingLabels, key, 
         created++;
       } else {
         const desc = descriptions[flagName] || "";
-        await createLabel(teamId, flagName, desc, COLORS.flag, null, key);
+        await createLabel(teamId, flagName, desc, COLORS.flag, null);
         console.log(`  ✅ created flag "${flagName}"`);
         created++;
       }
@@ -467,7 +380,7 @@ async function provisionFlags(teamId, flags, descriptions, existingLabels, key, 
  * pre-created on every Linear team — we check and skip them.
  * Returns { created: number, skipped: number }
  */
-async function provisionStates(teamId, states, existingStates, key, dryRun) {
+async function provisionStates(teamId, states, existingStates, dryRun) {
   let created = 0;
   let skipped = 0;
 
@@ -485,7 +398,7 @@ async function provisionStates(teamId, states, existingStates, key, dryRun) {
         console.log(`  ➕ create state "${state.name}" (type: ${state.type}, color: #${stateColor}, position: ${i})`);
         created++;
       } else {
-        await createWorkflowState(teamId, state.name, state.type, stateColor, i, key);
+        await createWorkflowState(teamId, state.name, state.type, stateColor, i);
         console.log(`  ✅ created state "${state.name}"`);
         created++;
       }
@@ -506,7 +419,7 @@ async function provisionStates(teamId, states, existingStates, key, dryRun) {
  *
  * Returns { created: 0, skipped: 0, manual: [], deferred: true }
  */
-async function provisionTemplates(teamId, templates, existingTemplates, key, dryRun) {
+async function provisionTemplates(teamId, templates, existingTemplates, dryRun) {
   console.log(`  ⏭️  templates: deferred (templateData format TBD — labels+states provisioned)`);
   return { created: 0, skipped: 0, manual: [], deferred: true };
 }
@@ -699,7 +612,7 @@ async function main() {
 
     let team;
     try {
-      team = await resolveTeam(KEY, teamKey);
+      team = await resolveTeam(teamKey, WORKSPACE);
     } catch (err) {
       if (err.message.includes("401") || err.message.includes("403") || err.message.includes("Authentication")) {
         console.error(`❌ Auth failure: ${err.message}`);
@@ -712,8 +625,8 @@ async function main() {
     console.log(`🔍 Resolved team: ${team.name} (${team.key})${workspace ? ` in workspace "${workspace}"` : ""}`);
     console.log("📡 Fetching existing resources...");
     const [existingGroups, existingLabels] = await Promise.all([
-      fetchExistingLabelGroups(team.id, KEY),
-      fetchExistingLabels(team.id, KEY),
+      fetchExistingLabelGroups(team.id),
+      fetchExistingLabels(team.id),
     ]);
     console.log(`   Found ${existingGroups.length} label groups, ${existingLabels.length} labels`);
 
@@ -753,7 +666,7 @@ async function main() {
   // Resolve team
   let team;
   try {
-    team = await resolveTeam(KEY, teamKey);
+    team = await resolveTeam(teamKey, WORKSPACE);
   } catch (err) {
     if (err.message.includes("401") || err.message.includes("403") || err.message.includes("Authentication")) {
       console.error(`❌ Auth failure: ${err.message}`);
@@ -773,10 +686,10 @@ async function main() {
   // Fetch existing resources
   console.log("📡 Fetching existing resources...");
   const [existingGroups, existingLabels, existingStates, existingTemplates] = await Promise.all([
-    fetchExistingLabelGroups(team.id, KEY),
-    fetchExistingLabels(team.id, KEY),
-    fetchExistingStates(team.id, KEY),
-    fetchExistingTemplates(team.id, KEY),
+    fetchExistingLabelGroups(team.id),
+    fetchExistingLabels(team.id),
+    fetchExistingStates(team.id),
+    fetchExistingTemplates(team.id),
   ]);
   console.log(`   Found ${existingGroups.length} label groups, ${existingLabels.length} labels, ${existingStates.length} states, ${existingTemplates.length} templates`);
   console.log("");
@@ -785,7 +698,7 @@ async function main() {
   console.log("🏷️  Label groups:");
   const lgResult = await provisionLabelGroups(
     team.id, labelsCfg.groups, labelsCfg.descriptions || {},
-    existingGroups, existingLabels, KEY, false,
+    existingGroups, existingLabels, false,
   );
   console.log("");
 
@@ -793,21 +706,21 @@ async function main() {
   console.log("🚩 Flags:");
   const flResult = await provisionFlags(
     team.id, labelsCfg.flags, labelsCfg.descriptions || {},
-    existingLabels, KEY, false,
+    existingLabels, false,
   );
   console.log("");
 
   // 3. Workflow states
   console.log("🔷 Workflow states:");
   const stResult = await provisionStates(
-    team.id, statesCfg.workflowStates, existingStates, KEY, false,
+    team.id, statesCfg.workflowStates, existingStates, false,
   );
   console.log("");
 
   // 4. Issue templates
   console.log("📋 Issue templates:");
   const tplResult = await provisionTemplates(
-    team.id, templates, existingTemplates, KEY, false,
+    team.id, templates, existingTemplates, false,
   );
   console.log("");
 
