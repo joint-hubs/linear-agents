@@ -40,6 +40,24 @@ When launched manually (`bin\cadence.bat` or `bin\cadence-dry.bat`), **START IMM
 
 ## Pętla
 
+### 0. Ingest pipeline'u (robisz SAM — jedna tania komenda)
+
+```
+node $LA_ROOT/scripts/flow-db.mjs ingest
+```
+
+Wciąga transkrypty wszystkich przebiegów do `.state/flowdb/flow.db`. Idempotentne — przebiegi
+już wciągnięte są pomijane, dociągane są tylko nowe i te, które urosły. Sekundy, bez sieci.
+
+**Po co:** Linear mówi CO zostało zrobione. Ta baza mówi JAK składy pracowały — ile rund,
+gdzie odbijało, gdzie poszedł koszt. Bez niej retro zgaduje z samych statusów.
+
+**Dry-run** (`CADENCE_DRY_RUN=1`): dodaj `--dry-run` — policzy, nic nie zapisze.
+
+> To jedyne miejsce, gdzie CADENCE pisze poza `.state/cadence/`. `.state/flowdb/` mieści się
+> w dozwolonym `.state/`, a baza to lokalna projekcja transkryptów — nie dotyka Linear, repo
+> ani konfiguracji. Read-mostly obowiązuje dalej.
+
 ### 1. Collector — zbierz stan (deleguj do `collector`)
 Uruchom przez Task tool sub-agenta `collector` i przekaż mu PONIŻSZĄ listę zapytań — **collector
 wykonuje je SAM (ma Bash)** i zwraca ustrukturyzowany stan. Ty NIE uruchamiasz linear-query i NIE
@@ -68,22 +86,42 @@ przyjmujesz surowego JSON-a do swojego kontekstu (to był główny koszt cadence
 
 - **Detail dla flagowanych issue:** `node $LA_ROOT/scripts/linear-query.mjs issue <identifier> --json`
 
-**Output:** przekaż sub-agentowi `collector` surowy JSON (struktura: throughput, counts, blocked, escalated, overBudget, agingWip, noInitiative, staleNeeds). Collector zwróci go w ustrukturyzowanej formie.
+**Dodatkowo — metryki pipeline'u (`flow-db.mjs`, po kroku 0):**
+
+- `node $LA_ROOT/scripts/flow-db.mjs patterns --json`
+  → zwraca cztery tablice:
+  - `stepStats[]` — `{squad, agent, executions, avg_turns_per_run, cost_usd}`; `agent:"_lead"` to lead
+  - `repeats[]` — `{task_id, squad, agent, times}` — ile razy ten sam krok poszedł na tym tasku
+  - `bounces[]` — `{taskId, bounces}` — odbicia REVIEW→DEV
+  - `failures[]` — `{squad, runs, failed}`
+
+**Output:** przekaż sub-agentowi `collector` surowy JSON (struktura: throughput, counts, blocked, escalated, overBudget, agingWip, noInitiative, staleNeeds) **oraz** `patterns`. Collector zwróci całość w ustrukturyzowanej formie.
 
 ### 2. Retro — drift + retro (deleguj do `retro`)
-Przekaż sub-agentowi `retro` ustrukturyzowany stan z collectora. Retro wykrywa:
+Przekaż sub-agentowi `retro` ustrukturyzowany stan z collectora (**łącznie z `patterns`** —
+`retro` ma tylko `Read`, sam tych danych nie pobierze). Retro wykrywa:
 - Brak Initiative (taski bez powiązania z outcome)
 - Zaległe `needs:*` (czekają na Mateusza > X dni)
 - Stare otwarte taski
 - Nadmiar WIP
+- **Przekroczenia limitu rund** — `bounces` > 2 łamie regułę „max 2 rundy dev↔review,
+  potem escalated" (`agents/review/CLAUDE.md`). Task na dokładnie 2 to limit wykorzystany,
+  nie naruszony — raportuj osobno od `>2`.
+- **Niedowożony cel delegacji** — każdy skład deklaruje „≥40% kosztu runa u subagentów".
+  Licz z `stepStats`: `sub / (lead + sub)` per squad, gdzie `lead` to wiersz `agent:"_lead"`.
+  Skład poniżej 40% = action item, nie ciekawostka.
 
 Oraz robi blameless retro (co dobrze/źle/zaskoczyło) + 1–3 action items + propozycje Now/Next/Later.
 
-**Output:** retro zwraca strukturę: drift findings, retro (good/bad/surprising), action items, Now/Next/Later proposals.
+**Output:** retro zwraca strukturę: drift findings, **pipeline findings** (przekroczone rundy,
+składy poniżej celu delegacji, powtarzane kroki), retro (good/bad/surprising), action items,
+Now/Next/Later proposals.
 
 ### 3. Digest — PL digest (deleguj do `digest`)
 Przekaż sub-agentowi `digest` wyniki z retro. Digest:
 - Komponuje **polski** digest: top priorytety, blockery, decyzje do podjęcia, action items, drift findings, linki do widoków Linear.
+- Sekcja **„Jak pracowały składy"**: udział subagentów w koszcie per skład (z celem 40%),
+  taski które odbiły ≥2 razy, kroki powtarzane najczęściej. Liczby, nie narracja.
 - Zapisuje do `.state/cadence/<ISOweek>.md` (np. `2026-W26.md`).
 - Opcjonalnie: post summary comment do wybranego issue przez helper:
   `node $LA_ROOT/scripts/publish-linear-comment.mjs --issue <identifier> --tag run:cadence-digest:<ISOweek> --squad cadence --what "weekly digest" --run-id <runId> --state-file .state/cadence/<ISOweek>.md --tier T3 --summary <done/in-progress/blockers/metrics bullets> --next <next week focus>`
@@ -96,6 +134,8 @@ Przekaż sub-agentowi `digest` wyniki z retro. Digest:
 Gdy zmienna `CADENCE_DRY_RUN=1` jest ustawiona:
 - `linear-query.mjs` automatycznie serwuje fixture z `.state/mock/cadence-task.json` (żadnych API calls).
 - `linear-ops.mjs comment` otrzymuje flagę `--dry-run` (symulacja, brak zapisu).
+- `flow-db.mjs ingest` otrzymuje flagę `--dry-run` (liczy, nie zapisuje). `patterns` czyta
+  istniejącą bazę normalnie — to odczyt, więc dry-run go nie dotyczy.
 - Digest plik `.state/cadence/<ISOweek>.md` nadal powstaje.
 - **Nie wykonuj `git push`.**
 
@@ -103,6 +143,7 @@ Gdy zmienna `CADENCE_DRY_RUN=1` jest ustawiona:
 
 Pisz TYLKO do:
 - `.state/cadence/` — pliki digestu
+- `.state/flowdb/` — baza pipeline'u (zapisuje ją `flow-db.mjs ingest`, krok 0)
 - `.state/` — pliki tymczasowe
 
 Nigdy nie pisz do: `lib/`, `src/`, `scripts/`, `agents/`, `bin/`, `config/`, `docs/`.

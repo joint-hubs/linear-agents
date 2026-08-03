@@ -13,9 +13,16 @@ related: ../../scripts/flow-db.mjs (warstwa 1–2), ../../ui/README.md (ekran Fl
 > (run × subagent × tura) i odpowiada na pytania procesowe: `trace <taskId>`
 > (pełny łańcuch PLAN→DEV→REVIEW→TEST + bounce'y REVIEW→DEV), `patterns`
 > (powtórzenia kroków, odbicia per task, fail-rate per squad), `search` (przeszukiwanie
-> historycznych odpowiedzi). Endpointy: `/api/flow/trace`, `/api/flow/patterns`.
-> Ingest: `node scripts/flow-db.mjs ingest` (idempotentny; wpiąć w koniec każdego
-> runa launchera LUB w tygodniowy CADENCE).
+> historycznych odpowiedzi).
+>
+> **Ingest jest wpięty w CADENCE (2026-08-03)** — krok 0 pętli w `agents/cadence/CLAUDE.md`
+> woła `flow-db ingest`, collector dociąga `patterns --json`, retro liczy z tego udział
+> subagentów w koszcie i odbicia REVIEW→DEV, digest raportuje w sekcji „Jak pracowały składy".
+> Do 2026-08-03 baza nie miała żadnego konsumenta runtime i była nieaktualna o miesiąc.
+>
+> **Uwaga na nieaktualność:** `/api/flow/trace` i `/api/flow/patterns` **nie czytają już
+> tej bazy** — od `db8f9ff` idą do centralnego store'u telemetrii (`telemetry-store.mjs`).
+> Ta baza jest dziś zasilana i czytana wyłącznie przez CLI + CADENCE.
 
 Warstwa 3 = wykorzystanie tej bazy tak, żeby **agent na danym kroku był mądrzejszy,
 bo krok był już kiedyś wykonywany**.
