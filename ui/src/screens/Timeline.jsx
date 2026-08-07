@@ -7,14 +7,19 @@ import { fmtUSD, fmtCost, costValue, elapsed, statusLabel, modelMix } from '../u
 const POLL_MS = 5000;
 
 // Fixed squad palette (ux-design-v3 §3.2) — mirrors --sq-* vars in theme.css.
+// The two orchestrators share a muted teal: they are agent runs that cost money,
+// but they sit outside the plan→dev→review→test pipeline, so the accent colours
+// stay reserved for the squads that move a Linear task along.
 const SQCOLOR = {
   plan: '#6e56cf',
   dev: '#2563eb',
   review: '#d97706',
   test: '#059669',
   cadence: '#64748b',
+  'orch-ollama': '#0e7490',
+  'orch-openrouter': '#0891b2',
 };
-const SQUADS = ['plan', 'dev', 'review', 'test', 'cadence'];
+const SQUADS = ['plan', 'dev', 'review', 'test', 'cadence', 'orch-ollama', 'orch-openrouter'];
 const ZOOMS = [
   { h: 24, label: 'Day' },
   { h: 72, label: '3d' },

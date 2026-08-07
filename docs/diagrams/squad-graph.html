@@ -1,0 +1,228 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Fenix — squad graph</title>
+<style>
+:root {
+  --bg: #f5f2ea;
+  --line: #cdc4ad;
+  --line-soft: #ddd5c0;
+  --ink: #1c2430;
+  --ink-2: #5b6472;
+  --node: #ffffff;
+  --node-stroke: #1c2430;
+  --accent: #b0530f;
+  --accent-soft: #e7c9a8;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1c30;
+    --line: #2c4468;
+    --line-soft: #223655;
+    --ink: #e9edf3;
+    --ink-2: #8fa3c0;
+    --node: #14263f;
+    --node-stroke: #cdd8e8;
+    --accent: #e5943c;
+    --accent-soft: #4a3a24;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1c30; --line: #2c4468; --line-soft: #223655;
+  --ink: #e9edf3; --ink-2: #8fa3c0; --node: #14263f; --node-stroke: #cdd8e8;
+  --accent: #e5943c; --accent-soft: #4a3a24;
+}
+:root[data-theme="light"] {
+  --bg: #f5f2ea; --line: #cdc4ad; --line-soft: #ddd5c0;
+  --ink: #1c2430; --ink-2: #5b6472; --node: #ffffff; --node-stroke: #1c2430;
+  --accent: #b0530f; --accent-soft: #e7c9a8;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.wrap {
+  background: var(--bg);
+  padding: 2.5rem 1rem;
+  display: flex;
+  justify-content: center;
+}
+svg { width: 100%; height: auto; max-width: 1240px; overflow: visible; }
+text {
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  fill: var(--ink);
+}
+.node-label { font-size: 14px; font-weight: 600; letter-spacing: 0.02em; }
+.node-label-sm { font-size: 10.5px; font-weight: 500; }
+.route-label { font-size: 10px; fill: var(--ink-2); letter-spacing: 0.01em; }
+.terminal-label { font-size: 11px; fill: var(--ink-2); }
+.spine { stroke: var(--node-stroke); stroke-width: 1.6; fill: none; }
+.spine-arrow { fill: var(--node-stroke); }
+.trunk { stroke: var(--line); stroke-width: 1.3; fill: none; }
+.fan { stroke: var(--line); stroke-width: 1.2; fill: none; }
+.branch { stroke: var(--line); stroke-width: 1.2; fill: none; stroke-dasharray: 3 3; }
+.exception { stroke: var(--accent); stroke-width: 1.5; fill: none; }
+.exception-arrow { fill: var(--accent); }
+.observe { stroke: var(--ink-2); stroke-width: 1.2; fill: none; stroke-dasharray: 2 4; }
+.node-main circle { fill: var(--node); stroke: var(--node-stroke); stroke-width: 1.6; }
+.node-sub circle { fill: var(--bg); stroke: var(--line); stroke-width: 1.2; }
+.node-term circle { fill: var(--node-stroke); stroke: none; }
+</style>
+<div class="wrap">
+<svg viewBox="0 -40 1240 660" role="img" aria-labelledby="t d">
+<title id="t">Fenix squad routing graph</title>
+<desc id="d">Five agent squads — PLAN, DEV, REVIEW, TEST, CADENCE — process a task through Linear states. Each squad node expands into its internal delegation pipeline below it. Copper arcs above the spine show exception routing back to DEV.</desc>
+
+<defs>
+  <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L8,4 L0,8 Z" class="spine-arrow"></path>
+  </marker>
+  <marker id="arrow-x" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L8,4 L0,8 Z" class="exception-arrow"></path>
+  </marker>
+</defs>
+
+<!-- ============================== SPINE ============================== -->
+
+<!-- start -->
+<circle cx="46" cy="180" r="4" class="node-term" style="fill:var(--ink-2)"></circle>
+
+<!-- spine path: start -> PLAN -->
+<path d="M50,180 L192,180" class="spine" marker-end="url(#arrow)"></path>
+<!-- PLAN -> DEV -->
+<path d="M328,180 L472,180" class="spine" marker-end="url(#arrow)"></path>
+<text x="400" y="172" class="route-label" text-anchor="middle">dor-ok</text>
+<!-- DEV -> REVIEW -->
+<path d="M608,180 L752,180" class="spine" marker-end="url(#arrow)"></path>
+<text x="680" y="172" class="route-label" text-anchor="middle">ai:coded</text>
+<!-- REVIEW -> TEST -->
+<path d="M888,180 L1032,180" class="spine" marker-end="url(#arrow)"></path>
+<text x="960" y="172" class="route-label" text-anchor="middle">ai:reviewed</text>
+<!-- TEST -> done -->
+<path d="M1168,180 L1194,180" class="spine" marker-end="url(#arrow)"></path>
+<circle cx="1194" cy="180" r="4" class="node-term" style="fill:var(--ink-2)"></circle>
+<text x="1194" y="204" class="terminal-label" text-anchor="middle">done</text>
+
+<!-- ======================= EXCEPTION ARCS (above spine) ======================= -->
+<!-- REVIEW -> DEV -->
+<path d="M820,140 C 700,60 620,60 545,140" class="exception" marker-end="url(#arrow-x)"></path>
+<!-- TEST -> DEV -->
+<path d="M1100,140 C 900,-30 680,-30 555,132" class="exception" marker-end="url(#arrow-x)"></path>
+
+<!-- ============================== MAIN NODES ============================== -->
+
+<!-- PLAN -->
+<g class="node-main">
+  <circle cx="260" cy="180" r="44"></circle>
+  <text x="260" y="185" class="node-label" text-anchor="middle">plan</text>
+</g>
+
+<!-- DEV -->
+<g class="node-main">
+  <circle cx="540" cy="180" r="44"></circle>
+  <text x="540" y="185" class="node-label" text-anchor="middle">dev</text>
+</g>
+
+<!-- REVIEW -->
+<g class="node-main">
+  <circle cx="820" cy="180" r="44"></circle>
+  <text x="820" y="185" class="node-label" text-anchor="middle">review</text>
+</g>
+
+<!-- TEST -->
+<g class="node-main">
+  <circle cx="1100" cy="180" r="44"></circle>
+  <text x="1100" y="185" class="node-label" text-anchor="middle">test</text>
+</g>
+
+<!-- ============================== PLAN sub-pipeline (sequential) ============================== -->
+<path d="M260,224 L260,250 L119,259" class="trunk"></path>
+<path d="M156,296 L170,296 M210,296 L224,296 M280,296 L294,296 M368,296 L382,296" class="fan"></path>
+<g class="node-sub">
+  <circle cx="119" cy="296" r="37"></circle>
+  <text x="119" y="300" class="node-label-sm" text-anchor="middle">discovery</text>
+</g>
+<g class="node-sub">
+  <circle cx="190" cy="296" r="20"></circle>
+  <text x="190" y="300" class="node-label-sm" text-anchor="middle">spec</text>
+</g>
+<g class="node-sub">
+  <circle cx="252" cy="296" r="28"></circle>
+  <text x="252" y="300" class="node-label-sm" text-anchor="middle">skeptic</text>
+</g>
+<g class="node-sub">
+  <circle cx="331" cy="296" r="37"></circle>
+  <text x="331" y="300" class="node-label-sm" text-anchor="middle">decompose</text>
+</g>
+<g class="node-sub">
+  <circle cx="402" cy="296" r="20"></circle>
+  <text x="402" y="300" class="node-label-sm" text-anchor="middle">push</text>
+</g>
+
+<!-- ============================== DEV sub-pipeline (sequential + escalation) ============================== -->
+<path d="M540,224 L540,250 L498,268" class="trunk"></path>
+<path d="M526,296 L542,296" class="fan"></path>
+<g class="node-sub">
+  <circle cx="498" cy="296" r="28"></circle>
+  <text x="498" y="300" class="node-label-sm" text-anchor="middle">recon</text>
+</g>
+<g class="node-sub">
+  <circle cx="579" cy="296" r="37"></circle>
+  <text x="579" y="300" class="node-label-sm" text-anchor="middle">implement</text>
+</g>
+<path d="M579,333 L579,363" class="branch"></path>
+<g class="node-sub">
+  <circle cx="579" cy="400" r="37"></circle>
+  <text x="579" y="404" class="node-label-sm" text-anchor="middle">debug</text>
+</g>
+
+<!-- ============================== REVIEW sub-pipeline (parallel fan) ============================== -->
+<path d="M820,224 L820,250" class="trunk"></path>
+<path d="M820,250 L730,279 M820,250 L820,279 M820,250 L893,296" class="fan"></path>
+<g class="node-sub">
+  <circle cx="730" cy="316" r="37"></circle>
+  <text x="730" y="320" class="node-label-sm" text-anchor="middle">first-pass</text>
+</g>
+<g class="node-sub">
+  <circle cx="820" cy="316" r="37"></circle>
+  <text x="820" y="320" class="node-label-sm" text-anchor="middle">security</text>
+</g>
+<g class="node-sub">
+  <circle cx="893" cy="316" r="20"></circle>
+  <text x="893" y="320" class="node-label-sm" text-anchor="middle">deep</text>
+</g>
+
+<!-- ============================== TEST sub-pipeline (sequential + escalation) ============================== -->
+<path d="M1100,224 L1100,250 L1068,268" class="trunk"></path>
+<path d="M1096,296 L1112,296" class="fan"></path>
+<g class="node-sub">
+  <circle cx="1068" cy="296" r="28"></circle>
+  <text x="1068" y="300" class="node-label-sm" text-anchor="middle">deploy</text>
+</g>
+<g class="node-sub">
+  <circle cx="1132" cy="296" r="20"></circle>
+  <text x="1132" y="300" class="node-label-sm" text-anchor="middle">run</text>
+</g>
+<path d="M1132,316 L1132,346" class="branch"></path>
+<g class="node-sub">
+  <circle cx="1132" cy="383" r="37"></circle>
+  <text x="1132" y="387" class="node-label-sm" text-anchor="middle">root-cause</text>
+</g>
+
+<!-- ============================== CADENCE (weekly observer, sequential) ============================== -->
+<g class="node-main">
+  <circle cx="680" cy="500" r="40"></circle>
+  <text x="680" y="505" class="node-label" text-anchor="middle">cadence</text>
+</g>
+<path d="M680,460 L680,236" class="observe"></path>
+<circle cx="680" cy="236" r="5" fill="none" class="observe"></circle>
+<path d="M680,540 L680,554 L644,560" class="trunk"></path>
+<path d="M672,588 L688,588" class="fan"></path>
+<g class="node-sub">
+  <circle cx="644" cy="588" r="28"></circle>
+  <text x="644" y="592" class="node-label-sm" text-anchor="middle">collect</text>
+</g>
+<g class="node-sub">
+  <circle cx="716" cy="588" r="28"></circle>
+  <text x="716" y="592" class="node-label-sm" text-anchor="middle">digest</text>
+</g>
+
+</svg>
+</div>

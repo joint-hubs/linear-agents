@@ -31,7 +31,7 @@ try {
   DatabaseSync = null;
 }
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export function sqliteAvailable() {
   return DatabaseSync != null;
@@ -265,6 +265,39 @@ function createBaseSchema(db) {
       resolved_at TEXT,
       UNIQUE(run_id, issue_type, resolved_at)
     );
+    CREATE TABLE IF NOT EXISTS tool_facts (
+      tool_fact_id   TEXT PRIMARY KEY,
+      run_id         TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+      agent_key      TEXT NOT NULL,
+      model          TEXT,
+      observed_at    TEXT,
+      tool_name_raw  TEXT NOT NULL,
+      tool_name_canon TEXT,
+      tool_input     TEXT,
+      tool_has_error INTEGER NOT NULL DEFAULT 0,
+      turn_index    INTEGER NOT NULL,
+      source_path   TEXT NOT NULL,
+      source_offset INTEGER NOT NULL,
+      created_at    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_facts_run ON tool_facts(run_id, agent_key);
+    CREATE INDEX IF NOT EXISTS idx_tool_facts_canon ON tool_facts(tool_name_canon);
+    CREATE TABLE IF NOT EXISTS delegation_links (
+      delegation_id   TEXT PRIMARY KEY,
+      parent_run_id   TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+      parent_agent    TEXT NOT NULL,
+      child_agent     TEXT NOT NULL,
+      child_model     TEXT,
+      child_transcript TEXT,
+      observed_at     TEXT,
+      child_tokens    INTEGER,
+      child_cost_usd  REAL,
+      child_turns     INTEGER,
+      source          TEXT NOT NULL,
+      created_at      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_delegation_links_parent ON delegation_links(parent_run_id, parent_agent);
+    CREATE INDEX IF NOT EXISTS idx_delegation_links_child ON delegation_links(child_agent);
   `);
 }
 
@@ -1393,4 +1426,50 @@ export function resetTelemetry(options = {}) {
   const path = options.dbPath || telemetryDbPath();
   if (existsSync(path)) rmSync(path, { force: true });
   return path;
+}
+
+export async function recordToolFact(record, options = {}) {
+  const db = openTelemetryDb(options.dbPath);
+  try {
+    const toolFactId = createHash("sha1")
+      .update(`${record.source_path}:${record.source_offset}:${record.tool_index}`)
+      .digest("hex");
+    const toolInput = record.tool_input ? record.tool_input.slice(0, 1000) : null;
+    const result = db.prepare(`
+      INSERT OR IGNORE INTO tool_facts
+        (tool_fact_id, run_id, agent_key, model, observed_at, tool_name_raw, tool_name_canon, tool_input, tool_has_error, turn_index, source_path, source_offset, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      toolFactId, record.run_id, record.agent_key, record.model || null, record.observed_at || null,
+      record.tool_name_raw, record.tool_name_canon || null, toolInput,
+      record.tool_has_error ? 1 : 0, record.turn_index, record.source_path, record.source_offset, now(),
+    );
+    if (result.changes === 0) return { recorded: false, reason: "duplicate" };
+    return { recorded: true, id: toolFactId };
+  } finally {
+    db.close();
+  }
+}
+
+export async function recordDelegationLink(record, options = {}) {
+  const db = openTelemetryDb(options.dbPath);
+  try {
+    const delegationId = createHash("sha1")
+      .update(`${record.parent_run_id}:${record.parent_agent}:${record.child_agent}:${record.observed_at}`)
+      .digest("hex");
+    const result = db.prepare(`
+      INSERT OR IGNORE INTO delegation_links
+        (delegation_id, parent_run_id, parent_agent, child_agent, child_model, child_transcript, observed_at, child_tokens, child_cost_usd, child_turns, source, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      delegationId, record.parent_run_id, record.parent_agent, record.child_agent,
+      record.child_model || null, record.child_transcript || null, record.observed_at || null,
+      record.child_tokens || null, record.child_cost_usd || null, record.child_turns || null,
+      record.source || "transcript", now(),
+    );
+    if (result.changes === 0) return { recorded: false, reason: "duplicate" };
+    return { recorded: true, id: delegationId };
+  } finally {
+    db.close();
+  }
 }

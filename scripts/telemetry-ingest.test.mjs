@@ -13,9 +13,15 @@ const db = openTelemetryDb(join(temp, "telemetry.sqlite"));
 const transcript = join(temp, "lead.jsonl");
 const sessionId = "session-worktree-1";
 
-function test(name, fn) {
-  try { fn(); passed++; console.log(`  PASS ${name}`); }
-  catch (error) { failed++; console.log(`  FAIL ${name}: ${error.message}`); }
+async function test(name, fn) {
+  try {
+    await fn();
+    passed++;
+    console.log(`  PASS ${name}`);
+  } catch (error) {
+    failed++;
+    console.log(`  FAIL ${name}: ${error.message}`);
+  }
 }
 
 function assert(value, message) {
@@ -44,24 +50,28 @@ writeJsonl(join(subagents, "agent-worker.jsonl"), [
   { type: "assistant", timestamp: "2026-07-24T08:01:30.000Z", sessionId, agentId: "worker", message: { model: "deepseek-v4-flash", usage: { input_tokens: 20, output_tokens: 10 } } },
 ]);
 
-test("imports the transcript and worktree timeline", () => {
-  const result = ingestTranscript(db, "run-worktree-1", transcript, sessionId);
-  assert(result.events === 4, `events=${result.events}`);
-  const run = queryRuns(db)[0];
-  assert(run.worktreePath.endsWith("foc-36"), `worktree=${run.worktreePath}`);
-  assert(run.gitRef.name === "foc-36-design-system", `branch=${run.gitRef.name}`);
-  assert(run.byAgent._lead.turns === 1, "lead usage missing");
-  assert(run.byAgent["agent-worker"].turns === 1, "subagent usage missing");
-});
+async function run() {
+  await test("imports the transcript and worktree timeline", async () => {
+    const result = await ingestTranscript(db, "run-worktree-1", transcript, sessionId);
+    assert(result.events === 4, `events=${result.events}`);
+    const run = queryRuns(db)[0];
+    assert(run.worktreePath.endsWith("foc-36"), `worktree=${run.worktreePath}`);
+    assert(run.gitRef.name === "foc-36-design-system", `branch=${run.gitRef.name}`);
+    assert(run.byAgent._lead.turns === 1, "lead usage missing");
+    assert(run.byAgent["agent-worker"].turns === 1, "subagent usage missing");
+  });
 
-test("re-ingest does not duplicate usage", () => {
-  const result = ingestTranscript(db, "run-worktree-1", transcript, sessionId);
-  assert(result.events === 0, `events=${result.events}`);
-  const run = queryRuns(db)[0];
-  assert(run.byAgent._lead.turns === 1 && run.byAgent["agent-worker"].turns === 1, "usage duplicated");
-});
+  await test("re-ingest does not duplicate usage", async () => {
+    const result = await ingestTranscript(db, "run-worktree-1", transcript, sessionId);
+    assert(result.events === 0, `events=${result.events}`);
+    const run = queryRuns(db)[0];
+    assert(run.byAgent._lead.turns === 1 && run.byAgent["agent-worker"].turns === 1, "usage duplicated");
+  });
 
-db.close();
-rmSync(temp, { recursive: true, force: true });
-console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+  db.close();
+  rmSync(temp, { recursive: true, force: true });
+  console.log(`\n${passed} passed, ${failed} failed`);
+  process.exit(failed ? 1 : 0);
+}
+
+run().catch((error) => { console.error(error); process.exit(1); });

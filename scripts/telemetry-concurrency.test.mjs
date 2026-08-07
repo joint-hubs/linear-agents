@@ -56,7 +56,7 @@ try {
     import { openTelemetryDb } from ${JSON.stringify(storeUrl)};
     import { ingestTranscript } from ${JSON.stringify(ingestUrl)};
     const db = openTelemetryDb(process.env.LA_TELEMETRY_DB);
-    try { ingestTranscript(db, 'concurrent-run', ${JSON.stringify(transcript)}, 'concurrent-session'); }
+    try { await ingestTranscript(db, 'concurrent-run', ${JSON.stringify(transcript)}, 'concurrent-session'); }
     finally { db.close(); }
   `;
   await Promise.all([child(ingestCode), child(ingestCode)]);

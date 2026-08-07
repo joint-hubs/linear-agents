@@ -40,6 +40,11 @@ import {
   readLeadDoc,
   resolvePromptRefs,
   readContextFile,
+  writeContextFile,
+  listExternalPromptFiles,
+  readExternalFile,
+  writeExternalFile,
+  isExternalPath,
 } from './prompt-library.mjs';
 import { computeOutcomes } from './delegation-outcomes.mjs';
 
@@ -116,16 +121,24 @@ function corsPreflight(res) {
   res.end();
 }
 
-// Read + parse a small JSON request body (POST /api/launch). Caps at 8 KB so a
-// runaway client can't stream forever. Rejects invalid JSON as a thrown error.
-function readJsonBody(req) {
+// Read + parse a JSON request body. Caps the size so a runaway client can't
+// stream forever; rejects invalid JSON as a thrown error.
+//
+// The 8 KB default fits the control payloads (/api/launch, /api/squad-config).
+// /api/prompts/file carries a whole prompt document instead — agents/dev/CLAUDE.md
+// is already 8.7 KB and docs/FENIX_WORKFLOW.md is over 20 KB — so it passes a
+// larger cap. Callers that take documents must opt in explicitly; the default
+// stays tight.
+function readJsonBody(req, maxBytes = 8192) {
   return new Promise((resolve, reject) => {
     let data = '';
     req.on('data', (c) => {
       data += c;
-      if (data.length > 8192) {
+      if (data.length > maxBytes) {
         req.destroy();
-        reject(new Error('body too large (>8KB)'));
+        const err = new Error(`body too large (>${Math.round(maxBytes / 1024)}KB)`);
+        err.tooLarge = true;
+        reject(err);
       }
     });
     req.on('end', () => {
@@ -227,10 +240,10 @@ async function reconcileDeadRuns() {
   return closed;
 }
 
-function ingestTelemetry() {
+async function ingestTelemetry() {
   try {
     const replay = telemetryStore.replayPending();
-    const result = ingestKnownRuns();
+    const result = await ingestKnownRuns();
     if (replay.ingested || result.usageEvents) {
       console.log(`[telemetry] replayed=${replay.ingested} usage=${result.usageEvents}`);
     }
@@ -878,6 +891,56 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // --- POST /api/prompts/file ---
+    // Write a context/prompt document (docs/ui/prompt-editing.md). Localhost-only.
+    // Authorisation lives in writeContextFile: only .md files referenced by
+    // some prompt, with kind auto/read, can be written — same allowlist as
+    // GET /api/prompts/file. dryRun:true returns before/after without writing.
+    if (method === 'POST' && path === '/api/prompts/file') {
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/prompts/file is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden origin' });
+        log(method, path, 403);
+        return;
+      }
+      let body;
+      // 1 MB: a prompt document, not a control payload. The largest one in the
+      // repo (docs/FENIX_WORKFLOW.md) is ~20 KB, so this is generous headroom
+      // that still bounds the request.
+      try { body = await readJsonBody(req, 1024 * 1024); } catch (err) {
+        const status = err.tooLarge ? 413 : 400;
+        json(res, status, {
+          error: err.tooLarge ? err.message : 'invalid JSON body: ' + err.message,
+        });
+        log(method, path, status);
+        return;
+      }
+      const relPath = body.path;
+      const dryRun = body.dryRun === true;
+      // "@rootId/..." targets a configured external root (~/.claude, hermes);
+      // anything else is repo-relative. Guards live in prompt-library.
+      const result = isExternalPath(relPath)
+        ? writeExternalFile(root, relPath, body.body, { dryRun })
+        : writeContextFile(root, relPath, body.body, { dryRun });
+      if (result.error) {
+        const status = result.error.startsWith('forbidden')
+          ? 403
+          : result.error === 'not found'
+            ? 404
+            : 400;
+        json(res, status, result);
+        log(method, path, status);
+        return;
+      }
+      json(res, 200, result);
+      log(method, path, 200);
+      return;
+    }
+
     // --- POST /api/runs/task ---
     // Change or clear the task assigned to a run. Localhost-only.
     // scope: 'run' (default) → validFrom = run.startedAt (retroactive, moves all cost).
@@ -1298,12 +1361,23 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // GET /api/prompts/roots — editable prompt documents outside the repo
+    // (~/.claude, hermes). Allowlist: config/prompt-roots.json.
+    if (path === '/api/prompts/roots') {
+      json(res, 200, { files: listExternalPromptFiles(root) });
+      log(method, path, 200);
+      return;
+    }
+
     // GET /api/prompts/file?path= — content of one context file.
-    // Authorisation lives in readContextFile: the path must be referenced by
-    // some prompt AND resolve inside the repo. Do not loosen it here.
+    // Authorisation lives in readContextFile / readExternalFile: the path must
+    // be referenced by some prompt AND resolve inside the repo, or match a
+    // configured external root. Do not loosen it here.
     if (path === '/api/prompts/file') {
       const relPath = url.searchParams.get('path') || '';
-      const doc = readContextFile(root, relPath);
+      const doc = isExternalPath(relPath)
+        ? readExternalFile(root, relPath)
+        : readContextFile(root, relPath);
       if (doc.error) {
         const status = doc.error.startsWith('forbidden')
           ? 403
