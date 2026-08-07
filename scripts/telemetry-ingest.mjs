@@ -13,13 +13,18 @@ import {
   makeEvent,
   openTelemetryDb,
   queryRuns,
+  recordDelegationLink,
   recordManifest,
   recordSessionLink,
   recordTaskLink,
+  recordToolFact,
   recordWorkspace,
   reportDataQuality,
   replayPending,
+  sqliteAvailable,
 } from "./telemetry-store.mjs";
+import { extractToolFacts } from "./telemetry-tool-extract.mjs";
+import { reconstructDelegationLinks } from "./telemetry-delegation-recon.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -124,7 +129,45 @@ function subagentPaths(transcriptPath) {
   }
 }
 
-export function ingestTranscript(db, runId, transcriptPath, sessionId = null) {
+/**
+ * Determine the agent_key for a transcript path.
+ *
+ * For the lead transcript (isLead=true), returns "_lead".
+ * For subagent transcripts, scans the first few lines for attributionAgent
+ * (e.g. "first-pass", "security") or agentId, falling back to the filename.
+ */
+function agentKeyFromTranscript(path, isLead) {
+  if (isLead) return "_lead";
+  try {
+    const content = readFileSync(path, "utf8");
+    for (const line of content.split("\n").filter(Boolean)) {
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.attributionAgent) return parsed.attributionAgent;
+        if (parsed.agentId) return `agent-${parsed.agentId}`;
+      } catch { /* skip unparseable lines */ }
+    }
+  } catch { /* file not readable */ }
+  return basename(path).replace(/\.jsonl$/, "");
+}
+
+/**
+ * Add a tool_index field to each record so recordToolFact can compute a unique
+ * hash. Groups records by (source_path, source_offset) — all tool_use blocks
+ * in the same assistant message share the same source_offset — and assigns
+ * 0, 1, 2, … within each group.
+ */
+function addToolIndex(records) {
+  const counters = {};
+  for (const record of records) {
+    const key = `${record.source_path}:${record.source_offset}`;
+    counters[key] = (counters[key] || 0) + 1;
+    record.tool_index = counters[key] - 1;
+  }
+  return records;
+}
+
+export async function ingestTranscript(db, runId, transcriptPath, sessionId = null) {
   if (!transcriptPath || !existsSync(transcriptPath)) return { files: 0, events: 0, missing: true };
   const paths = [transcriptPath, ...subagentPaths(transcriptPath)];
   let eventsApplied = 0;
@@ -138,6 +181,33 @@ export function ingestTranscript(db, runId, transcriptPath, sessionId = null) {
     }, { runId, sourceKind: "transcript-progress", sourcePath: path, sourceOffset: size });
     const results = applyEvents(db, [...events, progressEvent]);
     eventsApplied += results.slice(0, -1).filter((result) => !result?.duplicate).length;
+
+    // Extract tool_facts and delegation_links for this transcript.
+    // Wrapped in sqliteAvailable() so Node degrades gracefully when node:sqlite
+    // is unavailable (e.g. Node 20 or custom builds).
+    if (sqliteAvailable()) {
+      const isLead = path === transcriptPath;
+      const agentKey = agentKeyFromTranscript(path, isLead);
+      const toolRecords = await extractToolFacts(path, runId, agentKey);
+      addToolIndex(toolRecords);
+      for (const record of toolRecords) {
+        await recordToolFact(record);
+      }
+      // For the lead transcript only, reconstruct delegation links from the
+      // subagents/ directory. Subagent transcripts are processed separately
+      // above (they get their own tool_facts), but the parent→child link is
+      // recorded once on the lead.
+      if (isLead) {
+        const delegationRecords = reconstructDelegationLinks({
+          runId,
+          parentAgent: "_lead",
+          transcriptPath: path,
+        });
+        for (const record of delegationRecords) {
+          await recordDelegationLink(record);
+        }
+      }
+    }
   }
   return { files: paths.length, events: eventsApplied, missing: false };
 }
@@ -248,7 +318,7 @@ export async function backfill(options = {}) {
     }
     const db = openTelemetryDb(options.dbPath);
     try {
-      const result = ingestTranscript(db, manifest.runId, transcriptPath, sessionId);
+      const result = await ingestTranscript(db, manifest.runId, transcriptPath, sessionId);
       if (result.missing) {
         summary.missingTranscripts++;
         reportDataQuality(manifest.runId, "transcript_missing", { manifestPath: path, sessionId }, options);
@@ -262,7 +332,7 @@ export async function backfill(options = {}) {
   return summary;
 }
 
-export function ingestKnownRuns(options = {}) {
+export async function ingestKnownRuns(options = {}) {
   const db = openTelemetryDb(options.dbPath);
   const summary = { runs: 0, transcripts: 0, usageEvents: 0, missingTranscripts: 0 };
   try {
@@ -273,7 +343,7 @@ export function ingestKnownRuns(options = {}) {
         reportDataQuality(run.runId, "transcript_missing", { sessionId: run.sessionId || null }, options);
         continue;
       }
-      const result = ingestTranscript(db, run.runId, transcriptPath, run.sessionId);
+      const result = await ingestTranscript(db, run.runId, transcriptPath, run.sessionId);
       summary.runs++;
       if (result.missing) {
         summary.missingTranscripts++;
@@ -293,7 +363,7 @@ async function main() {
   const asJson = args.includes("--json");
   let result;
   if (command === "backfill") result = await backfill();
-  else if (command === "ingest") result = ingestKnownRuns();
+  else if (command === "ingest") result = await ingestKnownRuns();
   else if (command === "replay") result = replayPending();
   else {
     console.error("Usage: node scripts/telemetry-ingest.mjs <backfill|ingest|replay> [--json]");

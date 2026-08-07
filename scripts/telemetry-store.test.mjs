@@ -14,7 +14,9 @@ import {
   queryRuns,
   querySummary,
   queryTrace,
+  recordDelegationLink,
   recordTaskLink,
+  recordToolFact,
 } from "./telemetry-store.mjs";
 
 let passed = 0;
@@ -25,8 +27,17 @@ const dbPath = join(temp, "telemetry.sqlite");
 const db = openTelemetryDb(dbPath);
 
 function test(name, fn) {
-  try { fn(); passed++; console.log(`  PASS ${name}`); }
-  catch (error) { failed++; failures.push(`${name}: ${error.message}`); console.log(`  FAIL ${name}: ${error.message}`); }
+  try {
+    const result = fn();
+    if (result instanceof Promise) {
+      result.then(() => { passed++; console.log(`  PASS ${name}`); })
+        .catch((error) => { failed++; failures.push(`${name}: ${error.message}`); console.log(`  FAIL ${name}: ${error.message}`); });
+    } else {
+      passed++; console.log(`  PASS ${name}`);
+    }
+  } catch (error) {
+    failed++; failures.push(`${name}: ${error.message}`); console.log(`  FAIL ${name}: ${error.message}`);
+  }
 }
 
 function assert(value, message) {
@@ -139,7 +150,7 @@ test("summary uses central projections", () => {
 
 test("health exposes store state", () => {
   const health = queryHealth(db);
-  assert(health.schemaVersion === 2, `schema=${health.schemaVersion}`);
+  assert(health.schemaVersion === 3, `schema=${health.schemaVersion}`);
   assert(health.issues.some((issue) => issue.type === "pricing_missing"), "pricing issue not reported");
 });
 
@@ -423,6 +434,36 @@ test("ignored branch does NOT move cost — usage stays on manual task", () => {
   assert(bucket != null, "MANUAL-1 must exist in byTask");
   assert(bucket.inputTokens === 100_000, `MANUAL-1 inputTokens=${bucket.inputTokens} (expected 100000 — ALL usage, branch was ignored)`);
   assert(summary.byTask["BRANCH-9"] == null, "BRANCH-9 must NOT appear in byTask (link was ignored)");
+});
+
+test("recordToolFact deduplicates on same source_path+source_offset+tool_index", async () => {
+  const r1 = await recordToolFact({
+    run_id: "test", agent_key: "x", tool_name_raw: "Read", tool_input: "{}",
+    turn_index: 0, source_path: "/tmp/x", source_offset: 0, tool_index: 0,
+  }, { dbPath });
+  assert(r1.recorded === true, `first call recorded=${r1.recorded}`);
+  assert(typeof r1.id === "string" && r1.id.length > 0, `first call id=${r1.id}`);
+  const r2 = await recordToolFact({
+    run_id: "test", agent_key: "x", tool_name_raw: "Read", tool_input: "{}",
+    turn_index: 0, source_path: "/tmp/x", source_offset: 0, tool_index: 0,
+  }, { dbPath });
+  assert(r2.recorded === false, `second call recorded=${r2.recorded}`);
+  assert(r2.reason === "duplicate", `reason=${r2.reason}`);
+});
+
+test("recordDelegationLink deduplicates on same parent_run_id+parent_agent+child_agent+observed_at", async () => {
+  const d1 = await recordDelegationLink({
+    parent_run_id: "test", parent_agent: "lead", child_agent: "implementer",
+    observed_at: "2026-08-03T12:00:00.000Z", source: "transcript",
+  }, { dbPath });
+  assert(d1.recorded === true, `first call recorded=${d1.recorded}`);
+  assert(typeof d1.id === "string" && d1.id.length > 0, `first call id=${d1.id}`);
+  const d2 = await recordDelegationLink({
+    parent_run_id: "test", parent_agent: "lead", child_agent: "implementer",
+    observed_at: "2026-08-03T12:00:00.000Z", source: "transcript",
+  }, { dbPath });
+  assert(d2.recorded === false, `second call recorded=${d2.recorded}`);
+  assert(d2.reason === "duplicate", `reason=${d2.reason}`);
 });
 
 db.close();
