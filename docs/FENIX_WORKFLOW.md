@@ -1,122 +1,46 @@
-# Fenix — Canonical Workflow
 
-> Single source of truth for how a Fenix squad session runs. Merges the office
-> 8-step session schema with the Fenix state model. Applies to all 5
-> squads (PLAN, DEV, REVIEW, TEST, CADENCE).
+<fenix_canonical_workflow_file_description>
+Single source of truth for how a Fenix squad session runs. 
+</fenix_canonical_workflow_file_description>
 
----
-
-## 1. What Fenix Is
-
+<fenix_definition>
 Fenix is an **AI orchestration system** that manages software delivery across
 multiple repositories through **5 specialized squads** of LLM agents, coordinated
 via **Linear** as the async signaling bus.
-
-**Managed repositories** (Fenix does not live in any of these — it orchestrates
-them):
-
-| Repo | Squad | Purpose |
-|---|---|---|
-| `jointhubs-fenix/neo` (joint-flows) | PLAN, DEV, REVIEW, TEST | Neo product |
-| `jointhubs-fenix/office` (AU/office) | PLAN, DEV, REVIEW, TEST | Office product |
-| `jointhubs-fenix/gantt-pisi` (PISI) | PLAN, DEV, REVIEW, TEST | PISI product |
-| `Fenix` (this repo) | — | Fenix config, docs, agent definitions |
 
 **Key properties:**
 - **Async HITL** via Linear metadata (labels, comments, emoji reactions) — never
   blocks on interactive chat.
 - **5 squads** run in isolation (separate `.bat` launchers, separate
   `CLAUDE_CONFIG_DIR`, separate model routing).
-- **CADENCE** is the 5th squad (weekly read-mostly loop) — not a cron job, not
-  a human ceremony.
-- **Cost-calibrated**: expensive models (Opus) only for high-leverage thinking;
-  cheap models (MiniMax, DeepSeek Flash) for volume work.
+</fenix_definition>
 
----
-
-## 2. State Model
-
-### 2.1 Linear Statuses (4 + Canceled)
-
+<linear_statuses>
 Fenix uses exactly **4 workflow statuses**. Sub-states like "Ready" and
 "Testing" are encoded as labels, not statuses.
 
-| Status | Type | Meaning |
-|---|---|---|
-| **Todo** | unstarted | Task exists, not yet picked up. May be unprioritized (backlog) or DoR-ready. |
-| **In Progress** | started | Actively being worked on by a squad. |
-| **In Review** | started | Handed off for review. May be under review or in testing sub-phase. |
-| **Done** | completed | All DoD criteria met. |
-| **Canceled** | canceled | Abandoned or superseded. |
+| Status          | Type      | Meaning                                                                      |
+| --------------- | --------- | ---------------------------------------------------------------------------- |
+| **Todo**        | unstarted | Task exists, not yet picked up. May be unprioritized (backlog) or DoR-ready. |
+| **In Progress** | started   | Actively being worked on by a squad.                                         |
+| **In Review**   | started   | Handed off for review. May be under review or in testing sub-phase.          |
+| **Done**        | completed | All DoD criteria met.                                                        |
+| **Canceled**    | canceled  | Abandoned or superseded.                                                     |
 
-### 2.2 Label Groups (Single-Select)
+</linear_statuses>
 
-| Group | Values | Direction | Meaning |
-|---|---|---|---|
-| **`type:`** | `feature` · `bug` · `spike` · `tech` | PLAN → all | Routes squad behavior. `spike` → ADR output, no deploy, timebox 1–2d. `tech` → technical success criteria, no user-journey check. |
-| **`needs:`** | `answer` · `approval` · `decision` · `access` | **agent → human** | "Waiting on Mateusz." This is the HITL queue. |
-| **`risk:`** | `high` | agent → human | Risky change → deeper review (GLM-5.2 deep pass). |
-| **`ai:`** | `planned` · `coded` · `reviewed` | provenance | AI-touched → higher review sampling. Non-exclusive (multi). |
+<linear_labels>
 
-### 2.3 Boolean Flags
+| Group        | Values                                        | Direction         | Meaning                                                                                                                           |
+| ------------ | --------------------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| **`type:`**  | `feature` · `bug` · `spike` · `tech`          | PLAN → all        | Routes squad behavior. `spike` → ADR output, no deploy, timebox 1–2d. `tech` → technical success criteria, no user-journey check. |
+| **`needs:`** | `answer` · `approval` · `decision` · `access` | **agent → human** | "Waiting on Mateusz." This is the HITL queue.                                                                                     |
+| **`risk:`**  | `high`                                        | agent → human     | Risky change → deeper review (GLM-5.2 deep pass).                                                                                 |
+| **`ai:`**    | `planned` · `coded` · `reviewed`              | provenance        | AI-touched → higher review sampling. Non-exclusive (multi).                                                                       |
+</linear_labels>
 
-| Flag | When | Meaning |
-|---|---|---|
-| `dor-ok` | Todo | Definition of Ready met (Why, AC, scope-out, deps present). |
-| `dod-ok` | In Review → Done | Definition of Done met. |
-| `escalated` | any | Loop-limit exceeded → human attention needed. |
-| `over-budget` | any | Cost guardrail exceeded → stop. |
-| `blocked` | any | Blocked by external dependency (+ `blocked by` relation). |
-| `stage:testing` | In Review | Sub-phase: deploy + tests running. |
-| `transcript-uncertain` | PLAN | Voice transcription uncertain — confirm before decomposing. |
 
-### 2.4 Native Fields (preferred over labels)
-
-| Field | Use |
-|---|---|
-| **Priority** | DEV pick order (Urgent > High > Med > Low). |
-| **Estimate** | T-shirt scale (XS/S/M/L/XL). XL → re-decompose before DEV. |
-| **Relations** | `blocked by` → dependency-aware pick. |
-| **Assignee** | Bot `@flow` vs Mateusz — handoff signal. |
-| **Initiative** | Outcome/theme linkage. |
-| **Project** | Repo mapping. |
-| **Parent / sub-issue** | Parent = full context, sub-issue = delta + link (never copy parent). |
-
-### 2.5 Office Status Mapping
-
-The office repo's 6-status workflow maps onto the 4-status + labels model:
-
-| Office status | Fenix equivalent | Notes |
-|---|---|---|
-| `backlog` | Todo (unprioritized) | No DoR check yet. |
-| `listed` | Todo + `dor-ok` | DoR-ready, visible for picking. |
-| `assigned` | Todo + claimed (assignee set) | Assignee = `@flow` or Mateusz. No separate status needed. |
-| `in_delivery` | In Progress + `ai:coded` | Active development. |
-| `review` | In Review (+ `ai:reviewed` when passed) | Review sub-phase. |
-| `completed` | Done | Terminal. |
-
-**Why labels > statuses (3 lines):**
-
-1. **Richer async HITL**: `needs:answer`, `needs:approval`, `needs:decision`,
-   `needs:access` encode *what kind* of human input is needed — a status can
-   only say "blocked," not why.
-2. **Provenance tracking**: `ai:planned → ai:coded → ai:reviewed` traces AI
-   involvement through the lifecycle. Statuses can't encode multi-dimensional
-   state (a task can be In Progress AND ai:coded AND risk:high simultaneously).
-3. **Human queue filtering**: The `needs:*` label group creates a single
-   filterable view (`🔔 My input`) across all tasks regardless of status. With
-   statuses alone, Mateusz would have to check every "blocked" or "in review"
-   task individually.
-
----
-
-## 3. Commit Convention
-
-### One Task = One Commit
-
-Every task produces **exactly one commit**. Never bundle multiple tasks in a
-single commit.
-
+<git_convention>
 ### Commit Message Format
 
 ```
@@ -129,47 +53,18 @@ single commit.
 
 **Prefixes** (match task type):
 
-| Prefix | When |
-|---|---|
-| `feat(area):` | New feature (type:feature) |
-| `fix(area):` | Bug fix (type:bug) |
-| `refactor:` | Refactor / tech debt (type:tech) |
-| `test:` | Tests only |
-| `chore:` | Config, deps, release bump |
-| `docs:` | Documentation |
+| Prefix        | When                             |
+| ------------- | -------------------------------- |
+| `feat(area):` | New feature (type:feature)       |
+| `fix(area):`  | Bug fix (type:bug)               |
+| `refactor:`   | Refactor / tech debt (type:tech) |
+| `test:`       | Tests only                       |
+| `chore:`      | Config, deps, release bump       |
+| `docs:`       | Documentation                    |
+</git_convention>
 
-**Area** (in parentheses): `api`, `frontend`, `sharing`, `deploy`, `models`,
-`security`, `db`, `infra`, `tests`, `config`, etc.
 
-**Task ID**: First 8 characters of the task's UUID (from Fenix/Linear),
-optionally followed by the Linear short identifier in brackets.
-
-**Examples:**
-
-```
-feat(api): CORS whitelist instead of wildcard [ee3262bc] [PISI-107]
-
-- Replaced wildcard CORS policy with explicit origin whitelist
-- Added config/env variable for allowed origins
-- Updated integration tests
-```
-
-```
-fix(deploy): keep existing secrets on bootstrap re-run [a1b2c3d4]
-
-- Added if-exists guard to bootstrap-local-secrets.sh
-- Prevents encryption key overwrite on redeploy
-```
-
-### Rules
-
-- **No `Co-Authored-By: Claude`** trailer (Mateusz's standing rule).
-- Branch per task. Pull/rebase from target branch before starting.
-- Commit message in English. Code in English. Comments to Mateusz in Polish.
-
----
-
-## 4. `deliver_task()` — Squad-Lead Action
+<lead_action_deliver_task>
 
 `deliver_task` is the **canonical handoff action** that moves a task from
 active development to review. Every squad lead calls it when their work on a
@@ -209,8 +104,9 @@ deliver_task(
 | **TEST** | After deploy + tests pass | Deploy + test time | Deploy URL, test results, health-check status |
 | **CADENCE** | N/A (read-only) | — | — |
 
----
+</lead_action_deliver_task>
 
+<lead_action_run_session>
 ## 5. Canonical Squad Session Loop (8 Steps)
 
 Every Fenix squad follows this loop. Steps 1–7 are sequential; step 8 loops
@@ -229,13 +125,16 @@ back or stops.
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Step Details
+</lead_action_run_session>
 
+<lead_action_run_session_step_1>
 **Step 1 — get_initiative_board()**
 - Load the initiative's kanban board from Linear.
-- Read cycles (sprints), their goals, and current task distribution.
+- Read issue (task) and analyze its parents if available.
 - Identify tasks in Todo (candidates), In Progress (active), In Review (blockers).
+</lead_action_run_session_step_1>
 
+<lead_action_run_session_step_2>
 **Step 2 — pick_next_task()**
 - Filter to Todo tasks with `dor-ok` (DoR-ready).
 - Sort by Priority (Urgent → High → Med → Low), then by deadline.
@@ -245,13 +144,16 @@ back or stops.
   delivered.
 - **Size gate**: if estimate is XL (>2 days), flag for re-decomposition before
   starting.
+</lead_action_run_session_step_2>
 
+<lead_action_run_session_step_3>
 **Step 3 — update_status(In Progress)**
 - Set status to In Progress.
-- Set assignee to `@flow` (the squad bot).
 - Add `ai:coded` label (or appropriate provenance).
 - Write a 👀 reaction comment: "Taking this task."
+</lead_action_run_session_step_3>
 
+<lead_action_run_session_step_4>
 **Step 4 — read_context(recon)**
 - Read the task description, AC, and linked resources.
 - Read the relevant code files (never modify unread code).
@@ -259,72 +161,50 @@ back or stops.
 - Check env readiness (docker compose, seed data, dependencies).
 - If anything is unclear → post `needs:answer` + @Mateusz in Polish → **sleep**
   (do not guess).
+</lead_action_run_session_step_4>
 
+<lead_action_run_session_step_5>
 **Step 5 — implement()**
 - Squad-specific work (see §5.1 below).
 - Checkpoint progress to `STATE.md` every ~4 hours or per logical slice.
 - For unclear decisions → `needs:decision` + sleep.
 - For risky changes → add `risk:high` label.
+</lead_action_run_session_step_5>
 
+<lead_action_run_session_step_6>
 **Step 6 — commit(one-task)**
 - `git add` only the files changed for this task.
 - Commit with the format from §3.
 - **Never `git push` without explicit approval** (safety rule).
+</lead_action_run_session_step_6>
 
+<lead_action_run_session_step_7>
 **Step 7 — deliver_task()**
 - Call `deliver_task(actual_hours, delivery_summary)` as defined in §4.
 - Task moves to In Review.
+</lead_action_run_session_step_7>
 
+<lead_action_run_session_step_8>
 **Step 8 — next or stop**
 - If more tasks are available and within session budget → go to step 1.
 - If session time limit reached, cost budget exceeded, or no suitable tasks →
   stop. Write final STATE.md update.
+</lead_action_run_session_step_8>
 
-### 5.1 Per-Squad Variations
+<lead_action_run_variations>
 
-| Aspect | PLAN | DEV | REVIEW | TEST | CADENCE |
-|---|---|---|---|---|---|
-| **Cadence** | On demand (voice memo) | On demand (task ready) | On demand (task in review) | On demand (task approved) | Weekly (cron) |
-| **Step 5 = implement()** | Discovery → spec → decompose → push to Linear | Code the feature/fix | Review code (3 parallel passes) | Deploy + run tests | Collect state → retro → digest |
-| **Input** | Voice memo + artifacts | Task in Todo with `dor-ok` | Task in In Review | Task with `stage:testing` | Linear board state |
-| **Output** | Parent epic + sub-issues in Todo | Branch + commit + In Review | Verdict: approve or return | Done or return to In Progress | Digest (PL) to Mateusz |
-| **Read-only?** | No | No | **Yes** (no Edit/Write) | Mostly no | **Yes** (no scope changes) |
-| **HITL gates** | 2 (brief approve, sample approve) | 1 (plan approve) | 0 (async if escalated) | 0 (auto-rollback on fail) | 0 (proposal only) |
-| **Key model** | Opus (lead), MiniMax (discovery) | GLM-5.2 (lead/impl) | GLM-5.2 (deep), Kimi (security) | MiniMax (lead), DeepSeek (deploy) | MiniMax (lead), GLM-5.2 (retro) |
+| Aspect                   | PLAN                                          | DEV                         | REVIEW                          | TEST                              | CADENCE                         |
+| ------------------------ | --------------------------------------------- | --------------------------- | ------------------------------- | --------------------------------- | ------------------------------- |
+| **Cadence**              | On demand (voice memo)                        | On demand (task ready)      | On demand (task in review)      | On demand (task approved)         | Weekly (cron)                   |
+| **Step 5 = implement()** | Discovery → spec → decompose → push to Linear | Code the feature/fix        | Review code (3 parallel passes) | Deploy + run tests                | Collect state → retro → digest  |
+| **Input**                | Voice memo + artifacts                        | Task in Todo with `dor-ok`  | Task in In Review               | Task with `stage:testing`         | Linear board state              |
+| **Output**               | Parent epic + sub-issues in Todo              | Branch + commit + In Review | Verdict: approve or return      | Done or return to In Progress     | Digest (PL) to Mateusz          |
+| **Read-only?**           | No                                            | No                          | **Yes** (no Edit/Write)         | Mostly no                         | **Yes** (no scope changes)      |
+| **HITL gates**           | 2 (brief approve, sample approve)             | 1 (plan approve)            | 0 (async if escalated)          | 0 (auto-rollback on fail)         | 0 (proposal only)               |
+| **Key model**            | Opus (lead), MiniMax (discovery)              | GLM-5.2 (lead/impl)         | GLM-5.2 (deep), Kimi (security) | MiniMax (lead), DeepSeek (deploy) | MiniMax (lead), GLM-5.2 (retro) |
+</lead_action_run_variations>
 
----
-
-## 6. HITL Gates and Signaling
-
-### 6.1 Emoji Micro-Dialog
-
-All human↔agent communication on Linear comments uses this lightweight protocol:
-
-| Emoji | Who | Meaning |
-|---|---|---|
-| 👀 | Agent | "Received, working on it" (ack) |
-| ✅ / 👍 | Human | "Approved, proceed" |
-| 🚫 | Human | "No, changes needed" |
-| 🔁 | Human | "Rework and resubmit" |
-
-**Flow:** Agent posts a plan/question → Mateusz reacts ✅ (1 click) → webhook
-wakes the agent → agent removes `needs:*` → continues.
-
-### 6.2 `needs:*` Queue
-
-When an agent needs human input, it:
-
-1. Posts a comment in Polish with the question/context.
-2. Adds the appropriate `needs:*` label (`answer`, `approval`, `decision`,
-   `access`).
-3. @mentions Mateusz.
-4. **Stops** (does not poll, does not guess).
-
-Mateusz sees all such tasks in the **🔔 My input** saved filter
-(`needs:*` OR assignee=me) and processes them in one batch session.
-
-### 6.3 Escalation Ladder
-
+<lead_action_escalation>
 When an agent hits a problem it cannot resolve:
 
 ```
@@ -332,7 +212,7 @@ Step 1: Retry (same model, same approach)
   ↓ (fails again)
 Step 2: Escalate model
   ├─ MCP/multi-file issues → Kimi K2.7 Code
-  └─ Reasoning/hard problems → Opus 4.8
+  └─ Reasoning/hard problems → Opus 5
   ↓ (still fails)
 Step 3: needs:* + @Mateusz (comment in Polish) + escalated flag
   ↓
@@ -343,12 +223,10 @@ Step 4: STOP — wait for human
 rounds without convergence → `escalated` + @Mateusz. The REVIEW squad lead
 tracks the round counter on the task.
 
----
+</lead_action_escalation>
 
-## 7. DoR / DoD Gates
-
-### 7.1 Definition of Ready (DoR) — Entry Gate
-
+<definition_of_ready>
+Entry Gate
 A task must pass DoR before DEV picks it. The PLAN squad (or a lightweight
 validator) checks:
 
@@ -363,8 +241,10 @@ validator) checks:
 
 **Pass** → add `dor-ok` flag. Task is pickable by DEV.
 **Fail** → add `needs:answer` + @Mateusz with specific gaps. Do not set `dor-ok`.
+</definition_of_ready>
 
-### 7.2 Definition of Done (DoD) — Exit Gate
+<definition_of_done>
+Exit Gate
 
 A task must pass DoD before moving to Done. The REVIEW squad (or the squad
 closing the task) checks:
@@ -382,57 +262,23 @@ closing the task) checks:
 **Pass** → add `dod-ok` flag → set status to Done.
 **Fail** → return to In Progress with specific gaps listed.
 
----
+</definition_of_done>
 
-## 8. Safeguards (P0)
-
-These are **hard requirements** before any squad runs autonomously. Enumerate
+<safeguards>
+These are requirements before any squad runs autonomously. Enumerate
 here; each squad's CLAUDE.md expands the implementation.
 
-| # | Safeguard | Mechanism | Squad |
-|---|---|---|---|
-| 1 | **Loop-limit + escalation** | Max 2 review rounds → `escalated`. Max N follow-ups per task. | REVIEW, DEV |
-| 2 | **Cost guardrail** | Budget $/task + kill-switch. Exceed → `over-budget` + stop. | All |
-| 3 | **Tool-call fallback** | Retry → fallback model (Kimi for MCP, Opus for reasoning). | All |
-| 4 | **Idempotency + resume** | Check existing before create. Atomic push + rollback. Resume from `STATE.md`. | PLAN, DEV |
-| 5 | **Deploy safety** | Health-check + auto-rollback. Synthetic test data (no prod PII). | TEST |
-| 6 | **Async HITL** | `needs:*` + sleep. Never block interactively. | All |
-| 7 | **DoR/DoD gate** | Task without Why/AC/scope-out/deps = not accepted. Without DoD = not closed. | PLAN, REVIEW |
-| 8 | **WIP=1** | One active task per squad session. No thrashing. | DEV, PLAN |
-| 9 | **No silent `git push`** | Commit only. Push requires explicit approval. | DEV |
-| 10 | **Context packet** | Parent = full context, sub-issue = delta + link. Never copy parent. | PLAN |
+| #   | Safeguard                | Mechanism                                                                    | Squad        |
+| --- | ------------------------ | ---------------------------------------------------------------------------- | ------------ |
+| 1   | **Async HITL**           | `needs:*` + sleep. Never block interactively.                                | All          |
+| 2   | **DoR/DoD gate**         | Task without Why/AC/scope-out/deps = not accepted. Without DoD = not closed. | PLAN, REVIEW |
+| 3   | **WIP=1**                | One active task per squad session. No thrashing.                             | DEV, PLAN    |
+| 4   | **No silent `git push`** | Commit only. Push requires explicit approval.                                | DEV          |
+| 5   | **Context packet**       | Parent = full context, sub-issue = delta + link. Never copy parent.          | PLAN         |
 
----
+</safeguards>
 
-## 9. Open Conventions (To Finalize)
-
-These are unresolved design points that will be decided as Fenix matures:
-
-| # | Topic | Question | Proposed |
-|---|---|---|---|
-| 1 | **Linear bot user** | What OAuth app name/scopes for `@flow`? | `app:assignable`, `app:mentionable`, webhooks on mention/assign/react/comment |
-| 2 | **Project → repo mapping** | Where to store the map? | `config/projects.json` — Linear project ID → repo path + deploy target |
-| 3 | **Deploy targets** | GCP VM vs Lambda AI per project? | Per-project in `projects.json` |
-| 4 | **API keys** | Where to store provider keys? | Env / vault, documented in `docs/ACCESS.md` |
-| 5 | **Control-panel UI** | Web UI for saved filters + manual override? | Separate step from `Desktop/experiments/0_linear` |
-| 6 | **CADENCE trigger** | Cron vs `morning_planner.py` vs Hermes? | Weekly cron, with manual override via `bin\cadence.bat` |
-| 7 | **Metrics dashboard** | DORA-lite metrics after ~50 tasks? | Cycle time, throughput, review iterations, $/task |
-| 8 | **Cross-repo tasks** | Task spanning multiple repos? | List >1 repo in task; DEV splits or handles sequentially |
-| 9 | **Release checklist** | User-facing release ceremony? | Optional: rollback check, observability, release notes |
-| 10 | **Forecast** | Monte Carlo throughput forecast? | After ~50 tasks of history |
-
----
-
-## Appendix A: Saved Linear Filters (Mateusz's Control Plane)
-
-| View | Filter | Purpose |
-|---|---|---|
-| **🔔 My input** | `needs:*` OR assignee=me | HITL queue (batch process) |
-| **🤖 Agent working** | assignee=`@flow` AND status=In Progress | What's happening now |
-| **⚠️ Attention** | `risk:high` OR `escalated` OR `over-budget` | Where to look |
-| **🚧 Blocked** | `blocked` OR has `blocked by` relation | Unblocking queue |
-| **🧪 Review/Test** | status=In Review | Ready for acceptance |
-
+<squad_launchers>
 ## Appendix B: Quick Reference — Squad Launchers
 
 ```bat
@@ -443,3 +289,4 @@ bin\test.bat     :: TEST squad   (deploy → test → done/return)
 bin\cadence.bat  :: CADENCE squad (collect → retro → digest)
 bin\agent.bat <area> <role>      :: Single sub-agent (debug)
 ```
+</squad_launchers>
