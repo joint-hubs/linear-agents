@@ -6,6 +6,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { getPromptLead, getPromptRuns, postLaunch, postKickoff } from '../api';
 import PromptContext from './PromptContext';
+import MarkdownEditor from './MarkdownEditor';
 import Modal from './Modal';
 import { fmtTime, fmtCost, statusLabel } from '../utils';
 
@@ -331,22 +332,9 @@ export default function SquadLeaf({ squad, data, taskId, setTaskId, onLaunchResu
           <div className="muted" style={{ padding: '8px 0' }}>Ładowanie…</div>
         )}
         {leadBody && (
-          <pre
-            style={{
-              marginTop: 8,
-              fontFamily: 'var(--mono)',
-              fontSize: 11.5,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              maxHeight: 300,
-              overflow: 'auto',
-              background: 'var(--surface-2)',
-              padding: 10,
-              borderRadius: 'var(--radius)',
-            }}
-          >
-            {leadBody}
-          </pre>
+          <div style={{ marginTop: 8 }}>
+            <MarkdownEditor path={`agents/${squad}/CLAUDE.md`} />
+          </div>
         )}
       </details>
 

@@ -5,6 +5,11 @@ import { LogDrawer } from './Flow.jsx';
 // — this file had grown past 1100 lines with SquadLeaf alone at ~560.
 import SquadLeaf from '../components/SquadLeaf';
 import RoleLeaf from '../components/RoleLeaf';
+import ExternalPrompts from '../components/ExternalPrompts';
+
+// Extra tree leaf, added client-side (not part of /api/prompts): orchestrator
+// (~/.claude) and Hermes prompt documents. docs/ui/prompt-editing-external.md §5.
+const EXTERNAL_INTENT = { id: 'external', label: 'Prompty globalne i Hermes', squad: null };
 
 // ---------------------------------------------------------------------------
 // Tree node button — accessible, focus-visible
@@ -149,18 +154,25 @@ export default function Prompts() {
     );
   }
 
-  const intents = data?.intents || [];
+  const intents = [...(data?.intents || []), EXTERNAL_INTENT];
   const squads = data?.squads || {};
   const squadKeys = Object.keys(squads).sort();
 
   // Determine what to show in the right panel.
   const isSinglePath = selIntent === 'single';
+  const isExternal = selIntent === 'external';
   const activeSquad = isSinglePath ? selSquad : selIntent;
-  const squadData = activeSquad ? squads[activeSquad] : null;
+  const squadData = activeSquad && !isExternal ? squads[activeSquad] : null;
 
   // Breadcrumb for right panel.
   let breadcrumb = null;
-  if (isSinglePath && selRole && selSquad) {
+  if (isExternal) {
+    breadcrumb = (
+      <span style={{ fontSize: 12, color: 'var(--text-2)' }}>
+        <strong>{EXTERNAL_INTENT.label}</strong>
+      </span>
+    );
+  } else if (isSinglePath && selRole && selSquad) {
     breadcrumb = (
       <span style={{ fontSize: 12, color: 'var(--text-2)' }}>
         Pojedyncza rola → <strong>{selSquad}</strong> → <strong>{selRole}</strong>
@@ -328,8 +340,16 @@ export default function Prompts() {
             <div className="empty">Wybierz opcję z drzewa po lewej, żeby zobaczyć szczegóły.</div>
           )}
 
+          {/* External prompts (orchestrators + Hermes) — client-side leaf, no /api/prompts data */}
+          {isExternal && (
+            <>
+              <div style={{ marginBottom: 16 }}>{breadcrumb}</div>
+              <ExternalPrompts />
+            </>
+          )}
+
           {/* Squad leaf (direct intent or squad selected under "single") */}
-          {selIntent && !isSinglePath && squadData && (
+          {selIntent && !isSinglePath && !isExternal && squadData && (
             <>
               <div style={{ marginBottom: 16 }}>{breadcrumb}</div>
               <SquadLeaf
@@ -373,7 +393,7 @@ export default function Prompts() {
           )}
 
           {/* Intent selected but no squad data (shouldn't happen) */}
-          {selIntent && !isSinglePath && !squadData && (
+          {selIntent && !isSinglePath && !isExternal && !squadData && (
             <div className="banner banner-warn">Brak danych dla tego składu.</div>
           )}
         </div>

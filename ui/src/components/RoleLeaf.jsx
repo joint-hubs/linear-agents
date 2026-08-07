@@ -5,6 +5,7 @@
 
 import { useState, useRef } from 'react';
 import PromptContext from './PromptContext';
+import MarkdownEditor from './MarkdownEditor';
 
 export default function RoleLeaf({ squad, role, data }) {
   const [copied, setCopied] = useState(false);
@@ -101,29 +102,11 @@ export default function RoleLeaf({ squad, role, data }) {
       {/* Context files this role's instruction pulls in */}
       <PromptContext squad={squad} role={role} />
 
-      {/* Role instruction */}
-      <div>
-        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4, color: 'var(--text-2)' }}>
-          Instrukcja roli
-        </div>
-        <pre
-          style={{
-            background: 'var(--surface)',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius)',
-            padding: 12,
-            fontFamily: 'var(--mono)',
-            fontSize: 11.5,
-            lineHeight: 1.6,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-            maxHeight: 400,
-            overflow: 'auto',
-          }}
-        >
-          {data.body || '(brak instrukcji)'}
-        </pre>
-      </div>
+      {/* Role instruction — the editor loads the raw file, frontmatter included */}
+      <MarkdownEditor
+        label="Instrukcja roli"
+        path={`agents/${squad}/agents/${role}.md`}
+      />
     </div>
   );
 }

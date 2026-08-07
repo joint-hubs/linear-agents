@@ -7,6 +7,21 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { getPromptRefs, getPromptFile } from '../api';
+import MarkdownEditor from './MarkdownEditor';
+
+/**
+ * Only prompt prose is editable here — the documents the agent reads. Scripts,
+ * JSON config and runtime state are reachable from a prompt but are not prompts;
+ * an editor that can overwrite linear-ops.mjs is no longer a prompt editor.
+ */
+function isEditable(item) {
+  return (
+    (item.kind === 'auto' || item.kind === 'read') &&
+    item.exists === true &&
+    !item.isTemplate &&
+    item.path.endsWith('.md')
+  );
+}
 
 // Order matters: what the agent knows at turn 0 comes first, what it is merely
 // told to go and find comes second.
@@ -37,6 +52,7 @@ const KIND_ORDER = ['auto', 'read', 'config', 'tool', 'state'];
 
 function FileRow({ item, expanded, onToggle, body, loading }) {
   const readable = item.exists && !item.isTemplate;
+  const editable = isEditable(item);
 
   let badge = null;
   if (item.isTemplate) {
@@ -105,7 +121,13 @@ function FileRow({ item, expanded, onToggle, body, loading }) {
         </div>
       )}
 
-      {expanded && (
+      {expanded && editable && (
+        <div style={{ margin: '0 0 10px 28px' }}>
+          <MarkdownEditor path={item.path} />
+        </div>
+      )}
+
+      {expanded && !editable && (
         <pre
           style={{
             margin: '0 0 8px 28px',
@@ -161,8 +183,10 @@ export default function PromptContext({ squad, role = null }) {
     (path) => {
       setExpanded((prev) => {
         const next = { ...prev, [path]: !prev[path] };
-        // Fetch content on first open only.
-        if (next[path] && !files[path]) {
+        // Fetch content on first open only — and not at all for editable rows,
+        // where MarkdownEditor loads the raw file itself.
+        const row = (data?.refs || []).find((r) => r.path === path);
+        if (next[path] && !files[path] && !(row && isEditable(row))) {
           setFiles((f) => ({ ...f, [path]: { loading: true } }));
           getPromptFile(path)
             .then((d) => setFiles((f) => ({ ...f, [path]: { body: d.body } })))

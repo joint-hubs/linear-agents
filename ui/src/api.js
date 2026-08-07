@@ -92,6 +92,24 @@ export async function getPromptFile(path) {
   return apiFetch('/api/prompts/file?path=' + encodeURIComponent(path));
 }
 
+// External prompts (orchestrators + Hermes) — files outside the repo, reached
+// via @rootId/rel paths. docs/ui/prompt-editing-external.md §4.
+export async function getPromptRoots() {
+  return apiFetch('/api/prompts/roots');
+}
+
+// Write one prompt document. dryRun validates the guards without touching disk.
+export async function postPromptFile({ path, body, dryRun = false }) {
+  const r = await fetch(API_BASE + '/api/prompts/file', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, body, dryRun }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+
 export async function getPromptRuns(squad, limit = 10) {
   return apiFetch(
     '/api/prompts/runs?squad=' + encodeURIComponent(squad) + '&limit=' + encodeURIComponent(limit)
