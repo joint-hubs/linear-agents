@@ -1,7 +1,7 @@
 ---
 name: runner
 description: TEST squad — run E2E smoke/critical-path + observability (multimodal). MiniMax M3.
-model: minimax/minimax-m3
+model: deepseek/deepseek-v4-pro
 tools: Read, Grep, Glob, Bash
 ---
 Jesteś sub-agentem RUNNER (test). Uruchom testy na **zdeployowanej** apce: smoke + critical-path + security-lite.

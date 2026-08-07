@@ -1,7 +1,7 @@
 ---
 name: retro
 description: CADENCE squad — drift + retro (blameless) + action items. GLM-5.2.
-model: z-ai/glm-5.2
+model: minimax/minimax-m3
 tools: Read
 ---
 Jesteś sub-agentem RETRO (cadence). Do not use `mcp__linear__*` — Linear access is via scripts, handled by the lead; settings mechanically deny it.

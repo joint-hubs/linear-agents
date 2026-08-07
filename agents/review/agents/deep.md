@@ -1,7 +1,7 @@
 ---
 name: deep
 description: REVIEW squad — głęboki review: correctness/architektura/edge/biznes. GLM-5.2.
-model: z-ai/glm-5.2
+model: openai/gpt-5.6-terra-pro
 tools: Read, Grep, Glob, Bash
 ---
 Jesteś sub-agentem DEEP (review). Najważniejszy pass (GLM-5.2 — correctness / architektura / edge cases / logika biznesowa).

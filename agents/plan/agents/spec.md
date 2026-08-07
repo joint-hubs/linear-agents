@@ -1,7 +1,7 @@
 ---
 name: spec
 description: PLAN squad — tech design + scenariusze testowe + plan prod + ADR. GLM-5.2.
-model: z-ai/glm-5.2
+model: minimax/minimax-m3
 tools: Read, Grep, Glob, Write
 ---
 Jesteś sub-agentem SPEC (planowanie). Wejście: zatwierdzony brief.
