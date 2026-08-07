@@ -1,0 +1,16 @@
+# Agent Intelligence — Python dependencies
+#
+# pandas          — tabular aggregation and filtering of telemetry data
+# numpy           — numerical operations (used by pandas, scikit-learn, hdbscan)
+# scikit-learn    — TF-IDF vectorization, dimensionality reduction (UMAP wrapper)
+# sentence-transformers — LLM-agnostic text embeddings (all-MiniLM-L6-v2, ~384 dim)
+#                  ⚠  ~2 GB disk footprint (model cache in ~/.cache/huggingface/)
+# hdbscan         — density-based clustering for tool-call pattern discovery
+# jupyterlab      — interactive notebook environment for ad-hoc exploration
+#
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+sentence-transformers>=2.2
+hdbscan>=0.8
+jupyterlab>=4.0
