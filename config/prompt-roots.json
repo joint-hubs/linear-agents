@@ -1,0 +1,35 @@
+{
+  "_doc": "Korzenie promptów edytowalne z dashboardu. Ścieżka bez ~ / %VAR% / litery dysku jest względna do repo. Kontrakt i uzasadnienie wykluczeń: docs/ui/prompt-editing-external.md. UWAGA: ten plik jest granicą bezpieczeństwa endpointu POST /api/prompts/file — dopisanie korzenia daje lokalnemu serwerowi HTTP prawo zapisu do tego katalogu. Jest .json, więc edytor promptów (tylko .md) sam go nie zmieni. Zmieniaj ręcznie i świadomie.",
+  "roots": [
+    {
+      "id": "orchestrator",
+      "label": "Orkiestratory — kontekst w repo",
+      "hint": "Czyta to bin/orchestrate.bat i bin/orchestrate-openrouter.bat (CLAUDE_CONFIG_DIR=agents/orchestrator). Przeniesione z ~/.claude 2026-08-06 — oryginał nadal obsługuje pozostałe sesje Claude Code i od tej pory te dwa zbiory żyją osobno.",
+      "path": "agents/orchestrator",
+      "include": ["CLAUDE.md", "memory/*.md", "skills/*/SKILL.md"],
+      "exclude": ["plans/*", "cache/*", "projects/*", "todos/*"]
+    },
+    {
+      "id": "hermes",
+      "label": "Hermes — asystent Discord",
+      "hint": "Osobny proces na frameworku hermes-agent, poza repo. Launchery orchestrate*.bat go NIE dotyczą — to inny system.",
+      "path": "%LOCALAPPDATA%/hermes",
+      "include": ["SOUL.md", "memories/*.md", "skills/*/SKILL.md"],
+      "exclude": ["hermes-agent/*", "sessions/*", "logs/*", "cache/*", "tmp/*"]
+    },
+    {
+      "id": "claude",
+      "label": "Claude Code — konfiguracja globalna (poza repo)",
+      "hint": "Oryginał, z którego skopiowano agents/orchestrator. Obsługuje KAŻDĄ inną sesję Claude Code, ale NIE orkiestratory. Edytuj tutaj tylko to, co ma dotyczyć wszystkich sesji.",
+      "path": "~/.claude",
+      "include": ["CLAUDE.md", "memory/*.md", "skills/*/SKILL.md"],
+      "exclude": ["plans/*", "cache/*", "projects/*", "todos/*", "plugins/*"]
+    }
+  ],
+  "_notEditable": {
+    "_doc": "Świadomie poza zasięgiem — uzasadnienie w docs/ui/prompt-editing-external.md §3.",
+    "bin/orchestrate*.bat": "plik wykonywalny — zapis z UI = zdalne wykonanie kodu. Prompt startowy siedzi inline w --append-system-prompt; pełna polityka jest w agents/orchestrator/memory/orchestration.md i to ją edytuj.",
+    "hermes/config.yaml": "680 linii YAML bez walidatora (repo jest zero-dep); złamana składnia wywala bota.",
+    "~/.claude-or/": "nieużywany od przeniesienia orkiestratorów pod agents/orchestrator."
+  }
+}

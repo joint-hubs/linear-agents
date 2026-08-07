@@ -9,12 +9,14 @@
 //   readLeadDoc(squad, root) -> { squad, body }
 //   extractRefs(text) -> [{ path, raw, isTemplate }]
 //   resolvePromptRefs(root, { squad, role }) -> { sources, refs, stats }
-//   listContextFiles(root) -> Set<string>   (allowlist for readContextFile)
+//   listContextFiles(root) -> Set<string>   (allowlist for readContextFile / writeContextFile)
 //   readContextFile(root, relPath) -> { path, body, lines } | { error }
+//   writeContextFile(root, relPath, body, { dryRun }) -> { path, before, after, changed, bytes } | { error }
 
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, renameSync, realpathSync } from "node:fs";
 import { join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import { KICKOFF_TEMPLATES } from "./launch.mjs";
 import { readSquadConfig } from "./squad-config.mjs";
 
@@ -319,6 +321,28 @@ function classifyRef(p) {
   return "read";
 }
 
+// Lead/role docs are the two path shapes resolvePromptRefs always registers
+// via addSource(...,"auto") — and addRef() keeps a path's first-assigned kind,
+// so within resolvePromptRefs these are "auto" no matter what else references
+// them. Matching the shape directly (instead of re-running resolvePromptRefs)
+// gives the same answer without a squad-by-squad traversal.
+const LEAD_DOC_RE = /^agents\/([a-z0-9-]+)\/CLAUDE\.md$/;
+const ROLE_DOC_RE = /^agents\/([a-z0-9-]+)\/agents\/([a-z0-9-]+)\.md$/;
+
+/**
+ * The kind of a context-file path, matching how resolvePromptRefs classifies
+ * it: lead/role docs are always `auto` sources; everything else falls back to
+ * classifyRef's extension / `.state/`-prefix rules (`read`, `tool`, `config`,
+ * `state`).
+ */
+function refKind(p) {
+  const lead = LEAD_DOC_RE.exec(p);
+  if (lead && SQUADS.includes(lead[1])) return "auto";
+  const role = ROLE_DOC_RE.exec(p);
+  if (role && SQUADS.includes(role[1])) return "auto";
+  return classifyRef(p);
+}
+
 /**
  * Extract every repo-relative file reference from a block of prose.
  *
@@ -563,4 +587,334 @@ export function readContextFile(root, relPath) {
   if (!st) return { error: "not found" };
 
   return { path: normalized, body: st.body, lines: st.lines };
+}
+
+// ---------------------------------------------------------------------------
+// External prompt roots — ~/.claude and hermes
+// (docs/ui/prompt-editing-external.md)
+//
+// Outside the repo the "must stay inside root" guard no longer applies, so it is
+// replaced by an explicit roots + include-globs allowlist. config/prompt-roots.json
+// is the security boundary: adding a root there grants this local HTTP server
+// write access to that directory. It is .json, so the .md-only editor cannot
+// modify it from the UI.
+// ---------------------------------------------------------------------------
+
+const EXTERNAL_PREFIX = "@";
+
+/**
+ * Expand ~ and %VAR%, and resolve repo-relative roots against `root`.
+ *
+ * A root without ~, %VAR% or a drive letter is repo-relative — that is how the
+ * orchestrator context (agents/orchestrator) is reached now that it lives in
+ * the repo rather than in ~/.claude.
+ */
+function expandPath(p, root) {
+  let out = p.replace(/^~(?=[/\\]|$)/, process.env.USERPROFILE || process.env.HOME || "~");
+  out = out.replace(/%([A-Z_][A-Z0-9_]*)%/gi, (m, name) => process.env[name] || m);
+  out = out.replace(/\\/g, "/");
+  const absolute = /^([A-Za-z]:|\/|\\\\)/.test(out);
+  if (!absolute) out = join(root || defaultRoot, out).replace(/\\/g, "/");
+  return out;
+}
+
+/** Glob with `*` only (no `**`): one segment, no separators. */
+function globToRe(glob) {
+  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  return new RegExp("^" + escaped.replace(/\*/g, "[^/]*") + "$");
+}
+
+/**
+ * Read the external-root allowlist.
+ * A malformed or missing file yields zero roots — the feature degrades to
+ * repo-only, which is the safe direction.
+ */
+export function readPromptRoots(root) {
+  const r = root || defaultRoot;
+  try {
+    const raw = readFileSync(join(r, "config", "prompt-roots.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    const roots = Array.isArray(parsed.roots) ? parsed.roots : [];
+    return roots
+      .filter((x) => x && typeof x.id === "string" && typeof x.path === "string")
+      .map((x) => ({
+        id: x.id,
+        label: x.label || x.id,
+        hint: x.hint || null,
+        path: expandPath(x.path, r),
+        include: Array.isArray(x.include) ? x.include : [],
+        exclude: Array.isArray(x.exclude) ? x.exclude : [],
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/** Split "@rootId/rel/path.md" into { rootId, rel }, or null when not prefixed. */
+function parseExternalPath(p) {
+  if (typeof p !== "string" || !p.startsWith(EXTERNAL_PREFIX)) return null;
+  const rest = p.slice(1).replace(/\\/g, "/");
+  const slash = rest.indexOf("/");
+  if (slash <= 0) return null;
+  return { rootId: rest.slice(0, slash), rel: rest.slice(slash + 1) };
+}
+
+function matchesAny(rel, globs) {
+  return globs.some((g) => globToRe(g).test(rel));
+}
+
+/**
+ * Resolve "@rootId/rel" to an absolute path, applying every guard.
+ * Returns { abs, root, rel } or { error }.
+ */
+function resolveExternal(root, p) {
+  const parsed = parseExternalPath(p);
+  if (!parsed) return { error: "forbidden: not an external prompt path" };
+
+  const cfg = readPromptRoots(root).find((x) => x.id === parsed.rootId);
+  if (!cfg) return { error: `forbidden: unknown prompt root '${parsed.rootId}'` };
+
+  if (!parsed.rel.endsWith(".md")) {
+    return { error: "forbidden: only .md files are editable" };
+  }
+
+  // realpath, not resolve: a symlink inside the root would otherwise be a way
+  // out of it. Both the parent directory AND the file itself are checked —
+  // a directory junction (skills/x -> elsewhere) and a file symlink
+  // (memory/x.md -> elsewhere) are two different escapes, and checking only the
+  // directory would let the second one through.
+  const abs = resolve(cfg.path, parsed.rel);
+  let rootReal;
+  try {
+    rootReal = realpathSync(cfg.path);
+  } catch {
+    return { error: "not found" };
+  }
+  const inside = (p) => p === rootReal || p.startsWith(rootReal + sep);
+
+  try {
+    if (!inside(realpathSync(dirname(abs)))) {
+      return { error: "forbidden: path escapes the prompt root" };
+    }
+  } catch {
+    return { error: "not found" };
+  }
+
+  // The file need not exist yet for the directory check above to be meaningful,
+  // but when it does exist its own real location must also be inside the root.
+  if (existsSync(abs)) {
+    try {
+      if (!inside(realpathSync(abs))) {
+        return { error: "forbidden: path escapes the prompt root" };
+      }
+    } catch {
+      return { error: "not found" };
+    }
+  }
+
+  if (!matchesAny(parsed.rel, cfg.include)) {
+    return { error: "forbidden: path is not in this root's include list" };
+  }
+  if (cfg.exclude.length && matchesAny(parsed.rel, cfg.exclude)) {
+    return { error: "forbidden: path is excluded in this root" };
+  }
+
+  return { abs, root: cfg, rel: parsed.rel };
+}
+
+/**
+ * Enumerate every editable file across the configured external roots.
+ * @returns {Array<{ rootId, label, hint, path, rel, lines, bytes }>}
+ */
+export function listExternalPromptFiles(root) {
+  const out = [];
+  for (const cfg of readPromptRoots(root)) {
+    if (!existsSync(cfg.path)) continue;
+    for (const glob of cfg.include) {
+      const parts = glob.split("/");
+      // Only two shapes are used: "FILE.md" and "dir/*.md" / "dir/*/FILE.md".
+      const candidates = [];
+      if (parts.length === 1) {
+        candidates.push(parts[0]);
+      } else if (parts.length === 2) {
+        const [d, f] = parts;
+        try {
+          for (const e of readdirSync(join(cfg.path, d), { withFileTypes: true })) {
+            if (e.isFile() && globToRe(f).test(e.name)) candidates.push(`${d}/${e.name}`);
+          }
+        } catch { /* directory absent — skip */ }
+      } else if (parts.length === 3) {
+        const [d, mid, f] = parts;
+        try {
+          for (const e of readdirSync(join(cfg.path, d), { withFileTypes: true })) {
+            if (!e.isDirectory() || !globToRe(mid).test(e.name)) continue;
+            const inner = join(cfg.path, d, e.name, f);
+            if (existsSync(inner)) candidates.push(`${d}/${e.name}/${f}`);
+          }
+        } catch { /* directory absent — skip */ }
+      }
+
+      for (const rel of candidates) {
+        if (cfg.exclude.length && matchesAny(rel, cfg.exclude)) continue;
+        const abs = join(cfg.path, rel);
+        if (!existsSync(abs)) continue;
+        if (out.some((x) => x.path === `${EXTERNAL_PREFIX}${cfg.id}/${rel}`)) continue;
+        let lines = null;
+        let bytes = null;
+        try {
+          const txt = readFileSync(abs, "utf8");
+          lines = txt.split(/\r?\n/).length;
+          bytes = statSync(abs).size;
+        } catch { continue; }
+        out.push({
+          rootId: cfg.id,
+          label: cfg.label,
+          hint: cfg.hint,
+          path: `${EXTERNAL_PREFIX}${cfg.id}/${rel}`,
+          rel,
+          lines,
+          bytes,
+        });
+      }
+    }
+  }
+  return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/** Read one external prompt document. */
+export function readExternalFile(root, p) {
+  const res = resolveExternal(root, p);
+  if (res.error) return res;
+  try {
+    const body = readFileSync(res.abs, "utf8");
+    return { path: p, body, lines: body.split(/\r?\n/).length };
+  } catch {
+    return { error: "not found" };
+  }
+}
+
+/** Write one external prompt document, preserving its line endings. */
+export function writeExternalFile(root, p, body, opts = {}) {
+  const res = resolveExternal(root, p);
+  if (res.error) return res;
+  if (typeof body !== "string") return { error: "body is required" };
+
+  let before;
+  try {
+    before = readFileSync(res.abs, "utf8");
+  } catch {
+    return { error: "not found" };
+  }
+
+  const eol = detectEOL(before);
+  const after = normalizeEOL(body, eol);
+  const changed = after !== before;
+
+  if (changed && !opts.dryRun) atomicWriteText(res.abs, after);
+
+  return { path: p, before, after, changed, bytes: Buffer.byteLength(after, "utf8") };
+}
+
+/** True when a path targets an external root rather than the repo. */
+export function isExternalPath(p) {
+  return parseExternalPath(p) !== null;
+}
+
+// ---------------------------------------------------------------------------
+// Context tracing — writing prompt/context documents
+// (docs/ui/prompt-editing.md)
+// ---------------------------------------------------------------------------
+
+/** Detect line ending of file content: "\r\n" or "\n". */
+function detectEOL(content) {
+  return content.includes("\r\n") ? "\r\n" : "\n";
+}
+
+/** Normalise every line ending in text to a single target EOL. */
+function normalizeEOL(text, eol) {
+  return text.replace(/\r\n|\n/g, eol);
+}
+
+/** Atomic text write: write to a sibling temp file, then rename over the target. */
+function atomicWriteText(filePath, content) {
+  const tmp = `${filePath}.${randomBytes(4).readUInt32BE(0).toString(36)}.tmp`;
+  writeFileSync(tmp, content, "utf8");
+  renameSync(tmp, filePath);
+}
+
+/**
+ * Write one context/prompt document — the write-side counterpart of
+ * readContextFile. Same allowlist, same defence-in-depth path check, plus a
+ * `kind` check so `.state/**` and other non-prompt `.md` files stay read-only.
+ *
+ * Guards run cheapest-first, first match wins:
+ *   1. `relPath` must end in `.md`
+ *   2. resolved path must stay inside `root` (defence in depth)
+ *   3. `relPath` must be in listContextFiles(root) — the real lock
+ *   4. the file's kind must be `auto` or `read` (blocks `.state/**.md`)
+ *   5. `body` must be a string
+ *
+ * On write, `body` is normalised to the file's existing EOL style before
+ * comparison and before hitting disk — this repo mixes CRLF/LF, and writing
+ * one style over the whole file would turn a three-line edit into a
+ * whole-file diff.
+ *
+ * @param {string} root
+ * @param {string} relPath  Repo-relative path.
+ * @param {string} body     New file content.
+ * @param {{ dryRun?: boolean }} [opts]
+ * @returns {{ path, before, after, changed, bytes } | { error: string }}
+ */
+export function writeContextFile(root, relPath, body, opts = {}) {
+  const r = root || defaultRoot;
+  const dryRun = Boolean(opts.dryRun);
+
+  // Guard 1 — cheapest rejection: extension allowlist.
+  if (typeof relPath !== "string" || !relPath.endsWith(".md")) {
+    return { error: "forbidden: only .md files are editable" };
+  }
+
+  const normalized = normalizeRef(relPath);
+
+  // Guard 2 — defence in depth: resolved path must stay inside root.
+  const abs = resolve(r, normalized);
+  const rootAbs = resolve(r);
+  if (abs !== rootAbs && !abs.startsWith(rootAbs + sep)) {
+    return { error: "forbidden: path escapes repo root" };
+  }
+
+  // Guard 3 — the real lock: the file must be referenced by some prompt.
+  if (!listContextFiles(r).has(normalized)) {
+    return { error: "forbidden: not referenced by any prompt" };
+  }
+
+  // Guard 4 — only auto/read documents are prompt text (blocks `.state/**.md`).
+  const kind = refKind(normalized);
+  if (kind !== "auto" && kind !== "read") {
+    return { error: "forbidden: not an editable prompt document" };
+  }
+
+  // Guard 5 — body must be a string.
+  if (typeof body !== "string") {
+    return { error: "body is required" };
+  }
+
+  const before = statRef(r, normalized);
+  if (!before) return { error: "not found" };
+
+  const eol = detectEOL(before.body);
+  const after = normalizeEOL(body, eol);
+  const changed = after !== before.body;
+
+  if (changed && !dryRun) {
+    atomicWriteText(abs, after);
+  }
+
+  return {
+    path: normalized,
+    before: before.body,
+    after,
+    changed,
+    bytes: Buffer.byteLength(after, "utf8"),
+  };
 }
