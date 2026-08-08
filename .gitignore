@@ -43,6 +43,9 @@ agents/*/daemon/
 # throwaway test scripts (kept locally for re-verification, not committed)
 scripts/_test_*.mjs
 
+# freetext scratch (prompt-engineering working notes — not docs)
+docs/99_freetext/
+
 # agent bridge scratch (Pro review reports, worker io)
 .agent-io/
 

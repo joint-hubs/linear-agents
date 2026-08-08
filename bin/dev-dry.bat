@@ -10,7 +10,7 @@ call "%~dp0_lib.bat" || exit /b 1
 REM Agent 2 - DEV (DRY-RUN). Spec: docs/agents/agent-2-dev.md
 REM DRY-RUN: no push, no Linear MCP, auto-approve HITL gates.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\dev"
-set "ANTHROPIC_MODEL=minimax/minimax-m3"
+set "ANTHROPIC_MODEL=z-ai/glm-5.2"
 set "ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8"
 set "ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6"
 set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"
