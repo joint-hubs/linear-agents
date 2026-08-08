@@ -3,71 +3,47 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-08-08 — Prompt optimization (FOC-72): zasady pisania LLM + optymalizacja DEV squad
+## Ostatnia aktualizacja: 2026-08-08 — Prompt optimization (FOC-72): DEV + Fala A (4 mózgi) done
 
 **Linear:** FOC-72 "[ FENIX ] prompt optimization" (In Progress). Cel: pisać prompty pod kątem modelu
-językowego (GLM-5.2 / MiniMax / DeepSeek / Kimi), nie człowieka. Komentarz w FOC-72 wskaże tu kontekst.
+językowego (GLM-5.2 / MiniMax / DeepSeek / Kimi), nie człowieka.
 
-### Co zrobione (commit `cbc98e5` + working tree 2026-08-08)
-- **`agents/dev/CLAUDE.md`** (mózg DEV) — pełna optymalizacja: sekcje owinięte w XML (`<dev_loop>`,
-  `<dev_delegation_policy>`, `<dev_hard_rules>`, `<dev_types>`, `<dev_squad>`, `<dev_linear_tools>`,
-  + nowe `<doubt_defaults>`, `<precedence_policy>`, `<examples>`). EN w blokach policy/constraint/role
-  (hybryda: PL zostaje w narracji kroków Pętli 0-6 jako runbook). Negacje → pozytywne reframy + trade-off.
-  Twarde `NEVER` zostawione TYLKO dla guardraili (sekret, git push). 125 → 175 linii
-  (wzrost = addytywny high-leverage content; rdzeń operacyjny przycięty).
-- **`agents/dev/agents/*.md` (wszystkie 6)** — przepisane na lean EN/XML wg Z1–Z7:
-  `implementer` (GLM-5.2), `debugger` (DeepSeek V4 Pro), `refactorer` (Kimi K2.7 Code), `flash`
-  (DeepSeek V4 Flash), `recon` (MiniMax M3), `worker` (MiniMax M3). Usunięte „Jesteś sub-agentem...",
-  wstawione `<role>`/`<input>`/`<loop>`/`<task>`/`<output>`/`<guardrails>`, stop-conditions, contract pointer
-  do `docs/prd/prd-development.md`, notka o Linear via scripts.
-- **`bin/dev.bat` + `bin/dev-dry.bat`** — `ANTHROPIC_MODEL` przywrócony do `z-ai/glm-5.2` (zgodnie z
-  `config/models.json` `ids.glm`). CRLF i pozostałe env zachowane.
-- **`docs/FENIX_WORKFLOW.md`** — resztkowe `##`/`###` wewnątrz bloków XML → `**bold**`.
-- **`config/models.json`** — +gemini pricing.
-- **`.gitignore`** — `docs/99_freetext/` (scratch odpowiedzi specjalisty od promptów).
+### Co zrobione
+- **`cbc98e5`** — `agents/dev/CLAUDE.md` template (XML, hybryda EN/PL, few-shot, doubt_defaults,
+  precedence_policy, budget drains). + FENIX_WORKFLOW / models pricing / gitignore freetext.
+- **`6c4477c`** — `agents/dev/agents/*.md` (6 subagentów) lean EN/XML + routing ids z `config/models.json`;
+  bin/dev*.bat `z-ai/glm-5.2`.
+- **Fala A (ten commit)** — `agents/{review,cadence,plan,test}/CLAUDE.md` przepisane wg template DEV:
+  | squad | lines | key semantics kept |
+  |-------|------:|--------------------|
+  | review | 174 | 3-pass parallel NEVER serialize; merge deep>security>first-pass; only `issue:` blocks; max 2 rounds |
+  | cadence | 164 | lead `flow-db ingest` step0; bounces==2 vs >2; subagent-share <40% action item; 1 digest/week PL |
+  | plan | 178 | HITL = interactive REPL (NOT async needs:*); GATE1/GATE2 sync; DRAFT JSON path; DRY-RUN |
+  | test | 125 | health-check+auto-rollback mandatory; synthetic data; PASS→Done / FAIL→root-cause→In Progress |
+- **Decyzja shared ≥40% bloku:** **inline-verbatim** (ten sam EN budget-drains + target ≥40% w każdym mózgu;
+  tag XML squad-prefixed). Zamknięte.
 
-**Stan working tree:** zmiany DEV squad w edytowanych plikach — **nie zacommitowane** (Mateusz: „NO git commit").
+### 7 zasad pisania promptów (Z1–Z7)
+Z1 EN = logic-carrier, PL = output/runbook | Z2 XML-tags | Z3 reguły warunkowe + stop-conditions;
+persona = 1 linia | Z4 negacja → pozytyw + trade-off; `NEVER` tylko guardraile | Z5 lean, merguj duplikaty |
+Z6 few-shot w `<examples>` | Z7 `<doubt_defaults>` + precedence/rationale gdzie trzeba.
 
-### 7 zasad pisania promptów (uzgodnione z Mateuszem, ugruntowane w `docs/99_freetext/q1-q12.md`)
-Z1 EN = logic-carrier, PL = output/runbook | Z2 XML-tags (well-formed, EN nazwy) | Z3 reguły warunkowe
-+ stop-conditions dominują; persona = 1 neutralna linia | Z4 negacja → pozytyw + trade-off; `NEVER`
-tylko dla guardraili | Z5 `CLAUDE.md` = indeks ~100 linii, merguj duplikaty | Z6 few-shot > reguły
-(3-5 przykładów w `<examples>`) | Z7 addytywne: `<doubt_defaults>` + `<precedence_policy>` + „read
-referenced files" + rationale zostaje (high-signal dla orkiestratora).
+### Kontekst do wznowienia (NASTĘPNY KROK)
+**DEV + Fala A — KOMPLETNE.** Dalej:
 
-### Kontekst do wznowienia sesji (NASTĘPNY KROK)
-**DEV squad — KOMPLETNE** (CLAUDE.md + 6 subagentów lean EN/XML + routing przywrócony do ids w
-`config/models.json` + bin/dev*.bat glm-5.2). Jeśli FOC-72 wymaga dalszej pracy, zaczynać od Fal A–D.
+- **Fala B (P2, ~22 subprompty)** — `agents/{review,cadence,plan,test}/agents/*.md` (+ inne poza dev).
+  Template = `agents/dev/agents/*.md` (już lean EN/XML). **Skip `agents/dev/agents/*`.**
+- **Fala C (P3)** — `~/.claude/memory/orchestration.md`, `~/.claude/skills/refine`,
+  `skills/git-checkpoint`, `~/.claude/CLAUDE.md` — reframe+EN (XML często już jest).
+- **Fala D (P3)** — `docs/prd/*`, `docs/agents/agent-{0,1,3,4}` — tylko przy rework squada.
 
-**Zostało — 4 fale:**
-- **Fala A (P1, mózgi 4 squadów)** — `agents/{review,cadence,plan,test}/CLAUDE.md`. Wszystkie mają ten
-  sam dług co DEV przed optymalizacją: „Jesteś MÓZGIEM...", goły `##`, PL logic-carrier, gęsta negacja
-  (review=19, cadence=22, plan=13, test=8). Zastosować template z `dev/CLAUDE.md`. **Otwarta decyzja**
-  (blokuje Fala A): near-duplikat bloku „≥40% kosztu u subagentów / tura najdroższa" we wszystkich 4 —
-  inline-verbatim (rekomendowane, Q10) vs shared-include vs per-squad. **Niepodjęta — czeka na Mateusza.**
-- **Fala B (P2, ~22 subprompty)** — `agents/*/agents/*.md`, strukturalnie identyczne („Jesteś
-  sub-agentem X", bez XML, PL, 9-46 linii). Banał równolegle wg squadów. **Skip całość
-  `agents/dev/agents/*`** (już lean EN/XML). cadence/flash + cadence/worker mogą być częściowo EN — sprawdzić.
-- **Fala C (P3, globalne high-negation)** — `~/.claude/memory/orchestration.md` (neg=23, najgęstsze w
-  systemie), `~/.claude/skills/refine` (13), `skills/git-checkpoint` (12), `~/.claude/CLAUDE.md` (14).
-  XML już obecny — tylko reframe+EN.
-- **Fala D (P3, spec-docs)** — `docs/prd/*`, `docs/agents/agent-{0,1,3,4}`. Tylko gdy reworkujesz dany
-  squad, trzymać w zgodzie.
+**Luki:** `~/.claude/skills/graphify/SKILL.md` pusty (dangling). Root `CLAUDE.md` = GitNexus auto — nie dotykać.
 
-**Luki (nie prompt-work, ale do flagowania):**
-- `~/.claude/skills/graphify/SKILL.md` jest **pusty (0 linii)** a referencjonowany jako live skill przez
-  `orchestrator/CLAUDE.md` i globalny `~/.claude/CLAUDE.md` — dangling reference → no-op.
-- Root `CLAUDE.md` (GitNexus) jest **auto-generowany** (`<!-- gitnexus:start -->`) — nie dotykać.
-
-### Jak czytać kontekst żeby wrócić do tej sesji
-1. Ten plik (`docs/STATE.md`, sekcja 2026-08-08) — start.
-2. `docs/99_freetext/q1.md`-`q12.md` — odpowiedzi specjalisty od promptów (źródło 7 zasad; **ignorowane
-   przez git** — `docs/99_freetext/` jest w `.gitignore`, są tylko lokalnie). Puste? = scratch wyczyszczony,
-   wtedy 7 zasad żyje w tej sekcji STATE.md + w treści `agents/dev/CLAUDE.md`.
-3. `agents/dev/CLAUDE.md` — referencyjny wzór (template) dla Fal A/B. Czytaj sekcje `<dev_delegation_policy>`,
-   `<examples>`, `<doubt_defaults>`, `<precedence_policy>` — to pattern do skopiowania.
-4. Commit `cbc98e5` (`git show cbc98e5`) — dokładny scope zmian tej sesji.
-5. Komentarz w FOC-72 — ten pointer, odzwierciedlony w Linear.
+### Jak wrócić
+1. Ten plik (`docs/STATE.md`) — start.
+2. Template mózg: `agents/dev/CLAUDE.md`. Template subagent: `agents/dev/agents/implementer.md`.
+3. Commity: `cbc98e5` (DEV brain), `6c4477c` (DEV subagents), ten (Fala A).
+4. FOC-72 Linear comment — pointer sesji.
 
 ---
 
