@@ -1,59 +1,55 @@
 ---
 type: prd
 status: active
-area: testing
-tags: [type/prd, area/ai, topic/linear, topic/agents, topic/testing, topic/deploy]
-created: 2026-06-23
-maturity: prd-v1
+maturity: v2
 ---
 
-# PRD — TESTING squad
+# PRD — TESTING
 
-> Obszar TESTÓW/DEPLOY jako zestaw agentów (lead + 3 subagentów). Deployuje i testuje
-> **działającą aplikację**. Spec: [agent-4-test](../agents/agent-4-test.md). Launchery — na końcu.
+<goal>stage:testing → deploy (OpenRouter build → GCP VM, **health-check + auto-rollback mandatory**) → E2E (smoke + critical-path + security-lite on synthetic data) → PASS→`Done`(+URL) or FAIL→root-cause→`In Progress`. Assertions on VALUES; solo profile scope.</goal>
 
-## 1. Cel
-Task `stage:testing` → deploy (OpenRouter build → GCP VM, **health-check + rollback**) → testy na
-zdeployowanej apce (smoke + critical-path + security-lite, synthetic data) → `Done` lub zwrot do `In Progress`.
+<squad_table>
+| Role | Model |
+|------|-------|
+| lead | minimax-m3 |
+| deploy | deepseek-v4-pro |
+| scenario_gen | deepseek-v4-flash |
+| runner | minimax-m3 |
+| root_cause | glm-5.2 |
+</squad_table>
 
-## 2. Zestaw agentów
-| Sub-agent | Model | Odpowiedzialność |
-|---|---|---|
-| **lead** (`test`) | MiniMax M3 | orkiestracja deploy→test→verdykt |
-| **deployer** | DeepSeek V4 Pro | build + deploy GCP VM + **health-check + auto-rollback** |
-| **scenario-gen** | DeepSeek V4 Flash | scenariusze (happy + 3–5 edge) z AC, **synthetic data** |
-| **runner** | MiniMax M3 (multimodal) | run E2E smoke/critical-path + observability (zrzuty UI) |
-| **root-cause** | GLM-5.2 | diagnoza failów |
+<runtime>Full loop (deploy→health→E2E→verdict, synthetic data policy, flaky rules, loop-limit, rollback behavior): see `agents/test/CLAUDE.md`.</runtime>
 
-## 3. Jak zbudować
-- Pliki: `agents/test/agents/{deployer,scenario-gen,runner,root-cause}.md` + lead `CLAUDE.md`.
-- **deployer**: cel z `config/projects.json` (GCP VM; Ollama/GPU → Lambda); health-check endpoint; fail → rollback do poprzedniej wersji + komentarz.
-- **scenario-gen**: **nigdy prod PII** — synthetic/factory data (RODO).
-- **runner**: asercje na **wartości** (nie `toBeDefined`); flaky → fix, nie retry; sprawdza observability (logi/metryki po deployu).
-- **root-cause**: GLM-5.2 dla hard-debug failów → komentarz → `In Progress`.
-- Profil solo: smoke + critical-path + security-lite (NIE pełna piramida).
+<scope>
+- Deploy: OpenRouter build → GCP VM (per `config/projects.json`); Ollama/GPU → Lambda fallback.
+- Health-check: mandatory before E2E; fail → auto-rollback, abort, report FAIL.
+- Scenarios: synthetic data only (no prod PII, RODO compliant); happy + 3–5 edge cases per AC.
+- Runner: assertions on VALUES (not `toBeDefined`); flaky → diagnose root cause (no blind-retry); observability (logs/metrics post-deploy).
+- Root-cause: GLM-5.2 on E2E failures; post findings, return to DEV In Progress.
+</scope>
 
-## 4. Safeguards (P0)
-**Health-check + rollback** obowiązkowe. Synthetic data. Wspólny loop-limit z DEV → `escalated`. Cost guardrail. Deploy fail → rollback + `escalated`.
+<build>
+- Subagents: `agents/test/agents/{deployer,scenario_gen,runner,root_cause}.md` + lead `CLAUDE.md`.
+- settings.json: Bash (docker, gcloud, ssh, curl, playwright) + Write + Linear MCP; deny `rm -rf`, git push.
+- config/projects.json: GCP VM name + Lambda config.
+- Smoke: `bin\agent.bat test deployer --dry-run`.
+- Full squad: `bin\test.bat`.
+</build>
 
-## 5. Acceptance criteria
-- [ ] Deploy OpenRouter build na GCP VM; przy fail health-check → auto-rollback.
-- [ ] Testy na zdeployowanej apce z synthetic data; asercje wartościowe.
-- [ ] Pass → `Done` (+ URL deployu); fail → root-cause (GLM-5.2) → `In Progress`.
-- [ ] Ollama/GPU build → ścieżka Lambda.
+<acceptance_criteria>
+- [ ] Deploy OpenRouter build to GCP VM; health-check fail → auto-rollback.
+- [ ] E2E tests on deployed app with synthetic data; assertions are value-based.
+- [ ] PASS → Done (+ deploy URL); FAIL → root-cause diagnosis → In Progress.
+- [ ] Ollama/GPU build paths wired to Lambda fallback.
+</acceptance_criteria>
 
-## 6. Build steps
-1. Subagenci `agents/test/agents/*.md` + lead CLAUDE.md.
-2. settings.json: Bash(docker,gcloud,ssh,curl,playwright) + Write + Linear MCP; deny `rm -rf`,`git push`.
-3. `config/projects.json` z nazwą GCP VM + Lambda.
-4. Smoke: `bin\agent.bat test deployer` (dry-run); cały squad: `bin\test.bat`.
-
-## 7. Launchery (funkcjonalne)
+<launchers>
 ```bat
-bin\test.bat                     :: cały zestaw test (deployer→scenario-gen→runner→root-cause)
-bin\agent.bat test deployer
-bin\agent.bat test scenario-gen
+bin\test.bat                     :: full squad (deploy→scenario-gen→runner→root-cause)
+bin\agent.bat test deploy
+bin\agent.bat test scenario_gen
 bin\agent.bat test runner
-bin\agent.bat test root-cause
+bin\agent.bat test root_cause
 ```
-Pliki: [`bin/test.bat`](../../bin/test.bat) · [`bin/agent.bat`](../../bin/agent.bat).
+Refs: [`bin/test.bat`](../../bin/test.bat) · [`bin/agent.bat`](../../bin/agent.bat).
+</launchers>
