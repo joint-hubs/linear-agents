@@ -3,7 +3,7 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-08-08 — Prompt optimization (FOC-72): DEV + Fala A (4 mózgi) done
+## Ostatnia aktualizacja: 2026-08-08 — Prompt optimization (FOC-72): DEV + Fala A + Fala B done
 
 **Linear:** FOC-72 "[ FENIX ] prompt optimization" (In Progress). Cel: pisać prompty pod kątem modelu
 językowego (GLM-5.2 / MiniMax / DeepSeek / Kimi), nie człowieka.
@@ -13,15 +13,22 @@ językowego (GLM-5.2 / MiniMax / DeepSeek / Kimi), nie człowieka.
   precedence_policy, budget drains). + FENIX_WORKFLOW / models pricing / gitignore freetext.
 - **`6c4477c`** — `agents/dev/agents/*.md` (6 subagentów) lean EN/XML + routing ids z `config/models.json`;
   bin/dev*.bat `z-ai/glm-5.2`.
-- **Fala A (ten commit)** — `agents/{review,cadence,plan,test}/CLAUDE.md` przepisane wg template DEV:
+- **`98f9d4a` Fala A** — `agents/{review,cadence,plan,test}/CLAUDE.md` przepisane wg template DEV:
   | squad | lines | key semantics kept |
   |-------|------:|--------------------|
   | review | 174 | 3-pass parallel NEVER serialize; merge deep>security>first-pass; only `issue:` blocks; max 2 rounds |
   | cadence | 164 | lead `flow-db ingest` step0; bounces==2 vs >2; subagent-share <40% action item; 1 digest/week PL |
   | plan | 178 | HITL = interactive REPL (NOT async needs:*); GATE1/GATE2 sync; DRAFT JSON path; DRY-RUN |
   | test | 125 | health-check+auto-rollback mandatory; synthetic data; PASS→Done / FAIL→root-cause→In Progress |
-- **Decyzja shared ≥40% bloku:** **inline-verbatim** (ten sam EN budget-drains + target ≥40% w każdym mózgu;
-  tag XML squad-prefixed). Zamknięte.
+- **Fala B (4 commity)** — 23 subprompty `agents/{review,cadence,plan,test}/agents/*.md` lean EN/XML;
+  modele przywrócone do `config/models.json` (usunięte stray `grok-4.5` / `gpt-5.6-terra-pro`):
+  | commit | squad | n | notes |
+  |--------|-------|--:|-------|
+  | `97968cf` | review | 5 | first-pass→v4-pro, security→kimi, deep→glm |
+  | `48eafb0` | cadence | 5 | retro→glm, digest→v4-pro (PL output) |
+  | `a1e63fa` | plan | 7 | spec→glm, spec-review→minimax; decomposer single schema |
+  | `b042b34` | test | 6 | runner→minimax, root-cause→glm; health-check+rollback |
+- **Decyzja shared ≥40% bloku:** **inline-verbatim** (zamknięte przy Fali A).
 
 ### 7 zasad pisania promptów (Z1–Z7)
 Z1 EN = logic-carrier, PL = output/runbook | Z2 XML-tags | Z3 reguły warunkowe + stop-conditions;
@@ -29,20 +36,21 @@ persona = 1 linia | Z4 negacja → pozytyw + trade-off; `NEVER` tylko guardraile
 Z6 few-shot w `<examples>` | Z7 `<doubt_defaults>` + precedence/rationale gdzie trzeba.
 
 ### Kontekst do wznowienia (NASTĘPNY KROK)
-**DEV + Fala A — KOMPLETNE.** Dalej:
+**DEV + Fala A + Fala B — KOMPLETNE.** Dalej:
 
-- **Fala B (P2, ~22 subprompty)** — `agents/{review,cadence,plan,test}/agents/*.md` (+ inne poza dev).
-  Template = `agents/dev/agents/*.md` (już lean EN/XML). **Skip `agents/dev/agents/*`.**
 - **Fala C (P3)** — `~/.claude/memory/orchestration.md`, `~/.claude/skills/refine`,
   `skills/git-checkpoint`, `~/.claude/CLAUDE.md` — reframe+EN (XML często już jest).
 - **Fala D (P3)** — `docs/prd/*`, `docs/agents/agent-{0,1,3,4}` — tylko przy rework squada.
 
-**Luki:** `~/.claude/skills/graphify/SKILL.md` pusty (dangling). Root `CLAUDE.md` = GitNexus auto — nie dotykać.
+**Luki (nieblokujące Fali B):**
+- Routing bez pliku roli: `plan.dor_gate` (robi flash), `plan.enrich` (martwy?), `*.pl` (digest=cadence.pl),
+  `test.terminal` (gpt — brak pliku). Decyzja: stub vs prune routing — przy Fali C/cleanup.
+- `~/.claude/skills/graphify/SKILL.md` pusty (dangling). Root `CLAUDE.md` = GitNexus auto — nie dotykać.
 
 ### Jak wrócić
 1. Ten plik (`docs/STATE.md`) — start.
 2. Template mózg: `agents/dev/CLAUDE.md`. Template subagent: `agents/dev/agents/implementer.md`.
-3. Commity: `cbc98e5` (DEV brain), `6c4477c` (DEV subagents), ten (Fala A).
+3. Commity: `cbc98e5` DEV brain · `6c4477c` DEV sub · `98f9d4a` Fala A · `97968cf`/`48eafb0`/`a1e63fa`/`b042b34` Fala B.
 4. FOC-72 Linear comment — pointer sesji.
 
 ---
