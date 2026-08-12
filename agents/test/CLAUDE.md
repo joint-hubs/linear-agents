@@ -6,8 +6,7 @@ You are the TEST squad orchestrator (deploy + E2E). Goal: take a `stage:testing`
 
 <precedence_policy>
 This file is the single source of truth for the TEST loop.
-FENIX_WORKFLOW.md §5 is a cross-reference view (state dictionary) only.
-On conflict: this file wins; flag the conflict to Mateusz instead of choosing.
+On conflict with `docs/prd/prd-testing.md`: this file wins; flag the conflict to Mateusz instead of choosing.
 </precedence_policy>
 
 <test_linear_tools>
@@ -48,7 +47,7 @@ Budget drains (each re-bills your context every turn):
 - Run single cheap tool commands yourself (linear-*, manifest).
 
 Target: ≥40% of run cost in subagents (dashboard → RunDetail 'By agent').
-- Context budget: when your turn approaches ~70% of the context window, write `.state/test-wip.json` (current step, state, next action) before continuing — cheap restart if the session drops. Checkpoint only.
+- Context budget: when your turn approaches ~70% of the context window, write `.state/test-wip.json` (current step, state, next action) before continuing — cheap restart if the session drops. Checkpoint only — HITL gates stay synchronous; never auto-advance.
 </test_delegation_policy>
 
 <test_tools>
@@ -64,9 +63,8 @@ Registry: `docs/tools/README.md` (one-page, check before sweeping with Grep). **
 ### 2. Build + deploy
 `deploy` builds (delivery-loop) and deploys **OpenRouter build → GCP VM** (per `config/projects.json`; Ollama/GPU → Lambda). Returns deploy URL.
 
-### 3. Health-check + auto-rollback
-`deploy` runs health-check against deploy URL; on fail → auto-rollback, abort, FAIL→root-cause (see <test_hard_rules>).
-WHY — E2E against an unhealthy deploy produces false failures and wastes the run; auto-rollback restores known-good, prevents false-PASS→Done.
+### 3. Health-check + auto-rollback (MANDATORY before E2E)
+`deploy` runs health-check against deploy URL; on fail → auto-rollback, abort, FAIL→root-cause (full rule + WHY in <test_hard_rules>).
 
 ### 4. scenario-gen → runner
 `scenarios` generates synthetic scenarios (solo profile: smoke + critical-path + security-lite). `run` executes E2E + collects observability.
@@ -102,8 +100,9 @@ WHY — comments are workspace-visible and may be indexed; one leak forces key r
 `TEST_DRY_RUN=1`:
 - `linear-query.mjs` auto-serves `.state/mock/test-task.json` fixture (no API calls).
 - `linear-ops.mjs` gets `--dry-run` on every call (transitions, labels, comments).
-- `deploy` subagent is mocked — no real GCP VM build/deploy; deploy URL comes from fixture.
-- Health-check is simulated from the fixture's `dryRunScenario` field (`healthy` → PASS; `unhealthy` → auto-rollback, 0 E2E delegations, FAIL→root_cause path).
+- Read the fixture once for `deployUrl` (top-level field) and `dryRunScenario` (`healthy` | `unhealthy`); `linear-query` does NOT return these, the brain owns them.
+- Brief `deploy`: do NOT build, do NOT deploy; the deploy URL comes from the fixture and the deploy subagent is mocked — only the simulated health-check runs.
+- Health-check is simulated from `dryRunScenario` (`healthy` → PASS; `unhealthy` → auto-rollback, 0 E2E delegations, FAIL→root_cause path).
 - For the unhealthy variant, swap primary fixture to `.state/mock/test-task-unhealthy.json`.
 - Do NOT `git push`; no real build, deploy, or prod touch.
 </test_dry_run>
