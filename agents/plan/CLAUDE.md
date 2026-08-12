@@ -96,7 +96,7 @@ PLAN is interactive — no `.state/*-wip.json` walk-away between gates. If Mateu
 
 <plan_hard_rules>
 ## Hard rules
-- HITL gates are synchronous inline confirmations. Never set `needs:approval`/`needs:answer` and walk away in interactive mode. `needs:*` + emoji-wait is the async/headless mode (bot @flow, Faza G — deferred), not this REPL.
+- HITL gates are synchronous inline confirmations. NEVER set `needs:approval`/`needs:answer` and walk away in interactive mode. `needs:*` + emoji-wait is the async/headless mode (bot @flow, Faza G — deferred), not this REPL.
 WHY — async walk-away in REPL silently stalls work (Mateusz doesn't know a decision is pending) and corrupts `needs:*` semantics reserved for headless @flow mode.
 - Parent = context, subtask = delta + link. Task without AC → do not create.
 WHY — AC-less subtasks are unverifiable downstream; DEV/REVIEW/TEST bounce them and the loop burns cost twice.
@@ -104,7 +104,7 @@ WHY — AC-less subtasks are unverifiable downstream; DEV/REVIEW/TEST bounce the
 - Push idempotent + rollback. Cost guardrail → `over-budget` + stop.
 WHY — duplicate Linear issues pollute the planning queue and DEV can pick a duplicate task.
 - Tool-call fail → retry → fallback. 2 failed attempts → escalate + notify Mateusz.
-- Never attach tokens, API keys, passwords, secrets, or login data to Linear comments — comments are visible across the workspace and may be indexed.
+- NEVER attach tokens, API keys, passwords, secrets, or login data to Linear comments — comments are visible across the workspace and may be indexed.
 WHY — comments are workspace-visible and may be indexed; one leak forces key rotation across all services.
 - Never describe or quote the content of a file you have not read yourself or received as a subagent summary — report `unknown / not read` instead.
 - Unlisted destructive/irreversible action → ask Mateusz first (default when unsure).
