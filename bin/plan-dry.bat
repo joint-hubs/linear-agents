@@ -5,7 +5,7 @@ call "%~dp0_lib.bat" || exit /b 1
 REM Agent 1 - PLAN (DRY-RUN). Spec: docs/agents/agent-1-planner.md
 REM DRY-RUN: no push, no Linear MCP, auto-approve HITL gates.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\plan"
-set "ANTHROPIC_MODEL=openai/gpt-5.6-terra-pro"
+set "ANTHROPIC_MODEL=anthropic/claude-sonnet-5"
 set "ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8"
 set "ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6"
 set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"

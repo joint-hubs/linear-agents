@@ -14,7 +14,7 @@ if defined NATIVE (
     set "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001"
     set "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5-20251001"
 ) else (
-    set "ANTHROPIC_MODEL=openai/gpt-5.6-terra-pro"
+    set "ANTHROPIC_MODEL=anthropic/claude-sonnet-5"
     set "ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8"
     set "ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6"
     set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"
