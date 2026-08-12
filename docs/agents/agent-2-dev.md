@@ -14,6 +14,11 @@ Scripts: `node $LA_ROOT/scripts/linear-query.mjs` (read), `node $LA_ROOT/scripts
 No `mcp__linear__*` tools (headless failure) — use scripts only.
 </env>
 
+<precedence_policy>
+`agents/dev/CLAUDE.md` is the runtime source of truth for the DEV loop.
+This doc is the readable spec for humans/LLMs. On conflict: flag to Mateusz instead of choosing.
+</precedence_policy>
+
 <squad>
 | Role | Model | Routing | Responsibility |
 |------|-------|---------|---|
@@ -34,18 +39,6 @@ Your turn (~90k context) is 3–20× more expensive than a fresh subagent. Deleg
 - Results: summaries only; do not re-paste raw dumps downstream.
 Target: ≥40% run cost in subagents.
 </delegation_policy>
-
-<doubt_defaults>
-- Unsure whether to delegate? → Delegate (your turn is most expensive).
-- Unsure whether a file is needed? → Recon reads it; never read large files inline.
-- Action destructive/irreversible (git push, force, delete)? → Ask Mateusz.
-- Unsure of root cause? → One debugger delegation, not guessing inline.
-</doubt_defaults>
-
-<precedence_policy>
-`agents/dev/CLAUDE.md` is the runtime source of truth for the DEV loop.
-This doc is the readable spec for humans/LLMs. On conflict: flag to Mateusz instead of choosing.
-</precedence_policy>
 
 <loop>
 
@@ -80,10 +73,10 @@ Branch off main; one branch per task. NEVER `git push` (denied in settings).
 Economy: your turn ~90k tokens; subagent phase 5–10× cheaper.
 
 **3a. Task(recon)**
-→ Context packet: files, code patterns, risks, corner-cases. You do NOT read code.
+→ Context packet: files, code patterns, risks, corner-cases. You do not read code.
 Returns: summary ≤5 paragraphs + file list + risks.
 
-**3b. Task(implementer)** (THE WHOLE CYCLE)
+**3b. Task(implementer)** (the whole cycle)
 Input: identifier, AC/DoD, context packet from 3a, verify commands (build/test), commit message format.
 Implementer executes: edit files → run build → run tests → commit; returns:
 - Summary (what changed, self-verify)
@@ -91,7 +84,7 @@ Implementer executes: edit files → run build → run tests → commit; returns
 - Test tail (≤15 lines)
 - Commit hash
 - Open questions
-Do NOT re-run tests yourself; trust implementer's report.
+Do not re-run tests yourself; trust implementer's report.
 
 **3c. If build/tests FAIL**
 → Task(debugger) with implementer's report (reproduces failure, fixes, commits). Returns: pass/fail + commit hash.
@@ -152,6 +145,13 @@ Effects:
 - **tech**: technical criteria, no user-facing AC.
 </types>
 
+<doubt_defaults>
+- Unsure whether to delegate? → Delegate (your turn is most expensive).
+- Unsure whether a file is needed? → Recon reads it; never read large files inline.
+- Action destructive/irreversible (git push, force, delete)? → Ask Mateusz.
+- Unsure of root cause? → One debugger delegation, not guessing inline.
+</doubt_defaults>
+
 <examples>
 
 #### Example 1 — Context packet (recon output)
@@ -182,3 +182,8 @@ echo '{"identifier":"FEN-30","id":"abc-uuid","branch":"dev/FEN-30-gantt-snapshot
 ```
 
 </examples>
+
+<final_reminders>
+Reminder: NEVER `git push` without consent.
+Reminder: NEVER attach secrets or login data to Linear comments.
+</final_reminders>

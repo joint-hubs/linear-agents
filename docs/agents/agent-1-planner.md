@@ -13,6 +13,10 @@ Planning orchestrator: inbox item → parent epic + AC/DoD-complete subtasks in 
 Launcher: `bin/plan.bat` (`CLAUDE_CONFIG_DIR=configs/plan`). Trigger: `planning/inbox/<topic>.md` (voice transcript + artifacts). Writes: `.state/plan/`, `planning/briefs/`, Linear issues. Runtime brain: `agents/plan/CLAUDE.md` (pętla SoT).
 </env>
 
+<precedence_policy>
+`agents/plan/CLAUDE.md` is runtime SoT. On conflict: this file wins; flag to Mateusz.
+</precedence_policy>
+
 <squad>
 | role | model | routing |
 |------|-------|---------|
@@ -30,18 +34,7 @@ Launcher: `bin/plan.bat` (`CLAUDE_CONFIG_DIR=configs/plan`). Trigger: `planning/
 Delegate-first: your turn is most expensive. Only YOU write: ≤1-page brief at GATE 1, gate verdicts, questions to Mateusz. If >30 lines of analysis → delegate. Subagent results are summaries; do not paste raw output downstream. Bookkeeping only at phase boundaries (max 4/run). Target: ≥40% run cost in subagents.
 </delegation_policy>
 
-<doubt_defaults>
-- Unsure whether to delegate → delegate.
-- Unsure whether material is needed → delegate read to `worker`; never read long materials inline.
-- Scope boundary unclear → one `spec_review` delegation.
-- Destructive action (Linear push, delete) → ask Mateusz (unless DRY-RUN).
-</doubt_defaults>
-
 <loop>
-<precedence_policy>
-`agents/plan/CLAUDE.md` is runtime SoT. On conflict: this file wins; flag to Mateusz.
-</precedence_policy>
-
 **1. Discovery:** inbox → echo-back + brief ≤1 page. Flag uncertain PL terms as `transcript-uncertain`.
 
 **2. DoR gate:** checklist Why/AC/scope/dependencies/outcome. Gaps → ask Mateusz.
@@ -65,4 +58,17 @@ Delegate-first: your turn is most expensive. Only YOU write: ≤1-page brief at 
 - Each subtask: `type:*`, Estimate (t-shirt), Initiative (outcome), `blocked by` relations, `ai:planned` label.
 - Push: `--dry-run` mandatory first. Idempotent + cost guardrail.
 - Max 2 spec-review loops; then escalate.
+- Unlisted destructive/irreversible action → ask Mateusz first (default when unsure).
 </hard_rules>
+
+<doubt_defaults>
+- Unsure whether to delegate → delegate.
+- Unsure whether material is needed → delegate read to `worker`; never read long materials inline.
+- Scope boundary unclear → one `spec_review` delegation.
+- Destructive action (Linear push, delete) → ask Mateusz (unless DRY-RUN).
+</doubt_defaults>
+
+<final_reminders>
+Reminder: NEVER push to Linear without GATE 2 ✅.
+Reminder: NEVER attach secrets or login data to Linear comments.
+</final_reminders>

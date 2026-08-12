@@ -3,7 +3,7 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-08-08 — Prompt optimization (FOC-72): DEV + Fala A/B/C/D DONE
+## Ostatnia aktualizacja: 2026-08-12 — Prompt optimization (FOC-72): Fala E (docs-sync + structural-order assertion) DONE
 
 **Linear:** FOC-72 "[ FENIX ] prompt optimization" (In Progress). Cel: pisać prompty pod kątem modelu
 językowego (GLM-5.2 / MiniMax / DeepSeek / Kimi), nie człowieka.
@@ -45,6 +45,22 @@ językowego (GLM-5.2 / MiniMax / DeepSeek / Kimi), nie człowieka.
   | (this) | STATE | mark Fala D complete |
   Skipped (not agent runtime): gantt/telemetry/graph-first/model-role-fit/prd-docs-to-linear, dev-readiness.
 - **Decyzja shared ≥40% bloku:** **inline-verbatim** (zamknięte przy Fali A).
+- **Fala E (docs-sync + structural-order assertion) — FOC-79, 2026-08-12** — mirrore `docs/agents/agent-{0..4}.md`
+  sprowadzone do porządku kanonicznego v2 (precedence na top-level, `doubt_defaults` po instrukcjach, nowy
+  `<final_reminders>`); `docs/prd/prd-testing.md` zyskał sekcję TEST dry-run (§4.5.7); runtime brains nietknięte
+  (SoT = `agents/*/CLAUDE.md`). Nowy `scripts/check-brain-order.mjs` (zero-deps, dry-run safe) assertuje kolejność
+  12 markerów v2 w 6 mózgach; `scripts/check.mjs` bez zmian. Tabela mózgów (before/after = linie runtime brains,
+  nietknięte; commit = SHA migracji FOC-73..FOC-78):
+  | brain | before | after | commit |
+  |-------|-------:|------:|--------|
+  | orchestrator | 68 | 68 | `7ead975` (FOC-73) |
+  | plan | 171 | 171 | `600ede9` (FOC-74) |
+  | dev | 184 | 184 | `792f8ab` (FOC-75) |
+  | review | 190 | 190 | `84b7227` (FOC-76) |
+  | test | 160 | 160 | `543ada1` (FOC-77) |
+  | cadence | 188 | 188 | `ed2dccc` (FOC-78) |
+  structural-order assertion: `scripts/check-brain-order.mjs` green (PASS ×6); `node scripts/check.mjs` green;
+  docs sync PR: `docs/agents` + `docs/prd` + STATE.
 
 ### 7 zasad pisania promptów (Z1–Z7)
 Z1 EN = logic-carrier, PL = output/runbook | Z2 XML-tags | Z3 reguły warunkowe + stop-conditions;
@@ -52,7 +68,7 @@ persona = 1 linia | Z4 negacja → pozytyw + trade-off; `NEVER` tylko guardraile
 Z6 few-shot w `<examples>` | Z7 `<doubt_defaults>` + precedence/rationale gdzie trzeba.
 
 ### Kontekst do wznowienia (NASTĘPNY KROK)
-**FOC-72 fale A–D — KOMPLETNE** (DEV brain+sub, 4 brains, 23 sub, user-global, docs specs).
+**FOC-72 fale A–E — KOMPLETNE** (DEV brain+sub, 4 brains, 23 sub, user-global, docs specs, Fala E docs-sync + structural-order assertion).
 
 Dalej (opcjonalnie, na zgodę Mateusza):
 - Linear comment FOC-72 (session pointer) + transition / close.
