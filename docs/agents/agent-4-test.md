@@ -1,54 +1,66 @@
 ---
-type: design-doc
+type: agent
 status: active
-tags: [type/design-doc, area/ai, topic/linear, topic/agent, topic/testing, topic/deploy]
-created: 2026-06-22
-updated: 2026-06-22
-maturity: design-v2
+maturity: v2
 ---
+# Agent 4 — TEST
 
-# Agent 4 — TEST (deploy + testy zdeployowanej apki)
+<role>
+Deploy + test orchestrator: merged code → deployed app → smoke + critical-path + security-lite tests on live instance. Light profile (not full pyramid). Health-check + auto-rollback mandatory.
+</role>
 
-> Deployuje i testuje **działającą aplikację** (nie tylko kod). Lekko (solo profile): smoke +
-> critical-path + security-scan, nie pełna piramida. Launcher: `bin/test.bat`
-> (`CLAUDE_CONFIG_DIR=configs/test`). Diagram: [04_review_test](diagrams/04_review_test.puml).
+<env>
+Launcher: `bin/test.bat` (`CLAUDE_CONFIG_DIR=configs/test`). Trigger: task `stage:testing` (post-review approve, webhook or manual). Deploy target: GCP VM (default, from `config/projects.json`) or Lambda (GPU projects). Writes: Linear status + deploy URL + test results. Runtime brain: `agents/test/CLAUDE.md` (SoT for pętla).
+</env>
 
-## Trigger
-Task po approve review (`stage:testing`). Ręczne odpalenie lub webhook.
+<squad>
+| role | model | routing |
+|------|-------|---------|
+| deploy | deepseek-v4-pro | orchestration (fast tool-call, multimodal UI shots) |
+| scenarios | deepseek-v4-flash | test case gen (bulk cheapest) |
+| run | minimax | E2E smoke + critical-path (multimodal: UI screenshots) |
+| root_cause | glm-5.2 | hard debug of failures |
+| terminal_debug | gpt-5.5 | terminal-heavy issues (optional) |
+| worker | minimax | summary / observability check |
+| flash | deepseek-v4-flash | flaky-fix suggestions |
+</squad>
 
-## Routing modeli
-| Krok | Model | Czemu |
-|---|---|---|
-| Deploy orchestration | **DeepSeek V4 Pro** | szybki tool-call; multimodal = screenshoty UI |
-| Test scenario gen (bulk) | **DeepSeek V4 Flash** | najtańszy bulk |
-| Run + analiza | **MiniMax M3** (multimodal) | ogląda zrzuty zdeployowanej apki |
-| Root-cause failów | **GLM-5.2** | hard-debug |
-| Terminal-heavy deploy debug | **GPT-5.5** (opcjonalnie) | Terminal-Bench 82.7 |
+<doubt_defaults>
+- After fix attempt: flaky → fix root cause, not retry-loop.
+- Deploy fails after rollback → `escalated` + @Mateusz.
+- Observability missing → `needs:access`.
+- Shared loop-limit with DEV: >2 bounces total → `escalated`.
+</doubt_defaults>
 
-## Cel deployu (z `config/projects.json`)
-- **OpenRouter build → GCP VM** (skonfigurowana nazwa instancji) — domyślnie.
-- **Ollama/GPU build → Lambda AI** (GPU) — alternatywna ścieżka.
+<loop>
+<precedence_policy>
+`agents/test/CLAUDE.md` is runtime SoT. On conflict: this file wins; flag to Mateusz.
+</precedence_policy>
 
-## Kroki
-1. **Pre-deploy.** Pull merged; build (delivery-loop: rebuild+redeploy). Wersja = OpenRouter (nie Ollama, chyba że projekt wymaga GPU → Lambda).
-2. **Deploy z safety.** Wgranie na **GCP VM**; **health-check** (endpoint/sanity). Fail → **auto-rollback** do poprzedniej wersji + komentarz (C8). Ryzykowne → canary (opcjonalnie).
-3. **Scenario gen (DeepSeek).** Happy path + 3–5 edge cases z AC; **synthetic data, nigdy prod PII** (C9).
-4. **Run (MiniMax).** Testy E2E smoke + critical-path na zdeployowanej apce; security DAST-lite; (multimodal: zrzuty UI). Asercje na **wartości**, nie `toBeDefined` (C10).
-5. **Observability check.** Logi/metryki/błędy po deployu na miejscu? (`testing` §6).
-6. **Verdykt:**
-   - **Pass** → `Done` + komentarz (link deploy, co przetestowano).
-   - **Fail** → root-cause (GLM-5.2) → komentarz → `In Progress` + ewentualnie `risk:high`.
+**1. Pre-deploy:** pull merged; build (rebuild+redeploy per delivery-loop). Use OpenRouter build (not Ollama unless GPU-required → Lambda).
 
-## Metadane Linear
-Status `stage:testing→Done|In Progress` · komentarz z URL deployu + wynikami · `ai:reviewed` zachowane.
+**2. Deploy with safety:** GCP VM (or Lambda). Run health-check (endpoint sanity). **Fail → auto-rollback** to previous version + comment in Linear. Risky deploys → optional canary.
 
-## Safeguards (P0)
-- **Health-check + rollback** obowiązkowe (C8). Synthetic data (C9, RODO).
-- Cost guardrail. Flaky → fix, nie retry w nieskończoność (C10).
-- Loop-limit z DEV (wspólny licznik) → `escalated`.
+**3. Scenario gen:** happy path + 3–5 edge-cases from AC. **Synthetic data only** (never prod PII; GDPR).
 
-## Output
-Zdeployowana, przetestowana wersja na GCP (lub Lambda dla GPU) · task `Done` lub zwrot do DEV z root-cause.
+**4. Run tests:** E2E smoke + critical-path on live deployed instance. Assertions on **values**, not `toBeDefined()`. DAST-lite security. Multimodal: capture UI screenshots.
 
-## Failure handling
-Deploy fail → rollback + `escalated` + @Mateusz. Brak observability → `needs:access`. Powtarzalny fail → `escalated`.
+**5. Observability:** logs/metrics/errors post-deploy present? Check and report.
+
+**6. Verdict:**
+   - **Pass:** `Done` + comment (deploy URL, test coverage summary).
+   - **Fail:** GLM-5.2 root-cause analysis → comment → `In Progress` (optionally `risk:high`).
+
+**7. Loop-limit:** shared with DEV. After 2 DEV bounces + 2 TEST bounces (total >2) → `escalated` + @Mateusz + stop.
+
+**8. Status transition:** `stage:testing→Done` (pass) OR `stage:testing→In Progress` (fail).
+</loop>
+
+<hard_rules>
+- **Health-check + rollback MANDATORY** (no deploy without it).
+- **Synthetic data only** (no prod PII; RODO).
+- **Flaky tests:** fix root cause, never auto-retry indefinitely.
+- **Cost guardrail:** escalate if over-budget.
+- **Loop-limit (shared with DEV):** max 2 combined bounces; then `escalated`.
+- Observability missing → `needs:access` (do not guess logs).
+</hard_rules>

@@ -1,4 +1,3 @@
-
 <fenix_canonical_workflow_file_description>
 Single source of truth for how a Fenix squad session runs. 
 </fenix_canonical_workflow_file_description>
@@ -41,7 +40,7 @@ Fenix uses exactly **4 workflow statuses**. Sub-states like "Ready" and
 
 
 <git_convention>
-### Commit Message Format
+**Commit Message Format**
 
 ```
 <prefix>(<area>): <short description> [<uuid-first-8>] [<linear-id>]
@@ -70,7 +69,7 @@ Fenix uses exactly **4 workflow statuses**. Sub-states like "Ready" and
 active development to review. Every squad lead calls it when their work on a
 task is complete.
 
-### Signature
+**Signature**
 
 ```
 deliver_task(
@@ -80,7 +79,7 @@ deliver_task(
 ) → void
 ```
 
-### Behavior
+**Behavior**
 
 1. **Validates DoD**: checks that the task's DoD checklist items are met. If
    not, logs a warning but does not block (the REVIEW squad will catch gaps).
@@ -94,7 +93,7 @@ deliver_task(
 6. **Clears `needs:*`**: if the squad lead was waiting on input, clears the
    needs label.
 
-### Per-Squad Notes
+**Per-Squad Notes**
 
 | Squad | When to call | `actual_hours` source | `delivery_summary` includes |
 |---|---|---|---|
@@ -107,7 +106,7 @@ deliver_task(
 </lead_action_deliver_task>
 
 <lead_action_run_session>
-## 5. Canonical Squad Session Loop (8 Steps)
+**Canonical Squad Session Loop (8 Steps)**
 
 Every Fenix squad follows this loop. Steps 1–7 are sequential; step 8 loops
 back or stops.
@@ -198,7 +197,7 @@ back or stops.
 | **Cadence**              | On demand (voice memo)                        | On demand (task ready)      | On demand (task in review)      | On demand (task approved)         | Weekly (cron)                   |
 | **Step 5 = implement()** | Discovery → spec → decompose → push to Linear | Code the feature/fix        | Review code (3 parallel passes) | Deploy + run tests                | Collect state → retro → digest  |
 | **Input**                | Voice memo + artifacts                        | Task in Todo with `dor-ok`  | Task in In Review               | Task with `stage:testing`         | Linear board state              |
-| **Output**               | Parent epic + sub-issues in Todo              | Branch + commit + In Review | Verdict: approve or return      | Done or return to In Progress     | Digest (PL) to Mateusz          |
+| **Output**               | Parent epic + sub-issues in Todo              | Branch + commit + In Review | Verdict: approve or return     | Done or return to In Progress     | Digest (PL) to Mateusz          |
 | **Read-only?**           | No                                            | No                          | **Yes** (no Edit/Write)         | Mostly no                         | **Yes** (no scope changes)      |
 | **HITL gates**           | 2 (brief approve, sample approve)             | 1 (plan approve)            | 0 (async if escalated)          | 0 (auto-rollback on fail)         | 0 (proposal only)               |
 | **Key model**            | Opus (lead), MiniMax (discovery)              | GLM-5.2 (lead/impl)         | GLM-5.2 (deep), Kimi (security) | MiniMax (lead), DeepSeek (deploy) | MiniMax (lead), GLM-5.2 (retro) |
@@ -279,7 +278,7 @@ here; each squad's CLAUDE.md expands the implementation.
 </safeguards>
 
 <squad_launchers>
-## Appendix B: Quick Reference — Squad Launchers
+**Quick Reference — Squad Launchers**
 
 ```bat
 bin\plan.bat     :: PLAN squad   (discovery → spec → decompose → push)

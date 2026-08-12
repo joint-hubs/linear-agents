@@ -1,56 +1,52 @@
 ---
 type: prd
 status: active
-area: review
-tags: [type/prd, area/ai, topic/linear, topic/agents, topic/code-review]
-created: 2026-06-23
-maturity: prd-v1
+maturity: v2
 ---
 
-# PRD — REVIEW squad
+# PRD — REVIEW
 
-> Obszar REVIEW jako zestaw agentów (lead + 3 subagentów) + narzędzia security.
-> Spec: [agent-3-review](../agents/agent-3-review.md). Launchery — na końcu.
+<goal>In Review task → parallel 3-pass (first-pass, security, deep) → merge findings into Conventional Comments → max 2 dev↔review bounces → hand to TEST (`stage:testing` + `ai:reviewed`) or escalate. Merge authority: deep (correctness/arch) > security (auth/secrets) > first-pass (lint/style).</goal>
 
-## 1. Cel
-Task w `In Review` zrecenzować: równolegle tani first-pass + security tooling + głęboki review (GLM-5.2),
-scalić w **Conventional Comments**, max 2 rundy → approve (`stage:testing`) lub zwrot do `In Progress`.
+<squad_table>
+| Role | Model |
+|------|-------|
+| lead | glm-5.2 |
+| first-pass | deepseek-v4-pro |
+| security | kimi-k2.7-code |
+| deep | glm-5.2 |
+</squad_table>
 
-## 2. Zestaw agentów
-| Sub-agent | Model | Odpowiedzialność |
-|---|---|---|
-| **lead** (`review`) | GLM-5.2 | risk-tiering, scalanie uwag, licznik rund, verdykt |
-| **first-pass** | DeepSeek V4 Pro | lint/style/oczywiste bugi, brakujące testy |
-| **security** | Kimi K2.7 Code + narzędzia | SAST/SCA/secret-scan (Semgrep/Snyk/Trivy/GitGuardian) |
-| **deep** | GLM-5.2 | correctness / architektura / edge / logika biznesowa |
+<runtime>Full loop (parallel dispatch, merge authority, Conventional Comments format, round tracking, escalation at round 3): see `agents/review/CLAUDE.md`.</runtime>
 
-## 3. Jak zbudować
-- Pliki: `agents/review/agents/{first-pass,security,deep}.md` + lead `CLAUDE.md`.
-- **lead**: risk-tiering (`risk:high`/`type:tech`/auth-payments → głębiej); odpala 3 passy równolegle; scala → Conventional Comments (`praise/nitpick/suggestion/issue/question`; tylko `issue:` blokuje); pilnuje licznika rund.
-- **security**: model + narzędzia CLI (read-only na repo); zwraca CVE/sekrety/podatności.
-- **deep**: GLM-5.2 — correctness / architektura / edge cases / logika biznesowa.
-- **Nie edytuje kodu** (settings deny Edit/Write); tylko komentarze. Komentarz do Mateusza PL.
+<scope>
+- **first-pass**: lint, style, obvious bugs, missing tests.
+- **security**: SAST/SCA/secret-scan (Semgrep, Snyk, Trivy, GitGuardian) — tools + model.
+- **deep**: correctness, architecture, edge cases, business logic.
+- Merge: deduplicate by file+line, keep highest severity; apply merge authority on conflict.
+- Verdict: `issue:` findings only block; `nitpick:`/`suggestion:`/`praise:`/`question:` are advisory.
+</scope>
 
-## 4. Safeguards (P0)
-**Max 2 rundy** dev↔review → `escalated` + @Mateusz. Security zawsze narzędziami (model łapie 60–80%). Zero „LGTM bez czytania". Cost guardrail.
+<build>
+- Subagents: `agents/review/agents/{first-pass,security,deep}.md` + lead `CLAUDE.md`.
+- settings.json: Read + Bash (git diff, security tools) + Linear MCP; **deny Edit/Write/git push/commit**.
+- Smoke: `bin\agent.bat review deep` on real diff.
+- Full squad: `bin\review.bat` → verdict.
+</build>
 
-## 5. Acceptance criteria
-- [ ] 3 passy lecą równolegle; uwagi scalone w Conventional Comments.
-- [ ] Issues → `In Progress` (round++); clean → `stage:testing` + `ai:reviewed`.
-- [ ] Po 2 rundach bez zbieżności → `escalated`.
-- [ ] SAST/secret-scan wykonane (nie tylko model).
+<acceptance_criteria>
+- [ ] 3 passes run in parallel; findings merged into Conventional Comments.
+- [ ] `issue:` findings → In Progress (round++); clean → stage:testing + ai:reviewed.
+- [ ] After 2 dev↔review bounces, no convergence → escalated + needs:answer.
+- [ ] SAST/secret-scan executed (not model-only).
+</acceptance_criteria>
 
-## 6. Build steps
-1. Subagenci `agents/review/agents/*.md` + lead CLAUDE.md.
-2. settings.json: Read + Bash(security tools, git diff) + Linear MCP; **deny Edit/Write/git push/commit**.
-3. Smoke: `bin\agent.bat review deep` na realnym diff.
-4. Cały squad: `bin\review.bat` → verdykt.
-
-## 7. Launchery (funkcjonalne)
+<launchers>
 ```bat
-bin\review.bat                   :: cały zestaw review (first-pass ∥ security ∥ deep)
+bin\review.bat                   :: full squad (first-pass ∥ security ∥ deep)
 bin\agent.bat review first-pass
 bin\agent.bat review security
 bin\agent.bat review deep
 ```
-Pliki: [`bin/review.bat`](../../bin/review.bat) · [`bin/agent.bat`](../../bin/agent.bat).
+Refs: [`bin/review.bat`](../../bin/review.bat) · [`bin/agent.bat`](../../bin/agent.bat).
+</launchers>

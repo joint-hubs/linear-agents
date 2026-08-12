@@ -3,7 +3,80 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-07-26 — Desktop launcher + zakładka „Konfiguracja składów" (dowiezione, zweryfikowane e2e).
+## Ostatnia aktualizacja: 2026-08-08 — Prompt optimization (FOC-72): DEV + Fala A/B/C/D DONE
+
+**Linear:** FOC-72 "[ FENIX ] prompt optimization" (In Progress). Cel: pisać prompty pod kątem modelu
+językowego (GLM-5.2 / MiniMax / DeepSeek / Kimi), nie człowieka.
+
+### Co zrobione
+- **`cbc98e5`** — `agents/dev/CLAUDE.md` template (XML, hybryda EN/PL, few-shot, doubt_defaults,
+  precedence_policy, budget drains). + FENIX_WORKFLOW / models pricing / gitignore freetext.
+- **`6c4477c`** — `agents/dev/agents/*.md` (6 subagentów) lean EN/XML + routing ids z `config/models.json`;
+  bin/dev*.bat `z-ai/glm-5.2`.
+- **`98f9d4a` Fala A** — `agents/{review,cadence,plan,test}/CLAUDE.md` przepisane wg template DEV:
+  | squad | lines | key semantics kept |
+  |-------|------:|--------------------|
+  | review | 174 | 3-pass parallel NEVER serialize; merge deep>security>first-pass; only `issue:` blocks; max 2 rounds |
+  | cadence | 164 | lead `flow-db ingest` step0; bounces==2 vs >2; subagent-share <40% action item; 1 digest/week PL |
+  | plan | 178 | HITL = interactive REPL (NOT async needs:*); GATE1/GATE2 sync; DRAFT JSON path; DRY-RUN |
+  | test | 125 | health-check+auto-rollback mandatory; synthetic data; PASS→Done / FAIL→root-cause→In Progress |
+- **Fala B (4 commity)** — 23 subprompty `agents/{review,cadence,plan,test}/agents/*.md` lean EN/XML;
+  modele przywrócone do `config/models.json` (usunięte stray `grok-4.5` / `gpt-5.6-terra-pro`):
+  | commit | squad | n | notes |
+  |--------|-------|--:|-------|
+  | `97968cf` | review | 5 | first-pass→v4-pro, security→kimi, deep→glm |
+  | `48eafb0` | cadence | 5 | retro→glm, digest→v4-pro (PL output) |
+  | `a1e63fa` | plan | 7 | spec→glm, spec-review→minimax; decomposer single schema |
+  | `b042b34` | test | 6 | runner→minimax, root-cause→glm; health-check+rollback |
+- **Fala C (user-global `~/.claude/`, poza repo)** — applied on disk 2026-08-08; repo tracks only STATE pointer:
+  | path | lines | action |
+  |------|------:|--------|
+  | `~/.claude/memory/orchestration.md` | 62 | light reframe: precedence + doubt_defaults; principles 1-liner; EN logic |
+  | `~/.claude/skills/refine/SKILL.md` | 77 | full lean EN/XML; DRY python bootstrap; optional ThoughtMap |
+  | `~/.claude/skills/git-checkpoint/SKILL.md` | 44 | light: +precedence (more-restrictive-wins vs squad brains) |
+  | `~/.claude/CLAUDE.md` | 42 | keep-as-is (already lean XML) |
+- **Fala D (docs specs, 3 commity)** — `docs/agents/agent-*.md` + squad `docs/prd/prd-*.md` lean EN/XML;
+  runtime SoT = `agents/*/CLAUDE.md` (docs = readable mirror + build/AC/launchers):
+  | commit | scope | notes |
+  |--------|-------|-------|
+  | `608b827` | agent-2-dev + prd-development | FULL rewrite (broken/incomplete → XML loop + AC) |
+  | `4898ad8` | prd-{cadence,planning,review,testing} | light-trim; cross-link brains; AC/launchers kept |
+  | `ae54998` | agent-{0,1,3,4} | light-trim; GATE sync REPL; parallel merge; health-check |
+  | (this) | STATE | mark Fala D complete |
+  Skipped (not agent runtime): gantt/telemetry/graph-first/model-role-fit/prd-docs-to-linear, dev-readiness.
+- **Decyzja shared ≥40% bloku:** **inline-verbatim** (zamknięte przy Fali A).
+
+### 7 zasad pisania promptów (Z1–Z7)
+Z1 EN = logic-carrier, PL = output/runbook | Z2 XML-tags | Z3 reguły warunkowe + stop-conditions;
+persona = 1 linia | Z4 negacja → pozytyw + trade-off; `NEVER` tylko guardraile | Z5 lean, merguj duplikaty |
+Z6 few-shot w `<examples>` | Z7 `<doubt_defaults>` + precedence/rationale gdzie trzeba.
+
+### Kontekst do wznowienia (NASTĘPNY KROK)
+**FOC-72 fale A–D — KOMPLETNE** (DEV brain+sub, 4 brains, 23 sub, user-global, docs specs).
+
+Dalej (opcjonalnie, na zgodę Mateusza):
+- Linear comment FOC-72 (session pointer) + transition / close.
+- `git push` main (ahead origin; **no push without consent**).
+- Cleanup routing orphans: `plan.dor_gate`, `plan.enrich`, `*.pl`, `test.terminal`; empty `graphify` skill.
+
+**Luki (nieblokujące):**
+- Routing bez pliku roli: `plan.dor_gate` (robi flash), `plan.enrich` (martwy?), `*.pl` (digest=cadence.pl),
+  `test.terminal` (gpt — brak pliku). Decyzja: stub vs prune routing — cleanup osobno.
+- `~/.claude/skills/graphify/SKILL.md` pusty (dangling). Root `CLAUDE.md` = GitNexus auto — nie dotykać.
+- Fala C files live outside git — version only via STATE pointer (or future dotfiles repo).
+- `docs/agents/agent-2-dev.md` ~184 linii (bogatszy mirror pętli DEV) — OK jako spec; runtime = `agents/dev/CLAUDE.md`.
+
+### Jak wrócić
+1. Ten plik (`docs/STATE.md`) — start.
+2. Template mózg: `agents/dev/CLAUDE.md`. Template subagent: `agents/dev/agents/implementer.md`.
+3. Commity: `cbc98e5` DEV brain · `6c4477c` DEV sub · `98f9d4a` A · `97968cf`/`48eafb0`/`a1e63fa`/`b042b34` B ·
+   `e14d4d6` C-STATE · `608b827`/`4898ad8`/`ae54998` D · ten (D-STATE).
+4. Fala C on disk: `~/.claude/memory/orchestration.md`, `~/.claude/skills/{refine,git-checkpoint}/SKILL.md`.
+5. FOC-72 Linear comment / push — na zgodę.
+
+---
+
+## (wcześniej) 2026-07-26 — Desktop launcher + zakładka „Konfiguracja składów" (dowiezione, zweryfikowane e2e).
 
 ## Biblioteka promptów + czytanie konwersacji (2026-07-26)
 
