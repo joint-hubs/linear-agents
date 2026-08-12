@@ -1,0 +1,196 @@
+{
+  "team": {
+    "id": "b0a1c2d3-e4f5-6789-abcd-ef0123456789",
+    "name": "Fenix",
+    "key": "FEN"
+  },
+  "issues": [
+    {
+      "id": "f1a2b3c4-d5e6-7890-abcd-ef0123456789",
+      "identifier": "FEN-30",
+      "title": "Sample TEST task: gantt snapshot lib",
+      "url": "https://linear.app/fenix/issue/FEN-30",
+      "state": {
+        "id": "state-testing-001",
+        "name": "In Review",
+        "type": "started"
+      },
+      "priority": 2,
+      "estimate": "S",
+      "createdAt": "2026-06-20T08:00:00.000Z",
+      "updatedAt": "2026-06-30T10:00:00.000Z",
+      "startedAt": "2026-06-28T15:00:00.000Z",
+      "assignee": {
+        "id": "user-test-001",
+        "name": "test-agent",
+        "displayName": "TEST Agent"
+      },
+      "labels": {
+        "nodes": [
+          { "id": "label-ai-reviewed-001", "name": "ai:reviewed" },
+          { "id": "label-stage-testing-001", "name": "stage:testing" },
+          { "id": "label-dod-ok-001", "name": "dod-ok" }
+        ]
+      },
+      "parent": {
+        "id": "epic-fen-11-001",
+        "identifier": "FEN-11",
+        "title": "Gantt panel epic"
+      },
+      "children": {
+        "nodes": [
+          {
+            "id": "child-fen-31-001",
+            "identifier": "FEN-31",
+            "title": "gantt-layout: compute row positions and time axis",
+            "state": { "name": "Done" }
+          },
+          {
+            "id": "child-fen-32-001",
+            "identifier": "FEN-32",
+            "title": "gantt-render: draw bars, labels, dependency arrows",
+            "state": { "name": "Done" }
+          },
+          {
+            "id": "child-fen-33-001",
+            "identifier": "FEN-33",
+            "title": "gantt-snapshot: facade + PNG export via sharp",
+            "state": { "name": "Done" }
+          },
+          {
+            "id": "child-fen-34-001",
+            "identifier": "FEN-34",
+            "title": "gantt-snapshot: unit tests",
+            "state": { "name": "Done" }
+          }
+        ]
+      }
+    }
+  ],
+  "issue": {
+    "id": "f1a2b3c4-d5e6-7890-abcd-ef0123456789",
+    "identifier": "FEN-30",
+    "title": "Sample TEST task: gantt snapshot lib",
+    "url": "https://linear.app/fenix/issue/FEN-30",
+    "description": "## Goal\n\nBuild a lightweight gantt-snapshot library that renders a Gantt chart from a flat task list and emits a PNG snapshot.\n\n## Acceptance Criteria\n\n**Given** a flat array of tasks with `{id, title, start, end, progress, dependsOn}`\n**When** the snapshot function is called\n**Then** it returns a Buffer containing a PNG image of the Gantt chart\n\n**Given** a task with `dependsOn` set\n**When** the chart is rendered\n**Then** a dependency arrow is drawn from the dependency to the task\n\n**Given** an empty task array\n**When** the snapshot function is called\n**Then** it returns a placeholder image with \"No tasks\" text\n\n## Definition of Done\n\n- [x] `gantt-snapshot` module exports `renderSnapshot(tasks, options)`\n- [x] Output is a valid PNG (verified via sharp metadata)\n- [x] Dependency arrows render correctly for 1-level and 2-level chains\n- [x] Empty input returns placeholder, not crash\n- [x] Unit tests cover: basic render, dependencies, empty input, custom dimensions\n- [x] `npm run build` passes with no warnings\n- [x] README documents the public API",
+    "state": {
+      "id": "state-testing-001",
+      "name": "In Review",
+      "type": "started"
+    },
+    "priority": 2,
+    "estimate": "S",
+    "createdAt": "2026-06-20T08:00:00.000Z",
+    "updatedAt": "2026-06-30T10:00:00.000Z",
+    "startedAt": "2026-06-28T15:00:00.000Z",
+    "completedAt": null,
+    "assignee": {
+      "id": "user-test-001",
+      "name": "test-agent",
+      "displayName": "TEST Agent"
+    },
+    "labels": {
+      "nodes": [
+        { "id": "label-ai-reviewed-001", "name": "ai:reviewed" },
+        { "id": "label-stage-testing-001", "name": "stage:testing" },
+        { "id": "label-dod-ok-001", "name": "dod-ok" }
+      ]
+    },
+    "parent": {
+      "id": "epic-fen-11-001",
+      "identifier": "FEN-11",
+      "title": "Gantt panel epic"
+    },
+    "children": {
+      "nodes": [
+        {
+          "id": "child-fen-31-001",
+          "identifier": "FEN-31",
+          "title": "gantt-layout: compute row positions and time axis",
+          "state": { "name": "Done" }
+        },
+        {
+          "id": "child-fen-32-001",
+          "identifier": "FEN-32",
+          "title": "gantt-render: draw bars, labels, dependency arrows",
+          "state": { "name": "Done" }
+        },
+        {
+          "id": "child-fen-33-001",
+          "identifier": "FEN-33",
+          "title": "gantt-snapshot: facade + PNG export via sharp",
+          "state": { "name": "Done" }
+        },
+        {
+          "id": "child-fen-34-001",
+          "identifier": "FEN-34",
+          "title": "gantt-snapshot: unit tests",
+          "state": { "name": "Done" }
+        }
+      ]
+    },
+    "comments": {
+      "nodes": [
+        {
+          "id": "comment-dev-handoff-001",
+          "body": "## DEV hand-off to REVIEW\n\n**Branch:** `fen-30-gantt-snapshot`\n**Self-verify:** `npm run build` — green (0 warnings)\n**Tests:** 12/12 passing (`npm test`)\n\n### Summary\n\nImplemented the gantt-snapshot library across 4 modules:\n\n| Module | File | Status |\n|--------|------|--------|\n| Layout engine | `lib/gantt-layout.mjs` | Done |\n| Renderer | `lib/gantt-render.mjs` | Done |\n| Snapshot facade | `lib/gantt-snapshot.mjs` | Done |\n| Tests | `test/gantt-snapshot.test.mjs` | Done |\n\n### Key decisions\n\n- Used `sharp` overlay compositing (compositeOver) for bars + arrows\n- Time axis auto-scales to date range with configurable `start`/`end` overrides\n- Dependency arrows use bezier curves via SVG overlay rendered to PNG\n- Palette: primary `#3B82F6`, done `#22C55E`, blocked `#EF4444`, text `#1E293B`\n\n### Files changed\n\n- `lib/gantt-layout.mjs` (new, 87 loc)\n- `lib/gantt-render.mjs` (new, 142 loc)\n- `lib/gantt-snapshot.mjs` (new, 34 loc)\n- `test/gantt-snapshot.test.mjs` (new, 98 loc)\n\n### Open questions for REVIEW\n\n1. Should the arrow head style be filled or open? Currently filled triangle.\n2. Row height auto-sizing for long task titles — currently clips at 200px. Acceptable?\n3. `sharp` composite order: bars rendered first, arrows on top. Verified visually but a second pair of eyes welcome.",
+          "createdAt": "2026-06-29T09:00:00.000Z",
+          "user": {
+            "id": "user-dev-agent-001",
+            "name": "dev-agent",
+            "displayName": "DEV Agent"
+          }
+        },
+        {
+          "id": "comment-review-handoff-001",
+          "body": "## REVIEW hand-off to TEST\n\n**Branch:** `fen-30-gantt-snapshot`\n**Verdict:** clean — no actionable issues\n**Review round:** 1\n\nHanding to TEST for E2E validation against deployed build. Apply the standard solo profile (smoke + critical-path + security-lite) with synthetic data only.",
+          "createdAt": "2026-06-30T09:00:00.000Z",
+          "user": {
+            "id": "user-review-agent-001",
+            "name": "review-agent",
+            "displayName": "REVIEW Agent"
+          }
+        }
+      ]
+    },
+    "relations": {
+      "nodes": [
+        {
+          "id": "rel-depends-on-001",
+          "type": "dependsOn",
+          "relatedIssue": {
+            "id": "dep-fen-29-001",
+            "identifier": "FEN-29",
+            "title": "Gantt panel: data model and store"
+          }
+        }
+      ]
+    }
+  },
+  "comments": {
+    "nodes": [
+      {
+        "id": "comment-dev-handoff-001",
+        "body": "## DEV hand-off to REVIEW\n\n**Branch:** `fen-30-gantt-snapshot`\n**Self-verify:** `npm run build` — green (0 warnings)\n**Tests:** 12/12 passing (`npm test`)\n\n### Summary\n\nImplemented the gantt-snapshot library across 4 modules...",
+        "createdAt": "2026-06-29T09:00:00.000Z",
+        "user": {
+          "id": "user-dev-agent-001",
+          "name": "dev-agent",
+          "displayName": "DEV Agent"
+        }
+      },
+      {
+        "id": "comment-review-handoff-001",
+        "body": "## REVIEW hand-off to TEST\n\n**Branch:** `fen-30-gantt-snapshot`\n**Verdict:** clean — no actionable issues\n**Review round:** 1\n\nHanding to TEST for E2E validation against deployed build. Apply the standard solo profile (smoke + critical-path + security-lite) with synthetic data only.",
+        "createdAt": "2026-06-30T09:00:00.000Z",
+        "user": {
+          "id": "user-review-agent-001",
+          "name": "review-agent",
+          "displayName": "REVIEW Agent"
+        }
+      }
+    ]
+  },
+  "deployUrl": "https://gantt-snapshot-mock.example.com",
+  "dryRunScenario": "unhealthy"
+}
