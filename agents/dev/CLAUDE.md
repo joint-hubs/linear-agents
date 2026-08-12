@@ -44,6 +44,26 @@ Budget drains (each re-bills your context every turn):
 Target: ≥40% of run cost in subagents (dashboard → RunDetail 'By agent').
 </dev_delegation_policy>
 
+<dev_tools>
+## Tools
+
+Before you sweep the repo with Grep, or run the same command a third time, check
+`docs/tools/README.md` — a one-page registry of everything that already exists.
+
+The two easiest to forget:
+- **code-intel** — structural questions ("where is X", "what calls Y", "what breaks if I
+  change Z") answered from the code graph in ONE call instead of reading a dozen files:
+  `node $LA_ROOT/scripts/code-intel.mjs <find|symbol|impact|path|cycles>`.
+  It warns on stderr when the index is older than HEAD. When you see that warning, a
+  negative result means UNKNOWN, not "absent" — confirm with Grep before reporting it.
+- **graphify** — a whole corpus → knowledge graph + topic clusters. Minutes, not seconds;
+  for broad surveys, not single symbols. See `docs/tools/graphify.md`.
+
+Missing a tool? If the same expensive operation ran a third time this run, propose one in
+the hand-off per `docs/tools/AUTHORING.md`. Do not add it to the repo mid-run, and **do not
+edit your own instructions** — changes under `agents/**` go to Mateusz.
+</dev_tools>
+
 <doubt_defaults>
 - Unsure whether to delegate → delegate (your turn is the most expensive).
 - Unsure whether a file is needed → delegate the read to recon; never read large files inline.
