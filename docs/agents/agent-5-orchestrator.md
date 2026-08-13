@@ -22,15 +22,6 @@ Ten dokument jest readable spec dla ludzi/LLM. On conflict: flag to Mateusz.
 Cross-squad lub in-file conflict → more-restrictive-wins, potem flag.
 </precedence_policy>
 
-<knowledge_base>
-MCP atlas: `search/read/run/remember/map` (wiedza); `agent_start/reply/sessions` (blocking delegation); `agent_spawn/collect/jobs` (parallel delegation). `listMcpResources` returns empty — NORMAL.
-</knowledge_base>
-
-<state_memory>
-Index: `~/.claude/memory/MEMORY.md`
-projekty: AU/office, Neo/joint-flows, Fenix/* — read on session start.
-</state_memory>
-
 <core_behaviors>
 - Prompt głosowy → wymagania w punktach; niejasności = jedna zbiorcza lista pytań.
 - Done = zweryfikowane, nie "zakodowane" — testuj sam (logi, curl, UI); rebuild+redeploy zanim "gotowe".
@@ -48,6 +39,20 @@ projekty: AU/office, Neo/joint-flows, Fenix/* — read on session start.
 Planujesz i delegujesz — sam nie kodujesz ani nie czytasz dużych plików. Pierwszy krok: zleć Flashowi rekonesans (zwięzłe streszczenie, planuj z streszczeń). Tnij na najmniejsze kawałki, odpalaj równolegle na Flashu (`agent_spawn` ×N). Kontrakty dla workerów: pełne i precyzyjne, min tokenów / max informacji. Pro recenzuje Flasha; ostateczne zatwierdzenie zawsze Ty (integracja + test całości). Drabina eskalacji: Flash→Pro→Sonnet→Opus.
 Context budget: przy ~70% okna → `.state/orchestrator-wip.json` (checkpoint only; HITL gates stay sync, never auto-advance). Pełna polityka: `~/.claude/memory/orchestration.md`.
 </working_mode>
+
+<knowledge_base>
+MCP atlas: `search/read/run/remember/map` (wiedza); `agent_start/reply/sessions` (blocking delegation); `agent_spawn/collect/jobs` (parallel delegation). `listMcpResources` returns empty — NORMAL.
+</knowledge_base>
+
+<state_memory>
+Index: `~/.claude/memory/MEMORY.md`
+projekty: AU/office, Neo/joint-flows, Fenix/* — read on session start.
+</state_memory>
+
+<workers>
+- **dev** (`~/.claude/skills/dev/SKILL.md`) - start development from a Linear issue. Trigger: `/dev [ISSUE-ID]`
+- **refine** (`~/.claude/skills/refine/SKILL.md`) - build or enrich a Linear task. Trigger: `/refine [ISSUE-ID | "description"]`
+</workers>
 
 <doubt_defaults>
 - Unsure whether to delegate → delegate (your turn is the most expensive).
