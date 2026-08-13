@@ -3,8 +3,10 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import {
   applyEvent,
+  applyEvents,
   clearRunTask,
   getRunTaskLinks,
   makeEvent,
@@ -150,7 +152,7 @@ test("summary uses central projections", () => {
 
 test("health exposes store state", () => {
   const health = queryHealth(db);
-  assert(health.schemaVersion === 3, `schema=${health.schemaVersion}`);
+  assert(health.schemaVersion === 4, `schema=${health.schemaVersion}`);
   assert(health.issues.some((issue) => issue.type === "pricing_missing"), "pricing issue not reported");
 });
 
@@ -464,6 +466,63 @@ test("recordDelegationLink deduplicates on same parent_run_id+parent_agent+child
   }, { dbPath });
   assert(d2.recorded === false, `second call recorded=${d2.recorded}`);
   assert(d2.reason === "duplicate", `reason=${d2.reason}`);
+});
+
+test("FOC-104 poison pill: not-a-repo → is-a-repo keeps worktree_id stable (no FK rollback, usage lands)", () => {
+  // Reproduces the worktree_id poison pill: a path registered as "not a git
+  // repo" (repositoryId=null) on day 1, then re-registered as a git repo on
+  // day 2. Under the old formula the computed worktree_id changed between
+  // sessions, but ON CONFLICT(path) preserved the OLD id → the next INSERT
+  // INTO workspace_observations used the NEW id → FK violation → the entire
+  // applyEvents txn (including the usage.recorded row in the same batch)
+  // rolled back, silently dropping usage for that run.
+  const runId = "run-foc104";
+  const cwdRaw = "C:/Users/experiments/trading_assist";
+  const normalizedCwd = cwdRaw.toLowerCase().replace(/\/+$/, "");
+  const commonDir = `${cwdRaw}/.git`;
+  const observedAt1 = "2026-08-12T10:00:00.000Z";
+  const observedAt2 = "2026-08-13T10:00:00.000Z";
+  const usageObs = "2026-08-13T10:01:00.000Z";
+
+  // Day 1: path is NOT a git repo → no commonDir → repositoryId stays null.
+  applyEvent(db, makeEvent("run.started", { runId, squad: "dev", startedAt: observedAt1, cwd: cwdRaw },
+    { runId, observedAt: observedAt1, sourceKind: "test", sourcePath: "C:/sessions/foc104.jsonl", sourceOffset: 0 }));
+  applyEvent(db, makeEvent("workspace.observed",
+    { runId, cwd: cwdRaw, refType: "unknown", refName: null, headSha: null, source: "runtime" },
+    { runId, observedAt: observedAt1, sourceKind: "runtime", sourcePath: "C:/sessions/foc104.jsonl", sourceOffset: 1, eventId: "ws-foc104-d1" }));
+
+  // Day 2: path IS a git repo → commonDir set. Batched with a usage.recorded
+  // event in the SAME applyEvents txn — the poison pill rolled back BOTH.
+  applyEvents(db, [
+    makeEvent("workspace.observed",
+      { runId, cwd: cwdRaw, commonDir, gitDir: commonDir, refType: "branch", refName: "foc-88-prices-yahoo-pipeline", headSha: "abc123", source: "runtime" },
+      { runId, observedAt: observedAt2, sourceKind: "runtime", sourcePath: "C:/sessions/foc104.jsonl", sourceOffset: 2, eventId: "ws-foc104-d2" }),
+    makeEvent("usage.recorded",
+      { runId, model: "deepseek-v4-flash", inputTokens: 100_000, outputTokens: 10_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: usageObs },
+      { runId, observedAt: usageObs, sourceKind: "transcript", sourcePath: "C:/sessions/foc104.jsonl", sourceOffset: 3, eventId: "usage-foc104" }),
+  ]);
+
+  // (a) usage.recorded committed (NOT dropped by FK rollback)
+  const run = queryRuns(db, { runId })[0];
+  assert(run != null, "run-foc104 missing from queryRuns");
+  assert(run.totals.inputTokens === 100_000, `inputTokens=${run.totals.inputTokens} (expected 100000 — usage must survive the transition)`);
+  const usageRow = db.prepare("SELECT input_tokens FROM usage_facts WHERE run_id=?").get(runId);
+  assert(usageRow != null, "usage_facts row missing — txn rolled back");
+  assert(usageRow.input_tokens === 100_000, `usage_facts.input_tokens=${usageRow.input_tokens} (expected 100000)`);
+
+  // (b) workspace_observations row exists with a worktree_id that satisfies
+  // the FK (referenced row present in worktrees) — the assertion that actually
+  // broke under the old formula.
+  const obs = db.prepare("SELECT worktree_id, repository_id FROM workspace_observations WHERE run_id=? ORDER BY id DESC LIMIT 1").get(runId);
+  assert(obs != null, "workspace_observations row missing for run-foc104");
+  const wt = db.prepare("SELECT worktree_id, repository_id FROM worktrees WHERE worktree_id=?").get(obs.worktree_id);
+  assert(wt != null, `FK broken: workspace_observations.worktree_id=${obs.worktree_id} not in worktrees`);
+
+  // (c) worktree_id is now keyed on path only (no repositoryId salt) and
+  // repository_id got backfilled from day 2 git detection.
+  const expectedWorktreeId = createHash("sha256").update(normalizedCwd).digest("hex");
+  assert(wt.worktree_id === expectedWorktreeId, `worktree_id=${wt.worktree_id} expected hash(cwd)=${expectedWorktreeId}`);
+  assert(wt.repository_id != null, "repository_id must be populated after day 2 git detection");
 });
 
 db.close();
