@@ -477,8 +477,8 @@ test("FOC-104 poison pill: not-a-repo → is-a-repo keeps worktree_id stable (no
   // applyEvents txn (including the usage.recorded row in the same batch)
   // rolled back, silently dropping usage for that run.
   const runId = "run-foc104";
-  const cwdRaw = "C:/Users/experiments/trading_assist";
-  const normalizedCwd = cwdRaw.toLowerCase().replace(/\/+$/, "");
+  const cwdRaw = join(temp, "foc104", "trading_assist");
+  const normalizedCwd = cwdRaw.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
   const commonDir = `${cwdRaw}/.git`;
   const observedAt1 = "2026-08-12T10:00:00.000Z";
   const observedAt2 = "2026-08-13T10:00:00.000Z";
