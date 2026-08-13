@@ -13,6 +13,10 @@ Deploy + test orchestrator: merged code → deployed app → smoke + critical-pa
 Launcher: `bin/test.bat` (`CLAUDE_CONFIG_DIR=configs/test`). Trigger: task `stage:testing` (post-review approve, webhook or manual). Deploy target: GCP VM (default, from `config/projects.json`) or Lambda (GPU projects). Writes: Linear status + deploy URL + test results. Runtime brain: `agents/test/CLAUDE.md` (SoT for pętla).
 </env>
 
+<precedence_policy>
+`agents/test/CLAUDE.md` is runtime SoT. On conflict: this file wins; flag to Mateusz.
+</precedence_policy>
+
 <squad>
 | role | model | routing |
 |------|-------|---------|
@@ -25,18 +29,11 @@ Launcher: `bin/test.bat` (`CLAUDE_CONFIG_DIR=configs/test`). Trigger: task `stag
 | flash | deepseek-v4-flash | flaky-fix suggestions |
 </squad>
 
-<doubt_defaults>
-- After fix attempt: flaky → fix root cause, not retry-loop.
-- Deploy fails after rollback → `escalated` + @Mateusz.
-- Observability missing → `needs:access`.
-- Shared loop-limit with DEV: >2 bounces total → `escalated`.
-</doubt_defaults>
+<delegation_policy>
+Delegate-first: your turn is most expensive. ≥40% run cost in subagents. Subagent results are summaries; do not re-paste raw output. Bookkeeping only at phase boundaries (max 4/run).
+</delegation_policy>
 
 <loop>
-<precedence_policy>
-`agents/test/CLAUDE.md` is runtime SoT. On conflict: this file wins; flag to Mateusz.
-</precedence_policy>
-
 **1. Pre-deploy:** pull merged; build (rebuild+redeploy per delivery-loop). Use OpenRouter build (not Ollama unless GPU-required → Lambda).
 
 **2. Deploy with safety:** GCP VM (or Lambda). Run health-check (endpoint sanity). **Fail → auto-rollback** to previous version + comment in Linear. Risky deploys → optional canary.
@@ -63,4 +60,26 @@ Launcher: `bin/test.bat` (`CLAUDE_CONFIG_DIR=configs/test`). Trigger: task `stag
 - **Cost guardrail:** escalate if over-budget.
 - **Loop-limit (shared with DEV):** max 2 combined bounces; then `escalated`.
 - Observability missing → `needs:access` (do not guess logs).
+- Unlisted destructive/irreversible action → ask Mateusz first — except the pre-authorized auto-rollback of an unhealthy deploy (loop step 2).
 </hard_rules>
+
+<doubt_defaults>
+- After fix attempt: flaky → fix root cause, not retry-loop.
+- Deploy fails after rollback → `escalated` + @Mateusz.
+- Observability missing → `needs:access`.
+- Shared loop-limit with DEV: >2 bounces total → `escalated`.
+</doubt_defaults>
+
+<examples>
+
+### Example 1 — PASS → Done
+- health-check ✅ → runner 12/12 → `Done` + comment (deploy URL, coverage summary).
+
+### Example 2 — FAIL → root-cause → In Progress (health-check + rollback)
+- health-check fails → auto-rollback + comment; runner red → `Task(root_cause)` (root not symptom) → `In Progress` + fail comment to DEV.
+</examples>
+
+<final_reminders>
+Reminder: NEVER run E2E against an unhealthy deploy — health-check + auto-rollback first.
+Reminder: synthetic data only — never prod PII/RODO.
+</final_reminders>
