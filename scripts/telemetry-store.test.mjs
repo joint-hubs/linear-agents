@@ -3,11 +3,14 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import {
   applyEvent,
+  applyEvents,
   clearRunTask,
   getRunTaskLinks,
   makeEvent,
+  migrate,
   openTelemetryDb,
   queryHealth,
   queryPatterns,
@@ -17,6 +20,7 @@ import {
   recordDelegationLink,
   recordTaskLink,
   recordToolFact,
+  SCHEMA_VERSION,
 } from "./telemetry-store.mjs";
 
 let passed = 0;
@@ -150,7 +154,7 @@ test("summary uses central projections", () => {
 
 test("health exposes store state", () => {
   const health = queryHealth(db);
-  assert(health.schemaVersion === 3, `schema=${health.schemaVersion}`);
+  assert(health.schemaVersion === 4, `schema=${health.schemaVersion}`);
   assert(health.issues.some((issue) => issue.type === "pricing_missing"), "pricing issue not reported");
 });
 
@@ -466,7 +470,119 @@ test("recordDelegationLink deduplicates on same parent_run_id+parent_agent+child
   assert(d2.reason === "duplicate", `reason=${d2.reason}`);
 });
 
-db.close();
+test("FOC-104 poison pill: not-a-repo → is-a-repo keeps worktree_id stable (no FK rollback, usage lands)", () => {
+  // Reproduces the worktree_id poison pill: a path registered as "not a git
+  // repo" (repositoryId=null) on day 1, then re-registered as a git repo on
+  // day 2. Under the old formula the computed worktree_id changed between
+  // sessions, but ON CONFLICT(path) preserved the OLD id → the next INSERT
+  // INTO workspace_observations used the NEW id → FK violation → the entire
+  // applyEvents txn (including the usage.recorded row in the same batch)
+  // rolled back, silently dropping usage for that run.
+  const runId = "run-foc104";
+  const cwdRaw = join(temp, "foc104", "trading_assist");
+  const normalizedCwd = cwdRaw.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const commonDir = `${cwdRaw}/.git`;
+  const observedAt1 = "2026-08-12T10:00:00.000Z";
+  const observedAt2 = "2026-08-13T10:00:00.000Z";
+  const usageObs = "2026-08-13T10:01:00.000Z";
+
+  // Day 1: path is NOT a git repo → no commonDir → repositoryId stays null.
+  applyEvent(db, makeEvent("run.started", { runId, squad: "dev", startedAt: observedAt1, cwd: cwdRaw },
+    { runId, observedAt: observedAt1, sourceKind: "test", sourcePath: "C:/sessions/foc104.jsonl", sourceOffset: 0 }));
+  applyEvent(db, makeEvent("workspace.observed",
+    { runId, cwd: cwdRaw, refType: "unknown", refName: null, headSha: null, source: "runtime" },
+    { runId, observedAt: observedAt1, sourceKind: "runtime", sourcePath: "C:/sessions/foc104.jsonl", sourceOffset: 1, eventId: "ws-foc104-d1" }));
+
+  // Day 2: path IS a git repo → commonDir set. Batched with a usage.recorded
+  // event in the SAME applyEvents txn — the poison pill rolled back BOTH.
+  applyEvents(db, [
+    makeEvent("workspace.observed",
+      { runId, cwd: cwdRaw, commonDir, gitDir: commonDir, refType: "branch", refName: "foc-88-prices-yahoo-pipeline", headSha: "abc123", source: "runtime" },
+      { runId, observedAt: observedAt2, sourceKind: "runtime", sourcePath: "C:/sessions/foc104.jsonl", sourceOffset: 2, eventId: "ws-foc104-d2" }),
+    makeEvent("usage.recorded",
+      { runId, model: "deepseek-v4-flash", inputTokens: 100_000, outputTokens: 10_000, cacheReadTokens: 0, cacheCreationTokens: 0, observedAt: usageObs },
+      { runId, observedAt: usageObs, sourceKind: "transcript", sourcePath: "C:/sessions/foc104.jsonl", sourceOffset: 3, eventId: "usage-foc104" }),
+  ]);
+
+  // (a) usage.recorded committed (NOT dropped by FK rollback)
+  const run = queryRuns(db, { runId })[0];
+  assert(run != null, "run-foc104 missing from queryRuns");
+  assert(run.totals.inputTokens === 100_000, `inputTokens=${run.totals.inputTokens} (expected 100000 — usage must survive the transition)`);
+  const usageRow = db.prepare("SELECT input_tokens FROM usage_facts WHERE run_id=?").get(runId);
+  assert(usageRow != null, "usage_facts row missing — txn rolled back");
+  assert(usageRow.input_tokens === 100_000, `usage_facts.input_tokens=${usageRow.input_tokens} (expected 100000)`);
+
+  // (b) workspace_observations row exists with a worktree_id that satisfies
+  // the FK (referenced row present in worktrees) — the assertion that actually
+  // broke under the old formula.
+  const obs = db.prepare("SELECT worktree_id, repository_id FROM workspace_observations WHERE run_id=? ORDER BY id DESC LIMIT 1").get(runId);
+  assert(obs != null, "workspace_observations row missing for run-foc104");
+  const wt = db.prepare("SELECT worktree_id, repository_id FROM worktrees WHERE worktree_id=?").get(obs.worktree_id);
+  assert(wt != null, `FK broken: workspace_observations.worktree_id=${obs.worktree_id} not in worktrees`);
+
+  // (c) worktree_id is now keyed on path only (no repositoryId salt) and
+  // repository_id got backfilled from day 2 git detection.
+  const expectedWorktreeId = createHash("sha256").update(normalizedCwd).digest("hex");
+  assert(wt.worktree_id === expectedWorktreeId, `worktree_id=${wt.worktree_id} expected hash(cwd)=${expectedWorktreeId}`);
+  assert(wt.repository_id != null, "repository_id must be populated after day 2 git detection");
+});
+
+test("FOC-104 backfillWorktreeIds upgrade: v3 worktree_id + referencing observation are rewritten and FK check stays clean", () => {
+  // Simulate a database that was last written by v3 code, where worktree_id
+  // was keyed on hash(`${repositoryId}:${cwd}`) instead of hash(path). We
+  // open a fresh db (which runs migrate and marks schema as v4), undo the
+  // schema_migrations marker so the backfill guard treats the db as pre-v4,
+  // inject v3-style rows directly, then reopen — triggering backfillWorktreeIds
+  // on real data — and verify both the worktrees PK and the FK reference in
+  // workspace_observations are rewritten and the FK check is clean.
+  const upgradeDbPath = join(temp, "telemetry-upgrade-test.sqlite");
+  const v3db = openTelemetryDb(upgradeDbPath);
+
+  const cwd = join(temp, "foc104-upgrade", "project").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const repositoryId = createHash("sha256").update(`${cwd}/.git`).digest("hex");
+  const oldWorktreeId = createHash("sha256").update(`${repositoryId}:${cwd}`).digest("hex");
+  const newWorktreeId = createHash("sha256").update(cwd).digest("hex");
+
+  // Seed v3-style rows: worktrees row with old ID and a workspace_observation
+  // that references it. Both use the same old ID so FK is satisfied at seed time.
+  v3db.exec("PRAGMA foreign_keys = OFF");
+  v3db.prepare(
+    "INSERT INTO runs (run_id, updated_at) VALUES (?, ?)",
+  ).run("run-upgrade-v3", "2026-07-01T00:00:00.000Z");
+  v3db.prepare(
+    "INSERT INTO repositories (repository_id, common_dir, created_at) VALUES (?, ?, ?)",
+  ).run(repositoryId, `${cwd}/.git`, "2026-07-01T00:00:00.000Z");
+  v3db.prepare(
+    "INSERT INTO worktrees (worktree_id, repository_id, path, git_dir, created_at) VALUES (?, ?, ?, ?, ?)",
+  ).run(oldWorktreeId, repositoryId, cwd, `${cwd}/.git`, "2026-07-01T00:00:00.000Z");
+  v3db.prepare(
+    "INSERT INTO workspace_observations (run_id, observed_at, cwd, repository_id, worktree_id, ref_type, ref_name, head_sha, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run("run-upgrade-v3", "2026-07-01T00:00:00.000Z", cwd, repositoryId, oldWorktreeId, "branch", "main", "abc123", "runtime");
+  v3db.exec("PRAGMA foreign_keys = ON");
+
+  // Remove the schema_migrations marker so backfillWorktreeIds treats this
+  // database as pre-v4 and actually rewrites the rows.
+  v3db.prepare("DELETE FROM schema_migrations WHERE version=?").run(SCHEMA_VERSION);
+  v3db.close();
+
+  // Reopen: migrate() runs, backfillWorktreeIds fires and rewrites old IDs.
+  const upgraded = openTelemetryDb(upgradeDbPath);
+
+  const wt = upgraded.prepare("SELECT worktree_id FROM worktrees WHERE path=?").get(cwd);
+  assert(wt != null, "worktrees row missing after upgrade");
+  assert(wt.worktree_id === newWorktreeId, `worktrees.worktree_id=${wt.worktree_id} expected hash(path)=${newWorktreeId}`);
+
+  const obs = upgraded.prepare("SELECT worktree_id FROM workspace_observations WHERE run_id=?").get("run-upgrade-v3");
+  assert(obs != null, "workspace_observations row missing after upgrade");
+  assert(obs.worktree_id === newWorktreeId, `workspace_observations.worktree_id=${obs.worktree_id} expected ${newWorktreeId}`);
+
+  const fkViolations = upgraded.prepare("PRAGMA foreign_key_check").all();
+  assert(fkViolations.length === 0, `foreign_key_check found violations: ${JSON.stringify(fkViolations)}`);
+
+  upgraded.close();
+});
+
+
 assert(existsSync(dbPath), "database was not created");
 rmSync(temp, { recursive: true, force: true });
 

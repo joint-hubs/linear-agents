@@ -31,7 +31,7 @@ try {
   DatabaseSync = null;
 }
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export function sqliteAvailable() {
   return DatabaseSync != null;
@@ -357,16 +357,54 @@ function ensureOneActivePrimaryLinkIndex(db) {
     ON run_task_links(run_id) WHERE role='primary' AND valid_to IS NULL`);
 }
 
+// FOC-104 one-shot backfill: re-key worktree_id on path only. Previously
+// worktree_id was hash(repositoryId:cwd); rows stored under the old formula
+// must be rewritten to hash(path) so their FK references in
+// workspace_observations stay valid after the formula change. Idempotent and
+// guarded by the SCHEMA_VERSION marker so it runs exactly once per database.
+function backfillWorktreeIds(db) {
+  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(SCHEMA_VERSION)) return 0;
+  const rows = db.prepare("SELECT worktree_id, path FROM worktrees").all();
+  if (rows.length === 0) return 0;
+  // workspace_observations.worktree_id → worktrees.worktree_id has no
+  // ON UPDATE CASCADE, so we re-point observations first then the PK. With FK
+  // enforcement ON that intermediate state fails the constraint, so disable
+  // FK for this migration only (pragma must be set outside a transaction).
+  db.exec("PRAGMA foreign_keys = OFF");
+  let updated = 0;
+  try {
+    const updateObs = db.prepare("UPDATE workspace_observations SET worktree_id=? WHERE worktree_id=?");
+    const updateWt = db.prepare("UPDATE worktrees SET worktree_id=? WHERE worktree_id=?");
+    db.exec("BEGIN");
+    for (const row of rows) {
+      const newId = hash(row.path);
+      if (newId === row.worktree_id) continue;
+      updateObs.run(newId, row.worktree_id);
+      updateWt.run(newId, row.worktree_id);
+      updated++;
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+  return updated;
+}
+
 // Order matters: base schema before column adds (ALTER needs the table to
 // exist); columns before the price-set backfill (it writes price_set_id);
 // superseded-links cleanup before the unique index (the index would reject
-// the very rows that cleanup fixes).
+// the very rows that cleanup fixes); worktree_id rekey before the schema
+// marker so the one-shot guard fires correctly.
 export function migrate(db) {
   createBaseSchema(db);
   addRunColumns(db);
   backfillPriceSetId(db);
   closeSupersededPrimaryLinks(db);
   ensureOneActivePrimaryLinkIndex(db);
+  backfillWorktreeIds(db);
   db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(SCHEMA_VERSION, now());
 }
 
@@ -613,7 +651,16 @@ function applyWorkspaceObserved(db, event) {
     ).run(repositoryId, facts.commonDir, facts.remoteUrl || null, now());
   }
   if (cwd) {
-    worktreeId = hash(`${repositoryId || "unknown"}:${cwd}`);
+    // FOC-104: key worktree_id on cwd only (matches UNIQUE(path) semantics).
+    // Previously `hash(`${repositoryId || "unknown"}:${cwd}`)` coupled the id
+    // to repositoryId. When a path transitioned from "not a git repo"
+    // (repositoryId=null) to "is a git repo" (repositoryId=hash(commonDir))
+    // between sessions, the ON CONFLICT(path) DO UPDATE clause above
+    // preserved the OLD worktree_id while this code computed a NEW one — the
+    // next INSERT INTO workspace_observations then failed the FK on the new
+    // id, rolling back the entire applyEvents txn and silently dropping every
+    // usage.recorded event in the batch.
+    worktreeId = hash(cwd);
     db.prepare(
       `INSERT INTO worktrees (worktree_id, repository_id, path, git_dir, created_at) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(path) DO UPDATE SET repository_id=COALESCE(excluded.repository_id, worktrees.repository_id), git_dir=COALESCE(excluded.git_dir, worktrees.git_dir)`,
