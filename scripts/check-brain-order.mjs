@@ -26,7 +26,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -133,9 +133,9 @@ function findMarkerLines(content, tags) {
   const lines = content.split('\n');
   const found = new Map();
   for (const tag of tags) {
-    const prefix = `<${tag}>`;
+    const pattern = new RegExp(`^\\s*<${tag}>`);
     for (let i = 0; i < lines.length; i++) {
-      if (lines[i].startsWith(prefix)) {
+      if (pattern.test(lines[i])) {
         found.set(tag, i + 1);
         break;
       }
@@ -252,7 +252,7 @@ function main() {
 
   let selected;
   if (args.brain) {
-    if (!CANONICAL[args.brain]) {
+    if (!Object.hasOwn(CANONICAL, args.brain)) {
       console.error(`error: unknown brain '${args.brain}'. Known: ${BRAINS.join(', ')}`);
       process.exit(1);
     }
@@ -298,4 +298,6 @@ function main() {
   }
 }
 
-main();
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

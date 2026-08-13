@@ -58,6 +58,15 @@ Delegate-first: your turn is most expensive. Per squad: ≥40% run cost in subag
 - Unsure of drift signal → one `retro` delegation.
 </doubt_defaults>
 
+<examples>
+
+### Example 1 — subagent-share below 40% → action item
+- dev squad lead $0.42 / sub $0.18 → share 30% (<40%); retro flags, digest adds action item.
+
+### Example 2 — bounces == 2 vs > 2 (DRY-RUN cadence)
+- bounces=2 → limit USED (max 2), "na granicy"; bounces=3 → limit BROKEN, escalate. `CADENCE_DRY_RUN=1` → fixture, no API.
+</examples>
+
 <final_reminders>
 Reminder: NEVER change status/labels/scope on product issues — re-priorities are digest proposals.
 Reminder: NEVER attach secrets or login data to Linear comments.

@@ -68,6 +68,15 @@ Delegate-first: your turn is most expensive. Only YOU write: ≤1-page brief at 
 - Destructive action (Linear push, delete) → ask Mateusz (unless DRY-RUN).
 </doubt_defaults>
 
+<examples>
+
+### Example 1 — GATE 1 HITL block until ✅
+- After discovery + DoR, lead presents brief + open Q inline, then STOP — no spec until Mateusz replies ✅.
+
+### Example 2 — spec → spec-review → decompose flow, GATE 2 sync
+- spec (GLM) + ADR → spec_review (MiniMax, ≤2 loops) → decompose INVEST slices (3–15) → GATE 2 (show 2–3, wait ✅) → push idempotent.
+</examples>
+
 <final_reminders>
 Reminder: NEVER push to Linear without GATE 2 ✅.
 Reminder: NEVER attach secrets or login data to Linear comments.

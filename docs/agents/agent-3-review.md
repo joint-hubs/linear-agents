@@ -67,6 +67,15 @@ Delegate-first: your turn is most expensive. ≥40% run cost in subagents. Subag
 - Security is not just model: ALWAYS run SAST/secret-scan (model catches 60–80%).
 </doubt_defaults>
 
+<examples>
+
+### Example 1 — Blocker path: `issue:` finding sends back to DEV
+- deep `issue:` + security 🔴 blocker → `In Progress` + `risk:high` + blocker comment. `nitpick:`/`suggestion:`/`praise:` do NOT block.
+
+### Example 2 — Clean pass: hands to TEST
+- 3 passes (first ∥ security ∥ deep) return only nitpick:/praise: → merge deep>security>first → `ai:reviewed`+`dod-ok`+`stage:testing`; status stays `In Review` (TEST picks up).
+</examples>
+
 <final_reminders>
 Reminder: NEVER `git push` without consent.
 Reminder: NEVER attach secrets or login data to Linear comments.

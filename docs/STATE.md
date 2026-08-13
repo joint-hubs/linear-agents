@@ -45,7 +45,7 @@ językowego (GLM-5.2 / MiniMax / DeepSeek / Kimi), nie człowieka.
   | (this) | STATE | mark Fala D complete |
   Skipped (not agent runtime): gantt/telemetry/graph-first/model-role-fit/prd-docs-to-linear, dev-readiness.
 - **Decyzja shared ≥40% bloku:** **inline-verbatim** (zamknięte przy Fali A).
-- **Fala E (docs-sync + structural-order assertion) — FOC-79, 2026-08-12** — mirrore `docs/agents/agent-{0..4}.md`
+- **Fala E (docs-sync + structural-order assertion) — FOC-79, 2026-08-12** — mirrory `docs/agents/agent-{0..4}.md`
   sprowadzone do porządku kanonicznego v2 (precedence na top-level, `doubt_defaults` po instrukcjach, nowy
   `<final_reminders>`); `docs/prd/prd-testing.md` zyskał sekcję TEST dry-run (§4.5.7); runtime brains nietknięte
   (SoT = `agents/*/CLAUDE.md`). Nowy `scripts/check-brain-order.mjs` (zero-deps, dry-run safe) assertuje kolejność
@@ -59,7 +59,7 @@ językowego (GLM-5.2 / MiniMax / DeepSeek / Kimi), nie człowieka.
   | review | 190 | 190 | `84b7227` (FOC-76) |
   | test | 160 | 160 | `543ada1` (FOC-77) |
   | cadence | 188 | 188 | `ed2dccc` (FOC-78) |
-  structural-order assertion: `scripts/check-brain-order.mjs` green (PASS ×6); `node scripts/check.mjs` green;
+  structural-order assertion: `scripts/check-brain-order.mjs` PASS ×6; `node scripts/check.mjs` ma 2 pre-existing DRIFTs (spec*.md model routing, out of FOC-79 scope — see hand-off open q#2).
   docs sync PR: `docs/agents` + `docs/prd` + STATE.
 
 ### 7 zasad pisania promptów (Z1–Z7)

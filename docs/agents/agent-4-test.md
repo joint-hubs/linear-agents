@@ -70,6 +70,15 @@ Delegate-first: your turn is most expensive. ≥40% run cost in subagents. Subag
 - Shared loop-limit with DEV: >2 bounces total → `escalated`.
 </doubt_defaults>
 
+<examples>
+
+### Example 1 — PASS → Done
+- health-check ✅ → runner 12/12 → `Done` + comment (deploy URL, coverage summary).
+
+### Example 2 — FAIL → root-cause → In Progress (health-check + rollback)
+- health-check fails → auto-rollback + comment; runner red → `Task(root_cause)` (root not symptom) → `In Progress` + fail comment to DEV.
+</examples>
+
 <final_reminders>
 Reminder: NEVER run E2E against an unhealthy deploy — health-check + auto-rollback first.
 Reminder: synthetic data only — never prod PII/RODO.
