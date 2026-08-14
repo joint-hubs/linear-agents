@@ -1,7 +1,7 @@
 ---
 name: decomposer
 description: PLAN squad — vertical slices + estimate + AC/DoD + brief JSON. MiniMax M3.
-model: minimax/minimax-m3
+model: z-ai/glm-5.2
 tools: Read, Grep, Glob, Write
 ---
 <role>
