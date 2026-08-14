@@ -444,10 +444,85 @@ async function fetchLinearQueue(workspace) {
 
 // Write the wrapper to .state/ (gitignored) and return its path. One stable
 // name per (squad, taskId) — re-launching overwrites, no file accumulation.
-async function writeLaunchBat(squad, taskId, kickoff) {
+async function writeLaunchBat(squad, taskId, kickoff, targetRepo) {
   const wrapper = join(root, '.state', `launch-${squad}-${taskId}.bat`);
-  await writeFile(wrapper, buildLaunchBat(squad, taskId, kickoff, root), 'utf8');
+  await writeFile(wrapper, buildLaunchBat(squad, taskId, kickoff, root, targetRepo), 'utf8');
   return wrapper;
+}
+
+// ---------------------------------------------------------------------------
+// Project → repo resolution (artifact-leak fix)
+// A dashboard launch used to always cwd into linear-agents regardless of
+// which repo the task belongs to, so squad meta-artifacts (state, plans,
+// briefs) leaked into linear-agents instead of the target project. Resolve
+// the issue's Linear project → config/projects.json repo before spawning;
+// fall back to linear-agents (with a warning surfaced to the dashboard) when
+// the project isn't set, isn't mapped, or the Linear call fails/times out.
+// ---------------------------------------------------------------------------
+
+const ISSUE_PROJECT_QUERY = `
+  query($id: String!) {
+    issue(id: $id) {
+      id
+      identifier
+      project { id name }
+    }
+  }
+`;
+
+function loadProjectsConfig() {
+  try {
+    const raw = readFileSyncNode(join(root, 'config', 'projects.json'), 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.projects) ? parsed.projects : [];
+  } catch (err) {
+    console.error('[launch] config/projects.json not loaded —', err.message);
+    return [];
+  }
+}
+
+// taskId's workspace isn't derivable from the identifier alone (unlike
+// /api/linear/queue, which takes workspace as an explicit caller param) — try
+// jointhubs first (the common case), then pisi. A cross-workspace lookup just
+// returns issue:null (not an error), so this is one harmless extra call, not
+// a failure path.
+async function findIssueProject(taskId) {
+  for (const workspace of [undefined, 'pisi']) {
+    const apiKey = chooseApiKey(workspace);
+    if (!apiKey) continue;
+    try {
+      const timeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Linear API timeout (8s)')), 8000),
+      );
+      const data = await Promise.race([
+        graphql(ISSUE_PROJECT_QUERY, { id: taskId }, workspace),
+        timeout,
+      ]);
+      if (data?.issue) return data.issue.project?.name || null;
+    } catch {
+      // try the other workspace before giving up
+    }
+  }
+  return undefined; // not found in either workspace queried
+}
+
+// Never throws — a bad/missing mapping degrades to { repo: null, warning }
+// so a Linear hiccup can never block a launch.
+async function resolveTaskRepo(taskId) {
+  const projectName = await findIssueProject(taskId);
+  if (projectName === undefined) {
+    return { repo: null, warning: `could not resolve Linear project for ${taskId} — launching in linear-agents` };
+  }
+  if (!projectName) {
+    return { repo: null, warning: `issue ${taskId} has no Linear project set — launching in linear-agents` };
+  }
+  const entry = loadProjectsConfig().find(
+    (p) => (p.linearProject || '').toLowerCase() === projectName.toLowerCase(),
+  );
+  if (!entry?.repo) {
+    return { repo: null, warning: `no repo mapped for Linear project "${projectName}" — launching in linear-agents` };
+  }
+  return { repo: entry.repo, warning: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +581,8 @@ const server = createServer(async (req, res) => {
       }
       const { taskId, squad, target, dryRun } = v;
       const kickoff = kickoffPrompt(squad, taskId);
+      const { repo: targetRepo, warning: repoWarning } = await resolveTaskRepo(taskId);
+      const effectiveRepo = targetRepo || root;
       if (dryRun) {
         json(res, 200, {
           ok: true,
@@ -514,7 +591,9 @@ const server = createServer(async (req, res) => {
           squad,
           target,
           kickoffPrompt: kickoff,
-          launchBat: buildLaunchBat(squad, taskId, kickoff, root),
+          launchBat: buildLaunchBat(squad, taskId, kickoff, root, targetRepo),
+          targetRepo: effectiveRepo,
+          ...(repoWarning ? { warning: repoWarning } : {}),
         });
         log(method, path, 200);
         return;
@@ -527,8 +606,8 @@ const server = createServer(async (req, res) => {
         return;
       }
       try {
-        const launchBatPath = await writeLaunchBat(squad, taskId, kickoff);
-        spawnLauncher(launchBatPath, root);
+        const launchBatPath = await writeLaunchBat(squad, taskId, kickoff, targetRepo);
+        spawnLauncher(launchBatPath, effectiveRepo);
         json(res, 200, {
           ok: true,
           taskId,
@@ -537,6 +616,8 @@ const server = createServer(async (req, res) => {
           spawned: true,
           kickoffPrompt: kickoff,
           launchBat: launchBatPath,
+          targetRepo: effectiveRepo,
+          ...(repoWarning ? { warning: repoWarning } : {}),
         });
         log(method, path, 200);
       } catch (err) {
