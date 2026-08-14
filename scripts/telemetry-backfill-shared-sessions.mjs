@@ -169,9 +169,9 @@ async function processRun(db, { runId, shared }, { dry, json }) {
   const eventsAfter = countEvents(db, runId);
   const dqAfter = countDataQualityIssues(db, runId);
 
-  // Sanity: AC4 invariant — ingest must not open a data_quality_issues row for
-  // a missing transcript (it resolves them instead). A present transcript
-  // should never grow new DQ rows here; assert defensively.
+  // Sanity: AC4 invariant — this backfill should not create new data_quality_issues rows.
+  // We surface before/after counts in the report so any unexpected delta is
+  // visible in logs/--json output.
   const status = ingestResult.missing ? "skipped" : "ingested";
   const report = buildReport({
     runId, shared, status, transcriptPath,
