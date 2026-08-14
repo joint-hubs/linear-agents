@@ -21,6 +21,7 @@ import {
   recordTaskLink,
   recordToolFact,
   SCHEMA_VERSION,
+  MIGRATION_VERSIONS,
 } from "./telemetry-store.mjs";
 
 let passed = 0;
@@ -526,6 +527,58 @@ test("FOC-104 poison pill: not-a-repo → is-a-repo keeps worktree_id stable (no
   assert(wt.worktree_id === expectedWorktreeId, `worktree_id=${wt.worktree_id} expected hash(cwd)=${expectedWorktreeId}`);
   assert(wt.repository_id != null, "repository_id must be populated after day 2 git detection");
 });
+
+  test("FOC-104 backfillWorktreeIds upgrade: v3 worktree_id + referencing observation are rewritten and FK check stays clean", () => {
+  // Simulate a database that was last written by v3 code, where worktree_id
+  // was keyed on hash(`${repositoryId}:${cwd}`) instead of hash(path). We
+  // open a fresh db (which runs migrate and marks schema as v4), undo the
+  // schema_migrations marker so the backfill guard treats the db as pre-v4,
+  // inject v3-style rows directly, then reopen — triggering backfillWorktreeIds
+  // on real data — and verify both the worktrees PK and the FK reference in
+  // workspace_observations are rewritten and the FK check is clean.
+  const upgradeDbPath = join(temp, "telemetry-upgrade-test.sqlite");
+  const v3db = openTelemetryDb(upgradeDbPath);
+
+  const cwd = join(temp, "foc104-upgrade", "project").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const repositoryId = createHash("sha256").update(`${cwd}/.git`).digest("hex");
+  const oldWorktreeId = createHash("sha256").update(`${repositoryId}:${cwd}`).digest("hex");
+  const newWorktreeId = createHash("sha256").update(cwd).digest("hex");
+
+  // Seed v3-style rows: worktrees row with old ID and a workspace_observation
+  // that references it. Both use the same old ID so FK is satisfied at seed time.
+  v3db.exec("PRAGMA foreign_keys = OFF");
+  v3db.prepare(
+    "INSERT INTO runs (run_id, updated_at) VALUES (?, ?)",
+  ).run("run-upgrade-v3", "2026-07-01T00:00:00.000Z");
+  v3db.prepare(
+    "INSERT INTO repositories (repository_id, common_dir, created_at) VALUES (?, ?, ?)",
+  ).run(repositoryId, `${cwd}/.git`, "2026-07-01T00:00:00.000Z");
+  v3db.prepare(
+    "INSERT INTO worktrees (worktree_id, repository_id, path, git_dir, created_at) VALUES (?, ?, ?, ?, ?)",
+  ).run(oldWorktreeId, repositoryId, cwd, `${cwd}/.git`, "2026-07-01T00:00:00.000Z");
+  v3db.prepare(
+    "INSERT INTO workspace_observations (run_id, observed_at, cwd, repository_id, worktree_id, ref_type, ref_name, head_sha, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run("run-upgrade-v3", "2026-07-01T00:00:00.000Z", cwd, repositoryId, oldWorktreeId, "branch", "main", "abc123", "runtime");
+  v3db.exec("PRAGMA foreign_keys = ON");
+
+  // Remove the schema_migrations marker so backfillWorktreeIds treats this
+  // database as pre-v4 and actually rewrites the rows.
+  v3db.prepare("DELETE FROM schema_migrations WHERE version=?").run(MIGRATION_VERSIONS.worktreeRekey);
+  v3db.close();
+
+  // Reopen: migrate() runs, backfillWorktreeIds fires and rewrites old IDs.
+  const upgraded = openTelemetryDb(upgradeDbPath);
+
+  const wt = upgraded.prepare("SELECT worktree_id FROM worktrees WHERE path=?").get(cwd);
+  assert(wt != null, "worktrees row missing after upgrade");
+  assert(wt.worktree_id === newWorktreeId, `worktrees.worktree_id=${wt.worktree_id} expected hash(path)=${newWorktreeId}`);
+
+  const obs = upgraded.prepare("SELECT worktree_id FROM workspace_observations WHERE run_id=?").get("run-upgrade-v3");
+  assert(obs != null, "workspace_observations row missing after upgrade");
+  assert(obs.worktree_id === newWorktreeId, `workspace_observations.worktree_id=${obs.worktree_id} expected ${newWorktreeId}`);
+
+  const fkViolations = upgraded.prepare("PRAGMA foreign_key_check").all();
+  assert(fkViolations.length === 0, `foreign_key_check found violations: ${JSON.stringify(fkViolations)}`);
 
   upgraded.close();
 });
