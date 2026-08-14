@@ -409,8 +409,7 @@ function backfillWorktreeIds(db) {
 //
 // Tables rebuilt (in order — cost_facts follows usage_facts so the FK target
 // exists when cost_facts_new is created): usage_facts, cost_facts, events,
-// transcript_sources. tool_facts is JOI-262 scope and is intentionally not
-// touched here.
+// transcript_sources, tool_facts. tool_facts is last (no FK deps beyond runs).
 //
 // Before the rebuild, a one-time VACUUM INTO snapshot is taken so the pre-v5
 // state can be restored if the migration is reverted. The snapshot is skipped
@@ -530,6 +529,38 @@ function migrateRunScopedUsage(db, path) {
         modified_at, parse_status, last_error, updated_at FROM transcript_sources;
       DROP TABLE transcript_sources;
       ALTER TABLE transcript_sources_new RENAME TO transcript_sources;
+    `);
+
+    // 5. tool_facts — PK(run_id, tool_fact_id). tool_fact_id stays
+    // sha1(source_path:source_offset:tool_index) (ADR-0008 alt.4); it becomes a
+    // derived column, the composite key scopes rows per run. No FK to tool_facts
+    // from any other table, so rebuild has no cascade order constraint beyond runs.
+    db.exec(`
+      CREATE TABLE tool_facts_new (
+        tool_fact_id   TEXT NOT NULL,
+        run_id         TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+        agent_key      TEXT NOT NULL,
+        model          TEXT,
+        observed_at    TEXT,
+        tool_name_raw  TEXT NOT NULL,
+        tool_name_canon TEXT,
+        tool_input     TEXT,
+        tool_has_error INTEGER NOT NULL DEFAULT 0,
+        turn_index    INTEGER NOT NULL,
+        source_path   TEXT NOT NULL,
+        source_offset INTEGER NOT NULL,
+        created_at    TEXT NOT NULL,
+        PRIMARY KEY (run_id, tool_fact_id)
+      );
+      INSERT INTO tool_facts_new (tool_fact_id, run_id, agent_key, model, observed_at,
+        tool_name_raw, tool_name_canon, tool_input, tool_has_error, turn_index,
+        source_path, source_offset, created_at)
+      SELECT tool_fact_id, run_id, agent_key, model, observed_at, tool_name_raw, tool_name_canon, tool_input, tool_has_error, turn_index,
+        source_path, source_offset, created_at FROM tool_facts;
+      DROP TABLE tool_facts;
+      ALTER TABLE tool_facts_new RENAME TO tool_facts;
+      CREATE INDEX IF NOT EXISTS idx_tool_facts_run ON tool_facts(run_id, agent_key);
+      CREATE INDEX IF NOT EXISTS idx_tool_facts_canon ON tool_facts(tool_name_canon);
     `);
 
     db.exec("COMMIT");
