@@ -1,0 +1,60 @@
+# ADR-0008: Run-scoped usage identity — composite `(run_id, usage_id)` primary key and `run_id` in all source-location dedup keys
+
+**Status:** Proposed
+
+**Date:** 2026-08-14
+
+## Context
+
+Linear JOI-259: `usage_facts.usage_id` is computed as `hash(source_path:source_offset)` with no run component, and is the table's sole primary key. When multiple runs share one `.jsonl` transcript file (observed: 7 dev runs from 2026-07-27 in session `aae50511-…`), only the first run's usage facts are inserted; every later run hits `INSERT OR IGNORE` on the PK collision and silently loses all token/cost data. The dashboard shows `$0.00` / 0 tokens for those runs.
+
+Discovery (`planning/briefs/discovery-joi-259.md`) found the collision exists at **three layers**, not one — the Linear issue's proposed fix only addresses the third:
+
+- **(a) Ingest skip** — `ingestTranscript` (`scripts/telemetry-ingest.mjs`) skips an entire file when `transcript_sources.parse_status='parsed'` and size matches. `transcript_sources` is keyed by `source_path` alone (one row per file), so run B never even generates events for a file run A already parsed.
+- **(b) Event dedup** — `events.UNIQUE(source_kind, source_path, source_offset, event_type)` plus the `eventAlreadyApplied` pre-check (`scripts/telemetry-store.mjs`) drops run B's `usage.recorded` event before dispatch, because its key is identical to run A's.
+- **(c) Fact PK** — `usage_facts` PK `usage_id` + `UNIQUE(source_path, source_offset)`, and `cost_facts` with `REFERENCES usage_facts(usage_id) ON DELETE CASCADE`.
+
+The shared root cause: a transcript **file** is not a run boundary, but every dedup key in the pipeline treats source location as globally unique. Additionally, `cost_facts` joins on `usage_id` alone would cross-join costs between runs sharing a file (same `usage_id` hash) once facts become per-run, so the FK and every join site must follow the new key shape.
+
+The same keying flaw exists in `tool_facts`: `tool_fact_id = sha1(source_path:source_offset:tool_index)` has no run component, so a second run's tool facts on a shared file are dropped as `INSERT OR IGNORE` duplicates. It is folded into this fix's scope (post-GATE-1 decision by Mateusz, 2026-08-14) — same bug class, same fix shape. (`delegation_links` is unaffected: its `delegation_id` already embeds `parent_run_id`.)
+
+Constraints from GATE 1 (locked by Mateusz): fix all three layers with one consistent principle; `cost_facts` rebuild approved; schema version must be **v5** (v4 is consumed by FOC-104's `backfillWorktreeIds`); general backfill (not hardcoded run list); continue on branch `foc-104-telemetry-worktree-id`.
+
+## Decision
+
+**One principle: `run_id` becomes part of every key that today identifies data by source location alone.** Facts and events are attributed to a run; a shared file must not collapse attributions.
+
+1. **`transcript_sources`** — identity changes from `source_path` to `PRIMARY KEY (source_path, run_id)`. Each run gets its own parse-status row for a shared file; `run_id` is `NOT NULL DEFAULT ''` (empty-string sentinel for legacy unattributed rows) because SQLite treats NULLs in key columns as distinct, which would make upserts non-deterministic. The ingest skip check becomes `WHERE source_path=? AND run_id=?`. `transcript.progress` dedup needs no special-casing — re-parsing run A's row never touches run B's row.
+2. **`events`** — `UNIQUE(source_kind, source_path, source_offset, event_type)` becomes `UNIQUE(run_id, source_kind, source_path, source_offset, event_type)`, and `eventAlreadyApplied` gains a NULL-safe `run_id IS ?` predicate. One physical line now yields one event per run (facts are run-scoped, so events must be too), while re-ingesting the *same* run stays idempotent. Both changes land in one commit — a predicate/constraint mismatch would surface as UNIQUE violations rolling back whole `applyEvents` batches.
+3. **`usage_facts`** — PK becomes composite `PRIMARY KEY (run_id, usage_id)` with `UNIQUE (run_id, source_path, source_offset)` retained as defense-in-depth. `usage_id` remains a derived column (`hash(source_path:source_offset)`), stable and reproducible from the source location alone, but no longer globally unique.
+4. **`cost_facts`** — rebuilt with `PRIMARY KEY (run_id, usage_id, price_set_id)` and `FOREIGN KEY (run_id, usage_id) REFERENCES usage_facts(run_id, usage_id) ON DELETE CASCADE`. Every join site gains `AND c.run_id=u.run_id`: `makeRunProjection` (×3), `aggregateUsageByTask`, `queryTrace`, `queryPatterns` in `telemetry-store.mjs`, plus `delegationsByTask` and `loadUsageTurns` in `scripts/delegation-outcomes.mjs`, plus `load_usage_facts` (~L156) and `load_task_links` (~L554) in `notebooks/agent_intelligence.py`.
+5. **Migration (schema v5)** — SQLite cannot alter PK/UNIQUE/FK in place, so all five tables (`usage_facts`, `cost_facts`, `events`, `transcript_sources`, `tool_facts`) are rebuilt (create-new → copy → drop → rename) inside one transaction with `PRAGMA foreign_keys = OFF`, following the existing `backfillWorktreeIds` pattern. Existing data copies losslessly (current rows are single-run per location; `cost_facts.run_id` is derivable 1:1 from `usage_facts`). The step is guarded by a per-step `schema_migrations` marker (per-step version constants replace the shared `SCHEMA_VERSION` guard, so bumping the constant no longer re-arms older steps) and takes a one-time `VACUUM INTO` file snapshot before rebuilding. The DB path must be threaded through the call chain for this — `openTelemetryDb(path)` → `migrate(db, path)` → `migrateRunScopedUsage(db, path)` — with the snapshot skipped for `:memory:` databases and when the backup file already exists (a later open must not overwrite the pre-v5 snapshot). Deployment runs under a single-writer sequence: stop the telemetry server and any scheduled ingest/backfill before the first `openTelemetryDb` that triggers the rebuild — WAL alone does not make DROP/RENAME under `PRAGMA foreign_keys=OFF` safe against a concurrent writer.
+6. **Backfill** — `scripts/telemetry-backfill-shared-sessions.mjs` (idempotent, `--dry`/`--run`/`--json`): asserts the v5 marker, loads candidate runs via `queryRuns(db)` (never raw SQL — `transcriptForSession` reads the camelCase projection shape, raw `runs` rows are snake_case and would silently skip every candidate), resolves each run's transcript on disk, re-ingests via the existing `ingestTranscript`, and reports per-run before/after fact counts. Selectivity falls out of the new keying — healthy runs hit their `(path, run_id)` parsed-row skip and produce zero new events; only runs matching the issue's repro condition (facts missing for a run whose transcript exists) actually change. Re-ingest also re-extracts `tool_facts`/`delegation_links` for recovered runs (existing `ingestTranscript` behavior), so their tool usage is restored without a separate backfill.
+7. **`tool_facts`** — same bug class, same fix shape, folded into v5 as its own subtask of JOI-259 (post-GATE-1 decision by Mateusz; not a separate Linear issue): PK becomes composite `PRIMARY KEY (run_id, tool_fact_id)`; `tool_fact_id` remains `sha1(source_path:source_offset:tool_index)` — derived from source location alone, unchanged. `recordToolFact`'s `INSERT OR IGNORE` needs no code change: dedup follows the new PK, and `run_id` is already bound in the INSERT. No other table references `tool_facts`, so the rebuild carries no FK cascade considerations.
+
+## Consequences
+
+- **Positive:**
+  - Every run sharing a transcript file gets complete usage/cost facts; dashboard totals become correct for the affected class of runs (and any future shared sessions).
+  - One uniform keying principle across `transcript_sources` / `events` / `usage_facts` / `cost_facts` / `tool_facts` — no per-table special cases; the bug class is closed, not patched at one layer.
+  - `usage_id` stays derivable from source location alone, keeping event payloads and any external references stable.
+  - Re-ingest of the same run against the same file remains idempotent at every layer (per-run skip row, per-run event dedup, per-run fact PK).
+  - Backfill is effect-selective and safely re-runnable; no hardcoded run list.
+  - Affected runs additionally gain their own `workspace.observed` / `transcript.progress` events, repairing their dashboard timelines as a side effect.
+- **Negative:**
+  - **Join complexity**: every `cost_facts` join must carry `c.run_id=u.run_id` forever; forgetting it in a future query cross-joins costs between runs sharing a file and double-counts. Mitigated only by code review — SQLite has no way to enforce it.
+  - **One-way migration**: once shared-session facts exist, reverting to a `usage_id`-only PK is lossy (rows would have to be deleted). v4 code against a v5 database is broken (orphaned `ON CONFLICT(source_path)`, NOT NULL `cost_facts.run_id`), so rollback = restore the pre-v5 `VACUUM INTO` snapshot + revert code. Acceptable because the DB is a rebuildable projection — transcripts remain the source of truth.
+  - Table rebuilds copy the whole `events` table (the largest one) once; on the single-host local deployment this is a one-off, sub-minute operation.
+  - `transcript_sources` and `events` grow by one row per (run, shared file) — bounded by the number of runs sharing a session, which is rare.
+- **Risks:**
+  - *Missed join site*: a query joining `cost_facts` on `usage_id` alone silently double-counts after v5. Mitigation: the call-site inventory in the spec (`planning/briefs/spec-joi-259.md` §3) was built by grepping, not from the issue text, and includes two sites in `scripts/delegation-outcomes.mjs` and two in `notebooks/agent_intelligence.py` the issue did not list.
+  - *Concurrent writer during rebuild*: WAL does not protect a DROP/RENAME schema rebuild from a second process writing mid-migration. Mitigation: the rollout sequence in spec §6 stops the telemetry server and all scheduled ingest before the single controlled `openTelemetryDb` that applies v5.
+  - *Sentinel `''` rows* in `transcript_sources` for legacy unattributed paths remain as a harmless vestige; new ingests key on real run ids.
+
+## Alternatives Considered
+
+1. **Fix only the `usage_facts` layer (the Linear issue's original proposal)** — Rejected: layers (a) and (b) still drop run B's data before it ever reaches `usage_facts`. The issue's claim that "duplicate detection stays on `events.UNIQUE(...)`, which is already correct" is false for shared sessions.
+2. **Per-run copy of the transcript file** (copy the `.jsonl` so each run parses its own path) — Rejected: duplicates large files on disk, breaks the session↔transcript mapping, leaves the event-dedup semantics wrong in principle, and solves with filesystem clutter what the schema should express.
+3. **Separate run→usage_id mapping table** (keep `usage_facts` PK `usage_id`, add a join table) — Rejected: `usage_facts` rows are inherently per-run data (`run_id NOT NULL` already); a fact row cannot be shared between runs without misattributing it. The mapping table would still need one fact row per run, so it adds a table to model what a composite PK states directly.
+4. **Fold `run_id` into the hash** (`usage_id = hash(run_id:path:offset)`, keep single-column PK) — Viable, but rejected: it changes `usage_id` semantics (no longer derivable from source location alone), silently breaks the `payload.usageId` override path and any stored references to old ids, and still requires the `cost_facts` FK rebuild. A composite PK makes run-scoping explicit and self-documenting in the schema and matches the principle applied uniformly to `events` and `transcript_sources`. The same reasoning applies to `tool_fact_id` (Decision 7): the hash stays, the PK gains `run_id`.
+5. **Drop the `events` UNIQUE constraint instead of extending it** (rely on `eventAlreadyApplied` alone) — Rejected: the constraint is defense-in-depth against dedup-check races (the concurrency contract test exists for a reason); extending it with `run_id` preserves that guarantee under the new semantics.

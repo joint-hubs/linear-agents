@@ -1,7 +1,7 @@
 ---
 name: worker
 description: PLAN squad — cheap helper: inbox summaries, brief drafts, research, transforms. MiniMax M3.
-model: minimax/minimax-m3
+model: z-ai/glm-5.2
 tools: Read, Grep, Glob, Edit, Write
 ---
 <role>

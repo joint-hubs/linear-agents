@@ -23,10 +23,18 @@
       "deploy": { "type": "gcp-vm", "vm": "TODO-vm-name", "ssh": "TODO" }
     },
     {
-      "linearProject": "Fenix",
+      "linearProject": "FENIX",
       "workspace": "joi",
-      "repo": "C:/Users/mateu/Documents/GitHub/fenix",
-      "deploy": { "type": "gcp-vm", "vm": "TODO-vm-name", "ssh": "TODO" }
+      "repo": "C:/Users/mateu/Documents/GitHub/linear-agents",
+      "deploy": { "type": "none", "note": "pilot test project — no deploy target" },
+      "note": "Linear project used by team FOC (e.g. FOC-104) — confirmed to track this repo's own tooling work, not the C:/.../fenix directory (unclear/unconfirmed purpose, deliberately unmapped now to avoid misrouting real launches)."
+    },
+    {
+      "linearProject": "Fenix v2",
+      "workspace": "joi",
+      "repo": "C:/Users/mateu/Documents/GitHub/linear-agents",
+      "deploy": { "type": "none", "note": "pilot test project — no deploy target" },
+      "note": "Linear project used by team JOI (e.g. JOI-259) — same as FENIX above, tracks this repo."
     },
     {
       "linearProject": "PISI",

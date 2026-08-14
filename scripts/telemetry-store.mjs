@@ -31,7 +31,15 @@ try {
   DatabaseSync = null;
 }
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
+
+// Per-step migration version markers. Each one-shot migration step is guarded
+// by its own constant rather than the shared SCHEMA_VERSION, so bumping the
+// shared constant no longer re-arms older steps that have already run.
+export const MIGRATION_VERSIONS = {
+  worktreeRekey: 4,
+  runScopedUsage: 5,
+};
 
 export function sqliteAvailable() {
   return DatabaseSync != null;
@@ -103,7 +111,7 @@ export function openTelemetryDb(path = telemetryDbPath()) {
   if (path !== ":memory:") ensureParent(path);
   const db = new DatabaseSync(path);
   db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
-  migrate(db);
+  migrate(db, path);
   return db;
 }
 
@@ -363,7 +371,7 @@ function ensureOneActivePrimaryLinkIndex(db) {
 // workspace_observations stay valid after the formula change. Idempotent and
 // guarded by the SCHEMA_VERSION marker so it runs exactly once per database.
 function backfillWorktreeIds(db) {
-  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(SCHEMA_VERSION)) return 0;
+  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(MIGRATION_VERSIONS.worktreeRekey)) return 0;
   const rows = db.prepare("SELECT worktree_id, path FROM worktrees").all();
   if (rows.length === 0) return 0;
   // workspace_observations.worktree_id → worktrees.worktree_id has no
@@ -393,19 +401,171 @@ function backfillWorktreeIds(db) {
   return updated;
 }
 
+// JOI-259 / ADR-0008: rebuild the four source-location tables so `run_id`
+// becomes part of every key that today identifies data by source location
+// alone. SQLite cannot alter PK/UNIQUE/FK in place, so each table is rebuilt
+// (create-new → copy → drop → rename) inside one transaction with
+// PRAGMA foreign_keys=OFF, mirroring the backfillWorktreeIds pattern.
+//
+// Tables rebuilt (in order — cost_facts follows usage_facts so the FK target
+// exists when cost_facts_new is created): usage_facts, cost_facts, events,
+// transcript_sources. tool_facts is JOI-262 scope and is intentionally not
+// touched here.
+//
+// Before the rebuild, a one-time VACUUM INTO snapshot is taken so the pre-v5
+// state can be restored if the migration is reverted. The snapshot is skipped
+// for :memory: databases and when the backup file already exists (a later open
+// must not overwrite the pre-v5 snapshot).
+function migrateRunScopedUsage(db, path) {
+  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(MIGRATION_VERSIONS.runScopedUsage)) return;
+
+  // VACUUM cannot run inside a transaction and cannot run with foreign_keys
+  // off mid-txn; take the snapshot BEFORE entering the rebuild txn.
+  if (path && path !== ":memory:") {
+    const backupPath = `${path}.pre-v5-backup.sqlite`;
+    if (!existsSync(backupPath)) {
+      ensureParent(backupPath);
+      const escaped = backupPath.replaceAll("'", "''");
+      db.exec(`VACUUM INTO '${escaped}'`);
+    }
+  }
+
+  // PRAGMA foreign_keys must be set outside a transaction. The DROP/RENAME
+  // sequence below would otherwise fail the FK constraint on the intermediate
+  // state (cost_facts_new references usage_facts before cost_facts is dropped).
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN");
+    // 1. usage_facts — PK(run_id, usage_id), UNIQUE(run_id, source_path, source_offset)
+    db.exec(`
+      CREATE TABLE usage_facts_new (
+        usage_id TEXT NOT NULL,
+        run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+        session_id TEXT,
+        agent_key TEXT NOT NULL,
+        model TEXT,
+        observed_at TEXT,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        cache_read_tokens INTEGER NOT NULL,
+        cache_creation_tokens INTEGER NOT NULL,
+        source_path TEXT NOT NULL,
+        source_offset INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, usage_id),
+        UNIQUE (run_id, source_path, source_offset)
+      );
+      INSERT INTO usage_facts_new (usage_id, run_id, session_id, agent_key, model, observed_at,
+        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+        source_path, source_offset, created_at)
+      SELECT usage_id, run_id, session_id, agent_key, model, observed_at,
+        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+        source_path, source_offset, created_at FROM usage_facts;
+      DROP TABLE usage_facts;
+      ALTER TABLE usage_facts_new RENAME TO usage_facts;
+      CREATE INDEX IF NOT EXISTS idx_usage_facts_run ON usage_facts(run_id, observed_at);
+    `);
+
+    // 2. cost_facts — PK(run_id, usage_id, price_set_id), FK(run_id, usage_id) REFERENCES usage_facts ON DELETE CASCADE.
+    // run_id is derivable 1:1 from usage_facts pre-v5 (usage_id was globally unique), so JOIN to copy it.
+    db.exec(`
+      CREATE TABLE cost_facts_new (
+        run_id TEXT NOT NULL,
+        usage_id TEXT NOT NULL,
+        price_set_id TEXT REFERENCES price_sets(price_set_id),
+        cost_usd REAL,
+        PRIMARY KEY (run_id, usage_id, price_set_id),
+        FOREIGN KEY (run_id, usage_id) REFERENCES usage_facts(run_id, usage_id) ON DELETE CASCADE
+      );
+      INSERT INTO cost_facts_new (run_id, usage_id, price_set_id, cost_usd)
+      SELECT u.run_id, c.usage_id, c.price_set_id, c.cost_usd
+      FROM cost_facts c JOIN usage_facts u ON u.usage_id = c.usage_id;
+      DROP TABLE cost_facts;
+      ALTER TABLE cost_facts_new RENAME TO cost_facts;
+    `);
+
+    // 3. events — UNIQUE(run_id, source_kind, source_path, source_offset, event_type).
+    // events.run_id already exists as a nullable column; rows with NULL run_id
+    // copy unchanged (SQLite NULLs-in-UNIQUE are distinct, so no collision).
+    db.exec(`
+      CREATE TABLE events_new (
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        run_id TEXT,
+        observed_at TEXT NOT NULL,
+        host_id TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_path TEXT,
+        source_offset INTEGER,
+        payload_json TEXT NOT NULL,
+        ingested_at TEXT NOT NULL,
+        UNIQUE (run_id, source_kind, source_path, source_offset, event_type)
+      );
+      INSERT INTO events_new (event_id, event_type, run_id, observed_at, host_id, source_kind,
+        source_path, source_offset, payload_json, ingested_at)
+      SELECT event_id, event_type, run_id, observed_at, host_id, source_kind,
+        source_path, source_offset, payload_json, ingested_at FROM events;
+      DROP TABLE events;
+      ALTER TABLE events_new RENAME TO events;
+    `);
+
+    // 4. transcript_sources — PK(source_path, run_id NOT NULL DEFAULT '').
+    // Legacy unattributed rows get the sentinel empty-string run_id via COALESCE.
+    db.exec(`
+      CREATE TABLE transcript_sources_new (
+        source_path TEXT NOT NULL,
+        session_id TEXT,
+        run_id TEXT NOT NULL DEFAULT '',
+        byte_offset INTEGER NOT NULL DEFAULT 0,
+        file_size INTEGER NOT NULL DEFAULT 0,
+        modified_at TEXT,
+        parse_status TEXT NOT NULL DEFAULT 'pending',
+        last_error TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (source_path, run_id)
+      );
+      INSERT INTO transcript_sources_new (source_path, session_id, run_id, byte_offset, file_size,
+        modified_at, parse_status, last_error, updated_at)
+      SELECT source_path, session_id, COALESCE(run_id, ''), byte_offset, file_size,
+        modified_at, parse_status, last_error, updated_at FROM transcript_sources;
+      DROP TABLE transcript_sources;
+      ALTER TABLE transcript_sources_new RENAME TO transcript_sources;
+    `);
+
+    db.exec("COMMIT");
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+
+  db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)")
+    .run(MIGRATION_VERSIONS.runScopedUsage, now());
+}
+
 // Order matters: base schema before column adds (ALTER needs the table to
 // exist); columns before the price-set backfill (it writes price_set_id);
 // superseded-links cleanup before the unique index (the index would reject
 // the very rows that cleanup fixes); worktree_id rekey before the schema
-// marker so the one-shot guard fires correctly.
-export function migrate(db) {
+// marker so the one-shot guard fires correctly; runScopedUsage rebuild after
+// the worktree rekey (it copies cost_facts.run_id from usage_facts, which
+// must already be in its post-FOC-104 shape).
+export function migrate(db, path) {
   createBaseSchema(db);
   addRunColumns(db);
   backfillPriceSetId(db);
   closeSupersededPrimaryLinks(db);
   ensureOneActivePrimaryLinkIndex(db);
   backfillWorktreeIds(db);
-  db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(SCHEMA_VERSION, now());
+  migrateRunScopedUsage(db, path);
+  // Record every migration marker. Each step guards itself above; this loop
+  // just persists the paper trail. INSERT OR IGNORE keeps it idempotent across
+  // re-opens.
+  const stamp = now();
+  for (const v of Object.values(MIGRATION_VERSIONS)) {
+    db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(v, stamp);
+  }
 }
 
 export function makeEvent(eventType, payload, options = {}) {
@@ -529,9 +689,38 @@ function eventAlreadyApplied(db, event) {
   if (db.prepare("SELECT 1 FROM events WHERE event_id = ?").get(event.eventId)) return true;
   const source = event.source || {};
   if (source.path && Number.isInteger(source.offset)) {
+    // run_id must lead, and must use IS rather than = so NULL matches NULL.
+    // The v5 rebuild (JOI-260) re-keyed this index to
+    // UNIQUE(run_id, source_kind, source_path, source_offset, event_type).
+    // Querying without run_id leaves the leading column unconstrained, so
+    // SQLite degrades from SEARCH to a full COVERING INDEX SCAN — measured at
+    // 849 ms per lookup against 5.86M rows on 2026-08-14, which is ~12 h for a
+    // single ingest cycle over 53k usage events. Matching the index also makes
+    // the check semantically right: after v5 the uniqueness of a source triple
+    // is scoped to the run, not global.
     return Boolean(db.prepare(
-      "SELECT 1 FROM events WHERE event_type = ? AND source_kind = ? AND source_path = ? AND source_offset = ?",
-    ).get(event.eventType, source.kind || "runtime", source.path, source.offset));
+      `SELECT 1 FROM events WHERE run_id IS ? AND source_kind = ? AND source_path = ?
+         AND source_offset = ? AND event_type = ?`,
+    ).get(event.runId ?? null, source.kind || "runtime", source.path, source.offset, event.eventType));
+  }
+  // quality.reported carries no source path/offset, so the generic dedup above
+  // never fires and the UNIQUE(source_kind, source_path, source_offset,
+  // event_type) index cannot help either — SQLite treats all-NULL keys as
+  // distinct. Left ungated, a caller on a timer appends a fresh row per tick
+  // forever (observed 2026-08-14: 5 791 702 rows, 98.9% of the events table,
+  // ~195k/hour, against 276 rows in the projection they all collapse into).
+  //
+  // The identity of a quality report is (run, issue type) — exactly the
+  // predicate raiseIssue() dedups on. An event that cannot change the
+  // projection is a duplicate. Re-raising after resolveQualityIssue() still
+  // works: with no open row the guard passes and a new event is recorded.
+  if (event.eventType === "quality.reported") {
+    const issueType = event.payload?.issueType;
+    if (!issueType) return false; // invalid; let applyQualityReported reject it
+    const runId = event.runId || event.payload?.runId || null;
+    return Boolean(db.prepare(
+      "SELECT 1 FROM data_quality_issues WHERE run_id IS ? AND issue_type = ? AND resolved_at IS NULL",
+    ).get(runId, issueType));
   }
   return false;
 }
@@ -814,6 +1003,16 @@ function calculateCost(usage, model, prices) {
   return Number.isFinite(cost) ? cost : null;
 }
 
+// True when this run already has an unresolved issue of this type. Callers that
+// re-check the same condition on a timer use it to skip reportDataQuality()
+// entirely: the store deduplicates the event anyway (see eventAlreadyApplied),
+// but skipping here avoids a spool write and a database open per tick per run.
+export function hasOpenQualityIssue(db, runId, issueType) {
+  return Boolean(db.prepare(
+    "SELECT 1 FROM data_quality_issues WHERE run_id IS ? AND issue_type = ? AND resolved_at IS NULL",
+  ).get(runId ?? null, issueType));
+}
+
 function raiseIssue(db, runId, issueType, severity, details) {
   const existing = db.prepare(
     "SELECT 1 FROM data_quality_issues WHERE run_id IS ? AND issue_type=? AND resolved_at IS NULL",
@@ -823,6 +1022,18 @@ function raiseIssue(db, runId, issueType, severity, details) {
     `INSERT INTO data_quality_issues (issue_id, run_id, issue_type, severity, details_json, opened_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(randomUUID(), runId, issueType, severity, safeJson(details), now());
+}
+
+// Close any open issue of this type for the given run. Called by ingest paths
+// when a previously-missing artifact (e.g. transcript) becomes available, so
+// the dashboard stops showing the issue as ongoing. Idempotent — no-op if
+// the issue was never raised or is already resolved.
+export function resolveQualityIssue(db, runId, issueType, options = {}) {
+  const result = db.prepare(
+    `UPDATE data_quality_issues SET resolved_at = ?
+       WHERE run_id IS ? AND issue_type = ? AND resolved_at IS NULL`,
+  ).run(options.resolvedAt || now(), runId, issueType);
+  return { closed: result.changes };
 }
 
 function applyUsageRecorded(db, event) {
@@ -850,26 +1061,29 @@ function applyUsageRecorded(db, event) {
   }
   const cost = calculateCost(payload, payload.model, snapshot.prices);
   if (cost == null && !isSyntheticModel(payload.model)) {
-    raiseIssue(db, runId, "pricing_missing", "warning", { model: payload.model, usageId });
+    raiseIssue(db, runId, "pricing_missing", "warning", { model: payload.model, usageId, runId: event.runId ?? null });
   }
-  db.prepare("INSERT OR REPLACE INTO cost_facts (usage_id, price_set_id, cost_usd) VALUES (?, ?, ?)")
-    .run(usageId, snapshot.id, cost);
+  db.prepare("INSERT OR REPLACE INTO cost_facts (run_id, usage_id, price_set_id, cost_usd) VALUES (?, ?, ?, ?)")
+    .run(runId, usageId, snapshot.id, cost);
   return { usageId, costUSD: cost };
 }
 
 function applyTranscriptProgress(db, event) {
   const payload = event.payload;
   if (!event.source?.path) throw new Error("transcript.progress requires source path");
+  // JOI-259: transcript_sources PK is now (source_path, run_id). run_id is
+  // NOT NULL DEFAULT '' — unattributed events use the sentinel '' so the
+  // upsert matches the legacy row keyed by (path, '').
+  const runId = event.runId || payload.runId || "";
   db.prepare(
     `INSERT INTO transcript_sources (source_path, session_id, run_id, byte_offset, file_size, modified_at, parse_status, last_error, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(source_path) DO UPDATE SET session_id=COALESCE(excluded.session_id, transcript_sources.session_id),
-       run_id=COALESCE(excluded.run_id, transcript_sources.run_id),
+     ON CONFLICT(source_path, run_id) DO UPDATE SET session_id=COALESCE(excluded.session_id, transcript_sources.session_id),
        byte_offset=MAX(excluded.byte_offset, transcript_sources.byte_offset),
        file_size=MAX(excluded.file_size, transcript_sources.file_size),
        modified_at=CASE WHEN excluded.modified_at > transcript_sources.modified_at THEN excluded.modified_at ELSE transcript_sources.modified_at END,
        parse_status=excluded.parse_status, last_error=excluded.last_error, updated_at=excluded.updated_at`,
-  ).run(event.source.path, payload.sessionId || null, event.runId || payload.runId || null, payload.byteOffset || 0,
+  ).run(event.source.path, payload.sessionId || null, runId, payload.byteOffset || 0,
     payload.fileSize || 0, payload.modifiedAt || null, payload.parseStatus || "parsed", payload.lastError || null, now());
   return { sourcePath: event.source.path };
 }
@@ -1048,12 +1262,23 @@ function makeRunProjection(db, row, options = {}) {
   const taskLink = db.prepare(
     `SELECT source, confidence FROM run_task_links WHERE run_id=? AND task_id=? ORDER BY valid_from DESC LIMIT 1`,
   ).get(row.run_id, task);
+  // Every cost_facts join below must lead with run_id. The v5 rebuild
+  // (JOI-260) re-keyed the table to PRIMARY KEY (run_id, usage_id,
+  // price_set_id); joining on usage_id alone leaves the leading column
+  // unconstrained, so SQLite cannot seek and falls back to scanning the whole
+  // table once per usage row. Measured 2026-08-14 on 53k usage / 53k cost rows:
+  // 141 832 ms for five runs, against 61 ms with run_id in the join — same
+  // totals, 2 325x apart. queryRuns() runs three of these per run, which is
+  // what pinned telemetry-server at 100% CPU for 32 hours.
+  //
+  // It is also the correct join: post-v5 a usage_id is unique per run, not
+  // globally, so matching on usage_id alone can attach another run's cost.
   const byModelRows = db.prepare(
     `SELECT u.model, SUM(u.input_tokens) AS input_tokens, SUM(u.output_tokens) AS output_tokens,
        SUM(u.cache_read_tokens) AS cache_read_tokens, SUM(u.cache_creation_tokens) AS cache_creation_tokens,
        SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END) AS cost_usd,
        SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced
-       FROM usage_facts u LEFT JOIN cost_facts c ON c.usage_id=u.usage_id
+       FROM usage_facts u LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id
        WHERE u.run_id=? GROUP BY u.model`,
   ).all(row.run_id);
   const byAgentRows = db.prepare(
@@ -1062,7 +1287,7 @@ function makeRunProjection(db, row, options = {}) {
       SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END) AS cost_usd,
       SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced,
       COUNT(*) AS turns,
-       MAX(u.observed_at) AS last_activity_at FROM usage_facts u LEFT JOIN cost_facts c ON c.usage_id=u.usage_id
+       MAX(u.observed_at) AS last_activity_at FROM usage_facts u LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id
        WHERE u.run_id=? GROUP BY u.agent_key`,
   ).all(row.run_id);
   const totals = db.prepare(
@@ -1070,7 +1295,7 @@ function makeRunProjection(db, row, options = {}) {
        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
        COALESCE(SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END), 0) AS cost_usd,
        SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced,
-       MAX(u.observed_at) AS last_activity_at FROM usage_facts u LEFT JOIN cost_facts c ON c.usage_id=u.usage_id WHERE u.run_id=?`,
+       MAX(u.observed_at) AS last_activity_at FROM usage_facts u LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id WHERE u.run_id=?`,
   ).get(row.run_id);
   const byModel = {};
   for (const item of byModelRows) {
@@ -1236,7 +1461,7 @@ function aggregateUsageByTask(db, priceMode) {
         ORDER BY l.confidence DESC, l.valid_from DESC LIMIT 1) AS task_id
      FROM usage_facts u
      JOIN runs r ON r.run_id=u.run_id
-     LEFT JOIN cost_facts c ON c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id`,
+     LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id`,
   ).all();
   const currentPrices = priceMode === "current" ? pricingSnapshot().prices : null;
   const buckets = {};
@@ -1337,7 +1562,7 @@ export function queryTrace(db, taskId) {
        SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END) AS cost,
        MIN(u.observed_at) AS first_ts, MAX(u.observed_at) AS last_ts
      FROM usage_facts u JOIN runs r ON r.run_id=u.run_id
-     LEFT JOIN cost_facts c ON c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
+     LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
      WHERE u.run_id=? AND
        (SELECT l.task_id FROM run_task_links l WHERE l.run_id=u.run_id AND l.role='primary'
         AND l.valid_from<=COALESCE(u.observed_at, r.started_at)
@@ -1391,7 +1616,7 @@ export function queryPatterns(db, filters = {}) {
         ORDER BY l.confidence DESC, l.valid_from DESC LIMIT 1) AS task_id,
        CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END AS cost_usd
      FROM usage_facts u JOIN runs r ON r.run_id=u.run_id
-     LEFT JOIN cost_facts c ON c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
+     LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`,
   ).all(...params);
   const stats = new Map();

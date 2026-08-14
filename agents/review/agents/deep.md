@@ -1,7 +1,7 @@
 ---
 name: deep
 description: REVIEW squad — deep review: correctness/architecture/edge/business. GLM-5.2.
-model: z-ai/glm-5.2
+model: x-ai/grok-4.6
 tools: Read, Grep, Glob, Bash
 ---
 <role>

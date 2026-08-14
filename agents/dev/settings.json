@@ -1,18 +1,49 @@
 {
   "permissions": {
-    "defaultMode": "default",
     "allow": [
-      "Read", "Grep", "Glob", "Edit", "Write",
+      "Read",
+      "Grep",
+      "Glob",
+      "Edit",
+      "Write",
+
       "Bash(node:*)",
-      "Bash(graphify query:*)", "Bash(graphify affected:*)", "Bash(graphify god-nodes:*)",
-      "Bash(graphify path:*)", "Bash(graphify explain:*)",
-      "Bash(git add:*)", "Bash(git commit:*)", "Bash(git checkout:*)", "Bash(git switch:*)",
-      "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git pull:*)", "Bash(git rebase:*)",
-      "Bash(npm:*)", "Bash(pnpm:*)", "Bash(yarn:*)", "Bash(docker:*)", "Bash(docker compose:*)", "Bash(make:*)", "Bash(pytest:*)",
-      "Bash(gcloud:*)", "Bash(ssh:*)", "Bash(scp:*)"
+
+      "Bash(graphify query:*)",
+      "Bash(graphify affected:*)",
+      "Bash(graphify god-nodes:*)",
+      "Bash(graphify path:*)",
+      "Bash(graphify explain:*)",
+
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git pull:*)",
+      "Bash(git rebase:*)",
+
+      "Bash(npm:*)",
+      "Bash(pnpm:*)",
+      "Bash(yarn:*)",
+
+      "Bash(docker:*)",
+      "Bash(docker compose:*)",
+
+      "Bash(make:*)",
+      "Bash(pytest:*)",
+
+      "Bash(gcloud:*)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)"
     ],
+    "defaultMode": "default",
     "deny": [
-      "Bash(git push:*)", "Bash(rm -rf:*)", "mcp__linear__*"
+      "Bash(git push:*)",
+      "Bash(rm -rf:*)",
+      "mcp__linear__*"
     ]
   },
   "theme": "dark",
