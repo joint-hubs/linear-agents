@@ -153,7 +153,7 @@ def load_usage_facts(db_path: str, args: argparse.Namespace) -> tuple:
             r.interactive,
             r.launched_by
         FROM usage_facts u
-        LEFT JOIN cost_facts c ON u.usage_id = c.usage_id
+        LEFT JOIN cost_facts c ON u.run_id = c.run_id AND u.usage_id = c.usage_id
         LEFT JOIN runs r       ON u.run_id = r.run_id
         WHERE u.observed_at >= ?
     """
@@ -551,7 +551,7 @@ def load_task_links(db_path: str, args: argparse.Namespace) -> tuple:
         FROM run_task_links rtl
         JOIN runs r ON rtl.run_id = r.run_id
         LEFT JOIN usage_facts u ON rtl.run_id = u.run_id
-        LEFT JOIN cost_facts c ON u.usage_id = c.usage_id
+        LEFT JOIN cost_facts c ON u.run_id = c.run_id AND u.usage_id = c.usage_id
         WHERE r.started_at >= ?
     """
     params: list = [cutoff_iso]

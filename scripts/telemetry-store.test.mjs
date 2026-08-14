@@ -525,6 +525,34 @@ test("FOC-104 poison pill: not-a-repo → is-a-repo keeps worktree_id stable (no
   assert(wt.repository_id != null, "repository_id must be populated after day 2 git detection");
 });
 
+test("cross-run isolation: two runs sharing a JSONL keep separate cost_facts", () => {
+  // JOI-261: usage_facts PK is (run_id, usage_id) and cost_facts PK is
+  // (run_id, usage_id, price_set_id) — both run-scoped (v5, JOI-260). Two runs
+  // ingesting the SAME source_path:offset derive the SAME usage_id hash but
+  // must each land their own usage_facts / cost_facts rows; the run-scoped
+  // joins (c.run_id=u.run_id) must NOT cross-attach run A's cost to run B.
+  const run1Before = queryRuns(db).find((r) => r.runId === "run-1");
+  const cost1Before = run1Before.totals.costUSD;
+  applyEvent(db, makeEvent("run.started", {
+    runId: "run-2", squad: "dev", startedAt: "2026-07-24T09:00:00.000Z", cwd: "C:/repos/office",
+  }, { runId: "run-2" }));
+  // Same source_path:offset as run-1's idempotent event → identical usageId hash.
+  applyEvent(db, makeEvent("usage.recorded", {
+    runId: "run-2", sessionId: "session-1", agentKey: "implementer", model: "deepseek-v4-flash",
+    observedAt: "2026-07-24T09:07:00.000Z", inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 0, cacheCreationTokens: 0,
+  }, { runId: "run-2", observedAt: "2026-07-24T09:07:00.000Z", sourceKind: "transcript", sourcePath: "C:/sessions/session-1.jsonl", sourceOffset: 42, eventId: "usage-run2-1" }));
+  const usage2 = db.prepare("SELECT COUNT(*) AS n FROM usage_facts WHERE run_id=?").get("run-2");
+  assert(usage2.n === 1, `run-2 usage_facts rows=${usage2.n}`);
+  const cost2 = db.prepare("SELECT COUNT(*) AS n FROM cost_facts WHERE run_id=?").get("run-2");
+  assert(cost2.n === 1, `run-2 cost_facts rows=${cost2.n}`);
+  const run2 = queryRuns(db).find((r) => r.runId === "run-2");
+  assert(run2.totals.costUSD > 0, `run-2 cost=${run2.totals.costUSD}`);
+  // Run A's cost is unchanged — run B's row did not cross-join into it.
+  const run1After = queryRuns(db).find((r) => r.runId === "run-1");
+  assert(run1After.totals.costUSD === cost1Before, `run-1 cost drifted ${cost1Before} → ${run1After.totals.costUSD}`);
+  assert(run1After.byAgent.implementer.turns === 1, `run-1 turns drifted=${run1After.byAgent.implementer.turns}`);
+});
+
 db.close();
 assert(existsSync(dbPath), "database was not created");
 rmSync(temp, { recursive: true, force: true });
