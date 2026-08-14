@@ -552,8 +552,10 @@ function migrateRunScopedUsage(db, path) {
         created_at    TEXT NOT NULL,
         PRIMARY KEY (run_id, tool_fact_id)
       );
-      INSERT INTO tool_facts_new SELECT tool_fact_id, run_id, agent_key, model, observed_at,
+      INSERT INTO tool_facts_new (tool_fact_id, run_id, agent_key, model, observed_at,
         tool_name_raw, tool_name_canon, tool_input, tool_has_error, turn_index,
+        source_path, source_offset, created_at)
+      SELECT tool_fact_id, run_id, agent_key, model, observed_at, tool_name_raw, tool_name_canon, tool_input, tool_has_error, turn_index,
         source_path, source_offset, created_at FROM tool_facts;
       DROP TABLE tool_facts;
       ALTER TABLE tool_facts_new RENAME TO tool_facts;
