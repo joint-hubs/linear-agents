@@ -689,9 +689,38 @@ function eventAlreadyApplied(db, event) {
   if (db.prepare("SELECT 1 FROM events WHERE event_id = ?").get(event.eventId)) return true;
   const source = event.source || {};
   if (source.path && Number.isInteger(source.offset)) {
+    // run_id must lead, and must use IS rather than = so NULL matches NULL.
+    // The v5 rebuild (JOI-260) re-keyed this index to
+    // UNIQUE(run_id, source_kind, source_path, source_offset, event_type).
+    // Querying without run_id leaves the leading column unconstrained, so
+    // SQLite degrades from SEARCH to a full COVERING INDEX SCAN — measured at
+    // 849 ms per lookup against 5.86M rows on 2026-08-14, which is ~12 h for a
+    // single ingest cycle over 53k usage events. Matching the index also makes
+    // the check semantically right: after v5 the uniqueness of a source triple
+    // is scoped to the run, not global.
     return Boolean(db.prepare(
-      "SELECT 1 FROM events WHERE event_type = ? AND source_kind = ? AND source_path = ? AND source_offset = ?",
-    ).get(event.eventType, source.kind || "runtime", source.path, source.offset));
+      `SELECT 1 FROM events WHERE run_id IS ? AND source_kind = ? AND source_path = ?
+         AND source_offset = ? AND event_type = ?`,
+    ).get(event.runId ?? null, source.kind || "runtime", source.path, source.offset, event.eventType));
+  }
+  // quality.reported carries no source path/offset, so the generic dedup above
+  // never fires and the UNIQUE(source_kind, source_path, source_offset,
+  // event_type) index cannot help either — SQLite treats all-NULL keys as
+  // distinct. Left ungated, a caller on a timer appends a fresh row per tick
+  // forever (observed 2026-08-14: 5 791 702 rows, 98.9% of the events table,
+  // ~195k/hour, against 276 rows in the projection they all collapse into).
+  //
+  // The identity of a quality report is (run, issue type) — exactly the
+  // predicate raiseIssue() dedups on. An event that cannot change the
+  // projection is a duplicate. Re-raising after resolveQualityIssue() still
+  // works: with no open row the guard passes and a new event is recorded.
+  if (event.eventType === "quality.reported") {
+    const issueType = event.payload?.issueType;
+    if (!issueType) return false; // invalid; let applyQualityReported reject it
+    const runId = event.runId || event.payload?.runId || null;
+    return Boolean(db.prepare(
+      "SELECT 1 FROM data_quality_issues WHERE run_id IS ? AND issue_type = ? AND resolved_at IS NULL",
+    ).get(runId, issueType));
   }
   return false;
 }
@@ -974,6 +1003,16 @@ function calculateCost(usage, model, prices) {
   return Number.isFinite(cost) ? cost : null;
 }
 
+// True when this run already has an unresolved issue of this type. Callers that
+// re-check the same condition on a timer use it to skip reportDataQuality()
+// entirely: the store deduplicates the event anyway (see eventAlreadyApplied),
+// but skipping here avoids a spool write and a database open per tick per run.
+export function hasOpenQualityIssue(db, runId, issueType) {
+  return Boolean(db.prepare(
+    "SELECT 1 FROM data_quality_issues WHERE run_id IS ? AND issue_type = ? AND resolved_at IS NULL",
+  ).get(runId ?? null, issueType));
+}
+
 function raiseIssue(db, runId, issueType, severity, details) {
   const existing = db.prepare(
     "SELECT 1 FROM data_quality_issues WHERE run_id IS ? AND issue_type=? AND resolved_at IS NULL",
@@ -983,6 +1022,18 @@ function raiseIssue(db, runId, issueType, severity, details) {
     `INSERT INTO data_quality_issues (issue_id, run_id, issue_type, severity, details_json, opened_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(randomUUID(), runId, issueType, severity, safeJson(details), now());
+}
+
+// Close any open issue of this type for the given run. Called by ingest paths
+// when a previously-missing artifact (e.g. transcript) becomes available, so
+// the dashboard stops showing the issue as ongoing. Idempotent — no-op if
+// the issue was never raised or is already resolved.
+export function resolveQualityIssue(db, runId, issueType, options = {}) {
+  const result = db.prepare(
+    `UPDATE data_quality_issues SET resolved_at = ?
+       WHERE run_id IS ? AND issue_type = ? AND resolved_at IS NULL`,
+  ).run(options.resolvedAt || now(), runId, issueType);
+  return { closed: result.changes };
 }
 
 function applyUsageRecorded(db, event) {
@@ -1010,7 +1061,7 @@ function applyUsageRecorded(db, event) {
   }
   const cost = calculateCost(payload, payload.model, snapshot.prices);
   if (cost == null && !isSyntheticModel(payload.model)) {
-    raiseIssue(db, runId, "pricing_missing", "warning", { model: payload.model, usageId });
+    raiseIssue(db, runId, "pricing_missing", "warning", { model: payload.model, usageId, runId: event.runId ?? null });
   }
   db.prepare("INSERT OR REPLACE INTO cost_facts (run_id, usage_id, price_set_id, cost_usd) VALUES (?, ?, ?, ?)")
     .run(runId, usageId, snapshot.id, cost);
@@ -1211,12 +1262,23 @@ function makeRunProjection(db, row, options = {}) {
   const taskLink = db.prepare(
     `SELECT source, confidence FROM run_task_links WHERE run_id=? AND task_id=? ORDER BY valid_from DESC LIMIT 1`,
   ).get(row.run_id, task);
+  // Every cost_facts join below must lead with run_id. The v5 rebuild
+  // (JOI-260) re-keyed the table to PRIMARY KEY (run_id, usage_id,
+  // price_set_id); joining on usage_id alone leaves the leading column
+  // unconstrained, so SQLite cannot seek and falls back to scanning the whole
+  // table once per usage row. Measured 2026-08-14 on 53k usage / 53k cost rows:
+  // 141 832 ms for five runs, against 61 ms with run_id in the join — same
+  // totals, 2 325x apart. queryRuns() runs three of these per run, which is
+  // what pinned telemetry-server at 100% CPU for 32 hours.
+  //
+  // It is also the correct join: post-v5 a usage_id is unique per run, not
+  // globally, so matching on usage_id alone can attach another run's cost.
   const byModelRows = db.prepare(
     `SELECT u.model, SUM(u.input_tokens) AS input_tokens, SUM(u.output_tokens) AS output_tokens,
        SUM(u.cache_read_tokens) AS cache_read_tokens, SUM(u.cache_creation_tokens) AS cache_creation_tokens,
        SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END) AS cost_usd,
        SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced
-       FROM usage_facts u LEFT JOIN cost_facts c ON c.usage_id=u.usage_id
+       FROM usage_facts u LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id
        WHERE u.run_id=? GROUP BY u.model`,
   ).all(row.run_id);
   const byAgentRows = db.prepare(
@@ -1225,7 +1287,7 @@ function makeRunProjection(db, row, options = {}) {
       SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END) AS cost_usd,
       SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced,
       COUNT(*) AS turns,
-       MAX(u.observed_at) AS last_activity_at FROM usage_facts u LEFT JOIN cost_facts c ON c.usage_id=u.usage_id
+       MAX(u.observed_at) AS last_activity_at FROM usage_facts u LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id
        WHERE u.run_id=? GROUP BY u.agent_key`,
   ).all(row.run_id);
   const totals = db.prepare(
@@ -1233,7 +1295,7 @@ function makeRunProjection(db, row, options = {}) {
        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
        COALESCE(SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END), 0) AS cost_usd,
        SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced,
-       MAX(u.observed_at) AS last_activity_at FROM usage_facts u LEFT JOIN cost_facts c ON c.usage_id=u.usage_id WHERE u.run_id=?`,
+       MAX(u.observed_at) AS last_activity_at FROM usage_facts u LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id WHERE u.run_id=?`,
   ).get(row.run_id);
   const byModel = {};
   for (const item of byModelRows) {
@@ -1399,7 +1461,7 @@ function aggregateUsageByTask(db, priceMode) {
         ORDER BY l.confidence DESC, l.valid_from DESC LIMIT 1) AS task_id
      FROM usage_facts u
      JOIN runs r ON r.run_id=u.run_id
-     LEFT JOIN cost_facts c ON c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id`,
+     LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id`,
   ).all();
   const currentPrices = priceMode === "current" ? pricingSnapshot().prices : null;
   const buckets = {};
@@ -1500,7 +1562,7 @@ export function queryTrace(db, taskId) {
        SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END) AS cost,
        MIN(u.observed_at) AS first_ts, MAX(u.observed_at) AS last_ts
      FROM usage_facts u JOIN runs r ON r.run_id=u.run_id
-     LEFT JOIN cost_facts c ON c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
+     LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
      WHERE u.run_id=? AND
        (SELECT l.task_id FROM run_task_links l WHERE l.run_id=u.run_id AND l.role='primary'
         AND l.valid_from<=COALESCE(u.observed_at, r.started_at)
@@ -1554,7 +1616,7 @@ export function queryPatterns(db, filters = {}) {
         ORDER BY l.confidence DESC, l.valid_from DESC LIMIT 1) AS task_id,
        CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END AS cost_usd
      FROM usage_facts u JOIN runs r ON r.run_id=u.run_id
-     LEFT JOIN cost_facts c ON c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
+     LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`,
   ).all(...params);
   const stats = new Map();

@@ -11,6 +11,7 @@ import * as ledger from "./ledger.mjs";
 import {
   applyEvents,
   makeEvent,
+  hasOpenQualityIssue,
   openTelemetryDb,
   queryRuns,
   recordDelegationLink,
@@ -21,6 +22,7 @@ import {
   recordWorkspace,
   reportDataQuality,
   replayPending,
+  resolveQualityIssue,
   sqliteAvailable,
 } from "./telemetry-store.mjs";
 import { extractToolFacts } from "./telemetry-tool-extract.mjs";
@@ -173,7 +175,12 @@ export async function ingestTranscript(db, runId, transcriptPath, sessionId = nu
   let eventsApplied = 0;
   for (const path of paths) {
     const stats = statSync(path);
-    const known = db.prepare("SELECT file_size, parse_status FROM transcript_sources WHERE source_path=?").get(path);
+    // Skip-cache is run-scoped: transcript_sources PK is (source_path, run_id)
+    // (v5, JOI-260), so run B parsing the same file as run A must NOT be skipped
+    // by run A's row. Querying source_path alone matched any prior run's row and
+    // silently dropped run B's ingest — binding run_id constrains the lookup to
+    // this run's own row (or none), so each run parses its own copy.
+    const known = db.prepare("SELECT file_size, parse_status FROM transcript_sources WHERE source_path=? AND run_id=?").get(path, runId);
     if (known?.parse_status === "parsed" && known.file_size === stats.size) continue;
     const { events, size } = jsonLineEvents(path, runId, sessionId, path === transcriptPath);
     const progressEvent = makeEvent("transcript.progress", {
@@ -209,12 +216,31 @@ export async function ingestTranscript(db, runId, transcriptPath, sessionId = nu
       }
     }
   }
+  // Transcript is now available — close any open "transcript_missing" issue
+  // for this run so the dashboard stops reporting it as ongoing. Without
+  // this, the issue opened by an earlier failed ingest cycle stays open
+  // forever and ingest cycles keep reporting it as still missing.
+  resolveQualityIssue(db, runId, "transcript_missing");
   return { files: paths.length, events: eventsApplied, missing: false };
+}
+
+// Strip the legacy "workspace/{workspaceId}/" segment inserted by older record
+// paths. Older ledger rows store transcript_path with an extra workspace
+// subfolder that no longer exists on disk; the file actually lives directly
+// under .../agents/{squad}/projects/{projectHash}/{sessionId}.jsonl.
+function stripLegacyWorkspaceSegment(transcriptPath) {
+  if (!transcriptPath) return null;
+  return transcriptPath.replace(/[/\\]workspace[/\\][^/\\]+[/\\]/, "/");
 }
 
 function transcriptForSession(run) {
   if (!run.sessionId) return null;
   if (run.transcriptPath && existsSync(run.transcriptPath)) return run.transcriptPath;
+  // The path stored in DB may include a stale /workspace/{id}/ segment that
+  // no longer matches the on-disk layout. Strip it and try again before
+  // falling back to a sessionId search across the known roots.
+  const stripped = stripLegacyWorkspaceSegment(run.transcriptPath);
+  if (stripped && stripped !== run.transcriptPath && existsSync(stripped)) return stripped;
   const roots = [
     run.claudeConfigDir ? join(run.claudeConfigDir, "projects") : null,
     run.squad ? join(root, "agents", run.squad, "projects") : null,
@@ -321,7 +347,9 @@ export async function backfill(options = {}) {
       const result = await ingestTranscript(db, manifest.runId, transcriptPath, sessionId);
       if (result.missing) {
         summary.missingTranscripts++;
-        reportDataQuality(manifest.runId, "transcript_missing", { manifestPath: path, sessionId }, options);
+        if (!hasOpenQualityIssue(db, manifest.runId, "transcript_missing")) {
+          reportDataQuality(manifest.runId, "transcript_missing", { manifestPath: path, sessionId }, options);
+        }
       }
       else { summary.transcripts += result.files; summary.usageEvents += result.events; }
       summary.runs++;
@@ -336,18 +364,25 @@ export async function ingestKnownRuns(options = {}) {
   const db = openTelemetryDb(options.dbPath);
   const summary = { runs: 0, transcripts: 0, usageEvents: 0, missingTranscripts: 0 };
   try {
+    // This loop runs on a 15s timer in telemetry-server, so every run whose
+    // transcript is gone is re-checked ~5 700 times a day. Report the issue
+    // only when it is not already open, otherwise the emit is pure waste — a
+    // spool file plus a database open per run per tick.
+    const reportMissing = (runId, details) => {
+      summary.missingTranscripts++;
+      if (hasOpenQualityIssue(db, runId, "transcript_missing")) return;
+      reportDataQuality(runId, "transcript_missing", details, options);
+    };
     for (const run of queryRuns(db)) {
       const transcriptPath = transcriptForSession(run);
       if (!transcriptPath) {
-        summary.missingTranscripts++;
-        reportDataQuality(run.runId, "transcript_missing", { sessionId: run.sessionId || null }, options);
+        reportMissing(run.runId, { sessionId: run.sessionId || null });
         continue;
       }
       const result = await ingestTranscript(db, run.runId, transcriptPath, run.sessionId);
       summary.runs++;
       if (result.missing) {
-        summary.missingTranscripts++;
-        reportDataQuality(run.runId, "transcript_missing", { sessionId: run.sessionId || null }, options);
+        reportMissing(run.runId, { sessionId: run.sessionId || null });
       }
       else { summary.transcripts += result.files; summary.usageEvents += result.events; }
     }

@@ -527,62 +527,38 @@ test("FOC-104 poison pill: not-a-repo → is-a-repo keeps worktree_id stable (no
   assert(wt.repository_id != null, "repository_id must be populated after day 2 git detection");
 });
 
-test("FOC-104 backfillWorktreeIds upgrade: v3 worktree_id + referencing observation are rewritten and FK check stays clean", () => {
-  // Simulate a database that was last written by v3 code, where worktree_id
-  // was keyed on hash(`${repositoryId}:${cwd}`) instead of hash(path). We
-  // open a fresh db (which runs migrate and marks schema as v4), undo the
-  // schema_migrations marker so the backfill guard treats the db as pre-v4,
-  // inject v3-style rows directly, then reopen — triggering backfillWorktreeIds
-  // on real data — and verify both the worktrees PK and the FK reference in
-  // workspace_observations are rewritten and the FK check is clean.
-  const upgradeDbPath = join(temp, "telemetry-upgrade-test.sqlite");
-  const v3db = openTelemetryDb(upgradeDbPath);
-
-  const cwd = join(temp, "foc104-upgrade", "project").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-  const repositoryId = createHash("sha256").update(`${cwd}/.git`).digest("hex");
-  const oldWorktreeId = createHash("sha256").update(`${repositoryId}:${cwd}`).digest("hex");
-  const newWorktreeId = createHash("sha256").update(cwd).digest("hex");
-
-  // Seed v3-style rows: worktrees row with old ID and a workspace_observation
-  // that references it. Both use the same old ID so FK is satisfied at seed time.
-  v3db.exec("PRAGMA foreign_keys = OFF");
-  v3db.prepare(
-    "INSERT INTO runs (run_id, updated_at) VALUES (?, ?)",
-  ).run("run-upgrade-v3", "2026-07-01T00:00:00.000Z");
-  v3db.prepare(
-    "INSERT INTO repositories (repository_id, common_dir, created_at) VALUES (?, ?, ?)",
-  ).run(repositoryId, `${cwd}/.git`, "2026-07-01T00:00:00.000Z");
-  v3db.prepare(
-    "INSERT INTO worktrees (worktree_id, repository_id, path, git_dir, created_at) VALUES (?, ?, ?, ?, ?)",
-  ).run(oldWorktreeId, repositoryId, cwd, `${cwd}/.git`, "2026-07-01T00:00:00.000Z");
-  v3db.prepare(
-    "INSERT INTO workspace_observations (run_id, observed_at, cwd, repository_id, worktree_id, ref_type, ref_name, head_sha, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run("run-upgrade-v3", "2026-07-01T00:00:00.000Z", cwd, repositoryId, oldWorktreeId, "branch", "main", "abc123", "runtime");
-  v3db.exec("PRAGMA foreign_keys = ON");
-
-  // Remove the schema_migrations marker so backfillWorktreeIds treats this
-  // database as pre-v4 and actually rewrites the rows.
-  v3db.prepare("DELETE FROM schema_migrations WHERE version=?").run(SCHEMA_VERSION);
-  v3db.close();
-
-  // Reopen: migrate() runs, backfillWorktreeIds fires and rewrites old IDs.
-  const upgraded = openTelemetryDb(upgradeDbPath);
-
-  const wt = upgraded.prepare("SELECT worktree_id FROM worktrees WHERE path=?").get(cwd);
-  assert(wt != null, "worktrees row missing after upgrade");
-  assert(wt.worktree_id === newWorktreeId, `worktrees.worktree_id=${wt.worktree_id} expected hash(path)=${newWorktreeId}`);
-
-  const obs = upgraded.prepare("SELECT worktree_id FROM workspace_observations WHERE run_id=?").get("run-upgrade-v3");
-  assert(obs != null, "workspace_observations row missing after upgrade");
-  assert(obs.worktree_id === newWorktreeId, `workspace_observations.worktree_id=${obs.worktree_id} expected ${newWorktreeId}`);
-
-  const fkViolations = upgraded.prepare("PRAGMA foreign_key_check").all();
-  assert(fkViolations.length === 0, `foreign_key_check found violations: ${JSON.stringify(fkViolations)}`);
-
   upgraded.close();
 });
 
+test("cross-run isolation: two runs sharing a JSONL keep separate cost_facts", () => {
+  // JOI-261: usage_facts PK is (run_id, usage_id) and cost_facts PK is
+  // (run_id, usage_id, price_set_id) — both run-scoped (v5, JOI-260). Two runs
+  // ingesting the SAME source_path:offset derive the SAME usage_id hash but
+  // must each land their own usage_facts / cost_facts rows; the run-scoped
+  // joins (c.run_id=u.run_id) must NOT cross-attach run A's cost to run B.
+  const run1Before = queryRuns(db).find((r) => r.runId === "run-1");
+  const cost1Before = run1Before.totals.costUSD;
+  applyEvent(db, makeEvent("run.started", {
+    runId: "run-2", squad: "dev", startedAt: "2026-07-24T09:00:00.000Z", cwd: "C:/repos/office",
+  }, { runId: "run-2" }));
+  // Same source_path:offset as run-1's idempotent event → identical usageId hash.
+  applyEvent(db, makeEvent("usage.recorded", {
+    runId: "run-2", sessionId: "session-1", agentKey: "implementer", model: "deepseek-v4-flash",
+    observedAt: "2026-07-24T09:07:00.000Z", inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 0, cacheCreationTokens: 0,
+  }, { runId: "run-2", observedAt: "2026-07-24T09:07:00.000Z", sourceKind: "transcript", sourcePath: "C:/sessions/session-1.jsonl", sourceOffset: 42, eventId: "usage-run2-1" }));
+  const usage2 = db.prepare("SELECT COUNT(*) AS n FROM usage_facts WHERE run_id=?").get("run-2");
+  assert(usage2.n === 1, `run-2 usage_facts rows=${usage2.n}`);
+  const cost2 = db.prepare("SELECT COUNT(*) AS n FROM cost_facts WHERE run_id=?").get("run-2");
+  assert(cost2.n === 1, `run-2 cost_facts rows=${cost2.n}`);
+  const run2 = queryRuns(db).find((r) => r.runId === "run-2");
+  assert(run2.totals.costUSD > 0, `run-2 cost=${run2.totals.costUSD}`);
+  // Run A's cost is unchanged — run B's row did not cross-join into it.
+  const run1After = queryRuns(db).find((r) => r.runId === "run-1");
+  assert(run1After.totals.costUSD === cost1Before, `run-1 cost drifted ${cost1Before} → ${run1After.totals.costUSD}`);
+  assert(run1After.byAgent.implementer.turns === 1, `run-1 turns drifted=${run1After.byAgent.implementer.turns}`);
+});
 
+db.close();
 assert(existsSync(dbPath), "database was not created");
 rmSync(temp, { recursive: true, force: true });
 

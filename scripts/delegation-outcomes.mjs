@@ -131,7 +131,7 @@ function delegationsByTask(db) {
     JOIN run_task_links l  ON l.run_id = u.run_id
                            AND u.observed_at >= l.valid_from
                            AND (l.valid_to IS NULL OR u.observed_at < l.valid_to)
-    LEFT JOIN cost_facts c ON c.usage_id = u.usage_id
+    LEFT JOIN cost_facts c ON c.run_id = u.run_id AND c.usage_id = u.usage_id
     WHERE l.role = 'primary' AND u.agent_key IS NOT NULL
     GROUP BY l.task_id, r.squad, u.agent_key, u.model
   `).all();
@@ -275,7 +275,7 @@ function loadUsageTurns(db) {
            r.squad AS squad, COALESCE(c.cost_usd, 0) AS costUsd
     FROM usage_facts u
     JOIN runs r ON r.run_id = u.run_id
-    LEFT JOIN cost_facts c ON c.usage_id = u.usage_id
+    LEFT JOIN cost_facts c ON c.run_id = u.run_id AND c.usage_id = u.usage_id
     WHERE u.agent_key IS NOT NULL
   `).all();
 }
