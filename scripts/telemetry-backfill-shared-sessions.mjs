@@ -225,7 +225,7 @@ Options:
   --json      Emit one JSON object per line (machine-readable)
   --help      Show this help
 `);
-    process.exit(0);
+    return 0;
   }
 
   const dry = args.includes("--dry");
@@ -239,7 +239,7 @@ Options:
 
   if (!sqliteAvailable()) {
     console.error("ERROR: node:sqlite is required (Node 22+ with --experimental-sqlite)");
-    process.exit(1);
+    return 1;
   }
 
   const db = openTelemetryDb();
@@ -255,7 +255,7 @@ Options:
       } else {
         console.error("run-schema-migration-first");
       }
-      process.exit(1);
+      return 1;
     }
 
     const candidates = resolveCandidates(db, runIds);
@@ -283,20 +283,24 @@ Options:
       );
     }
 
-    process.exit(0);
+    return 0;
   } catch (error) {
     if (json) {
       process.stdout.write(JSON.stringify({ status: "error", message: error.message }) + "\n");
     } else {
       console.error(`[backfill-shared-sessions] ${error.message}`);
     }
-    process.exit(1);
+    return 1;
   } finally {
     try { db.close(); } catch { /* already closed */ }
   }
 }
 
-main().catch((error) => {
-  console.error(`[backfill-shared-sessions] ${error.message}`);
-  process.exit(1);
-});
+main()
+  .then((exitCode) => {
+    process.exitCode = exitCode;
+  })
+  .catch((error) => {
+    console.error(`[backfill-shared-sessions] ${error.message}`);
+    process.exitCode = 1;
+  });
