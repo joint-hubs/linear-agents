@@ -20,7 +20,7 @@ const dbPath = join(temp, "test.sqlite");
 process.env.LA_TELEMETRY_HOME = temp;
 process.env.LA_TELEMETRY_DB = dbPath;
 
-const { openTelemetryDb, MIGRATION_VERSIONS } = await import("./telemetry-store.mjs");
+const { openTelemetryDb, MIGRATION_VERSIONS, queryRuns, querySummary } = await import("./telemetry-store.mjs");
 const { ingestTranscript: ingestTranscript2 } = await import("./telemetry-ingest.mjs");
 
 let passed = 0;
@@ -249,6 +249,115 @@ await test("(d8) human mode (no --json) emits non-empty stdout", () => {
   assertEqual(result.status, 0, "exit code");
   assert(result.stdout.trim().length > 0, "human output non-empty");
   assert(!result.stdout.trim().startsWith("{"), "human output is not JSON");
+});
+
+// ===========================================================================
+// Scenario (e) — dashboard reconcile: delete run-B, backfill restores it.
+// JOI-264 AC: after backfill, querySummary totals rise by EXACTLY run-B's
+// restored totals (inputTokens, outputTokens, partialCostUSD); run-A totals
+// are identical before and after. Uses a FRESH temp + DB so the (d)/(f)
+// scenarios above are unaffected.
+// ===========================================================================
+console.log("\nScenario (e) — dashboard reconcile (backfill restores run-B)");
+
+await test("(e) backfill restores run-B; summary deltas === run-B totals; run-A untouched", async () => {
+  const tempE = mkdtempSync(join(tmpdir(), "joi-264-e-"));
+  const savedHome = process.env.LA_TELEMETRY_HOME;
+  const savedDb = process.env.LA_TELEMETRY_DB;
+  try {
+    const dbPathE = join(tempE, "test.sqlite");
+    process.env.LA_TELEMETRY_HOME = tempE;
+    process.env.LA_TELEMETRY_DB = dbPathE;
+    const sharedPathE = join(tempE, "shared.jsonl");
+    writeFileSync(sharedPathE, transcriptContent, "utf8");
+
+    // Build fresh DB + insert runs A/B sharing sharedPathE.
+    let d = openTelemetryDb(dbPathE);
+    d.prepare(
+      `INSERT INTO runs (run_id, squad, session_id, transcript_path, claude_config_dir, started_at, status, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run("run-A", "dev", "sess-1", sharedPathE, tempE, "2026-08-14T10:00:00.000Z", "completed", "2026-08-14T11:00:00.000Z");
+    d.prepare(
+      `INSERT INTO runs (run_id, squad, session_id, transcript_path, claude_config_dir, started_at, status, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run("run-B", "dev", "sess-1", sharedPathE, tempE, "2026-08-14T10:01:00.000Z", "completed", "2026-08-14T11:01:00.000Z");
+    // Pre-ingest run-A (recordToolFact inside ingestTranscript opens via env → dbPathE).
+    await ingestTranscript2(d, "run-A", sharedPathE, "sess-1");
+    d.close();
+
+    // First backfill (no flags) so run-B gets ingested.
+    let res = runScript(["--json"]);
+    assertEqual(res.status, 0, "first backfill exit code");
+    const firstReports = parseJsonLines(res.stdout);
+    const firstB = firstReports.find((r) => r.runId === "run-B");
+    assert(firstB && firstB.status === "ingested", `run-B first ingest status=${firstB?.status}`);
+    assert(firstB.after > 0, `run-B first after>0 (got ${firstB?.after})`);
+
+    // Capture run-B reference totals while run-B is present (pre-delete).
+    d = openTelemetryDb(dbPathE);
+    const runBRef = queryRuns(d, { runId: "run-B" })[0].totals;
+
+    // DELETE run-B rows ONLY from dependent tables. DO NOT touch runs —
+    // otherwise backfill finds no run-B to restore. cost_facts cascades from
+    // usage_facts via FK ON DELETE CASCADE; the explicit DELETE is harmless.
+    d.exec("PRAGMA foreign_keys = ON");
+    d.prepare("DELETE FROM usage_facts WHERE run_id=?").run("run-B");
+    d.prepare("DELETE FROM cost_facts WHERE run_id=?").run("run-B");
+    d.prepare("DELETE FROM events WHERE run_id=?").run("run-B");
+    d.prepare("DELETE FROM tool_facts WHERE run_id=?").run("run-B");
+    d.prepare("DELETE FROM transcript_sources WHERE run_id=?").run("run-B");
+    const runBStillInRuns = d.prepare("SELECT 1 FROM runs WHERE run_id=?").get("run-B");
+    assert(runBStillInRuns, "run-B must remain in runs after dependent-row delete");
+    const runBUsageGone = d.prepare("SELECT COUNT(*) AS n FROM usage_facts WHERE run_id=?").get("run-B").n;
+    assertEqual(runBUsageGone, 0, "run-B usage_facts deleted");
+
+    // BEFORE snapshot: run-B absent from facts → summary reflects run-A only.
+    const beforeSummary = querySummary(d);
+    const beforeRunA = queryRuns(d, { runId: "run-A" })[0].totals;
+    d.close();
+
+    // Backfill --run run-B restores run-B's facts.
+    res = runScript(["--json", "--run", "run-B"]);
+    assertEqual(res.status, 0, "restore backfill exit code");
+    const restoreReports = parseJsonLines(res.stdout);
+    assertEqual(restoreReports.length, 1, "exactly one report for --run run-B");
+    const rb = restoreReports[0];
+    assertEqual(rb.runId, "run-B", "report runId");
+    assertEqual(rb.status, "ingested", "restore status");
+    assertEqual(rb.before, 0, "run-B before=0 (deleted facts)");
+    assert(rb.after > 0, `run-B after>0 (got ${rb.after})`);
+
+    // AFTER snapshot: run-B restored.
+    d = openTelemetryDb(dbPathE);
+    const afterSummary = querySummary(d);
+    const afterRunA = queryRuns(d, { runId: "run-A" })[0].totals;
+    const afterRunB = queryRuns(d, { runId: "run-B" })[0].totals;
+    d.close();
+
+    // Summary deltas === run-B's restored totals (run-A is the only other run
+    // and is unchanged, so the delta equals run-B's contribution).
+    assertEqual(afterSummary.totals.inputTokens - beforeSummary.totals.inputTokens, runBRef.inputTokens,
+      "summary inputTokens delta === run-B");
+    assertEqual(afterSummary.totals.outputTokens - beforeSummary.totals.outputTokens, runBRef.outputTokens,
+      "summary outputTokens delta === run-B");
+    const deltaCost = Number(afterSummary.totals.partialCostUSD.toFixed(6)) - Number(beforeSummary.totals.partialCostUSD.toFixed(6));
+    assertEqual(deltaCost, Number(runBRef.partialCostUSD.toFixed(6)),
+      "summary partialCostUSD delta === run-B");
+
+    // run-A untouched by run-B restore.
+    assertEqual(afterRunA.inputTokens, beforeRunA.inputTokens, "run-A inputTokens unchanged");
+    assertEqual(afterRunA.outputTokens, beforeRunA.outputTokens, "run-A outputTokens unchanged");
+    assertEqual(Number(afterRunA.partialCostUSD.toFixed(6)), Number(beforeRunA.partialCostUSD.toFixed(6)),
+      "run-A partialCostUSD unchanged");
+
+    // run-B restored to the same totals it had before the delete.
+    assertEqual(afterRunB.inputTokens, runBRef.inputTokens, "run-B inputTokens restored");
+    assertEqual(afterRunB.outputTokens, runBRef.outputTokens, "run-B outputTokens restored");
+  } finally {
+    process.env.LA_TELEMETRY_HOME = savedHome;
+    process.env.LA_TELEMETRY_DB = savedDb;
+    rmSync(tempE, { recursive: true, force: true });
+  }
 });
 
 // ===========================================================================
