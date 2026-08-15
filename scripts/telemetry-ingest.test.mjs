@@ -432,7 +432,7 @@ async function run() {
     } finally {
       process.env.LA_TELEMETRY_HOME = savedHome;
       process.env.LA_TELEMETRY_DB = savedDb;
-      rmSync(tempA, { recursive: true, force: true });
+      try { rmSync(tempA, { recursive: true, force: true }); } catch { /* ignore */ }
     }
   });
 
