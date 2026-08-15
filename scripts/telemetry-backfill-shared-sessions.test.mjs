@@ -107,6 +107,8 @@ db.close();
 
 console.log(`\nFixture ready: ${temp}\n`);
 
+let exitCode = 0;
+try {
 // ===========================================================================
 // Scenario (d) — idempotency + per-run before/after + --dry + --json + missing
 // ===========================================================================
@@ -406,7 +408,11 @@ console.log(`\n${passed}/${passed + failed} passed`);
 if (failed > 0) {
   console.log("\nFailures:");
   for (const f of failures) console.log(`  - ${f}`);
-  process.exit(1);
+  exitCode = 1;
 }
-try { rmSync(temp, { recursive: true, force: true }); } catch { /* ignore */ }
-process.exit(0);
+} finally {
+  // Top-level try/finally guarantees the shared temp dir is cleaned even on an
+  // uncaught throw in any scenario (d)/(e)/(f).
+  try { rmSync(temp, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+process.exit(exitCode);

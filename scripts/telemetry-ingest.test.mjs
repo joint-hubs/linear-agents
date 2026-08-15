@@ -23,8 +23,14 @@ try {
 }
 
 let passed = 0;
+let skipped = 0;
 let failed = 0;
 const failures = [];
+
+// Sentinel thrown by a test body to signal it was deliberately skipped (e.g.
+// `node:sqlite` unavailable for scenario (a)). The wrapper counts it against
+// `skipped`, NOT `passed`, and does not treat it as a failure.
+class TestSkip extends Error {}
 
 async function test(name, fn) {
   try {
@@ -32,6 +38,11 @@ async function test(name, fn) {
     passed++;
     console.log(`  PASS ${name}`);
   } catch (error) {
+    if (error instanceof TestSkip) {
+      skipped++;
+      console.log(`  SKIP ${name}: ${error.message}`);
+      return;
+    }
     failed++;
     failures.push(`${name}: ${error.message}`);
     console.log(`  FAIL ${name}: ${error.message}`);
@@ -178,6 +189,8 @@ const v4SchemaSql = `
 `;
 
 async function run() {
+  let exitCode = 0;
+  try {
   await test("imports the transcript and worktree timeline", async () => {
     const result = await ingestTranscript(db, "run-worktree-1", transcript, sessionId);
     assert(result.events === 4, `events=${result.events}`);
@@ -229,11 +242,13 @@ async function run() {
     assertEqual(r2.events, 0, "run-2 re-ingest events");
   });
 
-  await test("(b3) third ingest pass of both runs still yields events===0", async () => {
-    const r1 = await ingestTranscript(db, "run-worktree-1", transcript, sessionId);
+  await test("(b3) third ingest pass: run-A re-ingested AFTER run-B, both events===0", async () => {
+    // AC: "run A re-ingested AFTER run B" — so re-ingest run-2 (B) first, then
+    // run-1 (A). Order differs from (b2) on purpose to match the spec narrative.
     const r2 = await ingestTranscript(db, "run-worktree-2", transcript, sessionId);
-    assertEqual(r1.events, 0, "run-1 third pass events");
+    const r1 = await ingestTranscript(db, "run-worktree-1", transcript, sessionId);
     assertEqual(r2.events, 0, "run-2 third pass events");
+    assertEqual(r1.events, 0, "run-1 third pass events");
   });
 
   await test("(b4) cross-run isolation: re-ingest run-1 leaves run-2 untouched", async () => {
@@ -261,7 +276,7 @@ async function run() {
   console.log("\nScenario (a) — v4 fixture → v5 migration → run-v4-2 ingest on same source");
 
   await test("(a) v4 DB migrated to v5; run-v4-2 ingest collides on same source_path:offset, distinct run_id", async () => {
-    if (!DatabaseSync) { console.log("    SKIP: node:sqlite unavailable"); return; }
+    if (!DatabaseSync) { throw new TestSkip("node:sqlite unavailable"); }
     const tempA = mkdtempSync(join(tmpdir(), "joi-264-a-"));
     const savedHome = process.env.LA_TELEMETRY_HOME;
     const savedDb = process.env.LA_TELEMETRY_DB;
@@ -277,6 +292,19 @@ async function run() {
       const usageId = createHash("sha256").update(`${sourcePath}:${sourceOffset}`).digest("hex");
       // tool_fact_id (recordToolFact) = sha1("sourcePath:sourceOffset:toolIndex")
       const toolFactId = createHash("sha1").update(`${sourcePath}:${sourceOffset}:0`).digest("hex");
+
+      // Expected run-v4-1 totals computed from the v4 INSERT payload literals
+      // (input_tokens=100, output_tokens=10, cost_facts.cost_usd=0.001) BEFORE
+      // openTelemetryDb() triggers migration. Captured here so a migration
+      // regression (e.g. a cost JOIN that doubles cost_usd) is caught by an
+      // absolute-value assertion rather than a post-migration self-compare.
+      const expectedRun1Totals = {
+        inputTokens: 100,
+        outputTokens: 10,
+        cacheReadTokens: 0,
+        cacheCreationInputTokens: 0,
+        partialCostUSD: 0.001,
+      };
 
       // --- Build v4 fixture (raw SQL on a separate handle) ---
       const v4 = new DatabaseSync(dbPathA);
@@ -327,7 +355,7 @@ async function run() {
         assert(costRow && costRow.run_id === "run-v4-1", `cost_facts.run_id=${costRow?.run_id} (expected run-v4-1)`);
         // transcript_sources legacy row migrated with sentinel '' run_id.
         const tsRow = dbA.prepare("SELECT run_id FROM transcript_sources WHERE source_path=? AND run_id=''").get(sourcePath);
-        assert(tsRow, `legacy transcript_sources row with '' sentinel missing`);
+        assert(tsRow, `legacy transcript_sources[${sourcePath}] row with '' sentinel missing`);
 
         // --- Insert run-v4-2 (applyEvent run.started creates the runs row) ---
         applyEvent(dbA, makeEvent("run.started", {
@@ -388,9 +416,16 @@ async function run() {
         assert(r1.totals.inputTokens > 0 && r2.totals.inputTokens > 0,
           `both runs non-zero totals (r1=${r1.totals.inputTokens}, r2=${r2.totals.inputTokens})`);
 
-        // run-v4-1 sums unchanged by run-v4-2 ingest.
-        assertEqual(r1.totals.inputTokens, run1Before.totals.inputTokens, "run-v4-1 inputTokens unchanged");
-        assertEqual(r1.totals.outputTokens, run1Before.totals.outputTokens, "run-v4-1 outputTokens unchanged");
+        // run-v4-1 sums unchanged by run-v4-2 ingest (cross-run isolation).
+        assertEqual(r1.totals.inputTokens, run1Before.totals.inputTokens, "run-v4-1 inputTokens unchanged by run-v4-2 ingest");
+        assertEqual(r1.totals.outputTokens, run1Before.totals.outputTokens, "run-v4-1 outputTokens unchanged by run-v4-2 ingest");
+        // run-v4-1 matches the pre-migration v4 fixture baseline — guards
+        // against migration regressions (e.g. cost JOIN doubling cost_usd) that
+        // a post-migration self-compare would miss.
+        assertEqual(r1.totals.inputTokens, expectedRun1Totals.inputTokens, "run-v4-1 inputTokens matches v4 fixture baseline (migration not corrupted)");
+        assertEqual(r1.totals.outputTokens, expectedRun1Totals.outputTokens, "run-v4-1 outputTokens matches v4 fixture baseline");
+        assertEqual(r1.totals.cacheReadTokens, expectedRun1Totals.cacheReadTokens, "run-v4-1 cacheReadTokens matches v4 fixture baseline");
+        assertEqual(Number(r1.totals.partialCostUSD.toFixed(6)), expectedRun1Totals.partialCostUSD, "run-v4-1 partialCostUSD matches v4 fixture baseline (migration not corrupted)");
       } finally {
         dbA.close();
       }
@@ -401,10 +436,13 @@ async function run() {
     }
   });
 
-  rmSync(temp, { recursive: true, force: true });
-  console.log(`\n${passed} passed, ${failed} failed`);
+  console.log(`\n${passed} passed, ${skipped} skipped, ${failed} failed`);
   if (failed) console.log(failures.join("\n"));
-  process.exit(failed ? 1 : 0);
+  exitCode = failed ? 1 : 0;
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+  process.exit(exitCode);
 }
 
 run().catch((error) => { console.error(error); process.exit(1); });
