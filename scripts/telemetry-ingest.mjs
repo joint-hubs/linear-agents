@@ -233,7 +233,7 @@ function stripLegacyWorkspaceSegment(transcriptPath) {
   return transcriptPath.replace(/[/\\]workspace[/\\][^/\\]+[/\\]/, "/");
 }
 
-function transcriptForSession(run) {
+export function transcriptForSession(run) {
   if (!run.sessionId) return null;
   if (run.transcriptPath && existsSync(run.transcriptPath)) return run.transcriptPath;
   // The path stored in DB may include a stale /workspace/{id}/ segment that
