@@ -275,17 +275,20 @@ await test("(e) backfill restores run-B; summary deltas === run-B totals; run-A 
 
     // Build fresh DB + insert runs A/B sharing sharedPathE.
     let d = openTelemetryDb(dbPathE);
-    d.prepare(
-      `INSERT INTO runs (run_id, squad, session_id, transcript_path, claude_config_dir, started_at, status, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run("run-A", "dev", "sess-1", sharedPathE, tempE, "2026-08-14T10:00:00.000Z", "completed", "2026-08-14T11:00:00.000Z");
-    d.prepare(
-      `INSERT INTO runs (run_id, squad, session_id, transcript_path, claude_config_dir, started_at, status, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run("run-B", "dev", "sess-1", sharedPathE, tempE, "2026-08-14T10:01:00.000Z", "completed", "2026-08-14T11:01:00.000Z");
-    // Pre-ingest run-A (recordToolFact inside ingestTranscript opens via env → dbPathE).
-    await ingestTranscript2(d, "run-A", sharedPathE, "sess-1");
-    d.close();
+    try {
+      d.prepare(
+        `INSERT INTO runs (run_id, squad, session_id, transcript_path, claude_config_dir, started_at, status, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run("run-A", "dev", "sess-1", sharedPathE, tempE, "2026-08-14T10:00:00.000Z", "completed", "2026-08-14T11:00:00.000Z");
+      d.prepare(
+        `INSERT INTO runs (run_id, squad, session_id, transcript_path, claude_config_dir, started_at, status, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run("run-B", "dev", "sess-1", sharedPathE, tempE, "2026-08-14T10:01:00.000Z", "completed", "2026-08-14T11:01:00.000Z");
+      // Pre-ingest run-A (recordToolFact inside ingestTranscript opens via env → dbPathE).
+      await ingestTranscript2(d, "run-A", sharedPathE, "sess-1");
+    } finally {
+      d.close();
+    }
 
     // First backfill (no flags) so run-B gets ingested.
     let res = runScript(["--json"]);
