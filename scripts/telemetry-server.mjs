@@ -490,11 +490,35 @@ const ISSUE_PROJECT_QUERY = `
   }
 `;
 
+// Expand ${VAR} placeholders in any string values loaded from
+// config/projects.json. JSON has no native env-var support, but the file
+// (and the .env-loaded process.env) lets us keep paths like repo portable
+// without hardcoding user-specific directories. Recurses into objects/arrays
+// so nested fields (e.g. deploy.*) are expanded too. Unresolved placeholders
+// are left as-is so a missing env var surfaces as a clear "no repo mapped"
+// warning downstream rather than a silent empty string.
+const ENV_VAR_RE = /\$\{([A-Z_][A-Z0-9_]*)\}/g;
+function expandEnvVarsDeep(value) {
+  if (typeof value === 'string') {
+    return value.replace(ENV_VAR_RE, (match, name) =>
+      Object.prototype.hasOwnProperty.call(process.env, name) ? process.env[name] : match,
+    );
+  }
+  if (Array.isArray(value)) return value.map(expandEnvVarsDeep);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = expandEnvVarsDeep(v);
+    return out;
+  }
+  return value;
+}
+
 function loadProjectsConfig() {
   try {
     const raw = readFileSyncNode(join(root, 'config', 'projects.json'), 'utf8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed?.projects) ? parsed.projects : [];
+    const projects = Array.isArray(parsed?.projects) ? parsed.projects : [];
+    return projects.map(expandEnvVarsDeep);
   } catch (err) {
     console.error('[launch] config/projects.json not loaded —', err.message);
     return [];
