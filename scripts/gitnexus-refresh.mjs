@@ -96,6 +96,11 @@ function runForeground() {
  * `detached: true` + `unref()` is the portable way to survive the parent — a
  * bare `&` inside a Windows git hook does NOT reliably detach, which is why
  * graphify's own hook resorts to CREATE_BREAKAWAY_FROM_JOB.
+ *
+ * `windowsHide` is not optional alongside it. On Windows `detached: true` gives
+ * the child its own console, so without it EVERY commit flashes a terminal
+ * window: the hook fires on post-commit, i.e. during ordinary git work, and the
+ * flash is indistinguishable from an agent launching. Reported 2026-08-17.
  */
 function runBackground() {
   const head = headSha();
@@ -132,7 +137,7 @@ function runBackground() {
         try { rmSync(lock, { recursive: true, force: true }); } catch {}
       }
     `, process.execPath, RUNNER, ROOT, LOCK],
-    { cwd: ROOT, detached: true, stdio: ["ignore", out, out] }
+    { cwd: ROOT, detached: true, windowsHide: true, stdio: ["ignore", out, out] }
   );
   child.unref();
   process.exit(0);

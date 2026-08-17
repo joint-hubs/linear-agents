@@ -118,7 +118,11 @@ function main() {
   }
   db.close();
 
-  const backupPath = `${path}.pre-prune-backup.sqlite`;
+  // Timestamped so a second run never destroys the first run's rollback point,
+  // and so the script stays usable after the initial cleanup (test fixtures can
+  // leak in again — they did, hours after the first pass).
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const backupPath = `${path}.pre-prune-${stamp}.sqlite`;
   if (existsSync(backupPath)) {
     console.error(`[prune] backup already exists, refusing to overwrite: ${backupPath}`);
     process.exit(1);

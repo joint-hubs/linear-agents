@@ -2,7 +2,10 @@
 // scripts/launch.test.mjs — unit tests for the pure launch logic (L1b, JOI-69).
 //
 // Self-contained: `node scripts/launch.test.mjs` — no test framework, no HTTP
-// server, no spawn. Uses node:assert. Exits 0 on pass, 1 on fail. Backs the
+// server. One test does spawn a child (the consolePid case at the bottom); it
+// is given its own temp telemetry store, because inheriting the environment
+// pointed it at the user's real one and left a run there on every execution.
+// Uses node:assert. Exits 0 on pass, 1 on fail. Backs the
 // dev hand-off "unit" claim with a committed, reproducible artifact (D-Q2,
 // review round 1: the 50/50 unit claim was previously not backed by a file).
 //
@@ -13,7 +16,7 @@
 
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import {
@@ -33,15 +36,29 @@ import {
 const ok = 'JOI-51';
 let pass = 0;
 
+// Async cases have to be tracked, not fired and forgotten. This used to call
+// fn() and immediately count a pass, so an async test printed PASS before it had
+// run and a rejection surfaced only as an unhandled rejection — the consolePid
+// case below reported PASS no matter what it did. Thenables are collected and
+// settled before the summary.
+const pending = [];
+
 function test(name, fn) {
-  try {
-    fn();
-    pass++;
-    console.log(`  PASS ${name}`);
-  } catch (err) {
+  const passed = () => { pass++; console.log(`  PASS ${name}`); };
+  const failed = (err) => {
     console.error(`  FAIL ${name}`);
     console.error(`       ${err.message}`);
     process.exitCode = 1;
+  };
+  try {
+    const result = fn();
+    if (result && typeof result.then === 'function') {
+      pending.push(result.then(passed, failed));
+      return;
+    }
+    passed();
+  } catch (err) {
+    failed(err);
   }
 }
 
@@ -328,6 +345,12 @@ test('_doc key in config is NOT treated as a squad', () => {
 test('cmdStart writes consolePid as a number > 0', async () => {
   const runId = `test-cpid-${Date.now()}`;
   const manifestPath = join(process.cwd(), '.state', 'runs', `${runId}.json`);
+  // run-manifest.mjs start records the run in the central store, and the child
+  // resolves that store from the environment. Inheriting process.env unchanged
+  // pointed it at the REAL one: every run of this test left a permanent
+  // test-cpid-* row there, which the dashboard then showed as a zero-cost dev
+  // run on JOI-9. 50 had piled up by 2026-08-17. Give the child its own store.
+  const temp = mkdtempSync(join(tmpdir(), 'launch-cpid-test-'));
 
   // Spawn run-manifest.mjs start as a subprocess — simulates _lib.bat calling it.
   // process.ppid inside the child will be the PID of the cmd.exe or node process
@@ -336,11 +359,14 @@ test('cmdStart writes consolePid as a number > 0', async () => {
     const child = spawn('node', ['scripts/run-manifest.mjs', 'start', runId, 'dev'], {
       env: {
         ...process.env,
+        LA_TELEMETRY_HOME: temp,
+        LA_TELEMETRY_DB: join(temp, 'telemetry.sqlite'),
         LA_TASK_ID: 'JOI-9',
         LA_LAUNCHED_BY: 'dashboard',
         LA_WINDOW_TITLE: 'fenix - dev - JOI-9',
       },
       stdio: 'ignore',
+      windowsHide: true,
     });
     child.on('close', (code) => {
       if (code === 0) resolve();
@@ -351,12 +377,29 @@ test('cmdStart writes consolePid as a number > 0', async () => {
 
   // Read the manifest and check consolePid
   let manifest;
+  let landedInTempStore = null;
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    // Load-bearing: proves the child wrote to the temp store rather than the
+    // user's real one. Without this the env override could be dropped again and
+    // nothing would fail — the damage only shows up later, in the dashboard.
+    const tempDb = join(temp, 'telemetry.sqlite');
+    if (existsSync(tempDb)) {
+      const { DatabaseSync } = await import('node:sqlite');
+      const db = new DatabaseSync(tempDb, { readOnly: true });
+      try {
+        landedInTempStore = db.prepare('SELECT 1 FROM runs WHERE run_id=?').get(runId) != null;
+      } finally { db.close(); }
+    } else {
+      landedInTempStore = false;
+    }
   } finally {
     // Clean up
     try { rmSync(manifestPath); } catch {}
+    try { rmSync(temp, { recursive: true, force: true }); } catch {}
   }
+  assert.equal(landedInTempStore, true,
+    'run must be recorded in the temp store — if false, the child fell back to the real telemetry database');
 
   assert.ok(typeof manifest.consolePid === 'number', 'consolePid is a number');
   assert.ok(manifest.consolePid > 0, `consolePid > 0, got ${manifest.consolePid}`);
@@ -364,5 +407,9 @@ test('cmdStart writes consolePid as a number > 0', async () => {
   assert.equal(manifest.launchedBy, 'dashboard', 'launchedBy preserved');
 });
 
-console.log(`\n${pass} passed${process.exitCode ? `, ${process.exitCode ? 'see failures above' : ''}` : ''}`);
+// Settle the async cases before counting — otherwise the summary prints while
+// they are still running and always reads as a clean pass.
+await Promise.all(pending);
+
+console.log(`\n${pass} passed${process.exitCode ? ', see failures above' : ''}`);
 if (process.exitCode) process.exit(process.exitCode);
