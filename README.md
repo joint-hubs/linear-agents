@@ -62,3 +62,23 @@ bin\plan.bat             :: odpal agenta planowania
 ## Wymagania
 
 Windows · Claude Code · Node 22.5+ (centralna telemetria używa `node:sqlite`) · Java 21 (render diagramów) · klucze: OpenRouter, Anthropic, Linear.
+
+## Testy
+
+```bat
+node scripts\test-all.mjs
+:: albo jeden plik:
+node scripts\test-all.mjs linear-client
+:: albo ręcznie:
+node scripts\<plik>.test.mjs
+```
+
+Wrapper uruchamia wszystkie `scripts/*.test.mjs` w kolejności i raportuje ile mineło. Każdy plik jest samodzielny (wystarczy `node`).
+
+## Contributing
+
+Zgłoszenia i PR-y — patrz [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Licencja
+
+[MIT](LICENSE).

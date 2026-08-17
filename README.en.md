@@ -75,6 +75,18 @@ using the `ATLAS_VENV_PYTHON` and `ATLAS_ROOT` env vars you set in `.env`.
 
 Forks running on macOS/Linux will need to translate the `.bat` launchers to `.sh` — the underlying `.mjs` scripts are portable.
 
+## Running tests
+
+```bat
+node scripts\test-all.mjs
+:: or a single file:
+node scripts\test-all.mjs linear-client
+:: or run one directly:
+node scripts\<file>.test.mjs
+```
+
+The wrapper runs every `scripts/*.test.mjs` in order and reports a summary. Each file is self-contained (just `node`).
+
 ## License
 
 [MIT](LICENSE) — Copyright (c) 2026 Mateusz Stachowicz.
