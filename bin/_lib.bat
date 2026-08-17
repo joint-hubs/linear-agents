@@ -15,6 +15,24 @@ set "_PRE_LINEAR_WORKSPACE=%LINEAR_WORKSPACE%"
 REM load .env (eol=# skips comments, blank lines ignored)
 if exist "%ROOT%\.env" for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%ROOT%\.env") do set "%%A=%%B"
 
+REM Render config/atlas-mcp.json from config/atlas-mcp.json.template using ATLAS_VENV_PYTHON
+REM and ATLAS_ROOT from .env. The generated file is gitignored; the template is portable.
+REM Unresolved placeholders are left as-is so a missing env var surfaces immediately.
+REM We delegate to node here because cmd.exe's set STR:OLD=NEW substitution mangles
+REM backslashes in env-var values (single-pass escape semantics), and substituting
+REM within double quotes inside a JSON file is fragile. Node is already on PATH and
+REM the cost is ~30ms — cheaper than debugging the alternative.
+REM Backslashes in substituted values are normalized to JSON-escaped form (\\)
+REM so users can paste Windows paths in .env without thinking about JSON syntax.
+if exist "%ROOT%\config\atlas-mcp.json.template" (
+    if not exist "%ROOT%\config\atlas-mcp.json" (
+        node -e "const fs=require('fs'),p=require('path');const t=fs.readFileSync(p.join(process.cwd(),'config','atlas-mcp.json.template'),'utf8');const r=t.replace(/\{\{([A-Z_][A-Z0-9_]*)\}\}/g,(m,n)=>{const v=Object.prototype.hasOwnProperty.call(process.env,n)?process.env[n]:m;return typeof v==='string'?v.replace(/\\/g,'\\\\'):v;});try{JSON.parse(r);}catch(e){process.stderr.write('atlas-mcp.json template render produced invalid JSON: '+e.message+'\n');process.exit(1);}fs.writeFileSync(p.join(process.cwd(),'config','atlas-mcp.json'),r);" 2>nul
+        if errorlevel 1 (
+            echo [!] Nie udalo sie wyrenderowac config\atlas-mcp.json z template. Sprawdz ATLAS_VENV_PYTHON i ATLAS_ROOT w .env.
+        )
+    )
+)
+
 REM restore window-level overrides
 if defined _PRE_LINEAR_TEAM_KEY set "LINEAR_TEAM_KEY=%_PRE_LINEAR_TEAM_KEY%"
 if defined _PRE_LINEAR_WORKSPACE set "LINEAR_WORKSPACE=%_PRE_LINEAR_WORKSPACE%"

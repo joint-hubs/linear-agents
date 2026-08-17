@@ -77,3 +77,6 @@ Thumbs.db
 *.log
 
 .env.backup-fen
+
+# Rendered at launcher startup from config/atlas-mcp.json.template by bin/_lib.bat
+config/atlas-mcp.json
