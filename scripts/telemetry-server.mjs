@@ -208,31 +208,51 @@ async function telemetryHealth() {
  * "active" forever — Live kept counting a review whose window had already been
  * closed while the terminal panel, which checks the process, correctly did not.
  *
- * Only acts on definitive evidence: a recorded consolePid whose process no
- * longer exists. Runs without a pid (legacy or started outside the dashboard)
- * are left alone rather than guessed at.
+ * Two paths:
+ *   - a recorded consolePid whose process is gone — definitive, close it.
+ *   - no consolePid at all — close only after a long idle window
+ *     (orphanRunVerdict), and record a `run_orphaned` data-quality issue so the
+ *     guess is visible. Skipping these entirely was the old behaviour and it
+ *     made them permanent: a run with no pid could never be closed by anything.
  *
  * @returns {number} how many runs were closed
  */
 async function reconcileDeadRuns() {
   let closed = 0;
+  const close = (run, endedAt, reason) => {
+    telemetryStore.recordManifest(
+      {
+        runId: run.runId,
+        squad: run.squad,
+        startedAt: run.startedAt,
+        endedAt: endedAt || new Date().toISOString(),
+        exitCode: null,
+      },
+      'ended',
+    );
+    closed++;
+    console.log(`[telemetry] reconcile: closed ${run.runId} (${reason})`);
+  };
+
   try {
     const active = withManifestConsolePid(await telemetryRuns()).filter((r) => !r.endedAt);
     for (const run of active) {
-      if (!Number.isInteger(run.consolePid) || run.consolePid <= 0) continue;
-      if (isProcessAlive(run.consolePid)) continue;
-      telemetryStore.recordManifest(
-        {
-          runId: run.runId,
-          squad: run.squad,
-          startedAt: run.startedAt,
-          endedAt: run.lastActivityAt || new Date().toISOString(),
-          exitCode: null,
-        },
-        'ended',
-      );
-      closed++;
-      console.log(`[telemetry] reconcile: closed ${run.runId} (console pid ${run.consolePid} gone)`);
+      if (Number.isInteger(run.consolePid) && run.consolePid > 0) {
+        if (isProcessAlive(run.consolePid)) continue;
+        close(run, run.lastActivityAt, `console pid ${run.consolePid} gone`);
+        continue;
+      }
+      // No pid to check. Leaving these alone made them immortal — see
+      // orphanRunVerdict() for what that cost. Closing one is a guess, so it
+      // also raises a data-quality issue rather than disappearing silently.
+      const verdict = telemetryStore.orphanRunVerdict(run);
+      if (!verdict) continue;
+      close(run, verdict.endedAt, `orphan: ${verdict.reason}`);
+      telemetryStore.reportDataQuality(run.runId, 'run_orphaned', {
+        reason: verdict.reason,
+        startedAt: run.startedAt ?? null,
+        lastActivityAt: run.lastActivityAt ?? null,
+      });
     }
   } catch (error) {
     console.error(`[telemetry] reconcile failed: ${error.message}`);

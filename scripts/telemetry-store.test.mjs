@@ -20,6 +20,8 @@ import {
   recordDelegationLink,
   recordTaskLink,
   recordToolFact,
+  orphanRunVerdict,
+  ORPHAN_RUN_IDLE_MS,
   SCHEMA_VERSION,
   MIGRATION_VERSIONS,
 } from "./telemetry-store.mjs";
@@ -609,6 +611,78 @@ test("cross-run isolation: two runs sharing a JSONL keep separate cost_facts", (
   const run1After = queryRuns(db).find((r) => r.runId === "run-1");
   assert(run1After.totals.costUSD === cost1Before, `run-1 cost drifted ${cost1Before} → ${run1After.totals.costUSD}`);
   assert(run1After.byAgent.implementer.turns === 1, `run-1 turns drifted=${run1After.byAgent.implementer.turns}`);
+});
+
+// --- orphanRunVerdict ------------------------------------------------------
+// Guards the immortal-run bug: reconcileDeadRuns() only ever closed runs whose
+// console pid was gone, so a run with NO pid could never be closed by anything.
+// Two leaked test fixtures sat in the production Live view as permanently
+// ACTIVE until 2026-08-17.
+
+const NOW = Date.parse("2026-08-17T15:00:00.000Z");
+const ago = (ms) => new Date(NOW - ms).toISOString();
+
+test("orphanRunVerdict: a live console pid is never the orphan path's business", () => {
+  const v = orphanRunVerdict({ runId: "r", consolePid: 4321, startedAt: ago(50 * 3600_000) }, NOW);
+  assert(v === null, `expected null for a run with a pid, got ${JSON.stringify(v)}`);
+});
+
+test("orphanRunVerdict: an already-ended run is left alone", () => {
+  const v = orphanRunVerdict({ runId: "r", endedAt: ago(0), startedAt: ago(50 * 3600_000) }, NOW);
+  assert(v === null, `expected null for an ended run, got ${JSON.stringify(v)}`);
+});
+
+test("orphanRunVerdict: no pid but recently active → still running, leave it", () => {
+  const v = orphanRunVerdict({ runId: "r", consolePid: null, startedAt: ago(20 * 3600_000), lastActivityAt: ago(60_000) }, NOW);
+  assert(v === null, `a run active a minute ago must not be closed, got ${JSON.stringify(v)}`);
+});
+
+test("orphanRunVerdict: lastActivityAt wins over an old startedAt", () => {
+  // The 3h runs in the dashboard are real. Only idleness counts, not age.
+  const v = orphanRunVerdict({ runId: "r", consolePid: null, startedAt: ago(40 * 3600_000), lastActivityAt: ago(3 * 3600_000) }, NOW);
+  assert(v === null, `long-running but recently active must survive, got ${JSON.stringify(v)}`);
+});
+
+test("orphanRunVerdict: no pid and idle past the window → close, ending at last activity", () => {
+  const last = ago(13 * 3600_000);
+  const v = orphanRunVerdict({ runId: "r", consolePid: null, startedAt: ago(40 * 3600_000), lastActivityAt: last }, NOW);
+  assert(v != null, "13h idle with no pid must be closed");
+  assert(v.endedAt === last, `endedAt=${v.endedAt} must be the last activity, not now`);
+  assert(/idle for 13h/.test(v.reason), `reason=${v.reason}`);
+});
+
+test("orphanRunVerdict: the idle window boundary is pinned on both sides", () => {
+  // "idle for at least ORPHAN_RUN_IDLE_MS" is the rule: one millisecond short
+  // survives, exactly at the window closes.
+  const justUnder = orphanRunVerdict({ runId: "r", consolePid: null, lastActivityAt: ago(ORPHAN_RUN_IDLE_MS - 1) }, NOW);
+  assert(justUnder === null, `1 ms short of the window must survive, got ${JSON.stringify(justUnder)}`);
+  const atWindow = orphanRunVerdict({ runId: "r", consolePid: null, lastActivityAt: ago(ORPHAN_RUN_IDLE_MS) }, NOW);
+  assert(atWindow != null, "exactly at the window must close");
+});
+
+test("orphanRunVerdict: the real leaked fixtures — no pid, no timeline at all", () => {
+  // Exactly the two rows found in the production store: squad null, started_at
+  // null, console_pid null, zero usage. Nothing to age them against, so they
+  // are closed immediately rather than living forever.
+  for (const runId of ["test-run-fk-2", "test-1786714377"]) {
+    const v = orphanRunVerdict({ runId, consolePid: null, startedAt: null, lastActivityAt: null }, NOW);
+    assert(v != null, `${runId} must be closable`);
+    assert(v.endedAt === null, `${runId} endedAt=${v.endedAt} — no timeline to end at, caller substitutes now`);
+    assert(/no timeline/.test(v.reason), `${runId} reason=${v.reason}`);
+  }
+});
+
+test("orphanRunVerdict: an unparsable timestamp is treated as no timeline, not as fresh", () => {
+  const v = orphanRunVerdict({ runId: "r", consolePid: null, lastActivityAt: "not-a-date" }, NOW);
+  assert(v != null, "a garbage timestamp must not keep a run alive forever");
+  assert(/unparsable/.test(v.reason), `reason=${v.reason}`);
+});
+
+test("orphanRunVerdict: consolePid 0 and negatives count as no pid", () => {
+  for (const pid of [0, -1]) {
+    const v = orphanRunVerdict({ runId: "r", consolePid: pid, lastActivityAt: ago(20 * 3600_000) }, NOW);
+    assert(v != null, `consolePid=${pid} must fall through to the orphan path`);
+  }
 });
 
 db.close();
