@@ -1,84 +1,96 @@
 # Fenix
 
-Fenix to wieloagentowy workflow, który łączy Linear z Claude Code: pięć wyspecjalizowanych agentów przerabia tickety Linear w pętli, z minimalną ingerencją człowieka. Każdy agent startuje z izolowanego `.bat` — z własnym providerem/modelem i własnym `CLAUDE_CONFIG_DIR` — a human-in-the-loop działa **async** przez metadane Lineara (labelki, statusy, komentarze). Cel: maksymalne odciążenie przy minimalnym koszcie, całość widoczna na centralnej telemetrii (SQLite, port 7331).
+Fenix is a multi-agent workflow that connects Linear to Claude Code: five specialized agents process Linear tickets in a loop, with minimal human intervention. Each agent boots from an isolated `.bat` launcher — with its own provider/model and its own `CLAUDE_CONFIG_DIR` — and human-in-the-loop runs **asynchronously** through Linear metadata (labels, states, comments). The goal is maximum delegation at minimum cost, all visible in a central telemetry dashboard (SQLite, port 7331).
 
-## Pipeline e2e
+> **Note:** This is the English README. The original Polish version ([README.md](README.md)) is the authoritative one for the maintainer's team. The project itself is bilingual; this file is provided for external contributors.
+
+## End-to-end pipeline
 
 ```
 PLAN ──▶ DEV ──▶ REVIEW ──▶ TEST ──▶ CADENCE
-                                    (co tydzień)
+                                    (weekly)
 ```
 
-- **PLAN** — discovery: wpis z `planning/inbox/` (np. voice memo) → spec → ticket w Linearze.
-- **DEV** — podbiera task z `Todo`, robi branch, implementuje, wystawia na `In Review`.
-- **REVIEW** — first-pass + security + deep review (max 2 rundy); task wraca albo idzie dalej.
-- **TEST** — deploy na stage, testy syntetyczne, zamknięcie jako `Done`.
-- **CADENCE** — cykliczny (co tydzień): digest, retrospektywa, refresh roadmapy.
+- **PLAN** — discovery: an entry from `planning/inbox/` (e.g. a voice memo) → spec → Linear ticket.
+- **DEV** — picks up a `Todo` task, creates a branch, implements, moves it to `In Review`.
+- **REVIEW** — first-pass + security + deep review (max 2 rounds); task comes back or moves forward.
+- **TEST** — deploys to a staging VM, runs synthetic tests, closes as `Done`.
+- **CADENCE** — recurring (weekly): digest, retrospective, roadmap refresh.
 
-## 6 elementów (5 agentów + orchestrator)
+## Six components (5 agents + orchestrator)
 
-| # | Agent | Launcher | Trigger | Rola |
+| # | Agent | Launcher | Trigger | Role |
 |---|---|---|---|---|
-| 0 | CADENCE | `bin/cadence.bat` | cron weekly | digest + retro + roadmap refresh |
+| 0 | CADENCE | `bin/cadence.bat` | cron, weekly | digest + retro + roadmap refresh |
 | 1 | PLAN | `bin/plan.bat` | voice memo + `planning/inbox/` | discovery → spec → pushed |
-| 2 | DEV | `bin/dev.bat` | task w `Todo` | pick → branch → kod → In Review |
-| 3 | REVIEW | `bin/review.bat` | task w `In Review` | first-pass + security + deep (max 2 rundy) |
-| 4 | TEST | `bin/test.bat` | task `stage:testing` | deploy → synthetic → Done |
-| — | ORCHESTRATOR | `bin/orchestrate.bat` | ręcznie | strategista (Atlas MCP), deleguje do launcherów |
+| 2 | DEV | `bin/dev.bat` | task in `Todo` | pick → branch → code → In Review |
+| 3 | REVIEW | `bin/review.bat` | task in `In Review` | first-pass + security + deep (max 2 rounds) |
+| 4 | TEST | `bin/test.bat` | task in `stage:testing` | deploy → synthetic → Done |
+| — | ORCHESTRATOR | `bin/orchestrate.bat` | manual | strategist (Atlas MCP), delegates to launchers |
 
 ## Quickstart
 
 ```bat
-copy .env.example .env   :: uzupełnij klucze (OpenRouter, Anthropic, Linear)
-:: uzupełnij config/projects.json (repo↔projekt, GCP VM)
-node scripts/bootstrap-linear.mjs   :: tworzy labelki/statusy/templates w Linear
-bin\dashboard.bat        :: dashboard telemetryczny na :7331
-bin\plan.bat             :: odpal agenta planowania
+copy .env.example .env   :: fill in keys (OpenRouter, Anthropic, Linear)
+:: edit config/projects.json (repo<->project, GCP VM, team IDs)
+node scripts/bootstrap-linear.mjs   :: creates labels/states/templates in Linear
+bin\dashboard.bat        :: telemetry dashboard on :7331
+bin\plan.bat             :: start the planning agent
 ```
+
+The launchers read `.env` and `config/projects.json` at startup. The first run
+will auto-render `config/atlas-mcp.json` from `config/atlas-mcp.json.template`
+using the `ATLAS_VENV_PYTHON` and `ATLAS_ROOT` env vars you set in `.env`.
 
 ## Stack
 
-- **Claude Code** — każdy agent = izolowany `CLAUDE_CONFIG_DIR` + własny provider/model
-- **Modele** — DeepSeek V4 Flash / Pro, GLM-5.2, Sonnet 4.6, Kimi K2.7 (routing w `config/models.json`; decyzja: [model-comparison-and-routing.md](docs/decisions/model-comparison-and-routing.md))
-- **Telemetria** — SQLite schema v3 (`tool_facts` + `delegation_links` + `usage_facts`) → dashboard API na :7331 ([TELEMETRY-EXPLAINED.md](docs/TELEMETRY-EXPLAINED.md))
-- **Linear** — 2 workspace (joi | pisi), sygnały przez labels + emoji + webhooki ([linear-signaling-protocol.md](docs/decisions/linear-signaling-protocol.md))
+- **Claude Code** — each agent runs in an isolated `CLAUDE_CONFIG_DIR` with its own provider/model.
+- **Models** — DeepSeek V4 Flash / Pro, GLM-5.2, Sonnet 4.6, Kimi K2.7 (routing in `config/models.json`; rationale: [model-comparison-and-routing.md](docs/decisions/model-comparison-and-routing.md)).
+- **Telemetry** — SQLite schema v3 (`tool_facts` + `delegation_links` + `usage_facts`) → dashboard API on :7331 ([TELEMETRY-EXPLAINED.md](docs/TELEMETRY-EXPLAINED.md)).
+- **Linear** — 2 workspaces (`joi` | `pisi`), signals via labels + emoji + webhooks ([linear-signaling-protocol.md](docs/decisions/linear-signaling-protocol.md)).
 
-## Nowości 2026-Q3
+## What's new in 2026-Q3
 
-- **Orchestrator w repo** — `agents/orchestrator/` (strategist + 8 skills, Atlas MCP); config przeniesiony z `%LOCALAPPDATA%\hermes` do repo
-- **Telemetria v3** — `tool_facts` + `delegation_links` + `usage_facts` w SQLite. Trace: transkrypty → sqlite → dashboard. Retencja: [check-transcript-retention.mjs](scripts/check-transcript-retention.mjs)
-- **In-place prompt editor** — edycja promptów/agentów z UI dashboard, w tym zewnętrznych orchestrator root'ów (allowlist + symlink-safe; [prompt-editing.md](docs/ui/prompt-editing.md))
-- **Agent intelligence** — [agent_intelligence.py](notebooks/agent_intelligence.py) czyta telemetrię SQL → self-contained HTML (n-gramy, embedding clusters, per-squad break-down)
-- **GitNexus code-intelligence** — 6 skilli (`.claude/skills/gitnexus/`) + [AGENTS.md](AGENTS.md); impact analysis + detect_changes przed każdym commitem
+- **Orchestrator in the repo** — `agents/orchestrator/` (strategist + 8 skills, Atlas MCP); config moved from `%LOCALAPPDATA%\hermes` to the repo.
+- **Telemetry v3** — `tool_facts` + `delegation_links` + `usage_facts` in SQLite. Trace: transcripts → sqlite → dashboard. Retention: [check-transcript-retention.mjs](scripts/check-transcript-retention.mjs).
+- **In-place prompt editor** — edit prompts/agents from the dashboard UI, including external orchestrator roots (allowlist + symlink-safe; [prompt-editing.md](docs/ui/prompt-editing.md)).
+- **Agent intelligence** — [agent_intelligence.py](notebooks/agent_intelligence.py) reads telemetry SQL → self-contained HTML (n-grams, embedding clusters, per-squad break-down).
+- **GitNexus code-intelligence** — 6 skills (`.claude/skills/gitnexus/`) + [AGENTS.md](AGENTS.md); impact analysis + `detect_changes` before every commit.
 
-## Dokumentacja
+## Documentation
 
-- Koncept: [00-overview.md](docs/00-overview.md) · [FENIX_WORKFLOW.md](docs/FENIX_WORKFLOW.md)
-- Jak uruchomić: [HOW-TO-RUN-AGENTS.md](docs/HOW-TO-RUN-AGENTS.md) · [STATE.md](docs/STATE.md)
-- Decyzje: [model routing](docs/decisions/model-comparison-and-routing.md) · [squad-review](docs/decisions/squad-review-2026-07-27.md) · [code review](docs/decisions/code-review-2026-08-03.md) · [telemetry audit](docs/decisions/telemetry-data-audit-2026-08-03.md)
+- Concept: [00-overview.md](docs/00-overview.md) · [FENIX_WORKFLOW.md](docs/FENIX_WORKFLOW.md)
+- How to run: [HOW-TO-RUN-AGENTS.md](docs/HOW-TO-RUN-AGENTS.md) · [STATE.md](docs/STATE.md)
+- Decisions: [model routing](docs/decisions/model-comparison-and-routing.md) · [squad review](docs/decisions/squad-review-2026-07-27.md) · [code review](docs/decisions/code-review-2026-08-03.md) · [telemetry audit](docs/decisions/telemetry-data-audit-2026-08-03.md)
 - Intelligence: [agent-intelligence.md](docs/plans/agent-intelligence.md)
-- Pełny indeks: [docs/README.md](docs/README.md)
+- Full index: [docs/README.md](docs/README.md)
 
-## Wymagania
+## Requirements
 
-Windows · Claude Code · Node 22.5+ (centralna telemetria używa `node:sqlite`) · Java 21 (render diagramów) · klucze: OpenRouter, Anthropic, Linear.
+- Windows 10/11
+- [Claude Code](https://claude.com/claude-code) (CLI)
+- Node.js **22.5+** (the central telemetry server uses `node:sqlite`)
+- Java 21 (only for rendering PlantUML diagrams)
+- API keys: OpenRouter, Anthropic, Linear (see `.env.example`)
 
-## Testy
+Forks running on macOS/Linux will need to translate the `.bat` launchers to `.sh` — the underlying `.mjs` scripts are portable.
+
+## Running tests
 
 ```bat
 node scripts\test-all.mjs
-:: albo jeden plik:
+:: or a single file:
 node scripts\test-all.mjs linear-client
-:: albo ręcznie:
-node scripts\<plik>.test.mjs
+:: or run one directly:
+node scripts\<file>.test.mjs
 ```
 
-Wrapper uruchamia wszystkie `scripts/*.test.mjs` w kolejności i raportuje ile mineło. Każdy plik jest samodzielny (wystarczy `node`).
+The wrapper runs every `scripts/*.test.mjs` in order and reports a summary. Each file is self-contained (just `node`).
+
+## License
+
+[MIT](LICENSE) — Copyright (c) 2026 Mateusz Stachowicz.
 
 ## Contributing
 
-Zgłoszenia i PR-y — patrz [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Licencja
-
-[MIT](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md). For significant changes, please open an issue first to discuss what you'd like to change.
