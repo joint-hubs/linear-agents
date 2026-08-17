@@ -1473,6 +1473,38 @@ function repriceCurrent(db, runs) {
   return runs;
 }
 
+// How long an unended run with no console pid may sit idle before reconciliation
+// force-closes it. Generous on purpose: a legitimate long run (3h observed) must
+// never be closed underneath the user, and anything without a pid is already an
+// anomaly, not a normal launch.
+export const ORPHAN_RUN_IDLE_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * Should this unended run be force-closed as an orphan?
+ *
+ * reconcileDeadRuns() closes a run when its recorded console pid is gone. Runs
+ * with NO pid were skipped outright, which made them immortal: two test
+ * fixtures that leaked into the production store on 2026-08-14 ("test-run-fk-2",
+ * "test-1786714377") sat in Live as permanently ACTIVE, with no squad, no start
+ * time and no usage, because the pid branch could never fire for them.
+ *
+ * Only for the no-pid case — a run with a pid is decided by whether that process
+ * is alive, which this function cannot and should not determine.
+ *
+ * @returns {{reason: string, endedAt: string|null}|null} null = leave it alone
+ */
+export function orphanRunVerdict(run, now = Date.now(), idleMs = ORPHAN_RUN_IDLE_MS) {
+  if (!run || run.endedAt) return null;
+  if (Number.isInteger(run.consolePid) && run.consolePid > 0) return null;
+  const last = run.lastActivityAt || run.startedAt || null;
+  if (!last) return { reason: "no console pid and no timeline at all", endedAt: null };
+  const at = new Date(last).getTime();
+  if (!Number.isFinite(at)) return { reason: `no console pid and unparsable timestamp (${last})`, endedAt: null };
+  if (now - at < idleMs) return null;
+  const hours = Math.floor((now - at) / 3_600_000);
+  return { reason: `no console pid and idle for ${hours}h`, endedAt: last };
+}
+
 export function queryRuns(db, options = {}) {
   const where = options.runId ? "WHERE run_id=?" : "";
   const rows = db.prepare(`SELECT * FROM runs ${where} ORDER BY started_at DESC`).all(...(options.runId ? [options.runId] : []));
