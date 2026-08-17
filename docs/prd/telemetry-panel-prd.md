@@ -32,7 +32,7 @@ taski się zmieniają, że kod się produkuje, i powiązać generowane tokeny in
 
 ### 3.1 Ledger source — transcript JSONL (verified facts)
 
-Path: `C:/Users/mateu/.claude/projects/C--Users-mateu-Documents-GitHub-linear-agents/<session-id>.jsonl`
+Path: `$CLAUDE_CONFIG_DIR/projects/<cwd-hash>/<session-id>.jsonl`
 (NDJSON, one JSON object per line). Verified by probe:
 
 - Every `assistant` line carries `message.usage` with REAL (non-zero) counts:
@@ -67,7 +67,7 @@ Each squad launcher writes a manifest so we can attribute transcript sessions to
   "brief": null,
   "startedAt": "2026-06-25T13:02:07Z",
   "endedAt": "2026-06-25T13:14:33Z",
-  "cwd": "C:/Users/mateu/Documents/GitHub/linear-agents",
+  "cwd": "<repo-root>",
   "gitBranch": "feat/phase-a-offline-foundation",
   "native": false,
   "interactive": true

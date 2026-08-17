@@ -330,7 +330,7 @@ cd ui && npm install && npm run dev # http://localhost:5173
 
 ### Zrobione (cd. — Faza E foundation, telemetry + cost panel MVP, równolegle DeepSeek Flash, e2e verified)
 - **T-E0a — DONE.** `scripts/ledger.mjs` (ESM, zero deps): `parseTranscript` czyta transkrypty claude code
-  (`~/.claude/projects/C--Users-mateu-.../*.jsonl`, NDJSON) — każda linia `assistant` ma realny `message.usage`
+  (`~/.claude/projects/<cwd-hash>/*.jsonl`, NDJSON) — każda linia `assistant` ma realny `message.usage`
   (input/output/cache) + `message.model`; subagenty (`<session>/subagents/agent-*.jsonl`) mają `attributionAgent`.
   `costTokens` × pricing `config/models.json` (match cost-report.mjs). `aggregateRun`/`scanRuns`/`liveRuns`.
   Self-test `scripts/_test_ledger.mjs` 20/20 (gitignored). **Wybór źródła:** transkrypty, NIE stream-json — działają
@@ -456,7 +456,7 @@ cd ui && npm install && npm run dev # http://localhost:5173
 
 **Git po pilocie:** `feat/phase-a-offline-foundation` — 2 batche commitów pending (naprawy scripts #1#2 + ADR-0005). Branch `fen-28-scaffold-dummy-ui` (DEV commit `2df3919`, apps/dummy-ui) zostaje osobno. `planning/`, `.state/`, `scripts/_test_*.mjs` gitignored.
 
-**dummy-ui scaffold exported (2026-06-30):** standalone repo at `C:\Users\mateu\Desktop\dummy-ui-deploy-proof\` (commit c9ead75); branch `fen-28-scaffold-dummy-ui` kept locally pending deletion decision.
+**dummy-ui scaffold exported (2026-06-30):** standalone repo at `~/Desktop/dummy-ui-deploy-proof/` (commit c9ead75); branch `fen-28-scaffold-dummy-ui` kept locally pending deletion decision.
 
 ### Blokady (czeka na Mateusza)
 - Faza D T-D4 / Faza G: **GCP VM** (nazwa/projekt/zone).

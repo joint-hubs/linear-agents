@@ -10,7 +10,7 @@ metadata:
 Używany gdy user zgłasza nowe komentarze na PR albo prosi o przygotowanie PR do review/merge. Kluczowe założenia:
 
 - `gh` CLI jest zalogowany na konto z uprawnieniami `repo` (sprawdź `gh auth status` na starcie)
-- Na Windows `%TEMP%` to `C:\Users\mateu\AppData\Local\Temp\` — `gh api -F "body=@..."` rozwija `/tmp/...` do tej lokalizacji, ale NIE zapisuje tam plików. Ścieżki do plików z `body@` MUSZĄ być w stylu Windows (`/c/Users/.../AppData/Local/Temp/...`) albo użyj `body="..."` inline (kruche przy wielolinijkowych treściach)
+- Na Windows `%TEMP%` to `%LOCALAPPDATA%\Temp\` — `gh api -F "body=@..."` rozwija `/tmp/...` do tej lokalizacji, ale NIE zapisuje tam plików. Ścieżki do plików z `body@` MUSZĄ być w stylu Windows (`/c/Users/.../AppData/Local/Temp/...`) albo użyj `body="..."` inline (kruche przy wielolinijkowych treściach)
 - Pliki na GCP to rozpakowany tarball — NIE jest git repo. Sync plików po zmianie kodu przez `scp` (NIE `git pull`), z zachowaniem katalogu docelowego
 
 ## Kroki cyklu

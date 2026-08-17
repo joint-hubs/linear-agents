@@ -1,0 +1,11 @@
+{
+  "_doc": "Rejestracja mostu Atlas (agent_spawn / agent_start) dla orkiestratorów. Przekazywana przez --mcp-config w bin/orchestrate*.bat. Renderowana z tego template przez bin/_lib.bat do config/atlas-mcp.json (gitignored) — patrz sekcja # Atlas w .env.example.",
+  "mcpServers": {
+    "atlas": {
+      "type": "stdio",
+      "command": "{{ATLAS_VENV_PYTHON}}",
+      "args": ["{{ATLAS_ROOT}}\\server\\atlas_server.py"],
+      "env": {}
+    }
+  }
+}

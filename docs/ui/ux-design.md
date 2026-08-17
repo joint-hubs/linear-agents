@@ -228,10 +228,10 @@
 │  ┌──────────┬──────────┬──────────────────────────────────────┬──────────┐   │
 │  │ Project  │ Workspace│ Local repo path                      │ Deploy   │   │
 │  ├──────────┼──────────┼──────────────────────────────────────┼──────────┤   │
-│  │ Neo      │ joi      │ C:/Users/mateu/.../joint-flows  [✎]  │ gcp-vm   │   │
-│  │ AU       │ joi      │ C:/Users/mateu/.../office       [✎]  │ gcp-vm   │   │
-│  │ Fenix    │ joi      │ C:/Users/mateu/.../fenix        [✎]  │ gcp-vm   │   │
-│  │ PISI     │ pisi     │ C:/Users/mateu/.../gantt-pisi   [✎]  │ gcp-vm   │   │
+│  │ Neo      │ joi      │ ~/.../joint-flows  [✎]  │ gcp-vm   │   │
+│  │ AU       │ joi      │ ~/.../office       [✎]  │ gcp-vm   │   │
+│  │ Fenix    │ joi      │ ~/.../fenix        [✎]  │ gcp-vm   │   │
+│  │ PISI     │ pisi     │ ~/.../gantt-pisi   [✎]  │ gcp-vm   │   │
 │  └──────────┴──────────┴──────────────────────────────────────┴──────────┘   │
 │  [+ Add project]   [Save to config/projects.json]   [Discard]                 │
 ```

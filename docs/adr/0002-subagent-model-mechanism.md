@@ -18,7 +18,7 @@ lead delegates via the Task/Agent tool.
 The entire "model per subagent" design rests on one assumption that was never verified
 end-to-end: **does Claude Code actually honor `model: <openrouter-slug>` in a subagent's
 frontmatter?** Task T-A1 (BUILD-BACKLOG) is the spike that resolves this. The reference
-integration `C:\Users\mateu\AppData\Local\hermes\scripts\orchestrate-openrouter.bat` uses
+integration `%LOCALAPPDATA%\hermes\scripts\orchestrate-openrouter.bat` uses
 a different, env-var-only mechanism (`ANTHROPIC_BASE_URL` + `ANTHROPIC_SMALL_FAST_MODEL`),
 which raised doubt about whether frontmatter pinning works at all.
 
@@ -124,5 +124,5 @@ another Claude Code session (the orchestrator, CI, headless runners in Phase G).
 
 - BUILD-BACKLOG task T-A1 (spike contract) — `docs/BUILD-BACKLOG.md`
 - ADR-0001 — provider routing & fallback (native vs OpenRouter profiles)
-- Reference integration — `C:\Users\mateu\AppData\Local\hermes\scripts\orchestrate-openrouter.bat`
+- Reference integration — `%LOCALAPPDATA%\hermes\scripts\orchestrate-openrouter.bat`
 - Spike harness + logs — `.spike-a1/`, `.spike-a2/` (re-runnable: `run-spike.ps1`, `run-clean.ps1`)

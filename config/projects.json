@@ -13,43 +13,43 @@
     {
       "linearProject": "Neo",
       "workspace": "joi",
-      "repo": "C:/Users/mateu/Documents/GitHub/joint-flows",
+      "repo": "${GITHUB_ROOT}/joint-flows",
       "deploy": { "type": "gcp-vm", "vm": "TODO-vm-name", "ssh": "TODO" }
     },
     {
       "linearProject": "AU",
       "workspace": "joi",
-      "repo": "C:/Users/mateu/Documents/GitHub/office",
+      "repo": "${GITHUB_ROOT}/office",
       "deploy": { "type": "gcp-vm", "vm": "TODO-vm-name", "ssh": "TODO" }
     },
     {
       "linearProject": "FENIX",
       "workspace": "joi",
-      "repo": "C:/Users/mateu/Documents/GitHub/linear-agents",
+      "repo": "${GITHUB_ROOT}/linear-agents",
       "deploy": { "type": "none", "note": "pilot test project — no deploy target" },
-      "note": "Linear project used by team FOC (e.g. FOC-104) — confirmed to track this repo's own tooling work, not the C:/.../fenix directory (unclear/unconfirmed purpose, deliberately unmapped now to avoid misrouting real launches)."
+      "note": "Linear project used by team FOC (e.g. FOC-104) — tracks this repo's own tooling work."
     },
     {
       "linearProject": "Fenix v2",
       "workspace": "joi",
-      "repo": "C:/Users/mateu/Documents/GitHub/linear-agents",
+      "repo": "${GITHUB_ROOT}/linear-agents",
       "deploy": { "type": "none", "note": "pilot test project — no deploy target" },
       "note": "Linear project used by team JOI (e.g. JOI-259) — same as FENIX above, tracks this repo."
     },
     {
       "linearProject": "PISI",
       "workspace": "pisi",
-      "repo": "C:/Users/mateu/Documents/GitHub/gantt-pisi",
+      "repo": "${GITHUB_ROOT}/gantt-pisi",
       "deploy": { "type": "gcp-vm", "vm": "TODO-vm-name", "ssh": "TODO" }
     },
     {
       "linearProject": "linear-agents",
       "workspace": "joi",
-      "teamKey": "FEN",
-      "projectId": "eecedf9f68d4",
-      "repo": "C:/Users/mateu/Documents/GitHub/linear-agents",
+      "teamKey": "${LINEAR_TEAM_KEY_FEN}",
+      "projectId": "${LINEAR_PROJECT_ID_FEN}",
+      "repo": "${GITHUB_ROOT}/linear-agents",
       "deploy": { "type": "none", "note": "pilot test project — no deploy target" },
-      "note": "Pilot test project for linear-agents orchestration. Team FEN (id 08722f3a-3bc3-4d91-a748-cb109348a231), Linear project id eecedf9f68d4. See docs/BUILD-BACKLOG Faza C / docs/STATE.md."
+      "note": "Pilot test project for linear-agents orchestration. Team id configured via LINEAR_TEAM_UUID_FEN. See docs/BUILD-BACKLOG Faza C / docs/STATE.md."
     }
   ]
 }

@@ -14,7 +14,7 @@ chciałbym żeby digest cadence pokazywał wiek zadań w WIP bo teraz nie wiem k
 ## Kontekst
 
 - **Produkt:** linear-agents — zestaw 5 squadów agentów (cadence/plan/dev/review/test) do automatyzacji cyklu dev przez Linear.
-- **Repozytorium:** `C:\Users\mateu\Documents\GitHub\linear-agents`
+- **Repozytorium:** `<repo-root>`
 - **Constrainty:** read-mostly (CADENCE nie zmienia scope bez Mateusza); 1 digest/tydzień; collector czyta przez Linear MCP (1M context MiniMax — tani); zmiany tylko w agentach CADENCE (collector, retro, digest), nie w innych squadach.
 - **Timeline:** do zrobienia w tym sprintcie (przed następnym digestem).
 - **Budżet:** tani — preferowany MiniMax M3/M3 do collectora i retro, DeepSeek V4 Flash do digestu.

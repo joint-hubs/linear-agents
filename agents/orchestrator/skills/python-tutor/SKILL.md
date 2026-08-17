@@ -74,7 +74,7 @@ Każda instrukcja to:
 
 ### Uruchomienie apki
 ```bash
-cd C:/Users/mateu/Desktop/experiments/01_IP_BOX_PY
+cd $IPBOX_DIR    # set IPBOX_DIR to the path of your IP BOX PY project on your machine
 uvicorn ipbox.api:app --reload --port 8765
 ```
 Albo bez `uvicorn` (jeśli dodamy skrypt):
