@@ -29,10 +29,21 @@ try {
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
 const failures = [];
+
+// Thrown by a scenario that cannot run in this environment. The runner counts it
+// separately from a pass, so "no SQLite" can never be mistaken for "migration
+// verified". Mirrors the sentinel in telemetry-ingest.test.mjs.
+class TestSkip extends Error {}
 
 function assert(value, message) {
   if (!value) throw new Error(message || "assertion failed");
+}
+
+/** Every scenario here needs node:sqlite; call this first inside each one. */
+function requireSqlite() {
+  if (!DatabaseSync) throw new TestSkip("node:sqlite unavailable");
 }
 
 const testQueue = [];
@@ -176,14 +187,14 @@ function buildV4Fixture(path) {
   db.close();
 }
 
-if (!DatabaseSync) {
-  console.log("SKIP: node:sqlite unavailable");
-  process.exit(0);
-}
+// No global bail-out here: exiting 0 up front made a SQLite-less runner report
+// success for scenarios that never executed. Each scenario now declares the
+// dependency itself and the runner reports it as SKIP.
 
 // (a) fresh v4 fixture → v5
 let scenarioAPass = false;
 test("scenario (a): v4 DB migrated to v5 with composite PK and cost_facts.run_id populated", async () => {
+  requireSqlite();
   const temp = mkdtempSync(join(tmpdir(), "joi-260-a-"));
   try {
     const dbPath = join(temp, "telemetry.sqlite");
@@ -207,6 +218,14 @@ test("scenario (a): v4 DB migrated to v5 with composite PK and cost_facts.run_id
       const costRow = db.prepare("SELECT run_id, usage_id, price_set_id, cost_usd FROM cost_facts WHERE usage_id=?").get("usage-1");
       assert(costRow != null, "cost_facts row missing after migration");
       assert(costRow.run_id === "run-v4-1", `cost_facts.run_id=${costRow.run_id} (expected run-v4-1)`);
+      // The amount, not just the key. migrateRunScopedUsage rebuilds cost_facts
+      // through a JOIN onto usage_facts; if that JOIN ever doubles, zeroes or
+      // transforms the value, a run_id-only check still passes and the money
+      // changes silently. 0.001 is what the v4 fixture inserts.
+      assert(costRow.cost_usd === 0.001,
+        `cost_facts.cost_usd=${costRow.cost_usd} (expected 0.001 — the v4 fixture value, unchanged by the rebuild)`);
+      const costRows = db.prepare("SELECT COUNT(*) AS n FROM cost_facts").get().n;
+      assert(costRows === 1, `cost_facts rows=${costRows} (expected 1 — a JOIN fan-out would multiply them)`);
 
       // events row survived
       const evtCount = db.prepare("SELECT COUNT(*) AS n FROM events").get().n;
@@ -279,6 +298,7 @@ test("scenario (a): v4 DB migrated to v5 with composite PK and cost_facts.run_id
 
 // (b) reopening the same DB does NOT overwrite the snapshot
 test("scenario (b): reopening same DB preserves existing pre-v5-backup snapshot", () => {
+  requireSqlite();
   assert(scenarioAPass, "scenario (a) must pass first (dependency)");
   const temp = mkdtempSync(join(tmpdir(), "joi-260-b-"));
   try {
@@ -312,6 +332,7 @@ test("scenario (b): reopening same DB preserves existing pre-v5-backup snapshot"
 
 // (c) composite PK shape + DELETE FROM runs cascades to usage + cost
 test("scenario (c): composite PK on usage_facts; DELETE FROM runs cascades to usage+cost", () => {
+  requireSqlite();
   const temp = mkdtempSync(join(tmpdir(), "joi-260-c-"));
   try {
     const dbPath = join(temp, "telemetry.sqlite");
@@ -370,6 +391,7 @@ test("scenario (c): composite PK on usage_facts; DELETE FROM runs cascades to us
 
 // (d) a brand-new fresh DB records BOTH v4 and v5 markers in schema_migrations
 test("scenario (d): fresh DB has both v4 and v5 markers in schema_migrations", () => {
+  requireSqlite();
   const temp = mkdtempSync(join(tmpdir(), "joi-260-d-"));
   try {
     const dbPath = join(temp, "fresh.sqlite");
@@ -388,6 +410,7 @@ test("scenario (d): fresh DB has both v4 and v5 markers in schema_migrations", (
 
 // :memory: skips the VACUUM INTO snapshot
 test(":memory: DB skips pre-v5 backup snapshot", () => {
+  requireSqlite();
   const db = openTelemetryDb(":memory:");
   try {
     const h = queryHealth(db);
@@ -403,11 +426,18 @@ for (const { name, fn } of testQueue) {
     passed++;
     console.log(`  PASS ${name}`);
   } catch (error) {
+    if (error instanceof TestSkip) {
+      skipped++;
+      console.log(`  SKIP ${name}: ${error.message}`);
+      continue;
+    }
     failed++;
     failures.push(`${name}: ${error.message}`);
     console.log(`  FAIL ${name}: ${error.message}`);
   }
 }
-console.log(`\n${passed} passed, ${failed} failed`);
+console.log(`\n${passed} passed, ${skipped} skipped, ${failed} failed`);
 if (failed) console.log(failures.join("\n"));
+// Skips are not failures: a build without node:sqlite exits 0, a real assertion
+// failure exits 1.
 process.exit(failed ? 1 : 0);
