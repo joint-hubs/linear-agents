@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -599,6 +599,28 @@ export function migrate(db, path) {
   }
 }
 
+/**
+ * One spelling per file.
+ *
+ * source_path is an identity component three times over: the events UNIQUE key,
+ * the usage_facts UNIQUE key, and usage_id itself (hash(path:offset)). It was
+ * whatever string the caller happened to hold, so the same file reached the
+ * store as both `C:\...` and `C:/...` and every one of those keys split in two.
+ * Run 2026-07-27T07-05-39-770-dev-d2d8 ended up with 243 facts under each
+ * spelling and double the cost — $17.93 against $8.97 for identical sibling
+ * runs. Neither the composite PK nor the UNIQUE index can see that, because as
+ * strings the two paths simply differ.
+ *
+ * resolve() gives the platform-native form (backslashes on Windows), which is
+ * what 66 217 of 66 475 existing rows already used. Relative paths are left
+ * alone rather than being resolved against whatever cwd the caller happens to
+ * have — that would invent an identity rather than canonicalise one.
+ */
+function canonicalSourcePath(path) {
+  if (!path || typeof path !== "string") return null;
+  return isAbsolute(path) ? resolve(path) : path;
+}
+
 export function makeEvent(eventType, payload, options = {}) {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -609,7 +631,7 @@ export function makeEvent(eventType, payload, options = {}) {
     hostId: options.hostId || process.env.LA_TELEMETRY_HOST_ID || process.env.COMPUTERNAME || "local",
     source: {
       kind: options.sourceKind || "runtime",
-      path: options.sourcePath || null,
+      path: canonicalSourcePath(options.sourcePath),
       offset: Number.isInteger(options.sourceOffset) ? options.sourceOffset : null,
     },
     payload: payload || {},
@@ -769,6 +791,24 @@ export function applyEvent(db, event) {
     safeJson(event.payload), now(),
   );
 
+  return projectEvent(db, event);
+}
+
+/**
+ * Fold one event into the projections, without touching the events log.
+ *
+ * Split out of applyEvent so the log can be replayed. The two steps were welded
+ * together, which meant a projection could be lost permanently: if the event row
+ * was written but its handler never ran (or ran under a schema that rejected the
+ * row), a later re-ingest found the event already present, returned duplicate,
+ * and skipped the handler forever. Run 2026-07-27T07-10-36-661-dev-96ed sat like
+ * that — 243 usage.recorded events in the log, zero usage_facts, unrecoverable
+ * by re-ingest because the log was doing its job too well.
+ *
+ * Every handler is idempotent (INSERT OR IGNORE / ON CONFLICT / dedup guards),
+ * so replaying an event that WAS projected is a no-op.
+ */
+export function projectEvent(db, event) {
   switch (event.eventType) {
     case "run.started": return applyRunStarted(db, event);
     case "run.ended": return applyRunEnded(db, event);
@@ -780,6 +820,57 @@ export function applyEvent(db, event) {
     case "quality.reported": return applyQualityReported(db, event);
     default: return { ignored: true };
   }
+}
+
+/** Rehydrate a stored events row into the shape the handlers expect. */
+function eventFromRow(row) {
+  return {
+    eventId: row.event_id,
+    eventType: row.event_type,
+    runId: row.run_id,
+    observedAt: row.observed_at,
+    hostId: row.host_id,
+    source: { kind: row.source_kind, path: row.source_path, offset: row.source_offset },
+    payload: parseJson(row.payload_json, {}),
+  };
+}
+
+/**
+ * Replay stored events into the projections.
+ *
+ * Read-only against `events`; writes only projection tables. Additive by
+ * construction — it never deletes, so a replay cannot lose history.
+ *
+ * @param {object} db
+ * @param {{runId?: string, eventTypes?: string[], dryRun?: boolean}} [options]
+ *   eventTypes defaults to the fact-building events. Widening it to task.linked
+ *   or quality.reported replays attribution decisions too, which can reopen
+ *   issues that were resolved by hand — opt in deliberately.
+ */
+export function reprojectEvents(db, options = {}) {
+  const types = options.eventTypes || ["usage.recorded", "transcript.progress"];
+  const clauses = [`event_type IN (${types.map(() => "?").join(",")})`];
+  const args = [...types];
+  if (options.runId) { clauses.push("run_id IS ?"); args.push(options.runId); }
+  const rows = db.prepare(
+    `SELECT event_id, event_type, run_id, observed_at, host_id, source_kind, source_path,
+            source_offset, payload_json
+       FROM events WHERE ${clauses.join(" AND ")} ORDER BY observed_at, rowid`,
+  ).all(...args);
+
+  const summary = { scanned: rows.length, projected: 0, duplicate: 0, failed: 0, errors: [] };
+  if (options.dryRun) return summary;
+
+  for (const row of rows) {
+    try {
+      const result = projectEvent(db, eventFromRow(row));
+      if (result?.duplicate) summary.duplicate++; else summary.projected++;
+    } catch (error) {
+      summary.failed++;
+      if (summary.errors.length < 5) summary.errors.push(`${row.event_id}: ${error.message}`);
+    }
+  }
+  return summary;
 }
 
 function statusFor(run) {
