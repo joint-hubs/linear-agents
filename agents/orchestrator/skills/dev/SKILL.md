@@ -16,14 +16,14 @@ Two modes:
 
 **With ID:**
 - Prefix `PISI` → workspace pisi; anything else → jointhubs (default)
-- Read: `python C:\Users\mateu\AppData\Local\hermes\scripts\linear_tasks.py [-w pisi] show <ID>`
-- Comments: `python C:\Users\mateu\AppData\Local\hermes\scripts\linear_tasks.py [-w pisi] comments <ID>`
+- Read: `python %LOCALAPPDATA%\hermes\scripts\linear_tasks.py [-w pisi] show <ID>`
+- Comments: `python %LOCALAPPDATA%\hermes\scripts\linear_tasks.py [-w pisi] comments <ID>`
 
 **Without ID:**
 - Run both workspaces and show a merged numbered list:
   ```
-  python C:\Users\mateu\AppData\Local\hermes\scripts\linear_tasks.py list --state-type started --limit 20
-  python C:\Users\mateu\AppData\Local\hermes\scripts\linear_tasks.py -w pisi list --state-type started --limit 20
+  python %LOCALAPPDATA%\hermes\scripts\linear_tasks.py list --state-type started --limit 20
+  python %LOCALAPPDATA%\hermes\scripts\linear_tasks.py -w pisi list --state-type started --limit 20
   ```
 - Ask: "Który task bierzemy?"
 

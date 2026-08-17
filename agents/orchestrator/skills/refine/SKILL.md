@@ -50,15 +50,15 @@ Triggered when the argument looks like an issue identifier (e.g. `JOI-45`, `PISI
 1. Detect workspace: `PISI` prefix → pisi; else → jointhubs
 2. Read the issue and its comments:
    ```
-   python C:\Users\mateu\AppData\Local\hermes\scripts\linear_tasks.py [-w pisi] show <ID>
-   python C:\Users\mateu\AppData\Local\hermes\scripts\linear_tasks.py [-w pisi] comments <ID>
+   python %LOCALAPPDATA%\hermes\scripts\linear_tasks.py [-w pisi] show <ID>
+   python %LOCALAPPDATA%\hermes\scripts\linear_tasks.py [-w pisi] comments <ID>
    ```
 3. If the issue mentions specific files or areas — do a quick recon (Glob/Grep, no large file reads)
 4. Draft the enriched description using the template above
 5. **Show the full markdown to Mateusz and wait for approval before writing**
 6. On approval — resolve UUID and update:
    ```python
-   import sys; sys.path.insert(0, r"C:\Users\mateu\AppData\Local\hermes\scripts")
+   import sys; sys.path.insert(0, r"%LOCALAPPDATA%\hermes\scripts")
    import linear_api as la
    # la.use_workspace("pisi")  # uncomment for pisi
    issue = la.get_issue("<IDENTIFIER>")   # accepts "JOI-45" — returns dict with UUID in ["id"]
@@ -82,7 +82,7 @@ Triggered when the argument is free text (not an issue identifier).
 4. **Show the full draft to Mateusz and wait for approval before creating**
 5. On approval:
    ```python
-   import sys; sys.path.insert(0, r"C:\Users\mateu\AppData\Local\hermes\scripts")
+   import sys; sys.path.insert(0, r"%LOCALAPPDATA%\hermes\scripts")
    import linear_api as la
    # la.use_workspace("pisi")  # uncomment for pisi
    me = la.get_viewer()
