@@ -96,6 +96,24 @@ function runForeground() {
  * `detached: true` + `unref()` is the portable way to survive the parent — a
  * bare `&` inside a Windows git hook does NOT reliably detach, which is why
  * graphify's own hook resorts to CREATE_BREAKAWAY_FROM_JOB.
+ *
+ * `windowsHide: true` is required on BOTH spawns below, and removing either one
+ * brings the window back. Measured 2026-08-17:
+ *
+ *   detached, no windowsHide anywhere  -> window
+ *   detached + windowsHide (outer only) -> window   <-- the first attempt
+ *   detached + windowsHide (both)       -> no window
+ *   windowsHide (both), no detached     -> no window, but the analyze DIES with
+ *                                          its parent (lock held, never released)
+ *
+ * Why: DETACHED_PROCESS gives the child NO console. run.cjs then invokes npx,
+ * which on Windows is npx.cmd — a batch file, so cmd.exe runs it, and a console
+ * app with no console to inherit gets a fresh visible one. windowsHide on the
+ * inner call gives that level a HIDDEN console instead, which cmd.exe inherits.
+ * Hiding only the outer process leaves the grandchild to allocate its own.
+ *
+ * This fires on post-commit, i.e. during ordinary git work, so the flash reads
+ * as an agent launching itself. Reported 2026-08-17.
  */
 function runBackground() {
   const head = headSha();
@@ -120,7 +138,7 @@ function runBackground() {
       const { execFileSync } = require("node:child_process");
       const { rmSync } = require("node:fs");
       const [, node, runner, cwd, lock] = process.argv;
-      const run = (args) => execFileSync(node, [runner, "analyze", ...args], { cwd, stdio: "inherit" });
+      const run = (args) => execFileSync(node, [runner, "analyze", ...args], { cwd, stdio: "inherit", windowsHide: true });
       try {
         run([]);
       } catch (e) {
@@ -132,7 +150,7 @@ function runBackground() {
         try { rmSync(lock, { recursive: true, force: true }); } catch {}
       }
     `, process.execPath, RUNNER, ROOT, LOCK],
-    { cwd: ROOT, detached: true, stdio: ["ignore", out, out] }
+    { cwd: ROOT, detached: true, windowsHide: true, stdio: ["ignore", out, out] }
   );
   child.unref();
   process.exit(0);

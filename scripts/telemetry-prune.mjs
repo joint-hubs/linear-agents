@@ -118,7 +118,11 @@ function main() {
   }
   db.close();
 
-  const backupPath = `${path}.pre-prune-backup.sqlite`;
+  // Timestamped so a second run never destroys the first run's rollback point,
+  // and so the script stays usable after the initial cleanup (test fixtures can
+  // leak in again — they did, hours after the first pass).
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const backupPath = `${path}.pre-prune-${stamp}.sqlite`;
   if (existsSync(backupPath)) {
     console.error(`[prune] backup already exists, refusing to overwrite: ${backupPath}`);
     process.exit(1);
@@ -184,6 +188,52 @@ function main() {
     console.error(`[prune] run deletion FAILED, rolled back: ${error.message}`);
     process.exit(1);
   }
+
+  // Step 3 — collapse rows that differ only by how the path was spelled.
+  //
+  // usage_id is hash(source_path:source_offset), so the same file reaching the
+  // store as C:\... and C:/... produced two ids for one turn and counted its
+  // cost twice. makeEvent() now canonicalises the path, so this only has to
+  // clean what the old code wrote. Keeps the platform-native spelling, which is
+  // both what resolve() now produces and what the overwhelming majority of rows
+  // already used — so the survivor matches future ingests and nothing re-splits.
+  t = Date.now();
+  const normalise = (p) => p.replace(/\\/g, "/").toLowerCase();
+  const groups = new Map();
+  for (const row of db.prepare("SELECT run_id, usage_id, source_path, source_offset FROM usage_facts").all()) {
+    const key = `${row.run_id}|${normalise(row.source_path)}|${row.source_offset}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  const doomed = [];
+  for (const [, rows] of groups) {
+    if (rows.length < 2) continue;
+    const keep = rows.find((r) => r.source_path.includes("\\")) || rows[0];
+    for (const row of rows) if (row !== keep) doomed.push(row);
+  }
+  if (doomed.length) {
+    db.exec("PRAGMA foreign_keys = ON");
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const delUsage = db.prepare("DELETE FROM usage_facts WHERE run_id=? AND usage_id=?");
+      // cost_facts cascades from usage_facts, but the events rows that produced
+      // them carry the stray spelling too and would re-create the split on a
+      // replay, so they go as well.
+      const delEvent = db.prepare(
+        "DELETE FROM events WHERE run_id IS ? AND source_path=? AND source_offset=? AND event_type='usage.recorded'");
+      for (const row of doomed) {
+        delUsage.run(row.run_id, row.usage_id);
+        delEvent.run(row.run_id, row.source_path, row.source_offset);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch {}
+      db.close();
+      console.error(`[prune] path-spelling dedupe FAILED, rolled back: ${error.message}`);
+      process.exit(1);
+    }
+  }
+  console.log(`[prune] collapsed ${n(doomed.length)} path-spelling duplicates in ${((Date.now() - t) / 1000).toFixed(1)}s`);
 
   // Guard before the irreversible space reclaim: the counts that must not move.
   const after = survey(db);
