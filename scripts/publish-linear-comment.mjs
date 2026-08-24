@@ -16,10 +16,14 @@
 
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+
+// Resolve sibling scripts against this file's own location, not process.cwd() —
+// callers may invoke this script from any directory (see FOC-153).
+const __filename = fileURLToPath(import.meta.url);
+const __dir = dirname(__filename);
 
 // ---------------------------------------------------------------------------
 // CLI argument parser
@@ -214,7 +218,7 @@ function main() {
   let exitCode = 3;
   try {
     const result = spawnSync("node", [
-      "scripts/linear-ops.mjs", "comment", args.issue,
+      join(__dir, "linear-ops.mjs"), "comment", args.issue,
       "--body-file", tmpFile,
       "--dedup-tag", args.tag,
     ], { stdio: "inherit" });
@@ -227,7 +231,6 @@ function main() {
 }
 
 // Guard: only run main() when called directly
-const __filename = fileURLToPath(import.meta.url);
 if (process.argv[1] && resolve(process.argv[1]) === __filename) {
   main();
 }
