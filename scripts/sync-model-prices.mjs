@@ -88,19 +88,43 @@ function applyTo(raw, rows) {
   // Point-edit each price line instead of re-serialising the file: models.json keeps
   // `routing` as compact one-liners that a JSON.stringify round-trip would explode
   // into ~100 lines of noise (the reformatting problem noted in the pricing UI).
-  let out = raw, applied = 0;
+  // The `pricing` block is nested under a provider name (e.g. `"openrouter"`), so
+  // a global `("<key>"\s*:\s*){...}` regex would also match provider objects inside
+  // `providers` and corrupt them. Scope every per-key edit to the
+  // `pricing.openrouter` object — find its `{...}` body and splice the edits back.
+  const blockMatch = raw.match(/"pricing"\s*:\s*\{\s*"openrouter"\s*:\s*\{/);
+  if (!blockMatch) {
+    console.error("  ! nie znalazłem bloku pricing.openrouter w config/models.json — pomijam");
+    return { out: raw, applied: 0 };
+  }
+  const blockStart = blockMatch.index + blockMatch[0].length;
+  // Find the matching closing `}` by tracking brace depth from blockStart.
+  let depth = 1;
+  let blockEnd = -1;
+  for (let i = blockStart; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch === "{") depth++;
+    else if (ch === "}") { depth--; if (depth === 0) { blockEnd = i; break; } }
+  }
+  if (blockEnd < 0) {
+    console.error("  ! nie udało się znaleźć zamknięcia bloku pricing.openrouter — pomijam");
+    return { out: raw, applied: 0 };
+  }
+
+  let body = raw.slice(blockStart, blockEnd);
+  let applied = 0;
   for (const r of rows) {
     if (r.status !== "drift") continue;
     const esc = r.key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const line = new RegExp(`("${esc}"\\s*:\\s*)\\{[^}]*\\}`);
-    if (!line.test(out)) { console.error(`  ! nie znalazłem wpisu dla ${r.key} — pomijam`); continue; }
+    if (!line.test(body)) { console.error(`  ! nie znalazłem wpisu dla ${r.key} — pomijam`); continue; }
     const parts = [`"input": ${r.real.input}`, `"output": ${r.real.output}`];
     if (r.real.cacheRead != null) parts.push(`"cacheRead": ${r.real.cacheRead}`);
     if (r.real.cacheWrite != null) parts.push(`"cacheWrite": ${r.real.cacheWrite}`);
-    out = out.replace(line, `$1{ ${parts.join(", ")} }`);
+    body = body.replace(line, `$1{ ${parts.join(", ")} }`);
     applied++;
   }
-  return { out, applied };
+  return { out: raw.slice(0, blockStart) + body + raw.slice(blockEnd), applied };
 }
 
 function report(rows) {
@@ -138,7 +162,7 @@ async function main() {
   }
 
   const raw = await readFile(CONFIG, "utf8");
-  const rows = compare(JSON.parse(raw).pricing || {}, live);
+  const rows = compare(JSON.parse(raw).pricing?.openrouter || {}, live);
 
   if (AS_JSON) {
     console.log(JSON.stringify({ checked: rows.length, rows }, null, 2));

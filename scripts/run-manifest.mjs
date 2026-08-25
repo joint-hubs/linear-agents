@@ -101,6 +101,7 @@ function cmdStart(runId, squad, sourcePath) {
     gitRefType: gitBranch === "HEAD" ? "detached" : gitBranch === "unknown" ? "unknown" : "branch",
     gitHeadSha: getGitHeadSha(cwd),
     native: process.env.NATIVE !== undefined,
+    provider: process.env.LA_PROVIDER || "openrouter",
     interactive: true,
     claudeConfigDir: process.env.CLAUDE_CONFIG_DIR || null,
   };

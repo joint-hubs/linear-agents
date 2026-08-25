@@ -66,15 +66,15 @@ if defined NATIVE (
     set "ANTHROPIC_DEFAULT_HAIKU_MODEL="
     set "ANTHROPIC_SMALL_FAST_MODEL="
 ) else (
-    if not defined OPENROUTER_API_KEY (
-        echo [!] Brak OPENROUTER_API_KEY. Skopiuj .env.example -^> .env i uzupelnij.
-        exit /b 1
-    )
-
-    REM provider: OpenRouter serves every model id (anthropic/*, z-ai/*, minimax/*, deepseek/*, moonshotai/*, openai/*)
-    set "ANTHROPIC_BASE_URL=https://openrouter.ai/api"  REM no /v1 here -- Claude Code SDK appends /v1/messages
-    set "ANTHROPIC_AUTH_TOKEN=%OPENROUTER_API_KEY%"
-    set "ANTHROPIC_API_KEY="
+    REM Resolve the active provider via scripts/provider-resolve.mjs (single
+    REM source of truth — reads config/models.json + .env, nothing duplicated
+    REM here). --check prints the resolution (no secrets) or a clear error and
+    REM exits non-zero on an unknown provider / missing key, so we fail fast
+    REM BEFORE claude. It is also the LA_PROVIDER_RESOLVE_ONLY verification path.
+    node "%ROOT%\scripts\provider-resolve.mjs" --check
+    if errorlevel 1 exit /b 1
+    if defined LA_PROVIDER_RESOLVE_ONLY exit /b 1
+    for /f "delims=" %%a in ('node "%ROOT%\scripts\provider-resolve.mjs"') do %%a
 )
 set "CLAUDE_CODE_SUBAGENT_MODEL="
 REM clear inherited override; else all subagents flatten onto one model (see ADR-0002)
@@ -87,5 +87,5 @@ if not defined SOURCE_PATH set "SOURCE_PATH="
 for /f "delims=" %%i in ('node "%ROOT%\scripts\run-manifest.mjs" gen-id %SQUAD_SLUG%') do set "RUN_ID=%%i"
 node "%ROOT%\scripts\run-manifest.mjs" start "%RUN_ID%" %SQUAD_SLUG% "%SOURCE_PATH%"
 if not defined LA_TASK_ID set "LA_TASK_ID="
-endlocal & set "ROOT=%ROOT%" & set "LA_ROOT=%LA_ROOT%" & set "ANTHROPIC_BASE_URL=%ANTHROPIC_BASE_URL%" & set "ANTHROPIC_AUTH_TOKEN=%ANTHROPIC_AUTH_TOKEN%" & set "ANTHROPIC_API_KEY=%ANTHROPIC_API_KEY%" & set "API_TIMEOUT_MS=%API_TIMEOUT_MS%" & set "CLAUDE_CODE_SUBAGENT_MODEL=%CLAUDE_CODE_SUBAGENT_MODEL%" & set "LINEAR_API_KEY=%LINEAR_API_KEY%" & set "LINEAR_API_KEY_PISI=%LINEAR_API_KEY_PISI%" & set "LINEAR_WORKSPACE=%LINEAR_WORKSPACE%" & set "LINEAR_TEAM_KEY=%LINEAR_TEAM_KEY%" & set "OPENROUTER_API_KEY=%OPENROUTER_API_KEY%" & set "COST_BUDGET_USD_PER_TASK=%COST_BUDGET_USD_PER_TASK%" & set "RUN_ID=%RUN_ID%" & set "LA_RUN_ID=%RUN_ID%" & set "LA_TASK_ID=%LA_TASK_ID%"
+endlocal & set "ROOT=%ROOT%" & set "LA_ROOT=%LA_ROOT%" & set "ANTHROPIC_BASE_URL=%ANTHROPIC_BASE_URL%" & set "ANTHROPIC_AUTH_TOKEN=%ANTHROPIC_AUTH_TOKEN%" & set "ANTHROPIC_API_KEY=%ANTHROPIC_API_KEY%" & set "API_TIMEOUT_MS=%API_TIMEOUT_MS%" & set "CLAUDE_CODE_SUBAGENT_MODEL=%CLAUDE_CODE_SUBAGENT_MODEL%" & set "LINEAR_API_KEY=%LINEAR_API_KEY%" & set "LINEAR_API_KEY_PISI=%LINEAR_API_KEY_PISI%" & set "LINEAR_WORKSPACE=%LINEAR_WORKSPACE%" & set "LINEAR_TEAM_KEY=%LINEAR_TEAM_KEY%" & set "OPENROUTER_API_KEY=%OPENROUTER_API_KEY%" & set "LA_PROVIDER=%LA_PROVIDER%" & set "COST_BUDGET_USD_PER_TASK=%COST_BUDGET_USD_PER_TASK%" & set "RUN_ID=%RUN_ID%" & set "LA_RUN_ID=%RUN_ID%" & set "LA_TASK_ID=%LA_TASK_ID%"
 exit /b 0

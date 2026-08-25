@@ -50,7 +50,7 @@ function parseFlags(args) {
 function loadPricing() {
   try {
     const cfg = JSON.parse(readFileSync(join(root, "config", "models.json"), "utf8"));
-    return cfg.pricing || {};
+    return cfg.pricing?.openrouter || {};
   } catch {
     return {};
   }

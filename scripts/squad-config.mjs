@@ -3,11 +3,18 @@
 // ESM, zero runtime deps (Node 18+).
 //
 // Exports:
-//   readSquadConfig(root?)   → { squads, pricing }
+//   readSquadConfig(root?)   → { squads, pricing, providers }
 //   readToolCatalog(root?)   → { tools, riskLevels }
-//   validateSlug(slug)       → { ok, warning }
+//   validateSlug(slug, provider?) → { ok, warning }
 //   validateTools(tools, cat) → { ok, unknown, warnings }
+//   validateProvidersPatch(patch, current) → { ok, errors, warnings }
 //   writeSquadConfig(patch, root?, {dryRun}) → { changed, warnings }
+//
+// Provider representation in squad .bat files (PRD docs/ui/provider-config.md):
+// the `set "LA_PROVIDER=<name>"` line sits immediately BEFORE the
+// `call "%~dp0_lib.bat"` line. `openrouter` is the default provider and is
+// represented by the ABSENCE of the line (line removed), so squads that never
+// opted into a custom provider stay byte-identical to their original files.
 
 import {
   readFileSync,
@@ -95,6 +102,28 @@ function readLeadFromBat(filePath) {
     if (m) return m[1].trim();
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Read: provider from .bat file
+// ---------------------------------------------------------------------------
+
+const PROVIDER_LINE_RE = /^\s*set\s+"LA_PROVIDER=([^"]*)"\s*$/i;
+const LIB_CALL_RE = /^\s*call\s+"%~dp0_lib\.bat"/i;
+
+/**
+ * Extract the provider name from a .bat file's `set "LA_PROVIDER=..."` line.
+ * Absence of the line (or an empty value) = the default 'openrouter'.
+ */
+function readProviderFromBat(filePath) {
+  if (!existsSync(filePath)) return 'openrouter';
+  const content = readFileSync(filePath, "utf8");
+  const lines = content.split(/\r?\n/);
+  for (const line of lines) {
+    const m = line.match(PROVIDER_LINE_RE);
+    if (m) return m[1].trim() || 'openrouter';
+  }
+  return 'openrouter';
 }
 
 // ---------------------------------------------------------------------------
@@ -193,10 +222,33 @@ function readPricing(root) {
   const raw = readFileSync(modelsPath, "utf8");
   const data = JSON.parse(raw);
   const pricing = data?.pricing ?? {};
-  // Strip metadata keys (_doc, _note, etc.) — the UI must only see real pricing entries
+  // Pricing is scoped per provider: { provider: { modelId: price } }.
+  // Strip metadata keys (_doc, _note, etc.) at both the provider and model
+  // level — the UI must only see real pricing entries.
   const filtered = {};
-  for (const [k, v] of Object.entries(pricing)) {
-    if (!k.startsWith("_")) filtered[k] = v;
+  for (const [providerKey, providerPricing] of Object.entries(pricing)) {
+    if (providerKey.startsWith("_")) continue;
+    const models = {};
+    if (providerPricing && typeof providerPricing === "object") {
+      for (const [modelId, price] of Object.entries(providerPricing)) {
+        if (!modelId.startsWith("_")) models[modelId] = price;
+      }
+    }
+    filtered[providerKey] = models;
+  }
+  return filtered;
+}
+
+function readProviders(root) {
+  const modelsPath = join(root, "config", "models.json");
+  if (!existsSync(modelsPath)) return {};
+  const raw = readFileSync(modelsPath, "utf8");
+  const data = JSON.parse(raw);
+  const providers = data?.providers ?? {};
+  // Strip metadata keys — provider names never start with "_", but be defensive.
+  const filtered = {};
+  for (const [name, profile] of Object.entries(providers)) {
+    if (!name.startsWith("_")) filtered[name] = profile;
   }
   return filtered;
 }
@@ -220,16 +272,18 @@ export function readSquadConfig(root) {
     if (existsSync(dryBat)) leadFiles.push(`bin/${squad}-dry.bat`);
 
     const lead = readLeadFromBat(mainBat);
+    const provider = readProviderFromBat(mainBat);
 
     const squadDir = join(r, "agents", squad);
     const agents = readAgentConfigs(squadDir);
 
-    squads[squad] = { lead, leadFiles, agents };
+    squads[squad] = { lead, provider, leadFiles, agents };
   }
 
   const pricing = readPricing(r);
+  const providers = readProviders(r);
 
-  return { squads, pricing };
+  return { squads, pricing, providers };
 }
 
 // ---------------------------------------------------------------------------
@@ -292,14 +346,29 @@ export function validateTools(tools, catalog) {
 }
 
 // ---------------------------------------------------------------------------
-// Public: validateSlug
+// Public: validateSlug (provider-aware)
 // ---------------------------------------------------------------------------
 
 const SLUG_RE = /^[a-z0-9_.-]+\/[A-Za-z0-9._:-]+$/;
+// Loose model-ID shape for custom providers: .bat/frontmatter-safe, no
+// spaces/quotes/percent (those would break `set` and the frontmatter line).
+const CUSTOM_MODEL_RE = /^[A-Za-z0-9._:/-]+$/;
+const DEFAULT_PROVIDER = 'openrouter';
 
-export function validateSlug(slug) {
+export function validateSlug(slug, provider = DEFAULT_PROVIDER) {
   if (!slug || typeof slug !== "string" || slug.trim() === "") {
     return { ok: false, warning: "Slug nie może być pusty." };
+  }
+  if (provider !== DEFAULT_PROVIDER) {
+    if (!CUSTOM_MODEL_RE.test(slug)) {
+      return {
+        ok: false,
+        warning:
+          `Model "${slug}" ma niedozwolone znaki dla providera "${provider}" ` +
+          "(dozwolone: litery, cyfry, . _ : / -; bez spacji, cudzysłowów i %).",
+      };
+    }
+    return { ok: true, warning: null };
   }
   if (!SLUG_RE.test(slug)) {
     return {
@@ -379,6 +448,66 @@ function writeLeadToBat(filePath, newModel) {
   }
 
   return { changed, before, after: changed ? newModel : before };
+}
+
+// ---------------------------------------------------------------------------
+// Write: provider to .bat file
+// ---------------------------------------------------------------------------
+
+/**
+ * Insert/update/remove the `set "LA_PROVIDER=..."` line in a squad .bat file.
+ *
+ * Representation (see module docstring): 'openrouter' = line removed (absence
+ * of the line); any other provider = the line sits immediately before the
+ * `call "%~dp0_lib.bat"` line.
+ */
+function writeProviderToBat(filePath, provider) {
+  const content = readFileSync(filePath, "utf8");
+  const eol = detectEOL(content);
+  const lines = content.split(/\r?\n/);
+
+  let providerLineIdx = -1;
+  let libCallIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (PROVIDER_LINE_RE.test(lines[i])) providerLineIdx = i;
+    if (LIB_CALL_RE.test(lines[i]) && libCallIdx < 0) libCallIdx = i;
+  }
+
+  const before = readProviderFromBat(filePath);
+
+  if (provider === DEFAULT_PROVIDER) {
+    // Default = no line. Remove an existing one so untouched squads stay
+    // byte-identical to their original files.
+    if (providerLineIdx >= 0) {
+      lines.splice(providerLineIdx, 1);
+      const newContent = lines.join(eol);
+      atomicWriteText(filePath, newContent, eol);
+      return { changed: true, before, after: DEFAULT_PROVIDER };
+    }
+    return { changed: false, before: DEFAULT_PROVIDER, after: DEFAULT_PROVIDER };
+  }
+
+  const providerLine = `set "LA_PROVIDER=${provider}"`;
+
+  if (providerLineIdx >= 0) {
+    const existing = lines[providerLineIdx].match(PROVIDER_LINE_RE);
+    if (existing && existing[1].trim() === provider) {
+      return { changed: false, before, after: provider };
+    }
+    lines[providerLineIdx] = providerLine;
+    const newContent = lines.join(eol);
+    atomicWriteText(filePath, newContent, eol);
+    return { changed: true, before, after: provider };
+  }
+
+  // No existing line — insert immediately before the _lib.bat call.
+  if (libCallIdx < 0) {
+    return { changed: false, before: null, after: null, skipped: true };
+  }
+  lines.splice(libCallIdx, 0, providerLine);
+  const newContent = lines.join(eol);
+  atomicWriteText(filePath, newContent, eol);
+  return { changed: true, before, after: provider };
 }
 
 // ---------------------------------------------------------------------------
@@ -505,16 +634,23 @@ function writePricing(root, pricingPatch) {
   if (!data.pricing) data.pricing = {};
 
   const changed = [];
-  for (const [slug, price] of Object.entries(pricingPatch)) {
+  for (const [providerKey, providerPatch] of Object.entries(pricingPatch)) {
     // Silently skip metadata keys — they are not pricing entries
-    if (slug.startsWith("_")) continue;
-    const before = data.pricing[slug]
-      ? JSON.stringify(data.pricing[slug])
-      : null;
-    const after = JSON.stringify(price);
-    if (before !== after) {
-      data.pricing[slug] = price;
-      changed.push({ slug, before, after });
+    if (providerKey.startsWith("_")) continue;
+    if (!data.pricing[providerKey] || typeof data.pricing[providerKey] !== "object") {
+      data.pricing[providerKey] = {};
+    }
+    for (const [slug, price] of Object.entries(providerPatch)) {
+      // Silently skip metadata keys at the model level too
+      if (slug.startsWith("_")) continue;
+      const before = data.pricing[providerKey][slug]
+        ? JSON.stringify(data.pricing[providerKey][slug])
+        : null;
+      const after = JSON.stringify(price);
+      if (before !== after) {
+        data.pricing[providerKey][slug] = price;
+        changed.push({ slug, before, after });
+      }
     }
   }
 
@@ -522,6 +658,155 @@ function writePricing(root, pricingPatch) {
     atomicWriteJSON(modelsPath, data);
   }
 
+  return changed;
+}
+
+// ---------------------------------------------------------------------------
+// Provider validation (CRUD)
+// ---------------------------------------------------------------------------
+
+const PROVIDER_NAME_RE = /^[a-z][a-z0-9_-]*$/;
+const AUTH_ENV_RE = /^[A-Z][A-Z0-9_]*$/;
+const BASE_URL_RE = /^https?:\/\/\S+$/i;
+const AUTH_STYLES = new Set(['token', 'apikey']);
+
+function validateProviderProfile(profile) {
+  const errors = [];
+  if (!profile || typeof profile !== 'object') {
+    return { ok: false, errors: ['Provider musi być obiektem.'] };
+  }
+  if (typeof profile.baseUrl !== 'string' || !BASE_URL_RE.test(profile.baseUrl)) {
+    errors.push('baseUrl musi być poprawnym URL http(s).');
+  }
+  if (typeof profile.authEnv !== 'string' || !AUTH_ENV_RE.test(profile.authEnv)) {
+    errors.push(
+      'authEnv musi być nazwą zmiennej środowiskowej (wielkie litery, cyfry, podkreślenia, np. MY_API_KEY).',
+    );
+  }
+  if (profile.authStyle !== undefined && !AUTH_STYLES.has(profile.authStyle)) {
+    errors.push('authStyle musi być "token" lub "apikey".');
+  }
+  if (
+    profile.models !== undefined &&
+    (!Array.isArray(profile.models) || profile.models.some((m) => typeof m !== 'string' || !CUSTOM_MODEL_RE.test(m)))
+  ) {
+    errors.push(
+      'models musi być tablicą identyfikatorów modeli (litery, cyfry, . _ : / -; bez spacji, cudzysłowów i %).',
+    );
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+/**
+ * Validate a provider patch (add/edit/remove) against the current state.
+ *
+ * @param {object} patch     - { providers: { name: profile|null, ... } }
+ * @param {object} current   - { providers: {...}, squads: {...} } from readSquadConfig
+ * @returns {{ ok, errors, warnings }}
+ */
+export function validateProvidersPatch(patch, current) {
+  const errors = [];
+  const warnings = [];
+  const providers = patch?.providers;
+  if (!providers || typeof providers !== 'object') return { ok: true, errors: [], warnings: [] };
+
+  const currentProviders = current?.providers || {};
+  const currentSquads = current?.squads || {};
+
+  for (const [name, profile] of Object.entries(providers)) {
+    if (name.startsWith('_')) continue;
+
+    if (profile === null) {
+      // Removal
+      if (name === DEFAULT_PROVIDER) {
+        errors.push('Provider "openrouter" jest domyślny i nie może zostać usunięty.');
+        continue;
+      }
+      if (!currentProviders[name]) {
+        errors.push(`Provider "${name}" nie istnieje — nie można go usunąć.`);
+        continue;
+      }
+      // Block deletion when any squad references this provider.
+      const referencing = [];
+      for (const [squad, s] of Object.entries(currentSquads)) {
+        if ((s?.provider || DEFAULT_PROVIDER) === name) referencing.push(squad);
+      }
+      if (referencing.length > 0) {
+        errors.push(
+          `Nie można usunąć providera "${name}" — używają go składy: ${referencing.join(', ')}.`,
+        );
+        continue;
+      }
+      continue;
+    }
+
+    // Add / edit
+    if (!PROVIDER_NAME_RE.test(name)) {
+      errors.push(`Nazwa providera "${name}" jest niepoprawna (dozwolone: [a-z][a-z0-9_-]*).`);
+      continue;
+    }
+    const pv = validateProviderProfile(profile);
+    if (!pv.ok) {
+      errors.push(...pv.errors.map((e) => `Provider "${name}": ${e}`));
+      continue;
+    }
+  }
+
+  return { ok: errors.length === 0, errors, warnings };
+}
+
+// ---------------------------------------------------------------------------
+// Write: merge providers into config/models.json
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a provider profile to only the whitelisted fields — secret VALUES
+ * must never be accepted or stored; only env-var names are kept.
+ */
+function normalizeProviderProfile(profile) {
+  const out = {};
+  if (typeof profile.baseUrl === 'string') out.baseUrl = profile.baseUrl;
+  if (typeof profile.authEnv === 'string') out.authEnv = profile.authEnv;
+  out.authStyle = AUTH_STYLES.has(profile.authStyle) ? profile.authStyle : 'token';
+  if (Array.isArray(profile.models)) out.models = profile.models;
+  return out;
+}
+
+function writeProviders(root, providersPatch) {
+  const modelsPath = join(root, "config", "models.json");
+  if (!existsSync(modelsPath)) return [];
+  const raw = readFileSync(modelsPath, "utf8");
+  const data = JSON.parse(raw);
+  if (!data.providers) data.providers = {};
+  if (!data.pricing) data.pricing = {};
+
+  const changed = [];
+  for (const [name, profile] of Object.entries(providersPatch)) {
+    if (name.startsWith('_')) continue;
+
+    if (profile === null) {
+      // Removal — also removes the provider's pricing scope.
+      if (data.providers[name] === undefined && data.pricing[name] === undefined) continue;
+      const before = JSON.stringify(data.providers[name] ?? null);
+      delete data.providers[name];
+      delete data.pricing[name];
+      changed.push({ provider: name, before, after: null });
+      continue;
+    }
+
+    // Add / edit — only whitelisted fields survive.
+    const normalized = normalizeProviderProfile(profile);
+    const before = data.providers[name] ? JSON.stringify(data.providers[name]) : null;
+    const after = JSON.stringify(normalized);
+    if (before !== after) {
+      data.providers[name] = normalized;
+      changed.push({ provider: name, before, after });
+    }
+  }
+
+  if (changed.length > 0) {
+    atomicWriteJSON(modelsPath, data);
+  }
   return changed;
 }
 
@@ -563,6 +848,46 @@ export function writeSquadConfig(patch, root, { dryRun = false } = {}) {
             if (result.changed) {
               changed.push({
                 file: batPath,
+                before: result.before,
+                after: result.after,
+              });
+            }
+          }
+        }
+      }
+
+      // 1b. Provider (per squad) — LA_PROVIDER line in both bats
+      if (squadPatch.provider !== undefined) {
+        const mainBat = join(r, "bin", `${squad}.bat`);
+        const dryBat = join(r, "bin", `${squad}-dry.bat`);
+
+        for (const batPath of [mainBat, dryBat]) {
+          if (!existsSync(batPath)) {
+            warnings.push(
+              `Plik ${batPath} nie istnieje — pominięto aktualizację providera.`
+            );
+            continue;
+          }
+          if (dryRun) {
+            const before = readProviderFromBat(batPath);
+            if (before !== squadPatch.provider) {
+              changed.push({
+                file: batPath,
+                field: "provider",
+                before,
+                after: squadPatch.provider,
+              });
+            }
+          } else {
+            const result = writeProviderToBat(batPath, squadPatch.provider);
+            if (result.skipped) {
+              warnings.push(
+                `Plik ${batPath} nie ma linii 'call "%~dp0_lib.bat"' — pominięto providera.`
+              );
+            } else if (result.changed) {
+              changed.push({
+                file: batPath,
+                field: "provider",
                 before: result.before,
                 after: result.after,
               });
@@ -677,19 +1002,23 @@ export function writeSquadConfig(patch, root, { dryRun = false } = {}) {
   if (patch.pricing) {
     if (dryRun) {
       const currentPricing = readPricing(r);
-      for (const [slug, price] of Object.entries(patch.pricing)) {
+      for (const [providerKey, providerPatch] of Object.entries(patch.pricing)) {
         // Silently skip metadata keys
-        if (slug.startsWith("_")) continue;
-        const before = currentPricing[slug]
-          ? JSON.stringify(currentPricing[slug])
-          : null;
-        const after = JSON.stringify(price);
-        if (before !== after) {
-          changed.push({
-            file: join(r, "config", "models.json"),
-            before,
-            after,
-          });
+        if (providerKey.startsWith("_")) continue;
+        for (const [slug, price] of Object.entries(providerPatch || {})) {
+          // Silently skip metadata keys at the model level too
+          if (slug.startsWith("_")) continue;
+          const before = currentPricing[providerKey]?.[slug]
+            ? JSON.stringify(currentPricing[providerKey][slug])
+            : null;
+          const after = JSON.stringify(price);
+          if (before !== after) {
+            changed.push({
+              file: join(r, "config", "models.json"),
+              before,
+              after,
+            });
+          }
         }
       }
     } else {
@@ -697,6 +1026,39 @@ export function writeSquadConfig(patch, root, { dryRun = false } = {}) {
       for (const pc of pricingChanges) {
         changed.push({
           file: join(r, "config", "models.json"),
+          before: pc.before,
+          after: pc.after,
+        });
+      }
+    }
+  }
+
+  // 4. Providers (add/edit/remove)
+  if (patch.providers) {
+    if (dryRun) {
+      const currentProviders = readProviders(r);
+      for (const [name, profile] of Object.entries(patch.providers)) {
+        if (name.startsWith("_")) continue;
+        const before = currentProviders[name]
+          ? JSON.stringify(currentProviders[name])
+          : null;
+        // Normalize so dryRun previews the exact shape that would be written.
+        const after = profile === null ? null : JSON.stringify(normalizeProviderProfile(profile));
+        if (before !== after) {
+          changed.push({
+            file: join(r, "config", "models.json"),
+            provider: name,
+            before,
+            after,
+          });
+        }
+      }
+    } else {
+      const providerChanges = writeProviders(r, patch.providers);
+      for (const pc of providerChanges) {
+        changed.push({
+          file: join(r, "config", "models.json"),
+          provider: pc.provider,
           before: pc.before,
           after: pc.after,
         });

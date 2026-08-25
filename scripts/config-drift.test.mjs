@@ -127,13 +127,16 @@ test("żaden skład nie ma jednocześnie allow i deny na to samo", () => {
 console.log("\nmodele i cennik");
 
 test("każdy model użyty przez rolę ma cenę w models.json", () => {
-  const prices = readJson("config/models.json").pricing || {};
-  const keys = Object.keys(prices);
+  // All current squads route through OpenRouter, so the price row must live under
+  // pricing.openrouter. A model priced under another provider but missing here is
+  // a real gap — store would bill it at zero.
+  const openrouter = readJson("config/models.json").pricing?.openrouter || {};
+  const keys = Object.keys(openrouter);
   // Mirrors resolvePrice in telemetry-store: exact id, else last path segment with
   // dots normalised. A role model that resolves to nothing is billed at zero.
   const shortOf = (s) => s.split("/").pop().replace(/\./g, "-");
   const resolves = (model) =>
-    prices[model] != null || keys.some((k) => shortOf(k) === shortOf(model));
+    openrouter[model] != null || keys.some((k) => shortOf(k) === shortOf(model));
 
   const unpriced = [];
   for (const squad of SQUADS) {
@@ -148,8 +151,9 @@ test("każdy model użyty przez rolę ma cenę w models.json", () => {
 });
 
 test("model leada z bin/<squad>.bat ma cenę", () => {
-  const prices = readJson("config/models.json").pricing || {};
-  const keys = Object.keys(prices);
+  // Leads invoke OpenRouter, so the row must live under pricing.openrouter.
+  const openrouter = readJson("config/models.json").pricing?.openrouter || {};
+  const keys = Object.keys(openrouter);
   const shortOf = (s) => s.split("/").pop().replace(/\./g, "-");
   const bad = [];
   for (const squad of SQUADS) {
@@ -158,7 +162,7 @@ test("model leada z bin/<squad>.bat ma cenę", () => {
     for (const m of read(bat).matchAll(/set "ANTHROPIC_MODEL=([^"]+)"/g)) {
       const model = m[1].trim();
       if (!model || model.includes("%")) continue; // env indirection, not a literal
-      if (prices[model] == null && !keys.some((k) => shortOf(k) === shortOf(model))) {
+      if (openrouter[model] == null && !keys.some((k) => shortOf(k) === shortOf(model))) {
         bad.push(`${bat} → ${model}`);
       }
     }
@@ -169,23 +173,40 @@ test("model leada z bin/<squad>.bat ma cenę", () => {
 test("każda cena ma cacheRead — bez tego store zgaduje input*0.1", () => {
   // The guess is wrong in both directions: 12x too high for DeepSeek V4 Pro,
   // 2x too low for MiniMax. Cache reads are ~87% of a lead's token volume.
-  const prices = readJson("config/models.json").pricing || {};
-  const missing = Object.entries(prices)
-    .filter(([, v]) => v && typeof v === "object" && v.cacheRead == null)
-    .map(([k]) => k);
+  // Iterate every provider scope — a future provider's rows must satisfy this
+  // too. `_`-prefixed keys inside a scope are metadata (repo-wide convention)
+  // and must be skipped; price rows themselves carry input/output/cacheRead.
+  const scopes = readJson("config/models.json").pricing || {};
+  const missing = [];
+  for (const [provider, rows] of Object.entries(scopes)) {
+    if (!rows || typeof rows !== "object") continue;
+    for (const [model, v] of Object.entries(rows)) {
+      if (model.startsWith("_")) continue; // metadata, not a price row
+      if (!v || typeof v !== "object") continue;
+      if (!Number.isFinite(v.input) || !Number.isFinite(v.output)) continue;
+      if (v.cacheRead == null || !Number.isFinite(v.cacheRead)) {
+        missing.push(`${provider}/${model}`);
+      }
+    }
+  }
   if (missing.length) fail(`brak cacheRead (zgadywane):\n       ${missing.join("\n       ")}`);
 });
 
 test("cennik ma sensowne wartości", () => {
-  const prices = readJson("config/models.json").pricing || {};
+  // Iterate every provider scope; `_`-prefixed keys inside a scope are metadata.
+  const scopes = readJson("config/models.json").pricing || {};
   const bad = [];
-  for (const [k, v] of Object.entries(prices)) {
-    if (!v || typeof v !== "object") continue;
-    for (const f of ["input", "output"]) {
-      if (!Number.isFinite(v[f]) || v[f] < 0) bad.push(`${k}.${f} = ${v[f]}`);
-    }
-    if (Number.isFinite(v.cacheRead) && v.cacheRead > v.input) {
-      bad.push(`${k}: cacheRead (${v.cacheRead}) > input (${v.input})`);
+  for (const [provider, rows] of Object.entries(scopes)) {
+    if (!rows || typeof rows !== "object") continue;
+    for (const [k, v] of Object.entries(rows)) {
+      if (k.startsWith("_")) continue; // metadata, not a price row
+      if (!v || typeof v !== "object") continue;
+      for (const f of ["input", "output"]) {
+        if (!Number.isFinite(v[f]) || v[f] < 0) bad.push(`${provider}/${k}.${f} = ${v[f]}`);
+      }
+      if (Number.isFinite(v.cacheRead) && Number.isFinite(v.input) && v.cacheRead > v.input) {
+        bad.push(`${provider}/${k}: cacheRead (${v.cacheRead}) > input (${v.input})`);
+      }
     }
   }
   if (bad.length) fail(`podejrzane ceny:\n       ${bad.join("\n       ")}`);
