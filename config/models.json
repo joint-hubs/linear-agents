@@ -41,6 +41,11 @@
     "ox": "stealth/ox-alpha"
   },
   "routing": {
+    "supervisor": {
+      "default": "glm",
+      "worker": "minimax",
+      "flash": "deepseek_flash"
+    },
     "cadence": {
       "default": "minimax",
       "retro": "glm",

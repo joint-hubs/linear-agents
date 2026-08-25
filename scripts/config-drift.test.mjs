@@ -27,7 +27,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SQUADS = ["plan", "dev", "review", "test", "cadence"];
+// `supervisor` joined on 2026-08-25 (FOC-124). It has no agents/supervisor/agents/
+// roles — children are OS processes, not Task-tool subagents — so the model/price
+// checks below skip it via their own existsSync guards, while the link, kickoff
+// and permission checks apply to it exactly like any other squad.
+const SQUADS = ["plan", "dev", "review", "test", "cadence", "supervisor"];
 
 let passed = 0;
 const failures = [];

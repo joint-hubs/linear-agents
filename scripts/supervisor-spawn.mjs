@@ -149,6 +149,16 @@ try {
     [join(ROOT, "scripts", "run-manifest.mjs"), "start", telemetryRunId, squad],
     { cwd: worktree.worktree, env, stdio: "ignore" },
   );
+  // Two tags, two questions the dashboard has to answer about a child run:
+  // which issue it belongs to, and which Supervisor session put it there.
+  // Without the second one a child run looks like it started itself.
+  for (const tag of [taskId, `sup:${runId}`]) {
+    execFileSync(
+      process.execPath,
+      [join(ROOT, "scripts", "run-manifest.mjs"), "tag", telemetryRunId, tag],
+      { cwd: worktree.worktree, env, stdio: "ignore" },
+    );
+  }
   updateChild(runId, childId, { telemetryRunId });
 } catch {
   // Telemetry is observability, not control flow. A child that runs unrecorded
