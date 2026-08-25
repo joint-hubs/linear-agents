@@ -116,6 +116,12 @@ registry.children[childId] = {
   turns: [],
   costUsd: 0,
   telemetryRunId: null,
+  // Recorded so supervisor-followup.mjs can resume with the SAME permission
+  // mode, settings file and model. A follow-up that silently ran under different
+  // permissions than the turn it continues would be a hole in the P9 push gate.
+  permissionMode: args["permission-mode"] || "bypassPermissions",
+  settings: args.settings || null,
+  model: args.model || null,
   worktree: worktree.worktree,
   branch: worktree.branch,
   baseRevision: worktree.baseRevision,

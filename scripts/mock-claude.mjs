@@ -13,11 +13,20 @@
 //   MOCK_CLAUDE_STDERR       text to write to stderr
 //   MOCK_CLAUDE_SPLIT        1 → flush init in two chunks, splitting a JSON line
 //                                across writes (tests the NDJSON buffering)
+//   MOCK_CLAUDE_ARGV_FILE    append the argv it was called with, one JSON array
+//                            per line — how tests assert --resume carried the
+//                            right session id
 //
 // FOC-127 extends this for the full suite; it is kept deliberately small so a
 // failing test points at the system under test rather than at the mock.
 
+import { appendFileSync } from "node:fs";
+
 const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
+
+if (process.env.MOCK_CLAUDE_ARGV_FILE) {
+  appendFileSync(process.env.MOCK_CLAUDE_ARGV_FILE, JSON.stringify(process.argv.slice(2)) + "\n");
+}
 
 const sessionId = process.env.MOCK_CLAUDE_SESSION_ID || "11111111-2222-3333-4444-555555555555";
 const exitCode = Number(process.env.MOCK_CLAUDE_EXIT ?? 0);
