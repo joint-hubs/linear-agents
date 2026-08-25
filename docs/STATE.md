@@ -3,7 +3,33 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-08-12 — Prompt optimization (FOC-72): Fala E (docs-sync + structural-order assertion) DONE
+## Ostatnia aktualizacja: 2026-08-25 — Provider profiles (per-squad LLM provider): spec + ADR Accepted, implementation in parallel slices
+
+**Provider profiles — per-squad LLM provider.** Specyfikacja i decyzja architektoniczna gotowe;
+implementacja leci równoległymi slice'ami.
+
+- **Co to jest:** każdy provider (OpenRouter, Anthropic, lub dowolny Anthropic-Messages-protocol
+  endpoint) ma profil w `config/models.json::providers`: `{baseUrl, authEnv, authStyle, models?}`.
+  Squad `.bat` wybiera providera linią `set "LA_PROVIDER=<name>"`; brak linii = `openrouter`
+  (backward compatible). Pricing jest scopowany per provider — ten sam model może mieć różną
+  cenę u różnych vendorów.
+- **Kluczowe pliki:**
+  - `config/models.json::providers` — definicje providerów (baseUrl, authEnv, authStyle, models).
+  - `scripts/provider-resolve.mjs` — resolver (jedyny punkt czytający `.env` + `models.json`
+    do ustalenia `ANTHROPIC_BASE_URL` i auth var dla danego `LA_PROVIDER`; używany przez
+    `_lib.bat` po `endlocal`).
+  - `/squad-config` (zakładka „Konfiguracja" w dashboardzie, `localhost:7331`) — UI:
+    Providers card + provider-select per squad + provider-scoped pricing editor + provider-
+    aware model suggestions.
+- **Jak przełączyć providera składu:**
+  - UI: dashboard → zakładka **Konfiguracja** (`/squad-config`) → wybór providera w karcie
+    składu → zapis (zapisuje linię `set "LA_PROVIDER=<name>"` do `bin/<squad>.bat` i `-dry`).
+  - Ręcznie: edycja `bin/<squad>.bat` (i `bin/<squad>-dry.bat`) — wstaw `set "LA_PROVIDER=<name>"`
+    tuż **przed** `call "%~dp0_lib.bat"`. Brak linii = domyślny `openrouter`.
+- **Gdzie żyją klucze API:** wartość klucza jest TYLKO w `.env` (gitignored) pod nazwą, którą
+  wskazuje `authEnv` providera w `models.json`. `models.json` (git-tracked), komentarze Linear,
+  kod i logi NIGDY nie zawierają wartości — tylko nazwy zmiennych env.
+- **Dokumentacja:** PRD `docs/ui/provider-config.md`, ADR `docs/adr/0010-provider-profiles.md`.
 
 **Linear:** FOC-72 "[ FENIX ] prompt optimization" (In Progress). Cel: pisać prompty pod kątem modelu
 językowego (GLM-5.2 / MiniMax / DeepSeek / Kimi), nie człowieka.

@@ -29,6 +29,13 @@ Wszystkie klucze w **`.env`** (gitignored — nigdy nie commitować). Wzór: `.e
 
 **Rotacja klucza:** Linear → Settings → API → revoke stary → new key → zaktualizuj `.env`. Reszta narzędzi (bootstrap, push, query) nie wymaga restartu — czytają `.env` przy każdym uruchomieniu.
 
+**Provider profiles (`config/models.json::providers`):** każdy profil providera (`openrouter`,
+`anthropic`, custom) ma pole `authEnv` — nazwę zmiennej env, w której trzymany jest klucz API.
+Wartość klucza żyje WYŁĄCZNIE w `.env` (gitignored) — nigdy w `models.json` (git-tracked), nigdy
+w komentarzach Linear, nigdy w kodzie ani logach. Domyślny provider `openrouter` wymaga
+`OPENROUTER_API_KEY`. Dodanie nowego providera = nowy wpis `authEnv` w `.env` + wpis profilu w
+`config/models.json::providers`. PRD: `docs/ui/provider-config.md`, ADR: `docs/adr/0010-provider-profiles.md`.
+
 ---
 
 ## Onboarding nowego workspace'a
