@@ -1,7 +1,7 @@
 ---
 name: worker
 description: DEV squad — cheap single-scope tasks (one-file change, boilerplate, patterned test, summary, draft). MiniMax M3.
-model: minimax/minimax-m3
+model: stealth/ox-alpha
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 <role>

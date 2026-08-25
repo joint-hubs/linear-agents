@@ -1,7 +1,7 @@
 ---
 name: implementer
 description: DEV squad — full implement phase (edit→build→test→commit). GLM-5.2.
-model: deepseek/deepseek-v4-pro-0813
+model: stealth/ox-alpha
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 <role>

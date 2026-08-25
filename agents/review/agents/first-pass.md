@@ -1,7 +1,7 @@
 ---
 name: first-pass
 description: REVIEW squad — fast pass: lint/style/obvious bugs/missing tests. DeepSeek V4 Pro.
-model: deepseek/deepseek-v4-pro
+model: stealth/ox-alpha
 tools: Read, Grep, Glob, Bash
 ---
 <role>

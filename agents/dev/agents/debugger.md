@@ -1,7 +1,7 @@
 ---
 name: debugger
 description: DEV squad — hard bug / arch decision escalation. DeepSeek V4 Pro.
-model: deepseek/deepseek-v4-pro-0813
+model: stealth/ox-alpha
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 <role>

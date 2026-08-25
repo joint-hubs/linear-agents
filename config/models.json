@@ -205,6 +205,14 @@
         "output": 0,
         "cacheRead": 0
       }
+    },
+    "nebul": {
+      "zai-org/GLM-5.2-FP8": {
+        "input": 1.91,
+        "output": 9.57,
+        "cacheRead": 0.76,
+        "cacheWrite": 0.76
+      }
     }
   },
   "fallback": {
