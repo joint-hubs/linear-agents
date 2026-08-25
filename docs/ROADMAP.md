@@ -23,7 +23,7 @@ Docs live under `docs/`; each task's description also names its doc path.
 
 | Workstream | Linear | Doc (source of truth) | Status |
 |---|---|---|---|
-| Worktree-per-dev-run | JOI-75 | this file §NOW.1 | planned |
+| Worktree-per-dev-run | ~~JOI-75~~ → **FOC-119** | `docs/plans/brainstorm-graph-engineering.md` (D) | **superseded 2026-08-25** — worktree is assigned by the Supervisor at spawn, not by `dev-branch.mjs` |
 | Run lifecycle closed at source | JOI-76 | this file §NOW.2 | planned |
 | plan.bat NATIVE-by-default | JOI-77 | `docs/adr/0001-provider-routing-and-fallback.md` | planned |
 | OpenRouter mgmt key → reconcile | JOI-78 | `docs/decisions/cost-optimization.md` | needs:access |
@@ -39,10 +39,20 @@ Docs live under `docs/`; each task's description also names its doc path.
 | **Graphify + ThoughtMap context maps** | **JOI-167** | `docs/plans/brainstorm-graphify-thoughtmap-integration.md` (C) | approved, planned |
 | Learning miner S1 (specialization) | JOI-91 | `docs/plans/brainstorm-specialization-learning.md` (B) | approved, planned |
 | Autonomous dispatcher | *(not yet decomposed)* | `docs/plans/brainstorm-autonomous-dispatch.md` (A) | brainstorm draft |
+| **Graph engineering — Supervisor as graph runtime** | **FOC-116 · FOC-159** | `docs/plans/brainstorm-graph-engineering.md` (D) | approved, decomposed 2026-08-25 |
 
-Brainstorm docs A/B/C are the **Fenix v3 direction** (autonomy · learning · context maps). A and B
-are drafts; **C is approved and decomposed under JOI-73** (foundational, feeds the pilot). Cost
+Brainstorm docs A/B/C/D are the **Fenix v3 direction** (autonomy · learning · context maps · graph
+engineering). A and B are drafts; **C is approved and decomposed under JOI-73** (foundational, feeds
+the pilot); **D is approved and decomposed under FOC-116 / FOC-159** in the Focus team. Cost
 analysis: `docs/decisions/cost-optimization.md`. Delegation policy lives in each `agents/*/CLAUDE.md`.
+
+> **Status of this file (2026-08-25):** the active Fenix line moved to team **Focus**, project
+> **FENIX**, epic **FOC-102 "[ FENIX ] 1.0.0"**. JOI-73 "Fenix v2" was, in Mateusz's words, "in a
+> sense only a brainstorm" — it still holds 16 open tickets that need reviewing one by one, not
+> closing wholesale: some are genuinely dead (JOI-81 landed via UI redesign v2; JOI-85 HITL inbox is
+> partly absorbed by the Supervisor gate relay), some are alive and unrelated to the Supervisor
+> (JOI-167 context maps, JOI-210 quality signal, JOI-78/79 cost work). Until that review happens,
+> treat the NOW/NEXT/LATER sections below as historical.
 
 ---
 
