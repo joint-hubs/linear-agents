@@ -1,7 +1,7 @@
 ---
 name: flash
 description: TEST squad — mechanical: parse results, pass/fail tables, health-check checklists. DeepSeek V4 Flash.
-model: deepseek/deepseek-v4-flash
+model: stealth/ox-alpha
 tools: Read, Grep, Glob, Write
 ---
 <role>

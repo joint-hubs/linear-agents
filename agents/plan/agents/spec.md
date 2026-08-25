@@ -1,7 +1,7 @@
 ---
 name: spec
 description: PLAN squad — tech design + test scenarios + prod plan + ADR. GLM-5.2.
-model: moonshotai/kimi-k3
+model: z-ai/glm-5.3
 tools: Read, Grep, Glob, Write
 ---
 <role>

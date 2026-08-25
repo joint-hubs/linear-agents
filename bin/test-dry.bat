@@ -11,7 +11,7 @@ REM Agent 4 - TEST (DRY-RUN). Spec: docs/agents/agent-4-test.md
 REM DRY-RUN: no push, no Linear MCP, no real GCP deploy.
 REM Health-check is simulated from fixture's dryRunScenario field.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\test"
-set "ANTHROPIC_MODEL=minimax/minimax-m3"
+set "ANTHROPIC_MODEL=stealth/ox-alpha"
 set "ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8"
 set "ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6"
 set "ANTHROPIC_SMALL_FAST_MODEL=deepseek/deepseek-v4-flash"

@@ -164,8 +164,8 @@ test("health exposes store state", () => {
 test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
   const runId = "run-cache-savings";
   applyEvent(db, makeEvent("run.started", { runId, squad: "dev", startedAt: "2026-07-25T08:00:00.000Z" }, { runId, observedAt: "2026-07-25T08:00:00.000Z", sourceKind: "test" }));
-  // deepseek-v4-flash: input=0.14, cacheRead=0.028 (real, from OpenRouter — JOI-79)
-  // savings = (1M / 1M) * (0.14 - 0.028) = 0.112
+  // deepseek-v4-flash: input=0.088606, cacheRead=0.0177212 (real, from OpenRouter — JOI-79)
+  // savings = (1M / 1M) * (0.088606 - 0.0177212) = 0.0708848
   //
   // This used to expect 0.126, which is what the input*0.1 FALLBACK produces when
   // config carries no cacheRead. That fallback is wrong in both directions — 12x too
@@ -183,11 +183,11 @@ test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
   }, { runId, observedAt: "2026-07-25T08:02:00.000Z", sourceKind: "transcript", sourcePath: "C:/sessions/cache.jsonl", sourceOffset: 2, eventId: "cache-usage-2" }));
   const run = queryRuns(db, { runId })[0];
   assert(run.totals.cacheSavingsUSD > 0, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected > 0)`);
-  assert(Math.abs(run.totals.cacheSavingsUSD - 0.112) < 0.001, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected ~0.112 from the configured cacheRead=0.028)`);
+  assert(Math.abs(run.totals.cacheSavingsUSD - 0.0708848) < 0.001, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected ~0.0708848 from the configured cacheRead=0.0177212)`);
   // Per-model: deepseek-v4-flash has savings, unknown model does not
   const flashEntry = run.byModel["deepseek-v4-flash"];
   assert(flashEntry != null, "deepseek-v4-flash entry missing from byModel");
-  assert(Math.abs(flashEntry.cacheSavingsUSD - 0.112) < 0.001, `byModel flash cacheSavingsUSD=${flashEntry.cacheSavingsUSD}`);
+  assert(Math.abs(flashEntry.cacheSavingsUSD - 0.0708848) < 0.001, `byModel flash cacheSavingsUSD=${flashEntry.cacheSavingsUSD}`);
   const unknownEntry = run.byModel["unknown-model-v99"];
   assert(unknownEntry != null, "unknown-model-v99 entry missing from byModel");
   assert(unknownEntry.cacheSavingsUSD === 0, `byModel unknown cacheSavingsUSD=${unknownEntry.cacheSavingsUSD} (expected 0)`);
