@@ -1,0 +1,240 @@
+{
+  "_doc": "Squad topology as an executable artifact (FOC-158). Until now the graph lived in prose (agents/*/CLAUDE.md) plus four routing rules in config/handoff-rules.json — it could not be drawn, diffed or validated. This file is the source of truth for BOTH: node contracts (what each squad consumes, produces, when it is done, what it emits on failure) and the typed edges between them. Validate + render: node scripts/graph-validate.mjs [--emit-puml|--emit-handoff-rules]. Full rationale: docs/plans/brainstorm-graph-engineering.md",
+
+  "_migration": "config/handoff-rules.json is currently the file telemetry-server.mjs reads at runtime. It is being retired: this graph is authoritative, and `--emit-handoff-rules` regenerates that file from these edges. The regeneration is not a permanent view — it is the EQUIVALENCE PROOF for the migration. graph-validate.test.mjs asserts the committed handoff-rules.json is exactly what these edges produce, which is the mechanical evidence that nothing was lost in translation. When telemetry-server.mjs is rewired to read this file directly, handoff-rules.json, the emitter and that drift test are deleted together.",
+
+  "version": 1,
+
+  "entryNodes": ["plan", "cadence"],
+
+  "_entryNodes": "Nodes legitimately reachable without an inbound edge. `plan` is triggered by an entry in planning/inbox/ (a voice memo, an artefact) before any Linear task exists; `cadence` is triggered by a weekly timer, not by a task at all. Every other node MUST have an inbound edge — a node nothing routes to is dead topology, and graph-validate.mjs fails on it.",
+
+  "_autonomy": "Per-node autonomy level, human-set ONLY. Every node ships as `supervised`; promotion to `bounded` or `scheduled` is a committed edit by Mateusz backed by telemetry evidence, never something the system grants itself (brainstorm A decision #1 stays literal). Hard precondition: no node may go below `supervised` before FOC-163 (grounded verdicts) exists — promoting a node whose evaluator judges by eye is how parallelism turns into scaled-up unverified work.",
+
+  "_budget": "Stage each node's spend belongs to, for the per-stage allocation in FOC-162 (B_discovery + B_verification + B_synthesis + B_reserve). shareHint is a starting split of an issue budget, to be tuned from usage_facts once real runs exist — it is a hint, not a measured value. The reserve is held at graph level because it belongs to no single node.",
+
+  "_concurrency": "Maximum simultaneous live children per node. All 1 today, which is the WIP=1 the squads already enforce by hand. FOC-161 (semaphore + backpressure) reads these instead of hardcoding a limit.",
+
+  "budgetPolicy": {
+    "reserveShare": 0.05,
+    "note": "Released last, covers retries and tool failures only. Exhaustion stops graph expansion and produces a partial-status report (FOC-162)."
+  },
+
+  "nodes": {
+    "plan": {
+      "autonomy": "supervised",
+      "concurrency": 1,
+      "budget": { "stage": "discovery", "shareHint": 0.2 },
+      "input": {
+        "source": "planning/inbox/*.md",
+        "description": "An entry in the planning inbox — voice memo, artefact, free-text idea. No Linear task exists yet, or a Draft does."
+      },
+      "output": {
+        "linear": {
+          "creates": "epic + subtasks",
+          "labels": ["ai:planned", "type:*", "dor-ok"],
+          "fields": ["estimate", "blockedBy relations"]
+        },
+        "artifacts": ["planning/briefs/{discovery,spec,plan}-*.md", "docs/adr/NNNN-*.md"]
+      },
+      "completion": "Idempotent push to Linear succeeded AND the hand-off comment is posted. Re-running must not duplicate issues.",
+      "failure": "A HITL gate did not get its ✅ → stop without pushing. NEVER push to Linear without GATE 2 approval.",
+      "gates": ["plan.gate1", "plan.gate2"]
+    },
+
+    "dev": {
+      "autonomy": "supervised",
+      "concurrency": 1,
+      "budget": { "stage": "synthesis", "shareHint": 0.45 },
+      "input": {
+        "state": "Todo",
+        "labels": ["dor-ok"],
+        "description": "Exactly one issue, dependency-aware: anything with unfinished blockers is skipped. Prefer the smallest estimate."
+      },
+      "output": {
+        "git": "branch off main, commits on that branch — never pushed",
+        "linear": {
+          "state": "In Review",
+          "labels": ["coded"],
+          "comment": "hand-off summary (what changed, self-verification, open questions)"
+        }
+      },
+      "completion": "Work is committed on the squad branch AND the hand-off comment is posted AND the issue is transitioned to In Review — REVIEW needs a real diff to read.",
+      "failure": "Two failed attempts → labels `escalated` + `needs:answer`, write .state/dev-wip.json, exit cleanly. Never busy-wait.",
+      "gates": []
+    },
+
+    "review": {
+      "autonomy": "supervised",
+      "concurrency": 1,
+      "budget": { "stage": "verification", "shareHint": 0.2 },
+      "input": {
+        "state": "In Review",
+        "labels": ["coded"],
+        "description": "Reads the branch diff. Three passes run concurrently: first-pass, security, deep."
+      },
+      "output": {
+        "pass": { "labels": ["ai:reviewed", "dod-ok", "stage:testing"], "state": "In Review (unchanged — hands to TEST without a transition)" },
+        "fail": { "state": "In Progress", "labels": ["risk:high (only on a high-severity finding)"], "note": "round++" },
+        "artifacts": [".state/reviews/<ID>-round<N>.md (Conventional Comments)"]
+      },
+      "completion": "A verdict is posted. Clean = every AC and DoD item passes with zero blocking `issue:` findings.",
+      "failure": "round > 2 (third attempt) → label `escalated`, post the final verdict, STOP and notify Mateusz. Max 2 dev↔review cycles.",
+      "gates": []
+    },
+
+    "test": {
+      "autonomy": "supervised",
+      "concurrency": 1,
+      "budget": { "stage": "verification", "shareHint": 0.1 },
+      "input": {
+        "labels": ["stage:testing"],
+        "description": "Picked up after REVIEW approved and assigned a version."
+      },
+      "output": {
+        "pass": { "state": "Done" },
+        "fail": { "state": "In Progress", "note": "root-cause report attached" }
+      },
+      "completion": "Deploy health-check passed AND synthetic tests passed. The health-check is mandatory before E2E and carries auto-rollback.",
+      "failure": "Loop-limit reached → escalate. A failed health-check rolls back before anything else runs.",
+      "gates": []
+    },
+
+    "cadence": {
+      "autonomy": "supervised",
+      "concurrency": 1,
+      "budget": { "stage": "out-of-band", "shareHint": null },
+      "input": {
+        "trigger": "weekly timer",
+        "description": "Time-triggered, not task-triggered — this is why cadence is an entry node. Reads workspace state; does not pick an issue."
+      },
+      "output": {
+        "artifacts": [".state/cadence/<ISO-week>.md"],
+        "linear": { "comment": "digest posted to the active epic", "changes": "none — read-mostly by contract" }
+      },
+      "completion": "Digest written and posted.",
+      "failure": "Collector cannot reach Linear → report the gap in the digest rather than inventing numbers.",
+      "gates": []
+    },
+
+    "human": {
+      "autonomy": "supervised",
+      "concurrency": 1,
+      "budget": { "stage": "out-of-band", "shareHint": null },
+      "input": {
+        "labels": ["needs:*"],
+        "description": "Any task waiting on Mateusz: needs:answer, needs:approval, needs:decision, needs:access."
+      },
+      "output": {
+        "description": "An answer, approval or decision that removes the needs:* label and unblocks the task."
+      },
+      "completion": "The needs:* label is gone.",
+      "failure": "None — this node does not fail, it waits. Nothing may route past it while the label is set.",
+      "gates": []
+    }
+  },
+
+  "edges": [
+    {
+      "id": "any-needs-to-human",
+      "from": "*",
+      "to": "human",
+      "type": "gate",
+      "order": 1,
+      "routable": true,
+      "when": { "labels": ["needs:*"] },
+      "why": "needs:* → human (HOW-TO §6: any needs:answer/approval/decision/access = waiting on Mateusz, stop). Evaluated first so a blocked task always routes to the human regardless of state. Wildcard is separator-agnostic in the matcher — matches both the colon form (needs:answer, HOW-TO §6 doc convention) and the hyphen form (needs-decision, the actual Linear label name in this workspace)."
+    },
+    {
+      "id": "plan-to-dev",
+      "from": "plan",
+      "to": "dev",
+      "type": "handoff",
+      "order": 2,
+      "routable": true,
+      "when": { "state": "Todo", "labels": ["dor-ok"] },
+      "why": "Todo + dor-ok → dev (PLAN→DEV handoff)."
+    },
+    {
+      "id": "dev-to-review",
+      "from": "dev",
+      "to": "review",
+      "type": "handoff",
+      "order": 3,
+      "routable": true,
+      "when": { "state": "In Review", "labels": ["coded"] },
+      "why": "In Review + coded → review (DEV→REVIEW handoff). Linear exposes the leaf label `coded` (linear-ops.mjs accepts `ai:coded` as an add-alias, but the API returns `coded`)."
+    },
+    {
+      "id": "review-to-test",
+      "from": "review",
+      "to": "test",
+      "type": "handoff",
+      "order": 4,
+      "routable": true,
+      "when": { "labels": ["stage:testing"] },
+      "why": "stage:testing → test (REVIEW→TEST handoff, after approve + version)."
+    },
+
+    {
+      "id": "review-to-dev-return",
+      "from": "review",
+      "to": "dev",
+      "type": "return",
+      "order": 5,
+      "routable": false,
+      "when": { "state": "In Progress" },
+      "why": "REVIEW sends work back by transitioning to In Progress. This matches NO rule in handoff-rules.json today (the DEV rule requires Todo), so returns route to null in the dashboard — a real gap, made visible here rather than left implicit. NOT routable yet, for two reasons. (1) Emitting it would break the equivalence proof against the committed handoff-rules.json. (2) The blocking one: `In Progress` is ALSO the state of a task DEV is actively working on, so routing it to dev would suggest dev for work dev already holds. Enabling this needs a discriminator for 'returned, round > 0' — a round label or a state — which does not exist yet. That is a separate task with a visible dashboard behaviour change, not a side effect of declaring the topology."
+    },
+    {
+      "id": "test-to-dev-return",
+      "from": "test",
+      "to": "dev",
+      "type": "return",
+      "order": 6,
+      "routable": false,
+      "when": { "state": "In Progress" },
+      "why": "TEST sends a failed deploy or failed synthetic back to DEV as In Progress, with a root-cause report. Same discriminator problem as review-to-dev-return, and indistinguishable from it by state+labels alone — another reason the round marker is a prerequisite."
+    },
+    {
+      "id": "dev-to-human-escalate",
+      "from": "dev",
+      "to": "human",
+      "type": "escalate",
+      "order": 7,
+      "routable": false,
+      "when": { "labels": ["escalated"] },
+      "why": "Two failed attempts in DEV. Not routable because the `escalated` label is always set together with `needs:answer`, so the order-1 gate edge already routes these to the human — a routable rule here would be dead code that never wins first-match."
+    },
+    {
+      "id": "review-to-human-escalate",
+      "from": "review",
+      "to": "human",
+      "type": "escalate",
+      "order": 8,
+      "routable": false,
+      "when": { "labels": ["escalated"] },
+      "why": "round > 2, i.e. a third dev↔review attempt. Declared so the escalation path is visible in the topology; routing is handled by the order-1 gate edge. FOC-163 replaces the round counter with a diff+failure fingerprint, which will change this edge's condition."
+    },
+    {
+      "id": "test-to-human-escalate",
+      "from": "test",
+      "to": "human",
+      "type": "escalate",
+      "order": 9,
+      "routable": false,
+      "when": { "labels": ["escalated"] },
+      "why": "TEST loop-limit reached. Same routing note as the other escalate edges."
+    },
+    {
+      "id": "plan-to-human-gate",
+      "from": "plan",
+      "to": "human",
+      "type": "gate",
+      "order": 10,
+      "routable": false,
+      "when": { "gates": ["plan.gate1", "plan.gate2"] },
+      "why": "PLAN's two HITL gates. Not routable: today they block inline in the PLAN REPL and are never expressed as Linear state, so there is nothing for a label matcher to see. FOC-122 turns them into gate records relayed by the Supervisor, at which point this edge gains an observable condition."
+    }
+  ]
+}

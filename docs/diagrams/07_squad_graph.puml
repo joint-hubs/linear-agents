@@ -1,0 +1,38 @@
+@startuml
+!pragma layout smetana
+title Squad graph (generated from config/graph.json — do not edit by hand)\nnode contracts + typed edges · handoff / return / escalate / gate
+
+skinparam rectangle {
+  BackgroundColor #EAF3FF
+  BorderColor #336699
+  FontName Helvetica
+}
+
+rectangle "plan «entry»\nsupervised · discovery" as plan
+rectangle "dev\nsupervised · synthesis" as dev
+rectangle "review\nsupervised · verification" as review
+rectangle "test\nsupervised · verification" as test
+rectangle "cadence «entry»\nsupervised · out-of-band" as cadence
+rectangle "human\nsupervised · out-of-band" as human
+
+rectangle "any node" as ANY #FFF2CC
+
+ANY -[#7D3C98]-> human : gate: needs:*
+plan --> dev : handoff: Todo + dor-ok
+dev --> review : handoff: In Review + coded
+review --> test : handoff: stage:testing
+review -[#B5651D]-> dev : return: In Progress (declared, not routed)
+test -[#B5651D]-> dev : return: In Progress (declared, not routed)
+dev -[#C0392B]-> human : escalate: escalated (declared, not routed)
+review -[#C0392B]-> human : escalate: escalated (declared, not routed)
+test -[#C0392B]-> human : escalate: escalated (declared, not routed)
+plan -[#7D3C98]-> human : gate: plan.gate1 / plan.gate2 (declared, not routed)
+
+legend right
+  handoff = normal forward flow
+  return = work sent back
+  escalate = out to a human on failure
+  gate = blocked awaiting a human decision
+  (declared, not routed) = in the topology, not yet in the matcher
+end legend
+@enduml

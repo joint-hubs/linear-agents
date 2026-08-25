@@ -50,6 +50,7 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 | [04_review_test](diagrams/04_review_test.puml) | REVIEW (potrójny par, max 2 rundy) + TEST (deploy health+rollback) |
 | [05_cadence_loop](diagrams/05_cadence_loop.puml) | CADENCE: tygodniowa pętla domykająca linię w cykl |
 | [06_signaling_protocol](diagrams/06_signaling_protocol.puml) | async human↔agent: needs:* + emoji + webhook |
+| [07_squad_graph](diagrams/07_squad_graph.puml) | **generowany** z `config/graph.json` — węzły + typowane krawędzie (handoff/return/escalate/gate). NIE edytować ręcznie: `node scripts/graph-validate.mjs --emit-puml > docs/diagrams/07_squad_graph.puml` |
 | [squad-graph](diagrams/squad-graph.html) | interaktywna mapa zależności squadów |
 | [slides](diagrams/slides/README.md) | PlantUML→PNG pipeline (render commands) |
 
@@ -74,6 +75,13 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 - `scripts/delegation-outcomes.mjs` — join review verdicts na delegations (JOI-210)
 - `scripts/prompt-library.mjs` — backend biblioteki promptów (drzewo intencji + role/lead docs)
 - `notebooks/agent_intelligence.py` — CLI → self-contained HTML z telemetrii SQL
+- `scripts/graph-validate.mjs` — walidator `config/graph.json` (topologia składów) + `--emit-puml` / `--emit-handoff-rules`
+
+> **`config/graph.json` jest źródłem prawdy topologii.** `config/handoff-rules.json` to plik, który
+> `telemetry-server.mjs` czyta w runtime — jest wycofywany i **generowany** z grafu
+> (`--emit-handoff-rules`). `scripts/graph-validate.test.mjs` pilnuje, że zacommitowana wersja jest
+> dokładnie tym, co produkuje graf — to jest dowód równoważności dla migracji, nie stały widok.
+> Nie edytuj `handoff-rules.json` ręcznie; po przepięciu serwera na graf plik znika razem z emiterem.
 
 ## Status / następne kroki
 
