@@ -197,7 +197,7 @@ console.log("\njedno źródło prawdy dla pętli");
 test("agents/dev/CLAUDE.md deklaruje się jedynym opisem pętli", () => {
   // DEV briefly had three: 6 steps in the kickoff, 7 here, 8 in FENIX_WORKFLOW §5.
   const doc = read("agents/dev/CLAUDE.md");
-  if (!/jedynym obowiązującym opisem pętli/i.test(doc)) {
+  if (!/jedynym obowiązującym opisem pętli|single source of truth for the DEV loop/i.test(doc)) {
     fail("brak zdania o pierwszeństwie — bez niego kickoff i FENIX_WORKFLOW znów zaczną konkurować");
   }
 });
