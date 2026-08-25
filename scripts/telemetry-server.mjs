@@ -32,7 +32,7 @@ import {
   spawnLauncher,
   reloadKickoffTemplates,
 } from './launch.mjs';
-import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools } from './squad-config.mjs';
+import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools, validateProvidersPatch } from './squad-config.mjs';
 import { listTerminals, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive } from './terminals.mjs';
 import {
   buildPromptTree,
@@ -687,20 +687,62 @@ const server = createServer(async (req, res) => {
       }
       let body;
       try {
-        body = await readJsonBody(req);
+        // 64 KB cap: provider definitions carry model lists plus per-provider
+        // pricing, which no longer fits the 8 KB control-payload default.
+        body = await readJsonBody(req, 64 * 1024);
       } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        const status = err.tooLarge ? 413 : 400;
+        json(res, status, {
+          error: err.tooLarge ? err.message : 'invalid JSON body: ' + err.message,
+        });
+        log(method, path, status);
         return;
       }
 
-      // Validate slugs
+      // Current state, needed to resolve each squad's effective provider and to
+      // validate provider removal against existing references.
+      const current = readSquadConfig(root);
+
+      // Effective providers = current + this patch (removes applied), so a
+      // provider added in the same request can be referenced by a squad in it.
+      const effectiveProviders = { ...current.providers };
+      if (body.providers) {
+        for (const [name, profile] of Object.entries(body.providers)) {
+          if (name.startsWith('_')) continue;
+          if (profile === null) delete effectiveProviders[name];
+          else effectiveProviders[name] = profile;
+        }
+      }
+
+      // Validate providers patch (add/edit/remove) — name/URL/env-name/style.
+      const pv = validateProvidersPatch(body, current);
+
+      // Validate slug / provider / pricing — errors block, warnings don't.
       const slugErrors = [];
       const slugWarnings = [];
+      slugErrors.push(...pv.errors);
+
+      // Per-squad provider assignment must reference an existing provider.
       if (body.squads) {
         for (const [squad, squadPatch] of Object.entries(body.squads)) {
+          if (squadPatch.provider !== undefined) {
+            if (!effectiveProviders[squadPatch.provider]) {
+              slugErrors.push(`squads.${squad}.provider: provider "${squadPatch.provider}" nie istnieje.`);
+            }
+          }
+        }
+      }
+
+      if (body.squads) {
+        for (const [squad, squadPatch] of Object.entries(body.squads)) {
+          // Effective provider for this squad: the patch wins, then current,
+          // then the openrouter default.
+          const provider = squadPatch.provider !== undefined
+            ? squadPatch.provider
+            : (current.squads?.[squad]?.provider || 'openrouter');
+
           if (squadPatch.lead !== undefined) {
-            const v = validateSlug(squadPatch.lead);
+            const v = validateSlug(squadPatch.lead, provider);
             if (!v.ok) slugErrors.push(`squads.${squad}.lead: ${v.warning}`);
             else if (v.warning) slugWarnings.push(`squads.${squad}.lead: ${v.warning}`);
           }
@@ -708,7 +750,7 @@ const server = createServer(async (req, res) => {
             for (const [role, value] of Object.entries(squadPatch.agents)) {
               // Backward compat: string = model-only patch
               if (typeof value === 'string') {
-                const v = validateSlug(value);
+                const v = validateSlug(value, provider);
                 if (!v.ok) slugErrors.push(`squads.${squad}.agents.${role}: ${v.warning}`);
                 else if (v.warning) slugWarnings.push(`squads.${squad}.agents.${role}: ${v.warning}`);
                 continue;
@@ -716,7 +758,7 @@ const server = createServer(async (req, res) => {
               // Object patch: { model?, tools? }
               if (typeof value === 'object' && value !== null) {
                 if (value.model !== undefined) {
-                  const v = validateSlug(value.model);
+                  const v = validateSlug(value.model, provider);
                   if (!v.ok) slugErrors.push(`squads.${squad}.agents.${role}.model: ${v.warning}`);
                   else if (v.warning) slugWarnings.push(`squads.${squad}.agents.${role}.model: ${v.warning}`);
                 }
@@ -737,16 +779,23 @@ const server = createServer(async (req, res) => {
         }
       }
       if (body.pricing) {
-        for (const [slug, price] of Object.entries(body.pricing)) {
+        for (const [providerKey, providerPricing] of Object.entries(body.pricing)) {
           // Silently skip metadata keys (_doc, _note, etc.)
-          if (slug.startsWith('_')) continue;
-          if (typeof price.input !== 'number' || price.input < 0 || typeof price.output !== 'number' || price.output < 0) {
-            slugErrors.push(`pricing.${slug}: input/output must be numbers >= 0`);
+          if (providerKey.startsWith('_')) continue;
+          if (!providerPricing || typeof providerPricing !== 'object') {
+            slugErrors.push(`pricing.${providerKey}: must be an object of model → price`);
             continue;
           }
-          const v = validateSlug(slug);
-          if (!v.ok) slugErrors.push(`pricing.${slug}: ${v.warning}`);
-          else if (v.warning) slugWarnings.push(`pricing.${slug}: ${v.warning}`);
+          for (const [slug, price] of Object.entries(providerPricing)) {
+            if (slug.startsWith('_')) continue;
+            if (typeof price.input !== 'number' || price.input < 0 || typeof price.output !== 'number' || price.output < 0) {
+              slugErrors.push(`pricing.${providerKey}.${slug}: input/output must be numbers >= 0`);
+              continue;
+            }
+            const v = validateSlug(slug, providerKey);
+            if (!v.ok) slugErrors.push(`pricing.${providerKey}.${slug}: ${v.warning}`);
+            else if (v.warning) slugWarnings.push(`pricing.${providerKey}.${slug}: ${v.warning}`);
+          }
         }
       }
       if (slugErrors.length > 0) {
@@ -757,7 +806,7 @@ const server = createServer(async (req, res) => {
 
       const dryRun = body.dryRun === true;
       const result = writeSquadConfig(
-        { squads: body.squads, pricing: body.pricing },
+        { squads: body.squads, pricing: body.pricing, providers: body.providers },
         root,
         { dryRun },
       );
