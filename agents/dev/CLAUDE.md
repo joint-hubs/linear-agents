@@ -93,7 +93,7 @@ Missing tool → propose it in the hand-off per `docs/tools/AUTHORING.md`. Never
 ## Loop
 
 ### 0. Resume check (before pick)
-If `.state/dev-wip.json` exists, read it, then `node $LA_ROOT/scripts/linear-query.mjs issue <wip.identifier> --json` (DRY-RUN serves a fixture).
+If `.state/dev-wip.json` exists, read it, then `node $LA_ROOT/scripts/linear-query.mjs issue <wip.identifier> --json` (DRY-RUN serves a fixture). **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, this whole check is dead: the Supervisor resumes your session directly, so there is no `needs:*` to look for and the wip file is a crash checkpoint only.
 - Still `In Progress` AND carries `needs:answer`/`needs:approval` → RESUME (skip Pick; WIP `stage` = the blocked step).
 - No longer In Progress, or `needs:*` gone → delete `.state/dev-wip.json`, go to Pick.
 - No wip file → Pick.
@@ -129,7 +129,7 @@ One branch per task, off main, rebase if it already exists. NEVER `git push` (de
 ```
 node $LA_ROOT/scripts/linear-ops.mjs label <identifier> --add escalated --add needs:answer
 ```
-then a short WIP note and a clean EXIT (step 5). Do not busy-wait.
+then a short WIP note and a clean EXIT (step 5). Do not busy-wait. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, drop the `needs:answer` label and emit a `question` gate carrying the debugger's report; keep `escalated`.
 **3d.** Lead spot-check: max 2 cheap commands (e.g. `git log -1 --stat`, tail of one test). Budget drains from `<dev_delegation_policy>` apply here too.
 
 WHY — inline debugging re-bills the lead's whole context every turn; subagents run 5–10× cheaper on fresh context.
@@ -149,7 +149,7 @@ Keep the `ai:coded` label.
 
 ### 5. needs:answer resume (C7)
 Blocked (`needs:answer`/`needs:approval`) → write `{identifier, id, branch, stage, blockedReason, ts}` to `.state/dev-wip.json` and EXIT cleanly (no loop, no sleep).
-The next `dev.bat` resumes at the blocked step; once unblocked, delete `.state/dev-wip.json` and continue.
+The next `dev.bat` resumes at the blocked step; once unblocked, delete `.state/dev-wip.json` and continue. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, there is no next `dev.bat` and no `needs:*`: emit a gate, write the wip file as a crash checkpoint if you like, and exit. See *Supervised mode → DEV only*.
 
 ### 6. DRY-RUN mode
 `DEV_DRY_RUN=1` → pass `--dry-run` to EVERY `linear-ops.mjs` call (transitions, labels, comments). `linear-query.mjs` auto-serves the fixture (`.state/mock/dev-task.json`) — no API.
@@ -158,7 +158,7 @@ Branch is a no-op: `node $LA_ROOT/scripts/dev-branch.mjs start <identifier> <slu
 
 <dev_hard_rules>
 ## Hard rules
-- Tool-call fails → retry → fall back (refactorer/debugger). After 2 failed attempts: escalate + `needs:answer` (step 3c) + notify Mateusz.
+- Tool-call fails → retry → fall back (refactorer/debugger). After 2 failed attempts: escalate + `needs:answer` (step 3c) + notify Mateusz. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, "notify Mateusz" means a `question` gate — you cannot reach him directly.
   WHY — silent retry loops burn cost with no progress; escalation surfaces the block to a human who can unblock it.
 - NEVER `git push` without consent.
   WHY — push publishes unreviewed work and can trigger CI/deploy; merge timing is Mateusz's call.
@@ -213,7 +213,52 @@ Commit: `feat(gantt): add snapshot export (FEN-30)`
 Note what is absent: no algorithm, no helper names, no pseudo-code. The implementer decides how.
 </examples>
 
+<supervised_mode>
+## Supervised mode (`LA_SUPERVISOR=1`)
+
+When env `LA_SUPERVISOR=1` is set there is **NO human in this TTY**. The operator is the Supervisor agent (`agents/supervisor/`), and it is the only thing that can reach Mateusz. This section **overrides every rule elsewhere in this file that assumes a person is watching** — those rules carry a pointer back here.
+
+Nothing below applies when the variable is unset. Only `supervisor-spawn.mjs` sets it, so a normal `bin/<squad>.bat` run behaves exactly as it always has.
+
+### HITL gates
+GATE 1, GATE 2, questions, push/PR approvals — do NOT pause the REPL for a human, do NOT set Linear `needs:*` labels, and never walk away async-style. Emit a gate record, then **END YOUR TURN**:
+
+```bash
+node $LA_ROOT/scripts/supervisor-gate.mjs emit \
+  --kind <plan.gate1|plan.gate2|question|push-approval|pr-approval> \
+  --summary "<the decision you need, one line>" \
+  --question "<your question, verbatim>" [--question "..."] [--artifact <path>]
+```
+
+`--child` and `--run` come from `LA_SUPERVISOR_CHILD` / `LA_SUPERVISOR_RUN`, already in your environment. An unknown `--kind` is refused and no file is written.
+
+**A gate is one turn: emit, then exit.** Do not emit and carry on — the record says you are waiting, your status becomes `waiting_gate`, and work done after it is work nobody approved.
+
+The Supervisor answers by resuming your session (`supervisor-followup.mjs --resume`). **That is the ONLY resume path.** There is no next squad `.bat` invocation, and no Linear label will bring anyone back for you.
+
+### Push and PR
+Never run `git push`, `gh pr create`, `gh pr merge`, `gh release create` or `gh api`. The generated `child-settings.json` denies them at the harness level — verified: the refusal arrives before git runs. Request a `push-approval` gate; the Supervisor pushes once Mateusz has approved.
+
+### End of turn
+Close every turn with a compact status block:
+
+```
+STATUS: done | needs-decision | blocked
+ARTIFACTS: <paths>
+NEXT: <what you need>
+```
+
+Everything else in your loop is unchanged.
+
+### DEV only — one resume path, not three (§1.6.1)
+Unsupervised, DEV can be resumed three ways: a Linear `needs:*` label, `.state/dev-wip.json` read by the next `dev.bat`, or a human typing in this REPL. Under supervision **exactly one exists** — the Supervisor resuming your session.
+
+- Do NOT set `needs:answer` / `needs:approval`. The gate record replaces them. A label set here blocks nothing and nobody clears it.
+- Do NOT wait for a next `dev.bat`. None is coming.
+- `.state/dev-wip.json` is still written as a **local crash checkpoint** (the context-budget rule is unchanged) and may be written before you exit on a gate. It is never a resume trigger while supervised — your resumed session re-reads it naturally if it is there.
+</supervised_mode>
+
 <final_reminders>
-NEVER `git push` without consent. NEVER put secrets or login data in Linear comments.
+NEVER `git push` without consent — supervised, the harness denies it outright and consent arrives as an answered `push-approval` gate. NEVER put secrets or login data in Linear comments.
 Brief the WHAT, never the HOW.
 </final_reminders>

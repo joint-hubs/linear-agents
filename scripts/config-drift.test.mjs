@@ -153,6 +153,68 @@ test("każda zmienna LA_* opisana w CLAUDE.md jest przez coś czytana", () => {
   }
 });
 
+console.log("\ntryb nadzorowany");
+
+// The four squads run as children of the same Supervisor, so a rule that holds
+// for one and not another is not a rule. The section is the contract between
+// the lead and its children; it drifts the moment someone edits one file.
+const SUPERVISED_SQUADS = ["plan", "dev", "review", "test"];
+const supervisedBlock = (squad) => {
+  const doc = read(`agents/${squad}/CLAUDE.md`).replace(/\r\n/g, "\n");
+  const open = doc.indexOf("<supervised_mode>");
+  const close = doc.indexOf("</supervised_mode>");
+  if (open === -1 || close === -1) return null;
+  return doc.slice(open, close);
+};
+
+test("każdy skład ma sekcję Supervised mode", () => {
+  const missing = SUPERVISED_SQUADS.filter((s) => supervisedBlock(s) === null);
+  if (missing.length) fail(`brak <supervised_mode> w: ${missing.join(", ")}`);
+});
+
+test("sekcja Supervised mode jest identyczna we wszystkich czterech składach", () => {
+  // DEV carries one extra subsection (spec §1.6.1, the single resume path).
+  // Everything BEFORE it must match the other three byte for byte.
+  const shared = (squad) => {
+    const b = supervisedBlock(squad);
+    const extra = b.indexOf("### DEV only");
+    return (extra === -1 ? b : b.slice(0, extra)).trimEnd();
+  };
+  const reference = shared("plan");
+  const diverged = SUPERVISED_SQUADS.filter((s) => shared(s) !== reference);
+  if (diverged.length) {
+    fail(`rozjechana sekcja w: ${diverged.join(", ")} — edytuj wszystkie cztery naraz`);
+  }
+});
+
+test("tylko DEV ma dodatek o pojedynczej ścieżce wznowienia", () => {
+  // §1.6.1 is DEV-specific: only DEV had three resume mechanisms to collapse.
+  const withExtra = SUPERVISED_SQUADS.filter((s) => supervisedBlock(s).includes("### DEV only"));
+  if (withExtra.join(",") !== "dev") fail(`dodatek DEV-only jest w: ${withExtra.join(", ") || "(nigdzie)"}`);
+});
+
+test("każda reguła o needs:* / notify Mateusz ma odsyłacz do trybu nadzorowanego", () => {
+  // Appending the section is not enough: a hard rule saying "never walk away"
+  // contradicts it, and the lead would have to pick one. Every such rule carries
+  // an explicit rider instead (FOC-125).
+  const CONFLICTS = /needs:answer|needs:approval|notify Mateusz|walk away|stay synchronous/i;
+  const orphaned = [];
+  for (const squad of SUPERVISED_SQUADS) {
+    const doc = read(`agents/${squad}/CLAUDE.md`).replace(/\r\n/g, "\n");
+    // Paragraphs, not lines: a rider legitimately lands at the end of the
+    // paragraph rather than on the line that trips the regex.
+    const body = doc.slice(0, doc.indexOf("<supervised_mode>"));
+    for (const para of body.split(/\n\s*\n/)) {
+      if (CONFLICTS.test(para) && !/LA_SUPERVISOR/.test(para)) {
+        orphaned.push(`${squad}: ${para.trim().split("\n")[0].slice(0, 90)}`);
+      }
+    }
+  }
+  if (orphaned.length) {
+    fail(`reguła sprzeczna z trybem nadzorowanym, bez odsyłacza:\n       ${orphaned.join("\n       ")}`);
+  }
+});
+
 // ── 4. Model routing must be internally consistent ────────────────────────────
 console.log("\nmodele i cennik");
 

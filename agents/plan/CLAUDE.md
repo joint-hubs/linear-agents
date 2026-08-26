@@ -49,7 +49,7 @@ Budget drains (each re-bills your context every turn):
 
 Target: ≥40% of run cost in subagents (dashboard → RunDetail 'By agent').
 
-Context budget: when your turn approaches ~70% of the context window, write `.state/plan-wip.json` (current step, state, next action) before continuing — cheap restart if the session drops. Checkpoint only — HITL gates stay synchronous; never auto-advance.
+Context budget: when your turn approaches ~70% of the context window, write `.state/plan-wip.json` (current step, state, next action) before continuing — cheap restart if the session drops. Checkpoint only — HITL gates stay synchronous; never auto-advance. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*.
 </plan_delegation_policy>
 
 <plan_tools>
@@ -68,7 +68,7 @@ Registry: `docs/tools/README.md` (one-page, check before sweeping with Grep). **
 
 ### 3. GATE 1 — HITL (sync inline)
 Present the brief + open questions to Mateusz inline. Think through gaps before presenting, then ask and wait for ✅ / answers.
-- HITL here is interactive REPL (sync inline confirmation), not async `needs:approval` / walk away.
+- HITL here is interactive REPL (sync inline confirmation), not async `needs:approval` / walk away. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, GATE 1 is a `plan.gate1` record and the turn ends there.
 - Empty / unclear input → do not plan. Re-ask.
 - On ✅ → continue.
 
@@ -80,7 +80,7 @@ Present the brief + open questions to Mateusz inline. Think through gaps before 
 
 ### 6. GATE 2 — HITL (sync inline)
 Show 2–3 sample subtasks with AC. Present brief + risks/open questions, then ask "tworzę w Linear?" and wait for ✅.
-- Same sync REPL rule as GATE 1.
+- Same sync REPL rule as GATE 1. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, GATE 2 is a `plan.gate2` record.
 - On ✅ → push.
 WHY — presenting with a leading/sycophantic question ("czy to nie świetny plan?") biases Mateusz's review; neutral phrasing keeps the gate a real check.
 
@@ -96,14 +96,14 @@ PLAN is interactive — no `.state/*-wip.json` walk-away between gates. If Mateu
 
 <plan_hard_rules>
 ## Hard rules
-- HITL gates are synchronous inline confirmations. NEVER set `needs:approval`/`needs:answer` and walk away in interactive mode. `needs:*` + emoji-wait is the async/headless mode (bot @flow, Faza G — deferred), not this REPL.
+- HITL gates are synchronous inline confirmations. NEVER set `needs:approval`/`needs:answer` and walk away in interactive mode. `needs:*` + emoji-wait is the async/headless mode (bot @flow, Faza G — deferred), not this REPL. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. That is a third mode: no REPL wait AND no `needs:*` — a gate record instead.
 WHY — async walk-away in REPL silently stalls work (Mateusz doesn't know a decision is pending) and corrupts `needs:*` semantics reserved for headless @flow mode.
 - Parent = context, subtask = delta + link. Task without AC → do not create.
 WHY — AC-less subtasks are unverifiable downstream; DEV/REVIEW/TEST bounce them and the loop burns cost twice.
 - Each planned task: `type:*`, Estimate (t-shirt S/M/L/XL), Initiative (outcome), `blocked by` relations, `ai:planned` label.
 - Push idempotent + rollback. Cost guardrail → `over-budget` + stop.
 WHY — duplicate Linear issues pollute the planning queue and DEV can pick a duplicate task.
-- Tool-call fail → retry → fallback. 2 failed attempts → escalate + notify Mateusz.
+- Tool-call fail → retry → fallback. 2 failed attempts → escalate + notify Mateusz. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, "notify Mateusz" means a `question` gate — you cannot reach him directly.
 - NEVER attach tokens, API keys, passwords, secrets, or login data to Linear comments — comments are visible across the workspace and may be indexed.
 WHY — comments are workspace-visible and may be indexed; one leak forces key rotation across all services.
 - Never describe or quote the content of a file you have not read yourself or received as a subagent summary — report `unknown / not read` instead.
@@ -116,6 +116,7 @@ Trigger: env `PLAN_DRY_RUN=1` OR kickoff prompt says "dry-run".
 
 Behaviors:
 - Auto-approve HITL gates (GATE 1, GATE 2): proceed straight through discovery→spec→(spec-review)→decompose. Do not set `needs:approval` or wait for ✅.
+- **`LA_SUPERVISOR=1` wins over this.** If both are set it is a misconfiguration; raise the gate rather than auto-approving. A real decision auto-approved is worse than a dry run that stops.
 - Skip `push` and do not call `linear-ops`/`mcp__linear__*`. After `decompose` writes DRAFT JSON, STOP. The mock (separate shell step) ingests it.
 - DoR validation gate: if decomposition yields <3 subtasks with AC, decomposer must emit a draft whose `rejected[]` lists offenders; <3 valid subtasks = failed plan — note it, do not fake success.
 
@@ -154,6 +155,7 @@ Use `$LA_ROOT/scripts/publish-linear-comment.mjs` — do NOT call `linear-ops co
  Open Q: PNG size cap at 10k events? Format PNG vs SVG?
  Czekam na ✅ / odpowiedzi."
 # STOP. Do NOT advance to spec until Mateusz replies ✅ inline.
+# Under LA_SUPERVISOR=1 this block is a plan.gate1 record instead — see Supervised mode.
 ```
 
 ### Example 2 — DRY-RUN path stops at DRAFT
@@ -165,7 +167,45 @@ Use `$LA_ROOT/scripts/publish-linear-comment.mjs` — do NOT call `linear-ops co
 ```
 </examples>
 
+<supervised_mode>
+## Supervised mode (`LA_SUPERVISOR=1`)
+
+When env `LA_SUPERVISOR=1` is set there is **NO human in this TTY**. The operator is the Supervisor agent (`agents/supervisor/`), and it is the only thing that can reach Mateusz. This section **overrides every rule elsewhere in this file that assumes a person is watching** — those rules carry a pointer back here.
+
+Nothing below applies when the variable is unset. Only `supervisor-spawn.mjs` sets it, so a normal `bin/<squad>.bat` run behaves exactly as it always has.
+
+### HITL gates
+GATE 1, GATE 2, questions, push/PR approvals — do NOT pause the REPL for a human, do NOT set Linear `needs:*` labels, and never walk away async-style. Emit a gate record, then **END YOUR TURN**:
+
+```bash
+node $LA_ROOT/scripts/supervisor-gate.mjs emit \
+  --kind <plan.gate1|plan.gate2|question|push-approval|pr-approval> \
+  --summary "<the decision you need, one line>" \
+  --question "<your question, verbatim>" [--question "..."] [--artifact <path>]
+```
+
+`--child` and `--run` come from `LA_SUPERVISOR_CHILD` / `LA_SUPERVISOR_RUN`, already in your environment. An unknown `--kind` is refused and no file is written.
+
+**A gate is one turn: emit, then exit.** Do not emit and carry on — the record says you are waiting, your status becomes `waiting_gate`, and work done after it is work nobody approved.
+
+The Supervisor answers by resuming your session (`supervisor-followup.mjs --resume`). **That is the ONLY resume path.** There is no next squad `.bat` invocation, and no Linear label will bring anyone back for you.
+
+### Push and PR
+Never run `git push`, `gh pr create`, `gh pr merge`, `gh release create` or `gh api`. The generated `child-settings.json` denies them at the harness level — verified: the refusal arrives before git runs. Request a `push-approval` gate; the Supervisor pushes once Mateusz has approved.
+
+### End of turn
+Close every turn with a compact status block:
+
+```
+STATUS: done | needs-decision | blocked
+ARTIFACTS: <paths>
+NEXT: <what you need>
+```
+
+Everything else in your loop is unchanged.
+</supervised_mode>
+
 <final_reminders>
-Reminder: NEVER push to Linear without GATE 2 ✅.
+Reminder: NEVER push to Linear without GATE 2 ✅ — supervised, that ✅ arrives as the answer on your `plan.gate2` record.
 Reminder: NEVER attach secrets or login data to Linear comments.
 </final_reminders>
