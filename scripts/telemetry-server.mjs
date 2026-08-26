@@ -18,6 +18,10 @@ import { dirname, join, extname } from 'node:path';
 import { loadEnv, graphql, chooseApiKey } from './linear-client.mjs';
 import * as telemetryStore from './telemetry-store.mjs';
 import { backfill, ingestKnownRuns } from './telemetry-ingest.mjs';
+// The state+labels -> next-node matcher. Shared with supervisor-triage.mjs so
+// the dashboard's suggestion and the Supervisor's triage proposal can never
+// disagree about what the same rules mean (FOC-123).
+import { suggestedSquad } from './graph-route.mjs';
 // Pure launch logic (validation, kickoff prompt, wrapper .bat, loopback check)
 // lives in scripts/launch.mjs so it's unit-testable without the HTTP server.
 import {
@@ -333,43 +337,6 @@ const TEAM_ISSUES_QUERY = `
     }
   }
 `;
-
-// Evaluate handoff rules against a task. First match wins — rule order in the
-// config is significant. `labels:["needs:*"]` is a wildcard matching any
-// `needs:` label, so a blocked task routes to the human regardless of state
-// (put that rule first in the config, per HOW-TO §6 "dowolny → człowiek").
-//
-// The wildcard is separator-agnostic: it matches BOTH the colon form
-// (`needs:answer`, the HOW-TO §6 doc convention) AND the hyphen form
-// (`needs-decision`, the actual label name Linear returns in this workspace).
-// Linear lets you name a label either way; the doc uses `needs:` while the
-// live workspace uses `needs-`, and the matcher must not let that discrepancy
-// silently drop blocked tasks (JOI-68 review round 1 found 6 needs-decision
-// tasks routing to null instead of human).
-function suggestedSquad(task, rules) {
-  const labels = new Set(task.labels || []);
-  for (const rule of rules) {
-    const w = rule.when || {};
-    if (w.state && task.state !== w.state) continue;
-    if (w.labels && w.labels.length) {
-      const ok = w.labels.every((l) => {
-        if (l.endsWith(':*')) {
-          // Strip ":*" → stem (e.g. "needs:*" → "needs"). Match the stem
-          // exactly or followed by either separator, so colon- and hyphen-
-          // named labels both route.
-          const stem = l.slice(0, -2);
-          return [...labels].some(
-            (t) => t === stem || t.startsWith(stem + ':') || t.startsWith(stem + '-'),
-          );
-        }
-        return labels.has(l);
-      });
-      if (!ok) continue;
-    }
-    return rule.next;
-  }
-  return null;
-}
 
 // 60 s cache per workspace (Linear rate limits). AC3: a second call within
 // 60 s is served from cache — no second Linear hit (response carries
