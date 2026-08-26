@@ -2,9 +2,18 @@
   "permissions": {
     "defaultMode": "default",
     "allow": [
-      "Read", "Grep", "Glob", "Write",
+      "Read",
+      "Grep",
+      "Glob",
+      "Write",
       "Bash(node:*)",
-      "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git worktree:*)"
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git worktree:*)",
+      "mcp__codegraph__*",
+      "Bash(codegraph:*)"
     ],
     "deny": [
       "mcp__linear__*"
@@ -12,8 +21,16 @@
   },
   "theme": "dark",
   "hooks": {
-    "SessionStart": [{
-      "hooks": [{ "type": "command", "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"", "timeout": 5 }]
-    }]
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

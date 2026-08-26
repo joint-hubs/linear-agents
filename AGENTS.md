@@ -19,7 +19,15 @@ This project is indexed by **CodeGraph** (`.codegraph/`, auto-syncing). Ask the 
 
 ## Squads
 
-The five squad leads (`agents/{plan,dev,review,test,cadence}/`) each carry the CodeGraph MCP server in their own `settings.json`, because children run with an isolated `CLAUDE_CONFIG_DIR` and do not inherit a globally installed server. They also have the CLI wrapper:
+The MCP server is declared once in the repo's **`.mcp.json`** (project scope), which applies whatever `CLAUDE_CONFIG_DIR` a child runs under. It is **not** in `agents/*/settings.json` — Claude Code does not read `mcpServers` from settings files, and this repo carried a dead `mcpServers.linear` there for a while to prove it.
+
+A project-scoped server starts as `Pending approval` and stays inert until each config dir approves it. Children run headless, where no trust dialog can appear, so approval is scripted:
+
+```bash
+node scripts/mcp-enable.mjs --verify   # once per machine; asks Claude Code whether it worked
+```
+
+Squads also have the CLI wrapper:
 
 ```bash
 node scripts/code-intel.mjs <explore|symbol|impact|callers|callees|find|files|affected|status>

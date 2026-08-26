@@ -27,9 +27,16 @@ wywołań między nimi (łącznie ze skokami przez dynamiczny dispatch, których
 i podsumowanie promienia rażenia. Nie deleguj eksploracji do subagenta czytającego pliki —
 subagent bez tych narzędzi i tak otworzy pliki, a CodeGraph staje się wtedy czystym narzutem.
 
-Każdy skład ma serwer wpięty we własnym `agents/<squad>/settings.json`, bo dzieci startują
-z izolowanym `CLAUDE_CONFIG_DIR` i **nie dziedziczą** serwera zainstalowanego globalnie.
-Zestaw narzędzi rozszerza `CODEGRAPH_MCP_TOOLS` — domyślnie MCP wystawia tylko `explore`.
+Serwer jest zadeklarowany raz w repo, w **`.mcp.json`** (zakres projektowy) — działa niezależnie
+od tego, jaki `CLAUDE_CONFIG_DIR` ma dziecko. **Nie** w `agents/*/settings.json`: Claude Code nie
+czyta stamtąd `mcpServers` (zweryfikowane — `claude mcp list` odpowiadał „No MCP servers configured").
+
+Serwer projektowy startuje jako `Pending approval` i jest bezużyteczny, dopóki dany katalog configu
+go nie zatwierdzi. Dzieci lecą headless, więc dialog zaufania nie ma jak się pokazać — zatwierdzenie
+robi `node scripts/mcp-enable.mjs --verify` (raz na maszynę; sam pyta Claude Code, czy wyszło).
+
+Zestaw narzędzi rozszerza `CODEGRAPH_MCP_TOOLS` w `.mcp.json` — domyślnie MCP wystawia tylko
+`explore`. Zweryfikowane na żywym dziecku: 8 narzędzi `mcp__codegraph__*`, serwer `connected`.
 
 **CLI — `scripts/code-intel.mjs`.** Podłoga, nie sufit. Działa bez żadnej konfiguracji MCP,
 da się wołać ze skryptu i wystawia każdy werb osobno. Gdy pytanie jest wąskie („kto to woła"),

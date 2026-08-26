@@ -215,6 +215,36 @@ test("każda reguła o needs:* / notify Mateusz ma odsyłacz do trybu nadzorowan
   }
 });
 
+console.log("\nMCP");
+
+test("zaden settings.json nie deklaruje mcpServers", () => {
+  // Claude Code NIE czyta `mcpServers` z settings.json — bierze je z
+  // `.claude.json` (user) i `.mcp.json` (projekt). To repo trzymało tam martwy
+  // `mcpServers.linear` w dwóch składach: plik wyglądał na skonfigurowany, a
+  // `claude mcp list` pod CLAUDE_CONFIG_DIR składu odpowiadał
+  // "No MCP servers configured". Config, który twierdzi coś, czego runtime nie
+  // widzi — dokładnie po to jest ten plik.
+  const bad = SQUADS.filter((s) => readJson(`agents/${s}/settings.json`).mcpServers);
+  if (bad.length) {
+    fail(`mcpServers w settings.json (ignorowane przez Claude Code): ${bad.join(", ")} — przenieś do .mcp.json`);
+  }
+});
+
+test("kazdy serwer z .mcp.json jest dozwolony w allow-liscie skladow", () => {
+  // Serwer podłączony, ale nieprzepuszczony przez uprawnienia, znaczy monit w
+  // środku headlessowej tury — czyli dziecko, które wisi.
+  const servers = Object.keys(readJson(".mcp.json").mcpServers || {});
+  const missing = [];
+  for (const squad of SQUADS) {
+    const allow = readJson(`agents/${squad}/settings.json`).permissions?.allow || [];
+    for (const name of servers) {
+      const ok = allow.some((r) => r === `mcp__${name}__*` || r.startsWith(`mcp__${name}__`));
+      if (!ok) missing.push(`${squad}: brak mcp__${name}__*`);
+    }
+  }
+  if (missing.length) fail(`serwer bez uprawnienia:\n       ${missing.join("\n       ")}`);
+});
+
 // ── 4. Model routing must be internally consistent ────────────────────────────
 console.log("\nmodele i cennik");
 
