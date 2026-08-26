@@ -25,6 +25,7 @@ You are NOT the orchestrator (`agents/orchestrator/`) — that one stays beside 
 | `supervisor-stop.mjs` | kill a turn, report what it left behind |
 | `supervisor-cleanup.mjs list\|propose\|remove` | reclaim a child's worktree — TEST pass **and** his yes, both required |
 | `supervisor-verdict.mjs record\|show\|list` | a REVIEW verdict — every finding cites an artefact, an approve maps the ACs |
+| `supervisor-budget.mjs allocate\|status\|authorise\|reconcile` | split the issue budget per stage before anything spends it |
 | `linear-query.mjs` / `linear-ops.mjs` | read / write Linear (`mcp__linear__*` is denied) |
 
 All of them print JSON on stdout and a human log on stderr. Exit 1 means refused — read the `error` field, it names the reason.
@@ -58,6 +59,14 @@ Offline or Linear down: `propose --issue-file <saved.json>` triages from a paylo
 node $LA_ROOT/scripts/supervisor-spawn.mjs --squad <squad> --task <id> --prompt "<kickoff>"
 ```
 The child gets its own git worktree. Returns once `session_id` is captured; the child keeps running.
+
+**Split the budget before the first spawn** if Mateusz gave you one for this issue:
+```
+node $LA_ROOT/scripts/supervisor-budget.mjs allocate --total <usd>
+```
+It divides the total across stages from the `budget.shareHint` values in `config/graph.json` and enforces them per turn. **Stages do not borrow from each other** — the money reserved for verification is exactly what stops a run ending with work nobody checked. Skip this and only `LA_SUPERVISOR_MAX_COST_USD` applies, which is one number for the whole run and tells you too late.
+
+The two are ordered, not competing: `LA_SUPERVISOR_MAX_COST_USD` is the outer backstop, the stage split is the working control. Every refusal names which one it was.
 
 ### 4. Monitor — never busy-loop
 ```
@@ -125,6 +134,8 @@ WHY NOT EARLIER — `config/graph.json` has `review-to-dev-return` and `test-to-
 |---|---|
 | Child crash (exit ≠ 0) | Show the last 20 events. Ask: resume / respawn fresh / abandon. **Never silently retry.** |
 | Stalled child (in `stalledChildren`) | `supervisor-stop.mjs`, report the dirty git status it left, ask: resume / respawn / abandon. **Never auto-reset the worktree** — uncommitted work there may be the only copy. |
+| Stage budget exhausted | The refusal names the stage. It will **not** borrow — money left in verification is what stops the run ending with work nobody checked. Report what each stage has left and ask: raise the total (`budget allocate --total`), or authorise the reserve (`budget authorise --stage <s> --reason "..."`). Never work around it by unsetting a cap. |
+| Reserve exhausted | Expansion stops and a **partial-status report** is written to `.state/supervisor/<run>/partial-status.json`. Read him its `unverified` list — those are the tasks money was already spent on that nobody has vouched for. Raising the total is his decision, not a retry. |
 | Budget exceeded (`LA_SUPERVISOR_MAX_COST_USD`) | `spawn`/`followup` already refused — you cannot start another turn. Report the spend and the overshoot, ask whether to raise the cap or stop. The check is post-hoc at turn boundaries, so one turn can overshoot; say so rather than pretending the cap was exact. |
 | Spend is UNKNOWN under a cap | A model has no price row. The refusal names it. Do not work around it by unsetting the cap — tell Mateusz which model needs pricing. |
 | Child asks something you cannot answer | Relay verbatim. Never invent an answer. |

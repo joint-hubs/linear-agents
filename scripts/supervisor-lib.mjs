@@ -199,11 +199,20 @@ export function budgetStatus(runId, registry = readRegistry(runId)) {
   const children = Object.values(registry.children || {});
 
   let spent = 0;
+  let anyUnknown = false;
   const unpriced = [];
   for (const child of children) {
     for (const m of child.unpricedModels ?? []) if (!unpriced.includes(m)) unpriced.push(m);
-    spent = addCost(spent, child.costUsd === undefined ? 0 : child.costUsd);
+    const cost = child.costUsd === undefined ? 0 : child.costUsd;
+    // Explicit, not propagated through addCost. That helper is asymmetric so a
+    // null accumulator can be seeded (`addCost(null, 1)` is 1), which made this
+    // loop order-dependent: an unpriced child followed by a priced one reported
+    // a total that looked known, under the one setting whose whole purpose is
+    // to refuse when it is not. Found by spendByStage's test, FOC-162.
+    if (cost === null) anyUnknown = true;
+    else spent += cost;
   }
+  if (anyUnknown) spent = null;
 
   const capValid = cap !== null && Number.isFinite(cap) && cap >= 0;
   return {
@@ -252,6 +261,275 @@ export function assertWithinBudget(runId, fail = failJson) {
       { budget },
     );
   }
+  return budget;
+}
+
+// ── per-stage budgets (FOC-162) ──────────────────────────────────────────────
+//
+// One number cannot express the failure that actually costs money: DEV eats the
+// whole issue budget and REVIEW/TEST have nothing left, so the run ends with
+// work nobody verified. A single cap trips only AFTER that has happened.
+//
+// So the budget is split up front, from the `budget.shareHint` on each node in
+// config/graph.json, and the split is enforced per stage. `shareHint` is a
+// starting guess, explicitly labelled as one in the graph — `reconcile` is what
+// turns it into a measured number.
+//
+// LA_SUPERVISOR_MAX_COST_USD is NOT a competing cap. It stays as the OUTER
+// BACKSTOP above the split: the stage gate refuses first, and if a run somehow
+// gets past it the global cap still stops the whole thing. Two caps that could
+// each be the binding one would be two ways to be surprised; these are ordered.
+
+export const budgetPath = (runId) => join(runDir(runId), "budget.json");
+
+/**
+ * Split a total across stages using the graph's own hints.
+ *
+ * Nodes with `shareHint: null` (cadence, human) are out-of-band and get nothing:
+ * they are not part of an issue's work. The reserve comes off the top per
+ * `budgetPolicy.reserveShare`, and the remaining hints are NORMALISED rather
+ * than trusted to sum to 1 — a graph edit that changes one hint must not
+ * silently under- or over-allocate the whole run.
+ */
+export function allocateBudget(total, graph) {
+  const reserveShare = graph?.budgetPolicy?.reserveShare ?? 0;
+  if (!(total > 0)) throw new Error(`budget total must be > 0 (got ${total})`);
+  if (!(reserveShare >= 0 && reserveShare < 1)) {
+    throw new Error(`budgetPolicy.reserveShare must be in [0, 1) (got ${reserveShare})`);
+  }
+
+  const byStage = {};
+  for (const [name, node] of Object.entries(graph?.nodes ?? {})) {
+    const stage = node?.budget?.stage;
+    const hint = node?.budget?.shareHint;
+    if (!stage || hint === null || hint === undefined) continue;
+    if (!(hint > 0)) throw new Error(`node "${name}" has shareHint ${hint} — a stage cannot be allocated nothing`);
+    byStage[stage] = (byStage[stage] ?? 0) + hint;
+  }
+
+  const hintTotal = Object.values(byStage).reduce((a, b) => a + b, 0);
+  if (hintTotal <= 0) throw new Error("no node in the graph declares a positive budget.shareHint");
+
+  const reserve = round4(total * reserveShare);
+  const allocatable = total - reserve;
+
+  const stages = {};
+  for (const [stage, hint] of Object.entries(byStage)) {
+    stages[stage] = round4((hint / hintTotal) * allocatable);
+  }
+
+  return {
+    total: round4(total),
+    reserve,
+    reserveShare,
+    stages,
+    // Kept so `reconcile` can say whether a hint was wrong or the run was.
+    hints: byStage,
+    hintTotal: round4(hintTotal),
+  };
+}
+
+const round4 = (n) => Math.round(n * 10_000) / 10_000;
+
+/** Which stage does this squad's work belong to? `null` when out-of-band. */
+export function stageForSquad(squad, graph) {
+  return graph?.nodes?.[squad]?.budget?.stage ?? null;
+}
+
+/**
+ * Spend so far, grouped by the stage each child's squad belongs to.
+ *
+ * `null` is contagious here for the same reason it is in budgetStatus: a child
+ * on an unpriced model makes its STAGE unknown, not free.
+ */
+export function spendByStage(registry, graph) {
+  const totals = {};
+  const unknownStage = new Set();
+  const unknown = [];
+
+  for (const child of Object.values(registry?.children ?? {})) {
+    const stage = stageForSquad(child.squad, graph);
+    if (!stage) continue;
+    const cost = child.costUsd === undefined ? 0 : child.costUsd;
+    if (cost === null) {
+      unknownStage.add(stage);
+      if (!unknown.includes(child.squad)) unknown.push(child.squad);
+      continue;
+    }
+    totals[stage] = (totals[stage] ?? 0) + cost;
+  }
+
+  // Unknown-ness is tracked in a SET rather than propagated through addCost.
+  // addCost is asymmetric on purpose — `addCost(null, 1)` is 1, so that a null
+  // accumulator can be seeded — which makes null-contagion depend on the order
+  // children happen to be iterated in. An unpriced child followed by a priced
+  // one would report a total that looks known. Same bug was live in
+  // budgetStatus; both now decide unknown-ness explicitly.
+  const stages = {};
+  for (const [stage, sum] of Object.entries(totals)) stages[stage] = unknownStage.has(stage) ? null : sum;
+  for (const stage of unknownStage) if (!(stage in stages)) stages[stage] = null;
+
+  return { stages, unknownStages: unknown };
+}
+
+/**
+ * Where a run stands against its split.
+ *
+ * The reserve is accounted from ACTUAL overspend rather than from a number
+ * somebody reserved in advance: `reserveDrawn` is the sum of how far each stage
+ * has gone past its own allocation. That way an authorisation is permission to
+ * overspend, and the cost of using it is measured after the fact instead of
+ * estimated before — which is the same discipline the cost figures already
+ * follow (FOC-165: measured, not reported).
+ */
+export function stageBudgetStatus(runId, { graph, registry = readRegistry(runId) } = {}) {
+  const path = budgetPath(runId);
+  if (!existsSync(path)) return null; // no allocation for this run; the global cap still applies
+  let plan;
+  try {
+    plan = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new Error(`${path} is not readable JSON: ${err.message}`);
+  }
+
+  const { stages: spent, unknownStages } = spendByStage(registry, graph);
+  const stages = {};
+  let reserveDrawn = 0;
+
+  for (const [stage, allocated] of Object.entries(plan.stages ?? {})) {
+    // `spent[stage] ?? 0` would be wrong here and was, until a test caught it:
+    // `??` treats null as absent, so an UNKNOWN stage would have read as a stage
+    // that spent nothing. That is the silently-free failure this whole file
+    // exists to prevent, one operator away from a run continuing under a budget
+    // nobody could evaluate. Absent means 0; present-and-null means unknown.
+    const used = stage in spent ? spent[stage] : 0;
+    const over = used === null ? null : Math.max(0, used - allocated);
+    if (over !== null) reserveDrawn += over;
+    stages[stage] = {
+      allocated,
+      spent: used,
+      remaining: used === null ? null : round4(allocated - used),
+      over: over === null ? null : round4(over),
+      exhausted: used === null ? null : used >= allocated,
+      authorised: (plan.authorisations ?? []).some((a) => a.stage === stage),
+    };
+  }
+
+  const reserveRemaining = round4((plan.reserve ?? 0) - reserveDrawn);
+  return {
+    ...plan,
+    stages,
+    reserveDrawn: round4(reserveDrawn),
+    reserveRemaining,
+    reserveExhausted: reserveRemaining <= 0,
+    unknownStages,
+    evaluable: unknownStages.length === 0,
+  };
+}
+
+/**
+ * What the run produced and what nobody checked.
+ *
+ * Written when the reserve runs out, because the alternative — stopping with an
+ * error and nothing else — is the silent halt this task exists to prevent. The
+ * useful column is `unverified`: tasks with children that ran and no recorded
+ * REVIEW verdict. That is the money already spent whose result nobody can vouch
+ * for, and it is the reason per-stage budgets exist at all.
+ */
+export function partialStatusReport(runId, { graph, registry = readRegistry(runId) } = {}) {
+  const budget = stageBudgetStatus(runId, { graph, registry });
+  const byTask = new Map();
+  for (const child of Object.values(registry?.children ?? {})) {
+    if (!child.taskId) continue;
+    const row = byTask.get(child.taskId) ?? { taskId: child.taskId, squads: [], rounds: 0, verdict: null };
+    if (!row.squads.includes(child.squad)) row.squads.push(child.squad);
+    byTask.set(child.taskId, row);
+  }
+  for (const row of byTask.values()) {
+    const rounds = roundsFor(runId, row.taskId);
+    row.rounds = rounds.length;
+    row.verdict = rounds.length ? rounds[rounds.length - 1].verdict : null;
+  }
+
+  const tasks = [...byTask.values()];
+  return {
+    runId,
+    reason: "reserve exhausted — graph expansion stopped",
+    generatedAt: new Date().toISOString(),
+    budget,
+    tasks,
+    unverified: tasks.filter((t) => t.verdict !== "pass").map((t) => t.taskId),
+  };
+}
+
+/**
+ * The per-stage gate. Ordered BELOW the global cap deliberately: the split is
+ * the working control, LA_SUPERVISOR_MAX_COST_USD is the outer backstop, and
+ * a refusal always names which of the two it was.
+ *
+ * Returns null when the run has no allocation — the feature is opt-in per run,
+ * and a run started before `budget allocate` must not become unstartable.
+ */
+export function assertStageBudget(runId, squad, { graph, fail = failJson } = {}) {
+  const stage = stageForSquad(squad, graph);
+  if (!stage || stage === "out-of-band") return null;
+
+  const budget = stageBudgetStatus(runId, { graph });
+  if (!budget) return null;
+
+  const s = budget.stages[stage];
+  if (!s) return null;
+
+  if (s.spent === null) {
+    return fail(
+      `stage "${stage}" spend is UNKNOWN — no price row for ${budget.unknownStages.join(", ")}. ` +
+        `A budget that cannot be evaluated is not a budget.`,
+      { budget, hint: "add the model to pricing.openrouter in config/models.json" },
+    );
+  }
+
+  if (!s.exhausted) return budget;
+
+  // Exhausted. The whole point of splitting is that this does NOT reach across.
+  //
+  // Permission to overspend is PERSISTED STATE (`budget authorise` writes it),
+  // not a flag on this call. A flag would let whoever invokes spawn grant
+  // themselves the reserve; the authorisation has to be a decision on disk with
+  // a reason attached, because `reconcile` later has to say why a stage went
+  // past its allocation.
+  if (!s.authorised) {
+    return fail(
+      `stage "${stage}" has spent $${s.spent.toFixed(4)} of its $${s.allocated.toFixed(2)} allocation — ` +
+        `it will NOT borrow from the other stages. That is the split doing its job: money left in ` +
+        `verification is what stops this run ending with work nobody checked.`,
+      {
+        stage,
+        budget,
+        hint:
+          `Mateusz decides: raise the total (budget allocate --total), or authorise the reserve ` +
+          `(budget authorise --stage ${stage} --reason "..."), which is the only pool that may cover an overrun.`,
+      },
+    );
+  }
+
+  if (budget.reserveExhausted) {
+    const report = partialStatusReport(runId, { graph });
+    atomicWriteJSON(join(runDir(runId), "partial-status.json"), report);
+    return fail(
+      `the reserve is exhausted ($${budget.reserve.toFixed(2)} allocated, $${budget.reserveDrawn.toFixed(4)} drawn) — ` +
+        `graph expansion stops here`,
+      {
+        budget,
+        partialStatus: report,
+        // Stopping with an error and nothing else is the silent halt this exists
+        // to prevent. The report says what ran and, more usefully, what nobody
+        // verified.
+        unverified: report.unverified,
+        hint: "report the partial status to Mateusz; raising the total is his decision, not a retry",
+      },
+    );
+  }
+
   return budget;
 }
 

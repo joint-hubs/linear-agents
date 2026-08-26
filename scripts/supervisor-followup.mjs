@@ -20,6 +20,7 @@ import { join } from "node:path";
 
 import {
   ROOT,
+  assertStageBudget,
   assertWithinBudget,
   comparableProgress,
   failJson,
@@ -31,6 +32,7 @@ import {
   updateChild,
   writeRegistry,
 } from "./supervisor-lib.mjs";
+import { loadGraph } from "./graph-validate.mjs";
 
 // FOC-163 removed the dev↔review round cap. It was `LA_SUPERVISOR_MAX_LOOPS`,
 // default 2, and it counted: it stopped a run that was converging at the same
@@ -105,6 +107,16 @@ if (args.gate && args.gate !== true) {
 // Same gate as spawn: a follow-up is a new turn, and a cap enforced only on
 // first spawn would be a cap on one turn rather than on the run.
 assertWithinBudget(runId);
+
+// Same ordering as spawn: a follow-up is a new turn, and a stage that has spent
+// its allocation must not keep spending just because the child already exists.
+assertStageBudget(runId, entry.squad, { graph: (() => {
+  try {
+    return loadGraph();
+  } catch {
+    return null;
+  }
+})() });
 
 // ── guard: progress, not rounds (FOC-163) ────────────────────────────────────
 // A round is progress when the WORK changed. Two rounds with the same diff and

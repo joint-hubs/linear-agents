@@ -30,6 +30,7 @@ import {
   ROOT,
   TERMINAL_STATUSES,
   asArray,
+  assertStageBudget,
   assertWithinBudget,
   buildChildSettings,
   childSettingsPath,
@@ -48,6 +49,7 @@ import {
   updateChild,
   writeRegistry,
 } from "./supervisor-lib.mjs";
+import { loadGraph } from "./graph-validate.mjs";
 
 const SQUADS = ["plan", "dev", "review", "test"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -96,6 +98,22 @@ if (live.length >= MAX_LIVE_CHILDREN_PER_RUN) {
 // by construction: the turn already running may overshoot it. That is stated
 // rather than hidden. Unset means no cap and no behaviour change.
 assertWithinBudget(runId);
+
+// The per-stage split, checked AFTER the global cap and never instead of it.
+// Order matters and is the contract (FOC-162): the global cap is the outer
+// backstop, the stage gate is the working control, and each refusal names
+// which one it was. A run with no allocation skips this entirely — the
+// feature is opt-in per run, and a run started before `budget allocate` must
+// not become unstartable.
+assertStageBudget(runId, squad, { graph: (() => {
+  try {
+    return loadGraph();
+  } catch {
+    // A graph we cannot read means no stage mapping, so no stage gate. The
+    // global cap still applies; triage would already have refused a broken graph.
+    return null;
+  }
+})() });
 
 // ── worktree ─────────────────────────────────────────────────────────────────
 // Every child gets its own checkout (ADR-0009 amended 2026-08-25). A shared
