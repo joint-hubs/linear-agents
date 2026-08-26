@@ -15,7 +15,9 @@
       "Bash(git status:*)",
       "Bash(git log:*)",
       "Bash(git diff:*)",
-      "mcp__linear__*"
+      "mcp__linear__*",
+      "mcp__codegraph__*",
+      "Bash(codegraph:*)"
     ],
     "deny": [
       "Bash(rm -rf:*)",
@@ -28,11 +30,30 @@
     "linear": {
       "type": "sse",
       "url": "https://mcp.linear.app/sse"
+    },
+    "codegraph": {
+      "type": "stdio",
+      "command": "codegraph",
+      "args": [
+        "serve",
+        "--mcp"
+      ],
+      "env": {
+        "CODEGRAPH_MCP_TOOLS": "explore,node,search,callers,callees,impact,files,status"
+      }
     }
   },
   "hooks": {
-    "SessionStart": [{
-      "hooks": [{ "type": "command", "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"", "timeout": 5 }]
-    }]
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

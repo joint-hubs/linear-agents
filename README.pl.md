@@ -49,7 +49,7 @@ bin\plan.bat             :: odpal agenta planowania
 - **Telemetria v3** — `tool_facts` + `delegation_links` + `usage_facts` w SQLite. Trace: transkrypty → sqlite → dashboard. Retencja: [check-transcript-retention.mjs](scripts/check-transcript-retention.mjs)
 - **In-place prompt editor** — edycja promptów/agentów z UI dashboard, w tym zewnętrznych orchestrator root'ów (allowlist + symlink-safe; [prompt-editing.md](docs/ui/prompt-editing.md))
 - **Agent intelligence** — [agent_intelligence.py](notebooks/agent_intelligence.py) czyta telemetrię SQL → self-contained HTML (n-gramy, embedding clusters, per-squad break-down)
-- **GitNexus code-intelligence** — 6 skilli (`.claude/skills/gitnexus/`) + [AGENTS.md](AGENTS.md); impact analysis + detect_changes przed każdym commitem
+- **CodeGraph code-intelligence** — serwer MCP per skład (`agents/*/settings.json`) + nakładka CLI `scripts/code-intel.mjs`; patrz [AGENTS.md](AGENTS.md). Indeks sam się synchronizuje, bez hooka pre-commit
 
 ## Dokumentacja
 

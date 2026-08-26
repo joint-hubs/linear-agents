@@ -80,3 +80,6 @@ Thumbs.db
 
 # Rendered at launcher startup from config/atlas-mcp.json.template by bin/_lib.bat
 config/atlas-mcp.json
+
+# CodeGraph local index — rebuildable with `codegraph init`, and large.
+.codegraph/

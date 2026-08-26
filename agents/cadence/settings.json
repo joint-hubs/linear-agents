@@ -2,19 +2,51 @@
   "permissions": {
     "defaultMode": "default",
     "allow": [
-      "Read", "Grep", "Glob", "Write",
+      "Read",
+      "Grep",
+      "Glob",
+      "Write",
       "Bash(node:*)",
-      "Bash(graphify query:*)", "Bash(graphify affected:*)", "Bash(graphify god-nodes:*)",
-      "Bash(graphify path:*)", "Bash(graphify explain:*)"
+      "Bash(graphify query:*)",
+      "Bash(graphify affected:*)",
+      "Bash(graphify god-nodes:*)",
+      "Bash(graphify path:*)",
+      "Bash(graphify explain:*)",
+      "mcp__codegraph__*",
+      "Bash(codegraph:*)"
     ],
     "deny": [
-      "Edit", "Bash(rm -rf:*)", "Bash(git push:*)", "mcp__linear__*"
+      "Edit",
+      "Bash(rm -rf:*)",
+      "Bash(git push:*)",
+      "mcp__linear__*"
     ]
   },
   "theme": "dark",
   "hooks": {
-    "SessionStart": [{
-      "hooks": [{ "type": "command", "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"", "timeout": 5 }]
-    }]
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {
+    "codegraph": {
+      "type": "stdio",
+      "command": "codegraph",
+      "args": [
+        "serve",
+        "--mcp"
+      ],
+      "env": {
+        "CODEGRAPH_MCP_TOOLS": "explore,node,search,callers,callees,impact,files,status"
+      }
+    }
   }
 }

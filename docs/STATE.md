@@ -104,7 +104,7 @@ Dalej (opcjonalnie, na zgodę Mateusza):
 **Luki (nieblokujące):**
 - Routing bez pliku roli: `plan.dor_gate` (robi flash), `plan.enrich` (martwy?), `*.pl` (digest=cadence.pl),
   `test.terminal` (gpt — brak pliku). Decyzja: stub vs prune routing — cleanup osobno.
-- `~/.claude/skills/graphify/SKILL.md` pusty (dangling). Root `CLAUDE.md` = GitNexus auto — nie dotykać.
+- `~/.claude/skills/graphify/SKILL.md` pusty (dangling). Root `CLAUDE.md`/`AGENTS.md` = blok CodeGraph, pisany ręcznie (2026-08-26, po wyjściu z GitNexusa) — nie jest już generowany przez narzędzie.
 - Fala C files live outside git — version only via STATE pointer (or future dotfiles repo).
 - `docs/agents/agent-2-dev.md` ~184 linii (bogatszy mirror pętli DEV) — OK jako spec; runtime = `agents/dev/CLAUDE.md`.
 

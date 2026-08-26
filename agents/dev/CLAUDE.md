@@ -84,7 +84,7 @@ Incomplete brief → the subagent is instructed to return questions and stop. Ex
 <dev_tools>
 ## Tools
 Registry: `docs/tools/README.md` (one page — check it before sweeping with Grep).
-**code-intel** — `node $LA_ROOT/scripts/code-intel.mjs <find|symbol|impact|path|cycles>`; a stale-index warning means UNKNOWN, confirm with Grep.
+**code-intel** — `mcp__codegraph__codegraph_explore` first (one call: source + call paths + blast radius). CLI fallback `node $LA_ROOT/scripts/code-intel.mjs <explore|symbol|impact|callers|callees|find|files|affected>`; no index → exit 3, which means UNKNOWN, confirm with Grep.
 **graphify** — whole-corpus knowledge graph, see `docs/tools/graphify.md`.
 Missing tool → propose it in the hand-off per `docs/tools/AUTHORING.md`. Never mid-run, and never edit your own instructions — changes under `agents/**` go to Mateusz.
 </dev_tools>

@@ -54,7 +54,7 @@ Target: ≥40% of run cost in subagents (dashboard → RunDetail 'By agent').
 
 <review_tools>
 ## Tools
-Registry: `docs/tools/README.md` (one-page, check before sweeping with Grep). **code-intel** `node $LA_ROOT/scripts/code-intel.mjs <find|symbol|impact|path|cycles>` — stale-index warning means UNKNOWN, confirm with Grep.
+Registry: `docs/tools/README.md` (one-page, check before sweeping with Grep). **code-intel** — `mcp__codegraph__codegraph_explore` first (one call: source + call paths + blast radius). CLI fallback `node $LA_ROOT/scripts/code-intel.mjs <explore|symbol|impact|callers|callees|find|files|affected>`. No index → it refuses with exit 3 rather than answering "not found"; that refusal means UNKNOWN, confirm with Grep.
 **graphify** whole-corpus → knowledge graph (see `docs/tools/graphify.md`).
 Propose a missing tool in the hand-off per `docs/tools/AUTHORING.md` — never mid-run, never edit your own instructions (changes under `agents/**` go to Mateusz).
 </review_tools>

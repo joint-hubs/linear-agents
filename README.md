@@ -55,7 +55,7 @@ using the `ATLAS_VENV_PYTHON` and `ATLAS_ROOT` env vars you set in `.env`.
 - **Telemetry v3** — `tool_facts` + `delegation_links` + `usage_facts` in SQLite. Trace: transcripts → sqlite → dashboard. Retention: [check-transcript-retention.mjs](scripts/check-transcript-retention.mjs).
 - **In-place prompt editor** — edit prompts/agents from the dashboard UI, including external orchestrator roots (allowlist + symlink-safe; [prompt-editing.md](docs/ui/prompt-editing.md)).
 - **Agent intelligence** — [agent_intelligence.py](notebooks/agent_intelligence.py) reads telemetry SQL → self-contained HTML (n-grams, embedding clusters, per-squad break-down).
-- **GitNexus code-intelligence** — 6 skills (`.claude/skills/gitnexus/`) + [AGENTS.md](AGENTS.md); impact analysis + `detect_changes` before every commit.
+- **CodeGraph code-intelligence** — MCP server per squad (`agents/*/settings.json`) + CLI wrapper `scripts/code-intel.mjs`; see [AGENTS.md](AGENTS.md). Auto-syncing index, no pre-commit hook.
 
 ## Documentation
 
