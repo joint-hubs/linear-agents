@@ -27,7 +27,11 @@
     ],
     "deny": [
       "Bash(rm -rf:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Artifact",
+      "PushNotification",
+      "ListAgents",
+      "Monitor"
     ],
     "defaultMode": "default"
   },

@@ -19,7 +19,11 @@
       "Edit",
       "Bash(rm -rf:*)",
       "Bash(git push:*)",
-      "mcp__linear__*"
+      "mcp__linear__*",
+      "Artifact",
+      "PushNotification",
+      "ListAgents",
+      "Monitor"
     ]
   },
   "theme": "dark",

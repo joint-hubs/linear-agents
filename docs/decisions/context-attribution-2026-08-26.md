@@ -116,6 +116,15 @@ Cały historyczny rachunek za cache-read: **2,258 mld tokenów = $499**.
 **1. Zdejmij cztery narzędzia w `agents/*/settings.json`.** Jedyna zmiana z wymiernym zwrotem i
 zerowym ryzykiem jakościowym. Osobny, recenzowalny commit — ten task nic nie edytuje.
 
+> **Zrobione (FOC-169).** Zastosowane w sześciu składach; `agents/orchestrator` celowo nietknięty,
+> bo AC-10 FOC-116 wymaga pustego diffa. Zmierzone po zmianie na realnym configu deva:
+> **42,8k → 34,1k tokenów** z włączonym MCP. Koszt pojedynczych narzędzi: `Artifact` **6 129**
+> (70% całej oszczędności), `Monitor` 1 887, `ListAgents` 278, `PushNotification` 410.
+>
+> `PowerShell` (2 313) rozważony i **odrzucony**: leady wywołały go 243 razy, więc zdjęcie go
+> byłoby zmianą zachowania, a nie usunięciem martwego kodu. `config-drift.test.mjs` pilnuje
+> teraz listy, konfliktu z promptem i tego, że orchestrator nie został ruszony.
+
 **2. Nie przycinaj promptów.** Squadowy CLAUDE.md to 4,3k z 38,2k podłogi, czyli **3,9% rachunku**.
 Edycje promptów są najbardziej ryzykowną zmianą w tym repo — nic w suicie nie łapie „ten prompt się
 pogorszył" — a górna granica zysku to kilka dolarów miesięcznie. Stosunek ryzyka do zwrotu jest zły.

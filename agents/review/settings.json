@@ -29,7 +29,11 @@
       "Bash(git push:*)",
       "Bash(git commit:*)",
       "Bash(rm -rf:*)",
-      "mcp__linear__*"
+      "mcp__linear__*",
+      "Artifact",
+      "PushNotification",
+      "ListAgents",
+      "Monitor"
     ]
   },
   "theme": "dark",

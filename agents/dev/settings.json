@@ -38,7 +38,11 @@
     "deny": [
       "Bash(git push:*)",
       "Bash(rm -rf:*)",
-      "mcp__linear__*"
+      "mcp__linear__*",
+      "Artifact",
+      "PushNotification",
+      "ListAgents",
+      "Monitor"
     ]
   },
   "theme": "dark",

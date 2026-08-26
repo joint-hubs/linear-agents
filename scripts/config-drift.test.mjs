@@ -345,6 +345,62 @@ test("agents/dev/CLAUDE.md deklaruje się jedynym opisem pętli", () => {
   }
 });
 
+// ── powierzchnia narzędzi (FOC-169) ────────────────────────────────────
+console.log("\npowierzchnia narzędzi");
+
+// Zmierzone 2026-08-26 (`scripts/floor-probe.mjs --spend`, skład dev): schematy
+// tych czterech narzędzi kosztują 8 689 tokenów W KAŻDYM wywołaniu — dwa razy
+// tyle co cały prompt składu, ~$46/mies. przy obecnym wolumenie. Żadne z nich nie
+// jest używalne przez headless dziecko: `Artifact` publikuje stronę na claude.ai,
+// `PushNotification` dzwoni na telefon, `ListAgents` i `Monitor` obsługują sesje
+// interaktywne obok. Pełna metoda: docs/decisions/context-attribution-2026-08-26.md
+//
+// `permissions.deny` zdejmuje SCHEMAT, nie tylko prawo wywołania — to jest powod,
+// dla którego poprawka mieszka w commitowanym settings.json, a nie we fladze
+// launchera, o której każde nowe wejście musiałoby pamiętać.
+const HEADLESS_UNUSABLE = ["Artifact", "PushNotification", "ListAgents", "Monitor"];
+
+test("każdy skład odmawia czterech narzędzi nieużywalnych headless", () => {
+  const missing = [];
+  for (const squad of SQUADS) {
+    const deny = readJson(`agents/${squad}/settings.json`).permissions?.deny ?? [];
+    for (const tool of HEADLESS_UNUSABLE) {
+      if (!deny.includes(tool)) missing.push(`${squad}: brak deny na ${tool}`);
+    }
+  }
+  // Cicha regresja w czystej postaci: nic nie pada, gdy ktoś usunie wpis —
+  // rachunek po prostu rośnie o 8,7k tokenów na wywołanie i nikt tego nie widzi.
+  if (missing.length) fail(`odzyskana powierzchnia narzędzi wróciła:\n       ${missing.join("\n       ")}`);
+});
+
+test("odmówione narzędzie nie jest jednocześnie nakazane w prompcie", () => {
+  // Odwrotność testu "instrukcja bez uprawnienia": tu chodzi o uprawnienie
+  // zdjęte, gdy instrukcja została. Dopasowanie tylko w backtickach, bo tak ten
+  // repo nazywa narzędzia — nagłówek "### 4. Monitor — never busy-loop" w
+  // prompcie Supervisora to rzeczownik i NIE ma być trafieniem.
+  const conflicts = [];
+  for (const squad of SQUADS) {
+    const doc = read(`agents/${squad}/CLAUDE.md`);
+    const deny = readJson(`agents/${squad}/settings.json`).permissions?.deny ?? [];
+    for (const tool of HEADLESS_UNUSABLE) {
+      if (deny.includes(tool) && new RegExp("`" + tool + "`").test(doc)) {
+        conflicts.push(`${squad}: CLAUDE.md wskazuje \`${tool}\`, a settings.json go odmawia`);
+      }
+    }
+  }
+  if (conflicts.length) fail(`prompt każe użyć narzędzia, którego harness zabrania:\n       ${conflicts.join("\n       ")}`);
+});
+
+test("orchestrator zostaje nietknięty przez tę zmianę", () => {
+  // AC-10 FOC-116 jest dosłowne: `git diff -- agents/orchestrator` ma być pusty,
+  // a PR właśnie to zadeklarował. Orchestrator jest sesją interaktywną z własnym
+  // kontraktem i nie należy do SQUADS — ten test pilnuje, żeby porządkowanie
+  // powierzchni narzędzi nie weszło tam bokiem.
+  const deny = readJson("agents/orchestrator/settings.json").permissions?.deny ?? [];
+  const leaked = HEADLESS_UNUSABLE.filter((t) => deny.includes(t));
+  if (leaked.length) fail(`agents/orchestrator/settings.json zmieniony (${leaked.join(", ")}) — to łamie AC-10`);
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 console.log("");
 if (failures.length) {
