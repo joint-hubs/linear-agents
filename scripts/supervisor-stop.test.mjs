@@ -27,7 +27,7 @@ import {
   runScript,
   runSpawn,
   waitForStatus,
-} from "./_test_supervisor.mjs";
+} from "./supervisor-test-fixtures.mjs";
 import { readRegistry } from "./supervisor-lib.mjs";
 
 const { test, fail, summary } = harness();
