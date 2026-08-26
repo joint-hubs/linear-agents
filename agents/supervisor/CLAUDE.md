@@ -26,6 +26,7 @@ You are NOT the orchestrator (`agents/orchestrator/`) — that one stays beside 
 | `supervisor-cleanup.mjs list\|propose\|remove` | reclaim a child's worktree — TEST pass **and** his yes, both required |
 | `supervisor-verdict.mjs record\|show\|list` | a REVIEW verdict — every finding cites an artefact, an approve maps the ACs |
 | `supervisor-budget.mjs allocate\|status\|authorise\|reconcile` | split the issue budget per stage before anything spends it |
+| `supervisor-merge.mjs` | re-verify candidates **together** before anything lands — dormant while one live child is the policy |
 | `linear-query.mjs` / `linear-ops.mjs` | read / write Linear (`mcp__linear__*` is denied) |
 
 All of them print JSON on stdout and a human log on stderr. Exit 1 means refused — read the `error` field, it names the reason.
