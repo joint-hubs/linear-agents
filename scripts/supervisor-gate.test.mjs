@@ -37,6 +37,7 @@ import {
   runDir,
   writeRegistry,
 } from "./supervisor-lib.mjs";
+import { KINDS } from "./supervisor-gate.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const GATE = join(ROOT, "scripts", "supervisor-gate.mjs");
@@ -128,9 +129,13 @@ test("emit writes a pending gate with every §2.6 field", () => {
 
   const rec = JSON.parse(readFileSync(gatePath(runId, "gate-dev-1-1"), "utf8"));
   assert.deepEqual(Object.keys(rec).sort(), [
-    "answer", "artifacts", "childId", "createdAt", "gateId", "kind",
+    "answer", "artifacts", "childId", "createdAt", "facts", "gateId", "kind",
     "questions", "runId", "squad", "status", "summary", "taskId",
   ]);
+  // Always present, even empty. A field that only appears sometimes forces every
+  // reader to handle both shapes, and supervisor-cleanup.mjs reads this one to
+  // decide whether a checkout may be deleted.
+  assert.deepEqual(rec.facts, {});
   assert.equal(rec.status, "pending");
   assert.equal(rec.answer, null);
   // squad and taskId come from the registry — a gate has to say who asked and
@@ -214,10 +219,50 @@ test("a child that is not in the registry cannot raise a gate", () => {
 });
 
 test("every declared kind is accepted", () => {
+  // Driven off KINDS itself: this list was hardcoded once, and adding
+  // cleanup-approval left the new kind untested while the suite stayed green.
   const runId = fixtureRun();
-  for (const kind of ["plan.gate1", "plan.gate2", "question", "push-approval", "pr-approval"]) {
+  for (const kind of KINDS) {
     const r = gate(["emit", "--run", runId, "--child", "dev-1", "--kind", kind, "--summary", "s", "--question", "q"]);
     assert.equal(r.status, 0, `${kind}: ${r.stdout}`);
+  }
+});
+
+test("--facts rides along verbatim, as JSON or as @file", () => {
+  // What this is for: prose is what an approval must NOT be decided from when
+  // the thing approved is destructive. supervisor-cleanup.mjs writes the tree's
+  // HEAD and dirty paths here and re-checks them before removing anything.
+  const runId = fixtureRun();
+  const payload = { fingerprint: "abc123", dirty: ["?? scratch.txt"], head: "deadbeef" };
+
+  const inline = parse(gate([
+    "emit", "--run", runId, "--child", "dev-1", "--kind", "cleanup-approval",
+    "--summary", "s", "--question", "q?", "--facts", JSON.stringify(payload),
+  ]));
+  assert.deepEqual(JSON.parse(readFileSync(gatePath(runId, inline.gateId), "utf8")).facts, payload);
+
+  const dir = mkdtempSync(join(tmpdir(), "la-facts-"));
+  cleanup.push(dir);
+  const file = join(dir, "facts.json");
+  writeFileSync(file, JSON.stringify(payload));
+  const fromFile = parse(gate([
+    "emit", "--run", runId, "--child", "dev-1", "--kind", "cleanup-approval",
+    "--summary", "s", "--question", "q?", "--facts", `@${file}`,
+  ]));
+  assert.deepEqual(JSON.parse(readFileSync(gatePath(runId, fromFile.gateId), "utf8")).facts, payload);
+});
+
+test("--facts refuses anything that is not a JSON object, and writes no file", () => {
+  // facts is merged into a record whose other keys are load-bearing. An array or
+  // a bare string there is a field-name collision waiting to happen.
+  const runId = fixtureRun();
+  for (const bad of ["[1,2]", '"just a string"', "{not json", "@no-such-file.json"]) {
+    const r = gate([
+      "emit", "--run", runId, "--child", "dev-1", "--kind", "question",
+      "--summary", "s", "--question", "q?", "--facts", bad,
+    ]);
+    assert.equal(r.status, 1, `${bad} was accepted`);
+    assert.equal(gateFiles(runId).length, 0, `${bad} left a file behind`);
   }
 });
 

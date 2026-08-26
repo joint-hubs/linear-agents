@@ -1,7 +1,8 @@
 // scripts/supervisor-gate.mjs — the child asks, Mateusz answers, the file remembers.
 //
 //   node scripts/supervisor-gate.mjs emit   --kind <k> --summary "..." [--question "..." ...]
-//                                           [--artifact <path> ...] [--child <id>] [--run <id>]
+//                                           [--artifact <path> ...] [--facts <json|@file>]
+//                                           [--child <id>] [--run <id>]
 //   node scripts/supervisor-gate.mjs answer --gate <gateId> --text "..." [--run <id>]
 //   node scripts/supervisor-gate.mjs list   [--run <id>] [--status pending|answered] [--child <id>]
 //
@@ -41,13 +42,61 @@ import { atomicWriteJSON } from "./utils.mjs";
 // The well-known set (§2.6). Extending it is a script edit plus a spec note —
 // deliberately not config, because every kind implies a different thing the
 // Supervisor must do with the answer, and that behaviour lives in code.
-const KINDS = ["plan.gate1", "plan.gate2", "question", "push-approval", "pr-approval"];
+const KINDS = [
+  "plan.gate1",
+  "plan.gate2",
+  "question",
+  "push-approval",
+  "pr-approval",
+  // FOC-167. Unlike the others this one is emitted BY the Supervisor, not by a
+  // child: the child whose tree is being reclaimed is the last party that should
+  // be asking for permission to reclaim it.
+  "cleanup-approval",
+];
 
 const STATUSES = ["pending", "answered"];
 
 const REPEATABLE = new Set(["question", "artifact"]);
 
 const asList = (v) => (v === undefined || v === true ? [] : Array.isArray(v) ? v : [v]);
+
+/**
+ * `--facts <json>` or `--facts @<path>` — a structured payload stored verbatim
+ * on the record.
+ *
+ * Why a gate needs this at all: `summary` and `questions` are prose for a human
+ * to read, and prose is exactly what an approval must NOT be decided from when
+ * the thing being approved is destructive. The cleanup gate records the tree's
+ * HEAD and its dirty paths here, and supervisor-cleanup.mjs re-checks them
+ * against the tree before it removes anything — so a yes covers the tree
+ * Mateusz was shown, not whatever the tree became afterwards.
+ *
+ * Refuses non-objects: `facts` is merged into a record whose other keys are
+ * load-bearing, and an array or a bare string there would read as a field name
+ * collision waiting to happen.
+ */
+function parseFacts(raw) {
+  if (raw === undefined) return {};
+  if (raw === true) failJson("--facts needs a value: inline JSON, or @<path> to a JSON file");
+
+  let text = raw;
+  if (raw.startsWith("@")) {
+    const path = raw.slice(1);
+    if (!existsSync(path)) failJson(`--facts @${path} does not exist`);
+    text = readFileSync(path, "utf8");
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    failJson(`--facts is not readable JSON: ${err.message}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    failJson(`--facts must be a JSON object (got ${Array.isArray(parsed) ? "an array" : typeof parsed})`);
+  }
+  return parsed;
+}
 
 function readGate(runId, gateId) {
   const path = gatePath(runId, gateId);
@@ -108,6 +157,10 @@ function cmdEmit(args) {
   const summary = args.summary;
   if (!summary || summary === true) failJson('--summary "..." is required');
 
+  // Flags are validated before any state is read: a malformed --facts should say
+  // so whether or not the registry happens to know this child.
+  const facts = parseFacts(args.facts);
+
   // The registry is what makes a gate routable: it says which squad asked and
   // about which issue. A gate from a child nobody registered cannot be answered,
   // because there is no session to deliver the answer back to.
@@ -157,6 +210,7 @@ function cmdEmit(args) {
     summary,
     questions,
     artifacts,
+    facts,
     status: "pending",
     createdAt: new Date().toISOString(),
     answer: null,
