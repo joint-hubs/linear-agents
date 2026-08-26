@@ -261,12 +261,20 @@ export function assertWithinBudget(runId, fail = failJson) {
 // push` (the prefix no longer matches the rule) and any wrapper script all walk
 // straight past it. The real control is the human `push-approval` gate; this
 // list removes the accidental push, not the determined one. ADR-0009 §Risks.
+// The last two are the worktree gate (FOC-167), and they are here for the same
+// reason as the push rules: a child must not reclaim the checkout it is standing
+// in. Removal is the Supervisor's act, behind TEST-pass + Mateusz's yes
+// (scripts/supervisor-cleanup.mjs). Same caveat as above — this is the
+// accidental `git worktree remove`, not the determined one; the identity check
+// in supervisor-cleanup.mjs is the control that actually holds.
 export const SUPERVISOR_DENY = [
   "Bash(git push:*)",
   "Bash(gh pr create:*)",
   "Bash(gh pr merge:*)",
   "Bash(gh release create:*)",
   "Bash(gh api:*)",
+  "Bash(git worktree remove:*)",
+  "Bash(git worktree prune:*)",
 ];
 
 export const childSettingsPath = (runId, childId) =>

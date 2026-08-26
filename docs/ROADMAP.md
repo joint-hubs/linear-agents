@@ -60,7 +60,7 @@ analysis: `docs/decisions/cost-optimization.md`. Delegation policy lives in each
 
 1. **Worktree-per-dev-run** (top priority). Shared working tree = agents commit each other's
    changes and switch branches under a live run (observed twice). `dev-branch.mjs start` should
-   create `git worktree add ../la-wt/<branch>` and the run works there; cleanup on handoff.
+   create `git worktree add ../la-wt/<branch>` and the run works there; cleanup is `supervisor-cleanup.mjs`, behind TEST-pass + Mateusz's yes (FOC-167 — not on handoff, which the return edges still need).
    AC: two dev runs in parallel produce two clean, disjoint commits.
 2. **Run lifecycle closed at source.** Launcher wrapper runs claude via `start /wait` + always
    calls `run-manifest end` (kills the zombie class); `reconcile-runs.mjs` wired into

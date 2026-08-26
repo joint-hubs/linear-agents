@@ -22,7 +22,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ensureRunDir, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
@@ -118,6 +118,21 @@ export function fixtureRepo() {
 
 export const gitIn = (repo, ...args) =>
   execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+
+/**
+ * A real worktree off a fixture repo, without going through spawn.
+ *
+ * Worth having separately: spawning a child to get a worktree costs a mock
+ * process and an init handshake per test, and the cleanup suite needs a dozen
+ * trees whose CONTENT it controls. Same layout spawn produces (base/la-wt/<branch>)
+ * so anything asserted here holds for a real child's tree too.
+ */
+export function fixtureWorktree(repo, branch = "foc-123-dev") {
+  const target = join(repo, "..", "la-wt", branch);
+  execFileSync("git", ["worktree", "add", "-b", branch, target, "HEAD"], { cwd: repo, stdio: "ignore" });
+  const worktree = resolve(target);
+  return { worktree, branch, baseRevision: gitIn(worktree, "rev-parse", "HEAD") };
+}
 
 // ── a run directory ──────────────────────────────────────────────────────────
 
