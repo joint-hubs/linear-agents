@@ -6,7 +6,14 @@
 //
 // Snapshot mode returns immediately. Wait mode blocks until the child exits, a
 // pending gate appears, or the timeout elapses — Claude Code has no spontaneous
-// wakeup, so without this the lead would burn a turn per poll.
+// wakeup, so without this the lead would burn a turn per poll. It reports which
+// of four things happened:
+//
+//   exit     a child that was live has finished       → read the result, route on
+//   gate     a gate appeared that was not pending     → present it to Mateusz
+//   timeout  still running, nothing new               → re-issue with backoff
+//   idle     nothing is live; there is nothing to     → read the result, route on
+//            wait for, so it returned without waiting
 //
 // HARD CONTRACT: this script NEVER probes a process. Liveness is written by the
 // watcher (supervisor-watch.mjs) and read here. If a status is wrong, the bug is
@@ -196,7 +203,23 @@ const wasTerminal = new Set(
 let reason = "timeout";
 let current = before;
 
-while (Date.now() < deadline) {
+// Nothing live means nothing CAN change: only a running child writes the
+// registry or drops a gate file. Without this guard the loop burns the whole
+// timeout and reports `timeout` — which the cadence in agents/supervisor/CLAUDE.md
+// answers with a backoff, so up to 4x the base timeout is spent waiting on a
+// child that had already finished before the wait began. The baselining below
+// is what makes that reachable: an already-terminal child is deliberately not
+// reported as "just exited", and with no live sibling there is nothing else to
+// report either.
+//
+// Found by running the pipeline end to end (triage → spawn → status), where the
+// mock child exits in milliseconds and the gap is always hit. A read-through
+// would not have shown it: every unit test starts its wait while a child runs.
+if (before.totals.live === 0) {
+  reason = "idle";
+}
+
+while (reason === "timeout" && Date.now() < deadline) {
   await sleep(500);
   current = snapshot(runId, { childFilter, tail: 0 });
 
@@ -229,6 +252,9 @@ console.log(
       // its own counter: any stalled child means stop + escalate, regardless of
       // how many times it has polled or what backoff it used.
       stalledChildren: final.children.filter((c) => c.stalled).map((c) => c.childId),
+      // Only `timeout` means "still running, ask again later". `idle` means
+      // there is nothing left to wait for, so backing off would be waiting on
+      // no one.
       nextBackoffHint: reason === "timeout" ? Math.min(timeoutMs * 2, BASE_POLL_MS * 4) : BASE_POLL_MS,
     },
     null,

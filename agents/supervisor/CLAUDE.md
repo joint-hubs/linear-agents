@@ -60,7 +60,7 @@ The child gets its own git worktree. Returns once `session_id` is captured; the 
 ```
 node $LA_ROOT/scripts/supervisor-status.mjs --wait --timeout-ms <ms> --tail 20
 ```
-`--wait` blocks until the child exits, a pending gate appears, or the timeout fires, and tells you which. **Cadence:** after every spawn or follow-up, call `--wait`. On `timeout`, re-issue with backoff ×1, ×2, ×4 — capped at 4× the base timeout (`nextBackoffHint` in the response gives you the number).
+`--wait` blocks and tells you which of four things happened: `exit` (a live child finished), `gate` (a new gate appeared), `timeout` (still running, nothing new), `idle` (nothing is live — it returned without waiting). **Cadence:** after every spawn or follow-up, call `--wait`. On `timeout` **only**, re-issue with backoff ×1, ×2, ×4 — capped at 4× the base timeout (`nextBackoffHint` gives you the number). On `exit` or `idle`, stop waiting and read the result — backing off there is waiting on no one.
 
 **Max silence is wall-clock, not a poll count:** the tee must be silent for 5 × the base timeout (default 5 × 120 s = 10 min) before a child counts as stalled. Backoff cannot stretch it. Any child listed in `stalledChildren` → stop it and escalate (§failure modes). Do not invent a second counter of your own.
 

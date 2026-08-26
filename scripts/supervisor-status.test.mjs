@@ -263,6 +263,36 @@ test("returns reason=timeout when nothing happens, with a backoff hint", () => {
   if (!out.nextBackoffHint) fail("no backoff hint for the lead");
 });
 
+test("returns reason=idle, immediately, when nothing is live", () => {
+  // The child finished before the lead got round to waiting — the ordinary case
+  // for a fast turn, since spawn returns at system/init and the child may be
+  // done microseconds later. Without this the wait burns its full timeout and
+  // reports `timeout`, which the cadence answers with a backoff: up to 4x the
+  // base timeout spent waiting on someone who already left.
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  const t0 = Date.now();
+  const out = parse(status(runId, ["--wait", "--timeout-ms", "8000"]));
+  const elapsed = Date.now() - t0;
+  if (out.reason !== "idle") fail(`reason was ${out.reason}`);
+  if (elapsed > 4000) fail(`waited ${elapsed} ms for a child that had already exited`);
+  if (out.mode !== "wait") fail(`mode was ${out.mode}`);
+});
+
+test("a standing gate with no live child is idle too, and still reported", () => {
+  // Nothing writes a gate answer except the lead, so waiting on one while no
+  // child runs is waiting on itself.
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  writeFileSync(
+    join(runDir(runId), "gates", "standing.json"),
+    JSON.stringify({ gateId: "standing", status: "pending", kind: "question", summary: "waiting", questions: ["?"] }),
+  );
+  const out = parse(status(runId, ["--wait", "--timeout-ms", "8000"]));
+  if (out.reason !== "idle") fail(`reason was ${out.reason}`);
+  if (!out.pendingGates.some((g) => g.gateId === "standing")) fail("the standing gate must stay in the payload");
+});
+
 test("returns reason=exit when a live child finishes during the wait", () => {
   const repo = fixtureRepo();
   const runId = fixtureRun();
