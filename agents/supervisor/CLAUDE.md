@@ -39,11 +39,16 @@ Read the issue: `node $LA_ROOT/scripts/linear-query.mjs issue <id> --json`. Read
 ```
 node $LA_ROOT/scripts/supervisor-triage.mjs propose --issue <id>
 ```
+`propose` reads deterministic signals only and routes through the **routable edges of `config/graph.json`** — the same rules the dashboard shows for that task. It never falls back to a squad: an unresolvable node is an error. Its `node` field is where the issue enters the graph; its `autonomy` tells you whether the verdict needs confirming (`supervised` ⇒ yes; every node is `supervised` today).
+
 Present the proposal to Mateusz **with its rationale, its `unknowns[]` and its confidence**, then record what he confirms or overrides:
 ```
-node $LA_ROOT/scripts/supervisor-triage.mjs record --issue <id> --verdict <plan|dev|review|test|ask> --rationale "..."
+node $LA_ROOT/scripts/supervisor-triage.mjs record --issue <id> --verdict <plan|dev|review|test|ask> \
+     --rationale "..." --confidence <0-100> [--proposal <what propose said>] [--unknown "..." ...]
 ```
-Confidence <70 ⇒ the verdict must be `ask`. `spawn` refuses fail-closed until a verdict exists — that refusal is a feature, not an obstacle to work around.
+`--confidence` is required and refused below 70 for any verdict but `ask` — calibration is enforced by the tool, not by your good intentions. One verdict per run: recording a **different** issue into a run that already has one takes `--force`. `spawn` refuses fail-closed until a verdict exists — that refusal is a feature, not an obstacle to work around.
+
+Offline or Linear down: `propose --issue-file <saved.json>` triages from a payload on disk.
 
 ### 3. Spawn
 ```

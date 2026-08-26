@@ -85,7 +85,15 @@ if (live.length >= MAX_LIVE_CHILDREN_PER_RUN) {
 // Every child gets its own checkout (ADR-0009 amended 2026-08-25). A shared
 // working tree under two children is the failure observed twice on this repo:
 // agents committing each other's changes, and a branch switched under a live run.
-const gitRoot = resolveGitRoot(args.repo || ROOT);
+// Wrapped: git exits non-zero on a path that is not a repo, and an unwrapped
+// throw here printed a stack trace instead of the JSON every other failure path
+// returns — the Supervisor reads stdout, so that failure was invisible to it.
+let gitRoot;
+try {
+  gitRoot = resolveGitRoot(args.repo || ROOT);
+} catch (err) {
+  failJson(`--repo ${args.repo || ROOT} is not inside a git repository: ${err.message.split("\n")[0]}`);
+}
 const branch = buildBranchName(taskId, args.slug || squad, undefined);
 
 let worktree;
