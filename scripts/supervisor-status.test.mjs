@@ -242,6 +242,28 @@ test("the threshold scales with the base timeout — one constant, not two", () 
   if (out.children[0].stalled) fail("stalled tripped below its own threshold");
 });
 
+test("stall is wall-clock, so backoff cannot stretch the kill SLA", () => {
+  // The cadence tells the lead to back off x1, x2, x4 on timeout. If the stall
+  // threshold counted POLLS, or summed the backed-off waits, a lead that backed
+  // off would buy a stalled child extra life — exactly when it should be killed
+  // sooner. The threshold is 5 x the BASE timeout in wall-clock, and the number
+  // of calls that happened in between is irrelevant.
+  const runId = fixtureRun();
+  const childId = seedChild(runId, { status: "running", lines: [{ type: "system", subtype: "init" }] });
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(teeAbsPath(runId, childId), old, old);
+
+  // Base 10 s => threshold 50 s. 60 s of silence is past it.
+  const first = parse(status(runId, [], { LA_SUPERVISOR_POLL_MS: "10000" }));
+  if (!first.children[0].stalled) fail("60 s of silence did not trip a 50 s threshold");
+  if (first.stallSilenceMs !== 50_000) fail(`stallSilenceMs was ${first.stallSilenceMs}`);
+
+  // Same child, same silence, asked again as a backed-off lead would: the
+  // verdict must not change, because nothing about the CHILD changed.
+  const second = parse(status(runId, [], { LA_SUPERVISOR_POLL_MS: "10000" }));
+  if (!second.children[0].stalled) fail("the second call disagreed with the first");
+});
+
 test("a finished child is silent by definition, never stalled", () => {
   const runId = fixtureRun();
   const childId = seedChild(runId, { status: "exited", lines: [{ type: "result", subtype: "success" }] });

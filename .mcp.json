@@ -3,10 +3,10 @@
     "codegraph": {
       "type": "stdio",
       "command": "codegraph",
-      "args": ["serve", "--mcp"],
-      "env": {
-        "CODEGRAPH_MCP_TOOLS": "explore,node,search,callers,callees,impact,files,status"
-      }
+      "args": [
+        "serve",
+        "--mcp"
+      ]
     }
   }
 }

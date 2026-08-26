@@ -283,54 +283,8 @@ test("a non-zero exit is recorded as crashed, with no automatic respawn", async 
 });
 
 // ── stop ─────────────────────────────────────────────────────────────────────
-console.log("\nstop");
-
-test("stops a live child and reports the worktree instead of cleaning it", () => {
-  const { repo } = fixtureRepo();
-  const runId = fixtureRun();
-  const out = parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_HANG_MS: "20000" }));
-
-  writeFileSync(join(out.worktree, "scratch.txt"), "uncommitted work\n");
-
-  const r = spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
-  const stopped = parse(r);
-
-  if (!stopped.ok) fail(`stop failed: ${stopped.error}`);
-  if (stopped.status !== "stopped") fail(`status was ${stopped.status}`);
-  if (!stopped.dirty.some((l) => l.includes("scratch.txt"))) {
-    fail(`dirty report missed the file: ${JSON.stringify(stopped.dirty)}`);
-  }
-  // The uncommitted file must still be there — auto-reset would destroy the only
-  // copy of whatever the child had not committed.
-  if (!existsSync(join(out.worktree, "scratch.txt"))) fail("stop reset the worktree");
-  if (!existsSync(out.worktree)) fail("stop removed the worktree");
-});
-
-test("a stopped child is not relabelled as crashed by the watcher", async () => {
-  const { repo } = fixtureRepo();
-  const runId = fixtureRun();
-  const out = parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_HANG_MS: "20000" }));
-  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
-
-  // Give the watcher time to see the exit and write its own status.
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    execFileSync(process.execPath, ["-e", "setTimeout(()=>{},200)"]);
-    if (readRegistry(runId).children[out.childId].endedAt) break;
-  }
-  const entry = readRegistry(runId).children[out.childId];
-  if (entry.status !== "stopped") {
-    fail(`deliberate stop was recorded as "${entry.status}" — it would read as a failure in the digest`);
-  }
-});
-
-test("stopping an unknown child names what it knows", () => {
-  const runId = fixtureRun();
-  const r = spawnSync(process.execPath, [STOP, "--run", runId, "--child", "ghost"], { encoding: "utf8" });
-  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
-  const out = parse(r);
-  if (!Array.isArray(out.known)) fail("error does not list the known children");
-});
+// Moved to scripts/supervisor-stop.test.mjs (FOC-127): stop has its own script,
+// so it gets its own suite, and the "what stop must NOT do" cases needed room.
 
 // ── P9: the generated deny list ──────────────────────────────────────────────
 // The push gate must hold whether or not the child cooperates, so it lives in a
