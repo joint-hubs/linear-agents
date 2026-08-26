@@ -23,6 +23,7 @@ import {
   INIT_TIMEOUT_MS,
   MAX_LIVE_CHILDREN_PER_RUN,
   ROOT,
+  TERMINAL_STATUSES,
   asArray,
   ensureRunDir,
   ensureWorktree,
@@ -221,7 +222,7 @@ while (Date.now() < deadline) {
   await sleep(150);
   entry = readRegistry(runId).children[childId];
   if (entry?.sessionId) break;
-  if (entry && ["crashed", "exited", "stopped"].includes(entry.status)) break;
+  if (entry && TERMINAL_STATUSES.includes(entry.status)) break;
 }
 
 if (!entry?.sessionId) {

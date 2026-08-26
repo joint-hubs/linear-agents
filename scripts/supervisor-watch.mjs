@@ -19,6 +19,7 @@ import { appendFileSync, readFileSync } from "node:fs";
 import {
   ROOT,
   claudeCommand,
+  hasPendingGate,
   parseArgs,
   readRegistry,
   teeAbsPath,
@@ -168,7 +169,13 @@ child.on("exit", (code, signal) => {
   // overwrite it with `crashed` — an operator-requested kill and a child that
   // died on its own are different events, and conflating them would make every
   // deliberate stop look like a failure in the digest.
-  const status = entry.status === "stopped" ? "stopped" : code === 0 ? "exited" : "crashed";
+  //
+  // `waiting_gate` is `exited` plus an unanswered question (§2.5). Only the
+  // clean-exit branch can become it: a child that crashed or was killed left a
+  // gate behind as debris, not as a question anyone should answer, and dressing
+  // a crash up as "waiting for Mateusz" would park a dead child in the queue.
+  let status = entry.status === "stopped" ? "stopped" : code === 0 ? "exited" : "crashed";
+  if (status === "exited" && hasPendingGate(runId, childId)) status = "waiting_gate";
 
   const turns = entry.turns || [];
   turns[turnIndex] = { ...(turns[turnIndex] || {}), endedAt, exitCode: code };

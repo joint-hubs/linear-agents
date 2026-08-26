@@ -20,6 +20,7 @@ const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
 const FOLLOWUP = join(ROOT, "scripts", "supervisor-followup.mjs");
 const STOP = join(ROOT, "scripts", "supervisor-stop.mjs");
 const MOCK = join(ROOT, "scripts", "mock-claude.mjs");
+const GATE = join(ROOT, "scripts", "supervisor-gate.mjs");
 
 let passed = 0;
 const failures = [];
@@ -240,13 +241,28 @@ test("--gate is recorded on the turn for audit", () => {
   const repo = fixtureRepo();
   const runId = fixtureRun();
   const child = spawnChild(runId, repo);
-  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+  waitForStatus(runId, child.childId, ["exited", "crashed", "waiting_gate"]);
 
-  followup(runId, child.childId, ["--gate", "gate-42"]);
-  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+  // The gate has to exist and be ANSWERED before it can be delivered (FOC-122):
+  // a turn carrying an unrecorded answer leaves the gate `pending` forever.
+  // supervisor-gate.test.mjs owns the refusal cases; this one just needs a real gate.
+  const gateId = parse(
+    spawnSync(
+      process.execPath,
+      [GATE, "--run", runId, "emit", "--child", child.childId, "--kind", "question", "--summary", "s", "--question", "q?"],
+      { encoding: "utf8", env: baseEnv() },
+    ),
+  ).gateId;
+  spawnSync(process.execPath, [GATE, "--run", runId, "answer", "--gate", gateId, "--text", "rob A"], {
+    encoding: "utf8",
+    env: baseEnv(),
+  });
+
+  followup(runId, child.childId, ["--gate", gateId]);
+  waitForStatus(runId, child.childId, ["exited", "crashed", "waiting_gate"]);
 
   const entry = readRegistry(runId).children[child.childId];
-  if (entry.turns[1].gateId !== "gate-42") fail(`gateId was ${entry.turns[1].gateId}`);
+  if (entry.turns[1].gateId !== gateId) fail(`gateId was ${entry.turns[1].gateId}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

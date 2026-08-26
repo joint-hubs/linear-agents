@@ -14,13 +14,14 @@
 // than passed in again.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   ROOT,
   failJson,
+  gatePath,
   parseArgs,
   readRegistry,
   teeRelPath,
@@ -62,6 +63,41 @@ if (entry.status === "running" || entry.status === "starting") {
 
 if (!entry.sessionId) {
   failJson(`child ${childId} has no sessionId — nothing to resume`, { status: entry.status });
+}
+
+// ── guard: a gate is answered before it is delivered ─────────────────────────
+// `--gate` used to be audit-only, which left two ways to break the record.
+// Deliver without recording, and the gate file sits `pending` forever: the
+// child is unblocked but `status` still shows an open question and the child
+// reads as `waiting_gate`. Deliver a gate that does not exist, and the audit
+// trail points at nothing. Both are silent.
+//
+// The file is the source of truth (§2.6), so the file has to be right BEFORE
+// the answer travels. Order: supervisor-gate.mjs answer → this.
+if (args.gate && args.gate !== true) {
+  const gate = (() => {
+    const path = gatePath(runId, args.gate);
+    if (!existsSync(path)) return null;
+    try {
+      return JSON.parse(readFileSync(path, "utf8"));
+    } catch (err) {
+      failJson(`gate ${args.gate} is not readable JSON: ${err.message}`, { path });
+    }
+  })();
+
+  if (!gate) failJson(`gate ${args.gate} does not exist in run ${runId}`);
+  if (gate.childId !== childId) {
+    failJson(
+      `gate ${args.gate} belongs to child ${gate.childId}, not ${childId} — delivering it here would answer the wrong question`,
+    );
+  }
+  if (gate.status !== "answered") {
+    failJson(
+      `gate ${args.gate} is still ${gate.status} — record the answer first: ` +
+        `node scripts/supervisor-gate.mjs answer --gate ${args.gate} --text "..."`,
+      { hint: "the gate file is the record; this turn only delivers what the record already says" },
+    );
+  }
 }
 
 // ── guard: review-loop cap ───────────────────────────────────────────────────

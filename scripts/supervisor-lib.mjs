@@ -7,11 +7,11 @@
 // Layout under .state/supervisor/<runId>/:
 //   children.json        the registry (§2.5)
 //   children/<id>.jsonl  the raw stream-json tee for one child (§2.7)
-//   gates/<gateId>.json  gate records (FOC-122, not written here)
+//   gates/<gateId>.json  gate records (supervisor-gate.mjs, FOC-122)
 //   triage.json          the recorded verdict (FOC-123, read here, never written)
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -40,12 +40,14 @@ export const INIT_TIMEOUT_MS = 30_000;
 export const runDir = (runId) => join(ROOT, ".state", "supervisor", runId);
 export const registryPath = (runId) => join(runDir(runId), "children.json");
 export const triagePath = (runId) => join(runDir(runId), "triage.json");
+export const gatesDir = (runId) => join(runDir(runId), "gates");
+export const gatePath = (runId, gateId) => join(gatesDir(runId), `${gateId}.json`);
 export const teeRelPath = (childId) => join("children", `${childId}.jsonl`);
 export const teeAbsPath = (runId, childId) => join(runDir(runId), teeRelPath(childId));
 
 export function ensureRunDir(runId) {
   mkdirSync(join(runDir(runId), "children"), { recursive: true });
-  mkdirSync(join(runDir(runId), "gates"), { recursive: true });
+  mkdirSync(gatesDir(runId), { recursive: true });
 }
 
 export function emptyRegistry(runId) {
@@ -82,7 +84,36 @@ export function updateChild(runId, childId, patch) {
   return registry.children[childId];
 }
 
+// Does this child have an unanswered question outstanding? The watcher asks at
+// turn end to tell `exited` (finished the work) apart from `waiting_gate`
+// (stopped to ask) — §2.5. Deliberately tolerant of a malformed file: a gate
+// nobody can parse must not make a waiting child look finished, so anything
+// unreadable counts as pending.
+export function hasPendingGate(runId, childId) {
+  const dir = gatesDir(runId);
+  if (!existsSync(dir)) return false;
+  return readdirSync(dir)
+    .filter((f) => f.endsWith(".json"))
+    .some((f) => {
+      try {
+        const gate = JSON.parse(readFileSync(join(dir, f), "utf8"));
+        return gate.childId === childId && gate.status === "pending";
+      } catch {
+        return true;
+      }
+    });
+}
+
 export const LIVE_STATUSES = ["starting", "running"];
+
+// "The turn has ended" — no process is running, nothing will write this child's
+// state again until someone starts a new turn. `waiting_gate` belongs here even
+// though the WORK is unfinished: liveness is about the process, not the task.
+// Getting that wrong is not cosmetic — a `waiting_gate` child counted as live
+// would be reported as stalled once its tee went quiet (it always does; it is
+// waiting on a human), and `status --wait` would block instead of sending the
+// Supervisor to Mateusz for the answer.
+export const TERMINAL_STATUSES = ["exited", "crashed", "stopped", "waiting_gate"];
 
 export function liveChildren(registry) {
   return Object.values(registry.children || {}).filter((c) => LIVE_STATUSES.includes(c.status));

@@ -32,7 +32,9 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  TERMINAL_STATUSES,
   failJson,
+  gatesDir,
   parseArgs,
   readRegistry,
   runDir,
@@ -113,7 +115,7 @@ function teeActivity(runId, childId) {
 }
 
 function pendingGates(runId) {
-  const dir = join(runDir(runId), "gates");
+  const dir = gatesDir(runId);
   if (!existsSync(dir)) return [];
   const out = [];
   for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
@@ -137,8 +139,6 @@ function pendingGates(runId) {
   return out;
 }
 
-const TERMINAL = ["exited", "crashed", "stopped"];
-
 function snapshot(runId, { childFilter, tail }) {
   const registry = readRegistry(runId);
   const now = Date.now();
@@ -156,7 +156,7 @@ function snapshot(runId, { childFilter, tail }) {
       silentMs,
       // Stalled is only meaningful for a child that is supposed to be producing
       // output. A finished child is silent by definition, not stalled.
-      stalled: !TERMINAL.includes(entry.status) && silentMs !== null && silentMs >= STALL_SILENCE_MS,
+      stalled: !TERMINAL_STATUSES.includes(entry.status) && silentMs !== null && silentMs >= STALL_SILENCE_MS,
     };
   });
 
@@ -170,7 +170,7 @@ function snapshot(runId, { childFilter, tail }) {
       // event into the child's costUsd; this is the sum of those.
       costUsd: entries.reduce((sum, c) => sum + (c.costUsd || 0), 0),
       children: entries.length,
-      live: entries.filter((c) => !TERMINAL.includes(c.status)).length,
+      live: entries.filter((c) => !TERMINAL_STATUSES.includes(c.status)).length,
     },
     reviewLoopCount: registry.reviewLoopCount ?? {},
     stallSilenceMs: STALL_SILENCE_MS,
@@ -197,7 +197,7 @@ const deadline = Date.now() + timeoutMs;
 const before = snapshot(runId, { childFilter, tail: 0 });
 const gatesBefore = new Set(before.pendingGates.map((g) => g.gateId));
 const wasTerminal = new Set(
-  before.children.filter((c) => TERMINAL.includes(c.status)).map((c) => c.childId),
+  before.children.filter((c) => TERMINAL_STATUSES.includes(c.status)).map((c) => c.childId),
 );
 
 let reason = "timeout";
@@ -225,7 +225,7 @@ while (reason === "timeout" && Date.now() < deadline) {
 
   // (a) a child that was live has finished
   const justExited = current.children.find(
-    (c) => TERMINAL.includes(c.status) && !wasTerminal.has(c.childId),
+    (c) => TERMINAL_STATUSES.includes(c.status) && !wasTerminal.has(c.childId),
   );
   if (justExited) {
     reason = "exit";

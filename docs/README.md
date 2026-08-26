@@ -78,6 +78,7 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 - `scripts/graph-validate.mjs` — walidator `config/graph.json` (topologia składów) + `--emit-puml` / `--emit-handoff-rules`
 - `scripts/graph-route.mjs` — jeden matcher `stan + etykiety → następny węzeł`; używa go dashboard (`telemetry-server.mjs`) **i** triage Supervisora, żeby nie mogły się rozjechać
 - `scripts/supervisor-triage.mjs` — `propose` / `record`: deterministyczny werdykt wejściowego węzła grafu; zapisany werdykt jest kontraktem dla `supervisor-spawn.mjs`
+- `scripts/supervisor-gate.mjs` — `emit` / `answer` / `list`: rekord bramki HITL. Plik jest źródłem prawdy (bez mirrora `needs:*` w Linearze); `answer` zapisuje, dostarcza dopiero `supervisor-followup.mjs --gate`
 
 > **`config/graph.json` jest źródłem prawdy topologii.** `config/handoff-rules.json` to plik, który
 > `telemetry-server.mjs` czyta w runtime — jest wycofywany i **generowany** z grafu

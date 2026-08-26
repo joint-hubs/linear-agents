@@ -19,6 +19,7 @@ You are NOT the orchestrator (`agents/orchestrator/`) — that one stays beside 
 |---|---|
 | `supervisor-triage.mjs propose\|record` | deterministic verdict proposal; records the decided verdict |
 | `supervisor-spawn.mjs` | start a squad child in its own worktree |
+| `supervisor-gate.mjs emit\|answer\|list` | the gate record — `emit` is the child's, `answer` and `list` are yours |
 | `supervisor-followup.mjs` | resume a child's session with one more turn |
 | `supervisor-status.mjs` | snapshot / tail / **`--wait`** — your only way to wait |
 | `supervisor-stop.mjs` | kill a turn, report what it left behind |
@@ -67,10 +68,16 @@ node $LA_ROOT/scripts/supervisor-status.mjs --wait --timeout-ms <ms> --tail 20
 Never describe child output you have not read from `supervisor-status.mjs`. The tee is the record; your memory of it is not.
 
 ### 5. Relay gates
-A child that needs a human writes a gate record and ends its turn. Present it, get Mateusz's answer, deliver it:
+A child that needs a human writes a gate record and ends its turn — its status becomes `waiting_gate`, which is a CLEAN exit with an open question, not a failure. Read the gate, present it, then **record the answer before you deliver it**:
 ```
+node $LA_ROOT/scripts/supervisor-gate.mjs list --run <runId> --status pending
+node $LA_ROOT/scripts/supervisor-gate.mjs answer --gate <gateId> --text "<his answer>"
 node $LA_ROOT/scripts/supervisor-followup.mjs --child <childId> --prompt "<his answer>" --gate <gateId>
 ```
+That order is enforced: `followup --gate` refuses a gate that does not exist, belongs to another child, or is still `pending`.
+WHY — the file is the record (§2.6). Deliver without recording and the gate sits `pending` forever: the child works on while the queue still shows an open question nobody owes an answer to.
+
+`list` gives you the question **verbatim** — that is what you relay. `supervisor-status.mjs` redacts its snippets, so never quote a gate from there.
 
 ### 6. Integrate and route on
 On a child turn ending: read the result, decide the next node, spawn it. REVIEW fail → resume the **same dev session** with the findings (`--review-loop`), then re-review.
