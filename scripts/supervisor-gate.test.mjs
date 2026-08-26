@@ -85,7 +85,7 @@ function fixtureRun({ child = true } = {}) {
           worktree: join(tmpdir(), "fake-worktree"), permissionMode: "bypassPermissions",
         },
       },
-      reviewLoopCount: {},
+      rounds: {},
     });
   }
   return runId;

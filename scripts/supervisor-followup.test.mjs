@@ -196,46 +196,12 @@ test("refuses an unknown child and lists what it knows", () => {
   if (!Array.isArray(parse(r).known)) fail("error does not list known children");
 });
 
-// ── review loop cap ──────────────────────────────────────────────────────────
-console.log("\nreview loop cap is enforced in tooling");
-
-test("counts review loops and refuses the one past the cap", () => {
-  // The cap must live here rather than only in the lead's prompt: a limit a
-  // model can talk itself past is not a limit.
-  const repo = fixtureRepo();
-  const runId = fixtureRun();
-  const child = spawnChild(runId, repo);
-  waitForStatus(runId, child.childId, ["exited", "crashed"]);
-
-  for (const round of [1, 2]) {
-    const out = parse(followup(runId, child.childId, ["--review-loop"]));
-    if (!out.ok) fail(`round ${round} was refused: ${out.error}`);
-    if (out.reviewLoopCount !== round) fail(`round ${round} recorded count ${out.reviewLoopCount}`);
-    waitForStatus(runId, child.childId, ["exited", "crashed"]);
-  }
-
-  const third = followup(runId, child.childId, ["--review-loop"]);
-  if (third.status !== 1) fail(`third review loop was allowed (exit ${third.status})`);
-  const out = parse(third);
-  if (!/cap/i.test(out.error)) fail(`error does not mention the cap: ${out.error}`);
-  if (!/escalate/i.test(out.error)) fail("error does not say what to do instead");
-
-  const entry = readRegistry(runId).children[child.childId];
-  if (entry.turns.length !== 3) fail(`expected 3 turns (spawn + 2 loops), got ${entry.turns.length}`);
-});
-
-test("a plain follow-up does not consume the review-loop budget", () => {
-  const repo = fixtureRepo();
-  const runId = fixtureRun();
-  const child = spawnChild(runId, repo);
-  waitForStatus(runId, child.childId, ["exited", "crashed"]);
-
-  followup(runId, child.childId);
-  waitForStatus(runId, child.childId, ["exited", "crashed"]);
-
-  const count = readRegistry(runId).reviewLoopCount?.["FOC-123"] ?? 0;
-  if (count !== 0) fail(`a gate answer was counted as a review loop (count ${count})`);
-});
+// ── review loop ─────────────────────────────────────────────────────────────
+// The round CAP that used to be asserted here is gone (FOC-163): it counted,
+// and a counter cannot tell a run that is converging from one going in circles.
+// What replaced it — the diff + failing-test fingerprint — is a different
+// mechanism with its own preconditions, so it gets its own suite:
+// scripts/supervisor-verdict.test.mjs.
 
 test("--gate is recorded on the turn for audit", () => {
   const repo = fixtureRepo();

@@ -97,7 +97,7 @@ function seedChild(runId, { childId = "dev-1", status: st = "running", costUsd =
         worktree: ROOT,
       },
     },
-    reviewLoopCount: {},
+    rounds: {},
   });
   writeFileSync(teeAbsPath(runId, childId), lines.map((l) => JSON.stringify(l)).join("\n") + (lines.length ? "\n" : ""));
   return childId;

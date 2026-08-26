@@ -21,23 +21,23 @@ import { join } from "node:path";
 import {
   ROOT,
   assertWithinBudget,
+  comparableProgress,
   failJson,
   gatePath,
   parseArgs,
   readRegistry,
+  roundsFor,
   teeRelPath,
   updateChild,
   writeRegistry,
 } from "./supervisor-lib.mjs";
 
-// The dev↔review ping-pong cap. Enforced HERE, in tooling, rather than only in
-// the lead's prompt — a cap a model can talk itself past is not a cap.
-//
-// It counts rounds, which is the weakness FOC-163 fixes: two rounds that
-// reproduce the same failure are not progress, and a run that IS converging gets
-// cut off at the same number. FOC-163 replaces this counter with a diff +
-// failing-test fingerprint; when it lands, this constant goes.
-const MAX_REVIEW_LOOPS = Number(process.env.LA_SUPERVISOR_MAX_LOOPS ?? 2);
+// FOC-163 removed the dev↔review round cap. It was `LA_SUPERVISOR_MAX_LOOPS`,
+// default 2, and it counted: it stopped a run that was converging at the same
+// number as one that was going in circles, because a counter cannot tell them
+// apart. What stops a loop now is the PROGRESS FINGERPRINT — see the guard
+// below. No counter remains; an unused one would be worse than none, because
+// the next reader would take it for the live control.
 
 const args = parseArgs(process.argv.slice(2));
 const childId = args.child;
@@ -106,18 +106,64 @@ if (args.gate && args.gate !== true) {
 // first spawn would be a cap on one turn rather than on the run.
 assertWithinBudget(runId);
 
-// ── guard: review-loop cap ───────────────────────────────────────────────────
-let reviewLoopCount = registry.reviewLoopCount || {};
+// ── guard: progress, not rounds (FOC-163) ────────────────────────────────────
+// A round is progress when the WORK changed. Two rounds with the same diff and
+// the same failing tests are not two attempts — they are one attempt billed
+// twice, and spawning a third would buy the same result a third time.
+let progress = null;
 if (args["review-loop"]) {
-  const current = reviewLoopCount[entry.taskId] ?? 0;
-  if (current + 1 > MAX_REVIEW_LOOPS) {
+  const rounds = roundsFor(runId, entry.taskId);
+
+  // Without a recorded verdict there is nothing to loop ON: no findings to hand
+  // back, and no fingerprint to compare. This also closes the obvious bypass —
+  // a Supervisor that never records a verdict would otherwise loop forever,
+  // exactly the freedom the old counter existed to remove.
+  if (!rounds.length) {
     failJson(
-      `review loop cap reached for ${entry.taskId}: ${current} of ${MAX_REVIEW_LOOPS} used — escalate instead of resuming`,
-      { taskId: entry.taskId, reviewLoopCount: current, max: MAX_REVIEW_LOOPS },
+      `no REVIEW verdict recorded for ${entry.taskId} — there is nothing to send back to DEV`,
+      {
+        taskId: entry.taskId,
+        hint: `record it first: node scripts/supervisor-verdict.mjs record --child <reviewChild> --verdict fail --finding '{"text":"...","evidence":"..."}'`,
+      },
     );
   }
-  reviewLoopCount = { ...reviewLoopCount, [entry.taskId]: current + 1 };
-  registry.reviewLoopCount = reviewLoopCount;
+
+  const last = rounds[rounds.length - 1];
+  const prev = rounds.length > 1 ? rounds[rounds.length - 2] : null;
+  const repeated = comparableProgress(last?.fingerprint, prev?.fingerprint);
+
+  if (repeated === true) {
+    failJson(
+      `round ${last.round} of ${entry.taskId} reproduced round ${prev.round}: same diff, same failing tests — ` +
+        `another identical round is budget, not progress`,
+      {
+        taskId: entry.taskId,
+        fingerprints: { previous: prev.fingerprint, latest: last.fingerprint },
+        failingTests: last.fingerprint?.failingTests ?? [],
+        hint:
+          "change strategy before resuming: a different role or model, a restored checkpoint, or " +
+          "escalate to Mateusz with both fingerprints shown. Re-running the same one is the thing " +
+          "this guard exists to stop.",
+      },
+    );
+  }
+
+  // `null` means one of the two fingerprints could not be read. That is UNKNOWN,
+  // and unknown must not block: escalating because we failed to LOOK is a worse
+  // failure than one extra round. Said out loud instead of silently allowed.
+  if (repeated === null && prev) {
+    console.error(
+      `[followup] progress is UNKNOWN for ${entry.taskId} (a fingerprint could not be read) — allowing the round`,
+    );
+  }
+
+  progress = {
+    rounds: rounds.length,
+    latest: last.fingerprint?.combined ?? null,
+    previous: prev?.fingerprint?.combined ?? null,
+    repeated,
+  };
+  registry.rounds = { ...(registry.rounds || {}), [entry.taskId]: progress };
   writeRegistry(runId, registry);
 }
 
@@ -190,7 +236,9 @@ console.log(
       tee: teeRelPath(childId),
       gateId: args.gate || null,
       reviewLoop: Boolean(args["review-loop"]),
-      reviewLoopCount: reviewLoopCount[entry.taskId] ?? 0,
+      // What replaced the counter. `repeated: null` is UNKNOWN, not "fine" —
+      // whoever reads this next has to be able to tell those apart.
+      progress,
     },
     null,
     2,

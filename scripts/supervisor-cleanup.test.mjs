@@ -76,7 +76,7 @@ function scenario({ status = "exited", dirty = null } = {}) {
         allowedPaths: [],
       },
     },
-    reviewLoopCount: {},
+    rounds: {},
   });
 
   if (dirty) writeFileSync(join(wt.worktree, dirty), "uncommitted\n");

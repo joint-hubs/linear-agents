@@ -11,6 +11,7 @@
 //   triage.json          the recorded verdict (FOC-123, read here, never written)
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +43,9 @@ export const registryPath = (runId) => join(runDir(runId), "children.json");
 export const triagePath = (runId) => join(runDir(runId), "triage.json");
 export const gatesDir = (runId) => join(runDir(runId), "gates");
 export const gatePath = (runId, gateId) => join(gatesDir(runId), `${gateId}.json`);
+export const verdictsDir = (runId) => join(runDir(runId), "verdicts");
+export const verdictPath = (runId, taskId, round) =>
+  join(verdictsDir(runId), `${String(taskId).toLowerCase()}-round${round}.json`);
 export const teeRelPath = (childId) => join("children", `${childId}.jsonl`);
 export const teeAbsPath = (runId, childId) => join(runDir(runId), teeRelPath(childId));
 
@@ -51,7 +55,7 @@ export function ensureRunDir(runId) {
 }
 
 export function emptyRegistry(runId) {
-  return { runId, children: {}, reviewLoopCount: {} };
+  return { runId, children: {}, rounds: {} };
 }
 
 export function readRegistry(runId) {
@@ -437,6 +441,101 @@ export function dirtyTreeReport(cwd) {
   } catch (err) {
     return [`<git status failed: ${err.message}>`];
   }
+}
+
+// ── progress fingerprint (FOC-163) ───────────────────────────────────────────
+//
+// The thing that replaces counting rounds. A round is progress when the work
+// CHANGED; a second round producing the same diff and failing the same tests is
+// not a second attempt, it is the first attempt billed twice.
+//
+// Two components, hashed separately so a report can say WHICH half stood still:
+//
+//   · the diff against the round's base — `git diff <base>` compares base to the
+//     WORKING TREE, so it catches committed and uncommitted work in one pass.
+//     Untracked files never appear in a diff, so the porcelain list rides along;
+//     a round whose only output is an untracked file would otherwise fingerprint
+//     as "nothing happened".
+//   · the failing-test set the verdict declared, sorted and deduped — order out
+//     of a test runner is not stable, and an unsorted set would make every round
+//     look different for free.
+//
+// Deliberately NOT included: timestamps, durations, cost. All three change on
+// every round by construction, and a fingerprint that always differs is a cap
+// of infinity wearing a measurement's clothes.
+export function progressFingerprint({ worktree, baseRevision, failingTests = [] } = {}) {
+  const sha = (s) => createHash("sha256").update(s).digest("hex");
+
+  let diffText = null;
+  let porcelain = [];
+  let error = null;
+  if (worktree && baseRevision && existsSync(worktree)) {
+    try {
+      diffText = git(["diff", baseRevision], worktree);
+      porcelain = dirtyTreeReport(worktree);
+    } catch (err) {
+      error = err.message.split("\n")[0];
+    }
+  } else if (worktree || baseRevision) {
+    error = "worktree or baseRevision missing";
+  }
+
+  const tests = [...new Set(failingTests.map((t) => String(t).trim()).filter(Boolean))].sort();
+
+  // A fingerprint that could not read the tree is UNKNOWN, not empty. Returning
+  // a hash of "" here would make two unreadable rounds compare equal, and equal
+  // means "no progress, escalate" — the system would escalate on its own
+  // inability to look rather than on the child's failure to move.
+  const diffHash = error ? null : sha(`${diffText ?? ""}\n${[...porcelain].sort().join("\n")}`).slice(0, 12);
+  const testsHash = sha(tests.join("\n")).slice(0, 12);
+
+  return {
+    diff: diffHash,
+    tests: testsHash,
+    combined: diffHash ? sha(`${diffHash}:${testsHash}`).slice(0, 16) : null,
+    changedFiles: error ? null : porcelain.length,
+    failingTests: tests,
+    error,
+  };
+}
+
+/**
+ * Did this round move? `null` means UNKNOWN — one of the two could not be read —
+ * and callers must treat that as "cannot tell", never as "no progress".
+ */
+export function comparableProgress(a, b) {
+  if (!a?.combined || !b?.combined) return null;
+  return a.combined === b.combined;
+}
+
+/**
+ * Every recorded REVIEW verdict for one task, oldest first.
+ *
+ * Lives here rather than in supervisor-verdict.mjs because supervisor-followup
+ * reads it too, and a CLI script is the wrong thing for another script to import.
+ * Same rule the registry and the gate paths already follow.
+ */
+export function roundsFor(runId, taskId) {
+  const dir = verdictsDir(runId);
+  if (!existsSync(dir)) return [];
+  const prefix = `${String(taskId).toLowerCase()}-round`;
+  return readdirSync(dir)
+    .filter((f) => f.startsWith(prefix) && f.endsWith(".json"))
+    .map((f) => {
+      try {
+        return JSON.parse(readFileSync(join(dir, f), "utf8"));
+      } catch {
+        // Unreadable is not absent. A verdict nobody can parse must not make the
+        // round before it look like the latest one.
+        return { round: Number(f.slice(prefix.length, -5)) || 0, unreadable: true };
+      }
+    })
+    .sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
+}
+
+export function latestVerdict(runId, taskId) {
+  const all = roundsFor(runId, taskId);
+  return all.length ? all[all.length - 1] : null;
 }
 
 // ── killing a child ──────────────────────────────────────────────────────────

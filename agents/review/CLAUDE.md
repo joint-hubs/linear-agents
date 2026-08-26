@@ -139,7 +139,7 @@ WHY — gating on nitpicks stalls the pipeline for cosmetics; DEV gets noise ins
 <review_hard_rules>
 ## Hard rules
 - Tool-call fail → retry → fallback pass. 2 failed attempts → `escalated` + `needs:answer` + notify Mateusz. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, keep `escalated`, drop `needs:answer`, emit a `question` gate.
-- Max 2 dev↔review rounds — round 3 = `escalated` + notify Mateusz (counter in comment). **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, the Supervisor enforces the same cap in tooling (`supervisor-followup.mjs --review-loop`) and refuses the round past it; you raise a `question` gate.
+- Max 2 dev↔review rounds — round 3 = `escalated` + notify Mateusz (counter in comment). **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised there is **no round cap**: your verdict is recorded with `supervisor-verdict.mjs`, and what stops the loop is whether the work MOVED — the Supervisor fingerprints the diff plus your `--failing-test` set and refuses a round that reproduced the one before it. So a converging run may exceed 2 rounds, and a repeating one is stopped at 2; you raise a `question` gate either way.
 WHY — unbounded dev↔review loops burn cost on disagreements only a human can resolve.
 - Security always by tools (models catch 60–80%) — never a model-only security verdict.
 WHY — a false "secure" ships vulnerabilities; tools are the floor, models the filter.

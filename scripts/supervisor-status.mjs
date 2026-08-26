@@ -180,7 +180,21 @@ function snapshot(runId, { childFilter, tail }) {
       live: entries.filter((c) => !TERMINAL_STATUSES.includes(c.status)).length,
     },
     budget: budgetStatus(runId, registry),
-    reviewLoopCount: registry.reviewLoopCount ?? {},
+    // FOC-163 replaced the round counter with a progress signal. Two distinct
+    // conditions, deliberately NOT merged into one "stuck" flag:
+    //
+    //   · stalled  — the tee went silent (wall clock, unchanged). The child is
+    //                not producing output. Says nothing about the work.
+    //   · repeated — the last two REVIEW rounds fingerprinted the same. The
+    //                child is producing output that changes nothing.
+    //
+    // A live child can be busy and going nowhere; a silent one may have finished.
+    // Collapsing them would leave the lead unable to tell which it is looking at,
+    // and the two need opposite responses.
+    rounds: registry.rounds ?? {},
+    repeatedTasks: Object.entries(registry.rounds ?? {})
+      .filter(([, p]) => p?.repeated === true)
+      .map(([taskId, p]) => ({ taskId, rounds: p.rounds, fingerprint: p.latest })),
     stallSilenceMs: STALL_SILENCE_MS,
   };
 }
@@ -260,6 +274,11 @@ console.log(
       // its own counter: any stalled child means stop + escalate, regardless of
       // how many times it has polled or what backoff it used.
       stalledChildren: final.children.filter((c) => c.stalled).map((c) => c.childId),
+      // The other stall condition, reported separately on purpose (FOC-163):
+      // silence means no output, a repeated fingerprint means output that
+      // changed nothing. Escalating one as the other sends the wrong question
+      // to Mateusz.
+      repeatedTasks: final.repeatedTasks ?? [],
       // Only `timeout` means "still running, ask again later". `idle` means
       // there is nothing left to wait for, so backing off would be waiting on
       // no one.

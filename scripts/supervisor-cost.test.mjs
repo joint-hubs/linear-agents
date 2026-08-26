@@ -68,7 +68,7 @@ function fixtureRun(children = {}) {
   cleanup.push(runDir(runId));
   ensureRunDir(runId);
   writeFileSync(join(runDir(runId), "triage.json"), JSON.stringify({ issue: "FOC-999", verdict: "dev" }));
-  writeRegistry(runId, { runId, children, reviewLoopCount: {} });
+  writeRegistry(runId, { runId, children, rounds: {}, });
   return runId;
 }
 const child = (over = {}) => ({

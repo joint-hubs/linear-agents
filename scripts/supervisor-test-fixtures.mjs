@@ -151,7 +151,7 @@ export function fixtureRun({ triage = true, children = null } = {}) {
       JSON.stringify({ issue: "FOC-123", verdict: "dev", node: "dev", confidence: 90 }),
     );
   }
-  if (children) writeRegistry(runId, { runId, children, reviewLoopCount: {} });
+  if (children) writeRegistry(runId, { runId, children, rounds: {}, });
   cleanupLater(runDir(runId));
   return runId;
 }
