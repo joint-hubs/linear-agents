@@ -19,6 +19,7 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 - **1st read:** [00-overview.md](00-overview.md) — master: 5 elementów, statusy, task typing, escalation, izolacja `.bat`
 - **Run book:** [HOW-TO-RUN-AGENTS.md](HOW-TO-RUN-AGENTS.md) — operator runbook: który `.bat`, jaki kickoff wkleić
 - **Stan pracy:** [STATE.md](STATE.md) — long-work diary, najnowsza aktualizacja 2026-07-26
+- **Supervisor e2e:** [supervisor-e2e-checklist.md](supervisor-e2e-checklist.md) — ręczny przebieg FOC-116 mapowany 1:1 na AC-1…AC-10; przejdź go raz przed pierwszym realnym użyciem
 
 ## Agenci (specyfikacje)
 
