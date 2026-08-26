@@ -15,10 +15,13 @@
 
 import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
+import { calculateCost, pricingSnapshot } from "./telemetry-store.mjs";
 
 import {
   ROOT,
+  addCost,
   claudeCommand,
+  costFromResult,
   hasPendingGate,
   parseArgs,
   readRegistry,
@@ -84,7 +87,24 @@ const child = spawn(command, spawnArgs, {
 const turnIndex = Number(args.turn ?? 0);
 let sessionId = null;
 let costUsd = 0;
+let costUsdReported = 0;
+const unpricedModels = [];
+let initModel = null;
 let sawInit = false;
+
+// One read of config/models.json for the whole turn. A missing or broken price
+// table must not stop the child: cost becomes unknown (null), which is exactly
+// what an unpriced run is, and the budget check refuses on unknown rather than
+// pretending the run was free.
+const prices = (() => {
+  try {
+    return pricingSnapshot().prices;
+  } catch {
+    return null;
+  }
+})();
+const priceOne = (usage, model) => (prices ? calculateCost(usage, model, prices) : null);
+
 
 function patchTurn(patch) {
   const registry = readRegistry(runId);
@@ -122,14 +142,22 @@ child.stdout.on("data", (chunk) => {
 
     if (!sawInit && event.type === "system" && event.subtype === "init" && event.session_id) {
       sessionId = event.session_id;
+      initModel = event.model ?? null;
       sawInit = true;
       // This write is what unblocks supervisor-spawn.mjs, which is polling the
       // registry for exactly this field.
       updateChild(runId, childId, { sessionId, status: "running", pid: child.pid });
     }
     if (event.type === "result") {
-      if (typeof event.total_cost_usd === "number") costUsd += event.total_cost_usd;
-      else if (typeof event.cost_usd === "number") costUsd += event.cost_usd;
+      // Priced from token counts, NOT from the stream's total_cost_usd — that
+      // number is Claude Code's estimate for a model it does not recognise, and
+      // it is provably wrong (FOC-165: $0.2059 reported for a $0 model). The
+      // reported figure is kept beside the computed one so a divergence stays
+      // visible instead of one silently replacing the other.
+      const cost = costFromResult(event, initModel, priceOne);
+      costUsd = addCost(costUsd, cost.computed);
+      if (cost.reported !== null) costUsdReported += cost.reported;
+      for (const m of cost.unpriced) if (!unpricedModels.includes(m)) unpricedModels.push(m);
     }
   }
 });
@@ -185,7 +213,11 @@ child.on("exit", (code, signal) => {
     exitCode: code,
     signal: signal || null,
     endedAt,
-    costUsd: (entry.costUsd || 0) + costUsd,
+    // addCost, not `+`: null means "unknown", and unknown plus anything stays
+    // unknown. Treating it as zero is how an unpriced model becomes a free one.
+    costUsd: addCost(entry.costUsd === undefined ? 0 : entry.costUsd, costUsd),
+    costUsdReported: (entry.costUsdReported || 0) + costUsdReported,
+    unpricedModels: [...new Set([...(entry.unpricedModels || []), ...unpricedModels])],
     turns,
   });
 

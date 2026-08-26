@@ -127,6 +127,32 @@ test("żaden skład nie ma jednocześnie allow i deny na to samo", () => {
   if (conflicts.length) fail(`reguła w allow i deny naraz:\n       ${conflicts.join("\n       ")}`);
 });
 
+test("każda zmienna LA_* opisana w CLAUDE.md jest przez coś czytana", () => {
+  // agents/supervisor/CLAUDE.md miał całą sekcję "Budget guardrail" opisującą
+  // LA_SUPERVISOR_MAX_COST_USD — jego semantykę post-hoc, zachowanie przy
+  // przekroczeniu, wiersz w tabeli trybów awarii. Żaden skrypt tej zmiennej nie
+  // czytał. Lead był przekonany, że ma limit wydatków, którego nie miał
+  // (FOC-165). To jest dokładnie klasa "config twierdzi coś, czego repo już nie
+  // pokrywa", tyle że o zmiennych środowiskowych.
+  const scripts = readdirSync(join(ROOT, "scripts"))
+    .filter((f) => f.endsWith(".mjs"))
+    .map((f) => read(`scripts/${f}`))
+    .join("\n");
+
+  const orphaned = [];
+  for (const squad of SQUADS) {
+    const doc = read(`agents/${squad}/CLAUDE.md`);
+    for (const m of doc.matchAll(/\b(LA_[A-Z0-9_]+)\b/g)) {
+      if (!scripts.includes(m[1]) && !orphaned.some((o) => o.startsWith(m[1]))) {
+        orphaned.push(`${m[1]} (obiecana w agents/${squad}/CLAUDE.md)`);
+      }
+    }
+  }
+  if (orphaned.length) {
+    fail(`instrukcja obiecuje zmienną, której nikt nie czyta:\n       ${orphaned.join("\n       ")}`);
+  }
+});
+
 // ── 4. Model routing must be internally consistent ────────────────────────────
 console.log("\nmodele i cennik");
 

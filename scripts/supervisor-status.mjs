@@ -33,6 +33,8 @@ import { join } from "node:path";
 
 import {
   TERMINAL_STATUSES,
+  addCost,
+  budgetStatus,
   failJson,
   gatesDir,
   parseArgs,
@@ -166,12 +168,18 @@ function snapshot(runId, { childFilter, tail }) {
     children,
     pendingGates: pendingGates(runId),
     totals: {
-      // Provenance: the watcher accumulates total_cost_usd from each `result`
-      // event into the child's costUsd; this is the sum of those.
-      costUsd: entries.reduce((sum, c) => sum + (c.costUsd || 0), 0),
+      // Provenance: the watcher prices each `result` event from its TOKEN COUNTS
+      // through config/models.json; this is the sum of those. `null` means at
+      // least one model had no price row, so the total is UNKNOWN — never 0.
+      // The stream's own figure is reported separately and is not trusted:
+      // Claude Code computes it for models it does not recognise (FOC-165).
+      costUsd: entries.reduce((acc, c) => addCost(acc, c.costUsd === undefined ? 0 : c.costUsd), 0),
+      costUsdReported: entries.reduce((sum, c) => sum + (c.costUsdReported || 0), 0),
+      unpricedModels: [...new Set(entries.flatMap((c) => c.unpricedModels || []))],
       children: entries.length,
       live: entries.filter((c) => !TERMINAL_STATUSES.includes(c.status)).length,
     },
+    budget: budgetStatus(runId, registry),
     reviewLoopCount: registry.reviewLoopCount ?? {},
     stallSilenceMs: STALL_SILENCE_MS,
   };

@@ -125,9 +125,9 @@
         "cacheRead": 0.0177212
       },
       "deepseek/deepseek-v4-pro": {
-        "input": 0.790308,
-        "output": 1.58062,
-        "cacheRead": 0.065859
+        "input": 0.87,
+        "output": 1.74,
+        "cacheRead": 0.0725
       },
       "moonshotai/kimi-k2.7-code": {
         "input": 0.67,

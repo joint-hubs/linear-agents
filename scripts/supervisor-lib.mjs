@@ -104,6 +104,153 @@ export function hasPendingGate(runId, childId) {
     });
 }
 
+// ── cost (FOC-165) ───────────────────────────────────────────────────────────
+// The stream's `total_cost_usd` is NOT a measurement. Claude Code computes it
+// from its own table, and it does not recognise a single model id this repo
+// routes to — every child run prints `[claude-code:unrecognized_model]` to
+// stderr. Measured on 2026-08-26: a turn on `stealth/ox-alpha`, which OpenRouter
+// serves at $0/$0, was reported at $0.2059. Fabricated whole.
+//
+// So the cost the Supervisor reports is computed here from TOKEN COUNTS through
+// config/models.json — the same path the dashboard uses, so the two numbers can
+// no longer disagree about the same run. The stream's figure is kept alongside
+// as `costUsdReported`, because a discrepancy is evidence, not noise.
+//
+// `null` is contagious and deliberate: a model with no price row makes the total
+// UNKNOWN, never zero. Silently free is the failure that already cost this repo
+// a null dashboard total once (config-drift.test.mjs header, Haiku 4.5).
+
+// Claude Code spells usage two ways depending on where it appears: camelCase in
+// `result.modelUsage`, snake_case in `result.usage`. Both reach here.
+function normaliseUsage(u = {}) {
+  return {
+    inputTokens: u.inputTokens ?? u.input_tokens ?? 0,
+    outputTokens: u.outputTokens ?? u.output_tokens ?? 0,
+    cacheReadTokens: u.cacheReadInputTokens ?? u.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: u.cacheCreationInputTokens ?? u.cache_creation_input_tokens ?? 0,
+  };
+}
+
+/**
+ * `priceOne` is injected rather than imported so this module stays free of
+ * telemetry-store — and therefore of node:sqlite, which every script importing
+ * supervisor-lib would otherwise load for nothing. It also makes the unpriced
+ * path testable without a price table.
+ *
+ * @param {object} event   a stream-json `result` event
+ * @param {string|null} fallbackModel  the model from `system/init`, used when
+ *   the event carries no per-model breakdown
+ * @param {(usage: object, model: string) => number|null} priceOne
+ * @returns {{ computed: number|null, reported: number|null, unpriced: string[] }}
+ */
+export function costFromResult(event, fallbackModel, priceOne) {
+  const reported =
+    typeof event.total_cost_usd === "number"
+      ? event.total_cost_usd
+      : typeof event.cost_usd === "number"
+        ? event.cost_usd
+        : null;
+
+  // A turn can touch more than one model (the main one plus the small/fast one),
+  // and they are priced differently. modelUsage is the only place that split is
+  // visible; `usage` is already summed and would price the whole turn at one rate.
+  const byModel =
+    event.modelUsage && typeof event.modelUsage === "object"
+      ? event.modelUsage
+      : fallbackModel
+        ? { [fallbackModel]: event.usage ?? {} }
+        : {};
+
+  let computed = 0;
+  const unpriced = [];
+  for (const [model, usage] of Object.entries(byModel)) {
+    const cost = priceOne(normaliseUsage(usage), model);
+    if (cost === null) unpriced.push(model);
+    else computed += cost;
+  }
+
+  return { computed: unpriced.length || !Object.keys(byModel).length ? null : computed, reported, unpriced };
+}
+
+// Add two costs where `null` means "unknown". Unknown + anything is unknown:
+// treating it as zero is exactly how an unpriced model becomes a free one.
+export function addCost(a, b) {
+  if (a === null || a === undefined) return b ?? null;
+  if (b === null || b === undefined) return null;
+  return a + b;
+}
+
+/**
+ * The spend cap, evaluated at turn boundaries (spec §2.1: post-hoc, so one turn
+ * can overshoot before it trips). Unset means no cap and no behaviour change.
+ *
+ * A cap that cannot be evaluated is not a cap: when the operator asked for a
+ * limit and some model has no price, this reports `evaluable: false` and the
+ * callers refuse. Continuing would spend unbounded money under a setting whose
+ * whole purpose is to bound it — and the fix is one row in config/models.json.
+ */
+export function budgetStatus(runId, registry = readRegistry(runId)) {
+  const raw = process.env.LA_SUPERVISOR_MAX_COST_USD;
+  const cap = raw === undefined || raw === "" ? null : Number(raw);
+  const children = Object.values(registry.children || {});
+
+  let spent = 0;
+  const unpriced = [];
+  for (const child of children) {
+    for (const m of child.unpricedModels ?? []) if (!unpriced.includes(m)) unpriced.push(m);
+    spent = addCost(spent, child.costUsd === undefined ? 0 : child.costUsd);
+  }
+
+  const capValid = cap !== null && Number.isFinite(cap) && cap >= 0;
+  return {
+    cap: capValid ? cap : null,
+    capInvalid: cap !== null && !capValid ? raw : null,
+    spent,
+    reported: children.reduce((sum, c) => sum + (c.costUsdReported || 0), 0),
+    unpricedModels: unpriced,
+    evaluable: spent !== null,
+    exceeded: capValid && spent !== null && spent >= cap,
+  };
+}
+
+/**
+ * The turn-boundary gate. Called by spawn and by followup — the two places a new
+ * turn begins — and it refuses in three distinct ways, each with a different fix:
+ *
+ *   · the cap is set and already spent      → Mateusz decides whether to raise it
+ *   · the cap is set but spend is UNKNOWN   → one model has no price row
+ *   · the cap itself is not a number        → a typo in the env var
+ *
+ * The middle one is the interesting refusal. A cap you cannot evaluate is not a
+ * cap; carrying on would spend unbounded money under the one setting whose whole
+ * purpose is to bound it. The fix is a single row in config/models.json, and the
+ * error names the model that needs it.
+ */
+export function assertWithinBudget(runId, fail = failJson) {
+  const budget = budgetStatus(runId);
+  if (budget.capInvalid !== null) {
+    return fail(`LA_SUPERVISOR_MAX_COST_USD is "${budget.capInvalid}", which is not a number >= 0`, { budget });
+  }
+  if (budget.cap === null) return budget;
+
+  if (!budget.evaluable) {
+    return fail(
+      `LA_SUPERVISOR_MAX_COST_USD is set to ${budget.cap} but spend so far is UNKNOWN — ` +
+        `no price row for ${budget.unpricedModels.join(", ") || "an unrecorded model"}. ` +
+        `A cap that cannot be evaluated is not a cap.`,
+      { budget, hint: "add the model to pricing.openrouter in config/models.json" },
+    );
+  }
+  if (budget.exceeded) {
+    return fail(
+      `budget spent: $${budget.spent.toFixed(4)} of $${budget.cap.toFixed(2)} — no new turn until Mateusz decides. ` +
+        `The cap is checked at turn boundaries, so the last turn may have carried it past the limit.`,
+      { budget },
+    );
+  }
+  return budget;
+}
+
 // ── child settings (P9) ──────────────────────────────────────────────────────
 // The push gate is enforced by the harness, not by asking the child nicely.
 // This exact list is the spec's (§1.7): `gh api` is here because it can create a

@@ -30,6 +30,7 @@ import {
   ROOT,
   TERMINAL_STATUSES,
   asArray,
+  assertWithinBudget,
   buildChildSettings,
   childSettingsPath,
   ensureRunDir,
@@ -89,6 +90,12 @@ if (live.length >= MAX_LIVE_CHILDREN_PER_RUN) {
     { live: live.map((c) => ({ childId: c.childId, taskId: c.taskId, status: c.status })) },
   );
 }
+
+// ── fail-closed: the spend cap ───────────────────────────────────────────────
+// A turn boundary is the only place this can be checked, so the cap is post-hoc
+// by construction: the turn already running may overshoot it. That is stated
+// rather than hidden. Unset means no cap and no behaviour change.
+assertWithinBudget(runId);
 
 // ── worktree ─────────────────────────────────────────────────────────────────
 // Every child gets its own checkout (ADR-0009 amended 2026-08-25). A shared

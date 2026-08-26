@@ -20,6 +20,7 @@ import { join } from "node:path";
 
 import {
   ROOT,
+  assertWithinBudget,
   failJson,
   gatePath,
   parseArgs,
@@ -99,6 +100,11 @@ if (args.gate && args.gate !== true) {
     );
   }
 }
+
+// ── guard: the spend cap ─────────────────────────────────────────────────────
+// Same gate as spawn: a follow-up is a new turn, and a cap enforced only on
+// first spawn would be a cap on one turn rather than on the run.
+assertWithinBudget(runId);
 
 // ── guard: review-loop cap ───────────────────────────────────────────────────
 let reviewLoopCount = registry.reviewLoopCount || {};

@@ -10,6 +10,8 @@
 //   MOCK_CLAUDE_NO_INIT      1 → never emit system/init (tests the 30 s timeout)
 //   MOCK_CLAUDE_HANG_MS      stay alive this long after the events
 //   MOCK_CLAUDE_COST         total_cost_usd on result   (default: 0.01)
+//   MOCK_CLAUDE_MODEL        model id on init + modelUsage (default: "mock", unpriced)
+//   MOCK_CLAUDE_INPUT_TOKENS input tokens on result     (default: 10)
 //   MOCK_CLAUDE_STDERR       text to write to stderr
 //   MOCK_CLAUDE_SPLIT        1 → flush init in two chunks, splitting a JSON line
 //                                across writes (tests the NDJSON buffering)
@@ -32,13 +34,19 @@ const sessionId = process.env.MOCK_CLAUDE_SESSION_ID || "11111111-2222-3333-4444
 const exitCode = Number(process.env.MOCK_CLAUDE_EXIT ?? 0);
 const hangMs = Number(process.env.MOCK_CLAUDE_HANG_MS ?? 0);
 const cost = Number(process.env.MOCK_CLAUDE_COST ?? 0.01);
+// FOC-165: the Supervisor prices turns from TOKEN COUNTS, so the mock has to
+// carry a model id and a token count, not just a headline cost. Default "mock"
+// is deliberately unpriced — that is the path where cost must come out null.
+// Set MOCK_CLAUDE_MODEL to a real id to exercise the priced path.
+const model = process.env.MOCK_CLAUDE_MODEL || "mock";
+const inputTokens = Number(process.env.MOCK_CLAUDE_INPUT_TOKENS ?? 10);
 
 if (process.env.MOCK_CLAUDE_STDERR) {
   process.stderr.write(process.env.MOCK_CLAUDE_STDERR);
 }
 
 if (process.env.MOCK_CLAUDE_NO_INIT !== "1") {
-  const init = { type: "system", subtype: "init", session_id: sessionId, tools: [], model: "mock" };
+  const init = { type: "system", subtype: "init", session_id: sessionId, tools: [], model };
   if (process.env.MOCK_CLAUDE_SPLIT === "1") {
     const line = JSON.stringify(init) + "\n";
     const cut = Math.floor(line.length / 2);
@@ -56,7 +64,8 @@ setTimeout(() => {
     subtype: "success",
     session_id: sessionId,
     total_cost_usd: cost,
-    usage: { input_tokens: 10, output_tokens: 5 },
+    usage: { input_tokens: inputTokens, output_tokens: 5, cache_read_input_tokens: 0 },
+    modelUsage: { [model]: { inputTokens, outputTokens: 5, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
   });
 
   setTimeout(() => process.exit(exitCode), hangMs);
