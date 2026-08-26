@@ -20,18 +20,16 @@ import { atomicWriteJSON } from "./utils.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// One live child per run. This is a POLICY guard, not a technical limit — since
-// every child now gets its own worktree (ADR-0009, amended 2026-08-25), two
-// children can no longer corrupt each other's checkout, so nothing in the
-// runtime stops them.
+// FOC-161 replaced MAX_LIVE_CHILDREN_PER_RUN with a per-node semaphore whose
+// limits live in config/graph.json (`nodes.<name>.concurrency`). One source of
+// topology truth, and no orphaned constant.
 //
-// What is still missing is the machinery that makes concurrent work *trustworthy*:
-// the merge node that re-verifies combined behaviour (FOC-160) and the
-// backpressure that stops DEV producing candidates REVIEW cannot absorb
-// (FOC-161). Without those, parallelism yields more unverified work, not more
-// throughput. FOC-161 is the task that deletes this constant and replaces it
-// with a real semaphore.
-export const MAX_LIVE_CHILDREN_PER_RUN = 1;
+// REMOVING THE CONSTANT DID NOT TURN PARALLELISM ON. Every node ships
+// `concurrency: 1`, so the semaphore admits exactly what the old guard did, one
+// child per node. What changed is WHERE the limit lives and how it is raised:
+// editing a number in a committed, reviewed, validated file, rather than by
+// nobody, silently, because a constant was deleted. Raising it is a decision
+// with a diff.
 
 // The stream-json `system/init` event carries the session_id that IS the child's
 // durable identity — without it there is no --resume, so a child we cannot
@@ -79,7 +77,9 @@ export function writeRegistry(runId, registry) {
 // Read-modify-write. Single-writer by phase: supervisor-spawn writes the initial
 // entry BEFORE launching the watcher, and after that only the watcher writes
 // that child's state. That discipline — not locking — is what keeps this safe
-// today; FOC-161 lifts MAX_LIVE_CHILDREN_PER_RUN and will need real locking.
+// today. It survives the semaphore only because every node ships concurrency 1;
+// raising any node above 1 makes two writers possible and needs real locking
+// first. `admissionCheck` says so where the limit is read.
 export function updateChild(runId, childId, patch) {
   const registry = readRegistry(runId);
   const current = registry.children[childId] || {};
@@ -262,6 +262,124 @@ export function assertWithinBudget(runId, fail = failJson) {
     );
   }
   return budget;
+}
+
+// ── semaphore and backpressure (FOC-161) ─────────────────────────────────────
+//
+// WIP=1 gave backpressure for free. The moment children run in parallel that
+// property is gone and has to be built, or an unbounded queue of unreviewed
+// candidates grows until model quotas, the repo, or Mateusz's attention is the
+// thing that breaks.
+//
+// HELD IS NOT REFUSED. A spawn that cannot start now is recorded and released
+// when a slot frees. Dropping it would make the Supervisor responsible for
+// remembering what it asked for, which is exactly the kind of state a model
+// loses across a compaction.
+
+export const heldDir = (runId) => join(runDir(runId), "held");
+export const heldPath = (runId, heldId) => join(heldDir(runId), `${heldId}.json`);
+
+export function readHeld(runId) {
+  const dir = heldDir(runId);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => {
+      try {
+        return JSON.parse(readFileSync(join(dir, f), "utf8"));
+      } catch {
+        // Unreadable is not absent: a held request nobody can parse is still a
+        // slot somebody is waiting for, and hiding it would release the slot to
+        // someone else.
+        return { heldId: f.replace(/\.json$/, ""), squad: null, unreadable: true };
+      }
+    })
+    .sort((a, b) => String(a.heldAt).localeCompare(String(b.heldAt)));
+}
+
+/** The per-node limit, from the graph. Absent means 1 — never unbounded. */
+export function concurrencyFor(squad, graph) {
+  const n = graph?.nodes?.[squad]?.concurrency;
+  return Number.isInteger(n) && n > 0 ? n : 1;
+}
+
+/** Who consumes what this node produces — the first routable handoff edge out. */
+export function consumerOf(squad, graph) {
+  const edge = (graph?.edges ?? [])
+    .filter((e) => e.from === squad && e.type === "handoff" && e.routable)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))[0];
+  return edge?.to ?? null;
+}
+
+/**
+ * Live plus held, per node. Both count: a held request has already been decided
+ * on and is waiting for a slot, so treating it as free capacity would admit work
+ * that is already queued.
+ */
+export function queueState(runId, graph, registry = readRegistry(runId), { excludeHeld = null } = {}) {
+  // `excludeHeld` is how --release asks "could this run if it were not itself
+  // queued?". Without it a held request counts against its own slot and can
+  // never be released — it blocks itself forever, which is what the first
+  // version of this did.
+  const held = readHeld(runId).filter((h) => h.heldId !== excludeHeld);
+  const state = {};
+  const touch = (squad) => (state[squad] ??= { live: 0, held: 0, limit: concurrencyFor(squad, graph) });
+
+  for (const child of liveChildren(registry)) touch(child.squad).live++;
+  for (const h of held) if (h.squad) touch(h.squad).held++;
+
+  for (const [squad, s] of Object.entries(state)) {
+    s.queued = s.live + s.held;
+    s.saturated = s.queued >= s.limit;
+  }
+  return state;
+}
+
+/**
+ * May a child of this squad start right now?
+ *
+ * Two independent reasons to hold, and they are reported separately because the
+ * fix differs: a full node means wait, a saturated CONSUMER means the graph is
+ * producing faster than it can verify, and adding capacity upstream would make
+ * that worse rather than better.
+ */
+export function admissionCheck(runId, squad, graph, registry = readRegistry(runId), opts = {}) {
+  const state = queueState(runId, graph, registry, opts);
+  const limit = concurrencyFor(squad, graph);
+  const mine = state[squad] ?? { live: 0, held: 0, queued: 0, limit, saturated: false };
+
+  if (mine.queued >= limit) {
+    return {
+      admit: false,
+      reason: "node-full",
+      squad,
+      detail:
+        `${squad} already has ${mine.live} live and ${mine.held} held, and its concurrency is ${limit} ` +
+        `(config/graph.json). Held until a slot frees.`,
+      state,
+    };
+  }
+
+  // Backpressure. Pausing the PRODUCER is the point: queueing here instead would
+  // grow exactly the backlog this exists to prevent.
+  const consumer = consumerOf(squad, graph);
+  if (consumer) {
+    const c = state[consumer];
+    if (c?.saturated) {
+      return {
+        admit: false,
+        reason: "consumer-saturated",
+        squad,
+        consumer,
+        detail:
+          `${consumer} is saturated (${c.live} live, ${c.held} held, limit ${c.limit}), so ${squad} is paused ` +
+          `upstream rather than queued — producing candidates ${consumer} cannot absorb is not throughput.`,
+        state,
+      };
+    }
+  }
+
+  return { admit: true, squad, state };
 }
 
 // ── per-stage budgets (FOC-162) ──────────────────────────────────────────────

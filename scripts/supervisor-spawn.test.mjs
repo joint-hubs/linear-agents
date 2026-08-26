@@ -118,19 +118,27 @@ test("rejects a task id that is not a Linear identifier", () => {
   if (!parse(r).error.includes("TEAM-NUM")) fail("error did not explain the expected format");
 });
 
-test("refuses a second live child, naming the policy and the task that lifts it", () => {
+test("a second live child is HELD by the semaphore, not refused (FOC-161)", () => {
+  // This used to assert the one-live-child CONSTANT and the message naming
+  // FOC-161 as the task that would lift it. That task landed: the limit now
+  // comes from `nodes.dev.concurrency` in config/graph.json and a blocked spawn
+  // is held rather than refused. Rewritten rather than deleted — the behaviour
+  // it guards (a second child does not just start) still has to be guarded.
   const { repo } = fixtureRepo();
   const runId = fixtureRun();
   const first = parse(runSpawn(runId, repo));
   if (!first.ok) fail("first spawn failed");
 
   const second = runSpawn(runId, repo, ["--task", "FOC-124", "--child", "dev-2"]);
-  if (second.status !== 1) fail(`expected exit 1, got ${second.status}`);
+  // Held is not a failure: exit 0, ok true, and a record on disk.
+  if (second.status !== 0) fail(`expected exit 0 for a held request, got ${second.status}`);
   const out = parse(second);
-  // The message must make clear this is policy, not a worktree collision —
-  // otherwise the next reader "fixes" it by touching the worktree code.
-  if (!/policy/i.test(out.error)) fail(`error does not say it is a policy limit: ${out.error}`);
-  if (!/FOC-161/.test(out.error)) fail("error does not name the task that lifts the limit");
+  if (out.held !== true) fail(`expected held:true, got ${JSON.stringify(out)}`);
+  if (out.reason !== "node-full") fail(`expected reason node-full, got ${out.reason}`);
+  // The limit has to be traceable to the graph, or the next reader looks for a
+  // constant that no longer exists.
+  if (!/graph\.json/.test(out.detail)) fail(`detail does not name where the limit lives: ${out.detail}`);
+  if (!out.heldId) fail("no heldId to release later");
 
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", first.childId], { encoding: "utf8" });
 });

@@ -33,6 +33,7 @@ import { join } from "node:path";
 
 import {
   TERMINAL_STATUSES,
+  readHeld,
   addCost,
   budgetStatus,
   failJson,
@@ -191,6 +192,19 @@ function snapshot(runId, { childFilter, tail }) {
     // A live child can be busy and going nowhere; a silent one may have finished.
     // Collapsing them would leave the lead unable to tell which it is looking at,
     // and the two need opposite responses.
+    // Held spawn requests (FOC-161). Held is NOT refused: the request is on
+    // disk and starts when a slot frees. It is reported here because the
+    // Supervisor has no other way to know it asked for something that has
+    // not begun — and `reason` separates a full node from a saturated
+    // consumer, which need different responses.
+    held: readHeld(runId).map((h) => ({
+      heldId: h.heldId,
+      squad: h.squad ?? null,
+      taskId: h.taskId ?? null,
+      reason: h.reason ?? (h.unreadable ? "unreadable" : null),
+      consumer: h.consumer ?? null,
+      heldAt: h.heldAt ?? null,
+    })),
     rounds: registry.rounds ?? {},
     repeatedTasks: Object.entries(registry.rounds ?? {})
       .filter(([, p]) => p?.repeated === true)

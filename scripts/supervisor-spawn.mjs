@@ -4,6 +4,7 @@
 //       --prompt "<kickoff>" [--run <supervisorRunId>] [--child <id>]
 //       [--permission-mode <mode>] [--model <id>] [--settings <extra-deny.json>]
 //       [--repo <path>] [--slug <text>] [--allowed-path <p> ...]
+//   node scripts/supervisor-spawn.mjs --release [--run <supervisorRunId>]
 //
 // Returns as soon as the child's session_id is known; the child keeps running
 // under a detached watcher (supervisor-watch.mjs), which owns liveness.
@@ -14,11 +15,12 @@
 //
 // Fail-closed by design — it refuses rather than guesses when:
 //   · triage.json is missing (a verdict must be recorded before any spawn)
-//   · another child is still live in this run (policy, see MAX_LIVE_CHILDREN_PER_RUN)
+//   · the node is at its concurrency limit, or its consumer is saturated — then
+//     the request is HELD (written down, released later), not refused
 //   · no system/init arrives within 30 s (a child with no session_id is not resumable)
 
-import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,7 +28,9 @@ import { buildBranchName } from "./dev-branch.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 import {
   INIT_TIMEOUT_MS,
-  MAX_LIVE_CHILDREN_PER_RUN,
+  admissionCheck,
+  heldDir,
+  heldPath,
   ROOT,
   TERMINAL_STATUSES,
   asArray,
@@ -38,7 +42,7 @@ import {
   ensureWorktree,
   failJson,
   killTree,
-  liveChildren,
+  readHeld,
   parseArgs,
   readJsonOr,
   readRegistry,
@@ -51,6 +55,11 @@ import {
 } from "./supervisor-lib.mjs";
 import { loadGraph } from "./graph-validate.mjs";
 
+// A graph we cannot read means no topology: no per-node limit and no consumer to
+// apply backpressure from. Triage would already have refused a broken graph, so
+// this is a degraded path rather than a normal one.
+const graphOrNull = () => { try { return loadGraph(); } catch { return null; } };
+
 const SQUADS = ["plan", "dev", "review", "test"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -59,6 +68,53 @@ const args = parseArgs(process.argv.slice(2));
 const squad = args.squad;
 const taskId = args.task;
 const runId = args.run || process.env.LA_SUPERVISOR_RUN;
+
+// ── --release: start what was held, oldest first ─────────────────────────────
+// Handled before the normal argument checks, because a release carries no
+// --squad or --prompt of its own: those live in the held record, and replaying
+// them is the whole point. Held requests are released oldest-first so a slot
+// that frees goes to whoever has been waiting longest.
+if (args.release) {
+  if (!runId) failJson("--run <supervisorRunId> is required (or set LA_SUPERVISOR_RUN)");
+  const graph = graphOrNull();
+  const started = [];
+  const stillHeld = [];
+
+  for (const h of readHeld(runId)) {
+    if (h.unreadable) {
+      // Not skipped silently: an unreadable held record is a slot somebody is
+      // waiting for, and pretending it is not there releases that slot to
+      // someone else.
+      stillHeld.push({ ...h, why: "unreadable — inspect it by hand" });
+      continue;
+    }
+    const check = admissionCheck(runId, h.squad, graph, undefined, { excludeHeld: h.heldId });
+    if (!check.admit) {
+      stillHeld.push({ heldId: h.heldId, squad: h.squad, taskId: h.taskId, why: check.detail });
+      continue;
+    }
+    // Remove the record BEFORE replaying it. The replay re-enters this same
+    // script, which counts held requests as occupied capacity — leaving the
+    // record in place would make the request hold itself out of its own slot.
+    // (The admission check above already excludes it; this keeps the replay
+    // honest too.)
+    rmSync(heldPath(runId, h.heldId), { force: true });
+    const res = spawnSync(process.execPath, [process.argv[1], ...(h.argv ?? [])], {
+      encoding: "utf8",
+      env: process.env,
+    });
+    let result = null;
+    try {
+      result = JSON.parse(res.stdout);
+    } catch {
+      result = { ok: false, error: (res.stderr || res.stdout || "").split("\n")[0] };
+    }
+    started.push({ heldId: h.heldId, squad: h.squad, taskId: h.taskId, result });
+  }
+
+  console.log(JSON.stringify({ ok: true, released: started.length, started, stillHeld }, null, 2));
+  process.exit(0);
+}
 
 if (!squad || !SQUADS.includes(squad)) failJson(`--squad must be one of ${SQUADS.join(" | ")}`);
 if (!taskId) failJson("--task <issueId> is required");
@@ -82,15 +138,46 @@ if (!existsSync(triagePath(runId))) {
 ensureRunDir(runId);
 const registry = readRegistry(runId);
 
-// ── fail-closed: one live child ──────────────────────────────────────────────
-const live = liveChildren(registry);
-if (live.length >= MAX_LIVE_CHILDREN_PER_RUN) {
-  failJson(
-    `${live.length} child(ren) already live in this run; the policy limit is ${MAX_LIVE_CHILDREN_PER_RUN}. ` +
-      `This is a policy guard, not a worktree collision — each child has its own checkout. ` +
-      `FOC-161 (concurrency semaphore + backpressure) is the task that lifts it.`,
-    { live: live.map((c) => ({ childId: c.childId, taskId: c.taskId, status: c.status })) },
+// ── semaphore + backpressure (FOC-161) ───────────────────────────────────────
+// Replaces the one-live-child constant. Limits come from config/graph.json, and
+// a spawn that cannot start now is HELD rather than refused: the request is
+// written down and released when a slot frees. Refusing would make the
+// Supervisor responsible for remembering what it asked for, which is the kind of
+// state a model loses across a compaction.
+const admission = admissionCheck(runId, squad, graphOrNull());
+if (!admission.admit && !args["ignore-semaphore"]) {
+  const heldId = `held-${squad}-${Date.now()}`;
+  mkdirSync(heldDir(runId), { recursive: true });
+  atomicWriteJSON(heldPath(runId, heldId), {
+    heldId,
+    squad,
+    taskId,
+    reason: admission.reason,
+    detail: admission.detail,
+    consumer: admission.consumer ?? null,
+    heldAt: new Date().toISOString(),
+    // Everything needed to start it later, so `--release` replays the request
+    // rather than asking the Supervisor to reconstruct it.
+    argv: process.argv.slice(2),
+  });
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        held: true,
+        heldId,
+        squad,
+        taskId,
+        reason: admission.reason,
+        detail: admission.detail,
+        queue: admission.state,
+        next: `node scripts/supervisor-spawn.mjs --release --run ${runId}  (starts held requests whose slot has freed)`,
+      },
+      null,
+      2,
+    ),
   );
+  process.exit(0);
 }
 
 // ── fail-closed: the spend cap ───────────────────────────────────────────────

@@ -26,7 +26,8 @@ You are NOT the orchestrator (`agents/orchestrator/`) — that one stays beside 
 | `supervisor-cleanup.mjs list\|propose\|remove` | reclaim a child's worktree — TEST pass **and** his yes, both required |
 | `supervisor-verdict.mjs record\|show\|list` | a REVIEW verdict — every finding cites an artefact, an approve maps the ACs |
 | `supervisor-budget.mjs allocate\|status\|authorise\|reconcile` | split the issue budget per stage before anything spends it |
-| `supervisor-merge.mjs` | re-verify candidates **together** before anything lands — dormant while one live child is the policy |
+| `supervisor-merge.mjs` | re-verify candidates **together** before anything lands |
+| `supervisor-spawn.mjs --release` | start what the semaphore held, once a slot frees |
 | `linear-query.mjs` / `linear-ops.mjs` | read / write Linear (`mcp__linear__*` is denied) |
 
 All of them print JSON on stdout and a human log on stderr. Exit 1 means refused — read the `error` field, it names the reason.
@@ -76,6 +77,8 @@ node $LA_ROOT/scripts/supervisor-status.mjs --wait --timeout-ms <ms> --tail 20
 `--wait` blocks and tells you which of four things happened: `exit` (a live child finished), `gate` (a new gate appeared), `timeout` (still running, nothing new), `idle` (nothing is live — it returned without waiting). **Cadence:** after every spawn or follow-up, call `--wait`. On `timeout` **only**, re-issue with backoff ×1, ×2, ×4 — capped at 4× the base timeout (`nextBackoffHint` gives you the number). On `exit` or `idle`, stop waiting and read the result — backing off there is waiting on no one.
 
 **Max silence is wall-clock, not a poll count:** the tee must be silent for 5 × the base timeout (default 5 × 120 s = 10 min) before a child counts as stalled. Backoff cannot stretch it. Any child listed in `stalledChildren` → stop it and escalate (§failure modes). Do not invent a second counter of your own.
+
+`status` also lists `held` — spawns that were admitted-later rather than started. A held request is **not** a stalled child and **not** a failure: it is waiting for a slot. Release them with `supervisor-spawn.mjs --release`; never re-issue the spawn by hand, or the same work is queued twice.
 
 Never describe child output you have not read from `supervisor-status.mjs`. The tee is the record; your memory of it is not.
 
@@ -137,6 +140,7 @@ WHY NOT EARLIER — `config/graph.json` has `review-to-dev-return` and `test-to-
 | Stalled child (in `stalledChildren`) | `supervisor-stop.mjs`, report the dirty git status it left, ask: resume / respawn / abandon. **Never auto-reset the worktree** — uncommitted work there may be the only copy. |
 | Stage budget exhausted | The refusal names the stage. It will **not** borrow — money left in verification is what stops the run ending with work nobody checked. Report what each stage has left and ask: raise the total (`budget allocate --total`), or authorise the reserve (`budget authorise --stage <s> --reason "..."`). Never work around it by unsetting a cap. |
 | Reserve exhausted | Expansion stops and a **partial-status report** is written to `.state/supervisor/<run>/partial-status.json`. Read him its `unverified` list — those are the tasks money was already spent on that nobody has vouched for. Raising the total is his decision, not a retry. |
+| Spawn held (`held: true`) | **Not a failure.** The node is at its `concurrency` (config/graph.json) or its consumer is saturated. The request is on disk and starts with `supervisor-spawn.mjs --release` once a slot frees — you do not need to remember it. `reason` tells you which: `node-full` means wait; `consumer-saturated` means the graph is producing faster than it can verify, and adding capacity upstream makes that worse. |
 | Budget exceeded (`LA_SUPERVISOR_MAX_COST_USD`) | `spawn`/`followup` already refused — you cannot start another turn. Report the spend and the overshoot, ask whether to raise the cap or stop. The check is post-hoc at turn boundaries, so one turn can overshoot; say so rather than pretending the cap was exact. |
 | Spend is UNKNOWN under a cap | A model has no price row. The refusal names it. Do not work around it by unsetting the cap — tell Mateusz which model needs pricing. |
 | Child asks something you cannot answer | Relay verbatim. Never invent an answer. |
