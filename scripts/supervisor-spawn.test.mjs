@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { readRegistry, runDir } from "./supervisor-lib.mjs";
+import { SUPERVISOR_DENY, buildChildSettings, childSettingsPath, readRegistry, runDir } from "./supervisor-lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -330,6 +330,105 @@ test("stopping an unknown child names what it knows", () => {
   if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
   const out = parse(r);
   if (!Array.isArray(out.known)) fail("error does not list the known children");
+});
+
+// ── P9: the generated deny list ──────────────────────────────────────────────
+// The push gate must hold whether or not the child cooperates, so it lives in a
+// settings file the child does not write.
+console.log("\nP9 — wygenerowana lista deny");
+
+test("buildChildSettings unions squad denies with the Supervisor's, deduped", () => {
+  const out = buildChildSettings({ permissions: { deny: ["Bash(rm -rf:*)", "Bash(git push:*)"] } });
+  const deny = out.permissions.deny;
+  // The squad's own rules come first and keep their order; git push appears once
+  // even though both lists carry it.
+  if (deny[0] !== "Bash(rm -rf:*)" || deny[1] !== "Bash(git push:*)") {
+    fail(`squad denies lost their order: ${JSON.stringify(deny)}`);
+  }
+  if (deny.filter((r) => r === "Bash(git push:*)").length !== 1) fail(`not deduped: ${JSON.stringify(deny)}`);
+  for (const rule of SUPERVISOR_DENY) if (!deny.includes(rule)) fail(`missing ${rule}`);
+});
+
+test("the generated file is deny-only — no allow, no hooks", () => {
+  // `claude --settings` loads ADDITIONAL settings. An allow entry here could only
+  // grant, never remove; a repeated hooks block risks the SessionStart telemetry
+  // hook firing twice and double-counting the run.
+  const out = buildChildSettings({
+    permissions: { allow: ["Bash(node:*)"], deny: [] },
+    hooks: { SessionStart: [{ hooks: [{ type: "command", command: "x" }] }] },
+    theme: "dark",
+  });
+  if (JSON.stringify(Object.keys(out)) !== '["permissions"]') fail(`extra keys: ${Object.keys(out)}`);
+  if (JSON.stringify(Object.keys(out.permissions)) !== '["deny"]') fail(`not deny-only: ${Object.keys(out.permissions)}`);
+});
+
+test("the Supervisor's denies survive a squad file that is missing or corrupt", () => {
+  // Half the guarantee is the Supervisor's own list; an unparseable squad file
+  // must not silently reduce it to nothing.
+  for (const base of [{}, undefined, { permissions: null }]) {
+    const deny = buildChildSettings(base).permissions.deny;
+    for (const rule of SUPERVISOR_DENY) if (!deny.includes(rule)) fail(`missing ${rule} for ${JSON.stringify(base)}`);
+  }
+});
+
+test("regenerating produces a byte-identical file", () => {
+  // A file that churns on every spawn is a file nobody can diff.
+  const squad = { permissions: { deny: ["Bash(rm -rf:*)"] } };
+  const a = JSON.stringify(buildChildSettings(squad));
+  const b = JSON.stringify(buildChildSettings(squad));
+  if (a !== b) fail("two builds disagree");
+});
+
+test("spawn writes the file and points claude at it", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const argvFile = join(mkdtempSync(join(tmpdir(), "la-argv-")), "argv.json");
+  const out = parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_ARGV_FILE: argvFile, MOCK_CLAUDE_HANG_MS: "0" }));
+
+  const path = childSettingsPath(runId, out.childId);
+  if (!existsSync(path)) fail(`no generated settings at ${path}`);
+  const written = JSON.parse(readFileSync(path, "utf8"));
+  for (const rule of SUPERVISOR_DENY) {
+    if (!written.permissions.deny.includes(rule)) fail(`generated file is missing ${rule}`);
+  }
+
+  // The registry records the GENERATED path, which is what supervisor-followup
+  // reuses — a follow-up under a looser settings file would be a hole in P9.
+  if (readRegistry(runId).children[out.childId].settings !== path) fail("registry does not point at the generated file");
+
+  const argv = JSON.parse(readFileSync(argvFile, "utf8"));
+  const at = argv.indexOf("--settings");
+  if (at === -1) fail(`claude was invoked without --settings: ${JSON.stringify(argv)}`);
+  if (argv[at + 1] !== path) fail(`--settings pointed at ${argv[at + 1]}`);
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("--settings can only tighten: it is folded in, never substituted", () => {
+  // There must be no flag that hands a child the push it is not allowed to have.
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const extra = join(mkdtempSync(join(tmpdir(), "la-extra-")), "extra.json");
+  writeFileSync(extra, JSON.stringify({ permissions: { allow: ["Bash(git push:*)"], deny: ["Bash(curl:*)"] } }));
+
+  const out = parse(runSpawn(runId, repo, ["--settings", extra], { MOCK_CLAUDE_HANG_MS: "0" }));
+  const written = JSON.parse(readFileSync(childSettingsPath(runId, out.childId), "utf8"));
+  if (!written.permissions.deny.includes("Bash(curl:*)")) fail("the extra file's deny was dropped");
+  if (!written.permissions.deny.includes("Bash(git push:*)")) fail("the extra file's allow overrode the push deny");
+  if (written.permissions.allow) fail("an allow entry reached the generated file");
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("every squad's committed settings.json already denies git push", () => {
+  // The generated file is a second layer, not the only one. If a squad ever
+  // loses its own deny, the union still covers it — but the drift is worth
+  // knowing about, because the squad also runs standalone from bin/<squad>.bat,
+  // where no generated file exists at all.
+  for (const squad of ["plan", "dev", "review", "test"]) {
+    const deny = JSON.parse(readFileSync(join(ROOT, "agents", squad, "settings.json"), "utf8")).permissions?.deny ?? [];
+    if (!deny.includes("Bash(git push:*)")) fail(`agents/${squad}/settings.json no longer denies git push`);
+  }
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

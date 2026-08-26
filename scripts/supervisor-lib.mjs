@@ -104,6 +104,68 @@ export function hasPendingGate(runId, childId) {
     });
 }
 
+// ── child settings (P9) ──────────────────────────────────────────────────────
+// The push gate is enforced by the harness, not by asking the child nicely.
+// This exact list is the spec's (§1.7): `gh api` is here because it can create a
+// PR through the REST route, which the three `gh pr`/`gh release` rules would
+// otherwise miss.
+//
+// WHAT THIS IS NOT: a sandbox. `cmd /c git push`, `powershell -c`, `git -C <path>
+// push` (the prefix no longer matches the rule) and any wrapper script all walk
+// straight past it. The real control is the human `push-approval` gate; this
+// list removes the accidental push, not the determined one. ADR-0009 §Risks.
+export const SUPERVISOR_DENY = [
+  "Bash(git push:*)",
+  "Bash(gh pr create:*)",
+  "Bash(gh pr merge:*)",
+  "Bash(gh release create:*)",
+  "Bash(gh api:*)",
+];
+
+export const childSettingsPath = (runId, childId) =>
+  join(runDir(runId), `child-settings-${childId}.json`);
+
+/**
+ * DENY ONLY, on purpose.
+ *
+ * `claude --settings <file>` loads "additional settings" (its own --help), so
+ * this file is merged with the squad's own settings.json from CLAUDE_CONFIG_DIR
+ * rather than replacing it. Two consequences shape what goes in here:
+ *
+ *   · No `allow` list. Under merge semantics an allow entry can only ADD a
+ *     permission, never remove one, and this file exists to remove. Writing one
+ *     would make the file's intent readable two ways.
+ *   · No `hooks`. The squad's SessionStart telemetry hook already loads from the
+ *     config dir; repeating it here risks registering it twice and double-
+ *     counting every child run.
+ *
+ * The squad's own denies are copied in anyway even though the merge would apply
+ * them regardless — so one file answers "what is this child forbidden to do?"
+ * without needing to know the merge rules. Order is stable (squad first, then
+ * whatever the Supervisor adds) so regenerating produces a byte-identical file.
+ */
+export function buildChildSettings(...baseSettings) {
+  const deny = [];
+  for (const base of [...baseSettings, { permissions: { deny: SUPERVISOR_DENY } }]) {
+    for (const rule of base?.permissions?.deny ?? []) {
+      if (!deny.includes(rule)) deny.push(rule);
+    }
+  }
+  return { permissions: { deny } };
+}
+
+export function readJsonOr(path, fallback) {
+  if (!existsSync(path)) return fallback;
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    // A settings file we cannot parse must not silently become "no denies".
+    // Returning the fallback keeps the Supervisor's own list intact, which is
+    // the half that matters for P9.
+    return fallback;
+  }
+}
+
 export const LIVE_STATUSES = ["starting", "running"];
 
 // "The turn has ended" — no process is running, nothing will write this child's

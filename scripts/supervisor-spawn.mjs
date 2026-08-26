@@ -2,11 +2,15 @@
 //
 //   node scripts/supervisor-spawn.mjs --squad <plan|dev|review|test> --task <issueId>
 //       --prompt "<kickoff>" [--run <supervisorRunId>] [--child <id>]
-//       [--permission-mode <mode>] [--model <id>] [--settings <path>]
+//       [--permission-mode <mode>] [--model <id>] [--settings <extra-deny.json>]
 //       [--repo <path>] [--slug <text>] [--allowed-path <p> ...]
 //
 // Returns as soon as the child's session_id is known; the child keeps running
 // under a detached watcher (supervisor-watch.mjs), which owns liveness.
+//
+// Every child is launched with a GENERATED child-settings.json carrying the P9
+// deny list (§1.7). `--settings` here does not replace it — the file it names is
+// folded in as one more deny source, so the flag can only tighten.
 //
 // Fail-closed by design — it refuses rather than guesses when:
 //   · triage.json is missing (a verdict must be recorded before any spawn)
@@ -19,18 +23,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildBranchName } from "./dev-branch.mjs";
+import { atomicWriteJSON } from "./utils.mjs";
 import {
   INIT_TIMEOUT_MS,
   MAX_LIVE_CHILDREN_PER_RUN,
   ROOT,
   TERMINAL_STATUSES,
   asArray,
+  buildChildSettings,
+  childSettingsPath,
   ensureRunDir,
   ensureWorktree,
   failJson,
   killTree,
   liveChildren,
   parseArgs,
+  readJsonOr,
   readRegistry,
   resolveGitRoot,
   teeAbsPath,
@@ -115,6 +123,21 @@ const childId = args.child || `${squad}-${Object.keys(registry.children).length 
 // means "undeclared", not "denied".
 const allowedPaths = asArray(args["allowed-path"]);
 
+// ── P9: the child's deny list, generated per child ───────────────────────────
+// The push gate has to hold without the child cooperating, so it is written
+// into a settings file rather than into the kickoff prompt. `--settings` loads
+// ADDITIONAL settings (claude --help), so this merges with the squad's own
+// settings.json from CLAUDE_CONFIG_DIR instead of replacing it.
+//
+// `--settings` passed to spawn is folded in as a further deny source, never as
+// a replacement: a deny-only merge can tighten what a child may do, and cannot
+// loosen it. That asymmetry is the point — there must be no flag that hands a
+// child the push it is not allowed to have.
+const squadSettings = readJsonOr(join(ROOT, "agents", squad, "settings.json"), {});
+const extraSettings = args.settings ? readJsonOr(args.settings, {}) : {};
+const childSettings = childSettingsPath(runId, childId);
+atomicWriteJSON(childSettings, buildChildSettings(squadSettings, extraSettings));
+
 registry.children[childId] = {
   childId,
   squad,
@@ -129,7 +152,7 @@ registry.children[childId] = {
   // mode, settings file and model. A follow-up that silently ran under different
   // permissions than the turn it continues would be a hole in the P9 push gate.
   permissionMode: args["permission-mode"] || "bypassPermissions",
-  settings: args.settings || null,
+  settings: childSettings,
   model: args.model || null,
   worktree: worktree.worktree,
   branch: worktree.branch,
@@ -190,8 +213,10 @@ const watcherArgs = [
   "--turn", "0",
   "--prompt-file", args["prompt-file"] || promptFile,
   "--permission-mode", args["permission-mode"] || "bypassPermissions",
+  // Unconditional: a child without the generated deny list is a child that
+  // can push. There is no branch here on purpose.
+  "--settings", childSettings,
 ];
-if (args.settings) watcherArgs.push("--settings", args.settings);
 if (args.model) watcherArgs.push("--model", args.model);
 if (telemetryRunId) watcherArgs.push("--telemetry-run", telemetryRunId);
 
@@ -254,6 +279,8 @@ console.log(
       baseRevision: worktree.baseRevision,
       worktreeCreated: worktree.created,
       allowedPaths,
+      settings: childSettings,
+      deny: buildChildSettings(squadSettings, extraSettings).permissions.deny,
       telemetryRunId,
     },
     null,
