@@ -303,6 +303,23 @@ export function concurrencyFor(squad, graph) {
   return Number.isInteger(n) && n > 0 ? n : 1;
 }
 
+/**
+ * Who PRODUCES the work this node consumes — the routable handoff edge in.
+ *
+ * REVIEW's producer is DEV, and that matters more than it looks: a REVIEW
+ * verdict's progress fingerprint has to measure the tree holding the work under
+ * review, not the reviewer's own checkout. Fingerprinting the reviewer's tree
+ * made every second round look identical (it never changes), so the review loop
+ * refused at round 2 no matter how much DEV had fixed — worse than the counter
+ * it replaced, which at least allowed two.
+ */
+export function producerOf(squad, graph) {
+  const edge = (graph?.edges ?? [])
+    .filter((e) => e.to === squad && e.type === "handoff" && e.routable)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))[0];
+  return edge?.from ?? null;
+}
+
 /** Who consumes what this node produces — the first routable handoff edge out. */
 export function consumerOf(squad, graph) {
   const edge = (graph?.edges ?? [])
@@ -592,7 +609,20 @@ export function assertStageBudget(runId, squad, { graph, fail = failJson } = {})
   const stage = stageForSquad(squad, graph);
   if (!stage || stage === "out-of-band") return null;
 
-  const budget = stageBudgetStatus(runId, { graph });
+  // Every other refusal in this runtime is JSON on stdout; the Supervisor parses
+  // stdout and nothing else. stageBudgetStatus THROWS on an unreadable
+  // budget.json, which reached spawn as a raw stack trace on stderr with empty
+  // stdout — a refusal the lead cannot read is a refusal it cannot act on.
+  // Converted at the gate rather than in the reader, so `budget status` can
+  // still surface the parse error as an exception to a human.
+  let budget;
+  try {
+    budget = stageBudgetStatus(runId, { graph });
+  } catch (err) {
+    return fail(`the per-stage budget could not be read: ${err.message}`, {
+      hint: "fix or delete .state/supervisor/<run>/budget.json — a budget nobody can parse is not a budget",
+    });
+  }
   if (!budget) return null;
 
   const s = budget.stages[stage];

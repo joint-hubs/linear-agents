@@ -47,32 +47,42 @@ function issueFile(dir, acs) {
 }
 
 /**
- * A run whose child has a REAL worktree — the fingerprint diffs it, so a fake
- * path would make every test measure the same "unreadable" result.
+ * A REVIEW child and the DEV child whose work it reviews, each with a REAL
+ * worktree.
+ *
+ * Both are required, and that is the shape of a real run rather than test
+ * scaffolding: a review with no dev child is a review of nothing, and the
+ * fingerprint has to measure DEV's tree. `s.worktree` is DEV's — the one that
+ * moves — because that is what every progress assertion here is about.
  */
 function scenario() {
   const { base, repo } = fixtureRepo();
-  const wt = fixtureWorktree(repo);
+  const dev = fixtureWorktree(repo, "foc-123-dev");
+  const review = fixtureWorktree(repo, "foc-123-review");
   const runId = fixtureRun();
+
+  const child = (childId, squad, wt) => ({
+    childId,
+    squad,
+    taskId: "FOC-123",
+    sessionId: "11111111-2222-3333-4444-555555555555",
+    status: "exited",
+    turns: [{ pid: 1 }],
+    permissionMode: "bypassPermissions",
+    worktree: wt.worktree,
+    branch: wt.branch,
+    baseRevision: wt.baseRevision,
+  });
+
   writeRegistry(runId, {
     runId,
     children: {
-      "review-1": {
-        childId: "review-1",
-        squad: "review",
-        taskId: "FOC-123",
-        sessionId: "11111111-2222-3333-4444-555555555555",
-        status: "exited",
-        turns: [{ pid: 1 }],
-        permissionMode: "bypassPermissions",
-        worktree: wt.worktree,
-        branch: wt.branch,
-        baseRevision: wt.baseRevision,
-      },
+      "dev-1": child("dev-1", "dev", dev),
+      "review-1": child("review-1", "review", review),
     },
     rounds: {},
   });
-  return { base, repo, runId, ...wt };
+  return { base, repo, runId, ...dev, reviewTree: review.worktree };
 }
 
 /** Move the work on, so the next round fingerprints differently. */
@@ -217,6 +227,60 @@ test("a commit changes it, and so does an untracked file", () => {
   writeFileSync(join(s.worktree, "scratch.txt"), "untracked\n");
   const afterUntracked = progressFingerprint({ worktree: s.worktree, baseRevision: s.baseRevision });
   assert.notEqual(afterUntracked.combined, afterCommit.combined, "an untracked file left no trace");
+});
+
+test("the fingerprint measures the WORK, not the reviewer's own tree", () => {
+  // The bug this catches shipped and was caught by writing the scenario out:
+  // the fingerprint was taken from the recording child's worktree. A REVIEW
+  // child's tree does not contain DEV's changes and barely moves, so two
+  // consecutive rounds fingerprinted identically and the loop refused at round 2
+  // however much DEV had fixed — worse than the counter it replaced, which at
+  // least allowed two rounds.
+  const s = scenario();
+  const first = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+
+  advance(s, "dev-fixed-it.txt"); // DEV makes real progress in its own tree
+
+  const second = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  assert.notEqual(
+    second.fingerprint.combined,
+    first.fingerprint.combined,
+    "DEV committed real work and the fingerprint did not move — it is measuring the wrong tree",
+  );
+  // And it says whose tree it used, so nobody has to infer it.
+  assert.ok(second.warnings.some((w) => /dev-1/.test(w)), JSON.stringify(second.warnings));
+});
+
+test("a review with no work to review is refused, not guessed at", () => {
+  // Fail-closed: guessing here is how a verdict fingerprints a tree nobody was
+  // reviewing, and a wrong fingerprint is silent — it reads as "no progress".
+  const { base, repo } = fixtureRepo();
+  const review = fixtureWorktree(repo, "orphan-review");
+  const runId = fixtureRun();
+  writeRegistry(runId, {
+    runId,
+    rounds: {},
+    children: {
+      "review-1": {
+        childId: "review-1",
+        squad: "review",
+        taskId: "FOC-999",
+        status: "exited",
+        turns: [],
+        worktree: review.worktree,
+        branch: review.branch,
+        baseRevision: review.baseRevision,
+      },
+    },
+  });
+
+  const out = parse(
+    verdict(["record", "--run", runId, "--child", "review-1", "--verdict", "fail", "--finding", CITED]),
+    fail,
+  );
+  assert.equal(out.ok, false);
+  assert.match(out.error, /no dev child/);
+  assert.match(out.hint, /--work-child/);
 });
 
 test("an unreadable tree is UNKNOWN, not empty", () => {

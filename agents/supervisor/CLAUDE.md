@@ -74,7 +74,7 @@ The two are ordered, not competing: `LA_SUPERVISOR_MAX_COST_USD` is the outer ba
 ```
 node $LA_ROOT/scripts/supervisor-status.mjs --wait --timeout-ms <ms> --tail 20
 ```
-`--wait` blocks and tells you which of four things happened: `exit` (a live child finished), `gate` (a new gate appeared), `timeout` (still running, nothing new), `idle` (nothing is live — it returned without waiting). **Cadence:** after every spawn or follow-up, call `--wait`. On `timeout` **only**, re-issue with backoff ×1, ×2, ×4 — capped at 4× the base timeout (`nextBackoffHint` gives you the number). On `exit` or `idle`, stop waiting and read the result — backing off there is waiting on no one.
+`--wait` blocks and tells you which of **five** things happened: `exit` (a live child finished), `gate` (a new gate appeared), `timeout` (still running, nothing new), `held` (nothing is live but a spawn is waiting for a slot), `idle` (nothing is live and nothing is waiting — it returned without waiting). **Cadence:** after every spawn or follow-up, call `--wait`. On `timeout` **only**, re-issue with backoff ×1, ×2, ×4 — capped at 4× the base timeout (`nextBackoffHint` gives you the number). On `exit` or `idle`, stop waiting and read the result — backing off there is waiting on no one. On `held`, **release** (`supervisor-spawn.mjs --release`) and wait again; stopping there abandons work that was never started.
 
 **Max silence is wall-clock, not a poll count:** the tee must be silent for 5 × the base timeout (default 5 × 120 s = 10 min) before a child counts as stalled. Backoff cannot stretch it. Any child listed in `stalledChildren` → stop it and escalate (§failure modes). Do not invent a second counter of your own.
 

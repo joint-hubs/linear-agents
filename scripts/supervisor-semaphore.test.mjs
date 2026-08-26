@@ -252,6 +252,32 @@ test("status reports held requests with their reason", () => {
   runScript(STOP, ["--run", runId, "--child", first.childId]);
 });
 
+test("--wait reports `held`, not `idle`, when nothing is live but something waits", () => {
+  // The integration bug this catches: `idle` tells the lead to stop waiting and
+  // read the result. For a run whose only outstanding work is a HELD spawn, that
+  // means walking away from work that was never started — the exact outcome
+  // "held is not dropped" exists to prevent.
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const first = parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_HANG_MS: "20000" }), fail);
+  runSpawn(runId, repo, ["--task", "FOC-124", "--child", "dev-2"]); // held
+
+  // Free the slot so nothing is live, leaving only the held request.
+  runScript(STOP, ["--run", runId, "--child", first.childId]);
+  waitForStatus(runId, first.childId, ["stopped", "exited", "crashed"]);
+
+  const out = parse(
+    runScript(join(ROOT, "scripts", "supervisor-status.mjs"), [
+      "--run", runId, "--wait", "--timeout-ms", "1500",
+    ]),
+    fail,
+  );
+  assert.equal(out.reason, "held", `expected held, got ${out.reason}`);
+  // And it says what to do, because "neither running nor finished" is the state
+  // a lead is most likely to mishandle.
+  assert.match(out.next, /--release/);
+});
+
 test("an unreadable held record still occupies its slot", () => {
   // Hiding it would release the slot to someone else while whoever wrote it is
   // still waiting.

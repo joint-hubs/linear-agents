@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // scripts/supervisor-verdict.mjs — a REVIEW verdict has to cite something.
 //
-//   node scripts/supervisor-verdict.mjs record --child <id> --verdict pass|fail
+//   node scripts/supervisor-verdict.mjs record --child <id> --verdict pass|fail [--work-child <id>]
 //        [--finding '<json>' ...] [--ac '<json>' ...] [--failing-test <id> ...]
 //   node scripts/supervisor-verdict.mjs show --task <id> [--round N]
 //   node scripts/supervisor-verdict.mjs list
@@ -42,11 +42,13 @@ import {
   ensureRunDir,
   failJson,
   parseArgs,
+  producerOf,
   progressFingerprint,
   readRegistry,
   verdictPath,
   verdictsDir,
 } from "./supervisor-lib.mjs";
+import { loadGraph } from "./graph-validate.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 
 const VERDICTS = ["pass", "fail"];
@@ -114,6 +116,64 @@ function acCount(taskId, args) {
   if (!body) return null;
   const matches = body.match(/\*\*Given\*\*/g);
   return matches ? matches.length : 0;
+}
+
+// ── whose tree holds the work under review ───────────────────────────────────
+
+/**
+ * `--work-child <id>` when you want to say it; otherwise the child of this
+ * node's PRODUCER (config/graph.json) carrying the same taskId.
+ *
+ * Fail-closed on ambiguity. Guessing here is how a verdict ends up fingerprinting
+ * a tree nobody was reviewing, which is exactly the bug this function exists to
+ * have fixed — and a wrong fingerprint is silent: it reads as "no progress" and
+ * stops the loop.
+ */
+function resolveWorkChild(registry, entry, taskId, args) {
+  const children = Object.values(registry.children ?? {});
+
+  if (args["work-child"] && args["work-child"] !== true) {
+    const named = children.find((c) => c.childId === args["work-child"]);
+    if (!named) {
+      failJson(`--work-child "${args["work-child"]}" is not in the registry`, {
+        known: children.map((c) => c.childId),
+      });
+    }
+    return named;
+  }
+
+  const graph = loadGraphOrNull();
+  const producer = graph ? producerOf(entry.squad, graph) : null;
+
+  // A node with no producer reviews its own work — the recording child IS the
+  // work child, and that is not a guess.
+  if (!producer) return entry;
+
+  const matches = children.filter((c) => c.squad === producer && c.taskId === taskId && c.worktree);
+  if (matches.length === 1) return matches[0];
+
+  if (matches.length === 0) {
+    failJson(
+      `no ${producer} child for ${taskId} in this run, so there is no tree holding the work ${entry.squad} is reviewing`,
+      {
+        hint: `name it: --work-child <id>. Fingerprinting ${entry.childId}'s own tree would measure the reviewer, not the work.`,
+        candidates: children.map((c) => ({ childId: c.childId, squad: c.squad, taskId: c.taskId })),
+      },
+    );
+  }
+
+  failJson(`${matches.length} ${producer} children carry ${taskId} — which one is under review?`, {
+    hint: "--work-child <id>",
+    candidates: matches.map((c) => c.childId),
+  });
+}
+
+function loadGraphOrNull() {
+  try {
+    return loadGraph();
+  } catch {
+    return null;
+  }
 }
 
 // ── rounds ───────────────────────────────────────────────────────────────────
@@ -244,12 +304,24 @@ function cmdRecord(args) {
     );
   }
 
+  // WHICH TREE. Not the reviewer's — the one holding the work under review.
+  //
+  // The first version fingerprinted `entry.worktree`, the recording child's own
+  // checkout. A REVIEW child's tree does not contain DEV's changes and barely
+  // moves between rounds, so consecutive rounds fingerprinted IDENTICALLY and
+  // the review loop refused at round 2 however much DEV had fixed. That is
+  // worse than the counter it replaced, which at least allowed two rounds.
+  // Caught by writing the scenario out and running it, not by reading the code.
+  const workChild = resolveWorkChild(registry, entry, taskId, args);
   const fingerprint = progressFingerprint({
-    worktree: entry.worktree,
-    baseRevision: entry.baseRevision,
+    worktree: workChild.worktree,
+    baseRevision: workChild.baseRevision,
     failingTests,
   });
   if (fingerprint.error) warnings.push(`fingerprint is UNKNOWN: ${fingerprint.error}`);
+  if (workChild.childId !== entry.childId) {
+    warnings.push(`fingerprinted ${workChild.childId}'s tree (${workChild.squad}) — the work under review`);
+  }
 
   const prior = latestVerdict(runId, taskId);
   const round = Number(args.round ?? (prior?.round ?? 0) + 1);

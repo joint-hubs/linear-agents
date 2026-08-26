@@ -252,7 +252,12 @@ let current = before;
 // mock child exits in milliseconds and the gap is always hit. A read-through
 // would not have shown it: every unit test starts its wait while a child runs.
 if (before.totals.live === 0) {
-  reason = "idle";
+  // ...unless something is HELD. `idle` tells the lead to stop waiting and read
+  // the result (agents/supervisor/CLAUDE.md §4), which for a run with a held
+  // spawn means walking away from work that was never started — the exact
+  // outcome "held is not dropped" exists to prevent. A distinct reason, because
+  // the action is distinct: release it, do not stop.
+  reason = before.held?.length ? "held" : "idle";
 }
 
 while (reason === "timeout" && Date.now() < deadline) {
@@ -297,6 +302,11 @@ console.log(
       // there is nothing left to wait for, so backing off would be waiting on
       // no one.
       nextBackoffHint: reason === "timeout" ? Math.min(timeoutMs * 2, BASE_POLL_MS * 4) : BASE_POLL_MS,
+      // Only present when the reason is `held`, so the lead does not have to
+      // work out what to do with a run that is neither running nor finished.
+      ...(reason === "held"
+        ? { next: `node scripts/supervisor-spawn.mjs --release --run ${runId}` }
+        : {}),
     },
     null,
     2,

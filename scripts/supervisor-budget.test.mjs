@@ -12,7 +12,7 @@
 // Run: node scripts/supervisor-budget.test.mjs
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -298,6 +298,20 @@ test("reconcile reports the share this run actually used", () => {
   // One run is not a trend, and the tool has to say so rather than inviting an
   // edit to graph.json off a single sample.
   assert.match(out.hint, /one run is not a trend/i);
+});
+
+test("an unreadable budget refuses in JSON, not with a stack trace", () => {
+  // Every other refusal in this runtime is JSON on stdout, and the Supervisor
+  // parses stdout and nothing else. This one threw: spawn exited 1 with an empty
+  // stdout and a stack trace on stderr, which is a refusal the lead cannot read.
+  const { runId, repo } = scenario({ total: 10 });
+  writeFileSync(budgetPath(runId), "{ not json");
+
+  const r = runSpawn(runId, repo, ["--child", "dev-9"]);
+  assert.ok(r.stdout.trim().startsWith("{"), `stdout was not JSON: ${r.stdout.slice(0, 80)}`);
+  const out = parse(r, fail);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /could not be read/);
 });
 
 test("status refuses helpfully when there is no allocation", () => {

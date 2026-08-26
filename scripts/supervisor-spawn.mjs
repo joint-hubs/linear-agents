@@ -145,7 +145,11 @@ const registry = readRegistry(runId);
 // Supervisor responsible for remembering what it asked for, which is the kind of
 // state a model loses across a compaction.
 const admission = admissionCheck(runId, squad, graphOrNull());
-if (!admission.admit && !args["ignore-semaphore"]) {
+// No bypass flag. One was there for a moment and it defeated the point: the
+// semaphore exists so that raising a limit is a committed edit to
+// config/graph.json, and a CLI flag that skips it hands that decision back to
+// whoever types the command.
+if (!admission.admit) {
   const heldId = `held-${squad}-${Date.now()}`;
   mkdirSync(heldDir(runId), { recursive: true });
   atomicWriteJSON(heldPath(runId, heldId), {

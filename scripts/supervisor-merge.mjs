@@ -7,9 +7,9 @@
 // WHY (FOC-160). Two candidates can each pass their own tests and fail when
 // combined. Verification therefore has to happen TWICE — once per candidate in
 // isolation, once on the integration — and nothing did the second one. This is
-// the piece that has to exist before the one-live-child guard can be removed
-// (FOC-161); without it, parallelism produces more unverified work rather than
-// more throughput.
+// the piece that had to exist before the one-live-child guard could be removed
+// (FOC-161, since landed); without it, parallelism produces more unverified work
+// rather than more throughput.
 //
 // THE PIPELINE, and the order it actually runs in:
 //
