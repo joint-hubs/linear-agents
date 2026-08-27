@@ -60,6 +60,18 @@ function atomicWriteText(filePath, content, eol) {
 // ---------------------------------------------------------------------------
 
 const LEAD_LINE_RE = /^\s*set\s+"ANTHROPIC_MODEL=(.+)"\s*$/i;
+// A squad launcher that routes its model through its own variable, e.g.
+// bin/supervisor.bat's
+//     if not defined SUPERVISOR_MODEL set "SUPERVISOR_MODEL=z-ai/glm-5.2"
+//
+// The `if not defined <VAR> ` prefix is why the first version of this matched
+// nothing: `^\s*set` does not survive it, and the Supervisor's lead kept
+// reading null. Optional, because a launcher may also set it unconditionally.
+//
+// Deliberately NOT matching ANTHROPIC_DEFAULT_* / SMALL_FAST — those are the
+// per-tier fallbacks, not the lead.
+const INDIRECT_LEAD_RE =
+  /^\s*(?:if\s+not\s+defined\s+[A-Z][A-Z0-9_]*\s+)?set\s+"(?!ANTHROPIC_DEFAULT_|ANTHROPIC_SMALL_FAST)([A-Z][A-Z0-9_]*_MODEL)=([^"%]*)"\s*$/i;
 
 /**
  * Extract the lead model from a .bat file.
@@ -91,6 +103,20 @@ function readLeadFromBat(filePath) {
       if (inElse) {
         const m = line.match(LEAD_LINE_RE);
         if (m) return m[1].trim();
+        // FALLBACK, tried only when the else branch names no ANTHROPIC_MODEL.
+        //
+        // bin/supervisor.bat sets `SUPERVISOR_MODEL` in the branch and assigns
+        // `ANTHROPIC_MODEL=%SUPERVISOR_MODEL%` OUTSIDE it — deliberately, per the
+        // comment there: inside a parenthesised block cmd expands the variable
+        // when it parses the whole block, before the `set` on the previous line
+        // has run, so the assignment read empty. Reading only ANTHROPIC_MODEL
+        // therefore reported the Supervisor's lead as null (FOC-170), and the
+        // Konfiguracja screen would have shown it blank and unsettable.
+        //
+        // Ordered after the direct match so no existing .bat changes meaning.
+        // The `/` requirement is what keeps `%SUPERVISOR_MODEL%` out.
+        const indirect = line.match(INDIRECT_LEAD_RE);
+        if (indirect && indirect[2].includes("/")) return indirect[2].trim();
       }
     }
     return null;
@@ -257,13 +283,46 @@ function readProviders(root) {
 // Public: readSquadConfig
 // ---------------------------------------------------------------------------
 
-const SQUADS = ["plan", "dev", "review", "test", "cadence"];
+/**
+ * The squads, derived from `config/models.json` routing rather than listed here.
+ *
+ * This was a hardcoded array, and it is why the Supervisor was invisible in the
+ * dashboard for as long as it existed: `agents/supervisor/` and
+ * `routing.supervisor` were added and the eight copies of this list were not
+ * (FOC-170). Deriving it means the next squad appears by existing.
+ *
+ * `routing` is the right source: a squad with no model routing cannot run, and
+ * one that can run should be visible. Underscore keys are metadata, repo-wide
+ * convention.
+ */
+const BASE_SQUADS = ["cadence", "dev", "plan", "review", "test"];
+
+function squadNames(root) {
+  // UNION, never replacement. Deriving the list purely from routing looked
+  // cleaner and was wrong: a config with partial routing would silently NARROW
+  // the dashboard, which is the same disappearing act this function exists to
+  // stop, just relocated. Caught by squad-config-read.test.mjs, whose fixture
+  // routes only `dev` — under the derive-only version, plan vanished.
+  //
+  // So the base list is a floor that cannot shrink, and routing can only add to
+  // it. A models.json that cannot be read costs the new squads, not all of them.
+  const names = new Set(BASE_SQUADS);
+  try {
+    const models = JSON.parse(readFileSync(join(root, "config", "models.json"), "utf8"));
+    for (const k of Object.keys(models.routing ?? {})) {
+      if (!k.startsWith("_")) names.add(k);
+    }
+  } catch {
+    /* the floor stands */
+  }
+  return [...names].sort();
+}
 
 export function readSquadConfig(root) {
   const r = root ? root : repoRoot();
   const squads = {};
 
-  for (const squad of SQUADS) {
+  for (const squad of squadNames(r)) {
     const leadFiles = [];
     const mainBat = join(r, "bin", `${squad}.bat`);
     const dryBat = join(r, "bin", `${squad}-dry.bat`);
@@ -416,6 +475,25 @@ function writeLeadToBat(filePath, newModel) {
           if (before !== newModel) {
             lines[i] = lines[i].replace(
               /(set\s+"ANTHROPIC_MODEL=).+(")/i,
+              `$1${newModel}$2`
+            );
+            changed = true;
+          }
+          break;
+        }
+        // The indirect form the reader also handles (bin/supervisor.bat sets
+        // SUPERVISOR_MODEL here and assigns ANTHROPIC_MODEL outside the block).
+        //
+        // Without this the write found no ANTHROPIC_MODEL line, changed nothing,
+        // and STILL reported `changed` with a before/after pair — the dashboard
+        // said saved and the launcher kept its old model. A silent no-op that
+        // reports success is worse than a refusal (FOC-170).
+        const ind = lines[i].match(INDIRECT_LEAD_RE);
+        if (ind && ind[2].includes("/")) {
+          before = ind[2].trim();
+          if (before !== newModel) {
+            lines[i] = lines[i].replace(
+              new RegExp(`(set\\s+"${ind[1]}=)[^"]+(")`, "i"),
               `$1${newModel}$2`
             );
             changed = true;

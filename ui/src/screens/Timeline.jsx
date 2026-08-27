@@ -18,8 +18,9 @@ const SQCOLOR = {
   cadence: '#64748b',
   'orch-ollama': '#0e7490',
   'orch-openrouter': '#0891b2',
+  supervisor: '#be185d',
 };
-const SQUADS = ['plan', 'dev', 'review', 'test', 'cadence', 'orch-ollama', 'orch-openrouter'];
+const SQUADS = ['plan', 'dev', 'review', 'test', 'cadence', 'supervisor', 'orch-ollama', 'orch-openrouter'];
 const ZOOMS = [
   { h: 24, label: 'Day' },
   { h: 72, label: '3d' },

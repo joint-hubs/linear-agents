@@ -11,6 +11,7 @@ const SQUAD_LABELS = {
   review: 'Review',
   test: 'Test',
   cadence: 'Cadence',
+  supervisor: 'Supervisor',
 };
 
 const SQUAD_COLOR = {
@@ -19,6 +20,7 @@ const SQUAD_COLOR = {
   review: 'var(--sq-review)',
   test: 'var(--sq-test)',
   cadence: 'var(--sq-cadence)',
+  supervisor: 'var(--sq-supervisor)',
 };
 
 /** A model with no pricing entry for its provider silently reports $0 — warn on it. */

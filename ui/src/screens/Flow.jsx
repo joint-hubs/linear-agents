@@ -11,6 +11,19 @@ import { fmtCost, fmtTokens, fmtDateTime, fmtTime, taskLabel } from '../utils';
 // ---------------------------------------------------------------------------
 const PIPELINE = [
   {
+    // The Supervisor is not a stage of the pipeline — it DRIVES the stages to its
+    // right. It also has no subagents: its children are separate OS processes
+    // with their own telemetry runs, billed to their own squads, which is why
+    // this column has one node and always will. Saying that in the column beats
+    // rendering what looks like a squad whose roles failed to load.
+    squad: 'supervisor',
+    label: 'S · SUPERVISOR',
+    lead: 'GLM-5.2',
+    standalone: true,
+    note: 'no subagents — spawns the squads to the right as OS processes, each billed to its own run',
+    nodes: [{ key: '_lead', label: 'Lead (frontman)' }],
+  },
+  {
     squad: 'plan',
     label: '1 · PLAN',
     lead: 'Opus 4.8',
@@ -514,7 +527,7 @@ export default function Flow() {
     <div className="page">
       <div className="page-title">Flow</div>
       <div className="page-sub">
-        Interactive pipeline overview · every step = subagent role · click a step to browse
+        Interactive pipeline overview · every step = subagent role, except the Supervisor, which has none · click a step to browse
         executions and model-response logs
       </div>
 
@@ -522,14 +535,21 @@ export default function Flow() {
         {columns.map((col, i) => (
           <React.Fragment key={col.squad}>
             {i > 0 && (
-              <div className="muted" style={{ alignSelf: 'center', fontSize: 18, flexShrink: 0 }}>
-                →
+              <div
+                className="muted"
+                style={{ alignSelf: 'center', fontSize: columns[i - 1].standalone ? 10 : 18, flexShrink: 0 }}
+                title={columns[i - 1].standalone ? 'the Supervisor starts these, it is not a stage before them' : undefined}
+              >
+                {columns[i - 1].standalone ? 'drives ▸' : '→'}
               </div>
             )}
             <div style={{ minWidth: 200, flexShrink: 0 }}>
               <div style={{ fontWeight: 650, fontSize: 13 }}>{col.label}</div>
               <div className="muted" style={{ fontSize: 11, margin: '2px 0 10px' }}>
                 lead: {col.lead}
+                {col.note && (
+                  <div style={{ marginTop: 4, fontSize: 10, lineHeight: 1.35 }}>{col.note}</div>
+                )}
               </div>
               {col.nodes.map((n) => (
                 <NodeCard

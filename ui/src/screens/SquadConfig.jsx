@@ -3,7 +3,17 @@ import { getSquadConfig, postSquadConfig } from '../api';
 import SquadCard from '../components/SquadCard';
 import ToolEditorModal from '../components/ToolEditorModal';
 
-const SQUADS = ['plan', 'dev', 'review', 'test', 'cadence'];
+// Display ORDER only. Which squads exist comes from the server (readSquadConfig
+// derives it from config/models.json routing), so a new squad appears without
+// an edit here — it just sorts last. Hardcoding the set is what hid the
+// Supervisor from this screen for as long as it existed (FOC-170).
+const SQUAD_ORDER = ['plan', 'dev', 'review', 'test', 'cadence', 'supervisor'];
+const orderSquads = (names) =>
+  [...names].sort((a, b) => {
+    const ia = SQUAD_ORDER.indexOf(a);
+    const ib = SQUAD_ORDER.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+  });
 const DEFAULT_PROVIDER = 'openrouter';
 const PROVIDER_NAME_RE = /^[a-z][a-z0-9_-]*$/;
 const BASE_URL_RE = /^https?:\/\/\S+$/;
@@ -39,7 +49,7 @@ function countDirty(orig, edit) {
   let n = 0;
 
   // Squads: lead, provider, agent models/tools
-  for (const s of SQUADS) {
+  for (const s of Object.keys(orig.squads || {})) {
     const o = orig.squads?.[s];
     const e = edit.squads?.[s];
     if (!o || !e) continue;
@@ -256,7 +266,7 @@ export default function SquadConfig() {
       setProviderError('Provider "openrouter" jest domyślny i nie może zostać usunięty.');
       return;
     }
-    const referencing = SQUADS.filter(
+    const referencing = orderSquads(Object.keys(edited?.squads || {})).filter(
       (s) => (edited?.squads?.[s]?.provider || DEFAULT_PROVIDER) === name,
     );
     if (referencing.length > 0) {
@@ -686,7 +696,7 @@ export default function SquadConfig() {
       <div className="section">
         <div className="section-h">Składy</div>
         <div className="grid grid-2">
-          {SQUADS.map((squad) => (
+          {orderSquads(Object.keys(config?.squads || {})).map((squad) => (
             <SquadCard
               key={squad}
               squad={squad}

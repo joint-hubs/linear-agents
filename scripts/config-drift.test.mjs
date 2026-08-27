@@ -401,6 +401,66 @@ test("orchestrator zostaje nietknięty przez tę zmianę", () => {
   if (leaked.length) fail(`agents/orchestrator/settings.json zmieniony (${leaked.join(", ")}) — to łamie AC-10`);
 });
 
+// ── widoczność składu w dashboardzie (FOC-170) ───────────────────────────
+console.log("\nwidoczność składu w dashboardzie");
+
+// Supervisor istniał jako skład wszędzie poza dashboardem: telemetria miała jego
+// runy (4 runy, 3 456 wierszy usage_facts), config/models.json miał
+// routing.supervisor — a UI go nie pokazywało, bo lista składów była
+// zahardkodowana w ośmiu miejscach. Nic nie padło: te testy pilnowały spójności
+// config↔prompt, nie pokrycia w dashboardzie.
+const ROUTED_SQUADS = Object.keys(readJson("config/models.json").routing ?? {}).filter(
+  (k) => !k.startsWith("_"),
+);
+
+test("każdy skład z routingu ma etykietę i kolor w UI", () => {
+  const card = read("ui/src/components/SquadCard.jsx");
+  const theme = read("ui/src/theme.css");
+
+  // Wycinamy KONKRETNY blok, nie cały plik. Pierwsza wersja szukała
+  // `^\s*<squad>: '` w całym SquadCard.jsx i przechodziła na wpisie z mapy
+  // KOLORÓW — usunięcie etykiety niczego nie łamało. Sprawdzone przez zepsucie
+  // testu: nadal był zielony, czyli pilnował niczego.
+  //
+  // Druga wersja też nie działała: kotwica `\n};` nie łapie `\r\n};`, a te pliki
+  // UI mają CRLF. Regex zaczepiony o koniec linii musi to zakładać — inaczej
+  // przechodzi zawsze, bo blok jest pusty, a pusty blok "nie zawiera" niczego.
+  const block = (name) => {
+    const m = card.match(new RegExp(`const ${name}\\s*=\\s*\\{([\\s\\S]*?)\\r?\\n\\};`, "m"));
+    return m ? m[1] : "";
+  };
+  const labels = block("SQUAD_LABELS");
+  const colors = block("SQUAD_COLOR");
+  if (!labels || !colors) fail("nie znaleziono SQUAD_LABELS / SQUAD_COLOR w SquadCard.jsx");
+
+  const missing = [];
+  for (const squad of ROUTED_SQUADS) {
+    if (!new RegExp(`\\b${squad}:`).test(labels)) missing.push(`${squad}: brak etykiety w SQUAD_LABELS`);
+    if (!new RegExp(`\\b${squad}:`).test(colors)) missing.push(`${squad}: brak koloru w SQUAD_COLOR`);
+    if (!theme.includes(`--sq-${squad}:`)) missing.push(`${squad}: brak tokenu --sq-${squad} w theme.css`);
+  }
+  // Bez etykiety wiersz renderuje się fallbackiem i wygląda jak inny skład —
+  // gorzej niż gdyby go nie było.
+  if (missing.length) fail(`skład w routingu, niewidoczny w UI:\n       ${missing.join("\n       ")}`);
+});
+
+test("każdy skład z routingu przechodzi przez readSquadConfig", async () => {
+  // To jest ekran Konfiguracji i źródło listy dla Promptów. Skład, którego tu nie
+  // ma, jest nieedytowalny — i nikt się nie dowie, że istnieje.
+  const { readSquadConfig } = await import("./squad-config.mjs");
+  const seen = Object.keys(readSquadConfig(ROOT).squads);
+  const missing = ROUTED_SQUADS.filter((s) => !seen.includes(s));
+  if (missing.length) fail(`routing zna ${missing.join(", ")}, readSquadConfig nie`);
+});
+
+test("każdy skład z routingu jest na osi czasu", () => {
+  const timeline = read("ui/src/screens/Timeline.jsx");
+  const missing = ROUTED_SQUADS.filter((s) => !new RegExp(`'${s}'`).test(timeline));
+  // Filtrowanie po zahardkodowanej liście ukrywa runy, które SA w telemetrii —
+  // wygląda to jak brak danych, a jest brakiem wpisu.
+  if (missing.length) fail(`skład bez wpisu w Timeline.jsx: ${missing.join(", ")}`);
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 console.log("");
 if (failures.length) {
