@@ -35,7 +35,7 @@ REM failure mode is fail-closed — a classifier that cannot evaluate an action
 REM errors out instead of allowing it (changelog: "when the classifier can't
 REM evaluate an action, the error now includes a hint"). Revert this line to
 REM anthropic/claude-sonnet-4.6 if auto mode starts refusing work it should pass.
-    set "ANTHROPIC_DEFAULT_SONNET_MODEL=qwen/qwen3.8-flash"
+    set "ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6"
     set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"
 )
 REM Deliberately OUTSIDE the block above. Inside a parenthesised block cmd expands
