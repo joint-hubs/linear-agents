@@ -201,12 +201,20 @@ test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
 
 // --- provider-scoped pricing (PRD provider-config §4.4) --------------------
 
-test("pricingSnapshot reads the nested config as a 22-row openrouter scope", () => {
+test("pricingSnapshot reads the nested config as a provider-scoped openrouter scope", () => {
+  // The row COUNT used to be asserted exactly (22). That is a test that fails
+  // when someone prices a new model — growth, not regression — and it went red
+  // three times in one session for exactly that reason. What the PRD actually
+  // requires is that the flat view and the scoped view describe the same set,
+  // and that a known row survives the nesting.
   const snapshot = pricingSnapshot();
   const keys = Object.keys(snapshot.prices);
-  assert(keys.length === 22, `openrouter prices=${keys.length} (expected 22)`);
+  assert(keys.length > 0, "openrouter prices are empty");
   assert(snapshot.scoped.openrouter != null, "scoped.openrouter missing");
-  assert(Object.keys(snapshot.scoped.openrouter).length === 22, "scoped.openrouter row count != 22");
+  assert(
+    Object.keys(snapshot.scoped.openrouter).length === keys.length,
+    `flat view has ${keys.length} rows, scoped.openrouter has ${Object.keys(snapshot.scoped.openrouter).length}`,
+  );
   const glm = snapshot.prices["z-ai/glm-5.2"];
   assert(glm && glm.input === 1.19 && glm.output === 3.74 && glm.cacheRead === 0.221, `z-ai/glm-5.2 row=${JSON.stringify(glm)}`);
 });

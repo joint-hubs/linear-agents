@@ -209,6 +209,21 @@
         "input": 0,
         "output": 0,
         "cacheRead": 0
+      },
+      "qwen/qwen3.8-flash": {
+        "input": 0.15,
+        "output": 0.47,
+        "cacheRead": 0.016
+      },
+      "z-ai/glm-5.3-flash": {
+        "input": 0.075,
+        "output": 0.25,
+        "cacheRead": 0.015
+      },
+      "qwen/qwen3.8-27b": {
+        "input": 0.425,
+        "output": 2.55,
+        "cacheRead": 0.085
       }
     },
     "nebul": {
