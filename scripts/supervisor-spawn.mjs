@@ -294,7 +294,10 @@ try {
   ).trim();
   execFileSync(
     process.execPath,
-    [join(ROOT, "scripts", "run-manifest.mjs"), "start", telemetryRunId, squad],
+    // --headless: this child has no console. Without it run-manifest records the
+    // pid of THIS spawn process, which exits in seconds, and the dashboard's
+    // reconciler closes the run on "console pid gone" while the child works on.
+    [join(ROOT, "scripts", "run-manifest.mjs"), "start", telemetryRunId, squad, "--headless"],
     { cwd: worktree.worktree, env, stdio: "ignore" },
   );
   // Two tags, two questions the dashboard has to answer about a child run:
@@ -343,6 +346,17 @@ const childEnv = {
   LA_SUPERVISOR_RUN: runId,
   LA_SUPERVISOR_CHILD: childId,
   LA_TASK_ID: taskId,
+  // The child inherits the Supervisor's environment, and bin/supervisor.bat sets
+  // RUN_ID/LA_RUN_ID to the SUPERVISOR's telemetry run. telemetry-hook.mjs reads
+  // exactly those on SessionStart, so without this override the child's session,
+  // its tokens and its cost were all recorded against the Supervisor's run —
+  // observed 2026-08-27: 54 usage rows and 565k tokens on the parent while the
+  // child's own run showed 0 tokens, no model, and a `transcript_missing` issue.
+  //
+  // LA_SUPERVISOR_RUN stays the Supervisor's: that one addresses the gate and
+  // registry directory, which genuinely belong to the parent. Two different
+  // ideas that were sharing one value by accident.
+  ...(telemetryRunId ? { RUN_ID: telemetryRunId, LA_RUN_ID: telemetryRunId } : {}),
 };
 
 const watcher = spawn(process.execPath, watcherArgs, {
@@ -350,6 +364,11 @@ const watcher = spawn(process.execPath, watcherArgs, {
   env: childEnv,
   detached: true,
   stdio: "ignore",
+  // win32 gives a detached process its own console unless told otherwise, and
+  // that is the empty "claude" window that appeared next to the Supervisor.
+  // Children are headless by contract (ADR-0009): a window is not just noise,
+  // it invites someone to type into a session nobody is reading.
+  windowsHide: true,
 });
 watcher.unref();
 

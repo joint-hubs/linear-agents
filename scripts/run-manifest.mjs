@@ -4,6 +4,7 @@
 //   node scripts/run-manifest.mjs gen-id <squad>
 //   node scripts/run-manifest.mjs start <runId> <squad> [sourcePath]
 //   node scripts/run-manifest.mjs end <runId> [exitCode]
+//   ...start also takes --headless: no console, no launcher (supervisor children)
 //
 // ESM, zero runtime deps (Node 18+).
 
@@ -68,7 +69,7 @@ function cmdGenId(squad) {
   console.log(`${ts}-${squad}-${randomBytes(2).toString("hex")}`);
 }
 
-function cmdStart(runId, squad, sourcePath) {
+function cmdStart(runId, squad, sourcePath, { headless = false } = {}) {
   if (!runId || !squad) {
     console.error("Usage: node scripts/run-manifest.mjs start <runId> <squad> [sourcePath]");
     process.exit(1);
@@ -93,7 +94,18 @@ function cmdStart(runId, squad, sourcePath) {
     taskIdAuto: null,
     launchedBy: process.env.LA_LAUNCHED_BY || null,
     windowTitle: process.env.LA_WINDOW_TITLE || null,
-    consolePid: process.ppid,
+    // HEADLESS runs have no console and no launcher. A supervisor child is
+    // started by supervisor-spawn.mjs through execFileSync, so process.ppid here
+    // is that short-lived spawn process — it exits within seconds, and the
+    // dashboard's reconciler (telemetry-server.mjs reconcileDeadRuns) closes the
+    // run on "console pid gone" while the actual claude child works on for
+    // another hour. Observed 2026-08-27: a child run showed 6s / done / 0 tokens
+    // while its pid was alive and 292 MB into the task.
+    //
+    // A null pid is the honest answer, and it is already handled: the reconciler
+    // falls through to orphanRunVerdict(), which judges by transcript idleness
+    // instead of by a process that was never this run's liveness.
+    consolePid: headless ? null : process.ppid,
     startedAt: new Date().toISOString(),
     endedAt: null,
     cwd,
@@ -102,7 +114,7 @@ function cmdStart(runId, squad, sourcePath) {
     gitHeadSha: getGitHeadSha(cwd),
     native: process.env.NATIVE !== undefined,
     provider: process.env.LA_PROVIDER || "openrouter",
-    interactive: true,
+    interactive: !headless,
     claudeConfigDir: process.env.CLAUDE_CONFIG_DIR || null,
   };
 
@@ -348,7 +360,14 @@ const command = process.argv[2];
       cmdGenId(process.argv[3]);
       break;
     case "start":
-      cmdStart(process.argv[3], process.argv[4], process.argv[5]);
+      // `--headless` may appear anywhere after the subcommand; it is a flag, not
+      // a positional, so a launcher that never passes it is unaffected.
+      cmdStart(
+        process.argv[3],
+        process.argv[4],
+        process.argv[5] === "--headless" ? undefined : process.argv[5],
+        { headless: process.argv.includes("--headless") },
+      );
       break;
     case "end":
       await cmdEnd(process.argv[3], process.argv[4]);
