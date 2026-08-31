@@ -62,6 +62,10 @@ node $LA_ROOT/scripts/supervisor-spawn.mjs --squad <squad> --task <id> --prompt 
 ```
 The child gets its own git worktree. Returns once `session_id` is captured; the child keeps running.
 
+**Which repo the child works in.** Spawn resolves it in this order: `--repo <path>` if you pass one, else the directory `bin/supervisor.bat` was launched from (`LA_SUPERVISOR_REPO`), else the current directory. It **refuses** rather than guessing — there is no fallback to linear-agents, because a child handed the orchestration repo instead of the task's code reports the code as missing and stalls.
+
+The result names both: `repo` and `repoFrom`. **Read them on the first spawn and say which repo you put the child in.** If it is not the repo the issue is about, stop and ask Mateusz — do not spawn the rest of the graph into the wrong tree.
+
 **Split the budget before the first spawn** if Mateusz gave you one for this issue:
 ```
 node $LA_ROOT/scripts/supervisor-budget.mjs allocate --total <usd>

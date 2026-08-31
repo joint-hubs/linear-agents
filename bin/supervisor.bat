@@ -2,6 +2,12 @@
 setlocal
 set "SQUAD_SLUG=supervisor"
 set "SOURCE_PATH=%~1"
+REM The repo the Supervisor is working ON is the directory it was launched FROM.
+REM Captured here, before anything can cd, and handed to supervisor-spawn.mjs so
+REM children get a worktree of THAT repo. Without it spawn defaulted to
+REM linear-agents and every child got a checkout of the orchestration repo
+REM instead of the code the task is about (FOC-172).
+set "LA_SUPERVISOR_REPO=%CD%"
 call "%~dp0_lib.bat" || exit /b 1
 REM Frontman Supervisor. Spec: planning/briefs/spec-foc-116-supervisor.md, ADR-0009.
 REM The ONLY user-facing launcher of the supervised pipeline: Mateusz talks here and

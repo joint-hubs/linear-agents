@@ -25,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ensureRunDir, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
+import { ensureRunDir, readRegistry, runDir, worktreePathFor, writeRegistry } from "./supervisor-lib.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -124,11 +124,15 @@ export const gitIn = (repo, ...args) =>
  *
  * Worth having separately: spawning a child to get a worktree costs a mock
  * process and an init handshake per test, and the cleanup suite needs a dozen
- * trees whose CONTENT it controls. Same layout spawn produces (base/la-wt/<branch>)
- * so anything asserted here holds for a real child's tree too.
+ * trees whose CONTENT it controls.
+ *
+ * The path comes from worktreePathFor rather than being spelled out here, so it
+ * cannot drift from what spawn actually produces. It did once: the layout gained
+ * a per-repo segment (FOC-172) and this helper still described the old one in a
+ * comment claiming they matched.
  */
 export function fixtureWorktree(repo, branch = "foc-123-dev") {
-  const target = join(repo, "..", "la-wt", branch);
+  const target = worktreePathFor(repo, branch);
   execFileSync("git", ["worktree", "add", "-b", branch, target, "HEAD"], { cwd: repo, stdio: "ignore" });
   const worktree = resolve(target);
   return { worktree, branch, baseRevision: gitIn(worktree, "rev-parse", "HEAD") };

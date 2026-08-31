@@ -13,7 +13,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { atomicWriteJSON } from "./utils.mjs";
@@ -784,8 +784,18 @@ export function resolveGitRoot(cwd) {
 // it: a worktree nested under the repo shows up in the parent's own status and
 // in every glob the agents run, which is exactly the confusion worktrees exist
 // to remove.
+// Scoped by repo NAME, not just by the parent directory. Both linear-agents and
+// Fraud-Prediction live under GitHub/, so `<gitRoot>/../la-wt` resolved to the
+// same GitHub/la-wt for both — and both build branch names from the same Linear
+// id, so foc-174-dev from one repo collided with foc-174-dev from the other.
+// `git worktree add` fails loudly on that rather than corrupting anything, but
+// it blocks a spawn for a reason nothing in the message explains (FOC-172).
+//
+// Existing worktrees are unaffected: ensureWorktree finds them through
+// `git worktree list` on the branch, which is per-repo and does not care where
+// the directory sits. Only new ones land in the scoped path.
 export function worktreeRoot(gitRoot) {
-  return join(gitRoot, "..", "la-wt");
+  return join(gitRoot, "..", "la-wt", basename(gitRoot));
 }
 
 // Always resolved. `git worktree list` prints forward slashes on win32 while

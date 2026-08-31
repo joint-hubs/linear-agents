@@ -213,11 +213,57 @@ assertStageBudget(runId, squad, { graph: (() => {
 // Wrapped: git exits non-zero on a path that is not a repo, and an unwrapped
 // throw here printed a stack trace instead of the JSON every other failure path
 // returns — the Supervisor reads stdout, so that failure was invisible to it.
+// WHICH repo, and why it is not ROOT (FOC-172). This used to fall back to
+// linear-agents, the orchestration repo — so a child working on a task in some
+// other codebase got a checkout of the ORCHESTRATOR instead of the code the task
+// is about, and reported the missing code as a configuration blocker. Observed
+// on a real run: every supervisor launch in the store has a different cwd
+// (Fraud-Prediction, joint-flows, moto_computer_vision, landing), because the
+// Supervisor is launched FROM the repo it is working on. That cwd is the answer.
+//
+// Order: explicit flag, then the launcher's captured start directory, then this
+// process's cwd. No ROOT fallback — a silent default to linear-agents is the
+// bug, and "no repo" is a question for Mateusz, not something to guess at.
+// An EXPLICIT --repo that is not a repo is an error, not an invitation to try
+// the next candidate. Letting it fall through was a real defect in the first
+// version of this block — caught by supervisor-triage.test.mjs, which points
+// --repo at a non-repo and expects a refusal: the fallback quietly reached
+// process.cwd(), found linear-agents, and started a child there. The exact
+// failure this whole change exists to remove.
+if (args.repo && args.repo !== true) {
+  try {
+    resolveGitRoot(args.repo);
+  } catch (err) {
+    failJson(`--repo ${args.repo} is not inside a git repository: ${err.message.split("\n")[0]}`);
+  }
+}
+
+const repoCandidates = [
+  { value: args.repo, from: "--repo" },
+  { value: process.env.LA_SUPERVISOR_REPO, from: "LA_SUPERVISOR_REPO (bin/supervisor.bat)" },
+  { value: process.cwd(), from: "current directory" },
+].filter((c) => c.value && c.value !== true);
+
 let gitRoot;
-try {
-  gitRoot = resolveGitRoot(args.repo || ROOT);
-} catch (err) {
-  failJson(`--repo ${args.repo || ROOT} is not inside a git repository: ${err.message.split("\n")[0]}`);
+let repoFrom;
+const repoErrors = [];
+for (const candidate of repoCandidates) {
+  try {
+    gitRoot = resolveGitRoot(candidate.value);
+    repoFrom = candidate.from;
+    break;
+  } catch (err) {
+    repoErrors.push(`${candidate.from}: ${candidate.value} — ${err.message.split("\n")[0]}`);
+  }
+}
+if (!gitRoot) {
+  failJson(
+    "could not determine which repository this child should work in — none of the candidates is a git repo",
+    {
+      tried: repoErrors,
+      hint: "pass --repo <path>, or launch bin/supervisor.bat from the repo the task belongs to",
+    },
+  );
 }
 const branch = buildBranchName(taskId, args.slug || squad, undefined);
 
@@ -416,6 +462,11 @@ console.log(
       tee: teeRelPath(childId),
       status: entry.status,
       worktree: worktree.worktree,
+      // Reported so the Supervisor can SAY which repo it put the child in, and
+      // Mateusz can catch a wrong one at spawn time rather than from a child
+      // that reports the code missing twenty minutes later.
+      repo: gitRoot,
+      repoFrom,
       branch: worktree.branch,
       baseRevision: worktree.baseRevision,
       worktreeCreated: worktree.created,
