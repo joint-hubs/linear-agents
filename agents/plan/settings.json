@@ -15,24 +15,32 @@
       "Bash(git status:*)",
       "Bash(git log:*)",
       "Bash(git diff:*)",
-      "mcp__linear__*"
+      "mcp__linear__*",
+      "mcp__codegraph__*",
+      "Bash(codegraph:*)"
     ],
     "deny": [
       "Bash(rm -rf:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Artifact",
+      "PushNotification",
+      "ListAgents",
+      "Monitor"
     ],
     "defaultMode": "default"
   },
   "theme": "dark",
-  "mcpServers": {
-    "linear": {
-      "type": "sse",
-      "url": "https://mcp.linear.app/sse"
-    }
-  },
   "hooks": {
-    "SessionStart": [{
-      "hooks": [{ "type": "command", "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"", "timeout": 5 }]
-    }]
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

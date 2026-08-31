@@ -1,7 +1,7 @@
 ---
 name: worker
 description: TEST squad — cheap helper: log analysis, report drafts, synthetic data per pattern. MiniMax M3.
-model: minimax/minimax-m3
+model: stealth/ox-alpha
 tools: Read, Grep, Glob, Edit, Write
 ---
 <role>

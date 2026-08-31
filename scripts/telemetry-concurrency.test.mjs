@@ -30,12 +30,16 @@ function child(code) {
 }
 
 try {
+  // Under 8-way write contention a child may legitimately lose the race and
+  // spool its event as pending — that is the DESIGNED behaviour (spool →
+  // replayPending below re-ingests it). The child must not treat pending as
+  // failure; the final assertions prove convergence: exactly one deduped
+  // event and an empty spool afterwards.
   const emitCode = `
     import { emitEvent, makeEvent } from ${JSON.stringify(storeUrl)};
     const event = makeEvent('run.started', { runId:'concurrent-run', squad:'dev', startedAt:'2026-07-24T10:00:00.000Z' },
       { runId:'concurrent-run', eventId:'same-event', observedAt:'2026-07-24T10:00:00.000Z' });
-    const result = emitEvent(event);
-    if (result.pending) process.exit(1);
+    emitEvent(event);
   `;
   await Promise.all(Array.from({ length: 8 }, () => child(emitCode)));
 
@@ -85,5 +89,17 @@ try {
   }
   console.log("PASS concurrent event and transcript ingestion");
 } finally {
-  rmSync(temp, { recursive: true, force: true });
+  // Windows releases the sqlite file lock a beat AFTER the last child process
+  // exits, so an immediate recursive rmSync can hit EBUSY/ENOTEMPTY even though
+  // every connection was closed in code. Retry briefly instead of failing the
+  // test on the race.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      rmSync(temp, { recursive: true, force: true });
+      break;
+    } catch (error) {
+      if (!["EBUSY", "ENOTEMPTY", "EPERM"].includes(error.code) || attempt === 9) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
 }

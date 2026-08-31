@@ -1,7 +1,7 @@
 ---
 name: worker
 description: REVIEW squad — cheap helper: diff summary, context, file inventory. MiniMax M3.
-model: minimax/minimax-m3
+model: stealth/ox-alpha
 tools: Read, Grep, Glob, Write
 ---
 <role>

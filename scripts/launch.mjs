@@ -18,6 +18,16 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 const PROMPTS_PATH = join(__dir, '..', 'config', 'prompts.json');
 
 // Squads with a launcher (bin/<squad>.bat) AND a HOW-TO §4 kickoff template.
+// DELIBERATELY WITHOUT the supervisor (FOC-170). This allowlist governs what the
+// dashboard may LAUNCH with a kickoff template, and the Supervisor is not that
+// kind of run: it is the interactive frontman Mateusz talks to, its kickoff is
+// an issue id he types, and it starts the squad children itself. Adding it here
+// would demand a config/prompts.json template for a prompt that is one line
+// long and never the same twice.
+//
+// It IS present everywhere else the dashboard shows a squad — config, prompts,
+// flow, timeline — because it runs and is billed like one. Written down because
+// the asymmetry looks like the oversight this task fixed.
 export const SQUAD_ALLOWLIST = ['plan', 'dev', 'review', 'test', 'cadence'];
 
 // Linear identifier shape — strict, so a crafted taskId can't smuggle cmd

@@ -80,3 +80,17 @@ Thumbs.db
 
 # Rendered at launcher startup from config/atlas-mcp.json.template by bin/_lib.bat
 config/atlas-mcp.json
+
+# CodeGraph local index — rebuildable with `codegraph init`, and large.
+.codegraph/
+
+# Nebul diagnostics: raw HTTP wire captures, ~25 MB. The repro scripts and the
+# support report next to them are committed; the dumps they produce are not.
+# They are regenerable by re-running the probes, and being raw request/response
+# bodies they are exactly the kind of artefact that can pick up a credential.
+tools/nebul/*.bin
+tools/nebul/nebul-fail-*.json
+tools/nebul/claude-wire-*.json
+tools/nebul/nebul_replica_hunt.json
+tools/nebul/nebul_sat_run1.json
+tools/nebul/NEBUL_*_LOG.txt

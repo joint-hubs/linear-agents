@@ -160,19 +160,26 @@ async function runTests() {
     const root = buildFixture();
     const tree = buildPromptTree(root);
     assert(Array.isArray(tree.intents), "intents is an array");
-    assertEq(tree.intents.length, 6, "6 intents");
+    // Counted by shape, not by number. The count assertions here broke when the
+    // Supervisor intent was added (FOC-170), which is a test that fails on
+    // growth rather than on regression — the invariants worth holding are that
+    // plan leads and `single` is the escape hatch at the end.
+    assert(tree.intents.length >= 6, `at least 6 intents, got ${tree.intents.length}`);
     assertEq(tree.intents[0].id, "plan", "first intent is plan");
-    assertEq(tree.intents[5].id, "single", "last intent is single");
-    assertEq(tree.intents[5].squad, null, "single has squad null");
+    const last = tree.intents[tree.intents.length - 1];
+    assertEq(last.id, "single", "last intent is single");
+    assertEq(last.squad, null, "single has squad null");
     rmSync(root, { recursive: true, force: true });
   }
 
-  // ---- Test 2: buildPromptTree returns 5 squads ----
+  // ---- Test 2: buildPromptTree returns every squad ----
   {
     const root = buildFixture();
     const tree = buildPromptTree(root);
     const squadNames = Object.keys(tree.squads);
-    assertEq(squadNames.length, 5, "5 squads");
+    // Same reason: a new squad must not fail this. What matters is that the four
+    // it names below are present.
+    assert(squadNames.length >= 5, `at least 5 squads, got ${squadNames.length}`);
     assert(squadNames.includes("dev"), "has dev");
     assert(squadNames.includes("plan"), "has plan");
     assert(squadNames.includes("review"), "has review");

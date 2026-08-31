@@ -322,12 +322,36 @@ const RUN_COLUMNS = [
   ["console_pid", "INTEGER"],
   ["window_title", "TEXT"],
   ["launched_by", "TEXT"],
+  // Provider-scoped pricing (PRD provider-config §4.4): the provider this run
+  // resolved to at launch. Legacy rows stay NULL and serialize as 'openrouter'.
+  ["provider", "TEXT"],
 ];
 
 function addRunColumns(db) {
   const existing = new Set(db.prepare("PRAGMA table_info(runs)").all().map((c) => c.name));
   for (const [name, type] of RUN_COLUMNS) {
     if (!existing.has(name)) db.exec(`ALTER TABLE runs ADD COLUMN ${name} ${type}`);
+  }
+}
+
+// Columns added to `model_prices` after its initial CREATE TABLE, for the
+// provider-scoped pricing slice (PRD provider-config §4.4). Same declarative
+// pattern as RUN_COLUMNS: ALTER guarded by PRAGMA table_info, so pre-existing
+// databases (and their already-stored price sets) are upgraded in place.
+// `provider` is NOT NULL DEFAULT 'openrouter' so the ALTER backfills legacy
+// rows to the openrouter scope — the flat pricing map those rows came from is
+// exactly that scope. `cache_write_price` is NULLable: only models that carry
+// a cacheWrite row (currently the anthropic models) get a value; the rest fall
+// back to the input rate at billing time.
+const MODEL_PRICE_COLUMNS = [
+  ["provider", "TEXT NOT NULL DEFAULT 'openrouter'"],
+  ["cache_write_price", "REAL"],
+];
+
+function addModelPriceColumns(db) {
+  const existing = new Set(db.prepare("PRAGMA table_info(model_prices)").all().map((c) => c.name));
+  for (const [name, type] of MODEL_PRICE_COLUMNS) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE model_prices ADD COLUMN ${name} ${type}`);
   }
 }
 
@@ -576,15 +600,17 @@ function migrateRunScopedUsage(db, path) {
 }
 
 // Order matters: base schema before column adds (ALTER needs the table to
-// exist); columns before the price-set backfill (it writes price_set_id);
-// superseded-links cleanup before the unique index (the index would reject
-// the very rows that cleanup fixes); worktree_id rekey before the schema
-// marker so the one-shot guard fires correctly; runScopedUsage rebuild after
-// the worktree rekey (it copies cost_facts.run_id from usage_facts, which
-// must already be in its post-FOC-104 shape).
+// exist); columns before the price-set backfill (it writes price_set_id and
+// now provider/cache_write_price too); superseded-links cleanup before the
+// unique index (the index would reject the very rows that cleanup fixes);
+// worktree_id rekey before the schema marker so the one-shot guard fires
+// correctly; runScopedUsage rebuild after the worktree rekey (it copies
+// cost_facts.run_id from usage_facts, which must already be in its
+// post-FOC-104 shape).
 export function migrate(db, path) {
   createBaseSchema(db);
   addRunColumns(db);
+  addModelPriceColumns(db);
   backfillPriceSetId(db);
   closeSupersededPrimaryLinks(db);
   ensureOneActivePrimaryLinkIndex(db);
@@ -884,8 +910,8 @@ function applyRunStarted(db, event) {
   if (!runId) throw new Error("run.started requires runId");
   const priceSet = ensurePriceSet(db);
   db.prepare(
-    `INSERT INTO runs (run_id, squad, source, brief, started_at, status, native, interactive, launch_cwd, claude_config_dir, price_set_id, console_pid, window_title, launched_by, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO runs (run_id, squad, source, brief, started_at, status, native, interactive, launch_cwd, claude_config_dir, price_set_id, console_pid, window_title, launched_by, provider, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(run_id) DO UPDATE SET squad=excluded.squad, source=excluded.source, brief=excluded.brief,
        started_at=COALESCE(runs.started_at, excluded.started_at), native=excluded.native,
        interactive=excluded.interactive, launch_cwd=excluded.launch_cwd,
@@ -893,10 +919,12 @@ function applyRunStarted(db, event) {
        price_set_id=COALESCE(runs.price_set_id, excluded.price_set_id),
        console_pid=COALESCE(excluded.console_pid, runs.console_pid),
        window_title=COALESCE(excluded.window_title, runs.window_title),
-       launched_by=COALESCE(excluded.launched_by, runs.launched_by), updated_at=excluded.updated_at`,
+       launched_by=COALESCE(excluded.launched_by, runs.launched_by),
+       provider=COALESCE(excluded.provider, runs.provider), updated_at=excluded.updated_at`,
   ).run(runId, run.squad || null, run.source || null, run.brief || null, run.startedAt || event.observedAt,
     run.native ? 1 : 0, run.interactive === false ? 0 : 1, run.cwd || null, run.claudeConfigDir || null, priceSet.id,
-    Number.isInteger(run.consolePid) ? run.consolePid : null, run.windowTitle || null, run.launchedBy || null, now());
+    Number.isInteger(run.consolePid) ? run.consolePid : null, run.windowTitle || null, run.launchedBy || null,
+    run.provider || null, now());
   return { runId };
 }
 
@@ -1044,10 +1072,38 @@ function applyTaskLinked(db, event) {
   return { runId, taskId, linkId };
 }
 
-function pricingSnapshot() {
-  const source = readFileSync(join(root, "config", "models.json"), "utf8");
+function withoutMetaKeys(entries) {
+  if (!entries || typeof entries !== "object") return entries;
+  const out = {};
+  for (const [key, value] of Object.entries(entries)) {
+    if (!key.startsWith("_")) out[key] = value;
+  }
+  return out;
+}
+
+export function pricingSnapshot(rootDir = root) {
+  const source = readFileSync(join(rootDir, "config", "models.json"), "utf8");
   const config = JSON.parse(source);
-  return { id: hash(source), configHash: hash(source), prices: config.pricing || {} };
+  // Metadata keys (_doc, _note) are legal anywhere in models.json. Strip them
+  // from the pricing level before the shape heuristic — a `_doc: "text"` at the
+  // pricing level (or a `_note` inside a provider scope) would otherwise fail
+  // `every()` and misclassify a nested config as flat, silently emptying the
+  // price set — and from each provider/model scope so they never leak into
+  // `prices` or `scoped` consumers. The config migrated from a flat
+  // { modelId: priceRow } map to { provider: { modelId: priceRow } }. A flat
+  // row has an `input` key; a provider scope does not. `prices` stays the flat
+  // openrouter scope so legacy callers (resolvePrice without a provider,
+  // repriceCurrent, aggregateUsageByTask) keep working unchanged, while
+  // `scoped` carries the full provider map for provider-aware resolution and
+  // storage.
+  const pricing = withoutMetaKeys(config.pricing || {});
+  const nested = Object.values(pricing).every((value) => value && typeof value === "object" && value.input === undefined);
+  const rawScoped = nested ? pricing : { openrouter: pricing };
+  const scoped = {};
+  for (const [provider, models] of Object.entries(rawScoped)) {
+    scoped[provider] = withoutMetaKeys(models);
+  }
+  return { id: hash(source), configHash: hash(source), prices: scoped.openrouter || {}, scoped };
 }
 
 /**
@@ -1063,14 +1119,13 @@ export function isSyntheticModel(model) {
   return !model || SYNTHETIC_MODELS.has(model);
 }
 
-function resolvePrice(model, prices) {
-  if (isSyntheticModel(model)) return null;
-  if (prices[model]) return { key: model, price: prices[model] };
+function resolveInScope(model, scope) {
+  if (scope[model]) return { key: model, price: scope[model] };
   const short = model.split("/").pop().replace(/\./g, "-");
   const exactShort = [];
   const contained = [];
   const containing = [];
-  for (const [key, price] of Object.entries(prices)) {
+  for (const [key, price] of Object.entries(scope)) {
     const keyShort = key.split("/").pop().replace(/\./g, "-");
     if (keyShort === short) exactShort.push({ key, price });
     else if (model.includes(key.split("/").pop())) contained.push({ key, price, length: keyShort.length });
@@ -1082,46 +1137,72 @@ function resolvePrice(model, prices) {
   return null;
 }
 
+export function resolvePrice(model, prices, provider = null) {
+  if (isSyntheticModel(model)) return null;
+  if (!prices) return null;
+  // With a provider, resolve within that provider's scope only (exact →
+  // fuzzy). Without one, `prices` is the flat openrouter scope and the
+  // existing flat fuzzy behaviour is preserved for legacy callers and legacy
+  // stored price sets.
+  if (provider) return resolveInScope(model, prices[provider] || {});
+  return resolveInScope(model, prices);
+}
+
 function ensurePriceSet(db) {
   const snapshot = pricingSnapshot();
   db.prepare("INSERT OR IGNORE INTO price_sets (price_set_id, config_hash, created_at, source) VALUES (?, ?, ?, 'config/models.json')")
     .run(snapshot.id, snapshot.configHash, now());
-  const insert = db.prepare("INSERT OR IGNORE INTO model_prices (price_set_id, model_key, input_price, output_price, cache_read_price) VALUES (?, ?, ?, ?, ?)");
-  for (const [key, price] of Object.entries(snapshot.prices)) {
-    if (!Number.isFinite(price.input) || !Number.isFinite(price.output)) continue;
-    insert.run(
-      snapshot.id,
-      key,
-      nullableNumber(price.input),
-      nullableNumber(price.output),
-      nullableNumber(price.cacheRead),
-    );
+  const insert = db.prepare("INSERT OR IGNORE INTO model_prices (price_set_id, model_key, provider, input_price, output_price, cache_read_price, cache_write_price) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  for (const [provider, models] of Object.entries(snapshot.scoped)) {
+    if (!models || typeof models !== "object") continue;
+    for (const [key, price] of Object.entries(models)) {
+      if (!price || !Number.isFinite(price.input) || !Number.isFinite(price.output)) continue;
+      insert.run(
+        snapshot.id,
+        key,
+        provider,
+        nullableNumber(price.input),
+        nullableNumber(price.output),
+        nullableNumber(price.cacheRead),
+        nullableNumber(price.cacheWrite),
+      );
+    }
   }
   return snapshot;
 }
 
 function loadPriceSet(db, priceSetId) {
   const rows = db.prepare(
-    "SELECT model_key, input_price, output_price, cache_read_price FROM model_prices WHERE price_set_id=?",
+    "SELECT model_key, provider, input_price, output_price, cache_read_price, cache_write_price FROM model_prices WHERE price_set_id=?",
   ).all(priceSetId);
-  return {
-    id: priceSetId,
-    prices: Object.fromEntries(rows.map((row) => [row.model_key, {
+  const prices = {};
+  const scoped = {};
+  for (const row of rows) {
+    const price = {
       input: row.input_price,
       output: row.output_price,
       cacheRead: row.cache_read_price,
-    }])),
-  };
+      cacheWrite: row.cache_write_price,
+    };
+    // `prices` is the flat openrouter scope — the shape legacy callers and
+    // legacy price sets already rely on. `scoped` is the full provider map.
+    if (row.provider === "openrouter") prices[row.model_key] = price;
+    (scoped[row.provider] ||= {})[row.model_key] = price;
+  }
+  return { id: priceSetId, prices, scoped };
 }
 
-function calculateCost(usage, model, prices) {
-  const resolved = resolvePrice(model, prices);
+export function calculateCost(usage, model, prices, provider = null) {
+  const resolved = resolvePrice(model, prices, provider);
   if (!resolved) return null;
   const price = resolved.price;
   if (!Number.isFinite(price.input) || !Number.isFinite(price.output)) return null;
   const cacheReadPrice = Number.isFinite(price.cacheRead) ? price.cacheRead : price.input * 0.1;
+  // Cache-creation tokens bill at cacheWrite when the model configures one;
+  // otherwise they fall back to the input rate (today's behaviour).
+  const cacheWritePrice = Number.isFinite(price.cacheWrite) ? price.cacheWrite : price.input;
   const cost = ((usage.inputTokens || 0) * price.input + (usage.outputTokens || 0) * price.output +
-    (usage.cacheReadTokens || 0) * cacheReadPrice + (usage.cacheCreationTokens || 0) * price.input) / 1_000_000;
+    (usage.cacheReadTokens || 0) * cacheReadPrice + (usage.cacheCreationTokens || 0) * cacheWritePrice) / 1_000_000;
   return Number.isFinite(cost) ? cost : null;
 }
 
@@ -1473,7 +1554,7 @@ function makeRunProjection(db, row, options = {}) {
     gitRef: { type: workspace?.ref_type || "unknown", name: workspace?.ref_name || null, headSha: workspace?.head_sha || null },
     repository: workspace?.common_dir || null, worktreePath: workspace?.worktree_path || null,
     launchWorkspace: launch ? { cwd: launch.cwd, refType: launch.ref_type, refName: launch.ref_name, headSha: launch.head_sha } : null,
-    exitCode: row.exit_code, native: Boolean(row.native), sessionId: row.session_id, transcriptPath: row.transcript_path,
+    exitCode: row.exit_code, native: Boolean(row.native), provider: row.provider || "openrouter", sessionId: row.session_id, transcriptPath: row.transcript_path,
     consolePid: row.console_pid ?? null, windowTitle: row.window_title || null, launchedBy: row.launched_by || null,
     claudeConfigDir: row.claude_config_dir, taskId: task, taskIdExplicit: taskLink?.confidence === 1 ? task : null,
     taskAttribution: task ? { source: taskLink?.source || "unknown", confidence: taskLink?.confidence ?? 0 } : null,

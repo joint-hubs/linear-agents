@@ -13,7 +13,7 @@ sprawdź tutaj.**
 
 | Narzędzie | Do czego | Wywołanie | Szczegóły |
 |---|---|---|---|
-| **code-intel** | „gdzie jest X", „co woła Y", „co pęknie, jak zmienię Z" — z grafu kodu, zamiast przeszukiwania plików | `node $LA_ROOT/scripts/code-intel.mjs <find\|symbol\|impact\|path\|cycles> ...` | [code-intel.md](code-intel.md) |
+| **code-intel** | „gdzie jest X", „co woła Y", „co pęknie, jak zmienię Z" — z grafu kodu, zamiast przeszukiwania plików | `mcp__codegraph__codegraph_explore` lub `node $LA_ROOT/scripts/code-intel.mjs <explore\|symbol\|impact\|callers\|callees\|find\|files\|affected>` | [code-intel.md](code-intel.md) |
 | **graphify** | dowolny zbiór materiałów (kod, notatki, dokumenty) → graf wiedzy + klastry tematyczne | moduł Pythona, patrz dokument | [graphify.md](graphify.md) |
 | **linear-query** | odczyt z Linear (issues, issue, comments, search, team) | `node $LA_ROOT/scripts/linear-query.mjs ...` | `--help` |
 | **linear-ops** | zapis do Linear (transition, label, comment) | `node $LA_ROOT/scripts/linear-ops.mjs ...` | `--help` |

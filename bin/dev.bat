@@ -11,10 +11,14 @@ call "%~dp0_lib.bat" || exit /b 1
 REM Agent 2 - DEV. Spec: docs/agents/agent-2-dev.md
 REM Main = GLM-5.2 (base coding). Escalacja: multi-file/MCP -> Kimi, hard -> DeepSeek V4 Pro (przez /model lub subagent??w).
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\dev"
-set "ANTHROPIC_MODEL=minimax/minimax-m3"
-set "ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8"
-set "ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6"
+set "ANTHROPIC_MODEL=stealth/ox-alpha"
+REM small_fast stays minimax-m3: the openrouter tier is deepseek-v4-flash,
+REM and this squad ran minimax before the tiers moved to the provider.
 set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"
+REM Model tiers (opus/sonnet/haiku/small_fast) come from the active provider:
+REM config/models.json providers.<name>.tiers, applied by scripts/provider-resolve.mjs
+REM via _lib.bat. Switching LA_PROVIDER switches them too. Override one here (AFTER
+REM the call above) only if this squad genuinely needs a different model for it.
 echo [dev] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [dev] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL%
 claude %*

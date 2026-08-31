@@ -27,7 +27,10 @@ import { readSquadConfig } from "./squad-config.mjs";
 const __dir = dirname(fileURLToPath(import.meta.url));
 const defaultRoot = join(__dir, "..");
 
-const SQUADS = ["plan", "dev", "review", "test", "cadence"];
+// Read from squad-config rather than listed again. Eight copies of this array
+// are why the Supervisor was invisible in the dashboard for as long as it
+// existed (FOC-170) — the ninth squad should appear by existing.
+const SQUADS = Object.keys(readSquadConfig(defaultRoot).squads);
 
 const INTENTS = [
   { id: "plan", label: "Zaplanować nowy feature", squad: "plan" },
@@ -35,6 +38,9 @@ const INTENTS = [
   { id: "review", label: "Zrecenzować kod", squad: "review" },
   { id: "test", label: "Przetestować i wdrożyć", squad: "test" },
   { id: "cadence", label: "Podsumować tydzień", squad: "cadence" },
+  // The Supervisor is driven interactively — Mateusz talks to it and it starts
+  // the squad children itself — so its "kickoff" is an issue id, not a template.
+  { id: "supervisor", label: "Poprowadzić zadanie przez Supervisora", squad: "supervisor" },
   { id: "single", label: "Uruchomić pojedynczą rolę (debug)", squad: null },
 ];
 

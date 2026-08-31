@@ -39,7 +39,7 @@ odtworzenia, nie do commitowania.
 
 Przebieg na całym repo to minuty i realny koszt tokenów, jeśli włączysz warstwę LLM.
 Zanim odpalisz: zawęź korpus w `.graphifyignore` i sprawdź, czy odpowiedzi nie da się
-uzyskać z `code-intel` (sekundy) albo `flow-db patterns` (sekundy).
+uzyskać z `code-intel` / `codegraph_explore` (sekundy) albo `flow-db patterns` (sekundy).
 
 </cost_warning>
 

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "codegraph": {
+      "type": "stdio",
+      "command": "codegraph",
+      "args": ["serve", "--mcp"],
+      "_env": "CODEGRAPH_MCP_TOOLS re-enables the seven tools the MCP server hides by default (it lists only `explore`). NOTE: `codegraph install` REWRITES this file and drops the env block — verified 2026-08-26, when it silently reduced the surface back to one tool. Re-add it after any `codegraph install`, then re-run `node scripts/mcp-enable.mjs --verify`.",
+      "env": {
+        "CODEGRAPH_MCP_TOOLS": "explore,node,search,callers,callees,impact,files,status"
+      }
+    }
+  }
+}

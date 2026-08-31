@@ -1,17 +1,19 @@
 // Contract test for the central telemetry store.
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import {
   applyEvent,
   applyEvents,
+  calculateCost,
   clearRunTask,
   getRunTaskLinks,
   makeEvent,
   migrate,
   openTelemetryDb,
+  pricingSnapshot,
   queryHealth,
   queryPatterns,
   queryRuns,
@@ -20,6 +22,7 @@ import {
   recordDelegationLink,
   recordTaskLink,
   recordToolFact,
+  resolvePrice,
   orphanRunVerdict,
   ORPHAN_RUN_IDLE_MS,
   SCHEMA_VERSION,
@@ -164,8 +167,8 @@ test("health exposes store state", () => {
 test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
   const runId = "run-cache-savings";
   applyEvent(db, makeEvent("run.started", { runId, squad: "dev", startedAt: "2026-07-25T08:00:00.000Z" }, { runId, observedAt: "2026-07-25T08:00:00.000Z", sourceKind: "test" }));
-  // deepseek-v4-flash: input=0.14, cacheRead=0.028 (real, from OpenRouter — JOI-79)
-  // savings = (1M / 1M) * (0.14 - 0.028) = 0.112
+  // deepseek-v4-flash: input=0.088606, cacheRead=0.0177212 (real, from OpenRouter — JOI-79)
+  // savings = (1M / 1M) * (0.088606 - 0.0177212) = 0.0708848
   //
   // This used to expect 0.126, which is what the input*0.1 FALLBACK produces when
   // config carries no cacheRead. That fallback is wrong in both directions — 12x too
@@ -183,17 +186,108 @@ test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
   }, { runId, observedAt: "2026-07-25T08:02:00.000Z", sourceKind: "transcript", sourcePath: "C:/sessions/cache.jsonl", sourceOffset: 2, eventId: "cache-usage-2" }));
   const run = queryRuns(db, { runId })[0];
   assert(run.totals.cacheSavingsUSD > 0, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected > 0)`);
-  assert(Math.abs(run.totals.cacheSavingsUSD - 0.112) < 0.001, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected ~0.112 from the configured cacheRead=0.028)`);
+  assert(Math.abs(run.totals.cacheSavingsUSD - 0.0708848) < 0.001, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected ~0.0708848 from the configured cacheRead=0.0177212)`);
   // Per-model: deepseek-v4-flash has savings, unknown model does not
   const flashEntry = run.byModel["deepseek-v4-flash"];
   assert(flashEntry != null, "deepseek-v4-flash entry missing from byModel");
-  assert(Math.abs(flashEntry.cacheSavingsUSD - 0.112) < 0.001, `byModel flash cacheSavingsUSD=${flashEntry.cacheSavingsUSD}`);
+  assert(Math.abs(flashEntry.cacheSavingsUSD - 0.0708848) < 0.001, `byModel flash cacheSavingsUSD=${flashEntry.cacheSavingsUSD}`);
   const unknownEntry = run.byModel["unknown-model-v99"];
   assert(unknownEntry != null, "unknown-model-v99 entry missing from byModel");
   assert(unknownEntry.cacheSavingsUSD === 0, `byModel unknown cacheSavingsUSD=${unknownEntry.cacheSavingsUSD} (expected 0)`);
   // Summary must aggregate cacheSavingsUSD
   const summary = querySummary(db);
   assert(summary.totals.cacheSavingsUSD > 0, `summary cacheSavingsUSD=${summary.totals.cacheSavingsUSD} (expected > 0)`);
+});
+
+// --- provider-scoped pricing (PRD provider-config §4.4) --------------------
+
+test("pricingSnapshot reads the nested config as a provider-scoped openrouter scope", () => {
+  // The row COUNT used to be asserted exactly (22). That is a test that fails
+  // when someone prices a new model — growth, not regression — and it went red
+  // three times in one session for exactly that reason. What the PRD actually
+  // requires is that the flat view and the scoped view describe the same set,
+  // and that a known row survives the nesting.
+  const snapshot = pricingSnapshot();
+  const keys = Object.keys(snapshot.prices);
+  assert(keys.length > 0, "openrouter prices are empty");
+  assert(snapshot.scoped.openrouter != null, "scoped.openrouter missing");
+  assert(
+    Object.keys(snapshot.scoped.openrouter).length === keys.length,
+    `flat view has ${keys.length} rows, scoped.openrouter has ${Object.keys(snapshot.scoped.openrouter).length}`,
+  );
+  const glm = snapshot.prices["z-ai/glm-5.2"];
+  assert(glm && glm.input === 1.19 && glm.output === 3.74 && glm.cacheRead === 0.221, `z-ai/glm-5.2 row=${JSON.stringify(glm)}`);
+});
+
+test("pricingSnapshot strips _doc/_note metadata and still classifies nested pricing", () => {
+  const cfgRoot = join(temp, "pricing-meta");
+  mkdirSync(join(cfgRoot, "config"), { recursive: true });
+  writeFileSync(join(cfgRoot, "config", "models.json"), JSON.stringify({
+    pricing: {
+      _doc: "USD per 1M tokens",
+      openrouter: {
+        _note: "internal note",
+        "a/b": { input: 1, output: 2 },
+        "c/d": { input: 3, output: 4 },
+      },
+    },
+  }));
+  const snapshot = pricingSnapshot(cfgRoot);
+  assert(Object.keys(snapshot.scoped).length === 1, `scoped providers=${Object.keys(snapshot.scoped).join(",")} (expected openrouter only)`);
+  assert(snapshot.scoped._doc === undefined, "_doc leaked into scoped");
+  assert(snapshot.scoped.openrouter._note === undefined, "_note leaked into scoped.openrouter");
+  assert(Object.keys(snapshot.prices).length === 2, `prices rows=${Object.keys(snapshot.prices).length} (expected 2)`);
+  assert(snapshot.prices["a/b"].input === 1, `a/b row=${JSON.stringify(snapshot.prices["a/b"])}`);
+});
+
+test("resolvePrice scopes by provider and preserves flat fuzzy when none is given", () => {
+  const nested = {
+    openrouter: { "z-ai/glm-5.2": { input: 1.19, output: 3.74, cacheRead: 0.221 } },
+    zai_anthropic: { "glm-5.2": { input: 0.5, output: 2.0, cacheRead: 0.05 } },
+  };
+  // Exact within the openrouter scope.
+  const or = resolvePrice("z-ai/glm-5.2", nested, "openrouter");
+  assert(or && or.price.input === 1.19, `openrouter resolve=${JSON.stringify(or)}`);
+  // Exact within the zai_anthropic scope (different key spelling).
+  const zai = resolvePrice("glm-5.2", nested, "zai_anthropic");
+  assert(zai && zai.price.input === 0.5, `zai exact resolve=${JSON.stringify(zai)}`);
+  // Fuzzy within the zai_anthropic scope: "z-ai/glm-5.2" short-matches "glm-5.2".
+  const zaiFuzzy = resolvePrice("z-ai/glm-5.2", nested, "zai_anthropic");
+  assert(zaiFuzzy && zaiFuzzy.price.input === 0.5, `zai fuzzy resolve=${JSON.stringify(zaiFuzzy)}`);
+  // No provider → flat map, today's fuzzy behaviour.
+  const flat = resolvePrice("z-ai/glm-5.2", { "z-ai/glm-5.2": { input: 1.19 } });
+  assert(flat && flat.price.input === 1.19, `flat resolve=${JSON.stringify(flat)}`);
+});
+
+test("calculateCost bills cache-creation at cacheWrite, falling back to input", () => {
+  const prices = pricingSnapshot().prices;
+  // anthropic/claude-opus-5: input=5, cacheWrite=6.25 → cache-creation billed at 6.25.
+  const withWrite = calculateCost({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 1_000_000 }, "anthropic/claude-opus-5", prices);
+  assert(Math.abs(withWrite - 6.25) < 0.0001, `cacheWrite cost=${withWrite} (expected 6.25)`);
+  // deepseek/deepseek-v4-flash has no cacheWrite → falls back to input (0.088606).
+  const fallback = calculateCost({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 1_000_000 }, "deepseek/deepseek-v4-flash", prices);
+  assert(Math.abs(fallback - 0.088606) < 0.0001, `fallback cost=${fallback} (expected 0.088606)`);
+});
+
+test("model_prices migration backfills provider='openrouter' on a pre-existing DB", () => {
+  const legacyPath = join(temp, "telemetry-legacy-prices.sqlite");
+  const legacy = openTelemetryDb(legacyPath);
+  // Simulate a pre-migration DB: drop the two columns this slice adds, then
+  // insert a legacy flat price row (no provider, no cache_write column).
+  legacy.exec("ALTER TABLE model_prices DROP COLUMN provider");
+  legacy.exec("ALTER TABLE model_prices DROP COLUMN cache_write_price");
+  legacy.exec("PRAGMA foreign_keys = OFF");
+  legacy.prepare("INSERT INTO model_prices (price_set_id, model_key, input_price, output_price, cache_read_price) VALUES (?, ?, ?, ?, ?)")
+    .run("legacy-set", "deepseek/deepseek-v4-flash", 0.088606, 0.177212, 0.0177212);
+  legacy.exec("PRAGMA foreign_keys = ON");
+  legacy.close();
+
+  const migrated = openTelemetryDb(legacyPath);
+  const row = migrated.prepare("SELECT provider, cache_write_price FROM model_prices WHERE price_set_id=? AND model_key=?").get("legacy-set", "deepseek/deepseek-v4-flash");
+  assert(row != null, "legacy price row missing after migration");
+  assert(row.provider === "openrouter", `provider=${row.provider} (expected 'openrouter')`);
+  assert(row.cache_write_price === null, `cache_write_price=${row.cache_write_price} (expected null)`);
+  migrated.close();
 });
 
 test("getRunTaskLinks returns current=null when no links exist", () => {

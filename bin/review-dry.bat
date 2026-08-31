@@ -11,10 +11,11 @@ REM Agent 3 - REVIEW (DRY-RUN). Spec: docs/agents/agent-3-review.md
 REM DRY-RUN: no push, no Linear MCP, auto-approve HITL gates.
 REM Review is read-only analysis — no code edits or writes.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\review"
-set "ANTHROPIC_MODEL=minimax/minimax-m3"
-set "ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8"
-set "ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6"
-set "ANTHROPIC_SMALL_FAST_MODEL=deepseek/deepseek-v4-flash"
+set "ANTHROPIC_MODEL=stealth/ox-alpha"
+REM Model tiers (opus/sonnet/haiku/small_fast) come from the active provider:
+REM config/models.json providers.<name>.tiers, applied by scripts/provider-resolve.mjs
+REM via _lib.bat. Switching LA_PROVIDER switches them too. Override one here (AFTER
+REM the call above) only if this squad genuinely needs a different model for it.
 set "REVIEW_DRY_RUN=1"
 echo [review-dry] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [review-dry] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL% DRY_RUN=%REVIEW_DRY_RUN%

@@ -2,21 +2,52 @@
   "permissions": {
     "defaultMode": "default",
     "allow": [
-      "Read", "Grep", "Glob", "Write",
+      "Read",
+      "Grep",
+      "Glob",
+      "Write",
       "Bash(node:*)",
-      "Bash(graphify query:*)", "Bash(graphify affected:*)", "Bash(graphify god-nodes:*)",
-      "Bash(graphify path:*)", "Bash(graphify explain:*)",
-      "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
-      "Bash(semgrep:*)", "Bash(snyk:*)", "Bash(trivy:*)", "Bash(gitleaks:*)", "Bash(npx eslint:*)", "Bash(ruff:*)"
+      "Bash(graphify query:*)",
+      "Bash(graphify affected:*)",
+      "Bash(graphify god-nodes:*)",
+      "Bash(graphify path:*)",
+      "Bash(graphify explain:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(semgrep:*)",
+      "Bash(snyk:*)",
+      "Bash(trivy:*)",
+      "Bash(gitleaks:*)",
+      "Bash(npx eslint:*)",
+      "Bash(ruff:*)",
+      "mcp__codegraph__*",
+      "Bash(codegraph:*)"
     ],
     "deny": [
-      "Edit", "Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "mcp__linear__*"
+      "Edit",
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(rm -rf:*)",
+      "mcp__linear__*",
+      "Artifact",
+      "PushNotification",
+      "ListAgents",
+      "Monitor"
     ]
   },
   "theme": "dark",
   "hooks": {
-    "SessionStart": [{
-      "hooks": [{ "type": "command", "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"", "timeout": 5 }]
-    }]
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$LA_ROOT/scripts/telemetry-hook.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

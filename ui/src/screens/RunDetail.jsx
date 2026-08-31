@@ -14,9 +14,12 @@ import {
 } from '../utils';
 import RunTaskModal from '../components/RunTaskModal';
 
-// Provider label from the `native` flag (ux-design-v3 §3.3.1).
+// Provider label: the `native` flag wins (anthropic-sub); otherwise show the
+// recorded provider (legacy rows default to 'openrouter'); '—' only when nothing
+// is known (ux-design-v3 §3.3.1).
 function providerLabel(run) {
   if (run.native === true) return 'anthropic-sub';
+  if (run.provider) return run.provider;
   if (run.native === false) return 'openrouter';
   return '—';
 }

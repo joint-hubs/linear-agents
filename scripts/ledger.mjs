@@ -26,13 +26,13 @@ import { homedir } from "node:os";
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
 
-/** Lazy-loaded pricing table from config/models.json. */
+/** Lazy-loaded pricing table from config/models.json (OpenRouter scope). */
 let _pricing = null;
 function getPricing() {
   if (_pricing) return _pricing;
   try {
     const cfg = JSON.parse(readFileSync(join(root, "config", "models.json"), "utf8"));
-    _pricing = cfg.pricing || {};
+    _pricing = cfg.pricing?.openrouter || {};
   } catch {
     _pricing = {};
   }

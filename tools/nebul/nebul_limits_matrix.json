@@ -1,0 +1,123 @@
+{
+ "body_file": "C:\\Users\\mateu\\Documents\\GitHub\\linear-agents\\tools\\nebul\\nebul-fail-30.bin",
+ "url": "https://api.inference.nebul.io/v1/messages?beta=true",
+ "sweep": [
+  32000,
+  64000,
+  96000,
+  128000,
+  200000,
+  400000
+ ],
+ "grow": [],
+ "results": [
+  {
+   "status": 200,
+   "elapsed": 1.2031371593475342,
+   "request_id": "64c1d377d7df4a38c74d02c883ce5d64",
+   "headers": {
+    "date": "Fri, 28 Aug 2026 07:16:37 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "64c1d377d7df4a38c74d02c883ce5d64",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "body": "ef3\r\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_72e1cddd618e4908a81a9d522d22e9d9\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"zai-org/GLM-5.2-FP8\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":62782,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Repo ist\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"nieje i\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" ma\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" struktur\u0119 op\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"isan\u0105 w\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" kickoffie. Brak `\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"docs/` (st\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\u0105d\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" PRD/\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ADR tr\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"afi\u0105\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" do `\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"docs/`). Dataset\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"cont",
+   "shed": false,
+   "label": "max_tokens=32000",
+   "body_bytes": 200010
+  },
+  {
+   "status": 200,
+   "elapsed": 0.9854717254638672,
+   "request_id": "94e31980a1fb8ffb013f79ff39d4b717",
+   "headers": {
+    "date": "Fri, 28 Aug 2026 07:16:38 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "94e31980a1fb8ffb013f79ff39d4b717",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "body": "ef3\r\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_4a452efa32104442a9ace5a2bf4fde05\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"zai-org/GLM-5.2-FP8\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":62782,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"OK\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\", repo ist\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"nieje, ale nie\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" ma `docs/`.\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" To ozn\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"acza, \u017ce PR\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"D/ADR mus\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"z\u0119 zap\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"isa\u0107 w tym\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" repo (\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Fraud\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"-Prediction), gdzie\"}}\n\nevent: content_block_delta\ndata: {\"",
+   "shed": false,
+   "label": "max_tokens=64000",
+   "body_bytes": 200010
+  },
+  {
+   "status": 200,
+   "elapsed": 0.9727857112884521,
+   "request_id": "fe2ff6b0bb29665a1948b6750ed91ad6",
+   "headers": {
+    "date": "Fri, 28 Aug 2026 07:16:39 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "fe2ff6b0bb29665a1948b6750ed91ad6",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "body": "ef3\r\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_720cba997d3a4b2eae609a60fd06d1bb\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"zai-org/GLM-5.2-FP8\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":62782,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Repo\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" Fra\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"udy-Prediction ist\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"nieje,\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" nie\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" ma `docs/` \u2014\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" b\u0119d\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"\u0119 twor\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"zy\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"\u0142 PR\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"D w\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" `docs/pr\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"inde",
+   "shed": false,
+   "label": "max_tokens=96000",
+   "body_bytes": 200010
+  },
+  {
+   "status": 200,
+   "elapsed": 0.9818985462188721,
+   "request_id": "659f69a2a50b99257a6fcf405935d967",
+   "headers": {
+    "date": "Fri, 28 Aug 2026 07:16:40 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "659f69a2a50b99257a6fcf405935d967",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "body": "ef3\r\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1d7b84bc28534dd6b347e8c8538344a6\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"zai-org/GLM-5.2-FP8\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":62782,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Repo\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" ist\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"nieje,\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" ma\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" \"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"5 notebook\u00f3w +\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" funs\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\".py + README\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\".\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" Brak `docs/`\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" \u2014 to tam\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" w\u0142a\u015bnie\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"i",
+   "shed": false,
+   "label": "max_tokens=128000",
+   "body_bytes": 200011
+  },
+  {
+   "status": 200,
+   "elapsed": 1.0479357242584229,
+   "request_id": "f36366ccf5be3dd9d822f9a09dd635eb",
+   "headers": {
+    "date": "Fri, 28 Aug 2026 07:16:41 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "f36366ccf5be3dd9d822f9a09dd635eb",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "body": "ef3\r\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_9ff984923e2b44bfbb9cac90f7b23a87\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"zai-org/GLM-5.2-FP8\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":62782,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Repo ist\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"nieje, br\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ak `docs/` (\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"P\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"RD b\u0119d\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\u0119 tworzy\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\u0142). M\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"a\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"m struktur\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\u0119 zgod\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"n\u0105\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" z kickoff\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"em. Ter\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"",
+   "shed": false,
+   "label": "max_tokens=200000",
+   "body_bytes": 200011
+  },
+  {
+   "status": 200,
+   "elapsed": 1.0276122093200684,
+   "request_id": "e1aa50699de6428ea92e9f55dae06bac",
+   "headers": {
+    "date": "Fri, 28 Aug 2026 07:16:42 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "e1aa50699de6428ea92e9f55dae06bac",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "body": "ef3\r\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_400ed441707747659223b890b95e0910\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"zai-org/GLM-5.2-FP8\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":62782,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Repo ist\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"nieje, str\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"uktura zgod\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"na z\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" ust\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"aleniami\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\". Br\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ak `docs/` w\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" repo Fra\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"udy-Prediction (jest\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" doc\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"elow\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"y\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block",
+   "shed": false,
+   "label": "max_tokens=400000",
+   "body_bytes": 200011
+  }
+ ]
+}

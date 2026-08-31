@@ -3,7 +3,21 @@ import { getSquadConfig, postSquadConfig } from '../api';
 import SquadCard from '../components/SquadCard';
 import ToolEditorModal from '../components/ToolEditorModal';
 
-const SQUADS = ['plan', 'dev', 'review', 'test', 'cadence'];
+// Display ORDER only. Which squads exist comes from the server (readSquadConfig
+// derives it from config/models.json routing), so a new squad appears without
+// an edit here — it just sorts last. Hardcoding the set is what hid the
+// Supervisor from this screen for as long as it existed (FOC-170).
+const SQUAD_ORDER = ['plan', 'dev', 'review', 'test', 'cadence', 'supervisor'];
+const orderSquads = (names) =>
+  [...names].sort((a, b) => {
+    const ia = SQUAD_ORDER.indexOf(a);
+    const ib = SQUAD_ORDER.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+  });
+const DEFAULT_PROVIDER = 'openrouter';
+const PROVIDER_NAME_RE = /^[a-z][a-z0-9_-]*$/;
+const BASE_URL_RE = /^https?:\/\/\S+$/;
+const AUTH_ENV_RE = /^[A-Z][A-Z0-9_]*$/;
 
 function deepClone(obj) {
   return JSON.parse(JSON.stringify(obj));
@@ -23,14 +37,24 @@ function normalizeAgents(agents) {
   return out;
 }
 
+function samePrice(a, b) {
+  return (a?.input ?? 0) === (b?.input ?? 0)
+    && (a?.output ?? 0) === (b?.output ?? 0)
+    && (a?.cacheRead ?? 0) === (b?.cacheRead ?? 0)
+    && (a?.cacheWrite ?? 0) === (b?.cacheWrite ?? 0);
+}
+
 function countDirty(orig, edit) {
   if (!orig || !edit) return 0;
   let n = 0;
-  for (const s of SQUADS) {
+
+  // Squads: lead, provider, agent models/tools
+  for (const s of Object.keys(orig.squads || {})) {
     const o = orig.squads?.[s];
     const e = edit.squads?.[s];
     if (!o || !e) continue;
     if (o.lead !== e.lead) n++;
+    if ((o.provider || DEFAULT_PROVIDER) !== (e.provider || DEFAULT_PROVIDER)) n++;
     if (o.agents) {
       for (const [role, agent] of Object.entries(o.agents)) {
         const ea = e.agents?.[role];
@@ -42,16 +66,34 @@ function countDirty(orig, edit) {
       }
     }
   }
-  const slugs = new Set([
+
+  // Providers: add/edit/remove
+  const providerNames = new Set([
+    ...Object.keys(orig.providers || {}),
+    ...Object.keys(edit.providers || {}),
+  ]);
+  for (const p of providerNames) {
+    const o = orig.providers?.[p];
+    const e = edit.providers?.[p];
+    if (JSON.stringify(o ?? null) !== JSON.stringify(e ?? null)) n++;
+  }
+
+  // Pricing: nested per provider
+  const pricingProviders = new Set([
     ...Object.keys(orig.pricing || {}),
     ...Object.keys(edit.pricing || {}),
   ]);
-  for (const slug of slugs) {
-    const o = orig.pricing?.[slug];
-    const e = edit.pricing?.[slug];
-    if (!o && e) { n++; continue; }
-    if (o && !e) { n++; continue; }
-    if (o.input !== e.input || o.output !== e.output || (o.cacheRead || 0) !== (e.cacheRead || 0)) n++;
+  for (const p of pricingProviders) {
+    const slugs = new Set([
+      ...Object.keys(orig.pricing?.[p] || {}),
+      ...Object.keys(edit.pricing?.[p] || {}),
+    ]);
+    for (const slug of slugs) {
+      const o = orig.pricing?.[p]?.[slug];
+      const e = edit.pricing?.[p]?.[slug];
+      if ((o === undefined) !== (e === undefined)) { n++; continue; }
+      if (o && e && !samePrice(o, e)) n++;
+    }
   }
   return n;
 }
@@ -67,6 +109,16 @@ export default function SquadConfig() {
   const [errorDetails, setErrorDetails] = useState(null);
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState(null);
+
+  // Provider editor form (add/edit)
+  const [providerForm, setProviderForm] = useState({
+    name: '', baseUrl: '', authEnv: '', authStyle: 'token', models: '',
+  });
+  const [editingProvider, setEditingProvider] = useState(null); // name | null
+  const [providerError, setProviderError] = useState(null);
+
+  // Which provider's pricing is shown in the pricing editor
+  const [pricingProvider, setPricingProvider] = useState(DEFAULT_PROVIDER);
 
   // New pricing row form
   const [newSlug, setNewSlug] = useState('');
@@ -90,7 +142,11 @@ export default function SquadConfig() {
         if (squads[s].agents) squads[s].agents = normalizeAgents(squads[s].agents);
       }
       setConfig({ ...data, squads });
-      setEdited({ squads: deepClone(squads), pricing: deepClone(data.pricing || {}) });
+      setEdited({
+        squads: deepClone(squads),
+        pricing: deepClone(data.pricing || {}),
+        providers: deepClone(data.providers || {}),
+      });
       setPreview(null);
       setSuccess(null);
     } catch (e) {
@@ -118,6 +174,18 @@ export default function SquadConfig() {
     setSuccess(null);
   };
 
+  const handleProviderChange = (squad, value) => {
+    setEdited((prev) => ({
+      ...prev,
+      squads: {
+        ...prev.squads,
+        [squad]: { ...prev.squads[squad], provider: value },
+      },
+    }));
+    setPreview(null);
+    setSuccess(null);
+  };
+
   const handleAgentChange = (squad, role, value) => {
     setEdited((prev) => {
       const existing = prev.squads[squad]?.agents?.[role];
@@ -137,19 +205,116 @@ export default function SquadConfig() {
     setSuccess(null);
   };
 
+  // ---- provider handlers --------------------------------------------------
+
+  const handleProviderFormChange = (field, value) => {
+    setProviderForm((prev) => ({ ...prev, [field]: value }));
+    setProviderError(null);
+  };
+
+  const handleProviderSubmit = () => {
+    const name = providerForm.name.trim();
+    if (!PROVIDER_NAME_RE.test(name)) {
+      setProviderError('Nazwa providera musi pasować do [a-z][a-z0-9_-]* (np. my_provider).');
+      return;
+    }
+    if (!BASE_URL_RE.test(providerForm.baseUrl.trim())) {
+      setProviderError('baseUrl musi być poprawnym URL http(s).');
+      return;
+    }
+    if (!AUTH_ENV_RE.test(providerForm.authEnv.trim())) {
+      setProviderError('authEnv musi być nazwą zmiennej środowiskowej (np. MY_API_KEY).');
+      return;
+    }
+    const models = providerForm.models
+      .split(',')
+      .map((m) => m.trim())
+      .filter(Boolean);
+    const profile = {
+      baseUrl: providerForm.baseUrl.trim(),
+      authEnv: providerForm.authEnv.trim(),
+      authStyle: providerForm.authStyle === 'apikey' ? 'apikey' : 'token',
+    };
+    if (models.length) profile.models = models;
+
+    setEdited((prev) => ({
+      ...prev,
+      providers: { ...prev.providers, [name]: profile },
+    }));
+    setProviderError(null);
+    setProviderForm({ name: '', baseUrl: '', authEnv: '', authStyle: 'token', models: '' });
+    setEditingProvider(null);
+    setPreview(null);
+    setSuccess(null);
+  };
+
+  const handleEditProvider = (name) => {
+    const p = edited?.providers?.[name] || {};
+    setProviderForm({
+      name,
+      baseUrl: p.baseUrl || '',
+      authEnv: p.authEnv || '',
+      authStyle: p.authStyle || 'token',
+      models: (p.models || []).join(', '),
+    });
+    setEditingProvider(name);
+    setProviderError(null);
+  };
+
+  const handleRemoveProvider = (name) => {
+    if (name === DEFAULT_PROVIDER) {
+      setProviderError('Provider "openrouter" jest domyślny i nie może zostać usunięty.');
+      return;
+    }
+    const referencing = orderSquads(Object.keys(edited?.squads || {})).filter(
+      (s) => (edited?.squads?.[s]?.provider || DEFAULT_PROVIDER) === name,
+    );
+    if (referencing.length > 0) {
+      setProviderError(`Nie można usunąć providera "${name}" — używają go składy: ${referencing.join(', ')}.`);
+      return;
+    }
+    setEdited((prev) => {
+      const providers = { ...prev.providers };
+      delete providers[name];
+      const pricing = { ...prev.pricing };
+      delete pricing[name]; // removal also removes its pricing scope
+      return { ...prev, providers, pricing };
+    });
+    if (pricingProvider === name) setPricingProvider(DEFAULT_PROVIDER);
+    if (editingProvider === name) {
+      setEditingProvider(null);
+      setProviderForm({ name: '', baseUrl: '', authEnv: '', authStyle: 'token', models: '' });
+    }
+    setProviderError(null);
+    setPreview(null);
+    setSuccess(null);
+  };
+
+  const handleCancelProviderEdit = () => {
+    setEditingProvider(null);
+    setProviderForm({ name: '', baseUrl: '', authEnv: '', authStyle: 'token', models: '' });
+    setProviderError(null);
+  };
+
   // ---- pricing handlers ---------------------------------------------------
 
   const handlePriceChange = (slug, field, value) => {
-    setEdited((prev) => ({
-      ...prev,
-      pricing: {
-        ...prev.pricing,
-        [slug]: {
-          ...prev.pricing[slug],
-          [field]: field === 'cacheRead' ? (value === '' ? undefined : Number(value) || 0) : Number(value) || 0,
+    setEdited((prev) => {
+      const current = prev.pricing[pricingProvider]?.[slug] || {};
+      const next = { ...current };
+      if (field === 'cacheRead' || field === 'cacheWrite') {
+        next[field] = value === '' ? undefined : (Number(value) || 0);
+      } else {
+        next[field] = Number(value) || 0;
+      }
+      return {
+        ...prev,
+        pricing: {
+          ...prev.pricing,
+          [pricingProvider]: { ...(prev.pricing[pricingProvider] || {}), [slug]: next },
         },
-      },
-    }));
+      };
+    });
     setPreview(null);
     setSuccess(null);
   };
@@ -157,10 +322,10 @@ export default function SquadConfig() {
   const handlePriceSlugChange = (oldSlug, newSlug) => {
     if (!newSlug.trim() || oldSlug === newSlug) return;
     setEdited((prev) => {
-      const p = { ...prev.pricing };
-      p[newSlug] = { ...p[oldSlug] };
-      delete p[oldSlug];
-      return { ...prev, pricing: p };
+      const scope = { ...(prev.pricing[pricingProvider] || {}) };
+      scope[newSlug] = { ...scope[oldSlug] };
+      delete scope[oldSlug];
+      return { ...prev, pricing: { ...prev.pricing, [pricingProvider]: scope } };
     });
     setPreview(null);
     setSuccess(null);
@@ -173,9 +338,9 @@ export default function SquadConfig() {
       ...prev,
       pricing: {
         ...prev.pricing,
-        [slug]: {
-          input: Number(newInput) || 0,
-          output: Number(newOutput) || 0,
+        [pricingProvider]: {
+          ...(prev.pricing[pricingProvider] || {}),
+          [slug]: { input: Number(newInput) || 0, output: Number(newOutput) || 0 },
         },
       },
     }));
@@ -188,9 +353,9 @@ export default function SquadConfig() {
 
   const handleRemovePricing = (slug) => {
     setEdited((prev) => {
-      const p = { ...prev.pricing };
-      delete p[slug];
-      return { ...prev, pricing: p };
+      const scope = { ...(prev.pricing[pricingProvider] || {}) };
+      delete scope[slug];
+      return { ...prev, pricing: { ...prev.pricing, [pricingProvider]: scope } };
     });
     setPreview(null);
     setSuccess(null);
@@ -207,6 +372,7 @@ export default function SquadConfig() {
       const result = await postSquadConfig({
         squads: edited.squads,
         pricing: edited.pricing,
+        providers: edited.providers,
         dryRun: true,
       });
       setPreview(result);
@@ -227,6 +393,7 @@ export default function SquadConfig() {
       const result = await postSquadConfig({
         squads: edited.squads,
         pricing: edited.pricing,
+        providers: edited.providers,
         dryRun: false,
       });
       setSuccess(result);
@@ -250,7 +417,11 @@ export default function SquadConfig() {
 
   const handleDiscard = () => {
     if (!config) return;
-    setEdited({ squads: deepClone(config.squads || {}), pricing: deepClone(config.pricing || {}) });
+    setEdited({
+      squads: deepClone(config.squads || {}),
+      pricing: deepClone(config.pricing || {}),
+      providers: deepClone(config.providers || {}),
+    });
     setPreview(null);
     setSuccess(null);
     setError(null);
@@ -275,8 +446,17 @@ export default function SquadConfig() {
     );
   }
 
-  const pricing = config?.pricing || {};
-  const pricingSlugs = Object.keys(edited?.pricing || {}).sort();
+  const providerNames = [...new Set([
+    ...Object.keys(edited?.providers || {}),
+    ...Object.keys(edited?.pricing || {}),
+  ])];
+  const activePricingProvider = providerNames.includes(pricingProvider)
+    ? pricingProvider
+    : DEFAULT_PROVIDER;
+  const pricingSlugs = Object.keys(edited?.pricing?.[activePricingProvider] || {}).sort();
+  const pricingPlaceholder = activePricingProvider === DEFAULT_PROVIDER
+    ? 'provider/model-slug'
+    : 'model-id';
 
   return (
     <div className="page">
@@ -285,7 +465,7 @@ export default function SquadConfig() {
         <div>
           <div className="page-title">Konfiguracja składów</div>
           <div className="page-sub">
-            Modele LLM per skład · cennik OpenRouter · zmiany działają przy następnym uruchomieniu
+            Modele LLM per skład · providerzy · cennik · zmiany działają przy następnym uruchomieniu
           </div>
         </div>
         {dirtyCount > 0 && (
@@ -312,22 +492,28 @@ export default function SquadConfig() {
           Jak to działa?
         </summary>
         <p style={{ margin: '8px 0 0' }}>
-          Tutaj konfigurujesz, które modele LLM są przypisane do poszczególnych składów (plan, dev, review, test, cadence)
-          oraz uzupełniasz cennik OpenRouter, żeby telemetria mogła poprawnie przeliczać koszty.
+          Tutaj konfigurujesz, które modele LLM są przypisane do poszczególnych składów (plan, dev, review, test, cadence),
+          definiujesz providerów oraz uzupełniasz cennik, żeby telemetria mogła poprawnie przeliczać koszty.
         </p>
         <ul style={{ margin: '8px 0', paddingLeft: 20 }}>
           <li>
-            <strong>Provider to zawsze OpenRouter.</strong> W pola poniżej wklejasz samą nazwę modelu
-            (np. <code>anthropic/claude-opus-4.8</code>, <code>z-ai/glm-5.2</code>), bez URL-i i bez przedrostka
-            „openrouter/".
+            <strong>Provider domyślny to OpenRouter.</strong> Możesz dodać własnych providerów mówiących
+            protokołem Anthropic Messages API (np. bezpośredni Anthropic, Z.AI). Każdy skład ma swój provider,
+            a pola modeli walidują i podpowiadają nazwy zgodne z tym providerem.
+          </li>
+          <li>
+            <strong>Klucz API nigdy nie trafia do konfiguracji ani UI.</strong> Każdy provider ma pole{' '}
+            <code>authEnv</code> — nazwę zmiennej środowiskowej, pod którą klucz leży w pliku{' '}
+            <code>.env</code> (np. <code>OPENROUTER_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>).
+            Wartość klucza wpisujesz tylko tam.
+          </li>
+          <li>
+            <strong>Cennik jest per provider</strong> — ten sam model może kosztować inaczej u różnych providerów.
+            Telemetria rozlicza koszty po parze (provider, model).
           </li>
           <li>
             <strong>Zmiana zadziała przy następnym uruchomieniu składu</strong> — nie modyfikuje trwających
             sesji agentów. Jeśli chcesz zmienić model w już działającym agencie, zatrzymaj go i uruchom ponownie.
-          </li>
-          <li>
-            Cennik służy tylko do rozliczeń w panelu — nie wpływa na to, który model jest faktycznie wywoływany.
-            Modele bez wpisu w cenniku będą pokazywać $0 w telemetrii.
           </li>
         </ul>
       </details>
@@ -382,18 +568,144 @@ export default function SquadConfig() {
         </div>
       )}
 
+      {/* ---- Providers card ----------------------------------------------- */}
+      <div className="section">
+        <div className="section-h">Providerzy</div>
+
+        {providerError && (
+          <div className="api-banner" style={{ marginBottom: 12 }}>
+            {providerError}
+          </div>
+        )}
+
+        <div className="table-wrap" style={{ overflowX: 'auto' }}>
+          <table className="table">
+            <thead>
+              <tr className="th">
+                <th>Nazwa</th>
+                <th>baseUrl</th>
+                <th>authEnv</th>
+                <th>authStyle</th>
+                <th style={{ textAlign: 'right' }}>Modele</th>
+                <th style={{ width: 110 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {providerNames.map((name) => {
+                const p = edited?.providers?.[name] || {};
+                const isDefault = name === DEFAULT_PROVIDER;
+                return (
+                  <tr key={name}>
+                    <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
+                      {name}{isDefault && <span className="muted" style={{ fontSize: 11 }}> (domyślny)</span>}
+                    </td>
+                    <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 11.5 }}>{p.baseUrl || '—'}</td>
+                    <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 11.5 }}>{p.authEnv || '—'}</td>
+                    <td className="td" style={{ fontSize: 12 }}>{p.authStyle || 'token'}</td>
+                    <td className="td" style={{ textAlign: 'right', fontSize: 12 }}>{(p.models || []).length}</td>
+                    <td className="td" style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                      <button
+                        className="btn-secondary"
+                        style={{ fontSize: 11, padding: '3px 8px', marginRight: 4 }}
+                        onClick={() => handleEditProvider(name)}
+                      >
+                        Edytuj
+                      </button>
+                      {!isDefault && (
+                        <button
+                          className="btn-secondary"
+                          style={{ fontSize: 11, padding: '3px 8px' }}
+                          onClick={() => handleRemoveProvider(name)}
+                          title="Usuń providera"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {providerNames.length === 0 && (
+                <tr>
+                  <td className="td muted" colSpan={6} style={{ textAlign: 'center' }}>
+                    Brak providerów
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Add / edit provider form */}
+        <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+          <input
+            className="filter-search"
+            style={{ width: 140, fontFamily: 'var(--mono)', fontSize: 12 }}
+            value={providerForm.name}
+            onChange={(e) => handleProviderFormChange('name', e.target.value)}
+            placeholder="nazwa (np. my_llm)"
+            disabled={editingProvider !== null}
+            aria-label="Nazwa providera"
+          />
+          <input
+            className="filter-search"
+            style={{ width: 220, fontFamily: 'var(--mono)', fontSize: 12 }}
+            value={providerForm.baseUrl}
+            onChange={(e) => handleProviderFormChange('baseUrl', e.target.value)}
+            placeholder="https://api.example.com"
+            aria-label="baseUrl providera"
+          />
+          <input
+            className="filter-search"
+            style={{ width: 180, fontFamily: 'var(--mono)', fontSize: 12 }}
+            value={providerForm.authEnv}
+            onChange={(e) => handleProviderFormChange('authEnv', e.target.value)}
+            placeholder="MY_API_KEY"
+            aria-label="authEnv providera (nazwa zmiennej)"
+          />
+          <select
+            className="filter-search"
+            style={{ width: 110 }}
+            value={providerForm.authStyle}
+            onChange={(e) => handleProviderFormChange('authStyle', e.target.value)}
+            aria-label="authStyle providera"
+          >
+            <option value="token">token</option>
+            <option value="apikey">apikey</option>
+          </select>
+          <input
+            className="filter-search"
+            style={{ width: 200, fontFamily: 'var(--mono)', fontSize: 12 }}
+            value={providerForm.models}
+            onChange={(e) => handleProviderFormChange('models', e.target.value)}
+            placeholder="model-a, model-b (opcjonalne)"
+            aria-label="Lista modeli providera"
+          />
+          <button className="launch-btn" style={{ padding: '6px 14px' }} onClick={handleProviderSubmit}>
+            {editingProvider ? 'Zapisz' : 'Dodaj'}
+          </button>
+          {editingProvider && (
+            <button className="btn-secondary" style={{ padding: '6px 12px' }} onClick={handleCancelProviderEdit}>
+              Anuluj
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* ---- Squad cards -------------------------------------------------- */}
       <div className="section">
         <div className="section-h">Składy</div>
         <div className="grid grid-2">
-          {SQUADS.map((squad) => (
+          {orderSquads(Object.keys(config?.squads || {})).map((squad) => (
             <SquadCard
               key={squad}
               squad={squad}
               data={config?.squads?.[squad]}
               edited={edited?.squads?.[squad]}
-              pricing={pricing}
+              pricing={edited?.pricing || {}}
+              providers={edited?.providers || {}}
               onLeadChange={handleLeadChange}
+              onProviderChange={handleProviderChange}
               onAgentChange={handleAgentChange}
               onToolsOpen={handleToolsOpen}
             />
@@ -401,29 +713,45 @@ export default function SquadConfig() {
         </div>
       </div>
 
-      {/* ---- Pricing table ------------------------------------------------ */}
+      {/* ---- Pricing table (scoped per provider) -------------------------- */}
       <div className="section">
         <div className="section-h">Cennik (USD / 1M tokenów)</div>
+
+        {/* Provider tabs */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+          {providerNames.map((name) => (
+            <button
+              key={name}
+              className={name === activePricingProvider ? 'launch-btn' : 'btn-secondary'}
+              style={{ padding: '4px 12px', fontSize: 12 }}
+              onClick={() => setPricingProvider(name)}
+            >
+              {name}{name === DEFAULT_PROVIDER ? ' (domyślny)' : ''}
+            </button>
+          ))}
+        </div>
+
         <table className="table">
           <thead>
             <tr className="th">
-              <th>Slug modelu</th>
+              <th>Model</th>
               <th style={{ textAlign: 'right' }}>Input</th>
               <th style={{ textAlign: 'right' }}>Output</th>
               <th style={{ textAlign: 'right' }}>Cache read</th>
+              <th style={{ textAlign: 'right' }}>Cache write</th>
               <th style={{ width: 40 }}></th>
             </tr>
           </thead>
           <tbody>
             {pricingSlugs.length === 0 && (
               <tr>
-                <td className="td muted" colSpan={5} style={{ textAlign: 'center' }}>
-                  Brak wpisów w cenniku
+                <td className="td muted" colSpan={6} style={{ textAlign: 'center' }}>
+                  Brak wpisów w cenniku dla providera „{activePricingProvider}”
                 </td>
               </tr>
             )}
             {pricingSlugs.map((slug) => {
-              const p = edited?.pricing?.[slug] || {};
+              const p = edited?.pricing?.[activePricingProvider]?.[slug] || {};
               return (
                 <tr key={slug}>
                   <td className="td" style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
@@ -472,6 +800,19 @@ export default function SquadConfig() {
                       placeholder="—"
                     />
                   </td>
+                  <td className="td" style={{ textAlign: 'right' }}>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="filter-search"
+                      style={{ width: 90, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}
+                      value={p.cacheWrite ?? ''}
+                      onChange={(e) => handlePriceChange(slug, 'cacheWrite', e.target.value)}
+                      aria-label={`Cena cache write dla ${slug}`}
+                      placeholder="—"
+                    />
+                  </td>
                   <td className="td" style={{ textAlign: 'center' }}>
                     <button
                       className="btn-secondary"
@@ -495,8 +836,8 @@ export default function SquadConfig() {
                   style={{ width: '100%', fontFamily: 'var(--mono)', fontSize: 11.5 }}
                   value={newSlug}
                   onChange={(e) => setNewSlug(e.target.value)}
-                  placeholder="provider/model-slug"
-                  aria-label="Nowy slug modelu"
+                  placeholder={pricingPlaceholder}
+                  aria-label="Nowy model"
                 />
               </td>
               <td className="td" style={{ textAlign: 'right' }}>
@@ -524,6 +865,9 @@ export default function SquadConfig() {
                   placeholder="0.00"
                   aria-label="Cena output nowego modelu"
                 />
+              </td>
+              <td className="td" style={{ textAlign: 'right' }}>
+                <span className="muted" style={{ fontSize: 11 }}>—</span>
               </td>
               <td className="td" style={{ textAlign: 'right' }}>
                 <span className="muted" style={{ fontSize: 11 }}>—</span>

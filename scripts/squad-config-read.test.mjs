@@ -56,28 +56,28 @@ function buildFixture() {
   // bin/dev.bat (CRLF, simple — no NATIVE branch)
   writeFileSync(
     join(root, "bin", "dev.bat"),
-    '@echo off\r\nsetlocal\r\nset "ANTHROPIC_MODEL=z-ai/glm-5.2"\r\nset "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"\r\nclaude %*\r\nendlocal\r\n',
+    '@echo off\r\nsetlocal\r\ncall "%~dp0_lib.bat" || exit /b 1\r\nset "ANTHROPIC_MODEL=z-ai/glm-5.2"\r\nset "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"\r\nclaude %*\r\nendlocal\r\n',
     "utf8"
   );
 
   // bin/dev-dry.bat (CRLF)
   writeFileSync(
     join(root, "bin", "dev-dry.bat"),
-    '@echo off\r\nsetlocal\r\nset "ANTHROPIC_MODEL=z-ai/glm-5.2"\r\nset "DEV_DRY_RUN=1"\r\nclaude -p "dry" %*\r\nendlocal\r\n',
+    '@echo off\r\nsetlocal\r\ncall "%~dp0_lib.bat" || exit /b 1\r\nset "ANTHROPIC_MODEL=z-ai/glm-5.2"\r\nset "DEV_DRY_RUN=1"\r\nclaude -p "dry" %*\r\nendlocal\r\n',
     "utf8"
   );
 
   // bin/plan.bat (CRLF, with NATIVE/else split)
   writeFileSync(
     join(root, "bin", "plan.bat"),
-    '@echo off\r\nsetlocal\r\nif defined NATIVE (\r\n    set "ANTHROPIC_MODEL=claude-opus-4-8"\r\n) else (\r\n    set "ANTHROPIC_MODEL=anthropic/claude-opus-4.8"\r\n)\r\nclaude %*\r\nendlocal\r\n',
+    '@echo off\r\nsetlocal\r\ncall "%~dp0_lib.bat" || exit /b 1\r\nif defined NATIVE (\r\n    set "ANTHROPIC_MODEL=claude-opus-4-8"\r\n) else (\r\n    set "ANTHROPIC_MODEL=anthropic/claude-opus-4.8"\r\n)\r\nclaude %*\r\nendlocal\r\n',
     "utf8"
   );
 
   // bin/plan-dry.bat (CRLF, no NATIVE split — just the OpenRouter model)
   writeFileSync(
     join(root, "bin", "plan-dry.bat"),
-    '@echo off\r\nsetlocal\r\nset "ANTHROPIC_MODEL=anthropic/claude-opus-4.8"\r\nset "PLAN_DRY_RUN=1"\r\nclaude -p "dry" %*\r\nendlocal\r\n',
+    '@echo off\r\nsetlocal\r\ncall "%~dp0_lib.bat" || exit /b 1\r\nset "ANTHROPIC_MODEL=anthropic/claude-opus-4.8"\r\nset "PLAN_DRY_RUN=1"\r\nclaude -p "dry" %*\r\nendlocal\r\n',
     "utf8"
   );
 
@@ -151,7 +151,11 @@ function buildFixture() {
     '{\r\n' +
     '  "_doc": "Model routing source of truth",\r\n' +
     '  "providers": {\r\n' +
-    '    "openrouter": "https://openrouter.ai/api/v1"\r\n' +
+    '    "openrouter": {\r\n' +
+    '      "baseUrl": "https://openrouter.ai/api",\r\n' +
+    '      "authEnv": "OPENROUTER_API_KEY",\r\n' +
+    '      "authStyle": "token"\r\n' +
+    '    }\r\n' +
     '  },\r\n' +
     '  "ids": {\r\n' +
     '    "glm": "z-ai/glm-5.2",\r\n' +
@@ -162,8 +166,11 @@ function buildFixture() {
     '  },\r\n' +
     '  "pricing": {\r\n' +
     '    "_doc": "USD per 1M tokens (input/output)",\r\n' +
-    '    "z-ai/glm-5.2": { "input": 1.40, "output": 4.40 },\r\n' +
-    '    "minimax/minimax-m3": { "input": 0.30, "output": 1.20 }\r\n' +
+    '    "openrouter": {\r\n' +
+    '      "_note": "model-level metadata",\r\n' +
+    '      "z-ai/glm-5.2": { "input": 1.40, "output": 4.40 },\r\n' +
+    '      "minimax/minimax-m3": { "input": 0.30, "output": 1.20 }\r\n' +
+    '    }\r\n' +
     '  },\r\n' +
     '  "fallback": {\r\n' +
     '    "_note": "tool-call fail -> retry",\r\n' +
@@ -252,16 +259,20 @@ async function runTests() {
     const root = buildFixture();
     const config = readSquadConfig(root);
     assert(
-      config.pricing["z-ai/glm-5.2"] !== undefined,
-      "pricing has glm entry"
+      config.pricing.openrouter !== undefined,
+      "pricing has openrouter scope"
+    );
+    assert(
+      config.pricing.openrouter["z-ai/glm-5.2"] !== undefined,
+      "pricing has glm entry under openrouter"
     );
     assertEq(
-      config.pricing["z-ai/glm-5.2"].input,
+      config.pricing.openrouter["z-ai/glm-5.2"].input,
       1.40,
       "pricing glm input"
     );
     assertEq(
-      config.pricing["minimax/minimax-m3"].output,
+      config.pricing.openrouter["minimax/minimax-m3"].output,
       1.20,
       "pricing minimax output"
     );
@@ -299,14 +310,71 @@ async function runTests() {
       "readSquadConfig: _doc key is absent from pricing"
     );
     assert(
-      config.pricing["z-ai/glm-5.2"] !== undefined,
+      config.pricing.openrouter["_note"] === undefined,
+      "readSquadConfig: _note key is absent from pricing.openrouter"
+    );
+    assert(
+      config.pricing.openrouter["z-ai/glm-5.2"] !== undefined,
       "readSquadConfig: real pricing entries still present"
     );
     assertEq(
-      config.pricing["z-ai/glm-5.2"].input,
+      config.pricing.openrouter["z-ai/glm-5.2"].input,
       1.40,
       "readSquadConfig: glm input correct"
     );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 7: readSquadConfig exposes the providers map ----
+  {
+    const root = buildFixture();
+    const config = readSquadConfig(root);
+    assert(
+      config.providers !== undefined,
+      "readSquadConfig: providers map present"
+    );
+    assert(
+      config.providers.openrouter !== undefined,
+      "readSquadConfig: openrouter provider present"
+    );
+    assertEq(
+      config.providers.openrouter.baseUrl,
+      "https://openrouter.ai/api",
+      "readSquadConfig: openrouter baseUrl"
+    );
+    assertEq(
+      config.providers.openrouter.authEnv,
+      "OPENROUTER_API_KEY",
+      "readSquadConfig: openrouter authEnv"
+    );
+    assertEq(
+      config.providers.openrouter.authStyle,
+      "token",
+      "readSquadConfig: openrouter authStyle"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 8: read per-squad provider (default openrouter + custom line) ----
+  {
+    const root = buildFixture();
+    // No LA_PROVIDER line anywhere → default openrouter
+    let config = readSquadConfig(root);
+    assertEq(config.squads.dev.provider, "openrouter", "dev provider defaults to openrouter");
+    assertEq(config.squads.plan.provider, "openrouter", "plan provider defaults to openrouter");
+
+    // Inject a custom LA_PROVIDER line into dev.bat and read it back
+    const devBatPath = join(root, "bin", "dev.bat");
+    const devBat = readFileSync(devBatPath, "utf8");
+    const updated = devBat.replace(
+      'call "%~dp0_lib.bat"',
+      'set "LA_PROVIDER=zai_anthropic"\r\ncall "%~dp0_lib.bat"'
+    );
+    writeFileSync(devBatPath, updated, "utf8");
+
+    config = readSquadConfig(root);
+    assertEq(config.squads.dev.provider, "zai_anthropic", "dev provider read from LA_PROVIDER line");
+    assertEq(config.squads.plan.provider, "openrouter", "plan provider still openrouter");
     rmSync(root, { recursive: true, force: true });
   }
 }

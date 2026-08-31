@@ -1,7 +1,7 @@
 ---
 name: root-cause
 description: TEST squad — diagnose test/deploy failures (escalation). GLM-5.2.
-model: z-ai/glm-5.2
+model: stealth/ox-alpha
 tools: Read, Grep, Glob, Bash
 ---
 <role>

@@ -19,6 +19,7 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 - **1st read:** [00-overview.md](00-overview.md) — master: 5 elementów, statusy, task typing, escalation, izolacja `.bat`
 - **Run book:** [HOW-TO-RUN-AGENTS.md](HOW-TO-RUN-AGENTS.md) — operator runbook: który `.bat`, jaki kickoff wkleić
 - **Stan pracy:** [STATE.md](STATE.md) — long-work diary, najnowsza aktualizacja 2026-07-26
+- **Supervisor e2e:** [supervisor-e2e-checklist.md](supervisor-e2e-checklist.md) — ręczny przebieg FOC-116 mapowany 1:1 na AC-1…AC-10; przejdź go raz przed pierwszym realnym użyciem
 
 ## Agenci (specyfikacje)
 
@@ -50,6 +51,7 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 | [04_review_test](diagrams/04_review_test.puml) | REVIEW (potrójny par, max 2 rundy) + TEST (deploy health+rollback) |
 | [05_cadence_loop](diagrams/05_cadence_loop.puml) | CADENCE: tygodniowa pętla domykająca linię w cykl |
 | [06_signaling_protocol](diagrams/06_signaling_protocol.puml) | async human↔agent: needs:* + emoji + webhook |
+| [07_squad_graph](diagrams/07_squad_graph.puml) | **generowany** z `config/graph.json` — węzły + typowane krawędzie (handoff/return/escalate/gate). NIE edytować ręcznie: `node scripts/graph-validate.mjs --emit-puml > docs/diagrams/07_squad_graph.puml` |
 | [squad-graph](diagrams/squad-graph.html) | interaktywna mapa zależności squadów |
 | [slides](diagrams/slides/README.md) | PlantUML→PNG pipeline (render commands) |
 
@@ -74,6 +76,17 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 - `scripts/delegation-outcomes.mjs` — join review verdicts na delegations (JOI-210)
 - `scripts/prompt-library.mjs` — backend biblioteki promptów (drzewo intencji + role/lead docs)
 - `notebooks/agent_intelligence.py` — CLI → self-contained HTML z telemetrii SQL
+- `scripts/graph-validate.mjs` — walidator `config/graph.json` (topologia składów) + `--emit-puml` / `--emit-handoff-rules`
+- `scripts/graph-route.mjs` — jeden matcher `stan + etykiety → następny węzeł`; używa go dashboard (`telemetry-server.mjs`) **i** triage Supervisora, żeby nie mogły się rozjechać
+- `scripts/supervisor-triage.mjs` — `propose` / `record`: deterministyczny werdykt wejściowego węzła grafu; zapisany werdykt jest kontraktem dla `supervisor-spawn.mjs`
+- `scripts/supervisor-gate.mjs` — `emit` / `answer` / `list`: rekord bramki HITL. Plik jest źródłem prawdy (bez mirrora `needs:*` w Linearze); `answer` zapisuje, dostarcza dopiero `supervisor-followup.mjs --gate`
+- `scripts/price-check.mjs` — porównuje ceny z `config/models.json` z żywym katalogiem OpenRoutera. Sieciowy, więc **celowo poza** `config-drift.test.mjs` (ten jest offline i CI-safe). Uruchamiaj okresowo — nieaktualna cena jest cicha
+
+> **`config/graph.json` jest źródłem prawdy topologii.** `config/handoff-rules.json` to plik, który
+> `telemetry-server.mjs` czyta w runtime — jest wycofywany i **generowany** z grafu
+> (`--emit-handoff-rules`). `scripts/graph-validate.test.mjs` pilnuje, że zacommitowana wersja jest
+> dokładnie tym, co produkuje graf — to jest dowód równoważności dla migracji, nie stały widok.
+> Nie edytuj `handoff-rules.json` ręcznie; po przepięciu serwera na graf plik znika razem z emiterem.
 
 ## Status / następne kroki
 

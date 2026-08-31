@@ -1,7 +1,7 @@
 ---
 name: refactorer
 description: DEV squad — multi-file / MCP-heavy changes (strong tool-calling). Kimi K2.7 Code.
-model: moonshotai/kimi-k2.7-code
+model: stealth/ox-alpha
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 <role>

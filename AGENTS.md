@@ -1,44 +1,40 @@
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
+# CodeGraph — Code Intelligence
 
-This project is indexed by GitNexus as **linear-agents** (4091 symbols, 7691 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by **CodeGraph** (`.codegraph/`, auto-syncing). Ask the graph before you grep: one call returns the relevant symbols' verbatim source, the call paths between them, and the blast radius of a change.
 
-> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+> No `.codegraph/` yet? `codegraph init` from the project root (install: `npm i -g @colbymchenry/codegraph`, then `codegraph install` to wire the MCP server into your agent). The index keeps itself in sync via a file watcher — there is nothing to re-run after an edit.
 
 ## Always Do
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
-- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+- **Reach for `codegraph_explore` first**, for almost anything: "how does X work", "how does X reach Y", or surveying an area. One call returns source grouped by file plus the call paths — including dynamic-dispatch hops grep cannot follow. Name a file or symbol in the query to get its current line-numbered source.
+- **Run an impact check before editing a shared symbol.** `codegraph_impact` (or `codegraph impact <symbol> --depth 2`) gives the blast radius; `codegraph_explore` already includes a blast-radius summary. Report it before you touch a function with many callers, and say so plainly when the radius is wide.
+- **Before committing, check what your change reaches.** `codegraph affected <changed files>` lists the test files a change touches — run those, not the whole suite, when the suite is slow.
+- **Query directly; do not delegate exploration to a file-reading subagent.** A subagent without these tools will read files regardless, and CodeGraph becomes pure overhead. If you need a subagent, hand it the answer, not the question.
 
 ## Never Do
 
-- NEVER edit a function, class, or method without first running `impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
-- NEVER commit changes without running `detect_changes()` to check affected scope.
+- **NEVER treat a "not found" as proof of absence** when the index is missing or a file is flagged pending. `scripts/code-intel.mjs` exits 3 rather than answering in that state; if you hit it, that means UNKNOWN — confirm with Grep before reporting anything as gone.
+- **NEVER ignore a `⚠️` staleness banner** on a tool response. It names a file edited within the debounce window; read that file directly instead of trusting the indexed copy.
+- **NEVER commit `.codegraph/`.** It is a local index, gitignored, and rebuildable with one command.
 
-## Resources
+## Squads
 
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/linear-agents/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/linear-agents/clusters` | All functional areas |
-| `gitnexus://repo/linear-agents/processes` | All execution flows |
-| `gitnexus://repo/linear-agents/process/{name}` | Step-by-step execution trace |
+The MCP server is declared once in the repo's **`.mcp.json`** (project scope), which applies whatever `CLAUDE_CONFIG_DIR` a child runs under. It is **not** in `agents/*/settings.json` — Claude Code does not read `mcpServers` from settings files, and this repo carried a dead `mcpServers.linear` there for a while to prove it.
 
-## CLI
+A project-scoped server starts as `Pending approval` and stays inert until each config dir approves it. Children run headless, where no trust dialog can appear, so approval is scripted:
 
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+```bash
+node scripts/mcp-enable.mjs --verify   # once per machine; asks Claude Code whether it worked
+```
 
-<!-- gitnexus:end -->
+Squads also have the CLI wrapper:
+
+```bash
+node scripts/code-intel.mjs <explore|symbol|impact|callers|callees|find|files|affected|status>
+```
+
+The wrapper is the floor, not the ceiling: it works with no MCP wiring, from scripts, and exposes every verb. When the MCP tools are available, `codegraph_explore` is one call and returns source — prefer it.
+
+## What CodeGraph does not do
+
+Stated so nobody goes looking: there is **no circular-import check** and **no symbol-aware rename**. The previous index (GitNexus) had both; `code-intel.mjs` refuses those verbs by name rather than mapping them onto something adjacent, because "cycles: none found" from a tool that checked nothing is worse than no answer.

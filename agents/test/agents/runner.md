@@ -1,7 +1,7 @@
 ---
 name: runner
 description: TEST squad — E2E smoke/critical-path + observability (multimodal). MiniMax M3.
-model: minimax/minimax-m3
+model: stealth/ox-alpha
 tools: Read, Grep, Glob, Bash
 ---
 <role>
