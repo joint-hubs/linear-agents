@@ -45,7 +45,7 @@
         "haiku": "zai-org/GLM-5.2-FP8",
         "smallFast": "zai-org/GLM-5.2-FP8"
       },
-      "baseUrl": "https://api.inference.nebul.io/v1",
+      "baseUrl": "https://api.inference.nebul.io",
       "authEnv": "NEBUL_API_KEY",
       "authStyle": "token"
     }
