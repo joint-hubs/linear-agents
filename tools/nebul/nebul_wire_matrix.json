@@ -1,0 +1,396 @@
+{
+ "body_file": "C:\\Users\\mateu\\Documents\\GitHub\\linear-agents\\tools\\nebul\\nebul-fail-30.bin",
+ "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+ "url": "https://api.inference.nebul.io/v1/messages?beta=true",
+ "claude_betas": [
+  "claude-code-20250219",
+  "interleaved-thinking-2025-05-14",
+  "thinking-token-count-2026-05-13",
+  "context-management-2025-06-27",
+  "prompt-caching-scope-2026-01-05",
+  "mid-conversation-system-2026-04-07",
+  "advisor-tool-2026-03-01",
+  "effort-2025-11"
+ ],
+ "results": [
+  {
+   "label": "no-beta (old replay)",
+   "betas": [],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:04.434377+00:00",
+   "status": 200,
+   "elapsed_s": 2.923,
+   "request_id": "a9f3cdb260c22775b3fc531943bf52d4",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:05 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "a9f3cdb260c22775b3fc531943bf52d4",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "FULL claude code set",
+   "betas": [
+    "claude-code-20250219",
+    "interleaved-thinking-2025-05-14",
+    "thinking-token-count-2026-05-13",
+    "context-management-2025-06-27",
+    "prompt-caching-scope-2026-01-05",
+    "mid-conversation-system-2026-04-07",
+    "advisor-tool-2026-03-01",
+    "effort-2025-11"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:05.449422+00:00",
+   "status": 200,
+   "elapsed_s": 0.982,
+   "request_id": "502ab070e4375541cf072f6a1e809fba",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:06 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "502ab070e4375541cf072f6a1e809fba",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "full minus claude-code-20250219",
+   "betas": [
+    "interleaved-thinking-2025-05-14",
+    "thinking-token-count-2026-05-13",
+    "context-management-2025-06-27",
+    "prompt-caching-scope-2026-01-05",
+    "mid-conversation-system-2026-04-07",
+    "advisor-tool-2026-03-01",
+    "effort-2025-11"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:06.453041+00:00",
+   "status": 200,
+   "elapsed_s": 0.977,
+   "request_id": "08fcb4ce9ce98d39177eb54c2c411466",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:07 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "08fcb4ce9ce98d39177eb54c2c411466",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "full minus interleaved-thinking-2025-05-14",
+   "betas": [
+    "claude-code-20250219",
+    "thinking-token-count-2026-05-13",
+    "context-management-2025-06-27",
+    "prompt-caching-scope-2026-01-05",
+    "mid-conversation-system-2026-04-07",
+    "advisor-tool-2026-03-01",
+    "effort-2025-11"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:07.537891+00:00",
+   "status": 200,
+   "elapsed_s": 1.057,
+   "request_id": "bd4b53bc0daafffe5f5b356cd7994aac",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:08 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "bd4b53bc0daafffe5f5b356cd7994aac",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "full minus thinking-token-count-2026-05-13",
+   "betas": [
+    "claude-code-20250219",
+    "interleaved-thinking-2025-05-14",
+    "context-management-2025-06-27",
+    "prompt-caching-scope-2026-01-05",
+    "mid-conversation-system-2026-04-07",
+    "advisor-tool-2026-03-01",
+    "effort-2025-11"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:08.572664+00:00",
+   "status": 200,
+   "elapsed_s": 1.013,
+   "request_id": "acadc93353e2a22d2128cd70a8383445",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:09 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "acadc93353e2a22d2128cd70a8383445",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "full minus context-management-2025-06-27",
+   "betas": [
+    "claude-code-20250219",
+    "interleaved-thinking-2025-05-14",
+    "thinking-token-count-2026-05-13",
+    "prompt-caching-scope-2026-01-05",
+    "mid-conversation-system-2026-04-07",
+    "advisor-tool-2026-03-01",
+    "effort-2025-11"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:09.670479+00:00",
+   "status": 200,
+   "elapsed_s": 1.081,
+   "request_id": "5ddfa04484a176a9985b909f81e47670",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:10 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "5ddfa04484a176a9985b909f81e47670",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "full minus prompt-caching-scope-2026-01-05",
+   "betas": [
+    "claude-code-20250219",
+    "interleaved-thinking-2025-05-14",
+    "thinking-token-count-2026-05-13",
+    "context-management-2025-06-27",
+    "mid-conversation-system-2026-04-07",
+    "advisor-tool-2026-03-01",
+    "effort-2025-11"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:11.601278+00:00",
+   "status": 200,
+   "elapsed_s": 1.904,
+   "request_id": "6b6d9a35bf0ea8a500572049bd325fcf",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:12 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "6b6d9a35bf0ea8a500572049bd325fcf",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "full minus mid-conversation-system-2026-04-07",
+   "betas": [
+    "claude-code-20250219",
+    "interleaved-thinking-2025-05-14",
+    "thinking-token-count-2026-05-13",
+    "context-management-2025-06-27",
+    "prompt-caching-scope-2026-01-05",
+    "advisor-tool-2026-03-01",
+    "effort-2025-11"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:12.658441+00:00",
+   "status": 200,
+   "elapsed_s": 1.033,
+   "request_id": "d6d372a7b2f326556bc145dcaf0b5db0",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:13 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "d6d372a7b2f326556bc145dcaf0b5db0",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "full minus advisor-tool-2026-03-01",
+   "betas": [
+    "claude-code-20250219",
+    "interleaved-thinking-2025-05-14",
+    "thinking-token-count-2026-05-13",
+    "context-management-2025-06-27",
+    "prompt-caching-scope-2026-01-05",
+    "mid-conversation-system-2026-04-07",
+    "effort-2025-11"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:13.789668+00:00",
+   "status": 200,
+   "elapsed_s": 1.104,
+   "request_id": "270cf6f552eccdcd4d176f9bb39b2f68",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:14 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "270cf6f552eccdcd4d176f9bb39b2f68",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "full minus effort-2025-11",
+   "betas": [
+    "claude-code-20250219",
+    "interleaved-thinking-2025-05-14",
+    "thinking-token-count-2026-05-13",
+    "context-management-2025-06-27",
+    "prompt-caching-scope-2026-01-05",
+    "mid-conversation-system-2026-04-07",
+    "advisor-tool-2026-03-01"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:14.735219+00:00",
+   "status": 200,
+   "elapsed_s": 0.915,
+   "request_id": "a6e8f731f3805b381ef72ffbf4b033af",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:15 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "a6e8f731f3805b381ef72ffbf4b033af",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "only context-management",
+   "betas": [
+    "context-management-2025-06-27"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:15.791408+00:00",
+   "status": 200,
+   "elapsed_s": 1.032,
+   "request_id": "f45b53f9aed89c43f16ec92a8a6c79fd",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:16 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "f45b53f9aed89c43f16ec92a8a6c79fd",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "only mid-conversation-system",
+   "betas": [
+    "mid-conversation-system-2026-04-07"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:16.784257+00:00",
+   "status": 200,
+   "elapsed_s": 0.964,
+   "request_id": "ba287a14e3e62d8645f0885febcc42da",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:17 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "ba287a14e3e62d8645f0885febcc42da",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  },
+  {
+   "label": "context-mgmt + mid-conv-system",
+   "betas": [
+    "context-management-2025-06-27",
+    "mid-conversation-system-2026-04-07"
+   ],
+   "body_note": "verbatim",
+   "body_sha256": "0f089462073c2cdb87994cf739123d41f30db1930f432ea0384516bec2d83d5b",
+   "body_bytes": 196326,
+   "at": "2026-08-28T07:12:17.757536+00:00",
+   "status": 200,
+   "elapsed_s": 0.945,
+   "request_id": "a76efd45a29803f29b53e853ef19c3aa",
+   "shed": false,
+   "response_headers": {
+    "date": "Fri, 28 Aug 2026 07:12:18 GMT",
+    "content-type": "text/event-stream",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "x-request-id": "a76efd45a29803f29b53e853ef19c3aa",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+   },
+   "response_body": "",
+   "error": null
+  }
+ ]
+}
