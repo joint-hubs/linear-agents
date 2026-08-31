@@ -22,8 +22,15 @@ function runIdFrom(input) {
   return process.env.LA_RUN_ID || process.env.RUN_ID || input.run_id || input.runId || null;
 }
 
+// stdin FIRST, env second. The hook payload describes the session that is
+// actually starting; CLAUDE_CODE_SESSION_ID describes whichever session owns
+// this process tree, and a squad child launched from inside another Claude
+// session inherits the PARENT's value. With env winning, the child recorded the
+// parent's session id — four supervisor runs in the store claim the interactive
+// session that launched them (FOC-171). The env var stays as a fallback for
+// hook events whose payload carries no session id.
 function sessionIdFrom(input) {
-  return process.env.CLAUDE_CODE_SESSION_ID || input.session_id || input.sessionId || null;
+  return input.session_id || input.sessionId || process.env.CLAUDE_CODE_SESSION_ID || null;
 }
 
 const input = readInput();

@@ -356,7 +356,13 @@ const childEnv = {
   // LA_SUPERVISOR_RUN stays the Supervisor's: that one addresses the gate and
   // registry directory, which genuinely belong to the parent. Two different
   // ideas that were sharing one value by accident.
-  ...(telemetryRunId ? { RUN_ID: telemetryRunId, LA_RUN_ID: telemetryRunId } : {}),
+  //
+  // Empty string, not "leave it inherited", when telemetry failed to start. The
+  // conditional this replaces looked harmless and was not: the fallback for a
+  // null telemetryRunId was the SUPERVISOR's own RUN_ID, so a hiccup in the
+  // block above quietly turned into the parent being billed for the child.
+  RUN_ID: telemetryRunId || "",
+  LA_RUN_ID: telemetryRunId || "",
 };
 
 const watcher = spawn(process.execPath, watcherArgs, {

@@ -229,6 +229,19 @@ const watcher = spawn(process.execPath, watcherArgs, {
     LA_SUPERVISOR_RUN: runId,
     LA_SUPERVISOR_CHILD: childId,
     LA_TASK_ID: entry.taskId,
+    // Same override spawn does, and for the same reason — it was missing here,
+    // which is the whole of FOC-171. `claude --resume` fires SessionStart like
+    // any other start, telemetry-hook.mjs reads LA_RUN_ID/RUN_ID, and without
+    // this the inherited value is the SUPERVISOR's run: every follow-up turn
+    // filed the child's session against the parent. Turn 0 was fixed in
+    // 06051c6; turns 1..n were not, and they are where the volume is.
+    //
+    // Set to "" rather than left inherited when there is no telemetry run.
+    // Inheriting means the parent's id, and a child's tokens recorded against
+    // the SUPERVISOR are worse than a child's tokens recorded nowhere: the
+    // first silently doubles the parent's cost, the second shows up as a gap.
+    RUN_ID: entry.telemetryRunId || "",
+    LA_RUN_ID: entry.telemetryRunId || "",
   },
   detached: true,
   stdio: "ignore",
