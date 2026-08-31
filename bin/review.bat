@@ -7,9 +7,10 @@ REM Agent 3 - REVIEW. Spec: docs/agents/agent-3-review.md
 REM Main = GLM-5.2 (lead + deep review). first-pass = DeepSeek V4 Pro (small_fast). security = Kimi K2.7 Code.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\review"
 set "ANTHROPIC_MODEL=stealth/ox-alpha"
-set "ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8"
-set "ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6"
-set "ANTHROPIC_SMALL_FAST_MODEL=deepseek/deepseek-v4-flash"
+REM Model tiers (opus/sonnet/haiku/small_fast) come from the active provider:
+REM config/models.json providers.<name>.tiers, applied by scripts/provider-resolve.mjs
+REM via _lib.bat. Switching LA_PROVIDER switches them too. Override one here (AFTER
+REM the call above) only if this squad genuinely needs a different model for it.
 echo [review] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [review] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL%
 claude %*

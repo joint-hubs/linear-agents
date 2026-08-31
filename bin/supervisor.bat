@@ -17,27 +17,39 @@ if defined NATIVE (
     set "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5-20251001"
 ) else (
     if not defined SUPERVISOR_MODEL set "SUPERVISOR_MODEL=z-ai/glm-5.3"
-    set "ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8"
-REM The "sonnet tier" is not a model this repo routes work to — no role uses it.
-REM Claude Code claims it for its own AUTO MODE PERMISSION CLASSIFIER: on an
-REM external gateway it defaults to the sonnet tier and pins it for the session
-REM (Claude Code changelog, "the permission classifier now defaults to Sonnet 5
-REM for external sessions"). Every Bash call this session makes is judged by it.
-REM
-REM Measured 2026-08-27 on OpenRouter: one classification was 40 901 input / 7
-REM output tokens at $0.153 — SEVEN AND A HALF TIMES the $0.0204 that the DEV
-REM child's actual work cost in the same window. It also grows with the
-REM conversation, because the classifier reads it.
-REM
-REM Mateusz's call, 2026-08-27, and it IS a trade-off rather than free: this
-REM model decides which commands run. What makes it acceptable is that the
-REM failure mode is fail-closed — a classifier that cannot evaluate an action
-REM errors out instead of allowing it (changelog: "when the classifier can't
-REM evaluate an action, the error now includes a hint"). Revert this line to
-REM anthropic/claude-sonnet-4.6 if auto mode starts refusing work it should pass.
-    set "ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6"
-    set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"
+    if not defined SUPERVISOR_MODEL REM small_fast stays minimax-m3: the openrouter tier is deepseek-v4-flash,
+    if not defined SUPERVISOR_MODEL REM and this squad ran minimax before the tiers moved to the provider.
+    if not defined SUPERVISOR_MODEL set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"
 )
+REM The four model tiers are NOT set here. They come from the active provider —
+REM config/models.json providers.<name>.tiers, applied by scripts/provider-resolve.mjs
+REM through _lib.bat — so switching LA_PROVIDER switches them with it.
+REM
+REM That matters most for the "sonnet tier", which no role in this repo routes work
+REM to. Claude Code claims it for its own AUTO MODE PERMISSION CLASSIFIER: on an
+REM external gateway it defaults to the sonnet tier and pins it for the session
+REM (changelog, "the permission classifier now defaults to Sonnet 5 for external
+REM sessions"). Every Bash call is judged by it, so a slug the active provider does
+REM not host breaks every tool call rather than one role.
+REM
+REM That is not hypothetical. These launchers used to hardcode OpenRouter slugs
+REM while LA_PROVIDER was nebul, which serves open models only and has no Anthropic
+REM model under any id. Captured 2026-08-27 by the logging proxy: 24 of 30 recorded
+REM failures were 404 model_not_found, 18 of them the small_fast slug — the
+REM classifier dying on every permission question — plus a spawned Explore agent
+REM dying outright on anthropic/claude-opus-4.8.
+REM
+REM Cost, measured 2026-08-27 on OpenRouter: one classification was 40 901 input /
+REM 7 output tokens at $0.153 — SEVEN AND A HALF TIMES the $0.0204 the DEV child's
+REM actual work cost in the same window, and it grows with the conversation because
+REM the classifier reads it. The failure mode is fail-closed: a classifier that
+REM cannot evaluate an action errors out instead of allowing it.
+REM
+REM To cut that cost, change providers.<name>.tiers.sonnet/smallFast in
+REM config/models.json — once, for every squad. On nebul, mistralai/Ministral-3-14B-
+REM Instruct-2512 was verified to return tool_use; Qwen/Qwen3-30B-A3B-Instruct-2507
+REM was verified NOT to and must not be used. Any replacement also needs a pricing
+REM entry under pricing.<provider> or its cost reports as $0.
 REM Deliberately OUTSIDE the block above. Inside a parenthesised block cmd expands
 REM %SUPERVISOR_MODEL% when it parses the whole block — before the `set` on the
 REM previous line has run — so this read empty and claude started with no model.

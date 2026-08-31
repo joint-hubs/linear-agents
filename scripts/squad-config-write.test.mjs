@@ -918,6 +918,65 @@ async function runTests() {
     rmSync(root, { recursive: true, force: true });
   }
 
+  // ---- Test 20b: a UI-shaped save must not erase providers.<name>.tiers ----
+  {
+    const root = buildFixture();
+    // Seed a provider that carries model tiers (consumed by provider-resolve.mjs
+    // to set ANTHROPIC_DEFAULT_*/SMALL_FAST — including the tier Claude Code's
+    // permission classifier runs on).
+    writeSquadConfig(
+      {
+        providers: {
+          nebul: {
+            baseUrl: "https://api.inference.nebul.io",
+            authEnv: "NEBUL_API_KEY",
+            authStyle: "token",
+            tiers: { opus: "zai-org/GLM-5.2-FP8", sonnet: "zai-org/GLM-5.2-FP8" },
+          },
+        },
+      },
+      root
+    );
+    let config = readSquadConfig(root);
+    assertEq(config.providers.nebul.tiers.sonnet, "zai-org/GLM-5.2-FP8", "tiers stored on write");
+
+    // The dashboard's provider form only knows baseUrl/authEnv/authStyle/models,
+    // so it re-sends a profile with no `tiers` at all. That must not wipe them —
+    // every launcher would come up with its model aliases unset.
+    writeSquadConfig(
+      {
+        providers: {
+          nebul: { baseUrl: "http://127.0.0.1:8899", authEnv: "NEBUL_API_KEY", authStyle: "token" },
+        },
+      },
+      root
+    );
+    config = readSquadConfig(root);
+    assertEq(config.providers.nebul.baseUrl, "http://127.0.0.1:8899", "baseUrl edit applied");
+    assertEq(
+      config.providers.nebul.tiers && config.providers.nebul.tiers.sonnet,
+      "zai-org/GLM-5.2-FP8",
+      "tiers survive a save that omits them"
+    );
+
+    // An explicit tiers patch still replaces them, and non-string values are dropped.
+    writeSquadConfig(
+      {
+        providers: {
+          nebul: {
+            baseUrl: "http://127.0.0.1:8899", authEnv: "NEBUL_API_KEY", authStyle: "token",
+            tiers: { opus: "zai-org/GLM-5.1-FP8", sonnet: 42 },
+          },
+        },
+      },
+      root
+    );
+    config = readSquadConfig(root);
+    assertEq(config.providers.nebul.tiers.opus, "zai-org/GLM-5.1-FP8", "explicit tiers patch applied");
+    assertEq(config.providers.nebul.tiers.sonnet, undefined, "non-string tier value rejected");
+    rmSync(root, { recursive: true, force: true });
+  }
+
   // ---- Test 21: provider-aware slug validation (both regimes) ----
   {
     // OpenRouter regime: existing vendor/model slug regex

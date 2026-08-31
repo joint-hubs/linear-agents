@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import {
   resolveProvider,
   formatSetLines,
+  formatTierLines,
   parseEnvFile,
 } from "./provider-resolve.mjs";
 
@@ -59,7 +60,10 @@ function writeEnv(lines) {
 const CONFIG = writeConfig({
   openrouter: { baseUrl: "https://openrouter.ai/api", authEnv: "OPENROUTER_API_KEY", authStyle: "token" },
   anthropic: { baseUrl: "https://api.anthropic.com", authEnv: "ANTHROPIC_API_KEY", authStyle: "apikey" },
-  zai_anthropic: { baseUrl: "https://api.z.ai/api/anthropic", authEnv: "ZAI_API_KEY", authStyle: "token" },
+  zai_anthropic: {
+    baseUrl: "https://api.z.ai/api/anthropic", authEnv: "ZAI_API_KEY", authStyle: "token",
+    tiers: { opus: "glm-5.3", sonnet: "glm-5.2", haiku: "glm-5.2", smallFast: "glm-5.2" },
+  },
 });
 
 const ENV_FULL = writeEnv([
@@ -208,6 +212,40 @@ test("set lines carry the secret (consumed) but --check does not", () => {
   const out = runResolver(["openrouter"], env);
   assert(out.includes(`set "ANTHROPIC_AUTH_TOKEN=${OPENROUTER_KEY}"`), "set lines must carry the resolved key");
   assert(out.includes('set "LA_PROVIDER=openrouter"'), "set lines must include LA_PROVIDER");
+});
+
+// --- provider-scoped model tiers -------------------------------------------
+
+test("tiers travel with the provider so switching it switches the classifier model", () => {
+  const withTiers = resolveProvider("zai_anthropic", { configPath: CONFIG, envPath: ENV_FULL, env: {} });
+  const lines = formatSetLines(withTiers);
+  assert(lines.some((l) => l === `set "ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3"`), "opus tier line missing");
+  // The sonnet tier is what Claude Code's auto-mode permission classifier uses;
+  // pointing it at a model the active provider does not host breaks every call.
+  assert(lines.some((l) => l === `set "ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2"`), "sonnet tier line missing");
+  assert(lines.some((l) => l === `set "ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5.2"`), "haiku tier line missing");
+  assert(lines.some((l) => l === `set "ANTHROPIC_SMALL_FAST_MODEL=glm-5.2"`), "small-fast tier line missing");
+
+  const other = resolveProvider("openrouter", { configPath: CONFIG, envPath: ENV_FULL, env: {} });
+  assert(
+    !formatSetLines(other).some((l) => l.includes("glm-5.2")),
+    "another provider must not inherit these tier models",
+  );
+});
+
+test("a provider without tiers emits no tier lines (launcher keeps its own)", () => {
+  const r = resolveProvider("openrouter", { configPath: CONFIG, envPath: ENV_FULL, env: {} });
+  assert(formatTierLines(r).length === 0, "no tiers configured must emit nothing, not empty assignments");
+  assert(
+    !formatSetLines(r).some((l) => l.startsWith('set "ANTHROPIC_DEFAULT_')),
+    "set lines must not clear tier vars a launcher set itself",
+  );
+});
+
+test("--check reports every tier so a misrouted classifier is visible before launch", () => {
+  const out = runResolver(["zai_anthropic", "--check"], { ZAI_API_KEY: ZAI_KEY });
+  assert(/ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5\.2/.test(out), `--check must show the sonnet tier: ${out}`);
+  assert(!out.includes(ZAI_KEY), "--check must not print the key");
 });
 
 // --- teardown --------------------------------------------------------------

@@ -87,5 +87,11 @@ if not defined SOURCE_PATH set "SOURCE_PATH="
 for /f "delims=" %%i in ('node "%ROOT%\scripts\run-manifest.mjs" gen-id %SQUAD_SLUG%') do set "RUN_ID=%%i"
 node "%ROOT%\scripts\run-manifest.mjs" start "%RUN_ID%" %SQUAD_SLUG% "%SOURCE_PATH%"
 if not defined LA_TASK_ID set "LA_TASK_ID="
-endlocal & set "ROOT=%ROOT%" & set "LA_ROOT=%LA_ROOT%" & set "ANTHROPIC_BASE_URL=%ANTHROPIC_BASE_URL%" & set "ANTHROPIC_AUTH_TOKEN=%ANTHROPIC_AUTH_TOKEN%" & set "ANTHROPIC_API_KEY=%ANTHROPIC_API_KEY%" & set "API_TIMEOUT_MS=%API_TIMEOUT_MS%" & set "CLAUDE_CODE_SUBAGENT_MODEL=%CLAUDE_CODE_SUBAGENT_MODEL%" & set "LINEAR_API_KEY=%LINEAR_API_KEY%" & set "LINEAR_API_KEY_PISI=%LINEAR_API_KEY_PISI%" & set "LINEAR_WORKSPACE=%LINEAR_WORKSPACE%" & set "LINEAR_TEAM_KEY=%LINEAR_TEAM_KEY%" & set "OPENROUTER_API_KEY=%OPENROUTER_API_KEY%" & set "LA_PROVIDER=%LA_PROVIDER%" & set "COST_BUDGET_USD_PER_TASK=%COST_BUDGET_USD_PER_TASK%" & set "RUN_ID=%RUN_ID%" & set "LA_RUN_ID=%RUN_ID%" & set "LA_TASK_ID=%LA_TASK_ID%"
+REM The four ANTHROPIC_DEFAULT_*/SMALL_FAST vars come from provider-resolve above
+REM (config/models.json providers.<name>.tiers) and MUST be carried across this
+REM endlocal or they die with the setlocal — a launcher would then start with the
+REM tier aliases unset and Claude Code would fall back to ids the active provider
+REM may not host. A squad that wants a different model for one tier sets it AFTER
+REM `call _lib.bat`, which overrides the provider default for that launcher only.
+endlocal & set "ROOT=%ROOT%" & set "LA_ROOT=%LA_ROOT%" & set "ANTHROPIC_BASE_URL=%ANTHROPIC_BASE_URL%" & set "ANTHROPIC_AUTH_TOKEN=%ANTHROPIC_AUTH_TOKEN%" & set "ANTHROPIC_API_KEY=%ANTHROPIC_API_KEY%" & set "ANTHROPIC_DEFAULT_OPUS_MODEL=%ANTHROPIC_DEFAULT_OPUS_MODEL%" & set "ANTHROPIC_DEFAULT_SONNET_MODEL=%ANTHROPIC_DEFAULT_SONNET_MODEL%" & set "ANTHROPIC_DEFAULT_HAIKU_MODEL=%ANTHROPIC_DEFAULT_HAIKU_MODEL%" & set "ANTHROPIC_SMALL_FAST_MODEL=%ANTHROPIC_SMALL_FAST_MODEL%" & set "API_TIMEOUT_MS=%API_TIMEOUT_MS%" & set "CLAUDE_CODE_SUBAGENT_MODEL=%CLAUDE_CODE_SUBAGENT_MODEL%" & set "LINEAR_API_KEY=%LINEAR_API_KEY%" & set "LINEAR_API_KEY_PISI=%LINEAR_API_KEY_PISI%" & set "LINEAR_WORKSPACE=%LINEAR_WORKSPACE%" & set "LINEAR_TEAM_KEY=%LINEAR_TEAM_KEY%" & set "OPENROUTER_API_KEY=%OPENROUTER_API_KEY%" & set "LA_PROVIDER=%LA_PROVIDER%" & set "COST_BUDGET_USD_PER_TASK=%COST_BUDGET_USD_PER_TASK%" & set "RUN_ID=%RUN_ID%" & set "LA_RUN_ID=%RUN_ID%" & set "LA_TASK_ID=%LA_TASK_ID%"
 exit /b 0

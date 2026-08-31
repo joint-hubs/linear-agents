@@ -110,12 +110,40 @@ export function resolveProvider(provider, options = {}) {
     authStyle,
     authValue: authValue ?? null,
     present: Boolean(authValue),
+    tiers: entry.tiers && typeof entry.tiers === "object" ? entry.tiers : null,
   };
 }
 
 // ---------------------------------------------------------------------------
 // Output formatting
 // ---------------------------------------------------------------------------
+
+// The model-tier variables Claude Code resolves aliases against. Their values
+// belong to the PROVIDER, not to the squad: a slug that exists on OpenRouter
+// (anthropic/claude-opus-4.8) is a 404 on Nebul, which serves open models only.
+// Keeping them here means switching LA_PROVIDER switches them too — including
+// the sonnet tier, which Claude Code claims for its own auto-mode permission
+// classifier and which therefore fails on EVERY tool call when it points at a
+// model the active provider does not host.
+const TIER_VARS = {
+  opus: "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  sonnet: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  haiku: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  smallFast: "ANTHROPIC_SMALL_FAST_MODEL",
+};
+
+/** Emit `set "VAR=value"` lines for each tier the provider declares. A squad
+ *  that needs a different model for one tier sets it AFTER calling _lib.bat,
+ *  which overrides the provider default for that launcher only. */
+export function formatTierLines(resolved) {
+  if (!resolved.tiers) return [];
+  const lines = [];
+  for (const [tier, variable] of Object.entries(TIER_VARS)) {
+    const model = resolved.tiers[tier];
+    if (nonEmpty(model)) lines.push(`set "${variable}=${model}"`);
+  }
+  return lines;
+}
 
 export function formatSetLines(resolved) {
   const inactiveVar = resolved.authVar === "ANTHROPIC_AUTH_TOKEN"
@@ -126,17 +154,23 @@ export function formatSetLines(resolved) {
     `set "${resolved.authVar}=${resolved.authValue}"`,
     `set "${inactiveVar}="`,
     `set "LA_PROVIDER=${resolved.provider}"`,
+    ...formatTierLines(resolved),
   ];
 }
 
 function formatCheck(resolved) {
-  return [
+  const lines = [
     `provider=${resolved.provider}`,
     `baseUrl=${resolved.baseUrl}`,
     `authVar=${resolved.authVar}`,
     `authEnv=${resolved.authEnv}`,
     `authPresent=${resolved.present ? "set" : "unset"}`,
   ];
+  for (const [tier, variable] of Object.entries(TIER_VARS)) {
+    const model = resolved.tiers?.[tier];
+    lines.push(`${variable}=${nonEmpty(model) ? model : "(unset — squad launcher must provide it)"}`);
+  }
+  return lines;
 }
 
 function errorMessage(resolved) {

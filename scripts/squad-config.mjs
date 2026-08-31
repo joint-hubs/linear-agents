@@ -840,13 +840,31 @@ export function validateProvidersPatch(patch, current) {
 /**
  * Normalize a provider profile to only the whitelisted fields — secret VALUES
  * must never be accepted or stored; only env-var names are kept.
+ *
+ * `existing` is the profile already on disk. Whitelisted fields the caller did
+ * not send are carried over from it rather than dropped: the dashboard's
+ * provider form only knows baseUrl/authEnv/authStyle/models, so without this a
+ * save from the UI would silently erase `tiers` and every launcher would come
+ * up with its model aliases unset. Carrying a value forward is safe because it
+ * comes from the file, never from the request.
  */
-function normalizeProviderProfile(profile) {
+function normalizeProviderProfile(profile, existing = {}) {
   const out = {};
   if (typeof profile.baseUrl === 'string') out.baseUrl = profile.baseUrl;
   if (typeof profile.authEnv === 'string') out.authEnv = profile.authEnv;
   out.authStyle = AUTH_STYLES.has(profile.authStyle) ? profile.authStyle : 'token';
   if (Array.isArray(profile.models)) out.models = profile.models;
+
+  // Per-provider model tiers (opus/sonnet/haiku/smallFast) consumed by
+  // scripts/provider-resolve.mjs. String values only — no nested objects.
+  const tiers = profile.tiers !== undefined ? profile.tiers : existing.tiers;
+  if (tiers && typeof tiers === 'object' && !Array.isArray(tiers)) {
+    const clean = {};
+    for (const [k, v] of Object.entries(tiers)) {
+      if (typeof v === 'string' && v) clean[k] = v;
+    }
+    if (Object.keys(clean).length > 0) out.tiers = clean;
+  }
   return out;
 }
 
@@ -873,7 +891,7 @@ function writeProviders(root, providersPatch) {
     }
 
     // Add / edit — only whitelisted fields survive.
-    const normalized = normalizeProviderProfile(profile);
+    const normalized = normalizeProviderProfile(profile, data.providers[name] || {});
     const before = data.providers[name] ? JSON.stringify(data.providers[name]) : null;
     const after = JSON.stringify(normalized);
     if (before !== after) {

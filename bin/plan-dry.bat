@@ -6,9 +6,13 @@ REM Agent 1 - PLAN (DRY-RUN). Spec: docs/agents/agent-1-planner.md
 REM DRY-RUN: no push, no Linear MCP, auto-approve HITL gates.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\plan"
 set "ANTHROPIC_MODEL=z-ai/glm-5.3"
-set "ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8"
-set "ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6"
+REM small_fast stays minimax-m3: the openrouter tier is deepseek-v4-flash,
+REM and this squad ran minimax before the tiers moved to the provider.
 set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"
+REM Model tiers (opus/sonnet/haiku/small_fast) come from the active provider:
+REM config/models.json providers.<name>.tiers, applied by scripts/provider-resolve.mjs
+REM via _lib.bat. Switching LA_PROVIDER switches them too. Override one here (AFTER
+REM the call above) only if this squad genuinely needs a different model for it.
 set "PLAN_DRY_RUN=1"
 echo [plan-dry] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [plan-dry] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL% DRY_RUN=%PLAN_DRY_RUN%

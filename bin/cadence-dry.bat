@@ -12,9 +12,10 @@ REM DRY-RUN: no push, no Linear MCP, auto-approve HITL gates.
 REM Cadence is read-mostly — collects, retrospects, writes digest.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\cadence"
 set "ANTHROPIC_MODEL=minimax/minimax-m3"
-set "ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.8"
-set "ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6"
-set "ANTHROPIC_SMALL_FAST_MODEL=deepseek/deepseek-v4-flash"
+REM Model tiers (opus/sonnet/haiku/small_fast) come from the active provider:
+REM config/models.json providers.<name>.tiers, applied by scripts/provider-resolve.mjs
+REM via _lib.bat. Switching LA_PROVIDER switches them too. Override one here (AFTER
+REM the call above) only if this squad genuinely needs a different model for it.
 set "CADENCE_DRY_RUN=1"
 echo [cadence-dry] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [cadence-dry] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL% DRY_RUN=%CADENCE_DRY_RUN%
