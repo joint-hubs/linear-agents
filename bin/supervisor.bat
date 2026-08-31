@@ -22,10 +22,11 @@ if defined NATIVE (
     set "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001"
     set "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5-20251001"
 ) else (
-    if not defined SUPERVISOR_MODEL set "SUPERVISOR_MODEL=z-ai/glm-5.3"
-    if not defined SUPERVISOR_MODEL REM small_fast stays minimax-m3: the openrouter tier is deepseek-v4-flash,
-    if not defined SUPERVISOR_MODEL REM and this squad ran minimax before the tiers moved to the provider.
-    if not defined SUPERVISOR_MODEL set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"
+    if not defined SUPERVISOR_MODEL set "SUPERVISOR_MODEL=z-ai/glm-5.3-flash"
+    REM small_fast stays minimax-m3: the openrouter tier is deepseek-v4-flash, and this
+    REM squad ran minimax before the tiers moved to the provider. The guard belongs on
+    REM SUPERVISOR_MODEL above, never on this line — they are different settings.
+    set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"
 )
 REM The four model tiers are NOT set here. They come from the active provider —
 REM config/models.json providers.<name>.tiers, applied by scripts/provider-resolve.mjs
