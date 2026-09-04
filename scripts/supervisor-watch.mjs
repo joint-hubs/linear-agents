@@ -82,6 +82,13 @@ const child = spawn(command, spawnArgs, {
   cwd,
   env: process.env,
   stdio: ["ignore", "pipe", "pipe"],
+  // This watcher is itself detached, so it owns no console. Spawning claude —
+  // a console application — makes win32 allocate a FRESH console for it, which
+  // appears as a terminal window popping up on Mateusz's desktop for every
+  // single turn. 06051c6 hid the watcher's own window and stopped there; the
+  // window people actually see is this one. Pipes are unaffected: the watcher
+  // still reads stdout/stderr, it just does not get a visible console with it.
+  windowsHide: true,
 });
 
 const turnIndex = Number(args.turn ?? 0);

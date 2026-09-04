@@ -245,6 +245,11 @@ const watcher = spawn(process.execPath, watcherArgs, {
   },
   detached: true,
   stdio: "ignore",
+  // Same as supervisor-spawn.mjs. Missing here for the same reason RUN_ID was:
+  // the fix landed on the turn-0 path and was never carried to the follow-up
+  // path, and follow-ups are the frequent one — a gate answer or a review loop
+  // opens a window every time.
+  windowsHide: true,
 });
 watcher.unref();
 

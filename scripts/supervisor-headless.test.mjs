@@ -120,6 +120,32 @@ test("the detached watcher gets windowsHide", () => {
   assert.match(code, /windowsHide:\s*true/);
 });
 
+test("EVERY process this runtime spawns is hidden, not just spawn's watcher", () => {
+  // This assertion used to cover supervisor-spawn.mjs alone, and passed while
+  // two other spawns opened windows on every turn (2026-09-04, reported as
+  // "a terminal opens every few moments"):
+  //
+  //   · supervisor-followup.mjs launches the SAME watcher for turns 1..n and
+  //     had no windowsHide — the frequent path, missed exactly as RUN_ID was.
+  //   · supervisor-watch.mjs launches `claude` itself. The watcher is detached
+  //     so it owns no console, and win32 then allocates a FRESH one for the
+  //     console application it starts. That is the window people actually see;
+  //     hiding the watcher never hid its child.
+  //
+  // Checked per file rather than as one regex over a concatenation, so a
+  // failure names the file that regressed.
+  for (const file of ["supervisor-spawn.mjs", "supervisor-followup.mjs", "supervisor-watch.mjs"]) {
+    const src = readFileSync(join(ROOT, "scripts", file), "utf8")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+      .join("\n");
+    if (!/spawn\(/.test(src)) fail(`${file} no longer spawns anything — this guard is stale`);
+    if (!/windowsHide:\s*true/.test(src)) {
+      fail(`${file} spawns a process without windowsHide — that is a console window per turn`);
+    }
+  }
+});
+
 test("the child's env carries its OWN telemetry run id", () => {
   // telemetry-hook.mjs reads RUN_ID / LA_RUN_ID on SessionStart. The child
   // inherits the Supervisor's environment, so without this override every
