@@ -14,7 +14,7 @@ if defined NATIVE (
     set "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001"
     set "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5-20251001"
 ) else (
-    set "ANTHROPIC_MODEL=z-ai/glm-5.3"
+    set "ANTHROPIC_MODEL=z-ai/glm-5.3-flash"
     REM small_fast stays minimax-m3: the openrouter tier is deepseek-v4-flash,
     REM and this squad ran minimax before the tiers moved to the provider.
     set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"

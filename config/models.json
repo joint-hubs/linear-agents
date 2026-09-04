@@ -2,52 +2,52 @@
   "_doc": "Źródło prawdy routingu modeli per rola. Odzwierciedlone w bin/*.bat i agents/*/settings.json. Pełne uzasadnienie: docs/decisions/model-comparison-and-routing.md",
   "providers": {
     "openrouter": {
-      "tiers": {
-        "opus": "anthropic/claude-opus-4.8",
-        "sonnet": "anthropic/claude-sonnet-4.6",
-        "haiku": "deepseek/deepseek-v4-flash",
-        "smallFast": "deepseek/deepseek-v4-flash"
-      },
       "baseUrl": "https://openrouter.ai/api",
       "authEnv": "OPENROUTER_API_KEY",
-      "authStyle": "token"
+      "authStyle": "token",
+      "tiers": {
+        "opus": "z-ai/glm-5.3-flash",
+        "sonnet": "google/gemini-2.5-flash-lite",
+        "haiku": "deepseek/deepseek-v4-flash",
+        "smallFast": "deepseek/deepseek-v4-flash"
+      }
     },
     "anthropic": {
+      "baseUrl": "https://api.anthropic.com",
+      "authEnv": "ANTHROPIC_API_KEY",
+      "authStyle": "apikey",
       "tiers": {
         "opus": "claude-opus-4-8",
         "sonnet": "claude-sonnet-4-6",
         "haiku": "claude-haiku-4-5-20251001",
         "smallFast": "claude-haiku-4-5-20251001"
-      },
-      "baseUrl": "https://api.anthropic.com",
-      "authEnv": "ANTHROPIC_API_KEY",
-      "authStyle": "apikey"
+      }
     },
     "zai_anthropic": {
-      "tiers": {
-        "opus": "glm-5.3",
-        "sonnet": "glm-5.2",
-        "haiku": "glm-5.2",
-        "smallFast": "glm-5.2"
-      },
       "baseUrl": "https://api.z.ai/api/anthropic",
       "authEnv": "ZAI_API_KEY",
       "authStyle": "token",
       "models": [
         "glm-5.2",
         "glm-5.3"
-      ]
+      ],
+      "tiers": {
+        "opus": "glm-5.3",
+        "sonnet": "glm-5.2",
+        "haiku": "glm-5.2",
+        "smallFast": "glm-5.2"
+      }
     },
     "nebul": {
+      "baseUrl": "https://api.inference.nebul.io",
+      "authEnv": "NEBUL_API_KEY",
+      "authStyle": "token",
       "tiers": {
         "opus": "zai-org/GLM-5.2-FP8",
         "sonnet": "zai-org/GLM-5.2-FP8",
         "haiku": "zai-org/GLM-5.2-FP8",
         "smallFast": "zai-org/GLM-5.2-FP8"
-      },
-      "baseUrl": "https://api.inference.nebul.io",
-      "authEnv": "NEBUL_API_KEY",
-      "authStyle": "token"
+      }
     }
   },
   "ids": {
@@ -139,8 +139,8 @@
         "cacheRead": 0.221
       },
       "minimax/minimax-m3": {
-        "input": 0.3,
-        "output": 1.2,
+        "input": 0.23,
+        "output": 0.96,
         "cacheRead": 0.06
       },
       "deepseek/deepseek-v4-flash": {
@@ -149,9 +149,9 @@
         "cacheRead": 0.0177212
       },
       "deepseek/deepseek-v4-pro": {
-        "input": 0.87,
-        "output": 1.74,
-        "cacheRead": 0.0725
+        "input": 0.66,
+        "output": 1.98,
+        "cacheRead": 0.022
       },
       "moonshotai/kimi-k2.7-code": {
         "input": 0.67,
@@ -225,9 +225,9 @@
         "cacheRead": 0.26
       },
       "deepseek/deepseek-v4-pro-0813": {
-        "input": 1.122,
-        "output": 3.366,
-        "cacheRead": 0.0374
+        "input": 0.66,
+        "output": 1.98,
+        "cacheRead": 0.022
       },
       "stealth/ox-alpha": {
         "input": 0,
@@ -240,14 +240,25 @@
         "cacheRead": 0.016
       },
       "z-ai/glm-5.3-flash": {
-        "input": 0.075,
-        "output": 0.25,
+        "input": 0.071,
+        "output": 0.24,
         "cacheRead": 0.015
       },
       "qwen/qwen3.8-27b": {
         "input": 0.425,
         "output": 2.55,
         "cacheRead": 0.085
+      },
+      "google/gemini-2.5-flash-lite": {
+        "input": 0.1,
+        "output": 0.4,
+        "cacheRead": 0.01
+      },
+      "google/gemini-3.8-flash": {
+        "input": 0.75,
+        "output": 3.75,
+        "cacheRead": 0.075,
+        "cacheWrite": 0.04
       }
     },
     "nebul": {

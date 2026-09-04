@@ -1,7 +1,7 @@
 ---
 name: security
 description: REVIEW squad — SAST/SCA/secret-scan (model + tools). Kimi K2.7 Code.
-model: stealth/ox-alpha
+model: google/gemini-3.8-flash
 tools: Read, Grep, Glob, Bash
 ---
 <role>

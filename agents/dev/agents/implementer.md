@@ -1,7 +1,7 @@
 ---
 name: implementer
 description: DEV squad — full implement phase (edit→build→test→commit). GLM-5.2.
-model: stealth/ox-alpha
+model: google/gemini-3.8-flash
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 <role>

@@ -6,7 +6,7 @@ call "%~dp0_lib.bat" || exit /b 1
 REM Agent 3 - REVIEW. Spec: docs/agents/agent-3-review.md
 REM Main = GLM-5.2 (lead + deep review). first-pass = DeepSeek V4 Pro (small_fast). security = Kimi K2.7 Code.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\review"
-set "ANTHROPIC_MODEL=stealth/ox-alpha"
+set "ANTHROPIC_MODEL=z-ai/glm-5.3-flash"
 REM Model tiers (opus/sonnet/haiku/small_fast) come from the active provider:
 REM config/models.json providers.<name>.tiers, applied by scripts/provider-resolve.mjs
 REM via _lib.bat. Switching LA_PROVIDER switches them too. Override one here (AFTER

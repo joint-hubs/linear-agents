@@ -1,7 +1,7 @@
 ---
 name: scenario-gen
 description: TEST squad — generate test scenarios (synthetic data). DeepSeek V4 Flash.
-model: stealth/ox-alpha
+model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write
 ---
 <role>

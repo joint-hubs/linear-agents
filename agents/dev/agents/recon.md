@@ -1,7 +1,7 @@
 ---
 name: recon
 description: DEV squad — task + codebase scan → context packet. MiniMax M3.
-model: stealth/ox-alpha
+model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Bash
 ---
 <role>

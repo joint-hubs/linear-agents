@@ -1,7 +1,7 @@
 ---
 name: worker
 description: DEV squad — cheap single-scope tasks (one-file change, boilerplate, patterned test, summary, draft). MiniMax M3.
-model: stealth/ox-alpha
+model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 <role>

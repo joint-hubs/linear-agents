@@ -5,7 +5,7 @@ call "%~dp0_lib.bat" || exit /b 1
 REM Agent 1 - PLAN (DRY-RUN). Spec: docs/agents/agent-1-planner.md
 REM DRY-RUN: no push, no Linear MCP, auto-approve HITL gates.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\plan"
-set "ANTHROPIC_MODEL=z-ai/glm-5.3"
+set "ANTHROPIC_MODEL=z-ai/glm-5.3-flash"
 REM small_fast stays minimax-m3: the openrouter tier is deepseek-v4-flash,
 REM and this squad ran minimax before the tiers moved to the provider.
 set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"

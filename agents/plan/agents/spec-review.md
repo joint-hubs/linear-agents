@@ -1,7 +1,7 @@
 ---
 name: spec-review
 description: PLAN squad — adversarial spec review (holes, corner cases). MiniMax M3.
-model: anthropic/claude-sonnet-5
+model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob
 ---
 <role>

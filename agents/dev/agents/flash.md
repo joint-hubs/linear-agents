@@ -1,7 +1,7 @@
 ---
 name: flash
 description: DEV squad — mechanical micro-tasks per strict instruction (extract/format/checklist/grep/table). DeepSeek V4 Flash.
-model: stealth/ox-alpha
+model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write, Bash, Edit
 ---
 <role>

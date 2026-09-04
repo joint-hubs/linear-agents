@@ -1,7 +1,7 @@
 ---
 name: push
 description: PLAN squad — idempotent Linear push of parent+subtasks. DeepSeek V4 Flash.
-model: deepseek/deepseek-v4-flash
+model: z-ai/glm-5.3-flash
 tools: Bash, Read
 ---
 <role>

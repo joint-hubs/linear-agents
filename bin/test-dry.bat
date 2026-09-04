@@ -11,7 +11,7 @@ REM Agent 4 - TEST (DRY-RUN). Spec: docs/agents/agent-4-test.md
 REM DRY-RUN: no push, no Linear MCP, no real GCP deploy.
 REM Health-check is simulated from fixture's dryRunScenario field.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\test"
-set "ANTHROPIC_MODEL=stealth/ox-alpha"
+set "ANTHROPIC_MODEL=z-ai/glm-5.3-flash"
 REM Model tiers (opus/sonnet/haiku/small_fast) come from the active provider:
 REM config/models.json providers.<name>.tiers, applied by scripts/provider-resolve.mjs
 REM via _lib.bat. Switching LA_PROVIDER switches them too. Override one here (AFTER

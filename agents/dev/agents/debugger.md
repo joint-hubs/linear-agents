@@ -1,7 +1,7 @@
 ---
 name: debugger
 description: DEV squad — hard bug / arch decision escalation. DeepSeek V4 Pro.
-model: stealth/ox-alpha
+model: google/gemini-3.8-flash
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 <role>

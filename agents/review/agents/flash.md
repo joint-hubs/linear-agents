@@ -1,7 +1,7 @@
 ---
 name: flash
 description: REVIEW squad — mechanical: dedup findings, format Conventional Comments, severity tables. DeepSeek V4 Flash.
-model: stealth/ox-alpha
+model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write
 ---
 <role>
