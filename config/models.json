@@ -139,8 +139,8 @@
         "cacheRead": 0.221
       },
       "minimax/minimax-m3": {
-        "input": 0.23,
-        "output": 0.96,
+        "input": 0.3,
+        "output": 1.2,
         "cacheRead": 0.06
       },
       "deepseek/deepseek-v4-flash": {
