@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fenix — dobór modeli do ról</title>
+<title>Porównywarka modeli — benchmarki OpenRouter</title>
 <style>
 /* ── tokens ──────────────────────────────────────────────────────────────
    Neutrals are biased a few degrees warm so they read as chosen, not default.
@@ -30,7 +30,7 @@
   --r:         9px;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg:        #16181a;
     --panel:     #1e2124;
     --panel-2:   #24282c;
@@ -75,7 +75,7 @@ body {
        font-variant-numeric: tabular-nums; }
 
 /* ── shell ── */
-.wrap { max-width: 1440px; margin: 0 auto; padding: 22px 20px 64px; }
+.wrap { max-width: 1500px; margin: 0 auto; padding: 22px 20px 64px; }
 header.top { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; }
 h1 { font-size: 21px; font-weight: 640; letter-spacing: -.015em; margin: 0; text-wrap: balance; }
 .sub { color: var(--ink-3); font-size: 13px; }
@@ -89,7 +89,7 @@ h1 { font-size: 21px; font-weight: 640; letter-spacing: -.015em; margin: 0; text
 .facts { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0 18px; }
 .fact {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
-  padding: 9px 13px; box-shadow: var(--shadow); flex: 1 1 190px; min-width: 0;
+  padding: 9px 13px; box-shadow: var(--shadow); flex: 1 1 170px; min-width: 0;
 }
 .fact b { display: block; font-size: 17px; font-weight: 640; letter-spacing: -.01em; }
 .fact span { font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; }
@@ -102,7 +102,10 @@ h1 { font-size: 21px; font-weight: 640; letter-spacing: -.015em; margin: 0; text
 
 /* ── layout ── */
 .cols { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 20px; align-items: start; }
-@media (max-width: 940px) { .cols { grid-template-columns: 1fr; } }
+/* A grid item defaults to min-width:auto, so a table with a min-width would push
+   the whole page sideways instead of scrolling inside its own container. */
+.cols > * { min-width: 0; }
+@media (max-width: 980px) { .cols { grid-template-columns: minmax(0, 1fr); } }
 
 .card {
   background: var(--panel); border: 1px solid var(--line);
@@ -112,9 +115,12 @@ h1 { font-size: 21px; font-weight: 640; letter-spacing: -.015em; margin: 0; text
   margin: 0; padding: 13px 16px 11px; font-size: 12px; font-weight: 660;
   text-transform: uppercase; letter-spacing: .075em; color: var(--ink-3);
   border-bottom: 1px solid var(--line);
+  display: flex; align-items: baseline; gap: 10px;
 }
+.card > h2 .h2note { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 11.5px; }
 .card > .body { padding: 14px 16px 17px; }
 aside .card + .card { margin-top: 16px; }
+main .card + .card { margin-top: 16px; }
 
 /* ── role presets ── */
 .roles { display: flex; flex-direction: column; gap: 3px; }
@@ -126,7 +132,8 @@ aside .card + .card { margin-top: 16px; }
 .role:hover { background: var(--panel-2); color: var(--ink); }
 .role[aria-pressed="true"] { background: var(--accent-bg); border-color: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--ink); font-weight: 560; }
 .role .mix { margin-left: auto; font-size: 10.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; }
-.role:focus-visible, .theme-btn:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.role:focus-visible, .theme-btn:focus-visible, input:focus-visible, select:focus-visible,
+.reset:focus-visible, .chip:focus-visible, .tabbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ── sliders ── */
 .sl { margin-bottom: 13px; }
@@ -154,10 +161,26 @@ input[type=range]::-moz-range-thumb {
 }
 .reset:hover { border-color: var(--line-firm); color: var(--ink); }
 
+/* ── filters ── */
+.field { margin-bottom: 12px; }
+.field:last-child { margin-bottom: 0; }
+.field > label { display: block; font-size: 12.4px; color: var(--ink-2); margin-bottom: 5px; }
+input[type=text], select {
+  width: 100%; background: var(--bg); border: 1px solid var(--line); color: var(--ink);
+  border-radius: 7px; padding: 6px 9px; font: inherit; font-size: 13px;
+}
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip {
+  font-size: 11.5px; padding: 3px 9px; border-radius: 99px; cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2); font-family: inherit;
+}
+.chip:hover { border-color: var(--line-firm); color: var(--ink); }
+.chip[aria-pressed="true"] { background: var(--accent-bg); border-color: color-mix(in srgb, var(--accent) 40%, transparent); color: var(--accent); font-weight: 560; }
+
 /* ── results ── */
 .rank { display: flex; flex-direction: column; }
 .row {
-  display: grid; grid-template-columns: 26px minmax(150px, 1.6fr) 1fr 92px 74px;
+  display: grid; grid-template-columns: 26px minmax(150px, 1.6fr) 1fr 96px 78px;
   gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line);
 }
 .row:last-child { border-bottom: 0; }
@@ -166,6 +189,9 @@ input[type=range]::-moz-range-thumb {
   color: var(--ink-3); padding-top: 9px; padding-bottom: 9px; background: var(--panel-2);
 }
 .row.best { background: color-mix(in srgb, var(--accent-bg) 55%, transparent); }
+.row.pick { cursor: pointer; }
+.row.pick:hover { background: var(--panel-2); }
+.row.sel { box-shadow: inset 3px 0 0 var(--accent); }
 .pos { font-size: 12px; color: var(--ink-3); text-align: right; }
 .row.best .pos { color: var(--accent); font-weight: 700; }
 .mname { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -177,35 +203,76 @@ input[type=range]::-moz-range-thumb {
 }
 .tag.now { background: var(--accent-bg); border-color: color-mix(in srgb, var(--accent) 40%, transparent); color: var(--accent); }
 .tag.gap { background: var(--amber-bg); border-color: color-mix(in srgb, var(--amber) 40%, transparent); color: var(--amber); }
-.tag.free { background: color-mix(in srgb, var(--good) 14%, transparent); border-color: color-mix(in srgb, var(--good) 40%, transparent); color: var(--good); }
+.tag.free, .tag.front { background: color-mix(in srgb, var(--good) 14%, transparent); border-color: color-mix(in srgb, var(--good) 40%, transparent); color: var(--good); }
 .bar { height: 7px; border-radius: 99px; background: var(--panel-2); overflow: hidden; border: 1px solid var(--line); }
 .bar i { display: block; height: 100%; background: var(--accent); border-radius: 99px; transition: width .18s ease; }
 .row.best .bar i { background: var(--amber); }
 .cell { font-size: 13px; text-align: right; }
 .cell .s2 { display: block; font-size: 11px; color: var(--ink-3); }
+/* Below ~620px the five-column row cannot hold its minimums, so the bar — the one
+   column that is a restatement of the sort order rather than a number — is dropped. */
+@media (max-width: 620px) {
+  .row { grid-template-columns: 22px minmax(0, 1fr) 74px 62px; gap: 9px; padding: 10px 12px; }
+  .row .bar, .row.head span:nth-child(3) { display: none; }
+  .cell, .cell .s2 { font-size: 12px; }
+  .mname b { font-size: 13px; }
+}
 .delta.up { color: var(--good); }
 .delta.down { color: var(--bad); }
+.more { padding: 10px 16px; }
 
-/* ── detail table ── */
+/* ── scatter ── */
+.plot { padding: 8px 10px 4px; }
+.plot svg { display: block; width: 100%; height: auto; overflow: visible; }
+.ax { stroke: var(--line); stroke-width: 1; }
+.grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; opacity: .8; }
+.axlab { fill: var(--ink-3); font-size: 10px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.axtitle { fill: var(--ink-2); font-size: 11px; }
+.dot { fill: var(--accent); opacity: .38; cursor: pointer; }
+.dot:hover { opacity: .95; }
+.dot.front { fill: var(--amber); opacity: .95; }
+.dot.fleet { stroke: var(--ink); stroke-width: 1.6; fill-opacity: .9; opacity: .95; }
+.dot.sel { stroke: var(--accent); stroke-width: 2.4; opacity: 1; }
+.frontline { fill: none; stroke: var(--amber); stroke-width: 1.5; stroke-dasharray: 5 3; opacity: .75; }
+.dotlab { fill: var(--ink-2); font-size: 10.5px; pointer-events: none; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 4px 16px 14px; font-size: 11.5px; color: var(--ink-3); }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+
+/* ── tables ── */
 .scroll { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; font-size: 12.5px; min-width: 760px; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; min-width: 860px; }
 th, td { padding: 7px 9px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th {
   font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3);
-  font-weight: 620; position: sticky; top: 0; background: var(--panel); text-align: right;
+  font-weight: 620; position: sticky; top: 0; background: var(--panel); text-align: right; z-index: 1;
 }
+th.sortable { cursor: pointer; }
+th.sortable:hover { color: var(--ink); }
+th[aria-sort] { color: var(--accent); }
 th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: var(--panel); }
-tbody tr:hover td { background: var(--panel-2); }
-tbody tr:hover td:first-child { background: var(--panel-2); }
+th:first-child { z-index: 2; }
+tbody tr:hover td, tbody tr:hover td:first-child { background: var(--panel-2); }
 td.na { color: var(--amber); }
 td.w { color: var(--accent); font-weight: 600; }
+td.hi { font-weight: 660; }
+
+/* ── tabs ── */
+.tabs { display: flex; gap: 4px; padding: 10px 16px 0; flex-wrap: wrap; }
+.tabbtn {
+  background: none; border: 1px solid transparent; border-radius: 7px; padding: 5px 10px;
+  font: inherit; font-size: 12.8px; color: var(--ink-2); cursor: pointer;
+}
+.tabbtn:hover { background: var(--panel-2); color: var(--ink); }
+.tabbtn[aria-selected="true"] { background: var(--accent-bg); border-color: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--ink); font-weight: 560; }
 
 .note { font-size: 12.4px; color: var(--ink-2); line-height: 1.6; }
 .note + .note { margin-top: 9px; }
-.note code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 11.5px;
+.note code, footer code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 11.5px;
              font-family: ui-monospace, Menlo, Consolas, monospace; }
+.empty { padding: 22px 16px; color: var(--ink-3); font-size: 13px; }
 footer { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--line);
          font-size: 12.2px; color: var(--ink-3); line-height: 1.6; }
+footer a { color: var(--accent); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 </head>
@@ -213,26 +280,20 @@ footer { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--line);
 <div class="wrap">
 
 <header class="top">
-  <h1>Dobór modeli do ról</h1>
-  <span class="sub">panel eksploracyjny · dane: benchmarki OpenRouter + telemetria Fenix</span>
+  <h1>Porównywarka modeli</h1>
+  <span class="sub">benchmarki Artificial Analysis + cennik OpenRoutera · snapshot <b id="snapDate" class="num"></b></span>
   <button class="theme-btn" id="theme" type="button">motyw</button>
 </header>
 
 <div class="facts">
-  <div class="fact"><span>wydatek ogółem</span><b class="num">$580.92</b></div>
-  <div class="fact"><span>u leadów</span><b class="num">85.7%</b></div>
-  <div class="fact"><span>u subagentów</span><b class="num">14.3%</b></div>
-  <div class="fact"><span>przebiegów</span><b class="num">130</b></div>
-  <div class="fact"><span>slotów ról</span><b class="num">30</b></div>
+  <div class="fact"><span>modeli z benchmarkami</span><b class="num" id="fModels">—</b></div>
+  <div class="fact"><span>wariantów reasoning</span><b class="num" id="fVars">—</b></div>
+  <div class="fact"><span>metryk na model</span><b class="num" id="fBench">—</b></div>
+  <div class="fact"><span>nowych od 27 lip</span><b class="num" id="fNew">—</b></div>
+  <div class="fact"><span>bez pomiarów AA</span><b class="num" id="fUnscored">—</b></div>
 </div>
 
-<div class="warn">
-  <b>Zanim zaufasz osi „tanio/drogo".</b> Ceny pochodzą z tabeli OpenRoutera (z promocjami),
-  a <code>config/models.json</code> ma stawki katalogowe — dla GLM-5.2 to różnica 1.87×, czyli
-  <b>$164.87</b> zawyżenia w dashboardzie. Koszt niżej liczony jest z <em>Twojego realnego miksu
-  tokenów</em> (cache-read to 87% wolumenu leada i bilowany jest jako 0.1× wejścia), więc nie zgadza się
-  z ceną katalogową „za 1M" i nie powinien.
-</div>
+<div class="warn" id="warnBox"></div>
 
 <div class="cols">
   <aside>
@@ -264,82 +325,152 @@ footer { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--line);
         </div>
       </div>
     </div>
+
+    <div class="card">
+      <h2>Filtry <span class="h2note num" id="filterCount"></span></h2>
+      <div class="body">
+        <div class="field">
+          <label for="q">Szukaj po nazwie</label>
+          <input type="text" id="q" placeholder="np. glm, sonnet, qwen3.8" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="lab">Dostawca</label>
+          <select id="lab"><option value="">wszyscy</option></select>
+        </div>
+        <div class="field">
+          <label for="maxp">Sufit ceny wejścia — <span class="num" id="maxpVal">bez limitu</span></label>
+          <input type="range" id="maxp" min="0" max="10" step="1" value="10" aria-label="Maksymalna cena wejścia">
+        </div>
+        <div class="field">
+          <label for="minctx">Minimalny kontekst — <span class="num" id="minctxVal">dowolny</span></label>
+          <input type="range" id="minctx" min="0" max="5" step="1" value="0" aria-label="Minimalny kontekst">
+        </div>
+        <div class="field">
+          <label>Skróty</label>
+          <div class="chips">
+            <button class="chip" id="cFleet" type="button" aria-pressed="false">tylko flota Fenix</button>
+            <button class="chip" id="cFresh" type="button" aria-pressed="false">tylko od maja 2026</button>
+            <button class="chip" id="cCache" type="button" aria-pressed="false">tylko z cache</button>
+            <button class="chip" id="cFull" type="button" aria-pressed="false">komplet metryk</button>
+          </div>
+        </div>
+        <button class="reset" id="resetF" type="button">Wyczyść filtry</button>
+      </div>
+    </div>
   </aside>
 
   <main>
     <div class="card">
-      <h2 id="rankTitle">Ranking</h2>
+      <h2 id="rankTitle">Ranking <span class="h2note" id="rankNote"></span></h2>
       <div class="rank" id="rank"></div>
     </div>
 
-    <div class="card" style="margin-top:16px">
-      <h2>Pełna tabela benchmarków</h2>
+    <div class="card">
+      <h2>Mapa cena ↔ jakość <span class="h2note">oś X w skali logarytmicznej · przerywana linia = granica opłacalności</span></h2>
+      <div class="plot" id="plot"></div>
+      <div class="legend">
+        <span><i style="background:var(--amber)"></i>na granicy Pareto — nic tańszego nie jest lepsze</span>
+        <span><i style="background:var(--accent);opacity:.45"></i>zdominowany — istnieje tańszy i lepszy</span>
+        <span><i style="background:var(--accent);box-shadow:0 0 0 1.6px var(--ink)"></i>flota Fenix</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Drabina reasoning effort <span class="h2note" id="ladderNote"></span></h2>
+      <div id="ladder"></div>
+    </div>
+
+    <div class="card">
+      <h2>Wiedza kontra konfabulacja <span class="h2note">AA Omniscience — ile model wie vs. jak często zmyśla zamiast przyznać, że nie wie</span></h2>
+      <div class="scroll" id="honesty"></div>
+    </div>
+
+    <div class="card">
+      <h2>Co się zmieniło od poprzedniego snapshotu <span class="h2note">baza: 27 lipca 2026</span></h2>
+      <div class="scroll" id="diff"></div>
+    </div>
+
+    <div class="card">
+      <h2>Pełna tabela <span class="h2note"><button class="chip" id="csv" type="button">pobierz CSV</button></span></h2>
+      <div class="tabs" id="tabs"></div>
       <div class="scroll"><table id="tbl"></table></div>
     </div>
 
-    <div class="card" style="margin-top:16px">
+    <div class="card">
+      <h2>Świeże modele bez pomiarów <span class="h2note">są na OpenRouterze, Artificial Analysis ich jeszcze nie przemierzyło</span></h2>
+      <div class="scroll" id="unscored"></div>
+    </div>
+
+    <div class="card">
       <h2>Jak to czytać</h2>
       <div class="body">
         <p class="note"><b>Brak pomiaru to nie zero.</b> <code>—</code> oznacza, że benchmarku nie
         uruchomiono. Taki model liczony jest na węższym podzbiorze i oznaczony żółtą etykietą —
         jego wynik <em>nie jest wprost porównywalny</em> z modelem mającym komplet. Jeśli braki
         przekraczają 40% wagi, model wypada z rankingu zamiast dostać zaniżony wynik.</p>
+        <p class="note"><b>Kolumna „sama jakość” to indeks 0–100, nie wynik benchmarku.</b>
+        Benchmarki nie mają wspólnej skali: GPQA i τ² siedzą w paśmie 70–99, a Agentic Index
+        w okolicach 20–60. Uśrednianie surowych wartości po <em>niepełnym</em> zestawie premiowało
+        model za to, że nie podszedł do trudnego testu — im mniej pomiarów, tym wyższa średnia.
+        Dlatego każda metryka jest najpierw przeskalowana do 0–100 względem całej stawki, a dopiero
+        potem ważona. Ta poprawka zmienia ranking mocniej niż jakiekolwiek nowe dane.</p>
         <p class="note"><b>Ranking miesza dwie znormalizowane osie.</b> Jakość i taniość skalowane
-        są do 0–1 w obrębie aktualnej stawki, potem mieszane suwakiem ceny. Przy 100% zawsze wygra
-        najtańszy — to nie jest rekomendacja, tylko dolna granica.</p>
-        <p class="note"><b>Dwa modele z Twojej floty są niemierzalne.</b>
-        <code>deepseek-v4-flash</code> (6 slotów) i <code>kimi-k2.7-code</code> (2 sloty) nie
-        występują w tabeli benchmarków. Widać je jako obecny wybór, ale nie da się ich ocenić.</p>
+        są do 0–1, potem mieszane suwakiem ceny. Cena normalizowana jest <em>logarytmicznie</em> —
+        skok z $0.05 na $0.10 waży tyle samo co z $5 na $10, bo tak zachowuje się rachunek.
+        Przy 100% zawsze wygra najtańszy — to nie jest rekomendacja, tylko dolna granica.</p>
+        <p class="note"><b>Koszt liczony jest z miksu tokenów, nie z ceny katalogowej.</b> Lead
+        czyta własny kontekst co turę, więc cache-read to 87% jego wolumenu, a cena wyjścia prawie
+        nie gra roli. Stawka cache brana jest teraz z <em>faktycznego cennika modelu</em>
+        (<code>input_cache_read</code>), a nie z założenia „0.1× wejścia” — dla części modeli to
+        różnica kilkukrotna, a <b id="noCacheN">część</b> modeli nie ma cache w ogóle i płaci pełną
+        stawkę wejścia od każdego powtórzonego tokenu. Takie modele mają etykietę <code>bez cache</code>.</p>
+        <p class="note"><b>Jeden model to często kilka modeli.</b> Ten sam wagowo model przy różnym
+        reasoning effort daje różne wyniki i różny rachunek. W rankingu pokazywany jest wariant
+        najmocniejszy; drabina wyżej pokazuje, na którym szczeblu dopłata przestaje się zwracać.</p>
+        <p class="note"><b>Granica Pareto odpowiada na inne pytanie niż ranking.</b> Ranking mówi
+        „co wybrać przy tych wagach”. Granica mówi „czego nie ma sensu rozważać w ogóle” — model nad
+        linią jest zdominowany: istnieje tańszy, który jest jednocześnie lepszy.</p>
       </div>
     </div>
   </main>
 </div>
 
-<footer>
-  Wagi profili ról i miksy tokenów wyliczone z <code>telemetry.sqlite</code> (130 przebiegów).
-  Analiza źródłowa: <code>docs/prd/model-role-fit-analysis.md</code>.
-  Opus 5 pominięty — jest na stałe leadem PLAN i nie podlega tej analizie.
-</footer>
+<footer id="foot"></footer>
 
 </div>
-
 <script>
 "use strict";
 
-// Benchmark values as published; null = not run. Prices are OpenRouter in/out
-// per 1M from the source table, promos included.
+/* ── data ─────────────────────────────────────────────────────────────────
+   Pulled live from OpenRouter: /api/v1/models for listed pricing, context and
+   release date; /api/frontend/v1/private/artificial-analysis-benchmarks for
+   the Artificial Analysis evaluation set, per reasoning-effort variant.
+   `v` holds only benchmarks that were actually run — a missing key is a
+   missing measurement, never a zero. */
+const DATA = /* DATA:BEGIN */{"models":[{"id":"google/gemini-3.8-flash","name":"Gemini 3.8 Flash","author":"Google","inp":0.75,"out":3.75,"cache":0.075,"ctx":1048576,"date":"2026-09-02","reason":true,"vars":[{"e":"high","label":"Gemini 3.8 Flash (high)","v":{"intel":58.7,"code":76.3,"agent":50.0,"py":53.6,"gpqa":95.3,"hle":47.8,"lctx":81.0,"econ":52.3,"phys":18.3,"know":54.6,"hon":44.8},"pct":{"inte":93,"codi":94,"agen":89},"ts":1788393653699}]},{"id":"anthropic/claude-fable-5.1","name":"Claude Fable 5.1","author":"Anthropic","inp":10.0,"out":50.0,"cache":0.25,"ctx":1000000,"date":"2026-09-01","reason":true,"vars":[{"e":"max","label":"Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)","v":{"intel":65.7,"code":81.6,"agent":61.3,"py":62.0,"gpqa":93.7,"hle":59.1,"lctx":80.0,"econ":67.7,"phys":29.7,"know":67.2,"hon":27.4},"pct":{"inte":99,"codi":99,"agen":99},"ts":1788307256623}]},{"id":"ibm-granite/granite-4.2-8b","name":"Granite 4.2 8B","author":"ibm-granite","inp":0.1,"out":0.15,"cache":0.05,"ctx":131072,"date":"2026-08-31","reason":true,"vars":[{"e":"default","label":"Granite 4.2 8B","v":{"intel":19.6,"code":22.4,"agent":9.2,"py":30.4,"gpqa":63.1,"hle":9.7,"lctx":43.3,"econ":10.2,"phys":0.3,"know":11.2,"hon":68.0},"pct":{"inte":19,"codi":23,"agen":24},"ts":1788220849262}]},{"id":"z-ai/glm-5.3-flash","name":"GLM 5.3 Flash","author":"Z.ai","inp":0.075,"out":0.25,"cache":0.015,"ctx":1310720,"date":"2026-08-26","reason":true,"vars":[{"e":"default","label":"GLM-5.3-Flash","v":{"intel":57.5,"code":71.5,"agent":58.2,"py":46.1,"gpqa":91.2,"hle":39.9,"lctx":78.0,"econ":63.2,"phys":15.4,"know":27.5,"hon":72.4},"pct":{"inte":90,"codi":84,"agen":96},"ts":1787918457018}]},{"id":"z-ai/glm-5.3","name":"GLM 5.3","author":"Z.ai","inp":1.4,"out":4.4,"cache":0.14,"ctx":1310720,"date":"2026-08-18","reason":true,"vars":[{"e":"max","label":"GLM-5.3 (max)","v":{"intel":59.5,"code":74.8,"agent":59.1,"py":56.5,"gpqa":91.7,"hle":42.3,"lctx":76.3,"econ":62.9,"phys":19.1,"know":33.9,"hon":70.4},"pct":{"inte":94,"codi":91,"agen":98},"ts":1787918457018}]},{"id":"qwen/qwen3.8-27b","name":"Qwen3.8 27B","author":"Qwen","inp":0.425,"out":2.55,"cache":0.085,"ctx":1000000,"date":"2026-08-14","reason":true,"vars":[{"e":"xhigh","label":"Qwen3.8 27B (xhigh)","v":{"intel":52.0,"code":68.1,"agent":50.9,"py":44.7,"gpqa":90.5,"hle":33.9,"lctx":77.3,"econ":52.1,"phys":5.4,"know":15.6,"hon":69.7},"pct":{"inte":76,"codi":76,"agen":91},"ts":1787918457018}]},{"id":"google/gemini-3.7-flash","name":"Gemini 3.7 Flash","author":"Google","inp":0.75,"out":3.75,"cache":0.075,"ctx":1048576,"date":"2026-08-13","reason":true,"vars":[{"e":"low","label":"Gemini 3.7 Flash (low)","v":{"intel":50.9,"code":71.0,"agent":41.6,"py":53.6,"gpqa":90.1,"hle":35.1,"lctx":78.3,"econ":47.3,"phys":5.7,"know":53.6,"hon":32.3},"pct":{"inte":74,"codi":82,"agen":74},"ts":1788307256623},{"e":"medium","label":"Gemini 3.7 Flash (medium)","v":{"intel":53.4,"code":71.5,"agent":45.1,"py":57.9,"gpqa":92.1,"hle":39.0,"lctx":81.0,"econ":49.6,"phys":9.4,"know":54.0,"hon":34.1},"pct":{"inte":82,"codi":84,"agen":78},"ts":1787918457018},{"e":"high","label":"Gemini 3.7 Flash (high)","v":{"intel":56.0,"code":76.1,"agent":45.1,"py":56.8,"gpqa":94.5,"hle":47.9,"lctx":80.0,"econ":50.8,"phys":14.3,"know":55.3,"hon":35.5},"pct":{"inte":87,"codi":92,"agen":78},"ts":1787918457018}]},{"id":"qwen/qwen3.8-2.4t-a95b","name":"Qwen3.8 2.4T A95B","author":"Qwen","inp":2.0,"out":6.0,"cache":0.25,"ctx":1048576,"date":"2026-08-12","reason":true,"vars":[{"e":"default","label":"Qwen3.8 2.4T A95B","v":{"intel":57.7,"code":71.9,"agent":57.1,"py":51.6,"gpqa":93.5,"hle":42.4,"lctx":75.3,"econ":60.9,"phys":20.0,"know":31.3,"hon":60.8},"pct":{"inte":91,"codi":88,"agen":94},"ts":1787788832040}]},{"id":"deepseek/deepseek-v4-pro-0813","name":"DeepSeek V4 Pro 0813","author":"DeepSeek","inp":1.1154,"out":3.3462,"cache":0.0372,"ctx":1048576,"date":"2026-08-12","reason":true,"vars":[{"e":"max","label":"DeepSeek V4 Pro 0813 (Reasoning, Max Effort)","v":{"intel":53.2,"code":68.8,"agent":49.6,"py":49.2,"gpqa":92.8,"hle":41.0,"lctx":75.3,"econ":53.8,"phys":18.0,"know":49.1,"hon":5.2},"pct":{"inte":81,"codi":77,"agen":87},"ts":1787918457018}]},{"id":"x-ai/grok-4.6","name":"Grok 4.6","author":"SpaceXAI","inp":2.0,"out":6.0,"cache":0.5,"ctx":500000,"date":"2026-08-12","reason":true,"vars":[{"e":"high","label":"Grok 4.6 (high)","v":{"intel":60.9,"code":76.8,"agent":58.7,"py":53.6,"gpqa":94.9,"hle":42.9,"lctx":75.0,"econ":61.5,"phys":17.1,"know":48.2,"hon":65.7},"pct":{"inte":96,"codi":96,"agen":97},"ts":1787918457018}]},{"id":"nvidia/nemotron-3.5-lightning","name":"Nemotron 3.5 Lightning","author":"Nvidia","inp":0.08,"out":0.2,"cache":0.04,"ctx":262144,"date":"2026-08-11","reason":true,"vars":[{"e":"default","label":"Nemotron 3.5 Lightning","v":{"intel":23.6,"code":26.8,"agent":13.8,"py":31.6,"gpqa":74.3,"hle":10.6,"lctx":55.3,"econ":16.2,"phys":0.0,"know":14.4,"hon":62.4},"pct":{"inte":25,"codi":30,"agen":29},"ts":1787788832040}]},{"id":"upstage/solar-pro4","name":"Solar Pro 4","author":"upstage","inp":0.03,"out":0.12,"cache":0.006,"ctx":524288,"date":"2026-08-10","reason":true,"vars":[{"e":"default","label":"Solar Pro 4","v":{"intel":41.6,"code":52.7,"agent":33.6,"py":43.6,"gpqa":89.1,"hle":29.2,"lctx":70.7,"econ":38.6,"phys":5.4,"know":18.9,"hon":75.6},"pct":{"inte":59,"codi":60,"agen":64},"ts":1787788832040}]},{"id":"meta/muse-spark-1.2","name":"Muse Spark 1.2","author":"Meta","inp":1.25,"out":4.25,"cache":0.15,"ctx":1048576,"date":"2026-08-05","reason":true,"vars":[{"e":"xhigh","label":"Muse Spark 1.2 (xhigh)","v":{"intel":56.8,"code":72.2,"agent":49.3,"py":56.4,"gpqa":90.4,"hle":45.5,"lctx":83.3,"econ":55.8,"phys":17.7,"know":45.4,"hon":66.7},"pct":{"inte":88,"codi":89,"agen":85},"ts":1787918457018}]},{"id":"qwen/qwen3.8-max","name":"Qwen3.8 Max","author":"Qwen","inp":2.0,"out":6.0,"cache":0.25,"ctx":1000000,"date":"2026-08-03","reason":true,"vars":[{"e":"default","label":"Qwen3.8 Max","v":{"intel":53.4,"code":68.9,"agent":49.9,"py":45.0,"gpqa":92.2,"hle":40.3,"lctx":65.0,"econ":54.9,"phys":18.6,"know":30.8,"hon":59.7},"pct":{"inte":82,"codi":79,"agen":88},"ts":1785801614387},{"e":"default","label":"Qwen3.8 Max","v":{"intel":58.1,"code":71.8,"agent":58.4,"py":52.9,"gpqa":92.7,"hle":43.0,"lctx":74.3,"econ":61.0,"phys":20.0,"know":31.9,"hon":58.3},"pct":{"inte":92,"codi":87,"agen":96},"ts":1788307256623}]},{"id":"deepseek/deepseek-v4-flash-0731","name":"DeepSeek V4 Flash 0731","author":"DeepSeek","inp":0.065,"out":0.18,"cache":0.016,"ctx":1310720,"date":"2026-07-31","reason":true,"vars":[{"e":"max","label":"DeepSeek V4 Flash 0731 (Reasoning, Max Effort)","v":{"intel":51.8,"code":69.1,"agent":48.4,"py":49.9,"gpqa":90.8,"hle":38.6,"lctx":74.3,"econ":52.4,"phys":16.6,"know":40.4,"hon":8.3},"pct":{"inte":76,"codi":79,"agen":84},"ts":1788307256623}]},{"id":"thinkingmachines/inkling-small","name":"Inkling Small","author":"thinkingmachines","inp":0.45,"out":1.2,"cache":0.1,"ctx":1048576,"date":"2026-07-30","reason":true,"vars":[{"e":"default","label":"Inkling Small","v":{"intel":41.2,"code":52.9,"agent":31.9,"py":48.7,"gpqa":89.5,"hle":33.3,"lctx":69.3,"econ":38.4,"phys":8.3,"know":33.2,"hon":37.0},"pct":{"inte":58,"codi":61,"agen":63},"ts":1788307256623}]},{"id":"anthropic/claude-opus-5","name":"Claude Opus 5","author":"Anthropic","inp":5.0,"out":25.0,"cache":0.5,"ctx":1000000,"date":"2026-07-24","reason":true,"vars":[{"e":"low","label":"Claude Opus 5 (Adaptive Reasoning, Low Effort)","v":{"intel":52.5,"code":66.9,"agent":42.1,"py":48.0,"gpqa":88.9,"hle":43.4,"lctx":77.0,"econ":47.7,"phys":23.1,"know":55.9,"hon":37.8},"pct":{"inte":78,"codi":75,"agen":75},"ts":1787788832040},{"e":"medium","label":"Claude Opus 5 (Adaptive Reasoning, Medium Effort)","v":{"intel":58.6,"code":74.3,"agent":50.4,"py":50.7,"gpqa":91.9,"hle":51.3,"lctx":78.7,"econ":55.7,"phys":26.9,"know":57.1,"hon":39.3},"pct":{"inte":92,"codi":90,"agen":90},"ts":1787788832040},{"e":"high","label":"Claude Opus 5 (Adaptive Reasoning, High Effort)","v":{"intel":61.5,"code":76.5,"agent":56.1,"py":54.3,"gpqa":93.7,"hle":52.8,"lctx":76.3,"econ":60.9,"phys":28.3,"know":58.9,"hon":38.8},"pct":{"inte":97,"codi":95,"agen":93},"ts":1787788832040},{"e":"xhigh","label":"Claude Opus 5 (Adaptive Reasoning, Xhigh Effort)","v":{"intel":62.5,"code":77.0,"agent":58.4,"py":55.0,"gpqa":93.7,"hle":54.4,"lctx":76.3,"econ":64.9,"phys":27.7,"know":59.5,"hon":40.5},"pct":{"inte":98,"codi":97,"agen":96},"ts":1787788832040},{"e":"max","label":"Claude Opus 5 (Adaptive Reasoning, Max Effort)","v":{"intel":63.1,"code":78.0,"agent":59.2,"py":55.7,"gpqa":93.2,"hle":54.9,"lctx":75.7,"econ":66.2,"phys":29.1,"know":60.9,"hon":39.2},"pct":{"inte":99,"codi":98,"agen":99},"ts":1787918457018}]},{"id":"inclusionai/ling-3.0-flash","name":"Ling-3.0-flash","author":"inclusionai","inp":0.021,"out":0.063,"cache":0.0042,"ctx":262144,"date":"2026-07-23","reason":true,"vars":[{"e":"default","label":"Ling 3.0 Flash","v":{"intel":37.8,"code":50.6,"agent":29.3,"py":41.1,"gpqa":85.5,"hle":23.7,"lctx":67.0,"econ":30.3,"phys":1.7,"know":18.2,"hon":55.9},"pct":{"inte":49,"codi":56,"agen":54},"ts":1787616009405}]},{"id":"google/gemini-3.6-flash","name":"Gemini 3.6 Flash","author":"Google","inp":0.75,"out":3.75,"cache":0.075,"ctx":1048576,"date":"2026-07-21","reason":true,"vars":[{"e":"high","label":"Gemini 3.6 Flash (high)","v":{"intel":51.6,"code":69.2,"agent":40.5,"py":52.7,"gpqa":92.8,"hle":40.8,"lctx":79.0,"econ":45.7,"phys":10.6,"know":50.0,"hon":44.4},"pct":{"inte":75,"codi":80,"agen":73},"ts":1788307256623}]},{"id":"google/gemini-3.5-flash-lite","name":"Gemini 3.5 Flash Lite","author":"Google","inp":0.3,"out":2.5,"cache":0.03,"ctx":1048576,"date":"2026-07-21","reason":true,"vars":[{"e":"default","label":"Gemini 3.5 Flash-Lite","v":{"intel":37.4,"code":49.3,"agent":27.2,"py":40.9,"gpqa":83.8,"hle":18.8,"lctx":74.7,"econ":31.8,"phys":0.0,"know":29.5,"hon":65.6},"pct":{"inte":47,"codi":54,"agen":50},"ts":1788307256623}]},{"id":"meituan/longcat-2.0","name":"LongCat 2.0","author":"meituan","inp":0.3,"out":1.2,"cache":0.006,"ctx":1048756,"date":"2026-07-20","reason":true,"vars":[{"e":"default","label":"LongCat 2.0","v":{"intel":34.0,"code":45.3,"agent":22.0,"py":35.4,"gpqa":78.0,"hle":33.7,"lctx":62.7,"econ":26.6,"phys":2.6,"know":29.6,"hon":24.6},"pct":{"inte":42,"codi":48,"agen":42},"ts":1787616009405}]},{"id":"thinkingmachines/inkling","name":"Inkling","author":"thinkingmachines","inp":1.0,"out":4.05,"cache":0.17,"ctx":1048576,"date":"2026-07-18","reason":true,"vars":[{"e":"xhigh","label":"Inkling (xhigh)","v":{"intel":42.3,"code":52.1,"agent":34.1,"py":46.1,"gpqa":87.2,"hle":31.9,"lctx":73.3,"econ":36.7,"phys":5.4,"know":41.5,"hon":32.3},"pct":{"inte":62,"codi":58,"agen":65},"ts":1787918457018}]},{"id":"moonshotai/kimi-k3","name":"Kimi K3","author":"moonshotai","inp":3.0,"out":15.0,"cache":0.3,"ctx":1048576,"date":"2026-07-16","reason":true,"vars":[{"e":"low","label":"Kimi K3 (low)","v":{"intel":48.3,"code":72.0,"agent":39.6,"py":51.2,"gpqa":84.2,"hle":25.0,"lctx":77.0,"econ":38.5,"phys":3.1,"know":45.8,"hon":22.9},"pct":{"inte":71,"codi":88,"agen":71},"ts":1787788832040},{"e":"max","label":"Kimi K3 (max)","v":{"intel":59.7,"code":76.2,"agent":54.3,"py":58.7,"gpqa":93.5,"hle":46.9,"lctx":82.7,"econ":58.4,"phys":23.4,"know":47.6,"hon":46.8},"pct":{"inte":95,"codi":93,"agen":92},"ts":1787918457018}]},{"id":"meta/muse-spark-1.1","name":"Muse Spark 1.1","author":"Meta","inp":1.25,"out":4.25,"cache":0.15,"ctx":1048576,"date":"2026-07-16","reason":true,"vars":[{"e":"xhigh","label":"Muse Spark 1.1 (xhigh)","v":{"intel":53.2,"code":71.3,"agent":39.7,"py":58.2,"gpqa":89.8,"hle":46.2,"lctx":81.3,"econ":43.6,"phys":15.1,"know":52.0,"hon":50.0},"pct":{"inte":81,"codi":83,"agen":71},"ts":1788307256623}]},{"id":"openai/gpt-5.6-luna","name":"GPT-5.6 Luna","author":"OpenAI","inp":0.2,"out":1.2,"cache":0.02,"ctx":1050000,"date":"2026-07-09","reason":true,"vars":[{"e":"off","label":"GPT-5.6 Luna (Non-reasoning)","v":{"intel":26.8,"code":39.3,"agent":22.2,"py":39.9,"gpqa":64.5,"hle":7.2,"lctx":38.7,"econ":28.8,"phys":0.3,"know":28.6,"hon":25.0},"pct":{"inte":32,"codi":41,"agen":43},"ts":1787788832040},{"e":"low","label":"GPT-5.6 Luna (low)","v":{"intel":33.9,"code":44.2,"agent":25.7,"py":45.6,"gpqa":83.5,"hle":19.8,"lctx":65.3,"econ":32.6,"phys":2.6,"know":39.6,"hon":10.1},"pct":{"inte":41,"codi":47,"agen":46},"ts":1788307256623},{"e":"medium","label":"GPT-5.6 Luna (medium)","v":{"intel":38.9,"code":50.7,"agent":31.8,"py":45.8,"gpqa":85.9,"hle":25.8,"lctx":72.0,"econ":38.5,"phys":4.9,"know":40.7,"hon":9.1},"pct":{"inte":52,"codi":56,"agen":62},"ts":1787788832040},{"e":"high","label":"GPT-5.6 Luna (high)","v":{"intel":47.0,"code":63.3,"agent":41.0,"py":50.7,"gpqa":89.2,"hle":33.4,"lctx":74.0,"econ":47.8,"phys":16.6,"know":41.8,"hon":7.6},"pct":{"inte":69,"codi":72,"agen":73},"ts":1787918457018},{"e":"xhigh","label":"GPT-5.6 Luna (xhigh)","v":{"intel":50.1,"code":68.6,"agent":44.4,"py":50.0,"gpqa":89.5,"hle":37.0,"lctx":73.3,"econ":50.7,"phys":20.6,"know":42.4,"hon":7.5},"pct":{"inte":72,"codi":77,"agen":78},"ts":1788307256623},{"e":"max","label":"GPT-5.6 Luna (max)","v":{"intel":52.3,"code":71.4,"agent":46.9,"py":52.5,"gpqa":91.1,"hle":39.5,"lctx":78.3,"econ":53.5,"phys":20.6,"know":42.7,"hon":7.4},"pct":{"inte":78,"codi":84,"agen":82},"ts":1787918457018}]},{"id":"openai/gpt-5.6-terra","name":"GPT-5.6 Terra","author":"OpenAI","inp":2.0,"out":12.0,"cache":0.2,"ctx":1050000,"date":"2026-07-09","reason":true,"vars":[{"e":"off","label":"GPT-5.6 Terra (Non-reasoning)","v":{"intel":34.6,"code":52.3,"agent":30.1,"py":44.6,"gpqa":74.6,"hle":11.4,"lctx":55.0,"econ":37.2,"phys":2.0,"know":36.8,"hon":5.0},"pct":{"inte":44,"codi":59,"agen":55},"ts":1786060819020},{"e":"low","label":"GPT-5.6 Terra (low)","v":{"intel":41.3,"code":58.1,"agent":31.5,"py":49.2,"term":43.9,"gpqa":84.3,"hle":29.2,"ifb":59.7,"tau2":60.5,"lctx":68.7,"econ":37.6,"phys":9.4,"know":43.7,"hon":10.1},"pct":{"inte":58,"codi":66,"agen":61},"ts":1788307256623},{"e":"medium","label":"GPT-5.6 Terra (medium)","v":{"intel":46.8,"code":64.7,"agent":39.1,"py":49.7,"gpqa":87.2,"hle":33.3,"ifb":62.2,"tau2":72.8,"lctx":70.3,"econ":45.0,"phys":17.4,"know":44.6,"hon":10.2},"pct":{"inte":69,"codi":73,"agen":69},"ts":1788307256623},{"e":"high","label":"GPT-5.6 Terra (high)","v":{"intel":50.1,"code":67.1,"agent":43.5,"py":50.1,"term":57.6,"gpqa":89.6,"hle":38.5,"ifb":64.4,"tau2":78.4,"lctx":73.3,"econ":50.2,"phys":22.9,"know":45.5,"hon":10.2},"pct":{"inte":72,"codi":76,"agen":76},"ts":1788307256623},{"e":"xhigh","label":"GPT-5.6 Terra (xhigh)","v":{"intel":52.8,"code":70.6,"agent":46.5,"py":51.6,"term":62.9,"gpqa":90.8,"hle":41.9,"ifb":66.3,"tau2":80.4,"lctx":75.0,"econ":53.1,"phys":27.1,"know":45.5,"hon":11.0},"pct":{"inte":79,"codi":82,"agen":82},"ts":1788307256623},{"e":"max","label":"GPT-5.6 Terra (max)","v":{"intel":56.6,"code":76.7,"agent":50.2,"py":53.9,"term":57.6,"gpqa":92.5,"hle":42.9,"ifb":71.2,"tau2":86.3,"lctx":79.7,"econ":53.3,"phys":30.0,"know":46.8,"hon":12.1},"pct":{"inte":88,"codi":96,"agen":89},"ts":1787918457018}]},{"id":"openai/gpt-5.6-sol","name":"GPT-5.6 Sol","author":"OpenAI","inp":2.0,"out":10.0,"cache":0.2,"ctx":1050000,"date":"2026-07-09","reason":true,"vars":[{"e":"off","label":"GPT-5.6 Sol (Non-reasoning)","v":{"intel":41.9,"code":65.1,"agent":36.0,"py":47.1,"gpqa":79.0,"hle":16.7,"lctx":57.0,"econ":44.0,"phys":5.1,"know":48.7,"hon":7.2},"pct":{"inte":60,"codi":74,"agen":68},"ts":1787616009405},{"e":"low","label":"GPT-5.6 Sol (low)","v":{"intel":50.7,"code":69.7,"agent":41.6,"py":55.4,"term":60.6,"gpqa":89.8,"hle":39.4,"ifb":66.5,"tau2":76.0,"lctx":73.0,"econ":47.0,"phys":14.9,"know":57.2,"hon":10.6},"pct":{"inte":73,"codi":81,"agen":74},"ts":1787788832040},{"e":"medium","label":"GPT-5.6 Sol (medium)","v":{"intel":55.6,"code":76.3,"agent":47.9,"py":56.5,"term":62.9,"gpqa":92.6,"hle":42.2,"ifb":69.6,"tau2":81.0,"lctx":74.3,"econ":52.2,"phys":22.9,"know":57.8,"hon":9.2},"pct":{"inte":85,"codi":94,"agen":83},"ts":1787788832040},{"e":"high","label":"GPT-5.6 Sol (high)","v":{"intel":57.3,"code":77.2,"agent":50.6,"py":56.9,"term":62.1,"gpqa":92.8,"hle":46.0,"ifb":69.2,"tau2":83.3,"lctx":75.3,"econ":55.8,"phys":25.7,"know":58.4,"hon":8.8},"pct":{"inte":89,"codi":97,"agen":90},"ts":1787788832040},{"e":"xhigh","label":"GPT-5.6 Sol (xhigh)","v":{"intel":59.0,"code":78.3,"agent":53.6,"py":56.0,"term":61.4,"gpqa":93.1,"hle":47.3,"ifb":71.0,"tau2":84.8,"lctx":76.3,"econ":58.6,"phys":28.6,"know":58.8,"hon":8.1},"pct":{"inte":94,"codi":99,"agen":92},"ts":1787788832040},{"e":"max","label":"GPT-5.6 Sol (max)","v":{"intel":60.9,"code":77.4,"agent":57.8,"py":56.1,"term":65.9,"gpqa":94.1,"hle":49.5,"ifb":72.7,"tau2":85.1,"lctx":77.7,"econ":60.5,"phys":32.3,"know":59.4,"hon":7.8},"pct":{"inte":96,"codi":98,"agen":95},"ts":1787918457018}]},{"id":"x-ai/grok-4.5","name":"Grok 4.5","author":"SpaceXAI","inp":2.0,"out":6.0,"cache":0.3,"ctx":500000,"date":"2026-07-08","reason":true,"vars":[{"e":"high","label":"Grok 4.5 (high)","v":{"intel":55.8,"code":72.4,"agent":48.9,"py":54.1,"gpqa":93.1,"hle":42.7,"lctx":74.0,"econ":50.9,"phys":15.4,"know":51.5,"hon":45.9},"pct":{"inte":86,"codi":89,"agen":85},"ts":1787616009405}]},{"id":"anthropic/claude-sonnet-5","name":"Claude Sonnet 5","author":"Anthropic","inp":2.0,"out":10.0,"cache":0.2,"ctx":1000000,"date":"2026-06-30","reason":true,"vars":[{"e":"off","label":"Claude Sonnet 5 (Non-reasoning, High Effort)","v":{"intel":42.6,"code":66.4,"agent":34.2,"py":48.6,"gpqa":80.0,"hle":19.0,"lctx":66.0,"econ":43.1,"phys":1.1,"know":33.8,"hon":48.0},"pct":{"inte":63,"codi":75,"agen":66},"ts":1788307256623},{"e":"low","label":"Claude Sonnet 5 (Adaptive Reasoning, Low Effort)","v":{"econ":35.9},"pct":{},"ts":1787788832040},{"e":"medium","label":"Claude Sonnet 5 (Adaptive Reasoning, Medium Effort)","v":{"econ":39.9},"pct":{},"ts":1787788832040},{"e":"high","label":"Claude Sonnet 5 (Adaptive Reasoning, High Effort)","v":{"econ":44.9},"pct":{},"ts":1787788832040},{"e":"xhigh","label":"Claude Sonnet 5 (Adaptive Reasoning, Xhigh Effort)","v":{"econ":49.7},"pct":{},"ts":1787788832040},{"e":"max","label":"Claude Sonnet 5 (Adaptive Reasoning, Max Effort)","v":{"intel":55.3,"code":71.5,"agent":49.7,"py":53.6,"gpqa":91.1,"hle":41.3,"lctx":77.0,"econ":54.2,"phys":16.9,"know":40.1,"hon":60.6},"pct":{"inte":85,"codi":84,"agen":87},"ts":1788307256623}]},{"id":"cohere/north-mini-code:free","name":"North Mini Code (free)","author":"Cohere","inp":0.0,"out":0.0,"cache":null,"ctx":256000,"date":"2026-06-17","reason":true,"vars":[{"e":"default","label":"North Mini Code","v":{"intel":20.2,"code":36.5,"agent":3.1,"py":38.2,"term":31.1,"gpqa":75.7,"hle":11.1,"ifb":57.6,"tau2":37.4,"lctx":36.0,"econ":2.1,"phys":0.3,"know":18.9,"hon":16.8},"pct":{"inte":21,"codi":38,"agen":15},"ts":1786060819020}]},{"id":"z-ai/glm-5.2","name":"GLM 5.2","author":"Z.ai","inp":0.966,"out":3.036,"cache":0.1932,"ctx":1048576,"date":"2026-06-16","reason":true,"vars":[{"e":"off","label":"GLM-5.2 (Non-reasoning)","v":{"intel":34.8,"code":46.5,"agent":35.1,"py":36.1,"gpqa":68.6,"hle":9.8,"lctx":45.0,"econ":44.4,"phys":3.1,"know":20.3,"hon":66.3},"pct":{"inte":44,"codi":50,"agen":66},"ts":1788307256623},{"e":"max","label":"GLM-5.2 (max)","v":{"intel":52.6,"code":68.8,"agent":45.7,"py":50.5,"term":50.8,"gpqa":89.5,"hle":41.1,"ifb":73.3,"tau2":99.1,"lctx":76.7,"econ":49.9,"phys":20.9,"know":24.3,"hon":73.7},"pct":{"inte":79,"codi":77,"agen":80},"ts":1787918457018}]},{"id":"moonshotai/kimi-k2.7-code","name":"Kimi K2.7 Code","author":"moonshotai","inp":0.66,"out":3.4,"cache":0.18,"ctx":262144,"date":"2026-06-12","reason":true,"vars":[{"e":"default","label":"Kimi K2.7 Code","v":{"intel":43.0,"code":60.8,"agent":30.3,"py":47.5,"term":44.7,"gpqa":89.6,"hle":35.0,"ifb":63.1,"tau2":90.1,"lctx":75.0,"econ":34.4,"phys":10.0,"know":39.6,"hon":17.6},"pct":{"inte":64,"codi":70,"agen":56},"ts":1787616009405}]},{"id":"anthropic/claude-fable-5","name":"Claude Fable 5","author":"Anthropic","inp":10.0,"out":50.0,"cache":1.0,"ctx":1000000,"date":"2026-06-09","reason":true,"vars":[{"e":"max","label":"Claude Fable 5 (Adaptive Reasoning, Max Effort, Opus 4.8 Fallback)","v":{"intel":62.1,"code":76.5,"agent":56.6,"py":60.2,"term":62.9,"gpqa":92.6,"hle":55.5,"ifb":63.5,"tau2":98.5,"lctx":76.7,"econ":61.1,"phys":28.6,"know":65.3,"hon":36.4},"pct":{"inte":97,"codi":95,"agen":94},"ts":1787788832040}]},{"id":"nex-agi/nex-n2-pro","name":"Nex-N2-Pro","author":"nex-agi","inp":0.25,"out":1.0,"cache":0.025,"ctx":262144,"date":"2026-06-08","reason":true,"vars":[{"e":"default","label":"Nex-N2-Pro","v":{"intel":41.7,"code":59.1,"agent":31.2,"py":41.8,"gpqa":89.2,"hle":33.7,"ifb":66.2,"tau2":81.6,"lctx":76.3,"econ":37.4,"phys":8.6,"know":34.8,"hon":5.1},"pct":{"inte":60,"codi":68,"agen":59},"ts":1787918457018}]},{"id":"nvidia/nemotron-3-ultra-550b-a55b","name":"Nemotron 3 Ultra","author":"Nvidia","inp":0.6,"out":2.4,"cache":0.12,"ctx":262144,"date":"2026-06-04","reason":true,"vars":[{"e":"on","label":"Nemotron 3 Ultra 550B A55B (Reasoning)","v":{"intel":38.3,"code":49.3,"agent":27.5,"py":39.9,"term":36.4,"gpqa":86.7,"hle":28.4,"ifb":81.4,"tau2":83.3,"lctx":71.0,"econ":33.1,"phys":3.1,"know":22.6,"hon":70.3},"pct":{"inte":51,"codi":54,"agen":51},"ts":1787140803775}]},{"id":"qwen/qwen3.7-plus","name":"Qwen3.7 Plus","author":"Qwen","inp":0.32,"out":1.28,"cache":0.064,"ctx":1000000,"date":"2026-06-03","reason":true,"vars":[{"e":"default","label":"Qwen3.7 Plus","v":{"intel":39.4,"code":55.9,"agent":20.7,"py":45.5,"term":47.0,"gpqa":90.0,"hle":35.6,"ifb":78.0,"tau2":93.0,"lctx":69.0,"econ":22.4,"phys":9.1,"know":22.5,"hon":72.3},"pct":{"inte":54,"codi":63,"agen":38},"ts":1787788832040}]},{"id":"minimax/minimax-m3","name":"MiniMax M3","author":"MiniMax","inp":0.3,"out":1.2,"cache":0.06,"ctx":1048576,"date":"2026-05-31","reason":true,"vars":[{"e":"default","label":"MiniMax-M3","v":{"intel":45.4,"code":58.6,"agent":36.1,"py":45.4,"term":42.4,"gpqa":92.9,"hle":39.0,"ifb":82.9,"tau2":88.9,"lctx":80.3,"econ":44.0,"phys":3.7,"know":16.7,"hon":81.6},"pct":{"inte":67,"codi":66,"agen":68},"ts":1787918457018}]},{"id":"stepfun/step-3.7-flash","name":"Step 3.7 Flash","author":"stepfun","inp":0.2,"out":1.15,"cache":0.04,"ctx":262144,"date":"2026-05-28","reason":true,"vars":[{"e":"default","label":"Step 3.7 Flash","v":{"intel":30.9,"code":39.6,"agent":21.7,"py":40.0,"term":35.6,"gpqa":80.9,"hle":21.4,"ifb":67.3,"tau2":98.5,"lctx":69.7,"econ":25.9,"phys":2.3,"know":25.8,"hon":15.0},"pct":{"inte":37,"codi":42,"agen":41},"ts":1788307256623}]},{"id":"anthropic/claude-opus-4.8","name":"Claude Opus 4.8","author":"Anthropic","inp":5.0,"out":25.0,"cache":0.5,"ctx":1000000,"date":"2026-05-27","reason":true,"vars":[{"e":"max","label":"Claude Opus 4.8 (Adaptive Reasoning, Max Effort)","v":{"intel":57.3,"code":74.3,"agent":49.4,"py":53.5,"term":58.3,"gpqa":92.0,"hle":48.7,"ifb":62.2,"tau2":94.4,"lctx":73.0,"econ":53.9,"phys":20.9,"know":48.8,"hon":60.7},"pct":{"inte":89,"codi":90,"agen":86},"ts":1787788832040}]},{"id":"qwen/qwen3.7-max","name":"Qwen3.7 Max","author":"Qwen","inp":1.475,"out":4.425,"cache":0.295,"ctx":1000000,"date":"2026-05-21","reason":true,"vars":[{"e":"default","label":"Qwen3.7 Max","v":{"intel":46.7,"code":66.0,"agent":30.9,"py":48.8,"term":50.8,"gpqa":92.3,"hle":40.5,"ifb":80.5,"tau2":94.7,"lctx":74.7,"econ":38.2,"phys":13.4,"know":31.1,"hon":74.4},"pct":{"inte":68,"codi":74,"agen":58},"ts":1788307256623}]},{"id":"x-ai/grok-build-0.1","name":"Grok Build 0.1","author":"SpaceXAI","inp":1.0,"out":2.0,"cache":0.2,"ctx":256000,"date":"2026-05-20","reason":true,"vars":[{"e":"default","label":"Grok Build 0.1 0616","v":{"intel":40.7,"code":51.5,"agent":28.9,"py":50.2,"gpqa":89.5,"hle":38.3,"lctx":70.0,"econ":35.6,"phys":9.1,"know":51.5,"hon":6.9},"pct":{"inte":56,"codi":57,"agen":52},"ts":1787788832040}]},{"id":"google/gemini-3.5-flash","name":"Gemini 3.5 Flash","author":"Google","inp":1.5,"out":9.0,"cache":0.15,"ctx":1048576,"date":"2026-05-19","reason":true,"vars":[{"e":"minimal","label":"Gemini 3.5 Flash (minimal)","v":{"py":48.8,"term":46.2,"gpqa":82.8,"hle":24.1,"ifb":47.3,"tau2":58.8,"lctx":58.3,"phys":1.4,"know":43.0,"hon":25.7},"pct":{},"ts":1786060819020},{"e":"medium","label":"Gemini 3.5 Flash (medium)","v":{"py":53.0,"term":39.4,"gpqa":92.1,"hle":41.3,"ifb":74.6,"tau2":95.6,"lctx":79.7,"phys":10.9,"know":51.0,"hon":38.2},"pct":{},"ts":1786060819020},{"e":"high","label":"Gemini 3.5 Flash (high)","v":{"intel":52.0,"code":70.1,"agent":39.7,"py":53.1,"term":40.9,"gpqa":92.2,"hle":42.7,"ifb":76.3,"tau2":95.3,"lctx":81.0,"econ":41.9,"phys":13.1,"know":51.4,"hon":37.8},"pct":{"inte":76,"codi":81,"agen":71},"ts":1788307256623}]},{"id":"x-ai/grok-4.3","name":"Grok 4.3","author":"SpaceXAI","inp":1.25,"out":2.5,"cache":0.2,"ctx":1000000,"date":"2026-05-01","reason":true,"vars":[{"e":"off","label":"Grok 4.3 (Non-reasoning)","v":{"intel":25.0,"code":35.2,"agent":23.0,"py":37.4,"term":18.9,"gpqa":65.8,"hle":6.8,"ifb":47.6,"tau2":65.8,"lctx":28.0,"econ":30.0,"phys":0.0,"know":23.7,"hon":25.5},"pct":{"inte":28,"codi":37,"agen":43},"ts":1788307256623},{"e":"low","label":"Grok 4.3 (low)","v":{"py":41.9,"term":26.5,"gpqa":84.3,"hle":18.4,"ifb":81.0,"tau2":88.9,"lctx":67.7,"phys":0.6,"know":26.7,"hon":82.6},"pct":{},"ts":1786060819020},{"e":"medium","label":"Grok 4.3 (medium)","v":{"py":44.6,"term":30.3,"gpqa":89.0,"hle":30.0,"ifb":83.3,"tau2":91.2,"lctx":68.3,"phys":4.9,"know":28.8,"hon":83.1},"pct":{},"ts":1786060819020},{"e":"high","label":"Grok 4.3 (high)","v":{"intel":37.9,"code":42.2,"agent":24.2,"py":47.3,"term":37.9,"gpqa":90.1,"hle":37.2,"ifb":81.3,"tau2":97.7,"lctx":66.0,"econ":29.4,"phys":8.0,"know":34.8,"hon":74.2},"pct":{"inte":50,"codi":44,"agen":45},"ts":1786104059192}]},{"id":"ibm-granite/granite-4.1-8b","name":"Granite 4.1 8B","author":"ibm-granite","inp":0.05,"out":0.1,"cache":0.05,"ctx":131072,"date":"2026-04-30","reason":false,"vars":[{"e":"default","label":"Granite 4.1 8B","v":{"code":9.5,"py":21.8,"term":0.0,"gpqa":43.3,"hle":3.8,"ifb":38.6,"tau2":27.8,"lctx":11.3,"phys":0.0,"know":12.3,"hon":12.9},"pct":{"codi":5},"ts":1786060819020}]},{"id":"mistralai/mistral-medium-3-5","name":"Mistral Medium 3.5","author":"Mistral AI","inp":1.5,"out":7.5,"cache":null,"ctx":262144,"date":"2026-04-30","reason":true,"vars":[{"e":"default","label":"Mistral Medium 3.5","v":{"intel":30.4,"code":46.9,"agent":19.2,"py":39.6,"term":33.3,"gpqa":74.8,"hle":13.8,"ifb":68.8,"tau2":94.2,"lctx":65.3,"econ":21.8,"phys":0.0,"know":24.7,"hon":18.4},"pct":{"inte":36,"codi":52,"agen":34},"ts":1787788832040}]},{"id":"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free","name":"Nemotron 3 Nano Omni (free)","author":"Nvidia","inp":0.0,"out":0.0,"cache":null,"ctx":256000,"date":"2026-04-28","reason":true,"vars":[{"e":"default","label":"Nemotron 3 Nano Omni 30B A3B Reasoning","v":{"code":13.8,"py":27.8,"term":8.3,"gpqa":46.9,"hle":4.8,"ifb":63.2,"tau2":45.3,"lctx":40.7,"econ":0.0,"phys":0.0,"know":15.2,"hon":14.3},"pct":{"codi":11},"ts":1786060819020}]},{"id":"qwen/qwen3.6-35b-a3b","name":"Qwen3.6 35B A3B","author":"Qwen","inp":0.1,"out":0.9,"cache":0.05,"ctx":262144,"date":"2026-04-27","reason":true,"vars":[{"e":"off","label":"Qwen3.6 35B A3B (Non-reasoning)","v":{"intel":24.6,"code":28.1,"agent":19.2,"py":1.3,"term":25.8,"gpqa":81.7,"hle":13.9,"ifb":36.2,"tau2":85.1,"lctx":60.0,"econ":25.9,"phys":0.0,"know":16.7,"hon":7.9},"pct":{"inte":28,"codi":31,"agen":34},"ts":1788307256623},{"e":"on","label":"Qwen3.6 35B A3B (Reasoning)","v":{"intel":32.1,"code":41.9,"agent":21.6,"py":35.8,"term":34.8,"gpqa":84.1,"hle":22.2,"ifb":64.4,"tau2":95.3,"lctx":66.7,"econ":27.8,"phys":0.3,"know":18.8,"hon":49.5},"pct":{"inte":39,"codi":43,"agen":39},"ts":1786104059192}]},{"id":"qwen/qwen3.6-max-preview","name":"Qwen3.6 Max Preview","author":"Qwen","inp":1.027,"out":6.162,"cache":null,"ctx":262144,"date":"2026-04-27","reason":true,"vars":[{"e":"default","label":"Qwen3.6 Max Preview","v":{"py":46.9,"term":43.9,"gpqa":88.8,"hle":30.8,"ifb":76.6,"tau2":95.9,"lctx":72.0,"phys":3.7,"know":37.9,"hon":53.8},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3.6-27b","name":"Qwen3.6 27B","author":"Qwen","inp":0.6,"out":3.6,"cache":0.12,"ctx":262144,"date":"2026-04-27","reason":true,"vars":[{"e":"off","label":"Qwen3.6 27B (Non-reasoning)","v":{"intel":31.3,"code":46.6,"agent":23.6,"py":37.3,"term":21.2,"gpqa":82.9,"hle":15.1,"ifb":45.7,"tau2":93.6,"lctx":64.3,"econ":30.6,"phys":0.9,"know":16.7,"hon":16.0},"pct":{"inte":37,"codi":51,"agen":45},"ts":1787788832040},{"e":"on","label":"Qwen3.6 27B (Reasoning)","v":{"intel":37.7,"code":53.7,"agent":27.5,"py":39.8,"term":34.8,"gpqa":84.2,"hle":23.1,"ifb":67.6,"tau2":94.2,"lctx":73.3,"econ":31.9,"phys":1.1,"know":19.6,"hon":50.7},"pct":{"inte":49,"codi":61,"agen":51},"ts":1787788832040}]},{"id":"openai/gpt-5.5-pro","name":"GPT-5.5 Pro","author":"OpenAI","inp":30.0,"out":180.0,"cache":null,"ctx":1050000,"date":"2026-04-24","reason":true,"vars":[{"e":"xhigh","label":"GPT-5.5 Pro (xhigh)","v":{"phys":30.6},"pct":{},"ts":1777593658148}]},{"id":"openai/gpt-5.5","name":"GPT-5.5","author":"OpenAI","inp":5.0,"out":30.0,"cache":0.5,"ctx":1050000,"date":"2026-04-24","reason":true,"vars":[{"e":"off","label":"GPT-5.5 (Non-reasoning)","v":{"intel":35.8,"code":56.5,"agent":26.1,"py":47.3,"term":49.2,"gpqa":76.8,"hle":13.7,"ifb":46.1,"tau2":69.3,"lctx":58.0,"econ":31.2,"phys":1.4,"know":45.6,"hon":7.3},"pct":{"inte":46,"codi":65,"agen":48},"ts":1786492852460},{"e":"low","label":"GPT-5.5 (low)","v":{"intel":44.5,"code":60.9,"agent":31.7,"py":51.6,"term":52.3,"gpqa":91.0,"hle":32.7,"ifb":64.4,"tau2":83.9,"lctx":77.7,"econ":34.2,"phys":8.0,"know":54.8,"hon":12.0},"pct":{"inte":65,"codi":71,"agen":62},"ts":1788307256623},{"e":"medium","label":"GPT-5.5 (medium)","v":{"intel":51.4,"code":71.5,"agent":39.2,"py":53.5,"term":57.6,"gpqa":92.6,"hle":42.4,"ifb":71.0,"tau2":91.8,"lctx":76.7,"econ":43.5,"phys":18.6,"know":56.8,"hon":10.4},"pct":{"inte":74,"codi":84,"agen":70},"ts":1788307256623},{"e":"high","label":"GPT-5.5 (high)","v":{"intel":54.7,"code":71.6,"agent":45.9,"py":55.9,"term":59.8,"gpqa":93.2,"hle":45.0,"ifb":71.6,"tau2":93.0,"lctx":79.0,"econ":47.7,"phys":25.4,"know":57.0,"hon":10.9},"pct":{"inte":83,"codi":86,"agen":80},"ts":1788307256623},{"e":"xhigh","label":"GPT-5.5 (xhigh)","v":{"intel":56.3,"code":74.9,"agent":47.4,"py":56.1,"term":60.6,"gpqa":93.5,"hle":45.8,"ifb":75.9,"tau2":93.9,"lctx":79.0,"econ":49.1,"phys":27.1,"know":58.0,"hon":11.0},"pct":{"inte":87,"codi":92,"agen":83},"ts":1788307256623}]},{"id":"deepseek/deepseek-v4-pro","name":"DeepSeek V4 Pro 0423","author":"DeepSeek","inp":1.0423,"out":2.0845,"cache":0.0869,"ctx":1048576,"date":"2026-04-24","reason":true,"vars":[{"e":"off","label":"DeepSeek V4 Pro (Non-reasoning)","v":{"py":42.4,"term":36.4,"gpqa":71.7,"hle":8.2,"ifb":45.8,"tau2":91.2,"lctx":49.7,"phys":0.9,"know":30.9,"hon":12.2},"pct":{},"ts":1787011251007},{"e":"high","label":"DeepSeek V4 Pro (Reasoning, High Effort)","v":{"intel":43.7,"code":58.7,"agent":35.3,"py":46.4,"term":41.7,"gpqa":90.5,"hle":35.2,"ifb":71.3,"tau2":94.2,"lctx":67.0,"econ":39.6,"phys":10.0,"know":41.4,"hon":11.3},"pct":{"inte":65,"codi":67,"agen":67},"ts":1788307256623},{"e":"max","label":"DeepSeek V4 Pro (Reasoning, Max Effort)","v":{"intel":45.3,"code":59.4,"agent":37.8,"py":50.0,"term":46.2,"gpqa":88.8,"hle":37.5,"ifb":76.5,"tau2":96.2,"lctx":70.0,"econ":39.9,"phys":12.9,"know":42.9,"hon":5.9},"pct":{"inte":67,"codi":69,"agen":69},"ts":1787918457018}]},{"id":"deepseek/deepseek-v4-flash","name":"DeepSeek V4 Flash 0423","author":"DeepSeek","inp":0.0886,"out":0.1772,"cache":0.0177,"ctx":1048576,"date":"2026-04-24","reason":true,"vars":[{"e":"off","label":"DeepSeek V4 Flash (Non-reasoning)","v":{"py":37.3,"term":34.1,"gpqa":71.6,"hle":7.8,"ifb":47.2,"tau2":94.4,"lctx":37.3,"phys":0.3,"know":26.0,"hon":5.5},"pct":{},"ts":1786060819020},{"e":"high","label":"DeepSeek V4 Flash (Reasoning, High Effort)","v":{"intel":39.0,"code":52.0,"agent":30.3,"py":42.0,"term":38.6,"gpqa":86.7,"hle":30.3,"ifb":73.5,"tau2":95.6,"lctx":69.0,"econ":32.6,"phys":3.4,"know":34.9,"hon":11.0},"pct":{"inte":53,"codi":57,"agen":56},"ts":1788307256623},{"e":"max","label":"DeepSeek V4 Flash (Reasoning, Max Effort)","v":{"intel":42.1,"code":56.2,"agent":33.7,"py":44.9,"term":35.6,"gpqa":89.4,"hle":34.8,"ifb":79.2,"tau2":95.0,"lctx":70.0,"econ":34.4,"phys":7.1,"know":36.8,"hon":3.9},"pct":{"inte":61,"codi":64,"agen":64},"ts":1787788832040}]},{"id":"tencent/hy3-preview","name":"Hy3 preview","author":"tencent","inp":0.18,"out":0.6,"cache":0.06,"ctx":262144,"date":"2026-04-22","reason":true,"vars":[{"e":"off","label":"Hy3-preview (Non-reasoning)","v":{"py":39.4,"term":31.8,"gpqa":73.2,"hle":7.0,"ifb":48.0,"tau2":67.5,"lctx":38.7,"phys":0.3,"know":23.2,"hon":24.3},"pct":{},"ts":1786060819020},{"e":"on","label":"Hy3-preview (Reasoning)","v":{"py":41.2,"term":34.1,"gpqa":86.7,"hle":27.8,"ifb":63.1,"tau2":92.7,"lctx":60.3,"phys":4.6,"know":27.9,"hon":12.6},"pct":{},"ts":1786060819020},{"e":"default","label":"Hy3","v":{"intel":42.2,"code":58.8,"agent":31.4,"py":47.6,"gpqa":89.7,"hle":33.5,"lctx":74.7,"econ":35.6,"phys":4.9,"know":32.0,"hon":25.9},"pct":{"inte":62,"codi":68,"agen":60},"ts":1788307256623}]},{"id":"xiaomi/mimo-v2.5-pro","name":"MiMo-V2.5-Pro","author":"Xiaomi","inp":0.435,"out":0.87,"cache":0.0036,"ctx":1050000,"date":"2026-04-22","reason":true,"vars":[{"e":"off","label":"MiMo-V2.5-Pro (Non-reasoning)","v":{"py":39.1,"term":35.6,"gpqa":76.2,"hle":14.8,"ifb":42.7,"tau2":72.5,"lctx":39.3,"phys":1.1,"know":27.2,"hon":10.8},"pct":{},"ts":1786060819020},{"e":"default","label":"MiMo-V2.5-Pro","v":{"intel":42.9,"code":60.2,"agent":29.5,"py":50.2,"term":43.2,"gpqa":86.6,"hle":35.7,"ifb":79.9,"tau2":94.2,"lctx":77.7,"econ":38.0,"phys":4.0,"know":22.4,"hon":75.3},"pct":{"inte":63,"codi":70,"agen":54},"ts":1788307256623}]},{"id":"xiaomi/mimo-v2.5","name":"MiMo-V2.5","author":"Xiaomi","inp":0.14,"out":0.28,"cache":0.0028,"ctx":1050000,"date":"2026-04-22","reason":true,"vars":[{"e":"default","label":"MiMo-V2.5","v":{"intel":38.0,"code":56.8,"agent":24.4,"py":43.1,"term":41.7,"gpqa":84.9,"hle":27.2,"ifb":67.1,"tau2":90.6,"lctx":68.3,"econ":32.3,"phys":3.7,"know":16.8,"hon":68.1},"pct":{"inte":51,"codi":65,"agen":46},"ts":1788307256623}]},{"id":"moonshotai/kimi-k2.6","name":"Kimi K2.6","author":"moonshotai","inp":0.95,"out":4.0,"cache":0.16,"ctx":262144,"date":"2026-04-20","reason":true,"vars":[{"e":"off","label":"Kimi K2.6 (Non-reasoning)","v":{"py":39.5,"term":37.9,"gpqa":78.8,"hle":19.6,"ifb":44.3,"tau2":93.9,"lctx":66.0,"phys":1.4,"know":24.3,"hon":55.8},"pct":{},"ts":1786060819020},{"e":"default","label":"Kimi K2.6","v":{"intel":45.1,"code":61.8,"agent":31.2,"py":53.5,"term":43.9,"gpqa":91.1,"hle":37.5,"ifb":76.0,"tau2":95.9,"lctx":76.7,"econ":34.5,"phys":8.0,"know":32.6,"hon":59.5},"pct":{"inte":66,"codi":71,"agen":59},"ts":1787788832040}]},{"id":"anthropic/claude-opus-4.7","name":"Claude Opus 4.7","author":"Anthropic","inp":5.0,"out":25.0,"cache":0.5,"ctx":1000000,"date":"2026-04-16","reason":true,"vars":[{"e":"off","label":"Claude Opus 4.7 (Non-reasoning, High Effort)","v":{"py":50.1,"term":54.5,"gpqa":88.5,"hle":33.3,"ifb":43.6,"tau2":74.0,"lctx":72.3,"phys":5.1,"know":44.7,"hon":45.9},"pct":{},"ts":1786060819020},{"e":"max","label":"Claude Opus 4.7 (Adaptive Reasoning, Max Effort)","v":{"intel":55.0,"code":73.6,"agent":46.3,"py":54.5,"term":51.5,"gpqa":91.4,"hle":42.3,"ifb":58.6,"tau2":88.6,"lctx":75.3,"econ":49.1,"phys":12.0,"know":48.9,"hon":57.7},"pct":{"inte":84,"codi":90,"agen":81},"ts":1787788832040}]},{"id":"z-ai/glm-5.1","name":"GLM 5.1","author":"Z.ai","inp":0.966,"out":3.036,"cache":0.1794,"ctx":204800,"date":"2026-04-07","reason":true,"vars":[{"e":"off","label":"GLM-5.1 (Non-reasoning)","v":{"py":36.1,"term":35.6,"gpqa":83.9,"hle":27.9,"ifb":52.0,"tau2":97.1,"lctx":53.7,"phys":0.0,"know":25.2,"hon":36.4},"pct":{},"ts":1786060819020},{"e":"on","label":"GLM-5.1 (Reasoning)","v":{"intel":41.0,"code":55.8,"agent":30.6,"py":43.8,"term":43.2,"gpqa":86.8,"hle":30.1,"ifb":76.3,"tau2":97.7,"lctx":68.0,"econ":37.7,"phys":4.6,"know":23.7,"hon":70.1},"pct":{"inte":57,"codi":62,"agen":57},"ts":1788307256623}]},{"id":"google/gemma-4-26b-a4b-it","name":"Gemma 4 26B A4B ","author":"Google","inp":0.07,"out":0.34,"cache":null,"ctx":262144,"date":"2026-04-03","reason":true,"vars":[{"e":"off","label":"Gemma 4 26B A4B (Non-reasoning)","v":{"py":37.3,"term":25.0,"gpqa":71.4,"hle":11.5,"ifb":45.4,"tau2":40.4,"lctx":40.7,"phys":0.0,"know":15.5,"hon":7.9},"pct":{},"ts":1786060819020},{"e":"on","label":"Gemma 4 26B A4B (Reasoning)","v":{"intel":26.1,"code":39.3,"agent":11.0,"py":40.0,"term":13.6,"gpqa":79.2,"hle":19.3,"ifb":72.4,"tau2":43.6,"lctx":61.7,"econ":13.5,"phys":0.0,"know":19.1,"hon":13.6},"pct":{"inte":31,"codi":41,"agen":27},"ts":1787788832040}]},{"id":"google/gemma-4-31b-it","name":"Gemma 4 31B","author":"Google","inp":0.09,"out":0.34,"cache":0.05,"ctx":262144,"date":"2026-04-02","reason":true,"vars":[{"e":"off","label":"Gemma 4 31B (Non-reasoning)","v":{"intel":22.3,"code":33.2,"agent":11.1,"py":41.1,"term":30.3,"gpqa":76.3,"hle":11.8,"ifb":53.5,"tau2":65.5,"lctx":42.7,"econ":12.4,"phys":0.0,"know":16.6,"hon":18.1},"pct":{"inte":24,"codi":35,"agen":27},"ts":1787140803775},{"e":"on","label":"Gemma 4 31B (Reasoning)","v":{"intel":29.7,"code":43.4,"agent":14.4,"py":43.4,"term":36.4,"gpqa":85.7,"hle":23.6,"ifb":75.6,"tau2":59.9,"lctx":68.3,"econ":15.7,"phys":1.4,"know":20.0,"hon":15.0},"pct":{"inte":34,"codi":45,"agen":30},"ts":1788307256623}]},{"id":"qwen/qwen3.6-plus","name":"Qwen3.6 Plus","author":"Qwen","inp":0.325,"out":1.95,"cache":null,"ctx":1000000,"date":"2026-04-02","reason":true,"vars":[{"e":"default","label":"Qwen3.6 Plus","v":{"intel":40.5,"code":54.5,"agent":29.0,"py":40.7,"term":43.9,"gpqa":88.2,"hle":27.8,"ifb":75.2,"tau2":97.7,"lctx":72.3,"econ":31.8,"phys":2.9,"know":26.4,"hon":65.4},"pct":{"inte":55,"codi":62,"agen":53},"ts":1788307256623}]},{"id":"z-ai/glm-5v-turbo","name":"GLM 5V Turbo","author":"Z.ai","inp":1.2,"out":4.0,"cache":0.24,"ctx":202752,"date":"2026-04-01","reason":true,"vars":[{"e":"on","label":"GLM 5V Turbo (Reasoning)","v":{"py":43.5,"term":32.6,"gpqa":80.9,"hle":17.1,"ifb":61.1,"tau2":98.5,"lctx":65.7,"phys":0.6,"know":29.3,"hon":31.2},"pct":{},"ts":1786060819020}]},{"id":"arcee-ai/trinity-large-thinking","name":"Trinity Large Thinking","author":"arcee-ai","inp":0.25,"out":0.8,"cache":0.06,"ctx":262144,"date":"2026-04-01","reason":true,"vars":[{"e":"default","label":"Trinity Large Thinking","v":{"intel":18.7,"code":25.8,"agent":3.7,"py":36.1,"term":22.7,"gpqa":75.2,"hle":15.8,"ifb":56.3,"tau2":90.1,"lctx":38.3,"econ":3.3,"phys":0.9,"know":22.5,"hon":14.1},"pct":{"inte":18,"codi":28,"agen":17},"ts":1787788832040}]},{"id":"x-ai/grok-4.20","name":"Grok 4.20","author":"SpaceXAI","inp":1.25,"out":2.5,"cache":0.2,"ctx":2000000,"date":"2026-03-31","reason":true,"vars":[{"e":"off","label":"Grok 4.20 0309 (Non-reasoning)","v":{"py":32.2,"term":22.0,"gpqa":78.5,"hle":24.5,"ifb":47.8,"tau2":69.6,"lctx":21.7,"phys":0.0,"know":26.1,"hon":7.2},"pct":{},"ts":1786060819020},{"e":"off","label":"Grok 4.20 0309 v2 (Non-reasoning)","v":{"py":32.8,"term":16.7,"gpqa":77.6,"hle":27.9,"ifb":49.3,"tau2":59.9,"lctx":20.7,"phys":0.3,"know":26.7,"hon":2.7},"pct":{},"ts":1786060819020},{"e":"on","label":"Grok 4.20 0309 (Reasoning)","v":{"py":44.7,"term":40.9,"gpqa":88.5,"hle":32.4,"ifb":82.9,"tau2":96.5,"lctx":60.7,"phys":6.0,"know":28.9,"hon":77.6},"pct":{},"ts":1786060819020},{"e":"on","label":"Grok 4.20 0309 v2 (Reasoning)","v":{"py":45.6,"term":37.9,"gpqa":91.1,"hle":34.5,"ifb":81.2,"tau2":93.0,"lctx":62.3,"phys":6.6,"know":27.5,"hon":82.6},"pct":{},"ts":1786060819020}]},{"id":"kwaipilot/kat-coder-pro-v2","name":"KAT-Coder-Pro V2","author":"kwaipilot","inp":0.3,"out":1.2,"cache":0.06,"ctx":262144,"date":"2026-03-27","reason":false,"vars":[{"e":"default","label":"KAT Coder Pro V2","v":{"intel":33.7,"code":59.5,"agent":15.1,"py":38.3,"term":49.2,"gpqa":85.5,"hle":16.1,"ifb":66.7,"tau2":89.5,"lctx":70.0,"econ":20.3,"phys":0.0,"know":21.5,"hon":44.0},"pct":{"inte":40,"codi":69,"agen":31},"ts":1787140803775}]},{"id":"minimax/minimax-m2.7","name":"MiniMax M2.7","author":"MiniMax","inp":0.3,"out":1.2,"cache":0.06,"ctx":204800,"date":"2026-03-18","reason":true,"vars":[{"e":"default","label":"MiniMax-M2.7","v":{"intel":38.9,"code":52.6,"agent":25.9,"py":47.0,"term":39.4,"gpqa":87.4,"hle":29.6,"ifb":75.7,"tau2":84.8,"lctx":75.3,"econ":32.9,"phys":0.6,"know":26.8,"hon":64.4},"pct":{"inte":52,"codi":59,"agen":47},"ts":1787788832040}]},{"id":"openai/gpt-5.4-nano","name":"GPT-5.4 Nano","author":"OpenAI","inp":0.2,"out":1.25,"cache":0.02,"ctx":400000,"date":"2026-03-17","reason":true,"vars":[{"e":"off","label":"GPT-5.4 nano (Non-Reasoning)","v":{"py":35.2,"term":24.2,"gpqa":55.8,"hle":4.1,"ifb":32.7,"tau2":34.8,"lctx":28.0,"econ":11.9,"phys":0.0,"know":14.9,"hon":38.5},"pct":{},"ts":1787788832040},{"e":"medium","label":"GPT-5.4 nano (medium)","v":{"py":38.4,"term":33.3,"gpqa":76.1,"hle":15.9,"ifb":64.4,"tau2":52.6,"lctx":65.3,"phys":5.1,"know":21.9,"hon":48.9},"pct":{},"ts":1786060819020},{"e":"xhigh","label":"GPT-5.4 nano (xhigh)","v":{"intel":39.7,"code":56.1,"agent":29.7,"py":46.9,"term":42.4,"gpqa":81.7,"hle":28.3,"ifb":75.9,"tau2":76.0,"lctx":72.0,"econ":30.2,"phys":9.3,"know":25.7,"hon":25.8},"pct":{"inte":54,"codi":63,"agen":55},"ts":1786060819020}]},{"id":"openai/gpt-5.4-mini","name":"GPT-5.4 Mini","author":"OpenAI","inp":0.75,"out":4.5,"cache":0.075,"ctx":400000,"date":"2026-03-17","reason":true,"vars":[{"e":"off","label":"GPT-5.4 mini (Non-Reasoning)","v":{"py":39.6,"term":18.2,"gpqa":60.6,"hle":5.9,"ifb":38.8,"tau2":23.4,"lctx":34.7,"econ":14.6,"phys":0.0,"know":25.7,"hon":4.4},"pct":{},"ts":1788307256623},{"e":"medium","label":"GPT-5.4 mini (medium)","v":{"py":44.2,"term":34.1,"gpqa":82.3,"hle":18.6,"ifb":64.8,"tau2":36.5,"lctx":62.3,"phys":2.9,"know":36.5,"hon":10.2},"pct":{},"ts":1786060819020},{"e":"xhigh","label":"GPT-5.4 mini (xhigh)","v":{"intel":40.9,"code":56.1,"agent":31.5,"py":49.9,"term":52.3,"gpqa":87.5,"hle":28.1,"ifb":73.3,"tau2":83.3,"lctx":73.0,"econ":33.3,"phys":10.0,"know":37.5,"hon":9.8},"pct":{"inte":56,"codi":63,"agen":61},"ts":1788307256623}]},{"id":"mistralai/mistral-small-2603","name":"Mistral Small 4","author":"Mistral AI","inp":0.15,"out":0.6,"cache":0.015,"ctx":262144,"date":"2026-03-16","reason":true,"vars":[{"e":"off","label":"Mistral Small 4 (Non-reasoning)","v":{"py":28.1,"term":10.6,"gpqa":57.1,"hle":3.8,"ifb":32.8,"tau2":18.4,"lctx":24.3,"phys":0.3,"know":16.6,"hon":22.0},"pct":{},"ts":1786060819020},{"e":"on","label":"Mistral Small 4 (Reasoning)","v":{"intel":19.7,"code":26.6,"agent":4.6,"py":38.0,"term":17.4,"gpqa":76.9,"hle":9.9,"ifb":48.2,"tau2":41.2,"lctx":47.3,"econ":4.5,"phys":0.3,"know":21.7,"hon":33.5},"pct":{"inte":20,"codi":30,"agen":18},"ts":1787788832040}]},{"id":"z-ai/glm-5-turbo","name":"GLM 5 Turbo","author":"Z.ai","inp":1.2,"out":4.0,"cache":0.24,"ctx":202752,"date":"2026-03-15","reason":true,"vars":[{"e":"default","label":"GLM-5-Turbo","v":{"py":43.6,"term":33.3,"gpqa":84.7,"hle":27.8,"ifb":73.2,"tau2":98.5,"lctx":66.7,"phys":0.3,"know":28.4,"hon":37.4},"pct":{},"ts":1786060819020}]},{"id":"nvidia/nemotron-3-super-120b-a12b","name":"Nemotron 3 Super","author":"Nvidia","inp":0.085,"out":0.4,"cache":null,"ctx":1000000,"date":"2026-03-11","reason":true,"vars":[{"e":"on","label":"Nemotron 3 Super 120B A12B (Reasoning)","v":{"intel":25.7,"code":37.7,"agent":8.8,"py":36.0,"term":28.8,"gpqa":80.0,"hle":20.8,"ifb":71.5,"tau2":67.8,"lctx":60.3,"econ":10.0,"phys":3.1,"know":24.3,"hon":13.0},"pct":{"inte":29,"codi":40,"agen":22},"ts":1787745640345}]},{"id":"qwen/qwen3.5-9b","name":"Qwen3.5-9B","author":"Qwen","inp":0.1,"out":0.15,"cache":null,"ctx":262144,"date":"2026-03-10","reason":true,"vars":[{"e":"off","label":"Qwen3.5 9B (Non-reasoning)","v":{"code":23.5,"py":27.7,"term":18.2,"gpqa":78.6,"hle":9.4,"ifb":37.8,"tau2":85.1,"lctx":45.0,"phys":0.6,"know":14.0,"hon":1.6},"pct":{"codi":25},"ts":1786060819020},{"e":"on","label":"Qwen3.5 9B (Reasoning)","v":{"intel":21.8,"code":28.7,"agent":7.0,"py":27.5,"term":24.2,"gpqa":80.6,"hle":14.9,"ifb":66.7,"tau2":86.8,"lctx":65.3,"econ":7.2,"phys":0.3,"know":16.4,"hon":16.4},"pct":{"inte":22,"codi":32,"agen":21},"ts":1786104059192}]},{"id":"openai/gpt-5.4-pro","name":"GPT-5.4 Pro","author":"OpenAI","inp":30.0,"out":180.0,"cache":null,"ctx":1050000,"date":"2026-03-05","reason":true,"vars":[{"e":"xhigh","label":"GPT-5.4 Pro (xhigh)","v":{"phys":30.0},"pct":{},"ts":1773187236611}]},{"id":"openai/gpt-5.4","name":"GPT-5.4","author":"OpenAI","inp":2.5,"out":15.0,"cache":0.25,"ctx":1050000,"date":"2026-03-05","reason":true,"vars":[{"e":"off","label":"GPT-5.4 (Non-reasoning)","v":{"py":47.1,"term":37.9,"gpqa":74.8,"hle":11.3,"ifb":48.4,"tau2":36.0,"lctx":54.0,"phys":0.6,"know":37.4,"hon":15.3},"pct":{},"ts":1786406446872},{"e":"low","label":"GPT-5.4 (low)","v":{"py":50.3,"term":43.2,"gpqa":87.1,"hle":30.8,"ifb":65.9,"tau2":74.6,"lctx":73.7,"phys":7.4,"know":47.8,"hon":17.4},"pct":{},"ts":1786060819020},{"e":"xhigh","label":"GPT-5.4 (xhigh)","v":{"intel":53.1,"code":71.1,"agent":44.2,"py":56.6,"term":57.6,"gpqa":92.0,"hle":43.7,"ifb":73.9,"tau2":87.1,"lctx":77.7,"econ":44.2,"phys":23.4,"know":50.8,"hon":8.3},"pct":{"inte":80,"codi":83,"agen":77},"ts":1788307256623}]},{"id":"inception/mercury-2","name":"Mercury 2","author":"inception","inp":0.25,"out":0.75,"cache":0.025,"ctx":128000,"date":"2026-03-04","reason":true,"vars":[{"e":"default","label":"Mercury 2","v":{"intel":21.9,"code":31.1,"agent":9.5,"py":38.7,"term":26.5,"gpqa":77.0,"hle":17.1,"ifb":69.8,"tau2":70.8,"lctx":40.7,"econ":10.1,"phys":0.8,"know":21.2,"hon":8.8},"pct":{"inte":23,"codi":34,"agen":25},"ts":1788307256623}]},{"id":"google/gemini-3.1-flash-lite-preview","name":"Gemini 3.1 Flash Lite Preview","author":"Google","inp":0.25,"out":1.5,"cache":0.025,"ctx":1048576,"date":"2026-03-03","reason":true,"vars":[{"e":"default","label":"Gemini 3.1 Flash-Lite","v":{"intel":25.6,"code":34.7,"agent":6.5,"py":41.9,"term":24.2,"gpqa":82.2,"hle":17.2,"ifb":77.2,"tau2":31.3,"lctx":71.3,"econ":7.5,"phys":1.1,"know":36.3,"hon":17.3},"pct":{"inte":29,"codi":37,"agen":20},"ts":1787788832040}]},{"id":"qwen/qwen3.5-35b-a3b","name":"Qwen3.5-35B-A3B","author":"Qwen","inp":0.25,"out":1.25,"cache":0.25,"ctx":262144,"date":"2026-02-25","reason":true,"vars":[{"e":"off","label":"Qwen3.5 35B A3B (Non-reasoning)","v":{"intel":24.3,"code":37.0,"agent":11.8,"py":29.3,"term":10.6,"gpqa":81.9,"hle":13.4,"ifb":44.5,"tau2":86.3,"lctx":60.3,"econ":14.9,"phys":0.6,"know":15.7,"hon":6.6},"pct":{"inte":26,"codi":39,"agen":28},"ts":1787788832040},{"e":"on","label":"Qwen3.5 35B A3B (Reasoning)","v":{"py":37.7,"term":26.5,"gpqa":84.5,"hle":21.0,"ifb":72.5,"tau2":89.2,"lctx":68.3,"phys":0.9,"know":20.1,"hon":14.6},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3.5-27b","name":"Qwen3.5-27B","author":"Qwen","inp":0.195,"out":1.56,"cache":null,"ctx":262144,"date":"2026-02-25","reason":true,"vars":[{"e":"off","label":"Qwen3.5 27B (Non-reasoning)","v":{"py":36.7,"term":31.8,"gpqa":84.2,"hle":13.9,"ifb":46.9,"tau2":87.1,"lctx":61.0,"phys":0.3,"know":15.7,"hon":24.9},"pct":{},"ts":1786060819020},{"e":"on","label":"Qwen3.5 27B (Reasoning)","v":{"py":39.5,"term":32.6,"gpqa":85.8,"hle":23.9,"ifb":75.6,"tau2":93.9,"lctx":72.3,"phys":0.9,"know":20.7,"hon":18.5},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3.5-122b-a10b","name":"Qwen3.5-122B-A10B","author":"Qwen","inp":0.29,"out":2.4,"cache":null,"ctx":262144,"date":"2026-02-25","reason":true,"vars":[{"e":"off","label":"Qwen3.5 122B A10B (Non-reasoning)","v":{"intel":28.2,"code":43.3,"agent":16.2,"py":35.6,"term":29.5,"gpqa":82.7,"hle":15.9,"ifb":50.8,"tau2":84.5,"lctx":61.7,"econ":19.6,"phys":0.9,"know":19.1,"hon":8.4},"pct":{"inte":33,"codi":45,"agen":32},"ts":1788307256623},{"e":"on","label":"Qwen3.5 122B A10B (Reasoning)","v":{"intel":32.8,"code":45.7,"agent":21.3,"py":42.0,"term":31.1,"gpqa":85.7,"hle":25.2,"ifb":75.7,"tau2":93.6,"lctx":70.3,"econ":24.4,"phys":0.6,"know":24.4,"hon":12.9},"pct":{"inte":40,"codi":49,"agen":39},"ts":1788307256623}]},{"id":"openai/gpt-5.3-codex","name":"GPT-5.3-Codex","author":"OpenAI","inp":1.75,"out":14.0,"cache":0.175,"ctx":400000,"date":"2026-02-24","reason":true,"vars":[{"e":"xhigh","label":"GPT-5.3 Codex (xhigh)","v":{"py":53.2,"term":53.0,"gpqa":91.5,"hle":42.5,"ifb":75.4,"tau2":86.0,"lctx":78.3,"phys":16.9,"know":52.9,"hon":10.8},"pct":{},"ts":1786060819020}]},{"id":"google/gemini-3.1-pro-preview","name":"Gemini 3.1 Pro Preview","author":"Google","inp":2.0,"out":12.0,"cache":0.2,"ctx":1048576,"date":"2026-02-19","reason":true,"vars":[{"e":"low","label":"Gemini 3 Pro Preview (low)","v":{"py":49.9,"term":34.1,"gpqa":88.7,"hle":29.5,"ifb":49.7,"tau2":68.1,"lctx":70.3,"phys":0.0,"know":48.3,"hon":10.0},"pct":{},"ts":1786060819020},{"e":"high","label":"Gemini 3 Pro Preview (high)","v":{"py":56.1,"term":41.7,"gpqa":90.8,"hle":39.7,"ifb":70.4,"tau2":87.1,"lctx":73.0,"phys":9.1,"know":55.7,"hon":8.5},"pct":{},"ts":1786060819020},{"e":"default","label":"Gemini 3.1 Pro Preview","v":{"intel":47.7,"code":68.8,"agent":23.0,"py":58.9,"term":53.8,"gpqa":94.1,"hle":47.0,"ifb":77.1,"tau2":95.6,"lctx":79.0,"econ":23.2,"phys":17.7,"know":54.8,"hon":49.1},"pct":{"inte":70,"codi":77,"agen":43},"ts":1787616009405}]},{"id":"anthropic/claude-sonnet-4.6","name":"Claude Sonnet 4.6","author":"Anthropic","inp":3.0,"out":15.0,"cache":0.3,"ctx":1000000,"date":"2026-02-17","reason":true,"vars":[{"e":"off","label":"Claude Sonnet 4.6 (Non-reasoning, Low Effort)","v":{"py":44.1,"term":42.4,"gpqa":79.7,"hle":11.2,"ifb":42.4,"tau2":78.9,"lctx":64.7,"phys":0.9,"know":36.5,"hon":39.2},"pct":{},"ts":1786060819020},{"e":"off","label":"Claude Sonnet 4.6 (Non-reasoning, High Effort)","v":{"py":46.9,"term":46.2,"gpqa":79.9,"hle":13.3,"ifb":41.2,"tau2":79.5,"lctx":62.3,"phys":0.9,"know":38.6,"hon":31.5},"pct":{},"ts":1786060819020},{"e":"max","label":"Claude Sonnet 4.6 (Adaptive Reasoning, Max Effort)","v":{"intel":48.4,"code":63.0,"agent":42.1,"py":46.8,"term":53.0,"gpqa":87.5,"hle":33.6,"ifb":56.6,"tau2":75.7,"lctx":74.0,"econ":43.5,"phys":3.1,"know":40.9,"hon":51.6},"pct":{"inte":71,"codi":72,"agen":75},"ts":1788307256623}]},{"id":"qwen/qwen3.5-397b-a17b","name":"Qwen3.5 397B A17B","author":"Qwen","inp":0.55,"out":3.5,"cache":0.225,"ctx":262144,"date":"2026-02-16","reason":true,"vars":[{"e":"off","label":"Qwen3.5 397B A17B (Non-reasoning)","v":{"py":41.1,"term":35.6,"gpqa":86.1,"hle":19.8,"ifb":51.6,"tau2":83.9,"lctx":62.0,"phys":0.9,"know":24.5,"hon":17.3},"pct":{},"ts":1786060819020},{"e":"on","label":"Qwen3.5 397B A17B (Reasoning)","v":{"intel":34.3,"code":48.2,"agent":19.8,"py":42.0,"term":40.9,"gpqa":89.3,"hle":29.0,"ifb":78.8,"tau2":95.6,"lctx":72.7,"econ":23.3,"phys":1.7,"know":30.8,"hon":11.1},"pct":{"inte":42,"codi":53,"agen":36},"ts":1787616009405}]},{"id":"minimax/minimax-m2.5","name":"MiniMax M2.5","author":"MiniMax","inp":0.27,"out":1.08,"cache":0.027,"ctx":204800,"date":"2026-02-12","reason":true,"vars":[{"e":"default","label":"MiniMax-M2.5","v":{"py":42.6,"term":34.8,"gpqa":84.8,"hle":20.5,"ifb":71.6,"tau2":95.3,"lctx":72.0,"phys":1.1,"know":26.2,"hon":11.9},"pct":{},"ts":1786060819020}]},{"id":"z-ai/glm-5","name":"GLM 5","author":"Z.ai","inp":0.6,"out":1.92,"cache":0.12,"ctx":204800,"date":"2026-02-11","reason":true,"vars":[{"e":"off","label":"GLM-5 (Non-reasoning)","v":{"py":38.3,"term":39.4,"gpqa":66.6,"hle":7.6,"ifb":55.2,"tau2":97.4,"lctx":43.3,"phys":0.0,"know":23.1,"hon":54.7},"pct":{},"ts":1786060819020},{"e":"on","label":"GLM-5 (Reasoning)","v":{"py":46.2,"term":43.2,"gpqa":82.0,"hle":29.3,"ifb":72.3,"tau2":98.2,"lctx":70.7,"phys":2.0,"know":26.3,"hon":64.7},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-max-thinking","name":"Qwen3 Max Thinking","author":"Qwen","inp":0.78,"out":3.9,"cache":null,"ctx":262144,"date":"2026-02-09","reason":true,"vars":[{"e":"default","label":"Qwen3 Max Thinking","v":{"py":43.1,"term":24.2,"gpqa":86.1,"hle":28.0,"ifb":70.7,"tau2":83.6,"lctx":70.3,"phys":1.7,"know":29.8,"hon":5.3},"pct":{},"ts":1786060819020},{"e":"preview","label":"Qwen3 Max Thinking (Preview)","v":{"py":38.7,"term":17.4,"gpqa":77.6,"hle":12.7,"ifb":53.8,"tau2":83.6,"lctx":60.3,"phys":0.0,"know":27.4,"hon":8.5},"pct":{},"ts":1786060819020}]},{"id":"anthropic/claude-opus-4.6","name":"Claude Opus 4.6","author":"Anthropic","inp":5.0,"out":25.0,"cache":0.5,"ctx":1000000,"date":"2026-02-04","reason":true,"vars":[{"e":"off","label":"Claude Opus 4.6 (Non-reasoning, High Effort)","v":{"py":45.7,"term":48.5,"gpqa":84.0,"hle":19.1,"ifb":44.6,"tau2":84.8,"lctx":62.3,"phys":2.8,"know":45.8,"hon":19.9},"pct":{},"ts":1786060819020},{"e":"max","label":"Claude Opus 4.6 (Adaptive Reasoning, Max Effort)","v":{"py":51.9,"term":46.2,"gpqa":89.6,"hle":39.9,"ifb":53.1,"tau2":92.1,"lctx":74.3,"phys":12.6,"know":47.0,"hon":37.2},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-coder-next","name":"Qwen3 Coder Next","author":"Qwen","inp":0.12,"out":0.8,"cache":0.07,"ctx":262144,"date":"2026-02-04","reason":false,"vars":[{"e":"default","label":"Qwen3 Coder Next","v":{"intel":21.3,"code":36.2,"agent":8.9,"py":32.3,"term":18.2,"gpqa":73.7,"hle":10.1,"ifb":35.2,"tau2":79.5,"lctx":42.3,"econ":11.1,"phys":0.0,"know":16.2,"hon":6.3},"pct":{"inte":22,"codi":38,"agen":23},"ts":1787918457018}]},{"id":"stepfun/step-3.5-flash","name":"Step 3.5 Flash","author":"stepfun","inp":0.1,"out":0.3,"cache":null,"ctx":262144,"date":"2026-01-30","reason":true,"vars":[{"e":"default","label":"Step 3.5 Flash","v":{"py":40.4,"term":27.3,"gpqa":83.1,"hle":21.1,"ifb":64.6,"tau2":94.4,"lctx":48.0,"phys":2.5,"know":23.6,"hon":14.3},"pct":{},"ts":1786060819020},{"e":"default","label":"Step 3.5 Flash 2603","v":{"py":38.5,"term":32.6,"gpqa":82.6,"hle":24.5,"ifb":66.5,"tau2":87.4,"lctx":60.3,"phys":2.3,"know":24.6,"hon":8.7},"pct":{},"ts":1786060819020}]},{"id":"moonshotai/kimi-k2.5","name":"Kimi K2.5","author":"moonshotai","inp":0.45,"out":2.25,"cache":0.07,"ctx":262144,"date":"2026-01-27","reason":true,"vars":[{"e":"off","label":"Kimi K2.5 (Non-reasoning)","v":{"py":39.6,"term":18.9,"gpqa":78.9,"hle":13.2,"ifb":43.7,"tau2":81.3,"lctx":65.3,"phys":0.6,"know":24.1,"hon":50.0},"pct":{},"ts":1786060819020},{"e":"on","label":"Kimi K2.5 (Reasoning)","v":{"intel":36.0,"code":46.8,"agent":21.7,"py":49.0,"term":34.8,"gpqa":87.9,"hle":30.7,"ifb":70.2,"tau2":95.9,"lctx":73.0,"econ":25.3,"phys":3.1,"know":35.2,"hon":34.3},"pct":{"inte":46,"codi":52,"agen":41},"ts":1787788832040}]},{"id":"upstage/solar-pro-3","name":"Solar Pro 3","author":"upstage","inp":0.15,"out":0.6,"cache":0.015,"ctx":131072,"date":"2026-01-27","reason":true,"vars":[{"e":"default","label":"Solar Pro 3","v":{"intel":14.5,"code":16.2,"agent":2.9,"py":24.7,"term":7.6,"gpqa":72.4,"hle":10.3,"ifb":71.2,"tau2":86.3,"lctx":31.0,"econ":0.0,"phys":0.0,"know":18.5,"hon":11.8},"pct":{"inte":8,"codi":15,"agen":14},"ts":1786060819020}]},{"id":"z-ai/glm-4.7-flash","name":"GLM 4.7 Flash","author":"Z.ai","inp":0.06,"out":0.4,"cache":0.01,"ctx":202752,"date":"2026-01-19","reason":true,"vars":[{"e":"off","label":"GLM-4.7-Flash (Non-reasoning)","v":{"py":25.5,"term":3.8,"gpqa":45.2,"hle":5.0,"ifb":46.3,"tau2":91.8,"lctx":18.3,"phys":0.0,"know":13.1,"hon":5.7},"pct":{},"ts":1786060819020},{"e":"on","label":"GLM-4.7-Flash (Reasoning)","v":{"py":33.7,"term":22.0,"gpqa":58.1,"hle":7.6,"ifb":60.8,"tau2":98.8,"lctx":40.7,"phys":0.3,"know":16.2,"hon":6.1},"pct":{},"ts":1786060819020}]},{"id":"openai/gpt-5.2-codex","name":"GPT-5.2-Codex","author":"OpenAI","inp":1.75,"out":14.0,"cache":0.175,"ctx":400000,"date":"2026-01-14","reason":true,"vars":[{"e":"xhigh","label":"GPT-5.2 Codex (xhigh)","v":{"py":54.6,"term":37.1,"gpqa":89.9,"hle":35.7,"ifb":77.6,"tau2":92.1,"lctx":79.3,"phys":8.7,"know":41.1,"hon":26.6},"pct":{},"ts":1786060819020}]},{"id":"minimax/minimax-m2.1","name":"MiniMax M2.1","author":"MiniMax","inp":0.3,"out":1.2,"cache":0.03,"ctx":204800,"date":"2025-12-23","reason":true,"vars":[{"e":"default","label":"MiniMax-M2.1","v":{"py":40.7,"term":28.8,"gpqa":83.0,"hle":23.2,"ifb":69.9,"tau2":85.4,"lctx":66.3,"phys":0.3,"know":21.2,"hon":31.5},"pct":{},"ts":1786060819020}]},{"id":"z-ai/glm-4.7","name":"GLM 4.7","author":"Z.ai","inp":0.4,"out":1.75,"cache":0.08,"ctx":204800,"date":"2025-12-22","reason":true,"vars":[{"e":"off","label":"GLM-4.7 (Non-reasoning)","v":{"py":35.4,"term":30.3,"gpqa":66.4,"hle":6.4,"ifb":54.6,"tau2":94.2,"lctx":40.7,"phys":0.0,"know":23.6,"hon":7.1},"pct":{},"ts":1786060819020},{"e":"on","label":"GLM-4.7 (Reasoning)","v":{"intel":34.5,"code":45.3,"agent":26.2,"py":45.1,"term":31.8,"gpqa":85.9,"hle":27.4,"ifb":67.9,"tau2":95.9,"lctx":68.0,"econ":33.3,"phys":1.7,"know":29.3,"hon":7.0},"pct":{"inte":43,"codi":48,"agen":48},"ts":1788307256623}]},{"id":"google/gemini-3-flash-preview","name":"Gemini 3 Flash Preview","author":"Google","inp":0.5,"out":3.0,"cache":0.05,"ctx":1048576,"date":"2025-12-17","reason":true,"vars":[{"e":"off","label":"Gemini 3 Flash Preview (Non-reasoning)","v":{"py":49.9,"term":31.8,"gpqa":81.2,"hle":15.0,"ifb":55.1,"tau2":43.3,"lctx":53.0,"phys":1.4,"know":45.8,"hon":7.6},"pct":{},"ts":1786060819020},{"e":"on","label":"Gemini 3 Flash Preview (Reasoning)","v":{"py":50.6,"term":38.6,"gpqa":89.8,"hle":36.6,"ifb":78.0,"tau2":80.4,"lctx":73.0,"phys":8.6,"know":53.4,"hon":7.0},"pct":{},"ts":1786060819020}]},{"id":"nvidia/nemotron-3-nano-30b-a3b","name":"Nemotron 3 Nano 30B A3B","author":"Nvidia","inp":0.05,"out":0.2,"cache":0.03,"ctx":262144,"date":"2025-12-14","reason":true,"vars":[{"e":"off","label":"NVIDIA Nemotron 3 Nano 30B A3B (Non-reasoning)","v":{"py":23.0,"term":12.1,"gpqa":39.9,"hle":4.6,"ifb":37.5,"tau2":25.4,"lctx":8.7,"econ":0.0,"phys":0.0,"know":11.4,"hon":9.0},"pct":{},"ts":1786060819020},{"e":"on","label":"NVIDIA Nemotron 3 Nano 30B A3B (Reasoning)","v":{"intel":14.5,"code":14.4,"agent":2.0,"py":29.6,"term":13.6,"gpqa":75.7,"hle":11.4,"ifb":71.1,"tau2":40.9,"lctx":37.3,"econ":0.0,"phys":0.9,"know":17.3,"hon":16.7},"pct":{"inte":8,"codi":12,"agen":11},"ts":1786060819020}]},{"id":"openai/gpt-5.2","name":"GPT-5.2","author":"OpenAI","inp":1.75,"out":14.0,"cache":0.175,"ctx":400000,"date":"2025-12-10","reason":true,"vars":[{"e":"off","label":"GPT-5.2 (Non-reasoning)","v":{"py":40.4,"term":31.8,"gpqa":71.2,"hle":8.0,"ifb":47.4,"tau2":46.5,"lctx":41.7,"phys":0.6,"know":30.8,"hon":37.7},"pct":{},"ts":1786060819020},{"e":"medium","label":"GPT-5.2 (medium)","v":{"py":46.2,"term":43.2,"gpqa":86.4,"hle":26.7,"ifb":65.2,"tau2":74.3,"lctx":69.0,"phys":7.9,"know":38.3,"hon":38.4},"pct":{},"ts":1786060819020},{"e":"xhigh","label":"GPT-5.2 (xhigh)","v":{"py":52.1,"term":47.0,"gpqa":90.3,"hle":37.7,"ifb":75.4,"tau2":84.8,"lctx":79.3,"phys":11.6,"know":44.3,"hon":18.8},"pct":{},"ts":1786060819020}]},{"id":"mistralai/devstral-2512","name":"Devstral 2 2512","author":"Mistral AI","inp":0.4,"out":2.0,"cache":0.04,"ctx":262144,"date":"2025-12-09","reason":false,"vars":[{"e":"default","label":"Devstral 2","v":{"intel":19.2,"code":31.3,"agent":10.6,"py":33.1,"term":18.9,"gpqa":59.4,"hle":3.6,"ifb":38.1,"tau2":24.9,"lctx":31.3,"econ":12.3,"phys":0.0,"know":20.8,"hon":14.7},"pct":{"inte":19,"codi":35,"agen":25},"ts":1788307256623}]},{"id":"z-ai/glm-4.6v","name":"GLM 4.6V","author":"Z.ai","inp":0.3,"out":0.9,"cache":0.055,"ctx":131072,"date":"2025-12-08","reason":true,"vars":[{"e":"off","label":"GLM-4.6V (Non-reasoning)","v":{"py":27.2,"term":3.0,"gpqa":56.6,"hle":3.7,"ifb":27.9,"tau2":30.7,"lctx":14.3,"phys":0.0,"know":17.4,"hon":33.4},"pct":{},"ts":1786060819020},{"e":"on","label":"GLM-4.6V (Reasoning)","v":{"py":30.4,"term":14.4,"gpqa":71.9,"hle":9.6,"ifb":30.1,"tau2":31.6,"lctx":45.0,"phys":0.0,"know":16.2,"hon":48.5},"pct":{},"ts":1786060819020}]},{"id":"amazon/nova-2-lite-v1","name":"Nova 2 Lite","author":"Amazon","inp":0.3,"out":2.5,"cache":null,"ctx":1000000,"date":"2025-12-02","reason":true,"vars":[{"e":"off","label":"Nova 2.0 Lite (Non-reasoning)","v":{"py":24.0,"term":6.8,"gpqa":60.3,"hle":2.9,"ifb":40.5,"tau2":62.0,"lctx":18.3,"phys":0.0,"know":14.0,"hon":14.1},"pct":{},"ts":1786060819020},{"e":"low","label":"Nova 2.0 Lite (low)","v":{"py":33.3,"term":3.8,"gpqa":69.8,"hle":4.0,"ifb":61.2,"tau2":71.9,"lctx":55.0,"phys":0.0,"know":17.6,"hon":12.9},"pct":{},"ts":1786060819020},{"e":"medium","label":"Nova 2.0 Lite (medium)","v":{"py":36.8,"term":17.4,"gpqa":76.8,"hle":9.0,"ifb":68.5,"tau2":75.7,"lctx":60.3,"phys":0.0,"know":18.2,"hon":8.2},"pct":{},"ts":1786060819020},{"e":"high","label":"Nova 2.0 Lite (high)","v":{"code":23.0,"py":36.9,"term":16.7,"gpqa":81.1,"hle":11.6,"ifb":70.7,"tau2":72.8,"lctx":58.7,"econ":4.5,"phys":0.3,"know":19.0,"hon":8.6},"pct":{"codi":24},"ts":1787788832040}]},{"id":"mistralai/ministral-14b-2512","name":"Ministral 3 14B 2512","author":"Mistral AI","inp":0.2,"out":0.2,"cache":0.02,"ctx":262144,"date":"2025-12-02","reason":false,"vars":[{"e":"default","label":"Ministral 3 14B","v":{"intel":11.2,"code":14.4,"agent":2.2,"py":23.6,"term":4.5,"gpqa":57.2,"hle":4.6,"ifb":32.0,"tau2":27.2,"lctx":25.0,"econ":0.0,"phys":0.0,"know":13.6,"hon":7.5},"pct":{"inte":6,"codi":12,"agen":13},"ts":1786060819020}]},{"id":"mistralai/ministral-8b-2512","name":"Ministral 3 8B 2512","author":"Mistral AI","inp":0.15,"out":0.15,"cache":0.015,"ctx":262144,"date":"2025-12-02","reason":false,"vars":[{"e":"default","label":"Ministral 3 8B","v":{"intel":9.0,"code":9.7,"agent":1.2,"py":20.8,"term":4.5,"gpqa":47.1,"hle":4.3,"ifb":29.1,"tau2":26.6,"lctx":25.3,"econ":0.0,"phys":0.0,"know":13.0,"hon":5.8},"pct":{"inte":3,"codi":5,"agen":3},"ts":1786060819020}]},{"id":"mistralai/ministral-3b-2512","name":"Ministral 3 3B 2512","author":"Mistral AI","inp":0.1,"out":0.1,"cache":0.01,"ctx":131072,"date":"2025-12-02","reason":false,"vars":[{"e":"default","label":"Ministral 3 3B","v":{"intel":7.1,"code":4.8,"agent":1.6,"py":14.4,"term":0.0,"gpqa":35.8,"hle":5.4,"ifb":26.8,"tau2":24.9,"lctx":16.0,"econ":0.0,"phys":0.0,"know":9.0,"hon":19.8},"pct":{"inte":1,"codi":2,"agen":5},"ts":1786060819020}]},{"id":"mistralai/mistral-large-2512","name":"Mistral Large 3 2512","author":"Mistral AI","inp":0.5,"out":1.5,"cache":0.05,"ctx":262144,"date":"2025-12-01","reason":false,"vars":[{"e":"default","label":"Mistral Large 3","v":{"intel":15.9,"code":20.1,"agent":5.5,"py":36.2,"term":15.9,"gpqa":68.0,"hle":4.2,"ifb":36.2,"tau2":24.6,"lctx":34.7,"econ":7.2,"phys":0.0,"know":24.9,"hon":14.0},"pct":{"inte":15,"codi":18,"agen":19},"ts":1788307256623}]},{"id":"deepseek/deepseek-v3.2","name":"DeepSeek V3.2","author":"DeepSeek","inp":0.269,"out":0.4,"cache":0.1345,"ctx":163840,"date":"2025-12-01","reason":true,"vars":[{"e":"on","label":"DeepSeek V3.2 (Reasoning)","v":{"code":44.2,"py":38.9,"term":35.6,"gpqa":84.0,"hle":24.6,"ifb":60.7,"tau2":90.6,"lctx":70.7,"econ":18.4,"phys":2.9,"know":33.0,"hon":17.3},"pct":{"codi":47},"ts":1788307256623}]},{"id":"anthropic/claude-opus-4.5","name":"Claude Opus 4.5","author":"Anthropic","inp":5.0,"out":25.0,"cache":0.5,"ctx":200000,"date":"2025-11-24","reason":true,"vars":[{"e":"off","label":"Claude Opus 4.5 (Non-reasoning)","v":{"py":47.0,"term":40.9,"gpqa":81.0,"hle":13.2,"ifb":43.0,"tau2":86.3,"lctx":67.3,"phys":0.3,"know":40.9,"hon":23.8},"pct":{},"ts":1786060819020},{"e":"on","label":"Claude Opus 4.5 (Reasoning)","v":{"py":49.5,"term":47.0,"gpqa":86.6,"hle":30.1,"ifb":58.0,"tau2":89.5,"lctx":76.0,"phys":4.6,"know":46.6,"hon":39.0},"pct":{},"ts":1786060819020}]},{"id":"openai/gpt-5.1","name":"GPT-5.1","author":"OpenAI","inp":1.25,"out":10.0,"cache":0.125,"ctx":400000,"date":"2025-11-13","reason":true,"vars":[{"e":"off","label":"GPT-5.1 (Non-reasoning)","v":{"py":36.5,"term":22.7,"gpqa":64.3,"hle":5.3,"ifb":43.2,"tau2":46.5,"lctx":44.3,"phys":0.0,"know":29.5,"hon":9.4},"pct":{},"ts":1786060819020},{"e":"high","label":"GPT-5.1 (high)","v":{"intel":37.5,"code":49.4,"agent":21.6,"py":43.3,"term":45.5,"gpqa":87.3,"hle":28.5,"ifb":72.9,"tau2":81.9,"lctx":76.7,"econ":24.7,"phys":4.9,"know":37.7,"hon":48.1},"pct":{"inte":48,"codi":55,"agen":39},"ts":1788307256623}]},{"id":"openai/gpt-5.1-codex","name":"GPT-5.1-Codex","author":"OpenAI","inp":1.25,"out":10.0,"cache":0.13,"ctx":400000,"date":"2025-11-13","reason":true,"vars":[{"e":"high","label":"GPT-5.1 Codex (high)","v":{"py":40.2,"term":34.8,"gpqa":86.0,"hle":25.7,"ifb":70.0,"tau2":83.0,"lctx":69.0,"phys":5.7,"know":39.9,"hon":22.8},"pct":{},"ts":1786060819020}]},{"id":"openai/gpt-5.1-codex-mini","name":"GPT-5.1-Codex-Mini","author":"OpenAI","inp":0.25,"out":2.0,"cache":0.03,"ctx":400000,"date":"2025-11-13","reason":true,"vars":[{"e":"high","label":"GPT-5.1 Codex mini (high)","v":{"py":42.6,"term":33.3,"gpqa":81.3,"hle":18.5,"ifb":67.9,"tau2":62.9,"lctx":65.0,"phys":0.0,"know":23.2,"hon":48.4},"pct":{},"ts":1786060819020}]},{"id":"moonshotai/kimi-k2-thinking","name":"Kimi K2 Thinking","author":"moonshotai","inp":0.6,"out":2.5,"cache":0.15,"ctx":262144,"date":"2025-11-06","reason":true,"vars":[{"e":"default","label":"K2 Think V2","v":{"code":21.0,"py":33.0,"term":6.8,"gpqa":71.3,"hle":10.1,"ifb":62.8,"tau2":25.4,"lctx":55.3,"econ":0.0,"phys":0.0,"know":18.0,"hon":28.8},"pct":{"codi":21},"ts":1786449655531},{"e":"default","label":"Kimi K2 Thinking","v":{"py":42.4,"term":31.1,"gpqa":83.8,"hle":23.8,"ifb":68.1,"tau2":93.0,"lctx":70.3,"phys":2.6,"know":30.9,"hon":24.4},"pct":{},"ts":1786060819020}]},{"id":"amazon/nova-premier-v1","name":"Nova Premier 1.0","author":"Amazon","inp":2.5,"out":12.5,"cache":0.625,"ctx":1000000,"date":"2025-10-31","reason":false,"vars":[{"e":"default","label":"Nova Premier","v":{"py":27.9,"term":6.8,"gpqa":56.9,"hle":4.2,"ifb":36.2,"tau2":38.3,"lctx":31.3,"phys":0.0,"know":21.2,"hon":28.1},"pct":{},"ts":1786060819020}]},{"id":"minimax/minimax-m2","name":"MiniMax M2","author":"MiniMax","inp":0.255,"out":1.02,"cache":null,"ctx":204800,"date":"2025-10-23","reason":true,"vars":[{"e":"default","label":"MiniMax-M2","v":{"py":36.1,"term":25.8,"gpqa":77.7,"hle":13.7,"ifb":72.3,"tau2":86.8,"lctx":65.0,"phys":0.9,"know":23.2,"hon":9.1},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-vl-32b-instruct","name":"Qwen3 VL 32B Instruct","author":"Qwen","inp":0.104,"out":0.416,"cache":null,"ctx":131072,"date":"2025-10-23","reason":false,"vars":[{"e":"on","label":"Qwen3 VL 32B (Reasoning)","v":{"py":28.5,"term":7.6,"gpqa":73.3,"hle":10.1,"ifb":59.4,"tau2":45.6,"lctx":57.0,"phys":0.0,"know":17.0,"hon":16.3},"pct":{},"ts":1786060819020},{"e":"default","label":"Qwen3 VL 32B Instruct","v":{"py":30.1,"term":8.3,"gpqa":67.1,"hle":6.8,"ifb":39.2,"tau2":29.2,"lctx":34.3,"phys":0.0,"know":14.8,"hon":8.2},"pct":{},"ts":1786060819020}]},{"id":"ibm-granite/granite-4.0-h-micro","name":"Granite 4.0 Micro","author":"ibm-granite","inp":0.017,"out":0.112,"cache":null,"ctx":131000,"date":"2025-10-20","reason":false,"vars":[{"e":"default","label":"Granite 4.0 Micro","v":{"py":11.9,"term":1.5,"gpqa":33.6,"hle":5.0,"ifb":24.8,"tau2":12.6,"lctx":5.7,"phys":0.0,"know":9.3,"hon":4.2},"pct":{},"ts":1786060819020}]},{"id":"anthropic/claude-haiku-4.5","name":"Claude Haiku 4.5","author":"Anthropic","inp":1.0,"out":5.0,"cache":0.1,"ctx":200000,"date":"2025-10-15","reason":true,"vars":[{"e":"off","label":"Claude 4.5 Haiku (Non-reasoning)","v":{"py":34.4,"term":27.3,"gpqa":64.6,"hle":4.2,"ifb":42.0,"tau2":32.5,"lctx":48.3,"phys":0.0,"know":14.4,"hon":74.3},"pct":{},"ts":1786060819020},{"e":"on","label":"Claude 4.5 Haiku (Reasoning)","v":{"intel":29.9,"code":43.9,"agent":16.5,"py":43.3,"term":27.3,"gpqa":67.2,"hle":10.4,"ifb":54.3,"tau2":54.7,"lctx":73.7,"econ":20.7,"phys":0.0,"know":18.0,"hon":72.7},"pct":{"inte":35,"codi":46,"agen":32},"ts":1786060819020}]},{"id":"qwen/qwen3-vl-8b-thinking","name":"Qwen3 VL 8B Thinking","author":"Qwen","inp":0.18,"out":2.1,"cache":null,"ctx":131072,"date":"2025-10-14","reason":true,"vars":[{"e":"on","label":"Qwen3 VL 8B (Reasoning)","v":{"py":21.9,"term":3.8,"gpqa":57.9,"hle":3.8,"ifb":39.9,"tau2":22.5,"lctx":36.7,"phys":0.3,"know":20.4,"hon":8.6},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-vl-8b-instruct","name":"Qwen3 VL 8B Instruct","author":"Qwen","inp":0.117,"out":0.455,"cache":null,"ctx":262144,"date":"2025-10-14","reason":false,"vars":[{"e":"default","label":"Qwen3 VL 8B Instruct","v":{"py":17.4,"term":2.3,"gpqa":42.7,"hle":2.7,"ifb":32.3,"tau2":29.2,"lctx":16.7,"phys":0.0,"know":20.5,"hon":9.0},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-vl-30b-a3b-thinking","name":"Qwen3 VL 30B A3B Thinking","author":"Qwen","inp":0.2,"out":2.4,"cache":null,"ctx":262144,"date":"2025-10-07","reason":true,"vars":[{"e":"on","label":"Qwen3 VL 30B A3B (Reasoning)","v":{"py":28.8,"term":5.3,"gpqa":72.0,"hle":8.9,"ifb":45.1,"tau2":19.9,"lctx":42.7,"phys":0.0,"know":16.9,"hon":10.2},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-vl-30b-a3b-instruct","name":"Qwen3 VL 30B A3B Instruct","author":"Qwen","inp":0.15,"out":0.6,"cache":null,"ctx":262144,"date":"2025-10-07","reason":false,"vars":[{"e":"default","label":"Qwen3 VL 30B A3B Instruct","v":{"py":30.8,"term":6.1,"gpqa":69.5,"hle":6.3,"ifb":33.1,"tau2":19.0,"lctx":27.3,"phys":0.0,"know":15.6,"hon":6.3},"pct":{},"ts":1786060819020}]},{"id":"z-ai/glm-4.6","name":"GLM 4.6","author":"Z.ai","inp":0.55,"out":2.2,"cache":0.11,"ctx":204800,"date":"2025-09-30","reason":true,"vars":[{"e":"off","label":"GLM-4.6 (Non-reasoning)","v":{"py":33.1,"term":28.8,"gpqa":63.2,"hle":5.5,"ifb":36.7,"tau2":76.9,"lctx":28.3,"phys":0.0,"know":21.4,"hon":32.4},"pct":{},"ts":1786060819020},{"e":"on","label":"GLM-4.6 (Reasoning)","v":{"intel":29.3,"code":45.8,"agent":18.6,"py":38.4,"term":25.0,"gpqa":78.0,"hle":14.5,"ifb":43.4,"tau2":70.5,"lctx":55.3,"econ":21.7,"phys":1.1,"know":26.9,"hon":5.9},"pct":{"inte":33,"codi":50,"agen":34},"ts":1788307256623}]},{"id":"anthropic/claude-sonnet-4.5","name":"Claude Sonnet 4.5","author":"Anthropic","inp":3.0,"out":15.0,"cache":0.3,"ctx":1000000,"date":"2025-09-29","reason":true,"vars":[{"e":"off","label":"Claude 4.5 Sonnet (Non-reasoning)","v":{"py":42.8,"term":28.8,"gpqa":72.7,"hle":7.2,"ifb":42.7,"tau2":70.5,"lctx":52.3,"phys":0.0,"know":28.4,"hon":47.3},"pct":{},"ts":1786060819020},{"e":"on","label":"Claude 4.5 Sonnet (Reasoning)","v":{"intel":37.4,"code":52.1,"agent":26.4,"py":44.7,"term":35.6,"gpqa":83.4,"hle":17.8,"ifb":57.3,"tau2":78.1,"lctx":68.3,"econ":27.8,"phys":1.1,"know":32.9,"hon":50.9},"pct":{"inte":47,"codi":58,"agen":49},"ts":1786104059192}]},{"id":"deepseek/deepseek-v3.2-exp","name":"DeepSeek V3.2 Exp","author":"DeepSeek","inp":0.27,"out":0.41,"cache":null,"ctx":163840,"date":"2025-09-29","reason":true,"vars":[{"e":"off","label":"DeepSeek V3.2 Exp (Non-reasoning)","v":{"py":39.9,"term":25.0,"gpqa":73.8,"hle":9.0,"ifb":43.1,"tau2":33.9,"lctx":45.0,"phys":1.4,"know":22.8,"hon":7.9},"pct":{},"ts":1786060819020},{"e":"off","label":"DeepSeek V3.2 (Non-reasoning)","v":{"py":38.7,"term":32.6,"gpqa":75.1,"hle":11.2,"ifb":49.0,"tau2":78.9,"lctx":42.7,"phys":0.9,"know":24.0,"hon":6.7},"pct":{},"ts":1786060819020},{"e":"on","label":"DeepSeek V3.2 Exp (Reasoning)","v":{"py":37.7,"term":31.1,"gpqa":79.7,"hle":14.9,"ifb":54.1,"tau2":33.9,"lctx":72.3,"phys":1.4,"know":27.6,"hon":19.2},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-vl-235b-a22b-thinking","name":"Qwen3 VL 235B A22B Thinking","author":"Qwen","inp":0.4,"out":4.0,"cache":null,"ctx":131072,"date":"2025-09-24","reason":true,"vars":[{"e":"on","label":"Qwen3 VL 235B A22B (Reasoning)","v":{"py":39.9,"term":11.4,"gpqa":77.2,"hle":11.9,"ifb":56.5,"tau2":54.1,"lctx":63.0,"phys":0.0,"know":20.8,"hon":14.8},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-vl-235b-a22b-instruct","name":"Qwen3 VL 235B A22B Instruct","author":"Qwen","inp":0.21,"out":1.9,"cache":0.1,"ctx":262144,"date":"2025-09-24","reason":false,"vars":[{"e":"off","label":"Qwen3 235B A22B (Non-reasoning)","v":{"py":29.9,"term":6.1,"gpqa":61.3,"hle":4.2,"ifb":36.6,"tau2":27.2,"lctx":0.0,"phys":0.0,"know":18.6,"hon":12.9},"pct":{},"ts":1786060819020},{"e":"default","label":"Qwen3 VL 235B A22B Instruct","v":{"py":35.9,"term":6.8,"gpqa":71.2,"hle":6.6,"ifb":42.7,"tau2":35.1,"lctx":32.0,"phys":0.0,"know":20.3,"hon":8.4},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-max","name":"Qwen3 Max","author":"Qwen","inp":0.78,"out":3.9,"cache":0.156,"ctx":262144,"date":"2025-09-23","reason":true,"vars":[{"e":"default","label":"Qwen2.5 Max","v":{"py":33.7,"gpqa":58.7,"hle":3.8},"pct":{},"ts":1786060819020},{"e":"default","label":"Qwen3 Max","v":{"py":38.3,"term":20.5,"gpqa":76.4,"hle":11.9,"ifb":44.1,"tau2":74.3,"lctx":48.3,"phys":0.0,"know":24.4,"hon":10.1},"pct":{},"ts":1786060819020},{"e":"preview","label":"Qwen3 Max (Preview)","v":{"py":37.0,"term":19.7,"gpqa":76.4,"hle":10.1,"ifb":48.0,"tau2":32.7,"lctx":42.3,"phys":0.9,"know":24.2,"hon":11.6},"pct":{},"ts":1786060819020}]},{"id":"deepseek/deepseek-v3.1-terminus","name":"DeepSeek V3.1 Terminus","author":"DeepSeek","inp":0.27,"out":1.0,"cache":0.135,"ctx":163840,"date":"2025-09-22","reason":true,"vars":[{"e":"off","label":"DeepSeek V3.1 Terminus (Non-reasoning)","v":{"py":32.1,"term":31.8,"gpqa":75.1,"hle":8.7,"ifb":41.2,"tau2":37.1,"lctx":45.0,"phys":0.0,"know":23.5,"hon":12.4},"pct":{},"ts":1786060819020},{"e":"on","label":"DeepSeek V3.1 Terminus (Reasoning)","v":{"intel":31.4,"code":43.5,"agent":19.9,"py":40.6,"term":30.3,"gpqa":79.2,"hle":16.4,"ifb":57.0,"tau2":37.1,"lctx":68.0,"econ":19.2,"phys":1.7,"know":27.7,"hon":25.2},"pct":{"inte":38,"codi":46,"agen":37},"ts":1787788832040}]},{"id":"qwen/qwen3-next-80b-a3b-thinking","name":"Qwen3 Next 80B A3B Thinking","author":"Qwen","inp":0.15,"out":1.2,"cache":null,"ctx":262144,"date":"2025-09-11","reason":true,"vars":[{"e":"on","label":"Qwen3 Next 80B A3B (Reasoning)","v":{"intel":16.9,"code":17.4,"agent":2.1,"py":38.8,"term":9.8,"gpqa":75.9,"hle":12.6,"ifb":60.7,"tau2":41.5,"lctx":62.0,"econ":0.0,"phys":0.0,"know":19.0,"hon":13.0},"pct":{"inte":16,"codi":17,"agen":11},"ts":1786060819020}]},{"id":"qwen/qwen3-next-80b-a3b-instruct","name":"Qwen3 Next 80B A3B Instruct","author":"Qwen","inp":0.1,"out":1.1,"cache":0.07,"ctx":262144,"date":"2025-09-11","reason":false,"vars":[{"e":"default","label":"Qwen3 Next 80B A3B Instruct","v":{"py":30.7,"term":7.6,"gpqa":73.8,"hle":7.6,"ifb":39.7,"tau2":21.6,"lctx":52.0,"phys":0.0,"know":17.2,"hon":7.3},"pct":{},"ts":1786060819020}]},{"id":"moonshotai/kimi-k2-0905","name":"Kimi K2 0905","author":"moonshotai","inp":0.6,"out":2.5,"cache":null,"ctx":262144,"date":"2025-09-04","reason":false,"vars":[{"e":"default","label":"Kimi K2 0905","v":{"py":30.7,"term":23.5,"gpqa":76.7,"hle":6.4,"ifb":41.7,"tau2":73.4,"lctx":53.7,"phys":0.0,"know":25.4,"hon":30.3},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-30b-a3b-thinking-2507","name":"Qwen3 30B A3B Thinking 2507","author":"Qwen","inp":0.2,"out":2.4,"cache":null,"ctx":81920,"date":"2025-08-28","reason":true,"vars":[{"e":"on","label":"Qwen3 30B A3B 2507 (Reasoning)","v":{"intel":14.6,"code":12.1,"agent":1.8,"py":33.3,"term":5.3,"gpqa":70.7,"hle":10.3,"ifb":50.7,"tau2":28.1,"lctx":59.7,"econ":0.0,"phys":0.3,"know":16.3,"hon":13.5},"pct":{"inte":10,"codi":9,"agen":8},"ts":1786060819020}]},{"id":"nousresearch/hermes-4-70b","name":"Hermes 4 70B","author":"Nous Research","inp":0.13,"out":0.4,"cache":null,"ctx":131072,"date":"2025-08-26","reason":true,"vars":[{"e":"on","label":"Hermes 4 - Llama-3.1 70B (Reasoning)","v":{"py":34.1,"term":4.5,"gpqa":69.9,"hle":8.8,"ifb":31.3,"tau2":22.5,"lctx":8.0,"phys":0.0,"know":23.5,"hon":4.6},"pct":{},"ts":1786060819020}]},{"id":"nousresearch/hermes-4-405b","name":"Hermes 4 405B","author":"Nous Research","inp":1.0,"out":3.0,"cache":null,"ctx":131072,"date":"2025-08-26","reason":true,"vars":[{"e":"on","label":"Hermes 4 - Llama-3.1 405B (Reasoning)","v":{"py":25.2,"term":11.4,"gpqa":72.7,"hle":10.9,"ifb":32.7,"tau2":22.2,"lctx":22.7,"phys":0.3,"know":30.1,"hon":5.5},"pct":{},"ts":1786060819020}]},{"id":"deepseek/deepseek-chat-v3.1","name":"DeepSeek V3.1","author":"DeepSeek","inp":0.25,"out":0.95,"cache":0.13,"ctx":163840,"date":"2025-08-21","reason":true,"vars":[{"e":"off","label":"DeepSeek V3.1 (Non-reasoning)","v":{"py":36.7,"term":24.2,"gpqa":73.5,"hle":6.7,"ifb":37.8,"tau2":34.8,"lctx":46.7,"phys":0.0,"know":23.1,"hon":14.3},"pct":{},"ts":1786060819020},{"e":"on","label":"DeepSeek V3.1 (Reasoning)","v":{"py":39.1,"term":25.0,"gpqa":77.9,"hle":14.3,"ifb":41.5,"tau2":37.4,"lctx":56.7,"phys":2.0,"know":29.0,"hon":17.5},"pct":{},"ts":1786060819020}]},{"id":"mistralai/mistral-medium-3.1","name":"Mistral Medium 3.1","author":"Mistral AI","inp":0.4,"out":2.0,"cache":0.04,"ctx":131072,"date":"2025-08-13","reason":false,"vars":[{"e":"default","label":"Mistral Medium 3.1","v":{"intel":14.7,"code":20.5,"agent":6.1,"py":33.8,"term":10.6,"gpqa":58.8,"hle":4.7,"ifb":39.8,"tau2":40.6,"lctx":21.3,"econ":5.5,"phys":0.0,"know":20.7,"hon":15.4},"pct":{"inte":11,"codi":19,"agen":20},"ts":1787788832040}]},{"id":"z-ai/glm-4.5v","name":"GLM 4.5V","author":"Z.ai","inp":0.6,"out":1.8,"cache":0.11,"ctx":65536,"date":"2025-08-11","reason":true,"vars":[{"e":"off","label":"GLM-4.5V (Non-reasoning)","v":{"py":18.8,"term":6.8,"gpqa":57.3,"hle":3.5,"ifb":28.6,"tau2":19.6,"lctx":0.0,"phys":0.0,"know":18.2,"hon":9.8},"pct":{},"ts":1786060819020},{"e":"on","label":"GLM-4.5V (Reasoning)","v":{"py":22.1,"term":5.3,"gpqa":68.4,"hle":6.3,"ifb":34.2,"tau2":22.5,"lctx":0.0,"phys":0.0,"know":20.8,"hon":15.2},"pct":{},"ts":1786060819020}]},{"id":"openai/gpt-5","name":"GPT-5","author":"OpenAI","inp":1.25,"out":10.0,"cache":0.125,"ctx":400000,"date":"2025-08-07","reason":true,"vars":[{"e":"minimal","label":"GPT-5 (minimal)","v":{"py":38.8,"term":18.2,"gpqa":67.3,"hle":6.0,"ifb":45.6,"tau2":67.0,"lctx":27.0,"phys":0.0,"know":29.6,"hon":9.9},"pct":{},"ts":1786060819020},{"e":"low","label":"GPT-5 (low)","v":{"py":39.1,"term":26.5,"gpqa":80.8,"hle":19.6,"ifb":66.6,"tau2":84.2,"lctx":63.7,"phys":1.1,"know":38.1,"hon":21.0},"pct":{},"ts":1786060819020},{"e":"medium","label":"GPT-5 (medium)","v":{"py":41.1,"term":37.9,"gpqa":84.2,"hle":25.4,"ifb":70.6,"tau2":86.5,"lctx":76.3,"phys":0.0,"know":39.5,"hon":16.8},"pct":{},"ts":1786060819020},{"e":"high","label":"GPT-5 (high)","v":{"intel":35.3,"code":37.8,"agent":26.5,"py":42.9,"term":32.6,"gpqa":85.4,"hle":28.5,"ifb":73.1,"tau2":84.8,"lctx":76.3,"econ":29.1,"phys":5.7,"know":40.3,"hon":17.8},"pct":{"inte":45,"codi":41,"agen":50},"ts":1787788832040}]},{"id":"openai/gpt-5-mini","name":"GPT-5 Mini","author":"OpenAI","inp":0.25,"out":2.0,"cache":0.025,"ctx":400000,"date":"2025-08-07","reason":true,"vars":[{"e":"minimal","label":"GPT-5 mini (minimal)","v":{"py":36.9,"term":14.4,"gpqa":68.7,"hle":5.1,"ifb":45.6,"tau2":31.9,"lctx":36.7,"phys":0.0,"know":19.2,"hon":10.7},"pct":{},"ts":1786060819020},{"e":"medium","label":"GPT-5 mini (medium)","v":{"py":41.0,"term":28.8,"gpqa":80.3,"hle":15.9,"ifb":71.2,"tau2":71.1,"lctx":69.7,"phys":1.4,"know":23.1,"hon":55.7},"pct":{},"ts":1786060819020},{"e":"high","label":"GPT-5 mini (high)","v":{"intel":25.8,"code":15.6,"agent":19.6,"py":39.2,"term":33.3,"gpqa":82.8,"hle":21.5,"ifb":75.4,"tau2":68.4,"lctx":71.0,"econ":22.1,"phys":0.0,"know":25.0,"hon":43.6},"pct":{"inte":30,"codi":14,"agen":36},"ts":1787788832040}]},{"id":"openai/gpt-5-nano","name":"GPT-5 Nano","author":"OpenAI","inp":0.05,"out":0.4,"cache":0.005,"ctx":400000,"date":"2025-08-07","reason":true,"vars":[{"e":"minimal","label":"GPT-5 nano (minimal)","v":{"py":29.1,"term":6.8,"gpqa":42.8,"hle":4.0,"ifb":32.5,"tau2":25.7,"lctx":20.0,"phys":0.0,"know":13.1,"hon":11.2},"pct":{},"ts":1786060819020},{"e":"medium","label":"GPT-5 nano (medium)","v":{"py":33.8,"term":17.4,"gpqa":67.0,"hle":8.7,"ifb":65.9,"tau2":30.4,"lctx":42.3,"phys":0.0,"know":17.6,"hon":47.4},"pct":{},"ts":1786060819020},{"e":"high","label":"GPT-5 nano (high)","v":{"py":36.6,"term":12.1,"gpqa":67.6,"hle":9.5,"ifb":67.6,"tau2":36.5,"lctx":43.7,"phys":0.0,"know":19.1,"hon":41.0},"pct":{},"ts":1786060819020}]},{"id":"openai/gpt-oss-120b","name":"gpt-oss-120b","author":"OpenAI","inp":0.037,"out":0.17,"cache":null,"ctx":131072,"date":"2025-08-05","reason":true,"vars":[{"e":"low","label":"gpt-oss-120b (low)","v":{"intel":14.9,"code":21.2,"agent":1.0,"py":36.0,"term":5.3,"gpqa":67.2,"hle":5.9,"ifb":58.3,"tau2":45.0,"lctx":46.0,"econ":0.0,"phys":0.0,"know":19.8,"hon":8.6},"pct":{"inte":12,"codi":21,"agen":1},"ts":1786060819020},{"e":"high","label":"gpt-oss-120b (high)","v":{"intel":24.1,"code":30.4,"agent":13.4,"py":38.9,"term":23.5,"gpqa":78.2,"hle":19.6,"ifb":69.0,"tau2":65.8,"lctx":51.0,"econ":15.1,"phys":1.1,"know":21.8,"hon":9.2},"pct":{"inte":26,"codi":34,"agen":29},"ts":1787788832040}]},{"id":"openai/gpt-oss-20b","name":"gpt-oss-20b","author":"OpenAI","inp":0.03,"out":0.13,"cache":0.03,"ctx":131072,"date":"2025-08-05","reason":true,"vars":[{"e":"low","label":"gpt-oss-20b (low)","v":{"py":34.0,"term":4.5,"gpqa":61.1,"hle":5.3,"ifb":57.8,"tau2":50.3,"lctx":30.7,"phys":0.0,"know":15.1,"hon":13.3},"pct":{},"ts":1786060819020},{"e":"high","label":"gpt-oss-20b (high)","v":{"intel":15.2,"code":20.7,"agent":3.1,"py":34.4,"term":10.6,"gpqa":68.8,"hle":11.0,"ifb":65.1,"tau2":60.2,"lctx":33.3,"econ":3.4,"phys":1.4,"know":16.0,"hon":5.9},"pct":{"inte":13,"codi":20,"agen":15},"ts":1787788832040}]},{"id":"anthropic/claude-opus-4.1","name":"Claude Opus 4.1","author":"Anthropic","inp":15.0,"out":75.0,"cache":1.5,"ctx":200000,"date":"2025-08-05","reason":true,"vars":[{"e":"on","label":"Claude 4.1 Opus (Reasoning)","v":{"py":40.9,"term":34.3,"gpqa":80.9,"hle":12.5,"ifb":55.4,"tau2":71.4,"lctx":73.3,"phys":0.0},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-coder-30b-a3b-instruct","name":"Qwen3 Coder 30B A3B Instruct","author":"Qwen","inp":0.07,"out":0.28,"cache":null,"ctx":262144,"date":"2025-07-31","reason":false,"vars":[{"e":"default","label":"Qwen3 Coder 30B A3B Instruct","v":{"py":27.8,"term":15.2,"gpqa":51.6,"hle":3.8,"ifb":32.7,"tau2":34.5,"lctx":31.7,"phys":0.0,"know":16.4,"hon":19.7},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-30b-a3b-instruct-2507","name":"Qwen3 30B A3B Instruct 2507","author":"Qwen","inp":0.0481,"out":0.193,"cache":null,"ctx":262144,"date":"2025-07-29","reason":false,"vars":[{"e":"off","label":"Qwen3 30B A3B (Non-reasoning)","v":{"py":26.4,"term":6.8,"gpqa":51.5,"hle":4.6,"ifb":31.9,"tau2":22.2,"lctx":0.0,"phys":0.0,"know":12.0,"hon":11.5},"pct":{},"ts":1786060819020},{"e":"default","label":"Qwen3 30B A3B 2507 Instruct","v":{"py":30.4,"term":6.1,"gpqa":65.9,"hle":6.9,"ifb":33.1,"tau2":10.2,"lctx":25.3,"phys":0.0,"know":15.0,"hon":4.6},"pct":{},"ts":1786060819020}]},{"id":"z-ai/glm-4.5","name":"GLM 4.5","author":"Z.ai","inp":0.6,"out":2.2,"cache":0.11,"ctx":131072,"date":"2025-07-25","reason":true,"vars":[{"e":"on","label":"GLM-4.5 (Reasoning)","v":{"py":34.8,"term":22.0,"gpqa":78.2,"hle":13.0,"ifb":44.1,"tau2":43.0,"lctx":51.7,"phys":0.0,"know":25.1,"hon":29.9},"pct":{},"ts":1786060819020}]},{"id":"z-ai/glm-4.5-air","name":"GLM 4.5 Air","author":"Z.ai","inp":0.13,"out":0.85,"cache":0.025,"ctx":131072,"date":"2025-07-25","reason":true,"vars":[{"e":"default","label":"GLM-4.5-Air","v":{"py":30.6,"term":20.5,"gpqa":73.3,"hle":7.0,"ifb":37.6,"tau2":46.5,"lctx":45.7,"phys":0.0,"know":16.3,"hon":7.1},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-235b-a22b-thinking-2507","name":"Qwen3 235B A22B Thinking 2507","author":"Qwen","inp":0.23,"out":2.3,"cache":null,"ctx":131072,"date":"2025-07-25","reason":true,"vars":[{"e":"on","label":"Qwen3 235B A22B 2507 (Reasoning)","v":{"intel":19.9,"code":22.1,"agent":3.8,"py":42.4,"term":13.6,"gpqa":79.0,"hle":15.9,"ifb":51.2,"tau2":53.2,"lctx":70.7,"econ":2.4,"phys":0.0,"know":22.8,"hon":10.2},"pct":{"inte":21,"codi":23,"agen":17},"ts":1787788832040}]},{"id":"qwen/qwen3-coder","name":"Qwen3 Coder 480B A35B","author":"Qwen","inp":0.3,"out":1.0,"cache":0.1,"ctx":262144,"date":"2025-07-23","reason":false,"vars":[{"e":"default","label":"Qwen3 Coder 480B A35B Instruct","v":{"py":35.9,"term":18.9,"gpqa":61.8,"hle":4.5,"ifb":40.5,"tau2":43.6,"lctx":45.3,"phys":0.0,"know":15.7,"hon":55.1},"pct":{},"ts":1786060819020}]},{"id":"google/gemini-2.5-flash-lite","name":"Gemini 2.5 Flash Lite","author":"Google","inp":0.1,"out":0.4,"cache":0.01,"ctx":1048576,"date":"2025-07-22","reason":true,"vars":[{"e":"off","label":"Gemini 2.5 Flash-Lite (Non-reasoning)","v":{"py":17.7,"term":2.3,"gpqa":47.4,"hle":3.7,"ifb":31.5,"tau2":19.0,"lctx":32.0,"phys":0.0,"know":15.4,"hon":12.2},"pct":{},"ts":1786060819020},{"e":"off","label":"Gemini 2.5 Flash-Lite Preview (Sep '25) (Non-reasoning)","v":{"py":28.5,"term":7.6,"gpqa":65.1,"hle":5.1,"ifb":41.8,"tau2":30.4,"lctx":51.7,"phys":0.0,"know":14.1,"hon":33.9},"pct":{},"ts":1786060819020},{"e":"on","label":"Gemini 2.5 Flash-Lite Preview (Sep '25) (Reasoning)","v":{"py":28.7,"term":12.9,"gpqa":70.9,"hle":7.0,"ifb":52.6,"tau2":30.7,"lctx":63.0,"phys":0.0,"know":18.0,"hon":12.2},"pct":{},"ts":1786060819020},{"e":"on","label":"Gemini 2.5 Flash-Lite (Reasoning)","v":{"py":19.3,"term":4.5,"gpqa":62.5,"hle":6.8,"ifb":49.9,"tau2":18.4,"lctx":56.3,"phys":0.0,"know":17.9,"hon":22.6},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-235b-a22b-2507","name":"Qwen3 235B A22B Instruct 2507","author":"Qwen","inp":0.0875,"out":0.35,"cache":0.0175,"ctx":262144,"date":"2025-07-21","reason":false,"vars":[{"e":"default","label":"Qwen3 235B A22B 2507 Instruct","v":{"py":36.0,"term":15.2,"gpqa":75.3,"hle":11.1,"ifb":46.1,"tau2":33.3,"lctx":33.0,"phys":0.0,"know":18.7,"hon":22.8},"pct":{},"ts":1786060819020}]},{"id":"moonshotai/kimi-k2","name":"Kimi K2 0711","author":"moonshotai","inp":0.57,"out":2.3,"cache":null,"ctx":131072,"date":"2025-07-11","reason":false,"vars":[{"e":"low","label":"K2-V2 (low)","v":{"py":22.3,"term":4.5,"gpqa":54.1,"hle":3.6,"ifb":41.0,"tau2":20.8,"lctx":20.0,"phys":0.0,"know":16.3,"hon":24.0},"pct":{},"ts":1786060819020},{"e":"medium","label":"K2-V2 (medium)","v":{"py":25.2,"term":8.3,"gpqa":59.8,"hle":4.4,"ifb":55.1,"tau2":24.9,"lctx":28.3,"phys":0.0,"know":17.9,"hon":18.4},"pct":{},"ts":1786060819020},{"e":"high","label":"K2-V2 (high)","v":{"py":28.6,"term":9.8,"gpqa":68.1,"hle":10.5,"ifb":60.1,"tau2":27.8,"lctx":36.3,"phys":0.0,"know":18.5,"hon":9.0},"pct":{},"ts":1786060819020},{"e":"default","label":"Kimi K2","v":{"py":34.5,"term":15.9,"gpqa":76.6,"hle":7.4,"ifb":41.5,"tau2":61.1,"lctx":53.0,"phys":0.0,"know":27.4,"hon":23.4},"pct":{},"ts":1786060819020}]},{"id":"minimax/minimax-m1","name":"MiniMax M1","author":"MiniMax","inp":0.55,"out":2.2,"cache":null,"ctx":1000000,"date":"2025-06-18","reason":true,"vars":[{"e":"default","label":"MiniMax M1 80k","v":{"py":37.4,"term":3.0,"gpqa":69.7,"hle":8.9,"ifb":41.8,"tau2":34.2,"lctx":56.7,"phys":0.0,"know":22.5,"hon":8.5},"pct":{},"ts":1786060819020},{"e":"default","label":"MiniMax M1 40k","v":{"py":37.8,"term":2.3,"gpqa":68.2,"hle":7.8,"ifb":41.2,"tau2":31.6,"lctx":55.7},"pct":{},"ts":1786060819020}]},{"id":"google/gemini-2.5-flash","name":"Gemini 2.5 Flash","author":"Google","inp":0.3,"out":2.5,"cache":0.03,"ctx":1048576,"date":"2025-06-17","reason":true,"vars":[{"e":"off","label":"Gemini 2.5 Flash (Non-reasoning)","v":{"py":29.1,"term":12.1,"gpqa":68.3,"hle":4.7,"ifb":39.0,"tau2":14.9,"lctx":48.0,"phys":1.4,"know":26.1,"hon":7.0},"pct":{},"ts":1786060819020},{"e":"off","label":"Gemini 2.5 Flash Preview (Non-reasoning)","v":{"py":23.3,"gpqa":59.4,"hle":3.8},"pct":{},"ts":1786060819020},{"e":"off","label":"Gemini 2.5 Flash Preview (Sep '25) (Non-reasoning)","v":{"py":37.5,"term":14.4,"gpqa":76.6,"hle":8.7,"ifb":43.5,"tau2":28.4,"lctx":59.0,"phys":0.0,"know":26.8,"hon":8.8},"pct":{},"ts":1786060819020},{"e":"on","label":"Gemini 2.5 Flash (Reasoning)","v":{"py":39.4,"term":13.6,"gpqa":79.0,"hle":12.1,"ifb":50.3,"tau2":31.6,"lctx":65.7,"phys":1.1,"know":26.0,"hon":24.7},"pct":{},"ts":1786060819020},{"e":"on","label":"Gemini 2.5 Flash Preview (Sep '25) (Reasoning)","v":{"py":40.5,"term":16.7,"gpqa":79.3,"hle":13.8,"ifb":52.3,"tau2":45.6,"lctx":68.0,"phys":0.3,"know":28.3,"hon":10.1},"pct":{},"ts":1786060819020},{"e":"on","label":"Gemini 2.5 Flash Preview (Reasoning)","v":{"py":35.9,"gpqa":69.8,"hle":12.1},"pct":{},"ts":1786060819020}]},{"id":"google/gemini-2.5-pro","name":"Gemini 2.5 Pro","author":"Google","inp":1.25,"out":10.0,"cache":0.125,"ctx":1048576,"date":"2025-06-17","reason":true,"vars":[{"e":"default","label":"Gemini 2.5 Pro","v":{"intel":25.9,"code":33.3,"agent":7.2,"py":42.8,"term":26.5,"gpqa":84.4,"hle":22.5,"ifb":48.7,"tau2":54.1,"lctx":66.0,"econ":8.7,"phys":2.6,"know":39.1,"hon":9.1},"pct":{"inte":31,"codi":36,"agen":22},"ts":1788307256623},{"e":"may' 25","label":"Gemini 2.5 Pro Preview (May' 25)","v":{"py":41.6,"gpqa":82.2,"hle":19.9},"pct":{},"ts":1786060819020}]},{"id":"openai/o3-pro","name":"o3 Pro","author":"OpenAI","inp":20.0,"out":80.0,"cache":null,"ctx":200000,"date":"2025-06-11","reason":true,"vars":[{"e":"default","label":"o3-pro","v":{"gpqa":84.5},"pct":{},"ts":1779808859852}]},{"id":"deepseek/deepseek-r1-0528","name":"R1 0528","author":"DeepSeek","inp":0.5,"out":2.15,"cache":0.35,"ctx":163840,"date":"2025-05-28","reason":true,"vars":[{"e":"may '25","label":"DeepSeek R1 0528 (May '25)","v":{"py":40.3,"term":15.9,"gpqa":81.3,"hle":15.8,"ifb":39.6,"tau2":36.5,"lctx":56.7,"phys":1.4,"know":30.5,"hon":16.6},"pct":{},"ts":1786060819020}]},{"id":"anthropic/claude-opus-4","name":"Claude Opus 4","author":"Anthropic","inp":15.0,"out":75.0,"cache":1.5,"ctx":200000,"date":"2025-05-22","reason":true,"vars":[{"e":"off","label":"Claude 4 Opus (Non-reasoning)","v":{"py":40.9,"gpqa":70.1,"hle":6.2,"ifb":43.3,"lctx":40.0},"pct":{},"ts":1786060819020},{"e":"on","label":"Claude 4 Opus (Reasoning)","v":{"py":39.8,"term":31.1,"gpqa":79.6,"hle":12.3,"ifb":53.7,"tau2":73.4,"lctx":36.3},"pct":{},"ts":1786060819020}]},{"id":"anthropic/claude-sonnet-4","name":"Claude Sonnet 4","author":"Anthropic","inp":3.0,"out":15.0,"cache":0.3,"ctx":1000000,"date":"2025-05-22","reason":true,"vars":[{"e":"off","label":"Claude 4 Sonnet (Non-reasoning)","v":{"py":37.3,"term":27.3,"gpqa":68.3,"hle":4.3,"ifb":45.4,"tau2":52.3,"lctx":45.7,"phys":1.1,"know":22.7,"hon":59.0},"pct":{},"ts":1786060819020},{"e":"on","label":"Claude 4 Sonnet (Reasoning)","v":{"intel":29.8,"code":37.6,"agent":17.6,"py":40.0,"term":31.1,"gpqa":77.7,"hle":10.7,"ifb":54.7,"tau2":64.6,"lctx":69.7,"econ":18.9,"phys":0.3,"know":22.7,"hon":70.9},"pct":{"inte":35,"codi":39,"agen":33},"ts":1788307256623}]},{"id":"mistralai/mistral-medium-3","name":"Mistral Medium 3","author":"Mistral AI","inp":0.4,"out":2.0,"cache":0.04,"ctx":131072,"date":"2025-05-07","reason":false,"vars":[{"e":"default","label":"Mistral Medium 3","v":{"py":33.1,"term":3.8,"gpqa":57.8,"hle":4.1,"ifb":39.3,"tau2":24.3,"lctx":31.7,"phys":0.0,"know":18.3,"hon":39.1},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-30b-a3b","name":"Qwen3 30B A3B","author":"Qwen","inp":0.12,"out":0.5,"cache":null,"ctx":131072,"date":"2025-04-29","reason":true,"vars":[{"e":"on","label":"Qwen3 30B A3B (Reasoning)","v":{"py":28.5,"term":2.3,"gpqa":61.6,"hle":6.2,"ifb":41.5,"tau2":26.0,"lctx":0.0,"phys":0.0,"know":16.2,"hon":19.3},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen3-8b","name":"Qwen3 8B","author":"Qwen","inp":0.117,"out":0.455,"cache":null,"ctx":131072,"date":"2025-04-28","reason":true,"vars":[{"e":"off","label":"Qwen3 8B (Non-reasoning)","v":{"py":16.8,"term":2.3,"gpqa":45.2,"hle":1.9,"ifb":28.6,"tau2":24.9,"lctx":0.0,"phys":0.0,"know":11.1,"hon":4.4},"pct":{},"ts":1786060819020},{"e":"on","label":"Qwen3 8B (Reasoning)","v":{"intel":8.3,"code":9.0,"agent":1.6,"py":22.6,"term":2.3,"gpqa":58.9,"hle":3.9,"ifb":33.5,"tau2":27.8,"lctx":0.0,"econ":0.0,"phys":0.0,"know":13.6,"hon":9.3},"pct":{"inte":2,"codi":4,"agen":5},"ts":1786060819020}]},{"id":"qwen/qwen3-14b","name":"Qwen3 14B","author":"Qwen","inp":0.12,"out":0.24,"cache":null,"ctx":131072,"date":"2025-04-28","reason":true,"vars":[{"e":"off","label":"Qwen3 14B (Non-reasoning)","v":{"py":26.5,"term":5.3,"gpqa":47.0,"hle":4.1,"ifb":23.9,"tau2":32.2,"lctx":0.0,"phys":0.0,"know":13.3,"hon":7.7},"pct":{},"ts":1786060819020},{"e":"on","label":"Qwen3 14B (Reasoning)","v":{"intel":10.4,"code":13.8,"agent":1.9,"py":31.6,"term":3.8,"gpqa":60.4,"hle":4.5,"ifb":40.5,"tau2":34.5,"lctx":0.0,"econ":0.0,"phys":0.0,"know":15.3,"hon":24.2},"pct":{"inte":4,"codi":11,"agen":10},"ts":1786060819020}]},{"id":"qwen/qwen3-32b","name":"Qwen3 32B","author":"Qwen","inp":0.08,"out":0.28,"cache":null,"ctx":131072,"date":"2025-04-28","reason":true,"vars":[{"e":"off","label":"Qwen3 32B (Non-reasoning)","v":{"py":28.0,"gpqa":53.5,"hle":4.1,"ifb":31.5,"lctx":0.0},"pct":{},"ts":1786060819020},{"e":"on","label":"Qwen3 32B (Reasoning)","v":{"intel":11.4,"code":15.3,"agent":1.8,"py":35.4,"term":3.0,"gpqa":66.8,"hle":7.4,"ifb":36.3,"tau2":29.8,"lctx":0.0,"econ":0.0,"phys":0.3,"know":17.4,"hon":17.9},"pct":{"inte":6,"codi":14,"agen":8},"ts":1786060819020}]},{"id":"qwen/qwen3-235b-a22b","name":"Qwen3 235B A22B","author":"Qwen","inp":0.455,"out":1.82,"cache":null,"ctx":131072,"date":"2025-04-28","reason":true,"vars":[{"e":"on","label":"Qwen3 235B A22B (Reasoning)","v":{"py":39.9,"term":6.1,"gpqa":70.0,"hle":11.0,"ifb":38.7,"tau2":24.0,"lctx":0.0,"phys":0.0,"know":18.5,"hon":22.4},"pct":{},"ts":1786060819020}]},{"id":"openai/o3","name":"o3","author":"OpenAI","inp":2.0,"out":8.0,"cache":0.5,"ctx":200000,"date":"2025-04-16","reason":true,"vars":[{"e":"default","label":"o3","v":{"py":41.0,"term":37.1,"gpqa":82.7,"hle":20.1,"ifb":71.4,"tau2":80.7,"lctx":73.3,"phys":1.1,"know":38.6,"hon":11.9},"pct":{},"ts":1786060819020}]},{"id":"openai/o4-mini","name":"o4 Mini","author":"OpenAI","inp":1.1,"out":4.4,"cache":0.275,"ctx":200000,"date":"2025-04-16","reason":true,"vars":[{"e":"high","label":"o4-mini (high)","v":{"py":46.5,"term":15.2,"gpqa":78.4,"hle":16.5,"ifb":68.7,"tau2":55.6,"lctx":60.0,"phys":0.6,"know":24.8,"hon":19.5},"pct":{},"ts":1786060819020}]},{"id":"openai/gpt-4.1","name":"GPT-4.1","author":"OpenAI","inp":2.0,"out":8.0,"cache":0.5,"ctx":1047576,"date":"2025-04-14","reason":false,"vars":[{"e":"default","label":"GPT-4.1","v":{"py":38.1,"term":13.6,"gpqa":66.6,"hle":4.2,"ifb":43.0,"tau2":47.1,"lctx":64.3,"phys":0.0,"know":27.8,"hon":6.7},"pct":{},"ts":1786060819020}]},{"id":"openai/gpt-4.1-mini","name":"GPT-4.1 Mini","author":"OpenAI","inp":0.4,"out":1.6,"cache":0.1,"ctx":1047576,"date":"2025-04-14","reason":false,"vars":[{"e":"default","label":"GPT-4.1 mini","v":{"intel":14.8,"code":20.2,"agent":1.8,"py":40.4,"term":7.6,"gpqa":66.4,"hle":5.0,"ifb":38.3,"tau2":52.9,"lctx":45.3,"econ":0.4,"phys":0.0,"know":20.3,"hon":7.3},"pct":{"inte":12,"codi":19,"agen":8},"ts":1788307256623}]},{"id":"openai/gpt-4.1-nano","name":"GPT-4.1 Nano","author":"OpenAI","inp":0.1,"out":0.4,"cache":0.025,"ctx":1047576,"date":"2025-04-14","reason":false,"vars":[{"e":"default","label":"GPT-4.1 nano","v":{"intel":9.6,"code":11.1,"agent":1.2,"py":25.9,"term":3.8,"gpqa":51.2,"hle":3.8,"ifb":32.0,"tau2":17.3,"lctx":19.3,"econ":0.0,"phys":0.0,"know":13.7,"hon":17.4},"pct":{"inte":3,"codi":7,"agen":3},"ts":1786060819020}]},{"id":"meta-llama/llama-4-maverick","name":"Llama 4 Maverick","author":"Meta Llama","inp":0.2,"out":0.696,"cache":null,"ctx":1048576,"date":"2025-04-05","reason":false,"vars":[{"e":"default","label":"Llama 4 Maverick","v":{"intel":14.5,"code":16.3,"agent":1.2,"py":33.1,"term":6.8,"gpqa":67.1,"hle":4.9,"ifb":43.0,"tau2":17.8,"lctx":50.0,"econ":0.0,"phys":0.0,"know":24.9,"hon":11.1},"pct":{"inte":8,"codi":16,"agen":3},"ts":1786060819020}]},{"id":"meta-llama/llama-4-scout","name":"Llama 4 Scout","author":"Meta Llama","inp":0.1,"out":0.3,"cache":null,"ctx":1310720,"date":"2025-04-05","reason":false,"vars":[{"e":"default","label":"Llama 4 Scout","v":{"intel":10.3,"code":8.2,"agent":1.1,"py":17.0,"term":1.5,"gpqa":58.7,"hle":3.8,"ifb":39.5,"tau2":15.5,"lctx":30.3,"econ":0.0,"phys":0.0,"know":15.2,"hon":20.6},"pct":{"inte":4,"codi":4,"agen":3},"ts":1786060819020}]},{"id":"deepseek/deepseek-chat-v3-0324","name":"DeepSeek V3 0324","author":"DeepSeek","inp":0.25,"out":1.0,"cache":null,"ctx":163840,"date":"2025-03-24","reason":false,"vars":[{"e":"default","label":"DeepSeek V3 0324","v":{"intel":15.2,"code":21.2,"agent":1.6,"py":35.8,"term":15.2,"gpqa":65.5,"hle":4.7,"ifb":41.0,"tau2":47.1,"lctx":41.3,"econ":0.0,"phys":0.0,"know":24.3,"hon":14.1},"pct":{"inte":13,"codi":21,"agen":5},"ts":1786060819020}]},{"id":"google/gemma-3-4b-it","name":"Gemma 3 4B","author":"Google","inp":0.05,"out":0.1,"cache":null,"ctx":131072,"date":"2025-03-13","reason":false,"vars":[{"e":"default","label":"Gemma 3 4B Instruct","v":{"code":2.7,"py":7.3,"term":0.8,"gpqa":29.1,"hle":5.3,"ifb":28.3,"tau2":5.0,"lctx":6.7,"phys":0.0,"know":7.7,"hon":1.8},"pct":{"codi":0},"ts":1786060819020}]},{"id":"google/gemma-3-12b-it","name":"Gemma 3 12B","author":"Google","inp":0.05,"out":0.15,"cache":null,"ctx":131072,"date":"2025-03-13","reason":false,"vars":[{"e":"default","label":"Gemma 3 12B Instruct","v":{"intel":5.5,"code":5.8,"agent":0.3,"py":17.4,"term":0.8,"gpqa":34.9,"hle":4.2,"ifb":36.7,"tau2":10.8,"lctx":8.0,"econ":0.0,"phys":0.0,"know":10.3,"hon":2.6},"pct":{"inte":0,"codi":3,"agen":0},"ts":1786060819020}]},{"id":"cohere/command-a","name":"Command A","author":"Cohere","inp":2.5,"out":10.0,"cache":null,"ctx":256000,"date":"2025-03-13","reason":false,"vars":[{"e":"default","label":"Command A+","v":{"intel":22.8,"code":27.8,"agent":9.2,"py":37.8,"term":25.0,"gpqa":76.1,"hle":12.0,"ifb":73.9,"tau2":80.7,"lctx":48.7,"econ":10.7,"phys":0.3,"know":8.9,"hon":85.8},"pct":{"inte":24,"codi":31,"agen":24},"ts":1787616009405}]},{"id":"rekaai/reka-flash-3","name":"Reka Flash 3","author":"rekaai","inp":0.1,"out":0.2,"cache":null,"ctx":65536,"date":"2025-03-12","reason":true,"vars":[{"e":"default","label":"Reka Flash 3","v":{"py":26.7,"term":0.0,"gpqa":52.9,"hle":4.4,"ifb":30.4,"tau2":0.0,"lctx":0.0,"phys":0.0,"know":13.7,"hon":8.7},"pct":{},"ts":1786060819020}]},{"id":"google/gemma-3-27b-it","name":"Gemma 3 27B","author":"Google","inp":0.08,"out":0.45,"cache":0.04,"ctx":131072,"date":"2025-03-12","reason":false,"vars":[{"e":"default","label":"Gemma 3 27B Instruct","v":{"intel":7.4,"code":10.1,"agent":0.3,"py":21.2,"term":3.8,"gpqa":42.8,"hle":4.4,"ifb":31.8,"tau2":10.5,"lctx":6.3,"econ":0.0,"phys":0.0,"know":13.0,"hon":7.9},"pct":{"inte":1,"codi":6,"agen":0},"ts":1786060819020}]},{"id":"perplexity/sonar-pro","name":"Sonar Pro","author":"Perplexity","inp":3.0,"out":15.0,"cache":null,"ctx":200000,"date":"2025-03-07","reason":false,"vars":[{"e":"default","label":"Sonar Pro","v":{"py":22.6,"gpqa":57.8,"hle":6.6},"pct":{},"ts":1786060819020}]},{"id":"mistralai/mistral-saba","name":"Saba","author":"Mistral AI","inp":0.2,"out":0.6,"cache":0.02,"ctx":32768,"date":"2025-02-17","reason":false,"vars":[{"e":"default","label":"Mistral Saba","v":{"py":24.1,"gpqa":42.4,"hle":4.3},"pct":{},"ts":1786060819020}]},{"id":"openai/o3-mini-high","name":"o3 Mini High","author":"OpenAI","inp":1.1,"out":4.4,"cache":0.55,"ctx":200000,"date":"2025-02-12","reason":true,"vars":[{"e":"high","label":"o3-mini (high)","v":{"intel":15.7,"code":16.3,"agent":1.7,"py":39.8,"term":6.1,"gpqa":77.3,"hle":12.0,"ifb":67.1,"tau2":31.3,"lctx":42.0,"econ":0.0,"phys":0.3,"know":21.3,"hon":18.9},"pct":{"inte":15,"codi":16,"agen":8},"ts":1786060819020}]},{"id":"openai/o3-mini","name":"o3 Mini","author":"OpenAI","inp":1.1,"out":4.4,"cache":0.55,"ctx":200000,"date":"2025-01-31","reason":true,"vars":[{"e":"default","label":"o3-mini","v":{"py":39.9,"term":6.8,"gpqa":74.8,"hle":7.9,"tau2":28.7},"pct":{},"ts":1786060819020}]},{"id":"mistralai/mistral-small-24b-instruct-2501","name":"Mistral Small 3","author":"Mistral AI","inp":0.05,"out":0.08,"cache":null,"ctx":32768,"date":"2025-01-30","reason":false,"vars":[{"e":"default","label":"Mistral Small 3","v":{"py":23.6,"gpqa":46.2,"hle":3.8,"ifb":26.4,"tau2":19.6,"lctx":0.0},"pct":{},"ts":1786060819020}]},{"id":"perplexity/sonar","name":"Sonar","author":"Perplexity","inp":1.0,"out":1.0,"cache":null,"ctx":127072,"date":"2025-01-27","reason":false,"vars":[{"e":"default","label":"Sonar","v":{"py":22.9,"gpqa":47.1,"hle":4.9},"pct":{},"ts":1786060819020}]},{"id":"deepseek/deepseek-r1-distill-llama-70b","name":"R1 Distill Llama 70B","author":"DeepSeek","inp":0.8,"out":0.8,"cache":null,"ctx":8192,"date":"2025-01-23","reason":true,"vars":[{"e":"default","label":"DeepSeek R1 Distill Llama 70B","v":{"py":31.3,"term":1.5,"gpqa":40.2,"hle":5.1,"ifb":27.6,"tau2":21.9,"lctx":9.3,"phys":0.0,"know":19.2,"hon":18.9},"pct":{},"ts":1786060819020}]},{"id":"deepseek/deepseek-r1","name":"R1","author":"DeepSeek","inp":0.7,"out":2.5,"cache":null,"ctx":64000,"date":"2025-01-20","reason":true,"vars":[{"e":"jan '25","label":"DeepSeek R1 (Jan '25)","v":{"intel":18.6,"code":24.6,"agent":3.1,"py":35.7,"term":6.1,"gpqa":70.8,"hle":8.5,"ifb":39.0,"tau2":11.4,"lctx":56.0,"econ":1.6,"phys":0.6,"know":30.5,"hon":9.7},"pct":{"inte":17,"codi":26,"agen":15},"ts":1787788832040}]},{"id":"microsoft/phi-4","name":"Phi 4","author":"Microsoft","inp":0.07,"out":0.14,"cache":null,"ctx":16384,"date":"2025-01-10","reason":false,"vars":[{"e":"default","label":"Phi-4","v":{"py":26.0,"term":3.8,"gpqa":57.5,"hle":3.8,"ifb":23.5,"tau2":0.0,"lctx":0.0,"phys":0.0,"know":14.1,"hon":18.8},"pct":{},"ts":1786060819020}]},{"id":"openai/o1","name":"o1","author":"OpenAI","inp":15.0,"out":60.0,"cache":7.5,"ctx":200000,"date":"2024-12-17","reason":true,"vars":[{"e":"default","label":"o1","v":{"code":39.7,"py":35.8,"term":12.9,"gpqa":74.7,"hle":7.0,"ifb":70.3,"tau2":62.6,"lctx":63.3,"phys":0.3,"know":34.5,"hon":30.4},"pct":{"codi":43},"ts":1786060819020},{"e":"default","label":"o1-preview","v":{"code":34.0,"gpqa":76.5},"pct":{"codi":36},"ts":1786622420356}]},{"id":"meta-llama/llama-3.3-70b-instruct","name":"Llama 3.3 70B Instruct","author":"Meta Llama","inp":0.1,"out":0.32,"cache":null,"ctx":131072,"date":"2024-12-06","reason":false,"vars":[{"e":"default","label":"Llama 3.3 Instruct 70B","v":{"code":11.9,"py":26.0,"term":3.0,"gpqa":49.8,"hle":3.6,"ifb":47.1,"tau2":26.6,"lctx":15.7,"econ":0.0,"phys":0.0,"know":19.0,"hon":9.8},"pct":{"codi":8},"ts":1786449655531}]},{"id":"amazon/nova-lite-v1","name":"Nova Lite 1.0","author":"Amazon","inp":0.06,"out":0.24,"cache":null,"ctx":300000,"date":"2024-12-05","reason":false,"vars":[{"e":"default","label":"Nova Lite","v":{"py":13.9,"term":0.8,"gpqa":43.3,"hle":4.3,"ifb":34.1,"tau2":17.5,"lctx":19.0,"phys":0.0,"know":9.8,"hon":42.4},"pct":{},"ts":1786060819020}]},{"id":"amazon/nova-micro-v1","name":"Nova Micro 1.0","author":"Amazon","inp":0.035,"out":0.14,"cache":null,"ctx":128000,"date":"2024-12-05","reason":false,"vars":[{"e":"default","label":"Nova Micro","v":{"py":9.4,"term":1.5,"gpqa":35.8,"hle":4.6,"ifb":29.4,"tau2":14.0,"lctx":10.7,"phys":0.0,"know":10.0,"hon":34.9},"pct":{},"ts":1786060819020}]},{"id":"amazon/nova-pro-v1","name":"Nova Pro 1.0","author":"Amazon","inp":0.8,"out":3.2,"cache":null,"ctx":300000,"date":"2024-12-05","reason":false,"vars":[{"e":"default","label":"Nova Pro","v":{"py":20.8,"term":6.1,"gpqa":49.9,"hle":3.2,"ifb":38.1,"tau2":14.0,"lctx":22.3,"phys":0.0,"know":16.9,"hon":22.3},"pct":{},"ts":1786060819020}]},{"id":"openai/gpt-4o-2024-11-20","name":"GPT-4o (2024-11-20)","author":"OpenAI","inp":2.5,"out":10.0,"cache":1.25,"ctx":128000,"date":"2024-11-20","reason":false,"vars":[{"e":"nov '24","label":"GPT-4o (Nov '24)","v":{"py":33.3,"term":8.3,"gpqa":54.3,"hle":2.4,"ifb":34.3,"tau2":25.1,"lctx":0.0,"phys":0.0,"know":19.9,"hon":62.1},"pct":{},"ts":1786060819020}]},{"id":"mistralai/mistral-large-2407","name":"Mistral Large 2407","author":"Mistral AI","inp":2.0,"out":6.0,"cache":0.2,"ctx":131072,"date":"2024-11-19","reason":false,"vars":[{"e":"nov '24","label":"Mistral Large 2 (Nov '24)","v":{"py":29.2,"term":6.1,"gpqa":48.6,"hle":3.3,"ifb":31.2,"tau2":30.7,"lctx":5.3,"phys":0.0,"know":19.9,"hon":32.3},"pct":{},"ts":1786060819020},{"e":"jul '24","label":"Mistral Large 2 (Jul '24)","v":{"py":27.1,"gpqa":47.2,"hle":2.9,"ifb":31.6,"tau2":33.0,"lctx":1.7},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen-2.5-coder-32b-instruct","name":"Qwen2.5 Coder 32B Instruct","author":"Qwen","inp":0.66,"out":1.0,"cache":null,"ctx":32768,"date":"2024-11-12","reason":false,"vars":[{"e":"default","label":"Qwen2.5 Coder Instruct 32B","v":{"py":27.1,"gpqa":41.7,"hle":3.5},"pct":{},"ts":1786060819020}]},{"id":"meta-llama/llama-3.2-1b-instruct","name":"Llama 3.2 1B Instruct","author":"Meta Llama","inp":0.027,"out":0.201,"cache":null,"ctx":60000,"date":"2024-09-25","reason":false,"vars":[{"e":"default","label":"Llama 3.2 Instruct 1B","v":{"py":1.7,"term":0.0,"gpqa":19.6,"hle":5.5,"ifb":22.8,"tau2":0.0,"lctx":6.0,"phys":0.0,"know":7.0,"hon":33.7},"pct":{},"ts":1786060819020}]},{"id":"meta-llama/llama-3.2-3b-instruct","name":"Llama 3.2 3B Instruct","author":"Meta Llama","inp":0.05,"out":0.33,"cache":null,"ctx":131072,"date":"2024-09-25","reason":false,"vars":[{"e":"default","label":"Llama 3.2 Instruct 3B","v":{"py":5.2,"gpqa":25.5,"hle":5.3,"ifb":26.2,"tau2":21.1,"lctx":2.7},"pct":{},"ts":1786060819020}]},{"id":"qwen/qwen-2.5-72b-instruct","name":"Qwen2.5 72B Instruct","author":"Qwen","inp":0.36,"out":0.4,"cache":null,"ctx":32768,"date":"2024-09-19","reason":false,"vars":[{"e":"default","label":"Qwen2.5 Instruct 72B","v":{"py":26.7,"term":4.5,"gpqa":49.1,"hle":3.6,"ifb":36.9,"tau2":34.5,"lctx":20.0,"phys":0.0,"know":17.5,"hon":14.5},"pct":{},"ts":1786060819020}]},{"id":"nousresearch/hermes-3-llama-3.1-70b","name":"Hermes 3 70B Instruct","author":"Nous Research","inp":0.7,"out":0.7,"cache":null,"ctx":131072,"date":"2024-08-18","reason":false,"vars":[{"e":"off","label":"Hermes 4 - Llama-3.1 70B (Non-reasoning)","v":{"py":27.7,"term":0.0,"gpqa":49.1,"hle":3.6,"ifb":29.0,"tau2":21.6,"lctx":3.0,"phys":0.0,"know":18.7,"hon":17.3},"pct":{},"ts":1786060819020},{"e":"default","label":"Hermes 3 - Llama-3.1 70B","v":{"py":23.1,"gpqa":40.1,"hle":4.0},"pct":{},"ts":1786060819020}]},{"id":"nousresearch/hermes-3-llama-3.1-405b","name":"Hermes 3 405B Instruct","author":"Nous Research","inp":1.0,"out":1.0,"cache":null,"ctx":131072,"date":"2024-08-16","reason":false,"vars":[{"e":"off","label":"Hermes 4 - Llama-3.1 405B (Non-reasoning)","v":{"py":34.6,"term":9.8,"gpqa":53.6,"hle":4.2,"ifb":34.8,"tau2":26.6,"lctx":21.0,"phys":0.0,"know":26.1,"hon":19.8},"pct":{},"ts":1786060819020}]},{"id":"openai/gpt-4o-2024-08-06","name":"GPT-4o (2024-08-06)","author":"OpenAI","inp":2.5,"out":10.0,"cache":1.25,"ctx":128000,"date":"2024-08-06","reason":false,"vars":[{"e":"aug '24","label":"GPT-4o (Aug '24)","v":{"py":33.1,"term":8.3,"gpqa":52.1,"hle":2.3,"ifb":36.0,"tau2":28.9,"lctx":39.3,"phys":0.0,"know":23.7,"hon":41.6},"pct":{},"ts":1786060819020}]},{"id":"meta-llama/llama-3.1-70b-instruct","name":"Llama 3.1 70B Instruct","author":"Meta Llama","inp":0.4,"out":0.4,"cache":null,"ctx":131072,"date":"2024-07-23","reason":false,"vars":[{"e":"default","label":"Llama 3.1 Instruct 70B","v":{"py":26.7,"term":3.0,"gpqa":40.9,"hle":4.5,"ifb":34.4,"tau2":15.2,"lctx":8.0,"phys":0.0,"know":19.7,"hon":21.8},"pct":{},"ts":1786060819020}]},{"id":"meta-llama/llama-3.1-8b-instruct","name":"Llama 3.1 8B Instruct","author":"Meta Llama","inp":0.05,"out":0.08,"cache":0.025,"ctx":131072,"date":"2024-07-23","reason":false,"vars":[{"e":"default","label":"Llama 3.1 Instruct 8B","v":{"code":5.4,"py":13.2,"term":0.8,"gpqa":25.9,"hle":5.3,"ifb":28.6,"tau2":16.4,"lctx":18.0,"econ":0.0,"phys":0.0,"know":8.5,"hon":57.0},"pct":{"codi":2},"ts":1786449655531}]},{"id":"openai/gpt-4o-mini","name":"GPT-4o-mini","author":"OpenAI","inp":0.15,"out":0.6,"cache":0.075,"ctx":128000,"date":"2024-07-18","reason":false,"vars":[{"e":"default","label":"GPT-4o mini","v":{"code":11.4,"agent":1.0,"py":22.9,"gpqa":42.6,"hle":4.2,"ifb":31.0,"econ":0.0},"pct":{"codi":8,"agen":1},"ts":1786060819020}]},{"id":"openai/gpt-4o-2024-05-13","name":"GPT-4o (2024-05-13)","author":"OpenAI","inp":5.0,"out":15.0,"cache":null,"ctx":128000,"date":"2024-05-13","reason":false,"vars":[{"e":"may '24","label":"GPT-4o (May '24)","v":{"code":24.2,"py":30.9,"gpqa":52.6,"hle":1.8},"pct":{"codi":26},"ts":1786060819020}]},{"id":"mistralai/mixtral-8x22b-instruct","name":"Mixtral 8x22B Instruct","author":"Mistral AI","inp":2.0,"out":6.0,"cache":0.2,"ctx":65536,"date":"2024-04-17","reason":false,"vars":[{"e":"default","label":"Mixtral 8x22B Instruct","v":{"py":18.8,"gpqa":33.2,"hle":4.0},"pct":{},"ts":1786060819020}]},{"id":"openai/gpt-4-turbo","name":"GPT-4 Turbo","author":"OpenAI","inp":10.0,"out":30.0,"cache":null,"ctx":128000,"date":"2024-04-09","reason":false,"vars":[{"e":"default","label":"GPT-4 Turbo","v":{"code":21.5,"py":31.9,"hle":3.1},"pct":{"codi":22},"ts":1786060819020}]},{"id":"anthropic/claude-3-haiku","name":"Claude 3 Haiku","author":"Anthropic","inp":0.25,"out":1.25,"cache":0.03,"ctx":200000,"date":"2024-03-13","reason":false,"vars":[{"e":"default","label":"Claude 3 Haiku","v":{"py":18.6,"term":0.8,"gpqa":37.4,"hle":4.1,"ifb":36.1,"tau2":21.1,"lctx":25.0,"phys":0.0,"know":17.6,"hon":19.5},"pct":{},"ts":1786060819020}]},{"id":"mistralai/mistral-large","name":"Mistral Large","author":"Mistral AI","inp":2.0,"out":6.0,"cache":0.2,"ctx":128000,"date":"2024-02-26","reason":false,"vars":[{"e":"feb '24","label":"Mistral Large (Feb '24)","v":{"py":20.8,"gpqa":35.1,"hle":3.5},"pct":{},"ts":1786060819020}]},{"id":"openai/gpt-3.5-turbo","name":"GPT-3.5 Turbo","author":"OpenAI","inp":0.5,"out":1.5,"cache":null,"ctx":16385,"date":"2023-05-28","reason":false,"vars":[{"e":"default","label":"GPT-3.5 Turbo","v":{"code":10.7,"gpqa":29.7},"pct":{"codi":6},"ts":1773187233358}]},{"id":"openai/gpt-4","name":"GPT-4","author":"OpenAI","inp":30.0,"out":60.0,"cache":null,"ctx":8191,"date":"2023-05-28","reason":false,"vars":[{"e":"default","label":"GPT-4","v":{"code":13.1,"gpqa":34.9,"ifb":33.2,"econ":0.0,"know":21.0,"hon":30.6},"pct":{"codi":10},"ts":1786449655531}]}],"unscored":[{"id":"meta/muse-spark-1.3-contributor","name":"Muse Spark 1.3 Contributor","author":"Meta","inp":0.1,"out":0.2,"cache":0.002,"ctx":1048576,"date":"2026-09-02"},{"id":"meta/muse-spark-1.3","name":"Muse Spark 1.3","author":"Meta","inp":1.25,"out":4.25,"cache":0.15,"ctx":1048576,"date":"2026-09-02"},{"id":"inception/mercury-2.5-preview","name":"Mercury 2.5 Preview","author":"inception","inp":0.04,"out":0.15,"cache":0.004,"ctx":260000,"date":"2026-08-31"},{"id":"tencent/hy4-preview","name":"Hy4 preview","author":"tencent","inp":0.834,"out":2.501,"cache":0.042,"ctx":1048576,"date":"2026-08-28"},{"id":"inclusionai/ling-3.0-flash-fin:free","name":"Ling 3.0 Flash Fin (free)","author":"inclusionai","inp":0.0,"out":0.0,"cache":null,"ctx":262144,"date":"2026-08-27"},{"id":"qwen/qwen3.8-flash","name":"Qwen3.8 Flash","author":"Qwen","inp":0.15,"out":0.47,"cache":0.016,"ctx":1000000,"date":"2026-08-26"},{"id":"meta/muse-spark-1.2-contributor","name":"Muse Spark 1.2 Contributor","author":"Meta","inp":0.1,"out":0.2,"cache":0.002,"ctx":1048576,"date":"2026-08-21"},{"id":"deepseek/deepseek-v4-flash-vision-exp","name":"DeepSeek V4 Flash Vision Exp","author":"DeepSeek","inp":0.22,"out":0.66,"cache":0.007,"ctx":1048576,"date":"2026-08-21"},{"id":"tencent/hy-mt2-1.8b","name":"Hy-MT2-1.8B","author":"tencent","inp":0.044,"out":0.177,"cache":null,"ctx":8192,"date":"2026-08-20"},{"id":"tencent/hy-mt2-30b-a3b","name":"Hy-MT2-30B-A3B","author":"tencent","inp":0.074,"out":0.295,"cache":null,"ctx":8192,"date":"2026-08-20"},{"id":"tencent/hy-mt2-7b","name":"Hy-MT2-7B","author":"tencent","inp":0.074,"out":0.295,"cache":null,"ctx":8192,"date":"2026-08-19"},{"id":"dots-studio/dots-3-note-preview:free","name":"Dots3-Note Preview (free)","author":"Dots Studio","inp":0.0,"out":0.0,"cache":null,"ctx":512000,"date":"2026-08-14"},{"id":"bytedance-seed/seed-2-1-turbo","name":"Seed 2.1 Turbo","author":"bytedance-seed","inp":0.5,"out":2.5,"cache":null,"ctx":262144,"date":"2026-08-12"},{"id":"bytedance-seed/seed-2.0-code","name":"Seed-2.0-Code","author":"bytedance-seed","inp":0.5,"out":3.0,"cache":null,"ctx":262144,"date":"2026-08-12"},{"id":"liquid/lfm-2.5-2.6b:free","name":"LFM2.5-2.6B (free)","author":"Liquid","inp":0.0,"out":0.0,"cache":null,"ctx":65536,"date":"2026-08-11"},{"id":"sakana/sakana-namazu","name":"Sakana Namazu","author":"sakana","inp":0.95,"out":4.0,"cache":0.15,"ctx":262144,"date":"2026-08-11"},{"id":"meta/muse-glimmer-30b","name":"Muse Glimmer 30B","author":"Meta","inp":0.3,"out":1.1,"cache":0.04,"ctx":131072,"date":"2026-08-09"},{"id":"qwen/qwen3.7-flash","name":"Qwen3.7 Flash","author":"Qwen","inp":0.03,"out":0.13,"cache":0.006,"ctx":1000000,"date":"2026-07-28"},{"id":"poolside/laguna-s-2.1","name":"Laguna S 2.1","author":"poolside","inp":0.09,"out":0.18,"cache":0.009,"ctx":1048576,"date":"2026-07-21"},{"id":"openrouter/auto-beta","name":"Auto Router (Beta)","author":"OpenRouter","inp":-1000000.0,"out":-1000000.0,"cache":null,"ctx":2000000,"date":"2026-07-17"},{"id":"kwaipilot/kat-coder-pro-v2.5","name":"KAT-Coder-Pro V2.5","author":"kwaipilot","inp":0.74,"out":2.96,"cache":0.15,"ctx":262144,"date":"2026-07-10"},{"id":"openai/gpt-5.6-luna-pro","name":"GPT-5.6 Luna Pro","author":"OpenAI","inp":0.2,"out":1.2,"cache":0.02,"ctx":1050000,"date":"2026-07-09"},{"id":"openai/gpt-5.6-terra-pro","name":"GPT-5.6 Terra Pro","author":"OpenAI","inp":2.0,"out":12.0,"cache":0.2,"ctx":1050000,"date":"2026-07-09"},{"id":"openai/gpt-5.6-sol-pro","name":"GPT-5.6 Sol Pro","author":"OpenAI","inp":2.0,"out":10.0,"cache":0.2,"ctx":1050000,"date":"2026-07-09"},{"id":"aion-labs/aion-3.0-mini","name":"Aion-3.0-Mini","author":"Aion Labs","inp":0.7,"out":1.4,"cache":0.18,"ctx":131072,"date":"2026-07-07"},{"id":"aion-labs/aion-3.0","name":"Aion-3.0","author":"Aion Labs","inp":3.0,"out":6.0,"cache":0.75,"ctx":131072,"date":"2026-07-07"},{"id":"tencent/hy3","name":"Hy3","author":"tencent","inp":0.132,"out":0.528,"cache":0.033,"ctx":262144,"date":"2026-07-06"},{"id":"poolside/laguna-xs-2.1","name":"Laguna XS 2.1","author":"poolside","inp":0.06,"out":0.12,"cache":0.03,"ctx":262144,"date":"2026-07-02"},{"id":"google/gemini-3.1-flash-lite-image","name":"Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)","author":"Google","inp":0.25,"out":1.5,"cache":null,"ctx":65536,"date":"2026-06-30"},{"id":"nex-agi/nex-n2-mini","name":"Nex-N2-Mini","author":"nex-agi","inp":0.025,"out":0.1,"cache":0.0025,"ctx":262144,"date":"2026-06-24"},{"id":"sakana/fugu-ultra","name":"Fugu Ultra","author":"sakana","inp":5.0,"out":30.0,"cache":0.5,"ctx":1000000,"date":"2026-06-24"},{"id":"google/gemini-3.1-flash-image","name":"Nano Banana 2 (Gemini 3.1 Flash Image)","author":"Google","inp":0.5,"out":3.0,"cache":null,"ctx":131072,"date":"2026-06-18"},{"id":"google/gemini-3-pro-image","name":"Nano Banana Pro (Gemini 3 Pro Image)","author":"Google","inp":2.0,"out":12.0,"cache":0.2,"ctx":131072,"date":"2026-06-18"},{"id":"openrouter/fusion","name":"Fusion","author":"OpenRouter","inp":-1000000.0,"out":-1000000.0,"cache":null,"ctx":1000000,"date":"2026-06-13"},{"id":"nvidia/nemotron-3.5-content-safety:free","name":"Nemotron 3.5 Content Safety (free)","author":"Nvidia","inp":0.0,"out":0.0,"cache":null,"ctx":128000,"date":"2026-06-04"},{"id":"perceptron/perceptron-mk1","name":"Perceptron Mk1","author":"perceptron","inp":0.15,"out":1.5,"cache":null,"ctx":32768,"date":"2026-05-12"},{"id":"google/gemini-3.1-flash-lite","name":"Gemini 3.1 Flash Lite","author":"Google","inp":0.25,"out":1.5,"cache":0.025,"ctx":1048576,"date":"2026-05-07"},{"id":"openai/gpt-chat-latest","name":"GPT Chat Latest","author":"OpenAI","inp":5.0,"out":30.0,"cache":0.5,"ctx":400000,"date":"2026-05-05"},{"id":"qwen/qwen3.5-plus-20260420","name":"Qwen3.5 Plus 2026-04-20","author":"Qwen","inp":0.3,"out":1.8,"cache":null,"ctx":1000000,"date":"2026-04-27"},{"id":"qwen/qwen3.6-flash","name":"Qwen3.6 Flash","author":"Qwen","inp":0.1875,"out":1.125,"cache":null,"ctx":1000000,"date":"2026-04-27"},{"id":"openai/gpt-5.4-image-2","name":"GPT-5.4 Image 2","author":"OpenAI","inp":8.0,"out":15.0,"cache":2.0,"ctx":272000,"date":"2026-04-21"},{"id":"openrouter/pareto-code","name":"Pareto Code Router","author":"OpenRouter","inp":-1000000.0,"out":-1000000.0,"cache":null,"ctx":2000000,"date":"2026-04-21"},{"id":"x-ai/grok-4.20-multi-agent","name":"Grok 4.20 Multi-Agent","author":"SpaceXAI","inp":1.25,"out":2.5,"cache":0.2,"ctx":2000000,"date":"2026-03-31"},{"id":"google/lyria-3-pro-preview","name":"Lyria 3 Pro Preview","author":"Google","inp":0.0,"out":0.0,"cache":null,"ctx":1048576,"date":"2026-03-30"},{"id":"google/lyria-3-clip-preview","name":"Lyria 3 Clip Preview","author":"Google","inp":0.0,"out":0.0,"cache":null,"ctx":1048576,"date":"2026-03-30"},{"id":"rekaai/reka-edge","name":"Reka Edge","author":"rekaai","inp":0.1,"out":0.1,"cache":null,"ctx":16384,"date":"2026-03-20"},{"id":"bytedance-seed/seed-2.0-lite","name":"Seed-2.0-Lite","author":"bytedance-seed","inp":0.25,"out":2.0,"cache":null,"ctx":262144,"date":"2026-03-10"},{"id":"bytedance-seed/seed-2.0-mini","name":"Seed-2.0-Mini","author":"bytedance-seed","inp":0.1,"out":0.4,"cache":null,"ctx":262144,"date":"2026-02-26"},{"id":"google/gemini-3.1-flash-image-preview","name":"Nano Banana 2 (Gemini 3.1 Flash Image Preview)","author":"Google","inp":0.5,"out":3.0,"cache":null,"ctx":65536,"date":"2026-02-26"},{"id":"qwen/qwen3.5-flash-02-23","name":"Qwen3.5-Flash","author":"Qwen","inp":0.065,"out":0.26,"cache":null,"ctx":1000000,"date":"2026-02-25"},{"id":"google/gemini-3.1-pro-preview-customtools","name":"Gemini 3.1 Pro Preview Custom Tools","author":"Google","inp":2.0,"out":12.0,"cache":0.2,"ctx":1048576,"date":"2026-02-25"},{"id":"aion-labs/aion-2.0","name":"Aion-2.0","author":"Aion Labs","inp":0.8,"out":1.6,"cache":0.2,"ctx":131072,"date":"2026-02-23"},{"id":"qwen/qwen3.5-plus-02-15","name":"Qwen3.5 Plus 2026-02-15","author":"Qwen","inp":0.26,"out":1.56,"cache":null,"ctx":1000000,"date":"2026-02-16"},{"id":"openrouter/free","name":"Free Models Router","author":"OpenRouter","inp":0.0,"out":0.0,"cache":null,"ctx":200000,"date":"2026-02-01"},{"id":"minimax/minimax-m2-her","name":"MiniMax M2-her","author":"MiniMax","inp":0.3,"out":1.2,"cache":0.03,"ctx":65536,"date":"2026-01-23"},{"id":"writer/palmyra-x5","name":"Palmyra X5","author":"Writer","inp":0.6,"out":6.0,"cache":null,"ctx":1040000,"date":"2026-01-21"},{"id":"openai/gpt-audio","name":"GPT Audio","author":"OpenAI","inp":2.5,"out":10.0,"cache":null,"ctx":128000,"date":"2026-01-19"},{"id":"openai/gpt-audio-mini","name":"GPT Audio Mini","author":"OpenAI","inp":0.6,"out":2.4,"cache":null,"ctx":128000,"date":"2026-01-19"},{"id":"bytedance-seed/seed-1.6-flash","name":"Seed 1.6 Flash","author":"bytedance-seed","inp":0.075,"out":0.3,"cache":null,"ctx":262144,"date":"2025-12-23"},{"id":"bytedance-seed/seed-1.6","name":"Seed 1.6","author":"bytedance-seed","inp":0.25,"out":2.0,"cache":null,"ctx":262144,"date":"2025-12-23"},{"id":"openai/gpt-5.2-chat","name":"GPT-5.2 Chat","author":"OpenAI","inp":1.75,"out":14.0,"cache":0.175,"ctx":128000,"date":"2025-12-10"},{"id":"openai/gpt-5.2-pro","name":"GPT-5.2 Pro","author":"OpenAI","inp":21.0,"out":168.0,"cache":null,"ctx":400000,"date":"2025-12-10"},{"id":"relace/relace-search","name":"Relace Search","author":"relace","inp":1.0,"out":3.0,"cache":null,"ctx":256000,"date":"2025-12-08"},{"id":"openrouter/bodybuilder","name":"Body Builder (beta)","author":"OpenRouter","inp":-1000000.0,"out":-1000000.0,"cache":null,"ctx":128000,"date":"2025-12-05"},{"id":"openai/gpt-5.1-codex-max","name":"GPT-5.1-Codex-Max","author":"OpenAI","inp":1.25,"out":10.0,"cache":0.125,"ctx":400000,"date":"2025-12-04"},{"id":"google/gemini-3-pro-image-preview","name":"Nano Banana Pro (Gemini 3 Pro Image Preview)","author":"Google","inp":2.0,"out":12.0,"cache":0.2,"ctx":65536,"date":"2025-11-20"},{"id":"perplexity/sonar-pro-search","name":"Sonar Pro Search","author":"Perplexity","inp":3.0,"out":15.0,"cache":null,"ctx":200000,"date":"2025-10-30"},{"id":"mistralai/voxtral-small-24b-2507","name":"Voxtral Small 24B 2507","author":"Mistral AI","inp":0.1,"out":0.3,"cache":0.01,"ctx":32768,"date":"2025-10-30"},{"id":"openai/gpt-oss-safeguard-20b","name":"gpt-oss-safeguard-20b","author":"OpenAI","inp":0.075,"out":0.3,"cache":0.0375,"ctx":131072,"date":"2025-10-29"},{"id":"openai/gpt-5-image-mini","name":"GPT-5 Image Mini","author":"OpenAI","inp":2.5,"out":2.0,"cache":0.25,"ctx":400000,"date":"2025-10-16"},{"id":"openai/gpt-5-image","name":"GPT-5 Image","author":"OpenAI","inp":10.0,"out":10.0,"cache":1.25,"ctx":400000,"date":"2025-10-14"},{"id":"google/gemini-2.5-flash-image","name":"Nano Banana (Gemini 2.5 Flash Image)","author":"Google","inp":0.3,"out":2.5,"cache":0.03,"ctx":32768,"date":"2025-10-07"},{"id":"openai/gpt-5-pro","name":"GPT-5 Pro","author":"OpenAI","inp":15.0,"out":120.0,"cache":null,"ctx":400000,"date":"2025-10-06"},{"id":"thedrummer/cydonia-24b-v4.1","name":"Cydonia 24B V4.1","author":"Drummer","inp":0.3,"out":0.5,"cache":0.15,"ctx":131072,"date":"2025-09-27"},{"id":"relace/relace-apply-3","name":"Relace Apply 3","author":"relace","inp":0.85,"out":1.25,"cache":null,"ctx":256000,"date":"2025-09-26"},{"id":"qwen/qwen3-coder-plus","name":"Qwen3 Coder Plus","author":"Qwen","inp":0.65,"out":3.25,"cache":0.13,"ctx":1000000,"date":"2025-09-23"},{"id":"qwen/qwen3-coder-flash","name":"Qwen3 Coder Flash","author":"Qwen","inp":0.195,"out":0.975,"cache":0.039,"ctx":1000000,"date":"2025-09-17"},{"id":"qwen/qwen-plus-2025-07-28","name":"Qwen Plus 0728","author":"Qwen","inp":0.26,"out":0.78,"cache":null,"ctx":1000000,"date":"2025-09-08"},{"id":"mistralai/codestral-2508","name":"Codestral 2508","author":"Mistral AI","inp":0.3,"out":0.9,"cache":0.03,"ctx":256000,"date":"2025-08-01"},{"id":"bytedance/ui-tars-1.5-7b","name":"UI-TARS 7B ","author":"bytedance","inp":0.1,"out":0.2,"cache":0.1,"ctx":128000,"date":"2025-07-22"},{"id":"cognitivecomputations/dolphin-mistral-24b-venice-edition","name":"Uncensored","author":"venice","inp":0.2,"out":0.9,"cache":null,"ctx":128000,"date":"2025-07-09"},{"id":"tencent/hunyuan-a13b-instruct","name":"Hunyuan A13B Instruct","author":"tencent","inp":0.14,"out":0.57,"cache":null,"ctx":131072,"date":"2025-07-08"},{"id":"morph/morph-v3-large","name":"Morph V3 Large","author":"morph","inp":0.9,"out":1.9,"cache":null,"ctx":262144,"date":"2025-07-07"},{"id":"morph/morph-v3-fast","name":"Morph V3 Fast","author":"morph","inp":0.8,"out":1.2,"cache":null,"ctx":81920,"date":"2025-07-07"},{"id":"baidu/ernie-4.5-vl-424b-a47b","name":"ERNIE 4.5 VL 424B A47B ","author":"baidu","inp":0.42,"out":1.25,"cache":null,"ctx":123000,"date":"2025-06-30"},{"id":"mistralai/mistral-small-3.2-24b-instruct","name":"Mistral Small 3.2 24B","author":"Mistral AI","inp":0.075,"out":0.2,"cache":null,"ctx":131072,"date":"2025-06-20"},{"id":"google/gemini-2.5-pro-preview","name":"Gemini 2.5 Pro Preview 06-05","author":"Google","inp":1.25,"out":10.0,"cache":0.125,"ctx":1048576,"date":"2025-06-05"},{"id":"google/gemini-2.5-pro-preview-05-06","name":"Gemini 2.5 Pro Preview 05-06","author":"Google","inp":1.25,"out":10.0,"cache":0.125,"ctx":1048576,"date":"2025-05-07"},{"id":"meta-llama/llama-guard-4-12b","name":"Llama Guard 4 12B","author":"Meta Llama","inp":0.18,"out":0.18,"cache":null,"ctx":163840,"date":"2025-04-30"},{"id":"openai/o4-mini-high","name":"o4 Mini High","author":"OpenAI","inp":1.1,"out":4.4,"cache":0.275,"ctx":200000,"date":"2025-04-16"},{"id":"openai/o1-pro","name":"o1-pro","author":"OpenAI","inp":150.0,"out":600.0,"cache":null,"ctx":200000,"date":"2025-03-19"},{"id":"mistralai/mistral-small-3.1-24b-instruct","name":"Mistral Small 3.1 24B","author":"Mistral AI","inp":0.351,"out":0.555,"cache":null,"ctx":128000,"date":"2025-03-17"},{"id":"thedrummer/skyfall-36b-v2","name":"Skyfall 36B V2","author":"Drummer","inp":0.55,"out":0.8,"cache":0.25,"ctx":32768,"date":"2025-03-10"},{"id":"perplexity/sonar-reasoning-pro","name":"Sonar Reasoning Pro","author":"Perplexity","inp":2.0,"out":8.0,"cache":null,"ctx":128000,"date":"2025-03-07"},{"id":"perplexity/sonar-deep-research","name":"Sonar Deep Research","author":"Perplexity","inp":2.0,"out":8.0,"cache":null,"ctx":128000,"date":"2025-03-07"},{"id":"aion-labs/aion-rp-llama-3.1-8b","name":"Aion-RP 1.0 (8B)","author":"Aion Labs","inp":0.8,"out":1.6,"cache":null,"ctx":32768,"date":"2025-02-04"},{"id":"qwen/qwen2.5-vl-72b-instruct","name":"Qwen2.5 VL 72B Instruct","author":"Qwen","inp":0.25,"out":0.75,"cache":null,"ctx":128000,"date":"2025-02-01"},{"id":"qwen/qwen-plus","name":"Qwen-Plus","author":"Qwen","inp":0.26,"out":0.78,"cache":0.052,"ctx":1000000,"date":"2025-02-01"},{"id":"minimax/minimax-01","name":"MiniMax-01","author":"MiniMax","inp":0.2,"out":1.1,"cache":null,"ctx":1000192,"date":"2025-01-15"},{"id":"deepseek/deepseek-chat","name":"DeepSeek V3","author":"deepseek-ai","inp":0.32,"out":0.89,"cache":null,"ctx":163840,"date":"2024-12-26"},{"id":"sao10k/l3.3-euryale-70b","name":"Llama 3.3 Euryale 70B","author":"Sao10K","inp":0.65,"out":0.75,"cache":null,"ctx":131072,"date":"2024-12-18"},{"id":"cohere/command-r7b-12-2024","name":"Command R7B (12-2024)","author":"Cohere","inp":0.0375,"out":0.15,"cache":null,"ctx":128000,"date":"2024-12-14"},{"id":"thedrummer/unslopnemo-12b","name":"UnslopNemo 12B","author":"Drummer","inp":0.4,"out":0.4,"cache":null,"ctx":1024000,"date":"2024-11-08"},{"id":"anthracite-org/magnum-v4-72b","name":"Magnum v4 72B","author":"anthracite-org","inp":2.5,"out":5.0,"cache":null,"ctx":32768,"date":"2024-10-22"},{"id":"qwen/qwen-2.5-7b-instruct","name":"Qwen2.5 7B Instruct","author":"Qwen","inp":0.1,"out":0.2,"cache":null,"ctx":32768,"date":"2024-10-16"},{"id":"cohere/command-r-08-2024","name":"Command R (08-2024)","author":"Cohere","inp":0.15,"out":0.6,"cache":null,"ctx":128000,"date":"2024-08-30"},{"id":"cohere/command-r-plus-08-2024","name":"Command R+ (08-2024)","author":"Cohere","inp":2.5,"out":10.0,"cache":null,"ctx":128000,"date":"2024-08-30"},{"id":"sao10k/l3.1-euryale-70b","name":"Llama 3.1 Euryale 70B v2.2","author":"Sao10K","inp":0.85,"out":0.85,"cache":null,"ctx":131072,"date":"2024-08-28"},{"id":"sao10k/l3-lunaris-8b","name":"Llama 3 8B Lunaris","author":"Sao10K","inp":0.04,"out":0.05,"cache":null,"ctx":8192,"date":"2024-08-13"},{"id":"mistralai/mistral-nemo","name":"Mistral Nemo","author":"Mistral AI","inp":0.019,"out":0.03,"cache":null,"ctx":131072,"date":"2024-07-19"},{"id":"openai/gpt-4o-mini-2024-07-18","name":"GPT-4o-mini (2024-07-18)","author":"OpenAI","inp":0.15,"out":0.6,"cache":0.075,"ctx":128000,"date":"2024-07-18"},{"id":"google/gemma-2-27b-it","name":"Gemma 2 27B","author":"Google","inp":0.65,"out":0.65,"cache":null,"ctx":8192,"date":"2024-07-13"},{"id":"openai/gpt-4o","name":"GPT-4o","author":"OpenAI","inp":2.5,"out":10.0,"cache":1.25,"ctx":128000,"date":"2024-05-13"},{"id":"microsoft/wizardlm-2-8x22b","name":"WizardLM-2 8x22B","author":"Microsoft","inp":0.62,"out":0.62,"cache":null,"ctx":65535,"date":"2024-04-16"},{"id":"openai/gpt-3.5-turbo-0613","name":"GPT-3.5 Turbo (older v0613)","author":"OpenAI","inp":1.0,"out":2.0,"cache":null,"ctx":4095,"date":"2024-01-25"},{"id":"openai/gpt-4-turbo-preview","name":"GPT-4 Turbo Preview","author":"OpenAI","inp":10.0,"out":30.0,"cache":null,"ctx":128000,"date":"2024-01-25"},{"id":"openrouter/auto","name":"Auto Router","author":"OpenRouter","inp":-1000000.0,"out":-1000000.0,"cache":null,"ctx":2000000,"date":"2023-11-08"},{"id":"openai/gpt-3.5-turbo-instruct","name":"GPT-3.5 Turbo Instruct","author":"OpenAI","inp":1.5,"out":2.0,"cache":null,"ctx":4095,"date":"2023-09-28"},{"id":"openai/gpt-3.5-turbo-16k","name":"GPT-3.5 Turbo 16k","author":"OpenAI","inp":3.0,"out":4.0,"cache":null,"ctx":16385,"date":"2023-08-28"},{"id":"mancer/weaver","name":"Weaver (alpha)","author":"Mancer","inp":0.4,"out":0.75,"cache":null,"ctx":8000,"date":"2023-08-02"},{"id":"undi95/remm-slerp-l2-13b","name":"ReMM SLERP 13B","author":"Undi","inp":0.45,"out":0.65,"cache":null,"ctx":6144,"date":"2023-07-22"},{"id":"gryphe/mythomax-l2-13b","name":"MythoMax 13B","author":"Gryphe","inp":0.06,"out":0.06,"cache":null,"ctx":8192,"date":"2023-07-02"}],"snapshot":"2026-09-03","prev":{"deepseek/deepseek-v4-pro":{"inp":0.435,"out":0.87,"intel":44.3},"z-ai/glm-5.2":{"inp":0.7504,"out":2.358,"intel":51.1},"anthropic/claude-sonnet-5":{"inp":2.0,"out":10.0,"intel":53.4},"minimax/minimax-m3":{"inp":0.24,"out":0.96,"intel":44.4},"x-ai/grok-4.5":{"inp":2.0,"out":6.0,"intel":53.8},"moonshotai/kimi-k2.5":{"inp":0.375,"out":2.025,"intel":35.4},"moonshotai/kimi-k3":{"inp":3.0,"out":15.0,"intel":57.1},"qwen/qwen3.6-plus":{"inp":0.325,"out":1.95,"intel":39.6},"qwen/qwen3.7-max":{"inp":1.475,"out":4.425,"intel":46.0},"qwen/qwen3.7-plus":{"inp":0.32,"out":1.28,"intel":39.0},"nvidia/nemotron-3-super-120b-a12b":{"inp":0.0,"out":0.0,"intel":25.4}}}/* DATA:END */;
+const MODELS_RAW = DATA.models, UNSCORED = DATA.unscored, SNAP = DATA.snapshot, PREV = DATA.prev;
+
 const BENCH = [
-  ["intel", "Intelligence"],
-  ["code",  "Kodowanie"],
-  ["agent", "Agentowość"],
-  ["py",    "Python"],
-  ["term",  "Terminal"],
-  ["gpqa",  "Nauka (GPQA)"],
-  ["hle",   "Humanity's Last Exam"],
-  ["ifb",   "Trzymanie instrukcji"],
-  ["tau2",  "Dialog dwustronny (τ²)"],
-  ["lctx",  "Długi kontekst"],
-  ["econ",  "Zadania ekonomiczne"],
-  ["phys",  "Fizyka badawcza"],
+  ["intel", "Intelligence Index", "złożony indeks AA — średnia po wszystkich ewaluacjach"],
+  ["code",  "Coding Index",       "złożony indeks kodowania AA"],
+  ["agent", "Agentic Index",      "złożony indeks agentowy AA"],
+  ["py",    "SciCode",            "kod naukowy w Pythonie"],
+  ["term",  "Terminal-Bench Hard","praca w powłoce, długie łańcuchy poleceń"],
+  ["gpqa",  "GPQA Diamond",       "pytania naukowe na poziomie doktoranckim"],
+  ["hle",   "Humanity's Last Exam","najtrudniejszy egzamin ogólnowiedzowy"],
+  ["ifb",   "IFBench",            "trzymanie się instrukcji"],
+  ["tau2",  "τ²-bench",           "agent w dialogu dwustronnym z użytkownikiem"],
+  ["lctx",  "Long-context (LCR)", "rozumowanie na długim kontekście"],
+  ["econ",  "GDPval",             "zadania o wartości ekonomicznej"],
+  ["phys",  "CritPt",             "fizyka na poziomie badawczym"],
+  ["know",  "Omniscience acc.",   "trafność wiedzy faktograficznej"],
+  ["hon",   "Non-hallucination",  "jak często przyznaje „nie wiem” zamiast zmyślać"],
 ];
+const BKEY = new Map(BENCH.map(([k, l, d]) => [k, { l, d }]));
 
-const MODELS = [
-  { id:"deepseek-v4-pro", name:"DeepSeek V4 Pro", inp:0.435, out:0.87,  ctx:"1M",   date:"2026-04-24", intel:44.3, code:59.4, agent:36.4, py:50.0, term:46.2, gpqa:88.8, hle:35.9, ifb:76.5, tau2:96.2, lctx:66.3, econ:40.3, phys:12.9 },
-  { id:"glm-5.2",         name:"GLM-5.2",         inp:0.7504,out:2.358, ctx:"1M",   date:"2026-06-16", intel:51.1, code:68.8, agent:43.1, py:50.5, term:50.8, gpqa:89.5, hle:40.1, ifb:73.3, tau2:99.1, lctx:71.3, econ:50.3, phys:20.9 },
-  { id:"claude-sonnet-5", name:"Claude Sonnet 5", inp:2.0,   out:10.0,  ctx:"1M",   date:"2026-06-30", intel:53.4, code:71.5, agent:46.7, py:53.6, term:null, gpqa:91.1, hle:39.6, ifb:null, tau2:null, lctx:70.7, econ:55.2, phys:16.9 },
-  { id:"minimax-m3",      name:"MiniMax M3",      inp:0.24,  out:0.96,  ctx:"1M",   date:"2026-05-31", intel:44.4, code:58.6, agent:35.4, py:45.4, term:42.4, gpqa:92.9, hle:37.1, ifb:82.9, tau2:88.9, lctx:74.0, econ:44.5, phys:3.7 },
-  { id:"grok-4.5",        name:"Grok 4.5",        inp:2.0,   out:6.0,   ctx:"500K", date:"2026-07-08", intel:53.8, code:72.4, agent:45.7, py:54.1, term:null, gpqa:93.1, hle:40.3, ifb:null, tau2:null, lctx:67.7, econ:51.4, phys:15.4 },
-  { id:"nemotron-3",      name:"Nemotron 3 Super", inp:0,    out:0,     ctx:"262K", date:"2026-03-11", intel:25.4, code:37.7, agent:8.7,  py:36.0, term:28.8, gpqa:80.0, hle:19.2, ifb:71.5, tau2:67.8, lctx:60.0, econ:9.9,  phys:3.1, free:true },
-  { id:"kimi-k2.5",       name:"Kimi K2.5",       inp:0.375, out:2.025, ctx:"262K", date:"2026-01-27", intel:35.4, code:46.8, agent:21.7, py:49.0, term:34.8, gpqa:87.9, hle:29.4, ifb:70.2, tau2:95.9, lctx:65.3, econ:25.1, phys:3.1 },
-  { id:"kimi-k3",         name:"Kimi K3",         inp:3.0,   out:15.0,  ctx:"1M",   date:"2026-07-16", intel:57.1, code:76.2, agent:50.1, py:58.7, term:null, gpqa:93.5, hle:44.3, ifb:null, tau2:null, lctx:74.7, econ:59.3, phys:23.4 },
-  { id:"qwen3.6-plus",    name:"Qwen 3.6 Plus",   inp:0.325, out:1.95,  ctx:"1M",   date:"2026-04-02", intel:39.6, code:54.5, agent:27.6, py:40.7, term:43.9, gpqa:88.2, hle:25.7, ifb:75.2, tau2:97.7, lctx:69.7, econ:31.9, phys:2.9 },
-  { id:"qwen3.7-max",     name:"Qwen 3.7 Max",    inp:1.475, out:4.425, ctx:"1M",   date:"2026-05-21", intel:46.0, code:66.0, agent:30.6, py:48.8, term:50.8, gpqa:92.3, hle:38.1, ifb:80.5, tau2:94.7, lctx:69.0, econ:38.6, phys:13.4 },
-  { id:"qwen3.7-plus",    name:"Qwen 3.7 Plus",   inp:0.32,  out:1.28,  ctx:"1M",   date:"2026-06-03", intel:39.0, code:55.9, agent:20.8, py:45.5, term:47.0, gpqa:90.0, hle:33.4, ifb:78.0, tau2:93.0, lctx:65.0, econ:22.1, phys:9.1 },
-];
-
-// Token mixes measured in telemetry.sqlite. A lead re-reads its own context every
-// turn, so cache-read (billed at 0.1x input) is 87% of its volume and the OUTPUT
-// price barely matters — the opposite of what intuition suggests.
+/* Token mixes measured in telemetry.sqlite. A lead re-reads its own context every
+   turn, so cache-read is 87% of its volume and the OUTPUT price barely matters —
+   the opposite of what intuition suggests. */
 const MIXES = [
   { id:"lead",       label:"lead (orkiestracja)", inp:0.11, out:0.013, cache:0.87 },
   { id:"generator",  label:"generator (pisze)",   inp:0.35, out:0.20,  cache:0.45 },
@@ -347,106 +478,202 @@ const MIXES = [
   { id:"mechanical", label:"mechaniczny",         inp:0.60, out:0.08,  cache:0.32 },
 ];
 
-// Models in the fleet that have no benchmark row — shown, never scored.
-const UNSCORED = { "deepseek-v4-flash": "DeepSeek V4 Flash", "kimi-k2.7-code": "Kimi K2.7 Code" };
-
 const ROLES = [
-  { id:"lead",     label:"Lead składu",          mix:0, now:"glm-5.2",         w:{agent:80, tau2:40, lctx:40, ifb:40} },
-  { id:"impl",     label:"Implementer",          mix:1, now:"glm-5.2",         w:{code:80, py:60, term:40, agent:20} },
-  { id:"refac",    label:"Refactorer",           mix:1, now:"kimi-k2.7-code",  w:{agent:70, term:50, code:50, lctx:30} },
-  { id:"debug",    label:"Debugger",             mix:1, now:"deepseek-v4-pro", w:{intel:70, code:60, hle:40, py:30} },
-  { id:"recon",    label:"Recon",                mix:2, now:"minimax-m3",      w:{lctx:100, intel:50, ifb:50} },
-  { id:"deep",     label:"Deep review",          mix:2, now:"glm-5.2",         w:{intel:70, code:60, hle:40, lctx:30} },
-  { id:"sec",      label:"Security review",      mix:2, now:"kimi-k2.7-code",  w:{code:70, term:50, intel:50, gpqa:30} },
-  { id:"first",    label:"First-pass review",    mix:2, now:"deepseek-v4-pro", w:{code:100, ifb:60, lctx:40} },
-  { id:"spec",     label:"Spec / ADR",           mix:1, now:"glm-5.2",         w:{econ:60, intel:60, lctx:40, hle:40} },
-  { id:"decomp",   label:"Decomposer / discovery", mix:1, now:"minimax-m3",    w:{ifb:80, econ:60, intel:60} },
-  { id:"deploy",   label:"Deployer / runner",    mix:3, now:"deepseek-v4-pro", w:{term:90, agent:70, ifb:40} },
-  { id:"worker",   label:"Worker / flash / push", mix:3, now:"deepseek-v4-flash", w:{ifb:100, intel:50, code:40} },
-  { id:"digest",   label:"Digest / retro",       mix:1, now:"deepseek-v4-pro", w:{lctx:70, econ:70, intel:60} },
+  { id:"lead",   label:"Lead składu",           mix:0, now:"z-ai/glm-5.2",              w:{agent:80, tau2:40, lctx:40, ifb:40} },
+  { id:"impl",   label:"Implementer",           mix:1, now:"z-ai/glm-5.2",              w:{code:80, py:60, term:40, agent:20} },
+  { id:"refac",  label:"Refactorer",            mix:1, now:"moonshotai/kimi-k2.7-code", w:{agent:70, term:50, code:50, lctx:30} },
+  { id:"debug",  label:"Debugger",              mix:1, now:"deepseek/deepseek-v4-pro",  w:{intel:70, code:60, hle:40, py:30} },
+  { id:"recon",  label:"Recon",                 mix:2, now:"minimax/minimax-m3",        w:{lctx:100, intel:50, ifb:50} },
+  { id:"deep",   label:"Deep review",           mix:2, now:"z-ai/glm-5.2",              w:{intel:70, code:60, hle:40, lctx:30} },
+  { id:"sec",    label:"Security review",       mix:2, now:"moonshotai/kimi-k2.7-code", w:{code:70, term:50, intel:50, gpqa:30} },
+  { id:"first",  label:"First-pass review",     mix:2, now:"deepseek/deepseek-v4-pro",  w:{code:100, ifb:60, lctx:40} },
+  { id:"spec",   label:"Spec / ADR",            mix:1, now:"z-ai/glm-5.2",              w:{econ:60, intel:60, lctx:40, hon:40} },
+  { id:"decomp", label:"Decomposer / discovery",mix:1, now:"minimax/minimax-m3",        w:{ifb:80, econ:60, intel:60} },
+  { id:"deploy", label:"Deployer / runner",     mix:3, now:"deepseek/deepseek-v4-pro",  w:{term:90, agent:70, ifb:40} },
+  { id:"worker", label:"Worker / flash / push", mix:3, now:"deepseek/deepseek-v4-flash",w:{ifb:100, intel:50, code:40} },
+  { id:"digest", label:"Digest / retro",        mix:1, now:"deepseek/deepseek-v4-pro",  w:{lctx:70, econ:70, know:40, hon:40} },
+  { id:"fact",   label:"Fakty / research",      mix:2, now:null,                        w:{hon:90, know:70, lctx:50, hle:40} },
 ];
+const FLEET = new Set(ROLES.map(r => r.now).filter(Boolean));
 
-// ── state ──
-let weights = {};
-let priceW = 40;
-let mixIdx = 0;
-let activeRole = null;
+const PRICE_STOPS  = [0.05, 0.1, 0.2, 0.5, 1, 2, 3, 5, 10, 20, null];
+const CTX_STOPS    = [0, 128e3, 200e3, 262e3, 500e3, 1e6];
+
+/* ── model shaping ────────────────────────────────────────────────────────
+   One OpenRouter model can carry several Artificial Analysis rows — the same
+   weights at a different reasoning effort. They are genuinely different
+   products: different scores, different token bills. The ranking uses the
+   strongest variant; the ladder exposes the rest. */
+const MODELS = MODELS_RAW.map(m => {
+  const best = m.vars.reduce((a, b) => rank(b) > rank(a) ? b : a, m.vars[0]);
+  const o = Object.assign({}, m, best.v, {
+    variant: best.e, variantLabel: best.label, pct: best.pct || {},
+    vars: m.vars, nVars: m.vars.length,
+    ctxK: m.ctx / 1000, fleet: FLEET.has(m.id), noCache: m.cache == null,
+  });
+  o.filled = BENCH.filter(([k]) => o[k] != null).length;
+  return o;
+});
+function rank(v) {
+  const x = v.v;
+  return x.intel != null ? 1000 + x.intel : (x.gpqa != null ? x.gpqa : 0);
+}
+const BY_ID = new Map(MODELS.map(m => [m.id, m]));
+
+/* ── state ── */
+let weights = {}, priceW = 40, mixIdx = 0, activeRole = null, selected = null;
+let filters = { q: "", lab: "", maxp: PRICE_STOPS.length - 1, minctx: 0,
+                fleet: false, fresh: false, cache: false, full: false };
+let tab = "core", sortKey = null, sortDir = -1, expanded = false;
 BENCH.forEach(([k]) => weights[k] = 0);
 
-const $ = (id) => document.getElementById(id);
-const fmtUsd = (v) => v === 0 ? "gratis" : "$" + v.toFixed(3);
+const $ = (id) => document.getElementById(id);   // ids only — selectors go through querySelector
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+const fmtUsd = (v) => v === 0 ? "gratis" : "$" + (v < 0.01 ? v.toFixed(4) : v.toFixed(3));
+const fmtCtx = (k) => k >= 1000 ? (k / 1000).toFixed(k % 1000 ? 1 : 0) + "M" : Math.round(k) + "K";
+const pl = (n, a, b, c) => n === 1 ? a : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? b : c);
 
+/* Effective $/1M for one token mix. The cache leg uses the model's own
+   cache-read rate; a model without caching pays the full input rate for every
+   re-read token, which is exactly where a lead-heavy mix gets expensive. */
 function priceFor(m, mix) {
-  return m.inp * (mix.inp + mix.cache * 0.1) + m.out * mix.out;
+  const cacheRate = m.cache == null ? m.inp : m.cache;
+  return m.inp * mix.inp + cacheRate * mix.cache + m.out * mix.out;
 }
 
-// Score over AVAILABLE benchmarks only. A model missing more than 40% of the
-// requested weight is dropped rather than scored on a thin slice — a low score
-// from absent data would read as a real weakness.
+/* Benchmarks do NOT share a scale. GPQA and τ² cluster in the 70–99 band while
+   the Agentic Index sits around 20–60, so averaging raw values across a PARTIAL
+   subset quietly rewards a model for not having run the hard test. Each metric
+   is therefore rescaled to 0–100 against the whole field first, and the weighted
+   average runs on those. Bounds come from every model, not the filtered pool, so
+   a score means the same thing before and after you touch a filter. */
+const NORM = {};
+BENCH.forEach(([k]) => {
+  const v = MODELS.map(m => m[k]).filter(x => x != null);
+  NORM[k] = v.length ? { lo: Math.min(...v), hi: Math.max(...v) } : null;
+});
+const normed = (m, k) => {
+  const n = NORM[k];
+  if (!n || m[k] == null) return null;
+  return n.hi === n.lo ? 100 : (m[k] - n.lo) / (n.hi - n.lo) * 100;
+};
+
+/* Score over AVAILABLE benchmarks only. A model missing more than 40% of the
+   requested weight is dropped rather than scored on a thin slice — a low score
+   from absent data would read as a real weakness. */
 function scoreFor(m) {
-  let sum = 0, used = 0, total = 0, missing = [];
+  let sum = 0, used = 0, total = 0; const missing = [];
   for (const [k, label] of BENCH) {
     const w = weights[k];
     if (!w) continue;
     total += w;
-    if (m[k] == null) { missing.push(label); continue; }
-    sum += m[k] * w; used += w;
+    const v = normed(m, k);
+    if (v == null) { missing.push(label); continue; }
+    sum += v * w; used += w;
   }
-  if (total === 0) return { q: null, missing, dropped: false, coverage: 1 };
+  if (total === 0) return { q: null, missing, dropped: false };
   const coverage = used / total;
-  if (coverage < 0.6) return { q: null, missing, dropped: true, coverage };
-  return { q: sum / used, missing, dropped: false, coverage };
+  if (coverage < 0.6) return { q: null, missing, dropped: true };
+  return { q: sum / used, missing, dropped: false };
+}
+
+function passes(m) {
+  const f = filters;
+  if (f.q && !(m.name + " " + m.id).toLowerCase().includes(f.q)) return false;
+  if (f.lab && m.author !== f.lab) return false;
+  const cap = PRICE_STOPS[f.maxp];
+  if (cap != null && m.inp > cap) return false;
+  if (m.ctx < CTX_STOPS[f.minctx]) return false;
+  if (f.fleet && !m.fleet) return false;
+  if (f.fresh && m.date < "2026-05-01") return false;
+  if (f.cache && m.noCache) return false;
+  if (f.full && m.filled < BENCH.length) return false;
+  return true;
 }
 
 function compute() {
   const mix = MIXES[mixIdx];
   const anyWeight = BENCH.some(([k]) => weights[k] > 0);
-  const rows = MODELS.map(m => {
+  const pool = MODELS.filter(passes);
+  const rows = pool.map(m => {
     const s = scoreFor(m);
     return { m, q: s.q, missing: s.missing, dropped: s.dropped, p: priceFor(m, mix) };
   });
-  const live = rows.filter(r => r.q != null);
-  if (!live.length) return { rows: [], dropped: rows.filter(r => r.dropped), mix, anyWeight };
+  // With every weight at zero there is no quality axis at all, so the whole pool
+  // stays in and the ranking degenerates to price — that is the stated fallback,
+  // not an empty result.
+  const live = anyWeight ? rows.filter(r => r.q != null) : rows.slice();
+  if (!live.length) return { rows: [], dropped: rows.filter(r => r.dropped), mix, anyWeight, pool };
 
-  const qs = live.map(r => r.q), ps = live.map(r => r.p);
-  const qMin = Math.min(...qs), qMax = Math.max(...qs);
-  const pMin = Math.min(...ps), pMax = Math.max(...ps);
+  const lps = live.map(r => Math.log10(Math.max(r.p, 1e-4)));
+  const pMin = Math.min(...lps), pMax = Math.max(...lps);
   const span = (v, lo, hi) => hi === lo ? 1 : (v - lo) / (hi - lo);
   const s = priceW / 100;
+  let qMin = 0, qMax = 1;
+  if (anyWeight) { const qs = live.map(r => r.q); qMin = Math.min(...qs); qMax = Math.max(...qs); }
 
   live.forEach(r => {
-    r.qn = span(r.q, qMin, qMax);
-    r.pn = 1 - span(r.p, pMin, pMax);       // cheaper scores higher
+    r.qn = anyWeight ? span(r.q, qMin, qMax) : 0;
+    // Cheaper scores higher, on a log axis: a 10x price gap reads as one step
+    // whether it sits at $0.05 or at $5.
+    r.pn = 1 - span(Math.log10(Math.max(r.p, 1e-4)), pMin, pMax);
     r.total = anyWeight ? (1 - s) * r.qn + s * r.pn : r.pn;
+    r.front = false;
   });
-  live.sort((a, b) => b.total - a.total || b.q - a.q);
-  return { rows: live, dropped: rows.filter(r => r.dropped), mix, anyWeight };
+
+  /* Pareto frontier on (cost asc, quality desc): a model is on the frontier when
+     nothing cheaper already scores at least as high. Everything else is
+     dominated — strictly worse on both axes, so no weighting can rescue it.
+     Without a quality axis the notion has no meaning, so it is left off. */
+  if (anyWeight) {
+    const byPrice = [...live].sort((a, b) => a.p - b.p || b.q - a.q);
+    let ceiling = -Infinity;
+    byPrice.forEach(r => { r.front = r.q > ceiling; if (r.front) ceiling = r.q; });
+  }
+
+  live.sort((a, b) => b.total - a.total || (b.q || 0) - (a.q || 0));
+  return { rows: live, dropped: rows.filter(r => r.dropped), mix, anyWeight, pool };
 }
 
-function render() {
-  const { rows, dropped, mix, anyWeight } = compute();
+/* ── ranking ── */
+function renderRank(st) {
+  const { rows, dropped, mix, anyWeight } = st;
   const role = ROLES.find(r => r.id === activeRole);
   const nowId = role ? role.now : null;
   const nowRow = rows.find(r => r.m.id === nowId);
 
-  $("rankTitle").textContent = role ? `Ranking — ${role.label}` : "Ranking";
+  $("rankTitle").firstChild.nodeValue = role ? `Ranking — ${role.label} ` : "Ranking ";
+  $("rankNote").textContent = `${rows.length} ${pl(rows.length, "model", "modele", "modeli")} po filtrach`;
 
-  // The bar is the SORT KEY (quality and price blended by the slider); the right
-  // column is the quality delta alone. Without saying so, a model that ranks low
-  // purely on price looks like a sorting bug — e.g. Kimi K3 sits last on a better
-  // quality delta than Nemotron, because it is 340% dearer.
+  if (!rows.length) {
+    $("rank").innerHTML = st.pool.length
+      ? `<div class="empty">Żaden z <b>${st.pool.length}</b> modeli po filtrach nie ma pomiarów dla
+         ponad 40% wybranych wag, więc nie da się ich uczciwie uszeregować. Zdejmij wagę z metryki
+         o dużej liczbie braków albo poluzuj filtry.</div>`
+      : `<div class="empty">Filtry nie przepuściły żadnego modelu. Poluzuj sufit ceny
+         albo wyczyść filtry.</div>`;
+    return;
+  }
+
+  /* The bar is the SORT KEY (quality and price blended by the slider); the right
+     column is the quality delta alone. Without saying so, a model that ranks low
+     purely on price looks like a sorting bug. */
   const head = `<div class="row head"><span></span><span>model</span>
     <span>dopasowanie — pasek = ranking (jakość + cena)</span>
     <span style="text-align:right">koszt 1M</span>
     <span style="text-align:right">${nowRow ? "sama jakość" : "wynik"}</span></div>`;
 
-  const body = rows.map((r, i) => {
-    const isNow = r.m.id === nowId;
+  const limit = expanded ? rows.length : 12;
+  const body = rows.slice(0, limit).map((r, i) => {
+    const m = r.m, isNow = m.id === nowId;
     const tags = [];
     if (isNow) tags.push('<span class="tag now">obecny</span>');
-    if (r.m.free) tags.push('<span class="tag free">darmowy</span>');
-    if (r.missing.length) tags.push(`<span class="tag gap" title="brak pomiaru: ${r.missing.join(", ")}">braki: ${r.missing.length}</span>`);
-    tags.push(`<span class="tag">${r.m.ctx}</span>`);
+    if (r.front) tags.push('<span class="tag front">granica Pareto</span>');
+    if (m.inp === 0) tags.push('<span class="tag free">darmowy</span>');
+    if (m.noCache) tags.push('<span class="tag gap" title="brak zniżki na cache-read — każdy powtórzony token po pełnej stawce wejścia">bez cache</span>');
+    if (r.missing.length) tags.push(`<span class="tag gap" title="brak pomiaru: ${esc(r.missing.join(", "))}">braki: ${r.missing.length}</span>`);
+    if (m.nVars > 1) tags.push(`<span class="tag" title="${esc(m.variantLabel || "")}">effort: ${esc(m.variant)}</span>`);
+    tags.push(`<span class="tag">${fmtCtx(m.ctxK)}</span>`);
 
     let right;
     if (nowRow && !isNow && anyWeight) {
@@ -457,9 +684,9 @@ function render() {
       right = `<span class="num">${anyWeight ? r.q.toFixed(1) : "—"}</span>`;
     }
 
-    return `<div class="row ${i === 0 ? "best" : ""}">
+    return `<div class="row pick ${i === 0 ? "best" : ""} ${m.id === selected ? "sel" : ""}" data-id="${esc(m.id)}" role="button" tabindex="0">
       <span class="pos num">${i + 1}</span>
-      <span class="mname"><b>${r.m.name}</b><span class="tags">${tags.join("")}</span></span>
+      <span class="mname"><b>${esc(m.name)}</b><span class="tags">${tags.join("")}</span></span>
       <span class="bar"><i style="width:${Math.max(2, r.total * 100).toFixed(1)}%"></i></span>
       <span class="cell num">${fmtUsd(r.p)}<span class="s2">${mix.id}</span></span>
       <span class="cell">${right}</span>
@@ -467,128 +694,483 @@ function render() {
   }).join("");
 
   let extra = "";
+  if (rows.length > limit) {
+    extra += `<div class="more"><button class="chip" id="expand" type="button">pokaż pozostałe ${rows.length - limit}</button></div>`;
+  } else if (expanded && rows.length > 12) {
+    extra += `<div class="more"><button class="chip" id="expand" type="button">zwiń do 12</button></div>`;
+  }
   if (dropped.length) {
     extra += `<div class="row"><span></span><span class="mname" style="grid-column:2/-1">
-      <span class="tags"><span class="tag gap">poza rankingiem</span></span>
+      <span class="tags"><span class="tag gap">poza rankingiem: ${dropped.length}</span></span>
       <span style="font-size:12.4px;color:var(--ink-2);margin-top:4px">
-      ${dropped.map(d => d.m.name).join(", ")} — brak pomiarów dla ponad 40% wybranych wag.
-      Zaniżony wynik wyglądałby jak słabość, a to brak danych.</span></span></div>`;
-  }
-  if (nowId && UNSCORED[nowId]) {
-    extra += `<div class="row"><span></span><span class="mname" style="grid-column:2/-1">
-      <span class="tags"><span class="tag now">obecny</span><span class="tag gap">niemierzalny</span></span>
-      <span style="font-size:12.4px;color:var(--ink-2);margin-top:4px">
-      Ta rola używa dziś <b>${UNSCORED[nowId]}</b>, którego nie ma w tabeli benchmarków —
-      nie da się go porównać z powyższymi.</span></span></div>`;
+      ${esc(dropped.slice(0, 8).map(d => d.m.name).join(", "))}${dropped.length > 8 ? ` i ${dropped.length - 8} ${pl(dropped.length - 8, "inny", "inne", "innych")}` : ""} —
+      brak pomiarów dla ponad 40% wybranych wag. Zaniżony wynik wyglądałby jak słabość, a to brak danych.</span></span></div>`;
   }
   if (!anyWeight) {
     extra += `<div class="row"><span></span><span class="mname" style="grid-column:2/-1">
       <span style="font-size:12.4px;color:var(--ink-2)">Wszystkie wagi na zerze — ranking pokazuje
       wyłącznie cenę. Wybierz rolę po lewej albo podnieś suwaki.</span></span></div>`;
   }
-
   $("rank").innerHTML = head + body + extra;
-  renderTable(rows);
 }
 
-function renderTable(rows) {
-  const order = new Map(rows.map((r, i) => [r.m.id, i]));
-  const sorted = [...MODELS].sort((a, b) => (order.get(a.id) ?? 99) - (order.get(b.id) ?? 99));
-  const th = ["model", "in $/1M", "out $/1M", ...BENCH.map(([, l]) => l)]
-    .map(h => `<th>${h}</th>`).join("");
-  const body = sorted.map(m => {
-    const cells = BENCH.map(([k]) => m[k] == null
-      ? `<td class="na" title="benchmark nie uruchomiony">—</td>`
-      : `<td class="num ${weights[k] > 0 ? "w" : ""}">${m[k].toFixed(1)}</td>`).join("");
-    return `<tr><td>${m.name}</td><td class="num">${m.free ? "0" : m.inp}</td>
-            <td class="num">${m.free ? "0" : m.out}</td>${cells}</tr>`;
+/* ── price ↔ quality map ── */
+function renderPlot(st) {
+  const { rows, mix, anyWeight } = st;
+  const box = $("plot");
+  if (!anyWeight || rows.length < 2) {
+    box.innerHTML = `<div class="empty">Mapa potrzebuje wag jakości — wybierz rolę albo podnieś suwak.</div>`;
+    return;
+  }
+  const W = 900, H = 380, ML = 46, MR = 16, MT = 14, MB = 42;
+  const pw = W - ML - MR, ph = H - MT - MB;
+  const lp = rows.map(r => Math.log10(Math.max(r.p, 1e-4)));
+  const x0 = Math.min(...lp), x1 = Math.max(...lp);
+  const qs = rows.map(r => r.q);
+  const y0 = Math.min(...qs), y1 = Math.max(...qs);
+  const px = v => ML + (x1 === x0 ? pw / 2 : (Math.log10(Math.max(v, 1e-4)) - x0) / (x1 - x0) * pw);
+  const py = v => MT + ph - (y1 === y0 ? ph / 2 : (v - y0) / (y1 - y0) * ph);
+
+  const ticks = [];
+  for (let e = Math.floor(x0); e <= Math.ceil(x1); e++) {
+    for (const mlt of [1, 2, 5]) {
+      const v = mlt * Math.pow(10, e);
+      if (Math.log10(v) >= x0 - 1e-9 && Math.log10(v) <= x1 + 1e-9) ticks.push(v);
+    }
+  }
+  const gridX = ticks.map(v => `<line class="grid" x1="${px(v).toFixed(1)}" y1="${MT}" x2="${px(v).toFixed(1)}" y2="${MT + ph}"/>
+      <text class="axlab" x="${px(v).toFixed(1)}" y="${MT + ph + 15}" text-anchor="middle">${v < 1 ? "$" + v.toFixed(2) : "$" + v}</text>`).join("");
+  const yTicks = 5, gridY = Array.from({ length: yTicks }, (_, i) => {
+    const v = y0 + (y1 - y0) * i / (yTicks - 1);
+    return `<line class="grid" x1="${ML}" y1="${py(v).toFixed(1)}" x2="${ML + pw}" y2="${py(v).toFixed(1)}"/>
+      <text class="axlab" x="${ML - 7}" y="${(py(v) + 3.5).toFixed(1)}" text-anchor="end">${v.toFixed(0)}</text>`;
   }).join("");
-  $("tbl").innerHTML = `<thead><tr>${th}</tr></thead><tbody>${body}</tbody>`;
+
+  const front = rows.filter(r => r.front).sort((a, b) => a.p - b.p);
+  const path = front.length > 1
+    ? `<polyline class="frontline" points="${front.map(r => `${px(r.p).toFixed(1)},${py(r.q).toFixed(1)}`).join(" ")}"/>` : "";
+
+  const dots = rows.map(r => {
+    const cls = ["dot"];
+    if (r.front) cls.push("front");
+    if (r.m.fleet) cls.push("fleet");
+    if (r.m.id === selected) cls.push("sel");
+    return `<circle class="${cls.join(" ")}" data-id="${esc(r.m.id)}" cx="${px(r.p).toFixed(1)}" cy="${py(r.q).toFixed(1)}"
+      r="${r.front || r.m.fleet ? 5.5 : 4}"><title>${esc(r.m.name)} — jakość ${r.q.toFixed(1)}, ${fmtUsd(r.p)}/1M (${mix.id})${r.front ? " · granica Pareto" : ""}</title></circle>`;
+  }).join("");
+
+  /* Label only the frontier and the fleet: labelling 200 points is noise, and the
+     frontier is the only set the reader is asked to act on. */
+  const labelled = rows.filter(r => (r.front || r.m.fleet)).slice(0, 14);
+  const labels = labelled.map(r => {
+    const x = px(r.p), y = py(r.q), right = x < ML + pw * 0.72;
+    return `<text class="dotlab" x="${(x + (right ? 9 : -9)).toFixed(1)}" y="${(y + 3.5).toFixed(1)}"
+      text-anchor="${right ? "start" : "end"}">${esc(r.m.name)}</text>`;
+  }).join("");
+
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img"
+    aria-label="Wykres rozrzutu: koszt efektywny na osi poziomej w skali logarytmicznej, jakość ważona na pionowej. ${front.length} modeli na granicy Pareto.">
+    ${gridX}${gridY}
+    <line class="ax" x1="${ML}" y1="${MT + ph}" x2="${ML + pw}" y2="${MT + ph}"/>
+    <line class="ax" x1="${ML}" y1="${MT}" x2="${ML}" y2="${MT + ph}"/>
+    ${path}${dots}${labels}
+    <text class="axtitle" x="${ML + pw / 2}" y="${H - 6}" text-anchor="middle">koszt efektywny $/1M przy miksie „${mix.id}”</text>
+    <text class="axtitle" x="${-(MT + ph / 2)}" y="13" text-anchor="middle" transform="rotate(-90)">jakość ważona</text>
+  </svg>`;
 }
 
-// ── controls ──
+/* ── reasoning-effort ladder ── */
+function renderLadder(st) {
+  const box = $("ladder");
+  const m = BY_ID.get(selected) || (st.rows[0] && st.rows[0].m);
+  if (!m) { box.innerHTML = `<div class="empty">Brak modelu do pokazania.</div>`; $("ladderNote").textContent = ""; return; }
+  $("ladderNote").textContent = m.nVars > 1
+    ? `${esc(m.name)} · ${m.nVars} ${pl(m.nVars, "wariant", "warianty", "wariantów")} — kliknij inny model w rankingu lub na mapie`
+    : `${esc(m.name)} — kliknij inny model w rankingu lub na mapie`;
+
+  if (m.nVars < 2) {
+    box.innerHTML = `<div class="empty"><b>${esc(m.name)}</b> ma jeden zmierzony wariant
+      (<code>${esc(m.variant)}</code>), więc nie ma czego porównywać. Drabina ma sens dla modeli
+      z regulowanym reasoning effort — np. Claude Opus 5, GPT-5.6 czy Gemini 3.7 Flash.</div>`;
+    return;
+  }
+
+  const keys = ["intel", "code", "agent", "gpqa", "hle", "term", "lctx", "hon"];
+  const base = m.vars[0];
+  const th = ["effort", ...keys.map(k => BKEY.get(k).l), "Δ vs. najniższy"].map((h, i) =>
+    `<th${i ? "" : ' style="text-align:left"'}>${esc(h)}</th>`).join("");
+  const body = m.vars.map(v => {
+    const cells = keys.map(k => v.v[k] == null
+      ? `<td class="na">—</td>`
+      : `<td class="num">${v.v[k].toFixed(1)}</td>`).join("");
+    const bi = base.v.intel, vi = v.v.intel;
+    const d = (bi != null && vi != null) ? vi - bi : null;
+    const dc = d == null ? `<td class="na">—</td>`
+      : `<td class="num delta ${d > 0 ? "up" : d < 0 ? "down" : ""}">${d > 0 ? "+" : ""}${d.toFixed(1)}</td>`;
+    return `<tr><td>${esc(v.e)}<span class="s2"></span></td>${cells}${dc}</tr>`;
+  }).join("");
+
+  const bi = m.vars[0].v.intel, ti = m.vars[m.vars.length - 1].v.intel;
+  const verdict = (bi != null && ti != null)
+    ? `Od <code>${esc(m.vars[0].e)}</code> do <code>${esc(m.vars[m.vars.length - 1].e)}</code>
+       Intelligence Index rośnie o <b>${(ti - bi).toFixed(1)}</b> pkt. Cena za token się nie zmienia —
+       płacisz dłuższym łańcuchem rozumowania, czyli liczbą tokenów wyjścia, której ten cennik nie widzi.`
+    : `Warianty różnią się zakresem pomiarów, więc różnicy w Intelligence Index nie da się policzyć.`;
+
+  box.innerHTML = `<div class="scroll"><table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table></div>
+    <div class="body"><p class="note">${verdict}</p></div>`;
+}
+
+/* ── knowledge vs. hallucination ── */
+/* Sorting by non-hallucination alone puts models that simply know nothing on top —
+   answering "nie wiem" to everything scores perfectly. The useful reading is the
+   pairing, so the section splits into the two groups a role decision hangs on. */
+function renderHonesty(st) {
+  const box = $("honesty");
+  const pool = st.pool.filter(m => m.know != null && m.hon != null);
+  if (pool.length < 4) {
+    box.innerHTML = `<div class="empty">Za mało modeli z pomiarem Omniscience po filtrach
+      (${pool.length}). Poluzuj filtry.</div>`;
+    return;
+  }
+  const knows = pool.map(m => m.know).sort((a, b) => a - b);
+  const medKnow = knows[Math.floor(knows.length / 2)];
+
+  const safe = pool.filter(m => m.know >= medKnow).sort((a, b) => b.hon - a.hon).slice(0, 8);
+  const risky = pool.filter(m => m.hon < 40).sort((a, b) => b.know - a.know).slice(0, 6);
+
+  const bar = (v) => `<span class="bar" style="display:block"><i style="width:${Math.max(1.5, v).toFixed(1)}%;
+    background:${v >= 60 ? "var(--good)" : v >= 30 ? "var(--amber)" : "var(--bad)"}"></i></span>`;
+  const rowsOf = (list) => list.map(m => `<tr>
+      <td>${esc(m.name)}${m.fleet ? ' <span class="tag now">flota</span>' : ""}</td>
+      <td style="width:32%">${bar(m.hon)}</td>
+      <td class="num hi">${m.hon.toFixed(1)}</td>
+      <td class="num">${m.know.toFixed(1)}</td>
+      <td class="num">${m.intel != null ? m.intel.toFixed(1) : "—"}</td>
+    </tr>`).join("");
+
+  const head = `<thead><tr>
+      <th style="text-align:left">model</th><th></th>
+      <th title="odsetek pytań, przy których model przyznaje niewiedzę zamiast zmyślać">non-hallucination %</th>
+      <th title="trafność wiedzy faktograficznej">wiedza %</th><th>intel</th>
+    </tr></thead>`;
+
+  box.innerHTML = `
+    <div class="body" style="padding-bottom:6px"><p class="note"><b>Rzetelny i&nbsp;niedouczony to
+    nie to samo.</b> Model, który na wszystko odpowiada „nie wiem”, ma perfekcyjny wynik
+    non-hallucination i&nbsp;jest bezużyteczny. Dlatego pierwsza tabela bierze tylko modele
+    z&nbsp;wiedzą powyżej mediany stawki (${medKnow.toFixed(1)}%) i&nbsp;dopiero wśród nich szuka
+    najrzetelniejszych.</p></div>
+    <div class="scroll"><table style="min-width:640px">${head}<tbody>${rowsOf(safe)}</tbody></table></div>
+    <div class="body" style="padding-bottom:6px"><p class="note"><b>Druga strona: wie dużo,
+    a&nbsp;i&nbsp;tak zmyśla.</b> Poniżej modele z&nbsp;non-hallucination poniżej 40% uszeregowane
+    po wiedzy. To najgorszy profil do research u i&nbsp;przeglądu faktów — brzmią kompetentnie
+    dokładnie wtedy, kiedy się mylą.</p></div>
+    ${risky.length
+      ? `<div class="scroll"><table style="min-width:640px">${head}<tbody>${rowsOf(risky)}</tbody></table></div>`
+      : `<div class="empty">Żaden model po filtrach nie schodzi poniżej 40% non-hallucination.</div>`}
+    <div class="body"><p class="note">Tego wymiaru poprzednia wersja panelu w&nbsp;ogóle nie miała —
+    Artificial Analysis raportuje go jako <code>aa_omniscience_accuracy</code>
+    i&nbsp;<code>aa_omniscience_non_hallucination_rate</code>.</p></div>`;
+}
+
+/* ── what changed since the previous snapshot ── */
+function renderDiff() {
+  const rows = Object.entries(PREV).map(([id, o]) => {
+    const m = BY_ID.get(id);
+    return m ? { m, o } : null;
+  }).filter(Boolean);
+  const body = rows.map(({ m, o }) => {
+    const dIn = (m.inp / o.inp - 1) * 100, dOut = (m.out / o.out - 1) * 100;
+    const dq = (o.intel != null && m.intel != null) ? m.intel - o.intel : null;
+    const cell = (v) => Math.abs(v) < 0.5
+      ? `<td class="num" style="color:var(--ink-3)">bez zmian</td>`
+      : `<td class="num delta ${v < 0 ? "up" : "down"}">${v > 0 ? "+" : ""}${v.toFixed(0)}%</td>`;
+    return `<tr>
+      <td>${esc(m.name)}${m.fleet ? ' <span class="tag now">flota</span>' : ""}</td>
+      <td class="num">${o.inp} → ${m.inp}</td>${cell(dIn)}
+      <td class="num">${o.out} → ${m.out}</td>${cell(dOut)}
+      <td class="num">${o.intel != null ? o.intel.toFixed(1) : "—"} → ${m.intel != null ? m.intel.toFixed(1) : "—"}</td>
+      <td class="num delta ${dq == null ? "" : dq >= 0 ? "up" : "down"}">${dq == null ? "—" : (dq > 0 ? "+" : "") + dq.toFixed(1)}</td>
+    </tr>`;
+  }).join("");
+  $("diff").innerHTML = `<table style="min-width:820px"><thead><tr>
+      <th style="text-align:left">model</th><th>wejście $/1M</th><th>Δ</th>
+      <th>wyjście $/1M</th><th>Δ</th><th>intel</th><th>Δ</th>
+    </tr></thead><tbody>${body}</tbody></table>
+    <div class="body"><p class="note">Poprzedni snapshot brał ceny z tabeli OpenRoutera
+    <em>z promocjami</em>. Część z nich wygasła — stąd skoki w górę bez żadnej zmiany po stronie
+    dostawcy. To jest dokładnie ten powód, dla którego ten panel odświeża ceny z API zamiast
+    trzymać je w kodzie.</p></div>`;
+}
+
+/* ── full table ── */
+const TABS = [
+  { id:"core",  label:"Indeksy AA",   keys:["intel", "code", "agent"] },
+  { id:"eng",   label:"Inżynieria",   keys:["code", "py", "term", "agent", "tau2"] },
+  { id:"know",  label:"Wiedza",       keys:["gpqa", "hle", "phys", "know", "hon"] },
+  { id:"ops",   label:"Operacyjne",   keys:["ifb", "lctx", "econ", "tau2"] },
+  { id:"all",   label:"Wszystko",     keys:BENCH.map(([k]) => k) },
+];
+function renderTable(st) {
+  $("tabs").innerHTML = TABS.map(t =>
+    `<button class="tabbtn" type="button" role="tab" data-tab="${t.id}"
+      aria-selected="${t.id === tab}">${t.label}</button>`).join("");
+
+  const cols = (TABS.find(t => t.id === tab) || TABS[0]).keys;
+  const order = new Map(st.rows.map((r, i) => [r.m.id, i]));
+  let list = st.pool.slice();
+  if (sortKey) {
+    list.sort((a, b) => {
+      const av = sortKey === "inp" ? a.inp : sortKey === "out" ? a.out : sortKey === "ctx" ? a.ctx : a[sortKey];
+      const bv = sortKey === "inp" ? b.inp : sortKey === "out" ? b.out : sortKey === "ctx" ? b.ctx : b[sortKey];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return (av - bv) * sortDir;
+    });
+  } else {
+    list.sort((a, b) => (order.get(a.id) ?? 9e9) - (order.get(b.id) ?? 9e9));
+  }
+  list = list.slice(0, 60);
+
+  const hcols = [["inp", "in $/1M"], ["out", "out $/1M"], ["ctx", "kontekst"], ...cols.map(k => [k, BKEY.get(k).l])];
+  const th = `<th style="text-align:left">model</th>` + hcols.map(([k, l]) =>
+    `<th class="sortable" data-sort="${k}" ${sortKey === k ? `aria-sort="${sortDir < 0 ? "descending" : "ascending"}"` : ""}
+       title="${esc(BKEY.get(k) ? BKEY.get(k).d : "sortuj")}">${esc(l)}</th>`).join("");
+
+  const maxes = {};
+  cols.forEach(k => { const v = list.map(m => m[k]).filter(x => x != null); maxes[k] = v.length ? Math.max(...v) : null; });
+
+  const body = list.map(m => {
+    const cells = cols.map(k => m[k] == null
+      ? `<td class="na" title="benchmark nie uruchomiony">—</td>`
+      : `<td class="num ${weights[k] > 0 ? "w" : ""} ${m[k] === maxes[k] ? "hi" : ""}">${m[k].toFixed(1)}</td>`).join("");
+    return `<tr><td>${esc(m.name)}${m.fleet ? ' <span class="tag now">flota</span>' : ""}${m.nVars > 1 ? ` <span class="tag">${esc(m.variant)}</span>` : ""}</td>
+      <td class="num">${m.inp}</td><td class="num">${m.out}</td><td class="num">${fmtCtx(m.ctxK)}</td>${cells}</tr>`;
+  }).join("");
+
+  $("tbl").innerHTML = `<thead><tr>${th}</tr></thead><tbody>${body}</tbody>`;
+  if (st.pool.length > 60) {
+    $("tbl").insertAdjacentHTML("afterend", "");
+  }
+}
+
+function renderUnscored() {
+  const recent = UNSCORED.filter(u => u.date >= "2026-07-01").slice(0, 24);
+  const body = recent.map(u => `<tr>
+      <td>${esc(u.name)}</td><td>${esc(u.author)}</td>
+      <td class="num">${u.date}</td><td class="num">${u.inp}</td><td class="num">${u.out}</td>
+      <td class="num">${u.cache == null ? '<span class="tag gap">brak</span>' : u.cache}</td>
+      <td class="num">${fmtCtx(u.ctx / 1000)}</td>
+    </tr>`).join("");
+  $("unscored").innerHTML = `<table style="min-width:700px"><thead><tr>
+      <th style="text-align:left">model</th><th style="text-align:right">dostawca</th><th>data</th>
+      <th>in $/1M</th><th>out $/1M</th><th>cache $/1M</th><th>kontekst</th>
+    </tr></thead><tbody>${body}</tbody></table>
+    <div class="body"><p class="note">Te modele da się dziś odpalić, ale nie da się ich uczciwie
+    porównać — nikt ich jeszcze nie przemierzył. Świadomie <b>nie</b> trafiają do rankingu:
+    zgadywany wynik byłby gorszy niż jego brak. Łącznie takich modeli jest
+    <b class="num">${UNSCORED.length}</b>.</p></div>`;
+}
+
+/* ── controls ── */
 function buildRoles() {
   $("roles").innerHTML = ROLES.map(r =>
     `<button class="role" type="button" data-role="${r.id}" aria-pressed="false">
-       ${r.label}<span class="mix">${MIXES[r.mix].id}</span></button>`).join("");
+       ${esc(r.label)}<span class="mix">${MIXES[r.mix].id}</span></button>`).join("");
   $("roles").addEventListener("click", (e) => {
     const btn = e.target.closest(".role"); if (!btn) return;
     const r = ROLES.find(x => x.id === btn.dataset.role);
     activeRole = r.id;
     BENCH.forEach(([k]) => weights[k] = r.w[k] || 0);
     mixIdx = r.mix;
+    if (r.now) selected = r.now;
     syncInputs();
     render();
   });
 }
 
 function buildWeights() {
-  $("weights").innerHTML = BENCH.map(([k, label]) => {
+  $("weights").innerHTML = BENCH.map(([k, label, desc]) => {
     const gaps = MODELS.filter(m => m[k] == null).length;
     return `<div class="sl">
       <div class="sl-top">
-        <span class="sl-name">${label}${gaps ? `<span class="miss" title="${gaps} modeli bez tego pomiaru">${gaps} braków</span>` : ""}</span>
+        <span class="sl-name" title="${esc(desc)}">${esc(label)}${gaps ? `<span class="miss" title="${gaps} modeli bez tego pomiaru">${gaps} braków</span>` : ""}</span>
         <span class="sl-val num" data-out="${k}">0</span>
       </div>
-      <input type="range" min="0" max="100" value="0" data-w="${k}" aria-label="Waga: ${label}">
+      <input type="range" data-w="${k}" min="0" max="100" value="0" aria-label="Waga: ${esc(label)}">
     </div>`;
   }).join("");
   $("weights").addEventListener("input", (e) => {
     const k = e.target.dataset.w; if (!k) return;
     weights[k] = +e.target.value;
-    $("weights").querySelector(`[data-out="${k}"]`).textContent = e.target.value;
     activeRole = null;
     document.querySelectorAll(".role").forEach(b => b.setAttribute("aria-pressed", "false"));
-    $("rankTitle").textContent = "Ranking — profil własny";
+    const out = document.querySelector(`[data-out="${k}"]`);
+    if (out) out.textContent = weights[k];
     render();
   });
 }
 
+function buildFilters() {
+  const labs = [...new Set(MODELS.map(m => m.author))].sort((a, b) => a.localeCompare(b, "pl"));
+  $("lab").insertAdjacentHTML("beforeend", labs.map(l =>
+    `<option value="${esc(l)}">${esc(l)}</option>`).join(""));
+
+  $("q").addEventListener("input", e => { filters.q = e.target.value.trim().toLowerCase(); render(); });
+  $("lab").addEventListener("change", e => { filters.lab = e.target.value; render(); });
+  $("maxp").addEventListener("input", e => { filters.maxp = +e.target.value; syncFilterLabels(); render(); });
+  $("minctx").addEventListener("input", e => { filters.minctx = +e.target.value; syncFilterLabels(); render(); });
+  [["cFleet", "fleet"], ["cFresh", "fresh"], ["cCache", "cache"], ["cFull", "full"]].forEach(([id, key]) => {
+    $(id).addEventListener("click", () => {
+      filters[key] = !filters[key];
+      $(id).setAttribute("aria-pressed", String(filters[key]));
+      render();
+    });
+  });
+  $("resetF").addEventListener("click", () => {
+    filters = { q: "", lab: "", maxp: PRICE_STOPS.length - 1, minctx: 0, fleet: false, fresh: false, cache: false, full: false };
+    $("q").value = ""; $("lab").value = ""; $("maxp").value = PRICE_STOPS.length - 1; $("minctx").value = 0;
+    ["cFleet", "cFresh", "cCache", "cFull"].forEach(id => $(id).setAttribute("aria-pressed", "false"));
+    syncFilterLabels(); render();
+  });
+}
+
+function syncFilterLabels() {
+  const cap = PRICE_STOPS[filters.maxp];
+  $("maxpVal").textContent = cap == null ? "bez limitu" : "≤ $" + cap;
+  const c = CTX_STOPS[filters.minctx];
+  $("minctxVal").textContent = c === 0 ? "dowolny" : "≥ " + fmtCtx(c / 1000);
+}
+
 function syncInputs() {
+  $("price").value = priceW; $("priceVal").textContent = priceW + "%";
+  $("mix").value = mixIdx;   $("mixVal").textContent = MIXES[mixIdx].label;
   BENCH.forEach(([k]) => {
-    const inp = $("weights").querySelector(`[data-w="${k}"]`);
-    const out = $("weights").querySelector(`[data-out="${k}"]`);
-    if (inp) inp.value = weights[k];
+    const el = document.querySelector(`[data-w="${k}"]`);
+    const out = document.querySelector(`[data-out="${k}"]`);
+    if (el) el.value = weights[k];
     if (out) out.textContent = weights[k];
   });
-  $("mix").value = mixIdx;
-  $("mixVal").textContent = MIXES[mixIdx].label;
   document.querySelectorAll(".role").forEach(b =>
     b.setAttribute("aria-pressed", String(b.dataset.role === activeRole)));
 }
 
-$("price").addEventListener("input", (e) => {
-  priceW = +e.target.value;
-  $("priceVal").textContent = priceW + "%";
-  render();
-});
-$("mix").addEventListener("input", (e) => {
-  mixIdx = +e.target.value;
-  $("mixVal").textContent = MIXES[mixIdx].label;
-  render();
-});
-$("reset").addEventListener("click", () => {
-  BENCH.forEach(([k]) => weights[k] = 0);
-  activeRole = null;
-  syncInputs();
-  $("rankTitle").textContent = "Ranking";
-  render();
-});
-$("theme").addEventListener("click", () => {
-  const cur = document.documentElement.getAttribute("data-theme");
-  const sysDark = matchMedia("(prefers-color-scheme: dark)").matches;
-  const next = cur ? (cur === "dark" ? "light" : "dark") : (sysDark ? "light" : "dark");
-  document.documentElement.setAttribute("data-theme", next);
-});
+function exportCsv(st) {
+  const cols = BENCH.map(([k]) => k);
+  const head = ["model", "id", "dostawca", "data", "wariant", "in_usd_1m", "out_usd_1m", "cache_usd_1m",
+                "kontekst", `koszt_efektywny_${MIXES[mixIdx].id}`, "jakosc_wazona", "pareto", ...cols];
+  const lines = [head.join(",")];
+  st.rows.forEach(r => {
+    const m = r.m;
+    const row = [m.name, m.id, m.author, m.date, m.variant, m.inp, m.out, m.cache == null ? "" : m.cache,
+                 m.ctx, r.p.toFixed(4), r.q == null ? "" : r.q.toFixed(2), r.front ? "1" : "0",
+                 ...cols.map(k => m[k] == null ? "" : m[k])];
+    lines.push(row.map(v => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v).join(","));
+  });
+  const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `modele-openrouter-${SNAP}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
 
-buildRoles();
-buildWeights();
-// Open on the archetype that actually holds the money.
-activeRole = "lead";
-BENCH.forEach(([k]) => weights[k] = ROLES[0].w[k] || 0);
-mixIdx = 0;
-syncInputs();
-render();
+/* ── render ── */
+let lastState = null;
+function render() {
+  const st = compute();
+  lastState = st;
+  $("filterCount").textContent = `${st.pool.length}/${MODELS.length}`;
+  renderRank(st);
+  renderPlot(st);
+  renderLadder(st);
+  renderHonesty(st);
+  renderTable(st);
+}
+
+function pick(id) {
+  if (!id) return;
+  selected = id;
+  render();
+}
+
+/* ── boot ── */
+function boot() {
+  const nVars = MODELS.reduce((a, m) => a + m.nVars, 0);
+  const nNew = MODELS.filter(m => m.date > "2026-07-27").length + UNSCORED.filter(u => u.date > "2026-07-27").length;
+  const noCache = MODELS.filter(m => m.noCache).length;
+  $("snapDate").textContent = SNAP;
+  $("fModels").textContent = MODELS.length;
+  $("fVars").textContent = nVars;
+  $("fBench").textContent = BENCH.length;
+  $("fNew").textContent = nNew;
+  $("fUnscored").textContent = UNSCORED.length;
+  $("noCacheN").textContent = `${noCache} z ${MODELS.length}`;
+
+  const glm = BY_ID.get("z-ai/glm-5.2"), ds = BY_ID.get("deepseek/deepseek-v4-pro");
+  $("warnBox").innerHTML = `<b>Ceny w tym panelu są pobrane z API, nie przepisane.</b>
+    Poprzednia wersja miała stawki wklepane ręcznie z tabeli z promocjami — od tamtej pory
+    ${ds ? `DeepSeek V4 Pro podrożał z <b>$0.435</b> na <b>$${ds.inp}</b> za 1M wejścia (+140%)` : "część promocji wygasła"},
+    ${glm ? `a GLM-5.2 z <b>$0.750</b> na <b>$${glm.inp}</b> (+29%)` : ""}. Każda liczba tutaj pochodzi
+    z <code>openrouter.ai/api/v1/models</code> oraz z zestawu ewaluacji Artificial Analysis,
+    zaciągniętych ${SNAP}. Koszt niżej liczony jest z <em>miksu tokenów</em>, więc nie zgadza się
+    z ceną katalogową „za 1M” i nie powinien.`;
+
+  $("foot").innerHTML = `Źródła: <code>openrouter.ai/api/v1/models</code> (cennik, kontekst, data
+    wydania) oraz <code>/api/frontend/v1/private/artificial-analysis-benchmarks</code> (zestaw
+    ewaluacji Artificial Analysis, per poziom reasoning effort). Wagi profili ról i miksy tokenów
+    pochodzą z <code>telemetry.sqlite</code> (130 przebiegów) — analiza źródłowa:
+    <code>docs/prd/model-role-fit-analysis.md</code>. Snapshot: ${SNAP}.
+    Odświeżenie: <code>docs/ui/refresh-model-data.py</code>.`;
+
+  buildRoles(); buildWeights(); buildFilters(); syncFilterLabels(); renderDiff(); renderUnscored();
+
+  $("price").addEventListener("input", e => { priceW = +e.target.value; $("priceVal").textContent = priceW + "%"; render(); });
+  $("mix").addEventListener("input", e => { mixIdx = +e.target.value; $("mixVal").textContent = MIXES[mixIdx].label; render(); });
+  $("reset").addEventListener("click", () => {
+    BENCH.forEach(([k]) => weights[k] = 0); activeRole = null; syncInputs(); render();
+  });
+  $("csv").addEventListener("click", () => lastState && exportCsv(lastState));
+
+  $("rank").addEventListener("click", e => {
+    if (e.target.closest("#expand")) { expanded = !expanded; render(); return; }
+    const row = e.target.closest(".row.pick"); if (row) pick(row.dataset.id);
+  });
+  $("rank").addEventListener("keydown", e => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const row = e.target.closest(".row.pick");
+    if (row) { e.preventDefault(); pick(row.dataset.id); }
+  });
+  $("plot").addEventListener("click", e => {
+    const d = e.target.closest(".dot"); if (d) pick(d.dataset.id);
+  });
+  $("tabs").addEventListener("click", e => {
+    const b = e.target.closest(".tabbtn"); if (!b) return;
+    tab = b.dataset.tab; sortKey = null; render();
+  });
+  $("tbl").addEventListener("click", e => {
+    const th = e.target.closest("th.sortable"); if (!th) return;
+    const k = th.dataset.sort;
+    if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = -1; }
+    render();
+  });
+
+  const root = document.documentElement;
+  $("theme").addEventListener("click", () => {
+    const cur = root.getAttribute("data-theme");
+    const dark = cur ? cur === "dark"
+      : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.setAttribute("data-theme", dark ? "light" : "dark");
+  });
+
+  // Open on the lead profile: the most expensive role slot, and the one where the
+  // cache-rate correction changes the answer most.
+  const leadBtn = document.querySelector('[data-role="lead"]');
+  if (leadBtn) leadBtn.click(); else render();
+}
+boot();
 </script>
 </body>
 </html>
