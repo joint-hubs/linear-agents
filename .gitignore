@@ -94,3 +94,11 @@ tools/nebul/claude-wire-*.json
 tools/nebul/nebul_replica_hunt.json
 tools/nebul/nebul_sat_run1.json
 tools/nebul/NEBUL_*_LOG.txt
+
+# Installed supervisor skills. Third-party projects with their own release
+# cycles, ~25 MB, and diagram-design is a git CLONE — `git add` on it records
+# a bare gitlink with no .gitmodules, which hands anyone who clones this repo
+# an empty directory. The skills committed under agents/orchestrator/skills/
+# are a different thing: one SKILL.md each, written here.
+# To version these properly: submodule for diagram-design, vendor archify.
+agents/supervisor/skills/
