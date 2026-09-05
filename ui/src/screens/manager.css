@@ -115,11 +115,190 @@
   background: var(--surface-2);
 }
 
+.mgr-badge-dirty {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: var(--warn-soft);
+  font-weight: 600;
+}
+
 .mgr-freshness {
   font-size: 12px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   margin-left: auto;
+}
+
+/* --- edit bar (staged changes: preview → apply) --------------------------- */
+
+.mgr-editbar {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mgr-editbar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mgr-editbar-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.5;
+  flex: 1;
+  min-width: 260px;
+}
+
+.mgr-editbar-note code,
+.mgr-editbar-note strong {
+  font-size: 11px;
+}
+
+.mgr-editbar-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.mgr-btn-primary {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.mgr-btn-primary:hover {
+  background: var(--accent-soft);
+}
+
+.mgr-btn:disabled {
+  color: var(--faint);
+  cursor: not-allowed;
+  background: var(--surface);
+}
+
+.mgr-save-error {
+  border: 1px solid var(--danger);
+  background: var(--danger-soft);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.mgr-save-error .mgr-error-title {
+  color: var(--danger);
+  margin: 0 0 4px;
+}
+
+.mgr-save-error p {
+  margin: 0 0 4px;
+}
+
+.mgr-save-error ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.mgr-save-ok {
+  border: 1px solid var(--ok);
+  background: var(--ok-soft);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.mgr-save-ok-title {
+  color: var(--ok);
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.mgr-save-ok p {
+  margin: 0;
+}
+
+.mgr-preview-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  margin: 0 0 6px;
+}
+
+.mgr-preview {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.mgr-diff-before {
+  color: var(--danger);
+}
+
+.mgr-diff-after {
+  color: var(--ok);
+}
+
+/* --- profile model editor -------------------------------------------------- */
+
+.mgr-input {
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+
+.mgr-modeledit {
+  font-family: var(--mono);
+  font-size: 12px;
+  width: 100%;
+}
+
+.mgr-modeledit-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+  flex-wrap: wrap;
+}
+
+.mgr-modeledit-hint {
+  font-size: 11px;
+  margin: 6px 0 0;
+  line-height: 1.5;
+}
+
+.mgr-warn-note {
+  font-size: 11.5px;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  margin: 6px 0 0;
+  line-height: 1.5;
+}
+
+/* --- unsaved-edit indicator ------------------------------------------------- */
+
+.mgr-unsaved-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+  display: inline-block;
+  margin-left: 5px;
 }
 
 /* --- body grid ----------------------------------------------------------- */

@@ -8,7 +8,7 @@
 // "Podgląd zmian" (dry run) then "Zapisz" — so there is one pattern to learn,
 // not two.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { getPromptFile, postPromptFile } from '../api';
 
 /**
@@ -45,7 +45,7 @@ function changedRegion(before, after) {
   };
 }
 
-export default function MarkdownEditor({ path, label, onSaved }) {
+export default function MarkdownEditor({ path, label, onSaved, onDirtyChange }) {
   // The raw file is always fetched here rather than accepted from a caller.
   // getPromptRole() strips frontmatter before returning a body — saving that
   // back would silently delete a role's `model:` and `tools:` lines.
@@ -76,6 +76,26 @@ export default function MarkdownEditor({ path, label, onSaved }) {
 
   const dirty = body !== null && toLF(draft) !== toLF(body);
   const region = dirty ? changedRegion(body, draft) : null;
+
+  // Lift dirty transitions to a host that guards navigation (FOC-225 Manager).
+  // Additive: hosts that don't pass onDirtyChange are unaffected.
+  const lastDirtyRef = useRef(false);
+  const onDirtyChangeRef = useRef(null);
+  useEffect(() => {
+    onDirtyChangeRef.current = onDirtyChange;
+    if (lastDirtyRef.current !== dirty) {
+      lastDirtyRef.current = dirty;
+      if (onDirtyChange) onDirtyChange(dirty);
+    }
+  }, [dirty, onDirtyChange]);
+  // If the editor goes away mid-edit (path change or unmount) the draft is
+  // dropped with it — the host must not keep guarding against a ghost draft.
+  useEffect(
+    () => () => {
+      if (lastDirtyRef.current && onDirtyChangeRef.current) onDirtyChangeRef.current(false);
+    },
+    []
+  );
 
   const submit = async (dryRun) => {
     setSaving(true);

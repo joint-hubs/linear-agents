@@ -5,6 +5,8 @@
 // SQUAD_COLOR and hasPrice came along because nothing outside this card used
 // them.
 
+import { hasPriceEntry, modelSuggestions } from '../squadConfig/workingCopy';
+
 const SQUAD_LABELS = {
   plan: 'Plan',
   dev: 'Dev',
@@ -23,19 +25,8 @@ const SQUAD_COLOR = {
   supervisor: 'var(--sq-supervisor)',
 };
 
-/** A model with no pricing entry for its provider silently reports $0 — warn on it. */
-function hasPrice(slug, provider, pricing) {
-  return !!(pricing && pricing[provider] && pricing[provider][slug]);
-}
-
-/** Model suggestions for one provider: its models list ∪ its pricing keys. */
-function suggestionsFor(provider, providers, pricing) {
-  const list = [];
-  const profile = providers?.[provider];
-  if (Array.isArray(profile?.models)) list.push(...profile.models);
-  if (pricing?.[provider]) list.push(...Object.keys(pricing[provider]));
-  return [...new Set(list)];
-}
+const hasPrice = hasPriceEntry;
+const suggestionsFor = modelSuggestions;
 
 export default function SquadCard({
   squad,

@@ -1,11 +1,14 @@
-// Unit tests for the Manager pure adapters (FOC-225 slice 1 part 1).
+// Unit tests for the Manager pure adapters (FOC-225 slice 1).
 // Self-contained Node ESM script — NO test framework, NO deps. Same harness
 // pattern as src/_test_utils.mjs. Invoke via: `npm --prefix ui run test`.
 //
-// Covers: identity mapping from a real-shaped /api/squad-config fixture
+// Part 1: identity mapping from a real-shaped /api/squad-config fixture
 // (squad/role/model/tools), unknown role/model handling, coordinator-only
 // squads, and layout persistence incl. schema migration and corrupt-record
-// recovery. Fixtures only — no network, no production config access.
+// recovery. Part 2: the shared squad-config working copy (staging, dirty
+// counting, save payloads, save-error normalization), model suggestions,
+// prompt paths, staged-vs-configured summaries, unsaved-guard predicate and
+// squad role counts. Fixtures only — no network, no production config access.
 
 import assert from 'node:assert/strict';
 
@@ -14,6 +17,7 @@ import {
   installFingerprint,
   resolveModelState,
   toolSummary,
+  squadRoleCounts,
   COORDINATOR_KEY,
 } from './manager/identity.js';
 import {
@@ -26,6 +30,22 @@ import {
   loadLayout,
   saveLayout,
 } from './manager/layout.js';
+import {
+  DEFAULT_PROVIDER,
+  buildSavePayload,
+  buildWorkingCopy,
+  countDirty,
+  hasPriceEntry,
+  modelSuggestions,
+  normalizeSaveError,
+  setAgentModel,
+  setLeadModel,
+} from './squadConfig/workingCopy.js';
+import {
+  editingGuardActive,
+  promptPathFor,
+  stagedModelSummary,
+} from './manager/editing.js';
 
 // --- Minimal test harness (same shape as _test_utils.mjs) ------------------
 
@@ -305,6 +325,146 @@ await test('storage failures degrade to defaults and no-op saves', () => {
   const loaded = loadLayout(denied, key, 'dev', ['recon']);
   eq(loaded.positions, defaultPositions(['recon']));
   eq(saveLayout(denied, key, 'dev', { recon: { x: 1, y: 1 } }), null);
+});
+
+// --- working copy: staging (slice 1 part 2) ----------------------------------
+
+await test('buildWorkingCopy normalizes legacy string agents and deep-clones', () => {
+  const raw = {
+    squads: { dev: { lead: 'm1', provider: 'openrouter', leadFiles: [], agents: { recon: 'm2' } } },
+    pricing: { openrouter: { m1: { input: 1, output: 2 } } },
+    providers: {},
+  };
+  const copy = buildWorkingCopy(raw);
+  eq(copy.squads.dev.agents.recon, { model: 'm2', tools: [] });
+  copy.squads.dev.lead = 'changed';
+  copy.pricing.openrouter.m1.input = 999;
+  eq(raw.squads.dev.lead, 'm1'); // source untouched
+  eq(raw.pricing.openrouter.m1.input, 1);
+});
+
+await test('setAgentModel stages a model and preserves the role tools', () => {
+  const copy = buildWorkingCopy(FIXTURE);
+  const next = setAgentModel(copy, 'dev', 'recon', 'google/gemini-2.5-flash-lite');
+  eq(next.squads.dev.agents.recon, { model: 'google/gemini-2.5-flash-lite', tools: ['Read', 'Grep', 'Glob', 'Bash'] });
+  eq(copy.squads.dev.agents.recon.model, 'z-ai/glm-5.3-flash'); // previous copy untouched
+});
+
+await test('setAgentModel creates a missing agent entry and ignores unknown squads', () => {
+  const copy = buildWorkingCopy(FIXTURE);
+  const created = setAgentModel(copy, 'dev', 'newRole', 'm9');
+  eq(created.squads.dev.agents.newRole, { model: 'm9', tools: [] });
+  eq(setAgentModel(copy, 'ghost', 'recon', 'm9'), copy);
+  eq(setLeadModel(copy, 'ghost', 'm9'), copy);
+});
+
+await test('setLeadModel stages the coordinator model and keeps other squad fields', () => {
+  const copy = buildWorkingCopy(FIXTURE);
+  const next = setLeadModel(copy, 'dev', 'other/model');
+  eq(next.squads.dev.lead, 'other/model');
+  eq(next.squads.dev.provider, 'openrouter');
+  eq(next.squads.dev.agents, copy.squads.dev.agents);
+});
+
+await test('countDirty counts model, lead, tools, provider, pricing changes', () => {
+  const base = buildWorkingCopy(FIXTURE);
+  // both sides normalized the same way → clean slate (the real app compares
+  // its normalized server read against the working copy)
+  eq(countDirty(base, buildWorkingCopy(FIXTURE)), 0);
+  let next = setAgentModel(base, 'dev', 'recon', 'other/model');
+  eq(countDirty(base, next), 1);
+  next = setLeadModel(next, 'dev', 'lead/model');
+  eq(countDirty(base, next), 2);
+  // tool order is not content (sorted comparison) — reordering is clean
+  const reordered = setAgentModel(base, 'dev', 'recon', 'z-ai/glm-5.3-flash');
+  reordered.squads.dev.agents.recon.tools = ['Bash', 'Read', 'Grep', 'Glob'];
+  eq(countDirty(base, reordered), 0);
+  // but an actual tool change counts
+  const fewer = setAgentModel(base, 'dev', 'recon', 'z-ai/glm-5.3-flash');
+  fewer.squads.dev.agents.recon.tools = ['Read'];
+  eq(countDirty(base, fewer), 1);
+  // pricing edit
+  const priced = buildWorkingCopy(FIXTURE);
+  priced.pricing.openrouter = { 'new/model': { input: 3, output: 4 } };
+  eq(countDirty(base, priced), 1);
+  // provider profile edit
+  const prov = buildWorkingCopy(FIXTURE);
+  prov.providers.anthropic = { ...PROVIDERS.anthropic, baseUrl: 'https://other.example' };
+  eq(countDirty(base, prov), 1);
+  // staging a model on the unconfigured role counts as one change
+  const filled = setAgentModel(base, 'dev', 'debugger', 'some/model');
+  eq(countDirty(base, filled), 1);
+  // leaving the unconfigured role empty stays clean
+  eq(countDirty(base, setAgentModel(base, 'dev', 'debugger', '')), 0);
+});
+
+await test('buildSavePayload sends the full working copy with the dry-run flag', () => {
+  const copy = buildWorkingCopy(FIXTURE);
+  const previewPayload = buildSavePayload(copy, true);
+  eq(Object.keys(previewPayload).sort(), ['dryRun', 'pricing', 'providers', 'squads']);
+  eq(previewPayload.dryRun, true);
+  eq(buildSavePayload(copy, false).dryRun, false);
+  eq(previewPayload.squads, copy.squads);
+  eq(buildSavePayload(null, true).squads, {});
+});
+
+await test('normalizeSaveError keeps validation details, drops non-arrays', () => {
+  const err = new Error('Validation failed');
+  err.data = { error: 'Validation failed', details: ['bad model', 'bad price'] };
+  eq(normalizeSaveError(err), { message: 'Validation failed', details: ['bad model', 'bad price'] });
+  eq(normalizeSaveError(new Error('boom')).details, []);
+  eq(normalizeSaveError({ data: { details: 'junk' } }).details, []);
+  eq(normalizeSaveError(undefined).details, []);
+  eq(normalizeSaveError(42).message, '42');
+});
+
+await test('modelSuggestions = provider models ∪ pricing keys, deduped', () => {
+  eq(
+    modelSuggestions('openrouter', PROVIDERS, { openrouter: { 'z-ai/glm-5.3-flash': {}, 'other/x': {} } }),
+    ['z-ai/glm-5.3-flash', 'google/gemini-2.5-flash-lite', 'other/x']
+  );
+  eq(modelSuggestions('unknown', PROVIDERS, {}), []);
+  eq(modelSuggestions('openrouter', null, null), []); // no provider profile → no suggestions
+  eq(DEFAULT_PROVIDER, 'openrouter');
+});
+
+await test('hasPriceEntry finds pricing rows only for the same provider', () => {
+  const pricing = { openrouter: { 'z-ai/glm-5.3-flash': { input: 1, output: 2 } } };
+  eq(hasPriceEntry('z-ai/glm-5.3-flash', 'openrouter', pricing), true);
+  eq(hasPriceEntry('z-ai/glm-5.3-flash', 'anthropic', pricing), false);
+  eq(hasPriceEntry('z-ai/glm-5.3-flash', 'openrouter', undefined), false);
+});
+
+// --- manager editing helpers ---------------------------------------------------
+
+await test('promptPathFor maps roles to agent files and the coordinator to CLAUDE.md', () => {
+  eq(promptPathFor('dev', 'recon'), 'agents/dev/agents/recon.md');
+  eq(promptPathFor('dev', COORDINATOR_KEY), 'agents/dev/CLAUDE.md');
+  eq(promptPathFor('dev', null), null);
+  eq(promptPathFor(null, 'recon'), null);
+});
+
+await test('stagedModelSummary compares configured vs staged, nulls equal empty', () => {
+  eq(stagedModelSummary('m1', 'm2'), { changed: true, from: 'm1', to: 'm2' });
+  eq(stagedModelSummary(null, ''), { changed: false, from: '', to: '' });
+  eq(stagedModelSummary(null, 'm1'), { changed: true, from: '', to: 'm1' });
+  eq(stagedModelSummary('m1', null), { changed: true, from: 'm1', to: '' });
+});
+
+await test('editingGuardActive turns on for staging or a prompt draft', () => {
+  eq(editingGuardActive(0, false), false);
+  eq(editingGuardActive(2, false), true);
+  eq(editingGuardActive(0, true), true);
+  eq(editingGuardActive(3, true), true);
+  eq(editingGuardActive(NaN, false), false); // junk count never arms the guard
+});
+
+await test('squadRoleCounts: specialists exclude the lead, roster lists all', () => {
+  const [dev, supervisor] = buildBoardModel(FIXTURE);
+  eq(squadRoleCounts(dev), { specialists: 3, total: 4, coordinatorOnly: false });
+  eq(squadRoleCounts(supervisor), { specialists: 0, total: 1, coordinatorOnly: true });
+  eq(squadRoleCounts(null), { specialists: 0, total: 0, coordinatorOnly: false });
+  eq(squadRoleCounts({ cards: 'junk' }), { specialists: 0, total: 0, coordinatorOnly: false });
 });
 
 // --- Summary -----------------------------------------------------------------

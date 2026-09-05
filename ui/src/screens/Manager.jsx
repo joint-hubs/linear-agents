@@ -1,13 +1,18 @@
-// Fenix Manager — tactical board (FOC-225 slice 1 part 1).
-// Read-only view over /api/squad-config: board, roster, inspector. Layout
-// positions are presentation preferences persisted per installation + squad;
-// moving a card never issues a request or changes execution semantics.
-// Configuration editing (staged changes, preview/apply) arrives with
-// slice 1 part 2 — the header reserves the unsaved-change slot.
+// Fenix Manager — tactical board (FOC-225 slice 1).
+// Board, roster and inspector over /api/squad-config. Layout positions are
+// presentation preferences persisted per installation + squad; moving a card
+// never issues a request or changes execution semantics.
+//
+// Slice 1 part 2 adds editing through the SHARED writer: model assignments
+// stage into the same working copy /squad-config uses, go through the same
+// /api/squad-config endpoint (dry-run preview, then explicit apply), and
+// prompt documents edit through the same guarded MarkdownEditor flow the
+// Prompts screen uses. There is no second writer and no silent start of
+// work — every write is a visible staged change first.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { getSquadConfig } from '../api';
+import { getSquadConfig, postSquadConfig } from '../api';
 import { fmtTime } from '../utils.js';
 import { buildBoardModel, installFingerprint, COORDINATOR_KEY } from '../manager/identity.js';
 import {
@@ -16,6 +21,15 @@ import {
   defaultPositions,
   clampPosition,
 } from '../manager/layout.js';
+import { editingGuardActive } from '../manager/editing.js';
+import {
+  buildSavePayload,
+  buildWorkingCopy,
+  countDirty,
+  normalizeSaveError,
+  setAgentModel,
+  setLeadModel,
+} from '../squadConfig/workingCopy';
 import RoleCard from '../components/manager/RoleCard.jsx';
 import { SquadRail, RosterTable } from '../components/manager/Roster.jsx';
 import Inspector from '../components/manager/Inspector.jsx';
@@ -29,6 +43,13 @@ const ARROW_MOVES = {
   ArrowUp: [0, -MOVE_STEP],
   ArrowDown: [0, MOVE_STEP],
 };
+
+const LEAVE_MESSAGE =
+  'Leave with unsaved work? Staged configuration changes and unsaved prompt edits exist only '
+  + 'while this screen is open — leaving now discards them.';
+
+const PROMPT_SWITCH_MESSAGE =
+  'The prompt draft is not saved. Switching role or squad now discards it. Continue?';
 
 function pct(v) {
   return `${Math.round(v)}%`;
@@ -47,6 +68,16 @@ export default function Manager() {
   const [positions, setPositions] = useState({});
   const [draggingKey, setDraggingKey] = useState(null);
   const [announce, setAnnounce] = useState('');
+
+  // --- editing state (slice 1 part 2) ---------------------------------------
+  // working: the shared squad-config working copy (staging). preview: the
+  // dry-run result from /api/squad-config. configSave: per-endpoint outcome —
+  // prompt-file saves are a separate endpoint and report separately (there is
+  // no combined atomic save to claim).
+  const [working, setWorking] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [configSave, setConfigSave] = useState({ phase: 'idle', op: null, result: null, error: null });
+  const [promptDirty, setPromptDirty] = useState(false);
 
   const positionsRef = useRef(positions);
   const boardRef = useRef(null);
@@ -71,7 +102,10 @@ export default function Manager() {
     setLoadError(null);
     try {
       const cfg = await getSquadConfig();
-      setConfig(cfg);
+      // Normalize agents to {model, tools} (same as /squad-config) so the
+      // working copy and countDirty see one canonical shape.
+      const squads = buildWorkingCopy(cfg).squads;
+      setConfig({ ...cfg, squads });
       setReadAt(new Date());
     } catch (err) {
       setLoadError(err);
@@ -83,6 +117,17 @@ export default function Manager() {
   useEffect(() => {
     fetchConfig();
   }, [fetchConfig]);
+
+  // Rebuild the staging working copy whenever a fresh server read lands
+  // (initial load and after a successful apply — applied changes ARE server
+  // state, so staging resets; a successful outcome banner stays visible).
+  useEffect(() => {
+    setWorking(config ? buildWorkingCopy(config) : null);
+    setPreview(null);
+    setConfigSave((prev) =>
+      prev.phase === 'ok' ? prev : { phase: 'idle', op: null, result: null, error: null }
+    );
+  }, [config]);
 
   // Reflect the effective squad selection in the URL (invalid ?squad= falls
   // back to the first squad, and the selector shows exactly that).
@@ -179,10 +224,10 @@ export default function Manager() {
         const p = positionsRef.current[card.key];
         setAnnounce(`${card.key} moved to ${pct(p.x)}, ${pct(p.y)}`);
       } else {
-        setSelectedRole(card.key);
+        selectRole(card.key);
       }
     },
-    [persistLayout]
+    [persistLayout, selectRole]
   );
 
   const onCardKeyDown = useCallback(
@@ -193,10 +238,10 @@ export default function Manager() {
         moveCard(card.key, ARROW_MOVES[e.key][0], ARROW_MOVES[e.key][1]);
       } else if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
-        setSelectedRole(card.key);
+        selectRole(card.key);
       }
     },
-    [moveCard]
+    [moveCard, selectRole]
   );
 
   const resetLayout = useCallback(() => {
@@ -208,9 +253,113 @@ export default function Manager() {
     setAnnounce('layout reset to defaults');
   }, [squad, roleKeys, persistLayout]);
 
-  const onSelectSquad = useCallback((key) => {
-    setSearchParams({ squad: key });
-  }, [setSearchParams]);
+  // --- staging + save (same endpoint and payload as /squad-config) ----------
+
+  const dirtyCount = useMemo(
+    () => (config && working ? countDirty(config, working) : 0),
+    [config, working]
+  );
+
+  const stageAgentModel = useCallback((squadKey, role, value) => {
+    setWorking((prev) => setAgentModel(prev, squadKey, role, value));
+    setPreview(null); // any new edit invalidates a previous dry run
+    setConfigSave({ phase: 'idle', op: null, result: null, error: null });
+  }, []);
+
+  const stageLeadModel = useCallback((squadKey, value) => {
+    setWorking((prev) => setLeadModel(prev, squadKey, value));
+    setPreview(null);
+    setConfigSave({ phase: 'idle', op: null, result: null, error: null });
+  }, []);
+
+  const previewChanges = useCallback(async () => {
+    if (!working) return;
+    setConfigSave({ phase: 'busy', op: 'preview', result: null, error: null });
+    try {
+      const result = await postSquadConfig(buildSavePayload(working, true));
+      setPreview(result);
+      setConfigSave({ phase: 'idle', op: null, result: null, error: null });
+    } catch (e) {
+      setPreview(null);
+      setConfigSave({ phase: 'error', op: 'preview', result: null, error: normalizeSaveError(e) });
+    }
+  }, [working]);
+
+  const applyChanges = useCallback(async () => {
+    // Apply is only reachable after a successful dry run — the same rule the
+    // /squad-config screen enforces.
+    if (!working || !preview) return;
+    setConfigSave({ phase: 'busy', op: 'apply', result: null, error: null });
+    try {
+      const result = await postSquadConfig(buildSavePayload(working, false));
+      setPreview(null);
+      setConfigSave({ phase: 'ok', op: 'apply', result, error: null });
+      await fetchConfig(); // re-read: the applied state is now server truth
+    } catch (e) {
+      setConfigSave({ phase: 'error', op: 'apply', result: null, error: normalizeSaveError(e) });
+    }
+  }, [working, preview, fetchConfig]);
+
+  const discardChanges = useCallback(() => {
+    if (!config) return;
+    setWorking(buildWorkingCopy(config));
+    setPreview(null);
+    setConfigSave({ phase: 'idle', op: null, result: null, error: null });
+  }, [config]);
+
+  // --- unsaved-edit protection ----------------------------------------------
+
+  const guardActive = editingGuardActive(dirtyCount, promptDirty);
+  const promptDirtyRef = useRef(false);
+  promptDirtyRef.current = promptDirty;
+
+  // Closing/reloading the tab with unsaved work asks first.
+  useEffect(() => {
+    if (!guardActive) return undefined;
+    const onBeforeUnload = (e) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [guardActive]);
+
+  // In-app navigation while the guard is active: intercept anchor clicks in
+  // the capture phase and ask. BrowserRouter exposes no data-router blocker,
+  // so the anchor is the interception point.
+  useEffect(() => {
+    if (!guardActive) return undefined;
+    const onDocClick = (e) => {
+      if (e.defaultPrevented || e.button !== 0) return;
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const anchor = e.target?.closest?.('a');
+      if (!anchor) return;
+      const href = anchor.getAttribute('href');
+      if (!href || !href.startsWith('/')) return;
+      if (href === `${window.location.pathname}${window.location.search}`) return;
+      if (!window.confirm(LEAVE_MESSAGE)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    document.addEventListener('click', onDocClick, true);
+    return () => document.removeEventListener('click', onDocClick, true);
+  }, [guardActive]);
+
+  // Switching role/squad while a prompt draft is open would silently drop it
+  // (MarkdownEditor resets on path change) — ask first.
+  const selectRole = useCallback((key) => {
+    if (promptDirtyRef.current && !window.confirm(PROMPT_SWITCH_MESSAGE)) return;
+    setSelectedRole(key);
+  }, []);
+
+  const selectSquad = useCallback(
+    (key) => {
+      if (promptDirtyRef.current && !window.confirm(PROMPT_SWITCH_MESSAGE)) return;
+      setSearchParams({ squad: key });
+    },
+    [setSearchParams]
+  );
 
   // --- Render states -------------------------------------------------------
 
@@ -274,7 +423,7 @@ export default function Manager() {
             <select
               className="mgr-select"
               value={selectedSquad || ''}
-              onChange={(e) => onSelectSquad(e.target.value)}
+              onChange={(e) => selectSquad(e.target.value)}
             >
               {boardModel.map((s) => (
                 <option key={s.key} value={s.key}>
@@ -297,23 +446,160 @@ export default function Manager() {
               Live
             </button>
           </div>
-          <span className="mgr-readonly-badge" title="configuration editing arrives with slice 1 part 2">
-            read-only view
-          </span>
+          {dirtyCount > 0 ? (
+            <span
+              className="mgr-readonly-badge mgr-badge-dirty"
+              title="staged configuration changes — preview (dry run), then apply to write"
+            >
+              {dirtyCount} staged
+            </span>
+          ) : (
+            <span
+              className="mgr-readonly-badge"
+              title="changes stage locally; preview (dry run), then apply writes configuration"
+            >
+              setup · staged editing
+            </span>
+          )}
           <span className="mgr-freshness">
             {readAt ? `config read ${fmtTime(readAt.toISOString())}` : ''}
+            {promptDirty ? ' · prompt draft unsaved' : ''}
           </span>
         </div>
       </header>
+
+      {(dirtyCount > 0 || preview || configSave.phase !== 'idle') && (
+        <section className="mgr-editbar" aria-label="Staged configuration changes">
+          <div className="mgr-editbar-row">
+            {dirtyCount > 0 ? (
+              <span className="mgr-chip mgr-chip-warn">
+                <span aria-hidden="true">✎</span> {dirtyCount} staged change
+                {dirtyCount === 1 ? '' : 's'}
+              </span>
+            ) : (
+              <span className="mgr-muted">no staged changes</span>
+            )}
+            <span className="mgr-editbar-note">
+              installation-global — applies on the next launch · config and prompt saves are
+              separate endpoints, each confirms on its own · provider, pricing and tool edits stay
+              in <code>/squad-config</code>
+            </span>
+            <div className="mgr-editbar-actions">
+              <button
+                type="button"
+                className="mgr-btn mgr-btn-sm"
+                onClick={previewChanges}
+                disabled={dirtyCount === 0 || configSave.phase === 'busy'}
+              >
+                {configSave.phase === 'busy' && configSave.op === 'preview'
+                  ? 'Checking…'
+                  : 'Preview changes'}
+              </button>
+              <button
+                type="button"
+                className="mgr-btn mgr-btn-sm mgr-btn-primary"
+                onClick={applyChanges}
+                disabled={!preview || configSave.phase === 'busy'}
+                title="apply is enabled after a successful dry-run preview"
+              >
+                {configSave.phase === 'busy' && configSave.op === 'apply' ? 'Applying…' : 'Apply'}
+              </button>
+              <button
+                type="button"
+                className="mgr-btn mgr-btn-sm"
+                onClick={discardChanges}
+                disabled={dirtyCount === 0 || configSave.phase === 'busy'}
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+
+          {configSave.error && (
+            <div className="mgr-save-error" role="alert">
+              <p className="mgr-error-title">
+                {configSave.op === 'apply'
+                  ? 'Apply failed — nothing was written; your staged changes are still here.'
+                  : 'Preview failed — nothing was written.'}
+              </p>
+              <p>{configSave.error.message}</p>
+              {configSave.error.details.length > 0 && (
+                <ul>
+                  {configSave.error.details.map((d, i) => (
+                    <li key={i}>{d}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {configSave.phase === 'ok' && configSave.result && (
+            <div className="mgr-save-ok" role="status">
+              <p className="mgr-save-ok-title">
+                ✓ Configuration saved — applies on the next launch of each squad.
+              </p>
+              {configSave.result.changed?.length > 0 && (
+                <p className="mgr-muted">
+                  Changed files:{' '}
+                  {configSave.result.changed.map((c) => (
+                    <code key={c.file}>{c.file}</code>
+                  ))}
+                </p>
+              )}
+            </div>
+          )}
+
+          {preview && (
+            <div className="mgr-preview">
+              <p className="mgr-preview-title">
+                Preview (dry run — nothing has been written yet)
+              </p>
+              {preview.warnings?.length > 0 && (
+                <div className="mgr-warn-note" role="note">
+                  {preview.warnings.map((w, i) => (
+                    <div key={i}>
+                      <span aria-hidden="true">⚠</span> {w}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {preview.changed?.length > 0 ? (
+                <table className="mgr-table mgr-table-tight">
+                  <thead>
+                    <tr>
+                      <th scope="col">File</th>
+                      <th scope="col">Before</th>
+                      <th scope="col">After</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.changed.map((c) => (
+                      <tr key={c.file}>
+                        <td className="mgr-cell-mono">{c.file}</td>
+                        <td className="mgr-cell-mono mgr-diff-before">{c.before}</td>
+                        <td className="mgr-cell-mono mgr-diff-after">{c.after}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="mgr-empty-note">
+                  No changes to apply — the staged copy matches the server state.
+                </p>
+              )}
+            </div>
+          )}
+        </section>
+      )}
 
       <div className="mgr-body">
         <aside className="mgr-rail">
           <SquadRail
             squads={boardModel}
             selectedSquad={selectedSquad}
-            onSelectSquad={onSelectSquad}
+            onSelectSquad={selectSquad}
             selectedRole={selectedRole}
-            onSelectRole={setSelectedRole}
+            onSelectRole={selectRole}
           />
         </aside>
 
@@ -362,7 +648,7 @@ export default function Manager() {
           <RosterTable
             cards={squad.cards}
             selectedRole={selectedRole}
-            onSelectRole={setSelectedRole}
+            onSelectRole={selectRole}
           />
 
           <p className="mgr-board-note">
@@ -373,7 +659,19 @@ export default function Manager() {
         </section>
 
         <aside className="mgr-inspector-panel">
-          <Inspector squad={squad} card={selectedCard} tab={tab} onTab={setTab} />
+          <Inspector
+            squad={squad}
+            card={selectedCard}
+            tab={tab}
+            onTab={setTab}
+            editing={{
+              working,
+              onStageLead: stageLeadModel,
+              onStageModel: stageAgentModel,
+              onPromptDirty: setPromptDirty,
+            }}
+            promptDirty={promptDirty}
+          />
         </aside>
       </div>
 

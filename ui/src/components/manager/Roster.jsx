@@ -2,7 +2,7 @@
 // table fallback (FOC-225). The table is the screen-reader/keyboard source of
 // truth; the board is decorative layout on top of the same data.
 
-import { COORDINATOR_KEY } from '../../manager/identity.js';
+import { COORDINATOR_KEY, squadRoleCounts } from '../../manager/identity.js';
 import { StateChip } from './RoleCard.jsx';
 
 export function SquadRail({ squads, selectedSquad, onSelectSquad, selectedRole, onSelectRole }) {
@@ -12,22 +12,34 @@ export function SquadRail({ squads, selectedSquad, onSelectSquad, selectedRole, 
       <div className="mgr-rail-section">
         <div className="mgr-rail-title">Squads</div>
         <ul className="mgr-squad-list" role="list">
-          {squads.map((s) => (
-            <li key={s.key}>
-              <button
-                type="button"
-                className={`mgr-squad-item${s.key === selectedSquad ? ' mgr-squad-item-active' : ''}`}
-                onClick={() => onSelectSquad(s.key)}
-                aria-current={s.key === selectedSquad ? 'true' : undefined}
-              >
-                <span className={`mgr-squad-dot mgr-squad-${s.key}`} aria-hidden="true" />
-                <span className="mgr-squad-name">{s.key}</span>
-                <span className="mgr-squad-count">
-                  {s.coordinatorOnly ? '0 roles' : `${s.cards.length - 1} role${s.cards.length === 2 ? '' : 's'}`}
-                </span>
-              </button>
-            </li>
-          ))}
+          {squads.map((s) => {
+            const counts = squadRoleCounts(s);
+            return (
+              <li key={s.key}>
+                <button
+                  type="button"
+                  className={`mgr-squad-item${s.key === selectedSquad ? ' mgr-squad-item-active' : ''}`}
+                  onClick={() => onSelectSquad(s.key)}
+                  aria-current={s.key === selectedSquad ? 'true' : undefined}
+                >
+                  <span className={`mgr-squad-dot mgr-squad-${s.key}`} aria-hidden="true" />
+                  <span className="mgr-squad-name">{s.key}</span>
+                  <span
+                    className="mgr-squad-count"
+                    title={
+                      counts.coordinatorOnly
+                        ? 'coordinator only — no specialist roles'
+                        : `${counts.specialists} specialist role${counts.specialists === 1 ? '' : 's'}; the roster below lists ${counts.total} including the lead`
+                    }
+                  >
+                    {counts.coordinatorOnly
+                      ? 'coordinator only'
+                      : `${counts.specialists} role${counts.specialists === 1 ? '' : 's'} + lead`}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </div>
       {selected && (

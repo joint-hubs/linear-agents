@@ -103,3 +103,17 @@ export function buildBoardModel(config) {
       };
     });
 }
+
+// Squad list counts. The rail shows "N roles + lead" so the number matches
+// what the roster lists minus the coordinator — "N roles" alone read as if
+// the roster should have N entries, but it also lists the lead (FOC-225
+// review finding). Malformed squads degrade to honest zeros.
+export function squadRoleCounts(squadModel) {
+  const cards = Array.isArray(squadModel?.cards) ? squadModel.cards : [];
+  const specialists = cards.filter((c) => c && c.key !== COORDINATOR_KEY).length;
+  return {
+    specialists,
+    total: cards.length,
+    coordinatorOnly: squadModel?.coordinatorOnly === true || (cards.length > 0 && specialists === 0),
+  };
+}

@@ -154,3 +154,21 @@ export function normalizeSaveError(err) {
     details: Array.isArray(details) ? details : [],
   };
 }
+
+// Model suggestions for one provider: its models list ∪ its pricing keys —
+// the same suggestion set the SquadConfig editor offers. Free-text input +
+// this datalist is the assignment contract; validation happens server-side
+// at preview/apply.
+export function modelSuggestions(provider, providers, pricing) {
+  const list = [];
+  const profile = providers?.[provider];
+  if (Array.isArray(profile?.models)) list.push(...profile.models);
+  if (pricing?.[provider]) list.push(...Object.keys(pricing[provider]));
+  return [...new Set(list)];
+}
+
+// A model with no pricing entry for its provider silently reports $0 — the
+// editors surface a warning on it (see SquadCard).
+export function hasPriceEntry(slug, provider, pricing) {
+  return !!(pricing && pricing[provider] && pricing[provider][slug]);
+}
