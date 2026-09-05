@@ -26,18 +26,23 @@ export function clampPosition(pos) {
 
 // Coordinator top-center, specialists in a grid below. The grouping is a
 // visual convention, NOT an execution edge — no arrows, no implied order.
+// Columns sit at 16/50/84% because cards are center-anchored — at the board's
+// typical widths that keeps even a 200px card inside the field.
 export function defaultPositions(roleKeys) {
   const positions = {};
   const specialists = roleKeys.filter((k) => k !== COORDINATOR_KEY);
   if (roleKeys.includes(COORDINATOR_KEY)) {
-    positions[COORDINATOR_KEY] = { x: 38, y: 6 };
+    // y=12 keeps the coordinator card's top half inside the board (cards are
+    // center-anchored; 6% put its head above the field at default heights).
+    positions[COORDINATOR_KEY] = { x: 50, y: 12 };
   }
   const perRow = 3;
+  const colX = [16, 50, 84];
   const rowY = [36, 66];
   specialists.forEach((k, i) => {
     const row = Math.floor(i / perRow);
     const col = i % perRow;
-    positions[k] = { x: 6 + col * 32, y: rowY[Math.min(row, rowY.length - 1)] };
+    positions[k] = { x: colX[col], y: rowY[Math.min(row, rowY.length - 1)] };
   });
   return positions;
 }

@@ -311,7 +311,8 @@
 .mgr-card {
   position: absolute;
   transform: translate(-50%, -50%);
-  width: 200px;
+  /* Responsive: three default columns at 16/50/84% must never overlap. */
+  width: clamp(150px, 30%, 210px);
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -362,11 +363,11 @@
 
 .mgr-coord-tag {
   font-size: 10px;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--sq-supervisor);
-  margin-left: 5px;
+  margin-bottom: 3px;
 }
 
 .mgr-card-model {

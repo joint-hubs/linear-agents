@@ -195,15 +195,15 @@ await test('clampPosition clamps to 0..100 and coerces junk to 0', () => {
 
 await test('defaultPositions puts coordinator top-center, specialists below', () => {
   const pos = defaultPositions([COORDINATOR_KEY, 'a', 'b', 'c']);
-  eq(pos[COORDINATOR_KEY], { x: 38, y: 6 });
-  eq(pos.a, { x: 6, y: 36 });
-  eq(pos.b, { x: 38, y: 36 });
-  eq(pos.c, { x: 70, y: 36 });
+  eq(pos[COORDINATOR_KEY], { x: 50, y: 12 });
+  eq(pos.a, { x: 16, y: 36 });
+  eq(pos.b, { x: 50, y: 36 });
+  eq(pos.c, { x: 84, y: 36 });
 });
 
 await test('defaultPositions: extra rows and coordinator-less squads work', () => {
   const pos = defaultPositions(['a', 'b', 'c', 'd']);
-  eq(pos.d, { x: 6, y: 66 });
+  eq(pos.d, { x: 16, y: 66 });
   eq(COORDINATOR_KEY in pos, false);
 });
 

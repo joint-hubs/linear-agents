@@ -53,12 +53,10 @@ export default function RoleCard({
       onKeyDown={onKeyDown}
     >
       <div className="mgr-card-head">
-        <span className="mgr-card-role">
-          {roleKey}
-          {isCoordinator && <span className="mgr-coord-tag">coordinator</span>}
-        </span>
+        <span className="mgr-card-role">{roleKey}</span>
         <StateChip state={card.modelState} />
       </div>
+      {isCoordinator && <div className="mgr-coord-tag">coordinator</div>}
       <div className="mgr-card-model">
         {card.model || <span className="mgr-card-nomodel">no model assigned</span>}
       </div>

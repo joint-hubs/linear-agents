@@ -115,7 +115,7 @@ conflating them here is the exact failure the design forbids).
 
 1. **Pointer drag** on a card (grab cursor; card lifts with shadow while dragged; no animation loops).
 2. **Keyboard**: card is focusable (`Tab`); when focused, `Arrow keys` move by step, `Shift+Arrow`
-   moves by large step, `Enter`/`Esc` deselects; a visible "Reset layout" button restores defaults.
+   moves by large step, `Enter` selects the role (opens the inspector); a visible "Reset layout" button restores defaults.
    Focus never moves the card silently: every move is announced by a visually-hidden live region
    ("recon moved to 34%, 60%").
 3. Positions are normalized `{x, y}` percentages clamped to the board bounds; they persist per
