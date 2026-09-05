@@ -3,7 +3,23 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-08-25 — Provider profiles (per-squad LLM provider): spec + ADR Accepted, implementation in parallel slices
+## Current execution: 2026-09-05 — Fenix stabilization
+
+- Approved roadmap: `docs/plans/fenix-stabilization-and-learning.md`.
+- Branch: `chore/fenix-stabilization-learning`, starting at `71a2962`. Bootstrap checkpoint: `18785c2` (35 prompt/model/launcher files, scoped staging; checks passed). This is not independent squad delivery acceptance. No push. Pre-existing telemetry/runtime/tooling changes remain uncommitted and preserved.
+- Recovery artifacts (local, not published): `.state/fenix-stabilization/git-before.patch`, `git-before.json`, `untracked-before/`; Linear project snapshot `linear-before.json` in the same directory.
+- Baseline: `check.mjs` FAIL (24 model-map violations); `config-drift.test.mjs` 22 PASS / 1 FAIL (frontman model missing cacheRead); `provider-resolve.test.mjs` 14 PASS. The compound shell's exit 0 was the last suite only, not an overall pass.
+- Authorized: scoped verified local commits; exact GLM 5.3 Flash for PLAN/DEV/REVIEW/TEST; no additional budget cap. Frontman model, unrelated squads and provider tiers remain unchanged.
+- Linear migration completed: `docs/plans/fenix-linear-reconciliation.md`. New FOC-216–224; FOC-110 retained as F5; 12 verified dependency relations; FOC-108/107/105 canceled with successors. No task marked Done.
+- Bootstrap checks: `check.mjs` 0 violations, `config-drift.test.mjs` 23/23, `provider-resolve.test.mjs` 14/14, brain-order 6/6. All 24 execution role models and four routing sections match exact GLM Flash. Actual stream identity remains unverified; no operational child started.
+- Frontman cache prices verified against the public OpenRouter catalogue (2026-09-05T21:01:09Z): cache-read 1, cache-write 12.5 USD/M. Context-tier pricing and GLM catalogue-rate drift remain explicitly tracked in FOC-165.
+- Full `node scripts/test-all.mjs` launched on the combined working tree; result pending at this checkpoint. Affected-file lookup returned only a Markdown path, not usable test coverage, so explicit relevant suites were run instead.
+- First operational task: FOC-217. Triage proposed DEV (`confidence: high`, `requiresConfirmation: true`), based on existing AC; unknowns: no standalone DoD section, no estimate. This differs from the requested PLAN-first sequence. No verdict recorded and no child spawned; confirmation is not inferred from roadmap approval.
+- Next: inspect full-suite results, independently verify preserved batches, and resolve the routing gate before paid squad work. Existing uncommitted runtime/telemetry files are not present in a worktree seeded from HEAD; FOC-217 must receive explicit preserved artifacts rather than assume they are committed.
+- Existing HITL/triage confirmations remain required. Push/PR and cleanup are not authorized by the roadmap. Spend for operational children in this initiative: none started; frontman/planning costs are not included in that statement.
+- Older sections below are historical context, not the current model or execution policy.
+
+## Historical update: 2026-08-25 — Provider profiles (per-squad LLM provider): spec + ADR Accepted, implementation in parallel slices
 
 **Provider profiles — per-squad LLM provider.** Specyfikacja i decyzja architektoniczna gotowe;
 implementacja leci równoległymi slice'ami.
