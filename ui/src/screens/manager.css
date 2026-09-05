@@ -1,0 +1,711 @@
+/* Fenix Manager — scoped manager styles (FOC-225).
+   Everything lives under .mgr and derives from the existing theme tokens in
+   theme.css (graphite surfaces, --sq-* squad accents). No new global rules,
+   no external assets, no game artwork. Motion is transition-only and dies
+   under prefers-reduced-motion. */
+
+.mgr {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 100%;
+}
+
+.mgr-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.mgr-muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* --- header -------------------------------------------------------------- */
+
+.mgr-header {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+
+.mgr-header-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.mgr-title {
+  font-size: 16px;
+  font-weight: 650;
+  margin: 0;
+  letter-spacing: 0.2px;
+}
+
+.mgr-squad-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mgr-squad-label-text {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+
+.mgr-select {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+
+.mgr-mode {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.mgr-mode-btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  border: 0;
+  background: var(--surface);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.mgr-mode-btn + .mgr-mode-btn {
+  border-left: 1px solid var(--border-strong);
+}
+
+.mgr-mode-btn.mgr-mode-active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.mgr-mode-btn:disabled {
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+.mgr-readonly-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-2);
+  background: var(--surface-2);
+}
+
+.mgr-freshness {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+/* --- body grid ----------------------------------------------------------- */
+
+.mgr-body {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr) 320px;
+  gap: 12px;
+  align-items: start;
+}
+
+/* --- left rail ----------------------------------------------------------- */
+
+.mgr-rail {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mgr-rail-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.mgr-squad-list,
+.mgr-roster {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mgr-squad-item,
+.mgr-roster-item {
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.mgr-squad-item:hover,
+.mgr-roster-item:hover {
+  background: var(--surface-2);
+}
+
+.mgr-squad-item-active,
+.mgr-squad-item-active:hover {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.mgr-roster-item-active,
+.mgr-roster-item-active:hover {
+  background: var(--surface-2);
+  outline: 1px solid var(--border-strong);
+}
+
+.mgr-squad-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--faint);
+  flex: none;
+}
+
+.mgr-squad-plan { background: var(--sq-plan); }
+.mgr-squad-dev { background: var(--sq-dev); }
+.mgr-squad-review { background: var(--sq-review); }
+.mgr-squad-test { background: var(--sq-test); }
+.mgr-squad-cadence { background: var(--sq-cadence); }
+.mgr-squad-supervisor { background: var(--sq-supervisor); }
+
+.mgr-squad-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mgr-squad-count {
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.mgr-roster-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12.5px;
+}
+
+.mgr-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.mgr-dot-configured { background: var(--ok); }
+.mgr-dot-unconfigured { background: var(--faint); }
+.mgr-dot-unknown { background: var(--warn); }
+
+.mgr-empty-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 4px 0;
+  line-height: 1.45;
+}
+
+/* --- board --------------------------------------------------------------- */
+
+.mgr-center {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mgr-boardbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mgr-viewtoggle {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.mgr-btn {
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.mgr-btn:hover {
+  background: var(--surface-2);
+}
+
+.mgr-btn-sm {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+.mgr-btn[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.mgr-board {
+  position: relative;
+  min-height: 480px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background-color: var(--surface-2);
+  background-image: radial-gradient(var(--border-strong) 1px, transparent 1px);
+  background-size: 24px 24px;
+  overflow: hidden;
+}
+
+.mgr-card {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 200px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  padding: 8px 10px;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.mgr-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mgr-card-selected {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-lg);
+}
+
+.mgr-card-dragging {
+  cursor: grabbing;
+  box-shadow: var(--shadow-lg);
+  border-color: var(--accent);
+}
+
+.mgr-card-coordinator {
+  border-width: 2px;
+}
+
+.mgr-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.mgr-card-role {
+  font-weight: 650;
+  font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mgr-coord-tag {
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--sq-supervisor);
+  margin-left: 5px;
+}
+
+.mgr-card-model {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mgr-card-nomodel {
+  color: var(--faint);
+  font-family: var(--mono);
+}
+
+.mgr-card-tools {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mgr-board-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* --- status chips (icon + text, never color alone) ----------------------- */
+
+.mgr-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.mgr-chip-ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.mgr-chip-neutral {
+  background: var(--surface-2);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+}
+
+.mgr-chip-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.mgr-chip-run {
+  background: var(--run-soft);
+  color: var(--run);
+}
+
+.mgr-chip-fail {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* --- roster table fallback ---------------------------------------------- */
+
+.mgr-table-wrap {
+  display: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.mgr-view-list .mgr-board {
+  display: none;
+}
+
+.mgr-view-list .mgr-table-wrap {
+  display: block;
+}
+
+.mgr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.mgr-table-caption {
+  text-align: left;
+  font-size: 11px;
+  color: var(--muted);
+  padding: 8px 10px 0;
+}
+
+.mgr-table th,
+.mgr-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mgr-table thead th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.mgr-table tbody tr {
+  cursor: pointer;
+}
+
+.mgr-table tbody tr:hover {
+  background: var(--surface-2);
+}
+
+.mgr-row-selected,
+.mgr-row-selected:hover {
+  background: var(--accent-soft);
+}
+
+.mgr-cell-mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.mgr-table-tight th,
+.mgr-table-tight td {
+  padding: 4px 8px;
+}
+
+/* --- inspector ------------------------------------------------------------ */
+
+.mgr-inspector-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  min-width: 0;
+}
+
+.mgr-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+
+.mgr-tab {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.mgr-tab:hover {
+  color: var(--text);
+}
+
+.mgr-tab-active {
+  color: var(--accent-strong);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+/* Reserved slot for the slice-1-part-2 unsaved-edit dot; empty now. */
+.mgr-tab-unsaved-slot {
+  display: inline-block;
+  width: 0;
+  height: 0;
+}
+
+.mgr-tabpanel {
+  font-size: 13px;
+  min-height: 200px;
+}
+
+.mgr-profile {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  margin: 0;
+}
+
+.mgr-profile dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  padding-top: 2px;
+}
+
+.mgr-profile dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mgr-tool-list {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.mgr-inspector-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  margin: 0 0 8px;
+  line-height: 1.45;
+}
+
+.mgr-prompt {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mgr-pending {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--surface-2);
+}
+
+.mgr-pending-title {
+  font-weight: 650;
+  font-size: 13px;
+  margin: 0 0 4px;
+}
+
+/* --- loading / error / empty --------------------------------------------- */
+
+.mgr-loading,
+.mgr-error,
+.mgr-empty {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.mgr-skeleton {
+  height: 60px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--border) 50%, var(--surface-2) 75%);
+  background-size: 200% 100%;
+  animation: mgr-pulse 1.4s ease infinite;
+  margin-bottom: 10px;
+}
+
+.mgr-skeleton-wide {
+  height: 120px;
+}
+
+@keyframes mgr-pulse {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+.mgr-error {
+  border-color: var(--danger);
+}
+
+.mgr-error-title {
+  font-weight: 650;
+  color: var(--danger);
+  margin: 0 0 8px;
+}
+
+.mgr-error code,
+.mgr-empty code,
+.mgr-loading code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: var(--surface-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* --- responsive ----------------------------------------------------------- */
+
+@media (max-width: 1180px) {
+  .mgr-body {
+    grid-template-columns: 180px minmax(0, 1fr);
+  }
+
+  .mgr-inspector-panel {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 900px) {
+  .mgr-body {
+    grid-template-columns: 1fr;
+  }
+
+  /* Narrow screens: the accessible roster table replaces the board. */
+  .mgr-board {
+    display: none;
+  }
+
+  .mgr-table-wrap {
+    display: block;
+  }
+}
+
+/* --- reduced motion ------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .mgr-card,
+  .mgr-skeleton {
+    transition: none;
+    animation: none;
+  }
+}

@@ -1,5 +1,6 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom';
+import Manager from './screens/Manager.jsx';
 import Live from './screens/Live.jsx';
 import Timeline from './screens/Timeline.jsx';
 import Runs from './screens/Runs.jsx';
@@ -12,6 +13,13 @@ import Prompts from './screens/Prompts.jsx';
 
 // Minimal 17px stroke icons (no icon-lib dependency).
 const I = {
+  manager: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="8" height="7" rx="1.5" />
+      <rect x="13" y="4" width="8" height="7" rx="1.5" />
+      <rect x="8" y="14" width="8" height="7" rx="1.5" />
+    </svg>
+  ),
   live: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
@@ -90,6 +98,7 @@ export default function App() {
             </div>
           </div>
           <nav className="nav">
+            <NavItem to="/manager" icon={I.manager}>Manager</NavItem>
             <NavItem to="/" end icon={I.live}>Live</NavItem>
             <NavItem to="/timeline" icon={I.timeline}>Timeline</NavItem>
             <NavItem to="/runs" icon={I.runs}>Runs</NavItem>
@@ -107,6 +116,7 @@ export default function App() {
         <div className="main">
           <div className="page">
             <Routes>
+              <Route path="/manager" element={<Manager />} />
               <Route path="/" element={<Live />} />
               <Route path="/timeline" element={<Timeline />} />
               <Route path="/runs" element={<Runs />} />

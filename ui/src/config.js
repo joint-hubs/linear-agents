@@ -4,8 +4,11 @@
 // "jointhubs" — overridable at build time via VITE_LINEAR_WORKSPACE_PISI
 // / VITE_LINEAR_WORKSPACE_JOINTHUBS for forks that use different workspaces.
 // Falls back to the project defaults so existing setups keep working.
-const WORKSPACE_PISI = import.meta.env.VITE_LINEAR_WORKSPACE_PISI || 'pisi';
-const WORKSPACE_JOINTHUBS = import.meta.env.VITE_LINEAR_WORKSPACE_JOINTHUBS || 'jointhubs';
+// The env access is guarded: the pure-Node test suite (_test_utils.mjs,
+// JOI-71) imports this file outside Vite, where import.meta.env is undefined.
+const VITE_ENV = import.meta.env || {};
+const WORKSPACE_PISI = VITE_ENV.VITE_LINEAR_WORKSPACE_PISI || 'pisi';
+const WORKSPACE_JOINTHUBS = VITE_ENV.VITE_LINEAR_WORKSPACE_JOINTHUBS || 'jointhubs';
 
 // Linear issue URL prefix map. A task chip renders as an ↗ link when its
 // prefix is known here, otherwise plain text.
