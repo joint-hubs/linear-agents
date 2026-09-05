@@ -1,6 +1,6 @@
 ---
 name: flash
-description: DEV squad — mechanical micro-tasks per strict instruction (extract/format/checklist/grep/table). DeepSeek V4 Flash.
+description: DEV squad — mechanical extraction, formatting and checklists under a strict task contract.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write, Bash, Edit
 ---

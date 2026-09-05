@@ -1,6 +1,6 @@
 ---
 name: worker
-description: TEST squad — cheap helper: log analysis, report drafts, synthetic data per pattern. MiniMax M3.
+description: TEST squad — bounded log analysis, evidence reports and synthetic fixture drafts.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Edit, Write
 ---

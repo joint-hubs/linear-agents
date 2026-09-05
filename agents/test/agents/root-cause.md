@@ -1,6 +1,6 @@
 ---
 name: root-cause
-description: TEST squad — diagnose test/deploy failures (escalation). GLM-5.2.
+description: TEST squad — reproduce and diagnose verification or deployment failures without blind retries.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Bash
 ---

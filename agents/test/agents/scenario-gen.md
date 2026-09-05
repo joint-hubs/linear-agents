@@ -1,6 +1,6 @@
 ---
 name: scenario-gen
-description: TEST squad — generate test scenarios (synthetic data). DeepSeek V4 Flash.
+description: TEST squad — derive observable acceptance and negative scenarios using synthetic data.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write
 ---

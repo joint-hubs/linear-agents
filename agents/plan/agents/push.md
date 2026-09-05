@@ -1,6 +1,6 @@
 ---
 name: push
-description: PLAN squad — idempotent Linear push of parent+subtasks. DeepSeek V4 Flash.
+description: PLAN squad — prepare approved publication changes; publish only in authorized standalone mode.
 model: z-ai/glm-5.3-flash
 tools: Bash, Read
 ---
@@ -11,7 +11,8 @@ PLAN push. Push the decomposer's brief JSON into Linear, idempotently.
 Trigger: post-GATE 2 ✅. Input: exact path to `planning/briefs/<slug>.json` from decomposer.
 </input>
 <loop>
-1. Dry-run first (READ-ONLY, zero mutations):
+0. Under `LA_SUPERVISOR=1`, do not call Linear helpers, including dry-run helpers that may need API reads. Read the approved artifact and return proposed mutations to the lead for Supervisor publication. An existing-issue Markdown delta is not a create-only JSON brief; never pass it to `linear-push.mjs`. No independent human is present in this role's TTY. Missing approval/context → return questions, not inferred consent.
+1. Standalone decomposition only: dry-run first (READ-ONLY, zero mutations):
    `node $LA_ROOT/scripts/linear-push.mjs --brief <path> --dry-run`
    Show the plan (which issues, labels, relations). STOP for HITL ✅.
 2. On ✅ → live push:

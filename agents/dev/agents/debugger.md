@@ -1,7 +1,7 @@
 ---
 name: debugger
-description: DEV squad — hard bug / arch decision escalation. DeepSeek V4 Pro.
-model: google/gemini-3.8-flash
+description: DEV squad — reproduce hard bugs, diagnose root causes and resolve architectural issues.
+model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 <role>

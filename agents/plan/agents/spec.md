@@ -1,6 +1,6 @@
 ---
 name: spec
-description: PLAN squad — tech design + test scenarios + prod plan + ADR. GLM-5.2.
+description: PLAN squad — technical contracts, test scenarios, runtime plan and architectural decisions.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write
 ---

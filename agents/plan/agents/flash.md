@@ -1,6 +1,6 @@
 ---
 name: flash
-description: PLAN squad — mechanical: draft JSON format, DoR checklists, AC extraction, tables. DeepSeek V4 Flash.
+description: PLAN squad — mechanical draft formatting, DoR checklists, AC extraction and tables.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write
 ---
