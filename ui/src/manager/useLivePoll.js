@@ -18,9 +18,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getManagerSnapshot } from '../api';
-import { nextPollIntervalMs, shouldPoll } from './live';
+import { POLL_BASE_MS, nextPollIntervalMs, shouldPoll } from './live';
 
-export default function useLivePoll({ enabled = false, tick = enabled, intervalMs = 5000, fetcher = getManagerSnapshot } = {}) {
+export default function useLivePoll({ enabled = false, tick = enabled, intervalMs = POLL_BASE_MS, fetcher = getManagerSnapshot } = {}) {
   const [snapshot, setSnapshot] = useState(null);
   const [error, setError] = useState(null);
   const [lastSuccessAt, setLastSuccessAt] = useState(null);
@@ -69,8 +69,9 @@ export default function useLivePoll({ enabled = false, tick = enabled, intervalM
   }, [enabled, runFetch]);
 
   // Tick loop. The interval is re-created whenever the backoff changes —
-  // backoffRef alone cannot reschedule a setInterval, so backoffMs is state.
-  // tick=false (Setup) seeds one snapshot and pauses the repetition.
+  // backoffRef alone cannot reschedule a setInterval, so backoffMs is state
+  // kept in sync with the ref here. tick=false (Setup) seeds one snapshot
+  // and pauses the repetition.
   const [backoffMs, setBackoffMs] = useState(intervalMs);
   useEffect(() => {
     setBackoffMs(backoffRef.current);
@@ -110,7 +111,7 @@ export default function useLivePoll({ enabled = false, tick = enabled, intervalM
     tickRef.current = tick;
   }, [tick, runFetch]);
 
-  // keep backoffMs in sync with the ref for callers inspecting state
+  // Manual refresh (Retry button) — same skip rules as a tick.
   const refresh = useCallback(() => {
     if (shouldPoll({ enabled: enabledRef.current, inFlight: inFlightRef.current, hidden: document.hidden })) {
       runFetch();
