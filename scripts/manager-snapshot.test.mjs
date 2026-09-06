@@ -116,11 +116,11 @@ test("buildManagerSnapshot: per-squad grouping, bounds, fresh source, injected n
     mkdirSync(supRoot, { recursive: true });
     writeGate(supRoot, "runA", "g1.json", { gateId: "g1", runId: "runA", squad: "dev", kind: "question", createdAt: "2026-08-20T09:00:00.000Z", status: "pending" });
     writeManifest(join(dir, "manifests"), "dev-act-1", { consolePid: 4242 });
-    const snapshot = buildManagerSnapshot({
+    const snapshot = await buildManagerSnapshot({
       db,
       supervisorRoot: supRoot,
       runsManifestDir: join(dir, "manifests"),
-      isProcessAlive: () => true,
+      checkProcessesAlive: async (pids) => new Map(pids.map((p) => [p, true])),
       now: () => "2026-09-06T00:00:00.000Z",
     });
 
@@ -167,7 +167,7 @@ test("acceptance: latest round wins, case-insensitive match, fail never accepts,
     writeVerdict(supRoot, "runB", "foc-911-round3.json", { taskId: "FOC-911", round: 3, verdict: "pass", recordedAt: "2026-08-21T12:00:00.000Z" });
     writeVerdict(supRoot, "runB", "foc-912-round1.json", { taskId: "FOC-912", round: 1, verdict: "pass", recordedAt: "2026-08-11T12:00:00.000Z" });
     writeVerdict(supRoot, "runB", "foc-91-round9.json", { taskId: "FOC-91", round: 9, verdict: "pass", recordedAt: "2026-08-21T12:00:00.000Z" });
-    const snapshot = buildManagerSnapshot({ db, supervisorRoot: supRoot });
+    const snapshot = await buildManagerSnapshot({ db, supervisorRoot: supRoot });
 
     assert(!("FOC-910" in snapshot.acceptedByTask), "latest fail verdict must not leave the task accepted");
     const acc911 = snapshot.acceptedByTask["FOC-911"];
@@ -198,11 +198,14 @@ test("liveness: checker true/false, manifest absent, no pid, and the 10-check ca
     }
     let calls = 0;
     const aliveByPid = { 101: true, 102: false };
-    const snapshot = buildManagerSnapshot({
+    const snapshot = await buildManagerSnapshot({
       db,
       supervisorRoot: null,
       runsManifestDir: join(dir, "manifests"),
-      isProcessAlive: (pid) => { calls++; return aliveByPid[pid] ?? true; },
+      checkProcessesAlive: async (pids) => {
+        calls += pids.length;
+        return new Map(pids.map((p) => [p, aliveByPid[p] ?? true]));
+      },
     });
 
     assertAlive("dev-act-1", snapshot, true, "liveness");
@@ -216,6 +219,57 @@ test("liveness: checker true/false, manifest absent, no pid, and the 10-check ca
     assert(capped.some((m) => m.scope === "run:dev-act-11") && capped.some((m) => m.scope === "run:dev-act-12"), "capped runs undocumented");
     // supervisorRoot null is documented, not silent
     assert(snapshot.missing.some((m) => m.scope === "supervisor" && m.field === "state"), "absent supervisor root undocumented");
+  } finally {
+    try { if (db) db.close(); } catch { /* already closed */ }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("liveness: a failed checker is unknown + documented — never a fake dead process", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mgr-snap-"));
+  let db;
+  try {
+    db = openTelemetryDb(join(dir, "t.sqlite"));
+    seedRun(db, { runId: "dev-act-1", squad: "dev", startedAt: "2026-08-20T10:05:00.000Z", status: "running" });
+    writeManifest(join(dir, "manifests"), "dev-act-1", { consolePid: 501 });
+    const snapshot = await buildManagerSnapshot({
+      db,
+      supervisorRoot: null,
+      runsManifestDir: join(dir, "manifests"),
+      checkProcessesAlive: async () => {
+        throw new Error("powershell broke");
+      },
+    });
+    assertAlive("dev-act-1", snapshot, null, "checker failure");
+    const failed = snapshot.missing.filter((m) => m.reason === "liveness checker failed");
+    assert(failed.length === 1 && failed[0].scope === "run:dev-act-1", `checker failure undocumented: ${JSON.stringify(failed)}`);
+  } finally {
+    try { if (db) db.close(); } catch { /* already closed */ }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("liveness: a partial checker answer keeps unanswered pids unknown + documented", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mgr-snap-"));
+  let db;
+  try {
+    db = openTelemetryDb(join(dir, "t.sqlite"));
+    seedRun(db, { runId: "dev-act-1", squad: "dev", startedAt: "2026-08-20T10:05:00.000Z", status: "running" });
+    seedRun(db, { runId: "dev-act-2", squad: "dev", startedAt: "2026-08-20T10:04:00.000Z", status: "running" });
+    writeManifest(join(dir, "manifests"), "dev-act-1", { consolePid: 601 });
+    writeManifest(join(dir, "manifests"), "dev-act-2", { consolePid: 602 });
+    const snapshot = await buildManagerSnapshot({
+      db,
+      supervisorRoot: null,
+      runsManifestDir: join(dir, "manifests"),
+      checkProcessesAlive: async (pids) => new Map([[pids[0], true]]), // second pid missing from the answer
+    });
+    assertAlive("dev-act-1", snapshot, true, "partial checker");
+    assertAlive("dev-act-2", snapshot, null, "partial checker");
+    assert(
+      snapshot.missing.some((m) => m.scope === "run:dev-act-2" && m.reason === "liveness result missing"),
+      "missing checker answer undocumented",
+    );
   } finally {
     try { if (db) db.close(); } catch { /* already closed */ }
     rmSync(dir, { recursive: true, force: true });
@@ -243,7 +297,7 @@ test("supervisor scan: pending gates only, malformed documented, 20-dir mtime ca
     // squad-less pending gate lands under 'unknown'
     writeGate(supRoot, "run-25", "nosquad.json", { gateId: "g-nosquad", kind: "question", status: "pending" });
 
-    const snapshot = buildManagerSnapshot({ db, supervisorRoot: supRoot });
+    const snapshot = await buildManagerSnapshot({ db, supervisorRoot: supRoot });
     const squadKeys = Object.keys(snapshot.squads).sort();
     // 20 scanned gate squads (sq-06..sq-25) + dev/plan from the store fixture
     assert(squadKeys.filter((k) => k.startsWith("sq-")).length === 20, `expected 20 scanned gate squads, got ${squadKeys.length}: ${squadKeys}`);
@@ -267,7 +321,7 @@ test("run with no squad in the store → 'unknown' bucket + documented missing e
   try {
     db = openTelemetryDb(join(dir, "t.sqlite"));
     seedRun(db, { runId: "ghost-1", squad: null, startedAt: "2026-08-20T10:00:00.000Z", status: "running" });
-    const snapshot = buildManagerSnapshot({ db, supervisorRoot: null, runsManifestDir: null });
+    const snapshot = await buildManagerSnapshot({ db, supervisorRoot: null, runsManifestDir: null });
     assert(snapshot.squads.unknown && snapshot.squads.unknown.active.some((r) => r.runId === "ghost-1"), "squad-less run not reported");
     assert(snapshot.missing.some((m) => m.scope === "run:ghost-1" && m.field === "squad"), "squad-less run undocumented");
   } finally {
@@ -349,7 +403,7 @@ test("read-only proof: the whole snapshot build runs under PRAGMA query_only", a
     writer.close();
     ro = new DatabaseSync(path);
     ro.exec("PRAGMA query_only = 1;");
-    const snapshot = buildManagerSnapshot({ db: ro, supervisorRoot: null, runsManifestDir: null });
+    const snapshot = await buildManagerSnapshot({ db: ro, supervisorRoot: null, runsManifestDir: null });
     assert(snapshot.squads.dev.active.length === 1 && snapshot.squads.dev.recent.length === 2, "read-only build returned wrong sets");
   } finally {
     try { if (ro) ro.close(); } catch { /* already closed */ }

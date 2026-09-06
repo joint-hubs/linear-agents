@@ -5,7 +5,7 @@
 //   1. the telemetry store via queryManagerRuns() (bounded, allowlisted —
 //      never makeRunProjection, never queryRuns);
 //   2. console manifests under .state/runs/<runId>.json for the liveness of
-//      ACTIVE runs only (existing isProcessAlive pattern, capped);
+//      ACTIVE runs only (one batched async checker spawn per build, capped);
 //   3. supervisor state under .state/supervisor/<runId>/: pending gate
 //      records and recorded verdicts (latest round per task).
 // No raw-log scanning, no CLI spawns, no writes. The v1 contract below is
@@ -68,6 +68,12 @@ function readPendingGates(dir, runId, missingList) {
     try {
       const gate = JSON.parse(readFileSync(join(gatesDir, file), "utf8"));
       if (gate?.status !== "pending") continue;
+      // Sub-field gaps go through the same missing[] discipline as everything
+      // else — a fallback (gateId/runId) or a null (squad/kind/createdAt) is
+      // reported, never silently swallowed.
+      for (const field of ["gateId", "runId", "squad", "kind", "createdAt"]) {
+        if (gate?.[field] == null) missing(missingList, `gate:${runId}/${file}`, field, "pending gate record missing field");
+      }
       out.push({
         gateId: gate.gateId ?? file.replace(/\.json$/, ""),
         runId: gate.runId ?? runId,
@@ -98,6 +104,11 @@ function readAcceptedVerdicts(dirs, taskIdsLower, missingList) {
       if (!taskIdsLower.includes(task) || !Number.isInteger(round)) continue;
       try {
         const record = JSON.parse(readFileSync(join(verdictsDir, file), "utf8"));
+        // Same discipline as gates: a record with absent sub-fields is still
+        // usable where a fallback exists, but the gap is reported.
+        for (const field of ["round", "verdict", "recordedAt"]) {
+          if (record?.[field] == null) missing(missingList, `verdict:${runId}/${file}`, field, "verdict record missing field");
+        }
         const current = best.get(task);
         if (!current || round > current.round) {
           best.set(task, {
@@ -115,12 +126,12 @@ function readAcceptedVerdicts(dirs, taskIdsLower, missingList) {
   return best;
 }
 
-export function buildManagerSnapshot(deps = {}) {
+export async function buildManagerSnapshot(deps = {}) {
   const {
     db,
     supervisorRoot,
     runsManifestDir,
-    isProcessAlive = null,
+    checkProcessesAlive = null,
     now = () => new Date().toISOString(),
     scanLimit = MANAGER_SNAPSHOT_SCAN_LIMIT,
     livenessCap = MANAGER_SNAPSHOT_LIVENESS_CAP,
@@ -136,14 +147,19 @@ export function buildManagerSnapshot(deps = {}) {
 
   // Liveness for ACTIVE runs only: manifest consolePid → injected checker.
   // null means "cannot tell" and is documented, never guessed into a state.
-  let checks = 0;
+  // Pass 1 (sync) resolves manifests and collects the pids to probe within
+  // the cap; pass 2 asks the checker for ALL of them in ONE batch — the
+  // checker is async and must never block the event loop per pid (the
+  // per-pid execSync variant froze every endpoint for the whole build,
+  // review round 1 blocker).
+  const toProbe = [];
   for (const run of active) {
     run.alive = null;
     if (!runsManifestDir) {
       missing(missingList, `run:${run.runId}`, "alive", "no manifest dir configured");
       continue;
     }
-    if (checks >= livenessCap) {
+    if (toProbe.length >= livenessCap) {
       missing(missingList, `run:${run.runId}`, "alive", "liveness cap reached");
       continue;
     }
@@ -159,14 +175,28 @@ export function buildManagerSnapshot(deps = {}) {
         missing(missingList, `run:${run.runId}`, "alive", "no console pid recorded");
         continue;
       }
-      if (typeof isProcessAlive !== "function") {
-        missing(missingList, `run:${run.runId}`, "alive", "liveness checker unavailable");
-        continue;
-      }
-      run.alive = isProcessAlive(pid) === true;
-      checks++;
+      toProbe.push({ run, pid });
     } catch {
       missing(missingList, `run:${run.runId}`, "alive", "console manifest unreadable");
+    }
+  }
+  if (toProbe.length) {
+    if (typeof checkProcessesAlive !== "function") {
+      for (const { run } of toProbe) missing(missingList, `run:${run.runId}`, "alive", "liveness checker unavailable");
+    } else {
+      try {
+        const aliveMap = await checkProcessesAlive(toProbe.map(({ pid }) => pid));
+        for (const { run, pid } of toProbe) {
+          const alive = aliveMap instanceof Map ? aliveMap.get(pid) : undefined;
+          if (alive === true || alive === false) run.alive = alive;
+          else missing(missingList, `run:${run.runId}`, "alive", "liveness result missing");
+        }
+      } catch {
+        // A broken checker is NOT a dead process: alive stays null (unknown)
+        // and the gap is documented — false would fake a state the server
+        // cannot know.
+        for (const { run } of toProbe) missing(missingList, `run:${run.runId}`, "alive", "liveness checker failed");
+      }
     }
   }
 
@@ -246,8 +276,9 @@ export function buildManagerSnapshot(deps = {}) {
 // Module-level cache: TTL + single-flight. A request arriving while a compute
 // is in flight gets the PREVIOUS snapshot when one exists (never two
 // concurrent computes); the very first request waits for the first compute.
-// On build errors the previous snapshot stays — the overlay keeps last-known
-// data and the header reports the failure.
+// On build errors the promise rejects — the route answers 500. Last-known
+// data lives on the CLIENT: useLivePoll keeps the previous snapshot mounted
+// and the header reports the failure.
 let cacheState = { snapshot: null, computedAt: 0, inflight: null };
 
 export function resetManagerSnapshotCache() {

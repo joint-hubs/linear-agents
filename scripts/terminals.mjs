@@ -2,7 +2,11 @@
 // Terminal window management — list, focus, stop agent console windows.
 //
 // Primary API (PID-based — reliable, used by dashboard):
-//   isProcessAlive(pid)        → boolean
+//   isProcessAlive(pid)        → boolean   (SYNC — one PowerShell spawn per pid;
+//                                          interval/background paths only, never
+//                                          the HTTP request path)
+//   areProcessesAlive(pids)    → Promise<Map<pid, boolean>>  (ASYNC batched — one
+//                                          spawn for all pids; request paths)
 //   flashWindowByPid(pid,opts) → { ok, error? }  — taskbar flash (default UI path)
 //   focusWindowByPid(pid)      → { ok, error? }  — blocked by Windows for bg processes
 //   stopByPid(pid)             → { ok, error? }
@@ -14,10 +18,13 @@
 //   focusWindow(title)         → { ok, error? }
 //   stopWindow(title)          → { ok, error? }
 
-import { execSync } from "node:child_process";
+import { execSync, execFile } from "node:child_process";
 import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { promisify } from "node:util";
+
+const execFileP = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -78,6 +85,52 @@ export function isProcessAlive(pid) {
     return out.length > 0;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Batched liveness check — ONE async PowerShell spawn for many pids.
+ *
+ * isProcessAlive() is synchronous (execSync blocks the event loop for the
+ * whole PowerShell startup, ~0.1–0.5 s per pid); the manager snapshot path
+ * probes up to 10 pids per build and must never block the server's event
+ * loop, so it uses this instead: a single `Get-Process -Id a,b,c` spawn,
+ * awaited. Resolves a Map pid → boolean (a missing pid is simply absent
+ * from Get-Process output → false). REJECTS on spawn failure — the caller
+ * must distinguish "checker broken" (alive unknown) from "process dead"
+ * (a valid answer).
+ *
+ * @param {number[]} pids  Process IDs (positive integers; deduped here)
+ * @returns {Promise<Map<number, boolean>>}
+ */
+export async function areProcessesAlive(pids) {
+  const unique = [...new Set((Array.isArray(pids) ? pids : []).filter(validPid))];
+  const result = new Map(unique.map((pid) => [pid, false]));
+  if (unique.length === 0) return result;
+  const dir = mkdtempSync(join(tmpdir(), "fenix-ps-"));
+  try {
+    const file = join(dir, "cmd.ps1");
+    writeFileSync(
+      file,
+      `Get-Process -Id ${unique.join(",")} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id`,
+      "utf8",
+    );
+    const { stdout } = await execFileP(
+      "powershell",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file],
+      { timeout: 10000, windowsHide: true, encoding: "utf8" },
+    );
+    const alive = new Set(
+      stdout.trim().split(/\r?\n/).map((line) => Number(line.trim())).filter(Number.isInteger),
+    );
+    for (const pid of unique) result.set(pid, alive.has(pid));
+    return result;
+  } finally {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* temp dir cleanup is best-effort */
+    }
   }
 }
 

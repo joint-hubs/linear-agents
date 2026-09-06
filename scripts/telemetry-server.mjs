@@ -37,7 +37,7 @@ import {
   reloadKickoffTemplates,
 } from './launch.mjs';
 import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools, validateProvidersPatch } from './squad-config.mjs';
-import { listTerminals, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive } from './terminals.mjs';
+import { listTerminals, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive, areProcessesAlive } from './terminals.mjs';
 import {
   buildPromptTree,
   readRoleDoc,
@@ -1235,7 +1235,10 @@ const server = createServer(async (req, res) => {
     // GET /api/manager/snapshot — bounded, cached live-state view for the
     // /manager overlay (FOC-225 slice 2). Read-only: store reader is
     // allowlisted/bounded (queryManagerRuns), supervisor scan is capped.
-    // /api/runs and /api/prompts/runs are deliberately untouched.
+    // Liveness probing is the ASYNC batched checker — the per-pid sync
+    // isProcessAlive blocks the event loop for the whole build and is kept
+    // for the background reconcile path only. /api/runs and
+    // /api/prompts/runs are deliberately untouched.
     if (path === '/api/manager/snapshot') {
       if (method !== 'GET') {
         json(res, 405, { error: 'GET only' });
@@ -1249,7 +1252,7 @@ const server = createServer(async (req, res) => {
             db,
             supervisorRoot: join(root, '.state', 'supervisor'),
             runsManifestDir: join(root, '.state', 'runs'),
-            isProcessAlive,
+            checkProcessesAlive: areProcessesAlive,
           });
           json(res, 200, snapshot);
           log(method, path, 200);
