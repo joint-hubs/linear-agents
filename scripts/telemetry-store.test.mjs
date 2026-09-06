@@ -160,7 +160,7 @@ test("summary uses central projections", () => {
 
 test("health exposes store state", () => {
   const health = queryHealth(db);
-  assert(health.schemaVersion === 5, `schema=${health.schemaVersion}`);
+  assert(health.schemaVersion === 6, `schema=${health.schemaVersion}`);
   assert(health.issues.some((issue) => issue.type === "pricing_missing"), "pricing issue not reported");
 });
 
