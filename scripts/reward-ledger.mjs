@@ -326,3 +326,37 @@ export function queryRatings(db, { limit = 20 } = {}) {
     )
     .all(Number.isInteger(limit) && limit > 0 ? limit : 20);
 }
+
+/**
+ * Subjects holding active XP-bearing records — the squad list for the
+ * rewards payload. The 'unknown' subject (held awards) is excluded: held
+ * rows are surfaced by queryHeldAwards, never credited.
+ */
+export function queryRewardSubjects(db) {
+  return db
+    .prepare("SELECT DISTINCT subject FROM reward_records WHERE active=1 AND subject <> ? ORDER BY subject")
+    .all(UNKNOWN)
+    .map((row) => row.subject);
+}
+
+/**
+ * Held awards — pass evidence whose credit subject could not be resolved at
+ * ingest time. This is the "awaiting verified evidence" surface: never XP,
+ * and a hold whose lineage later resolved (an active award with the same
+ * dedup key now exists) drops out of the list.
+ */
+export function queryHeldAwards(db, { limit = 20 } = {}) {
+  return db
+    .prepare(
+      `SELECT id, task_id AS taskId, repo, revision, evidence_id AS evidenceId, run_id AS runId,
+              provenance, recorded_at AS recordedAt
+         FROM reward_records
+        WHERE subject=? AND kind='award' AND active=0
+          AND NOT EXISTS (
+            SELECT 1 FROM reward_records cur
+             WHERE cur.dedup_key = reward_records.dedup_key AND cur.kind='award' AND cur.active=1
+          )
+        ORDER BY id DESC LIMIT ?`,
+    )
+    .all(UNKNOWN, Number.isInteger(limit) && limit > 0 ? limit : 20);
+}
