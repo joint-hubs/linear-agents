@@ -205,7 +205,7 @@ test("scenario (a): v4 DB migrated to v5 with composite PK and cost_facts.run_id
     const db = openTelemetryDb(dbPath);
     try {
       const health = queryHealth(db);
-      assert(health.schemaVersion === 5, `schemaVersion=${health.schemaVersion} (expected 5)`);
+      assert(health.schemaVersion === 6, `schemaVersion=${health.schemaVersion} (expected 6)`); // slice 2 bump (FOC-225)
 
       // composite PK: usage_facts has two pk>0 columns
       const cols = db.prepare("PRAGMA table_info(usage_facts)").all();
@@ -323,7 +323,7 @@ test("scenario (b): reopening same DB preserves existing pre-v5-backup snapshot"
     const db3 = openTelemetryDb(dbPath);
     try {
       const h = queryHealth(db3);
-      assert(h.schemaVersion === 5, `schemaVersion after reopen=${h.schemaVersion}`);
+      assert(h.schemaVersion === 6, `schemaVersion after reopen=${h.schemaVersion}`);
     } finally { db3.close(); }
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -400,8 +400,9 @@ test("scenario (d): fresh DB has both v4 and v5 markers in schema_migrations", (
       const versions = db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => r.version);
       assert(versions.includes(4), `schema_migrations missing v4 (have ${versions.join(",")})`);
       assert(versions.includes(5), `schema_migrations missing v5 (have ${versions.join(",")})`);
+      assert(versions.includes(6), `schema_migrations missing v6 (have ${versions.join(",")})`); // slice 2: manager run index
       const h = queryHealth(db);
-      assert(h.schemaVersion === 5, `fresh DB schemaVersion=${h.schemaVersion}`);
+      assert(h.schemaVersion === 6, `fresh DB schemaVersion=${h.schemaVersion}`);
     } finally { db.close(); }
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -414,9 +415,9 @@ test(":memory: DB skips pre-v5 backup snapshot", () => {
   const db = openTelemetryDb(":memory:");
   try {
     const h = queryHealth(db);
-    assert(h.schemaVersion === 5, `:memory: schemaVersion=${h.schemaVersion}`);
+    assert(h.schemaVersion === 6, `:memory: schemaVersion=${h.schemaVersion}`);
     const versions = db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => r.version);
-    assert(versions.includes(4) && versions.includes(5), `:memory: missing markers (have ${versions.join(",")})`);
+    assert(versions.includes(4) && versions.includes(5) && versions.includes(6), `:memory: missing markers (have ${versions.join(",")})`);
   } finally { db.close(); }
 });
 

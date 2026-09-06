@@ -37,7 +37,7 @@ import {
   reloadKickoffTemplates,
 } from './launch.mjs';
 import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools, validateProvidersPatch } from './squad-config.mjs';
-import { listTerminals, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive } from './terminals.mjs';
+import { listTerminals, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive, areProcessesAlive } from './terminals.mjs';
 import {
   buildPromptTree,
   readRoleDoc,
@@ -51,6 +51,7 @@ import {
   isExternalPath,
 } from './prompt-library.mjs';
 import { computeOutcomes } from './delegation-outcomes.mjs';
+import { getCachedManagerSnapshot } from './manager-snapshot.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
@@ -1228,6 +1229,38 @@ const server = createServer(async (req, res) => {
         json(res, 200, links);
         log(method, path, 200);
       } finally { db.close(); }
+      return;
+    }
+
+    // GET /api/manager/snapshot — bounded, cached live-state view for the
+    // /manager overlay (FOC-225 slice 2). Read-only: store reader is
+    // allowlisted/bounded (queryManagerRuns), supervisor scan is capped.
+    // Liveness probing is the ASYNC batched checker — the per-pid sync
+    // isProcessAlive blocks the event loop for the whole build and is kept
+    // for the background reconcile path only. /api/runs and
+    // /api/prompts/runs are deliberately untouched.
+    if (path === '/api/manager/snapshot') {
+      if (method !== 'GET') {
+        json(res, 405, { error: 'GET only' });
+        log(method, path, 405);
+        return;
+      }
+      try {
+        const db = telemetryStore.openTelemetryDb();
+        try {
+          const snapshot = await getCachedManagerSnapshot({
+            db,
+            supervisorRoot: join(root, '.state', 'supervisor'),
+            runsManifestDir: join(root, '.state', 'runs'),
+            checkProcessesAlive: areProcessesAlive,
+          });
+          json(res, 200, snapshot);
+          log(method, path, 200);
+        } finally { db.close(); }
+      } catch (err) {
+        json(res, 500, { error: err.message || 'snapshot build failed' });
+        log(method, path, 500);
+      }
       return;
     }
 

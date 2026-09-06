@@ -37,19 +37,20 @@ layouts, states and interaction contracts. The reward system is specified separa
 - Role identity is stable: *orchestration installation + squad + role key*. We do NOT invent
   persistent individual-agent identities and we do NOT infer role identity from a shared model name.
 - The board shows **configured** state (what the installation will launch next). Observed runtime
-  activity arrives in slice 2 via a telemetry adapter; until then cards carry an explicit
-  "no live activity shown" contract, never a fake live status.
+  activity (slice 2) is squad-level only, served by a bounded manager-snapshot endpoint; the live
+  overlay renders only what the snapshot states, never a fake live status.
 - The supervisor is the **coordinator**: rendered as a distinct coordinator card with an honestly
   empty specialist list — not as an invented football position.
 - Repository filtering (slice 2) controls observed activity only, never the scope of configuration edits.
-- Unattributed activity stays at squad level (slice 2 rule, stated now so the UI never assumes otherwise).
+- Unattributed activity stays at squad level. Per-role live attribution is explicitly out of v1
+  (binding decision: it needs manifest/launcher/store work and separate approval).
 
 ## 2. Information architecture
 
 ```
 Fenix sidebar
 ├─ Manager  (/manager)          ← NEW, first nav entry
-│   ├─ header: squad selector · Setup/Live switch (Setup active in slice 1) · freshness · connectivity · unsaved-edit slot
+│   ├─ header: squad selector · Setup/Live switch · freshness (config read + live poll) · connectivity · unsaved-edit slot
 │   ├─ left rail: squad list + compact roster of selected squad
 │   ├─ center: tactical board (role cards) | roster table fallback
 │   └─ right: inspector (Profile / Instructions / History / Achievements)
@@ -63,9 +64,9 @@ Fenix sidebar
 └─ Prompty     (/prompts)
 ```
 
-`Setup / Live` is a visible switch from day one: slice 1 ships Setup (configured view). The Live
-side is disabled with a tooltip "live overlay arrives with telemetry integration (slice 2)" —
-the switch communicates the planned model without faking live data.
+`Setup / Live` is a visible switch from day one: slice 1 shipped Setup (configured view); slice 2
+activates Live (squad-level telemetry overlay, §3.6). Live polls a bounded snapshot endpoint and
+renders only what it states — never fake live data.
 
 ## 3. Screens
 
@@ -101,7 +102,13 @@ role.
 | `configured` | ✓ configured | role has a model assignment | — |
 | `unconfigured` | ○ not configured | `model` is null in config | an error; a role may be prompt-only |
 | `unknown` | ? unknown | model string not resolvable in provider catalogue | a invented fallback name |
-| live states (running/waiting/failed/stale) | — | **absent in slice 1** — arrive with slice 2 evidence adapter | — |
+| `running` (live) | ▶ running | store run unended and the console process is alive | an accepted task; a squad or role attribution |
+| `waiting for decision` (live) | ⏸ waiting for decision | a pending supervisor gate record exists | anything inferred from run state — only real pending gate records count |
+| `failed` (live) | ✕ failed | run ended with a non-zero exit code | any supervisor verdict |
+| `finished · unverified` (live) | ✓ finished · unverified | run ended with exit 0 and no supervisor pass verdict | accepted work |
+| `accepted` (live) | ★ accepted | supervisor pass verdict keyed to the task (latest round) | exit 0 alone — exit 0 is never acceptance |
+| `unknown` (live) | ? unknown | missing fields or contradicting liveness (unended but process dead) | a guessed state |
+| `stale` (live) | ⏱ stale data | snapshot older than 15 s or the last poll failed | live truth — the last known board is kept and labelled |
 
 No chip is encoded by color alone: every chip pairs an icon glyph with text. Colors validate
 against the dataviz categorical/status palette (see §5).
@@ -149,9 +156,9 @@ is open.)
 
 | Tab | Slice 1 content | Source |
 |---|---|---|
-| Profile | role key, squad, configured model (labelled **configured**) with a free-text model editor + suggestions, provider, tools list, staged `from → to` chip, and — explicitly separated — **observed runtime model: not shown yet (slice 2)** | squad-config |
+| Profile | role key, squad, configured model (labelled **configured**) with a free-text model editor + suggestions, provider, tools list, staged `from → to` chip, and — explicitly separated — **observed runtime model: not shown in v1 (live state is squad-level only; per-role attribution needs manifest/launcher/store work)** | squad-config |
 | Instructions | prompt document edited in place through the guarded MarkdownEditor flow (Anuluj / dry run / Zapisz); a draft shows the unsaved dot and the switch confirm; frontmatter is preserved; PromptContext below for reference | `/api/prompts/file` |
-| History | squad-level recent runs (runId, task, status label, started, cost) — labelled "squad-level; per-role attribution arrives in slice 2" | `/api/prompts/runs` |
+| History | live snapshot for the squad: bounded active + recent runs with derived state chips, pending-gate badge, cost (partial while unended); an empty window renders "no runs in the bounded window for this squad" | `/api/manager/snapshot` |
 | Achievements | "Rewards arrive in a later slice — nothing recorded yet" pending state. **No zeroed fake records.** | — |
 
 The configured-vs-observed split is a hard rule: a card and the Profile tab must never blend
@@ -165,7 +172,7 @@ The configured-vs-observed split is a hard rule: a card and the Profile tab must
 | Backend error | full-panel error card with the exact failed endpoint, a Retry button, and the backend start hint (`node scripts/telemetry-server.mjs`); header dot goes red with text "offline" |
 | Empty roles | coordinator card + "no specialist roles configured" (supervisor case) |
 | Squad unknown in URL | falls back to first squad, selector reflects it |
-| Stale data | slice 1 data is read-on-demand; the freshness line shows read time. Stale-warning behavior activates with slice 2 polling |
+| Stale data | config data is read-on-demand (freshness shows the read time). Live mode: a failed poll keeps the last known snapshot labelled "live update failed — showing last known from …" with a Retry button; a snapshot older than 15 s is labelled stale. The board never blanks |
 | Rewards | always "pending — arrives in a later slice" (never zeros) |
 
 ### 3.5 Visual direction
@@ -176,6 +183,38 @@ keys. Board field: restrained dotted grid (CSS background), no game artwork, no 
 external assets. Motion limited to: selection highlight, drag lift, chip transitions — all
 disabled under `prefers-reduced-motion: reduce`. No looping/idle animation of any kind: a card
 that looks busy without evidence behind it is a lie.
+
+### 3.6 Live telemetry overlay (slice 2)
+
+The Live side of the switch renders squad-level activity from one read-only endpoint —
+`GET /api/manager/snapshot` (paramless in v1) — built by `scripts/manager-snapshot.mjs` on top of
+the existing telemetry store/status readers. The query is bounded (active runs ≤ 25, recent ≤ 5
+per squad, supervisor scan ≤ 20 dirs, ≤ 10 real liveness checks per snapshot) and served through
+a 3 s single-flight TTL cache; `/manager` never calls `/api/runs` or `/api/prompts/runs`.
+
+**Snapshot → UI state mapping (hard rules):**
+
+- `running` = store run unended AND the console process is alive. An unended run whose process
+  is dead is `unknown`, never "running".
+- `waiting for decision` = a pending supervisor gate record exists. Never inferred.
+- `failed` = ended + non-zero exit code. `finished · unverified` = ended + exit 0 (the default).
+- `accepted` = a supervisor pass verdict keyed to the task (latest round wins; fail never
+  promotes). Exit 0 alone is NEVER acceptance. Verdict records carry no REVIEW/TEST kind marker —
+  documented v1 caveat.
+- Runs without a squad attribution land under `unknown` and are listed in the snapshot's
+  `missing[]`; every absent field (no manifest dir, liveness cap reached, absent manifest,
+  no pid, no checker, unreadable record) is documented there, never guessed.
+
+**Rendered surface:** header freshness (live poll time, `(cached)` when served from the TTL
+cache, failure/stale warnings + Retry); a squad live strip (state chip + active-run count +
+pending-decision badge); live state chips in the squad rail; inspector History live runs with a
+non-interactive gate badge (a `<span>` pointing to the supervisor window — no answer controls).
+
+**Polling:** `useLivePoll` ticks every 5 s with ×2 backoff capped at 60 s, skips a tick while a
+request is in flight, pauses on `document.hidden` and while Setup is active, resumes on refocus
+and on Live entry. Motion exists only on an observed transition between consecutive snapshots
+(one-shot pulse, gated behind `prefers-reduced-motion: no-preference`). An empty store renders
+honest emptiness — "no activity in the bounded window" — never fake idle activity.
 
 ## 4. Interaction contracts (numbered, testable)
 
@@ -239,12 +278,35 @@ that looks busy without evidence behind it is a lie.
 - [ ] Tests for staging, dirty counting, save payloads, error normalization, suggestions, prompt
       paths, guard predicate and role counts run under `npm --prefix ui test`; build passes.
 
+## 6c. Acceptance criteria (slice 2 — live telemetry overlay)
+
+- [ ] `GET /api/manager/snapshot` is read-only, paramless and bounded; the TTL cache is
+      single-flight (a caller during recompute gets the previous snapshot as `cached`); build
+      errors keep the previous snapshot; no secrets in the payload (tested).
+- [ ] `/manager` fetches only `/api/manager/snapshot` for live data — never `/api/runs` or
+      `/api/prompts/runs` (network-observer check).
+- [ ] State mapping follows §3.6 exactly: contradiction is `unknown`, gates are never inferred,
+      exit 0 alone is never `accepted`; squad-less runs are `unknown` + `missing[]` entries.
+- [ ] Disconnect keeps the last known board with a failure/stale label and a Retry button; Retry
+      restores live updates once the backend returns.
+- [ ] An empty store renders "no activity in the bounded window" / "no runs in the bounded
+      window" — no chips, no fake running, no motion.
+- [ ] Flash animation fires only on an observed transition between consecutive snapshots and is
+      gated behind `prefers-reduced-motion: no-preference`; no looping animation exists.
+- [ ] Inspector History is snapshot-driven; the gate badge is a non-interactive `<span>`;
+      inspector tabs navigate with Arrow keys (roving focus, no wrap, Home/End) — a11y ride-along.
+- [ ] `npm --prefix ui test` (50 tests), `npm --prefix ui run build` and
+      `node scripts/test-all.mjs telemetry` (10/10 suites) pass; a CDP browser drive on the
+      isolated fixture covers setup/live/disconnect/reconnect/reduced-motion/1024-1440px/empty.
+
 ## 7. Out of scope (parked, with pointers)
 
 - ~~Config/prompt editing inside Manager~~ — delivered in slice 1 part 2 (shared
   `workingCopy.js` + guarded MarkdownEditor; `ui/src/screens/SquadConfig.jsx` keeps its route).
-- Live telemetry overlay, per-role activity, gate visibility → slice 2
-  (pure adapter + bounded polling; see plan §2).
+- ~~Live telemetry overlay, gate visibility~~ — delivered in slice 2 (squad-level; bounded
+  `/api/manager/snapshot` + 5 s poll; see §3.6).
+- Per-role live attribution — explicitly declined for v1; needs manifest/launcher/store work and
+  separate approval.
 - Reward ledger, XP, ratings → [fenix-manager-rewards.md](fenix-manager-rewards.md) (slice 3).
 - Launch/stop/gate buttons on the board — rejected by design; `/api/launch` opens standalone
   terminals, which must not be presented as supervised orchestration.

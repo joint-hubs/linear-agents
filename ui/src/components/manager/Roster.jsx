@@ -3,9 +3,10 @@
 // truth; the board is decorative layout on top of the same data.
 
 import { COORDINATOR_KEY, squadRoleCounts } from '../../manager/identity.js';
+import { LIVE_STATE_META } from '../../manager/live.js';
 import { StateChip } from './RoleCard.jsx';
 
-export function SquadRail({ squads, selectedSquad, onSelectSquad, selectedRole, onSelectRole }) {
+export function SquadRail({ squads, selectedSquad, onSelectSquad, selectedRole, onSelectRole, liveStates }) {
   const selected = squads.find((s) => s.key === selectedSquad);
   return (
     <>
@@ -14,6 +15,8 @@ export function SquadRail({ squads, selectedSquad, onSelectSquad, selectedRole, 
         <ul className="mgr-squad-list" role="list">
           {squads.map((s) => {
             const counts = squadRoleCounts(s);
+            const live = liveStates?.[s.key];
+            const liveMeta = live?.state ? LIVE_STATE_META[live.state] : null;
             return (
               <li key={s.key}>
                 <button
@@ -24,6 +27,11 @@ export function SquadRail({ squads, selectedSquad, onSelectSquad, selectedRole, 
                 >
                   <span className={`mgr-squad-dot mgr-squad-${s.key}`} aria-hidden="true" />
                   <span className="mgr-squad-name">{s.key}</span>
+                  {liveMeta && (
+                    <span className={`mgr-chip mgr-chip-sm ${liveMeta.cls}`} title={`live: ${liveMeta.label}`}>
+                      <span aria-hidden="true">{liveMeta.glyph}</span> {liveMeta.label}
+                    </span>
+                  )}
                   <span
                     className="mgr-squad-count"
                     title={

@@ -72,3 +72,16 @@ export function connectivityState({ loading, readAt, error }) {
   if (loading || !readAt) return 'connecting';
   return 'online';
 }
+
+// Inspector tab bar, arrow-key navigation target (APG tabs pattern over the
+// existing roving tabindex): Left/Right step, Home/End jump, no wrap-around.
+// Returns -1 when the key is not a navigation key or the index is out of
+// range — the caller then leaves focus where it is.
+export function nextTabIndex(key, index, count) {
+  if (count <= 0 || !Number.isInteger(index) || index < 0 || index >= count) return -1;
+  if (key === 'ArrowLeft') return Math.max(0, index - 1);
+  if (key === 'ArrowRight') return Math.min(count - 1, index + 1);
+  if (key === 'Home') return 0;
+  if (key === 'End') return count - 1;
+  return -1;
+}

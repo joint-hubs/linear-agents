@@ -116,6 +116,16 @@ export async function getPromptRuns(squad, limit = 10) {
   );
 }
 
+// Manager live overlay (FOC-225 slice 2) — bounded, cached, read-only view of
+// run state across all squads. The ONLY telemetry source the /manager screen
+// polls: it never calls /api/runs or /api/prompts/runs. Takes an AbortSignal
+// so the poll hook can cancel in-flight requests.
+export async function getManagerSnapshot(signal) {
+  const r = await fetch(API_BASE + '/api/manager/snapshot', { signal });
+  if (!r.ok) throw new Error('API ' + r.status);
+  return r.json();
+}
+
 // Squad config — read current squad model assignments + pricing table.
 export async function getSquadConfig() {
   return apiFetch('/api/squad-config');
