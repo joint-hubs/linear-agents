@@ -32,12 +32,12 @@
   --danger-soft: #fdecec;
 
   /* squads */
-  --sq-plan: #6e56cf;
-  --sq-dev: #2563eb;
-  --sq-review: #d97706;
-  --sq-test: #059669;
-  --sq-cadence: #64748b;
-  --sq-supervisor: #be185d;
+  --sq-plan: #a25bac;
+  --sq-dev: #0b76d9;
+  --sq-review: #bf5902;
+  --sq-test: #067500;
+  --sq-cadence: #553d97;
+  --sq-supervisor: #920858;
 
   /* shape */
   --radius: 14px;

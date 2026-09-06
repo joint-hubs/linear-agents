@@ -11,14 +11,14 @@ const POLL_MS = 5000;
 // but they sit outside the plan→dev→review→test pipeline, so the accent colours
 // stay reserved for the squads that move a Linear task along.
 const SQCOLOR = {
-  plan: '#6e56cf',
-  dev: '#2563eb',
-  review: '#d97706',
-  test: '#059669',
-  cadence: '#64748b',
+  plan: 'var(--sq-plan)',
+  dev: 'var(--sq-dev)',
+  review: 'var(--sq-review)',
+  test: 'var(--sq-test)',
+  cadence: 'var(--sq-cadence)',
   'orch-ollama': '#0e7490',
   'orch-openrouter': '#0891b2',
-  supervisor: '#be185d',
+  supervisor: 'var(--sq-supervisor)',
 };
 const SQUADS = ['plan', 'dev', 'review', 'test', 'cadence', 'supervisor', 'orch-ollama', 'orch-openrouter'];
 const ZOOMS = [
@@ -245,8 +245,8 @@ export default function Timeline() {
                             left: b.left + '%',
                             width: b.width + '%',
                             minWidth: 4,
-                            background: SQCOLOR[b.run.squad] || '#64748b',
-                            color: SQCOLOR[b.run.squad] || '#64748b',
+                            background: SQCOLOR[b.run.squad] || 'var(--sq-cadence)',
+                            color: SQCOLOR[b.run.squad] || 'var(--sq-cadence)',
                           }}
                           onMouseMove={(e) =>
                             setHover({ run: b.run, x: e.clientX, y: e.clientY })
