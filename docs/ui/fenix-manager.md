@@ -144,6 +144,8 @@ users get the table via the toggle; keyboard users can use either.
 Tabs: `Profile | Instructions | History | Achievements`. Unsaved-edit protection belongs to the
 config-editing increment (slice 1 part 2); this slice is read-only, so there is nothing to lose —
 the tab bar still reserves the unsaved indicator slot so the contract does not change shape later.
+(Slice 1 part 2 fills that slot: the Instructions tab shows the unsaved dot while a prompt draft
+is open.)
 
 | Tab | Slice 1 content | Source |
 |---|---|---|
@@ -188,8 +190,10 @@ that looks busy without evidence behind it is a lie.
    corrupt records fall back to defaults without throwing.
 6. Every status renders icon+text; contrast validates via the dataviz palette validator.
 7. Narrow viewport (`<900px`) or manual toggle swaps the board for the accessible table.
-8. No control on this screen launches, stops, answers gates, pushes, or writes any configuration
-   in slice 1. The only writes are to `localStorage` layout prefs.
+8. No control on this screen launches, stops, answers gates or pushes. Writes are `localStorage`
+   layout prefs and — since slice 1 part 2 — configuration/prompt edits that stage first and go
+   through the shared dry-run preview → explicit apply flow (see §7 pointers removed below);
+   nothing starts or stops work.
 9. Existing routes render exactly as before (regression: navigation smoke test).
 
 ## 5. Palette
@@ -213,13 +217,32 @@ that looks busy without evidence behind it is a lie.
 - [ ] `prefers-reduced-motion` disables board/chip transitions.
 - [ ] Loading, error (with retry + backend hint), empty and rewards-pending states are real — no fake activity, no zeroed achievement records.
 - [ ] Tests for identity mapping (squad/role/model/tools from a real-shaped fixture), unknown model/role handling, and layout persistence+migration run under `npm --prefix ui test`; `npm --prefix ui run build` passes.
-- [ ] No POST/apply calls exist in manager code this slice; `grep` for `post` in `ui/src/manager/**` finds none.
+- [ ] No POST/apply calls existed in manager code in slice 1 part 1 (superseded by part 2 below).
+
+## 6b. Acceptance criteria (slice 1 part 2 — config/prompt editing)
+
+- [ ] Manager stages model assignments into the SAME working copy `/squad-config` uses
+      (`ui/src/squadConfig/workingCopy.js` is the single shared writer; `/api/squad-config`
+      is the only config endpoint; no second writer, no silent start of work).
+- [ ] Every write is visible first: staged count badge, per-role `from → to` chip, edit bar with
+      Preview changes / Apply / Discard; apply stays disabled until a dry-run preview succeeded.
+- [ ] Preview (dry run) reports file-level before/after and server warnings without writing;
+      apply re-reads the config and shows next-launch semantics; discard restores server truth.
+- [ ] Failed preview/apply report honestly ("nothing was written"), keep staging, and distinguish
+      per-endpoint outcomes — config and prompt saves are separate endpoints, never a claimed
+      combined atomic save.
+- [ ] Prompt edits go through the guarded MarkdownEditor flow (same as Prompts screen); the
+      Instructions tab shows an unsaved dot, the header reports the draft, switching role/squad
+      or navigating away with a dirty draft asks for confirmation; scope note distinguishes
+      installation-global model changes from repository activity filters (slice 2).
+- [ ] `/squad-config` behavior preserved after the workingCopy extraction (its suites pass).
+- [ ] Tests for staging, dirty counting, save payloads, error normalization, suggestions, prompt
+      paths, guard predicate and role counts run under `npm --prefix ui test`; build passes.
 
 ## 7. Out of scope (parked, with pointers)
 
-- Config/prompt editing inside Manager (staged changes, preview/apply, unsaved-edit protection,
-  next-launch semantics) → slice 1 part 2, reusing SquadConfig working-copy logic and the guarded
-  prompt file-edit flow; `ui/src/screens/SquadConfig.jsx` stays the owner of its route meanwhile.
+- ~~Config/prompt editing inside Manager~~ — delivered in slice 1 part 2 (shared
+  `workingCopy.js` + guarded MarkdownEditor; `ui/src/screens/SquadConfig.jsx` keeps its route).
 - Live telemetry overlay, per-role activity, gate visibility → slice 2
   (pure adapter + bounded polling; see plan §2).
 - Reward ledger, XP, ratings → [fenix-manager-rewards.md](fenix-manager-rewards.md) (slice 3).

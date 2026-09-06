@@ -3,7 +3,30 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Current execution: 2026-09-05 — Fenix stabilization
+## Current execution: 2026-09-06 — FOC-225 Fenix Manager (slice 0 + slice 1, worktree `foc-225-dev`)
+
+- Worktree `C:\Users\mateu\Documents\GitHub\la-wt\linear-agents\foc-225-dev`, branch `foc-225-dev`, baza `875b5c6`.
+- Dowiezione: slice 0 (spec `docs/ui/fenix-manager.md` + `docs/ui/fenix-manager-rewards.md`), slice 1 part 1
+  (read-only /manager: board, roster, inspector, layout persistence) i slice 1 part 2 (edycja config/promptów
+  przez WSPÓŁDZIELONY writer `ui/src/squadConfig/workingCopy.js` — staging → dry-run preview → explicit apply,
+  unsaved-edit protection, per-endpoint statusy, next-launch semantics).
+- Commity: `0b394dd` spec · `c7b9fd2` board · `8ac385f` card fit · `88c8007` workingCopy extraction ·
+  `1d14b09` manager editing · fix TDZ/chip + docs (ten commit).
+- Kluczowe pliki: `ui/src/squadConfig/workingCopy.js` (single shared writer), `ui/src/manager/editing.js`,
+  `ui/src/screens/Manager.jsx`, `ui/src/components/manager/Inspector.jsx`, `ui/src/screens/SquadConfig.jsx`
+  (refactor na wspólny moduł, zachowanie bez zmian), `ui/src/components/MarkdownEditor.jsx` (additive `onDirtyChange`).
+- Weryfikacja: UI 47+38 PASS · build ✓ · serwer 30/115/6/37/53 PASS · przeglądarka (CDP headless, izolowany
+  fixture :7391 → vite :5174): drive 1 staging→preview→apply→re-read→discard+warning 15/15, drive 2
+  prompt-draft/confirm-block/failed-preview+recovery 19/19, drive 3 regresja /squad-config 5/5;
+  zrzuty `.state/shots2/*.png`; WCAG par statusowych ≥4.5:1 (bez nowych kolorów).
+- Izolowany fixture: `.state/fixture-install/` (kopia scripts/config/agents/bin; backend `TELEMETRY_PORT=7391
+  node .state/fixture-install/scripts/telemetry-server.mjs`, UI `LA_UI_PORT=5174 LA_API_PORT=7391 npm --prefix ui run dev`).
+  Produkcja (7331/5173) nietknięta — zero POST poza fixture.
+- Known: serwerowa walidacja sluga fail-open (warning, nie błąd); footer sidebar ma zahardkodowane `:7331`;
+  `/api/prompts/runs` bywa wolne (import nieskompresowanego transkryptu). Rewards = pending placeholders (slice 3).
+- Następne (wymaga decyzji): slice 2 (telemetry overlay) i slice 3 (rewards) — po review incrementu.
+
+## Historical: 2026-09-05 — Fenix stabilization
 
 - Approved roadmap: `docs/plans/fenix-stabilization-and-learning.md`.
 - Branch: `chore/fenix-stabilization-learning`, starting at `71a2962`. Bootstrap checkpoint: `18785c2` (35 prompt/model/launcher files, scoped staging; checks passed). This is not independent squad delivery acceptance. No push. Pre-existing telemetry/runtime/tooling changes remain uncommitted and preserved.
