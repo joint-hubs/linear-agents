@@ -47,6 +47,7 @@ import {
 import {
   connectivityState,
   editingGuardActive,
+  nextTabIndex,
   promptPathFor,
   stagedModelSummary,
   switchBlocked,
@@ -643,6 +644,19 @@ await test('poll helpers: backoff doubles to the cap; ticks skip in-flight, hidd
   eq(shouldPoll({ enabled: true, inFlight: true, hidden: false }), false); // never overlap
   eq(shouldPoll({ enabled: true, inFlight: false, hidden: true }), false); // hidden tab
   eq(shouldPoll({ enabled: false, inFlight: false, hidden: false }), false); // paused mode
+});
+
+await test('nextTabIndex: arrow-key tab navigation — steps clamp, Home/End jump, no wrap', () => {
+  // 4 inspector tabs; APG tabs pattern over the roving tabindex
+  eq(nextTabIndex('ArrowRight', 0, 4), 1);
+  eq(nextTabIndex('ArrowRight', 3, 4), 3); // clamped at the end — no wrap
+  eq(nextTabIndex('ArrowLeft', 2, 4), 1);
+  eq(nextTabIndex('ArrowLeft', 0, 4), 0); // clamped at the start
+  eq(nextTabIndex('Home', 3, 4), 0);
+  eq(nextTabIndex('End', 0, 4), 3);
+  eq(nextTabIndex('ArrowDown', 1, 4), -1); // not a navigation key
+  eq(nextTabIndex('ArrowRight', -1, 4), -1); // focus outside the tablist
+  eq(nextTabIndex('ArrowRight', 0, 0), -1); // empty tablist
 });
 
 // --- Summary -----------------------------------------------------------------

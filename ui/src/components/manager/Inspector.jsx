@@ -13,7 +13,7 @@ import PromptContext from '../PromptContext.jsx';
 import MarkdownEditor from '../MarkdownEditor.jsx';
 import { fmtDateTime, fmtUSD } from '../../utils.js';
 import { COORDINATOR_KEY } from '../../manager/identity.js';
-import { promptPathFor, stagedModelSummary } from '../../manager/editing.js';
+import { promptPathFor, stagedModelSummary, nextTabIndex } from '../../manager/editing.js';
 import { hasPriceEntry, modelSuggestions } from '../../squadConfig/workingCopy.js';
 import { GateBadge, LiveStateChip } from './LiveStrip.jsx';
 import { StateChip } from './RoleCard.jsx';
@@ -224,7 +224,21 @@ export default function Inspector({ squad, card, tab, onTab, editing, promptDirt
   }
   return (
     <div className="mgr-inspector">
-      <div className="mgr-tabs" role="tablist" aria-label="Role inspector">
+      <div
+        className="mgr-tabs"
+        role="tablist"
+        aria-label="Role inspector"
+        onKeyDown={(e) => {
+          // APG tabs: arrows move focus and activate (through onTab, which
+          // carries the unsaved-draft guard).
+          const tabs = [...e.currentTarget.querySelectorAll('[role="tab"]')];
+          const next = nextTabIndex(e.key, tabs.indexOf(document.activeElement), tabs.length);
+          if (next === -1) return;
+          e.preventDefault();
+          tabs[next].focus();
+          onTab(TABS[next][0]);
+        }}
+      >
         {TABS.map(([id, label]) => (
           <button
             key={id}
