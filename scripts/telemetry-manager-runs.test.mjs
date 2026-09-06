@@ -256,6 +256,30 @@ test("queryManagerRuns: squads filter, limits, and the empty store", async () =>
   }
 });
 
+test("queryManagerRuns: the default active cut (25) keeps the newest actives only", async () => {
+  requireSqlite();
+  const dir = mkdtempSync(join(tmpdir(), "mgr-runs-"));
+  try {
+    const db = openTelemetryDb(join(dir, "t.sqlite"));
+    for (let i = 1; i <= 30; i++) {
+      seedRun(db, {
+        runId: `dev-bulk-${String(i).padStart(2, "0")}`, squad: "dev",
+        startedAt: new Date(Date.UTC(2026, 7, 1, 0, i)).toISOString(),
+        endedAt: null, exitCode: null, status: "running",
+      });
+    }
+    const { active, recent } = queryManagerRuns(db); // no options — default limits
+    assert(active.length === 25, `default activeLimit must cut at 25, got ${active.length}`);
+    assert(active[0].runId === "dev-bulk-30", `newest active must survive the cut: ${active[0].runId}`);
+    assert(active[24].runId === "dev-bulk-06", `25th newest must be the last kept: ${active[24].runId}`);
+    assert(!active.some((r) => r.runId === "dev-bulk-05"), "actives beyond the cut must be dropped");
+    assert(recent.length === 0, "no ended runs seeded → recent must be empty");
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("read-only proof: queryManagerRuns and queryRuns both work under PRAGMA query_only", async () => {
   requireSqlite();
   const dir = mkdtempSync(join(tmpdir(), "mgr-runs-"));
