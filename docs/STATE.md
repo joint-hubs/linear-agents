@@ -11,7 +11,8 @@
   przez WSPÓŁDZIELONY writer `ui/src/squadConfig/workingCopy.js` — staging → dry-run preview → explicit apply,
   unsaved-edit protection, per-endpoint statusy, next-launch semantics).
 - Commity: `0b394dd` spec · `c7b9fd2` board · `8ac385f` card fit · `88c8007` workingCopy extraction ·
-  `1d14b09` manager editing · fix TDZ/chip + docs (ten commit).
+  `1d14b09` manager editing · `f377506` fix TDZ/chip · `07c0f58` docs part 2 ·
+  `0fbbaa7` review-r1 fixes (tab-switch confirm, stale-preview gate, roster keyboard).
 - Kluczowe pliki: `ui/src/squadConfig/workingCopy.js` (single shared writer), `ui/src/manager/editing.js`,
   `ui/src/screens/Manager.jsx`, `ui/src/components/manager/Inspector.jsx`, `ui/src/screens/SquadConfig.jsx`
   (refactor na wspólny moduł, zachowanie bez zmian), `ui/src/components/MarkdownEditor.jsx` (additive `onDirtyChange`).
