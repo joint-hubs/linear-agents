@@ -129,6 +129,8 @@ export function buildManagerSnapshot(deps = {}) {
   if (!db) throw new Error("buildManagerSnapshot requires an open telemetry db");
   if (!Number.isInteger(livenessCap) || livenessCap < 0) throw new Error("livenessCap must be a non-negative integer");
 
+  const startedAtMs = Date.now();
+
   const missingList = [];
   const { active, recent } = queryManagerRunsFn(db);
 
@@ -228,6 +230,7 @@ export function buildManagerSnapshot(deps = {}) {
     generatedAt: now(),
     ttlMs: typeof deps.ttlMs === "number" ? deps.ttlMs : MANAGER_SNAPSHOT_TTL_MS,
     source: "fresh",
+    generatedInMs: Date.now() - startedAtMs,
     bounds: {
       activeLimit: MANAGER_RUN_ACTIVE_LIMIT,
       recentPerSquad: MANAGER_RUN_RECENT_PER_SQUAD,
