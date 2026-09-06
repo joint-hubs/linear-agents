@@ -158,8 +158,8 @@ is open.)
 |---|---|---|
 | Profile | role key, squad, configured model (labelled **configured**) with a free-text model editor + suggestions, provider, tools list, staged `from → to` chip, and — explicitly separated — **observed runtime model: not shown in v1 (live state is squad-level only; per-role attribution needs manifest/launcher/store work)** | squad-config |
 | Instructions | prompt document edited in place through the guarded MarkdownEditor flow (Anuluj / dry run / Zapisz); a draft shows the unsaved dot and the switch confirm; frontmatter is preserved; PromptContext below for reference | `/api/prompts/file` |
-| History | live snapshot for the squad: bounded active + recent runs with derived state chips, pending-gate badge, cost (partial while unended); an empty window renders "no runs in the bounded window for this squad" | `/api/manager/snapshot` |
-| Achievements | "Rewards arrive in a later slice — nothing recorded yet" pending state. **No zeroed fake records.** | — |
+| History | live snapshot for the squad: bounded active + recent runs with derived state chips, pending-gate badge, cost (partial while unended); an empty window renders "no runs in the bounded window for this squad". Since slice 3 a **Rating** column carries the human rating authoring surface: ended runs with a task get a ★-select + optional note + explicit Save (subjective, standalone — never XP); rows without a recorded rating read "not rated", never 0/5; non-rateable rows (active, no task) render `—` | `/api/manager/snapshot` + `/api/manager/rewards` |
+| Achievements | rewards aggregates for the squad (slice 3): XP + level, evidence-backed badges, the bounded recent-records table (award/revocation/rating glyphs, points, when, evidence id) and the product-rules note. A squad with no records is the first-class **"awaiting verified evidence"** state — never zeros. Aggregates only: rating authoring lives in the History rows | `/api/manager/rewards` |
 
 The configured-vs-observed split is a hard rule: a card and the Profile tab must never blend
 "what is configured" with "what actually ran" into one field.
@@ -173,7 +173,7 @@ The configured-vs-observed split is a hard rule: a card and the Profile tab must
 | Empty roles | coordinator card + "no specialist roles configured" (supervisor case) |
 | Squad unknown in URL | falls back to first squad, selector reflects it |
 | Stale data | config data is read-on-demand (freshness shows the read time). Live mode: a failed poll keeps the last known snapshot labelled "live update failed — showing last known from …" with a Retry button; a snapshot older than 15 s is labelled stale. The board never blanks |
-| Rewards | always "pending — arrives in a later slice" (never zeros) |
+| Rewards | awaiting squad → "awaiting verified evidence" card (never zeros); fetch error → error card with Retry; header chip renders only once records exist |
 
 ### 3.5 Visual direction
 
@@ -215,6 +215,30 @@ request is in flight, pauses on `document.hidden` and while Setup is active, res
 and on Live entry. Motion exists only on an observed transition between consecutive snapshots
 (one-shot pulse, gated behind `prefers-reduced-motion: no-preference`). An empty store renders
 honest emptiness — "no activity in the bounded window" — never fake idle activity.
+
+### 3.7 Rewards and manager ratings (slice 3)
+
+One read endpoint — `GET /api/manager/rewards` (build by `scripts/reward-ingest.mjs`, append-only
+ledger `scripts/reward-ledger.mjs` in a dedicated `rewards.sqlite`, never `telemetry.sqlite`) —
+plus one authoring endpoint, `POST /api/manager/ratings`. There is deliberately **no XP submitter**:
+acceptance credit is derived from supervisor verdicts (ingest on read, 30 s single-flight TTL cache
+around the ingest only — squads/ratings/held are read fresh per payload build).
+
+- **Header chip** (next to the squad selector): `★ L{level} · {xp} XP` with the product-rules label
+  as `title`. Renders only for a squad with records; digit grouping is non-breaking so the chip
+  never wraps mid-number.
+- **Achievements tab**: XP + level, badges (evidence-backed distinct verified delivery counts —
+  display facts that unlock nothing), bounded recent-records table (★ award / ↩ revocation / ✎
+  rating glyphs, points, when, evidence id), squad-level-only + product-rules notes, and the held
+  count for unresolvable pass verdicts. Awaiting is the first-class empty state.
+- **History Rating column**: the only human-authoring surface. Select seeds from the recorded
+  rating; Save is enabled only for a real staged delta; every save is a supersession (new latest
+  record). Staging a rating raises the unsaved-work guard (`editingGuardActive` gains an additive
+  `ratingDirty` input) and the switch confirm covers a staged rating.
+- A rating is subjective and standalone: it never carries XP, is never averaged with the
+  acceptance verdict, and "not rated" is never rendered as 0/5. Revocations are verdict-driven
+  only and are recorded as audit rows (active flag + negative points), so XP returns to its
+  pre-award value.
 
 ## 4. Interaction contracts (numbered, testable)
 
@@ -307,6 +331,8 @@ honest emptiness — "no activity in the bounded window" — never fake idle act
   `/api/manager/snapshot` + 5 s poll; see §3.6).
 - Per-role live attribution — explicitly declined for v1; needs manifest/launcher/store work and
   separate approval.
-- Reward ledger, XP, ratings → [fenix-manager-rewards.md](fenix-manager-rewards.md) (slice 3).
+- ~~Reward ledger, XP, ratings~~ — delivered in slice 3 (append-only ledger + verdict-driven
+  ingest + header chip / Achievements / History rating authoring; see §3.7 and
+  [fenix-manager-rewards.md](fenix-manager-rewards.md)).
 - Launch/stop/gate buttons on the board — rejected by design; `/api/launch` opens standalone
   terminals, which must not be presented as supervised orchestration.

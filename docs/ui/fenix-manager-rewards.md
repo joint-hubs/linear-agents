@@ -1,6 +1,6 @@
 ---
 type: spec
-status: draft
+status: implemented
 audience: Mateusz (approval) → GLM (build)
 tags: [type/spec, area/ui, topic/rewards]
 created: 2026-09-06
@@ -12,8 +12,9 @@ manager-ui: fenix-manager.md
 # Fenix Manager — rewards and manager ratings (build spec)
 
 This document specifies the reward system delivered in slice 3 of the Fenix Manager plan:
-attribution, evidence, the rating rubric, and persistence. The `/manager` UI ships the
-**pending state** for all of it until this spec is implemented — no zeroed placeholder records.
+attribution, evidence, the rating rubric, and persistence. **Delivered in slice 3** — the
+implementation confirmation at the end of §5 records what shipped; no zeroed placeholder
+records anywhere.
 
 **Framing rule: XP records verified experience. It does not claim that model weights improved,
 that a squad is "good", or that a rating measures quality.** Nothing here is RL, fine-tuning, or
@@ -25,7 +26,7 @@ training — the word "progression" describes a bookkeeping view, nothing more.
 |---|---|---|
 | TEST squad verdicts (independent acceptance) | supervisor run records | the ONLY source of automatic XP evidence |
 | Run/task identifiers, started/cost fields | telemetry store | evidence references, never reward inputs themselves |
-| Application-data directory conventions | repo root `.state/`, `docs/ACCESS.md` | the ledger lives beside them (location confirmed at implementation start) |
+| Application-data directory conventions | repo root `.state/`, `docs/ACCESS.md` | the ledger lives beside them (location confirmed: `rewards.sqlite` under the rewards home, see §5) |
 | Manager profiles UI | `ui/src/screens/Manager.jsx` + inspector | display only; the browser never computes or submits XP |
 
 ## 1. Attribution model
@@ -120,14 +121,34 @@ Rules:
   are rendered as text (no HTML injection path). No secrets and no whole prompts are stored in
   reward records.
 
+**Implementation confirmation (slice 3):**
+
+- Ledger: `scripts/reward-ledger.mjs` — a dedicated `node:sqlite` database `rewards.sqlite` under
+  `%LOCALAPPDATA%\linear-agents\rewards\` (env overrides `LA_REWARDS_DB` / `LA_REWARDS_HOME`),
+  never `telemetry.sqlite`; append-only rows with an `active` flag; path overridable for tests;
+  survives restart (tested).
+- Record kinds shipped: `award | revocation | rating`. `correction` is realized as supersession
+  rather than a fourth kind — every save (rating amendment included) inserts a new record; the
+  newest per subject wins for display and the audit trail keeps priors.
+- Revocation is **verdict-driven only** (a supervisor fail verdict referencing the award's
+  evidence revokes it; a Linear reopen without a new verdict round does not). A revocation is
+  recorded as its own audit row (`active=0`, negative points) and the award row is marked
+  inactive — so active XP returns to its pre-award value while the history stays intact.
+- Ingest runs **on read**: `GET /api/manager/rewards` wraps only the evidence ingest in a 30 s
+  single-flight TTL cache; squads/ratings/held are read fresh per payload build.
+- Provenance caveat: the acceptance-verdict → award join carries a documented `PROVENANCE_CAVEAT`
+  verbatim in each record's provenance field (supervisor-resolved decision, PROCEED-WITH-CAVEAT).
+
 ## 6. UI rendering (Manager integration)
 
 - Squad header / profile Achievements tab: level + XP from `xp-rules v1`, with the version label
   visible ("rules v1 · 100 XP per accepted revision · 500 XP per level").
 - `awaiting verified evidence` is a first-class state wherever an award would appear.
-- Manager rating control appears only where a human is the author (post-task report view, slice 3);
-  the board and profiles render ratings read-only.
-- Everything in this section renders `pending — arrives in a later slice` until slice 3 lands.
+- Manager rating control appears only where a human is the author — landed in the inspector
+  **History rows** (ended runs with a task), the only post-task human-authoring surface on
+  `/manager`; the board and profiles render ratings read-only.
+- There is deliberately no XP submitter: `ui/src/api.js` exposes a GET-only rewards helper plus
+  the one ratings POST, and nothing else.
 
 ## 7. Acceptance criteria (slice 3, for the record now)
 
