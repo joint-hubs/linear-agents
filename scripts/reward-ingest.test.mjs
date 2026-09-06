@@ -16,7 +16,9 @@
 //   (e) bounds and hygiene: scan limit, malformed records, absent root,
 //       zero-award quiet store;
 //   (f) cache: TTL window, single-flight sharing, reset;
-//   (g) display payload: server facts only (rules, squads, ratings, held).
+//   (g) display payload: server facts only (rules, squads, ratings, held);
+//       the ratings base cap (20 newest) extended by scoped lookups for the
+//       rendered History window so visible rows never render "not rated".
 
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -559,6 +561,41 @@ test("cache: TTL window, single-flight sharing, reset", async () => {
     const afterReset = await getCachedRewardIngest(deps);
     assert(afterReset.source === "fresh", "reset must drop the cached window");
   } finally {
+    h.cleanup();
+  }
+});
+
+test("display payload: the rendered History window resolves ratings past the 20-newest cap", async () => {
+  requireSqlite();
+  resetRewardsIngestCache();
+  const h = harness();
+  try {
+    seedRun(h.telemetryDb, { runId: "run-a", squad: "dev" });
+    seedLink(h.telemetryDb, "run-a", "FOC-500");
+    writeVerdict(h.supervisorRoot, "run-a", "FOC-500", 1, "pass");
+    // an honestly-recorded rating whose ledger id lands BELOW the 20-newest cap
+    insertRating(h.rewardsDb, { subject: "dev", taskId: "FOC-500", runId: "run-window", rating: 3, note: "old but real" });
+    for (let i = 1; i <= 20; i++) {
+      insertRating(h.rewardsDb, { subject: "plan", taskId: `FOC-${600 + i}`, runId: `run-fill-${i}`, rating: 4 });
+    }
+
+    // without the window the cap applies — the old rating would render "not rated"
+    const withoutWindow = await buildRewardsPayload(h.deps);
+    assert(withoutWindow.ratings.length === 20, `base cap must hold: ${withoutWindow.ratings.length}`);
+    assert(!withoutWindow.ratings.some((r) => r.runId === "run-window"), "the old rating sits below the cap");
+
+    // with the rendered window the visible run's real rating resolves
+    const payload = await buildRewardsPayload({ ...h.deps, renderedRunIds: ["run-window", "run-fill-1", "unknown-run"] });
+    const oldRating = payload.ratings.find((r) => r.runId === "run-window");
+    assert(oldRating, `the visible window's rating must resolve: ${JSON.stringify(payload.ratings.map((r) => r.runId))}`);
+    assert(oldRating.rating === 3 && oldRating.note === "old but real", `the real value must roundtrip: ${JSON.stringify(oldRating)}`);
+    assert(payload.ratings.length === 21, `base + scoped, deduped by id: ${payload.ratings.length}`);
+    assert(payload.ratings.filter((r) => r.runId === "run-fill-1").length === 1, "a run both in the base set and the window must appear once");
+    const ids = payload.ratings.map((r) => r.id);
+    assert(JSON.stringify(ids) === JSON.stringify([...ids].sort((a, b) => b - a)), "the merged set stays newest-first");
+    assert(payload.held.length === 0 && payload.ingest.awarded === 1, "the rest of the payload shape is unchanged");
+  } finally {
+    resetRewardsIngestCache();
     h.cleanup();
   }
 });

@@ -208,6 +208,33 @@ function log(method, path, status) {
   console.log(`${method} ${path} -> ${status}`);
 }
 
+// The run ids the Manager's rendered History window can show — snapshot
+// active + recent. Resolved from the SAME cached snapshot /api/manager/snapshot
+// serves, with the same full deps: routing the rewards build through the
+// shared single-flight cache means one snapshot is built for both routes and
+// the cache can never hold a degraded (liveness-less) build minted by the
+// rewards path. A snapshot failure only drops the scoped ratings extension —
+// the rewards payload still serves its 20-newest base set (S5).
+async function renderedHistoryRunIds(db) {
+  try {
+    const snapshot = await getCachedManagerSnapshot({
+      db,
+      supervisorRoot: join(root, '.state', 'supervisor'),
+      runsManifestDir: join(root, '.state', 'runs'),
+      checkProcessesAlive: areProcessesAlive,
+    });
+    const ids = [];
+    for (const squad of Object.values(snapshot.squads || {})) {
+      for (const run of [...(squad.active || []), ...(squad.recent || [])]) {
+        if (run?.runId) ids.push(run.runId);
+      }
+    }
+    return ids;
+  } catch {
+    return []; // snapshot unavailable → the display cap applies, nothing lies about existence
+  }
+}
+
 async function telemetryRuns(options = {}) {
   const db = telemetryStore.openTelemetryDb();
   try { return telemetryStore.queryRuns(db, options); } finally { db.close(); }
@@ -1192,7 +1219,8 @@ const server = createServer(async (req, res) => {
     // GET /api/manager/rewards — the rewards display payload (FOC-225 slice 3).
     // Runs the verdict-driven ingest FIRST (30 s TTL single-flight cache):
     // this route is the ingest's only trigger and the ledger is the only XP
-    // writer. Read side is bounded (per-squad recent ≤10, ratings ≤20); the
+    // writer. Read side is bounded (per-squad recent ≤10, ratings ≤20 base set
+    // extended by scoped lookups for the rendered History window — S5); the
     // ledger is a SEPARATE rewards.sqlite, telemetry.sqlite stays untouched.
     // NOTE: lives BEFORE the GET-only gate below — it carries the ratings POST.
     if (path === '/api/manager/rewards') {
@@ -1212,6 +1240,7 @@ const server = createServer(async (req, res) => {
               telemetryDb: db,
               rewardsDb: rewards,
               supervisorRoot: join(root, '.state', 'supervisor'),
+              renderedRunIds: await renderedHistoryRunIds(db),
             });
             json(res, 200, payload);
             log(method, path, 200);

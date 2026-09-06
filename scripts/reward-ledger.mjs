@@ -434,6 +434,30 @@ export function queryRatings(db, { limit = 20 } = {}) {
 }
 
 /**
+ * Active ratings for a bounded set of run ids — the scoped companion to
+ * queryRatings. The 20-newest display cap hides honestly-recorded ratings
+ * once more than 20 (task, run) pairs are rated; the Manager's rendered
+ * History window must still resolve every visible row, so the payload builder
+ * looks up exactly the run ids the window can show. Inputs are filtered to
+ * run-id shape and capped (one indexed parameterized lookup, no scans);
+ * ordering stays newest-first like queryRatings.
+ */
+export function queryRatingsForRuns(db, runIds = []) {
+  const ids = [...new Set(
+    (Array.isArray(runIds) ? runIds : [])
+      .filter((id) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)),
+  )].slice(0, 100);
+  if (ids.length === 0) return [];
+  return db
+    .prepare(
+      `SELECT id, subject, task_id AS taskId, run_id AS runId, rating, note, recorded_at AS recordedAt
+         FROM reward_records WHERE kind='rating' AND active=1 AND run_id IN (${ids.map(() => "?").join(",")})
+        ORDER BY id DESC`,
+    )
+    .all(...ids);
+}
+
+/**
  * Subjects holding active XP-bearing records — the squad list for the
  * rewards payload. The 'unknown' subject (held awards) is excluded: held
  * rows are surfaced by queryHeldAwards, never credited.

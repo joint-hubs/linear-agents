@@ -12,7 +12,8 @@
 //       (active=0, points −100), active XP returns to the pre-award state,
 //       revoking an inactive award is a no-op;
 //   (d) rating semantics: NULL-safe supersession per (subject, task, run),
-//       prior entries kept, latest wins, ratings never carry points;
+//       prior entries kept, latest wins, ratings never carry points; scoped
+//       per-run lookups reach past the 20-newest display cap;
 //   (e) held awards: written in one transaction in their final shape, dedup
 //       in the held namespace (replays stay one row) while never blocking the
 //       later real award;
@@ -39,6 +40,7 @@ import {
   insertRating,
   querySquadRewards,
   queryRatings,
+  queryRatingsForRuns,
   queryHeldAwards,
 } from "./reward-ledger.mjs";
 
@@ -326,6 +328,40 @@ test("absent repo/revision: sentinel 'unknown', never null", () => {
     // a real value beats the sentinel: a resolved repo is a different key
     const resolved = insertAward(db, { ...AWARD, revision: undefined });
     assert(resolved.duplicate === false, "a resolved repo must not dedup against the sentinel award");
+  } finally {
+    h.closeAll();
+    cleanup(dir);
+  }
+});
+
+test("scoped ratings: per-run lookups resolve the rendered window past the display cap", () => {
+  requireSqlite();
+  const dir = mkdtempSync(join(tmpdir(), "rewards-ledger-"));
+  const h = tracker();
+  try {
+    const db = h.open(join(dir, "rewards.sqlite"));
+    for (let i = 1; i <= 22; i++) {
+      insertRating(db, { subject: "dev", taskId: `FOC-${900 + i}`, runId: `run-${i}`, rating: (i % 5) + 1 });
+    }
+    // the 20-newest display cap hides the two oldest rated runs
+    assert(queryRatings(db).every((r) => r.runId !== "run-1" && r.runId !== "run-2"), "the base cap must hide the oldest ratings");
+
+    // scoped lookups reach exactly the requested window runs; junk inputs are
+    // filtered, duplicates collapse, unknown ids stay absent
+    const scoped = queryRatingsForRuns(db, ["run-1", "run-1", "run-3", "no-such-run", "", "x".repeat(65), "../etc"]);
+    assert(
+      JSON.stringify(scoped.map((r) => r.runId)) === JSON.stringify(["run-3", "run-1"]),
+      `scoped must return only the real requested runs, newest-first: ${JSON.stringify(scoped)}`,
+    );
+    assert(scoped.every((r) => typeof r.rating === "number" && r.rating >= 1 && r.rating <= 5), "the rating shape must hold");
+    assert(queryRatingsForRuns(db, []).length === 0 && queryRatingsForRuns(db, null).length === 0, "empty/unusable input is a quiet empty set");
+
+    // superseded ratings are history: only the active row per (subject, task, run)
+    const before = queryRatingsForRuns(db, ["run-1"]);
+    assert(before.length === 1, `one active rating for run-1, got ${before.length}`);
+    insertRating(db, { subject: "dev", taskId: "FOC-901", runId: "run-1", rating: 2, note: "revised" });
+    const after = queryRatingsForRuns(db, ["run-1"]);
+    assert(after.length === 1 && after[0].rating === 2, `the superseded row must not come back: ${JSON.stringify(after)}`);
   } finally {
     h.closeAll();
     cleanup(dir);

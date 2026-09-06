@@ -48,6 +48,7 @@ import {
   queryRewardSubjects,
   querySquadRewards,
   queryRatings,
+  queryRatingsForRuns,
   queryHeldAwards,
 } from "./reward-ledger.mjs";
 
@@ -352,6 +353,11 @@ export async function getCachedRewardIngest(deps = {}) {
 // Server facts only: rules constants, per-squad totals + recent records, the
 // ratings display set, held awards (awaiting verified evidence) and the ingest
 // diagnostics. Level math and badge thresholds are client-side (adapter).
+// deps.renderedRunIds (optional): the run ids the Manager's currently rendered
+// History window can show (snapshot active + recent, resolved by the route
+// from the shared snapshot cache) — used to extend the ratings display set
+// past its 20-newest cap so no visible row renders "not rated" while its
+// recorded rating sits below the cap.
 
 export async function buildRewardsPayload(deps = {}) {
   const { result, source } = await getCachedRewardIngest(deps);
@@ -361,12 +367,22 @@ export async function buildRewardsPayload(deps = {}) {
   for (const subject of subjects) {
     squads[subject] = querySquadRewards(rewardsDb, subject);
   }
+  // WHY the scoped extension: queryRatings caps at the 20 newest active
+  // ratings — past it, an honestly-recorded rating would render "not rated"
+  // in the Manager's History column, a lie caused by a display cap. The cap
+  // stays as the base set; the run ids of the rendered window get their own
+  // scoped lookups, deduped by record id, merged back into one newest-first
+  // array (record ids are autoincrement, so id order IS newest-first).
+  const baseRatings = queryRatings(rewardsDb);
+  const baseIds = new Set(baseRatings.map((r) => r.id));
+  const scopedRatings = queryRatingsForRuns(rewardsDb, deps.renderedRunIds).filter((r) => !baseIds.has(r.id));
+  const ratings = [...baseRatings, ...scopedRatings].sort((a, b) => b.id - a.id);
   return {
     generatedAt: new Date().toISOString(),
     source,
     rules: { ...XP_RULES },
     squads,
-    ratings: queryRatings(rewardsDb),
+    ratings,
     held: queryHeldAwards(rewardsDb),
     ingest: {
       at: result.ingestedAt,
