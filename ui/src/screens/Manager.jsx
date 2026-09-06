@@ -166,6 +166,24 @@ export default function Manager() {
     [squadKey, installKey]
   );
 
+  // Selection with the unsaved-prompt guard (card click, roster, table,
+  // keyboard Enter all funnel here). The ref keeps the callbacks stable.
+  const promptDirtyRef = useRef(false);
+  promptDirtyRef.current = promptDirty;
+
+  const selectRole = useCallback((key) => {
+    if (promptDirtyRef.current && !window.confirm(PROMPT_SWITCH_MESSAGE)) return;
+    setSelectedRole(key);
+  }, []);
+
+  const selectSquad = useCallback(
+    (key) => {
+      if (promptDirtyRef.current && !window.confirm(PROMPT_SWITCH_MESSAGE)) return;
+      setSearchParams({ squad: key });
+    },
+    [setSearchParams]
+  );
+
   const moveCard = useCallback(
     (key, dx, dy) => {
       const cur = positionsRef.current[key];
@@ -310,8 +328,6 @@ export default function Manager() {
   // --- unsaved-edit protection ----------------------------------------------
 
   const guardActive = editingGuardActive(dirtyCount, promptDirty);
-  const promptDirtyRef = useRef(false);
-  promptDirtyRef.current = promptDirty;
 
   // Closing/reloading the tab with unsaved work asks first.
   useEffect(() => {
@@ -345,21 +361,6 @@ export default function Manager() {
     document.addEventListener('click', onDocClick, true);
     return () => document.removeEventListener('click', onDocClick, true);
   }, [guardActive]);
-
-  // Switching role/squad while a prompt draft is open would silently drop it
-  // (MarkdownEditor resets on path change) — ask first.
-  const selectRole = useCallback((key) => {
-    if (promptDirtyRef.current && !window.confirm(PROMPT_SWITCH_MESSAGE)) return;
-    setSelectedRole(key);
-  }, []);
-
-  const selectSquad = useCallback(
-    (key) => {
-      if (promptDirtyRef.current && !window.confirm(PROMPT_SWITCH_MESSAGE)) return;
-      setSearchParams({ squad: key });
-    },
-    [setSearchParams]
-  );
 
   // --- Render states -------------------------------------------------------
 

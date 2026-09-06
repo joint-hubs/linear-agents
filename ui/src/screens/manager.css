@@ -274,6 +274,13 @@
   flex-wrap: wrap;
 }
 
+/* a long staged "from → to" slug must wrap inside the narrow inspector
+   column instead of clipping at the panel edge (chips elsewhere stay one line) */
+.mgr-modeledit-meta .mgr-chip {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .mgr-modeledit-hint {
   font-size: 11px;
   margin: 6px 0 0;
