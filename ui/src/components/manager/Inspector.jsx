@@ -9,14 +9,13 @@
 // stage → preview (dry run) → apply in the edit bar; prompt saves are the
 // editor's own dry-run/save pair.
 
-import { useEffect, useState } from 'react';
 import PromptContext from '../PromptContext.jsx';
 import MarkdownEditor from '../MarkdownEditor.jsx';
-import { getPromptRuns } from '../../api';
-import { fmtCost, fmtDateTime, statusLabel } from '../../utils.js';
+import { fmtDateTime, fmtUSD } from '../../utils.js';
 import { COORDINATOR_KEY } from '../../manager/identity.js';
 import { promptPathFor, stagedModelSummary } from '../../manager/editing.js';
 import { hasPriceEntry, modelSuggestions } from '../../squadConfig/workingCopy.js';
+import { GateBadge, LiveStateChip } from './LiveStrip.jsx';
 import { StateChip } from './RoleCard.jsx';
 
 const TABS = [
@@ -25,21 +24,6 @@ const TABS = [
   ['history', 'History'],
   ['achievements', 'Achievements'],
 ];
-
-const RUN_STATE_META = {
-  running: { cls: 'mgr-chip-run', glyph: '▶' },
-  failed: { cls: 'mgr-chip-fail', glyph: '✕' },
-  done: { cls: 'mgr-chip-ok', glyph: '✓' },
-};
-
-function RunStateChip({ label }) {
-  const meta = RUN_STATE_META[label] || { cls: 'mgr-chip-neutral', glyph: '·' };
-  return (
-    <span className={`mgr-chip ${meta.cls}`}>
-      <span aria-hidden="true">{meta.glyph}</span> {label}
-    </span>
-  );
-}
 
 function Profile({ squad, card, editing }) {
   const isCoordinator = card.key === COORDINATOR_KEY;
@@ -114,8 +98,9 @@ function Profile({ squad, card, editing }) {
       </dd>
       <dt>Observed runtime model</dt>
       <dd className="mgr-muted">
-        not shown yet — telemetry integration arrives in slice 2. Configured and observed stay
-        separate fields by design.
+        not shown in v1 — live state is squad-level only; per-role attribution needs
+        manifest/launcher/store work (separate approval). Configured and observed stay separate
+        fields by design.
       </dd>
       <dt>Tools</dt>
       <dd>
@@ -162,61 +147,50 @@ function Instructions({ squad, card, onPromptDirty }) {
   );
 }
 
-function History({ squad }) {
-  const [state, setState] = useState({ loading: false, runs: null, error: null });
-
-  useEffect(() => {
-    let cancelled = false;
-    setState({ loading: true, runs: null, error: null });
-    getPromptRuns(squad.key, 10)
-      .then((runs) => {
-        if (!cancelled) setState({ loading: false, runs, error: null });
-      })
-      .catch((err) => {
-        if (!cancelled) setState({ loading: false, runs: null, error: err });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [squad.key]);
-
+// History reads the bounded live snapshot (the same /api/manager/snapshot the
+// overlay polls) — the Manager screen never calls /api/runs or
+// /api/prompts/runs. Rows arrive decorated with their derived state; active
+// runs first, then the most recent ended ones (≤ 5 per squad, server bound).
+function History({ live, liveStale }) {
+  const runs = live ? [...live.active, ...live.recent] : [];
+  const cost = (r) => (r.costPartial ? 'partial' : fmtUSD(r.costUSD ?? 0));
   return (
     <div>
       <p className="mgr-inspector-note">
-        Squad-level run history. Per-role attribution arrives with the slice 2 telemetry adapter —
-        nothing is inferred here.
+        Squad-level run history from the bounded live snapshot (5 most recent per squad). Per-role
+        attribution is not available in v1 — squad-level binding only; nothing is inferred here.
       </p>
-      {state.loading && <p className="mgr-muted">loading runs…</p>}
-      {state.error && (
-        <p className="mgr-empty-note">
-          run history unavailable ({state.error.message}). This does not affect configuration
-          data.
+      {liveStale && (
+        <p className="mgr-empty-note" role="note">
+          <span aria-hidden="true">⏱</span> live update failed — showing last known data
         </p>
       )}
-      {state.runs && state.runs.length === 0 && (
-        <p className="mgr-empty-note">no runs recorded for this squad yet</p>
+      <GateBadge count={(live?.pendingGates || []).length} />
+      {!live && <p className="mgr-muted">loading live snapshot…</p>}
+      {live && runs.length === 0 && live.pendingGates.length === 0 && (
+        <p className="mgr-empty-note">no runs in the bounded window for this squad</p>
       )}
-      {state.runs && state.runs.length > 0 && (
+      {live && runs.length > 0 && (
         <table className="mgr-table mgr-table-tight">
           <thead>
             <tr>
               <th scope="col">Run</th>
               <th scope="col">Task</th>
-              <th scope="col">Status</th>
+              <th scope="col">State</th>
               <th scope="col">Started</th>
               <th scope="col">Cost</th>
             </tr>
           </thead>
           <tbody>
-            {state.runs.map((r) => (
+            {runs.map((r) => (
               <tr key={r.runId}>
                 <td className="mgr-cell-mono">{r.runId}</td>
                 <td>{r.taskId || '—'}</td>
                 <td>
-                  <RunStateChip label={statusLabel(r)} />
+                  <LiveStateChip state={r.state} />
                 </td>
                 <td>{fmtDateTime(r.startedAt)}</td>
-                <td>{fmtCost(r)}</td>
+                <td>{cost(r)}</td>
               </tr>
             ))}
           </tbody>
@@ -240,7 +214,7 @@ function Achievements() {
   );
 }
 
-export default function Inspector({ squad, card, tab, onTab, editing, promptDirty }) {
+export default function Inspector({ squad, card, tab, onTab, editing, promptDirty, live, liveStale }) {
   if (!card) {
     return (
       <div className="mgr-inspector">
@@ -284,7 +258,7 @@ export default function Inspector({ squad, card, tab, onTab, editing, promptDirt
         {tab === 'instructions' && (
           <Instructions squad={squad} card={card} onPromptDirty={editing.onPromptDirty} />
         )}
-        {tab === 'history' && <History squad={squad} />}
+        {tab === 'history' && <History live={live} liveStale={liveStale} />}
         {tab === 'achievements' && <Achievements />}
       </div>
     </div>

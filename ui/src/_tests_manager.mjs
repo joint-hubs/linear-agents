@@ -52,6 +52,19 @@ import {
   switchBlocked,
   workingFingerprint,
 } from './manager/editing.js';
+import {
+  LIVE_STATE_META,
+  POLL_BASE_MS,
+  POLL_MAX_MS,
+  SNAPSHOT_STALE_MS,
+  decorateRuns,
+  isSnapshotStale,
+  liveBlockFor,
+  mapRunState,
+  nextPollIntervalMs,
+  shouldPoll,
+  squadLiveState,
+} from './manager/live.js';
 
 // --- Minimal test harness (same shape as _test_utils.mjs) ------------------
 
@@ -535,6 +548,101 @@ await test('connectivityState: offline on fetch failure, restored on a successfu
   eq(connectivityState({ loading: true, readAt: new Date(), error: null }), 'connecting');
   // successful read restores the normal state
   eq(connectivityState({ loading: false, readAt: new Date(), error: null }), 'online');
+});
+
+// --- Slice 2: live snapshot adapter (manager/live.js) ------------------------
+
+await test('LIVE_STATE_META: every state renders icon + text — never color alone', () => {
+  const states = ['running', 'waiting', 'failed', 'finished', 'accepted', 'stale', 'unknown'];
+  for (const s of states) {
+    const meta = LIVE_STATE_META[s];
+    assert(meta, `missing meta for ${s}`);
+    assert(meta.glyph && meta.glyph.length > 0, `${s} has no icon glyph`);
+    assert(meta.label && meta.label.length > 0, `${s} has no text label`);
+    assert(meta.cls && meta.cls.startsWith('mgr-chip'), `${s} chip class wrong: ${meta.cls}`);
+  }
+});
+
+await test('mapRunState: unended runs — store truth, liveness refines, contradiction is never "running"', () => {
+  eq(mapRunState(null), 'unknown');
+  eq(mapRunState({ endedAt: null, alive: true }), 'running');
+  // missing liveness does not negate the store (documented server-side in missing[])
+  eq(mapRunState({ endedAt: null, alive: null }), 'running');
+  eq(mapRunState({ endedAt: null }), 'running');
+  // a dead console with no recorded end contradicts the store — unknown, not fake running
+  eq(mapRunState({ endedAt: null, alive: false }), 'unknown');
+});
+
+await test('mapRunState: ended runs — failed / finished / accepted / unknown', () => {
+  const acc = { 'FOC-910': { round: 3, verdict: 'pass' } };
+  eq(mapRunState({ endedAt: 'x', exitCode: 1 }), 'failed');
+  eq(mapRunState({ endedAt: 'x', exitCode: '2' }), 'failed'); // string exit codes parse
+  eq(mapRunState({ endedAt: 'x', exitCode: 0 }), 'finished'); // exit 0 alone never accepts
+  eq(mapRunState({ endedAt: 'x', exitCode: 0, taskId: 'FOC-910' }, acc), 'accepted');
+  eq(mapRunState({ endedAt: 'x', exitCode: 0, taskId: 'foc-910' }, acc), 'accepted'); // case-insensitive
+  eq(mapRunState({ endedAt: 'x', exitCode: 0, taskId: 'FOC-999' }, acc), 'finished');
+  eq(mapRunState({ endedAt: 'x', exitCode: 0 }, acc), 'finished');
+  // missing or unparsable exit code — unknown, never guessed into finished/failed
+  eq(mapRunState({ endedAt: 'x', exitCode: null }), 'unknown');
+  eq(mapRunState({ endedAt: 'x' }), 'unknown');
+  eq(mapRunState({ endedAt: 'x', exitCode: 'oops' }), 'unknown');
+});
+
+await test('squadLiveState: gate > active > newest recent; empty window renders nothing', () => {
+  const acc = { 'FOC-910': { round: 1, verdict: 'pass' } };
+  const gate = { pendingGates: [{ gateId: 'g1' }] };
+  eq(squadLiveState(gate, acc), 'waiting'); // a pending gate overrides everything
+  eq(squadLiveState({ ...gate, active: [{ endedAt: null, alive: true }] }, acc), 'waiting');
+  eq(squadLiveState({ active: [{ endedAt: null, alive: true }], recent: [] }, acc), 'running');
+  eq(squadLiveState({ active: [], recent: [{ endedAt: 'x', exitCode: 1 }] }, acc), 'failed');
+  eq(squadLiveState({ active: [], recent: [{ endedAt: 'x', exitCode: 0, taskId: 'FOC-910' }] }, acc), 'accepted');
+  eq(squadLiveState({ active: [], recent: [{ endedAt: 'x', exitCode: 0 }] }, acc), 'finished');
+  eq(squadLiveState({ active: [], recent: [{ endedAt: 'x', exitCode: null }] }, acc), 'unknown');
+  eq(squadLiveState({ active: [], recent: [] }, acc), null); // no fake idle activity
+  eq(squadLiveState(null, acc), null);
+});
+
+await test('liveBlockFor + decorateRuns: absent squad is empty, rows get derived states', () => {
+  // a missing snapshot or squad is an EMPTY block, not an error — no runs in
+  // the bounded window, nothing invented
+  const emptyShape = JSON.stringify({ active: [], recent: [], pendingGates: [] });
+  eq(JSON.stringify(liveBlockFor(null, 'dev')), emptyShape);
+  const empty = liveBlockFor({ squads: {} }, 'dev');
+  eq(JSON.stringify(empty), emptyShape);
+  const block = {
+    active: [{ runId: 'a1', endedAt: null, alive: true }],
+    recent: [{ runId: 'r1', endedAt: 'x', exitCode: 1 }, { runId: 'r2', endedAt: 'x', exitCode: 0 }],
+    pendingGates: [{ gateId: 'g1', squad: 'dev' }],
+  };
+  const d = decorateRuns(block, {});
+  eq(d.active[0].state, 'running');
+  eq(d.recent[0].state, 'failed');
+  eq(d.recent[1].state, 'finished');
+  eq(d.active[0].runId, 'a1'); // original fields intact
+  eq(d.pendingGates.length, 1);
+});
+
+await test('isSnapshotStale: missing/broken generatedAt is stale; age over the bound is stale', () => {
+  const now = Date.parse('2026-09-06T12:00:00.000Z');
+  eq(isSnapshotStale(null, now), true);
+  eq(isSnapshotStale({}, now), true);
+  eq(isSnapshotStale({ generatedAt: 'not-a-date' }, now), true);
+  eq(isSnapshotStale({ generatedAt: '2026-09-06T11:59:57.000Z' }, now), false); // 3 s old — fresh
+  eq(isSnapshotStale({ generatedAt: '2026-09-06T11:59:40.000Z' }, now), true); // 20 s — stale
+  assert(SNAPSHOT_STALE_MS === 15000, `stale bound moved: ${SNAPSHOT_STALE_MS}`);
+});
+
+await test('poll helpers: backoff doubles to the cap; ticks skip in-flight, hidden and paused', () => {
+  eq(POLL_BASE_MS, 5000);
+  eq(POLL_MAX_MS, 60000);
+  eq(nextPollIntervalMs(5000), 10000); // one failure → ×2
+  eq(nextPollIntervalMs(30000), 60000); // capped
+  eq(nextPollIntervalMs(60000), 60000); // stays at cap
+  eq(nextPollIntervalMs(0), 10000); // garbage current falls back to base then doubles
+  eq(shouldPoll({ enabled: true, inFlight: false, hidden: false }), true);
+  eq(shouldPoll({ enabled: true, inFlight: true, hidden: false }), false); // never overlap
+  eq(shouldPoll({ enabled: true, inFlight: false, hidden: true }), false); // hidden tab
+  eq(shouldPoll({ enabled: false, inFlight: false, hidden: false }), false); // paused mode
 });
 
 // --- Summary -----------------------------------------------------------------

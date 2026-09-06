@@ -29,6 +29,13 @@ import {
   connectivityState,
 } from '../manager/editing.js';
 import {
+  decorateRuns,
+  liveBlockFor,
+  squadLiveState,
+  POLL_BASE_MS,
+} from '../manager/live.js';
+import useLivePoll from '../manager/useLivePoll.js';
+import {
   buildSavePayload,
   buildWorkingCopy,
   countDirty,
@@ -39,6 +46,7 @@ import {
 import RoleCard from '../components/manager/RoleCard.jsx';
 import { SquadRail, RosterTable } from '../components/manager/Roster.jsx';
 import Inspector from '../components/manager/Inspector.jsx';
+import { LiveFreshness, SquadLiveStrip } from '../components/manager/LiveStrip.jsx';
 import './manager.css';
 
 // Header connectivity badge (fenix-manager.md §3.4): dot + text — never
@@ -75,6 +83,9 @@ export default function Manager() {
   const [selectedRole, setSelectedRole] = useState(null);
   const [tab, setTab] = useState('profile');
   const [viewMode, setViewMode] = useState('board');
+  // 'setup' | 'live' — Live activates the telemetry overlay (slice 2). Setup
+  // keeps the overlay quiet: one seeded snapshot for History, no ticking.
+  const [mode, setMode] = useState('setup');
   const [positions, setPositions] = useState({});
   const [draggingKey, setDraggingKey] = useState(null);
   const [announce, setAnnounce] = useState('');
@@ -99,6 +110,44 @@ export default function Manager() {
   const boardModel = useMemo(() => buildBoardModel(config), [config]);
   const installKey = useMemo(() => installFingerprint(config), [config]);
 
+  // --- live overlay (slice 2) -------------------------------------------------
+  // One poller for the whole screen: ticks in Live mode, seeds once in Setup
+  // (the History tab reads the same snapshot). Failures keep the last-known
+  // snapshot — the overlay freezes, it never blanks.
+  const live = useLivePoll({ enabled: true, tick: mode === 'live', intervalMs: POLL_BASE_MS });
+  const snapshot = live.snapshot;
+
+  // Motion only on OBSERVED transitions between consecutive snapshots — and
+  // only in Live mode. Stale/offline means no new snapshots, hence no motion;
+  // an empty store never animates.
+  const prevSquadStatesRef = useRef({});
+  const [flashSquads, setFlashSquads] = useState(() => new Set());
+  useEffect(() => {
+    if (mode !== 'live' || !snapshot) return undefined;
+    const prev = prevSquadStatesRef.current;
+    const next = {};
+    const changed = new Set();
+    for (const [key, block] of Object.entries(snapshot.squads || {})) {
+      next[key] = squadLiveState(block, snapshot.acceptedByTask || {});
+      if (prev[key] !== undefined && prev[key] !== next[key]) changed.add(key);
+    }
+    prevSquadStatesRef.current = next;
+    if (changed.size === 0) return undefined;
+    setFlashSquads(changed);
+    const t = setTimeout(() => setFlashSquads(new Set()), 1200);
+    return () => clearTimeout(t);
+  }, [snapshot, mode]);
+
+  // Per-squad live states for the rail chips (Live mode only).
+  const liveBySquad = useMemo(() => {
+    if (mode !== 'live' || !snapshot) return null;
+    const map = {};
+    for (const [key, block] of Object.entries(snapshot.squads || {})) {
+      map[key] = { state: squadLiveState(block, snapshot.acceptedByTask || {}), block };
+    }
+    return map;
+  }, [snapshot, mode]);
+
   const requested = searchParams.get('squad');
   const selectedSquad = boardModel.some((s) => s.key === requested)
     ? requested
@@ -109,6 +158,15 @@ export default function Manager() {
   const roleKeys = useMemo(() => (squad ? squad.cards.map((c) => c.key) : []), [squad]);
   const roleKeysSig = roleKeys.join('|');
   const selectedCard = squad?.cards.find((c) => c.key === selectedRole) || null;
+
+  // Render-ready runs for the selected squad (History tab, both modes).
+  const squadLive = useMemo(
+    () =>
+      snapshot
+        ? decorateRuns(liveBlockFor(snapshot, squadKey), snapshot.acceptedByTask || {})
+        : null,
+    [snapshot, squadKey]
+  );
 
   const fetchConfig = useCallback(async () => {
     setLoading(true);
@@ -486,15 +544,20 @@ export default function Manager() {
             </select>
           </label>
           <div className="mgr-mode" role="group" aria-label="View mode">
-            <button type="button" className="mgr-mode-btn mgr-mode-active" aria-pressed="true">
+            <button
+              type="button"
+              className={`mgr-mode-btn${mode === 'setup' ? ' mgr-mode-active' : ''}`}
+              aria-pressed={mode === 'setup'}
+              onClick={() => setMode('setup')}
+            >
               Setup
             </button>
             <button
               type="button"
-              className="mgr-mode-btn"
-              aria-pressed="false"
-              disabled
-              title="live overlay arrives with telemetry integration (slice 2)"
+              className={`mgr-mode-btn${mode === 'live' ? ' mgr-mode-active' : ''}`}
+              aria-pressed={mode === 'live'}
+              onClick={() => setMode('live')}
+              title="live run state from the bounded telemetry snapshot"
             >
               Live
             </button>
@@ -518,6 +581,14 @@ export default function Manager() {
             {readAt ? `config read ${fmtTime(readAt.toISOString())}` : ''}
             {promptDirty ? ' · prompt draft unsaved' : ''}
           </span>
+          {mode === 'live' && (
+            <LiveFreshness
+              snapshot={snapshot}
+              error={live.error}
+              lastSuccessAt={live.lastSuccessAt}
+              onRetry={live.refresh}
+            />
+          )}
           <ConnBadge state={conn} />
         </div>
       </header>
@@ -654,6 +725,7 @@ export default function Manager() {
             onSelectSquad={selectSquad}
             selectedRole={selectedRole}
             onSelectRole={selectRole}
+            liveStates={liveBySquad}
           />
         </aside>
 
@@ -677,6 +749,13 @@ export default function Manager() {
                 List
               </button>
             </div>
+            {mode === 'live' && (
+              <SquadLiveStrip
+                block={liveBlockFor(snapshot, squadKey)}
+                acceptedByTask={snapshot?.acceptedByTask || {}}
+                flash={flashSquads.has(squadKey)}
+              />
+            )}
             <button type="button" className="mgr-btn mgr-btn-sm" onClick={resetLayout}>
               Reset layout
             </button>
@@ -725,6 +804,8 @@ export default function Manager() {
               onPromptDirty: setPromptDirty,
             }}
             promptDirty={promptDirty}
+            live={squadLive}
+            liveStale={live.error != null}
           />
         </aside>
       </div>
