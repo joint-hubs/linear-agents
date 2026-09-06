@@ -24,17 +24,23 @@ export function stagedModelSummary(configuredModel, stagedModel) {
   return { changed: from !== to, from, to };
 }
 
-// The unsaved-work guard is active when either writer has staged/unsaved
-// work: configuration staging (working copy ≠ server state) or a prompt
-// draft. beforeunload + SPA-nav interception + switch confirms all key off
-// this single predicate.
-export function editingGuardActive(configDirtyCount, promptDirty) {
-  return (configDirtyCount > 0) === true || promptDirty === true;
+// The unsaved-work guard is active when any writer has staged/unsaved work:
+// configuration staging (working copy ≠ server state), a prompt draft, or a
+// staged manager rating (slice 3, additive third parameter). beforeunload +
+// SPA-nav interception + switch confirms all key off this single predicate.
+export function editingGuardActive(configDirtyCount, promptDirty, ratingDirty = false) {
+  return (configDirtyCount > 0) === true || promptDirty === true || ratingDirty === true;
 }
 
-// Decision shared by every in-screen switch that would drop an unsaved
-// prompt draft (role, squad, inspector tab): ask via the given confirm
-// function only when a draft exists; true means the switch is blocked.
+// Combined "is anything staged?" input for the switch guards: a prompt draft
+// or a staged manager rating both mean a confirm before losing work.
+export function anyUnsaved(promptDirty, ratingDirty) {
+  return promptDirty === true || ratingDirty === true;
+}
+
+// Decision shared by every in-screen switch that would drop unsaved staged
+// work (role, squad, inspector tab): ask via the given confirm function only
+// when something is staged; true means the switch is blocked.
 export function switchBlocked(promptDirty, confirmFn) {
   if (promptDirty !== true) return false;
   return confirmFn() !== true;

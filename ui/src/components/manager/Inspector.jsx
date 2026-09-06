@@ -8,15 +8,22 @@
 // screen uses. Nothing here applies anything by itself: config changes go
 // stage → preview (dry run) → apply in the edit bar; prompt saves are the
 // editor's own dry-run/save pair.
+//
+// Slice 3 adds rewards: the Achievements tab renders the squad's ledger
+// aggregates, and the History tab carries the ONE human-authoring surface
+// for manager ratings (per ended run with a task) — a stage-then-explicit-
+// apply control whose saves go through /api/manager/ratings.
 
 import PromptContext from '../PromptContext.jsx';
 import MarkdownEditor from '../MarkdownEditor.jsx';
 import { fmtDateTime, fmtUSD } from '../../utils.js';
 import { COORDINATOR_KEY } from '../../manager/identity.js';
 import { promptPathFor, stagedModelSummary, nextTabIndex } from '../../manager/editing.js';
+import { ratingForRun } from '../../manager/rewards.js';
 import { hasPriceEntry, modelSuggestions } from '../../squadConfig/workingCopy.js';
 import { GateBadge, LiveStateChip } from './LiveStrip.jsx';
 import { StateChip } from './RoleCard.jsx';
+import { AchievementsPanel, RatingControl, RatingDisplay, rateableRun } from './Rewards.jsx';
 
 const TABS = [
   ['profile', 'Profile'],
@@ -151,7 +158,7 @@ function Instructions({ squad, card, onPromptDirty }) {
 // overlay polls) — the Manager screen never calls /api/runs or
 // /api/prompts/runs. Rows arrive decorated with their derived state; active
 // runs first, then the most recent ended ones (≤ 5 per squad, server bound).
-function History({ live, liveStale }) {
+function History({ live, liveStale, squadKey, rewards, onRate, ratingSave, onRatingDirty }) {
   const runs = live ? [...live.active, ...live.recent] : [];
   const cost = (r) => (r.costPartial ? 'partial' : fmtUSD(r.costUSD ?? 0));
   return (
@@ -159,6 +166,8 @@ function History({ live, liveStale }) {
       <p className="mgr-inspector-note">
         Squad-level run history from the bounded live snapshot (5 most recent per squad). Per-role
         attribution is not available in v1 — squad-level binding only; nothing is inferred here.
+        The Rating column is the one human-authoring surface for manager ratings: a subjective
+        record on the rewards ledger, saved explicitly — it never carries XP.
       </p>
       {liveStale && (
         <p className="mgr-empty-note" role="note">
@@ -179,20 +188,41 @@ function History({ live, liveStale }) {
               <th scope="col">State</th>
               <th scope="col">Started</th>
               <th scope="col">Cost</th>
+              <th scope="col">Rating</th>
             </tr>
           </thead>
           <tbody>
-            {runs.map((r) => (
-              <tr key={r.runId}>
-                <td className="mgr-cell-mono">{r.runId}</td>
-                <td>{r.taskId || '—'}</td>
-                <td>
-                  <LiveStateChip state={r.state} />
-                </td>
-                <td>{fmtDateTime(r.startedAt)}</td>
-                <td>{cost(r)}</td>
-              </tr>
-            ))}
+            {runs.map((r) => {
+              const rating = ratingForRun(rewards?.data, r);
+              return (
+                <tr key={r.runId}>
+                  <td className="mgr-cell-mono">{r.runId}</td>
+                  <td>{r.taskId || '—'}</td>
+                  <td>
+                    <LiveStateChip state={r.state} />
+                  </td>
+                  <td>{fmtDateTime(r.startedAt)}</td>
+                  <td>{cost(r)}</td>
+                  <td>
+                    {rateableRun(r) ? (
+                      <RatingControl
+                        squadKey={squadKey}
+                        run={r}
+                        saved={rating}
+                        onSave={onRate}
+                        onDirty={onRatingDirty}
+                        busy={ratingSave?.busy}
+                        error={ratingSave?.error}
+                      />
+                    ) : rating ? (
+                      <RatingDisplay rating={rating} />
+                    ) : (
+                      <span className="mgr-muted">—</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}
@@ -200,21 +230,24 @@ function History({ live, liveStale }) {
   );
 }
 
-// Rewards stay honestly pending until the slice 3 ledger exists (see
-// docs/ui/fenix-manager-rewards.md). Never rendered as zeroed records.
-function Achievements() {
-  return (
-    <div className="mgr-pending">
-      <p className="mgr-pending-title">Rewards arrive in a later slice</p>
-      <p className="mgr-muted">
-        XP and manager ratings need a durable evidence ledger (slice 3). Nothing is recorded yet —
-        and nothing is guessed from runs, costs or exit codes.
-      </p>
-    </div>
-  );
-}
+// Achievements aggregates live in Rewards.jsx (slice 3): squad XP/level/
+// badges from the ledger, awaiting-verified-evidence when nothing is on
+// record — never zeroed records. Aggregates only: rating authoring stays in
+// the History rows, per the supervisor-resolved design decision.
 
-export default function Inspector({ squad, card, tab, onTab, editing, promptDirty, live, liveStale }) {
+export default function Inspector({
+  squad,
+  card,
+  tab,
+  onTab,
+  editing,
+  promptDirty,
+  live,
+  liveStale,
+  rewards,
+  onRate,
+  ratingSave,
+}) {
   if (!card) {
     return (
       <div className="mgr-inspector">
@@ -272,8 +305,18 @@ export default function Inspector({ squad, card, tab, onTab, editing, promptDirt
         {tab === 'instructions' && (
           <Instructions squad={squad} card={card} onPromptDirty={editing.onPromptDirty} />
         )}
-        {tab === 'history' && <History live={live} liveStale={liveStale} />}
-        {tab === 'achievements' && <Achievements />}
+        {tab === 'history' && (
+          <History
+            live={live}
+            liveStale={liveStale}
+            squadKey={squad.key}
+            rewards={rewards}
+            onRate={onRate}
+            ratingSave={ratingSave}
+            onRatingDirty={editing.onRatingDirty}
+          />
+        )}
+        {tab === 'achievements' && <AchievementsPanel rewards={rewards} squadKey={squad.key} />}
       </div>
     </div>
   );

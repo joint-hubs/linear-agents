@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { getSquadConfig, postSquadConfig } from '../api';
+import { getManagerRewards, getSquadConfig, postManagerRating, postSquadConfig } from '../api';
 import { fmtTime } from '../utils.js';
 import { buildBoardModel, installFingerprint, COORDINATOR_KEY } from '../manager/identity.js';
 import {
@@ -23,6 +23,7 @@ import {
   keyboardMoveDelta,
 } from '../manager/layout.js';
 import {
+  anyUnsaved,
   editingGuardActive,
   switchBlocked,
   workingFingerprint,
@@ -47,6 +48,7 @@ import RoleCard from '../components/manager/RoleCard.jsx';
 import { SquadRail, RosterTable } from '../components/manager/Roster.jsx';
 import Inspector from '../components/manager/Inspector.jsx';
 import { LiveFreshness, SquadLiveStrip } from '../components/manager/LiveStrip.jsx';
+import { RewardsHeaderChip } from '../components/manager/Rewards.jsx';
 import './manager.css';
 
 // Header connectivity badge (fenix-manager.md §3.4): dot + text — never
@@ -63,11 +65,12 @@ function ConnBadge({ state }) {
 }
 
 const LEAVE_MESSAGE =
-  'Leave with unsaved work? Staged configuration changes and unsaved prompt edits exist only '
-  + 'while this screen is open — leaving now discards them.';
+  'Leave with unsaved work? Staged configuration changes, unsaved prompt edits and staged manager '
+  + 'ratings exist only while this screen is open — leaving now discards them.';
 
-const PROMPT_SWITCH_MESSAGE =
-  'The prompt draft is not saved. Switching role or squad now discards it. Continue?';
+const UNSAVED_SWITCH_MESSAGE =
+  'Unsaved work exists (a prompt draft or a staged manager rating). Switching role or squad now '
+  + 'discards it. Continue?';
 
 function pct(v) {
   return `${Math.round(v)}%`;
@@ -102,6 +105,16 @@ export default function Manager() {
   const [previewFp, setPreviewFp] = useState(null);
   const [configSave, setConfigSave] = useState({ phase: 'idle', op: null, result: null, error: null });
   const [promptDirty, setPromptDirty] = useState(false);
+
+  // --- rewards state (slice 3) ----------------------------------------------
+  // Ledger facts (GET /api/manager/rewards) change only when verdicts are
+  // ingested server-side: fetched once per mount, re-fetched after a rating
+  // save and on the panel's Retry. data semantics mirror the adapter:
+  // undefined = loading, null = error. Last-known facts are kept while
+  // revalidating — the UI never invents zeros.
+  const [rewardsState, setRewardsState] = useState({ data: undefined, error: null });
+  const [ratingSave, setRatingSave] = useState({ busy: false, error: null });
+  const [dirtyRatingRuns, setDirtyRatingRuns] = useState(() => new Set());
 
   const positionsRef = useRef(positions);
   const boardRef = useRef(null);
@@ -189,6 +202,67 @@ export default function Manager() {
     fetchConfig();
   }, [fetchConfig]);
 
+  // --- rewards fetch + rating save (slice 3) --------------------------------
+
+  const rewardsAbortRef = useRef(null);
+  const loadRewards = useCallback(async () => {
+    rewardsAbortRef.current?.abort();
+    const controller = new AbortController();
+    rewardsAbortRef.current = controller;
+    try {
+      const payload = await getManagerRewards(controller.signal);
+      if (controller.signal.aborted) return;
+      setRewardsState({ data: payload, error: null });
+    } catch (err) {
+      if (controller.signal.aborted || err?.name === 'AbortError') return;
+      setRewardsState({ data: null, error: err });
+    }
+  }, []);
+
+  useEffect(() => {
+    loadRewards();
+    return () => rewardsAbortRef.current?.abort();
+  }, [loadRewards]);
+
+  // Rating save → 201 → reload the ledger so History rows and the
+  // achievements aggregates show the new latest record. Per-endpoint errors
+  // stay on the row's control; success releases the row's staged state.
+  const saveRating = useCallback(
+    async (payload) => {
+      setRatingSave({ busy: true, error: null });
+      try {
+        await postManagerRating(payload);
+        await loadRewards();
+        setRatingSave({ busy: false, error: null });
+        return true;
+      } catch (err) {
+        setRatingSave({ busy: false, error: err });
+        return false;
+      }
+    },
+    [loadRewards]
+  );
+
+  // Staged rating state per History row — a Set, because several rows carry
+  // their own control at once; reverting one row must not release the
+  // unsaved-work guard for another.
+  const onRatingDirty = useCallback((runId, isDirty) => {
+    setDirtyRatingRuns((prev) => {
+      const has = prev.has(runId);
+      if (isDirty === has) return prev;
+      const next = new Set(prev);
+      if (isDirty) next.add(runId);
+      else next.delete(runId);
+      return next;
+    });
+  }, []);
+
+  const rewards = useMemo(
+    () => ({ ...rewardsState, reload: loadRewards }),
+    [rewardsState, loadRewards]
+  );
+  const ratingDirty = dirtyRatingRuns.size > 0;
+
   // Rebuild the staging working copy whenever a fresh server read lands
   // (initial load and after a successful apply — applied changes ARE server
   // state, so staging resets; a successful outcome banner stays visible).
@@ -238,21 +312,24 @@ export default function Manager() {
     [squadKey, installKey]
   );
 
-  // Selection with the unsaved-prompt guard (card click, roster, table,
-  // keyboard Enter all funnel here). The ref keeps the callbacks stable.
+  // Selection with the unsaved-work guard (card click, roster, table,
+  // keyboard Enter all funnel here). The refs keep the callbacks stable:
+  // a prompt draft or a staged manager rating both mean a confirm first.
   const promptDirtyRef = useRef(false);
   promptDirtyRef.current = promptDirty;
+  const ratingDirtyRef = useRef(false);
+  ratingDirtyRef.current = ratingDirty;
 
-  const confirmDiscardPrompt = useCallback(() => window.confirm(PROMPT_SWITCH_MESSAGE), []);
+  const confirmDiscardPrompt = useCallback(() => window.confirm(UNSAVED_SWITCH_MESSAGE), []);
 
   const selectRole = useCallback((key) => {
-    if (switchBlocked(promptDirtyRef.current, confirmDiscardPrompt)) return;
+    if (switchBlocked(anyUnsaved(promptDirtyRef.current, ratingDirtyRef.current), confirmDiscardPrompt)) return;
     setSelectedRole(key);
   }, [confirmDiscardPrompt]);
 
   const selectSquad = useCallback(
     (key) => {
-      if (switchBlocked(promptDirtyRef.current, confirmDiscardPrompt)) return;
+      if (switchBlocked(anyUnsaved(promptDirtyRef.current, ratingDirtyRef.current), confirmDiscardPrompt)) return;
       setSearchParams({ squad: key });
     },
     [setSearchParams, confirmDiscardPrompt]
@@ -262,7 +339,7 @@ export default function Manager() {
   // unmounts MarkdownEditor and would silently drop the draft.
   const selectTab = useCallback(
     (id) => {
-      if (switchBlocked(promptDirtyRef.current, confirmDiscardPrompt)) return;
+      if (switchBlocked(anyUnsaved(promptDirtyRef.current, ratingDirtyRef.current), confirmDiscardPrompt)) return;
       setTab(id);
     },
     [confirmDiscardPrompt]
@@ -427,7 +504,7 @@ export default function Manager() {
 
   // --- unsaved-edit protection ----------------------------------------------
 
-  const guardActive = editingGuardActive(dirtyCount, promptDirty);
+  const guardActive = editingGuardActive(dirtyCount, promptDirty, ratingDirty);
 
   // Header connectivity: offline while the config read fails, restored on a
   // successful read (fenix-manager.md §3.4).
@@ -543,6 +620,7 @@ export default function Manager() {
               ))}
             </select>
           </label>
+          <RewardsHeaderChip rewards={rewards} squadKey={squadKey} />
           <div className="mgr-mode" role="group" aria-label="View mode">
             <button
               type="button"
@@ -580,6 +658,7 @@ export default function Manager() {
           <span className="mgr-freshness">
             {readAt ? `config read ${fmtTime(readAt.toISOString())}` : ''}
             {promptDirty ? ' · prompt draft unsaved' : ''}
+            {ratingDirty ? ' · rating unsaved' : ''}
           </span>
           {mode === 'live' && (
             <LiveFreshness
@@ -802,10 +881,14 @@ export default function Manager() {
               onStageLead: stageLeadModel,
               onStageModel: stageAgentModel,
               onPromptDirty: setPromptDirty,
+              onRatingDirty,
             }}
             promptDirty={promptDirty}
             live={squadLive}
             liveStale={live.error != null}
+            rewards={rewards}
+            onRate={saveRating}
+            ratingSave={ratingSave}
           />
         </aside>
       </div>

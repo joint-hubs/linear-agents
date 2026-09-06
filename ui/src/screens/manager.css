@@ -921,19 +921,6 @@
   overflow-wrap: anywhere;
 }
 
-.mgr-pending {
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-sm);
-  padding: 12px;
-  background: var(--surface-2);
-}
-
-.mgr-pending-title {
-  font-weight: 650;
-  font-size: 13px;
-  margin: 0 0 4px;
-}
-
 /* --- loading / error / empty --------------------------------------------- */
 
 .mgr-loading,
@@ -981,6 +968,134 @@
   background: var(--surface-2);
   padding: 1px 5px;
   border-radius: 4px;
+}
+
+/* --- rewards (FOC-225 slice 3) --------------------------------------------- */
+
+/* Static surfaces only: no animation is defined for any rewards element, so
+   the prefers-reduced-motion block needs no rewards entries. Icon + text
+   everywhere; the earned/locked badge pair differs by glyph AND fill, never
+   by color alone. */
+
+.mgr-rewards-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.mgr-rewards-chip-star {
+  color: var(--accent-strong);
+}
+
+.mgr-rewards {
+  display: grid;
+  gap: 10px;
+}
+
+.mgr-rewards-awaiting {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: var(--surface);
+}
+
+.mgr-rewards-awaiting-title {
+  font-weight: 650;
+  margin: 0 0 4px;
+  color: var(--text);
+}
+
+.mgr-rewards-xp {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.mgr-rewards-badge-row {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mgr-rw-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+
+.mgr-rw-badge-earned {
+  background: var(--ok-soft);
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.mgr-rw-badge-locked {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.mgr-rewards-kind {
+  white-space: nowrap;
+}
+
+.mgr-rewards-evidence {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mgr-rewards-notes {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.mgr-rewards-notes p {
+  margin: 4px 0;
+}
+
+/* Rating authoring inside a History cell — compact one-row layout. */
+.mgr-rating {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mgr-rating-select {
+  font-size: 12px;
+  padding: 1px 4px;
+}
+
+.mgr-rating-note {
+  font-size: 12px;
+  padding: 1px 6px;
+  width: 120px;
+}
+
+.mgr-rating-error {
+  color: var(--danger);
+  font-size: 11px;
+  flex-basis: 100%;
+}
+
+.mgr-rating-display {
+  white-space: nowrap;
 }
 
 /* --- responsive ----------------------------------------------------------- */
