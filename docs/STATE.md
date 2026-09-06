@@ -12,14 +12,20 @@
   unsaved-edit protection, per-endpoint statusy, next-launch semantics).
 - Commity: `0b394dd` spec · `c7b9fd2` board · `8ac385f` card fit · `88c8007` workingCopy extraction ·
   `1d14b09` manager editing · `f377506` fix TDZ/chip · `07c0f58` docs part 2 ·
-  `0fbbaa7` review-r1 fixes (tab-switch confirm, stale-preview gate, roster keyboard).
+  `0fbbaa7` review-r1 fixes (tab-switch confirm, stale-preview gate, roster keyboard) ·
+  `5134f1f` test-r1 fixes (Shift+Arrow step, offline header badge, model-input width).
 - Kluczowe pliki: `ui/src/squadConfig/workingCopy.js` (single shared writer), `ui/src/manager/editing.js`,
   `ui/src/screens/Manager.jsx`, `ui/src/components/manager/Inspector.jsx`, `ui/src/screens/SquadConfig.jsx`
   (refactor na wspólny moduł, zachowanie bez zmian), `ui/src/components/MarkdownEditor.jsx` (additive `onDirtyChange`).
-- Weryfikacja: UI 47+38 PASS · build ✓ · serwer 30/115/6/37/53 PASS · przeglądarka (CDP headless, izolowany
+- Weryfikacja: UI 47+42 PASS · build ✓ · serwer 30/115/6/37/53 PASS · przeglądarka (CDP headless, izolowany
   fixture :7391 → vite :5174): drive 1 staging→preview→apply→re-read→discard+warning 15/15, drive 2
-  prompt-draft/confirm-block/failed-preview+recovery 19/19, drive 3 regresja /squad-config 5/5;
-  zrzuty `.state/shots2/*.png`; WCAG par statusowych ≥4.5:1 (bez nowych kolorów).
+  prompt-draft/confirm-block/failed-preview+recovery 19/19, drive 3 regresja /squad-config 5/5, drive 4
+  review-r1 regresje 12/12, drive 5/5b test-r1 (offline→online badge, Shift+Arrow +8% / Arrow +2%,
+  model-editor width 131→185px) — zrzuty `.state/shots2/*.png`; WCAG par statusowych ≥4.5:1.
+- TEST return (round 1): D1 Shift+Arrow używa dużego kroku (`keyboardMoveDelta` w `manager/layout.js`),
+  D2 badge łączności w headerze (`connectivityState` w `manager/editing.js`, offline w gałęzi błędu),
+  D3 `.mgr-profile dt { max-width: 9em }` przestaje ściśkać edytor modelu. Nitpicki z review celowo nie
+  łapane (scope: D1–D3).
 - Izolowany fixture: `.state/fixture-install/` (kopia scripts/config/agents/bin; backend `TELEMETRY_PORT=7391
   node .state/fixture-install/scripts/telemetry-server.mjs`, UI `LA_UI_PORT=5174 LA_API_PORT=7391 npm --prefix ui run dev`).
   Produkcja (7331/5173) nietknięta — zero POST poza fixture.
