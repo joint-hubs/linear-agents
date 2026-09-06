@@ -3,7 +3,7 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Current execution: 2026-09-06 — FOC-225 Fenix Manager (slice 0 + slice 1, worktree `foc-225-dev`)
+## Current execution: 2026-09-06 — FOC-225 Fenix Manager (slice 0–2, worktree `foc-225-dev`)
 
 - Worktree `C:\Users\mateu\Documents\GitHub\la-wt\linear-agents\foc-225-dev`, branch `foc-225-dev`, baza `875b5c6`.
 - Dowiezione: slice 0 (spec `docs/ui/fenix-manager.md` + `docs/ui/fenix-manager-rewards.md`), slice 1 part 1
@@ -14,6 +14,33 @@
   `1d14b09` manager editing · `f377506` fix TDZ/chip · `07c0f58` docs part 2 ·
   `0fbbaa7` review-r1 fixes (tab-switch confirm, stale-preview gate, roster keyboard) ·
   `5134f1f` test-r1 fixes (Shift+Arrow step, offline header badge, model-input width).
+- Slice 2 (live telemetry overlay, plan zatwierdzony 2026-09-06): bounded `queryManagerRuns`
+  (`scripts/telemetry-store.mjs`, migracja idx v6) → snapshot builder `scripts/manager-snapshot.mjs`
+  + cache'owane `GET /api/manager/snapshot` (TTL 3 s single-flight; handlery `/api/runs` i
+  `/api/prompts/runs` nietknięte) → klient `ui/src/manager/live.js` (czysty adapter, testowalny
+  w node) + `ui/src/manager/useLivePoll.js` (tick 5 s, backoff ×2 cap 60 s, skip in-flight, pauza
+  hidden/Setup, wznowienie refocus/Live) → overlay (LiveStrip, chipsy w railu, live History,
+  nieinteraktywny gate badge) + a11y ride-along (taby Inspectora strzałkami, Home/End, bez zawijania).
+- Commity slice 2: `7adb89b` store query+migracja · `fd8deed` builder+route+testy ·
+  `d7c975b` live overlay UI · `dcf1af4` inspector a11y · (ten commit) docs §3.6/§6c + STATE.
+- Diagnoza (podstawa decyzji): `queryRuns` na realnym store = 1247 ms/call (461 runs / 137 260
+  usage rows; SELECT * + pełna projekcja per-row), bounded path 0,6–5 ms — stąd NOWE bounded
+  query, a nie cache nad wolną ścieżką.
+- Weryfikacja slice 2: UI 50 PASS (live adapter, poll helpers, nextTabIndex) · build ✓ ·
+  telemetry 10/10 · drive 6 (CDP, izolowany fixture :7391→:5174) 33/33 PASS: setup (zero wywołań
+  /api/runs i /api/prompts/runs z /manager; stany ▶ ✓ ★ ✕; gate badge jako span), live strip
+  (waiting > running, „live · updated … (cached)", chipsy railu), plan running, disconnect
+  (board retained, „live update failed — showing last known", Retry), reconnect (Retry przywraca),
+  reduced-motion (matchMedia reduce; flash za no-preference), 1440/1024 bez overflow, empty store
+  („no activity in the bounded window", zero chipów) — zrzuty `.state/shots2/s2-*.png`; narzędzia:
+  `.state/cdp6.mjs`, `.state/seed-slice2-fixture.mjs`, `.state/fix-manifests.mjs`, `.state/reseed-empty.mjs`.
+- Decyzje wiążące: atrybucja live wyłącznie squad-level (per-role ODRZUCONE dla v1 — wymaga
+  manifest/launcher/store + osobnej zgody); `accepted` = supervisor pass verdict per task
+  (latest round wygrywa, fail nigdy nie promuje); verdicty nie mają markera REVIEW/TEST (v1 caveat,
+  udokumentowany w §3.6).
+- Reconcile interplay (ważne dla fixture): `reconcileDeadRuns` działa przy starcie i co 15 s —
+  zamyka unended runs z martwym consolePid; manifesty żywych runów muszą wskazywać pid backendu
+  (`.state/fix-manifests.mjs` tuż po starcie backendu).
 - Kluczowe pliki: `ui/src/squadConfig/workingCopy.js` (single shared writer), `ui/src/manager/editing.js`,
   `ui/src/screens/Manager.jsx`, `ui/src/components/manager/Inspector.jsx`, `ui/src/screens/SquadConfig.jsx`
   (refactor na wspólny moduł, zachowanie bez zmian), `ui/src/components/MarkdownEditor.jsx` (additive `onDirtyChange`).
@@ -30,8 +57,10 @@
   node .state/fixture-install/scripts/telemetry-server.mjs`, UI `LA_UI_PORT=5174 LA_API_PORT=7391 npm --prefix ui run dev`).
   Produkcja (7331/5173) nietknięta — zero POST poza fixture.
 - Known: serwerowa walidacja sluga fail-open (warning, nie błąd); footer sidebar ma zahardkodowane `:7331`;
-  `/api/prompts/runs` bywa wolne (import nieskompresowanego transkryptu). Rewards = pending placeholders (slice 3).
-- Następne (wymaga decyzji): slice 2 (telemetry overlay) i slice 3 (rewards) — po review incrementu.
+  `/api/prompts/runs` bywa wolne (import nieskompresowanego transkryptu) — `/manager` już po nią nie sięga
+  (bounded snapshot). Rewards = pending placeholders (slice 3).
+- Następne (wymaga decyzji): slice 3 (rewards). Odrzucone dla v1: per-role live attribution
+  (wymaga osobnej zgody).
 
 ## Historical: 2026-09-05 — Fenix stabilization
 
