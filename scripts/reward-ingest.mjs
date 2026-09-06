@@ -12,16 +12,23 @@
 //   - the browser can never submit XP (AC 2) — this module is the sole writer;
 //   - per (task, repo) group the LATEST verdict wins: retries and re-reviews
 //     within a lineage never multiply awards, and a newer non-pass revokes;
-//   - repo comes from the RECORDING run's launch_cwd (the run whose artifacts
-//     hold the verdict — same repo as the delivery); subject comes from the
-//     producing run's squad via the task's primary run_task_links link (the
-//     verdict's own squad field is the REVIEW child's squad — wrong credit);
+//   - repo identity is the RECORDING run's LOGICAL repo (the run whose
+//     artifacts hold the verdict — same repo as the delivery): the run's git
+//     common dir via its workspace_observations row when one exists (spawn-free
+//     lookup — the git facts were recorded at event time, never re-spawned
+//     here), so two worktrees of one repo share one identity; without a
+//     workspace observation the normalized launch_cwd stands in. The raw
+//     launch_cwd stays in provenance whenever the common dir supplied the
+//     identity; subject comes from the producing run's squad via the task's
+//     primary run_task_links link (the verdict's own squad field is the REVIEW
+//     child's squad — wrong credit);
 //   - prompt/config revision is not carried by verdict records — stored as
 //     the 'unknown' sentinel and reported once per pass in missing[];
 //   - a pass verdict with no resolvable subject is HELD: an audit row at
-//     subject 'unknown', active=0 (no XP) + a missing[] entry; when a later
-//     pass resolves the link the real award is inserted (dedup only blocks
-//     ACTIVE awards);
+//     subject 'unknown', active=0 (no XP) + a missing[] entry; replays of the
+//     same unresolved evidence dedup in the held namespace (one held row, no
+//     matter how many passes rescan it); when a later pass resolves the link
+//     the real award is inserted — a hold never blocks an award;
 //   - revocation is VERDICT-DRIVEN ONLY (supervisor decision 2): a Linear
 //     reopen without a new non-pass verdict round does not revoke;
 //   - provenance stamps the supervisor decision verbatim: a supervisor pass
@@ -49,6 +56,13 @@ export const REWARDS_INGEST_TTL_MS = 30_000; // single-flight cache window
 // Supervisor decision 1 (2026-09-06), stamped verbatim into award provenance.
 export const PROVENANCE_CAVEAT =
   "a supervisor pass verdict is acceptance evidence; the missing REVIEW/TEST stage marker is the documented v1 caveat";
+
+// The non-pass counterpart, as its own named constant: deriving it by
+// .replace() over PROVENANCE_CAVEAT meant a caveat rewording silently changed
+// (or no-op'd) the revocation provenance. Round and evidence are interpolated
+// at the call site, never baked in here.
+export const REVOCATION_PROVENANCE =
+  "revocation: a supervisor non-pass verdict supersedes acceptance (the missing REVIEW/TEST stage marker is the documented v1 caveat)";
 
 export function missing(list, ref, field, reason) {
   if (!list.some((m) => m.ref === ref && m.field === field && m.reason === reason)) {
@@ -104,16 +118,17 @@ export function ingestRewards(deps = {}) {
   }
   const runDirs = entries.slice(0, scanLimit);
 
-  // Verdict records, grouped by (task, repo). The repo is resolved per verdict
-  // from the RECORDING run's launch_cwd so two repos sharing a task id stay
-  // two groups (two awards).
+  // Verdict records, grouped by (task, repo identity). The identity is
+  // resolved per verdict from the RECORDING run so two repos sharing a task
+  // id stay two groups (two awards) while two worktrees of ONE repo stay one
+  // group (one award, M2).
   const groups = new Map(); // key → { taskId, repo, verdicts: [] }
   for (const { name: runId } of runDirs) {
     const verdictsDir = join(supervisorRoot, runId, "verdicts");
     if (!existsSync(verdictsDir)) continue;
     result.scannedRuns++;
-    let recordingCwd = null;
-    let recordingCwdResolved = false;
+    let recordingIdentity = null;
+    let recordingIdentityResolved = false;
     for (const file of readdirSync(verdictsDir)) {
       if (!file.endsWith(".json")) continue;
       const evidenceId = `supervisor/${runId}/verdicts/${file.replaceAll("\\", "/")}`;
@@ -132,20 +147,53 @@ export function ingestRewards(deps = {}) {
         missing(result.missing, evidenceId, "verdict", "verdict record missing required fields (taskId, round, verdict, recordedAt)");
         continue;
       }
-      if (!recordingCwdResolved) {
-        // one bounded indexed lookup per run dir
+      if (!recordingIdentityResolved) {
+        // two bounded indexed lookups per run dir
         try {
-          const row = telemetryDb.prepare("SELECT launch_cwd AS cwd FROM runs WHERE run_id=?").get(runId);
-          recordingCwd = normalizeRepo(row?.cwd);
+          const run = telemetryDb.prepare("SELECT launch_cwd AS cwd FROM runs WHERE run_id=?").get(runId);
+          const cwd = normalizeRepo(run?.cwd);
+          // Spawn-free logical identity (M2): the run's workspace observation
+          // already carries the repository's git common dir — the one path
+          // every worktree of the repo shares, so it is the dedup identity
+          // that survives re-review from another checkout. Falls back to the
+          // normalized launch cwd when no observation exists.
+          let commonDir = null;
+          try {
+            commonDir = telemetryDb
+              .prepare(
+                `SELECT r.common_dir AS commonDir
+                   FROM workspace_observations o JOIN repositories r ON r.repository_id = o.repository_id
+                  WHERE o.run_id=? AND o.repository_id IS NOT NULL
+                  ORDER BY o.observed_at DESC LIMIT 1`,
+              )
+              .get(runId)?.commonDir ?? null;
+          } catch (err) {
+            missing(result.missing, evidenceId, "repo", `workspace lookup failed: ${toMissingEntry(err)}`);
+          }
+          recordingIdentity = commonDir
+            ? { repo: normalizeRepo(commonDir), fromCommonDir: true, recordedFrom: run?.cwd ?? null }
+            : { repo: cwd, fromCommonDir: false, recordedFrom: null };
         } catch (err) {
           missing(result.missing, evidenceId, "repo", `recording run lookup failed: ${toMissingEntry(err)}`);
         }
-        recordingCwdResolved = true;
+        recordingIdentityResolved = true;
       }
-      const repo = recordingCwd ?? UNKNOWN;
+      const repo = recordingIdentity?.repo ?? UNKNOWN;
       const key = `${taskId}|${repo}`;
       if (!groups.has(key)) groups.set(key, { taskId, repo, verdicts: [] });
-      groups.get(key).verdicts.push({ round, verdict, recordedAt, evidenceId, recordingRunId: runId });
+      // Identity metadata rides each verdict, not the group: one group can
+      // hold verdicts from several recording runs (two worktrees, one repo),
+      // and the provenance must cite the checkout of the run whose verdict
+      // actually drives the write — never of whichever dir was scanned first.
+      groups.get(key).verdicts.push({
+        round,
+        verdict,
+        recordedAt,
+        evidenceId,
+        recordingRunId: runId,
+        repoOrigin: recordingIdentity?.fromCommonDir ? "git-common-dir" : "launch-cwd",
+        recordedFrom: recordingIdentity?.recordedFrom ?? null,
+      });
     }
   }
   if (result.scannedRuns === 0) {
@@ -176,7 +224,7 @@ export function ingestRewards(deps = {}) {
           ruleVersion: award.ruleVersion,
           runId: latest.recordingRunId,
           evidenceId: latest.evidenceId,
-          provenance: `revocation: ${PROVENANCE_CAVEAT.replace("pass verdict is acceptance evidence", `non-pass verdict (round ${latest.round}) supersedes acceptance`)} — evidence ${latest.evidenceId}`,
+          provenance: `${REVOCATION_PROVENANCE} — round ${latest.round}, evidence ${latest.evidenceId}`,
         });
         if (!outcome.noop) result.revoked++;
       }
@@ -226,7 +274,15 @@ export function ingestRewards(deps = {}) {
       runId: producing?.runId ?? null,
       evidenceId: latest.evidenceId,
       model,
-      provenance: `xp-rules v1: ${PROVENANCE_CAVEAT} (round ${latest.round}, evidence ${latest.evidenceId})`,
+      // When the git common dir supplied the identity, provenance keeps the
+      // raw checkout path of the winning verdict's recording run — the common
+      // dir is stable across worktrees, but the audit trail should still say
+      // where the run actually recorded its artifacts.
+      provenance:
+        `xp-rules v1: ${PROVENANCE_CAVEAT} (round ${latest.round}, evidence ${latest.evidenceId})` +
+        (latest.repoOrigin === "git-common-dir"
+          ? `; repo identity from the git common dir (recorded from ${latest.recordedFrom ?? UNKNOWN})`
+          : ""),
     };
     if (!subject) {
       const held = insertHeldAward(rewardsDb, awardInput);

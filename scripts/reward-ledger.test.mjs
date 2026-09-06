@@ -1,8 +1,9 @@
 // Tests for the reward ledger (FOC-225 slice 3, design: docs/ui/fenix-manager-rewards.md §5).
 //
 // Covers:
-//   (a) dedicated store: fresh rewards.sqlite stamps the v1 marker; a close→
-//       reopen cycle keeps every record (restart persistence);
+//   (a) dedicated store: fresh rewards.sqlite stamps the migration markers; a
+//       close→reopen cycle keeps every record (restart persistence); a v1
+//       database (first marker only) still gains the v2 held-replay rekey;
 //   (b) award semantics: replay dedup inside one BEGIN IMMEDIATE, concurrent
 //       writers across two connections still yield exactly one award, the
 //       revoke → re-accept → re-award cycle stays possible, cross-repo same
@@ -12,7 +13,10 @@
 //       revoking an inactive award is a no-op;
 //   (d) rating semantics: NULL-safe supersession per (subject, task, run),
 //       prior entries kept, latest wins, ratings never carry points;
-//   (e) schema honesty: the record column set contains no secrets/prompt
+//   (e) held awards: written in one transaction in their final shape, dedup
+//       in the held namespace (replays stay one row) while never blocking the
+//       later real award;
+//   (f) schema honesty: the record column set contains no secrets/prompt
 //       columns (AC 14) and bounded reads return the allowlisted projection.
 //
 // Windows discipline: every handle is closed in `finally` BEFORE rmSync — a
@@ -35,6 +39,7 @@ import {
   insertRating,
   querySquadRewards,
   queryRatings,
+  queryHeldAwards,
 } from "./reward-ledger.mjs";
 
 let DatabaseSync;
@@ -103,19 +108,65 @@ test("xp rules: frozen constants with a version label", () => {
   assert(Object.isFrozen(XP_RULES), "XP_RULES must be frozen");
 });
 
-test("migration: fresh store stamps the v1 marker; reopen does not duplicate it", () => {
+test("migration: fresh store stamps every step marker; reopen does not duplicate them", () => {
   requireSqlite();
   const dir = mkdtempSync(join(tmpdir(), "rewards-ledger-"));
   const h = tracker();
   try {
     const path = join(dir, "rewards.sqlite");
     const db = h.open(path);
-    assert(REWARDS_SCHEMA_VERSION === 1, `schema version should be 1, got ${REWARDS_SCHEMA_VERSION}`);
-    const marker = db.prepare("SELECT version FROM schema_migrations WHERE version=?").get(REWARDS_MIGRATION_VERSIONS.rewardsBase);
-    assert(marker, "rewardsBase marker missing");
+    assert(REWARDS_SCHEMA_VERSION === 2, `schema version should be 2, got ${REWARDS_SCHEMA_VERSION}`);
+    for (const version of Object.values(REWARDS_MIGRATION_VERSIONS)) {
+      const marker = db.prepare("SELECT version FROM schema_migrations WHERE version=?").get(version);
+      assert(marker, `marker ${version} missing on a fresh store`);
+    }
     const reopened = h.open(path);
     const markers = reopened.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get();
-    assert(markers.n === 1, `reopen must not re-stamp, got ${markers.n} markers`);
+    assert(
+      markers.n === Object.keys(REWARDS_MIGRATION_VERSIONS).length,
+      `reopen must not re-stamp, got ${markers.n} markers`,
+    );
+  } finally {
+    h.closeAll();
+    cleanup(dir);
+  }
+});
+
+test("migration: a v1 database (base marker only) still gains the v2 held-replay rekey", () => {
+  requireSqlite();
+  const dir = mkdtempSync(join(tmpdir(), "rewards-ledger-"));
+  const h = tracker();
+  try {
+    const path = join(dir, "rewards.sqlite");
+    // Wind the rows back to the exact v1 shapes the writer used to leave:
+    // a held row under the PLAIN award key, and — the M3 crash window — an
+    // active award at subject 'unknown'. Only the base marker stays stamped.
+    const seeded = h.open(path);
+    const real = insertAward(seeded, { ...AWARD, taskId: "FOC-100" });
+    const heldV1 = insertAward(seeded, { ...AWARD, taskId: "FOC-101", subject: UNKNOWN });
+    seeded.prepare("UPDATE reward_records SET active=0, provenance=provenance || ' [held]' WHERE id=?").run(heldV1.id);
+    const corrupted = insertAward(seeded, { ...AWARD, taskId: "FOC-102", subject: UNKNOWN }); // stays active=1
+    seeded.prepare("DELETE FROM schema_migrations WHERE version=?").run(REWARDS_MIGRATION_VERSIONS.heldReplayRekey);
+    seeded.close();
+
+    const migrated = h.open(path); // reopen must re-run the v2 step, not short-circuit
+    for (const version of Object.values(REWARDS_MIGRATION_VERSIONS)) {
+      assert(
+        migrated.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(version),
+        `marker ${version} must be stamped after the reopen`,
+      );
+    }
+    const row = (id) => migrated.prepare("SELECT dedup_key, active FROM reward_records WHERE id=?").get(id);
+    assert(row(real.id).active === 1 && !row(real.id).dedup_key.startsWith("held|"), "a real award must stay untouched");
+    assert(row(heldV1.id).dedup_key.startsWith("held|") && row(heldV1.id).active === 0, "the v1 held row must move into the held namespace");
+    assert(row(corrupted.id).active === 0 && row(corrupted.id).dedup_key.startsWith("held|"), "the crash-corrupted award must be demoted and re-keyed");
+
+    // and the migrated rows behave like native v2 rows: the hold dedups, the
+    // demoted row cannot block the real award for its evidence
+    const heldReplay = insertHeldAward(migrated, { ...AWARD, taskId: "FOC-101" });
+    assert(heldReplay.duplicate === true, "the re-keyed held row must dedup replays");
+    const unblocked = insertAward(migrated, { ...AWARD, taskId: "FOC-102" });
+    assert(unblocked.duplicate === false, "the demoted row must not block the real award");
   } finally {
     h.closeAll();
     cleanup(dir);
@@ -289,20 +340,55 @@ test("held award: subject 'unknown', active=0, later link resolution re-awards t
     const db = h.open(join(dir, "rewards.sqlite"));
     const held = insertHeldAward(db, AWARD);
     assert(held.ok, "held award must write an audit row");
-    const row = db.prepare("SELECT subject, active, provenance FROM reward_records WHERE id=?").get(held.id);
+    const row = db.prepare("SELECT subject, active, provenance, dedup_key FROM reward_records WHERE id=?").get(held.id);
     assert(row.subject === UNKNOWN, `held award must sit at subject unknown, got ${row.subject}`);
     assert(row.active === 0, `held award must carry no xp, got active=${row.active}`);
     assert(row.provenance.includes("held:"), `provenance must document the hold: ${row.provenance}`);
+    assert(row.dedup_key.startsWith("held|"), `held dedup key must be held-scoped, got ${row.dedup_key}`);
     assert(querySquadRewards(db, "dev").xp === 0, "holding must not credit the squad");
 
     // later ingest pass resolves the link → the real squad gets its award
     const real = insertAward(db, AWARD);
     assert(real.duplicate === false, "resolved link must award despite the held row");
+    const awardKey = db.prepare("SELECT dedup_key FROM reward_records WHERE id=?").get(real.id).dedup_key;
+    assert(!awardKey.startsWith("held|"), "the award dedup key must stay in the award namespace");
     const squad = querySquadRewards(db, "dev");
     assert(squad.xp === 100, `squad must be credited after resolution, got ${squad.xp}`);
     // and re-scanning the still-unlinked evidence must not produce a second held row
     const heldAgain = insertHeldAward(db, AWARD);
-    assert(heldAgain.duplicate === true, "held evidence replay must dedup against the active award");
+    assert(heldAgain.duplicate === true, "held evidence replay must dedup against the held namespace");
+  } finally {
+    h.closeAll();
+    cleanup(dir);
+  }
+});
+
+test("held replay: the same unresolved evidence yields exactly one held row, and the hold never blocks the real award", () => {
+  requireSqlite();
+  const dir = mkdtempSync(join(tmpdir(), "rewards-ledger-"));
+  const h = tracker();
+  try {
+    const db = h.open(join(dir, "rewards.sqlite"));
+    // pass 1 holds; passes 2..N (the ~30 s Manager polls) must be no-ops
+    const first = insertHeldAward(db, AWARD);
+    assert(first.duplicate === false, "the first pass must insert the held row");
+    for (let i = 0; i < 3; i++) {
+      const replay = insertHeldAward(db, AWARD);
+      assert(replay.duplicate === true && replay.id === first.id, `replay pass ${i + 2} must dedup to the same row`);
+    }
+    const heldCount = db.prepare("SELECT COUNT(*) AS n FROM reward_records WHERE subject=? AND kind='award'").get(UNKNOWN);
+    assert(heldCount.n === 1, `exactly one held row expected across passes, got ${heldCount.n}`);
+    assert(querySquadRewards(db, "dev").xp === 0, "held replays must never mint xp");
+
+    // while the evidence stays unresolved the hold stays on the awaiting list
+    assert(queryHeldAwards(db).length === 1, "an unresolved hold must stay listed");
+
+    // the hold does NOT block the real award once the link resolves
+    const real = insertAward(db, AWARD);
+    assert(real.duplicate === false, "the held row must not block the real award");
+    assert(querySquadRewards(db, "dev").xp === 100, `the resolved squad must be credited, got ${querySquadRewards(db, "dev").xp}`);
+    // ...and the now-resolved hold drops out of the awaiting list
+    assert(queryHeldAwards(db).length === 0, "a hold whose lineage resolved must drop out of the list");
   } finally {
     h.closeAll();
     cleanup(dir);
@@ -351,6 +437,8 @@ test("validation: bad inputs are rejected before any write", () => {
       ["revocation without taskId", () => insertRevocation(db, { ...AWARD, taskId: " " })],
       ["rating out of range", () => insertRating(db, { subject: "dev", taskId: "FOC-225", rating: 6 })],
       ["rating non-integer", () => insertRating(db, { subject: "dev", taskId: "FOC-225", rating: 4.5 })],
+      ["rating as string", () => insertRating(db, { subject: "dev", taskId: "FOC-225", rating: "3" })],
+      ["rating as array", () => insertRating(db, { subject: "dev", taskId: "FOC-225", rating: [3] })],
       ["rating without subject", () => insertRating(db, { taskId: "FOC-225", rating: 3 })],
       ["read without subject", () => querySquadRewards(db, "")],
     ];

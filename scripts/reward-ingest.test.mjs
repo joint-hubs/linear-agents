@@ -8,8 +8,11 @@
 //   (b) latest-round-wins: fail→pass awards, pass→fail revokes, pass after
 //       revoke re-awards, replay of a revocation stays clean;
 //   (c) held awards: no linked producing run or squad-less run → subject
-//       'unknown', no XP, missing[] entry, awaiting list; resolution re-awards;
-//   (d) cross-repo same taskId → two groups, two awards;
+//       'unknown', no XP, missing[] entry, awaiting list; replays across passes
+//       stay one held row counted once; resolution re-awards;
+//   (d) repo identity: cross-repo same taskId → two groups, two awards;
+//       worktrees of one repo share the git common dir → one award, while
+//       repos sharing a basename stay two;
 //   (e) bounds and hygiene: scan limit, malformed records, absent root,
 //       zero-award quiet store;
 //   (f) cache: TTL window, single-flight sharing, reset;
@@ -94,6 +97,20 @@ function seedUsage(db, runId, model, observedAt = "2026-09-01T00:10:00.000Z") {
        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, source_path, source_offset, created_at)
      VALUES (?,?,?,'implement',?, ?,10,5,0,0,'C:/t/x.jsonl',0,'2026-09-01T00:10:00.000Z')`,
   ).run(`u-${runId}-${model.replaceAll("/", "-")}`, runId, `sess-${runId}`, model, observedAt);
+}
+
+// A recorded workspace observation (what a hook / transcript scan would have
+// written at event time) — lets the ingest resolve the run's LOGICAL repo via
+// the git common dir without spawning git.
+function seedWorkspace(db, runId, { cwd, commonDir, observedAt = "2026-09-01T00:02:00.000Z" }) {
+  const repositoryId = `repo-${commonDir.toLowerCase()}`;
+  db.prepare(
+    "INSERT OR IGNORE INTO repositories (repository_id, common_dir, remote_url, created_at) VALUES (?,?,NULL,?)",
+  ).run(repositoryId, commonDir, "2026-09-01T00:00:00.000Z");
+  db.prepare(
+    `INSERT INTO workspace_observations (run_id, observed_at, cwd, repository_id, worktree_id, ref_type, ref_name, head_sha, source)
+     VALUES (?,?,?,?,NULL,'branch','main',NULL,'test')`,
+  ).run(runId, observedAt, cwd, repositoryId);
 }
 
 function writeVerdict(root, runId, taskId, round, verdict, { recordedAt = "2026-09-05T10:00:00.000Z", squad = "review" } = {}) {
@@ -289,6 +306,38 @@ test("held: no linked producing run → subject unknown, no xp, awaiting; resolu
   }
 });
 
+test("held replay: unresolved evidence re-scanned by later passes stays one held row, counted once", () => {
+  requireSqlite();
+  resetRewardsIngestCache();
+  const h = harness();
+  try {
+    seedRun(h.telemetryDb, { runId: "run-a", squad: "dev" });
+    writeVerdict(h.supervisorRoot, "run-a", "FOC-920", 1, "pass");
+    const first = ingestRewards(h.deps);
+    assert(first.held === 1 && first.awarded === 0, `first pass must hold: ${JSON.stringify(first)}`);
+
+    // the Manager polls ~every 30 s: passes 2..N ride the same unresolved
+    // evidence and must neither mint rows nor re-count the hold
+    for (let pass = 2; pass <= 4; pass++) {
+      const replay = ingestRewards(h.deps);
+      assert(replay.held === 0 && replay.awarded === 0, `pass ${pass} must be a no-op: ${JSON.stringify(replay)}`);
+    }
+    const rows = h.rewardsDb.prepare("SELECT COUNT(*) AS n FROM reward_records WHERE kind='award'").get();
+    assert(rows.n === 1, `exactly one held row across four passes, got ${rows.n}`);
+    assert(queryHeldAwards(h.rewardsDb).length === 1, "the hold must stay on the awaiting list while unresolved");
+
+    // resolution still awards the real squad, and the next replay is a plain duplicate
+    seedLink(h.telemetryDb, "run-a", "FOC-920");
+    const resolved = ingestRewards(h.deps);
+    assert(resolved.awarded === 1, `resolution must award: ${JSON.stringify(resolved)}`);
+    assert(querySquadRewards(h.rewardsDb, "dev").xp === 100, "resolved squad must be credited");
+    const after = ingestRewards(h.deps);
+    assert(after.duplicated === 1 && after.held === 0, `post-resolution replay wrong: ${JSON.stringify(after)}`);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("held: producing run without squad → subject unknown + missing[]", () => {
   requireSqlite();
   resetRewardsIngestCache();
@@ -326,6 +375,61 @@ test("cross-repo same taskId: recording cwd separates the groups → two awards"
     assert(JSON.stringify(repos) === JSON.stringify(["c:/repos/one", "c:/repos/two"]), `repos wrong: ${repos}`);
     const squad = querySquadRewards(h.rewardsDb, "dev");
     assert(squad.xp === 200 && squad.distinctRevisions === 2, `xp/distinct wrong: ${squad.xp}/${squad.distinctRevisions}`);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("repo identity: two worktrees of one repo share the git common dir → one award; same-basename repos stay two", () => {
+  requireSqlite();
+  resetRewardsIngestCache();
+  const h = harness();
+  try {
+    // the same accepted revision re-reviewed from ANOTHER checkout of the same
+    // repo (a worktree) — both recording runs share one git common dir
+    seedRun(h.telemetryDb, { runId: "run-main", squad: "dev", launchCwd: "C:/repos/linear-agents" });
+    seedRun(h.telemetryDb, { runId: "run-wt", squad: "dev", launchCwd: "C:/repos/linear-agents/wt-foc-225" });
+    seedWorkspace(h.telemetryDb, "run-main", { cwd: "C:/repos/linear-agents", commonDir: "C:/repos/linear-agents/.git" });
+    seedWorkspace(h.telemetryDb, "run-wt", { cwd: "C:/repos/linear-agents/wt-foc-225", commonDir: "C:/repos/linear-agents/.git" });
+    seedLink(h.telemetryDb, "run-main", "FOC-910");
+    seedLink(h.telemetryDb, "run-wt", "FOC-910");
+    writeVerdict(h.supervisorRoot, "run-main", "FOC-910", 1, "pass", { recordedAt: "2026-09-05T10:00:00.000Z" });
+    writeVerdict(h.supervisorRoot, "run-wt", "FOC-910", 2, "pass", { recordedAt: "2026-09-05T11:00:00.000Z" });
+
+    // two genuinely different repos that merely share a basename stay separate
+    seedRun(h.telemetryDb, { runId: "run-a", squad: "dev", launchCwd: "C:/repos/la" });
+    seedRun(h.telemetryDb, { runId: "run-b", squad: "dev", launchCwd: "C:/repos/other/la" });
+    seedWorkspace(h.telemetryDb, "run-a", { cwd: "C:/repos/la", commonDir: "C:/repos/la/.git" });
+    seedWorkspace(h.telemetryDb, "run-b", { cwd: "C:/repos/other/la", commonDir: "C:/repos/other/la/.git" });
+    seedLink(h.telemetryDb, "run-a", "FOC-911");
+    seedLink(h.telemetryDb, "run-b", "FOC-911");
+    writeVerdict(h.supervisorRoot, "run-a", "FOC-911", 1, "pass", { recordedAt: "2026-09-05T10:05:00.000Z" });
+    writeVerdict(h.supervisorRoot, "run-b", "FOC-911", 1, "pass", { recordedAt: "2026-09-05T10:10:00.000Z" });
+
+    const result = ingestRewards(h.deps);
+    assert(result.groups === 3, `worktree evidence must group with its repo, same-basename repos must not: ${JSON.stringify(result)}`);
+    assert(result.awarded === 3, `one award per accepted revision, not per checkout: ${JSON.stringify(result)}`);
+    const repos = h.rewardsDb
+      .prepare("SELECT repo FROM reward_records WHERE kind='award' AND active=1 ORDER BY repo")
+      .all()
+      .map((r) => r.repo);
+    assert(
+      JSON.stringify(repos) === JSON.stringify([
+        "c:/repos/la/.git",
+        "c:/repos/linear-agents/.git",
+        "c:/repos/other/la/.git",
+      ]),
+      `repo identity must be the git common dir: ${repos}`,
+    );
+    const worktreeAward = h.rewardsDb
+      .prepare("SELECT provenance, run_id FROM reward_records WHERE repo='c:/repos/linear-agents/.git' AND kind='award' AND active=1")
+      .get();
+    assert(worktreeAward.provenance.includes("git common dir"), `provenance must name the identity surface: ${worktreeAward.provenance}`);
+    assert(
+      worktreeAward.provenance.includes("C:/repos/linear-agents/wt-foc-225"),
+      `provenance must keep the raw checkout path: ${worktreeAward.provenance}`,
+    );
+    assert(querySquadRewards(h.rewardsDb, "dev").xp === 300 && querySquadRewards(h.rewardsDb, "dev").distinctRevisions === 3, "xp must match the award count");
   } finally {
     h.cleanup();
   }

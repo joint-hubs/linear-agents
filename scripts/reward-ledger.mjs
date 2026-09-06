@@ -15,6 +15,10 @@
 //     BEGIN IMMEDIATE — deliberately NOT a table UNIQUE, so the
 //     revoke → re-accept → re-award cycle stays possible while replayed or
 //     concurrent evidence still yields exactly one award;
+//   - held awards (evidence accepted, credit subject unresolvable) live in
+//     their OWN dedup namespace ('held|' prefix) so a hold dedups against
+//     itself across ingest passes yet never blocks the real award once the
+//     producing run is linked;
 //   - absent repo/revision are the sentinel 'unknown' (never NULL, never 0 —
 //     SQLite UNIQUE/comparison does not collapse NULLs and silence is unknown);
 //   - ratings supersede per (subject, task, run) with NULL-safe `IS`
@@ -25,13 +29,18 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
-export const REWARDS_SCHEMA_VERSION = 1;
+export const REWARDS_SCHEMA_VERSION = 2;
 
-// Per-step migration markers, same pattern telemetry-store.mjs uses: a one-shot
-// step is guarded by its own constant so bumping the shared version no longer
-// re-arms older steps that already ran.
+// Per-step migration markers, same pattern telemetry-store.mjs uses: each step
+// guards itself on its own marker inside migrateRewards, so opening an
+// existing database always runs every step whose marker is missing — a
+// short-circuit on the first marker would freeze the store at v1 forever.
 export const REWARDS_MIGRATION_VERSIONS = {
   rewardsBase: 1,
+  // v2 (review round 5): held rows re-keyed into the held dedup namespace and
+  // crash-corrupted active 'unknown'-subject awards demoted — see
+  // migrateHeldReplayRekey.
+  heldReplayRekey: 2,
 };
 
 // PRODUCT RULES, not measurements (design §3): display arithmetic only.
@@ -80,7 +89,26 @@ export function migrateRewards(db) {
       applied_at TEXT NOT NULL
     );
   `);
-  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(REWARDS_MIGRATION_VERSIONS.rewardsBase)) return;
+  // Each step guards itself on its own marker (telemetry-store's pattern):
+  // an existing v1 database must still gain every later step, so nothing may
+  // return early from migrateRewards as a whole.
+  migrateRewardsBase(db);
+  migrateHeldReplayRekey(db);
+}
+
+function migrationMarker(db, version) {
+  return db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(version);
+}
+
+function stampMigration(db, version) {
+  db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(
+    version,
+    new Date().toISOString(),
+  );
+}
+
+function migrateRewardsBase(db) {
+  if (migrationMarker(db, REWARDS_MIGRATION_VERSIONS.rewardsBase)) return;
   db.exec(`
     CREATE TABLE IF NOT EXISTS reward_records (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,10 +133,36 @@ export function migrateRewards(db) {
     CREATE INDEX IF NOT EXISTS idx_rewards_subject_active ON reward_records (subject, active, kind);
     CREATE INDEX IF NOT EXISTS idx_rewards_dedup ON reward_records (dedup_key);
   `);
-  db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(
-    REWARDS_MIGRATION_VERSIONS.rewardsBase,
-    new Date().toISOString(),
-  );
+  stampMigration(db, REWARDS_MIGRATION_VERSIONS.rewardsBase);
+}
+
+// v2 — the v1 held-award insert committed an active award row and demoted it
+// with two post-commit UPDATEs. A crash in that window left an ACTIVE award
+// at subject 'unknown': invisible to the held list (which requires active=0)
+// and, via the award dedup check, permanently blocking the real award. And
+// because v1 held rows carried the plain award dedup key, every ingest pass
+// over still-unresolved evidence inserted another held row. The writer now
+// inserts held rows directly in their final shape under a held-scoped key;
+// this one-shot rekey moves pre-v2 rows into that same shape:
+//   - any active award at subject 'unknown' is a crash leftover (the ingest
+//     only awards through insertAward with a resolved subject) → demote;
+//   - every unknown-subject award row gets the 'held|' key prefix, so replayed
+//     held evidence dedups and the demoted rows can never block an award.
+function migrateHeldReplayRekey(db) {
+  if (migrationMarker(db, REWARDS_MIGRATION_VERSIONS.heldReplayRekey)) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE reward_records SET active=0 WHERE kind='award' AND subject=? AND active=1").run(UNKNOWN);
+    db.prepare(
+      `UPDATE reward_records SET dedup_key = '${HELD_KEY_PREFIX}' || dedup_key
+        WHERE kind='award' AND subject=? AND dedup_key IS NOT NULL AND dedup_key NOT LIKE '${HELD_KEY_PREFIX}%'`,
+    ).run(UNKNOWN);
+    stampMigration(db, REWARDS_MIGRATION_VERSIONS.heldReplayRekey);
+    db.exec("COMMIT");
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    throw err;
+  }
 }
 
 function now() {
@@ -117,6 +171,17 @@ function now() {
 
 function taskKey(taskId, repo, revision, ruleVersion) {
   return [taskId ?? UNKNOWN, repo ?? UNKNOWN, revision ?? UNKNOWN, ruleVersion ?? UNKNOWN].join("|");
+}
+
+// Held rows dedup in their own namespace: 'held|' + the award key. Two
+// identities that must both hold at once: (1) replays of the same unresolved
+// evidence group collapse to ONE held row (the held key matches itself), and
+// (2) the held key never equals an award key, so a hold can never block the
+// real award inserted later once the producing run is linked.
+const HELD_KEY_PREFIX = "held|";
+
+function heldKey(key) {
+  return `${HELD_KEY_PREFIX}${key}`;
 }
 
 function normalizedTaskId(taskId) {
@@ -182,21 +247,58 @@ export function insertAward(db, award = {}) {
 
 /**
  * Insert a held award — evidence accepted but the producing run could not be
- * linked, so credit subject is 'unknown'. The row sits in the ledger for the
- * audit trail with active=0 (no XP); when a later ingest pass resolves the
- * link, the normal award path inserts a real active award because the dedup
- * pre-check only blocks ACTIVE awards.
+ * linked, so credit subject is 'unknown'. The row is written directly in its
+ * final shape (active=0, no XP, held-scoped dedup key) inside one
+ * BEGIN IMMEDIATE: replaying the same unresolved evidence yields exactly one
+ * held row (duplicate=true, nothing written), and because the held key lives
+ * in its own namespace the hold never blocks the real award inserted once the
+ * link resolves. v1 instead committed an active award and demoted it with
+ * post-commit UPDATEs — a crash in that window left an active award at
+ * subject 'unknown' that hid from the held list and blocked the real award.
  */
 export function insertHeldAward(db, award = {}) {
-  const inserted = insertAward(db, { ...award, subject: UNKNOWN });
-  if (!inserted.duplicate) {
-    db.prepare("UPDATE reward_records SET active=0 WHERE id=?").run(inserted.id);
-    db.prepare("UPDATE reward_records SET provenance=? WHERE id=?").run(
-      `${award.provenance || "award: evidence accepted by ingestion"} [held: no linked producing run — subject unresolvable at ingest time]`,
-      inserted.id,
-    );
+  const taskId = normalizedTaskId(award.taskId);
+  if (!taskId) throw new Error("insertHeldAward requires taskId");
+  const points = Number.isInteger(award.points) ? award.points : XP_RULES.pointsPerAcceptedRevision;
+  const ruleVersion = award.ruleVersion || XP_RULES.version;
+  const key = heldKey(taskKey(taskId, award.repo, award.revision, ruleVersion));
+  const recordedAt = award.recordedAt || now();
+  const provenance = `${award.provenance || "award: evidence accepted by ingestion"} [held: no linked producing run — subject unresolvable at ingest time]`;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // No active filter: a held row is always active=0 by construction, and
+    // the held key cannot collide with an award key (separate namespace).
+    const existing = db.prepare("SELECT id FROM reward_records WHERE dedup_key=? AND kind='award' LIMIT 1").get(key);
+    if (existing) {
+      db.exec("COMMIT");
+      return { ok: true, id: existing.id, duplicate: true };
+    }
+    const result = db
+      .prepare(
+        `INSERT INTO reward_records
+           (kind, subject, role, task_id, repo, revision, run_id, evidence_id, model,
+            rule_version, points, active, provenance, recorded_at, dedup_key)
+         VALUES ('award', '${UNKNOWN}', NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+      )
+      .run(
+        taskId,
+        award.repo ?? UNKNOWN,
+        award.revision ?? UNKNOWN,
+        award.runId ?? null,
+        award.evidenceId ?? null,
+        award.model ?? null,
+        ruleVersion,
+        points,
+        provenance,
+        recordedAt,
+        key,
+      );
+    db.exec("COMMIT");
+    return { ok: true, id: Number(result.lastInsertRowid), duplicate: false };
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    throw err;
   }
-  return inserted;
 }
 
 /**
@@ -260,8 +362,12 @@ export function insertRevocation(db, revocation = {}) {
  */
 export function insertRating(db, rating = {}) {
   if (!rating.subject || typeof rating.subject !== "string") throw new Error("insertRating requires subject");
-  const value = Number(rating.rating);
-  if (!Number.isInteger(value) || value < 1 || value > 5) throw new Error("insertRating requires rating 1..5");
+  // Strictly a number: the HTTP layer must not be able to smuggle "3" or [3]
+  // past a Number() coercion (review round 5).
+  const value = rating.rating;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 5) {
+    throw new Error("insertRating requires rating 1..5");
+  }
   const taskId = normalizedTaskId(rating.taskId);
   const runId = rating.runId ?? null;
   const note = rating.note == null ? null : String(rating.note).slice(0, 500);
@@ -343,7 +449,9 @@ export function queryRewardSubjects(db) {
  * Held awards — pass evidence whose credit subject could not be resolved at
  * ingest time. This is the "awaiting verified evidence" surface: never XP,
  * and a hold whose lineage later resolved (an active award with the same
- * dedup key now exists) drops out of the list.
+ * task/repo/revision identity now exists) drops out of the list. Resolution
+ * is matched on the natural evidence identity, NOT on dedup_key: the held row
+ * carries a held-scoped key that can never equal an award's key.
  */
 export function queryHeldAwards(db, { limit = 20 } = {}) {
   return db
@@ -354,7 +462,10 @@ export function queryHeldAwards(db, { limit = 20 } = {}) {
         WHERE subject=? AND kind='award' AND active=0
           AND NOT EXISTS (
             SELECT 1 FROM reward_records cur
-             WHERE cur.dedup_key = reward_records.dedup_key AND cur.kind='award' AND cur.active=1
+             WHERE cur.kind='award' AND cur.active=1
+               AND cur.task_id IS reward_records.task_id
+               AND cur.repo IS reward_records.repo
+               AND cur.revision IS reward_records.revision
           )
         ORDER BY id DESC LIMIT ?`,
     )

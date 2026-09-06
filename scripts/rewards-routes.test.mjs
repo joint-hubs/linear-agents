@@ -9,8 +9,8 @@
 //     held, ingest diagnostics) and surfaces pre-seeded ledger rows;
 //   - there is NO XP submission endpoint: POST /api/manager/rewards → 405;
 //   - ratings POST: local-origin discipline (403 on a foreign Origin), 400
-//     with a message on invalid squad/rating/note/JSON, 201 + roundtrip on
-//     the happy path.
+//     with a message on invalid squad/rating/note/JSON, 413 on an over-limit
+//     body, 201 + roundtrip on the happy path.
 //
 // The port MUST be free when this runs — the fixture backend keeps 7391, so
 // stop it first (or the file skips itself).
@@ -186,6 +186,9 @@ test("ratings POST: invalid squad / rating / note / body → 400 with a message"
     ["missing subject", { taskId: "ROUTE-3", rating: 3 }, /subject/],
     ["rating out of range", { subject: validSquad ?? "dev", taskId: "ROUTE-3", rating: 6 }, /1\.\.5/],
     ["rating non-integer", { subject: validSquad ?? "dev", taskId: "ROUTE-3", rating: 4.5 }, /1\.\.5/],
+    ["rating as string", { subject: validSquad ?? "dev", taskId: "ROUTE-3", rating: "3" }, /1\.\.5/],
+    ["rating as array", { subject: validSquad ?? "dev", taskId: "ROUTE-3", rating: [3] }, /1\.\.5/],
+    ["rating null", { subject: validSquad ?? "dev", taskId: "ROUTE-3", rating: null }, /1\.\.5/],
     ["note too long", { subject: validSquad ?? "dev", taskId: "ROUTE-3", rating: 3, note: "x".repeat(501) }, /500/],
     ["bad taskId", { subject: validSquad ?? "dev", taskId: "bad task id!", rating: 3 }, /taskId/],
   ];
@@ -204,6 +207,19 @@ test("ratings POST: invalid squad / rating / note / body → 400 with a message"
     body: "{not json",
   });
   assert.equal(raw.status, 400, "invalid JSON must 400");
+});
+
+test("ratings POST: an over-limit body is 413, not 400", async () => {
+  if (setupError) throw setupError;
+  // the 8 KB default body cap: a note far past it must surface the same
+  // status the server's other body-limit handlers emit
+  const { status, body } = await fetchJson("/api/manager/ratings", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ subject: validSquad ?? "dev", taskId: "ROUTE-5", rating: 3, note: "x".repeat(9000) }),
+  });
+  assert.equal(status, 413, `over-limit body must 413, got ${status}: ${JSON.stringify(body)}`);
+  assert.match(String(body?.error), /too large/i);
 });
 
 test("ratings POST: foreign origin is rejected, GET only is enforced", async () => {

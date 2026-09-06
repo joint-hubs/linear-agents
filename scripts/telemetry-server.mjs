@@ -54,26 +54,12 @@ import { computeOutcomes } from './delegation-outcomes.mjs';
 import { getCachedManagerSnapshot } from './manager-snapshot.mjs';
 import { openRewardsDb, insertRating } from './reward-ledger.mjs';
 import { buildRewardsPayload } from './reward-ingest.mjs';
-
-// Manager ratings POST body validation (FOC-225 slice 3). Ratings are
-// subjective 1..5 + note — never points; the squad must be a configured one.
-// Mirrors validateLaunch's { status, error } convention.
-function validateRating(body) {
-  const subject = typeof body?.subject === 'string' ? body.subject.trim().toLowerCase() : '';
-  if (!subject) return { error: 'subject (squad) is required' };
-  let known = null;
-  try { known = Object.keys(readSquadConfig().squads || {}); } catch { known = null; }
-  if (known && !known.includes(subject)) return { error: `unknown squad: ${subject}` };
-  const rating = Number(body?.rating);
-  if (!Number.isInteger(rating) || rating < 1 || rating > 5) return { error: 'rating must be an integer 1..5' };
-  const note = body?.note == null ? null : String(body.note);
-  if (note != null && note.length > 500) return { error: 'note must be at most 500 characters' };
-  const taskId = body?.taskId == null ? null : String(body.taskId).trim().toUpperCase();
-  if (taskId && !/^[A-Z][A-Z0-9-]{1,19}$/.test(taskId)) return { error: 'taskId must look like a task identifier' };
-  const runId = body?.runId == null ? null : String(body.runId).trim();
-  if (runId && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(runId)) return { error: 'runId must be a run identifier' };
-  return { rating: { subject, taskId: taskId || null, runId: runId || null, rating, note } };
-}
+// Manager ratings POST body validation (FOC-225 slice 3) lives in its own
+// module so the fail-closed allowlist branch stays testable without the
+// server: ratings are subjective 1..5 + note — never points; the squad must
+// be a configured one, and an unreadable squad config denies (never fails
+// open). Mirrors validateLaunch's { status, error } convention.
+import { validateRating } from './manager-ratings.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
@@ -159,16 +145,26 @@ function corsPreflight(res) {
 function readJsonBody(req, maxBytes = 8192) {
   return new Promise((resolve, reject) => {
     let data = '';
+    let settled = false;
     req.on('data', (c) => {
+      if (settled) return; // over limit: keep draining, stop buffering
       data += c;
       if (data.length > maxBytes) {
-        req.destroy();
+        settled = true;
+        data = '';
+        // Deliberately NOT req.destroy() here: destroying the socket RSTs the
+        // connection before the handler's 413 can be read, so the documented
+        // status never reached any client (review round 5). Drain and discard
+        // the remainder instead — buffering is already capped (settled stops
+        // the concat) and Node's requestTimeout still bounds a sender that
+        // never stops.
         const err = new Error(`body too large (>${Math.round(maxBytes / 1024)}KB)`);
         err.tooLarge = true;
         reject(err);
       }
     });
     req.on('end', () => {
+      if (settled) return;
       if (!data) return resolve({});
       try {
         resolve(JSON.parse(data));
@@ -1252,14 +1248,17 @@ const server = createServer(async (req, res) => {
       try {
         body = await readJsonBody(req);
       } catch (err) {
-        json(res, 400, { error: err.tooLarge ? 'request body too large' : `invalid JSON body: ${err.message}` });
-        log(method, path, 400);
+        // 413 on an over-limit body, same as the server's other body-limit
+        // handlers; 400 stays for malformed JSON.
+        const status = err.tooLarge ? 413 : 400;
+        json(res, status, { error: err.tooLarge ? err.message : `invalid JSON body: ${err.message}` });
+        log(method, path, status);
         return;
       }
       const v = validateRating(body);
       if (v.error) {
-        json(res, 400, { error: v.error });
-        log(method, path, 400);
+        json(res, v.status || 400, { error: v.error });
+        log(method, path, v.status || 400);
         return;
       }
       try {
