@@ -58,6 +58,7 @@ const SQ_VAR = {
   review: 'var(--sq-review)',
   test: 'var(--sq-test)',
   cadence: 'var(--sq-cadence)',
+  supervisor: 'var(--sq-supervisor)',
 };
 
 function ModelBars({ run }) {
