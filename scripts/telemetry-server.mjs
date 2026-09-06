@@ -52,6 +52,28 @@ import {
 } from './prompt-library.mjs';
 import { computeOutcomes } from './delegation-outcomes.mjs';
 import { getCachedManagerSnapshot } from './manager-snapshot.mjs';
+import { openRewardsDb, insertRating } from './reward-ledger.mjs';
+import { buildRewardsPayload } from './reward-ingest.mjs';
+
+// Manager ratings POST body validation (FOC-225 slice 3). Ratings are
+// subjective 1..5 + note — never points; the squad must be a configured one.
+// Mirrors validateLaunch's { status, error } convention.
+function validateRating(body) {
+  const subject = typeof body?.subject === 'string' ? body.subject.trim().toLowerCase() : '';
+  if (!subject) return { error: 'subject (squad) is required' };
+  let known = null;
+  try { known = Object.keys(readSquadConfig().squads || {}); } catch { known = null; }
+  if (known && !known.includes(subject)) return { error: `unknown squad: ${subject}` };
+  const rating = Number(body?.rating);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) return { error: 'rating must be an integer 1..5' };
+  const note = body?.note == null ? null : String(body.note);
+  if (note != null && note.length > 500) return { error: 'note must be at most 500 characters' };
+  const taskId = body?.taskId == null ? null : String(body.taskId).trim().toUpperCase();
+  if (taskId && !/^[A-Z][A-Z0-9-]{1,19}$/.test(taskId)) return { error: 'taskId must look like a task identifier' };
+  const runId = body?.runId == null ? null : String(body.runId).trim();
+  if (runId && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(runId)) return { error: 'runId must be a run identifier' };
+  return { rating: { subject, taskId: taskId || null, runId: runId || null, rating, note } };
+}
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
@@ -1168,6 +1190,89 @@ const server = createServer(async (req, res) => {
         });
       } finally { db.close(); }
       log(method, path, 200);
+      return;
+    }
+
+    // GET /api/manager/rewards — the rewards display payload (FOC-225 slice 3).
+    // Runs the verdict-driven ingest FIRST (30 s TTL single-flight cache):
+    // this route is the ingest's only trigger and the ledger is the only XP
+    // writer. Read side is bounded (per-squad recent ≤10, ratings ≤20); the
+    // ledger is a SEPARATE rewards.sqlite, telemetry.sqlite stays untouched.
+    // NOTE: lives BEFORE the GET-only gate below — it carries the ratings POST.
+    if (path === '/api/manager/rewards') {
+      if (method !== 'GET') {
+        // AC 2: there is NO XP submission endpoint — the browser can never
+        // push points, only ratings (below) and only from a local origin.
+        json(res, 405, { error: 'GET only' });
+        log(method, path, 405);
+        return;
+      }
+      try {
+        const db = telemetryStore.openTelemetryDb();
+        try {
+          const rewards = openRewardsDb();
+          try {
+            const payload = await buildRewardsPayload({
+              telemetryDb: db,
+              rewardsDb: rewards,
+              supervisorRoot: join(root, '.state', 'supervisor'),
+            });
+            json(res, 200, payload);
+            log(method, path, 200);
+          } finally { rewards.close(); }
+        } finally { db.close(); }
+      } catch (err) {
+        json(res, 500, { error: err.message || 'rewards build failed' });
+        log(method, path, 500);
+      }
+      return;
+    }
+
+    // POST /api/manager/ratings — human-authored manager ratings (FOC-225
+    // slice 3). Subjective 1..5 + note, superseded per (subject, task, run);
+    // never points and never averaged with the acceptance verdict. Same
+    // local-origin discipline as /api/launch.
+    if (path === '/api/manager/ratings') {
+      if (method !== 'POST') {
+        json(res, 405, { error: 'POST only' });
+        log(method, path, 405);
+        return;
+      }
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/manager/ratings is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden: origin not allowed' });
+        log(method, path, 403);
+        return;
+      }
+      let body = {};
+      try {
+        body = await readJsonBody(req);
+      } catch (err) {
+        json(res, 400, { error: err.tooLarge ? 'request body too large' : `invalid JSON body: ${err.message}` });
+        log(method, path, 400);
+        return;
+      }
+      const v = validateRating(body);
+      if (v.error) {
+        json(res, 400, { error: v.error });
+        log(method, path, 400);
+        return;
+      }
+      try {
+        const rewards = openRewardsDb();
+        try {
+          const record = insertRating(rewards, v.rating);
+          json(res, 201, record);
+          log(method, path, 201);
+        } finally { rewards.close(); }
+      } catch (err) {
+        json(res, 500, { error: err.message || 'rating write failed' });
+        log(method, path, 500);
+      }
       return;
     }
 
