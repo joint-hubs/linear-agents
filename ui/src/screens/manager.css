@@ -129,6 +129,43 @@
   margin-left: auto;
 }
 
+/* --- header connectivity (fenix-manager.md §3.4) --------------------------- */
+/* A failed config read shows the header "offline": dot + text, never color
+   alone. Static dot — no looping animation (§3.5). danger/ok on surface pass
+   AA at these sizes (6.57 / 5.69, see §5). */
+.mgr-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.mgr-conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  display: inline-block;
+}
+
+.mgr-conn-online {
+  color: var(--ok);
+}
+
+.mgr-conn-online .mgr-conn-dot {
+  background: var(--ok);
+}
+
+.mgr-conn-offline {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.mgr-conn-offline .mgr-conn-dot {
+  background: var(--danger);
+}
+
 /* --- edit bar (staged changes: preview → apply) --------------------------- */
 
 .mgr-editbar {
@@ -766,6 +803,10 @@
   letter-spacing: 0.5px;
   color: var(--muted);
   padding-top: 2px;
+  /* The auto column would size to the widest label ("observed runtime
+     model") and squeeze the model editor to ~130px at 1440px. Capping the
+     label lets it wrap instead of stealing the value column's width. */
+  max-width: 9em;
 }
 
 .mgr-profile dd {

@@ -61,3 +61,14 @@ function sortKeys(value) {
   }
   return value;
 }
+
+// Header connectivity state (fenix-manager.md §3.4): a failed config read
+// must show the header "offline" — dot + text, never color alone — and a
+// successful read restores the normal state. 'connecting' covers the first
+// load and in-flight retries: claiming "online" before any read succeeded
+// would be a lie.
+export function connectivityState({ loading, readAt, error }) {
+  if (error) return 'offline';
+  if (loading || !readAt) return 'connecting';
+  return 'online';
+}

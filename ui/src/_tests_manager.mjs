@@ -29,6 +29,9 @@ import {
   normalizePositions,
   loadLayout,
   saveLayout,
+  keyboardMoveDelta,
+  MOVE_STEP,
+  MOVE_STEP_LARGE,
 } from './manager/layout.js';
 import {
   DEFAULT_PROVIDER,
@@ -42,6 +45,7 @@ import {
   setLeadModel,
 } from './squadConfig/workingCopy.js';
 import {
+  connectivityState,
   editingGuardActive,
   promptPathFor,
   stagedModelSummary,
@@ -505,6 +509,32 @@ await test('workingFingerprint is order-canonical and edit-sensitive (preview ga
   assert.notEqual(workingFingerprint(base), workingFingerprint(staged));
   // discard rebuilds from the same source — identity restored
   eq(workingFingerprint(buildWorkingCopy(FIXTURE)), workingFingerprint(base));
+});
+
+await test('keyboardMoveDelta scales the arrow step — Shift uses the large step', () => {
+  // fenix-manager.md §3.1 item 2: arrow = small step, Shift+Arrow = large step
+  eq(MOVE_STEP, 2);
+  eq(MOVE_STEP_LARGE, 8);
+  eq(keyboardMoveDelta('ArrowRight', false), [2, 0]); // plain press moves 2%
+  eq(keyboardMoveDelta('ArrowRight', true), [8, 0]); // Shift moves 8%
+  eq(keyboardMoveDelta('ArrowLeft', true), [-8, 0]);
+  eq(keyboardMoveDelta('ArrowUp', true), [0, -8]);
+  eq(keyboardMoveDelta('ArrowDown', false), [0, 2]);
+  eq(keyboardMoveDelta('Enter', true), null); // non-move keys stay select keys
+  eq(keyboardMoveDelta('a', false), null);
+});
+
+await test('connectivityState: offline on fetch failure, restored on a successful read', () => {
+  // first load in flight — not online yet
+  eq(connectivityState({ loading: true, readAt: null, error: null }), 'connecting');
+  // failed config read → header goes offline (dot + text, fenix-manager.md §3.4)
+  const failure = new Error('GET /api/squad-config failed');
+  eq(connectivityState({ loading: true, readAt: null, error: failure }), 'offline');
+  eq(connectivityState({ loading: false, readAt: null, error: failure }), 'offline');
+  // retry in flight after a failure — error cleared, but not online until a read lands
+  eq(connectivityState({ loading: true, readAt: new Date(), error: null }), 'connecting');
+  // successful read restores the normal state
+  eq(connectivityState({ loading: false, readAt: new Date(), error: null }), 'online');
 });
 
 // --- Summary -----------------------------------------------------------------

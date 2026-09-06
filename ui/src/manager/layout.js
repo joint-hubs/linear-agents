@@ -24,6 +24,27 @@ export function clampPosition(pos) {
   };
 }
 
+// Keyboard repositioning (fenix-manager.md §3.1 item 2): an arrow press moves
+// a card by the normal step, Shift+Arrow by the large step. Pure so the suite
+// pins the step scaling — the keydown handler stays dumb.
+export const MOVE_STEP = 2; // % per arrow press
+export const MOVE_STEP_LARGE = 8; // % with Shift held
+
+const ARROW_DIRS = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, -1],
+  ArrowDown: [0, 1],
+};
+
+// Move delta in % for a board keydown, or null when the key is not a move key.
+export function keyboardMoveDelta(key, shiftKey) {
+  const dir = ARROW_DIRS[key];
+  if (!dir) return null;
+  const step = shiftKey === true ? MOVE_STEP_LARGE : MOVE_STEP;
+  return [dir[0] * step, dir[1] * step];
+}
+
 // Coordinator top-center, specialists in a grid below. The grouping is a
 // visual convention, NOT an execution edge — no arrows, no implied order.
 // Columns sit at 16/50/84% because cards are center-anchored — at the board's

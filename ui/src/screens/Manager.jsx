@@ -20,8 +20,14 @@ import {
   saveLayout,
   defaultPositions,
   clampPosition,
+  keyboardMoveDelta,
 } from '../manager/layout.js';
-import { editingGuardActive, switchBlocked, workingFingerprint } from '../manager/editing.js';
+import {
+  editingGuardActive,
+  switchBlocked,
+  workingFingerprint,
+  connectivityState,
+} from '../manager/editing.js';
 import {
   buildSavePayload,
   buildWorkingCopy,
@@ -35,14 +41,18 @@ import { SquadRail, RosterTable } from '../components/manager/Roster.jsx';
 import Inspector from '../components/manager/Inspector.jsx';
 import './manager.css';
 
-const MOVE_STEP = 2; // % per arrow press
-const MOVE_STEP_LARGE = 8; // % with Shift held
-const ARROW_MOVES = {
-  ArrowLeft: [-MOVE_STEP, 0],
-  ArrowRight: [MOVE_STEP, 0],
-  ArrowUp: [0, -MOVE_STEP],
-  ArrowDown: [0, MOVE_STEP],
-};
+// Header connectivity badge (fenix-manager.md §3.4): dot + text — never
+// color alone — with "offline" while the config read fails.
+const CONN_LABEL = { offline: 'offline', connecting: 'connecting…', online: 'online' };
+
+function ConnBadge({ state }) {
+  return (
+    <span className={`mgr-conn mgr-conn-${state}`} role="status">
+      <span className="mgr-conn-dot" aria-hidden="true" />
+      {CONN_LABEL[state] || state}
+    </span>
+  );
+}
 
 const LEAVE_MESSAGE =
   'Leave with unsaved work? Staged configuration changes and unsaved prompt edits exist only '
@@ -266,10 +276,10 @@ export default function Manager() {
 
   const onCardKeyDown = useCallback(
     (e, card) => {
-      const step = e.shiftKey ? MOVE_STEP_LARGE : MOVE_STEP;
-      if (ARROW_MOVES[e.key]) {
+      const delta = keyboardMoveDelta(e.key, e.shiftKey); // Shift = large step
+      if (delta) {
         e.preventDefault();
-        moveCard(card.key, ARROW_MOVES[e.key][0], ARROW_MOVES[e.key][1]);
+        moveCard(card.key, delta[0], delta[1]);
       } else if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         selectRole(card.key);
@@ -361,6 +371,10 @@ export default function Manager() {
 
   const guardActive = editingGuardActive(dirtyCount, promptDirty);
 
+  // Header connectivity: offline while the config read fails, restored on a
+  // successful read (fenix-manager.md §3.4).
+  const conn = connectivityState({ loading, readAt, error: loadError });
+
   // Closing/reloading the tab with unsaved work asks first.
   useEffect(() => {
     if (!guardActive) return undefined;
@@ -413,6 +427,12 @@ export default function Manager() {
   if (loadError) {
     return (
       <div className="mgr">
+        <header className="mgr-header">
+          <div className="mgr-header-row">
+            <h1 className="mgr-title">Manager</h1>
+            <ConnBadge state={conn} />
+          </div>
+        </header>
         <div className="mgr-error" role="alert">
           <p className="mgr-error-title">Cannot reach the configuration API</p>
           <p>
@@ -498,6 +518,7 @@ export default function Manager() {
             {readAt ? `config read ${fmtTime(readAt.toISOString())}` : ''}
             {promptDirty ? ' · prompt draft unsaved' : ''}
           </span>
+          <ConnBadge state={conn} />
         </div>
       </header>
 

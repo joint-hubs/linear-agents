@@ -49,7 +49,7 @@ layouts, states and interaction contracts. The reward system is specified separa
 ```
 Fenix sidebar
 ├─ Manager  (/manager)          ← NEW, first nav entry
-│   ├─ header: squad selector · Setup/Live switch (Setup active in slice 1) · freshness · unsaved-edit slot
+│   ├─ header: squad selector · Setup/Live switch (Setup active in slice 1) · freshness · connectivity · unsaved-edit slot
 │   ├─ left rail: squad list + compact roster of selected squad
 │   ├─ center: tactical board (role cards) | roster table fallback
 │   └─ right: inspector (Profile / Instructions / History / Achievements)
