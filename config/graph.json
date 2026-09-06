@@ -1,5 +1,5 @@
 {
-  "_doc": "Squad topology as an executable artifact (FOC-158). Until now the graph lived in prose (agents/*/CLAUDE.md) plus four routing rules in config/handoff-rules.json — it could not be drawn, diffed or validated. This file is the source of truth for BOTH: node contracts (what each squad consumes, produces, when it is done, what it emits on failure) and the typed edges between them. Validate + render: node scripts/graph-validate.mjs [--emit-puml|--emit-handoff-rules]. Full rationale: docs/plans/brainstorm-graph-engineering.md",
+  "_doc": "Squad topology as an executable artifact (FOC-158). Until now the graph lived in prose (agents/*/CLAUDE.md) plus four routing rules in config/handoff-rules.json — it could not be drawn, diffed or validated. This file is the source of truth for BOTH: node contracts (what each squad consumes, produces, when it is done, what it emits on failure) and the typed edges between them. Validate + render: node scripts/graph-validate.mjs [--emit-puml|--emit-handoff-rules]. Full rationale: docs/plans/brainstorm-graph-engineering.md. AI-state labels: the Linear group `ai` (children planned / coded / reviewed, displayed as ai:planned, coded, ai:reviewed) is EXCLUSIVE — an issue carries at most one. Each stage stamp REPLACES the previous one: remove the outgoing ai:* label before adding the next (dev: planned→coded; review pass: coded→ai:reviewed).",
 
   "_migration": "config/handoff-rules.json is currently the file telemetry-server.mjs reads at runtime. It is being retired: this graph is authoritative, and `--emit-handoff-rules` regenerates that file from these edges. The regeneration is not a permanent view — it is the EQUIVALENCE PROOF for the migration. graph-validate.test.mjs asserts the committed handoff-rules.json is exactly what these edges produce, which is the mechanical evidence that nothing was lost in translation. When telemetry-server.mjs is rewired to read this file directly, handoff-rules.json, the emitter and that drift test are deleted together.",
 
@@ -74,7 +74,7 @@
         "description": "Reads the branch diff. Three passes run concurrently: first-pass, security, deep."
       },
       "output": {
-        "pass": { "labels": ["ai:reviewed", "dod-ok", "stage:testing"], "state": "In Review (unchanged — hands to TEST without a transition)" },
+        "pass": { "labels": ["ai:reviewed", "dod-ok", "stage:testing"], "state": "In Review (unchanged — hands to TEST without a transition)", "note": "ai:reviewed REPLACES coded — the Linear `ai` group (planned/coded/reviewed) is exclusive, the two cannot coexist; remove `coded` before stamping" },
         "fail": { "state": "In Progress", "labels": ["risk:high (only on a high-severity finding)"], "note": "round++" },
         "artifacts": [".state/reviews/<ID>-round<N>.md (Conventional Comments)"]
       },
