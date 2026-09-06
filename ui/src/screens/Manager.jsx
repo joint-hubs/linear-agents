@@ -21,7 +21,7 @@ import {
   defaultPositions,
   clampPosition,
 } from '../manager/layout.js';
-import { editingGuardActive } from '../manager/editing.js';
+import { editingGuardActive, switchBlocked, workingFingerprint } from '../manager/editing.js';
 import {
   buildSavePayload,
   buildWorkingCopy,
@@ -76,6 +76,9 @@ export default function Manager() {
   // no combined atomic save to claim).
   const [working, setWorking] = useState(null);
   const [preview, setPreview] = useState(null);
+  // Fingerprint of the snapshot the current preview was computed from — a
+  // preview may only produce an Apply for the snapshot it actually described.
+  const [previewFp, setPreviewFp] = useState(null);
   const [configSave, setConfigSave] = useState({ phase: 'idle', op: null, result: null, error: null });
   const [promptDirty, setPromptDirty] = useState(false);
 
@@ -124,6 +127,7 @@ export default function Manager() {
   useEffect(() => {
     setWorking(config ? buildWorkingCopy(config) : null);
     setPreview(null);
+    setPreviewFp(null);
     setConfigSave((prev) =>
       prev.phase === 'ok' ? prev : { phase: 'idle', op: null, result: null, error: null }
     );
@@ -171,17 +175,29 @@ export default function Manager() {
   const promptDirtyRef = useRef(false);
   promptDirtyRef.current = promptDirty;
 
+  const confirmDiscardPrompt = useCallback(() => window.confirm(PROMPT_SWITCH_MESSAGE), []);
+
   const selectRole = useCallback((key) => {
-    if (promptDirtyRef.current && !window.confirm(PROMPT_SWITCH_MESSAGE)) return;
+    if (switchBlocked(promptDirtyRef.current, confirmDiscardPrompt)) return;
     setSelectedRole(key);
-  }, []);
+  }, [confirmDiscardPrompt]);
 
   const selectSquad = useCallback(
     (key) => {
-      if (promptDirtyRef.current && !window.confirm(PROMPT_SWITCH_MESSAGE)) return;
+      if (switchBlocked(promptDirtyRef.current, confirmDiscardPrompt)) return;
       setSearchParams({ squad: key });
     },
-    [setSearchParams]
+    [setSearchParams, confirmDiscardPrompt]
+  );
+
+  // The inspector tab bar sits directly above the editor: switching tabs
+  // unmounts MarkdownEditor and would silently drop the draft.
+  const selectTab = useCallback(
+    (id) => {
+      if (switchBlocked(promptDirtyRef.current, confirmDiscardPrompt)) return;
+      setTab(id);
+    },
+    [confirmDiscardPrompt]
   );
 
   const moveCard = useCallback(
@@ -278,50 +294,66 @@ export default function Manager() {
     [config, working]
   );
 
+  // Identity of the staged snapshot. An in-flight preview that resolves after
+  // a further edit must not reinstall a dry run the user never saw.
+  const workingFp = useMemo(() => workingFingerprint(working), [working]);
+  const workingFpRef = useRef(workingFp);
+  useEffect(() => {
+    workingFpRef.current = workingFp;
+  }, [workingFp]);
+
   const stageAgentModel = useCallback((squadKey, role, value) => {
     setWorking((prev) => setAgentModel(prev, squadKey, role, value));
     setPreview(null); // any new edit invalidates a previous dry run
+    setPreviewFp(null);
     setConfigSave({ phase: 'idle', op: null, result: null, error: null });
   }, []);
 
   const stageLeadModel = useCallback((squadKey, value) => {
     setWorking((prev) => setLeadModel(prev, squadKey, value));
     setPreview(null);
+    setPreviewFp(null);
     setConfigSave({ phase: 'idle', op: null, result: null, error: null });
   }, []);
 
   const previewChanges = useCallback(async () => {
     if (!working) return;
+    const fp = workingFp; // snapshot identity this dry run describes
     setConfigSave({ phase: 'busy', op: 'preview', result: null, error: null });
     try {
       const result = await postSquadConfig(buildSavePayload(working, true));
-      setPreview(result);
       setConfigSave({ phase: 'idle', op: null, result: null, error: null });
+      if (workingFpRef.current !== fp) return; // staged on while in flight — drop the stale dry run
+      setPreview(result);
+      setPreviewFp(fp);
     } catch (e) {
       setPreview(null);
+      setPreviewFp(null);
       setConfigSave({ phase: 'error', op: 'preview', result: null, error: normalizeSaveError(e) });
     }
-  }, [working]);
+  }, [working, workingFp]);
 
   const applyChanges = useCallback(async () => {
-    // Apply is only reachable after a successful dry run — the same rule the
-    // /squad-config screen enforces.
-    if (!working || !preview) return;
+    // Apply is only reachable after a successful dry run of the CURRENT
+    // staged snapshot — the same rule the /squad-config screen enforces.
+    if (!working || !preview || previewFp !== workingFp) return;
     setConfigSave({ phase: 'busy', op: 'apply', result: null, error: null });
     try {
       const result = await postSquadConfig(buildSavePayload(working, false));
       setPreview(null);
+      setPreviewFp(null);
       setConfigSave({ phase: 'ok', op: 'apply', result, error: null });
       await fetchConfig(); // re-read: the applied state is now server truth
     } catch (e) {
       setConfigSave({ phase: 'error', op: 'apply', result: null, error: normalizeSaveError(e) });
     }
-  }, [working, preview, fetchConfig]);
+  }, [working, preview, previewFp, workingFp, fetchConfig]);
 
   const discardChanges = useCallback(() => {
     if (!config) return;
     setWorking(buildWorkingCopy(config));
     setPreview(null);
+    setPreviewFp(null);
     setConfigSave({ phase: 'idle', op: null, result: null, error: null });
   }, [config]);
 
@@ -500,8 +532,8 @@ export default function Manager() {
                 type="button"
                 className="mgr-btn mgr-btn-sm mgr-btn-primary"
                 onClick={applyChanges}
-                disabled={!preview || configSave.phase === 'busy'}
-                title="apply is enabled after a successful dry-run preview"
+                disabled={!preview || previewFp !== workingFp || configSave.phase === 'busy'}
+                title="apply is enabled after a dry-run preview of the current staged changes"
               >
                 {configSave.phase === 'busy' && configSave.op === 'apply' ? 'Applying…' : 'Apply'}
               </button>
@@ -664,7 +696,7 @@ export default function Manager() {
             squad={squad}
             card={selectedCard}
             tab={tab}
-            onTab={setTab}
+            onTab={selectTab}
             editing={{
               working,
               onStageLead: stageLeadModel,

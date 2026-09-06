@@ -149,8 +149,8 @@ is open.)
 
 | Tab | Slice 1 content | Source |
 |---|---|---|
-| Profile | role key, squad, configured model (labelled **configured**), provider, tools list, and — explicitly separated — **observed runtime model: not shown yet (slice 2)** | squad-config |
-| Instructions | prompt document for the role, read-only, with "edits happen in Prompty (/prompts) — next-launch semantics apply there" pointer | `/api/prompts/role` |
+| Profile | role key, squad, configured model (labelled **configured**) with a free-text model editor + suggestions, provider, tools list, staged `from → to` chip, and — explicitly separated — **observed runtime model: not shown yet (slice 2)** | squad-config |
+| Instructions | prompt document edited in place through the guarded MarkdownEditor flow (Anuluj / dry run / Zapisz); a draft shows the unsaved dot and the switch confirm; frontmatter is preserved; PromptContext below for reference | `/api/prompts/file` |
 | History | squad-level recent runs (runId, task, status label, started, cost) — labelled "squad-level; per-role attribution arrives in slice 2" | `/api/prompts/runs` |
 | Achievements | "Rewards arrive in a later slice — nothing recorded yet" pending state. **No zeroed fake records.** | — |
 

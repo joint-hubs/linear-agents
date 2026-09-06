@@ -45,6 +45,8 @@ import {
   editingGuardActive,
   promptPathFor,
   stagedModelSummary,
+  switchBlocked,
+  workingFingerprint,
 } from './manager/editing.js';
 
 // --- Minimal test harness (same shape as _test_utils.mjs) ------------------
@@ -465,6 +467,44 @@ await test('squadRoleCounts: specialists exclude the lead, roster lists all', ()
   eq(squadRoleCounts(supervisor), { specialists: 0, total: 1, coordinatorOnly: true });
   eq(squadRoleCounts(null), { specialists: 0, total: 0, coordinatorOnly: false });
   eq(squadRoleCounts({ cards: 'junk' }), { specialists: 0, total: 0, coordinatorOnly: false });
+});
+
+// --- review regressions: tab-switch confirm + stale-preview gating -----------
+
+await test('switchBlocked guards only when a draft exists and confirm declines', () => {
+  let calls = 0;
+  const confirmTrue = () => {
+    calls++;
+    return true;
+  };
+  const confirmFalse = () => {
+    calls++;
+    return false;
+  };
+  eq(switchBlocked(false, confirmFalse), false); // clean draft → never even asks
+  eq(calls, 0);
+  eq(switchBlocked(true, confirmFalse), true); // dirty + declined → blocked
+  eq(switchBlocked(true, confirmTrue), false); // dirty + confirmed → proceed
+  eq(calls, 2);
+  eq(switchBlocked(undefined, confirmFalse), false); // junk dirty never blocks
+  eq(calls, 2);
+});
+
+await test('workingFingerprint is order-canonical and edit-sensitive (preview gate)', () => {
+  // key order is not content — structurally equal snapshots must match
+  const a = workingFingerprint({ b: { y: 2, x: 1 }, a: [1, { d: 4, c: 3 }] });
+  const b = workingFingerprint({ a: [1, { c: 3, d: 4 }], b: { x: 1, y: 2 } });
+  eq(a, b);
+  eq(workingFingerprint(null), workingFingerprint(null));
+  assert.notEqual(a, workingFingerprint({ b: { y: 2, x: 1 }, a: [1, { c: 3, d: 5 }] }));
+  // the gating property the Manager relies on: staging changes the fingerprint…
+  const base = buildWorkingCopy(FIXTURE);
+  const staged = setAgentModel(base, 'dev', 'recon', 'other/model');
+  assert.notEqual(workingFingerprint(staged), workingFingerprint(base));
+  // …and a preview computed before the staging can never equal the staged copy
+  assert.notEqual(workingFingerprint(base), workingFingerprint(staged));
+  // discard rebuilds from the same source — identity restored
+  eq(workingFingerprint(buildWorkingCopy(FIXTURE)), workingFingerprint(base));
 });
 
 // --- Summary -----------------------------------------------------------------

@@ -92,7 +92,15 @@ export function RosterTable({ cards, selectedRole, onSelectRole }) {
             <tr
               key={c.key}
               className={c.key === selectedRole ? 'mgr-row-selected' : ''}
+              tabIndex={0}
+              aria-selected={c.key === selectedRole}
               onClick={() => onSelectRole(c.key)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onSelectRole(c.key);
+                }
+              }}
             >
               <th scope="row">{c.key === COORDINATOR_KEY ? 'lead (coordinator)' : c.key}</th>
               <td className="mgr-cell-mono">{c.model || '—'}</td>

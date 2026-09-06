@@ -31,3 +31,33 @@ export function stagedModelSummary(configuredModel, stagedModel) {
 export function editingGuardActive(configDirtyCount, promptDirty) {
   return (configDirtyCount > 0) === true || promptDirty === true;
 }
+
+// Decision shared by every in-screen switch that would drop an unsaved
+// prompt draft (role, squad, inspector tab): ask via the given confirm
+// function only when a draft exists; true means the switch is blocked.
+export function switchBlocked(promptDirty, confirmFn) {
+  if (promptDirty !== true) return false;
+  return confirmFn() !== true;
+}
+
+// Stable fingerprint of a working-copy snapshot with canonical key order —
+// two structurally equal snapshots must compare equal regardless of key
+// order. The preview gate compares the fingerprint captured when the dry run
+// was requested against the current one, so a preview that no longer
+// describes the staged state can neither render an Apply button nor resolve
+// into one.
+export function workingFingerprint(value) {
+  return JSON.stringify(sortKeys(value ?? null));
+}
+
+function sortKeys(value) {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((k) => [k, sortKeys(value[k])])
+    );
+  }
+  return value;
+}

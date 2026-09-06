@@ -44,6 +44,7 @@ export default function RoleCard({
       style={{ left: `${position.x}%`, top: `${position.y}%` }}
       tabIndex={0}
       role="button"
+      aria-selected={selected}
       aria-label={`${isCoordinator ? 'coordinator' : 'role'} ${roleKey}, model ${
         card.model || 'not configured'
       }. Arrow keys move the card; Enter selects.`}
