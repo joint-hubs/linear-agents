@@ -3,6 +3,13 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## Current execution: 2026-09-06 — FOC-227 squad palette repaint (worktree `foc-227-dev`)
+
+- Paleta `--sq-*` (6 akcentów squadów) przemalowana na muted-indigo w `ui/src/theme.css`; `Timeline.jsx` SQCOLOR
+  na `var(--sq-*)` (fallback `var(--sq-cadence)`, orchestratory bez zmian); walidator `scripts/validate-palette.mjs`
+  (frozen, commit `2481031`) podpięty do `npm --prefix ui run test` przez `ui/src/_tests_palette.mjs`.
+  Walidator all-pairs PASS (deutan+tritan ≥ 9.3, normal ≥ 15, AA 4.5:1); stara paleta FOC-225 odrzucana (exit 1).
+
 ## Current execution: 2026-09-06 — FOC-225 Fenix Manager (slice 0 + slice 1, worktree `foc-225-dev`)
 
 - Worktree `C:\Users\mateu\Documents\GitHub\la-wt\linear-agents\foc-225-dev`, branch `foc-225-dev`, baza `875b5c6`.
