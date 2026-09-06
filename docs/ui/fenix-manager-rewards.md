@@ -138,6 +138,17 @@ Rules:
   single-flight TTL cache; squads/ratings/held are read fresh per payload build.
 - Provenance caveat: the acceptance-verdict → award join carries a documented `PROVENANCE_CAVEAT`
   verbatim in each record's provenance field (supervisor-resolved decision, PROCEED-WITH-CAVEAT).
+- Repo identity (review round 5): the dedup key's repo component is the recording run's **logical
+  repo** — its git common dir, read spawn-free from the run's recorded workspace observation; with
+  no observation, the normalized launch cwd stands in. The raw checkout path is kept in the record's
+  provenance whenever the common dir supplied the identity. Two worktrees of one repo therefore
+  share one identity: the same accepted revision re-reviewed from another checkout yields one award,
+  not two (spec §3).
+- Held awards (review round 5): a pass verdict whose credit subject cannot be resolved is written
+  in one transaction at subject `unknown`, `active=0`, under a **held-scoped dedup key** (`held|`
+  prefix) — replays of the same unresolved evidence collapse to one held row (the ~30 s Manager
+  polls cannot grow the ledger), and a hold never blocks the real award once the producing run
+  links.
 
 ## 6. UI rendering (Manager integration)
 
@@ -146,7 +157,8 @@ Rules:
 - `awaiting verified evidence` is a first-class state wherever an award would appear.
 - Manager rating control appears only where a human is the author — landed in the inspector
   **History rows** (ended runs with a task), the only post-task human-authoring surface on
-  `/manager`; the board and profiles render ratings read-only.
+  `/manager`; the board and profiles do not render ratings — rating display lives in the
+  inspector History rows.
 - There is deliberately no XP submitter: `ui/src/api.js` exposes a GET-only rewards helper plus
   the one ratings POST, and nothing else.
 
