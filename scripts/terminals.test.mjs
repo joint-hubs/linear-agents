@@ -361,6 +361,10 @@ test("listTerminalsAsync: ONE batched probe carries every candidate pid; results
 });
 
 test("listTerminalsAsync: a rejecting checker maps every candidate to alive=false", async () => {
+  // Contract (areProcessesAlive JSDoc): the /api/terminals panel path maps a
+  // checker rejection to alive=false — the old sync probe's catch answer —
+  // never to unknown. The strict === false below fails on null too, so this
+  // pins the path against drifting into the snapshot caller's null contract.
   const result = await terminals.listTerminalsAsync([makeRun({ runId: "x", consolePid: 42 })], {
     probeAsync: async () => {
       throw new Error("powershell broken");

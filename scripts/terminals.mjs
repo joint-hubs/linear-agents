@@ -100,9 +100,12 @@ export function isProcessAlive(pid) {
  * probes up to 10 pids per build and must never block the server's event
  * loop, so it uses this instead: a single `Get-Process -Id a,b,c` spawn,
  * awaited. Resolves a Map pid → boolean (a missing pid is simply absent
- * from Get-Process output → false). REJECTS on spawn failure — the caller
- * must distinguish "checker broken" (alive unknown) from "process dead"
- * (a valid answer).
+ * from Get-Process output → false). REJECTS on spawn failure; what a
+ * rejection means is the CALLER's contract, and the two callers disagree on
+ * purpose: listTerminalsAsync (/api/terminals) maps it to alive=false — the
+ * same answer the old sync probe's catch path produced, so a broken checker
+ * never flips a panel run to unknown — while the manager snapshot keeps
+ * alive=null (unknown) and documents the gap in its missing[].
  *
  * @param {number[]} pids  Process IDs (positive integers; deduped here)
  * @returns {Promise<Map<number, boolean>>}
