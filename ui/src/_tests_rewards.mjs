@@ -535,6 +535,35 @@ await test('C6h pinned at source: the error-driven inspector prop is liveFailed,
   assert.ok(!managerSrc.includes('liveStale') && !inspectorSrc.includes('liveStale'), 'the old name must be gone');
 });
 
+await test('C7 pinned at source: a note typed before a value is chosen survives the value commit', () => {
+  const src = readSrc('components/manager/Rewards.jsx');
+  // The staged entry is dropped only on a clean slate (both fields empty) or
+  // when the re-staged pair equals the recorded rating — NEVER merely because
+  // the value is still unset (that dropped note-only edits).
+  assert.ok(
+    /const empty = nextValue === '' && nextNote === '';/.test(src),
+    'the drop condition must be "both fields empty"',
+  );
+  assert.ok(
+    /const unchanged = nextValue === savedValue && \(nextNote \|\| ''\) === savedNote;/.test(src),
+    'the drop condition must be "exactly the recorded rating re-staged"',
+  );
+  assert.ok(
+    /empty \|\| unchanged \? null : \{ value: nextValue, note: nextNote \}/.test(src),
+    'stage must store any other pair, including a note-only edit',
+  );
+  assert.ok(
+    !/const stillDirty = nextValue !== '' &&/.test(src),
+    'the old value-gated drop (which lost note-before-value input) must be gone',
+  );
+  // Save stays value-gated: a note-only staged entry is never dirty, so the
+  // guard cannot trigger a value-less POST.
+  assert.ok(
+    /const dirty = value !== '' && \(value !== savedValue \|\| note !== savedNote\);/.test(src),
+    'dirty must still require a chosen value',
+  );
+});
+
 // --- Summary ------------------------------------------------------------------
 
 console.log(`\n${pass} passed, ${fail} failed`);

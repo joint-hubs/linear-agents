@@ -189,9 +189,12 @@ export function AchievementsPanel({ rewards, squadKey }) {
 // this control — the Manager keeps staged ratings in a runId-keyed map that
 // survives both, so nothing staged is silently lost. This control is a plain
 // view of that map: it renders `staged` and writes every edit back through
-// onStage(runId, entry|null). Staging exactly the recorded rating again (or
-// clearing the select) removes the entry; a successful save clears it in the
-// Manager. There is no unmount cleanup left to lose work with.
+// onStage(runId, entry|null). A note typed BEFORE a value is chosen stays in
+// the staged entry (not yet dirty — Save needs a value) and merges into the
+// rating when the value commits (FOC-225 cleanup round C7). The entry is
+// dropped only when everything is empty again or exactly the recorded rating
+// is re-staged; a successful save clears it in the Manager. There is no
+// unmount cleanup left to lose work with.
 export function RatingControl({ squadKey, run, saved, onSave, onStage, staged, busy, error }) {
   const savedValue = saved ? String(saved.rating) : '';
   const savedNote = saved?.note || '';
@@ -200,8 +203,13 @@ export function RatingControl({ squadKey, run, saved, onSave, onStage, staged, b
   const dirty = value !== '' && (value !== savedValue || note !== savedNote);
 
   const stage = (nextValue, nextNote) => {
-    const stillDirty = nextValue !== '' && (nextValue !== savedValue || nextNote !== savedNote);
-    onStage?.(run.runId, stillDirty ? { value: nextValue, note: nextNote } : null);
+    // Drop the staged entry only when the control is back to a clean slate
+    // (both empty) or back to exactly the recorded rating. A note typed while
+    // the value is still unset MUST stage — dropping it here silently lost
+    // the user's text the moment they typed before selecting a rating.
+    const empty = nextValue === '' && nextNote === '';
+    const unchanged = nextValue === savedValue && (nextNote || '') === savedNote;
+    onStage?.(run.runId, empty || unchanged ? null : { value: nextValue, note: nextNote });
   };
 
   const save = async () => {
