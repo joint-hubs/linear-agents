@@ -1702,10 +1702,12 @@ export function queryRuns(db, options = {}) {
 // is unbounded and projects every run in full (usage/cost/workspace aggregates
 // per row) — exactly what pinned the server at 100% CPU once; measured
 // 2026-09-06: 1 247 ms per call on the real store (461 runs / 137 260 usage
-// facts). This query never runs makeRunProjection: two bounded SELECTs over
-// allowlisted runs columns (active + newest recentPerSquad per squad), primary
-// task link per selected row, and one grouped cost aggregate over the selected
-// run_ids. Measured ~5 ms on a 3 000-run / 60k-usage fixture, <1 ms active-only
+// facts). This query never runs makeRunProjection: two SELECTs with bounded
+// RESULTS over allowlisted runs columns (active cut at activeLimit, recent
+// capped at recentPerSquad per squad — note the recent window's SCAN is still
+// O(all ended rows), see the comment at the query), primary task link per
+// selected row, and one grouped cost aggregate over the selected run_ids.
+// Measured ~5 ms on a 3 000-run / 60k-usage fixture, <1 ms active-only
 // on the real store.
 
 export const MANAGER_RUN_ACTIVE_LIMIT = 25;
@@ -1742,28 +1744,26 @@ export function queryManagerRuns(db, options = {}) {
 
   let recent = [];
   if (recentPerSquad > 0) {
-    // The inner scan is BOUNDED: the window needs only recentPerSquad rows per
-    // squad, so scanning recentPerSquad × squads rows suffices — without the
-    // LIMIT the subquery walked every ended run in the store, and runs only
-    // accumulate. The bound is a computed parameter (never interpolated SQL):
-    // recentPerSquad × the number of squads in scope (the filter's squads when
-    // one is given, else the store's distinct squad count). Only a squad whose
-    // entire recent history sits older than the newest bound-overall rows can
-    // thin out — genuine long inactivity, not a render lie.
-    const squadCount = squads
-      ? squads.length
-      : db.prepare("SELECT COUNT(DISTINCT squad) AS n FROM runs").get().n;
-    const recentScanCap = recentPerSquad * Math.max(squadCount, 1);
+    // MEASURED SEMANTICS (review round 8, I1 — do not "optimize" back): the
+    // window function ranks ALL ended rows before anything else applies. An
+    // inner ORDER BY ... LIMIT does NOT bound the scan — SQLite computes
+    // ROW_NUMBER over the whole filtered set first, so the inner sort only
+    // added a THIRD temp b-tree (EXPLAIN QUERY PLAN, 100k-row replica with
+    // idx_runs_squad_ended: old shape 2, that shape 3) with no time gain.
+    // The subquery therefore keeps the plain scan shape; the per-squad cap is
+    // applied by the outer rn filter. Scan cost is O(all ended rows in
+    // scope) per call — the result sets stay bounded (rn <= recentPerSquad),
+    // the scan does not. run_id is the tiebreak in every ORDER BY so
+    // same-started_at rows never reshuffle between polls; it adds no temp
+    // b-tree vs the one-column sort (EQP: 2 in both shapes).
     recent = db.prepare(
       `SELECT ${MANAGER_RUN_SELECT} FROM (
          SELECT r.run_id, r.squad, r.status, r.started_at, r.ended_at, r.exit_code,
                 ROW_NUMBER() OVER (PARTITION BY r.squad ORDER BY r.started_at DESC, r.run_id DESC) AS rn
            FROM runs r
           WHERE r.ended_at IS NOT NULL${squadFilter}
-          ORDER BY r.started_at DESC, r.run_id DESC
-          LIMIT ?
        ) r WHERE r.rn <= ? ORDER BY r.squad, r.started_at DESC, r.run_id DESC`,
-    ).all(...squadParams, recentScanCap, recentPerSquad);
+    ).all(...squadParams, recentPerSquad);
   }
 
   // Primary task link per selected row — bounded by the row counts above.

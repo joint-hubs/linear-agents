@@ -280,7 +280,7 @@ test("queryManagerRuns: the default active cut (25) keeps the newest actives onl
   }
 });
 
-test("queryManagerRuns: interleaved multi-squad volume — every squad keeps its 5 newest despite the bounded inner scan", async () => {
+test("queryManagerRuns: interleaved multi-squad volume — every squad keeps its 5 newest (per-squad window cap)", async () => {
   requireSqlite();
   const dir = mkdtempSync(join(tmpdir(), "mgr-runs-"));
   try {
@@ -317,6 +317,50 @@ test("queryManagerRuns: interleaved multi-squad volume — every squad keeps its
     const after = queryManagerRuns(db);
     const devIds = after.recent.filter((r) => r.squad === "dev").map((r) => r.runId);
     assert(devIds[0] === "dev-tie-b" && devIds[1] === "dev-tie-a", `tiebreak wrong: ${devIds.slice(0, 2)}`);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("queryManagerRuns: results-equality — the shipped shape matches the plain scan shape row for row (round 8 I1)", async () => {
+  requireSqlite();
+  const dir = mkdtempSync(join(tmpdir(), "mgr-runs-"));
+  try {
+    const db = openTelemetryDb(join(dir, "t.sqlite"));
+    seedFixture(db);
+    // Reference = the pre-ee6cb92 scan shape (window rank over the whole
+    // filtered set, no inner ORDER BY/LIMIT, single-column sorts). The shipped
+    // shape must return the IDENTICAL rows in the identical order — the
+    // run_id tiebreaks only decide ties, they may not reorder distinct rows.
+    const oldActive = (filter, params, limit) =>
+      db.prepare(`SELECT r.run_id, r.squad FROM runs r WHERE r.ended_at IS NULL${filter} ORDER BY r.started_at DESC LIMIT ?`).all(...params, limit);
+    const oldRecent = (filter, params, per) =>
+      db.prepare(
+        `SELECT r.run_id, r.squad FROM (
+           SELECT r.run_id, r.squad, r.started_at, ROW_NUMBER() OVER (PARTITION BY r.squad ORDER BY r.started_at DESC) AS rn
+             FROM runs r WHERE r.ended_at IS NOT NULL${filter}
+         ) r WHERE r.rn <= ? ORDER BY r.squad, r.started_at DESC`,
+      ).all(...params, per);
+
+    const pairs = (rows) => JSON.stringify(rows.map((r) => [r.run_id ?? r.runId, r.squad]));
+
+    const unfiltered = queryManagerRuns(db);
+    assert(
+      pairs(unfiltered.active) === pairs(oldActive("", [], 25)),
+      `active rows diverge from the reference shape:\n  shipped ${pairs(unfiltered.active)}\n  reference ${pairs(oldActive("", [], 25))}`,
+    );
+    assert(
+      pairs(unfiltered.recent) === pairs(oldRecent("", [], 5)),
+      `recent rows diverge from the reference shape`,
+    );
+
+    // filtered variant: the squad filter must sit inside both shapes the same way
+    const filtered = queryManagerRuns(db, { squads: ["dev"] });
+    assert(
+      pairs(filtered.recent) === pairs(oldRecent(" AND r.squad IN (?)", ["dev"], 5)),
+      "filtered recent rows diverge from the reference shape",
+    );
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
