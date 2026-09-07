@@ -37,7 +37,7 @@ import {
   reloadKickoffTemplates,
 } from './launch.mjs';
 import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools, validateProvidersPatch } from './squad-config.mjs';
-import { listTerminals, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive, areProcessesAlive } from './terminals.mjs';
+import { listTerminalsAsync, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive, areProcessesAlive } from './terminals.mjs';
 import {
   buildPromptTree,
   readRoleDoc,
@@ -1740,7 +1740,11 @@ const server = createServer(async (req, res) => {
     // GET /api/terminals — terminal panel: alive + finished runs with window info
     if (path === '/api/terminals') {
       const runs = withManifestConsolePid(await telemetryRuns());
-      const data = listTerminals(runs, { finishedLimit: 15 });
+      // Batched async liveness — ONE PowerShell spawn per build. The sync
+      // per-pid isProcessAlive probe here blocked the event loop for the
+      // whole build (same class as the slice-2 manager-snapshot blocker);
+      // it stays only on the background reconcile path.
+      const data = await listTerminalsAsync(runs, { finishedLimit: 15 });
       json(res, 200, data);
       log(method, path, 200);
       return;

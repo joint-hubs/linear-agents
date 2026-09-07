@@ -3,10 +3,14 @@
 //
 // Primary API (PID-based — reliable, used by dashboard):
 //   isProcessAlive(pid)        → boolean   (SYNC — one PowerShell spawn per pid;
-//                                          interval/background paths only, never
-//                                          the HTTP request path)
+//                                          background reconcile path only, never
+//                                          an HTTP request path)
 //   areProcessesAlive(pids)    → Promise<Map<pid, boolean>>  (ASYNC batched — one
 //                                          spawn for all pids; request paths)
+//   listTerminalsAsync(runs)   → Promise<array>  (batched probe + listTerminals —
+//                                          the /api/terminals request path)
+//   listTerminals(runs, opts)  → array of terminal entries (sync probe injection
+//                                          for tests; caller pre-resolves liveness)
 //   flashWindowByPid(pid,opts) → { ok, error? }  — taskbar flash (default UI path)
 //   focusWindowByPid(pid)      → { ok, error? }  — blocked by Windows for bg processes
 //   stopByPid(pid)             → { ok, error? }
@@ -334,6 +338,53 @@ export function listTerminals(runs, opts = {}) {
   const trimmedFinished = finished.slice(0, finishedLimit);
 
   return [...alive, ...trimmedFinished];
+}
+
+/**
+ * Async listTerminals — ONE batched liveness spawn per build.
+ *
+ * The /api/terminals request path must not run the sync per-pid probe:
+ * isProcessAlive execSync-blocks the event loop for the whole PowerShell
+ * startup (~0.1–0.5 s) per pid. This collects the pids of unfinished runs and
+ * asks areProcessesAlive for ALL of them in one `Get-Process -Id a,b,c` spawn,
+ * then reuses listTerminals with the results injected as the probe — same
+ * response shape and alive/canFocus/canSignal mapping.
+ *
+ * A rejecting checker (spawn failure) maps every candidate to alive=false,
+ * exactly what the sync probe's catch path produced; a pid absent from the
+ * checker output is simply dead. opts.probe still wins (sync injection, used
+ * by tests); opts.probeAsync defaults to areProcessesAlive and is the
+ * injection point for batching tests.
+ *
+ * @param {Array<object>} runs  See listTerminals.
+ * @param {object} [opts]  listTerminals opts plus { probeAsync }.
+ * @returns {Promise<Array<object>>}
+ */
+export async function listTerminalsAsync(runs, opts = {}) {
+  const runList = Array.isArray(runs) ? runs : [];
+  if (typeof opts.probe === "function") {
+    return listTerminals(runList, opts); // sync injection — caller owns probing
+  }
+  const probeAsync = typeof opts.probeAsync === "function" ? opts.probeAsync : areProcessesAlive;
+  const candidates = [
+    ...new Set(
+      runList
+        .filter((run) => !run.endedAt && validPid(run.consolePid))
+        .map((run) => run.consolePid),
+    ),
+  ];
+  let aliveMap = null;
+  if (candidates.length > 0) {
+    try {
+      aliveMap = await probeAsync(candidates);
+    } catch {
+      aliveMap = null; // checker broken → alive=false, same as the sync probe's failure path
+    }
+  }
+  return listTerminals(runList, {
+    ...opts,
+    probe: (pid) => (aliveMap ? aliveMap.get(pid) === true : false),
+  });
 }
 
 // ---------------------------------------------------------------------------
