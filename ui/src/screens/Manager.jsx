@@ -146,7 +146,18 @@ export default function Manager() {
   const prevSquadStatesRef = useRef({});
   const [flashSquads, setFlashSquads] = useState(() => new Set());
   useEffect(() => {
-    if (mode !== 'live' || !snapshot) return undefined;
+    if (mode !== 'live' || !snapshot) {
+      // Leaving Live mode (or losing the snapshot entirely) discards the last
+      // seen states: without this the ref kept them across Setup→Live
+      // re-entry, so stale-vs-fresh comparisons replayed pulses for squads
+      // whose state had not actually changed while the screen was away
+      // (FOC-225 cleanup round C6a).
+      if (prevSquadStatesRef.current && Object.keys(prevSquadStatesRef.current).length > 0) {
+        prevSquadStatesRef.current = {};
+      }
+      setFlashSquads((current) => (current.size > 0 ? new Set() : current));
+      return undefined;
+    }
     const prev = prevSquadStatesRef.current;
     const next = {};
     const changed = new Set();
@@ -863,6 +874,7 @@ export default function Manager() {
                 block={liveBlockFor(snapshot, squadKey)}
                 acceptedByTask={snapshot?.acceptedByTask || {}}
                 flash={flashSquads.has(squadKey)}
+                pending={snapshot == null}
               />
             )}
             <button type="button" className="mgr-btn mgr-btn-sm" onClick={resetLayout}>
@@ -914,7 +926,7 @@ export default function Manager() {
             }}
             promptDirty={promptDirty}
             live={squadLive}
-            liveStale={live.error != null}
+            liveFailed={live.error != null}
             rewards={rewards}
             onRate={saveRating}
             ratingSave={ratingSave}

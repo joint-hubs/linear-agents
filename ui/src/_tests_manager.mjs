@@ -59,7 +59,6 @@ import {
   POLL_MAX_MS,
   SNAPSHOT_STALE_MS,
   decorateRuns,
-  isSnapshotStale,
   liveBlockFor,
   mapRunState,
   nextPollIntervalMs,
@@ -623,14 +622,12 @@ await test('liveBlockFor + decorateRuns: absent squad is empty, rows get derived
   eq(d.pendingGates.length, 1);
 });
 
-await test('isSnapshotStale: missing/broken generatedAt is stale; age over the bound is stale', () => {
-  const now = Date.parse('2026-09-06T12:00:00.000Z');
-  eq(isSnapshotStale(null, now), true);
-  eq(isSnapshotStale({}, now), true);
-  eq(isSnapshotStale({ generatedAt: 'not-a-date' }, now), true);
-  eq(isSnapshotStale({ generatedAt: '2026-09-06T11:59:57.000Z' }, now), false); // 3 s old — fresh
-  eq(isSnapshotStale({ generatedAt: '2026-09-06T11:59:40.000Z' }, now), true); // 20 s — stale
+await test('SNAPSHOT_STALE_MS: the stale bound stays at 3 poll ticks — LiveFreshness compares lastSuccessAt against it', () => {
+  // isSnapshotStale was removed (dead in prod): the shipped stale readout is
+  // LiveFreshness's own lastSuccessAt comparison, not a generatedAt helper
+  // (FOC-225 cleanup round C6d). Pin the bound the readout relies on.
   assert(SNAPSHOT_STALE_MS === 15000, `stale bound moved: ${SNAPSHOT_STALE_MS}`);
+  eq(POLL_BASE_MS * 3, SNAPSHOT_STALE_MS); // the "3 poll ticks" contract
 });
 
 await test('poll helpers: backoff doubles to the cap; ticks skip in-flight, hidden and paused', () => {

@@ -34,12 +34,22 @@ export function GateBadge({ count }) {
 
 // Squad-level live strip: derived state + active-run count + gate badge.
 // An empty bounded window renders "no activity" — never fake live motion.
-export function SquadLiveStrip({ block, acceptedByTask = {}, flash = false }) {
+// Before the FIRST snapshot arrives there is no window at all, so the strip
+// shows a neutral "awaiting first snapshot…" instead — "no activity" is an
+// observed fact about the store and must not be rendered as a guess
+// (FOC-225 cleanup round C6g).
+export function SquadLiveStrip({ block, acceptedByTask = {}, flash = false, pending = false }) {
   const state = squadLiveState(block, acceptedByTask);
   const { active, pendingGates } = decorateRuns(block, acceptedByTask);
   return (
     <div className="mgr-livestrip" data-testid="mgr-livestrip">
-      {state ? <LiveStateChip state={state} flash={flash} /> : <span className="mgr-muted">no activity in the bounded window</span>}
+      {pending ? (
+        <span className="mgr-muted">awaiting first snapshot…</span>
+      ) : state ? (
+        <LiveStateChip state={state} flash={flash} />
+      ) : (
+        <span className="mgr-muted">no activity in the bounded window</span>
+      )}
       {active.length > 0 && (
         <span className="mgr-muted">
           {active.length} active run{active.length === 1 ? '' : 's'}

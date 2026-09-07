@@ -1733,20 +1733,37 @@ export function queryManagerRuns(db, options = {}) {
 
   const squadParams = squads ? [...squads] : [];
 
+  // run_id is the tiebreak everywhere: same started_at values must never
+  // reshuffle between polls (the liveness-cap cut and the rendered History
+  // window both assume a stable order).
   const active = db.prepare(
-    `SELECT ${MANAGER_RUN_SELECT} FROM runs r WHERE r.ended_at IS NULL${squadFilter} ORDER BY r.started_at DESC LIMIT ?`,
+    `SELECT ${MANAGER_RUN_SELECT} FROM runs r WHERE r.ended_at IS NULL${squadFilter} ORDER BY r.started_at DESC, r.run_id DESC LIMIT ?`,
   ).all(...squadParams, activeLimit);
 
   let recent = [];
   if (recentPerSquad > 0) {
+    // The inner scan is BOUNDED: the window needs only recentPerSquad rows per
+    // squad, so scanning recentPerSquad × squads rows suffices — without the
+    // LIMIT the subquery walked every ended run in the store, and runs only
+    // accumulate. The bound is a computed parameter (never interpolated SQL):
+    // recentPerSquad × the number of squads in scope (the filter's squads when
+    // one is given, else the store's distinct squad count). Only a squad whose
+    // entire recent history sits older than the newest bound-overall rows can
+    // thin out — genuine long inactivity, not a render lie.
+    const squadCount = squads
+      ? squads.length
+      : db.prepare("SELECT COUNT(DISTINCT squad) AS n FROM runs").get().n;
+    const recentScanCap = recentPerSquad * Math.max(squadCount, 1);
     recent = db.prepare(
       `SELECT ${MANAGER_RUN_SELECT} FROM (
          SELECT r.run_id, r.squad, r.status, r.started_at, r.ended_at, r.exit_code,
-                ROW_NUMBER() OVER (PARTITION BY r.squad ORDER BY r.started_at DESC) AS rn
+                ROW_NUMBER() OVER (PARTITION BY r.squad ORDER BY r.started_at DESC, r.run_id DESC) AS rn
            FROM runs r
           WHERE r.ended_at IS NOT NULL${squadFilter}
-       ) r WHERE r.rn <= ? ORDER BY r.squad, r.started_at DESC`,
-    ).all(...squadParams, recentPerSquad);
+          ORDER BY r.started_at DESC, r.run_id DESC
+          LIMIT ?
+       ) r WHERE r.rn <= ? ORDER BY r.squad, r.started_at DESC, r.run_id DESC`,
+    ).all(...squadParams, recentScanCap, recentPerSquad);
   }
 
   // Primary task link per selected row — bounded by the row counts above.

@@ -485,6 +485,56 @@ await test('D1 pinned at source: the inspector layout keeps both tables inside t
   );
 });
 
+// --- cleanup round C6 pins ------------------------------------------------------
+
+await test('C6a pinned at source: the flash memory resets when Live mode is left or the snapshot is lost', () => {
+  const managerSrc = readSrc('screens/Manager.jsx');
+  // the flash effect's early branch must CLEAR state, not just skip work
+  assert.ok(
+    /if \(mode !== 'live' \|\| !snapshot\) \{/.test(managerSrc),
+    'the flash effect must own an explicit early branch for non-live / no-snapshot',
+  );
+  assert.ok(
+    /prevSquadStatesRef\.current = \{\}/.test(managerSrc),
+    'leaving Live mode must discard the last-seen squad states (no replayed pulses)',
+  );
+  assert.ok(
+    /setFlashSquads\(\(current\) => \(current\.size > 0 \? new Set\(\) : current\)\)/.test(managerSrc),
+    'a lingering flash set must be cleared on the same early branch',
+  );
+});
+
+await test('C6g pinned at source: no snapshot yet renders a neutral placeholder, never "no activity"', () => {
+  const liveStripSrc = readSrc('components/manager/LiveStrip.jsx');
+  assert.ok(
+    /pending \? \(/.test(liveStripSrc) && /awaiting first snapshot/.test(liveStripSrc),
+    'SquadLiveStrip must gate the pre-first-fetch state behind a pending prop',
+  );
+  assert.ok(
+    /no activity in the bounded window/.test(liveStripSrc),
+    'the observed empty-store rendering must remain distinct from the placeholder',
+  );
+  const managerSrc = readSrc('screens/Manager.jsx');
+  assert.ok(
+    /pending=\{snapshot == null\}/.test(managerSrc),
+    'Manager must derive pending from the absence of a snapshot, not from an empty window',
+  );
+});
+
+await test('C6h pinned at source: the error-driven inspector prop is liveFailed, not liveStale', () => {
+  const managerSrc = readSrc('screens/Manager.jsx');
+  const inspectorSrc = readSrc('components/manager/Inspector.jsx');
+  assert.ok(
+    /liveFailed=\{live\.error != null\}/.test(managerSrc),
+    'Manager must pass the rename through',
+  );
+  assert.ok(
+    /liveFailed,/.test(inspectorSrc) && /\{liveFailed && \(/.test(inspectorSrc),
+    'Inspector must consume the rename through',
+  );
+  assert.ok(!managerSrc.includes('liveStale') && !inspectorSrc.includes('liveStale'), 'the old name must be gone');
+});
+
 // --- Summary ------------------------------------------------------------------
 
 console.log(`\n${pass} passed, ${fail} failed`);

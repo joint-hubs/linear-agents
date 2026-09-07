@@ -18,7 +18,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { connect } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -256,6 +256,55 @@ test("control routes map an over-limit body to 413 too (representative: POST /ap
   });
   assert.equal(status, 413, `over-limit body must 413, got ${status}: ${JSON.stringify(body)}`);
   assert.match(String(body?.error), /too large/i);
+});
+
+test("C6f: an unavailable rewards db must not take /api/manager/snapshot down", async () => {
+  if (setupError) throw setupError;
+  // Second server on its own port whose rewards db path is unopenable — its
+  // parent dir is a regular FILE, so openRewardsDb's mkdir throws. The
+  // snapshot reads only the telemetry store and sits ahead of the ledger
+  // gate, so it must still 200 while the rewards route honestly 500s.
+  const dir2 = mkdtempSync(join(tmpdir(), "rewards-routes-norew-"));
+  const blocker = join(dir2, "blocker.txt");
+  writeFileSync(blocker, "not a directory", "utf8");
+  const PORT2 = 7392;
+  const child2 = spawn(process.execPath, [join(__dir, "telemetry-server.mjs")], {
+    env: {
+      ...process.env,
+      TELEMETRY_PORT: String(PORT2),
+      LA_TELEMETRY_DB: join(dir2, "telemetry.sqlite"),
+      LA_REWARDS_DB: join(blocker, "rewards.sqlite"),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr2 = "";
+  child2.stderr.on("data", (chunk) => { stderr2 += chunk; });
+  try {
+    const deadline = Date.now() + 20000;
+    let up = false;
+    while (Date.now() < deadline) {
+      if (child2.exitCode !== null) throw new Error(`second server exited early (${child2.exitCode}): ${stderr2.slice(-400)}`);
+      try {
+        const probe = await fetch(`http://127.0.0.1:${PORT2}/api/telemetry/health`);
+        if (probe.ok) { up = true; break; }
+      } catch { /* not up yet */ }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!up) throw new Error(`second server not ready: ${stderr2.slice(-400)}`);
+    const snap = await fetch(`http://127.0.0.1:${PORT2}/api/manager/snapshot`);
+    assert.equal(snap.status, 200, `snapshot must work without the rewards db: ${snap.status}`);
+    const snapBody = await snap.json();
+    assert.ok(snapBody.generatedAt && Array.isArray(snapBody.missing), "snapshot payload must be well-formed");
+    const rewards = await fetch(`http://127.0.0.1:${PORT2}/api/manager/rewards`);
+    assert.equal(rewards.status, 500, "rewards route must honestly 500 while its db is unopenable");
+  } finally {
+    if (child2.exitCode === null) child2.kill();
+    await Promise.race([
+      new Promise((r) => child2.once("exit", r)),
+      new Promise((r) => setTimeout(r, 5000)),
+    ]);
+    rmSync(dir2, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
 });
 
 test("ratings POST: foreign origin is rejected, GET only is enforced", async () => {

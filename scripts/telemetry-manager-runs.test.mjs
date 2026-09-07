@@ -280,6 +280,49 @@ test("queryManagerRuns: the default active cut (25) keeps the newest actives onl
   }
 });
 
+test("queryManagerRuns: interleaved multi-squad volume — every squad keeps its 5 newest despite the bounded inner scan", async () => {
+  requireSqlite();
+  const dir = mkdtempSync(join(tmpdir(), "mgr-runs-"));
+  try {
+    const db = openTelemetryDb(join(dir, "t.sqlite"));
+    // 3 squads × 60 ended runs, round-robin interleaved (600-store volumes are
+    // where the unbounded subquery used to walk everything): the inner scan is
+    // capped at recentPerSquad × squads, yet each squad must still surface its
+    // own 5 newest — a bounded scan must never thin one squad in favour of
+    // another.
+    const names = ["dev", "plan", "review"];
+    let n = 0;
+    for (let i = 1; i <= 60; i++) {
+      for (const squad of names) {
+        n++;
+        const started = new Date(Date.UTC(2026, 7, 1, 0, n)).toISOString();
+        seedRun(db, {
+          runId: `${squad}-vol-${String(i).padStart(2, "0")}`, squad, startedAt: started,
+          endedAt: new Date(Date.parse(started) + 60_000).toISOString(), exitCode: 0, status: "ended",
+        });
+      }
+    }
+    const { recent } = queryManagerRuns(db);
+    assert(recent.length === 15, `3 squads × 5 expected, got ${recent.length}`);
+    for (const squad of names) {
+      const ids = recent.filter((r) => r.squad === squad).map((r) => r.runId);
+      const want = [56, 57, 58, 59, 60].map((i) => `${squad}-vol-${String(i).padStart(2, "0")}`).reverse().join(",");
+      assert(ids.join(",") === want, `${squad} recent wrong: ${ids}`);
+    }
+    // Deterministic tiebreak: identical started_at values must not reshuffle
+    // between polls — run_id DESC decides (same order the liveness cap relies on).
+    const tied = new Date(Date.UTC(2026, 7, 1, 3, 0)).toISOString();
+    seedRun(db, { runId: "dev-tie-b", squad: "dev", startedAt: tied, endedAt: new Date(Date.parse(tied) + 60_000).toISOString(), exitCode: 0, status: "ended" });
+    seedRun(db, { runId: "dev-tie-a", squad: "dev", startedAt: tied, endedAt: new Date(Date.parse(tied) + 60_000).toISOString(), exitCode: 0, status: "ended" });
+    const after = queryManagerRuns(db);
+    const devIds = after.recent.filter((r) => r.squad === "dev").map((r) => r.runId);
+    assert(devIds[0] === "dev-tie-b" && devIds[1] === "dev-tie-a", `tiebreak wrong: ${devIds.slice(0, 2)}`);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("read-only proof: queryManagerRuns and queryRuns both work under PRAGMA query_only", async () => {
   requireSqlite();
   const dir = mkdtempSync(join(tmpdir(), "mgr-runs-"));

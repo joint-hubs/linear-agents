@@ -158,7 +158,7 @@ function Instructions({ squad, card, onPromptDirty }) {
 // overlay polls) — the Manager screen never calls /api/runs or
 // /api/prompts/runs. Rows arrive decorated with their derived state; active
 // runs first, then the most recent ended ones (≤ 5 per squad, server bound).
-function History({ live, liveStale, squadKey, rewards, onRate, ratingSave, stagedRatings, onRatingStage }) {
+function History({ live, liveFailed, squadKey, rewards, onRate, ratingSave, stagedRatings, onRatingStage }) {
   const runs = live ? [...live.active, ...live.recent] : [];
   const cost = (r) => (r.costPartial ? 'partial' : fmtUSD(r.costUSD ?? 0));
   return (
@@ -169,7 +169,7 @@ function History({ live, liveStale, squadKey, rewards, onRate, ratingSave, stage
         The Rating column is the one human-authoring surface for manager ratings: a subjective
         record on the rewards ledger, saved explicitly — it never carries XP.
       </p>
-      {liveStale && (
+      {liveFailed && (
         <p className="mgr-empty-note" role="note">
           <span aria-hidden="true">⏱</span> live update failed — showing last known data
         </p>
@@ -249,7 +249,7 @@ export default function Inspector({
   editing,
   promptDirty,
   live,
-  liveStale,
+  liveFailed,
   rewards,
   onRate,
   ratingSave,
@@ -316,7 +316,7 @@ export default function Inspector({
         {tab === 'history' && (
           <History
             live={live}
-            liveStale={liveStale}
+            liveFailed={liveFailed}
             squadKey={squad.key}
             rewards={rewards}
             onRate={onRate}

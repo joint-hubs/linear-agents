@@ -102,13 +102,13 @@ role.
 | `configured` | ✓ configured | role has a model assignment | — |
 | `unconfigured` | ○ not configured | `model` is null in config | an error; a role may be prompt-only |
 | `unknown` | ? unknown | model string not resolvable in provider catalogue | a invented fallback name |
-| `running` (live) | ▶ running | store run unended and the console process is alive | an accepted task; a squad or role attribution |
+| `running` (live) | ▶ running | store run unended and the process is not known dead (liveness unknown still renders running — the gap is listed in the snapshot's `missing[]`) | an accepted task; a squad or role attribution |
 | `waiting for decision` (live) | ⏸ waiting for decision | a pending supervisor gate record exists | anything inferred from run state — only real pending gate records count |
 | `failed` (live) | ✕ failed | run ended with a non-zero exit code | any supervisor verdict |
 | `finished · unverified` (live) | ✓ finished · unverified | run ended with exit 0 and no supervisor pass verdict | accepted work |
 | `accepted` (live) | ★ accepted | supervisor pass verdict keyed to the task (latest round) | exit 0 alone — exit 0 is never acceptance |
 | `unknown` (live) | ? unknown | missing fields or contradicting liveness (unended but process dead) | a guessed state |
-| `stale` (live) | ⏱ stale data | snapshot older than 15 s or the last poll failed | live truth — the last known board is kept and labelled |
+| `stale` (live) | ⏱ stale data | no successful fetch within 15 s (the header ages the last success, `lastSuccessAt`); a failed poll is flagged immediately | live truth — the last known board is kept and labelled |
 
 No chip is encoded by color alone: every chip pairs an icon glyph with text. Colors validate
 against the dataviz categorical/status palette (see §5).
@@ -172,7 +172,7 @@ The configured-vs-observed split is a hard rule: a card and the Profile tab must
 | Backend error | full-panel error card with the exact failed endpoint, a Retry button, and the backend start hint (`node scripts/telemetry-server.mjs`); header dot goes red with text "offline" |
 | Empty roles | coordinator card + "no specialist roles configured" (supervisor case) |
 | Squad unknown in URL | falls back to first squad, selector reflects it |
-| Stale data | config data is read-on-demand (freshness shows the read time). Live mode: a failed poll keeps the last known snapshot labelled "live update failed — showing last known from …" with a Retry button; a snapshot older than 15 s is labelled stale. The board never blanks |
+| Stale data | config data is read-on-demand (freshness shows the read time). Live mode: a failed poll keeps the last known snapshot labelled "live update failed — showing last known from …" with a Retry button; no successful fetch within 15 s (aged from `lastSuccessAt`, the last success — not per-snapshot timestamps) is labelled stale. The board never blanks |
 | Rewards | awaiting squad → "awaiting verified evidence" card (never zeros); fetch error → error card with Retry; header chip renders only once records exist |
 
 ### 3.5 Visual direction
@@ -194,8 +194,11 @@ a 3 s single-flight TTL cache; `/manager` never calls `/api/runs` or `/api/promp
 
 **Snapshot → UI state mapping (hard rules):**
 
-- `running` = store run unended AND the console process is alive. An unended run whose process
-  is dead is `unknown`, never "running".
+- `running` = store run unended and the process is NOT known dead. An unended run whose process
+  is dead is `unknown`, never "running". Liveness that cannot be determined (no manifest, no
+  pid, cap reached, checker failed) does NOT demote the run: it stays `running` and the gap is
+  reported in the snapshot's `missing[]` — this matches the shipped client mapping
+  (FOC-225 cleanup round C6e).
 - `waiting for decision` = a pending supervisor gate record exists. Never inferred.
 - `failed` = ended + non-zero exit code. `finished · unverified` = ended + exit 0 (the default).
 - `accepted` = a supervisor pass verdict keyed to the task (latest round wins; fail never
@@ -213,8 +216,11 @@ non-interactive gate badge (a `<span>` pointing to the supervisor window — no 
 **Polling:** `useLivePoll` ticks every 5 s with ×2 backoff capped at 60 s, skips a tick while a
 request is in flight, pauses on `document.hidden` and while Setup is active, resumes on refocus
 and on Live entry. Motion exists only on an observed transition between consecutive snapshots
-(one-shot pulse, gated behind `prefers-reduced-motion: no-preference`). An empty store renders
-honest emptiness — "no activity in the bounded window" — never fake idle activity.
+(one-shot pulse, gated behind `prefers-reduced-motion: no-preference`); leaving Live mode (or
+losing the snapshot) discards the last-seen states, so re-entry seeds fresh instead of replaying
+pulses. Before the first snapshot arrives the strip shows a neutral "awaiting first snapshot…";
+an empty store renders honest emptiness — "no activity in the bounded window" — never fake idle
+activity.
 
 ### 3.7 Rewards and manager ratings (slice 3)
 

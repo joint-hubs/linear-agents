@@ -83,16 +83,12 @@ export function decorateRuns(block, acceptedByTask = {}) {
   };
 }
 
-// Snapshot freshness. stale bound default: 3 poll ticks (15 s) after the last
-// success — the header shows a stale warning past it and motion freezes.
+// Snapshot freshness. Stale bound: 3 poll ticks (15 s) after the last
+// SUCCESSFUL fetch — the header's LiveFreshness derives staleness from
+// lastSuccessAt against this bound and shows a stale warning past it (motion
+// freezes). There is deliberately no per-snapshot helper: generatedAt age is
+// not the shipped truth, lastSuccessAt is (FOC-225 cleanup round C6d).
 export const SNAPSHOT_STALE_MS = 15000;
-
-export function isSnapshotStale(snapshot, nowMs = Date.now(), maxAgeMs = SNAPSHOT_STALE_MS) {
-  if (!snapshot || !snapshot.generatedAt) return true;
-  const t = Date.parse(snapshot.generatedAt);
-  if (!Number.isFinite(t)) return true;
-  return nowMs - t > maxAgeMs;
-}
 
 // --- poll scheduling helpers (pure; used by the useLivePoll hook) -----------
 

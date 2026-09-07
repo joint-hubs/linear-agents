@@ -151,7 +151,10 @@ export async function buildManagerSnapshot(deps = {}) {
   // the cap; pass 2 asks the checker for ALL of them in ONE batch — the
   // checker is async and must never block the event loop per pid (the
   // per-pid execSync variant froze every endpoint for the whole build,
-  // review round 1 blocker).
+  // review round 1 blocker). The cap cut is deterministic because
+  // queryManagerRuns orders active runs by (started_at, run_id): the newest
+  // runs are probed first and same-timestamp ties never reshuffle which
+  // runs get checked.
   const toProbe = [];
   for (const run of active) {
     run.alive = null;
