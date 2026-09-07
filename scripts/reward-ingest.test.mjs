@@ -20,7 +20,7 @@
 //       the ratings base cap (20 newest) extended by scoped lookups for the
 //       rendered History window so visible rows never render "not rated".
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -31,6 +31,7 @@ import {
   PROVENANCE_CAVEAT,
   REWARDS_INGEST_TTL_MS,
   ingestRewards,
+  listRunDirs,
   getCachedRewardIngest,
   resetRewardsIngestCache,
   buildRewardsPayload,
@@ -151,7 +152,7 @@ function harness() {
 
 // ── scenarios ────────────────────────────────────────────────────────────────
 
-test("award: pass verdict + linked producing run → one resolved award", () => {
+test("award: pass verdict + linked producing run → one resolved award", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
@@ -161,7 +162,7 @@ test("award: pass verdict + linked producing run → one resolved award", () => 
     seedUsage(h.telemetryDb, "run-a", "z-ai/glm-5.3-flash");
     writeVerdict(h.supervisorRoot, "run-a", "FOC-500", 1, "pass");
 
-    const result = ingestRewards(h.deps);
+    const result = await ingestRewards(h.deps);
     assert(result.awarded === 1 && result.held === 0 && result.revoked === 0, `counters wrong: ${JSON.stringify(result)}`);
     assert(result.scannedRuns === 1, `scannedRuns wrong: ${result.scannedRuns}`);
 
@@ -190,7 +191,7 @@ test("award: pass verdict + linked producing run → one resolved award", () => 
   }
 });
 
-test("replay: re-ingesting the same evidence awards nothing more", () => {
+test("replay: re-ingesting the same evidence awards nothing more", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
@@ -198,8 +199,8 @@ test("replay: re-ingesting the same evidence awards nothing more", () => {
     seedRun(h.telemetryDb, { runId: "run-a", squad: "dev" });
     seedLink(h.telemetryDb, "run-a", "FOC-500");
     writeVerdict(h.supervisorRoot, "run-a", "FOC-500", 1, "pass");
-    ingestRewards(h.deps);
-    const replay = ingestRewards(h.deps);
+    await ingestRewards(h.deps);
+    const replay = await ingestRewards(h.deps);
     assert(replay.awarded === 0 && replay.duplicated === 1, `replay counters wrong: ${JSON.stringify(replay)}`);
     assert(querySquadRewards(h.rewardsDb, "dev").xp === 100, "replay must not multiply xp");
     const rows = h.rewardsDb.prepare("SELECT COUNT(*) AS n FROM reward_records WHERE kind='award'").get();
@@ -209,7 +210,7 @@ test("replay: re-ingesting the same evidence awards nothing more", () => {
   }
 });
 
-test("latest round wins: a retried fail→pass awards in one scan", () => {
+test("latest round wins: a retried fail→pass awards in one scan", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
@@ -219,7 +220,7 @@ test("latest round wins: a retried fail→pass awards in one scan", () => {
     writeVerdict(h.supervisorRoot, "run-a", "FOC-600", 1, "fail", { recordedAt: "2026-09-05T10:00:00.000Z" });
     writeVerdict(h.supervisorRoot, "run-a", "FOC-600", 2, "pass", { recordedAt: "2026-09-05T11:00:00.000Z" });
 
-    const result = ingestRewards(h.deps);
+    const result = await ingestRewards(h.deps);
     assert(result.awarded === 1 && result.revoked === 0, `the pass round must drive the state: ${JSON.stringify(result)}`);
     assert(querySquadRewards(h.rewardsDb, "dev").xp === 100, "the retried pass must award");
   } finally {
@@ -227,7 +228,7 @@ test("latest round wins: a retried fail→pass awards in one scan", () => {
   }
 });
 
-test("pass→fail revokes across scans (evidence arrives over time)", () => {
+test("pass→fail revokes across scans (evidence arrives over time)", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
@@ -235,10 +236,10 @@ test("pass→fail revokes across scans (evidence arrives over time)", () => {
     seedRun(h.telemetryDb, { runId: "run-a", squad: "dev" });
     seedLink(h.telemetryDb, "run-a", "FOC-601");
     writeVerdict(h.supervisorRoot, "run-a", "FOC-601", 1, "pass", { recordedAt: "2026-09-05T10:30:00.000Z" });
-    assert(ingestRewards(h.deps).awarded === 1, "first scan awards the pass");
+    assert((await ingestRewards(h.deps)).awarded === 1, "first scan awards the pass");
 
     writeVerdict(h.supervisorRoot, "run-a", "FOC-601", 2, "fail", { recordedAt: "2026-09-05T11:30:00.000Z" });
-    const result = ingestRewards(h.deps);
+    const result = await ingestRewards(h.deps);
     assert(result.awarded === 0 && result.revoked === 1, `counters wrong: ${JSON.stringify(result)}`);
     assert(querySquadRewards(h.rewardsDb, "dev").xp === 0, "the overturned award must stop counting");
 
@@ -250,7 +251,7 @@ test("pass→fail revokes across scans (evidence arrives over time)", () => {
   }
 });
 
-test("revocation replay stays clean; a later pass re-awards", () => {
+test("revocation replay stays clean; a later pass re-awards", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
@@ -258,16 +259,16 @@ test("revocation replay stays clean; a later pass re-awards", () => {
     seedRun(h.telemetryDb, { runId: "run-a", squad: "dev" });
     seedLink(h.telemetryDb, "run-a", "FOC-601");
     writeVerdict(h.supervisorRoot, "run-a", "FOC-601", 1, "pass", { recordedAt: "2026-09-05T10:00:00.000Z" });
-    ingestRewards(h.deps);
+    await ingestRewards(h.deps);
     writeVerdict(h.supervisorRoot, "run-a", "FOC-601", 2, "fail", { recordedAt: "2026-09-05T11:00:00.000Z" });
-    ingestRewards(h.deps);
-    const replay = ingestRewards(h.deps);
+    await ingestRewards(h.deps);
+    const replay = await ingestRewards(h.deps);
     assert(replay.revoked === 0, `revocation replay must be a no-op: ${JSON.stringify(replay)}`);
     const revCount = h.rewardsDb.prepare("SELECT COUNT(*) AS n FROM reward_records WHERE kind='revocation'").get();
     assert(revCount.n === 1, `no second revocation row, got ${revCount.n}`);
 
     writeVerdict(h.supervisorRoot, "run-a", "FOC-601", 3, "pass", { recordedAt: "2026-09-05T12:00:00.000Z" });
-    const reaccept = ingestRewards(h.deps);
+    const reaccept = await ingestRewards(h.deps);
     assert(reaccept.awarded === 1, `re-acceptance must re-award: ${JSON.stringify(reaccept)}`);
     assert(querySquadRewards(h.rewardsDb, "dev").xp === 100, "xp must be restored");
     const awards = h.rewardsDb.prepare("SELECT COUNT(*) AS n FROM reward_records WHERE kind='award'").get();
@@ -277,14 +278,14 @@ test("revocation replay stays clean; a later pass re-awards", () => {
   }
 });
 
-test("held: no linked producing run → subject unknown, no xp, awaiting; resolution re-awards", () => {
+test("held: no linked producing run → subject unknown, no xp, awaiting; resolution re-awards", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
   try {
     seedRun(h.telemetryDb, { runId: "run-a", squad: "dev" });
     writeVerdict(h.supervisorRoot, "run-a", "FOC-700", 1, "pass");
-    const result = ingestRewards(h.deps);
+    const result = await ingestRewards(h.deps);
     assert(result.held === 1 && result.awarded === 0, `held counters wrong: ${JSON.stringify(result)}`);
     assert(querySquadRewards(h.rewardsDb, "dev").xp === 0, "held award must not credit any squad");
     const held = queryHeldAwards(h.rewardsDb);
@@ -299,7 +300,7 @@ test("held: no linked producing run → subject unknown, no xp, awaiting; resolu
 
     // the link appears in a later pass → the real squad is credited
     seedLink(h.telemetryDb, "run-a", "FOC-700");
-    const resolved = ingestRewards(h.deps);
+    const resolved = await ingestRewards(h.deps);
     assert(resolved.awarded === 1, `resolution must award: ${JSON.stringify(resolved)}`);
     assert(querySquadRewards(h.rewardsDb, "dev").xp === 100, "resolved squad must be credited");
     assert(queryHeldAwards(h.rewardsDb).length === 0, "resolved hold must drop out of the awaiting list");
@@ -308,20 +309,20 @@ test("held: no linked producing run → subject unknown, no xp, awaiting; resolu
   }
 });
 
-test("held replay: unresolved evidence re-scanned by later passes stays one held row, counted once", () => {
+test("held replay: unresolved evidence re-scanned by later passes stays one held row, counted once", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
   try {
     seedRun(h.telemetryDb, { runId: "run-a", squad: "dev" });
     writeVerdict(h.supervisorRoot, "run-a", "FOC-920", 1, "pass");
-    const first = ingestRewards(h.deps);
+    const first = await ingestRewards(h.deps);
     assert(first.held === 1 && first.awarded === 0, `first pass must hold: ${JSON.stringify(first)}`);
 
     // the Manager polls ~every 30 s: passes 2..N ride the same unresolved
     // evidence and must neither mint rows nor re-count the hold
     for (let pass = 2; pass <= 4; pass++) {
-      const replay = ingestRewards(h.deps);
+      const replay = await ingestRewards(h.deps);
       assert(replay.held === 0 && replay.awarded === 0, `pass ${pass} must be a no-op: ${JSON.stringify(replay)}`);
     }
     const rows = h.rewardsDb.prepare("SELECT COUNT(*) AS n FROM reward_records WHERE kind='award'").get();
@@ -330,17 +331,17 @@ test("held replay: unresolved evidence re-scanned by later passes stays one held
 
     // resolution still awards the real squad, and the next replay is a plain duplicate
     seedLink(h.telemetryDb, "run-a", "FOC-920");
-    const resolved = ingestRewards(h.deps);
+    const resolved = await ingestRewards(h.deps);
     assert(resolved.awarded === 1, `resolution must award: ${JSON.stringify(resolved)}`);
     assert(querySquadRewards(h.rewardsDb, "dev").xp === 100, "resolved squad must be credited");
-    const after = ingestRewards(h.deps);
+    const after = await ingestRewards(h.deps);
     assert(after.duplicated === 1 && after.held === 0, `post-resolution replay wrong: ${JSON.stringify(after)}`);
   } finally {
     h.cleanup();
   }
 });
 
-test("held: producing run without squad → subject unknown + missing[]", () => {
+test("held: producing run without squad → subject unknown + missing[]", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
@@ -348,7 +349,7 @@ test("held: producing run without squad → subject unknown + missing[]", () => 
     seedRun(h.telemetryDb, { runId: "run-a", squad: null });
     seedLink(h.telemetryDb, "run-a", "FOC-701");
     writeVerdict(h.supervisorRoot, "run-a", "FOC-701", 1, "pass");
-    const result = ingestRewards(h.deps);
+    const result = await ingestRewards(h.deps);
     assert(result.held === 1, `must hold: ${JSON.stringify(result)}`);
     assert(
       result.missing.some((m) => m.field === "subject" && m.reason.includes("no squad recorded")),
@@ -359,7 +360,7 @@ test("held: producing run without squad → subject unknown + missing[]", () => 
   }
 });
 
-test("cross-repo same taskId: recording cwd separates the groups → two awards", () => {
+test("cross-repo same taskId: recording cwd separates the groups → two awards", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
@@ -371,7 +372,7 @@ test("cross-repo same taskId: recording cwd separates the groups → two awards"
     writeVerdict(h.supervisorRoot, "run-one", "FOC-800", 1, "pass", { recordedAt: "2026-09-05T10:00:00.000Z" });
     writeVerdict(h.supervisorRoot, "run-two", "FOC-800", 1, "pass", { recordedAt: "2026-09-05T10:05:00.000Z" });
 
-    const result = ingestRewards(h.deps);
+    const result = await ingestRewards(h.deps);
     assert(result.awarded === 2 && result.groups === 2, `cross-repo must award twice: ${JSON.stringify(result)}`);
     const repos = h.rewardsDb.prepare("SELECT repo FROM reward_records WHERE kind='award' AND active=1 ORDER BY repo").all().map((r) => r.repo);
     assert(JSON.stringify(repos) === JSON.stringify(["c:/repos/one", "c:/repos/two"]), `repos wrong: ${repos}`);
@@ -382,7 +383,7 @@ test("cross-repo same taskId: recording cwd separates the groups → two awards"
   }
 });
 
-test("repo identity: two worktrees of one repo share the git common dir → one award; same-basename repos stay two", () => {
+test("repo identity: two worktrees of one repo share the git common dir → one award; same-basename repos stay two", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
@@ -408,7 +409,7 @@ test("repo identity: two worktrees of one repo share the git common dir → one 
     writeVerdict(h.supervisorRoot, "run-a", "FOC-911", 1, "pass", { recordedAt: "2026-09-05T10:05:00.000Z" });
     writeVerdict(h.supervisorRoot, "run-b", "FOC-911", 1, "pass", { recordedAt: "2026-09-05T10:10:00.000Z" });
 
-    const result = ingestRewards(h.deps);
+    const result = await ingestRewards(h.deps);
     assert(result.groups === 3, `worktree evidence must group with its repo, same-basename repos must not: ${JSON.stringify(result)}`);
     assert(result.awarded === 3, `one award per accepted revision, not per checkout: ${JSON.stringify(result)}`);
     const repos = h.rewardsDb
@@ -437,7 +438,7 @@ test("repo identity: two worktrees of one repo share the git common dir → one 
   }
 });
 
-test("a non-pass verdict only revokes its own repo lineage", () => {
+test("a non-pass verdict only revokes its own repo lineage", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
@@ -448,10 +449,10 @@ test("a non-pass verdict only revokes its own repo lineage", () => {
     seedLink(h.telemetryDb, "run-two", "FOC-810", { validFrom: "2026-09-01T00:06:00.000Z" });
     writeVerdict(h.supervisorRoot, "run-one", "FOC-810", 1, "pass", { recordedAt: "2026-09-05T10:00:00.000Z" });
     writeVerdict(h.supervisorRoot, "run-two", "FOC-810", 1, "pass", { recordedAt: "2026-09-05T10:05:00.000Z" });
-    ingestRewards(h.deps);
+    await ingestRewards(h.deps);
     // a later non-pass in repo two must not touch repo one's award
     writeVerdict(h.supervisorRoot, "run-two", "FOC-810", 2, "fail", { recordedAt: "2026-09-05T11:00:00.000Z" });
-    const result = ingestRewards(h.deps);
+    const result = await ingestRewards(h.deps);
     assert(result.revoked === 1, `one lineage revoked: ${JSON.stringify(result)}`);
     const active = h.rewardsDb.prepare("SELECT repo FROM reward_records WHERE kind='award' AND active=1").all().map((r) => r.repo);
     assert(JSON.stringify(active) === JSON.stringify(["c:/repos/one"]), `surviving award wrong: ${active}`);
@@ -460,7 +461,7 @@ test("a non-pass verdict only revokes its own repo lineage", () => {
   }
 });
 
-test("scan bound: only the newest N run dirs are ingested, and the cut is documented", () => {
+test("scan bound: only the newest N run dirs are ingested, and the cut is documented", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
@@ -472,7 +473,7 @@ test("scan bound: only the newest N run dirs are ingested, and the cut is docume
       writeVerdict(h.supervisorRoot, runId, `FOC-90${i}`, 1, "pass");
     }
     const deps = { ...h.deps, scanLimit: 2 };
-    const result = ingestRewards(deps);
+    const result = await ingestRewards(deps);
     assert(result.scannedRuns === 2 && result.awarded === 2, `bound scan wrong: ${JSON.stringify(result)}`);
     assert(
       result.missing.some((m) => m.field === "scan" && m.reason.includes("1 older run dirs")),
@@ -483,7 +484,7 @@ test("scan bound: only the newest N run dirs are ingested, and the cut is docume
   }
 });
 
-test("malformed verdict records are documented and skipped, good ones still ingest", () => {
+test("malformed verdict records are documented and skipped, good ones still ingest", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
@@ -498,7 +499,7 @@ test("malformed verdict records are documented and skipped, good ones still inge
       "utf8",
     );
     writeVerdict(h.supervisorRoot, "run-a", "FOC-950", 1, "pass");
-    const result = ingestRewards(h.deps);
+    const result = await ingestRewards(h.deps);
     assert(result.awarded === 1, `good record must ingest: ${JSON.stringify(result)}`);
     assert(
       result.missing.some((m) => m.reason.includes("unreadable")),
@@ -513,21 +514,60 @@ test("malformed verdict records are documented and skipped, good ones still inge
   }
 });
 
-test("absent supervisor root: documented, zero actions, no throw", () => {
+test("absent supervisor root: documented, zero actions, no throw", async () => {
   requireSqlite();
   resetRewardsIngestCache();
   const h = harness();
   try {
-    const result = ingestRewards({ ...h.deps, supervisorRoot: join(h.dir, "missing-root") });
+    const result = await ingestRewards({ ...h.deps, supervisorRoot: join(h.dir, "missing-root") });
     assert(result.awarded === 0 && result.scannedRuns === 0, `no actions expected: ${JSON.stringify(result)}`);
     assert(
       result.missing.some((m) => m.reason.includes("no supervisor root configured")),
       `absent root must be documented: ${JSON.stringify(result.missing)}`,
     );
-    const empty = ingestRewards({ ...h.deps, supervisorRoot: h.supervisorRoot });
+    const empty = await ingestRewards({ ...h.deps, supervisorRoot: h.supervisorRoot });
     assert(empty.awarded === 0 && empty.scannedRuns === 0, "empty root is quiet, not an error");
   } finally {
     h.cleanup();
+  }
+});
+
+test("walk: bounded, depth-capped, newest-first run-dir discovery on a tmp dir", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rewards-walk-"));
+  try {
+    // three run dirs + nesting past the depth cap below one of them
+    for (const name of ["run-old", "run-new", "run-mid"]) {
+      mkdirSync(join(dir, name, "verdicts"), { recursive: true });
+    }
+    mkdirSync(join(dir, "run-new", "children", "child-1", "sub"), { recursive: true });
+    // mtimes AFTER all mkdirs (creating a subdir refreshes the parent's mtime):
+    // run-new newest, run-old oldest
+    const base = Date.parse("2026-09-01T00:00:00Z");
+    utimesSync(join(dir, "run-old"), new Date(base), new Date(base));
+    utimesSync(join(dir, "run-mid"), new Date(base + 1000), new Date(base + 1000));
+    utimesSync(join(dir, "run-new"), new Date(base + 2000), new Date(base + 2000));
+
+    const { dirs, truncated } = await listRunDirs(dir);
+    assert(truncated === false, "an ordinary tree is not truncated");
+    // Subdirs keep their creation mtimes (fresher than the ones set below), so
+// the deterministic pin is the RELATIVE order of the run dirs themselves.
+    const names = dirs.map((d) => d.name);
+    const idx = (n) => names.indexOf(n);
+    assert(idx("run-new") > -1 && idx("run-new") < idx("run-mid") && idx("run-mid") < idx("run-old"), `newest-first ordering: ${JSON.stringify(names)}`);
+    assert(typeof dirs[0].mtimeMs === "number", "entries carry an mtime");
+    assert(dirs.some((d) => d.name === "run-new/children"), "depth 2 is visited");
+    assert(dirs.some((d) => d.name === "run-new/children/child-1"), "depth 3 is visited");
+    assert(!dirs.some((d) => d.name === "run-new/children/child-1/sub"), "depth 4 is skipped");
+    assert(!dirs.some((d) => d.name.endsWith("/verdicts/verdicts")), "no phantom nesting");
+
+    const capped = await listRunDirs(dir, { maxDirs: 3 });
+    assert(capped.dirs.length === 3, "at most maxDirs entries");
+    assert(capped.truncated === true, "hitting the cap is reported, never silent");
+
+    const empty = await listRunDirs(join(dir, "run-old", "verdicts"));
+    assert(empty.dirs.length === 0 && empty.truncated === false, "a dir without subdirs yields nothing");
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 

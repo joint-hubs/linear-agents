@@ -35,7 +35,8 @@
 //     verdict is acceptance evidence; the missing REVIEW/TEST stage marker is
 //     the documented v1 caveat.
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { MANAGER_SNAPSHOT_SCAN_LIMIT } from "./manager-snapshot.mjs";
@@ -83,9 +84,59 @@ function toMissingEntry(err) {
   return String(err?.message || err || "unknown error");
 }
 
-// One ingest pass. Synchronous fs on a bounded set (≤ scanLimit run dirs),
+// ── bounded run-dir discovery ─────────────────────────────────────────────────
+// .state/supervisor gains one directory per run and nothing prunes it, and the
+// ingest runs on the rewards GET path — so discovery is ASYNC (fs.promises)
+// and bounded. WHY the caps: without them a long-lived installation pays one
+// stat per run dir ever created on every pass, and a pathological layout could
+// walk without end. The walk is BFS (shallow-first — run dirs sit at depth 1
+// by contract, supervisor-lib.mjs runDir()), never descends past
+// REWARDS_WALK_MAX_DEPTH, and stats at most REWARDS_WALK_MAX_DIRS directories
+// per pass; past the cap it stops and reports `truncated`, so the gap is
+// documented in missing[] instead of silently skipped.
+export const REWARDS_WALK_MAX_DIRS = 500; // dirs visited (one stat each) per pass
+export const REWARDS_WALK_MAX_DEPTH = 3; // depth below the supervisor root
+
+export async function listRunDirs(rootDir, opts = {}) {
+  const maxDirs = opts.maxDirs ?? REWARDS_WALK_MAX_DIRS;
+  const maxDepth = opts.maxDepth ?? REWARDS_WALK_MAX_DEPTH;
+  const dirs = [];
+  let truncated = false;
+  const queue = [{ dir: rootDir, depth: 0, rel: "" }];
+  while (queue.length > 0 && dirs.length < maxDirs) {
+    const { dir, depth, rel } = queue.shift();
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue; // unreadable branch — discovery simply stops here
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (dirs.length >= maxDirs) {
+        truncated = true;
+        break;
+      }
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      let mtimeMs = 0;
+      try {
+        mtimeMs = (await stat(join(dir, entry.name))).mtimeMs;
+      } catch {
+        // unstattable dir sorts last; still reported
+      }
+      dirs.push({ name: childRel, mtimeMs });
+      if (depth + 1 < maxDepth) queue.push({ dir: join(dir, entry.name), depth: depth + 1, rel: childRel });
+    }
+  }
+  if (queue.length > 0) truncated = true;
+  dirs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return { dirs, truncated };
+}
+
+// One ingest pass. Discovery is an async bounded walk (above); verdict reads
+// stay synchronous on the ≤ scanLimit run dirs actually scanned, and there are
 // zero child-process spawns — the event loop is never blocked for long.
-export function ingestRewards(deps = {}) {
+export async function ingestRewards(deps = {}) {
   const {
     telemetryDb,
     rewardsDb,
@@ -109,15 +160,24 @@ export function ingestRewards(deps = {}) {
     return result;
   }
 
-  // ── scan: ≤ scanLimit newest run dirs ──────────────────────────────────────
-  const entries = readdirSync(supervisorRoot, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
-    .map((e) => ({ name: e.name, mtimeMs: statSync(join(supervisorRoot, e.name)).mtimeMs }))
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
-  if (entries.length > scanLimit) {
-    missing(result.missing, "supervisor", "scan", `scan limit reached — ${entries.length - scanLimit} older run dirs not scanned`);
+  // ── scan: ≤ scanLimit newest run dirs (bounded async discovery) ────────────
+  const { dirs: discovered, truncated: walkTruncated } = await listRunDirs(supervisorRoot, deps);
+  if (walkTruncated) {
+    missing(
+      result.missing,
+      "supervisor",
+      "walk",
+      `dir cap reached — discovery truncated at ${REWARDS_WALK_MAX_DIRS} dirs; the newest-first order covers only the discovered set`,
+    );
   }
-  const runDirs = entries.slice(0, scanLimit);
+  // A run dir is a directory carrying a verdicts/ subdir (the supervisor-lib
+  // layout). Filtering BEFORE the cut keeps fresh-mtime subdirs (<run>/verdicts,
+  // /gates, /children) from occupying scan-limit slots or inflating the cut count.
+  const candidates = discovered.filter((d) => existsSync(join(supervisorRoot, d.name, "verdicts")));
+  if (candidates.length > scanLimit) {
+    missing(result.missing, "supervisor", "scan", `scan limit reached — ${candidates.length - scanLimit} older run dirs not scanned`);
+  }
+  const runDirs = candidates.slice(0, scanLimit);
 
   // Verdict records, grouped by (task, repo identity). The identity is
   // resolved per verdict from the RECORDING run so two repos sharing a task
@@ -335,7 +395,7 @@ export async function getCachedRewardIngest(deps = {}) {
     return { result, source: "cached" };
   }
   const promise = (async () => {
-    const result = ingestRewards(deps);
+    const result = await ingestRewards(deps);
     cacheState.result = result;
     // stamped from the same clock the freshness check reads (injected nowMs in
     // tests, wall clock in production) so TTL tests stay deterministic
