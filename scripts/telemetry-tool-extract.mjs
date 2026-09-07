@@ -80,6 +80,9 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
   }
 
   const records = [];
+  // tool_use_id → did that call come back as an error. Filled from tool_result
+  // blocks, which is why it cannot be resolved inside the loop (below).
+  const errorByToolUseId = new Map();
   let turnIndex = 0;
   const now = new Date().toISOString();
 
@@ -91,11 +94,24 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
       continue; // skip malformed lines
     }
 
+    const content = line.message?.content;
+
+    // A tool_result carries the OUTCOME of a tool_use recorded earlier in the
+    // file. Claude Code writes it as a `user` line, so it always arrives AFTER
+    // the record it describes — collect verdicts by id here and apply them once
+    // the whole file is read (records are buffered in memory anyway).
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block?.type === "tool_result" && block.tool_use_id) {
+          errorByToolUseId.set(block.tool_use_id, block.is_error === true);
+        }
+      }
+    }
+
     // Only process assistant messages
     if (line.type !== "assistant") continue;
 
     const observedAt = line.timestamp || null;
-    const content = line.message?.content;
     if (!Array.isArray(content)) {
       turnIndex++;
       continue;
@@ -126,13 +142,15 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
         model,
         observed_at: observedAt,
         tool_name_raw: name,
-        tool_name_canon: null, // filled by normalization pass
+        tool_name_canon: null, // resolved after the loop — needs the config map
         tool_input: input,
-        tool_has_error: 0,     // filled by follow-up pass (checks next assistant message)
+        tool_has_error: 0,     // resolved after the loop — needs the tool_result
         turn_index: turnIndex,
         source_path: transcriptPath,
         source_offset: byteOffset,
         created_at: now,
+        // Not a column — the join key to errorByToolUseId, dropped below.
+        _toolUseId: block.id || null,
       });
 
       toolIndex++;
@@ -141,7 +159,29 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
     turnIndex++;
   }
 
+  // Two fields could not be filled during the streaming pass: the canonical
+  // category (needs config/tool-norm.json) and the error verdict (needs the
+  // tool_result that appears later in the file). Resolve both here, and drop
+  // the temporary join key so the record matches the tool_facts columns.
+  const { rawToCanon } = normMap();
+  for (const record of records) {
+    record.tool_name_canon =
+      rawToCanon.resolve(record.tool_name_raw) || bucketUnknownTool(record.tool_name_raw);
+    if (record._toolUseId && errorByToolUseId.get(record._toolUseId) === true) {
+      record.tool_has_error = 1;
+    }
+    delete record._toolUseId;
+  }
+
   return records;
+}
+
+// loadToolNormMap() reads and parses a file; extractToolFacts runs once per
+// transcript (900+ on a full backfill), so the map is read once per process.
+let normMapCache = null;
+function normMap() {
+  if (!normMapCache) normMapCache = loadToolNormMap();
+  return normMapCache;
 }
 
 // ---------------------------------------------------------------------------
