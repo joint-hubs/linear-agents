@@ -1,6 +1,5 @@
 {
   "permissions": {
-    "defaultMode": "default",
     "allow": [
       "Read",
       "Grep",
@@ -21,9 +20,9 @@
       "PushNotification",
       "ListAgents",
       "Monitor"
-    ]
+    ],
+    "defaultMode": "default"
   },
-  "theme": "dark",
   "hooks": {
     "SessionStart": [
       {
@@ -36,5 +35,7 @@
         ]
       }
     ]
-  }
+  },
+  "theme": "dark",
+  "tui": "fullscreen"
 }
