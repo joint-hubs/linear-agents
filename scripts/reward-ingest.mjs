@@ -374,9 +374,14 @@ export async function ingestRewards(deps = {}) {
   return result;
 }
 
-// ── single-flight cache (mirror of the manager snapshot cache pattern) ───────
-// Callers during a recompute receive the PREVIOUS result labelled 'cached';
-// first-ever callers share one in-flight promise.
+// ── TTL + single-flight cache (mirror of the manager snapshot cache pattern) ─
+// Callers inside the TTL window receive the cached result; callers arriving
+// while a pass is still running share its in-flight promise (labelled
+// 'cached'), and the promise is cleared on settle. Since the run-dir walk
+// became async (bounded discovery above) this wiring is load-bearing — two
+// GETs can genuinely overlap inside the await window; while the pass was
+// fully synchronous, no caller could ever reach the reuse branch. On a failed
+// pass the promise clears and any previous cached result is kept.
 
 let cacheState = { result: null, computedAt: 0, inflight: null };
 
