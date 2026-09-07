@@ -138,12 +138,21 @@ Rules:
   single-flight TTL cache; squads/ratings/held are read fresh per payload build.
 - Provenance caveat: the acceptance-verdict → award join carries a documented `PROVENANCE_CAVEAT`
   verbatim in each record's provenance field (supervisor-resolved decision, PROCEED-WITH-CAVEAT).
+- A squad literally named `unknown` would collide with the missing-squad sentinel used by held
+  records and ungated squad attribution — accepted risk (review-17 F4): real squad names come from
+  config and must not be renamed to match the sentinel.
+- A telemetry-store reset degrades repo identity for records ingested after the reset: run rows
+  (and with them the workspace observations behind the logical-repo lookup) are gone until real
+  runs repopulate `repositories`, so post-reset ingests fall back to the normalized launch cwd
+  identity (review-17 F5) — pre-reset awards keep their original identity keys.
 - Repo identity (review round 5): the dedup key's repo component is the recording run's **logical
   repo** — its git common dir, read spawn-free from the run's recorded workspace observation; with
   no observation, the normalized launch cwd stands in. The raw checkout path is kept in the record's
   provenance whenever the common dir supplied the identity. Two worktrees of one repo therefore
   share one identity: the same accepted revision re-reviewed from another checkout yields one award,
-  not two (spec §3).
+  not two (spec §3). When the `repositories.common_dir` lookup is unavailable the fallback identity
+  is the normalized launch cwd, so one repo's awards can split across two identity keys (or two
+  distinct repos coincide) — `revision` uniqueness is per identity key, not per physical repo.
 - Held awards (review round 5): a pass verdict whose credit subject cannot be resolved is written
   in one transaction at subject `unknown`, `active=0`, under a **held-scoped dedup key** (`held|`
   prefix) — replays of the same unresolved evidence collapse to one held row (the ~30 s Manager
