@@ -142,13 +142,21 @@ function json(res, status, data) {
 }
 
 function corsPreflight(req, res) {
-  const headers = {
+  // The method/header allows describe what a REFLECTED origin may do — for a
+  // foreign origin the browser refuses the response on the missing ACAO
+  // anyway, so advertising capabilities to it is noise at best. All three
+  // headers go out only together (review round 8, N2).
+  const cors = corsOriginFor(req);
+  if (!cors) {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+  res.writeHead(204, {
+    'Access-Control-Allow-Origin': cors,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
-  };
-  const cors = corsOriginFor(req);
-  if (cors) headers['Access-Control-Allow-Origin'] = cors;
-  res.writeHead(204, headers);
+  });
   res.end();
 }
 

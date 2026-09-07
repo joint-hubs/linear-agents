@@ -163,6 +163,24 @@ test("CORS: a loopback origin is reflected, a foreign origin gets no ACAO header
   const plain = await fetch(`${BASE}/api/telemetry/health`);
   assert.equal(plain.headers.get("access-control-allow-origin"), null, "no Origin → no ACAO header");
   assert.equal(plain.status, 200, "no-Origin requests are unaffected");
+  // preflight (N2): the method/header allows describe what a REFLECTED origin
+  // may do — they go out ONLY alongside the ACAO, never to a foreign origin
+  const preflightAllow = await fetch(`${BASE}/api/manager/ratings`, {
+    method: "OPTIONS",
+    headers: { origin: "http://localhost:5174", "access-control-request-method": "POST" },
+  });
+  assert.equal(preflightAllow.status, 204, "preflight must answer 204");
+  assert.equal(preflightAllow.headers.get("access-control-allow-origin"), "http://localhost:5174", "allowlisted preflight reflects the origin");
+  assert.equal(preflightAllow.headers.get("access-control-allow-methods"), "GET, POST, OPTIONS", "allowlisted preflight carries the methods allow");
+  assert.equal(preflightAllow.headers.get("access-control-allow-headers"), "Content-Type", "allowlisted preflight carries the headers allow");
+  const preflightForeign = await fetch(`${BASE}/api/manager/ratings`, {
+    method: "OPTIONS",
+    headers: { origin: "https://evil.example", "access-control-request-method": "POST" },
+  });
+  assert.equal(preflightForeign.status, 204, "a foreign preflight still answers 204 (the browser enforces the refusal)");
+  for (const h of ["access-control-allow-origin", "access-control-allow-methods", "access-control-allow-headers"]) {
+    assert.equal(preflightForeign.headers.get(h), null, `foreign preflight must not send ${h}`);
+  }
 });
 
 test("AC 2: there is no XP submission endpoint (POST /api/manager/rewards → 405)", async () => {
