@@ -20,9 +20,22 @@ pip install -r requirements.txt
 
 ## Run
 
+The report reads the **canonical views**, not the raw fact tables. Create them
+once (they are cheap to recreate, and re-running is safe):
+
 ```bash
+node scripts/telemetry-canonical.mjs --ensure
 python notebooks/agent_intelligence.py --squad dev --days 30
 ```
+
+Without the views the report refuses to run rather than falling back. That is
+deliberate: `usage_facts` is run-scoped (ADR-0008), so several runs sharing a
+transcript each hold a copy of the same call, and every total taken from the
+raw table is inflated — measured at 14,4% of rows and roughly 2x on cost. A
+report that is quietly twice too big is worse than one that will not start.
+
+> `--days` defaults to 30. The fleet has ~72 days of history, so use
+> `--days 90` for a full picture.
 
 ### Options
 
@@ -54,13 +67,21 @@ python notebooks/agent_intelligence.py --squad dev --days 30
 
 | Section | Data source | Notes |
 |---------|-------------|-------|
-| Fleet Overview | `usage_facts` + `cost_facts` | KPI cards |
-| Squad Breakdown | `usage_facts` + `runs` | Aggregated by squad |
-| Agent Breakdown | `usage_facts` | Aggregated by agent_key |
-| Tool Calls | `tool_facts` | Canonical + raw names; empty if table not populated yet |
-| Delegation Handovers | `delegation_links` | Graph + per-delegation sample; empty if table not populated yet |
+| Fleet Overview | `canonical_usage` | KPI cards; cost counts each call once |
+| Squad Breakdown | `canonical_usage` + `runs` | Aggregated by squad |
+| Agent Breakdown | `canonical_usage` | Aggregated by agent_key |
+| Tool Calls | `canonical_tool_facts` | **Full aggregate**, not a sample, with error counts per tool |
+| Delegation Handovers | `delegation_links` | Graph + per-delegation sample; `child_cost_usd` is NULL for every row today |
 | Task Linkage | `run_task_links` + `runs` + `usage_facts` | Per-task cost/tokens/runs |
-| N-grams | Transcript JSONL files | Top 20 1-2-grams per agent; cached in `.ngrams-cache.pkl` |
+| N-grams | Transcript JSONL files | Top 20 1-2-grams per agent, from **that agent's own** transcript; cached in `.ngrams-cache.pkl` |
+
+Two columns carry the honesty of the numbers and are worth reading before
+drawing conclusions:
+
+- **`attribution`** (`in_window` / `after_end` / `before_start`) — how confident
+  the run attribution is. Filter to `in_window` when a claim needs to be solid.
+- **cost `null`** — the model was missing from the price snapshot. It means
+  *unknown*, never $0.00; ~3 200 rows are in this state.
 | Embedding Clusters | Transcript assistant text | HDBSCAN; requires `sentence-transformers` + `hdbscan` + `scikit-learn` |
 
 ## Caching

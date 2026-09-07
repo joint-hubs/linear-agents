@@ -170,13 +170,13 @@ Three ways it refuses, three different fixes:
 
 **Where the cost number comes from:** token counts priced through `config/models.json`, the same path the dashboard uses. The stream's own `total_cost_usd` is recorded separately as `costUsdReported` and is **not** trusted — Claude Code computes it for models it does not recognise, and it is measurably wrong (FOC-165: $0.21 reported for a run on a $0 model). If the two diverge sharply, that is worth telling Mateusz, not smoothing over.
 
-Today the whole issue shares one number. Splitting it per stage — so discovery cannot spend the money reserved for verification — is FOC-162.
+The outer cap covers the whole run. Per-stage allocation is available through `supervisor-budget.mjs allocate` and follows `config/graph.json` share hints; stages do not borrow from verification. Allocate when the user supplied an issue budget. No requested budget means no invented additional cap, not permission to remove an existing cap.
 </supervisor_budget>
 
 <supervisor_limits>
 ## What this MVP deliberately does not do
 
-- **One live child at a time.** A policy guard, not a technical limit: every child already has its own worktree. What is missing is the merge node that re-verifies combined behaviour (FOC-160) and the backpressure that stops DEV out-producing REVIEW (FOC-161). Until those exist, parallelism yields more unverified work, not more throughput. FOC-161 removes the guard.
+- **One live child at a time for the stabilization rollout.** This is the current execution policy, not a claim that merge verification or backpressure is missing. The runtime has merge/semaphore controls; verify the combined candidate and downstream capacity before proposing parallel issue execution. Do not silently lift the sequential policy.
 - **Mid-turn steering.** `claude -p` runs to completion; you steer at turn boundaries.
 - **Gate mirroring into Linear.** Gate records are files; there is no `needs:*` mirror in MVP.
 - Design rationale for all three: `docs/plans/brainstorm-graph-engineering.md`.

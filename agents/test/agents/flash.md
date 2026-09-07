@@ -1,6 +1,6 @@
 ---
 name: flash
-description: TEST squad — mechanical: parse results, pass/fail tables, health-check checklists. DeepSeek V4 Flash.
+description: TEST squad — parse individual check outcomes and format readiness/verification tables.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write
 ---

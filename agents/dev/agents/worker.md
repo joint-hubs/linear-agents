@@ -1,6 +1,6 @@
 ---
 name: worker
-description: DEV squad — cheap single-scope tasks (one-file change, boilerplate, patterned test, summary, draft). MiniMax M3.
+description: DEV squad — bounded single-scope changes, patterned tests, summaries and drafts.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---

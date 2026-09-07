@@ -705,6 +705,18 @@ export const SUPERVISOR_DENY = [
   "Bash(gh api:*)",
   "Bash(git worktree remove:*)",
   "Bash(git worktree prune:*)",
+  // Linear writes go through the frontman, never a child. FOC-213 (2026-09-05):
+  // a dev child found the script path and posted a Linear comment + state
+  // transition behind the mcp__linear__* deny, because the deny-list covers the
+  // MCP server, not the CLI scripts that wrap the same API. The rules below cut
+  // the launcher-documented invocation (`node $LA_ROOT/scripts/...`). Same
+  // caveat as the push rules above — a child that rewrites the path (`node
+  // C:/.../linear-ops.mjs`, `cmd /c`, cd + relative) walks past the prefix
+  // match; this removes the accidental write, and the frontman relay remains
+  // the real control.
+  "Bash(node $LA_ROOT/scripts/linear-ops.mjs:*)",
+  "Bash(node $LA_ROOT/scripts/publish-linear-comment.mjs:*)",
+  "Bash(node $LA_ROOT/scripts/linear-query.mjs:*)",
 ];
 
 export const childSettingsPath = (runId, childId) =>

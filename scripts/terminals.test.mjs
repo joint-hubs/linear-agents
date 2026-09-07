@@ -8,16 +8,9 @@ let passed = 0;
 let failed = 0;
 const failures = [];
 
+const testQueue = [];
 function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failed++;
-    failures.push({ name, message: e.message });
-    console.log(`  \u2717 ${name}: ${e.message}`);
-  }
+  testQueue.push({ name, fn });
 }
 
 function assert(cond, msg) {
@@ -337,8 +330,75 @@ test("stopWindow with empty/null title returns error", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Tests — listTerminalsAsync (batched request path)
+// ---------------------------------------------------------------------------
+
+test("listTerminalsAsync: ONE batched probe carries every candidate pid; results map back", async () => {
+  const calls = [];
+  const probeAsync = async (pids) => {
+    calls.push(pids);
+    return new Map([[100, true], [200, false]]);
+  };
+  const runs = [
+    makeRun({ runId: "a", startedAt: now, endedAt: null, consolePid: 100 }),
+    makeRun({ runId: "b", startedAt: earlier, endedAt: null, consolePid: 200 }),
+    makeRun({ runId: "dup", startedAt: evenEarlier, endedAt: null, consolePid: 100 }), // deduped in the batch
+    makeRun({ runId: "fin", startedAt: evenEarlier, endedAt: evenEarlier, consolePid: 300 }),
+    { ...makeRun({ runId: "nopid", startedAt: now, endedAt: null }), consolePid: null }, // no pid at all
+  ];
+
+  const result = await terminals.listTerminalsAsync(runs, { probeAsync });
+
+  assert(calls.length === 1, `exactly one batched probe, got ${calls.length}`);
+  assert(JSON.stringify(calls[0]) === JSON.stringify([100, 200]), `batch = deduped candidate pids: ${JSON.stringify(calls[0])}`);
+  const byId = Object.fromEntries(result.map((r) => [r.runId, r]));
+  assert(byId.a.alive === true && byId.a.canFocus === true, "alive per the checker map");
+  assert(byId.b.alive === false, "absent from checker output → alive=false");
+  assert(byId.dup.alive === true, "same pid as run a → same liveness (batch dedup)");
+
+  assert(byId.fin.alive === false && byId.fin.canFocus === false, "finished never probed");
+  assert(byId.nopid.alive === false && byId.nopid.consolePid === null, "no pid → not probed, alive=false");
+});
+
+test("listTerminalsAsync: a rejecting checker maps every candidate to alive=false", async () => {
+  // Contract (areProcessesAlive JSDoc): the /api/terminals panel path maps a
+  // checker rejection to alive=false — the old sync probe's catch answer —
+  // never to unknown. The strict === false below fails on null too, so this
+  // pins the path against drifting into the snapshot caller's null contract.
+  const result = await terminals.listTerminalsAsync([makeRun({ runId: "x", consolePid: 42 })], {
+    probeAsync: async () => {
+      throw new Error("powershell broken");
+    },
+  });
+  assert(result[0].alive === false && result[0].canFocus === false, "checker failure → alive=false (same as the sync probe's catch path)");
+});
+
+test("listTerminalsAsync: empty runs → empty result, no probe call", async () => {
+  let calls = 0;
+  const result = await terminals.listTerminalsAsync([], {
+    probeAsync: async (pids) => {
+      calls++;
+      return new Map();
+    },
+  });
+  assert(result.length === 0 && calls === 0, "empty input → empty output, no probe");
+});
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
+
+for (const { name, fn } of testQueue) {
+  try {
+    await fn();
+    passed++;
+    console.log(`  ✓ ${name}`);
+  } catch (e) {
+    failed++;
+    failures.push({ name, message: e.message });
+    console.log(`  ✗ ${name}: ${e.message}`);
+  }
+}
 
 console.log("");
 if (failed > 0) {

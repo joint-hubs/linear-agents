@@ -3,7 +3,125 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Ostatnia aktualizacja: 2026-08-25 — Provider profiles (per-squad LLM provider): spec + ADR Accepted, implementation in parallel slices
+## Current execution: 2026-09-07 — FOC-225 COMPLETE (slice 3 + cleanup landed, integration `b009358`)
+
+- Slice 3 (rewards persistence) DONE: oddzielny ledger `rewards.sqlite` (`LA_REWARDS_HOME`/`LA_REWARDS_DB`;
+  nigdy telemetry.sqlite), `reward_records` (award|revocation|rating, flaga `active`), dedup `BEGIN IMMEDIATE`
+  na (task, repo, revision, rule_version), tożsamość repo z `repositories.common_dir` (spawn-free, fallback
+  launch_cwd udokumentowany), `GET /api/manager/rewards` (ingest-on-read, TTL 30 s single-flight) +
+  `POST /api/manager/ratings` (int 1–5, 413 przy nadmiarze), XP_RULES frozen v1 (100/akceptacja, 500/level)
+  w payloadzie, revocation wyłącznie verdict-driven, `PROVENANCE_CAVEAT`, brak zapisu XP z przeglądarki.
+  Commity: `1831d48` ledger · `886f175` ingest · `dfa6a4d` routes · `95df9d5` UI · `0d9ca82` docs ·
+  fix-round `77bc7bd`/`92d898c`/`fb37c3b`/`4696c2a` · D1 fix `299b19b` (inspector 320px kolumna przy 1440).
+- Cleanup round DONE (12 commitów `8c5c5b9..b009358`): `/api/terminals` batched async probe (jeden spawn na
+  build), CORS tylko loopback-allowlist (nigdy `*`), bounded async walk na ścieżce rewards GET (+ `rootError`
+  jako własny wpis `missing[]`), 413 z size-message na wszystkich 9 `readJsonBody` routes, slice-2 nitpicks
+  a–h (flash reset, SQL bounds, deterministyczny tie-break, `isSnapshotStale` usunięte + docs, §3.6 zgodne,
+  snapshot route przed ledger gate, placeholder do pierwszego fetcha, `liveStale`→`liveFailed`), rating
+  note-before-value zachowany, docs: fallback-identity dedup + provenance caveats (unknown-squad, reset).
+  Round-8 I1: recent-window wróciło do plain scan (inner ORDER BY..LIMIT nie ograniczał skanu — EQP zmierzone
+  2/3/2 temp b-trees, timing neutralny), prawdziwy komentarz + pin równości wyników.
+- Weryfikacja łańcucha: REVIEW approve (runda 6 slice 3 — 14 AC zmapowanych; runda 9 cleanup — 10 itemów) ·
+  TEST pass (slice 3: 16/16 + re-test po D1; cleanup: 145/0 UI per-file + live API 413/CORS/gate/terminals +
+  CDP drive z kontrolą pozytywną) · main tree po ff-landing: UI 145/0, build ✓, snapshot 10, ledger 16,
+  ingest 18, routes 9, ratings 5, terminals 21/21, telemetry-manager-runs 9, test-all telemetry 11/11.
+- Landing: supervisor-merge hermetic replay odmówił (tekstowy konflikt docs/STATE.md przy 36-commit replay),
+  ale kandydat był liniowym potomkiem integration head (merge-base == head) — ff-only = drzewo TEST-verified
+  co do bajta (mocniejsza gwarancja niż replay). Powtórzone dla slice 3 i cleanup.
+- Koszt biegu: ~$6.76 priced (costUsdReported zawyżony ~58×, niezaufany). Werdyktów TEST nie nagrywać przez
+  supervisor-verdict (fingerprint liczony z drzewa dziecka → fałszywa kolizja z ostatnią rundą review).
+- Decyzje Mateusza 2026-09-07: push/PR zautoryzowane (branch + PR do main); worktree sprzątane propose-only
+  (na jego „tak" per dziecko); FOC-227 (paleta) bez dalszych ruchów. Linear: komentarz zamknięcia opublikowany,
+  issue Done; label `reviewed` był już nadany i pozostaje.
+
+## Current execution: 2026-09-06 — FOC-227 squad palette repaint (worktree `foc-227-dev`)
+
+- Paleta `--sq-*` (6 akcentów squadów) przemalowana na muted-indigo w `ui/src/theme.css`; `Timeline.jsx` SQCOLOR
+  na `var(--sq-*)` (fallback `var(--sq-cadence)`, orchestratory bez zmian); walidator `scripts/validate-palette.mjs`
+  (frozen, commit `2481031`) podpięty do `npm --prefix ui run test` przez `ui/src/_tests_palette.mjs`.
+  Walidator all-pairs PASS (deutan+tritan ≥ 9.3, normal ≥ 15, AA 4.5:1); stara paleta FOC-225 odrzucana (exit 1).
+
+## Current execution: 2026-09-06 — FOC-225 Fenix Manager (slice 0–2, worktree `foc-225-dev`)
+
+- Worktree `C:\Users\mateu\Documents\GitHub\la-wt\linear-agents\foc-225-dev`, branch `foc-225-dev`, baza `875b5c6`.
+- Dowiezione: slice 0 (spec `docs/ui/fenix-manager.md` + `docs/ui/fenix-manager-rewards.md`), slice 1 part 1
+  (read-only /manager: board, roster, inspector, layout persistence) i slice 1 part 2 (edycja config/promptów
+  przez WSPÓŁDZIELONY writer `ui/src/squadConfig/workingCopy.js` — staging → dry-run preview → explicit apply,
+  unsaved-edit protection, per-endpoint statusy, next-launch semantics).
+- Commity: `0b394dd` spec · `c7b9fd2` board · `8ac385f` card fit · `88c8007` workingCopy extraction ·
+  `1d14b09` manager editing · `f377506` fix TDZ/chip · `07c0f58` docs part 2 ·
+  `0fbbaa7` review-r1 fixes (tab-switch confirm, stale-preview gate, roster keyboard) ·
+  `5134f1f` test-r1 fixes (Shift+Arrow step, offline header badge, model-input width).
+- Slice 2 (live telemetry overlay, plan zatwierdzony 2026-09-06): bounded `queryManagerRuns`
+  (`scripts/telemetry-store.mjs`, migracja idx v6) → snapshot builder `scripts/manager-snapshot.mjs`
+  + cache'owane `GET /api/manager/snapshot` (TTL 3 s single-flight; handlery `/api/runs` i
+  `/api/prompts/runs` nietknięte) → klient `ui/src/manager/live.js` (czysty adapter, testowalny
+  w node) + `ui/src/manager/useLivePoll.js` (tick 5 s, backoff ×2 cap 60 s, skip in-flight, pauza
+  hidden/Setup, wznowienie refocus/Live) → overlay (LiveStrip, chipsy w railu, live History,
+  nieinteraktywny gate badge) + a11y ride-along (taby Inspectora strzałkami, Home/End, bez zawijania).
+- Commity slice 2: `7adb89b` store query+migracja · `fd8deed` builder+route+testy ·
+  `d7c975b` live overlay UI · `dcf1af4` inspector a11y · (ten commit) docs §3.6/§6c + STATE.
+- Diagnoza (podstawa decyzji): `queryRuns` na realnym store = 1247 ms/call (461 runs / 137 260
+  usage rows; SELECT * + pełna projekcja per-row), bounded path 0,6–5 ms — stąd NOWE bounded
+  query, a nie cache nad wolną ścieżką.
+- Weryfikacja slice 2: UI 50 PASS (live adapter, poll helpers, nextTabIndex) · build ✓ ·
+  telemetry 10/10 · drive 6 (CDP, izolowany fixture :7391→:5174) 33/33 PASS: setup (zero wywołań
+  /api/runs i /api/prompts/runs z /manager; stany ▶ ✓ ★ ✕; gate badge jako span), live strip
+  (waiting > running, „live · updated … (cached)", chipsy railu), plan running, disconnect
+  (board retained, „live update failed — showing last known", Retry), reconnect (Retry przywraca),
+  reduced-motion (matchMedia reduce; flash za no-preference), 1440/1024 bez overflow, empty store
+  („no activity in the bounded window", zero chipów) — zrzuty `.state/shots2/s2-*.png`; narzędzia:
+  `.state/cdp6.mjs`, `.state/seed-slice2-fixture.mjs`, `.state/fix-manifests.mjs`, `.state/reseed-empty.mjs`.
+- Decyzje wiążące: atrybucja live wyłącznie squad-level (per-role ODRZUCONE dla v1 — wymaga
+  manifest/launcher/store + osobnej zgody); `accepted` = supervisor pass verdict per task
+  (latest round wygrywa, fail nigdy nie promuje); verdicty nie mają markera REVIEW/TEST (v1 caveat,
+  udokumentowany w §3.6).
+- Reconcile interplay (ważne dla fixture): `reconcileDeadRuns` działa przy starcie i co 15 s —
+  zamyka unended runs z martwym consolePid; manifesty żywych runów muszą wskazywać pid backendu
+  (`.state/fix-manifests.mjs` tuż po starcie backendu).
+- Kluczowe pliki: `ui/src/squadConfig/workingCopy.js` (single shared writer), `ui/src/manager/editing.js`,
+  `ui/src/screens/Manager.jsx`, `ui/src/components/manager/Inspector.jsx`, `ui/src/screens/SquadConfig.jsx`
+  (refactor na wspólny moduł, zachowanie bez zmian), `ui/src/components/MarkdownEditor.jsx` (additive `onDirtyChange`).
+- Weryfikacja: UI 47+42 PASS · build ✓ · serwer 30/115/6/37/53 PASS · przeglądarka (CDP headless, izolowany
+  fixture :7391 → vite :5174): drive 1 staging→preview→apply→re-read→discard+warning 15/15, drive 2
+  prompt-draft/confirm-block/failed-preview+recovery 19/19, drive 3 regresja /squad-config 5/5, drive 4
+  review-r1 regresje 12/12, drive 5/5b test-r1 (offline→online badge, Shift+Arrow +8% / Arrow +2%,
+  model-editor width 131→185px) — zrzuty `.state/shots2/*.png`; WCAG par statusowych ≥4.5:1.
+- TEST return (round 1): D1 Shift+Arrow używa dużego kroku (`keyboardMoveDelta` w `manager/layout.js`),
+  D2 badge łączności w headerze (`connectivityState` w `manager/editing.js`, offline w gałęzi błędu),
+  D3 `.mgr-profile dt { max-width: 9em }` przestaje ściśkać edytor modelu. Nitpicki z review celowo nie
+  łapane (scope: D1–D3).
+- Izolowany fixture: `.state/fixture-install/` (kopia scripts/config/agents/bin; backend `TELEMETRY_PORT=7391
+  node .state/fixture-install/scripts/telemetry-server.mjs`, UI `LA_UI_PORT=5174 LA_API_PORT=7391 npm --prefix ui run dev`).
+  Produkcja (7331/5173) nietknięta — zero POST poza fixture.
+- Known: serwerowa walidacja sluga fail-open (warning, nie błąd); footer sidebar ma zahardkodowane `:7331`;
+  `/api/prompts/runs` bywa wolne (import nieskompresowanego transkryptu) — `/manager` już po nią nie sięga
+  (bounded snapshot). Rewards = pending placeholders (slice 3).
+- Następne (wymaga decyzji): slice 3 (rewards). Odrzucone dla v1: per-role live attribution
+  (wymaga osobnej zgody).
+
+## Historical: 2026-09-05 — Fenix stabilization
+
+- Approved roadmap: `docs/plans/fenix-stabilization-and-learning.md`.
+- Branch: `chore/fenix-stabilization-learning`, starting at `71a2962`. Bootstrap checkpoint: `18785c2` (35 prompt/model/launcher files, scoped staging; checks passed). This is not independent squad delivery acceptance. No push. Pre-existing telemetry/runtime/tooling changes remain uncommitted and preserved.
+- Recovery artifacts (local, not published): `.state/fenix-stabilization/git-before.patch`, `git-before.json`, `untracked-before/`; Linear project snapshot `linear-before.json` in the same directory.
+- Baseline: `check.mjs` FAIL (24 model-map violations); `config-drift.test.mjs` 22 PASS / 1 FAIL (frontman model missing cacheRead); `provider-resolve.test.mjs` 14 PASS. The compound shell's exit 0 was the last suite only, not an overall pass.
+- Authorized: scoped verified local commits; exact GLM 5.3 Flash for PLAN/DEV/REVIEW/TEST; no additional budget cap. Frontman model, unrelated squads and provider tiers remain unchanged.
+- Linear migration completed: `docs/plans/fenix-linear-reconciliation.md`. New FOC-216–224; FOC-110 retained as F5; 12 verified dependency relations; FOC-108/107/105 canceled with successors. No task marked Done.
+- Bootstrap checks: `check.mjs` 0 violations, `config-drift.test.mjs` 23/23, `provider-resolve.test.mjs` 14/14, brain-order 6/6. All 24 execution role models and four routing sections match exact GLM Flash. Actual stream identity remains unverified; no operational child started.
+- Frontman cache prices verified against the public OpenRouter catalogue (2026-09-05T21:01:09Z): cache-read 1, cache-write 12.5 USD/M. Context-tier pricing and GLM catalogue-rate drift remain explicitly tracked in FOC-165.
+- Full `node scripts/test-all.mjs`: 41/41 test scripts passed in 294416 ms, exit 0. Retained output: background task `bfazq6ga3` (`.../86390beb-5b48-4d13-928f-4fbe5964be94/tasks/bfazq6ga3.output` under the Claude temporary task directory). This tested the combined working tree, including preserved uncommitted files; it is not proof that commit `18785c2` alone or a fresh child worktree passes. Some prompt edits overlapped the full run; final focused bootstrap checks passed separately. Affected-file lookup returned only a Markdown path, not usable test coverage, so explicit relevant suites were run instead.
+- Roadmap/reconciliation checkpoint: `3d709ab`. Final project audit saved to `.state/fenix-stabilization/linear-after.json`: 53 project issues, nine new issues verified as Backlog with no estimate/deadline or `ai:planned` label, unique stable plan keys, three predecessors verified Canceled. This is a scoped project audit, not a cleanup of every historical JOI backlog.
+- Runtime source check: `supervisor-spawn.mjs` sets `CLAUDE_CONFIG_DIR` to the orchestration root's `agents/<squad>` and runs the watcher in the task worktree; `supervisor-watch.mjs` forwards the kickoff, generated settings and explicit `--model` to `claude -p`. It does not invoke the squad `.bat`: provider environment is inherited, so launcher configuration alone is insufficient runtime evidence. Effective prompt/model loading still needs the live canary. Telemetry initialization can fail without blocking spawn; verify a non-null child telemetry run and actual captured events before continuing paid work.
+- First operational task: FOC-217. User explicitly approved PLAN-first; recorded override DEV → PLAN at confidence 90/100, with DoD/estimate, preserved candidate and runtime-evidence unknowns. Run `2026-09-05T20-31-57-862-supervisor-42cc`; kickoff `.state/fenix-stabilization/FOC-217-plan-kickoff.md`.
+- First real child `plan-1`, session `036ae0a9-cd8d-4e40-9c62-b1d6936e557b`, started 2026-09-05T21:43:03Z with explicit model `z-ai/glm-5.3-flash`, explicit repo `linear-agents`, worktree `../la-wt/linear-agents/foc-217-plan`, base `3d709ab042b716d2fc662e0e6705cd9293165456`; telemetry run `2026-09-05T21-43-03-223-plan-62bf`.
+- Child crashed at 21:44:49Z, exit 1: `API Error: stream closed before completion`. Status tail showed 17 thinking-token events, one assistant thinking event, the API error, then contradictory `result: success cost=0`. Runtime correctly marked crashed; priced cost is UNKNOWN, reported cost 0 is not evidence of zero spend. No pending gate. Child worktree Git status is clean. No automatic retry, model fallback or cleanup. Resume/fresh/stop decision remains pending; exact provider/runtime cause and actual model evidence are not yet established.
+- User chose local diagnosis only (option 3); no additional model calls or retry. Diagnosis: `.state/fenix-stabilization/FOC-217-plan-crash-diagnosis.md`. Raw result is `subtype: success` WITH `is_error: true`; status snippets omit the error flag/message (confirmed presentation defect at supervisor-status.mjs:80-81). Registry crashed and central telemetry failed are correct. Init and partial assistant response both name exact GLM Flash; 3015 thinking-token events are event counts, not billable token evidence. No tools/delegations ran. Two all-zero usage rows confirm ingestion but not accounting; empty modelUsage explains computed UNKNOWN. Upstream termination cause remains unknown: no transport status/request ID in retained diagnostics.
+- Next: keep paid execution paused pending a separate recovery decision; scope the status-presentation regression fix without conflating it with the unresolved stream failure. The child received read-only preserved artifact references; these uncommitted files are not part of its HEAD. Full-suite success does not authorize bundling unrelated changes into one commit.
+- Existing HITL confirmations remain required. Push/PR and cleanup are not authorized by the roadmap. One operational child started and crashed; its priced spend is UNKNOWN. Frontman costs are separate.
+- Older sections below are historical context, not the current model or execution policy.
+
+## Historical update: 2026-08-25 — Provider profiles (per-squad LLM provider): spec + ADR Accepted, implementation in parallel slices
 
 **Provider profiles — per-squad LLM provider.** Specyfikacja i decyzja architektoniczna gotowe;
 implementacja leci równoległymi slice'ami.

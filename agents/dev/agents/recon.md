@@ -1,6 +1,6 @@
 ---
 name: recon
-description: DEV squad — task + codebase scan → context packet. MiniMax M3.
+description: DEV squad — synthesize a code navigation and impact context packet for the assigned task.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Bash
 ---

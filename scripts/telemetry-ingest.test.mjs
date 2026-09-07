@@ -349,7 +349,7 @@ async function run() {
       const dbA = openTelemetryDb(dbPathA);
       try {
         const health = queryHealth(dbA);
-        assertEqual(health.schemaVersion, 5, "schemaVersion");
+        assertEqual(health.schemaVersion, 6, "schemaVersion"); // slice 2: SCHEMA_VERSION 5→6 (FOC-225)
         // cost_facts.run_id populated from JOIN with usage_facts.
         const costRow = dbA.prepare("SELECT run_id FROM cost_facts WHERE usage_id=?").get(usageId);
         assert(costRow && costRow.run_id === "run-v4-1", `cost_facts.run_id=${costRow?.run_id} (expected run-v4-1)`);

@@ -2,6 +2,15 @@ import { useState, useEffect, useCallback } from 'react';
 import { getSquadConfig, postSquadConfig } from '../api';
 import SquadCard from '../components/SquadCard';
 import ToolEditorModal from '../components/ToolEditorModal';
+import {
+  DEFAULT_PROVIDER,
+  buildSavePayload,
+  buildWorkingCopy,
+  countDirty,
+  normalizeSaveError,
+  setAgentModel,
+  setLeadModel,
+} from '../squadConfig/workingCopy';
 
 // Display ORDER only. Which squads exist comes from the server (readSquadConfig
 // derives it from config/models.json routing), so a new squad appears without
@@ -14,89 +23,9 @@ const orderSquads = (names) =>
     const ib = SQUAD_ORDER.indexOf(b);
     return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
   });
-const DEFAULT_PROVIDER = 'openrouter';
 const PROVIDER_NAME_RE = /^[a-z][a-z0-9_-]*$/;
 const BASE_URL_RE = /^https?:\/\/\S+$/;
 const AUTH_ENV_RE = /^[A-Z][A-Z0-9_]*$/;
-
-function deepClone(obj) {
-  return JSON.parse(JSON.stringify(obj));
-}
-
-/** Normalize agents from old shape (string) to new shape ({model, tools}). */
-function normalizeAgents(agents) {
-  if (!agents) return agents;
-  const out = {};
-  for (const [role, val] of Object.entries(agents)) {
-    if (typeof val === 'object' && val !== null) {
-      out[role] = { model: val.model || '', tools: val.tools || [] };
-    } else {
-      out[role] = { model: val || '', tools: [] };
-    }
-  }
-  return out;
-}
-
-function samePrice(a, b) {
-  return (a?.input ?? 0) === (b?.input ?? 0)
-    && (a?.output ?? 0) === (b?.output ?? 0)
-    && (a?.cacheRead ?? 0) === (b?.cacheRead ?? 0)
-    && (a?.cacheWrite ?? 0) === (b?.cacheWrite ?? 0);
-}
-
-function countDirty(orig, edit) {
-  if (!orig || !edit) return 0;
-  let n = 0;
-
-  // Squads: lead, provider, agent models/tools
-  for (const s of Object.keys(orig.squads || {})) {
-    const o = orig.squads?.[s];
-    const e = edit.squads?.[s];
-    if (!o || !e) continue;
-    if (o.lead !== e.lead) n++;
-    if ((o.provider || DEFAULT_PROVIDER) !== (e.provider || DEFAULT_PROVIDER)) n++;
-    if (o.agents) {
-      for (const [role, agent] of Object.entries(o.agents)) {
-        const ea = e.agents?.[role];
-        if (!ea) { n++; continue; }
-        if (agent.model !== ea.model) n++;
-        const ot = JSON.stringify([...(agent.tools || [])].sort());
-        const et = JSON.stringify([...(ea.tools || [])].sort());
-        if (ot !== et) n++;
-      }
-    }
-  }
-
-  // Providers: add/edit/remove
-  const providerNames = new Set([
-    ...Object.keys(orig.providers || {}),
-    ...Object.keys(edit.providers || {}),
-  ]);
-  for (const p of providerNames) {
-    const o = orig.providers?.[p];
-    const e = edit.providers?.[p];
-    if (JSON.stringify(o ?? null) !== JSON.stringify(e ?? null)) n++;
-  }
-
-  // Pricing: nested per provider
-  const pricingProviders = new Set([
-    ...Object.keys(orig.pricing || {}),
-    ...Object.keys(edit.pricing || {}),
-  ]);
-  for (const p of pricingProviders) {
-    const slugs = new Set([
-      ...Object.keys(orig.pricing?.[p] || {}),
-      ...Object.keys(edit.pricing?.[p] || {}),
-    ]);
-    for (const slug of slugs) {
-      const o = orig.pricing?.[p]?.[slug];
-      const e = edit.pricing?.[p]?.[slug];
-      if ((o === undefined) !== (e === undefined)) { n++; continue; }
-      if (o && e && !samePrice(o, e)) n++;
-    }
-  }
-  return n;
-}
 
 // ---- Main screen ----------------------------------------------------------
 
@@ -137,16 +66,9 @@ export default function SquadConfig() {
       setErrorDetails(null);
       const data = await getSquadConfig();
       // Normalize agents to {model, tools} shape (backward-compat with old string-only API)
-      const squads = deepClone(data.squads || {});
-      for (const s of Object.keys(squads)) {
-        if (squads[s].agents) squads[s].agents = normalizeAgents(squads[s].agents);
-      }
+      const squads = buildWorkingCopy(data).squads;
       setConfig({ ...data, squads });
-      setEdited({
-        squads: deepClone(squads),
-        pricing: deepClone(data.pricing || {}),
-        providers: deepClone(data.providers || {}),
-      });
+      setEdited(buildWorkingCopy(data));
       setPreview(null);
       setSuccess(null);
     } catch (e) {
@@ -163,13 +85,7 @@ export default function SquadConfig() {
   // ---- squad field handlers (clear preview on any edit) -------------------
 
   const handleLeadChange = (squad, value) => {
-    setEdited((prev) => ({
-      ...prev,
-      squads: {
-        ...prev.squads,
-        [squad]: { ...prev.squads[squad], lead: value },
-      },
-    }));
+    setEdited((prev) => setLeadModel(prev, squad, value));
     setPreview(null);
     setSuccess(null);
   };
@@ -187,20 +103,7 @@ export default function SquadConfig() {
   };
 
   const handleAgentChange = (squad, role, value) => {
-    setEdited((prev) => {
-      const existing = prev.squads[squad]?.agents?.[role];
-      const tools = (existing && typeof existing === 'object') ? (existing.tools || []) : [];
-      return {
-        ...prev,
-        squads: {
-          ...prev.squads,
-          [squad]: {
-            ...prev.squads[squad],
-            agents: { ...prev.squads[squad].agents, [role]: { model: value, tools } },
-          },
-        },
-      };
-    });
+    setEdited((prev) => setAgentModel(prev, squad, role, value));
     setPreview(null);
     setSuccess(null);
   };
@@ -369,16 +272,11 @@ export default function SquadConfig() {
     setErrorDetails(null);
     setSuccess(null);
     try {
-      const result = await postSquadConfig({
-        squads: edited.squads,
-        pricing: edited.pricing,
-        providers: edited.providers,
-        dryRun: true,
-      });
+      const result = await postSquadConfig(buildSavePayload(edited, true));
       setPreview(result);
     } catch (e) {
       setError(e.message);
-      setErrorDetails(e.data?.details || null);
+      setErrorDetails(normalizeSaveError(e).details);
     } finally {
       setSaving(false);
     }
@@ -390,19 +288,14 @@ export default function SquadConfig() {
     setErrorDetails(null);
     setSuccess(null);
     try {
-      const result = await postSquadConfig({
-        squads: edited.squads,
-        pricing: edited.pricing,
-        providers: edited.providers,
-        dryRun: false,
-      });
+      const result = await postSquadConfig(buildSavePayload(edited, false));
       setSuccess(result);
       setPreview(null);
       // Refresh from server
       await fetchConfig();
     } catch (e) {
       setError(e.message);
-      setErrorDetails(e.data?.details || null);
+      setErrorDetails(normalizeSaveError(e).details);
     } finally {
       setSaving(false);
     }
@@ -417,11 +310,7 @@ export default function SquadConfig() {
 
   const handleDiscard = () => {
     if (!config) return;
-    setEdited({
-      squads: deepClone(config.squads || {}),
-      pricing: deepClone(config.pricing || {}),
-      providers: deepClone(config.providers || {}),
-    });
+    setEdited(buildWorkingCopy(config));
     setPreview(null);
     setSuccess(null);
     setError(null);

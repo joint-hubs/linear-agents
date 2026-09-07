@@ -93,6 +93,7 @@ Zakładka **Konfiguracja** (`localhost:7331/squad-config`) edytuje modele per sk
 - **Health:** `http://127.0.0.1:7331/api/telemetry/health` pokazuje pending spool i nierozwiązane problemy jakości danych.
 - **Ceny:** API domyślnie zwraca estimate `as-run` według snapshotu cen; `?pricing=current` przelicza wyłącznie odczyt według bieżącego `config/models.json`.
 - **Niepełny koszt:** `costUSD:null` oznacza brak ceny co najmniej jednego modelu; `partialCostUSD` jest znanym minimum i UI pokazuje je jako `≥$...`.
+- **Nagrody / XP (FOC-225):** osobna baza append-only `%LOCALAPPDATA%\linear-agents\rewards\rewards.sqlite` (override: `LA_REWARDS_DB`; katalog: `LA_REWARDS_HOME`) — nigdy `telemetry.sqlite`. Ingest działa przy odczycie `GET /api/manager/rewards` (cache TTL 30 s obejmuje sam ingest; squad-y/ratingi/held czytane świeżo do każdego payloadu).
 
 ---
 

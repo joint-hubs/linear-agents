@@ -1,0 +1,50 @@
+{
+  "_doc": "Tool-call normalization map (agent-intelligence PRD §10). Maps raw tool names as they appear in transcripts to canonical categories, so `tool_facts.tool_name_canon` answers 'what kind of work was this' instead of 'which build of which client emitted it'. Read by loadToolNormMap() in scripts/telemetry-tool-extract.mjs. Shape: { canonicalName: [rawName, ...] }. A raw name starting with mcp__ is treated as a PREFIX (longest match wins), so one entry covers every verb of that server; anything else matches case-insensitively on the whole name. Unmatched mcp__ names fall back to other_mcp, all other misses to other_<firstword> via bucketUnknownTool(). Built against the 54 distinct names present in telemetry on 2026-09-04 — when the report's unmatched list grows past ~5%, add entries here rather than teaching the analysis to special-case names.",
+
+  "_grouping": "Categories are cut by WHAT THE AGENT WAS DOING, not by which tool implements it: Bash and PowerShell are one `bash` because on this host they are interchangeable shells, and every Atlas/Task verb that starts a child lands in `agent_spawn` because delegation rate is the metric these categories exist to serve. The raw name is never lost — tool_name_raw keeps it, so any grouping decision here is reversible by re-running the normalization pass.",
+
+  "read_file": ["Read", "read_file", "ReadFile", "NotebookRead"],
+  "write_file": ["Write", "write_file", "WriteFile"],
+  "edit_file": ["Edit", "edit_file", "EditFile", "MultiEdit", "NotebookEdit"],
+  "bash": ["Bash", "bash", "PowerShell", "execute_command", "shell"],
+  "grep": ["Grep", "grep", "rg", "ripgrep", "search_content"],
+  "glob": ["Glob", "glob", "find_files"],
+
+  "web_search": ["WebSearch", "web_search", "mcp__tavily__tavily-search"],
+  "web_fetch": ["WebFetch", "web_fetch", "mcp__tavily__tavily-extract"],
+
+  "agent_spawn": ["Agent", "Task", "task", "delegate", "mcp__atlas__agent_spawn", "mcp__atlas__agent_start"],
+  "agent_control": [
+    "mcp__atlas__agent_collect",
+    "mcp__atlas__agent_jobs",
+    "mcp__atlas__agent_sessions",
+    "mcp__atlas__agent_reply",
+    "TaskOutput",
+    "TaskStop",
+    "Monitor",
+    "SendMessage"
+  ],
+  "task_management": ["TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoWrite"],
+
+  "issue_tracker": ["mcp__e089526a-65bc-4d1c-836e-c4689518d343__", "mcp__linear__"],
+  "knowledge_base": ["mcp__atlas__search", "mcp__atlas__read", "mcp__atlas__run", "mcp__atlas__remember", "mcp__atlas__map", "mcp__thoughtmap__"],
+  "code_intel": ["mcp__codegraph__"],
+  "browser": ["mcp__Claude_Browser__", "mcp__claude-in-chrome__"],
+
+  "user_interaction": ["AskUserQuestion", "PushNotification", "SendUserFile"],
+  "session_control": [
+    "EnterWorktree",
+    "ExitWorktree",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "Skill",
+    "ToolSearch",
+    "ScheduleWakeup",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "mcp__ccd_session__",
+    "mcp__ide__"
+  ],
+  "filesystem_meta": ["mcp__fs__"]
+}

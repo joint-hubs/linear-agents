@@ -37,7 +37,7 @@ import {
   reloadKickoffTemplates,
 } from './launch.mjs';
 import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools, validateProvidersPatch } from './squad-config.mjs';
-import { listTerminals, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive } from './terminals.mjs';
+import { listTerminalsAsync, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive, areProcessesAlive } from './terminals.mjs';
 import {
   buildPromptTree,
   readRoleDoc,
@@ -51,6 +51,15 @@ import {
   isExternalPath,
 } from './prompt-library.mjs';
 import { computeOutcomes } from './delegation-outcomes.mjs';
+import { getCachedManagerSnapshot } from './manager-snapshot.mjs';
+import { openRewardsDb, insertRating } from './reward-ledger.mjs';
+import { buildRewardsPayload } from './reward-ingest.mjs';
+// Manager ratings POST body validation (FOC-225 slice 3) lives in its own
+// module so the fail-closed allowlist branch stays testable without the
+// server: ratings are subjective 1..5 + note — never points; the squad must
+// be a configured one, and an unreadable squad config denies (never fails
+// open). Mirrors validateLaunch's { status, error } convention.
+import { validateRating } from './manager-ratings.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
@@ -107,22 +116,59 @@ try {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// CORS: reward/XP and cost data must not be readable from an arbitrary
+// website. The historical `Access-Control-Allow-Origin: *` let any page in a
+// local browser read every JSON response — the loopback bind does not help,
+// because the *browser* runs on the loopback too. The UI's actual origins:
+// the Vite dev server (http://localhost|127.0.0.1 on :5173, auto-incremented
+// ports when occupied — hence the port wildcard in launch.mjs's loopback
+// regex) and, in production, this same server serving ui/dist (same-origin,
+// so browsers send no Origin on same-origin GETs at all). So the Origin is
+// reflected ONLY when it is loopback (isAllowedOrigin); any other origin gets
+// NO ACAO header and the browser blocks the read (fail closed, never `*`).
+// Non-browser clients send no Origin and are unaffected.
+function corsOriginFor(req) {
+  const origin = req?.headers?.origin;
+  return origin && isAllowedOrigin(origin) ? origin : null;
+}
+
 function json(res, status, data) {
   const body = JSON.stringify(data, null, 2);
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-  });
+  const headers = { 'Content-Type': 'application/json' };
+  const cors = corsOriginFor(res.req);
+  if (cors) headers['Access-Control-Allow-Origin'] = cors;
+  res.writeHead(status, headers);
   res.end(body);
 }
 
-function corsPreflight(res) {
+function corsPreflight(req, res) {
+  // The method/header allows describe what a REFLECTED origin may do — for a
+  // foreign origin the browser refuses the response on the missing ACAO
+  // anyway, so advertising capabilities to it is noise at best. All three
+  // headers go out only together (review round 8, N2).
+  const cors = corsOriginFor(req);
+  if (!cors) {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
   res.writeHead(204, {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': cors,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   });
   res.end();
+}
+
+// Map a readJsonBody failure to the response: an over-limit body is 413 with
+// the size message; malformed JSON is 400 with the parse message. One helper
+// because six routes answered a 413-class error with the 400 "invalid JSON
+// body" message — a size complaint that read like a syntax error. Returns the
+// status so the caller can log it.
+function respondBodyError(res, err) {
+  const status = err?.tooLarge ? 413 : 400;
+  json(res, status, { error: err?.tooLarge ? err.message : 'invalid JSON body: ' + err.message });
+  return status;
 }
 
 // Read + parse a JSON request body. Caps the size so a runaway client can't
@@ -136,16 +182,26 @@ function corsPreflight(res) {
 function readJsonBody(req, maxBytes = 8192) {
   return new Promise((resolve, reject) => {
     let data = '';
+    let settled = false;
     req.on('data', (c) => {
+      if (settled) return; // over limit: keep draining, stop buffering
       data += c;
       if (data.length > maxBytes) {
-        req.destroy();
+        settled = true;
+        data = '';
+        // Deliberately NOT req.destroy() here: destroying the socket RSTs the
+        // connection before the handler's 413 can be read, so the documented
+        // status never reached any client (review round 5). Drain and discard
+        // the remainder instead — buffering is already capped (settled stops
+        // the concat) and Node's requestTimeout still bounds a sender that
+        // never stops.
         const err = new Error(`body too large (>${Math.round(maxBytes / 1024)}KB)`);
         err.tooLarge = true;
         reject(err);
       }
     });
     req.on('end', () => {
+      if (settled) return;
       if (!data) return resolve({});
       try {
         resolve(JSON.parse(data));
@@ -187,6 +243,33 @@ function withManifestConsolePid(runs) {
 
 function log(method, path, status) {
   console.log(`${method} ${path} -> ${status}`);
+}
+
+// The run ids the Manager's rendered History window can show — snapshot
+// active + recent. Resolved from the SAME cached snapshot /api/manager/snapshot
+// serves, with the same full deps: routing the rewards build through the
+// shared single-flight cache means one snapshot is built for both routes and
+// the cache can never hold a degraded (liveness-less) build minted by the
+// rewards path. A snapshot failure only drops the scoped ratings extension —
+// the rewards payload still serves its 20-newest base set (S5).
+async function renderedHistoryRunIds(db) {
+  try {
+    const snapshot = await getCachedManagerSnapshot({
+      db,
+      supervisorRoot: join(root, '.state', 'supervisor'),
+      runsManifestDir: join(root, '.state', 'runs'),
+      checkProcessesAlive: areProcessesAlive,
+    });
+    const ids = [];
+    for (const squad of Object.values(snapshot.squads || {})) {
+      for (const run of [...(squad.active || []), ...(squad.recent || [])]) {
+        if (run?.runId) ids.push(run.runId);
+      }
+    }
+    return ids;
+  } catch {
+    return []; // snapshot unavailable → the display cap applies, nothing lies about existence
+  }
 }
 
 async function telemetryRuns(options = {}) {
@@ -548,7 +631,7 @@ const server = createServer(async (req, res) => {
   try {
     // --- CORS preflight ---
     if (method === 'OPTIONS') {
-      corsPreflight(res);
+      corsPreflight(req, res);
       log(method, path, 204);
       return;
     }
@@ -580,8 +663,7 @@ const server = createServer(async (req, res) => {
       try {
         body = await readJsonBody(req);
       } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const v = validateLaunch(body);
@@ -658,11 +740,7 @@ const server = createServer(async (req, res) => {
         // pricing, which no longer fits the 8 KB control-payload default.
         body = await readJsonBody(req, 64 * 1024);
       } catch (err) {
-        const status = err.tooLarge ? 413 : 400;
-        json(res, status, {
-          error: err.tooLarge ? err.message : 'invalid JSON body: ' + err.message,
-        });
-        log(method, path, status);
+        log(method, path, respondBodyError(res, err));
         return;
       }
 
@@ -804,8 +882,7 @@ const server = createServer(async (req, res) => {
       }
       let body;
       try { body = await readJsonBody(req); } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const runId = String(body.runId || '').trim();
@@ -866,8 +943,7 @@ const server = createServer(async (req, res) => {
       }
       let body;
       try { body = await readJsonBody(req); } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const runId = String(body.runId || '').trim();
@@ -914,8 +990,7 @@ const server = createServer(async (req, res) => {
       }
       let body;
       try { body = await readJsonBody(req); } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const runId = String(body.runId || '').trim();
@@ -963,8 +1038,7 @@ const server = createServer(async (req, res) => {
       }
       let body;
       try { body = await readJsonBody(req); } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const squad = String(body.squad || '').trim().toLowerCase();
@@ -1053,11 +1127,7 @@ const server = createServer(async (req, res) => {
       // repo (docs/FENIX_WORKFLOW.md) is ~20 KB, so this is generous headroom
       // that still bounds the request.
       try { body = await readJsonBody(req, 1024 * 1024); } catch (err) {
-        const status = err.tooLarge ? 413 : 400;
-        json(res, status, {
-          error: err.tooLarge ? err.message : 'invalid JSON body: ' + err.message,
-        });
-        log(method, path, status);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const relPath = body.path;
@@ -1099,8 +1169,7 @@ const server = createServer(async (req, res) => {
       }
       let body;
       try { body = await readJsonBody(req); } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const runId = String(body.runId || '').trim();
@@ -1167,6 +1236,127 @@ const server = createServer(async (req, res) => {
         });
       } finally { db.close(); }
       log(method, path, 200);
+      return;
+    }
+
+    // GET /api/manager/rewards — the rewards display payload (FOC-225 slice 3).
+    // Runs the verdict-driven ingest FIRST (30 s TTL single-flight cache):
+    // this route is the ingest's only trigger and the ledger is the only XP
+    // writer. Read side is bounded (per-squad recent ≤10, ratings ≤20 base set
+    // extended by scoped lookups for the rendered History window — S5); the
+    // ledger is a SEPARATE rewards.sqlite, telemetry.sqlite stays untouched.
+    // NOTE: lives BEFORE the GET-only gate below — it carries the ratings POST.
+    if (path === '/api/manager/rewards') {
+      if (method !== 'GET') {
+        // AC 2: there is NO XP submission endpoint — the browser can never
+        // push points, only ratings (below) and only from a local origin.
+        json(res, 405, { error: 'GET only' });
+        log(method, path, 405);
+        return;
+      }
+      try {
+        const db = telemetryStore.openTelemetryDb();
+        try {
+          const rewards = openRewardsDb();
+          try {
+            const payload = await buildRewardsPayload({
+              telemetryDb: db,
+              rewardsDb: rewards,
+              supervisorRoot: join(root, '.state', 'supervisor'),
+              renderedRunIds: await renderedHistoryRunIds(db),
+            });
+            json(res, 200, payload);
+            log(method, path, 200);
+          } finally { rewards.close(); }
+        } finally { db.close(); }
+      } catch (err) {
+        json(res, 500, { error: err.message || 'rewards build failed' });
+        log(method, path, 500);
+      }
+      return;
+    }
+
+    // POST /api/manager/ratings — human-authored manager ratings (FOC-225
+    // slice 3). Subjective 1..5 + note, superseded per (subject, task, run);
+    // never points and never averaged with the acceptance verdict. Same
+    // local-origin discipline as /api/launch.
+    if (path === '/api/manager/ratings') {
+      if (method !== 'POST') {
+        json(res, 405, { error: 'POST only' });
+        log(method, path, 405);
+        return;
+      }
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/manager/ratings is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden: origin not allowed' });
+        log(method, path, 403);
+        return;
+      }
+      let body = {};
+      try {
+        body = await readJsonBody(req);
+      } catch (err) {
+        // 413 on an over-limit body, 400 for malformed JSON (shared helper).
+        log(method, path, respondBodyError(res, err));
+        return;
+      }
+      const v = validateRating(body);
+      if (v.error) {
+        json(res, v.status || 400, { error: v.error });
+        log(method, path, v.status || 400);
+        return;
+      }
+      try {
+        const rewards = openRewardsDb();
+        try {
+          const record = insertRating(rewards, v.rating);
+          json(res, 201, record);
+          log(method, path, 201);
+        } finally { rewards.close(); }
+      } catch (err) {
+        json(res, 500, { error: err.message || 'rating write failed' });
+        log(method, path, 500);
+      }
+      return;
+    }
+
+    // GET /api/manager/snapshot — bounded, cached live-state view for the
+    // /manager overlay (FOC-225 slice 2). Read-only: store reader is
+    // allowlisted/bounded (queryManagerRuns), supervisor scan is capped.
+    // Liveness probing is the ASYNC batched checker — the per-pid sync
+    // isProcessAlive blocks the event loop for the whole build and is kept
+    // for the background reconcile path only. /api/runs and
+    // /api/prompts/runs are deliberately untouched.
+    // This route sits BEFORE the ledger gate on purpose: post-slice-3 the
+    // rewards ledger is a separate rewards.sqlite, while the snapshot needs
+    // only the telemetry store — an unavailable or broken ledger must not
+    // take the live overlay down with it (cleanup round, FOC-225 C6f).
+    if (path === '/api/manager/snapshot') {
+      if (method !== 'GET') {
+        json(res, 405, { error: 'GET only' });
+        log(method, path, 405);
+        return;
+      }
+      try {
+        const db = telemetryStore.openTelemetryDb();
+        try {
+          const snapshot = await getCachedManagerSnapshot({
+            db,
+            supervisorRoot: join(root, '.state', 'supervisor'),
+            runsManifestDir: join(root, '.state', 'runs'),
+            checkProcessesAlive: areProcessesAlive,
+          });
+          json(res, 200, snapshot);
+          log(method, path, 200);
+        } finally { db.close(); }
+      } catch (err) {
+        json(res, 500, { error: err.message || 'snapshot build failed' });
+        log(method, path, 500);
+      }
       return;
     }
 
@@ -1574,7 +1764,11 @@ const server = createServer(async (req, res) => {
     // GET /api/terminals — terminal panel: alive + finished runs with window info
     if (path === '/api/terminals') {
       const runs = withManifestConsolePid(await telemetryRuns());
-      const data = listTerminals(runs, { finishedLimit: 15 });
+      // Batched async liveness — ONE PowerShell spawn per build. The sync
+      // per-pid isProcessAlive probe here blocked the event loop for the
+      // whole build (same class as the slice-2 manager-snapshot blocker);
+      // it stays only on the background reconcile path.
+      const data = await listTerminalsAsync(runs, { finishedLimit: 15 });
       json(res, 200, data);
       log(method, path, 200);
       return;
@@ -1636,11 +1830,10 @@ const server = createServer(async (req, res) => {
             : 'public, max-age=3600';
 
         const content = await readFile(servePath);
-        res.writeHead(200, {
-          'Content-Type': mime,
-          'Cache-Control': cacheControl,
-          'Access-Control-Allow-Origin': '*',
-        });
+        const staticHeaders = { 'Content-Type': mime, 'Cache-Control': cacheControl };
+        const assetCors = corsOriginFor(req);
+        if (assetCors) staticHeaders['Access-Control-Allow-Origin'] = assetCors;
+        res.writeHead(200, staticHeaders);
         res.end(content);
         log(method, path, 200);
         return;
@@ -1651,11 +1844,10 @@ const server = createServer(async (req, res) => {
           if (!hasExt) {
             try {
               const indexContent = await readFile(indexPath);
-              res.writeHead(200, {
-                'Content-Type': 'text/html',
-                'Cache-Control': 'no-cache',
-                'Access-Control-Allow-Origin': '*',
-              });
+              const indexHeaders = { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' };
+              const indexCors = corsOriginFor(req);
+              if (indexCors) indexHeaders['Access-Control-Allow-Origin'] = indexCors;
+              res.writeHead(200, indexHeaders);
               res.end(indexContent);
               log(method, path, 200);
               return;

@@ -116,6 +116,44 @@ export async function getPromptRuns(squad, limit = 10) {
   );
 }
 
+// Manager live overlay (FOC-225 slice 2) — bounded, cached, read-only view of
+// run state across all squads. The ONLY telemetry source the /manager screen
+// polls: it never calls /api/runs or /api/prompts/runs. Takes an AbortSignal
+// so the poll hook can cancel in-flight requests.
+export async function getManagerSnapshot(signal) {
+  const r = await fetch(API_BASE + '/api/manager/snapshot', { signal });
+  if (!r.ok) throw new Error('API ' + r.status);
+  return r.json();
+}
+
+// Manager rewards (FOC-225 slice 3) — server facts from the append-only
+// reward ledger. GET only by design: XP is ingested from verdict evidence,
+// there is deliberately NO submission endpoint (AC 2) and this client ships
+// no XP submitter either.
+export async function getManagerRewards(signal) {
+  const r = await fetch(API_BASE + '/api/manager/rewards', { signal });
+  if (!r.ok) throw new Error('API ' + r.status);
+  return r.json();
+}
+
+// Manager rating — the one POST in the rewards area: a subjective 1..5
+// record on the append-only ledger. Returns parsed JSON even on 4xx so the
+// UI can surface the server's error message verbatim.
+export async function postManagerRating(payload) {
+  const r = await fetch(API_BASE + '/api/manager/ratings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
 // Squad config — read current squad model assignments + pricing table.
 export async function getSquadConfig() {
   return apiFetch('/api/squad-config');

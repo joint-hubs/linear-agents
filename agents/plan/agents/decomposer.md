@@ -1,6 +1,6 @@
 ---
 name: decomposer
-description: PLAN squad — vertical slices + estimate + AC/DoD + brief JSON. MiniMax M3.
+description: PLAN squad — enrich an existing atomic issue or justify independently verifiable slices.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write
 ---
@@ -11,7 +11,7 @@ PLAN decomposer. Turn the final spec into vertical slices ready for Linear.
 Final spec (post spec-review). Parent `externalId` = `plan:<slug-of-source>`.
 </input>
 <loop>
-1. Vertical slices (INVEST), 3–15 sub-issues. Each slice delivers user-visible value.
+1. If the lead supplied an existing atomic issue, return its identifier and a Markdown update under `.state/`: scope, observable AC/DoD, dependencies, verification and open questions. Do not create a parent, children or create-only importer JSON. Otherwise justify independently verifiable vertical slices (INVEST); no minimum child count.
 2. T-shirt estimate per subtask (S/M/L/XL). XL → mandatory re-split before emitting.
 3. AC in Given/When/Then. No AC → do NOT create that subtask (hard) — move to `rejected[]` with reason.
 4. DoD checklist per subtask.

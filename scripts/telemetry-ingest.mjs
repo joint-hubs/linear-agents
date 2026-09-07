@@ -360,9 +360,49 @@ export async function backfill(options = {}) {
   return summary;
 }
 
+// A run that has ENDED does not need its transcript re-read every 15 seconds.
+//
+// The skip cache inside ingestTranscript compares FILE SIZE, so a transcript
+// that is still growing defeats it forever — and a finished run's transcript
+// keeps growing whenever something else is still writing to that file: a live
+// session, or a stale run->session link pointing this run at someone else's
+// transcript.
+//
+// Measured 2026-09-05, before this gate: 68.7 MB of JSON re-parsed on every
+// cycle, with one 16.7 MB file parsed FOUR times over because four completed
+// August runs all claimed it. That is synchronous work on Node's single
+// thread, so every dashboard request queued behind it — /api/runs took 24.9 s
+// and even a 404 took 25.6 s.
+//
+// The grace window exists because `run-manifest end` writes the manifest
+// before the transcript's last lines are necessarily flushed. Inside it the
+// run is re-read normally; only afterwards is it considered settled.
+const TERMINAL_RUN_STATUSES = new Set(["completed", "failed"]);
+const REINGEST_GRACE_MS = 5 * 60 * 1000;
+
+/**
+ * True when this run is finished, past the flush grace, and already has its
+ * transcript parsed — so anything the file gained since belongs to someone
+ * else. A run that ended but was NEVER ingested is not settled: it still needs
+ * its one pass, otherwise a crash during ingest would lose it permanently.
+ */
+function settledRun(db, run) {
+  if (!TERMINAL_RUN_STATUSES.has(run.status)) return false;
+  const ended = run.endedAt ? new Date(run.endedAt).getTime() : NaN;
+  if (!Number.isFinite(ended)) return false;
+  if (Date.now() - ended <= REINGEST_GRACE_MS) return false;
+  const pending = db
+    .prepare("SELECT COUNT(*) AS c FROM transcript_sources WHERE run_id=? AND parse_status<>'parsed'")
+    .get(run.runId);
+  const parsed = db
+    .prepare("SELECT COUNT(*) AS c FROM transcript_sources WHERE run_id=? AND parse_status='parsed'")
+    .get(run.runId);
+  return (parsed?.c ?? 0) > 0 && (pending?.c ?? 0) === 0;
+}
+
 export async function ingestKnownRuns(options = {}) {
   const db = openTelemetryDb(options.dbPath);
-  const summary = { runs: 0, transcripts: 0, usageEvents: 0, missingTranscripts: 0 };
+  const summary = { runs: 0, transcripts: 0, usageEvents: 0, missingTranscripts: 0, settled: 0 };
   try {
     // This loop runs on a 15s timer in telemetry-server, so every run whose
     // transcript is gone is re-checked ~5 700 times a day. Report the issue
@@ -374,6 +414,13 @@ export async function ingestKnownRuns(options = {}) {
       reportDataQuality(runId, "transcript_missing", details, options);
     };
     for (const run of queryRuns(db)) {
+      // Checked before transcriptForSession: that helper stats the path and
+      // may search three roots for it, which is itself per-run work this loop
+      // repeats every 15 s for runs that finished days ago.
+      if (settledRun(db, run)) {
+        summary.settled++;
+        continue;
+      }
       const transcriptPath = transcriptForSession(run);
       if (!transcriptPath) {
         reportMissing(run.runId, { sessionId: run.sessionId || null });

@@ -1,6 +1,6 @@
 ---
 name: discovery
-description: PLAN squad — discovery synthesis from voice note + artifacts. MiniMax M3.
+description: PLAN squad — synthesize requirements and evidence from the source request and artifacts.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write, Bash
 ---

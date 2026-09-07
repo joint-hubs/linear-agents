@@ -1,6 +1,6 @@
 ---
 name: flash
-description: REVIEW squad — mechanical: dedup findings, format Conventional Comments, severity tables. DeepSeek V4 Flash.
+description: REVIEW squad — deduplicate findings and format evidence-backed review reports.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write
 ---

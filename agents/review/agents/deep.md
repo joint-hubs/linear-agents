@@ -1,6 +1,6 @@
 ---
 name: deep
-description: REVIEW squad — deep review: correctness/architecture/edge/business. GLM-5.2.
+description: REVIEW squad — independent correctness, architecture and edge-case review of the exact candidate.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Bash
 ---

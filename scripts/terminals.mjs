@@ -2,7 +2,15 @@
 // Terminal window management — list, focus, stop agent console windows.
 //
 // Primary API (PID-based — reliable, used by dashboard):
-//   isProcessAlive(pid)        → boolean
+//   isProcessAlive(pid)        → boolean   (SYNC — one PowerShell spawn per pid;
+//                                          background reconcile path only, never
+//                                          an HTTP request path)
+//   areProcessesAlive(pids)    → Promise<Map<pid, boolean>>  (ASYNC batched — one
+//                                          spawn for all pids; request paths)
+//   listTerminalsAsync(runs)   → Promise<array>  (batched probe + listTerminals —
+//                                          the /api/terminals request path)
+//   listTerminals(runs, opts)  → array of terminal entries (sync probe injection
+//                                          for tests; caller pre-resolves liveness)
 //   flashWindowByPid(pid,opts) → { ok, error? }  — taskbar flash (default UI path)
 //   focusWindowByPid(pid)      → { ok, error? }  — blocked by Windows for bg processes
 //   stopByPid(pid)             → { ok, error? }
@@ -14,10 +22,13 @@
 //   focusWindow(title)         → { ok, error? }
 //   stopWindow(title)          → { ok, error? }
 
-import { execSync } from "node:child_process";
+import { execSync, execFile } from "node:child_process";
 import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { promisify } from "node:util";
+
+const execFileP = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -78,6 +89,55 @@ export function isProcessAlive(pid) {
     return out.length > 0;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Batched liveness check — ONE async PowerShell spawn for many pids.
+ *
+ * isProcessAlive() is synchronous (execSync blocks the event loop for the
+ * whole PowerShell startup, ~0.1–0.5 s per pid); the manager snapshot path
+ * probes up to 10 pids per build and must never block the server's event
+ * loop, so it uses this instead: a single `Get-Process -Id a,b,c` spawn,
+ * awaited. Resolves a Map pid → boolean (a missing pid is simply absent
+ * from Get-Process output → false). REJECTS on spawn failure; what a
+ * rejection means is the CALLER's contract, and the two callers disagree on
+ * purpose: listTerminalsAsync (/api/terminals) maps it to alive=false — the
+ * same answer the old sync probe's catch path produced, so a broken checker
+ * never flips a panel run to unknown — while the manager snapshot keeps
+ * alive=null (unknown) and documents the gap in its missing[].
+ *
+ * @param {number[]} pids  Process IDs (positive integers; deduped here)
+ * @returns {Promise<Map<number, boolean>>}
+ */
+export async function areProcessesAlive(pids) {
+  const unique = [...new Set((Array.isArray(pids) ? pids : []).filter(validPid))];
+  const result = new Map(unique.map((pid) => [pid, false]));
+  if (unique.length === 0) return result;
+  const dir = mkdtempSync(join(tmpdir(), "fenix-ps-"));
+  try {
+    const file = join(dir, "cmd.ps1");
+    writeFileSync(
+      file,
+      `Get-Process -Id ${unique.join(",")} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id`,
+      "utf8",
+    );
+    const { stdout } = await execFileP(
+      "powershell",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file],
+      { timeout: 10000, windowsHide: true, encoding: "utf8" },
+    );
+    const alive = new Set(
+      stdout.trim().split(/\r?\n/).map((line) => Number(line.trim())).filter(Number.isInteger),
+    );
+    for (const pid of unique) result.set(pid, alive.has(pid));
+    return result;
+  } finally {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* temp dir cleanup is best-effort */
+    }
   }
 }
 
@@ -281,6 +341,53 @@ export function listTerminals(runs, opts = {}) {
   const trimmedFinished = finished.slice(0, finishedLimit);
 
   return [...alive, ...trimmedFinished];
+}
+
+/**
+ * Async listTerminals — ONE batched liveness spawn per build.
+ *
+ * The /api/terminals request path must not run the sync per-pid probe:
+ * isProcessAlive execSync-blocks the event loop for the whole PowerShell
+ * startup (~0.1–0.5 s) per pid. This collects the pids of unfinished runs and
+ * asks areProcessesAlive for ALL of them in one `Get-Process -Id a,b,c` spawn,
+ * then reuses listTerminals with the results injected as the probe — same
+ * response shape and alive/canFocus/canSignal mapping.
+ *
+ * A rejecting checker (spawn failure) maps every candidate to alive=false,
+ * exactly what the sync probe's catch path produced; a pid absent from the
+ * checker output is simply dead. opts.probe still wins (sync injection, used
+ * by tests); opts.probeAsync defaults to areProcessesAlive and is the
+ * injection point for batching tests.
+ *
+ * @param {Array<object>} runs  See listTerminals.
+ * @param {object} [opts]  listTerminals opts plus { probeAsync }.
+ * @returns {Promise<Array<object>>}
+ */
+export async function listTerminalsAsync(runs, opts = {}) {
+  const runList = Array.isArray(runs) ? runs : [];
+  if (typeof opts.probe === "function") {
+    return listTerminals(runList, opts); // sync injection — caller owns probing
+  }
+  const probeAsync = typeof opts.probeAsync === "function" ? opts.probeAsync : areProcessesAlive;
+  const candidates = [
+    ...new Set(
+      runList
+        .filter((run) => !run.endedAt && validPid(run.consolePid))
+        .map((run) => run.consolePid),
+    ),
+  ];
+  let aliveMap = null;
+  if (candidates.length > 0) {
+    try {
+      aliveMap = await probeAsync(candidates);
+    } catch {
+      aliveMap = null; // checker broken → alive=false, same as the sync probe's failure path
+    }
+  }
+  return listTerminals(runList, {
+    ...opts,
+    probe: (pid) => (aliveMap ? aliveMap.get(pid) === true : false),
+  });
 }
 
 // ---------------------------------------------------------------------------

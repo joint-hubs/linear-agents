@@ -31,7 +31,7 @@ try {
   DatabaseSync = null;
 }
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 // Per-step migration version markers. Each one-shot migration step is guarded
 // by its own constant rather than the shared SCHEMA_VERSION, so bumping the
@@ -39,6 +39,7 @@ export const SCHEMA_VERSION = 5;
 export const MIGRATION_VERSIONS = {
   worktreeRekey: 4,
   runScopedUsage: 5,
+  managerRunIndex: 6,
 };
 
 export function sqliteAvailable() {
@@ -215,6 +216,7 @@ function createBaseSchema(db) {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_run_task_links_active ON run_task_links(run_id, role, valid_to);
+    CREATE INDEX IF NOT EXISTS idx_runs_squad_ended ON runs(squad, ended_at, started_at);
     CREATE TABLE IF NOT EXISTS transcript_sources (
       source_path TEXT PRIMARY KEY,
       session_id TEXT,
@@ -607,6 +609,15 @@ function migrateRunScopedUsage(db, path) {
 // correctly; runScopedUsage rebuild after the worktree rekey (it copies
 // cost_facts.run_id from usage_facts, which must already be in its
 // post-FOC-104 shape).
+// FOC-225 slice 2: the Manager live overlay polls active + recent-per-squad
+// runs every few seconds. Both shapes filter/seek on (squad, ended_at,
+// started_at), which no earlier index covers. Additive only — no rebuild, no
+// backfill; a v5 database gains one index.
+function ensureManagerRunIndex(db) {
+  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(MIGRATION_VERSIONS.managerRunIndex)) return;
+  db.exec("CREATE INDEX IF NOT EXISTS idx_runs_squad_ended ON runs(squad, ended_at, started_at)");
+}
+
 export function migrate(db, path) {
   createBaseSchema(db);
   addRunColumns(db);
@@ -616,6 +627,7 @@ export function migrate(db, path) {
   ensureOneActivePrimaryLinkIndex(db);
   backfillWorktreeIds(db);
   migrateRunScopedUsage(db, path);
+  ensureManagerRunIndex(db);
   // Record every migration marker. Each step guards itself above; this loop
   // just persists the paper trail. INSERT OR IGNORE keeps it idempotent across
   // re-opens.
@@ -1682,6 +1694,119 @@ export function queryRuns(db, options = {}) {
   const rows = db.prepare(`SELECT * FROM runs ${where} ORDER BY started_at DESC`).all(...(options.runId ? [options.runId] : []));
   const runs = rows.map((row) => makeRunProjection(db, row, options));
   return options.priceMode === "current" ? repriceCurrent(db, runs) : runs;
+}
+
+// ── Manager live overlay (FOC-225 slice 2) ───────────────────────────────────
+//
+// Bounded, allowlisted read for GET /api/manager/snapshot. queryRuns() above
+// is unbounded and projects every run in full (usage/cost/workspace aggregates
+// per row) — exactly what pinned the server at 100% CPU once; measured
+// 2026-09-06: 1 247 ms per call on the real store (461 runs / 137 260 usage
+// facts). This query never runs makeRunProjection: two SELECTs with bounded
+// RESULTS over allowlisted runs columns (active cut at activeLimit, recent
+// capped at recentPerSquad per squad — note the recent window's SCAN is still
+// O(all ended rows), see the comment at the query), primary task link per
+// selected row, and one grouped cost aggregate over the selected run_ids.
+// Measured ~5 ms on a 3 000-run / 60k-usage fixture, <1 ms active-only
+// on the real store.
+
+export const MANAGER_RUN_ACTIVE_LIMIT = 25;
+export const MANAGER_RUN_RECENT_PER_SQUAD = 5;
+
+// The columns this reader may return. Deliberately narrow: no brief, no
+// transcript_path, no launch_cwd, no session ids — the Manager overlay needs
+// run identity + timing + outcome, nothing else.
+const MANAGER_RUN_COLUMNS = {
+  runId: "r.run_id",
+  squad: "r.squad",
+  status: "r.status",
+  startedAt: "r.started_at",
+  endedAt: "r.ended_at",
+  exitCode: "r.exit_code",
+};
+const MANAGER_RUN_SELECT = Object.values(MANAGER_RUN_COLUMNS).join(", ");
+
+export function queryManagerRuns(db, options = {}) {
+  const squads = Array.isArray(options.squads) && options.squads.length ? options.squads.map(String) : null;
+  const squadFilter = squads ? ` AND r.squad IN (${squads.map(() => "?").join(",")})` : "";
+  const activeLimit = Number.isInteger(options.activeLimit) && options.activeLimit > 0 ? options.activeLimit : MANAGER_RUN_ACTIVE_LIMIT;
+  const recentPerSquad =
+    Number.isInteger(options.recentPerSquad) && options.recentPerSquad >= 0 ? options.recentPerSquad : MANAGER_RUN_RECENT_PER_SQUAD;
+
+  const squadParams = squads ? [...squads] : [];
+
+  // run_id is the tiebreak everywhere: same started_at values must never
+  // reshuffle between polls (the liveness-cap cut and the rendered History
+  // window both assume a stable order).
+  const active = db.prepare(
+    `SELECT ${MANAGER_RUN_SELECT} FROM runs r WHERE r.ended_at IS NULL${squadFilter} ORDER BY r.started_at DESC, r.run_id DESC LIMIT ?`,
+  ).all(...squadParams, activeLimit);
+
+  let recent = [];
+  if (recentPerSquad > 0) {
+    // MEASURED SEMANTICS (review round 8, I1 — do not "optimize" back): the
+    // window function ranks ALL ended rows before anything else applies. An
+    // inner ORDER BY ... LIMIT does NOT bound the scan — SQLite computes
+    // ROW_NUMBER over the whole filtered set first, so the inner sort only
+    // added a THIRD temp b-tree (EXPLAIN QUERY PLAN, 100k-row replica with
+    // idx_runs_squad_ended: old shape 2, that shape 3) with no time gain.
+    // The subquery therefore keeps the plain scan shape; the per-squad cap is
+    // applied by the outer rn filter. Scan cost is O(all ended rows in
+    // scope) per call — the result sets stay bounded (rn <= recentPerSquad),
+    // the scan does not. run_id is the tiebreak in every ORDER BY so
+    // same-started_at rows never reshuffle between polls; it adds no temp
+    // b-tree vs the one-column sort (EQP: 2 in both shapes).
+    recent = db.prepare(
+      `SELECT ${MANAGER_RUN_SELECT} FROM (
+         SELECT r.run_id, r.squad, r.status, r.started_at, r.ended_at, r.exit_code,
+                ROW_NUMBER() OVER (PARTITION BY r.squad ORDER BY r.started_at DESC, r.run_id DESC) AS rn
+           FROM runs r
+          WHERE r.ended_at IS NOT NULL${squadFilter}
+       ) r WHERE r.rn <= ? ORDER BY r.squad, r.started_at DESC, r.run_id DESC`,
+    ).all(...squadParams, recentPerSquad);
+  }
+
+  // Primary task link per selected row — bounded by the row counts above.
+  const taskFor = db.prepare(
+    `SELECT task_id FROM run_task_links WHERE run_id=? AND role='primary' AND valid_to IS NULL ORDER BY valid_from DESC LIMIT 1`,
+  );
+
+  // One grouped cost aggregate over exactly the selected run_ids (never the
+  // table): costUSD stays null while any non-synthetic usage row is unpriced —
+  // null is contagious, same rule the dashboards follow (FOC-165).
+  const ids = [...new Set([...active, ...recent].map((row) => row.run_id))];
+  const costs = new Map();
+  if (ids.length) {
+    const rows = db.prepare(
+      `SELECT u.run_id,
+              COALESCE(SUM(c.cost_usd), 0) AS cost_usd,
+              SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced
+         FROM usage_facts u
+         LEFT JOIN cost_facts c ON c.run_id = u.run_id AND c.usage_id = u.usage_id
+        WHERE u.run_id IN (${ids.map(() => "?").join(",")})
+        GROUP BY u.run_id`,
+    ).all(...ids);
+    for (const row of rows) costs.set(row.run_id, row);
+  }
+
+  const project = (row) => {
+    const cost = costs.get(row.run_id);
+    const unpriced = cost ? cost.unpriced : 0;
+    const task = taskFor.get(row.run_id);
+    return {
+      runId: row.run_id,
+      squad: row.squad,
+      taskId: task?.task_id ?? null,
+      status: row.status ?? null,
+      startedAt: row.started_at ?? null,
+      endedAt: row.ended_at ?? null,
+      exitCode: row.exit_code ?? null,
+      costUSD: unpriced > 0 ? null : Number(cost?.cost_usd ?? 0),
+      costPartial: unpriced > 0,
+    };
+  };
+
+  return { active: active.map(project), recent: recent.map(project) };
 }
 
 function aggregateUsageByTask(db, priceMode) {

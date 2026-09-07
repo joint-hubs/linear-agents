@@ -188,6 +188,42 @@ Konsekwencje praktyczne: zmiana cennika nie przepisuje historii; można porówna
 „ile ten run kosztował wtedy" z „ile kosztowałby dziś"; a wiersz `usage_fact` bez
 odpowiadającego `cost_fact` to jawna dziura w danych, nie ciche zero.
 
+### Run czy wywołanie — dwie różne jednostki
+
+Od migracji v5 (ADR-0008) fakty są **run-scoped**: gdy kilka runów dzieli jeden plik
+transkryptu, każdy dostaje własną kopię jego wierszy. Dla pytania „ile kosztował run X"
+to jest poprawne. Dla pytania „ile wydałem" — nie, bo jedno wywołanie API zostaje
+policzone tyle razy, ile runów sobie je przypisało.
+
+Skala na 2026-09-04: **124 269 wierszy `usage_facts` opisuje 106 357 rzeczywistych
+wywołań** (14,4% to duplikaty atrybucji), a suma kosztu po runach — $4 394 — spada do
+**$2 042** po sprowadzeniu do wywołań. Skład `supervisor` był zawyżony o 44%.
+
+Dlatego `scripts/telemetry-canonical.mjs` definiuje dwa widoki: **`canonical_usage`**
+i **`canonical_tool_facts`** — jeden wiersz na fizyczne wywołanie, identyfikowane przez
+pozycję bajtową w pliku. Spośród runów roszczących sobie wiersz wygrywa ten, w którego
+oknie czasowym wywołanie faktycznie nastąpiło.
+
+```
+node scripts/telemetry-canonical.mjs --ensure    # (od)tworzy widoki
+node scripts/telemetry-canonical.mjs --report    # raw vs canonical, pewność atrybucji
+```
+
+Widok **nie ukrywa niepewności**. Kolumna `attribution` mówi, na jakiej podstawie
+przypisano wiersz — `in_window` (96 654), `after_end` (9 230), `before_start` (473) —
+a `claim_count` ile runów go chciało. Analiza, która potrzebuje pewności, filtruje
+`attribution = 'in_window'` zamiast dziedziczyć domysł.
+
+> **Zasada wyboru:** pytania per-run czytaj z `usage_facts` (tam atrybucja run-scoped
+> jest intencją), pytania flotowe — z `canonical_usage`. Sumowanie `usage_facts` po
+> całej flocie zawyża, i to jest jedyny powód istnienia tych widoków.
+
+Wciąż otwarte: źródłem zawyżenia jest `ingestTranscript`, który przypisuje **każdą
+linię pliku** do runu, dla którego akurat ingestuje — bez granicy. Stąd run trwający
+trzy sekundy potrafi mieć 2 524 tury rozciągnięte na dziesięć dni. Widoki to mierzą
+i neutralizują w agregatach; naprawa u źródła wymaga filtra okna w ingeście i
+ponownego przetworzenia transkryptów.
+
 ### Poziomy agregacji
 
 ```
@@ -344,8 +380,13 @@ ten sam regex, którym zrobiłem tabelę wyżej), jeden endpoint i jedna sekcja 
 razem z licznikami tokenów. Ingestujemy to do SQLite, wyceniamy własnym cennikiem
 i porównujemy z fakturą OpenRoutera; rozbieżność powyżej 10% jest flagowana.
 
-**„Czy to nie jest podwójne liczenie?"** — nie, klucz to pozycja bajtowa linii w pliku;
-ponowny ingest wpada w `INSERT OR IGNORE`.
+**„Czy to nie jest podwójne liczenie?"** — ponowny ingest *tego samego runu* nie dubluje:
+klucz to `(run_id, source_path, source_offset)`, więc powtórka wpada w `INSERT OR IGNORE`.
+Ale **kilka runów dzielących jeden transkrypt owszem** — od v5 każdy dostaje własną kopię
+wierszy, celowo (ADR-0008), bo inaczej wszystkie poza pierwszym pokazywały $0. Suma po
+całej flocie liczy wtedy jedno wywołanie wielokrotnie: 124 269 wierszy to 106 357
+wywołań, $4 394 to naprawdę $2 042. Dlatego pytania flotowe idą przez `canonical_usage`
+(patrz §4), a nie przez surowe `usage_facts`.
 
 **„Co z cache?"** — odczyt z cache liczymy po 10% ceny inputu (albo po jawnej stawce
 z cennika), zapis po cenie inputu. Oszczędność raportujemy osobno, jako różnicę wobec

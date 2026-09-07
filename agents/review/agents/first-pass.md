@@ -1,6 +1,6 @@
 ---
 name: first-pass
-description: REVIEW squad — fast pass: lint/style/obvious bugs/missing tests. DeepSeek V4 Pro.
+description: REVIEW squad — inspect lint, style, obvious defects and missing regression tests.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Bash
 ---

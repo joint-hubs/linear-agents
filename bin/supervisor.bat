@@ -16,13 +16,13 @@ REM as headless processes in their own worktrees - never by a .bat, never with a
 REM Model: routing.supervisor.default in config/models.json; SUPERVISOR_MODEL overrides.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\supervisor"
 if defined NATIVE (
-    if not defined SUPERVISOR_MODEL set "SUPERVISOR_MODEL=claude-opus-4-8"
-    set "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-8"
-    set "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6"
+    if not defined SUPERVISOR_MODEL set "SUPERVISOR_MODEL=claude-opus-5"
+    set "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5"
+    set "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5"
     set "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001"
     set "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5-20251001"
 ) else (
-    if not defined SUPERVISOR_MODEL set "SUPERVISOR_MODEL=z-ai/glm-5.3-flash"
+    if not defined SUPERVISOR_MODEL set "SUPERVISOR_MODEL=z-ai/glm-5.3"
     REM small_fast stays minimax-m3: the openrouter tier is deepseek-v4-flash, and this
     REM squad ran minimax before the tiers moved to the provider. The guard belongs on
     REM SUPERVISOR_MODEL above, never on this line — they are different settings.

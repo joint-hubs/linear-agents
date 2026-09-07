@@ -6,6 +6,13 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["scripts/serve-docs.mjs"],
       "port": 7444
+    },
+    {
+      "name": "report-static",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/serve-docs.mjs", "7445"],
+      "env": { "LA_SERVE_ROOT": "report" },
+      "port": 7445
     }
   ]
 }

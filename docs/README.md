@@ -81,6 +81,7 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 - `scripts/supervisor-triage.mjs` — `propose` / `record`: deterministyczny werdykt wejściowego węzła grafu; zapisany werdykt jest kontraktem dla `supervisor-spawn.mjs`
 - `scripts/supervisor-gate.mjs` — `emit` / `answer` / `list`: rekord bramki HITL. Plik jest źródłem prawdy (bez mirrora `needs:*` w Linearze); `answer` zapisuje, dostarcza dopiero `supervisor-followup.mjs --gate`
 - `scripts/price-check.mjs` — porównuje ceny z `config/models.json` z żywym katalogiem OpenRoutera. Sieciowy, więc **celowo poza** `config-drift.test.mjs` (ten jest offline i CI-safe). Uruchamiaj okresowo — nieaktualna cena jest cicha
+- `scripts/validate-palette.mjs` — walidator palety akcentów squadów (`--sq-*` z `ui/src/theme.css`): OKLab lightness/chroma, separacja CVD (deutan+tritan), kontrast AA; exit 0/1. Podpięty do `npm --prefix ui run test` (`ui/src/_tests_palette.mjs`)
 
 > **`config/graph.json` jest źródłem prawdy topologii.** `config/handoff-rules.json` to plik, który
 > `telemetry-server.mjs` czyta w runtime — jest wycofywany i **generowany** z grafu

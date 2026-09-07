@@ -60,6 +60,7 @@
     "kimi": "moonshotai/kimi-k2.7-code",
     "gpt": "openai/gpt-5.5",
     "glm53": "z-ai/glm-5.3",
+    "glm53flash": "z-ai/glm-5.3-flash",
     "sonnet5": "anthropic/claude-sonnet-5",
     "ds4pro": "deepseek/deepseek-v4-pro-0813",
     "ox": "stealth/ox-alpha"
@@ -78,42 +79,42 @@
       "flash": "deepseek_flash"
     },
     "plan": {
-      "discovery": "minimax",
-      "dor_gate": "deepseek_flash",
-      "spec": "glm53",
-      "spec_review": "sonnet5",
-      "decompose": "glm53",
-      "enrich": "minimax",
-      "push": "deepseek_flash",
-      "pl": "minimax",
-      "worker": "ds4pro",
-      "flash": "deepseek_flash"
+      "discovery": "glm53flash",
+      "dor_gate": "glm53flash",
+      "spec": "glm53flash",
+      "spec_review": "glm53flash",
+      "decompose": "glm53flash",
+      "enrich": "glm53flash",
+      "push": "glm53flash",
+      "pl": "glm53flash",
+      "worker": "glm53flash",
+      "flash": "glm53flash"
     },
     "dev": {
-      "recon": "minimax",
-      "implement": "ds4pro",
-      "multifile": "ds4pro",
-      "hard": "ds4pro",
-      "pl": "minimax",
-      "worker": "minimax",
-      "flash": "ds4pro"
+      "recon": "glm53flash",
+      "implement": "glm53flash",
+      "multifile": "glm53flash",
+      "hard": "glm53flash",
+      "pl": "glm53flash",
+      "worker": "glm53flash",
+      "flash": "glm53flash"
     },
     "review": {
-      "first_pass": "deepseek_pro",
-      "security": "ox",
-      "deep": "ox",
-      "pl": "minimax",
-      "worker": "ox",
-      "flash": "deepseek_flash"
+      "first_pass": "glm53flash",
+      "security": "glm53flash",
+      "deep": "glm53flash",
+      "pl": "glm53flash",
+      "worker": "glm53flash",
+      "flash": "glm53flash"
     },
     "test": {
-      "deploy": "ox",
-      "scenarios": "ox",
-      "run": "ox",
-      "root_cause": "ox",
-      "terminal": "gpt",
-      "worker": "ox",
-      "flash": "ox"
+      "deploy": "glm53flash",
+      "scenarios": "glm53flash",
+      "run": "glm53flash",
+      "root_cause": "glm53flash",
+      "terminal": "glm53flash",
+      "worker": "glm53flash",
+      "flash": "glm53flash"
     }
   },
   "pricing": {
@@ -259,6 +260,12 @@
         "output": 3.75,
         "cacheRead": 0.075,
         "cacheWrite": 0.04
+      },
+      "openai/gpt-6-astra": {
+        "input": 10,
+        "output": 50,
+        "cacheRead": 1,
+        "cacheWrite": 12.5
       }
     },
     "nebul": {

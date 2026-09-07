@@ -1,6 +1,6 @@
 ---
 name: worker
-description: REVIEW squad — cheap helper: diff summary, context, file inventory. MiniMax M3.
+description: REVIEW squad — bounded diff context and file inventory without modifying product code.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write
 ---

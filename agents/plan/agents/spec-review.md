@@ -1,6 +1,6 @@
 ---
 name: spec-review
-description: PLAN squad — adversarial spec review (holes, corner cases). MiniMax M3.
+description: PLAN squad — adversarial spec review for missing behavior, corner cases and unverifiable acceptance criteria.
 model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob
 ---

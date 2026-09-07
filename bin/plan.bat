@@ -4,8 +4,8 @@ set "SQUAD_SLUG=plan"
 set "SOURCE_PATH=%~1"
 call "%~dp0_lib.bat" || exit /b 1
 REM Agent 1 - PLAN. Spec: docs/agents/agent-1-planner.md
-REM Main = Opus (PLAN lead). discovery/spec-review = MiniMax M3. Tanie etapy (spec=GLM-5.2, decompose/enrich=MiniMax M3,
-REM push=DeepSeek) przez subagent??w w agents/plan/agents/ + slot small_fast.
+REM Task lead/roles use GLM Flash; routing: config/models.json, role files: agents/plan/agents/.
+REM NATIVE is an explicitly selected separate provider mode, not an automatic fallback.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\plan"
 if defined NATIVE (
     set "ANTHROPIC_MODEL=claude-opus-4-8"
