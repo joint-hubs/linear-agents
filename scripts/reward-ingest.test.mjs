@@ -527,6 +527,32 @@ test("absent supervisor root: documented, zero actions, no throw", async () => {
     );
     const empty = await ingestRewards({ ...h.deps, supervisorRoot: h.supervisorRoot });
     assert(empty.awarded === 0 && empty.scannedRuns === 0, "empty root is quiet, not an error");
+
+    // N1 (review round 8): a root that exists but cannot be READ (e.g. a file
+    // sits at the path — existsSync answers true for it) must surface as its
+    // own supervisor/root missing[] entry, never masquerade as an empty store
+    // via the misleading "no supervisor run dirs carry verdict records".
+    const blocker = join(h.dir, "blocker.txt");
+    writeFileSync(blocker, "not a directory", "utf8");
+    const blocked = await ingestRewards({ ...h.deps, supervisorRoot: blocker });
+    assert(blocked.awarded === 0 && blocked.scannedRuns === 0, `zero actions on an unreadable root: ${JSON.stringify(blocked)}`);
+    const rootEntries = blocked.missing.filter((m) => m.ref === "supervisor" && m.field === "root");
+    assert(rootEntries.length === 1, `exactly one supervisor/root entry: ${JSON.stringify(blocked.missing)}`);
+    assert(
+      /unreadable/.test(rootEntries[0].reason) && /nothing ingested/.test(rootEntries[0].reason),
+      `the reason must name the unreadability: ${rootEntries[0].reason}`,
+    );
+    assert(
+      !blocked.missing.some((m) => m.field === "runs"),
+      "the misleading no-verdict-records entry must not fire for an unreadable root",
+    );
+
+    // the walk itself reports the root failure distinctly from an empty tree
+    const walk = await listRunDirs(blocker);
+    assert(walk.dirs.length === 0 && walk.truncated === false, "an unreadable root discovers nothing");
+    assert(typeof walk.rootError === "string" && walk.rootError.length > 0, `rootError must carry the cause: ${walk.rootError}`);
+    const walkOk = await listRunDirs(h.supervisorRoot);
+    assert(walkOk.rootError == null, "a readable root reports no rootError");
   } finally {
     h.cleanup();
   }

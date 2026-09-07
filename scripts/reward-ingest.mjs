@@ -93,7 +93,9 @@ function toMissingEntry(err) {
 // by contract, supervisor-lib.mjs runDir()), never descends past
 // REWARDS_WALK_MAX_DEPTH, and stats at most REWARDS_WALK_MAX_DIRS directories
 // per pass; past the cap it stops and reports `truncated`, so the gap is
-// documented in missing[] instead of silently skipped.
+// documented in missing[] instead of silently skipped. An unreadable ROOT is
+// reported separately (`rootError`) — it is the "no evidence view possible"
+// class, not an empty store.
 export const REWARDS_WALK_MAX_DIRS = 500; // dirs visited (one stat each) per pass
 export const REWARDS_WALK_MAX_DEPTH = 3; // depth below the supervisor root
 
@@ -102,14 +104,21 @@ export async function listRunDirs(rootDir, opts = {}) {
   const maxDepth = opts.maxDepth ?? REWARDS_WALK_MAX_DEPTH;
   const dirs = [];
   let truncated = false;
+  let rootError = null; // the ROOT failing to read is a distinct, reportable condition
   const queue = [{ dir: rootDir, depth: 0, rel: "" }];
   while (queue.length > 0 && dirs.length < maxDirs) {
     const { dir, depth, rel } = queue.shift();
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      continue; // unreadable branch — discovery simply stops here
+    } catch (err) {
+      if (dir === rootDir) {
+        // An unreadable root (or a file sitting at the root path — existsSync
+        // answers true for those) must surface, not masquerade as an empty
+        // store: the caller reports it instead of "no verdict records".
+        rootError = err?.code || String(err?.message || "unreadable").split("\n")[0];
+      }
+      continue; // unreadable branch below the root — discovery simply stops here
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
@@ -130,7 +139,7 @@ export async function listRunDirs(rootDir, opts = {}) {
   }
   if (queue.length > 0) truncated = true;
   dirs.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return { dirs, truncated };
+  return { dirs, truncated, rootError };
 }
 
 // One ingest pass. Discovery is an async bounded walk (above); verdict reads
@@ -161,7 +170,16 @@ export async function ingestRewards(deps = {}) {
   }
 
   // ── scan: ≤ scanLimit newest run dirs (bounded async discovery) ────────────
-  const { dirs: discovered, truncated: walkTruncated } = await listRunDirs(supervisorRoot, deps);
+  const { dirs: discovered, truncated: walkTruncated, rootError } = await listRunDirs(supervisorRoot, deps);
+  if (rootError) {
+    // existsSync answered true, so the root path is there but cannot be read
+    // (a file at the path, permission denial, ...) — the same "no evidence
+    // view possible" class as a missing root, so it takes the same early
+    // return and must NOT fall through to the misleading "no supervisor run
+    // dirs carry verdict records" entry (review round 8, N1).
+    missing(result.missing, "supervisor", "root", `supervisor root unreadable (${rootError}) — nothing ingested`);
+    return result;
+  }
   if (walkTruncated) {
     missing(
       result.missing,
