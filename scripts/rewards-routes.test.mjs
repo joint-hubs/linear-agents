@@ -142,6 +142,29 @@ test("GET /api/manager/rewards returns the server-facts payload", async () => {
   assert.equal(proof.recent[0].taskId, "ROUTE-1", "seeded record must surface");
 });
 
+test("CORS: a loopback origin is reflected, a foreign origin gets no ACAO header", async () => {
+  if (setupError) throw setupError;
+  // allowlisted (the dashboard's dev origin — any loopback port; Vite
+  // auto-increments past 5173): the origin is reflected so cross-port dev reads work
+  const allow = await fetch(`${BASE}/api/telemetry/health`, { headers: { origin: "http://localhost:5174" } });
+  assert.equal(
+    allow.headers.get("access-control-allow-origin"),
+    "http://localhost:5174",
+    "allowlisted origin must be reflected",
+  );
+  // anything else: NO ACAO header at all — the browser blocks the read (never `*`)
+  const foreign = await fetch(`${BASE}/api/telemetry/health`, { headers: { origin: "https://evil.example" } });
+  assert.equal(
+    foreign.headers.get("access-control-allow-origin"),
+    null,
+    "a foreign origin must not receive any ACAO header",
+  );
+  // no Origin (curl, server-to-server): no ACAO needed, request still served
+  const plain = await fetch(`${BASE}/api/telemetry/health`);
+  assert.equal(plain.headers.get("access-control-allow-origin"), null, "no Origin → no ACAO header");
+  assert.equal(plain.status, 200, "no-Origin requests are unaffected");
+});
+
 test("AC 2: there is no XP submission endpoint (POST /api/manager/rewards → 405)", async () => {
   if (setupError) throw setupError;
   const { status, body } = await fetchJson("/api/manager/rewards", {

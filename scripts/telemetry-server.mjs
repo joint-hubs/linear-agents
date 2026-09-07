@@ -116,21 +116,39 @@ try {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// CORS: reward/XP and cost data must not be readable from an arbitrary
+// website. The historical `Access-Control-Allow-Origin: *` let any page in a
+// local browser read every JSON response — the loopback bind does not help,
+// because the *browser* runs on the loopback too. The UI's actual origins:
+// the Vite dev server (http://localhost|127.0.0.1 on :5173, auto-incremented
+// ports when occupied — hence the port wildcard in launch.mjs's loopback
+// regex) and, in production, this same server serving ui/dist (same-origin,
+// so browsers send no Origin on same-origin GETs at all). So the Origin is
+// reflected ONLY when it is loopback (isAllowedOrigin); any other origin gets
+// NO ACAO header and the browser blocks the read (fail closed, never `*`).
+// Non-browser clients send no Origin and are unaffected.
+function corsOriginFor(req) {
+  const origin = req?.headers?.origin;
+  return origin && isAllowedOrigin(origin) ? origin : null;
+}
+
 function json(res, status, data) {
   const body = JSON.stringify(data, null, 2);
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-  });
+  const headers = { 'Content-Type': 'application/json' };
+  const cors = corsOriginFor(res.req);
+  if (cors) headers['Access-Control-Allow-Origin'] = cors;
+  res.writeHead(status, headers);
   res.end(body);
 }
 
-function corsPreflight(res) {
-  res.writeHead(204, {
-    'Access-Control-Allow-Origin': '*',
+function corsPreflight(req, res) {
+  const headers = {
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
-  });
+  };
+  const cors = corsOriginFor(req);
+  if (cors) headers['Access-Control-Allow-Origin'] = cors;
+  res.writeHead(204, headers);
   res.end();
 }
 
@@ -594,7 +612,7 @@ const server = createServer(async (req, res) => {
   try {
     // --- CORS preflight ---
     if (method === 'OPTIONS') {
-      corsPreflight(res);
+      corsPreflight(req, res);
       log(method, path, 204);
       return;
     }
@@ -1806,11 +1824,10 @@ const server = createServer(async (req, res) => {
             : 'public, max-age=3600';
 
         const content = await readFile(servePath);
-        res.writeHead(200, {
-          'Content-Type': mime,
-          'Cache-Control': cacheControl,
-          'Access-Control-Allow-Origin': '*',
-        });
+        const staticHeaders = { 'Content-Type': mime, 'Cache-Control': cacheControl };
+        const assetCors = corsOriginFor(req);
+        if (assetCors) staticHeaders['Access-Control-Allow-Origin'] = assetCors;
+        res.writeHead(200, staticHeaders);
         res.end(content);
         log(method, path, 200);
         return;
@@ -1821,11 +1838,10 @@ const server = createServer(async (req, res) => {
           if (!hasExt) {
             try {
               const indexContent = await readFile(indexPath);
-              res.writeHead(200, {
-                'Content-Type': 'text/html',
-                'Cache-Control': 'no-cache',
-                'Access-Control-Allow-Origin': '*',
-              });
+              const indexHeaders = { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' };
+              const indexCors = corsOriginFor(req);
+              if (indexCors) indexHeaders['Access-Control-Allow-Origin'] = indexCors;
+              res.writeHead(200, indexHeaders);
               res.end(indexContent);
               log(method, path, 200);
               return;
