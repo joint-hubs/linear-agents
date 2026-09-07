@@ -148,6 +148,36 @@ for (const [i, [line, expected]] of compoundLines.entries()) {
   check(`compound guard ${i + 1} → ${expected ?? "no verdict"}`, got === expected, `${pr.verdict} ${JSON.stringify(pr.unknownReasons)}`);
 }
 
+// review round 1 follow-ups: recap scope, resolved gab, emoji anchoring
+r = parseReview([
+  "## Verdict",
+  "",
+  "- **VERDICT PROPOSAL: APPROVE** — the round-2 blocker and both fixed findings are independently verified CLOSED; one round-2 nit remains open by design (not under fix).",
+].join("\n"), "FXT", 1);
+check("verdict proposal mentioning a later round still classifies (FOC-151-r3)",
+  r.verdict === "PASS", `${r.verdict} ${JSON.stringify(r.unknownReasons)}`);
+
+r = parseReview([
+  "## Verdict",
+  "",
+  "**PASS** — round 1's 5 blocking findings all verified fixed in code; regression hunt clean.",
+].join("\n"), "FXT", 1);
+check("blocking findings verified fixed is resolved, not FAIL (FOC-156-r2)",
+  r.verdict === "PASS", `${r.verdict} ${JSON.stringify(r.unknownReasons)}`);
+r = parseReview("**Verdict:** FAIL — the blocker was never fixed.", "FXT", 1);
+check("blocker never fixed still fires FAIL", r.verdict === "FAIL", `${r.verdict}`);
+
+r = parseReview(["## Verdict", "", "- **🟠 `issue:`: 1** (D-S1 — CSRF on the launch endpoint)."].join("\n"), "FXT", 1);
+check("line-initial severity emoji fires FAIL", r.verdict === "FAIL", `${r.verdict}`);
+r = parseReview("- **Verdict:** 🔴 changes required — sending back to DEV.", "FXT", 1);
+check("verdict-adjacent severity emoji fires FAIL", r.verdict === "FAIL", `${r.verdict}`);
+r = parseReview("- **Verdict: APPROVE** — D-S1 (the r1 🟠 security issue) fixed and live-verified; clean.", "FXT", 1);
+check("historical emoji mention inside verdict prose does not fire FAIL (JOI-69-r2)",
+  r.verdict === "PASS", `${r.verdict} ${JSON.stringify(r.unknownReasons)}`);
+r = parseReview(["## Verdict", "", "  1. **D-S1 (🟠 security, priority):** add Origin-header allowlist."].join("\n"), "FXT", 1);
+check("mid-list emoji mention is not a FAIL signal",
+  r.verdict === "UNKNOWN", `${r.verdict}`);
+
 // recap-line (FOC-177-r2 shape): a previous round's verdict is not a contradiction
 r = parseReview(["- **Verdict: PASS**", "", "Round-1 verdict: FAIL on artifact integrity (4 blockers)."].join("\n"), "FXT", 1);
 check("recap-line keeps PASS", r.verdict === "PASS", JSON.stringify(r.unknownReasons));
@@ -366,6 +396,19 @@ check("unreadable round counts as UNKNOWN", bad?.outcome === "UNKNOWN" && bad?.u
 check("read error surfaces in parseAnomalies",
   result2.parseAnomalies.some((a) => a.reason === "read-error" && a.file.endsWith("BAD-round1.md")));
 check("other files unaffected by a read error", result2.byTask.find((x) => x.taskId === "GOOD")?.outcome === "PASS");
+
+// malformed review-rounds.json degrades to {} plus a parseAnomalies entry, no throw
+const reviewsDir4 = join(temp, "reviews4");
+mkdirSync(reviewsDir4);
+writeFileSync(join(reviewsDir4, "GOOD-round1.md"), "**Verdict:** clean\n", "utf8");
+const malformedRounds = join(temp, "review-rounds-broken.json");
+writeFileSync(malformedRounds, "{not json", "utf8");
+const result4 = computeOutcomes({ dbPath, reviewsDir: reviewsDir4, roundsPath: malformedRounds });
+check("malformed rounds counter does not throw and degrades to {}",
+  result4.byTask.length === 1 && result4.byTask[0].outcome === "PASS",
+  JSON.stringify(result4?.byTask ?? null));
+check("malformed rounds counter surfaces in parseAnomalies",
+  result4.parseAnomalies.some((a) => a.reason === "rounds-counter-parse-error"));
 
 // helper-files: only <task>-round<N>.md files are parsed
 const reviewsDir3 = join(temp, "reviews3");

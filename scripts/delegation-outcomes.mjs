@@ -75,8 +75,10 @@ const HEADING_RE = /^#{1,6}\s/;
 const FENCE_RE = /^\s*```/;
 const JSON_LINE_RE = /^\s*[{"]/; // counter JSON quoted inside a review
 // "Round-1 verdict: FAIL …" describes a previous round whose own file carries the
-// verdict — a recap, never this file's verdict.
-const RECAP_LINE_RE = /round\s*-?\s*\d+\s+verdict|verdict[^.]*round\s*-?\s*\d+/i;
+// verdict — a recap, never this file's verdict. Only this shape is ignored: a
+// verdict line that merely MENTIONS a later round (FOC-151-r3 "VERDICT PROPOSAL:
+// APPROVE — the round-2 blocker …") is this file's verdict and must classify.
+const RECAP_LINE_RE = /round\s*-?\s*\d+\s+verdict/i;
 const PROCESS_STATE_RE = /\b(?:escalated|in review|in progress)\b/i;
 const UNKNOWN_VALUE_RE = /\b(?:verdict|status)\s*\*{0,2}\s*[:=]\s*\*{0,2}\s*unknown\b/i;
 
@@ -94,15 +96,22 @@ const NEG_COUNT_ZERO_AFTER_RE = /(?:[🔴🔶🟠][^\w\n]{0,4})?\b(?:blockers?|b
 const NEG_NEGATED_EMOJI_RE = /\b(?:no|none|zero|0)\b\s*[🔴🔶🟠]/gi;
 const NEG_NONE_AFTER_RE = /\b(?:blockers?|bloker\w*)[^.\n]{0,40}?\bnone\b/gi;
 // Resolved blocker: "Round-1 blocker closed", "blocker fixed correctly",
-// "🔴 blocker → FIXED". The optional leading emoji rides along so a resolved
-// mention cannot fire FAIL through its own severity marker. (/u: these emoji are
-// astral-plane chars — without it the class matches the shared high surrogate.)
-const NEG_RESOLVED_RE = /(?:[🔴🔶🟠]\s*)?\bblockers?\b\s*(?:→|->|—|–|:|-)?\s*(?:is\s+|was\s+|now\s+)?(?:closed|fixed)\b/giu;
+// "🔴 blocker → FIXED", "5 blocking findings all verified fixed" (FOC-156-r2).
+// The gab is tempered so "blocker was never fixed" keeps firing FAIL, and the
+// optional leading emoji rides along so a resolved mention cannot fire FAIL
+// through its own severity marker. (/u: these emoji are astral-plane chars —
+// without it the class matches the shared high surrogate.)
+const NEG_RESOLVED_RE = /(?:[🔴🔶🟠][^\w\n]{0,4})?\bblock(?:ers?|ing)\b(?:(?!\b(?:not|never)\b)[^.\n]){0,40}?(?:closed|fixed)\b/giu;
 
 // Compound guard: "fail-closed", "single-pass", "pass-all", "non-blocking" are not
 // verdict words — the hyphen must not count as a token boundary for them.
 const FAIL_TOKEN_RES = [
-  /[🔴🔶🟠]/u,                               // severity emoji (/u — astral-plane chars)
+  // Severity emoji (/u — astral-plane chars) counts only line-initial (after
+  // bullet/quote/bold/number prefixes) or verdict-adjacent (right after a
+  // Verdict:/Status: label). A historical mention inside verdict prose
+  // (JOI-69-r2:60 "the r1 🟠 security issue") is not a verdict signal.
+  /^[\s>*_`\d.)\-–—•·]*[🔴🔶🟠]/u,
+  /\b(?:verdict|status)\b[^:\n]{0,12}[:：][^:\n]{0,16}?[🔴🔶🟠]/iu,
   /(?<![\w-])FAIL(?![\w-])/i,
   /(?<![\w-])(?:blockers?|bloker\w*)\b/i,    // incl. Polish inflection; guard keeps "non-blockers" out
   /(?<![\w-])blocking(?![\w-])/i,
@@ -448,8 +457,21 @@ export function computeOutcomes({ dbPath = DB_PATH, reviewsDir = REVIEWS, rounds
 
   // The round counter is REVIEW's own state; it may know about tasks whose round
   // files were cleaned up. aggregateOutcomes() folds it in without ever letting a
-  // counter value fabricate a verdict (FOC-218 §4.3).
-  const counter = existsSync(roundsPath) ? JSON.parse(readFileSync(roundsPath, "utf8")) : {};
+  // counter value fabricate a verdict (FOC-218 §4.3). A malformed counter degrades
+  // to {} — same contract as a read-error: the dashboard keeps working and the
+  // evidence surfaces in parseAnomalies.
+  let counter = {};
+  let counterAnomaly = null;
+  if (existsSync(roundsPath)) {
+    try {
+      counter = JSON.parse(readFileSync(roundsPath, "utf8"));
+    } catch (error) {
+      counterAnomaly = {
+        reason: "rounds-counter-parse-error",
+        detail: String(error?.message || error),
+      };
+    }
+  }
   const { byTask: taskOutcomes, anomalies: aggregateAnomalies } = aggregateOutcomes(reviews, counter);
 
   const db = new DatabaseSync(dbPath, { readOnly: true });
@@ -494,6 +516,7 @@ export function computeOutcomes({ dbPath = DB_PATH, reviewsDir = REVIEWS, rounds
   // File-level parse anomalies: every UNKNOWN round's reasons, plus read errors
   // from loadReviews(). Task-level contradictions come from aggregateOutcomes().
   const parseAnomalies = [...readErrors];
+  if (counterAnomaly) parseAnomalies.push(counterAnomaly);
   for (const r of reviews) {
     if (r.verdict !== "UNKNOWN") continue;
     for (const reason of r.unknownReasons) {
