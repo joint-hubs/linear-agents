@@ -152,6 +152,17 @@ function corsPreflight(req, res) {
   res.end();
 }
 
+// Map a readJsonBody failure to the response: an over-limit body is 413 with
+// the size message; malformed JSON is 400 with the parse message. One helper
+// because six routes answered a 413-class error with the 400 "invalid JSON
+// body" message — a size complaint that read like a syntax error. Returns the
+// status so the caller can log it.
+function respondBodyError(res, err) {
+  const status = err?.tooLarge ? 413 : 400;
+  json(res, status, { error: err?.tooLarge ? err.message : 'invalid JSON body: ' + err.message });
+  return status;
+}
+
 // Read + parse a JSON request body. Caps the size so a runaway client can't
 // stream forever; rejects invalid JSON as a thrown error.
 //
@@ -644,8 +655,7 @@ const server = createServer(async (req, res) => {
       try {
         body = await readJsonBody(req);
       } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const v = validateLaunch(body);
@@ -722,11 +732,7 @@ const server = createServer(async (req, res) => {
         // pricing, which no longer fits the 8 KB control-payload default.
         body = await readJsonBody(req, 64 * 1024);
       } catch (err) {
-        const status = err.tooLarge ? 413 : 400;
-        json(res, status, {
-          error: err.tooLarge ? err.message : 'invalid JSON body: ' + err.message,
-        });
-        log(method, path, status);
+        log(method, path, respondBodyError(res, err));
         return;
       }
 
@@ -868,8 +874,7 @@ const server = createServer(async (req, res) => {
       }
       let body;
       try { body = await readJsonBody(req); } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const runId = String(body.runId || '').trim();
@@ -930,8 +935,7 @@ const server = createServer(async (req, res) => {
       }
       let body;
       try { body = await readJsonBody(req); } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const runId = String(body.runId || '').trim();
@@ -978,8 +982,7 @@ const server = createServer(async (req, res) => {
       }
       let body;
       try { body = await readJsonBody(req); } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const runId = String(body.runId || '').trim();
@@ -1027,8 +1030,7 @@ const server = createServer(async (req, res) => {
       }
       let body;
       try { body = await readJsonBody(req); } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const squad = String(body.squad || '').trim().toLowerCase();
@@ -1117,11 +1119,7 @@ const server = createServer(async (req, res) => {
       // repo (docs/FENIX_WORKFLOW.md) is ~20 KB, so this is generous headroom
       // that still bounds the request.
       try { body = await readJsonBody(req, 1024 * 1024); } catch (err) {
-        const status = err.tooLarge ? 413 : 400;
-        json(res, status, {
-          error: err.tooLarge ? err.message : 'invalid JSON body: ' + err.message,
-        });
-        log(method, path, status);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const relPath = body.path;
@@ -1163,8 +1161,7 @@ const server = createServer(async (req, res) => {
       }
       let body;
       try { body = await readJsonBody(req); } catch (err) {
-        json(res, 400, { error: 'invalid JSON body: ' + err.message });
-        log(method, path, 400);
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const runId = String(body.runId || '').trim();
@@ -1295,11 +1292,8 @@ const server = createServer(async (req, res) => {
       try {
         body = await readJsonBody(req);
       } catch (err) {
-        // 413 on an over-limit body, same as the server's other body-limit
-        // handlers; 400 stays for malformed JSON.
-        const status = err.tooLarge ? 413 : 400;
-        json(res, status, { error: err.tooLarge ? err.message : `invalid JSON body: ${err.message}` });
-        log(method, path, status);
+        // 413 on an over-limit body, 400 for malformed JSON (shared helper).
+        log(method, path, respondBodyError(res, err));
         return;
       }
       const v = validateRating(body);

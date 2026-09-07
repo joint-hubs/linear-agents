@@ -245,6 +245,19 @@ test("ratings POST: an over-limit body is 413, not 400", async () => {
   assert.match(String(body?.error), /too large/i);
 });
 
+test("control routes map an over-limit body to 413 too (representative: POST /api/runs/task)", async () => {
+  if (setupError) throw setupError;
+  // the shared body-error mapping: a size complaint must never surface as the
+  // 400 "invalid JSON body" class
+  const { status, body } = await fetchJson("/api/runs/task", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ runId: "x".repeat(9000) }),
+  });
+  assert.equal(status, 413, `over-limit body must 413, got ${status}: ${JSON.stringify(body)}`);
+  assert.match(String(body?.error), /too large/i);
+});
+
 test("ratings POST: foreign origin is rejected, GET only is enforced", async () => {
   if (setupError) throw setupError;
   const foreign = await fetchJson("/api/manager/ratings", {
