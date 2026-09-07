@@ -3,6 +3,37 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## Current execution: 2026-09-07 — FOC-225 COMPLETE (slice 3 + cleanup landed, integration `b009358`)
+
+- Slice 3 (rewards persistence) DONE: oddzielny ledger `rewards.sqlite` (`LA_REWARDS_HOME`/`LA_REWARDS_DB`;
+  nigdy telemetry.sqlite), `reward_records` (award|revocation|rating, flaga `active`), dedup `BEGIN IMMEDIATE`
+  na (task, repo, revision, rule_version), tożsamość repo z `repositories.common_dir` (spawn-free, fallback
+  launch_cwd udokumentowany), `GET /api/manager/rewards` (ingest-on-read, TTL 30 s single-flight) +
+  `POST /api/manager/ratings` (int 1–5, 413 przy nadmiarze), XP_RULES frozen v1 (100/akceptacja, 500/level)
+  w payloadzie, revocation wyłącznie verdict-driven, `PROVENANCE_CAVEAT`, brak zapisu XP z przeglądarki.
+  Commity: `1831d48` ledger · `886f175` ingest · `dfa6a4d` routes · `95df9d5` UI · `0d9ca82` docs ·
+  fix-round `77bc7bd`/`92d898c`/`fb37c3b`/`4696c2a` · D1 fix `299b19b` (inspector 320px kolumna przy 1440).
+- Cleanup round DONE (12 commitów `8c5c5b9..b009358`): `/api/terminals` batched async probe (jeden spawn na
+  build), CORS tylko loopback-allowlist (nigdy `*`), bounded async walk na ścieżce rewards GET (+ `rootError`
+  jako własny wpis `missing[]`), 413 z size-message na wszystkich 9 `readJsonBody` routes, slice-2 nitpicks
+  a–h (flash reset, SQL bounds, deterministyczny tie-break, `isSnapshotStale` usunięte + docs, §3.6 zgodne,
+  snapshot route przed ledger gate, placeholder do pierwszego fetcha, `liveStale`→`liveFailed`), rating
+  note-before-value zachowany, docs: fallback-identity dedup + provenance caveats (unknown-squad, reset).
+  Round-8 I1: recent-window wróciło do plain scan (inner ORDER BY..LIMIT nie ograniczał skanu — EQP zmierzone
+  2/3/2 temp b-trees, timing neutralny), prawdziwy komentarz + pin równości wyników.
+- Weryfikacja łańcucha: REVIEW approve (runda 6 slice 3 — 14 AC zmapowanych; runda 9 cleanup — 10 itemów) ·
+  TEST pass (slice 3: 16/16 + re-test po D1; cleanup: 145/0 UI per-file + live API 413/CORS/gate/terminals +
+  CDP drive z kontrolą pozytywną) · main tree po ff-landing: UI 145/0, build ✓, snapshot 10, ledger 16,
+  ingest 18, routes 9, ratings 5, terminals 21/21, telemetry-manager-runs 9, test-all telemetry 11/11.
+- Landing: supervisor-merge hermetic replay odmówił (tekstowy konflikt docs/STATE.md przy 36-commit replay),
+  ale kandydat był liniowym potomkiem integration head (merge-base == head) — ff-only = drzewo TEST-verified
+  co do bajta (mocniejsza gwarancja niż replay). Powtórzone dla slice 3 i cleanup.
+- Koszt biegu: ~$6.76 priced (costUsdReported zawyżony ~58×, niezaufany). Werdyktów TEST nie nagrywać przez
+  supervisor-verdict (fingerprint liczony z drzewa dziecka → fałszywa kolizja z ostatnią rundą review).
+- Decyzje Mateusza 2026-09-07: push/PR zautoryzowane (branch + PR do main); worktree sprzątane propose-only
+  (na jego „tak" per dziecko); FOC-227 (paleta) bez dalszych ruchów. Linear: komentarz zamknięcia opublikowany,
+  issue Done; label `reviewed` był już nadany i pozostaje.
+
 ## Current execution: 2026-09-06 — FOC-227 squad palette repaint (worktree `foc-227-dev`)
 
 - Paleta `--sq-*` (6 akcentów squadów) przemalowana na muted-indigo w `ui/src/theme.css`; `Timeline.jsx` SQCOLOR
@@ -79,10 +110,15 @@
 - Linear migration completed: `docs/plans/fenix-linear-reconciliation.md`. New FOC-216–224; FOC-110 retained as F5; 12 verified dependency relations; FOC-108/107/105 canceled with successors. No task marked Done.
 - Bootstrap checks: `check.mjs` 0 violations, `config-drift.test.mjs` 23/23, `provider-resolve.test.mjs` 14/14, brain-order 6/6. All 24 execution role models and four routing sections match exact GLM Flash. Actual stream identity remains unverified; no operational child started.
 - Frontman cache prices verified against the public OpenRouter catalogue (2026-09-05T21:01:09Z): cache-read 1, cache-write 12.5 USD/M. Context-tier pricing and GLM catalogue-rate drift remain explicitly tracked in FOC-165.
-- Full `node scripts/test-all.mjs` launched on the combined working tree; result pending at this checkpoint. Affected-file lookup returned only a Markdown path, not usable test coverage, so explicit relevant suites were run instead.
-- First operational task: FOC-217. Triage proposed DEV (`confidence: high`, `requiresConfirmation: true`), based on existing AC; unknowns: no standalone DoD section, no estimate. This differs from the requested PLAN-first sequence. No verdict recorded and no child spawned; confirmation is not inferred from roadmap approval.
-- Next: inspect full-suite results, independently verify preserved batches, and resolve the routing gate before paid squad work. Existing uncommitted runtime/telemetry files are not present in a worktree seeded from HEAD; FOC-217 must receive explicit preserved artifacts rather than assume they are committed.
-- Existing HITL/triage confirmations remain required. Push/PR and cleanup are not authorized by the roadmap. Spend for operational children in this initiative: none started; frontman/planning costs are not included in that statement.
+- Full `node scripts/test-all.mjs`: 41/41 test scripts passed in 294416 ms, exit 0. Retained output: background task `bfazq6ga3` (`.../86390beb-5b48-4d13-928f-4fbe5964be94/tasks/bfazq6ga3.output` under the Claude temporary task directory). This tested the combined working tree, including preserved uncommitted files; it is not proof that commit `18785c2` alone or a fresh child worktree passes. Some prompt edits overlapped the full run; final focused bootstrap checks passed separately. Affected-file lookup returned only a Markdown path, not usable test coverage, so explicit relevant suites were run instead.
+- Roadmap/reconciliation checkpoint: `3d709ab`. Final project audit saved to `.state/fenix-stabilization/linear-after.json`: 53 project issues, nine new issues verified as Backlog with no estimate/deadline or `ai:planned` label, unique stable plan keys, three predecessors verified Canceled. This is a scoped project audit, not a cleanup of every historical JOI backlog.
+- Runtime source check: `supervisor-spawn.mjs` sets `CLAUDE_CONFIG_DIR` to the orchestration root's `agents/<squad>` and runs the watcher in the task worktree; `supervisor-watch.mjs` forwards the kickoff, generated settings and explicit `--model` to `claude -p`. It does not invoke the squad `.bat`: provider environment is inherited, so launcher configuration alone is insufficient runtime evidence. Effective prompt/model loading still needs the live canary. Telemetry initialization can fail without blocking spawn; verify a non-null child telemetry run and actual captured events before continuing paid work.
+- First operational task: FOC-217. User explicitly approved PLAN-first; recorded override DEV → PLAN at confidence 90/100, with DoD/estimate, preserved candidate and runtime-evidence unknowns. Run `2026-09-05T20-31-57-862-supervisor-42cc`; kickoff `.state/fenix-stabilization/FOC-217-plan-kickoff.md`.
+- First real child `plan-1`, session `036ae0a9-cd8d-4e40-9c62-b1d6936e557b`, started 2026-09-05T21:43:03Z with explicit model `z-ai/glm-5.3-flash`, explicit repo `linear-agents`, worktree `../la-wt/linear-agents/foc-217-plan`, base `3d709ab042b716d2fc662e0e6705cd9293165456`; telemetry run `2026-09-05T21-43-03-223-plan-62bf`.
+- Child crashed at 21:44:49Z, exit 1: `API Error: stream closed before completion`. Status tail showed 17 thinking-token events, one assistant thinking event, the API error, then contradictory `result: success cost=0`. Runtime correctly marked crashed; priced cost is UNKNOWN, reported cost 0 is not evidence of zero spend. No pending gate. Child worktree Git status is clean. No automatic retry, model fallback or cleanup. Resume/fresh/stop decision remains pending; exact provider/runtime cause and actual model evidence are not yet established.
+- User chose local diagnosis only (option 3); no additional model calls or retry. Diagnosis: `.state/fenix-stabilization/FOC-217-plan-crash-diagnosis.md`. Raw result is `subtype: success` WITH `is_error: true`; status snippets omit the error flag/message (confirmed presentation defect at supervisor-status.mjs:80-81). Registry crashed and central telemetry failed are correct. Init and partial assistant response both name exact GLM Flash; 3015 thinking-token events are event counts, not billable token evidence. No tools/delegations ran. Two all-zero usage rows confirm ingestion but not accounting; empty modelUsage explains computed UNKNOWN. Upstream termination cause remains unknown: no transport status/request ID in retained diagnostics.
+- Next: keep paid execution paused pending a separate recovery decision; scope the status-presentation regression fix without conflating it with the unresolved stream failure. The child received read-only preserved artifact references; these uncommitted files are not part of its HEAD. Full-suite success does not authorize bundling unrelated changes into one commit.
+- Existing HITL confirmations remain required. Push/PR and cleanup are not authorized by the roadmap. One operational child started and crashed; its priced spend is UNKNOWN. Frontman costs are separate.
 - Older sections below are historical context, not the current model or execution policy.
 
 ## Historical update: 2026-08-25 — Provider profiles (per-squad LLM provider): spec + ADR Accepted, implementation in parallel slices
