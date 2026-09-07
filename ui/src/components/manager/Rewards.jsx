@@ -16,11 +16,10 @@
 // Motion: none is added — chips, badges and tables are static; a reduced-
 // motion preference therefore has nothing to silence here.
 
-import { useEffect, useState } from 'react';
 import {
+  deliveryNeedLabel,
   formatXp,
   heldCount,
-  ratingForRun,
   recordMeta,
   recordPoints,
   rulesLabel,
@@ -28,7 +27,9 @@ import {
   squadRewardsView,
 } from '../../manager/rewards.js';
 
-// Header chip for the selected squad — icon + text, never color alone.
+// Header chip for the selected squad — icon + text, never color alone. With
+// no rules in the payload no level is invented client-side: the chip shows
+// the bare XP.
 export function RewardsHeaderChip({ rewards, squadKey }) {
   const view = squadRewardsView(rewards?.data, squadKey);
   if (view.state !== 'ready') return null;
@@ -36,7 +37,8 @@ export function RewardsHeaderChip({ rewards, squadKey }) {
   return (
     <span className="mgr-rewards-chip" title={label ? `product rules — ${label}` : 'verified-delivery XP'}>
       <span className="mgr-rewards-chip-star" aria-hidden="true">★</span>
-      L{view.level} · {formatXp(view.xp)} XP
+      {view.level == null ? null : `L${view.level} · `}
+      {formatXp(view.xp)} XP
     </span>
   );
 }
@@ -113,7 +115,8 @@ export function AchievementsPanel({ rewards, squadKey }) {
       {view.state === 'ready' && (
         <>
           <p className="mgr-rewards-xp">
-            <span className="mgr-rewards-chip-star" aria-hidden="true">★</span> L{view.level} ·{' '}
+            <span className="mgr-rewards-chip-star" aria-hidden="true">★</span>{' '}
+            {view.level == null ? null : `L${view.level} · `}
             {formatXp(view.xp)} XP
           </p>
           <p className="mgr-rewards-badge-row" aria-label="badges">
@@ -121,9 +124,13 @@ export function AchievementsPanel({ rewards, squadKey }) {
               <span
                 key={b.id}
                 className={`mgr-rw-badge${b.earned ? ' mgr-rw-badge-earned' : ' mgr-rw-badge-locked'}`}
-                title={b.earned ? `earned — ${b.need} distinct verified deliver${b.need === 1 ? 'y' : 'ies'}` : `locked — needs ${b.need} distinct verified deliveries`}
+                title={
+                  b.earned
+                    ? `earned — ${deliveryNeedLabel(b.need)}`
+                    : `locked — needs ${deliveryNeedLabel(b.need)}`
+                }
               >
-                <span aria-hidden="true">{b.glyph}</span> {b.label}
+                <span aria-hidden="true">{b.earned ? b.glyph : b.lockedGlyph}</span> {b.label}
               </span>
             ))}
           </p>
@@ -175,45 +182,35 @@ export function AchievementsPanel({ rewards, squadKey }) {
 // subjective human record on an append-only audit ledger — no preview/apply
 // two-step like config, because there is nothing destructive to preview.
 //
-// onDirty has the shape (runId, isDirty): several History rows carry their
-// own control at once, so the screen-level unsaved guard tracks a per-row
-// Set — reverting one row must not release the guard for another.
-export function RatingControl({ squadKey, run, saved, onSave, onDirty, busy, error }) {
+// Staged state is SCREEN-level, not component state: the live poll can evict
+// a run from the ≤5 recent History window (or the tab can switch), unmounting
+// this control — the Manager keeps staged ratings in a runId-keyed map that
+// survives both, so nothing staged is silently lost. This control is a plain
+// view of that map: it renders `staged` and writes every edit back through
+// onStage(runId, entry|null). Staging exactly the recorded rating again (or
+// clearing the select) removes the entry; a successful save clears it in the
+// Manager. There is no unmount cleanup left to lose work with.
+export function RatingControl({ squadKey, run, saved, onSave, onStage, staged, busy, error }) {
   const savedValue = saved ? String(saved.rating) : '';
   const savedNote = saved?.note || '';
-  const [value, setValue] = useState(savedValue);
-  const [note, setNote] = useState(savedNote);
-
-  // Re-seed whenever the ledger record behind this row changes (the save's
-  // reload lands, or the snapshot swaps rows): staged state always starts
-  // from what is actually recorded.
-  useEffect(() => {
-    setValue(savedValue);
-    setNote(savedNote);
-  }, [savedValue, savedNote, run?.runId]);
-
-  // The screen-level unsaved guard mirrors the staged delta; releasing it on
-  // unmount (row swap, tab change) is mandatory.
+  const value = staged?.value ?? '';
+  const note = staged?.note ?? '';
   const dirty = value !== '' && (value !== savedValue || note !== savedNote);
-  useEffect(() => {
-    onDirty?.(run.runId, dirty);
-  }, [run.runId, dirty, onDirty]);
-  useEffect(() => () => onDirty?.(run.runId, false), [run.runId, onDirty]);
+
+  const stage = (nextValue, nextNote) => {
+    const stillDirty = nextValue !== '' && (nextValue !== savedValue || nextNote !== savedNote);
+    onStage?.(run.runId, stillDirty ? { value: nextValue, note: nextNote } : null);
+  };
 
   const save = async () => {
     if (!dirty) return;
-    const ok = await onSave({
+    await onSave({
       subject: squadKey,
       taskId: run.taskId,
       runId: run.runId,
       rating: Number(value),
       note: note.trim() ? note.trim() : null,
     });
-    if (ok) {
-      // Clear the staged delta; the reload's re-seed restores the saved record.
-      setValue('');
-      setNote('');
-    }
   };
 
   return (
@@ -225,7 +222,7 @@ export function RatingControl({ squadKey, run, saved, onSave, onDirty, busy, err
         id={`mgr-rate-${run.runId}`}
         className="mgr-select mgr-rating-select"
         value={value}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => stage(e.target.value, note)}
       >
         <option value="">rate…</option>
         {[5, 4, 3, 2, 1].map((n) => (
@@ -239,7 +236,7 @@ export function RatingControl({ squadKey, run, saved, onSave, onDirty, busy, err
         value={note}
         maxLength={500}
         placeholder="note (optional)"
-        onChange={(e) => setNote(e.target.value)}
+        onChange={(e) => stage(value, e.target.value)}
         aria-label={`note for the manager rating of ${run.taskId || run.runId}`}
       />
       <button type="button" className="mgr-btn mgr-btn-sm" onClick={save} disabled={!dirty || busy}>
@@ -272,5 +269,3 @@ export function RatingDisplay({ rating }) {
 export function rateableRun(run) {
   return !!run && run.endedAt != null && !!run.taskId;
 }
-
-export { ratingForRun };

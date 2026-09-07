@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import {
   BADGES,
   badgeList,
+  deliveryNeedLabel,
   formatXp,
   heldCount,
   levelFor,
@@ -73,10 +74,10 @@ await test('rulesLabel(null / missing version) -> null (component hides the note
 // --- levelFor ---------------------------------------------------------------
 
 await test('levelFor boundaries: 0->1, 499->1, 500->2, 1250->3', () => {
-  eq(levelFor(0), 1);
-  eq(levelFor(499), 1);
-  eq(levelFor(500), 2);
-  eq(levelFor(1250), 3);
+  eq(levelFor(0, 500), 1);
+  eq(levelFor(499, 500), 1);
+  eq(levelFor(500, 500), 2);
+  eq(levelFor(1250, 500), 3);
 });
 
 await test('levelFor honours the payload xpPerLevel', () => {
@@ -85,11 +86,19 @@ await test('levelFor honours the payload xpPerLevel', () => {
 });
 
 await test('levelFor rejects non-finite / negative / null XP -> null (never level guesses)', () => {
-  eq(levelFor(-1), null);
-  eq(levelFor(undefined), null);
-  eq(levelFor(null), null); // "no data" is never "level 1"
-  eq(levelFor(''), null);
-  eq(levelFor('many'), null);
+  eq(levelFor(-1, 500), null);
+  eq(levelFor(undefined, 500), null);
+  eq(levelFor(null, 500), null); // "no data" is never "level 1"
+  eq(levelFor('', 500), null);
+  eq(levelFor('many', 500), null);
+});
+
+await test('levelFor without a payload xpPerLevel -> null (no 500 fallback is invented client-side)', () => {
+  eq(levelFor(1250, undefined), null);
+  eq(levelFor(1250, null), null);
+  eq(levelFor(1250, 0), null);
+  eq(levelFor(1250, -500), null);
+  eq(levelFor(1250, 'many'), null);
 });
 
 // --- formatXp ---------------------------------------------------------------
@@ -136,6 +145,30 @@ await test('badgeList: 5 -> both earned', () => {
 
 await test('badgeList treats non-numeric distinctRevisions as 0', () => {
   eq(badgeList(undefined).every((b) => !b.earned), true);
+});
+
+await test('deliveryNeedLabel singularizes a need of 1 (never "needs 1 ... deliveries")', () => {
+  eq(deliveryNeedLabel(1), '1 distinct verified delivery');
+  eq(deliveryNeedLabel(2), '2 distinct verified deliveries');
+  eq(deliveryNeedLabel(5), '5 distinct verified deliveries');
+});
+
+await test('badge glyphs: earned and locked are visually distinct strings, not a fill change only', () => {
+  for (const b of BADGES) {
+    assert.ok(b.glyph, `${b.id}: earned glyph expected`);
+    assert.ok(b.lockedGlyph, `${b.id}: locked glyph expected`);
+    assert.notStrictEqual(b.glyph, b.lockedGlyph, `${b.id}: earned/locked glyphs must differ`);
+  }
+  // badgeList carries both variants regardless of state (locked = outline
+  // form), so the component can switch on earned without guessing.
+  eq(badgeList(0).map((b) => [b.earned, b.glyph, b.lockedGlyph]), [
+    [false, '✓', '○'],
+    [false, '★★', '☆☆'],
+  ]);
+  eq(badgeList(5).map((b) => [b.earned, b.glyph, b.lockedGlyph]), [
+    [true, '✓', '○'],
+    [true, '★★', '☆☆'],
+  ]);
 });
 
 // --- shortWhen ----------------------------------------------------------------
@@ -220,6 +253,14 @@ await test('squadRewardsView: xp 0 after revocations is an honest ready zero, no
   eq(view.xp, 0);
   eq(view.level, 1);
   eq(view.badges.every((b) => !b.earned), true);
+});
+
+await test('squadRewardsView: no rules in the payload -> level null, XP untouched (no invented constant)', () => {
+  const view = squadRewardsView({ squads: { dev: { xp: 1250, distinctRevisions: 1, recent: [] } } }, 'dev');
+  eq(view.state, 'ready');
+  eq(view.xp, 1250);
+  eq(view.rules, null);
+  eq(view.level, null);
 });
 
 // --- ratings lookup -----------------------------------------------------------
@@ -333,6 +374,68 @@ await test('wiring pins: History Rating column + header chip are actually render
     managerSrc.includes('<RewardsHeaderChip rewards={rewards} squadKey={squadKey} />'),
     'the header chip must be wired next to the squad selector',
   );
+});
+
+// --- review round 5 pins (S6/S7/S8 + nitpicks) ---------------------------------
+
+await test('S6 pinned at source: the badge glyph switches between earned and locked variants', () => {
+  const src = readSrc('components/manager/Rewards.jsx');
+  assert.ok(
+    /\{b\.earned \? b\.glyph : b\.lockedGlyph\}/.test(src),
+    'the rendered glyph must come from the earned/locked pair the adapter provides',
+  );
+});
+
+await test('S6/N1 pinned at source: badge titles come from the singularizing adapter helper', () => {
+  const src = readSrc('components/manager/Rewards.jsx');
+  assert.ok(
+    /deliveryNeedLabel\(b\.need\)/.test(src),
+    'badge titles must pluralize through deliveryNeedLabel',
+  );
+  assert.ok(!/verified deliver\$\{/.test(src), 'no inline pluralization may remain in the component');
+});
+
+await test('S7 pinned at source: ratingSave is scoped to the run that owns the save', () => {
+  const managerSrc = readSrc('screens/Manager.jsx');
+  assert.ok(
+    /runId: payload\.runId/.test(managerSrc),
+    'saveRating must tag busy/error with the originating runId',
+  );
+  const inspectorSrc = readSrc('components/manager/Inspector.jsx');
+  assert.ok(
+    inspectorSrc.includes('ratingSave?.runId === r.runId'),
+    'History rows must scope busy/error to their own run',
+  );
+});
+
+await test('S8 pinned at source: staged ratings live in a screen-level map that survives eviction', () => {
+  const managerSrc = readSrc('screens/Manager.jsx');
+  assert.ok(
+    /const \[stagedRatings, setStagedRatings\] = useState\(\{\}\)/.test(managerSrc),
+    'Manager must own a runId-keyed staged-ratings map',
+  );
+  assert.ok(
+    /Object\.keys\(stagedRatings\)\.length > 0/.test(managerSrc),
+    'the unsaved-work guard must derive from the staged map, not from mounted rows',
+  );
+  assert.ok(
+    /delete next\[payload\.runId\]/.test(managerSrc),
+    'a successful save must clear that run staged entry',
+  );
+  assert.ok(
+    /setStagedRatings\(\{\}\)/.test(managerSrc),
+    'accepting the unsaved-switch confirm must clear the staged map (honest discard)',
+  );
+  const inspectorSrc = readSrc('components/manager/Inspector.jsx');
+  assert.ok(
+    inspectorSrc.includes('staged={stagedRatings?.[r.runId]}') && inspectorSrc.includes('onStage={onRatingStage}'),
+    'History rows must seed and stage through the screen-level map',
+  );
+});
+
+await test('N2 pinned at source: the dead ratingForRun re-export is gone from Rewards.jsx', () => {
+  const src = readSrc('components/manager/Rewards.jsx');
+  assert.ok(!/export \{ ratingForRun \}/.test(src), 'the re-export must be removed');
 });
 
 // --- Summary ------------------------------------------------------------------

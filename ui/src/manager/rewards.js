@@ -17,11 +17,31 @@
 //     awards only) — nothing unlocks anything, they are display facts.
 
 // Badge thresholds over the squad's DISTINCT task-revision count among active
-// awards (server-computed distinctRevisions).
+// awards (server-computed distinctRevisions). Earned and locked differ by
+// GLYPH as well as fill — the locked variant is an outline form, so the state
+// never rides on color alone.
 export const BADGES = [
-  { id: 'first-delivery', glyph: '✓', label: 'first verified delivery', need: 1 },
-  { id: 'five-deliveries', glyph: '★★', label: 'five distinct verified deliveries', need: 5 },
+  {
+    id: 'first-delivery',
+    glyph: '✓',
+    lockedGlyph: '○',
+    label: 'first verified delivery',
+    need: 1,
+  },
+  {
+    id: 'five-deliveries',
+    glyph: '★★',
+    lockedGlyph: '☆☆',
+    label: 'five distinct verified deliveries',
+    need: 5,
+  },
 ];
+
+// Badge-title need phrase with the count singularized — "needs 1 distinct
+// verified delivery", never "needs 1 distinct verified deliveries".
+export function deliveryNeedLabel(need) {
+  return `${need} distinct verified deliver${need === 1 ? 'y' : 'ies'}`;
+}
 
 // Product-rules label built FROM the payload constants — if the server ever
 // ships different rules, the label follows it (version included).
@@ -30,12 +50,17 @@ export function rulesLabel(rules) {
   return `rules ${rules.version.replace(/^xp-rules\s*/, '')} · ${rules.pointsPerAcceptedRevision} XP per accepted revision · ${rules.xpPerLevel} XP per level`;
 }
 
-export function levelFor(xp, xpPerLevel = 500) {
+export function levelFor(xp, xpPerLevel) {
   // null/undefined/'' mean "no data" — never "level 1" (Number(null) is 0).
   if (xp == null || xp === '') return null;
   const n = Number(xp);
   if (!Number.isFinite(n) || n < 0) return null;
-  return Math.floor(n / xpPerLevel) + 1;
+  // xpPerLevel is a payload constant — when the payload carries no rules,
+  // NO level is invented client-side (no 500 fallback): the caller renders
+  // no level rather than one derived from a made-up constant.
+  const per = Number(xpPerLevel);
+  if (!Number.isFinite(per) || per <= 0) return null;
+  return Math.floor(n / per) + 1;
 }
 
 // Non-breaking-space digit grouping for the header chip (★ L3 · 1 250 XP) —
@@ -94,7 +119,7 @@ export function squadRewardsView(payload, squadKey) {
   const entry = payload.squads?.[squadKey];
   const rules = payload.rules || null;
   if (!entry) return { state: 'awaiting', rules };
-  const level = levelFor(entry.xp, rules?.xpPerLevel ?? 500);
+  const level = levelFor(entry.xp, rules?.xpPerLevel);
   return {
     state: 'ready',
     rules,

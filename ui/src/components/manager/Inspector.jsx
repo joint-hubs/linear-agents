@@ -158,7 +158,7 @@ function Instructions({ squad, card, onPromptDirty }) {
 // overlay polls) — the Manager screen never calls /api/runs or
 // /api/prompts/runs. Rows arrive decorated with their derived state; active
 // runs first, then the most recent ended ones (≤ 5 per squad, server bound).
-function History({ live, liveStale, squadKey, rewards, onRate, ratingSave, onRatingDirty }) {
+function History({ live, liveStale, squadKey, rewards, onRate, ratingSave, stagedRatings, onRatingStage }) {
   const runs = live ? [...live.active, ...live.recent] : [];
   const cost = (r) => (r.costPartial ? 'partial' : fmtUSD(r.costUSD ?? 0));
   return (
@@ -194,6 +194,9 @@ function History({ live, liveStale, squadKey, rewards, onRate, ratingSave, onRat
           <tbody>
             {runs.map((r) => {
               const rating = ratingForRun(rewards?.data, r);
+              // busy/error belong to the run that owns the save — other rows
+              // stay independent (a failed save never repeats everywhere).
+              const ownSave = ratingSave?.runId === r.runId;
               return (
                 <tr key={r.runId}>
                   <td className="mgr-cell-mono">{r.runId}</td>
@@ -210,9 +213,10 @@ function History({ live, liveStale, squadKey, rewards, onRate, ratingSave, onRat
                         run={r}
                         saved={rating}
                         onSave={onRate}
-                        onDirty={onRatingDirty}
-                        busy={ratingSave?.busy}
-                        error={ratingSave?.error}
+                        onStage={onRatingStage}
+                        staged={stagedRatings?.[r.runId]}
+                        busy={ownSave && ratingSave?.busy}
+                        error={ownSave ? ratingSave?.error : null}
                       />
                     ) : rating ? (
                       <RatingDisplay rating={rating} />
@@ -247,6 +251,8 @@ export default function Inspector({
   rewards,
   onRate,
   ratingSave,
+  stagedRatings,
+  onRatingStage,
 }) {
   if (!card) {
     return (
@@ -313,7 +319,8 @@ export default function Inspector({
             rewards={rewards}
             onRate={onRate}
             ratingSave={ratingSave}
-            onRatingDirty={editing.onRatingDirty}
+            stagedRatings={stagedRatings}
+            onRatingStage={onRatingStage}
           />
         )}
         {tab === 'achievements' && <AchievementsPanel rewards={rewards} squadKey={squad.key} />}

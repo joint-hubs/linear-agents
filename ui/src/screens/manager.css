@@ -974,8 +974,8 @@
 
 /* Static surfaces only: no animation is defined for any rewards element, so
    the prefers-reduced-motion block needs no rewards entries. Icon + text
-   everywhere; the earned/locked badge pair differs by glyph AND fill, never
-   by color alone. */
+   everywhere; the earned/locked badge pair differs by glyph (filled vs
+   outline form, from the adapter) AND fill, never by color alone. */
 
 .mgr-rewards-chip {
   display: inline-flex;

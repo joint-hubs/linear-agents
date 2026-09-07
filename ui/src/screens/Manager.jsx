@@ -113,8 +113,18 @@ export default function Manager() {
   // undefined = loading, null = error. Last-known facts are kept while
   // revalidating — the UI never invents zeros.
   const [rewardsState, setRewardsState] = useState({ data: undefined, error: null });
-  const [ratingSave, setRatingSave] = useState({ busy: false, error: null });
-  const [dirtyRatingRuns, setDirtyRatingRuns] = useState(() => new Set());
+  // ratingSave is tracked per originating run ({busy, error, runId}): only
+  // the History row that owns the save shows its busy/error — a failed save
+  // never repeats inside every rateable row, and a busy save never disables
+  // the other rows' Save buttons.
+  const [ratingSave, setRatingSave] = useState({ busy: false, error: null, runId: null });
+  // Staged manager ratings, keyed per History row (runId → {value, note}),
+  // owned at SCREEN level: the 5 s live poll can evict a run from the ≤5
+  // recent window (or the History tab can switch), unmounting its row control
+  // — a staged rating must survive both until it is saved or explicitly
+  // discarded. The unsaved-work guard (ratingDirty) stays raised while any
+  // entry exists, including entries whose row is currently evicted.
+  const [stagedRatings, setStagedRatings] = useState({});
 
   const positionsRef = useRef(positions);
   const boardRef = useRef(null);
@@ -225,35 +235,47 @@ export default function Manager() {
   }, [loadRewards]);
 
   // Rating save → 201 → reload the ledger so History rows and the
-  // achievements aggregates show the new latest record. Per-endpoint errors
-  // stay on the row's control; success releases the row's staged state.
+  // achievements aggregates show the new latest record. busy/error are
+  // tagged with the originating runId so only that row's control reflects
+  // them; success clears that run's staged entry (the reload's rows re-seed
+  // from the new latest record).
   const saveRating = useCallback(
     async (payload) => {
-      setRatingSave({ busy: true, error: null });
+      setRatingSave({ busy: true, error: null, runId: payload.runId });
       try {
         await postManagerRating(payload);
         await loadRewards();
-        setRatingSave({ busy: false, error: null });
+        setStagedRatings((prev) => {
+          if (!(payload.runId in prev)) return prev;
+          const next = { ...prev };
+          delete next[payload.runId];
+          return next;
+        });
+        setRatingSave({ busy: false, error: null, runId: null });
         return true;
       } catch (err) {
-        setRatingSave({ busy: false, error: err });
+        setRatingSave({ busy: false, error: err, runId: payload.runId });
         return false;
       }
     },
     [loadRewards]
   );
 
-  // Staged rating state per History row — a Set, because several rows carry
-  // their own control at once; reverting one row must not release the
-  // unsaved-work guard for another.
-  const onRatingDirty = useCallback((runId, isDirty) => {
-    setDirtyRatingRuns((prev) => {
-      const has = prev.has(runId);
-      if (isDirty === has) return prev;
-      const next = new Set(prev);
-      if (isDirty) next.add(runId);
-      else next.delete(runId);
-      return next;
+  // Staging writes straight into the screen-level map; a null entry removes
+  // it (the row was staged back to its recorded rating, or the select was
+  // cleared). Several rows carry their own control at once — entries are
+  // per runId, so staging one row never releases another.
+  const onRatingStage = useCallback((runId, staged) => {
+    setStagedRatings((prev) => {
+      if (!staged) {
+        if (!(runId in prev)) return prev;
+        const next = { ...prev };
+        delete next[runId];
+        return next;
+      }
+      const cur = prev[runId];
+      if (cur && cur.value === staged.value && cur.note === staged.note) return prev;
+      return { ...prev, [runId]: staged };
     });
   }, []);
 
@@ -261,7 +283,7 @@ export default function Manager() {
     () => ({ ...rewardsState, reload: loadRewards }),
     [rewardsState, loadRewards]
   );
-  const ratingDirty = dirtyRatingRuns.size > 0;
+  const ratingDirty = Object.keys(stagedRatings).length > 0;
 
   // Rebuild the staging working copy whenever a fresh server read lands
   // (initial load and after a successful apply — applied changes ARE server
@@ -320,29 +342,37 @@ export default function Manager() {
   const ratingDirtyRef = useRef(false);
   ratingDirtyRef.current = ratingDirty;
 
-  const confirmDiscardPrompt = useCallback(() => window.confirm(UNSAVED_SWITCH_MESSAGE), []);
+  // The switch confirm is an honest discard: accepting clears the staged
+  // rating map (and with it the rating guard) — the same semantics the prompt
+  // draft gets from its editor unmounting on the switch. Declining keeps
+  // everything staged.
+  const confirmDiscardUnsaved = useCallback(() => {
+    if (!window.confirm(UNSAVED_SWITCH_MESSAGE)) return false;
+    setStagedRatings({});
+    return true;
+  }, []);
 
   const selectRole = useCallback((key) => {
-    if (switchBlocked(anyUnsaved(promptDirtyRef.current, ratingDirtyRef.current), confirmDiscardPrompt)) return;
+    if (switchBlocked(anyUnsaved(promptDirtyRef.current, ratingDirtyRef.current), confirmDiscardUnsaved)) return;
     setSelectedRole(key);
-  }, [confirmDiscardPrompt]);
+  }, [confirmDiscardUnsaved]);
 
   const selectSquad = useCallback(
     (key) => {
-      if (switchBlocked(anyUnsaved(promptDirtyRef.current, ratingDirtyRef.current), confirmDiscardPrompt)) return;
+      if (switchBlocked(anyUnsaved(promptDirtyRef.current, ratingDirtyRef.current), confirmDiscardUnsaved)) return;
       setSearchParams({ squad: key });
     },
-    [setSearchParams, confirmDiscardPrompt]
+    [setSearchParams, confirmDiscardUnsaved]
   );
 
   // The inspector tab bar sits directly above the editor: switching tabs
   // unmounts MarkdownEditor and would silently drop the draft.
   const selectTab = useCallback(
     (id) => {
-      if (switchBlocked(anyUnsaved(promptDirtyRef.current, ratingDirtyRef.current), confirmDiscardPrompt)) return;
+      if (switchBlocked(anyUnsaved(promptDirtyRef.current, ratingDirtyRef.current), confirmDiscardUnsaved)) return;
       setTab(id);
     },
-    [confirmDiscardPrompt]
+    [confirmDiscardUnsaved]
   );
 
   const moveCard = useCallback(
@@ -881,7 +911,6 @@ export default function Manager() {
               onStageLead: stageLeadModel,
               onStageModel: stageAgentModel,
               onPromptDirty: setPromptDirty,
-              onRatingDirty,
             }}
             promptDirty={promptDirty}
             live={squadLive}
@@ -889,6 +918,8 @@ export default function Manager() {
             rewards={rewards}
             onRate={saveRating}
             ratingSave={ratingSave}
+            stagedRatings={stagedRatings}
+            onRatingStage={onRatingStage}
           />
         </aside>
       </div>
