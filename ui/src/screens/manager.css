@@ -866,6 +866,82 @@
   min-height: 200px;
 }
 
+/* D1: the two inspector tables (History, rewards records) sat at auto layout,
+   so their column min-content — unbreakable mono run/evidence ids, the
+   rating form — pushed the table past the 320px inspector track and 118–130px
+   beyond the viewport at 1440px. Fixed layout pins each table to the panel
+   width; long tokens then wrap (hyphens first, mid-token only as a last
+   resort) or truncate through an ellipsis instead of widening the table.
+   Scoped to the tabpanel: the roster fallback table keeps its auto layout
+   and its own overflow-x wrapper. Cells run slightly denser (11px, 3px 5px)
+   so six History columns stay legible in 320px. */
+.mgr-tabpanel table.mgr-table {
+  table-layout: fixed;
+  font-size: 11px;
+}
+
+.mgr-tabpanel table.mgr-table th,
+.mgr-tabpanel table.mgr-table td {
+  padding: 3px 5px;
+  overflow-wrap: anywhere;
+}
+
+/* Headers are short known words — they must never wrap mid-word ("POIN/TS")
+   and must never spill into the neighbouring header (the STARTED/COST
+   mangle), so each one truncates at its own cell edge instead. The full
+   header text stays in the DOM for assistive tech. */
+.mgr-tabpanel table.mgr-table thead th {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The last column is the one that yields value from width — evidence ids
+   (ellipsis) in the records table, the rating form in History. */
+.mgr-tabpanel table.mgr-table th:last-child {
+  width: 30%;
+}
+
+/* One-line spans that would otherwise spill across the fixed column: the
+   kind label and the rating display wrap inside their cell instead. */
+.mgr-tabpanel table.mgr-table .mgr-rewards-kind,
+.mgr-tabpanel table.mgr-table .mgr-rating-display {
+  white-space: normal;
+}
+
+/* State chips cannot wrap in a ~60px column without stacking one character
+   per line, so they truncate like the evidence cell instead: one line,
+   ellipsis at the cell edge, full label on hover (the chip carries a title)
+   and the state glyph always visible. */
+.mgr-tabpanel table.mgr-table .mgr-chip {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Records table column proportions: kind fits its longest label ("revoked"),
+   when keeps date and time on two clean lines, task/points wrap at hyphens. */
+.mgr-rewards table.mgr-table th:nth-child(1) { width: 19%; }
+.mgr-rewards table.mgr-table th:nth-child(2) { width: 14%; }
+.mgr-rewards table.mgr-table th:nth-child(3) { width: 17%; }
+.mgr-rewards table.mgr-table th:nth-child(4) { width: 20%; }
+
+/* History column proportions: run/task ids wrap at hyphens, the timestamp
+   breaks into date/time segments, cost wraps after "$0.", the state chip
+   truncates (see above), rating (last) gets 30% above. Sum is exactly 100%
+   (fixed layout scales a non-100 sum, and exactness keeps the proportions
+   honest). The :not(.mgr-rewards) scope matters: the History root and the
+   rewards root are BOTH plain divs under the tabpanel — an unscoped
+   `> div > table` would leak these widths into the records table (Chrome
+   then renormalizes the under-100% sum). */
+.mgr-tabpanel > div:not(.mgr-rewards) > table.mgr-table th:nth-child(1) { width: 12.5%; }
+.mgr-tabpanel > div:not(.mgr-rewards) > table.mgr-table th:nth-child(2) { width: 12%; }
+.mgr-tabpanel > div:not(.mgr-rewards) > table.mgr-table th:nth-child(3) { width: 19%; }
+.mgr-tabpanel > div:not(.mgr-rewards) > table.mgr-table th:nth-child(4) { width: 15.5%; }
+.mgr-tabpanel > div:not(.mgr-rewards) > table.mgr-table th:nth-child(5) { width: 11%; }
+
 .mgr-profile {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -997,7 +1073,17 @@
 
 .mgr-rewards {
   display: grid;
+  /* D1: with no explicit track the single column sized itself to the records
+     table's min-content (~477px) and spilled past the rigid 320px inspector
+     column at 1440px. minmax(0, 1fr) + min-width: 0 children let the table
+     shrink to the panel instead of stretching the track past it (the table
+     itself goes fixed-layout — see the inspector-table rules above). */
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
+}
+
+.mgr-rewards > * {
+  min-width: 0;
 }
 
 .mgr-rewards-awaiting {
@@ -1080,12 +1166,18 @@
 .mgr-rating-select {
   font-size: 12px;
   padding: 1px 4px;
+  /* Never wider than its fixed-layout Rating cell (D1) — the native select
+     ellipsizes instead of spilling into the neighbouring column. */
+  max-width: 100%;
 }
 
 .mgr-rating-note {
   font-size: 12px;
   padding: 1px 6px;
-  width: 120px;
+  /* D1: a fixed 120px width was a min-content floor inside the narrow Rating
+     cell — the flexible basis takes the leftover line width and shrinks. */
+  flex: 1 1 96px;
+  min-width: 0;
 }
 
 .mgr-rating-error {

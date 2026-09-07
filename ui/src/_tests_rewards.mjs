@@ -366,8 +366,8 @@ await test('Rewards.jsx does no IO of its own — all server access goes through
 await test('wiring pins: History Rating column + header chip are actually rendered', () => {
   const inspectorSrc = readSrc('components/manager/Inspector.jsx');
   assert.ok(
-    inspectorSrc.includes('<th scope="col">Rating</th>'),
-    'History must expose the Rating column',
+    inspectorSrc.includes('<th scope="col" title="Rating">Rating</th>'),
+    'History must expose the Rating column (title restores the truncated header, D1)',
   );
   const managerSrc = readSrc('screens/Manager.jsx');
   assert.ok(
@@ -436,6 +436,53 @@ await test('S8 pinned at source: staged ratings live in a screen-level map that 
 await test('N2 pinned at source: the dead ratingForRun re-export is gone from Rewards.jsx', () => {
   const src = readSrc('components/manager/Rewards.jsx');
   assert.ok(!/export \{ ratingForRun \}/.test(src), 'the re-export must be removed');
+});
+
+await test('D1 pinned at source: the inspector layout keeps both tables inside the 320px column', () => {
+  const css = readSrc('screens/manager.css');
+  // The rewards grid must expose one shrinkable track — the records table's
+  // min-content (~477px) must never size the track past the inspector column.
+  assert.ok(
+    /\.mgr-rewards\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(css),
+    '.mgr-rewards must declare a minmax(0, 1fr) track so the records table shrinks',
+  );
+  assert.ok(
+    /\.mgr-rewards\s*>\s*\*\s*\{[^}]*min-width:\s*0/.test(css),
+    '.mgr-rewards children must carry min-width: 0',
+  );
+  // Both inspector tables (History + records) go fixed-layout: auto layout let
+  // their column min-content push them 118–130px past the viewport at 1440.
+  assert.ok(
+    /\.mgr-tabpanel table\.mgr-table\s*\{[^}]*table-layout:\s*fixed/.test(css),
+    'inspector tables must be table-layout: fixed inside the tabpanel',
+  );
+  // Per-table column widths must stay scoped: the History root and the
+  // rewards root are BOTH plain divs under the tabpanel, so an unscoped
+  // `> div > table` leaks the History widths into the records table.
+  assert.ok(
+    /\.mgr-tabpanel > div:not\(\.mgr-rewards\) > table\.mgr-table/.test(css),
+    'History column widths must carry the :not(.mgr-rewards) scope',
+  );
+  // The rating note input must stay flexible — a fixed px width was a
+  // min-content floor that overflowed the fixed-layout Rating cell.
+  assert.ok(
+    !/\.mgr-rating-note\s*\{[^}]*width:\s*\d+px/.test(css),
+    '.mgr-rating-note must not reintroduce a fixed px width',
+  );
+  // The wrap mechanism fixed layout leans on: long run/evidence tokens break
+  // inside their pinned cell instead of spilling past the panel edge.
+  assert.ok(
+    /\.mgr-tabpanel table\.mgr-table td\s*\{[^}]*overflow-wrap:\s*anywhere/.test(css),
+    'inspector table cells must wrap anywhere so long tokens never widen the table',
+  );
+  // Truncation must be restorable: the state chip is the one cell that
+  // ellipsizes instead of wrapping, so it carries a hover title (D1 rule —
+  // truncation may hide text only when a title restores it).
+  const liveStripSrc = readSrc('components/manager/LiveStrip.jsx');
+  assert.ok(
+    /title=\{meta\.label\}/.test(liveStripSrc),
+    'the live-state chip must carry a title so inspector-table truncation restores the label',
+  );
 });
 
 // --- Summary ------------------------------------------------------------------

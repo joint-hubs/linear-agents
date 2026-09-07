@@ -182,13 +182,15 @@ function History({ live, liveStale, squadKey, rewards, onRate, ratingSave, stage
       {live && runs.length > 0 && (
         <table className="mgr-table mgr-table-tight">
           <thead>
+            {/* title restores the full header word — the narrow 320px column
+                ellipsizes the longer ones (D1 truncation-with-title rule). */}
             <tr>
-              <th scope="col">Run</th>
-              <th scope="col">Task</th>
-              <th scope="col">State</th>
-              <th scope="col">Started</th>
-              <th scope="col">Cost</th>
-              <th scope="col">Rating</th>
+              <th scope="col" title="Run">Run</th>
+              <th scope="col" title="Task">Task</th>
+              <th scope="col" title="State">State</th>
+              <th scope="col" title="Started">Started</th>
+              <th scope="col" title="Cost">Cost</th>
+              <th scope="col" title="Rating">Rating</th>
             </tr>
           </thead>
           <tbody>

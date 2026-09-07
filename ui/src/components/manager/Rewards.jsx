@@ -48,12 +48,14 @@ function RecordsTable({ records }) {
   return (
     <table className="mgr-table mgr-table-tight">
       <thead>
+        {/* title restores the full header word — the narrow 320px column
+            ellipsizes the longer ones (D1 truncation-with-title rule). */}
         <tr>
-          <th scope="col">Kind</th>
-          <th scope="col">Task</th>
-          <th scope="col">Points</th>
-          <th scope="col">When</th>
-          <th scope="col">Evidence</th>
+          <th scope="col" title="Kind">Kind</th>
+          <th scope="col" title="Task">Task</th>
+          <th scope="col" title="Points">Points</th>
+          <th scope="col" title="When">When</th>
+          <th scope="col" title="Evidence">Evidence</th>
         </tr>
       </thead>
       <tbody>

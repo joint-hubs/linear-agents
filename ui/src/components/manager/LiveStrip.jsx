@@ -8,11 +8,13 @@ import { useEffect, useState } from 'react';
 import { LIVE_STATE_META, SNAPSHOT_STALE_MS, decorateRuns, squadLiveState } from '../../manager/live';
 import { fmtTime } from '../../utils';
 
-// Icon + text chip for a live state — never color alone (§3.4).
+// Icon + text chip for a live state — never color alone (§3.4). The title
+// carries the full label: inside the inspector's fixed-layout tables (D1) the
+// chip truncates to one line, so the hover must restore what was cut.
 export function LiveStateChip({ state, flash = false }) {
   const meta = LIVE_STATE_META[state] || LIVE_STATE_META.unknown;
   return (
-    <span className={`mgr-chip ${meta.cls}${flash ? ' mgr-live-flash' : ''}`}>
+    <span className={`mgr-chip ${meta.cls}${flash ? ' mgr-live-flash' : ''}`} title={meta.label}>
       <span aria-hidden="true">{meta.glyph}</span> {meta.label}
     </span>
   );
