@@ -19,7 +19,11 @@ import { join, resolve, extname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "docs");
+// Defaults to docs/. LA_SERVE_ROOT points it at another directory under the
+// repo — report/ is the reason: the generated HTML is ~23 MB and file:// blocks
+// enough of it to make "does the report actually open" untestable.
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = resolve(REPO, process.env.LA_SERVE_ROOT || "docs");
 const PORT = Number(process.argv[2] || process.env.PORT || 7444);
 
 const TYPES = {
