@@ -41,40 +41,71 @@ STOPWORDS: set[str] = {
     "only", "own", "same", "so", "than", "too", "very", "just", "also",
     "if", "then", "because", "while", "here", "there", "now", "us",
     "my", "your", "our", "their", "about", "into", "over", "after", "before",
+    # Polish — the squads are prompted and answer in Polish, so an English-only
+    # list left "nie", "jest", "na" at the top of every agent's n-grams.
+    "nie", "jest", "sie", "się", "na", "do", "to", "za", "ze", "że", "jak",
+    "co", "czy", "ale", "lub", "oraz", "tez", "też", "juz", "już", "tylko",
+    "bardzo", "jego", "jej", "ich", "ten", "ta", "te", "tego", "tej", "tym",
+    "tych", "przez", "przy", "pod", "nad", "bez", "dla", "od", "po", "we",
+    "byc", "być", "byl", "był", "byla", "była", "bylo", "było", "sa", "są",
+    "ma", "mam", "masz", "mozna", "można", "trzeba", "musi", "moze", "może",
+    "jesli", "jeśli", "gdy", "kiedy", "gdzie", "kto", "ktory", "który",
+    "ktora", "która", "ktore", "które", "wszystko", "jeszcze", "wiec", "więc",
 }
 
-TOOL_NAME_MAP: dict[str, str] = {
-    "Read": "read_file",
-    "Write": "write_file",
-    "Edit": "edit_file",
-    "Bash": "bash",
-    "Grep": "grep",
-    "Glob": "glob",
-    "Agent": "agent_spawn",
-    "Task": "agent_spawn",
-    "agent_spawn": "agent_spawn",
-    "WebSearch": "web_search",
-    "WebFetch": "web_fetch",
-    "TodoWrite": "todo_update",
-    "ReadMcpResource": "mcp_read",
-    "mcp__atlas__read": "mcp_read",
-}
+_TOOL_NORM_PATH = Path(__file__).resolve().parent.parent / "config" / "tool-norm.json"
+_tool_norm_cache: dict[str, str] | None = None
+
+
+def _tool_norm_map() -> dict[str, str]:
+    """Load config/tool-norm.json as {raw_or_prefix: canonical}, cached.
+
+    This file is the single source of truth, shared with the Node extractor
+    (scripts/telemetry-tool-extract.mjs). It replaced a hardcoded Python dict
+    that had drifted into a second, quietly different mapping — the reason
+    reports and the database disagreed about what "agent_spawn" covered.
+    """
+    global _tool_norm_cache
+    if _tool_norm_cache is None:
+        try:
+            raw = json.loads(_TOOL_NORM_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _tool_norm_cache = {}
+            return _tool_norm_cache
+        _tool_norm_cache = {
+            name: canon
+            for canon, names in raw.items()
+            if isinstance(names, list)
+            for name in names
+        }
+    return _tool_norm_cache
 
 
 def normalize_tool_name(raw: str) -> str:
     """Map a raw tool name to its canonical form.
 
-    Falls through the hardcoded map, then checks for ``mcp__`` prefix,
-    then falls back to ``other_<first_word>``.
+    Prefer ``tool_facts.tool_name_canon`` — the database column is filled at
+    ingest time by the same map. This helper exists for transcript text that
+    never reached the database, and must stay behaviourally identical to
+    loadToolNormMap()/bucketUnknownTool() in the Node extractor.
     """
     if not raw:
         return "other_unknown"
-    canonical = TOOL_NAME_MAP.get(raw)
+    mapping = _tool_norm_map()
+    canonical = mapping.get(raw)
     if canonical:
         return canonical
+    lowered = raw.lower()
+    for name, canon in mapping.items():
+        if name.lower() == lowered:
+            return canon
+    # mcp__ entries in the config are prefixes; longest match wins.
+    for name, canon in sorted(mapping.items(), key=lambda kv: -len(kv[0])):
+        if name.startswith("mcp__") and raw.startswith(name):
+            return canon
     if raw.startswith("mcp__"):
-        return "mcp_other"
-    first_word = raw.split("_")[0].split("-")[0].lower()
+        return "other_mcp"
+    first_word = re.split(r"[\s_-]", raw)[0].lower()
     return f"other_{first_word}"
 
 
@@ -104,6 +135,35 @@ def resolve_db_path(args: argparse.Namespace) -> str:
     return str(
         Path.home() / ".local" / "share" / "linear-agents" / "telemetry" / "telemetry.sqlite"
     )
+
+
+CANONICAL_VIEWS = ("canonical_usage", "canonical_tool_facts")
+
+
+def missing_canonical_views(db_path: str) -> list[str]:
+    """Return the canonical views this report needs but the database lacks.
+
+    The views are defined in Node (scripts/telemetry-canonical.mjs) and are the
+    only correct source for fleet-level aggregates: raw usage_facts is
+    run-scoped, so several runs sharing one transcript each hold a copy of the
+    same call and every SUM over them is inflated. Reporting on the raw tables
+    would silently produce numbers ~2x too high, so a missing view is an error
+    with a fix attached, not a fallback.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        present = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")
+        }
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    return [v for v in CANONICAL_VIEWS if v not in present]
 
 
 def _build_date_filter(days: int) -> tuple[str, str]:
@@ -143,7 +203,9 @@ def load_usage_facts(db_path: str, args: argparse.Namespace) -> tuple:
             u.cache_creation_tokens,
             u.source_path,
             u.source_offset,
-            c.cost_usd,
+            u.cost_usd,
+            u.attribution,
+            u.claim_count,
             r.squad,
             r.source       AS run_source,
             r.started_at,
@@ -152,9 +214,8 @@ def load_usage_facts(db_path: str, args: argparse.Namespace) -> tuple:
             r.native,
             r.interactive,
             r.launched_by
-        FROM usage_facts u
-        LEFT JOIN cost_facts c ON u.run_id = c.run_id AND u.usage_id = c.usage_id
-        LEFT JOIN runs r       ON u.run_id = r.run_id
+        FROM canonical_usage u
+        LEFT JOIN runs r ON u.run_id = r.run_id
         WHERE u.observed_at >= ?
     """
     params: list = [cutoff_iso]
@@ -244,8 +305,9 @@ def load_tool_facts(db_path: str, args: argparse.Namespace) -> tuple:
             t.tool_name_canon,
             t.tool_has_error,
             t.turn_index,
+            t.attribution,
             r.squad
-        FROM tool_facts t
+        FROM canonical_tool_facts t
         LEFT JOIN runs r ON t.run_id = r.run_id
         WHERE t.observed_at >= ?
     """
@@ -349,11 +411,14 @@ def load_ngrams(db_path: str, args: argparse.Namespace) -> tuple:
     # Build filter key for cache
     filter_key = json.dumps({"squad": args.squad, "agent": args.agent, "days": args.days}, sort_keys=True)
 
-    # Get source_paths from usage_facts joined with transcript_sources
+    # Each usage row already names the transcript it came from — the lead's file
+    # for _lead, the subagent's own file for a subagent. Joining
+    # transcript_sources on run_id alone instead handed EVERY agent EVERY
+    # transcript of the run, so `first-pass` and `security` came out with
+    # byte-identical n-grams: the per-role view was measuring the whole run.
     query = """
-        SELECT DISTINCT u.agent_key, u.run_id, u.observed_at, ts.source_path
-        FROM usage_facts u
-        LEFT JOIN transcript_sources ts ON u.run_id = ts.run_id
+        SELECT DISTINCT u.agent_key, u.run_id, u.observed_at, u.source_path
+        FROM canonical_usage u
         WHERE u.observed_at >= ?
     """
     params: list = [cutoff_iso]
@@ -663,7 +728,11 @@ def compute_handover_graph(delegation_df: "pd.DataFrame") -> dict:
     for _, row in delegation_df.iterrows():
         from_agent = str(row.get("parent_agent", ""))
         to_agent = str(row.get("child_agent", ""))
-        cost = float(row.get("child_cost_usd", 0) or 0)
+        # NaN-safe: delegation_links.child_cost_usd is NULL for every row today
+        # (the post-pass that was meant to fill it never shipped), and NaN is
+        # truthy, so `or 0` would let it poison every downstream sum.
+        raw_cost = row.get("child_cost_usd")
+        cost = 0.0 if raw_cost is None or raw_cost != raw_cost else float(raw_cost)
         observed = str(row.get("observed_at", ""))
         squad = str(row.get("squad", "")) if "squad" in delegation_df.columns else ""
 
@@ -1090,8 +1159,14 @@ function render() {
   const totalTokens = rows.reduce((s,r) => s + (r.total_tokens||0), 0);
   const totalRuns = new Set(rows.map(r=>r.run_id)).size;
   const totalAgents = new Set(rows.map(r=>r.agent_key)).size;
-  const totalTools = (D.tools || []).filter(t => rows.some(r => r.run_id === t.run_id && r.agent_key === t.agent_key)).reduce((s,t)=>s+(t.count||1),0);
-  const totalDelegations = (D.delegations || []).filter(d => rows.some(r => r.run_id === d.parent_run_id)).length;
+  // Tool rows are an aggregate keyed by squad/agent/model, so they filter on
+  // those directly. Delegations still key on run_id, but via a Set — the old
+  // rows.some() scanned 100k+ usage rows per delegation on every keystroke.
+  const runIds = new Set(rows.map(r => r.run_id));
+  const totalTools = (D.tools || [])
+    .filter(t => (!squad || t.squad === squad) && (!agent || t.agent_key === agent) && (!model || t.model === model))
+    .reduce((s,t)=>s+(t.count||1),0);
+  const totalDelegations = (D.delegations || []).filter(d => runIds.has(d.parent_run_id)).length;
   document.getElementById('kpi-cards').innerHTML = [
     ['Total cost', fmtUsd(totalCost)],
     ['Total tokens', fmtN(totalTokens)],
@@ -1111,17 +1186,21 @@ function render() {
   document.getElementById('tbl-agent').innerHTML = '<tr><th>Agent</th><th>Turns</th><th class="num">Tokens</th><th class="num">Cost</th><th class="num">Runs</th><th>Squads</th><th>Models</th></tr>' +
     Object.values(ag).sort((a,b)=>b.cost-a.cost).map(a => `<tr><td>${escHtml(a.agent_key)}</td><td>${fmtN(a.turns)}</td><td class="num">${fmtN(a.tokens)}</td><td class="num">${fmtUsd(a.cost)}</td><td class="num">${a.runs.size}</td><td>${[...a.squads].map(escHtml).join(', ')}</td><td>${[...a.models].map(escHtml).join(', ')}</td></tr>`).join('');
 
-  const tools = (D.tools||[]).filter(t => rows.some(r => r.run_id === t.run_id && r.agent_key === t.agent_key));
+  // Filter on the aggregate's own dimensions. This used to join every tool row
+  // against every usage row (O(tools x rows) on each keystroke) and silently
+  // dropped calls whose run_id did not match a usage row.
+  const tools = (D.tools||[]).filter(t =>
+    (!squad || t.squad === squad) && (!agent || t.agent_key === agent) && (!model || t.model === model));
   const tgrp = {};
-  tools.forEach(t => { const k = t.tool_name_canon||'(unknown)'; if (!tgrp[k]) tgrp[k] = {tool:k,count:0,cost:0,agents:new Set()}; tgrp[k].count += (t.count||1); tgrp[k].cost += (t.cost_usd||0); tgrp[k].agents.add(t.agent_key); });
+  tools.forEach(t => { const k = t.tool_name_canon||'(unknown)'; if (!tgrp[k]) tgrp[k] = {tool:k,count:0,errors:0,cost:0,agents:new Set()}; tgrp[k].count += (t.count||1); tgrp[k].errors += (t.errors||0); tgrp[k].cost += (t.cost_usd||0); tgrp[k].agents.add(t.agent_key); });
   const maxT = Math.max(1, ...Object.values(tgrp).map(x=>x.count));
-  document.getElementById('tbl-tools').innerHTML = '<tr><th>Tool (canonical)</th><th class="num">Calls</th><th></th><th class="num">Cost</th><th>Agents</th></tr>' +
-    Object.values(tgrp).sort((a,b)=>b.count-a.count).slice(0,30).map(t => `<tr><td>${escHtml(t.tool)}</td><td class="num">${fmtN(t.count)}</td><td><span class="bar" style="width:' + (t.count/maxT*100).toFixed(1) + '%"></span></td><td class="num">${fmtUsd(t.cost)}</td><td>${t.agents.size}</td></tr>`).join('') ||
-    '<tr><td colspan="5" class="meta">tool_facts empty (backfill hasn\'t run yet?)</td></tr>';
+  document.getElementById('tbl-tools').innerHTML = '<tr><th>Tool (canonical)</th><th class="num">Calls</th><th></th><th class="num">Errors</th><th class="num">Err %</th><th>Agents</th></tr>' +
+    Object.values(tgrp).sort((a,b)=>b.count-a.count).slice(0,30).map(t => `<tr><td>${escHtml(t.tool)}</td><td class="num">${fmtN(t.count)}</td><td><span class="bar" style="width:' + (t.count/maxT*100).toFixed(1) + '%"></span></td><td class="num">${fmtN(t.errors)}</td><td class="num">${t.count ? (100*t.errors/t.count).toFixed(1) : '0.0'}%</td><td>${t.agents.size}</td></tr>`).join('') ||
+    '<tr><td colspan="6" class="meta">tool_facts empty (backfill hasn\'t run yet?)</td></tr>';
 
   const rawUnmatched = (D.tools_raw||[]).filter(t => !t.tool_name_canon);
   const rgrp = {};
-  rawUnmatched.forEach(t => { rgrp[t.tool_name_raw] = (rgrp[t.tool_name_raw]||0) + 1; });
+  rawUnmatched.forEach(t => { rgrp[t.tool_name_raw] = (rgrp[t.tool_name_raw]||0) + (t.count||1); });
   document.getElementById('tbl-tools-raw').innerHTML = '<tr><th>Raw name</th><th class="num">Count</th></tr>' +
     Object.entries(rgrp).sort((a,b)=>b[1]-a[1]).slice(0,30).map(([n,c]) => `<tr><td>${escHtml(n)}</td><td class="num">${c}</td></tr>`).join('');
 
@@ -1205,6 +1284,28 @@ def write_report(
     """Write full report artifacts (data.json + index.html)."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    def _int(value) -> int:
+        """NaN-safe int. `or 0` does NOT cover NaN — it is truthy, so it passes
+        straight through and int() raises. Missing counts become 0."""
+        try:
+            if value is None or value != value:  # NaN != NaN
+                return 0
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _cost(value):
+        """NaN-safe cost, preserving 'unknown'. A call whose model was missing
+        from the price snapshot has no cost — that is NULL in the view and must
+        stay null in JSON, not become $0.00. json.dumps would otherwise emit a
+        bare NaN literal, which is invalid JSON and breaks the viewer's fetch."""
+        try:
+            if value is None or value != value:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     # Build rows for the viewer
     rows = []
     if not usage_df.empty:
@@ -1215,36 +1316,47 @@ def write_report(
                 "agent_key": str(r.get("agent_key", "")),
                 "model": str(r.get("model", "")),
                 "observed_at": str(r.get("observed_at", "")),
-                "total_tokens": int((r.get("input_tokens", 0) or 0) + (r.get("output_tokens", 0) or 0)),
-                "cost_usd": float(r.get("cost_usd", 0) or 0),
+                "total_tokens": _int(r.get("input_tokens", 0)) + _int(r.get("output_tokens", 0)),
+                "cost_usd": _cost(r.get("cost_usd")),
             })
 
-    # Tools (sample up to 5000)
+    # Tools — a full aggregate, not a sample.
+    #
+    # This previously emitted one entry per call with count:1 and then kept the
+    # FIRST 5000 (`tools[:5000]`), so a fleet with 52 049 calls reported on ~10%
+    # of them, chosen by insertion order rather than at random. It also never
+    # carried tool_has_error, so the error rate could not reach the report at
+    # all. Grouping by the dimensions the viewer actually filters on keeps every
+    # call represented in a few thousand rows.
     tools = []
     tools_raw = []
     if not tool_df.empty:
-        for _, r in tool_df.iterrows():
-            entry = {
-                "run_id": str(r.get("run_id", "")),
-                "agent_key": str(r.get("agent_key", "")),
-                "tool_name_raw": str(r.get("tool_name_raw", "")),
-                "tool_name_canon": r.get("tool_name_canon"),
-                "count": 1,
+        keys = ["squad", "agent_key", "model", "tool_name_canon", "tool_name_raw"]
+        grouped = (
+            tool_df.assign(**{k: tool_df[k].fillna("") for k in keys if k in tool_df.columns})
+            .groupby([k for k in keys if k in tool_df.columns], dropna=False)
+            .agg(count=("tool_name_raw", "size"), errors=("tool_has_error", "sum"))
+            .reset_index()
+        )
+        for _, r in grouped.iterrows():
+            canon = str(r.get("tool_name_canon", "") or "")
+            tools.append({
+                "squad": str(r.get("squad", "") or ""),
+                "agent_key": str(r.get("agent_key", "") or ""),
+                "model": str(r.get("model", "") or ""),
+                "tool_name_raw": str(r.get("tool_name_raw", "") or ""),
+                "tool_name_canon": canon or None,
+                "count": _int(r.get("count")),
+                "errors": _int(r.get("errors")),
                 "cost_usd": 0,
-            }
-            tools.append(entry)
-            if not r.get("tool_name_canon"):
+            })
+            if not canon:
                 tools_raw.append({
-                    "run_id": str(r.get("run_id", "")),
-                    "agent_key": str(r.get("agent_key", "")),
-                    "tool_name_raw": str(r.get("tool_name_raw", "")),
+                    "squad": str(r.get("squad", "") or ""),
+                    "agent_key": str(r.get("agent_key", "") or ""),
+                    "tool_name_raw": str(r.get("tool_name_raw", "") or ""),
+                    "count": _int(r.get("count")),
                 })
-        # Cap at 5000
-        if len(tools) > 5000:
-            tools = tools[:5000]
-            tools_raw = [t for t in tools_raw if any(
-                t["run_id"] == tt["run_id"] for tt in tools
-            )]
 
     # Delegations
     delegations = []
@@ -1255,7 +1367,7 @@ def write_report(
                 "parent_agent": str(r.get("parent_agent", "")),
                 "child_agent": str(r.get("child_agent", "")),
                 "observed_at": str(r.get("observed_at", "")),
-                "child_cost_usd": float(r.get("child_cost_usd", 0) or 0),
+                "child_cost_usd": _cost(r.get("child_cost_usd")),
                 "source": str(r.get("source", "")),
             })
 
@@ -1266,9 +1378,9 @@ def write_report(
             tasks.append({
                 "task_id": str(r.get("task_id", "")),
                 "squad": str(r.get("squad", "")),
-                "runs": int(r.get("runs", 0) or 0),
-                "cost_usd": float(r.get("cost_usd", 0) or 0),
-                "tokens": int(r.get("tokens", 0) or 0),
+                "runs": _int(r.get("runs")),
+                "cost_usd": _cost(r.get("cost_usd")),
+                "tokens": _int(r.get("tokens")),
                 "first_started": str(r.get("first_started", "")),
             })
 
@@ -1355,6 +1467,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Output:  {out_dir.resolve()}")
     print(f"Filters: squad={args.squad or '(all)'}, agent={args.agent or '(all)'}, days={args.days}")
     print()
+
+    if Path(db_path).exists():
+        absent = missing_canonical_views(db_path)
+        if absent:
+            print(f"ERROR: missing canonical view(s): {', '.join(absent)}")
+            print("These deduplicate run-scoped facts; without them every total is inflated.")
+            print("Create them with:\n    node scripts/telemetry-canonical.mjs --ensure")
+            return 1
 
     if not Path(db_path).exists():
         print(f"WARNING: Database not found at {db_path}")
