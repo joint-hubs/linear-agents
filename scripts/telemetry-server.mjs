@@ -51,6 +51,10 @@ import {
   isExternalPath,
 } from './prompt-library.mjs';
 import { computeOutcomes } from './delegation-outcomes.mjs';
+// FOC-219: unified verdict evidence (supervisor + legacy verdicts with round
+// lineage). Pure projection — the route computes per request and degrades to
+// the valid empty shape when .state/ is absent.
+import { projectVerdictEvidence, emptyVerdictEvidence } from './verdict-evidence.mjs';
 import { getCachedManagerSnapshot } from './manager-snapshot.mjs';
 import { openRewardsDb, insertRating } from './reward-ledger.mjs';
 import { buildRewardsPayload } from './reward-ingest.mjs';
@@ -1463,6 +1467,24 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // GET /api/verdict-evidence (FOC-219)
+    // Unified verdict evidence: supervisor verdicts + legacy REVIEW rounds,
+    // folded into logical verdicts with round lineage and coverage classes.
+    // Same compute→serve pattern as /api/delegation-outcomes: recomputed per
+    // request — a stale panel would be worse than a slow one. Absent .state/
+    // is a legitimate empty state (valid degraded shape, not a failure).
+    if (path === '/api/verdict-evidence') {
+      let data = null;
+      try {
+        data = projectVerdictEvidence();
+      } catch (error) {
+        console.error('[verdict-evidence]', error.message);
+      }
+      json(res, 200, data || emptyVerdictEvidence());
+      log(method, path, 200);
+      return;
+    }
+
     // GET /api/cost-per-task
     if (path === '/api/cost-per-task') {
       const data = (await telemetrySummary({ priceMode: url.searchParams.get('pricing') || 'current' })).byTask;
@@ -1900,6 +1922,7 @@ server.listen(PORT, '127.0.0.1', () => {
       '/api/summary',
       '/api/cost-per-task',
       '/api/delegation-outcomes',
+      '/api/verdict-evidence',
       '/api/budget',
       '/api/telemetry/health',
       '/api/linear/queue?workspace=jointhubs',

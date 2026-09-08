@@ -74,6 +74,7 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 - `scripts/telemetry-delegation-recon.mjs` — rekonstrukcja parent→child delegation links
 - `scripts/check-transcript-retention.mjs` — audyt: ile usage_facts ma live transcript
 - `scripts/delegation-outcomes.mjs` — join review verdicts na delegations (JOI-210)
+- `scripts/verdict-evidence.mjs` — ujednolicone dowody werdyktów: supervisor + legacy → logical verdicts z round lineage i coverage classes (FOC-219; `GET /api/verdict-evidence`)
 - `scripts/prompt-library.mjs` — backend biblioteki promptów (drzewo intencji + role/lead docs)
 - `notebooks/agent_intelligence.py` — CLI → self-contained HTML z telemetrii SQL
 - `scripts/graph-validate.mjs` — walidator `config/graph.json` (topologia składów) + `--emit-puml` / `--emit-handoff-rules`
