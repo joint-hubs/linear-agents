@@ -785,6 +785,14 @@ function rebuildReport(r) {
 }
 
 // ── 5. real-corpus read-only A/B (skipped without the main checkout) ──────────
+// The corpus is APPEND-ONLY and self-referential: this very candidate's own
+// REVIEW verdicts (FOC-218, FOC-219 …) are recorded into the same .state/ the
+// A/B reads, so exact aggregate totals flip on every supervised run — they
+// moved 118 → 119 → 120 logical verdicts within a day of pinning. Human
+// decision (Mateusz, 2026-09-08): the pinned SEMANTICS live on named
+// immutable cells — historical records that can no longer change — never on
+// exact totals. Totals are sanity-checked only via the sum invariant and
+// growth-tolerant floors.
 
 function mainCheckoutRoot() {
   const r = spawnSync("git", ["worktree", "list", "--porcelain"], { cwd: join(__dirname, ".."), encoding: "utf8" });
@@ -808,20 +816,30 @@ if (mainRoot && supDir && revDir && existsSync(supDir) && existsSync(revDir)) {
     dbPath: join(root, "no-such-db.sqlite"),
   });
 
-  check("real-corpus: coverage baseline {118, 11, 104, 3}",
-    JSON.stringify(rep.coverage) === JSON.stringify({ logicalVerdicts: 118, matched: 11, unmatched: 104, ambiguous: 3 }),
-    JSON.stringify(rep.coverage));
+  // Append-only totals: never asserted exactly — printed so every run shows
+  // the live corpus state, and bounded only by the invariant + floors.
+  console.log(`  live corpus coverage: ${JSON.stringify(rep.coverage)} (evidenceRows: ${rep.evidenceRows.length})`);
   check("real-corpus: sum invariant", sumInvariant(rep.coverage));
+  check("real-corpus: growth-tolerant floors (matched >= 11, ambiguous >= 3)",
+    rep.coverage.matched >= 11 && rep.coverage.ambiguous >= 3,
+    JSON.stringify(rep.coverage));
 
-  const amb = new Map(rep.logicalVerdicts.filter((l) => l.coverageClass === "ambiguous")
-    .map((l) => [`${l.issue}|${l.stage}|${l.round}`, l.conflict.sides]));
-  check("real-corpus: exactly 3 ambiguous cells, supervisor-precedence, both sides named",
-    amb.size === 3
-      && JSON.stringify(amb.get("FOC-151|review|2")) === JSON.stringify({ structured: "pass", legacy: "FAIL" })
-      && JSON.stringify(amb.get("FOC-151|review|3")) === JSON.stringify({ structured: "fail", legacy: "PASS" })
-      && JSON.stringify(amb.get("FOC-156|review|1")) === JSON.stringify({ structured: "pass", legacy: "FAIL" })
-      && rep.logicalVerdicts.filter((l) => l.coverageClass === "ambiguous").every((l) => l.conflict.resolvedBy === "supervisor-precedence"),
-    JSON.stringify([...amb], null, 1));
+  // Named immutable cells — historical records that can no longer change.
+  const ambByKey = new Map(rep.logicalVerdicts.filter((l) => l.coverageClass === "ambiguous")
+    .map((l) => [`${l.issue}|${l.stage}|${l.round}`, l]));
+  const expectAmbiguous = {
+    "FOC-151|review|2": { resolved: "PASS", sides: { structured: "pass", legacy: "FAIL" } },
+    "FOC-151|review|3": { resolved: "FAIL", sides: { structured: "fail", legacy: "PASS" } },
+    "FOC-156|review|1": { resolved: "PASS", sides: { structured: "pass", legacy: "FAIL" } },
+  };
+  for (const [key, want] of Object.entries(expectAmbiguous)) {
+    const l = ambByKey.get(key);
+    check(`real-corpus: ambiguous cell ${key} exact (immutable record, supervisor-precedence, both sides)`,
+      !!l && l.resolvedVerdict === want.resolved && l.conflict.resolvedBy === "supervisor-precedence"
+        && JSON.stringify(l.conflict.sides) === JSON.stringify(want.sides)
+        && JSON.stringify(l.sources) === JSON.stringify(["structured", "legacy"]),
+      JSON.stringify(l));
+  }
 
   const r142legacy = rep.evidenceRows.filter((r) => r.issue === "FOC-142" && r.source === "legacy");
   check("real-corpus: FOC-142 legacy attempt resolves via reviewRunId join to run 2d75",
@@ -830,21 +848,32 @@ if (mainRoot && supDir && revDir && existsSync(supDir) && existsSync(revDir)) {
       && r.work.reviewRunId === "2026-08-27T08-08-45-487-review-63bc"),
     JSON.stringify(r142legacy.map((r) => [r.round, r.attempt, r.work.reviewRunId])));
   const l142r1 = logicalOf(rep, "FOC-142", "review", 1);
-  check("real-corpus: FOC-142 r1 decided + UNKNOWN → matched, evidence-asymmetry",
-    l142r1?.coverageClass === "matched" && l142r1?.resolution === "evidence-asymmetry",
+  check("real-corpus: FOC-142 r1 matched, evidence-asymmetry, FAIL, attempt joined to run 2d75",
+    l142r1?.coverageClass === "matched" && l142r1?.resolution === "evidence-asymmetry"
+      && l142r1?.resolvedVerdict === "FAIL"
+      && l142r1?.attempt === "2026-08-27T06-45-08-262-supervisor-2d75",
     JSON.stringify(l142r1));
+  const l142r2 = logicalOf(rep, "FOC-142", "review", 2);
+  check("real-corpus: FOC-142 r2 matched PASS",
+    l142r2?.coverageClass === "matched" && l142r2?.resolvedVerdict === "PASS",
+    JSON.stringify(l142r2));
 
   const r211 = rep.evidenceRows.find((r) => r.issue === "FOC-211" && r.source === "legacy");
-  check("real-corpus: FOC-211 legacy row carries unsupervised pseudo-attempt",
-    r211?.attempt === "unsupervised:FOC-211", r211?.attempt);
+  const l211 = logicalOf(rep, "FOC-211", "review", 1);
+  check("real-corpus: FOC-211 legacy unsupervised pseudo-attempt, cell matched PASS",
+    r211?.attempt === "unsupervised:FOC-211" && l211?.coverageClass === "matched" && l211?.resolvedVerdict === "PASS",
+    JSON.stringify([r211?.attempt, l211]));
 
   const srow151 = rowOf(rep, "FOC-151", "structured", 2);
-  const l151 = logicalOf(rep, "FOC-151", "review", 2);
-  check("real-corpus: FOC-151 r2 cross-stage recording — row stays test, rolls up to review, flagged",
-    srow151?.stage === "test" && srow151?.qualityFlags.includes("cross-stage-recording")
-      && l151?.stage === "review" && l151?.coverageClass === "ambiguous"
-      && typeof l151?.work.workId === "string" && l151.work.workId.startsWith("fp:"),
-    JSON.stringify([srow151?.stage, srow151?.qualityFlags, l151?.stage, l151?.coverageClass, l151?.work.workId]));
+  const l151 = ambByKey.get("FOC-151|review|2");
+  check("real-corpus: FOC-151 r2 cross-stage recording — row stays test (childId test-4), rolls up to review",
+    srow151?.stage === "test" && srow151?.childId === "test-4"
+      && srow151?.qualityFlags.includes("cross-stage-recording")
+      && l151?.stage === "review" && l151?.coverageClass === "ambiguous",
+    JSON.stringify([srow151?.stage, srow151?.childId, srow151?.qualityFlags, l151?.stage]));
+
+  check("real-corpus: FOC-218 present with fp: workId (self-referential growth is expected)",
+    rep.logicalVerdicts.some((l) => l.issue === "FOC-218" && typeof l.work.workId === "string" && l.work.workId.startsWith("fp:")));
 
   check("real-corpus: hermetic — delegations unavailable with pinned-missing dbPath",
     rep.delegations.available === false && rep.delegations.attribution === "weak");
