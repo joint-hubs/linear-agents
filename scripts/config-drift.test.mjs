@@ -187,6 +187,49 @@ test("sekcja Supervised mode jest identyczna we wszystkich czterech składach", 
   }
 });
 
+// Generic subagents (`general-purpose`, `Explore`) have no role definition, so
+// they inherit the SONNET tier — the same model Claude Code claims for its
+// auto-mode permission classifier, tuned for terse allow/deny rather than work.
+// Measured once at 48.8% tool errors across one such session. The instruction to
+// pass an explicit `model: "haiku"` at spawn is the only thing standing between
+// that tier and real work, and it lives in five prompts that drift apart the
+// moment someone edits one.
+const GENERIC_MODEL_SQUADS = ["plan", "dev", "review", "test", "cadence"];
+const genericModelBlock = (squad) => {
+  const doc = read(`agents/${squad}/CLAUDE.md`).replace(/\r\n/g, "\n");
+  const open = doc.indexOf("**A generic subagent needs an explicit model.**");
+  if (open === -1) return null;
+  const close = doc.indexOf("explicit slug in their own frontmatter.", open);
+  if (close === -1) return null;
+  return doc.slice(open, close).trimEnd();
+};
+
+test("każdy skład mówi, jaki model dać generycznemu subagentowi", () => {
+  const missing = GENERIC_MODEL_SQUADS.filter((s) => genericModelBlock(s) === null);
+  if (missing.length) fail(`brak instrukcji o modelu generycznego subagenta w: ${missing.join(", ")}`);
+});
+
+test("instrukcja o generycznym subagencie jest identyczna we wszystkich składach", () => {
+  const reference = genericModelBlock("plan");
+  const diverged = GENERIC_MODEL_SQUADS.filter((s) => genericModelBlock(s) !== reference);
+  if (diverged.length) fail(`rozjechana instrukcja w: ${diverged.join(", ")} — edytuj wszystkie naraz`);
+});
+
+test("alias z instrukcji faktycznie wskazuje na model roboczy", () => {
+  // The instruction names `haiku`, which resolves through
+  // ANTHROPIC_DEFAULT_HAIKU_MODEL (ADR-0002 test 3b). If that tier is ever
+  // pointed at the same model as `sonnet`, the advice becomes a no-op and
+  // nothing else would say so.
+  const tiers = readJson("config/models.json").providers?.openrouter?.tiers ?? {};
+  const block = genericModelBlock("plan") ?? "";
+  const alias = block.match(/pass `model: "(\w+)"`/)?.[1];
+  if (!alias) fail("nie da się odczytać aliasu z instrukcji");
+  if (!tiers[alias]) fail(`alias '${alias}' nie ma odpowiednika w providers.openrouter.tiers`);
+  if (tiers[alias] === tiers.sonnet) {
+    fail(`alias '${alias}' wskazuje ten sam model co tier sonnet (${tiers.sonnet}) — instrukcja nic nie zmienia`);
+  }
+});
+
 test("tylko DEV ma dodatek o pojedynczej ścieżce wznowienia", () => {
   // §1.6.1 is DEV-specific: only DEV had three resume mechanisms to collapse.
   const withExtra = SUPERVISED_SQUADS.filter((s) => supervisedBlock(s).includes("### DEV only"));
