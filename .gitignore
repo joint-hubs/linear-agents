@@ -36,6 +36,9 @@ agents/*/todos/
 agents/*/.last-update-result.json
 agents/*/jobs/
 agents/*/daemon/
+# feedback drafts (pre-send, keyed by UUID) and the stats cache are regenerated
+agents/*/feedback/
+agents/*/stats-cache.json
 
 # spike scratch (re-runnable T-A1 evidence; see docs/adr/0002)
 .spike-*/
@@ -83,6 +86,9 @@ config/atlas-mcp.json
 
 # CodeGraph local index — rebuildable with `codegraph init`, and large.
 .codegraph/
+
+# Codex CLI local home (config.toml, hooks.json) — machine-local, created on first use.
+.codex/
 
 # Nebul diagnostics: raw HTTP wire captures, ~25 MB. The repro scripts and the
 # support report next to them are committed; the dumps they produce are not.
