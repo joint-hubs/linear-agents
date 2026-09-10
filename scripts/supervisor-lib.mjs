@@ -333,12 +333,19 @@ export function consumerOf(squad, graph) {
  * on and is waiting for a slot, so treating it as free capacity would admit work
  * that is already queued.
  */
-export function queueState(runId, graph, registry = readRegistry(runId), { excludeHeld = null } = {}) {
+export function queueState(runId, graph, registry = readRegistry(runId), { excludeHeld = null, excludeHeldSquad = null } = {}) {
   // `excludeHeld` is how --release asks "could this run if it were not itself
   // queued?". Without it a held request counts against its own slot and can
   // never be released — it blocks itself forever, which is what the first
   // version of this did.
-  const held = readHeld(runId).filter((h) => h.heldId !== excludeHeld);
+  // `excludeHeldSquad` asks the same for the record's SIBLINGS: when --release
+  // checks the oldest held request, the other held requests of that squad are
+  // queued BEHIND it, not occupying its slot. Without this, concurrency=1 with
+  // two or more held requests deadlocks — each is refused because of the rest,
+  // so none can ever start.
+  const held = readHeld(runId).filter(
+    (h) => h.heldId !== excludeHeld && h.squad !== excludeHeldSquad,
+  );
   const state = {};
   const touch = (squad) => (state[squad] ??= { live: 0, held: 0, limit: concurrencyFor(squad, graph) });
 

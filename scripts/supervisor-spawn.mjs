@@ -88,18 +88,29 @@ if (args.release) {
       stillHeld.push({ ...h, why: "unreadable — inspect it by hand" });
       continue;
     }
-    const check = admissionCheck(runId, h.squad, graph, undefined, { excludeHeld: h.heldId });
+    // excludeHeldSquad: the sibling held requests are queued BEHIND this record,
+    // they do not occupy its slot. Counting them would deadlock the release
+    // whenever concurrency=1 and two or more requests wait (each refused
+    // because of the others, so none can ever start). The replay below still
+    // passes the normal admission path, so a slot taken by the record released
+    // here is seen by the siblings checked after it.
+    const check = admissionCheck(runId, h.squad, graph, undefined, {
+      excludeHeld: h.heldId,
+      excludeHeldSquad: h.squad,
+    });
     if (!check.admit) {
       stillHeld.push({ heldId: h.heldId, squad: h.squad, taskId: h.taskId, why: check.detail });
       continue;
     }
-    // Remove the record BEFORE replaying it. The replay re-enters this same
-    // script, which counts held requests as occupied capacity — leaving the
-    // record in place would make the request hold itself out of its own slot.
-    // (The admission check above already excludes it; this keeps the replay
-    // honest too.)
+    // Remove the record BEFORE replaying it — a held request counts against
+    // its own slot otherwise. The replay carries `--release-replay` so the
+    // normal admission path below asks the same question this check just
+    // answered ("is the LIVE slot free?") instead of the new-spawn question
+    // ("is the queue empty?"), which would re-hold the request behind the
+    // very siblings this check excluded — re-held with a fresh record, so
+    // nothing would ever start.
     rmSync(heldPath(runId, h.heldId), { force: true });
-    const res = spawnSync(process.execPath, [process.argv[1], ...(h.argv ?? [])], {
+    const res = spawnSync(process.execPath, [process.argv[1], ...(h.argv ?? []), "--release-replay"], {
       encoding: "utf8",
       env: process.env,
     });
@@ -144,7 +155,14 @@ const registry = readRegistry(runId);
 // written down and released when a slot frees. Refusing would make the
 // Supervisor responsible for remembering what it asked for, which is the kind of
 // state a model loses across a compaction.
-const admission = admissionCheck(runId, squad, graphOrNull());
+// `--release-replay` marks a request the release loop already admitted. The
+// replay re-enters this normal path, and the held siblings queued BEHIND it
+// must not hold it out of its own slot again. This is not a bypass flag: live
+// capacity still refuses (a slot taken since the release check re-holds the
+// request), and only the release loop ever writes the marker.
+const admission = args["release-replay"]
+  ? admissionCheck(runId, squad, graphOrNull(), undefined, { excludeHeldSquad: squad })
+  : admissionCheck(runId, squad, graphOrNull());
 // No bypass flag. One was there for a moment and it defeated the point: the
 // semaphore exists so that raising a limit is a committed edit to
 // config/graph.json, and a CLI flag that skips it hands that decision back to
@@ -161,8 +179,11 @@ if (!admission.admit) {
     consumer: admission.consumer ?? null,
     heldAt: new Date().toISOString(),
     // Everything needed to start it later, so `--release` replays the request
-    // rather than asking the Supervisor to reconstruct it.
-    argv: process.argv.slice(2),
+    // rather than asking the Supervisor to reconstruct it. The release marker
+    // is stripped: it belongs to the release attempt, not to the request — a
+    // replay that is held again must keep its original argv (and queue
+    // seniority would be lost rewriting it anyway).
+    argv: process.argv.slice(2).filter((a) => a !== "--release-replay"),
   });
   console.log(
     JSON.stringify(

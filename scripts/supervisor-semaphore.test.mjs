@@ -151,6 +151,31 @@ test("held requests count against capacity, not just live ones", () => {
   assert.equal(admissionCheck(runId, "dev", g).admit, false);
 });
 
+test("a release check excludes the held siblings of the same squad", () => {
+  // queueState counts held requests as capacity for a NEW spawn — fairness:
+  // queued work goes first. --release asks a different question: "may the
+  // OLDEST start?". The siblings waiting behind it are not occupying its
+  // slot. Without the exclusion, concurrency=1 with two or more held
+  // requests deadlocks: each is refused because of the rest.
+  const runId = runWith();
+  const g = withConcurrency("dev", 1);
+  const dir = ensureHeldDir(runId);
+  for (const id of ["held-dev-1", "held-dev-2"]) {
+    writeFileSync(
+      join(dir, `${id}.json`),
+      JSON.stringify({ heldId: id, squad: "dev", taskId: "FOC-1", heldAt: new Date().toISOString() }),
+    );
+  }
+  // A fresh spawn still waits: the queue is ahead of it.
+  assert.equal(admissionCheck(runId, "dev", g).admit, false);
+  // The release check for the oldest admits: 0 live, siblings excluded.
+  const c = admissionCheck(runId, "dev", g, undefined, {
+    excludeHeld: "held-dev-1",
+    excludeHeldSquad: "dev",
+  });
+  assert.equal(c.admit, true);
+});
+
 // ── 3. backpressure ──────────────────────────────────────────────────────────
 console.log("\nbackpressure — nasycony konsument wstrzymuje producenta");
 
@@ -221,6 +246,39 @@ test("--release starts a held request once the slot frees", () => {
   // The record is consumed, not left to be released twice.
   assert.equal(readHeld(runId).length, 0);
   assert.ok(readRegistry(runId).children["dev-2"], "the released child was never registered");
+});
+
+test("--release frees the oldest held request even with siblings queued behind it", () => {
+  // Regression: with concurrency=1 and two held requests, each was counted
+  // against the others' slot — release refused both, forever, and the run
+  // stalled with nothing live. The siblings are queued BEHIND the oldest;
+  // releasing it must still work, and it must take the slot so the siblings
+  // keep waiting.
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const first = parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_HANG_MS: "20000" }), fail);
+  runSpawn(runId, repo, ["--task", "FOC-124", "--child", "dev-2"]); // held #1 (older)
+  runSpawn(runId, repo, ["--task", "FOC-125", "--child", "dev-3"]); // held #2 (younger)
+
+  // Free the slot: nothing live, two waiting.
+  runScript(STOP, ["--run", runId, "--child", first.childId]);
+  waitForStatus(runId, first.childId, ["stopped", "exited", "crashed"]);
+
+  // The released child must STAY live to hold the slot for the sibling —
+  // baseEnv's MOCK_CLAUDE_HANG_MS=0 would let it finish before the loop
+  // reaches held #2, and the release would legitimately admit it too (the
+  // slot is genuinely free again). Pinning the hang makes the fixture say
+  // what the assertion claims: one slot taken, one sibling kept waiting.
+  const out = parse(runScript(SPAWN, ["--release", "--run", runId], { MOCK_CLAUDE_HANG_MS: "20000" }), fail);
+  assert.equal(out.ok, true);
+  assert.equal(out.released, 1, JSON.stringify(out));
+  assert.equal(out.started[0].result.ok, true, JSON.stringify(out.started[0]));
+  // The younger sibling stays queued: one slot, oldest first.
+  assert.equal(out.stillHeld.length, 1);
+  assert.equal(readHeld(runId).length, 1);
+  assert.ok(readRegistry(runId).children["dev-2"], "the released child was never registered");
+
+  runScript(STOP, ["--run", runId, "--child", "dev-2"]);
 });
 
 test("--release leaves a request held while the slot is still taken", () => {
