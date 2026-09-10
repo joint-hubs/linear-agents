@@ -94,6 +94,8 @@ node $LA_ROOT/scripts/supervisor-gate.mjs answer --gate <gateId> --text "<his an
 node $LA_ROOT/scripts/supervisor-followup.mjs --child <childId> --prompt "<his answer>" --gate <gateId>
 ```
 That order is enforced: `followup --gate` refuses a gate that does not exist, belongs to another child, or is still `pending`.
+
+**`followup` now waits for the turn to actually start**, up to 30 s, exactly as `spawn` does — it used to answer `ok: true` the moment it launched the watcher, which meant a turn that never started was reported as running (0 bytes in the tee, `pid: null`) and you waited on a child that did not exist. If it refuses with `no system/init`, the turn is dead and already recorded as `crashed`: read the tee, do not re-issue blindly.
 WHY — the file is the record (§2.6). Deliver without recording and the gate sits `pending` forever: the child works on while the queue still shows an open question nobody owes an answer to.
 
 `list` gives you the question **verbatim** — that is what you relay. `supervisor-status.mjs` redacts its snippets, so never quote a gate from there.

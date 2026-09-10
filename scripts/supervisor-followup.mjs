@@ -19,15 +19,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  INIT_TIMEOUT_MS,
   ROOT,
+  TERMINAL_STATUSES,
   assertStageBudget,
   assertWithinBudget,
   comparableProgress,
   failJson,
   gatePath,
+  killTree,
   parseArgs,
   readRegistry,
   roundsFor,
+  teeAbsPath,
   teeRelPath,
   updateChild,
   writeRegistry,
@@ -253,15 +257,69 @@ const watcher = spawn(process.execPath, watcherArgs, {
 });
 watcher.unref();
 
-// Unlike spawn, there is no wait for system/init: the session already exists and
-// its id cannot change on resume. The caller polls supervisor-status.mjs.
+// ── wait for system/init (FOC-271) ───────────────────────────────────────────
+// This used to return the moment the watcher was spawned, on the reasoning that
+// the session already exists so there is no session_id to wait for. True, and
+// beside the point: what needed verifying was never the id, it was that a
+// process started at all.
+//
+// Observed twice in one run (2026-09-09, 11:25 and 11:44): followup answered
+// ok:true, the watcher never got claude off the ground, and the registry showed
+// a turn with 0 bytes in the tee and a null pid. The Supervisor then waited on
+// a child that did not exist — 7 and 12 minutes of silence before anyone
+// noticed. Spawn has had this check since the beginning and refused correctly
+// on the same day; only this path was blind.
+//
+// The signal differs from spawn's. There is no new sessionId, so we wait for
+// the status the watcher writes when it sees system/init: the "starting" set
+// above becoming "running". A turn that finishes before we look is a terminal
+// status, which is success, not silence.
+const deadline = Date.now() + INIT_TIMEOUT_MS;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let live = null;
+let started = false;
+
+while (Date.now() < deadline) {
+  await sleep(150);
+  live = readRegistry(runId).children[childId];
+  if (live?.status === "running" || (live && TERMINAL_STATUSES.includes(live.status))) {
+    started = true;
+    break;
+  }
+}
+
+if (!started) {
+  // Same disposal as spawn: kill whatever fragment exists, record the turn as
+  // crashed, and fail loudly. A zombie recorded as a live turn is the thing
+  // this whole check exists to stop, so it must not degrade into a warning.
+  killTree(live?.turns?.[turnIndex]?.pid, "force");
+  updateChild(runId, childId, {
+    status: "crashed",
+    endedAt: new Date().toISOString(),
+    error: `no system/init within ${INIT_TIMEOUT_MS} ms (follow-up turn ${turnIndex})`,
+  });
+  failJson(
+    `follow-up turn ${turnIndex} for ${childId} produced no system/init within ${INIT_TIMEOUT_MS} ms — killed`,
+    {
+      childId,
+      turn: turnIndex,
+      tee: teeAbsPath(runId, childId),
+      hint: "the watcher started but claude never did; the tee is the first place to look",
+    },
+  );
+}
+
 console.log(
   JSON.stringify(
     {
       ok: true,
       childId,
       sessionId: entry.sessionId,
-      status: "running",
+      // The OBSERVED status, not a hardcoded "running". Now that this waits for
+      // init, a fast turn can already have finished by the time we look, and
+      // reporting it as running would be the same class of lie the wait was
+      // added to remove.
+      status: live?.status ?? "running",
       turn: turnIndex,
       tee: teeRelPath(childId),
       gateId: args.gate || null,
