@@ -11,9 +11,6 @@ REM Agent 2 - DEV (DRY-RUN). Spec: docs/agents/agent-2-dev.md
 REM DRY-RUN: no push, no Linear MCP, auto-approve HITL gates.
 set "CLAUDE_CONFIG_DIR=%ROOT%\agents\dev"
 set "ANTHROPIC_MODEL=z-ai/glm-5.3-flash"
-REM small_fast stays minimax-m3: the openrouter tier is deepseek-v4-flash,
-REM and this squad ran minimax before the tiers moved to the provider.
-set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"
 REM Model tiers (opus/sonnet/haiku/small_fast) come from the active provider:
 REM config/models.json providers.<name>.tiers, applied by scripts/provider-resolve.mjs
 REM via _lib.bat. Switching LA_PROVIDER switches them too. Override one here (AFTER

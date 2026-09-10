@@ -18,6 +18,18 @@ Access Linear via `node $LA_ROOT/scripts/linear-query.mjs` (read) and `node $LA_
 ## Squad
 Delegate via Task tool; role definitions live in `agents/review/agents/*.md` (single run: `bin\agent.bat review <role>`). Routing source of truth: `config/models.json` (`routing.review`).
 
+**A generic subagent needs an explicit model.** `general-purpose` and `Explore` have no role
+definition in this repo, so they inherit the **sonnet** tier — which is also what Claude Code claims
+for its own auto-mode permission classifier. That model is chosen to answer allow/deny in a few
+tokens, which is close to the opposite of what a working subagent needs; measured once at 48.8%
+tool errors across one such session.
+
+So when you spawn one, pass `model: "haiku"`. A per-spawn model takes precedence over both the
+agent definition and the default (ADR-0002), and the alias resolves through
+`ANTHROPIC_DEFAULT_HAIKU_MODEL` to the squad's working model. Named roles are unaffected — they pin an
+explicit slug in their own frontmatter.
+
+
 | role | purpose | `routing.review` key |
 |------|---------|----------------------|
 | first-pass | correctness / lint / style | `first_pass` |

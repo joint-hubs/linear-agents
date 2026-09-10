@@ -8,8 +8,8 @@
       "tiers": {
         "opus": "z-ai/glm-5.3-flash",
         "sonnet": "google/gemini-2.5-flash-lite",
-        "haiku": "deepseek/deepseek-v4-flash",
-        "smallFast": "deepseek/deepseek-v4-flash"
+        "haiku": "z-ai/glm-5.3-flash",
+        "smallFast": "z-ai/glm-5.3-flash"
       }
     },
     "anthropic": {
@@ -266,6 +266,11 @@
         "output": 50,
         "cacheRead": 1,
         "cacheWrite": 12.5
+      },
+      "deepseek/deepseek-v4.1-flash": {
+        "input": 0.15,
+        "output": 0.6,
+        "cacheRead": 0.003
       }
     },
     "nebul": {
