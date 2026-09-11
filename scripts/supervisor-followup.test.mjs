@@ -231,10 +231,11 @@ test("--gate is recorded on the turn for audit", () => {
   if (entry.turns[1].gateId !== gateId) fail(`gateId was ${entry.turns[1].gateId}`);
 });
 
-// ── incident catcher (FOC-284 round 2) ──────────────────────────────────────
+// ── incident catcher (FOC-284 rounds 2–3) ───────────────────────────────────
 // A --review-loop resume off a FAIL verdict must say so when the return may
 // never have landed: no linearEffects audit at all (a pre-FOC-284 tool wrote
-// the record — the round-1 incident), or a label recorded "failed". Fixtures
+// the record — the round-1 incident), a label recorded "failed", ops left
+// "pending" (crash window), or an unlanded transition. Fixtures
 // are verdict JSONs written straight into the run's verdicts dir; both rounds
 // share one fingerprint so the progress guard refuses before any spawn — the
 // warning fires on stderr first, and the refusal keeps the suite spawn-free.
@@ -325,6 +326,69 @@ test("a PASS verdict never trips the catcher", () => {
   const r = loopAttempt(runId);
   if (r.status !== 1) fail(`expected the repeated-round refusal, got exit ${r.status}`);
   if (/linearEffects|probably missing/.test(r.stderr)) fail(`unexpected incident warning:\n       ${r.stderr}`);
+});
+
+test("a FAIL verdict with pending return ops warns that the state is unknown (R2-3)", () => {
+  // The crash window between the pending write and the amend: the record stays
+  // "pending" forever. Either nothing was applied, or Linear WAS mutated while
+  // the record-time gate never fired (in-memory statuses read applied at the
+  // kill) — so neither the failure nor the landed wording fits; this one says
+  // the state is unknown and the issue must be verified first.
+  const runId = loopRun();
+  writeRound(runId, 1);
+  writeRound(runId, 2, {
+    linearEffects: {
+      dryRun: false,
+      label: { status: "pending", detail: "pending — the verdict file is written before the linear-ops label runs" },
+      transition: { status: "pending", detail: "pending — the verdict file is written before the linear-ops transition runs" },
+    },
+  });
+  const r = loopAttempt(runId);
+  if (r.status !== 1) fail(`expected the repeated-round refusal, got exit ${r.status}`);
+  if (!/left the return ops "pending"/.test(r.stderr)) fail(`no pending warning on stderr:\n       ${r.stderr}`);
+  if (!/state UNKNOWN/.test(r.stderr)) fail(`the pending warning must say the state is unknown:\n       ${r.stderr}`);
+  if (/FAILED return label|NO linearEffects audit|unlanded return transition/.test(r.stderr)) {
+    fail(`the pending warning reused another shape's wording:\n       ${r.stderr}`);
+  }
+});
+
+test("an unlanded TRANSITION warns even when the label applied (R2-3 mirror)", () => {
+  // The belt mirrors the record-time enforcement gate's condition: label
+  // applied + transition failed is invisible on later resumes if that gate
+  // failed to emit — never-block cuts both ways.
+  const runId = loopRun();
+  writeRound(runId, 1);
+  writeRound(runId, 2, {
+    linearEffects: {
+      dryRun: false,
+      label: { status: "applied", detail: "" },
+      transition: { status: "failed", detail: "linear-ops transition FOC-123 --status In Progress → state not found" },
+    },
+  });
+  const r = loopAttempt(runId);
+  if (r.status !== 1) fail(`expected the repeated-round refusal, got exit ${r.status}`);
+  if (!/unlanded return transition/.test(r.stderr)) fail(`no transition warning on stderr:\n       ${r.stderr}`);
+  if (!/\(failed\)/.test(r.stderr)) fail(`the warning does not name the transition status:\n       ${r.stderr}`);
+  if (!/state not found/.test(r.stderr)) fail(`the warning does not carry the op detail:\n       ${r.stderr}`);
+});
+
+test("a real applied/applied return stays silent — the mirror does not fire on a landed return", () => {
+  // The silence pin above covers the dry-run shape; this is the REAL landed
+  // shape the new mirror condition must also stay quiet on.
+  const runId = loopRun();
+  writeRound(runId, 1);
+  writeRound(runId, 2, {
+    linearEffects: {
+      dryRun: false,
+      label: { status: "applied", detail: "" },
+      transition: { status: "applied", detail: "" },
+    },
+  });
+  const r = loopAttempt(runId);
+  if (r.status !== 1) fail(`expected the repeated-round refusal, got exit ${r.status}`);
+  if (/pending|unlanded return transition|linearEffects|probably missing/.test(r.stderr)) {
+    fail(`unexpected incident warning:\n       ${r.stderr}`);
+  }
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────
