@@ -198,11 +198,37 @@ test("adding a routable edge changes the proposal with no code change", () => {
 // ── 4. Ambiguity is never rounded away ────────────────────────────────────────
 console.log("\nniepewność zostaje niepewnością");
 
-test("In Progress → ask (returned vs. still held is not decidable)", () => {
+test("In Progress with no return flag → ask (returned vs. still held is not decidable)", () => {
   const r = p({ state: "In Progress", stateType: "started", body: AC_BODY, estimate: 3 });
   assert.equal(r.proposal, "ask");
   assert.equal(r.confidence, "low");
   assert.ok(r.unknowns.some((u) => u.includes("In Progress")));
+});
+
+test("In Progress + returned-by:review → dev (FOC-284 return edge)", () => {
+  // The discriminator supervisor-verdict stamps on a review fail. Without it
+  // this case would still land on ask — fresh DEV work carries no return flag.
+  const r = p({ state: "In Progress", stateType: "started", labels: ["returned-by:review"], body: AC_BODY, estimate: 3 });
+  assert.equal(r.proposal, "dev");
+  assert.equal(r.confidence, "high");
+});
+
+test("In Progress + returned-by:test → dev (same key, emitter deferred FOC-165)", () => {
+  const r = p({ state: "In Progress", stateType: "started", labels: ["returned-by:test"], body: AC_BODY, estimate: 3 });
+  assert.equal(r.proposal, "dev");
+});
+
+test("a lingering return flag cannot steal a re-hand-off — In Review + coded routes to review", () => {
+  // DEV's re-hand-off stamps coded + In Review; the state-gated rule 3 fires
+  // before the return rule is ever reached, so a stale flag is inert.
+  const r = p({ state: "In Review", stateType: "started", labels: ["coded", "returned-by:review"], body: AC_BODY });
+  assert.equal(r.proposal, "review");
+});
+
+test("a needs:* label still outranks the return flag — the order-1 gate wins", () => {
+  const r = p({ state: "In Progress", stateType: "started", labels: ["returned-by:review", "needs-decision"], body: AC_BODY, estimate: 3 });
+  assert.equal(r.node, "human");
+  assert.equal(r.proposal, "ask");
 });
 
 test("a completed or canceled issue → ask, never re-routed", () => {

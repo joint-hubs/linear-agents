@@ -183,7 +183,7 @@ Twoją wyraźną zgodę (agenci nie pushują sami).
 |---|---|
 | PLAN → DEV     | status `Todo` + `dor-ok` |
 | DEV → REVIEW   | status `In Review` + `ai:coded` |
-| REVIEW → DEV   | status `In Progress` (return, +runda) |
+| REVIEW → DEV   | status `In Progress` + `returned-by:review` (return, +runda) |
 | REVIEW → TEST  | `stage:testing` + `ai:reviewed` + `version:<sesja>` |
 | TEST → done    | status `Done` + `dod-ok` |
 | dowolny → człowiek | `needs:answer/approval/decision/access` + @Mateusz → **stop** |

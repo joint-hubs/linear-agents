@@ -151,14 +151,17 @@ export function propose(signals, graph) {
     if (byRule) return byRule;
     if (byHandoff) return byHandoff;
 
-    // 5. Nothing routed. `In Progress` is the one state where that is actively
-    //    dangerous: it is BOTH "returned by review" and "a squad is working on
-    //    it right now", and no field on the issue tells the two apart. Same
-    //    reason review-to-dev-return is declared non-routable in graph.json.
+    // 5. Nothing routed. `In Progress` WITHOUT a returned-by:* flag is the one
+    //    state where that is actively dangerous: it is BOTH "returned for
+    //    rework" and "a squad is working on it right now". The flag — applied
+    //    by supervisor-verdict.mjs `record` on a review fail — is exactly what
+    //    makes review-to-dev-return routable in graph.json; without it there is
+    //    nothing to match.
     if (signals.state === "In Progress") {
       return ask(
-        'state "In Progress" matches no routable edge — it is both "returned for rework" and ' +
-          '"a squad already holds it", and nothing on the issue discriminates',
+        'state "In Progress" with no returned-by:* flag matches no routable edge — it is both ' +
+          '"returned for rework" and "a squad already holds it"; the returned-by:* flag ' +
+          '(stamped by supervisor-verdict.mjs on a review fail) is the discriminator that would decide it',
       );
     }
 

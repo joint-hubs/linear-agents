@@ -10,12 +10,14 @@
 // Run: node scripts/supervisor-verdict.test.mjs
 
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
   FOLLOWUP,
   ROOT,
+  baseEnv,
   fixtureRepo,
   fixtureRun,
   fixtureWorktree,
@@ -29,9 +31,49 @@ import { progressFingerprint, readRegistry, writeRegistry } from "./supervisor-l
 const { test, fail, summary } = harness();
 const VERDICT = join(ROOT, "scripts", "supervisor-verdict.mjs");
 
-const verdict = (args) => runScript(VERDICT, args);
+// Every record call here runs linear-ops offline: REVIEW_DRY_RUN=1 makes
+// linear-ops serve the mock fixture below instead of the live API (its --dry-run
+// flag alone still reads, so the env is what keeps the suite hermetic). And the
+// suites are never supervisor children, but this session may BE one —
+// LA_SUPERVISOR_CHILD is set by supervisor-spawn, runScript would inherit it,
+// and the FOC-167 guard would skip exactly the fail transition these tests
+// prove. It is scrubbed, and re-settable per call.
+const verdict = (args, env = {}) => {
+  const e = baseEnv({ REVIEW_DRY_RUN: "1", ...env });
+  delete e.LA_SUPERVISOR_CHILD;
+  if (env.LA_SUPERVISOR_CHILD !== undefined) e.LA_SUPERVISOR_CHILD = env.LA_SUPERVISOR_CHILD;
+  return spawnSync(process.execPath, [VERDICT, ...args], { cwd: ROOT, encoding: "utf8", env: e });
+};
 const followup = (runId, childId, extra = []) =>
   runScript(FOLLOWUP, ["--run", runId, "--child", childId, "--prompt", "again", ...extra]);
+
+// The offline fixture linear-ops (and linear-query) serve under *_DRY_RUN=1.
+// Any prior local file is restored on exit — .state is scratch, but it is not
+// ours to throw away.
+const MOCK_DIR = join(ROOT, ".state", "mock");
+const MOCK_FIXTURE = join(MOCK_DIR, "review-task.json");
+const priorMock = existsSync(MOCK_FIXTURE) ? readFileSync(MOCK_FIXTURE, "utf8") : null;
+const hadMockDir = existsSync(MOCK_DIR);
+mkdirSync(MOCK_DIR, { recursive: true });
+writeFileSync(
+  MOCK_FIXTURE,
+  JSON.stringify({
+    issue: {
+      identifier: "FOC-123",
+      state: { name: "In Review" },
+      labels: { nodes: [] },
+      description: "## Acceptance Criteria\n\n**Given** g **When** w **Then** t\n",
+    },
+  }),
+  "utf8",
+);
+process.on("exit", () => {
+  try {
+    if (priorMock !== null) writeFileSync(MOCK_FIXTURE, priorMock, "utf8");
+    else rmSync(MOCK_FIXTURE, { force: true });
+    if (!hadMockDir) rmSync(MOCK_DIR, { recursive: true, force: true });
+  } catch { /* best effort, like the fixtures cleanup */ }
+});
 
 // A finding that would satisfy the schema, for tests that are about something else.
 const CITED = JSON.stringify({ text: "resolvePrice ignores cacheRead", evidence: "scripts/ledger.mjs:88 resolvePrice" });
@@ -352,7 +394,117 @@ test("recording the same round twice is refused", () => {
   assert.match(again.error, /recorded once/);
 });
 
-// ── 5. the two stall conditions stay distinct ────────────────────────────────
+// ── 5. the fail transition (FOC-284) ─────────────────────────────────────────
+console.log("\nprzejście powrotu po failu recenzji");
+
+test("a review fail stamps the return flag and transitions In Progress (offline dry-run)", () => {
+  const s = scenario();
+  const out = record(s, ["--verdict", "fail", "--finding", CITED]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.linearEffects.dryRun, true, "the suite must exercise linear-ops offline, never live");
+  assert.equal(out.linearEffects.label.status, "applied");
+  assert.match(out.linearEffects.label.detail, /returned-by:review/, out.linearEffects.label.detail);
+  assert.equal(out.linearEffects.transition.status, "applied");
+  assert.match(out.linearEffects.transition.detail, /In Progress/, out.linearEffects.transition.detail);
+});
+
+test("the verdict file carries the same audit block the CLI printed", () => {
+  const s = scenario();
+  record(s, ["--verdict", "fail", "--finding", CITED]);
+  const onDisk = JSON.parse(readFileSync(join(ROOT, ".state", "supervisor", s.runId, "verdicts", "foc-123-round1.json"), "utf8"));
+  assert.equal(onDisk.linearEffects.label.status, "applied");
+  assert.equal(onDisk.linearEffects.transition.status, "applied");
+  assert.equal(onDisk.linearEffects.dryRun, true);
+});
+
+test("a pass records no side effects at all", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+  ]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.linearEffects.label.status, "not-applicable");
+  assert.equal(out.linearEffects.transition.status, "not-applicable");
+  assert.match(out.linearEffects.label.detail, /verdict "pass"/);
+});
+
+test("a non-review fail is recorded inert — no test emitter exists (F-05 → FOC-165)", () => {
+  const { base, repo } = fixtureRepo();
+  const testTree = fixtureWorktree(repo, "foc-123-test");
+  const reviewTree = fixtureWorktree(repo, "foc-123-test-review");
+  const runId = fixtureRun();
+  const child = (childId, squad, wt) => ({
+    childId,
+    squad,
+    taskId: "FOC-123",
+    sessionId: "11111111-2222-3333-4444-555555555555",
+    status: "exited",
+    turns: [{ pid: 1 }],
+    permissionMode: "bypassPermissions",
+    worktree: wt.worktree,
+    branch: wt.branch,
+    baseRevision: wt.baseRevision,
+  });
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "test-1": child("test-1", "test", testTree),
+      "review-1": child("review-1", "review", reviewTree),
+    },
+    rounds: {},
+  });
+
+  const out = parse(verdict(["record", "--run", runId, "--child", "test-1", "--verdict", "fail", "--finding", CITED]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.squad, "test");
+  assert.equal(out.linearEffects.label.status, "not-applicable");
+  assert.match(out.linearEffects.label.detail, /FOC-165/, out.linearEffects.label.detail);
+  assert.equal(out.linearEffects.transition.status, "not-applicable");
+});
+
+test("inside a spawned child the writes are skipped — and the verdict still lands", () => {
+  const s = scenario();
+  const out = parse(
+    verdict(["record", "--run", s.runId, "--child", "review-1", "--verdict", "fail", "--finding", CITED], { LA_SUPERVISOR_CHILD: "review-1" }),
+    fail,
+  );
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.linearEffects.label.status, "skipped");
+  assert.equal(out.linearEffects.transition.status, "skipped");
+  assert.match(out.linearEffects.label.detail, /FOC-167/);
+  assert.ok(out.warnings.some((w) => /skipped inside child/.test(w)), JSON.stringify(out.warnings));
+  // The point of warnings-only: the verdict file exists anyway.
+  assert.ok(existsSync(join(ROOT, ".state", "supervisor", s.runId, "verdicts", "foc-123-round1.json")));
+});
+
+test("a linear-ops failure degrades to a warning; the verdict is still written", () => {
+  // FOC-777 is not in the offline fixture, so linear-ops exits 1 on both
+  // operations — the exact shape of "label not yet bootstrapped in the
+  // workspace". Recording must survive it.
+  const s = scenario();
+  const out = record(s, ["--verdict", "fail", "--finding", CITED, "--work-child", "dev-1", "--task", "FOC-777"]);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.linearEffects.label.status, "failed");
+  assert.equal(out.linearEffects.transition.status, "failed");
+  assert.ok(out.warnings.some((w) => /return label failed/.test(w)), JSON.stringify(out.warnings));
+  assert.ok(out.warnings.some((w) => /return transition failed/.test(w)), JSON.stringify(out.warnings));
+  assert.ok(existsSync(join(ROOT, ".state", "supervisor", s.runId, "verdicts", "foc-777-round1.json")));
+});
+
+test("a refused re-record of the same round touches no Linear write", () => {
+  // The record-once guard fires BEFORE the side effects — re-recording round 1
+  // must not stamp the label twice.
+  const s = scenario();
+  record(s, ["--verdict", "fail", "--finding", CITED]);
+  const again = record(s, ["--verdict", "fail", "--finding", CITED, "--round", "1"]);
+  assert.equal(again.ok, false);
+  assert.match(again.error, /recorded once/);
+  assert.equal(again.linearEffects, undefined);
+});
+
+// ── 6. the two stall conditions stay distinct ────────────────────────────────
 console.log("\ndwa warunki zastoju, osobno raportowane");
 
 test("status reports a repeated fingerprint separately from silence", () => {
