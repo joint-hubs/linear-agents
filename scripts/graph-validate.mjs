@@ -2,9 +2,11 @@
 //
 // The topology used to live in prose (agents/*/CLAUDE.md) plus four routing
 // rules in config/handoff-rules.json. Prose cannot be checked, and the two
-// drifted apart silently — the review→dev return path has never been in
-// handoff-rules.json at all, so returns route to null in the dashboard and
-// nobody noticed. A graph you can validate is the point of FOC-158.
+// drifted apart silently — the review→dev return path was never in
+// handoff-rules.json, so returns routed to null in the dashboard and nobody
+// noticed. FOC-284 closed that gap: both return edges are routable and emitted,
+// keyed on the returned-by:* flags that supervisor-verdict.mjs applies on a
+// review fail. A graph you can validate is the point of FOC-158.
 //
 // Usage:
 //   node scripts/graph-validate.mjs                       validate, exit 0/1

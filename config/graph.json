@@ -182,9 +182,9 @@
       "to": "dev",
       "type": "return",
       "order": 5,
-      "routable": false,
-      "when": { "state": "In Progress" },
-      "why": "REVIEW sends work back by transitioning to In Progress. This matches NO rule in handoff-rules.json today (the DEV rule requires Todo), so returns route to null in the dashboard — a real gap, made visible here rather than left implicit. NOT routable yet, for two reasons. (1) Emitting it would break the equivalence proof against the committed handoff-rules.json. (2) The blocking one: `In Progress` is ALSO the state of a task DEV is actively working on, so routing it to dev would suggest dev for work dev already holds. Enabling this needs a discriminator for 'returned, round > 0' — a round label or a state — which does not exist yet. That is a separate task with a visible dashboard behaviour change, not a side effect of declaring the topology."
+      "routable": true,
+      "when": { "state": "In Progress", "labels": ["returned-by:review"] },
+      "why": "REVIEW returns work by transitioning to In Progress (node contract review.fail). The discriminator is the `returned-by:review` flag — supervisor-verdict.mjs `record` stamps it via linear-ops on every review fail in the supervised flow, together with the In Progress transition review.fail declares (until FOC-284 nobody performed that transition at all). This is the 'returned, round > 0' marker the pre-284 why said was missing: In Progress WITHOUT the flag stays work a squad already holds and matches no routable edge. A lingering flag is safe: DEV's re-hand-off stamps coded + In Review and the order-3 rule matches on state before this one is ever reached, and needs:* outranks everything at order 1. Exact label name, like stage:testing — no wildcard."
     },
     {
       "id": "test-to-dev-return",
@@ -192,9 +192,9 @@
       "to": "dev",
       "type": "return",
       "order": 6,
-      "routable": false,
-      "when": { "state": "In Progress" },
-      "why": "TEST sends a failed deploy or failed synthetic back to DEV as In Progress, with a root-cause report. Same discriminator problem as review-to-dev-return, and indistinguishable from it by state+labels alone — another reason the round marker is a prerequisite."
+      "routable": true,
+      "when": { "state": "In Progress", "labels": ["returned-by:test"] },
+      "why": "TEST sends a failed deploy or failed synthetic back to DEV as In Progress, with a root-cause report — keyed symmetric with review-to-dev-return. The emitter is DEFERRED (F-05 → FOC-165): no code path applies returned-by:test yet, so the flag never appears and the rule stays dormant rather than wrong; the pre-284 'indistinguishable from the review return' objection dies with the per-squad flags. Enabling TEST's side is then a one-line emitter, not a topology edit."
     },
     {
       "id": "dev-to-human-escalate",

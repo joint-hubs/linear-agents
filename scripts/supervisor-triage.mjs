@@ -141,9 +141,15 @@ export function propose(signals, graph) {
     }
 
     // 4. Two independent families disagreeing is the definition of a mixed
-    //    signal. Picking the "stronger" one here would be a judgement call
-    //    dressed up as a rule.
+    //    signal — with ONE exception (FOC-284 round 2). A `returned-by:*` flag is
+    //    the machine stamp supervisor-verdict.mjs applies at the moment of the
+    //    fail, so it is newer BY CONSTRUCTION than any hand-off comment: comments
+    //    are append-only, and every returned task carries a stale one from the
+    //    round before. Flag-gated only — with no flag the two families have no
+    //    ordering, and disagreement stays the human question it always was.
+    const hasReturnFlag = signals.labels.some((l) => String(l).startsWith("returned-by:"));
     if (byRule && byHandoff && byRule !== byHandoff) {
+      if (hasReturnFlag) return byRule;
       return ask(
         `mixed signals: state/labels route to "${byRule}", the latest hand-off comment routes to "${byHandoff}"`,
       );
@@ -151,14 +157,17 @@ export function propose(signals, graph) {
     if (byRule) return byRule;
     if (byHandoff) return byHandoff;
 
-    // 5. Nothing routed. `In Progress` is the one state where that is actively
-    //    dangerous: it is BOTH "returned by review" and "a squad is working on
-    //    it right now", and no field on the issue tells the two apart. Same
-    //    reason review-to-dev-return is declared non-routable in graph.json.
+    // 5. Nothing routed. `In Progress` WITHOUT a returned-by:* flag is the one
+    //    state where that is actively dangerous: it is BOTH "returned for
+    //    rework" and "a squad is working on it right now". The flag — applied
+    //    by supervisor-verdict.mjs `record` on a review fail — is exactly what
+    //    makes review-to-dev-return routable in graph.json; without it there is
+    //    nothing to match.
     if (signals.state === "In Progress") {
       return ask(
-        'state "In Progress" matches no routable edge — it is both "returned for rework" and ' +
-          '"a squad already holds it", and nothing on the issue discriminates',
+        'state "In Progress" with no returned-by:* flag matches no routable edge — it is both ' +
+          '"returned for rework" and "a squad already holds it"; the returned-by:* flag ' +
+          '(stamped by supervisor-verdict.mjs on a review fail) is the discriminator that would decide it',
       );
     }
 

@@ -146,6 +146,60 @@ if (args["review-loop"]) {
 
   const last = rounds[rounds.length - 1];
   const prev = rounds.length > 1 ? rounds[rounds.length - 2] : null;
+
+  // ── incident catcher (FOC-284 rounds 2–3) ────────────────────────────────
+  // A FAIL round is only a real return when the flag + In Progress actually
+  // landed on the issue. Four shapes say they may NOT have, and the round-1
+  // incident is exactly one of them: the Supervisor recorded a fail verdict
+  // with the BASE supervisor-verdict.mjs — no apply code, no warning, the
+  // flag hand-applied, the verdict record carrying no `linearEffects` at all.
+  //   (a) NO linearEffects → a pre-FOC-284 tool wrote the record: whether the
+  //       return landed is UNKNOWN, never assume it did.
+  //   (b) label.status "failed" → the audit exists and says the stamp did not
+  //       land (the enforcement gate may also exist; this is the belt to it).
+  //   (c) any op "pending" (round 3, R2-3) → the record was written but the
+  //       outcome was never amended — the crash window between the pending
+  //       write and the amend. The state is genuinely UNKNOWN: either nothing
+  //       was applied, or Linear WAS mutated while the record-time gate never
+  //       fired (in-memory statuses read "applied" at the kill). Neither the
+  //       failure nor the landed wording fits, so this one says so plainly.
+  //   (d) the transition did not land while the label did (round 3, R2-3 /
+  //       S2-1) → the same condition the record-time enforcement gate checks,
+  //       mirrored here so a later resume still sees it when that gate failed
+  //       to emit. Never-block cuts both ways: a belt that fires only at
+  //       record time is no belt.
+  // Applied/applied, skipped (child), not-applicable, dry-run and pass
+  // verdicts stay silent. Warning only — the resume is not refused on a
+  // signal we cannot act on from here.
+  if (last?.verdict === "fail") {
+    const effects = last.linearEffects;
+    const labelStatus = effects?.label?.status;
+    const transitionStatus = effects?.transition?.status;
+    if (!effects) {
+      console.error(
+        `[followup] round ${last.round} of ${entry.taskId} has NO linearEffects audit (pre-FOC-284 tool) — ` +
+          `whether the return flag + In Progress ever landed is UNKNOWN; check the issue before this dev round`,
+      );
+    } else if (labelStatus === "failed") {
+      console.error(
+        `[followup] round ${last.round} of ${entry.taskId} recorded a FAILED return label: ${effects.label?.detail} — ` +
+          `the return flag is probably missing; apply returned-by:* + In Progress by hand if so`,
+      );
+    } else if (labelStatus === "pending" || transitionStatus === "pending") {
+      console.error(
+        `[followup] round ${last.round} of ${entry.taskId} left the return ops "pending" — ` +
+          `the record was written but the outcome was never amended: state UNKNOWN, ` +
+          `verify the issue on Linear (flag + In Progress) before resuming this dev round`,
+      );
+    } else if (transitionStatus === "failed" || (labelStatus === "applied" && transitionStatus !== "applied")) {
+      console.error(
+        `[followup] round ${last.round} of ${entry.taskId} recorded an unlanded return transition ` +
+          `(${transitionStatus ?? "absent"}): ${effects.transition?.detail ?? "no detail"} — ` +
+          `the label may be on while the issue still sits in In Review; apply the transition by hand if so`,
+      );
+    }
+  }
+
   const repeated = comparableProgress(last?.fingerprint, prev?.fingerprint);
 
   if (repeated === true) {
