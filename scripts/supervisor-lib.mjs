@@ -898,6 +898,138 @@ export function dirtyTreeReport(cwd) {
   }
 }
 
+// ── pinned state (FOC-286) ───────────────────────────────────────────────────
+//
+// FOC-272's topology review (F-12, §6) measured what children spend their first
+// turns on: 37% of sessions re-derive git state the runtime already pinned, 22%
+// re-query Linear, and kickoff LENGTH changes nothing (spearman −0.01 across
+// length quartiles) — content is the lever, not volume. So every kickoff now
+// starts with a nine-field machine-templated prologue of facts spawn already
+// holds, and spawn refuses to launch a child it would be lying to: the facts
+// are verified against the worktree BEFORE anything is written or launched,
+// and the outcome is recorded on the child's registry entry.
+
+/**
+ * Verify the facts the pinned-state prologue is about to claim, against the
+ * worktree itself. Takes the object ensureWorktree returns — the verification
+ * is about exactly those four facts, nothing else.
+ *
+ * `created: true` claims a CLEAN tree (it was checked out seconds ago); a
+ * reused worktree is pinned as it stands, dirty list and all, because reuse
+ * is legitimate (a resumed child's uncommitted work is exactly what FOC-167
+ * protects) and hiding the dirt would be the lie this exists to prevent.
+ *
+ * Check names and failure reasons are stable so a refusal can be acted on
+ * without parsing prose: worktree-missing, branch-mismatch,
+ * base-revision-mismatch, tree-state-mismatch (a freshly created tree that is
+ * somehow dirty) and tree-state-unreadable (git status failed — an UNKNOWN
+ * state must never be claimed as clean).
+ *
+ * @returns {{ok: boolean, at: string, checks: Array, reasons: string[],
+ *   cleanAtSpawn: boolean, dirtyPaths: string[]}}
+ */
+export function verifyPinnedState({ worktree, branch, baseRevision, created }) {
+  const at = new Date().toISOString();
+  const checks = [];
+  const reasons = [];
+  const refuse = (name, reason, detail = {}) => {
+    checks.push({ name, ok: false, reason, ...detail });
+    reasons.push(reason);
+  };
+
+  // First, because every other check runs git INSIDE the directory: a missing
+  // worktree must fail under its own name, not as three git errors.
+  if (!existsSync(worktree)) {
+    refuse("worktree-exists", "worktree-missing", { worktree });
+    return { ok: false, at, checks, reasons, cleanAtSpawn: false, dirtyPaths: [] };
+  }
+  checks.push({ name: "worktree-exists", ok: true });
+
+  // 5 of the 26 gate failures FOC-272 counted were children told to work in a
+  // state that did not match reality (FOC-176 wrong repo, FOC-151 wrong
+  // workspace). These re-read what ensureWorktree just derived, so they only
+  // fire on a race or a disagreement — cheap insurance for the prologue's
+  // credibility, which is the entire product here.
+  try {
+    const actual = git(["rev-parse", "--abbrev-ref", "HEAD"], worktree);
+    if (actual === branch) checks.push({ name: "branch-match", ok: true });
+    else refuse("branch-match", "branch-mismatch", { expected: branch, actual });
+  } catch (err) {
+    refuse("branch-match", "branch-unreadable", { error: err.message.split("\n")[0] });
+  }
+
+  try {
+    const actual = git(["rev-parse", "HEAD"], worktree);
+    if (actual === baseRevision) checks.push({ name: "base-revision-match", ok: true });
+    else refuse("base-revision-match", "base-revision-mismatch", { expected: baseRevision, actual });
+  } catch (err) {
+    refuse("base-revision-match", "base-revision-unreadable", { error: err.message.split("\n")[0] });
+  }
+
+  // dirtyTreeReport's own convention: [] is clean, porcelain lines are the
+  // dirty list, and its "<git status failed: ...>" marker means UNKNOWN —
+  // which must refuse, never read as clean.
+  const dirtyPaths = dirtyTreeReport(worktree);
+  const unreadable = dirtyPaths.length === 1 && dirtyPaths[0].startsWith("<git status failed:");
+  const cleanAtSpawn = !unreadable && dirtyPaths.length === 0;
+  if (unreadable) {
+    refuse("tree-state", "tree-state-unreadable", { error: dirtyPaths[0] });
+  } else if (created && dirtyPaths.length > 0) {
+    refuse("tree-state", "tree-state-mismatch", {
+      expected: "clean — this worktree was created by this spawn",
+      actual: `${dirtyPaths.length} dirty path(s)`,
+    });
+  } else {
+    checks.push({ name: "tree-state", ok: true });
+  }
+
+  return { ok: reasons.length === 0, at, checks, reasons, cleanAtSpawn, dirtyPaths };
+}
+
+/**
+ * The nine-field prologue prepended to every kickoff (FOC-286). Machine-
+ * templated on purpose: the review measured that kickoff LENGTH has no effect
+ * on what a child re-derives, so the value is a FIXED shape a child can read
+ * in one pass — nine labeled lines, stable order, `| `-separated sub-values.
+ *
+ * Every value comes from data spawn already holds. `issue` is the deliberate
+ * exception in shape, not in source: spawn has no Linear access and must not
+ * grow one (FOC-286 constraint), so the field carries the identifier and
+ * points at the verbatim issue + ACs in the kickoff body the author supplied —
+ * that content is already in the prompt below the prologue.
+ */
+export function pinnedStatePrologue({
+  repo,
+  laRoot = null,
+  worktree,
+  branch,
+  baseRevision,
+  cleanAtSpawn,
+  dirtyPaths = [],
+  task,
+  runId,
+  childId,
+  laRunId = null,
+  verification,
+  preAuthorized = [],
+  knownQuirks = [],
+}) {
+  const verified = verification.checks.filter((c) => c.ok).map((c) => c.name);
+  return [
+    "=== PINNED STATE ===",
+    `repo: ${repo} | LA_ROOT: ${laRoot ?? "(unset)"}`,
+    `worktree: ${worktree}`,
+    `branch: ${branch} | base-revision: ${baseRevision}`,
+    `clean-at-spawn: ${cleanAtSpawn} | dirty: ${dirtyPaths.length ? dirtyPaths.join("; ") : "(none)"}`,
+    `issue: ${task} | verbatim issue + ACs: kickoff body below (not fetched from Linear at spawn)`,
+    `run: ${runId} | child: ${childId} | LA_RUN_ID: ${laRunId ?? "(none — telemetry not started)"}`,
+    `spawn-verified: ${verified.join(", ")} — PASS at ${verification.at}`,
+    `pre-authorized: ${preAuthorized.length ? preAuthorized.join("; ") : "(none — child settings are deny-only)"}`,
+    `known-quirks: ${knownQuirks.length ? knownQuirks.join("; ") : "(none documented)"}`,
+    "=== END PINNED STATE ===",
+  ].join("\n");
+}
+
 // ── progress fingerprint (FOC-163) ───────────────────────────────────────────
 //
 // The thing that replaces counting rounds. A round is progress when the work

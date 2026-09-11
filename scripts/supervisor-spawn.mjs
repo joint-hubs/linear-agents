@@ -20,9 +20,9 @@
 //   · no system/init arrives within 30 s (a child with no session_id is not resumable)
 
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { buildBranchName } from "./dev-branch.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
@@ -44,6 +44,7 @@ import {
   killTree,
   readHeld,
   parseArgs,
+  pinnedStatePrologue,
   readJsonOr,
   readRegistry,
   resolveGitRoot,
@@ -51,6 +52,7 @@ import {
   teeRelPath,
   triagePath,
   updateChild,
+  verifyPinnedState,
   writeRegistry,
 } from "./supervisor-lib.mjs";
 import { loadGraph } from "./graph-validate.mjs";
@@ -295,6 +297,50 @@ try {
   failJson(`could not prepare a worktree for ${branch}: ${err.message}`, { gitRoot });
 }
 
+// ── pinned state (FOC-286): verify what the kickoff will claim ───────────────
+// Every kickoff below starts with a prologue stating the worktree facts as
+// certainties. A child that re-checks them — 37% of sessions did, FOC-272 §6 —
+// must find them true, or the prologue is one more thing to distrust. So the
+// facts are verified HERE, before the registry entry, the settings file and
+// the watcher exist: a refusal costs nothing and leaves nothing behind.
+const pinnedVerification = verifyPinnedState(worktree);
+if (!pinnedVerification.ok) {
+  failJson(`pinned-state verification refused the spawn: ${pinnedVerification.reasons.join(", ")}`, {
+    pinnedStateVerification: pinnedVerification,
+    worktree: worktree.worktree,
+    branch: worktree.branch,
+    baseRevision: worktree.baseRevision,
+  });
+}
+
+// The caller's --prompt-file is an input the kickoff is built on, so an
+// unreadable one refuses HERE too, while refusal is still free. This also
+// closes a silent crash class: the watcher used to receive this path
+// unresolved and read it with the worktree as its cwd, so a missing or
+// relative path died invisibly behind the 30 s init timeout. Spawn now reads
+// the file itself — resolved against the CALLER's cwd, not the worktree's —
+// and the watcher is handed a path spawn wrote.
+let kickoff = String(args.prompt ?? "");
+if (args["prompt-file"]) {
+  const callerPromptPath = resolve(args["prompt-file"]);
+  try {
+    kickoff = readFileSync(callerPromptPath, "utf8");
+    pinnedVerification.checks.push({ name: "prompt-file-readable", ok: true, path: callerPromptPath });
+  } catch (err) {
+    failJson(
+      `--prompt-file is not readable (resolved: ${callerPromptPath}): ` +
+        `${err.message.split("\n")[0]} — refusing the spawn: prompt-file-unreadable`,
+      {
+        pinnedStateVerification: {
+          ...pinnedVerification,
+          ok: false,
+          reasons: [...pinnedVerification.reasons, "prompt-file-unreadable"],
+        },
+      },
+    );
+  }
+}
+
 // ── registry entry, written BEFORE the watcher starts ────────────────────────
 // Single-writer discipline: spawn owns the entry until the watcher launches,
 // and the watcher owns it afterwards. Nothing writes it concurrently.
@@ -341,6 +387,11 @@ registry.children[childId] = {
   branch: worktree.branch,
   baseRevision: worktree.baseRevision,
   allowedPaths,
+  // FOC-286: what spawn verified before this entry existed. The prologue text
+  // the child actually received is patched in below, once telemetry has given
+  // the prologue its LA_RUN_ID value — still before the watcher launches, so
+  // spawn remains the entry's only writer.
+  pinnedStateVerification: pinnedVerification,
 };
 writeRegistry(runId, registry);
 
@@ -389,7 +440,31 @@ try {
 // carry quotes, and Windows argv quoting mangles both.
 const promptDir = mkdtempSync(join(tmpdir(), "la-supervisor-"));
 const promptFile = join(promptDir, "prompt.txt");
-writeFileSync(promptFile, args["prompt-file"] ? "" : String(args.prompt), "utf8");
+// FOC-286: the pinned-state prologue is prepended to the kickoff itself, so
+// every squad receives it without kickoff authors repeating it. Both entry
+// paths meet here — the inline --prompt and the caller's --prompt-file, whose
+// content was read and verified above — and the combined text goes into the
+// spawn-owned temp file. The caller's file is never rewritten, and the watcher
+// always receives THAT path, absolute by construction.
+const prologue = pinnedStatePrologue({
+  repo: gitRoot,
+  laRoot: process.env.LA_ROOT || null,
+  worktree: worktree.worktree,
+  branch: worktree.branch,
+  baseRevision: worktree.baseRevision,
+  cleanAtSpawn: pinnedVerification.cleanAtSpawn,
+  dirtyPaths: pinnedVerification.dirtyPaths,
+  task: taskId,
+  runId,
+  childId,
+  laRunId: telemetryRunId,
+  verification: pinnedVerification,
+});
+writeFileSync(promptFile, `${prologue}\n\n${kickoff}`, "utf8");
+// The registry entry recorded what was verified; now it can also say WHAT THE
+// CHILD WAS TOLD — the prologue verbatim. Patched while spawn still owns the
+// entry (the watcher has not launched), so the single-writer discipline holds.
+updateChild(runId, childId, { pinnedStateVerification: { ...pinnedVerification, prologue } });
 
 const watcherArgs = [
   join(ROOT, "scripts", "supervisor-watch.mjs"),
@@ -397,7 +472,7 @@ const watcherArgs = [
   "--child", childId,
   "--cwd", worktree.worktree,
   "--turn", "0",
-  "--prompt-file", args["prompt-file"] || promptFile,
+  "--prompt-file", promptFile,
   "--permission-mode", args["permission-mode"] || "bypassPermissions",
   // Unconditional: a child without the generated deny list is a child that
   // can push. There is no branch here on purpose.
@@ -495,6 +570,10 @@ console.log(
       settings: childSettings,
       deny: buildChildSettings(squadSettings, extraSettings).permissions.deny,
       telemetryRunId,
+      // FOC-286: reported alongside the facts so the Supervisor can say, at
+      // spawn time, not just where the child is but that the state it was
+      // handed was checked before it existed.
+      pinnedStateVerification: { ...pinnedVerification, prologue },
     },
     null,
     2,
