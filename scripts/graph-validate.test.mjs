@@ -214,6 +214,24 @@ test("emitHandoffRules reproduces the committed config/handoff-rules.json", () =
   );
 });
 
+test("emitPuml reproduces the committed docs/diagrams/07_squad_graph.puml", () => {
+  // Same contract as the proof above, for the diagram: the file's own header
+  // says "generated ... do not edit by hand", and it went stale once anyway —
+  // FOC-284 routable return edges still read "(declared, not routed)" after
+  // the round-1 commit, and nothing scanned diagrams, so nothing caught it.
+  // Regenerate with `node scripts/graph-validate.mjs --emit-puml > docs/diagrams/07_squad_graph.puml`.
+  // CRLF-normalised and trailing-newline-insensitive: git's autocrlf may check
+  // the file out with CRLF, and the redirect captures console.log's trailing
+  // newline that emitPuml's return value does not carry. Both are formatting,
+  // not semantics.
+  const committed = readFileSync(join(ROOT, "docs", "diagrams", "07_squad_graph.puml"), "utf8").replace(/\r\n/g, "\n").trimEnd();
+  assert.equal(
+    emitPuml(GRAPH).trimEnd(),
+    committed,
+    "the committed diagram drifted from the graph — regenerate it with --emit-puml instead of editing it by hand",
+  );
+});
+
 test("the needs:* gate is still the first rule", () => {
   // A blocked task must route to the human regardless of state. If this ever
   // stops being rule 1, blocked tasks start getting picked up by squads.

@@ -21,8 +21,8 @@ ANY -[#7D3C98]-> human : gate: needs:*
 plan --> dev : handoff: Todo + dor-ok
 dev --> review : handoff: In Review + coded
 review --> test : handoff: stage:testing
-review -[#B5651D]-> dev : return: In Progress (declared, not routed)
-test -[#B5651D]-> dev : return: In Progress (declared, not routed)
+review -[#B5651D]-> dev : return: In Progress + returned-by:review
+test -[#B5651D]-> dev : return: In Progress + returned-by:test
 dev -[#C0392B]-> human : escalate: escalated (declared, not routed)
 review -[#C0392B]-> human : escalate: escalated (declared, not routed)
 test -[#C0392B]-> human : escalate: escalated (declared, not routed)

@@ -406,6 +406,15 @@ test("a review fail stamps the return flag and transitions In Progress (offline 
   assert.match(out.linearEffects.label.detail, /returned-by:review/, out.linearEffects.label.detail);
   assert.equal(out.linearEffects.transition.status, "applied");
   assert.match(out.linearEffects.transition.detail, /In Progress/, out.linearEffects.transition.detail);
+  // F2 (round 2): dry-run in a NON-child context is the production shape that
+  // once turned a real fail-record into a silent no-op recorded as "applied".
+  // The warning names the trigger, so a stale env var is visible, not inferred.
+  assert.ok(
+    out.warnings.some((w) => /dry-run mode \(trigger: REVIEW_DRY_RUN=1\)/.test(w)),
+    JSON.stringify(out.warnings),
+  );
+  // A dry run exercises the branch; it does not enforce it — no gate.
+  assert.equal(out.linearEffects.gate, undefined);
 });
 
 test("the verdict file carries the same audit block the CLI printed", () => {
@@ -477,6 +486,8 @@ test("inside a spawned child the writes are skipped — and the verdict still la
   assert.ok(out.warnings.some((w) => /skipped inside child/.test(w)), JSON.stringify(out.warnings));
   // The point of warnings-only: the verdict file exists anyway.
   assert.ok(existsSync(join(ROOT, ".state", "supervisor", s.runId, "verdicts", "foc-123-round1.json")));
+  // The child guard is the real run's job, not a failed return — no gate (F3).
+  assert.equal(out.linearEffects.gate, undefined);
 });
 
 test("a linear-ops failure degrades to a warning; the verdict is still written", () => {
@@ -491,6 +502,59 @@ test("a linear-ops failure degrades to a warning; the verdict is still written",
   assert.ok(out.warnings.some((w) => /return label failed/.test(w)), JSON.stringify(out.warnings));
   assert.ok(out.warnings.some((w) => /return transition failed/.test(w)), JSON.stringify(out.warnings));
   assert.ok(existsSync(join(ROOT, ".state", "supervisor", s.runId, "verdicts", "foc-777-round1.json")));
+  // A dry-run failure is exercise, not enforcement — no gate (F3).
+  assert.equal(out.linearEffects.gate, undefined);
+});
+
+test("a REAL failed apply raises a pending Supervisor gate naming the manual fix (F3)", () => {
+  // No REVIEW_DRY_RUN: the verdict's dry-run is off. FOO_DRY_RUN=1 must NOT
+  // engage it either (F2 — an arbitrary suffix is no longer an allowlist
+  // member), but linear-ops' own context still honours it, exits 1 on its
+  // missing foo-task.json fixture — so both ops fail OFFLINE, no live call.
+  // Failed statuses + real context = the enforcement gate, attached to the DEV
+  // child the Supervisor resumes next.
+  const s = scenario();
+  const out = parse(
+    verdict(
+      ["record", "--run", s.runId, "--child", "review-1", "--verdict", "fail", "--finding", CITED, "--work-child", "dev-1", "--task", "FOC-777"],
+      { REVIEW_DRY_RUN: "", FOO_DRY_RUN: "1" },
+    ),
+    fail,
+  );
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.linearEffects.dryRun, false, "FOO_DRY_RUN must not engage the verdict's dry-run");
+  assert.equal(out.linearEffects.label.status, "failed");
+  assert.equal(out.linearEffects.transition.status, "failed");
+
+  const gate = out.linearEffects.gate;
+  assert.ok(gate?.emitted, JSON.stringify(out.linearEffects));
+  assert.match(gate.gateId, /^gate-dev-1-\d+$/);
+  const onDisk = JSON.parse(
+    readFileSync(join(ROOT, ".state", "supervisor", s.runId, "gates", `${gate.gateId}.json`), "utf8"),
+  );
+  assert.equal(onDisk.kind, "question");
+  assert.equal(onDisk.childId, "dev-1");
+  assert.equal(onDisk.status, "pending");
+  assert.match(onDisk.summary, /FOC-777/);
+  assert.match(onDisk.summary, /round 1/);
+  assert.match(onDisk.questions.join(" "), /returned-by:review/);
+  assert.match(onDisk.questions.join(" "), /In Progress/);
+});
+
+test("a garbage taskId skips the ops with a naming warning; the verdict still writes (N2)", () => {
+  const s = scenario();
+  const out = record(s, ["--verdict", "fail", "--finding", CITED, "--work-child", "dev-1", "--task", "not-a-task-99"]);
+  assert.equal(out.ok, true, out.error);
+  assert.match(out.linearEffects.label.detail, /not-a-task-99/);
+  assert.match(out.linearEffects.label.detail, /neither an issue identifier/);
+  assert.equal(out.linearEffects.transition.status, "failed");
+  assert.ok(
+    out.warnings.some((w) => /refusing to send it to linear-ops/.test(w)),
+    JSON.stringify(out.warnings),
+  );
+  assert.ok(existsSync(join(ROOT, ".state", "supervisor", s.runId, "verdicts", "not-a-task-99-round1.json")));
+  // Suite default is dry-run: exercise, not enforcement — no gate here.
+  assert.equal(out.linearEffects.gate, undefined);
 });
 
 test("a refused re-record of the same round touches no Linear write", () => {

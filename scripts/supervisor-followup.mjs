@@ -146,6 +146,35 @@ if (args["review-loop"]) {
 
   const last = rounds[rounds.length - 1];
   const prev = rounds.length > 1 ? rounds[rounds.length - 2] : null;
+
+  // ── incident catcher (FOC-284 round 2) ──────────────────────────────────
+  // A FAIL round is only a real return when the flag + In Progress actually
+  // landed on the issue. Two shapes say they may NOT have, and the round-1
+  // incident is exactly one of them: the Supervisor recorded a fail verdict
+  // with the BASE supervisor-verdict.mjs — no apply code, no warning, the
+  // flag hand-applied, the verdict record carrying no `linearEffects` at all.
+  //   (a) NO linearEffects → a pre-FOC-284 tool wrote the record: whether the
+  //       return landed is UNKNOWN, never assume it did.
+  //   (b) label.status "failed" → the audit exists and says the stamp did not
+  //       land (the enforcement gate may also exist; this is the belt to it).
+  // A "pending" status (record written, ops in flight) and every applied /
+  // skipped / not-applicable / dry-run shape stay silent. Warning only — the
+  // resume is not refused on a signal we cannot act on from here.
+  if (last?.verdict === "fail") {
+    const effects = last.linearEffects;
+    if (!effects) {
+      console.error(
+        `[followup] round ${last.round} of ${entry.taskId} has NO linearEffects audit (pre-FOC-284 tool) — ` +
+          `whether the return flag + In Progress ever landed is UNKNOWN; check the issue before this dev round`,
+      );
+    } else if (effects.label?.status === "failed") {
+      console.error(
+        `[followup] round ${last.round} of ${entry.taskId} recorded a FAILED return label: ${effects.label?.detail} — ` +
+          `the return flag is probably missing; apply returned-by:* + In Progress by hand if so`,
+      );
+    }
+  }
+
   const repeated = comparableProgress(last?.fingerprint, prev?.fingerprint);
 
   if (repeated === true) {

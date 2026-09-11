@@ -141,9 +141,15 @@ export function propose(signals, graph) {
     }
 
     // 4. Two independent families disagreeing is the definition of a mixed
-    //    signal. Picking the "stronger" one here would be a judgement call
-    //    dressed up as a rule.
+    //    signal — with ONE exception (FOC-284 round 2). A `returned-by:*` flag is
+    //    the machine stamp supervisor-verdict.mjs applies at the moment of the
+    //    fail, so it is newer BY CONSTRUCTION than any hand-off comment: comments
+    //    are append-only, and every returned task carries a stale one from the
+    //    round before. Flag-gated only — with no flag the two families have no
+    //    ordering, and disagreement stays the human question it always was.
+    const hasReturnFlag = signals.labels.some((l) => String(l).startsWith("returned-by:"));
     if (byRule && byHandoff && byRule !== byHandoff) {
+      if (hasReturnFlag) return byRule;
       return ask(
         `mixed signals: state/labels route to "${byRule}", the latest hand-off comment routes to "${byHandoff}"`,
       );
