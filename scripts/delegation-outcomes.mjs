@@ -256,7 +256,10 @@ export function parseReview(text, taskId, round) {
   };
 }
 
-function loadReviews(reviewsDir = REVIEWS) {
+// Exported for verdict-evidence.mjs (FOC-219): the projection reuses this loader
+// verbatim instead of re-parsing round files. Additive keyword only — F1 semantics
+// and its 123-check suite are untouched.
+export function loadReviews(reviewsDir = REVIEWS) {
   if (!existsSync(reviewsDir)) return { reviews: [], readErrors: [] };
   const reviews = [];
   const readErrors = [];
@@ -392,7 +395,10 @@ export function aggregateOutcomes(roundReviews, roundsCounter = {}) {
  * temporal rule the cost views use, otherwise a retagged run would move its
  * quality signal too.
  */
-function delegationsByTask(db) {
+// Exported for verdict-evidence.mjs (FOC-219): the optional telemetry axis reuses
+// the same temporal run_task_links join — one definition of "which delegation
+// worked on this task". Additive keyword only.
+export function delegationsByTask(db) {
   const rows = db.prepare(`
     SELECT l.task_id AS taskId, r.squad AS squad, u.agent_key AS agent, u.model AS model,
            COUNT(*) AS turns, ROUND(SUM(COALESCE(c.cost_usd, 0)), 4) AS usd,
