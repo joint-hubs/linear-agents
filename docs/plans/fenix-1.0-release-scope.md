@@ -1,6 +1,6 @@
 # Fenix 1.0 — release-blocking scope decision (FOC-102)
 
-Status: scope approved at GATE 1 on 2026-09-10 (gate record `gate-plan-1-1`; GATE 2 pending). Author: PLAN squad. This file records the confirmed release-blocking scope for Linear epic FOC-102 "Fenix 1.0: stabilize delivery and trustworthy evidence". Linear updates happen only through the Supervisor after GATE 2.
+Status: scope approved at GATE 1 on 2026-09-10 (gate record `gate-plan-1-1`); GATE 2 answered 2026-09-11 (gate record `gate-plan-1-2`) — delta application approved, Flags (e) and (g) dispositioned per Mateusz. Author: PLAN squad. This file records the confirmed release-blocking scope for Linear epic FOC-102 "Fenix 1.0: stabilize delivery and trustworthy evidence". Linear updates happen only through the Supervisor after GATE 2.
 
 Sources (read in full by PLAN before writing; code citations re-verified in this worktree on 2026-09-11):
 
@@ -76,7 +76,7 @@ Pure review; every input exists (verified 2026-09-11): `config/graph.json` + `co
 
 ### 3.5 FOC-114 — Navigation — BLOCKING slice = CodeGraph navigation benchmark (Q3)
 
-The benchmark per Q3 AC 1–4 is the release-blocking slice; "measured effectiveness" rides F3/F4 telemetry. Note: this worktree currently has NO `.codegraph/` index (Glob 2026-09-11) — the missing-index/fallback path is itself part of the AC, and index availability is an open question routed to GATE 2 (Flag (g)). The routing seam stays out of FOC-114 (Q3).
+The benchmark per Q3 AC 1–4 is the release-blocking slice; "measured effectiveness" rides F3/F4 telemetry. Note: this worktree currently has NO `.codegraph/` index (Glob 2026-09-11) — the missing-index/fallback path is itself part of the AC; index setup is resolved per Flag (g): DEV runs `codegraph init` in the FOC-114 execution worktree. The routing seam stays out of FOC-114 (Q3).
 
 ## 4. Execution order 0–6
 
@@ -106,9 +106,9 @@ The benchmark per Q3 AC 1–4 is the release-blocking slice; "measured effective
 - **(b) Completion records:** roadmap L3 ("pending unless explicitly recorded below") has no completion-record mechanism → close-out applies the ledger update per L53; otherwise "recorded" covers nothing.
 - **(c) Title verbs:** FOC-220/221 titles say measurement/attribution; roadmap L33–34 says Correct/Qualify — the work is repair of existing measurements, not greenfield. The FOC-102 delta pins AC to L33–34.
 - **(d) FOC-165 title "budget cap" vs roadmap L10:** scope is verify-existing; no new cap.
-- **(e) FOC-271 direction 2 (outside the epic):** open seam — `stalled` requires a first tee write (`scripts/supervisor-status.mjs:155-163`: `silentMs` is null without a tee mtime, so a child silent from start is never stalled); `STALL_SILENCE_MS` at :47-48. Disposition pending GATE 2; must not silently extend 1.0.
+- **(e) FOC-271 direction 2 (outside the epic):** open seam — `stalled` requires a first tee write (`scripts/supervisor-status.mjs:155-163`: `silentMs` is null without a tee mtime, so a child silent from start is never stalled); `STALL_SILENCE_MS` at :47-48. Disposition (Mateusz, GATE 2, `gate-plan-1-2`): **accepted residual, documented in this 1.0 scope record**; candidate for fix if the FOC-272 review surfaces the stall-detector seam — its fix-or-defer gate decides. No new blocking work; never silently extends 1.0.
 - **(f) Child states** were verified by the Supervisor on 2026-09-10, not independently re-verified by PLAN — recorded assumption.
-- **(g) CodeGraph index availability** for the FOC-114 benchmark — open question routed to GATE 2 (no `.codegraph/` in this worktree).
+- **(g) CodeGraph index availability** for the FOC-114 benchmark — resolved (Mateusz, GATE 2, `gate-plan-1-2`): the DEV child of the FOC-114 run runs `codegraph init` in its own execution worktree as part of benchmark setup; missing-index/fallback behavior remains part of the benchmark AC (this planning worktree has no `.codegraph/`).
 
 ## 7. Non-blocking children (stay in the epic, annotated post-1.0 / non-blocking)
 
