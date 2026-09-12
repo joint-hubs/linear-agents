@@ -3,6 +3,7 @@
 //
 //   node scripts/supervisor-verdict.mjs record --child <id> --verdict pass|fail [--work-child <id>]
 //        [--finding '<json>' ...] [--ac '<json>' ...] [--failing-test <id> ...]
+//        [--no-failing-tests '<reason>']
 //   node scripts/supervisor-verdict.mjs show --task <id> [--round N]
 //   node scripts/supervisor-verdict.mjs list
 //
@@ -26,7 +27,11 @@
 // And it records a PROGRESS FINGERPRINT: the diff against the round's base plus
 // the declared failing-test set. supervisor-followup.mjs compares consecutive
 // rounds and refuses to spawn a third identical one — a round that reproduces
-// its predecessor's diff and failures is the first round billed twice.
+// its predecessor's diff and failures is the first round billed twice. On a
+// fail the test axis is a declaration, not a default: a fail with no failing
+// test is refused unless --no-failing-tests states why (FOC-220), because an
+// empty axis by omission makes two rounds that fixed nothing compare equal on
+// half the fingerprint.
 //
 // Placeholder evidence ("n/a", "-", "TODO") is refused too. A requirement that
 // can be satisfied by typing a dash is not a requirement; the cheapest way past
@@ -41,6 +46,7 @@ import {
   asArray,
   ensureRunDir,
   failJson,
+  normalizeFailingTests,
   parseArgs,
   producerOf,
   progressFingerprint,
@@ -293,15 +299,47 @@ function cmdRecord(args) {
     }
   }
 
-  // ── the fingerprint ────────────────────────────────────────────────────────
-  const failingTests = asArray(args["failing-test"]).map(String);
-  if (verdict === "fail" && !failingTests.length) {
-    // Not fatal — a review can fail on design, not only on a red test — but a
-    // fail with no failing test makes the fingerprint depend on the diff alone,
-    // and two rounds that fix nothing then look identical for the wrong reason.
-    warnings.push(
-      "a fail with no --failing-test fingerprints on the diff alone; declare the failures if there are any",
-    );
+  // ── the failing-test axis is a declaration, not a default ──────────────────
+  // Normalized the way the fingerprint hashes it, so what is enforced here IS
+  // what lands in the record — `--failing-test " "` must not count as declared.
+  const failingTests = normalizeFailingTests(asArray(args["failing-test"]));
+  const declaredNone = args["no-failing-tests"]; // absent, `true` (flag without a reason), or the reason
+
+  if (declaredNone !== undefined) {
+    // FOC-220. A fail that is not test-backed — a design failure — is a real
+    // category, so the gate stays escapable; but the escape is an explicit,
+    // on-the-command-line declaration with a reason, never an omission. It
+    // rides the record out as `noFailingTests`, so an operator reading the JSON
+    // later can tell "declared none, here is why" from an axis left empty by
+    // accident (which the branch below stops new records from having).
+    if (verdict !== "fail") {
+      failJson("--no-failing-tests only means something on a fail verdict", {
+        verdict,
+        hint: "drop the flag, or move to a fail verdict that declares its failing tests",
+      });
+    }
+    if (failingTests.length) {
+      failJson(`--no-failing-tests and ${failingTests.length} --failing-test value(s) contradict each other`, {
+        failingTests,
+        hint: "declare the failing tests, or declare there are none — not both",
+      });
+    }
+    if (declaredNone === true || !isEvidence(declaredNone)) {
+      failJson("--no-failing-tests is a declaration and needs a reason: why does this fail cite no test?", {
+        hint: `example: --no-failing-tests "design failure: the AC contradicts the spec, no test can be red"`,
+      });
+    }
+    warnings.push(`failing tests declared absent on this fail: ${declaredNone}`);
+  } else if (verdict === "fail" && !failingTests.length) {
+    // FOC-220. This used to be a warning; 86 of 89 recorded verdicts shipped an
+    // empty test axis anyway, and two rounds that fixed nothing then compared
+    // equal on a fingerprint whose tests half hashed the empty string.
+    failJson("a fail verdict must declare its failing tests — the detector compares rounds on the test axis", {
+      taskId,
+      hint:
+        "pass --failing-test <test id> once per failing test; if the fail is not test-backed " +
+        '(a design failure), declare that instead: --no-failing-tests "<why this fail cites no test>"',
+    });
   }
 
   // WHICH TREE. Not the reviewer's — the one holding the work under review.
@@ -337,6 +375,11 @@ function cmdRecord(args) {
     acMapping,
     declaredAcs: declared,
     fingerprint,
+    // FOC-220: present only when the fail DECLARED an empty test axis, carrying
+    // the reason that earned it. A fail record with an empty
+    // fingerprint.failingTests and no such field is a pre-enforcement record,
+    // written by omission — the two must stay distinguishable on disk.
+    ...(declaredNone !== undefined ? { noFailingTests: { reason: declaredNone } } : {}),
     recordedAt: new Date().toISOString(),
   };
 

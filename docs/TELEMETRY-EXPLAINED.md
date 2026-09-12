@@ -109,6 +109,20 @@ cache'owanych. Pełny rozmiar promptu to `input + cache_read + cache_creation`. 
 Czego **nie** mierzymy: czasu ściennego per tura, jakości odpowiedzi, liczby linii kodu.
 Czas trwania runu liczymy z manifestu (`startedAt`/`endedAt`), nie z tur.
 
+### Tożsamość wywołania narzędzia — bez treści
+
+Treść argumentów narzędzi nie trafia do bazy (podgląd ucięty do 1000 znaków). Zamiast niej
+`tool_facts` trzyma **tożsamość**: HMAC-SHA256 kanonicznego JSON-a **całego** inputu
+(klucze posortowane na każdym poziomie — kolejność kluczy nie zmienia digestu) oraz digest
+tekstu wyniku jako dowód równości. JSON jest kanonicznie solony losową, per-bazową solą
+z `store_settings`, więc digest bez dostępu do bazy nie jest wyrocznią do odgadywania krótkich argumentów.
+
+Wersja tej recepty to `INPUT_IDENTITY_SCHEME_VERSION` w `scripts/tool-identity.mjs`;
+baza zapisuje, którą wersją policzono jej digesty (`store_settings.tool_identity_scheme`).
+Zmiana normalizacji bez podbicia wersji byłaby niewykrywalna — dlatego przy niezgodności
+ścieżki zapisu **odmawiają** z komunikatem (patrz `queryHealth.identityScheme`), zamiast
+mieszać nieporównywalne digesty i czytać dryf schematu jako „inny input".
+
 ---
 
 ## 3. Cache — mechanizm i wycena

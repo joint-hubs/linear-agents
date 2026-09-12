@@ -126,7 +126,7 @@ test("v6 migration: fresh DB stamps the marker and creates idx_runs_squad_ended"
   const dir = mkdtempSync(join(tmpdir(), "mgr-runs-"));
   try {
     const db = openTelemetryDb(join(dir, "t.sqlite"));
-    assert(SCHEMA_VERSION === 6, `SCHEMA_VERSION should be 6, got ${SCHEMA_VERSION}`);
+    assert(SCHEMA_VERSION === 7, `SCHEMA_VERSION should be 7, got ${SCHEMA_VERSION}`); // FOC-220: additive tool_facts columns
     const markers = db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => r.version);
     assert(markers.includes(MIGRATION_VERSIONS.managerRunIndex), `marker 6 missing, have ${markers}`);
     const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_runs_squad_ended'").get();

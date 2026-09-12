@@ -15,11 +15,12 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { INPUT_IDENTITY_SCHEME_VERSION, contentDigest, inputIdentity } from "./tool-identity.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -31,7 +32,7 @@ try {
   DatabaseSync = null;
 }
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 // Per-step migration version markers. Each one-shot migration step is guarded
 // by its own constant rather than the shared SCHEMA_VERSION, so bumping the
@@ -40,6 +41,10 @@ export const MIGRATION_VERSIONS = {
   worktreeRekey: 4,
   runScopedUsage: 5,
   managerRunIndex: 6,
+  // FOC-220: additive tool_facts columns (input identity, result size/state).
+  // The column add itself is PRAGMA-guarded and idempotent on every open
+  // (same pattern as addRunColumns); the marker is the paper trail.
+  toolFactIdentity: 7,
 };
 
 export function sqliteAvailable() {
@@ -308,6 +313,13 @@ function createBaseSchema(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_delegation_links_parent ON delegation_links(parent_run_id, parent_agent);
     CREATE INDEX IF NOT EXISTS idx_delegation_links_child ON delegation_links(child_agent);
+    -- FOC-220: per-store key/value settings. Holds the random salt that keys the
+    -- tool-input identity and result digests (tool-identity.mjs) — generated on
+    -- first use, stable for the lifetime of this database file.
+    CREATE TABLE IF NOT EXISTS store_settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
 }
 
@@ -354,6 +366,40 @@ function addModelPriceColumns(db) {
   const existing = new Set(db.prepare("PRAGMA table_info(model_prices)").all().map((c) => c.name));
   for (const [name, type] of MODEL_PRICE_COLUMNS) {
     if (!existing.has(name)) db.exec(`ALTER TABLE model_prices ADD COLUMN ${name} ${type}`);
+  }
+}
+
+// Columns added to `tool_facts` after its initial CREATE TABLE (FOC-220).
+// Same declarative ALTER-guarded-by-PRAGMA pattern as RUN_COLUMNS: every open
+// converges the table to this shape, fresh and legacy databases alike.
+//
+// All five are NULLable and stay NULL on rows written before this change —
+// NULL means UNKNOWN, never "measured zero" and never "verified ok":
+//   tool_input_id      HMAC-SHA256 (store salt) over the COMPLETE, deep
+//                      key-order-canonical input JSON — computed before the
+//                      1000-char preview truncation, so two long calls sharing
+//                      a prefix never collide. Never argument content itself.
+//   tool_index         position of the tool_use within its assistant message;
+//                      recovers the input to tool_fact_id's sha1 formula.
+//   tool_result_state  'ok' | 'error' | 'missing' from the tool_result block.
+//                      Historical rows keep NULL: a legacy tool_has_error=0
+//                      must not be read as a verified success (FOC-220 AC5).
+//   tool_result_bytes  UTF-8 byte size of the result text; 0 = present but
+//                      empty; NULL = missing or unknown. No content stored.
+//   tool_result_id     HMAC-SHA256 (store salt) over the result text — equality
+//                      evidence for repeat classification, no content.
+const TOOL_FACT_COLUMNS = [
+  ["tool_input_id", "TEXT"],
+  ["tool_index", "INTEGER"],
+  ["tool_result_state", "TEXT"],
+  ["tool_result_bytes", "INTEGER"],
+  ["tool_result_id", "TEXT"],
+];
+
+function addToolFactColumns(db) {
+  const existing = new Set(db.prepare("PRAGMA table_info(tool_facts)").all().map((c) => c.name));
+  for (const [name, type] of TOOL_FACT_COLUMNS) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE tool_facts ADD COLUMN ${name} ${type}`);
   }
 }
 
@@ -633,6 +679,9 @@ export function migrate(db, path) {
   ensureOneActivePrimaryLinkIndex(db);
   backfillWorktreeIds(db);
   migrateRunScopedUsage(db, path);
+  // FOC-220 columns must be added AFTER the v5 rebuild: migrateRunScopedUsage
+  // recreates tool_facts from its own DDL, which would drop columns added earlier.
+  addToolFactColumns(db);
   ensureManagerRunIndex(db);
   ensureCanonicalViews(db);
   // Record every migration marker. Each step guards itself above; this loop
@@ -781,13 +830,18 @@ WHERE k.rn = 1`;
 // per physical tool call (a tool_use content block), independent of which run
 // claimed it. Only the run-scoped claim layer applies here; the per-message
 // layer does not (several tool_use blocks of one message are several calls).
+// FOC-220 columns ride along: tool_input_id (full-input identity, key-order
+// independent), tool_index, and the honest outcome triple
+// tool_result_state / tool_result_bytes / tool_result_id (NULL = unknown on
+// pre-FOC-220 rows — never read as a verified ok).
 export const CANONICAL_TOOL_SQL = `
 CREATE VIEW canonical_tool_facts AS
 WITH claims AS (
   SELECT
     u.tool_fact_id, u.run_id, u.agent_key, u.model, u.observed_at,
     u.tool_name_raw, u.tool_name_canon, u.tool_has_error, u.turn_index,
-    u.tool_input, u.source_path, u.source_offset,
+    u.tool_input, u.tool_input_id, u.tool_index, u.tool_result_state,
+    u.tool_result_bytes, u.tool_result_id, u.source_path, u.source_offset,
     r.squad, r.started_at,
     ${FIT_RANK_SQL} AS fit_rank
   FROM tool_facts u JOIN runs r USING(run_id)
@@ -804,7 +858,9 @@ ranked AS (
 SELECT
   k.tool_fact_id, k.run_id, k.squad, k.agent_key, k.model, k.observed_at,
   k.tool_name_raw, k.tool_name_canon, k.tool_has_error, k.turn_index,
-  k.tool_input, k.source_path, k.source_offset, k.claim_count,
+  k.tool_input, k.tool_input_id, k.tool_index, k.tool_result_state,
+  k.tool_result_bytes, k.tool_result_id, k.source_path, k.source_offset,
+  k.claim_count,
   ${FIT_LABEL_SQL} AS attribution
 FROM ranked k
 WHERE k.rn = 1`;
@@ -2349,7 +2405,9 @@ export function queryHealth(db) {
   const pendingCount = existsSync(pending) ? readdirSync(pending).filter((name) => name.endsWith(".json")).length : 0;
   const issues = db.prepare("SELECT issue_type AS type, severity, COUNT(*) AS count FROM data_quality_issues WHERE resolved_at IS NULL GROUP BY issue_type, severity ORDER BY count DESC").all();
   const running = db.prepare("SELECT COUNT(*) AS count FROM runs WHERE ended_at IS NULL").get().count;
-  return { database: telemetryDbPath(), schemaVersion: SCHEMA_VERSION, pendingEvents: pendingCount, runningRuns: running, issues };
+  // FOC-220 AC1: identity-scheme drift is reported here too, so a mismatch is
+  // visible to every health reader, not only to the refused write.
+  return { database: telemetryDbPath(), schemaVersion: SCHEMA_VERSION, identityScheme: toolIdentityScheme(db), pendingEvents: pendingCount, runningRuns: running, issues };
 }
 
 // Cost/turn basis labels (FOC-221 review). queryTrace and queryPatterns read
@@ -2535,6 +2593,66 @@ export function resetTelemetry(options = {}) {
   return path;
 }
 
+/**
+ * Per-store random salt keying the tool-input identity and result digests
+ * (FOC-220). Generated once on first use, persisted in store_settings, stable
+ * for the lifetime of the database file — so digests stay comparable across
+ * ingests while remaining unverifiable to anyone who sees only the digests.
+ * VACUUM INTO snapshots carry the salt with the data, keeping restores coherent.
+ *
+ * @param {import("node:sqlite").DatabaseSync} db
+ * @returns {string} hex salt
+ */
+export function toolIdentitySalt(db) {
+  const KEY = "tool_identity_salt";
+  const existing = db.prepare("SELECT value FROM store_settings WHERE key=?").get(KEY);
+  if (existing?.value) return existing.value;
+  db.prepare("INSERT OR IGNORE INTO store_settings (key, value) VALUES (?, ?)")
+    .run(KEY, randomBytes(32).toString("hex"));
+  // Re-read rather than trust the insert: a concurrent writer may have won.
+  return db.prepare("SELECT value FROM store_settings WHERE key=?").get(KEY).value;
+}
+
+/**
+ * Which identity scheme wrote this store, vs the one currently running
+ * (FOC-220 AC1). The scheme is recorded in store_settings next to the salt,
+ * so a stored digest is attributable to a normalization recipe — two digests
+ * computed under different schemes must never be compared as "different
+ * input", because the difference may be scheme drift, not a different call.
+ *
+ * First contact with a store that has no recorded scheme stamps the CURRENT
+ * one: every store predating the versioned contract was written by the
+ * unchanged scheme-1 recipe, so adoption is a single INSERT — no re-derivation
+ * of the backfilled rows. A scheme bump (INPUT_IDENTITY_SCHEME_VERSION) then
+ * shows up here as a mismatch, and the write paths refuse.
+ *
+ * @param {import("node:sqlite").DatabaseSync} db
+ * @returns {{stored: number, current: number, mismatch: boolean, adopted: boolean}}
+ */
+export function toolIdentityScheme(db) {
+  const KEY = "tool_identity_scheme";
+  const row = db.prepare("SELECT value FROM store_settings WHERE key=?").get(KEY);
+  if (row?.value) {
+    const stored = Number(row.value);
+    return {
+      stored,
+      current: INPUT_IDENTITY_SCHEME_VERSION,
+      mismatch: stored !== INPUT_IDENTITY_SCHEME_VERSION,
+      adopted: false,
+    };
+  }
+  db.prepare("INSERT OR IGNORE INTO store_settings (key, value) VALUES (?, ?)")
+    .run(KEY, String(INPUT_IDENTITY_SCHEME_VERSION));
+  // Re-read rather than trust the insert: a concurrent writer may have won.
+  const stamped = Number(db.prepare("SELECT value FROM store_settings WHERE key=?").get(KEY).value);
+  return {
+    stored: stamped,
+    current: INPUT_IDENTITY_SCHEME_VERSION,
+    mismatch: stamped !== INPUT_IDENTITY_SCHEME_VERSION,
+    adopted: true,
+  };
+}
+
 export async function recordToolFact(record, options = {}) {
   const db = openTelemetryDb(options.dbPath);
   try {
@@ -2542,14 +2660,53 @@ export async function recordToolFact(record, options = {}) {
       .update(`${record.source_path}:${record.source_offset}:${record.tool_index}`)
       .digest("hex");
     const toolInput = record.tool_input ? record.tool_input.slice(0, 1000) : null;
+    // Full-input identity (FOC-220): digest the COMPLETE input before any
+    // display truncation. The extractor passes the untruncated serialization in
+    // tool_input_full; a direct caller without it may fall back to its
+    // tool_input only when that is provably untruncated (< the 1000-char cap) —
+    // a truncated preview must never become an identity. NULL = unknown.
+    const identitySource = record.tool_input_full != null
+      ? record.tool_input_full
+      : (record.tool_input && record.tool_input.length < 1000 ? record.tool_input : null);
+    // Refuse, don't mix (FOC-220 AC1): a fact written under a different scheme
+    // than the store's existing identities would be incomparable with them —
+    // scheme drift must surface as this error, never as "a different input".
+    // Thrown, not returned as a result object: the ingest loop ignores return
+    // values, and a swallowed mismatch is exactly the silent drift this guard
+    // exists to prevent. Facts are re-derivable from transcripts, so refusal
+    // loses nothing that cannot be rebuilt after the schemes are reconciled.
+    const scheme = toolIdentityScheme(db);
+    if (scheme.mismatch) {
+      throw new Error(
+        `tool-input identity scheme mismatch in ${options.dbPath || telemetryDbPath()}: store records scheme ${scheme.stored}, running code computes scheme ${scheme.current}. ` +
+        "New digests would be incomparable with the stored ones. Reconcile first — see the versioning contract in scripts/tool-identity.mjs.",
+      );
+    }
+    const salt = toolIdentitySalt(db);
+    const toolInputId = identitySource != null ? inputIdentity(identitySource, salt) : null;
+    // Honest outcome (FOC-220): 'ok' | 'error' | 'missing'; anything else (and
+    // anything on pre-FOC-220 rows) stays NULL = unknown. The result digest is
+    // equality evidence only — the text itself is never persisted.
+    const RESULT_STATES = new Set(["ok", "error", "missing"]);
+    const toolResultState = RESULT_STATES.has(record.tool_result_state) ? record.tool_result_state : null;
+    const toolResultBytes = Number.isInteger(record.tool_result_bytes) ? record.tool_result_bytes : null;
+    const toolResultId = toolResultState && toolResultState !== "missing" && typeof record.tool_result_full === "string"
+      ? contentDigest(record.tool_result_full, salt)
+      : null;
+    const hasError = record.tool_has_error != null
+      ? (record.tool_has_error ? 1 : 0)
+      : (record.tool_result_state === "error" ? 1 : 0);
     const result = db.prepare(`
       INSERT OR IGNORE INTO tool_facts
-        (tool_fact_id, run_id, agent_key, model, observed_at, tool_name_raw, tool_name_canon, tool_input, tool_has_error, turn_index, source_path, source_offset, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (tool_fact_id, run_id, agent_key, model, observed_at, tool_name_raw, tool_name_canon, tool_input, tool_has_error, turn_index, source_path, source_offset, created_at,
+         tool_input_id, tool_index, tool_result_state, tool_result_bytes, tool_result_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       toolFactId, record.run_id, record.agent_key, record.model || null, record.observed_at || null,
       record.tool_name_raw, record.tool_name_canon || null, toolInput,
-      record.tool_has_error ? 1 : 0, record.turn_index, record.source_path, record.source_offset, now(),
+      hasError, record.turn_index, record.source_path, record.source_offset, now(),
+      toolInputId, Number.isInteger(record.tool_index) ? record.tool_index : null,
+      toolResultState, toolResultBytes, toolResultId,
     );
     if (result.changes === 0) return { recorded: false, reason: "duplicate" };
     return { recorded: true, id: toolFactId };

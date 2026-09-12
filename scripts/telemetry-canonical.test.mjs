@@ -311,6 +311,18 @@ check("tool call deduplicated to one row", toolRows.length === 1, `got ${toolRow
 check("tool winner is the live run", toolRows[0]?.run_id === "runA", `got ${toolRows[0]?.run_id}`);
 check("error flag preserved", toolRows[0]?.tool_has_error === 1);
 
+// FOC-220: the view rides along with the identity/outcome columns. A row
+// inserted without them (the legacy shape) must read UNKNOWN on every one —
+// never a measured zero, never a verified ok.
+check("view exposes FOC-220 columns",
+  ["tool_input_id", "tool_index", "tool_result_state", "tool_result_bytes", "tool_result_id"]
+    .every((c) => c in toolRows[0]),
+  Object.keys(toolRows[0] ?? {}).join(","));
+check("legacy-shape rows read unknown on the FOC-220 columns",
+  toolRows[0]?.tool_input_id === null && toolRows[0]?.tool_result_state === null &&
+  toolRows[0]?.tool_result_bytes === null && toolRows[0]?.tool_result_id === null,
+  JSON.stringify(toolRows[0]));
+
 // --- idempotence ---------------------------------------------------------
 const countBefore = totals.n;
 ensureViews(db);
