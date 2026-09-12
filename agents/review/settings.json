@@ -19,7 +19,6 @@
       "Bash(snyk:*)",
       "Bash(trivy:*)",
       "Bash(gitleaks:*)",
-      "Bash(npx eslint:*)",
       "Bash(ruff:*)",
       "mcp__codegraph__*",
       "Bash(codegraph:*)"

@@ -45,7 +45,7 @@ Delegate-first: your turn is most expensive. ≥40% run cost in subagents. Subag
    - **Issues found:** compose comment (PL if to Mateusz) → `In Progress` + increment bounce-counter.
    - **Clean (all passes pass, DoD ✓):** approve → label `ai:reviewed`, `stage:testing` (hand to TEST).
 
-**6. DoD check:** tests + AC covered? Missing → treat as `issue:`.
+**6. DoD check:** tests + lint (DEV's `node scripts/lint.mjs` completion condition) + AC covered? Missing → treat as `issue:`.
 
 **7. Bounce limit:** max 2 dev↔review rounds per `agents/review/CLAUDE.md`. >2 bounces → `escalated` + @Mateusz + stop.
 

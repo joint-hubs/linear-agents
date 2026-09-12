@@ -82,7 +82,7 @@ Every implementer/refactorer/debugger brief carries exactly these five parts:
 2. **Input** — what it starts from: entry points, signatures, data shapes, the caller.
 3. **Expected behaviour** — AC/DoD as observable outcomes: what must happen on the happy path, what must happen on each error case. This is the contract the implementer designs against.
 4. **Code standard** — the convention the repo already follows, as reported by recon (error handling shape, result types, test framework, naming, file layout). If the repo has a standard, it wins over the subagent's habits. If recon found none, say so explicitly rather than inventing one.
-5. **Verification + commit** — exact build/test commands, permitted file paths, candidate base/head, local commit authorization and message format. Stage explicit task paths only; preserve pre-existing changes. Include negative cases and distinguish executed checks from skipped ones.
+5. **Verification + commit** — exact build/test commands, permitted file paths, candidate base/head, local commit authorization and message format. Stage explicit task paths only; preserve pre-existing changes. Include negative cases and distinguish executed checks from skipped ones. Verify commands must exist in this repo and run against the candidate tree — `node scripts/lint.mjs` (from the task worktree) is always part of verification; never brief a command that is not in the tree.
 
 Do NOT include: step-by-step implementation instructions, chosen algorithms, invented helper names, or pseudo-code. If you catch yourself writing an implementation, you are doing the subagent's job in the most expensive context available.
 
@@ -147,13 +147,15 @@ then a short WIP note and a clean EXIT (step 5). Do not busy-wait. **Unless `LA_
 WHY — inline debugging re-bills the lead's whole context every turn; subagents run 5–10× cheaper on fresh context.
 
 ### 4. Hand-off (success)
-Write the handoff summary under `.state/`. Inspect working and staged diffs; commit only task-owned, authorized paths after their checks pass. Never sweep unrelated changes, logs, local configuration or another worker's files into a commit. If the implementer already committed the candidate, report that commit; do not create a redundant commit.
+Write the handoff summary under `.state/`. Inspect working and staged diffs; commit only task-owned, authorized paths after their checks pass — `node scripts/lint.mjs` (exit 0), run from the task worktree so it lints the candidate tree, is a completion condition next to the task's own verify commands. Never sweep unrelated changes, logs, local configuration or another worker's files into a commit. If the implementer already committed the candidate, report that commit; do not create a redundant commit.
 ```
 git add -- <explicit-task-paths>
 git diff --cached --stat
 git commit -m "<type>(<scope>): <subject> (<Linear-id>)" -m "Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
 Commit authorization must be in the brief. A failed or skipped check remains visible in the handoff, never described as verified.
+
+Lint status is part of the completion report a dev child returns: the command run (`node scripts/lint.mjs` from the task worktree — the tool lints the tree it is invoked from), its exit code, and the scope/`not covered` lines the tool printed — so a skipped or failed lint is visible in the hand-off rather than implied. A lint that covers nothing is false evidence, not a pass; REVIEW records the same lint row in its verdict (`agents/review/CLAUDE.md`).
 ```
 node $LA_ROOT/scripts/publish-linear-comment.mjs --issue <identifier> --tag run:dev-handoff:<identifier> --squad dev --what "hand-off" --run-id <runId> --state-file <summary.md> --tier T2 --summary "<bullet1>" --summary "<bullet2>" --summary "<bullet3>" --next "<next step>"
 node $LA_ROOT/scripts/linear-ops.mjs transition <identifier> --status "In Review"
@@ -178,6 +180,8 @@ Branch is a no-op: `node $LA_ROOT/scripts/dev-branch.mjs start <identifier> <slu
   WHY — push publishes unreviewed work and can trigger CI/deploy; merge timing is Mateusz's call.
 - NEVER put tokens, API keys, passwords, secrets or login data in Linear comments.
   WHY — comments are visible workspace-wide and may be indexed by search; secrets leak to readers who should never see them.
+- Lint must actually run and actually cover something: hand-off requires `node scripts/lint.mjs` — run from the task worktree, so it lints the candidate tree (the `$LA_ROOT` spelling would lint the main repo) — to have come back clean (exit 0), and the completion report cites the tool's scope/`not covered` output. A lint that lints nothing and always exits 0 is worse than no lint.
+  WHY — a gate that cannot fail manufactures false evidence: "clean" stops meaning anything, and REVIEW inherits a claim nobody can falsify.
 - Never describe or quote a file you have not read yourself or received as a subagent summary — report `unknown / not read` instead.
 - Any destructive or irreversible action not listed here → ask Mateusz first. This is the default whenever you are unsure.
 </dev_hard_rules>
@@ -220,7 +224,7 @@ Code standard (repo):
 Hygiene & security: match surrounding style, no dead code or debug output, tests
 alongside the change; no secrets in code or logs, validate external input.
 
-Verify: `npm run build && npm test -- snapshot`
+Verify: `node scripts/lint.mjs && node scripts/check.mjs`
 Commit: `feat(gantt): add snapshot export (FEN-30)`
 ```
 

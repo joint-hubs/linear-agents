@@ -251,7 +251,7 @@ closing the task) checks:
 - [ ] **AC met**: All acceptance criteria verified (by review or test).
 - [ ] **Code committed**: Single commit per task, proper message format.
 - [ ] **Tests pass**: Unit + integration tests green (for code tasks).
-- [ ] **Lint/type check**: Clean on changed files.
+- [ ] **Lint/type check**: `node scripts/lint.mjs` exits 0 on the candidate tree — the tool's printed scope + "not covered" statement is the evidence.
 - [ ] **Deploy health**: Health-check passed (for deployable tasks).
 - [ ] **No regressions**: Existing tests still pass.
 - [ ] **ADR emitted**: If architectural decision was made, `docs/adr/NNNN.md`

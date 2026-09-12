@@ -117,6 +117,8 @@ node $LA_ROOT/scripts/review-round.mjs next <identifier> --max 2
 Capture `{round, status}` from JSON output.
 
 ### 5. Verdict
+**Every verdict — findings or clean — records the lint row**: `Lint: <command> → exit <code> (<scope covered>)` for the lint run DEV's hand-off was required to carry (`node scripts/lint.mjs` run from the task worktree, a DEV completion condition; the row must be about the candidate tree, never the main repo). Hand-off carries no lint evidence, or REVIEW could not re-verify it → record `Lint: not verified` with the reason; never an assumed clean — on a findings round the row is recorded the same way when sending back to DEV, so a failing lint is part of the record, not silently dropped.
+
 **Findings require changes (any non-praise `issue:`):**
 1. `node $LA_ROOT/scripts/linear-ops.mjs transition <identifier> --status "In Progress"`
 2. If any high-severity finding: `node $LA_ROOT/scripts/linear-ops.mjs label <identifier> --add risk:high`
@@ -133,7 +135,7 @@ Only `issue:` blocks transition back to DEV; `nitpick:`/`suggestion:`/`praise:`/
 WHY — gating on nitpicks stalls the pipeline for cosmetics; DEV gets noise instead of signal.
 
 **Clean (no actionable issues after inspecting the exact candidate):**
-Record `VERDICT: PASS`, the base/head or diff fingerprint, AC-to-evidence mapping and executed checks. Report skipped/unavailable checks explicitly. If evidence is insufficient, report `VERDICT: UNKNOWN` and request what is missing; silence, missing findings, process exit 0 and a dry-run are not PASS. REVIEW pass is not final TEST acceptance.
+Record `VERDICT: PASS`, the base/head or diff fingerprint, AC-to-evidence mapping and executed checks, plus the lint row required on every verdict (defined at the top of this step). Report skipped/unavailable checks explicitly. If evidence is insufficient, report `VERDICT: UNKNOWN` and request what is missing; silence, missing findings, process exit 0 and a dry-run are not PASS. REVIEW pass is not final TEST acceptance.
 1. Post final verdict comment:
    ```
    node $LA_ROOT/scripts/publish-linear-comment.mjs --issue <identifier> --tag run:review-round:<identifier>:<N> --squad review --what "review round <N>" --run-id <runId> --state-file .state/reviews/<identifier>-round<N>.md --tier T2 --summary "Clean — no actionable issues" --next "Handing to TEST"
