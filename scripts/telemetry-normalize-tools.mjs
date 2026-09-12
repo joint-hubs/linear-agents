@@ -18,8 +18,13 @@
  *   errors — needs the transcript re-read to pair tool_use with tool_result.
  *            Rows whose source file no longer exists keep tool_has_error = 0
  *            and are reported as `unverifiable`, never silently as "no errors".
+ *   identity (FOC-220) — needs the transcript re-read too: fills tool_input_id
+ *            (full-input identity), tool_index, tool_result_state / bytes / id
+ *            for rows whose transcript still exists. Rows whose transcript is
+ *            gone stay NULL — which reads as UNKNOWN, never as a measured zero
+ *            or a verified ok.
  *
- * Idempotent: re-running changes nothing once both passes have applied.
+ * Idempotent: re-running changes nothing once all passes have applied.
  *
  * Usage:
  *   node scripts/telemetry-normalize-tools.mjs [--dry] [--json] [--canon-only] [--help]
@@ -27,8 +32,8 @@
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-import { telemetryDbPath } from "./telemetry-store.mjs";
+import { openTelemetryDb, telemetryDbPath, toolIdentitySalt } from "./telemetry-store.mjs";
+import { contentDigest, inputIdentity } from "./tool-identity.mjs";
 import { loadToolNormMap, bucketUnknownTool, extractToolFacts } from "./telemetry-tool-extract.mjs";
 
 /**
@@ -70,10 +75,13 @@ if (args.includes("--help")) {
 
 const log = (...a) => { if (!JSON_OUT) console.log(...a); };
 
-const db = new DatabaseSync(telemetryDbPath());
+// openTelemetryDb (not a raw DatabaseSync) so the FOC-220 additive columns and
+// the identity salt exist before the passes below write them.
+const db = openTelemetryDb(telemetryDbPath());
 db.exec("PRAGMA busy_timeout = 15000;");
+const identitySalt = toolIdentitySalt(db);
 
-const summary = { canon: {}, errors: {}, dry: DRY };
+const summary = { canon: {}, errors: {}, identity: {}, dry: DRY };
 
 // ---------------------------------------------------------------------------
 // Pass 1 — canonical tool names
@@ -108,12 +116,12 @@ if (!DRY && pending > 0) {
 }
 
 // ---------------------------------------------------------------------------
-// Pass 2 — error verdicts (needs the transcripts)
+// Pass 2 + 3 — transcript-backed repairs (error verdicts, then FOC-220 identity)
 // ---------------------------------------------------------------------------
+// One re-read per (source_path, run_id, agent_key) feeds both repairs:
+// tool_fact_id is derived from path+offset+index, so re-extraction reproduces
+// the same ids and every update is a straight key match.
 if (!CANON_ONLY) {
-  // One re-read per (source_path, run_id, agent_key): tool_fact_id is derived
-  // from path+offset+index, so re-extraction reproduces the same ids and the
-  // update is a straight key match.
   const groups = db.prepare(
     `SELECT source_path, run_id, agent_key, COUNT(*) n FROM tool_facts GROUP BY 1,2,3`,
   ).all();
@@ -122,13 +130,34 @@ if (!CANON_ONLY) {
   const gone = groups.filter((g) => !existsSync(g.source_path));
   const unverifiableRows = gone.reduce((a, g) => a + g.n, 0);
 
-  log(`errors: ${groups.length} transcript groups — ${present.length} readable, ${gone.length} missing (${unverifiableRows} rows unverifiable)`);
+  log(`errors+identity: ${groups.length} transcript groups — ${present.length} readable, ${gone.length} missing (${unverifiableRows} rows unverifiable)`);
 
   let flagged = 0;
   let scanned = 0;
   let unmatched = 0;
-  const update = db.prepare("UPDATE tool_facts SET tool_has_error=1 WHERE run_id=? AND tool_fact_id=? AND tool_has_error=0");
+  let identityRepaired = 0;
+  let identityUnmatched = 0;
+  const updateError = db.prepare("UPDATE tool_facts SET tool_has_error=1 WHERE run_id=? AND tool_fact_id=? AND tool_has_error=0");
+  // FOC-220: fill the identity/outcome columns only where they are still NULL —
+  // never overwrite a value, never fabricate one for a row we cannot re-derive.
+  const updateIdentity = db.prepare(`UPDATE tool_facts SET
+      tool_input_id=?, tool_index=?, tool_result_state=?, tool_result_bytes=?, tool_result_id=?
+    WHERE run_id=? AND tool_fact_id=? AND (tool_input_id IS NULL OR tool_result_state IS NULL)`);
   const exists = db.prepare("SELECT 1 FROM tool_facts WHERE run_id=? AND tool_fact_id=?");
+  const needsIdentity = DRY
+    ? db.prepare("SELECT 1 FROM tool_facts WHERE run_id=? AND tool_fact_id=? AND (tool_input_id IS NULL OR tool_result_state IS NULL)")
+    : null;
+  const RESULT_STATES = new Set(["ok", "error", "missing"]);
+
+  const identityFields = (r) => [
+    r.tool_input_full != null ? inputIdentity(r.tool_input_full, identitySalt) : null,
+    Number.isInteger(r.tool_index) ? r.tool_index : null,
+    RESULT_STATES.has(r.tool_result_state) ? r.tool_result_state : null,
+    Number.isInteger(r.tool_result_bytes) ? r.tool_result_bytes : null,
+    typeof r.tool_result_full === "string" && r.tool_result_state && r.tool_result_state !== "missing"
+      ? contentDigest(r.tool_result_full, identitySalt)
+      : null,
+  ];
 
   for (const g of present) {
     let records;
@@ -138,23 +167,38 @@ if (!CANON_ONLY) {
       continue; // unreadable mid-run; counted as unverifiable below
     }
     scanned++;
-    const errored = storedToolFactIds(records).filter((r) => r.tool_has_error === 1);
-    if (!errored.length) continue;
+    const stored = storedToolFactIds(records);
+
     if (DRY) {
       // Verify the reconstructed key actually addresses a stored row — a silent
       // key mismatch is exactly how this pass reported 2074 findings and wrote 0.
-      for (const r of errored) {
-        if (exists.get(g.run_id, r.storedId)) flagged++;
-        else unmatched++;
+      for (const r of stored) {
+        if (!exists.get(g.run_id, r.storedId)) {
+          if (r.tool_has_error === 1) unmatched++;
+          identityUnmatched++;
+          continue;
+        }
+        if (r.tool_has_error === 1) flagged++;
+        if (needsIdentity.get(g.run_id, r.storedId)) identityRepaired++;
       }
     } else {
       db.exec("BEGIN");
-      for (const r of errored) {
-        const changes = update.run(g.run_id, r.storedId).changes;
-        if (changes) flagged += changes;
-        else unmatched++;
+      try {
+        for (const r of stored) {
+          if (r.tool_has_error === 1) {
+            const changes = updateError.run(g.run_id, r.storedId).changes;
+            if (changes) flagged += changes;
+            else unmatched++;
+          }
+          const repaired = updateIdentity.run(...identityFields(r), g.run_id, r.storedId).changes;
+          if (repaired) identityRepaired++;
+          else if (!exists.get(g.run_id, r.storedId)) identityUnmatched++;
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+        throw error;
       }
-      db.exec("COMMIT");
     }
   }
 
@@ -166,9 +210,21 @@ if (!CANON_ONLY) {
     rowsFlagged: flagged,
     rowsUnmatched: unmatched,
   };
+  summary.identity = {
+    rowsRepaired: identityRepaired,
+    rowsUnmatched: identityUnmatched,
+    rowsUnverifiable: unverifiableRows,
+  };
   log(`  ${flagged} rows flagged as errored across ${scanned} transcripts`);
   if (unmatched) {
     log(`  ${unmatched} errored call(s) had no stored row — transcript grew since ingest, or the key scheme drifted`);
+  }
+  log(`  ${identityRepaired} rows given tool_input_id / tool_result columns${DRY ? " (dry run — nothing written)" : ""}`);
+  if (identityUnmatched) {
+    log(`  ${identityUnmatched} re-extracted call(s) had no stored row — transcript grew since ingest, or the key scheme drifted`);
+  }
+  if (gone.length) {
+    log(`  ${unverifiableRows} rows in ${gone.length} missing transcript(s) stay NULL = unknown (never guessed)`);
   }
 }
 

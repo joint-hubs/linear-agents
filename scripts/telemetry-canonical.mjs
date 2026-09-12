@@ -95,13 +95,18 @@ WHERE k.rn = 1`;
 
 // tool_fact_id is sha1(source_path:source_offset:tool_index) — already a
 // physical identity, independent of which run claimed it. Same tie-break.
+// FOC-220 columns ride along: tool_input_id (full-input identity, key-order
+// independent), tool_index, and the honest outcome triple
+// tool_result_state / tool_result_bytes / tool_result_id (NULL = unknown on
+// pre-FOC-220 rows — never read as a verified ok).
 export const CANONICAL_TOOL_SQL = `
 CREATE VIEW canonical_tool_facts AS
 WITH claims AS (
   SELECT
     u.tool_fact_id, u.run_id, u.agent_key, u.model, u.observed_at,
     u.tool_name_raw, u.tool_name_canon, u.tool_has_error, u.turn_index,
-    u.tool_input, u.source_path, u.source_offset,
+    u.tool_input, u.tool_input_id, u.tool_index, u.tool_result_state,
+    u.tool_result_bytes, u.tool_result_id, u.source_path, u.source_offset,
     r.squad, r.started_at,
     ${FIT_RANK} AS fit_rank
   FROM tool_facts u JOIN runs r USING(run_id)
@@ -118,7 +123,9 @@ ranked AS (
 SELECT
   k.tool_fact_id, k.run_id, k.squad, k.agent_key, k.model, k.observed_at,
   k.tool_name_raw, k.tool_name_canon, k.tool_has_error, k.turn_index,
-  k.tool_input, k.source_path, k.source_offset, k.claim_count,
+  k.tool_input, k.tool_input_id, k.tool_index, k.tool_result_state,
+  k.tool_result_bytes, k.tool_result_id, k.source_path, k.source_offset,
+  k.claim_count,
   ${FIT_LABEL} AS attribution
 FROM ranked k
 WHERE k.rn = 1`;

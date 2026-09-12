@@ -2,7 +2,9 @@
 // telemetry-tool-extract.mjs — extract tool_use facts from transcript JSONL files.
 //
 // Standalone module with one primary export: extractToolFacts(transcriptPath, runId, agentKey).
-// Designed to be wired into telemetry-ingest.mjs by a follow-up commit.
+// Wired into telemetry-ingest.mjs; rows are persisted by recordToolFact
+// (telemetry-store.mjs), which also derives the FOC-220 identity digests from
+// the transient full-content fields this module carries.
 //
 // Zero deps except node:crypto and existing project utils. ESM (.mjs), Node 18+.
 
@@ -67,7 +69,31 @@ async function* jsonlLines(filePath) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Model-visible text of a tool_result block's content. Content is a string, an
+ * array of typed parts (text parts use their text, anything else is serialized
+ * so its presence still counts toward the size), or absent. Used for the result
+ * SIZE measurement and — in recordToolFact — for the salted result digest; the
+ * text itself is never persisted (FOC-220).
+ */
+function toolResultText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (part && typeof part.text === "string" ? part.text : JSON.stringify(part ?? null)))
+      .join("\n");
+  }
+  if (content == null) return "";
+  try { return JSON.stringify(content); } catch { return ""; }
+}
+
+/**
  * Extract tool_use facts from a transcript JSONL file.
+ *
+ * The returned records carry three TRANSIENT fields (tool_input_full,
+ * tool_result_full) holding the complete, untruncated input serialization and
+ * the result text. They exist so recordToolFact can derive the salted identity
+ * digests at the single write point; they are never persisted and must not be
+ * logged. All other fields map 1:1 onto the tool_facts columns.
  *
  * @param {string} transcriptPath  Path to the .jsonl transcript file
  * @param {string} runId           Run ID to stamp on every record
@@ -80,9 +106,9 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
   }
 
   const records = [];
-  // tool_use_id → did that call come back as an error. Filled from tool_result
-  // blocks, which is why it cannot be resolved inside the loop (below).
-  const errorByToolUseId = new Map();
+  // tool_use_id → how that call came back. Filled from tool_result blocks,
+  // which is why it cannot be resolved inside the loop (below).
+  const resultByToolUseId = new Map();
   let turnIndex = 0;
   const now = new Date().toISOString();
 
@@ -98,12 +124,17 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
 
     // A tool_result carries the OUTCOME of a tool_use recorded earlier in the
     // file. Claude Code writes it as a `user` line, so it always arrives AFTER
-    // the record it describes — collect verdicts by id here and apply them once
+    // the record it describes — collect outcomes by id here and apply them once
     // the whole file is read (records are buffered in memory anyway).
     if (Array.isArray(content)) {
       for (const block of content) {
         if (block?.type === "tool_result" && block.tool_use_id) {
-          errorByToolUseId.set(block.tool_use_id, block.is_error === true);
+          const text = toolResultText(block.content);
+          resultByToolUseId.set(block.tool_use_id, {
+            isError: block.is_error === true,
+            bytes: Buffer.byteLength(text, "utf8"),
+            text,
+          });
         }
       }
     }
@@ -126,14 +157,17 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
       const name = block.name;
       if (!name) continue; // skip nameless tool_use blocks
 
-      // Serialize input, truncated to 1000 chars
-      let input = "";
+      // Serialize the COMPLETE input first (identity source, FOC-220), then cut
+      // the display preview down to 1000 chars. The full string is carried
+      // transiently in tool_input_full so recordToolFact digests the untruncated
+      // input; it is never persisted.
+      let inputFull = "";
       try {
-        input = JSON.stringify(block.input);
+        inputFull = JSON.stringify(block.input ?? null);
       } catch {
-        input = "";
+        inputFull = "";
       }
-      if (input.length > 1000) input = input.slice(0, 1000);
+      const input = inputFull.length > 1000 ? inputFull.slice(0, 1000) : inputFull;
 
       records.push({
         tool_fact_id: hashToolFactId(transcriptPath, byteOffset, toolIndex),
@@ -144,12 +178,20 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
         tool_name_raw: name,
         tool_name_canon: null, // resolved after the loop — needs the config map
         tool_input: input,
+        tool_input_full: inputFull,
         tool_has_error: 0,     // resolved after the loop — needs the tool_result
+        // FOC-220: position of this tool_use within its assistant message —
+        // the input to tool_fact_id's sha1, now also stored as a column.
+        tool_index: toolIndex,
+        // Resolved after the loop from the matching tool_result block.
+        tool_result_state: null,
+        tool_result_bytes: null,
+        tool_result_full: null,
         turn_index: turnIndex,
         source_path: transcriptPath,
         source_offset: byteOffset,
         created_at: now,
-        // Not a column — the join key to errorByToolUseId, dropped below.
+        // Not a column — the join key to resultByToolUseId, dropped below.
         _toolUseId: block.id || null,
       });
 
@@ -159,16 +201,29 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
     turnIndex++;
   }
 
-  // Two fields could not be filled during the streaming pass: the canonical
-  // category (needs config/tool-norm.json) and the error verdict (needs the
-  // tool_result that appears later in the file). Resolve both here, and drop
+  // Three things could not be filled during the streaming pass: the canonical
+  // category (needs config/tool-norm.json) and the outcome fields (need the
+  // tool_result that appears later in the file). Resolve them here, and drop
   // the temporary join key so the record matches the tool_facts columns.
+  //
+  // A tool_use whose tool_result never appears in the file gets state
+  // 'missing' — NOT ok, NOT error. Under the old scheme that case was
+  // indistinguishable from success (tool_has_error stayed 0).
   const { rawToCanon } = normMap();
   for (const record of records) {
     record.tool_name_canon =
       rawToCanon.resolve(record.tool_name_raw) || bucketUnknownTool(record.tool_name_raw);
-    if (record._toolUseId && errorByToolUseId.get(record._toolUseId) === true) {
-      record.tool_has_error = 1;
+    const result = record._toolUseId ? resultByToolUseId.get(record._toolUseId) : undefined;
+    if (result) {
+      record.tool_has_error = result.isError ? 1 : 0;
+      record.tool_result_state = result.isError ? "error" : "ok";
+      record.tool_result_bytes = result.bytes;
+      record.tool_result_full = result.text;
+    } else {
+      record.tool_has_error = 0;
+      record.tool_result_state = "missing";
+      record.tool_result_bytes = null;
+      record.tool_result_full = null;
     }
     delete record._toolUseId;
   }
@@ -409,7 +464,10 @@ async function main() {
   }
 
   const records = await extractToolFacts(transcriptPath, "cli-test-run", "lead");
-  const preview = records.slice(0, 3);
+  // Strip the transient full-content fields before printing: they exist only so
+  // recordToolFact can derive digests, and a preview CLI must not dump tool
+  // arguments or result bodies to stdout.
+  const preview = records.slice(0, 3).map(({ tool_input_full, tool_result_full, ...rest }) => rest);
   console.log(JSON.stringify(preview, null, 2));
 }
 

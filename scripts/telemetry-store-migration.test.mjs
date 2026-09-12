@@ -14,7 +14,7 @@ import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:f
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import { openTelemetryDb, queryHealth, recordToolFact } from "./telemetry-store.mjs";
+import { openTelemetryDb, queryHealth, recordToolFact, toolIdentitySalt } from "./telemetry-store.mjs";
 
 // tool_fact_id is sha1(source_path:source_offset:tool_index) per recordToolFact.
 // Computed once so the v4 fixture row and the run-B ingest collide on the same id.
@@ -205,7 +205,7 @@ test("scenario (a): v4 DB migrated to v5 with composite PK and cost_facts.run_id
     const db = openTelemetryDb(dbPath);
     try {
       const health = queryHealth(db);
-      assert(health.schemaVersion === 6, `schemaVersion=${health.schemaVersion} (expected 6)`); // slice 2 bump (FOC-225)
+      assert(health.schemaVersion === 7, `schemaVersion=${health.schemaVersion} (expected 7)`); // FOC-220: additive tool_facts columns
 
       // composite PK: usage_facts has two pk>0 columns
       const cols = db.prepare("PRAGMA table_info(usage_facts)").all();
@@ -323,7 +323,7 @@ test("scenario (b): reopening same DB preserves existing pre-v5-backup snapshot"
     const db3 = openTelemetryDb(dbPath);
     try {
       const h = queryHealth(db3);
-      assert(h.schemaVersion === 6, `schemaVersion after reopen=${h.schemaVersion}`);
+      assert(h.schemaVersion === 7, `schemaVersion after reopen=${h.schemaVersion}`);
     } finally { db3.close(); }
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -401,8 +401,9 @@ test("scenario (d): fresh DB has both v4 and v5 markers in schema_migrations", (
       assert(versions.includes(4), `schema_migrations missing v4 (have ${versions.join(",")})`);
       assert(versions.includes(5), `schema_migrations missing v5 (have ${versions.join(",")})`);
       assert(versions.includes(6), `schema_migrations missing v6 (have ${versions.join(",")})`); // slice 2: manager run index
+      assert(versions.includes(7), `schema_migrations missing v7 (have ${versions.join(",")})`); // FOC-220: tool identity columns
       const h = queryHealth(db);
-      assert(h.schemaVersion === 6, `fresh DB schemaVersion=${h.schemaVersion}`);
+      assert(h.schemaVersion === 7, `fresh DB schemaVersion=${h.schemaVersion}`);
     } finally { db.close(); }
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -415,10 +416,97 @@ test(":memory: DB skips pre-v5 backup snapshot", () => {
   const db = openTelemetryDb(":memory:");
   try {
     const h = queryHealth(db);
-    assert(h.schemaVersion === 6, `:memory: schemaVersion=${h.schemaVersion}`);
+    assert(h.schemaVersion === 7, `:memory: schemaVersion=${h.schemaVersion}`);
     const versions = db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => r.version);
-    assert(versions.includes(4) && versions.includes(5) && versions.includes(6), `:memory: missing markers (have ${versions.join(",")})`);
+    assert(versions.includes(4) && versions.includes(5) && versions.includes(6) && versions.includes(7), `:memory: missing markers (have ${versions.join(",")})`);
   } finally { db.close(); }
+});
+
+// (e) FOC-220 — additive tool_facts columns: fresh shape, historical rows read
+// as UNKNOWN (never a measured zero / verified ok), new rows carry the identity.
+test("scenario (e): FOC-220 columns added additively; legacy rows read unknown; new rows carry identity", async () => {
+  requireSqlite();
+  assert(scenarioAPass, "scenario (a) must pass first (dependency)");
+  const temp = mkdtempSync(join(tmpdir(), "foc-220-e-"));
+  try {
+    const dbPath = join(temp, "telemetry.sqlite");
+    buildV4Fixture(dbPath);
+    const db = openTelemetryDb(dbPath);
+    try {
+      // The five columns exist on the migrated legacy database.
+      const names = db.prepare("PRAGMA table_info(tool_facts)").all().map((c) => c.name);
+      for (const col of ["tool_input_id", "tool_index", "tool_result_state", "tool_result_bytes", "tool_result_id"]) {
+        assert(names.includes(col), `tool_facts missing column ${col} (have ${names.join(",")})`);
+      }
+
+      // The pre-FOC-220 row reads as UNKNOWN on every new dimension — NULL, not
+      // 0 / 'ok' / an empty identity. Nothing may read it as verified ok.
+      const legacy = db.prepare("SELECT tool_input_id, tool_index, tool_result_state, tool_result_bytes, tool_result_id, tool_has_error FROM tool_facts WHERE run_id=?").get("run-v4-1");
+      assert(legacy != null, "legacy tool_facts row missing");
+      assert(legacy.tool_input_id === null, `legacy tool_input_id=${legacy.tool_input_id} (expected NULL = unknown)`);
+      assert(legacy.tool_index === null, `legacy tool_index=${legacy.tool_index} (expected NULL = unknown)`);
+      assert(legacy.tool_result_state === null, `legacy tool_result_state=${legacy.tool_result_state} (expected NULL = unknown)`);
+      assert(legacy.tool_result_bytes === null, `legacy tool_result_bytes=${legacy.tool_result_bytes} (expected NULL = unknown)`);
+      assert(legacy.tool_result_id === null, `legacy tool_result_id=${legacy.tool_result_id} (expected NULL = unknown)`);
+      assert(legacy.tool_has_error === 0, "legacy tool_has_error untouched by migration");
+
+      // Per-store salt: exists, and is stable across close/reopen.
+      const salt1 = toolIdentitySalt(db);
+      assert(typeof salt1 === "string" && salt1.length === 64, `salt=${salt1} (expected 64 hex chars)`);
+      db.close();
+      const db2 = openTelemetryDb(dbPath);
+      const salt2 = toolIdentitySalt(db2);
+      assert(salt2 === salt1, "identity salt must be stable across reopen");
+      db2.close();
+
+      // Same input, two DIFFERENT stores → different digests (the salt is what
+      // stops a stored digest from being a confirmation oracle for short args).
+      const dbBPath = join(temp, "other.sqlite");
+      const dbA = openTelemetryDb(dbPath);
+      const dbB = openTelemetryDb(dbBPath);
+      try {
+        dbA.prepare("INSERT INTO runs (run_id, squad, status, updated_at) VALUES ('run-e-1','dev','completed','2026-09-12T00:00:00.000Z')").run();
+        dbB.prepare("INSERT INTO runs (run_id, squad, status, updated_at) VALUES ('run-e-2','dev','completed','2026-09-12T00:00:00.000Z')").run();
+        const record = {
+          run_id: "run-e-1", agent_key: "implementer", tool_name_raw: "Read", tool_name_canon: "read_file",
+          tool_input: '{"file_path":"/tmp/x"}', tool_input_full: '{"file_path":"/tmp/x"}',
+          tool_result_state: "ok", tool_result_bytes: 42, tool_result_full: "hello result",
+          tool_has_error: 0, turn_index: 0, tool_index: 0,
+          source_path: "C:/sessions/e.jsonl", source_offset: 7,
+        };
+        const insA = await recordToolFact(record, { dbPath: dbPath });
+        assert(insA.recorded === true, `recordToolFact recorded=${insA.recorded}`);
+        const rowA = dbA.prepare("SELECT tool_input_id, tool_index, tool_result_state, tool_result_bytes, tool_result_id FROM tool_facts WHERE run_id='run-e-1'").get();
+        assert(/^[0-9a-f]{64}$/.test(rowA.tool_input_id), `tool_input_id=${rowA.tool_input_id} (expected 64-hex HMAC)`);
+        assert(rowA.tool_index === 0, `tool_index=${rowA.tool_index}`);
+        assert(rowA.tool_result_state === "ok", `tool_result_state=${rowA.tool_result_state}`);
+        assert(rowA.tool_result_bytes === 42, `tool_result_bytes=${rowA.tool_result_bytes}`);
+        assert(/^[0-9a-f]{64}$/.test(rowA.tool_result_id), `tool_result_id=${rowA.tool_result_id}`);
+
+        const insB = await recordToolFact({ ...record, run_id: "run-e-2", source_offset: 8 }, { dbPath: dbBPath });
+        assert(insB.recorded === true, `recordToolFact (store B) recorded=${insB.recorded}`);
+        const rowB = dbB.prepare("SELECT tool_input_id FROM tool_facts WHERE run_id='run-e-2'").get();
+        assert(rowB.tool_input_id !== rowA.tool_input_id,
+          "same input in two stores must produce different digests (per-store salt)");
+
+        // Missing result: state 'missing', bytes NULL — distinct from empty (0) and ok.
+        const insM = await recordToolFact({
+          ...record, source_offset: 9, tool_result_state: "missing", tool_result_bytes: null, tool_result_full: null,
+        }, { dbPath: dbPath });
+        assert(insM.recorded === true, `missing-result record recorded=${insM.recorded}`);
+        const rowM = dbA.prepare("SELECT tool_result_state, tool_result_bytes, tool_result_id FROM tool_facts WHERE source_offset=9").get();
+        assert(rowM.tool_result_state === "missing", `missing state=${rowM.tool_result_state}`);
+        assert(rowM.tool_result_bytes === null && rowM.tool_result_id === null, "missing result must have NULL bytes/id");
+      } finally {
+        dbA.close();
+        dbB.close();
+      }
+    } finally {
+      try { db.close(); } catch { /* already closed above */ }
+    }
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 for (const { name, fn } of testQueue) {
