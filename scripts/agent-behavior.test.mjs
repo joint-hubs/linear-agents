@@ -241,6 +241,25 @@ check("every repeat detail carries its category and evidence",
   analyseToolCalls(orderingRows).details.every((d) => d.kind === "repeat" && d.category && d.evidence && d.tool_fact_id),
   "kind/category/evidence/fact id are the inspection contract");
 
+// The final key of the order is load-bearing on real data: two tool_use blocks
+// in ONE transcript line share observed_at, source_path, source_offset and
+// tool_index, and differ only by tool_fact_id. Every fixture above gives each
+// row a distinct (observed_at, source_offset), so the tie is never exercised.
+// Fed in REVERSE fact order, the order — not the input array or SQLite's
+// return order — must decide which fact is the origin and which the repeat.
+const tieAt = "2026-09-12T11:00:00.000Z";
+const tieA = fact({ tool_fact_id: "f-tie-a", observed_at: tieAt, source_offset: 900, tool_result_id: "d-tie", tool_result_state: "ok" });
+const tieB = fact({ tool_fact_id: "f-tie-b", observed_at: tieAt, source_offset: 900, tool_result_id: "d-tie", tool_result_state: "ok" });
+res = analyseToolCalls([tieB, tieA]);
+check("a full (observed_at, path, offset, index) tie is broken by tool_fact_id",
+  res.totals.repeats === 1 && res.details.length === 1 &&
+  res.details[0].tool_fact_id === "f-tie-b" &&
+  res.details[0].evidence.comparedTo === "f-tie-a",
+  JSON.stringify(res.details[0]));
+check("tie output (totals + details) is invariant to input row order",
+  fingerprint(analyseToolCalls([tieA, tieB])) === fingerprint(analyseToolCalls([tieB, tieA])),
+  "the order must come from the row, not from the input array");
+
 console.log(`${passed} passed, ${failed} failed`);
 if (failures.length) {
   console.log(failures.map((f) => `  FAIL: ${f}`).join("\n"));
