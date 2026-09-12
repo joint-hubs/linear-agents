@@ -1,0 +1,10 @@
+{
+  "name": "linear-agents",
+  "private": true,
+  "description": "Security scanners for the REVIEW squad (FOC-285): secretlint (secret scanning) runs in-process from these devDependencies; semgrep (SAST) is provisioned separately via pip — see docs/tools/security-scan.md",
+  "devDependencies": {
+    "@secretlint/config-loader": "^13.0.5",
+    "@secretlint/core": "^13.0.5",
+    "@secretlint/secretlint-rule-preset-recommend": "^13.0.5"
+  }
+}
