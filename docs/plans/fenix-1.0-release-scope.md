@@ -58,7 +58,7 @@ Therefore the release-blocking scope is F3 + F4 (open) plus the contracts needed
 
 - `canonical_usage` is real and tested, but deduplicated cost is still 2.19× inflated (per-message usage lines repeat ~2.57×; raw sums 4.01×) — telemetry L8, L22.
 - Task links are heuristic only, without validation.
-- Kickoff backfill regex `TASK_RE = /\b(FEN|PISI|JOI)-(\d{1,5})\b/i` at `scripts/backfill-task-ids.mjs:34` lacks the FOC- prefix, while branch inference covers FOC (`scripts/ledger.mjs:115-127`) — asymmetric coverage.
+- RESOLVED since this assessment: task-id recognition is single-sourced in `TASK_ID_RE = /\b(FEN|PISI|JOI|FOC)-(\d{1,5})\b/i` (`scripts/ledger.mjs`), imported by `scripts/backfill-task-ids.mjs` — FOC- ids are recognised by backfill and ledger alike (locked by `scripts/backfill-task-ids.test.mjs`). The pre-fix asymmetry the original review recorded here (a FOC-less local copy in the backfill while branch inference covered FOC) no longer exists.
 
 ### 3.3 FOC-165 — Budget cap / accounting verification — BLOCKING, release-candidate run (Q1)
 

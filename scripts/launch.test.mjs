@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import {
   SQUAD_ALLOWLIST,
-  TASK_ID_RE,
+  TASK_ID_FORMAT_RE,
   KICKOFF_TEMPLATES,
   DEFAULT_KICKOFF_TEMPLATES,
   reloadKickoffTemplates,
@@ -199,7 +199,7 @@ test('buildLaunchBat sets LA_TASK_ID + calls bin/<squad>.bat with prompt', () =>
 });
 
 test('buildLaunchBat is injection-resistant (taskId is regex-validated upstream)', () => {
-  // taskId reaching buildLaunchBat already passed TASK_ID_RE, so no metachars.
+  // taskId reaching buildLaunchBat already passed TASK_ID_FORMAT_RE, so no metachars.
   // Verify the safeKick path: a kickoff with a literal " is swapped to '.
   const bat = buildLaunchBat('dev', ok, 'has "quote" inside', 'C:/repo');
   assert.ok(!bat.includes('"quote" inside'), 'inner double-quote must be neutralized');

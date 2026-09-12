@@ -664,9 +664,11 @@ export function migrate(db, path) {
 // message.id by an island over the file's line sequence: within one
 // (source_path, agent_key, model), consecutive rows (by source_offset) whose
 // token tuples are IDENTICAL belong to the same message, unless their
-// observed_at values are more than MESSAGE_GAP_MS apart. Ground truth from
-// real transcripts (2,161 messages): the rule reproduces message.id grouping
-// exactly — zero false merges, zero splits. The gap only has to cover the
+// observed_at values are more than MESSAGE_GAP_MS apart. message.id is not
+// stored in the DB, so the only ground truth available is a sample: on a
+// 2,161-message sample of real transcripts the rule reproduced message.id
+// grouping — zero false merges, zero splits on that sample (validated there,
+// not proven universal). The gap only has to cover the
 // longest observed stream (172.9 s); strict tuple identity already prevents
 // merging distinct calls. Two conservative consequences, both deliberate:
 // zero-token lines are never merged with non-zero neighbours (a zero line

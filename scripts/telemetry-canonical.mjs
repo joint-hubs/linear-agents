@@ -126,7 +126,14 @@ if (isMain) {
         contested: canon.contested,
         collapsedLines: canon.collapsed_lines ?? 0,
       },
-      cost: { rawUsd: rawCost, canonicalUsd: canon.usd, unpricedRows: canon.unpriced },
+      cost: {
+        rawUsd: rawCost, canonicalUsd: canon.usd, unpricedRows: canon.unpriced,
+        // Population label (FOC-221 review): this counts EVERY canonical row
+        // with NULL cost — synthetic and unknown models included. The
+        // usage-audit's unpricedRows is narrower (known non-synthetic models
+        // only); the two are deliberately different populations.
+        unpricedRowsNote: "every canonical row with NULL cost — synthetic models and NULL models included",
+      },
       toolFacts: { raw: rawTool, canonical: canonTool.n, errors: canonTool.errors },
       attribution: Object.fromEntries(attribution.map((r) => [r.attribution, r.n])),
       bySquad,
@@ -141,7 +148,7 @@ if (isMain) {
       log(`  contested by more than one run: ${canon.contested}`);
       log(`tool facts   ${rawTool} raw -> ${canonTool.n} canonical  (${canonTool.errors} errored calls)`);
       log(`cost         $${rawCost} summed per run  ->  $${canon.usd} for distinct calls`);
-      log(`  ${canon.unpriced} rows have no price for their model (counted as unknown, not $0)`);
+      log(`  ${canon.unpriced} rows have no price for their model (counted as unknown, not $0; ALL NULL-cost rows — synthetic + unknown models included)`);
       log(`\nattribution confidence:`);
       for (const r of attribution) log(`  ${String(r.n).padStart(7)}  ${r.attribution}`);
       log(`\nby squad (canonical):`);

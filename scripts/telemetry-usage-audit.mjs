@@ -218,6 +218,11 @@ const after = {
   tokens: islands.reduce((s, r) => s + r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_creation_tokens, 0),
   usd: Math.round(islands.reduce((s, r) => s + (r.cost_usd ?? 0), 0) * 100) / 100,
   unpricedRows: islands.filter((r) => r.cost_usd == null && r.model != null && r.model !== "synthetic" && r.model !== "<synthetic>").length,
+  // Population labels (FOC-221 review): the three unpriced counters in the
+  // wild measure different populations — say so next to the numbers instead of
+  // letting a reader diff them into a phantom trend.
+  unpricedRowsNote: "NULL-cost islands whose model is KNOWN and non-synthetic — synthetic-model and NULL-model islands are excluded here",
+  bySquadNote: "per-squad `unpriced` counts EVERY NULL-cost island, synthetic and NULL models included — a wider population than unpricedRows above",
   collapsedLines: islands.reduce((s, r) => s + (r.line_count - 1), 0),
   contestedIslands: islands.filter((r) => r.claim_count > 1).length,
   zeroTokenIslands: islands.filter((r) => r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_creation_tokens === 0).length,
@@ -317,7 +322,7 @@ const audit = {
     {
       mechanism: "unknown prices stay unknown",
       unpricedIslands: after.unpricedRows,
-      note: "islands whose winner's model is missing from the run's price snapshot report NULL cost and are counted, never folded to 0.",
+      note: "islands whose winner's model is missing from the run's price snapshot report NULL cost and are counted, never folded to 0. Population: known non-synthetic models only — bySquad.unpriced below counts every NULL-cost island including synthetic ones.",
     },
     {
       mechanism: "zero-token islands stay events",
