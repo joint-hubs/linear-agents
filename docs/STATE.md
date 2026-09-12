@@ -3,6 +3,30 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## Current execution: 2026-09-11 — supervised wave (epic FOC-102): FOC-286 + FOC-284 COMPLETE · WIND-DOWN
+
+- **FOC-286** (return-from-test crash, supervised) — COMPLETE, merged to main; follow-ups FOC-294/295/296 filed.
+- **FOC-284** (F-04: `returned-by:*` return labels + routable return edges) — COMPLETE 2026-09-11, run
+  `2026-09-11T10-46-48-428-supervisor-f5dd` (children dev-1/review-2/test-3, glm-5.3-flash). Loop: 3 rundy
+  dev↔review (REQUEST_CHANGES ×2 → **APPROVE**, pierwsza czysta runda — zero `issue:`), kandydat `c8e51e1`
+  (3 commity na `foc-284-dev` nad bazą `3859c86`). TEST: **PASS** — 9/9 suite'ów, 275 testów 0 failed,
+  walidator OK (6/10/6), AC1–AC4 verified, gate-leak clean; F-05 (emiter test-side) odroczony do FOC-165 by design.
+  Linear: **Done**, labels [feature, dod-ok, reviewed, returned-by:review] (return-label zostaje do pass-time
+  removal w FOC-165). Landing: **PR #26** (`foc-284-dev` → main; main == baza — zero konfliktów) — czeka na
+  merge Mateusza. Worktree `foc-284-{dev,review,test}` ZOSTAWIONE (decyzja Mateusza, precedens FOC-286;
+  gałąź review z docsami rund nie jest na origin). Koszt runu ~$14.90 priced (dev $9.32 / review $4.97 / test $0.60).
+- **Wind-down (Mateusz, 2026-09-11):** „musimy powoli robic stop, nie zaczynaj nowych tasków" — koniec fali,
+  nic nowego nie startuje. Follow-upy z rundy 3 FOC-284 ŚWIADOMIE NIE file'owane, zapisane w PR #26:
+  S3-1 (skip-counted-as-pass w supervisor-test-fixtures.mjs), S3-2+N3-1 (catcher: edge-derived advice +
+  dryRun suppression w supervisor-followup.mjs), N3-2/N3-3+Q3-1 (scrub pattern poza supervisor-verdict —
+  `publish-linear-comment.mjs:221` to WRITE path). FOC-165 pokrywa emiter + usuwanie returned-by:review.
+- **Nieruszone w Linear (kolej naturalna, po wznowieniu):** FOC-287 (F-13 lint) · FOC-220 (+F-06) · FOC-221 ·
+  FOC-285 (F-09) · FOC-288 (F-15) · FOC-289 (F-16 docs) · FOC-114 · FOC-165 (+F-14, release-candidate run) ·
+  FOC-102 close-out (epic) · standing: FOC-294/295/296/297. (PR #25/FOC-219 już scalony na main 2026-09-11,
+  `967fc1a`, wchłonięty w `3859c86`; po stronie Mateusza zostaje tylko merge PR #26.)
+- Uwaga toolowa (znana z FEN/FOC-284): wyroki TEST nie nagrywać przez supervisor-verdict; `--run` jawne przy
+  KAŻDYM wywołaniu supervisor-tool (env LA_SUPERVISOR_RUN wskazuje stary run).
+
 ## Current execution: 2026-09-07 — FOC-225 COMPLETE (slice 3 + cleanup landed, integration `b009358`)
 
 - Slice 3 (rewards persistence) DONE: oddzielny ledger `rewards.sqlite` (`LA_REWARDS_HOME`/`LA_REWARDS_DB`;
