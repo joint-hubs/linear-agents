@@ -19,8 +19,26 @@
 // for anyone who sees only the digests (exports, reports, dashboards). It is NOT
 // protection against someone holding the whole database: the salt sits next to
 // the digests by design, because that same database already holds the previews.
+//
+// Versioning contract (FOC-220 AC1): everything above — the canonical-JSON
+// normalization (key ordering, number formatting, array order, cycle/Map/Set
+// handling) plus the HMAC construction — is INPUT_IDENTITY_SCHEME_VERSION.
+// Any change to that recipe bumps the constant in the same commit. Each store
+// records the scheme that produced its stored identities
+// (store_settings.tool_identity_scheme, managed by toolIdentityScheme in
+// telemetry-store.mjs); when the recorded scheme differs from the running one,
+// the write paths REFUSE instead of mixing incomparable digests — scheme drift
+// must be surfaced, never silently read as "different input".
 
 import { createHmac } from "node:crypto";
+
+/**
+ * Identity-scheme version: bumped iff the normalization or HMAC recipe above
+ * changes. Single source of truth — telemetry-store.mjs stamps it into
+ * store_settings on first use and refuses writes when it disagrees with what
+ * the store already holds.
+ */
+export const INPUT_IDENTITY_SCHEME_VERSION = 1;
 
 /**
  * Deterministic JSON serialization with object keys sorted at every depth.

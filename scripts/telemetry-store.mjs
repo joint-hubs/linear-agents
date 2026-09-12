@@ -20,7 +20,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { contentDigest, inputIdentity } from "./tool-identity.mjs";
+import { INPUT_IDENTITY_SCHEME_VERSION, contentDigest, inputIdentity } from "./tool-identity.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -1958,7 +1958,9 @@ export function queryHealth(db) {
   const pendingCount = existsSync(pending) ? readdirSync(pending).filter((name) => name.endsWith(".json")).length : 0;
   const issues = db.prepare("SELECT issue_type AS type, severity, COUNT(*) AS count FROM data_quality_issues WHERE resolved_at IS NULL GROUP BY issue_type, severity ORDER BY count DESC").all();
   const running = db.prepare("SELECT COUNT(*) AS count FROM runs WHERE ended_at IS NULL").get().count;
-  return { database: telemetryDbPath(), schemaVersion: SCHEMA_VERSION, pendingEvents: pendingCount, runningRuns: running, issues };
+  // FOC-220 AC1: identity-scheme drift is reported here too, so a mismatch is
+  // visible to every health reader, not only to the refused write.
+  return { database: telemetryDbPath(), schemaVersion: SCHEMA_VERSION, identityScheme: toolIdentityScheme(db), pendingEvents: pendingCount, runningRuns: running, issues };
 }
 
 export function queryTrace(db, taskId) {
@@ -2129,6 +2131,46 @@ export function toolIdentitySalt(db) {
   return db.prepare("SELECT value FROM store_settings WHERE key=?").get(KEY).value;
 }
 
+/**
+ * Which identity scheme wrote this store, vs the one currently running
+ * (FOC-220 AC1). The scheme is recorded in store_settings next to the salt,
+ * so a stored digest is attributable to a normalization recipe — two digests
+ * computed under different schemes must never be compared as "different
+ * input", because the difference may be scheme drift, not a different call.
+ *
+ * First contact with a store that has no recorded scheme stamps the CURRENT
+ * one: every store predating the versioned contract was written by the
+ * unchanged scheme-1 recipe, so adoption is a single INSERT — no re-derivation
+ * of the backfilled rows. A scheme bump (INPUT_IDENTITY_SCHEME_VERSION) then
+ * shows up here as a mismatch, and the write paths refuse.
+ *
+ * @param {import("node:sqlite").DatabaseSync} db
+ * @returns {{stored: number, current: number, mismatch: boolean, adopted: boolean}}
+ */
+export function toolIdentityScheme(db) {
+  const KEY = "tool_identity_scheme";
+  const row = db.prepare("SELECT value FROM store_settings WHERE key=?").get(KEY);
+  if (row?.value) {
+    const stored = Number(row.value);
+    return {
+      stored,
+      current: INPUT_IDENTITY_SCHEME_VERSION,
+      mismatch: stored !== INPUT_IDENTITY_SCHEME_VERSION,
+      adopted: false,
+    };
+  }
+  db.prepare("INSERT OR IGNORE INTO store_settings (key, value) VALUES (?, ?)")
+    .run(KEY, String(INPUT_IDENTITY_SCHEME_VERSION));
+  // Re-read rather than trust the insert: a concurrent writer may have won.
+  const stamped = Number(db.prepare("SELECT value FROM store_settings WHERE key=?").get(KEY).value);
+  return {
+    stored: stamped,
+    current: INPUT_IDENTITY_SCHEME_VERSION,
+    mismatch: stamped !== INPUT_IDENTITY_SCHEME_VERSION,
+    adopted: true,
+  };
+}
+
 export async function recordToolFact(record, options = {}) {
   const db = openTelemetryDb(options.dbPath);
   try {
@@ -2144,6 +2186,20 @@ export async function recordToolFact(record, options = {}) {
     const identitySource = record.tool_input_full != null
       ? record.tool_input_full
       : (record.tool_input && record.tool_input.length < 1000 ? record.tool_input : null);
+    // Refuse, don't mix (FOC-220 AC1): a fact written under a different scheme
+    // than the store's existing identities would be incomparable with them —
+    // scheme drift must surface as this error, never as "a different input".
+    // Thrown, not returned as a result object: the ingest loop ignores return
+    // values, and a swallowed mismatch is exactly the silent drift this guard
+    // exists to prevent. Facts are re-derivable from transcripts, so refusal
+    // loses nothing that cannot be rebuilt after the schemes are reconciled.
+    const scheme = toolIdentityScheme(db);
+    if (scheme.mismatch) {
+      throw new Error(
+        `tool-input identity scheme mismatch in ${options.dbPath || telemetryDbPath()}: store records scheme ${scheme.stored}, running code computes scheme ${scheme.current}. ` +
+        "New digests would be incomparable with the stored ones. Reconcile first — see the versioning contract in scripts/tool-identity.mjs.",
+      );
+    }
     const salt = toolIdentitySalt(db);
     const toolInputId = identitySource != null ? inputIdentity(identitySource, salt) : null;
     // Honest outcome (FOC-220): 'ok' | 'error' | 'missing'; anything else (and

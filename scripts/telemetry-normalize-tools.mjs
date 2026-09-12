@@ -32,7 +32,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { openTelemetryDb, telemetryDbPath, toolIdentitySalt } from "./telemetry-store.mjs";
+import { openTelemetryDb, telemetryDbPath, toolIdentitySalt, toolIdentityScheme } from "./telemetry-store.mjs";
 import { contentDigest, inputIdentity } from "./tool-identity.mjs";
 import { loadToolNormMap, bucketUnknownTool, extractToolFacts } from "./telemetry-tool-extract.mjs";
 
@@ -79,6 +79,19 @@ const log = (...a) => { if (!JSON_OUT) console.log(...a); };
 // the identity salt exist before the passes below write them.
 const db = openTelemetryDb(telemetryDbPath());
 db.exec("PRAGMA busy_timeout = 15000;");
+// Identity-scheme guard (FOC-220 AC1): the identity pass computes digests with
+// the RUNNING recipe; against a store recorded under a different one those
+// digests are incomparable with what is already stored. Refuse before ANY pass
+// writes (canon included) — scheme drift must surface, never mix silently.
+const identityScheme = toolIdentityScheme(db);
+if (identityScheme.mismatch) {
+  console.error(
+    `identity-scheme mismatch: ${telemetryDbPath()} records scheme ${identityScheme.stored}, running code computes scheme ${identityScheme.current} — refusing to write identities under a scheme the store does not use. ` +
+    "Reconcile the store first; see the versioning contract in scripts/tool-identity.mjs.",
+  );
+  db.close();
+  process.exit(1);
+}
 const identitySalt = toolIdentitySalt(db);
 
 const summary = { canon: {}, errors: {}, identity: {}, dry: DRY };
