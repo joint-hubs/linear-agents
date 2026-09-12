@@ -3,7 +3,50 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Current execution: 2026-09-11 — supervised wave (epic FOC-102): FOC-286 + FOC-284 COMPLETE · WIND-DOWN
+## Current execution: 2026-09-12 — FOC-287 + FOC-220 + FOC-221 INTEGRATED na `chore/foc-102-baseline` (lokalnie)
+
+- **Run** `2026-09-12T08-33-13-554-supervisor-a93f` (glm-5.3-flash, koszt runu ~$10.19 priced; `costUsdReported`
+  $467 to licznik strumienia dla nierozpoznanego modelu — niezaufany). Trzy linie fali doprowadzone do TEST PASS
+  i **scalone lokalnie**; push/PR nadal NIE.
+- **FOC-287** (F-13: lint jako warunek ukończenia w kontrakcie DEV + DoD) — kandydat `4822c84` (1 commit nad
+  `941e32e`, 8 plików: `agents/dev/CLAUDE.md`, `agents/review/CLAUDE.md`, `agents/review/settings.json`,
+  `docs/FENIX_WORKFLOW.md`, `docs/agents/agent-2-dev.md`, `docs/agents/agent-3-review.md`, nowe
+  `scripts/lint.mjs` + `scripts/lint.test.mjs`). TEST **PASS** (`gate-test-4-1`).
+- **FOC-220** (+F-06: tożsamość narzędzi w canonical view — `tool_input_id`, `tool_index` oraz trójka wyniku
+  `tool_result_state` / `tool_result_bytes` / `tool_result_id`) — kandydat `90983e2`. TEST **PASS**
+  (`gate-test-7-1`, `gate-test-9-1`).
+- **FOC-221** (task-coverage + uczciwe podstawy kosztu w eksportach telemetrii) — REVIEW r1 REQUEST_CHANGES →
+  runda fixów (`ab7d829`, `ac3247d`, `1eeccaa`) → REVIEW r2 **PASS** → TEST **PASS** @ `1eeccaa`.
+- **Merge integracyjny `cfacb0c`** (dev-12, `Merge: 1eeccaa 90983e2`) — FOC-221 przeniosło `CANONICAL_TOOL_SQL`
+  z `scripts/telemetry-canonical.mjs` do `scripts/telemetry-store.mjs`; FOC-220 dopisało w tym czasie 5 kolumn
+  *w starym miejscu*. Git scalił `telemetry-store.mjs` **czysto i bez tych kolumn** — pułapka zmierzona, nie
+  teoretyczna. Rozwiązanie: kształt FOC-221 (cienki moduł) + przeniesienie 5 kolumn do `CANONICAL_TOOL_SQL`
+  w **obu** miejscach (claims SELECT po `u.tool_input,`, projekcja końcowa po `k.tool_input,`) wraz z komentarzem
+  FOC-220. Strażnik `scripts/telemetry-canonical.test.mjs` czerwony przed, zielony po.
+- **Weryfikacja `cfacb0c`** — pełny suite **56/56, exit 0** (Supervisor 318 912 ms; dev-12 334 776 ms — dwa
+  niezależne przebiegi). Mutacja (usunięcie `k.tool_result_bytes` z projekcji): strażnik 54 passed / 2 failed
+  exit 1, suite 55/56 exit 1 — strażnik jest **falsyfikowalny**. Focused REVIEW samego commitu merge'a
+  (`--remerge-diff`, nie całego diffu) — **PASS**, gate `gate-review-17-1`.
+- **Landing** — `supervisor-merge.mjs --base cfacb0c --child dev-12 --child dev-1 --keep`, `accepted: true`,
+  `findings: []`, combined verify exit 0; gałąź `la-merge/2026-09-12T08-33-13-554-supervisor-a93f` @ `fcb3eda`
+  (dev-1: 1 commit replay bez konfliktów; dev-12: „nothing to replay — no commits ahead of the base").
+  Fast-forward w głównym checkoucie: `941e32e → fcb3eda` (37 plików, +3962/−356). **Lokalnie, bez push i bez PR.**
+- **`--base cfacb0c` to świadome odstępstwo** od dosłownej komendy: bez niego `replay()` odtwarza już
+  rozstrzygnięty konflikt `scripts/telemetry-canonical.mjs` (dowód: cherry-pick `941e32e..foc-221-dev-r1` na
+  scratchu konfliktuje na `0c241ed`, exit 1) → fałszywy REJECT. Z `--base` zakres dev-12 jest pusty, a FOC-287
+  wchodzi na scalony commit i dopiero ta kombinacja jest weryfikowana.
+- **Worktree** — po landingu do sprzątnięcia te, których gałąź jest przodkiem nowego HEAD (`foc-220-*`,
+  `foc-221-*`, `foc-287-*`), przez `supervisor-cleanup.mjs` po ratowaniu `.state`. **Zostawione świadomie:**
+  `foc-284-*`, `foc-286-*`, `foc-272-review`, `foc-102-plan` oraz `la-merge-2026-09-05…-dd5b`.
+- **Następne:** FOC-285 (F-09: provision secret scanner + SAST w ścieżce review) — dzieci startują z
+  zintegrowanego HEAD, przy **każdym** spawnie jawne `--model z-ai/glm-5.3-flash`.
+- **Uwagi toolowe z tego runu (nowe):** (a) `supervisor-followup.mjs` przekazuje `--prompt-file` do watchera,
+  który startuje z cwd = worktree dziecka i ginie przed tee → **zawsze `--prompt "$(cat <plik>)"`**, nigdy
+  `--prompt-file`; obejście „spawn świeżego dziecka" dało 12 worktree na 2 taski. (b) Bez jawnego `--model`
+  dziecko dziedziczy model sesji Supervisora (`deepseek/deepseek-v4.1-flash`). (c) „Czysty auto-merge nie jest
+  poprawnym auto-merge'em" — przy parze przenieś+edytuj plik, który *przyjął* przeniesienie, nie ma konfliktu.
+
+## 2026-09-11 — supervised wave (epic FOC-102): FOC-286 + FOC-284 COMPLETE · WIND-DOWN
 
 - **FOC-286** (return-from-test crash, supervised) — COMPLETE, merged to main; follow-ups FOC-294/295/296 filed.
 - **FOC-284** (F-04: `returned-by:*` return labels + routable return edges) — COMPLETE 2026-09-11, run
@@ -20,10 +63,11 @@
   S3-1 (skip-counted-as-pass w supervisor-test-fixtures.mjs), S3-2+N3-1 (catcher: edge-derived advice +
   dryRun suppression w supervisor-followup.mjs), N3-2/N3-3+Q3-1 (scrub pattern poza supervisor-verdict —
   `publish-linear-comment.mjs:221` to WRITE path). FOC-165 pokrywa emiter + usuwanie returned-by:review.
-- **Nieruszone w Linear (kolej naturalna, po wznowieniu):** FOC-287 (F-13 lint) · FOC-220 (+F-06) · FOC-221 ·
-  FOC-285 (F-09) · FOC-288 (F-15) · FOC-289 (F-16 docs) · FOC-114 · FOC-165 (+F-14, release-candidate run) ·
-  FOC-102 close-out (epic) · standing: FOC-294/295/296/297. (PR #25/FOC-219 już scalony na main 2026-09-11,
-  `967fc1a`, wchłonięty w `3859c86`; po stronie Mateusza zostaje tylko merge PR #26.)
+- **Nieruszone w Linear po wznowieniu 2026-09-12:** FOC-285 (F-09) · FOC-288 (F-15) · FOC-289 (F-16 docs) ·
+  FOC-114 · FOC-165 (+F-14, release-candidate run) · FOC-102 close-out (epic) · standing: FOC-294/295/296/297.
+  (FOC-287 / FOC-220 / FOC-221 zdjęte z tej listy 2026-09-12 — zintegrowane lokalnie, patrz sekcja wyżej.
+  PR #25/FOC-219 scalony na main 2026-09-11, `967fc1a`, wchłonięty w `3859c86`; po stronie Mateusza zostaje
+  merge PR #26 (FOC-284).)
 - Uwaga toolowa (znana z FEN/FOC-284): wyroki TEST nie nagrywać przez supervisor-verdict; `--run` jawne przy
   KAŻDYM wywołaniu supervisor-tool (env LA_SUPERVISOR_RUN wskazuje stary run).
 
