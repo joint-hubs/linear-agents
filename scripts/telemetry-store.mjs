@@ -2251,6 +2251,7 @@ function aggregateUsageByTask(db, priceMode) {
       runs: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0,
       inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationInputTokens: 0,
       firstStartedAt: null, lastEndedAt: null, squads: {}, _runs: new Set(), _running: false,
+      costBasis: COST_BASIS_CANONICAL,
     };
     const cost = currentPrices
       ? calculateCost({
@@ -2327,7 +2328,18 @@ export function querySummary(db, options = {}) {
   }
   const byTask = aggregateUsageByTask(db, options.priceMode);
   const cacheHitRate = totals.cacheReadTokens + totals.inputTokens > 0 ? totals.cacheReadTokens / (totals.cacheReadTokens + totals.inputTokens) * 100 : 0;
-  return { totals, bySquad, byModel, byDay, byRepo, byTask, cacheHitRate, taskCoverage: taskCoverageCounts(db) };
+  // One payload, two bases (FOC-221 review): totals/bySquad/byModel/byDay/byRepo
+  // sit on the raw per-message layer, while byTask is island-collapsed. Both are
+  // labeled so a consumer can branch instead of guessing which figures carry
+  // the raw over-counts.
+  return {
+    totals, bySquad, byModel, byDay, byRepo, byTask, cacheHitRate,
+    costBasis: COST_BASIS_RAW,
+    costBasisNote: COST_BASIS_RAW_NOTE,
+    byTaskCostBasis: COST_BASIS_CANONICAL,
+    byTaskCostBasisNote: COST_BASIS_CANONICAL_NOTE,
+    taskCoverage: taskCoverageCounts(db),
+  };
 }
 
 export function queryHealth(db) {
@@ -2337,6 +2349,19 @@ export function queryHealth(db) {
   const running = db.prepare("SELECT COUNT(*) AS count FROM runs WHERE ended_at IS NULL").get().count;
   return { database: telemetryDbPath(), schemaVersion: SCHEMA_VERSION, pendingEvents: pendingCount, runningRuns: running, issues };
 }
+
+// Cost/turn basis labels (FOC-221 review). queryTrace and queryPatterns read
+// the raw per-message layer (usage_facts LEFT JOIN cost_facts), so their cost
+// figures carry the run-scoped claim copies and the repeated per-message usage
+// lines — measured 2026-09-12 at ~2.1-2.2x. The figures stay raw by decision
+// (disclosure, not collapse: their turns are raw too, and turn attribution is
+// a separate future decision); instead the payloads self-describe the basis so
+// a JSON consumer can branch on it. canonical_usage / aggregateUsageByTask is
+// the collapsed surface.
+const COST_BASIS_RAW = "raw";
+const COST_BASIS_CANONICAL = "canonical";
+const COST_BASIS_RAW_NOTE = "cost figures and the turns counts beside them are raw usage-line sums from usage_facts LEFT JOIN cost_facts: run-scoped claim copies and repeated per-message usage lines are included, not collapsed — canonical_usage (FOC-221 island rule) is the collapsed surface";
+const COST_BASIS_CANONICAL_NOTE = "these buckets are island-collapsed per the FOC-221 rule (one row per physical message): they do not carry the raw over-counts the raw-layer figures above do";
 
 export function queryTrace(db, taskId) {
   const runRows = db.prepare(
@@ -2367,6 +2392,7 @@ export function queryTrace(db, taskId) {
       agent: step.agent,
       turns: step.turns,
       costUSD: step.unpriced ? null : (step.cost ?? 0),
+      costBasis: COST_BASIS_RAW,
       unpriced: step.unpriced,
       firstTs: step.first_ts,
       lastTs: step.last_ts,
@@ -2380,6 +2406,7 @@ export function queryTrace(db, taskId) {
       status: statusRow(row),
       unpriced: runUnpriced,
       costUSD: runUnpriced ? null : stepRows.reduce((sum, step) => sum + step.costUSD, 0),
+      costBasis: COST_BASIS_RAW,
       steps: stepRows,
     };
   });
@@ -2396,6 +2423,8 @@ export function queryTrace(db, taskId) {
     taskId: normalized,
     runs: chain,
     totalCostUSD: anyUnpriced ? null : chain.reduce((sum, run) => sum + run.costUSD, 0),
+    costBasis: COST_BASIS_RAW,
+    costBasisNote: COST_BASIS_RAW_NOTE,
     reviewDevBounces: bounces,
     squadRepeats: Object.fromEntries(Object.entries(repeats).filter(([, count]) => count > 1)),
   };
@@ -2423,6 +2452,9 @@ export function queryPatterns(db, filters = {}) {
     const key = `${row.squad}\u0000${row.agent}`;
     const stat = stats.get(key) || { squad: row.squad, agent: row.agent, runs: new Map(), turns: 0, cost_usd: 0, unpriced_turns: 0 };
     stat.turns++;
+    // The fold only feeds the internal sum; the OUTPUT below is null-contagious
+    // like queryTrace — a stat with an unpriced turn reports cost_usd null and
+    // carries the count next to it, never a partial sum laundered as truth.
     stat.cost_usd += row.cost_usd ?? 0;
     if (row.cost_usd == null && !isSyntheticModel(row.model)) stat.unpriced_turns++;
     stat.runs.set(row.run_id, (stat.runs.get(row.run_id) || 0) + 1);
@@ -2440,7 +2472,8 @@ export function queryPatterns(db, filters = {}) {
     executions: stat.runs.size,
     turns: stat.turns,
     avg_turns_per_run: stat.runs.size ? stat.turns / stat.runs.size : 0,
-    cost_usd: stat.cost_usd,
+    cost_usd: stat.unpriced_turns > 0 ? null : stat.cost_usd,
+    costBasis: COST_BASIS_RAW,
     unpriced_turns: stat.unpriced_turns,
   })).sort((a, b) => `${a.squad}:${a.agent}`.localeCompare(`${b.squad}:${b.agent}`));
   const repeats = [...repeated.entries()].flatMap(([key, runIds]) => {
@@ -2465,7 +2498,7 @@ export function queryPatterns(db, filters = {}) {
     `SELECT squad, COUNT(*) AS runs, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed
      FROM runs GROUP BY squad ORDER BY squad`,
   ).all();
-  return { stepStats, repeats, bounces, failures };
+  return { stepStats, repeats, bounces, failures, costBasis: COST_BASIS_RAW, costBasisNote: COST_BASIS_RAW_NOTE };
 }
 
 export function exportTelemetry(db, format, destination) {

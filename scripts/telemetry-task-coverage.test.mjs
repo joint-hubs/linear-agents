@@ -159,7 +159,16 @@ check("trace total is null, not a partial sum laundered as truth", trace.totalCo
 const patterns = queryPatterns(db);
 const confStep = patterns.stepStats.find((s) => s.squad === "dev" && s.agent === "_lead");
 check("patterns carry unpriced_turns", confStep && confStep.unpriced_turns === 1, JSON.stringify(confStep));
-check("patterns cost still sums the priced turns", confStep.cost_usd > 0, `cost=${confStep?.cost_usd}`);
+check("patterns cost is null-contagious: an unpriced turn nulls the stat, never a partial sum",
+  confStep && confStep.cost_usd === null, `cost=${confStep?.cost_usd}`);
+const cleanStep = patterns.stepStats.find((s) => s.squad === "review" && s.agent === "_lead");
+check("patterns cost still sums the priced turns when nothing is unpriced",
+  cleanStep && cleanStep.unpriced_turns === 0 && cleanStep.cost_usd > 0, JSON.stringify(cleanStep));
+check("trace and patterns state the same machine-readable raw basis",
+  patterns.costBasis === "raw" && trace.costBasis === "raw"
+  && patterns.stepStats.every((s) => s.costBasis === "raw")
+  && trace.runs.every((r) => r.costBasis === "raw" && r.steps.every((s) => s.costBasis === "raw")),
+  `patterns=${patterns.costBasis} trace=${trace.costBasis}`);
 
 db.close();
 rmSync(temp, { recursive: true, force: true });

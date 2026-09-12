@@ -151,6 +151,38 @@ test("central flow trace and patterns use temporal task usage", () => {
   assert(patterns.stepStats[0].executions >= 1, "patterns must include central usage");
 });
 
+test("trace and patterns self-describe the raw cost basis (FOC-221 disclosure)", () => {
+  const trace = queryTrace(db, "FOC-1");
+  assert(trace.costBasis === "raw", `trace costBasis=${trace.costBasis}`);
+  assert(typeof trace.costBasisNote === "string" && trace.costBasisNote.includes("raw"), "trace basis note missing");
+  assert(trace.runs.every((run) => run.costBasis === "raw"
+    && run.steps.every((step) => step.costBasis === "raw")), "per-run/step basis labels missing");
+  const patterns = queryPatterns(db);
+  assert(patterns.costBasis === "raw" && typeof patterns.costBasisNote === "string", "patterns payload basis missing");
+  assert(patterns.stepStats.length > 0 && patterns.stepStats.every((row) => row.costBasis === "raw"),
+    "patterns per-row basis labels missing");
+});
+
+test("patterns cost is null-contagious like trace: an unpriced turn nulls the stat, priced-only keeps the sum", () => {
+  const patterns = queryPatterns(db);
+  const lead = patterns.stepStats.find((row) => row.squad === "dev" && row.agent === "_lead");
+  assert(lead && lead.unpriced_turns >= 1, `lead stat=${JSON.stringify(lead)}`);
+  assert(lead.cost_usd === null, `unpriced turns must null the cost, got ${lead.cost_usd}`);
+  const implementer = patterns.stepStats.find((row) => row.squad === "dev" && row.agent === "implementer");
+  assert(implementer && implementer.unpriced_turns === 0 && implementer.cost_usd > 0,
+    `priced-only stat must keep the plain sum: ${JSON.stringify(implementer)}`);
+});
+
+test("querySummary labels the mix: raw totals, canonical byTask", () => {
+  const summary = querySummary(db);
+  assert(summary.costBasis === "raw", `summary costBasis=${summary.costBasis}`);
+  assert(summary.byTaskCostBasis === "canonical", `byTaskCostBasis=${summary.byTaskCostBasis}`);
+  assert(typeof summary.costBasisNote === "string" && summary.costBasisNote.length > 0, "costBasisNote missing");
+  assert(typeof summary.byTaskCostBasisNote === "string" && summary.byTaskCostBasisNote.length > 0, "byTaskCostBasisNote missing");
+  assert(Object.keys(summary.byTask).length > 0
+    && Object.values(summary.byTask).every((bucket) => bucket.costBasis === "canonical"), "byTask buckets unlabeled");
+});
+
 test("summary uses central projections", () => {
   const summary = querySummary(db);
   assert(summary.totals.runs === 2, `runs=${summary.totals.runs}`);
