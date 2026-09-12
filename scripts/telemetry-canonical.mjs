@@ -6,33 +6,46 @@
  * transcript file, each run gets its own copy of that file's rows. That is
  * correct for "what did run X cost" — but it makes every FLEET question
  * ("what did I spend", "which model errors most") count the same API call once
- * per claiming run. Measured on 2026-09-04: 124 237 usage rows describe 106 325
- * distinct calls, and `supervisor` alone is inflated 44%.
+ * per claiming run. On top of that sits a second over-count: a single
+ * assistant message is several JSONL lines (thinking / text / tool_use), and
+ * every one of them repeats the same usage object; ingest keys rows by byte
+ * offset, so the repeats became distinct rows. Measured 2026-09-12 on a copy
+ * of the live store: 182 796 usage rows → 74 086 physical calls; the pinned
+ * raw sum $7 029.53 → $1 557.42 once both layers are removed (FOC-221).
  *
- * The deeper cause is that ingestTranscript attributes EVERY line of a file to
- * the run it is ingesting for, with no boundary — so a run that lasted three
- * seconds can own 2 524 turns spanning ten days. These views do not fix that
- * (a re-ingest would); they make it measurable and stop it from silently
- * inflating aggregates.
+ * The rule (two layers, both read-side):
+ *   1. Run-scoped claims on one call are NOT summed — among the runs claiming
+ *      a call, one representative wins (fit, then time distance, then ids).
+ *   2. The repeated per-message usage lines are collapsed into one row:
+ *      partition by (source_path, agent_key, model), order by byte offset, and
+ *      keep rows on the same island while the token tuple is IDENTICAL and the
+ *      gap to the previous line stays within MESSAGE_GAP_MS (300 s; the
+ *      largest observed per-message span is 173 s). The representative line
+ *      carries the message's usage; `line_count` says how many lines were
+ *      folded, `collapsed_lines` in the report is the sum of line_count-1.
  *
- * The rule. A physical call is identified by (source_path, source_offset) —
- * a byte position in a file, which no amount of re-attribution changes. Among
- * the runs claiming it, one wins:
+ * Identical tuples only: zero-token rows never bridge two messages (checked
+ * against message.id ground truth on 2 161 real messages — islands match
+ * messages exactly).
+ *
+ * The representative row keeps an `attribution` label rather than hiding the
+ * guesswork:
  *
  *   in_window     the call happened between the run's start and end   ← trusted
  *   after_end     the run had already finished; nearest start wins
  *   before_start  the run had not started yet
  *   no_timestamp  no time on either side; run_id breaks the tie
  *
- * `attribution` is kept in the view rather than filtered away, so an analysis
- * can demand in_window when it needs certainty instead of inheriting a guess.
- * `claim_count` says how many runs wanted the row — 1 means uncontested.
- *
  * Cost is joined at the run's OWN price_set_id. cost_facts holds a row per
- * price snapshot (52 of them), so a join without that predicate multiplies
- * every sum — the trap ADR-0008 names under "Join complexity". A call whose
- * model was missing from the snapshot yields NULL, never 0: unpriced is not
- * free, and `--report` counts those rows separately.
+ * price snapshot, so a join without that predicate multiplies every sum — the
+ * trap ADR-0008 names under "Join complexity". A call whose model was missing
+ * from the snapshot yields NULL, never 0: unpriced is not free, and `--report`
+ * counts those rows separately.
+ *
+ * This file is now a thin CLI over the store: the SQL lives in
+ * telemetry-store.mjs next to its JS twin (collapseUsageIslands) so the two
+ * cannot drift apart — the contract test in telemetry-canonical.test.mjs
+ * asserts they agree row for row.
  *
  * Usage:
  *   node scripts/telemetry-canonical.mjs --ensure    # (re)create the views
@@ -41,100 +54,19 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { telemetryDbPath } from "./telemetry-store.mjs";
+import { telemetryDbPath, CANONICAL_USAGE_SQL, CANONICAL_TOOL_SQL, ensureCanonicalViews } from "./telemetry-store.mjs";
 
-// Ranking shared by both views: lower is a better claim on the row.
-const FIT_RANK = `
-    CASE
-      WHEN u.observed_at IS NULL OR r.started_at IS NULL THEN 3
-      WHEN u.observed_at >= r.started_at
-           AND (r.ended_at IS NULL OR u.observed_at <= r.ended_at) THEN 0
-      WHEN u.observed_at > COALESCE(r.ended_at, r.started_at) THEN 1
-      ELSE 2
-    END`;
-
-const FIT_LABEL = `
-    CASE k.fit_rank
-      WHEN 0 THEN 'in_window'
-      WHEN 1 THEN 'after_end'
-      WHEN 2 THEN 'before_start'
-      ELSE 'no_timestamp'
-    END`;
-
-export const CANONICAL_USAGE_SQL = `
-CREATE VIEW canonical_usage AS
-WITH claims AS (
-  SELECT
-    u.source_path, u.source_offset, u.usage_id, u.run_id, u.session_id,
-    u.agent_key, u.model, u.observed_at,
-    u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens,
-    r.squad, r.started_at, r.price_set_id,
-    ${FIT_RANK} AS fit_rank
-  FROM usage_facts u JOIN runs r USING(run_id)
-),
-ranked AS (
-  SELECT *,
-    ROW_NUMBER() OVER (
-      PARTITION BY source_path, source_offset
-      ORDER BY fit_rank, ABS(julianday(observed_at) - julianday(started_at)), run_id
-    ) AS rn,
-    COUNT(*) OVER (PARTITION BY source_path, source_offset) AS claim_count
-  FROM claims
-)
-SELECT
-  k.source_path, k.source_offset, k.usage_id, k.run_id, k.session_id, k.squad,
-  k.agent_key, k.model, k.observed_at,
-  k.input_tokens, k.output_tokens, k.cache_read_tokens, k.cache_creation_tokens,
-  k.claim_count,
-  ${FIT_LABEL} AS attribution,
-  c.cost_usd
-FROM ranked k
-LEFT JOIN cost_facts c
-  ON c.run_id = k.run_id AND c.usage_id = k.usage_id AND c.price_set_id = k.price_set_id
-WHERE k.rn = 1`;
-
-// tool_fact_id is sha1(source_path:source_offset:tool_index) — already a
-// physical identity, independent of which run claimed it. Same tie-break.
-export const CANONICAL_TOOL_SQL = `
-CREATE VIEW canonical_tool_facts AS
-WITH claims AS (
-  SELECT
-    u.tool_fact_id, u.run_id, u.agent_key, u.model, u.observed_at,
-    u.tool_name_raw, u.tool_name_canon, u.tool_has_error, u.turn_index,
-    u.tool_input, u.source_path, u.source_offset,
-    r.squad, r.started_at,
-    ${FIT_RANK} AS fit_rank
-  FROM tool_facts u JOIN runs r USING(run_id)
-),
-ranked AS (
-  SELECT *,
-    ROW_NUMBER() OVER (
-      PARTITION BY tool_fact_id
-      ORDER BY fit_rank, ABS(julianday(observed_at) - julianday(started_at)), run_id
-    ) AS rn,
-    COUNT(*) OVER (PARTITION BY tool_fact_id) AS claim_count
-  FROM claims
-)
-SELECT
-  k.tool_fact_id, k.run_id, k.squad, k.agent_key, k.model, k.observed_at,
-  k.tool_name_raw, k.tool_name_canon, k.tool_has_error, k.turn_index,
-  k.tool_input, k.source_path, k.source_offset, k.claim_count,
-  ${FIT_LABEL} AS attribution
-FROM ranked k
-WHERE k.rn = 1`;
+export { CANONICAL_USAGE_SQL, CANONICAL_TOOL_SQL };
 
 /**
  * Create both views, replacing any earlier definition. DROP+CREATE rather than
  * CREATE IF NOT EXISTS: a view that silently kept a stale definition after this
  * file changed would be worse than no view at all. Safe to call on every open —
- * a view holds no data.
+ * a view holds no data. (The store already calls this at the end of migrate();
+ * the CLI keeps its own entry point for databases opened read-write here.)
  */
 export function ensureViews(db) {
-  db.exec("DROP VIEW IF EXISTS canonical_usage");
-  db.exec("DROP VIEW IF EXISTS canonical_tool_facts");
-  db.exec(CANONICAL_USAGE_SQL);
-  db.exec(CANONICAL_TOOL_SQL);
-  return ["canonical_usage", "canonical_tool_facts"];
+  return ensureCanonicalViews(db);
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +106,7 @@ if (isMain) {
     const canon = one(`SELECT COUNT(*) n,
         SUM(claim_count > 1) contested,
         SUM(cost_usd IS NULL) unpriced,
+        SUM(line_count - 1) collapsed_lines,
         ROUND(SUM(COALESCE(cost_usd, 0)), 2) usd
       FROM canonical_usage`);
     const rawCost = one(`SELECT ROUND(SUM(c.cost_usd), 2) usd
@@ -188,7 +121,11 @@ if (isMain) {
     const canonTool = one("SELECT COUNT(*) n, SUM(tool_has_error) errors FROM canonical_tool_facts");
 
     const report = {
-      usage: { raw: rawUsage, canonical: canon.n, removed: rawUsage - canon.n, contested: canon.contested },
+      usage: {
+        raw: rawUsage, canonical: canon.n, removed: rawUsage - canon.n,
+        contested: canon.contested,
+        collapsedLines: canon.collapsed_lines ?? 0,
+      },
       cost: { rawUsd: rawCost, canonicalUsd: canon.usd, unpricedRows: canon.unpriced },
       toolFacts: { raw: rawTool, canonical: canonTool.n, errors: canonTool.errors },
       attribution: Object.fromEntries(attribution.map((r) => [r.attribution, r.n])),
@@ -199,7 +136,8 @@ if (isMain) {
       console.log(JSON.stringify(report, null, 2));
     } else {
       const pct = (a, b) => `${(100 * (b - a) / b).toFixed(1)}%`;
-      log(`usage rows   ${rawUsage} raw -> ${canon.n} canonical  (${pct(canon.n, rawUsage)} were duplicate attributions)`);
+      log(`usage rows   ${rawUsage} raw -> ${canon.n} canonical  (${pct(canon.n, rawUsage)} were over-counted)`);
+      log(`  per-message usage lines collapsed: ${canon.collapsed_lines ?? 0}`);
       log(`  contested by more than one run: ${canon.contested}`);
       log(`tool facts   ${rawTool} raw -> ${canonTool.n} canonical  (${canonTool.errors} errored calls)`);
       log(`cost         $${rawCost} summed per run  ->  $${canon.usd} for distinct calls`);

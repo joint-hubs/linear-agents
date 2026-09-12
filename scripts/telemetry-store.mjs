@@ -619,6 +619,12 @@ function ensureManagerRunIndex(db) {
 }
 
 export function migrate(db, path) {
+  // Views are dropped first and recreated at the end: the migrations below
+  // rebuild the fact tables they select from (DROP + RENAME), and SQLite
+  // parses every view body on any ALTER — a view left referencing a table
+  // mid-rebuild fails the migration with "error in view". A view holds no
+  // data, so dropping it up front is free.
+  dropCanonicalViews(db);
   createBaseSchema(db);
   addRunColumns(db);
   addModelPriceColumns(db);
@@ -628,6 +634,7 @@ export function migrate(db, path) {
   backfillWorktreeIds(db);
   migrateRunScopedUsage(db, path);
   ensureManagerRunIndex(db);
+  ensureCanonicalViews(db);
   // Record every migration marker. Each step guards itself above; this loop
   // just persists the paper trail. INSERT OR IGNORE keeps it idempotent across
   // re-opens.
@@ -635,6 +642,189 @@ export function migrate(db, path) {
   for (const v of Object.values(MIGRATION_VERSIONS)) {
     db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(v, stamp);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical fleet views (FOC-221).
+//
+// Two independent over-counts sit on top of usage_facts, and both are fixed at
+// READ time — the stored rows are never rewritten:
+//
+//   1. Run-scoped claims (ADR-0008): a transcript file is not a run boundary,
+//      so every run that re-ingested a file keeps its own copy of that file's
+//      rows. Measured 2026-09-04: 161,221 rows for 142,841 distinct calls.
+//   2. Repeated per-message usage lines (F7.1b): one assistant message is
+//      written to the transcript as several lines — thinking, text, tool_use —
+//      and each line repeats the same usage object. Ingest keys rows by byte
+//      offset (message.id is not stored), so the lines became distinct
+//      usage_facts rows. Measured 2026-09-12 on the live store copy:
+//      182,796 rows collapse to 74,086 calls; naive tokens 15.28 bn vs 4.77 bn.
+//
+// A physical call is therefore one assistant MESSAGE, identified without
+// message.id by an island over the file's line sequence: within one
+// (source_path, agent_key, model), consecutive rows (by source_offset) whose
+// token tuples are IDENTICAL belong to the same message, unless their
+// observed_at values are more than MESSAGE_GAP_MS apart. Ground truth from
+// real transcripts (2,161 messages): the rule reproduces message.id grouping
+// exactly — zero false merges, zero splits. The gap only has to cover the
+// longest observed stream (172.9 s); strict tuple identity already prevents
+// merging distinct calls. Two conservative consequences, both deliberate:
+// zero-token lines are never merged with non-zero neighbours (a zero line
+// that bridges two different calls would undercount one of them), and rows
+// with NULL observed_at collapse by tuple identity alone.
+//
+// Among the runs claiming an island, one wins, ranked by fit (in_window >
+// after_end > before_start > no_timestamp), then time distance to the run's
+// start, then run_id, then usage_id — the same ranking the original view used
+// per line, now applied per message. claim_count is the number of competing
+// runs, line_count the number of raw lines the row stands for; attribution
+// exposes the confidence instead of filtering it away.
+//
+// Cost is joined at the winning run's OWN price_set_id. cost_facts holds a row
+// per price snapshot, so a join without that predicate multiplies every sum.
+// A call whose model is missing from the snapshot yields NULL, never 0:
+// unpriced is not free.
+//
+// collapseUsageIslands() below is the JS twin of this definition — the
+// dashboard aggregates must stay under ~2 s per request, and this view costs
+// ~17 s on the live store — with a contract test
+// (scripts/telemetry-canonical.test.mjs) asserting both produce identical
+// rows. Change one, change the other.
+// ---------------------------------------------------------------------------
+
+export const MESSAGE_GAP_MS = 300000;
+
+const FIT_RANK_SQL = `
+    CASE
+      WHEN u.observed_at IS NULL OR r.started_at IS NULL THEN 3
+      WHEN u.observed_at >= r.started_at
+           AND (r.ended_at IS NULL OR u.observed_at <= r.ended_at) THEN 0
+      WHEN u.observed_at > COALESCE(r.ended_at, r.started_at) THEN 1
+      ELSE 2
+    END`;
+
+const FIT_LABEL_SQL = `
+    CASE k.fit_rank
+      WHEN 0 THEN 'in_window'
+      WHEN 1 THEN 'after_end'
+      WHEN 2 THEN 'before_start'
+      ELSE 'no_timestamp'
+    END`;
+
+export const CANONICAL_USAGE_SQL = `
+CREATE VIEW canonical_usage AS
+WITH ordered AS (
+  SELECT
+    u.usage_id, u.run_id, u.session_id, u.agent_key, u.model, u.observed_at,
+    u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens,
+    u.source_path, u.source_offset, u.created_at,
+    r.squad, r.started_at, r.ended_at, r.price_set_id,
+    ${FIT_RANK_SQL} AS fit_rank,
+    LAG(u.input_tokens)          OVER w AS p_input,
+    LAG(u.output_tokens)         OVER w AS p_output,
+    LAG(u.cache_read_tokens)     OVER w AS p_cache_read,
+    LAG(u.cache_creation_tokens) OVER w AS p_cache_creation,
+    LAG(u.observed_at)           OVER w AS p_observed_at
+  FROM usage_facts u JOIN runs r ON r.run_id = u.run_id
+  WINDOW w AS (PARTITION BY u.source_path, u.agent_key, u.model
+               ORDER BY u.source_offset, u.run_id, u.usage_id)
+),
+flagged AS (
+  SELECT *,
+    CASE
+      WHEN p_input IS NULL THEN 0
+      WHEN input_tokens != p_input OR output_tokens != p_output
+        OR cache_read_tokens != p_cache_read
+        OR cache_creation_tokens != p_cache_creation THEN 1
+      WHEN observed_at IS NOT NULL AND p_observed_at IS NOT NULL
+        AND ABS(julianday(observed_at) - julianday(p_observed_at)) * 86400 > 300 THEN 1
+      ELSE 0
+    END AS is_boundary
+  FROM ordered
+),
+islands AS (
+  SELECT *,
+    SUM(is_boundary) OVER (PARTITION BY source_path, agent_key, model
+      ORDER BY source_offset, run_id, usage_id ROWS UNBOUNDED PRECEDING) AS island_id
+  FROM flagged
+),
+island_stats AS (
+  SELECT source_path, agent_key, model, island_id,
+    COUNT(*) AS line_count, COUNT(DISTINCT run_id) AS claim_count
+  FROM islands GROUP BY source_path, agent_key, model, island_id
+),
+ranked AS (
+  SELECT *,
+    ROW_NUMBER() OVER (
+      PARTITION BY source_path, agent_key, model, island_id
+      ORDER BY fit_rank, ABS(julianday(observed_at) - julianday(started_at)), run_id, usage_id
+    ) AS rn
+  FROM islands
+)
+SELECT
+  k.source_path, k.source_offset, k.usage_id, k.run_id, k.session_id, k.squad,
+  k.agent_key, k.model, k.observed_at, k.started_at, k.ended_at,
+  k.input_tokens, k.output_tokens, k.cache_read_tokens, k.cache_creation_tokens,
+  s.claim_count, s.line_count,
+  ${FIT_LABEL_SQL} AS attribution,
+  c.cost_usd
+FROM ranked k
+JOIN island_stats s ON s.source_path = k.source_path AND s.agent_key = k.agent_key
+  AND s.model IS k.model AND s.island_id = k.island_id
+LEFT JOIN cost_facts c
+  ON c.run_id = k.run_id AND c.usage_id = k.usage_id AND c.price_set_id = k.price_set_id
+WHERE k.rn = 1`;
+
+// tool_fact_id is sha1(source_path:source_offset:tool_index) — already one row
+// per physical tool call (a tool_use content block), independent of which run
+// claimed it. Only the run-scoped claim layer applies here; the per-message
+// layer does not (several tool_use blocks of one message are several calls).
+export const CANONICAL_TOOL_SQL = `
+CREATE VIEW canonical_tool_facts AS
+WITH claims AS (
+  SELECT
+    u.tool_fact_id, u.run_id, u.agent_key, u.model, u.observed_at,
+    u.tool_name_raw, u.tool_name_canon, u.tool_has_error, u.turn_index,
+    u.tool_input, u.source_path, u.source_offset,
+    r.squad, r.started_at,
+    ${FIT_RANK_SQL} AS fit_rank
+  FROM tool_facts u JOIN runs r USING(run_id)
+),
+ranked AS (
+  SELECT *,
+    ROW_NUMBER() OVER (
+      PARTITION BY tool_fact_id
+      ORDER BY fit_rank, ABS(julianday(observed_at) - julianday(started_at)), run_id
+    ) AS rn,
+    COUNT(*) OVER (PARTITION BY tool_fact_id) AS claim_count
+  FROM claims
+)
+SELECT
+  k.tool_fact_id, k.run_id, k.squad, k.agent_key, k.model, k.observed_at,
+  k.tool_name_raw, k.tool_name_canon, k.tool_has_error, k.turn_index,
+  k.tool_input, k.source_path, k.source_offset, k.claim_count,
+  ${FIT_LABEL_SQL} AS attribution
+FROM ranked k
+WHERE k.rn = 1`;
+
+/**
+ * Create both canonical views, replacing any earlier definition. DROP+CREATE
+ * rather than CREATE IF NOT EXISTS: a view that silently kept a stale
+ * definition after this file changed would be worse than no view at all.
+ * Called on every open from migrate(), so a fresh store never has to remember
+ * to run scripts/telemetry-canonical.mjs --ensure first. Safe to call again —
+ * a view holds no data.
+ */
+export function dropCanonicalViews(db) {
+  db.exec("DROP VIEW IF EXISTS canonical_usage");
+  db.exec("DROP VIEW IF EXISTS canonical_tool_facts");
+}
+
+export function ensureCanonicalViews(db) {
+  dropCanonicalViews(db);
+  db.exec(CANONICAL_USAGE_SQL);
+  db.exec(CANONICAL_TOOL_SQL);
+  return ["canonical_usage", "canonical_tool_facts"];
 }
 
 /**
@@ -1041,6 +1231,14 @@ function applyTaskLinked(db, event) {
   const source = payload.source || "manual";
   const confidence = payload.confidence ?? (source === "launch" || source === "agent_pick" || source === "manual" ? 1 : 0.5);
   db.prepare("INSERT OR IGNORE INTO runs (run_id, status, updated_at) VALUES (?, 'running', ?)").run(runId, now());
+  // FOC-221: a link is only as good as its id. An id that does not look like a
+  // Linear identifier (TEAM-123) would otherwise create a work_items row and
+  // silently bill usage against garbage — reject it and raise a visible
+  // quality issue instead. clearRunTask (direct SQL) bypasses this by design.
+  if (!/^[A-Z][A-Z0-9]{0,9}-\d{1,10}$/.test(taskId)) {
+    raiseIssue(db, runId, "task_id_malformed", "warning", { taskId, source, runId: event.runId ?? null });
+    return { rejected: true, reason: "task_id_malformed", runId, taskId };
+  }
   db.prepare("INSERT OR IGNORE INTO work_items (task_id, provider, workspace, identifier, created_at) VALUES (?, ?, ?, ?, ?)")
     .run(taskId, payload.provider || "linear", payload.workspace || null, taskId, now());
   const active = db.prepare(
@@ -1809,24 +2007,246 @@ export function queryManagerRuns(db, options = {}) {
   return { active: active.map(project), recent: recent.map(project) };
 }
 
-function aggregateUsageByTask(db, priceMode) {
+// JS twin of the canonical_usage view (the per-message island collapse — see
+// the block comment above the view SQL for the rule and the measured ground
+// truth). The dashboard fleet aggregate must stay under ~2 s per request and
+// the SQL view costs ~17 s on the live store, so aggregateUsageByTask runs the
+// collapse here over the same raw input. The contract test in
+// scripts/telemetry-canonical.test.mjs asserts view and twin agree row for
+// row; change both or neither.
+const FIT_LABELS = ["in_window", "after_end", "before_start", "no_timestamp"];
+
+function fitRank(observedAt, startedAt, endedAt) {
+  if (observedAt == null || startedAt == null) return 3;
+  if (observedAt >= startedAt && (endedAt == null || observedAt <= endedAt)) return 0;
+  if (observedAt > (endedAt ?? startedAt)) return 1;
+  return 2;
+}
+
+// NULL sorts first in SQLite's ASC — the twin must agree when both pick a
+// winner among rows whose time distance is unknown.
+const sent = (v) => (v == null ? "\u0000" : v);
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+// SQLite's ASC puts NULL before every value; the twin must agree when rows
+// carry a NULL source_offset.
+const numCmp = (a, b) => {
+  if (a == null && b == null) return 0;
+  if (a == null) return -1;
+  if (b == null) return 1;
+  return a - b;
+};
+
+// julianday() reads a timestamp without an offset designator as UTC;
+// Date.parse() would read it as local time. Every timestamp the store writes
+// carries Z, but events come from outside — normalise so the twin agrees with
+// the view even on offset-less input.
+const toEpoch = (iso) => Date.parse(/[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`);
+
+function timeDistance(row) {
+  if (row.observed_at == null || row.started_at == null) return -1;
+  return Math.abs(toEpoch(row.observed_at) - toEpoch(row.started_at));
+}
+
+export function collapseUsageIslands(rows) {
+  const sorted = [...rows].sort((a, b) =>
+    cmp(sent(a.source_path), sent(b.source_path)) ||
+    cmp(sent(a.agent_key), sent(b.agent_key)) ||
+    cmp(sent(a.model), sent(b.model)) ||
+    numCmp(a.source_offset, b.source_offset) ||
+    cmp(sent(a.run_id), sent(b.run_id)) ||
+    cmp(sent(a.usage_id), sent(b.usage_id)));
+
+  const islands = [];
+  let current = null;
+  for (const row of sorted) {
+    const sameIsland = current
+      && current.source_path === row.source_path
+      && current.agent_key === row.agent_key
+      && (current.model ?? null) === (row.model ?? null)
+      && current.input_tokens === row.input_tokens
+      && current.output_tokens === row.output_tokens
+      && current.cache_read_tokens === row.cache_read_tokens
+      && current.cache_creation_tokens === row.cache_creation_tokens
+      && !(row.observed_at != null && current.observed_at != null
+        && Math.abs(toEpoch(row.observed_at) - toEpoch(current.observed_at)) > MESSAGE_GAP_MS);
+    if (sameIsland) {
+      current.lines.push(row);
+      current.observed_at = row.observed_at; // chain anchor, like the view's LAG
+    } else {
+      current = { ...row, lines: [row] };
+      islands.push(current);
+    }
+  }
+
+  return islands.map((island) => {
+    // Same ranking as the view: fit, then time distance to the run start
+    // (unknown sorts first), then run_id, then usage_id.
+    const rank = (r) => [
+      fitRank(r.observed_at, r.started_at, r.ended_at),
+      timeDistance(r),
+      sent(r.run_id),
+      sent(r.usage_id),
+    ];
+    const less = (a, b) => {
+      const ka = rank(a); const kb = rank(b);
+      for (let i = 0; i < ka.length; i++) {
+        if (ka[i] < kb[i]) return true;
+        if (ka[i] > kb[i]) return false;
+      }
+      return false;
+    };
+    const winner = island.lines.reduce((best, r) => (less(r, best) ? r : best));
+    return {
+      source_path: winner.source_path,
+      source_offset: winner.source_offset,
+      usage_id: winner.usage_id,
+      run_id: winner.run_id,
+      session_id: winner.session_id,
+      squad: winner.squad,
+      agent_key: winner.agent_key,
+      model: winner.model,
+      observed_at: winner.observed_at,
+      started_at: winner.started_at,
+      ended_at: winner.ended_at,
+      input_tokens: winner.input_tokens,
+      output_tokens: winner.output_tokens,
+      cache_read_tokens: winner.cache_read_tokens,
+      cache_creation_tokens: winner.cache_creation_tokens,
+      claim_count: new Set(island.lines.map((l) => l.run_id)).size,
+      line_count: island.lines.length,
+      attribution: FIT_LABELS[fitRank(winner.observed_at, winner.started_at, winner.ended_at)],
+      cost_usd: winner.cost_usd,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Task-coverage classes (FOC-221).
+//
+// Uncertainty never silent: ambiguity = multiple competing candidates for one
+// run, flagged — never silently first-picked the way a bare
+// `ORDER BY confidence DESC LIMIT 1` would.
+// ---------------------------------------------------------------------------
+
+function taskCoverageMap(db) {
   const rows = db.prepare(
-    `SELECT u.run_id, u.model, u.observed_at, u.input_tokens, u.output_tokens,
-       u.cache_read_tokens, u.cache_creation_tokens, r.squad, r.started_at, r.ended_at,
-       c.cost_usd,
-       (SELECT l.task_id FROM run_task_links l
-        WHERE l.run_id=u.run_id AND l.role='primary'
-          AND l.valid_from<=COALESCE(u.observed_at, r.started_at)
-          AND (l.valid_to IS NULL OR l.valid_to>COALESCE(u.observed_at, r.started_at))
-        ORDER BY l.confidence DESC, l.valid_from DESC LIMIT 1) AS task_id
+    `SELECT run_id,
+       MAX(CASE WHEN valid_to IS NULL THEN 1 ELSE 0 END) AS has_active,
+       MAX(CASE WHEN valid_to IS NULL AND confidence >= 1 THEN 1 ELSE 0 END) AS active_confident,
+       COUNT(DISTINCT task_id) AS distinct_tasks,
+       GROUP_CONCAT(DISTINCT task_id) AS candidates
+     FROM run_task_links WHERE role='primary' GROUP BY run_id`,
+  ).all();
+  const map = new Map();
+  for (const row of rows) {
+    map.set(row.run_id, {
+      coverage: !row.has_active ? "unmatched"
+        : row.active_confident || row.distinct_tasks === 1 ? "matched"
+        : "ambiguous",
+      taskId: null,
+      candidates: row.candidates ? row.candidates.split(",").sort() : [],
+    });
+  }
+  const active = db.prepare(
+    "SELECT run_id, task_id FROM run_task_links WHERE role='primary' AND valid_to IS NULL",
+  ).all();
+  for (const link of active) {
+    const entry = map.get(link.run_id);
+    if (entry) entry.taskId = link.task_id;
+  }
+  return map;
+}
+
+/**
+ * Deterministic coverage class for every primary task link (FOC-221). The
+ * class belongs to the run; every one of its links carries it:
+ *
+ *   unmatched   no active primary link — nothing is attributed
+ *   matched     one consistent attribution: a confidence>=1 link (launch,
+ *               manual, verified agent_pick) arbitrates, or all of the run's
+ *               primary links name the same task
+ *   ambiguous   >=2 distinct tasks were linked over the run's lifetime and no
+ *               confident link arbitrates — the fleet surface bills these runs
+ *               to the __ambiguous__ bucket with the candidates attached.
+ */
+export function runTaskCoverage(db) {
+  const coverage = taskCoverageMap(db);
+  const links = db.prepare(
+    `SELECT link_id, run_id, task_id, source, confidence, valid_from, valid_to
+     FROM run_task_links WHERE role='primary' ORDER BY run_id, valid_from`,
+  ).all();
+  return links.map((link) => ({ ...link, coverage: coverage.get(link.run_id)?.coverage ?? "unmatched" }));
+}
+
+/**
+ * Per-class run counts over the runs the fleet surface can bill — runs that
+ * have canonical usage rows at all. A run without usage is not attributable
+ * in the first place.
+ */
+export function taskCoverageCounts(db) {
+  const coverage = taskCoverageMap(db);
+  const counts = { matched: 0, unmatched: 0, ambiguous: 0 };
+  for (const row of db.prepare("SELECT DISTINCT run_id FROM canonical_usage").all()) {
+    counts[coverage.get(row.run_id)?.coverage ?? "unmatched"]++;
+  }
+  return counts;
+}
+
+// The SQL it twins: valid_from<=t AND (valid_to IS NULL OR valid_to>t)
+// ORDER BY confidence DESC, valid_from DESC LIMIT 1. NULL `at` matches
+// nothing, like SQL's three-valued comparison.
+function activeTaskAt(links, at) {
+  if (!links || at == null) return null;
+  let best = null;
+  for (const link of links) {
+    if (link.valid_from > at || (link.valid_to != null && link.valid_to <= at)) continue;
+    if (!best || link.confidence > best.confidence
+      || (link.confidence === best.confidence && link.valid_from > best.valid_from)) {
+      best = link;
+    }
+  }
+  return best?.task_id ?? null;
+}
+
+function linksByRunIndex(db) {
+  const rows = db.prepare(
+    `SELECT run_id, task_id, confidence, valid_from, valid_to FROM run_task_links
+     WHERE role='primary' ORDER BY run_id, valid_from DESC`,
+  ).all();
+  const byRun = new Map();
+  for (const row of rows) {
+    if (!byRun.has(row.run_id)) byRun.set(row.run_id, []);
+    byRun.get(row.run_id).push(row);
+  }
+  return byRun;
+}
+
+function aggregateUsageByTask(db, priceMode) {
+  // Fleet cost reads per-message canonical rows: one physical call counted
+  // once. Raw usage_facts would count a call once per claiming run (the
+  // run-scoped layer) and once per repeated per-message usage line — measured
+  // 2026-09-12 on the live store copy: 182,796 rows and $7,029 naive against
+  // 74,086 calls and $1,557 canonical.
+  const rows = db.prepare(
+    `SELECT u.usage_id, u.run_id, u.session_id, u.agent_key, u.model, u.observed_at,
+       u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens,
+       u.source_path, u.source_offset, r.squad, r.started_at, r.ended_at,
+       c.cost_usd
      FROM usage_facts u
      JOIN runs r ON r.run_id=u.run_id
      LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id`,
   ).all();
+  const canonical = collapseUsageIslands(rows);
+  const coverage = taskCoverageMap(db);
+  const links = linksByRunIndex(db);
   const currentPrices = priceMode === "current" ? pricingSnapshot().prices : null;
   const buckets = {};
-  for (const row of rows) {
-    const key = row.task_id || "__untagged__";
+  for (const row of canonical) {
+    const run = coverage.get(row.run_id);
+    // Ambiguous attribution is flagged, not first-picked: those runs are
+    // billed to their own bucket with the candidates kept inspectable.
+    const key = run?.coverage === "ambiguous" ? "__ambiguous__"
+      : activeTaskAt(links.get(row.run_id), row.observed_at ?? row.started_at) || "__untagged__";
     const bucket = buckets[key] ||= {
       runs: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0,
       inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationInputTokens: 0,
@@ -1845,6 +2265,10 @@ function aggregateUsageByTask(db, priceMode) {
     if (cost == null && !isSyntheticModel(row.model)) bucket.unpricedUsageCount++;
     else bucket.partialCostUSD += cost || 0;
     bucket._runs.add(row.run_id);
+    if (run?.coverage === "ambiguous" && run.candidates.length) {
+      bucket.candidateTaskIds ||= new Set();
+      for (const taskId of run.candidates) bucket.candidateTaskIds.add(taskId);
+    }
     if (!bucket.firstStartedAt || row.started_at < bucket.firstStartedAt) bucket.firstStartedAt = row.started_at;
     if (row.ended_at == null) bucket._running = true;
     else if (!bucket.lastEndedAt || row.ended_at > bucket.lastEndedAt) bucket.lastEndedAt = row.ended_at;
@@ -1853,12 +2277,14 @@ function aggregateUsageByTask(db, priceMode) {
     squadBucket._runs.add(row.run_id);
     squadBucket.costUSD += cost || 0;
   }
-  for (const bucket of Object.values(buckets)) {
+  for (const [key, bucket] of Object.entries(buckets)) {
     bucket.runs = bucket._runs.size;
     bucket.costUSD = bucket.unpricedUsageCount ? null : bucket.partialCostUSD;
     if (bucket._running) bucket.lastEndedAt = null;
     delete bucket._runs;
     delete bucket._running;
+    bucket.coverage = key === "__ambiguous__" ? "ambiguous" : key === "__untagged__" ? "unmatched" : "matched";
+    if (bucket.candidateTaskIds) bucket.candidateTaskIds = [...bucket.candidateTaskIds].sort();
     for (const squad of Object.values(bucket.squads)) {
       squad.runs = squad._runs.size;
       delete squad._runs;
@@ -1901,7 +2327,7 @@ export function querySummary(db, options = {}) {
   }
   const byTask = aggregateUsageByTask(db, options.priceMode);
   const cacheHitRate = totals.cacheReadTokens + totals.inputTokens > 0 ? totals.cacheReadTokens / (totals.cacheReadTokens + totals.inputTokens) * 100 : 0;
-  return { totals, bySquad, byModel, byDay, byRepo, byTask, cacheHitRate };
+  return { totals, bySquad, byModel, byDay, byRepo, byTask, cacheHitRate, taskCoverage: taskCoverageCounts(db) };
 }
 
 export function queryHealth(db) {
@@ -1919,7 +2345,9 @@ export function queryTrace(db, taskId) {
   ).all(normalizeTaskId(taskId));
   const steps = db.prepare(
     `SELECT u.agent_key AS agent, COUNT(*) AS turns,
-       SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END) AS cost,
+       SUM(c.cost_usd) AS cost,
+       SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL
+                AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced,
        MIN(u.observed_at) AS first_ts, MAX(u.observed_at) AS last_ts
      FROM usage_facts u JOIN runs r ON r.run_id=u.run_id
      LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
@@ -1931,21 +2359,30 @@ export function queryTrace(db, taskId) {
      GROUP BY u.agent_key ORDER BY MIN(u.observed_at)`,
   );
   const normalized = normalizeTaskId(taskId);
-  const chain = runRows.map((row) => ({
-    runId: row.run_id,
-    squad: row.squad,
-    startedAt: row.started_at,
-    endedAt: row.ended_at,
-    status: statusRow(row),
-    costUSD: steps.all(row.run_id, normalized).reduce((sum, step) => sum + (step.cost || 0), 0),
-    steps: steps.all(row.run_id, normalized).map((step) => ({
+  // Unknown price is not zero (FOC-221): the `ELSE 0` fold is gone. A step
+  // with unpriced usage reports costUSD null and carries the count next to it;
+  // nulls propagate up the chain instead of being laundered into a sum.
+  const chain = runRows.map((row) => {
+    const stepRows = steps.all(row.run_id, normalized).map((step) => ({
       agent: step.agent,
       turns: step.turns,
-      costUSD: step.cost,
+      costUSD: step.unpriced ? null : (step.cost ?? 0),
+      unpriced: step.unpriced,
       firstTs: step.first_ts,
       lastTs: step.last_ts,
-    })),
-  }));
+    }));
+    const runUnpriced = stepRows.reduce((sum, step) => sum + step.unpriced, 0);
+    return {
+      runId: row.run_id,
+      squad: row.squad,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+      status: statusRow(row),
+      unpriced: runUnpriced,
+      costUSD: runUnpriced ? null : stepRows.reduce((sum, step) => sum + step.costUSD, 0),
+      steps: stepRows,
+    };
+  });
   let bounces = 0;
   let lastReviewStart = null;
   const repeats = {};
@@ -1954,10 +2391,11 @@ export function queryTrace(db, taskId) {
     if (run.squad === "review") lastReviewStart = run.startedAt;
     if (run.squad === "dev" && lastReviewStart && run.startedAt > lastReviewStart) bounces++;
   }
+  const anyUnpriced = chain.some((run) => run.unpriced > 0);
   return {
     taskId: normalized,
     runs: chain,
-    totalCostUSD: chain.reduce((sum, run) => sum + (run.costUSD || 0), 0),
+    totalCostUSD: anyUnpriced ? null : chain.reduce((sum, run) => sum + run.costUSD, 0),
     reviewDevBounces: bounces,
     squadRepeats: Object.fromEntries(Object.entries(repeats).filter(([, count]) => count > 1)),
   };
@@ -1969,12 +2407,12 @@ export function queryPatterns(db, filters = {}) {
   if (filters.squad) { where.push("r.squad=?"); params.push(filters.squad); }
   if (filters.agent) { where.push("u.agent_key=?"); params.push(filters.agent); }
   const rows = db.prepare(
-    `SELECT u.run_id, r.squad, u.agent_key AS agent, u.observed_at,
+    `SELECT u.run_id, r.squad, u.agent_key AS agent, u.observed_at, u.model,
        (SELECT l.task_id FROM run_task_links l WHERE l.run_id=u.run_id AND l.role='primary'
         AND l.valid_from<=COALESCE(u.observed_at, r.started_at)
         AND (l.valid_to IS NULL OR l.valid_to>COALESCE(u.observed_at, r.started_at))
         ORDER BY l.confidence DESC, l.valid_from DESC LIMIT 1) AS task_id,
-       CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END AS cost_usd
+       c.cost_usd AS cost_usd
      FROM usage_facts u JOIN runs r ON r.run_id=u.run_id
      LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`,
@@ -1983,9 +2421,10 @@ export function queryPatterns(db, filters = {}) {
   const repeated = new Map();
   for (const row of rows) {
     const key = `${row.squad}\u0000${row.agent}`;
-    const stat = stats.get(key) || { squad: row.squad, agent: row.agent, runs: new Map(), turns: 0, cost_usd: 0 };
+    const stat = stats.get(key) || { squad: row.squad, agent: row.agent, runs: new Map(), turns: 0, cost_usd: 0, unpriced_turns: 0 };
     stat.turns++;
-    stat.cost_usd += row.cost_usd || 0;
+    stat.cost_usd += row.cost_usd ?? 0;
+    if (row.cost_usd == null && !isSyntheticModel(row.model)) stat.unpriced_turns++;
     stat.runs.set(row.run_id, (stat.runs.get(row.run_id) || 0) + 1);
     stats.set(key, stat);
     if (row.task_id) {
@@ -2002,6 +2441,7 @@ export function queryPatterns(db, filters = {}) {
     turns: stat.turns,
     avg_turns_per_run: stat.runs.size ? stat.turns / stat.runs.size : 0,
     cost_usd: stat.cost_usd,
+    unpriced_turns: stat.unpriced_turns,
   })).sort((a, b) => `${a.squad}:${a.agent}`.localeCompare(`${b.squad}:${b.agent}`));
   const repeats = [...repeated.entries()].flatMap(([key, runIds]) => {
     if (runIds.size <= 1) return [];
