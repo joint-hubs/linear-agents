@@ -10,7 +10,7 @@
 // Run: node scripts/supervisor-verdict.test.mjs
 
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -24,7 +24,7 @@ import {
   parse,
   runScript,
 } from "./supervisor-test-fixtures.mjs";
-import { progressFingerprint, readRegistry, writeRegistry } from "./supervisor-lib.mjs";
+import { progressFingerprint, readRegistry, verdictPath, writeRegistry } from "./supervisor-lib.mjs";
 
 const { test, fail, summary } = harness();
 const VERDICT = join(ROOT, "scripts", "supervisor-verdict.mjs");
@@ -124,7 +124,7 @@ test("placeholder evidence does not count as evidence", () => {
 
 test("a cited finding is recorded, with the citation kept verbatim", () => {
   const s = scenario();
-  const out = record(s, ["--verdict", "fail", "--finding", CITED]);
+  const out = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
   assert.equal(out.ok, true, out.error);
   assert.equal(out.findings[0].evidence, "scripts/ledger.mjs:88 resolvePrice");
   assert.equal(out.round, 1);
@@ -275,7 +275,10 @@ test("a review with no work to review is refused, not guessed at", () => {
   });
 
   const out = parse(
-    verdict(["record", "--run", runId, "--child", "review-1", "--verdict", "fail", "--finding", CITED]),
+    verdict([
+      "record", "--run", runId, "--child", "review-1", "--verdict", "fail",
+      "--finding", CITED, "--failing-test", "suite/a",
+    ]),
     fail,
   );
   assert.equal(out.ok, false);
@@ -292,7 +295,89 @@ test("an unreadable tree is UNKNOWN, not empty", () => {
   assert.ok(fp.error);
 });
 
-// ── 4. what replaced the cap ─────────────────────────────────────────────────
+// ── 4. the failing-test axis is declared (FOC-220) ──────────────────────────
+console.log("\nbrak failing-test to deklaracja, nie domyślenie");
+
+// A fail that is not test-backed — a design failure — is a real category, so
+// the gate is escapable; but the escape is an explicit declaration with a
+// reason, and it rides the record out. "Declared none, here is why" and "an
+// empty axis by omission" must never look the same on disk.
+const NO_TESTS_REASON = "design failure: the AC contradicts the spec, no test can be red";
+
+test("a fail with no failing test and no declaration is refused, writing nothing", () => {
+  const s = scenario();
+  const out = record(s, ["--verdict", "fail", "--finding", CITED]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /must declare its failing tests/);
+  assert.match(out.hint, /--no-failing-tests/);
+  // Refused means refused: a half-written verdict is worse than none.
+  assert.equal(existsSync(verdictPath(s.runId, "FOC-123", 1)), false);
+});
+
+test("a declared design failure is recorded, and the record carries the declaration", () => {
+  const s = scenario();
+  const out = record(s, ["--verdict", "fail", "--finding", CITED, "--no-failing-tests", NO_TESTS_REASON]);
+  assert.equal(out.ok, true, out.error);
+
+  // The operator's view is the FILE on disk, not the stdout echo.
+  const onDisk = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", out.round), "utf8"));
+  assert.deepEqual(onDisk.fingerprint.failingTests, []);
+  // Present BECAUSE it was declared — this field is what "on purpose" looks like.
+  assert.equal(onDisk.noFailingTests.reason, NO_TESTS_REASON);
+});
+
+test("the declaration without a reason is refused", () => {
+  const s = scenario();
+  // Flag last in argv: parseArgs turns a bare flag into `true`.
+  const out = record(s, ["--verdict", "fail", "--finding", CITED, "--no-failing-tests"]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /needs a reason/);
+});
+
+test("a placeholder reason is not a declaration", () => {
+  // The same cheat the citation gate refuses, refused here too: a requirement
+  // a dash satisfies is not a requirement.
+  const s = scenario();
+  for (const cheat of ["-", "n/a", "none", "  "]) {
+    const out = record(s, ["--verdict", "fail", "--finding", CITED, "--no-failing-tests", cheat]);
+    assert.equal(out.ok, false, `"${cheat}" was accepted as a reason`);
+  }
+});
+
+test("the declaration contradicts --failing-test, and that is refused", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "fail",
+    "--finding", CITED,
+    "--failing-test", "suite/a",
+    "--no-failing-tests", NO_TESTS_REASON,
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /contradict/);
+});
+
+test("whitespace-only failing tests do not count as declared", () => {
+  // The enforcement normalizes the set exactly as the fingerprint hashes it;
+  // otherwise `--failing-test " "` passes a length check and still hashes "".
+  const s = scenario();
+  const out = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "  "]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /must declare its failing tests/);
+});
+
+test("the declaration only means something on a fail verdict", () => {
+  const s = scenario();
+  const out = record(s, [
+    "--verdict", "pass",
+    "--issue-file", issueFile(s.base, 1),
+    "--ac", JSON.stringify({ ac: "AC-1", evidence: "scripts/a.test.mjs:10 asserts it" }),
+    "--no-failing-tests", NO_TESTS_REASON,
+  ]);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /only means something on a fail/);
+});
+
+// ── 5. what replaced the cap ─────────────────────────────────────────────────
 console.log("\nto, co zastąpiło cap");
 
 test("--review-loop without a recorded verdict is refused", () => {
@@ -338,7 +423,7 @@ test("a third DIFFERING round is allowed — the old cap of 2 is gone", () => {
 test("a plain follow-up does not touch the progress record", () => {
   const s = scenario();
   advance(s, "a.txt");
-  record(s, ["--verdict", "fail", "--finding", CITED]);
+  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
 
   parse(followup(s.runId, "review-1"), fail);
   assert.deepEqual(readRegistry(s.runId).rounds, {}, "a plain follow-up was counted as a review round");
@@ -346,13 +431,13 @@ test("a plain follow-up does not touch the progress record", () => {
 
 test("recording the same round twice is refused", () => {
   const s = scenario();
-  record(s, ["--verdict", "fail", "--finding", CITED]);
-  const again = record(s, ["--verdict", "fail", "--finding", CITED, "--round", "1"]);
+  record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
+  const again = record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a", "--round", "1"]);
   assert.equal(again.ok, false);
   assert.match(again.error, /recorded once/);
 });
 
-// ── 5. the two stall conditions stay distinct ────────────────────────────────
+// ── 6. the two stall conditions stay distinct ────────────────────────────────
 console.log("\ndwa warunki zastoju, osobno raportowane");
 
 test("status reports a repeated fingerprint separately from silence", () => {

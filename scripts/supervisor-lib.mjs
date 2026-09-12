@@ -1050,6 +1050,19 @@ export function pinnedStatePrologue({
 // Deliberately NOT included: timestamps, durations, cost. All three change on
 // every round by construction, and a fingerprint that always differs is a cap
 // of infinity wearing a measurement's clothes.
+
+/**
+ * The failing-test set a verdict declared, in exactly the form the fingerprint
+ * hashes it: trimmed, empties dropped, de-duplicated, sorted. Lives next to
+ * progressFingerprint so the axis supervisor-verdict ENFORCES (FOC-220) and the
+ * axis it HASHES cannot drift — a `--failing-test " "` accepted by a length
+ * check would otherwise still hash as an empty set, which is the hole by
+ * omission this function exists to close.
+ */
+export function normalizeFailingTests(failingTests = []) {
+  return [...new Set(failingTests.map((t) => String(t).trim()).filter(Boolean))].sort();
+}
+
 export function progressFingerprint({ worktree, baseRevision, failingTests = [] } = {}) {
   const sha = (s) => createHash("sha256").update(s).digest("hex");
 
@@ -1067,7 +1080,7 @@ export function progressFingerprint({ worktree, baseRevision, failingTests = [] 
     error = "worktree or baseRevision missing";
   }
 
-  const tests = [...new Set(failingTests.map((t) => String(t).trim()).filter(Boolean))].sort();
+  const tests = normalizeFailingTests(failingTests);
 
   // A fingerprint that could not read the tree is UNKNOWN, not empty. Returning
   // a hash of "" here would make two unreadable rounds compare equal, and equal
