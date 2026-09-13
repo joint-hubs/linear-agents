@@ -196,6 +196,62 @@ test("refuses an unknown child and lists what it knows", () => {
   if (!Array.isArray(parse(r).known)) fail("error does not list known children");
 });
 
+// ── --prompt-file ───────────────────────────────────────────────────────────
+// Run a93f, 2026-09-12: four resumes with `--prompt-file .state/x.md` died as
+// "no system/init within 30000 ms" because the watcher read the RELATIVE path
+// with the child's worktree as its cwd. The two `--prompt "$(cat …)"` resumes
+// in the same run worked. Spawn had been fixed for exactly this; followup had not.
+console.log("\n--prompt-file");
+
+const followupFromCwd = (cwd, runId, childId, extra, env = {}) =>
+  spawnSync(process.execPath, [FOLLOWUP, "--run", runId, "--child", childId, ...extra], {
+    cwd,
+    encoding: "utf8",
+    env: baseEnv({ MOCK_CLAUDE_HANG_MS: "0", ...env }),
+  });
+
+test("a relative --prompt-file resolves against the caller's cwd, not the worktree", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const argvFile = join(runDir(runId), "argv.log");
+  const caller = mkdtempSync(join(tmpdir(), "la-sup-fu-caller-"));
+  cleanup.push(caller);
+  mkdirSync(join(caller, ".state"));
+  writeFileSync(join(caller, ".state", "round2.md"), "PROMPT FROM THE CALLER'S FILE");
+
+  const child = spawnChild(runId, repo, { MOCK_CLAUDE_ARGV_FILE: argvFile });
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const out = parse(
+    followupFromCwd(caller, runId, child.childId, ["--prompt-file", ".state/round2.md"], { MOCK_CLAUDE_ARGV_FILE: argvFile }),
+  );
+  if (!out.ok) fail(`followup refused a readable file: ${out.error}`);
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const calls = readFileSync(argvFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  if (calls.length !== 2) fail(`expected 2 claude invocations, got ${calls.length} — the resumed turn never started`);
+  const prompt = calls[1][calls[1].indexOf("-p") + 1];
+  if (prompt !== "PROMPT FROM THE CALLER'S FILE") fail(`resumed turn received ${JSON.stringify(prompt)}`);
+});
+
+test("an unreadable --prompt-file is refused before a turn is recorded", () => {
+  // Refusing after the turn is appended would leave a phantom `starting` turn
+  // with a null pid — the zombie shape FOC-271 exists to prevent.
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const child = spawnChild(runId, repo);
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+  const before = readRegistry(runId).children[child.childId];
+
+  const r = followupFromCwd(ROOT, runId, child.childId, ["--prompt-file", ".state/does-not-exist-fu-test.md"]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  if (!/not readable/.test(parse(r).error)) fail(`unhelpful error: ${parse(r).error}`);
+
+  const after = readRegistry(runId).children[child.childId];
+  if (after.turns.length !== before.turns.length) fail("a turn was recorded for a prompt that could not be read");
+  if (after.status !== before.status) fail(`status moved ${before.status} → ${after.status}`);
+});
+
 // ── review loop ─────────────────────────────────────────────────────────────
 // The round CAP that used to be asserted here is gone (FOC-163): it counted,
 // and a counter cannot tell a run that is converging from one going in circles.

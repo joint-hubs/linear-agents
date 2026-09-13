@@ -98,4 +98,19 @@ test("neither spawn nor followup can report a turn without waiting for init", ()
   }
 });
 
+test("neither spawn nor followup hands the watcher the caller's --prompt-file path", () => {
+  // The fourth drift in this pair (run a93f, 2026-09-12): spawn resolved
+  // --prompt-file against the caller's cwd and passed the watcher a file it
+  // wrote; followup passed the raw path, the watcher read it inside the
+  // worktree, and four resumes died as "no system/init". Behaviour is covered
+  // in supervisor-followup.test.mjs; this pins the shape in both files at once.
+  for (const [name, src] of [["spawn", spawnSrc], ["followup", followup]]) {
+    if (!/resolve\(args\["prompt-file"\]\)/.test(src)) fail(`${name} no longer resolves --prompt-file against the caller's cwd`);
+    if (/"--prompt-file",\s*args\["prompt-file"\]/.test(src)) fail(`${name} passes the caller's --prompt-file straight to the watcher`);
+  }
+  const readAt = followup.indexOf('resolve(args["prompt-file"])');
+  const turnAt = followup.indexOf('status: "starting"');
+  if (turnAt > -1 && readAt > turnAt) fail("followup reads the prompt only after it has recorded the turn");
+});
+
 summary();
