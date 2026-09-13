@@ -163,6 +163,92 @@ console.log("taint precision: repo-standard schema interpolation is NOT flagged"
   }
 }
 
+console.log("ruleset precision: REVIEW round-1 probe forms — flagged vs clean split");
+{
+  // Regression for the two round-1 rule findings: bare exec/execSync with a
+  // concatenated/template command must fire (a top-level metavariable-regex on
+  // an arm-local metavariable used to disable those arms), and req.* request
+  // forms beyond two attribute segments (req.params.*, bracket access) must
+  // reach the path.join/path.resolve rule. Clean forms in the same fixtures
+  // assert the split — a rule that fires on everything is as broken as one
+  // that fires on nothing. Probe code lives in string data here; it only
+  // becomes executable in the temp fixture written below.
+  const dir = fixtureDir();
+  try {
+    const execSrc = [
+      "const host = 'example.com';",
+      "const dir2 = '/tmp';",
+      "const cp = require('child_process');",
+      'execSync("ping " + host);',
+      'exec("ls " + dir2);',
+      "execSync(`ping ${host}`);",
+      'cp.exec("ls " + dir2);',
+      'child_process.execSync("ping " + host);',
+      'execSync("ping localhost");', // clean: literal command
+    ];
+    const pathSrc = [
+      "const path = require('path');",
+      "const baseDir = '/var/data';",
+      "const req = { params: { file: 'a' }, file: 'b' };",
+      "const request = { query: { p: 'c' } };",
+      "path.join(baseDir, req.params.file);",
+      "path.resolve(baseDir, request.query.p);",
+      "path.join(baseDir, req['file']);",
+      "path.join(baseDir, req.file);", // pre-fix form — regression guard
+      "path.resolve(baseDir, req.params.file);",
+      "path.join(baseDir, req.file, 'sub');",
+      "path.join(baseDir, 'static', 'index.html');", // clean: literal segments
+      "path.join(baseDir, userChoice);", // clean: not request-scoped
+    ];
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src", "execprobe.js"), execSrc.join("\n") + "\n");
+    writeFileSync(join(dir, "src", "pathprobe.js"), pathSrc.join("\n") + "\n");
+    const res = scan(["--root", dir]);
+    const ln = (src, prefix) => src.findIndex((l) => l.startsWith(prefix)) + 1;
+
+    assert(res.status === 1, `exit 1 with probe fixture (got ${res.status})`);
+    for (const prefix of [
+      'execSync("ping " + host)',
+      'exec("ls " + dir2)',
+      "execSync(`ping ${host}`)",
+      "cp.exec(",
+      "child_process.execSync(",
+    ]) {
+      assert(
+        res.out.includes(`src/execprobe.js:${ln(execSrc, prefix)} security.child-process-exec-concat`),
+        `exec probe fires: ${prefix}`,
+      );
+    }
+    assert(
+      !res.out.includes(`src/execprobe.js:${ln(execSrc, 'execSync("ping localhost")')} security.`),
+      "clean exec literal does NOT fire",
+    );
+    for (const prefix of [
+      "path.join(baseDir, req.params.file)",
+      "path.resolve(baseDir, request.query.p)",
+      "path.join(baseDir, req['file'])",
+      "path.join(baseDir, req.file)",
+      "path.resolve(baseDir, req.params.file)",
+      "path.join(baseDir, req.file, 'sub')",
+    ]) {
+      assert(
+        res.out.includes(`src/pathprobe.js:${ln(pathSrc, prefix)} security.path-join-request-data`),
+        `path probe fires: ${prefix}`,
+      );
+    }
+    assert(
+      !res.out.includes(`src/pathprobe.js:${ln(pathSrc, "path.join(baseDir, 'static'")} security.`),
+      "literal path join does NOT fire",
+    );
+    assert(
+      !res.out.includes(`src/pathprobe.js:${ln(pathSrc, "path.join(baseDir, userChoice)")} security.`),
+      "non-request variable does NOT fire",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 console.log("end-to-end: the real repo tree scans clean (no committed secrets, no SAST findings)");
 {
   // This doubles as the AC3 holdability check in CI: a committed secret or a

@@ -35,18 +35,24 @@ rules:
     languages: [javascript, typescript]
     severity: ERROR
     message: exec()/execSync() with a non-literal command — string-concatenated shell input is command injection; pass argv arrays to execFile/spawn instead
+    # The $M regex must live INSIDE the qualified arm: a metavariable-regex at
+    # this level constrains every pattern-either arm, and $M is unbound in the
+    # bare exec/execSync arms — which silently disabled them (REVIEW round 1).
+    # $A is bound in every arm, so its regex stays top-level.
     patterns:
       - pattern-either:
           - pattern: exec($A)
           - pattern: execSync($A)
-          - pattern: cp.$M($A)
-          - pattern: child_process.$M($A)
+          - patterns:
+              - pattern-either:
+                  - pattern: cp.$M($A)
+                  - pattern: child_process.$M($A)
+              - metavariable-regex:
+                  metavariable: $M
+                  regex: ^(exec|execSync)$
       - metavariable-regex:
           metavariable: $A
           regex: .*(\$\{|\s*\+\s*|`\s*).*.*
-      - metavariable-regex:
-          metavariable: $M
-          regex: ^(exec|execSync)$
 
   - id: security.spawn-shell-true-nonliteral
     languages: [javascript, typescript]
@@ -95,6 +101,14 @@ rules:
       - pattern: dangerouslySetInnerHTML=...
 
   - id: security.path-join-request-data
+    # Pattern mode with explicit request-access forms (NOT taint). As a search
+    # pattern $REQ.$FIELD binds exactly two attribute segments, so the common
+    # req.params.* / request.query.* / bracket forms need their own arms
+    # (REVIEW round 1). A taint rule (as in the SQL rule above) would also
+    # catch indirect flows, but it cannot model this repo's guard idiom —
+    # resolve(ROOT, reqData) followed by a relative() containment check in
+    # scripts/serve-docs.mjs — and would flag it on every scan with no way to
+    # express the guard; the syntactic rule keeps that guarded server silent.
     languages: [javascript, typescript]
     severity: WARNING
     message: path.join/path.resolve fed straight from a request object — path traversal sink; normalize and confine to a base directory first
@@ -102,6 +116,10 @@ rules:
       - pattern-either:
           - pattern: path.join($BASE, $REQ.$FIELD, ...)
           - pattern: path.resolve($BASE, $REQ.$FIELD, ...)
+          - pattern: path.join($BASE, $REQ.$F1.$F2, ...)
+          - pattern: path.resolve($BASE, $REQ.$F1.$F2, ...)
+          - pattern: path.join($BASE, $REQ[$K], ...)
+          - pattern: path.resolve($BASE, $REQ[$K], ...)
       - metavariable-regex:
           metavariable: $REQ
           regex: ^(req|request)$
