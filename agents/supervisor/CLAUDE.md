@@ -95,6 +95,8 @@ node $LA_ROOT/scripts/supervisor-followup.mjs --child <childId> --prompt "<his a
 ```
 That order is enforced: `followup --gate` refuses a gate that does not exist, belongs to another child, or is still `pending`.
 
+A `cleanup-approval` answer is a single token (`tak`/`yes`/`nie`/`no`…) in `--text`; `answer` refuses anything else **without recording it**, so the gate stays answerable. The basis for the answer goes in `--note "…"`. A long prompt goes in a file: `--prompt-file <path>` is read against **your** cwd (both `spawn` and `followup`), so `.state/x.md` works as written.
+
 **`followup` now waits for the turn to actually start**, up to 30 s, exactly as `spawn` does — it used to answer `ok: true` the moment it launched the watcher, which meant a turn that never started was reported as running (0 bytes in the tee, `pid: null`) and you waited on a child that did not exist. If it refuses with `no system/init`, the turn is dead and already recorded as `crashed`: read the tee, do not re-issue blindly.
 WHY — the file is the record (§2.6). Deliver without recording and the gate sits `pending` forever: the child works on while the queue still shows an open question nobody owes an answer to.
 

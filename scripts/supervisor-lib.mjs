@@ -781,6 +781,25 @@ export const LIVE_STATUSES = ["starting", "running"];
 // Supervisor to Mateusz for the answer.
 export const TERMINAL_STATUSES = ["exited", "crashed", "stopped", "waiting_gate"];
 
+// Approval tokens for destructive gates (cleanup-approval). Deliberately small
+// and deliberately whole-answer. "yes, but leave the log file" is a
+// conversation, not an approval, and a script that reads the "yes" out of it and
+// deletes the log file has answered a question nobody asked. Shared here because
+// two scripts must agree on it: supervisor-cleanup.mjs, which acts on the
+// answer, and supervisor-gate.mjs, which refuses to RECORD an answer cleanup
+// would later reject — a gate is answered once, so recording prose burns it.
+export const AFFIRMATIVE = ["yes", "tak", "approve", "approved", "zatwierdzam", "usun", "usuń"];
+export const NEGATIVE = ["no", "nie", "reject", "rejected", "odrzucam", "stop"];
+
+const normaliseApproval = (text) =>
+  String(text ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[.!]+$/, "");
+
+export const isAffirmative = (text) => AFFIRMATIVE.includes(normaliseApproval(text));
+export const isNegative = (text) => NEGATIVE.includes(normaliseApproval(text));
+
 export function liveChildren(registry) {
   return Object.values(registry.children || {}).filter((c) => LIVE_STATUSES.includes(c.status));
 }

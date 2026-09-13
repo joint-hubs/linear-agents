@@ -318,6 +318,41 @@ test("answer requires --gate and --text", () => {
   assert.equal(gate(["answer", "--run", runId, "--gate", "gate-dev-1-1"]).status, 1);
 });
 
+// Run a93f, 2026-09-12: the Supervisor answered a cleanup-approval gate with a
+// paragraph containing "YES". `answer` recorded it, supervisor-cleanup.mjs then
+// refused it as not an unambiguous approval, and — a gate being answered once —
+// gate-dev-5-2 was burnt and had to be proposed again.
+test("a cleanup-approval answer that is not a whole yes/no is refused and nothing is recorded", () => {
+  const runId = fixtureRun();
+  const id = seedGate(runId, { kind: "cleanup-approval" });
+  const r = gate(["answer", "--run", runId, "--gate", id, "--text", "YES — TEST Done and the tree is clean"]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(parse(r).error, /single yes\/no token/);
+  const rec = JSON.parse(readFileSync(gatePath(runId, id), "utf8"));
+  assert.equal(rec.status, "pending", "a refused answer must leave the gate answerable");
+  assert.equal(rec.answer, null);
+});
+
+test("a cleanup-approval answer keeps its token in --text and its basis in --note", () => {
+  const runId = fixtureRun();
+  const yes = seedGate(runId, { kind: "cleanup-approval" });
+  const r = gate(["answer", "--run", runId, "--gate", yes, "--text", "tak", "--note", "TEST Done, fingerprint abc123"]);
+  assert.equal(r.status, 0, r.stdout);
+  const rec = JSON.parse(readFileSync(gatePath(runId, yes), "utf8"));
+  assert.equal(rec.answer.text, "tak", "cleanup reads --text; the token must arrive untouched");
+  assert.equal(rec.answer.note, "TEST Done, fingerprint abc123");
+
+  // A refusal is a token too.
+  const no = seedGate(runId, { kind: "cleanup-approval" });
+  assert.equal(gate(["answer", "--run", runId, "--gate", no, "--text", "nie"]).status, 0);
+});
+
+test("other kinds still take prose answers", () => {
+  const runId = fixtureRun();
+  const id = seedGate(runId);
+  assert.equal(gate(["answer", "--run", runId, "--gate", id, "--text", "rób A, bo B wymaga instalacji globalnej"]).status, 0);
+});
+
 // ── 4. list ───────────────────────────────────────────────────────────────────
 console.log("\nlist");
 

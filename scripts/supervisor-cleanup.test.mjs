@@ -26,7 +26,7 @@ import {
   parse,
   runScript,
 } from "./supervisor-test-fixtures.mjs";
-import { SUPERVISOR_DENY, buildChildSettings, readRegistry, writeRegistry } from "./supervisor-lib.mjs";
+import { SUPERVISOR_DENY, buildChildSettings, gatePath, readRegistry, writeRegistry } from "./supervisor-lib.mjs";
 
 const { test, fail, summary } = harness();
 
@@ -231,8 +231,22 @@ test('"yes, but keep the log file" is a conversation, not an approval', () => {
   // The failure mode worth refusing: reading the "yes" out of a qualified answer
   // and deleting the log file anyway would be answering a question nobody asked.
   const s = scenario({ dirty: "build.log" });
-  approved(s, "yes, but keep the log file");
+  const proposed = parse(cleanup(["propose", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(proposed.ok, true, proposed.error);
 
+  // Layer 1: `answer` no longer records it at all — recording prose used to
+  // burn the gate (gate-dev-5-2, run a93f) — so the gate stays answerable.
+  const refused = parse(gate(["answer", "--run", s.runId, "--gate", proposed.gateId, "--text", "yes, but keep the log file"]), fail);
+  assert.equal(refused.ok, false);
+  assert.equal(JSON.parse(readFileSync(gatePath(s.runId, proposed.gateId), "utf8")).status, "pending");
+
+  // Layer 2: a record that carries prose anyway (hand-edited, or written before
+  // layer 1 existed) is still refused by the script that would act on it.
+  const rec = JSON.parse(readFileSync(gatePath(s.runId, proposed.gateId), "utf8"));
+  writeFileSync(
+    gatePath(s.runId, proposed.gateId),
+    JSON.stringify({ ...rec, status: "answered", answer: { text: "yes, but keep the log file", answeredAt: new Date().toISOString() } }),
+  );
   const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
   assert.equal(out.ok, false);
   assert.match(out.error, /not an unambiguous approval/);

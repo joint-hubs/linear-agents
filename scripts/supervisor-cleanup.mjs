@@ -47,11 +47,14 @@ import { join, relative, resolve, isAbsolute } from "node:path";
 
 import { allGates } from "./supervisor-gate.mjs";
 import {
+  AFFIRMATIVE,
   LIVE_STATUSES,
   ROOT,
   dirtyTreeReport,
   failJson,
   git,
+  isAffirmative,
+  isNegative,
   listWorktrees,
   parseArgs,
   readRegistry,
@@ -61,21 +64,11 @@ import {
 
 const GATE_KIND = "cleanup-approval";
 
-// Deliberately small and deliberately whole-answer. "yes, but leave the log
-// file" is a conversation, not an approval, and a script that reads the "yes"
-// out of it and deletes the log file has answered a question nobody asked.
-// Listed in the refusal message so the operator never has to guess.
-const AFFIRMATIVE = ["yes", "tak", "approve", "approved", "zatwierdzam", "usun", "usuń"];
-const NEGATIVE = ["no", "nie", "reject", "rejected", "odrzucam", "stop"];
-
-const normalise = (text) =>
-  String(text ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[.!]+$/, "");
-
-export const isAffirmative = (text) => AFFIRMATIVE.includes(normalise(text));
-export const isNegative = (text) => NEGATIVE.includes(normalise(text));
+// The approval tokens live in supervisor-lib.mjs so supervisor-gate.mjs can
+// refuse to record an answer this script would reject. Re-exported for callers
+// that imported them from here. Listed in the refusal message so the operator
+// never has to guess.
+export { isAffirmative, isNegative };
 
 /**
  * What the human was shown, reduced to something comparable.

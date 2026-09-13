@@ -3,7 +3,7 @@
 //   node scripts/supervisor-gate.mjs emit   --kind <k> --summary "..." [--question "..." ...]
 //                                           [--artifact <path> ...] [--facts <json|@file>]
 //                                           [--child <id>] [--run <id>]
-//   node scripts/supervisor-gate.mjs answer --gate <gateId> --text "..." [--run <id>]
+//   node scripts/supervisor-gate.mjs answer --gate <gateId> --text "..." [--note "..."] [--run <id>]
 //   node scripts/supervisor-gate.mjs list   [--run <id>] [--status pending|answered] [--child <id>]
 //
 // THE FILE IS THE SOURCE OF TRUTH (spec §2.6). Not Linear: there is deliberately
@@ -30,10 +30,14 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 import {
+  AFFIRMATIVE,
+  NEGATIVE,
   ensureRunDir,
   failJson,
   gatePath,
   gatesDir,
+  isAffirmative,
+  isNegative,
   parseArgs,
   readRegistry,
 } from "./supervisor-lib.mjs";
@@ -250,10 +254,24 @@ function cmdAnswer(args) {
     });
   }
 
+  // A cleanup-approval answer is acted on by supervisor-cleanup.mjs, which only
+  // accepts a whole yes/no token. Recording anything else used to succeed here
+  // and fail there — and since a gate is answered once, the gate was burnt and
+  // had to be proposed again (gate-dev-5-2, run a93f). Refuse it BEFORE writing.
+  // The reasoning behind the answer belongs in --note, which cleanup never reads.
+  if (gate.kind === "cleanup-approval" && !isAffirmative(text) && !isNegative(text)) {
+    failJson(`a cleanup-approval answer must be a single yes/no token, got "${text}" — nothing was recorded`, {
+      gateId,
+      accepted: { yes: AFFIRMATIVE, no: NEGATIVE },
+      hint: 'put the basis for the answer in --note: --text "tak" --note "TEST Done, tree clean, fingerprint …"',
+    });
+  }
+
+  const note = args.note && args.note !== true ? String(args.note) : null;
   const updated = {
     ...gate,
     status: "answered",
-    answer: { text, answeredAt: new Date().toISOString() },
+    answer: { text, ...(note ? { note } : {}), answeredAt: new Date().toISOString() },
   };
   atomicWriteJSON(gatePath(runId, gateId), updated);
 
