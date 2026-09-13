@@ -6,6 +6,8 @@
       "Glob",
       "Write",
       "Bash(node:*)",
+      "Bash(node *linear-ops.mjs*)",
+      "Bash(node *publish-linear-comment.mjs*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git branch:*)",
