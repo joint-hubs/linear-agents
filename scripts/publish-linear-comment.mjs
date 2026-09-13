@@ -9,7 +9,10 @@
  * Usage:
  *   node scripts/publish-linear-comment.mjs --issue <id> --tag <tag> --squad <name> --what <desc> \
  *     [--run-id <id>] [--state-file <path>] [--next <text>] [--body-file <path>] \
- *     [--tier T1|T2|T3] --summary <bullet> [--summary <bullet> ...]
+ *     [--tier T1|T2|T3] --summary <bullet> [--summary <bullet> ...] [--dry-run]
+ *
+ *   --dry-run prints the body that would be posted and exits 0 without writing.
+ *   Any flag not listed here exits 2 before anything is posted.
  *
  * Dependencies: Node 18+. No npm install required.
  */
@@ -29,8 +32,14 @@ const __dir = dirname(__filename);
 // CLI argument parser
 // ---------------------------------------------------------------------------
 
+// Flags that take a value. Listed so a known flag missing its value is not
+// reported as unknown — it fails the required-args check with the usage text.
+const VALUE_FLAGS = new Set([
+  "--issue", "--tag", "--squad", "--what", "--run-id", "--state-file", "--next", "--body-file", "--tier", "--summary",
+]);
+
 export function parseArgs(argv) {
-  const args = { summary: [] };
+  const args = { summary: [], unknown: [] };
   const rest = [];
 
   for (let i = 2; i < argv.length; i++) {
@@ -57,8 +66,12 @@ export function parseArgs(argv) {
       args.summary.push(argv[++i]);
     } else if (a === "--help" || a === "-h") {
       args.help = true;
+    } else if (a === "--dry-run") {
+      args.dryRun = true;
     } else if (a.startsWith("--")) {
-      // Unknown flag — skip
+      // Collected, not skipped: main() refuses to post. A silently skipped
+      // `--dry-run` once published a rehearsal for real (run a93f, FOC-287).
+      if (!VALUE_FLAGS.has(a)) args.unknown.push(a);
     } else {
       rest.push(a);
     }
@@ -72,7 +85,7 @@ function printUsage() {
   console.error("Usage:");
   console.error("  node scripts/publish-linear-comment.mjs --issue <id> --tag <tag> --squad <name> --what <desc> \\");
   console.error("    [--run-id <id>] [--state-file <path>] [--next <text>] [--body-file <path>] \\");
-  console.error("    [--tier T1|T2|T3] --summary <bullet> [--summary <bullet> ...]");
+  console.error("    [--tier T1|T2|T3] --summary <bullet> [--summary <bullet> ...] [--dry-run]");
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +188,14 @@ function main() {
     process.exit(2);
   }
 
+  // Before anything else: this script writes to Linear, and a flag it does not
+  // understand may be the one that was meant to stop the write.
+  if (args.unknown.length) {
+    console.error(`Unknown flag(s): ${args.unknown.join(", ")} — refusing to publish.`);
+    printUsage();
+    process.exit(2);
+  }
+
   // Validate required args
   if (!args.issue || !args.tag || !args.squad || !args.what) {
     printUsage();
@@ -204,6 +225,12 @@ function main() {
     tier: args.tier,
     summary: args.summary,
   });
+
+  if (args.dryRun) {
+    console.log(`[dry-run] would post to ${args.issue} (dedup tag ${args.tag}) — nothing was written:\n`);
+    console.log(body);
+    process.exit(0);
+  }
 
   // pisi guard — dry-run only, no write
   if (pisiGuard(body)) {
