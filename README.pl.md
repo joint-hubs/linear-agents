@@ -29,7 +29,7 @@ SUPERVISOR ──steruje──▶ PLAN · DEV · REVIEW · TEST     (tryb nadzor
 | 3 | REVIEW | `bin/review.bat` | task w `In Review` | first-pass + security + deep |
 | 4 | TEST | `bin/test.bat` | task `stage:testing` | deploy → synthetic → Done |
 | — | SUPERVISOR | `bin/supervisor.bat` | ręcznie, jedno issue | frontman: triage → spawn dzieci → relay każdego gate'a |
-| — | ORCHESTRATOR | `bin/orchestrate.bat` | ręcznie | strategista (Atlas MCP), deleguje do launcherów |
+| — | ORCHESTRATOR | `bin/orchestrate.bat` | ręcznie | strategista (Atlas MCP), deleguje do launcherów — **wycofany z aktywnego użycia** (decyzja gate'a FOC-272; patrz [ADR-0011](docs/adr/0011-orch-ollama-withdrawal.md)) |
 
 ## Tryb nadzorowany
 

@@ -49,7 +49,7 @@ git diff --stat origin/main..HEAD -- agents/orchestrator
 ```
 
 - [ ] Output is empty.
-- [ ] `bin\orchestrate.bat` still starts and picks up work standalone.
+- [ ] `bin\orchestrate.bat` no longer starts a session — an ASCII guard added in FOC-288 exits before any session starts; withdrawn from active use per the FOC-272 gate decision. See [ADR-0011](adr/0011-orch-ollama-withdrawal.md).
 
 *Measured 2026-08-26 on this branch: 0 files. The squads' own CLAUDE.md files DID change — that is
 §1.6 and it is AC-10-compatible, because those changes are inert unless `LA_SUPERVISOR=1`, which

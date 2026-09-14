@@ -68,7 +68,7 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 ## Skrypty CLI (kluczowe)
 
 - `bin/dashboard.bat` — dashboard start (health-check → :7331)
-- `bin/orchestrate.bat` / `orchestrate-openrouter.bat` — launchery orkiestratora
+- `bin/orchestrate.bat` / `bin/orchestrate-openrouter.bat` — launchery orkiestratora (`orchestrate.bat` **wycofany z aktywnego użycia** — decyzja gate'a FOC-272, patrz [ADR-0011](adr/0011-orch-ollama-withdrawal.md))
 - `scripts/telemetry-store.mjs` — centralna SQLite store (schema v3)
 - `scripts/telemetry-ingest.mjs` — backfill + incremental ingest transkryptów
 - `scripts/telemetry-delegation-recon.mjs` — rekonstrukcja parent→child delegation links

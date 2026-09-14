@@ -31,7 +31,7 @@ SUPERVISOR ──drives──▶ PLAN · DEV · REVIEW · TEST      (supervised 
 | 3 | REVIEW | `bin/review.bat` | task in `In Review` | first-pass + security + deep |
 | 4 | TEST | `bin/test.bat` | task in `stage:testing` | deploy → synthetic → Done |
 | — | SUPERVISOR | `bin/supervisor.bat` | manual, one Linear issue | frontman: triage → spawn children → relay every gate |
-| — | ORCHESTRATOR | `bin/orchestrate.bat` | manual | strategist (Atlas MCP), delegates to launchers |
+| — | ORCHESTRATOR | `bin/orchestrate.bat` | manual | strategist (Atlas MCP), delegates to launchers — **withdrawn from active use** (FOC-272 gate decision; see [ADR-0011](docs/adr/0011-orch-ollama-withdrawal.md)) |
 
 ## Supervised mode
 

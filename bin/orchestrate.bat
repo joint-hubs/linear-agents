@@ -21,6 +21,11 @@ REM ---------------------------------------------------------------------------
 
 setlocal
 
+REM --- FOC-288: orch-ollama withdrawal guard ---
+echo orch-ollama was withdrawn from active use per FOC-272 gate decision gate-review-3-2, pointing to docs/adr/0011-orch-ollama-withdrawal.md
+exit /b 1
+REM --- end guard ---
+
 REM Each on its own line on purpose: in a `pushd ... & set "ROOT=%CD%" & popd`
 REM one-liner, %CD% is expanded when the line is PARSED - before pushd runs - so
 REM ROOT would capture the caller's directory instead of the repo. _lib.bat gets

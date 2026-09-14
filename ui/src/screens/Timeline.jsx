@@ -16,7 +16,7 @@ const SQCOLOR = {
   review: 'var(--sq-review)',
   test: 'var(--sq-test)',
   cadence: 'var(--sq-cadence)',
-  'orch-ollama': '#0e7490',
+  'orch-ollama': '#0e7490', // FOC-288: withdrawn from active use per FOC-272 gate decision
   'orch-openrouter': '#0891b2',
   supervisor: 'var(--sq-supervisor)',
 };
