@@ -79,6 +79,14 @@ debounce i uzgodnienie przy podłączeniu MCP. Nie ma czego odświeżać po edyc
 post-commit. W krótkim oknie po zapisie odpowiedzi MCP dostają baner `⚠️` z nazwą pliku —
 wtedy przeczytaj ten plik wprost, zamiast ufać kopii z indeksu.
 
+**Ścieżka CLI nie ma żadnej z tych osłon** (zmierzone w benchmarku FOC-114,
+`docs/benchmark/codegraph-missing-index-evidence.md` §5–6). Jednorazowe wywołanie
+`code-intel.mjs` nie synchronizuje indeksu i niczym nie flaguje nieświeżości: po edycji pliku
+odpowiada ze starej lokalizacji, bez bannera i bez ostrzeżenia, a zapytanie o symbol, którego
+jeszcze nie ma w indeksie, brzmi pewnie „not found". Przed zaufaniem negatywowi albo
+konkretnej lokalizacji `plik:linia` z CLI sprawdź `status --json` → `pendingChanges`
+(jedyny maszynowy sygnał UNKNOWN) albo potwierdź Grepem.
+
 `.codegraph/` jest gitignorowany, więc po świeżym klonie indeksu nie ma w ogóle.
 
 </critical_limitation>
