@@ -1,0 +1,14 @@
+# exit: 0
+**foc114ProbeTarget** (function)
+
+**Location:** src/lib.mjs:1
+**Signature:** `()`
+
+```javascript
+1	export function foc114ProbeHelper() {
+2	  return 42;
+3	}
+```
+**Trail — codegraph_node any of these to follow it (no Read needed)**
+**Calls →** foc114ProbeHelper (src/lib.mjs:5)
+**Called by ←** foc114ProbeMain (src/app.mjs:3), app.mjs (src/app.mjs:1)

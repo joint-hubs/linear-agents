@@ -2,7 +2,8 @@
 
 Observed behavior of `scripts/code-intel.mjs` and the CodeGraph CLI in the states where the
 index is missing, unavailable or out of date. Everything below was **run and captured**, not
-recalled: raw captures live in `evidence/raw/` (this directory) with SHA-256 hashes, and in the
+recalled: raw captures live in `evidence/raw/` (this directory), with SHA-256 hashes recorded in
+`SHA256SUMS.txt` — verify with `sha256sum -c SHA256SUMS.txt` from this directory — and in the
 run scratch under `.state/foc-114/` (gitignored) until integration.
 
 - Worktree: branch `foc-114-dev`, base revision `5b691110fa61e6ab7c0dd97c006c028abbcfb82d`, tree clean before the run.
@@ -16,6 +17,10 @@ run scratch under `.state/foc-114/` (gitignored) until integration.
 All nine wrapper verbs were run against the worktree **before any `.codegraph/` existed**:
 
 `explore | symbol | impact | callers | callees | find | files | affected | status`
+
+All nine captures are committed: `raw/evidence-<verb>.out` + `raw/evidence-<verb>.err`
+(stdout empty and stderr byte-identical across the verbs — the hashes in `SHA256SUMS.txt`
+make that checkable).
 
 | observed on every verb | value |
 |---|---|
@@ -85,7 +90,8 @@ then a new file added on disk and **not** synced; queries after a 4 s settle, vi
 | `status --json` | `pendingChanges: {"added":1,"modified":0,"removed":0}` | 0 |
 
 Cross-check with the 1.6.0 binary directly (`codegraph node foc114ProbePending --path <fixture>`):
-same confident `not found`, exit 0. **Finding:** the query verbs report confident absence for a
+same confident `not found`, exit 0. Raw captures: `raw/pending-symbol.out`, `raw/pending-find.out`,
+`raw/pending-status-json.out`. **Finding:** the query verbs report confident absence for a
 pending symbol at both CLI versions; the only machine-readable UNKNOWN signal is
 `status --json → pendingChanges`. `codegraph sync` takes a positional path (rejects `--path`).
 
@@ -98,6 +104,9 @@ after a 4 s settle:
   snippet it prints is re-read from current disk — an internally inconsistent answer;
 - **no staleness banner, no `⚠️` marker, exit 0**;
 - `status --json` → `pendingChanges.modified: 1` (the deterministic signal).
+
+Raw captures: `raw/stale-symbol.out` (the inconsistent answer in one output: stale location,
+fresh snippet), `raw/stale-status-json.out`.
 
 One-shot CLI invocations do not auto-reconcile and do not flag staleness; the "watcher keeps the
 index in sync" behavior belongs to a connected MCP server, not to CLI queries. Encoded as
