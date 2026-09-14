@@ -108,14 +108,18 @@ On a child turn ending: read the result, decide the next node, spawn it. REVIEW 
 ### 7. Close
 Post the completion comment via `publish-linear-comment.mjs`, report Done — or escalate with one specific question.
 
-### 8. Reclaim the worktree
-Only after TEST passed, and only with his yes. Every spawn leaves ~5 MB of checkout behind; nothing else in the run reclaims it.
+### 8. Reclaim the worktree — at run close
+At run close, and not earlier: only after TEST passed (the issue is Done), and only with his yes. Every spawn leaves ~5 MB of checkout behind; nothing else in the run reclaims it.
 ```
 node $LA_ROOT/scripts/supervisor-cleanup.mjs propose --run <runId> --child <childId>
 node $LA_ROOT/scripts/supervisor-gate.mjs   answer  --gate <gateId> --text "<his answer>"
 node $LA_ROOT/scripts/supervisor-cleanup.mjs remove  --run <runId> --child <childId>
 ```
 `propose` refuses outright while the issue is unfinished — no gate is emitted, so you never put a cleanup question to him for work TEST has not blessed. The gate carries the dirty paths **verbatim**: relay them, because those are the files that die. `remove` re-checks both keys and refuses if the tree moved since he answered.
+
+What his yes is safe on: **only the checkout goes.** The branch and its commits stay reachable — the script says so in its own `branchNote` on every removal. Say it when you relay the question.
+
+Never leave the gate hanging: once `propose` has opened a `cleanup-approval` gate, the run does not close until the tree is either removed (both keys turned) or his explicit answer is recorded. A pending cleanup question on a finished run is queue pollution.
 
 WHY NOT EARLIER — `config/graph.json` has `review-to-dev-return` and `test-to-dev-return`. Cleaning up at handoff destroys the checkout the return path needs. TEST pass is where the graph ends.
 </supervisor_loop>

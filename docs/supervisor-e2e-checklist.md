@@ -150,7 +150,8 @@ bypassPermissions` was refused — deny outranks bypass.
 ## Worktree cleanup (FOC-167) — walk it at the end
 
 Not one of AC-1…AC-10; it is the lifecycle that closes the run, and the only place in the system
-that may delete a checkout.
+that may delete a checkout — and only through `supervisor-cleanup.mjs`: a `git worktree remove`
+typed by hand walks past both keys (TEST pass, answered gate).
 
 - [ ] With the issue **not yet** Done, `cleanup propose` refuses and emits **no gate**.
 - [ ] Once TEST passes and the issue is Done, `propose` writes a `cleanup-approval` gate. The
@@ -160,6 +161,9 @@ that may delete a checkout.
       the yes.
 - [ ] Answer cleanly, then `remove`: the checkout is gone from disk **and** from `git worktree list`,
       and the branch plus its commits are still there.
+- [ ] No gate left unanswered: after the walk, `supervisor-gate.mjs list --run <runId> --status
+      pending` shows no `cleanup-approval` gate for this run — each one ended in a removal or in an
+      explicit answer. A pending cleanup question on a finished run is queue pollution.
 
 ---
 
@@ -205,8 +209,10 @@ what keeps AC-10 true while the squad prompts changed.
 
 ### Rollback
 Revert the PR. `.state/supervisor/` is disposable. Existing squads are bitwise-unchanged in
-behaviour when unsupervised. Worktrees left under `../la-wt/` are reclaimed with
-`supervisor-cleanup.mjs`, or by hand with `git worktree remove` once you have read what is in them.
+behaviour when unsupervised. Worktrees left under `../la-wt/` are reclaimed through
+`supervisor-cleanup.mjs` — `propose`, his yes, `remove` — and never by hand: a typed
+`git worktree remove` walks past both keys, and reading what is in a tree does not pin it the way
+the gate's fingerprint does.
 
 ### ADR status
 ADR-0009 stays **Proposed**. It is accepted at GATE 2, which is a separate decision — this PR does
