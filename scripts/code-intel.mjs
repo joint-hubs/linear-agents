@@ -100,6 +100,18 @@ function requireIndex() {
   process.exit(3);
 }
 
+function notOnPath() {
+  console.error(
+    [
+      "[code-intel] The `codegraph` CLI is not on PATH.",
+      "",
+      "Install:  npm i -g @colbymchenry/codegraph",
+      "Then:     codegraph init",
+    ].join("\n"),
+  );
+  process.exit(3);
+}
+
 function main() {
   const argv = process.argv.slice(2);
   const verb = argv[0];
@@ -130,16 +142,17 @@ function main() {
 
   const res = spawnSync("codegraph", args, { cwd: ROOT, stdio: "inherit", shell: process.platform === "win32" });
 
-  if (res.error?.code === "ENOENT") {
-    console.error(
-      [
-        "[code-intel] The `codegraph` CLI is not on PATH.",
-        "",
-        "Install:  npm i -g @colbymchenry/codegraph",
-        "Then:     codegraph init",
-      ].join("\n"),
-    );
-    process.exit(3);
+  if (res.error?.code === "ENOENT") notOnPath();
+
+  // On win32 the spawn above goes through cmd.exe (shell: true), so a missing
+  // binary never reaches us as ENOENT — cmd itself spawns fine and reports the
+  // failure as a plain exit 1 with a localized "'codegraph' is not recognized"
+  // message (observed and captured, FOC-114 evidence). An agent reading that
+  // sees a broken tool, not "cannot answer". Disambiguate with `where`, whose
+  // exit code is locale-independent; the probe only runs on a failing spawn.
+  if (process.platform === "win32" && res.status !== 0 && res.error == null) {
+    const where = spawnSync("where", ["codegraph"], { encoding: "utf8" });
+    if (where.status !== 0) notOnPath();
   }
   process.exit(res.status ?? 1);
 }
