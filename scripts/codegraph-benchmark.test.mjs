@@ -1,11 +1,24 @@
 // Tests for scripts/codegraph-benchmark.mjs — run with: node scripts/codegraph-benchmark.test.mjs
 //
-// Covers the pure core only (grading, direct-arm merge, table rendering); the
-// spawning runner is exercised for real by the benchmark run itself. All data
-// here is synthetic — no repository symbol appears in this file, so the tests
-// can never pollute the frozen question set's ground truth.
+// Covers the pure core (grading, direct-arm merge, table rendering) and one
+// end-to-end run of the spawning harness (review round 2: the wiring —
+// runGraphArm grading through gradeRow, and main()'s exit-3-on-ungraded path —
+// must be asserted, not just exercised operationally). All graded data is
+// synthetic; the end-to-end run asserts exit codes and summary counts only,
+// never answer content, so no repository symbol's ground truth is touched.
 
 import { gradeAnswer, gradeRow, mergeDirect, renderTable } from "./codegraph-benchmark.mjs";
+
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const HARNESS = join(__dirname, "codegraph-benchmark.mjs");
+const WRAPPER_SRC = join(__dirname, "code-intel.mjs");
+const MANIFEST = join(__dirname, "codegraph-benchmark-questions.json");
 
 let passed = 0;
 let failed = 0;
@@ -87,6 +100,38 @@ console.log("codegraph-benchmark core tests\n");
   assertEq(gradeRow(0, "Callers of betaFn:\n  src/alpha.mjs:3", machineQuestion).verdict, "pass", "exit 0 still grades normally");
   assertEq(gradeRow(1, "boom", machineQuestion).verdict, "fail", "non-refusal non-zero exit still grades the output it produced");
   assertEq(gradeRow(0, "anything", judgementQuestion).verdict, "manual", "judgement stays manual regardless");
+}
+
+// ---- end-to-end: the wiring grades refusals and exits 3 (review round 2) ----
+// Unit tests pin gradeRow's contract; this pins the call site and the run
+// exit path. Runs the committed harness in a temp fixture with no .codegraph/:
+// the wrapper's refusal fires before any CLI spawn, so no codegraph binary is
+// needed. Outputs land in the fixture (DEFAULT_OUT is harness-relative).
+{
+  const root = mkdtempSync(join(tmpdir(), "foc114-bench-e2e-"));
+  mkdirSync(join(root, "scripts"));
+  copyFileSync(HARNESS, join(root, "scripts", "codegraph-benchmark.mjs"));
+  copyFileSync(WRAPPER_SRC, join(root, "scripts", "code-intel.mjs"));
+  copyFileSync(MANIFEST, join(root, "scripts", "codegraph-benchmark-questions.json"));
+
+  const res = spawnSync(process.execPath, [join(root, "scripts", "codegraph-benchmark.mjs")], {
+    encoding: "utf8",
+  });
+  assertEq(res.status, 3, "e2e: unindexed run exits 3 (UNKNOWN propagated from the wrapper)");
+  assert(
+    (res.stdout || "").includes("0 pass, 0 fail, 0 manual, 7 ungraded"),
+    "e2e: summary counts every refusal as ungraded (call-site wiring, not just gradeRow)",
+  );
+  assert(
+    (res.stderr || "").includes("does not grade the frozen set"),
+    "e2e: run-level warning printed on the exit-3 path",
+  );
+  const results = JSON.parse(
+    readFileSync(join(root, ".state", "foc-114", "benchmark", "results.json"), "utf8"),
+  );
+  assertEq(results.summary.ungraded, 7, "e2e: results.json records 7 ungraded rows");
+
+  rmSync(root, { recursive: true, force: true });
 }
 
 // ---- direct-arm merge ----

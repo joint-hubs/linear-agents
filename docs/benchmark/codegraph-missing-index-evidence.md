@@ -3,7 +3,7 @@
 Observed behavior of `scripts/code-intel.mjs` and the CodeGraph CLI in the states where the
 index is missing, unavailable or out of date. Everything below was **run and captured**, not
 recalled: raw captures live in `evidence/raw/` (this directory), with SHA-256 hashes recorded in
-`SHA256SUMS.txt` — verify with `sha256sum -c SHA256SUMS.txt` from this directory — and in the
+`SHA256SUMS.txt` (verified per "Verifying the captures" below) and in the
 run scratch under `.state/foc-114/` (gitignored) until integration.
 
 - Worktree: branch `foc-114-dev`, base revision `5b691110fa61e6ab7c0dd97c006c028abbcfb82d`, tree clean before the run.
@@ -11,6 +11,25 @@ run scratch under `.state/foc-114/` (gitignored) until integration.
 - CLI resolution (measured, see "Version skew"): the wrapper's `spawnSync(..., { shell: true })`
   on win32 resolves `C:\Users\mateu\AppData\Local\codegraph\current\bin\codegraph.cmd` → **CLI 1.5.0**.
   The npm shim (`C:\Users\mateu\AppData\Roaming\npm\codegraph`) → **CLI 1.6.0**.
+
+## Verifying the captures
+
+`SHA256SUMS.txt` lists one SHA-256 row per **tracked** file in `evidence/raw/` (26 rows;
+`raw/init.log` is deliberately absent — `*.log` is gitignored by repo rule and §2 points at the
+run scratch for it). The hashes describe the **committed bytes**: `.gitattributes` pins this
+directory to no EOL conversion (`docs/benchmark/evidence/** -text`), so a fresh checkout
+reproduces them byte-for-byte on every platform. Quoted evidence must not be
+line-ending-normalized, and a hash taken from a working copy would not survive
+`core.autocrlf` — which is exactly how this list's first version failed to verify.
+
+Check, from this directory (`docs/benchmark/evidence/`):
+
+```bash
+sha256sum -c SHA256SUMS.txt
+```
+
+A pass is `: OK` on all 26 rows and exit code 0. Any `FAILED` row means the capture on disk no
+longer matches what was recorded — re-capture the observation, never edit the hash.
 
 ## 1. Missing index — every verb, before `codegraph init` (order-matters evidence)
 
