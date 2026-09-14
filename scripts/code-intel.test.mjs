@@ -175,6 +175,11 @@ function runTests() {
     for (const args of ALL_VERBS) {
       const r = runWrapper(root, args);
       assertEq(r.status, 3, `exit 3 for: ${args.join(" ")}`);
+      // Header claim holds for every verb, not a sampled one (review round 1):
+      // the refusal path is a single constant string in requireIndex, so the
+      // queried symbol can never leak into any verb's output.
+      const out = norm(r.stdout) + norm(r.stderr);
+      assert(!out.includes("foc114GhostSymbol"), `no absence claim for: ${args.join(" ")}`);
     }
     const probe = runWrapper(root, ["symbol", "foc114GhostSymbol"]);
     const out = norm(probe.stdout) + norm(probe.stderr);
@@ -283,7 +288,9 @@ function runTests() {
       const out = norm(probe.stdout) + norm(probe.stderr);
       assertEq(probe.status, 0, "stale query: observed exit 0");
       assert(out.includes("src/lib.mjs:1"), "stale query: answer cites the outdated location (line 1), not the current one (line 5)");
-      assert(!/pending|stale|outdated|⚠/i.test(out), "stale query: no staleness banner anywhere");
+      // Same name-strip as Case 4: the symbol's own name must never count as a hit.
+      const outNoName = out.split("foc114ProbeTarget").join("");
+      assert(!/pending|stale|outdated|⚠/i.test(outNoName), "stale query: no staleness banner anywhere");
     }
   }
 }

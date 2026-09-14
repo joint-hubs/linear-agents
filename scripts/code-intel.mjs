@@ -149,10 +149,13 @@ function main() {
   // failure as a plain exit 1 with a localized "'codegraph' is not recognized"
   // message (observed and captured, FOC-114 evidence). An agent reading that
   // sees a broken tool, not "cannot answer". Disambiguate with `where`, whose
-  // exit code is locale-independent; the probe only runs on a failing spawn.
+  // exit code is locale-independent — but only its own "not found" (1) proves
+  // absence: 0 (found) or >=2 (`where` itself failed) are NOT proof, so the
+  // CLI's own status is preserved rather than misreporting not-on-PATH.
+  // The probe only runs on a failing spawn.
   if (process.platform === "win32" && res.status !== 0 && res.error == null) {
     const where = spawnSync("where", ["codegraph"], { encoding: "utf8" });
-    if (where.status !== 0) notOnPath();
+    if (where.status === 1) notOnPath();
   }
   process.exit(res.status ?? 1);
 }
