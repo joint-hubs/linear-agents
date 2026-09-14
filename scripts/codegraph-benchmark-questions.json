@@ -1,0 +1,122 @@
+{
+  "benchmark": "FOC-114 CodeGraph navigation benchmark — frozen question set",
+  "baseRevision": "5b691110fa61e6ab7c0dd97c006c028abbcfb82d",
+  "pinning": "every ground truth below was verified by grep at the base revision; the command and the observed result are recorded per question. Questions reference only symbols untouched by the benchmark's own additions.",
+  "environment": {
+    "wrapper": "scripts/code-intel.mjs (spawnSync shell:true on win32, stdio passthrough)",
+    "cliResolvedByWrapper": "1.5.0 — cmd.exe PATH resolves C:\\Users\\mateu\\AppData\\Local\\codegraph\\current\\bin\\codegraph.cmd before the npm shim",
+    "cliDirect": "1.6.0 — npm shim C:\\Users\\mateu\\AppData\\Roaming\\npm\\codegraph",
+    "worktreeIndex": "codegraph init -y . — built by 1.6.0, 191 files / 4086 nodes / 16530 edges, 7056 ms wall",
+    "node": "v22.20.0",
+    "os": "Windows 11"
+  },
+  "costStatement": "inconclusive — shell arm, no token metering; agent-arm pricing out of slice",
+  "directArmBudgetRule": "one fresh agent per question; Grep/Glob/Read only; <=12 tool calls; flash-tier model; transcript saved",
+  "ac1Coverage": {
+    "caller-chain": "manifest questions q1-q3 (machine ground truth)",
+    "shared-symbol-impact": "manifest questions q4-q6 (machine ground truth)",
+    "judgement-marked": "manifest question q7 (groundTruthKind judgement, graded manual, never counted pass/fail)",
+    "stale-edit": "executable tripwires in scripts/code-intel.test.mjs case 5; expected observation frozen in docs/benchmark/codegraph-missing-index-evidence.md §6; re-run: node scripts/code-intel.test.mjs",
+    "pending-file": "executable tripwires in scripts/code-intel.test.mjs case 4; expected observation frozen in docs/benchmark/codegraph-missing-index-evidence.md §5; re-run: node scripts/code-intel.test.mjs",
+    "unavailable-index": "hard assertions in scripts/code-intel.test.mjs cases 1-2 (missing index, CLI not on PATH); observed capture frozen in docs/benchmark/codegraph-missing-index-evidence.md §1+§4; re-run: node scripts/code-intel.test.mjs"
+  },
+  "questions": [
+    {
+      "id": "q1-caller-sleepsync",
+      "class": "caller-chain",
+      "verb": "callers",
+      "args": ["sleepSync"],
+      "question": "In this repository's scripts/ directory: which function calls the private sleep helper sleepSync, and in which file is that call site?",
+      "expectedContains": ["scripts/supervisor-test-fixtures.mjs", "waitForStatus"],
+      "groundTruthKind": "machine",
+      "groundTruthCommand": "grep -n \"sleepSync\" scripts/supervisor-test-fixtures.mjs",
+      "groundTruthObserved": "defined at line 243 (not exported); single call site at line 233 inside waitForStatus (function starts at line 227); no other references repo-wide at the base revision",
+      "notes": "the tool cites the enclosing function's start line, not the call-site line"
+    },
+    {
+      "id": "q2-caller-fixturerepo",
+      "class": "caller-chain",
+      "verb": "callers",
+      "args": ["fixtureRepo", "--limit", "40"],
+      "question": "List every test file in this repository that imports and calls the fixture helper fixtureRepo().",
+      "expectedContains": [
+        "scripts/supervisor-budget.test.mjs",
+        "scripts/supervisor-cleanup.test.mjs",
+        "scripts/supervisor-followup.test.mjs",
+        "scripts/supervisor-gate.test.mjs",
+        "scripts/supervisor-merge.test.mjs",
+        "scripts/supervisor-pinned-state.test.mjs",
+        "scripts/supervisor-repo.test.mjs",
+        "scripts/supervisor-semaphore.test.mjs",
+        "scripts/supervisor-spawn.test.mjs",
+        "scripts/supervisor-status.test.mjs",
+        "scripts/supervisor-stop.test.mjs",
+        "scripts/supervisor-verdict.test.mjs"
+      ],
+      "groundTruthKind": "machine",
+      "groundTruthCommand": "grep -rln \"fixtureRepo\" scripts/",
+      "groundTruthObserved": "the 12 test files above, plus the definition file scripts/supervisor-test-fixtures.mjs — the definition file is not a caller and is not required in the answer",
+      "notes": "superset tolerated: the answer may also list file-level entries alongside function-level callers"
+    },
+    {
+      "id": "q3-chain-explore",
+      "class": "caller-chain",
+      "verb": "explore",
+      "args": ["how does a supervisor test reach sleepSync"],
+      "question": "How does a supervisor test end up executing the private sleep helper sleepSync? Name the intermediate function that sits between the test files and sleepSync, and the file that defines both.",
+      "expectedContains": ["sleepSync", "waitForStatus", "scripts/supervisor-test-fixtures.mjs"],
+      "groundTruthKind": "machine",
+      "groundTruthCommand": "grep -n \"sleepSync\\|waitForStatus\" scripts/supervisor-test-fixtures.mjs",
+      "groundTruthObserved": "the only intermediate function is waitForStatus (line 227), which calls sleepSync at line 233; both defined in scripts/supervisor-test-fixtures.mjs",
+      "notes": "grading covers the machine-checkable core (intermediate function + file); any further chain prose is a judgement call and is not graded"
+    },
+    {
+      "id": "q4-find-resolvescope",
+      "class": "shared-symbol-impact",
+      "verb": "find",
+      "args": ["resolveScope", "--kind", "function", "--limit", "20"],
+      "question": "How many distinct functions named resolveScope exist in this repository, and in which files are they defined?",
+      "expectedContains": ["scripts/lint.mjs", "scripts/security-scan.mjs"],
+      "groundTruthKind": "machine",
+      "groundTruthCommand": "grep -rn \"function resolveScope\" scripts/",
+      "groundTruthObserved": "exactly 2 definitions: scripts/lint.mjs:89 and scripts/security-scan.mjs:85",
+      "notes": "fuzzy extra hits tolerated (grading is expectedContains, not equality); the count itself (2) is for the answering agent to state"
+    },
+    {
+      "id": "q5-impact-lintfile",
+      "class": "shared-symbol-impact",
+      "verb": "impact",
+      "args": ["lintFile", "--depth", "2"],
+      "question": "What is the blast radius of changing lintFile in scripts/lint.mjs — which files reference it?",
+      "expectedContains": ["scripts/lint.mjs", "scripts/lint.test.mjs"],
+      "groundTruthKind": "machine",
+      "groundTruthCommand": "grep -rn \"lintFile\" scripts/",
+      "groundTruthObserved": "scripts/lint.mjs:152 (definition), scripts/lint.mjs:222 (internal call), scripts/lint.test.mjs:196-198 (test usage); no other files at the base revision",
+      "notes": ""
+    },
+    {
+      "id": "q6-impact-resolvescope",
+      "class": "shared-symbol-impact",
+      "verb": "impact",
+      "args": ["resolveScope"],
+      "question": "List every file in the repository that mentions resolveScope — both independent definitions included.",
+      "expectedContains": ["scripts/lint.mjs", "scripts/lint.test.mjs", "scripts/security-scan.mjs"],
+      "groundTruthKind": "machine",
+      "groundTruthCommand": "grep -rl \"resolveScope\" scripts/",
+      "groundTruthObserved": "3 files: scripts/lint.mjs, scripts/lint.test.mjs, scripts/security-scan.mjs",
+      "notes": ""
+    },
+    {
+      "id": "q7-judgement-rename",
+      "class": "judgement",
+      "verb": "callers",
+      "args": ["sleepSync"],
+      "question": "Would renaming sleepSync to sleepFor break anything outside scripts/supervisor-test-fixtures.mjs? Answer from the call graph and state your confidence.",
+      "expectedContains": [],
+      "groundTruthKind": "judgement",
+      "groundTruthCommand": "none — no machine-checkable ground truth; graded by human review",
+      "groundTruthObserved": "",
+      "notes": "recorded with verdict 'manual'; never counted as pass or fail"
+    }
+  ]
+}
