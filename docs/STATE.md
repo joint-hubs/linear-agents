@@ -3,7 +3,49 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Current execution: 2026-09-13 — FOC-285 (F-09) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+## Current execution: 2026-09-14 — FOC-288 (F-15) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+
+- **Run** `2026-09-13T20-18-45-233-supervisor-9946` (glm-5.3-flash; dzieci dev-1/review-2/test-3).
+  Kandydat `9c8253b` (`foc-288-dev`, 1 commit nad bazą `6f1d846`), po replayu `4b9e5f5`.
+- **FOC-288** (F-15: wycofanie `orch-ollama` z aktywnego użycia — decyzja Mateusza "(b) Wycofać" z gate'a
+  `gate-review-3-2`, FOC-272) — `bin/orchestrate.bat` dostaje bezwarunkowy guard (echo + `exit /b 1`
+  zaraz po `setlocal`), nowy `docs/adr/0011-orch-ollama-withdrawal.md`, cztery aktywne dokumenty launcherów
+  oznaczają wycofanie, `docs/adr/README.md` zyskuje tabelę Records (0001–0011). 8 plików, +60/−5.
+- **REVIEW runda 1 = APPROVE** (`foc-288-round1.json`, 7 findingów: 2 question, 1 todo, 4 nit, zero `issue`).
+  Zweryfikowane własnymi pomiarami: strażnik bezwarunkowy (cały plik, zero `goto`/`call`), cytowany gate
+  **istnieje fizycznie** i zgadza się co do milisekundy, wszystkie trzy twierdzenia ADR prawdziwe
+  (8 wystąpień w 4 plikach, zero wpisów w `config/models.json`, `527bc64` tylko na niescalonym `foc-272-review`).
+- **TEST = PASS** (`test-3`) — AC1 **przez wykonanie, nie przez inspekcję**: `cmd /c bin\orchestrate.bat`
+  i z `pro` → oba exit 1, tylko notice, zero linii launchera, `.state/runs/` nie powstaje, store bez zmian
+  (15→15 runów). Suite niezależnie 59/59 exit 0.
+- **Reziduum odnotowane świadomie: AC1 jest dziś niefalsyfikowalna przez suite.** Mutacja usuwająca guard
+  → `59/59, exit 0`, nic nie czerwienieje; w repo nie ma testu odwołującego się do `orchestrate.bat`.
+  To luka repo, nie wada kandydata — kandydat nie deklaruje pokrycia. Follow-up: tani test obecności guardu.
+- **Landing** — `supervisor-merge --run …9946 --base 6f1d846 --child dev-1 --verify "npm ci && node scripts/test-all.mjs"`
+  → `accepted: true`, `findings: []`, izolacja exit 0, combined exit 0, replay 1 commita bez konfliktów.
+  Fast-forward w głównym checkoucie: `6f1d846 → 4b9e5f5` (8 plików, +60/−5). **Lokalnie, bez push i bez PR.**
+
+### Uwagi z tego runu
+
+- **Kolejne (odwrotne) świadectwo na flake `telemetry-concurrency.test.mjs`.** Drugi przebieg merge'a odrzucił
+  kandydata **wyłącznie** tym plikiem (izolacja exit 1) **w tym samym przebiegu, w którym combined był zielony**
+  (exit 0) — czyli ten sam kod raz czerwony, raz zielony. Plik uruchomiony standalone w worktree dev-1: 2/2 pass.
+  To ten sam znany wyścig w `migrate()` (`view canonical_usage already exists`), nie defekt kandydata.
+  Retry zgodnie z regułą Mateusza zadziałał: trzeci przebieg `accepted: true`.
+- **Nie owijaj merge'a we własny `timeout`.** Pierwszy przebieg został obcięty moim `timeout 580` → `combined`
+  exit **143 (SIGTERM)**, a raport narzędzia mówi wtedy „the combined suite failed (exit 143)" — czyli wygląda
+  jak odrzucenie kandydata, choć to przerwanie po mojej stronie. `npm ci` w świeżym drzewie integracyjnym
+  + pełny suite nie mieszczą się w 10 min. Puść merge bez zewnętrznego limitu (tło).
+- **Referencje `orch-ollama` poza zakresem zmiany (nieblokujące, świadome):** `config/prompt-roots.json:7,31`,
+  `docs/ui/prompt-editing-external.md`, `config/atlas-mcp.json.template:2`, `agents/orchestrator/memory/orchestration.md:102`
+  (to ostatnie odroczone wg AC-10 — `agents/**` ma zostać diff-empty). Zgłoszone jako znajdujące się w trybie teraźniejszym.
+- **Granica repo-only nie jest nigdzie zapisana:** oryginał launchera żyje poza repo
+  (`%LOCALAPPDATA%\hermes\scripts\orchestrate.bat`, 4516 B) i nie jest objęty wycofaniem. Otwarte pytanie (review, medium).
+- **Liczba historycznych sesji `orch-ollama` rozjeżdża się między źródłami:** gate mówi „12 sesji", review powtórzył 12,
+  a TEST zmierzył bezpośrednio w store **15 runów / 13 sesji** (wszystkie `completed`, 08-06→08-24). Różnica podstawy
+  liczenia, nie utrata danych — ale przy cytowaniu tej liczby używać pomiaru z TEST.
+
+## 2026-09-13 — FOC-285 (F-09) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
 
 - **Run** `2026-09-12T21-31-34-supervisor-613e` (glm-5.3-flash; dzieci dev-1/review-2/test-3). Wznowienie po
   utracie sieci — runda 2 REVIEW startowała z istniejącej sesji `review-2` (`supervisor-followup`), nie z
@@ -113,10 +155,11 @@
   S3-1 (skip-counted-as-pass w supervisor-test-fixtures.mjs), S3-2+N3-1 (catcher: edge-derived advice +
   dryRun suppression w supervisor-followup.mjs), N3-2/N3-3+Q3-1 (scrub pattern poza supervisor-verdict —
   `publish-linear-comment.mjs:221` to WRITE path). FOC-165 pokrywa emiter + usuwanie returned-by:review.
-- **Nieruszone w Linear po wznowieniu 2026-09-13:** FOC-288 (F-15) · FOC-289 (F-16 docs) ·
+- **Nieruszone w Linear po wznowieniu 2026-09-13:** FOC-289 (F-16 docs) ·
   FOC-114 · FOC-165 (+F-14, release-candidate run) · FOC-102 close-out (epic) · standing: FOC-294/295/296/297.
   (FOC-287 / FOC-220 / FOC-221 zdjęte z tej listy 2026-09-12 — zintegrowane lokalnie; FOC-285 zdjęte
-  2026-09-13, patrz sekcja „Current execution” na górze.
+  2026-09-13 i FOC-288 zdjęte 2026-09-14 po TEST PASS i lokalnym landingu — patrz sekcje „Current execution”
+  na górze.
   PR #25/FOC-219 scalony na main 2026-09-11, `967fc1a`, wchłonięty w `3859c86`; po stronie Mateusza zostaje
   merge PR #26 (FOC-284).)
 - Uwaga toolowa (znana z FEN/FOC-284): wyroki TEST nie nagrywać przez supervisor-verdict; `--run` jawne przy
