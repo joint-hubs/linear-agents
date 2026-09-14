@@ -3,7 +3,68 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Current execution: 2026-09-14 — FOC-289 (F-16) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+## Current execution: 2026-09-14 — FOC-114 COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+
+- **Run** `2026-09-14-supervisor-foc-114` (glm-5.3-flash; dzieci dev-1 / review-2…review-6 / test-7).
+  Kandydat `d25e362` (`foc-114-dev`, 8 commitów nad bazą `5b69111`), po replayu `bec2965`; drzewo
+  integracji == drzewo kandydata (`8eb59746…`). Fast-forward w głównym checkoucie: `5b69111 → bec2965`
+  (36 plików, +1884/−12). **Lokalnie, bez push i bez PR.**
+- **FOC-114** — benchmark nawigacji CodeGraph, zgodnie z §3.5 / Q3 (NIE routing grafu zadań; styk
+  `config/graph.json` vs `handoff-rules.json` nietknięty). Nowe: `scripts/codegraph-benchmark.mjs` +
+  `.test.mjs` + `codegraph-benchmark-questions.json` (7 zamrożonych pytań, `groundTruthKind` machine ×6 +
+  judgement ×1), `scripts/code-intel.test.mjs` (nowy, 67 asercji), `docs/benchmark/codegraph-navigation.md`,
+  `docs/benchmark/codegraph-missing-index-evidence.md` + `evidence/raw/*` (26 przechwyceń) + `SHA256SUMS.txt`,
+  `docs/tools/code-intel.md`, `.gitattributes`.
+- **Pętla: 5 rund, fingerprinty wszystkie różne** — r1 `47f2f7a8b8fd2788` fail, r2 `0d66cc89aaff1866` pass,
+  r3 `9b73fadb6b8ea32e` pass, r4 `2795e7cf9104b42f` fail, r5 `6ea9b5def76f2a10` pass. Dwie rundy fail
+  znalazły realne wady: (r1) harness oceniał odmowę wrappera jako `fail` i wychodził 0 — „pewna siebie
+  błędna tabela"; (r4) strażnik świeżości był ślepy w katalogu bez `.git` i w repo bez pierwszego commita
+  (cmd-resolved CLI 1.5.0 raportuje wtedy `added:0` — fałszywe zero), a wrapper odpowiadał pewnym
+  „not found" z exit 0.
+- **AC2 — decyzja Mateusza 2026-09-14: naprawiamy w repo, na warstwie, którą benchmark mierzy.** Ani
+  czekanie na upstream, ani przepisanie AC2 w Linear. Ramię „graph" benchmarku to
+  `node scripts/code-intel.mjs <verb>`, więc strażnik w wrapperze spełnia AC2 dosłownie. Strażnik: przed
+  każdym czasownikiem zapytania (explore/symbol/find/callers/callees/impact/affected/**files**; `status`
+  wyjęty) odczyt `status --json`; przy pending → `codegraph sync <ROOT>` (pozycyjnie) i ponowny odczyt;
+  zapytanie dopiero przy zerze. **Exit 3 UNKNOWN** — komunikat nazywa poprawkę i nigdy szukanego symbolu —
+  gdy świeżości nie da się **udowodnić**: sync padł, zmiany dalej oczekują, status nieczytelny, **brak
+  baseline'u git** (brak `.git` w rootcie albo HEAD nierozwiązywalny). Uzasadnienie: bez baseline'u
+  instrument potrafi zwrócić fałszywe zero, więc guard wymaga *dowodu*, nie prawdomówności tego przebiegu.
+  Odmowa „version-skew" (rozwiązany CLI vs `builtWithVersion` indeksu) **świadomie odrzucona** — udokumentowany
+  workflow na tej maszynie łączy indeks zbudowany 1.6.0 z zapytaniami przez cmd-resolved 1.5.0, więc taka
+  odmowa psułaby ścieżkę główną; wersja CLI jest **ujawniana** w nocie o syncu i w każdej odmowie.
+- **Granica AC2 zapisana jawnie, nie zaokrąglona:** wrapper nigdy nie odpowiada z indeksu, którego
+  świeżości nie udowodni, i odmawia exit 3 tam, gdzie dowód jest niemożliwy; **baseline git jest
+  warunkiem dowodu**. Świadomie niepokryte (udokumentowane w §7 evidence doc i w navigation doc): okno
+  TOCTOU szerokości jednego spawnu; hipotetyczny uszkodzony status niosący poprawne zero (realny
+  uszkodzony kształt **pomija** pole i domyka się fail-closed); gałąź „still pending after sync" —
+  z konstrukcji, bez deterministycznego wyzwalacza na realnym CLI. Surowe CLI zostaje niebezpieczne
+  i **strypwirowe** (cases 4/5 dalej asertują zaobserwowane złe zachowanie i mają zaczerwienić, gdy CLI
+  się poprawi). **AC2 w Linear NIE przepisane.**
+- **TEST = PASS** (`test-7`) — niezależnie: suite 61/61 (`test-all` 60/61 exit 1, jedyna czerwona to
+  `supervisor-cleanup.test.mjs` asertująca brak `LA_SUPERVISOR_CHILD`; po wyczyszczeniu zmiennych
+  supervizora 26/0 → efektywnie 61/61), lint 396/0, security-scan 487 plików 0 findingów (oba skanery
+  naprawdę odpaliły po `npm ci`), `code-intel.test` 67/0, `codegraph-benchmark.test` 28/0, benchmark
+  6 pass / 0 fail / 1 manual / 0 ungraded exit 0 (koszt `inconclusive` — zostaje), config-drift 26/0,
+  spot-check AC2 w trzech fixture'ach, hashe evidence 26/26 exit 0 ze **świeżego klona** z `autocrlf=true`.
+- **Landing** — `supervisor-merge --run …foc-114 --child dev-1 --verify "npm ci && node scripts/test-all.mjs"`
+  (w tle, bez zewnętrznego `timeout`): `accepted: true`, `findings: []`, izolacja exit 0, combined exit 0,
+  replay 8 commitów bez konfliktów, `pathsOutsideDeclaration: []`.
+- **Rezidua zapisane, nie zakładane jako issue:** (1) koszt strażnika — jeden spawn `status --json` plus
+  jeden `git rev-parse --verify HEAD` na czasownik zapytania i jeden `sync` przy brudnym drzewie; czas
+  grafu urósł ~2–3× (2399–3186 ms przed strażnikiem → 6656–10685 ms po), wolumen wierszy bez zmian;
+  podział AC4 („no redundant graph calls" dotyczy **rady dla agentów**, nie wewnętrznego strażnika)
+  zapisany w doc. (2) Trzy nity z r5 zostają otwarte: gałąź „still pending after sync" bez
+  deterministycznego testu (stub PATH-shim by ją wyzwolił), komunikat „no git repository" dla repo bare,
+  niecytowane argumenty zapytania pod `shell:true` (pre-existing, fail-safe). (3) Kolizja dwóch
+  równoległych synców (SQLite lock) — przy każdym błędzie sync exit 3, ale sama kolizja nie jest
+  odtworzona deterministycznie i nie jest testowana. (4) `secretlint` nie skanował w worktree review-r3
+  (brak modułów) — naprawione przez `npm ci` w r4/r5/TEST, wiersz skanera uczciwy.
+- **Uwaga o procesie:** kickoff review r5 podał `+624/−56` dla delty `eccf56d..d25e362` — to był mój błąd
+  (wziąłem skumulowany `cce5574..HEAD`); zmierzone `+356/−30`, zbiór plików się zgadzał. Reviewer to
+  wychwycił i zapisał jako rozbieżność księgową w tekście przekazania, nie w kandydacie.
+
+## 2026-09-14 — FOC-289 (F-16) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
 
 - **Run** `2026-09-14-supervisor-foc-289` (glm-5.3-flash; dzieci dev-1 / review-2 / test-4). Kandydat
   `e3410f8` (`foc-289-dev`, 1 commit nad bazą `1ae52aa`), po replayu `cce2912`.
