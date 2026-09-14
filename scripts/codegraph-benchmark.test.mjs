@@ -5,7 +5,7 @@
 // here is synthetic — no repository symbol appears in this file, so the tests
 // can never pollute the frozen question set's ground truth.
 
-import { gradeAnswer, mergeDirect, renderTable } from "./codegraph-benchmark.mjs";
+import { gradeAnswer, gradeRow, mergeDirect, renderTable } from "./codegraph-benchmark.mjs";
 
 let passed = 0;
 let failed = 0;
@@ -73,6 +73,20 @@ console.log("codegraph-benchmark core tests\n");
   const judged = gradeAnswer("any answer at all", judgementQuestion);
   assertEq(judged.verdict, "manual", "judgement questions grade as manual, not pass/fail");
   assertJsonEq(judged.missing, [], "manual questions carry no missing list");
+}
+
+// ---- refusal grading (review round 1: an exit-3 refusal must never grade) ----
+{
+  const refusal =
+    "[code-intel] No CodeGraph index in this repo (.codegraph/ is missing).\n\n" +
+    "Nothing here can answer until it exists. Build it:  codegraph init\n" +
+    "A negative result from this tool right now would be a lie, so it refuses instead.";
+  assertEq(gradeRow(3, refusal, machineQuestion).verdict, "ungraded", "exit 3 refusal → ungraded, never graded");
+  assertEq(gradeRow(3, refusal, machineQuestion).missing.length, 0, "ungraded carries no missing list");
+  assertEq(gradeRow(3, "", machineQuestion).verdict, "ungraded", "exit 3 with empty output → ungraded (exit code is the signal)");
+  assertEq(gradeRow(0, "Callers of betaFn:\n  src/alpha.mjs:3", machineQuestion).verdict, "pass", "exit 0 still grades normally");
+  assertEq(gradeRow(1, "boom", machineQuestion).verdict, "fail", "non-refusal non-zero exit still grades the output it produced");
+  assertEq(gradeRow(0, "anything", judgementQuestion).verdict, "manual", "judgement stays manual regardless");
 }
 
 // ---- direct-arm merge ----

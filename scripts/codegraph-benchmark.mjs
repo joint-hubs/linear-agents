@@ -25,6 +25,9 @@
 // no token metering; agent-arm pricing out of slice") — never a number.
 //
 // Exit codes: 0 = run completed (a FAIL verdict is a measurement, not an error);
+// 3 = at least one question ungraded — the wrapper refused (missing index or CLI
+//     not on PATH), so the results are UNKNOWN, not a measurement; build the
+//     index first (`codegraph init`). Outputs are still written for inspection.
 // 2 = harness misuse (missing manifest, direct-arm id not in the manifest).
 
 import { spawnSync } from "node:child_process";
@@ -50,6 +53,18 @@ export function gradeAnswer(output, question) {
   const hay = (output || "").replace(/\\/g, "/");
   const missing = question.expectedContains.filter((needle) => !hay.includes(needle));
   return { verdict: missing.length === 0 ? "pass" : "fail", missing };
+}
+
+/**
+ * Grade one tool result row. A wrapper refusal (exit 3 — missing index or CLI
+ * not on PATH) is UNKNOWN, never a graded answer: grading it as `fail` would
+ * turn the tool's own "a negative result right now would be a lie" into a
+ * confident negative — the exact failure mode FOC-114 exists to expose
+ * (review round 1). Exit-3 rows come back `ungraded` and the run exits 3.
+ */
+export function gradeRow(exitCode, output, question) {
+  if (exitCode === 3) return { verdict: "ungraded", missing: [] };
+  return gradeAnswer(output, question);
 }
 
 /**
@@ -83,7 +98,7 @@ export function renderTable(rows, { costStatement, directRows = null }) {
     out.push(
       line(
         `${r.id.padEnd(24).slice(0, 24)} ${r.class.padEnd(20).slice(0, 20)} ${r.verb.padEnd(9).slice(0, 9)} ` +
-          `${r.verdict.padEnd(7)} ${String(r.bytes).padStart(6)} ${String(r.lines).padStart(6)} ${String(r.ms).padStart(7)}`,
+          `${r.verdict.padEnd(8)} ${String(r.bytes).padStart(6)} ${String(r.lines).padStart(6)} ${String(r.ms).padStart(7)}`,
       ),
     );
     if (r.missing?.length) out.push(line(`  ^ missing: ${r.missing.join(", ")}`));
@@ -154,7 +169,7 @@ function runGraphArm(manifest) {
     });
     const ms = Date.now() - t0;
     const output = (res.stdout || "") + (res.stderr || "");
-    const { verdict, missing } = gradeAnswer(output, q);
+    const { verdict, missing } = gradeRow(res.status, output, q);
     const row = {
       id: q.id,
       class: q.class,
@@ -215,6 +230,7 @@ async function main() {
       pass: rows.filter((r) => r.verdict === "pass").length,
       fail: rows.filter((r) => r.verdict === "fail").length,
       manual: rows.filter((r) => r.verdict === "manual").length,
+      ungraded: rows.filter((r) => r.verdict === "ungraded").length,
       totalMs: rows.reduce((acc, r) => acc + r.ms, 0),
     },
     questions: details,
@@ -237,9 +253,17 @@ async function main() {
   writeFileSync(join(opts.out, "table.txt"), table + "\n");
 
   console.log(table);
-  console.log(`\nsummary: ${results.summary.pass} pass, ${results.summary.fail} fail, ${results.summary.manual} manual (${results.summary.totalMs} ms total)`);
+  console.log(`\nsummary: ${results.summary.pass} pass, ${results.summary.fail} fail, ${results.summary.manual} manual, ${results.summary.ungraded} ungraded (${results.summary.totalMs} ms total)`);
   console.log(`results: ${join(opts.out, "results.json")}`);
   console.log(`raw answers: ${join(opts.out, "<question-id>.out")}`);
+  if (results.summary.ungraded > 0) {
+    console.error(
+      `\n[benchmark] ${results.summary.ungraded} question(s) ungraded: the wrapper refused ` +
+        `(UNKNOWN, not a measurement). Results were written for inspection, but this run ` +
+        `does not grade the frozen set — build the index first: codegraph init`,
+    );
+    process.exit(3);
+  }
   process.exit(0);
 }
 
