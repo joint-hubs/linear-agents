@@ -32,6 +32,15 @@
 // Requires a CodeGraph index (`.codegraph/`). If absent, every command says so
 // and exits 3 — it does NOT silently return nothing, because an empty answer
 // that looks like "no results" would send the agent down a wrong path.
+//
+// FRESHNESS (FOC-114 round 4): a query verb never answers from an unproven
+// index. Before every query verb the wrapper reads `status --json`; when
+// changes are pending it runs `codegraph sync <root>` (positional) and
+// re-checks; when cleanliness cannot be proven — sync failed, still pending
+// after sync, status unreadable — it exits 3 (UNKNOWN), never a silent
+// pass-through, and never naming the queried symbol. The raw one-shot
+// `codegraph` CLI has NO such guard (tripwired, evidence §5–6) — query through
+// this wrapper.
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -63,6 +72,19 @@ const RETIRED = {
   cycles: "no equivalent — CodeGraph has no circular-import check. Use `npx madge --circular` or Grep.",
   raw: "no equivalent — CodeGraph is not a Cypher store.",
 };
+
+// Verbs that ANSWER from the index, so freshness must be proven first (see
+// pendingGuard). `status` is exempt — it is the guard's own instrument.
+const QUERY_VERBS = new Set([
+  "explore",
+  "symbol",
+  "find",
+  "callers",
+  "callees",
+  "impact",
+  "affected",
+  "files",
+]);
 
 function usage(code = 2) {
   console.error(
@@ -112,6 +134,113 @@ function notOnPath() {
   process.exit(3);
 }
 
+function spawnCli(args, opts = {}) {
+  return spawnSync("codegraph", args, {
+    cwd: ROOT,
+    encoding: "utf8",
+    shell: process.platform === "win32",
+    ...opts,
+  });
+}
+
+// True only when this spawn provably failed because the CLI cannot run at all.
+// On win32 a missing binary never reaches us as ENOENT — cmd.exe itself spawns
+// fine (shell: true) and reports the failure as a plain exit 1 with a localized
+// "'codegraph' is not recognized" message (observed and captured, FOC-114
+// evidence §4). Disambiguate with `where`, whose exit code is
+// locale-independent — but only its own "not found" (1) proves absence: 0
+// (found) or >=2 (`where` itself failed) are NOT proof, so the CLI's own status
+// is preserved rather than misreporting not-on-PATH. The probe only runs on a
+// failing spawn.
+function cliMissing(res) {
+  if (res.error?.code === "ENOENT") return true;
+  if (process.platform === "win32" && res.status !== 0 && res.error == null) {
+    const where = spawnSync("where", ["codegraph"], { encoding: "utf8" });
+    if (where.status === 1) return true;
+  }
+  return false;
+}
+
+// Pending change count from `status --json` — or null when the state cannot be
+// PROVEN: non-zero exit, unparseable JSON, or a missing/non-numeric
+// pendingChanges (a corrupt index dir answers `{"initialized":false}` with exit
+// 0 and no pendingChanges — measured, FOC-114 round 4). null means UNKNOWN,
+// never "clean".
+function pendingCount() {
+  const res = spawnCli(["status", "--json"]);
+  if (cliMissing(res)) notOnPath();
+  if (res.status !== 0) return null;
+  const start = (res.stdout || "").indexOf("{");
+  if (start < 0) return null;
+  let json;
+  try {
+    json = JSON.parse(res.stdout.slice(start));
+  } catch {
+    return null;
+  }
+  const p = json && json.pendingChanges;
+  if (!p || [p.added, p.modified, p.removed].some((n) => typeof n !== "number")) return null;
+  return p.added + p.modified + p.removed;
+}
+
+function refuseStateUnknown() {
+  console.error(
+    [
+      "[code-intel] Cannot read the index state (codegraph status --json failed or was unreadable).",
+      "",
+      "An answer from an index of unknown freshness can be confidently wrong (FOC-114), so this",
+      "refuses instead. Build it:  codegraph init",
+    ].join("\n"),
+  );
+  process.exit(3);
+}
+
+// FOC-114 round 4 (AC2, decided 2026-09-14): the CLI's one-shot answer layer
+// does not flag staleness — it answers confidently from an outdated index
+// (pending → "not found" exit 0; stale edit → outdated file:line; evidence
+// §5–6). The wrapper therefore proves freshness before every query verb:
+// `status --json` when clean; `codegraph sync <root>` (positional — it rejects
+// --path) then re-check when not; exit 3 UNKNOWN whenever cleanliness cannot be
+// proven. All refusals name the fix and never the queried symbol. Two wrappers
+// syncing at once surface here as one failed sync — a refusal, never a false
+// answer.
+function pendingGuard() {
+  let pending = pendingCount();
+  if (pending === null) refuseStateUnknown();
+  if (pending > 0) {
+    const sync = spawnCli(["sync", ROOT]);
+    if (sync.error || sync.status !== 0) {
+      const detail = (sync.stderr || "").trim();
+      console.error(
+        [
+          `[code-intel] The index is out of date (${pending} pending change(s)) and "codegraph sync" failed` +
+            `${sync.status != null ? ` (exit ${sync.status})` : ""}.`,
+          ...(detail ? ["", detail] : []),
+          "",
+          "Concurrent wrappers surface here as one failed sync — a refusal, never a false answer.",
+          "Retry alone:  codegraph sync <project-root>",
+          "Rebuild:      codegraph init",
+        ].join("\n"),
+      );
+      process.exit(3);
+    }
+    console.error(`[code-intel] index was stale (${pending} pending change(s)); synced before answering`);
+    pending = pendingCount();
+    if (pending === null) refuseStateUnknown();
+    if (pending > 0) {
+      console.error(
+        [
+          `[code-intel] Still ${pending} pending change(s) after sync — the index does not settle.`,
+          "",
+          "An answer from a stale index can be confidently wrong (FOC-114), so this refuses instead.",
+          "Rebuild it:  codegraph init",
+        ].join("\n"),
+      );
+      process.exit(3);
+    }
+  }
+}
+
 function main() {
   const argv = process.argv.slice(2);
   const verb = argv[0];
@@ -131,6 +260,10 @@ function main() {
 
   requireIndex();
 
+  // Query verbs answer FROM the index, so freshness is proven first; `status`
+  // is exempt because it IS the guard's instrument.
+  if (QUERY_VERBS.has(verb)) pendingGuard();
+
   // `--path ROOT` because squads run from a worktree or a subdirectory, and
   // CodeGraph would otherwise resolve the index relative to cwd and report
   // "no index" for a repo that has one.
@@ -142,21 +275,7 @@ function main() {
 
   const res = spawnSync("codegraph", args, { cwd: ROOT, stdio: "inherit", shell: process.platform === "win32" });
 
-  if (res.error?.code === "ENOENT") notOnPath();
-
-  // On win32 the spawn above goes through cmd.exe (shell: true), so a missing
-  // binary never reaches us as ENOENT — cmd itself spawns fine and reports the
-  // failure as a plain exit 1 with a localized "'codegraph' is not recognized"
-  // message (observed and captured, FOC-114 evidence). An agent reading that
-  // sees a broken tool, not "cannot answer". Disambiguate with `where`, whose
-  // exit code is locale-independent — but only its own "not found" (1) proves
-  // absence: 0 (found) or >=2 (`where` itself failed) are NOT proof, so the
-  // CLI's own status is preserved rather than misreporting not-on-PATH.
-  // The probe only runs on a failing spawn.
-  if (process.platform === "win32" && res.status !== 0 && res.error == null) {
-    const where = spawnSync("where", ["codegraph"], { encoding: "utf8" });
-    if (where.status === 1) notOnPath();
-  }
+  if (cliMissing(res)) notOnPath();
   process.exit(res.status ?? 1);
 }
 

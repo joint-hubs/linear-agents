@@ -60,6 +60,13 @@ A sample raw graph-arm answer is committed for reference:
 - Conclusion impact: none recorded by review — the correctness tie and the `inconclusive` cost
   statement are unaffected by the deviation.
 
+- **Round 4 (wrapper freshness guard) — re-measured 2026-09-14.** The guard sits INSIDE the
+  wrapper, so graph-arm elapsed time changed while volume did not: same verdicts (6 pass /
+  0 fail / 1 manual, exit 0), identical bytes/lines per row, **9570 ms total vs 2399–3186 ms
+  pre-guard** (clean path: one `codegraph status --json` spawn per query; a dirty index
+  additionally syncs mid-run). AC4's "no redundant graph calls" constrains the advice given
+  to agents — squads make no extra call — not the wrapper's internal guard.
+
 - Questions + ground truth: `scripts/codegraph-benchmark-questions.json` (pinned to base
   revision `5b691110fa61e6ab7c0dd97c006c028abbcfb82d`; every ground truth grep-verified at
   that revision, command and observation recorded per question). Questions reference only
@@ -83,22 +90,44 @@ executable assertions (mapping: `ac1Coverage` in the manifest):
   `scripts/code-intel.test.mjs`, with the observed behavior frozen in
   `docs/benchmark/codegraph-missing-index-evidence.md` §1, §4, §5, §6.
 
-## AC2 status (decided, gate-review-2-1)
+## AC2 status (round 4 — fixed at the wrapper layer, decided 2026-09-14)
 
-**AC2 is NOT met on the current upstream CLI — decision recorded by Mateusz (Position B):
-the CLI answer-layer gap blocks FOC-114.** The split the decision rests on:
+**AC2 is satisfied on the wrapper path — the layer this benchmark measures.** Decision
+(2026-09-14, superseding the Position B dead end of gate-review-2-1): fix it in this repo, at
+the layer the documented workflow actually uses. The raw captures (`evidence/raw/pending-*`,
+`raw/stale-*`) show `codegraph status --json` deterministically reports `pendingChanges` in
+both bad cases, so `scripts/code-intel.mjs` now proves index freshness before every query
+verb (`explore`, `symbol`, `find`, `callers`, `callees`, `impact`, `affected`, `files`):
 
-- **Wrapper refusal layer — holds.** Missing index and CLI-not-on-PATH → exit 3, refusal names
-  the fix, never names the queried symbol; hard-asserted in `scripts/code-intel.test.mjs`.
-- **CLI answer layer — does not hold.** Pending symbol → confident "not found", exit 0, no
-  marker; stale edit → outdated `file:line` with a fresh-disk snippet, no banner. Reproduced
-  independently by review at CLI 1.6.0 from this candidate tree; tripwired in cases 4/5.
+- clean (`pendingChanges` all 0) → the query runs;
+- pending → `codegraph sync <root>` (positional — the CLI rejects `--path`), then re-check;
+  only at zero pending changes does the query run;
+- sync failed, still pending after sync, or state unprovable (unreadable/malformed status —
+  a corrupt index dir answers `{"initialized":false}` with exit 0 and no `pendingChanges`) →
+  **exit 3 UNKNOWN**, same semantics as the missing-index refusal; the message names the fix
+  and never the queried symbol.
 
-FOC-114 therefore does not close as satisfied on the current CLI. The two ways out, as facts:
-the upstream codegraph CLI fixes the answer layer (outside this repo), or AC2 is rewritten in
-Linear. The gap-pinning deliverables (tripwires, evidence §5–6, `status --json →
-pendingChanges` signal, the AC4 caveat) remain valid work; they do not satisfy AC2's literal
-text.
+Hard-asserted through the wrapper in `scripts/code-intel.test.mjs` (round 4;
+mutation-verified: guard disabled → exactly the guarded assertions go red while the raw-CLI
+tripwires stay green; guard restored → green): pending → found at the real location; stale →
+current `file:line`; unprovable state → exit 3; CLI unrunnable → exit 3.
+
+The split stays visible and factual:
+
+- **Wrapper — guarded.** Pending/stale queries can no longer answer silently from an outdated
+  index: the wrapper syncs first, or refuses with exit 3.
+- **Raw one-shot CLI — still dangerous, tripwired, not fixed here.** `codegraph
+  symbol/find/...` invoked directly still reports confident "not found" for a pending symbol
+  (exit 0, no marker) and cites an outdated `file:line` for a stale edit. That is upstream's
+  answer layer; cases 4/5 pin it as tripwires (they spawn the raw CLI) and evidence §5–6
+  documents it. Squads query through the wrapper (`docs/tools/code-intel.md`).
+- **Concurrent invocations.** Two wrappers syncing at once surface as one failed sync
+  (SQLite lock) → that wrapper exits 3 — a refusal, never a false answer. The deterministic
+  parts are asserted (unprovable state → exit 3, case 8; CLI unrunnable → exit 3, case 2); a
+  real two-process lock collision is timing-dependent and is deliberately NOT shipped as a
+  test — it would be flaky, and a flaky guard test is noise, not evidence.
+
+AC2 in Linear is NOT rewritten — the fix satisfies it as written, on the wrapper surface.
 
 ## What this benchmark cannot decide
 
@@ -110,5 +139,6 @@ text.
   belong to a connected MCP server; this benchmark exercises one-shot CLI invocations only
   (see the evidence doc's coverage note).
 - **CLI versions beyond 1.5.0/1.6.0** — the two installed on the measurement machine.
-- **Staleness under a live watcher** — one-shot CLI runs neither auto-sync nor flag
-  staleness (tripwired); the live-watcher path is untested here.
+- **Staleness under a live watcher** — the raw one-shot CLI neither auto-syncs nor flags
+  staleness (tripwired); the wrapper now syncs on pending changes and refuses otherwise
+  (round 4); the live-watcher path is untested here.

@@ -7,11 +7,17 @@
 //   no CLI on PATH → exit 3 (win32 needed a fix: cmd.exe ate the ENOENT, pre-fix
 //                    exit 1 was observed and captured in the evidence file)
 //   pending file   → `status --json` exposes pendingChanges (the UNKNOWN signal);
-//                    the query verbs themselves currently report confident absence —
-//                    encoded below as a labeled tripwire, not hidden
-//   stale edit     → `status --json` exposes modified; the query verbs currently
-//                    answer from the outdated index without any banner — tripwire
+//                    the raw CLI's query verbs report confident absence — tripwire
+//   stale edit     → `status --json` exposes modified; the raw CLI answers from the
+//                    outdated index without any banner — tripwire
 //   spot assertion → a caller-chain answer cites the exact current file:line
+//
+// Round 4 (wrapper freshness guard): the wrapper now proves index freshness
+// before every query verb — syncs when changes are pending, exits 3 (UNKNOWN)
+// when cleanliness cannot be proven. The guarded behavior is asserted in cases
+// 6/7 (pending → found; stale → current file:line) and case 8 (unprovable
+// state → exit 3). Cases 4/5 spawn the RAW CLI on purpose: they pin upstream's
+// answer layer, which the wrapper guard must never hide.
 //
 // All fixtures live in temp directories; the wrapper is COPIED into each fixture
 // (its ROOT is script-relative, so the copy pins the wrapper to the fixture tree).
@@ -92,6 +98,16 @@ const runWrapper = (root, args, env = {}) =>
   spawnSync(process.execPath, [join(root, "scripts", "code-intel.mjs"), ...args], {
     encoding: "utf8",
     env: { ...process.env, ...env },
+  });
+
+// The raw one-shot CLI (the same binary the wrapper resolves to on win32).
+// Used ONLY by the tripwire cases 4/5: they pin upstream's answer layer, which
+// the round-4 wrapper guard deliberately does not fix or hide.
+const runRawCli = (root, args) =>
+  spawnSync("codegraph", args, {
+    cwd: root,
+    shell: process.platform === "win32",
+    encoding: "utf8",
   });
 
 // The wrapper's refusal happens BEFORE any CLI spawn, so this works with or
@@ -188,7 +204,10 @@ function runTests() {
     assert(out.includes("would be a lie"), "refusal states why it refuses instead of answering");
   }
 
-  // ---- Case 2: codegraph not on PATH → exit 3, same no-absence property ----
+  // ---- Case 2: CLI unrunnable → exit 3, same no-absence property ----
+  // With the round-4 guard this is also the "sync/status impossible" case: the
+  // guard's instrument (status --json) cannot run, so cleanliness cannot be
+  // proven — the refusal fires before any query, never a silent pass-through.
   {
     console.log("\ncodegraph not on PATH (fixture with an empty .codegraph dir)");
     if (process.platform !== "win32") {
@@ -241,13 +260,14 @@ function runTests() {
       assert(st !== null, "status --json returns parseable JSON");
       assert((st?.pendingChanges?.added ?? 0) >= 1, "status --json exposes pendingChanges.added >= 1 (the UNKNOWN signal)");
 
-      // KNOWN GAP (FOC-114 evidence §5): the query verbs report confident
-      // absence for a pending symbol — no pending/UNKNOWN marker, exit 0.
-      // Desired contract: surface UNKNOWN/pending instead. This assertion
-      // documents the observed behavior as a tripwire: if the CLI ever starts
+      // KNOWN GAP (FOC-114 evidence §5): the RAW CLI's query verbs report
+      // confident absence for a pending symbol — no pending/UNKNOWN marker,
+      // exit 0. Desired contract: surface UNKNOWN/pending instead. This
+      // assertion documents the observed behavior as a tripwire against the
+      // raw CLI (the wrapper now guards — case 6): if the CLI ever starts
       // auto-syncing or flagging pending state, this FAILS and must be updated
       // to assert the improved behavior (and the benchmark docs with it).
-      const probe = runWrapper(root, ["symbol", "foc114ProbeOnDisk"]);
+      const probe = runRawCli(root, ["node", "foc114ProbeOnDisk", "--path", root]);
       const out = norm(probe.stdout) + norm(probe.stderr);
       assertEq(probe.status, 0, "pending-symbol query: observed exit 0 (desired: refusal or pending marker)");
       assert(/not found/i.test(out), "pending-symbol query: observed confident 'not found' (the gap itself)");
@@ -280,17 +300,77 @@ function runTests() {
       const nowLine = currentLineOf(join(root, "src", "lib.mjs"), "export function foc114ProbeTarget");
       assertEq(nowLine, 5, "fixture self-check: symbol moved to line 5 on disk");
 
-      // KNOWN GAP (FOC-114 evidence §6): the answer still cites the stale
-      // location (line 1) with a fresh snippet and no staleness marker, exit 0.
-      // Tripwire: if the CLI ever auto-syncs or flags staleness, this FAILS and
+      // KNOWN GAP (FOC-114 evidence §6): the RAW CLI's answer still cites the
+      // stale location (line 1) with a fresh snippet and no staleness marker,
+      // exit 0. Tripwire against the raw CLI (the wrapper now guards —
+      // case 7): if the CLI ever auto-syncs or flags staleness, this FAILS and
       // must be updated to assert the new behavior.
-      const probe = runWrapper(root, ["symbol", "foc114ProbeTarget"]);
+      const probe = runRawCli(root, ["node", "foc114ProbeTarget", "--path", root]);
       const out = norm(probe.stdout) + norm(probe.stderr);
       assertEq(probe.status, 0, "stale query: observed exit 0");
       assert(out.includes("src/lib.mjs:1"), "stale query: answer cites the outdated location (line 1), not the current one (line 5)");
       // Same name-strip as Case 4: the symbol's own name must never count as a hit.
       const outNoName = out.split("foc114ProbeTarget").join("");
       assert(!/pending|stale|outdated|⚠/i.test(outNoName), "stale query: no staleness banner anywhere");
+    }
+
+    // ---- Case 6: pending file THROUGH THE WRAPPER — guard syncs, then answers ----
+    {
+      console.log("\npending file through the wrapper (round 4 guard: sync, then answer)");
+      // Same pending state case 4 left behind (newer.mjs on disk, never synced):
+      // the raw CLI just answered "not found" for it; the wrapper must not.
+      const probe = runWrapper(root, ["symbol", "foc114ProbeOnDisk"]);
+      const out = norm(probe.stdout) + norm(probe.stderr);
+      assertEq(probe.status, 0, "guarded pending-symbol query exits 0 after the guard synced");
+      assert(out.includes("src/newer.mjs:1"), "guarded answer cites the pending symbol's real location (src/newer.mjs:1)");
+      assert(!/not found/i.test(out), "guarded query never reports confident absence for a pending symbol");
+    }
+
+    // ---- Case 7: stale edit THROUGH THE WRAPPER — guard syncs, current file:line ----
+    {
+      console.log("\nstale edit through the wrapper (round 4 guard: sync, then answer)");
+      // A fresh stale edit (case 6's guard already synced case 5's rewrite):
+      // target moves from line 5 to line 6; the raw CLI in case 5 cited line 1.
+      writeFileSync(
+        join(root, "src", "lib.mjs"),
+        [
+          "export function foc114ProbeHelper() {",
+          "  return 42;",
+          "}",
+          "",
+          "// second edit",
+          "export function foc114ProbeTarget() {",
+          "  return foc114ProbeHelper();",
+          "}",
+          "",
+        ].join("\n"),
+      );
+      settle(2000);
+      const probe = runWrapper(root, ["symbol", "foc114ProbeTarget"]);
+      const out = norm(probe.stdout) + norm(probe.stderr);
+      assertEq(probe.status, 0, "guarded stale-symbol query exits 0 after the guard synced");
+      assert(out.includes("src/lib.mjs:6"), "guarded answer cites the CURRENT location (src/lib.mjs:6), not the pre-edit one (line 5)");
+      // No "not :5" assertion here on purpose: after earlier rewrites other
+      // symbols can legitimately occupy those lines. Staleness is proven by the
+      // current location being cited (a stale answer never contains it) and by
+      // the guard's sync note.
+      assert(out.includes("synced before answering"), "guard reports that it synced a stale index before answering");
+    }
+
+    // ---- Case 8: unprovable index state → exit 3 UNKNOWN, never pass-through ----
+    {
+      console.log("\nunprovable index state (corrupt .codegraph) → exit 3 UNKNOWN");
+      // Destructive to the fixture — therefore last. `status --json` answers
+      // {"initialized":false} with exit 0 and NO pendingChanges (measured,
+      // FOC-114 round 4): nothing proves the state, so the guard refuses.
+      rmSync(join(root, ".codegraph"), { recursive: true, force: true });
+      mkdirSync(join(root, ".codegraph"));
+      writeFileSync(join(root, ".codegraph", "corrupt.bin"), "not a database");
+      const probe = runWrapper(root, ["symbol", "foc114ProbeOnDisk"]);
+      const out = norm(probe.stdout) + norm(probe.stderr);
+      assertEq(probe.status, 3, "unprovable index state → exit 3 (never a silent pass-through)");
+      assert(!out.includes("foc114ProbeOnDisk"), "refusal never names the queried symbol");
+      assert(out.includes("codegraph init"), "refusal names the fix (codegraph init)");
     }
   }
 }

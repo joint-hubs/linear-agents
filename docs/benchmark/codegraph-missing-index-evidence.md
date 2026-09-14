@@ -132,6 +132,15 @@ index in sync" behavior belongs to a connected MCP server, not to CLI queries. E
 tripwire tests in `scripts/code-intel.test.mjs`: if a future CLI starts auto-syncing or flagging,
 those tests fail by design and must be updated to assert the new (better) behavior.
 
+## Post-FOC-114 note (round 4)
+
+The §5–§6 observations were captured through the wrapper at a time when it did not alter
+answers — they describe the **raw one-shot CLI**, which still behaves exactly this way and is
+tripwired (cases 4/5, which spawn the raw CLI directly). Since round 4 the wrapper itself
+proves index freshness before every query verb: it syncs on pending changes and exits 3
+(UNKNOWN) when cleanliness cannot be proven — see "AC2 status" in
+`docs/benchmark/codegraph-navigation.md`. The raw CLI remains unguarded; that is upstream.
+
 ## What this evidence does not cover
 
 - MCP-server behavior (watcher, debounce, `⚠️` banner) — measured here only via the CLI path.
