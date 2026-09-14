@@ -99,13 +99,15 @@ the layer the documented workflow actually uses. The raw captures (`evidence/raw
 both bad cases, so `scripts/code-intel.mjs` now proves index freshness before every query
 verb (`explore`, `symbol`, `find`, `callers`, `callees`, `impact`, `affected`, `files`):
 
-- clean (`pendingChanges` all 0) → the query runs;
+- clean (`pendingChanges` all 0, with a provable git baseline — round 5) → the query runs;
 - pending → `codegraph sync <root>` (positional — the CLI rejects `--path`), then re-check;
   only at zero pending changes does the query run;
-- sync failed, still pending after sync, or state unprovable (unreadable/malformed status —
-  a corrupt index dir answers `{"initialized":false}` with exit 0 and no `pendingChanges`) →
-  **exit 3 UNKNOWN**, same semantics as the missing-index refusal; the message names the fix
-  and never the queried symbol.
+- no git baseline (no `.git`, or HEAD unresolvable), sync failed, still pending after sync, or
+  state unprovable (unreadable/malformed status — a corrupt index dir answers
+  `{"initialized":false}` with exit 0 and no `pendingChanges`) → **exit 3 UNKNOWN**, same
+  semantics as the missing-index refusal; the message names the fix and never the queried
+  symbol. (Without the baseline the CLI's pending signal reports false zeros — see round 5
+  below and evidence §7.)
 
 Hard-asserted through the wrapper in `scripts/code-intel.test.mjs` (round 4;
 mutation-verified: guard disabled → exactly the guarded assertions go red while the raw-CLI
@@ -126,6 +128,38 @@ The split stays visible and factual:
   parts are asserted (unprovable state → exit 3, case 8; CLI unrunnable → exit 3, case 2); a
   real two-process lock collision is timing-dependent and is deliberately NOT shipped as a
   test — it would be flaky, and a flaky guard test is noise, not evidence.
+
+**Round 5 — the claim, narrowed to what the guard actually proves.** Review round 4 falsified
+the round-4 wording end-to-end: `pendingChanges` is computed **against a git baseline**, and in
+two reachable configurations the CLI reports a false zero with a file pending — a git repo
+before its first commit (CLI 1.5.0, the binary cmd's PATH resolves on win32) and any tree with
+no own `.git` nested where an enclosing repo ignores it (both CLI versions) — so the wrapper
+answered a confident "not found" with exit 0, exactly the AC2-forbidden outcome. The measured
+matrix is in evidence §7; round 4's fixtures had all committed a baseline, which is why the
+suite could not see it. The guard now requires, before trusting *any* `pendingChanges` value
+(including zero) and before any sync: a readable status, `.git` at the project root, and a
+resolvable `git HEAD`. Where freshness cannot be proven it refuses with **exit 3**, naming the
+git fix and never the queried symbol. Hard-asserted (cases 9/10/11/12) and mutation-verified
+both directions: baseline check removed → exactly the blind-spot assertions go red (59 pass /
+8 fail); guard removed entirely → every guarded assertion red, raw-CLI tripwires green
+(49 pass / 18 fail); restored → 67 pass / 0 fail.
+
+The guarantee this states — and no wider: **the wrapper never answers from an index whose
+freshness it cannot prove, and it refuses (exit 3) wherever freshness cannot be proven; the
+git baseline is a precondition of proof.** Accepted bounds, documented and deliberately not
+chased: a TOCTOU window one spawn wide (an edit between the last status read and the query
+spawn); a hypothetical corrupt status carrying a well-formed zero (the corrupt shape that
+actually occurs omits the field and fails closed); "still pending after sync" has no
+deterministic trigger, so its refusal is reviewed by construction while the sync-failed
+sibling is pinned by test (case 11). The resolved CLI version is surfaced on the guard's
+diagnostic stderr as a measurement, not a refusal — the documented 1.5.0-queries-1.6.0-built
+path must not fail on version mismatch alone.
+
+- **Round 5 re-measure (guard + baseline check):** 6 pass / 0 fail / 1 manual, exit 0,
+  per-row bytes/lines identical, **6701 ms total** (round-4 runs 8110–9570 ms; pre-guard
+  2399–3186 ms) — spawn overhead dominates and varies by machine load; the structural cost is
+  one `status --json` spawn plus one `git rev-parse --verify HEAD` per query verb, and one
+  `sync` when dirty.
 
 AC2 in Linear is NOT rewritten — the fix satisfies it as written, on the wrapper surface.
 

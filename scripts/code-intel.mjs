@@ -33,14 +33,18 @@
 // and exits 3 — it does NOT silently return nothing, because an empty answer
 // that looks like "no results" would send the agent down a wrong path.
 //
-// FRESHNESS (FOC-114 round 4): a query verb never answers from an unproven
-// index. Before every query verb the wrapper reads `status --json`; when
-// changes are pending it runs `codegraph sync <root>` (positional) and
-// re-checks; when cleanliness cannot be proven — sync failed, still pending
-// after sync, status unreadable — it exits 3 (UNKNOWN), never a silent
-// pass-through, and never naming the queried symbol. The raw one-shot
-// `codegraph` CLI has NO such guard (tripwired, evidence §5–6) — query through
-// this wrapper.
+// FRESHNESS (FOC-114 rounds 4–5): a query verb never answers from an index it
+// cannot prove fresh. Before every query verb the wrapper reads `status --json`;
+// when changes are pending it runs `codegraph sync <root>` (positional) and
+// re-checks; when freshness cannot be PROVEN it exits 3 (UNKNOWN), never a
+// silent pass-through, and never naming the queried symbol. "Proven" takes a
+// readable status with numeric pendingChanges AND a git baseline — a `.git` at
+// the project root with a resolvable HEAD. The baseline is not bureaucracy: the
+// CLI's pending signal is computed against it and reports false zeros where it
+// is missing (measured, round 5 — both CLI versions in a git-ignored tree with
+// no own `.git`; 1.5.0 in a repo before its first commit), so a zero counts as
+// proof only where the baseline exists. The raw one-shot `codegraph` CLI has NO
+// such guard (tripwired, evidence §5–6) — query through this wrapper.
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -49,6 +53,16 @@ import { fileURLToPath } from "node:url";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dir, "..");
+
+// Resolved CLI version as `status --json` reports it — surfaced on the guard's
+// diagnostic stderr so a refusal or sync note says WHICH binary answered. On
+// this machine cmd's PATH resolves 1.5.0 while the npm shim is 1.6.0 (evidence
+// §3); the wrapper spawns through shell:true, so its binary is the one cmd
+// finds first. Measurement, not a refusal: the documented workflow pairs a
+// 1.6.0-built index with this 1.5.0 query path, so version mismatch alone must
+// not fail a query.
+let cliVersion = "unknown";
+const cliTag = () => (cliVersion === "unknown" ? "" : ` (codegraph CLI ${cliVersion})`);
 
 // Verb → codegraph subcommand. The left column is this repo's vocabulary, which
 // the five squad CLAUDE.md files already speak; the right is CodeGraph's.
@@ -143,6 +157,16 @@ function spawnCli(args, opts = {}) {
   });
 }
 
+// Under shell:true (win32) node hands the command line to cmd.exe unquoted, so
+// a path with spaces must be quoted here; POSIX spawns skip the shell and get
+// real argument arrays, where quoting would be wrong. Paths with cmd
+// metacharacters fail safe either way — a mangled sync is a refusal, never a
+// false answer — but a space in the repo path is ordinary, so quote it.
+function quoteForShell(p) {
+  if (process.platform !== "win32" || !/[\s"&|<>^]/.test(p)) return p;
+  return `"${p.replaceAll('"', '""')}"`;
+}
+
 // True only when this spawn provably failed because the CLI cannot run at all.
 // On win32 a missing binary never reaches us as ENOENT — cmd.exe itself spawns
 // fine (shell: true) and reports the failure as a plain exit 1 with a localized
@@ -179,6 +203,7 @@ function pendingCount() {
     return null;
   }
   const p = json && json.pendingChanges;
+  if (typeof json?.version === "string") cliVersion = json.version;
   if (!p || [p.added, p.modified, p.removed].some((n) => typeof n !== "number")) return null;
   return p.added + p.modified + p.removed;
 }
@@ -186,35 +211,79 @@ function pendingCount() {
 function refuseStateUnknown() {
   console.error(
     [
-      "[code-intel] Cannot read the index state (codegraph status --json failed or was unreadable).",
+      `[code-intel] Cannot read the index state (codegraph status --json failed or was unreadable${cliTag()}).`,
       "",
       "An answer from an index of unknown freshness can be confidently wrong (FOC-114), so this",
-      "refuses instead. Build it:  codegraph init",
+      "refuses instead.",
+      "Retry the read first:  codegraph status --json",
+      "Still unreadable — rebuild:  codegraph init",
     ].join("\n"),
   );
   process.exit(3);
 }
 
-// FOC-114 round 4 (AC2, decided 2026-09-14): the CLI's one-shot answer layer
+// FOC-114 round 5: pendingChanges is computed AGAINST a git baseline, and the
+// CLI reports a false zero wherever that baseline is missing — measured: in a
+// tree with no own `.git` nested where an enclosing repo ignores it, both CLI
+// versions answer `added:0` while a file is pending; in a git repo before its
+// first commit, 1.5.0 (the binary cmd resolves on win32) does the same. So a
+// pendingChanges zero proves cleanliness only when git itself has a baseline.
+// Require one before trusting ANY pendingChanges value — including zero — and
+// before any sync: a fresh index still needs the baseline for the NEXT query's
+// zero to mean anything.
+function refuseNoBaseline(why) {
+  console.error(
+    [
+      `[code-intel] Index freshness cannot be proven: ${why}${cliTag()}.`,
+      "",
+      "The pending-change signal is computed against a git baseline, and without one a",
+      '"clean" reading can be a false zero (FOC-114 round 5, measured). Commit the tree,',
+      "then re-run:",
+      "  git init                      (if there is no repository here)",
+      "  git add -A && git commit -m init   (if HEAD is unresolvable)",
+      "",
+      "A query from here right now would be UNKNOWN, so this refuses instead.",
+    ].join("\n"),
+  );
+  process.exit(3);
+}
+
+function requireGitBaseline() {
+  if (!existsSync(join(ROOT, ".git"))) {
+    refuseNoBaseline("no git repository at the project root");
+  }
+  const head = spawnSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: ROOT, encoding: "utf8" });
+  if (head.error || head.status !== 0) {
+    refuseNoBaseline("git HEAD is unresolvable (repository has no commit yet?)");
+  }
+}
+
+// FOC-114 rounds 4–5 (AC2, decided 2026-09-14): the CLI's one-shot answer layer
 // does not flag staleness — it answers confidently from an outdated index
 // (pending → "not found" exit 0; stale edit → outdated file:line; evidence
 // §5–6). The wrapper therefore proves freshness before every query verb:
-// `status --json` when clean; `codegraph sync <root>` (positional — it rejects
-// --path) then re-check when not; exit 3 UNKNOWN whenever cleanliness cannot be
-// proven. All refusals name the fix and never the queried symbol. Two wrappers
-// syncing at once surface here as one failed sync — a refusal, never a false
-// answer.
+// `status --json` readable; a git baseline present (round 5 — without it the
+// pending signal itself lies, evidence §7); `codegraph sync <root>` (positional
+// — it rejects --path) then re-check when not clean; exit 3 UNKNOWN whenever
+// any of that cannot be proven. All refusals name the fix and never the queried
+// symbol. Two wrappers syncing at once surface here as one failed sync — a
+// refusal, never a false answer.
+//
+// Order matters: the instrument is checked first so a missing CLI still gets
+// its specific not-on-PATH refusal, and the baseline is checked before any
+// pendingChanges value is trusted — including zero — and before any sync.
 function pendingGuard() {
   let pending = pendingCount();
   if (pending === null) refuseStateUnknown();
+  requireGitBaseline();
   if (pending > 0) {
-    const sync = spawnCli(["sync", ROOT]);
+    const sync = spawnCli(["sync", quoteForShell(ROOT)]);
     if (sync.error || sync.status !== 0) {
       const detail = (sync.stderr || "").trim();
       console.error(
         [
           `[code-intel] The index is out of date (${pending} pending change(s)) and "codegraph sync" failed` +
-            `${sync.status != null ? ` (exit ${sync.status})` : ""}.`,
+            `${sync.status != null ? ` (exit ${sync.status})` : ""}${cliTag()}.`,
           ...(detail ? ["", detail] : []),
           "",
           "Concurrent wrappers surface here as one failed sync — a refusal, never a false answer.",
@@ -224,13 +293,13 @@ function pendingGuard() {
       );
       process.exit(3);
     }
-    console.error(`[code-intel] index was stale (${pending} pending change(s)); synced before answering`);
+    console.error(`[code-intel] index was stale (${pending} pending change(s)); synced before answering${cliTag()}`);
     pending = pendingCount();
     if (pending === null) refuseStateUnknown();
     if (pending > 0) {
       console.error(
         [
-          `[code-intel] Still ${pending} pending change(s) after sync — the index does not settle.`,
+          `[code-intel] Still ${pending} pending change(s) after sync — the index does not settle${cliTag()}.`,
           "",
           "An answer from a stale index can be confidently wrong (FOC-114), so this refuses instead.",
           "Rebuild it:  codegraph init",
@@ -271,7 +340,7 @@ function main() {
   // `status` is the one subcommand that does NOT accept --path (it takes only
   // --json). Passing it there is a hard `error: unknown option` — found by
   // running it, not by reading the flag table.
-  const args = [sub, ...argv.slice(1), ...(sub === "status" ? [] : ["--path", ROOT])];
+  const args = [sub, ...argv.slice(1), ...(sub === "status" ? [] : ["--path", quoteForShell(ROOT)])];
 
   const res = spawnSync("codegraph", args, { cwd: ROOT, stdio: "inherit", shell: process.platform === "win32" });
 

@@ -19,11 +19,23 @@
 // state → exit 3). Cases 4/5 spawn the RAW CLI on purpose: they pin upstream's
 // answer layer, which the wrapper guard must never hide.
 //
+// Round 5 (guard hardening): "proven" now also requires a git baseline — the
+// CLI's pendingChanges is computed against it and reports false zeros without
+// one (a tree with no own `.git` nested where an enclosing repo ignores it:
+// both CLI versions lie; a repo before its first commit: CLI 1.5.0 lies —
+// measured, evidence §7). Round 4's fixtures all committed a baseline, so the
+// suite could not see the blind spots; cases 9/10 pin the refusal for both
+// shapes, case 11 pins the sync-failed no-leak property deterministically (a
+// read-only index DB), and case 12 pins quoting for repo paths with spaces.
+// Both mutations verified (see the round-5 report): baseline check removed →
+// exactly cases 9/10 red; guard removed entirely → every guarded assertion red
+// while the raw-CLI tripwires stay green.
+//
 // All fixtures live in temp directories; the wrapper is COPIED into each fixture
 // (its ROOT is script-relative, so the copy pins the wrapper to the fixture tree).
 // The real worktree tree is never used as a fixture and is never modified.
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync, chmodSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -208,6 +220,9 @@ function runTests() {
   // With the round-4 guard this is also the "sync/status impossible" case: the
   // guard's instrument (status --json) cannot run, so cleanliness cannot be
   // proven — the refusal fires before any query, never a silent pass-through.
+  // Ordering note (round 5): the guard checks its instrument BEFORE the git
+  // baseline, so this fixture — which has no .git either — still gets the
+  // specific not-on-PATH refusal, not a baseline refusal.
   {
     console.log("\ncodegraph not on PATH (fixture with an empty .codegraph dir)");
     if (process.platform !== "win32") {
@@ -346,6 +361,13 @@ function runTests() {
         ].join("\n"),
       );
       settle(2000);
+      // Settle note (round 5): on CLI 1.5.0 the one-shot `status`/`sync` scan the
+      // tree at invocation (probe: a file written with zero settle was detected
+      // as pending and synced), so the watcher is not in this answer path; the
+      // wait is belt-and-braces for other versions. If a future CLI defers
+      // pending detection to a watcher that misses this window, the note
+      // assertion below goes red without any wrapper defect — an accepted,
+      // named flakiness risk, not silent.
       const probe = runWrapper(root, ["symbol", "foc114ProbeTarget"]);
       const out = norm(probe.stdout) + norm(probe.stderr);
       assertEq(probe.status, 0, "guarded stale-symbol query exits 0 after the guard synced");
@@ -371,6 +393,144 @@ function runTests() {
       assertEq(probe.status, 3, "unprovable index state → exit 3 (never a silent pass-through)");
       assert(!out.includes("foc114ProbeOnDisk"), "refusal never names the queried symbol");
       assert(out.includes("codegraph init"), "refusal names the fix (codegraph init)");
+    }
+
+    // ---- Case 9: no git baseline (round 5 blind spot) → exit 3 UNKNOWN ----
+    {
+      console.log("\nno git baseline (no .git at the project root) → exit 3 UNKNOWN");
+      // Round-4's fixtures always committed, so the guard's instrument was
+      // truthful in every shipped test and the blind spots were invisible.
+      // Here there is NO git at all: measured (evidence §7), the CLI's
+      // pendingChanges is computed against a git baseline and can report a
+      // false zero here — 1.5.0 truthful in some no-git shapes, 1.6.0 not,
+      // depending on what git discovery finds above the tree. Whatever the
+      // instrument says, freshness is UNPROVABLE, so the guard refuses before
+      // trusting any pendingChanges value.
+      const root = makeFixture("nogit");
+      mkdirSync(join(root, "src"));
+      writeFileSync(
+        join(root, "src", "lib.mjs"),
+        ["export function foc114ProbeTarget() {", "  return 1;", "}", ""].join("\n"),
+      );
+      const init = spawnSync("codegraph", ["init", "."], { cwd: root, shell: true, encoding: "utf8" });
+      assertEq(init.status, 0, "codegraph init succeeds without git (fixture self-check)");
+      writeFileSync(
+        join(root, "src", "newer.mjs"),
+        ["export function foc114NogitPending() {", "  return 2;", "}", ""].join("\n"),
+      );
+      const probe = runWrapper(root, ["symbol", "foc114NogitPending"]);
+      const out = norm(probe.stdout) + norm(probe.stderr);
+      assertEq(probe.status, 3, "no git baseline → exit 3 (never an answer from an unproven index)");
+      assert(!out.includes("foc114NogitPending"), "no-baseline refusal never names the queried symbol");
+      assert(out.includes("no git repository"), "no-baseline refusal names what is missing");
+      assert(out.includes("git init"), "no-baseline refusal names the fix");
+    }
+
+    // ---- Case 10: git repo before the first commit (round 5 blind spot) ----
+    {
+      console.log("\ngit repo with no commit (unresolvable HEAD) → exit 3 UNKNOWN");
+      // Nothing staged, nothing committed — the shape where CLI 1.5.0 measured
+      // a false `added:0` with a file pending (evidence §7). The guard refuses
+      // on the unresolvable HEAD alone; the pending file additionally proves
+      // the refusal is not an accidentally-clean answer.
+      const root = makeFixture("nocommit");
+      mkdirSync(join(root, "src"));
+      writeFileSync(
+        join(root, "src", "lib.mjs"),
+        ["export function foc114ProbeTarget() {", "  return 1;", "}", ""].join("\n"),
+      );
+      const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+      git("init", "-b", "main");
+      git("config", "user.email", "test@example.com");
+      git("config", "user.name", "test");
+      const init = spawnSync("codegraph", ["init", "."], { cwd: root, shell: true, encoding: "utf8" });
+      assertEq(init.status, 0, "codegraph init succeeds in an unborn repo (fixture self-check)");
+      writeFileSync(
+        join(root, "src", "newer.mjs"),
+        ["export function foc114UnbornPending() {", "  return 2;", "}", ""].join("\n"),
+      );
+      const probe = runWrapper(root, ["symbol", "foc114UnbornPending"]);
+      const out = norm(probe.stdout) + norm(probe.stderr);
+      assertEq(probe.status, 3, "unresolvable HEAD → exit 3 (never an answer from an unproven index)");
+      assert(!out.includes("foc114UnbornPending"), "no-baseline refusal never names the queried symbol");
+      assert(out.includes("unresolvable"), "no-baseline refusal names what is missing");
+      assert(out.includes("git commit"), "no-baseline refusal names the fix");
+    }
+
+    // ---- Case 11: sync impossible (read-only DB) → exit 3, no-leak pinned ----
+    {
+      console.log("\nsync impossible (read-only index DB) → exit 3, refusal leaks no symbol");
+      // Deterministic sync failure: the reviewer verified `attrib +R` makes
+      // sync fail with "attempt to write a readonly database"; chmod 0o444 is
+      // the same read-only bit cross-platform. This pins the no-leak property
+      // on the sync-failed refusal (round-4 left it un-pinned; still-pending
+      // has no deterministic trigger and stays reviewed-by-construction).
+      const root = makeFixture("syncfail");
+      buildIndexedFixture(root);
+      writeFileSync(
+        join(root, "src", "blocked.mjs"),
+        ["export function foc114ProbeBlocked() {", "  return 3;", "}", ""].join("\n"),
+      );
+      const dbDir = join(root, ".codegraph");
+      let probe = null;
+      let locked = true;
+      try {
+        for (const f of readdirSync(dbDir)) chmodSync(join(dbDir, f), 0o444);
+      } catch {
+        locked = false;
+      }
+      if (!locked) {
+        skip("sync-failed no-leak pin", "could not set the read-only bit on the index DB");
+      } else {
+        try {
+          probe = runWrapper(root, ["symbol", "foc114ProbeBlocked"]);
+        } finally {
+          try {
+            for (const f of readdirSync(dbDir)) chmodSync(join(dbDir, f), 0o666);
+          } catch {
+            /* restore best effort; cleanup retries below */
+          }
+        }
+        const out = norm(probe.stdout) + norm(probe.stderr);
+        assertEq(probe.status, 3, "failed sync → exit 3 (a refusal, never a false answer)");
+        assert(!out.includes("foc114ProbeBlocked"), "sync-failed refusal never names the queried symbol (no-leak pin)");
+        assert(out.includes("codegraph sync"), "sync-failed refusal names the fix (codegraph sync)");
+      }
+    }
+
+    // ---- Case 12: repo path with a space — quoted ROOT survives shell:true ----
+    {
+      console.log("\nrepo path with a space (quoted ROOT under shell:true)");
+      // shell:true hands the command line to cmd.exe unquoted; a space in the
+      // repo path would misparse the sync positional and the --path value.
+      // Quoting is round-5 hardening; this fixture proves both survive.
+      const outer = mkdtempSync(join(tmpdir(), "codeintel-space-"));
+      cleanupDirs.push(outer);
+      const root = join(outer, "repo with space");
+      mkdirSync(join(root, "scripts"), { recursive: true });
+      copyFileSync(WRAPPER_SRC, join(root, "scripts", "code-intel.mjs"));
+      mkdirSync(join(root, "src"));
+      writeFileSync(
+        join(root, "src", "lib.mjs"),
+        ["export function foc114ProbeTarget() {", "  return 1;", "}", ""].join("\n"),
+      );
+      const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+      git("init", "-b", "main");
+      git("config", "user.email", "test@example.com");
+      git("config", "user.name", "test");
+      git("add", "-A");
+      git("commit", "-m", "init");
+      const init = spawnSync("codegraph", ["init", "."], { cwd: root, shell: true, encoding: "utf8" });
+      assertEq(init.status, 0, "codegraph init succeeds in a space-containing path (fixture self-check)");
+      writeFileSync(
+        join(root, "src", "newer.mjs"),
+        ["export function foc114SpacePending() {", "  return 2;", "}", ""].join("\n"),
+      );
+      const probe = runWrapper(root, ["symbol", "foc114SpacePending"]);
+      const out = norm(probe.stdout) + norm(probe.stderr);
+      assertEq(probe.status, 0, "space-path repo: guarded query exits 0 (quoted sync + quoted --path both worked)");
+      assert(out.includes("src/newer.mjs:1"), "space-path repo: pending symbol found after the quoted sync");
+      assert(out.includes("synced before answering"), "space-path repo: guard's sync note present (the sync ran, quoted)");
     }
   }
 }

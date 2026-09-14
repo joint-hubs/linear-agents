@@ -141,6 +141,67 @@ proves index freshness before every query verb: it syncs on pending changes and 
 (UNKNOWN) when cleanliness cannot be proven — see "AC2 status" in
 `docs/benchmark/codegraph-navigation.md`. The raw CLI remains unguarded; that is upstream.
 
+## 7. False-clean blind spots — the git baseline precondition (round 5)
+
+Round 4's guard trusted a numeric `pendingChanges` unconditionally, and round 4's fixtures all
+built their index **after** `git init` + a first commit — so the suite could never see the
+configurations where the instrument itself lies. Measured this round (scratch fixtures; the
+instrument read directly, plus the reviewer's end-to-end reproduction of the same cells through
+the wrapper: a confident `Symbol … not found`, **exit 0**, for a file that is on disk and absent
+from the index — the AC2-forbidden outcome):
+
+| config (index built, then a pending file on disk) | cmd-resolved **1.5.0** | npm-shim **1.6.0** |
+|---|---|---|
+| committed git repo (temp dir) | `added:1` — correct | `added:1` — correct |
+| git repo, **no commit yet**, nothing staged | **`added:0` — lie** | `added:1` — correct |
+| no own `.git`, nested where an enclosing repo ignores the tree (under a worktree's gitignored `.state/`) | **`added:0` — lie** | **`added:0` — lie** |
+| no git at all (temp dir) | `added:1` — correct | `added:1` — correct |
+
+Two mechanisms, one conclusion. In a repo before its first commit, 1.5.0's pending signal
+(git-derived) has no baseline to diff against and reports a false zero; in a git-ignored tree
+with no own `.git`, git discovery climbs into the enclosing repo, whose view of the tree is
+empty — both versions report a false zero. The two "correct" blind rows are the trap: whether
+the instrument lies in a no-baseline config is **version- and shape-dependent** (1.5.0 is
+truthful in a plain temp dir; 1.5.0 is truthful in an unborn repo with staged files), so no
+shape can be trusted on the strength of having answered correctly once.
+
+**The wrapper's answer (round 5): a zero counts as proof only where a git baseline exists.**
+`scripts/code-intel.mjs` now requires, before trusting *any* `pendingChanges` value — including
+zero — and before any sync: `.git` present at the project root, and `git rev-parse --verify
+HEAD` resolving. Otherwise: **exit 3 UNKNOWN**, refusal names what is missing and the fix
+(`git init` / `git add -A && git commit`), never the queried symbol. The instrument is checked
+first, so a missing CLI still gets its specific not-on-PATH refusal. `status` remains exempt —
+it is how a no-baseline project diagnoses itself.
+
+Hard-asserted in `scripts/code-intel.test.mjs`: case 9 (no `.git` at all) and case 10 (unborn
+HEAD) → exit 3, no symbol name, fix named; case 11 pins the sync-failed refusal's no-leak
+property deterministically (read-only index DB → sync fails → exit 3, zero symbol occurrences);
+case 12 pins quoting for repo paths with spaces (shell:true hands cmd.exe an unquoted command
+line). Mutation-verified both directions: baseline precondition removed → **59 pass / 8 fail**,
+exactly the eight baseline-refusal assertions of cases 9/10 (both fixtures then answer
+confidently, exit 0); guard call removed entirely → **49 pass / 18 fail**, every guarded
+assertion red while the raw-CLI tripwires (cases 4/5) stay green; restored → **67 pass /
+0 fail**.
+
+The resolved CLI version is now surfaced on the guard's diagnostic stderr (sync note and every
+refusal, e.g. `(codegraph CLI 1.5.0)`) — a measurement, not a refusal: the documented workflow
+pairs a 1.6.0-built index with the cmd-resolved 1.5.0 query path, so a version mismatch alone
+must not fail a query.
+
+**Accepted bounds, stated and deliberately not chased:**
+
+- **TOCTOU, one spawn wide** — a file edited between the guard's last `pendingCount()` and the
+  query spawn still gets a stale answer. Inherent to status-then-query; closing it needs the
+  guard and the query to be one atomic operation, which the CLI does not offer.
+- **A corrupt status that carries a well-formed `pendingChanges: {added:0, …}`** would pass the
+  guard (freshness proven, integrity not). The corrupt shape that actually occurs — a corrupt
+  index dir answers `{"initialized":false}` with exit 0 and **no** `pendingChanges` field
+  (measured, round 4) — omits it and fails closed; the lying shape is hypothetical, unmeasured.
+- **"Still pending after sync" has no deterministic trigger** — forcing it would need a sync
+  that reports success but clears nothing. The refusal is a static template plus the pending
+  count (no symbol interpolation) and is reviewed by construction; the sync-failed sibling is
+  the pinned one (case 11).
+
 ## What this evidence does not cover
 
 - MCP-server behavior (watcher, debounce, `⚠️` banner) — measured here only via the CLI path.
