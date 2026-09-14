@@ -3,7 +3,81 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Current execution: 2026-09-14 — FOC-288 (F-15) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+## Current execution: 2026-09-14 — FOC-289 (F-16) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+
+- **Run** `2026-09-14-supervisor-foc-289` (glm-5.3-flash; dzieci dev-1 / review-2 / test-4). Kandydat
+  `e3410f8` (`foc-289-dev`, 1 commit nad bazą `1ae52aa`), po replayu `cce2912`.
+- **Zakres zmieniony decyzją Mateusza (2026-09-14, przed pierwszym spawnem): tylko AC3.** AC1/AC2 straciły
+  podmiot, AC4 domknięte osobnym krokiem — oba idą jako zapis tutaj, nie do deliverables.
+- **FOC-289** (F-16: protokół sprzątania na końcu runu) — `agents/supervisor/CLAUDE.md` §8 „Reclaim the
+  worktree — at run close" (zamknięcie runu, nie wcześniej; co przeżywa: tylko checkout, gałąź i commity
+  zostają; reguła „nie zostawiaj gate'a wiszącego") oraz `docs/supervisor-e2e-checklist.md` (intro „only
+  through `supervisor-cleanup.mjs`", checkbox „no gate left unanswered", przepisany `### Rollback`).
+  2 pliki, +15/−5.
+- **Naprawiona sprzeczność:** stary `### Rollback` mówił „or by hand with `git worktree remove` once you
+  have read what is in them" — czyli licencjonował obejście obu kluczy. Kandydat zastępuje to zakazem;
+  niezależny sweep obu plików (REVIEW i TEST osobno) nie znalazł zdania, które tę drogę nadal licencjonuje.
+- **REVIEW runda 1 = APPROVE** (`verdicts/foc-289-round1.json`, fingerprint `669e56b5c6b3be8f`, 4 findingi:
+  1 todo, 1 nit, 1 question, 1 praise, zero `issue`). Każde twierdzenie prozy zweryfikowane w źródle:
+  `propose` odmawia przy niedomkniętym issue i nie emituje gate'a; `remove` przekłada oba klucze i odmawia
+  po ruchu drzewa (fingerprint = HEAD + posortowane porcelain); `branchNote` leci przy każdym usunięciu;
+  nie istnieje flaga `--test-approved` (klucz 1 to stan Linear `completed`).
+- **TEST = PASS** (`test-4`) — niezależnie: suite 59/59 exit 0 (`npm ci` + `test-all`, 364 s),
+  `config-drift` 26/0, `supervisor-cleanup.test.mjs` 26/0, `supervisor-gate.test.mjs` 29/0, `propose` na
+  tym runie exit 1 z licznikiem gate'ów 0→0, `agents/orchestrator/**` diff-empty.
+- **Reziduum świadome: AC3 nie jest pokryte testem.** Żaden test w repo nie czyta ani nie asertuje tych
+  dwóch plików — suite dowodzi zachowania narzędzi, nie prozy. Żaden test nie odróżni tego diffa od jego
+  braku; to fakt o pokryciu, nie wada kandydata.
+- **Landing** — `supervisor-merge --run …foc-289 --child dev-1 --verify "npm ci && node scripts/test-all.mjs"`
+  (w tle, bez zewnętrznego `timeout`): `accepted: true`, `findings: []`, izolacja exit 0, combined exit 0,
+  replay 1 commita bez konfliktów. Fast-forward w głównym checkoucie: `1ae52aa → cce2912` (2 pliki, +15/−5).
+  **Lokalnie, bez push i bez PR.**
+
+### FOC-289 — AC1/AC2 przedawnione, nie „zrobione" (re-scope 2026-09-14)
+
+- Sweep wszystkich 284 rekordów gate na dysku (`foc289-stale-gate-sweep.md`, ten run): `cleanup-approval`
+  **219 answered / 0 pending**. Premisa findingu („18 stale cleanup gates, jeden z dirty paths") nie
+  istnieje — backlog zjedli close-outy `f5dd`/`a93f`/`613e`/`9946`.
+- AC1 (tabela) i AC2 (eskalacja dirty-paths verbatim) **nie mają podmiotu**: nie ma ani jednego pending
+  gate'a tej klasy. 47 answered cleanup gate'ów z dirty paths ma zapisaną dyspozycję (żaden bez odpowiedzi
+  albo noty). Zero usunięć bez obu kluczy.
+- Uczciwe reziduum z tamtego sweepu: późniejsze `tak` usunęły drzewa, których gałęzie **nie są** zmergowane
+  do `main` (praca wylądowała lokalnie na `chore/foc-102-baseline`, nigdy nie pushowanej). Commity żyją na
+  lokalnych gałęziach; nic niezacommitowanego nie przetrwało. Konsekwencja lokalnej polityki landingu, nie
+  brakująca dyspozycja.
+
+### FOC-289 — AC4 domknięte jednorazowym sprzątaniem ewidencji (decyzja Mateusza, 2026-09-14)
+
+- Sweep wskazał żywą kolejkę jako **5 pending `question` gate'ów** i to była cała kolejka. Wszystkie 5
+  rozliczone — zapis bez followupów, bo tury, do których wracały, nie istnieją:
+  - `20260904-supervisor-foc-208` (FOC-208, joint-flows): `gate-plan-1-2` i `gate-plan-1-3` → **SUPERSEDED**
+    przez `1-4`/`1-5`; `gate-plan-1-4` i `gate-plan-1-5` → **PARKED** (decyzja produktowa linii Neo onprem,
+    wraca w sesji planowania joint-flows).
+  - `2026-09-05T21-28-09-052-supervisor-11df` (FOC-143, joint-flows): `gate-dev-4-2` → **STALE** (tura dev-4
+    z 2026-09-06 nie istnieje).
+- Pytania skopiowane **dosłownie** tam, gdzie żyje praca: FOC-208 (komentarz `aee8f41e-…`) i FOC-143
+  (komentarz `4e39d18c-…`); `publish-linear-comment --dry-run` przed publikacją. Worktree `la-wt/joint-flows/*`,
+  gałęzie i repo joint-flows — **nietknięte**.
+- Po tym kroku kolejka fali FOC-102 nie ma ani jednego pending gate'a: każdy rekord jest rozliczony
+  (completion albo zapisana dyspozycja). To jest AC4.
+
+### FOC-289 — rezidua i follow-upy (nieblokujące, nie zgłoszone jako issue)
+
+- `docs/supervisor-e2e-checklist.md:159` — checkbox „Answer with something qualified… `remove` refuses"
+  opisuje drogę, która od czasu dodania odmowy po stronie `answer` jest nieosiągalna: pierwsza odmowa pada
+  przy `answer` (gate zostaje `pending`), nie przy `remove`. Jednolinijkowy follow-up; linia sprzed tego diffa.
+- `docs/supervisor-e2e-checklist.md:3,22` — „30 files" / „30/30"; suite ma dziś **59** plików. Staleness
+  sprzed kandydata.
+- `verdicts/*.json` → `fingerprint.changedFiles` to liczba **brudnych** plików (`porcelain.length`), nie
+  liczba plików w diffie — przy tym kandydacie `0` mimo 2 zmienionych plików (`supervisor-lib.mjs:1115`).
+  Semantyka pola, nie defekt.
+- **Błąd operatora:** jedno wywołanie `supervisor-spawn` z `--prompt "placeholder"` (miało tylko odczytać
+  usage) uruchomiło dziecko `test-3` z bezsensownym promptem. Zatrzymane po ~1 min (`supervisor-stop.mjs`:
+  drzewo czyste, 0 kosztu, żadnych zapisów — tylko odczyt spec-refów). TEST wykonany od nowa jako `test-4`.
+- Worktree `foc-289-{dev,review,test}` + `la-merge/2026-09-14-supervisor-foc-289` czekają na
+  `supervisor-cleanup.mjs` (oba klucze).
+
+## 2026-09-14 — FOC-288 (F-15) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
 
 - **Run** `2026-09-13T20-18-45-233-supervisor-9946` (glm-5.3-flash; dzieci dev-1/review-2/test-3).
   Kandydat `9c8253b` (`foc-288-dev`, 1 commit nad bazą `6f1d846`), po replayu `4b9e5f5`.
