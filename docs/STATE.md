@@ -3,7 +3,57 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Current execution: 2026-09-12 — FOC-287 + FOC-220 + FOC-221 INTEGRATED na `chore/foc-102-baseline` (lokalnie)
+## Current execution: 2026-09-13 — FOC-285 (F-09) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+
+- **Run** `2026-09-12T21-31-34-supervisor-613e` (glm-5.3-flash; dzieci dev-1/review-2/test-3). Wznowienie po
+  utracie sieci — runda 2 REVIEW startowała z istniejącej sesji `review-2` (`supervisor-followup`), nie z
+  nowego spawnu. Kandydat finalny `e171c50` (`foc-285-dev`, 2 commity nad bazą `53fb441`).
+- **FOC-285** (F-09: provision secret scanner + SAST w ścieżce review) — dodaje `scripts/security-scan.mjs`
+  (wrapper na secretlint 13.0.5 + semgrep 1.172.0, `config/security/semgrep-rules.yml`, zacommitowany
+  `package.json`/`package-lock.json`, `docs/tools/security-scan.md`) i wpina go w kontrakt review.
+- **REVIEW runda 2 = APPROVE** — oba findingi rundy 1 zamknięte i potwierdzone na **własnych** próbkach
+  reviewera (10/10 form, wrapper + `semgrep` bezpośrednio). Mutacje falsyfikujące: A (przeniesienie
+  `metavariable-regex` na `$M` z powrotem na poziom reguły) → `36 passed, 3 failed`; B (usunięcie 4 nowych
+  ramion `path.join`/`resolve`) → `35 passed, 4 failed`; po `git checkout --` → `39 passed, 0 failed`.
+  Werdykt: `foc-285-round2.json`, combined fingerprint `b3b790e891f26c8f` (runda 1: `ba286141d3665ed3` —
+  praca się ruszyła, więc pętla nie stanęła na powtórce).
+- **Wycofanie taint-mode dla `security.path-join-request-data` uzasadnione empirycznie** (a nie stylistycznie):
+  wariant `mode: taint` daje **2 trwałe false positives na `scripts/serve-docs.mjs:49,59`** (poprawny idiom
+  `resolve(ROOT, reqData)` + `relative()` containment) i sam **gubi dostęp bracketowy** (`req["file"]`), więc
+  6-ramienny wariant syntaktyczny wygrywa. Cena: brak pokrycia przepływów aliasowanych — dziś 0 wystąpień w repo.
+- **TEST = PASS** (`test-3`, niezależny fixture wymyślony przez testera) — 5/5 wykryć, exit 1, zero wycieków
+  wartości w obu strumieniach; warunek wiążący Mateusza (skaner, który nie wystartował ⇒ non-zero + jawna
+  linia `NOT SCANNED` + **brak** linii OK) reprodukowany dwukrotnie — brak `node_modules` i `semgrep` poza
+  PATH — oba exit 2. `test-all` 58/58, lint 388/0, skan repo 452 pliki exit 0.
+- **Landing** — `supervisor-merge --run …613e --base e803027 --child dev-1 --verify "npm ci && node scripts/test-all.mjs"`
+  → `accepted: true`, `findings: []`, izolacja exit 0, integracja exit 0, replay 2 commitów bez konfliktów.
+  Fast-forward w głównym checkoucie: `e803027 → 3c36f8d` (9 plików, +1242/−8). **Lokalnie, bez push i bez PR.**
+- **Worktree FOC-285** (`foc-285-{dev,review,test}`, `la-merge-…613e` — ostatni usunięty przez sam merge)
+  do sprzątnięcia przez `supervisor-cleanup.mjs`, po ratowaniu `.state`. Scratch z fałszywymi sekretami
+  (`foc285-fixtures/`, `foc285-redact/`, `foc285-ruleprobe/`, `foc285-taint/`) **nie idzie do ratowanego `.state`**.
+
+### Uwagi toolowe z tego runu (nowe)
+
+- **`supervisor-merge.mjs` nie provisioninguje drzewa integracyjnego.** Pierwszy przebieg **odrzucił**
+  kandydata (`combined` exit 1, „1 test file(s) failed") mimo izolacji exit 0 — wyłącznie dlatego, że
+  scratch tree nie ma `node_modules`, a `scripts/security-scan.test.mjs` potrzebuje skanerów z
+  zacommitowanego lockfile (bez nich uczciwa degradacja: `NOT SCANNED` + exit 2 → asercje PASS na czerwono).
+  Po `npm ci` w tym samym drzewie suite wraca do `39 passed, 0 failed`. Obejście: `--verify "npm ci && node scripts/test-all.mjs"`.
+  **Konsekwencja ogólna:** od tego landingu `test-all` na świeżym checkoutcie **bez `npm ci` jest czerwony.**
+- **`LA_SUPERVISOR_MAX_COST_USD` wycieka do środowiska dziecka** i przewraca 4 hermetyczne pliki `supervisor-*`
+  w `test-all` (dowód: raport rundy 2 §6). Nie eksportować go w sesji Supervisora; budżet trzymać alokacją
+  etapową (`supervisor-budget.mjs allocate`). Kandydat na fix: scrub `LA_*` w `supervisor-spawn`/`supervisor-followup`.
+- **`--base` w merge'u jest tu obowiązkowe.** Domyślna wspólna baza to baza dev-1 (`53fb441`), więc integracja
+  bez `--base e803027` gubiłaby `b3a9377` + `e803027` i ff-only na baseline by się nie udał. Zbiory plików
+  kandydata i tych dwóch commitów **nie nachodzą na siebie** (sprawdzone) — replay czysty.
+- **Korekta nieaktualnej uwagi z 2026-09-12:** `supervisor-followup.mjs --prompt-file` **działa** — runda 2
+  REVIEW wystartowała dokładnie tak (ścieżka względem cwd Supervisora), a `supervisor-spawn` weryfikuje
+  `prompt-file-readable`. Zdanie „zawsze `--prompt "$(cat <plik>)"`, nigdy `--prompt-file`" (sekcja niżej) jest
+  nieaktualne dla bieżącego kodu.
+- `python -m semgrep` pozostaje zepsute na tej maszynie (cichy exit 2) — nieistotne, wrapper napędza binarkę
+  `semgrep`. Blokada Smart App Control (zdarzenie 3077) w tym runie **nie wystąpiła**.
+
+## 2026-09-12 — FOC-287 + FOC-220 + FOC-221 INTEGRATED na `chore/foc-102-baseline` (lokalnie)
 
 - **Run** `2026-09-12T08-33-13-554-supervisor-a93f` (glm-5.3-flash, koszt runu ~$10.19 priced; `costUsdReported`
   $467 to licznik strumienia dla nierozpoznanego modelu — niezaufany). Trzy linie fali doprowadzone do TEST PASS
@@ -63,9 +113,10 @@
   S3-1 (skip-counted-as-pass w supervisor-test-fixtures.mjs), S3-2+N3-1 (catcher: edge-derived advice +
   dryRun suppression w supervisor-followup.mjs), N3-2/N3-3+Q3-1 (scrub pattern poza supervisor-verdict —
   `publish-linear-comment.mjs:221` to WRITE path). FOC-165 pokrywa emiter + usuwanie returned-by:review.
-- **Nieruszone w Linear po wznowieniu 2026-09-12:** FOC-285 (F-09) · FOC-288 (F-15) · FOC-289 (F-16 docs) ·
+- **Nieruszone w Linear po wznowieniu 2026-09-13:** FOC-288 (F-15) · FOC-289 (F-16 docs) ·
   FOC-114 · FOC-165 (+F-14, release-candidate run) · FOC-102 close-out (epic) · standing: FOC-294/295/296/297.
-  (FOC-287 / FOC-220 / FOC-221 zdjęte z tej listy 2026-09-12 — zintegrowane lokalnie, patrz sekcja wyżej.
+  (FOC-287 / FOC-220 / FOC-221 zdjęte z tej listy 2026-09-12 — zintegrowane lokalnie; FOC-285 zdjęte
+  2026-09-13, patrz sekcja „Current execution” na górze.
   PR #25/FOC-219 scalony na main 2026-09-11, `967fc1a`, wchłonięty w `3859c86`; po stronie Mateusza zostaje
   merge PR #26 (FOC-284).)
 - Uwaga toolowa (znana z FEN/FOC-284): wyroki TEST nie nagrywać przez supervisor-verdict; `--run` jawne przy
