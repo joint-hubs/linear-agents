@@ -12,9 +12,11 @@
 
 ## Verdict
 
-**AC: 7 met, 0 not met, 0 inconclusive.** **DoD: 11 met, 1 not met** — `deepseek/deepseek-v4-pro` is
-not at the figure the DoD names (F1, §1.8), and the correction is not a mechanical one because the live
-catalogue has since moved past the DoD's own target. **Items (d) and (f) are decided** — (d) a written
+**AC: 7 met, 0 not met, 0 inconclusive.** **DoD: 11 met, 1 not met as written** — the
+`deepseek/deepseek-v4-pro` price point named figures (`0.87 / 1.74 / 0.0725`) that matched neither the
+committed row nor the live catalogue, so it was unsatisfiable as written; round 2 resolved it by the
+authorised dated price-sync (F1, §1.8), which committed the 2026-09-15 catalogue figures as a new
+price set across all 8 drifted models. **Items (d) and (f) are decided** — (d) a written
 defer with the corpus measured (§6), (f) explicit unsupported-above-threshold handling with boundary
 fixtures (§8). **The full suite was run this turn** (`npm ci && node scripts/test-all.mjs`): 62/63
 files pass, exit 1 in both runs — the single red in each run is a hermetic `supervisor-*` test failing
@@ -201,6 +203,13 @@ is a **substring search over script sources**, so a variable mentioned only in a
 it. That is the limit of the AC6 claim, stated here rather than implied: AC6 as written ("fails if no
 script reads that variable") is met at the level of "no script *mentions* it", which is weaker than
 "reads". No variable in the current tree sits in that gap.
+
+**Round-1 review nit, recorded honestly, not fixed:** the test enumerates a hardcoded six-squad list
+(`config-drift.test.mjs:34`: plan, dev, review, test, cadence, supervisor) — `agents/orchestrator/`
+carries a `CLAUDE.md` but is read by **no branch** of this test, so the "seven squads" sentence above
+overstates the scan. Latent, not live: the only `LA_*` in `agents/orchestrator/CLAUDE.md` is
+`LA_ROOT`, which several `scripts/*.mjs` files read, so nothing is currently hidden. Widening the
+list is outside this round's authorised paths, so the limit stands as stated.
 
 ## 3. Item (a) — over-budget kill-switch in the standalone launchers
 
@@ -922,18 +931,22 @@ git ls-tree -r --name-only 527bc64 | grep -E '^agents/[a-z]+/agents/[a-z-]+\.md$
 git show 527bc64:config/models.map | grep -v '^_id'
 ```
 
-**Why it matters, mechanically.** `bin/agent.bat:26` seeds `set "M=z-ai/glm-5.2"` and overwrites it
-**only** if `%AREA%.%ROLE%` appears in `config/models.map` (`:27`–`:29`). A role with no key is
+**Why it matters, mechanically.** `bin/agent.bat:27` seeds `set "M=z-ai/glm-5.2"` and overwrites it
+**only** if `%AREA%.%ROLE%` appears in `config/models.map` (`:28`–`:30`; the round-1 draft's `:26` /
+`:27`–`:29` cites were off by one, corrected round 2). A role with no key is
 therefore not an error — it silently launches a `flash` or `worker` subagent on `glm-5.2`, at a
-different price and a different capability from the role's routing. The checker validates the *other*
-direction only: `scripts/check.mjs:206` reports a `models.map` key that has no `agents/<area>/agents/
-<role>.md`, and nothing reports a role file that has no key. So `node scripts/check.mjs` passes while
-the drift is live.
+different price and a different capability from the role's routing. The checker validated one
+direction only: `scripts/check.mjs:212` reports a `models.map` key that has no `agents/<area>/agents/
+<role>.md`, and nothing reported a role file that has no key. So `node scripts/check.mjs` passed while
+the drift was live.
 
-**Proposed disposition.** **Fix now** (F-14's own disposition, and it is a ten-line config change):
-add the ten keys, then add the missing reverse check to `scripts/check.mjs` — a key set that cannot
-detect its own omissions will re-open the same finding. Note this is *not* done here because it touches
-`scripts/check.mjs`, which this turn's authorised paths do not include.
+**Proposed disposition (round 2).** **Fixed (gate Q1).** The ten keys are in `config/models.map` —
+`flash`/`worker` in dev/plan/review/test at `z-ai/glm-5.3-flash`, `cadence.flash` at
+`deepseek/deepseek-v4-flash`, `cadence.worker` at `minimax/minimax-m3` — and `scripts/check.mjs` now
+runs the reverse direction too (check 2b, `:216`–`:221`; the clean run prints `OK: 8 checks,
+0 violations`). Proven by mutation (`scripts/check.test.mjs`): deleting `dev.flash` turns the run
+red — `DRIFT: 1 violations` naming `agents/dev/agents/flash.md`, exit 1 — and restoring the key
+byte-identical returns it to green.
 
 ### F3 — `ids.opus`: half the claim is verifiable, half is not (dated 2026-09-15)
 
@@ -1104,8 +1117,9 @@ Results are the observed ones; a command whose output is red is followed by what
 | `node scripts/cost-guard.test.mjs` | **8 passed, 0 failed** |
 | `node scripts/publish-linear-comment.test.mjs` | **7 passed, 0 failed** |
 | `node scripts/telemetry-canonical-views-atomicity.test.mjs` | **PASS** |
-| `node scripts/config-drift.test.mjs` | **26 passed, 0 failed, exit 0** |
-| `node scripts/lint.mjs` | **OK: 400 files checked, 0 violations**, exit 0. Tool-printed scope: `json-parse 30 files`, `conflict-marker 400`, `bom 400`; tool-printed `Not covered: gitignored and machine-generated content in git mode (node_modules/, .state/, agent runtime dirs, tools/nebul wire captures, generated config/atlas-mcp.json, credential files)` |
+| `node scripts/config-drift.test.mjs` | **26 passed, 0 failed, exit 0**; round 2 after the price sync: **26 passed, 0 failed, exit 0** |
+| `node scripts/lint.mjs` | **OK: 400 files checked, 0 violations**, exit 0. Tool-printed scope: `json-parse 30 files`, `conflict-marker 400`, `bom 400`; tool-printed `Not covered: gitignored and machine-generated content in git mode (node_modules/, .state/, agent runtime dirs, tools/nebul wire captures, generated config/atlas-mcp.json, credential files)`; round 2: **OK: 401 files checked, 0 violations, exit 0** |
+| `node scripts/check.test.mjs` *(new, round 2)* | **2 passed, 0 failed** — baseline green (`OK: 8 checks, 0 violations`) plus the key-deletion mutation: `DRIFT: 1 violations` naming `agents/dev/agents/flash.md`, exit 1, then the key restored byte-identical and green again (F2) |
 
 The lint row is stated in full — command, exit code, scope and `not covered` — because a lint that
 covers nothing is false evidence. Beyond the gitignored set the tool declares, `.state/foc-165/*.mjs`
@@ -1138,24 +1152,31 @@ Each was applied to a clean tree, run, and reverted with `git checkout -- script
 
 | command | result |
 |---|---|
-| `node scripts/price-check.mjs --json` | **exit 1**; 7 drifting prices, 4 unlisted models — §1.7, §1.8 |
+| `node scripts/price-check.mjs --json` | **exit 1**; the checker's JSON names **8 drifted models / 21 field diffs**, 4 unlisted models — §1.7, §1.8. (The round-1 draft printed "7 drifting prices"; that was a transcription error — the same-day re-run by REVIEW reproduced 8/21.) |
+| round 2, **2026-09-15T17:23:19Z** — the gate's single authorised catalogue call (Q2) | **exit 1**; same shape: 8 drifted / 21 field diffs / 4 unlisted; full output kept at `.state/price-check-2026-09-15.json`; figures applied as the new price set (§1.8, F1/F8) |
 
-This is the only command in the run that touched the network. It is AC7's own acceptance test
+This is the only command in either round that touched the network. It is AC7's own acceptance test
 (`scripts/price-check.mjs:5`–`:7` documents it as network-using and deliberately outside
-`config-drift.test.mjs`), so it was run once and its output recorded. Everything else — every price,
-every token count, every row count in this report — came from `config/models.json`, the issue's quoted
-2026-09-05 figures, or the copy of the telemetry store. No catalogue figure was re-derived beyond this
-one invocation, and the two drift rows it reports are carried into §13 as findings with their date
-attached rather than as corrections applied here.
+`config-drift.test.mjs`), so it was run once per round and its output recorded. Everything else — every
+price, every token count, every row count in this report — came from `config/models.json`, the issue's
+quoted 2026-09-05 figures, or the copy of the telemetry store. Round 1 carried only 2 of the 8 drifted
+models into §13 as findings; round 2's sync dispositions all 8 (§1.8), so no drifted model is left
+unrecorded. The two same-day catalogue readings for `z-ai/glm-5.3-flash` disagree (round 1: `0.15 /
+0.5 / 0.03`; round 2: `0.075 / 0.25`); the sync run is the priced source of truth for this landing
+(F8's resolution).
 
 ### 14.5 Not run, and therefore not claimed
 
 - **`agents/review/CLAUDE.md` was not edited** and the review clean path was not driven end-to-end
-  (F4). Reading it is all this turn did.
-- **No Linear write of any kind.** No transition, no label, no comment, no description update.
+  (F4). Reading it is all this turn did. *(Round 2 edited it — one line, `--clear-returned-by-review`
+  on the clean path at `:143`, F4's fix-now; the Linear-side effect of the flag remains unverified —
+  no Linear writes in either round.)*
+- **No Linear write of any kind.** No transition, no label, no comment, no description update. *(Still
+  true in round 2.)*
 - **No `git push`, no PR, no merge**, and no command was run in any other worktree or against any other
   branch. `config/models.map`, `config/models.json` and `scripts/check.mjs` were read, not modified
-  (F1, F2, F3).
+  (F1, F2, F3). *(Round 2 modified all three — keys + reverse check, dated price sync; still no
+  push/PR/merge and no other worktree touched.)*
 - **No Windows shell was driven through an over-budget launch** (§3), and the `--clear-returned-by-review`
   removal was never executed against Linear (§7, F4).
 - **The live telemetry store was never opened by this child** (§12).
@@ -1186,3 +1207,10 @@ Run 2 isolates the two causes: with the four variables unset, cleanup passes and
 semaphore file's timing budget. Both reds are `supervisor-*` hermetic tests; both pass solo; neither
 touches (a)–(g). `telemetry-concurrency.test.mjs` (item (c)) passed in both runs. No test, threshold
 or skip was adjusted.
+
+**Round 2 did not re-run the full suite.** Its code surface is three files (`config/models.map`,
+`config/models.json`, `scripts/check.mjs`) plus the new `scripts/check.test.mjs`; the executed gates
+are the ones §14.1 and §14.4 list — `check.test.mjs` (2/2, mutation included), `check.mjs` (8 checks,
+0 violations), `config-drift.test.mjs` (26/26, re-run after the sync) and `lint.mjs` (401 files,
+exit 0). The telemetry and `supervisor-*` surface round 1 exercised is untouched by those diffs, and
+the round-1 reds (F9) are environmental, so re-litigating them was not part of this round.
