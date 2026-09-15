@@ -353,7 +353,46 @@ not claim otherwise.
 
 ## 8. Item (f) — catalogue reconciliation: verification only
 
-TBD
+> **(f): the fix or the fix-or-defer decision lands in a later turn of this run; this section is
+> updated in the same commit as that change.**
+
+No grade is issued here. What follows is what the tree at `b055340` already shows, so the later turn
+inherits a measured starting point instead of re-deriving one.
+
+**What (f) covers.** The issue's 2026-09-05 verification update, quoted in the issue body. It is the
+run's standing instruction **not** to re-derive that check from the network — the catalogue figures
+below are the issue's, and are treated as provenance, not as live truth.
+
+**Already true at `b055340`.**
+
+- The bootstrap fill is present: `config/models.json` → `pricing.openrouter["openai/gpt-6-astra"]` is
+  `{input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5}`, matching the catalogue figures quoted in
+  the issue including both cache fields, and the frontman model is unchanged.
+- The threshold is genuinely inexpressible, and this is verifiable structurally rather than by
+  re-reading the issue. `grep -rn "min_prompt_tokens|minPromptTokens|threshold" config/models.json
+  scripts/telemetry-store.mjs scripts/price-check.mjs` returns **nothing**, and the price row shape is
+  flat by construction — `model_prices` columns are
+  `price_set_id, model_key, input_price, output_price, cache_read_price, provider, cache_write_price`.
+  There is no column and no key that could carry *"above 272 000 prompt tokens, input is 20 not 10"*.
+  So the issue's claim — *"the current flat config cannot express that threshold"* — is **confirmed on
+  the tree**, and it is a schema limitation rather than a missing value.
+- The consequence is an honest under-count, not a wrong number: above the threshold, a `gpt-6-astra`
+  turn is priced at the base rate and the cost is **too low**, silently. Neither `price-check.mjs` nor
+  `config-drift.test.mjs` can see it, because both compare the flat row to a flat catalogue row.
+
+**Already true, and moving against the table.** `z-ai/glm-5.3-flash` is the model this run's own
+children are routed to, and its committed row (`0.071 / 0.24 / 0.015`) already disagrees with the
+catalogue figure quoted in the issue (`0.075 / 0.25 / 0.015`). Run at 2026-09-15, `price-check.mjs`
+reports the live catalogue at `0.15 / 0.5 / 0.03` — roughly **2× the committed row** (§1.7, §13).
+Whatever (f) decides, the decision is being made about a moving target, and the price-sync policy
+(no historical rewrite) is what keeps that from corrupting past costs. This is the case for deciding
+(f) on *policy* — threshold-aware pricing: yes or no — rather than on one model's current rate.
+
+**What this section will be updated with.** (i) whether threshold-aware pricing was built, or an
+explicit *unsupported-above-threshold* signal was emitted instead — the issue accepts either, and
+refusing to claim full correctness is explicitly preferred over the missing-field fix being sold as one;
+and (ii) the boundary fixtures that pin whichever choice was made. Until then the honest grade for (f)
+is **inconclusive — pending, by design**.
 
 ## 9. Item (g) — zero-token results, and the refusal that names the unpriced child
 
