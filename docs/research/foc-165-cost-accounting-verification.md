@@ -251,7 +251,36 @@ no `pricing_missing` issue raised. That call is on the copy only — `.state/foc
 
 ## 5. Item (c) — canonical views drop/recreate atomically inside `migrate`
 
-TBD
+**Commit:** `48c4ec5` — *fix(telemetry): make canonical view drop/recreate atomic inside migrate*.
+
+**What changed.** `ensureCanonicalViews` dropped `canonical_usage` / `canonical_tool_facts` and then
+re-`CREATE`d them as **separate** `db.exec` calls, so two processes opening the same store could
+interleave statement-by-statement: B drops, A's `CREATE` slips into the gap, B's own `CREATE` then
+fails with `view canonical_usage already exists`. Both recreate paths now run inside the file's
+existing `transaction()` helper (`BEGIN IMMEDIATE`) — `migrate()`'s initial `dropCanonicalViews` and
+`ensureCanonicalViews`' drop-plus-both-`CREATE`s. The 10 s `busy_timeout` set at open bounds the wait,
+and the view SQL itself is unchanged, so this is a concurrency fix and not a semantic one.
+
+**Why it matters for cost.** This is in scope for FOC-165 because it is a **cost-reporting** defect,
+not a general one: a failing telemetry hook write under-reports spend. The billing surface *is* the
+`canonical_*` views (FOC-221), so a view that transiently cannot be recreated is a view that can miss
+rows — and the commit message records the observed rate, roughly **1 in 10** runs of
+`telemetry-concurrency.test.mjs`.
+
+**The test.** `scripts/telemetry-canonical-views-atomicity.test.mjs` stages the production interleaving
+deterministically rather than by racing: an intruder connection `CREATE`s `canonical_usage` inside the
+drop-to-create gap through a `db.exec` wrapper. Run here:
+
+```
+$ node scripts/telemetry-canonical-views-atomicity.test.mjs
+PASS canonical view recreate survives an interleaved concurrent CREATE
+```
+
+**On the red/green claim.** The commit message states the test is deterministically red pre-fix and
+green post-fix, shown both ways. This report **does not re-assert the red half**: re-deriving it would
+mean reverting a reviewed commit inside a report turn, which is exactly the mutation discipline the
+next turn applies to the two new (g) fixtures. The green half is what was executed here, and it is
+what is graded.
 
 ## 6. Item (d) — F-05: verification only
 
