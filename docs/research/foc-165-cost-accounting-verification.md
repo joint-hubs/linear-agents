@@ -168,7 +168,36 @@ script reads that variable") is met at the level of "no script *mentions* it", w
 
 ## 3. Item (a) — over-budget kill-switch in the standalone launchers
 
-TBD
+**Commit:** `8c8e385` — *feat(cost-guard): wire over-budget kill-switch into standalone launchers*.
+
+**What changed.** `scripts/cost-guard.mjs` already wrote `.state/over-budget.json` on a breach, but the
+marker was consulted by exactly one reader (`cost-report.mjs`). A marker nobody blocks on is a log
+line, not a kill-switch. Three things changed:
+
+- `bin/_lib.bat:17` runs `node %ROOT%\scripts\cost-guard.mjs check` before `claude` starts and blocks
+  on a non-zero exit. The supervisor frontman is excluded on purpose — it is the intervention channel,
+  and its children are already guarded by `assertWithinBudget` (§1.4).
+- `scripts/launch.mjs:285` adds `assertNoOverBudgetMarker()`, called at `:297` *before*
+  `spawnLauncher`, so a dashboard `POST /api/launch` gets the refusal as an error instead of starting a
+  process that will refuse itself.
+- `cost-guard.mjs` gains an explicit CLI bridge with a stated exit contract (`check` → 0/1,
+  `clear` → 0, `usage` → 2) because `.bat` files cannot import ESM, plus a `COST_GUARD_MARKER_PATH`
+  override so tests never touch the real marker. Default behaviour for importers is unchanged.
+
+**Evidence that it was necessary.** The defect is the gap between *writing* a marker and *anyone
+refusing on it*: before this commit the only consumer was the reporting path, so an over-budget run
+launched from `bin/*.bat` or from the dashboard proceeded. The marker's own comment
+(`cost-guard.mjs:14`–`:15`) had promised `rm .state/over-budget.json` as the override — a promise that
+only means something if something blocks.
+
+**The test.** `scripts/cost-guard.test.mjs`, 8 tests, run here: **8 passed, 0 failed**. The three that
+carry the change are the CLI exit contract, `clear` reopening the gate, and
+`spawnLauncher refuses before spawning anything when the marker exists` — the last one is the assertion
+that matters, since "refuses" and "refuses before spending money" are different claims.
+
+**Verified by reading, not executed:** the `.bat` path itself. This report claims the wiring exists at
+`bin/_lib.bat:17`; it does not claim a Windows shell was driven through an over-budget launch, and no
+such execution happened in this run.
 
 ## 4. Item (b) — pricing nebul-catalogued keys across scopes
 
