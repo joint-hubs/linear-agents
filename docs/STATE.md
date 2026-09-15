@@ -3,7 +3,63 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Current execution: 2026-09-14 — FOC-114 COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+## Current execution: 2026-09-16 — FOC-165 COMPLETE · fala FOC-102 domknięta lokalnie (close-out)
+
+- **FOC-165** (release-candidate) — run `2026-09-15-supervisor-foc-165`. Kandydat `d725788` na `foc-165-dev`
+  (35 commitów nad `f887fb9`). **Lokalnie, bez push i bez PR** — fast-forward `chore/foc-102-baseline`
+  `f887fb9 → d725788` (35 commitów, 8 plików; `bin/supervisor.bat` nietknięty — wciąż niezacommitowany).
+- **Pętla: 4 rundy dev↔review, fingerprinty wszystkie różne** — r1 `47f2…` (wczesne), r2 `be5858eb…` pass,
+  r3 `983abbca…` **fail** (5 pozostałych runtime-pinned stawek + threshold), r4 `a60c9444…` **pass**.
+  Runda 3 FAIL znalazła realną lukę: siedem derywacji z rundy 3 zamknęło czerwone asercje, ale pięć
+  tej samej klasy zostało jako literały — następny `price-check.mjs` sync mógł je zaczerwienić
+  mechanizmem identycznym jak `e3bec56`. Runda 4 derywowała wszystkie 5 + próg `272_000`/`271_999`
+  z `promptTokenThreshold.minPromptTokens`.
+- **REVIEW r4 = approve** (review-11, deepseek-v4.1-flash): 7 tez MET, zero blokujących. Dwa nity
+  (nieblokujące): pre-existing tolerancje `0.001`/`0.0001`; para testów async `telemetry-store.test.mjs:757,772`
+  nie liczona przez harness przed `process.exit` (poza deltą, kandydat na osobne issue). Werdykt nagrany
+  z AC-by-AC mappingiem (7/7).
+- **TEST r2 = PASS** (test-12): pełna suita **64/64 exit 0** (382137 ms) na `d725788`; oba pliki dawniej
+  czerwone (`supervisor-cost.test.mjs` 34/0, `telemetry-store.test.mjs` 55/0) green; rate-swap obu zakresów
+  (nebul + openrouter) → oba green; mutacje M9–M13 → exit 1. Pierwsza tura test-12 skończyła się
+  przedwcześnie (suite w tle → 38 crashów `STATUS_DLL_INIT_FAILED`); wznowiona foreground → czyste 64/64.
+- **Landing** — `supervisor-merge --run …foc-165 --child dev-7 --verify "npm ci && node scripts/test-all.mjs"`
+  (w tle): `accepted: true`, izolacja exit 0, combined exit 0, replay 10 commitów bez konfliktów,
+  `pathsOutsideDeclaration: []`, `findings: []`. Następnie `git merge --ff-only d725788` w głównym checkoucie.
+- **Rezidua FOC-165 (zapisane, nie file'owane — wind-down):** (1) para async `telemetry-store.test.mjs:757,772`
+  — awaria nie czerwieni suity; kandydat na osobne issue; (2) tolerancje `0.001`/`0.0001` pre-existing;
+  (3) kopia bazy telemetrii 538 MB w `.state/foc-165/` NIE ratowana (prywatna, ginie z worktree); records
+  i skrypty `*.mjs` zachowane; (4) F9 — `supervisor-cleanup.test.mjs` czerwone pod dziedziczonym env
+  (`LA_SUPERVISOR_CHILD`); po wyczyszczeniu 26/0.
+
+### Fala FOC-102 — podsumowanie (issue →_commity → kluczowa decyzja → reziduum)
+
+| Issue | Landing | Kluczowa decyzja | Reziduum |
+|---|---|---|---|
+| FOC-225 | `b009358`, PR #23 (merged) | paleta Fenix, walidator AA | — |
+| FOC-218 | `69402bd`, PR #24 (merged) | — | cleanup drzewa FOC-225/227 |
+| FOC-219 | `033288e`, PR #25 → main `967fc1a` | — | FU FOC-255/256/257 filed |
+| FOC-221 | `1eeccaa` (lokalnie, gałąź nie wylądowała) | cienki moduł task-coverage | — |
+| FOC-287+220+221 | integracja `cfacb0c` (lokalnie 2026-09-12) | 5 kolumn do `CANONICAL_TOOL_SQL` | — |
+| FOC-286 | main `3859c86` (merged) | return-from-test crash | FU FOC-294/295/296 filed |
+| FOC-284 | `c8e51e1`, **PR #26 open** | `returned-by:*` + routable return edges | PR #26 czeka na merge Mateusza; worktree `foc-284-*` zostawione |
+| FOC-285 | lokalnie `3c36f8d` | secret scanner + SAST w review | — |
+| FOC-288 | lokalnie `4b9e5f5` | wycofanie orch-ollama | — |
+| FOC-289 | lokalnie `cce2912` | end-of-run cleanup protocol | — |
+| FOC-114 | lokalnie `bec2965` | CodeGraph navigation benchmark + freshness guard (exit 3 UNKNOWN) | koszt strażnika ~2–3×; 3 nity r5 otwarte |
+| FOC-165 | lokalnie `d725788` (ten run) | derywacja stawek z runtime/committed row; sync-proof | para async :757,772; tolerancje; baza telemetrii nie ratowana |
+| FOC-102 | **epic — NIE domknięty** (po Mateuszu) | — | zamknięcie epiku po pushu linii fali + PR #26 |
+
+### Czeka na Mateusza (poza moim pełnomocnictwem — nieodwracalne na zewnątrz)
+1. **Push linii fali** — `chore/foc-102-baseline` (d725788, 35 commitów nad ostatnim pushowanym stanem)
+   → `origin` (lub PR do main). Nigdzie nie wypchnięte.
+2. **PR #26 (FOC-284)** — `foc-284-dev` → main, czeka na merge.
+3. **Worktree'e** `foc-284-{dev,review,test}` i `foc-286-{dev,review,test}` — zostawione (decyzja Mateusza);
+   do usunięcia po jego zgodzie. Worktree `foc-165-{dev,review,test}` — do sprzątania (niżej).
+4. **Zamknięcie epiku FOC-102** — po pushu linii fali; nie zamykam sam.
+
+---
+
+## 2026-09-14 — FOC-114 COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
 
 - **Run** `2026-09-14-supervisor-foc-114` (glm-5.3-flash; dzieci dev-1 / review-2…review-6 / test-7).
   Kandydat `d25e362` (`foc-114-dev`, 8 commitów nad bazą `5b69111`), po replayu `bec2965`; drzewo
