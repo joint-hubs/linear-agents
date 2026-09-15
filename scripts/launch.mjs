@@ -14,6 +14,8 @@ import { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { checkOverBudgetMarker } from './cost-guard.mjs';
+
 const __dir = dirname(fileURLToPath(import.meta.url));
 const PROMPTS_PATH = join(__dir, '..', 'config', 'prompts.json');
 
@@ -270,7 +272,29 @@ export function buildLaunchBat(squad, taskId, kickoff, rootPath, targetRepo) {
 const CONHOST_PATH = 'C:\\Windows\\System32\\conhost.exe';
 const _useConhost = existsSync(CONHOST_PATH);
 
+// Over-budget kill-switch (FOC-165): scripts/cost-guard.mjs writes
+// .state/over-budget.json when a cost report breaches COST_BUDGET_USD_PER_TASK,
+// and bin/_lib.bat refuses squad launches while it exists (`node
+// scripts/cost-guard.mjs check` before claude — bats cannot import ESM). This
+// is the earlier, ESM-side refusal at the dashboard gate: the POST /api/launch
+// caller gets the error instead of a spawned window that dies inside _lib.bat.
+// The Supervisor frontman is deliberately NOT covered (bin/supervisor.bat sets
+// SQUAD_SLUG=supervisor and _lib.bat skips the check for it): it is the
+// intervention channel (see SQUAD_ALLOWLIST above for the same reasoning), and
+// its children are already guarded by assertWithinBudget (supervisor-lib.mjs).
+export function assertNoOverBudgetMarker() {
+  const marker = checkOverBudgetMarker();
+  if (marker) {
+    throw new Error(
+      `OVER-BUDGET: launch refused — over-budget marker exists (task ${marker.task}, ` +
+      `spent $${Number(marker.spent).toFixed(2)} of $${Number(marker.budget).toFixed(2)}). ` +
+      'Clear it: node scripts/cost-guard.mjs clear',
+    );
+  }
+}
+
 export function spawnLauncher(wrapperPath, cwd, title) {
+  assertNoOverBudgetMarker();
   // `start ""` — empty title prevents `start` from misinterpreting the first
   // path token as a title. The real title is set inside the wrapper .bat.
   const cmd = _useConhost

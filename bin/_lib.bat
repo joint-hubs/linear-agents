@@ -7,6 +7,17 @@ REM repo root (absolute)
 pushd "%~dp0.." & set "ROOT=!CD!" & popd
 set "LA_ROOT=%ROOT%"
 
+REM --- Over-budget kill-switch (FOC-165) ---
+REM scripts/cost-guard.mjs writes .state/over-budget.json when a cost report
+REM breaches COST_BUDGET_USD_PER_TASK; while it exists no squad starts. Clear:
+REM   node scripts\cost-guard.mjs clear
+REM supervisor.bat is excluded: the frontman is the intervention channel and its
+REM children are already guarded by assertWithinBudget (scripts/supervisor-lib.mjs).
+if /i not "%SQUAD_SLUG%"=="supervisor" (
+    node "%ROOT%\scripts\cost-guard.mjs" check
+    if errorlevel 1 exit /b 1
+)
+
 REM window-level overrides beat .env for team/workspace switches
 REM (e.g. `set LINEAR_TEAM_KEY=JOI&& bin\plan.bat`; platform /api/launch relies on this too)
 set "_PRE_LINEAR_TEAM_KEY=%LINEAR_TEAM_KEY%"

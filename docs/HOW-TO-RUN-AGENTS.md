@@ -46,6 +46,13 @@ Wszystkie naraz: `bin\all.bat` (otwiera 5 okien: cadence, plan, dev, review, tes
 klucz OR). Subskrypcja Anthropic (Opus/Sonnet natywnie) → ustaw `NATIVE=1` przed
 launcherem: `set NATIVE=1 && bin\plan.bat`.
 
+**Kill-switch budżetu:** gdy raport kosztów przekroczy `COST_BUDGET_USD_PER_TASK`,
+`scripts/cost-guard.mjs` zapisuje `.state/over-budget.json` i każdy launcher
+squadu (`bin\*.bat`, dashboard) odmówi startu z komunikatem `OVER-BUDGET` na
+stderr. Zdjęcie blokady po obsłużeniu przekroczenia: `node scripts\cost-guard.mjs
+clear` (albo ręcznie usuń plik). Supervisor frontman (`bin\supervisor.bat`) nie
+podlega blokadzie — dzieci pilnuje `assertWithinBudget`.
+
 ---
 
 ## 3. Który plik `.bat` = który agent
