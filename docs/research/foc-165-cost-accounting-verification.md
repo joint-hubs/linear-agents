@@ -18,10 +18,17 @@ committed row nor the live catalogue, so it was unsatisfiable as written; round 
 authorised dated price-sync (F1, §1.8), which committed the 2026-09-15 catalogue figures as a new
 price set across all 8 drifted models. **Items (d) and (f) are decided** — (d) a written
 defer with the corpus measured (§6), (f) explicit unsupported-above-threshold handling with boundary
-fixtures (§8). **The full suite was run this turn** (`npm ci && node scripts/test-all.mjs`): 62/63
+fixtures (§8). **The full suite was run this turn** (`npm ci && node scripts/test-all.mjs`): at head `39147c5`, 62/63
 files pass, exit 1 in both runs — the single red in each run is a hermetic `supervisor-*` test failing
 on its environment or timing budget, not on the candidate, and each passes solo (F9, §14.6);
-`telemetry-concurrency.test.mjs` (item (c)) passed in both runs.
+`telemetry-concurrency.test.mjs` (item (c)) passed in both runs. That story is true only of
+`39147c5`, and TEST proved it so at the next head: at `291c7cb` TEST's run was **62/64, exit 1, with
+two reds that were not environmental** — `supervisor-cost.test.mjs` and `telemetry-store.test.mjs`,
+whose seven rate-pinned assertions the round-2 price sync (`e3bec56`) had silently broken (TEST's
+report names them: supervisor-cost `:120`/`:136`/`:145`/`:547`, telemetry-store `:222`/`:252`/`:302`).
+TEST caught what round 2's targeted gates could not. Round 3's fix derives every affected expected
+value from the runtime's own price table at test time — with formula-mutation and rate-swap evidence
+(§14.3) — instead of re-pinning literals to today's rates, which would only break on the next sync.
 
 Four corrections to the material this report was written from, all found by checking rather than
 trusting, all recorded in place rather than smoothed over: the divergence is **58.8×**, not the 169.9×
@@ -131,8 +138,11 @@ EXIT=1
 It reported **8** drifted models (**21 field diffs** at tolerance 0.02) and **4** unlisted models, and
 exited non-zero — both halves of AC7. (An earlier draft of this section said "7 drifting prices"; the
 checker's own JSON names 8 — corrected 2026-09-15, round 2.)
-The drift list is in §1.8 and §13; note that a model absent from the live catalogue is reported as
-unlisted, not as an error, so pinned dated snapshots do not produce false failures.
+The drift list is in §1.8 and §13; the four unlisted are `anthropic/claude-4.8-opus-20260528`,
+`anthropic/claude-4.5-haiku-20251001`, `qwen/qwen3.8-max`, `stealth/ox-alpha` — named in the run's
+own JSON output (§1.8 carries what the sync did about them). Note that a model absent from the live
+catalogue is reported as unlisted, not as an error, so pinned dated snapshots do not produce false
+failures.
 
 ### 1.8 DoD — the committed price table
 
@@ -161,12 +171,17 @@ network, per the run's constraints.
 
 **Resolution (round 2, 2026-09-15, gate Q2).** One dated price-sync was authorised and executed:
 `node scripts/price-check.mjs --json` at **2026-09-15T17:23:19Z** — the round's single authorised
-catalogue call (full output kept at `.state/price-check-2026-09-15.json`, exit 1: 8 drifted /
-21 field diffs / 4 unlisted). Graded against that dated catalogue, the DoD's target `0.87 / 1.74 /
+catalogue call (exit 1: 8 drifted / 21 field diffs / 4 unlisted; the applied figures are commit
+`e3bec56`'s diff — the run's raw output lives in gitignored `.state/` and does not travel with the
+branch). Graded against that dated catalogue, the DoD's target `0.87 / 1.74 /
 0.0725` **was stale** — it matched neither the committed row nor the live catalogue (`1.6 / 3.2 /
 0.135`), so the item was **unsatisfiable as written**. The sync applied the live figures to every
 drifted model as a new price set (§4's policy: existing `cost_facts` rows keep their snapshot-time
-`price_set_id`; no stored cost changed). `stealth/ox-alpha` stays `0 / 0 / 0` — unlisted, a
+`price_set_id`; no stored cost changed). The eight drifted keys, for the record (§13's F1/F8 carry
+the two with findings): `z-ai/glm-5.2`, `z-ai/glm-5.3-flash`, `deepseek/deepseek-v4-flash`,
+`deepseek/deepseek-v4-pro`, `deepseek/deepseek-v4-pro-0813`, `moonshotai/kimi-k2.7-code`,
+`moonshotai/kimi-k3`, `qwen/qwen3.8-27b` — full field diffs in `e3bec56`.
+`stealth/ox-alpha` stays `0 / 0 / 0` — unlisted, a
 pinned-snapshot choice, not "fixed". `anthropic/claude-fable-5` was **not** added: the checker
 compares committed rows only and does not emit the full catalogue, so whether the catalogue lists it
 could not be established within the single authorised call — it stays unknown-priced, **10**
@@ -670,6 +685,12 @@ run that reached a `result` event (this child, `dev-3`, has none yet).
 | dev-2 (4 token-bearing turns + 2 zero-token turns) | **$0.172285935** | **$8.709432** | **50.6×** |
 | both children (11 result events) | **$0.519996026** | **$30.558817** | **58.8×** |
 
+*Rate date (round 3):* this table's computed column was priced at the round-1 committed price set.
+The dated sync (Q2, `e3bec56`) later moved the routed model's row — `z-ai/glm-5.3-flash`
+`0.071 / 0.24 / 0.015` → `0.075 / 0.25 / 0.015` (F8) — which would lift the computed column ~4–6%
+and pull each ratio down by the same few percent. The reported column is untouched and the headline's
+order of magnitude stands.
+
 **The headline: across this run's two children the stream reported $30.56 for work that prices at
 $0.52 — the fabricated figure is 58.8× the measured one.** Per turn the multiple ranges from 50.3× to
 78.9×, so it is not a constant that could be calibrated away; it is a figure that is simply unrelated
@@ -741,7 +762,8 @@ A note on what is **not** claimed here: nothing in this report says the stream f
 stream figure. `total_cost_usd` is Claude Code's own estimate, computed against a price list for a
 model it does not recognise. What the measurements show is that it does not describe **this** repo's
 spend, and that a cost series built on it was off by a factor between 50 and 79 — at the committed
-rates, which are themselves ~2× stale (F8).
+rates. F8's round-1 premise that those rates were ~2× stale did not reproduce at sync time: the
+2026-09-15 catalogue sits ~4–6% above them (F8's resolution, §13).
 
 ## 11. Pricing coverage
 
@@ -1102,6 +1124,13 @@ supervised child is exactly the leak §14.6 shows); (ii) read the semaphore test
 a supervised full-suite run reports one environmental red per run, and the honest way to read it is
 §14.6: which file, solo re-run, clean-env re-run.
 
+**Round 3 correction.** At `291c7cb` TEST's suite run was 62/64 with two reds that were **not**
+environmental and not this finding's class: `supervisor-cost.test.mjs` and `telemetry-store.test.mjs`,
+broken by the round-2 price sync moving the rates under seven rate-pinned assertions. TEST caught
+them; round 3 derived the expected values from the runtime snapshot (§14.3), and both files pass solo
+(34/0 and 55/0, exit 0). The two environmental reds documented above remain as described — but
+"the red is environmental" is now a claim to check per red, not a standing assumption.
+
 ## 14. Commands run
 
 Every command below was run in this worktree
@@ -1112,8 +1141,8 @@ Results are the observed ones; a command whose output is red is followed by what
 
 | command | result |
 |---|---|
-| `node scripts/supervisor-cost.test.mjs` | **31 passed, 0 failed** |
-| `node scripts/telemetry-store.test.mjs` | **51 passed, 0 failed** |
+| `node scripts/supervisor-cost.test.mjs` | **31 passed, 0 failed**; round 3 at head `8841688` (derived expected values, §14.3): **34 passed, 0 failed, exit 0** — the round-1 figure predates the item-(f) threshold tests, which added 3 tests to this file |
+| `node scripts/telemetry-store.test.mjs` | **51 passed, 0 failed**; round 3 at head `8841688` (derived expected values, §14.3): **55 passed, 0 failed, exit 0** — the round-1 figure predates the item-(f) threshold tests, which added 4 tests to this file |
 | `node scripts/cost-guard.test.mjs` | **8 passed, 0 failed** |
 | `node scripts/publish-linear-comment.test.mjs` | **7 passed, 0 failed** |
 | `node scripts/telemetry-canonical-views-atomicity.test.mjs` | **PASS** |
@@ -1148,12 +1177,34 @@ Each was applied to a clean tree, run, and reverted with `git checkout -- script
 | `sawTokens` guard read off top-level `usage` | `29 passed, 2 FAILED` |
 | zero-token result answering `null` instead of `0` | `27 passed, 4 FAILED` |
 
+**Round 3 (derivation, head `8841688`) — mutations ran in a scratch `git archive HEAD | tar -x` copy,
+never the candidate tree.** Eight formula breaks, one per assertion changed this round: each red at
+exit 1, each file restored from the archive and green again (supervisor-cost 34/0, telemetry-store
+55/0).
+
+| file:line | formula broken | red output → restored |
+|---|---|---|
+| `supervisor-cost.test.mjs:136` | expected sum drops the `output` term | `expected ~1.4 … got 5.8`, exit 1 → 34/0 |
+| `supervisor-cost.test.mjs:155` | expected sum drops the second model's term | `expected ~1.4 … got 1.7`, exit 1 → 34/0 |
+| `supervisor-cost.test.mjs:166` | compared against `r.output` instead of `r.input` | FAIL, exit 1 → 34/0 |
+| `supervisor-cost.test.mjs:574` | per-model sum drops the output-token term | `got 0.00028745 (expected ~0.0002157)`, exit 1 → 34/0 |
+| `telemetry-store.test.mjs:214` | expectedSavings drops the `cacheRead` term | `0.068432 (expected ~0.08554)`, exit 1 → 55/0 |
+| `telemetry-store.test.mjs:265` | flat view compared against a different committed row | `cacheRead 0.14 vs committed 0.26`, exit 1 → 55/0 |
+| `telemetry-store.test.mjs:328` | cacheWrite cost compared against the `input` rate | FAIL, exit 1 → 55/0 |
+| `telemetry-store.test.mjs:335` | fallback cost compared against the `output` rate | FAIL, exit 1 → 55/0 |
+
+**The sync-proof (the point of the round):** in the same scratch copy, `z-ai/glm-5.2`'s `input` was
+changed `1.4 → 2.0` in `config/models.json` and both files were re-run — **both green** (34/0, 55/0,
+exit 0). The tests now track the table the runtime prices through, so the next dated sync cannot
+break them the way `e3bec56` broke the rate-pinned versions; a break now means the *formula* is
+wrong, which is what these eight mutations demonstrate the assertions can still catch.
+
 ### 14.4 Network-using, deliberately
 
 | command | result |
 |---|---|
 | `node scripts/price-check.mjs --json` | **exit 1**; the checker's JSON names **8 drifted models / 21 field diffs**, 4 unlisted models — §1.7, §1.8. (The round-1 draft printed "7 drifting prices"; that was a transcription error — the same-day re-run by REVIEW reproduced 8/21.) |
-| round 2, **2026-09-15T17:23:19Z** — the gate's single authorised catalogue call (Q2) | **exit 1**; same shape: 8 drifted / 21 field diffs / 4 unlisted; full output kept at `.state/price-check-2026-09-15.json`; figures applied as the new price set (§1.8, F1/F8) |
+| round 2, **2026-09-15T17:23:19Z** — the gate's single authorised catalogue call (Q2) | **exit 1**; same shape: 8 drifted / 21 field diffs / 4 unlisted; figures applied as the new price set in commit `e3bec56` (§1.8, F1/F8) — the raw run output lives in gitignored `.state/` and does not travel with the branch |
 
 This is the only command in either round that touched the network. It is AC7's own acceptance test
 (`scripts/price-check.mjs:5`–`:7` documents it as network-using and deliberately outside
@@ -1179,9 +1230,15 @@ unrecorded. The two same-day catalogue readings for `z-ai/glm-5.3-flash` disagre
   push/PR/merge and no other worktree touched.)*
 - **No Windows shell was driven through an over-budget launch** (§3), and the `--clear-returned-by-review`
   removal was never executed against Linear (§7, F4).
+- **Two round-2 REVIEW findings were deliberately not actioned**: `scripts/check.mjs:216` (a
+  duplicated `5.` section prefix in the checker's report grouping) and `config/models.json:122` (the
+  `_sync` note names the counts but not the superseded figures). Both files are outside this round's
+  authorised paths — `scripts/supervisor-cost.test.mjs`, `scripts/telemetry-store.test.mjs`,
+  `docs/research/foc-165-*` — and were left untouched on purpose; they stay open for a round whose
+  scope includes them.
 - **The live telemetry store was never opened by this child** (§12).
 
-### 14.6 Full suite — run this turn, at head `39147c5`
+### 14.6 Full suite — round 1 at head `39147c5`; round 3 at head `8841688`
 
 Two full runs, both from the worktree root; logs kept at
 `.state/foc-165/test-all-run.log` (run 1) and `.state/foc-165/test-all-clean-env.log` (run 2).
@@ -1214,3 +1271,14 @@ are the ones §14.1 and §14.4 list — `check.test.mjs` (2/2, mutation included
 0 violations), `config-drift.test.mjs` (26/26, re-run after the sync) and `lint.mjs` (401 files,
 exit 0). The telemetry and `supervisor-*` surface round 1 exercised is untouched by those diffs, and
 the round-1 reds (F9) are environmental, so re-litigating them was not part of this round.
+
+**Round 3, head `8841688`.** TEST's own full-suite run at `291c7cb` (round-2 tip) was **62/64 passed,
+exit 1, two reds — and they were not environmental**: `supervisor-cost.test.mjs` and
+`telemetry-store.test.mjs` (seven assertions pinned to pre-sync rates; the sync `e3bec56` moved the
+rates under them). TEST caught what round 2's targeted gates could not. The fix (commits `d1bd1ea`,
+`8841688`) derives every affected expected value from `pricingSnapshot()` — the same table the
+runtime prices through — with non-vacuity preconditions, tolerances unchanged, no test weakened or
+removed; the formula-mutation and rate-swap evidence is §14.3. Both files solo, clean env:
+**34 passed, 0 failed** and **55 passed, 0 failed**, exit 0. The full suite itself was not re-run by
+this child — TEST owns that gate; what round 3 claims is the two files' solo green and the evidence
+that a rate change no longer breaks them.
