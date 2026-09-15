@@ -396,7 +396,81 @@ is **inconclusive — pending, by design**.
 
 ## 9. Item (g) — zero-token results, and the refusal that names the unpriced child
 
-TBD
+**Commits:** `b055340` (the fix, turn 1) and `6edebf1` (the two fixture additions, this turn).
+
+### 9.1 What changed
+
+`scripts/supervisor-lib.mjs`, `costFromResult`:
+
+- **The empty-`modelUsage` trap.** `byModel` used to be assigned whenever `modelUsage` was *an object*,
+  and the result was nulled whenever it had no keys
+  (`computed: unpriced.length || !Object.keys(byModel).length ? null : computed`). A real result event
+  carries `modelUsage: {}` on a zero-token turn, so the child's whole `costUsd` became `null` — a known
+  `$0.xx` spend turned UNKNOWN — and `assertWithinBudget` then refused the next spawn. The fallback is
+  now reached for the empty object (`:164`–`:169`).
+- **The $0-versus-unknown rule.** `sawTokens` is set inside the per-model loop (`:179`) and drives the
+  answer: no tokens anywhere → `computed: 0` (a known free turn, even with no model on record);
+  tokens present but unpriceable → `computed: null` (`:190`–`:199`).
+- **The refusal names the holder.** `unknownHolders` (`:264`) replaced "no price row for dev" — a
+  *squad* where a *model* was the reason — with `child <id> (<squad>): no price row for <model>`, or,
+  when no model was recorded at all, `cost not priced and no model recorded to price against`. The
+  matching `hint` differs for the two cases (`:274`–`:277`).
+
+### 9.2 The two fixtures added this turn — and what they are honestly worth
+
+Both were added to `scripts/fixtures/foc-165-result-events.json` and pinned in
+`scripts/supervisor-cost.test.mjs`, in `6edebf1`. They were requested with the phrase *"From this run's
+own tee"*, and the tees **are** readable — the run's child streams live at
+`.state/supervisor/2026-09-15-supervisor-foc-165/children/dev-{1,2,3}.jsonl` in the main checkout. So
+this report can and does check the claim instead of repeating it. It found one exact match and one
+non-match:
+
+| | claimed shape | what this run's tees actually contain |
+|---|---|---|
+| **(ii)** zero top-level usage, real per-model tokens | "3 163 cache-read tokens" | **`dev-2.jsonl` result #1** is exactly this shape — `usage` all zeros, `modelUsage` `{z-ai/glm-5.3-flash}` with **2876 input, 287 output, 0 cache-read**. It prices to **$0.000273076**, the figure quoted for it, at 2876 × 0.071/M + 287 × 0.24/M. Pinned. |
+| **(i)** zero tokens, one all-zero `modelUsage` key | "`muKeys=1`, not the `{}` already covered" | **No such event exists in any of the three tees.** All 11 `modelUsage` occurrences across `dev-1.jsonl` and `dev-2.jsonl` are either `{}` or carry real tokens; `dev-3.jsonl` has no `result` event yet (this child is still running). |
+
+So (ii) is real and its number is reproduced exactly; (i) is a **constructed shape**. It is a
+legitimate thing to pin — an all-zero single-key `modelUsage` is what a turn that *did* record a model
+looks like when it spent nothing, and nothing covered it — but the report will not call it a tee
+capture, because it is not one. The correction is recorded here rather than in a commit message because
+the fixture file cannot say it without asserting something untrue.
+
+**Neither new test is a regression proof, and the mutation run says so plainly.** Reverting
+`supervisor-lib.mjs` wholesale to `b055340^` reddens **5** tests — the original (g) suite — and
+**neither** of the two new ones, because pre-(g) already priced a non-empty `modelUsage` fine. These
+two pin *near-misses of the fix*, so the meaningful mutations are targeted:
+
+| mutation applied to a clean tree | observed |
+|---|---|
+| `supervisor-lib.mjs` reverted to `b055340^` | `26 passed, 5 FAILED` — none of the new two |
+| `sawTokens` guard read off top-level `usage` instead of the per-model entries | `29 passed, 2 FAILED` — incl. **`FAIL zero top-level usage with real per-model tokens prices the tokens, not $0`**, plus the pre-existing `FAIL both spellings of the usage fields are read` |
+| zero-token result answering `null` instead of the known `0` | `27 passed, 4 FAILED` — incl. **`FAIL an all-zero single-key modelUsage is the known $0, not unknown`** and the three original zero-token tests |
+
+Each mutation was applied to a clean tree and reverted immediately; `git status --porcelain` after the
+last one shows only the two files that were then committed.
+
+### 9.3 The near-miss is real, and it is live
+
+The `spentTokens` helper in the aggregate test read the **top-level** `usage`. Adding fixture (ii)
+broke it — `costUsd` included the $0.000273076 turn while `expected` excluded it — which is the same
+mistake in the test that the production code must not make. It is replaced by `anyTokens`, which
+prefers the per-model entries and falls back to `usage` only when there are none.
+
+Worth stating because it is easy to lose: this is not a theoretical trap. `dev-2.jsonl` result #1 is a
+real event from this run where the top-level `usage` is all zeros and the real cost is $0.000273076.
+Reading the guard one level too high discards it silently, and the child's total is quietly short.
+
+### 9.4 What the run's own supervisor-side context said, checked
+
+The turn brief supplied — as context, not as a task — that the (g) change is *surgical*: old and new
+`costFromResult` agree to the digit on every token-bearing event of this run
+(`0.000273076`, `0.086135159`, `0.082913526`, `0.002964174`) and differ only on the zero-token `{}`
+event (`null` → `0`). **Independently confirmed here** by pricing `dev-2.jsonl` through the watcher's
+own path (§10.2): those four figures are `dev-2` results #1–#4, they sum to **$0.172285935**, and that
+is the figure the brief quotes as the run's total — two independent derivations agreeing to nine
+decimals. The `null` → `0` difference is `dev-2` results #5 and #6, the two `modelUsage: {}` events
+that each nulled the child.
 
 ## 10. The divergence: computed vs reported
 
