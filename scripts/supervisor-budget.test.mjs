@@ -207,6 +207,10 @@ test("an unpriced child makes the stage UNKNOWN and the gate refuses", () => {
   const out = parse(runSpawn(runId, repo, ["--child", "dev-3"]), fail);
   assert.equal(out.ok, false);
   assert.match(out.error, /UNKNOWN/);
+  // FOC-165 (g): the refusal must say WHICH child holds the unknown cost and
+  // why. It used to print the SQUAD here — "no price row for dev" — pointing a
+  // human at config/models.json for a cause that had nothing to do with pricing.
+  assert.match(out.error, /child dev-unpriced \(dev\): no price row for some\/unlisted-model/);
 });
 
 test("an authorisation without a reason is refused", () => {

@@ -22,7 +22,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -382,6 +382,83 @@ test("metadata keys are not mistaken for price rows", () => {
   const { drifted, unlisted } = comparePrices({ _doc: "text", "a/b": { input: 1, output: 2 } }, {});
   assert.deepEqual(unlisted, ["a/b"]);
   assert.deepEqual(drifted, []);
+});
+
+// ── 6. the four real result shapes of FOC-165 (g) ─────────────────────────────
+console.log("\ncztery kształty result (FOC-165 g)");
+
+// Anonymised from a real supervised child: two turns with tokens, two with
+// usage all-zeros and modelUsage {}. Each zero-token event used to null the
+// whole child's costUsd through addCost — a known $0.xx spend became UNKNOWN
+// and the budget gates refused the next spawn.
+const FIXTURE = JSON.parse(
+  readFileSync(join(ROOT, "scripts", "fixtures", "foc-165-result-events.json"), "utf8"),
+);
+const byName = Object.fromEntries(FIXTURE.events.map((e) => [e.name, e]));
+const INIT_MODEL = Object.keys(byName["success-with-tokens"].modelUsage)[0];
+
+const spentTokens = (e) =>
+  e.usage.input_tokens + e.usage.output_tokens + e.usage.cache_read_input_tokens + e.usage.cache_creation_input_tokens;
+
+test("a zero-token result prices to the known $0, not unknown", () => {
+  for (const name of ["success-zero-tokens", "error-zero-tokens"]) {
+    const out = costFromResult(byName[name], INIT_MODEL, priceOne);
+    assert.equal(out.computed, 0, `${name} priced ${out.computed}, expected the known $0`);
+    assert.deepEqual(out.unpriced, []);
+  }
+});
+
+test("zero tokens are $0 even with no model on record at all", () => {
+  const out = costFromResult(byName["success-zero-tokens"], null, priceOne);
+  assert.equal(out.computed, 0, "nothing spent needs no rate table");
+});
+
+test("empty modelUsage with real tokens falls back to the system/init model", () => {
+  // Sibling of the real shapes: modelUsage {} but usage non-zero — a turn that
+  // DID spend. The truthy-but-empty object used to skip the fallback and price
+  // the turn as unknown.
+  const withTokens = byName["success-with-tokens"];
+  const out = costFromResult({ ...withTokens, modelUsage: {} }, INIT_MODEL, priceOne);
+  const direct = costFromResult(withTokens, null, priceOne);
+  assert.ok(out.computed > 0, `expected a real price, got ${out.computed}`);
+  assert.equal(out.computed, direct.computed, "same tokens, same price, whatever shape carried them");
+});
+
+test("tokens present and unpriceable stay null — unknown is not folded into $0", () => {
+  const modelUsage = byName["success-with-tokens"].modelUsage;
+  const out = costFromResult(
+    { ...byName["success-with-tokens"], modelUsage: { "acme/nobody-priced-this": modelUsage[INIT_MODEL] } },
+    null,
+    priceOne,
+  );
+  assert.equal(out.computed, null);
+  assert.deepEqual(out.unpriced, ["acme/nobody-priced-this"]);
+});
+
+test("a run of such turns leaves the child total unchanged, not nulled", () => {
+  // The watcher's exact loop (supervisor-watch.mjs): addCost over each result.
+  let costUsd = 0;
+  const unpricedModels = [];
+  for (const event of FIXTURE.events) {
+    const cost = costFromResult(event, INIT_MODEL, priceOne);
+    costUsd = addCost(costUsd, cost.computed);
+    for (const m of cost.unpriced) if (!unpricedModels.includes(m)) unpricedModels.push(m);
+  }
+  const expected = FIXTURE.events
+    .filter((e) => spentTokens(e) > 0)
+    .reduce((sum, e) => sum + costFromResult(e, INIT_MODEL, priceOne).computed, 0);
+  assert.ok(costUsd > 0, "the priced turns survive the zero-token ones");
+  assert.equal(costUsd, expected, "zero-token turns add nothing and null nothing");
+  assert.deepEqual(unpricedModels, []);
+});
+
+test("the cap refusal names the child holding the unknown cost", () => {
+  const runId = fixtureRun({ "dev-1": child({ costUsd: null, unpricedModels: ["acme/unknown"] }) });
+  const r = spawnCli(runId, { LA_SUPERVISOR_MAX_COST_USD: "5" });
+  assert.equal(r.status, 1);
+  const err = parse(r).error;
+  assert.match(err, /child dev-1 \(dev\): no price row for acme\/unknown/);
+  assert.doesNotMatch(err, /no price row for dev\b/, "a squad is not a price row");
 });
 
 // ── summary ───────────────────────────────────────────────────────────────────

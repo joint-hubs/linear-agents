@@ -158,8 +158,11 @@ export function costFromResult(event, fallbackModel, priceOne) {
   // A turn can touch more than one model (the main one plus the small/fast one),
   // and they are priced differently. modelUsage is the only place that split is
   // visible; `usage` is already summed and would price the whole turn at one rate.
+  // An EMPTY modelUsage is not a split: real result events carry `modelUsage: {}`
+  // (FOC-165 (g)), and reading any object as "the split is here" made the
+  // fallback below unreachable for exactly the turns that needed it.
   const byModel =
-    event.modelUsage && typeof event.modelUsage === "object"
+    event.modelUsage && typeof event.modelUsage === "object" && Object.keys(event.modelUsage).length
       ? event.modelUsage
       : fallbackModel
         ? { [fallbackModel]: event.usage ?? {} }
@@ -167,13 +170,35 @@ export function costFromResult(event, fallbackModel, priceOne) {
 
   let computed = 0;
   const unpriced = [];
+  let sawTokens = false;
   for (const [model, usage] of Object.entries(byModel)) {
-    const cost = priceOne(normaliseUsage(usage), model);
+    const norm = normaliseUsage(usage);
+    if (!norm.inputTokens && !norm.outputTokens && !norm.cacheReadTokens && !norm.cacheCreationTokens) {
+      continue; // zero tokens cost $0 whatever the rate table says — nothing to price
+    }
+    sawTokens = true;
+    const cost = priceOne(norm, model);
     if (cost === null) unpriced.push(model);
     else computed += cost;
   }
 
-  return { computed: unpriced.length || !Object.keys(byModel).length ? null : computed, reported, unpriced };
+  // $0 and "unknown" are different answers and must not blur (FOC-165 (g)). A
+  // zero-token result — real shape: usage all zeros, modelUsage {} — is a known
+  // free turn even when no model is on record to price it against. Tokens that
+  // exist but that no recorded model accounts for stay null: only tokens nobody
+  // could price make a turn unknown, never tokens that were not spent.
+  if (!sawTokens) {
+    const u = event.usage ?? {};
+    const eventTokens =
+      (u.inputTokens ?? u.input_tokens ?? 0) +
+      (u.outputTokens ?? u.output_tokens ?? 0) +
+      (u.cacheReadInputTokens ?? u.cache_read_input_tokens ?? 0) +
+      (u.cacheCreationInputTokens ?? u.cache_creation_input_tokens ?? 0);
+    if (!eventTokens) return { computed: 0, reported, unpriced: [] };
+    return { computed: null, reported, unpriced: [] };
+  }
+
+  return { computed: unpriced.length ? null : computed, reported, unpriced };
 }
 
 // Add two costs where `null` means "unknown". Unknown + anything is unknown:
@@ -196,12 +221,13 @@ export function addCost(a, b) {
 export function budgetStatus(runId, registry = readRegistry(runId)) {
   const raw = process.env.LA_SUPERVISOR_MAX_COST_USD;
   const cap = raw === undefined || raw === "" ? null : Number(raw);
-  const children = Object.values(registry.children || {});
+  const children = Object.entries(registry.children || {});
 
   let spent = 0;
   let anyUnknown = false;
   const unpriced = [];
-  for (const child of children) {
+  const unknownChildren = [];
+  for (const [id, child] of children) {
     for (const m of child.unpricedModels ?? []) if (!unpriced.includes(m)) unpriced.push(m);
     const cost = child.costUsd === undefined ? 0 : child.costUsd;
     // Explicit, not propagated through addCost. That helper is asymmetric so a
@@ -209,8 +235,12 @@ export function budgetStatus(runId, registry = readRegistry(runId)) {
     // loop order-dependent: an unpriced child followed by a priced one reported
     // a total that looked known, under the one setting whose whole purpose is
     // to refuse when it is not. Found by spendByStage's test, FOC-162.
-    if (cost === null) anyUnknown = true;
-    else spent += cost;
+    if (cost === null) {
+      anyUnknown = true;
+      // The refusal messages name these, so a human sees WHICH child holds an
+      // unknown cost and why — not "no price row for dev" (a squad, not a model).
+      unknownChildren.push({ id: child.childId ?? id, squad: child.squad ?? null, unpricedModels: child.unpricedModels ?? [] });
+    } else spent += cost;
   }
   if (anyUnknown) spent = null;
 
@@ -219,12 +249,32 @@ export function budgetStatus(runId, registry = readRegistry(runId)) {
     cap: capValid ? cap : null,
     capInvalid: cap !== null && !capValid ? raw : null,
     spent,
-    reported: children.reduce((sum, c) => sum + (c.costUsdReported || 0), 0),
+    reported: children.reduce((sum, [, c]) => sum + (c.costUsdReported || 0), 0),
     unpricedModels: unpriced,
+    unknownChildren,
     evaluable: spent !== null,
     exceeded: capValid && spent !== null && spent >= cap,
   };
 }
+
+// The "who holds an unknown cost and why" clause both budget refusals print. A
+// refusal a human cannot act on is part of the defect it reports (FOC-165 (g)):
+// "no price row for dev" named a SQUAD where a model — or the absence of one —
+// was the actual reason.
+function unknownHolders(unknownChildren = []) {
+  return unknownChildren
+    .map((c) =>
+      c.unpricedModels?.length
+        ? `child ${c.id} (${c.squad}): no price row for ${c.unpricedModels.join(", ")}`
+        : `child ${c.id} (${c.squad}): cost not priced and no model recorded to price against`,
+    )
+    .join("; ");
+}
+
+const unknownHint = (unknownChildren = []) =>
+  unknownChildren.some((c) => c.unpricedModels?.length)
+    ? "add the model to pricing.openrouter in config/models.json"
+    : "inspect the child tee — the result carried tokens that no recorded model accounts for";
 
 /**
  * The turn-boundary gate. Called by spawn and by followup — the two places a new
@@ -249,9 +299,8 @@ export function assertWithinBudget(runId, fail = failJson) {
   if (!budget.evaluable) {
     return fail(
       `LA_SUPERVISOR_MAX_COST_USD is set to ${budget.cap} but spend so far is UNKNOWN — ` +
-        `no price row for ${budget.unpricedModels.join(", ") || "an unrecorded model"}. ` +
-        `A cap that cannot be evaluated is not a cap.`,
-      { budget, hint: "add the model to pricing.openrouter in config/models.json" },
+        `${unknownHolders(budget.unknownChildren)}. A cap that cannot be evaluated is not a cap.`,
+      { budget, hint: unknownHint(budget.unknownChildren) },
     );
   }
   if (budget.exceeded) {
@@ -489,13 +538,16 @@ export function spendByStage(registry, graph) {
   const unknownStage = new Set();
   const unknown = [];
 
-  for (const child of Object.values(registry?.children ?? {})) {
+  const unknownChildren = [];
+  for (const [id, child] of Object.entries(registry?.children ?? {})) {
     const stage = stageForSquad(child.squad, graph);
     if (!stage) continue;
     const cost = child.costUsd === undefined ? 0 : child.costUsd;
     if (cost === null) {
       unknownStage.add(stage);
       if (!unknown.includes(child.squad)) unknown.push(child.squad);
+      // Named in the stage refusal: WHICH child, and which model needs a price.
+      unknownChildren.push({ id: child.childId ?? id, squad: child.squad, unpricedModels: child.unpricedModels ?? [] });
       continue;
     }
     totals[stage] = (totals[stage] ?? 0) + cost;
@@ -511,7 +563,7 @@ export function spendByStage(registry, graph) {
   for (const [stage, sum] of Object.entries(totals)) stages[stage] = unknownStage.has(stage) ? null : sum;
   for (const stage of unknownStage) if (!(stage in stages)) stages[stage] = null;
 
-  return { stages, unknownStages: unknown };
+  return { stages, unknownStages: unknown, unknownChildren };
 }
 
 /**
@@ -534,7 +586,7 @@ export function stageBudgetStatus(runId, { graph, registry = readRegistry(runId)
     throw new Error(`${path} is not readable JSON: ${err.message}`);
   }
 
-  const { stages: spent, unknownStages } = spendByStage(registry, graph);
+  const { stages: spent, unknownStages, unknownChildren } = spendByStage(registry, graph);
   const stages = {};
   let reserveDrawn = 0;
 
@@ -565,6 +617,7 @@ export function stageBudgetStatus(runId, { graph, registry = readRegistry(runId)
     reserveRemaining,
     reserveExhausted: reserveRemaining <= 0,
     unknownStages,
+    unknownChildren,
     evaluable: unknownStages.length === 0,
   };
 }
@@ -636,10 +689,11 @@ export function assertStageBudget(runId, squad, { graph, fail = failJson } = {})
   if (!s) return null;
 
   if (s.spent === null) {
+    const holders = (budget.unknownChildren ?? []).filter((c) => stageForSquad(c.squad, graph) === stage);
     return fail(
-      `stage "${stage}" spend is UNKNOWN — no price row for ${budget.unknownStages.join(", ")}. ` +
+      `stage "${stage}" spend is UNKNOWN — ${unknownHolders(holders) || "no child in this stage has a priceable cost"}. ` +
         `A budget that cannot be evaluated is not a budget.`,
-      { budget, hint: "add the model to pricing.openrouter in config/models.json" },
+      { budget, hint: unknownHint(holders) },
     );
   }
 

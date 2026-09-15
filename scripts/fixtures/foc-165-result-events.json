@@ -1,0 +1,37 @@
+{
+  "source": "FOC-165 (g) — the four result events of one real supervised child, anonymised. Ids, timestamps and session ids stripped; token counts and modelUsage shapes are what the tests price. Two events carry tokens and a populated modelUsage; two carry usage all-zeros with modelUsage {} — the shape that used to null the whole child's costUsd.",
+  "events": [
+    {
+      "name": "success-with-tokens",
+      "is_error": false,
+      "total_cost_usd": 7.5817,
+      "usage": { "input_tokens": 132629, "output_tokens": 23814, "cache_read_input_tokens": 229312, "cache_creation_input_tokens": 0 },
+      "modelUsage": {
+        "z-ai/glm-5.3-flash": { "inputTokens": 132629, "outputTokens": 23814, "cacheReadInputTokens": 229312, "cacheCreationInputTokens": 0 }
+      }
+    },
+    {
+      "name": "success-zero-tokens",
+      "is_error": false,
+      "total_cost_usd": 0,
+      "usage": { "input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0 },
+      "modelUsage": {}
+    },
+    {
+      "name": "error-with-tokens",
+      "is_error": true,
+      "total_cost_usd": 13.3693,
+      "usage": { "input_tokens": 941514, "output_tokens": 32927, "cache_read_input_tokens": 1992128, "cache_creation_input_tokens": 0 },
+      "modelUsage": {
+        "z-ai/glm-5.3-flash": { "inputTokens": 941514, "outputTokens": 32927, "cacheReadInputTokens": 1992128, "cacheCreationInputTokens": 0 }
+      }
+    },
+    {
+      "name": "error-zero-tokens",
+      "is_error": true,
+      "total_cost_usd": 0,
+      "usage": { "input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0 },
+      "modelUsage": {}
+    }
+  ]
+}
