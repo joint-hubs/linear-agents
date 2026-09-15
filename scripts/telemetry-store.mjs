@@ -669,8 +669,10 @@ export function migrate(db, path) {
   // rebuild the fact tables they select from (DROP + RENAME), and SQLite
   // parses every view body on any ALTER — a view left referencing a table
   // mid-rebuild fails the migration with "error in view". A view holds no
-  // data, so dropping it up front is free.
-  dropCanonicalViews(db);
+  // data, so dropping it up front is free. One unit of work: a concurrent
+  // opener must never see one canonical view gone while the other is still
+  // there.
+  transaction(db, () => dropCanonicalViews(db));
   createBaseSchema(db);
   addRunColumns(db);
   addModelPriceColumns(db);
@@ -879,9 +881,17 @@ export function dropCanonicalViews(db) {
 }
 
 export function ensureCanonicalViews(db) {
-  dropCanonicalViews(db);
-  db.exec(CANONICAL_USAGE_SQL);
-  db.exec(CANONICAL_TOOL_SQL);
+  // One unit of work: two openers racing this on the same file used to
+  // interleave statement-by-statement — B drops, A's CREATE slips into the
+  // gap, B's own CREATE fails with "view canonical_usage already exists".
+  // BEGIN IMMEDIATE holds the write lock across the drop and both CREATEs,
+  // so a concurrent recreate either waits behind it or lands after the
+  // committed drop; the gap it needs no longer exists.
+  transaction(db, () => {
+    dropCanonicalViews(db);
+    db.exec(CANONICAL_USAGE_SQL);
+    db.exec(CANONICAL_TOOL_SQL);
+  });
   return ["canonical_usage", "canonical_tool_facts"];
 }
 
