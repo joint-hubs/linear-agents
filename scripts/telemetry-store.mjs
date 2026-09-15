@@ -1495,11 +1495,35 @@ function loadPriceSet(db, priceSetId) {
   return { id: priceSetId, prices, scoped };
 }
 
+// A flat price row may declare the catalogue's context-length override as
+// `promptTokenThreshold` (FOC-165 (f): openai/gpt-6-astra bills 20/75/2/25 at
+// min_prompt_tokens=272000, which a flat row cannot express as a rate). The
+// flat rates are the BASE rate and are valid only below the threshold; above
+// it the honest answer is `null` — unpriced — never the base-rate under-count.
+// The comparison axis is the recorded inputTokens (the prompt axis usage rows
+// carry); cache-read tokens are a separate axis and are not folded in.
+const isPromptThreshold = (t) =>
+  t && typeof t === "object" && Number.isFinite(t.minPromptTokens) && t.minPromptTokens > 0;
+
+/**
+ * The declared prompt-token threshold for a model, or null when the resolved
+ * row is flat (or declares a malformed threshold, which is ignored rather than
+ * half-applied). Callers use it to tell "no price row" apart from "price row
+ * exists but does not cover this usage" when calculateCost returned null.
+ */
+export function priceThreshold(model, prices, provider = null, scoped = null) {
+  const resolved = resolvePrice(model, prices, provider, scoped);
+  const t = resolved?.price?.promptTokenThreshold;
+  return isPromptThreshold(t) ? t : null;
+}
+
 export function calculateCost(usage, model, prices, provider = null, scoped = null) {
   const resolved = resolvePrice(model, prices, provider, scoped);
   if (!resolved) return null;
   const price = resolved.price;
   if (!Number.isFinite(price.input) || !Number.isFinite(price.output)) return null;
+  const threshold = price.promptTokenThreshold;
+  if (isPromptThreshold(threshold) && (usage.inputTokens || 0) >= threshold.minPromptTokens) return null;
   const cacheReadPrice = Number.isFinite(price.cacheRead) ? price.cacheRead : price.input * 0.1;
   // Cache-creation tokens bill at cacheWrite when the model configures one;
   // otherwise they fall back to the input rate (today's behaviour).

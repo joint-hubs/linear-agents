@@ -15,7 +15,7 @@
 
 import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
-import { calculateCost, pricingSnapshot } from "./telemetry-store.mjs";
+import { calculateCost, priceThreshold, pricingSnapshot } from "./telemetry-store.mjs";
 
 import {
   ROOT,
@@ -114,6 +114,10 @@ const snapshot = (() => {
   }
 })();
 const priceOne = (usage, model) => (snapshot ? calculateCost(usage, model, snapshot.prices, null, snapshot.scoped) : null);
+// Mirrors priceOne: lets costFromResult tell "no price row" apart from "row
+// does not cover this usage" when calculateCost refuses at/above a declared
+// promptTokenThreshold (FOC-165 (f)).
+const thresholdOne = (model) => (snapshot ? priceThreshold(model, snapshot.prices, null, snapshot.scoped) : null);
 
 
 function patchTurn(patch) {
@@ -164,7 +168,7 @@ child.stdout.on("data", (chunk) => {
       // it is provably wrong (FOC-165: $0.2059 reported for a $0 model). The
       // reported figure is kept beside the computed one so a divergence stays
       // visible instead of one silently replacing the other.
-      const cost = costFromResult(event, initModel, priceOne);
+      const cost = costFromResult(event, initModel, priceOne, thresholdOne);
       costUsd = addCost(costUsd, cost.computed);
       if (cost.reported !== null) costUsdReported += cost.reported;
       for (const m of cost.unpriced) if (!unpricedModels.includes(m)) unpricedModels.push(m);

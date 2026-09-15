@@ -13,6 +13,7 @@ import {
   makeEvent,
   migrate,
   openTelemetryDb,
+  priceThreshold,
   pricingSnapshot,
   queryHealth,
   queryPatterns,
@@ -299,6 +300,54 @@ test("calculateCost bills cache-creation at cacheWrite, falling back to input", 
   // deepseek/deepseek-v4-flash has no cacheWrite → falls back to input (0.088606).
   const fallback = calculateCost({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 1_000_000 }, "deepseek/deepseek-v4-flash", prices);
   assert(Math.abs(fallback - 0.088606) < 0.0001, `fallback cost=${fallback} (expected 0.088606)`);
+});
+
+// --- FOC-165 (f): promptTokenThreshold — the flat row is the base rate, valid
+// only below the catalogue's context-length override; at/above it the honest
+// answer is unpriced, never the base-rate under-count. ------------------------
+
+const THRESHOLD_PRICES = {
+  "x/y": {
+    input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5,
+    promptTokenThreshold: { minPromptTokens: 272000, above: { input: 20, output: 75 } },
+  },
+  "flat/m": { input: 1, output: 2 },
+};
+
+test("calculateCost bills the base rate below the declared threshold", () => {
+  // 271,999 input tokens at 10 USD/M = 2.71999; output 0.
+  const below = calculateCost({ inputTokens: 271_999, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "x/y", THRESHOLD_PRICES);
+  assert(Math.abs(below - 2.71999) < 1e-9, `below-threshold cost=${below} (expected 2.71999)`);
+});
+
+test("calculateCost refuses at exactly the threshold, not only above it", () => {
+  // min_prompt_tokens=272000 means the override applies FROM this prompt size,
+  // so the base rate stops being true here — refusal, not an under-count.
+  const at = calculateCost({ inputTokens: 272_000, outputTokens: 1_000_000, cacheReadTokens: 0, cacheCreationTokens: 0 }, "x/y", THRESHOLD_PRICES);
+  assert(at === null, `at-threshold cost=${at} (expected null)`);
+  const above = calculateCost({ inputTokens: 500_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "x/y", THRESHOLD_PRICES);
+  assert(above === null, `above-threshold cost=${above} (expected null)`);
+});
+
+test("priceThreshold returns the declared threshold, null for flat rows, null for malformed ones", () => {
+  const declared = priceThreshold("x/y", THRESHOLD_PRICES);
+  assert(declared && declared.minPromptTokens === 272000, `threshold=${JSON.stringify(declared)}`);
+  assert(priceThreshold("flat/m", THRESHOLD_PRICES) === null, "flat row must have no threshold");
+  assert(priceThreshold("nope", THRESHOLD_PRICES) === null, "unknown model must have no threshold");
+  const malformed = { "x/y": { input: 1, output: 2, promptTokenThreshold: { minPromptTokens: "272000" } } };
+  assert(priceThreshold("x/y", malformed) === null, "a non-numeric threshold is ignored, not half-applied");
+  const billed = calculateCost({ inputTokens: 300_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "x/y", malformed);
+  assert(Math.abs(billed - 0.3) < 1e-9, `malformed-threshold cost=${billed} (expected 0.3 — billed flat)`);
+});
+
+test("the committed gpt-6-astra row declares the catalogue threshold and calculateCost honours it", () => {
+  const snapshot = pricingSnapshot();
+  const t = snapshot.prices["openai/gpt-6-astra"]?.promptTokenThreshold;
+  assert(t && t.minPromptTokens === 272000, `astra threshold=${JSON.stringify(t)}`);
+  const above = calculateCost({ inputTokens: 272_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "openai/gpt-6-astra", snapshot.prices);
+  assert(above === null, "astra at 272k prompt tokens must be unpriced, not base-rate billed");
+  const below = calculateCost({ inputTokens: 271_999, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "openai/gpt-6-astra", snapshot.prices);
+  assert(Math.abs(below - 2.71999) < 1e-9, `astra below-threshold cost=${below} (expected 2.71999)`);
 });
 
 // --- FOC-165: cross-scope exact pricing (nebul-only keys) --------------------

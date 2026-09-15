@@ -14,8 +14,9 @@
 
 **AC: 7 met, 0 not met, 0 inconclusive.** **DoD: 11 met, 1 not met** — `deepseek/deepseek-v4-pro` is
 not at the figure the DoD names (F1, §1.8), and the correction is not a mechanical one because the live
-catalogue has since moved past the DoD's own target. **Item (d) is decided — a written defer, with
-the corpus measured (§6)**; **item (f) remains pending its later turn.**
+catalogue has since moved past the DoD's own target. **Items (d) and (f) are decided** — (d) a written
+defer with the corpus measured (§6), (f) explicit unsupported-above-threshold handling with boundary
+fixtures (§8).
 
 Four corrections to the material this report was written from, all found by checking rather than
 trusting, all recorded in place rather than smoothed over: the divergence is **58.8×**, not the 169.9×
@@ -429,48 +430,92 @@ Carried forward as **finding F4** in §13.
 no Linear write access. The evidence above is offline tests plus the file reads, and this report does
 not claim otherwise.
 
-## 8. Item (f) — catalogue reconciliation: verification only
+## 8. Item (f) — catalogue reconciliation: explicit unsupported-above-threshold, with boundary fixtures
 
-> **(f): the fix or the fix-or-defer decision lands in a later turn of this run; this section is
-> updated in the same commit as that change.**
+**Decision: (B) — explicit unsupported-above-threshold handling, not threshold-aware (tiered)
+pricing.** Tiered pricing failed the issue's own triviality test, and the test is on the tree: the
+price row is flat by construction — `model_prices` columns are
+`price_set_id, model_key, input_price, output_price, cache_read_price, provider, cache_write_price`
+(`scripts/telemetry-store.mjs:242`), rows are written by explicit column list (`:1458`, `ensurePriceSet`)
+and read back as exactly four rate fields (`:1479`, `loadPriceSet`). A tier means a schema change plus
+a migration plus a pricing-path change plus threshold-aware comparisons in `price-check.mjs` and
+`config-drift.test.mjs` — five coupled surfaces for one model's override. The issue explicitly prefers
+refusing to claim full correctness over selling the missing-field fix as one; (B) is that refusal,
+made executable.
 
-No grade is issued here. What follows is what the tree at `b055340` already shows, so the later turn
-inherits a measured starting point instead of re-deriving one.
+**What changed — all additive, nothing rewritten.**
 
-**What (f) covers.** The issue's 2026-09-05 verification update, quoted in the issue body. It is the
-run's standing instruction **not** to re-derive that check from the network — the catalogue figures
-below are the issue's, and are treated as provenance, not as live truth.
+- `config/models.json:264` — the `openai/gpt-6-astra` row gains a `promptTokenThreshold` object:
+  `{minPromptTokens: 272000, above: {input: 20, output: 75, cacheRead: 2, cacheWrite: 25}, provenance: …}`.
+  The flat base rates (10 / 50 / 1 / 12.5) are unchanged, and the override rates are **provenance from
+  the issue's 2026-09-05 verification update, not live truth** — no network call was made, per the run's
+  constraints. The `above` rates are not read by code in this change; they are the documented reason
+  the boundary exists, and are the direct input a future tiered-pricing change (option (A)) would consume.
+- `scripts/telemetry-store.mjs:1525-1526` — `calculateCost` refuses (returns `null`) when the resolved
+  row declares a valid threshold and `usage.inputTokens >= minPromptTokens`. The comparison axis is the
+  recorded prompt axis; cache-read tokens are a separate axis and are not folded in. A malformed
+  threshold (non-finite, non-positive `minPromptTokens`) is ignored, not half-applied (`:1505`,
+  `isPromptThreshold`).
+- `scripts/telemetry-store.mjs:1514` — new export `priceThreshold(model, prices, provider, scoped)`,
+  so callers can tell "no price row" apart from "row exists but does not cover this usage".
+- `scripts/supervisor-watch.mjs:120` — `thresholdOne`, bound to the same snapshot as `priceOne`, passed
+  to `costFromResult` (`:171`).
+- `scripts/supervisor-lib.mjs:187-190` — `costFromResult` takes an optional 4th argument and, when a
+  turn is refused by a threshold, the unpriced entry becomes
+  `openai/gpt-6-astra (unsupported above 272000 prompt tokens)` instead of the bare model name — so the
+  budget refusal names the real reason instead of sending an operator to add a row that already exists.
 
-**Already true at `b055340`.**
+**The store never sees the threshold.** `ensurePriceSet` writes only the four rate columns (`:1458`),
+`loadPriceSet` reconstructs only the four rate fields (`:1479-1494`), so every price set stored in
+`model_prices` keeps billing flat — **historical and stored sets are untouched by this change**. The
+threshold exists only in the live config path, exactly where "the committed table is a pinned snapshot"
+semantics want it.
 
-- The bootstrap fill is present: `config/models.json` → `pricing.openrouter["openai/gpt-6-astra"]` is
-  `{input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5}`, matching the catalogue figures quoted in
-  the issue including both cache fields, and the frontman model is unchanged.
-- The threshold is genuinely inexpressible, and this is verifiable structurally rather than by
-  re-reading the issue. `grep -rn "min_prompt_tokens|minPromptTokens|threshold" config/models.json
-  scripts/telemetry-store.mjs scripts/price-check.mjs` returns **nothing**, and the price row shape is
-  flat by construction — `model_prices` columns are
-  `price_set_id, model_key, input_price, output_price, cache_read_price, provider, cache_write_price`.
-  There is no column and no key that could carry *"above 272 000 prompt tokens, input is 20 not 10"*.
-  So the issue's claim — *"the current flat config cannot express that threshold"* — is **confirmed on
-  the tree**, and it is a schema limitation rather than a missing value.
-- The consequence is an honest under-count, not a wrong number: above the threshold, a `gpt-6-astra`
-  turn is priced at the base rate and the cost is **too low**, silently. Neither `price-check.mjs` nor
-  `config-drift.test.mjs` can see it, because both compare the flat row to a flat catalogue row.
+**What this changes in practice — measured, not assumed.** In the telemetry copy
+(`.state/foc-165/telemetry-copy.sqlite`, `canonical_usage`), `openai/gpt-6-astra` holds **1266 rows
+whose maximum `input_tokens` is 3** — no recorded astra turn is anywhere near the boundary, so the
+change is **latent**: no stored cost flips, no canonical row moves. Reproduce:
 
-**Already true, and moving against the table.** `z-ai/glm-5.3-flash` is the model this run's own
-children are routed to, and its committed row (`0.071 / 0.24 / 0.015`) already disagrees with the
-catalogue figure quoted in the issue (`0.075 / 0.25 / 0.015`). Run at 2026-09-15, `price-check.mjs`
-reports the live catalogue at `0.15 / 0.5 / 0.03` — roughly **2× the committed row** (§1.7, §13).
-Whatever (f) decides, the decision is being made about a moving target, and the price-sync policy
-(no historical rewrite) is what keeps that from corrupting past costs. This is the case for deciding
-(f) on *policy* — threshold-aware pricing: yes or no — rather than on one model's current rate.
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('.state/foc-165/telemetry-copy.sqlite',{readOnly:true});
+console.log(db.prepare('SELECT COUNT(*) n, MAX(input_tokens) maxIn FROM canonical_usage WHERE model=?').get('openai/gpt-6-astra'))"
+```
 
-**What this section will be updated with.** (i) whether threshold-aware pricing was built, or an
-explicit *unsupported-above-threshold* signal was emitted instead — the issue accepts either, and
-refusing to claim full correctness is explicitly preferred over the missing-field fix being sold as one;
-and (ii) the boundary fixtures that pin whichever choice was made. Until then the honest grade for (f)
-is **inconclusive — pending, by design**.
+For completeness: exactly one real (non-synthetic) row in the whole corpus exceeds 272 000 prompt
+tokens — `minimax/minimax-m3` at 470 452 (`source_path` a real transcript). That model has **no**
+declared threshold, so it bills flat as before; whether the catalogue overrides it too is unknowable
+without a catalogue call this run may not make, and is **not asserted either way**. The four rows at
+exactly 1 000 000 are this run's own synthetic proof rows (`.state/foc-165/synthetic-proof.jsonl`, §9.2).
+
+**The boundary fixtures.** `scripts/telemetry-store.test.mjs` pins the behaviour on a synthetic
+threshold row *and* on the committed astra row: base rate below (`271_999` → `2.71999`), refusal at
+exactly the threshold (`272_000` → `null` — `min_prompt_tokens` means the override applies *from* that
+prompt size) and above (`500_000` → `null`), `priceThreshold` returning the declared object / `null`
+for flat rows / `null` for a malformed one (which then bills flat), and the committed astra row
+declaring `minPromptTokens: 272000` and refusing at the line. `scripts/supervisor-cost.test.mjs`
+pins the watch-side contract: at/above the threshold the turn is unpriced with the qualified entry;
+below it prices at the base rate; without the new binding the entry stays the bare model name
+(back-compat for every other `costFromResult` caller).
+
+**Mutation evidence.** Each branch was shown to fail when reverted: (1) the `calculateCost` refusal
+disabled (`if (false && …)`) → `telemetry-store.test.mjs` **53 passed, 2 failed** (at-threshold
+returns `52.72` instead of `null`; the committed-astra test fails) and `supervisor-cost.test.mjs`
+**32 passed, 2 FAILED**; (2) the qualifier dropped in `costFromResult` → `supervisor-cost.test.mjs`
+**33 passed, 1 FAILED** (the qualified-entry assertion). Restored, all four affected files are green:
+`telemetry-store.test.mjs` **55 passed, 0 failed**, `supervisor-cost.test.mjs` **34 passed, 0 failed**,
+`supervisor-budget.test.mjs` **24 passed, 0 failed**, `config-drift.test.mjs` **26 passed, 0 failed**,
+plus `telemetry-canonical-views-atomicity.test.mjs` **PASS** and `node scripts/lint.mjs` **exit 0**
+(scope: 400 files; `json-parse` covers the edited `config/models.json`).
+
+**What (B) deliberately does not do.** (i) It does not bill the override — a turn above the threshold
+is *unknown*, and the cap machinery treats unknown as refusal (the (g) behaviour), which is the honest
+state: the alternative number would be an under-count. (ii) The budget refusal's *hint* (`:276`, "add
+the model to pricing.openrouter") is not threshold-aware — with the qualifier the holder line already
+states the real reason, but the hint line still points at adding a row; left as-is on purpose, it is
+one string in a path that (g) owns. (iii) It does not touch the `z-ai/glm-5.3-flash` drift — that is
+finding **F8** (§13), a dated price-sync decision for Mateusz, not a mechanical edit: the committed row
+stays `0.071 / 0.24 / 0.015`, the issue's 2026-09-05 catalogue figure was `0.075 / 0.25 / 0.015`, and
+`price-check.mjs` run 2026-09-15 reported the live catalogue at `0.15 / 0.5 / 0.03` (~2×; §1.7).
 
 ## 9. Item (g) — zero-token results, and the refusal that names the unpriced child
 

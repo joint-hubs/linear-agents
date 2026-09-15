@@ -35,7 +35,7 @@ import {
   runDir,
   writeRegistry,
 } from "./supervisor-lib.mjs";
-import { calculateCost, pricingSnapshot } from "./telemetry-store.mjs";
+import { calculateCost, priceThreshold, pricingSnapshot } from "./telemetry-store.mjs";
 import { comparePrices } from "./price-check.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -170,6 +170,56 @@ test("both spellings of the usage fields are read", () => {
     { type: "result", usage: { cache_read_input_tokens: 1_000_000 } }, "z-ai/glm-5.2", priceOne);
   assert.ok(camel.computed > 0 && Math.abs(camel.computed - snake.computed) < 1e-9,
     `camel ${camel.computed} vs snake ${snake.computed}`);
+});
+
+// ── FOC-165 (f): a promptTokenThreshold row does not bill at/above its
+// threshold — the turn is unpriced with a qualifier naming the reason, so the
+// refusal is actionable instead of "add a row that already exists". ----------
+
+const thresholdOne = (model) => priceThreshold(model, SNAPSHOT.prices, null, SNAPSHOT.scoped);
+
+test("a turn at/above the declared threshold is unpriced with a named qualifier, not under-counted", () => {
+  const out = costFromResult(
+    resultEvent({
+      modelUsage: { "openai/gpt-6-astra": { inputTokens: 272_000, outputTokens: 1_000_000, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+    }),
+    null,
+    priceOne,
+    thresholdOne,
+  );
+  assert.equal(out.computed, null, `computed=${out.computed} (expected null — the flat row must not bill above its threshold)`);
+  assert.deepEqual(
+    out.unpriced,
+    ["openai/gpt-6-astra (unsupported above 272000 prompt tokens)"],
+    `unpriced=${JSON.stringify(out.unpriced)}`,
+  );
+});
+
+test("a turn below the threshold prices at the base rate as before", () => {
+  const out = costFromResult(
+    resultEvent({
+      modelUsage: { "openai/gpt-6-astra": { inputTokens: 271_999, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+    }),
+    null,
+    priceOne,
+    thresholdOne,
+  );
+  assert.ok(Math.abs(out.computed - 2.71999) < 1e-9, `computed=${out.computed} (expected 2.71999)`);
+  assert.deepEqual(out.unpriced, []);
+});
+
+test("without a thresholdOne binding the unpriced entry stays the bare model name", () => {
+  // Back-compat: the watcher passes the binding; other callers of
+  // costFromResult (tests, tooling) must not change shape.
+  const out = costFromResult(
+    resultEvent({
+      modelUsage: { "openai/gpt-6-astra": { inputTokens: 300_000, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+    }),
+    null,
+    priceOne,
+  );
+  assert.equal(out.computed, null, "calculateCost still refuses above the threshold");
+  assert.deepEqual(out.unpriced, ["openai/gpt-6-astra"], `unpriced=${JSON.stringify(out.unpriced)}`);
 });
 
 // ── 2. unpriced is not free ───────────────────────────────────────────────────

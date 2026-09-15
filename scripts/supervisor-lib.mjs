@@ -147,7 +147,7 @@ function normaliseUsage(u = {}) {
  * @param {(usage: object, model: string) => number|null} priceOne
  * @returns {{ computed: number|null, reported: number|null, unpriced: string[] }}
  */
-export function costFromResult(event, fallbackModel, priceOne) {
+export function costFromResult(event, fallbackModel, priceOne, thresholdOne = null) {
   const reported =
     typeof event.total_cost_usd === "number"
       ? event.total_cost_usd
@@ -178,8 +178,17 @@ export function costFromResult(event, fallbackModel, priceOne) {
     }
     sawTokens = true;
     const cost = priceOne(norm, model);
-    if (cost === null) unpriced.push(model);
-    else computed += cost;
+    if (cost === null) {
+      // FOC-165 (f): a null can mean "no row" or "the row exists but is valid
+      // only below its declared promptTokenThreshold, and this usage is at or
+      // above it". The second case bills nothing only because billing anything
+      // would under-count — the qualifier on the name says so, so the refusal
+      // is actionable instead of sending an operator to add a row that exists.
+      const t = thresholdOne?.(model);
+      unpriced.push(t && norm.inputTokens >= t.minPromptTokens
+        ? `${model} (unsupported above ${t.minPromptTokens} prompt tokens)`
+        : model);
+    } else computed += cost;
   }
 
   // $0 and "unknown" are different answers and must not blur (FOC-165 (g)). A

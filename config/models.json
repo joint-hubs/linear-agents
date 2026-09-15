@@ -265,7 +265,12 @@
         "input": 10,
         "output": 50,
         "cacheRead": 1,
-        "cacheWrite": 12.5
+        "cacheWrite": 12.5,
+        "promptTokenThreshold": {
+          "minPromptTokens": 272000,
+          "above": { "input": 20, "output": 75, "cacheRead": 2, "cacheWrite": 25 },
+          "provenance": "openrouter catalogue override at min_prompt_tokens=272000, seen in the FOC-165 issue's 2026-09-05 verification update — treated as provenance, not live truth. The flat rates above are the base rate and must not bill turns at or above the threshold (calculateCost refuses; no tiered billing exists)."
+        }
       },
       "deepseek/deepseek-v4.1-flash": {
         "input": 0.15,
