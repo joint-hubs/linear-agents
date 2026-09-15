@@ -102,15 +102,18 @@ let sawInit = false;
 // One read of config/models.json for the whole turn. A missing or broken price
 // table must not stop the child: cost becomes unknown (null), which is exactly
 // what an unpriced run is, and the budget check refuses on unknown rather than
-// pretending the run was free.
-const prices = (() => {
+// pretending the run was free. The whole snapshot is kept: the flat openrouter
+// scope alone cannot see keys catalogued under another provider (FOC-165 —
+// zai-org/GLM-5.2-FP8 lives only under nebul), so pricing resolves against
+// scopes exactly like ingest does.
+const snapshot = (() => {
   try {
-    return pricingSnapshot().prices;
+    return pricingSnapshot();
   } catch {
     return null;
   }
 })();
-const priceOne = (usage, model) => (prices ? calculateCost(usage, model, prices) : null);
+const priceOne = (usage, model) => (snapshot ? calculateCost(usage, model, snapshot.prices, null, snapshot.scoped) : null);
 
 
 function patchTurn(patch) {

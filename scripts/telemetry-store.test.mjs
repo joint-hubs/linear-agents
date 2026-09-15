@@ -301,6 +301,84 @@ test("calculateCost bills cache-creation at cacheWrite, falling back to input", 
   assert(Math.abs(fallback - 0.088606) < 0.0001, `fallback cost=${fallback} (expected 0.088606)`);
 });
 
+// --- FOC-165: cross-scope exact pricing (nebul-only keys) --------------------
+
+test("a nebul-only key prices through the scoped fallback; legacy flat callers still see null", () => {
+  const snapshot = pricingSnapshot();
+  // zai-org/GLM-5.2-FP8 is catalogued only under nebul, never under openrouter.
+  // Without the scoped map (the pre-FOC-165 call shape) it stays unpriced —
+  // legacy callers and legacy stored price sets must not change behaviour.
+  const legacy = resolvePrice("zai-org/GLM-5.2-FP8", snapshot.prices);
+  assert(legacy === null, `legacy flat resolve=${JSON.stringify(legacy)}`);
+  // With the scoped map (what ingest and the watcher now hand over): the exact
+  // nebul row, at the catalogued rates.
+  const scoped = resolvePrice("zai-org/GLM-5.2-FP8", snapshot.prices, null, snapshot.scoped);
+  assert(scoped && scoped.key === "zai-org/GLM-5.2-FP8", `scoped resolve=${JSON.stringify(scoped)}`);
+  const row = scoped.price;
+  assert(row.input === 1.91 && row.output === 9.57 && row.cacheRead === 0.76 && row.cacheWrite === 0.76,
+    `nebul row=${JSON.stringify(row)}`);
+});
+
+test("ingest prices FP8 at the catalogued nebul rates and raises no pricing_missing", () => {
+  const runId = "run-foc165-fp8";
+  const ev = (type, payload, observedAt, sourceOffset) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test", sourcePath: "C:/foc165.jsonl", sourceOffset,
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt: "2026-09-15T08:00:00.000Z" }, "2026-09-15T08:00:00.000Z");
+  ev("usage.recorded", {
+    runId, usageId: "foc165-fp8", agentKey: "_lead", model: "zai-org/GLM-5.2-FP8",
+    observedAt: "2026-09-15T08:01:00.000Z",
+    inputTokens: 1_000_000, outputTokens: 200_000, cacheReadTokens: 300_000, cacheCreationTokens: 40_000,
+  }, "2026-09-15T08:01:00.000Z", 1);
+  // 1M×1.91 + 200k×9.57 + 300k×0.76 + 40k×0.76, all per 1M tokens.
+  const costRow = db.prepare("SELECT cost_usd, price_set_id FROM cost_facts WHERE run_id=? AND usage_id=?").get(runId, "foc165-fp8");
+  assert(costRow != null, "cost_facts row missing for the FP8 usage");
+  assert(Math.abs(costRow.cost_usd - 4.0824) < 0.0001, `FP8 cost=${costRow.cost_usd} (expected 4.0824 at nebul rates)`);
+  // The pricing snapshot that resolved the price is the same one stamped on the row.
+  const run = db.prepare("SELECT price_set_id FROM runs WHERE run_id=?").get(runId);
+  assert(run.price_set_id === costRow.price_set_id, `price_set_id mismatch: run=${run.price_set_id} cost=${costRow.price_set_id}`);
+  const issue = db.prepare("SELECT 1 FROM data_quality_issues WHERE run_id=? AND issue_type='pricing_missing'").get(runId);
+  assert(issue === undefined, "pricing_missing must not fire for a nebul-catalogued key");
+});
+
+test("openrouter keys resolve exactly as before; the dated glm snapshot keeps the contained rule", () => {
+  const snapshot = pricingSnapshot();
+  for (const model of ["z-ai/glm-5.2", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"]) {
+    const hit = resolvePrice(model, snapshot.prices, null, snapshot.scoped);
+    assert(hit && hit.key === model, `${model} must resolve to itself, got ${JSON.stringify(hit)}`);
+  }
+  // z-ai/glm-5.2-20260616 is not a catalogued key. It keeps billing at glm-5.2
+  // rates through resolveInScope's CONTAINED rule: the raw last segment is
+  // substring-tested with dots intact ("z-ai/glm-5.2-20260616".includes("glm-5.2"))
+  // while short-name equality dash-normalizes. Flat resolution wins first and
+  // the nebul key never fuzzy-matches (case-sensitive; FP8 is not a substring),
+  // so the cross-scope fallback cannot change this.
+  const dated = resolvePrice("z-ai/glm-5.2-20260616", snapshot.prices, null, snapshot.scoped);
+  assert(dated && dated.key === "z-ai/glm-5.2", `dated snapshot must bill at glm-5.2, got ${JSON.stringify(dated)}`);
+});
+
+test("cross-scope collisions are deterministic: identical rows collapse, differing rows refuse, flat scope keeps precedence", () => {
+  const flat = {};
+  const scoped = {
+    zebra: { "x/model": { input: 2, output: 4 } },
+    alpha: { "x/model": { input: 2, output: 4 } },
+    openrouter: { "other/m": { input: 1, output: 1 } },
+  };
+  // Same key, same rates, two providers → collapses (alphabetically first
+  // provider is only a tie-break; the price is unambiguous).
+  const same = resolvePrice("x/model", flat, null, scoped);
+  assert(same && same.price.input === 2 && same.price.output === 4, `identical rows must collapse, got ${JSON.stringify(same)}`);
+  // Same key, different rates → refuse; the caller then surfaces
+  // pricing_missing instead of silently picking a rate.
+  scoped.beta = { "x/model": { input: 3, output: 4 } };
+  const conflict = resolvePrice("x/model", flat, null, scoped);
+  assert(conflict === null, `differing rows must refuse, got ${JSON.stringify(conflict)}`);
+  // The openrouter (flat) scope keeps precedence: when it resolves, the
+  // fallback is never consulted.
+  const orFirst = resolvePrice("x/model", { "x/model": { input: 1.19 } }, null, { nebul: { "x/model": { input: 9 } } });
+  assert(orFirst && orFirst.price.input === 1.19, `flat scope must keep precedence, got ${JSON.stringify(orFirst)}`);
+});
+
 test("model_prices migration backfills provider='openrouter' on a pre-existing DB", () => {
   const legacyPath = join(temp, "telemetry-legacy-prices.sqlite");
   const legacy = openTelemetryDb(legacyPath);

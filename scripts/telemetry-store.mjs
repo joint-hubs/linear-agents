@@ -1415,7 +1415,30 @@ function resolveInScope(model, scope) {
   return null;
 }
 
-export function resolvePrice(model, prices, provider = null) {
+// FOC-165: a key catalogued only under a non-openrouter provider (e.g.
+// zai-org/GLM-5.2-FP8 under nebul) is invisible to the flat openrouter scope
+// and every provider-less caller billed it as unpriced. Exact model_key lookup
+// across all provider scopes — never fuzzy, because the fuzzy rules above are
+// openrouter-shape heuristics and cross-provider they could silently bill one
+// provider's rate for another's. Deterministic when the same key is catalogued
+// more than once: identical price rows collapse (alphabetically first provider
+// is the tie-break), differing rows refuse so the caller surfaces
+// pricing_missing instead of silently picking a rate.
+const samePriceRow = (a, b) =>
+  ["input", "output", "cacheRead", "cacheWrite"].every((k) => (a[k] ?? null) === (b[k] ?? null));
+
+function resolveExactAcrossScopes(model, scoped) {
+  const candidates = [];
+  for (const [provider, models] of Object.entries(scoped || {})) {
+    if (models && typeof models === "object" && models[model]) candidates.push({ provider, price: models[model] });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0));
+  if (candidates.some((c) => !samePriceRow(candidates[0].price, c.price))) return null;
+  return { key: model, price: candidates[0].price };
+}
+
+export function resolvePrice(model, prices, provider = null, scoped = null) {
   if (isSyntheticModel(model)) return null;
   if (!prices) return null;
   // With a provider, resolve within that provider's scope only (exact →
@@ -1423,7 +1446,9 @@ export function resolvePrice(model, prices, provider = null) {
   // existing flat fuzzy behaviour is preserved for legacy callers and legacy
   // stored price sets.
   if (provider) return resolveInScope(model, prices[provider] || {});
-  return resolveInScope(model, prices);
+  const flat = resolveInScope(model, prices);
+  if (flat || !scoped) return flat;
+  return resolveExactAcrossScopes(model, scoped);
 }
 
 function ensurePriceSet(db) {
@@ -1470,8 +1495,8 @@ function loadPriceSet(db, priceSetId) {
   return { id: priceSetId, prices, scoped };
 }
 
-export function calculateCost(usage, model, prices, provider = null) {
-  const resolved = resolvePrice(model, prices, provider);
+export function calculateCost(usage, model, prices, provider = null, scoped = null) {
+  const resolved = resolvePrice(model, prices, provider, scoped);
   if (!resolved) return null;
   const price = resolved.price;
   if (!Number.isFinite(price.input) || !Number.isFinite(price.output)) return null;
@@ -1540,7 +1565,7 @@ function applyUsageRecorded(db, event) {
     snapshot = ensurePriceSet(db);
     db.prepare("UPDATE runs SET price_set_id=? WHERE run_id=?").run(snapshot.id, runId);
   }
-  const cost = calculateCost(payload, payload.model, snapshot.prices);
+  const cost = calculateCost(payload, payload.model, snapshot.prices, null, snapshot.scoped);
   if (cost == null && !isSyntheticModel(payload.model)) {
     raiseIssue(db, runId, "pricing_missing", "warning", { model: payload.model, usageId, runId: event.runId ?? null });
   }
@@ -1796,7 +1821,7 @@ function makeRunProjection(db, row, options = {}) {
     for (const item of byModelRows) {
       const model = item.model;
       if (isSyntheticModel(model)) continue;
-      const resolved = resolvePrice(model, priceSet.prices);
+      const resolved = resolvePrice(model, priceSet.prices, null, priceSet.scoped);
       if (!resolved) continue;
       const price = resolved.price;
       if (!Number.isFinite(price.input)) continue;
@@ -1848,7 +1873,8 @@ function makeRunProjection(db, row, options = {}) {
 }
 
 function repriceCurrent(db, runs) {
-  const prices = pricingSnapshot().prices;
+  const snapshot = pricingSnapshot();
+  const prices = snapshot.prices;
   const byRun = new Map(runs.map((run) => [run.runId, run]));
   for (const run of runs) {
     run.totals.costUSD = 0;
@@ -1878,7 +1904,7 @@ function repriceCurrent(db, runs) {
     const cost = calculateCost({
       inputTokens: item.input_tokens, outputTokens: item.output_tokens,
       cacheReadTokens: item.cache_read_tokens, cacheCreationTokens: item.cache_creation_tokens,
-    }, item.model, prices);
+    }, item.model, prices, null, snapshot.scoped);
     if (cost == null && !isSyntheticModel(item.model)) {
       run.totals.unpricedUsageCount++;
       if (run.byModel[modelKey]) run.byModel[modelKey].unpricedUsageCount++;
@@ -1897,7 +1923,7 @@ function repriceCurrent(db, runs) {
     }
     // Compute cache savings for this usage item
     if (item.cache_read_tokens > 0 && !isSyntheticModel(item.model)) {
-      const resolved = resolvePrice(item.model, prices);
+      const resolved = resolvePrice(item.model, prices, null, snapshot.scoped);
       if (resolved) {
         const price = resolved.price;
         if (Number.isFinite(price.input)) {
@@ -2307,7 +2333,8 @@ function aggregateUsageByTask(db, priceMode) {
   const canonical = collapseUsageIslands(rows);
   const coverage = taskCoverageMap(db);
   const links = linksByRunIndex(db);
-  const currentPrices = priceMode === "current" ? pricingSnapshot().prices : null;
+  const currentSnapshot = priceMode === "current" ? pricingSnapshot() : null;
+  const currentPrices = currentSnapshot ? currentSnapshot.prices : null;
   const buckets = {};
   for (const row of canonical) {
     const run = coverage.get(row.run_id);
@@ -2325,7 +2352,7 @@ function aggregateUsageByTask(db, priceMode) {
       ? calculateCost({
           inputTokens: row.input_tokens, outputTokens: row.output_tokens,
           cacheReadTokens: row.cache_read_tokens, cacheCreationTokens: row.cache_creation_tokens,
-        }, row.model, currentPrices)
+        }, row.model, currentPrices, null, currentSnapshot.scoped)
       : row.cost_usd;
     bucket.inputTokens += row.input_tokens;
     bucket.outputTokens += row.output_tokens;

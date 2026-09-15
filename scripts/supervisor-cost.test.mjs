@@ -77,8 +77,12 @@ const child = (over = {}) => ({
   permissionMode: "bypassPermissions", ...over,
 });
 
-const PRICES = pricingSnapshot().prices;
-const priceOne = (usage, model) => calculateCost(usage, model, PRICES);
+// Mirrors supervisor-watch.mjs: the watcher prices through the whole snapshot
+// (flat openrouter scope + scoped map), not the flat scope alone — a
+// nebul-catalogued key like zai-org/GLM-5.2-FP8 is invisible to flat-only
+// resolution (FOC-165).
+const SNAPSHOT = pricingSnapshot();
+const priceOne = (usage, model) => calculateCost(usage, model, SNAPSHOT.prices, null, SNAPSHOT.scoped);
 
 // The shape Claude Code actually emits, taken from a real run on 2026-08-26.
 const resultEvent = (over = {}) => ({
@@ -139,6 +143,22 @@ test("without modelUsage it falls back to usage + the model from system/init", (
     priceOne,
   );
   assert.ok(Math.abs(out.computed - 1.19) < 0.001, `got ${out.computed}`);
+});
+
+test("a nebul-catalogued key prices non-zero on the watch side (FOC-165)", () => {
+  // zai-org/GLM-5.2-FP8 lives only under the nebul scope. The flat openrouter
+  // scope used to be the only thing the watcher consulted, so every FP8 turn
+  // cost "unknown" — and an unknown turn makes the spend cap refuse.
+  const out = costFromResult(
+    resultEvent({
+      modelUsage: { "zai-org/GLM-5.2-FP8": { inputTokens: 1_000_000, outputTokens: 1_000_000 } },
+    }),
+    null,
+    priceOne,
+  );
+  // nebul rates: input 1.91 + output 9.57 per 1M
+  assert.ok(Math.abs(out.computed - (1.91 + 9.57)) < 0.001, `expected ~11.48, got ${out.computed}`);
+  assert.deepEqual(out.unpriced, []);
 });
 
 test("both spellings of the usage fields are read", () => {
