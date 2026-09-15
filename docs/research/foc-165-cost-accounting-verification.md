@@ -141,18 +141,30 @@ network, per the run's constraints.
 
 | DoD item | Grade | Evidence |
 |---|---|---|
-| `supervisor-watch.mjs` prices from token counts | TBD | §1.1 |
-| `total_cost_usd` kept as `costUsdReported` | TBD | §1.2 |
-| unpriced → `null`, never `0` | TBD | §1.3 |
-| `LA_SUPERVISOR_MAX_COST_USD` at turn boundaries, post-hoc, overshoot reported not rounded away | TBD | §1.4 |
-| `config-drift.test.mjs` covers every gating env var | TBD | §1.6 |
-| `scripts/price-check.mjs` exists | TBD | §1.7 |
-| `deepseek/deepseek-v4-pro` corrected to 0.87 / 1.74 / 0.0725 | TBD | §1.8 |
-| `stealth/ox-alpha` left at $0 (do not "fix") | TBD | §1.8 |
-| tests: fabricated-vs-computed divergence | TBD | §10 |
-| tests: unpriced → null | TBD | §1.3 |
-| tests: cap trips at a boundary | TBD | §1.4 |
-| tests: cap absent → no change | TBD | §1.5 |
+| `supervisor-watch.mjs` prices from token counts | **met** | §1.1 |
+| `total_cost_usd` kept as `costUsdReported` | **met** | §1.2 |
+| unpriced → `null`, never `0` | **met** | §1.3 |
+| `LA_SUPERVISOR_MAX_COST_USD` at turn boundaries, post-hoc, overshoot reported not rounded away | **met** | §1.4 |
+| `config-drift.test.mjs` covers every gating env var | **met, with a stated limit** | §1.6 + §2.1 |
+| `scripts/price-check.mjs` exists | **met** | §1.7 |
+| `deepseek/deepseek-v4-pro` corrected to 0.87 / 1.74 / 0.0725 | **not met** | §1.8, finding F1 in §13 |
+| `stealth/ox-alpha` left at $0 (do not "fix") | **met** | §1.8 |
+| tests: fabricated-vs-computed divergence | **met** | §10.3 |
+| tests: unpriced → null | **met** | §1.3 |
+| tests: cap trips at a boundary | **met** | §1.4 |
+| tests: cap absent → no change | **met** | §1.5 |
+
+### 2.1 AC6 coverage — what the test actually sees
+
+Measured, not assumed: across the seven squads that carry a `CLAUDE.md`
+(`cadence, dev, orchestrator, plan, review, supervisor, test`) the test finds **7 distinct `LA_*`
+variables** — `LA_ROOT`, `LA_RUN_ID`, `LA_SUPERVISOR`, `LA_SUPERVISOR_CHILD`,
+`LA_SUPERVISOR_MAX_COST_USD`, `LA_SUPERVISOR_REPO`, `LA_SUPERVISOR_RUN` — and each is present in
+`scripts/*.mjs`, so none is orphaned. The check is non-vacuous (it fails when a name is absent) but it
+is a **substring search over script sources**, so a variable mentioned only in a comment would satisfy
+it. That is the limit of the AC6 claim, stated here rather than implied: AC6 as written ("fails if no
+script reads that variable") is met at the level of "no script *mentions* it", which is weaker than
+"reads". No variable in the current tree sits in that gap.
 
 ## 3. Item (a) — over-budget kill-switch in the standalone launchers
 
