@@ -474,7 +474,114 @@ that each nulled the child.
 
 ## 10. The divergence: computed vs reported
 
-TBD
+Everything in this section was produced by running the commands below in this worktree. No figure is
+copied from the issue, from a commit message, or from another agent's summary.
+
+### 10.1 The re-runnable commands
+
+```bash
+# (i) the committed fixture, priced through the watcher's own path
+node .state/foc-165/divergence-fixture.mjs
+
+# (ii) this run's real tees, priced the same way — and priced a second time with
+#      the fixture's modelUsage normalisation, to show what that normalisation does
+node .state/foc-165/divergence-live-tee.mjs
+```
+
+Both call `costFromResult` from `scripts/supervisor-lib.mjs` with a `priceOne` built from
+`calculateCost` × `pricingSnapshot()` from `scripts/telemetry-store.mjs` — the same pairing
+`supervisor-watch.mjs:113` uses. Read-only; no store is opened for writing and no network is touched.
+
+### 10.2 Measured on the real tees, not on the fixture
+
+`.state/supervisor/2026-09-15-supervisor-foc-165/children/dev-{1,2}.jsonl` — the two children of this
+run that reached a `result` event (this child, `dev-3`, has none yet).
+
+| event | top-level usage tokens | per-model tokens | computed | reported | ratio |
+|---|---|---|---|---|---|
+| dev-1 #1 | 132 629 / 23 814 / 229 312 | 498 336 / 146 354 / 2 862 400 | $0.113442816 | $7.581730 | 66.8× |
+| dev-1 #2 | 0 (all zeros) | *(none — `{}`)* | $0.000000000 | $0.000000 | n/a |
+| dev-1 #3 | 941 514 / 32 927 / 1 992 128 | 1 435 119 / 135 245 / 5 625 088 | $0.218728569 | $13.369264 | 61.1× |
+| dev-1 #4 | 0 (all zeros) | *(none — `{}`)* | $0.000000000 | $0.000000 | n/a |
+| dev-1 #5 | 131 086 / 2 073 / 382 272 | 131 086 / 2 073 / 382 272 | $0.015538706 | $0.898391 | 57.8× |
+| dev-2 #1 | 0 (all zeros) | 2 876 / 287 / 0 | $0.000273076 | $0.021555 | 78.9× |
+| dev-2 #2 | 348 769 / 33 111 / 3 561 728 | same | $0.086135159 | $4.352484 | 50.5× |
+| dev-2 #3 | 430 026 / 16 229 / 3 232 448 | same | $0.082913526 | $4.172079 | 50.3× |
+| dev-2 #4 | 2 754 / 3 368 / 130 688 | same | $0.002964174 | $0.163314 | 55.1× |
+| dev-2 #5, #6 | 0 (all zeros) | *(none — `{}`)* | $0.000000000 | $0.000000 | n/a |
+
+| set | computed | reported | ratio |
+|---|---|---|---|
+| dev-1 (3 token-bearing turns + 2 zero-token turns) | **$0.347710091** | **$21.849385** | **62.8×** |
+| dev-2 (4 token-bearing turns + 2 zero-token turns) | **$0.172285935** | **$8.709432** | **50.6×** |
+| both children (11 result events) | **$0.519996026** | **$30.558817** | **58.8×** |
+
+**The headline: across this run's two children the stream reported $30.56 for work that prices at
+$0.52 — the fabricated figure is 58.8× the measured one.** Per turn the multiple ranges from 50.3× to
+78.9×, so it is not a constant that could be calibrated away; it is a figure that is simply unrelated
+to the tokens spent. That is the defect the issue exists to fix, and it is why AC1 is not a stylistic
+preference.
+
+Two events are worth pointing at because they behave differently from the rest. `dev-1` #5 is the only
+turn where the per-model entry equals the top-level `usage` exactly, and it is the only turn whose
+*fixture-style* and *real* prices are identical ($0.015538706 both ways). And `dev-2` #1 (§9.2) is the
+turn where the top-level `usage` is all zeros while the real cost is $0.000273076 — the one event in
+this table whose cost is invisible to anything that reads the top-level usage.
+
+`dev-2`'s computed total, **$0.172285935**, is also the figure the Supervisor reported independently
+for this child — two derivations, agreeing to nine decimals. See §9.4.
+
+### 10.3 The committed fixture gives 169.9× — and why that is not the number to quote
+
+```bash
+$ node .state/foc-165/divergence-fixture.mjs
+success-with-tokens          computed=$0.018571699 reported=$7.5817  ratio=408.2x
+success-zero-tokens          computed=$0.000000000 reported=$0.0000  ratio=n/a
+error-with-tokens            computed=$0.104631894 reported=$13.3693 ratio=127.8x
+error-zero-tokens            computed=$0.000000000 reported=$0.0000  ratio=n/a
+zero-tokens-one-zero-key     computed=$0.000000000 reported=$0.0000  ratio=n/a
+zero-usage-real-model-tokens computed=$0.000273076 reported=$0.0216  ratio=78.9x
+TOTAL computed=$0.123476669  reported=$20.9726  ratio=169.9x
+```
+
+Three numbers are now in play and they are not interchangeable. Stated plainly, because a reader who
+takes the wrong one will overstate the case by 3×:
+
+| what was priced | computed | reported | ratio |
+|---|---|---|---|
+| the fixture, all six events (above) | $0.123476669 | $20.9726 | **169.9×** |
+| the fixture, the four original events only | $0.123203593 | $20.9510 | 170.1× |
+| **dev-1's same four events, real `modelUsage`** | **$0.332171385** | **$20.950994** | **63.1×** |
+
+(The four original fixture events are `dev-1` results #1–#4; `dev-1` also has a fifth result, #5, which
+the fixture does not carry. That is why the dev-1 row in §10.2 — all five results, $0.347710091 — is
+larger than the four-event row here.)
+
+The gap between rows 1–2 and row 3 is a **fixture-fidelity** issue, and it is worth flagging as a
+finding rather than a footnote. The four original fixture events are `dev-1`'s, with one change: their
+`modelUsage` was **replaced by the top-level `usage`** shape. Real result events do not look like that —
+in `dev-1` #1 the per-model entry carries 498 336 input tokens against a top-level 132 629, because the
+per-model breakdown is not the same measurement as the turn's `usage`. Pricing the fixture therefore
+prices *smaller* numbers, and produces a *larger* ratio (170× vs 63×) for the same reported total.
+
+**Which figure this report stands behind: 58.8×** (§10.2) — measured on the real tees through the real
+path. The fixture's 169.9× is reproducible and correctly computed *for the shape it stores*, and
+§1.3/§9 rely on that fixture for behavioural pins, not for magnitude. The fix for the fidelity gap is
+to carry a real per-model entry in the fixture; it is **not** done here, because the four events are
+reviewed test inputs whose numbers four existing tests assert against, and changing them mid-report
+would invalidate the very mutation evidence §9.2 depends on. Carried as **finding F5** in §13.
+
+### 10.4 What the tests do about divergence
+
+`scripts/supervisor-cost.test.mjs` pins the *shape* of the divergence rather than its size: `costUsd`
+and `costUsdReported` are both written and neither replaces the other (AC2), and the cap tests assert
+on `spent` rather than on `reported`. There is no test that asserts a particular ratio — correctly, since
+the ratio is a property of a model's stream pricing and will move.
+
+A note on what is **not** claimed here: nothing in this report says the stream figure is *wrong* as a
+stream figure. `total_cost_usd` is Claude Code's own estimate, computed against Anthropic's price list
+for a model it does not recognise. What the measurements show is that it does not describe **this**
+repo's spend, and that a cost series built on it was off by a factor between 50 and 79.
 
 ## 11. Pricing coverage
 
