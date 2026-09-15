@@ -40,6 +40,12 @@ test("parseArgs collects unknown flags instead of dropping them", () => {
   assert.equal(args.issue, "FEN-1");
 });
 
+test("parseArgs recognises --clear-returned-by-review as a known boolean flag", () => {
+  const args = parseArgs(["node", "publish-linear-comment.mjs", "--issue", "FEN-1", "--clear-returned-by-review"]);
+  assert.equal(args.clearReturnedByReview, true);
+  assert.deepEqual(args.unknown, []);
+});
+
 test("an unknown flag exits 2 and names the flag, before anything is posted", () => {
   const r = run(["--no-such-flag"]);
   assert.equal(r.status, 2, `expected exit 2, got ${r.status}\n${r.stdout}\n${r.stderr}`);
@@ -57,6 +63,34 @@ test("--dry-run prints the rendered body and exits 0 without posting", () => {
   // dedup tag exactly as Linear would receive it.
   assert.match(r.stdout, /<!-- run:test:publish-cli -->/);
   assert.doesNotMatch(r.stdout + r.stderr, /comment posted/i);
+});
+
+console.log("\n--clear-returned-by-review (pass-time label removal, FOC-165)");
+
+test("pass flag + --dry-run prints the would-be label removal and exits 0", () => {
+  const r = run(["--clear-returned-by-review", "--dry-run"]);
+  assert.equal(r.status, 0, `expected exit 0, got ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert.match(
+    r.stdout,
+    /would remove label returned-by:review from ZZZ-999999/,
+    `no planned removal in output\n${r.stdout}`,
+  );
+  // The exact command a reader would run by hand, verbatim.
+  assert.match(r.stdout, /linear-ops\.mjs label ZZZ-999999 --remove returned-by:review/);
+});
+
+test("pass flag with the comment refused: label removal is skipped, visibly, exit non-zero", () => {
+  const r = run(["--clear-returned-by-review"]);
+  assert.notEqual(r.status, 0, `expected failure (invalid key + nonexistent issue)\n${r.stdout}\n${r.stderr}`);
+  // The removal did not run — and the output says so instead of staying silent.
+  assert.match(r.stdout + r.stderr, /NOT removed.*comment post failed/s);
+  assert.doesNotMatch(r.stdout + r.stderr, /clearing returned-by:review/);
+});
+
+test("without the pass flag no label step runs at all", () => {
+  const r = run([]);
+  assert.notEqual(r.status, 0);
+  assert.doesNotMatch(r.stdout + r.stderr, /returned-by:review/);
 });
 
 summary();

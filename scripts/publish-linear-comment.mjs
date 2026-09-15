@@ -9,9 +9,13 @@
  * Usage:
  *   node scripts/publish-linear-comment.mjs --issue <id> --tag <tag> --squad <name> --what <desc> \
  *     [--run-id <id>] [--state-file <path>] [--next <text>] [--body-file <path>] \
- *     [--tier T1|T2|T3] --summary <bullet> [--summary <bullet> ...] [--dry-run]
+ *     [--tier T1|T2|T3] --summary <bullet> [--summary <bullet> ...] \
+ *     [--clear-returned-by-review] [--dry-run]
  *
  *   --dry-run prints the body that would be posted and exits 0 without writing.
+ *   --clear-returned-by-review: after a SUCCESSFUL post, also remove the
+ *     `returned-by:review` label from the issue via linear-ops — the pass-time
+ *     removal FOC-284 deferred (the label used to outlive the pass it blocked).
  *   Any flag not listed here exits 2 before anything is posted.
  *
  * Dependencies: Node 18+. No npm install required.
@@ -27,6 +31,11 @@ import { fileURLToPath } from "node:url";
 // callers may invoke this script from any directory (see FOC-153).
 const __filename = fileURLToPath(import.meta.url);
 const __dir = dirname(__filename);
+
+// Pass-time removal target (FOC-165). Mirrors groups["returned-by"] in
+// config/linear/labels.json — linear-ops `label` validates against that
+// vocabulary, so a rename there must land here too or the removal exits 1.
+const RETURNED_BY_REVIEW_LABEL = "returned-by:review";
 
 // ---------------------------------------------------------------------------
 // CLI argument parser
@@ -68,6 +77,8 @@ export function parseArgs(argv) {
       args.help = true;
     } else if (a === "--dry-run") {
       args.dryRun = true;
+    } else if (a === "--clear-returned-by-review") {
+      args.clearReturnedByReview = true;
     } else if (a.startsWith("--")) {
       // Collected, not skipped: main() refuses to post. A silently skipped
       // `--dry-run` once published a rehearsal for real (run a93f, FOC-287).
@@ -85,7 +96,8 @@ function printUsage() {
   console.error("Usage:");
   console.error("  node scripts/publish-linear-comment.mjs --issue <id> --tag <tag> --squad <name> --what <desc> \\");
   console.error("    [--run-id <id>] [--state-file <path>] [--next <text>] [--body-file <path>] \\");
-  console.error("    [--tier T1|T2|T3] --summary <bullet> [--summary <bullet> ...] [--dry-run]");
+  console.error("    [--tier T1|T2|T3] --summary <bullet> [--summary <bullet> ...] \\");
+  console.error("    [--clear-returned-by-review] [--dry-run]");
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +241,12 @@ function main() {
   if (args.dryRun) {
     console.log(`[dry-run] would post to ${args.issue} (dedup tag ${args.tag}) — nothing was written:\n`);
     console.log(body);
+    if (args.clearReturnedByReview) {
+      console.log(
+        `[dry-run] would remove label ${RETURNED_BY_REVIEW_LABEL} from ${args.issue} ` +
+        `(node scripts/linear-ops.mjs label ${args.issue} --remove ${RETURNED_BY_REVIEW_LABEL})`,
+      );
+    }
     process.exit(0);
   }
 
@@ -252,6 +270,33 @@ function main() {
     exitCode = result.status !== null ? result.status : 3;
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
+  }
+
+  // Pass-time label removal (FOC-165): an explicit companion to a successful
+  // post, never a standalone action. Comment result and label result stay
+  // independent — a failed removal cannot un-post the comment, but it fails
+  // the script so the stale label is never silently lost.
+  if (args.clearReturnedByReview) {
+    if (exitCode !== 0) {
+      console.error(
+        `[label] ${RETURNED_BY_REVIEW_LABEL} NOT removed — comment post failed (exit ${exitCode}). ` +
+        `After fixing the post, remove it with: node scripts/linear-ops.mjs label ${args.issue} --remove ${RETURNED_BY_REVIEW_LABEL}`,
+      );
+    } else {
+      console.log(`[label] clearing ${RETURNED_BY_REVIEW_LABEL} from ${args.issue} (pass-time removal)`);
+      const labelResult = spawnSync("node", [
+        join(__dir, "linear-ops.mjs"), "label", args.issue,
+        "--remove", RETURNED_BY_REVIEW_LABEL,
+      ], { stdio: "inherit" });
+      const labelExit = labelResult.status !== null ? labelResult.status : 3;
+      if (labelExit !== 0) {
+        console.error(
+          `[label] FAILED to remove ${RETURNED_BY_REVIEW_LABEL} (exit ${labelExit}) — the comment IS posted. ` +
+          `Remove the label manually: node scripts/linear-ops.mjs label ${args.issue} --remove ${RETURNED_BY_REVIEW_LABEL}`,
+        );
+        exitCode = labelExit;
+      }
+    }
   }
 
   process.exit(exitCode);
