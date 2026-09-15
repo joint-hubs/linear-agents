@@ -201,7 +201,53 @@ such execution happened in this run.
 
 ## 4. Item (b) — pricing nebul-catalogued keys across scopes
 
-TBD
+**Commit:** `bf9c50a` — *fix(telemetry): price nebul-catalogued keys via exact-key cross-scope
+fallback*.
+
+**What changed.** `resolvePrice` / `calculateCost` gained an optional `scoped` parameter.
+`scripts/telemetry-store.mjs:1498` keeps flat `openrouter`-only resolution first and unchanged; only
+when that fails **and** the caller hands over the provider map does an exact-key cross-scope fallback
+fire. Fuzzy matching never crosses providers, and collisions are deterministic: identical rate rows
+collapse (alphabetically first provider wins) and differing rows refuse to unpriced rather than picking
+one silently. Five call sites were threaded through — `ingest applyUsageRecorded`, the run-projection
+cache, `repriceCurrent`, `aggregateUsageByTask` under `priceMode: 'current'`, and the supervisor
+watch-side `priceOne` (`supervisor-watch.mjs:113`, which is the one feeding the registry behind
+`assertWithinBudget`).
+
+**Evidence that it was necessary** — re-measured on the copy in this run, not taken from the commit
+message:
+
+```
+canonical_usage WHERE model = 'zai-org/GLM-5.2-FP8'
+  excluding this run's synthetic proof row:  rows=1079  priced=0  unpriced=1079  SUM(cost_usd)=NULL
+  including it:                              rows=1080  priced=1  unpriced=1079
+RAW usage_facts rows for the same key: 4703   →   cost_facts rows with non-null cost: 0
+pricing_missing issues naming GLM-5.2-FP8: 19
+```
+
+The key sits under `pricing.nebul` in `config/models.json` (`input 1.91 / output 9.57 / cacheRead 0.76
+/ cacheWrite 0.76`), and `zai-org/GLM-5.2-FP8` is the **only** key in that scope. So before the fix
+every one of those rows was unpriced, and budget accounting was blind on a model with real spend.
+*Reconciliation note:* the commit message says "1,080 canonical unpriced"; this run measures 1,079
+excluding the one synthetic proof row that `.state/foc-165/foc165-proof.mjs` writes to the copy —
+1080 − 1 = 1079, and the two agree once that row is accounted for. The report quotes its own numbers
+and shows the arithmetic rather than repeating the rounder one.
+
+**No historical rewrite.** Existing `cost_facts` rows keep their snapshot-time `price_set_id`; only
+newly ingested rows price differently. That is the price-sync policy, and it is why this fix does not
+restate past costs — see §13 finding F3 for what that leaves on the table.
+
+**The tests.** `node scripts/telemetry-store.test.mjs` → **51 passed, 0 failed**; four are new (FP8
+ingest pricing; openrouter keys unchanged with the containment rule pinned for
+`z-ai/glm-5.2-20260616`; collision determinism; scoped-fallback vs legacy flat `null`).
+`node scripts/supervisor-cost.test.mjs` → **29 passed, 0 failed**, including the watch-side test that a
+nebul-catalogued key prices non-zero.
+
+**End-to-end on stored data, not on a unit fixture:** `node .state/foc-165/foc165-proof.mjs` writes a
+fresh FP8 row through the real ingest into the **copy** and reads it back priced at `$4.0824`
+(1M in / 200k out / 300k cacheRead / 40k cacheWrite at the nebul rates), with `z-ai` keys unchanged and
+no `pricing_missing` issue raised. That call is on the copy only — `.state/foc-165/telemetry-copy.sqlite`
+— never the live store.
 
 ## 5. Item (c) — canonical views drop/recreate atomically inside `migrate`
 
