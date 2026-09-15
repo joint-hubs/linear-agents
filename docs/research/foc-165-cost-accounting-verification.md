@@ -126,7 +126,9 @@ $ node scripts/price-check.mjs --json ; echo "EXIT=$?"
 EXIT=1
 ```
 
-It reported **7** drifting prices and **4** unlisted models, and exited non-zero — both halves of AC7.
+It reported **8** drifted models (**21 field diffs** at tolerance 0.02) and **4** unlisted models, and
+exited non-zero — both halves of AC7. (An earlier draft of this section said "7 drifting prices"; the
+checker's own JSON names 8 — corrected 2026-09-15, round 2.)
 The drift list is in §1.8 and §13; note that a model absent from the live catalogue is reported as
 unlisted, not as an error, so pinned dated snapshots do not produce false failures.
 
@@ -138,8 +140,8 @@ Read from `config/models.json` → `pricing.openrouter`:
 |---|---|---|---|
 | `stealth/ox-alpha` | `0 / 0 / 0` | leave at $0, do not "fix" | **met — left alone** |
 | `openai/gpt-6-astra` | `10 / 50 / 1 / 12.5` | cache rates filled from the 2026-09-05 catalogue check | **met** |
-| `deepseek/deepseek-v4-pro` | `0.66 / 1.98 / 0.022` | correct to `0.87 / 1.74 / 0.0725` | **not met** |
-| `deepseek/deepseek-v4-pro-0813` | `0.66 / 1.98 / 0.022` | — (not named in the DoD) | same value as above |
+| `deepseek/deepseek-v4-pro` | `0.66 / 1.98 / 0.022` → **synced to `1.6 / 3.2 / 0.135`** | correct to `0.87 / 1.74 / 0.0725` | **not met as written — resolved by the dated sync (below)** |
+| `deepseek/deepseek-v4-pro-0813` | `0.66 / 1.98 / 0.022` → **synced to `0.57948 / 1.73844 / 0.018438`** | — (not named in the DoD) | synced with it (below) |
 
 The `stealth/ox-alpha` row is the one the issue warns about by name, and it is correct as it stands:
 the live catalogue does not list the model at all (§1.7 lists it under *unlisted*), so pricing it at
@@ -154,6 +156,22 @@ which is itself evidence about how fast this catalogue moves.
 
 `openai/gpt-6-astra` was verified against the issue's quoted 2026-09-05 check rather than against the
 network, per the run's constraints.
+
+**Resolution (round 2, 2026-09-15, gate Q2).** One dated price-sync was authorised and executed:
+`node scripts/price-check.mjs --json` at **2026-09-15T17:23:19Z** — the round's single authorised
+catalogue call (full output kept at `.state/price-check-2026-09-15.json`, exit 1: 8 drifted /
+21 field diffs / 4 unlisted). Graded against that dated catalogue, the DoD's target `0.87 / 1.74 /
+0.0725` **was stale** — it matched neither the committed row nor the live catalogue (`1.6 / 3.2 /
+0.135`), so the item was **unsatisfiable as written**. The sync applied the live figures to every
+drifted model as a new price set (§4's policy: existing `cost_facts` rows keep their snapshot-time
+`price_set_id`; no stored cost changed). `stealth/ox-alpha` stays `0 / 0 / 0` — unlisted, a
+pinned-snapshot choice, not "fixed". `anthropic/claude-fable-5` was **not** added: the checker
+compares committed rows only and does not emit the full catalogue, so whether the catalogue lists it
+could not be established within the single authorised call — it stays unknown-priced, **10**
+`canonical_usage` rows, all still `NULL` (F6). One line on the largest drift figure so a reader is
+not alarmed: `z-ai/glm-5.2` (now `1.4 / 4.4 / 0.14`) changes nothing at runtime — the supervisor
+launcher pins deepseek (`bin/supervisor.bat:25`, `SUPERVISOR_MODEL=deepseek/deepseek-v4.1-flash`);
+glm-5.2 runs only where a key names it (e.g. `cadence.retro`).
 
 ## 2. Definition of Done — grading
 
@@ -515,10 +533,11 @@ is *unknown*, and the cap machinery treats unknown as refusal (the (g) behaviour
 state: the alternative number would be an under-count. (ii) The budget refusal's *hint* (`:276`, "add
 the model to pricing.openrouter") is not threshold-aware — with the qualifier the holder line already
 states the real reason, but the hint line still points at adding a row; left as-is on purpose, it is
-one string in a path that (g) owns. (iii) It does not touch the `z-ai/glm-5.3-flash` drift — that is
-finding **F8** (§13), a dated price-sync decision for Mateusz, not a mechanical edit: the committed row
-stays `0.071 / 0.24 / 0.015`, the issue's 2026-09-05 catalogue figure was `0.075 / 0.25 / 0.015`, and
-`price-check.mjs` run 2026-09-15 reported the live catalogue at `0.15 / 0.5 / 0.03` (~2×; §1.7).
+one string in a path that (g) owns. (iii) The `z-ai/glm-5.3-flash` drift is finding **F8** (§13). At this item's writing the committed row
+stayed `0.071 / 0.24 / 0.015`, the issue's 2026-09-05 catalogue figure was `0.075 / 0.25 / 0.015`, and
+this report's own 2026-09-15 run had reported the live catalogue at `0.15 / 0.5 / 0.03` (~2×). The
+gate's dated sync (Q2, 2026-09-15T17:23:19Z) then reported `0.075 / 0.25` and committed that as the
+new price set — the 2× reading did not reproduce (F8's resolution, §13).
 
 ## 9. Item (g) — zero-token results, and the refusal that names the unpriced child
 
@@ -875,6 +894,12 @@ then-current figure with the check date recorded as provenance, or (ii) amend th
 *date* its figures came from and accept them as pinned. (i) is the recommendation; it is the same
 "catalogue time/provider as provenance" rule the issue already states for `z-ai/glm-5.3-flash`.
 
+**Resolution (round 2, 2026-09-15, gate Q2).** Option (i) executed as a gate decision: the authorised
+`price-check.mjs --json` run of **2026-09-15T17:23:19Z** (the round's single authorised catalogue call)
+supplied `1.6 / 3.2 / 0.135`, and the dated sync committed it as the new price set across all 8 drifted
+models (§1.8). The DoD's own target is recorded as stale, not applied — `0.87 / 1.74 / 0.0725` matched
+neither source.
+
 ### F2 — `config/models.map` still lacks 10 role keys, and the checker cannot see it (dated 2026-09-15)
 
 **Observed.** Measured against the role files that exist in the tree:
@@ -967,6 +992,13 @@ model this repo may no longer route to) or accept 10 permanently-unknown rows an
 coverage table is read. What must not happen is a `$0` default — `null` is the correct answer today and
 that is AC3 working.
 
+**Decision (round 2, 2026-09-15).** The row is **not added**. The gate's single authorised catalogue
+call (the dated sync, §1.8) cannot confirm whether the catalogue lists `anthropic/claude-fable-5` —
+the checker compares committed rows only and does not emit the full catalogue — and inventing a rate
+is barred. The model stays unknown-priced, carrying its **10** `canonical_usage` rows (all priced
+`NULL`); `null` remains the correct answer, which is AC3 working. Settling it later needs either a
+dated catalogue figure or a deliberate, provenance-carrying `$0` act.
+
 ### F7 — the issue body is stale in a way that could mislead a reviewer (dated 2026-09-15)
 
 The FOC-165 description presents two defects as open — the missing cap and its unread env var — and
@@ -1002,6 +1034,16 @@ silently rewriting historical costs"*. Reconciling `glm-5.3-flash` at the curren
 deliberate price-sync act with a date attached, and it belongs in the same decision as F1 (the two are
 the same question asked about two models). Record in the report — as here — that the computed series
 carries a *rate-date* caveat, not just an unpriced count.
+
+**Resolution (round 2, 2026-09-15, gate Q2).** The price-sync act happened, dated — and the drift's
+magnitude did not survive it. The authorised sync run (`price-check.mjs --json`, 2026-09-15T17:23:19Z)
+reports the live catalogue at `0.075 / 0.25` for this model, cacheRead within tolerance of `0.015` —
+i.e. the 2026-09-05 figure, **not** the `0.15 / 0.5 / 0.03` this report's own round-1 run had reported
+hours earlier. Two same-day catalogue readings disagree; both are kept here, and the sync run is the
+priced source of truth for this landing. The row is now `0.075 / 0.25 / 0.015`. Consequence for the
+caveat above: its premise (live rates ~2× committed) does not hold at sync time — the committed rates
+the computed series used sit ~4–6% under the catalogue, so `$0.17` is money to within those few
+percent, and the 2× restatement (~$0.36, ~24×) is **withdrawn as unreproduced**, not silently kept.
 
 ### F9 — a supervised full-suite run is red for two environmental reasons, one per run (dated 2026-09-15)
 
