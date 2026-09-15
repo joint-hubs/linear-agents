@@ -711,7 +711,165 @@ its own failure modes and the evidence above does not need it.
 
 ## 13. Findings beyond (a)–(g)
 
-TBD
+Each is a **dated finding with a proposed disposition**. None of them was fixed in this turn: this turn
+produces the report, and per the run's constraints a fix-or-defer decision beyond (a)–(g) stops here.
+
+### F1 — `deepseek/deepseek-v4-pro` is not at the DoD's figure (dated 2026-09-15)
+
+**Observed.** `config/models.json` → `pricing.openrouter["deepseek/deepseek-v4-pro"]` is
+`{input: 0.66, output: 1.98, cacheRead: 0.022}`. The DoD says it is *"corrected to 0.87 / 1.74 /
+0.0725"*. It is not, and neither is `deepseek/deepseek-v4-pro-0813`, which carries the same value.
+Reproduce:
+
+```bash
+node -e "const p=require('./config/models.json').pricing.openrouter;
+  console.log(p['deepseek/deepseek-v4-pro'], p['deepseek/deepseek-v4-pro-0813'])"
+```
+
+**Why it matters.** The issue's own justification for `price-check.mjs` names this model by name: it
+*"sat ~10% under the real rate with 8.9M input and 53.5M cache-read tokens already spent against it"*.
+A DoD item that names an exact number and is not met is the kind of thing a release decision must not
+discover later.
+
+**Complication, stated plainly.** Run at 2026-09-15, `price-check.mjs` reports the live catalogue at
+`1.6 / 3.2 / 0.135` for this key — which is **neither** the committed value nor the DoD's target. So
+"apply the DoD's numbers" is itself now of uncertain value: it would replace one disagreement with the
+catalogue by another. The catalogue is a moving target; the DoD's figures are a point-in-time
+measurement with a date attached.
+
+**Proposed disposition.** Do not silently write `0.87 / 1.74 / 0.0725` and call the DoD met — the value
+would be stale before it landed. Either (i) re-run `price-check.mjs` at landing time and commit the
+then-current figure with the check date recorded as provenance, or (ii) amend the DoD to state the
+*date* its figures came from and accept them as pinned. (i) is the recommendation; it is the same
+"catalogue time/provider as provenance" rule the issue already states for `z-ai/glm-5.3-flash`.
+
+### F2 — `config/models.map` still lacks 10 role keys, and the checker cannot see it (dated 2026-09-15)
+
+**Observed.** Measured against the role files that exist in the tree:
+
+```
+dev:    debugger, flash, implementer, recon, refactorer, worker   →  missing: flash, worker
+plan:   decomposer, discovery, flash, push, spec, spec-review, worker → missing: flash, worker
+review: deep, first-pass, flash, security, worker                 →  missing: flash, worker
+test:   deployer, flash, root-cause, runner, scenario-gen, worker →  missing: flash, worker
+cadence: collector, digest, flash, retro, worker                  →  missing: flash, worker
+```
+
+That is **10 missing `(area, role)` keys — `flash` and `worker` in each of five squads** — not the "5
+role keys" F-14 states. `git ls-tree` at the review's own commit `527bc64` gives the same 10, so the
+review's figure is a count of *squads*, or of distinct role names; either way the register understates
+the gap by half. Reproduce:
+
+```bash
+git ls-tree -r --name-only 527bc64 | grep -E '^agents/[a-z]+/agents/[a-z-]+\.md$'
+git show 527bc64:config/models.map | grep -v '^_id'
+```
+
+**Why it matters, mechanically.** `bin/agent.bat:26` seeds `set "M=z-ai/glm-5.2"` and overwrites it
+**only** if `%AREA%.%ROLE%` appears in `config/models.map` (`:27`–`:29`). A role with no key is
+therefore not an error — it silently launches a `flash` or `worker` subagent on `glm-5.2`, at a
+different price and a different capability from the role's routing. The checker validates the *other*
+direction only: `scripts/check.mjs:206` reports a `models.map` key that has no `agents/<area>/agents/
+<role>.md`, and nothing reports a role file that has no key. So `node scripts/check.mjs` passes while
+the drift is live.
+
+**Proposed disposition.** **Fix now** (F-14's own disposition, and it is a ten-line config change):
+add the ten keys, then add the missing reverse check to `scripts/check.mjs` — a key set that cannot
+detect its own omissions will re-open the same finding. Note this is *not* done here because it touches
+`scripts/check.mjs`, which this turn's authorised paths do not include.
+
+### F3 — `ids.opus`: half the claim is verifiable, half is not (dated 2026-09-15)
+
+**Verified half.** `config/models.json` → `ids.opus` = `anthropic/claude-opus-4.8`;
+`config/models.map` → `_id.opus` = `anthropic/claude-opus-4.8`; `config/models.native.map` →
+`plan.lead` / `plan.spec-review` = `claude-opus-4-8`. All three agree with each other, and
+`pricing.openrouter` carries an `anthropic/claude-opus-5` row that nothing routes to. So *"the price
+table knows an opus the routing never selects"* is confirmed.
+
+**Not verified.** F-14's phrasing is *"`ids.opus` → 4.8 vs plan-native opus-5"*. Nothing in the tree
+says plan is supposed to be on opus-5: `grep -rn "opus-5|opus5" config/ docs/agents/ agents/*/CLAUDE.md`
+returns **only** the price row (`config/models.json:167`). The claim that plan *should* be on 5 came
+from somewhere other than this repo.
+
+**Proposed disposition.** **Defer with the question stated** rather than "fix" a drift whose direction
+is unestablished: is the intent that `opus` means the newest Opus (→ routing and native map both move
+to 5, three files), or that 4.8 is deliberately pinned and the opus-5 price row is the dead entry (→
+delete the row)? Both are one-commit changes; guessing between them is not.
+
+### F4 — item (e)'s flag is implemented but wired into nothing (dated 2026-09-15)
+
+**Observed.** `grep -rn "clear-returned-by-review" agents/` returns nothing.
+`agents/review/CLAUDE.md:143` — the clean-path hand-off — invokes `publish-linear-comment.mjs` with
+seven flags and not this one. So the FOC-284 stale label would recur on the next review pass, exactly
+as before `51ce84b`.
+
+**Proposed disposition.** **Fix now, and it is a one-line edit to a file this run may not touch**
+(`agents/**` changes go to Mateusz by the repo's own rule). Add `--clear-returned-by-review` to the
+clean-path command at `agents/review/CLAUDE.md:143`. Until then item (e) is a capability, not a fix —
+see §7.
+
+### F5 — the divergence fixture is not faithful to real `modelUsage`, and overstates the ratio 2.7× (dated 2026-09-15)
+
+**Observed.** The four original fixture events are `dev-1`'s, with `modelUsage` replaced by the
+top-level `usage` shape. Real per-model entries are a different measurement: `dev-1` #1 has 498 336
+per-model input tokens against a 132 629 top-level. Pricing the fixture therefore yields **169.9×** for
+a set whose real ratio is **63.1×** (§10.3).
+
+**Proposed disposition.** **Defer, deliberately.** The fixture is reviewed test input that four existing
+tests and §9.2's mutation evidence assert against; changing its numbers now would invalidate the
+evidence that justifies the (g) fix. The behavioural pins it carries (zero-token → `$0`, unpriced →
+`null`) do not depend on the magnitude. Carry as a follow-up: add one event with a *real* per-model
+entry that differs from its top-level `usage`, so the suite prices one honest shape. If anyone quotes a
+divergence figure from the fixture in a release decision, §10.3 must travel with it.
+
+### F6 — `anthropic/claude-fable-5` has no price row, so 10 rows can never be repriced (dated 2026-09-15)
+
+**Observed.** `canonical_usage` holds 10 rows for `anthropic/claude-fable-5`, all unpriced
+(`SUM(cost_usd) = NULL`), all from one run (`2026-08-09T13-36-24-712-dev-a18b`, squad `dev`, agent
+`recon`). The key is absent from `pricing.openrouter` **and** `pricing.nebul`, and absent from the
+newest price set in the store. Unlike FP8 (§11.3), no fix to the resolution path helps: there is no row
+to resolve.
+
+**Proposed disposition.** **Decide, don't default.** Either add a price row (needs a real rate for a
+model this repo may no longer route to) or accept 10 permanently-unknown rows and note it where the
+coverage table is read. What must not happen is a `$0` default — `null` is the correct answer today and
+that is AC3 working.
+
+### F7 — the issue body is stale in a way that could mislead a reviewer (dated 2026-09-15)
+
+The FOC-165 description presents two defects as open — the missing cap and its unread env var — and
+implies the grep behind that claim is current.
+
+**Observed.** The cap *is* read at runtime (`scripts/supervisor-lib.mjs:222`, called from
+`supervisor-spawn.mjs:214` and `supervisor-followup.mjs:137`), and the commit that landed it is
+`a720b88`, dated **2026-08-26** — three weeks before this run's base `f887fb9`. So the issue's
+"no runtime reads the cap" is a 2026-08-26 grep, and both defects it describes had been fixed before
+this run started.
+
+**Proposed disposition.** **Fix now, cheaply:** annotate the issue body with the date and the commit
+that closed each defect, or the next reader re-derives a resolved problem. This report is the
+annotation (§1.4 is the current-state answer).
+
+### F8 — the "measured" costs are measured at rates that now disagree with the catalogue by ~2× (dated 2026-09-15)
+
+**Observed.** `z-ai/glm-5.3-flash` — the model every child of this run was routed to — is committed at
+`0.071 / 0.24 / 0.015` (`config/models.json`). `price-check.mjs` run at 2026-09-15 reports the live
+catalogue at `0.15 / 0.5 / 0.03`: **2.11× / 2.08× / 2.00×** the committed values, i.e. ~2.07× overall.
+The issue's own 2026-09-05 check had it at `0.075 / 0.25 / 0.015` — so this is not the check being
+wrong, it is the catalogue moving between 09-05 and 09-15.
+
+**Why it matters more than it looks.** Every "computed" figure in this report is computed *at the
+committed rates*. If the live rates are the real ones, then the measured cost of this run is
+**~$0.36 rather than $0.17**, and the divergence against the stream's $30.56 is ~24× rather than 58.8×.
+The direction of the headline is unchanged and the defect is unchanged — but the magnitude is a
+function of a price table that is currently ~2× stale, and no reader should take `$0.17` as money.
+
+**Proposed disposition.** **Do not "fix" silently.** The issue already states the rule — *"treat
+catalogue time/provider as provenance and reconcile via the existing price-sync policy rather than
+silently rewriting historical costs"*. Reconciling `glm-5.3-flash` at the current catalogue rate is a
+deliberate price-sync act with a date attached, and it belongs in the same decision as F1 (the two are
+the same question asked about two models). Record in the report — as here — that the computed series
+carries a *rate-date* caveat, not just an unpriced count.
 
 ## 14. Commands run
 
