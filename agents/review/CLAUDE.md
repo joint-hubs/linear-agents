@@ -140,7 +140,7 @@ WHY — gating on nitpicks stalls the pipeline for cosmetics; DEV gets noise ins
 Record `VERDICT: PASS`, the base/head or diff fingerprint, AC-to-evidence mapping and executed checks, plus the lint row required on every verdict (defined at the top of this step). Report skipped/unavailable checks explicitly. If evidence is insufficient, report `VERDICT: UNKNOWN` and request what is missing; silence, missing findings, process exit 0 and a dry-run are not PASS. REVIEW pass is not final TEST acceptance.
 1. Post final verdict comment:
    ```
-   node $LA_ROOT/scripts/publish-linear-comment.mjs --issue <identifier> --tag run:review-round:<identifier>:<N> --squad review --what "review round <N>" --run-id <runId> --state-file .state/reviews/<identifier>-round<N>.md --tier T2 --summary "Clean — no actionable issues" --next "Handing to TEST"
+   node $LA_ROOT/scripts/publish-linear-comment.mjs --issue <identifier> --tag run:review-round:<identifier>:<N> --squad review --what "review round <N>" --run-id <runId> --state-file .state/reviews/<identifier>-round<N>.md --tier T2 --clear-returned-by-review --summary "Clean — no actionable issues" --next "Handing to TEST"
    ```
 2. `node $LA_ROOT/scripts/linear-ops.mjs label <identifier> --add ai:reviewed --add dod-ok --add stage:testing`
 3. Keep status "In Review" (hand to TEST). Do NOT transition to Done.

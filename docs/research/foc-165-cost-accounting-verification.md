@@ -965,10 +965,11 @@ only.
 seven flags and not this one. So the FOC-284 stale label would recur on the next review pass, exactly
 as before `51ce84b`.
 
-**Proposed disposition.** **Fix now, and it is a one-line edit to a file this run may not touch**
-(`agents/**` changes go to Mateusz by the repo's own rule). Add `--clear-returned-by-review` to the
-clean-path command at `agents/review/CLAUDE.md:143`. Until then item (e) is a capability, not a fix —
-see §7.
+**Proposed disposition (round 2).** **Fixed now** (gate decision): `--clear-returned-by-review` is on
+the clean-path command at `agents/review/CLAUDE.md:143` — the review pass clears the
+`returned-by:review` label exactly where it hands back clean, so the FOC-284 stale-label recurrence
+does not survive a clean verdict. With the caller documented, item (e) is a fix, not only a
+capability (§7).
 
 ### F5 — the divergence fixture is not faithful to real `modelUsage`, and overstates the ratio 2.7× (dated 2026-09-15)
 
@@ -1091,7 +1092,7 @@ a supervised full-suite run reports one environmental red per run, and the hones
 ## 14. Commands run
 
 Every command below was run in this worktree
-(`C:\Users\mateu\Documents\GitHub\la-wt\linear-agents\foc-165-dev`) at head `6edebf1`, by this child.
+(`la-wt/linear-agents/foc-165-dev`) at head `6edebf1`, by this child.
 Results are the observed ones; a command whose output is red is followed by what was red.
 
 ### 14.1 Tests and gates — all executed, all green
