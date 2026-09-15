@@ -14,8 +14,8 @@
 
 **AC: 7 met, 0 not met, 0 inconclusive.** **DoD: 11 met, 1 not met** — `deepseek/deepseek-v4-pro` is
 not at the figure the DoD names (F1, §1.8), and the correction is not a mechanical one because the live
-catalogue has since moved past the DoD's own target. **Items (d) and (f) are not graded** — they are
-verification-only sections, explicitly pending later turns.
+catalogue has since moved past the DoD's own target. **Item (d) is decided — a written defer, with
+the corpus measured (§6)**; **item (f) remains pending its later turn.**
 
 Four corrections to the material this report was written from, all found by checking rather than
 trusting, all recorded in place rather than smoothed over: the divergence is **58.8×**, not the 169.9×
@@ -296,36 +296,100 @@ mean reverting a reviewed commit inside a report turn, which is exactly the muta
 next turn applies to the two new (g) fixtures. The green half is what was executed here, and it is
 what is graded.
 
-## 6. Item (d) — F-05: verification only
+## 6. Item (d) — F-05: written defer, with the corpus measured
 
-> **(d): the fix or the fix-or-defer decision lands in a later turn of this run; this section is
-> updated in the same commit as that change.**
-
-Nothing in this section is settled, and no part of it should be read as a grade.
+**Decision: DEFER (option ii).** The corpus still does not support a `returned-by:test`
+discriminator: the structured record set holds **5 test-squad verdicts, 0 findings across all of
+them, and exactly 1 test→dev return — itself carrying 0 findings, 0 failing tests, 0 changed files**.
+Implementing the symmetric half against that is designing against noise, which is what the review's
+own disposition already said (`527bc64`, §9: *"DEFER — design the label symmetric with review's;
+validate at the first real test return"*). This section is the deliverable: the decision, its
+evidence, and the trigger that reopens it. No code changed for this item.
 
 **What F-05 is.** From the FOC-272 consolidated topology review (`527bc64`,
 `docs/reviews/foc-272-topology-review.md` §9 — *not present on this branch's tree; read from the commit
-object*): *"test→dev return edge has no design corpus: 5 test verdicts, ~0 findings"*, disposition
-**DEFER — design the label symmetric with review's; validate at the first real test return**, assigned
-to *the FOC-165 release-candidate run*.
+object*): *"test→dev return edge has no design corpus: 5 test verdicts, ~0 findings"*. The review's §3
+(e) recommendation is an exclusive return label (`returned-by:review` / `returned-by:test`, added on
+the fail transition, removed on re-handoff). The review→dev half has a corpus to design against; the
+test→dev half does not. Item (e) implemented the review half (`51ce84b`, §7); this item was to decide
+the symmetric half.
 
-**Why it lands here at all.** It is the data gap behind item (e). The review's recommendation at §3 (e)
-is to emit an exclusive return label (`returned-by:review` / `returned-by:test`, added on the fail
-transition, removed on re-handoff) at return time. The review→dev half of that has a corpus to design
-against; the test→dev half does not — five verdicts with no findings is not a corpus, and designing a
-discriminator against it would be designing against noise.
+### The discriminator, established from the writer — not guessed
 
-**What this turn establishes, and what it does not.** This run's (g) work touched only
-`supervisor-lib.mjs` and the supervisor cost tests; the return-label surface is item (e) (§7), whose
-implementation is `51ce84b` and whose `returned-by:test` half is exactly the deferred part. So at
-`b055340` the position of F-05 is unchanged from the review, and the honest grade for (d) this turn is
-**inconclusive — pending, by design**, not *met* and not *not met*.
+A record's stage marker is its `squad` field, and `squad` is set at record time from the run's own
+child registry: `scripts/supervisor-verdict.mjs:216` (`const entry = registry.children[childId]`) and
+`:371` (`squad: entry.squad ?? null`). So `squad` records *which squad's child actually recorded this
+verdict* — precisely "what stage produced the record" — and it is present on all 141 records. This is
+the same conclusion FOC-219 reached independently (`agents/plan/plans/foc-219-design.md` §4.4:
+*"stage must be derived per record from `squad`/`childId`, never assumed from the source or the
+flow"*).
 
-**What would settle it.** Either (i) a real test→dev return with findings lands in the corpus during
-this release-candidate run, giving the symmetric label something to be validated against; or (ii) the
-run closes with that corpus still empty, in which case the correct outcome is a **written defer with
-the reason stated** — not a discriminator invented to close the finding. The later turn that lands (d)
-should say which of the two happened rather than choosing the flattering one.
+`noFailingTests` is **not** a stage marker, and the caution is confirmed by the writer itself: it is
+the FOC-220 declaration "this fail is not test-backed" (`supervisor-verdict.mjs:302-332` — a fail
+verdict must either declare `--failing-test` values or declare `--no-failing-tests <reason>`, and the
+declaration rides the record out as `noFailingTests`). All 9 records carrying it are `squad:"review"`
+— design failures declared by review, not test-stage verdicts. Reproduce:
+
+```bash
+node -e "const fs=require('fs');const files=require('child_process').execSync(
+  'ls .state/supervisor/*/verdicts/*.json').toString().trim().split('\n');
+const recs=files.map(f=>JSON.parse(fs.readFileSync(f,'utf8')));
+console.log(recs.filter(r=>r.noFailingTests!==undefined).map(r=>r.squad).join(','))"
+```
+
+### The corpus, measured 2026-09-15 — not taken from any brief
+
+```bash
+node -e "const fs=require('fs');const files=require('child_process').execSync(
+  'ls .state/supervisor/*/verdicts/*.json').toString().trim().split('\n');
+const recs=files.map(f=>JSON.parse(fs.readFileSync(f,'utf8')));
+const by=(k)=>recs.reduce((m,r)=>{const v=String(r[k]);m[v]=(m[v]||0)+1;return m},{});
+console.log('total',recs.length,JSON.stringify(by('squad')),JSON.stringify(by('verdict')));
+for(const r of recs.filter(r=>r.squad==='test'))
+  console.log(r.taskId,'r'+r.round,r.verdict,'findings='+r.findings.length,r.childId)"
+```
+
+| what | count |
+|---|---|
+| records, total | **141** — 130 `squad:"review"`, 5 `squad:"test"`, 6 `squad:"dev"`; 92 `pass`, 49 `fail` |
+| test-stage records | 5 — FOC-151 r2/r5/r7 (pass, `test-4`), FOC-184 r2 (pass, `test-3`), FOC-225 r7 (fail, `test-18`) |
+| findings across all 5 test records | **0** |
+| test→dev returns on record (test-squad fail verdicts) | **1** — FOC-225 r7 |
+| dev-squad fail verdicts | 0 |
+
+The review's premise is **not stale — it is current**. `527bc64` is dated 2026-09-11 and all 5 test
+records predate it (recorded 2026-08-31 … 2026-09-07); the structured corpus has grown from the
+review's 89 records (F-06's own denominator: *"populated 3/89"*) to 141 and has added **zero** new
+test-stage records.
+
+**What the one return says: nothing — and that is the point.** FOC-225 r7 is the no-movement repeat
+FOC-272 §3(b) itself cites (`combined: 7e7c3026fea1858d`, run dd5b): its fingerprint is
+`{changedFiles: 0, failingTests: [], tests: "e3b0c44298fc…"}` — that `tests` value is the SHA-256 of
+the empty string, truncated, i.e. an empty test axis. The return reason was "the work did not move",
+not findings dev could act on. Even the single positive example carries an empty axis everywhere a
+discriminator would read.
+
+### Why not (i)
+
+The label's semantics, symmetric with (e) (§7), would be "added on the test→dev fail transition,
+removed on re-handoff". Designing it needs to know what a real return looks like; the corpus contains
+one return with no findings, no failing tests and no changed files. There is nothing to validate
+against, and no test could be written whose mutation proof would mean anything, because the positive
+case has never occurred. This run cannot add one either: its children registry holds `dev-1`…`dev-4`
+only (`.state/supervisor/2026-09-15-supervisor-foc-165/children.json`) and it has recorded 0
+verdicts.
+
+Item (e)'s half (`returned-by:review`) is implemented and tested (`51ce84b`, §7); its open gap — the
+flag is invoked by no documented instruction — is carried as **F4** (§13). The symmetric half lands
+when data exists, not before.
+
+### What reopens it
+
+The first structured test-squad **fail** with a non-empty findings axis (or, once F-06's record-time
+enforcement holds, a populated `fingerprint.failingTests`) landing in
+`.state/supervisor/*/verdicts/`. Re-run the measurement command above; when it prints a test record
+with `findings>0`, design `returned-by:test` symmetric with (e) against that record and prove it by
+mutation. Until then, F-05 stays **DEFER** with the counts above as its evidence.
 
 ## 7. Item (e) — pass-time removal of `returned-by:review`
 
