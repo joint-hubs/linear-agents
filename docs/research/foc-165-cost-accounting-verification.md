@@ -873,4 +873,71 @@ carries a *rate-date* caveat, not just an unpriced count.
 
 ## 14. Commands run
 
-TBD
+Every command below was run in this worktree
+(`C:\Users\mateu\Documents\GitHub\la-wt\linear-agents\foc-165-dev`) at head `6edebf1`, by this child.
+Results are the observed ones; a command whose output is red is followed by what was red.
+
+### 14.1 Tests and gates — all executed, all green
+
+| command | result |
+|---|---|
+| `node scripts/supervisor-cost.test.mjs` | **31 passed, 0 failed** |
+| `node scripts/telemetry-store.test.mjs` | **51 passed, 0 failed** |
+| `node scripts/cost-guard.test.mjs` | **8 passed, 0 failed** |
+| `node scripts/publish-linear-comment.test.mjs` | **7 passed, 0 failed** |
+| `node scripts/telemetry-canonical-views-atomicity.test.mjs` | **PASS** |
+| `node scripts/config-drift.test.mjs` | **26 passed, 0 failed, exit 0** |
+| `node scripts/lint.mjs` | **OK: 400 files checked, 0 violations**, exit 0. Tool-printed scope: `json-parse 30 files`, `conflict-marker 400`, `bom 400`; tool-printed `Not covered: gitignored and machine-generated content in git mode (node_modules/, .state/, agent runtime dirs, tools/nebul wire captures, generated config/atlas-mcp.json, credential files)` |
+
+The lint row is stated in full — command, exit code, scope and `not covered` — because a lint that
+covers nothing is false evidence. Beyond the gitignored set the tool declares, `.state/foc-165/*.mjs`
+(including the proof scripts this report relies on) is **not linted** by this run.
+
+### 14.2 Evidence scripts — all executed
+
+| command | purpose | where its output appears |
+|---|---|---|
+| `node .state/foc-165/divergence-fixture.mjs` | the six fixture events through `costFromResult` × `pricingSnapshot` | §10.3 |
+| `node .state/foc-165/divergence-live-tee.mjs` | this run's real tees, priced twice (real `modelUsage` vs the fixture's normalisation) | §10.2, §10.3 |
+| `node .state/foc-165/counts.mjs` | raw vs canonical counts, price-set registry, JOIN-mismatch check | §4, §11 |
+| `node .state/foc-165/cost-reported.mjs` | stored reported/computed medians per model | §11.5 |
+| `node .state/foc-165/foc165-proof.mjs` | writes one synthetic FP8 row to the **copy** and reads it back priced | §4 |
+| `node .state/foc-165/make-copy.mjs` | (run before this turn) the read-only `VACUUM INTO` copy — **refused to overwrite**, existing copy reused | §12 |
+
+### 14.3 Mutation runs — red before green, then reverted
+
+Each was applied to a clean tree, run, and reverted with `git checkout -- scripts/supervisor-lib.mjs`;
+`git status --porcelain` after each showed only the intended files. Full table and interpretation in
+§9.2.
+
+| mutation | result |
+|---|---|
+| `scripts/supervisor-lib.mjs` ← `git show b055340^:…` (whole file reverted) | `26 passed, 5 FAILED` |
+| `sawTokens` guard read off top-level `usage` | `29 passed, 2 FAILED` |
+| zero-token result answering `null` instead of `0` | `27 passed, 4 FAILED` |
+
+### 14.4 Network-using, deliberately
+
+| command | result |
+|---|---|
+| `node scripts/price-check.mjs --json` | **exit 1**; 7 drifting prices, 4 unlisted models — §1.7, §1.8 |
+
+This is the only command in the run that touched the network. It is AC7's own acceptance test
+(`scripts/price-check.mjs:5`–`:7` documents it as network-using and deliberately outside
+`config-drift.test.mjs`), so it was run once and its output recorded. Everything else — every price,
+every token count, every row count in this report — came from `config/models.json`, the issue's quoted
+2026-09-05 figures, or the copy of the telemetry store. No catalogue figure was re-derived beyond this
+one invocation, and the two drift rows it reports are carried into §13 as findings with their date
+attached rather than as corrections applied here.
+
+### 14.5 Not run, and therefore not claimed
+
+- **`agents/review/CLAUDE.md` was not edited** and the review clean path was not driven end-to-end
+  (F4). Reading it is all this turn did.
+- **No Linear write of any kind.** No transition, no label, no comment, no description update.
+- **No `git push`, no PR, no merge**, and no command was run in any other worktree or against any other
+  branch. `config/models.map`, `config/models.json` and `scripts/check.mjs` were read, not modified
+  (F1, F2, F3).
+- **No Windows shell was driven through an over-budget launch** (§3), and the `--clear-returned-by-review`
+  removal was never executed against Linear (§7, F4).
+- **The live telemetry store was never opened by this child** (§12).
