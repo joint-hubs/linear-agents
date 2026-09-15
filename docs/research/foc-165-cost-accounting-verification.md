@@ -585,7 +585,88 @@ repo's spend, and that a cost series built on it was off by a factor between 50 
 
 ## 11. Pricing coverage
 
-TBD
+Row counts come from `canonical_usage` — the billing surface (FOC-221) — never from raw
+`usage_facts`. The store holds known duplicate raw rows (`z-ai/glm-5.3-flash`: 56 838 raw vs 27 840
+canonical; `zai-org/GLM-5.2-FP8`: 4 703 raw vs 1 079 canonical), so a raw count overstates by roughly
+2× for the GLM keys and by 4.4× for FP8. This run's own synthetic proof rows
+(`run_id = 'foc165-synthetic-proof'`) are excluded and counted separately where they matter.
+
+```bash
+node .state/foc-165/counts.mjs      # raw vs canonical, price-set registry, JOIN mismatch check
+```
+
+### 11.1 Coverage, all models
+
+```
+canonical_usage, synthetic proof excluded:
+  TOTAL   rows 77 859   priced 76 309   unpriced 1 550   SUM(cost_usd) $1 600.6543
+  distinct models: 39
+```
+
+**Any cost series printed anywhere in this report carries that `unpriced = 1 550` with it.** A total
+of `$1 600.65` over 77 859 rows is `$1 600.65` *plus 1 550 rows of unknown cost*, and the two must be
+read together or the series implies a completeness it does not have.
+
+### 11.2 Models carrying unpriced rows
+
+| model | canonical rows | unpriced | SUM(cost_usd) | what it is |
+|---|---|---|---|---|
+| **`zai-org/GLM-5.2-FP8`** | **1 079** | **1 079** | **`NULL`** | **unknown — the whole model** |
+| `anthropic/claude-haiku-4.5` | 606 | 206 | $2.4636 | partially priced; historical |
+| `<synthetic>` | 192 | 192 | `NULL` | not a model — mock/dry-run events |
+| `anthropic/claude-4.5-haiku-20251001` | 63 | 63 | `NULL` | historical |
+| `anthropic/claude-fable-5` | 10 | 10 | `NULL` | **live gap — no price row exists** |
+
+`zai-org/GLM-5.2-FP8` is reported **as unknown, with its row count (1 079), and never folded into
+`$0`** — `SUM(cost_usd)` is `NULL`, not `0.0`, which is the AC3 property surviving all the way into the
+aggregate. That is the point of §4: 1 079 rows of real spend were invisible, and the fix made them
+*priced*; had the fix instead defaulted them to zero, this table would have shown a comfortable
+`$0.00` and the model would have disappeared from view.
+
+### 11.3 Which gaps are live and which are historical
+
+The unpriced rows are not all the same kind of problem, and the difference is checkable. Comparing each
+model against the newest price set in the copy (`9cb7cbf85167`, created 2026-09-12T12:23:27Z, 30 rows):
+
+| model | row in the newest price set? | verdict |
+|---|---|---|
+| `zai-org/GLM-5.2-FP8` | **yes** — `provider: nebul, input 1.91` | **was a resolution defect, not a missing row** — exactly (b)'s bug: the row existed and the flat `openrouter`-only lookup could not see it |
+| `anthropic/claude-haiku-4.5` | yes — `provider: openrouter, input 1` | **historical** — unpriced rows come from older price sets; a fresh ingest prices them |
+| `anthropic/claude-4.5-haiku-20251001` | yes — `provider: openrouter, input 1` | **historical** |
+| `anthropic/claude-fable-5` | **no row anywhere** | **live gap** — 10 rows that no reprice can fix while the row is absent. Finding F6, §13 |
+| `<synthetic>` | no row (correctly) | not a gap — a mock marker that must stay unpriced rather than be priced at some bucket rate |
+
+The FP8 row is the sharpest evidence in this report for why (b) mattered: the rate was **already in the
+price table** and had been since at least 2026-09-12. Nothing was missing except the ability to look
+outside the `openrouter` scope.
+
+### 11.4 The canonical JOIN is sound
+
+`counts.mjs` also cross-checks `cost_facts.price_set_id` against `runs.price_set_id`, because a
+mismatch there would drop priced rows out of the canonical view even when a price exists — a
+`priced=N` under-count that would look exactly like a pricing gap. Result: `cost_facts` rows with
+`price_set_id IS NULL`: **0**, and no mismatch group reported. So the unpriced counts above are a
+pricing fact, not a view artefact.
+
+### 11.5 Reported-vs-computed on stored data
+
+`node .state/foc-165/cost-reported.mjs`, on the copy (median of per-child reported/computed):
+
+```
+z-ai/glm-5.3-flash: n=123  median 63.70x  (min 38.64 / max 218.69)
+z-ai/glm-5.3:       n=24   median  3.68x  (min  2.69 / max   5.75)
+z-ai/glm-5.2:       no usable children found
+zai-org/GLM-5.2-FP8: no usable children found
+cross-check 70/107 within 5% (registry computed $28.05 vs canonical $16.89)
+```
+
+Two things to take from this, and one not to. The **not**: the `63.70×` median agrees with §10.2's
+`50–79×` band for the model this run ran on, so the divergence is a property of the model, not of one
+child. The two to take: `z-ai/glm-5.3` sits at `3.68×` — the divergent factor is **model-specific and
+spans 3.7× to 64×**, which is why no single correction factor could have fixed AC1; and the
+`70/107 within 5%` cross-check is a **known-disputed** figure (`disputed-figure: FOC-220`, per the
+FOC-272 review §5 — the by-tool series rest on truncating, hash-less input recording). It is reported
+here as an observation on the copy, not as a validated agreement rate.
 
 ## 12. Telemetry copy path
 
