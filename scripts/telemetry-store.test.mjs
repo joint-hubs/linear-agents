@@ -1,9 +1,10 @@
 // Contract test for the central telemetry store.
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
   applyEvent,
   applyEvents,
@@ -29,6 +30,8 @@ import {
   SCHEMA_VERSION,
   MIGRATION_VERSIONS,
 } from "./telemetry-store.mjs";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 let passed = 0;
 let failed = 0;
@@ -200,8 +203,15 @@ test("health exposes store state", () => {
 test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
   const runId = "run-cache-savings";
   applyEvent(db, makeEvent("run.started", { runId, squad: "dev", startedAt: "2026-07-25T08:00:00.000Z" }, { runId, observedAt: "2026-07-25T08:00:00.000Z", sourceKind: "test" }));
-  // deepseek-v4-flash: input=0.088606, cacheRead=0.0177212 (real, from OpenRouter — JOI-79)
-  // savings = (1M / 1M) * (0.088606 - 0.0177212) = 0.0708848
+  // deepseek-v4-flash rates come from the same pricingSnapshot() the store
+  // prices through — derived below, not literals (rate literals broke on the
+  // 2026-09-15 price sync; the rate LEVEL is price-check.mjs's job, the tests
+  // own the CALCULATION). savings = (1M / 1M) * (input - cacheRead), the 1M
+  // basis the event above spends.
+  const flashRow = pricingSnapshot().prices["deepseek/deepseek-v4-flash"];
+  assert(flashRow && flashRow.input > 0 && flashRow.cacheRead > 0,
+    `precondition: deepseek/deepseek-v4-flash must be priced with input > 0 and cacheRead > 0, row=${JSON.stringify(flashRow)}`);
+  const expectedSavings = flashRow.input - flashRow.cacheRead;
   //
   // This used to expect 0.126, which is what the input*0.1 FALLBACK produces when
   // config carries no cacheRead. That fallback is wrong in both directions — 12x too
@@ -219,11 +229,11 @@ test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
   }, { runId, observedAt: "2026-07-25T08:02:00.000Z", sourceKind: "transcript", sourcePath: "C:/sessions/cache.jsonl", sourceOffset: 2, eventId: "cache-usage-2" }));
   const run = queryRuns(db, { runId })[0];
   assert(run.totals.cacheSavingsUSD > 0, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected > 0)`);
-  assert(Math.abs(run.totals.cacheSavingsUSD - 0.0708848) < 0.001, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected ~0.0708848 from the configured cacheRead=0.0177212)`);
+  assert(Math.abs(run.totals.cacheSavingsUSD - expectedSavings) < 0.001, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected ~${expectedSavings} = snapshot input − cacheRead)`);
   // Per-model: deepseek-v4-flash has savings, unknown model does not
   const flashEntry = run.byModel["deepseek-v4-flash"];
   assert(flashEntry != null, "deepseek-v4-flash entry missing from byModel");
-  assert(Math.abs(flashEntry.cacheSavingsUSD - 0.0708848) < 0.001, `byModel flash cacheSavingsUSD=${flashEntry.cacheSavingsUSD}`);
+  assert(Math.abs(flashEntry.cacheSavingsUSD - expectedSavings) < 0.001, `byModel flash cacheSavingsUSD=${flashEntry.cacheSavingsUSD} (expected ~${expectedSavings})`);
   const unknownEntry = run.byModel["unknown-model-v99"];
   assert(unknownEntry != null, "unknown-model-v99 entry missing from byModel");
   assert(unknownEntry.cacheSavingsUSD === 0, `byModel unknown cacheSavingsUSD=${unknownEntry.cacheSavingsUSD} (expected 0)`);
@@ -248,8 +258,19 @@ test("pricingSnapshot reads the nested config as a provider-scoped openrouter sc
     Object.keys(snapshot.scoped.openrouter).length === keys.length,
     `flat view has ${keys.length} rows, scoped.openrouter has ${Object.keys(snapshot.scoped.openrouter).length}`,
   );
+  // Compared against a row read directly from config/models.json — the real
+  // committed table — not against numbers: this test's point is that the
+  // nested-vs-flat resolution agrees with what is committed (Mateusz, round 3).
+  const committedRow = JSON.parse(readFileSync(join(ROOT, "config", "models.json"), "utf8"))
+    ?.pricing?.openrouter?.["z-ai/glm-5.2"];
+  assert(committedRow, "precondition: config/models.json must carry z-ai/glm-5.2 under pricing.openrouter");
+  assert(committedRow.input > 0 && committedRow.output > 0 && committedRow.cacheRead > 0,
+    `precondition: the committed z-ai/glm-5.2 row must be priced, row=${JSON.stringify(committedRow)}`);
   const glm = snapshot.prices["z-ai/glm-5.2"];
-  assert(glm && glm.input === 1.19 && glm.output === 3.74 && glm.cacheRead === 0.221, `z-ai/glm-5.2 row=${JSON.stringify(glm)}`);
+  assert(
+    glm && glm.input === committedRow.input && glm.output === committedRow.output && glm.cacheRead === committedRow.cacheRead,
+    `flat view vs committed row: snapshot=${JSON.stringify(glm)} committed=${JSON.stringify(committedRow)}`,
+  );
 });
 
 test("pricingSnapshot strips _doc/_note metadata and still classifies nested pricing", () => {
@@ -294,12 +315,24 @@ test("resolvePrice scopes by provider and preserves flat fuzzy when none is give
 
 test("calculateCost bills cache-creation at cacheWrite, falling back to input", () => {
   const prices = pricingSnapshot().prices;
-  // anthropic/claude-opus-5: input=5, cacheWrite=6.25 → cache-creation billed at 6.25.
+  // Rates are read from the same snapshot the runtime prices through — not
+  // literals (rate literals broke on the 2026-09-15 price sync). The
+  // cacheWrite !== input preconditions keep both halves distinguishable: if a
+  // row ever carried cacheWrite === input, the direct and fallback paths would
+  // be indistinguishable and the test would pass either way.
+  // anthropic/claude-opus-5 bills cache-creation at its own cacheWrite.
+  const op = prices["anthropic/claude-opus-5"];
+  assert(op && op.cacheWrite > 0, `precondition: anthropic/claude-opus-5 must carry cacheWrite > 0, row=${JSON.stringify(op)}`);
+  assert(op.cacheWrite !== op.input, `precondition: opus-5 cacheWrite (${op.cacheWrite}) must differ from input (${op.input}), else direct path is indistinguishable from fallback`);
   const withWrite = calculateCost({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 1_000_000 }, "anthropic/claude-opus-5", prices);
-  assert(Math.abs(withWrite - 6.25) < 0.0001, `cacheWrite cost=${withWrite} (expected 6.25)`);
-  // deepseek/deepseek-v4-flash has no cacheWrite → falls back to input (0.088606).
+  assert(Math.abs(withWrite - op.cacheWrite) < 0.0001, `cacheWrite cost=${withWrite} (expected ~${op.cacheWrite})`);
+  // deepseek/deepseek-v4-flash has no cacheWrite → falls back to input.
+  const r = prices["deepseek/deepseek-v4-flash"];
+  assert(r && r.input > 0, `precondition: deepseek/deepseek-v4-flash must be priced, row=${JSON.stringify(r)}`);
+  assert(r.cacheWrite === undefined, `precondition premise died: deepseek-v4-flash now carries cacheWrite=${r.cacheWrite} — point the fixture at a row without one`);
+  assert(r.cacheWrite !== r.input, "precondition: cacheWrite must differ from input, else fallback is indistinguishable from direct");
   const fallback = calculateCost({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 1_000_000 }, "deepseek/deepseek-v4-flash", prices);
-  assert(Math.abs(fallback - 0.088606) < 0.0001, `fallback cost=${fallback} (expected 0.088606)`);
+  assert(Math.abs(fallback - r.input) < 0.0001, `fallback cost=${fallback} (expected ~${r.input})`);
 });
 
 // --- FOC-165 (f): promptTokenThreshold — the flat row is the base rate, valid
