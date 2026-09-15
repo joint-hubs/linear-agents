@@ -5,20 +5,34 @@
 | Issue | FOC-165 — *Cost is measured, not reported* |
 | Branch | `foc-165-dev` |
 | Base | `f887fb9` |
-| Head at time of writing | `b055340` |
-| Report written | 2026-09-15 |
-| Telemetry store used | **copy** `.state/foc-165/telemetry-copy.sqlite` via `LA_TELEMETRY_DB` — the live `telemetry.sqlite` was never written (see §12) |
+| Code under review | **`6edebf1`** — the five reviewed commits plus this turn's fixture/test additions. This report's own commits follow it and change no code |
+| Report written | 2026-09-15, turn 2 of 5 |
+| Telemetry store used | **copy**, `.state/foc-165/telemetry-copy.sqlite`, addressed by explicit path — **not** via `LA_TELEMETRY_DB`, which is unset; see §12 for the correction and for why the live store was never written |
 | Grading source | the issue's own Acceptance Criteria / Definition of Done, reproduced verbatim below and graded item by item |
+
+## Verdict
+
+**AC: 7 met, 0 not met, 0 inconclusive.** **DoD: 11 met, 1 not met** — `deepseek/deepseek-v4-pro` is
+not at the figure the DoD names (F1, §1.8), and the correction is not a mechanical one because the live
+catalogue has since moved past the DoD's own target. **Items (d) and (f) are not graded** — they are
+verification-only sections, explicitly pending later turns.
+
+Four corrections to the material this report was written from, all found by checking rather than
+trusting, all recorded in place rather than smoothed over: the divergence is **58.8×**, not the 169.9×
+the fixture yields (§10.3); the run does **not** reach the store via `LA_TELEMETRY_DB` (§12); fixture
+**(i) is a constructed shape**, not a tee capture — no such event exists in this run's tees (§9.2); and
+the `flash`/`worker` gap in `config/models.map` is **10 keys, not 5** (F2).
 
 **How to read this report.** Every grade carries either a `file:line` or a command that can be re-run.
 `inconclusive` is used where the repo does not settle the question, and the report says what *would*
-settle it. No number in this document was copied from another agent's summary; §10's divergence was
-re-derived here from the committed fixture, and §11's row counts come from the `canonical_*` views.
+settle it. No number in this document was copied from another agent's summary: §10's divergence was
+re-derived here from the committed fixture **and** from this run's real tees, and §11's row counts come
+from the `canonical_*` views.
 
-**On the issue body.** The FOC-165 description is stale in one specific place, noted in §13: the
+**On the issue body.** The FOC-165 description is stale in one specific place, noted in §13 (F7): the
 "no runtime reads the cap" claim in it is a 2026-08-26 grep, and both defects it describes as open had
-already been fixed before this run started. The ACs below are graded against the tree at `b055340`,
-not against the issue's prose.
+already been fixed before this run started. The ACs below are graded against the tree at `6edebf1`, not
+against the issue's prose.
 
 ---
 
@@ -149,7 +163,7 @@ network, per the run's constraints.
 | `scripts/price-check.mjs` exists | **met** | §1.7 |
 | `deepseek/deepseek-v4-pro` corrected to 0.87 / 1.74 / 0.0725 | **not met** | §1.8, finding F1 in §13 |
 | `stealth/ox-alpha` left at $0 (do not "fix") | **met** | §1.8 |
-| tests: fabricated-vs-computed divergence | **met** | §10.3 |
+| tests: fabricated-vs-computed divergence | **met** | §10.4 |
 | tests: unpriced → null | **met** | §1.3 |
 | tests: cap trips at a boundary | **met** | §1.4 |
 | tests: cap absent → no change | **met** | §1.5 |
@@ -571,17 +585,23 @@ to carry a real per-model entry in the fixture; it is **not** done here, because
 reviewed test inputs whose numbers four existing tests assert against, and changing them mid-report
 would invalidate the very mutation evidence §9.2 depends on. Carried as **finding F5** in §13.
 
-### 10.4 What the tests do about divergence
+### 10.4 What the tests do about divergence — the DoD item
 
-`scripts/supervisor-cost.test.mjs` pins the *shape* of the divergence rather than its size: `costUsd`
-and `costUsdReported` are both written and neither replaces the other (AC2), and the cap tests assert
-on `spent` rather than on `reported`. There is no test that asserts a particular ratio — correctly, since
-the ratio is a property of a model's stream pricing and will move.
+The DoD asks for *"tests for fabricated-vs-computed divergence"*. Three exist, and they pin the
+divergence rather than a particular ratio — correctly, since the ratio is a property of a model's
+stream pricing and moves between 3.7× and 64× across models on stored data (§11.5):
+
+| test | what it pins |
+|---|---|
+| `a $0 model costs $0 however loudly the stream disagrees` (`supervisor-cost.test.mjs:102`) | the exact case that exposed the defect: OpenRouter serves `stealth/ox-alpha` free, Claude Code billed the turn at `$0.20587`. Asserts `computed === 0` **and** `reported === 0.20587699999999998` — the divergence is asserted as a fact, not smoothed away |
+| `budgetStatus sums children and keeps the reported figure apart` (`:314`) | `costUsd` and `costUsdReported` are summed into separate fields (`1.5/9` and `0.5/4` → `reported: 13`), so neither replaces the other (AC2) |
+| the cap suite (`:258`–`:291`) | the cap acts on `spent` (computed), never on `reported` — a cap that tripped on the fabricated figure would fire ~59× too early |
 
 A note on what is **not** claimed here: nothing in this report says the stream figure is *wrong* as a
-stream figure. `total_cost_usd` is Claude Code's own estimate, computed against Anthropic's price list
-for a model it does not recognise. What the measurements show is that it does not describe **this**
-repo's spend, and that a cost series built on it was off by a factor between 50 and 79.
+stream figure. `total_cost_usd` is Claude Code's own estimate, computed against a price list for a
+model it does not recognise. What the measurements show is that it does not describe **this** repo's
+spend, and that a cost series built on it was off by a factor between 50 and 79 — at the committed
+rates, which are themselves ~2× stale (F8).
 
 ## 11. Pricing coverage
 
