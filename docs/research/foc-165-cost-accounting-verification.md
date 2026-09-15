@@ -785,6 +785,10 @@ canonical_usage, synthetic proof excluded:
   distinct models: 39
 ```
 
+*(Rate date, round 4: that `$1 600.6543` is priced at each row's snapshot-time price set — §4's
+store semantics; the 2026-09-15 sync (`e3bec56`) added a new set and did not re-price stored rows,
+so the series reflects the rates its rows were ingested at, not the 2026-09-15 catalogue.)*
+
 **Any cost series printed anywhere in this report carries that `unpriced = 1 550` with it.** A total
 of `$1 600.65` over 77 859 rows is `$1 600.65` *plus 1 550 rows of unknown cost*, and the two must be
 read together or the series implies a completeness it does not have.
@@ -1137,7 +1141,7 @@ Every command below was run in this worktree
 (`la-wt/linear-agents/foc-165-dev`) at head `6edebf1`, by this child.
 Results are the observed ones; a command whose output is red is followed by what was red.
 
-### 14.1 Tests and gates — all executed, all green
+### 14.1 Tests and gates — all executed; results are per-head, not a blanket green
 
 | command | result |
 |---|---|
@@ -1149,6 +1153,12 @@ Results are the observed ones; a command whose output is red is followed by what
 | `node scripts/config-drift.test.mjs` | **26 passed, 0 failed, exit 0**; round 2 after the price sync: **26 passed, 0 failed, exit 0** |
 | `node scripts/lint.mjs` | **OK: 400 files checked, 0 violations**, exit 0. Tool-printed scope: `json-parse 30 files`, `conflict-marker 400`, `bom 400`; tool-printed `Not covered: gitignored and machine-generated content in git mode (node_modules/, .state/, agent runtime dirs, tools/nebul wire captures, generated config/atlas-mcp.json, credential files)`; round 2: **OK: 401 files checked, 0 violations, exit 0** |
 | `node scripts/check.test.mjs` *(new, round 2)* | **2 passed, 0 failed** — baseline green (`OK: 8 checks, 0 violations`) plus the key-deletion mutation: `DRIFT: 1 violations` naming `agents/dev/agents/flash.md`, exit 1, then the key restored byte-identical and green again (F2) |
+
+*(Round 4, head `9010e5d`: both files re-verified solo, clean env — **34 passed, 0 failed** and
+**55 passed, 0 failed**, exit 0. Test counts are unchanged; what moved is the assertion count —
+assert-bearing lines 86 → 89 in `supervisor-cost.test.mjs` and 190 → 194 in
+`telemetry-store.test.mjs` (`grep -cE "assert[.(]"`, measured on `d0a5ea9` vs `9010e5d`) — the five
+derived sites' row-exists and field-`> 0` preconditions, plus no deleted assertion.)*
 
 The lint row is stated in full — command, exit code, scope and `not covered` — because a lint that
 covers nothing is false evidence. Beyond the gitignored set the tool declares, `.state/foc-165/*.mjs`
@@ -1196,8 +1206,34 @@ exit 1, each file restored from the archive and green again (supervisor-cost 34/
 **The sync-proof (the point of the round):** in the same scratch copy, `z-ai/glm-5.2`'s `input` was
 changed `1.4 → 2.0` in `config/models.json` and both files were re-run — **both green** (34/0, 55/0,
 exit 0). The tests now track the table the runtime prices through, so the next dated sync cannot
-break them the way `e3bec56` broke the rate-pinned versions; a break now means the *formula* is
-wrong, which is what these eight mutations demonstrate the assertions can still catch.
+break **these thirteen assertions** — the eight rows above plus the five round-4 rows below — the
+way `e3bec56` broke the rate-pinned versions; a break now means the *formula* is wrong, which is
+what the mutations demonstrate the assertions can still catch.
+
+**Round 4 (the whole class, head `9010e5d`) — same scratch protocol
+(`git archive HEAD | tar -x`), candidate tree never mutated.** The five remaining runtime-pinned
+expected values are derived, each with its formula mutation:
+
+| file:line | formula broken | red output → restored |
+|---|---|---|
+| `supervisor-cost.test.mjs:209` | FP8 expected sum drops the `output` term | `expected ~1.91 … got 11.48`, exit 1 → 34/0 |
+| `supervisor-cost.test.mjs:252` | below-threshold expected drops the rate multiplier | `computed=2.71999 (expected 0.271999)`, exit 1 → 34/0 |
+| `telemetry-store.test.mjs:389` | below-threshold expected drops the rate multiplier | `cost=2.71999 (expected 0.271999)`, exit 1 → 55/0 |
+| `telemetry-store.test.mjs:417` | resolution comparison pairs `row.output` against the wrong committed field | FAIL on the pairing, exit 1 → 55/0 |
+| `telemetry-store.test.mjs:440` | ingest expected drops the `0.2 × output` term | `FP8 cost=4.0824 (expected 2.1684)`, exit 1 → 55/0 |
+
+**The rate-swap now covers both scopes.** In the scratch copy, four rates moved at once —
+`pricing.nebul["zai-org/GLM-5.2-FP8"]` `input 1.91 → 2.10` and `output 9.57 → 10.5`,
+`pricing.openrouter["openai/gpt-6-astra"]` `input 10 → 11`, `pricing.openrouter["z-ai/glm-5.2"]`
+`input 1.4 → 2.0` — and both files stayed **green** (34/0, 55/0, exit 0); after restoring the copy
+from the archive, green again. Sites 3–5 read the committed `pricing.nebul` row (deliberately not
+the snapshot — the flat scope has no FP8 key, which is the property those tests assert, so deriving
+from the snapshot would compare the resolver to itself), so a nebul rate change flows through both
+sides; sites 1–2 and the threshold boundary follow the openrouter scope the same way. The threshold
+boundary literals (`272_000` / `271_999` / the qualifier's `272000`) are likewise derived from the
+row's `promptTokenThreshold.minPromptTokens` — the same sync that moves a rate can move it — while
+the inline `THRESHOLD_PRICES` fixtures stay literal on purpose: they pass their own config object
+that no sync can reach.
 
 ### 14.4 Network-using, deliberately
 
