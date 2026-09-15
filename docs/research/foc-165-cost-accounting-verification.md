@@ -670,7 +670,44 @@ here as an observation on the copy, not as a validated agreement rate.
 
 ## 12. Telemetry copy path
 
-TBD
+**The copy actually used — and a correction to the brief.** The turn brief says to *"state which copy
+path you used for the telemetry store (via `LA_TELEMETRY_DB`)"*. That is not how it was done, and the
+difference is worth one paragraph rather than a silent substitution:
+
+- `LA_TELEMETRY_DB` is **unset** in this child (`process.env.LA_TELEMETRY_DB === undefined`), and
+  **no proof script in `.state/foc-165/` reads or sets it**. Every one of them addresses the copy by
+  explicit path — `counts.mjs:4`, `cost-reported.mjs:10`, `proof-resolve.mjs:6`, `foc165-proof.mjs:11`,
+  `make-copy.mjs:9` all open `…/.state/foc-165/telemetry-copy.sqlite` directly.
+- So the env-var mechanism `telemetry-store.mjs:59` defines (`process.env.LA_TELEMETRY_DB ||
+  join(telemetryHome(), "telemetry.sqlite")`) was **not** the mechanism used here. Pointing the scripts
+  at the copy by explicit path is the *stricter* form of the same guarantee — it cannot fall back to the
+  live store if the variable is misread — but the report should say what happened, not what was asked
+  for. Nothing in this report depends on the difference; every number in §4 and §11 comes from the copy.
+
+**The copy.**
+
+| | path | size | mtime |
+|---|---|---|---|
+| live | `%LOCALAPPDATA%\linear-agents\telemetry\telemetry.sqlite` | 586 670 080 B | 2026-09-15T13:30:48Z |
+| **copy (all queries)** | `.state/foc-165/telemetry-copy.sqlite` | 563 294 208 B | 2026-09-15T13:06:08Z |
+
+The copy was made by `node .state/foc-165/make-copy.mjs`, which opens the live store with
+`{ readOnly: true }` (`make-copy.mjs:18`), sets `PRAGMA busy_timeout = 30000`, and materialises the copy
+with `VACUUM INTO` (`:20`) — the pattern from `scripts/telemetry-prune.mjs:125-135`. It refuses to
+overwrite an existing copy (`:10`–`:13`), which is why re-running it is safe and why this run reused the
+copy taken at 13:06:08Z rather than replacing it.
+
+**The live store was never written by this report, and the honest form of that claim.** The live file's
+mtime is **later** than the copy's (13:30:48Z vs 13:06:08Z) — it was written *during* this session, by
+the live supervisor's watcher, not by this child. A read-only open is not proof by itself, so the claim
+made here is the checkable one: the five scripts this report used all open the copy path, and this child
+executed nothing else against a telemetry database. The one write this run performed anywhere —
+`foc165-proof.mjs`'s synthetic FP8 row proving (b) prices — went to the copy (`:3`, `:11`), and those
+rows are excluded by `run_id = 'foc165-synthetic-proof'` from every count in §11.
+
+**Not done, and therefore not claimed:** the live store was never opened read-only to confirm the
+absence of the synthetic run id, because opening a WAL database read-only alongside its live writer has
+its own failure modes and the evidence above does not need it.
 
 ## 13. Findings beyond (a)–(g)
 
