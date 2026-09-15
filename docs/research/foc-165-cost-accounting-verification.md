@@ -284,7 +284,34 @@ what is graded.
 
 ## 6. Item (d) — F-05: verification only
 
-TBD
+> **(d): the fix or the fix-or-defer decision lands in a later turn of this run; this section is
+> updated in the same commit as that change.**
+
+Nothing in this section is settled, and no part of it should be read as a grade.
+
+**What F-05 is.** From the FOC-272 consolidated topology review (`527bc64`,
+`docs/reviews/foc-272-topology-review.md` §9 — *not present on this branch's tree; read from the commit
+object*): *"test→dev return edge has no design corpus: 5 test verdicts, ~0 findings"*, disposition
+**DEFER — design the label symmetric with review's; validate at the first real test return**, assigned
+to *the FOC-165 release-candidate run*.
+
+**Why it lands here at all.** It is the data gap behind item (e). The review's recommendation at §3 (e)
+is to emit an exclusive return label (`returned-by:review` / `returned-by:test`, added on the fail
+transition, removed on re-handoff) at return time. The review→dev half of that has a corpus to design
+against; the test→dev half does not — five verdicts with no findings is not a corpus, and designing a
+discriminator against it would be designing against noise.
+
+**What this turn establishes, and what it does not.** This run's (g) work touched only
+`supervisor-lib.mjs` and the supervisor cost tests; the return-label surface is item (e) (§7), whose
+implementation is `51ce84b` and whose `returned-by:test` half is exactly the deferred part. So at
+`b055340` the position of F-05 is unchanged from the review, and the honest grade for (d) this turn is
+**inconclusive — pending, by design**, not *met* and not *not met*.
+
+**What would settle it.** Either (i) a real test→dev return with findings lands in the corpus during
+this release-candidate run, giving the symmetric label something to be validated against; or (ii) the
+run closes with that corpus still empty, in which case the correct outcome is a **written defer with
+the reason stated** — not a discriminator invented to close the finding. The later turn that lands (d)
+should say which of the two happened rather than choosing the flattering one.
 
 ## 7. Item (e) — pass-time removal of `returned-by:review`
 
