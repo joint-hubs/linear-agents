@@ -315,7 +315,41 @@ should say which of the two happened rather than choosing the flattering one.
 
 ## 7. Item (e) — pass-time removal of `returned-by:review`
 
-TBD
+**Commit:** `51ce84b` — *feat(linear): pass-time removal of returned-by:review via
+publish-linear-comment*.
+
+**What changed.** `scripts/publish-linear-comment.mjs` gains an explicit
+`--clear-returned-by-review` flag (`:80`, documented `:13`–`:16`): after a **successful** post it also
+spawns `linear-ops label <issue> --remove returned-by:review`. The two results stay independent — a
+failed removal cannot un-post the comment but does fail the script, so a stale label is never silently
+lost; a failed post skips the removal with a visible note. `--dry-run` prints the would-be removal.
+Without the flag, behaviour is unchanged. `returned-by:review` was also added to
+`config/linear/labels.json`, because the label exists in Linear since FOC-284 but was missing from the
+local vocabulary `linear-ops` validates against — without that row the removal would have exited 1.
+
+**Evidence that it was necessary.** FOC-284 left `returned-by:review` on a real issue *after* the child
+passed, because nothing removes it at pass time. A label that is added on failure and never removed on
+success is worse than no label: it makes the issue's state lie about where the work is, and that is the
+same class of defect as the issue's own subject — a signal that claims something the system no longer
+does.
+
+**The tests.** `node scripts/publish-linear-comment.test.mjs` → **7 passed, 0 failed**. The three new
+ones pin the contract: dry-run prints the exact removal command; with the comment refused the removal
+is skipped *visibly* and the exit is non-zero; with no flag, no label step runs at all.
+
+**The gap this item leaves open — and it is the important part.** The capability is not wired into the
+path that would use it. `agents/review/CLAUDE.md:143` is the clean-path hand-off command ("Clean — no
+actionable issues … Handing to TEST") and it does **not** pass `--clear-returned-by-review`;
+`grep -rn "clear-returned-by-review" agents/` returns nothing. So as of `b055340` the flag exists, is
+tested, and is invoked by no documented instruction — the FOC-284 stale label would still occur on the
+next review pass. The commit message itself flags this ("wiring the flag into the REVIEW clean path is
+Mateusz's call, flagged in the report"), so this is a known, declared boundary rather than an oversight
+— but it is also the difference between item (e) being *implemented* and item (e) being *effective*.
+Carried forward as **finding F4** in §13.
+
+**Not verified by execution.** The real removal was never run against Linear — by design, this child has
+no Linear write access. The evidence above is offline tests plus the file reads, and this report does
+not claim otherwise.
 
 ## 8. Item (f) — catalogue reconciliation: verification only
 
