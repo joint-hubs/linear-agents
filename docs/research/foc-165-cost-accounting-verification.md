@@ -948,10 +948,15 @@ says plan is supposed to be on opus-5: `grep -rn "opus-5|opus5" config/ docs/age
 returns **only** the price row (`config/models.json:167`). The claim that plan *should* be on 5 came
 from somewhere other than this repo.
 
-**Proposed disposition.** **Defer with the question stated** rather than "fix" a drift whose direction
-is unestablished: is the intent that `opus` means the newest Opus (→ routing and native map both move
-to 5, three files), or that 4.8 is deliberately pinned and the opus-5 price row is the dead entry (→
-delete the row)? Both are one-commit changes; guessing between them is not.
+**Proposed disposition (round 2).** Referred, with an owner: **FOC-350** — a new Linear issue, child
+of FOC-102, filed 2026-09-15. It owns `ids.opus` + `config/models.map _id.opus` +
+`config/models.native.map plan.lead`/`plan.spec-review` → Opus 5 (its price row
+`anthropic/claude-opus-5` = `5 / 25 / 0.5 / 6.25` already exists). The evidence that settles the
+direction, which round 1 could not find: **`bin/supervisor.bat:18-21`** — the NATIVE branch sets
+`claude-opus-5` / `claude-sonnet-5`, so the native path already expects the Opus-5 generation and 4.8
+is what has not been moved. F3 stops being "no owner"; it is **referred**, with the number. Linear
+itself was not touched this round (no Linear writes in the authorised set); the citation is by number
+only.
 
 ### F4 — item (e)'s flag is implemented but wired into nothing (dated 2026-09-15)
 
