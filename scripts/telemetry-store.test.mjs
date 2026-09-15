@@ -375,12 +375,19 @@ test("priceThreshold returns the declared threshold, null for flat rows, null fo
 
 test("the committed gpt-6-astra row declares the catalogue threshold and calculateCost honours it", () => {
   const snapshot = pricingSnapshot();
-  const t = snapshot.prices["openai/gpt-6-astra"]?.promptTokenThreshold;
-  assert(t && t.minPromptTokens === 272000, `astra threshold=${JSON.stringify(t)}`);
-  const above = calculateCost({ inputTokens: 272_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "openai/gpt-6-astra", snapshot.prices);
-  assert(above === null, "astra at 272k prompt tokens must be unpriced, not base-rate billed");
-  const below = calculateCost({ inputTokens: 271_999, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "openai/gpt-6-astra", snapshot.prices);
-  assert(Math.abs(below - 2.71999) < 1e-9, `astra below-threshold cost=${below} (expected 2.71999)`);
+  const r = snapshot.prices["openai/gpt-6-astra"];
+  assert(r && r.input > 0, `precondition: openai/gpt-6-astra must be priced with input > 0, row=${JSON.stringify(r)}`);
+  const t = r?.promptTokenThreshold;
+  // The threshold level is a rate-level parameter of the committed row — a
+  // sync can move it, so the boundary is read from the row, not pinned. What
+  // stays under test is that calculateCost HONOURS whatever the row declares.
+  assert(t && Number.isFinite(t.minPromptTokens) && t.minPromptTokens > 0, `astra threshold=${JSON.stringify(t)}`);
+  const th = t.minPromptTokens;
+  const above = calculateCost({ inputTokens: th, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "openai/gpt-6-astra", snapshot.prices);
+  assert(above === null, "astra at the declared threshold must be unpriced, not base-rate billed");
+  const below = calculateCost({ inputTokens: th - 1, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "openai/gpt-6-astra", snapshot.prices);
+  const expectedBelow = (th - 1) / 1e6 * r.input;
+  assert(Math.abs(below - expectedBelow) < 1e-9, `astra below-threshold cost=${below} (expected ${expectedBelow} = ${th - 1}/1e6 × snapshot input)`);
 });
 
 // --- FOC-165: cross-scope exact pricing (nebul-only keys) --------------------
@@ -397,8 +404,19 @@ test("a nebul-only key prices through the scoped fallback; legacy flat callers s
   const scoped = resolvePrice("zai-org/GLM-5.2-FP8", snapshot.prices, null, snapshot.scoped);
   assert(scoped && scoped.key === "zai-org/GLM-5.2-FP8", `scoped resolve=${JSON.stringify(scoped)}`);
   const row = scoped.price;
-  assert(row.input === 1.91 && row.output === 9.57 && row.cacheRead === 0.76 && row.cacheWrite === 0.76,
-    `nebul row=${JSON.stringify(row)}`);
+  // Expected side reads the committed pricing.nebul row from the file, not the
+  // snapshot: the resolver and the snapshot share one table, so comparing the
+  // resolved row against snapshot.scoped would be the same object compared to
+  // itself — green under any rate and under a resolver that picks the wrong
+  // row. The raw read keeps the resolution property and is equally sync-proof.
+  const committedNebul = JSON.parse(readFileSync(join(ROOT, "config", "models.json"), "utf8"))
+    ?.pricing?.nebul?.["zai-org/GLM-5.2-FP8"];
+  assert(committedNebul, "precondition: config/models.json must carry zai-org/GLM-5.2-FP8 under pricing.nebul");
+  assert(committedNebul.input > 0 && committedNebul.output > 0 && committedNebul.cacheRead > 0 && committedNebul.cacheWrite > 0,
+    `precondition: the committed nebul row must price all four fields > 0, row=${JSON.stringify(committedNebul)}`);
+  assert(row.input === committedNebul.input && row.output === committedNebul.output
+    && row.cacheRead === committedNebul.cacheRead && row.cacheWrite === committedNebul.cacheWrite,
+    `resolved nebul row=${JSON.stringify(row)} vs committed=${JSON.stringify(committedNebul)}`);
 });
 
 test("ingest prices FP8 at the catalogued nebul rates and raises no pricing_missing", () => {
@@ -412,10 +430,17 @@ test("ingest prices FP8 at the catalogued nebul rates and raises no pricing_miss
     observedAt: "2026-09-15T08:01:00.000Z",
     inputTokens: 1_000_000, outputTokens: 200_000, cacheReadTokens: 300_000, cacheCreationTokens: 40_000,
   }, "2026-09-15T08:01:00.000Z", 1);
-  // 1M×1.91 + 200k×9.57 + 300k×0.76 + 40k×0.76, all per 1M tokens.
+  // Expected side: the token multipliers of the fixture above (1M / 200k /
+  // 300k / 40k, all per 1M) priced at the committed nebul row's rates — read
+  // from the file, since the flat snapshot has no FP8 key by design.
+  const nebul = JSON.parse(readFileSync(join(ROOT, "config", "models.json"), "utf8"))
+    ?.pricing?.nebul?.["zai-org/GLM-5.2-FP8"];
+  assert(nebul && nebul.input > 0 && nebul.output > 0 && nebul.cacheRead > 0 && nebul.cacheWrite > 0,
+    `precondition: the committed nebul row must price all four fields > 0, row=${JSON.stringify(nebul)}`);
+  const expectedCost = 1 * nebul.input + 0.2 * nebul.output + 0.3 * nebul.cacheRead + 0.04 * nebul.cacheWrite;
   const costRow = db.prepare("SELECT cost_usd, price_set_id FROM cost_facts WHERE run_id=? AND usage_id=?").get(runId, "foc165-fp8");
   assert(costRow != null, "cost_facts row missing for the FP8 usage");
-  assert(Math.abs(costRow.cost_usd - 4.0824) < 0.0001, `FP8 cost=${costRow.cost_usd} (expected 4.0824 at nebul rates)`);
+  assert(Math.abs(costRow.cost_usd - expectedCost) < 0.0001, `FP8 cost=${costRow.cost_usd} (expected ${expectedCost} at the committed nebul rates)`);
   // The pricing snapshot that resolved the price is the same one stamped on the row.
   const run = db.prepare("SELECT price_set_id FROM runs WHERE run_id=?").get(runId);
   assert(run.price_set_id === costRow.price_set_id, `price_set_id mismatch: run=${run.price_set_id} cost=${costRow.price_set_id}`);

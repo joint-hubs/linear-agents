@@ -99,6 +99,31 @@ const requirePrice = (model, ...fields) => {
   return r;
 };
 
+// The threshold boundary is a rate-level parameter of the committed row too —
+// a sync can move it, so the tests read it from the row instead of a literal.
+const requireThreshold = () => {
+  const r = requirePrice("openai/gpt-6-astra", "input");
+  const th = r.promptTokenThreshold?.minPromptTokens;
+  assert.ok(Number.isFinite(th) && th > 0, `precondition: openai/gpt-6-astra.promptTokenThreshold.minPromptTokens must be a positive number, got ${th}`);
+  return th;
+};
+
+// Expected sides that must read the COMMITTED file rather than the snapshot:
+// the nebul-only FP8 row is invisible to SNAPSHOT.prices by design (that is
+// the property those tests assert), so deriving their expected side from the
+// snapshot would compare the resolver to itself. Same file the runtime prices
+// through, different accessor — resolution stays under test, the rate level
+// stays price-check.mjs's job.
+const committedNebulRow = () => {
+  const row = JSON.parse(readFileSync(join(ROOT, "config", "models.json"), "utf8"))
+    ?.pricing?.nebul?.["zai-org/GLM-5.2-FP8"];
+  assert.ok(row, "precondition: config/models.json must carry zai-org/GLM-5.2-FP8 under pricing.nebul");
+  for (const f of ["input", "output", "cacheRead", "cacheWrite"]) {
+    assert.ok(row[f] > 0, `precondition: pricing.nebul["zai-org/GLM-5.2-FP8"].${f} must be > 0, got ${row[f]} — a 0-vs-0 comparison would make the test vacuous`);
+  }
+  return row;
+};
+
 // The shape Claude Code actually emits, taken from a real run on 2026-08-26.
 const resultEvent = (over = {}) => ({
   type: "result",
@@ -177,8 +202,12 @@ test("a nebul-catalogued key prices non-zero on the watch side (FOC-165)", () =>
     null,
     priceOne,
   );
-  // nebul rates: input 1.91 + output 9.57 per 1M
-  assert.ok(Math.abs(out.computed - (1.91 + 9.57)) < 0.001, `expected ~11.48, got ${out.computed}`);
+  // Expected side reads the catalogued nebul row from the committed file: the
+  // flat snapshot deliberately has no FP8 key, so the snapshot cannot be the
+  // expected side here without comparing the resolver to itself.
+  const nebul = committedNebulRow();
+  const expected = nebul.input + nebul.output;
+  assert.ok(Math.abs(out.computed - expected) < 0.001, `expected ~${expected} (committed nebul input+output per 1M), got ${out.computed}`);
   assert.deepEqual(out.unpriced, []);
 });
 
@@ -200,9 +229,10 @@ test("both spellings of the usage fields are read", () => {
 const thresholdOne = (model) => priceThreshold(model, SNAPSHOT.prices, null, SNAPSHOT.scoped);
 
 test("a turn at/above the declared threshold is unpriced with a named qualifier, not under-counted", () => {
+  const th = requireThreshold();
   const out = costFromResult(
     resultEvent({
-      modelUsage: { "openai/gpt-6-astra": { inputTokens: 272_000, outputTokens: 1_000_000, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+      modelUsage: { "openai/gpt-6-astra": { inputTokens: th, outputTokens: 1_000_000, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
     }),
     null,
     priceOne,
@@ -211,21 +241,24 @@ test("a turn at/above the declared threshold is unpriced with a named qualifier,
   assert.equal(out.computed, null, `computed=${out.computed} (expected null — the flat row must not bill above its threshold)`);
   assert.deepEqual(
     out.unpriced,
-    ["openai/gpt-6-astra (unsupported above 272000 prompt tokens)"],
+    [`openai/gpt-6-astra (unsupported above ${th} prompt tokens)`],
     `unpriced=${JSON.stringify(out.unpriced)}`,
   );
 });
 
 test("a turn below the threshold prices at the base rate as before", () => {
+  const th = requireThreshold();
+  const a = requirePrice("openai/gpt-6-astra", "input");
+  const expected = (th - 1) / 1e6 * a.input;
   const out = costFromResult(
     resultEvent({
-      modelUsage: { "openai/gpt-6-astra": { inputTokens: 271_999, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+      modelUsage: { "openai/gpt-6-astra": { inputTokens: th - 1, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
     }),
     null,
     priceOne,
     thresholdOne,
   );
-  assert.ok(Math.abs(out.computed - 2.71999) < 1e-9, `computed=${out.computed} (expected 2.71999)`);
+  assert.ok(Math.abs(out.computed - expected) < 1e-9, `computed=${out.computed} (expected ${expected} = ${th - 1}/1e6 × snapshot input)`);
   assert.deepEqual(out.unpriced, []);
 });
 
