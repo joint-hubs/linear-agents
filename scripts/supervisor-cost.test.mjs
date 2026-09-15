@@ -84,6 +84,21 @@ const child = (over = {}) => ({
 const SNAPSHOT = pricingSnapshot();
 const priceOne = (usage, model) => calculateCost(usage, model, SNAPSHOT.prices, null, SNAPSHOT.scoped);
 
+// The expected side of every cost assertion below is DERIVED from the same
+// snapshot the runtime prices through (pricingSnapshot() above), never from a
+// literal. A literal tracks a rate level, and the next price sync breaks it —
+// the level is price-check.mjs's job (with a date); the tests own the
+// CALCULATION. This bit us on 2026-09-15: seven assertions pinned to pre-sync
+// rates went red on a green calculation.
+const requirePrice = (model, ...fields) => {
+  const r = SNAPSHOT.prices[model];
+  assert.ok(r, `precondition: ${model} must have a price row in the runtime snapshot`);
+  for (const f of fields) {
+    assert.ok(r[f] > 0, `precondition: ${model}.${f} must be > 0, got ${r[f]} — a 0-vs-0 comparison would make the test vacuous`);
+  }
+  return r;
+};
+
 // The shape Claude Code actually emits, taken from a real run on 2026-08-26.
 const resultEvent = (over = {}) => ({
   type: "result",
@@ -116,8 +131,10 @@ test("a priced model is costed from its tokens", () => {
     null,
     priceOne,
   );
-  // glm-5.2: input 1.19 + output 3.74 per 1M
-  assert.ok(Math.abs(out.computed - 4.93) < 0.001, `expected ~4.93, got ${out.computed}`);
+  // Expected value derived from the snapshot row the runtime prices through.
+  const r = requirePrice("z-ai/glm-5.2", "input", "output");
+  const expected = r.input + r.output;
+  assert.ok(Math.abs(out.computed - expected) < 0.001, `expected ~${expected} (snapshot input+output per 1M), got ${out.computed}`);
 });
 
 test("a turn touching two models prices each at its own rate", () => {
@@ -133,7 +150,10 @@ test("a turn touching two models prices each at its own rate", () => {
     null,
     priceOne,
   );
-  assert.ok(Math.abs(out.computed - (1.19 + 0.3)) < 0.001, `expected ~1.49, got ${out.computed}`);
+  const g = requirePrice("z-ai/glm-5.2", "input");
+  const m = requirePrice("minimax/minimax-m3", "input");
+  const expected = g.input + m.input;
+  assert.ok(Math.abs(out.computed - expected) < 0.001, `expected ~${expected} (snapshot input per 1M for both models), got ${out.computed}`);
 });
 
 test("without modelUsage it falls back to usage + the model from system/init", () => {
@@ -142,7 +162,8 @@ test("without modelUsage it falls back to usage + the model from system/init", (
     "z-ai/glm-5.2",
     priceOne,
   );
-  assert.ok(Math.abs(out.computed - 1.19) < 0.001, `got ${out.computed}`);
+  const r = requirePrice("z-ai/glm-5.2", "input");
+  assert.ok(Math.abs(out.computed - r.input) < 0.001, `expected ~${r.input} (snapshot input per 1M), got ${out.computed}`);
 });
 
 test("a nebul-catalogued key prices non-zero on the watch side (FOC-165)", () => {
@@ -453,7 +474,8 @@ const spentTokens = (e) =>
 // Did this event spend anything ANYWHERE? Per-model entries are authoritative
 // when present — a real result can carry `usage` all-zeros while `modelUsage`
 // holds the tokens (FOC-165 (g), the `zero-usage-real-model-tokens` fixture: top
-// level sums to 0, the event is worth $0.000273076). Reading only the top-level
+// level sums to 0, the event carries real per-model tokens worth a snapshot-derived
+// fraction of a dollar — asserted below). Reading only the top-level
 // `usage` here is the same mistake `costFromResult` must not make.
 const anyTokens = (e) => {
   const models = Object.entries(e.modelUsage ?? {});
@@ -541,10 +563,17 @@ test("zero top-level usage with real per-model tokens prices the tokens, not $0"
   const e = byName["zero-usage-real-model-tokens"];
   assert.equal(spentTokens(e), 0, "the top-level usage really is all zeros — that is the trap");
   const out = costFromResult(e, null, priceOne);
-  // Tolerance, not equality: 2876 input at 0.071/M plus 287 output at 0.24/M is
-  // 0.000273076 exactly on paper and 0.00027307599999999997 in binary floating
-  // point. The claim under test is the ORDER of magnitude — a real cost, not $0.
-  assert.ok(Math.abs(out.computed - 0.000273076) < 1e-12, `sawTokens must come from the per-model entries, got ${out.computed}`);
+  // Tolerance, not equality, for two reasons: the expected value is derived
+  // from the same snapshot row the runtime prices through (a price sync moves
+  // both sides together), and at this magnitude the product differs from the
+  // exact decimal in the last binary digits. The claim under test is the ORDER
+  // of magnitude — a real cost, not $0.
+  assert.equal(Object.keys(e.modelUsage).length, 1, "single-key shape is the premise of the derived expected value");
+  const [model, mu] = Object.entries(e.modelUsage)[0];
+  const r = requirePrice(model, "input", "output");
+  const expected = ((mu.inputTokens ?? 0) / 1e6) * r.input + ((mu.outputTokens ?? 0) / 1e6) * r.output;
+  assert.ok(expected > 0, "precondition: the fixture's per-model tokens must price above zero");
+  assert.ok(Math.abs(out.computed - expected) < 1e-12, `sawTokens must come from the per-model entries, got ${out.computed} (expected ~${expected})`);
   assert.deepEqual(out.unpriced, []);
   // And through the watcher's accumulator it is a real, non-zero contribution.
   assert.equal(addCost(0, out.computed), out.computed);
