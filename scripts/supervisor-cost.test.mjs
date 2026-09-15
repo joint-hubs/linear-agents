@@ -400,6 +400,24 @@ const INIT_MODEL = Object.keys(byName["success-with-tokens"].modelUsage)[0];
 const spentTokens = (e) =>
   e.usage.input_tokens + e.usage.output_tokens + e.usage.cache_read_input_tokens + e.usage.cache_creation_input_tokens;
 
+// Did this event spend anything ANYWHERE? Per-model entries are authoritative
+// when present — a real result can carry `usage` all-zeros while `modelUsage`
+// holds the tokens (FOC-165 (g), the `zero-usage-real-model-tokens` fixture: top
+// level sums to 0, the event is worth $0.000273076). Reading only the top-level
+// `usage` here is the same mistake `costFromResult` must not make.
+const anyTokens = (e) => {
+  const models = Object.entries(e.modelUsage ?? {});
+  const sources = models.length ? models.map(([, u]) => u) : [e.usage ?? {}];
+  return sources.some(
+    (u) =>
+      (u.inputTokens ?? u.input_tokens ?? 0) +
+        (u.outputTokens ?? u.output_tokens ?? 0) +
+        (u.cacheReadInputTokens ?? u.cache_read_input_tokens ?? 0) +
+        (u.cacheCreationInputTokens ?? u.cache_creation_input_tokens ?? 0) >
+      0,
+  );
+};
+
 test("a zero-token result prices to the known $0, not unknown", () => {
   for (const name of ["success-zero-tokens", "error-zero-tokens"]) {
     const out = costFromResult(byName[name], INIT_MODEL, priceOne);
@@ -445,11 +463,42 @@ test("a run of such turns leaves the child total unchanged, not nulled", () => {
     for (const m of cost.unpriced) if (!unpricedModels.includes(m)) unpricedModels.push(m);
   }
   const expected = FIXTURE.events
-    .filter((e) => spentTokens(e) > 0)
+    .filter(anyTokens)
     .reduce((sum, e) => sum + costFromResult(e, INIT_MODEL, priceOne).computed, 0);
   assert.ok(costUsd > 0, "the priced turns survive the zero-token ones");
   assert.equal(costUsd, expected, "zero-token turns add nothing and null nothing");
   assert.deepEqual(unpricedModels, []);
+});
+
+// ── (g) turn 2: the two shapes the four above do not cover.
+//
+// One guards each side of the rule. `zero-tokens-one-zero-key` is the shape that
+// must stay a KNOWN $0 — a model on record that spent nothing. Its sibling
+// `zero-usage-real-model-tokens` is the shape that must NOT become $0: the
+// top-level usage is all zeros while the per-model entries spent real tokens, so
+// a `sawTokens` read off `usage` instead of the entries silently discards the
+// cost. Both are the (g) fix's own near-misses, and neither existed before.
+
+test("an all-zero single-key modelUsage is the known $0, not unknown", () => {
+  const e = byName["zero-tokens-one-zero-key"];
+  assert.equal(Object.keys(e.modelUsage).length, 1, "muKeys=1 is the shape under test — {} is already covered");
+  const out = costFromResult(e, INIT_MODEL, priceOne);
+  assert.equal(out.computed, 0, "a recorded model that spent nothing still spent nothing");
+  assert.deepEqual(out.unpriced, []);
+});
+
+test("zero top-level usage with real per-model tokens prices the tokens, not $0", () => {
+  const e = byName["zero-usage-real-model-tokens"];
+  assert.equal(spentTokens(e), 0, "the top-level usage really is all zeros — that is the trap");
+  const out = costFromResult(e, null, priceOne);
+  // Tolerance, not equality: 2876 input at 0.071/M plus 287 output at 0.24/M is
+  // 0.000273076 exactly on paper and 0.00027307599999999997 in binary floating
+  // point. The claim under test is the ORDER of magnitude — a real cost, not $0.
+  assert.ok(Math.abs(out.computed - 0.000273076) < 1e-12, `sawTokens must come from the per-model entries, got ${out.computed}`);
+  assert.deepEqual(out.unpriced, []);
+  // And through the watcher's accumulator it is a real, non-zero contribution.
+  assert.equal(addCost(0, out.computed), out.computed);
+  assert.ok(addCost(0, out.computed) > 0, "an accumulator must not fold it into $0");
 });
 
 test("the cap refusal names the child holding the unknown cost", () => {

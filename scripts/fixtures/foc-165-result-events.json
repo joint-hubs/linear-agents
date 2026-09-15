@@ -1,5 +1,5 @@
 {
-  "source": "FOC-165 (g) — the four result events of one real supervised child, anonymised. Ids, timestamps and session ids stripped; token counts and modelUsage shapes are what the tests price. Two events carry tokens and a populated modelUsage; two carry usage all-zeros with modelUsage {} — the shape that used to null the whole child's costUsd.",
+  "source": "FOC-165 (g) — result events of real supervised children, anonymised. Ids, timestamps and session ids stripped; token counts and modelUsage shapes are what the tests price. The first four carry two events with tokens and a populated modelUsage, and two with usage all-zeros and modelUsage {} — the shape that used to null the whole child's costUsd. The last two are the (g) turn-2 additions: a single-key all-zero modelUsage (muKeys=1, the shape the four above do not cover), and a zero top-level usage carrying real per-model tokens — the near-miss of (g)'s own sawTokens logic, where reading the top-level usage instead of the per-model entries silently folds a real cost into $0.",
   "events": [
     {
       "name": "success-with-tokens",
@@ -32,6 +32,24 @@
       "total_cost_usd": 0,
       "usage": { "input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0 },
       "modelUsage": {}
+    },
+    {
+      "name": "zero-tokens-one-zero-key",
+      "is_error": false,
+      "total_cost_usd": 0,
+      "usage": { "input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0 },
+      "modelUsage": {
+        "z-ai/glm-5.3-flash": { "inputTokens": 0, "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0 }
+      }
+    },
+    {
+      "name": "zero-usage-real-model-tokens",
+      "is_error": true,
+      "total_cost_usd": 0.021555,
+      "usage": { "input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0 },
+      "modelUsage": {
+        "z-ai/glm-5.3-flash": { "inputTokens": 2876, "outputTokens": 287, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0 }
+      }
     }
   ]
 }
