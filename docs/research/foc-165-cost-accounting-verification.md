@@ -16,7 +16,10 @@
 not at the figure the DoD names (F1, §1.8), and the correction is not a mechanical one because the live
 catalogue has since moved past the DoD's own target. **Items (d) and (f) are decided** — (d) a written
 defer with the corpus measured (§6), (f) explicit unsupported-above-threshold handling with boundary
-fixtures (§8).
+fixtures (§8). **The full suite was run this turn** (`npm ci && node scripts/test-all.mjs`): 62/63
+files pass, exit 1 in both runs — the single red in each run is a hermetic `supervisor-*` test failing
+on its environment or timing budget, not on the candidate, and each passes solo (F9, §14.6);
+`telemetry-concurrency.test.mjs` (item (c)) passed in both runs.
 
 Four corrections to the material this report was written from, all found by checking rather than
 trusting, all recorded in place rather than smoothed over: the divergence is **58.8×**, not the 169.9×
@@ -1000,6 +1003,44 @@ deliberate price-sync act with a date attached, and it belongs in the same decis
 the same question asked about two models). Record in the report — as here — that the computed series
 carries a *rate-date* caveat, not just an unpriced count.
 
+### F9 — a supervised full-suite run is red for two environmental reasons, one per run (dated 2026-09-15)
+
+**Observed.** The full suite was run twice this turn at head `39147c5` (§14.6). First run, exactly as
+specified — `npm ci` (exit 0) then `node scripts/test-all.mjs` from the worktree root, in this child's
+inherited environment: exit 1, **62/63 passed** in 376 197 ms, sole red
+`supervisor-cleanup.test.mjs`. Its own output names the cause: 22 of 26 assertions fail with
+`refusing: LA_SUPERVISOR_CHILD=dev-5 is set, so this is running inside a spawned child` — the
+`LA_SUPERVISOR*` variables the supervisor sets on every spawned child leak into the suite, and this
+file asserts it is *not* running inside a spawned child. Re-run of that file alone with the four
+`LA_SUPERVISOR*` variables unset: exit 0, **26 passed, 0 failed**. So the red is deterministic in the
+inherited environment and deterministic green in a clean one — a property of where the suite was run
+from, not of the candidate. `LA_SUPERVISOR_MAX_COST_USD` itself was checked before the run and is
+**UNSET** in this shell.
+
+The second full run, same command with only the four `LA_SUPERVISOR*` variables unset, flipped the red
+to a different file: `supervisor-semaphore.test.mjs` (exit 1, 80 165 ms; assertion `--release starts a
+held request once the slot frees` — the child it spawned produced no `system/init` within the test's
+30 000 ms window). That file alone, clean env: exit 0, **19 passed, 0 failed**; in the first full run
+it passed at 50 074 ms. Timing-sensitive under full-suite load, not deterministic — the same class of
+flake as `telemetry-concurrency.test.mjs` before item (c), but with a timeout budget instead of a race.
+
+**What is clean.** `telemetry-concurrency.test.mjs` — item (c)'s own fix — passed in both full runs
+(490 ms, 476 ms). No red anywhere was attributable to any of (a)–(g): in each run the single red file
+was a hermetic `supervisor-*` test failing on its environment or its timing budget, and each passes
+when run alone.
+
+**Why it matters.** `test-all` exits 1 on both runs, so "the suite is green" is not a claim this report
+can make from inside a supervised run — but "the candidate is red" would be equally false. A reader
+sees exit 1 and must be able to trace which file and why without re-running anything.
+
+**Proposed disposition.** Do not weaken either test. Two candidate fixes, both outside (a)–(g) scope,
+neither applied here: (i) have `test-all.mjs` drop `LA_SUPERVISOR*` from the environment it passes to
+each spawned test file (the hermetic files assume a clean env; the runner running *inside* a
+supervised child is exactly the leak §14.6 shows); (ii) read the semaphore test's 30 000 ms
+`system/init` window from an env override so loaded machines stop eating flaky reds. Until one lands,
+a supervised full-suite run reports one environmental red per run, and the honest way to read it is
+§14.6: which file, solo re-run, clean-env re-run.
+
 ## 14. Commands run
 
 Every command below was run in this worktree
@@ -1070,3 +1111,30 @@ attached rather than as corrections applied here.
 - **No Windows shell was driven through an over-budget launch** (§3), and the `--clear-returned-by-review`
   removal was never executed against Linear (§7, F4).
 - **The live telemetry store was never opened by this child** (§12).
+
+### 14.6 Full suite — run this turn, at head `39147c5`
+
+Two full runs, both from the worktree root; logs kept at
+`.state/foc-165/test-all-run.log` (run 1) and `.state/foc-165/test-all-clean-env.log` (run 2).
+Per-file counts are the runner's own summary lines.
+
+| run | command | exit | summary | red file |
+|---|---|---|---|---|
+| 1 | `npm ci && node scripts/test-all.mjs` | 0 / **1** | **62/63 passed** in 376 197 ms; `npm ci`: 19 packages, 0 vulnerabilities | `supervisor-cleanup.test.mjs` (9 415 ms) — 4 passed, 22 FAILED |
+| 2 | `npm ci` already done; `env -u LA_SUPERVISOR -u LA_SUPERVISOR_CHILD -u LA_SUPERVISOR_REPO -u LA_SUPERVISOR_RUN node scripts/test-all.mjs` | **1** | **62/63 passed** in 396 831 ms | `supervisor-semaphore.test.mjs` (80 165 ms) — 18 passed, 1 FAILED |
+
+Solo re-runs of each red file (clean env, same command, no suite load):
+
+| file | result |
+|---|---|
+| `node scripts/supervisor-cleanup.test.mjs` | exit 0, **26 passed, 0 failed** |
+| `node scripts/supervisor-semaphore.test.mjs` | exit 0, **19 passed, 0 failed** |
+
+Run 1 is the run specified by the issue — the real result is **exit 1, 62/63**, and the red is
+environmental, not the candidate: this child is spawned with `LA_SUPERVISOR=1` and
+`LA_SUPERVISOR_CHILD=dev-5`, those variables leak into every test file `test-all.mjs` spawns, and
+`supervisor-cleanup.test.mjs` asserts it is running *outside* a spawned child (the full trace is F9).
+Run 2 isolates the two causes: with the four variables unset, cleanup passes and the red moves to the
+semaphore file's timing budget. Both reds are `supervisor-*` hermetic tests; both pass solo; neither
+touches (a)–(g). `telemetry-concurrency.test.mjs` (item (c)) passed in both runs. No test, threshold
+or skip was adjusted.
