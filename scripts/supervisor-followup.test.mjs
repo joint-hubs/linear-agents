@@ -234,6 +234,31 @@ test("a relative --prompt-file resolves against the caller's cwd, not the worktr
   if (prompt !== "PROMPT FROM THE CALLER'S FILE") fail(`resumed turn received ${JSON.stringify(prompt)}`);
 });
 
+test("an absolute --prompt-file is passed through unchanged", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const argvFile = join(runDir(runId), "argv.log");
+  const caller = mkdtempSync(join(tmpdir(), "la-sup-fu-caller-"));
+  cleanup.push(caller);
+  mkdirSync(join(caller, ".state"));
+  const promptFile = join(caller, ".state", "round2.md");
+  writeFileSync(promptFile, "PROMPT FROM THE CALLER'S FILE");
+
+  const child = spawnChild(runId, repo, { MOCK_CLAUDE_ARGV_FILE: argvFile });
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const out = parse(
+    followupFromCwd(caller, runId, child.childId, ["--prompt-file", promptFile], { MOCK_CLAUDE_ARGV_FILE: argvFile }),
+  );
+  if (!out.ok) fail(`followup refused a readable file: ${out.error}`);
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const calls = readFileSync(argvFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  if (calls.length !== 2) fail(`expected 2 claude invocations, got ${calls.length} — the resumed turn never started`);
+  const prompt = calls[1][calls[1].indexOf("-p") + 1];
+  if (prompt !== "PROMPT FROM THE CALLER'S FILE") fail(`resumed turn received ${JSON.stringify(prompt)}`);
+});
+
 test("an unreadable --prompt-file is refused before a turn is recorded", () => {
   // Refusing after the turn is appended would leave a phantom `starting` turn
   // with a null pid — the zombie shape FOC-271 exists to prevent.
