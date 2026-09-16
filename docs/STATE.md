@@ -3,30 +3,39 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Current execution: 2026-09-16 — FOC-102 Order 6 CLOSE-OUT done · release-blocking scope na `main`
+## Current execution: 2026-09-16 — FOC-102 fala + Order 6 + standing FOC-294..297 MERGED na `main`
 
-- **PR #27 MERGED** (`3f2ff87`, 2026-09-16T07:53Z) — cała fala FOC-102 (release-blocking scope) na
-  `origin/main`. Wchłonął PR #26 (FOC-284) w rebase. Lokalny `main` za `origin/main` (checkout
-  blokowany przez niezacommitowany `bin/supervisor.bat` — nietknięty z założenia).
-- **Order 6 (close-out) DONE 2026-09-16:**
-  - **Ledger completion record F0–F2** — dopisane do `docs/plans/fenix-linear-reconciliation.md`
-    ("Completion record", roadmap L3/L53). F0=FOC-217 PR#23 `2b3ea3d`, F1=FOC-218 PR#24 `313589a`,
+- **Pięć PR-ów zmergowanych na `origin/main` (2026-09-16):** #28 `768314b` (close-out docs), #29
+  `c9c680b` (FOC-294), #30 `170a58f` (FOC-295), #31 `9ad9419` (FOC-296), #32 `2c6128c` (FOC-297). `main`
+  na `2c6128c`. Wcześniejszy **PR #27 `3f2ff87`** (release-blocking scope fali, wchłonął PR #26).
+- **Order 6 (close-out) DONE i na `main` (PR #28):**
+  - **Ledger completion record F0–F2** w `docs/plans/fenix-linear-reconciliation.md` ("Completion
+    record", roadmap L3/L53). F0=FOC-217 PR#23 `2b3ea3d`, F1=FOC-218 PR#24 `313589a`,
     F2=FOC-219 PR#25 `967fc1a`; F3/F4 + blokujące kontrakty via PR #27 `3f2ff87`.
-  - **R1–R7 evidence pack** — nowy `docs/plans/fenix-1.0-release-evidence.md` (jedna uziemniona
-    linia per kryterium akceptacji; SHA, runy, gate'y, werdykty).
-  - **Delta applied to FOC-102** — `linear-ops update-description`: R1–R7 + Order 1–6 odhaczone
-    `[X]` z konkretnym dowodem (SHA, run, gate) przy każdym; PR #25/#27 SHA wpisane. `--dry-run`
-    przed publikacją. Ostatnie 3 pozycje DoD (ograniczenia procesowe) zostawione `[ ]` — to trwające
-    reguły, nie pozycje do odhaczenia.
-  - **BRIEF comment via Supervisor** — opublikowany na FOC-102 (`comment --dedup-tag
-    foc-102-release-closeout`, id `5dd0b717…`): release-blocking scope landed, R1–R7 pass, epik
-    zostaje In Progress (niesie niesblokujące dzieci + standing).
+  - **R1–R7 evidence pack** — `docs/plans/fenix-1.0-release-evidence.md` (jedna uziemniona linia per
+    kryterium akceptacji; SHA, runy, gate'y, werdykty).
+  - **Delta applied to FOC-102** — `linear-ops update-description`: R1–R7 + Order 1–6 odhaczone `[X]`
+    z konkretnym dowodem przy każdym. Ostatnie 3 pozycje DoD (ograniczenia procesowe) zostawione `[ ]`
+    — to trwające reguły, nie pozycje do odhaczenia.
+  - **BRIEF comment via Supervisor** na FOC-102 (id `5dd0b717…`).
+- **Standing follow-ups FOC-294/295/296/297 — DONE + MERGED.** Cztery runy `2026-09-16-supervisor-foc-{294,295,296,297}`,
+  child dev-1 glm-5.3-flash każdy, weryfikowane niezależnie (focused testy zielone, lint 403/0),
+  Backlog→Done + done comment. Koszt liczony 4 runów = **$0.1906** (reported $11.57 — ~60× zawyżone,
+  jak w FOC-165; w raporcie tylko koszt liczony).
+  - **FOC-294** (PR #29) — test-only `21a7b7e` (+25, 4. test dla `--prompt-file` na resume); fix
+    `9b8cb4a` już na main z PR #27.
+  - **FOC-295** (PR #30) — `3f11179` (3 files +113/−1; scrub `LA_SUPERVISOR*` w subprocessach test-all).
+  - **FOC-296** (PR #31) — `c1b2b8a` (3 files +175/−1; `--pre-authorized`/`--known-quirk` flagi REPEATABLE
+    z fail-closed guards).
+  - **FOC-297** (PR #32) — `8dc154b` (2 files +517/−30; paginacja kursorowa Relay w `bootstrap-linear.mjs`
+    + fail-loud guards + self-heal duplicate-label). AC1 live `--check`: 4 label groups, 122 labels
+    (było 0/100 → crash); exit 1 tylko przez out-of-scope `returned-by:review` (pre-existing drift).
+- **Proces — nota:** żaden z 4 runów standingowych nie miał alokacji budżetu (`supervisor-budget status`
+  → "has no allocation"), chroniła tylko `LA_SUPERVISOR_MAX_COST_USD`. Od następnego runu
+  `budget allocate --total` na starcie.
 - **Epik FOC-102 zostaje In Progress** — Order 6 domyka release-blocking scope, NIE epik. Niesie:
-  FOC-164/117/255/256/257 (post-1.0), standing FOC-294/295/296/297, FOC-351 (kruche testy), FOC-350,
-  FOC-297. Zamknięcie epiku — decyzja Mateusza.
-- **Docs close-out jeszcze nie na `main`** — `fenix-1.0-release-evidence.md` (nowy) +
-  `fenix-linear-reconciliation.md` (edycja) w working tree; wylądują małym close-out PR (worktree off
-  `origin/main`, bo checkout main blokowany przez `bin/supervisor.bat`) na zgodę Mateusza.
+  FOC-164/117/255/256/257 (post-1.0), FOC-351 (kruche testy), FOC-350. Zamknięcie epiku — decyzja
+  Mateusza. `bin/supervisor.bat` zostaje niezacommitowany (zmiana Mateusza, z założenia).
 
 ---
 
