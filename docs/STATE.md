@@ -50,15 +50,17 @@
 | FOC-102 | **epic — NIE domknięty** (po Mateuszu) | — | zamknięcie epiku po pushu linii fali + PR #26 |
 
 ### Czeka na Mateusza (poza moim pełnomocnictwem — nieodwracalne na zewnątrz)
-1. **Push linii fali** — `chore/foc-102-baseline` (d725788, 35 commitów nad ostatnim pushowanym stanem)
-   → `origin` (lub PR do main). Nigdzie nie wypchnięte.
-2. **PR #26 (FOC-284)** — `foc-284-dev` → main, czeka na merge.
-3. **Worktree'e** — `foc-284-{dev,review,test}` i `foc-286-{dev,review,test}` **usunięte przez Mateusza
-   2026-09-16** (razem z `foc-102-plan`, `foc-272-review`, `la-merge-dd5b`, `la-merge-a93f`; `.state`
-   uratowane → `../la-wt-rescued-2026-09-16/` z manifestem sha256). Zostają gałęzie `foc-284-dev` +
-   `foc-284-review` (PR #26) oraz `foc-220/272/286/287-review` (po 1 commicie werdyktu). Worktree
-   `foc-165-{dev,review,test}` sprzątnięte w run (3 usunięte, 4 gałęzie skasowane).
-4. **Zamknięcie epiku FOC-102** — po pushu linii fali; nie zamykam sam.
+1. **PR #27 (fala FOC-102) — OPEN, MERGEABLE** — https://github.com/joint-hubs/linear-agents/pull/27
+   (`chore/foc-102-baseline` → main, 77 commitów, 122 pliki +10739/−512). Gałąź wypchnięta; PR
+   rebazowany na nowy `main` (PR #26 / FOC-284 wchłonięty). Semantyczny konflikt merge rozwiązany:
+   wymóg FOC-165 (fail musi deklarować `--failing-test`) pogodzony z transition FOC-284 — testy
+   sekcji 5 dostają `--failing-test "suite/a"` (42/0); `returned-by:*` labele z FOC-284 autorytatywne
+   z notatką `--clear-returned-by-review` z FOC-165. Pełna suita w głównym checkoucie 61/64 (3 znane
+   env-redy = FOC-351, zero nowych po merge); czyste drzewo 64/64. Czeka na merge Mateusza.
+2. **Worktree'e** — `foc-284-{dev,review,test}` i `foc-286-{dev,review,test}` usunięte przez Mateusza
+   2026-09-16. **`foc-284-dev` usunięte lokalnie + zdalnie** (wchłonięte przez PR #26). Zostają gałęzie
+   werdyktowe `foc-220/272/284/286/287-review` (po decyzji Mateusza — nie usuwam) oraz `foc-284-review`.
+3. **Zamknięcie epiku FOC-102** — po merge'u PR #27; nie zamykam sam.
 
 ---
 
