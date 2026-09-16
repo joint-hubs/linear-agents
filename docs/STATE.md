@@ -26,7 +26,7 @@
   (w tle): `accepted: true`, izolacja exit 0, combined exit 0, replay 10 commitów bez konfliktów,
   `pathsOutsideDeclaration: []`, `findings: []`. Następnie `git merge --ff-only d725788` w głównym checkoucie.
 - **Rezidua FOC-165 (zapisane, nie file'owane — wind-down):** (1) para async `telemetry-store.test.mjs:757,772`
-  — awaria nie czerwieni suity; kandydat na osobne issue; (2) tolerancje `0.001`/`0.0001` pre-existing;
+  — awaria nie czerwieni suity; **filed jako FOC-351** (z 3 env-redami, niżej); (2) tolerancje `0.001`/`0.0001` pre-existing;
   (3) kopia bazy telemetrii 538 MB w `.state/foc-165/` NIE ratowana (prywatna, ginie z worktree); records
   i skrypty `*.mjs` zachowane; (4) F9 — `supervisor-cleanup.test.mjs` czerwone pod dziedziczonym env
   (`LA_SUPERVISOR_CHILD`); po wyczyszczeniu 26/0.
@@ -53,9 +53,30 @@
 1. **Push linii fali** — `chore/foc-102-baseline` (d725788, 35 commitów nad ostatnim pushowanym stanem)
    → `origin` (lub PR do main). Nigdzie nie wypchnięte.
 2. **PR #26 (FOC-284)** — `foc-284-dev` → main, czeka na merge.
-3. **Worktree'e** `foc-284-{dev,review,test}` i `foc-286-{dev,review,test}` — zostawione (decyzja Mateusza);
-   do usunięcia po jego zgodzie. Worktree `foc-165-{dev,review,test}` — do sprzątania (niżej).
+3. **Worktree'e** — `foc-284-{dev,review,test}` i `foc-286-{dev,review,test}` **usunięte przez Mateusza
+   2026-09-16** (razem z `foc-102-plan`, `foc-272-review`, `la-merge-dd5b`, `la-merge-a93f`; `.state`
+   uratowane → `../la-wt-rescued-2026-09-16/` z manifestem sha256). Zostają gałęzie `foc-284-dev` +
+   `foc-284-review` (PR #26) oraz `foc-220/272/286/287-review` (po 1 commicie werdyktu). Worktree
+   `foc-165-{dev,review,test}` sprzątnięte w run (3 usunięte, 4 gałęzie skasowane).
 4. **Zamknięcie epiku FOC-102** — po pushu linii fali; nie zamykam sam.
+
+---
+
+### Korekta 2026-09-16 (Mateusz, po close-out) — sprzątanie gita + stan zestawu
+
+- **Sprzątanie gita (poza narzędziami supervisora):** Mateusz usunął worktree `foc-102-plan`,
+  `foc-272-review`, `foc-284-{dev,review,test}`, `foc-286-{dev,review,test}`, `la-merge-dd5b`,
+  `la-merge-a93f` (`.state` uratowane → `../la-wt-rescued-2026-09-16/` + manifest sha256) oraz 21 gałęzi
+  (wszystkie `git cherry HEAD <gałąź>` bez "+"). Rejestry starych runów wskazują na worktree, których już
+  nie ma — nie odzyskiwać ani nie sprzątać. Zostają: `foc-284-dev` + `foc-284-review` (PR #26) oraz
+  `foc-220/272/286/287-review` (po 1 commicie werdyktu).
+- **Stan zestawu w głównym checkoucie: 61/64** — 3 czerwone to środowisko, nie kandydat: (a)
+  `rewards-routes.test.mjs` wisi na prawdziwym `.state` (w czystym worktree 9/9); (b)
+  `verdict-evidence.test.mjs` czyta prawdziwy `.state/review-rounds.json` mimo deklaracji hermetyczności;
+  (c) `supervisor-semaphore.test.mjs` — flake czasowy (solo 19/19); plus para async
+  `telemetry-store.test.mjs:757,772` nie liczona przez harness przed `process.exit`. W czystym drzewie
+  (tym, co trafi na main) zestaw zielony — potwierdza TEST r2 64/64 i combined exit 0 z merge'a.
+  Filed jako **FOC-351** (nieblokujące, dziecko FOC-102; opis: obserwacje + komendy, bez implementacji).
 
 ---
 
