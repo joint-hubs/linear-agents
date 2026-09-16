@@ -2,7 +2,7 @@
 // scripts/supervisor-verdict.mjs — a REVIEW verdict has to cite something.
 //
 //   node scripts/supervisor-verdict.mjs record --child <id> --verdict pass|fail [--work-child <id>]
-//        [--finding '<json>' ...] [--ac '<json>' ...] [--failing-test <id> ...]
+//        [--finding '<json>' ...] [--ac '<json>' ...] [--failing-test <id> ...] [--dry-run]
 //   node scripts/supervisor-verdict.mjs show --task <id> [--round N]
 //   node scripts/supervisor-verdict.mjs list
 //
@@ -31,6 +31,36 @@
 // Placeholder evidence ("n/a", "-", "TODO") is refused too. A requirement that
 // can be satisfied by typing a dash is not a requirement; the cheapest way past
 // this gate has to be actually looking.
+//
+// On a REVIEW fail (FOC-284) record also PERFORMS review.fail's transition: it
+// stamps the `returned-by:review` flag and moves the issue to In Progress via
+// linear-ops. The flag is the discriminator the routing rule keys on
+// (config/graph.json review-to-dev-return) — bare `In Progress` is also the
+// state of work DEV already holds, so without it a return could not be routed.
+//
+// Ordering (round 2): the verdict file is written BEFORE any Linear op runs,
+// carrying statuses "pending"; the ops run; the file is amended with the final
+// statuses. No Linear write can happen without a verdict record on disk, and a
+// crash in between leaves "pending" on disk — distinct from NO linearEffects,
+// which means an old tool wrote the record and said nothing at all.
+//
+// Enforcement (round 2): a side effect that did not land is still warnings-only
+// AT THE RECORD LEVEL, but on a real run (no --dry-run, not a child) a failed
+// label or transition additionally emits a pending Supervisor gate naming the
+// manual fix — a quiet `ok:true` must not be the last word on a return that
+// never happened (the round-1 incident: the apply never ran and nothing fired).
+//
+// Both side effects are warnings-only and never block recording: skipped inside
+// spawned children (LA_SUPERVISOR_CHILD, FOC-167), degraded to a warning on any
+// linear-ops failure, and the verdict file is written either way. `--dry-run`
+// (or one of the explicitly allow-listed *_DRY_RUN=1 envs, which linear-ops
+// honours offline via the mock fixture) runs the operations through linear-ops'
+// dry-run path instead — loudly, see DRY_RUN_ENV_ALLOWLIST. Any OTHER
+// *_DRY_RUN=1 in the session is scrubbed from every spawned Linear op's
+// environment (round 3): linear-ops AND linear-query honour the glob for ANY
+// name, and an unscrubbed rogue var would drive the offline fixture path — a
+// silent "applied" for linear-ops, or a fake issue description into
+// declaredAcs via linear-query — while this record still claimed a real run.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
@@ -103,10 +133,14 @@ function acCount(taskId, args) {
     }
   } else if (taskId) {
     try {
+      // Same R2-1 shape as runLinearOps: linear-query honours ANY *_DRY_RUN=1
+      // for its fixture path, and an unscrubbed FOO_DRY_RUN=1 + a matching
+      // .state/mock fixture would hand a FAKE issue description to the AC
+      // count below — poisoning pass-record completeness with no warning.
       const out = execFileSync(
         process.execPath,
         [join(ROOT, "scripts", "linear-query.mjs"), "issue", taskId, "--json"],
-        { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+        { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: scrubbedSpawnEnv() },
       );
       body = JSON.parse(out)?.description ?? null;
     } catch {
@@ -199,7 +233,312 @@ export function latestVerdict(runId, taskId) {
   return all.length ? all[all.length - 1] : null;
 }
 
+// The consulted allowlist for the fail-transition emitter — NOT documentation.
+// Contains ONLY review: test's emitter is deferred (F-05 → FOC-165) and stays
+// inert (a test fail must not stamp a flag no code manages). FOC-165 enables
+// it by adding `test: "test-to-dev-return"` here — one edit instead of two.
+// Keyed by edge id so the lookup cannot silently match a different edge when
+// the topology is reordered.
+const RETURN_EDGE_BY_SQUAD = { review: "review-to-dev-return" };
+
+// The flag each squad's return edge keys on, read from the edge rather than
+// restated here: if the edge is ever re-keyed or un-routed, this follows it and
+// the side effect goes dormant instead of stamping a dead label.
+function returnFlagFor(squad) {
+  const graph = loadGraphOrNull();
+  const edge = graph?.edges?.find((e) => e.id === RETURN_EDGE_BY_SQUAD[squad]);
+  return edge?.routable ? (edge?.when?.labels?.[0] ?? null) : null;
+}
+
+// linear-ops' --dry-run flag alone still reads Linear; a *_DRY_RUN=1 env makes
+// it fully offline via .state/mock/<squad>-task.json — which is how the suites
+// exercise this branch without ever touching live Linear.
+//
+// The env names are an EXPLICIT allowlist, deliberately not a `*_DRY_RUN` glob:
+// any `FOO_DRY_RUN=1` left over in the Supervisor's session used to engage
+// dry-run silently (FOC-284 round 2, F2) — a real fail-record came back
+// "applied" with nothing written and no warning. Only the names the repo's own
+// tooling sets (bin/*-dry.bat, and the suites) may engage the offline path; an
+// unknown `FOO_DRY_RUN=1` is now just a stale env var, not a silent no-op.
+const DRY_RUN_ENV_ALLOWLIST = ["REVIEW_DRY_RUN", "DEV_DRY_RUN", "PLAN_DRY_RUN", "TEST_DRY_RUN", "CADENCE_DRY_RUN"];
+
+// Returns the `NAME=1` that engaged dry-run, or null. The name travels into the
+// dry-run warning so a stale env var is visible instead of inferred.
+const dryRunEnvTrigger = () =>
+  DRY_RUN_ENV_ALLOWLIST.find((k) => process.env[k] === "1") ?? null;
+const isEnvDryRun = () => dryRunEnvTrigger() !== null;
+
+// R2-1 (round 3, extended to every spawned Linear op): the environment a
+// spawned op inherits. linear-ops (dryRunContext) AND linear-query
+// (detectDryRun) honour the glob for ANY <NAME>_DRY_RUN=1 and serve the
+// matching .state/mock/<name>-task.json fixture. A non-allowlisted var that
+// leaked into the Supervisor's session would therefore drive the spawned op
+// through its offline path while the record claimed a real run — for
+// linear-ops a silent "applied" with nothing written (the round-1 F2
+// incident, one layer down); for linear-query a FAKE issue description fed
+// into declaredAcs, so a pass mapping could be "verified" against a
+// fabricated criterion. Scrub every non-allowlisted dry-run var from the
+// child env; the allowlisted names survive — they drive the deliberate
+// offline fixture path and are loudly warned on above.
+const scrubbedSpawnEnv = () => {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.endsWith("_DRY_RUN") && !DRY_RUN_ENV_ALLOWLIST.includes(key)) delete env[key];
+  }
+  return env;
+};
+
+// A hung linear-ops must not park the FAIL path of every review verdict forever
+// (round-1 review, S1). 60 s: an order of magnitude above a normal offline or
+// online op, short enough that a hung subprocess surfaces as a failed op (and,
+// on a real run, into the enforcement gate) instead of a stalled Supervisor.
+const LINEAR_OPS_TIMEOUT_MS = 60_000;
+
+function runLinearOps(argv, dryRun) {
+  const args = [...argv, ...(dryRun ? ["--dry-run"] : [])];
+  // R2-1 (round 3): the spawned op must not inherit a rogue dry-run var —
+  // see scrubbedSpawnEnv above for why.
+  const env = scrubbedSpawnEnv();
+  try {
+    const out = execFileSync(
+      process.execPath,
+      [join(ROOT, "scripts", "linear-ops.mjs"), ...args],
+      { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: LINEAR_OPS_TIMEOUT_MS, env },
+    );
+    return { status: "applied", detail: out.trim().split("\n")[0] ?? "" };
+  } catch (err) {
+    // A timed-out child is killed with SIGTERM: say so, rather than surfacing
+    // the killed process's truncated output as the "actual reason".
+    if (err.killed || err.signal) {
+      return {
+        status: "failed",
+        detail: `linear-ops ${args.join(" ")} → timed out after ${LINEAR_OPS_TIMEOUT_MS} ms and was killed (${err.signal ?? "timeout"})`,
+      };
+    }
+    // execFileSync attaches the child's stderr; linear-ops states the actual
+    // reason on its last line (label not found, state not found, auth…).
+    const detail = String(err.stderr ?? err.message).trim().split("\n").pop() ?? "";
+    return { status: "failed", detail: `linear-ops ${args.join(" ")} → ${detail}` };
+  }
+}
+
+// ── the fail transition (FOC-284) ────────────────────────────────────────────
+//
+// review.fail (config/graph.json) declares that a failed review sends the issue
+// back to In Progress. The unsupervised flow executed that by hand; the
+// supervised one had NOBODY doing it — a review fail recorded a verdict and the
+// issue sat in In Review. record is where the supervised flow performs the
+// transition, stamping the flag the return edge keys on: without it `In
+// Progress` is also the state of work DEV is actively holding and nothing could
+// tell the two apart (why the edge stayed non-routable until FOC-284).
+//
+// Both operations are WARNINGS-ONLY side effects. The verdict file is the
+// artifact the whole loop reads; a Linear hiccup (label not yet bootstrapped,
+// API down) must never block or corrupt its recording — the label is
+// recoverable, a lost verdict is not. What keeps that honest is ORDER: the
+// record (with "pending" statuses) lands on disk before the first op, and the
+// ops' outcome is amended in afterwards — plus, on a real run, the enforcement
+// gate below, so a quiet exit can no longer be the last word on an unlanded
+// return (round-1 incident: the apply silently never ran).
+
+/**
+ * Stage 1 of the fail transition: decide applicability, resolve every status
+ * that is final without running an operation, and leave the live ops as
+ * "pending" for executeReturnEffects. Pure w.r.t. Linear — nothing runs here.
+ *
+ * Statuses: "applied" (linear-ops exited 0), "skipped" (LA_SUPERVISOR_CHILD —
+ * a spawned child never writes to Linear, FOC-167), "not-applicable" (pass
+ * verdict, or a squad with no emitter), "failed" (linear-ops refused; warning
+ * pushed), "pending" (transient — on disk before the op runs, amended after;
+ * visible only if the process died in between, which is the point). `dryRun`
+ * marks the whole block as exercised against linear-ops' dry-run path —
+ * nothing was written to Linear.
+ */
+function planReturnEffects(record, taskId, verdict, args, warnings) {
+  const dryRun = args["dry-run"] === true || isEnvDryRun();
+  // R2-N1 (round 3): WHICH trigger engaged dry-run is known at write time and
+  // must survive into the record — warnings[] are not persisted, and a later
+  // `show` consumer should not have to infer the trigger. Same precedence the
+  // execute-time warning uses: an env trigger names itself, the bare flag says
+  // so; null on a real run.
+  const envTrigger = dryRunEnvTrigger();
+  const effects = {
+    dryRun,
+    dryRunTrigger: envTrigger ? `${envTrigger}=1` : dryRun ? "--dry-run flag" : null,
+    label: null,
+    transition: null,
+  };
+
+  if (verdict !== "fail") {
+    const na = { status: "not-applicable", detail: `verdict "${verdict}" — side effects apply to a review fail only` };
+    effects.label = na;
+    effects.transition = na;
+    return effects;
+  }
+  // R2-N2 (round 3): the record's OWN squad field is the single source for
+  // every return-emitter decision — the allowlist gate here, the flag lookups
+  // in execute and the enforcement gate. A reader of the record therefore sees
+  // the same decision the recorder made (`record.squad` is entry.squad ?? null,
+  // frozen at record time rather than re-derived at each stage).
+  if (!RETURN_EDGE_BY_SQUAD[record.squad]) {
+    const na = {
+      status: "not-applicable",
+      detail: `squad "${record.squad}" has no return emitter configured (review only; test's is deferred, F-05 → FOC-165)`,
+    };
+    effects.label = na;
+    effects.transition = na;
+    return effects;
+  }
+
+  const childId = process.env.LA_SUPERVISOR_CHILD;
+  if (childId) {
+    const skipped = {
+      status: "skipped",
+      detail: `LA_SUPERVISOR_CHILD=${childId} set — children never write to Linear (FOC-167)`,
+    };
+    effects.label = skipped;
+    effects.transition = skipped;
+    warnings.push(`return transition skipped inside child ${childId}: would stamp the return flag + In Progress on ${taskId}`);
+    return effects;
+  }
+
+  const flag = returnFlagFor(record.squad);
+  if (!flag) {
+    const why = {
+      status: "failed",
+      detail: `config/graph.json no longer declares a routable return flag on ${RETURN_EDGE_BY_SQUAD[record.squad]}`,
+    };
+    effects.label = why;
+    effects.transition = why;
+    warnings.push(why.detail);
+    return effects;
+  }
+
+  // taskId shape was validated at cmdRecord entry (R2-2) — the ops and the
+  // enforcement gate are the only consumers here, and both get a checked id.
+
+  const pending = (op) => ({
+    status: "pending",
+    detail: `pending — the verdict file is written before the linear-ops ${op} runs`,
+  });
+  effects.label = pending("label");
+  effects.transition = pending("transition");
+  return effects;
+}
+
+/**
+ * Stage 2: run the pending ops and amend `record.linearEffects` in place.
+ * Returns true when the record changed and has to be written again.
+ */
+function executeReturnEffects(record, taskId, warnings) {
+  const effects = record.linearEffects;
+  if (!effects || effects.label?.status !== "pending") return false;
+
+  // F2 (round 2): dry-run in the Supervisor's own session is legitimate (the
+  // suites) but must never look like a real apply. Loud, and named by the
+  // trigger that was persisted at plan time (R2-N1).
+  if (effects.dryRun) {
+    warnings.push(
+      `return side effects ran OFFLINE in dry-run mode (trigger: ${effects.dryRunTrigger}) — ` +
+        `linear-ops served its mock fixture; "applied" is simulated and nothing was written to Linear`,
+    );
+  }
+
+  const flag = returnFlagFor(record.squad);
+  effects.label = flag
+    ? runLinearOps(["label", taskId, "--add", flag], effects.dryRun)
+    : { status: "failed", detail: `config/graph.json no longer declares a routable return flag on ${RETURN_EDGE_BY_SQUAD[record.squad]}` };
+  effects.transition = runLinearOps(["transition", taskId, "--status", "In Progress"], effects.dryRun);
+  for (const [name, op] of [["label", effects.label], ["transition", effects.transition]]) {
+    if (op.status === "failed") warnings.push(`return ${name} failed: ${op.detail}`);
+  }
+  return true;
+}
+
+/**
+ * Stage 3 (round 2, F3): on a REAL fail+review record — not a dry run, not a
+ * child-guard skip — any status other than "applied" raises a pending
+ * Supervisor gate naming the manual fix. linear-ops ensure-create was declined
+ * (shared tool mid-wave; bootstrap owns label creation), so the gate is the
+ * enforcement: a quiet ok:true no longer hides a return that never landed.
+ * Gate-emission failure is a warning, never a block. Returns true when the
+ * audit block changed (a `gate` field was recorded) and needs the amend write.
+ */
+/**
+ * The paste-able manual fix the enforcement gate hands the Supervisor.
+ * R2-N3 (round 3): the flag is whatever the graph edge resolves to — never a
+ * hardcoded name (at FOC-165 a test-side gate would have printed the review
+ * flag for an edge no code manages). When the edge cannot resolve, the
+ * question names the broken edge instead of inventing a flag to stamp.
+ */
+function returnGateQuestion(taskId, flag, edgeId) {
+  return flag
+    ? `apply the return to ${taskId} by hand and resume DEV: ` +
+        `node scripts/linear-ops.mjs label ${taskId} --add ${flag} && ` +
+        `node scripts/linear-ops.mjs transition ${taskId} --status "In Progress"`
+    : `apply the return to ${taskId} by hand and resume DEV: the return flag on ` +
+        `${edgeId} is not resolvable from config/graph.json — fix the edge (or stamp the label ` +
+        `from its when.labels by hand) and transition ${taskId} to In Progress`;
+}
+
+function maybeEmitReturnGate(record, taskId, workChild, runId, warnings) {
+  const effects = record.linearEffects;
+  if (!effects) return false;
+  if (record.verdict !== "fail") return false;
+  if (!RETURN_EDGE_BY_SQUAD[record.squad]) return false;
+  if (effects.dryRun) return false; // offline exercise — nothing to enforce
+  if (effects.label?.status === "skipped") return false; // child guard — the real run applies it
+  if (effects.label?.status === "applied" && effects.transition?.status === "applied") return false;
+
+  const failedOps = [
+    ["label", effects.label],
+    ["transition", effects.transition],
+  ].filter(([, op]) => op?.status !== "applied");
+  const edgeId = RETURN_EDGE_BY_SQUAD[record.squad];
+  const flag = returnFlagFor(record.squad);
+
+  const summary =
+    `${taskId} round ${record.round}: the review-fail return did not land — ` +
+    `${failedOps.map(([name]) => name).join(" + ")} not applied`;
+  const question = returnGateQuestion(taskId, flag, edgeId);
+
+  try {
+    const out = execFileSync(
+      process.execPath,
+      [
+        join(ROOT, "scripts", "supervisor-gate.mjs"), "emit",
+        "--run", runId,
+        "--child", workChild.childId,
+        "--kind", "question",
+        "--summary", summary,
+        "--question", question,
+      ],
+      { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: LINEAR_OPS_TIMEOUT_MS },
+    );
+    const gate = JSON.parse(out);
+    effects.gate = { emitted: true, gateId: gate.gateId ?? null, childId: workChild.childId };
+  } catch (err) {
+    const detail = err.killed || err.signal
+      ? `timed out after ${LINEAR_OPS_TIMEOUT_MS} ms (${err.signal ?? "timeout"})`
+      : String(err.stderr ?? err.message).trim().split("\n").pop() ?? err.message;
+    warnings.push(`return-enforcement gate could not be emitted: ${detail}`);
+    effects.gate = { emitted: false, detail };
+  }
+  return true;
+}
+
 // ── record ───────────────────────────────────────────────────────────────────
+
+// A verdict is about a Linear issue, and EVERYTHING in cmdRecord derives from
+// the id: the verdict file name (a `../`-bearing id would climb out of the
+// verdicts dir), the linear-ops invocations, and the enforcement gate's
+// paste-able manual-fix command. The id must LOOK like one — an issue
+// identifier (FOC-284) or a UUID — and it is checked at ENTRY, before any of
+// that derivation runs. R2-2 (round 3): a garbage id used to be refused at the
+// ops yet still interpolated RAW into the gate's command; a verdict keyed by a
+// garbage id is itself garbage, so it is refused outright — no record written,
+// no ops, no gate.
+const RE_TASK_ID = /^[A-Za-z]+-\d+$|^[0-9a-f-]{36}$/i;
 
 function cmdRecord(args) {
   const runId = requireRun(args);
@@ -217,6 +556,16 @@ function cmdRecord(args) {
 
   const taskId = args.task && args.task !== true ? args.task : entry.taskId;
   if (!taskId) failJson("no taskId on the child and none given — a verdict has to be about something");
+
+  // R2-2 (round 3): entry-level shape check — before the findings, the AC read,
+  // the work-child resolution, the record-once check, the file name, the ops
+  // and the gate, all of which derive from the id. failJson names the value.
+  if (!RE_TASK_ID.test(String(taskId))) {
+    failJson(
+      `taskId "${taskId}" is neither an issue identifier (TEAM-123) nor a UUID — ` +
+        `refusing to derive a verdict file, linear-ops ops or enforcement gate from it`,
+    );
+  }
 
   // ── findings, each cited ───────────────────────────────────────────────────
   const findings = asArray(args.finding).map((raw, i) => parseJsonFlag(raw, "finding", i));
@@ -348,9 +697,32 @@ function cmdRecord(args) {
     });
   }
 
+  // AFTER the round check: a refused record must not touch Linear.
+  //
+  // Record FIRST (round 2, N3): the file lands with per-op status "pending"
+  // before any Linear op can run, so no Linear write happens without a verdict
+  // record on disk. A crash between this write and the amend leaves "pending"
+  // on disk — distinct from NO linearEffects, which means an older tool wrote
+  // the record; supervisor-followup's review-loop catcher tells them apart.
+  record.linearEffects = planReturnEffects(record, taskId, verdict, args, warnings);
+
   ensureRunDir(runId);
   mkdirSync(verdictsDir(runId), { recursive: true });
   atomicWriteJSON(path, record);
+
+  const opsRan = executeReturnEffects(record, taskId, warnings);
+  const gateAttempted = maybeEmitReturnGate(record, taskId, workChild, runId, warnings);
+
+  if (opsRan || gateAttempted) {
+    try {
+      atomicWriteJSON(path, record);
+    } catch (err) {
+      warnings.push(
+        `the verdict file could not be re-written after the return ops (${err.message}) — ` +
+          `the on-disk audit still reads "pending" while the operations did run`,
+      );
+    }
+  }
 
   for (const w of warnings) console.error(`[verdict] ${w}`);
   console.log(JSON.stringify({ ok: true, path, warnings, ...record }, null, 2));
@@ -423,6 +795,6 @@ function main() {
   failJson(`unknown subcommand "${cmd ?? ""}" — expected record | show | list`);
 }
 
-export { VERDICTS, SEVERITIES, isEvidence, roundsFor };
+export { VERDICTS, SEVERITIES, isEvidence, roundsFor, returnGateQuestion };
 
 if (process.argv[1]?.endsWith("supervisor-verdict.mjs")) main();

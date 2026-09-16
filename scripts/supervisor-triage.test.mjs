@@ -198,11 +198,90 @@ test("adding a routable edge changes the proposal with no code change", () => {
 // ── 4. Ambiguity is never rounded away ────────────────────────────────────────
 console.log("\nniepewność zostaje niepewnością");
 
-test("In Progress → ask (returned vs. still held is not decidable)", () => {
+test("In Progress with no return flag → ask (returned vs. still held is not decidable)", () => {
   const r = p({ state: "In Progress", stateType: "started", body: AC_BODY, estimate: 3 });
   assert.equal(r.proposal, "ask");
   assert.equal(r.confidence, "low");
   assert.ok(r.unknowns.some((u) => u.includes("In Progress")));
+});
+
+test("In Progress + returned-by:review → dev (FOC-284 return edge)", () => {
+  // The discriminator supervisor-verdict stamps on a review fail. Without it
+  // this case would still land on ask — fresh DEV work carries no return flag.
+  const r = p({ state: "In Progress", stateType: "started", labels: ["returned-by:review"], body: AC_BODY, estimate: 3 });
+  assert.equal(r.proposal, "dev");
+  assert.equal(r.confidence, "high");
+});
+
+test("In Progress + returned-by:test → dev (same key, emitter deferred FOC-165)", () => {
+  const r = p({ state: "In Progress", stateType: "started", labels: ["returned-by:test"], body: AC_BODY, estimate: 3 });
+  assert.equal(r.proposal, "dev");
+});
+
+// ── 4b. the return flag outranks a stale hand-off comment (FOC-284 round 2) ──
+console.log("\nflag powrotu bije stary komentarz hand-off");
+
+test("In Progress + returned-by:review + latest hand-off from dev → dev, not ask", () => {
+  // The headline case F1 closed. Every returned task carries a hand-off comment
+  // from the round BEFORE the fail (comments are append-only), so treating a
+  // flag × hand-off disagreement as mixed signals made `ask` the DEFAULT for
+  // the return itself. The flag is the machine stamp — newer by construction.
+  const r = p({
+    state: "In Progress", stateType: "started",
+    labels: ["returned-by:review"], body: AC_BODY, estimate: 3,
+    comments: [handoffComment("dev")],
+  });
+  assert.equal(r.proposal, "dev");
+  assert.equal(r.confidence, "high");
+  assert.ok(!r.unknowns.some((u) => u.includes("mixed signals")), JSON.stringify(r.unknowns));
+});
+
+test("mixed signals with NO return flag still ask — the precedence is flag-gated", () => {
+  // Regression pin: In Review + coded routes to review; a stale plan hand-off
+  // routes to dev. No return flag → the two families have no ordering → ask.
+  const r = p({
+    state: "In Review", stateType: "started", labels: ["coded"], body: AC_BODY,
+    comments: [handoffComment("plan")],
+  });
+  assert.equal(r.proposal, "ask");
+  assert.equal(r.confidence, "low");
+  assert.ok(r.unknowns.some((u) => u.includes("mixed signals")), JSON.stringify(r.unknowns));
+});
+
+test("In Review + coded + lingering flag + dev hand-off → review (consistent with the state pin)", () => {
+  // DEV's re-hand-off goes through here after fixing a returned round: the
+  // state-gated rule fires before the return rule, flag inert, same as the
+  // no-handoff pin above.
+  const r = p({
+    state: "In Review", stateType: "started", labels: ["coded", "returned-by:review"],
+    body: AC_BODY, comments: [handoffComment("dev")],
+  });
+  assert.equal(r.proposal, "review");
+});
+
+test("In Progress + returned-by:test + stale hand-off → dev (the FOC-165 emitter copies this)", () => {
+  // Pinned now, while test's emitter is still off: the review hand-off routes
+  // to test, the flag routes to dev, the flag wins.
+  const r = p({
+    state: "In Progress", stateType: "started",
+    labels: ["returned-by:test"], body: AC_BODY, estimate: 3,
+    comments: [handoffComment("review")],
+  });
+  assert.equal(r.proposal, "dev");
+  assert.equal(r.confidence, "high");
+});
+
+test("a lingering return flag cannot steal a re-hand-off — In Review + coded routes to review", () => {
+  // DEV's re-hand-off stamps coded + In Review; the state-gated rule 3 fires
+  // before the return rule is ever reached, so a stale flag is inert.
+  const r = p({ state: "In Review", stateType: "started", labels: ["coded", "returned-by:review"], body: AC_BODY });
+  assert.equal(r.proposal, "review");
+});
+
+test("a needs:* label still outranks the return flag — the order-1 gate wins", () => {
+  const r = p({ state: "In Progress", stateType: "started", labels: ["returned-by:review", "needs-decision"], body: AC_BODY, estimate: 3 });
+  assert.equal(r.node, "human");
+  assert.equal(r.proposal, "ask");
 });
 
 test("a completed or canceled issue → ask, never re-routed", () => {
