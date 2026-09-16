@@ -3,7 +3,34 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## Current execution: 2026-09-16 — FOC-165 COMPLETE · fala FOC-102 domknięta lokalnie (close-out)
+## Current execution: 2026-09-16 — FOC-102 Order 6 CLOSE-OUT done · release-blocking scope na `main`
+
+- **PR #27 MERGED** (`3f2ff87`, 2026-09-16T07:53Z) — cała fala FOC-102 (release-blocking scope) na
+  `origin/main`. Wchłonął PR #26 (FOC-284) w rebase. Lokalny `main` za `origin/main` (checkout
+  blokowany przez niezacommitowany `bin/supervisor.bat` — nietknięty z założenia).
+- **Order 6 (close-out) DONE 2026-09-16:**
+  - **Ledger completion record F0–F2** — dopisane do `docs/plans/fenix-linear-reconciliation.md`
+    ("Completion record", roadmap L3/L53). F0=FOC-217 PR#23 `2b3ea3d`, F1=FOC-218 PR#24 `313589a`,
+    F2=FOC-219 PR#25 `967fc1a`; F3/F4 + blokujące kontrakty via PR #27 `3f2ff87`.
+  - **R1–R7 evidence pack** — nowy `docs/plans/fenix-1.0-release-evidence.md` (jedna uziemniona
+    linia per kryterium akceptacji; SHA, runy, gate'y, werdykty).
+  - **Delta applied to FOC-102** — `linear-ops update-description`: R1–R7 + Order 1–6 odhaczone
+    `[X]` z konkretnym dowodem (SHA, run, gate) przy każdym; PR #25/#27 SHA wpisane. `--dry-run`
+    przed publikacją. Ostatnie 3 pozycje DoD (ograniczenia procesowe) zostawione `[ ]` — to trwające
+    reguły, nie pozycje do odhaczenia.
+  - **BRIEF comment via Supervisor** — opublikowany na FOC-102 (`comment --dedup-tag
+    foc-102-release-closeout`, id `5dd0b717…`): release-blocking scope landed, R1–R7 pass, epik
+    zostaje In Progress (niesie niesblokujące dzieci + standing).
+- **Epik FOC-102 zostaje In Progress** — Order 6 domyka release-blocking scope, NIE epik. Niesie:
+  FOC-164/117/255/256/257 (post-1.0), standing FOC-294/295/296/297, FOC-351 (kruche testy), FOC-350,
+  FOC-297. Zamknięcie epiku — decyzja Mateusza.
+- **Docs close-out jeszcze nie na `main`** — `fenix-1.0-release-evidence.md` (nowy) +
+  `fenix-linear-reconciliation.md` (edycja) w working tree; wylądują małym close-out PR (worktree off
+  `origin/main`, bo checkout main blokowany przez `bin/supervisor.bat`) na zgodę Mateusza.
+
+---
+
+## 2026-09-16 (wcześniej) — FOC-165 COMPLETE · fala FOC-102 domknięta lokalnie (close-out)
 
 - **FOC-165** (release-candidate) — run `2026-09-15-supervisor-foc-165`. Kandydat `d725788` na `foc-165-dev`
   (35 commitów nad `f887fb9`). **Lokalnie, bez push i bez PR** — fast-forward `chore/foc-102-baseline`
@@ -50,17 +77,15 @@
 | FOC-102 | **epic — NIE domknięty** (po Mateuszu) | — | zamknięcie epiku po pushu linii fali + PR #26 |
 
 ### Czeka na Mateusza (poza moim pełnomocnictwem — nieodwracalne na zewnątrz)
-1. **PR #27 (fala FOC-102) — OPEN, MERGEABLE** — https://github.com/joint-hubs/linear-agents/pull/27
-   (`chore/foc-102-baseline` → main, 77 commitów, 122 pliki +10739/−512). Gałąź wypchnięta; PR
-   rebazowany na nowy `main` (PR #26 / FOC-284 wchłonięty). Semantyczny konflikt merge rozwiązany:
-   wymóg FOC-165 (fail musi deklarować `--failing-test`) pogodzony z transition FOC-284 — testy
-   sekcji 5 dostają `--failing-test "suite/a"` (42/0); `returned-by:*` labele z FOC-284 autorytatywne
-   z notatką `--clear-returned-by-review` z FOC-165. Pełna suita w głównym checkoucie 61/64 (3 znane
-   env-redy = FOC-351, zero nowych po merge); czyste drzewo 64/64. Czeka na merge Mateusza.
+1. **PR #27 (fala FOC-102) — MERGED** 2026-09-16T07:53Z, `3f2ff87`. Release-blocking scope na `main`.
+   Order 6 close-out zrobione (evidence pack + ledger + delta do FOC-102 + BRIEF comment). Docs
+   close-out (`fenix-1.0-release-evidence.md`, `fenix-linear-reconciliation.md`) czekają na mały
+   close-out PR na zgodę Mateusza.
 2. **Worktree'e** — `foc-284-{dev,review,test}` i `foc-286-{dev,review,test}` usunięte przez Mateusza
    2026-09-16. **`foc-284-dev` usunięte lokalnie + zdalnie** (wchłonięte przez PR #26). Zostają gałęzie
    werdyktowe `foc-220/272/284/286/287-review` (po decyzji Mateusza — nie usuwam) oraz `foc-284-review`.
-3. **Zamknięcie epiku FOC-102** — po merge'u PR #27; nie zamykam sam.
+3. **Zamknięcie epiku FOC-102** — po close-out; nie zamykam sam. Epik zostaje In Progress (niesie
+   niesblokujące dzieci + standing FOC-294/295/296/297 + FOC-351).
 
 ---
 
