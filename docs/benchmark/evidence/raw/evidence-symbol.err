@@ -1,0 +1,4 @@
+[code-intel] No CodeGraph index in this repo (.codegraph/ is missing).
+
+Nothing here can answer until it exists. Build it:  codegraph init
+A negative result from this tool right now would be a lie, so it refuses instead.

@@ -33,7 +33,7 @@ explicit slug in their own frontmatter.
 | role | purpose | `routing.review` key |
 |------|---------|----------------------|
 | first-pass | correctness / lint / style | `first_pass` |
-| security | auth / secrets / available scanners | `security` |
+| security | auth / secrets / provisioned scanners (`security-scan.mjs`) | `security` |
 | deep | architecture / hard correctness | `deep` |
 | worker | bounded context extraction | `worker` |
 | flash | finding deduplication / report formatting | `flash` |
@@ -105,6 +105,8 @@ Branch not found locally → report "branch <name> not found locally — needs f
 ### 3. Parallel review (3 subagents, concurrent)
 Run `first-pass` ∥ `security` ∥ `deep` via Task tool. **Brief = `<base>` + `<branch>` + issue AC — each pass runs `git diff $base...<branch>` ITSELF (they have Bash) and reads touched files in its own context.** You never paste diff content into briefs — the diff lives in the passes' cheap contexts, not yours. Each returns findings.
 
+**The security pass brief always carries the provisioned scanner command:** `node scripts/security-scan.mjs` (secretlint secret scan + semgrep SAST, offline local ruleset; provisioning and output contract: `docs/tools/security-scan.md`). The pass runs it itself in the task worktree and cites its rows as `tool-reported` findings (file:line + rule id — the tool never echoes matched values). A scanner that did not run is recorded as `not scanned`, never as clean — a security verdict without a scanner row is model-only, which the hard rules below forbid.
+
 ### 4. Merge → Conventional Comments
 Combine the 3 passes into one Conventional Comments review (`issue:`/`nitpick:`/`suggestion:`/`praise:`/`question:`).
 Merge: deduplicate by file+line (one entry per location); keep HIGHEST severity on overlap; on disagreement apply merge-authority order (`deep`>correctness/arch, `security`>auth/secrets, `first-pass`>lint/style); drop praise-only duplicates.
@@ -117,6 +119,8 @@ node $LA_ROOT/scripts/review-round.mjs next <identifier> --max 2
 Capture `{round, status}` from JSON output.
 
 ### 5. Verdict
+**Every verdict — findings or clean — records the lint row**: `Lint: <command> → exit <code> (<scope covered>)` for the lint run DEV's hand-off was required to carry (`node scripts/lint.mjs` run from the task worktree, a DEV completion condition; the row must be about the candidate tree, never the main repo). Hand-off carries no lint evidence, or REVIEW could not re-verify it → record `Lint: not verified` with the reason; never an assumed clean — on a findings round the row is recorded the same way when sending back to DEV, so a failing lint is part of the record, not silently dropped.
+
 **Findings require changes (any non-praise `issue:`):**
 1. `node $LA_ROOT/scripts/linear-ops.mjs transition <identifier> --status "In Progress"`
 2. If any high-severity finding: `node $LA_ROOT/scripts/linear-ops.mjs label <identifier> --add risk:high`
@@ -133,10 +137,10 @@ Only `issue:` blocks transition back to DEV; `nitpick:`/`suggestion:`/`praise:`/
 WHY — gating on nitpicks stalls the pipeline for cosmetics; DEV gets noise instead of signal.
 
 **Clean (no actionable issues after inspecting the exact candidate):**
-Record `VERDICT: PASS`, the base/head or diff fingerprint, AC-to-evidence mapping and executed checks. Report skipped/unavailable checks explicitly. If evidence is insufficient, report `VERDICT: UNKNOWN` and request what is missing; silence, missing findings, process exit 0 and a dry-run are not PASS. REVIEW pass is not final TEST acceptance.
+Record `VERDICT: PASS`, the base/head or diff fingerprint, AC-to-evidence mapping and executed checks, plus the lint row required on every verdict (defined at the top of this step). Report skipped/unavailable checks explicitly. If evidence is insufficient, report `VERDICT: UNKNOWN` and request what is missing; silence, missing findings, process exit 0 and a dry-run are not PASS. REVIEW pass is not final TEST acceptance.
 1. Post final verdict comment:
    ```
-   node $LA_ROOT/scripts/publish-linear-comment.mjs --issue <identifier> --tag run:review-round:<identifier>:<N> --squad review --what "review round <N>" --run-id <runId> --state-file .state/reviews/<identifier>-round<N>.md --tier T2 --summary "Clean — no actionable issues" --next "Handing to TEST"
+   node $LA_ROOT/scripts/publish-linear-comment.mjs --issue <identifier> --tag run:review-round:<identifier>:<N> --squad review --what "review round <N>" --run-id <runId> --state-file .state/reviews/<identifier>-round<N>.md --tier T2 --clear-returned-by-review --summary "Clean — no actionable issues" --next "Handing to TEST"
    ```
 2. `node $LA_ROOT/scripts/linear-ops.mjs label <identifier> --add ai:reviewed --add dod-ok --add stage:testing`
 3. Keep status "In Review" (hand to TEST). Do NOT transition to Done.
@@ -154,8 +158,8 @@ Record `VERDICT: PASS`, the base/head or diff fingerprint, AC-to-evidence mappin
 - Tool-call fail → retry → fallback pass. 2 failed attempts → `escalated` + `needs:answer` + notify Mateusz. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, keep `escalated`, drop `needs:answer`, emit a `question` gate.
 - Max 2 dev↔review rounds — round 3 = `escalated` + notify Mateusz (counter in comment). **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised there is **no round cap**: your verdict is recorded with `supervisor-verdict.mjs`, and what stops the loop is whether the work MOVED — the Supervisor fingerprints the diff plus your `--failing-test` set and refuses a round that reproduced the one before it. So a converging run may exceed 2 rounds, and a repeating one is stopped at 2; you raise a `question` gate either way.
 WHY — unbounded dev↔review loops burn cost on disagreements only a human can resolve.
-- Security always by tools (models catch 60–80%) — never a model-only security verdict.
-WHY — a false "secure" ships vulnerabilities; tools are the floor, models the filter.
+- Security always by tools (models catch 60–80%) — never a model-only security verdict. The provisioned scanners run through `node scripts/security-scan.mjs` (FOC-285, offline; `docs/tools/security-scan.md`) and the verdict records their row (`Scanner: secretlint+semgrep → exit <code>, <n> findings` or `Scanner: not scanned — <reason>`) next to the lint row on every verdict. A security finding list with no scanner row is a model-only verdict.
+WHY — a false "secure" ships vulnerabilities; tools are the floor, models the filter. F-09: scanners promised but never called are structurally identical to no scanners.
 - Zero "LGTM without reading" — cost guardrail.
 - NEVER `git push` without consent.
 - NEVER attach tokens, API keys, passwords, secrets, or login data to Linear comments — comments are visible across the workspace and may be indexed.

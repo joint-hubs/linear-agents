@@ -1,0 +1,127 @@
+# Semgrep ruleset for the linear-agents repo — committed local rules, no registry.
+#
+# Design (FOC-285):
+#   - Runs fully offline: semgrep is invoked with --config pointing at THIS file,
+#     never with --config auto / p/<ruleset> (those fetch from semgrep.dev — a
+#     network assumption this repo does not make).
+#   - Scope: code-level security patterns for the languages this repo actually
+#     ships (plain Node .mjs tooling in scripts/ + a React UI under ui/src).
+#     Secret *values* are the secretlint pass's job (scripts/security-scan.mjs
+#     runs both); these rules deliberately do not duplicate secret patterns.
+#   - Each rule targets a class the REVIEW security pass is required to check
+#     by tools (agents/review/agents/security.md): injection sinks, eval, XSS
+#     in the UI, path traversal via request data.
+#
+# Adding a rule: keep it deterministic (no --config auto, no registry ids),
+# state the class it covers, and prefer a narrow pattern over a broad one —
+# a scanner the reviewers mute because of noise is a scanner nobody runs.
+
+rules:
+  - id: security.eval-usage
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: eval() executes arbitrary code — replace with a parse (JSON.parse) or an explicit dispatch map
+    patterns:
+      - pattern: eval($X)
+
+  - id: security.new-function-constructor
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: new Function() compiles and executes a string as code — same risk class as eval()
+    patterns:
+      - pattern: new Function($X)
+
+  - id: security.child-process-exec-concat
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: exec()/execSync() with a non-literal command — string-concatenated shell input is command injection; pass argv arrays to execFile/spawn instead
+    # The $M regex must live INSIDE the qualified arm: a metavariable-regex at
+    # this level constrains every pattern-either arm, and $M is unbound in the
+    # bare exec/execSync arms — which silently disabled them (REVIEW round 1).
+    # $A is bound in every arm, so its regex stays top-level.
+    patterns:
+      - pattern-either:
+          - pattern: exec($A)
+          - pattern: execSync($A)
+          - patterns:
+              - pattern-either:
+                  - pattern: cp.$M($A)
+                  - pattern: child_process.$M($A)
+              - metavariable-regex:
+                  metavariable: $M
+                  regex: ^(exec|execSync)$
+      - metavariable-regex:
+          metavariable: $A
+          regex: .*(\$\{|\s*\+\s*|`\s*).*.*
+
+  - id: security.spawn-shell-true-nonliteral
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: spawn/spawnSync with shell:true and a non-literal command — shell metacharacters in the command/args become executable
+    patterns:
+      - pattern-either:
+          - pattern: 'spawn($CMD, $ARGS, { ..., shell: true, ... })'
+          - pattern: 'spawnSync($CMD, $ARGS, { ..., shell: true, ... })'
+      - metavariable-pattern:
+          metavariable: $CMD
+          pattern: |
+            { not: { pattern: "\"...\"" } }
+
+  - id: security.sql-injection-taint
+    mode: taint
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: External data (argv/request) reaches SQL built by interpolation — parameterize with ? placeholders instead
+    pattern-sources:
+      - pattern-either:
+          - pattern: process.argv
+          - pattern: process.argv[$X]
+      - patterns:
+          - pattern: $REQ.$FIELD
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request)$
+    pattern-sinks:
+      - pattern-either:
+          - pattern: $DB.prepare(`...${$X}...`)
+          - pattern: $DB.prepare("..." + $X)
+          - pattern: $DB.prepare($A + $B)
+          - pattern: $DB.exec(`...${$X}...`)
+          - pattern: $DB.exec($A + $B)
+          - pattern: $DB.query(`...${$X}...`)
+    # Interpolating a schema identifier (table/column names from module
+    # constants) is the repo's standard pattern and is not flagged — only
+    # flows that originate in external data are.
+
+  - id: security.dangerously-set-inner-html
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: dangerouslySetInnerHTML renders unescaped HTML — XSS sink; escape at the boundary or render as text
+    patterns:
+      - pattern: dangerouslySetInnerHTML=...
+
+  - id: security.path-join-request-data
+    # Pattern mode with explicit request-access forms (NOT taint). As a search
+    # pattern $REQ.$FIELD binds exactly two attribute segments, so the common
+    # req.params.* / request.query.* / bracket forms need their own arms
+    # (REVIEW round 1). A taint rule (as in the SQL rule above) would also
+    # catch indirect flows, but it cannot model this repo's guard idiom —
+    # resolve(ROOT, reqData) followed by a relative() containment check in
+    # scripts/serve-docs.mjs — and would flag it on every scan with no way to
+    # express the guard; the syntactic rule keeps that guarded server silent.
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: path.join/path.resolve fed straight from a request object — path traversal sink; normalize and confine to a base directory first
+    patterns:
+      - pattern-either:
+          - pattern: path.join($BASE, $REQ.$FIELD, ...)
+          - pattern: path.resolve($BASE, $REQ.$FIELD, ...)
+          - pattern: path.join($BASE, $REQ.$F1.$F2, ...)
+          - pattern: path.resolve($BASE, $REQ.$F1.$F2, ...)
+          - pattern: path.join($BASE, $REQ[$K], ...)
+          - pattern: path.resolve($BASE, $REQ[$K], ...)
+      - metavariable-regex:
+          metavariable: $REQ
+          regex: ^(req|request)$
+      - pattern-not: path.join($BASE, ".")
+      - pattern-not: path.resolve($BASE, ".")

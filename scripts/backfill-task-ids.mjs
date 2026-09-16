@@ -4,7 +4,7 @@
 // For every manifest in .state/runs/ with NO task attribution (no explicit
 // taskId, no taskIdAuto, no branch-inferable id), locate its transcript
 // (manifest.transcriptPath, or ledger late discovery) and scan the FIRST
-// user message for a Linear task reference (FEN-/PISI-/JOI-NNN) — kickoff
+// user message for a Linear task reference (FEN-/PISI-/JOI-/FOC-NNN) — kickoff
 // prompts name the task up front ("Weź task FEN-98…"). Writes taskIdAuto
 // (never the explicit taskId), so an explicit tag always wins.
 //
@@ -24,19 +24,21 @@
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { inferTaskIdFromBranch, discoverTranscriptsForRuns } from "./ledger.mjs";
+import { inferTaskIdFromBranch, discoverTranscriptsForRuns, TASK_ID_RE } from "./ledger.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
 const RUNS_DIR = join(root, ".state", "runs");
 
-const TASK_RE = /\b(FEN|PISI|JOI)-(\d{1,5})\b/i;
+// Same prefix list the ledger infers from kickoff text — a local copy here
+// drifted and FOC- runs went untagged.
+const TASK_RE = TASK_ID_RE;
 const apply = process.argv.includes("--apply");
 const recheckBranch = process.argv.includes("--recheck-branch");
 
 /** Extract plain text from a transcript user line (string or content-array). */
-function userText(line) {
+export function userText(line) {
   const c = line?.message?.content ?? line?.content;
   if (typeof c === "string") return c;
   if (Array.isArray(c)) {
@@ -49,7 +51,7 @@ function userText(line) {
 }
 
 /** First non-sidechain user message text from a transcript, or null. */
-function firstUserMessage(transcriptPath) {
+export function firstUserMessage(transcriptPath) {
   if (!transcriptPath || !existsSync(transcriptPath)) return null;
   let lines;
   try {
@@ -72,70 +74,90 @@ function firstUserMessage(transcriptPath) {
 }
 
 // --- Load manifests, pick the untagged ones ---
-const files = existsSync(RUNS_DIR)
-  ? readdirSync(RUNS_DIR).filter((f) => f.endsWith(".json"))
-  : [];
+// Importable without side effects (telemetry-canonical.mjs pattern): the scan
+// below only runs for the CLI itself.
+const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/").split("/").pop());
 
-const manifests = [];
-for (const f of files) {
-  try {
-    manifests.push({ file: join(RUNS_DIR, f), data: JSON.parse(readFileSync(join(RUNS_DIR, f), "utf8")) });
-  } catch {
-    continue;
-  }
-}
-
-const candidates = manifests.filter(({ data }) => {
-  if (data.taskId || data.taskIdAuto) return false;
+/**
+ * What the backfill would do with one untagged manifest given its kickoff
+ * text. Pure, so tests can drive it against fixtures; the CLI only adds
+ * printing and the --apply write.
+ *
+ * @returns {{status: "propose"|"propose-override"|"confirm"|"skip",
+ *            taskId: string|null, reason: string, inferred: string|null}}
+ */
+export function backfillDecision(data, text, { recheckBranch = false } = {}) {
   const inferred = inferTaskIdFromBranch(data.gitBranch);
-  if (inferred && !recheckBranch) return false; // branch-tagged: only touch with --recheck-branch
-  return true;
-});
-
-// Late discovery for those without a recorded transcriptPath.
-const discovered = discoverTranscriptsForRuns(candidates.map(({ data }) => data));
-
-let proposed = 0;
-let skipped = 0;
-
-console.log(`${candidates.length} candidate manifest(s) of ${manifests.length} total\n`);
-
-for (const { file, data } of candidates) {
-  const inferred = inferTaskIdFromBranch(data.gitBranch);
-  const transcriptPath = data.transcriptPath || discovered.get(data.runId)?.path || null;
-  const text = firstUserMessage(transcriptPath);
-
-  if (!text) {
-    skipped++;
-    console.log(`  -    ${data.runId.padEnd(30)} no transcript / no user message`);
-    continue;
-  }
-
+  if (inferred && !recheckBranch) return { status: "skip", taskId: null, reason: "branch-tagged", inferred };
+  if (!text) return { status: "skip", taskId: null, reason: "no transcript / no user message", inferred };
   const m = text.match(TASK_RE);
-  if (!m) {
-    skipped++;
-    console.log(`  -    ${data.runId.padEnd(30)} no task reference in kickoff`);
-    continue;
-  }
-
+  if (!m) return { status: "skip", taskId: null, reason: "no task reference in kickoff", inferred };
   const taskId = `${m[1].toUpperCase()}-${m[2]}`;
-
   if (inferred && taskId === inferred) {
-    skipped++;
-    console.log(`  ok   ${data.runId.padEnd(30)} branch id ${inferred} confirmed by kickoff`);
-    continue;
+    return { status: "confirm", taskId, reason: `branch id ${inferred} confirmed by kickoff`, inferred };
   }
-
-  proposed++;
-  const snippet = text.replace(/\s+/g, " ").slice(0, 70);
-  const note = inferred ? ` (OVERRIDES branch ${inferred})` : "";
-  console.log(`  ${apply ? "SET " : "WOULD"} ${data.runId.padEnd(30)} → ${taskId.padEnd(9)}${note} "${snippet}…"`);
-
-  if (apply) {
-    data.taskIdAuto = taskId;
-    data.taskIdAutoSource = inferred ? "transcript-backfill-branch-override" : "transcript-backfill";
-    atomicWriteJSON(file, data);
-  }
+  return { status: inferred ? "propose-override" : "propose", taskId, reason: "", inferred };
 }
 
-console.log(`\n${proposed} proposal(s), ${skipped} left untagged.${apply ? "" : " Run with --apply to write."}`);
+if (isMain) {
+  const apply = process.argv.includes("--apply");
+  const recheckBranch = process.argv.includes("--recheck-branch");
+  const files = existsSync(RUNS_DIR)
+    ? readdirSync(RUNS_DIR).filter((f) => f.endsWith(".json"))
+    : [];
+
+  const manifests = [];
+  for (const f of files) {
+    try {
+      manifests.push({ file: join(RUNS_DIR, f), data: JSON.parse(readFileSync(join(RUNS_DIR, f), "utf8")) });
+    } catch {
+      continue;
+    }
+  }
+
+  const candidates = manifests.filter(({ data }) => {
+    if (data.taskId || data.taskIdAuto) return false;
+    const inferred = inferTaskIdFromBranch(data.gitBranch);
+    if (inferred && !recheckBranch) return false; // branch-tagged: only touch with --recheck-branch
+    return true;
+  });
+
+  // Late discovery for those without a recorded transcriptPath.
+  const discovered = discoverTranscriptsForRuns(candidates.map(({ data }) => data));
+
+  let proposed = 0;
+  let skipped = 0;
+
+  console.log(`${candidates.length} candidate manifest(s) of ${manifests.length} total\n`);
+
+  for (const { file, data } of candidates) {
+    const transcriptPath = data.transcriptPath || discovered.get(data.runId)?.path || null;
+    const text = firstUserMessage(transcriptPath);
+    const decision = backfillDecision(data, text, { recheckBranch });
+
+    if (decision.status === "skip") {
+      skipped++;
+      console.log(`  -    ${data.runId.padEnd(30)} ${decision.reason}`);
+      continue;
+    }
+    if (decision.status === "confirm") {
+      skipped++;
+      console.log(`  ok   ${data.runId.padEnd(30)} ${decision.reason}`);
+      continue;
+    }
+
+    proposed++;
+    const snippet = text.replace(/\s+/g, " ").slice(0, 70);
+    const note = decision.inferred ? ` (OVERRIDES branch ${decision.inferred})` : "";
+    console.log(`  ${apply ? "SET " : "WOULD"} ${data.runId.padEnd(30)} → ${decision.taskId.padEnd(9)}${note} "${snippet}…"`);
+
+    if (apply) {
+      data.taskIdAuto = decision.taskId;
+      data.taskIdAutoSource = decision.inferred ? "transcript-backfill-branch-override" : "transcript-backfill";
+      atomicWriteJSON(file, data);
+    }
+  }
+
+  console.log(`\n${proposed} proposal(s), ${skipped} left untagged.${apply ? "" : " Run with --apply to write."}`);
+}
+

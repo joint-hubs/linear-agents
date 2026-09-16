@@ -15,11 +15,12 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { INPUT_IDENTITY_SCHEME_VERSION, contentDigest, inputIdentity } from "./tool-identity.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -31,7 +32,7 @@ try {
   DatabaseSync = null;
 }
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 // Per-step migration version markers. Each one-shot migration step is guarded
 // by its own constant rather than the shared SCHEMA_VERSION, so bumping the
@@ -40,6 +41,10 @@ export const MIGRATION_VERSIONS = {
   worktreeRekey: 4,
   runScopedUsage: 5,
   managerRunIndex: 6,
+  // FOC-220: additive tool_facts columns (input identity, result size/state).
+  // The column add itself is PRAGMA-guarded and idempotent on every open
+  // (same pattern as addRunColumns); the marker is the paper trail.
+  toolFactIdentity: 7,
 };
 
 export function sqliteAvailable() {
@@ -308,6 +313,13 @@ function createBaseSchema(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_delegation_links_parent ON delegation_links(parent_run_id, parent_agent);
     CREATE INDEX IF NOT EXISTS idx_delegation_links_child ON delegation_links(child_agent);
+    -- FOC-220: per-store key/value settings. Holds the random salt that keys the
+    -- tool-input identity and result digests (tool-identity.mjs) — generated on
+    -- first use, stable for the lifetime of this database file.
+    CREATE TABLE IF NOT EXISTS store_settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
 }
 
@@ -354,6 +366,40 @@ function addModelPriceColumns(db) {
   const existing = new Set(db.prepare("PRAGMA table_info(model_prices)").all().map((c) => c.name));
   for (const [name, type] of MODEL_PRICE_COLUMNS) {
     if (!existing.has(name)) db.exec(`ALTER TABLE model_prices ADD COLUMN ${name} ${type}`);
+  }
+}
+
+// Columns added to `tool_facts` after its initial CREATE TABLE (FOC-220).
+// Same declarative ALTER-guarded-by-PRAGMA pattern as RUN_COLUMNS: every open
+// converges the table to this shape, fresh and legacy databases alike.
+//
+// All five are NULLable and stay NULL on rows written before this change —
+// NULL means UNKNOWN, never "measured zero" and never "verified ok":
+//   tool_input_id      HMAC-SHA256 (store salt) over the COMPLETE, deep
+//                      key-order-canonical input JSON — computed before the
+//                      1000-char preview truncation, so two long calls sharing
+//                      a prefix never collide. Never argument content itself.
+//   tool_index         position of the tool_use within its assistant message;
+//                      recovers the input to tool_fact_id's sha1 formula.
+//   tool_result_state  'ok' | 'error' | 'missing' from the tool_result block.
+//                      Historical rows keep NULL: a legacy tool_has_error=0
+//                      must not be read as a verified success (FOC-220 AC5).
+//   tool_result_bytes  UTF-8 byte size of the result text; 0 = present but
+//                      empty; NULL = missing or unknown. No content stored.
+//   tool_result_id     HMAC-SHA256 (store salt) over the result text — equality
+//                      evidence for repeat classification, no content.
+const TOOL_FACT_COLUMNS = [
+  ["tool_input_id", "TEXT"],
+  ["tool_index", "INTEGER"],
+  ["tool_result_state", "TEXT"],
+  ["tool_result_bytes", "INTEGER"],
+  ["tool_result_id", "TEXT"],
+];
+
+function addToolFactColumns(db) {
+  const existing = new Set(db.prepare("PRAGMA table_info(tool_facts)").all().map((c) => c.name));
+  for (const [name, type] of TOOL_FACT_COLUMNS) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE tool_facts ADD COLUMN ${name} ${type}`);
   }
 }
 
@@ -619,6 +665,14 @@ function ensureManagerRunIndex(db) {
 }
 
 export function migrate(db, path) {
+  // Views are dropped first and recreated at the end: the migrations below
+  // rebuild the fact tables they select from (DROP + RENAME), and SQLite
+  // parses every view body on any ALTER — a view left referencing a table
+  // mid-rebuild fails the migration with "error in view". A view holds no
+  // data, so dropping it up front is free. One unit of work: a concurrent
+  // opener must never see one canonical view gone while the other is still
+  // there.
+  transaction(db, () => dropCanonicalViews(db));
   createBaseSchema(db);
   addRunColumns(db);
   addModelPriceColumns(db);
@@ -627,7 +681,11 @@ export function migrate(db, path) {
   ensureOneActivePrimaryLinkIndex(db);
   backfillWorktreeIds(db);
   migrateRunScopedUsage(db, path);
+  // FOC-220 columns must be added AFTER the v5 rebuild: migrateRunScopedUsage
+  // recreates tool_facts from its own DDL, which would drop columns added earlier.
+  addToolFactColumns(db);
   ensureManagerRunIndex(db);
+  ensureCanonicalViews(db);
   // Record every migration marker. Each step guards itself above; this loop
   // just persists the paper trail. INSERT OR IGNORE keeps it idempotent across
   // re-opens.
@@ -635,6 +693,206 @@ export function migrate(db, path) {
   for (const v of Object.values(MIGRATION_VERSIONS)) {
     db.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(v, stamp);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical fleet views (FOC-221).
+//
+// Two independent over-counts sit on top of usage_facts, and both are fixed at
+// READ time — the stored rows are never rewritten:
+//
+//   1. Run-scoped claims (ADR-0008): a transcript file is not a run boundary,
+//      so every run that re-ingested a file keeps its own copy of that file's
+//      rows. Measured 2026-09-04: 161,221 rows for 142,841 distinct calls.
+//   2. Repeated per-message usage lines (F7.1b): one assistant message is
+//      written to the transcript as several lines — thinking, text, tool_use —
+//      and each line repeats the same usage object. Ingest keys rows by byte
+//      offset (message.id is not stored), so the lines became distinct
+//      usage_facts rows. Measured 2026-09-12 on the live store copy:
+//      182,796 rows collapse to 74,086 calls; naive tokens 15.28 bn vs 4.77 bn.
+//
+// A physical call is therefore one assistant MESSAGE, identified without
+// message.id by an island over the file's line sequence: within one
+// (source_path, agent_key, model), consecutive rows (by source_offset) whose
+// token tuples are IDENTICAL belong to the same message, unless their
+// observed_at values are more than MESSAGE_GAP_MS apart. message.id is not
+// stored in the DB, so the only ground truth available is a sample: on a
+// 2,161-message sample of real transcripts the rule reproduced message.id
+// grouping — zero false merges, zero splits on that sample (validated there,
+// not proven universal). The gap only has to cover the
+// longest observed stream (172.9 s); strict tuple identity already prevents
+// merging distinct calls. Two conservative consequences, both deliberate:
+// zero-token lines are never merged with non-zero neighbours (a zero line
+// that bridges two different calls would undercount one of them), and rows
+// with NULL observed_at collapse by tuple identity alone.
+//
+// Among the runs claiming an island, one wins, ranked by fit (in_window >
+// after_end > before_start > no_timestamp), then time distance to the run's
+// start, then run_id, then usage_id — the same ranking the original view used
+// per line, now applied per message. claim_count is the number of competing
+// runs, line_count the number of raw lines the row stands for; attribution
+// exposes the confidence instead of filtering it away.
+//
+// Cost is joined at the winning run's OWN price_set_id. cost_facts holds a row
+// per price snapshot, so a join without that predicate multiplies every sum.
+// A call whose model is missing from the snapshot yields NULL, never 0:
+// unpriced is not free.
+//
+// collapseUsageIslands() below is the JS twin of this definition — the
+// dashboard aggregates must stay under ~2 s per request, and this view costs
+// ~17 s on the live store — with a contract test
+// (scripts/telemetry-canonical.test.mjs) asserting both produce identical
+// rows. Change one, change the other.
+// ---------------------------------------------------------------------------
+
+export const MESSAGE_GAP_MS = 300000;
+
+const FIT_RANK_SQL = `
+    CASE
+      WHEN u.observed_at IS NULL OR r.started_at IS NULL THEN 3
+      WHEN u.observed_at >= r.started_at
+           AND (r.ended_at IS NULL OR u.observed_at <= r.ended_at) THEN 0
+      WHEN u.observed_at > COALESCE(r.ended_at, r.started_at) THEN 1
+      ELSE 2
+    END`;
+
+const FIT_LABEL_SQL = `
+    CASE k.fit_rank
+      WHEN 0 THEN 'in_window'
+      WHEN 1 THEN 'after_end'
+      WHEN 2 THEN 'before_start'
+      ELSE 'no_timestamp'
+    END`;
+
+export const CANONICAL_USAGE_SQL = `
+CREATE VIEW canonical_usage AS
+WITH ordered AS (
+  SELECT
+    u.usage_id, u.run_id, u.session_id, u.agent_key, u.model, u.observed_at,
+    u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens,
+    u.source_path, u.source_offset, u.created_at,
+    r.squad, r.started_at, r.ended_at, r.price_set_id,
+    ${FIT_RANK_SQL} AS fit_rank,
+    LAG(u.input_tokens)          OVER w AS p_input,
+    LAG(u.output_tokens)         OVER w AS p_output,
+    LAG(u.cache_read_tokens)     OVER w AS p_cache_read,
+    LAG(u.cache_creation_tokens) OVER w AS p_cache_creation,
+    LAG(u.observed_at)           OVER w AS p_observed_at
+  FROM usage_facts u JOIN runs r ON r.run_id = u.run_id
+  WINDOW w AS (PARTITION BY u.source_path, u.agent_key, u.model
+               ORDER BY u.source_offset, u.run_id, u.usage_id)
+),
+flagged AS (
+  SELECT *,
+    CASE
+      WHEN p_input IS NULL THEN 0
+      WHEN input_tokens != p_input OR output_tokens != p_output
+        OR cache_read_tokens != p_cache_read
+        OR cache_creation_tokens != p_cache_creation THEN 1
+      WHEN observed_at IS NOT NULL AND p_observed_at IS NOT NULL
+        AND ABS(julianday(observed_at) - julianday(p_observed_at)) * 86400 > 300 THEN 1
+      ELSE 0
+    END AS is_boundary
+  FROM ordered
+),
+islands AS (
+  SELECT *,
+    SUM(is_boundary) OVER (PARTITION BY source_path, agent_key, model
+      ORDER BY source_offset, run_id, usage_id ROWS UNBOUNDED PRECEDING) AS island_id
+  FROM flagged
+),
+island_stats AS (
+  SELECT source_path, agent_key, model, island_id,
+    COUNT(*) AS line_count, COUNT(DISTINCT run_id) AS claim_count
+  FROM islands GROUP BY source_path, agent_key, model, island_id
+),
+ranked AS (
+  SELECT *,
+    ROW_NUMBER() OVER (
+      PARTITION BY source_path, agent_key, model, island_id
+      ORDER BY fit_rank, ABS(julianday(observed_at) - julianday(started_at)), run_id, usage_id
+    ) AS rn
+  FROM islands
+)
+SELECT
+  k.source_path, k.source_offset, k.usage_id, k.run_id, k.session_id, k.squad,
+  k.agent_key, k.model, k.observed_at, k.started_at, k.ended_at,
+  k.input_tokens, k.output_tokens, k.cache_read_tokens, k.cache_creation_tokens,
+  s.claim_count, s.line_count,
+  ${FIT_LABEL_SQL} AS attribution,
+  c.cost_usd
+FROM ranked k
+JOIN island_stats s ON s.source_path = k.source_path AND s.agent_key = k.agent_key
+  AND s.model IS k.model AND s.island_id = k.island_id
+LEFT JOIN cost_facts c
+  ON c.run_id = k.run_id AND c.usage_id = k.usage_id AND c.price_set_id = k.price_set_id
+WHERE k.rn = 1`;
+
+// tool_fact_id is sha1(source_path:source_offset:tool_index) — already one row
+// per physical tool call (a tool_use content block), independent of which run
+// claimed it. Only the run-scoped claim layer applies here; the per-message
+// layer does not (several tool_use blocks of one message are several calls).
+// FOC-220 columns ride along: tool_input_id (full-input identity, key-order
+// independent), tool_index, and the honest outcome triple
+// tool_result_state / tool_result_bytes / tool_result_id (NULL = unknown on
+// pre-FOC-220 rows — never read as a verified ok).
+export const CANONICAL_TOOL_SQL = `
+CREATE VIEW canonical_tool_facts AS
+WITH claims AS (
+  SELECT
+    u.tool_fact_id, u.run_id, u.agent_key, u.model, u.observed_at,
+    u.tool_name_raw, u.tool_name_canon, u.tool_has_error, u.turn_index,
+    u.tool_input, u.tool_input_id, u.tool_index, u.tool_result_state,
+    u.tool_result_bytes, u.tool_result_id, u.source_path, u.source_offset,
+    r.squad, r.started_at,
+    ${FIT_RANK_SQL} AS fit_rank
+  FROM tool_facts u JOIN runs r USING(run_id)
+),
+ranked AS (
+  SELECT *,
+    ROW_NUMBER() OVER (
+      PARTITION BY tool_fact_id
+      ORDER BY fit_rank, ABS(julianday(observed_at) - julianday(started_at)), run_id
+    ) AS rn,
+    COUNT(*) OVER (PARTITION BY tool_fact_id) AS claim_count
+  FROM claims
+)
+SELECT
+  k.tool_fact_id, k.run_id, k.squad, k.agent_key, k.model, k.observed_at,
+  k.tool_name_raw, k.tool_name_canon, k.tool_has_error, k.turn_index,
+  k.tool_input, k.tool_input_id, k.tool_index, k.tool_result_state,
+  k.tool_result_bytes, k.tool_result_id, k.source_path, k.source_offset,
+  k.claim_count,
+  ${FIT_LABEL_SQL} AS attribution
+FROM ranked k
+WHERE k.rn = 1`;
+
+/**
+ * Create both canonical views, replacing any earlier definition. DROP+CREATE
+ * rather than CREATE IF NOT EXISTS: a view that silently kept a stale
+ * definition after this file changed would be worse than no view at all.
+ * Called on every open from migrate(), so a fresh store never has to remember
+ * to run scripts/telemetry-canonical.mjs --ensure first. Safe to call again —
+ * a view holds no data.
+ */
+export function dropCanonicalViews(db) {
+  db.exec("DROP VIEW IF EXISTS canonical_usage");
+  db.exec("DROP VIEW IF EXISTS canonical_tool_facts");
+}
+
+export function ensureCanonicalViews(db) {
+  // One unit of work: two openers racing this on the same file used to
+  // interleave statement-by-statement — B drops, A's CREATE slips into the
+  // gap, B's own CREATE fails with "view canonical_usage already exists".
+  // BEGIN IMMEDIATE holds the write lock across the drop and both CREATEs,
+  // so a concurrent recreate either waits behind it or lands after the
+  // committed drop; the gap it needs no longer exists.
+  transaction(db, () => {
+    dropCanonicalViews(db);
+    db.exec(CANONICAL_USAGE_SQL);
+    db.exec(CANONICAL_TOOL_SQL);
+  });
+  return ["canonical_usage", "canonical_tool_facts"];
 }
 
 /**
@@ -1041,6 +1299,14 @@ function applyTaskLinked(db, event) {
   const source = payload.source || "manual";
   const confidence = payload.confidence ?? (source === "launch" || source === "agent_pick" || source === "manual" ? 1 : 0.5);
   db.prepare("INSERT OR IGNORE INTO runs (run_id, status, updated_at) VALUES (?, 'running', ?)").run(runId, now());
+  // FOC-221: a link is only as good as its id. An id that does not look like a
+  // Linear identifier (TEAM-123) would otherwise create a work_items row and
+  // silently bill usage against garbage — reject it and raise a visible
+  // quality issue instead. clearRunTask (direct SQL) bypasses this by design.
+  if (!/^[A-Z][A-Z0-9]{0,9}-\d{1,10}$/.test(taskId)) {
+    raiseIssue(db, runId, "task_id_malformed", "warning", { taskId, source, runId: event.runId ?? null });
+    return { rejected: true, reason: "task_id_malformed", runId, taskId };
+  }
   db.prepare("INSERT OR IGNORE INTO work_items (task_id, provider, workspace, identifier, created_at) VALUES (?, ?, ?, ?, ?)")
     .run(taskId, payload.provider || "linear", payload.workspace || null, taskId, now());
   const active = db.prepare(
@@ -1149,7 +1415,30 @@ function resolveInScope(model, scope) {
   return null;
 }
 
-export function resolvePrice(model, prices, provider = null) {
+// FOC-165: a key catalogued only under a non-openrouter provider (e.g.
+// zai-org/GLM-5.2-FP8 under nebul) is invisible to the flat openrouter scope
+// and every provider-less caller billed it as unpriced. Exact model_key lookup
+// across all provider scopes — never fuzzy, because the fuzzy rules above are
+// openrouter-shape heuristics and cross-provider they could silently bill one
+// provider's rate for another's. Deterministic when the same key is catalogued
+// more than once: identical price rows collapse (alphabetically first provider
+// is the tie-break), differing rows refuse so the caller surfaces
+// pricing_missing instead of silently picking a rate.
+const samePriceRow = (a, b) =>
+  ["input", "output", "cacheRead", "cacheWrite"].every((k) => (a[k] ?? null) === (b[k] ?? null));
+
+function resolveExactAcrossScopes(model, scoped) {
+  const candidates = [];
+  for (const [provider, models] of Object.entries(scoped || {})) {
+    if (models && typeof models === "object" && models[model]) candidates.push({ provider, price: models[model] });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0));
+  if (candidates.some((c) => !samePriceRow(candidates[0].price, c.price))) return null;
+  return { key: model, price: candidates[0].price };
+}
+
+export function resolvePrice(model, prices, provider = null, scoped = null) {
   if (isSyntheticModel(model)) return null;
   if (!prices) return null;
   // With a provider, resolve within that provider's scope only (exact →
@@ -1157,7 +1446,9 @@ export function resolvePrice(model, prices, provider = null) {
   // existing flat fuzzy behaviour is preserved for legacy callers and legacy
   // stored price sets.
   if (provider) return resolveInScope(model, prices[provider] || {});
-  return resolveInScope(model, prices);
+  const flat = resolveInScope(model, prices);
+  if (flat || !scoped) return flat;
+  return resolveExactAcrossScopes(model, scoped);
 }
 
 function ensurePriceSet(db) {
@@ -1204,11 +1495,35 @@ function loadPriceSet(db, priceSetId) {
   return { id: priceSetId, prices, scoped };
 }
 
-export function calculateCost(usage, model, prices, provider = null) {
-  const resolved = resolvePrice(model, prices, provider);
+// A flat price row may declare the catalogue's context-length override as
+// `promptTokenThreshold` (FOC-165 (f): openai/gpt-6-astra bills 20/75/2/25 at
+// min_prompt_tokens=272000, which a flat row cannot express as a rate). The
+// flat rates are the BASE rate and are valid only below the threshold; above
+// it the honest answer is `null` — unpriced — never the base-rate under-count.
+// The comparison axis is the recorded inputTokens (the prompt axis usage rows
+// carry); cache-read tokens are a separate axis and are not folded in.
+const isPromptThreshold = (t) =>
+  t && typeof t === "object" && Number.isFinite(t.minPromptTokens) && t.minPromptTokens > 0;
+
+/**
+ * The declared prompt-token threshold for a model, or null when the resolved
+ * row is flat (or declares a malformed threshold, which is ignored rather than
+ * half-applied). Callers use it to tell "no price row" apart from "price row
+ * exists but does not cover this usage" when calculateCost returned null.
+ */
+export function priceThreshold(model, prices, provider = null, scoped = null) {
+  const resolved = resolvePrice(model, prices, provider, scoped);
+  const t = resolved?.price?.promptTokenThreshold;
+  return isPromptThreshold(t) ? t : null;
+}
+
+export function calculateCost(usage, model, prices, provider = null, scoped = null) {
+  const resolved = resolvePrice(model, prices, provider, scoped);
   if (!resolved) return null;
   const price = resolved.price;
   if (!Number.isFinite(price.input) || !Number.isFinite(price.output)) return null;
+  const threshold = price.promptTokenThreshold;
+  if (isPromptThreshold(threshold) && (usage.inputTokens || 0) >= threshold.minPromptTokens) return null;
   const cacheReadPrice = Number.isFinite(price.cacheRead) ? price.cacheRead : price.input * 0.1;
   // Cache-creation tokens bill at cacheWrite when the model configures one;
   // otherwise they fall back to the input rate (today's behaviour).
@@ -1274,7 +1589,7 @@ function applyUsageRecorded(db, event) {
     snapshot = ensurePriceSet(db);
     db.prepare("UPDATE runs SET price_set_id=? WHERE run_id=?").run(snapshot.id, runId);
   }
-  const cost = calculateCost(payload, payload.model, snapshot.prices);
+  const cost = calculateCost(payload, payload.model, snapshot.prices, null, snapshot.scoped);
   if (cost == null && !isSyntheticModel(payload.model)) {
     raiseIssue(db, runId, "pricing_missing", "warning", { model: payload.model, usageId, runId: event.runId ?? null });
   }
@@ -1530,7 +1845,7 @@ function makeRunProjection(db, row, options = {}) {
     for (const item of byModelRows) {
       const model = item.model;
       if (isSyntheticModel(model)) continue;
-      const resolved = resolvePrice(model, priceSet.prices);
+      const resolved = resolvePrice(model, priceSet.prices, null, priceSet.scoped);
       if (!resolved) continue;
       const price = resolved.price;
       if (!Number.isFinite(price.input)) continue;
@@ -1582,7 +1897,8 @@ function makeRunProjection(db, row, options = {}) {
 }
 
 function repriceCurrent(db, runs) {
-  const prices = pricingSnapshot().prices;
+  const snapshot = pricingSnapshot();
+  const prices = snapshot.prices;
   const byRun = new Map(runs.map((run) => [run.runId, run]));
   for (const run of runs) {
     run.totals.costUSD = 0;
@@ -1612,7 +1928,7 @@ function repriceCurrent(db, runs) {
     const cost = calculateCost({
       inputTokens: item.input_tokens, outputTokens: item.output_tokens,
       cacheReadTokens: item.cache_read_tokens, cacheCreationTokens: item.cache_creation_tokens,
-    }, item.model, prices);
+    }, item.model, prices, null, snapshot.scoped);
     if (cost == null && !isSyntheticModel(item.model)) {
       run.totals.unpricedUsageCount++;
       if (run.byModel[modelKey]) run.byModel[modelKey].unpricedUsageCount++;
@@ -1631,7 +1947,7 @@ function repriceCurrent(db, runs) {
     }
     // Compute cache savings for this usage item
     if (item.cache_read_tokens > 0 && !isSyntheticModel(item.model)) {
-      const resolved = resolvePrice(item.model, prices);
+      const resolved = resolvePrice(item.model, prices, null, snapshot.scoped);
       if (resolved) {
         const price = resolved.price;
         if (Number.isFinite(price.input)) {
@@ -1809,34 +2125,258 @@ export function queryManagerRuns(db, options = {}) {
   return { active: active.map(project), recent: recent.map(project) };
 }
 
-function aggregateUsageByTask(db, priceMode) {
+// JS twin of the canonical_usage view (the per-message island collapse — see
+// the block comment above the view SQL for the rule and the measured ground
+// truth). The dashboard fleet aggregate must stay under ~2 s per request and
+// the SQL view costs ~17 s on the live store, so aggregateUsageByTask runs the
+// collapse here over the same raw input. The contract test in
+// scripts/telemetry-canonical.test.mjs asserts view and twin agree row for
+// row; change both or neither.
+const FIT_LABELS = ["in_window", "after_end", "before_start", "no_timestamp"];
+
+function fitRank(observedAt, startedAt, endedAt) {
+  if (observedAt == null || startedAt == null) return 3;
+  if (observedAt >= startedAt && (endedAt == null || observedAt <= endedAt)) return 0;
+  if (observedAt > (endedAt ?? startedAt)) return 1;
+  return 2;
+}
+
+// NULL sorts first in SQLite's ASC — the twin must agree when both pick a
+// winner among rows whose time distance is unknown.
+const sent = (v) => (v == null ? "\u0000" : v);
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+// SQLite's ASC puts NULL before every value; the twin must agree when rows
+// carry a NULL source_offset.
+const numCmp = (a, b) => {
+  if (a == null && b == null) return 0;
+  if (a == null) return -1;
+  if (b == null) return 1;
+  return a - b;
+};
+
+// julianday() reads a timestamp without an offset designator as UTC;
+// Date.parse() would read it as local time. Every timestamp the store writes
+// carries Z, but events come from outside — normalise so the twin agrees with
+// the view even on offset-less input.
+const toEpoch = (iso) => Date.parse(/[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`);
+
+function timeDistance(row) {
+  if (row.observed_at == null || row.started_at == null) return -1;
+  return Math.abs(toEpoch(row.observed_at) - toEpoch(row.started_at));
+}
+
+export function collapseUsageIslands(rows) {
+  const sorted = [...rows].sort((a, b) =>
+    cmp(sent(a.source_path), sent(b.source_path)) ||
+    cmp(sent(a.agent_key), sent(b.agent_key)) ||
+    cmp(sent(a.model), sent(b.model)) ||
+    numCmp(a.source_offset, b.source_offset) ||
+    cmp(sent(a.run_id), sent(b.run_id)) ||
+    cmp(sent(a.usage_id), sent(b.usage_id)));
+
+  const islands = [];
+  let current = null;
+  for (const row of sorted) {
+    const sameIsland = current
+      && current.source_path === row.source_path
+      && current.agent_key === row.agent_key
+      && (current.model ?? null) === (row.model ?? null)
+      && current.input_tokens === row.input_tokens
+      && current.output_tokens === row.output_tokens
+      && current.cache_read_tokens === row.cache_read_tokens
+      && current.cache_creation_tokens === row.cache_creation_tokens
+      && !(row.observed_at != null && current.observed_at != null
+        && Math.abs(toEpoch(row.observed_at) - toEpoch(current.observed_at)) > MESSAGE_GAP_MS);
+    if (sameIsland) {
+      current.lines.push(row);
+      current.observed_at = row.observed_at; // chain anchor, like the view's LAG
+    } else {
+      current = { ...row, lines: [row] };
+      islands.push(current);
+    }
+  }
+
+  return islands.map((island) => {
+    // Same ranking as the view: fit, then time distance to the run start
+    // (unknown sorts first), then run_id, then usage_id.
+    const rank = (r) => [
+      fitRank(r.observed_at, r.started_at, r.ended_at),
+      timeDistance(r),
+      sent(r.run_id),
+      sent(r.usage_id),
+    ];
+    const less = (a, b) => {
+      const ka = rank(a); const kb = rank(b);
+      for (let i = 0; i < ka.length; i++) {
+        if (ka[i] < kb[i]) return true;
+        if (ka[i] > kb[i]) return false;
+      }
+      return false;
+    };
+    const winner = island.lines.reduce((best, r) => (less(r, best) ? r : best));
+    return {
+      source_path: winner.source_path,
+      source_offset: winner.source_offset,
+      usage_id: winner.usage_id,
+      run_id: winner.run_id,
+      session_id: winner.session_id,
+      squad: winner.squad,
+      agent_key: winner.agent_key,
+      model: winner.model,
+      observed_at: winner.observed_at,
+      started_at: winner.started_at,
+      ended_at: winner.ended_at,
+      input_tokens: winner.input_tokens,
+      output_tokens: winner.output_tokens,
+      cache_read_tokens: winner.cache_read_tokens,
+      cache_creation_tokens: winner.cache_creation_tokens,
+      claim_count: new Set(island.lines.map((l) => l.run_id)).size,
+      line_count: island.lines.length,
+      attribution: FIT_LABELS[fitRank(winner.observed_at, winner.started_at, winner.ended_at)],
+      cost_usd: winner.cost_usd,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Task-coverage classes (FOC-221).
+//
+// Uncertainty never silent: ambiguity = multiple competing candidates for one
+// run, flagged — never silently first-picked the way a bare
+// `ORDER BY confidence DESC LIMIT 1` would.
+// ---------------------------------------------------------------------------
+
+function taskCoverageMap(db) {
   const rows = db.prepare(
-    `SELECT u.run_id, u.model, u.observed_at, u.input_tokens, u.output_tokens,
-       u.cache_read_tokens, u.cache_creation_tokens, r.squad, r.started_at, r.ended_at,
-       c.cost_usd,
-       (SELECT l.task_id FROM run_task_links l
-        WHERE l.run_id=u.run_id AND l.role='primary'
-          AND l.valid_from<=COALESCE(u.observed_at, r.started_at)
-          AND (l.valid_to IS NULL OR l.valid_to>COALESCE(u.observed_at, r.started_at))
-        ORDER BY l.confidence DESC, l.valid_from DESC LIMIT 1) AS task_id
+    `SELECT run_id,
+       MAX(CASE WHEN valid_to IS NULL THEN 1 ELSE 0 END) AS has_active,
+       MAX(CASE WHEN valid_to IS NULL AND confidence >= 1 THEN 1 ELSE 0 END) AS active_confident,
+       COUNT(DISTINCT task_id) AS distinct_tasks,
+       GROUP_CONCAT(DISTINCT task_id) AS candidates
+     FROM run_task_links WHERE role='primary' GROUP BY run_id`,
+  ).all();
+  const map = new Map();
+  for (const row of rows) {
+    map.set(row.run_id, {
+      coverage: !row.has_active ? "unmatched"
+        : row.active_confident || row.distinct_tasks === 1 ? "matched"
+        : "ambiguous",
+      taskId: null,
+      candidates: row.candidates ? row.candidates.split(",").sort() : [],
+    });
+  }
+  const active = db.prepare(
+    "SELECT run_id, task_id FROM run_task_links WHERE role='primary' AND valid_to IS NULL",
+  ).all();
+  for (const link of active) {
+    const entry = map.get(link.run_id);
+    if (entry) entry.taskId = link.task_id;
+  }
+  return map;
+}
+
+/**
+ * Deterministic coverage class for every primary task link (FOC-221). The
+ * class belongs to the run; every one of its links carries it:
+ *
+ *   unmatched   no active primary link — nothing is attributed
+ *   matched     one consistent attribution: a confidence>=1 link (launch,
+ *               manual, verified agent_pick) arbitrates, or all of the run's
+ *               primary links name the same task
+ *   ambiguous   >=2 distinct tasks were linked over the run's lifetime and no
+ *               confident link arbitrates — the fleet surface bills these runs
+ *               to the __ambiguous__ bucket with the candidates attached.
+ */
+export function runTaskCoverage(db) {
+  const coverage = taskCoverageMap(db);
+  const links = db.prepare(
+    `SELECT link_id, run_id, task_id, source, confidence, valid_from, valid_to
+     FROM run_task_links WHERE role='primary' ORDER BY run_id, valid_from`,
+  ).all();
+  return links.map((link) => ({ ...link, coverage: coverage.get(link.run_id)?.coverage ?? "unmatched" }));
+}
+
+/**
+ * Per-class run counts over the runs the fleet surface can bill — runs that
+ * have canonical usage rows at all. A run without usage is not attributable
+ * in the first place.
+ */
+export function taskCoverageCounts(db) {
+  const coverage = taskCoverageMap(db);
+  const counts = { matched: 0, unmatched: 0, ambiguous: 0 };
+  for (const row of db.prepare("SELECT DISTINCT run_id FROM canonical_usage").all()) {
+    counts[coverage.get(row.run_id)?.coverage ?? "unmatched"]++;
+  }
+  return counts;
+}
+
+// The SQL it twins: valid_from<=t AND (valid_to IS NULL OR valid_to>t)
+// ORDER BY confidence DESC, valid_from DESC LIMIT 1. NULL `at` matches
+// nothing, like SQL's three-valued comparison.
+function activeTaskAt(links, at) {
+  if (!links || at == null) return null;
+  let best = null;
+  for (const link of links) {
+    if (link.valid_from > at || (link.valid_to != null && link.valid_to <= at)) continue;
+    if (!best || link.confidence > best.confidence
+      || (link.confidence === best.confidence && link.valid_from > best.valid_from)) {
+      best = link;
+    }
+  }
+  return best?.task_id ?? null;
+}
+
+function linksByRunIndex(db) {
+  const rows = db.prepare(
+    `SELECT run_id, task_id, confidence, valid_from, valid_to FROM run_task_links
+     WHERE role='primary' ORDER BY run_id, valid_from DESC`,
+  ).all();
+  const byRun = new Map();
+  for (const row of rows) {
+    if (!byRun.has(row.run_id)) byRun.set(row.run_id, []);
+    byRun.get(row.run_id).push(row);
+  }
+  return byRun;
+}
+
+function aggregateUsageByTask(db, priceMode) {
+  // Fleet cost reads per-message canonical rows: one physical call counted
+  // once. Raw usage_facts would count a call once per claiming run (the
+  // run-scoped layer) and once per repeated per-message usage line — measured
+  // 2026-09-12 on the live store copy: 182,796 rows and $7,029 naive against
+  // 74,086 calls and $1,557 canonical.
+  const rows = db.prepare(
+    `SELECT u.usage_id, u.run_id, u.session_id, u.agent_key, u.model, u.observed_at,
+       u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens,
+       u.source_path, u.source_offset, r.squad, r.started_at, r.ended_at,
+       c.cost_usd
      FROM usage_facts u
      JOIN runs r ON r.run_id=u.run_id
      LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id`,
   ).all();
-  const currentPrices = priceMode === "current" ? pricingSnapshot().prices : null;
+  const canonical = collapseUsageIslands(rows);
+  const coverage = taskCoverageMap(db);
+  const links = linksByRunIndex(db);
+  const currentSnapshot = priceMode === "current" ? pricingSnapshot() : null;
+  const currentPrices = currentSnapshot ? currentSnapshot.prices : null;
   const buckets = {};
-  for (const row of rows) {
-    const key = row.task_id || "__untagged__";
+  for (const row of canonical) {
+    const run = coverage.get(row.run_id);
+    // Ambiguous attribution is flagged, not first-picked: those runs are
+    // billed to their own bucket with the candidates kept inspectable.
+    const key = run?.coverage === "ambiguous" ? "__ambiguous__"
+      : activeTaskAt(links.get(row.run_id), row.observed_at ?? row.started_at) || "__untagged__";
     const bucket = buckets[key] ||= {
       runs: 0, costUSD: 0, partialCostUSD: 0, unpricedUsageCount: 0,
       inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationInputTokens: 0,
       firstStartedAt: null, lastEndedAt: null, squads: {}, _runs: new Set(), _running: false,
+      costBasis: COST_BASIS_CANONICAL,
     };
     const cost = currentPrices
       ? calculateCost({
           inputTokens: row.input_tokens, outputTokens: row.output_tokens,
           cacheReadTokens: row.cache_read_tokens, cacheCreationTokens: row.cache_creation_tokens,
-        }, row.model, currentPrices)
+        }, row.model, currentPrices, null, currentSnapshot.scoped)
       : row.cost_usd;
     bucket.inputTokens += row.input_tokens;
     bucket.outputTokens += row.output_tokens;
@@ -1845,6 +2385,10 @@ function aggregateUsageByTask(db, priceMode) {
     if (cost == null && !isSyntheticModel(row.model)) bucket.unpricedUsageCount++;
     else bucket.partialCostUSD += cost || 0;
     bucket._runs.add(row.run_id);
+    if (run?.coverage === "ambiguous" && run.candidates.length) {
+      bucket.candidateTaskIds ||= new Set();
+      for (const taskId of run.candidates) bucket.candidateTaskIds.add(taskId);
+    }
     if (!bucket.firstStartedAt || row.started_at < bucket.firstStartedAt) bucket.firstStartedAt = row.started_at;
     if (row.ended_at == null) bucket._running = true;
     else if (!bucket.lastEndedAt || row.ended_at > bucket.lastEndedAt) bucket.lastEndedAt = row.ended_at;
@@ -1853,12 +2397,14 @@ function aggregateUsageByTask(db, priceMode) {
     squadBucket._runs.add(row.run_id);
     squadBucket.costUSD += cost || 0;
   }
-  for (const bucket of Object.values(buckets)) {
+  for (const [key, bucket] of Object.entries(buckets)) {
     bucket.runs = bucket._runs.size;
     bucket.costUSD = bucket.unpricedUsageCount ? null : bucket.partialCostUSD;
     if (bucket._running) bucket.lastEndedAt = null;
     delete bucket._runs;
     delete bucket._running;
+    bucket.coverage = key === "__ambiguous__" ? "ambiguous" : key === "__untagged__" ? "unmatched" : "matched";
+    if (bucket.candidateTaskIds) bucket.candidateTaskIds = [...bucket.candidateTaskIds].sort();
     for (const squad of Object.values(bucket.squads)) {
       squad.runs = squad._runs.size;
       delete squad._runs;
@@ -1901,7 +2447,18 @@ export function querySummary(db, options = {}) {
   }
   const byTask = aggregateUsageByTask(db, options.priceMode);
   const cacheHitRate = totals.cacheReadTokens + totals.inputTokens > 0 ? totals.cacheReadTokens / (totals.cacheReadTokens + totals.inputTokens) * 100 : 0;
-  return { totals, bySquad, byModel, byDay, byRepo, byTask, cacheHitRate };
+  // One payload, two bases (FOC-221 review): totals/bySquad/byModel/byDay/byRepo
+  // sit on the raw per-message layer, while byTask is island-collapsed. Both are
+  // labeled so a consumer can branch instead of guessing which figures carry
+  // the raw over-counts.
+  return {
+    totals, bySquad, byModel, byDay, byRepo, byTask, cacheHitRate,
+    costBasis: COST_BASIS_RAW,
+    costBasisNote: COST_BASIS_RAW_NOTE,
+    byTaskCostBasis: COST_BASIS_CANONICAL,
+    byTaskCostBasisNote: COST_BASIS_CANONICAL_NOTE,
+    taskCoverage: taskCoverageCounts(db),
+  };
 }
 
 export function queryHealth(db) {
@@ -1909,8 +2466,23 @@ export function queryHealth(db) {
   const pendingCount = existsSync(pending) ? readdirSync(pending).filter((name) => name.endsWith(".json")).length : 0;
   const issues = db.prepare("SELECT issue_type AS type, severity, COUNT(*) AS count FROM data_quality_issues WHERE resolved_at IS NULL GROUP BY issue_type, severity ORDER BY count DESC").all();
   const running = db.prepare("SELECT COUNT(*) AS count FROM runs WHERE ended_at IS NULL").get().count;
-  return { database: telemetryDbPath(), schemaVersion: SCHEMA_VERSION, pendingEvents: pendingCount, runningRuns: running, issues };
+  // FOC-220 AC1: identity-scheme drift is reported here too, so a mismatch is
+  // visible to every health reader, not only to the refused write.
+  return { database: telemetryDbPath(), schemaVersion: SCHEMA_VERSION, identityScheme: toolIdentityScheme(db), pendingEvents: pendingCount, runningRuns: running, issues };
 }
+
+// Cost/turn basis labels (FOC-221 review). queryTrace and queryPatterns read
+// the raw per-message layer (usage_facts LEFT JOIN cost_facts), so their cost
+// figures carry the run-scoped claim copies and the repeated per-message usage
+// lines — measured 2026-09-12 at ~2.1-2.2x. The figures stay raw by decision
+// (disclosure, not collapse: their turns are raw too, and turn attribution is
+// a separate future decision); instead the payloads self-describe the basis so
+// a JSON consumer can branch on it. canonical_usage / aggregateUsageByTask is
+// the collapsed surface.
+const COST_BASIS_RAW = "raw";
+const COST_BASIS_CANONICAL = "canonical";
+const COST_BASIS_RAW_NOTE = "cost figures and the turns counts beside them are raw usage-line sums from usage_facts LEFT JOIN cost_facts: run-scoped claim copies and repeated per-message usage lines are included, not collapsed — canonical_usage (FOC-221 island rule) is the collapsed surface";
+const COST_BASIS_CANONICAL_NOTE = "these buckets are island-collapsed per the FOC-221 rule (one row per physical message): they do not carry the raw over-counts the raw-layer figures above do";
 
 export function queryTrace(db, taskId) {
   const runRows = db.prepare(
@@ -1919,7 +2491,9 @@ export function queryTrace(db, taskId) {
   ).all(normalizeTaskId(taskId));
   const steps = db.prepare(
     `SELECT u.agent_key AS agent, COUNT(*) AS turns,
-       SUM(CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END) AS cost,
+       SUM(c.cost_usd) AS cost,
+       SUM(CASE WHEN c.cost_usd IS NULL AND u.model IS NOT NULL
+                AND u.model NOT IN ('synthetic','<synthetic>') THEN 1 ELSE 0 END) AS unpriced,
        MIN(u.observed_at) AS first_ts, MAX(u.observed_at) AS last_ts
      FROM usage_facts u JOIN runs r ON r.run_id=u.run_id
      LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
@@ -1931,21 +2505,32 @@ export function queryTrace(db, taskId) {
      GROUP BY u.agent_key ORDER BY MIN(u.observed_at)`,
   );
   const normalized = normalizeTaskId(taskId);
-  const chain = runRows.map((row) => ({
-    runId: row.run_id,
-    squad: row.squad,
-    startedAt: row.started_at,
-    endedAt: row.ended_at,
-    status: statusRow(row),
-    costUSD: steps.all(row.run_id, normalized).reduce((sum, step) => sum + (step.cost || 0), 0),
-    steps: steps.all(row.run_id, normalized).map((step) => ({
+  // Unknown price is not zero (FOC-221): the `ELSE 0` fold is gone. A step
+  // with unpriced usage reports costUSD null and carries the count next to it;
+  // nulls propagate up the chain instead of being laundered into a sum.
+  const chain = runRows.map((row) => {
+    const stepRows = steps.all(row.run_id, normalized).map((step) => ({
       agent: step.agent,
       turns: step.turns,
-      costUSD: step.cost,
+      costUSD: step.unpriced ? null : (step.cost ?? 0),
+      costBasis: COST_BASIS_RAW,
+      unpriced: step.unpriced,
       firstTs: step.first_ts,
       lastTs: step.last_ts,
-    })),
-  }));
+    }));
+    const runUnpriced = stepRows.reduce((sum, step) => sum + step.unpriced, 0);
+    return {
+      runId: row.run_id,
+      squad: row.squad,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+      status: statusRow(row),
+      unpriced: runUnpriced,
+      costUSD: runUnpriced ? null : stepRows.reduce((sum, step) => sum + step.costUSD, 0),
+      costBasis: COST_BASIS_RAW,
+      steps: stepRows,
+    };
+  });
   let bounces = 0;
   let lastReviewStart = null;
   const repeats = {};
@@ -1954,10 +2539,13 @@ export function queryTrace(db, taskId) {
     if (run.squad === "review") lastReviewStart = run.startedAt;
     if (run.squad === "dev" && lastReviewStart && run.startedAt > lastReviewStart) bounces++;
   }
+  const anyUnpriced = chain.some((run) => run.unpriced > 0);
   return {
     taskId: normalized,
     runs: chain,
-    totalCostUSD: chain.reduce((sum, run) => sum + (run.costUSD || 0), 0),
+    totalCostUSD: anyUnpriced ? null : chain.reduce((sum, run) => sum + run.costUSD, 0),
+    costBasis: COST_BASIS_RAW,
+    costBasisNote: COST_BASIS_RAW_NOTE,
     reviewDevBounces: bounces,
     squadRepeats: Object.fromEntries(Object.entries(repeats).filter(([, count]) => count > 1)),
   };
@@ -1969,12 +2557,12 @@ export function queryPatterns(db, filters = {}) {
   if (filters.squad) { where.push("r.squad=?"); params.push(filters.squad); }
   if (filters.agent) { where.push("u.agent_key=?"); params.push(filters.agent); }
   const rows = db.prepare(
-    `SELECT u.run_id, r.squad, u.agent_key AS agent, u.observed_at,
+    `SELECT u.run_id, r.squad, u.agent_key AS agent, u.observed_at, u.model,
        (SELECT l.task_id FROM run_task_links l WHERE l.run_id=u.run_id AND l.role='primary'
         AND l.valid_from<=COALESCE(u.observed_at, r.started_at)
         AND (l.valid_to IS NULL OR l.valid_to>COALESCE(u.observed_at, r.started_at))
         ORDER BY l.confidence DESC, l.valid_from DESC LIMIT 1) AS task_id,
-       CASE WHEN c.cost_usd IS NOT NULL THEN c.cost_usd ELSE 0 END AS cost_usd
+       c.cost_usd AS cost_usd
      FROM usage_facts u JOIN runs r ON r.run_id=u.run_id
      LEFT JOIN cost_facts c ON c.run_id=u.run_id AND c.usage_id=u.usage_id AND c.price_set_id=r.price_set_id
      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`,
@@ -1983,9 +2571,13 @@ export function queryPatterns(db, filters = {}) {
   const repeated = new Map();
   for (const row of rows) {
     const key = `${row.squad}\u0000${row.agent}`;
-    const stat = stats.get(key) || { squad: row.squad, agent: row.agent, runs: new Map(), turns: 0, cost_usd: 0 };
+    const stat = stats.get(key) || { squad: row.squad, agent: row.agent, runs: new Map(), turns: 0, cost_usd: 0, unpriced_turns: 0 };
     stat.turns++;
-    stat.cost_usd += row.cost_usd || 0;
+    // The fold only feeds the internal sum; the OUTPUT below is null-contagious
+    // like queryTrace — a stat with an unpriced turn reports cost_usd null and
+    // carries the count next to it, never a partial sum laundered as truth.
+    stat.cost_usd += row.cost_usd ?? 0;
+    if (row.cost_usd == null && !isSyntheticModel(row.model)) stat.unpriced_turns++;
     stat.runs.set(row.run_id, (stat.runs.get(row.run_id) || 0) + 1);
     stats.set(key, stat);
     if (row.task_id) {
@@ -2001,7 +2593,9 @@ export function queryPatterns(db, filters = {}) {
     executions: stat.runs.size,
     turns: stat.turns,
     avg_turns_per_run: stat.runs.size ? stat.turns / stat.runs.size : 0,
-    cost_usd: stat.cost_usd,
+    cost_usd: stat.unpriced_turns > 0 ? null : stat.cost_usd,
+    costBasis: COST_BASIS_RAW,
+    unpriced_turns: stat.unpriced_turns,
   })).sort((a, b) => `${a.squad}:${a.agent}`.localeCompare(`${b.squad}:${b.agent}`));
   const repeats = [...repeated.entries()].flatMap(([key, runIds]) => {
     if (runIds.size <= 1) return [];
@@ -2025,7 +2619,7 @@ export function queryPatterns(db, filters = {}) {
     `SELECT squad, COUNT(*) AS runs, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed
      FROM runs GROUP BY squad ORDER BY squad`,
   ).all();
-  return { stepStats, repeats, bounces, failures };
+  return { stepStats, repeats, bounces, failures, costBasis: COST_BASIS_RAW, costBasisNote: COST_BASIS_RAW_NOTE };
 }
 
 export function exportTelemetry(db, format, destination) {
@@ -2060,6 +2654,66 @@ export function resetTelemetry(options = {}) {
   return path;
 }
 
+/**
+ * Per-store random salt keying the tool-input identity and result digests
+ * (FOC-220). Generated once on first use, persisted in store_settings, stable
+ * for the lifetime of the database file — so digests stay comparable across
+ * ingests while remaining unverifiable to anyone who sees only the digests.
+ * VACUUM INTO snapshots carry the salt with the data, keeping restores coherent.
+ *
+ * @param {import("node:sqlite").DatabaseSync} db
+ * @returns {string} hex salt
+ */
+export function toolIdentitySalt(db) {
+  const KEY = "tool_identity_salt";
+  const existing = db.prepare("SELECT value FROM store_settings WHERE key=?").get(KEY);
+  if (existing?.value) return existing.value;
+  db.prepare("INSERT OR IGNORE INTO store_settings (key, value) VALUES (?, ?)")
+    .run(KEY, randomBytes(32).toString("hex"));
+  // Re-read rather than trust the insert: a concurrent writer may have won.
+  return db.prepare("SELECT value FROM store_settings WHERE key=?").get(KEY).value;
+}
+
+/**
+ * Which identity scheme wrote this store, vs the one currently running
+ * (FOC-220 AC1). The scheme is recorded in store_settings next to the salt,
+ * so a stored digest is attributable to a normalization recipe — two digests
+ * computed under different schemes must never be compared as "different
+ * input", because the difference may be scheme drift, not a different call.
+ *
+ * First contact with a store that has no recorded scheme stamps the CURRENT
+ * one: every store predating the versioned contract was written by the
+ * unchanged scheme-1 recipe, so adoption is a single INSERT — no re-derivation
+ * of the backfilled rows. A scheme bump (INPUT_IDENTITY_SCHEME_VERSION) then
+ * shows up here as a mismatch, and the write paths refuse.
+ *
+ * @param {import("node:sqlite").DatabaseSync} db
+ * @returns {{stored: number, current: number, mismatch: boolean, adopted: boolean}}
+ */
+export function toolIdentityScheme(db) {
+  const KEY = "tool_identity_scheme";
+  const row = db.prepare("SELECT value FROM store_settings WHERE key=?").get(KEY);
+  if (row?.value) {
+    const stored = Number(row.value);
+    return {
+      stored,
+      current: INPUT_IDENTITY_SCHEME_VERSION,
+      mismatch: stored !== INPUT_IDENTITY_SCHEME_VERSION,
+      adopted: false,
+    };
+  }
+  db.prepare("INSERT OR IGNORE INTO store_settings (key, value) VALUES (?, ?)")
+    .run(KEY, String(INPUT_IDENTITY_SCHEME_VERSION));
+  // Re-read rather than trust the insert: a concurrent writer may have won.
+  const stamped = Number(db.prepare("SELECT value FROM store_settings WHERE key=?").get(KEY).value);
+  return {
+    stored: stamped,
+    current: INPUT_IDENTITY_SCHEME_VERSION,
+    mismatch: stamped !== INPUT_IDENTITY_SCHEME_VERSION,
+    adopted: true,
+  };
+}
+
 export async function recordToolFact(record, options = {}) {
   const db = openTelemetryDb(options.dbPath);
   try {
@@ -2067,14 +2721,53 @@ export async function recordToolFact(record, options = {}) {
       .update(`${record.source_path}:${record.source_offset}:${record.tool_index}`)
       .digest("hex");
     const toolInput = record.tool_input ? record.tool_input.slice(0, 1000) : null;
+    // Full-input identity (FOC-220): digest the COMPLETE input before any
+    // display truncation. The extractor passes the untruncated serialization in
+    // tool_input_full; a direct caller without it may fall back to its
+    // tool_input only when that is provably untruncated (< the 1000-char cap) —
+    // a truncated preview must never become an identity. NULL = unknown.
+    const identitySource = record.tool_input_full != null
+      ? record.tool_input_full
+      : (record.tool_input && record.tool_input.length < 1000 ? record.tool_input : null);
+    // Refuse, don't mix (FOC-220 AC1): a fact written under a different scheme
+    // than the store's existing identities would be incomparable with them —
+    // scheme drift must surface as this error, never as "a different input".
+    // Thrown, not returned as a result object: the ingest loop ignores return
+    // values, and a swallowed mismatch is exactly the silent drift this guard
+    // exists to prevent. Facts are re-derivable from transcripts, so refusal
+    // loses nothing that cannot be rebuilt after the schemes are reconciled.
+    const scheme = toolIdentityScheme(db);
+    if (scheme.mismatch) {
+      throw new Error(
+        `tool-input identity scheme mismatch in ${options.dbPath || telemetryDbPath()}: store records scheme ${scheme.stored}, running code computes scheme ${scheme.current}. ` +
+        "New digests would be incomparable with the stored ones. Reconcile first — see the versioning contract in scripts/tool-identity.mjs.",
+      );
+    }
+    const salt = toolIdentitySalt(db);
+    const toolInputId = identitySource != null ? inputIdentity(identitySource, salt) : null;
+    // Honest outcome (FOC-220): 'ok' | 'error' | 'missing'; anything else (and
+    // anything on pre-FOC-220 rows) stays NULL = unknown. The result digest is
+    // equality evidence only — the text itself is never persisted.
+    const RESULT_STATES = new Set(["ok", "error", "missing"]);
+    const toolResultState = RESULT_STATES.has(record.tool_result_state) ? record.tool_result_state : null;
+    const toolResultBytes = Number.isInteger(record.tool_result_bytes) ? record.tool_result_bytes : null;
+    const toolResultId = toolResultState && toolResultState !== "missing" && typeof record.tool_result_full === "string"
+      ? contentDigest(record.tool_result_full, salt)
+      : null;
+    const hasError = record.tool_has_error != null
+      ? (record.tool_has_error ? 1 : 0)
+      : (record.tool_result_state === "error" ? 1 : 0);
     const result = db.prepare(`
       INSERT OR IGNORE INTO tool_facts
-        (tool_fact_id, run_id, agent_key, model, observed_at, tool_name_raw, tool_name_canon, tool_input, tool_has_error, turn_index, source_path, source_offset, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (tool_fact_id, run_id, agent_key, model, observed_at, tool_name_raw, tool_name_canon, tool_input, tool_has_error, turn_index, source_path, source_offset, created_at,
+         tool_input_id, tool_index, tool_result_state, tool_result_bytes, tool_result_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       toolFactId, record.run_id, record.agent_key, record.model || null, record.observed_at || null,
       record.tool_name_raw, record.tool_name_canon || null, toolInput,
-      record.tool_has_error ? 1 : 0, record.turn_index, record.source_path, record.source_offset, now(),
+      hasError, record.turn_index, record.source_path, record.source_offset, now(),
+      toolInputId, Number.isInteger(record.tool_index) ? record.tool_index : null,
+      toolResultState, toolResultBytes, toolResultId,
     );
     if (result.changes === 0) return { recorded: false, reason: "duplicate" };
     return { recorded: true, id: toolFactId };

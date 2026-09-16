@@ -22,7 +22,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,7 +35,7 @@ import {
   runDir,
   writeRegistry,
 } from "./supervisor-lib.mjs";
-import { calculateCost, pricingSnapshot } from "./telemetry-store.mjs";
+import { calculateCost, priceThreshold, pricingSnapshot } from "./telemetry-store.mjs";
 import { comparePrices } from "./price-check.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -77,8 +77,52 @@ const child = (over = {}) => ({
   permissionMode: "bypassPermissions", ...over,
 });
 
-const PRICES = pricingSnapshot().prices;
-const priceOne = (usage, model) => calculateCost(usage, model, PRICES);
+// Mirrors supervisor-watch.mjs: the watcher prices through the whole snapshot
+// (flat openrouter scope + scoped map), not the flat scope alone — a
+// nebul-catalogued key like zai-org/GLM-5.2-FP8 is invisible to flat-only
+// resolution (FOC-165).
+const SNAPSHOT = pricingSnapshot();
+const priceOne = (usage, model) => calculateCost(usage, model, SNAPSHOT.prices, null, SNAPSHOT.scoped);
+
+// The expected side of every cost assertion below is DERIVED from the same
+// snapshot the runtime prices through (pricingSnapshot() above), never from a
+// literal. A literal tracks a rate level, and the next price sync breaks it —
+// the level is price-check.mjs's job (with a date); the tests own the
+// CALCULATION. This bit us on 2026-09-15: seven assertions pinned to pre-sync
+// rates went red on a green calculation.
+const requirePrice = (model, ...fields) => {
+  const r = SNAPSHOT.prices[model];
+  assert.ok(r, `precondition: ${model} must have a price row in the runtime snapshot`);
+  for (const f of fields) {
+    assert.ok(r[f] > 0, `precondition: ${model}.${f} must be > 0, got ${r[f]} — a 0-vs-0 comparison would make the test vacuous`);
+  }
+  return r;
+};
+
+// The threshold boundary is a rate-level parameter of the committed row too —
+// a sync can move it, so the tests read it from the row instead of a literal.
+const requireThreshold = () => {
+  const r = requirePrice("openai/gpt-6-astra", "input");
+  const th = r.promptTokenThreshold?.minPromptTokens;
+  assert.ok(Number.isFinite(th) && th > 0, `precondition: openai/gpt-6-astra.promptTokenThreshold.minPromptTokens must be a positive number, got ${th}`);
+  return th;
+};
+
+// Expected sides that must read the COMMITTED file rather than the snapshot:
+// the nebul-only FP8 row is invisible to SNAPSHOT.prices by design (that is
+// the property those tests assert), so deriving their expected side from the
+// snapshot would compare the resolver to itself. Same file the runtime prices
+// through, different accessor — resolution stays under test, the rate level
+// stays price-check.mjs's job.
+const committedNebulRow = () => {
+  const row = JSON.parse(readFileSync(join(ROOT, "config", "models.json"), "utf8"))
+    ?.pricing?.nebul?.["zai-org/GLM-5.2-FP8"];
+  assert.ok(row, "precondition: config/models.json must carry zai-org/GLM-5.2-FP8 under pricing.nebul");
+  for (const f of ["input", "output", "cacheRead", "cacheWrite"]) {
+    assert.ok(row[f] > 0, `precondition: pricing.nebul["zai-org/GLM-5.2-FP8"].${f} must be > 0, got ${row[f]} — a 0-vs-0 comparison would make the test vacuous`);
+  }
+  return row;
+};
 
 // The shape Claude Code actually emits, taken from a real run on 2026-08-26.
 const resultEvent = (over = {}) => ({
@@ -112,8 +156,10 @@ test("a priced model is costed from its tokens", () => {
     null,
     priceOne,
   );
-  // glm-5.2: input 1.19 + output 3.74 per 1M
-  assert.ok(Math.abs(out.computed - 4.93) < 0.001, `expected ~4.93, got ${out.computed}`);
+  // Expected value derived from the snapshot row the runtime prices through.
+  const r = requirePrice("z-ai/glm-5.2", "input", "output");
+  const expected = r.input + r.output;
+  assert.ok(Math.abs(out.computed - expected) < 0.001, `expected ~${expected} (snapshot input+output per 1M), got ${out.computed}`);
 });
 
 test("a turn touching two models prices each at its own rate", () => {
@@ -129,7 +175,10 @@ test("a turn touching two models prices each at its own rate", () => {
     null,
     priceOne,
   );
-  assert.ok(Math.abs(out.computed - (1.19 + 0.3)) < 0.001, `expected ~1.49, got ${out.computed}`);
+  const g = requirePrice("z-ai/glm-5.2", "input");
+  const m = requirePrice("minimax/minimax-m3", "input");
+  const expected = g.input + m.input;
+  assert.ok(Math.abs(out.computed - expected) < 0.001, `expected ~${expected} (snapshot input per 1M for both models), got ${out.computed}`);
 });
 
 test("without modelUsage it falls back to usage + the model from system/init", () => {
@@ -138,7 +187,28 @@ test("without modelUsage it falls back to usage + the model from system/init", (
     "z-ai/glm-5.2",
     priceOne,
   );
-  assert.ok(Math.abs(out.computed - 1.19) < 0.001, `got ${out.computed}`);
+  const r = requirePrice("z-ai/glm-5.2", "input");
+  assert.ok(Math.abs(out.computed - r.input) < 0.001, `expected ~${r.input} (snapshot input per 1M), got ${out.computed}`);
+});
+
+test("a nebul-catalogued key prices non-zero on the watch side (FOC-165)", () => {
+  // zai-org/GLM-5.2-FP8 lives only under the nebul scope. The flat openrouter
+  // scope used to be the only thing the watcher consulted, so every FP8 turn
+  // cost "unknown" — and an unknown turn makes the spend cap refuse.
+  const out = costFromResult(
+    resultEvent({
+      modelUsage: { "zai-org/GLM-5.2-FP8": { inputTokens: 1_000_000, outputTokens: 1_000_000 } },
+    }),
+    null,
+    priceOne,
+  );
+  // Expected side reads the catalogued nebul row from the committed file: the
+  // flat snapshot deliberately has no FP8 key, so the snapshot cannot be the
+  // expected side here without comparing the resolver to itself.
+  const nebul = committedNebulRow();
+  const expected = nebul.input + nebul.output;
+  assert.ok(Math.abs(out.computed - expected) < 0.001, `expected ~${expected} (committed nebul input+output per 1M), got ${out.computed}`);
+  assert.deepEqual(out.unpriced, []);
 });
 
 test("both spellings of the usage fields are read", () => {
@@ -150,6 +220,60 @@ test("both spellings of the usage fields are read", () => {
     { type: "result", usage: { cache_read_input_tokens: 1_000_000 } }, "z-ai/glm-5.2", priceOne);
   assert.ok(camel.computed > 0 && Math.abs(camel.computed - snake.computed) < 1e-9,
     `camel ${camel.computed} vs snake ${snake.computed}`);
+});
+
+// ── FOC-165 (f): a promptTokenThreshold row does not bill at/above its
+// threshold — the turn is unpriced with a qualifier naming the reason, so the
+// refusal is actionable instead of "add a row that already exists". ----------
+
+const thresholdOne = (model) => priceThreshold(model, SNAPSHOT.prices, null, SNAPSHOT.scoped);
+
+test("a turn at/above the declared threshold is unpriced with a named qualifier, not under-counted", () => {
+  const th = requireThreshold();
+  const out = costFromResult(
+    resultEvent({
+      modelUsage: { "openai/gpt-6-astra": { inputTokens: th, outputTokens: 1_000_000, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+    }),
+    null,
+    priceOne,
+    thresholdOne,
+  );
+  assert.equal(out.computed, null, `computed=${out.computed} (expected null — the flat row must not bill above its threshold)`);
+  assert.deepEqual(
+    out.unpriced,
+    [`openai/gpt-6-astra (unsupported above ${th} prompt tokens)`],
+    `unpriced=${JSON.stringify(out.unpriced)}`,
+  );
+});
+
+test("a turn below the threshold prices at the base rate as before", () => {
+  const th = requireThreshold();
+  const a = requirePrice("openai/gpt-6-astra", "input");
+  const expected = (th - 1) / 1e6 * a.input;
+  const out = costFromResult(
+    resultEvent({
+      modelUsage: { "openai/gpt-6-astra": { inputTokens: th - 1, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+    }),
+    null,
+    priceOne,
+    thresholdOne,
+  );
+  assert.ok(Math.abs(out.computed - expected) < 1e-9, `computed=${out.computed} (expected ${expected} = ${th - 1}/1e6 × snapshot input)`);
+  assert.deepEqual(out.unpriced, []);
+});
+
+test("without a thresholdOne binding the unpriced entry stays the bare model name", () => {
+  // Back-compat: the watcher passes the binding; other callers of
+  // costFromResult (tests, tooling) must not change shape.
+  const out = costFromResult(
+    resultEvent({
+      modelUsage: { "openai/gpt-6-astra": { inputTokens: 300_000, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+    }),
+    null,
+    priceOne,
+  );
+  assert.equal(out.computed, null, "calculateCost still refuses above the threshold");
+  assert.deepEqual(out.unpriced, ["openai/gpt-6-astra"], `unpriced=${JSON.stringify(out.unpriced)}`);
 });
 
 // ── 2. unpriced is not free ───────────────────────────────────────────────────
@@ -362,6 +486,140 @@ test("metadata keys are not mistaken for price rows", () => {
   const { drifted, unlisted } = comparePrices({ _doc: "text", "a/b": { input: 1, output: 2 } }, {});
   assert.deepEqual(unlisted, ["a/b"]);
   assert.deepEqual(drifted, []);
+});
+
+// ── 6. the four real result shapes of FOC-165 (g) ─────────────────────────────
+console.log("\ncztery kształty result (FOC-165 g)");
+
+// Anonymised from a real supervised child: two turns with tokens, two with
+// usage all-zeros and modelUsage {}. Each zero-token event used to null the
+// whole child's costUsd through addCost — a known $0.xx spend became UNKNOWN
+// and the budget gates refused the next spawn.
+const FIXTURE = JSON.parse(
+  readFileSync(join(ROOT, "scripts", "fixtures", "foc-165-result-events.json"), "utf8"),
+);
+const byName = Object.fromEntries(FIXTURE.events.map((e) => [e.name, e]));
+const INIT_MODEL = Object.keys(byName["success-with-tokens"].modelUsage)[0];
+
+const spentTokens = (e) =>
+  e.usage.input_tokens + e.usage.output_tokens + e.usage.cache_read_input_tokens + e.usage.cache_creation_input_tokens;
+
+// Did this event spend anything ANYWHERE? Per-model entries are authoritative
+// when present — a real result can carry `usage` all-zeros while `modelUsage`
+// holds the tokens (FOC-165 (g), the `zero-usage-real-model-tokens` fixture: top
+// level sums to 0, the event carries real per-model tokens worth a snapshot-derived
+// fraction of a dollar — asserted below). Reading only the top-level
+// `usage` here is the same mistake `costFromResult` must not make.
+const anyTokens = (e) => {
+  const models = Object.entries(e.modelUsage ?? {});
+  const sources = models.length ? models.map(([, u]) => u) : [e.usage ?? {}];
+  return sources.some(
+    (u) =>
+      (u.inputTokens ?? u.input_tokens ?? 0) +
+        (u.outputTokens ?? u.output_tokens ?? 0) +
+        (u.cacheReadInputTokens ?? u.cache_read_input_tokens ?? 0) +
+        (u.cacheCreationInputTokens ?? u.cache_creation_input_tokens ?? 0) >
+      0,
+  );
+};
+
+test("a zero-token result prices to the known $0, not unknown", () => {
+  for (const name of ["success-zero-tokens", "error-zero-tokens"]) {
+    const out = costFromResult(byName[name], INIT_MODEL, priceOne);
+    assert.equal(out.computed, 0, `${name} priced ${out.computed}, expected the known $0`);
+    assert.deepEqual(out.unpriced, []);
+  }
+});
+
+test("zero tokens are $0 even with no model on record at all", () => {
+  const out = costFromResult(byName["success-zero-tokens"], null, priceOne);
+  assert.equal(out.computed, 0, "nothing spent needs no rate table");
+});
+
+test("empty modelUsage with real tokens falls back to the system/init model", () => {
+  // Sibling of the real shapes: modelUsage {} but usage non-zero — a turn that
+  // DID spend. The truthy-but-empty object used to skip the fallback and price
+  // the turn as unknown.
+  const withTokens = byName["success-with-tokens"];
+  const out = costFromResult({ ...withTokens, modelUsage: {} }, INIT_MODEL, priceOne);
+  const direct = costFromResult(withTokens, null, priceOne);
+  assert.ok(out.computed > 0, `expected a real price, got ${out.computed}`);
+  assert.equal(out.computed, direct.computed, "same tokens, same price, whatever shape carried them");
+});
+
+test("tokens present and unpriceable stay null — unknown is not folded into $0", () => {
+  const modelUsage = byName["success-with-tokens"].modelUsage;
+  const out = costFromResult(
+    { ...byName["success-with-tokens"], modelUsage: { "acme/nobody-priced-this": modelUsage[INIT_MODEL] } },
+    null,
+    priceOne,
+  );
+  assert.equal(out.computed, null);
+  assert.deepEqual(out.unpriced, ["acme/nobody-priced-this"]);
+});
+
+test("a run of such turns leaves the child total unchanged, not nulled", () => {
+  // The watcher's exact loop (supervisor-watch.mjs): addCost over each result.
+  let costUsd = 0;
+  const unpricedModels = [];
+  for (const event of FIXTURE.events) {
+    const cost = costFromResult(event, INIT_MODEL, priceOne);
+    costUsd = addCost(costUsd, cost.computed);
+    for (const m of cost.unpriced) if (!unpricedModels.includes(m)) unpricedModels.push(m);
+  }
+  const expected = FIXTURE.events
+    .filter(anyTokens)
+    .reduce((sum, e) => sum + costFromResult(e, INIT_MODEL, priceOne).computed, 0);
+  assert.ok(costUsd > 0, "the priced turns survive the zero-token ones");
+  assert.equal(costUsd, expected, "zero-token turns add nothing and null nothing");
+  assert.deepEqual(unpricedModels, []);
+});
+
+// ── (g) turn 2: the two shapes the four above do not cover.
+//
+// One guards each side of the rule. `zero-tokens-one-zero-key` is the shape that
+// must stay a KNOWN $0 — a model on record that spent nothing. Its sibling
+// `zero-usage-real-model-tokens` is the shape that must NOT become $0: the
+// top-level usage is all zeros while the per-model entries spent real tokens, so
+// a `sawTokens` read off `usage` instead of the entries silently discards the
+// cost. Both are the (g) fix's own near-misses, and neither existed before.
+
+test("an all-zero single-key modelUsage is the known $0, not unknown", () => {
+  const e = byName["zero-tokens-one-zero-key"];
+  assert.equal(Object.keys(e.modelUsage).length, 1, "muKeys=1 is the shape under test — {} is already covered");
+  const out = costFromResult(e, INIT_MODEL, priceOne);
+  assert.equal(out.computed, 0, "a recorded model that spent nothing still spent nothing");
+  assert.deepEqual(out.unpriced, []);
+});
+
+test("zero top-level usage with real per-model tokens prices the tokens, not $0", () => {
+  const e = byName["zero-usage-real-model-tokens"];
+  assert.equal(spentTokens(e), 0, "the top-level usage really is all zeros — that is the trap");
+  const out = costFromResult(e, null, priceOne);
+  // Tolerance, not equality, for two reasons: the expected value is derived
+  // from the same snapshot row the runtime prices through (a price sync moves
+  // both sides together), and at this magnitude the product differs from the
+  // exact decimal in the last binary digits. The claim under test is the ORDER
+  // of magnitude — a real cost, not $0.
+  assert.equal(Object.keys(e.modelUsage).length, 1, "single-key shape is the premise of the derived expected value");
+  const [model, mu] = Object.entries(e.modelUsage)[0];
+  const r = requirePrice(model, "input", "output");
+  const expected = ((mu.inputTokens ?? 0) / 1e6) * r.input + ((mu.outputTokens ?? 0) / 1e6) * r.output;
+  assert.ok(expected > 0, "precondition: the fixture's per-model tokens must price above zero");
+  assert.ok(Math.abs(out.computed - expected) < 1e-12, `sawTokens must come from the per-model entries, got ${out.computed} (expected ~${expected})`);
+  assert.deepEqual(out.unpriced, []);
+  // And through the watcher's accumulator it is a real, non-zero contribution.
+  assert.equal(addCost(0, out.computed), out.computed);
+  assert.ok(addCost(0, out.computed) > 0, "an accumulator must not fold it into $0");
+});
+
+test("the cap refusal names the child holding the unknown cost", () => {
+  const runId = fixtureRun({ "dev-1": child({ costUsd: null, unpricedModels: ["acme/unknown"] }) });
+  const r = spawnCli(runId, { LA_SUPERVISOR_MAX_COST_USD: "5" });
+  assert.equal(r.status, 1);
+  const err = parse(r).error;
+  assert.match(err, /child dev-1 \(dev\): no price row for acme\/unknown/);
+  assert.doesNotMatch(err, /no price row for dev\b/, "a squad is not a price row");
 });
 
 // ── summary ───────────────────────────────────────────────────────────────────

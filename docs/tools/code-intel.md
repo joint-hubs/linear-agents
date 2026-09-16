@@ -79,6 +79,20 @@ debounce i uzgodnienie przy podłączeniu MCP. Nie ma czego odświeżać po edyc
 post-commit. W krótkim oknie po zapisie odpowiedzi MCP dostają baner `⚠️` z nazwą pliku —
 wtedy przeczytaj ten plik wprost, zamiast ufać kopii z indeksu.
 
+**Świeżość: wrapper pilnuje, surowe CLI nie** (FOC-114, rundy 4–5). `code-intel.mjs` przed
+każdym werbem zapytania sprawdza `status --json` → `pendingChanges`: przy oczekujących
+zmianach sam robi `codegraph sync <root>` i odpytuje dopiero przy zerze pending; gdy świeżości
+nie da się udowodnić (sync nieudany, stan nieczytelny, **brak bazowej linii gita** — bez
+`.git` i rozwiązywalnego `HEAD` sygnał pending potrafi zgłosić fałszywe zero, więc zero liczy
+się jako dowód tylko przy zaangażowanym repo) — **odmawia z exit 3**, z tą samą semantyką
+UNKNOWN co przy braku indeksu, i nigdy nie podaje nazwy odpytywanego symbolu.
+**Surowe jednostrzałowe CLI (`codegraph symbol/find/...` bezpośrednio) nie ma żadnej z tych
+osłon** (zmierzone, `docs/benchmark/codegraph-missing-index-evidence.md` §5–6): po edycji
+odpowiada ze starej lokalizacji bez ostrzeżenia, a zapytanie o symbol spoza indeksu brzmi
+pewnie „not found". **Pytaj przez wrapper, nie przez surowe CLI**; przed zaufaniem negatywowi
+z surowego CLI sprawdź `status --json` albo potwierdź Grepem. Zachowanie surowego CLI jest
+uwiezione tripwire'ami (cases 4/5 w `scripts/code-intel.test.mjs`).
+
 `.codegraph/` jest gitignorowany, więc po świeżym klonie indeksu nie ma w ogóle.
 
 </critical_limitation>

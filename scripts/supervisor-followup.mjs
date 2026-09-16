@@ -16,7 +16,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
   INIT_TIMEOUT_MS,
@@ -52,6 +52,30 @@ const runId = args.run || process.env.LA_SUPERVISOR_RUN;
 if (!childId) failJson("--child <childId> is required");
 if (!runId) failJson("--run <runId> is required (or set LA_SUPERVISOR_RUN)");
 if (!args.prompt && !args["prompt-file"]) failJson("--prompt or --prompt-file is required");
+
+// ── the prompt is read HERE, against the caller's cwd ────────────────────────
+// The watcher runs with the child's worktree as its cwd. It used to receive
+// --prompt-file unresolved, so a relative path — the natural `.state/x.md` —
+// was read inside the worktree, where the gitignored .state/ does not exist.
+// The watcher died before claude started and the caller saw only "no
+// system/init within 30000 ms". Run a93f (2026-09-12) lost four resumes this
+// way (review-2, dev-5, test-7, dev-10) while the two `--prompt "$(cat …)"`
+// resumes worked, and the Supervisor concluded that --resume itself was dead.
+// supervisor-spawn.mjs fixed the identical defect on turn 0 and this file never
+// got it: the fourth guard in this pair to drift apart. Read before any
+// registry write, so a bad path is refused while refusal is still free.
+let promptText = String(args.prompt ?? "");
+if (args["prompt-file"] && args["prompt-file"] !== true) {
+  const callerPromptPath = resolve(args["prompt-file"]);
+  try {
+    promptText = readFileSync(callerPromptPath, "utf8");
+  } catch (err) {
+    failJson(
+      `--prompt-file is not readable (resolved: ${callerPromptPath}): ${err.message.split("\n")[0]} — no turn was started`,
+      { childId, path: callerPromptPath },
+    );
+  }
+}
 
 const registry = readRegistry(runId);
 const entry = registry.children[childId];
@@ -262,7 +286,9 @@ updateChild(runId, childId, {
 
 const promptDir = mkdtempSync(join(tmpdir(), "la-supervisor-"));
 const promptFile = join(promptDir, "prompt.txt");
-writeFileSync(promptFile, args["prompt-file"] ? "" : String(args.prompt), "utf8");
+// The watcher always gets a path this script wrote, never the caller's — the
+// same contract as spawn. See the prompt read at the top.
+writeFileSync(promptFile, promptText, "utf8");
 
 const watcherArgs = [
   join(ROOT, "scripts", "supervisor-watch.mjs"),
@@ -270,7 +296,7 @@ const watcherArgs = [
   "--child", childId,
   "--cwd", entry.worktree,
   "--turn", String(turnIndex),
-  "--prompt-file", args["prompt-file"] || promptFile,
+  "--prompt-file", promptFile,
   "--permission-mode", entry.permissionMode || "bypassPermissions",
   "--session", entry.sessionId,
 ];

@@ -130,6 +130,15 @@ export function inferTaskIdFromBranch(branch) {
 }
 
 /**
+ * The task prefixes free text may carry. One spelling shared by every
+ * consumer (ledger inference here, backfill-task-ids.mjs) — the prefix list
+ * used to drift between the two and FOC- runs went untagged by the backfill.
+ * Branch inference deliberately stays generic: branch slugs are not limited
+ * to these teams.
+ */
+export const TASK_ID_RE = /\b(FEN|PISI|JOI|FOC)-(\d{1,5})\b/i;
+
+/**
  * Infer a Linear task ID from free text (a kickoff prompt). First match wins —
  * kickoffs lead with the task ("Weź task JOI-61…", "DEV task PISI-98: …").
  *
@@ -138,7 +147,7 @@ export function inferTaskIdFromBranch(branch) {
  */
 export function inferTaskIdFromText(text) {
   if (!text || typeof text !== "string") return null;
-  const m = text.match(/\b(FEN|PISI|JOI)-(\d{1,5})\b/i);
+  const m = text.match(TASK_ID_RE);
   if (m) return `${m[1].toUpperCase()}-${m[2]}`;
   return null;
 }

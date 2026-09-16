@@ -103,7 +103,11 @@ export function buildBranchName(identifier, slug, teamKeyFlag) {
   // LINEAR_TEAM_KEY=FEN → fen-70-…), which then poisoned branch-based task
   // attribution in telemetry. --team-key stays as an explicit override.
   const teamKey = (teamKeyFlag ? resolveTeamKey(teamKeyFlag) : key).toLowerCase();
-  const safeSlug = sanitizeSlug(slug);
+  // A slug that already starts with the identifier (`--slug foc-221-test-r2`)
+  // used to be prefixed a second time: foc-221-foc-221-test-r2 (run a93f).
+  const ownPrefix = `${key.toLowerCase()}-${number}-`;
+  const rawSlug = sanitizeSlug(slug);
+  const safeSlug = rawSlug.startsWith(ownPrefix) ? sanitizeSlug(rawSlug.slice(ownPrefix.length)) : rawSlug;
   return `${teamKey}-${number}-${safeSlug}`;
 }
 

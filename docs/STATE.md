@@ -3,6 +3,382 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## Current execution: 2026-09-16 — FOC-165 COMPLETE · fala FOC-102 domknięta lokalnie (close-out)
+
+- **FOC-165** (release-candidate) — run `2026-09-15-supervisor-foc-165`. Kandydat `d725788` na `foc-165-dev`
+  (35 commitów nad `f887fb9`). **Lokalnie, bez push i bez PR** — fast-forward `chore/foc-102-baseline`
+  `f887fb9 → d725788` (35 commitów, 8 plików; `bin/supervisor.bat` nietknięty — wciąż niezacommitowany).
+- **Pętla: 4 rundy dev↔review, fingerprinty wszystkie różne** — r1 `47f2…` (wczesne), r2 `be5858eb…` pass,
+  r3 `983abbca…` **fail** (5 pozostałych runtime-pinned stawek + threshold), r4 `a60c9444…` **pass**.
+  Runda 3 FAIL znalazła realną lukę: siedem derywacji z rundy 3 zamknęło czerwone asercje, ale pięć
+  tej samej klasy zostało jako literały — następny `price-check.mjs` sync mógł je zaczerwienić
+  mechanizmem identycznym jak `e3bec56`. Runda 4 derywowała wszystkie 5 + próg `272_000`/`271_999`
+  z `promptTokenThreshold.minPromptTokens`.
+- **REVIEW r4 = approve** (review-11, deepseek-v4.1-flash): 7 tez MET, zero blokujących. Dwa nity
+  (nieblokujące): pre-existing tolerancje `0.001`/`0.0001`; para testów async `telemetry-store.test.mjs:757,772`
+  nie liczona przez harness przed `process.exit` (poza deltą, kandydat na osobne issue). Werdykt nagrany
+  z AC-by-AC mappingiem (7/7).
+- **TEST r2 = PASS** (test-12): pełna suita **64/64 exit 0** (382137 ms) na `d725788`; oba pliki dawniej
+  czerwone (`supervisor-cost.test.mjs` 34/0, `telemetry-store.test.mjs` 55/0) green; rate-swap obu zakresów
+  (nebul + openrouter) → oba green; mutacje M9–M13 → exit 1. Pierwsza tura test-12 skończyła się
+  przedwcześnie (suite w tle → 38 crashów `STATUS_DLL_INIT_FAILED`); wznowiona foreground → czyste 64/64.
+- **Landing** — `supervisor-merge --run …foc-165 --child dev-7 --verify "npm ci && node scripts/test-all.mjs"`
+  (w tle): `accepted: true`, izolacja exit 0, combined exit 0, replay 10 commitów bez konfliktów,
+  `pathsOutsideDeclaration: []`, `findings: []`. Następnie `git merge --ff-only d725788` w głównym checkoucie.
+- **Rezidua FOC-165 (zapisane, nie file'owane — wind-down):** (1) para async `telemetry-store.test.mjs:757,772`
+  — awaria nie czerwieni suity; **filed jako FOC-351** (z 3 env-redami, niżej); (2) tolerancje `0.001`/`0.0001` pre-existing;
+  (3) kopia bazy telemetrii 538 MB w `.state/foc-165/` NIE ratowana (prywatna, ginie z worktree); records
+  i skrypty `*.mjs` zachowane; (4) F9 — `supervisor-cleanup.test.mjs` czerwone pod dziedziczonym env
+  (`LA_SUPERVISOR_CHILD`); po wyczyszczeniu 26/0.
+
+### Fala FOC-102 — podsumowanie (issue →_commity → kluczowa decyzja → reziduum)
+
+| Issue | Landing | Kluczowa decyzja | Reziduum |
+|---|---|---|---|
+| FOC-225 | `b009358`, PR #23 (merged) | paleta Fenix, walidator AA | — |
+| FOC-218 | `69402bd`, PR #24 (merged) | — | cleanup drzewa FOC-225/227 |
+| FOC-219 | `033288e`, PR #25 → main `967fc1a` | — | FU FOC-255/256/257 filed |
+| FOC-221 | `1eeccaa` (lokalnie, gałąź nie wylądowała) | cienki moduł task-coverage | — |
+| FOC-287+220+221 | integracja `cfacb0c` (lokalnie 2026-09-12) | 5 kolumn do `CANONICAL_TOOL_SQL` | — |
+| FOC-286 | main `3859c86` (merged) | return-from-test crash | FU FOC-294/295/296 filed |
+| FOC-284 | `c8e51e1`, **PR #26 open** | `returned-by:*` + routable return edges | PR #26 czeka na merge Mateusza; worktree `foc-284-*` zostawione |
+| FOC-285 | lokalnie `3c36f8d` | secret scanner + SAST w review | — |
+| FOC-288 | lokalnie `4b9e5f5` | wycofanie orch-ollama | — |
+| FOC-289 | lokalnie `cce2912` | end-of-run cleanup protocol | — |
+| FOC-114 | lokalnie `bec2965` | CodeGraph navigation benchmark + freshness guard (exit 3 UNKNOWN) | koszt strażnika ~2–3×; 3 nity r5 otwarte |
+| FOC-165 | lokalnie `d725788` (ten run) | derywacja stawek z runtime/committed row; sync-proof | para async :757,772; tolerancje; baza telemetrii nie ratowana |
+| FOC-102 | **epic — NIE domknięty** (po Mateuszu) | — | zamknięcie epiku po pushu linii fali + PR #26 |
+
+### Czeka na Mateusza (poza moim pełnomocnictwem — nieodwracalne na zewnątrz)
+1. **PR #27 (fala FOC-102) — OPEN, MERGEABLE** — https://github.com/joint-hubs/linear-agents/pull/27
+   (`chore/foc-102-baseline` → main, 77 commitów, 122 pliki +10739/−512). Gałąź wypchnięta; PR
+   rebazowany na nowy `main` (PR #26 / FOC-284 wchłonięty). Semantyczny konflikt merge rozwiązany:
+   wymóg FOC-165 (fail musi deklarować `--failing-test`) pogodzony z transition FOC-284 — testy
+   sekcji 5 dostają `--failing-test "suite/a"` (42/0); `returned-by:*` labele z FOC-284 autorytatywne
+   z notatką `--clear-returned-by-review` z FOC-165. Pełna suita w głównym checkoucie 61/64 (3 znane
+   env-redy = FOC-351, zero nowych po merge); czyste drzewo 64/64. Czeka na merge Mateusza.
+2. **Worktree'e** — `foc-284-{dev,review,test}` i `foc-286-{dev,review,test}` usunięte przez Mateusza
+   2026-09-16. **`foc-284-dev` usunięte lokalnie + zdalnie** (wchłonięte przez PR #26). Zostają gałęzie
+   werdyktowe `foc-220/272/284/286/287-review` (po decyzji Mateusza — nie usuwam) oraz `foc-284-review`.
+3. **Zamknięcie epiku FOC-102** — po merge'u PR #27; nie zamykam sam.
+
+---
+
+### Korekta 2026-09-16 (Mateusz, po close-out) — sprzątanie gita + stan zestawu
+
+- **Sprzątanie gita (poza narzędziami supervisora):** Mateusz usunął worktree `foc-102-plan`,
+  `foc-272-review`, `foc-284-{dev,review,test}`, `foc-286-{dev,review,test}`, `la-merge-dd5b`,
+  `la-merge-a93f` (`.state` uratowane → `../la-wt-rescued-2026-09-16/` + manifest sha256) oraz 21 gałęzi
+  (wszystkie `git cherry HEAD <gałąź>` bez "+"). Rejestry starych runów wskazują na worktree, których już
+  nie ma — nie odzyskiwać ani nie sprzątać. Zostają: `foc-284-dev` + `foc-284-review` (PR #26) oraz
+  `foc-220/272/286/287-review` (po 1 commicie werdyktu).
+- **Stan zestawu w głównym checkoucie: 61/64** — 3 czerwone to środowisko, nie kandydat: (a)
+  `rewards-routes.test.mjs` wisi na prawdziwym `.state` (w czystym worktree 9/9); (b)
+  `verdict-evidence.test.mjs` czyta prawdziwy `.state/review-rounds.json` mimo deklaracji hermetyczności;
+  (c) `supervisor-semaphore.test.mjs` — flake czasowy (solo 19/19); plus para async
+  `telemetry-store.test.mjs:757,772` nie liczona przez harness przed `process.exit`. W czystym drzewie
+  (tym, co trafi na main) zestaw zielony — potwierdza TEST r2 64/64 i combined exit 0 z merge'a.
+  Filed jako **FOC-351** (nieblokujące, dziecko FOC-102; opis: obserwacje + komendy, bez implementacji).
+
+---
+
+## 2026-09-14 — FOC-114 COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+
+- **Run** `2026-09-14-supervisor-foc-114` (glm-5.3-flash; dzieci dev-1 / review-2…review-6 / test-7).
+  Kandydat `d25e362` (`foc-114-dev`, 8 commitów nad bazą `5b69111`), po replayu `bec2965`; drzewo
+  integracji == drzewo kandydata (`8eb59746…`). Fast-forward w głównym checkoucie: `5b69111 → bec2965`
+  (36 plików, +1884/−12). **Lokalnie, bez push i bez PR.**
+- **FOC-114** — benchmark nawigacji CodeGraph, zgodnie z §3.5 / Q3 (NIE routing grafu zadań; styk
+  `config/graph.json` vs `handoff-rules.json` nietknięty). Nowe: `scripts/codegraph-benchmark.mjs` +
+  `.test.mjs` + `codegraph-benchmark-questions.json` (7 zamrożonych pytań, `groundTruthKind` machine ×6 +
+  judgement ×1), `scripts/code-intel.test.mjs` (nowy, 67 asercji), `docs/benchmark/codegraph-navigation.md`,
+  `docs/benchmark/codegraph-missing-index-evidence.md` + `evidence/raw/*` (26 przechwyceń) + `SHA256SUMS.txt`,
+  `docs/tools/code-intel.md`, `.gitattributes`.
+- **Pętla: 5 rund, fingerprinty wszystkie różne** — r1 `47f2f7a8b8fd2788` fail, r2 `0d66cc89aaff1866` pass,
+  r3 `9b73fadb6b8ea32e` pass, r4 `2795e7cf9104b42f` fail, r5 `6ea9b5def76f2a10` pass. Dwie rundy fail
+  znalazły realne wady: (r1) harness oceniał odmowę wrappera jako `fail` i wychodził 0 — „pewna siebie
+  błędna tabela"; (r4) strażnik świeżości był ślepy w katalogu bez `.git` i w repo bez pierwszego commita
+  (cmd-resolved CLI 1.5.0 raportuje wtedy `added:0` — fałszywe zero), a wrapper odpowiadał pewnym
+  „not found" z exit 0.
+- **AC2 — decyzja Mateusza 2026-09-14: naprawiamy w repo, na warstwie, którą benchmark mierzy.** Ani
+  czekanie na upstream, ani przepisanie AC2 w Linear. Ramię „graph" benchmarku to
+  `node scripts/code-intel.mjs <verb>`, więc strażnik w wrapperze spełnia AC2 dosłownie. Strażnik: przed
+  każdym czasownikiem zapytania (explore/symbol/find/callers/callees/impact/affected/**files**; `status`
+  wyjęty) odczyt `status --json`; przy pending → `codegraph sync <ROOT>` (pozycyjnie) i ponowny odczyt;
+  zapytanie dopiero przy zerze. **Exit 3 UNKNOWN** — komunikat nazywa poprawkę i nigdy szukanego symbolu —
+  gdy świeżości nie da się **udowodnić**: sync padł, zmiany dalej oczekują, status nieczytelny, **brak
+  baseline'u git** (brak `.git` w rootcie albo HEAD nierozwiązywalny). Uzasadnienie: bez baseline'u
+  instrument potrafi zwrócić fałszywe zero, więc guard wymaga *dowodu*, nie prawdomówności tego przebiegu.
+  Odmowa „version-skew" (rozwiązany CLI vs `builtWithVersion` indeksu) **świadomie odrzucona** — udokumentowany
+  workflow na tej maszynie łączy indeks zbudowany 1.6.0 z zapytaniami przez cmd-resolved 1.5.0, więc taka
+  odmowa psułaby ścieżkę główną; wersja CLI jest **ujawniana** w nocie o syncu i w każdej odmowie.
+- **Granica AC2 zapisana jawnie, nie zaokrąglona:** wrapper nigdy nie odpowiada z indeksu, którego
+  świeżości nie udowodni, i odmawia exit 3 tam, gdzie dowód jest niemożliwy; **baseline git jest
+  warunkiem dowodu**. Świadomie niepokryte (udokumentowane w §7 evidence doc i w navigation doc): okno
+  TOCTOU szerokości jednego spawnu; hipotetyczny uszkodzony status niosący poprawne zero (realny
+  uszkodzony kształt **pomija** pole i domyka się fail-closed); gałąź „still pending after sync" —
+  z konstrukcji, bez deterministycznego wyzwalacza na realnym CLI. Surowe CLI zostaje niebezpieczne
+  i **strypwirowe** (cases 4/5 dalej asertują zaobserwowane złe zachowanie i mają zaczerwienić, gdy CLI
+  się poprawi). **AC2 w Linear NIE przepisane.**
+- **TEST = PASS** (`test-7`) — niezależnie: suite 61/61 (`test-all` 60/61 exit 1, jedyna czerwona to
+  `supervisor-cleanup.test.mjs` asertująca brak `LA_SUPERVISOR_CHILD`; po wyczyszczeniu zmiennych
+  supervizora 26/0 → efektywnie 61/61), lint 396/0, security-scan 487 plików 0 findingów (oba skanery
+  naprawdę odpaliły po `npm ci`), `code-intel.test` 67/0, `codegraph-benchmark.test` 28/0, benchmark
+  6 pass / 0 fail / 1 manual / 0 ungraded exit 0 (koszt `inconclusive` — zostaje), config-drift 26/0,
+  spot-check AC2 w trzech fixture'ach, hashe evidence 26/26 exit 0 ze **świeżego klona** z `autocrlf=true`.
+- **Landing** — `supervisor-merge --run …foc-114 --child dev-1 --verify "npm ci && node scripts/test-all.mjs"`
+  (w tle, bez zewnętrznego `timeout`): `accepted: true`, `findings: []`, izolacja exit 0, combined exit 0,
+  replay 8 commitów bez konfliktów, `pathsOutsideDeclaration: []`.
+- **Rezidua zapisane, nie zakładane jako issue:** (1) koszt strażnika — jeden spawn `status --json` plus
+  jeden `git rev-parse --verify HEAD` na czasownik zapytania i jeden `sync` przy brudnym drzewie; czas
+  grafu urósł ~2–3× (2399–3186 ms przed strażnikiem → 6656–10685 ms po), wolumen wierszy bez zmian;
+  podział AC4 („no redundant graph calls" dotyczy **rady dla agentów**, nie wewnętrznego strażnika)
+  zapisany w doc. (2) Trzy nity z r5 zostają otwarte: gałąź „still pending after sync" bez
+  deterministycznego testu (stub PATH-shim by ją wyzwolił), komunikat „no git repository" dla repo bare,
+  niecytowane argumenty zapytania pod `shell:true` (pre-existing, fail-safe). (3) Kolizja dwóch
+  równoległych synców (SQLite lock) — przy każdym błędzie sync exit 3, ale sama kolizja nie jest
+  odtworzona deterministycznie i nie jest testowana. (4) `secretlint` nie skanował w worktree review-r3
+  (brak modułów) — naprawione przez `npm ci` w r4/r5/TEST, wiersz skanera uczciwy.
+- **Uwaga o procesie:** kickoff review r5 podał `+624/−56` dla delty `eccf56d..d25e362` — to był mój błąd
+  (wziąłem skumulowany `cce5574..HEAD`); zmierzone `+356/−30`, zbiór plików się zgadzał. Reviewer to
+  wychwycił i zapisał jako rozbieżność księgową w tekście przekazania, nie w kandydacie.
+
+## 2026-09-14 — FOC-289 (F-16) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+
+- **Run** `2026-09-14-supervisor-foc-289` (glm-5.3-flash; dzieci dev-1 / review-2 / test-4). Kandydat
+  `e3410f8` (`foc-289-dev`, 1 commit nad bazą `1ae52aa`), po replayu `cce2912`.
+- **Zakres zmieniony decyzją Mateusza (2026-09-14, przed pierwszym spawnem): tylko AC3.** AC1/AC2 straciły
+  podmiot, AC4 domknięte osobnym krokiem — oba idą jako zapis tutaj, nie do deliverables.
+- **FOC-289** (F-16: protokół sprzątania na końcu runu) — `agents/supervisor/CLAUDE.md` §8 „Reclaim the
+  worktree — at run close" (zamknięcie runu, nie wcześniej; co przeżywa: tylko checkout, gałąź i commity
+  zostają; reguła „nie zostawiaj gate'a wiszącego") oraz `docs/supervisor-e2e-checklist.md` (intro „only
+  through `supervisor-cleanup.mjs`", checkbox „no gate left unanswered", przepisany `### Rollback`).
+  2 pliki, +15/−5.
+- **Naprawiona sprzeczność:** stary `### Rollback` mówił „or by hand with `git worktree remove` once you
+  have read what is in them" — czyli licencjonował obejście obu kluczy. Kandydat zastępuje to zakazem;
+  niezależny sweep obu plików (REVIEW i TEST osobno) nie znalazł zdania, które tę drogę nadal licencjonuje.
+- **REVIEW runda 1 = APPROVE** (`verdicts/foc-289-round1.json`, fingerprint `669e56b5c6b3be8f`, 4 findingi:
+  1 todo, 1 nit, 1 question, 1 praise, zero `issue`). Każde twierdzenie prozy zweryfikowane w źródle:
+  `propose` odmawia przy niedomkniętym issue i nie emituje gate'a; `remove` przekłada oba klucze i odmawia
+  po ruchu drzewa (fingerprint = HEAD + posortowane porcelain); `branchNote` leci przy każdym usunięciu;
+  nie istnieje flaga `--test-approved` (klucz 1 to stan Linear `completed`).
+- **TEST = PASS** (`test-4`) — niezależnie: suite 59/59 exit 0 (`npm ci` + `test-all`, 364 s),
+  `config-drift` 26/0, `supervisor-cleanup.test.mjs` 26/0, `supervisor-gate.test.mjs` 29/0, `propose` na
+  tym runie exit 1 z licznikiem gate'ów 0→0, `agents/orchestrator/**` diff-empty.
+- **Reziduum świadome: AC3 nie jest pokryte testem.** Żaden test w repo nie czyta ani nie asertuje tych
+  dwóch plików — suite dowodzi zachowania narzędzi, nie prozy. Żaden test nie odróżni tego diffa od jego
+  braku; to fakt o pokryciu, nie wada kandydata.
+- **Landing** — `supervisor-merge --run …foc-289 --child dev-1 --verify "npm ci && node scripts/test-all.mjs"`
+  (w tle, bez zewnętrznego `timeout`): `accepted: true`, `findings: []`, izolacja exit 0, combined exit 0,
+  replay 1 commita bez konfliktów. Fast-forward w głównym checkoucie: `1ae52aa → cce2912` (2 pliki, +15/−5).
+  **Lokalnie, bez push i bez PR.**
+
+### FOC-289 — AC1/AC2 przedawnione, nie „zrobione" (re-scope 2026-09-14)
+
+- Sweep wszystkich 284 rekordów gate na dysku (`foc289-stale-gate-sweep.md`, ten run): `cleanup-approval`
+  **219 answered / 0 pending**. Premisa findingu („18 stale cleanup gates, jeden z dirty paths") nie
+  istnieje — backlog zjedli close-outy `f5dd`/`a93f`/`613e`/`9946`.
+- AC1 (tabela) i AC2 (eskalacja dirty-paths verbatim) **nie mają podmiotu**: nie ma ani jednego pending
+  gate'a tej klasy. 47 answered cleanup gate'ów z dirty paths ma zapisaną dyspozycję (żaden bez odpowiedzi
+  albo noty). Zero usunięć bez obu kluczy.
+- Uczciwe reziduum z tamtego sweepu: późniejsze `tak` usunęły drzewa, których gałęzie **nie są** zmergowane
+  do `main` (praca wylądowała lokalnie na `chore/foc-102-baseline`, nigdy nie pushowanej). Commity żyją na
+  lokalnych gałęziach; nic niezacommitowanego nie przetrwało. Konsekwencja lokalnej polityki landingu, nie
+  brakująca dyspozycja.
+
+### FOC-289 — AC4 domknięte jednorazowym sprzątaniem ewidencji (decyzja Mateusza, 2026-09-14)
+
+- Sweep wskazał żywą kolejkę jako **5 pending `question` gate'ów** i to była cała kolejka. Wszystkie 5
+  rozliczone — zapis bez followupów, bo tury, do których wracały, nie istnieją:
+  - `20260904-supervisor-foc-208` (FOC-208, joint-flows): `gate-plan-1-2` i `gate-plan-1-3` → **SUPERSEDED**
+    przez `1-4`/`1-5`; `gate-plan-1-4` i `gate-plan-1-5` → **PARKED** (decyzja produktowa linii Neo onprem,
+    wraca w sesji planowania joint-flows).
+  - `2026-09-05T21-28-09-052-supervisor-11df` (FOC-143, joint-flows): `gate-dev-4-2` → **STALE** (tura dev-4
+    z 2026-09-06 nie istnieje).
+- Pytania skopiowane **dosłownie** tam, gdzie żyje praca: FOC-208 (komentarz `aee8f41e-…`) i FOC-143
+  (komentarz `4e39d18c-…`); `publish-linear-comment --dry-run` przed publikacją. Worktree `la-wt/joint-flows/*`,
+  gałęzie i repo joint-flows — **nietknięte**.
+- Po tym kroku kolejka fali FOC-102 nie ma ani jednego pending gate'a: każdy rekord jest rozliczony
+  (completion albo zapisana dyspozycja). To jest AC4.
+
+### FOC-289 — rezidua i follow-upy (nieblokujące, nie zgłoszone jako issue)
+
+- `docs/supervisor-e2e-checklist.md:159` — checkbox „Answer with something qualified… `remove` refuses"
+  opisuje drogę, która od czasu dodania odmowy po stronie `answer` jest nieosiągalna: pierwsza odmowa pada
+  przy `answer` (gate zostaje `pending`), nie przy `remove`. Jednolinijkowy follow-up; linia sprzed tego diffa.
+- `docs/supervisor-e2e-checklist.md:3,22` — „30 files" / „30/30"; suite ma dziś **59** plików. Staleness
+  sprzed kandydata.
+- `verdicts/*.json` → `fingerprint.changedFiles` to liczba **brudnych** plików (`porcelain.length`), nie
+  liczba plików w diffie — przy tym kandydacie `0` mimo 2 zmienionych plików (`supervisor-lib.mjs:1115`).
+  Semantyka pola, nie defekt.
+- **Błąd operatora:** jedno wywołanie `supervisor-spawn` z `--prompt "placeholder"` (miało tylko odczytać
+  usage) uruchomiło dziecko `test-3` z bezsensownym promptem. Zatrzymane po ~1 min (`supervisor-stop.mjs`:
+  drzewo czyste, 0 kosztu, żadnych zapisów — tylko odczyt spec-refów). TEST wykonany od nowa jako `test-4`.
+- Worktree `foc-289-{dev,review,test}` + `la-merge/2026-09-14-supervisor-foc-289` czekają na
+  `supervisor-cleanup.mjs` (oba klucze).
+
+## 2026-09-14 — FOC-288 (F-15) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+
+- **Run** `2026-09-13T20-18-45-233-supervisor-9946` (glm-5.3-flash; dzieci dev-1/review-2/test-3).
+  Kandydat `9c8253b` (`foc-288-dev`, 1 commit nad bazą `6f1d846`), po replayu `4b9e5f5`.
+- **FOC-288** (F-15: wycofanie `orch-ollama` z aktywnego użycia — decyzja Mateusza "(b) Wycofać" z gate'a
+  `gate-review-3-2`, FOC-272) — `bin/orchestrate.bat` dostaje bezwarunkowy guard (echo + `exit /b 1`
+  zaraz po `setlocal`), nowy `docs/adr/0011-orch-ollama-withdrawal.md`, cztery aktywne dokumenty launcherów
+  oznaczają wycofanie, `docs/adr/README.md` zyskuje tabelę Records (0001–0011). 8 plików, +60/−5.
+- **REVIEW runda 1 = APPROVE** (`foc-288-round1.json`, 7 findingów: 2 question, 1 todo, 4 nit, zero `issue`).
+  Zweryfikowane własnymi pomiarami: strażnik bezwarunkowy (cały plik, zero `goto`/`call`), cytowany gate
+  **istnieje fizycznie** i zgadza się co do milisekundy, wszystkie trzy twierdzenia ADR prawdziwe
+  (8 wystąpień w 4 plikach, zero wpisów w `config/models.json`, `527bc64` tylko na niescalonym `foc-272-review`).
+- **TEST = PASS** (`test-3`) — AC1 **przez wykonanie, nie przez inspekcję**: `cmd /c bin\orchestrate.bat`
+  i z `pro` → oba exit 1, tylko notice, zero linii launchera, `.state/runs/` nie powstaje, store bez zmian
+  (15→15 runów). Suite niezależnie 59/59 exit 0.
+- **Reziduum odnotowane świadomie: AC1 jest dziś niefalsyfikowalna przez suite.** Mutacja usuwająca guard
+  → `59/59, exit 0`, nic nie czerwienieje; w repo nie ma testu odwołującego się do `orchestrate.bat`.
+  To luka repo, nie wada kandydata — kandydat nie deklaruje pokrycia. Follow-up: tani test obecności guardu.
+- **Landing** — `supervisor-merge --run …9946 --base 6f1d846 --child dev-1 --verify "npm ci && node scripts/test-all.mjs"`
+  → `accepted: true`, `findings: []`, izolacja exit 0, combined exit 0, replay 1 commita bez konfliktów.
+  Fast-forward w głównym checkoucie: `6f1d846 → 4b9e5f5` (8 plików, +60/−5). **Lokalnie, bez push i bez PR.**
+
+### Uwagi z tego runu
+
+- **Kolejne (odwrotne) świadectwo na flake `telemetry-concurrency.test.mjs`.** Drugi przebieg merge'a odrzucił
+  kandydata **wyłącznie** tym plikiem (izolacja exit 1) **w tym samym przebiegu, w którym combined był zielony**
+  (exit 0) — czyli ten sam kod raz czerwony, raz zielony. Plik uruchomiony standalone w worktree dev-1: 2/2 pass.
+  To ten sam znany wyścig w `migrate()` (`view canonical_usage already exists`), nie defekt kandydata.
+  Retry zgodnie z regułą Mateusza zadziałał: trzeci przebieg `accepted: true`.
+- **Nie owijaj merge'a we własny `timeout`.** Pierwszy przebieg został obcięty moim `timeout 580` → `combined`
+  exit **143 (SIGTERM)**, a raport narzędzia mówi wtedy „the combined suite failed (exit 143)" — czyli wygląda
+  jak odrzucenie kandydata, choć to przerwanie po mojej stronie. `npm ci` w świeżym drzewie integracyjnym
+  + pełny suite nie mieszczą się w 10 min. Puść merge bez zewnętrznego limitu (tło).
+- **Referencje `orch-ollama` poza zakresem zmiany (nieblokujące, świadome):** `config/prompt-roots.json:7,31`,
+  `docs/ui/prompt-editing-external.md`, `config/atlas-mcp.json.template:2`, `agents/orchestrator/memory/orchestration.md:102`
+  (to ostatnie odroczone wg AC-10 — `agents/**` ma zostać diff-empty). Zgłoszone jako znajdujące się w trybie teraźniejszym.
+- **Granica repo-only nie jest nigdzie zapisana:** oryginał launchera żyje poza repo
+  (`%LOCALAPPDATA%\hermes\scripts\orchestrate.bat`, 4516 B) i nie jest objęty wycofaniem. Otwarte pytanie (review, medium).
+- **Liczba historycznych sesji `orch-ollama` rozjeżdża się między źródłami:** gate mówi „12 sesji", review powtórzył 12,
+  a TEST zmierzył bezpośrednio w store **15 runów / 13 sesji** (wszystkie `completed`, 08-06→08-24). Różnica podstawy
+  liczenia, nie utrata danych — ale przy cytowaniu tej liczby używać pomiaru z TEST.
+
+## 2026-09-13 — FOC-285 (F-09) COMPLETE · zintegrowany lokalnie na `chore/foc-102-baseline`
+
+- **Run** `2026-09-12T21-31-34-supervisor-613e` (glm-5.3-flash; dzieci dev-1/review-2/test-3). Wznowienie po
+  utracie sieci — runda 2 REVIEW startowała z istniejącej sesji `review-2` (`supervisor-followup`), nie z
+  nowego spawnu. Kandydat finalny `e171c50` (`foc-285-dev`, 2 commity nad bazą `53fb441`).
+- **FOC-285** (F-09: provision secret scanner + SAST w ścieżce review) — dodaje `scripts/security-scan.mjs`
+  (wrapper na secretlint 13.0.5 + semgrep 1.172.0, `config/security/semgrep-rules.yml`, zacommitowany
+  `package.json`/`package-lock.json`, `docs/tools/security-scan.md`) i wpina go w kontrakt review.
+- **REVIEW runda 2 = APPROVE** — oba findingi rundy 1 zamknięte i potwierdzone na **własnych** próbkach
+  reviewera (10/10 form, wrapper + `semgrep` bezpośrednio). Mutacje falsyfikujące: A (przeniesienie
+  `metavariable-regex` na `$M` z powrotem na poziom reguły) → `36 passed, 3 failed`; B (usunięcie 4 nowych
+  ramion `path.join`/`resolve`) → `35 passed, 4 failed`; po `git checkout --` → `39 passed, 0 failed`.
+  Werdykt: `foc-285-round2.json`, combined fingerprint `b3b790e891f26c8f` (runda 1: `ba286141d3665ed3` —
+  praca się ruszyła, więc pętla nie stanęła na powtórce).
+- **Wycofanie taint-mode dla `security.path-join-request-data` uzasadnione empirycznie** (a nie stylistycznie):
+  wariant `mode: taint` daje **2 trwałe false positives na `scripts/serve-docs.mjs:49,59`** (poprawny idiom
+  `resolve(ROOT, reqData)` + `relative()` containment) i sam **gubi dostęp bracketowy** (`req["file"]`), więc
+  6-ramienny wariant syntaktyczny wygrywa. Cena: brak pokrycia przepływów aliasowanych — dziś 0 wystąpień w repo.
+- **TEST = PASS** (`test-3`, niezależny fixture wymyślony przez testera) — 5/5 wykryć, exit 1, zero wycieków
+  wartości w obu strumieniach; warunek wiążący Mateusza (skaner, który nie wystartował ⇒ non-zero + jawna
+  linia `NOT SCANNED` + **brak** linii OK) reprodukowany dwukrotnie — brak `node_modules` i `semgrep` poza
+  PATH — oba exit 2. `test-all` 58/58, lint 388/0, skan repo 452 pliki exit 0.
+- **Landing** — `supervisor-merge --run …613e --base e803027 --child dev-1 --verify "npm ci && node scripts/test-all.mjs"`
+  → `accepted: true`, `findings: []`, izolacja exit 0, integracja exit 0, replay 2 commitów bez konfliktów.
+  Fast-forward w głównym checkoucie: `e803027 → 3c36f8d` (9 plików, +1242/−8). **Lokalnie, bez push i bez PR.**
+- **Worktree FOC-285** (`foc-285-{dev,review,test}`, `la-merge-…613e` — ostatni usunięty przez sam merge)
+  do sprzątnięcia przez `supervisor-cleanup.mjs`, po ratowaniu `.state`. Scratch z fałszywymi sekretami
+  (`foc285-fixtures/`, `foc285-redact/`, `foc285-ruleprobe/`, `foc285-taint/`) **nie idzie do ratowanego `.state`**.
+
+### Uwagi toolowe z tego runu (nowe)
+
+- **`supervisor-merge.mjs` nie provisioninguje drzewa integracyjnego.** Pierwszy przebieg **odrzucił**
+  kandydata (`combined` exit 1, „1 test file(s) failed") mimo izolacji exit 0 — wyłącznie dlatego, że
+  scratch tree nie ma `node_modules`, a `scripts/security-scan.test.mjs` potrzebuje skanerów z
+  zacommitowanego lockfile (bez nich uczciwa degradacja: `NOT SCANNED` + exit 2 → asercje PASS na czerwono).
+  Po `npm ci` w tym samym drzewie suite wraca do `39 passed, 0 failed`. Obejście: `--verify "npm ci && node scripts/test-all.mjs"`.
+  **Konsekwencja ogólna:** od tego landingu `test-all` na świeżym checkoutcie **bez `npm ci` jest czerwony.**
+- **`LA_SUPERVISOR_MAX_COST_USD` wycieka do środowiska dziecka** i przewraca 4 hermetyczne pliki `supervisor-*`
+  w `test-all` (dowód: raport rundy 2 §6). Nie eksportować go w sesji Supervisora; budżet trzymać alokacją
+  etapową (`supervisor-budget.mjs allocate`). Kandydat na fix: scrub `LA_*` w `supervisor-spawn`/`supervisor-followup`.
+- **`--base` w merge'u jest tu obowiązkowe.** Domyślna wspólna baza to baza dev-1 (`53fb441`), więc integracja
+  bez `--base e803027` gubiłaby `b3a9377` + `e803027` i ff-only na baseline by się nie udał. Zbiory plików
+  kandydata i tych dwóch commitów **nie nachodzą na siebie** (sprawdzone) — replay czysty.
+- **Korekta nieaktualnej uwagi z 2026-09-12:** `supervisor-followup.mjs --prompt-file` **działa** — runda 2
+  REVIEW wystartowała dokładnie tak (ścieżka względem cwd Supervisora), a `supervisor-spawn` weryfikuje
+  `prompt-file-readable`. Zdanie „zawsze `--prompt "$(cat <plik>)"`, nigdy `--prompt-file`" (sekcja niżej) jest
+  nieaktualne dla bieżącego kodu.
+- `python -m semgrep` pozostaje zepsute na tej maszynie (cichy exit 2) — nieistotne, wrapper napędza binarkę
+  `semgrep`. Blokada Smart App Control (zdarzenie 3077) w tym runie **nie wystąpiła**.
+
+## 2026-09-12 — FOC-287 + FOC-220 + FOC-221 INTEGRATED na `chore/foc-102-baseline` (lokalnie)
+
+- **Run** `2026-09-12T08-33-13-554-supervisor-a93f` (glm-5.3-flash, koszt runu ~$10.19 priced; `costUsdReported`
+  $467 to licznik strumienia dla nierozpoznanego modelu — niezaufany). Trzy linie fali doprowadzone do TEST PASS
+  i **scalone lokalnie**; push/PR nadal NIE.
+- **FOC-287** (F-13: lint jako warunek ukończenia w kontrakcie DEV + DoD) — kandydat `4822c84` (1 commit nad
+  `941e32e`, 8 plików: `agents/dev/CLAUDE.md`, `agents/review/CLAUDE.md`, `agents/review/settings.json`,
+  `docs/FENIX_WORKFLOW.md`, `docs/agents/agent-2-dev.md`, `docs/agents/agent-3-review.md`, nowe
+  `scripts/lint.mjs` + `scripts/lint.test.mjs`). TEST **PASS** (`gate-test-4-1`).
+- **FOC-220** (+F-06: tożsamość narzędzi w canonical view — `tool_input_id`, `tool_index` oraz trójka wyniku
+  `tool_result_state` / `tool_result_bytes` / `tool_result_id`) — kandydat `90983e2`. TEST **PASS**
+  (`gate-test-7-1`, `gate-test-9-1`).
+- **FOC-221** (task-coverage + uczciwe podstawy kosztu w eksportach telemetrii) — REVIEW r1 REQUEST_CHANGES →
+  runda fixów (`ab7d829`, `ac3247d`, `1eeccaa`) → REVIEW r2 **PASS** → TEST **PASS** @ `1eeccaa`.
+- **Merge integracyjny `cfacb0c`** (dev-12, `Merge: 1eeccaa 90983e2`) — FOC-221 przeniosło `CANONICAL_TOOL_SQL`
+  z `scripts/telemetry-canonical.mjs` do `scripts/telemetry-store.mjs`; FOC-220 dopisało w tym czasie 5 kolumn
+  *w starym miejscu*. Git scalił `telemetry-store.mjs` **czysto i bez tych kolumn** — pułapka zmierzona, nie
+  teoretyczna. Rozwiązanie: kształt FOC-221 (cienki moduł) + przeniesienie 5 kolumn do `CANONICAL_TOOL_SQL`
+  w **obu** miejscach (claims SELECT po `u.tool_input,`, projekcja końcowa po `k.tool_input,`) wraz z komentarzem
+  FOC-220. Strażnik `scripts/telemetry-canonical.test.mjs` czerwony przed, zielony po.
+- **Weryfikacja `cfacb0c`** — pełny suite **56/56, exit 0** (Supervisor 318 912 ms; dev-12 334 776 ms — dwa
+  niezależne przebiegi). Mutacja (usunięcie `k.tool_result_bytes` z projekcji): strażnik 54 passed / 2 failed
+  exit 1, suite 55/56 exit 1 — strażnik jest **falsyfikowalny**. Focused REVIEW samego commitu merge'a
+  (`--remerge-diff`, nie całego diffu) — **PASS**, gate `gate-review-17-1`.
+- **Landing** — `supervisor-merge.mjs --base cfacb0c --child dev-12 --child dev-1 --keep`, `accepted: true`,
+  `findings: []`, combined verify exit 0; gałąź `la-merge/2026-09-12T08-33-13-554-supervisor-a93f` @ `fcb3eda`
+  (dev-1: 1 commit replay bez konfliktów; dev-12: „nothing to replay — no commits ahead of the base").
+  Fast-forward w głównym checkoucie: `941e32e → fcb3eda` (37 plików, +3962/−356). **Lokalnie, bez push i bez PR.**
+- **`--base cfacb0c` to świadome odstępstwo** od dosłownej komendy: bez niego `replay()` odtwarza już
+  rozstrzygnięty konflikt `scripts/telemetry-canonical.mjs` (dowód: cherry-pick `941e32e..foc-221-dev-r1` na
+  scratchu konfliktuje na `0c241ed`, exit 1) → fałszywy REJECT. Z `--base` zakres dev-12 jest pusty, a FOC-287
+  wchodzi na scalony commit i dopiero ta kombinacja jest weryfikowana.
+- **Worktree** — po landingu do sprzątnięcia te, których gałąź jest przodkiem nowego HEAD (`foc-220-*`,
+  `foc-221-*`, `foc-287-*`), przez `supervisor-cleanup.mjs` po ratowaniu `.state`. **Zostawione świadomie:**
+  `foc-284-*`, `foc-286-*`, `foc-272-review`, `foc-102-plan` oraz `la-merge-2026-09-05…-dd5b`.
+- **Następne:** FOC-285 (F-09: provision secret scanner + SAST w ścieżce review) — dzieci startują z
+  zintegrowanego HEAD, przy **każdym** spawnie jawne `--model z-ai/glm-5.3-flash`.
+- **Uwagi toolowe z tego runu (nowe):** (a) `supervisor-followup.mjs` przekazuje `--prompt-file` do watchera,
+  który startuje z cwd = worktree dziecka i ginie przed tee → **zawsze `--prompt "$(cat <plik>)"`**, nigdy
+  `--prompt-file`; obejście „spawn świeżego dziecka" dało 12 worktree na 2 taski. (b) Bez jawnego `--model`
+  dziecko dziedziczy model sesji Supervisora (`deepseek/deepseek-v4.1-flash`). (c) „Czysty auto-merge nie jest
+  poprawnym auto-merge'em" — przy parze przenieś+edytuj plik, który *przyjął* przeniesienie, nie ma konfliktu.
+
+## 2026-09-11 — supervised wave (epic FOC-102): FOC-286 + FOC-284 COMPLETE · WIND-DOWN
+
+- **FOC-286** (return-from-test crash, supervised) — COMPLETE, merged to main; follow-ups FOC-294/295/296 filed.
+- **FOC-284** (F-04: `returned-by:*` return labels + routable return edges) — COMPLETE 2026-09-11, run
+  `2026-09-11T10-46-48-428-supervisor-f5dd` (children dev-1/review-2/test-3, glm-5.3-flash). Loop: 3 rundy
+  dev↔review (REQUEST_CHANGES ×2 → **APPROVE**, pierwsza czysta runda — zero `issue:`), kandydat `c8e51e1`
+  (3 commity na `foc-284-dev` nad bazą `3859c86`). TEST: **PASS** — 9/9 suite'ów, 275 testów 0 failed,
+  walidator OK (6/10/6), AC1–AC4 verified, gate-leak clean; F-05 (emiter test-side) odroczony do FOC-165 by design.
+  Linear: **Done**, labels [feature, dod-ok, reviewed, returned-by:review] (return-label zostaje do pass-time
+  removal w FOC-165). Landing: **PR #26** (`foc-284-dev` → main; main == baza — zero konfliktów) — czeka na
+  merge Mateusza. Worktree `foc-284-{dev,review,test}` ZOSTAWIONE (decyzja Mateusza, precedens FOC-286;
+  gałąź review z docsami rund nie jest na origin). Koszt runu ~$14.90 priced (dev $9.32 / review $4.97 / test $0.60).
+- **Wind-down (Mateusz, 2026-09-11):** „musimy powoli robic stop, nie zaczynaj nowych tasków" — koniec fali,
+  nic nowego nie startuje. Follow-upy z rundy 3 FOC-284 ŚWIADOMIE NIE file'owane, zapisane w PR #26:
+  S3-1 (skip-counted-as-pass w supervisor-test-fixtures.mjs), S3-2+N3-1 (catcher: edge-derived advice +
+  dryRun suppression w supervisor-followup.mjs), N3-2/N3-3+Q3-1 (scrub pattern poza supervisor-verdict —
+  `publish-linear-comment.mjs:221` to WRITE path). FOC-165 pokrywa emiter + usuwanie returned-by:review.
+- **Nieruszone w Linear po wznowieniu 2026-09-13:** FOC-289 (F-16 docs) ·
+  FOC-114 · FOC-165 (+F-14, release-candidate run) · FOC-102 close-out (epic) · standing: FOC-294/295/296/297.
+  (FOC-287 / FOC-220 / FOC-221 zdjęte z tej listy 2026-09-12 — zintegrowane lokalnie; FOC-285 zdjęte
+  2026-09-13 i FOC-288 zdjęte 2026-09-14 po TEST PASS i lokalnym landingu — patrz sekcje „Current execution”
+  na górze.
+  PR #25/FOC-219 scalony na main 2026-09-11, `967fc1a`, wchłonięty w `3859c86`; po stronie Mateusza zostaje
+  merge PR #26 (FOC-284).)
+- Uwaga toolowa (znana z FEN/FOC-284): wyroki TEST nie nagrywać przez supervisor-verdict; `--run` jawne przy
+  KAŻDYM wywołaniu supervisor-tool (env LA_SUPERVISOR_RUN wskazuje stary run).
+
 ## Current execution: 2026-09-07 — FOC-225 COMPLETE (slice 3 + cleanup landed, integration `b009358`)
 
 - Slice 3 (rewards persistence) DONE: oddzielny ledger `rewards.sqlite` (`LA_REWARDS_HOME`/`LA_REWARDS_DB`;

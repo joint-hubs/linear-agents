@@ -14,6 +14,8 @@ import { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { checkOverBudgetMarker } from './cost-guard.mjs';
+
 const __dir = dirname(fileURLToPath(import.meta.url));
 const PROMPTS_PATH = join(__dir, '..', 'config', 'prompts.json');
 
@@ -30,9 +32,13 @@ const PROMPTS_PATH = join(__dir, '..', 'config', 'prompts.json');
 // the asymmetry looks like the oversight this task fixed.
 export const SQUAD_ALLOWLIST = ['plan', 'dev', 'review', 'test', 'cadence'];
 
-// Linear identifier shape — strict, so a crafted taskId can't smuggle cmd
-// metacharacters into the wrapper .bat (it's interpolated into `set` + `call`).
-export const TASK_ID_RE = /^[A-Z]+-\d+$/;
+// Linear identifier FORMAT check — strict shape only (TEAM-digits), so a
+// crafted taskId can't smuggle cmd metacharacters into the wrapper .bat (it's
+// interpolated into `set` + `call`). Named for its semantics on purpose: this
+// is NOT the task-id inference regex — that one is single-sourced as TASK_ID_RE
+// in scripts/ledger.mjs (FEN|PISI|JOI|FOC prefixes, free-text recognition) and
+// the two must never be confused again.
+export const TASK_ID_FORMAT_RE = /^[A-Z]+-\d+$/;
 
 // HOW-TO-RUN-AGENTS §4 kickoff templates, one per squad. Newlines collapsed to
 // " | " so the whole prompt fits on a single cmd line (a .bat `call` can't span
@@ -132,8 +138,8 @@ export function reloadKickoffTemplates() {
 // reaches the spawned shell. Wire it when its meaning is specified.
 export function validateLaunch(body) {
   const taskId = String((body && body.taskId) || '').trim();
-  if (!TASK_ID_RE.test(taskId)) {
-    return { ok: false, status: 400, error: `invalid taskId: must match ${TASK_ID_RE.source}` };
+  if (!TASK_ID_FORMAT_RE.test(taskId)) {
+    return { ok: false, status: 400, error: `invalid taskId: must match ${TASK_ID_FORMAT_RE.source}` };
   }
   const squad = String((body && body.squad) || '').trim().toLowerCase();
   if (!SQUAD_ALLOWLIST.includes(squad)) {
@@ -254,7 +260,7 @@ export function buildLaunchBat(squad, taskId, kickoff, rootPath, targetRepo) {
 // works because the wrapper path has NO spaces (validated squad/taskId +
 // no-space repo root + `.state`). Full spaced-path support isn't achievable
 // through Node's arg array; the no-space precondition is enforced upstream
-// (TASK_ID_RE + SQUAD_ALLOWLIST + a no-space repo root) and documented here.
+// (TASK_ID_FORMAT_RE + SQUAD_ALLOWLIST + a no-space repo root) and documented here.
 // With `shell: true` we bypass Node's arg-quoting entirely — the command string
 // goes straight to cmd.exe, so quoting would be safe, but we keep the path
 // unquoted for consistency with the D-N1 invariant.
@@ -266,7 +272,29 @@ export function buildLaunchBat(squad, taskId, kickoff, rootPath, targetRepo) {
 const CONHOST_PATH = 'C:\\Windows\\System32\\conhost.exe';
 const _useConhost = existsSync(CONHOST_PATH);
 
+// Over-budget kill-switch (FOC-165): scripts/cost-guard.mjs writes
+// .state/over-budget.json when a cost report breaches COST_BUDGET_USD_PER_TASK,
+// and bin/_lib.bat refuses squad launches while it exists (`node
+// scripts/cost-guard.mjs check` before claude — bats cannot import ESM). This
+// is the earlier, ESM-side refusal at the dashboard gate: the POST /api/launch
+// caller gets the error instead of a spawned window that dies inside _lib.bat.
+// The Supervisor frontman is deliberately NOT covered (bin/supervisor.bat sets
+// SQUAD_SLUG=supervisor and _lib.bat skips the check for it): it is the
+// intervention channel (see SQUAD_ALLOWLIST above for the same reasoning), and
+// its children are already guarded by assertWithinBudget (supervisor-lib.mjs).
+export function assertNoOverBudgetMarker() {
+  const marker = checkOverBudgetMarker();
+  if (marker) {
+    throw new Error(
+      `OVER-BUDGET: launch refused — over-budget marker exists (task ${marker.task}, ` +
+      `spent $${Number(marker.spent).toFixed(2)} of $${Number(marker.budget).toFixed(2)}). ` +
+      'Clear it: node scripts/cost-guard.mjs clear',
+    );
+  }
+}
+
 export function spawnLauncher(wrapperPath, cwd, title) {
+  assertNoOverBudgetMarker();
   // `start ""` — empty title prevents `start` from misinterpreting the first
   // path token as a title. The real title is set inside the wrapper .bat.
   const cmd = _useConhost

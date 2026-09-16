@@ -1,6 +1,6 @@
 # Supervisor — manual e2e checklist (FOC-116, spec §8.12)
 
-The scripted suite (`node scripts/test-all.mjs`, 30 files) proves the parts against a mock
+The scripted suite (`node scripts/test-all.mjs`, 64 files) proves the parts against a mock
 `claude`. It cannot prove the one thing this epic is actually about: that **Mateusz never opens a
 child terminal**. That is a claim about a human session, so it gets walked by hand, once, on a
 throwaway issue, before first real use.
@@ -19,7 +19,7 @@ order they are numbered.
 
 ```bash
 node scripts/linear-query.mjs team FOC          # confirm the workspace answers
-node scripts/test-all.mjs                       # 30/30 before you start; a red suite invalidates the walk
+node scripts/test-all.mjs                       # 64/64 before you start; a red suite invalidates the walk
 git diff --stat -- agents/orchestrator          # AC-10, see below
 ```
 
@@ -49,7 +49,7 @@ git diff --stat origin/main..HEAD -- agents/orchestrator
 ```
 
 - [ ] Output is empty.
-- [ ] `bin\orchestrate.bat` still starts and picks up work standalone.
+- [ ] `bin\orchestrate.bat` no longer starts a session — an ASCII guard added in FOC-288 exits before any session starts; withdrawn from active use per the FOC-272 gate decision. See [ADR-0011](adr/0011-orch-ollama-withdrawal.md).
 
 *Measured 2026-08-26 on this branch: 0 files. The squads' own CLAUDE.md files DID change — that is
 §1.6 and it is AC-10-compatible, because those changes are inert unless `LA_SUPERVISOR=1`, which
@@ -150,7 +150,8 @@ bypassPermissions` was refused — deny outranks bypass.
 ## Worktree cleanup (FOC-167) — walk it at the end
 
 Not one of AC-1…AC-10; it is the lifecycle that closes the run, and the only place in the system
-that may delete a checkout.
+that may delete a checkout — and only through `supervisor-cleanup.mjs`: a `git worktree remove`
+typed by hand walks past both keys (TEST pass, answered gate).
 
 - [ ] With the issue **not yet** Done, `cleanup propose` refuses and emits **no gate**.
 - [ ] Once TEST passes and the issue is Done, `propose` writes a `cleanup-approval` gate. The
@@ -160,6 +161,9 @@ that may delete a checkout.
       the yes.
 - [ ] Answer cleanly, then `remove`: the checkout is gone from disk **and** from `git worktree list`,
       and the branch plus its commits are still there.
+- [ ] No gate left unanswered: after the walk, `supervisor-gate.mjs list --run <runId> --status
+      pending` shows no `cleanup-approval` gate for this run — each one ended in a removal or in an
+      explicit answer. A pending cleanup question on a finished run is queue pollution.
 
 ---
 
@@ -199,14 +203,16 @@ All of it is **inert unless `LA_SUPERVISOR=1`**, which only `supervisor-spawn.mj
 what keeps AC-10 true while the squad prompts changed.
 
 ### Verification
-- `node scripts/test-all.mjs` → 30/30 files (§8.1–8.11).
+- `node scripts/test-all.mjs` → 64/64 files (§8.1–8.11).
 - This checklist, walked once on a throwaway issue (§8.12).
 - `git diff -- agents/orchestrator` empty (AC-10).
 
 ### Rollback
 Revert the PR. `.state/supervisor/` is disposable. Existing squads are bitwise-unchanged in
-behaviour when unsupervised. Worktrees left under `../la-wt/` are reclaimed with
-`supervisor-cleanup.mjs`, or by hand with `git worktree remove` once you have read what is in them.
+behaviour when unsupervised. Worktrees left under `../la-wt/` are reclaimed through
+`supervisor-cleanup.mjs` — `propose`, his yes, `remove` — and never by hand: a typed
+`git worktree remove` walks past both keys, and reading what is in a tree does not pin it the way
+the gate's fingerprint does.
 
 ### ADR status
 ADR-0009 stays **Proposed**. It is accepted at GATE 2, which is a separate decision — this PR does

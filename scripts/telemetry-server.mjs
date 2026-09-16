@@ -26,7 +26,7 @@ import { suggestedSquad } from './graph-route.mjs';
 // lives in scripts/launch.mjs so it's unit-testable without the HTTP server.
 import {
   SQUAD_ALLOWLIST,
-  TASK_ID_RE,
+  TASK_ID_FORMAT_RE,
   KICKOFF_TEMPLATES,
   validateLaunch,
   kickoffPrompt,

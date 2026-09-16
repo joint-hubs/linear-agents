@@ -77,11 +77,12 @@ Economy: your turn ~90k tokens; subagent phase 5–10× cheaper.
 Returns: summary ≤5 paragraphs + file list + risks.
 
 **3b. Task(implementer)** (the whole cycle)
-Input: identifier, AC/DoD, context packet from 3a, verify commands (build/test), commit message format.
+Input: identifier, AC/DoD, context packet from 3a, verify commands (lint + build/test), commit message format.
 Implementer executes: edit files → run build → run tests → commit; returns:
 - Summary (what changed, self-verify)
 - File list (changed files)
 - Test tail (≤15 lines)
+- Lint status (command + exit + scope covered)
 - Commit hash
 - Open questions
 Do not re-run tests yourself; trust implementer's report.

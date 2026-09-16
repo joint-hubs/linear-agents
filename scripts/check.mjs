@@ -5,6 +5,9 @@
  * Checks:
  *   1. Every subagent model: value is a known alias or a slug in models.map
  *   2. Every area.role key in models.map has a corresponding subagent file
+ *   2b. Every subagent file has a corresponding area.role key in models.map
+ *       (without one, bin/agent.bat silently launches the role on its
+ *       hardcoded fallback model, bin/agent.bat:27)
  *   3. Every Linear label clearly referenced in agent prompts exists in labels.json
  *   4. Every config/*.json parses as valid JSON
  *   5. config/models.native.map: format, required roles, allowed values
@@ -201,10 +204,21 @@ for (const rel of subagentRelPaths) {
 
 // ── 5. Check 2: area.role keys have subagent files ──────────────────
 
+const areaRoleKeySet = new Set(areaRoleKeys.map(k => k.key));
+
 for (const { key } of areaRoleKeys) {
   if (!existingSubagents.has(key)) {
     const [area, role] = key.split('.');
     report(`config/models.map key '${key}'`, `has no subagent file agents/${area}/agents/${role}.md`);
+  }
+}
+
+// ── 5. Check 2b: subagent files have area.role keys (reverse) ───────
+
+for (const key of existingSubagents) {
+  if (!areaRoleKeySet.has(key)) {
+    const [area, role] = key.split('.');
+    report(`agents/${area}/agents/${role}.md`, `has no config/models.map key '${key}'`);
   }
 }
 
@@ -419,7 +433,7 @@ for (const v of violations) {
 
 const count = violations.length;
 if (count === 0) {
-  console.log(`OK: 7 checks, 0 violations`);
+  console.log(`OK: 8 checks, 0 violations`);
   process.exit(0);
 } else {
   console.log(`DRIFT: ${count} violations`);

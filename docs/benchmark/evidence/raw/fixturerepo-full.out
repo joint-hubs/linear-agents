@@ -1,0 +1,51 @@
+
+Callers of "fixtureRepo" (16):
+
+function    scenario
+  scripts/supervisor-budget.test.mjs:46
+
+file        supervisor-budget.test.mjs
+  scripts/supervisor-budget.test.mjs:1
+
+function    scenario
+  scripts/supervisor-cleanup.test.mjs:58
+
+function    fixture
+  scripts/supervisor-merge.test.mjs:33
+
+file        supervisor-pinned-state.test.mjs
+  scripts/supervisor-pinned-state.test.mjs:1
+
+file        supervisor-repo.test.mjs
+  scripts/supervisor-repo.test.mjs:1
+
+file        supervisor-semaphore.test.mjs
+  scripts/supervisor-semaphore.test.mjs:1
+
+file        supervisor-stop.test.mjs
+  scripts/supervisor-stop.test.mjs:1
+
+function    scenario
+  scripts/supervisor-verdict.test.mjs:58
+
+file        supervisor-verdict.test.mjs
+  scripts/supervisor-verdict.test.mjs:1
+
+file        supervisor-cleanup.test.mjs
+  scripts/supervisor-cleanup.test.mjs:1
+
+file        supervisor-merge.test.mjs
+  scripts/supervisor-merge.test.mjs:1
+
+file        supervisor-followup.test.mjs
+  scripts/supervisor-followup.test.mjs:1
+
+file        supervisor-gate.test.mjs
+  scripts/supervisor-gate.test.mjs:1
+
+file        supervisor-spawn.test.mjs
+  scripts/supervisor-spawn.test.mjs:1
+
+file        supervisor-status.test.mjs
+  scripts/supervisor-status.test.mjs:1
+

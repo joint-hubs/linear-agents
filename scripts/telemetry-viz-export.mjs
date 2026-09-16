@@ -14,9 +14,12 @@
  * visualisation can be built section by section without re-reading the prose.
  *
  * Data honesty rules carried into the payload:
- *   - cost comes from canonical_usage (run-scoped duplicates already collapsed)
+ *   - cost comes from canonical_usage (run-scoped AND per-message duplicates
+ *     collapsed — the FOC-221 island rule)
  *   - `unpriced` counts are exported next to every cost figure, never folded in
- *   - `inflation` reports BOTH known over-counts, because they multiply
+ *   - `inflation` reports the over-counts of the RAW corpus (run-scoped claim
+ *     copies and repeated per-message usage lines); canonical_usage removes
+ *     both, so these factors describe what naive sums would over-count
  *   - scratch-derived series degrade to null when .state/research-scratch is
  *     absent, and `sources` says which ones made it
  *
@@ -81,15 +84,15 @@ const costByModel = all(`SELECT model AS label, COUNT(*) AS turns,
 
 // Week buckets: ISO-ish, good enough for a trend line and stable across runs.
 const costByWeek = all(`SELECT strftime('%Y-W%W', observed_at) AS label,
-    COUNT(*) AS turns, ROUND(SUM(COALESCE(cost_usd,0)),2) AS usd
+    COUNT(*) AS turns, ROUND(SUM(COALESCE(cost_usd,0)),2) AS usd, SUM(cost_usd IS NULL) AS unpriced
   FROM canonical_usage WHERE observed_at IS NOT NULL GROUP BY 1 ORDER BY 1`);
 
 const leadVsSub = all(`SELECT CASE WHEN agent_key='_lead' THEN 'lead' ELSE 'subagent' END AS label,
-    COUNT(*) AS turns, ROUND(SUM(COALESCE(cost_usd,0)),2) AS usd
+    COUNT(*) AS turns, ROUND(SUM(COALESCE(cost_usd,0)),2) AS usd, SUM(cost_usd IS NULL) AS unpriced
   FROM canonical_usage GROUP BY 1`);
 
 const costByRole = all(`SELECT agent_key AS label, COUNT(*) AS turns,
-    ROUND(SUM(COALESCE(cost_usd,0)),2) AS usd
+    ROUND(SUM(COALESCE(cost_usd,0)),2) AS usd, SUM(cost_usd IS NULL) AS unpriced
   FROM canonical_usage WHERE agent_key <> '_lead' AND agent_key NOT LIKE 'agent-%'
   GROUP BY 1 ORDER BY usd DESC LIMIT 20`);
 
@@ -316,7 +319,7 @@ const payload = {
       runScoped, messageScoped,
       combinedFactor: runScoped.factor && messageScoped.factor
         ? Number((runScoped.factor * messageScoped.factor).toFixed(2)) : null,
-      note: "The two over-counts are independent and multiply. canonical_usage removes the run-scoped one only.",
+      note: "Factors describe the RAW corpus, where the over-counts multiply. canonical_usage (FOC-221 island rule) collapses both layers, so fleet totals no longer carry them.",
     },
     canonCoverage: {
       rows: canonCoverage.rows, nullCanon: canonCoverage.nullCanon,

@@ -21,6 +21,7 @@ sprawdź tutaj.**
 | **flow-db** | historia przebiegów: trace per task, odbicia REVIEW→DEV, koszt per krok | `node $LA_ROOT/scripts/flow-db.mjs <ingest\|trace\|patterns>` | `--help` |
 | **run-manifest** | rejestracja przebiegu w telemetrii | `node $LA_ROOT/scripts/run-manifest.mjs ...` | `--help` |
 | **publish-linear-comment** | komentarz hand-off do Linear (idempotentny) | `node $LA_ROOT/scripts/publish-linear-comment.mjs ...` | `--help` |
+| **security-scan** | skanery bezpieczeństwa dla REVIEW: secretlint (sekrety) + semgrep (SAST), offline, wyjście file:line bez wartości trafień | `node $LA_ROOT/scripts/security-scan.mjs [--json]` | [security-scan.md](security-scan.md) |
 
 </available_tools>
 

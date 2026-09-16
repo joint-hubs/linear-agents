@@ -211,6 +211,33 @@ test("records allowedPaths as a declaration when given", () => {
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
 });
 
+// Run a93f, 2026-09-12: four children spawned without --model ran on the
+// Supervisor's own deepseek-v4.1-flash (inherited ANTHROPIC_MODEL) while the
+// registry recorded `model: null`.
+test("without --model the registry records the model the child inherits, and says so", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runSpawn(runId, repo, [], { ANTHROPIC_MODEL: "supervisor/own-model" });
+  const out = parse(r);
+  const entry = readRegistry(runId).children[out.childId];
+  if (entry.model !== "supervisor/own-model") fail(`registry model was ${entry.model}`);
+  if (entry.modelSource !== "inherited:ANTHROPIC_MODEL") fail(`modelSource was ${entry.modelSource}`);
+  if (!/no --model/.test(r.stderr)) fail(`no warning on stderr: ${r.stderr}`);
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("an explicit --model wins over the inherited one and draws no warning", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runSpawn(runId, repo, ["--model", "z-ai/glm-5.3-flash"], { ANTHROPIC_MODEL: "supervisor/own-model" });
+  const out = parse(r);
+  const entry = readRegistry(runId).children[out.childId];
+  if (entry.model !== "z-ai/glm-5.3-flash") fail(`registry model was ${entry.model}`);
+  if (entry.modelSource !== "--model") fail(`modelSource was ${entry.modelSource}`);
+  if (/no --model/.test(r.stderr)) fail("warned although --model was given");
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
 // ── session identity + tee ───────────────────────────────────────────────────
 console.log("\nsession identity and the event tee");
 

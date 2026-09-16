@@ -1,2 +1,7 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# FOC-114 evidence captures are hashed as committed bytes (SHA256SUMS.txt).
+# -text: no EOL conversion in either direction, so a fresh checkout is
+# byte-identical to the blobs and the hash list verifies on every platform.
+docs/benchmark/evidence/** -text

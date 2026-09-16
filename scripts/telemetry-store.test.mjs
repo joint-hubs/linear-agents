@@ -1,9 +1,10 @@
 // Contract test for the central telemetry store.
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
   applyEvent,
   applyEvents,
@@ -13,6 +14,7 @@ import {
   makeEvent,
   migrate,
   openTelemetryDb,
+  priceThreshold,
   pricingSnapshot,
   queryHealth,
   queryPatterns,
@@ -28,6 +30,8 @@ import {
   SCHEMA_VERSION,
   MIGRATION_VERSIONS,
 } from "./telemetry-store.mjs";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 let passed = 0;
 let failed = 0;
@@ -151,6 +155,38 @@ test("central flow trace and patterns use temporal task usage", () => {
   assert(patterns.stepStats[0].executions >= 1, "patterns must include central usage");
 });
 
+test("trace and patterns self-describe the raw cost basis (FOC-221 disclosure)", () => {
+  const trace = queryTrace(db, "FOC-1");
+  assert(trace.costBasis === "raw", `trace costBasis=${trace.costBasis}`);
+  assert(typeof trace.costBasisNote === "string" && trace.costBasisNote.includes("raw"), "trace basis note missing");
+  assert(trace.runs.every((run) => run.costBasis === "raw"
+    && run.steps.every((step) => step.costBasis === "raw")), "per-run/step basis labels missing");
+  const patterns = queryPatterns(db);
+  assert(patterns.costBasis === "raw" && typeof patterns.costBasisNote === "string", "patterns payload basis missing");
+  assert(patterns.stepStats.length > 0 && patterns.stepStats.every((row) => row.costBasis === "raw"),
+    "patterns per-row basis labels missing");
+});
+
+test("patterns cost is null-contagious like trace: an unpriced turn nulls the stat, priced-only keeps the sum", () => {
+  const patterns = queryPatterns(db);
+  const lead = patterns.stepStats.find((row) => row.squad === "dev" && row.agent === "_lead");
+  assert(lead && lead.unpriced_turns >= 1, `lead stat=${JSON.stringify(lead)}`);
+  assert(lead.cost_usd === null, `unpriced turns must null the cost, got ${lead.cost_usd}`);
+  const implementer = patterns.stepStats.find((row) => row.squad === "dev" && row.agent === "implementer");
+  assert(implementer && implementer.unpriced_turns === 0 && implementer.cost_usd > 0,
+    `priced-only stat must keep the plain sum: ${JSON.stringify(implementer)}`);
+});
+
+test("querySummary labels the mix: raw totals, canonical byTask", () => {
+  const summary = querySummary(db);
+  assert(summary.costBasis === "raw", `summary costBasis=${summary.costBasis}`);
+  assert(summary.byTaskCostBasis === "canonical", `byTaskCostBasis=${summary.byTaskCostBasis}`);
+  assert(typeof summary.costBasisNote === "string" && summary.costBasisNote.length > 0, "costBasisNote missing");
+  assert(typeof summary.byTaskCostBasisNote === "string" && summary.byTaskCostBasisNote.length > 0, "byTaskCostBasisNote missing");
+  assert(Object.keys(summary.byTask).length > 0
+    && Object.values(summary.byTask).every((bucket) => bucket.costBasis === "canonical"), "byTask buckets unlabeled");
+});
+
 test("summary uses central projections", () => {
   const summary = querySummary(db);
   assert(summary.totals.runs === 2, `runs=${summary.totals.runs}`);
@@ -160,15 +196,22 @@ test("summary uses central projections", () => {
 
 test("health exposes store state", () => {
   const health = queryHealth(db);
-  assert(health.schemaVersion === 6, `schema=${health.schemaVersion}`);
+  assert(health.schemaVersion === 7, `schema=${health.schemaVersion}`); // FOC-220: additive tool_facts columns
   assert(health.issues.some((issue) => issue.type === "pricing_missing"), "pricing issue not reported");
 });
 
 test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
   const runId = "run-cache-savings";
   applyEvent(db, makeEvent("run.started", { runId, squad: "dev", startedAt: "2026-07-25T08:00:00.000Z" }, { runId, observedAt: "2026-07-25T08:00:00.000Z", sourceKind: "test" }));
-  // deepseek-v4-flash: input=0.088606, cacheRead=0.0177212 (real, from OpenRouter — JOI-79)
-  // savings = (1M / 1M) * (0.088606 - 0.0177212) = 0.0708848
+  // deepseek-v4-flash rates come from the same pricingSnapshot() the store
+  // prices through — derived below, not literals (rate literals broke on the
+  // 2026-09-15 price sync; the rate LEVEL is price-check.mjs's job, the tests
+  // own the CALCULATION). savings = (1M / 1M) * (input - cacheRead), the 1M
+  // basis the event above spends.
+  const flashRow = pricingSnapshot().prices["deepseek/deepseek-v4-flash"];
+  assert(flashRow && flashRow.input > 0 && flashRow.cacheRead > 0,
+    `precondition: deepseek/deepseek-v4-flash must be priced with input > 0 and cacheRead > 0, row=${JSON.stringify(flashRow)}`);
+  const expectedSavings = flashRow.input - flashRow.cacheRead;
   //
   // This used to expect 0.126, which is what the input*0.1 FALLBACK produces when
   // config carries no cacheRead. That fallback is wrong in both directions — 12x too
@@ -186,11 +229,11 @@ test("cacheSavingsUSD computed from cache_read_tokens and model prices", () => {
   }, { runId, observedAt: "2026-07-25T08:02:00.000Z", sourceKind: "transcript", sourcePath: "C:/sessions/cache.jsonl", sourceOffset: 2, eventId: "cache-usage-2" }));
   const run = queryRuns(db, { runId })[0];
   assert(run.totals.cacheSavingsUSD > 0, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected > 0)`);
-  assert(Math.abs(run.totals.cacheSavingsUSD - 0.0708848) < 0.001, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected ~0.0708848 from the configured cacheRead=0.0177212)`);
+  assert(Math.abs(run.totals.cacheSavingsUSD - expectedSavings) < 0.001, `cacheSavingsUSD=${run.totals.cacheSavingsUSD} (expected ~${expectedSavings} = snapshot input − cacheRead)`);
   // Per-model: deepseek-v4-flash has savings, unknown model does not
   const flashEntry = run.byModel["deepseek-v4-flash"];
   assert(flashEntry != null, "deepseek-v4-flash entry missing from byModel");
-  assert(Math.abs(flashEntry.cacheSavingsUSD - 0.0708848) < 0.001, `byModel flash cacheSavingsUSD=${flashEntry.cacheSavingsUSD}`);
+  assert(Math.abs(flashEntry.cacheSavingsUSD - expectedSavings) < 0.001, `byModel flash cacheSavingsUSD=${flashEntry.cacheSavingsUSD} (expected ~${expectedSavings})`);
   const unknownEntry = run.byModel["unknown-model-v99"];
   assert(unknownEntry != null, "unknown-model-v99 entry missing from byModel");
   assert(unknownEntry.cacheSavingsUSD === 0, `byModel unknown cacheSavingsUSD=${unknownEntry.cacheSavingsUSD} (expected 0)`);
@@ -215,8 +258,19 @@ test("pricingSnapshot reads the nested config as a provider-scoped openrouter sc
     Object.keys(snapshot.scoped.openrouter).length === keys.length,
     `flat view has ${keys.length} rows, scoped.openrouter has ${Object.keys(snapshot.scoped.openrouter).length}`,
   );
+  // Compared against a row read directly from config/models.json — the real
+  // committed table — not against numbers: this test's point is that the
+  // nested-vs-flat resolution agrees with what is committed (Mateusz, round 3).
+  const committedRow = JSON.parse(readFileSync(join(ROOT, "config", "models.json"), "utf8"))
+    ?.pricing?.openrouter?.["z-ai/glm-5.2"];
+  assert(committedRow, "precondition: config/models.json must carry z-ai/glm-5.2 under pricing.openrouter");
+  assert(committedRow.input > 0 && committedRow.output > 0 && committedRow.cacheRead > 0,
+    `precondition: the committed z-ai/glm-5.2 row must be priced, row=${JSON.stringify(committedRow)}`);
   const glm = snapshot.prices["z-ai/glm-5.2"];
-  assert(glm && glm.input === 1.19 && glm.output === 3.74 && glm.cacheRead === 0.221, `z-ai/glm-5.2 row=${JSON.stringify(glm)}`);
+  assert(
+    glm && glm.input === committedRow.input && glm.output === committedRow.output && glm.cacheRead === committedRow.cacheRead,
+    `flat view vs committed row: snapshot=${JSON.stringify(glm)} committed=${JSON.stringify(committedRow)}`,
+  );
 });
 
 test("pricingSnapshot strips _doc/_note metadata and still classifies nested pricing", () => {
@@ -261,12 +315,175 @@ test("resolvePrice scopes by provider and preserves flat fuzzy when none is give
 
 test("calculateCost bills cache-creation at cacheWrite, falling back to input", () => {
   const prices = pricingSnapshot().prices;
-  // anthropic/claude-opus-5: input=5, cacheWrite=6.25 → cache-creation billed at 6.25.
+  // Rates are read from the same snapshot the runtime prices through — not
+  // literals (rate literals broke on the 2026-09-15 price sync). The
+  // cacheWrite !== input preconditions keep both halves distinguishable: if a
+  // row ever carried cacheWrite === input, the direct and fallback paths would
+  // be indistinguishable and the test would pass either way.
+  // anthropic/claude-opus-5 bills cache-creation at its own cacheWrite.
+  const op = prices["anthropic/claude-opus-5"];
+  assert(op && op.cacheWrite > 0, `precondition: anthropic/claude-opus-5 must carry cacheWrite > 0, row=${JSON.stringify(op)}`);
+  assert(op.cacheWrite !== op.input, `precondition: opus-5 cacheWrite (${op.cacheWrite}) must differ from input (${op.input}), else direct path is indistinguishable from fallback`);
   const withWrite = calculateCost({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 1_000_000 }, "anthropic/claude-opus-5", prices);
-  assert(Math.abs(withWrite - 6.25) < 0.0001, `cacheWrite cost=${withWrite} (expected 6.25)`);
-  // deepseek/deepseek-v4-flash has no cacheWrite → falls back to input (0.088606).
+  assert(Math.abs(withWrite - op.cacheWrite) < 0.0001, `cacheWrite cost=${withWrite} (expected ~${op.cacheWrite})`);
+  // deepseek/deepseek-v4-flash has no cacheWrite → falls back to input.
+  const r = prices["deepseek/deepseek-v4-flash"];
+  assert(r && r.input > 0, `precondition: deepseek/deepseek-v4-flash must be priced, row=${JSON.stringify(r)}`);
+  assert(r.cacheWrite === undefined, `precondition premise died: deepseek-v4-flash now carries cacheWrite=${r.cacheWrite} — point the fixture at a row without one`);
+  assert(r.cacheWrite !== r.input, "precondition: cacheWrite must differ from input, else fallback is indistinguishable from direct");
   const fallback = calculateCost({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 1_000_000 }, "deepseek/deepseek-v4-flash", prices);
-  assert(Math.abs(fallback - 0.088606) < 0.0001, `fallback cost=${fallback} (expected 0.088606)`);
+  assert(Math.abs(fallback - r.input) < 0.0001, `fallback cost=${fallback} (expected ~${r.input})`);
+});
+
+// --- FOC-165 (f): promptTokenThreshold — the flat row is the base rate, valid
+// only below the catalogue's context-length override; at/above it the honest
+// answer is unpriced, never the base-rate under-count. ------------------------
+
+const THRESHOLD_PRICES = {
+  "x/y": {
+    input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5,
+    promptTokenThreshold: { minPromptTokens: 272000, above: { input: 20, output: 75 } },
+  },
+  "flat/m": { input: 1, output: 2 },
+};
+
+test("calculateCost bills the base rate below the declared threshold", () => {
+  // 271,999 input tokens at 10 USD/M = 2.71999; output 0.
+  const below = calculateCost({ inputTokens: 271_999, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "x/y", THRESHOLD_PRICES);
+  assert(Math.abs(below - 2.71999) < 1e-9, `below-threshold cost=${below} (expected 2.71999)`);
+});
+
+test("calculateCost refuses at exactly the threshold, not only above it", () => {
+  // min_prompt_tokens=272000 means the override applies FROM this prompt size,
+  // so the base rate stops being true here — refusal, not an under-count.
+  const at = calculateCost({ inputTokens: 272_000, outputTokens: 1_000_000, cacheReadTokens: 0, cacheCreationTokens: 0 }, "x/y", THRESHOLD_PRICES);
+  assert(at === null, `at-threshold cost=${at} (expected null)`);
+  const above = calculateCost({ inputTokens: 500_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "x/y", THRESHOLD_PRICES);
+  assert(above === null, `above-threshold cost=${above} (expected null)`);
+});
+
+test("priceThreshold returns the declared threshold, null for flat rows, null for malformed ones", () => {
+  const declared = priceThreshold("x/y", THRESHOLD_PRICES);
+  assert(declared && declared.minPromptTokens === 272000, `threshold=${JSON.stringify(declared)}`);
+  assert(priceThreshold("flat/m", THRESHOLD_PRICES) === null, "flat row must have no threshold");
+  assert(priceThreshold("nope", THRESHOLD_PRICES) === null, "unknown model must have no threshold");
+  const malformed = { "x/y": { input: 1, output: 2, promptTokenThreshold: { minPromptTokens: "272000" } } };
+  assert(priceThreshold("x/y", malformed) === null, "a non-numeric threshold is ignored, not half-applied");
+  const billed = calculateCost({ inputTokens: 300_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "x/y", malformed);
+  assert(Math.abs(billed - 0.3) < 1e-9, `malformed-threshold cost=${billed} (expected 0.3 — billed flat)`);
+});
+
+test("the committed gpt-6-astra row declares the catalogue threshold and calculateCost honours it", () => {
+  const snapshot = pricingSnapshot();
+  const r = snapshot.prices["openai/gpt-6-astra"];
+  assert(r && r.input > 0, `precondition: openai/gpt-6-astra must be priced with input > 0, row=${JSON.stringify(r)}`);
+  const t = r?.promptTokenThreshold;
+  // The threshold level is a rate-level parameter of the committed row — a
+  // sync can move it, so the boundary is read from the row, not pinned. What
+  // stays under test is that calculateCost HONOURS whatever the row declares.
+  assert(t && Number.isFinite(t.minPromptTokens) && t.minPromptTokens > 0, `astra threshold=${JSON.stringify(t)}`);
+  const th = t.minPromptTokens;
+  const above = calculateCost({ inputTokens: th, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "openai/gpt-6-astra", snapshot.prices);
+  assert(above === null, "astra at the declared threshold must be unpriced, not base-rate billed");
+  const below = calculateCost({ inputTokens: th - 1, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, "openai/gpt-6-astra", snapshot.prices);
+  const expectedBelow = (th - 1) / 1e6 * r.input;
+  assert(Math.abs(below - expectedBelow) < 1e-9, `astra below-threshold cost=${below} (expected ${expectedBelow} = ${th - 1}/1e6 × snapshot input)`);
+});
+
+// --- FOC-165: cross-scope exact pricing (nebul-only keys) --------------------
+
+test("a nebul-only key prices through the scoped fallback; legacy flat callers still see null", () => {
+  const snapshot = pricingSnapshot();
+  // zai-org/GLM-5.2-FP8 is catalogued only under nebul, never under openrouter.
+  // Without the scoped map (the pre-FOC-165 call shape) it stays unpriced —
+  // legacy callers and legacy stored price sets must not change behaviour.
+  const legacy = resolvePrice("zai-org/GLM-5.2-FP8", snapshot.prices);
+  assert(legacy === null, `legacy flat resolve=${JSON.stringify(legacy)}`);
+  // With the scoped map (what ingest and the watcher now hand over): the exact
+  // nebul row, at the catalogued rates.
+  const scoped = resolvePrice("zai-org/GLM-5.2-FP8", snapshot.prices, null, snapshot.scoped);
+  assert(scoped && scoped.key === "zai-org/GLM-5.2-FP8", `scoped resolve=${JSON.stringify(scoped)}`);
+  const row = scoped.price;
+  // Expected side reads the committed pricing.nebul row from the file, not the
+  // snapshot: the resolver and the snapshot share one table, so comparing the
+  // resolved row against snapshot.scoped would be the same object compared to
+  // itself — green under any rate and under a resolver that picks the wrong
+  // row. The raw read keeps the resolution property and is equally sync-proof.
+  const committedNebul = JSON.parse(readFileSync(join(ROOT, "config", "models.json"), "utf8"))
+    ?.pricing?.nebul?.["zai-org/GLM-5.2-FP8"];
+  assert(committedNebul, "precondition: config/models.json must carry zai-org/GLM-5.2-FP8 under pricing.nebul");
+  assert(committedNebul.input > 0 && committedNebul.output > 0 && committedNebul.cacheRead > 0 && committedNebul.cacheWrite > 0,
+    `precondition: the committed nebul row must price all four fields > 0, row=${JSON.stringify(committedNebul)}`);
+  assert(row.input === committedNebul.input && row.output === committedNebul.output
+    && row.cacheRead === committedNebul.cacheRead && row.cacheWrite === committedNebul.cacheWrite,
+    `resolved nebul row=${JSON.stringify(row)} vs committed=${JSON.stringify(committedNebul)}`);
+});
+
+test("ingest prices FP8 at the catalogued nebul rates and raises no pricing_missing", () => {
+  const runId = "run-foc165-fp8";
+  const ev = (type, payload, observedAt, sourceOffset) => applyEvent(db, makeEvent(type, payload, {
+    runId, observedAt, sourceKind: "test", sourcePath: "C:/foc165.jsonl", sourceOffset,
+  }));
+  ev("run.started", { runId, squad: "dev", startedAt: "2026-09-15T08:00:00.000Z" }, "2026-09-15T08:00:00.000Z");
+  ev("usage.recorded", {
+    runId, usageId: "foc165-fp8", agentKey: "_lead", model: "zai-org/GLM-5.2-FP8",
+    observedAt: "2026-09-15T08:01:00.000Z",
+    inputTokens: 1_000_000, outputTokens: 200_000, cacheReadTokens: 300_000, cacheCreationTokens: 40_000,
+  }, "2026-09-15T08:01:00.000Z", 1);
+  // Expected side: the token multipliers of the fixture above (1M / 200k /
+  // 300k / 40k, all per 1M) priced at the committed nebul row's rates — read
+  // from the file, since the flat snapshot has no FP8 key by design.
+  const nebul = JSON.parse(readFileSync(join(ROOT, "config", "models.json"), "utf8"))
+    ?.pricing?.nebul?.["zai-org/GLM-5.2-FP8"];
+  assert(nebul && nebul.input > 0 && nebul.output > 0 && nebul.cacheRead > 0 && nebul.cacheWrite > 0,
+    `precondition: the committed nebul row must price all four fields > 0, row=${JSON.stringify(nebul)}`);
+  const expectedCost = 1 * nebul.input + 0.2 * nebul.output + 0.3 * nebul.cacheRead + 0.04 * nebul.cacheWrite;
+  const costRow = db.prepare("SELECT cost_usd, price_set_id FROM cost_facts WHERE run_id=? AND usage_id=?").get(runId, "foc165-fp8");
+  assert(costRow != null, "cost_facts row missing for the FP8 usage");
+  assert(Math.abs(costRow.cost_usd - expectedCost) < 0.0001, `FP8 cost=${costRow.cost_usd} (expected ${expectedCost} at the committed nebul rates)`);
+  // The pricing snapshot that resolved the price is the same one stamped on the row.
+  const run = db.prepare("SELECT price_set_id FROM runs WHERE run_id=?").get(runId);
+  assert(run.price_set_id === costRow.price_set_id, `price_set_id mismatch: run=${run.price_set_id} cost=${costRow.price_set_id}`);
+  const issue = db.prepare("SELECT 1 FROM data_quality_issues WHERE run_id=? AND issue_type='pricing_missing'").get(runId);
+  assert(issue === undefined, "pricing_missing must not fire for a nebul-catalogued key");
+});
+
+test("openrouter keys resolve exactly as before; the dated glm snapshot keeps the contained rule", () => {
+  const snapshot = pricingSnapshot();
+  for (const model of ["z-ai/glm-5.2", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"]) {
+    const hit = resolvePrice(model, snapshot.prices, null, snapshot.scoped);
+    assert(hit && hit.key === model, `${model} must resolve to itself, got ${JSON.stringify(hit)}`);
+  }
+  // z-ai/glm-5.2-20260616 is not a catalogued key. It keeps billing at glm-5.2
+  // rates through resolveInScope's CONTAINED rule: the raw last segment is
+  // substring-tested with dots intact ("z-ai/glm-5.2-20260616".includes("glm-5.2"))
+  // while short-name equality dash-normalizes. Flat resolution wins first and
+  // the nebul key never fuzzy-matches (case-sensitive; FP8 is not a substring),
+  // so the cross-scope fallback cannot change this.
+  const dated = resolvePrice("z-ai/glm-5.2-20260616", snapshot.prices, null, snapshot.scoped);
+  assert(dated && dated.key === "z-ai/glm-5.2", `dated snapshot must bill at glm-5.2, got ${JSON.stringify(dated)}`);
+});
+
+test("cross-scope collisions are deterministic: identical rows collapse, differing rows refuse, flat scope keeps precedence", () => {
+  const flat = {};
+  const scoped = {
+    zebra: { "x/model": { input: 2, output: 4 } },
+    alpha: { "x/model": { input: 2, output: 4 } },
+    openrouter: { "other/m": { input: 1, output: 1 } },
+  };
+  // Same key, same rates, two providers → collapses (alphabetically first
+  // provider is only a tie-break; the price is unambiguous).
+  const same = resolvePrice("x/model", flat, null, scoped);
+  assert(same && same.price.input === 2 && same.price.output === 4, `identical rows must collapse, got ${JSON.stringify(same)}`);
+  // Same key, different rates → refuse; the caller then surfaces
+  // pricing_missing instead of silently picking a rate.
+  scoped.beta = { "x/model": { input: 3, output: 4 } };
+  const conflict = resolvePrice("x/model", flat, null, scoped);
+  assert(conflict === null, `differing rows must refuse, got ${JSON.stringify(conflict)}`);
+  // The openrouter (flat) scope keeps precedence: when it resolves, the
+  // fallback is never consulted.
+  const orFirst = resolvePrice("x/model", { "x/model": { input: 1.19 } }, null, { nebul: { "x/model": { input: 9 } } });
+  assert(orFirst && orFirst.price.input === 1.19, `flat scope must keep precedence, got ${JSON.stringify(orFirst)}`);
 });
 
 test("model_prices migration backfills provider='openrouter' on a pre-existing DB", () => {

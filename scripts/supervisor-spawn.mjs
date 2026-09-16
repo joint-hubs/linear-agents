@@ -367,6 +367,25 @@ const extraSettings = args.settings ? readJsonOr(args.settings, {}) : {};
 const childSettings = childSettingsPath(runId, childId);
 atomicWriteJSON(childSettings, buildChildSettings(squadSettings, extraSettings));
 
+// ── the model the child will actually run on ─────────────────────────────────
+// Without --model the child does not run on "no model": claude inherits
+// ANTHROPIC_MODEL from this process, and bin/supervisor.bat sets that to the
+// SUPERVISOR's own model. Run a93f (2026-09-12) put dev-1, dev-5, test-9 and
+// test-16 on deepseek-v4.1-flash that way while the registry said `model: null`
+// and the squads are routed to glm-5.3-flash. Recording the inherited id keeps
+// the registry truthful, and pins resumed turns to it — followup replays
+// entry.model, so a Supervisor restarted on a different model can no longer
+// silently switch a half-finished child.
+const inheritedModel = process.env.ANTHROPIC_MODEL || null;
+const childModel = args.model && args.model !== true ? String(args.model) : inheritedModel;
+const modelSource = args.model && args.model !== true ? "--model" : inheritedModel ? "inherited:ANTHROPIC_MODEL" : null;
+if (modelSource !== "--model") {
+  console.error(
+    `[spawn] no --model: ${childId} inherits ANTHROPIC_MODEL=${inheritedModel ?? "(unset)"} from the Supervisor's ` +
+      `environment — pass --model to choose the squad's model explicitly`,
+  );
+}
+
 registry.children[childId] = {
   childId,
   squad,
@@ -382,7 +401,8 @@ registry.children[childId] = {
   // permissions than the turn it continues would be a hole in the P9 push gate.
   permissionMode: args["permission-mode"] || "bypassPermissions",
   settings: childSettings,
-  model: args.model || null,
+  model: childModel,
+  modelSource,
   worktree: worktree.worktree,
   branch: worktree.branch,
   baseRevision: worktree.baseRevision,
@@ -569,6 +589,8 @@ console.log(
       allowedPaths,
       settings: childSettings,
       deny: buildChildSettings(squadSettings, extraSettings).permissions.deny,
+      model: childModel,
+      modelSource,
       telemetryRunId,
       // FOC-286: reported alongside the facts so the Supervisor can say, at
       // spawn time, not just where the child is but that the state it was

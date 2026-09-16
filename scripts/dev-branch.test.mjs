@@ -139,6 +139,16 @@ test("--team-key overrides the identifier prefix", () => {
   eq(buildBranchName("JOI-70", "x", "FEN"), "fen-70-x");
 });
 
+test("a slug that already carries the identifier is not prefixed twice", () => {
+  // Run a93f: `--slug foc-221-test-r2` produced branch foc-221-foc-221-test-r2.
+  eq(buildBranchName("FOC-221", "foc-221-test-r2"), "foc-221-test-r2");
+  eq(buildBranchName("FOC-221", "FOC-221 test r2"), "foc-221-test-r2");
+  // Only a leading copy of THIS identifier is dropped.
+  eq(buildBranchName("FOC-221", "test-foc-221"), "foc-221-test-foc-221");
+  eq(buildBranchName("FOC-221", "foc-2210-x"), "foc-221-foc-2210-x");
+  eq(buildBranchName("FOC-221", "foc-221"), "foc-221-foc-221");
+});
+
 // --- repo targeting (the regression these tests exist for) -----------------
 
 console.log("\ndev-branch: which repo does the branch land in");

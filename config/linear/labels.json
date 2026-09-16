@@ -4,7 +4,8 @@
     "type":  { "exclusive": true, "labels": ["feature", "bug", "spike", "tech", "docs", "test", "chore"] },
     "needs": { "exclusive": true, "labels": ["answer", "approval", "decision", "access"] },
     "risk":  { "exclusive": true, "labels": ["high"] },
-    "ai":    { "exclusive": false, "labels": ["planned", "coded", "reviewed"] }
+    "ai":    { "exclusive": false, "labels": ["planned", "coded", "reviewed"] },
+    "returned-by": { "exclusive": true, "labels": ["review"] }
   },
   "flags": ["dor-ok", "dod-ok", "escalated", "over-budget", "transcript-uncertain", "blocked", "stage:testing", "returned-by:review", "returned-by:test"],
   "descriptions": {
@@ -25,7 +26,7 @@
     "over-budget": "Przekroczono budżet kosztowy → stop (kill-switch)",
     "transcript-uncertain": "Niepewna transkrypcja głosu — do potwierdzenia",
     "stage:testing": "Pod-faza In Review: deploy + testy",
-    "returned-by:review": "REVIEW odesłało do DEV (fail) — odróżnia 'returned' od pracy trzymanej w In Progress",
+    "returned-by:review": "REVIEW odesłało do DEV (fail) — odróżnia 'returned' od pracy trzymanej w In Progress; zdejmowane przy pass (publish-linear-comment --clear-returned-by-review, FOC-165)",
     "returned-by:test": "TEST odesłał do DEV (fail deploy/testów) — klucz symetryczny z review; emiter w FOC-165"
   },
   "nativeFields": {
