@@ -3,6 +3,29 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## 2026-09-16 (close-out) — FOC-102 fala zamknięta · rezydua zapisane
+
+- **Stan zamknięcia:** `origin/main` na `b9814be` (PR #33 merged). Fala zmergowana jako **5+1 PR-ów**
+  (#27 `3f2ff87` release-blocking scope + #28–#32 standing FOC-294..297 + #33 ten close-out STATE).
+  Worktree tylko główny checkout; gałęzie lokalne wyczyszczone; gałęzie zdalne czekają na Mateusza.
+  `bin/supervisor.bat` zostaje niezacommitowany (zmiana Mateusza, z założenia).
+- **Rezydua zapisane w Linear (tech, dzieci FOC-102, bez implementacji — do triage):**
+  - **FOC-351** — kruche testy, sprzężenie ze środowiskiem w obie strony: `security-scan` potrzebuje
+    `node_modules` z `npm ci` (czerwony w gołym worktree), `verdict-evidence` potrzebuje konkretnego
+    korpusu `.state`; zielono/czerwono zależy od hosta, nie od kodu.
+  - **FOC-354** — guard asertujący, że liczba plików testowych w docs == faktyczna liczba
+    `scripts/*.test.mjs` (drift 64→67 zdarzył się trzykrotnie; dziś 67).
+  - **FOC-355** — trzy martwe przypadki `supervisor-verdict` (`:637`/`:706`/`:775`) wołające
+    `--verdict fail` bez deklaracji `--failing-test`/`--no-failing-tests`, odrzucane przez gwardię FOC-220
+    (`5504d39`), maskowane skipem `HAS_DOTENV` (`:63`, oba z `c8e51e1`) — w gołym worktree 39/3, w głównym
+    checkoucie zielone (`.env` istnieje → skip nie odpala przypadków).
+- **Bramka TEST fali:** 64/64 na `d725788` (FOC-165 TEST r2) **było prawdziwe** — `c8e51e1` (FOC-284,
+  które wнесło trzy martwe przypadki + skip) **nie jest przodkiem `d725788`**; goły worktree na `d725788`
+  bez `.env` daje 28/0. Obecne 39/3 to **regres wniesiony przez FOC-284** po fakcie, nie wada bramki,
+  która błogosławiła falę. Bramka TEST stoi na solidnym gruncie; zepsuł się obecny suite, nie gate.
+
+---
+
 ## Current execution: 2026-09-16 — FOC-102 fala + Order 6 + standing FOC-294..297 MERGED na `main`
 
 - **Pięć PR-ów zmergowanych na `origin/main` (2026-09-16):** #28 `768314b` (close-out docs), #29
