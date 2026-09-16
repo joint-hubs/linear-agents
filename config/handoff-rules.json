@@ -1,22 +1,60 @@
 [
   {
     "comment": "needs:* → human (HOW-TO §6: any needs:answer/approval/decision/access = waiting on Mateusz, stop). Evaluated first so a blocked task always routes to the human regardless of state. Wildcard is separator-agnostic in the matcher — matches both the colon form (needs:answer, HOW-TO §6 doc convention) and the hyphen form (needs-decision, the actual Linear label name in this workspace).",
-    "when": { "labels": ["needs:*"] },
+    "when": {
+      "labels": [
+        "needs:*"
+      ]
+    },
     "next": "human"
   },
   {
     "comment": "Todo + dor-ok → dev (PLAN→DEV handoff).",
-    "when": { "state": "Todo", "labels": ["dor-ok"] },
+    "when": {
+      "state": "Todo",
+      "labels": [
+        "dor-ok"
+      ]
+    },
     "next": "dev"
   },
   {
     "comment": "In Review + coded → review (DEV→REVIEW handoff). Linear exposes the leaf label `coded` (linear-ops.mjs accepts `ai:coded` as an add-alias, but the API returns `coded`).",
-    "when": { "state": "In Review", "labels": ["coded"] },
+    "when": {
+      "state": "In Review",
+      "labels": [
+        "coded"
+      ]
+    },
     "next": "review"
   },
   {
     "comment": "stage:testing → test (REVIEW→TEST handoff, after approve + version).",
-    "when": { "labels": ["stage:testing"] },
+    "when": {
+      "labels": [
+        "stage:testing"
+      ]
+    },
     "next": "test"
+  },
+  {
+    "comment": "REVIEW returns work by transitioning to In Progress (node contract review.fail). The discriminator is the `returned-by:review` flag — supervisor-verdict.mjs `record` stamps it via linear-ops on every review fail in the supervised flow, together with the In Progress transition review.fail declares (until FOC-284 nobody performed that transition at all). This is the 'returned, round > 0' marker the pre-284 why said was missing: In Progress WITHOUT the flag stays work a squad already holds and matches no routable edge. A lingering flag is safe: DEV's re-hand-off stamps coded + In Review and the order-3 rule matches on state before this one is ever reached, and needs:* outranks everything at order 1. Exact label name, like stage:testing — no wildcard.",
+    "when": {
+      "state": "In Progress",
+      "labels": [
+        "returned-by:review"
+      ]
+    },
+    "next": "dev"
+  },
+  {
+    "comment": "TEST sends a failed deploy or failed synthetic back to DEV as In Progress, with a root-cause report — keyed symmetric with review-to-dev-return. The emitter is DEFERRED (F-05 → FOC-165): no code path applies returned-by:test yet, so the flag never appears and the rule stays dormant rather than wrong; the pre-284 'indistinguishable from the review return' objection dies with the per-squad flags. Enabling TEST's side is then a one-line emitter, not a topology edit.",
+    "when": {
+      "state": "In Progress",
+      "labels": [
+        "returned-by:test"
+      ]
+    },
+    "next": "dev"
   }
 ]

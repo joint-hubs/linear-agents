@@ -7,7 +7,7 @@
     "ai":    { "exclusive": false, "labels": ["planned", "coded", "reviewed"] },
     "returned-by": { "exclusive": true, "labels": ["review"] }
   },
-  "flags": ["dor-ok", "dod-ok", "escalated", "over-budget", "transcript-uncertain", "blocked", "stage:testing"],
+  "flags": ["dor-ok", "dod-ok", "escalated", "over-budget", "transcript-uncertain", "blocked", "stage:testing", "returned-by:review", "returned-by:test"],
   "descriptions": {
     "type:spike": "Research/decyzja; output ADR, bez deploy, timebox 1-2 dni",
     "type:tech": "Tech-debt/refactor/infra; technical success criteria, bez user-AC",
@@ -26,7 +26,8 @@
     "over-budget": "Przekroczono budżet kosztowy → stop (kill-switch)",
     "transcript-uncertain": "Niepewna transkrypcja głosu — do potwierdzenia",
     "stage:testing": "Pod-faza In Review: deploy + testy",
-    "returned-by:review": "Dziecko odesłane przez REVIEW — zdejmowane przy pass (publish-linear-comment --clear-returned-by-review, FOC-165)"
+    "returned-by:review": "REVIEW odesłało do DEV (fail) — odróżnia 'returned' od pracy trzymanej w In Progress; zdejmowane przy pass (publish-linear-comment --clear-returned-by-review, FOC-165)",
+    "returned-by:test": "TEST odesłał do DEV (fail deploy/testów) — klucz symetryczny z review; emiter w FOC-165"
   },
   "nativeFields": {
     "_note": "używaj pól natywnych zamiast labelek",

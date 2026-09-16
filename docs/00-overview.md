@@ -82,7 +82,7 @@ DEV  pick(Todo, priority/deadline, dep-aware, WIP=1) → recon(context packet)
    → DoD → In Review, ai:coded
         ▼
 REVIEW  first-pass + SAST/secret-scan  ∥  deep(GLM-5.2, risk-tiered)
-   → issues? Conventional Comments → In Progress  (max 2 rundy → escalated)
+   → issues? Conventional Comments → In Progress + returned-by:review  (max 2 rundy → escalated)
    → clean → approve, ai:reviewed, stage:testing
         ▼
 TEST  deploy OpenRouter build → GCP VM (health-check + rollback)

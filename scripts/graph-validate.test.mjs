@@ -214,6 +214,24 @@ test("emitHandoffRules reproduces the committed config/handoff-rules.json", () =
   );
 });
 
+test("emitPuml reproduces the committed docs/diagrams/07_squad_graph.puml", () => {
+  // Same contract as the proof above, for the diagram: the file's own header
+  // says "generated ... do not edit by hand", and it went stale once anyway —
+  // FOC-284 routable return edges still read "(declared, not routed)" after
+  // the round-1 commit, and nothing scanned diagrams, so nothing caught it.
+  // Regenerate with `node scripts/graph-validate.mjs --emit-puml > docs/diagrams/07_squad_graph.puml`.
+  // CRLF-normalised and trailing-newline-insensitive: git's autocrlf may check
+  // the file out with CRLF, and the redirect captures console.log's trailing
+  // newline that emitPuml's return value does not carry. Both are formatting,
+  // not semantics.
+  const committed = readFileSync(join(ROOT, "docs", "diagrams", "07_squad_graph.puml"), "utf8").replace(/\r\n/g, "\n").trimEnd();
+  assert.equal(
+    emitPuml(GRAPH).trimEnd(),
+    committed,
+    "the committed diagram drifted from the graph — regenerate it with --emit-puml instead of editing it by hand",
+  );
+});
+
 test("the needs:* gate is still the first rule", () => {
   // A blocked task must route to the human regardless of state. If this ever
   // stops being rule 1, blocked tasks start getting picked up by squads.
@@ -226,20 +244,47 @@ test("the needs:* gate is still the first rule", () => {
 test("non-routable edges stay out of the emitted rules", () => {
   const generated = emitHandoffRules(GRAPH);
   const declaredOnly = GRAPH.edges.filter((e) => !e.routable).map((e) => e.id);
-  if (!declaredOnly.length) fail("expected at least the return edges to be declared-not-routed");
+  if (!declaredOnly.length) fail("expected at least the escalate/gate edges to be declared-not-routed");
   if (generated.length !== GRAPH.edges.filter((e) => e.routable).length) {
     fail("emitted rule count does not match the routable edge count");
   }
 });
 
-test("the review→dev return path is declared but deliberately not routed", () => {
-  // It matches no rule today, so returns route to null in the dashboard. Enabling
-  // it needs a "returned, round > 0" discriminator, because In Progress is also
-  // the state of work DEV currently holds. Separate task, visible UI change.
+test("the review→dev return edge is routable, keyed on the return flag (FOC-284)", () => {
+  // The pre-284 objection — `In Progress` is also the state of work DEV holds —
+  // is answered by the flag supervisor-verdict.mjs stamps on a review fail.
   const edge = GRAPH.edges.find((e) => e.id === "review-to-dev-return");
   if (!edge) fail("the return edge is missing from the graph");
   if (edge.type !== "return") fail(`return edge typed as "${edge.type}"`);
-  if (edge.routable) fail("the return edge became routable — that changes live dashboard behaviour");
+  if (!edge.routable) fail("the return edge is not routable — returns route to null again");
+  if (edge.order !== 5) fail(`return edge order ${edge.order}, expected 5`);
+  assert.deepStrictEqual(
+    edge.when,
+    { state: "In Progress", labels: ["returned-by:review"] },
+    "the return rule must key on the exact flag, not a wildcard or bare state",
+  );
+});
+
+test("the test→dev return edge mirrors the review one, its emitter still deferred", () => {
+  // Routable by symmetry; dormant until FOC-165 gives TEST an emitter that
+  // stamps the flag. Nothing else may apply `returned-by:test`.
+  const edge = GRAPH.edges.find((e) => e.id === "test-to-dev-return");
+  if (!edge) fail("the return edge is missing from the graph");
+  if (!edge.routable) fail("the test return edge is not routable");
+  if (edge.order !== 6) fail(`return edge order ${edge.order}, expected 6`);
+  assert.deepStrictEqual(edge.when, { state: "In Progress", labels: ["returned-by:test"] });
+});
+
+test("the emitted rules end with the two return edges, in order", () => {
+  const rules = emitHandoffRules(GRAPH);
+  if (rules.length !== 6) fail(`expected 6 routable rules, got ${rules.length}`);
+  const [fifth, sixth] = rules.slice(4);
+  if (fifth.next !== "dev" || !fifth.when.labels?.includes("returned-by:review")) {
+    fail(`rule 5 is ${JSON.stringify(fifth.when)} → ${fifth.next}, expected the review return`);
+  }
+  if (sixth.next !== "dev" || !sixth.when.labels?.includes("returned-by:test")) {
+    fail(`rule 6 is ${JSON.stringify(sixth.when)} → ${sixth.next}, expected the test return`);
+  }
 });
 
 // ── 4. Rendering ─────────────────────────────────────────────────────────────
