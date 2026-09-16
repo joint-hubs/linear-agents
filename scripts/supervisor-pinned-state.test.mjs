@@ -130,6 +130,13 @@ test("renders the dirty list, the quirks, and the honest (none) fallbacks", () =
   if (!clean.includes("dirty: (none)")) fail("a clean tree did not render (none)");
   if (!clean.includes("LA_ROOT: C:/repo/linear-agents")) fail("laRoot lost on the clean path");
   if (!clean.includes("issue: FOC-286")) fail("issue field lost");
+  // FOC-296: both declaration fields have honest placeholders when omitted —
+  // asserted verbatim, because a placeholder that drifts is a shape a child
+  // parsing the fixed template no longer recognises.
+  if (!clean.includes("pre-authorized: (none — child settings are deny-only)")) {
+    fail("pre-authorized placeholder lost");
+  }
+  if (!clean.includes("known-quirks: (none documented)")) fail("known-quirks placeholder lost");
 });
 
 // ── verification against real worktrees ───────────────────────────────────────
@@ -288,6 +295,79 @@ test("--prompt-file: prologue prepended, caller's file untouched, check recorded
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
 });
 
+// FOC-296: the two declaration fields, end to end through the real spawn CLI.
+test("--pre-authorized/--known-quirk: rendered in the prompt, recorded, reported", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const argvFile = join(mkdtempSync(join(tmpdir(), "la-argv-")), "argv.json");
+  const out = parse(
+    runSpawn(runId, repo, [
+      "--pre-authorized", "node scripts/lint.mjs",
+      "--pre-authorized", "node scripts/check.mjs",
+      "--known-quirk", "jsdom needs NODE_OPTIONS=--experimental-vm-modules",
+    ], { MOCK_CLAUDE_ARGV_FILE: argvFile }),
+    fail,
+  );
+  if (!out.ok) fail(`spawn failed: ${out.error}`);
+
+  const expectedPre = "pre-authorized: node scripts/lint.mjs; node scripts/check.mjs";
+  const expectedQuirk = "known-quirks: jsdom needs NODE_OPTIONS=--experimental-vm-modules";
+  const argv = JSON.parse(readFileSync(argvFile, "utf8"));
+  const prompt = argv[argv.indexOf("-p") + 1];
+  if (!prompt.includes(expectedPre)) fail(`the child's kickoff lost the pre-authorized render`);
+  if (!prompt.includes(expectedQuirk)) fail(`the child's kickoff lost the known-quirks render`);
+
+  // The registry carries the declarations beside allowedPaths AND the prologue
+  // the child was told, verbatim.
+  const entry = readRegistry(runId).children[out.childId];
+  if (JSON.stringify(entry.preAuthorized) !== JSON.stringify(["node scripts/lint.mjs", "node scripts/check.mjs"])) {
+    fail(`registry preAuthorized drifted: ${JSON.stringify(entry.preAuthorized)}`);
+  }
+  if (JSON.stringify(entry.knownQuirks) !== JSON.stringify(["jsdom needs NODE_OPTIONS=--experimental-vm-modules"])) {
+    fail(`registry knownQuirks drifted: ${JSON.stringify(entry.knownQuirks)}`);
+  }
+  if (!entry.pinnedStateVerification.prologue.includes(expectedPre)) fail("recorded prologue lost the pre-authorized render");
+  if (!entry.pinnedStateVerification.prologue.includes(expectedQuirk)) fail("recorded prologue lost the known-quirks render");
+
+  // The success JSON reports the same declarations.
+  if (JSON.stringify(out.preAuthorized) !== JSON.stringify(entry.preAuthorized)) fail("success JSON preAuthorized ≠ registry");
+  if (JSON.stringify(out.knownQuirks) !== JSON.stringify(entry.knownQuirks)) fail("success JSON knownQuirks ≠ registry");
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("without the flags the prologue keeps the placeholders, byte-identical to the plain template", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const out = parse(runSpawn(runId, repo), fail);
+  if (!out.ok) fail(`spawn failed: ${out.error}`);
+  const prologue = readRegistry(runId).children[out.childId].pinnedStateVerification.prologue;
+  if (!prologue.includes("pre-authorized: (none — child settings are deny-only)")) fail("no pre-authorized placeholder without flags");
+  if (!prologue.includes("known-quirks: (none documented)")) fail("no known-quirks placeholder without flags");
+
+  // Byte-identical: rebuilt from the reported facts ALONE, no flag data — any
+  // drift between the template and what spawn renders would fail this.
+  const v = { ...out.pinnedStateVerification };
+  delete v.prologue;
+  const rebuilt = pinnedStatePrologue({
+    repo: out.repo,
+    laRoot: process.env.LA_ROOT || null,
+    worktree: out.worktree,
+    branch: out.branch,
+    baseRevision: out.baseRevision,
+    cleanAtSpawn: v.cleanAtSpawn,
+    dirtyPaths: v.dirtyPaths,
+    task: "FOC-123",
+    runId,
+    childId: out.childId,
+    laRunId: out.telemetryRunId,
+    verification: v,
+  });
+  if (rebuilt !== prologue) fail("the no-flag prologue is not the plain template render");
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
 // ── refusals: nothing is written, nothing is launched ─────────────────────────
 console.log("\nrefusals — no partial spawn");
 
@@ -330,6 +410,50 @@ test("a worktree whose state cannot be read refuses the spawn (corrupt index)", 
   if (!out.error.includes("tree-state-unreadable")) fail(`refusal does not name the reason: ${out.error}`);
   if (Object.keys(readRegistry(runB).children).length) fail("a child was registered despite the refusal");
   if (existsSync(childSettingsPath(runB, "dev-1"))) fail("a settings file was generated despite the refusal");
+});
+
+// FOC-296: a declaration field that would render "true" or a second line into
+// the fixed template refuses instead — before anything is written or launched.
+test("--pre-authorized without a value refuses and writes nothing", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runScript(SPAWN, [
+    "--run", runId, "--squad", "dev", "--task", "FOC-123",
+    "--prompt", "kickoff", "--repo", repo, "--pre-authorized",
+  ]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r, fail);
+  if (out.ok !== false) fail("the refusal reported ok");
+  if (!out.error.includes("--pre-authorized")) fail(`refusal does not name the flag: ${out.error}`);
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered despite the refusal");
+  if (existsSync(childSettingsPath(runId, "dev-1"))) fail("a settings file was generated despite the refusal");
+});
+
+test("a --known-quirk value that looks like a flag refuses", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runScript(SPAWN, [
+    "--run", runId, "--squad", "dev", "--task", "FOC-123",
+    "--prompt", "kickoff", "--repo", repo, "--known-quirk", "--prompt",
+  ]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r, fail);
+  if (out.ok !== false) fail("the refusal reported ok");
+  if (!out.error.includes("--known-quirk")) fail(`refusal does not name the flag: ${out.error}`);
+});
+
+test("a --known-quirk value with a newline refuses (one line per field)", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runScript(SPAWN, [
+    "--run", runId, "--squad", "dev", "--task", "FOC-123",
+    "--prompt", "kickoff", "--repo", repo, "--known-quirk", "line one\nline two",
+  ]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r, fail);
+  if (out.ok !== false) fail("the refusal reported ok");
+  if (!out.error.includes("--known-quirk")) fail(`refusal does not name the flag: ${out.error}`);
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered despite the refusal");
 });
 
 summary();
