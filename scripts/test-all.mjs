@@ -28,6 +28,17 @@ if (!allFiles.length) {
 
 console.log(`Running ${allFiles.length} test file(s)${filter ? ` (filter: "${filter}")` : ''}...\n`);
 
+// Suite files are hermetic: they assume a clean environment, and supervisor-cleanup
+// in particular refuses inside a spawned child (the FOC-167 identity guard). This
+// runner usually runs inside one, so the supervisor's LA_SUPERVISOR* variables would
+// leak into every file below (FOC-295: 22 of 26 cleanup assertions failing on the
+// inherited LA_SUPERVISOR_CHILD alone, F9 in docs/research/foc-165-cost-accounting-verification.md).
+// Strip the prefix for the suite subprocesses — the guard itself is untouched.
+const suiteEnv = { ...process.env };
+for (const key of Object.keys(suiteEnv)) {
+  if (key.startsWith('LA_SUPERVISOR')) delete suiteEnv[key];
+}
+
 let failed = 0;
 let passed = 0;
 const t0 = Date.now();
@@ -35,7 +46,7 @@ const t0 = Date.now();
 for (const f of allFiles) {
   const path = join(__dirname, f);
   const t1 = Date.now();
-  const result = spawnSync(process.execPath, [path], { stdio: 'inherit' });
+  const result = spawnSync(process.execPath, [path], { stdio: 'inherit', env: suiteEnv });
   const dt = Date.now() - t1;
   if (result.status === 0) {
     passed++;
