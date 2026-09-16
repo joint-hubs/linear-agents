@@ -12,10 +12,11 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { loadEnv, graphql, resolveTeam } from "./linear-client.mjs";
 
-const __dir = dirname(fileURLToPath(import.meta.url));
+const __filename = fileURLToPath(import.meta.url);
+const __dir = dirname(__filename);
 const root = join(__dir, "..");
 
 // This script has always authenticated with LINEAR_API_KEY directly — it reads
@@ -62,16 +63,56 @@ const COLORS = {
 // Existing resources queries
 // ---------------------------------------------------------------------------
 
-async function fetchExistingLabelGroups(teamId) {
+// Linear caps every connection page at 100 nodes and does NOT auto-follow
+// cursors. The FOC team crossed 100 labels and the first page happened to
+// contain no isGroup labels, so fetchExistingLabelGroups saw zero groups and
+// bootstrap re-created existing groups — which Linear rejected as duplicate
+// names (FOC-297). Both label fetches therefore walk pageInfo cursors to
+// completion and fail loud on anything unexpected: a capped fetch that
+// under-reads is exactly the bug class this fixes, so missing pagination
+// metadata or a runaway loop must never come back as a silent partial set.
+const LABELS_MAX_PAGES = 100; // defensive cap — 100 pages × 100 labels = 10k
+
+/**
+ * Walk a `team.labels` connection (Relay-style cursor pagination) to the end.
+ * `query` must declare `$after: String` and select
+ * `labels(first: 100, after: $after) { nodes {...} pageInfo { hasNextPage endCursor } }`.
+ * The loop ends ONLY on an explicit hasNextPage === false.
+ */
+async function fetchAllLabelPages(query, vars) {
+  const nodes = [];
+  let after;
+  for (let page = 1; page <= LABELS_MAX_PAGES; page++) {
+    const data = await graphql(query, { ...vars, after }, WORKSPACE);
+    const conn = data.team?.labels;
+    const info = conn?.pageInfo;
+    // hasNextPage=true without an endCursor would spin forever on page 1
+    // (after stays undefined), so it is refused up front.
+    if (!info || typeof info.hasNextPage !== "boolean" || (info.hasNextPage && !info.endCursor)) {
+      throw new Error(
+        `Label pagination: page ${page} returned malformed pageInfo (hasNextPage: ${info?.hasNextPage}, endCursor: ${info?.endCursor}) — refusing to continue with a partial label set`,
+      );
+    }
+    nodes.push(...(conn.nodes || []));
+    if (!info.hasNextPage) return nodes;
+    after = info.endCursor;
+  }
+  throw new Error(
+    `Label pagination: exceeded ${LABELS_MAX_PAGES} pages (${nodes.length} labels fetched so far) — giving up rather than returning a truncated label set`,
+  );
+}
+
+export async function fetchExistingLabelGroups(teamId) {
   // Current schema: Team has NO `labelGroups` field. A label GROUP is just an
   // IssueLabel with isGroup:true; its children are IssueLabels whose parent is
   // the group. We fetch all labels and keep only the groups (each carrying its
-  // children) so downstream provisioning can match by name.
-  const data = await graphql(
+  // children) so downstream provisioning can match by name. Cursor pagination
+  // is mandatory — groups past page 1 are invisible to a first:100 fetch.
+  const labels = await fetchAllLabelPages(
     gql`
-      query ($teamId: String!) {
+      query ($teamId: String!, $after: String) {
         team(id: $teamId) {
-          labels(first: 100) {
+          labels(first: 100, after: $after) {
             nodes {
               id
               name
@@ -86,25 +127,27 @@ async function fetchExistingLabelGroups(teamId) {
                 }
               }
             }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
           }
         }
       }
     `,
     { teamId },
-    WORKSPACE,
   );
-  const labels = data.team?.labels?.nodes || [];
   return labels.filter((l) => l.isGroup === true);
 }
 
-async function fetchExistingLabels(teamId) {
+export async function fetchExistingLabels(teamId) {
   // Current schema: label→group link is via `parent` (an IssueLabel with
   // isGroup:true), not `labelGroup`. Standalone flags have a null parent.
-  const data = await graphql(
+  const labels = await fetchAllLabelPages(
     gql`
-      query ($teamId: String!) {
+      query ($teamId: String!, $after: String) {
         team(id: $teamId) {
-          labels(first: 100) {
+          labels(first: 100, after: $after) {
             nodes {
               id
               name
@@ -113,14 +156,17 @@ async function fetchExistingLabels(teamId) {
                 id
               }
             }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
           }
         }
       }
     `,
     { teamId },
-    WORKSPACE,
   );
-  return data.team?.labels?.nodes || [];
+  return labels;
 }
 
 async function fetchExistingStates(teamId) {
@@ -269,7 +315,7 @@ async function createIssueTemplate(teamId, name, description, templateData, sort
  * Provision label groups and their child labels.
  * Returns { created: number, skipped: number }
  */
-async function provisionLabelGroups(teamId, groups, descriptions, existingGroups, existingLabels, dryRun) {
+export async function provisionLabelGroups(teamId, groups, descriptions, existingGroups, existingLabels, dryRun) {
   let created = 0;
   let skipped = 0;
 
@@ -314,25 +360,47 @@ async function provisionLabelGroups(teamId, groups, descriptions, existingGroups
         }
         created += 1 + groupCfg.labels.length;
       } else {
-        // Create the group first (an IssueLabel with isGroup:true)
-        const groupResult = await createLabelGroup(teamId, groupName, groupColor);
-        if (!groupResult?.issueLabelCreate?.success) {
-          console.error(`  ❌ failed to create label group "${groupName}"`);
-          continue;
+        // Create the group first (an IssueLabel with isGroup:true). Linear
+        // rejects a duplicate name, so before surfacing a failed create we
+        // re-fetch and match by name: the group may already exist (created
+        // by a run that pre-dates cursor pagination — FOC-297 — or by a
+        // concurrent one). Only a group still missing after the re-fetch is
+        // a real failure.
+        let group;
+        try {
+          const groupResult = await createLabelGroup(teamId, groupName, groupColor);
+          if (!groupResult?.issueLabelCreate?.success) {
+            console.error(`  ❌ failed to create label group "${groupName}"`);
+            continue;
+          }
+          group = groupResult.issueLabelCreate.issueLabel;
+          console.log(`  ✅ created label group "${groupName}"`);
+          created++; // for the group itself
+        } catch (err) {
+          const healed = (await fetchExistingLabelGroups(teamId)).find((g) => g.name === groupName);
+          if (!healed) throw err;
+          group = healed;
+          skipped++;
+          console.log(`  ⏭️  label group "${groupName}" exists (matched by name after create was rejected)`);
         }
-        const newGroupId = groupResult.issueLabelCreate.issueLabel.id;
-        console.log(`  ✅ created label group "${groupName}"`);
 
-        // Then create each label in the group
+        // Then create each missing label in the group. A fresh create carries
+        // no children, so the filter only ever bites on the healed path (an
+        // earlier run already created some of the children).
+        const existingChildren = group.children?.nodes || [];
         for (const labelName of groupCfg.labels) {
+          if (existingChildren.find((l) => l.name === labelName)) {
+            console.log(`  ⏭️  label "${groupName}:${labelName}" exists`);
+            skipped++;
+            continue;
+          }
           const descKey = `${groupName}:${labelName}`;
           const desc = descriptions[descKey] || "";
           const color = COLORS[groupName]?.[labelName] || groupColor;
-          await createLabel(teamId, labelName, desc, color, newGroupId);
+          await createLabel(teamId, labelName, desc, color, group.id);
           console.log(`  ✅ created label "${groupName}:${labelName}"`);
           created++;
         }
-        created++; // for the group itself
       }
     }
   }
@@ -748,7 +816,12 @@ async function main() {
   console.log(`📌 Provisioning marker written to ${markerPath}`);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// Guard: only run main() when called directly (not when imported as a module —
+// bootstrap-linear.test.mjs imports the fetch/provision functions). Mirrors
+// linear-client.mjs.
+if (process.argv[1] && resolve(process.argv[1]) === __filename) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
