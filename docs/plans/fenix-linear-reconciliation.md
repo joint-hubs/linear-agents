@@ -62,3 +62,45 @@ Linear normalizes Markdown list spacing, bullet markers, trailing whitespace and
 ## Next gate
 
 FOC-217 is the first operational task. The direct prompt/config bootstrap is not independent REVIEW/TEST. Commit only verified scoped batches, then propose triage through the Supervisor protocol. Plan approval is not an answer to a future triage or child gate.
+
+## Completion record (Order 6, 2026-09-16)
+
+Roadmap L3 ("pending unless explicitly recorded below") and L53 ("close-out applies the ledger
+update") require an explicit completion record. This section is that record. No issue was marked
+Done by the reconciliation migration itself; these completion records are grounded in merged PRs.
+
+### F0–F2 — stabilization wave (release-blocking, DONE)
+
+| Key | Linear | State | PR | Merge SHA | Merged | Evidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| F0 | FOC-217 | Done | #23 | `2b3ea3d` | 2026-09-07 | preserved baseline + GLM squad delivery |
+| F1 | FOC-218 | Done | #24 | `313589a` | 2026-09-07 | explicit PASS/FAIL/UNKNOWN parsing |
+| F2 | FOC-219 | Done | #25 | `967fc1a` | 2026-09-11 | unified verdict evidence with round lineage |
+
+Re-verify: `gh pr view 23 --json mergeCommit,mergedAt` (and 24, 25).
+
+### F3 / F4 + blocking contracts — release-blocking scope on `main`
+
+| Key | Linear | State | Landed via | Note |
+| --- | --- | --- | --- | --- |
+| F3 | FOC-220 | Done | PR #27 `3f2ff87` | 5 tool-identity columns to `CANONICAL_TOOL_SQL` |
+| F4 | FOC-221 | Done | PR #27 `3f2ff87` | thin task-coverage module; `TASK_ID_RE` single-sourced |
+| — | FOC-272 | Done | PR #27 `3f2ff87` | topology review (`docs/reviews/foc-272-topology-review.md`) |
+| — | FOC-114 | Done | PR #27 `3f2ff87` | CodeGraph navigation benchmark + freshness guard |
+| — | FOC-165 | Done | PR #27 `3f2ff87` | release-candidate run; report `docs/research/foc-165-cost-accounting-verification.md` |
+| — | FOC-284/285/286/287/288/289 | Done | PR #26 + PR #27 | FOC-272 fix-or-defer dispositions |
+
+PR #27 (`chore/foc-102-baseline` → `main`) merge commit `3f2ff87`, merged 2026-09-16T07:53:11Z. It
+absorbed PR #26 (FOC-284) during rebase. Re-verify: `gh pr view 27 --json mergeCommit,mergedAt`.
+
+### Non-blocking children (stay in the epic, annotated post-1.0 — NOT completed)
+
+FOC-164, FOC-117, FOC-255, FOC-256, FOC-257 remain Backlog (scope file §7). Standing follow-ups
+FOC-294/295/296/297 remain Backlog (start on Mateusz's word, after the wave landed). FOC-351
+(fragile tests) filed non-blocking. The epic FOC-102 stays In Progress to carry these; Order 6 does
+not close the epic, only the release-blocking scope.
+
+### R1–R7 evidence pack
+
+`docs/plans/fenix-1.0-release-evidence.md` — assembled 2026-09-16, one grounded line per acceptance
+criterion.
