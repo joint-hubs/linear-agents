@@ -1,9 +1,9 @@
-// scripts/supervisor-pinned-state.test.mjs — FOC-286: the nine-field kickoff
+// scripts/supervisor-pinned-state.test.mjs — FOC-286: the ten-field kickoff
 // prologue, and the spawn-time verification that backs it.
 //
 // Two halves, both measured here:
 //   · the prologue — a fixed machine-templated shape, so the tests assert the
-//     nine labels, their order, and that every value comes from spawn's own
+//     ten labels, their order, and that every value comes from spawn's own
 //     data;
 //   · the verification — it runs BEFORE anything is written or launched, so
 //     every refusal is asserted to leave NO registry entry and NO generated
@@ -18,7 +18,7 @@
 //
 // Run: node scripts/supervisor-pinned-state.test.mjs
 
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,7 +45,7 @@ import {
 const { test, fail, summary } = harness();
 
 // ── the prologue template ────────────────────────────────────────────────────
-console.log("\nprologue — nine fields from spawn's own data");
+console.log("\nprologue — ten fields from spawn's own data");
 
 const STATE = {
   repo: "C:/repo/linear-agents",
@@ -72,12 +72,12 @@ const STATE = {
   },
 };
 
-test("renders the nine labeled fields in a fixed order, values from the input", () => {
+test("renders the ten labeled fields in a fixed order, values from the input", () => {
   const text = pinnedStatePrologue(STATE);
   const lines = text.split("\n");
   if (lines[0] !== "=== PINNED STATE ===") fail(`no header line: ${lines[0]}`);
   if (lines[lines.length - 1] !== "=== END PINNED STATE ===") fail("no end marker");
-  // The nine labels, in the order a child reads them — fixed on purpose: this
+  // The ten labels, in the order a child reads them — fixed on purpose: this
   // is a template, not prose, and a shape that moves is a shape nobody parses.
   const expected = [
     "repo:",
@@ -89,6 +89,7 @@ test("renders the nine labeled fields in a fixed order, values from the input", 
     "spawn-verified:",
     "pre-authorized:",
     "known-quirks:",
+    "referenced-files:",
   ];
   const labels = lines.slice(1, -1).map((l) => l.slice(0, l.indexOf(":") + 1));
   if (JSON.stringify(labels) !== JSON.stringify(expected)) fail(`labels drifted: ${JSON.stringify(labels)}`);
@@ -115,6 +116,7 @@ test("renders the dirty list, the quirks, and the honest (none) fallbacks", () =
     laRunId: null,
     preAuthorized: ["node scripts/test-all.mjs supervisor"],
     knownQuirks: ["la-wt worktrees hold locks briefly after a kill"],
+    referencedFiles: ["scripts/lint.mjs", "docs/agents/agent-2-dev.md"],
   });
   for (const needle of [
     "clean-at-spawn: false",
@@ -123,6 +125,7 @@ test("renders the dirty list, the quirks, and the honest (none) fallbacks", () =
     "LA_RUN_ID: (none",
     "node scripts/test-all.mjs supervisor",
     "la-wt worktrees hold locks briefly after a kill",
+    "referenced-files: scripts/lint.mjs; docs/agents/agent-2-dev.md",
   ]) {
     if (!dirty.includes(needle)) fail(`dirty prologue missing "${needle}"`);
   }
@@ -130,13 +133,14 @@ test("renders the dirty list, the quirks, and the honest (none) fallbacks", () =
   if (!clean.includes("dirty: (none)")) fail("a clean tree did not render (none)");
   if (!clean.includes("LA_ROOT: C:/repo/linear-agents")) fail("laRoot lost on the clean path");
   if (!clean.includes("issue: FOC-286")) fail("issue field lost");
-  // FOC-296: both declaration fields have honest placeholders when omitted —
-  // asserted verbatim, because a placeholder that drifts is a shape a child
-  // parsing the fixed template no longer recognises.
+  // FOC-296/FOC-357: all three declaration fields have honest placeholders when
+  // omitted — asserted verbatim, because a placeholder that drifts is a shape a
+  // child parsing the fixed template no longer recognises.
   if (!clean.includes("pre-authorized: (none — child settings are deny-only)")) {
     fail("pre-authorized placeholder lost");
   }
   if (!clean.includes("known-quirks: (none documented)")) fail("known-quirks placeholder lost");
+  if (!clean.includes("referenced-files: (none declared)")) fail("referenced-files placeholder lost");
 });
 
 // ── verification against real worktrees ───────────────────────────────────────
@@ -221,7 +225,7 @@ test("the child's kickoff starts with the prologue, body intact, record matching
   if (!prompt.startsWith("=== PINNED STATE ===")) fail("the kickoff does not start with the pinned-state block");
   for (const label of [
     "repo:", "worktree:", "branch:", "clean-at-spawn:", "issue:", "run:",
-    "spawn-verified:", "pre-authorized:", "known-quirks:",
+    "spawn-verified:", "pre-authorized:", "known-quirks:", "referenced-files:",
   ]) {
     if (!prompt.includes(label)) fail(`the child's kickoff lacks "${label}"`);
   }
@@ -365,6 +369,59 @@ test("without the flags the prologue keeps the placeholders, byte-identical to t
   });
   if (rebuilt !== prologue) fail("the no-flag prologue is not the plain template render");
 
+  // FOC-357: with no declaration the check does not fire at all — asserted
+  // here, not via the rebuild above, which is built from the same `checks` and
+  // would render a spurious check in both prologues alike.
+  if (out.pinnedStateVerification.checks.some((c) => c.name === "referenced-files")) {
+    fail("a referenced-files check fired despite no --referenced-file declaration");
+  }
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+// FOC-357: the referenced-files declaration, end to end through the real spawn
+// CLI. README.md ships in every fixture repo's first commit; a second file is
+// committed here so the repeatable flag is seen accumulating, not assumed.
+test("--referenced-file: existing files pass, render into the prologue, and ride the record", () => {
+  const { repo } = fixtureRepo();
+  writeFileSync(join(repo, "docs-note.md"), "referenced\n", "utf8");
+  execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "second"], { cwd: repo, stdio: "ignore" });
+  const runId = fixtureRun();
+  const argvFile = join(mkdtempSync(join(tmpdir(), "la-argv-")), "argv.json");
+  const out = parse(
+    runSpawn(runId, repo, [
+      "--referenced-file", "README.md",
+      "--referenced-file", "docs-note.md",
+    ], { MOCK_CLAUDE_ARGV_FILE: argvFile }),
+    fail,
+  );
+  if (!out.ok) fail(`spawn failed: ${out.error}`);
+
+  const expectedRender = "referenced-files: README.md; docs-note.md";
+  const argv = JSON.parse(readFileSync(argvFile, "utf8"));
+  const prompt = argv[argv.indexOf("-p") + 1];
+  if (!prompt.includes(expectedRender)) fail(`the child's kickoff lost the referenced-files render`);
+
+  // The registry carries the declaration beside the other handoff declarations
+  // AND the prologue the child was told, verbatim.
+  const entry = readRegistry(runId).children[out.childId];
+  if (JSON.stringify(entry.referencedFiles) !== JSON.stringify(["README.md", "docs-note.md"])) {
+    fail(`registry referencedFiles drifted: ${JSON.stringify(entry.referencedFiles)}`);
+  }
+  if (!entry.pinnedStateVerification.prologue.includes(expectedRender)) {
+    fail("recorded prologue lost the referenced-files render");
+  }
+  // The check rides pinnedVerification.checks like the git facts do.
+  if (!entry.pinnedStateVerification.checks.some((c) => c.name === "referenced-files" && c.ok)) {
+    fail("the referenced-files check was not recorded as ok");
+  }
+
+  // The success JSON reports the same declaration.
+  if (JSON.stringify(out.referencedFiles) !== JSON.stringify(entry.referencedFiles)) {
+    fail("success JSON referencedFiles ≠ registry");
+  }
+
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
 });
 
@@ -383,6 +440,49 @@ test("an unreadable --prompt-file refuses with a named reason and spawns nothing
   if (out.ok !== false) fail("the refusal reported ok");
   if (!out.error.includes("prompt-file-unreadable")) fail(`refusal does not name the reason: ${out.error}`);
   // No partial spawn: no child, no generated settings.
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered despite the refusal");
+  if (existsSync(childSettingsPath(runId, "dev-1"))) fail("a settings file was generated despite the refusal");
+});
+
+// FOC-357: a declared file missing from the worktree refuses like an unreadable
+// --prompt-file — before the registry entry, the settings file, the watcher.
+test("a --referenced-file missing from the worktree refuses with a named reason and spawns nothing", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runScript(SPAWN, [
+    "--run", runId, "--squad", "dev", "--task", "FOC-123",
+    "--prompt", "kickoff", "--repo", repo, "--referenced-file", "docs/no-such-file.md",
+  ]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r, fail);
+  if (out.ok !== false) fail("the refusal reported ok");
+  if (!out.error.includes("referenced-file-missing")) fail(`refusal does not name the reason: ${out.error}`);
+  // No partial spawn: no child, no generated settings.
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered despite the refusal");
+  if (existsSync(childSettingsPath(runId, "dev-1"))) fail("a settings file was generated despite the refusal");
+  // The failing check rides the reported verification, like the git-fact refusals.
+  const refCheck = out.pinnedStateVerification?.checks?.find((c) => c.name === "referenced-files");
+  if (!refCheck || refCheck.ok !== false || refCheck.reason !== "referenced-file-missing") {
+    fail(`refusal payload lost the failing check: ${JSON.stringify(refCheck)}`);
+  }
+  if (JSON.stringify(refCheck.missing) !== JSON.stringify(["docs/no-such-file.md"])) {
+    fail(`the missing list drifted: ${JSON.stringify(refCheck.missing)}`);
+  }
+});
+
+// FOC-357: a missing flag value parses as boolean `true` and would be verified
+// as the literal path "true" — refuse up front, before anything is written.
+test("--referenced-file without a value refuses and writes nothing", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runScript(SPAWN, [
+    "--run", runId, "--squad", "dev", "--task", "FOC-123",
+    "--prompt", "kickoff", "--repo", repo, "--referenced-file",
+  ]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r, fail);
+  if (out.ok !== false) fail("the refusal reported ok");
+  if (!out.error.includes("--referenced-file")) fail(`refusal does not name the flag: ${out.error}`);
   if (Object.keys(readRegistry(runId).children).length) fail("a child was registered despite the refusal");
   if (existsSync(childSettingsPath(runId, "dev-1"))) fail("a settings file was generated despite the refusal");
 });
