@@ -4,6 +4,7 @@
 //       --prompt "<kickoff>" [--run <supervisorRunId>] [--child <id>]
 //       [--permission-mode <mode>] [--model <id>] [--settings <extra-deny.json>]
 //       [--repo <path>] [--slug <text>] [--allowed-path <p> ...]
+//       [--pre-authorized <cmd> ...] [--known-quirk <text> ...]
 //   node scripts/supervisor-spawn.mjs --release [--run <supervisorRunId>]
 //
 // Returns as soon as the child's session_id is known; the child keeps running
@@ -12,6 +13,12 @@
 // Every child is launched with a GENERATED child-settings.json carrying the P9
 // deny list (§1.7). `--settings` here does not replace it — the file it names is
 // folded in as one more deny source, so the flag can only tighten.
+//
+// `--pre-authorized` and `--known-quirk` (each repeatable, FOC-296) fill the
+// pinned-state prologue's two declaration fields: the verify commands
+// pre-allowed for this child and the runbook quirks the Supervisor declares at
+// handoff. They render as prologue text and ride the registry record — they
+// never touch the generated settings file, which stays deny-only.
 //
 // Fail-closed by design — it refuses rather than guesses when:
 //   · triage.json is missing (a verdict must be recorded before any spawn)
@@ -138,6 +145,23 @@ if (!/^[A-Za-z]+-\d+$/.test(String(taskId))) {
 }
 if (!runId) failJson("--run <supervisorRunId> is required (or set LA_SUPERVISOR_RUN)");
 if (!args.prompt && !args["prompt-file"]) failJson("--prompt or --prompt-file is required");
+
+// FOC-296: the two prologue declaration fields are TEXT, rendered one field per
+// line. A missing value parses as boolean `true`, and a value starting with
+// `--` is swallowed as the next flag — either would render the string "true"
+// into the prologue as if it were a command. A newline would break the
+// one-line-per-field invariant the fixed nine-field shape depends on. All three
+// refuse here, before anything is written or launched.
+for (const flag of ["pre-authorized", "known-quirk"]) {
+  for (const value of asArray(args[flag])) {
+    if (value === true) {
+      failJson(`--${flag} needs a value — a missing value, or one starting with "--", is not a command to pin`);
+    }
+    if (/[\r\n]/.test(String(value))) {
+      failJson(`--${flag} value must be a single line — split it into repeated --${flag} flags`);
+    }
+  }
+}
 
 // ── fail-closed: the verdict comes before the spawn ──────────────────────────
 // AC-2. Spawning without a recorded triage verdict is how a Supervisor ends up
@@ -352,6 +376,13 @@ const childId = args.child || `${squad}-${Object.keys(registry.children).length 
 // means "undeclared", not "denied".
 const allowedPaths = asArray(args["allowed-path"]);
 
+// FOC-296: the prologue's two declaration fields, validated above. Recorded
+// beside allowedPaths — the same kind of per-child handoff declaration,
+// auditable in the record without re-parsing the prologue text. An empty array
+// means "not declared", exactly as it does for allowedPaths.
+const preAuthorized = asArray(args["pre-authorized"]);
+const knownQuirks = asArray(args["known-quirk"]);
+
 // ── P9: the child's deny list, generated per child ───────────────────────────
 // The push gate has to hold without the child cooperating, so it is written
 // into a settings file rather than into the kickoff prompt. `--settings` loads
@@ -407,6 +438,11 @@ registry.children[childId] = {
   branch: worktree.branch,
   baseRevision: worktree.baseRevision,
   allowedPaths,
+  // FOC-296: what the Supervisor declared for THIS child at handoff — the
+  // pre-allowed verify commands and known runbook quirks rendered into the
+  // prologue below. Always present; empty means not declared.
+  preAuthorized,
+  knownQuirks,
   // FOC-286: what spawn verified before this entry existed. The prologue text
   // the child actually received is patched in below, once telemetry has given
   // the prologue its LA_RUN_ID value — still before the watcher launches, so
@@ -466,6 +502,8 @@ const promptFile = join(promptDir, "prompt.txt");
 // content was read and verified above — and the combined text goes into the
 // spawn-owned temp file. The caller's file is never rewritten, and the watcher
 // always receives THAT path, absolute by construction.
+// The two declaration fields come from --pre-authorized/--known-quirk
+// (FOC-296); absent flags render the honest "(none)" placeholders.
 const prologue = pinnedStatePrologue({
   repo: gitRoot,
   laRoot: process.env.LA_ROOT || null,
@@ -479,6 +517,8 @@ const prologue = pinnedStatePrologue({
   childId,
   laRunId: telemetryRunId,
   verification: pinnedVerification,
+  preAuthorized,
+  knownQuirks,
 });
 writeFileSync(promptFile, `${prologue}\n\n${kickoff}`, "utf8");
 // The registry entry recorded what was verified; now it can also say WHAT THE
@@ -587,6 +627,10 @@ console.log(
       baseRevision: worktree.baseRevision,
       worktreeCreated: worktree.created,
       allowedPaths,
+      // FOC-296: reported beside allowedPaths so the Supervisor can say what it
+      // declared for this child without re-reading the prologue text.
+      preAuthorized,
+      knownQuirks,
       settings: childSettings,
       deny: buildChildSettings(squadSettings, extraSettings).permissions.deny,
       model: childModel,

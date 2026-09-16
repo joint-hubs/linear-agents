@@ -1079,6 +1079,12 @@ export function verifyPinnedState({ worktree, branch, baseRevision, created }) {
  * grow one (FOC-286 constraint), so the field carries the identifier and
  * points at the verbatim issue + ACs in the kickoff body the author supplied —
  * that content is already in the prompt below the prologue.
+ *
+ * `preAuthorized` and `knownQuirks` are the two declaration fields the
+ * Supervisor fills per child at handoff (FOC-296): spawn passes them straight
+ * from its repeatable `--pre-authorized`/`--known-quirk` flags. Empty renders
+ * the honest "(none)" placeholders — an undeclared field says so, it does not
+ * pretend to be filled.
  */
 export function pinnedStatePrologue({
   repo,
@@ -1278,7 +1284,7 @@ export function claudeCommand(args) {
 // wrapper that appends an override (`--task A ... --task B`) gets B rather than
 // the array ["A","B"] — which silently became the string "A,B" downstream and
 // failed identifier validation with a nonsense message.
-const REPEATABLE = new Set(["allowed-path"]);
+const REPEATABLE = new Set(["allowed-path", "pre-authorized", "known-quirk"]);
 
 export function parseArgs(argv, repeatable = REPEATABLE) {
   const out = { _: [] };
