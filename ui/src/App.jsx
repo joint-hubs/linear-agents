@@ -10,6 +10,7 @@ import Tasks from './screens/Tasks.jsx';
 import Flow from './screens/Flow.jsx';
 import SquadConfig from './screens/SquadConfig.jsx';
 import Prompts from './screens/Prompts.jsx';
+import Ft from './screens/Ft.jsx';
 
 // Minimal 17px stroke icons (no icon-lib dependency).
 const I = {
@@ -70,6 +71,12 @@ const I = {
       <path d="M8 9h8M8 13h5" />
     </svg>
   ),
+  ft: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 3v18h18" />
+      <path d="M7 14l3-4 4 3 5-7" />
+    </svg>
+  ),
 };
 
 function NavItem({ to, end, icon, children }) {
@@ -107,6 +114,7 @@ export default function App() {
             <NavItem to="/flow" icon={I.flow}>Flow</NavItem>
             <NavItem to="/squad-config" icon={I.config}>Konfiguracja</NavItem>
             <NavItem to="/prompts" icon={I.prompts}>Prompty</NavItem>
+            <NavItem to="/ft" icon={I.ft}>Fine-tune</NavItem>
           </nav>
           <div className="sidebar-foot">
             <span className="dot dot-ok" style={{ width: 7, height: 7 }} />
@@ -126,6 +134,7 @@ export default function App() {
               <Route path="/flow" element={<Flow />} />
               <Route path="/squad-config" element={<SquadConfig />} />
               <Route path="/prompts" element={<Prompts />} />
+              <Route path="/ft" element={<Ft />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>

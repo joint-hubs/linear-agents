@@ -65,6 +65,10 @@ import { buildRewardsPayload } from './reward-ingest.mjs';
 // open). Mirrors validateLaunch's { status, error } convention.
 import { validateRating } from './manager-ratings.mjs';
 
+// FT control plane (FOC-359): datasets, training-run lifecycle, log tail.
+// Pure logic in scripts/ft.mjs; the server only does HTTP guards + dispatch.
+import { listDatasets, listRuns, getRun, launchTrain, stopRun } from './ft.mjs';
+
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
 
@@ -1364,6 +1368,34 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // === FT control plane (FOC-359) ===
+    // POST /api/ft/train — launch a detached training run. Body: hyperparams
+    // (baseModel, epochs, lr, batchSize, gradAccum, seqLen, loraR, loraAlpha).
+    // Mirrors /api/launch's guard sequence: loopback + origin + body + validate.
+    if (method === 'POST' && path === '/api/ft/train') {
+      if (!isLocalOrigin(req.socket.remoteAddress)) { json(res, 403, { error: 'forbidden: 127.0.0.1 only' }); log(method, path, 403); return; }
+      if (!isAllowedOrigin(req.headers.origin))    { json(res, 403, { error: 'forbidden origin' }); log(method, path, 403); return; }
+      let body;
+      try { body = await readJsonBody(req, 64 * 1024); } catch (err) { log(method, path, respondBodyError(res, err)); return; }
+      const r = await launchTrain(body);
+      if (!r.ok) { json(res, r.status, { error: r.error }); log(method, path, r.status); return; }
+      json(res, 200, { ok: true, id: r.id, pid: r.pid });
+      log(method, path, 200);
+      return;
+    }
+
+    // POST /api/ft/runs/:id/stop — terminate a running training.
+    if (method === 'POST' && path.startsWith('/api/ft/runs/') && path.endsWith('/stop')) {
+      if (!isLocalOrigin(req.socket.remoteAddress)) { json(res, 403, { error: 'forbidden: 127.0.0.1 only' }); log(method, path, 403); return; }
+      if (!isAllowedOrigin(req.headers.origin))    { json(res, 403, { error: 'forbidden origin' }); log(method, path, 403); return; }
+      const id = path.slice('/api/ft/runs/'.length, -'/stop'.length);
+      const r = await stopRun(id);
+      if (!r.ok) { json(res, r.status, { error: r.error }); log(method, path, r.status); return; }
+      json(res, 200, { ok: true, pid: r.pid });
+      log(method, path, 200);
+      return;
+    }
+
     // --- Only GET is supported beyond this point (other POST/PUT/DELETE → 404) ---
     if (method !== 'GET') {
       json(res, 404, { error: 'not found' });
@@ -1379,6 +1411,28 @@ const server = createServer(async (req, res) => {
     }
 
     // --- Route matching ---
+
+    // GET /api/ft/datasets — list dataset JSONL files with pair counts + sample.
+    if (path === '/api/ft/datasets') {
+      json(res, 200, await listDatasets());
+      log(method, path, 200);
+      return;
+    }
+    // GET /api/ft/runs — list training runs (id, status, alive, lastLoss).
+    if (path === '/api/ft/runs') {
+      json(res, 200, await listRuns());
+      log(method, path, 200);
+      return;
+    }
+    // GET /api/ft/runs/:id — run detail (config, full metrics, log tail, adapter).
+    const ftRunMatch = path.match(/^\/api\/ft\/runs\/([^/]+)$/);
+    if (ftRunMatch) {
+      const r = await getRun(ftRunMatch[1]);
+      if (r.error) { json(res, 404, { error: r.error }); log(method, path, 404); return; }
+      json(res, 200, r);
+      log(method, path, 200);
+      return;
+    }
 
     // GET /api/telemetry/health — central-store status plus unresolved quality
     // signals. This endpoint never scans manifests/transcripts.

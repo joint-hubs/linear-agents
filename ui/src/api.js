@@ -256,3 +256,26 @@ export async function postKickoff(payload) {
   }
   return data;
 }
+
+// ===== FT control plane (FOC-359) =====
+export async function getFtDatasets() { return apiFetch('/api/ft/datasets'); }
+export async function getFtRuns() { return apiFetch('/api/ft/runs'); }
+export async function getFtRun(id) { return apiFetch('/api/ft/runs/' + encodeURIComponent(id)); }
+
+export async function postFtTrain(payload) {
+  const r = await fetch(API_BASE + '/api/ft/train', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { const err = new Error(data?.error || ('API ' + r.status)); err.data = data; throw err; }
+  return data;
+}
+
+export async function postFtStop(id) {
+  const r = await fetch(API_BASE + '/api/ft/runs/' + encodeURIComponent(id) + '/stop', { method: 'POST' });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { const err = new Error(data?.error || ('API ' + r.status)); err.data = data; throw err; }
+  return data;
+}
