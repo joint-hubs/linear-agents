@@ -5,6 +5,7 @@
 //       [--permission-mode <mode>] [--model <id>] [--settings <extra-deny.json>]
 //       [--repo <path>] [--slug <text>] [--allowed-path <p> ...]
 //       [--pre-authorized <cmd> ...] [--known-quirk <text> ...]
+//       [--referenced-file <path> ...]
 //   node scripts/supervisor-spawn.mjs --release [--run <supervisorRunId>]
 //
 // Returns as soon as the child's session_id is known; the child keeps running
@@ -14,10 +15,12 @@
 // deny list (§1.7). `--settings` here does not replace it — the file it names is
 // folded in as one more deny source, so the flag can only tighten.
 //
-// `--pre-authorized` and `--known-quirk` (each repeatable, FOC-296) fill the
-// pinned-state prologue's two declaration fields: the verify commands
+// `--pre-authorized` and `--known-quirk` (each repeatable, FOC-296) fill two of
+// the pinned-state prologue's declaration fields: the verify commands
 // pre-allowed for this child and the runbook quirks the Supervisor declares at
-// handoff. They render as prologue text and ride the registry record — they
+// handoff. `--referenced-file` (repeatable, FOC-357) fills the third: the files
+// the kickoff names, which spawn VERIFIES against the worktree before
+// launching. They render as prologue text and ride the registry record — they
 // never touch the generated settings file, which stays deny-only.
 //
 // Fail-closed by design — it refuses rather than guesses when:
@@ -150,7 +153,7 @@ if (!args.prompt && !args["prompt-file"]) failJson("--prompt or --prompt-file is
 // line. A missing value parses as boolean `true`, and a value starting with
 // `--` is swallowed as the next flag — either would render the string "true"
 // into the prologue as if it were a command. A newline would break the
-// one-line-per-field invariant the fixed nine-field shape depends on. All three
+// one-line-per-field invariant the fixed ten-field shape depends on. All three
 // refuse here, before anything is written or launched.
 for (const flag of ["pre-authorized", "known-quirk"]) {
   for (const value of asArray(args[flag])) {
@@ -160,6 +163,21 @@ for (const flag of ["pre-authorized", "known-quirk"]) {
     if (/[\r\n]/.test(String(value))) {
       failJson(`--${flag} value must be a single line — split it into repeated --${flag} flags`);
     }
+  }
+}
+
+// FOC-357: --referenced-file declares a PATH the kickoff names, checked against
+// the worktree below. Same parse hazard as the FOC-296 fields — a missing value
+// parses as boolean `true` and would be verified as the literal path "true" —
+// so it refuses up front, naming the thing it is not: a file path, not a
+// command to pin. A newline would break the prologue's one-line-per-field
+// shape the same way.
+for (const value of asArray(args["referenced-file"])) {
+  if (value === true) {
+    failJson(`--referenced-file needs a value — a missing value, or one starting with "--", is not a file path`);
+  }
+  if (/[\r\n]/.test(String(value))) {
+    failJson(`--referenced-file value must be a single line — split it into repeated --referenced-file flags`);
   }
 }
 
@@ -365,6 +383,36 @@ if (args["prompt-file"]) {
   }
 }
 
+// FOC-357: the frontman declares the files the kickoff names (--referenced-file,
+// repeatable). A kickoff naming a file missing from the child tree cost a full
+// turn to discover (§F6): the child reads the pinned worktree, looks for the
+// file, finds nothing, and spends the turn reporting the discrepancy instead of
+// working. So the declaration is VERIFIED here, on the same terms as the git
+// facts above — before the registry entry, the settings file and the watcher
+// exist, where a refusal is free and leaves nothing behind. Paths resolve
+// against the worktree root; an absolute path inside it resolves to itself.
+// Pure declaration read, no Linear access (FOC-286 constraint untouched).
+const referencedFiles = asArray(args["referenced-file"]);
+if (referencedFiles.length) {
+  const missing = referencedFiles.filter((declared) => !existsSync(resolve(worktree.worktree, declared)));
+  if (missing.length) {
+    pinnedVerification.checks.push({
+      name: "referenced-files",
+      ok: false,
+      reason: "referenced-file-missing",
+      missing,
+    });
+    pinnedVerification.reasons.push("referenced-file-missing");
+    pinnedVerification.ok = false;
+    failJson(
+      `--referenced-file names ${missing.length} file(s) missing from the worktree ` +
+        `(resolved against ${worktree.worktree}): ${missing.join(", ")} — refusing the spawn: referenced-file-missing`,
+      { pinnedStateVerification: pinnedVerification },
+    );
+  }
+  pinnedVerification.checks.push({ name: "referenced-files", ok: true });
+}
+
 // ── registry entry, written BEFORE the watcher starts ────────────────────────
 // Single-writer discipline: spawn owns the entry until the watcher launches,
 // and the watcher owns it afterwards. Nothing writes it concurrently.
@@ -376,7 +424,7 @@ const childId = args.child || `${squad}-${Object.keys(registry.children).length 
 // means "undeclared", not "denied".
 const allowedPaths = asArray(args["allowed-path"]);
 
-// FOC-296: the prologue's two declaration fields, validated above. Recorded
+// FOC-296: two of the prologue's declaration fields, validated above. Recorded
 // beside allowedPaths — the same kind of per-child handoff declaration,
 // auditable in the record without re-parsing the prologue text. An empty array
 // means "not declared", exactly as it does for allowedPaths.
@@ -438,11 +486,13 @@ registry.children[childId] = {
   branch: worktree.branch,
   baseRevision: worktree.baseRevision,
   allowedPaths,
-  // FOC-296: what the Supervisor declared for THIS child at handoff — the
-  // pre-allowed verify commands and known runbook quirks rendered into the
-  // prologue below. Always present; empty means not declared.
+  // FOC-296/FOC-357: what the Supervisor declared for THIS child at handoff —
+  // the pre-allowed verify commands, known runbook quirks and referenced files
+  // rendered into the prologue below (the files verified above). Always
+  // present; empty means not declared.
   preAuthorized,
   knownQuirks,
+  referencedFiles,
   // FOC-286: what spawn verified before this entry existed. The prologue text
   // the child actually received is patched in below, once telemetry has given
   // the prologue its LA_RUN_ID value — still before the watcher launches, so
@@ -502,8 +552,9 @@ const promptFile = join(promptDir, "prompt.txt");
 // content was read and verified above — and the combined text goes into the
 // spawn-owned temp file. The caller's file is never rewritten, and the watcher
 // always receives THAT path, absolute by construction.
-// The two declaration fields come from --pre-authorized/--known-quirk
-// (FOC-296); absent flags render the honest "(none)" placeholders.
+// The three declaration fields come from --pre-authorized/--known-quirk
+// (FOC-296) and --referenced-file (FOC-357); absent flags render the honest
+// "(none)" placeholders.
 const prologue = pinnedStatePrologue({
   repo: gitRoot,
   laRoot: process.env.LA_ROOT || null,
@@ -519,6 +570,7 @@ const prologue = pinnedStatePrologue({
   verification: pinnedVerification,
   preAuthorized,
   knownQuirks,
+  referencedFiles,
 });
 writeFileSync(promptFile, `${prologue}\n\n${kickoff}`, "utf8");
 // The registry entry recorded what was verified; now it can also say WHAT THE
@@ -627,10 +679,11 @@ console.log(
       baseRevision: worktree.baseRevision,
       worktreeCreated: worktree.created,
       allowedPaths,
-      // FOC-296: reported beside allowedPaths so the Supervisor can say what it
-      // declared for this child without re-reading the prologue text.
+      // FOC-296/FOC-357: reported beside allowedPaths so the Supervisor can say
+      // what it declared for this child without re-reading the prologue text.
       preAuthorized,
       knownQuirks,
+      referencedFiles,
       settings: childSettings,
       deny: buildChildSettings(squadSettings, extraSettings).permissions.deny,
       model: childModel,

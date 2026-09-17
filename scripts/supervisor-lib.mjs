@@ -986,7 +986,7 @@ export function dirtyTreeReport(cwd) {
 // turns on: 37% of sessions re-derive git state the runtime already pinned, 22%
 // re-query Linear, and kickoff LENGTH changes nothing (spearman −0.01 across
 // length quartiles) — content is the lever, not volume. So every kickoff now
-// starts with a nine-field machine-templated prologue of facts spawn already
+// starts with a ten-field machine-templated prologue of facts spawn already
 // holds, and spawn refuses to launch a child it would be lying to: the facts
 // are verified against the worktree BEFORE anything is written or launched,
 // and the outcome is recorded on the child's registry entry.
@@ -1069,10 +1069,10 @@ export function verifyPinnedState({ worktree, branch, baseRevision, created }) {
 }
 
 /**
- * The nine-field prologue prepended to every kickoff (FOC-286). Machine-
+ * The ten-field prologue prepended to every kickoff (FOC-286). Machine-
  * templated on purpose: the review measured that kickoff LENGTH has no effect
  * on what a child re-derives, so the value is a FIXED shape a child can read
- * in one pass — nine labeled lines, stable order, `| `-separated sub-values.
+ * in one pass — ten labeled lines, stable order, `| `-separated sub-values.
  *
  * Every value comes from data spawn already holds. `issue` is the deliberate
  * exception in shape, not in source: spawn has no Linear access and must not
@@ -1080,9 +1080,10 @@ export function verifyPinnedState({ worktree, branch, baseRevision, created }) {
  * points at the verbatim issue + ACs in the kickoff body the author supplied —
  * that content is already in the prompt below the prologue.
  *
- * `preAuthorized` and `knownQuirks` are the two declaration fields the
- * Supervisor fills per child at handoff (FOC-296): spawn passes them straight
- * from its repeatable `--pre-authorized`/`--known-quirk` flags. Empty renders
+ * `preAuthorized`, `knownQuirks` and `referencedFiles` are the three
+ * declaration fields the Supervisor fills per child at handoff (FOC-296,
+ * FOC-357): spawn passes them straight from its repeatable
+ * `--pre-authorized`/`--known-quirk`/`--referenced-file` flags. Empty renders
  * the honest "(none)" placeholders — an undeclared field says so, it does not
  * pretend to be filled.
  */
@@ -1101,6 +1102,7 @@ export function pinnedStatePrologue({
   verification,
   preAuthorized = [],
   knownQuirks = [],
+  referencedFiles = [],
 }) {
   const verified = verification.checks.filter((c) => c.ok).map((c) => c.name);
   return [
@@ -1114,6 +1116,7 @@ export function pinnedStatePrologue({
     `spawn-verified: ${verified.join(", ")} — PASS at ${verification.at}`,
     `pre-authorized: ${preAuthorized.length ? preAuthorized.join("; ") : "(none — child settings are deny-only)"}`,
     `known-quirks: ${knownQuirks.length ? knownQuirks.join("; ") : "(none documented)"}`,
+    `referenced-files: ${referencedFiles.length ? referencedFiles.join("; ") : "(none declared)"}`,
     "=== END PINNED STATE ===",
   ].join("\n");
 }
@@ -1284,7 +1287,7 @@ export function claudeCommand(args) {
 // wrapper that appends an override (`--task A ... --task B`) gets B rather than
 // the array ["A","B"] — which silently became the string "A,B" downstream and
 // failed identifier validation with a nonsense message.
-const REPEATABLE = new Set(["allowed-path", "pre-authorized", "known-quirk"]);
+const REPEATABLE = new Set(["allowed-path", "pre-authorized", "known-quirk", "referenced-file"]);
 
 export function parseArgs(argv, repeatable = REPEATABLE) {
   const out = { _: [] };
