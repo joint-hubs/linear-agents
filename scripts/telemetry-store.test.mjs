@@ -36,16 +36,23 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 let passed = 0;
 let failed = 0;
 const failures = [];
+const asyncTests = [];
 const temp = mkdtempSync(join(tmpdir(), "telemetry-store-test-"));
 const dbPath = join(temp, "telemetry.sqlite");
 const db = openTelemetryDb(dbPath);
 
+// FOC-351: the async test pair (recordToolFact, recordDelegationLink) was
+// uncounted — process.exit fired before their .then() callbacks ran, so
+// passed/failed never included them. Collect each Promise and await all
+// before exit so the count is honest and a rejection is visible.
 function test(name, fn) {
   try {
     const result = fn();
     if (result instanceof Promise) {
-      result.then(() => { passed++; console.log(`  PASS ${name}`); })
-        .catch((error) => { failed++; failures.push(`${name}: ${error.message}`); console.log(`  FAIL ${name}: ${error.message}`); });
+      asyncTests.push(
+        result.then(() => { passed++; console.log(`  PASS ${name}`); })
+          .catch((error) => { failed++; failures.push(`${name}: ${error.message}`); console.log(`  FAIL ${name}: ${error.message}`); }),
+      );
     } else {
       passed++; console.log(`  PASS ${name}`);
     }
@@ -754,6 +761,13 @@ test("ignored branch does NOT move cost — usage stays on manual task", () => {
   assert(summary.byTask["BRANCH-9"] == null, "BRANCH-9 must NOT appear in byTask (link was ignored)");
 });
 
+// FOC-351: the async pair (recordToolFact, recordDelegationLink) was uncounted
+// — process.exit fired before their .then() callbacks ran, silently swallowing
+// a FK rejection. Now that they are awaited, the parent run must exist or the
+// FK constraint fails. Create it here so the dedup tests have a valid parent.
+applyEvent(db, makeEvent("run.started", { runId: "test", squad: "dev", startedAt: "2026-07-26T19:00:00.000Z" },
+  { runId: "test", observedAt: "2026-07-26T19:00:00.000Z", sourceKind: "test" }));
+
 test("recordToolFact deduplicates on same source_path+source_offset+tool_index", async () => {
   const r1 = await recordToolFact({
     run_id: "test", agent_key: "x", tool_name_raw: "Read", tool_input: "{}",
@@ -995,6 +1009,11 @@ test("orphanRunVerdict: consolePid 0 and negatives count as no pid", () => {
     assert(v != null, `consolePid=${pid} must fall through to the orphan path`);
   }
 });
+
+// FOC-351: await the async pair before exit so their pass/fail is counted.
+// Without this, process.exit fires before their .then() callbacks and the
+// count silently drops them — a green suite with 55/57 reported.
+await Promise.all(asyncTests);
 
 db.close();
 assert(existsSync(dbPath), "database was not created");

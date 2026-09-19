@@ -324,9 +324,13 @@ test("--wait reports `held`, not `idle`, when nothing is live but something wait
   runScript(STOP, ["--run", runId, "--child", first.childId]);
   waitForStatus(runId, first.childId, ["stopped", "exited", "crashed"]);
 
+  // FOC-351: timeout bumped from 1500 to 5000 — the held record is on disk
+  // synchronously so `held` returns immediately, but under CI load the
+  // status script's own startup can exceed 1500ms and the timeout reason
+  // masks the held reason.
   const out = parse(
     runScript(join(ROOT, "scripts", "supervisor-status.mjs"), [
-      "--run", runId, "--wait", "--timeout-ms", "1500",
+      "--run", runId, "--wait", "--timeout-ms", "5000",
     ]),
     fail,
   );
