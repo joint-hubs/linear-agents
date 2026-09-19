@@ -17,7 +17,7 @@
       "authEnv": "ANTHROPIC_API_KEY",
       "authStyle": "apikey",
       "tiers": {
-        "opus": "claude-opus-4-8",
+        "opus": "claude-opus-5",
         "sonnet": "claude-sonnet-4-6",
         "haiku": "claude-haiku-4-5-20251001",
         "smallFast": "claude-haiku-4-5-20251001"
@@ -51,7 +51,7 @@
     }
   },
   "ids": {
-    "opus": "anthropic/claude-opus-4.8",
+    "opus": "anthropic/claude-opus-5",
     "sonnet": "anthropic/claude-sonnet-4.6",
     "glm": "z-ai/glm-5.2",
     "minimax": "minimax/minimax-m3",

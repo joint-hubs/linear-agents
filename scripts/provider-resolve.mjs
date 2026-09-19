@@ -102,9 +102,18 @@ export function resolveProvider(provider, options = {}) {
   const envFile = parseEnvFile(envPath);
   const authValue = nonEmpty(env[authEnv]) ? env[authEnv] : envFile[authEnv];
 
+  // FOC-164: env override for baseUrl — LA_PROVIDER_BASEURL_<PROVIDER>.
+  // Uppercase the provider name, non-alphanumeric → '_'. Additive: when
+  // unset, the config baseUrl is used unchanged (no behaviour change).
+  const envOverrideKey = `LA_PROVIDER_BASEURL_${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+  const envBaseUrl = nonEmpty(env[envOverrideKey]) ? env[envOverrideKey] : null;
+  const baseUrl = envBaseUrl || entry.baseUrl;
+  const baseUrlSource = envBaseUrl ? "env" : "config";
+
   return {
     provider: name,
-    baseUrl: entry.baseUrl,
+    baseUrl,
+    baseUrlSource,
     authVar,
     authEnv,
     authStyle,
@@ -162,6 +171,7 @@ function formatCheck(resolved) {
   const lines = [
     `provider=${resolved.provider}`,
     `baseUrl=${resolved.baseUrl}`,
+    `baseUrlSource=${resolved.baseUrlSource || "config"}`,
     `authVar=${resolved.authVar}`,
     `authEnv=${resolved.authEnv}`,
     `authPresent=${resolved.present ? "set" : "unset"}`,

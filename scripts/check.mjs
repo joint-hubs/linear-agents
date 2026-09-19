@@ -339,7 +339,7 @@ const REQUIRED_NATIVE_ROLES = [
   'plan.push',
 ];
 
-const ALLOWED_NATIVE_VALUES = new Set(['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001']);
+const ALLOWED_NATIVE_VALUES = new Set(['claude-opus-5', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001']);
 
 if (nativeMapRaw === null) {
   report('config/models.native.map', 'MISSING');
@@ -366,7 +366,7 @@ if (nativeMapRaw === null) {
     }
 
     if (!ALLOWED_NATIVE_VALUES.has(value)) {
-      report(`config/models.native.map:${i + 1}`, `value '${value}' not in {claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5-20251001}`);
+      report(`config/models.native.map:${i + 1}`, `value '${value}' not in {claude-opus-5, claude-sonnet-4-6, claude-haiku-4-5-20251001}`);
     }
 
     seenRoles.add(key);
@@ -423,7 +423,30 @@ for (const script of linearScripts) {
   }
 }
 
-// ── 10. Report ──────────────────────────────────────────────────────
+// ── 10. Check 8: no committed localhost in provider baseUrls (FOC-164) ──
+//
+// The repo is public; a developer running a local proxy commits localhost into
+// config/models.json and breaks every other machine. Drift test: fail if any
+// provider baseUrl contains localhost or 127.0.0.1.
+
+const modelsJsonPath = path.join(ROOT, 'config', 'models.json');
+const modelsJsonRaw = readFileSafe(modelsJsonPath);
+if (modelsJsonRaw !== null) {
+  try {
+    const modelsConfig = JSON.parse(modelsJsonRaw);
+    const providers = modelsConfig.providers || {};
+    for (const [name, entry] of Object.entries(providers)) {
+      const url = entry?.baseUrl || '';
+      if (/localhost|127\.0\.0\.1/.test(url)) {
+        report(`config/models.json providers.${name}`, `baseUrl '${url}' contains localhost — use LA_PROVIDER_BASEURL_<NAME> env override for local proxy dev`);
+      }
+    }
+  } catch (e) {
+    // Already caught by check 4 (invalid JSON)
+  }
+}
+
+// ── 11. Report ──────────────────────────────────────────────────────
 
 violations.sort();
 
@@ -433,7 +456,7 @@ for (const v of violations) {
 
 const count = violations.length;
 if (count === 0) {
-  console.log(`OK: 8 checks, 0 violations`);
+  console.log(`OK: 9 checks, 0 violations`);
   process.exit(0);
 } else {
   console.log(`DRIFT: ${count} violations`);

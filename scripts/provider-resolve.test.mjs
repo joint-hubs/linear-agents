@@ -248,6 +248,34 @@ test("--check reports every tier so a misrouted classifier is visible before lau
   assert(!out.includes(ZAI_KEY), "--check must not print the key");
 });
 
+// --- FOC-164: baseUrl env override ----------------------------------------
+
+test("LA_PROVIDER_BASEURL_<PROVIDER> overrides config baseUrl", () => {
+  const r = resolveProvider("openrouter", {
+    configPath: CONFIG,
+    envPath: ENV_FULL,
+    env: { LA_PROVIDER_BASEURL_OPENROUTER: "http://localhost:8899" },
+  });
+  assert(r.baseUrl === "http://localhost:8899", `baseUrl=${r.baseUrl} (expected override)`);
+  assert(r.baseUrlSource === "env", `baseUrlSource=${r.baseUrlSource}`);
+});
+
+test("baseUrl falls back to config when env override is unset", () => {
+  const r = resolveProvider("openrouter", { configPath: CONFIG, envPath: ENV_FULL, env: {} });
+  assert(r.baseUrl === "https://openrouter.ai/api", `baseUrl=${r.baseUrl}`);
+  assert(r.baseUrlSource === "config", `baseUrlSource=${r.baseUrlSource}`);
+});
+
+test("baseUrl env override normalizes non-alphanumeric provider name (zai_anthropic)", () => {
+  const r = resolveProvider("zai_anthropic", {
+    configPath: CONFIG,
+    envPath: ENV_FULL,
+    env: { LA_PROVIDER_BASEURL_ZAI_ANTHROPIC: "http://localhost:7777" },
+  });
+  assert(r.baseUrl === "http://localhost:7777", `baseUrl=${r.baseUrl} (expected override for zai_anthropic)`);
+  assert(r.baseUrlSource === "env", `baseUrlSource=${r.baseUrlSource}`);
+});
+
 // --- teardown --------------------------------------------------------------
 
 rmSync(temp, { recursive: true, force: true });
