@@ -27,6 +27,7 @@ File naming convention: `NNNN-descriptive-kebab-case.md` (e.g. `0001-use-openrou
 | [0009](0009-supervisor-frontman-runtime.md) | Frontman supervisor runtime — internal bus, headless Claude children, file-based HITL relay | Proposed |
 | [0010](0010-provider-profiles.md) | Provider profiles in `config/models.json` | Accepted |
 | [0011](0011-orch-ollama-withdrawal.md) | orch-ollama Withdrawal | Accepted |
+| [0012](0012-decision-shaped-steps-four-kinds.md) | Decision-shaped steps and the four step kinds — step taxonomy, decision tier, MCP-hosted [J] pattern | Accepted |
 
 ## Statuses
 
