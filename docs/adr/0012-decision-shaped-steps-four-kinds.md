@@ -1,8 +1,8 @@
 # ADR-0012: Decision-shaped steps and the four step kinds — step taxonomy, decision tier, MCP-hosted [J] pattern
 
-**Status:** Proposed
+**Status:** Accepted (2026-09-19)
 
-**Date:** 2026-09-19 (co-designed with Mateusz via two HITL gate rounds the same day; status flips to Accepted on his review of this draft)
+**Date:** 2026-09-19 (co-designed with Mateusz via two HITL gate rounds; accepted on his review the same day)
 
 ## Context
 
@@ -127,4 +127,3 @@ The wider MCP-hosted [J] family named by Mateusz — extraction/classification o
 - **FOC-399** — xgrammar / Path B serving, including the Ollama logprobs probe (the Path B entry condition).
 - **Proposed children** (filed by the Supervisor after review): the MCP [J] family catalog+build child (title/scope in the FOC-383 hand-off gate); the `draft-approval` kind implementation in `supervisor-gate.mjs`.
 - **Calibration task** — ECE/Brier on labeled [J] outputs before any threshold becomes policy.
-- **Status flip** — this ADR goes Proposed → Accepted when Mateusz reviews the draft (the final gate of FOC-383).
