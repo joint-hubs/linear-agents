@@ -10,7 +10,7 @@
 //   gates/<gateId>.json  gate records (supervisor-gate.mjs, FOC-122)
 //   triage.json          the recorded verdict (FOC-123, read here, never written)
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname, resolve, basename } from "node:path";
@@ -1162,7 +1162,17 @@ export function progressFingerprint({ worktree, baseRevision, failingTests = [] 
   let error = null;
   if (worktree && baseRevision && existsSync(worktree)) {
     try {
-      diffText = git(["diff", baseRevision], worktree);
+      // spawnSync has no maxBuffer limit — execFileSync throws at 1 MiB
+      // (ERR_CHILD_PROCESS_STDIO_MAXBUFFER) which makes the guard fail
+      // open on large commits. Hash the full diff regardless of size.
+      const _diffResult = spawnSync("git", ["diff", baseRevision], {
+        cwd: worktree,
+        encoding: "utf8",
+      });
+      if (_diffResult.status !== 0) {
+        throw new Error((_diffResult.stderr || "").trim().split("\n")[0] || `git diff exited ${_diffResult.status}`);
+      }
+      diffText = _diffResult.stdout;
       porcelain = dirtyTreeReport(worktree);
     } catch (err) {
       error = err.message.split("\n")[0];

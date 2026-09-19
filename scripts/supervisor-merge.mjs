@@ -201,6 +201,14 @@ function makeIntegrationTree() {
       base,
     });
   }
+  // Normalize the checkout — worktree add -B can leave a dirty index
+  // when the base branch has been force-updated. A clean tree means
+  // cherry-pick never refuses for stale-index reasons.
+  try {
+    git(["checkout", "--", "."], resolve(integrationTree));
+  } catch {
+    /* best effort — if checkout fails the tree is still usable */
+  }
   return resolve(integrationTree);
 }
 
@@ -239,7 +247,7 @@ function replay(child, tree) {
     const out = git(["rev-list", "--reverse", range], mainRepo);
     commits = out ? out.split(/\r?\n/).filter(Boolean) : [];
   } catch (err) {
-    return { childId: child.childId, ok: false, conflicts: [], error: err.message.split("\n")[0], commits: 0 };
+    return { childId: child.childId, ok: false, conflicts: [], error: (err.stderr || err.message).trim().split("\n")[0], commits: 0 };
   }
 
   if (!commits.length) {
@@ -268,7 +276,7 @@ function replay(child, tree) {
       ok: false,
       conflicts,
       commits: commits.length,
-      error: err.message.split("\n")[0],
+      error: (err.stderr || err.message).trim().split("\n")[0],
     };
   }
 }
