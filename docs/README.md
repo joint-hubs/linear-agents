@@ -32,6 +32,7 @@ przy minimalnym koszcie, HITL async przez metadane Lineara.
 
 ## Decyzje i konwencje
 
+- [mcp-decision-steps-catalog.md](mcp-decision-steps-catalog.md) — katalog kroków decyzyjnych [J] (FOC-401): extraction + prompt-refinement zbudowane (MCP, tier-1 Jev), repo-state recon otwarte; wzorzec ADR-0012 D5
 - [model-comparison-and-routing.md](decisions/model-comparison-and-routing.md) — zweryfikowane benchmarki + routing kosztowy
 - [linear-signaling-protocol.md](decisions/linear-signaling-protocol.md) — async komunikacja człowiek↔agent
 - [design-review-and-gaps.md](decisions/design-review-and-gaps.md) — sceptyczna krytyka: weak points / corner cases
