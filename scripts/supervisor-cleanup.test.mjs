@@ -33,8 +33,21 @@ const { test, fail, summary } = harness();
 const CLEANUP = join(ROOT, "scripts", "supervisor-cleanup.mjs");
 const GATE = join(ROOT, "scripts", "supervisor-gate.mjs");
 
-const cleanup = (args, env = {}) => runScript(CLEANUP, args, env);
-const gate = (args) => runScript(GATE, args);
+// FOC-256: build the spawn env explicitly instead of inheriting
+// LA_SUPERVISOR_CHILD from the ambient process.env. Without this, every TEST
+// child needed `env -u LA_SUPERVISOR_CHILD` to work around the identity guard
+// — and the suite was green only when the ambient env was clean. Explicit is
+// better: set LA_SUPERVISOR_CHILD only when the test says so.
+const cleanup = (args, env = {}) => {
+  const e = baseEnv(env);
+  if (!("LA_SUPERVISOR_CHILD" in env)) delete e.LA_SUPERVISOR_CHILD;
+  return spawnSync(process.execPath, [CLEANUP, ...args], { cwd: ROOT, encoding: "utf8", env: e });
+};
+const gate = (args, env = {}) => {
+  const e = baseEnv(env);
+  if (!("LA_SUPERVISOR_CHILD" in env)) delete e.LA_SUPERVISOR_CHILD;
+  return spawnSync(process.execPath, [GATE, ...args], { cwd: ROOT, encoding: "utf8", env: e });
+};
 
 // ── issue fixtures: the TEST key, offline ────────────────────────────────────
 // --issue-file is the same seam supervisor-triage.mjs uses. There is no

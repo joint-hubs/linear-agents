@@ -500,7 +500,15 @@ const corpusB = writeStableCorpus(dirB, "reverse");
 {
   const cliEnv = { ...process.env, LA_TELEMETRY_DB: join(root, "no-such-db.sqlite") };
   const runCli = (dir) => {
-    const r = spawnSync(process.execPath, [CLI, "--json", "--supervisor-root", join(dir, "supervisor"), "--reviews-dir", join(dir, "reviews")],
+    const r = spawnSync(process.execPath, [CLI, "--json",
+      "--supervisor-root", join(dir, "supervisor"),
+      "--reviews-dir", join(dir, "reviews"),
+      // FOC-255: pin roundsPath to the same temp-dir path the in-process
+      // project() helper uses (join(dirname(sup), "review-rounds.json")),
+      // so the CLI and in-process projections read the same (absent) counter
+      // file — otherwise the CLI falls back to DEFAULT_ROUNDS (.state/) which
+      // may exist on the main checkout, breaking byte-for-byte parity.
+      "--rounds-path", join(dir, "review-rounds.json")],
       { encoding: "utf8", env: cliEnv });
     if (r.status !== 0) throw new Error(`CLI exit ${r.status}: ${String(r.stderr).slice(0, 300)}`);
     return JSON.parse(r.stdout);

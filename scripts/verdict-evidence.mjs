@@ -608,8 +608,12 @@ function main() {
   const opts = {};
   const supervisorRoot = opt("--supervisor-root");
   const reviewsDir = opt("--reviews-dir");
+  const roundsPath = opt("--rounds-path");
+  const dbPath = opt("--db-path");
   if (supervisorRoot !== undefined) opts.supervisorRoot = supervisorRoot;
   if (reviewsDir !== undefined) opts.reviewsDir = reviewsDir;
+  if (roundsPath !== undefined) opts.roundsPath = roundsPath;
+  if (dbPath !== undefined) opts.dbPath = dbPath;
 
   const report = projectVerdictEvidence(opts);
   if (asJson) {

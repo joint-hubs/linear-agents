@@ -31,8 +31,12 @@ const root = join(__dir, "..");
 // Helpers (mirrors linear-push.mjs / bootstrap-linear.mjs convention)
 // ---------------------------------------------------------------------------
 
-/** Manual .env parser — zero deps, mirrors cost-report.mjs convention. */
+/** Manual .env parser — zero deps, mirrors cost-report.mjs convention.
+ * FOC-355: LA_LINEAR_NO_ENV_FILE=1 skips the .env read so the supervisor
+ * test suite can strip credentials hermetically even on a checkout that
+ * carries .env — loadEnv() would otherwise backfill the stripped keys. */
 export function loadEnv() {
+  if (process.env.LA_LINEAR_NO_ENV_FILE) return;
   try {
     const text = readFileSync(join(root, ".env"), "utf8");
     for (const line of text.split("\n")) {

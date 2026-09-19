@@ -41,12 +41,11 @@ const VERDICT = join(ROOT, "scripts", "supervisor-verdict.mjs");
 // prove. It is scrubbed, and re-settable per call.
 //
 // `opts.stripCreds` (round 3) is the offline-REAL recipe: a dryRun:false op is
-// made to fail fast by stripping both Linear credential vars, so graphql()
-// refuses locally before any fetch. linear-ops' loadEnv() backfills an UNSET
-// var from .env at the repo root — which is exactly why these tests are
-// guarded on HAS_DOTENV: where a checkout carries one, the recipe cannot prove
-// the op stays offline and the guarded tests skip with evidence instead of
-// risking a live call. (.env is gitignored, so extractions never carry it.)
+// made to fail fast by stripping both Linear credential vars AND setting
+// LA_LINEAR_NO_ENV_FILE=1 so loadEnv() cannot backfill them from .env.
+// linear-ops' loadEnv() backfills an UNSET var from .env at the repo root —
+// LA_LINEAR_NO_ENV_FILE skips that read so the recipe stays hermetic on
+// any checkout, not just a clean worktree.
 const verdict = (args, env = {}, opts = {}) => {
   const e = baseEnv({ REVIEW_DRY_RUN: "1", ...env });
   delete e.LA_SUPERVISOR_CHILD;
@@ -54,18 +53,16 @@ const verdict = (args, env = {}, opts = {}) => {
   if (opts.stripCreds) {
     delete e.LINEAR_API_KEY;
     delete e.LINEAR_API_KEY_PISI;
+    // FOC-355: prevent loadEnv() in linear-client.mjs from backfilling the
+    // stripped keys from .env at the repo root. Without this, the offline-real
+    // recipe only works in a clean worktree (no .env); on the main checkout
+    // .env backfills and linear-ops runs with a real key — a live write.
+    e.LA_LINEAR_NO_ENV_FILE = "1";
   }
   return spawnSync(process.execPath, [VERDICT, ...args], { cwd: ROOT, encoding: "utf8", env: e });
 };
 const followup = (runId, childId, extra = []) =>
   runScript(FOLLOWUP, ["--run", runId, "--child", childId, "--prompt", "again", ...extra]);
-
-const HAS_DOTENV = existsSync(join(ROOT, ".env"));
-let skippedGuarded = 0;
-const skipGuarded = (name) => {
-  skippedGuarded++;
-  console.log(`  SKIP ${name} — .env at the repo root would backfill the stripped credentials; the offline-real recipe cannot stay provably offline`);
-};
 
 // The offline fixtures linear-ops (and linear-query) serve under *_DRY_RUN=1.
 // Any prior local file is restored on exit — .state is scratch, but it is not
@@ -628,17 +625,18 @@ test("a REAL failed apply raises a pending Supervisor gate naming the manual fix
   // No REVIEW_DRY_RUN: the verdict's dry-run is off. Round-3 rework (R2-1): the
   // old FOO_DRY_RUN=1 + unknown-fixture recipe dies WITH the scrub — the var no
   // longer reaches the spawned op by design, so the failure has to come from
-  // somewhere else. Recipe (a): both credential vars stripped and no .env at
-  // the root (HAS_DOTENV guard) → linear-ops fails fast inside graphql(),
-  // before any fetch, on both ops. FOC-777 (unknown on any workspace) keeps the
-  // worst case a live READ, never a write, even if credentials ever leaked
-  // back in. Failed statuses + real context = the enforcement gate, attached
-  // to the DEV child the Supervisor resumes next.
-  if (HAS_DOTENV) return skipGuarded("real failed apply raises the enforcement gate (F3)");
+  // somewhere else. Recipe (a): both credential vars stripped + LA_LINEAR_NO_ENV_FILE
+  // → linear-ops fails fast inside graphql(), before any fetch, on both ops.
+  // FOC-777 (unknown on any workspace) keeps the worst case a live READ, never
+  // a write, even if credentials ever leaked back in. Failed statuses + real
+  // context = the enforcement gate, attached to the DEV child the Supervisor
+  // resumes next.
   const s = scenario();
   const out = parse(
     verdict(
-      ["record", "--run", s.runId, "--child", "review-1", "--verdict", "fail", "--finding", CITED, "--work-child", "dev-1", "--task", "FOC-777"],
+      ["record", "--run", s.runId, "--child", "review-1", "--verdict", "fail",
+       "--finding", CITED, "--no-failing-tests", "env-scrub test: not a real failing review",
+       "--work-child", "dev-1", "--task", "FOC-777"],
       { REVIEW_DRY_RUN: "" },
       { stripCreds: true },
     ),
@@ -699,15 +697,16 @@ test("a non-allowlisted *_DRY_RUN is scrubbed from the spawned op's env (R2-1)",
   // The R2-1 bug verbatim as the counterfactual: FOO_DRY_RUN=1 with a matching
   // .state/mock/foo-task.json used to drive linear-ops' offline path while the
   // record claimed dryRun:false + "applied" — no warning, no gate. Scrubbed,
-  // the op runs REAL: credentials stripped + no .env (guarded) → graphql()
+  // the op runs REAL: credentials stripped + LA_LINEAR_NO_ENV_FILE → graphql()
   // refuses locally before any fetch, both ops fail, and the real-context
   // failure raises the enforcement gate instead of a silent apply. FOC-777
   // keeps the worst case a live READ even if credentials ever leaked back.
-  if (HAS_DOTENV) return skipGuarded("non-allowlisted *_DRY_RUN scrubbed from the spawn env (R2-1)");
   const s = scenario();
   const out = parse(
     verdict(
-      ["record", "--run", s.runId, "--child", "review-1", "--verdict", "fail", "--finding", CITED, "--work-child", "dev-1", "--task", "FOC-777"],
+      ["record", "--run", s.runId, "--child", "review-1", "--verdict", "fail",
+       "--finding", CITED, "--no-failing-tests", "env-scrub test: not a real failing review",
+       "--work-child", "dev-1", "--task", "FOC-777"],
       { REVIEW_DRY_RUN: "", FOO_DRY_RUN: "1" },
       { stripCreds: true },
     ),
@@ -735,12 +734,11 @@ test("a non-allowlisted *_DRY_RUN cannot feed a fake issue into declaredAcs (R2-
   // (identifier FOC-777) would hand a FAKE issue description to the AC count —
   // one **Given** → declaredAcs:1 — and a pass mapping "covering" it would be
   // approved as complete against a fabricated criterion, with no warning
-  // anywhere. Scrubbed, linear-query runs REAL: credentials stripped + no .env
-  // (guarded) → graphql() refuses locally before any fetch, acCount reads that
-  // refusal as UNKNOWN (null), and the record says completeness unverified.
-  // FOC-777 keeps the worst case a live READ even if credentials ever leaked
-  // back in.
-  if (HAS_DOTENV) return skipGuarded("non-allowlisted *_DRY_RUN scrubbed from the acCount spawn (R2-1)");
+  // anywhere. Scrubbed, linear-query runs REAL: credentials stripped +
+  // LA_LINEAR_NO_ENV_FILE → graphql() refuses locally before any fetch,
+  // acCount reads that refusal as UNKNOWN (null), and the record says
+  // completeness unverified. FOC-777 keeps the worst case a live READ even if
+  // credentials ever leaked back.
   const s = scenario();
   const out = parse(
     verdict(
@@ -768,15 +766,15 @@ test("a non-allowlisted *_DRY_RUN cannot feed a fake issue into declaredAcs (R2-
 
 test("a --dry-run flag with no dry-run env names the flag as the trigger (R2-N4)", () => {
   // The last untested branch of the F2 warning (round-2 dev-reported): the
-  // flag-only trigger. Attempted per the round-2 review's pre-authorization —
-  // and hermetic: with no dry-run env, linear-ops' dryRunContext never touches
-  // a fixture; the spawned op goes down the REAL path and fails fast on the
-  // stripped credentials (no .env, guarded) before any network.
-  if (HAS_DOTENV) return skipGuarded("--dry-run flag-only trigger naming (R2-N4)");
+  // flag-only trigger. Hermetic: with no dry-run env, linear-ops' dryRunContext
+  // never touches a fixture; the spawned op goes down the REAL path and fails
+  // fast on the stripped credentials + LA_LINEAR_NO_ENV_FILE before any network.
   const s = scenario();
   const out = parse(
     verdict(
-      ["record", "--run", s.runId, "--child", "review-1", "--verdict", "fail", "--finding", CITED, "--dry-run"],
+      ["record", "--run", s.runId, "--child", "review-1", "--verdict", "fail",
+       "--finding", CITED, "--no-failing-tests", "env-scrub test: not a real failing review",
+       "--dry-run"],
       { REVIEW_DRY_RUN: "" },
       { stripCreds: true },
     ),
@@ -861,6 +859,3 @@ test("no counter survives anywhere", () => {
 });
 
 summary();
-if (skippedGuarded) {
-  console.log(`${skippedGuarded} skipped (offline-real pins guarded on .env absence — see SKIP lines above)`);
-}
