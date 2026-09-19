@@ -61,6 +61,26 @@ const lastAssistantText = (teePath) => {
 };
 
 // ---------- output projection: keep model fields, strip runtime-filled ----------
+// W2 condense: the model must emit a VERDICT, not regurgitate review prose.
+// `text` and `evidence` are collapsed to one sentence / short prefix so the
+// target stays compact (~200-1200 chars vs the 14k pre-condense outliers).
+// Applied identically to train and eval, so the §5 F1 measures (lemma_overlap
+// on `text`, artifact-prefix match on `evidence`) stay consistent against the
+// condensed gold.
+const firstSentence = (s, cap) => {
+  const t = String(s ?? '').trim();
+  if (!t) return '';
+  const seg = t.split(/(?<=[.!?])\s+|\n/)[0] || t;
+  return seg.length > cap ? seg.slice(0, cap - 1) + '…' : seg;
+};
+const condenseText = (s) => firstSentence(s, 40);
+const condenseEvidence = (s) => {
+  const t = String(s ?? '').trim();
+  if (!t) return '';
+  const seg = t.split('\n')[0] || t;
+  return seg.length > 120 ? seg.slice(0, 119) + '…' : seg;
+};
+
 const projectOutput = (v) => {
   const failingTests = v.fingerprint && Array.isArray(v.fingerprint.failingTests)
     ? v.fingerprint.failingTests
@@ -69,12 +89,12 @@ const projectOutput = (v) => {
     verdict: v.verdict,
     findings: (v.findings || []).map((f) => ({
       severity: f.severity,
-      text: f.text,
-      evidence: f.evidence,
+      text: condenseText(f.text),
+      evidence: condenseEvidence(f.evidence),
     })),
     acMapping: (v.acMapping || v.acs || v.acceptanceCriteria || []).map((a) => ({
       ac: a.ac,
-      evidence: a.evidence,
+      evidence: condenseEvidence(a.evidence),
     })),
     fingerprint: { failingTests },
   };

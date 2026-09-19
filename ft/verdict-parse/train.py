@@ -22,8 +22,12 @@ Usage:
   python train.py --data-dir ft/verdict-parse/data --run-dir ft/verdict-parse/runs/<ts> \
                   --epochs 3 --lr 2e-4 --batch-size 2 --grad-accum 4 --seq-len 4096
 """
-import argparse, json, os, sys, time, traceback
+import argparse, json, os, sys, time, traceback, hashlib
 from pathlib import Path
+
+# Shared SYSTEM prompt — single source of truth for train and eval.
+# Drift here silently suppresses results; see B2 in review.
+from prompt import SYSTEM_PROMPT
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -41,15 +45,6 @@ def parse_args():
     p.add_argument("--seed", type=int, default=3407)
     return p.parse_args()
 
-SYSTEM_PROMPT = (
-    "You are a verdict parser. Given a code review's final status text (the "
-    "'odprawa' block), output the review verdict as JSON matching the schema: "
-    '{"verdict":"pass"|"fail","findings":[{"severity","text","evidence"}],'
-    '"acMapping":[{"ac","evidence"}],"fingerprint":{"failingTests":[]}}. '
-    "Severity is one of issue|todo|nit|question|praise. Evidence must cite an "
-    "artifact (path:line). Output ONLY valid JSON, no prose, no markdown fences."
-)
-
 def load_jsonl(path):
     rows = []
     with open(path, "r", encoding="utf-8") as f:
@@ -59,24 +54,19 @@ def load_jsonl(path):
                 rows.append(json.loads(line))
     return rows
 
-def build_dataset(rows, tokenizer):
-    """Format each pair as a Qwen3 chat conversation (non-thinking)."""
-    texts = []
+def build_dataset(rows):
+    """Conversational format (messages), so TRL can mask the prompt and apply
+    assistant_only_loss. Each pair = system + user(input) + assistant(JSON)."""
+    convs = []
     for r in rows:
         out = r["output"]
-        # Compact, stable JSON — keys in fixed order, no extra whitespace.
         assistant = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
-        messages = [
+        convs.append({"messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": r["input"]},
             {"role": "assistant", "content": assistant},
-        ]
-        # enable_thinking=False: Qwen3 chat template emits no <think> block.
-        text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False, enable_thinking=False
-        )
-        texts.append({"text": text})
-    return texts
+        ]})
+    return convs
 
 def write_status(run_dir, status, **extra):
     payload = {"status": status, **extra}
@@ -104,9 +94,32 @@ def main():
     sys.stderr = Tee(sys.__stderr__, log_f)
 
     cfg = vars(args)
+    # B7: record dataset lineage — sha256 of train/eval files at train time.
+    # Without this, every eval is irreproducible archaeology.
+    def file_sha(p):
+        try: return hashlib.sha256(Path(p).read_bytes()).hexdigest()[:12]
+        except FileNotFoundError: return None
+    cfg["data_hashes"] = {
+        "train_jsonl": file_sha(Path(args.data_dir) / "train.jsonl"),
+        "eval_jsonl": file_sha(Path(args.data_dir) / "eval.jsonl"),
+        "prompt_sha": hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12],
+    }
     config_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     started_at = time.time()
-    write_status(run_dir, "running", startedAt=started_at)
+    write_status(run_dir, "running", startedAt=started_at, pid=os.getpid())
+
+    # Graceful stop on Ctrl-C / terminate: mark stopped, not failed.
+    import signal
+    def _stop(signum, frame):
+        write_status(run_dir, "stopped", startedAt=started_at, pid=os.getpid(),
+                     message="terminated by signal %d" % signum)
+        sys.__stdout__.write("[ft] STOPPED by signal %d\n" % signum); sys.__stdout__.flush()
+        sys.exit(130)
+    signal.signal(signal.SIGINT, _stop)
+    try:
+        signal.signal(signal.SIGTERM, _stop)
+    except (AttributeError, ValueError):
+        pass  # SIGTERM not available on Windows in the same way
 
     try:
         import torch
@@ -143,8 +156,8 @@ def main():
         train_rows = load_jsonl(Path(args.data_dir) / "train.jsonl")
         eval_rows = load_jsonl(Path(args.data_dir) / "eval.jsonl")
         print(f"[ft] train={len(train_rows)} eval={len(eval_rows)}", flush=True)
-        train_ds = Dataset.from_list(build_dataset(train_rows, tok))
-        eval_ds = Dataset.from_list(build_dataset(eval_rows, tok))
+        train_ds = Dataset.from_list(build_dataset(train_rows))
+        eval_ds = Dataset.from_list(build_dataset(eval_rows))
 
         sft_cfg = SFTConfig(
             output_dir=str(run_dir / "checkpoints"),
@@ -162,8 +175,7 @@ def main():
             bf16=True,
             max_length=args.seq_len,
             packing=False,
-            dataset_text_field="text",
-            completion_only_loss=False,  # full-sequence loss; small model, structured task
+            assistant_only_loss=True,  # mask prompt; loss only on assistant turn
             seed=args.seed,
             report_to="none",
         )
