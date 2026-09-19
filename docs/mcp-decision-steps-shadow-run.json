@@ -1,0 +1,120 @@
+{
+  "_doc": "Shadow-run evidence for the FOC-401 decision servers (docs/mcp-decision-steps-catalog.md). Every call carries `path`: \"live\" (tier-1 Jev via OpenRouter /api/alpha/decisions, measured confidence) or \"offline\" (deterministic, no model call, confidence null per ADR-0012 D3.6). An offline record is never presented as a live result, and a failed live call is recorded as the typed error it is.",
+  "runAt": "2026-09-19T20:27:58.807Z",
+  "path": "live",
+  "key": "OPENROUTER_API_KEY: present",
+  "servers": [
+    {
+      "server": "fenix-decision-extraction",
+      "tool": "extract_features",
+      "handshake": {
+        "initialize": "ok",
+        "toolsList": "ok"
+      },
+      "calls": [
+        {
+          "fixture": "dictated-en",
+          "path": "live",
+          "envelope": {
+            "step": "extraction",
+            "tier": 1,
+            "model": "typesafe/jev-1.13-20260917",
+            "mode": "live",
+            "ok": true,
+            "decision": {
+              "features": [
+                {
+                  "name": "the export should include hidden rows",
+                  "kind": "feature",
+                  "confidence": 0.87
+                },
+                {
+                  "name": "a date range picker for the toolbar",
+                  "kind": "feature",
+                  "confidence": 0.85
+                }
+              ],
+              "notes": null
+            },
+            "confidence": 0.05,
+            "measuredAt": "2026-09-19T20:27:58.808Z",
+            "durationMs": 416
+          }
+        },
+        {
+          "fixture": "dictated-pl-kif-czeryf",
+          "path": "live",
+          "envelope": {
+            "step": "extraction",
+            "tier": 1,
+            "model": "typesafe/jev-1.13-20260917",
+            "mode": "live",
+            "ok": true,
+            "decision": {
+              "features": [
+                {
+                  "name": "jeszcze retry w webhookach",
+                  "kind": "feature",
+                  "confidence": 0.64
+                },
+                {
+                  "name": "wykres kosztów w raporcie miesięcznym",
+                  "kind": "feature",
+                  "confidence": 0.78
+                }
+              ],
+              "notes": null
+            },
+            "confidence": 0.04,
+            "measuredAt": "2026-09-19T20:27:59.224Z",
+            "durationMs": 329
+          }
+        }
+      ]
+    },
+    {
+      "server": "fenix-decision-prompt-refinement",
+      "tool": "refine_prompt",
+      "handshake": {
+        "initialize": "ok",
+        "toolsList": "ok"
+      },
+      "calls": [
+        {
+          "fixture": "squad-prompt-medium",
+          "path": "live",
+          "envelope": {
+            "step": "prompt-refinement",
+            "tier": 1,
+            "model": "typesafe/jev-1.13-20260917",
+            "mode": "live",
+            "ok": true,
+            "decision": {
+              "size": "small",
+              "squads": [],
+              "relations": [
+                {
+                  "name": "snapshot export",
+                  "relation": "standalone"
+                },
+                {
+                  "name": "date range picker",
+                  "relation": "extension"
+                },
+                {
+                  "name": "webhook retry",
+                  "relation": "standalone"
+                }
+              ],
+              "rationale": null,
+              "confidence": 0.4
+            },
+            "confidence": 0.4,
+            "measuredAt": "2026-09-19T20:27:59.553Z",
+            "durationMs": 328
+          }
+        }
+      ]
+    }
+  ]
+}

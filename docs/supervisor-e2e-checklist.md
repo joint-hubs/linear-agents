@@ -1,6 +1,6 @@
 # Supervisor — manual e2e checklist (FOC-116, spec §8.12)
 
-The scripted suite (`node scripts/test-all.mjs`, 68 files) proves the parts against a mock
+The scripted suite (`node scripts/test-all.mjs`, 72 files) proves the parts against a mock
 `claude`. It cannot prove the one thing this epic is actually about: that **Mateusz never opens a
 child terminal**. That is a claim about a human session, so it gets walked by hand, once, on a
 throwaway issue, before first real use.
@@ -203,7 +203,7 @@ All of it is **inert unless `LA_SUPERVISOR=1`**, which only `supervisor-spawn.mj
 what keeps AC-10 true while the squad prompts changed.
 
 ### Verification
-- `node scripts/test-all.mjs` → 68/68 files (§8.1–8.11).
+- `node scripts/test-all.mjs` → 72/72 files (§8.1–8.11).
 - This checklist, walked once on a throwaway issue (§8.12).
 - `git diff -- agents/orchestrator` empty (AC-10).
 
