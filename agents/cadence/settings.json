@@ -65,7 +65,41 @@
       "Bash(gh run view:*)",
       "Bash(gh run list:*)",
       "Bash(gh issue view:*)",
-      "Bash(gh issue list:*)"
+      "Bash(gh issue list:*)",
+      "Bash(cd:*)",
+      "Bash(export:*)",
+      "Bash(set:*)",
+      "Bash(true)",
+      "Bash(git -C * status*)",
+      "Bash(git -C * log*)",
+      "Bash(git -C * diff*)",
+      "Bash(git -C * show*)",
+      "Bash(git -C * rev-parse*)",
+      "Bash(git -C * rev-list*)",
+      "Bash(git -C * ls-files*)",
+      "Bash(git -C * ls-tree*)",
+      "Bash(git -C * merge-base*)",
+      "Bash(git -C * cherry*)",
+      "Bash(git -C * check-ignore*)",
+      "Bash(git -C * blame*)",
+      "Bash(git -C * grep*)",
+      "Bash(git -C * fetch*)",
+      "Bash(git -C * worktree list*)",
+      "Bash(git -C * branch --show-current*)",
+      "Bash(git -C * branch --list*)",
+      "Bash(*/Scripts/python.exe*)",
+      "Bash(C:/Python*/python.exe*)",
+      "PowerShell(node *)",
+      "PowerShell(python *)",
+      "PowerShell(git status*)",
+      "PowerShell(git log*)",
+      "PowerShell(git diff*)",
+      "PowerShell(git show*)",
+      "PowerShell(Test-Path *)",
+      "PowerShell(Get-ChildItem*)",
+      "PowerShell(Get-Content *)",
+      "PowerShell(Get-Process*)",
+      "PowerShell(Select-String *)"
     ],
     "deny": [
       "Edit",
@@ -80,7 +114,11 @@
       "Bash(git worktree remove:*)",
       "Bash(git worktree prune:*)"
     ],
-    "defaultMode": "default"
+    "defaultMode": "default",
+    "additionalDirectories": [
+      "C:/Users/mateu/Documents/GitHub",
+      "C:/Users/mateu/Desktop/experiments"
+    ]
   },
   "theme": "dark",
   "hooks": {
