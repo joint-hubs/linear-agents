@@ -465,7 +465,13 @@ export function projectVerdictEvidence({
           continue;
         }
         const row = structuredRow(rec, runId, file, content, childrenByRun.get(runId) || []);
-        if (row.verdict === "UNKNOWN" && row.rawVerdict !== "UNKNOWN" && !["pass", "fail"].includes(row.rawVerdict)) {
+        // FOC-257: any non-pass/fail raw verdict (including literal "UNKNOWN")
+        // triggers the anomaly — the row.unknownReasons already carries it, but
+        // the anomaly array is the cross-row surface a dashboard scans. The
+        // rawVerdict !== "UNKNOWN" guard created an asymmetry: "maybe" was
+        // anomalous but "UNKNOWN" was not, despite normalizeVerdict mapping
+        // both to "UNKNOWN". Both are now anomalous for consistency.
+        if (row.verdict === "UNKNOWN" && !["pass", "fail"].includes(row.rawVerdict)) {
           anomalies.push({ reason: "unrecognized-verdict-value", path: row.artifacts[0].path, value: row.rawVerdict });
         }
         evidenceRows.push(row);

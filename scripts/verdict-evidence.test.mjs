@@ -792,6 +792,101 @@ function rebuildReport(r) {
   };
 }
 
+// ── FOC-257: exact key-set guard per row shape ─────────────────────────────
+// rebuildReport catches added keys and key-order drift, but a key removed from
+// BOTH the production code and rebuildReport would pass silently. These
+// independent exact-key-set assertions catch that — the expected sets are
+// spelled out here, not derived from the report, so a removed key is a
+// mismatch regardless of what rebuildReport lists.
+
+console.log("\n# FOC-257 exact key-set guard\n");
+
+{
+  const rep = project(corpusA);
+  const assertKeys = (name, obj, expected) => {
+    const actual = Object.keys(obj).sort();
+    const want = [...expected].sort();
+    check(`key-set: ${name}`, JSON.stringify(actual) === JSON.stringify(want),
+      `expected ${JSON.stringify(want)}, got ${JSON.stringify(actual)}`);
+  };
+
+  // evidenceRow shape
+  for (const w of rep.evidenceRows) {
+    assertKeys("evidenceRow", w, [
+      "issue", "stage", "source", "attempt", "round", "verdict", "rawVerdict",
+      "unknownReasons", "qualityFlags", "childId", "work", "artifacts",
+      "recordedAt", "findings", "acMapping", "evidenceLine", "conflictingEvidence",
+    ]);
+    assertKeys("evidenceRow.work", w.work, [
+      "workId", "fingerprint", "baseRevision", "reviewRunId", "workTurns",
+    ]);
+  }
+
+  // logicalVerdict shape
+  for (const l of rep.logicalVerdicts) {
+    assertKeys("logicalVerdict", l, [
+      "issue", "stage", "round", "attempt", "resolvedVerdict", "coverageClass",
+      "resolution", "conflict", "work", "qualityFlags", "sources", "artifacts",
+    ]);
+    assertKeys("logicalVerdict.work", l.work, ["workId"]);
+  }
+
+  // perIssue shape
+  for (const p of rep.perIssue) {
+    assertKeys("perIssue", p, [
+      "issue", "review", "testAcceptance", "testAcceptanceArtifacts",
+      "humanAcceptance", "humanAcceptanceTraces", "testReportArtifacts",
+    ]);
+    assertKeys("perIssue.review", p.review, ["finalVerdict", "firstPassClean", "rounds"]);
+  }
+
+  // corroborationHint shape
+  for (const h of rep.corroborationHints) {
+    assertKeys("corroborationHint", h, ["issue", "attempt", "verdict", "cells"]);
+  }
+
+  // coverage shape
+  assertKeys("coverage", rep.coverage, [
+    "logicalVerdicts", "matched", "unmatched", "ambiguous",
+  ]);
+}
+
+// ── FOC-257: literal "UNKNOWN" raw verdict → unrecognized-verdict-value anomaly ──
+// normalizeVerdict maps "UNKNOWN" to "UNKNOWN" — the row.unknownReasons already
+// carries it. Before FOC-257 the anomaly guard excluded rawVerdict === "UNKNOWN"
+// (the rawVerdict !== "UNKNOWN" guard), so "maybe" was anomalous but "UNKNOWN"
+// was not, despite both mapping to "UNKNOWN". Both are now anomalous.
+
+console.log("\n# FOC-257 literal UNKNOWN anomaly\n");
+
+{
+  const dir = join(root, "foc-257-unknown");
+  const c = mkCorpus(dir);
+  const runId = "2026-09-01T99-00-00-000-supervisor-abcd";
+  writeRun(c.sup, runId, {
+    verdicts: [
+      rec({ taskId: "FOC-999", round: 1, childId: "review-1", verdict: "UNKNOWN" }),
+      rec({ taskId: "FOC-998", round: 1, childId: "review-2", verdict: "maybe" }),
+    ],
+    children: {
+      "review-1": kid("review-1", "review", "FOC-999"),
+      "review-2": kid("review-2", "review", "FOC-998"),
+    },
+  });
+
+  const rep = project(c);
+  const unknownAnoms = rep.anomalies.filter((a) => a.reason === "unrecognized-verdict-value");
+  check("UNKNOWN anomaly: literal 'UNKNOWN' raw verdict → unrecognized-verdict-value",
+    unknownAnoms.some((a) => a.value === "UNKNOWN"),
+    JSON.stringify(unknownAnoms));
+  check("UNKNOWN anomaly: 'maybe' raw verdict → unrecognized-verdict-value (existing behaviour)",
+    unknownAnoms.some((a) => a.value === "maybe"),
+    JSON.stringify(unknownAnoms));
+  check("UNKNOWN anomaly: both rows flagged (no asymmetry)",
+    unknownAnoms.length >= 2,
+    JSON.stringify(unknownAnoms));
+}
+
 // ── 5. real-corpus read-only A/B (skipped without the main checkout) ──────────
 // The corpus is APPEND-ONLY and self-referential: this very candidate's own
 // REVIEW verdicts (FOC-218, FOC-219 …) are recorded into the same .state/ the
