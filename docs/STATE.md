@@ -3,6 +3,26 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## 2026-09-19 — FOC-380 (architektura pipeline'u) rozbity · FOC-385 uprawnienia zrobione
+
+- **FOC-380** (epik, dziecko FOC-102): rozbicie squadów na typowane kroki [D]/[J]/[A]/[H] + wywołania
+  decyzyjne (Jev przez OpenRouter Decisions API, `typesafe/jev-1.13`). 19 subtasków **FOC-381…399**
+  z 26 relacjami blocked-by; mapa, ścieżka krytyczna i lista „pamiętaj" w komentarzu na FOC-380.
+  - **Do startu od razu (bez blokerów):** 381 (R7b), 382 (rekord wyjścia DEV), 383 (ADR-0012),
+    385 (uprawnienia), 388 (research modeli OpenRouter).
+  - **Ścieżka krytyczna:** 383 → 386 → 387 → 390 → 398/399.
+  - Dowody: `docs/plans/fenix-architecture-gaps-2026-09-19.md` (+ dwie analizy z tego dnia).
+- **FOC-385 (Done, gałąź `chore/foc-385-permissions` → PR):** allowlisty dla supervisora i squadów
+  poszerzone według zmierzonego użycia
+  (m.in. `Edit` dla supervisora i planu, shell tylko do odczytu, python, git/gh/docker tylko do odczytu).
+  - Supervisor: `ask` na push / PR create+merge / reset --hard / clean / branch -D / rm -rf / WebFetch.
+  - Wszyscy: deny `git worktree remove|prune` i `mcp__claude_ai_Linear__*`.
+  - Role bez zmian: review i cadence dalej bez `Edit`, squady dalej bez `git push`.
+  - **Po merge'u:** restart supervisora i squadów (wczytanie settings), potem pomiar częstości
+    promptów na 5 sesjach wobec bazy ~76% wywołań powłoki.
+- **Znalezione przy okazji (nie moje):** niezacommitowane `agents/dev/agents/{debugger,implementer,
+  refactorer}.md` przestawione na `deepseek/deepseek-v4.1-flash` bez `models.map` — `check.mjs` = DRIFT (3).
+
 ## 2026-09-16 (close-out) — FOC-102 fala zamknięta · rezydua zapisane
 
 - **Stan zamknięcia:** `origin/main` na `b9814be` (PR #33 merged). Fala zmergowana jako **5+1 PR-ów**
