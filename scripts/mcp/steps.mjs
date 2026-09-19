@@ -142,7 +142,16 @@ export const EXTRACTION_STEP = {
       if (p === null) {
         throw new TypedError("unparseable_output", `decisions answers[${id}]: no numeric noul probability in [0,1]`);
       }
-      measured.push(p);
+      // Envelope confidence must express certainty of the VERDICT (accept or
+      // reject), not the probability of "true": a rejected candidate with
+      // p=0.05 is a confident rejection (certainty 0.95), so the per-answer
+      // figure is max(p, 1−p) — the distance from the coin flip — and the
+      // aggregate below is the min of those. A raw min(p) over all answers
+      // inverted this and reported probability-of-wrongness as the envelope
+      // confidence (measured live 2026-09-19: features accepted at 0.87/0.85
+      // under an envelope confidence of 0.05/0.04). Still native probabilities
+      // only — nothing estimated (ADR-0012 D3.6).
+      measured.push(Math.max(p, 1 - p));
       // p > 0.5 is the coin-flip reading of the native probability, NOT a
       // calibrated auto-fire threshold — those stay deferred until the ECE/
       // Brier calibration task (ADR-0012 D2). Consumers treat the decision

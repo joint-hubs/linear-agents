@@ -110,7 +110,9 @@ Dictated free text in (dictation corrupts words: the kickoff's own sample is *"k
   own context (the 39.7%-share context, GAPS §2.9). **Not wired yet** — the wiring point is the
   graph runner (FOC-397); this child ships the server only.
 - **Tier:** tier-1 Jev, one `noul` question per code-split candidate; measured confidence per
-  verified feature; envelope confidence = min over measured answers.
+  verified feature; envelope confidence = min over per-answer certainty, where the certainty of a
+  binary verdict is `max(p, 1−p)` — a confident rejection carries high confidence, so a bare
+  `min(p)` over all answers would report the rejection's probability-of-wrongness as confidence.
 - **[D] half:** the candidate split is deterministic code (`splitCandidates` — newline / semicolon /
   comma / common PL+EN conjunctions, duplicate-neighbour collapse, cap 12). It is deliberately naive
   and replaceable: the model's per-candidate verification absorbs the splitter's noise, per
@@ -375,9 +377,10 @@ tools/call), no supervisor wiring — and writes `docs/mcp-decision-steps-shadow
 `auto` goes live when `OPENROUTER_API_KEY` is set and offline otherwise; `live` without a key is
 REFUSED (never faked); every record states its path explicitly, and an offline record is never
 presented as a model answer. The committed evidence from 2026-09-19 is the **live** path:
-3/3 calls ok at tier 1 (resolved build `typesafe/jev-1.13-20260917`), ~0.3–0.4 s per call — the
+3/3 calls ok at tier 1 (resolved build `typesafe/jev-1.13-20260917`), ~0.3–0.7 s per call — the
 extraction fixtures verified the real Polish fragments and rejected the corrupted-dictation
-fragments ("kif", "czeryf"), the refinement fixture classified with min-measured confidence 0.4.
+fragments ("kif", "czeryf") with high certainty (envelope confidence 0.80 / 0.61, the min over
+per-answer `max(p, 1−p)`), the refinement fixture classified with min-measured confidence 0.44.
 Fixture content is synthetic; no real issue or conversation content is sent.
 
 ## Security notes

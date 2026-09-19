@@ -194,7 +194,13 @@ await test("valid decisions response → measured features + measured confidence
   if (envelope.ok !== true) fail("expected ok, got " + JSON.stringify(envelope));
   if (envelope.mode !== "live" || envelope.tier !== 1) fail("meta: " + JSON.stringify(envelope));
   if (envelope.model !== "typesafe/jev-1.13-20260917") fail("resolved build not carried: " + envelope.model);
-  if (envelope.confidence !== 0.41) fail("confidence should be min(measured): " + envelope.confidence);
+  // Certainty of the verdict, not probability of "true": the accepted answer
+  // (0.93) carries certainty 0.93, the rejected one (0.41) carries certainty
+  // 1−0.41 = 0.59; the envelope aggregates min over those = 0.59. A raw min
+  // over p would report the rejection's probability-of-wrongness (0.41) — the
+  // inverted semantics fixed in FOC-401 review round 1.
+  // 1−0.41 is 0.5900000000000001 in IEEE 754 — compare with a tolerance.
+  if (Math.abs(envelope.confidence - 0.59) > 1e-9) fail("confidence should be min(max(p,1-p)): " + envelope.confidence);
   const names = envelope.decision.features.map((f) => f.name);
   // p=0.93 > 0.5 → in; p=0.41 <= 0.5 → out (coin-flip reading, not a calibrated threshold)
   if (JSON.stringify(names) !== JSON.stringify(["kif"])) fail("features: " + JSON.stringify(names));

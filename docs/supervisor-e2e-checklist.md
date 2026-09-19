@@ -19,7 +19,7 @@ order they are numbered.
 
 ```bash
 node scripts/linear-query.mjs team FOC          # confirm the workspace answers
-node scripts/test-all.mjs                       # 67/67 before you start; a red suite invalidates the walk
+node scripts/test-all.mjs                       # 72/72 before you start; a red suite invalidates the walk
 git diff --stat -- agents/orchestrator          # AC-10, see below
 ```
 

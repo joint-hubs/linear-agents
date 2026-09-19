@@ -3,6 +3,36 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## 2026-09-19 — FOC-401 (kroki decyzyjne MCP) dowiezione · REVIEW r1 fixy
+
+- **FOC-401** (gałąź `foc-401-dev`, kandydat `925f312` + commit fixów): katalog rodziny kroków
+  decyzyjnych `docs/mcp-decision-steps-catalog.md` + **dwa serwery MCP** w `scripts/mcp/`
+  (`envelope.mjs`, `jsonrpc.mjs`, `steps.mjs`, `provider-jev.mjs`, `provider-offline.mjs`,
+  `server-extraction.mjs`, `server-prompt-refinement.mjs`, `shadow-run.mjs`) z testami
+  `scripts/mcp-{extraction,prompt-refinement,protocol,shadow-run}.test.mjs`. Zero-dep ESM, envelope
+  fail-closed, confidence tylko z natywnych prawdopodobieństw (ADR-0012 D3.6).
+- **REVIEW r1 = FAIL → 3 must-fix zrobione (commit fixów):**
+  - **Semantyka confidence w ekstrakcji odwrócona → naprawiona** (`scripts/mcp/steps.mjs`): aggregate
+    brał `min` po WSZYSTKICH prawdopodobieństwach, łącznie z pewnie odrzuconymi kandydatami, więc
+    odrzucenie raportowało `1−p` jako confidence (dowód: stary shadow run — features 0.87/0.85 przy
+    envelope 0.05/0.04; FOC-397 low-confidence escalation strzelałby na każdej dyktaturze z szumem).
+    Nowa reguła: per-answer certainty `max(p, 1−p)`, potem `min` — certainty werdyktu; test
+    przypięty na nowo (`scripts/mcp-extraction.test.mjs`), `docs/mcp-decision-steps-shadow-run.json`
+    **zregenerowany na live** (OPENROUTER_API_KEY obecny; 3/3 ok, envelope 0.80 / 0.61 / 0.44),
+    katalog zsynchronizowany.
+  - **`docs/STATE.md`** — ta sekcja (AC5).
+  - **`docs/supervisor-e2e-checklist.md:22`** — `67/67` → `72/72` (forma literału niewidoczna dla
+    `docs-count-guard.test.mjs`, który pilnuje tylko linii 3 i 206).
+- **Otwarte (nieblokujące, świadomie poza FOC-401):**
+  - **repo-state recon** — właściciel kroku to otwarte pytanie (katalog §repo-state recon: udokumentowane,
+    nie rozstrzygnięte; nic downstream nie może na tym gate'ować).
+  - **Serwery niepodpięte** do żadnego flow — wiring to graph runner (FOC-396/397); FOC-401 dowozi
+    tylko serwery.
+  - **Brakujące wiersze cennika** w `config/models.json`: `typesafe/jev-1.13`, `qwen3-30b-a3b-instruct`
+    (config child; `price-check.mjs` ich nie widzi — rows must be hand-pinned).
+- **Dwa nity REVIEW r1 świadomie NIE naprawiane** (follow-up candidates): error-echo defense-in-depth
+  (envelope/provider-jev/jsonrpc) oraz spójność protocol/CLI.
+
 ## 2026-09-19 — FOC-380 (architektura pipeline'u) rozbity · FOC-385 uprawnienia zrobione
 
 - **FOC-380** (epik, dziecko FOC-102): rozbicie squadów na typowane kroki [D]/[J]/[A]/[H] + wywołania
