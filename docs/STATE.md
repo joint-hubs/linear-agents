@@ -3,30 +3,43 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## 2026-09-20 — FOC-283 Stage 1 (handoff compressor, eval only) — wynik: lever NIE wykazany
+## 2026-09-20 — FOC-283 Stage 1 (handoff compressor, eval only) — R2: lever WYKAZANY (skromnie), confounder rozwiązany
 
 - **Stage 1 = tylko ewaluacja** (bez treningu/GPU/pobierania modeli), gałąź `foc-283-dev`.
-  Raport: `docs/research/foc-283-handoff-compressor-stage1.md`; skrypty i metering zostają
-  LOCAL-ONLY w `.state/research-scratch/foc-283/` (niekommitowane).
+  Raport (runda 2, po REVIEW r1 pass + 13 uwag): `docs/research/foc-283-handoff-compressor-stage1.md`;
+  skrypty i metering LOCAL-ONLY w `.state/research-scratch/foc-283/` (niekommitowane).
 - **Pytanie:** czy model potrafi zdraftować pinned-state handoff tak, żeby następny etap mniej
   re-derive'ował? Metryka downstream = udział wywołań kontekstowych w pierwszych 15 tool callach
   pierwszej tury dziecka (wyciągacz B2, ta sama definicja co baseline).
 - **Baseline (AC-1, zamrożone archiwum, dokładna reprodukcja):** dev 33.3% / review 26.7% /
-  test 26.7% / plan 50.0%. **Korpus (AC-2):** 86 par (46 dev→review + 42 review→test), split po
-  taskach bez przecieku. **Template (AC-3):** 42/42. **API (AC-4):** GLM-5.3-flash extractive,
-  42/42 draftów, $0.0276 (52 zmierzone wywołania; `reasoning:{effort:'low'}` obowiązkowy — domyślny
-  effort zjada cały max_tokens i zwraca pustą treść; `usage:{include:true}` obowiązkowy do meteringu).
-- **Sondy downstream (AC-5):** 8 par × 2 ramiona (paired, identyczne warunki, tylko tekst handoffu
-  się różni), prawdziwe headless tury. Wynik (mediana ctx%): template 54.2/47.8, api 37.2/36.7
-  (dev→review / review→test). API bije template w obu kierunkach (6/8 par), ale ŻADNE ramię nie
-  dochodzi do baseline'u 26.7%.
-- **Werdykt kill-criterion (przedrejestrowany: musi bić i baseline, i template):** lever NIE
-  wykazany przy obecnej jakości modelu — Stage 2 (trening) nie startuje na tym dowodzie. Główny
-  koszt kontekstu świeżej pierwszej tury to weryfikacja samego pinned-state (git/fs inspekcja
-  wskazanych worktree i SHA), nie re-derivation, którego draft nie zapobiegł. Confounder: świeża
-  sonda vs historyczny anchor (różne warunki) — czysty next step to ramię baseline'u w tych samych
-  warunkach (sonda na oryginalnym archived kickoff).
-- Koszt łącznie ≈ $0.12 z limitu $2.
+  test 26.7% / plan 50.0%. **Korpus (AC-2):** 86 par (45 dev→review + 41 review→test — r1 błędnie
+  pisało 46+42), split po taskach bez przecieku. **Template (AC-3):** 42/42. **API (AC-4):**
+  GLM-5.3-flash extractive, 42/42 draftów, $0.0276 (52 zmierzone wywołania, w tym 10 ok:false —
+  retry po fixach promptu).
+- **Runda 1 (4 pary × 2 ramiona):** API biło template, ale oba ramiona nad anchor 26.7% → werdykt
+  „lever NIE wykazany". REVIEW r1: pass + 13 uwag (poprawki w raporcie: liczba par, cacheRead w
+  cenach — sonda r1 $0.0891→$0.1445 dla 12 rekordów, pełne rozliczenie prób, n=4 caveat, pointer
+  loose-sweep) + akceptacja eksperymentu de-confounding.
+- **Runda 2 (eksperyment de-confounding, Mateusz approve):** 16 par × 3 RAMIONA (paired): baseline
+  = ORYGINALNY archived kickoff (verbatim z pairs.json), template, api — wszystko inne identyczne.
+  **Wynik (mediana ctx%, all-16): baseline 49.4%, template 50.0%, api 40.0%.** API niżej niż
+  baseline w 10/16 par (mediana −9.0 pp) i niżej niż template w 11/16 (−10.0 pp); w obu kierunkach,
+  w obu odczytach klasyfikacji (strict + loose). **Fresh-baseline 49.4% ≫ historyczny anchor 26.7%**
+  → anchor to artefakt warunków (świeża pierwsza tura), nie jakości draftu.
+- **Werdykt kill-criterion (r2, de-confounded: musi bić i świeży-baseline, i template): lever
+  WYKAZANY skromnie** — odwraca werdykt r1 (był napędzany confoundem warunków). Zastrzeżenia:
+  marginesy skromne (sign-test p≈0.06 vs template, p≈0.30 vs baseline — kierunek wszędzie
+  zgodny), absolutnie 40% re-derivation zostaje, censoring 420 s niesymetryczny (13/16 baseline
+  vs 5/16 api), pre-registracja self-attested (bez timestampa). Decyzja o Stage 2 = Mateusz; tania
+  wzmocnienia: więcej par w tym samym 3-arm probe.
+- **Kluczowy mechanika pomiaru:** ekstrakcja z tee (verbatim stream-json) — per-session plik w
+  probe-config bywa obcięty przez SIGKILL (EOF ≠ koniec tury); tee nie niesie stop_reason ani
+  usage per wiadomość → censored koszty backfillowane z transkryptu (metoda walidowana 1:1 na
+  nietimeoutowanej sesji) = dolne ograniczenie.
+- **Koszt (z cacheRead, pełne rozliczenie 53 rekordów + 4 r1 ghost-runów niemierzalnych):**
+  sondy łącznie $0.7288 + drafty $0.0276 + diagnostyka ~$0.005 = **≈$0.7614 z limitu $2**
+  (limit z kickoffu frontmana — staged-scope approval, 2026-09-20). Szczegóły:
+  `probe-cost-revised.json`.
 
 ## 2026-09-20 — FOC-386 (decision-call seam) dowiezione
 
