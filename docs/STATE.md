@@ -3,6 +3,31 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## 2026-09-20 — FOC-283 Stage 1 (handoff compressor, eval only) — wynik: lever NIE wykazany
+
+- **Stage 1 = tylko ewaluacja** (bez treningu/GPU/pobierania modeli), gałąź `foc-283-dev`.
+  Raport: `docs/research/foc-283-handoff-compressor-stage1.md`; skrypty i metering zostają
+  LOCAL-ONLY w `.state/research-scratch/foc-283/` (niekommitowane).
+- **Pytanie:** czy model potrafi zdraftować pinned-state handoff tak, żeby następny etap mniej
+  re-derive'ował? Metryka downstream = udział wywołań kontekstowych w pierwszych 15 tool callach
+  pierwszej tury dziecka (wyciągacz B2, ta sama definicja co baseline).
+- **Baseline (AC-1, zamrożone archiwum, dokładna reprodukcja):** dev 33.3% / review 26.7% /
+  test 26.7% / plan 50.0%. **Korpus (AC-2):** 86 par (46 dev→review + 42 review→test), split po
+  taskach bez przecieku. **Template (AC-3):** 42/42. **API (AC-4):** GLM-5.3-flash extractive,
+  42/42 draftów, $0.0276 (52 zmierzone wywołania; `reasoning:{effort:'low'}` obowiązkowy — domyślny
+  effort zjada cały max_tokens i zwraca pustą treść; `usage:{include:true}` obowiązkowy do meteringu).
+- **Sondy downstream (AC-5):** 8 par × 2 ramiona (paired, identyczne warunki, tylko tekst handoffu
+  się różni), prawdziwe headless tury. Wynik (mediana ctx%): template 54.2/47.8, api 37.2/36.7
+  (dev→review / review→test). API bije template w obu kierunkach (6/8 par), ale ŻADNE ramię nie
+  dochodzi do baseline'u 26.7%.
+- **Werdykt kill-criterion (przedrejestrowany: musi bić i baseline, i template):** lever NIE
+  wykazany przy obecnej jakości modelu — Stage 2 (trening) nie startuje na tym dowodzie. Główny
+  koszt kontekstu świeżej pierwszej tury to weryfikacja samego pinned-state (git/fs inspekcja
+  wskazanych worktree i SHA), nie re-derivation, którego draft nie zapobiegł. Confounder: świeża
+  sonda vs historyczny anchor (różne warunki) — czysty next step to ramię baseline'u w tych samych
+  warunkach (sonda na oryginalnym archived kickoff).
+- Koszt łącznie ≈ $0.12 z limitu $2.
+
 ## 2026-09-20 — FOC-386 (decision-call seam) dowiezione
 
 - **FOC-386** (gałąź `foc-386-dev`): `scripts/decision-call.mjs` — JEDEN punkt wejścia dla wszystkich
