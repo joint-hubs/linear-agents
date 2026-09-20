@@ -3,6 +3,37 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## 2026-09-20 — FOC-386 (decision-call seam) dowiezione
+
+- **FOC-386** (gałąź `foc-386-dev`): `scripts/decision-call.mjs` — JEDEN punkt wejścia dla wszystkich
+  kroków [J]: wywołanie `{state, questions}` (typy `noul`/`choice`/`score` z `instructions`+`criteria`)
+  → typowane odpowiedzi + probabilities/confidence + wersja modelu + `usage.cost`, walidowane ajv
+  na wejściu i wyjściu (ADR-0012 D5), fail-closed (5 kodów z `mcp/envelope.mjs`). Kontrakt i sposób
+  użycia w nagłówku pliku; brak CLI (callers = rodzina kroków MCP, węzły grafu, kalibracja).
+- **Tier-1** = `createJevProvider` (pin `typesafe/jev-1.13`; na każdej decyzji rejestrowane OBA:
+  `pinnedModel` i echo resolved buildu w `model`); retry 429/5xx na granicy wywołania (2 próby,
+  backoff 250/1000 ms); **tier-2 fallback** = `z-ai/glm-5.3-flash` przez chat/completions
+  (`response_format: json_schema` + logprobs + `provider.require_parameters: true`; confidence =
+  exp(średni logprob), bez logprobów → `null`, nigdy nie szacowana; verdict noul → noul 1|0 jako
+  ENKODOWANIE werdyktu, per-answer confidence `null` po tier-2). Po wyczerpaniu kaskady — fail
+  closed do ścieżki relay/HITL. `auth_missing` → od razu fail closed (fallback bez klucza bez sensu).
+- **Metering**: każda odpowiedź HTTP pod własnym agent key `decision-call` (zdarzenie
+  `decision.call.usage`, koszt wprost z `usage.cost`; próby 429/5xx z `costUsd: null`), gated na
+  `LA_RUN_ID`, best-effort — jak telemetria w `mcp/envelope.mjs`.
+- **Shadow log**: każda zakończona decyzja (ok i fail-closed) dopisywana jako linia JSONL do
+  `.state/runs/<LA_RUN_ID>/decisions.jsonl` (inputs hash = sha256 z kanonicznego JSON
+  `{model: pin, state, questions}`, answers, confidence, obie wersje modelu, usage.cost,
+  responseId, error) — harness dołączy realny outcome. Best-effort, bez `LA_RUN_ID` — brak zapisu.
+- **Live-probe step-0 (2026-09-20, 1 wywołanie, HTTP 200, koszt $0.000013692)**: kształt
+  zgodny z "Measured alpha contract" z katalogu (rekord po qid; echo `typesafe/jev-1.13-20260917`;
+  `usage.cost` obecny) — klient zbudowany na OBSERWOWANYM kształcie, dryf kształtu tier-1 → fallback.
+- **Pricing row**: `typesafe/jev-1.13` → input $0.042/M, output $0/M (Mateusz, 2026-09-20);
+  `cacheRead: 0` pochodne z probe (koszt $0.000013692 zamyka się dokładnie na input_tokens ×
+  0.042/M, a usage decisions API nie niesie pól cache) — zgodnie z inwariantem config-drift
+  (każdy wiersz cennika z jawnym cacheRead). Pierwszy priced tier-1; `checklist` 72→73 plików.
+- Testy: `scripts/decision-call.test.mjs` (19 testów, wszystko offline na injected fetch); pełna
+  suita `node scripts/test-all.mjs` (73 plików, foreground); guard `node scripts/docs-count-guard.test.mjs`.
+
 ## 2026-09-19 — FOC-401 (kroki decyzyjne MCP) dowiezione · REVIEW r1 fixy
 
 - **FOC-401** (gałąź `foc-401-dev`, kandydat `925f312` + commit fixów): katalog rodziny kroków
