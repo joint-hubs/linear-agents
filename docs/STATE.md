@@ -3,6 +3,15 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## 2026-09-21 — FOC-473: ADR-0012 amended ([G] kind, D7 node contract), tier-2 disabled
+
+- **ADR-0012 amended (FOC-473):** fifth step kind **[G] generate-shaped** (one model call, no tool loop, schema-validated bounded output, declared inputs only, cheap tier, never decides a gate); **D7 one node contract** for all kinds; the [J] bullet's "hallucination … 'mathematically impossible'" claim corrected (a schema guarantees shape, not truth — correctness comes from gates and calibration, FOC-387).
+- **Tier-2 disabled:** `FALLBACK_MODEL = null` in `scripts/decision-call.mjs` — D3.3 measured z-ai/glm-5.3-flash reasoning-mandatory, no documented non-thinking candidate holds a pricing row (qwen3-30b-a3b-instruct has none), so claiming "non-thinking" unmeasured would be fabrication. A tier-1 failure now fails closed: one `provider_error` envelope, "tier-2 disabled (FOC-473)" note, zero fallback network calls. The chat/completions + logprobs mechanism stays in the code, dormant, tested through the `fallbackModel` test seam.
+- **formatConfidence:** tier-2 logprobs measure FORMAT (well-formedness), not decision correctness — envelope and shadow log carry `confidence` (decision source; `null` at tier 2) and `formatConfidence` separately; never used for autonomy until calibrated (FOC-387).
+- **Drift test:** `scripts/decision-call.test.mjs` fails when the ADR-0012 quote and the shipped `FALLBACK_MODEL` diverge (every `FALLBACK_MODEL = …` quote in the ADR must equal the constant; missing ADR fails too). 23 tests, all offline on injected fetch.
+- **Verify:** `node scripts/decision-call.test.mjs` (exit 0) · `node scripts/docs-count-guard.test.mjs` (exit 0) · `node scripts/lint.mjs` (exit 0).
+- **Follow-ups → FOC-461** (noticed outside this task's paths, left untouched): ADR README index title still "four step kinds"; `docs/mcp-decision-steps-catalog.md` still presents tier 2 as live (non-thinking + logprobs) and its confidence wording predates `formatConfidence`.
+
 ## 2026-09-21 — Roadmapa Fenix (Linear przebudowany)
 
 - **Roadmapa Fenix 2026-09-21:** milestone'y M1–M6, epiki FOC-466..472 w projekcie FENIX; FOC-102
