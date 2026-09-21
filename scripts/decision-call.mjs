@@ -7,6 +7,16 @@
 // later (MCP step family, graph [D] nodes, calibration harness) calls through
 // this seam; no caller builds its own provider.
 //
+// Registry (FOC-448): a call may name a config/decisions.json entry instead
+// of carrying inline questions — {state, decisionId}. The question set is
+// resolved through scripts/decision-registry.mjs and both provenance facts
+// (decisionId, criteriaVersion) travel on the envelope, the served meter
+// event and the shadow line. The entry's autonomy is REGISTRY-OWNED: an A0
+// entry is served as an annotation only — its answers live inside
+// envelope.annotation and no field is left readable as an action flag, and
+// no caller parameter can request action semantics (structurally
+// unreachable: nothing is read from the caller but state and decisionId).
+//
 // Measured alpha contract (live probe 2026-09-20, HTTP 200, single call):
 //   · request  {model: "typesafe/jev-1.13", state, questions} — questions is
 //     a RECORD keyed by question id (an array is rejected with 400);
@@ -84,9 +94,11 @@ import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import Ajv from "ajv";
 import { runDecision, TypedError } from "./mcp/envelope.mjs";
 import { scrub } from "./mcp/scrub.mjs";
 import { createJevProvider, JEV_MODEL, probabilityOf, choiceOf, confidenceOf } from "./mcp/provider-jev.mjs";
+import { resolveEntryQuestions } from "./decision-registry.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -184,12 +196,18 @@ export const DECISION_STEP = {
   name: "decision-call",
   inputSchema: {
     type: "object",
-    required: ["state", "questions"],
+    required: ["state"],
     additionalProperties: false,
     properties: {
       state: { type: "string", minLength: 1, maxLength: 16000 },
       questions: { type: "object", minProperties: 1, maxProperties: 12, additionalProperties: QUESTION_SCHEMA },
+      decisionId: { type: "string", minLength: 1, maxLength: 200 },
     },
+    // Exactly one questions source: inline, or a registry entry (FOC-448).
+    anyOf: [
+      { required: ["questions"], not: { required: ["decisionId"] } },
+      { required: ["decisionId"], not: { required: ["questions"] } },
+    ],
   },
   outputSchema: {
     type: "object",
@@ -200,6 +218,12 @@ export const DECISION_STEP = {
     },
   },
 };
+
+// The decisionId path validates the RAW caller input before registry
+// resolution: runDecision later validates the RESOLVED {state, questions},
+// which would silently drop unexpected caller parameters — the raw shape
+// must not smuggle them through (fail closed instead).
+const INPUT_VALIDATE = new Ajv().compile(DECISION_STEP.inputSchema);
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -365,6 +389,23 @@ function disabledFallbackError(tier1Error) {
   );
 }
 
+// Pre-provider failure envelope (FOC-448): mirrors runDecision's fail-closed
+// shape exactly — mutual-exclusion violations, raw-input schema violations
+// and registry lookup failures return the same typed envelope without any
+// provider involvement.
+function failureEnvelope(err, startedAt, nowFn) {
+  return {
+    step: DECISION_STEP.name,
+    tier: null,
+    model: null,
+    mode: null,
+    ok: false,
+    error: { code: err.code, message: scrub(err.message) },
+    measuredAt: nowFn(),
+    durationMs: Date.now() - startedAt,
+  };
+}
+
 /**
  * Call-boundary retry: re-issues 429/5xx up to `retries` extra times with a
  * small backoff; everything else (other 4xx, network errors) propagates
@@ -429,7 +470,9 @@ function appendShadow(shadowDir, line) {
 /**
  * The decision-call seam. Returns an async call({state, questions}) →
  * envelope (the shared fail-closed shape, plus answers/usage/responseId and
- * pinnedModel on success).
+ * pinnedModel on success). A call may carry a registry decisionId instead of
+ * inline questions (FOC-448); an A0 entry is then served as an annotation
+ * only — envelope.annotation, never an action flag.
  *
  * Options:
  *   apiKey     — OPENROUTER_API_KEY value (both tiers; auth_missing without)
@@ -478,15 +521,66 @@ export function createDecisionCaller({
   const jevProvider = createJevProvider({ apiKey, fetchImpl: jevRetry, timeoutMs });
 
   async function callDecisions(input = {}) {
-    const hash = safeHash(input);
-    const envelope = await runDecision(DECISION_STEP, input, { provider: decisionProvider(), now });
+    const startedAt = Date.now();
+
+    // ── registry resolution (FOC-448): decisionId or inline questions ───────
+    // Resolution happens BEFORE the provider: a registry problem is a typed
+    // pre-provider failure — never a network attempt with half a question set.
+    let registry = null;
+    let preProviderFailure = null;
+    let effective = input;
+    if (input?.decisionId !== undefined) {
+      if (input.questions !== undefined) {
+        preProviderFailure = new TypedError(
+          "invalid_input",
+          "questions and decisionId are mutually exclusive — pass inline questions or a registry decisionId, not both",
+        );
+      } else if (!INPUT_VALIDATE(input)) {
+        const summary = (INPUT_VALIDATE.errors || []).slice(0, 3)
+          .map((e) => `${e.instancePath || "(root)"}: ${e.keyword}`).join("; ");
+        preProviderFailure = new TypedError("schema_invalid", `decisionId call input rejected: ${scrub(summary)}`);
+      } else {
+        try {
+          const resolved = resolveEntryQuestions(input.decisionId);
+          registry = { decisionId: input.decisionId, autonomy: resolved.autonomy, criteriaVersion: resolved.criteriaVersion };
+          effective = { state: input.state, questions: resolved.questions };
+        } catch (err) {
+          preProviderFailure = err instanceof TypedError
+            ? err
+            : new TypedError("provider_error", `decision registry lookup failed: ${scrub(err?.message || "unknown error")}`);
+        }
+      }
+    }
+
+    const hash = safeHash(preProviderFailure ? input : effective);
+    const envelope = preProviderFailure
+      ? failureEnvelope(preProviderFailure, startedAt, now)
+      : await runDecision(DECISION_STEP, effective, { provider: decisionProvider(registry), now });
 
     envelope.pinnedModel = JEV_MODEL;
+    if (registry) {
+      envelope.decisionId = registry.decisionId;
+      envelope.criteriaVersion = registry.criteriaVersion;
+    }
     if (envelope.ok) {
       envelope.usage = captured.usage ? { inputTokens: captured.usage.inputTokens, outputTokens: captured.usage.outputTokens, cost: captured.usage.cost } : null;
       envelope.responseId = captured.responseId;
       envelope.formatConfidence = captured.formatConfidence ?? null;
     }
+
+    // A0 (registry-owned autonomy, FOC-448): capture the measured answers for
+    // the shadow join FIRST, then wrap — the envelope carries an annotation
+    // only, and no field remains readable as an action flag. No caller
+    // parameter can request action semantics: the rule is the entry's.
+    const answers = envelope.ok ? envelope.decision.answers : null;
+    const confidence = envelope.confidence ?? null;
+    if (envelope.ok && registry?.autonomy === "A0") {
+      envelope.autonomy = "A0";
+      envelope.annotation = { answers, confidence };
+      delete envelope.decision;
+      delete envelope.confidence;
+    }
+
     appendShadow(shadowDir ?? defaultShadowDir(runIdActual()), {
       ts: now(),
       runId: runIdActual(),
@@ -496,17 +590,23 @@ export function createDecisionCaller({
       tier: envelope.tier ?? null,
       mode: envelope.mode ?? null,
       ok: envelope.ok === true,
-      answers: envelope.ok ? envelope.decision.answers : null,
-      confidence: envelope.confidence ?? null,
+      answers: envelope.ok ? answers : null,
+      confidence: envelope.ok ? confidence : null,
       formatConfidence: envelope.formatConfidence ?? null,
       usage: envelope.ok ? envelope.usage : null,
       responseId: envelope.ok ? envelope.responseId : null,
       error: envelope.ok ? null : { code: envelope.error.code },
+      // Registry provenance rides along for the harness join; inline calls
+      // spread nothing and stay byte-identical to the pre-FOC-448 lines.
+      ...(registry ? { decisionId: registry.decisionId, criteriaVersion: registry.criteriaVersion } : {}),
     });
     return envelope;
   }
 
-  function decisionProvider() {
+  function decisionProvider(registry) {
+    // Registry provenance travels on every served meter record (FOC-448);
+    // non-registry calls spread an empty object — byte-identical records.
+    const provenance = registry ? { decisionId: registry.decisionId, criteriaVersion: registry.criteriaVersion } : {};
     return {
       tier: 1,
       model: JEV_MODEL,
@@ -522,7 +622,7 @@ export function createDecisionCaller({
             const responseId = typeof body?.id === "string" ? body.id : null;
             const model = typeof body?.model === "string" && body.model ? body.model : null;
             captured = { usage, responseId, model, formatConfidence: null };
-            meterRecord("served")({ endpoint: "decisions", tier: 1, attempts: jevRetry.attempts(), model, status: null, usage, responseId });
+            meterRecord("served")({ endpoint: "decisions", tier: 1, attempts: jevRetry.attempts(), model, status: null, usage, responseId, ...provenance });
             return { decision: { answers: parsed.answers }, confidence: parsed.confidence };
           },
         };
@@ -532,13 +632,13 @@ export function createDecisionCaller({
         } catch (err) {
           if (err instanceof TypedError && err.code === "auth_missing") throw err;
           if (fallbackModel === null) throw disabledFallbackError(err);
-          return fallbackDecide(input, err);
+          return fallbackDecide(input, err, provenance);
         }
       },
     };
   }
 
-  async function fallbackDecide(input, tier1Error) {
+  async function fallbackDecide(input, tier1Error, provenance = {}) {
     let response;
     try {
       response = await tier2Retry(FALLBACK_ENDPOINT, {
@@ -587,7 +687,7 @@ export function createDecisionCaller({
     const model = typeof body?.model === "string" && body.model ? body.model : fallbackModel;
     const formatConfidence = logprobConfidence(body?.choices?.[0]?.logprobs);
     captured = { usage, responseId: null, model, formatConfidence };
-    meterRecord("served")({ endpoint: "chat-completions", tier: 2, attempts: tier2Retry.attempts(), model, status: null, usage, responseId: null });
+    meterRecord("served")({ endpoint: "chat-completions", tier: 2, attempts: tier2Retry.attempts(), model, status: null, usage, responseId: null, ...provenance });
     // Tier 2 has no DECISION confidence source — per-answer confidence stays
     // null and the envelope confidence is null; only the FORMAT is measured.
     return { tier: 2, model, mode: "live", decision: { answers: parsed }, confidence: null, formatConfidence };

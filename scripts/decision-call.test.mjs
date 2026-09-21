@@ -408,6 +408,147 @@ await test("fallback serving call carries its own usage meter event", async () =
   eq(retries.filter((r) => r.endpoint === "chat-completions").length, 1, "fallback retry metered");
 });
 
+console.log("\ndecision-call: registry decisionId calls (FOC-448)");
+
+const deepEq = (a, b, label) => {
+  const sa = JSON.stringify(a);
+  const sb = JSON.stringify(b);
+  if (sa !== sb) fail(`${label}: ${sa} !== ${sb}`);
+};
+
+// gate.screen — the registry's one concrete (non-template) question set;
+// the seed question is advisory and pending FOC-391, the autonomy is A0.
+const GATE_STATE = "Probe (FOC-448): registry decisionId call — gate.screen seed, advisory pre-screen.";
+const GATE_PROBE_BODY = {
+  model: "typesafe/jev-1.13-20260917",
+  answers: { q0: { type: "noul", noul: 0.98 } },
+  usage: { input_tokens: 326, output_tokens: 21, cost: 0.000013692 },
+  id: "gen-dec-1789892790-FOC448",
+  provider: "TypeSafe",
+};
+
+await test("decisionId resolves the registry question set and serves an A0 annotation", async () => {
+  const records = [];
+  const envelope = await caller((url, options) => {
+    eq(url, JEV_ENDPOINT, "tier-1 endpoint");
+    const body = JSON.parse(options.body);
+    deepEq(Object.keys(body.questions), ["q0"], "registry question set sent");
+    if (!body.questions.q0.instructions.includes("FOC-391")) fail("registry seed question text not sent");
+    return jsonResponse(GATE_PROBE_BODY);
+  }, { meter: (r) => records.push(r) })({ state: GATE_STATE, decisionId: "gate.screen" });
+  eq(envelope.ok, true, "ok");
+  eq(envelope.step, "decision-call", "step");
+  eq(envelope.decisionId, "gate.screen", "provenance on envelope");
+  eq(envelope.criteriaVersion, 1, "criteriaVersion on envelope");
+  eq(envelope.autonomy, "A0", "registry-owned autonomy surfaced");
+  // A0: the annotation is the only readable answer channel.
+  if ("decision" in envelope) fail("A0 envelope must not carry decision");
+  if ("confidence" in envelope) fail("A0 envelope must not carry confidence");
+  eq(envelope.annotation.answers.q0.noul, 0.98, "answers inside the annotation");
+  eq(envelope.annotation.confidence, 0.98, "confidence inside the annotation");
+  eq(envelope.pinnedModel, JEV_MODEL, "pinned model recorded");
+  eq(envelope.usage.cost, 0.000013692, "usage recorded");
+  const served = records.filter((r) => r.kind === "served");
+  eq(served.length, 1, "one served meter record");
+  eq(served[0].decisionId, "gate.screen", "provenance on meter event");
+  eq(served[0].criteriaVersion, 1, "criteriaVersion on meter event");
+});
+
+await test("a failed registry call still records provenance and never an annotation", async () => {
+  const records = [];
+  const envelope = await caller(async () => statusResponse(500), { meter: (r) => records.push(r), retries: 1 })({ state: GATE_STATE, decisionId: "gate.screen" });
+  eq(envelope.ok, false, "fail-closed");
+  eq(envelope.error.code, "provider_error", "tier-2 disabled path");
+  eq(envelope.decisionId, "gate.screen", "provenance on failed envelope");
+  eq(envelope.criteriaVersion, 1, "criteriaVersion on failed envelope");
+  if ("annotation" in envelope) fail("failed call carries no annotation");
+  if ("decision" in envelope) fail("failed call carries no decision");
+  if ("autonomy" in envelope) fail("autonomy is only surfaced on a served A0 call");
+  eq(records.some((r) => r.kind === "served"), false, "no served meter record on failure");
+});
+
+await test("questions and decisionId together are a typed invalid_input with no HTTP call", async () => {
+  let calls = 0;
+  const impl = async () => { calls++; return jsonResponse(GATE_PROBE_BODY); };
+  const envelope = await caller(impl)({ state: GATE_STATE, decisionId: "gate.screen", questions: NOUL_INPUT.questions });
+  eq(envelope.ok, false, "fail-closed");
+  eq(envelope.error.code, "invalid_input", "mutual exclusion");
+  if (!envelope.error.message.includes("mutually exclusive")) fail("message names the rule");
+  eq(typeof envelope.durationMs, "number", "pre-provider failure keeps the envelope shape");
+  eq(calls, 0, "no HTTP attempt");
+});
+
+await test("unknown decisionId fails closed with no HTTP call", async () => {
+  let calls = 0;
+  const impl = async () => { calls++; return jsonResponse(GATE_PROBE_BODY); };
+  const envelope = await caller(impl)({ state: GATE_STATE, decisionId: "intake.triage_node" });
+  eq(envelope.ok, false, "fail-closed");
+  eq(envelope.error.code, "invalid_input", "unknown id");
+  if (!envelope.error.message.includes("unknown decision id")) fail("message names the failure");
+  eq(calls, 0, "no HTTP attempt");
+});
+
+await test("registry template and node entries refuse a direct decisionId call", async () => {
+  let calls = 0;
+  const impl = async () => { calls++; return jsonResponse(GATE_PROBE_BODY); };
+  const templated = await caller(impl)({ state: GATE_STATE, decisionId: "extraction" });
+  eq(templated.ok, false, "template entry refuses");
+  eq(templated.error.code, "invalid_input", "template code");
+  if (!templated.error.message.includes("FOC-448")) fail("template refusal names the migration");
+  const node = await caller(impl)({ state: GATE_STATE, decisionId: "plan.dor" });
+  eq(node.ok, false, "node entry refuses");
+  eq(node.error.code, "invalid_input", "node code");
+  if (!node.error.message.includes("FOC-397")) fail("node refusal names the runner");
+  eq(calls, 0, "no HTTP attempt for either");
+});
+
+await test("no caller parameter can request action semantics (structurally unreachable)", async () => {
+  let calls = 0;
+  const impl = async () => { calls++; return jsonResponse(GATE_PROBE_BODY); };
+  const envelope = await caller(impl)({ state: GATE_STATE, decisionId: "gate.screen", asAction: true });
+  eq(envelope.ok, false, "fail-closed");
+  eq(envelope.error.code, "schema_invalid", "unknown parameter rejected by the raw-input gate");
+  if (!envelope.error.message.includes("decisionId call input rejected")) fail("message names the raw-input gate");
+  eq(calls, 0, "no HTTP attempt");
+});
+
+await test("shadow line for a registry call records decisionId, criteriaVersion and the measured answers", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decision-call-test-"));
+  try {
+    const envelope = await caller(async () => jsonResponse(GATE_PROBE_BODY), { shadowDir: dir })({ state: GATE_STATE, decisionId: "gate.screen" });
+    eq(envelope.ok, true, "ok");
+    const line = JSON.parse(readFileSync(join(dir, "decisions.jsonl"), "utf8").trim());
+    eq(line.decisionId, "gate.screen", "provenance in the shadow join");
+    eq(line.criteriaVersion, 1, "criteriaVersion in the shadow join");
+    eq(line.ok, true, "ok line");
+    eq(line.answers.q0.noul, 0.98, "measured answers recorded despite the A0 wrap");
+    eq(line.confidence, 0.98, "measured confidence recorded despite the A0 wrap");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("inline-questions calls stay byte-identical (no provenance keys anywhere)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decision-call-test-"));
+  try {
+    const records = [];
+    const envelope = await caller(async () => jsonResponse(PROBE_BODY), { shadowDir: dir, meter: (r) => records.push(r) })(NOUL_INPUT);
+    eq(envelope.ok, true, "ok");
+    if ("decisionId" in envelope) fail("inline envelope must not gain decisionId");
+    if ("criteriaVersion" in envelope) fail("inline envelope must not gain criteriaVersion");
+    if ("autonomy" in envelope) fail("inline call carries no autonomy");
+    if ("annotation" in envelope) fail("inline call carries no annotation");
+    eq(envelope.confidence, 0.98, "confidence stays top-level inline");
+    const line = JSON.parse(readFileSync(join(dir, "decisions.jsonl"), "utf8").trim());
+    if ("decisionId" in line) fail("inline shadow line must not gain decisionId");
+    if ("criteriaVersion" in line) fail("inline shadow line must not gain criteriaVersion");
+    eq(line.answers.q0.noul, 0.98, "answers recorded");
+    if (records.some((r) => "decisionId" in r)) fail("inline meter records must not gain provenance");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 console.log("\ndecision-call: ADR-0012 drift guard (code ↔ ADR agreement, FOC-473)");
 
 await test("ADR-0012 states the tier-2 state the code ships (drift guard)", async () => {
