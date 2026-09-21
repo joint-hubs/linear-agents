@@ -4,6 +4,8 @@
 
 **Date:** 2026-09-19 (co-designed with Mateusz via two HITL gate rounds; accepted on his review the same day)
 
+**Amendment 2026-09-21 (FOC-473) — fifth kind [G], one node contract, tier-2 honesty.** Corrections from the 2026-09-21 review, recorded in place below with `**Amended 2026-09-21 (FOC-473):**` markers: the taxonomy gains a fifth kind, **[G] generate-shaped** (D1), for one-call generation of small typed structures; the [J] bullet's "hallucination … 'mathematically impossible'" claim (JEV §1) is corrected — a schema-validated typed output guarantees shape, not truth; a single node contract (D7) now binds every kind; and tier 2 of the decision cascade is **disabled** (`FALLBACK_MODEL = null` in `scripts/decision-call.mjs`) until a non-thinking model is measured — its "non-thinking" premise was never measured and is contradicted by this ADR's own probe record (D3.3).
+
 ## Context
 
 The supervisor frontman (ADR-0009) runs all routine work — and pays for it. Measured on the deduplicated corpus (`docs/plans/fenix-architecture-gaps-2026-09-19.md` §2.1, below: **GAPS**): the frontman consumed $1,339 of $3,081 (43.5%), 2.5× all children combined; after the measurement corrections (GAPS §2.9 — amounts ~2.19× too high, per-squad shares not proportional) the corrected shares are supervisor 39.7%, dev 38.1%, review 11.4%, test 9.1%, plan 1.7%. Meanwhile a decisions model is cheap: Jev served 3 gate questions in 286–487 ms at ~$0.000023/call — "~0.3–0.5 s and ~$0.02 per 1,000 decisions" (GAPS §2.3), the "System One" economy.
@@ -13,22 +15,27 @@ Two further pressures shape this ADR:
 - Steps that are deterministic in content are today executed by an LLM anyway (GAPS §3.2), and steps that need one bounded judgment are executed by full agents — both burn frontier-tier cost on work a typed, cheap tier could do.
 - The Supervisor's context is a scarce resource: routine reasoning must not happen inside it. Work should run in processes whose only return to the caller is a final typed JSON (Mateusz, 2026-09-19: a model that "may think, but at the end must produce the concrete JSON … it is inside MCP so we do not pollute the Supervisor's context").
 
-This ADR records: the four step kinds, the decision-model tier (cascade), the verified constraints from the measured probes, Path A/B, and the MCP-hosted pattern for decision-shaped steps. It deliberately does NOT spec the graph.json v2 step schema (FOC-396), the graph runner (FOC-397), or the gate auto-answer policy (ADR-0013 / FOC-384).
+This ADR records: the five step kinds, the decision-model tier (cascade), the verified constraints from the measured probes, Path A/B, the MCP-hosted pattern for decision-shaped steps, and the one node contract for all kinds (D7). It deliberately does NOT spec the graph.json v2 step schema (FOC-396), the graph runner (FOC-397), or the gate auto-answer policy (ADR-0013 / FOC-384). **Amended 2026-09-21 (FOC-473):** "four" at acceptance — [G] generate-shaped is the fifth kind (D1).
 
 Evidence shorthands used throughout: **GAPS** = `docs/plans/fenix-architecture-gaps-2026-09-19.md` (the audited correction; authoritative where it disagrees), **JEV** = `docs/plans/jev-mechanics-fenix-analysis-2026-09-19.md`, **VISION** = `docs/plans/mcp-pipeline-vision-analysis-2026-09-19.md`.
 
 ## Decision
 
-### D1 — Four step kinds, with examples and classification rules
+### D1 — Five step kinds, with examples and classification rules
+
+**Amended 2026-09-21 (FOC-473):** "Four" at acceptance; [G] generate-shaped below is the fifth kind.
 
 Every step in a graph is exactly one of:
 
 - **[D] deterministic** — the output is fully determined by the inputs; no model call.
   Example: filling a template from a schedule snapshot; the graph transitions that are "deterministic co do treści, a mimo to wykonuje je LLM" (GAPS §3.2); merge-authority, which is "logika 3 linii (deep > security > first-pass), nie comprehension" — "Nie budować merge-authority jako LLM (to 3 linie JS)" (VISION §4.2, §10.4).
   Classification rule: if the step can be written as a pure function/script with no judgment, it is [D] — and per this ADR it must be.
-- **[J] decision-shaped** — unstructured state in, typed probabilistic decision out (JEV §1); the deterministic part of the work (regex/keyword/parser extraction) stays code, and the model only verifies/scores/classifies/routes (JEV §3.1). The model may think, but must END with a schema-validated typed JSON; hallucination in this shape is "mathematically impossible" (JEV §1) because the output space is typed.
+- **[J] decision-shaped** — unstructured state in, typed probabilistic decision out (JEV §1); the deterministic part of the work (regex/keyword/parser extraction) stays code, and the model only verifies/scores/classifies/routes (JEV §3.1). The model may think, but must END with a schema-validated typed JSON; the schema guarantees the output's SHAPE, not its truth — a well-formed answer can still be wrong, and correctness comes from the gates ([J]/[D]/[H]) and from calibration (FOC-387), never from the type system. **Amended 2026-09-21 (FOC-473):** this bullet previously quoted JEV §1's "hallucination … 'mathematically impossible'" reading; that is refuted — typing the output space constrains the form, it does not make the content true. JEV §1 is not edited; this ADR is the correction of record.
   Examples: findings/verdict severity; "AC mapped?"; "same error class as round N−1?"; "is this command irreversible?" (GAPS §4, §5); task-size classification (small/medium/large — feeds the ADR-0009 amendment); feature-relation and feature-size classification (Mateusz, 2026-09-19).
-  Classification rule: a single bounded judgment with a typed, validated answer — not a tool loop, not open-ended generation.
+  Classification rule: a single bounded judgment with a typed, validated answer — not a tool loop, not open-ended generation. **Amended 2026-09-21 (FOC-473):** generating a small structure (a Definition of Done, acceptance criteria) is not a judgment — that is [G] below; generation stays out of [J].
+- **[G] generate-shaped** — one model call, no tool loop, that produces a small typed structure: the output is JSON-schema-validated and bounded in size, the inputs are limited to the node's declared fields only, and the model tier is cheap by default (D7). **Amended 2026-09-21 (FOC-473):** new fifth kind from the 2026-09-21 review — the model never writes free prose here: templates, [G] nodes ("jedno wywołanie API z minimalnym kontekstem i schematem JSON") and [A] steps are what produce text (`docs/plans/jev-placement-map-2026-09-21.md`).
+  Examples: PLAN's Definition of Done and acceptance criteria; the small typed structures of the MCP family catalog (FOC-401) that are generated rather than judged.
+  Classification rule: the step GENERATES a small bounded structure instead of judging one — one call, no tool loop; and a [G] node never decides a gate — gates are [J], [D] or [H].
 - **[A] agentic** — a full agent loop (Claude Code in its own worktree); the only place for long context accumulation and `--resume` (GAPS §4).
   Example: the DEV implementer phase (edit → build → test → commit).
   Classification rule: the step requires interactive tool use with side effects and context accumulation across many turns.
@@ -45,7 +52,7 @@ Every step in a graph is exactly one of:
 A [J] step's model is chosen by the cascade, cheapest first:
 
 1. **Tier 1 — Jev** via the OpenRouter Decisions API. Served ONLY via `POST /api/alpha/decisions` (chat/completions returns 400); pin `typesafe/jev-1.13`, never a `~latest` alias. Native probabilities and confidence in the response; ~0.3–0.5 s, ~$0.02 per 1,000 decisions (GAPS §2.3).
-2. **Tier 2 — a non-thinking model with logprobs + structured output.** Phase 1 (Path A): OpenRouter open models (e.g. qwen3-30b-a3b-instruct, non-thinking). Phase 2 (Path B): a **local Ollama** model. Tier 2 must stay non-thinking: logprobs are meaningful only on clean tokens.
+2. **Tier 2 — a non-thinking model with logprobs + structured output.** Phase 1 (Path A): OpenRouter open models (e.g. qwen3-30b-a3b-instruct, non-thinking). Phase 2 (Path B): a **local Ollama** model. Tier 2 must stay non-thinking: logprobs are meaningful only on clean tokens. **Amended 2026-09-21 (FOC-473): tier 2 is DISABLED** (`FALLBACK_MODEL = null` in `scripts/decision-call.mjs`): this ADR's own probe (D3.3) measured z-ai/glm-5.3-flash as reasoning-mandatory — its reasoning cannot be turned off, ~910 reasoning tokens / ~11 s per yes/no — and no candidate holding a `config/models.json` pricing row is documented non-thinking (no such attribute exists on any row), while the example above, qwen3-30b-a3b-instruct, has no pricing row at all (config invariant: every used model needs one). Claiming "non-thinking" without measurement would repeat the dishonesty this amendment corrects. A tier-1 failure therefore fails closed straight to the relay/HITL path — the cascade runs with one fewer live tier. **Re-enable conditions:** a model MEASURED non-thinking, WITH a pricing row in `config/models.json`, and ADR quote and code agreeing (test-enforced — `scripts/decision-call.test.mjs` fails on divergence; see Open items).
 3. **Tier 3 — Claude**, where typed output without confidence is enough (Claude exposes no logprobs — verified, see D3).
 
 **Escalation tier:** frontier models sit at the top of the cascade, **below the human** (GAPS §3.6/§4: "niska pewność / błąd ──▶ wyższy szczebel ──▶ frontman ──▶ Ty").
@@ -54,7 +61,7 @@ A [J] step's model is chosen by the cascade, cheapest first:
 
 **Escalation policy (ruled, Q4a):** this ADR fixes the escalation DIRECTION only — lower confidence or an error moves the call one rung up, ending at the human. Threshold VALUES are deferred until measured calibration (ECE/Brier on labeled [J] outputs). The 0.95/0.5/0.7 numbers floated in JEV §6.3 have no measured basis today (GAPS §2.3: `answerable_from_docs` measured 0.61–0.73 — three gate questions on one model, Jev, n=3; GAPS itself calls the sample an anecdote — at a 0.95 threshold nothing would ever auto-fire).
 
-**Confidence source (FIXED; wording per review round 1):** confidence comes only from **measured sources** — tier-1 native Decisions-API probabilities or tier-2 logprobs; otherwise it is `null` — never estimated, never fabricated. (The original logprobs-only wording would have nulled every tier-1 answer, whose probabilities are native to the Decisions API rather than logprobs; the kept invariant is *measured — never estimated, never fabricated*.)
+**Confidence source (FIXED; wording per review round 1):** confidence comes only from **measured sources** — tier-1 native Decisions-API probabilities or tier-2 logprobs; otherwise it is `null` — never estimated, never fabricated. (The original logprobs-only wording would have nulled every tier-1 answer, whose probabilities are native to the Decisions API rather than logprobs; the kept invariant is *measured — never estimated, never fabricated*.) **Amended 2026-09-21 (FOC-473):** tier-2 logprobs measure **format confidence** — the probability that the output is well-formed, NOT the probability that the decision is right; the field is labelled `formatConfidence` (envelope + shadow log), `confidence` at tier 2 stays `null`, and `formatConfidence` is never used for autonomy until calibrated (FOC-387). Tier-1 native probabilities keep their existing meaning as decision confidence.
 
 ### D3 — Verified constraints (recorded from the measured probes)
 
@@ -65,7 +72,7 @@ All from GAPS §2.2–§2.3 unless noted:
 3. glm-5.3-flash cannot turn reasoning off — `reasoning:{enabled:false}` → 400 "Reasoning is mandatory".
 4. Jev is served ONLY via `POST /api/alpha/decisions` (chat/completions returns 400: "is a decisions model … Use the /api/alpha/decisions endpoint").
 5. Pin `typesafe/jev-1.13`, never a `~latest` alias — the alias has no endpoint today; the pinned version is kept in the decision record.
-6. Confidence comes only from **measured sources** — tier-1 native Decisions-API probabilities or tier-2 logprobs; otherwise `null` — never estimated or fabricated.
+6. Confidence comes only from **measured sources** — tier-1 native Decisions-API probabilities or tier-2 logprobs; otherwise `null` — never estimated or fabricated. **Amended 2026-09-21 (FOC-473):** tier-2 logprobs now feed `formatConfidence` (format, not decision correctness — see D2); `confidence` at tier 2 is `null`.
 
 **Refutation note:** `docs/plans/jev-mechanics-fenix-analysis-2026-09-19.md` §4 (Path A) claims "Anthropic zwraca `top_logprobs`" as a confidence source. That claim is **refuted by the measured probes** (GAPS §2.2 — constraint 1 above; constraint 2 for tool-call arguments). Path A survives only in the tier-3 role (typed output without confidence). The evidence doc is not edited; this ADR is the correction of record.
 
@@ -89,12 +96,26 @@ First [J] candidates (GAPS §2.8 deprioritizes the gate pre-screener; §5 lists 
 
 The wider MCP-hosted [J] family named by Mateusz — extraction/classification of the user's expected **features** into very short typed JSON; prompt refinement (also classifying how features relate and their size); repo-state recon (open: MCP server vs supervisor vs squad vs agent); definition-of-done; acceptance criteria; expected behaviors/features; risks; security requirements; security tests; QA; testing; out-of-scope — is ONE catalog+build child under FOC-380, filed as **FOC-401** (ruled, Q11a). ADR-0012 defines only the pattern (D5); the child owns the catalog and the build.
 
+### D7 — One node contract for all kinds
+
+**Amendment 2026-09-21 (FOC-473).** Every node of every kind carries exactly these fields, nothing more:
+
+- **id** — unique within the graph.
+- **kind** — exactly one of [D], [J], [A], [H], [G] (D1).
+- **declared input fields** — an explicit subset of the run record; nothing outside it may be read.
+- **output schema** — validated on write; a [G] node's output is additionally bounded in size.
+- **model tier** — [D]/[H]: none; [J]: per the D2 cascade; [G]: cheap tier by default; [A]: the agent model.
+- **failure behaviour** — typed and fail-closed: a failed node never invents output and never silently passes; only [J]/[D]/[H] decide gates ([G] never does).
+- **output destination** — one named place per node: the run record, the envelope, or the graph state.
+
+graph.json v2 (FOC-396) encodes exactly these fields — the node schema and this contract are the same list; a field outside it has no place in a node.
+
 ## Consequences
 
 - **Positive:**
-  - The frontman's 43.5% share has a defined escape route: [D] steps leave the LLM entirely, [J] steps drop to the cheap tiers, and only [A]/[H] keep the expensive shapes.
+  - The frontman's 43.5% share has a defined escape route: [D] steps leave the LLM entirely, [J] steps drop to the cheap tiers, and only [A]/[H] keep the expensive shapes. **Amended 2026-09-21 (FOC-473):** [G] joins the cheap-tier set (D1).
   - The Supervisor's context stops absorbing routine reasoning — MCP-hosted steps return one typed JSON each.
-  - Decisions carry measured confidence (tiers 1–2) instead of vibes; `null` is honest where no measurement exists.
+  - Decisions carry measured confidence (tiers 1–2) instead of vibes; `null` is honest where no measurement exists. **Amended 2026-09-21 (FOC-473):** tier 2 is disabled (D2) — today only tier-1 decisions carry decision confidence, and `formatConfidence` is labelled separately (D2, confidence rule).
   - The explicit per-kind taxonomy unlocks per-kind tooling (GEPA on [J] only) and makes misclassification auditable.
 - **Negative:**
   - Graph authoring requires explicit per-step labels and taxonomy discipline; the [J] classifier can propose but not decide.
@@ -127,3 +148,4 @@ The wider MCP-hosted [J] family named by Mateusz — extraction/classification o
 - **FOC-399** — xgrammar / Path B serving, including the Ollama logprobs probe (the Path B entry condition).
 - **Filed children** (by the Supervisor): the MCP [J] family catalog+build — **FOC-401**; the `draft-approval` kind implementation in `supervisor-gate.mjs` (small separate child, ruled Q4a).
 - **Calibration task** — ECE/Brier on labeled [J] outputs before any threshold becomes policy.
+- **Tier-2 re-enable (amendment 2026-09-21, FOC-473)** — find a model MEASURED non-thinking, give it a pricing row in `config/models.json`, restore `FALLBACK_MODEL` in `scripts/decision-call.mjs`, and update the ADR quote in the same change — the drift test fails while code and this ADR disagree.
