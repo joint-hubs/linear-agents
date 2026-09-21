@@ -105,8 +105,9 @@ Full per-pair values, per-cell values, and the extraction provenance are in `pro
 
 ### De-confounding result (the experiment's primary question)
 
-**The fresh-baseline arm sits at 49.4% — nowhere near the historical 26.7% anchor.** The historical
-anchor is confirmed to be a **conditions artifact**: a fresh single-turn probe child re-derives far
+**The fresh-baseline arm sits at 49.4% — nowhere near the historical 26.7% anchor.** The evidence
+indicates the historical anchor is a **conditions artifact** (single fresh-baseline arm, n=16 —
+indicated, not proven): a fresh single-turn probe child re-derives far
 more context than the historical long-running children did, regardless of which handoff text it
 receives (original, template, or model draft). The honest lever question is therefore
 **api vs original kickoff under identical conditions** — and on that question the model-drafted
@@ -130,11 +131,21 @@ observation does not reproduce at n=8 per cell.
 ### Reliability notes
 
 - **Timeout censoring is heavily arm-dependent:** 13/16 usable baseline-arm turns, 5/16 api turns
-  and 1/16 template turns hit the 420 s harness ceiling (all with complete observed windows; the 4
-  baseline attempts that timed out BELOW the 15-call window were rejected and re-run — see §retry
-  accounting). Censoring concentrates in the baseline arm because the original kickoff names no
-  worktree state to verify, so the child keeps searching longer; this makes the baseline arm's
-  number conservative (its window stops early, mid-search).
+  and 1/16 template turns hit the 420 s harness ceiling. Acceptance rule: a censored turn is used
+  when its FULL transcript carries ≥15 tool calls (the `probe-run.mjs` ok-rule) — the metric itself
+  reads only the first turn, as observed, even when that window is shorter than 15 calls (the 4
+  rejected baseline attempts were reruns whose full transcripts carried 21/25/20/34 calls against
+  first-turn windows of 6/10/5/11 — see §retry accounting). Of the 19 censored turns used, 12 had
+  truncated first-turn windows below 15 calls (baseline 005@10, 006@10, 015@5, 016@7, 017@8, 020@6,
+  021@10, 030@11, 035@14; api 006@13, 013@12; template 015@14), 1 (baseline 013) had a first turn
+  that completed naturally at 3 calls, and 6 reached the full 15-call window. Truncated windows
+  skew LOW-ctx (the 9 truncated baseline turns: median 37.5% vs 53.3% for the 3 complete-window
+  censored baseline turns; e.g. 035@14=7.1 and 005@10=10, though mixed: 021@10=70, 013@3=100), so
+  as-observed censoring pulls the baseline median DOWN — it understates the api-vs-baseline gap,
+  which is conservative for the pass (caveat 3); completing those turns would likely RAISE the
+  baseline number and strengthen, not overturn, the verdict. Censoring concentrates in the baseline
+  arm because the original kickoff names no worktree state to verify, so the child keeps searching
+  longer.
 - **Metric source:** extraction reads the runner's verbatim stream-json tee
   (`probe-tees/<arm>/<pairId>.jsonl`, sessionId-matched segment), not the per-session file under
   `probe-config/`: SIGKILL truncates that sync copy mid-write, so for censored turns its EOF is not
@@ -162,20 +173,23 @@ observation does not reproduce at n=8 per cell.
   timeouts below the 15-call threshold (F283-020: 13 calls, F283-006: 14, F283-015: 11, F283-030:
   14), all recorded `ok:false` in `probe-metering.json` with their token spend ($0.052 total) —
   nothing unrecorded this round.
-- Metering now holds **53 records total (21 recorded r1 + 36 r2), every one priced**, including the
+- Metering now holds **53 records total (17 recorded r1 + 36 r2), every one priced**, including the
   5 rejected (tokens were really spent). 48 of 53 are the usable grid probes (16 per arm).
 
 ## Kill-criterion verdict (round 2)
 
 **Pre-registration status (REVIEW r1 question C1, answered):** the criterion is **self-attested** —
-the stage-1 plan doc registers the B2 metric and the beat-both rule as design intent at experiment
-build time, but no externally timestamped pre-registration exists. Stated plainly; treat the
-criterion as a design decision, not a registered prediction.
+no externally timestamped pre-registration exists, and no plan doc in the repo or scratch registers
+the beat-both rule (the known stage-1 plan doc registers the B2 metric only — r1 finding 12).
+Design-decision evidence: the criterion as committed in the round-1 report (`31008ae`, lines
+100-102, verified present). Stated plainly; treat the criterion as a design decision, not a
+registered prediction.
 
 **Round-1 criterion** ("model-drafted arm must beat BOTH the historical baseline anchor AND the
 template control"): **superseded** — the baseline anchor is a conditions artifact (fresh-baseline arm
-measures 49.4% vs the historical 26.7% under identical probe conditions), so beating 26.7% was never
-the right test for a fresh-turn setting.
+measures 49.4% vs the historical 26.7% under identical probe conditions); under those conditions the
+historical anchor stays what round 1 itself called it: "an anchor, not a competitor arm"
+(`31008ae`, lines 62-63).
 
 **Round-2 criterion (de-confounded, same pairs, same conditions): the model-drafted arm must beat
 BOTH the fresh-baseline arm (original kickoff) AND the template arm.**

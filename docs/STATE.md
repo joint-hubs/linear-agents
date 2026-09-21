@@ -33,8 +33,8 @@
   vs 5/16 api), pre-registracja self-attested (bez timestampa). Decyzja o Stage 2 = Mateusz; tania
   wzmocnienia: więcej par w tym samym 3-arm probe.
 - **Kluczowy mechanika pomiaru:** ekstrakcja z tee (verbatim stream-json) — per-session plik w
-  probe-config bywa obcięty przez SIGKILL (EOF ≠ koniec tury); tee nie niesie stop_reason ani
-  usage per wiadomość → censored koszty backfillowane z transkryptu (metoda walidowana 1:1 na
+  probe-config bywa obcięty przez SIGKILL (EOF ≠ koniec tury); tee nie niesie zdarzenia result
+  (usage) → censored koszty backfillowane z transkryptu (metoda walidowana 1:1 na
   nietimeoutowanej sesji) = dolne ograniczenie.
 - **Koszt (z cacheRead, pełne rozliczenie 53 rekordów + 4 r1 ghost-runów niemierzalnych):**
   sondy łącznie $0.7288 + drafty $0.0276 + diagnostyka ~$0.005 = **≈$0.7614 z limitu $2**
