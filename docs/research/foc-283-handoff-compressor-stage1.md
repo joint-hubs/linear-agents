@@ -195,11 +195,13 @@ historical anchor stays what round 1 itself called it: "an anchor, not a competi
 **Round-2 criterion (de-confounded, same pairs, same conditions): the model-drafted arm must beat
 BOTH the fresh-baseline arm (original kickoff) AND the template arm.**
 
-> **Verdict: the lever IS demonstrated — modestly.** The API-drafted handoff beats the original
-> kickoff (10/16 pairs lower, median −9.0 pp) and the template control (11/16, median −10.0 pp) in
-> both directions, in all four cells, and under both strict and loose classification readings. This
-> REVERSES the round-1 kill verdict, which was driven by the conditions confound rather than by
-> draft quality.
+> **Verdict: promising, not statistically significant (n=16; 10 lower / 5 higher / 1 tied vs the
+> original kickoff; sign test 10/15 non-tied, one-sided p ≈ 0.15, two-sided ≈ 0.30; 13/16
+> baseline-arm turns cut by the 420 s ceiling).** The API-drafted handoff beats the original kickoff
+> (median −9.0 pp) and the template control (11/16, median −10.0 pp) in both directions, in all four
+> cells, and under both strict and loose classification readings. This reverses the round-1 kill
+> verdict, which was driven by the conditions confound rather than by draft quality; the pass rests
+> on the pre-registered beat-both rule, not on statistical significance.
 
 Honest caveats attached to the pass:
 
@@ -216,7 +218,7 @@ Honest caveats attached to the pass:
    kickoff makes the next stage search longer.
 4. **The probe child verifies instead of trusting, in every arm.** The residual 40% is dominated by
    git/fs verification of the pinned state — behavior the historical children (26.7%) did not show at
-   fresh-turn intensity. A training decision (Stage 2) should weigh the demonstrated ~10 pp lever at
+   fresh-turn intensity. A training decision (Stage 2) should weigh the observed ~10 pp lever at
    flash class against this conditions shift; a cheap scale-up of the same 3-arm probe to more pairs
    would firm up the 10/16 margin before committing to Stage 2. That decision is Mateusz's; the
    pre-registered rule no longer blocks it.

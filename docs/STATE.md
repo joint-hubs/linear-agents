@@ -3,7 +3,7 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
-## 2026-09-20 — FOC-283 Stage 1 (handoff compressor, eval only) — R2: lever WYKAZANY (skromnie), confounder rozwiązany
+## 2026-09-20 — FOC-283 Stage 1 (handoff compressor, eval only) — R2: obiecujące, nieistotne statystycznie (n=16; 10/5/1, test znaków p≈0.15; 13/16 tur bazowych uciętych limitem 420 s); confounder rozwiązany
 
 - **Stage 1 = tylko ewaluacja** (bez treningu/GPU/pobierania modeli), gałąź `foc-283-dev`.
   Raport (runda 2, po REVIEW r1 pass + 13 uwag): `docs/research/foc-283-handoff-compressor-stage1.md`;
@@ -26,12 +26,14 @@
   baseline w 10/16 par (mediana −9.0 pp) i niżej niż template w 11/16 (−10.0 pp); w obu kierunkach,
   w obu odczytach klasyfikacji (strict + loose). **Fresh-baseline 49.4% ≫ historyczny anchor 26.7%**
   → anchor to artefakt warunków (świeża pierwsza tura), nie jakości draftu.
-- **Werdykt kill-criterion (r2, de-confounded: musi bić i świeży-baseline, i template): lever
-  WYKAZANY skromnie** — odwraca werdykt r1 (był napędzany confoundem warunków). Zastrzeżenia:
-  marginesy skromne (sign-test p≈0.06 vs template, p≈0.30 vs baseline — kierunek wszędzie
-  zgodny), absolutnie 40% re-derivation zostaje, censoring 420 s niesymetryczny (13/16 baseline
-  vs 5/16 api), pre-registracja self-attested (bez timestampa). Decyzja o Stage 2 = Mateusz; tania
-  wzmocnienia: więcej par w tym samym 3-arm probe.
+- **Werdykt kill-criterion (r2, de-confounded: musi bić i świeży-baseline, i template):
+  obiecujący, nieistotny statystycznie (n=16; 10/5/1, test znaków p≈0.15 jednostronnie;
+  13/16 tur bazowych uciętych limitem 420 s)** — odwraca werdykt r1 (był napędzany confoundem
+  warunków); przechodzi po pre-rejestrowanej regule beat-both, nie po istotności. Zastrzeżenia:
+  marginesy skromne (sign-test p≈0.06 vs template; vs baseline 10/15, jednostronnie p≈0.15,
+  dwustronnie ≈0.30 — kierunek wszędzie zgodny), absolutnie 40% re-derivation zostaje, censoring
+  420 s niesymetryczny (13/16 baseline vs 5/16 api), pre-registracja self-attested (bez
+  timestampa). Decyzja o Stage 2 = Mateusz; tanie wzmocnienie: więcej par w tym samym 3-arm probe.
 - **Kluczowy mechanika pomiaru:** ekstrakcja z tee (verbatim stream-json) — per-session plik w
   probe-config bywa obcięty przez SIGKILL (EOF ≠ koniec tury); tee nie niesie zdarzenia result
   (usage) → censored koszty backfillowane z transkryptu (metoda walidowana 1:1 na
