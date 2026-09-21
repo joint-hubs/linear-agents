@@ -1,0 +1,544 @@
+{
+  "_doc": {
+    "what": "Decision & node registry (FOC-448) — one typed place per model-made judgment and per v2 graph-node step. Graph-node entries carry the ADR-0012 D7 contract copied verbatim from docs/plans/graph-json-v2-design.md §3.1–§3.9 (a config/graph.json v2 step object stays exactly-D7 and copies reads/output/tier/failure/writes from here); transport entries carry the question set their call-site sends to the decision-call seam.",
+    "consumers": "scripts/decision-registry.mjs (loader: validates every entry, lookup by id, question resolution + template instantiation), scripts/decision-call.mjs (decisionId lookups + the A0 annotation rule), scripts/mcp/steps.mjs (FOC-401 question templates).",
+    "autonomy": "A0 = the entry produces a model-made judgment whose A0-ENFORCED channel (the decision-call seam decisionId path) serves it as an annotation only — no caller field can request action semantics. Seed A0 entries: gate.screen (supervisor-fixed), extraction, prompt-refinement, plan.dor, plan.decompose. Start posture, stated honestly: nothing calibrated (thresholds null; FOC-387 has not run) and no placement is wired into a supervised flow — but extraction and prompt-refinement ARE served today by the built FOC-401 step servers (live MCP endpoints) whose code programmatically acts on answers inside the tool boundary; that built boundary is declared per path in the serving field and is gated to FOC-397. null = not an autonomy-managed decision, and the encoding is structural: autonomy is null IFF kind is one of G, A, H, D (node configs — the [G] generator node per the roadmap note, the [A] agent node gated by plan.gate1, the [H] human gates, the [D] deterministic node — are step configuration, not decisions), while kind J requires autonomy in {A0, A1, A2} (AC1's autonomy list binds decision entries). A1/A2 are evidence-backed promotions granted by Mateusz (FOC-387 calibration), never self-granted.",
+    "serving": "Machine-readable serving scope, required on kind-J entries (empty array = no serving path exists today). One record per serving path: via = the channel; actsOnAnswers = this path, as built today, programmatically consumes answers into operative output; a0Enforced = this path returns the A0 annotation-only shape, loader-enforced (true only on the seam decisionId channel); gate = the FOC that owns bringing the path under A0 governance — REQUIRED whenever actsOnAnswers=true && a0Enforced=false. Schema cross-rules: kind J ⇒ serving present and kind != J ⇒ serving forbidden; a0Enforced ⇒ via is the seam; autonomy A0 ⇒ every declared path is a0Enforced or names a gate.",
+    "threshold": "null in every seed entry — FOC-387 writes calibration rows; never invent numbers.",
+    "fallback": "tier2 is \"disabled\" in every entry while scripts/decision-call.mjs FALLBACK_MODEL is null (FOC-473): a tier-1 failure goes fail-closed to the relay/HITL path, or escalates where the entry's D7 failure field says so. Tier-2 is never claimed live; the registry test enforces the correspondence with the shipped constant.",
+    "criteriaVersion": "Bumped when an entry's question text changes; recorded on every registry-sourced call (envelope, shadow JSONL line, meter event).",
+    "outOfScope": "egress.contains_secret, intake.triage_node, intake.task_size, test.failure.cause, review.depth, orchestration.next_step, monitor.child_state are NOT entries here — they enter when their owners land (FOC-391 gate pre-screen wiring, FOC-397 decide-edges, and the egress/test/review/monitor owners).",
+    "sources": "Graph-node entries: docs/plans/graph-json-v2-design.md §3.1–§3.9 (FOC-396; runner FOC-397). gate.screen: seed question pending FOC-391. extraction / prompt-refinement: question text moved byte-identical from scripts/mcp/steps.mjs (FOC-401); per-candidate/per-feature instantiation stays in code.",
+    "templates": "A transport question key carrying {i} fans out one question per instance (\"q{i}\" → q0..qN-1, \"rel{i}\" → rel0..relN); {{var}} placeholders in the text are substituted per instance; a fixed key is served verbatim."
+  },
+  "entries": {
+    "plan.dor": {
+      "id": "plan.dor",
+      "kind": "J",
+      "owner": "plan node v2 (FOC-397 runner); DoR decision point MAP #3 (FOC-452)",
+      "hookPoint": "plan chain entry, after the [D] pinned-state prologue (repoState.pinned)",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) per the D7 failure field — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [],
+      "reads": [
+        "inbox.entry",
+        "repoState.pinned"
+      ],
+      "output": {
+        "type": "object",
+        "required": [
+          "ready",
+          "gaps"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "gaps": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "maxLength": 200
+            }
+          }
+        }
+      },
+      "tier": {
+        "cascade": true,
+        "min": 1
+      },
+      "failure": "escalate",
+      "writes": "run-record"
+    },
+    "plan.ac": {
+      "id": "plan.ac",
+      "kind": "G",
+      "owner": "plan node v2 (FOC-397 runner); seed [G] prompt pending FOC-397",
+      "hookPoint": "plan chain, after plan.dor — one bounded model call, never a gate verdict (D7: only [J]/[D]/[H] decide gates)",
+      "autonomy": null,
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed — the chain stops at one typed failure record, no unvalidated text flows to plan.spec; escalation policy is the runner's (FOC-397)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost"
+      ],
+      "criteriaVersion": 1,
+      "reads": [
+        "inbox.entry",
+        "features.list"
+      ],
+      "output": {
+        "type": "object",
+        "required": [
+          "acs",
+          "definitionOfDone"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "acs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "text",
+                "kind"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^AC-[0-9]{1,2}$"
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "kind": {
+                  "enum": [
+                    "behaviour",
+                    "boundary",
+                    "verification"
+                  ]
+                }
+              }
+            }
+          },
+          "definitionOfDone": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "required": [
+                "check",
+                "kind",
+                "bounded"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "check": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "kind": {
+                  "enum": [
+                    "test",
+                    "lint",
+                    "manual",
+                    "linear"
+                  ]
+                },
+                "bounded": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      },
+      "tier": "cheap",
+      "failure": "stop",
+      "writes": "run-record",
+      "prompt": "You generate acceptance criteria and a definition of done for one planning inbox entry. Work only from the declared inputs — the dictated entry text and the extracted feature list; no repo tree, no telemetry, no prior runs, no Linear comments (context size is a design output). Make exactly one model call with no tool loop. Produce one bounded declarative statement per criterion — never count, size or compute anything; sizes, counts and estimates belong to plan.decompose plus the code-side mapping, not here. Every acs item is an object {id, text, kind} where id matches ^AC-[0-9]{1,2}$, text stays within 300 characters, and kind is behaviour, boundary or verification; every definitionOfDone item is an object {check, kind, bounded} where check stays within 200 characters, kind is test, lint, manual or linear, and bounded says whether the check is machine-checkable as written. 1 to 12 items in each list. Your output must validate against this entry's output schema before anything downstream sees it; a schema-invalid or failed call stops the step fail-closed with one typed failure record — never partial data. Runs on the cheap tier."
+    },
+    "plan.spec": {
+      "id": "plan.spec",
+      "kind": "A",
+      "owner": "plan node v2 (FOC-397 runner); v1 plan-node LLM work with discovery folded in (GAPS §4)",
+      "hookPoint": "plan chain, after plan.ac — discovery + brief/ADR drafting ([A], interactive tool loop)",
+      "autonomy": null,
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "escalate after the runner's retry policy — the v1 two-strikes shape stays runner policy (FOC-397)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost"
+      ],
+      "criteriaVersion": 1,
+      "reads": [
+        "inbox.entry",
+        "plan.ac.acs",
+        "plan.ac.definitionOfDone",
+        "repoState.pinned"
+      ],
+      "output": {
+        "type": "object",
+        "required": [
+          "briefs",
+          "adr",
+          "summary"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "briefs": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          "adr": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        }
+      },
+      "tier": "agent",
+      "failure": "escalate",
+      "writes": "run-record"
+    },
+    "plan.gate1": {
+      "id": "plan.gate1",
+      "kind": "H",
+      "owner": "plan node v2 (FOC-397 runner); gate contract untouched (GAPS §4)",
+      "hookPoint": "plan chain, after plan.spec — GATE 1 (plan approval), relayed mechanically by supervisor-gate.mjs; Mateusz decides",
+      "autonomy": null,
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "no model call — the human decides; without approval the chain stops (D7 failure: stop)"
+      },
+      "metrics": [],
+      "criteriaVersion": 1,
+      "reads": [
+        "plan.spec.record"
+      ],
+      "output": {
+        "type": "object",
+        "required": [
+          "approved"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "approved": {
+            "type": "boolean"
+          }
+        }
+      },
+      "tier": null,
+      "failure": "stop",
+      "writes": "graph-state"
+    },
+    "plan.decompose": {
+      "id": "plan.decompose",
+      "kind": "J",
+      "owner": "plan node v2 (FOC-397 runner); built analogue of the prompt-refinement family",
+      "hookPoint": "plan chain, after plan.gate1 — epic/subtask split judgment; the size→engagement mapping stays [D] code (squadsForSize)",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) per the D7 failure field — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [],
+      "reads": [
+        "plan.spec.record",
+        "plan.ac.acs"
+      ],
+      "output": {
+        "type": "object",
+        "required": [
+          "tasks"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "tasks": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "required": [
+                "title",
+                "size",
+                "labels",
+                "relations"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "size": {
+                  "enum": [
+                    "small",
+                    "medium",
+                    "large"
+                  ]
+                },
+                "labels": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 60
+                  }
+                },
+                "relations": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 60
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "tier": {
+        "cascade": true,
+        "min": 1
+      },
+      "failure": "escalate",
+      "writes": "run-record"
+    },
+    "plan.gate2": {
+      "id": "plan.gate2",
+      "kind": "H",
+      "owner": "plan node v2 (FOC-397 runner); gate contract untouched (GAPS §4)",
+      "hookPoint": "plan chain, after plan.decompose — GATE 2 (push approval); config/graph.json plan.failure forbids pushing without it; Mateusz decides",
+      "autonomy": null,
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "no model call — the human decides; a missed approval stops the chain before any push (D7 failure: stop)"
+      },
+      "metrics": [],
+      "criteriaVersion": 1,
+      "reads": [
+        "plan.decompose.record",
+        "gate.plan.gate1.record"
+      ],
+      "output": {
+        "type": "object",
+        "required": [
+          "approved"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "approved": {
+            "type": "boolean"
+          }
+        }
+      },
+      "tier": null,
+      "failure": "stop",
+      "writes": "graph-state"
+    },
+    "plan.push": {
+      "id": "plan.push",
+      "kind": "D",
+      "owner": "plan node v2 (FOC-397 runner)",
+      "hookPoint": "plan chain, after plan.gate2 — idempotent Linear push ([D] script; re-running must not duplicate issues)",
+      "autonomy": null,
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "no model call — deterministic script; never push on a gate miss, fail-closed (D7 failure: stop)"
+      },
+      "metrics": [],
+      "criteriaVersion": 1,
+      "reads": [
+        "plan.decompose.record",
+        "gate.plan.gate2.record"
+      ],
+      "output": {
+        "type": "object",
+        "required": [
+          "epicId",
+          "childrenIds",
+          "handoffCommentPosted"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "epicId": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "childrenIds": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "string",
+              "maxLength": 20
+            }
+          },
+          "handoffCommentPosted": {
+            "type": "boolean"
+          }
+        }
+      },
+      "tier": null,
+      "failure": "stop",
+      "writes": "run-record"
+    },
+    "gate.screen": {
+      "id": "gate.screen",
+      "kind": "J",
+      "owner": "FOC-391 gate pre-screener (advisory, supervisor-fixed); seed question pending FOC-391",
+      "hookPoint": "before a HITL gate record is emitted (supervisor-gate.mjs pre-screen; advisory only — the human decides regardless)",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed to the relay/HITL path — the gate record goes to the human without the advisory annotation (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "q0": {
+          "type": "noul",
+          "instructions": "Advisory pre-screen of a HITL gate record (seed pending FOC-391; never decides the gate — the human approves or rejects regardless of this answer). Does the record look ready for review: complete against what the gate asks, self-consistent, and carrying the evidence a reviewer needs?",
+          "criteria": {
+            "true": "record looks complete and reviewable — flag it ready for the human",
+            "false": "record looks incomplete or unclear — flag it for the human's attention"
+          }
+        }
+      }
+    },
+    "extraction": {
+      "id": "extraction",
+      "kind": "J",
+      "owner": "FOC-401 (scripts/mcp/steps.mjs EXTRACTION_STEP); question text moved byte-identical from the step's toJev",
+      "hookPoint": "MCP extract_features tool call (server-extraction.mjs) — tier-1 verification of each code-split candidate; the enumeration itself is code",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed — one typed error envelope, never partial data; the relay/HITL path is the caller's fallback (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "step-server (FOC-401)",
+          "actsOnAnswers": true,
+          "a0Enforced": false,
+          "gate": "FOC-397"
+        }
+      ],
+      "questions": {
+        "q{i}": {
+          "type": "noul",
+          "instructions": "Is this dictated fragment a concrete, buildable expectation? Fragment: \"{{name}}\". Answer true only if a developer could open a task from it without asking the user what the words mean.",
+          "criteria": {
+            "true": "concrete expected feature or change",
+            "false": "greeting, context, meta-talk, or unactionable fragment"
+          }
+        }
+      }
+    },
+    "prompt-refinement": {
+      "id": "prompt-refinement",
+      "kind": "J",
+      "owner": "FOC-401 (scripts/mcp/steps.mjs PROMPT_REFINEMENT_STEP); question text moved byte-identical from the step's toJev",
+      "hookPoint": "MCP refine_prompt tool call (server-prompt-refinement.mjs) — tier-1 size classification + per-feature relations; the size→squads map stays code (ADR-0009 amendment)",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed — one typed error envelope, never partial data; the relay/HITL path is the caller's fallback (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "step-server (FOC-401)",
+          "actsOnAnswers": true,
+          "a0Enforced": false,
+          "gate": "FOC-397"
+        }
+      ],
+      "questions": {
+        "size": {
+          "type": "choice",
+          "instructions": "Classify the overall task size for frontman engagement (ADR-0009 amendment).",
+          "criteria": {
+            "small": "small and easy — the Supervisor does the work itself, no squads",
+            "medium": "medium or complicated — DEV + TEST squads",
+            "large": "large and very complex — full triage PLAN → DEV → REVIEW → TEST"
+          }
+        },
+        "rel{i}": {
+          "type": "choice",
+          "instructions": "How does the feature \"{{name}}\" relate to the other features in this task?",
+          "criteria": {
+            "standalone": "independent of the other features",
+            "extension": "extends or refines another feature listed here",
+            "alternative": "an alternative to another feature (either/or)"
+          }
+        }
+      }
+    }
+  }
+}

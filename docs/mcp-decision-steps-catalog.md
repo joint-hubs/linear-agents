@@ -20,7 +20,10 @@ Built code (the executable source of truth for the two built steps):
 `scripts/mcp/steps.mjs` (schemas + Jev mapping), `scripts/mcp/envelope.mjs` (fail-closed envelope),
 `scripts/mcp/provider-jev.mjs` (tier-1 transport + strict parsers), `scripts/mcp/provider-offline.mjs`
 (deterministic path), `scripts/mcp/jsonrpc.mjs` (minimal MCP surface), `scripts/mcp/server-*.mjs`
-(the two servers), `scripts/mcp/shadow-run.mjs` (evidence run).
+(the two servers), `scripts/mcp/shadow-run.mjs` (evidence run). Since FOC-448 the question TEXT of
+both built steps lives in `config/decisions.json` — the decision & node registry, loaded and
+instantiated by `scripts/decision-registry.mjs` — which is the source of truth for that text; this
+file stays the catalog for schemas, tiers and integration points.
 
 ## How to read a catalog entry
 
@@ -136,7 +139,7 @@ Dictated free text in (dictation corrupts words: the kickoff's own sample is *"k
   GAPS §2.3 measured `answerable_from_docs` 0.61–0.73, an anecdote). Consumers treat the decision as
   a proposal carrying its measurement.
 
-Input schema (JSON Schema; executable copy in `scripts/mcp/steps.mjs`):
+Input schema (JSON Schema; executable copy in `scripts/mcp/steps.mjs`; question text sourced from `config/decisions.json`, the registry — FOC-448):
 
 ```json
 {
@@ -205,7 +208,7 @@ management, state files).
   rationale would be fabricated text (D3.6 spirit). If a rationale is ever needed it must come from a
   measured source or a different tier.
 
-Input schema (JSON Schema; executable copy in `scripts/mcp/steps.mjs`):
+Input schema (JSON Schema; executable copy in `scripts/mcp/steps.mjs`; question text sourced from `config/decisions.json`, the registry — FOC-448):
 
 ```json
 {
