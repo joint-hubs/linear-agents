@@ -3,7 +3,8 @@
 //   node scripts/supervisor-spawn.mjs --squad <plan|dev|review|test> --task <issueId>
 //       --prompt "<kickoff>" [--run <supervisorRunId>] [--child <id>]
 //       [--permission-mode <mode>] [--model <id>] [--settings <extra-deny.json>]
-//       [--repo <path>] [--slug <text>] [--allowed-path <p> ...]
+//       [--repo <path>] [--slug <text>] [--candidate <sha-or-branch>]
+//       [--allowed-path <p> ...]
 //       [--pre-authorized <cmd> ...] [--known-quirk <text> ...]
 //       [--referenced-file <path> ...]
 //   node scripts/supervisor-spawn.mjs --release [--run <supervisorRunId>]
@@ -51,7 +52,9 @@ import {
   ensureRunDir,
   ensureWorktree,
   failJson,
+  git,
   killTree,
+  listWorktrees,
   readHeld,
   parseArgs,
   pinnedStatePrologue,
@@ -178,6 +181,25 @@ for (const value of asArray(args["referenced-file"])) {
   }
   if (/[\r\n]/.test(String(value))) {
     failJson(`--referenced-file value must be a single line — split it into repeated --referenced-file flags`);
+  }
+}
+
+// FOC-406: --candidate names the commit a child's worktree must start at — the
+// DEV candidate a REVIEW/TEST child verifies. Same parse hazard as the
+// FOC-296/FOC-357 fields: a missing value parses as boolean `true`, a newline
+// is not a revision anyone typed, and an empty value would resolve to nothing
+// at all. All three refuse here, before anything is written or launched; the
+// git resolution itself happens below, once the repo is known.
+const hasCandidate = args.candidate !== undefined;
+if (hasCandidate) {
+  if (args.candidate === true) {
+    failJson(`--candidate needs a value — a missing value, or one starting with "--", is not a revision`);
+  }
+  if (/[\r\n]/.test(String(args.candidate))) {
+    failJson(`--candidate value must be a single line — name one commit or branch`);
+  }
+  if (!String(args.candidate).trim()) {
+    failJson(`--candidate value is empty — name the commit or branch to pin the worktree at`);
   }
 }
 
@@ -332,9 +354,86 @@ if (!gitRoot) {
 }
 const branch = buildBranchName(taskId, args.slug || squad, undefined);
 
+// ── --candidate (FOC-406): pin the worktree at the DEV candidate ─────────────
+// REVIEW/TEST verify a candidate DEV produced; without this flag their worktree
+// starts at the base revision and the reviewer has to checkout the candidate by
+// hand (observed live, FOC-473 review kickoff) — and nothing fails when they
+// forget. With it, the child's branch is CREATED at the resolved commit and
+// `baseRevision` reports it, so the prologue cannot claim a state the child is
+// not in. The mechanics are squad-agnostic: dev simply does not pass the flag
+// today. Every refusal below is fail-closed — an unresolved or mismatched
+// candidate never falls back to the base revision, because verifying the wrong
+// tree is worse than verifying nothing.
+let candidateSha = null;
+if (hasCandidate) {
+  const wanted = String(args.candidate).trim();
+  // Resolve through git to exactly one commit — by full or short sha, or by
+  // branch/tag name. A tree or blob is not a commit a branch can start at.
+  try {
+    candidateSha = git(["rev-parse", "--verify", "--quiet", `${wanted}^{commit}`], gitRoot);
+  } catch {
+    failJson(
+      `--candidate "${wanted}" does not resolve to a commit in ${gitRoot} — refusing the spawn: candidate-unresolved`,
+      { reason: "candidate-unresolved", candidate: wanted, repo: gitRoot },
+    );
+  }
+
+  // The flag wants its own branch to pin. Sharing a branch a recorded child
+  // already owns would put a second child into a tree another child works in —
+  // the shared-tree failure ADR-0009 exists to prevent. Candidate-only: the
+  // no-flag reuse path below stays exactly as it was (FOC-167).
+  const colliding = Object.values(registry.children).filter((c) => c.branch === branch);
+  if (colliding.length) {
+    failJson(
+      `branch ${branch} is already owned by child ${colliding.map((c) => c.childId).join(", ")} in this run — ` +
+        `a --candidate spawn needs its own branch, refusing the spawn: candidate-branch-collision`,
+      { reason: "candidate-branch-collision", branch, children: colliding.map((c) => c.childId) },
+    );
+  }
+
+  // Reuse only when the standing tree IS the candidate — a reused worktree is
+  // pinned as it stands, so ignoring the candidate would be the exact bug
+  // class this flag exists to close.
+  const existing = listWorktrees(gitRoot).find((w) => w.branch === branch);
+  if (existing) {
+    const standingHead = git(["rev-parse", "HEAD"], resolve(existing.path));
+    if (standingHead !== candidateSha) {
+      failJson(
+        `worktree for ${branch} exists at ${resolve(existing.path)} and stands at ${standingHead.slice(0, 12)}, ` +
+          `not at the candidate ${candidateSha.slice(0, 12)} — refusing the spawn: candidate-head-mismatch`,
+        {
+          reason: "candidate-head-mismatch",
+          branch,
+          worktree: resolve(existing.path),
+          worktreeHead: standingHead,
+          candidate: candidateSha,
+        },
+      );
+    }
+  } else {
+    // The branch can exist without a worktree (a previous run's leftover), and
+    // `worktree add <path> <branch>` checks out its TIP — which is not
+    // necessarily the candidate. Refuse rather than move somebody's branch.
+    const branchTip = (() => {
+      try {
+        return git(["rev-parse", "--verify", `refs/heads/${branch}`], gitRoot);
+      } catch {
+        return null; // branch does not exist yet — it will be created at the candidate
+      }
+    })();
+    if (branchTip && branchTip !== candidateSha) {
+      failJson(
+        `branch ${branch} already exists at ${branchTip.slice(0, 12)}, not at the candidate ` +
+          `${candidateSha.slice(0, 12)} — refusing the spawn: candidate-branch-tip-mismatch`,
+        { reason: "candidate-branch-tip-mismatch", branch, branchTip, candidate: candidateSha },
+      );
+    }
+  }
+}
+
 let worktree;
 try {
-  worktree = ensureWorktree(gitRoot, branch);
+  worktree = ensureWorktree(gitRoot, branch, candidateSha);
 } catch (err) {
   failJson(`could not prepare a worktree for ${branch}: ${err.message}`, { gitRoot });
 }
