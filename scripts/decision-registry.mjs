@@ -200,9 +200,12 @@ export const ENTRY_SCHEMA = {
           serving: {
             type: "array",
             items: {
+              // (`type: "object"` on every branch keeps ajv strict mode
+              // quiet; the base serving subschema already pins the record
+              // as an object — the branch restates it.)
               anyOf: [
-                { properties: { a0Enforced: { const: true } }, required: ["a0Enforced"] },
-                { required: ["gate"] },
+                { type: "object", properties: { a0Enforced: { const: true } }, required: ["a0Enforced"] },
+                { type: "object", required: ["gate"] },
               ],
             },
           },

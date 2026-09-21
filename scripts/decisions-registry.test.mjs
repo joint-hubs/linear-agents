@@ -489,6 +489,17 @@ await test("serving/autonomy cross-rules fail closed (review round 1)", () => {
   throwsCode(() => loadRegistry({ path: fixture((r) => { r.entries["n.one"].autonomy = "A0"; }) }), "schema_invalid", "failed its schema");
 });
 
+// A serving RECORD is always an object (ajv strict-mode fix round): a
+// string/array standing in for a record fails closed, not vacuously.
+await test("a non-object serving record fails closed", () => {
+  throwsCode(() => loadRegistry({
+    path: fixture((r) => { r.entries["t.one"].serving = ["seam"]; }),
+  }), "schema_invalid", "failed its schema");
+  throwsCode(() => loadRegistry({
+    path: fixture((r) => { r.entries["t.one"].serving = [["seam", { a0Enforced: true }]]; }),
+  }), "schema_invalid", "failed its schema");
+});
+
 rmSync(fixtureDir, { recursive: true, force: true });
 
 console.log(`\ndecisions-registry: ${passed} passed, ${failures.length} failed`);
