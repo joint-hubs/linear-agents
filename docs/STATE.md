@@ -3,6 +3,14 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## 2026-09-21 — FOC-396: graph.json v2 design doc (design only, blocks FOC-397)
+
+- **Design doc:** `docs/plans/graph-json-v2-design.md` — PLAN decomposed into 7 steps (plan.dor [J] → plan.ac [G] → plan.spec [A] → plan.gate1 [H] → plan.decompose [J] → plan.gate2 [H] → plan.push [D]), each carrying the full ADR-0012 D7 contract (kind argued, declared `reads`, bounded output schema, tier, fail-closed failure, one output destination); REVIEW/TEST decomposition deferred to FOC-478 (M4).
+- **Mechanism:** Option A additive shape — v2 = v1 + per-squad `steps` (D7-exact objects) + node-local `stepFlow` (`sequence`) + top-level `decisionEdges` (`decide`); `edges`, squad contracts and budget stay untouched, so all 9 real consumers keep working unmodified. [J] minimum-tier pin specified (`tier: {cascade, min}` — the ADR-0012 Q5b open item). Five kickoff transitions bound to proposed registry ids (none exist in the catalog yet — FOC-448 owns the registry); child_state edge-vs-hook discrepancy flagged, not silently resolved.
+- **Frontman-share estimate (AC4):** conservative bound (only orchestration.next_step moves) ≈ 17 pp of corpus (0.435 × ~0.40, the map's unmeasured approximation); broader bound (argued 50–70% routine set) ≈ 22–30 pp; every factor labelled measured vs approximated; R7b ÷2.19 correction preserved (no post-correction absolutes exist).
+- **Verify:** `node scripts/docs-count-guard.test.mjs` (exit 0) · `node scripts/lint.mjs` (exit 0).
+- **Follow-ups:** FOC-397 runner (blocks on this doc); FOC-461 collector notes (stale README line-21 date; catalog tier-2 presentation drift still open).
+
 ## 2026-09-21 — FOC-473: ADR-0012 amended ([G] kind, D7 node contract), tier-2 disabled
 
 - **ADR-0012 amended (FOC-473):** fifth step kind **[G] generate-shaped** (one model call, no tool loop, schema-validated bounded output, declared inputs only, cheap tier, never decides a gate); **D7 one node contract** for all kinds; the [J] bullet's "hallucination … 'mathematically impossible'" claim corrected (a schema guarantees shape, not truth — correctness comes from gates and calibration, FOC-387).
