@@ -45,6 +45,10 @@ build child needs and the four things the graph.json v2 step schema (FOC-396) wi
   validator is hand-rolled, and `@modelcontextprotocol/sdk` is deliberately NOT adopted: the MCP
   surface a decision server needs is `initialize` / `tools/list` / `tools/call` over newline-delimited
   stdio JSON-RPC 2.0 — hand-rolled in `scripts/mcp/jsonrpc.mjs` (~120 lines, zero new deps).
+- **Worktree prerequisite.** The runtime imports ajv directly (`scripts/mcp/envelope.mjs:32` — the
+  repo's one declared runtime dependency), and `node_modules` is not committed: a fresh child
+  worktree must run `npm ci` before any decision-step server or its tests can run — a bare checkout
+  fails at import.
 - **Tier cascade (ADR-0012 D2).** Tier 1 = Jev via `POST /api/alpha/decisions` (pinned
   `typesafe/jev-1.13`, never a `~latest` alias); tier 2 = non-thinking model with logprobs +
   structured output; tier 3 = Claude, where typed output without confidence suffices (Claude exposes

@@ -3,6 +3,14 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## 2026-09-21 — Roadmapa Fenix (Linear przebudowany)
+
+- **Roadmapa Fenix 2026-09-21:** milestone'y M1–M6, epiki FOC-466..472 w projekcie FENIX; FOC-102
+  Done; FOC-380/447/216 zastąpione. Wykonanie wyłącznie z projektu FENIX, kolejność = sortowanie
+  tasków w epikach; maks. dwa tory naraz (A = FOC-467 od FOC-473; B = FOC-466 od FOC-406, nigdy
+  nie blokuje A). Drobiazgi z review → FOC-461. Mapa „gdzie Jev":
+  `docs/plans/jev-placement-map-2026-09-21.md`.
+
 ## 2026-09-20 — FOC-283 Stage 1 (handoff compressor, eval only) — R2: obiecujące, nieistotne statystycznie (n=16; 10/5/1, test znaków p≈0.15; 13/16 tur bazowych uciętych limitem 420 s); confounder rozwiązany
 
 - **Stage 1 = tylko ewaluacja** (bez treningu/GPU/pobierania modeli), gałąź `foc-283-dev`.
