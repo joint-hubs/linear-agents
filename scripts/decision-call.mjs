@@ -28,20 +28,34 @@
 //   · retry on 429/5xx at the call boundary (bounded, small backoff) by
 //     wrapping the injected fetch — 4xx other than 429 and network errors do
 //     not retry;
-//   · tier 2 — fallback on tier-1 failure (down, 4xx/5xx after retries, or a
-//     tier-1 body that no longer matches the measured shape): a NON-THINKING
-//     model via chat/completions with response_format json_schema,
-//     provider.require_parameters: true and logprobs. Confidence comes ONLY
-//     from the returned logprobs (mean token probability, exp of mean
-//     logprob); with no logprob source confidence is null — never estimated.
-//     A noul verdict maps to noul 1|0 — that is the verdict's ENCODING, not a
-//     measured probability: per-answer confidence stays null at tier 2, the
-//     honest uncertainty lives in the envelope confidence (logprob-derived),
-//     and the envelope tier/mode say which path served the call;
+//   · tier 2 — DISABLED as of FOC-473 (FALLBACK_MODEL = null): the planned
+//     fallback on tier-1 failure (down, 4xx/5xx after retries, or a tier-1
+//     body that no longer matches the measured shape) is parked. Why: the
+//     only probed candidate is reasoning-mandatory (D3.3 — glm-5.3-flash
+//     cannot turn reasoning off), no config/models.json row documents a
+//     non-thinking model, and calling that unmeasured would repeat the
+//     dishonesty this amendment corrects. The labelled mechanism below —
+//     chat/completions with response_format json_schema,
+//     provider.require_parameters: true and logprobs — stays in this file,
+//     covered through the fallbackModel test seam, and re-arms when a model
+//     is MEASURED non-thinking with a pricing row. While the constant is
+//     null, a tier-1 failure goes straight to the fail-closed envelope: one
+//     provider_error TypedError carrying the tier-1 cause, zero further
+//     network calls;
+//   · confidence vs formatConfidence: `confidence` is the DECISION source —
+//     tier-1 native Decisions-API probabilities, otherwise null, never
+//     estimated, never fabricated. `formatConfidence` measures the FORMAT
+//     (tier-2 exp of mean token logprob — the probability the output is
+//     well-formed), not the probability the decision is right, and is never
+//     used for autonomy until calibrated (FOC-387); at tier 2 per-answer
+//     confidence stays null (a noul verdict maps to noul 1|0 — that is the
+//     verdict's ENCODING, not a measured probability) and the envelope
+//     tier/mode say which path served the call;
 //   · auth_missing fails closed directly — no fallback attempt without
 //     credentials (both tiers share the same key);
-//   · after the cascade the seam fails closed to the relay/HITL path: one
-//     typed error envelope, never an invented answer.
+//   · after the cascade — one live tier while tier 2 is disabled — the seam
+//     fails closed to the relay/HITL path: one typed error envelope, never
+//     an invented answer.
 //
 // Metering: every HTTP response is metered under the seam's own agent key
 // ("decision-call") with OpenRouter's usage.cost verbatim; a decision that
@@ -77,10 +91,16 @@ import { createJevProvider, JEV_MODEL, probabilityOf, choiceOf, confidenceOf } f
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
 
-// Tier-2 fallback: a non-thinking model with logprob support that ALREADY has
-// a pricing row in config/models.json (input 0.075 / output 0.25 USD per 1M),
-// so live fallback spend stays measurable under cost caps.
-export const FALLBACK_MODEL = "z-ai/glm-5.3-flash";
+// Tier-2 fallback model — DISABLED since FOC-473: null keeps the chat/
+// completions transport below unreachable. Why: ADR-0012's own probe (D3.3)
+// measured z-ai/glm-5.3-flash reasoning-mandatory — its reasoning cannot be
+// turned off — and no candidate holding a config/models.json pricing row is
+// documented non-thinking (logprobs over reasoning tokens are not clean-token
+// confidence). Re-enable with a model MEASURED non-thinking that ALSO has a
+// pricing row (input 0.075 / output 0.25 USD per 1M kept the live fallback
+// spend measurable under cost caps); the drift test pins this constant and
+// ADR-0012 D2 together.
+export const FALLBACK_MODEL = null;
 export const FALLBACK_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 // Metering key — every decision-call HTTP usage is metered under this key.
 export const DECISION_AGENT_KEY = "decision-call";
@@ -332,6 +352,19 @@ function logprobConfidence(logprobs) {
   return Math.min(1, Math.max(0, Math.exp(sum / tokens.length)));
 }
 
+// Tier-2 disabled (FALLBACK_MODEL = null, FOC-473): a tier-1 failure must
+// fail closed exactly like a tier-2 failure would — one provider_error
+// TypedError carrying the tier-1 cause — with zero further network calls:
+// the dormant transport is never reached. The tier-1 message is status-only
+// or already scrubbed at the fetch boundary; it is scrubbed again here.
+function disabledFallbackError(tier1Error) {
+  const cause = tier1Error?.code || "error";
+  return new TypedError(
+    "provider_error",
+    `tier-2 disabled (FOC-473) (tier-1: ${cause}): ${scrub(tier1Error?.message || "no tier-1 cause")}`,
+  );
+}
+
 /**
  * Call-boundary retry: re-issues 429/5xx up to `retries` extra times with a
  * small backoff; everything else (other 4xx, network errors) propagates
@@ -406,6 +439,11 @@ function appendShadow(shadowDir, line) {
  *   backoffMs  — backoff schedule between retries (default [250, 1000])
  *   delayFn    — injectable sleeper (tests pass an instant resolver)
  *   meter      — per-call metering sink (default: LA_RUN_ID-gated telemetry)
+ *   fallbackModel — tier-2 model override (TEST SEAM): the shipped default is
+ *                  FALLBACK_MODEL, which is null (tier-2 disabled, FOC-473);
+ *                  tests pass a model string to keep the dormant chat/
+ *                  completions mechanism covered. Production callers never
+ *                  set this.
  *   shadowDir  — directory for decisions.jsonl (default
  *                <repo>/.state/runs/<LA_RUN_ID>; explicit dir writes even
  *                without LA_RUN_ID)
@@ -421,6 +459,7 @@ export function createDecisionCaller({
   backoffMs = [250, 1000],
   delayFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   meter = defaultMeter,
+  fallbackModel = FALLBACK_MODEL,
   shadowDir,
   runId = process.env.LA_RUN_ID,
   now = () => new Date().toISOString(),
@@ -435,7 +474,7 @@ export function createDecisionCaller({
   // tier 1 — the shared Jev transport over the retry-wrapped fetch; tier 2 —
   // the fallback transport with its own retry budget.
   const jevRetry = makeRetryFetch(fetchImpl, { retries, backoffMs, delayFn, onError: (r) => meterRecord("retry")({ endpoint: "decisions", tier: 1, model: JEV_MODEL, status: r.status, attempts: r.attempts, usage: null, responseId: null }) });
-  const tier2Retry = makeRetryFetch(fetchImpl, { retries, backoffMs, delayFn, onError: (r) => meterRecord("retry")({ endpoint: "chat-completions", tier: 2, model: FALLBACK_MODEL, status: r.status, attempts: r.attempts, usage: null, responseId: null }) });
+  const tier2Retry = makeRetryFetch(fetchImpl, { retries, backoffMs, delayFn, onError: (r) => meterRecord("retry")({ endpoint: "chat-completions", tier: 2, model: fallbackModel, status: r.status, attempts: r.attempts, usage: null, responseId: null }) });
   const jevProvider = createJevProvider({ apiKey, fetchImpl: jevRetry, timeoutMs });
 
   async function callDecisions(input = {}) {
@@ -446,6 +485,7 @@ export function createDecisionCaller({
     if (envelope.ok) {
       envelope.usage = captured.usage ? { inputTokens: captured.usage.inputTokens, outputTokens: captured.usage.outputTokens, cost: captured.usage.cost } : null;
       envelope.responseId = captured.responseId;
+      envelope.formatConfidence = captured.formatConfidence ?? null;
     }
     appendShadow(shadowDir ?? defaultShadowDir(runIdActual()), {
       ts: now(),
@@ -458,6 +498,7 @@ export function createDecisionCaller({
       ok: envelope.ok === true,
       answers: envelope.ok ? envelope.decision.answers : null,
       confidence: envelope.confidence ?? null,
+      formatConfidence: envelope.formatConfidence ?? null,
       usage: envelope.ok ? envelope.usage : null,
       responseId: envelope.ok ? envelope.responseId : null,
       error: envelope.ok ? null : { code: envelope.error.code },
@@ -480,7 +521,7 @@ export function createDecisionCaller({
             const usage = usageOf(body?.usage);
             const responseId = typeof body?.id === "string" ? body.id : null;
             const model = typeof body?.model === "string" && body.model ? body.model : null;
-            captured = { usage, responseId, model };
+            captured = { usage, responseId, model, formatConfidence: null };
             meterRecord("served")({ endpoint: "decisions", tier: 1, attempts: jevRetry.attempts(), model, status: null, usage, responseId });
             return { decision: { answers: parsed.answers }, confidence: parsed.confidence };
           },
@@ -490,6 +531,7 @@ export function createDecisionCaller({
           return await jevProvider.decide({ step: adapterStep, input });
         } catch (err) {
           if (err instanceof TypedError && err.code === "auth_missing") throw err;
+          if (fallbackModel === null) throw disabledFallbackError(err);
           return fallbackDecide(input, err);
         }
       },
@@ -503,7 +545,7 @@ export function createDecisionCaller({
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: FALLBACK_MODEL,
+          model: fallbackModel,
           messages: [
             { role: "system", content: "You resolve typed decision questions. Reply with the JSON object only — no prose." },
             { role: "user", content: JSON.stringify({ state: input.state, questions: input.questions }) },
@@ -542,11 +584,13 @@ export function createDecisionCaller({
     }
 
     const usage = usageOf(body?.usage);
-    const model = typeof body?.model === "string" && body.model ? body.model : FALLBACK_MODEL;
-    const confidence = logprobConfidence(body?.choices?.[0]?.logprobs);
-    captured = { usage, responseId: null, model };
+    const model = typeof body?.model === "string" && body.model ? body.model : fallbackModel;
+    const formatConfidence = logprobConfidence(body?.choices?.[0]?.logprobs);
+    captured = { usage, responseId: null, model, formatConfidence };
     meterRecord("served")({ endpoint: "chat-completions", tier: 2, attempts: tier2Retry.attempts(), model, status: null, usage, responseId: null });
-    return { tier: 2, model, mode: "live", decision: { answers: parsed }, confidence };
+    // Tier 2 has no DECISION confidence source — per-answer confidence stays
+    // null and the envelope confidence is null; only the FORMAT is measured.
+    return { tier: 2, model, mode: "live", decision: { answers: parsed }, confidence: null, formatConfidence };
   }
 
   return callDecisions;
