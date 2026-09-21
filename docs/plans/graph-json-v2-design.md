@@ -436,6 +436,11 @@ fallback path; metrics. All hook points call `decision-call.mjs` by id.
   an additive top-level `decisionEdges` array.
 - **Option B — new file** (`config/graph.v2.json`; v1 untouched).
 
+**Confirmed 2026-09-21 (Mateusz, via supervisor recommendation)** — both picks stand: (a) Option A,
+versioned key in place, additive — the schema-versioning precedent FOC-397 builds on; (b) the
+7-step PLAN split of §3 (plan.dor [J], plan.ac [G], plan.spec [A] with discovery folded in,
+plan.gate1 [H], plan.decompose [J], plan.gate2 [H], plan.push [D]).
+
 **Picked: Option A.** Defense, on the census evidence (§2):
 
 1. `validateGraph` requires `CONTRACT_FIELDS` + `autonomy` on every **top-level** node — nested
