@@ -528,6 +528,57 @@ await test("shadow line for a registry call records decisionId, criteriaVersion 
   }
 });
 
+await test("pre-provider failures stamp decisionId (criteriaVersion only where the entry resolved)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decision-call-test-"));
+  try {
+    let calls = 0;
+    const impl = async () => { calls++; return jsonResponse(GATE_PROBE_BODY); };
+    // mutual exclusion: the id is known, the entry never resolved
+    const excluded = await caller(impl, { shadowDir: dir })({ state: GATE_STATE, decisionId: "gate.screen", questions: NOUL_INPUT.questions });
+    eq(excluded.ok, false, "fail-closed");
+    eq(excluded.error.code, "invalid_input", "mutual exclusion");
+    eq(excluded.decisionId, "gate.screen", "id stamped on the failure envelope");
+    if ("criteriaVersion" in excluded) fail("exclusion fires before resolution — no criteriaVersion");
+    // unknown id: provenance even for a failed lookup
+    const unknown = await caller(impl, { shadowDir: dir })({ state: GATE_STATE, decisionId: "intake.triage_node" });
+    eq(unknown.ok, false, "fail-closed");
+    eq(unknown.decisionId, "intake.triage_node", "id stamped on the failed lookup");
+    if ("criteriaVersion" in unknown) fail("unknown id resolved nothing — no criteriaVersion");
+    // raw-input reject: the id is still provenance
+    const smuggled = await caller(impl)({ state: GATE_STATE, decisionId: "gate.screen", asAction: true });
+    eq(smuggled.error.code, "schema_invalid", "raw-input gate");
+    eq(smuggled.decisionId, "gate.screen", "id stamped on the raw-input reject");
+    eq(calls, 0, "no HTTP attempt for any of the three");
+    const lines = readFileSync(join(dir, "decisions.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    eq(lines.length, 2, "one shadow line per failed call");
+    for (const line of lines) {
+      eq(line.ok, false, "failed line");
+      if (typeof line.decisionId !== "string") fail("shadow line carries the id");
+      if ("criteriaVersion" in line) fail("no criteriaVersion where the entry did not resolve");
+    }
+    eq(lines[0].decisionId, "gate.screen", "exclusion line id");
+    eq(lines[1].decisionId, "intake.triage_node", "unknown-id line id");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("inline failures stamp nothing (byte-identity holds on error records too)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decision-call-test-"));
+  try {
+    const envelope = await caller(async () => statusResponse(500), { shadowDir: dir, retries: 1 })(NOUL_INPUT);
+    eq(envelope.ok, false, "fail-closed");
+    if ("decisionId" in envelope) fail("inline failure carries no decisionId");
+    if ("criteriaVersion" in envelope) fail("inline failure carries no criteriaVersion");
+    const line = JSON.parse(readFileSync(join(dir, "decisions.jsonl"), "utf8").trim());
+    if ("decisionId" in line) fail("inline failure shadow line carries no decisionId");
+    if ("criteriaVersion" in line) fail("inline failure shadow line carries no criteriaVersion");
+    eq(line.error.code, "provider_error", "error recorded");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 await test("inline-questions calls stay byte-identical (no provenance keys anywhere)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "decision-call-test-"));
   try {

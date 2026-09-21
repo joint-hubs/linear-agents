@@ -522,6 +522,8 @@ export function createDecisionCaller({
 
   async function callDecisions(input = {}) {
     const startedAt = Date.now();
+    // The id is provenance as soon as it is a string — served or failed.
+    const decisionId = typeof input?.decisionId === "string" && input.decisionId ? input.decisionId : null;
 
     // ── registry resolution (FOC-448): decisionId or inline questions ───────
     // Resolution happens BEFORE the provider: a registry problem is a typed
@@ -561,6 +563,12 @@ export function createDecisionCaller({
     if (registry) {
       envelope.decisionId = registry.decisionId;
       envelope.criteriaVersion = registry.criteriaVersion;
+    } else if (decisionId) {
+      // Failure provenance (review round 1): the id is stamped even on a
+      // pre-provider failure; criteriaVersion rides only where the entry
+      // actually resolved (a lookup that failed or never ran has none to
+      // give). Inline calls (no decisionId) stamp nothing.
+      envelope.decisionId = decisionId;
     }
     if (envelope.ok) {
       envelope.usage = captured.usage ? { inputTokens: captured.usage.inputTokens, outputTokens: captured.usage.outputTokens, cost: captured.usage.cost } : null;
@@ -596,9 +604,10 @@ export function createDecisionCaller({
       usage: envelope.ok ? envelope.usage : null,
       responseId: envelope.ok ? envelope.responseId : null,
       error: envelope.ok ? null : { code: envelope.error.code },
-      // Registry provenance rides along for the harness join; inline calls
-      // spread nothing and stay byte-identical to the pre-FOC-448 lines.
-      ...(registry ? { decisionId: registry.decisionId, criteriaVersion: registry.criteriaVersion } : {}),
+      // Provenance for the harness join: the id whenever it is known (served
+      // or failed); criteriaVersion only where the entry resolved (review
+      // round 1). Inline calls spread nothing and stay byte-identical.
+      ...(decisionId ? { decisionId, ...(registry ? { criteriaVersion: registry.criteriaVersion } : {}) } : {}),
     });
     return envelope;
   }
