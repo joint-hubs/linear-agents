@@ -2,7 +2,8 @@
   "_doc": {
     "what": "Decision & node registry (FOC-448) — one typed place per model-made judgment and per v2 graph-node step. Graph-node entries carry the ADR-0012 D7 contract copied verbatim from docs/plans/graph-json-v2-design.md §3.1–§3.9 (a config/graph.json v2 step object stays exactly-D7 and copies reads/output/tier/failure/writes from here); transport entries carry the question set their call-site sends to the decision-call seam.",
     "consumers": "scripts/decision-registry.mjs (loader: validates every entry, lookup by id, question resolution + template instantiation), scripts/decision-call.mjs (decisionId lookups + the A0 annotation rule), scripts/mcp/steps.mjs (FOC-401 question templates).",
-    "autonomy": "A0 = the entry produces a model-made judgment served as an ANNOTATION ONLY at the decision-call seam — no caller field can request action semantics. Seed A0 entries: gate.screen (supervisor-fixed), extraction, prompt-refinement, plan.dor, plan.decompose — start posture: nothing calibrated, nothing wired. null = not an autonomy-managed judgment (plan.ac content generation, plan.spec agent work, plan.gate1/plan.gate2 human gates, plan.push deterministic). A1/A2 are evidence-backed promotions granted by Mateusz (FOC-387 calibration), never self-granted.",
+    "autonomy": "A0 = the entry produces a model-made judgment whose A0-ENFORCED channel (the decision-call seam decisionId path) serves it as an annotation only — no caller field can request action semantics. Seed A0 entries: gate.screen (supervisor-fixed), extraction, prompt-refinement, plan.dor, plan.decompose. Start posture, stated honestly: nothing calibrated (thresholds null; FOC-387 has not run) and no placement is wired into a supervised flow — but extraction and prompt-refinement ARE served today by the built FOC-401 step servers (live MCP endpoints) whose code programmatically acts on answers inside the tool boundary; that built boundary is declared per path in the serving field and is gated to FOC-397. null = not an autonomy-managed decision, and the encoding is structural: autonomy is null IFF kind is one of G, A, H, D (node configs — the [G] generator node per the roadmap note, the [A] agent node gated by plan.gate1, the [H] human gates, the [D] deterministic node — are step configuration, not decisions), while kind J requires autonomy in {A0, A1, A2} (AC1's autonomy list binds decision entries). A1/A2 are evidence-backed promotions granted by Mateusz (FOC-387 calibration), never self-granted.",
+    "serving": "Machine-readable serving scope, required on kind-J entries (empty array = no serving path exists today). One record per serving path: via = the channel; actsOnAnswers = this path, as built today, programmatically consumes answers into operative output; a0Enforced = this path returns the A0 annotation-only shape, loader-enforced (true only on the seam decisionId channel); gate = the FOC that owns bringing the path under A0 governance — REQUIRED whenever actsOnAnswers=true && a0Enforced=false. Schema cross-rules: kind J ⇒ serving present and kind != J ⇒ serving forbidden; a0Enforced ⇒ via is the seam; autonomy A0 ⇒ every declared path is a0Enforced or names a gate.",
     "threshold": "null in every seed entry — FOC-387 writes calibration rows; never invent numbers.",
     "fallback": "tier2 is \"disabled\" in every entry while scripts/decision-call.mjs FALLBACK_MODEL is null (FOC-473): a tier-1 failure goes fail-closed to the relay/HITL path, or escalates where the entry's D7 failure field says so. Tier-2 is never claimed live; the registry test enforces the correspondence with the shipped constant.",
     "criteriaVersion": "Bumped when an entry's question text changes; recorded on every registry-sourced call (envelope, shadow JSONL line, meter event).",
@@ -30,6 +31,7 @@
         "confidence"
       ],
       "criteriaVersion": 1,
+      "serving": [],
       "reads": [
         "inbox.entry",
         "repoState.pinned"
@@ -269,6 +271,7 @@
         "confidence"
       ],
       "criteriaVersion": 1,
+      "serving": [],
       "reads": [
         "plan.spec.record",
         "plan.ac.acs"
@@ -433,6 +436,13 @@
         "confidence"
       ],
       "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
       "questions": {
         "q0": {
           "type": "noul",
@@ -463,6 +473,14 @@
         "confidence"
       ],
       "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "step-server (FOC-401)",
+          "actsOnAnswers": true,
+          "a0Enforced": false,
+          "gate": "FOC-397"
+        }
+      ],
       "questions": {
         "q{i}": {
           "type": "noul",
@@ -493,6 +511,14 @@
         "confidence"
       ],
       "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "step-server (FOC-401)",
+          "actsOnAnswers": true,
+          "a0Enforced": false,
+          "gate": "FOC-397"
+        }
+      ],
       "questions": {
         "size": {
           "type": "choice",

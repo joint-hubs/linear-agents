@@ -148,6 +148,40 @@ await test("metrics sets match the contract per kind", () => {
   for (const id of SEED_IDS) deepEq(entries[id].metrics, METRICS_BY_ID[id], `metrics of ${id}`);
 });
 
+console.log("\ndecisions-registry: serving scope + structural autonomy (review round 1)");
+
+// The built step boundary is DECLARED, not implied: extraction and
+// prompt-refinement are served today by FOC-401 step servers whose code acts
+// on answers — gated to FOC-397. gate.screen's only path is the seam. The
+// PLAN [J] entries have no serving path yet (FOC-397 wires them).
+const SERVING_BY_ID = {
+  extraction: [{ via: "step-server (FOC-401)", actsOnAnswers: true, a0Enforced: false, gate: "FOC-397" }],
+  "prompt-refinement": [{ via: "step-server (FOC-401)", actsOnAnswers: true, a0Enforced: false, gate: "FOC-397" }],
+  "gate.screen": [{ via: "seam", actsOnAnswers: false, a0Enforced: true }],
+  "plan.dor": [],
+  "plan.decompose": [],
+};
+
+await test("serving is pinned per entry: the built boundary is declared, the seam is enforced", () => {
+  for (const id of SEED_IDS) {
+    if (!TRANSPORT_IDS.includes(id) && id !== "plan.dor" && id !== "plan.decompose") continue;
+    deepEq(entries[id].serving, SERVING_BY_ID[id], `serving of ${id}`);
+  }
+});
+
+await test("autonomy encoding is structural: null IFF kind is not J; kind J declares serving", () => {
+  for (const id of SEED_IDS) {
+    const e = entries[id];
+    if (e.kind === "J") {
+      if (e.autonomy !== "A0" && e.autonomy !== "A1" && e.autonomy !== "A2") fail(`${id}: kind J must carry A0/A1/A2`);
+      if (e.serving === undefined) fail(`${id}: kind J must declare serving`);
+    } else {
+      eq(e.autonomy, null, `node config ${id} is autonomy-null`);
+      if (e.serving !== undefined) fail(`${id}: non-J entries carry no serving`);
+    }
+  }
+});
+
 await test("fallback tier2 is disabled everywhere and corresponds to the shipped FALLBACK_MODEL", () => {
   for (const id of SEED_IDS) {
     const fb = entries[id].fallback;
@@ -380,6 +414,7 @@ function fixture(mutate) {
         id: "t.one", kind: "J", owner: "o", hookPoint: "h", autonomy: "A0", threshold: null,
         fallback: { tier2: "disabled", onModelFailure: "fail closed" },
         metrics: ["confidence"], criteriaVersion: 1,
+        serving: [{ via: "seam", actsOnAnswers: false, a0Enforced: true }],
         questions: { q0: { type: "noul", instructions: "i", criteria: { true: "t", false: "f" } } },
       },
       "n.one": {
@@ -429,6 +464,29 @@ await test("a fixed-key question carrying a placeholder fails closed at instanti
   const reg = loadRegistry({ path }); // loads fine — the misuse is at instantiation
   eq(reg.entries["t.one"].questions.q0.instructions, "Hello {{name}}", "fixture loaded");
   throwsCode(() => instantiateEntryQuestions("t.one", [], { path }), "invalid_input", "placeholder");
+});
+
+await test("serving/autonomy cross-rules fail closed (review round 1)", () => {
+  // (a) kind J ⇒ serving present
+  throwsCode(() => loadRegistry({ path: fixture((r) => { delete r.entries["t.one"].serving; }) }), "schema_invalid", "failed its schema");
+  // serving is a kind-J concern — a node config carries none
+  throwsCode(() => loadRegistry({ path: fixture((r) => { r.entries["n.one"].serving = []; }) }), "schema_invalid", "failed its schema");
+  // a path that acts on answers without A0 enforcement must name its gate
+  throwsCode(() => loadRegistry({
+    path: fixture((r) => { r.entries["t.one"].serving = [{ via: "step-server", actsOnAnswers: true, a0Enforced: false }]; }),
+  }), "schema_invalid", "failed its schema");
+  // the same shape WITH the gate is the declared-boundary posture — loads
+  const gated = loadRegistry({
+    path: fixture((r) => { r.entries["t.one"].serving = [{ via: "step-server (FOC-401)", actsOnAnswers: true, a0Enforced: false, gate: "FOC-397" }]; }),
+  });
+  eq(gated.entries["t.one"].serving[0].gate, "FOC-397", "gated boundary loads");
+  // a0Enforced ⇒ via is the seam (the loader-enforced channel)
+  throwsCode(() => loadRegistry({
+    path: fixture((r) => { r.entries["t.one"].serving = [{ via: "step-server", actsOnAnswers: false, a0Enforced: true }]; }),
+  }), "schema_invalid", "failed its schema");
+  // autonomy encoding: kind J must carry a value; node configs must be null
+  throwsCode(() => loadRegistry({ path: fixture((r) => { r.entries["t.one"].autonomy = null; }) }), "schema_invalid", "failed its schema");
+  throwsCode(() => loadRegistry({ path: fixture((r) => { r.entries["n.one"].autonomy = "A0"; }) }), "schema_invalid", "failed its schema");
 });
 
 rmSync(fixtureDir, { recursive: true, force: true });

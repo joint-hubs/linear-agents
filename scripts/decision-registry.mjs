@@ -103,6 +103,34 @@ export const ENTRY_SCHEMA = {
     // the shipped file against it (anti-drift), and a decisionId call
     // re-validates the resolved set at the seam on every call.
     questions: { type: "object", minProperties: 1, maxProperties: 12, additionalProperties: true },
+    // Machine-readable serving scope (FOC-448 round 2): one record per
+    // channel that serves this entry's decision. actsOnAnswers = the path,
+    // as built today, programmatically consumes answers into operative
+    // output; a0Enforced = the path returns the A0 annotation-only shape,
+    // loader-enforced; gate = the FOC that owns bringing the path under A0
+    // governance (required whenever actsOnAnswers && !a0Enforced).
+    serving: {
+      type: "array",
+      maxItems: 4,
+      items: {
+        type: "object",
+        required: ["via", "actsOnAnswers", "a0Enforced"],
+        additionalProperties: false,
+        properties: {
+          via: { type: "string", minLength: 1, maxLength: 120 },
+          actsOnAnswers: { type: "boolean" },
+          a0Enforced: { type: "boolean" },
+          gate: { type: "string", pattern: "^FOC-[0-9]+$", maxLength: 20 },
+        },
+        allOf: [
+          {
+            if: { properties: { actsOnAnswers: { const: true }, a0Enforced: { const: false } }, required: ["actsOnAnswers", "a0Enforced"] },
+            then: { required: ["gate"] },
+          },
+          { if: { properties: { a0Enforced: { const: true } }, required: ["a0Enforced"] }, then: { properties: { via: { const: "seam" } } } },
+        ],
+      },
+    },
   },
   allOf: [
     // D7 node entry (reads present): the full D7 list is required and the
@@ -154,6 +182,33 @@ export const ENTRY_SCHEMA = {
     { if: { properties: { kind: { enum: ["D", "H"] } }, required: ["kind"] }, then: { properties: { metrics: { type: "array", maxItems: 0 } } } },
     { if: { properties: { kind: { const: "J" } }, required: ["kind"] }, then: { properties: { metrics: { type: "array", contains: { const: "confidence" } } } } },
     { if: { properties: { kind: { enum: ["G", "A"] } }, required: ["kind"] }, then: { properties: { metrics: { type: "array", not: { contains: { const: "confidence" } } } } } },
+    // Serving scope (FOC-448 round 2): kind J declares its serving paths
+    // (empty array = none today); non-J entries are node config, not
+    // decisions — no serving channel lives in this registry for them.
+    { if: { properties: { kind: { const: "J" } }, required: ["kind"] }, then: { required: ["serving"] } },
+    { if: { properties: { kind: { enum: ["D", "A", "H", "G"] } }, required: ["kind"] }, then: { not: { required: ["serving"] } } },
+    // Autonomy encoding is structural (review round 1): decisions (kind J)
+    // carry an autonomy value; node configs (G/A/H/D) are null.
+    { if: { properties: { kind: { const: "J" } }, required: ["kind"] }, then: { properties: { autonomy: { enum: ["A0", "A1", "A2"] } } } },
+    { if: { properties: { kind: { enum: ["D", "A", "H", "G"] } }, required: ["kind"] }, then: { properties: { autonomy: { type: "null" } } } },
+    // A0 posture (review round 1): every declared serving path of an A0
+    // entry is A0-enforced or names the gate that will bring it under A0.
+    {
+      if: { properties: { autonomy: { const: "A0" } }, required: ["autonomy"] },
+      then: {
+        properties: {
+          serving: {
+            type: "array",
+            items: {
+              anyOf: [
+                { properties: { a0Enforced: { const: true } }, required: ["a0Enforced"] },
+                { required: ["gate"] },
+              ],
+            },
+          },
+        },
+      },
+    },
   ],
 };
 
@@ -169,6 +224,21 @@ export const REGISTRY_SCHEMA = {
 
 const ajv = new Ajv({ allErrors: false });
 let validateRegistry = null;
+
+// Compiled per output schema, cached by its JSON text: loadRegistry re-reads
+// the file per lookup (fresh fail-closed read by design), so re-compiling on
+// every lookup would redo full ajv compilation of every node output each
+// time — the text key survives re-parsing and compiles once per schema.
+const compiledOutputs = new Map();
+function compileOutput(output) {
+  const key = JSON.stringify(output);
+  let validate = compiledOutputs.get(key);
+  if (!validate) {
+    validate = ajv.compile(output);
+    compiledOutputs.set(key, validate);
+  }
+  return validate;
+}
 
 // Loose structural check on question values. The full contract check lives
 // at the seam (input schema, per call) and in the registry test (anti-drift
@@ -217,7 +287,7 @@ export function loadRegistry({ path = DEFAULT_REGISTRY_PATH } = {}) {
     }
     if (entry.output) {
       try {
-        ajv.compile(entry.output);
+        compileOutput(entry.output);
       } catch (err) {
         throw new TypedError("schema_invalid", `decision registry: entry "${entry.id}" output is not a compilable JSON Schema: ${scrub(err?.message || "")}`);
       }
