@@ -157,9 +157,10 @@ observation does not reproduce at n=8 per cell.
   probe child verifies the pinned state instead of trusting it (context labels across arms: baseline
   fs-inspect 18 + read-fresh 18 + glob 9 + git-inspect 8; template fs-inspect 28 + glob 15 +
   read-kickoff-described 12; api fs-inspect 33 + read-kickoff-described 10 + git-inspect 9). The
-  original kickoff induces the MOST verification (18 read-fresh — files it fails to describe), the
-  API draft the least re-reading of described files. Productive test-runs appear in 9/11/3 windows
-  (baseline/template/api).
+  original kickoff induces the most read-fresh verification (18 vs template 2 / api 3 — files it
+  fails to describe); re-reads of files the kickoff DOES describe order baseline 8 < api 10 <
+  template 12 (read-kickoff-described sums). Test-run calls in the first-15 window
+  (baseline/template/api): 9/6/3.
 
 ### Retry accounting (REVIEW r1 finding A3 — all spawn attempts, both rounds)
 
