@@ -13,6 +13,8 @@
 // stdio loop (serveStdio) touches process streams, and everything it logs
 // goes to stderr — stdout is protocol, never log.
 
+import { scrub } from "./scrub.mjs";
+
 export const PROTOCOL_VERSION = "2025-06-18";
 
 const JSONRPC_ERRORS = {
@@ -87,8 +89,10 @@ export function createMcpHandler({ serverInfo, tools, callTool }) {
     try {
       request = JSON.parse(text);
     } catch (err) {
-      const detail = err.message.length > 120 ? `${err.message.slice(0, 117)}...` : err.message;
-      return serialize(error(null, JSONRPC_ERRORS.parse, detail));
+      // A V8 parse error quotes a fragment of the offending line, so the
+      // detail is scrubbed as well as capped — the cap now lives in
+      // scrub.mjs (MAX_ERROR_TEXT) instead of inline here (FOC-417).
+      return serialize(error(null, JSONRPC_ERRORS.parse, scrub(err.message)));
     }
     const response = await handleMessage(request);
     return response ? serialize(response) : null;

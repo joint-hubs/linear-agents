@@ -85,7 +85,12 @@ Every decision call returns one envelope — the ONLY thing that crosses the MCP
 ```
 
 Error messages carry schema paths and statuses, never provider or prompt content — inputs and
-outputs may carry user-dictated text, so nothing of it may leak through the error path.
+outputs may carry user-dictated text, so nothing of it may leak through the error path. The one
+piece of provider-originated text that does reach an error message — a transport/fetch failure
+reason, and the JSON-RPC parse detail for a malformed line — goes through `scripts/mcp/scrub.mjs`
+first: key-shaped material (Authorization/Bearer values, tokenized URL params, `sk-` keys) is
+masked and the result is capped at `MAX_ERROR_TEXT` (120 chars). Scrubbing only removes text; the
+error codes and the envelope shape are unchanged (FOC-417).
 
 | code | meaning | typical trigger |
 |---|---|---|
@@ -388,7 +393,8 @@ Fixture content is synthetic; no real issue or conversation content is sent.
 
 - **Auth is env-only** (`OPENROUTER_API_KEY`, per `config/models.json` providers.openrouter.authEnv);
   no key is ever logged, echoed into an error message, or written into evidence (the record carries
-  only `present`/`absent`).
+  only `present`/`absent`). Every message on an error path additionally goes through
+  `scripts/mcp/scrub.mjs`, which masks key-shaped material and caps the text at 120 chars (FOC-417).
 - **No prompt content in errors or telemetry.** Error messages carry schema paths and statuses;
   telemetry (`mcp.decision.recorded`, written only when `LA_RUN_ID` is set) carries step name, ok,
   mode, tier, model, confidence, error code, duration — no prompt, no decision payload. Telemetry is

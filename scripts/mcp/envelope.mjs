@@ -20,6 +20,8 @@
 // Context isolation (D5): the caller receives only the final typed JSON. The
 // model's intermediate reasoning never crosses this boundary, and error
 // messages carry schema paths and statuses, never provider or prompt content.
+// Provider-originated text that does reach an error message is scrubbed of
+// key-shaped material and capped at MAX_ERROR_TEXT (FOC-417, mcp/scrub.mjs).
 //
 // Telemetry is best-effort by contract: a telemetry failure must never fail
 // or degrade the decision call. An event is written only when LA_RUN_ID is
@@ -28,6 +30,7 @@
 // is swallowed.
 
 import Ajv from "ajv";
+import { scrub } from "./scrub.mjs";
 
 // Machine-readable error codes (documented in docs/mcp-decision-steps-catalog.md).
 export const ERROR_CODES = {
@@ -139,11 +142,14 @@ export async function runDecision(step, input, { provider, now = () => new Date(
   try {
     raw = await provider.decide({ step, input });
   } catch (err) {
+    // Both echoes are scrubbed (FOC-417): a provider message may carry a
+    // credential that a transport error quoted, even when the provider's own
+    // error text was composed here. Fail-closed shape is untouched.
     if (err instanceof TypedError) {
-      return finish({ ...base, ...failure(err.code, err.message) });
+      return finish({ ...base, ...failure(err.code, scrub(err.message)) });
     }
     // An unexpected provider crash is a provider failure, not a degrade.
-    return finish({ ...base, ...failure("provider_error", err?.message || String(err)) });
+    return finish({ ...base, ...failure("provider_error", scrub(err?.message || String(err))) });
   }
 
   const meta = {

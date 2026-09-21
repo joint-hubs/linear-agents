@@ -30,9 +30,11 @@
 // The endpoint is third-party surface (TypeSafe) — the request carries step
 // state by design (accepted trade-off, ADR-0012 Risks), and this provider
 // never echoes response bodies into error messages, so content cannot leak
-// through the typed error path.
+// through the typed error path. The one provider message that is echoed — a
+// transport/fetch error — is scrubbed and capped first (FOC-417).
 
 import { TypedError } from "./envelope.mjs";
+import { scrub } from "./scrub.mjs";
 
 const JEV_ENDPOINT = "https://openrouter.ai/api/alpha/decisions";
 // Pinned — never a ~latest alias (ADR-0012 D3.5).
@@ -74,9 +76,12 @@ export function createJevProvider({ apiKey, fetchImpl = fetch, timeoutMs = 30000
           signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (err) {
+        // A fetch/transport error is third-party text: it can quote the URL
+        // (and whatever the runtime put in it), so it is scrubbed before it
+        // becomes the typed reason (FOC-417).
         const reason = err?.name === "TimeoutError" || err?.name === "AbortError"
           ? `timed out after ${timeoutMs}ms`
-          : (err?.message || "network error");
+          : scrub(err?.message || "network error");
         throw new TypedError("provider_error", `decisions call failed: ${reason}`);
       }
 

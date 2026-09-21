@@ -59,8 +59,9 @@
 // decision) and skipped when there is no run directory to write to.
 //
 // Secrets: error paths never echo Authorization values or key material —
-// key-shaped substrings (≥32 chars) and everything after "Bearer" are
-// scrubbed in every message this module composes (FOC-411 lesson).
+// every message this module composes goes through mcp/scrub.mjs, the one
+// scrubber shared with the envelope, the Jev provider and the JSON-RPC layer
+// (FOC-411 lesson, unified in FOC-417).
 //
 // Run: import { createDecisionCaller } from "./decision-call.mjs" (no CLI —
 // callers are the MCP step family and the graph runner).
@@ -70,6 +71,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runDecision, TypedError } from "./mcp/envelope.mjs";
+import { scrub } from "./mcp/scrub.mjs";
 import { createJevProvider, JEV_MODEL, probabilityOf, choiceOf, confidenceOf } from "./mcp/provider-jev.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -206,12 +208,6 @@ function safeHash(input) {
   } catch {
     return null;
   }
-}
-
-function scrub(text) {
-  return String(text)
-    .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
-    .replace(/[A-Za-z0-9_-]{32,}/g, "[REDACTED]");
 }
 
 function usageOf(usage) {
