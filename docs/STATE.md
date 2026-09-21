@@ -3,6 +3,115 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 
+## 2026-09-21 — Roadmapa Fenix (Linear przebudowany)
+
+- **Roadmapa Fenix 2026-09-21:** milestone'y M1–M6, epiki FOC-466..472 w projekcie FENIX; FOC-102
+  Done; FOC-380/447/216 zastąpione. Wykonanie wyłącznie z projektu FENIX, kolejność = sortowanie
+  tasków w epikach; maks. dwa tory naraz (A = FOC-467 od FOC-473; B = FOC-466 od FOC-406, nigdy
+  nie blokuje A). Drobiazgi z review → FOC-461. Mapa „gdzie Jev":
+  `docs/plans/jev-placement-map-2026-09-21.md`.
+
+## 2026-09-20 — FOC-283 Stage 1 (handoff compressor, eval only) — R2: obiecujące, nieistotne statystycznie (n=16; 10/5/1, test znaków p≈0.15; 13/16 tur bazowych uciętych limitem 420 s); confounder rozwiązany
+
+- **Stage 1 = tylko ewaluacja** (bez treningu/GPU/pobierania modeli), gałąź `foc-283-dev`.
+  Raport (runda 2, po REVIEW r1 pass + 13 uwag): `docs/research/foc-283-handoff-compressor-stage1.md`;
+  skrypty i metering LOCAL-ONLY w `.state/research-scratch/foc-283/` (niekommitowane).
+- **Pytanie:** czy model potrafi zdraftować pinned-state handoff tak, żeby następny etap mniej
+  re-derive'ował? Metryka downstream = udział wywołań kontekstowych w pierwszych 15 tool callach
+  pierwszej tury dziecka (wyciągacz B2, ta sama definicja co baseline).
+- **Baseline (AC-1, zamrożone archiwum, dokładna reprodukcja):** dev 33.3% / review 26.7% /
+  test 26.7% / plan 50.0%. **Korpus (AC-2):** 86 par (45 dev→review + 41 review→test — r1 błędnie
+  pisało 46+42), split po taskach bez przecieku. **Template (AC-3):** 42/42. **API (AC-4):**
+  GLM-5.3-flash extractive, 42/42 draftów, $0.0276 (52 zmierzone wywołania, w tym 10 ok:false —
+  retry po fixach promptu).
+- **Runda 1 (4 pary × 2 ramiona):** API biło template, ale oba ramiona nad anchor 26.7% → werdykt
+  „lever NIE wykazany". REVIEW r1: pass + 13 uwag (poprawki w raporcie: liczba par, cacheRead w
+  cenach — sonda r1 $0.0891→$0.1445 dla 12 rekordów, pełne rozliczenie prób, n=4 caveat, pointer
+  loose-sweep) + akceptacja eksperymentu de-confounding.
+- **Runda 2 (eksperyment de-confounding, Mateusz approve):** 16 par × 3 RAMIONA (paired): baseline
+  = ORYGINALNY archived kickoff (verbatim z pairs.json), template, api — wszystko inne identyczne.
+  **Wynik (mediana ctx%, all-16): baseline 49.4%, template 50.0%, api 40.0%.** API niżej niż
+  baseline w 10/16 par (mediana −9.0 pp) i niżej niż template w 11/16 (−10.0 pp); w obu kierunkach,
+  w obu odczytach klasyfikacji (strict + loose). **Fresh-baseline 49.4% ≫ historyczny anchor 26.7%**
+  → anchor to artefakt warunków (świeża pierwsza tura), nie jakości draftu.
+- **Werdykt kill-criterion (r2, de-confounded: musi bić i świeży-baseline, i template):
+  obiecujący, nieistotny statystycznie (n=16; 10/5/1, test znaków p≈0.15 jednostronnie;
+  13/16 tur bazowych uciętych limitem 420 s)** — odwraca werdykt r1 (był napędzany confoundem
+  warunków); przechodzi po pre-rejestrowanej regule beat-both, nie po istotności. Zastrzeżenia:
+  marginesy skromne (sign-test p≈0.06 vs template; vs baseline 10/15, jednostronnie p≈0.15,
+  dwustronnie ≈0.30 — kierunek wszędzie zgodny), absolutnie 40% re-derivation zostaje, censoring
+  420 s niesymetryczny (13/16 baseline vs 5/16 api), pre-registracja self-attested (bez
+  timestampa). Decyzja o Stage 2 = Mateusz; tanie wzmocnienie: więcej par w tym samym 3-arm probe.
+- **Kluczowy mechanika pomiaru:** ekstrakcja z tee (verbatim stream-json) — per-session plik w
+  probe-config bywa obcięty przez SIGKILL (EOF ≠ koniec tury); tee nie niesie zdarzenia result
+  (usage) → censored koszty backfillowane z transkryptu (metoda walidowana 1:1 na
+  nietimeoutowanej sesji) = dolne ograniczenie.
+- **Koszt (z cacheRead, pełne rozliczenie 53 rekordów + 4 r1 ghost-runów niemierzalnych):**
+  sondy łącznie $0.7288 + drafty $0.0276 + diagnostyka ~$0.005 = **≈$0.7614 z limitu $2**
+  (limit z kickoffu frontmana — staged-scope approval, 2026-09-20). Szczegóły:
+  `probe-cost-revised.json`.
+
+## 2026-09-20 — FOC-386 (decision-call seam) dowiezione
+
+- **FOC-386** (gałąź `foc-386-dev`): `scripts/decision-call.mjs` — JEDEN punkt wejścia dla wszystkich
+  kroków [J]: wywołanie `{state, questions}` (typy `noul`/`choice`/`score` z `instructions`+`criteria`)
+  → typowane odpowiedzi + probabilities/confidence + wersja modelu + `usage.cost`, walidowane ajv
+  na wejściu i wyjściu (ADR-0012 D5), fail-closed (5 kodów z `mcp/envelope.mjs`). Kontrakt i sposób
+  użycia w nagłówku pliku; brak CLI (callers = rodzina kroków MCP, węzły grafu, kalibracja).
+- **Tier-1** = `createJevProvider` (pin `typesafe/jev-1.13`; na każdej decyzji rejestrowane OBA:
+  `pinnedModel` i echo resolved buildu w `model`); retry 429/5xx na granicy wywołania (2 próby,
+  backoff 250/1000 ms); **tier-2 fallback** = `z-ai/glm-5.3-flash` przez chat/completions
+  (`response_format: json_schema` + logprobs + `provider.require_parameters: true`; confidence =
+  exp(średni logprob), bez logprobów → `null`, nigdy nie szacowana; verdict noul → noul 1|0 jako
+  ENKODOWANIE werdyktu, per-answer confidence `null` po tier-2). Po wyczerpaniu kaskady — fail
+  closed do ścieżki relay/HITL. `auth_missing` → od razu fail closed (fallback bez klucza bez sensu).
+- **Metering**: każda odpowiedź HTTP pod własnym agent key `decision-call` (zdarzenie
+  `decision.call.usage`, koszt wprost z `usage.cost`; próby 429/5xx z `costUsd: null`), gated na
+  `LA_RUN_ID`, best-effort — jak telemetria w `mcp/envelope.mjs`.
+- **Shadow log**: każda zakończona decyzja (ok i fail-closed) dopisywana jako linia JSONL do
+  `.state/runs/<LA_RUN_ID>/decisions.jsonl` (inputs hash = sha256 z kanonicznego JSON
+  `{model: pin, state, questions}`, answers, confidence, obie wersje modelu, usage.cost,
+  responseId, error) — harness dołączy realny outcome. Best-effort, bez `LA_RUN_ID` — brak zapisu.
+- **Live-probe step-0 (2026-09-20, 1 wywołanie, HTTP 200, koszt $0.000013692)**: kształt
+  zgodny z "Measured alpha contract" z katalogu (rekord po qid; echo `typesafe/jev-1.13-20260917`;
+  `usage.cost` obecny) — klient zbudowany na OBSERWOWANYM kształcie, dryf kształtu tier-1 → fallback.
+- **Pricing row**: `typesafe/jev-1.13` → input $0.042/M, output $0/M (Mateusz, 2026-09-20);
+  `cacheRead: 0` pochodne z probe (koszt $0.000013692 zamyka się dokładnie na input_tokens ×
+  0.042/M, a usage decisions API nie niesie pól cache) — zgodnie z inwariantem config-drift
+  (każdy wiersz cennika z jawnym cacheRead). Pierwszy priced tier-1; `checklist` 72→73 plików.
+- Testy: `scripts/decision-call.test.mjs` (19 testów, wszystko offline na injected fetch); pełna
+  suita `node scripts/test-all.mjs` (73 plików, foreground); guard `node scripts/docs-count-guard.test.mjs`.
+
+## 2026-09-19 — FOC-401 (kroki decyzyjne MCP) dowiezione · REVIEW r1 fixy
+
+- **FOC-401** (gałąź `foc-401-dev`, kandydat `925f312` + commit fixów): katalog rodziny kroków
+  decyzyjnych `docs/mcp-decision-steps-catalog.md` + **dwa serwery MCP** w `scripts/mcp/`
+  (`envelope.mjs`, `jsonrpc.mjs`, `steps.mjs`, `provider-jev.mjs`, `provider-offline.mjs`,
+  `server-extraction.mjs`, `server-prompt-refinement.mjs`, `shadow-run.mjs`) z testami
+  `scripts/mcp-{extraction,prompt-refinement,protocol,shadow-run}.test.mjs`. Zero-dep ESM, envelope
+  fail-closed, confidence tylko z natywnych prawdopodobieństw (ADR-0012 D3.6).
+- **REVIEW r1 = FAIL → 3 must-fix zrobione (commit fixów):**
+  - **Semantyka confidence w ekstrakcji odwrócona → naprawiona** (`scripts/mcp/steps.mjs`): aggregate
+    brał `min` po WSZYSTKICH prawdopodobieństwach, łącznie z pewnie odrzuconymi kandydatami, więc
+    odrzucenie raportowało `1−p` jako confidence (dowód: stary shadow run — features 0.87/0.85 przy
+    envelope 0.05/0.04; FOC-397 low-confidence escalation strzelałby na każdej dyktaturze z szumem).
+    Nowa reguła: per-answer certainty `max(p, 1−p)`, potem `min` — certainty werdyktu; test
+    przypięty na nowo (`scripts/mcp-extraction.test.mjs`), `docs/mcp-decision-steps-shadow-run.json`
+    **zregenerowany na live** (OPENROUTER_API_KEY obecny; 3/3 ok, envelope 0.80 / 0.61 / 0.44),
+    katalog zsynchronizowany.
+  - **`docs/STATE.md`** — ta sekcja (AC5).
+  - **`docs/supervisor-e2e-checklist.md:22`** — `67/67` → `72/72` (forma literału niewidoczna dla
+    `docs-count-guard.test.mjs`, który pilnuje tylko linii 3 i 206).
+- **Otwarte (nieblokujące, świadomie poza FOC-401):**
+  - **repo-state recon** — właściciel kroku to otwarte pytanie (katalog §repo-state recon: udokumentowane,
+    nie rozstrzygnięte; nic downstream nie może na tym gate'ować).
+  - **Serwery niepodpięte** do żadnego flow — wiring to graph runner (FOC-396/397); FOC-401 dowozi
+    tylko serwery.
+  - **Brakujące wiersze cennika** w `config/models.json`: `typesafe/jev-1.13`, `qwen3-30b-a3b-instruct`
+    (config child; `price-check.mjs` ich nie widzi — rows must be hand-pinned).
+- **Dwa nity REVIEW r1 świadomie NIE naprawiane** (follow-up candidates): error-echo defense-in-depth
+  (envelope/provider-jev/jsonrpc) oraz spójność protocol/CLI.
+
 ## 2026-09-19 — FOC-380 (architektura pipeline'u) rozbity · FOC-385 uprawnienia zrobione
 
 - **FOC-380** (epik, dziecko FOC-102): rozbicie squadów na typowane kroki [D]/[J]/[A]/[H] + wywołania

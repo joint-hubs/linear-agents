@@ -186,6 +186,52 @@ test("a gate with no question still emits, but says why that is bad", () => {
   assert.match(r.stderr, /no --question/);
 });
 
+test("a draft-approval gate carries the artifact it submits for approval", () => {
+  // ADR-0012 D5: this kind exists to put a whole artifact (an ADR draft, a
+  // squad-prompt draft) in front of a human for approve/reject. The artifact is
+  // what is being decided — the question is only how to read it.
+  const runId = fixtureRun();
+  const r = gate([
+    "emit", "--run", runId, "--child", "dev-1", "--kind", "draft-approval",
+    "--summary", "ADR draft 0013", "--question", "approve?", "--artifact", "docs/adr/0013-x.md",
+  ]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const out = parse(r);
+  assert.deepEqual(out.warnings, []);
+
+  const rec = JSON.parse(readFileSync(gatePath(runId, out.gateId), "utf8"));
+  assert.equal(rec.kind, "draft-approval");
+  assert.equal(rec.status, "pending");
+  assert.equal(rec.answer, null);
+  assert.equal(rec.artifacts.length, 1);
+  assert.ok(rec.artifacts[0].includes("0013-x.md"), `artifact not kept: ${rec.artifacts[0]}`);
+});
+
+test("a draft-approval gate with no artifact still emits, but says why that is bad", () => {
+  // Not fatal: ADR-0012 D5 specifies no new required fields, so a hard
+  // requirement would refuse a gate the ADR calls well-formed. But the artifact
+  // is the point of this kind, and a warning is cheaper than an approval of
+  // something nobody attached.
+  const runId = fixtureRun();
+  const r = gate([
+    "emit", "--run", runId, "--child", "dev-1", "--kind", "draft-approval",
+    "--summary", "s", "--question", "q?",
+  ]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(parse(r).warnings.length, 1);
+  assert.match(r.stderr, /no --artifact/);
+  assert.equal(gateFiles(runId).length, 1, "a warning is not a refusal — the gate is still on disk");
+});
+
+test("only draft-approval warns about a missing artifact", () => {
+  // The rule belongs to this kind. A plan.gate1 with no artifact is an ordinary
+  // gate, not a broken draft-approval, and must not collect its warning.
+  const runId = fixtureRun();
+  const r = gate(["emit", "--run", runId, "--child", "dev-1", "--kind", "plan.gate1", "--summary", "s", "--question", "q?"]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(parse(r).warnings, []);
+});
+
 // ── 2. a refused emit leaves nothing behind ───────────────────────────────────
 console.log("\nemit — odmowa nie zostawia pliku");
 
@@ -351,6 +397,19 @@ test("other kinds still take prose answers", () => {
   const runId = fixtureRun();
   const id = seedGate(runId);
   assert.equal(gate(["answer", "--run", runId, "--gate", id, "--text", "rób A, bo B wymaga instalacji globalnej"]).status, 0);
+});
+
+test("a draft-approval answer is free prose — reject with the reason attached", () => {
+  // ADR-0012 D5 sets no answer-phrasing rule for this kind, unlike the
+  // single-token rule cleanup-approval needs for supervisor-cleanup.mjs. A
+  // rejection and its basis are the same text here.
+  const runId = fixtureRun();
+  const id = seedGate(runId, { kind: "draft-approval" });
+  const r = gate(["answer", "--run", runId, "--gate", id, "--text", "odrzucam: brakuje sekcji o rollbacku"]);
+  assert.equal(r.status, 0, r.stdout);
+  const rec = JSON.parse(readFileSync(gatePath(runId, id), "utf8"));
+  assert.equal(rec.status, "answered");
+  assert.equal(rec.answer.text, "odrzucam: brakuje sekcji o rollbacku");
 });
 
 // ── 4. list ───────────────────────────────────────────────────────────────────

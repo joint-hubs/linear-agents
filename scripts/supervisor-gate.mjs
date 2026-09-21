@@ -56,6 +56,11 @@ const KINDS = [
   // child: the child whose tree is being reclaimed is the last party that should
   // be asking for permission to reclaim it.
   "cleanup-approval",
+  // FOC-400, ADR-0012 D5. Unlike `question`, which asks something open, this one
+  // submits a whole artifact — an ADR draft, a squad-prompt draft — for
+  // approve/reject. No new record fields and no answer-phrasing rule: the
+  // artifact rides on the existing --artifact list, and the answer is free text.
+  "draft-approval",
 ];
 
 const STATUSES = ["pending", "answered"];
@@ -192,6 +197,16 @@ function cmdEmit(args) {
     warnings.push(
       "no --question given: the Supervisor can only relay questions verbatim, so a gate without one " +
         "gives Mateusz nothing to answer",
+    );
+  }
+  if (kind === "draft-approval" && !artifacts.length) {
+    // Also not fatal: ADR-0012 D5 specifies no new required fields, and a hard
+    // requirement here would refuse a gate the ADR says is well-formed. But the
+    // artifact is the whole point of this kind — without one, Mateusz is asked
+    // to approve a draft he cannot see.
+    warnings.push(
+      "no --artifact given: a draft-approval gate submits a full artifact for approve/reject, " +
+        "so without one there is nothing to approve",
     );
   }
 

@@ -37,6 +37,8 @@ Liveness is owned by a **detached watcher process** per spawned turn: it waits o
 
 Under supervision there is exactly ONE resume path per child: Supervisor `--resume <session_id>`. DEV's existing `needs:*` + `.state/dev-wip.json` + next-`dev.bat` resume is disabled (no Linear labels set, no next bat); the wip file survives only as a local crash checkpoint. Squad CLAUDE.md files are **amended, not just appended to**: rules that mandate a synchronous human in the TTY (PLAN `<plan_hard_rules>`, `<plan_loop>` GATE 1/2; DEV `needs:*` resume) gain an "unless `LA_SUPERVISOR=1`" rider so no rule contradicts supervised mode.
 
+**Amendment 2026-09-19 (Mateusz-approved, FOC-383) — task-size scenarios for frontman engagement.** The frontman does not run every issue through the full squad pipeline: engagement depth is chosen per issue size, decided by a [J] task-size classification step (ADR-0012, decision tier). **Small & easy** — the Supervisor does the work itself; no squads spawn. **Medium / complicated** — DEV + TEST squads. **Large & very complex** — the full triage pipeline PLAN → DEV → REVIEW → TEST. In every scenario the Supervisor keeps its standing duties: it oversees the run, manages the Linear issue (comments, labels, status transitions) and updates the state files. This amendment records the routing policy only; the classifier that feeds it is a decision-shaped [J] step defined in ADR-0012 (decision tier, MCP-hosted pattern), and nothing here changes the gate-record mechanics above.
+
 ## Consequences
 
 - **Positive:**
