@@ -133,7 +133,9 @@ export async function runDecision(step, input, { provider, now = () => new Date(
   // 1. Input validation — the caller's shape is the first fail-closed gate.
   const validateIn = compile(step.inputSchema);
   if (!validateIn(input ?? null)) {
-    return finish({ ...base, ...failure("invalid_input", describe(schemaErrors(validateIn))) });
+    // Schema paths quote caller-named keys — the summary is scrubbed and
+    // capped like the provider echoes below (FOC-443, mcp/scrub.mjs).
+    return finish({ ...base, ...failure("invalid_input", scrub(describe(schemaErrors(validateIn)))) });
   }
 
   // 2. The provider produces a RAW result; free-form model text never reaches
@@ -169,7 +171,8 @@ export async function runDecision(step, input, { provider, now = () => new Date(
   //    nothing partial leaks: the envelope carries paths, never fragments.
   const validateOut = compile(step.outputSchema);
   if (!validateOut(raw.decision)) {
-    return finish({ ...base, ...meta, ...failure("schema_invalid", describe(schemaErrors(validateOut))) });
+    // Output-schema paths quote model-chosen keys — same scrub as the input path (FOC-443).
+    return finish({ ...base, ...meta, ...failure("schema_invalid", scrub(describe(schemaErrors(validateOut)))) });
   }
 
   const confidence = normalizeConfidence(raw.confidence);

@@ -154,6 +154,36 @@ await test("a very long malformed line stays capped", async () => {
   if (detail.length > MAX_ERROR_TEXT) fail("cap not applied: " + detail.length);
 });
 
+console.log("\nscrub: schema-path summary (reject path, FOC-443)");
+
+await test("a schema reject of a long key-shaped property is masked and capped", async () => {
+  // The built steps use additionalProperties:false, whose violation reports
+  // "(root)" — so a caller-named KEY only reaches the schema path where a
+  // schema descends into named properties. This fixture models that shape;
+  // the property name is long AND key-shaped, so both rules must fire.
+  const step = {
+    name: "scrub-schema-path-probe",
+    inputSchema: {
+      type: "object",
+      required: ["text"],
+      properties: { text: { type: "string", minLength: 1 } },
+      additionalProperties: { type: "string", maxLength: 2 },
+    },
+    outputSchema: { type: "object", required: ["decision"], properties: { decision: { type: "object" } } },
+  };
+  const name = `token_${"abcdefghijklmnopqrstuvwxyz012345".repeat(5)}`;
+  const envelope = await runDecision(step, { text: "kif i czeryf", [name]: "w".repeat(24) }, {
+    provider: { decide: async () => { throw new Error("provider must never be reached by a rejected input"); } },
+  });
+  if (envelope.ok !== false) fail("expected ok:false, got " + JSON.stringify(envelope.ok));
+  if (envelope.error?.code !== "invalid_input") fail("code changed: " + envelope.error?.code);
+  if (typeof envelope.error?.message !== "string") fail("error.message missing");
+  if (envelope.error.message.includes(name)) fail("caller-named key survived in the schema path");
+  if (!envelope.error.message.includes("[REDACTED]")) fail("no mask marker: " + envelope.error.message);
+  if (envelope.error.message.length > MAX_ERROR_TEXT) fail("cap not applied: " + envelope.error.message.length);
+  if ("decision" in envelope) fail("a failed envelope must carry no decision");
+});
+
 console.log("\n" + passed + " passed.");
 if (failures.length > 0) {
   console.error(failures.length + " test(s) failed.");

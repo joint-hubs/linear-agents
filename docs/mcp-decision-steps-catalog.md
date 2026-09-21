@@ -85,12 +85,17 @@ Every decision call returns one envelope — the ONLY thing that crosses the MCP
 ```
 
 Error messages carry schema paths and statuses, never provider or prompt content — inputs and
-outputs may carry user-dictated text, so nothing of it may leak through the error path. The one
-piece of provider-originated text that does reach an error message — a transport/fetch failure
-reason, and the JSON-RPC parse detail for a malformed line — goes through `scripts/mcp/scrub.mjs`
-first: key-shaped material (Authorization/Bearer values, tokenized URL params, `sk-` keys) is
-masked and the result is capped at `MAX_ERROR_TEXT` (120 chars). Scrubbing only removes text; the
-error codes and the envelope shape are unchanged (FOC-417).
+outputs may carry user-dictated text, so nothing of it may leak through the error path. Every
+piece of provider-originated (or caller-copied) text that reaches an error message goes through
+`scripts/mcp/scrub.mjs` first: key-shaped material (Authorization/Bearer values, tokenized URL
+params, `sk-` keys) is masked and the result is capped at `MAX_ERROR_TEXT` (120 chars). That
+covers provider TypedError messages, the catch-all echo of an unexpected provider crash, a
+transport/fetch failure reason, the JSON-RPC parse detail for a malformed line, and — since
+FOC-443 — the schema-path summaries of `invalid_input` and `schema_invalid`, whose paths quote
+caller-named keys verbatim. Messages composed entirely in the repo (`unknown tool`, HTTP
+status-only reasons, timeouts) are not provider text; the status-only trigger of `provider_error`
+stays untouched by design. Scrubbing only removes text; the error codes and the envelope shape
+are unchanged (FOC-417, FOC-443).
 
 | code | meaning | typical trigger |
 |---|---|---|
@@ -393,8 +398,13 @@ Fixture content is synthetic; no real issue or conversation content is sent.
 
 - **Auth is env-only** (`OPENROUTER_API_KEY`, per `config/models.json` providers.openrouter.authEnv);
   no key is ever logged, echoed into an error message, or written into evidence (the record carries
-  only `present`/`absent`). Every message on an error path additionally goes through
-  `scripts/mcp/scrub.mjs`, which masks key-shaped material and caps the text at 120 chars (FOC-417).
+  only `present`/`absent`). Every message that carries provider-originated text goes through
+  `scripts/mcp/scrub.mjs`, which masks key-shaped material and caps the text at 120 chars (FOC-417):
+  a transport/fetch failure reason, the catch-all echo of an unexpected provider crash, the
+  JSON-RPC parse detail, and — since FOC-443 — the schema-path summaries of `invalid_input` and
+  `schema_invalid`, whose paths quote caller-named keys verbatim. Messages composed entirely in
+  the repo (HTTP status-only reasons, timeouts, `unknown tool`) carry no provider text and are not
+  scrubbed.
 - **No prompt content in errors or telemetry.** Error messages carry schema paths and statuses;
   telemetry (`mcp.decision.recorded`, written only when `LA_RUN_ID` is set) carries step name, ok,
   mode, tier, model, confidence, error code, duration — no prompt, no decision payload. Telemetry is
