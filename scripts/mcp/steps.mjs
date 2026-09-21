@@ -1,5 +1,9 @@
 // scripts/mcp/steps.mjs — the two built decision steps of the FOC-401 family
 // (docs/mcp-decision-steps-catalog.md is the catalog; this file is the build).
+// Since FOC-448 the question TEXT of both steps lives in config/decisions.json
+// (the decision & node registry) and is instantiated per candidate/feature
+// through scripts/decision-registry.mjs — this file keeps the deterministic
+// work: the candidate split, the ids, the size→squads routing.
 //
 // A step is config plus deterministic code:
 //   · inputSchema / outputSchema — JSON Schema, enforced fail-closed by
@@ -18,6 +22,7 @@
 
 import { TypedError } from "./envelope.mjs";
 import { probabilityOf, choiceOf, confidenceOf } from "./provider-jev.mjs";
+import { instantiateEntryQuestions } from "../decision-registry.mjs";
 
 export const SIZES = ["small", "medium", "large"];
 export const RELATIONS = ["standalone", "extension", "alternative"];
@@ -100,7 +105,9 @@ export const EXTRACTION_STEP = {
     // Measured live contract (2026-09-19): questions is a record keyed by id,
     // criteria a record of label → description; a noul question's labels are
     // exactly "true"/"false". Ids are position-stable (q0..qN) and carry no
-    // user content.
+    // user content. The question TEXT lives in config/decisions.json (the
+    // registry, FOC-448) — moved byte-identical from this method; the
+    // per-candidate instantiation stays code.
     const ids = candidates.map((_, i) => `q${i}`);
     const state = [
       'Dictated user text (verbatim; may contain corrupted dictation such as "kif i czeryf" for "feature"):',
@@ -109,17 +116,7 @@ export const EXTRACTION_STEP = {
     ].filter(Boolean).join("\n");
     return {
       state,
-      questions: Object.fromEntries(candidates.map((name, i) => [
-        ids[i],
-        {
-          type: "noul",
-          instructions: `Is this dictated fragment a concrete, buildable expectation? Fragment: "${name}". Answer true only if a developer could open a task from it without asking the user what the words mean.`,
-          criteria: {
-            true: "concrete expected feature or change",
-            false: "greeting, context, meta-talk, or unactionable fragment",
-          },
-        },
-      ])),
+      questions: instantiateEntryQuestions("extraction", candidates.map((name) => ({ name }))),
       ids,
       candidates,
     };
@@ -247,32 +244,12 @@ export const PROMPT_REFINEMENT_STEP = {
       ...features.map((f) => `- ${f.name}${f.size ? ` (size: ${f.size})` : ""}`),
     ].filter(Boolean).join("\n");
     // Measured live contract (2026-09-19): questions is a record keyed by id;
-    // stable ids ("size", "rel0..relN") carry no user content.
-    const questions = {
-      size: {
-        type: "choice",
-        instructions: "Classify the overall task size for frontman engagement (ADR-0009 amendment).",
-        criteria: {
-          small: "small and easy — the Supervisor does the work itself, no squads",
-          medium: "medium or complicated — DEV + TEST squads",
-          large: "large and very complex — full triage PLAN → DEV → REVIEW → TEST",
-        },
-      },
-    };
-    const ids = ["size"];
-    features.forEach((f, i) => {
-      const id = `rel${i}`;
-      ids.push(id);
-      questions[id] = {
-        type: "choice",
-        instructions: `How does the feature "${f.name}" relate to the other features in this task?`,
-        criteria: {
-          standalone: "independent of the other features",
-          extension: "extends or refines another feature listed here",
-          alternative: "an alternative to another feature (either/or)",
-        },
-      };
-    });
+    // stable ids ("size", "rel0..relN") carry no user content. The question
+    // TEXT lives in config/decisions.json (the registry, FOC-448) — moved
+    // byte-identical from this method; the per-feature instantiation and the
+    // size→squads routing stay code.
+    const questions = instantiateEntryQuestions("prompt-refinement", features.map((f) => ({ name: f.name })));
+    const ids = ["size", ...features.map((_, i) => `rel${i}`)];
     return { state, questions, ids, features };
   },
   fromJev(body, mapped) {
