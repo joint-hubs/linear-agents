@@ -205,7 +205,12 @@ if (process.argv[1] && process.argv[1].endsWith("shadow-run.mjs")) {
       usage(console.log);
       process.exit(0);
     } else if (args[i] === "--mode") {
-      mode = args[++i] ?? "auto";
+      mode = args[++i];
+      if (!mode) {
+        console.error("shadow-run: --mode requires one of auto | live | offline");
+        usage(console.error);
+        process.exit(2);
+      }
     } else if (args[i] === "--out") {
       outPath = args[++i];
       if (!outPath) {
@@ -220,6 +225,12 @@ if (process.argv[1] && process.argv[1].endsWith("shadow-run.mjs")) {
       usage(console.error);
       process.exit(2);
     }
+  }
+
+  if (mode !== "auto" && mode !== "live" && mode !== "offline") {
+    console.error(`shadow-run: unknown --mode '${mode}' — expected auto | live | offline`);
+    usage(console.error);
+    process.exit(2);
   }
 
   try {

@@ -84,7 +84,7 @@ export const EXTRACTION_STEP = {
           additionalProperties: false,
           properties: {
             name: { type: "string", minLength: 1, maxLength: 120 },
-            kind: { enum: ["feature", "constraint", "question"] },
+            kind: { enum: ["feature"] },
             confidence: { type: ["number", "null"], minimum: 0, maximum: 1 },
           },
         },

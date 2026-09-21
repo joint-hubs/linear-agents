@@ -11,7 +11,11 @@
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { runShadowRun, DEFAULT_OUT } from "./mcp/shadow-run.mjs";
+
+const SHADOW_RUN = fileURLToPath(new URL("./mcp/shadow-run.mjs", import.meta.url));
 
 // Hermetic by construction: close the LA_RUN_ID telemetry gate before any
 // decision call (see mcp-extraction.test.mjs).
@@ -116,6 +120,30 @@ await test("unknown mode is rejected", async () => {
     rejected = err;
   }
   if (!rejected) fail("unknown mode must be rejected");
+});
+
+// The argv parse contract is only reachable through a real CLI invocation (the
+// entry guard matches process.argv[1]), so these spawn the script hermetic in
+// offline/--no-write mode only — no network, no evidence file written.
+console.log("\nshadow-run: --mode CLI parse contract");
+
+await test("--mode with an unknown value exits 2 with a usage error naming the valid modes", () => {
+  const r = spawnSync(process.execPath, [SHADOW_RUN, "--mode", "telepathy"], { encoding: "utf8" });
+  if (r.status !== 2) fail("exit code: " + r.status);
+  if (!r.stderr.includes("unknown --mode")) fail("stderr missing the unknown-mode message: " + JSON.stringify(r.stderr));
+  if (!r.stderr.includes("auto | live | offline")) fail("stderr missing the valid modes: " + JSON.stringify(r.stderr));
+});
+
+await test("--mode as the last argument is a usage error, never a silent auto fallback", () => {
+  const r = spawnSync(process.execPath, [SHADOW_RUN, "--mode"], { encoding: "utf8" });
+  if (r.status !== 2) fail("exit code: " + r.status);
+  if (!r.stderr.includes("--mode requires")) fail("stderr missing the missing-value message: " + JSON.stringify(r.stderr));
+});
+
+await test("a valid --mode still parses and runs the named path", () => {
+  const r = spawnSync(process.execPath, [SHADOW_RUN, "--mode", "offline", "--no-write"], { encoding: "utf8" });
+  if (r.status !== 0) fail("exit code: " + r.status + " stderr: " + JSON.stringify(r.stderr));
+  if (!r.stdout.includes("path=offline")) fail("stdout missing the offline path: " + JSON.stringify(r.stdout));
 });
 
 console.log("\n" + passed + " passed.");

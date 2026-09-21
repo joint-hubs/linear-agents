@@ -1,8 +1,9 @@
 // scripts/mcp/jsonrpc.mjs — the minimal MCP surface, hand-rolled on purpose.
 //
-// The repo is zero-dependency ESM (node: builtins only) and the decision
-// servers need three methods, so @modelcontextprotocol/sdk would pull a
-// dependency tree for a surface this small. MCP is JSON-RPC 2.0 over
+// This module is builtins-only ESM; the repo's one runtime dependency is ajv
+// (schema validation in envelope.mjs). The decision servers need three
+// methods, so @modelcontextprotocol/sdk would pull a dependency tree for a
+// surface this small. MCP is JSON-RPC 2.0 over
 // newline-delimited stdio with initialize / tools/list / tools/call — exactly
 // what a decision server per ADR-0012 D5 needs, nothing more: the caller
 // receives only the final typed JSON.
