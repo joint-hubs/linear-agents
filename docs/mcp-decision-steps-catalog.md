@@ -152,7 +152,7 @@ Output schema (JSON Schema):
         "additionalProperties": false,
         "properties": {
           "name": { "type": "string", "minLength": 1, "maxLength": 120 },
-          "kind": { "enum": ["feature", "constraint", "question"] },
+          "kind": { "enum": ["feature"] },
           "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
         }
       }
@@ -357,12 +357,13 @@ Every model a server might route to needs a pricing row in `config/models.json`;
 findings to fix in a config child, NOT something these servers work around. Verified against
 `config/models.json` `pricing.openrouter` on 2026-09-19:
 
-1. **`typesafe/jev-1.13` — NO pricing row** (tier 1, the family's primary tier). It is also absent
-   from the public `/api/v1/models` list (GAPS §2.3), so `scripts/price-check.mjs` cannot see it;
-   its measured economics live only in GAPS §2.3 (~$0.042/M input, $0 output; ~$0.00002/call). Any
-   cost accounting that goes through `config/models.json` will treat tier-1 decision calls as
-   unpriced until a row is added — and the row must be hand-pinned, since the catalogue sync cannot
-   source it.
+1. **`typesafe/jev-1.13` — pricing row EXISTS (hand-pinned)** (tier 1, the family's primary tier).
+   No row existed when this catalog was written (2026-09-19); FOC-386 added one on 2026-09-20
+   (`config/models.json` `pricing.openrouter`: input 0.042, output 0, cacheRead 0 — matching the
+   GAPS §2.3 economics of ~$0.042/M input, $0 output; ~$0.00002/call), so cost accounting through
+   `config/models.json` prices tier-1 decision calls today (re-verified 2026-09-21). The row stays
+   hand-pinned by necessity: the model is absent from the public `/api/v1/models` list (GAPS §2.3),
+   so `scripts/price-check.mjs` cannot see it — a future price change must be edited by hand.
 2. **`qwen3-30b-a3b-instruct` — NO pricing row** (tier-2 non-thinking+logprobs candidate, ADR-0012
    D2; measured live in GAPS §2.2: 0.9 s, 14 output tokens, saturated p=1.0000 on the easy probe).
 3. **`anthropic/*` — rows EXIST** (claude-opus-5, claude-sonnet-4.6, claude-sonnet-5,
