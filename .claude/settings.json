@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "mcp__codegraph__*"
+      "mcp__codegraph__*",
+      "mcp__fenix-decision-extraction__*",
+      "mcp__fenix-decision-prompt-refinement__*"
     ]
   },
   "hooks": {

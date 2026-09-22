@@ -12,6 +12,8 @@
       "Bash(graphify path:*)",
       "Bash(graphify explain:*)",
       "mcp__codegraph__*",
+      "mcp__fenix-decision-extraction__*",
+      "mcp__fenix-decision-prompt-refinement__*",
       "Bash(codegraph:*)",
       "Bash(ls:*)",
       "Bash(cat:*)",

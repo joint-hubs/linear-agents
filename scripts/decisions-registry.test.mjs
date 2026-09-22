@@ -77,8 +77,9 @@ const QUESTION_VALIDATE = new Ajv().compile(QUESTION_SCHEMA);
 const SEED_IDS = [
   "plan.dor", "plan.ac", "plan.spec", "plan.gate1", "plan.decompose",
   "plan.gate2", "plan.push", "gate.screen", "extraction", "prompt-refinement",
-  // The five FOC-397 decide-edge entries (graph decisionEdges bindings).
-  "intake.triage_node", "intake.task_size", "review.depth",
+  // The five FOC-397 decide-edge entries (graph decisionEdges bindings) plus
+  // the FOC-451 DoR intake gate, bound the same way.
+  "intake.triage_node", "intake.has_acceptance_criteria", "intake.task_size", "review.depth",
   "orchestration.next_step", "monitor.child_state",
 ];
 const NODE_IDS = SEED_IDS.slice(0, 7);
@@ -92,7 +93,7 @@ const AUTONOMY_MAP = {
   "plan.dor": "A0", "plan.ac": null, "plan.spec": null, "plan.gate1": null,
   "plan.decompose": "A0", "plan.gate2": null, "plan.push": null,
   "gate.screen": "A0", "extraction": "A0", "prompt-refinement": "A0",
-  "intake.triage_node": "A0", "intake.task_size": "A0", "review.depth": "A0",
+  "intake.triage_node": "A0", "intake.has_acceptance_criteria": "A0", "intake.task_size": "A0", "review.depth": "A0",
   "orchestration.next_step": "A0", "monitor.child_state": "A0",
 };
 const METRICS_BY_ID = {
@@ -123,7 +124,7 @@ await test("registry loads, passes REGISTRY_SCHEMA directly, and carries _doc + 
   eq(Object.keys(entries).length, SEED_IDS.length, "entry count");
 });
 
-await test("the seed set is exactly the fifteen contracted ids", () => {
+await test("the seed set is exactly the sixteen contracted ids", () => {
   deepEq([...Object.keys(entries)].sort(), [...SEED_IDS].sort(), "id set");
 });
 
@@ -162,7 +163,7 @@ console.log("\ndecisions-registry: serving scope + structural autonomy (review r
 // A0-enforced decisionId channel (loader rule); the step servers' inline
 // channel names itself "seam (inline)" and stays the declared boundary gated
 // to FOC-387. plan.dor / plan.decompose gained their real seam serving with
-// FOC-397, as did the five decide edges.
+// FOC-397, as did the decide edges (FOC-451 added the DoR intake gate).
 const SEAM_SERVING = [{ via: "seam", actsOnAnswers: false, a0Enforced: true }];
 const SERVING_BY_ID = {
   extraction: [{ via: "seam (inline)", actsOnAnswers: true, a0Enforced: false, gate: "FOC-387" }],
@@ -171,6 +172,7 @@ const SERVING_BY_ID = {
   "plan.dor": SEAM_SERVING,
   "plan.decompose": SEAM_SERVING,
   "intake.triage_node": SEAM_SERVING,
+  "intake.has_acceptance_criteria": SEAM_SERVING,
   "intake.task_size": SEAM_SERVING,
   "review.depth": SEAM_SERVING,
   "orchestration.next_step": SEAM_SERVING,
@@ -248,9 +250,20 @@ await test("the seven node entries carry the full D7 contract; transports carry 
   }
 });
 
-await test("decide-edge entries pin the cascade ladder and exactly one MAP question each", () => {
+await test("decide-edge entries pin the cascade ladder and exactly one question each", () => {
+  // QTYPE: the FOC-397 MAP questions are choices; the FOC-451 DoR intake gate
+  // is a noul (boolean-with-confidence), matching its true/false criteria.
+  const QTYPE = {
+    "intake.triage_node": "choice",
+    "intake.has_acceptance_criteria": "noul",
+    "intake.task_size": "choice",
+    "review.depth": "choice",
+    "orchestration.next_step": "choice",
+    "monitor.child_state": "choice",
+  };
   const CRITERIA = {
     "intake.triage_node": ["plan", "dev", "review", "test", "ask"],
+    "intake.has_acceptance_criteria": ["true", "false"],
     "intake.task_size": ["small", "medium", "large"],
     "review.depth": ["first-pass", "deep", "security"],
     "orchestration.next_step": ["wait", "resume", "advance", "escalate", "ask"],
@@ -264,7 +277,7 @@ await test("decide-edge entries pin the cascade ladder and exactly one MAP quest
     const qids = Object.keys(e.questions);
     if (qids.length !== 1) fail(`${id}: expected one decide question, got ${qids.length}`);
     const q = e.questions[qids[0]];
-    eq(q.type, "choice", `question type of ${id}`);
+    eq(q.type, QTYPE[id], `question type of ${id}`);
     deepEq(Object.keys(q.criteria), CRITERIA[id], `criteria labels of ${id}`);
   }
 });

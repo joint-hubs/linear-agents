@@ -207,7 +207,7 @@ test("edge with no `why`", () => {
 // the class of bug no consumer would notice until it executes.
 console.log("\nv2 — version, steps, stepFlow, decisionEdges");
 
-test("v2: the committed graph carries the plan step chain and five decision edges", () => {
+test("v2: the committed graph carries the plan step chain and six decision edges", () => {
   const plan = GRAPH.nodes.plan;
   const stepIds = Object.keys(plan.steps || {});
   if (stepIds.length !== 7) fail(`expected 7 plan steps, got ${stepIds.length}`);
@@ -219,8 +219,8 @@ test("v2: the committed graph carries the plan step chain and five decision edge
   for (const e of flow) {
     if (e.type !== "sequence") fail(`stepFlow edge typed "${e.type}"`);
   }
-  if (!Array.isArray(GRAPH.decisionEdges) || GRAPH.decisionEdges.length !== 5) {
-    fail(`expected 5 decision edges, got ${(GRAPH.decisionEdges || []).length}`);
+  if (!Array.isArray(GRAPH.decisionEdges) || GRAPH.decisionEdges.length !== 6) {
+    fail(`expected 6 decision edges, got ${(GRAPH.decisionEdges || []).length}`);
   }
   for (const e of GRAPH.decisionEdges) {
     if (e.type !== "decide") fail(`decision edge "${e.id}" typed "${e.type}"`);

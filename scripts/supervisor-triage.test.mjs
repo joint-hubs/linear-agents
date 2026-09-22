@@ -21,19 +21,26 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadGraph } from "./graph-validate.mjs";
-import { extractSignals, propose, resolveNode, verdictForNode } from "./supervisor-triage.mjs";
+import { getRegistryEntry } from "./decision-registry.mjs";
+import {
+  buildIntake, extractSignals, labelRecordedIntake, propose, resolveNode, resolveSizeFlow, stateOf, verdictForNode,
+} from "./supervisor-triage.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = join(ROOT, "scripts", "supervisor-triage.mjs");
 
 let passed = 0;
 const failures = [];
+// The intake tests (FOC-451) await stub callers — they are queued and run
+// after the sync body, so a rejected promise can never print a green line
+// past the summary.
+const asyncTests = [];
 
 function test(name, fn) {
   try {
@@ -44,6 +51,10 @@ function test(name, fn) {
     failures.push(name);
     console.log(`  FAIL ${name}\n       ${err.message}`);
   }
+}
+
+function testAsync(name, fn) {
+  asyncTests.push({ name, fn });
 }
 const fail = (msg) => { throw new Error(msg); };
 
@@ -395,7 +406,7 @@ test("an unreadable issue file is a JSON refusal", () => {
 test("an unknown subcommand is refused", () => {
   const r = run(["triage", "--issue", "FOC-999"]);
   assert.equal(r.status, 1);
-  assert.match(JSON.parse(r.stdout).error, /propose \| record/);
+  assert.match(JSON.parse(r.stdout).error, /propose \| record \| intake/);
 });
 
 // ── 7. record — the contract, and its calibration gate ────────────────────────
@@ -527,10 +538,470 @@ test("a recorded verdict opens the gate — the next refusal is about something 
   assert.match(err, /not inside a git repository/);
 });
 
-// ── summary ───────────────────────────────────────────────────────────────────
-console.log("");
-if (failures.length) {
-  console.log(`${passed} passed, ${failures.length} FAILED`);
-  process.exit(1);
+// ── 9. intake — the seam's annotations next to the verdict (FOC-451) ─────────
+console.log("\nintake (FOC-451)");
+
+// The seam is stubbed at the exact contract buildIntake consumes: a registry
+// call ({state, decisionId}) answered with the A0 envelope — annotation,
+// confidence, eventId. No network, no key, ever.
+const ANSWERS = {
+  "intake.triage_node": { q0: "dev" },
+  "intake.has_acceptance_criteria": { q0: true },
+  "intake.task_size": { size: "medium" },
+};
+const stubCaller = () => async ({ decisionId }) => ({
+  ok: true,
+  decisionId,
+  annotation: { answers: ANSWERS[decisionId], confidence: 0.9 },
+  eventId: `evt-${decisionId}`,
+});
+
+testAsync("stateOf composes title + body and caps at the seam's 16000-char state cap", async () => {
+  assert.equal(stateOf({ title: "T", description: "b" }), "Title: T\n\nb");
+  assert.equal(stateOf({ description: "body" }), "body");
+  assert.equal(stateOf({ title: "T", description: "x".repeat(20000) }).length, 16000);
+});
+
+testAsync("intake records the three seam annotations with answers, confidence and eventIds", async () => {
+  const { record, warnings } = await buildIntake({ issue: issue({ title: "T", body: AC_BODY }), graph: GRAPH, caller: stubCaller() });
+  assert.equal(warnings.length, 0, JSON.stringify(warnings));
+  for (const id of ["intake.triage_node", "intake.has_acceptance_criteria", "intake.task_size"]) {
+    const d = record.decisions[id];
+    assert.equal(d.ok, true, id);
+    assert.ok(d.answer !== null && d.answer !== undefined, `${id} answer`);
+    assert.equal(d.confidence, 0.9, id);
+    assert.match(d.eventId, /^evt-intake\./, id);
+  }
+  assert.equal(record.decisions["intake.triage_node"].answer, "dev");
+  assert.equal(record.decisions["intake.has_acceptance_criteria"].answer, true);
+  assert.equal(record.frontman.proposal, "dev", "the deterministic frontman proposal rides along");
+  assert.equal(record.disagreement, null, "seam and frontman agree → no disagreement invented");
+  assert.equal(record.size, "medium");
+  // suggestedFlow is pinned against an explicit mapping fixture below — the
+  // committed graph may or may not carry intakeFlows at this commit.
+});
+
+testAsync("a seam/frontman disagreement is surfaced, never auto-acted", async () => {
+  const caller = async ({ decisionId }) => ({
+    ok: true,
+    decisionId,
+    annotation: { answers: { ...(decisionId === "intake.triage_node" ? { q0: "plan" } : ANSWERS[decisionId]) }, confidence: 0.9 },
+    eventId: `evt-${decisionId}`,
+  });
+  const { record } = await buildIntake({ issue: issue({ body: AC_BODY }), graph: GRAPH, caller });
+  assert.deepEqual(record.disagreement, { decisionId: "intake.triage_node", seam: "plan", frontman: "dev" });
+  // A0: the seam's answer is displayed data — recorded verbatim, never swapped
+  // for the frontman's, never acted on.
+  assert.equal(record.decisions["intake.triage_node"].answer, "plan");
+});
+
+testAsync("no API key → every decision fails closed, visibly, and the record still builds", async () => {
+  const authMissing = async () => {
+    const err = new Error("OPENROUTER_API_KEY is not set — tier-1 Jev needs it");
+    err.code = "auth_missing";
+    throw err;
+  };
+  const { record, warnings } = await buildIntake({ issue: issue({ body: AC_BODY }), graph: GRAPH, caller: authMissing });
+  for (const id of Object.keys(record.decisions)) {
+    assert.equal(record.decisions[id].ok, false, id);
+    assert.equal(record.decisions[id].code, "auth_missing", id);
+  }
+  assert.equal(warnings.length, 3, JSON.stringify(warnings));
+  assert.equal(record.disagreement, null, "no annotation → no disagreement invented");
+});
+
+testAsync("a pre-provider failure still carries the eventId — the label join works later", async () => {
+  const refused = async ({ decisionId }) => ({
+    ok: false,
+    error: { code: "schema_invalid", message: "state rejected" },
+    eventId: `evt-${decisionId}`,
+  });
+  const { record } = await buildIntake({ issue: issue({ body: AC_BODY }), graph: GRAPH, caller: refused });
+  assert.equal(record.decisions["intake.triage_node"].eventId, "evt-intake.triage_node");
+  assert.equal(record.decisions["intake.triage_node"].code, "schema_invalid");
+});
+
+testAsync("the seam's size feeds the suggested flow only where the config mapping knows it", async () => {
+  const g = clone();
+  g.intakeFlows = { small: [], medium: ["dev", "test"], large: ["plan", "dev", "review", "test"] };
+  const { record } = await buildIntake({ issue: issue({ body: AC_BODY }), graph: g, caller: stubCaller() });
+  assert.deepEqual(record.suggestedFlow, { size: "medium", squads: ["dev", "test"] });
+
+  const g2 = clone();
+  delete g2.intakeFlows; // robust whether or not the committed graph carries the mapping yet
+  const { record: r2 } = await buildIntake({ issue: issue({ body: AC_BODY }), graph: g2, caller: stubCaller() });
+  assert.equal(r2.suggestedFlow, undefined);
+  assert.match(r2.flowReason, /no "intakeFlows" size→flow mapping/);
+});
+
+test("resolveSizeFlow reads the config mapping and refuses what it does not know", () => {
+  const g = { intakeFlows: { small: [], medium: ["dev", "test"], large: ["plan", "dev", "review", "test"] } };
+  assert.deepEqual(resolveSizeFlow(g, "medium"), ["dev", "test"]);
+  assert.deepEqual(resolveSizeFlow(g, "small"), []);
+  assert.throws(() => resolveSizeFlow(g, "huge"), /unknown size "huge"/);
+  assert.throws(() => resolveSizeFlow({}, "medium"), /no "intakeFlows" size→flow mapping/);
+  assert.throws(() => resolveSizeFlow({ intakeFlows: "x" }, "medium"), /no "intakeFlows" size→flow mapping/);
+});
+
+test("intake refuses without --run, before any network or file write", () => {
+  // LA_SUPERVISOR_RUN blanked: a supervised session sets it, and this refusal
+  // must fire even there — --run is required, not inherited-by-luck.
+  const r = run(["intake", "--issue", "FOC-999", "--issue-file", fixture({ body: AC_BODY })], { OPENROUTER_API_KEY: "", LA_SUPERVISOR_RUN: "" });
+  assert.equal(r.status, 1);
+  assert.match(JSON.parse(r.stdout).error, /--run/);
+});
+
+test("intake with no API key fails closed, visibly, and still writes the sibling record", () => {
+  const runId = withRun();
+  cleanup.push(join(ROOT, ".state", "runs", runId)); // the caller's shadow log
+  const r = run(
+    ["intake", "--issue", "FOC-999", "--issue-file", fixture({ body: AC_BODY, title: "T" }), "--run", runId],
+    { OPENROUTER_API_KEY: "" },
+  );
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.ok, true);
+  for (const id of ["intake.triage_node", "intake.has_acceptance_criteria", "intake.task_size"]) {
+    assert.equal(out.decisions[id].ok, false, id);
+    assert.equal(out.decisions[id].code, "auth_missing", id);
+    assert.match(out.decisions[id].eventId, /^[0-9a-f-]{36}$/, `${id} event id`);
+  }
+  assert.equal(out.warnings.length, 3, JSON.stringify(out.warnings));
+  assert.equal(out.disagreement, null);
+  assert.match(r.stderr, /failed closed/, "the failure is announced, not swallowed");
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "intake.json"), "utf8"));
+  assert.equal(rec.runId, runId);
+  assert.equal(rec.issue, "FOC-999");
+  assert.equal(rec.decisions["intake.triage_node"].code, "auth_missing");
+  assert.ok(existsSync(join(ROOT, ".state", "runs", runId, "decisions.jsonl")), "the shadow events exist even for failed calls");
+});
+
+test("record embeds the intake summary next to the verdict and displays the disagreement", () => {
+  const runId = withRun();
+  const dir = runDirOf(runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "intake.json"),
+    JSON.stringify({
+      issue: "FOC-999", createdAt: "2026-09-22T00:00:00.000Z", runId,
+      decisions: {
+        "intake.triage_node": { ok: true, answer: "plan", confidence: 0.9, eventId: "evt-t" },
+        "intake.has_acceptance_criteria": { ok: true, answer: true, confidence: 0.9, eventId: "evt-a" },
+        "intake.task_size": { ok: true, answer: "medium", confidence: 0.9, eventId: "evt-s" },
+      },
+      frontman: { proposal: "dev", node: "dev", confidence: "high" },
+      disagreement: { decisionId: "intake.triage_node", seam: "plan", frontman: "dev" },
+      size: "medium",
+    }),
+    "utf8",
+  );
+  const r = run(["record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "AC present", "--confidence", "85", "--run", runId]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(dir, "triage.json"), "utf8"));
+  assert.equal(rec.verdict, "dev");
+  assert.deepEqual(rec.intake.disagreement, { decisionId: "intake.triage_node", seam: "plan", frontman: "dev" });
+  assert.equal(rec.intake.decisions["intake.triage_node"].eventId, "evt-t");
+  assert.equal(rec.intake.decisions["intake.has_acceptance_criteria"].answer, true);
+  assert.ok(!("size" in rec), "no --size → no final size on the record");
+  assert.match(r.stderr, /A0 disagreement — seam intake\.triage_node says "plan"/);
+  assert.match(r.stderr, /displayed, never auto-acted/);
+});
+
+test("record --size is validated against the config mapping — unknown sizes are refused", () => {
+  const runId = withRun();
+  const r = run([
+    "record", "--issue", "FOC-1", "--verdict", "dev", "--rationale", "x", "--confidence", "85",
+    "--size", "colossal", "--run", runId,
+  ]);
+  assert.equal(r.status, 1);
+  assert.match(JSON.parse(r.stdout).error, /size/);
+  assert.ok(!existsSync(join(runDirOf(runId), "triage.json")), "a refused size must not leave a verdict behind");
+});
+
+test("the committed intakeFlows mapping covers exactly the registry's task_size criteria", () => {
+  // Anti-drift: the frontman validates --size against these keys; a size the
+  // registry can ask about but the mapping does not know would be refused at
+  // record time for no good reason — and vice versa.
+  const criteria = Object.keys(getRegistryEntry("intake.task_size").questions.size.criteria);
+  assert.deepEqual(Object.keys(GRAPH.intakeFlows).sort(), criteria.sort());
+  for (const flow of Object.values(GRAPH.intakeFlows)) {
+    assert.ok(Array.isArray(flow), "every mapping value is a squad list");
+  }
+});
+
+test("record --size embeds the final size, the suggested flow and the size disagreement", () => {
+  const runId = withRun();
+  const dir = runDirOf(runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "intake.json"),
+    JSON.stringify({
+      issue: "FOC-999", createdAt: "2026-09-22T00:00:00.000Z", runId,
+      decisions: {
+        "intake.triage_node": { ok: true, answer: "dev", confidence: 0.9, eventId: "evt-t" },
+        "intake.task_size": { ok: true, answer: "small", confidence: 0.9, eventId: "evt-s" },
+      },
+      frontman: { proposal: "dev", node: "dev", confidence: "high" },
+      disagreement: null,
+      size: "small",
+    }),
+    "utf8",
+  );
+  const r = run([
+    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85",
+    "--size", "large", "--run", runId,
+  ]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(dir, "triage.json"), "utf8"));
+  assert.equal(rec.size, "large");
+  assert.deepEqual(rec.suggestedFlow, ["plan", "dev", "review", "test"]);
+  assert.deepEqual(rec.intake.sizeDisagreement, { seam: "small", recorded: "large" });
+  assert.match(r.stderr, /seam intake\.task_size says "small"/);
+  assert.match(r.stderr, /displayed, never auto-acted/);
+});
+
+test("the recorded verdict/size become FOC-449 labels tied to the intake eventIds", () => {
+  const runsDir = join(tmp, "runs-labels");
+  const logDir = join(runsDir, "test-triage-labels");
+  mkdirSync(logDir, { recursive: true });
+  const evtT = "evt-triage-1";
+  const evtS = "evt-size-1";
+  writeFileSync(
+    join(logDir, "decisions.jsonl"),
+    JSON.stringify({ type: "event", eventId: evtT, decisionId: "intake.triage_node", taskKey: "FOC-999" }) + "\n" +
+      JSON.stringify({ type: "event", eventId: evtS, decisionId: "intake.task_size", taskKey: "FOC-999" }) + "\n",
+    "utf8",
+  );
+  const { labelled, warnings } = labelRecordedIntake({
+    intake: {
+      runId: "test-triage-labels",
+      decisions: {
+        "intake.triage_node": { ok: true, answer: "dev", eventId: evtT },
+        "intake.task_size": { ok: true, answer: "medium", eventId: evtS },
+      },
+    },
+    verdict: "dev",
+    size: "medium",
+    runsDir,
+    issue: "FOC-999",
+  });
+  assert.equal(warnings.length, 0, JSON.stringify(warnings));
+  assert.equal(labelled.length, 2);
+  const labels = readFileSync(join(logDir, "decisions.jsonl"), "utf8")
+    .trim().split("\n").map((l) => JSON.parse(l))
+    .filter((l) => l.type === "label");
+  const byEvent = Object.fromEntries(labels.map((l) => [l.eventId, l]));
+  assert.equal(byEvent[evtT].outcome, "dev");
+  assert.equal(byEvent[evtT].by, "agent");
+  assert.equal(byEvent[evtT].source, "auto");
+  assert.equal(byEvent[evtT].via, "verdict");
+  assert.equal(byEvent[evtS].outcome, "medium");
+});
+
+test("an intake without eventIds labels nothing and warns nobody", () => {
+  const { labelled, warnings } = labelRecordedIntake({
+    intake: { runId: "nowhere", decisions: { "intake.triage_node": { ok: true, answer: "dev" } } },
+    verdict: "dev",
+    runsDir: join(tmp, "runs-empty"),
+    issue: "FOC-999",
+  });
+  assert.equal(labelled.length, 0);
+  assert.equal(warnings.length, 0);
+});
+
+test("record labels the final verdict against the offline intake's eventId (end to end)", () => {
+  const runId = withRun();
+  const runsDir = join(ROOT, ".state", "runs");
+  cleanup.push(join(runsDir, runId));
+  // intake — offline (no key): the events exist, the answers do not.
+  const i = run(
+    ["intake", "--issue", "FOC-999", "--issue-file", fixture({ body: AC_BODY }), "--run", runId],
+    { OPENROUTER_API_KEY: "" },
+  );
+  assert.equal(i.status, 0, i.stdout + i.stderr);
+  const intakeRec = JSON.parse(readFileSync(join(runDirOf(runId), "intake.json"), "utf8"));
+  const evtT = intakeRec.decisions["intake.triage_node"].eventId;
+  assert.ok(evtT, "a failed call still carries its event id");
+  // record the verdict → the label lands in the run log that holds the event.
+  const r = run(["record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--run", runId]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const lines = readFileSync(join(runsDir, runId, "decisions.jsonl"), "utf8")
+    .trim().split("\n").map((l) => JSON.parse(l));
+  const label = lines.find((l) => l.type === "label" && l.eventId === evtT);
+  assert.ok(label, "the label is in the run log holding the event");
+  assert.equal(label.outcome, "dev");
+  assert.equal(label.by, "agent");
+  assert.equal(label.via, "verdict");
+  const evtS = intakeRec.decisions["intake.task_size"].eventId;
+  assert.ok(!lines.some((l) => l.type === "label" && l.eventId === evtS), "no final size → no size label");
+});
+
+// ── 9b. one run, one issue — the intake record is not re-parentable (FOC-451) ─
+console.log("\nintake należy do jednego zagadnienia (FOC-451)");
+
+// A run whose intake.json — and the decision event it points at — belongs to
+// FOC-888, while the verdict being recorded is FOC-999: the round-1 blocker.
+// The foreign event exists in the run's real log, so labelling it would be
+// possible; every test here proves it is not.
+function foreignIntake(runId) {
+  const dir = runDirOf(runId);
+  mkdirSync(dir, { recursive: true });
+  const logDir = join(ROOT, ".state", "runs", runId);
+  mkdirSync(logDir, { recursive: true });
+  cleanup.push(logDir); // the caller's shadow log, same as the intake tests above
+  writeFileSync(
+    join(logDir, "decisions.jsonl"),
+    JSON.stringify({ type: "event", eventId: "evt-foreign", decisionId: "intake.triage_node", taskKey: "FOC-888" }) + "\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(dir, "intake.json"),
+    JSON.stringify({
+      issue: "FOC-888", createdAt: "2026-09-22T00:00:00.000Z", runId,
+      decisions: { "intake.triage_node": { ok: true, answer: "dev", confidence: 0.9, eventId: "evt-foreign" } },
+      frontman: { proposal: "dev", node: "dev", confidence: "high" },
+      disagreement: null,
+      size: "medium",
+    }),
+    "utf8",
+  );
+  return { dir, logDir };
 }
-console.log(`${passed} passed, 0 failed`);
+
+const noForeignLabel = (logDir) => {
+  const lines = readFileSync(join(logDir, "decisions.jsonl"), "utf8")
+    .trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(!lines.some((l) => l.type === "label"), "the foreign event must collect no label");
+};
+
+test("record refuses an intake.json written for a DIFFERENT issue — before any embed or label", () => {
+  const runId = withRun();
+  const { dir, logDir } = foreignIntake(runId);
+  const r = run(["record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--run", runId]);
+  assert.equal(r.status, 1, "cross-issue intake data would silently corrupt the FOC-449 join");
+  const err = JSON.parse(r.stdout).error;
+  assert.match(err, /already has intake annotations for FOC-888/);
+  assert.match(err, /recording FOC-999/, "the refusal names both identities");
+  assert.ok(!existsSync(join(dir, "triage.json")), "the refusal precedes any verdict write");
+  noForeignLabel(logDir);
+});
+
+test("--force records the new verdict but DROPS the foreign intake data instead of re-parenting it", () => {
+  const runId = withRun();
+  const { dir, logDir } = foreignIntake(runId);
+  const r = run([
+    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--force", "--run", runId,
+  ]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(dir, "triage.json"), "utf8"));
+  assert.equal(rec.issue, "FOC-999");
+  assert.ok(!("intake" in rec), "the foreign intake summary is dropped, never embedded");
+  assert.match(r.stderr, /intake\.json belongs to FOC-888, not FOC-999/, "the drop is announced, not silent");
+  noForeignLabel(logDir);
+});
+
+test("labelRecordedIntake refuses a mismatched eventId→issue pairing — fail-closed before any write", () => {
+  const runsDir = join(tmp, "runs-pairing");
+  const logDir = join(runsDir, "test-triage-pairing");
+  mkdirSync(logDir, { recursive: true });
+  const evtForeign = "evt-pair-foreign";
+  const evtNoKey = "evt-pair-nokey";
+  writeFileSync(
+    join(logDir, "decisions.jsonl"),
+    JSON.stringify({ type: "event", eventId: evtForeign, decisionId: "intake.triage_node", taskKey: "FOC-888" }) + "\n" +
+      JSON.stringify({ type: "event", eventId: evtNoKey, decisionId: "intake.task_size" }) + "\n",
+    "utf8",
+  );
+  const { labelled, warnings } = labelRecordedIntake({
+    intake: {
+      runId: "test-triage-pairing",
+      decisions: {
+        "intake.triage_node": { ok: true, answer: "dev", eventId: evtForeign },
+        "intake.task_size": { ok: true, answer: "medium", eventId: evtNoKey },
+      },
+    },
+    verdict: "dev",
+    size: "medium",
+    runsDir,
+    issue: "FOC-999",
+  });
+  assert.equal(labelled.length, 0, "a mismatched event must not collect the outcome");
+  assert.equal(warnings.length, 2, JSON.stringify(warnings));
+  assert.match(warnings[0], /taskKey is "FOC-888", not "FOC-999"/);
+  assert.match(warnings[1], /taskKey is "missing"/, "an event without a taskKey cannot be verified, so it is refused");
+  const labels = readFileSync(join(logDir, "decisions.jsonl"), "utf8")
+    .trim().split("\n").map((l) => JSON.parse(l))
+    .filter((l) => l.type === "label");
+  assert.equal(labels.length, 0, "no label line reaches the log");
+});
+
+test("intake records the invoked --issue identity, not a payload-derived uuid (the guard's vocabulary)", () => {
+  // extractSignals falls back to issue.id when a payload has no identifier —
+  // a uuid in intake.json would not be comparable to the --issue the record
+  // step is invoked with, enabling and masking the cross-issue mismatch.
+  const runId = withRun();
+  cleanup.push(join(ROOT, ".state", "runs", runId));
+  const path = join(tmp, `issue-uuid-${fixtureN++}.json`);
+  writeFileSync(
+    path,
+    JSON.stringify({
+      id: "9f1c2a34-5b6d-7e8f-9a0b-1c2d3e4f5a6b",
+      description: AC_BODY,
+      state: { name: "Backlog", type: "backlog" },
+      labels: { nodes: [] },
+      comments: { nodes: [] },
+      estimate: null,
+      children: { nodes: [] },
+    }),
+    "utf8",
+  );
+  const i = run(["intake", "--issue", "FOC-999", "--issue-file", path, "--run", runId], { OPENROUTER_API_KEY: "" });
+  assert.equal(i.status, 0, i.stdout + i.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "intake.json"), "utf8"));
+  assert.equal(rec.issue, "FOC-999", "the stored identity must be the invoked id, same vocabulary as taskKey and triage.json");
+});
+
+test("the A0 disagreement line states the RECORDED verdict, not the deterministic proposal", () => {
+  const runId = withRun();
+  const dir = runDirOf(runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "intake.json"),
+    JSON.stringify({
+      issue: "FOC-999", createdAt: "2026-09-22T00:00:00.000Z", runId,
+      decisions: { "intake.triage_node": { ok: true, answer: "plan", confidence: 0.9, eventId: "evt-t" } },
+      frontman: { proposal: "dev", node: "dev", confidence: "high" },
+      disagreement: { decisionId: "intake.triage_node", seam: "plan", frontman: "dev" },
+      size: "medium",
+    }),
+    "utf8",
+  );
+  // The frontman proposed dev, the seam said plan — the verdict recorded is
+  // review, and the display must say review.
+  const r = run(["record", "--issue", "FOC-999", "--verdict", "review", "--rationale", "x", "--confidence", "90", "--run", runId]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stderr, /seam intake\.triage_node says "plan"/);
+  assert.match(r.stderr, /the recorded verdict is "review"/, "the recorded verdict, not the frontman proposal");
+  assert.match(r.stderr, /displayed, never auto-acted/);
+});
+
+// ── summary ───────────────────────────────────────────────────────────────────
+(async () => {
+  for (const { name, fn } of asyncTests) {
+    try {
+      await fn();
+      passed++;
+      console.log(`  PASS ${name}`);
+    } catch (err) {
+      failures.push(name);
+      console.log(`  FAIL ${name}\n       ${err.message}`);
+    }
+  }
+  console.log("");
+  if (failures.length) {
+    console.log(`${passed} passed, ${failures.length} FAILED`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`${passed} passed, 0 failed`);
+})();
