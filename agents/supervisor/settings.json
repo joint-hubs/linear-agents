@@ -20,6 +20,8 @@
       "Bash(git log:*)",
       "Bash(git show:*)",
       "mcp__codegraph__*",
+      "mcp__fenix-decision-extraction__*",
+      "mcp__fenix-decision-prompt-refinement__*",
       "Bash(codegraph:*)",
       "Edit",
       "Bash(ls:*)",

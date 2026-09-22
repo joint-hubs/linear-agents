@@ -8,6 +8,16 @@
       "env": {
         "CODEGRAPH_MCP_TOOLS": "explore,node,search,callers,callees,impact,files,status"
       }
+    },
+    "fenix-decision-extraction": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["scripts/mcp/server-extraction.mjs"]
+    },
+    "fenix-decision-prompt-refinement": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["scripts/mcp/server-prompt-refinement.mjs"]
     }
   }
 }
