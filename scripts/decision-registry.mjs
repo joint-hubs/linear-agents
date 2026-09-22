@@ -198,7 +198,7 @@ export const ENTRY_SCHEMA = {
     // least one serving path — an entry nothing serves is not wired, and an
     // empty "serving: []" claim would let that drift sit quietly. Every path
     // that serves the entry in code must appear here.
-    { if: { properties: { kind: { const: "J" } }, required: ["kind"] }, then: { required: ["serving"], properties: { serving: { minItems: 1 } } } },
+    { if: { properties: { kind: { const: "J" } }, required: ["kind"] }, then: { required: ["serving"], properties: { serving: { type: "array", minItems: 1 } } } },
     { if: { properties: { kind: { enum: ["D", "A", "H", "G"] } }, required: ["kind"] }, then: { not: { required: ["serving"] } } },
     // Autonomy encoding is structural (review round 1): decisions (kind J)
     // carry an autonomy value; node configs (G/A/H/D) are null.
