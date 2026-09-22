@@ -82,6 +82,14 @@
 // questions}. Writes are best-effort (a shadow failure never degrades the
 // decision) and skipped when there is no run directory to write to.
 //
+// FOC-449: a registry-backed line (decisionId present — served success AND
+// failure) is a full event record: type:"event", a random eventId, the FULL
+// state and questions AS SENT (masked through mcp/scrub.mjs key patterns
+// WITHOUT the 120-char error cap), a scrub provenance note, the caller's
+// taskKey and durationMs. Outcomes land separately as {type:"label"} lines
+// via scripts/decision-log.mjs. Inline lines gain nothing and stay
+// byte-identical.
+//
 // Secrets: error paths never echo Authorization values or key material —
 // every message this module composes goes through mcp/scrub.mjs, the one
 // scrubber shared with the envelope, the Jev provider and the JSON-RPC layer
@@ -90,13 +98,13 @@
 // Run: import { createDecisionCaller } from "./decision-call.mjs" (no CLI —
 // callers are the MCP step family and the graph runner).
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
 import { runDecision, TypedError } from "./mcp/envelope.mjs";
-import { scrub } from "./mcp/scrub.mjs";
+import { scrub, scrubMask } from "./mcp/scrub.mjs";
 import { createJevProvider, JEV_MODEL, probabilityOf, choiceOf, confidenceOf } from "./mcp/provider-jev.mjs";
 import { resolveEntryQuestions } from "./decision-registry.mjs";
 
@@ -118,6 +126,9 @@ export const FALLBACK_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 export const DECISION_AGENT_KEY = "decision-call";
 export const SHADOW_FILENAME = "decisions.jsonl";
 export const DECISION_EVENT_TYPE = "decision.call.usage";
+// FOC-449: the shadow line type markers. An `event` is one decision record
+// (written here); a `label` is one recorded outcome (scripts/decision-log.mjs).
+export const SHADOW_EVENT_TYPE = "event";
 
 // ── step descriptor (schemas run through the shared fail-closed envelope) ───
 
@@ -467,6 +478,32 @@ function appendShadow(shadowDir, line) {
   }
 }
 
+// FOC-449 E1b: the full input a registry-backed decision sent to the provider,
+// stored for the outcome join. Untrusted text — masked through the shared
+// key-shaped scrub patterns WITHOUT the 120-char error-text cap (the cap
+// bounds an error path, not a record whose point is the complete input).
+// A value that cannot be serialized deterministically is redacted whole and
+// the fact recorded in the note: raw secret-shaped material never reaches
+// .state, gitignored or not. questions travels as the JSON actually sent.
+function scrubEventInput(effective) {
+  const note = "state/questions masked via mcp/scrub.mjs key patterns (variant: mask-only, no error-text cap)";
+  try {
+    return {
+      state: typeof effective?.state === "string" ? scrubMask(effective.state) : null,
+      questions: scrubMask(JSON.stringify(effective?.questions ?? null)),
+      redacted: false,
+      note,
+    };
+  } catch {
+    return {
+      state: "[REDACTED]",
+      questions: "[REDACTED]",
+      redacted: true,
+      note: `${note}; unserializable input redacted in full`,
+    };
+  }
+}
+
 /**
  * The decision-call seam. Returns an async call({state, questions}) →
  * envelope (the shared fail-closed shape, plus answers/usage/responseId and
@@ -492,6 +529,9 @@ function appendShadow(shadowDir, line) {
  *                without LA_RUN_ID)
  *   runId      — run id recorded in shadow lines and meter events
  *                (default process.env.LA_RUN_ID)
+ *   taskKey    — the work item the decision belongs to, recorded on
+ *                registry-backed shadow events (default process.env.LA_TASK_ID,
+ *                null when absent — honest, never guessed)
  *   now        — clock for measuredAt (tests)
  */
 export function createDecisionCaller({
@@ -505,6 +545,7 @@ export function createDecisionCaller({
   fallbackModel = FALLBACK_MODEL,
   shadowDir,
   runId = process.env.LA_RUN_ID,
+  taskKey = process.env.LA_TASK_ID ?? null,
   now = () => new Date().toISOString(),
 } = {}) {
   function meterRecord(kind) {
@@ -589,6 +630,12 @@ export function createDecisionCaller({
       delete envelope.confidence;
     }
 
+    // FOC-449: the full input is recorded only where it was actually sent to
+    // the provider. A pre-provider failure (mutual exclusion, schema reject,
+    // registry lookup) sent nothing — input stays null rather than pretending
+    // the raw caller input was the served one.
+    const sentInput = decisionId && !preProviderFailure ? scrubEventInput(effective) : null;
+
     appendShadow(shadowDir ?? defaultShadowDir(runIdActual()), {
       ts: now(),
       runId: runIdActual(),
@@ -608,6 +655,23 @@ export function createDecisionCaller({
       // or failed); criteriaVersion only where the entry resolved (review
       // round 1). Inline calls spread nothing and stay byte-identical.
       ...(decisionId ? { decisionId, ...(registry ? { criteriaVersion: registry.criteriaVersion } : {}) } : {}),
+      // FOC-449: registry-backed lines are full event records — identity, the
+      // scrubbed input AS SENT (null when nothing was sent), the scrub
+      // provenance, the work key and the latency. Inline lines gain nothing.
+      ...(decisionId
+        ? {
+            type: SHADOW_EVENT_TYPE,
+            eventId: randomUUID(),
+            ...(sentInput
+              ? {
+                  input: { state: sentInput.state, questions: sentInput.questions },
+                  scrub: { variant: "mask-only", redacted: sentInput.redacted, note: sentInput.note },
+                }
+              : { input: null, scrub: null }),
+            taskKey: taskKey ?? null,
+            durationMs: envelope.durationMs ?? null,
+          }
+        : {}),
     });
     return envelope;
   }
