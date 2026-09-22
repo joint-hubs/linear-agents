@@ -2,6 +2,7 @@
 //
 //   node scripts/supervisor-gate.mjs emit   --kind <k> --summary "..." [--question "..." ...]
 //                                           [--artifact <path> ...] [--facts <json|@file>]
+//                                           [--decision-event <eventId> ...] [--decision-run <runId> ...]
 //                                           [--child <id>] [--run <id>]
 //   node scripts/supervisor-gate.mjs answer --gate <gateId> --text "..." [--note "..."] [--run <id>]
 //   node scripts/supervisor-gate.mjs list   [--run <id>] [--status pending|answered] [--child <id>]
@@ -41,6 +42,7 @@ import {
   parseArgs,
   readRegistry,
 } from "./supervisor-lib.mjs";
+import { autoLabel, pairDecisionEvents } from "./decision-log.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 
 // The well-known set (§2.6). Extending it is a script edit plus a spec note —
@@ -65,7 +67,7 @@ const KINDS = [
 
 const STATUSES = ["pending", "answered"];
 
-const REPEATABLE = new Set(["question", "artifact"]);
+const REPEATABLE = new Set(["question", "artifact", "decision-event", "decision-run"]);
 
 const asList = (v) => (v === undefined || v === true ? [] : Array.isArray(v) ? v : [v]);
 
@@ -170,6 +172,17 @@ function cmdEmit(args) {
   // so whether or not the registry happens to know this child.
   const facts = parseFacts(args.facts);
 
+  // FOC-449: explicit decision provenance — the decision events this gate's
+  // answer will label. Validated with the other flags, before any state is
+  // read: a malformed pairing must be refused whether or not the registry
+  // knows this child. No flags → no provenance on the record at all.
+  let decisionEvents = [];
+  try {
+    decisionEvents = pairDecisionEvents(asList(args["decision-event"]), asList(args["decision-run"]));
+  } catch (err) {
+    failJson(err.message);
+  }
+
   // The registry is what makes a gate routable: it says which squad asked and
   // about which issue. A gate from a child nobody registered cannot be answered,
   // because there is no session to deliver the answer back to.
@@ -233,6 +246,10 @@ function cmdEmit(args) {
     status: "pending",
     createdAt: new Date().toISOString(),
     answer: null,
+    // FOC-449: the decision events this gate's answer will label. The key is
+    // added only when provenance was given — a gate without it stays
+    // byte-identical.
+    ...(decisionEvents.length ? { decisionEvents } : {}),
   };
 
   ensureRunDir(runId);
@@ -290,6 +307,14 @@ function cmdAnswer(args) {
   };
   atomicWriteJSON(gatePath(runId, gateId), updated);
 
+  // FOC-449 auto-join: the recorded answer IS the outcome for every decision
+  // event the gate carried provenance for — outcome = the answer value,
+  // by:"human", via:"gate". Never derived from the event's own answers. A
+  // failed label is a warning on stderr, never a broken answer (the gate
+  // record is the primary flow); a gate without provenance labels nothing.
+  const labelWarnings = autoLabel(gate.decisionEvents, { outcome: text, by: "human", via: "gate" }).warnings;
+  for (const w of labelWarnings) console.error(`[gate] ${w}`);
+
   console.log(
     JSON.stringify(
       {
@@ -299,6 +324,7 @@ function cmdAnswer(args) {
         // between the two is where a child sits waiting on an answer that
         // technically exists.
         next: `deliver it: node scripts/supervisor-followup.mjs --child ${gate.childId} --gate ${gateId} --prompt "<the answer>"`,
+        warnings: labelWarnings,
         ...updated,
       },
       null,

@@ -3,7 +3,8 @@
 //
 //   node scripts/supervisor-verdict.mjs record --child <id> --verdict pass|fail [--work-child <id>]
 //        [--finding '<json>' ...] [--ac '<json>' ...] [--failing-test <id> ...]
-//        [--no-failing-tests '<reason>'] [--dry-run]
+//        [--no-failing-tests '<reason>'] [--decision-event <eventId> ...]
+//        [--decision-run <runId> ...] [--dry-run]
 //   node scripts/supervisor-verdict.mjs show --task <id> [--round N]
 //   node scripts/supervisor-verdict.mjs list
 //
@@ -84,6 +85,7 @@ import {
   verdictPath,
   verdictsDir,
 } from "./supervisor-lib.mjs";
+import { autoLabel, pairDecisionEvents } from "./decision-log.mjs";
 import { loadGraph } from "./graph-validate.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 
@@ -94,7 +96,7 @@ const SEVERITIES = ["issue", "todo", "nit", "question", "praise"];
 // after trimming and lowercasing.
 const NON_EVIDENCE = ["", "-", "--", "n/a", "na", "none", "todo", "tbd", "?", "see above", "obvious"];
 
-const REPEATABLE = new Set(["finding", "ac", "failing-test"]);
+const REPEATABLE = new Set(["finding", "ac", "failing-test", "decision-event", "decision-run"]);
 
 const isEvidence = (v) => {
   const s = String(v ?? "").trim();
@@ -691,6 +693,18 @@ function cmdRecord(args) {
     });
   }
 
+  // ── FOC-449: explicit decision provenance ───────────────────────────────────
+  // The decision events this verdict labels with its outcome (the verdict
+  // value itself, by:"agent", via:"verdict"). Same plumbing as the gate emit:
+  // validated before anything is written, and the record key exists only when
+  // flags were passed. No flags → nothing labelled, nothing warned.
+  let decisionEvents = [];
+  try {
+    decisionEvents = pairDecisionEvents(asArray(args["decision-event"]), asArray(args["decision-run"]));
+  } catch (err) {
+    failJson(err.message);
+  }
+
   // WHICH TREE. Not the reviewer's — the one holding the work under review.
   //
   // The first version fingerprinted `entry.worktree`, the recording child's own
@@ -729,6 +743,9 @@ function cmdRecord(args) {
     // fingerprint.failingTests and no such field is a pre-enforcement record,
     // written by omission — the two must stay distinguishable on disk.
     ...(declaredNone !== undefined ? { noFailingTests: { reason: declaredNone } } : {}),
+    // FOC-449: the decision events this verdict labels. Key only when
+    // provenance was given — a verdict without it stays byte-identical.
+    ...(decisionEvents.length ? { decisionEvents } : {}),
     recordedAt: new Date().toISOString(),
   };
 
@@ -752,6 +769,12 @@ function cmdRecord(args) {
   ensureRunDir(runId);
   mkdirSync(verdictsDir(runId), { recursive: true });
   atomicWriteJSON(path, record);
+
+  // FOC-449 auto-join: the verdict IS the outcome for the decision events it
+  // carries provenance for — outcome = the verdict value, by:"agent",
+  // via:"verdict". Best-effort: a failed label is a warning in the record's
+  // own warnings trail, never a broken verdict.
+  warnings.push(...autoLabel(record.decisionEvents, { outcome: verdict, by: "agent", via: "verdict" }).warnings);
 
   const opsRan = executeReturnEffects(record, taskId, warnings);
   const gateAttempted = maybeEmitReturnGate(record, taskId, workChild, runId, warnings);
