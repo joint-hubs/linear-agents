@@ -199,6 +199,154 @@ test("edge with no `why`", () => {
   if (!hasProblem(validateGraph(g), 'has no "why"')) fail("an unexplained edge was accepted");
 });
 
+// ── 2b. v2 — version, steps, stepFlow, decisionEdges ─────────────────────────
+// The v2 shape is additive (Option A): every v1 check keeps running on every v2
+// graph, and the step objects must carry exactly the D7 list deep-equal to their
+// config/decisions.json entries. A graph you can diff against the registry is
+// the point — the runner (FOC-397) reads both files, and drift between them is
+// the class of bug no consumer would notice until it executes.
+console.log("\nv2 — version, steps, stepFlow, decisionEdges");
+
+test("v2: the committed graph carries the plan step chain and five decision edges", () => {
+  const plan = GRAPH.nodes.plan;
+  const stepIds = Object.keys(plan.steps || {});
+  if (stepIds.length !== 7) fail(`expected 7 plan steps, got ${stepIds.length}`);
+  const flow = plan.stepFlow || [];
+  if (flow.length !== 6) fail(`expected 6 sequence edges, got ${flow.length}`);
+  if (flow[0].from !== "plan.dor" || flow[flow.length - 1].to !== "plan.push") {
+    fail("the step chain does not run plan.dor → plan.push");
+  }
+  for (const e of flow) {
+    if (e.type !== "sequence") fail(`stepFlow edge typed "${e.type}"`);
+  }
+  if (!Array.isArray(GRAPH.decisionEdges) || GRAPH.decisionEdges.length !== 5) {
+    fail(`expected 5 decision edges, got ${(GRAPH.decisionEdges || []).length}`);
+  }
+  for (const e of GRAPH.decisionEdges) {
+    if (e.type !== "decide") fail(`decision edge "${e.id}" typed "${e.type}"`);
+    if (!e.registry) fail(`decision edge "${e.id}" names no registry entry`);
+    if (!e.why) fail(`decision edge "${e.id}" has no why`);
+  }
+});
+
+test("v2 malformed: a versionless or unknown-version graph is caught", () => {
+  const g1 = clone();
+  delete g1.version;
+  if (!hasProblem(validateGraph(g1), 'graph has no "version"')) fail("a versionless graph was accepted");
+  const g2 = clone();
+  g2.version = 3;
+  if (!hasProblem(validateGraph(g2), "graph version 3")) fail("an unknown graph version was accepted");
+});
+
+test("v2 malformed: a step missing a D7 field is caught", () => {
+  const g = clone();
+  delete g.nodes.plan.steps["plan.dor"].tier;
+  if (!hasProblem(validateGraph(g), 'step "plan.dor" is missing D7 field "tier"')) {
+    fail("a step missing a D7 field was accepted");
+  }
+});
+
+test("v2 malformed: step↔registry drift is caught", () => {
+  // The copy in graph.json is a rendered view; the registry entry is the
+  // contract. Drift must fail here, not the runner three weeks later.
+  const g = clone();
+  g.nodes.plan.steps["plan.dor"].reads = ["inbox.entry"];
+  if (!hasProblem(validateGraph(g), 'drifts from its config/decisions.json entry on "reads"')) {
+    fail("step↔registry drift was accepted");
+  }
+});
+
+test("v2 malformed: budget on a step is caught", () => {
+  // Budget stays at squad granularity (FOC-162 answered it there); a step-level
+  // budget would quietly re-open the allocation question per step.
+  const g = clone();
+  g.nodes.plan.steps["plan.dor"].budget = { stage: "discovery", shareHint: 0.1 };
+  if (!hasProblem(validateGraph(g), "carries field(s) budget outside the D7 list")) {
+    fail("budget on a step was accepted");
+  }
+});
+
+test("v2 malformed: an unknown step kind is caught", () => {
+  const g = clone();
+  g.nodes.plan.steps["plan.ac"].kind = "X";
+  if (!hasProblem(validateGraph(g), 'step "plan.ac" has kind "X"')) fail("an unknown step kind was accepted");
+});
+
+test("v2 malformed: a tier that does not match the kind is caught", () => {
+  const g1 = clone();
+  g1.nodes.plan.steps["plan.dor"].tier = 1;
+  if (!hasProblem(validateGraph(g1), "kind J expects { cascade: true, min: 1 | 2 | 3 }")) {
+    fail("a [J] step without a cascade pin was accepted");
+  }
+  const g2 = clone();
+  g2.nodes.plan.steps["plan.ac"].tier = "agent";
+  if (!hasProblem(validateGraph(g2), 'kind G expects "cheap"')) fail("a retiered [G] step was accepted");
+  const g3 = clone();
+  g3.nodes.plan.steps["plan.push"].tier = { cascade: true, min: 1 };
+  if (!hasProblem(validateGraph(g3), "kind D expects null")) fail("a cascading [D] step was accepted");
+});
+
+test("v2 malformed: a broken stepFlow is caught", () => {
+  const g1 = clone();
+  // One head, one tail, six edges for seven steps — but plan.dor/plan.ac form a
+  // cycle off the main line, so the walk from the head reaches only 5 of 7.
+  g1.nodes.plan.stepFlow = [
+    { from: "plan.spec", to: "plan.gate1", type: "sequence" },
+    { from: "plan.gate1", to: "plan.decompose", type: "sequence" },
+    { from: "plan.decompose", to: "plan.gate2", type: "sequence" },
+    { from: "plan.gate2", to: "plan.push", type: "sequence" },
+    { from: "plan.dor", to: "plan.ac", type: "sequence" },
+    { from: "plan.ac", to: "plan.dor", type: "sequence" },
+  ];
+  if (!hasProblem(validateGraph(g1), "every step must sit on the chain")) {
+    fail("a disconnected stepFlow was accepted");
+  }
+  const g2 = clone();
+  g2.nodes.plan.stepFlow.push({ from: "plan.ac", to: "plan.dor", type: "sequence" });
+  const p2 = validateGraph(g2);
+  if (!hasProblem(p2, "outbound sequence edges") && !hasProblem(p2, "a cycle")) {
+    fail("a branching or cyclic stepFlow was accepted");
+  }
+  const g3 = clone();
+  g3.nodes.plan.stepFlow[0].type = "handoff";
+  if (!hasProblem(validateGraph(g3), 'has type "handoff", expected "sequence"')) {
+    fail("a v1 edge type inside stepFlow was accepted");
+  }
+  const g4 = clone();
+  delete g4.nodes.plan.stepFlow;
+  if (!hasProblem(validateGraph(g4), 'declares steps but no "stepFlow"')) {
+    fail("steps without a flow were accepted");
+  }
+});
+
+test("v2 malformed: a decision edge naming an unknown scope or wrong type is caught", () => {
+  const g = clone();
+  g.decisionEdges.push({
+    id: "decide-bogus", from: "nowhere", to: "human", type: "handoff", registry: "x", why: "y",
+  });
+  const problems = validateGraph(g);
+  if (!hasProblem(problems, 'references unknown node "nowhere" as from')) {
+    fail("a decision edge naming an unknown scope was accepted");
+  }
+  if (!hasProblem(problems, 'decision edge "decide-bogus" has type "handoff", expected "decide"')) {
+    fail("a wrongly typed decision edge was accepted");
+  }
+});
+
+test("a v1 graph must not carry v2 fields", () => {
+  // No v1 consumer reads steps/stepFlow/decisionEdges — they would be dead
+  // config wearing a v1 badge.
+  const g = clone();
+  g.version = 1;
+  const problems = validateGraph(g);
+  if (!hasProblem(problems, 'node "plan" declares steps/stepFlow but the graph is version 1')) {
+    fail("a v1 graph carrying steps was accepted");
+  }
+  if (!hasProblem(problems, "graph carries decisionEdges but is version 1")) {
+    fail("a v1 graph carrying decisionEdges was accepted");
+  }
+});
+
 // ── 3. The equivalence proof ─────────────────────────────────────────────────
 console.log("\nequivalence with the file telemetry-server.mjs reads today");
 
@@ -365,6 +513,29 @@ test("a broken graph is never rendered", () => {
   const r = run(path, "--emit-puml");
   if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
   if (r.stdout.includes("@startuml")) fail("a broken graph was rendered anyway");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("v2 malformed fixtures exit 1 and name every problem through the CLI", () => {
+  const dir = mkdtempSync(join(tmpdir(), "graph-validate-"));
+  const broken = clone();
+  delete broken.nodes.plan.steps["plan.dor"].tier;
+  broken.nodes.plan.steps["plan.dor"].reads = ["inbox.entry"];
+  broken.nodes.plan.steps["plan.dor"].budget = { stage: "discovery" };
+  broken.nodes.plan.steps["plan.ac"].kind = "X";
+  const path = join(dir, "graph.json");
+  writeFileSync(path, JSON.stringify(broken));
+
+  const r = run(path);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}: ${r.stderr}`);
+  for (const needle of [
+    'step "plan.dor" is missing D7 field "tier"',
+    'drifts from its config/decisions.json entry on "reads"',
+    "carries field(s) budget outside the D7 list",
+    'step "plan.ac" has kind "X"',
+  ]) {
+    if (!r.stderr.includes(needle)) fail(`the CLI did not report: ${needle}`);
+  }
   rmSync(dir, { recursive: true, force: true });
 });
 
