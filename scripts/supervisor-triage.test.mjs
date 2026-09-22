@@ -27,6 +27,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadGraph } from "./graph-validate.mjs";
+import { getRegistryEntry } from "./decision-registry.mjs";
 import {
   buildIntake, extractSignals, labelRecordedIntake, propose, resolveNode, resolveSizeFlow, stateOf, verdictForNode,
 } from "./supervisor-triage.mjs";
@@ -715,6 +716,48 @@ test("record --size is validated against the config mapping — unknown sizes ar
   assert.equal(r.status, 1);
   assert.match(JSON.parse(r.stdout).error, /size/);
   assert.ok(!existsSync(join(runDirOf(runId), "triage.json")), "a refused size must not leave a verdict behind");
+});
+
+test("the committed intakeFlows mapping covers exactly the registry's task_size criteria", () => {
+  // Anti-drift: the frontman validates --size against these keys; a size the
+  // registry can ask about but the mapping does not know would be refused at
+  // record time for no good reason — and vice versa.
+  const criteria = Object.keys(getRegistryEntry("intake.task_size").questions.size.criteria);
+  assert.deepEqual(Object.keys(GRAPH.intakeFlows).sort(), criteria.sort());
+  for (const flow of Object.values(GRAPH.intakeFlows)) {
+    assert.ok(Array.isArray(flow), "every mapping value is a squad list");
+  }
+});
+
+test("record --size embeds the final size, the suggested flow and the size disagreement", () => {
+  const runId = withRun();
+  const dir = runDirOf(runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "intake.json"),
+    JSON.stringify({
+      issue: "FOC-999", createdAt: "2026-09-22T00:00:00.000Z", runId,
+      decisions: {
+        "intake.triage_node": { ok: true, answer: "dev", confidence: 0.9, eventId: "evt-t" },
+        "intake.task_size": { ok: true, answer: "small", confidence: 0.9, eventId: "evt-s" },
+      },
+      frontman: { proposal: "dev", node: "dev", confidence: "high" },
+      disagreement: null,
+      size: "small",
+    }),
+    "utf8",
+  );
+  const r = run([
+    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85",
+    "--size", "large", "--run", runId,
+  ]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(dir, "triage.json"), "utf8"));
+  assert.equal(rec.size, "large");
+  assert.deepEqual(rec.suggestedFlow, ["plan", "dev", "review", "test"]);
+  assert.deepEqual(rec.intake.sizeDisagreement, { seam: "small", recorded: "large" });
+  assert.match(r.stderr, /seam intake\.task_size says "small"/);
+  assert.match(r.stderr, /displayed, never auto-acted/);
 });
 
 test("the recorded verdict/size become FOC-449 labels tied to the intake eventIds", () => {

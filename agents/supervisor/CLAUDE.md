@@ -39,7 +39,11 @@ You have **no subagents**. Children are OS processes, not Task-tool subagents; t
 ## Loop
 
 ### 1. Intake
-Read the issue: `node $LA_ROOT/scripts/linear-query.mjs issue <id> --json`. Read its comments too — a hand-off comment changes the verdict.
+Read the issue: `node $LA_ROOT/scripts/linear-query.mjs issue <id> --json`. Read its comments too — a hand-off comment changes the verdict. Then serve the intake annotations:
+```
+node $LA_ROOT/scripts/supervisor-triage.mjs intake --issue <id>
+```
+`intake` runs the three registry decisions (`intake.triage_node`, `intake.has_acceptance_criteria`, `intake.task_size`) through the decision seam and writes `.state/supervisor/<run>/intake.json` — triage.json's sibling, so the annotations are reviewable next to the verdict they informed. A0: these are annotations only, never a verdict. Without `OPENROUTER_API_KEY` every call fails closed (visible in the record) and triage below still works.
 
 ### 2. Triage — before any spawn
 ```
@@ -47,12 +51,16 @@ node $LA_ROOT/scripts/supervisor-triage.mjs propose --issue <id>
 ```
 `propose` reads deterministic signals only and routes through the **routable edges of `config/graph.json`** — the same rules the dashboard shows for that task. It never falls back to a squad: an unresolvable node is an error. Its `node` field is where the issue enters the graph; its `autonomy` tells you whether the verdict needs confirming (`supervised` ⇒ yes; every node is `supervised` today).
 
-Present the proposal to Mateusz **with its rationale, its `unknowns[]` and its confidence**, then record what he confirms or overrides:
+The intake annotations sit next to the proposal. A0 discipline: a seam/frontman disagreement on `intake.triage_node` is **displayed, never auto-acted** — the recorded verdict stays your call.
+
+Every task also carries a size (`intake.task_size`, small/medium/large). The `intakeFlows` mapping in `config/graph.json` turns it into a **suggested flow** (small → the Supervisor does the work itself, no squads; medium → dev+test; large → full triage plan → dev → review → test). Show that flow before the first spawn, then record the final choice with `--size` — the tool validates it against the mapping and refuses what it does not know:
+
 ```
 node $LA_ROOT/scripts/supervisor-triage.mjs record --issue <id> --verdict <plan|dev|review|test|ask> \
-     --rationale "..." --confidence <0-100> [--proposal <what propose said>] [--unknown "..." ...]
+     --rationale "..." --confidence <0-100> [--proposal <what propose said>] [--unknown "..." ...] \
+     [--size <small|medium|large>]
 ```
-`--confidence` is required and refused below 70 for any verdict but `ask` — calibration is enforced by the tool, not by your good intentions. One verdict per run: recording a **different** issue into a run that already has one takes `--force`. `spawn` refuses fail-closed until a verdict exists — that refusal is a feature, not an obstacle to work around.
+`--confidence` is required and refused below 70 for any verdict but `ask` — calibration is enforced by the tool, not by your good intentions. One verdict per run: recording a **different** issue into a run that already has one takes `--force`. `spawn` refuses fail-closed until a verdict exists — that refusal is a feature, not an obstacle to work around. The final verdict and size are logged as FOC-449 label records tied to the intake events — the outcome side of the decision log's training join.
 
 Offline or Linear down: `propose --issue-file <saved.json>` triages from a payload on disk.
 
