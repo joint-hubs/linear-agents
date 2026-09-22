@@ -16,6 +16,11 @@
 //
 // Masking runs BEFORE truncation on purpose: a cap applied first could split a
 // key in half and leave its readable prefix in the message.
+//
+// FOC-449 adds the masking half on its own: scrubMask() runs the same patterns
+// without the cap, for full decision inputs stored on disk (the cap bounds an
+// error path, not a stored record). scrub() keeps its exact behaviour — every
+// existing caller is byte-identical.
 
 // One cap, one place (R2/AC-2). 120 is the value the JSON-RPC parse detail
 // already used inline, folded in here rather than kept as a second constant.
@@ -42,11 +47,24 @@ const KEY_PATTERNS = [
 ];
 
 /**
+ * Mask key-shaped material in `text`, WITHOUT the MAX_ERROR_TEXT cap — the
+ * FOC-449 variant for full decision inputs stored on disk (.state, gitignored
+ * but never fake-safe). Masking only, no truncation: the cap bounds an error
+ * path, not a record whose whole point is carrying the complete input. Same
+ * patterns, same order, same REDACTED marker as scrub().
+ * Accepts anything; a non-string is stringified, undefined/null become "".
+ */
+export function scrubMask(text) {
+  let out = String(text ?? "");
+  for (const [pattern, replacement] of KEY_PATTERNS) out = out.replace(pattern, replacement);
+  return out;
+}
+
+/**
  * Mask key-shaped material in `text`, then truncate it to MAX_ERROR_TEXT.
  * Accepts anything; a non-string is stringified, undefined/null become "".
  */
 export function scrub(text) {
-  let out = String(text ?? "");
-  for (const [pattern, replacement] of KEY_PATTERNS) out = out.replace(pattern, replacement);
-  return out.length > MAX_ERROR_TEXT ? `${out.slice(0, MAX_ERROR_TEXT - 3)}...` : out;
+  const masked = scrubMask(text);
+  return masked.length > MAX_ERROR_TEXT ? `${masked.slice(0, MAX_ERROR_TEXT - 3)}...` : masked;
 }

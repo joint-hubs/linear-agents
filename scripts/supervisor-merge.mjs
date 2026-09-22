@@ -3,6 +3,7 @@
 //
 //   node scripts/supervisor-merge.mjs --run <id> --verify "<command>"
 //        [--child <id> ...] [--base <rev>] [--keep] [--json]
+//        [--decision-event <eventId> ...] [--decision-run <runId> ...]
 //
 // WHY (FOC-160). Two candidates can each pass their own tests and fail when
 // combined. Verification therefore has to happen TWICE — once per candidate in
@@ -53,9 +54,10 @@ import {
   resolveGitRoot,
   runDir,
 } from "./supervisor-lib.mjs";
+import { autoLabel, pairDecisionEvents } from "./decision-log.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 
-const REPEATABLE = new Set(["child"]);
+const REPEATABLE = new Set(["child", "decision-event", "decision-run"]);
 const args = parseArgs(process.argv.slice(2), REPEATABLE);
 
 const runId = args.run || process.env.LA_SUPERVISOR_RUN;
@@ -69,6 +71,16 @@ if (!verifyCmd || verifyCmd === true) {
       "a merge node that guesses the test command can report green by running nothing. " +
       'Name it explicitly, e.g. --verify "node scripts/test-all.mjs".',
   });
+}
+
+// FOC-449: explicit decision provenance — the merge result labels the named
+// decision events (accepted → "merged", otherwise "not-merged"), by:"agent",
+// via:"merge". No flags → no labels and no provenance key on the report.
+let decisionEvents = [];
+try {
+  decisionEvents = pairDecisionEvents(asArray(args["decision-event"]), asArray(args["decision-run"]));
+} catch (err) {
+  failJson(err.message);
 }
 
 // ── candidates ───────────────────────────────────────────────────────────────
@@ -374,6 +386,8 @@ const report = {
   replays,
   combined,
   findings,
+  // FOC-449: the provenance this merge labelled — absent when none was given.
+  ...(decisionEvents.length ? { decisionEvents } : {}),
   integration: {
     branch: integrationBranch,
     worktree: integrationRemoved ? null : tree,
@@ -389,6 +403,17 @@ const report = {
 };
 
 atomicWriteJSON(join(runDir(runId), "merge.json"), report);
+
+// FOC-449 auto-join: the merge result IS the outcome for the decision events
+// the caller named — accepted → "merged", otherwise "not-merged"; by:"agent",
+// via:"merge". Best-effort: a failed label is a stderr warning and never
+// changes the verdict or the exit code.
+const labelWarnings = autoLabel(decisionEvents, {
+  outcome: accepted ? "merged" : "not-merged",
+  by: "agent",
+  via: "merge",
+}).warnings;
+for (const w of labelWarnings) console.error(`[merge] ${w}`);
 
 console.log(JSON.stringify(report, null, 2));
 // Exit 1 on rejection so a caller that only checks the status code cannot read

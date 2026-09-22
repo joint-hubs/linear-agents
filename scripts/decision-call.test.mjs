@@ -7,7 +7,9 @@
 // formatConfidence null without a logprob source) exercised through the
 // fallbackModel TEST SEAM, the tier-2 DISABLED state (FALLBACK_MODEL = null,
 // FOC-473: a tier-1 failure fails closed with zero fallback calls),
-// fail-closed exits, the shadow JSONL log and its inputs hash, and the
+// fail-closed exits, the shadow JSONL log and its inputs hash, the full event
+// record registry-backed calls gain (FOC-449: eventId, the scrubbed input as
+// sent, taskKey, durationMs — inline lines byte-identical), and the
 // ADR-0012 drift guard (the shipped FALLBACK_MODEL constant ↔ the ADR quote,
 // test-enforced per ADR-0012 D2 as amended). Every HTTP path runs through an
 // injected fetch stub — these tests never touch the network.
@@ -595,6 +597,151 @@ await test("inline-questions calls stay byte-identical (no provenance keys anywh
     if ("criteriaVersion" in line) fail("inline shadow line must not gain criteriaVersion");
     eq(line.answers.q0.noul, 0.98, "answers recorded");
     if (records.some((r) => "decisionId" in r)) fail("inline meter records must not gain provenance");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+console.log("\ndecision-call: full decision event record (FOC-449)");
+
+// Secret-shaped state: a tokenized param, an sk-style key and a 32+ char run —
+// the three shapes mcp/scrub.mjs exists to mask. Normal long prose has no such
+// run and must survive UNTRUNCATED (the E1b point: no 120-char error cap on
+// stored inputs).
+const SECRET_STATE = "pre-screen for FOC-449; api_key=sk-or-v1-0123456789abcdef0123456789abcdef in state";
+const LONG_PLAIN_STATE = "plain prose sentence for the no-cap check. ".repeat(12);
+
+await test("a served registry call records a full event (identity, scrubbed input as sent, work key, latency)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decision-call-test-"));
+  delete process.env.LA_TASK_ID;
+  try {
+    const envelope = await caller(async () => jsonResponse(GATE_PROBE_BODY), {
+      shadowDir: dir,
+      taskKey: "FOC-449",
+    })({ state: GATE_STATE, decisionId: "gate.screen" });
+    eq(envelope.ok, true, "ok");
+    const line = JSON.parse(readFileSync(join(dir, "decisions.jsonl"), "utf8").trim());
+    eq(line.type, "event", "type marker");
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(line.eventId)) {
+      fail(`eventId is not a random UUID: ${line.eventId}`);
+    }
+    eq(line.decisionId, "gate.screen", "provenance stays");
+    eq(line.criteriaVersion, 1, "criteriaVersion stays");
+    eq(line.taskKey, "FOC-449", "work key from the caller option");
+    eq(typeof line.durationMs, "number", "latency recorded");
+    eq(line.pinnedModel, JEV_MODEL, "pinned model recorded");
+    eq(line.model, "typesafe/jev-1.13-20260917", "resolved build recorded");
+    eq(line.usage.cost, 0.000013692, "usage.cost recorded");
+    eq(line.input.state, GATE_STATE, "full state AS SENT, unmasked where harmless");
+    eq(JSON.parse(line.input.questions).q0.type, "noul", "full questions AS SENT (serialized)");
+    eq(line.scrub.variant, "mask-only", "scrub variant recorded");
+    eq(line.scrub.redacted, false, "nothing needed redaction");
+    if (!line.scrub.note.includes("mask-only")) fail(`scrub provenance note present: ${line.scrub.note}`);
+    // Additive record: every field the FOC-448 join read is still there, in order.
+    deepEq(Object.keys(line), [
+      "ts", "runId", "hash", "pinnedModel", "model", "tier", "mode", "ok", "answers",
+      "confidence", "formatConfidence", "usage", "responseId", "error",
+      "decisionId", "criteriaVersion", "type", "eventId", "input", "scrub", "taskKey", "durationMs",
+    ], "event record key order");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("a failed registry call keeps the input it actually sent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decision-call-test-"));
+  try {
+    const envelope = await caller(async () => statusResponse(500), { shadowDir: dir, retries: 1 })({ state: GATE_STATE, decisionId: "gate.screen" });
+    eq(envelope.ok, false, "fail-closed");
+    const line = JSON.parse(readFileSync(join(dir, "decisions.jsonl"), "utf8").trim());
+    eq(line.type, "event", "failure is still an event");
+    eq(line.ok, false, "failure recorded");
+    eq(line.error.code, "provider_error", "error code recorded");
+    eq(line.input.state, GATE_STATE, "the questions WERE sent — input recorded");
+    eq(line.scrub.variant, "mask-only", "scrub provenance on the failure too");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("a pre-provider failure records the event with input null — nothing was sent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decision-call-test-"));
+  try {
+    let calls = 0;
+    const impl = async () => { calls++; return jsonResponse(GATE_PROBE_BODY); };
+    const envelope = await caller(impl, { shadowDir: dir })({ state: GATE_STATE, decisionId: "gate.screen", questions: NOUL_INPUT.questions });
+    eq(envelope.ok, false, "fail-closed");
+    eq(envelope.error.code, "invalid_input", "mutual exclusion");
+    const line = JSON.parse(readFileSync(join(dir, "decisions.jsonl"), "utf8").trim());
+    eq(line.type, "event", "registry-backed line is an event");
+    if (!line.eventId) fail("eventId stamped even pre-provider");
+    eq(line.decisionId, "gate.screen", "id provenance stays");
+    eq(line.input, null, "nothing was sent — input null, honest");
+    eq(line.scrub, null, "nothing scrubbed — no note, honest");
+    eq(calls, 0, "no HTTP attempt");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("taskKey falls back to LA_TASK_ID and stays null when absent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decision-call-test-"));
+  process.env.LA_TASK_ID = "FOC-777";
+  try {
+    const withEnv = await caller(async () => jsonResponse(GATE_PROBE_BODY), { shadowDir: dir })({ state: GATE_STATE, decisionId: "gate.screen" });
+    eq(withEnv.ok, true, "ok");
+    let line = JSON.parse(readFileSync(join(dir, "decisions.jsonl"), "utf8").trim());
+    eq(line.taskKey, "FOC-777", "env fallback");
+  } finally {
+    delete process.env.LA_TASK_ID;
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const dir2 = mkdtempSync(join(tmpdir(), "decision-call-test-"));
+  try {
+    const withoutEnv = await caller(async () => jsonResponse(GATE_PROBE_BODY), { shadowDir: dir2 })({ state: GATE_STATE, decisionId: "gate.screen" });
+    eq(withoutEnv.ok, true, "ok");
+    const line = JSON.parse(readFileSync(join(dir2, "decisions.jsonl"), "utf8").trim());
+    eq(line.taskKey, null, "no env, no option — null, never guessed");
+  } finally {
+    rmSync(dir2, { recursive: true, force: true });
+  }
+});
+
+await test("the stored input is masked without the error-text cap (E1b routing)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decision-call-test-"));
+  try {
+    const envelope = await caller(async () => jsonResponse(GATE_PROBE_BODY), { shadowDir: dir })({ state: SECRET_STATE, decisionId: "gate.screen" });
+    eq(envelope.ok, true, "ok");
+    const line = JSON.parse(readFileSync(join(dir, "decisions.jsonl"), "utf8").trim());
+    if (line.input.state.includes("sk-or-v1-0123456789abcdef0123456789abcdef")) {
+      fail("secret-shaped state material leaked into .state");
+    }
+    if (!line.input.state.includes("[REDACTED]")) fail("expected masked state");
+    eq(line.input.state.startsWith("pre-screen for FOC-449;"), true, "readable prose kept");
+    // A second call proves plain long text survives whole: no 120-char cap.
+    const long = await caller(async () => jsonResponse(GATE_PROBE_BODY), { shadowDir: dir })({ state: LONG_PLAIN_STATE, decisionId: "gate.screen" });
+    eq(long.ok, true, "ok");
+    const lines = readFileSync(join(dir, "decisions.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    eq(lines[1].input.state, LONG_PLAIN_STATE, `full ${LONG_PLAIN_STATE.length}-char state stored untruncated`);
+    eq(lines[1].input.state.length > 120, true, "the error cap does not apply to stored inputs");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("inline shadow lines stay byte-identical — no event fields at all", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decision-call-test-"));
+  try {
+    const envelope = await caller(async () => jsonResponse(PROBE_BODY), { shadowDir: dir })(NOUL_INPUT);
+    eq(envelope.ok, true, "ok");
+    const line = JSON.parse(readFileSync(join(dir, "decisions.jsonl"), "utf8").trim());
+    deepEq(Object.keys(line), [
+      "ts", "runId", "hash", "pinnedModel", "model", "tier", "mode", "ok", "answers",
+      "confidence", "formatConfidence", "usage", "responseId", "error",
+    ], "inline key set unchanged");
+    for (const key of ["type", "eventId", "input", "scrub", "taskKey", "durationMs"]) {
+      if (key in line) fail(`inline line must not gain "${key}"`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
