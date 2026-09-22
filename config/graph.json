@@ -3,7 +3,9 @@
 
   "_migration": "config/handoff-rules.json is currently the file telemetry-server.mjs reads at runtime. It is being retired: this graph is authoritative, and `--emit-handoff-rules` regenerates that file from these edges. The regeneration is not a permanent view — it is the EQUIVALENCE PROOF for the migration. graph-validate.test.mjs asserts the committed handoff-rules.json is exactly what these edges produce, which is the mechanical evidence that nothing was lost in translation. When telemetry-server.mjs is rewired to read this file directly, handoff-rules.json, the emitter and that drift test are deleted together.",
 
-  "version": 1,
+  "version": 2,
+
+  "_v2": "v2 additive shape (FOC-397, Option A per docs/plans/graph-json-v2-design.md §6.1): everything v1 stays byte-identical — the six squad-node contracts, the top-level `edges` array, handoff-rules.json and the PUML rendering. Additions: the plan node carries `steps` (the 7-step PLAN decomposition; each step object is exactly the D7 list — id = its key, kind, reads, output, tier, failure, writes) and `stepFlow` (sequence edges — ordered step-to-step connectors inside the node, never matcher edges), plus a top-level `decisionEdges` array for the five decide transitions (MAP #1/#2/#14/#16 + hook #17; each names the registry entry in config/decisions.json that owns autonomy, threshold, fallback and metrics). graph-validate v2 mode cross-checks step fields deep-equal against the registry entries. Deferred (FOC-397): step branching, monitor.child_state hook wiring, step-level diagram emitter.",
 
   "entryNodes": ["plan", "cadence"],
 
@@ -39,7 +41,125 @@
       },
       "completion": "Idempotent push to Linear succeeded AND the hand-off comment is posted. Re-running must not duplicate issues.",
       "failure": "A HITL gate did not get its ✅ → stop without pushing. NEVER push to Linear without GATE 2 approval.",
-      "gates": ["plan.gate1", "plan.gate2"]
+      "gates": ["plan.gate1", "plan.gate2"],
+      "steps": {
+        "plan.dor": {
+          "kind": "J",
+          "reads": ["inbox.entry", "repoState.pinned"],
+          "output": { "type": "object", "required": ["ready", "gaps"], "additionalProperties": false, "properties": { "ready": { "type": "boolean" }, "gaps": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 200 } } } },
+          "tier": { "cascade": true, "min": 1 },
+          "failure": "escalate",
+          "writes": "run-record"
+        },
+        "plan.ac": {
+          "kind": "G",
+          "reads": ["inbox.entry", "features.list"],
+          "output": {
+            "type": "object",
+            "required": ["acs", "definitionOfDone"],
+            "additionalProperties": false,
+            "properties": {
+              "acs": {
+                "type": "array", "minItems": 1, "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "required": ["id", "text", "kind"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": { "type": "string", "pattern": "^AC-[0-9]{1,2}$" },
+                    "text": { "type": "string", "minLength": 1, "maxLength": 300 },
+                    "kind": { "enum": ["behaviour", "boundary", "verification"] }
+                  }
+                }
+              },
+              "definitionOfDone": {
+                "type": "array", "minItems": 1, "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "required": ["check", "kind", "bounded"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "check": { "type": "string", "minLength": 1, "maxLength": 200 },
+                    "kind": { "enum": ["test", "lint", "manual", "linear"] },
+                    "bounded": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          },
+          "tier": "cheap",
+          "failure": "stop",
+          "writes": "run-record"
+        },
+        "plan.spec": {
+          "kind": "A",
+          "reads": ["inbox.entry", "plan.ac.acs", "plan.ac.definitionOfDone", "repoState.pinned"],
+          "output": { "type": "object", "required": ["briefs", "adr", "summary"], "additionalProperties": false, "properties": { "briefs": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 200 } }, "adr": { "type": "string", "maxLength": 200 }, "summary": { "type": "string", "maxLength": 2000 } } },
+          "tier": "agent",
+          "failure": "escalate",
+          "writes": "run-record"
+        },
+        "plan.gate1": {
+          "kind": "H",
+          "reads": ["plan.spec.record"],
+          "output": { "type": "object", "required": ["approved"], "additionalProperties": false, "properties": { "approved": { "type": "boolean" } } },
+          "tier": null,
+          "failure": "stop",
+          "writes": "graph-state"
+        },
+        "plan.decompose": {
+          "kind": "J",
+          "reads": ["plan.spec.record", "plan.ac.acs"],
+          "output": {
+            "type": "object",
+            "required": ["tasks"],
+            "additionalProperties": false,
+            "properties": {
+              "tasks": {
+                "type": "array", "minItems": 1, "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "required": ["title", "size", "labels", "relations"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+                    "size": { "enum": ["small", "medium", "large"] },
+                    "labels": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 60 } },
+                    "relations": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 60 } }
+                  }
+                }
+              }
+            }
+          },
+          "tier": { "cascade": true, "min": 1 },
+          "failure": "escalate",
+          "writes": "run-record"
+        },
+        "plan.gate2": {
+          "kind": "H",
+          "reads": ["plan.decompose.record", "gate.plan.gate1.record"],
+          "output": { "type": "object", "required": ["approved"], "additionalProperties": false, "properties": { "approved": { "type": "boolean" } } },
+          "tier": null,
+          "failure": "stop",
+          "writes": "graph-state"
+        },
+        "plan.push": {
+          "kind": "D",
+          "reads": ["plan.decompose.record", "gate.plan.gate2.record"],
+          "output": { "type": "object", "required": ["epicId", "childrenIds", "handoffCommentPosted"], "additionalProperties": false, "properties": { "epicId": { "type": "string", "maxLength": 20 }, "childrenIds": { "type": "array", "maxItems": 12, "items": { "type": "string", "maxLength": 20 } }, "handoffCommentPosted": { "type": "boolean" } } },
+          "tier": null,
+          "failure": "stop",
+          "writes": "run-record"
+        }
+      },
+      "stepFlow": [
+        { "from": "plan.dor", "to": "plan.ac", "type": "sequence" },
+        { "from": "plan.ac", "to": "plan.spec", "type": "sequence" },
+        { "from": "plan.spec", "to": "plan.gate1", "type": "sequence" },
+        { "from": "plan.gate1", "to": "plan.decompose", "type": "sequence" },
+        { "from": "plan.decompose", "to": "plan.gate2", "type": "sequence" },
+        { "from": "plan.gate2", "to": "plan.push", "type": "sequence" }
+      ]
     },
 
     "dev": {
@@ -235,6 +355,39 @@
       "routable": false,
       "when": { "gates": ["plan.gate1", "plan.gate2"] },
       "why": "PLAN's two HITL gates. Not routable: today they block inline in the PLAN REPL and are never expressed as Linear state, so there is nothing for a label matcher to see. FOC-122 turns them into gate records relayed by the Supervisor, at which point this edge gains an observable condition."
+    }
+  ],
+
+  "decisionEdges": [
+    {
+      "id": "decide-triage-node", "from": "*", "to": "*", "type": "decide",
+      "registry": "intake.triage_node",
+      "when": { "event": "run-start" },
+      "why": "MAP #1: issue -> entry node (plan/dev/review/test/ask). Today the frontman's --confidence judgment in supervisor-triage.mjs. Registry id proposed - none exists in the catalog yet (FOC-448 owns the registry)."
+    },
+    {
+      "id": "decide-task-size", "from": "*", "to": "*", "type": "decide",
+      "registry": "intake.task_size",
+      "when": { "event": "run-start", "after": "decide-triage-node" },
+      "why": "MAP #2: size -> engagement path. Today the frontman; built analogue prompt-refinement (FOC-401), not wired."
+    },
+    {
+      "id": "decide-review-depth", "from": "review", "to": "review", "type": "decide",
+      "registry": "review.depth",
+      "when": { "state": "In Review" },
+      "why": "MAP #14: first-pass/deep/security. Today fixed config. from/to name the decision's scope, not a routable target."
+    },
+    {
+      "id": "decide-next-step", "from": "*", "to": "*", "type": "decide",
+      "registry": "orchestration.next_step",
+      "when": { "event": "child-terminal" },
+      "why": "MAP #16: wait/resume/advance/escalate/ask-Mateusz. Today a frontman turn - the cost lever behind the AC4 estimate."
+    },
+    {
+      "id": "decide-child-state", "from": "*", "to": "*", "type": "decide",
+      "registry": "monitor.child_state",
+      "when": { "hook": ["PostToolUse", "Stop"] },
+      "why": "MAP #17: stuck/working/waiting. Today the STALL_SILENCE_MS heuristic (supervisor-status.mjs). Discrepancy flagged: the map scopes decide-edges to #1/#2/#14/#16 and hooks #17 via PostToolUse/Stop, the kickoff requires an edge - bound here per the kickoff; resolution (edge vs hook-only) left to FOC-397/Mateusz."
     }
   ]
 }

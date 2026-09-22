@@ -106,7 +106,7 @@ import Ajv from "ajv";
 import { runDecision, TypedError } from "./mcp/envelope.mjs";
 import { scrub, scrubMask } from "./mcp/scrub.mjs";
 import { createJevProvider, JEV_MODEL, probabilityOf, choiceOf, confidenceOf } from "./mcp/provider-jev.mjs";
-import { resolveEntryQuestions } from "./decision-registry.mjs";
+import { getRegistryEntry, resolveEntryQuestions } from "./decision-registry.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -214,10 +214,16 @@ export const DECISION_STEP = {
       questions: { type: "object", minProperties: 1, maxProperties: 12, additionalProperties: QUESTION_SCHEMA },
       decisionId: { type: "string", minLength: 1, maxLength: 200 },
     },
-    // Exactly one questions source: inline, or a registry entry (FOC-448).
+    // Exactly one questions source: inline, a registry entry (FOC-448), or —
+    // for a graph-node entry carrying no question set of its own (plan.dor,
+    // plan.decompose) — runner-built questions under the registry id (FOC-397):
+    // the id governs autonomy/provenance, the question text comes from the
+    // caller. Whether the pair is allowed is the entry's shape, checked at
+    // resolution below, not in this schema.
     anyOf: [
       { required: ["questions"], not: { required: ["decisionId"] } },
       { required: ["decisionId"], not: { required: ["questions"] } },
+      { required: ["decisionId", "questions"] },
     ],
   },
   outputSchema: {
@@ -509,7 +515,11 @@ function scrubEventInput(effective) {
  * envelope (the shared fail-closed shape, plus answers/usage/responseId and
  * pinnedModel on success). A call may carry a registry decisionId instead of
  * inline questions (FOC-448); an A0 entry is then served as an annotation
- * only — envelope.annotation, never an action flag.
+ * only — envelope.annotation, never an action flag. A graph-node entry with
+ * no question set of its own (plan.dor, plan.decompose) is served by
+ * decisionId PLUS runner-built questions (FOC-397): the id governs autonomy
+ * and provenance, the question text comes from the caller, and the
+ * annotation-only shape is enforced by the entry's autonomy, never requested.
  *
  * Options:
  *   apiKey     — OPENROUTER_API_KEY value (both tiers; auth_missing without)
@@ -569,19 +579,39 @@ export function createDecisionCaller({
     // ── registry resolution (FOC-448): decisionId or inline questions ───────
     // Resolution happens BEFORE the provider: a registry problem is a typed
     // pre-provider failure — never a network attempt with half a question set.
+    // FOC-397 adds the third shape: decisionId PLUS runner-built questions for
+    // a graph-node entry (the entry carries no question set of its own, so
+    // resolveEntryQuestions cannot serve it — the runner builds the questions
+    // from the entry's output schema and passes them inline; the id still
+    // governs autonomy/provenance, and the A0 wrap below still applies).
     let registry = null;
     let preProviderFailure = null;
     let effective = input;
     if (input?.decisionId !== undefined) {
-      if (input.questions !== undefined) {
-        preProviderFailure = new TypedError(
-          "invalid_input",
-          "questions and decisionId are mutually exclusive — pass inline questions or a registry decisionId, not both",
-        );
-      } else if (!INPUT_VALIDATE(input)) {
+      if (!INPUT_VALIDATE(input)) {
         const summary = (INPUT_VALIDATE.errors || []).slice(0, 3)
           .map((e) => `${e.instancePath || "(root)"}: ${e.keyword}`).join("; ");
         preProviderFailure = new TypedError("schema_invalid", `decisionId call input rejected: ${scrub(summary)}`);
+      } else if (input.questions !== undefined) {
+        // Runner-built questions under a registry id (FOC-397). A transport
+        // entry's question text is registry-owned — inline questions must not
+        // override it, fail closed instead.
+        try {
+          const entry = getRegistryEntry(input.decisionId);
+          if (entry.questions !== undefined) {
+            preProviderFailure = new TypedError(
+              "invalid_input",
+              `decision "${input.decisionId}" carries its own question set — inline questions and that decisionId are mutually exclusive`,
+            );
+          } else {
+            registry = { decisionId: input.decisionId, autonomy: entry.autonomy, criteriaVersion: entry.criteriaVersion };
+            effective = { state: input.state, questions: input.questions };
+          }
+        } catch (err) {
+          preProviderFailure = err instanceof TypedError
+            ? err
+            : new TypedError("provider_error", `decision registry lookup failed: ${scrub(err?.message || "unknown error")}`);
+        }
       } else {
         try {
           const resolved = resolveEntryQuestions(input.decisionId);

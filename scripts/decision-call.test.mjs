@@ -483,7 +483,7 @@ await test("questions and decisionId together are a typed invalid_input with no 
 await test("unknown decisionId fails closed with no HTTP call", async () => {
   let calls = 0;
   const impl = async () => { calls++; return jsonResponse(GATE_PROBE_BODY); };
-  const envelope = await caller(impl)({ state: GATE_STATE, decisionId: "intake.triage_node" });
+  const envelope = await caller(impl)({ state: GATE_STATE, decisionId: "no.such.entry" });
   eq(envelope.ok, false, "fail-closed");
   eq(envelope.error.code, "invalid_input", "unknown id");
   if (!envelope.error.message.includes("unknown decision id")) fail("message names the failure");
@@ -502,6 +502,59 @@ await test("registry template and node entries refuse a direct decisionId call",
   eq(node.error.code, "invalid_input", "node code");
   if (!node.error.message.includes("FOC-397")) fail("node refusal names the runner");
   eq(calls, 0, "no HTTP attempt for either");
+});
+
+console.log("\ndecision-call: runner-built questions under a graph-node id (FOC-397)");
+
+// FOC-397: a graph-node entry (plan.dor) carries NO question set of its own —
+// the runner builds the questions and calls the seam with the registry id.
+// The id still governs provenance and autonomy: decisionId + criteriaVersion
+// ride the envelope and the meter event, and the A0 wrap applies exactly as
+// for a registry-resolved call (annotation only, decision deleted).
+const READY_QUESTIONS = {
+  q_ready: { type: "noul", instructions: "Assess DoR readiness.", criteria: { true: "DoR met", false: "DoR unmet" } },
+};
+const READY_PROBE_BODY = {
+  model: "typesafe/jev-1.13-20260917",
+  answers: { q_ready: { type: "noul", noul: 0.97 } },
+  usage: { input_tokens: 118, output_tokens: 9, cost: 0.0000062 },
+  id: "gen-dec-1789892790-FOC397",
+  provider: "TypeSafe",
+};
+
+await test("decisionId plus runner-built questions serves the graph-node entry with A0 provenance", async () => {
+  const records = [];
+  let sentQuestions = null;
+  const envelope = await caller((_url, options) => {
+    sentQuestions = JSON.parse(options.body).questions;
+    return jsonResponse(READY_PROBE_BODY);
+  }, { meter: (r) => records.push(r) })({ state: GATE_STATE, decisionId: "plan.dor", questions: READY_QUESTIONS });
+  eq(envelope.ok, true, "ok");
+  eq(envelope.decisionId, "plan.dor", "provenance on envelope");
+  eq(envelope.criteriaVersion, 1, "criteriaVersion on envelope");
+  eq(envelope.autonomy, "A0", "registry-owned autonomy surfaced");
+  if ("decision" in envelope) fail("A0 envelope must not carry decision");
+  if ("confidence" in envelope) fail("A0 envelope must not carry confidence");
+  eq(envelope.annotation.answers.q_ready.noul, 0.97, "runner-built answers inside the annotation");
+  eq(envelope.annotation.confidence, 0.97, "confidence inside the annotation");
+  eq(envelope.pinnedModel, JEV_MODEL, "pinned model recorded");
+  deepEq(sentQuestions, READY_QUESTIONS, "the runner-built questions are sent verbatim");
+  const served = records.filter((r) => r.kind === "served");
+  eq(served.length, 1, "one served meter record");
+  eq(served[0].decisionId, "plan.dor", "provenance on meter event");
+  eq(served[0].criteriaVersion, 1, "criteriaVersion on meter event");
+});
+
+await test("a decide-edge entry with its own questions still refuses inline questions", async () => {
+  let calls = 0;
+  const impl = async () => { calls++; return jsonResponse(GATE_PROBE_BODY); };
+  const envelope = await caller(impl)({ state: GATE_STATE, decisionId: "intake.triage_node", questions: READY_QUESTIONS });
+  eq(envelope.ok, false, "fail-closed");
+  eq(envelope.error.code, "invalid_input", "mutual exclusion");
+  if (!envelope.error.message.includes("carries its own question set")) fail("message names the decide-edge rule");
+  if (!envelope.error.message.includes("mutually exclusive")) fail("message names the rule");
+  eq(envelope.decisionId, "intake.triage_node", "id stamped on the refusal");
+  eq(calls, 0, "no HTTP attempt");
 });
 
 await test("no caller parameter can request action semantics (structurally unreachable)", async () => {
@@ -542,9 +595,9 @@ await test("pre-provider failures stamp decisionId (criteriaVersion only where t
     eq(excluded.decisionId, "gate.screen", "id stamped on the failure envelope");
     if ("criteriaVersion" in excluded) fail("exclusion fires before resolution — no criteriaVersion");
     // unknown id: provenance even for a failed lookup
-    const unknown = await caller(impl, { shadowDir: dir })({ state: GATE_STATE, decisionId: "intake.triage_node" });
+    const unknown = await caller(impl, { shadowDir: dir })({ state: GATE_STATE, decisionId: "no.such.entry" });
     eq(unknown.ok, false, "fail-closed");
-    eq(unknown.decisionId, "intake.triage_node", "id stamped on the failed lookup");
+    eq(unknown.decisionId, "no.such.entry", "id stamped on the failed lookup");
     if ("criteriaVersion" in unknown) fail("unknown id resolved nothing — no criteriaVersion");
     // raw-input reject: the id is still provenance
     const smuggled = await caller(impl)({ state: GATE_STATE, decisionId: "gate.screen", asAction: true });
@@ -559,7 +612,7 @@ await test("pre-provider failures stamp decisionId (criteriaVersion only where t
       if ("criteriaVersion" in line) fail("no criteriaVersion where the entry did not resolve");
     }
     eq(lines[0].decisionId, "gate.screen", "exclusion line id");
-    eq(lines[1].decisionId, "intake.triage_node", "unknown-id line id");
+    eq(lines[1].decisionId, "no.such.entry", "unknown-id line id");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

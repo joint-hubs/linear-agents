@@ -77,18 +77,23 @@ const QUESTION_VALIDATE = new Ajv().compile(QUESTION_SCHEMA);
 const SEED_IDS = [
   "plan.dor", "plan.ac", "plan.spec", "plan.gate1", "plan.decompose",
   "plan.gate2", "plan.push", "gate.screen", "extraction", "prompt-refinement",
+  // The five FOC-397 decide-edge entries (graph decisionEdges bindings).
+  "intake.triage_node", "intake.task_size", "review.depth",
+  "orchestration.next_step", "monitor.child_state",
 ];
 const NODE_IDS = SEED_IDS.slice(0, 7);
+// The decide-edge bindings (config/graph.json decisionEdges): kind-J transport
+// entries that additionally pin their cascade ladder start (tier {cascade, min}).
+const DECIDE_EDGE_IDS = SEED_IDS.slice(10);
 const TRANSPORT_IDS = SEED_IDS.slice(7);
 // OUT of scope per the FOC-448 contract — they enter when their owners land.
-const OUT_OF_SCOPE = [
-  "egress.contains_secret", "intake.triage_node", "intake.task_size",
-  "test.failure.cause", "review.depth", "orchestration.next_step", "monitor.child_state",
-];
+const OUT_OF_SCOPE = ["egress.contains_secret", "test.failure.cause"];
 const AUTONOMY_MAP = {
   "plan.dor": "A0", "plan.ac": null, "plan.spec": null, "plan.gate1": null,
   "plan.decompose": "A0", "plan.gate2": null, "plan.push": null,
   "gate.screen": "A0", "extraction": "A0", "prompt-refinement": "A0",
+  "intake.triage_node": "A0", "intake.task_size": "A0", "review.depth": "A0",
+  "orchestration.next_step": "A0", "monitor.child_state": "A0",
 };
 const METRICS_BY_ID = {
   "plan.dor": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
@@ -102,6 +107,9 @@ const METRICS_BY_ID = {
   "plan.gate2": [],
   "plan.push": [],
 };
+for (const id of DECIDE_EDGE_IDS) {
+  METRICS_BY_ID[id] = ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"];
+}
 
 const registry = loadRegistry();
 const entries = registry.entries;
@@ -115,7 +123,7 @@ await test("registry loads, passes REGISTRY_SCHEMA directly, and carries _doc + 
   eq(Object.keys(entries).length, SEED_IDS.length, "entry count");
 });
 
-await test("the seed set is exactly the ten contracted ids", () => {
+await test("the seed set is exactly the fifteen contracted ids", () => {
   deepEq([...Object.keys(entries)].sort(), [...SEED_IDS].sort(), "id set");
 });
 
@@ -150,31 +158,38 @@ await test("metrics sets match the contract per kind", () => {
 
 console.log("\ndecisions-registry: serving scope + structural autonomy (review round 1)");
 
-// The built step boundary is DECLARED, not implied: extraction and
-// prompt-refinement are served today by FOC-401 step servers whose code acts
-// on answers — gated to FOC-397. gate.screen's only path is the seam. The
-// PLAN [J] entries have no serving path yet (FOC-397 wires them).
+// Serving is pinned per kind-J entry. The seam NAME is reserved for the
+// A0-enforced decisionId channel (loader rule); the step servers' inline
+// channel names itself "seam (inline)" and stays the declared boundary gated
+// to FOC-387. plan.dor / plan.decompose gained their real seam serving with
+// FOC-397, as did the five decide edges.
+const SEAM_SERVING = [{ via: "seam", actsOnAnswers: false, a0Enforced: true }];
 const SERVING_BY_ID = {
-  extraction: [{ via: "step-server (FOC-401)", actsOnAnswers: true, a0Enforced: false, gate: "FOC-397" }],
-  "prompt-refinement": [{ via: "step-server (FOC-401)", actsOnAnswers: true, a0Enforced: false, gate: "FOC-397" }],
-  "gate.screen": [{ via: "seam", actsOnAnswers: false, a0Enforced: true }],
-  "plan.dor": [],
-  "plan.decompose": [],
+  extraction: [{ via: "seam (inline)", actsOnAnswers: true, a0Enforced: false, gate: "FOC-387" }],
+  "prompt-refinement": [{ via: "seam (inline)", actsOnAnswers: true, a0Enforced: false, gate: "FOC-387" }],
+  "gate.screen": SEAM_SERVING,
+  "plan.dor": SEAM_SERVING,
+  "plan.decompose": SEAM_SERVING,
+  "intake.triage_node": SEAM_SERVING,
+  "intake.task_size": SEAM_SERVING,
+  "review.depth": SEAM_SERVING,
+  "orchestration.next_step": SEAM_SERVING,
+  "monitor.child_state": SEAM_SERVING,
 };
 
-await test("serving is pinned per entry: the built boundary is declared, the seam is enforced", () => {
+await test("serving is pinned per kind-J entry: enforced seam paths + the declared inline boundary", () => {
   for (const id of SEED_IDS) {
-    if (!TRANSPORT_IDS.includes(id) && id !== "plan.dor" && id !== "plan.decompose") continue;
+    if (entries[id].serving === undefined) continue; // node configs carry none — structural test below
     deepEq(entries[id].serving, SERVING_BY_ID[id], `serving of ${id}`);
   }
 });
 
-await test("autonomy encoding is structural: null IFF kind is not J; kind J declares serving", () => {
+await test("autonomy encoding is structural: null IFF kind is not J; kind J declares non-empty serving", () => {
   for (const id of SEED_IDS) {
     const e = entries[id];
     if (e.kind === "J") {
       if (e.autonomy !== "A0" && e.autonomy !== "A1" && e.autonomy !== "A2") fail(`${id}: kind J must carry A0/A1/A2`);
-      if (e.serving === undefined) fail(`${id}: kind J must declare serving`);
+      if (!Array.isArray(e.serving) || e.serving.length === 0) fail(`${id}: kind J must declare non-empty serving`);
     } else {
       eq(e.autonomy, null, `node config ${id} is autonomy-null`);
       if (e.serving !== undefined) fail(`${id}: non-J entries carry no serving`);
@@ -219,9 +234,38 @@ await test("the seven node entries carry the full D7 contract; transports carry 
   for (const id of TRANSPORT_IDS) {
     const e = entries[id];
     if (e.questions === undefined) fail(`${id}: transport entry must carry a question set`);
-    for (const field of ["reads", "output", "tier", "failure", "writes", "prompt"]) {
+    for (const field of ["reads", "output", "failure", "writes", "prompt"]) {
       if (e[field] !== undefined) fail(`${id}: transport entry must not carry ${field}`);
     }
+    // FOC-397: the cascade-tier pin is allowed on a decide edge and forbidden
+    // on every other transport entry — no other question-carrying entry needs
+    // a ladder, and a stray tier on one would be unexplained configuration.
+    if (DECIDE_EDGE_IDS.includes(id)) {
+      deepEq(e.tier, { cascade: true, min: 1 }, `cascade tier pin of ${id}`);
+    } else if (e.tier !== undefined) {
+      fail(`${id}: transport entry must not carry tier`);
+    }
+  }
+});
+
+await test("decide-edge entries pin the cascade ladder and exactly one MAP question each", () => {
+  const CRITERIA = {
+    "intake.triage_node": ["plan", "dev", "review", "test", "ask"],
+    "intake.task_size": ["small", "medium", "large"],
+    "review.depth": ["first-pass", "deep", "security"],
+    "orchestration.next_step": ["wait", "resume", "advance", "escalate", "ask"],
+    "monitor.child_state": ["stuck", "working", "waiting"],
+  };
+  for (const id of DECIDE_EDGE_IDS) {
+    const e = entries[id];
+    deepEq(e.tier, { cascade: true, min: 1 }, `tier pin of ${id}`);
+    eq(e.autonomy, "A0", `autonomy of ${id}`);
+    deepEq(e.serving, [{ via: "seam", actsOnAnswers: false, a0Enforced: true }], `serving of ${id}`);
+    const qids = Object.keys(e.questions);
+    if (qids.length !== 1) fail(`${id}: expected one decide question, got ${qids.length}`);
+    const q = e.questions[qids[0]];
+    eq(q.type, "choice", `question type of ${id}`);
+    deepEq(Object.keys(q.criteria), CRITERIA[id], `criteria labels of ${id}`);
   }
 });
 
@@ -487,6 +531,26 @@ await test("serving/autonomy cross-rules fail closed (review round 1)", () => {
   // autonomy encoding: kind J must carry a value; node configs must be null
   throwsCode(() => loadRegistry({ path: fixture((r) => { r.entries["t.one"].autonomy = null; }) }), "schema_invalid", "failed its schema");
   throwsCode(() => loadRegistry({ path: fixture((r) => { r.entries["n.one"].autonomy = "A0"; }) }), "schema_invalid", "failed its schema");
+});
+
+await test("serving/autonomy cross-rules fail closed (FOC-397 round 2)", () => {
+  // kind J ⇒ serving present AND non-empty — a path that serves the entry in
+  // code must appear here; an empty array claims to serve nothing.
+  throwsCode(() => loadRegistry({ path: fixture((r) => { r.entries["t.one"].serving = []; }) }), "schema_invalid", "failed its schema");
+  // via "seam" ⇒ a0Enforced — the seam name is reserved for the enforced
+  // decisionId channel; a seam path without enforcement is mislabeled.
+  throwsCode(() => loadRegistry({
+    path: fixture((r) => { r.entries["t.one"].serving = [{ via: "seam", actsOnAnswers: false, a0Enforced: false }]; }),
+  }), "schema_invalid", "failed its schema");
+  // a0Enforced on any serving path ⇒ the entry's autonomy is "A0" —
+  // enforcement belongs to the entry, not to whoever happens to call it.
+  throwsCode(() => loadRegistry({
+    path: fixture((r) => { r.entries["t.one"].autonomy = "A1"; }),
+  }), "schema_invalid", "failed its schema");
+  // a gate names its owning issue: "FOC-397x" is not an issue key.
+  throwsCode(() => loadRegistry({
+    path: fixture((r) => { r.entries["t.one"].serving = [{ via: "step-server (FOC-401)", actsOnAnswers: true, a0Enforced: false, gate: "FOC-397x" }]; }),
+  }), "schema_invalid", "failed its schema");
 });
 
 // A serving RECORD is always an object (ajv strict-mode fix round): a
