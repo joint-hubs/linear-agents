@@ -199,7 +199,7 @@ function validateStepFlow(nodeName, steps, flow, problems) {
 // Decide edges never match a task state — graph-route reads `edges` only, so
 // they are inert by construction; what must hold is that they name real scopes
 // and a registry entry, because the registry entry owns the autonomy fields.
-function validateDecisionEdges(graph, nodes, problems) {
+function validateDecisionEdges(graph, nodes, entries, problems) {
   const dec = graph.decisionEdges;
   if (dec === undefined) return;
   if (!Array.isArray(dec)) {
@@ -219,6 +219,10 @@ function validateDecisionEdges(graph, nodes, problems) {
     if (e.type !== "decide") problems.push(`${label} has type "${e.type}", expected "decide"`);
     if (!e.registry) {
       problems.push(`${label} names no registry entry — the registry entry owns autonomy, threshold, fallback and metrics`);
+    } else if (!entries[e.registry]) {
+      problems.push(`${label} names registry entry "${e.registry}", which does not exist in config/decisions.json`);
+    } else if (entries[e.registry].kind !== "J") {
+      problems.push(`${label} names registry entry "${e.registry}" of kind ${entries[e.registry].kind} — decision edges bind kind-J entries`);
     }
     if (!e.why) problems.push(`${label} has no "why" — the rationale is the thing worth keeping, not the rule`);
     if (
@@ -235,8 +239,7 @@ function validateDecisionEdges(graph, nodes, problems) {
 // graph.json is a rendered view; the registry is the contract. A drift between
 // the two files is exactly the class of silent divergence this file exists to
 // catch (see the FOC-284 paragraph in the header).
-function crossCheckSteps(graph, problems) {
-  const entries = loadRegistryEntries(problems);
+function crossCheckSteps(graph, entries, problems) {
   for (const node of Object.values(graph.nodes || {})) {
     for (const [stepId, step] of Object.entries(node.steps || {})) {
       const entry = entries[stepId];
@@ -354,6 +357,7 @@ export function validateGraph(graph) {
 
   // ── v2: steps, stepFlow, decisionEdges, step↔registry cross-check ──────────
   if (graph.version === 2) {
+    const entries = loadRegistryEntries(problems);
     for (const [name, node] of Object.entries(nodes)) {
       if (node.steps) {
         if (node.stepFlow == null) {
@@ -365,8 +369,8 @@ export function validateGraph(graph) {
         problems.push(`node "${name}" declares a "stepFlow" but no "steps"`);
       }
     }
-    validateDecisionEdges(graph, nodes, problems);
-    crossCheckSteps(graph, problems);
+    validateDecisionEdges(graph, nodes, entries, problems);
+    crossCheckSteps(graph, entries, problems);
   } else if (graph.version === 1) {
     // A v1 graph must not silently carry v2 fields: no v1 consumer reads them,
     // so they would be dead config wearing a v1 badge.

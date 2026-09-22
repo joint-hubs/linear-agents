@@ -3,9 +3,11 @@
 // config/decisions.json is the one typed place for every model-made judgment
 // and every v2 graph-node step: the seven PLAN entries carry the ADR-0012 D7
 // contract copied verbatim from docs/plans/graph-json-v2-design.md §3.1–§3.9,
-// and the three transport entries (gate.screen, extraction,
-// prompt-refinement) carry the question set their call-site sends to the
-// decision-call seam. This module loads + validates that file fail-closed —
+// and the transport entries (gate.screen, the FOC-401 step pair, and the five
+// FOC-397 decide-edge entries) carry the question set their call-site sends
+// to the decision-call seam — decide edges additionally pin their cascade
+// ladder start (tier {cascade, min}). This module loads + validates that file
+// fail-closed —
 // a registry that does not parse, does not pass its schema, or carries an
 // id that disagrees with its key is a typed error, never a guessed lookup —
 // exposes lookup by id, resolves concrete question sets for the seam, and
@@ -51,7 +53,7 @@ export const ENTRY_SCHEMA = {
   required: ["id", "kind", "owner", "hookPoint", "autonomy", "threshold", "fallback", "metrics", "criteriaVersion"],
   additionalProperties: false,
   properties: {
-    id: { type: "string", minLength: 1, maxLength: 120, pattern: "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)*$" },
+    id: { type: "string", minLength: 1, maxLength: 120, pattern: "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)*$" },
     kind: { enum: ["D", "J", "A", "H", "G"] },
     owner: { type: "string", minLength: 1, maxLength: 200 },
     hookPoint: { type: "string", minLength: 1, maxLength: 300 },
@@ -128,6 +130,12 @@ export const ENTRY_SCHEMA = {
             then: { required: ["gate"] },
           },
           { if: { properties: { a0Enforced: { const: true } }, required: ["a0Enforced"] }, then: { properties: { via: { const: "seam" } } } },
+          // Reverse direction (FOC-397): the name "seam" is RESERVED for the
+          // loader-enforced decisionId channel — a path via "seam" claims the
+          // A0 annotation-only shape, so it must set a0Enforced. The seam's
+          // inline-questions channel names itself differently ("seam
+          // (inline)") precisely so it cannot borrow the enforced name.
+          { if: { properties: { via: { const: "seam" } }, required: ["via"] }, then: { properties: { a0Enforced: { const: true } } } },
         ],
       },
     },
@@ -139,7 +147,11 @@ export const ENTRY_SCHEMA = {
       if: { required: ["reads"] },
       then: { required: ["output", "tier", "failure", "writes"], not: { required: ["questions"] } },
     },
-    // Transport entry (questions present): no D7 fields, no prompt.
+    // Transport entry (questions present): no D7 fields, no prompt — except
+    // the cascade-tier pin (FOC-397): a kind-J decide edge carries tier
+    // {cascade, min} so the runner reads its cascade ladder start from the
+    // entry. Every other D7 field and the prompt stay forbidden next to a
+    // question set.
     {
       if: { required: ["questions"] },
       then: {
@@ -147,10 +159,10 @@ export const ENTRY_SCHEMA = {
           anyOf: [
             { required: ["reads"] },
             { required: ["output"] },
-            { required: ["tier"] },
             { required: ["failure"] },
             { required: ["writes"] },
             { required: ["prompt"] },
+            { properties: { kind: { enum: ["D", "A", "H", "G"] } }, required: ["kind", "tier"] },
           ],
         },
       },
@@ -182,10 +194,11 @@ export const ENTRY_SCHEMA = {
     { if: { properties: { kind: { enum: ["D", "H"] } }, required: ["kind"] }, then: { properties: { metrics: { type: "array", maxItems: 0 } } } },
     { if: { properties: { kind: { const: "J" } }, required: ["kind"] }, then: { properties: { metrics: { type: "array", contains: { const: "confidence" } } } } },
     { if: { properties: { kind: { enum: ["G", "A"] } }, required: ["kind"] }, then: { properties: { metrics: { type: "array", not: { contains: { const: "confidence" } } } } } },
-    // Serving scope (FOC-448 round 2): kind J declares its serving paths
-    // (empty array = none today); non-J entries are node config, not
-    // decisions — no serving channel lives in this registry for them.
-    { if: { properties: { kind: { const: "J" } }, required: ["kind"] }, then: { required: ["serving"] } },
+    // Serving scope (FOC-448 round 2, tightened FOC-397): kind J declares at
+    // least one serving path — an entry nothing serves is not wired, and an
+    // empty "serving: []" claim would let that drift sit quietly. Every path
+    // that serves the entry in code must appear here.
+    { if: { properties: { kind: { const: "J" } }, required: ["kind"] }, then: { required: ["serving"], properties: { serving: { minItems: 1 } } } },
     { if: { properties: { kind: { enum: ["D", "A", "H", "G"] } }, required: ["kind"] }, then: { not: { required: ["serving"] } } },
     // Autonomy encoding is structural (review round 1): decisions (kind J)
     // carry an autonomy value; node configs (G/A/H/D) are null.
@@ -211,6 +224,22 @@ export const ENTRY_SCHEMA = {
           },
         },
       },
+    },
+  // A0 enforcement is the entry's autonomy, not the caller's (FOC-397,
+    // carried r2 rule): a serving path that returns the annotation-only shape
+    // can only exist on an A0 entry. A1/A2 mean calibrated action semantics —
+    // no serving record may claim the enforced shape for them.
+    {
+      if: {
+        required: ["serving"],
+        properties: {
+          serving: {
+            type: "array",
+            contains: { type: "object", required: ["a0Enforced"], properties: { a0Enforced: { const: true } } },
+          },
+        },
+      },
+      then: { properties: { autonomy: { const: "A0" } } },
     },
   ],
 };

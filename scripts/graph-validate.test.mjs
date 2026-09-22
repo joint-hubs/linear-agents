@@ -333,6 +333,25 @@ test("v2 malformed: a decision edge naming an unknown scope or wrong type is cau
   }
 });
 
+test("v2: every decision edge binds an existing kind-J registry entry", () => {
+  const entries = JSON.parse(readFileSync(join(ROOT, "config", "decisions.json"), "utf8")).entries;
+  for (const e of GRAPH.decisionEdges) {
+    const entry = entries[e.registry];
+    if (!entry) fail(`decision edge "${e.id}" binds "${e.registry}", which is not in config/decisions.json`);
+    if (entry.kind !== "J") fail(`decision edge "${e.id}" binds "${e.registry}" of kind ${entry.kind}`);
+  }
+  const g = clone();
+  g.decisionEdges[0].registry = "no.such.entry";
+  if (!hasProblem(validateGraph(g), 'names registry entry "no.such.entry", which does not exist')) {
+    fail("a decision edge binding a missing registry entry was accepted");
+  }
+  const g2 = clone();
+  g2.decisionEdges[0].registry = "plan.ac";
+  if (!hasProblem(validateGraph(g2), "of kind G — decision edges bind kind-J entries")) {
+    fail("a decision edge binding a non-decision entry was accepted");
+  }
+});
+
 test("a v1 graph must not carry v2 fields", () => {
   // No v1 consumer reads steps/stepFlow/decisionEdges — they would be dead
   // config wearing a v1 badge.
