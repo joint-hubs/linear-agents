@@ -5,7 +5,7 @@
 
   "version": 2,
 
-  "_v2": "v2 additive shape (FOC-397, Option A per docs/plans/graph-json-v2-design.md §6.1): everything v1 stays byte-identical — the six squad-node contracts, the top-level `edges` array, handoff-rules.json and the PUML rendering. Additions: the plan node carries `steps` (the 7-step PLAN decomposition; each step object is exactly the D7 list — id = its key, kind, reads, output, tier, failure, writes) and `stepFlow` (sequence edges — ordered step-to-step connectors inside the node, never matcher edges), plus a top-level `decisionEdges` array for the five decide transitions (MAP #1/#2/#14/#16 + hook #17; each names the registry entry in config/decisions.json that owns autonomy, threshold, fallback and metrics). graph-validate v2 mode cross-checks step fields deep-equal against the registry entries. Deferred (FOC-397): step branching, monitor.child_state hook wiring, step-level diagram emitter.",
+  "_v2": "v2 additive shape (FOC-397, Option A per docs/plans/graph-json-v2-design.md §6.1): everything v1 stays byte-identical — the six squad-node contracts, the top-level `edges` array, handoff-rules.json and the PUML rendering. Additions: the plan node carries `steps` (the 7-step PLAN decomposition; each step object is exactly the D7 list — id = its key, kind, reads, output, tier, failure, writes) and `stepFlow` (sequence edges — ordered step-to-step connectors inside the node, never matcher edges), plus a top-level `decisionEdges` array for the six decide transitions (MAP #1/#2/#14/#16, hook #17 and the FOC-451 DoR intake gate; each names the registry entry in config/decisions.json that owns autonomy, threshold, fallback and metrics). graph-validate v2 mode cross-checks step fields deep-equal against the registry entries. Deferred (FOC-397): step branching, monitor.child_state hook wiring, step-level diagram emitter.",
 
   "entryNodes": ["plan", "cadence"],
 
@@ -370,6 +370,12 @@
       "registry": "intake.task_size",
       "when": { "event": "run-start", "after": "decide-triage-node" },
       "why": "MAP #2: size -> engagement path. Today the frontman; built analogue prompt-refinement (FOC-401), not wired."
+    },
+    {
+      "id": "decide-has-acceptance-criteria", "from": "*", "to": "*", "type": "decide",
+      "registry": "intake.has_acceptance_criteria",
+      "when": { "event": "run-start" },
+      "why": "DoR rubric §5.5 (jev-mechanics analysis): does the issue carry acceptance criteria? A0 annotation recorded next to the frontman's triage — displayed, never auto-acted (FOC-451)."
     },
     {
       "id": "decide-review-depth", "from": "review", "to": "review", "type": "decide",

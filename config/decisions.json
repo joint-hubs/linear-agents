@@ -2,13 +2,13 @@
   "_doc": {
     "what": "Decision & node registry (FOC-448) — one typed place per model-made judgment and per v2 graph-node step. Graph-node entries carry the ADR-0012 D7 contract copied verbatim from docs/plans/graph-json-v2-design.md §3.1–§3.9 (a config/graph.json v2 step object stays exactly-D7 and copies reads/output/tier/failure/writes from here); transport entries carry the question set their call-site sends to the decision-call seam.",
     "consumers": "scripts/decision-registry.mjs (loader: validates every entry, lookup by id, question resolution + template instantiation), scripts/decision-call.mjs (decisionId lookups + the A0 annotation rule + runner-built-question governance), scripts/mcp/steps.mjs (FOC-401 question templates), scripts/graph-runner.mjs (FOC-397: [J] steps and decide edges by registry id).",
-    "autonomy": "A0 = the entry produces a model-made judgment whose A0-ENFORCED channel (the decision-call seam decisionId path) serves it as an annotation only — no caller field can request action semantics. Seed A0 entries: gate.screen (supervisor-fixed), extraction, prompt-refinement, plan.dor, plan.decompose, and the five decide-edge entries (intake.triage_node, intake.task_size, review.depth, orchestration.next_step, monitor.child_state). Start posture, stated honestly: nothing calibrated (thresholds null; FOC-387 has not run); the runner (FOC-397) serves plan.dor/plan.decompose and the decide edges through the seam's A0-enforced decisionId channel; extraction and prompt-refinement are served by the built FOC-401 step servers routed through the seam's inline channel since FOC-397 — their code programmatically acts on answers inside the tool boundary, that built boundary is declared per path in the serving field and is gated to FOC-387. null = not an autonomy-managed decision, and the encoding is structural: autonomy is null IFF kind is one of G, A, H, D (node configs — the [G] generator node per the roadmap note, the [A] agent node gated by plan.gate1, the [H] human gates, the [D] deterministic node — are step configuration, not decisions), while kind J requires autonomy in {A0, A1, A2} (AC1's autonomy list binds decision entries). A1/A2 are evidence-backed promotions granted by Mateusz (FOC-387 calibration), never self-granted.",
+    "autonomy": "A0 = the entry produces a model-made judgment whose A0-ENFORCED channel (the decision-call seam decisionId path) serves it as an annotation only — no caller field can request action semantics. Seed A0 entries: gate.screen (supervisor-fixed), extraction, prompt-refinement, plan.dor, plan.decompose, and the six decide-edge entries (intake.triage_node, intake.has_acceptance_criteria, intake.task_size, review.depth, orchestration.next_step, monitor.child_state). Start posture, stated honestly: nothing calibrated (thresholds null; FOC-387 has not run); the runner (FOC-397) serves plan.dor/plan.decompose and the decide edges through the seam's A0-enforced decisionId channel; extraction and prompt-refinement are served by the built FOC-401 step servers routed through the seam's inline channel since FOC-397 — their code programmatically acts on answers inside the tool boundary, that built boundary is declared per path in the serving field and is gated to FOC-387. null = not an autonomy-managed decision, and the encoding is structural: autonomy is null IFF kind is one of G, A, H, D (node configs — the [G] generator node per the roadmap note, the [A] agent node gated by plan.gate1, the [H] human gates, the [D] deterministic node — are step configuration, not decisions), while kind J requires autonomy in {A0, A1, A2} (AC1's autonomy list binds decision entries). A1/A2 are evidence-backed promotions granted by Mateusz (FOC-387 calibration), never self-granted.",
     "serving": "Machine-readable serving scope, required and NON-EMPTY on kind-J entries (FOC-397: an entry nothing serves must not sit in the registry, and every path that serves it in code must appear here). One record per serving path: via = the channel; actsOnAnswers = this path, as built today, programmatically consumes answers into operative output; a0Enforced = this path returns the A0 annotation-only shape, loader-enforced (true only on the seam decisionId channel); gate = the FOC that owns bringing the path under A0 governance — REQUIRED whenever actsOnAnswers=true && a0Enforced=false. Schema cross-rules: kind J ⇒ serving present and non-empty; kind != J ⇒ serving forbidden; a0Enforced ⇒ via is the seam; via \"seam\" ⇒ a0Enforced (the name is reserved for the enforced decisionId channel — the seam's inline channel is \"seam (inline)\"); a0Enforced ⇒ autonomy A0; autonomy A0 ⇒ every declared path is a0Enforced or names a gate.",
     "threshold": "null in every seed entry — FOC-387 writes calibration rows; never invent numbers.",
     "fallback": "tier2 is \"disabled\" in every entry while scripts/decision-call.mjs FALLBACK_MODEL is null (FOC-473): a tier-1 failure goes fail-closed to the relay/HITL path, or escalates where the entry's D7 failure field says so. Tier-2 is never claimed live; the registry test enforces the correspondence with the shipped constant.",
     "criteriaVersion": "Bumped when an entry's question text changes; recorded on every registry-sourced call (envelope, shadow JSONL line, meter event).",
-    "outOfScope": "egress.contains_secret and test.failure.cause are NOT entries here — they enter when their owners land (FOC-391 egress wiring; the TEST failure-cause owner). The five decide-edge ids (intake.triage_node, intake.task_size, review.depth, orchestration.next_step, monitor.child_state) landed with FOC-397.",
-    "sources": "Graph-node entries: docs/plans/graph-json-v2-design.md §3.1–§3.9 (FOC-396; runner FOC-397). gate.screen: seed question pending FOC-391. extraction / prompt-refinement: question text moved byte-identical from scripts/mcp/steps.mjs (FOC-401); per-candidate/per-feature instantiation stays in code. The five decide-edge entries: config/graph.json decisionEdges (FOC-397); question text designed from the MAP descriptions (FOC-452) and the built prompt-refinement analogue.",
+    "outOfScope": "egress.contains_secret and test.failure.cause are NOT entries here — they enter when their owners land (FOC-391 egress wiring; the TEST failure-cause owner). The five decide-edge ids (intake.triage_node, intake.task_size, review.depth, orchestration.next_step, monitor.child_state) landed with FOC-397; intake.has_acceptance_criteria joined them with FOC-451.",
+    "sources": "Graph-node entries: docs/plans/graph-json-v2-design.md §3.1–§3.9 (FOC-396; runner FOC-397). gate.screen: seed question pending FOC-391. extraction / prompt-refinement: question text moved byte-identical from scripts/mcp/steps.mjs (FOC-401); per-candidate/per-feature instantiation stays in code. The decide-edge entries: config/graph.json decisionEdges (FOC-397; intake.has_acceptance_criteria FOC-451); question text designed from the MAP descriptions (FOC-452), the built prompt-refinement analogue and the DoR rubric.",
     "templates": "A transport question key carrying {i} fans out one question per instance (\"q{i}\" → q0..qN-1, \"rel{i}\" → rel0..relN); {{var}} placeholders in the text are substituted per instance; a fixed key is served verbatim."
   },
   "entries": {
@@ -592,6 +592,47 @@
             "review": "existing work returning for review (REVIEW node)",
             "test": "work that is staged and ready for verification (TEST node)",
             "ask": "the issue cannot be triaged from its text — it needs Mateusz's answer first"
+          }
+        }
+      }
+    },
+    "intake.has_acceptance_criteria": {
+      "id": "intake.has_acceptance_criteria",
+      "kind": "J",
+      "owner": "FOC-451 decide-edge (graph decide-has-acceptance-criteria); rubric origin: the DoR readiness question (docs/plans/jev-mechanics-fenix-analysis-2026-09-19.md §5.5)",
+      "hookPoint": "graph decision edge decide-has-acceptance-criteria — when {event: run-start}; served by the runner through the seam decisionId channel; A0 annotation only, never an action",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up the cascade ladder (tier → frontman → Mateusz), starting at the entry's tier.min — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "tier": {
+        "cascade": true,
+        "min": 1
+      },
+      "questions": {
+        "q0": {
+          "type": "noul",
+          "instructions": "Intake gate: does the issue carry acceptance criteria — a statement of what done looks like that a reviewer could check the work against? Judge from the issue text alone — the title, the description and any attached context.",
+          "criteria": {
+            "true": "the issue states its acceptance criteria (or the explicit done-conditions a reviewer could check)",
+            "false": "the issue carries no acceptance criteria — done is unstated or a bare prose wish"
           }
         }
       }
