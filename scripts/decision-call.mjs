@@ -666,7 +666,15 @@ export function createDecisionCaller({
     // the raw caller input was the served one.
     const sentInput = decisionId && !preProviderFailure ? scrubEventInput(effective) : null;
 
-    appendShadow(shadowDir ?? defaultShadowDir(runIdActual()), {
+    // FOC-451: one event id per registry-backed call, generated here so the
+    // shadow line and the envelope carry the SAME id — the join key a caller
+    // pairs a FOC-449 label against. Generated only where an event line can
+    // actually land (a shadow dir resolves); inline calls and runs with no
+    // log to write gain nothing.
+    const shadowTarget = shadowDir ?? defaultShadowDir(runIdActual());
+    const eventId = decisionId && shadowTarget ? randomUUID() : null;
+
+    appendShadow(shadowTarget, {
       ts: now(),
       runId: runIdActual(),
       hash,
@@ -691,7 +699,7 @@ export function createDecisionCaller({
       ...(decisionId
         ? {
             type: SHADOW_EVENT_TYPE,
-            eventId: randomUUID(),
+            eventId,
             ...(sentInput
               ? {
                   input: { state: sentInput.state, questions: sentInput.questions },
@@ -703,6 +711,10 @@ export function createDecisionCaller({
           }
         : {}),
     });
+    // The event id travels on the envelope too — served or pre-provider-failed,
+    // the same rule that produced the shadow event record — so the caller can
+    // pair a FOC-449 label to this exact event without re-reading the log.
+    if (eventId) envelope.eventId = eventId;
     return envelope;
   }
 

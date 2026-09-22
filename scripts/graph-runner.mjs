@@ -617,6 +617,9 @@ export function createGraphRunner({
           stepId: registryId,
           reason: "A0 — annotation recorded, decision handed to the frontman (never auto-acted; threshold null)",
           annotation: envelope.annotation,
+          // FOC-451: the shadow event's id — the join key for the FOC-449 label
+          // the frontman later records against this decision.
+          eventId: envelope.eventId ?? null,
           tier: TIER_SEAM,
         })
       : stepRecord(runId, now, key, "handed-off", {

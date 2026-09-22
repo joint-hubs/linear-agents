@@ -39,6 +39,9 @@ export const INIT_TIMEOUT_MS = 30_000;
 export const runDir = (runId) => join(ROOT, ".state", "supervisor", runId);
 export const registryPath = (runId) => join(runDir(runId), "children.json");
 export const triagePath = (runId) => join(runDir(runId), "triage.json");
+// FOC-451: the intake annotations live as triage.json's sibling, so a reviewer
+// reads the seam's annotations next to the verdict they informed.
+export const intakePath = (runId) => join(runDir(runId), "intake.json");
 export const gatesDir = (runId) => join(runDir(runId), "gates");
 export const gatePath = (runId, gateId) => join(gatesDir(runId), `${gateId}.json`);
 export const verdictsDir = (runId) => join(runDir(runId), "verdicts");

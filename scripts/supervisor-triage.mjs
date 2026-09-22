@@ -4,6 +4,8 @@
 //   node scripts/supervisor-triage.mjs record  --issue <id> --verdict <plan|dev|review|test|ask>
 //                                              --rationale "..." --confidence <0-100>
 //                                              [--proposal <v>] [--unknown "..." ...] [--force]
+//                                              [--size <small|medium|large>]
+//   node scripts/supervisor-triage.mjs intake  --issue <id> [--issue-file <path>] --run <runId>
 //
 // `propose` is advisory and reads only deterministic signals — no model call, no
 // judgement. `record` writes the verdict, and THE RECORDED VERDICT IS THE
@@ -19,6 +21,17 @@
 //   · it never upgrades its own confidence. Below 70 with a verdict other than
 //     `ask` is refused at the CLI, the same way the review-loop cap is (§2.2).
 //
+// FOC-451 adds `intake`: the three intake decisions (intake.triage_node,
+// intake.has_acceptance_criteria, intake.task_size) served through the seam's
+// decisionId channel and recorded as .state/supervisor/<run>/intake.json —
+// triage.json's sibling. A0 discipline holds: the annotations are DISPLAYED —
+// a seam/frontman disagreement is shown, never auto-acted — the recorded
+// verdict and the final --size stay the frontman's call, and both final
+// choices are logged as FOC-449 label records tied to the exact eventIds the
+// intake calls carried. No OPENROUTER_API_KEY → the calls fail closed
+// (auth_missing, visible in the record) and triage stays possible on the
+// deterministic signals alone.
+//
 // Vocabulary warning: "entry node" here means "the node where THIS issue enters
 // the graph" (which may be dev, review or test). It is NOT graph.json's
 // `entryNodes`, which is a topology property — nodes legitimately reachable with
@@ -28,9 +41,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { createDecisionCaller } from "./decision-call.mjs";
+import { autoLabel } from "./decision-log.mjs";
 import { loadGraph, emitHandoffRules } from "./graph-validate.mjs";
 import { handoffTargetFrom, matchRule } from "./graph-route.mjs";
-import { ROOT, ensureRunDir, failJson, parseArgs, triagePath } from "./supervisor-lib.mjs";
+import { ROOT, ensureRunDir, failJson, intakePath, parseArgs, triagePath } from "./supervisor-lib.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 
 const VERDICTS = ["plan", "dev", "review", "test", "ask"];
@@ -41,6 +56,16 @@ const VERDICTS = ["plan", "dev", "review", "test", "ask"];
 const ASK_NODE = "human";
 
 const CONFIDENCE_FLOOR = 70;
+
+// The intake gate (FOC-451): three registry decisions served at run start,
+// annotation-only. The order mirrors the decide edges — triage first, the DoR
+// readiness check alongside it, size last (it feeds the suggested flow).
+const INTAKE_DECISIONS = ["intake.triage_node", "intake.has_acceptance_criteria", "intake.task_size"];
+
+// The seam's state schema (DECISION_STEP.inputSchema) caps state at 16000
+// chars — a longer issue body is truncated, never refused: an annotation over
+// a truncated body beats no annotation, and the cap is the schema's, not ours.
+const STATE_CAP = 16000;
 
 // ── signals ──────────────────────────────────────────────────────────────────
 // Every regex here answers a yes/no question about text already on the issue.
@@ -239,6 +264,179 @@ export function verdictForNode(graph, nodeId) {
   );
 }
 
+// ── intake (FOC-451) ─────────────────────────────────────────────────────────
+// The seam's annotations for the three intake decisions. The caller is the
+// decision-call seam addressed BY REGISTRY ID (never inline questions — the
+// registry owns the question text), so every answer arrives as the A0
+// envelope: annotation, confidence, eventId — never an action flag.
+
+const defaultNow = () => new Date().toISOString();
+
+export function stateOf(issue) {
+  const title = typeof issue?.title === "string" ? issue.title.trim() : "";
+  const description = typeof issue?.description === "string" ? issue.description : "";
+  const state = [title && `Title: ${title}`, description.trim()].filter(Boolean).join("\n\n");
+  return state.length > STATE_CAP ? state.slice(0, STATE_CAP) : state;
+}
+
+/**
+ * Serve the three intake decisions and build the annotation record. A failed
+ * decision (no API key, provider error, schema refusal) is recorded as
+ * ok:false with its typed code — fail-closed and visible, triage still
+ * possible. The disagreement between the seam's triage_node annotation and
+ * the frontman's deterministic proposal is computed here and DISPLAYED by the
+ * callers; nothing downstream acts on it.
+ */
+export async function buildIntake({ issue, graph, caller, runId = null, now = defaultNow }) {
+  const signals = extractSignals(issue);
+  let frontman;
+  try {
+    const proposal = propose(signals, graph);
+    frontman = { proposal: proposal.proposal, node: proposal.node, confidence: proposal.confidence };
+  } catch (err) {
+    // A graph that cannot route does not block the annotations — but the
+    // disagreement check has nothing to compare against, so it stays null.
+    frontman = { error: err.message };
+  }
+
+  const state = stateOf(issue);
+  const decisions = {};
+  const warnings = [];
+  for (const decisionId of INTAKE_DECISIONS) {
+    try {
+      const envelope = await caller({ state, decisionId });
+      if (!envelope.ok) {
+        decisions[decisionId] = {
+          ok: false,
+          code: envelope.error?.code ?? null,
+          message: envelope.error?.message ?? null,
+          ...(envelope.eventId ? { eventId: envelope.eventId } : {}),
+        };
+        warnings.push(`${decisionId} failed closed (${envelope.error?.code ?? "error"}) — triage proceeds without the annotation`);
+      } else {
+        decisions[decisionId] = {
+          ok: true,
+          answer: Object.values(envelope.annotation?.answers ?? {})[0] ?? null,
+          confidence: envelope.annotation?.confidence ?? null,
+          eventId: envelope.eventId ?? null,
+        };
+      }
+    } catch (err) {
+      decisions[decisionId] = { ok: false, code: err?.code ?? null, message: err?.message ?? null };
+      warnings.push(`${decisionId} failed closed (${err?.code ?? "error"}) — triage proceeds without the annotation`);
+    }
+  }
+
+  const seamTriage = decisions["intake.triage_node"].ok ? decisions["intake.triage_node"].answer : null;
+  const disagreement =
+    seamTriage && frontman.proposal && seamTriage !== frontman.proposal
+      ? { decisionId: "intake.triage_node", seam: seamTriage, frontman: frontman.proposal }
+      : null;
+
+  const size = decisions["intake.task_size"].ok ? decisions["intake.task_size"].answer : null;
+  let suggestedFlow = null;
+  let flowReason = null;
+  if (size) {
+    const squads = graph?.intakeFlows?.[size];
+    if (Array.isArray(squads)) suggestedFlow = { size, squads };
+    else {
+      flowReason = graph?.intakeFlows
+        ? `no "${size}" entry in graph.intakeFlows`
+        : 'config/graph.json carries no "intakeFlows" size→flow mapping';
+    }
+  }
+
+  return {
+    record: {
+      issue: signals.identifier || null,
+      createdAt: now(),
+      runId,
+      decisions,
+      frontman,
+      disagreement,
+      size,
+      ...(suggestedFlow ? { suggestedFlow } : {}),
+      ...(flowReason ? { flowReason } : {}),
+    },
+    warnings,
+  };
+}
+
+/**
+ * The size→flow lookup for the FINAL recorded size: validated against the
+ * config mapping's own keys, refused otherwise — a size nobody mapped would
+ * suggest a flow nobody built.
+ */
+export function resolveSizeFlow(graph, size) {
+  const flows = graph?.intakeFlows;
+  if (!flows || typeof flows !== "object") {
+    throw new Error('config/graph.json carries no "intakeFlows" size→flow mapping — the final size cannot be validated against it');
+  }
+  const flow = flows[size];
+  if (!Array.isArray(flow)) {
+    throw new Error(`unknown size "${size}" — intakeFlows carries: ${Object.keys(flows).join(", ")}`);
+  }
+  return flow;
+}
+
+/**
+ * The intake summary that rides the triage record: the seam's answers,
+ * confidences and eventIds NEXT TO the verdict, plus both disagreement views.
+ * The final-size view can only exist here (the seam's size annotation is
+ * compared against what was actually recorded).
+ */
+function intakeSummaryOf(intake, recordedSize) {
+  const decisions = {};
+  for (const decisionId of INTAKE_DECISIONS) {
+    const d = intake?.decisions?.[decisionId];
+    if (!d) continue;
+    decisions[decisionId] = {
+      ok: d.ok === true,
+      answer: d.answer ?? null,
+      confidence: d.confidence ?? null,
+      ...(d.eventId ? { eventId: d.eventId } : {}),
+      ...(d.ok ? {} : { code: d.code ?? null }),
+    };
+  }
+  const seamSize = intake?.decisions?.["intake.task_size"];
+  const sizeDisagreement =
+    recordedSize && seamSize?.ok && seamSize.answer != null && seamSize.answer !== recordedSize
+      ? { seam: seamSize.answer, recorded: recordedSize }
+      : null;
+  return {
+    decisions,
+    disagreement: intake?.disagreement ?? null,
+    ...(sizeDisagreement ? { sizeDisagreement } : {}),
+  };
+}
+
+/**
+ * The final-choice auto-join (FOC-449): the recorded verdict and the recorded
+ * size are the OUTCOMES the triage_node/task_size events train against, so
+ * `record` labels them tied to the exact eventIds the intake calls carried.
+ * Best-effort by contract, same as the gate join — a failed label (unknown
+ * event, unwritable log) is a warning, never a broken verdict. No eventId →
+ * nothing labelled; no size → no size label.
+ */
+export function labelRecordedIntake({ intake, verdict, size, runsDir } = {}) {
+  const decisions = intake?.decisions ?? {};
+  const pairFor = (decisionId) => {
+    const d = decisions[decisionId];
+    return d?.eventId ? [{ eventId: d.eventId, runId: intake.runId ?? null }] : [];
+  };
+  const labelled = [];
+  const warnings = [];
+  const join = (pairs, outcome) => {
+    if (!pairs.length || outcome == null) return;
+    const res = autoLabel(pairs, { outcome: String(outcome), by: "agent", via: "verdict", ...(runsDir ? { runsDir } : {}) });
+    labelled.push(...res.labelled);
+    warnings.push(...res.warnings);
+  };
+  join(pairFor("intake.triage_node"), verdict);
+  join(pairFor("intake.task_size"), size);
+  return { labelled, warnings };
+}
+
 // ── issue loading ────────────────────────────────────────────────────────────
 // --issue-file is the offline seam: the test suite feeds fixtures through it,
 // and it is also how you triage from a saved payload when Linear is down.
@@ -340,6 +538,32 @@ function cmdRecord(args) {
     failJson(err.message);
   }
 
+  // FOC-451: the final size is optional, but when given it must be one the
+  // config's size→flow mapping actually knows — a size nobody mapped would
+  // suggest a flow nobody built.
+  let sizeFlow = null;
+  if (args.size !== undefined) {
+    try {
+      sizeFlow = resolveSizeFlow(graph, String(args.size));
+    } catch (err) {
+      failJson(err.message, { hint: "sizes come from graph.intakeFlows (config/graph.json)" });
+    }
+  }
+
+  // The intake annotations, recorded NEXT TO the verdict: intake.json is the
+  // sibling artifact the `intake` subcommand wrote for this run; its summary
+  // rides the triage record so a reviewer reads the annotations and the
+  // verdict they informed in one place. No intake → no summary, no display.
+  let intake = null;
+  const intakeFile = intakePath(runId);
+  if (existsSync(intakeFile)) {
+    try {
+      intake = JSON.parse(readFileSync(intakeFile, "utf8"));
+    } catch (err) {
+      failJson(`${intakeFile} exists but is not readable JSON: ${err.message}`);
+    }
+  }
+
   // One triage.json per run, and a run handles one issue. Overwriting the
   // verdict for a DIFFERENT issue would silently retarget every later spawn in
   // the run, so it takes --force. Re-recording the SAME issue is allowed: new
@@ -360,6 +584,8 @@ function cmdRecord(args) {
     }
   }
 
+  const size = args.size !== undefined ? String(args.size) : null;
+  const intakeView = intake ? intakeSummaryOf(intake, size) : null;
   const record = {
     issue: args.issue,
     verdict: args.verdict,
@@ -371,23 +597,79 @@ function cmdRecord(args) {
     confidence,
     decidedBy: "supervisor",
     createdAt: new Date().toISOString(),
+    ...(size ? { size, suggestedFlow: sizeFlow } : {}),
+    ...(intakeView ? { intake: intakeView } : {}),
   };
 
   ensureRunDir(runId);
   atomicWriteJSON(path, record);
+
+  // A0 display: the seam's annotations are shown next to the recorded choice,
+  // never auto-acted — the verdict proceeds regardless of what they say.
+  if (intakeView?.disagreement) {
+    console.error(
+      `[triage] A0 disagreement — seam ${intakeView.disagreement.decisionId} says "${intakeView.disagreement.seam}", ` +
+        `the recorded verdict is "${intakeView.disagreement.frontman}": displayed, never auto-acted`,
+    );
+  }
+  if (intakeView?.sizeDisagreement) {
+    console.error(
+      `[triage] A0 disagreement — seam intake.task_size says "${intakeView.sizeDisagreement.seam}", ` +
+        `the recorded size is "${intakeView.sizeDisagreement.recorded}": displayed, never auto-acted`,
+    );
+  }
+
+  // The final choices become FOC-449 labels tied to the intake eventIds.
+  // Best-effort: a failed label warns on stderr and never breaks the verdict.
+  const { warnings: labelWarnings } = labelRecordedIntake({ intake, verdict: args.verdict, size });
+  for (const w of labelWarnings) console.error(`[triage] ${w}`);
+
   console.log(JSON.stringify({ ok: true, path, ...record }, null, 2));
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
-function main() {
+async function cmdIntake(args) {
+  if (!args.issue) failJson("--issue <id> is required");
+  const runId = args.run || process.env.LA_SUPERVISOR_RUN;
+  if (!runId) failJson("--run <supervisorRunId> is required (or set LA_SUPERVISOR_RUN)");
+  const graph = loadGraphOrFail();
+  const issue = loadIssue(args);
+
+  // A0 annotations via the seam's decisionId channel — the registry owns the
+  // question text, never inline questions. No OPENROUTER_API_KEY → every call
+  // fails closed (auth_missing, before any network attempt); the record shows
+  // the failures and the deterministic triage stays usable.
+  const caller = createDecisionCaller({ apiKey: process.env.OPENROUTER_API_KEY, runId, taskKey: args.issue });
+  let built;
+  try {
+    built = await buildIntake({ issue, graph, caller, runId });
+  } catch (err) {
+    failJson(`intake decisions could not be served: ${err.message}`);
+  }
+  const { record, warnings } = built;
+  for (const w of warnings) console.error(`[triage] ${w}`);
+  if (!record.issue) record.issue = args.issue;
+
+  const path = intakePath(runId);
+  try {
+    ensureRunDir(runId);
+    atomicWriteJSON(path, record);
+  } catch (err) {
+    failJson(`could not write ${path}: ${err.message}`);
+  }
+  console.log(JSON.stringify({ ok: true, path, ...record, warnings }, null, 2));
+}
+
+async function main() {
   const args = parseArgs(process.argv.slice(2), new Set(["unknown"]));
   const cmd = args._[0];
 
   if (cmd === "propose") return cmdPropose(args);
   if (cmd === "record") return cmdRecord(args);
+  if (cmd === "intake") return cmdIntake(args);
 
-  failJson(`unknown subcommand "${cmd ?? ""}" — expected propose | record`);
+  failJson(`unknown subcommand "${cmd ?? ""}" — expected propose | record | intake`);
 }
 
 if (process.argv[1]?.endsWith("supervisor-triage.mjs")) main();
