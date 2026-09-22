@@ -3,6 +3,7 @@
 //
 //   node scripts/decision-log.mjs label --event <eventId> --outcome <value>
 //        --by human|agent [--run <runId>]
+//   node scripts/decision-log.mjs export --decision <decisionId> [--out <path>]
 //
 // decisions.jsonl (one file per LA_RUN_ID under <repo>/.state/runs/) carries
 // two line types:
@@ -10,7 +11,7 @@
 //     decision-call.mjs: identity (eventId), the scrubbed input AS SENT, the
 //     typed output, usage/cost facts, taskKey. Legacy lines (pre-FOC-449, no
 //     `type`) are decision records without an eventId; they still parse but
-//     cannot carry a label.
+//     cannot carry a label and are skipped by the export.
 //   · {type:"label", ...} — one recorded outcome per event: what ACTUALLY
 //     happened. Never derived from the event's own answers — the outcome is
 //     an argument here (source:"manual"), or the gate/verdict/merge result
@@ -22,8 +23,16 @@
 // Unknown events are refused — an outcome pointing at nothing is worse than
 // none, because the export joins on it. Errors exit non-zero; the auto-join
 // callers treat every failure from appendLabel as a warning instead.
+//
+// The export joins every event of one decisionId with its labels and assigns
+// a training split deterministically: sha256("<eventId>|<decisionId>") gives
+// a bucket (first 8 hex chars, mod 1000); < 800 → train, < 900 → val, else
+// test. Same log content ⇒ byte-identical output — the seed, the thresholds
+// and the record key order are constants of this script (splitVersion: 1;
+// changing any of them is a new splitVersion, never a silent reshuffle).
 
-import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,6 +45,13 @@ export const RUNS_DIR = join(ROOT, ".state", "runs");
 
 export const SHADOW_LABEL_TYPE = "label";
 export const LABEL_BY = ["human", "agent"];
+
+// Split assignment (E4): deterministic per (eventId, decisionId), never
+// re-drawn. Bumping the seed, the thresholds or the record shape is a new
+// splitVersion — the number exists so a consumer can tell reshuffles apart.
+export const SPLIT_VERSION = 1;
+const SPLIT_TRAIN_BELOW = 800;
+const SPLIT_VAL_BELOW = 900;
 
 const defaultNow = () => new Date().toISOString();
 
@@ -172,6 +188,70 @@ export function pairDecisionEvents(eventIds, runIds) {
   return events.map((eventId, i) => ({ eventId, runId: runs[i] ?? runs[runs.length - 1] ?? null }));
 }
 
+/**
+ * The training split of one event: sha256("<eventId>|<decisionId>") → bucket
+ * (first 8 hex chars mod 1000) → < 800 train, < 900 val, else test. Pure and
+ * stable: the same pair always maps to the same split, no matter when it is
+ * asked or which log holds the event.
+ */
+export function splitFor(eventId, decisionId) {
+  const hex = createHash("sha256").update(`${eventId}|${decisionId}`).digest("hex").slice(0, 8);
+  const bucket = parseInt(hex, 16) % 1000;
+  if (bucket < SPLIT_TRAIN_BELOW) return "train";
+  if (bucket < SPLIT_VAL_BELOW) return "val";
+  return "test";
+}
+
+/**
+ * One export record per event line of `decisionId`, joined with the labels
+ * that live in the same run file. Deterministic twice over: run logs are
+ * scanned name-ascending (NOT the label lookup's newest-first — mtimes move,
+ * exports must not), and each record's key order is the literal below. Legacy
+ * lines (no `type`, no eventId) parse but are skipped.
+ */
+export function exportDecisionEvents(decisionId, { runsDir = RUNS_DIR } = {}) {
+  const records = [];
+  const logs = existsSync(runsDir)
+    ? readdirSync(runsDir)
+        .sort()
+        .map((runId) => ({ runId, path: join(runsDir, runId, SHADOW_FILENAME) }))
+        .filter((f) => existsSync(f.path))
+    : [];
+  for (const { runId, path } of logs) {
+    const lines = readJsonl(path);
+    for (const line of lines) {
+      if (line?.type !== SHADOW_EVENT_TYPE || line?.decisionId !== decisionId || !line?.eventId) continue;
+      const eventId = line.eventId;
+      const labels = lines.filter((l) => l?.type === SHADOW_LABEL_TYPE && l?.eventId === eventId);
+      records.push({
+        splitVersion: SPLIT_VERSION,
+        split: splitFor(eventId, decisionId),
+        eventId,
+        decisionId,
+        ts: line.ts ?? null,
+        taskKey: line.taskKey ?? null,
+        runId,
+        input: line.input ?? null,
+        output: {
+          ok: line.ok ?? null,
+          answers: line.answers ?? null,
+          confidence: line.confidence ?? null,
+          formatConfidence: line.formatConfidence ?? null,
+          model: line.model ?? null,
+          pinnedModel: line.pinnedModel ?? null,
+          tier: line.tier ?? null,
+          mode: line.mode ?? null,
+          usage: line.usage ?? null,
+          responseId: line.responseId ?? null,
+          error: line.error ?? null,
+        },
+        labels,
+      });
+    }
+  }
+  return records;
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
 // Same flag semantics as supervisor-lib.parseArgs (last value wins), without
@@ -224,11 +304,35 @@ function cmdLabel(args) {
   }
 }
 
+function cmdExport(args) {
+  const decisionId = requireValue(args.decision, "[decision-log] --decision <decisionId> is required");
+  if (args.out === true) fail("--out needs a file path (or drop it and the records go to stdout as JSONL)");
+  const out = args.out === undefined ? null : String(args.out).trim();
+  let records;
+  try {
+    records = exportDecisionEvents(decisionId);
+  } catch (err) {
+    return fail(err.message);
+  }
+  if (out) {
+    writeFileSync(out, records.map((r) => JSON.stringify(r)).join("\n") + (records.length ? "\n" : ""), "utf8");
+    const counts = { train: 0, val: 0, test: 0 };
+    for (const r of records) counts[r.split]++;
+    console.log(
+      JSON.stringify({ ok: true, decisionId, splitVersion: SPLIT_VERSION, path: out, total: records.length, counts }, null, 2),
+    );
+  } else {
+    // Pure JSONL on stdout: one training record per line, in scan order.
+    for (const r of records) console.log(JSON.stringify(r));
+  }
+}
+
 function main() {
   const args = parseCli(process.argv.slice(2));
   const cmd = args._[0];
   if (cmd === "label") return cmdLabel(args);
-  console.error(`[decision-log] unknown subcommand "${cmd ?? ""}" — expected label`);
+  if (cmd === "export") return cmdExport(args);
+  console.error(`[decision-log] unknown subcommand "${cmd ?? ""}" — expected label | export`);
   process.exit(1);
 }
 

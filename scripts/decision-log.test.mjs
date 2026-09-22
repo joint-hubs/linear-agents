@@ -12,7 +12,7 @@
 // Run: node scripts/decision-log.test.mjs
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -20,10 +20,13 @@ import { randomUUID } from "node:crypto";
 import { scrub, scrubMask, MAX_ERROR_TEXT } from "./mcp/scrub.mjs";
 import {
   RUNS_DIR,
+  SPLIT_VERSION,
   appendLabel,
+  exportDecisionEvents,
   findEventFile,
   labelRecord,
   pairDecisionEvents,
+  splitFor,
 } from "./decision-log.mjs";
 import {
   ROOT,
@@ -471,6 +474,103 @@ test("a merge without provenance labels nothing", () => {
   assert.equal(out.accepted, true, JSON.stringify(out.findings));
   if ("decisionEvents" in out) fail("no provenance key without provenance flags");
   assert.deepEqual(readLog(dlog.path), before, "no label written");
+});
+
+// ── 8. export ────────────────────────────────────────────────────────────────
+console.log("\nexport");
+
+// The export scans EVERY run log name-ascending, so these tests scope to a
+// unique decisionId — the auto-join tests above legitimately wrote events of
+// other decisions into the same runs dir.
+let exportCounter = 0;
+const EXPORT_DEC = () => `export.test.${process.pid}.${exportCounter++}`;
+
+/** A UUID that hashes into the named split for this decisionId. */
+const eventIdForSplit = (split, decisionId) => {
+  for (;;) {
+    const id = randomUUID();
+    if (splitFor(id, decisionId) === split) return id;
+  }
+};
+
+test("splitFor is a pure function with all three buckets reachable", () => {
+  const dec = EXPORT_DEC();
+  const a = splitFor("e-1", dec);
+  assert.equal(splitFor("e-1", dec), a, "same pair → same split");
+  for (const split of ["train", "val", "test"]) {
+    const id = eventIdForSplit(split, dec);
+    assert.equal(splitFor(id, dec), split);
+  }
+});
+
+test("export joins events with their labels, deterministically and byte-identically", () => {
+  const dec = EXPORT_DEC();
+  const e1 = EVENT({ decisionId: dec });
+  const e2 = EVENT({ decisionId: dec });
+  const f = fixtureRunLog([e1, e2]);
+  const r = runScript(DECISION_LOG, ["label", "--event", e1.eventId, "--outcome", "rób A", "--by", "human", "--run", f.runId]);
+  assert.equal(r.status, 0, r.stderr);
+
+  const first = runScript(DECISION_LOG, ["export", "--decision", dec]);
+  const second = runScript(DECISION_LOG, ["export", "--decision", dec]);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(first.stdout, second.stdout, "same log content ⇒ byte-identical output");
+
+  const records = first.stdout.trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(records.length, 2, "one record per event, legacy-free log");
+  assert.ok(records.every((rec) => rec.splitVersion === SPLIT_VERSION && rec.decisionId === dec), "split assignment present");
+  const byId = new Map(records.map((rec) => [rec.eventId, rec]));
+  assert.deepEqual(byId.get(e1.eventId).labels.map((l) => l.outcome), ["rób A"], "labels joined");
+  assert.deepEqual(byId.get(e2.eventId).labels, [], "an unlabelled event exports with an empty label list");
+  const rec = byId.get(e1.eventId);
+  assert.equal(rec.split, splitFor(e1.eventId, dec), "the recorded split IS splitFor()");
+  assert.equal(rec.runId, f.runId, "group key: runId");
+  assert.deepEqual(Object.keys(rec).sort(), ["decisionId", "eventId", "input", "labels", "output", "runId", "split", "splitVersion", "taskKey", "ts"]);
+});
+
+test("export skips legacy lines without a type and never crashes on them", () => {
+  const dec = EXPORT_DEC();
+  const f = fixtureRunLog([EVENT({ decisionId: dec })]);
+  appendFileSync(f.path, JSON.stringify({ runId: f.runId, decisionId: dec, ok: true, answers: {} }) + "\n", "utf8");
+  const r = runScript(DECISION_LOG, ["export", "--decision", dec]);
+  assert.equal(r.status, 0, r.stderr);
+  const records = r.stdout.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  assert.equal(records.length, 1, "the legacy line (no type, no eventId) is skipped, not exported");
+});
+
+test("--out writes the JSONL file and a summary on stdout", () => {
+  const dec = EXPORT_DEC();
+  fixtureRunLog([EVENT({ decisionId: dec }), EVENT({ decisionId: dec })]);
+  const out = join(tmpdir(), `dlog-export-${process.pid}-${runCounter++}.jsonl`);
+  cleanupLater(out);
+  const r = runScript(DECISION_LOG, ["export", "--decision", dec, "--out", out]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const s = parse(r, fail);
+  assert.equal(s.ok, true);
+  assert.equal(s.splitVersion, SPLIT_VERSION);
+  assert.equal(s.total, 2);
+  assert.deepEqual(Object.keys(s.counts).sort(), ["test", "train", "val"]);
+  assert.equal(s.counts.train + s.counts.val + s.counts.test, 2);
+  const lines = readLog(out);
+  assert.equal(lines.length, 2, "file holds the same records the summary counts");
+});
+
+test("export of a decision nobody called is an empty, successful JSONL", () => {
+  const r = runScript(DECISION_LOG, ["export", "--decision", EXPORT_DEC()]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(r.stdout.trim(), "", "no records");
+});
+
+test("the module API matches the CLI", () => {
+  const dec = EXPORT_DEC();
+  const e = EVENT({ decisionId: dec });
+  const f = fixtureRunLog([e]);
+  const records = exportDecisionEvents(dec);
+  assert.equal(records.length, 1, "exactly the fixture's event");
+  assert.equal(records[0].eventId, e.eventId);
+  assert.equal(records[0].runId, f.runId);
+  assert.ok(records[0].ts, "event ts carried");
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────
