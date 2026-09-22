@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { SUPERVISOR_DENY, buildChildSettings, childSettingsPath, readRegistry, runDir } from "./supervisor-lib.mjs";
+import { SUPERVISOR_DENY, buildChildSettings, childSettingsPath, readHeld, readRegistry, runDir } from "./supervisor-lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -84,6 +84,24 @@ function runSpawn(runId, repo, extra = [], env = {}) {
     },
   );
 }
+
+// A DEV candidate for the --candidate tests (FOC-406): a second commit on the
+// branch a DEV child would own (foc-123-dev), while the Supervisor's tree stays
+// on main at the base commit — so the pin is observable as a diff between the
+// base revision and the candidate. Returns the candidate commit sha.
+function fixtureCandidate(repo) {
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("checkout", "-b", "foc-123-dev");
+  writeFileSync(join(repo, "candidate.txt"), "candidate\n");
+  git("add", "-A");
+  git("commit", "-m", "candidate");
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  git("checkout", "main");
+  return sha;
+}
+
+const shaOf = (ref, cwd) =>
+  execFileSync("git", ["rev-parse", ref], { cwd, encoding: "utf8" }).trim();
 
 const parse = (r) => {
   try {
@@ -236,6 +254,123 @@ test("an explicit --model wins over the inherited one and draws no warning", () 
   if (entry.modelSource !== "--model") fail(`modelSource was ${entry.modelSource}`);
   if (/no --model/.test(r.stderr)) fail("warned although --model was given");
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+// ── --candidate: pin the worktree at the DEV candidate (FOC-406) ─────────────
+// Without the flag a REVIEW/TEST worktree starts at the base revision and the
+// reviewer has to checkout the candidate by hand — and nothing fails when they
+// forget. With it, the branch is CREATED at the resolved commit, or the spawn
+// refuses; it never falls back to the base revision.
+console.log("\n--candidate pins the worktree at the DEV candidate");
+
+test("a --candidate sha starts a fresh worktree at that commit (FOC-406)", () => {
+  const { repo } = fixtureRepo();
+  const candidate = fixtureCandidate(repo);
+  const runId = fixtureRun();
+  const out = parse(runSpawn(runId, repo, ["--squad", "review", "--child", "review-1", "--candidate", candidate]));
+
+  if (!out.ok) fail(`spawn failed: ${out.error}`);
+  if (!out.worktreeCreated) fail("expected a fresh worktree");
+  if (out.baseRevision !== candidate) fail(`baseRevision was ${out.baseRevision}, not the candidate`);
+  if (out.branch === "foc-123-dev") fail(`the review child took the DEV branch name: ${out.branch}`);
+  if (shaOf("HEAD", out.worktree) !== candidate) fail("worktree HEAD is not the candidate");
+  // The prologue the child is told must pin the same commit the result claims.
+  const entry = readRegistry(runId).children[out.childId];
+  if (!entry.pinnedStateVerification.prologue.includes(`base-revision: ${candidate}`)) {
+    fail("prologue does not pin the candidate");
+  }
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("a --candidate branch name resolves to its commit (FOC-406)", () => {
+  const { repo } = fixtureRepo();
+  const candidate = fixtureCandidate(repo);
+  const runId = fixtureRun();
+  const out = parse(runSpawn(runId, repo, ["--squad", "review", "--child", "review-1", "--candidate", "foc-123-dev"]));
+
+  if (!out.ok) fail(`spawn failed: ${out.error}`);
+  if (!out.worktreeCreated) fail("expected a fresh worktree");
+  if (out.baseRevision !== candidate) fail(`baseRevision was ${out.baseRevision}, not the branch tip`);
+  if (shaOf("HEAD", out.worktree) !== candidate) fail("worktree HEAD is not the branch tip");
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("an unresolvable --candidate refuses and names the input (FOC-406)", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runSpawn(runId, repo, ["--candidate", "no-such-sha-or-branch"]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r);
+  if (out.ok !== false) fail(`expected ok:false, got ${JSON.stringify(out)}`);
+  if (!/no-such-sha-or-branch/.test(out.error)) fail("error does not name the unresolved input");
+  if (!/candidate-unresolved/.test(out.error)) fail("error carries no stable reason slug");
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered anyway");
+});
+
+test("--candidate without a value is refused, not read as boolean true (FOC-406)", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runSpawn(runId, repo, ["--candidate"]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r);
+  if (!/needs a value/.test(out.error)) fail(`unhelpful error: ${out.error}`);
+});
+
+test("--candidate refuses a branch a recorded child already owns (FOC-406)", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const first = parse(runSpawn(runId, repo)); // DEV child, branch foc-123-dev
+  if (!first.ok) fail(`first spawn failed: ${first.error}`);
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", first.childId], { encoding: "utf8" });
+
+  // Same slug → the same branch name; a candidate spawn must not land a second
+  // child on a branch another child of this run already owns.
+  const r = runSpawn(runId, repo, ["--slug", "dev", "--candidate", "main"]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r);
+  if (!/candidate-branch-collision/.test(out.error)) fail(`no collision slug: ${out.error}`);
+  if (!/foc-123-dev/.test(out.error)) fail("error does not name the conflicting branch");
+});
+
+test("--candidate refuses to reuse a worktree standing at the wrong commit (FOC-406)", () => {
+  const { repo } = fixtureRepo();
+  const runA = fixtureRun();
+  const first = parse(runSpawn(runA, repo)); // creates the worktree on foc-123-dev at the base commit
+  spawnSync(process.execPath, [STOP, "--run", runA, "--child", first.childId], { encoding: "utf8" });
+
+  // A commit the standing worktree does not have. The second run's registry is
+  // empty, so the collision guard cannot fire before the reuse check.
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  writeFileSync(join(repo, "candidate.txt"), "candidate\n");
+  git("add", "-A");
+  git("commit", "-m", "candidate");
+  const candidate = shaOf("HEAD", repo);
+
+  const runB = fixtureRun();
+  const r = runSpawn(runB, repo, ["--slug", "dev", "--candidate", candidate]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r);
+  if (!/candidate-head-mismatch/.test(out.error)) fail(`no mismatch slug: ${out.error}`);
+});
+
+test("a held --candidate request records the flag for replay (FOC-406)", () => {
+  const { repo } = fixtureRepo();
+  const candidate = fixtureCandidate(repo);
+  const runId = fixtureRun();
+  const first = parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_HANG_MS: "20000" }));
+  if (!first.ok) fail(`first spawn failed: ${first.error}`);
+
+  const second = runSpawn(runId, repo, ["--task", "FOC-124", "--candidate", candidate, "--child", "dev-2"]);
+  if (parse(second).held !== true) fail("second spawn was not held");
+  const [held] = readHeld(runId);
+  // The record replays the request verbatim — the candidate must ride along,
+  // or the released child would silently start at the base revision.
+  if (!held.argv.includes("--candidate")) fail(`held argv lost --candidate: ${JSON.stringify(held.argv)}`);
+  if (!held.argv.includes(candidate)) fail(`held argv lost the candidate value: ${JSON.stringify(held.argv)}`);
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", first.childId], { encoding: "utf8" });
 });
 
 // ── session identity + tee ───────────────────────────────────────────────────

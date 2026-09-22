@@ -22,6 +22,29 @@
 - **Verify:** `node scripts/docs-count-guard.test.mjs` (exit 0) · `node scripts/lint.mjs` (exit 0).
 - **Follow-ups:** FOC-397 runner (blocks on this doc); FOC-461 collector notes (stale README line-21 date; catalog tier-2 presentation drift still open).
 
+## 2026-09-21 — FOC-406: `--candidate` pins review/test worktrees at the DEV candidate
+
+- **`supervisor-spawn.mjs --candidate <sha-or-branch>` (FOC-406):** the value resolves through git
+  to exactly one commit (`<ref>^{commit}`); the child's branch is CREATED at that commit (`worktree
+  add -b <branch> <target> <sha>`, not a detached HEAD, so the pinned-state branch-match gate stays
+  green), and both `baseRevision` in the result JSON and the prologue's `base-revision:` line report
+  the resolved sha — no separate `candidateRevision` field. Without the flag, behavior is
+  byte-identical to before.
+- **Fail-closed refusals (failJson, stable reason slugs), never a fallback to base:** unresolvable
+  candidate → `candidate-unresolved`; computed branch owned by a recorded child of the run (e.g. the
+  DEV child's `foc-<n>-dev`) → `candidate-branch-collision`; an existing worktree on the branch
+  standing off-candidate → `candidate-head-mismatch`; an existing branch without a worktree whose tip
+  differs → `candidate-branch-tip-mismatch`. Missing value / boolean-true / newline refused like the
+  FOC-296/357 precedents.
+- **`ensureWorktree(gitRoot, branch, startPoint)`** (supervisor-lib.mjs): optional start point feeds
+  the `-b` form; reuse and the existing-branch add form throw unless HEAD/tip equals the start point
+  (spawn refuses first with its own slugs; the lib guards protect the library's other callers).
+- **Held requests unchanged:** the record stores argv verbatim, so `--candidate` replays unchanged;
+  a candidate that stopped resolving surfaces at replay inside `started[].result`.
+- **Verify:** `node scripts/supervisor-spawn.test.mjs` (28 passed, 0 failed) ·
+  `node scripts/supervisor-semaphore.test.mjs` (19 passed, 0 failed) ·
+  `node scripts/docs-count-guard.test.mjs` (OK, 74 test files) · `node scripts/lint.mjs` (exit 0, 441 files).
+
 ## 2026-09-21 — FOC-473: ADR-0012 amended ([G] kind, D7 node contract), tier-2 disabled
 
 - **ADR-0012 amended (FOC-473):** fifth step kind **[G] generate-shaped** (one model call, no tool loop, schema-validated bounded output, declared inputs only, cheap tier, never decides a gate); **D7 one node contract** for all kinds; the [J] bullet's "hallucination … 'mathematically impossible'" claim corrected (a schema guarantees shape, not truth — correctness comes from gates and calibration, FOC-387).

@@ -934,19 +934,35 @@ export function listWorktrees(gitRoot) {
  * under a live run is one of the two failures this whole change exists to
  * prevent (docs/ROADMAP.md §NOW.1).
  *
+ * FOC-406: an optional start point (a RESOLVED commit) starts a new branch at
+ * that commit instead of the main tree's HEAD — a review child's worktree must
+ * start at the DEV candidate, not at the base revision. The -b form already
+ * takes a start-point positional. A reused tree, or an existing branch, is
+ * accepted only when it stands at the start point; either mismatch throws,
+ * because silently landing the tree somewhere else is the exact bug class the
+ * start point exists to close. (The spawn refuses first, with its own reason
+ * slugs; these guards protect the library's other callers.)
+ *
+ * @param {string|null} [startPoint] resolved commit a new branch starts at
  * @returns {{ worktree: string, branch: string, baseRevision: string, created: boolean }}
  */
-export function ensureWorktree(gitRoot, branch) {
+export function ensureWorktree(gitRoot, branch, startPoint = null) {
   const existing = listWorktrees(gitRoot).find((w) => w.branch === branch);
   if (existing) {
     const path = resolve(existing.path);
-    return { worktree: path, branch, baseRevision: git(["rev-parse", "HEAD"], path), created: false };
+    const baseRevision = git(["rev-parse", "HEAD"], path);
+    if (startPoint && baseRevision !== startPoint) {
+      throw new Error(
+        `worktree for ${branch} stands at ${baseRevision}, not at the requested start point ${startPoint}`,
+      );
+    }
+    return { worktree: path, branch, baseRevision, created: false };
   }
 
   const target = worktreePathFor(gitRoot, branch);
   mkdirSync(worktreeRoot(gitRoot), { recursive: true });
 
-  const head = git(["rev-parse", "HEAD"], gitRoot);
+  const head = startPoint ?? git(["rev-parse", "HEAD"], gitRoot);
   const branchExists = (() => {
     try {
       git(["rev-parse", "--verify", `refs/heads/${branch}`], gitRoot);
@@ -959,6 +975,15 @@ export function ensureWorktree(gitRoot, branch) {
   // `git worktree add <path> <branch>` checks out an existing branch;
   // `-b` creates it. Passing -b for an existing branch fails, and omitting it
   // for a missing one checks out a detached HEAD named after nothing.
+  // FOC-406: with a start point, an existing branch must already sit at it —
+  // its tip is what the add form checks out, and moving somebody's branch is
+  // not this function's call to make.
+  if (startPoint && branchExists) {
+    const tip = git(["rev-parse", "--verify", `refs/heads/${branch}`], gitRoot);
+    if (tip !== startPoint) {
+      throw new Error(`branch ${branch} is at ${tip}, not at the requested start point ${startPoint}`);
+    }
+  }
   const args = branchExists
     ? ["worktree", "add", target, branch]
     : ["worktree", "add", "-b", branch, target, head];
