@@ -41,8 +41,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { createDecisionCaller } from "./decision-call.mjs";
-import { autoLabel } from "./decision-log.mjs";
+import { SHADOW_EVENT_TYPE, createDecisionCaller } from "./decision-call.mjs";
+import { autoLabel, findEventFile } from "./decision-log.mjs";
 import { loadGraph, emitHandoffRules } from "./graph-validate.mjs";
 import { handoffTargetFrom, matchRule } from "./graph-route.mjs";
 import { ROOT, ensureRunDir, failJson, intakePath, parseArgs, triagePath } from "./supervisor-lib.mjs";
@@ -411,14 +411,46 @@ function intakeSummaryOf(intake, recordedSize) {
 }
 
 /**
+ * The taskKey of the run-log event an intake eventId points at — the issue the
+ * decision call actually served. Null when the event carries none; an event
+ * that is nowhere throws, and the caller turns that into the same unknown-event
+ * warning the label write would have produced.
+ */
+function eventTaskKeyOf(eventId, { runId = null, runsDir } = {}) {
+  const { path } = findEventFile(eventId, { runId, runsDir });
+  const line = readFileSync(path, "utf8")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .find((l) => l?.type === SHADOW_EVENT_TYPE && l?.eventId === eventId);
+  return line?.taskKey ?? null;
+}
+
+/**
  * The final-choice auto-join (FOC-449): the recorded verdict and the recorded
  * size are the OUTCOMES the triage_node/task_size events train against, so
  * `record` labels them tied to the exact eventIds the intake calls carried.
- * Best-effort by contract, same as the gate join — a failed label (unknown
+ * Before anything is written, every event is checked against the issue being
+ * recorded — its taskKey must BE this issue, or the label is skipped with a
+ * warning: an outcome must never be joined to another issue's decision event,
+ * however the intake file came to carry it. Fail-closed, the same philosophy
+ * as the triage guard. Best-effort by contract — a failed label (unknown
  * event, unwritable log) is a warning, never a broken verdict. No eventId →
  * nothing labelled; no size → no size label.
  */
-export function labelRecordedIntake({ intake, verdict, size, runsDir } = {}) {
+export function labelRecordedIntake({ intake, verdict, size, runsDir, issue } = {}) {
+  if (typeof issue !== "string" || !issue.trim()) {
+    throw new Error(
+      "labelRecordedIntake needs the issue being recorded — the eventId→issue pairing cannot be verified without it",
+    );
+  }
   const decisions = intake?.decisions ?? {};
   const pairFor = (decisionId) => {
     const d = decisions[decisionId];
@@ -428,7 +460,29 @@ export function labelRecordedIntake({ intake, verdict, size, runsDir } = {}) {
   const warnings = [];
   const join = (pairs, outcome) => {
     if (!pairs.length || outcome == null) return;
-    const res = autoLabel(pairs, { outcome: String(outcome), by: "agent", via: "verdict", ...(runsDir ? { runsDir } : {}) });
+    const paired = [];
+    for (const pair of pairs) {
+      let taskKey = null;
+      let lookupError = null;
+      try {
+        taskKey = eventTaskKeyOf(pair.eventId, { runId: pair.runId, runsDir });
+      } catch (err) {
+        lookupError = err;
+      }
+      if (lookupError) {
+        warnings.push(`decision label for event ${pair.eventId} was not written: ${lookupError.message}`);
+        continue;
+      }
+      if (taskKey !== issue) {
+        warnings.push(
+          `decision label for event ${pair.eventId} was not written: its taskKey is "${taskKey ?? "missing"}", ` +
+            `not "${issue}" — a cross-issue outcome is never joined`,
+        );
+        continue;
+      }
+      paired.push(pair);
+    }
+    const res = autoLabel(paired, { outcome: String(outcome), by: "agent", via: "verdict", ...(runsDir ? { runsDir } : {}) });
     labelled.push(...res.labelled);
     warnings.push(...res.warnings);
   };
@@ -584,6 +638,27 @@ function cmdRecord(args) {
     }
   }
 
+  // One intake.json per run too, and its eventIds belong to the issue `intake`
+  // ran for. Recording a DIFFERENT issue would pair this run's outcome with
+  // another issue's decision events — silently corrupting the FOC-449 training
+  // join — so the mismatch is refused before anything is embedded or labelled.
+  // Re-recording the SAME issue is allowed, as with the verdict. Under --force
+  // the foreign intake data is DROPPED, never re-parented: --force replaces
+  // the verdict, but it cannot make another issue's annotations belong to
+  // this one.
+  if (intake?.issue && intake.issue !== args.issue) {
+    if (!args.force) {
+      failJson(
+        `run ${runId} already has intake annotations for ${intake.issue}; recording ${args.issue} would pair them with the wrong outcome`,
+        { existing: intake, hint: "start a new run, or pass --force to record without the intake data" },
+      );
+    }
+    console.error(
+      `[triage] intake.json belongs to ${intake.issue}, not ${args.issue} — dropping the intake summary and its FOC-449 labels`,
+    );
+    intake = null;
+  }
+
   const size = args.size !== undefined ? String(args.size) : null;
   const intakeView = intake ? intakeSummaryOf(intake, size) : null;
   const record = {
@@ -607,9 +682,12 @@ function cmdRecord(args) {
   // A0 display: the seam's annotations are shown next to the recorded choice,
   // never auto-acted — the verdict proceeds regardless of what they say.
   if (intakeView?.disagreement) {
+    // The recorded verdict is what this CLI was invoked with — never the
+    // frontman's deterministic proposal, which the disagreement field keeps
+    // for the record anyway.
     console.error(
       `[triage] A0 disagreement — seam ${intakeView.disagreement.decisionId} says "${intakeView.disagreement.seam}", ` +
-        `the recorded verdict is "${intakeView.disagreement.frontman}": displayed, never auto-acted`,
+        `the recorded verdict is "${args.verdict}": displayed, never auto-acted`,
     );
   }
   if (intakeView?.sizeDisagreement) {
@@ -621,7 +699,7 @@ function cmdRecord(args) {
 
   // The final choices become FOC-449 labels tied to the intake eventIds.
   // Best-effort: a failed label warns on stderr and never breaks the verdict.
-  const { warnings: labelWarnings } = labelRecordedIntake({ intake, verdict: args.verdict, size });
+  const { warnings: labelWarnings } = labelRecordedIntake({ intake, verdict: args.verdict, size, issue: args.issue });
   for (const w of labelWarnings) console.error(`[triage] ${w}`);
 
   console.log(JSON.stringify({ ok: true, path, ...record }, null, 2));
@@ -649,7 +727,12 @@ async function cmdIntake(args) {
   }
   const { record, warnings } = built;
   for (const w of warnings) console.error(`[triage] ${w}`);
-  if (!record.issue) record.issue = args.issue;
+  // The record's identity is the id this CLI was invoked with — the SAME
+  // vocabulary the events' taskKey and triage.json carry. The payload-derived
+  // identifier (extractSignals) falls back to the raw issue id when a payload
+  // has no identifier field, which would store a uuid here and break the
+  // record-time own-issue comparison against --issue.
+  record.issue = args.issue;
 
   const path = intakePath(runId);
   try {

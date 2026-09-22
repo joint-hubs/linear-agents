@@ -1,7 +1,5 @@
 # STATE — linear-agents (pilotaż orkiestratora)
 
-# STATE — linear-agents (pilotaż orkiestratora)
-
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
 

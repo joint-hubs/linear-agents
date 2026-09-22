@@ -768,8 +768,8 @@ test("the recorded verdict/size become FOC-449 labels tied to the intake eventId
   const evtS = "evt-size-1";
   writeFileSync(
     join(logDir, "decisions.jsonl"),
-    JSON.stringify({ type: "event", eventId: evtT, decisionId: "intake.triage_node" }) + "\n" +
-      JSON.stringify({ type: "event", eventId: evtS, decisionId: "intake.task_size" }) + "\n",
+    JSON.stringify({ type: "event", eventId: evtT, decisionId: "intake.triage_node", taskKey: "FOC-999" }) + "\n" +
+      JSON.stringify({ type: "event", eventId: evtS, decisionId: "intake.task_size", taskKey: "FOC-999" }) + "\n",
     "utf8",
   );
   const { labelled, warnings } = labelRecordedIntake({
@@ -783,6 +783,7 @@ test("the recorded verdict/size become FOC-449 labels tied to the intake eventId
     verdict: "dev",
     size: "medium",
     runsDir,
+    issue: "FOC-999",
   });
   assert.equal(warnings.length, 0, JSON.stringify(warnings));
   assert.equal(labelled.length, 2);
@@ -802,6 +803,7 @@ test("an intake without eventIds labels nothing and warns nobody", () => {
     intake: { runId: "nowhere", decisions: { "intake.triage_node": { ok: true, answer: "dev" } } },
     verdict: "dev",
     runsDir: join(tmp, "runs-empty"),
+    issue: "FOC-999",
   });
   assert.equal(labelled.length, 0);
   assert.equal(warnings.length, 0);
@@ -832,6 +834,155 @@ test("record labels the final verdict against the offline intake's eventId (end 
   assert.equal(label.via, "verdict");
   const evtS = intakeRec.decisions["intake.task_size"].eventId;
   assert.ok(!lines.some((l) => l.type === "label" && l.eventId === evtS), "no final size → no size label");
+});
+
+// ── 9b. one run, one issue — the intake record is not re-parentable (FOC-451) ─
+console.log("\nintake należy do jednego zagadnienia (FOC-451)");
+
+// A run whose intake.json — and the decision event it points at — belongs to
+// FOC-888, while the verdict being recorded is FOC-999: the round-1 blocker.
+// The foreign event exists in the run's real log, so labelling it would be
+// possible; every test here proves it is not.
+function foreignIntake(runId) {
+  const dir = runDirOf(runId);
+  mkdirSync(dir, { recursive: true });
+  const logDir = join(ROOT, ".state", "runs", runId);
+  mkdirSync(logDir, { recursive: true });
+  cleanup.push(logDir); // the caller's shadow log, same as the intake tests above
+  writeFileSync(
+    join(logDir, "decisions.jsonl"),
+    JSON.stringify({ type: "event", eventId: "evt-foreign", decisionId: "intake.triage_node", taskKey: "FOC-888" }) + "\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(dir, "intake.json"),
+    JSON.stringify({
+      issue: "FOC-888", createdAt: "2026-09-22T00:00:00.000Z", runId,
+      decisions: { "intake.triage_node": { ok: true, answer: "dev", confidence: 0.9, eventId: "evt-foreign" } },
+      frontman: { proposal: "dev", node: "dev", confidence: "high" },
+      disagreement: null,
+      size: "medium",
+    }),
+    "utf8",
+  );
+  return { dir, logDir };
+}
+
+const noForeignLabel = (logDir) => {
+  const lines = readFileSync(join(logDir, "decisions.jsonl"), "utf8")
+    .trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(!lines.some((l) => l.type === "label"), "the foreign event must collect no label");
+};
+
+test("record refuses an intake.json written for a DIFFERENT issue — before any embed or label", () => {
+  const runId = withRun();
+  const { dir, logDir } = foreignIntake(runId);
+  const r = run(["record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--run", runId]);
+  assert.equal(r.status, 1, "cross-issue intake data would silently corrupt the FOC-449 join");
+  const err = JSON.parse(r.stdout).error;
+  assert.match(err, /already has intake annotations for FOC-888/);
+  assert.match(err, /recording FOC-999/, "the refusal names both identities");
+  assert.ok(!existsSync(join(dir, "triage.json")), "the refusal precedes any verdict write");
+  noForeignLabel(logDir);
+});
+
+test("--force records the new verdict but DROPS the foreign intake data instead of re-parenting it", () => {
+  const runId = withRun();
+  const { dir, logDir } = foreignIntake(runId);
+  const r = run([
+    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--force", "--run", runId,
+  ]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(dir, "triage.json"), "utf8"));
+  assert.equal(rec.issue, "FOC-999");
+  assert.ok(!("intake" in rec), "the foreign intake summary is dropped, never embedded");
+  assert.match(r.stderr, /intake\.json belongs to FOC-888, not FOC-999/, "the drop is announced, not silent");
+  noForeignLabel(logDir);
+});
+
+test("labelRecordedIntake refuses a mismatched eventId→issue pairing — fail-closed before any write", () => {
+  const runsDir = join(tmp, "runs-pairing");
+  const logDir = join(runsDir, "test-triage-pairing");
+  mkdirSync(logDir, { recursive: true });
+  const evtForeign = "evt-pair-foreign";
+  const evtNoKey = "evt-pair-nokey";
+  writeFileSync(
+    join(logDir, "decisions.jsonl"),
+    JSON.stringify({ type: "event", eventId: evtForeign, decisionId: "intake.triage_node", taskKey: "FOC-888" }) + "\n" +
+      JSON.stringify({ type: "event", eventId: evtNoKey, decisionId: "intake.task_size" }) + "\n",
+    "utf8",
+  );
+  const { labelled, warnings } = labelRecordedIntake({
+    intake: {
+      runId: "test-triage-pairing",
+      decisions: {
+        "intake.triage_node": { ok: true, answer: "dev", eventId: evtForeign },
+        "intake.task_size": { ok: true, answer: "medium", eventId: evtNoKey },
+      },
+    },
+    verdict: "dev",
+    size: "medium",
+    runsDir,
+    issue: "FOC-999",
+  });
+  assert.equal(labelled.length, 0, "a mismatched event must not collect the outcome");
+  assert.equal(warnings.length, 2, JSON.stringify(warnings));
+  assert.match(warnings[0], /taskKey is "FOC-888", not "FOC-999"/);
+  assert.match(warnings[1], /taskKey is "missing"/, "an event without a taskKey cannot be verified, so it is refused");
+  const labels = readFileSync(join(logDir, "decisions.jsonl"), "utf8")
+    .trim().split("\n").map((l) => JSON.parse(l))
+    .filter((l) => l.type === "label");
+  assert.equal(labels.length, 0, "no label line reaches the log");
+});
+
+test("intake records the invoked --issue identity, not a payload-derived uuid (the guard's vocabulary)", () => {
+  // extractSignals falls back to issue.id when a payload has no identifier —
+  // a uuid in intake.json would not be comparable to the --issue the record
+  // step is invoked with, enabling and masking the cross-issue mismatch.
+  const runId = withRun();
+  cleanup.push(join(ROOT, ".state", "runs", runId));
+  const path = join(tmp, `issue-uuid-${fixtureN++}.json`);
+  writeFileSync(
+    path,
+    JSON.stringify({
+      id: "9f1c2a34-5b6d-7e8f-9a0b-1c2d3e4f5a6b",
+      description: AC_BODY,
+      state: { name: "Backlog", type: "backlog" },
+      labels: { nodes: [] },
+      comments: { nodes: [] },
+      estimate: null,
+      children: { nodes: [] },
+    }),
+    "utf8",
+  );
+  const i = run(["intake", "--issue", "FOC-999", "--issue-file", path, "--run", runId], { OPENROUTER_API_KEY: "" });
+  assert.equal(i.status, 0, i.stdout + i.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "intake.json"), "utf8"));
+  assert.equal(rec.issue, "FOC-999", "the stored identity must be the invoked id, same vocabulary as taskKey and triage.json");
+});
+
+test("the A0 disagreement line states the RECORDED verdict, not the deterministic proposal", () => {
+  const runId = withRun();
+  const dir = runDirOf(runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "intake.json"),
+    JSON.stringify({
+      issue: "FOC-999", createdAt: "2026-09-22T00:00:00.000Z", runId,
+      decisions: { "intake.triage_node": { ok: true, answer: "plan", confidence: 0.9, eventId: "evt-t" } },
+      frontman: { proposal: "dev", node: "dev", confidence: "high" },
+      disagreement: { decisionId: "intake.triage_node", seam: "plan", frontman: "dev" },
+      size: "medium",
+    }),
+    "utf8",
+  );
+  // The frontman proposed dev, the seam said plan — the verdict recorded is
+  // review, and the display must say review.
+  const r = run(["record", "--issue", "FOC-999", "--verdict", "review", "--rationale", "x", "--confidence", "90", "--run", runId]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stderr, /seam intake\.triage_node says "plan"/);
+  assert.match(r.stderr, /the recorded verdict is "review"/, "the recorded verdict, not the frontman proposal");
+  assert.match(r.stderr, /displayed, never auto-acted/);
 });
 
 // ── summary ───────────────────────────────────────────────────────────────────
