@@ -70,10 +70,22 @@ Delegate-first: your turn is most expensive. ≥40% run cost in subagents. Subag
 <examples>
 
 ### Example 1 — Blocker path: `issue:` finding sends back to DEV
-- deep `issue:` + security 🔴 blocker → `In Progress` + `risk:high` + blocker comment. `nitpick:`/`suggestion:`/`praise:` do NOT block.
+```
+# round 1: deep found `issue (non-blocking)` in auth, security found a `🔴 blocker` secret leak
+# -> review-round next -> {round:1, status:"ok"}
+# -> transition "In Progress"; add risk:high
+# -> post blocker comment (--summary "🔴 blocker: ...", --next "Sent back to DEV — round 1")
+# nitpick:/suggestion:/praise: in the .state file do NOT block
+```
 
 ### Example 2 — Clean pass: hands to TEST
-- 3 passes (first ∥ security ∥ deep) return only nitpick:/praise: → merge deep>security>first → `ai:reviewed`+`dod-ok`+`stage:testing`; status stays `In Review` (TEST picks up).
+```
+# round 1: all three passes returned only nitpick:/praise:
+# -> review-round next -> {round:1, status:"ok"}
+# -> post final verdict comment ("Clean — no actionable issues", "Handing to TEST")
+# -> add ai:reviewed+dod-ok+stage:testing
+# -> status stays "In Review" (TEST picks it up); do NOT transition to Done
+```
 </examples>
 
 <final_reminders>

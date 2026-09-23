@@ -61,10 +61,21 @@ Delegate-first: your turn is most expensive. Per squad: ≥40% run cost in subag
 <examples>
 
 ### Example 1 — subagent-share below 40% → action item
-- dev squad lead $0.42 / sub $0.18 → share 30% (<40%); retro flags, digest adds action item.
+```
+# from stepStats: dev squad -> lead cost_usd=0.42, sub cost_usd=0.18
+# share = 0.18 / (0.42 + 0.18) = 0.30  -> 30%, below 40% target
+# retro flags as pipeline finding; digest adds action item:
+#   "DEV: delegacja spadła do 30% (cel ≥40%) — implementer wykonał za dużo inline; rozważyć mocniejszy brief recon."
+```
 
 ### Example 2 — bounces == 2 vs > 2 (DRY-RUN cadence)
-- bounces=2 → limit USED (max 2), "na granicy"; bounces=3 → limit BROKEN, escalate. `CADENCE_DRY_RUN=1` → fixture, no API.
+```
+# bounces[] from patterns:
+#   FEN-30: bounces=2  -> limit USED (2 dev<->review rounds), NOT a breach — report as "na granicy limitu"
+#   FEN-44: bounces=3  -> limit BROKEN (max 2) — should already be escalated; flag for Mateusz
+# retro separates the two; digest lists FEN-44 under blockers, FEN-30 under watch-list.
+# CADENCE_DRY_RUN=1 -> fixture, no API.
+```
 </examples>
 
 <final_reminders>

@@ -78,9 +78,7 @@ The result names both: `repo` and `repoFrom`. **Read them on the first spawn and
 ```
 node $LA_ROOT/scripts/supervisor-budget.mjs allocate --total <usd>
 ```
-It divides the total across stages from the `budget.shareHint` values in `config/graph.json` and enforces them per turn. **Stages do not borrow from each other** — the money reserved for verification is exactly what stops a run ending with work nobody checked. Skip this and only `LA_SUPERVISOR_MAX_COST_USD` applies, which is one number for the whole run and tells you too late.
-
-The two are ordered, not competing: `LA_SUPERVISOR_MAX_COST_USD` is the outer backstop, the stage split is the working control. Every refusal names which one it was.
+It divides the total across stages from the `budget.shareHint` values in `config/graph.json` and enforces them per turn; stages do not borrow from each other. `LA_SUPERVISOR_MAX_COST_USD` stays the outer backstop; every refusal names which control fired. Semantics: `<supervisor_budget>`.
 
 ### 4. Monitor — never busy-loop
 ```
@@ -158,10 +156,10 @@ WHY NOT EARLIER — `config/graph.json` has `review-to-dev-return` and `test-to-
 |---|---|
 | Child crash (exit ≠ 0) | Show the last 20 events. Ask: resume / respawn fresh / abandon. **Never silently retry.** |
 | Stalled child (in `stalledChildren`) | `supervisor-stop.mjs`, report the dirty git status it left, ask: resume / respawn / abandon. **Never auto-reset the worktree** — uncommitted work there may be the only copy. |
-| Stage budget exhausted | The refusal names the stage. It will **not** borrow — money left in verification is what stops the run ending with work nobody checked. Report what each stage has left and ask: raise the total (`budget allocate --total`), or authorise the reserve (`budget authorise --stage <s> --reason "..."`). Never work around it by unsetting a cap. |
+| Stage budget exhausted | The refusal names the stage. It will **not** borrow (see `<supervisor_budget>`). Report what each stage has left and ask: raise the total (`budget allocate --total`), or authorise the reserve (`budget authorise --stage <s> --reason "..."`). Never work around it by unsetting a cap. |
 | Reserve exhausted | Expansion stops and a **partial-status report** is written to `.state/supervisor/<run>/partial-status.json`. Read him its `unverified` list — those are the tasks money was already spent on that nobody has vouched for. Raising the total is his decision, not a retry. |
 | Spawn held (`held: true`) | **Not a failure.** The node is at its `concurrency` (config/graph.json) or its consumer is saturated. The request is on disk and starts with `supervisor-spawn.mjs --release` once a slot frees — you do not need to remember it. `reason` tells you which: `node-full` means wait; `consumer-saturated` means the graph is producing faster than it can verify, and adding capacity upstream makes that worse. |
-| Budget exceeded (`LA_SUPERVISOR_MAX_COST_USD`) | `spawn`/`followup` already refused — you cannot start another turn. Report the spend and the overshoot, ask whether to raise the cap or stop. The check is post-hoc at turn boundaries, so one turn can overshoot; say so rather than pretending the cap was exact. |
+| Budget exceeded (`LA_SUPERVISOR_MAX_COST_USD`) | `spawn`/`followup` already refused — you cannot start another turn. Report the spend and the overshoot, ask whether to raise the cap or stop. The check is post-hoc at turn boundaries; say so rather than pretending the cap was exact. |
 | Spend is UNKNOWN under a cap | A model has no price row. The refusal names it. Do not work around it by unsetting the cap — tell Mateusz which model needs pricing. |
 | Child asks something you cannot answer | Relay verbatim. Never invent an answer. |
 | REVIEW fails DEV | Record the verdict, then resume DEV with the findings (`--review-loop`), then re-review. **There is no round cap.** What refuses a resume is a REPEATED round — same diff, same failing tests as the one before. On that refusal: change strategy (different role or model, restore a checkpoint) or present **both positions** and let Mateusz decide, showing both fingerprints. A run that keeps MOVING may exceed two rounds; budget still bounds it. Never silently mark a failed review Done. Each re-entry asks: "starting from zero today, would we still pick this approach?" |
@@ -174,15 +172,7 @@ WHY NOT EARLIER — `config/graph.json` has `review-to-dev-return` and `test-to-
 
 `LA_SUPERVISOR_MAX_COST_USD` (unset = no cap, no behaviour change) caps **cumulative child cost in this run** — not your own tokens. It is enforced by `spawn` and `followup`, which refuse a new turn once it is reached.
 
-It is **post-hoc by construction**: a turn boundary is the only place it can be checked, so the turn already running may carry spend past the limit before anything notices. Report the overshoot as it is; do not round it away.
-
-Three ways it refuses, three different fixes:
-
-| Refusal | What it means |
-|---|---|
-| `budget spent: $X of $Y` | the cap is real and reached — ask Mateusz whether to raise it |
-| `spend so far is UNKNOWN` | a model has no price row in `config/models.json`; the error names it. A cap that cannot be evaluated is not a cap |
-| `is not a number >= 0` | a typo in the env var |
+It is **post-hoc by construction**: a turn boundary is the only place it can be checked, so the turn already running may carry spend past the limit before anything notices. Report the overshoot as it is; do not round it away. A refusal names its cause — cap reached (`budget spent: $X of $Y` → ask Mateusz whether to raise it), a model without a price row (`spend so far is UNKNOWN` → tell Mateusz which model needs pricing), or a typo in the env var. Do not work around any of them by unsetting the cap.
 
 **Where the cost number comes from:** token counts priced through `config/models.json`, the same path the dashboard uses. The stream's own `total_cost_usd` is recorded separately as `costUsdReported` and is **not** trusted — Claude Code computes it for models it does not recognise, and it is measurably wrong (FOC-165: $0.21 reported for a run on a $0 model). If the two diverge sharply, that is worth telling Mateusz, not smoothing over.
 

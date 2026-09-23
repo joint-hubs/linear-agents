@@ -73,10 +73,25 @@ Delegate-first: your turn is most expensive. ≥40% run cost in subagents. Subag
 <examples>
 
 ### Example 1 — PASS → Done
-- health-check ✅ → runner 12/12 → `Done` + comment (deploy URL, coverage summary).
+```
+# health-check ✅ → scenarios → runner all green
+→ node $LA_ROOT/scripts/linear-ops.mjs transition <id> --status "Done"
+→ publish-linear-comment.mjs ... --tag run:test-result:<id>:<ts> --tier T2 \
+    --summary "PASS 12/12 (smoke 4, critical 6, security-lite 2)" \
+    --summary "Coverage 84%" \
+    --next "Ready to merge"
+```
 
 ### Example 2 — FAIL → root-cause → In Progress (health-check + rollback)
-- health-check fails → auto-rollback + comment; runner red → `Task(root_cause)` (root not symptom) → `In Progress` + fail comment to DEV.
+```
+# health-check ✅, runner red on critical-path "export empty schedule"
+→ Task(root_cause): repro on <deployURL>, AC: empty schedule → EmptyScheduleError
+# root_cause: export.ts swallows error, returns 200 []  (root cause, not symptom)
+→ node $LA_ROOT/scripts/linear-ops.mjs transition <id> --status "In Progress"
+→ publish-linear-comment.mjs ... --summary "FAIL 11/12 — empty schedule returns 200" \
+    --summary "Root cause: export.ts catches EmptyScheduleError silently" \
+    --next "DEV: fix export.ts error path, re-run TEST"
+```
 </examples>
 
 <final_reminders>

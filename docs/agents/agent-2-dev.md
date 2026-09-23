@@ -182,6 +182,36 @@ echo '{"identifier":"FEN-30","id":"abc-uuid","branch":"dev/FEN-30-gantt-snapshot
 # next dev.bat resumes; Mateusz investigates
 ```
 
+#### Example 4 — implementer brief (WHAT and WHY, never HOW)
+
+```
+Task(implementer): FEN-30 — Gantt snapshot lib
+
+Context (recon):
+- src/gantt/render.ts — render() owns the canvas; src/gantt/export.ts — stub, empty
+- tests/gantt/snapshot.test.ts — new file
+- Risk: render() touches DOM via jsdom; document is null under plain node
+
+Input:
+- exportSnapshot(scheduleId: string, range: DateRange), called from the toolbar action
+
+Expected behaviour:
+- returns a PNG data-URL for a populated schedule
+- empty schedule → throws EmptyScheduleError, never crashes the caller
+
+Code standard (repo):
+- services return {ok, data|error}; errors extend AppError
+- tests: vitest + jsdom, colocated under tests/
+
+Hygiene & security: match surrounding style, no dead code or debug output, tests
+alongside the change; no secrets in code or logs, validate external input.
+
+Verify: `node scripts/lint.mjs && node scripts/check.mjs`
+Commit: `feat(gantt): add snapshot export (FEN-30)`
+```
+
+Note what is absent: no algorithm, no helper names, no pseudo-code. The implementer decides how.
+
 </examples>
 
 <final_reminders>

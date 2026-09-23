@@ -71,10 +71,26 @@ Delegate-first: your turn is most expensive. Only YOU write: ≤1-page brief at 
 <examples>
 
 ### Example 1 — GATE 1 HITL block until ✅
-- After discovery + DoR, lead presents brief + open Q inline, then STOP — no spec until Mateusz replies ✅.
+```
+# after discovery + DoR gate, lead presents inline:
+"Brief: Gantt snapshot lib — export PNG from schedule.
+ AC: exportSnapshot()→data-URL; empty schedule → EmptyScheduleError.
+ Open Q: PNG size cap at 10k events? Format PNG vs SVG?
+ Czekam na ✅ / odpowiedzi."
+# STOP. Do NOT advance to spec until Mateusz replies ✅ inline.
+# Under LA_SUPERVISOR=1 this block is a plan.gate1 record instead — see Supervised mode.
+```
 
 ### Example 2 — spec → spec-review → decompose flow, GATE 2 sync
 - spec (GLM) + ADR → spec_review (MiniMax, ≤2 loops) → decompose INVEST slices (3–15) → GATE 2 (show 2–3, wait ✅) → push idempotent.
+
+### Example 3 — DRY-RUN path stops at DRAFT
+```
+# PLAN_DRY_RUN=1, kickoff "dry-run"
+→ discovery (auto) → spec (auto) → spec-review (auto) → decompose
+→ decomposer writes planning/briefs/.draft.plan.gantt-snapshot-lib.json
+# lead stops. No push, no linear-ops. Mock ingests the draft.
+```
 </examples>
 
 <final_reminders>
