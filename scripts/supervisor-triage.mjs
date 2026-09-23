@@ -279,6 +279,26 @@ export function stateOf(issue) {
   return state.length > STATE_CAP ? state.slice(0, STATE_CAP) : state;
 }
 
+// The seam answers questions as TYPED records (decision-call.mjs normalizeAnswers:
+// noul → {type:"noul", noul:<p>}, choice → {type:"choice", choice:<label>},
+// score → {type:"score", score:<n>}), while everything downstream of intake
+// compares against primitives — verdict strings, size keys, squad-mapping keys.
+// The unwrap semantics are the plan-gates precedent (scripts/plan-gates.mjs
+// answerValueOf — not exported there, and this module must not import the whole
+// plan-gates chain for one helper), replicated here with identical semantics:
+// noul → its boolean verdict (p ≥ 0.5), choice → the label, score → the number,
+// a non-object → itself, anything else → null. FOC-513: pitting a raw record
+// against a string made every comparison disagree and printed "[object Object]";
+// a null unwrap is an INCOMPARABLE side — skipped, never invented into agreement.
+function answerValueOf(a) {
+  if (a === null || a === undefined) return null;
+  if (typeof a !== "object") return a;
+  if (a.type === "noul") return typeof a.noul === "number" ? a.noul >= 0.5 : null;
+  if (a.type === "choice") return typeof a.choice === "string" ? a.choice : null;
+  if (a.type === "score") return typeof a.score === "number" && Number.isFinite(a.score) ? a.score : null;
+  return null;
+}
+
 /**
  * Serve the three intake decisions and build the annotation record. A failed
  * decision (no API key, provider error, schema refusal) is recorded as
@@ -327,16 +347,27 @@ export async function buildIntake({ issue, graph, caller, runId = null, now = de
     }
   }
 
-  const seamTriage = decisions["intake.triage_node"].ok ? decisions["intake.triage_node"].answer : null;
+  // FOC-513: the stored answers keep the RAW typed records (fidelity — the
+  // FOC-449 join and any later re-read see the seam's exact shape); every
+  // comparison, lookup key and display below reads the unwrapped primitive.
+  const seamTriage = decisions["intake.triage_node"].ok
+    ? answerValueOf(decisions["intake.triage_node"].answer)
+    : null;
   const disagreement =
-    seamTriage && frontman.proposal && seamTriage !== frontman.proposal
+    seamTriage !== null && frontman.proposal != null && seamTriage !== frontman.proposal
       ? { decisionId: "intake.triage_node", seam: seamTriage, frontman: frontman.proposal }
       : null;
 
-  const size = decisions["intake.task_size"].ok ? decisions["intake.task_size"].answer : null;
+  const size = decisions["intake.task_size"].ok
+    ? answerValueOf(decisions["intake.task_size"].answer)
+    : null;
   let suggestedFlow = null;
   let flowReason = null;
-  if (size) {
+  // Null (no answer, or one that unwraps to nothing) is absent: no lookup, no
+  // reason, no disagreement. A boolean/score unwrapped from a malformed size
+  // answer still gets its lookup attempt — the failure names the unwrapped
+  // key, never the raw record.
+  if (size !== null) {
     const squads = graph?.intakeFlows?.[size];
     if (Array.isArray(squads)) suggestedFlow = { size, squads };
     else {
@@ -399,9 +430,13 @@ function intakeSummaryOf(intake, recordedSize) {
     };
   }
   const seamSize = intake?.decisions?.["intake.task_size"];
+  // FOC-513: the comparison — and the seam value this object stores — read the
+  // unwrapped primitive. Pitting the raw typed record against the recorded size
+  // string made equal values disagree and printed "[object Object]".
+  const seamSizeValue = seamSize?.ok ? answerValueOf(seamSize.answer) : null;
   const sizeDisagreement =
-    recordedSize && seamSize?.ok && seamSize.answer != null && seamSize.answer !== recordedSize
-      ? { seam: seamSize.answer, recorded: recordedSize }
+    recordedSize && seamSizeValue !== null && seamSizeValue !== recordedSize
+      ? { seam: seamSizeValue, recorded: recordedSize }
       : null;
   return {
     decisions,
@@ -681,12 +716,20 @@ function cmdRecord(args) {
 
   // A0 display: the seam's annotations are shown next to the recorded choice,
   // never auto-acted — the verdict proceeds regardless of what they say.
-  if (intakeView?.disagreement) {
-    // The recorded verdict is what this CLI was invoked with — never the
-    // frontman's deterministic proposal, which the disagreement field keeps
-    // for the record anyway.
+  // FOC-513: the triage line's trigger is the seam's UNWRAPPED answer vs the
+  // RECORDED verdict (args.verdict) — where the annotation and the actual
+  // decision diverge; the stored disagreement keeps the seam-vs-frontman view
+  // for the record. Interpolating the raw typed record printed
+  // "[object Object]".
+  const seamTriage = intakeView?.decisions?.["intake.triage_node"];
+  const seamTriageValue = seamTriage?.ok ? answerValueOf(seamTriage.answer) : null;
+  if (seamTriageValue !== null && seamTriageValue !== args.verdict) {
+    // The seam's stated confidence rides the line; a null one is omitted
+    // rather than printed as "(null)".
+    const c = seamTriage.confidence;
     console.error(
-      `[triage] A0 disagreement — seam ${intakeView.disagreement.decisionId} says "${intakeView.disagreement.seam}", ` +
+      `[triage] A0 disagreement — seam intake.triage_node says "${seamTriageValue}"` +
+        `${Number.isFinite(c) ? ` (${c})` : ""}, ` +
         `the recorded verdict is "${args.verdict}": displayed, never auto-acted`,
     );
   }
