@@ -70,6 +70,73 @@
       "failure": "escalate",
       "writes": "run-record"
     },
+    "plan.dod": {
+      "id": "plan.dod",
+      "kind": "G",
+      "owner": "plan node v2 (FOC-397 runner); DoD generator node FOC-474",
+      "hookPoint": "plan chain, after plan.dor — one bounded model call generating the Definition of Done, never a gate verdict (D7: only [J]/[D]/[H] decide gates)",
+      "autonomy": null,
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed — the chain stops at one typed failure record (failure stop), no unvalidated text flows to plan.spec; escalation policy is the runner's (FOC-397)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost"
+      ],
+      "criteriaVersion": 1,
+      "reads": [
+        "inbox.entry"
+      ],
+      "output": {
+        "type": "object",
+        "required": [
+          "definitionOfDone"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "definitionOfDone": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "required": [
+                "check",
+                "kind",
+                "bounded"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "check": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "kind": {
+                  "enum": [
+                    "test",
+                    "lint",
+                    "manual",
+                    "linear"
+                  ]
+                },
+                "bounded": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      },
+      "tier": "cheap",
+      "failure": "stop",
+      "writes": "run-record",
+      "prompt": "You generate the Definition of Done for one planning inbox entry. Work only from the declared inputs you are given — the issue title and the accepted scope summary the inbox entry carries; no repo tree, no telemetry, no prior runs, no Linear comments, and never the sibling generator's feature list (context size is a design output). Make exactly one model call with no tool loop. The DoD derives from the issue's own accepted scope: every item is a verifiable, bounded check on what THIS issue delivers — no invented scope, no feature the issue does not name, no estimates or counts. Use the repo's DoD conventions: a bounded checklist of 1 to 12 items, each item one verifiable statement of at most 200 characters, classified with kind — test (a named test or the suite that must pass), lint (the linter or a static check that must exit clean), manual (a human verification step) or linear (a Linear-side fact: labels, state transition, hand-off comment); set bounded true only when the check is machine-checkable as written. Recurring repo conventions are legitimate DoD substance where the scope implies them: the test suite green, lint exit 0, the docs state file updated, one commit carrying the issue id. Your output must validate against this entry's output schema — one object {definitionOfDone} whose items are {check, kind, bounded} — before anything downstream sees it; a schema-invalid or failed call stops the step fail-closed with one typed failure record, never partial data. Runs on the cheap tier."
+    },
     "plan.ac": {
       "id": "plan.ac",
       "kind": "G",
