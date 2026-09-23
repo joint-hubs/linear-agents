@@ -985,6 +985,203 @@ test("the A0 disagreement line states the RECORDED verdict, not the deterministi
   assert.match(r.stderr, /displayed, never auto-acted/);
 });
 
+// ── 9c. typed seam answers unwrap — the FOC-513 regression guard ─────────────
+console.log("\nintake — typed seam answers (FOC-513)");
+
+// The live seam answers as TYPED records (decision-call.mjs normalizeAnswers:
+// choice → {type:"choice", choice, confidence}, noul → {type:"noul", noul,
+// confidence}, score → {type:"score", score, confidence}). These stubs use that
+// exact shape for all three intake decisions, and the guard is simple: the
+// literal "[object Object]" must appear nowhere — not in intake.json, not in
+// triage.json, not on stderr — and every comparison/lookup must key on the
+// unwrapped primitive while the stored answers keep the raw records.
+const TYPED_ANSWERS = {
+  "intake.triage_node": { q0: { type: "choice", choice: "dev", confidence: 0.99 } },
+  "intake.has_acceptance_criteria": { q0: { type: "noul", noul: 1, confidence: 1 } },
+  "intake.task_size": { size: { type: "choice", choice: "medium", confidence: 0.95 } },
+};
+const typedCaller = (answers = TYPED_ANSWERS) => async ({ decisionId }) => ({
+  ok: true,
+  decisionId,
+  annotation: { answers: answers[decisionId], confidence: 0.9 },
+  eventId: `evt-${decisionId}`,
+});
+
+testAsync("typed answers unwrap: the flow lookup keys on the primitive, the stored answers stay raw", async () => {
+  const g = clone();
+  g.intakeFlows = { small: [], medium: ["dev", "test"], large: ["plan", "dev", "review", "test"] };
+  const { record } = await buildIntake({ issue: issue({ body: AC_BODY }), graph: g, caller: typedCaller() });
+  // Fidelity: decisions[].answer keeps the RAW typed records...
+  assert.deepEqual(record.decisions["intake.triage_node"].answer, TYPED_ANSWERS["intake.triage_node"].q0);
+  assert.deepEqual(record.decisions["intake.has_acceptance_criteria"].answer, TYPED_ANSWERS["intake.has_acceptance_criteria"].q0);
+  assert.deepEqual(record.decisions["intake.task_size"].answer, TYPED_ANSWERS["intake.task_size"].size);
+  // ...while every derived field carries the primitive.
+  assert.equal(record.size, "medium");
+  assert.deepEqual(record.suggestedFlow, { size: "medium", squads: ["dev", "test"] });
+  assert.equal(record.flowReason, undefined);
+  // Agreement is RECOGNIZED: a raw record vs the frontman string used to
+  // disagree unconditionally.
+  assert.equal(record.disagreement, null);
+  // The `intake` subcommand writes exactly this object to intake.json — no
+  // "[object Object]" may survive serialization anywhere in it.
+  assert.ok(!JSON.stringify(record).includes("[object Object]"), JSON.stringify(record));
+});
+
+testAsync("a typed answer absent from the mapping names the UNWRAPPED key in flowReason", async () => {
+  const g = clone();
+  g.intakeFlows = { small: [], medium: ["dev", "test"], large: ["plan", "dev", "review", "test"] };
+  const withSize = (sizeAnswer) => async ({ decisionId }) => ({
+    ok: true,
+    decisionId,
+    annotation: {
+      answers: decisionId === "intake.task_size" ? { size: sizeAnswer } : TYPED_ANSWERS[decisionId],
+      confidence: 0.9,
+    },
+    eventId: `evt-${decisionId}`,
+  });
+  // A choice label the mapping does not carry...
+  const colossal = await buildIntake({
+    issue: issue({ body: AC_BODY }), graph: g,
+    caller: withSize({ type: "choice", choice: "colossal", confidence: 0.9 }),
+  });
+  assert.equal(colossal.record.size, "colossal");
+  assert.equal(colossal.record.flowReason, 'no "colossal" entry in graph.intakeFlows');
+  // ...and a noul-shaped one, whose unwrapped key is its boolean verdict.
+  const noul = await buildIntake({
+    issue: issue({ body: AC_BODY }), graph: g,
+    caller: withSize({ type: "noul", noul: 0.9, confidence: 0.9 }),
+  });
+  assert.equal(noul.record.size, true);
+  assert.equal(noul.record.flowReason, 'no "true" entry in graph.intakeFlows');
+});
+
+testAsync("an answer that unwraps to nothing is absent — no lookup, no flowReason, no disagreement invented", async () => {
+  const g = clone();
+  g.intakeFlows = { small: [], medium: ["dev", "test"], large: ["plan", "dev", "review", "test"] };
+  const shapeless = async ({ decisionId }) => ({
+    ok: true,
+    decisionId,
+    annotation: { answers: { q0: { note: "no recognized answer type" } }, confidence: 0.9 },
+    eventId: `evt-${decisionId}`,
+  });
+  const { record } = await buildIntake({ issue: issue({ body: AC_BODY }), graph: g, caller: shapeless });
+  assert.equal(record.size, null);
+  assert.equal(record.suggestedFlow, undefined);
+  assert.equal(record.flowReason, undefined);
+  assert.equal(record.disagreement, null, "an incomparable seam side is skipped, never invented into agreement");
+});
+
+testAsync("a typed triage answer that disagrees with the frontman stores the unwrapped seam value", async () => {
+  const caller = async ({ decisionId }) => ({
+    ok: true,
+    decisionId,
+    annotation: {
+      answers: decisionId === "intake.triage_node"
+        ? { q0: { type: "choice", choice: "plan", confidence: 0.99 } }
+        : TYPED_ANSWERS[decisionId],
+      confidence: 0.9,
+    },
+    eventId: `evt-${decisionId}`,
+  });
+  const { record } = await buildIntake({ issue: issue({ body: AC_BODY }), graph: GRAPH, caller });
+  assert.deepEqual(record.disagreement, { decisionId: "intake.triage_node", seam: "plan", frontman: "dev" });
+  assert.deepEqual(record.decisions["intake.triage_node"].answer, { type: "choice", choice: "plan", confidence: 0.99 });
+});
+
+test("record's A0 lines read the unwrapped typed seam answers — [object Object] appears nowhere", () => {
+  const runId = withRun();
+  const dir = runDirOf(runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "intake.json"),
+    JSON.stringify({
+      issue: "FOC-999", createdAt: "2026-09-22T00:00:00.000Z", runId,
+      decisions: {
+        "intake.triage_node": { ok: true, answer: { type: "choice", choice: "plan", confidence: 0.99 }, confidence: 0.99, eventId: "evt-t" },
+        "intake.has_acceptance_criteria": { ok: true, answer: TYPED_ANSWERS["intake.has_acceptance_criteria"].q0, confidence: 1, eventId: "evt-a" },
+        "intake.task_size": { ok: true, answer: { type: "choice", choice: "small", confidence: 0.9 }, confidence: 0.9, eventId: "evt-s" },
+      },
+      frontman: { proposal: "dev", node: "dev", confidence: "high" },
+      disagreement: { decisionId: "intake.triage_node", seam: "plan", frontman: "dev" },
+      size: "small",
+    }),
+    "utf8",
+  );
+  const r = run([
+    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85",
+    "--size", "large", "--run", runId,
+  ]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  // The triage line: a genuine seam-vs-recorded-verdict difference, named with
+  // the seam's confidence in the parenthetical.
+  assert.match(r.stderr, /A0 disagreement — seam intake\.triage_node says "plan" \(0\.99\), the recorded verdict is "dev"/);
+  // The size line: unwrapped seam value vs the recorded size.
+  assert.match(r.stderr, /A0 disagreement — seam intake\.task_size says "small", the recorded size is "large"/);
+  assert.ok(!r.stderr.includes("[object Object]"), r.stderr);
+  const raw = readFileSync(join(dir, "triage.json"), "utf8");
+  assert.ok(!raw.includes("[object Object]"), raw);
+  const rec = JSON.parse(raw);
+  // Fidelity: the embedded summary keeps the raw typed records...
+  assert.deepEqual(rec.intake.decisions["intake.triage_node"].answer, { type: "choice", choice: "plan", confidence: 0.99 });
+  // ...while the size disagreement stores the unwrapped seam value.
+  assert.deepEqual(rec.intake.sizeDisagreement, { seam: "small", recorded: "large" });
+});
+
+test("the A0 triage line omits a null seam confidence rather than printing (null)", () => {
+  const runId = withRun();
+  const dir = runDirOf(runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "intake.json"),
+    JSON.stringify({
+      issue: "FOC-999", createdAt: "2026-09-22T00:00:00.000Z", runId,
+      decisions: {
+        "intake.triage_node": { ok: true, answer: { type: "choice", choice: "plan", confidence: null }, confidence: null, eventId: "evt-t" },
+      },
+      frontman: { proposal: "dev", node: "dev", confidence: "high" },
+      disagreement: { decisionId: "intake.triage_node", seam: "plan", frontman: "dev" },
+      size: null,
+    }),
+    "utf8",
+  );
+  const r = run(["record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--run", runId]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stderr, /seam intake\.triage_node says "plan", the recorded verdict is "dev"/);
+  assert.ok(!/\(null\)/.test(r.stderr), r.stderr);
+});
+
+test("seam-vs-recorded agreement fires no A0 line, even with a stored disagreement", () => {
+  // The stored disagreement is the seam-vs-frontman view; the record-time line
+  // is the seam-vs-recorded one. The seam said "dev" and "medium", and that is
+  // exactly what was recorded — nothing to display.
+  const runId = withRun();
+  const dir = runDirOf(runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "intake.json"),
+    JSON.stringify({
+      issue: "FOC-999", createdAt: "2026-09-22T00:00:00.000Z", runId,
+      decisions: {
+        "intake.triage_node": { ok: true, answer: TYPED_ANSWERS["intake.triage_node"].q0, confidence: 0.99, eventId: "evt-t" },
+        "intake.task_size": { ok: true, answer: TYPED_ANSWERS["intake.task_size"].size, confidence: 0.95, eventId: "evt-s" },
+      },
+      frontman: { proposal: "plan", node: "plan", confidence: "low" },
+      disagreement: { decisionId: "intake.triage_node", seam: "dev", frontman: "plan" },
+      size: "medium",
+    }),
+    "utf8",
+  );
+  const r = run([
+    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85",
+    "--size", "medium", "--run", runId,
+  ]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok(!/A0 disagreement/.test(r.stderr), r.stderr);
+  const rec = JSON.parse(readFileSync(join(dir, "triage.json"), "utf8"));
+  assert.equal(rec.intake.sizeDisagreement, undefined, "equal sizes → no sizeDisagreement invented");
+  assert.deepEqual(rec.intake.disagreement, { decisionId: "intake.triage_node", seam: "dev", frontman: "plan" }, "the stored seam-vs-frontman view rides untouched");
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 (async () => {
   for (const { name, fn } of asyncTests) {
