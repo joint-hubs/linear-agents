@@ -1,6 +1,6 @@
 @echo off
 REM ---------------------------------------------------------------------------
-REM Orchestrator on OpenRouter - Claude Code with openai/gpt-6-astra as the strategist
+REM Orchestrator on OpenRouter - Claude Code with xiaomi/mimo-v2.6-pro as the strategist
 REM and DeepSeek in the haiku slot as the worker.
 REM
 REM Moved from %LOCALAPPDATA%\hermes\scripts\orchestrate-openrouter.bat
@@ -34,8 +34,8 @@ popd
 
 set PROFILE=%1
 if "%PROFILE%"=="" set PROFILE=flash
-if /i "%PROFILE%"=="flash"   set WORKER=deepseek/deepseek-v4-flash
-if /i "%PROFILE%"=="pro"     set WORKER=deepseek/deepseek-v4-pro
+if /i "%PROFILE%"=="flash"   set WORKER=z-ai/glm-5.3-flash
+if /i "%PROFILE%"=="pro"     set WORKER=z-ai/glm-5.3-flash
 if /i "%PROFILE%"=="minimax" set WORKER=minimax/minimax-m3
 if "%WORKER%"=="" (
     echo [orchestrate-openrouter] Unknown profile "%PROFILE%". Use: flash ^| pro ^| minimax
@@ -68,14 +68,14 @@ set "RUN_ID="
 if exist "%ROOT%\scripts\run-manifest.mjs" for /f "delims=" %%i in ('node "%ROOT%\scripts\run-manifest.mjs" gen-id orch-openrouter 2^>nul') do set "RUN_ID=%%i"
 if defined RUN_ID node "%ROOT%\scripts\run-manifest.mjs" start "%RUN_ID%" orch-openrouter "%CD%" >nul 2>&1
 
-echo [orchestrate-openrouter] orchestrator = openai/gpt-6-astra (OpenRouter)
+echo [orchestrate-openrouter] orchestrator = xiaomi/mimo-v2.6-pro (OpenRouter)
 echo [orchestrate-openrouter] worker (haiku slot) = %WORKER%
 echo [orchestrate-openrouter] working dir = %CD%
 echo [orchestrate-openrouter] CLAUDE_CONFIG_DIR = %CLAUDE_CONFIG_DIR%
 if defined RUN_ID echo [orchestrate-openrouter] run = %RUN_ID%
 echo.
 
-claude --model openai/gpt-6-astra --mcp-config "%ROOT%\config\atlas-mcp.json" --append-system-prompt "ORCHESTRATION MODE: you PLAN, delegate, and approve. You do NOT read or write code yourself - your context is only for planning and integration. FIRST for ANY task: spawn a DeepSeek Flash worker (agent_spawn model=flash, cwd=repo) to explore the code and return a COMPACT summary (key files, signatures, where things live; max ~200 lines, no changes) - NEVER open large files yourself. Plan from that summary; ASK the user when unclear before delegating. Delegate ALL code to Flash, even tiny changes - never write feature code yourself; cut into the SMALLEST chunks, run on PARALLEL Flash workers (agent_spawn xN). Every worker instruction must be complete, precise, token-dense (min tokens, max info). Pro reviews Flash; escalate Flash->Pro->Sonnet->Opus. FINAL APPROVAL IS ALWAYS YOURS: integrate and test the whole before done. Atlas bridge sonnet/opus route to real Anthropic. Reason by Descartes' 4 rules: evidence (no guessing/haste), divide, order by dependency, full review. Read memory/orchestration.md first."
+claude --model xiaomi/mimo-v2.6-pro --mcp-config "%ROOT%\config\atlas-mcp.json" --append-system-prompt "ORCHESTRATION MODE: you PLAN, delegate, and approve. You do NOT read or write code yourself - your context is only for planning and integration. FIRST for ANY task: spawn a DeepSeek Flash worker (agent_spawn model=flash, cwd=repo) to explore the code and return a COMPACT summary (key files, signatures, where things live; max ~200 lines, no changes) - NEVER open large files yourself. Plan from that summary; ASK the user when unclear before delegating. Delegate ALL code to Flash, even tiny changes - never write feature code yourself; cut into the SMALLEST chunks, run on PARALLEL Flash workers (agent_spawn xN). Every worker instruction must be complete, precise, token-dense (min tokens, max info). Pro reviews Flash; escalate Flash->Pro->Sonnet->Opus. FINAL APPROVAL IS ALWAYS YOURS: integrate and test the whole before done. Atlas bridge sonnet/opus route to real Anthropic. Reason by Descartes' 4 rules: evidence (no guessing/haste), divide, order by dependency, full review. Read memory/orchestration.md first."
 
 set "EXIT_CODE=%errorlevel%"
 if defined RUN_ID node "%ROOT%\scripts\run-manifest.mjs" end "%RUN_ID%" %EXIT_CODE% >nul 2>&1
