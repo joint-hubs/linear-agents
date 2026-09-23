@@ -95,6 +95,29 @@ const root = join(__dir, "..");
 const TIER_SEAM = 1;
 const TIER_FRONTMAN = 3;
 
+// The handed-off record extras shared by runJStep ([J] steps) and decideEdge —
+// both stop on the same A0/frontman contract, so both build the same typed
+// payload rather than two hand-rolled copies that drift apart.
+function handOffFields(stepId, envelope) {
+  if (envelope.ok) {
+    return {
+      stepId,
+      reason: "A0 — annotation recorded, decision handed to the frontman (never auto-acted; threshold null)",
+      annotation: envelope.annotation,
+      // FOC-451: the shadow event's id — the join key for the FOC-449 label
+      // the frontman later records against this decision.
+      eventId: envelope.eventId ?? null,
+      tier: TIER_SEAM,
+    };
+  }
+  return {
+    stepId,
+    reason: "cascade exhausted — tier 2 is disabled (FOC-473), tier 3 = frontman",
+    error: envelope.error,
+    tier: TIER_FRONTMAN,
+  };
+}
+
 // Terminal statuses: a run that stops on one stays stopped on resume —
 // recovering is the frontman's decision, never the runner's initiative.
 const TERMINAL_STATUSES = new Set(["failed", "gate-rejected"]);
@@ -102,6 +125,9 @@ const TERMINAL_STATUSES = new Set(["failed", "gate-rejected"]);
 // The statuses that WAIT for an external actor: handed-off and gate-pending
 // steps resolve through a <key>.resolution record.
 const WAITING_STATUSES = new Set(["handed-off", "gate-pending"]);
+
+// FOC-474 eval — 7/12 calls timed out at 120 s, 12/12 succeeded at 300 s with a max of 299.2 s; 420 s leaves headroom.
+export const G_TIMEOUT_MS = 420000;
 
 // ── runner-built questions (FOC-397) ─────────────────────────────────────────
 // plan.dor and plan.decompose carry no registry question set — the runner
@@ -336,7 +362,7 @@ export function createDefaultGenerator({
   taskKey = process.env.LA_TASK_ID ?? null,
   shadowDir = runId ? join(root, ".state", "runs", runId) : null,
   fetchImpl = fetch,
-  timeoutMs = 120000,
+  timeoutMs = G_TIMEOUT_MS,
   now = () => new Date().toISOString(),
 } = {}) {
   return async function generate({ stepId, step, reads }) {
@@ -614,20 +640,7 @@ export function createGraphRunner({
     } catch (err) {
       return failRecord(stepId, errorOf(err, "caller threw"));
     }
-    if (envelope.ok) {
-      return stepRecord(runId, now, stepId, "handed-off", {
-        stepId,
-        reason: "A0 — annotation recorded, decision handed to the frontman (never auto-acted; threshold null)",
-        annotation: envelope.annotation,
-        tier: TIER_SEAM,
-      });
-    }
-    return stepRecord(runId, now, stepId, "handed-off", {
-      stepId,
-      reason: "cascade exhausted — tier 2 is disabled (FOC-473), tier 3 = frontman",
-      error: envelope.error,
-      tier: TIER_FRONTMAN,
-    });
+    return stepRecord(runId, now, stepId, "handed-off", handOffFields(stepId, envelope));
   }
 
   // [G] — one schema-validated model call; the runner validates whatever the
@@ -754,22 +767,7 @@ export function createGraphRunner({
       store.append(rec);
       return { status: "stopped", stepId: key, record: rec };
     }
-    const rec = envelope.ok
-      ? stepRecord(runId, now, key, "handed-off", {
-          stepId: registryId,
-          reason: "A0 — annotation recorded, decision handed to the frontman (never auto-acted; threshold null)",
-          annotation: envelope.annotation,
-          // FOC-451: the shadow event's id — the join key for the FOC-449 label
-          // the frontman later records against this decision.
-          eventId: envelope.eventId ?? null,
-          tier: TIER_SEAM,
-        })
-      : stepRecord(runId, now, key, "handed-off", {
-          stepId: registryId,
-          reason: "cascade exhausted — tier 2 is disabled (FOC-473), tier 3 = frontman",
-          error: envelope.error,
-          tier: TIER_FRONTMAN,
-        });
+    const rec = stepRecord(runId, now, key, "handed-off", handOffFields(registryId, envelope));
     store.append(rec);
     return { status: "handed-off", record: rec };
   }
@@ -868,8 +866,11 @@ function parseValue(raw, flagName) {
   }
 }
 
-function createLiveCaller() {
-  return createDecisionCaller({ apiKey: process.env.OPENROUTER_API_KEY });
+// The seam logs its event lines under the run it is given; without the
+// explicit runId the [J] events key to an ambient LA_RUN_ID instead of the
+// CLI's --run-id.
+export function createLiveCaller({ runId, apiKey = process.env.OPENROUTER_API_KEY, create = createDecisionCaller } = {}) {
+  return create({ apiKey, runId });
 }
 
 async function main() {
@@ -890,7 +891,7 @@ async function main() {
   const runner = createGraphRunner({
     runId,
     storePath: flag("store"),
-    caller: createLiveCaller(),
+    caller: createLiveCaller({ runId }),
     generator: createDefaultGenerator({ apiKey: process.env.OPENROUTER_API_KEY, runId }),
   });
 
