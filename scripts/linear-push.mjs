@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { idempotentCreate } from "./utils.mjs";
 import { loadEnv, chooseApiKey, graphql, resolveTeam } from "./linear-client.mjs";
+import { assertEgressClean } from "./egress-screen.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -236,6 +237,16 @@ async function reconcileAfterTransient(input) {
  * @returns {Promise<string>} The created (or reconciled) issue id.
  */
 async function createIssue(input, kind, externalId) {
+  // Egress screen (FOC-450): title and description are outbound text. Screen
+  // BEFORE the try block — the catch below dumps the full input to stderr, and
+  // the screen's refusal must not hand it the secret it just found. Parent and
+  // subtask creation both funnel through here, so one screen covers both.
+  if (typeof input.title === "string") {
+    assertEgressClean(input.title, `${kind || "issue"} title`);
+  }
+  if (typeof input.description === "string") {
+    assertEgressClean(input.description, `${kind || "issue"} description`);
+  }
   try {
     const d = await graphql(ISSUE_CREATE_MUTATION, { input });
     const issue = d.issueCreate.issue;

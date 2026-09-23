@@ -25,6 +25,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { loadEnv, graphql, resolveTeam, resolveIssue } from "./linear-client.mjs";
+import { assertEgressClean } from "./egress-screen.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -481,6 +482,9 @@ async function handleComment(identifier, args, dryRunCtx) {
       process.exit(2);
     }
 
+    // Egress screen (FOC-450): a dry-run echo lands in logs — screen it too.
+    assertEgressClean(body, "comment body (--dry-run)");
+
     if (args.dedupTag) {
       const marker = `<!-- run:${args.dedupTag} -->`;
       body = `${marker}\n${body}`;
@@ -491,9 +495,9 @@ async function handleComment(identifier, args, dryRunCtx) {
     return;
   }
 
-  const { issue } = await resolveIssueWithTeam(identifier);
-
-  // Resolve body
+  // Resolve body FIRST (before the network) so the egress screen can block
+  // before any call — the dedup check below queries the API, and the mutation
+  // would carry the body.
   let body;
   if (args.body && args.bodyFile) {
     console.error("Error: provide --body OR --body-file, not both");
@@ -512,6 +516,11 @@ async function handleComment(identifier, args, dryRunCtx) {
     console.error("Error: --body <text> or --body-file <path> is required for comment");
     process.exit(2);
   }
+
+  // Egress screen (FOC-450): fail closed before any network call.
+  assertEgressClean(body, "comment body");
+
+  const { issue } = await resolveIssueWithTeam(identifier);
 
   // Dedup check
   if (args.dedupTag) {
@@ -576,21 +585,28 @@ async function handleComment(identifier, args, dryRunCtx) {
 
 /** Resolve --body / --body-file into a string, exiting on bad usage. */
 function readBodyArg(args, cmdName) {
+  let body;
   if (args.body && args.bodyFile) {
     console.error("Error: provide --body OR --body-file, not both");
     process.exit(2);
   }
-  if (args.body) return args.body;
-  if (args.bodyFile) {
+  if (args.body) {
+    body = args.body;
+  } else if (args.bodyFile) {
     try {
-      return readFileSync(args.bodyFile, "utf8");
+      body = readFileSync(args.bodyFile, "utf8");
     } catch (err) {
       console.error(`Error reading --body-file "${args.bodyFile}": ${err.message}`);
       process.exit(1);
     }
+  } else {
+    console.error(`Error: --body <text> or --body-file <path> is required for ${cmdName}`);
+    process.exit(2);
   }
-  console.error(`Error: --body <text> or --body-file <path> is required for ${cmdName}`);
-  process.exit(2);
+  // Egress screen (FOC-450): one chokepoint covers comment-replace,
+  // update-description and create-child bodies — all resolve through here.
+  assertEgressClean(body, `${cmdName} body`);
+  return body;
 }
 
 // ---------------------------------------------------------------------------
@@ -770,6 +786,8 @@ async function handleCreateChild(identifier, args, dryRunCtx) {
     console.error("Error: --title <text> is required for create-child");
     process.exit(2);
   }
+  // Egress screen (FOC-450): the title is outbound text too.
+  assertEgressClean(args.title, "create-child title");
   const body = readBodyArg(args, "create-child");
 
   const { issue: parent, teamId } = await resolveIssueWithTeam(identifier);
