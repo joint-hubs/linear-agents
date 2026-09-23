@@ -2,7 +2,7 @@
   "_doc": {
     "what": "Decision & node registry (FOC-448) — one typed place per model-made judgment and per v2 graph-node step. Graph-node entries carry the ADR-0012 D7 contract copied verbatim from docs/plans/graph-json-v2-design.md §3.1–§3.9 (a config/graph.json v2 step object stays exactly-D7 and copies reads/output/tier/failure/writes from here); transport entries carry the question set their call-site sends to the decision-call seam.",
     "consumers": "scripts/decision-registry.mjs (loader: validates every entry, lookup by id, question resolution + template instantiation), scripts/decision-call.mjs (decisionId lookups + the A0 annotation rule + runner-built-question governance), scripts/mcp/steps.mjs (FOC-401 question templates), scripts/graph-runner.mjs (FOC-397: [J] steps and decide edges by registry id).",
-    "autonomy": "A0 = the entry produces a model-made judgment whose A0-ENFORCED channel (the decision-call seam decisionId path) serves it as an annotation only — no caller field can request action semantics. Seed A0 entries: gate.screen (supervisor-fixed), extraction, prompt-refinement, plan.dor, plan.decompose, and the six decide-edge entries (intake.triage_node, intake.has_acceptance_criteria, intake.task_size, review.depth, orchestration.next_step, monitor.child_state). Start posture, stated honestly: nothing calibrated (thresholds null; FOC-387 has not run); the runner (FOC-397) serves plan.dor/plan.decompose and the decide edges through the seam's A0-enforced decisionId channel; extraction and prompt-refinement are served by the built FOC-401 step servers routed through the seam's inline channel since FOC-397 — their code programmatically acts on answers inside the tool boundary, that built boundary is declared per path in the serving field and is gated to FOC-387. null = not an autonomy-managed decision, and the encoding is structural: autonomy is null IFF kind is one of G, A, H, D (node configs — the [G] generator node per the roadmap note, the [A] agent node gated by plan.gate1, the [H] human gates, the [D] deterministic node — are step configuration, not decisions), while kind J requires autonomy in {A0, A1, A2} (AC1's autonomy list binds decision entries). A1/A2 are evidence-backed promotions granted by Mateusz (FOC-387 calibration), never self-granted.",
+    "autonomy": "A0 = the entry produces a model-made judgment whose A0-ENFORCED channel (the decision-call seam decisionId path) serves it as an annotation only — no caller field can request action semantics. Seed A0 entries: gate.screen (supervisor-fixed), extraction, prompt-refinement, plan.dor, plan.decompose, the ten FOC-452 PLAN gate entries, and the six decide-edge entries (intake.triage_node, intake.has_acceptance_criteria, intake.task_size, review.depth, orchestration.next_step, monitor.child_state). Start posture, stated honestly: nothing calibrated (thresholds null; FOC-387 has not run); the runner (FOC-397) serves plan.dor/plan.decompose and the decide edges through the seam's A0-enforced decisionId channel; extraction and prompt-refinement are served by the built FOC-401 step servers routed through the seam's inline channel since FOC-397 — their code programmatically acts on answers inside the tool boundary, that built boundary is declared per path in the serving field and is gated to FOC-387. null = not an autonomy-managed decision, and the encoding is structural: autonomy is null IFF kind is one of G, A, H, D (node configs — the [G] generator node per the roadmap note, the [A] agent node gated by plan.gate1, the [H] human gates, the [D] deterministic node — are step configuration, not decisions), while kind J requires autonomy in {A0, A1, A2} (AC1's autonomy list binds decision entries). A1/A2 are evidence-backed promotions granted by Mateusz (FOC-387 calibration), never self-granted.",
     "serving": "Machine-readable serving scope, required and NON-EMPTY on kind-J entries (FOC-397: an entry nothing serves must not sit in the registry, and every path that serves it in code must appear here). One record per serving path: via = the channel; actsOnAnswers = this path, as built today, programmatically consumes answers into operative output; a0Enforced = this path returns the A0 annotation-only shape, loader-enforced (true only on the seam decisionId channel); gate = the FOC that owns bringing the path under A0 governance — REQUIRED whenever actsOnAnswers=true && a0Enforced=false. Schema cross-rules: kind J ⇒ serving present and non-empty; kind != J ⇒ serving forbidden; a0Enforced ⇒ via is the seam; via \"seam\" ⇒ a0Enforced (the name is reserved for the enforced decisionId channel — the seam's inline channel is \"seam (inline)\"); a0Enforced ⇒ autonomy A0; autonomy A0 ⇒ every declared path is a0Enforced or names a gate.",
     "threshold": "null in every seed entry — FOC-387 writes calibration rows; never invent numbers.",
     "fallback": "tier2 is \"disabled\" in every entry while scripts/decision-call.mjs FALLBACK_MODEL is null (FOC-473): a tier-1 failure goes fail-closed to the relay/HITL path, or escalates where the entry's D7 failure field says so. Tier-2 is never claimed live; the registry test enforces the correspondence with the shipped constant.",
@@ -803,6 +803,385 @@
             "stuck": "no progress signal within the stall window — flag it",
             "working": "progressing normally — leave it alone",
             "waiting": "blocked on a human or an external answer"
+          }
+        }
+      }
+    },
+    "plan.dor.criteria_testable": {
+      "id": "plan.dor.criteria_testable",
+      "kind": "J",
+      "owner": "FOC-452 PLAN gate (DoR rubric, MAP §3A #3); judgment today: the PLAN squad's readiness check at chain entry",
+      "hookPoint": "PLAN chain entry, the DoR checkpoint — served through the seam decisionId channel; A0 annotation only, never an action; plan.ready (FOC-476) consumes the answers + confidence",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "q0": {
+          "type": "noul",
+          "instructions": "DoR criterion 1 of 3 (MAP §3A #3): are the acceptance criteria concrete and testable — statements of what done looks like that a reviewer could check the work against? Judge from the task text alone.",
+          "criteria": {
+            "true": "the acceptance criteria are concrete and testable",
+            "false": "the acceptance criteria are missing, vague or unverifiable"
+          }
+        }
+      }
+    },
+    "plan.dor.scope_clear": {
+      "id": "plan.dor.scope_clear",
+      "kind": "J",
+      "owner": "FOC-452 PLAN gate (DoR rubric, MAP §3A #3); judgment today: the PLAN squad's readiness check at chain entry",
+      "hookPoint": "PLAN chain entry, the DoR checkpoint — served through the seam decisionId channel; A0 annotation only, never an action; plan.ready (FOC-476) consumes the answers + confidence",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "q0": {
+          "type": "noul",
+          "instructions": "DoR criterion 2 of 3 (MAP §3A #3): is the scope clear and bounded — could a reviewer say what this task does NOT cover? Judge from the task text alone.",
+          "criteria": {
+            "true": "the scope is clear and bounded",
+            "false": "the scope is open-ended, mixed or unstated"
+          }
+        }
+      }
+    },
+    "plan.dor.context_sufficient": {
+      "id": "plan.dor.context_sufficient",
+      "kind": "J",
+      "owner": "FOC-452 PLAN gate (DoR rubric, MAP §3A #3); judgment today: the PLAN squad's readiness check at chain entry",
+      "hookPoint": "PLAN chain entry, the DoR checkpoint — served through the seam decisionId channel; A0 annotation only, never an action; plan.ready (FOC-476) consumes the answers + confidence",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "q0": {
+          "type": "noul",
+          "instructions": "DoR criterion 3 of 3 (MAP §3A #3): is there enough context to start — the inputs, constraints and access a developer needs are present or reachable? Judge from the task text alone.",
+          "criteria": {
+            "true": "enough context to start without guessing",
+            "false": "key inputs, constraints or access are missing"
+          }
+        }
+      }
+    },
+    "plan.labels.type": {
+      "id": "plan.labels.type",
+      "kind": "J",
+      "owner": "FOC-452 PLAN label gate (MAP §3A #4); option set pinned to the type group of config/linear/labels.json",
+      "hookPoint": "PLAN node, when the squad applies its labels — served through the seam decisionId channel; A0 annotation only, never an action; a seam/applied disagreement is displayed, never auto-acted",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "q0": {
+          "type": "choice",
+          "instructions": "Label gate (MAP §3A #4): which type:* label does this task carry? The options are the type group of config/linear/labels.json, verbatim.",
+          "criteria": {
+            "feature": "a new user-facing capability",
+            "bug": "something built is broken — fix an existing behaviour",
+            "spike": "research/decision — output is an ADR, no deploy, timeboxed",
+            "tech": "tech-debt/refactor/infra — technical success criteria, no user AC",
+            "docs": "documentation work (README/ADR/docs)",
+            "test": "test authoring/automation",
+            "chore": "maintenance/cleanup (non-feature)"
+          }
+        }
+      }
+    },
+    "plan.labels.risk": {
+      "id": "plan.labels.risk",
+      "kind": "J",
+      "owner": "FOC-452 PLAN label gate (MAP §3A #4); option set = the risk group of config/linear/labels.json ({high}) plus an explicit none — a choice needs both answers representable",
+      "hookPoint": "PLAN node, when the squad applies its labels — served through the seam decisionId channel; A0 annotation only, never an action; a seam/applied disagreement is displayed, never auto-acted",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "q0": {
+          "type": "choice",
+          "instructions": "Label gate (MAP §3A #4): is this a risky change? The config risk group defines only risk:high — its silence is the other answer, spelled out here as \"none\".",
+          "criteria": {
+            "high": "a risky change — gets the risk:high label and a deeper review",
+            "none": "no risk label — the change is not flagged risky"
+          }
+        }
+      }
+    },
+    "plan.estimate": {
+      "id": "plan.estimate",
+      "kind": "J",
+      "owner": "FOC-452 PLAN label gate (MAP §3A #4); anchors are the t-shirt scale of config/linear/labels.json nativeFields.estimate",
+      "hookPoint": "PLAN node, when the squad applies its labels — served through the seam decisionId channel; A0 annotation only, never an action; a seam/applied disagreement is displayed, never auto-acted",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "q0": {
+          "type": "score",
+          "instructions": "Label gate (MAP §3A #4): score the task size on the t-shirt scale — reply 0 = XS, 1 = S, 2 = M, 3 = L, 4 = XL; XL means re-decompose before any squad picks the task up.",
+          "criteria": {
+            "XS": "trivial — a one-file tweak with no test surface",
+            "S": "small — one bounded change with its tests",
+            "M": "medium — a standard feature slice",
+            "L": "large — multi-part work that needs decomposition",
+            "XL": "extra-large — re-decompose first (labels.json nativeFields.estimate)"
+          }
+        }
+      }
+    },
+    "plan.needs_adr": {
+      "id": "plan.needs_adr",
+      "kind": "J",
+      "owner": "FOC-452 PLAN gate (MAP §3A #4); judgment today: the PLAN squad's ADR call at planning time",
+      "hookPoint": "PLAN node, when the squad applies its labels — served through the seam decisionId channel; A0 annotation only, never an action; a seam/applied disagreement is displayed, never auto-acted",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "q0": {
+          "type": "noul",
+          "instructions": "Does this change need an ADR — an architecture decision with alternatives worth recording, not implementation detail inside an existing decision?",
+          "criteria": {
+            "true": "an ADR is warranted",
+            "false": "no ADR — the change stays inside decisions already recorded"
+          }
+        }
+      }
+    },
+    "plan.security_sensitive": {
+      "id": "plan.security_sensitive",
+      "kind": "J",
+      "owner": "FOC-452 PLAN gate (MAP §3A #4); judgment today: the PLAN squad's security-sensitivity call at planning time",
+      "hookPoint": "PLAN node, when the squad applies its labels — served through the seam decisionId channel; A0 annotation only, never an action; a seam/applied disagreement is displayed, never auto-acted",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "q0": {
+          "type": "noul",
+          "instructions": "Is this task security-sensitive — touching auth, secrets, permissions, untrusted input or anything where least privilege applies?",
+          "criteria": {
+            "true": "security-sensitive — flag it for the security sweep",
+            "false": "no security-sensitive surface"
+          }
+        }
+      }
+    },
+    "plan.duplicate_of": {
+      "id": "plan.duplicate_of",
+      "kind": "J",
+      "owner": "FOC-452 PLAN gate (MAP §3A #5); candidates are chosen by code at serve time (Linear search is the runtime caller's concern) — the entry carries only the per-candidate template",
+      "hookPoint": "PLAN node, before decomposition — served through the seam decisionId channel with per-candidate questions instantiated via the registry loader; A0 annotation only, never an action",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "cand{i}": {
+          "type": "choice",
+          "instructions": "Duplicate/relation check (MAP §3A #5): how does this task relate to candidate issue \"{{title}}\" ({{key}})? Judge only against the candidates injected at serve time.",
+          "criteria": {
+            "duplicate": "the same work — this task duplicates the candidate",
+            "related": "different work that depends on or extends the candidate",
+            "distinct": "unrelated work"
+          }
+        }
+      }
+    },
+    "plan.ac.testable": {
+      "id": "plan.ac.testable",
+      "kind": "J",
+      "owner": "FOC-452 PLAN gate — one testability judgment per acceptance criterion; the AC list is serve-time input (FOC-475 owns the real plan.ac consumer; fixture instances until then)",
+      "hookPoint": "PLAN node, after the criteria are drafted — served through the seam decisionId channel with per-criterion questions instantiated via the registry loader; A0 annotation only, never an action",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "ac{i}": {
+          "type": "noul",
+          "instructions": "Per-criterion testability (MAP §3A #3): is acceptance criterion {{id}} concrete and testable? Criterion: \"{{text}}\". Answer true only if a reviewer could check the delivered work against it as written.",
+          "criteria": {
+            "true": "concrete and checkable as written",
+            "false": "vague, unmeasurable or unverifiable as written"
           }
         }
       }

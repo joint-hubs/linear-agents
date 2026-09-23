@@ -13,9 +13,10 @@
 //
 // Run: node scripts/decisions-registry.test.mjs
 
-import { writeFileSync, rmSync, mkdtempSync } from "node:fs";
+import { writeFileSync, readFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
 import {
   loadRegistry, getRegistryEntry, resolveEntryQuestions, instantiateEntryQuestions,
@@ -23,6 +24,8 @@ import {
 } from "./decision-registry.mjs";
 import { DECISION_STEP, FALLBACK_MODEL } from "./decision-call.mjs";
 import { TypedError } from "./mcp/envelope.mjs";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Hermetic by construction: a test run must never write telemetry.
 delete process.env.LA_RUN_ID;
@@ -77,15 +80,22 @@ const QUESTION_VALIDATE = new Ajv().compile(QUESTION_SCHEMA);
 const SEED_IDS = [
   "plan.dor", "plan.ac", "plan.spec", "plan.gate1", "plan.decompose",
   "plan.gate2", "plan.push", "gate.screen", "extraction", "prompt-refinement",
-  // The five FOC-397 decide-edge entries (graph decisionEdges bindings) plus
-  // the FOC-451 DoR intake gate, bound the same way.
+  // The six FOC-397 decide-edge entries (graph decisionEdges bindings), the
+  // FOC-451 DoR intake gate bound the same way, and the ten FOC-452 PLAN gate
+  // entries (seam-served transports with NO decide-edge binding and no tier).
   "intake.triage_node", "intake.has_acceptance_criteria", "intake.task_size", "review.depth",
   "orchestration.next_step", "monitor.child_state",
+  "plan.dor.criteria_testable", "plan.dor.scope_clear", "plan.dor.context_sufficient",
+  "plan.labels.type", "plan.labels.risk", "plan.estimate",
+  "plan.needs_adr", "plan.security_sensitive", "plan.duplicate_of", "plan.ac.testable",
 ];
 const NODE_IDS = SEED_IDS.slice(0, 7);
 // The decide-edge bindings (config/graph.json decisionEdges): kind-J transport
 // entries that additionally pin their cascade ladder start (tier {cascade, min}).
-const DECIDE_EDGE_IDS = SEED_IDS.slice(10);
+const DECIDE_EDGE_IDS = SEED_IDS.slice(10, 16);
+// The FOC-452 PLAN gate entries: seam-served A0 transports that are NOT decide
+// edges — no graph.json binding, no tier pin.
+const PLAN_GATE_IDS = SEED_IDS.slice(16);
 const TRANSPORT_IDS = SEED_IDS.slice(7);
 // OUT of scope per the FOC-448 contract — they enter when their owners land.
 const OUT_OF_SCOPE = ["egress.contains_secret", "test.failure.cause"];
@@ -95,6 +105,9 @@ const AUTONOMY_MAP = {
   "gate.screen": "A0", "extraction": "A0", "prompt-refinement": "A0",
   "intake.triage_node": "A0", "intake.has_acceptance_criteria": "A0", "intake.task_size": "A0", "review.depth": "A0",
   "orchestration.next_step": "A0", "monitor.child_state": "A0",
+  "plan.dor.criteria_testable": "A0", "plan.dor.scope_clear": "A0", "plan.dor.context_sufficient": "A0",
+  "plan.labels.type": "A0", "plan.labels.risk": "A0", "plan.estimate": "A0",
+  "plan.needs_adr": "A0", "plan.security_sensitive": "A0", "plan.duplicate_of": "A0", "plan.ac.testable": "A0",
 };
 const METRICS_BY_ID = {
   "plan.dor": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
@@ -107,6 +120,16 @@ const METRICS_BY_ID = {
   "plan.gate1": [],
   "plan.gate2": [],
   "plan.push": [],
+  "plan.dor.criteria_testable": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.dor.scope_clear": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.dor.context_sufficient": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.labels.type": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.labels.risk": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.estimate": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.needs_adr": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.security_sensitive": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.duplicate_of": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.ac.testable": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
 };
 for (const id of DECIDE_EDGE_IDS) {
   METRICS_BY_ID[id] = ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"];
@@ -124,7 +147,7 @@ await test("registry loads, passes REGISTRY_SCHEMA directly, and carries _doc + 
   eq(Object.keys(entries).length, SEED_IDS.length, "entry count");
 });
 
-await test("the seed set is exactly the sixteen contracted ids", () => {
+await test("the seed set is exactly the twenty-six contracted ids", () => {
   deepEq([...Object.keys(entries)].sort(), [...SEED_IDS].sort(), "id set");
 });
 
@@ -163,7 +186,8 @@ console.log("\ndecisions-registry: serving scope + structural autonomy (review r
 // A0-enforced decisionId channel (loader rule); the step servers' inline
 // channel names itself "seam (inline)" and stays the declared boundary gated
 // to FOC-387. plan.dor / plan.decompose gained their real seam serving with
-// FOC-397, as did the decide edges (FOC-451 added the DoR intake gate).
+// FOC-397, as did the decide edges (FOC-451 added the DoR intake gate); the
+// FOC-452 PLAN gates serve the same enforced channel.
 const SEAM_SERVING = [{ via: "seam", actsOnAnswers: false, a0Enforced: true }];
 const SERVING_BY_ID = {
   extraction: [{ via: "seam (inline)", actsOnAnswers: true, a0Enforced: false, gate: "FOC-387" }],
@@ -177,6 +201,16 @@ const SERVING_BY_ID = {
   "review.depth": SEAM_SERVING,
   "orchestration.next_step": SEAM_SERVING,
   "monitor.child_state": SEAM_SERVING,
+  "plan.dor.criteria_testable": SEAM_SERVING,
+  "plan.dor.scope_clear": SEAM_SERVING,
+  "plan.dor.context_sufficient": SEAM_SERVING,
+  "plan.labels.type": SEAM_SERVING,
+  "plan.labels.risk": SEAM_SERVING,
+  "plan.estimate": SEAM_SERVING,
+  "plan.needs_adr": SEAM_SERVING,
+  "plan.security_sensitive": SEAM_SERVING,
+  "plan.duplicate_of": SEAM_SERVING,
+  "plan.ac.testable": SEAM_SERVING,
 };
 
 await test("serving is pinned per kind-J entry: enforced seam paths + the declared inline boundary", () => {
@@ -279,6 +313,93 @@ await test("decide-edge entries pin the cascade ladder and exactly one question 
     const q = e.questions[qids[0]];
     eq(q.type, QTYPE[id], `question type of ${id}`);
     deepEq(Object.keys(q.criteria), CRITERIA[id], `criteria labels of ${id}`);
+  }
+});
+
+console.log("\ndecisions-registry: FOC-452 PLAN gate entries (registry-served PLAN decisions)");
+
+await test("the PLAN gates are A0 seam transports with no tier pin and no D7 fields", () => {
+  for (const id of PLAN_GATE_IDS) {
+    const e = entries[id];
+    eq(e.kind, "J", `kind of ${id}`);
+    eq(e.autonomy, "A0", `autonomy of ${id}`);
+    eq(e.threshold, null, `threshold of ${id}`);
+    deepEq(e.serving, SEAM_SERVING, `serving of ${id}`);
+    for (const field of ["reads", "output", "failure", "writes", "prompt", "tier"]) {
+      if (e[field] !== undefined) fail(`${id}: a PLAN gate is not a decide edge — it must not carry ${field}`);
+    }
+    eq(Object.keys(e.questions).length, 1, `one question on ${id}`);
+  }
+});
+
+await test("the DoR trio and the boolean label gates are noul questions with true/false criteria", () => {
+  const NOULS = [
+    "plan.dor.criteria_testable", "plan.dor.scope_clear", "plan.dor.context_sufficient",
+    "plan.needs_adr", "plan.security_sensitive",
+  ];
+  for (const id of NOULS) {
+    const q = entries[id].questions.q0;
+    eq(q.type, "noul", `type of ${id}`);
+    deepEq(Object.keys(q.criteria), ["true", "false"], `criteria of ${id}`);
+  }
+  if (!entries["plan.dor.criteria_testable"].questions.q0.instructions.includes("testable")) {
+    fail("the DoR question asks what MAP §3A #3 asks: are the criteria concrete and testable");
+  }
+});
+
+await test("plan.labels.type options are the type group of config/linear/labels.json, verbatim (anti-drift)", () => {
+  const labels = JSON.parse(readFileSync(join(__dirname, "..", "config", "linear", "labels.json"), "utf8"));
+  const q = entries["plan.labels.type"].questions.q0;
+  eq(q.type, "choice", "type");
+  deepEq(Object.keys(q.criteria), labels.groups.type.labels, "criteria labels == the config type group");
+});
+
+await test("plan.labels.risk pins the config risk group plus the explicit none", () => {
+  const labels = JSON.parse(readFileSync(join(__dirname, "..", "config", "linear", "labels.json"), "utf8"));
+  const q = entries["plan.labels.risk"].questions.q0;
+  eq(q.type, "choice", "type");
+  // The config risk group defines exactly {high}; a choice question needs the
+  // "no label" answer representable, so the entry adds an explicit "none" —
+  // the group's silence is the other answer. This extension is CHOSEN and
+  // reported in the FOC-452 hand-off, not silently inherited.
+  deepEq(Object.keys(q.criteria), [...labels.groups.risk.labels, "none"], "criteria labels");
+});
+
+await test("plan.estimate is a score over the t-shirt anchors of labels.json", () => {
+  const q = entries["plan.estimate"].questions.q0;
+  eq(q.type, "score", "type");
+  deepEq(Object.keys(q.criteria), ["XS", "S", "M", "L", "XL"], "size anchors");
+  for (const needle of ["0 = XS", "4 = XL", "re-decompose"]) {
+    if (!q.instructions.includes(needle)) fail(`instructions should carry "${needle}"`);
+  }
+});
+
+await test("the two per-instance PLAN gates are templates; the eight concrete gates resolve", () => {
+  deepEq(Object.keys(entries["plan.duplicate_of"].questions), ["cand{i}"], "duplicate template key");
+  deepEq(Object.keys(entries["plan.ac.testable"].questions), ["ac{i}"], "ac template key");
+  throwsCode(() => resolveEntryQuestions("plan.duplicate_of"), "invalid_input", "instantiate via the registry loader");
+  throwsCode(() => resolveEntryQuestions("plan.ac.testable"), "invalid_input", "instantiate via the registry loader");
+
+  const dup = instantiateEntryQuestions("plan.duplicate_of", [{ key: "FEN-10", title: "Gantt snapshot lib" }]);
+  deepEq(Object.keys(dup), ["cand0"], "candidate fan-out");
+  if (!dup.cand0.instructions.includes("Gantt snapshot lib") || !dup.cand0.instructions.includes("FEN-10")) {
+    fail("candidate title/key substituted into the instructions");
+  }
+  deepEq(Object.keys(dup.cand0.criteria), ["duplicate", "related", "distinct"], "relation criteria");
+
+  const ac = instantiateEntryQuestions("plan.ac.testable", [{ id: "AC-1", text: "returns a PNG data-URL" }]);
+  deepEq(Object.keys(ac), ["ac0"], "ac fan-out");
+  eq(ac.ac0.type, "noul", "ac type");
+  if (!ac.ac0.instructions.includes("AC-1") || !ac.ac0.instructions.includes("returns a PNG data-URL")) {
+    fail("criterion id/text substituted into the instructions");
+  }
+
+  const concrete = PLAN_GATE_IDS.filter((id) => id !== "plan.duplicate_of" && id !== "plan.ac.testable");
+  eq(concrete.length, 8, "eight concrete gates");
+  for (const id of concrete) {
+    const resolved = resolveEntryQuestions(id);
+    eq(resolved.autonomy, "A0", `autonomy of ${id}`);
+    eq(resolved.criteriaVersion, 1, `criteriaVersion of ${id}`);
   }
 });
 
