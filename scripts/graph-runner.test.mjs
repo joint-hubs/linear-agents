@@ -22,7 +22,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { createGraphRunner } from "./graph-runner.mjs";
+import { createGraphRunner, createLiveCaller, G_TIMEOUT_MS } from "./graph-runner.mjs";
 
 let passed = 0;
 const failures = [];
@@ -590,6 +590,49 @@ await test("an unknown decision edge throws typed invalid_input with no record",
     eqCode(err, "invalid_input", "unknown edge");
   }
   eq(existsSync(storePath), false, "nothing recorded for an unknown edge");
+});
+
+console.log("\ngraph-runner: FOC-518 — eventId on handed-off [J] records, live-caller run context, [G] timeout");
+
+await test("plan.dor handed-off record carries the seam's eventId when the envelope supplies one", async () => {
+  const { storePath } = tempStore();
+  const runner = makeRunner({
+    caller: async () => ({ ...a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } }), eventId: "evt-1" }),
+    generator: async () => ({}),
+    gateEmitter: async () => ({}),
+    linearEffect: async () => ({}),
+    storePath,
+  });
+  const result = await runner.run({ inputs: RUN_INPUTS });
+  eq(result.status, "stopped", "run stops at plan.dor");
+  eq(result.record.status, "handed-off", "handed-off record");
+  eq(result.record.eventId, "evt-1", "eventId is the FOC-451 join key, carried through");
+});
+
+await test("plan.dor handed-off record carries eventId null when the envelope has none", async () => {
+  const { storePath } = tempStore();
+  const runner = makeRunner({
+    caller: async () => a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } }),
+    generator: async () => ({}),
+    gateEmitter: async () => ({}),
+    linearEffect: async () => ({}),
+    storePath,
+  });
+  const result = await runner.run({ inputs: RUN_INPUTS });
+  eq(result.record.status, "handed-off", "handed-off record");
+  eq(result.record.eventId, null, "absent eventId normalizes to null");
+});
+
+await test("createLiveCaller passes the run id explicitly (the [J] events key to the CLI's --run-id)", () => {
+  const calls = [];
+  const spy = (opts) => { calls.push(opts); return "caller"; };
+  const out = createLiveCaller({ runId: "run-x", apiKey: "k", create: spy });
+  eq(out, "caller", "returns the created caller");
+  deepEq(calls, [{ apiKey: "k", runId: "run-x" }], "runId forwarded explicitly, not ambient");
+});
+
+await test("G_TIMEOUT_MS is 420 s (FOC-474: 120 s timed out on 7/12 eval calls)", () => {
+  eq(G_TIMEOUT_MS, 420000, "default [G] timeout");
 });
 
 console.log("\ngraph-runner: CLI (typed envelope, no network)");

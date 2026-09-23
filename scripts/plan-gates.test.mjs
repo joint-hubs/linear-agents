@@ -389,13 +389,16 @@ testAsync("a throwing caller fails that decision closed (typed record + warning)
   assert.match(warning, /plan\.labels\.type failed closed \(error\)/);
 });
 
-testAsync("a state over the seam's 16000-char cap is truncated, never refused (supervisor-triage precedent)", async () => {
-  const { stub, warnings } = await serveAll({ args: { state: "x".repeat(20000) } });
-  assert.equal(warnings.length, 0, JSON.stringify(warnings));
+testAsync("a state over the seam's 16000-char cap is truncated, never refused, and the cut is visible on the record", async () => {
+  const { stub, record, warnings } = await serveAll({ args: { state: "x".repeat(20000) } });
+  assert.equal(warnings.length, 1, JSON.stringify(warnings));
+  assert.match(warnings[0], /state truncated from 20000 to 16000/);
+  assert.deepEqual(record.truncation, { field: "state", originalLength: 20000, keptLength: 16000 });
   assert.equal(stub.calls.length, 10, "all ten gates still serve");
   for (const call of stub.calls) assert.equal(call.state.length, 16000, "every call rides the capped state");
-  const { stub: short } = await serveAll();
+  const { stub: short, record: shortRecord } = await serveAll();
   assert.equal(short.calls[0].state, STATE, "an under-cap state passes through untouched");
+  assert.equal("truncation" in shortRecord, false, "an under-cap run records no truncation");
 });
 
 testAsync("bad arguments fail closed before any call (identity, state, caller)", async () => {

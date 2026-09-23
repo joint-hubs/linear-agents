@@ -78,7 +78,8 @@ const INSTANCE_CAP = 12;
 // The seam's state schema (DECISION_STEP.inputSchema) caps state at 16000
 // chars — a longer issue body is truncated, never refused: an annotation over
 // a truncated body beats no annotation, and the cap is the schema's, not ours
-// (the supervisor-triage.mjs precedent).
+// (the supervisor-triage.mjs precedent). The cut is never silent: it is
+// recorded on the record (truncation) and as a warning.
 const STATE_CAP = 16000;
 
 const defaultNow = () => new Date().toISOString();
@@ -144,12 +145,18 @@ export async function buildPlanGates({ issue, state, caller, candidates = [], ac
 
   // The seam's schema caps state at 16000 chars — truncate, never refuse
   // (supervisor-triage precedent): an annotation over a truncated body beats
-  // no annotation.
+  // no annotation. The cut is visible, never silent — recorded on the record
+  // (truncation) and as a warning, so a partial view of the issue is never
+  // mistaken for a full one.
   const stateText = state.slice(0, STATE_CAP);
 
   const decisions = {};
   const warnings = [];
   const record = { issue, createdAt: now(), runId, decisions };
+  if (state.length > STATE_CAP) {
+    record.truncation = { field: "state", originalLength: state.length, keptLength: STATE_CAP };
+    warnings.push(`state truncated from ${state.length} to ${STATE_CAP} chars (seam cap) — the annotations saw only the first ${STATE_CAP}`);
+  }
 
   // Every failure — a refused shape, a provider error, a throwing caller —
   // lands in the per-decision record (fail-closed, visible) instead of
