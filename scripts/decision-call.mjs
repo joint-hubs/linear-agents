@@ -106,7 +106,7 @@ import Ajv from "ajv";
 import { runDecision, TypedError } from "./mcp/envelope.mjs";
 import { scrub, scrubMask } from "./mcp/scrub.mjs";
 import { createJevProvider, JEV_MODEL, probabilityOf, choiceOf, confidenceOf } from "./mcp/provider-jev.mjs";
-import { getRegistryEntry, resolveEntryQuestions } from "./decision-registry.mjs";
+import { getRegistryEntry, resolveEntryQuestions, instantiateEntryQuestions } from "./decision-registry.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -213,17 +213,24 @@ export const DECISION_STEP = {
       state: { type: "string", minLength: 1, maxLength: 16000 },
       questions: { type: "object", minProperties: 1, maxProperties: 12, additionalProperties: QUESTION_SCHEMA },
       decisionId: { type: "string", minLength: 1, maxLength: 200 },
+      // Serve-time var records for a registry-owned TEMPLATE entry (FOC-452):
+      // the caller passes data, never question text — the seam instantiates
+      // the entry's templates itself and the registry stays the one owner of
+      // the words the model is asked. One instance ⇒ one fanned-out question,
+      // so the array is capped at the same 12 the question set is.
+      instances: { type: "array", minItems: 1, maxItems: 12, items: { type: "object" } },
     },
-    // Exactly one questions source: inline, a registry entry (FOC-448), or —
-    // for a graph-node entry carrying no question set of its own (plan.dor,
-    // plan.decompose) — runner-built questions under the registry id (FOC-397):
-    // the id governs autonomy/provenance, the question text comes from the
-    // caller. Whether the pair is allowed is the entry's shape, checked at
-    // resolution below, not in this schema.
+    // Exactly one questions source per call: inline; a registry entry
+    // (FOC-448); runner-built questions under the registry id of a graph-node
+    // entry carrying no question set of its own (FOC-397); or the instances
+    // the seam instantiates a transport entry's question templates over
+    // (FOC-452). Whether a pairing is allowed is the entry's shape, checked
+    // at resolution below, not in this schema.
     anyOf: [
-      { required: ["questions"], not: { required: ["decisionId"] } },
-      { required: ["decisionId"], not: { required: ["questions"] } },
-      { required: ["decisionId", "questions"] },
+      { required: ["questions"], not: { anyOf: [{ required: ["decisionId"] }, { required: ["instances"] }] } },
+      { required: ["decisionId"], not: { anyOf: [{ required: ["questions"] }, { required: ["instances"] }] } },
+      { required: ["decisionId", "questions"], not: { required: ["instances"] } },
+      { required: ["decisionId", "instances"], not: { required: ["questions"] } },
     ],
   },
   outputSchema: {
@@ -611,6 +618,30 @@ export function createDecisionCaller({
           preProviderFailure = err instanceof TypedError
             ? err
             : new TypedError("provider_error", `decision registry lookup failed: ${scrub(err?.message || "unknown error")}`);
+        }
+      } else if (input.instances !== undefined) {
+        // Serve-time instances over a registry-owned template entry (FOC-452):
+        // the caller passes var records ({key, title}, {id, text}, …) and the
+        // seam instantiates the entry's templates itself — the registry keeps
+        // sole ownership of the question text, the caller only feeds data. A
+        // non-template entry has nothing to instantiate over — fail closed
+        // rather than silently ignoring the instances.
+        try {
+          const entry = getRegistryEntry(input.decisionId);
+          const templateKey = Object.keys(entry.questions ?? {}).find((k) => k.includes("{i}"));
+          if (!templateKey) {
+            preProviderFailure = new TypedError(
+              "invalid_input",
+              `decision "${input.decisionId}" carries no question templates — instances are only for template entries`,
+            );
+          } else {
+            registry = { decisionId: input.decisionId, autonomy: entry.autonomy, criteriaVersion: entry.criteriaVersion };
+            effective = { state: input.state, questions: instantiateEntryQuestions(input.decisionId, input.instances) };
+          }
+        } catch (err) {
+          preProviderFailure = err instanceof TypedError
+            ? err
+            : new TypedError("provider_error", `decision template instantiation failed: ${scrub(err?.message || "unknown error")}`);
         }
       } else {
         try {

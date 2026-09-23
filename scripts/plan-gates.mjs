@@ -17,11 +17,13 @@
 // and recordable, never auto-acted — the applied labels stay the PLAN
 // squad's call.
 //
-// Two entries are per-instance templates served through the seam's third
-// call shape {state, decisionId, questions}:
+// Two entries are per-instance templates served through the seam's instances
+// shape {state, decisionId, instances} (FOC-452): the caller passes the var
+// records and the SEAM instantiates the registry-owned templates — question
+// text is never built here.
 //   · plan.duplicate_of — one choice question per candidate issue; the
 //     candidate list ({key, title} records, chosen by code at serve time)
-//     is injected here and instantiated via the registry loader;
+//     is injected here;
 //   · plan.ac.testable — one noul per acceptance criterion; the AC list
 //     ({id, text}) is injected the same way (FOC-475 owns the real
 //     plan.ac consumer; fixture instances until then).
@@ -42,7 +44,6 @@ import { readFileSync } from "node:fs";
 
 import { SHADOW_EVENT_TYPE } from "./decision-call.mjs";
 import { autoLabel, findEventFile } from "./decision-log.mjs";
-import { instantiateEntryQuestions } from "./decision-registry.mjs";
 
 // The ten PLAN gate decision ids, in serve order: DoR readiness first, then
 // the label gates, then the duplicate check and the per-criterion testability.
@@ -73,6 +74,12 @@ const TSHIRT_SIZES = ["XS", "S", "M", "L", "XL"];
 // one question per instance, so an injected list cannot exceed it. Checked
 // here for a clear message instead of a seam roundtrip.
 const INSTANCE_CAP = 12;
+
+// The seam's state schema (DECISION_STEP.inputSchema) caps state at 16000
+// chars — a longer issue body is truncated, never refused: an annotation over
+// a truncated body beats no annotation, and the cap is the schema's, not ours
+// (the supervisor-triage.mjs precedent).
+const STATE_CAP = 16000;
 
 const defaultNow = () => new Date().toISOString();
 
@@ -135,18 +142,23 @@ export async function buildPlanGates({ issue, state, caller, candidates = [], ac
   assertInstances("candidates", candidates, ["key", "title"]);
   assertInstances("acs", acs, ["id", "text"]);
 
+  // The seam's schema caps state at 16000 chars — truncate, never refuse
+  // (supervisor-triage precedent): an annotation over a truncated body beats
+  // no annotation.
+  const stateText = state.slice(0, STATE_CAP);
+
   const decisions = {};
   const warnings = [];
   const record = { issue, createdAt: now(), runId, decisions };
 
-  // questionsOf is a thunk so a template-instantiation failure lands in the
-  // per-decision record (fail-closed, visible) instead of aborting the serve.
-  const serve = async (decisionId, questionsOf = null) => {
+  // Every failure — a refused shape, a provider error, a throwing caller —
+  // lands in the per-decision record (fail-closed, visible) instead of
+  // aborting the serve.
+  const serve = async (decisionId, instances = null) => {
     try {
-      const questions = questionsOf ? questionsOf() : undefined;
-      const envelope = questions
-        ? await caller({ state, decisionId, questions })
-        : await caller({ state, decisionId });
+      const envelope = instances
+        ? await caller({ state: stateText, decisionId, instances })
+        : await caller({ state: stateText, decisionId });
       if (!envelope.ok) {
         decisions[decisionId] = {
           ok: false,
@@ -194,7 +206,7 @@ export async function buildPlanGates({ issue, state, caller, candidates = [], ac
         warnings.push("plan.duplicate_of skipped — no candidates injected");
         continue;
       }
-      await serve(decisionId, () => instantiateEntryQuestions(decisionId, candidates));
+      await serve(decisionId, candidates);
       continue;
     }
     if (decisionId === "plan.ac.testable") {
@@ -203,7 +215,7 @@ export async function buildPlanGates({ issue, state, caller, candidates = [], ac
         warnings.push("plan.ac.testable skipped — no acceptance criteria injected");
         continue;
       }
-      await serve(decisionId, () => instantiateEntryQuestions(decisionId, acs));
+      await serve(decisionId, acs);
       continue;
     }
     await serve(decisionId);
@@ -308,8 +320,8 @@ function outcomeFor(decisionId, applied) {
  * warning: an outcome must never be joined to another issue's decision
  * event, however the record came to carry it. Fail-closed on the pairing,
  * best-effort by contract — a failed label (unknown event, unwritable log)
- * is a warning, never a broken plan run. No eventId or no applied value →
- * nothing labelled for that decision.
+ * is a warning, never a broken plan run. A failed decision, a missing eventId
+ * or a missing applied value → nothing labelled for that decision.
  */
 export function labelAppliedPlan({ record, applied, issue, runsDir } = {}) {
   if (typeof issue !== "string" || !issue.trim()) {
@@ -325,6 +337,12 @@ export function labelAppliedPlan({ record, applied, issue, runsDir } = {}) {
     const outcome = outcomeFor(decisionId, applied);
     if (outcome === null) continue;
     const d = decisions[decisionId];
+    // A FAILED decision never produced an answer PLAN applied — whatever the
+    // applied value is, it did not come from this event, so there is no
+    // honest tie-back. (Diverges from the supervisor-triage.mjs precedent,
+    // which labels a failed call's eventId too; that file's owner decides
+    // separately.)
+    if (!d?.ok) continue;
     if (!d?.eventId) continue;
     let taskKey = null;
     try {

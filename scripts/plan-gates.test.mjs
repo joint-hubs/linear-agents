@@ -3,11 +3,15 @@
 //
 // Three things are worth failing a build over here.
 //
-// 1. THE QUESTIONS COME FROM THE REGISTRY. The fixed gates resolve by id, the
-//    per-instance gates (plan.duplicate_of, plan.ac.testable) instantiate
-//    through the loader and ride the seam's third call shape — no inline
-//    question text anywhere, and the injected serve-time inputs (candidates,
-//    ACs) are validated before any call.
+// 1. THE QUESTIONS COME FROM THE REGISTRY. The fixed gates resolve by id; the
+//    per-instance gates (plan.duplicate_of, plan.ac.testable) pass RAW
+//    instance records ({key, title}, {id, text}) and the SEAM instantiates
+//    the registry-owned templates over them — question text is never built
+//    by the caller. The stub models the seam's validation faithfully (it
+//    consults the real registry and the real loader), and two tests drive
+//    the REAL seam (createDecisionCaller) end to end: the round-1 reviewer
+//    probe (inline questions on a template entry → invalid_input) and the
+//    fixed serve path through the real contract, instantiation included.
 //
 // 2. A0 HOLDS. The seam's annotations (answers + confidence + eventId) are
 //    recorded verbatim and DISPLAYED; a seam/applied disagreement is shown,
@@ -16,39 +20,31 @@
 // 3. OUTCOMES JOIN ONLY THEIR OWN EVENTS. An applied label becomes a FOC-449
 //    label tied to the exact eventId its decision call carried — and only
 //    when the event's taskKey IS this issue. A cross-issue outcome is
-//    refused, loudly, before any write.
+//    refused, loudly, before any write; a FAILED decision collects nothing
+//    (it never produced an answer PLAN applied).
 //
 // Run: node scripts/plan-gates.test.mjs
 
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
+import { createDecisionCaller } from "./decision-call.mjs";
+import { getRegistryEntry, instantiateEntryQuestions, resolveEntryQuestions } from "./decision-registry.mjs";
 import { buildPlanGates, disagreementsOf, displayPlanGates, labelAppliedPlan, PLAN_DECISIONS } from "./plan-gates.mjs";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+// Hermetic by construction: a test run must never write telemetry or shadow
+// lines outside the temp dir (decision-call.test.mjs pattern).
+delete process.env.LA_RUN_ID;
 
 let passed = 0;
 const failures = [];
 const asyncTests = [];
 
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  PASS ${name}`);
-  } catch (err) {
-    failures.push(name);
-    const at = String(err.stack ?? "").split("\n").find((l) => l.includes("plan-gates.test.mjs:")) ?? "";
-    console.log(`  FAIL ${name}\n       ${err.message}\n       ${at.trim()}`);
-  }
-}
 function testAsync(name, fn) {
   asyncTests.push({ name, fn });
 }
-const fail = (msg) => { throw new Error(msg); };
 
 const tmp = mkdtempSync(join(tmpdir(), "la-plan-gates-test-"));
 process.on("exit", () => { try { rmSync(tmp, { recursive: true, force: true }); } catch {} });
@@ -56,25 +52,69 @@ process.on("exit", () => { try { rmSync(tmp, { recursive: true, force: true }); 
 const STATE = "Title: Gantt snapshot lib\n\nExport the schedule as a PNG.";
 const RUN_ID = "test-plan-gates";
 
-// The seam is stubbed at the exact contract buildPlanGates consumes: a
-// registry call ({state, decisionId} or {state, decisionId, questions})
-// answered with the A0 envelope — typed answers inside the annotation,
-// confidence, eventId. No network, no key, ever.
-const FIXED_ANSWERS = {
-  "plan.dor.criteria_testable": { q0: { type: "noul", noul: 1, confidence: 0.9 } },
-  "plan.dor.scope_clear": { q0: { type: "noul", noul: 1, confidence: 0.9 } },
-  "plan.dor.context_sufficient": { q0: { type: "noul", noul: 0, confidence: 0.9 } },
-  "plan.labels.type": { q0: { type: "choice", choice: "feature", confidence: 0.9 } },
-  "plan.labels.risk": { q0: { type: "choice", choice: "none", confidence: 0.9 } },
-  "plan.estimate": { q0: { type: "score", score: 2, confidence: null } },
-  "plan.needs_adr": { q0: { type: "noul", noul: 0, confidence: 0.9 } },
-  "plan.security_sensitive": { q0: { type: "noul", noul: 0, confidence: 0.9 } },
+// The stub models the REAL seam's validation faithfully — the same branch
+// structure createDecisionCaller.callDecisions runs, over the REAL registry:
+//   · inline questions + an entry carrying its own question set → invalid_input
+//     (the round-1 blocker: plan-gates must NEVER send this shape);
+//   · instances + a non-template entry → invalid_input;
+//   · a plain decisionId on a template entry → invalid_input (the loader
+//     refuses half-resolved templates);
+//   · instances + a template entry → instantiated via the REAL loader.
+// Answers are typed records exactly like normalizeAnswers emits. No network,
+// no key, ever.
+const NOUL_BY_ID = {
+  "plan.dor.criteria_testable": 1,
+  "plan.dor.scope_clear": 1,
+  "plan.dor.context_sufficient": 0,
+  "plan.needs_adr": 0,
+  "plan.security_sensitive": 0,
 };
+const CHOICE_BY_ID = { "plan.labels.type": "feature", "plan.labels.risk": "none" };
 
 function stubCaller({ overrides = {}, failIds = [] } = {}) {
   const calls = [];
+  const resolved = [];
+  const shapeRefusal = (input, code, message) => ({
+    ok: false,
+    decisionId: input.decisionId ?? null,
+    error: { code, message },
+    eventId: input.decisionId ? `evt-${input.decisionId}` : null,
+  });
   const caller = async (input) => {
     calls.push(input);
+    if (input.questions !== undefined && input.instances !== undefined) {
+      return shapeRefusal(input, "invalid_input", "questions and instances are mutually exclusive");
+    }
+    if (input.instances !== undefined && input.decisionId === undefined) {
+      return shapeRefusal(input, "invalid_input", "instances require a decisionId");
+    }
+    if (input.decisionId === undefined) {
+      return shapeRefusal(input, "invalid_input", "this stub serves registry-backed calls only");
+    }
+    const entry = getRegistryEntry(input.decisionId);
+    let questions;
+    if (input.questions !== undefined) {
+      if (entry.questions !== undefined) {
+        return shapeRefusal(
+          input,
+          "invalid_input",
+          `decision "${input.decisionId}" carries its own question set — inline questions and that decisionId are mutually exclusive`,
+        );
+      }
+      questions = input.questions;
+    } else if (input.instances !== undefined) {
+      if (!Object.keys(entry.questions ?? {}).some((k) => k.includes("{i}"))) {
+        return shapeRefusal(
+          input,
+          "invalid_input",
+          `decision "${input.decisionId}" carries no question templates — instances are only for template entries`,
+        );
+      }
+      questions = instantiateEntryQuestions(input.decisionId, input.instances);
+    } else {
+      questions = resolveEntryQuestions(input.decisionId).questions;
+    }
+    resolved.push({ decisionId: input.decisionId, questions });
     if (failIds.includes(input.decisionId)) {
       return {
         ok: false,
@@ -83,17 +123,14 @@ function stubCaller({ overrides = {}, failIds = [] } = {}) {
         eventId: `evt-${input.decisionId}`,
       };
     }
-    let answers = FIXED_ANSWERS[input.decisionId];
-    if (input.questions) {
-      answers = Object.fromEntries(
-        Object.keys(input.questions).map((k, i) => [
-          k,
-          k.startsWith("cand")
-            ? { type: "choice", choice: i === 1 ? "duplicate" : "related", confidence: 0.8 }
-            : { type: "noul", noul: i % 2 === 0 ? 1 : 0, confidence: 0.8 },
-        ]),
-      );
-    }
+    const answers = Object.fromEntries(Object.entries(questions).map(([k, q], i) => [
+      k,
+      q.type === "noul"
+        ? { type: "noul", noul: k.startsWith("ac") ? (i % 2 === 0 ? 1 : 0) : NOUL_BY_ID[input.decisionId], confidence: 0.9 }
+        : q.type === "choice"
+          ? { type: "choice", choice: k.startsWith("cand") ? (i === 1 ? "duplicate" : "related") : CHOICE_BY_ID[input.decisionId], confidence: 0.9 }
+          : { type: "score", score: 2, confidence: null },
+    ]));
     return {
       ok: true,
       decisionId: input.decisionId,
@@ -101,7 +138,7 @@ function stubCaller({ overrides = {}, failIds = [] } = {}) {
       eventId: `evt-${input.decisionId}`,
     };
   };
-  return { calls, caller };
+  return { calls, resolved, caller };
 }
 
 const CANDIDATES = [
@@ -127,6 +164,22 @@ const serveAll = async (extra = {}) => {
   return { record, warnings, stub };
 };
 
+// The real seam, driven over an injected fetch: every request body is
+// captured, and the response answers exactly the questions the body carried
+// (typed like the real Jev decisions endpoint answers them).
+const jevBody = (body) => ({
+  model: "typesafe/jev-1.13-20260917",
+  answers: Object.fromEntries(Object.entries(body.questions).map(([k, q], i) => [
+    k,
+    q.type === "noul" ? { type: "noul", noul: 0.9 }
+      : q.type === "choice" ? { type: "choice", choice: k.startsWith("cand") ? (i === 1 ? "duplicate" : "related") : Object.keys(q.criteria)[0] }
+        : { type: "score", score: 2 },
+  ])),
+  usage: { input_tokens: 10, output_tokens: 2, cost: 0.000001 },
+  id: "gen-plan-gates-test",
+  provider: "TypeSafe",
+});
+
 // ── serving ──────────────────────────────────────────────────────────────────
 console.log("\nserving — the ten PLAN gates resolve through the seam");
 
@@ -151,22 +204,106 @@ testAsync("all ten gates serve and record the annotation shape (answer(s), confi
   assert.equal(record.decisions["plan.estimate"].answer.score, 2);
 });
 
-testAsync("the per-instance gates ride the seam's third shape with loader-instantiated questions", async () => {
+testAsync("the per-instance gates pass raw instances — the seam instantiates the registry templates", async () => {
   const { stub } = await serveAll();
   const dup = stub.calls.find((c) => c.decisionId === "plan.duplicate_of");
   assert.ok(dup, "duplicate_of was called");
-  assert.deepEqual(Object.keys(dup.questions), ["cand0", "cand1"], "candidate fan-out");
-  assert.ok(dup.questions.cand0.instructions.includes("Gantt snapshot export"), "candidate 0 title substituted");
-  assert.ok(dup.questions.cand1.instructions.includes("webhook retry backoff"), "candidate 1 title substituted");
-  assert.ok(dup.questions.cand0.instructions.includes("FEN-10"), "candidate 0 key substituted");
+  assert.deepEqual(dup.instances, CANDIDATES, "the raw candidate records ride the call — never question text");
+  assert.ok(!("questions" in dup), "no inline questions key on a template gate");
+  const dupResolved = stub.resolved.find((r) => r.decisionId === "plan.duplicate_of");
+  assert.deepEqual(Object.keys(dupResolved.questions), ["cand0", "cand1"], "the seam fanned the template out per candidate");
+  assert.ok(dupResolved.questions.cand0.instructions.includes("Gantt snapshot export"), "candidate 0 title substituted");
+  assert.ok(dupResolved.questions.cand1.instructions.includes("webhook retry backoff"), "candidate 1 title substituted");
+  assert.ok(dupResolved.questions.cand0.instructions.includes("FEN-10"), "candidate 0 key substituted");
   const ac = stub.calls.find((c) => c.decisionId === "plan.ac.testable");
   assert.ok(ac, "ac.testable was called");
-  assert.deepEqual(Object.keys(ac.questions), ["ac0", "ac1"], "criterion fan-out");
-  assert.ok(ac.questions.ac0.instructions.includes("AC-1"), "criterion id substituted");
-  assert.ok(ac.questions.ac0.instructions.includes("returns a PNG data-URL"), "criterion text substituted");
-  // The fixed gates ride the plain decisionId shape — no inline questions.
+  assert.deepEqual(ac.instances, ACS, "the raw criterion records ride the call");
+  const acResolved = stub.resolved.find((r) => r.decisionId === "plan.ac.testable");
+  assert.deepEqual(Object.keys(acResolved.questions), ["ac0", "ac1"], "the seam fanned the template out per criterion");
+  assert.ok(acResolved.questions.ac0.instructions.includes("AC-1"), "criterion id substituted");
+  assert.ok(acResolved.questions.ac0.instructions.includes("returns a PNG data-URL"), "criterion text substituted");
+  // The fixed gates ride the plain decisionId shape — no inline questions, no instances.
   const type = stub.calls.find((c) => c.decisionId === "plan.labels.type");
-  assert.ok(type && !("questions" in type), "fixed gates carry no inline questions");
+  assert.ok(type && !("questions" in type) && !("instances" in type), "fixed gates carry no inline questions and no instances");
+});
+
+testAsync("the reviewer's round-1 probe, verbatim, against the REAL seam: inline questions on a template entry are invalid_input; instances are accepted", async () => {
+  const probe = createDecisionCaller({
+    apiKey: null,
+    fetchImpl: async () => { throw new Error("network must never be reached by these probes"); },
+    delayFn: async () => {},
+    runId: null,
+    shadowDir: null,
+    meter: () => {},
+  });
+  const rejected = await probe({
+    state: STATE,
+    decisionId: "plan.duplicate_of",
+    questions: { cand0: { type: "choice", instructions: "how does this task relate?", criteria: { duplicate: "d", related: "r", distinct: "x" } } },
+  });
+  assert.equal(rejected.ok, false, "the exact payload the round-1 blocker pinned");
+  assert.equal(rejected.error.code, "invalid_input");
+  assert.match(rejected.error.message, /mutually exclusive/);
+  const accepted = await probe({
+    state: STATE,
+    decisionId: "plan.duplicate_of",
+    instances: [{ key: "FEN-10", title: "Gantt snapshot export" }],
+  });
+  assert.equal(accepted.ok, false);
+  assert.equal(accepted.error.code, "auth_missing", "the same call with instances passes the shape — it fails later, at the missing key, never at the contract");
+  const noTemplates = await probe({ state: STATE, decisionId: "gate.screen", instances: [{ a: "b" }] });
+  assert.equal(noTemplates.ok, false);
+  assert.equal(noTemplates.error.code, "invalid_input", "instances on a non-template entry fail closed too");
+});
+
+testAsync("through the REAL seam: buildPlanGates over createDecisionCaller serves all ten gates and the labels join real events", async () => {
+  const bodies = [];
+  const runsDir = join(tmp, "runs-real");
+  const realCaller = createDecisionCaller({
+    apiKey: "test-key",
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      bodies.push(body);
+      return { ok: true, status: 200, json: async () => jevBody(body) };
+    },
+    delayFn: async () => {},
+    runId: RUN_ID,
+    shadowDir: join(runsDir, RUN_ID),
+    taskKey: "FEN-100",
+    meter: () => {},
+  });
+  const { record, warnings } = await buildPlanGates({
+    issue: "FEN-100",
+    state: STATE,
+    caller: realCaller,
+    candidates: CANDIDATES,
+    acs: ACS,
+    runId: RUN_ID,
+  });
+  assert.equal(warnings.length, 0, JSON.stringify(warnings));
+  for (const id of PLAN_DECISIONS) {
+    assert.equal(record.decisions[id].ok, true, id);
+    assert.ok(record.decisions[id].eventId, `${id} carries a real eventId from the shadow log`);
+  }
+  // The SEAM instantiated the templates — the outgoing bodies carry the
+  // registry-owned question text with the injected data substituted in.
+  const dupBody = bodies.find((b) => b.questions.cand0);
+  assert.ok(dupBody, "duplicate_of request captured");
+  assert.ok(dupBody.questions.cand0.instructions.includes("Gantt snapshot export"), "candidate title substituted by the seam");
+  assert.ok(dupBody.questions.cand1.instructions.includes("FEN-11"), "candidate key substituted by the seam");
+  const acBody = bodies.find((b) => b.questions.ac0);
+  assert.ok(acBody, "ac.testable request captured");
+  assert.ok(acBody.questions.ac0.instructions.includes("AC-1"), "criterion id substituted by the seam");
+  assert.equal(record.decisions["plan.duplicate_of"].duplicateOf, "FEN-11", "duplicateOf derived from the seam's own answers");
+  // The full FOC-449 loop against the REAL event lines the seam wrote.
+  const { labelled, warnings: labelWarnings } = labelAppliedPlan({
+    record,
+    applied: { type: "feature", risk: "none", estimate: "M" },
+    issue: "FEN-100",
+    runsDir,
+  });
+  assert.equal(labelWarnings.length, 0, JSON.stringify(labelWarnings));
+  assert.equal(labelled.length, 3, "type + risk + estimate joined to real events");
 });
 
 testAsync("plan.duplicate_of derives duplicateOf from the answered candidate", async () => {
@@ -226,6 +363,39 @@ testAsync("a failed decision is recorded ok:false and the rest still serve", asy
   assert.equal(record.decisions["plan.dor.criteria_testable"].ok, true);
   assert.equal(warnings.length, 2, JSON.stringify(warnings));
   assert.match(warnings[0], /plan\.labels\.type failed closed \(auth_missing\)/);
+});
+
+testAsync("a throwing caller fails that decision closed (typed record + warning) and the rest still serve", async () => {
+  const base = stubCaller();
+  const throwing = async (input) => {
+    if (input.decisionId === "plan.labels.type") throw new Error("connection reset mid-serve");
+    return base.caller(input);
+  };
+  const { record, warnings } = await buildPlanGates({
+    issue: "FEN-100",
+    state: STATE,
+    caller: throwing,
+    candidates: CANDIDATES,
+    acs: ACS,
+    runId: RUN_ID,
+  });
+  const failed = record.decisions["plan.labels.type"];
+  assert.equal(failed.ok, false);
+  assert.equal(failed.code, null, "a plain Error carries no typed code — recorded honestly as null");
+  assert.equal(failed.message, "connection reset mid-serve");
+  assert.equal(record.decisions["plan.dor.criteria_testable"].ok, true, "the rest still serve");
+  const warning = warnings.find((w) => w.includes("plan.labels.type"));
+  assert.ok(warning, JSON.stringify(warnings));
+  assert.match(warning, /plan\.labels\.type failed closed \(error\)/);
+});
+
+testAsync("a state over the seam's 16000-char cap is truncated, never refused (supervisor-triage precedent)", async () => {
+  const { stub, warnings } = await serveAll({ args: { state: "x".repeat(20000) } });
+  assert.equal(warnings.length, 0, JSON.stringify(warnings));
+  assert.equal(stub.calls.length, 10, "all ten gates still serve");
+  for (const call of stub.calls) assert.equal(call.state.length, 16000, "every call rides the capped state");
+  const { stub: short } = await serveAll();
+  assert.equal(short.calls[0].state, STATE, "an under-cap state passes through untouched");
 });
 
 testAsync("bad arguments fail closed before any call (identity, state, caller)", async () => {
@@ -340,6 +510,21 @@ testAsync("applied labels become FOC-449 records tied to the exact eventIds", as
     assert.equal(l.source, "auto");
     assert.equal(l.via, "labels");
   }
+});
+
+testAsync("a failed decision is never tied back, even with an eventId and a stated applied value", async () => {
+  const { record } = await serveAll({ stub: { failIds: ["plan.labels.type"] } });
+  const runsDir = fixtureLog("failed");
+  const { labelled, warnings } = labelAppliedPlan({
+    record,
+    applied: { type: "feature", risk: null, estimate: "M" },
+    issue: "FEN-100",
+    runsDir,
+  });
+  assert.equal(labelled.length, 2, "risk(none) + estimate only — the failed type decision collects nothing");
+  const events = labelsIn(runsDir).map((l) => l.eventId);
+  assert.ok(!events.includes("evt-plan.labels.type"), "the failed decision's eventId never receives a label");
+  assert.equal(warnings.length, 0, JSON.stringify(warnings));
 });
 
 testAsync("no eventIds and absent applied values label nothing and warn nobody", async () => {
