@@ -136,10 +136,20 @@ Generates acceptance criteria in one model call — the DoD half moved to `plan.
 this is the acceptance-criteria half (FOC-475). ADR-0012's own [G] examples (D1 as amended: "PLAN's
 acceptance criteria"). The full end-to-end walk-through is §4. Never decides a gate: AC quality is
 input material for spec and review, never a verdict (D7: only [J]/[D]/[H] decide gates).
-**Contract:** reads `inbox.entry`, `features.list` → bounded output `{ acs (1..12) }` (schema in
-§3.11); tier `cheap`; failure `stop` (fail-closed — no unvalidated text flows to spec); writes
-`run-record`. **Frontman: none** — a failed generation stops the chain at a typed record;
-escalation policy is the runner's (FOC-397).
+**Contract:** reads `inbox.entry`, `features.list` → bounded output `{ acs (1..12) }` — each
+criterion `{id, text, kind, evidence}`, where `evidence` (enum `test | command_output | file_state |
+human_check`) names what would demonstrate the criterion (schema in §3.11); tier `cheap`; failure
+`stop` (fail-closed — no unvalidated text flows to spec); writes `run-record`. **Frontman: none**
+— a failed generation stops the chain at a typed record; escalation policy is the runner's
+(FOC-397). **Node-internal testable gate (FOC-452 carry, FOC-475):** the generated criteria are
+scored by the node itself, right after the generation call, through the `plan.ac.testable` registry
+entry — one `noul` per criterion served via the seam's instances channel (`{state, decisionId,
+instances}`), verdict p ≥ 0.5. Any criterion below the verdict triggers exactly ONE regeneration
+whose inputs carry the failing criteria and the gate's reasons, after which ALL criteria are
+re-scored; still below → the step fails closed with a typed escalation record (per-criterion
+verdicts, reasons, attempt count). The loop is node-internal — not a decision edge, and no graph
+edge is added (the graph-level retry edge is FOC-476's); the stepFlow and the 8-step chain are
+unchanged.
 
 ### 3.4 plan.spec — [A]
 
@@ -306,12 +316,13 @@ kept verbatim for the nine consumers.
                 "type": "array", "minItems": 1, "maxItems": 12,
                 "items": {
                   "type": "object",
-                  "required": ["id", "text", "kind"],
+                  "required": ["id", "text", "kind", "evidence"],
                   "additionalProperties": false,
                   "properties": {
                     "id": { "type": "string", "pattern": "^AC-[0-9]{1,2}$" },
                     "text": { "type": "string", "minLength": 1, "maxLength": 300 },
-                    "kind": { "enum": ["behaviour", "boundary", "verification"] }
+                    "kind": { "enum": ["behaviour", "boundary", "verification"] },
+                    "evidence": { "type": "string", "enum": ["test", "command_output", "file_state", "human_check"] }
                   }
                 }
               }

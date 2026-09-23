@@ -253,7 +253,7 @@ const D7 = {
   "plan.dor": { reads: ["inbox.entry", "repoState.pinned"], tier: { cascade: true, min: 1 }, failure: "escalate", writes: "run-record" },
   "plan.dod": { reads: ["inbox.entry"], tier: "cheap", failure: "stop", writes: "run-record" },
   "plan.ac": { reads: ["inbox.entry", "features.list"], tier: "cheap", failure: "stop", writes: "run-record" },
-  "plan.spec": { reads: ["inbox.entry", "plan.ac.acs", "plan.ac.definitionOfDone", "repoState.pinned"], tier: "agent", failure: "escalate", writes: "run-record" },
+  "plan.spec": { reads: ["inbox.entry", "plan.dod.definitionOfDone", "plan.ac.acs", "repoState.pinned"], tier: "agent", failure: "escalate", writes: "run-record" },
   "plan.gate1": { reads: ["plan.spec.record"], tier: null, failure: "stop", writes: "graph-state" },
   "plan.decompose": { reads: ["plan.spec.record", "plan.ac.acs"], tier: { cascade: true, min: 1 }, failure: "escalate", writes: "run-record" },
   "plan.gate2": { reads: ["plan.decompose.record", "gate.plan.gate1.record"], tier: null, failure: "stop", writes: "graph-state" },
@@ -409,7 +409,7 @@ await test("every node output schema compiles and accepts a valid sample / rejec
   const SAMPLES = {
     "plan.dor": { ok: { ready: true, gaps: ["x"] }, bad: { ready: "yes", gaps: [] } },
     "plan.dod": { ok: { definitionOfDone: [{ check: "c", kind: "test", bounded: true }] }, bad: { definitionOfDone: [] } },
-    "plan.ac": { ok: { acs: [{ id: "AC-1", text: "t", kind: "behaviour" }], definitionOfDone: [{ check: "c", kind: "test", bounded: true }] }, bad: { acs: [], definitionOfDone: [] } },
+    "plan.ac": { ok: { acs: [{ id: "AC-1", text: "t", kind: "behaviour", evidence: "test" }] }, bad: { acs: [{ id: "AC-1", text: "t", kind: "behaviour" }] } },
     "plan.spec": { ok: { briefs: ["b"], adr: "a", summary: "s" }, bad: { briefs: "b", adr: "a", summary: "s" } },
     "plan.gate1": { ok: { approved: true }, bad: { approved: "yes" } },
     "plan.gate2": { ok: { approved: true }, bad: {} },
@@ -426,42 +426,42 @@ await test("every node output schema compiles and accepts a valid sample / rejec
 
 await test("plan.ac §3.9 bounds are pinned (schema facts AND behavior)", () => {
   const acs = entries["plan.ac"].output.properties.acs;
-  const dod = entries["plan.ac"].output.properties.definitionOfDone;
   eq(acs.minItems, 1, "acs minItems");
   eq(acs.maxItems, 12, "acs maxItems");
-  deepEq(acs.items.required, ["id", "text", "kind"], "acs item required");
+  deepEq(acs.items.required, ["id", "text", "kind", "evidence"], "acs item required");
   eq(acs.items.properties.id.pattern, "^AC-[0-9]{1,2}$", "acs id pattern");
   eq(acs.items.properties.text.maxLength, 300, "acs text bound");
   deepEq(acs.items.properties.kind.enum, ["behaviour", "boundary", "verification"], "acs kind enum");
-  eq(dod.minItems, 1, "DoD minItems");
-  eq(dod.maxItems, 12, "DoD maxItems");
-  deepEq(dod.items.required, ["check", "kind", "bounded"], "DoD item required");
-  eq(dod.items.properties.check.maxLength, 200, "DoD check bound");
-  deepEq(dod.items.properties.kind.enum, ["test", "lint", "manual", "linear"], "DoD kind enum");
-  eq(dod.items.properties.bounded.type, "boolean", "DoD bounded type");
+  deepEq(acs.items.properties.evidence.enum, ["test", "command_output", "file_state", "human_check"], "acs evidence enum (AC2)");
+  if (entries["plan.ac"].output.properties.definitionOfDone) {
+    fail("plan.ac is AC-only since FOC-474/475 — the DoD half lives on plan.dod now");
+  }
 
   const validate = new Ajv().compile(entries["plan.ac"].output);
-  const acs12 = Array.from({ length: 12 }, (_, i) => ({ id: `AC-${i + 1}`, text: "t", kind: "behaviour" }));
-  const acs13 = Array.from({ length: 13 }, (_, i) => ({ id: `AC-${i + 1}`, text: "t", kind: "behaviour" }));
-  const dod1 = [{ check: "c", kind: "test", bounded: true }];
-  eq(validate({ acs: acs12, definitionOfDone: dod1 }), true, "12 acs pass");
-  eq(validate({ acs: acs13, definitionOfDone: dod1 }), false, "13 acs fail");
-  eq(validate({ acs: [{ id: "AC-123", text: "t", kind: "behaviour" }], definitionOfDone: dod1 }), false, "AC-123 fails the id pattern");
-  eq(validate({ acs: [{ id: "AC-1", text: "x".repeat(301), kind: "behaviour" }], definitionOfDone: dod1 }), false, "301-char text fails");
-  eq(validate({ acs: [{ id: "AC-1", text: "t", kind: "cosmetic" }], definitionOfDone: dod1 }), false, "bad ac kind fails");
-  eq(validate({ acs: acs12, definitionOfDone: [{ check: "x".repeat(201), kind: "test", bounded: true }] }), false, "201-char check fails");
-  eq(validate({ acs: acs12, definitionOfDone: [{ check: "c", kind: "someday", bounded: true }] }), false, "bad DoD kind fails");
-  eq(validate({ acs: acs12, definitionOfDone: [{ check: "c", kind: "test", bounded: "yes" }] }), false, "non-boolean bounded fails");
+  const ac = (over = {}) => ({ id: "AC-1", text: "t", kind: "behaviour", evidence: "test", ...over });
+  const acs12 = Array.from({ length: 12 }, (_, i) => ac({ id: `AC-${i + 1}` }));
+  const acs13 = Array.from({ length: 13 }, (_, i) => ac({ id: `AC-${i + 1}` }));
+  eq(validate({ acs: acs12 }), true, "12 acs pass");
+  eq(validate({ acs: acs13 }), false, "13 acs fail");
+  eq(validate({ acs: [ac({ id: "AC-123" })] }), false, "AC-123 fails the id pattern");
+  eq(validate({ acs: [ac({ text: "x".repeat(301) })] }), false, "301-char text fails");
+  eq(validate({ acs: [ac({ kind: "cosmetic" })] }), false, "bad ac kind fails");
+  eq(validate({ acs: [ac({ evidence: "a_hunch" })] }), false, "bad evidence enum fails");
+  eq(validate({ acs: [ac({ evidence: undefined })] }), false, "missing evidence fails");
+  eq(validate({ acs: acs12, definitionOfDone: [{ check: "c", kind: "test", bounded: true }] }), false, "the merged shape fails — plan.ac is AC-only");
 });
 
-await test("plan.ac carries the §4 seed [G] prompt, marked pending the runner", () => {
+await test("plan.ac carries the FOC-475 AC-only [G] prompt", () => {
   const p = entries["plan.ac"].prompt;
   if (typeof p !== "string" || p.length === 0) fail("plan.ac prompt missing");
-  for (const needle of ["declared inputs", "no tool loop", "never count, size or compute anything", "^AC-[0-9]{1,2}$", "cheap tier", "fail-closed"]) {
-    if (!p.includes(needle)) fail(`seed prompt should mention "${needle}"`);
+  if (p.length > 4000) fail(`plan.ac prompt exceeds the registry's 4000-char bound (${p.length})`);
+  for (const needle of ["declared inputs", "no tool loop", "never count, size or compute anything", "^AC-[0-9]{1,2}$", "cheap tier", "fail-closed", "no invented scope", "evidence"]) {
+    if (!p.includes(needle)) fail(`AC-only prompt should mention "${needle}"`);
   }
-  if (p.includes("FOC-397")) fail("prompt is content, not bookkeeping — the pending marker lives in owner");
-  eq(entries["plan.ac"].owner.includes("FOC-397"), true, "owner marks the runner pending");
+  if (p.includes("definitionOfDone")) fail("plan.ac is AC-only — the prompt must not ask for the sibling's DoD output");
+  if (p.includes("FOC-397")) fail("prompt is content, not bookkeeping — the ownership marker lives in owner");
+  eq(entries["plan.ac"].owner.includes("FOC-397"), true, "owner marks the v2 runner lineage");
+  eq(entries["plan.ac"].owner.includes("FOC-475"), true, "owner marks the FOC-475 restructure");
 });
 
 console.log("\ndecisions-registry: transport entries (anti-drift + byte-identity)");

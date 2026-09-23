@@ -83,32 +83,20 @@
           "reads": ["inbox.entry", "features.list"],
           "output": {
             "type": "object",
-            "required": ["acs", "definitionOfDone"],
+            "required": ["acs"],
             "additionalProperties": false,
             "properties": {
               "acs": {
                 "type": "array", "minItems": 1, "maxItems": 12,
                 "items": {
                   "type": "object",
-                  "required": ["id", "text", "kind"],
+                  "required": ["id", "text", "kind", "evidence"],
                   "additionalProperties": false,
                   "properties": {
                     "id": { "type": "string", "pattern": "^AC-[0-9]{1,2}$" },
                     "text": { "type": "string", "minLength": 1, "maxLength": 300 },
-                    "kind": { "enum": ["behaviour", "boundary", "verification"] }
-                  }
-                }
-              },
-              "definitionOfDone": {
-                "type": "array", "minItems": 1, "maxItems": 12,
-                "items": {
-                  "type": "object",
-                  "required": ["check", "kind", "bounded"],
-                  "additionalProperties": false,
-                  "properties": {
-                    "check": { "type": "string", "minLength": 1, "maxLength": 200 },
-                    "kind": { "enum": ["test", "lint", "manual", "linear"] },
-                    "bounded": { "type": "boolean" }
+                    "kind": { "enum": ["behaviour", "boundary", "verification"] },
+                    "evidence": { "type": "string", "enum": ["test", "command_output", "file_state", "human_check"] }
                   }
                 }
               }
@@ -120,7 +108,7 @@
         },
         "plan.spec": {
           "kind": "A",
-          "reads": ["inbox.entry", "plan.ac.acs", "plan.ac.definitionOfDone", "repoState.pinned"],
+          "reads": ["inbox.entry", "plan.dod.definitionOfDone", "plan.ac.acs", "repoState.pinned"],
           "output": { "type": "object", "required": ["briefs", "adr", "summary"], "additionalProperties": false, "properties": { "briefs": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 200 } }, "adr": { "type": "string", "maxLength": 200 }, "summary": { "type": "string", "maxLength": 2000 } } },
           "tier": "agent",
           "failure": "escalate",

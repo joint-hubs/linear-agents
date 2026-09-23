@@ -67,8 +67,7 @@ const RUN_INPUTS = {
 };
 
 const AC_OUTPUT = {
-  acs: [{ id: "AC-1", text: "The runner executes the PLAN subgraph with typed run records.", kind: "behaviour" }],
-  definitionOfDone: [{ check: "node scripts/graph-runner.test.mjs is green", kind: "test", bounded: true }],
+  acs: [{ id: "AC-1", text: "The runner executes the PLAN subgraph with typed run records.", kind: "behaviour", evidence: "test" }],
 };
 
 const DOD_OUTPUT = {
@@ -92,6 +91,13 @@ function a0Envelope(decisionId, answers, confidence = 0.9) {
     pinnedModel: "typesafe/jev-1.13",
     usage: { input_tokens: 10, output_tokens: 2, cost: 0.000001 },
   };
+}
+
+// The node-internal plan.ac.testable gate answering ABOVE the verdict
+// threshold (p ≥ 0.5) for every criterion instance — the happy-path stub.
+function testableEnvelope(input) {
+  const answers = Object.fromEntries((input.instances ?? []).map((_, i) => [`ac${i}`, { type: "noul", noul: 0.9 }]));
+  return a0Envelope("plan.ac.testable", answers);
 }
 
 // The frontman's pen: resolution records are appended by the DECIDING agent —
@@ -205,6 +211,7 @@ await test("the full resumable walk: 8 steps, 2 A0 annotations, 2 [G] calls, 2 g
   const caller = async (input) => {
     callerCalls.push(input);
     if (input.decisionId === "plan.dor") return a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } });
+    if (input.decisionId === "plan.ac.testable") return testableEnvelope(input);
     if (input.decisionId === "plan.decompose") return a0Envelope("plan.decompose", { q_size: { type: "choice", choice: "medium", probabilities: { medium: 0.9 } }, q_relations: { type: "choice", choice: "standalone", probabilities: { standalone: 0.8 } } });
     return fail(`unexpected caller decisionId ${input.decisionId}`);
   };
@@ -313,7 +320,7 @@ await test("the full resumable walk: 8 steps, 2 A0 annotations, 2 [G] calls, 2 g
   eq(latest(records, "plan.push").status, "done", "push done");
   eq(latest(records, "plan.push").output.epicId, "FEN-900", "push output recorded");
   eq(generatorCalls, 2, "[G] never re-executed across resumes");
-  eq(callerCalls.length, 1, "one seam call since the reset (plan.decompose)");
+  eq(callerCalls.length, 2, "two seam calls since the reset (plan.ac.testable, plan.decompose)");
 
   // Run 7 — fully idempotent: every step done, nothing re-runs.
   const callsBefore = callerCalls.length;
@@ -489,7 +496,7 @@ await test("the default Linear boundary refuses — the runner never writes to L
 await test("a gate answered rejected records gate-rejected and stops (downstream never runs)", async () => {
   const { storePath } = tempStore();
   const runner = makeRunner({
-    caller: async () => a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } }),
+    caller: async (input) => (input.decisionId === "plan.ac.testable" ? testableEnvelope(input) : a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } })),
     generator: async ({ stepId }) => (stepId === "plan.dod" ? DOD_OUTPUT : AC_OUTPUT),
     gateEmitter: async () => ({ gateId: "gate-test-1" }),
     linearEffect: async () => { fail("linear effect must not run after a rejection"); },
