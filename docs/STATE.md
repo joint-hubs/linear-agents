@@ -3,6 +3,15 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Fenix supervisor contract: `agents/supervisor/CLAUDE.md`. Squad model routing: `config/models.json`. Execution plan: `docs/BUILD-BACKLOG.md`. Atlas delegation is a separate mechanism.
 
+## 2026-09-23 — FOC-518: graph-runner record fixes (09-23 audit findings 2, 3, 6) + [G] timeout
+
+- **eventId on [J] records:** one shared `handOffFields(stepId, envelope)` in `scripts/graph-runner.mjs` builds the handed-off extras for both `runJStep` and `decideEdge`. `runJStep` records now carry `eventId` (null when the envelope has none), the FOC-449 label join key; `decideEdge` records are byte-identical to before.
+- **Explicit run context:** `createLiveCaller({ runId })` is exported and injectable. The CLI passes `--run-id` to the [J] caller as it already did to the [G] generator, so seam event lines no longer key to an ambient `LA_RUN_ID`.
+- **Visible truncation:** `buildPlanGates` (`scripts/plan-gates.mjs`) still cuts state at the seam's 16 000 chars (never refuses), but the cut is now on the record (`truncation: {field, originalLength, keptLength}`) and in `warnings`.
+- **[G] timeout 120 s → 420 s:** `G_TIMEOUT_MS` is the `createDefaultGenerator` default. FOC-474 eval: 7/12 timed out at 120 s; at 300 s, 12/12 succeeded (max 299.2 s). The eval harnesses keep their own explicit 300 s.
+- **Not done here:** plan-gates still sends a raw prefix of the state, not selected fields (audit finding 6, second half).
+- **Verify:** graph-runner 23/23, plan-gates 21/21, plan-dod 21/21, plan-ac 22/22, decisions-registry 38/38, graph-validate 42/42 · `node scripts/check.mjs` 0 violations · `node scripts/lint.mjs` 0 violations · `node scripts/test-all.mjs` 84/85. The one red file, `supervisor-spawn.test.mjs`, has a case ("a held --candidate request records the flag for replay") whose mock child sent no system/init within 30 s under parallel load. It touches none of these files and passes 34/34 on an isolated re-run; same load-flake class as FOC-407.
+
 ## 2026-09-23 — FOC-450: egress secret screen, local first
 
 - **Screen:** new `scripts/egress-screen.mjs` — zero-dep, synchronous, offline (pure regex; fetch-stub test pins no outbound call). Five local detector families: key-prefix (public prefixes, longest-first), PEM (full blocks + truncated BEGIN, line count reported), env-assignment (secret-bearing NAME gate, value gate strips `# comments`/`${VAR}`/placeholders), JWT (3 base64url segments, `eyJ` header), high-entropy (base62/base64url runs, ≥3 classes, Shannon ≥4.3 bits/char, ≥3.9 at 32+; excludes hex/SHAs, UUIDs, data URIs, public PEM blocks, ISO-date slugs — unprefixed hex keys are the documented blind spot). Hits BLOCK fail-closed, typed `EgressBlockedError` (`code EGRESS_BLOCKED`), named by SHAPE only (family/line/column/public prefix + length) — never value; last stderr line self-describing for supervisor-verdict's child-stderr surfacing.
