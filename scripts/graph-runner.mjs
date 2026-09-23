@@ -322,6 +322,13 @@ function defaultGateEmitter() {
 // ever written. Constructed with the run id it runs under — the event line
 // keys to it like every seam-driven line.
 
+// Node's abort timeout rejects with an AbortError (or TimeoutError through
+// some adapters); either way the call never completed — a provider failure,
+// not an output-shape failure.
+function isAbort(err) {
+  return err?.name === "AbortError" || err?.name === "TimeoutError";
+}
+
 export function createDefaultGenerator({
   apiKey,
   runId = process.env.LA_RUN_ID,
@@ -374,6 +381,7 @@ export function createDefaultGenerator({
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
+      if (isAbort(err)) throw new TypedError("provider_error", `[G] ${stepId} request timed out after ${timeoutMs}ms`);
       throw new TypedError("provider_error", `[G] ${stepId} request failed: ${scrub(err?.message || "network error")}`);
     }
     if (!res.ok) throw new TypedError("provider_error", `[G] ${stepId} returned HTTP ${res.status}`);
@@ -382,6 +390,10 @@ export function createDefaultGenerator({
     try {
       body = await res.json();
     } catch (err) {
+      // The abort can fire while the body streams — a timed-out read is a
+      // provider failure (measured on the eval's first pass: FOC-443 took
+      // 119.9s), never a claim that the response "was not JSON".
+      if (isAbort(err)) throw new TypedError("provider_error", `[G] ${stepId} request timed out after ${timeoutMs}ms`);
       throw new TypedError("unparseable_output", `[G] ${stepId} response is not JSON: ${scrub(err.message)}`);
     }
     const content = body?.choices?.[0]?.message?.content;

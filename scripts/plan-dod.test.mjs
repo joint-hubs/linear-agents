@@ -415,6 +415,34 @@ await test("a network failure throws provider_error and appends NOTHING", async 
   }
 });
 
+await test("a timed-out request is provider_error — never 'response is not JSON' — and appends NOTHING", async () => {
+  const { dir, cleanup } = tempDir();
+  try {
+    // The abort can fire while the body streams (measured on the eval's first
+    // pass): the read's rejection carries the abort shape.
+    const fetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "AbortError" });
+      },
+    });
+    const generate = createDefaultGenerator({ apiKey: "test-key", runId: "r", taskKey: "T", shadowDir: dir, fetchImpl, timeoutMs: 50 });
+    let err;
+    try {
+      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "inbox.entry": "x" } });
+      fail("must throw");
+    } catch (e) {
+      err = e;
+    }
+    eqCode(err, "provider_error", "a timeout is a provider failure");
+    if (!err.message.includes("timed out")) fail(`the message names the timeout: ${err.message}`);
+    eq(existsSync(join(dir, "decisions.jsonl")), false, "no event line");
+  } finally {
+    cleanup();
+  }
+});
+
 await test("unparseable content throws unparseable_output and appends NOTHING", async () => {
   const { dir, cleanup } = tempDir();
   try {

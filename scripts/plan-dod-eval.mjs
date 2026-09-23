@@ -148,7 +148,12 @@ export async function runAll({
   outDir,
   apiKey = process.env.OPENROUTER_API_KEY,
   fetchImpl = fetch,
-  timeoutMs = 120000,
+  // 300s: the first eval pass measured FOC-443 at 119.9s (~11k output tokens)
+  // against the runner's 120s default — below this provider's real envelope
+  // for the longer fixture rows, 7 of 12 calls aborted mid-generation. The
+  // runner default stays fail-closed; the MEASUREMENT gives the model its
+  // headroom and reports the latency.
+  timeoutMs = 300000,
   runId = "foc-474-eval",
   issues: issuesOverride,
   limit,
@@ -295,6 +300,7 @@ async function main() {
     outDir,
     limit,
     runId: flag("run-id") ?? "foc-474-eval",
+    ...(flag("timeout") ? { timeoutMs: Number.parseInt(flag("timeout"), 10) } : {}),
   });
   console.log(readFileSync(join(outDir, "table.txt"), "utf8"));
   console.log(`artifacts: ${outDir}`);
