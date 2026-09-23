@@ -278,7 +278,9 @@ function safeHash(input) {
   }
 }
 
-function usageOf(usage) {
+// Exported for the [G] generator's event line (FOC-474) — the same usage
+// normalization, never a second copy. Shape and semantics unchanged.
+export function usageOf(usage) {
   if (!usage || typeof usage !== "object") return null;
   const inputTokens = usage.input_tokens ?? usage.prompt_tokens;
   const outputTokens = usage.output_tokens ?? usage.completion_tokens;
@@ -481,7 +483,9 @@ function defaultShadowDir(runId) {
   return runId ? join(root, ".state", "runs", runId) : null;
 }
 
-function appendShadow(shadowDir, line) {
+// Exported for the [G] generator's event line (FOC-474) — the ONE writer for
+// decisions.jsonl; no caller forks a parallel append. Best-effort unchanged.
+export function appendShadow(shadowDir, line) {
   if (!shadowDir) return;
   try {
     mkdirSync(shadowDir, { recursive: true });

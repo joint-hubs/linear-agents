@@ -18,16 +18,26 @@
 //       call (the seam owns its own retries), tier 2 is dead by contract
 //       (every entry pins fallback.tier2 "disabled", FOC-473), tier 3 =
 //       frontman hand-off carrying the triggering envelope error.
-//   [G] plan.ac — ONE schema-validated model call through the injectable
-//       generator; the result is validated against the step's output schema
-//       and recorded done. The default generator is a single chat/completions
-//       POST with response_format json_schema (strict, the step's output
-//       schema) on the cheap tier from config/models.json
+//   [G] plan.dod, plan.ac — ONE schema-validated model call through the
+//       injectable generator; the result is validated against the step's
+//       output schema and recorded done. The default generator is a single
+//       chat/completions POST with response_format json_schema (strict, the
+//       step's output schema) on the cheap tier from config/models.json
 //       (routing.plan.discovery) — UNMEASURED (FOC-473 posture: no measured
-//       call, no pricing row); tests never touch it (injected). Deliberately
-//       NOT the decision-call seam: the seam's contract is typed question/
-//       answer sets, and the plan.ac output (an open list of ACs) is not a
-//       decision — routing it through would misstate what served the call.
+//       call, no pricing row); tests inject a generator or an injected
+//       fetch. It rides the registry: the entry for the step id owns the
+//       prompt, and the message is composed from the RESOLVED reads — the
+//       declared inputs, never the whole run state. A successful call
+//       appends ONE FOC-449 event line to the run's decisions.jsonl (input
+//       as sent, mask-only scrubbed, parsed output as `answers`, usage/
+//       cost, latency); a failed or unparseable call appends NOTHING — the
+//       typed failure record in the run store is the only trace.
+//       Deliberately NOT the decision-call seam: the seam's contract is
+//       typed question/answer sets, and a [G] output (an open checklist or
+//       AC list) is not a decision — routing it through would misstate what
+//       served the call. And [G] answers persist as event lines, never as
+//       outcome labels: the label machinery stays [J]/gate-only (ADR-0012
+//       D7 — a [G] node never decides a gate).
 //   [A] plan.spec — stop + hand-off record: the work belongs to an agent
 //       outside the runner; the deciding agent writes <step>.resolution and
 //       the next run resumes.
@@ -62,15 +72,16 @@
 //   node scripts/graph-runner.mjs status --run-id <id> [--store <path>]
 
 import { spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
 import { TypedError } from "./mcp/envelope.mjs";
-import { scrub } from "./mcp/scrub.mjs";
-import { createDecisionCaller, DECISION_STEP } from "./decision-call.mjs";
+import { scrub, scrubMask } from "./mcp/scrub.mjs";
+import { appendShadow, canonicalJson, createDecisionCaller, DECISION_STEP, SHADOW_EVENT_TYPE, usageOf } from "./decision-call.mjs";
 import { loadGraph, validateGraph } from "./graph-validate.mjs";
-import { loadRegistry } from "./decision-registry.mjs";
+import { getRegistryEntry, loadRegistry } from "./decision-registry.mjs";
 import { KINDS } from "./supervisor-gate.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -294,12 +305,40 @@ function defaultGateEmitter() {
 // One chat/completions POST with a strict json_schema response format, on the
 // cheap tier from config/models.json (routing.plan.discovery → z-ai/
 // glm-5.3-flash). No measured call backs this transport; it exists so the CLI
-// can run end-to-end and says so. Tests inject a generator and never reach
-// this code.
+// can run end-to-end and says so. Tests inject a generator and only the
+// plan-dod tests reach this code, on an injected fetch.
+//
+// The generator rides the registry: the entry for stepId owns the prompt (the
+// words the model is asked) and the criteria version; the runner hands the
+// RESOLVED reads over, and the message is composed from exactly those — the
+// declared inputs, never the whole run state. A successful call (HTTP ok,
+// parseable content) appends ONE FOC-449 event line to the run's
+// decisions.jsonl through decision-call's own writer: the input AS SENT
+// (mask-only scrub), the parsed output as `answers`, usage/cost, latency.
+// [G] answers persist as event lines, never as outcome labels — the label
+// machinery stays [J]/gate-only (ADR-0012 D7: a [G] node never decides a
+// gate). A failed/unparseable call appends NOTHING: the step's typed failure
+// record in the run store is the only trace, and no fabricated answers are
+// ever written. Constructed with the run id it runs under — the event line
+// keys to it like every seam-driven line.
 
-function createDefaultGenerator({ apiKey } = {}) {
-  return async function generate({ stepId, step, state }) {
+export function createDefaultGenerator({
+  apiKey,
+  runId = process.env.LA_RUN_ID,
+  taskKey = process.env.LA_TASK_ID ?? null,
+  shadowDir = runId ? join(root, ".state", "runs", runId) : null,
+  fetchImpl = fetch,
+  timeoutMs = 120000,
+  now = () => new Date().toISOString(),
+} = {}) {
+  return async function generate({ stepId, step, reads }) {
     if (!apiKey) throw new TypedError("auth_missing", "OPENROUTER_API_KEY is absent — [G] generation fails closed");
+    const startedAt = Date.now();
+    // The registry entry owns the prompt; an unknown stepId is a typed
+    // failure (the runner turns it into one failed record — never a guessed
+    // message on the wire).
+    const entry = getRegistryEntry(stepId);
+
     let models;
     try {
       models = JSON.parse(readFileSync(join(root, "config", "models.json"), "utf8"));
@@ -312,22 +351,30 @@ function createDefaultGenerator({ apiKey } = {}) {
       throw new TypedError("provider_error", `config/models.json has no ids row for routing.plan.discovery ("${scrub(String(alias))}")`);
     }
 
+    const message = [
+      entry.prompt,
+      "",
+      `Produce the "${stepId}" step output for the declared inputs below. Respond with JSON matching the schema exactly.`,
+      "",
+      "INPUTS (declared reads, in order):",
+      ...step.reads.map((r) => `- ${r}: ${JSON.stringify(reads[r] ?? null)}`),
+    ].join("\n");
+
     let res;
     try {
-      res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      res = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           model,
-          messages: [{
-            role: "user",
-            content: `Produce the "${stepId}" step output for the state below. Respond with JSON matching the schema exactly.\n\nSTATE:\n${JSON.stringify(state, null, 2)}`,
-          }],
+          messages: [{ role: "user", content: message }],
           response_format: { type: "json_schema", json_schema: { name: stepId, strict: true, schema: step.output } },
+          usage: { include: true },
         }),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
-      throw new TypedError("provider_error", `[G] ${stepId} request failed: ${scrub(err.message)}`);
+      throw new TypedError("provider_error", `[G] ${stepId} request failed: ${scrub(err?.message || "network error")}`);
     }
     if (!res.ok) throw new TypedError("provider_error", `[G] ${stepId} returned HTTP ${res.status}`);
 
@@ -341,11 +388,55 @@ function createDefaultGenerator({ apiKey } = {}) {
     if (typeof content !== "string") {
       throw new TypedError("unparseable_output", `[G] ${stepId} response carries no message content`);
     }
+    let output;
     try {
-      return JSON.parse(content);
+      output = JSON.parse(content);
     } catch (err) {
       throw new TypedError("unparseable_output", `[G] ${stepId} content is not JSON: ${scrub(err.message)}`);
     }
+
+    // Success ⇒ the FOC-449 event line. Input AS SENT, mask-only scrubbed
+    // (no error-text cap — the cap bounds an error path, not a record whose
+    // point is the complete input); questions stays null because a [G]
+    // generation sends no question set. The hash mirrors inputsHash's join
+    // key (model + state + questions) with the [G] call's own resolved model
+    // in place of the pinned one — inputsHash hardcodes JEV_MODEL, which is
+    // not what served here. Best-effort, like every shadow write.
+    const usage = usageOf(body?.usage);
+    const servedModel = typeof body?.model === "string" && body.model ? body.model : model;
+    const eventId = shadowDir ? randomUUID() : null;
+    const note = "state masked via mcp/scrub.mjs key patterns (variant: mask-only, no error-text cap); questions null — a [G] generation sends no question set";
+    let input;
+    try {
+      input = { state: scrubMask(message), redacted: false, note };
+    } catch {
+      input = { state: "[REDACTED]", redacted: true, note: `${note}; unserializable input redacted in full` };
+    }
+    appendShadow(shadowDir, {
+      ts: now(),
+      runId: runId ?? null,
+      hash: createHash("sha256").update(canonicalJson({ model, questions: null, state: message })).digest("hex"),
+      pinnedModel: null,
+      model: servedModel,
+      tier: "cheap",
+      mode: "live",
+      ok: true,
+      answers: output,
+      confidence: null,
+      formatConfidence: null,
+      usage,
+      responseId: typeof body?.id === "string" ? body.id : null,
+      error: null,
+      decisionId: stepId,
+      criteriaVersion: entry.criteriaVersion,
+      type: SHADOW_EVENT_TYPE,
+      eventId,
+      input: { state: input.state, questions: null },
+      scrub: { variant: "mask-only", redacted: input.redacted, note: input.note },
+      taskKey: taskKey ?? null,
+      durationMs: Date.now() - startedAt,
+    });
+    return output;
   };
 }
 
@@ -749,7 +840,7 @@ async function main() {
     runId,
     storePath: flag("store"),
     caller: createLiveCaller(),
-    generator: createDefaultGenerator({ apiKey: process.env.OPENROUTER_API_KEY }),
+    generator: createDefaultGenerator({ apiKey: process.env.OPENROUTER_API_KEY, runId }),
   });
 
   if (cmd === "run") {
