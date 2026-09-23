@@ -68,8 +68,7 @@ const DOD_OUTPUT = {
   definitionOfDone: [{ check: "node scripts/graph-runner.test.mjs is green", kind: "test", bounded: true }],
 };
 const AC_OUTPUT = {
-  acs: [{ id: "AC-1", text: "The DoD node generates a bounded checklist.", kind: "behaviour" }],
-  definitionOfDone: [{ check: "node scripts/plan-dod.test.mjs is green", kind: "test", bounded: true }],
+  acs: [{ id: "AC-1", text: "The DoD node generates a bounded checklist.", kind: "behaviour", evidence: "test" }],
 };
 const RUN_INPUTS = {
   "inbox.entry": "Dictated entry (test): the plan chain generates the DoD as a bounded checklist.",
@@ -174,7 +173,7 @@ await test("8 plan steps, 7 sequence edges, plan.dod sits between plan.dor and p
   );
   eq(PLAN.steps["plan.dor"].kind, "J", "plan.dor stays [J]");
   eq(DOD_STEP.kind, "G", "plan.dod is [G]");
-  eq(AC_STEP.kind, "G", "plan.ac stays [G] (FOC-475 owns any split)");
+  eq(AC_STEP.kind, "G", "plan.ac stays [G] (the FOC-475 testable loop is node-internal, not a split)");
 });
 
 await test("the graph step deep-equals the registry entry on the D7 contract (one spec, two views)", () => {
@@ -197,7 +196,23 @@ function seedDone(storePath, stepId, output) {
   })}\n`);
 }
 
-function makeRunner({ generator, storePath, caller = async () => { fail("the caller must not fire when plan.dor is already done"); } }) {
+function makeRunner({ generator, storePath, caller = async (input) => {
+  // plan.ac executes through the FOC-475 node-internal loop, so its gate call
+  // is the one seam call a dod-first walk makes — serve it above the verdict
+  // threshold; anything else reaching the default caller is a bug.
+  if (input?.decisionId === "plan.ac.testable") {
+    return {
+      ok: true,
+      step: "decision-call",
+      decisionId: "plan.ac.testable",
+      criteriaVersion: 1,
+      autonomy: "A0",
+      annotation: { answers: Object.fromEntries((input.instances ?? []).map((_, i) => [`ac${i}`, { type: "noul", noul: 0.9 }])), confidence: 0.9 },
+      pinnedModel: "typesafe/jev-1.13",
+    };
+  }
+  fail(`unexpected caller decisionId ${input?.decisionId ?? "none"} — the default caller serves only plan.ac.testable`);
+} }) {
   return createGraphRunner({
     runId: "run-plan-dod",
     storePath,
@@ -363,7 +378,8 @@ await test("plan.ac rides the same generator: its own registry prompt, its reads
 
     const body = JSON.parse(fetchCalls[0].options.body);
     const message = body.messages[0].content;
-    if (!message.includes("You generate acceptance criteria and a definition of done for one planning inbox entry")) fail("plan.ac's REGISTRY PROMPT is on the wire (FOC-475 inherits the fixed transport)");
+    if (!message.includes("You generate acceptance criteria for one planning inbox entry")) fail("plan.ac's REGISTRY PROMPT is on the wire (FOC-475 inherits the fixed transport)");
+    if (message.includes("definition of done")) fail("plan.ac is AC-only since FOC-475 — no DoD ask in its prompt");
     if (!message.includes('- inbox.entry: "the dictated entry"') || !message.includes("- features.list: ")) fail("both declared reads reach the message");
     deepEq(body.response_format, { type: "json_schema", json_schema: { name: "plan.ac", strict: true, schema: AC_STEP.output } }, "plan.ac's schema");
 

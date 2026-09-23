@@ -82,6 +82,7 @@ import { scrub, scrubMask } from "./mcp/scrub.mjs";
 import { appendShadow, canonicalJson, createDecisionCaller, DECISION_STEP, SHADOW_EVENT_TYPE, usageOf } from "./decision-call.mjs";
 import { loadGraph, validateGraph } from "./graph-validate.mjs";
 import { getRegistryEntry, loadRegistry } from "./decision-registry.mjs";
+import { AC_TESTABLE_DECISION, runPlanAcNode } from "./plan-ac.mjs";
 import { KINDS } from "./supervisor-gate.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -539,6 +540,19 @@ export function createGraphRunner({
   if (gStepIds.length && typeof generator !== "function") {
     throw new TypedError("invalid_input", `the "${nodeName}" subgraph carries [G] steps (${gStepIds.join(", ")}) — inject a generator`);
   }
+  // plan.ac is a [G] step that ALSO runs the node-internal testable gate
+  // (FOC-475) through the seam — the same A0, threshold-null, tier-2-dead
+  // posture the [J] steps pin, checked here so drift is a construction
+  // failure, never a mid-run surprise.
+  if (steps["plan.ac"]?.kind === "G") {
+    const gateEntry = registry.entries[AC_TESTABLE_DECISION];
+    if (typeof caller !== "function") {
+      throw new TypedError("invalid_input", `step "plan.ac" runs the node-internal ${AC_TESTABLE_DECISION} gate — inject a caller (createDecisionCaller)`);
+    }
+    if (!gateEntry || gateEntry.autonomy !== "A0" || gateEntry.threshold !== null || gateEntry.fallback?.tier2 !== "disabled") {
+      throw new TypedError("schema_invalid", `step "plan.ac" binds a ${AC_TESTABLE_DECISION} entry the runner cannot honestly serve (A0, threshold null, tier 2 disabled)`);
+    }
+  }
 
   const emitGate = gateEmitter ?? defaultGateEmitter();
   const linear = linearEffect ?? defaultLinearEffect();
@@ -561,9 +575,10 @@ export function createGraphRunner({
   }
 
   // Executors RETURN records; run() is the only writer. A failed record stops
-  // the run and carries the triggering cause for the frontman.
-  function failRecord(stepId, error) {
-    return stepRecord(runId, now, recordKey(stepId), "failed", { stepId, error });
+  // the run and carries the triggering cause for the frontman. Extra typed
+  // payload (e.g. the plan.ac escalation detail) rides on the record.
+  function failRecord(stepId, error, extra = {}) {
+    return stepRecord(runId, now, recordKey(stepId), "failed", { stepId, error, ...extra });
   }
   // A stop the runner ITSELF produced (unexpected state) is appended here so
   // the store carries the triggering record even though no step executed.
@@ -617,7 +632,31 @@ export function createGraphRunner({
 
   // [G] — one schema-validated model call; the runner validates whatever the
   // generator returns against the step's output schema (single choke point).
+  // plan.ac is the ONE [G] step with a node-internal quality loop (FOC-475):
+  // the FOC-452 plan.ac.testable gate scores every generated criterion, the
+  // node regenerates once carrying the gate's reasons, then escalates typed.
+  // The loop is node-internal — the graph-level retry EDGE is FOC-476's, and
+  // no graph edge is added here.
   async function runGStep(stepId, step, reads) {
+    if (stepId === "plan.ac") {
+      let result;
+      try {
+        result = await runPlanAcNode({
+          stepId,
+          step,
+          reads,
+          generator,
+          caller,
+          validate: (raw) => outputValidate.get(stepId)(raw),
+        });
+      } catch (err) {
+        return failRecord(stepId, errorOf(err, "plan.ac node threw"));
+      }
+      if (result.status === "done") {
+        return stepRecord(runId, now, stepId, "done", { stepId, output: result.output });
+      }
+      return failRecord(stepId, result.error, result.escalation ? { escalation: result.escalation } : {});
+    }
     let raw;
     try {
       raw = await generator({ stepId, step, reads });
