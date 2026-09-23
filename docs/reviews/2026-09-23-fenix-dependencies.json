@@ -1,0 +1,466 @@
+{
+  "i0": {
+    "identifier": "FOC-406",
+    "relations": {
+      "nodes": []
+    },
+    "inverseRelations": {
+      "nodes": []
+    }
+  },
+  "i1": {
+    "identifier": "FOC-450",
+    "relations": {
+      "nodes": [
+        {
+          "type": "blocks",
+          "relatedIssue": {
+            "identifier": "FOC-476",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        }
+      ]
+    },
+    "inverseRelations": {
+      "nodes": []
+    }
+  },
+  "i2": {
+    "identifier": "FOC-381",
+    "relations": {
+      "nodes": [
+        {
+          "type": "blocks",
+          "relatedIssue": {
+            "identifier": "FOC-477",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "relatedIssue": {
+            "identifier": "FOC-397",
+            "state": {
+              "name": "In Review"
+            }
+          }
+        }
+      ]
+    },
+    "inverseRelations": {
+      "nodes": [
+        {
+          "type": "related",
+          "issue": {
+            "identifier": "FOC-459",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "i3": {
+    "identifier": "FOC-407",
+    "relations": {
+      "nodes": []
+    },
+    "inverseRelations": {
+      "nodes": []
+    }
+  },
+  "i4": {
+    "identifier": "FOC-271",
+    "relations": {
+      "nodes": []
+    },
+    "inverseRelations": {
+      "nodes": []
+    }
+  },
+  "i5": {
+    "identifier": "FOC-397",
+    "relations": {
+      "nodes": [
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-451",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-473",
+            "state": {
+              "name": "Done"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-478",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-391",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-387",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-380",
+            "state": {
+              "name": "Canceled"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-382",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "relatedIssue": {
+            "identifier": "FOC-476",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        }
+      ]
+    },
+    "inverseRelations": {
+      "nodes": [
+        {
+          "type": "related",
+          "issue": {
+            "identifier": "FOC-452",
+            "state": {
+              "name": "In Progress"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "issue": {
+            "identifier": "FOC-448",
+            "state": {
+              "name": "Done"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "issue": {
+            "identifier": "FOC-381",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "issue": {
+            "identifier": "FOC-396",
+            "state": {
+              "name": "In Progress"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "i6": {
+    "identifier": "FOC-449",
+    "relations": {
+      "nodes": [
+        {
+          "type": "blocks",
+          "relatedIssue": {
+            "identifier": "FOC-477",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-387",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "relatedIssue": {
+            "identifier": "FOC-399",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "relatedIssue": {
+            "identifier": "FOC-398",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "relatedIssue": {
+            "identifier": "FOC-392",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        }
+      ]
+    },
+    "inverseRelations": {
+      "nodes": [
+        {
+          "type": "related",
+          "issue": {
+            "identifier": "FOC-452",
+            "state": {
+              "name": "In Progress"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "i7": {
+    "identifier": "FOC-451",
+    "relations": {
+      "nodes": []
+    },
+    "inverseRelations": {
+      "nodes": [
+        {
+          "type": "related",
+          "issue": {
+            "identifier": "FOC-397",
+            "state": {
+              "name": "In Review"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "issue": {
+            "identifier": "FOC-452",
+            "state": {
+              "name": "In Progress"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "issue": {
+            "identifier": "FOC-448",
+            "state": {
+              "name": "Done"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "i8": {
+    "identifier": "FOC-452",
+    "relations": {
+      "nodes": [
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-391",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-451",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-449",
+            "state": {
+              "name": "In Review"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-475",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "related",
+          "relatedIssue": {
+            "identifier": "FOC-397",
+            "state": {
+              "name": "In Review"
+            }
+          }
+        }
+      ]
+    },
+    "inverseRelations": {
+      "nodes": [
+        {
+          "type": "blocks",
+          "issue": {
+            "identifier": "FOC-448",
+            "state": {
+              "name": "Done"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "i9": {
+    "identifier": "FOC-474",
+    "relations": {
+      "nodes": [
+        {
+          "type": "blocks",
+          "relatedIssue": {
+            "identifier": "FOC-477",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        }
+      ]
+    },
+    "inverseRelations": {
+      "nodes": [
+        {
+          "type": "blocks",
+          "issue": {
+            "identifier": "FOC-448",
+            "state": {
+              "name": "Done"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "i10": {
+    "identifier": "FOC-477",
+    "relations": {
+      "nodes": [
+        {
+          "type": "blocks",
+          "relatedIssue": {
+            "identifier": "FOC-478",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        }
+      ]
+    },
+    "inverseRelations": {
+      "nodes": [
+        {
+          "type": "blocks",
+          "issue": {
+            "identifier": "FOC-381",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "issue": {
+            "identifier": "FOC-449",
+            "state": {
+              "name": "In Review"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "issue": {
+            "identifier": "FOC-476",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "issue": {
+            "identifier": "FOC-475",
+            "state": {
+              "name": "Backlog"
+            }
+          }
+        },
+        {
+          "type": "blocks",
+          "issue": {
+            "identifier": "FOC-474",
+            "state": {
+              "name": "In Progress"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
