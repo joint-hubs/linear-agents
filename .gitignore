@@ -45,6 +45,7 @@ agents/*/daemon/
 # feedback drafts (pre-send, keyed by UUID) and the stats cache are regenerated
 agents/*/feedback/
 agents/*/stats-cache.json
+agents/*/state/
 
 # spike scratch (re-runnable T-A1 evidence; see docs/adr/0002)
 .spike-*/
