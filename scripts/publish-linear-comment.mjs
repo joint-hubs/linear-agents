@@ -26,6 +26,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { assertEgressClean, EgressBlockedError } from "./egress-screen.mjs";
 
 // Resolve sibling scripts against this file's own location, not process.cwd() —
 // callers may invoke this script from any directory (see FOC-153).
@@ -237,6 +238,20 @@ function main() {
     tier: args.tier,
     summary: args.summary,
   });
+
+  // Egress screen (FOC-450): the composed body is about to leave the process —
+  // its own --dry-run echo included (that path below never reaches linear-ops).
+  // linear-ops re-screens at the chokepoint; this pass covers the composition
+  // inputs: summary bullets, --next and --body-file (extraBody).
+  try {
+    assertEgressClean(body, "run summary comment");
+  } catch (err) {
+    if (err instanceof EgressBlockedError) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
 
   if (args.dryRun) {
     console.log(`[dry-run] would post to ${args.issue} (dedup tag ${args.tag}) — nothing was written:\n`);
