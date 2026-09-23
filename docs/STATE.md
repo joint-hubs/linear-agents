@@ -1,7 +1,14 @@
 # STATE — linear-agents (pilotaż orkiestratora)
 
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
-> Orkiestrator: GLM-5.2. Plan wykonawczy: `docs/BUILD-BACKLOG.md`. Polityka: `~/.claude/memory/orchestration.md`.
+> Fenix supervisor contract: `agents/supervisor/CLAUDE.md`. Squad model routing: `config/models.json`. Execution plan: `docs/BUILD-BACKLOG.md`. Atlas delegation is a separate mechanism.
+
+## 2026-09-23 — CodeGraph prompt refresh — verified delivery
+
+- Role prompts slimmed + CodeGraph guidance unified + fail-closed MCP boundary. Measured mandatory-payload cut (LF-normalized bytes, not billed tokens; role file + previous PRD/spec reads, shared global context excluded): DEV 35261→21654 (−38.6%), PLAN 23377→17569 (−24.8%), REVIEW 25629→20325 (−20.7%), TEST 24443→16636 (−31.9%), CADENCE 17865→12868 (−28%), SUP 20107→19670 (−2.2%) — ≈21–39% per squad role. Full report + diagnostics: `docs/reviews/2026-09-23-prompt-codegraph-delivery.md`.
+- Two paid probe diagnostics done (no further paid probes) — prompt adoption proven; production worktree MCP approval separately verified Connected without model/API calls. Checklist test-count pins now 84 files (historical 80 entries below unchanged).
+- Exact HEAD/schema guard and independent review PASS. Final root regression: 84/84 files passed, exit 0 (783171 ms); implementation commit references are recorded in the delivery report. Origin/main `e2f76f7` verified by direct ls-remote — baseline `70e40a4` genuinely 32 ahead; no push/fetch.
+- Next supervisor restart: `docs/supervisor-restart-2026-09-23.md` (explicit new session in `C:/Users/mateu/Documents/GitHub/linear-agents`; FOC-475 closed only after rechecking AC/DoD vs current Linear — never unconditionally).
 
 ## 2026-09-23 — FOC-475: plan.ac [G] AC generator — node, testable-gate loop, eval
 
