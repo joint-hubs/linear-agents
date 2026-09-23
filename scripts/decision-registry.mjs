@@ -1,13 +1,13 @@
 // scripts/decision-registry.mjs — the decision & node registry loader (FOC-448).
 //
 // config/decisions.json is the one typed place for every model-made judgment
-// and every v2 graph-node step: the seven PLAN entries carry the ADR-0012 D7
-// contract copied verbatim from docs/plans/graph-json-v2-design.md §3.1–§3.9,
-// and the transport entries (gate.screen, the FOC-401 step pair, and the five
-// FOC-397 decide-edge entries) carry the question set their call-site sends
-// to the decision-call seam — decide edges additionally pin their cascade
-// ladder start (tier {cascade, min}). This module loads + validates that file
-// fail-closed —
+// and every v2 graph-node step: the PLAN graph-node entries carry the
+// ADR-0012 D7 contract copied verbatim from docs/plans/graph-json-v2-design.md
+// §3.1–§3.9, and the transport entries (gate.screen, the FOC-401 step pair,
+// the FOC-452 PLAN gate decisions, and the FOC-397/FOC-451 decide-edge
+// entries) carry the question set their call-site sends to the decision-call
+// seam — decide edges additionally pin their cascade ladder start (tier
+// {cascade, min}). This module loads + validates that file fail-closed —
 // a registry that does not parse, does not pass its schema, or carries an
 // id that disagrees with its key is a typed error, never a guessed lookup —
 // exposes lookup by id, resolves concrete question sets for the seam, and
