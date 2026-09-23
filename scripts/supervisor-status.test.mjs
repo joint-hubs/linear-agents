@@ -324,7 +324,7 @@ test("returns reason=exit when a live child finishes during the wait", () => {
       [SPAWN, "--run", runId, "--squad", "dev", "--task", "FOC-123", "--prompt", "k", "--repo", repo],
       {
         encoding: "utf8",
-        env: { ...process.env, LA_CLAUDE_BIN: MOCK, LA_SUPERVISOR_NO_TELEMETRY: "1", MOCK_CLAUDE_HANG_MS: "1500" },
+        env: { ...process.env, LA_CLAUDE_BIN: MOCK, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1", MOCK_CLAUDE_HANG_MS: "1500" },
       },
     ),
   );

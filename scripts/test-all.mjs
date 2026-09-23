@@ -38,6 +38,10 @@ const suiteEnv = { ...process.env };
 for (const key of Object.keys(suiteEnv)) {
   if (key.startsWith('LA_SUPERVISOR')) delete suiteEnv[key];
 }
+// Nothing LA_SUPERVISOR* is added back — zz-suite-env-scrub.test.mjs holds that
+// line. Suites that spawn mock children set the offline codegraph seam
+// (LA_SUPERVISOR_NO_CODEGRAPH=1) in their own env builders — see baseEnv in
+// supervisor-test-fixtures.mjs.
 
 let failed = 0;
 let passed = 0;

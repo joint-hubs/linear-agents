@@ -31,15 +31,28 @@
 // exactly cases 9/10 red; guard removed entirely → every guarded assertion red
 // while the raw-CLI tripwires stay green.
 //
+// Round 6 (2026-09-23 review corrections): the freshness verdict moved wholly
+// into codegraph-runtime.mjs (the CLI's own copy had drifted — P2) and gained
+// the exact-HEAD proof `.codegraph/synced-head` (P1): a BACKDATED commit and a
+// BACKWARDS checkout both read pending 0/0/0 with an in-order lastIndexed, and
+// both used to answer from the stale graph. Case 7c proves the fix on the CALL
+// relationship with the real CLI (rev1 has no caller, rev2 adds one — a stale
+// answer names the rev2 caller after checking rev1 out). Cases 17–19 pin the
+// rest through the fake CLI: the stamp bootstrap (one sync, then none), the
+// schema-stale refusal (a sync cannot close a schema gap; `codegraph index`
+// can), and the bounded query (a hung CLI dies at --timeout into UNKNOWN).
+//
 // All fixtures live in temp directories; the wrapper is COPIED into each fixture
 // (its ROOT is script-relative, so the copy pins the wrapper to the fixture tree).
 // The real worktree tree is never used as a fixture and is never modified.
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync, chmodSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync, chmodSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+
+import { makeFakeCodegraphCli } from "./fixtures/codegraph-fake-cli.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -103,14 +116,33 @@ function makeFixture(name) {
   cleanupDirs.push(root);
   mkdirSync(join(root, "scripts"));
   copyFileSync(WRAPPER_SRC, join(root, "scripts", "code-intel.mjs"));
+  // The wrapper imports its contract from ./codegraph-runtime.mjs — the copy
+  // pins the runtime to the fixture tree too, exactly as it pins the wrapper.
+  copyFileSync(join(__dirname, "codegraph-runtime.mjs"), join(root, "scripts", "codegraph-runtime.mjs"));
   return root;
 }
 
+// The wrapper takes the target from the CALLER'S cwd (git toplevel) or an
+// explicit --project-root — never from the script's own location. So every
+// fixture run must execute FROM the fixture root.
 const runWrapper = (root, args, env = {}) =>
   spawnSync(process.execPath, [join(root, "scripts", "code-intel.mjs"), ...args], {
+    cwd: root,
     encoding: "utf8",
     env: { ...process.env, ...env },
   });
+
+// A committed baseline for a fixture — the shape every guarded query needs
+// (round 5: pendingChanges is computed against git HEAD).
+function gitInitFixture(root) {
+  const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+  git("init", "-b", "main");
+  git("config", "user.email", "test@example.com");
+  git("config", "user.name", "test");
+  writeFileSync(join(root, "README.md"), "fixture\n");
+  git("add", "README.md");
+  git("commit", "-m", "init");
+}
 
 // The raw one-shot CLI (the same binary the wrapper resolves to on win32).
 // Used ONLY by the tripwire cases 4/5: they pin upstream's answer layer, which
@@ -200,6 +232,7 @@ function runTests() {
   {
     console.log("\nmissing index (un-initialized fixture)");
     const root = makeFixture("noindex");
+    gitInitFixture(root); // the target must resolve before anything else can refuse
     for (const args of ALL_VERBS) {
       const r = runWrapper(root, args);
       assertEq(r.status, 3, `exit 3 for: ${args.join(" ")}`);
@@ -221,8 +254,10 @@ function runTests() {
   // guard's instrument (status --json) cannot run, so cleanliness cannot be
   // proven — the refusal fires before any query, never a silent pass-through.
   // Ordering note (round 5): the guard checks its instrument BEFORE the git
-  // baseline, so this fixture — which has no .git either — still gets the
-  // specific not-on-PATH refusal, not a baseline refusal.
+  // baseline, so this fixture still gets the specific not-on-PATH refusal,
+  // not a baseline refusal. git itself must stay findable: the wrapper resolves
+  // the target root WITH GIT before any CLI spawn, so a PATH that hid git too
+  // would test root resolution, not the CLI probe.
   {
     console.log("\ncodegraph not on PATH (fixture with an empty .codegraph dir)");
     if (process.platform !== "win32") {
@@ -231,8 +266,14 @@ function runTests() {
       skip("not-on-PATH", "win32-only spawn semantics (shell:true + cmd.exe)");
     } else {
       const root = makeFixture("nopath");
+      gitInitFixture(root);
       mkdirSync(join(root, ".codegraph")); // requireIndex passes; the spawn is the test
-      const r = runWrapper(root, ["symbol", "foc114GhostSymbol"], { PATH: "C:\\Windows\\System32" });
+      const gitDir = dirname(
+        spawnSync("where", ["git"], { encoding: "utf8" }).stdout.trim().split(/\r?\n/)[0],
+      );
+      const r = runWrapper(root, ["symbol", "foc114GhostSymbol"], {
+        PATH: [gitDir, "C:\\Windows\\System32"].join(";"),
+      });
       const out = norm(r.stdout) + norm(r.stderr);
       assertEq(r.status, 3, "exit 3 after the win32 not-on-PATH fix (pre-fix observed: exit 1)");
       assert(out.includes("not on PATH"), "not-on-PATH refusal printed");
@@ -379,6 +420,95 @@ function runTests() {
       assert(out.includes("synced before answering"), "guard reports that it synced a stale index before answering");
     }
 
+    // ---- Case 7b: a COMMIT after the sync (HEAD switch) — the pending-zero blind spot ----
+    {
+      console.log("\ncommitted HEAD switch through the wrapper (the pendingChanges blind spot)");
+      // pendingChanges compares the tree against git HEAD: commit the current
+      // tree and the counts read 0/0/0 while the index still predates the new
+      // HEAD (measured 2026-09-23). Only the exact-HEAD stamp sees the switch —
+      // the sha it recorded is the previous commit — so the guard re-proves with
+      // one bounded sync; never a confident stale answer.
+      const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+      git("add", "src"); // never a blind `git add -A`: it would baseline .codegraph
+      git("commit", "-m", "second");
+      settle(1000);
+      const probe = runWrapper(root, ["symbol", "foc114ProbeTarget"]);
+      const out = norm(probe.stdout) + norm(probe.stderr);
+      assertEq(probe.status, 0, "guarded query after a commit exits 0 (the stamp mismatch settled it)");
+      assert(out.includes("not proven for the current git HEAD"), "guard reports the stamp-mismatch sync");
+      assert(out.includes("src/lib.mjs:6"), "post-switch answer still cites the current location");
+    }
+
+    // ---- Case 7c: the P1 false-fresh shapes, proven on the CALL graph ----
+    {
+      console.log("\nbackwards checkout + backdated commit (P1 false-fresh, call-graph end to end)");
+      // Review 2026-09-23 P1: `lastIndexed >= HEAD commit time` could not tell
+      // "synced after this HEAD" from "an OLDER revision was checked out / a
+      // BACKDATED commit landed" — both read pending 0/0/0 with an in-order
+      // lastIndexed, so the stale graph answered. The exact-HEAD stamp
+      // (.codegraph/synced-head) closes both, and the proof here is the CALL
+      // RELATIONSHIP, not just source lines: rev1 has NO caller for
+      // focRevTarget, rev2 ADDS one — a stale answer would name the rev2
+      // caller while HEAD is rev1.
+      const revRoot = makeFixture("revswitch");
+      mkdirSync(join(revRoot, "src"));
+      writeFileSync(join(revRoot, "src", "lib.mjs"), 'export function focRevTarget() {\n  return 1;\n}\n');
+      writeFileSync(join(revRoot, "src", "app.mjs"), 'export function focRevMain() {\n  return 0;\n}\n');
+      const git = (...args) => spawnSync("git", args, { cwd: revRoot, encoding: "utf8" });
+      git("init", "-b", "main");
+      git("config", "user.email", "test@example.com");
+      git("config", "user.name", "test");
+      git("add", "src");
+      git("commit", "-m", "first"); // rev1: nothing calls focRevTarget
+      writeFileSync(
+        join(revRoot, "src", "app.mjs"),
+        'import { focRevTarget } from "./lib.mjs";\n\nexport function focRevMain() {\n  return focRevTarget();\n}\n',
+      );
+      git("add", "src");
+      git("commit", "-m", "second"); // rev2: focRevMain calls focRevTarget
+      const init = spawnSync("codegraph", ["init", "."], { cwd: revRoot, shell: true, encoding: "utf8" });
+      assertEq(init.status, 0, "codegraph init at rev2 succeeds (fixture self-check)");
+      settle(2000);
+
+      // (a) rev2 through the wrapper: the caller relationship answers.
+      const rev2 = runWrapper(revRoot, ["callers", "focRevTarget"]);
+      const rev2Out = norm(rev2.stdout) + norm(rev2.stderr);
+      assertEq(rev2.status, 0, "rev2 query exits 0 (guard bootstrapped the stamp)");
+      assert(rev2Out.includes("focRevMain"), "rev2 answer names the caller (focRevMain)");
+
+      // (b) BACKWARDS CHECKOUT to rev1: pending 0/0/0 (the tree matches HEAD
+      // again), lastIndexed in-order — the old timestamp comparison called
+      // this fresh; the recorded sha does not. One proof sync, and the CALL
+      // GRAPH follows the checkout: no focRevMain caller at rev1.
+      git("checkout", "HEAD~1");
+      settle(2000);
+      const rev1 = runWrapper(revRoot, ["callers", "focRevTarget"]);
+      const rev1Out = norm(rev1.stdout) + norm(rev1.stderr);
+      assertEq(rev1.status, 0, "backwards checkout: guard re-proved (one sync) and answered");
+      assert(!rev1Out.includes("focRevMain"), "rev1 answer has NO focRevMain caller — the call graph followed the checkout");
+      assert(rev1Out.includes("not proven for the current git HEAD"), "the stamp-mismatch sync is reported");
+
+      // (c) BACKDATED COMMIT on top of rev2: identical tree, the commit clock
+      // set to 2020 — pending 0 and a lastIndexed after every honest reading,
+      // the exact shape the time comparison could not see. The stamp (rev1's
+      // sha) vs the new HEAD decides.
+      git("checkout", "-");
+      spawnSync("git", ["commit", "--allow-empty", "-m", "backdated"], {
+        cwd: revRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_COMMITTER_DATE: "2020-01-01T00:00:00",
+          GIT_AUTHOR_DATE: "2020-01-01T00:00:00",
+        },
+      });
+      const back = runWrapper(revRoot, ["callers", "focRevTarget"]);
+      const backOut = norm(back.stdout) + norm(back.stderr);
+      assertEq(back.status, 0, "backdated commit: guard re-proved (one sync) and answered");
+      assert(backOut.includes("focRevMain"), "the rev2 caller relationship answers again (the tree is rev2)");
+      assert(backOut.includes("not proven for the current git HEAD"), "the stamp-mismatch sync is reported");
+    }
+
     // ---- Case 8: unprovable index state → exit 3 UNKNOWN, never pass-through ----
     {
       console.log("\nunprovable index state (corrupt .codegraph) → exit 3 UNKNOWN");
@@ -395,17 +525,22 @@ function runTests() {
       assert(out.includes("codegraph init"), "refusal names the fix (codegraph init)");
     }
 
-    // ---- Case 9: no git baseline (round 5 blind spot) → exit 3 UNKNOWN ----
+    // ---- Case 9: no git at all — two refusals, both round-5 meaningful ----
     {
       console.log("\nno git baseline (no .git at the project root) → exit 3 UNKNOWN");
       // Round-4's fixtures always committed, so the guard's instrument was
       // truthful in every shipped test and the blind spots were invisible.
-      // Here there is NO git at all: measured (evidence §7), the CLI's
-      // pendingChanges is computed against a git baseline and can report a
-      // false zero here — 1.5.0 truthful in some no-git shapes, 1.6.0 not,
-      // depending on what git discovery finds above the tree. Whatever the
-      // instrument says, freshness is UNPROVABLE, so the guard refuses before
-      // trusting any pendingChanges value.
+      // Measured (evidence §7), the CLI's pendingChanges is computed against a
+      // git baseline and can report a false zero without one. Two shapes now:
+      //
+      //  (a) cwd-based targeting in a non-repo directory → the wrapper cannot
+      //      even resolve a target root and refuses with the fix named. This is
+      //      the 2026-09-23 root contract: NO fallback to the script location,
+      //      no silent default — the wrong-checkout defect class, closed at the
+      //      boundary.
+      //  (b) an EXPLICIT --project-root at the same tree → the root resolves
+      //      (explicit means the caller decided), the index check passes, and
+      //      the ROUND-5 refusal fires on the missing git baseline itself.
       const root = makeFixture("nogit");
       mkdirSync(join(root, "src"));
       writeFileSync(
@@ -418,9 +553,15 @@ function runTests() {
         join(root, "src", "newer.mjs"),
         ["export function foc114NogitPending() {", "  return 2;", "}", ""].join("\n"),
       );
-      const probe = runWrapper(root, ["symbol", "foc114NogitPending"]);
+      const cwdProbe = runWrapper(root, ["symbol", "foc114NogitPending"]);
+      const cwdOut = norm(cwdProbe.stdout) + norm(cwdProbe.stderr);
+      assertEq(cwdProbe.status, 3, "non-repo cwd → exit 3 (no root to check, so no answer either)");
+      assert(!cwdOut.includes("foc114NogitPending"), "root refusal never names the queried symbol");
+      assert(cwdOut.includes("Cannot determine the target project root"), "root refusal names what is missing");
+      assert(cwdOut.includes("--project-root"), "root refusal names the fix");
+      const probe = runWrapper(root, ["symbol", "foc114NogitPending", "--project-root", root]);
       const out = norm(probe.stdout) + norm(probe.stderr);
-      assertEq(probe.status, 3, "no git baseline → exit 3 (never an answer from an unproven index)");
+      assertEq(probe.status, 3, "explicit root without git → exit 3 (never an answer from an unproven index)");
       assert(!out.includes("foc114NogitPending"), "no-baseline refusal never names the queried symbol");
       assert(out.includes("no git repository"), "no-baseline refusal names what is missing");
       assert(out.includes("git init"), "no-baseline refusal names the fix");
@@ -509,6 +650,7 @@ function runTests() {
       const root = join(outer, "repo with space");
       mkdirSync(join(root, "scripts"), { recursive: true });
       copyFileSync(WRAPPER_SRC, join(root, "scripts", "code-intel.mjs"));
+      copyFileSync(join(__dirname, "codegraph-runtime.mjs"), join(root, "scripts", "codegraph-runtime.mjs"));
       mkdirSync(join(root, "src"));
       writeFileSync(
         join(root, "src", "lib.mjs"),
@@ -532,6 +674,265 @@ function runTests() {
       assert(out.includes("src/newer.mjs:1"), "space-path repo: pending symbol found after the quoted sync");
       assert(out.includes("synced before answering"), "space-path repo: guard's sync note present (the sync ran, quoted)");
     }
+
+    // ---- Case 14: two repos — an explicit --project-root retargets EVERYTHING ----
+    {
+      console.log("\ntwo repos: --project-root B from cwd A answers about B, guard included");
+      // A guard that checked A while the query hit B would be the exact
+      // wrong-checkout hole: freshness proven for one tree, answered from
+      // another. A distinct symbol per repo makes the target observable.
+      const rootB = makeFixture("repo-b");
+      mkdirSync(join(rootB, "src"));
+      writeFileSync(
+        join(rootB, "src", "other.mjs"),
+        ["export function foc114OtherRepoSymbol() {", "  return 9;", "}", ""].join("\n"),
+      );
+      const gitB = (...args) => spawnSync("git", args, { cwd: rootB, encoding: "utf8" });
+      gitB("init", "-b", "main");
+      gitB("config", "user.email", "test@example.com");
+      gitB("config", "user.name", "test");
+      gitB("add", "src");
+      gitB("commit", "-m", "init");
+      const initB = spawnSync("codegraph", ["init", "."], { cwd: rootB, shell: true, encoding: "utf8" });
+      assertEq(initB.status, 0, "codegraph init in repo B succeeds (fixture self-check)");
+      // Run FROM repo A (cwd), targeted AT repo B.
+      const probe = runWrapper(root, ["symbol", "foc114OtherRepoSymbol", "--project-root", rootB]);
+      const out = norm(probe.stdout) + norm(probe.stderr);
+      assertEq(probe.status, 0, "explicit --project-root B answers from B");
+      assert(out.includes("foc114OtherRepoSymbol"), "the answer names B's symbol");
+      assert(out.includes("src/other.mjs"), "the answer cites B's file");
+    }
+
+    // ---- Case 15: a linked worktree targets THE WORKTREE, never the main checkout ----
+    {
+      console.log("\nlinked worktree: cwd resolution and one-index-per-worktree");
+      // The wrong-main-root defect this whole contract closes: invoked from a
+      // worktree, the wrapper used to query the script-location checkout and
+      // the wrong tree answered confidently. Two pins:
+      //  (a) before the worktree has its own index: a refusal naming THE
+      //      WORKTREE — never a silent answer from the main repo's index;
+      //  (b) after bootstrap: the answer comes from the worktree's own index.
+      const wtOuter = mkdtempSync(join(tmpdir(), "codeintel-wt-"));
+      cleanupDirs.push(wtOuter);
+      const main = join(wtOuter, "main");
+      mkdirSync(main);
+      const gitM = (...args) => spawnSync("git", args, { cwd: main, encoding: "utf8" });
+      gitM("init", "-b", "main");
+      gitM("config", "user.email", "test@example.com");
+      gitM("config", "user.name", "test");
+      mkdirSync(join(main, "scripts"));
+      copyFileSync(WRAPPER_SRC, join(main, "scripts", "code-intel.mjs"));
+      copyFileSync(join(__dirname, "codegraph-runtime.mjs"), join(main, "scripts", "codegraph-runtime.mjs"));
+      mkdirSync(join(main, "src"));
+      writeFileSync(
+        join(main, "src", "wt.mjs"),
+        ["export function foc114WtSymbol() {", "  return 5;", "}", ""].join("\n"),
+      );
+      gitM("add", "src", "scripts");
+      gitM("commit", "-m", "init");
+      const initM = spawnSync("codegraph", ["init", "."], { cwd: main, shell: true, encoding: "utf8" });
+      assertEq(initM.status, 0, "codegraph init in main repo succeeds (fixture self-check)");
+      const wt = join(wtOuter, "wt");
+      spawnSync("git", ["worktree", "add", wt], { cwd: main, encoding: "utf8" });
+      // (a) no index in the worktree yet → refusal naming THE WORKTREE root.
+      const noIndex = runWrapper(wt, ["symbol", "foc114WtSymbol"]);
+      const noIndexOut = norm(noIndex.stdout) + norm(noIndex.stderr);
+      assertEq(noIndex.status, 3, "worktree without its own index refuses (never borrows main's)");
+      assert(noIndexOut.includes(norm(wt)), "the refusal names THE WORKTREE as the target");
+      assert(
+        !/foc114WtSymbol/.test(noIndexOut.split(norm(wt)).join("")),
+        "refusal never names the queried symbol",
+      );
+      // (b) bootstrap the worktree's own index → the answer comes from it.
+      const initWt = spawnSync("codegraph", ["init", "."], { cwd: wt, shell: true, encoding: "utf8" });
+      assertEq(initWt.status, 0, "codegraph init in the worktree succeeds (bootstrap)");
+      const probe = runWrapper(wt, ["symbol", "foc114WtSymbol"]);
+      const out = norm(probe.stdout) + norm(probe.stderr);
+      assertEq(probe.status, 0, "worktree query answers from the worktree's own index");
+      assert(out.includes("src/wt.mjs"), "the answer cites the worktree's file");
+    }
+  }
+
+  // ---- Case 13: `--path` passthrough is rejected — it would bypass the guard ----
+  // Needs no codegraph at all: the refusal fires before anything is spawned.
+  {
+    console.log("\n--path passthrough rejection");
+    const root = makeFixture("pathflag");
+    gitInitFixture(root);
+    for (const spelling of [
+      ["symbol", "focX", "--path", join(root, "elsewhere")],
+      ["symbol", "focX", "--path=" + join(root, "elsewhere")],
+    ]) {
+      const r = runWrapper(root, spelling);
+      const out = norm(r.stdout) + norm(r.stderr);
+      assertEq(r.status, 2, `exit 2 for: ${spelling.join(" ")}`);
+      assert(out.includes("--path` is not accepted"), "the refusal names the flag");
+      assert(out.includes("--project-root"), "the refusal names the sanctioned spelling");
+    }
+  }
+
+  // ---- Case 16: same-root pin, end to end — the fake CLI's invocation log ----
+  // The real CLI cannot show WHICH root its status/sync/query addressed; a
+  // wrong root answers confidently, which is the defect. The fake shim
+  // (unwrapped through the same .cmd path production takes on win32) logs
+  // every invocation, so this pins the ONE-root contract for
+  // baseline+status+sync+query together — for the cwd-derived root AND for an
+  // explicit --project-root that disagrees with the cwd.
+  {
+    console.log("\nsame-root pin (fake CLI log: status/sync/query address one root)");
+    const holder = mkdtempSync(join(tmpdir(), "codeintel-fakecli-"));
+    cleanupDirs.push(holder);
+    const logPath = join(holder, "calls.log");
+    const fake = makeFakeCodegraphCli({ dir: join(holder, "bin"), mode: "dirty", logPath });
+    const envWithFake = {
+      PATH: [fake.dir, process.env.PATH].join(";"),
+      ...fake.env,
+    };
+    const fixture = makeFixture("sameroot");
+    gitInitFixture(fixture);
+    mkdirSync(join(fixture, ".codegraph")); // requireIndex passes; the fake provides status
+    // The fake's own "index present" marker + a dirty one: status must report
+    // initialized-with-pending so the guard runs its sync → re-check → answer
+    // sequence end to end.
+    writeFileSync(join(fixture, ".codegraph", "fake-initialized"), "1\n");
+    writeFileSync(join(fixture, ".codegraph", "fake-dirty"), "1\n");
+    const probe = runWrapper(fixture, ["symbol", "focSameRootProbe"], envWithFake);
+    const out = norm(probe.stdout) + norm(probe.stderr);
+    assertEq(probe.status, 0, "guarded query exits 0 through the fake CLI (dirty → sync → answer)");
+    const calls = fake.readLog(readFileSync).filter((c) => c.cmd !== "init");
+    assert(calls.length >= 4, "status, sync, status and the query all ran");
+    // The root each invocation addressed: the positional for status/sync, the
+    // value after --path for query verbs.
+    const rootOf = (c) =>
+      norm(c.args[c.cmd === "status" || c.cmd === "sync" ? 0 : c.args.indexOf("--path") + 1]);
+    const roots = new Set(calls.map(rootOf));
+    assertEq(roots.size, 1, "every codegraph invocation addressed exactly ONE root");
+    assert([...roots][0].endsWith(norm(fixture).split("/").pop()), "and that root is the fixture (the cwd's toplevel)");
+    const q = calls.find((c) => c.cmd === "node");
+    assert(q && norm(q.args[q.args.length - 1]).includes(norm(fixture)), "the query verb carried the same root via --path");
+    assert(out.includes("synced before answering"), "the guard's sync note printed for the dirty marker");
+
+    // Same pin with an explicit --project-root: cwd is the fixture, the target
+    // is another directory — every invocation must follow the flag, not cwd.
+    const other = makeFixture("sameroot-other");
+    gitInitFixture(other);
+    mkdirSync(join(other, ".codegraph"));
+    writeFileSync(join(other, ".codegraph", "fake-initialized"), "1\n");
+    writeFileSync(join(other, ".codegraph", "fake-dirty"), "1\n");
+    writeFileSync(logPath, ""); // fresh log
+    const probe2 = runWrapper(fixture, ["symbol", "focSameRootProbe", "--project-root", other], envWithFake);
+    assertEq(probe2.status, 0, "explicit --project-root query exits 0 through the fake CLI");
+    const calls2 = fake.readLog(readFileSync).filter((c) => c.cmd !== "init");
+    assert(calls2.length >= 4, "the full guard sequence ran for the explicit root too");
+    const roots2 = new Set(calls2.map(rootOf));
+    assertEq(roots2.size, 1, "one root again");
+    assert([...roots2][0].endsWith(norm(other).split("/").pop()), "and it is the --project-root target, not the cwd");
+  }
+
+  // ---- Case 17: the stamp bootstrap — first query syncs ONCE, the clean query none ----
+  // The exact-HEAD proof is a per-worktree artifact, so its lifecycle is pinned
+  // end to end through the fake CLI's invocation log: a first query on a
+  // stamp-less index pays ONE bounded sync and writes the stamp into the
+  // TARGET's .codegraph; a second query on the unchanged tree pays none —
+  // proof, not a per-query rebuild.
+  {
+    console.log("\nstamp bootstrap (fake CLI log: one proof sync, then none)");
+    const holder = mkdtempSync(join(tmpdir(), "codeintel-stamp-"));
+    cleanupDirs.push(holder);
+    const logPath = join(holder, "calls.log");
+    const fake = makeFakeCodegraphCli({ dir: join(holder, "bin"), mode: "ready", logPath });
+    const envWithFake = {
+      PATH: [fake.dir, process.env.PATH].join(";"),
+      ...fake.env,
+    };
+    const fixture = makeFixture("stampboot");
+    gitInitFixture(fixture);
+    mkdirSync(join(fixture, ".codegraph"));
+    writeFileSync(join(fixture, ".codegraph", "fake-initialized"), "1\n");
+    const first = runWrapper(fixture, ["symbol", "focStampProbe"], envWithFake);
+    assertEq(first.status, 0, "first query exits 0 (the missing stamp cost one bounded sync)");
+    const firstLog = fake.readLog(readFileSync);
+    assert(firstLog.some((c) => c.cmd === "sync"), "the missing stamp caused ONE sync");
+    assert(firstLog.some((c) => c.cmd === "node"), "and the query ran after it");
+    assert(
+      existsSync(join(fixture, ".codegraph", "synced-head")),
+      "the stamp was written into the TARGET's own .codegraph (per-worktree proof)",
+    );
+
+    writeFileSync(logPath, ""); // fresh log
+    const second = runWrapper(fixture, ["symbol", "focStampProbe"], envWithFake);
+    const secondOut = norm(second.stdout) + norm(second.stderr);
+    assertEq(second.status, 0, "clean query on a proven stamp exits 0");
+    const secondLog = fake.readLog(readFileSync);
+    assert(!secondLog.some((c) => c.cmd === "sync"), "a proven stamp answers with ZERO syncs — no per-query rebuild");
+    assert(!secondOut.includes("synced before answering"), "no sync note for a proven-fresh query");
+    assert(secondLog.some((c) => c.cmd === "node"), "and the query answered");
+  }
+
+  // ---- Case 18: schema-stale index — queries refuse; only a rebuild clears it ----
+  // The fake's `schema` mode reports the schema-stale `index` block
+  // (reindexRecommended=true, a mismatched extraction pair, state/pendingRefs)
+  // until a rebuild writes its marker — `sync` deliberately never does. The
+  // wrapper must refuse (a sync cannot close a schema gap), name the fix
+  // (`codegraph index` — full rebuild), leak no symbol, and answer once the
+  // rebuild landed.
+  {
+    console.log("\nschema-stale index (fake CLI): queries refuse; a rebuild clears it");
+    const holder = mkdtempSync(join(tmpdir(), "codeintel-schema-"));
+    cleanupDirs.push(holder);
+    const logPath = join(holder, "calls.log");
+    const fake = makeFakeCodegraphCli({ dir: join(holder, "bin"), mode: "schema", logPath });
+    const envWithFake = {
+      PATH: [fake.dir, process.env.PATH].join(";"),
+      ...fake.env,
+    };
+    const fixture = makeFixture("schemastale");
+    gitInitFixture(fixture);
+    mkdirSync(join(fixture, ".codegraph"));
+    writeFileSync(join(fixture, ".codegraph", "fake-initialized"), "1\n"); // NO fake-schema-ok
+    const probe = runWrapper(fixture, ["symbol", "focSchemaProbe"], envWithFake);
+    const out = norm(probe.stdout) + norm(probe.stderr);
+    assertEq(probe.status, 3, "schema-stale index → exit 3 (refused, never a confidently wrong answer)");
+    assert(!out.includes("focSchemaProbe"), "refusal never names the queried symbol");
+    assert(out.includes("index-schema-stale"), "refusal names the schema state");
+    assert(out.includes("reindexRecommended"), "refusal carries the instrument's own signal");
+    assert(out.includes("codegraph index"), "refusal names the fix (codegraph index — full rebuild)");
+    const log = fake.readLog(readFileSync);
+    assert(!log.some((c) => c.cmd === "sync"), "a sync cannot close a schema gap — none ran");
+    assert(!log.some((c) => c.cmd === "node"), "the query never spawned");
+
+    // The fix, applied — what `codegraph index <project-root>` does to the marker:
+    writeFileSync(join(fixture, ".codegraph", "fake-schema-ok"), "ok\n");
+    const after = runWrapper(fixture, ["symbol", "focSchemaProbe"], envWithFake);
+    assertEq(after.status, 0, "after the rebuild the query answers (exit 0)");
+  }
+
+  // ---- Case 19: a hung query is BOUNDED — --timeout kills it into UNKNOWN ----
+  // The fake's `hang` mode answers status/sync normally and never answers a
+  // query verb (it outlives any sane budget). The wrapper must die at its own
+  // budget and refuse — a wrapper that can hang is not a guarded one.
+  {
+    console.log("\nhung query (fake CLI hang mode): --timeout refuses instead of hanging");
+    const holder = mkdtempSync(join(tmpdir(), "codeintel-hang-"));
+    cleanupDirs.push(holder);
+    const logPath = join(holder, "calls.log");
+    const fake = makeFakeCodegraphCli({ dir: join(holder, "bin"), mode: "hang", logPath });
+    const envWithFake = {
+      PATH: [fake.dir, process.env.PATH].join(";"),
+      ...fake.env,
+    };
+    const fixture = makeFixture("hangquery");
+    gitInitFixture(fixture);
+    mkdirSync(join(fixture, ".codegraph"));
+    writeFileSync(join(fixture, ".codegraph", "fake-initialized"), "1\n");
+    const t0 = Date.now();
+    const probe = runWrapper(fixture, ["symbol", "focHangProbe", "--timeout", "5000"], envWithFake);
+    const elapsed = Date.now() - t0;
+    const out = norm(probe.stdout) + norm(probe.stderr);
+    assertEq(probe.status, 3, "a hung query is killed at the budget and refused (UNKNOWN)");
+    assert(elapsed < 20_000, `bounded: refused in ${elapsed}ms — never the fake's 30s+ eternity`);
+    assert(out.includes("did not answer within 5000ms"), "the refusal names the budget");
+    assert(!out.includes("focHangProbe"), "refusal never names the queried symbol");
   }
 }
 

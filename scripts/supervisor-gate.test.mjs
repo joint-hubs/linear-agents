@@ -108,7 +108,7 @@ function fixtureRepo() {
 
 const cli = (script, args, env = {}) =>
   spawnSync(process.execPath, [script, ...args], {
-    cwd: ROOT, encoding: "utf8", env: { ...process.env, LA_SUPERVISOR_NO_TELEMETRY: "1", ...env },
+    cwd: ROOT, encoding: "utf8", env: { ...process.env, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1", ...env },
   });
 const gate = (args, env) => cli(GATE, args, env);
 const parse = (r) => JSON.parse(r.stdout);

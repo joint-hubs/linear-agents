@@ -14,10 +14,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { delimiter, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { SUPERVISOR_DENY, buildChildSettings, childSettingsPath, readHeld, readRegistry, runDir } from "./supervisor-lib.mjs";
+import { makeFakeCodegraphCli } from "./fixtures/codegraph-fake-cli.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -78,6 +79,11 @@ function runSpawn(runId, repo, extra = [], env = {}) {
         ...process.env,
         LA_CLAUDE_BIN: MOCK,
         LA_SUPERVISOR_NO_TELEMETRY: "1",
+        // The codegraph preflight has `initialize: true` and this machine has
+        // the real CLI on PATH — without this seam every mock test below would
+        // provision a REAL index in its fixture repo. The readiness tests at
+        // the bottom turn the seam off and use the fake CLI instead.
+        LA_SUPERVISOR_NO_CODEGRAPH: "1",
         MOCK_CLAUDE_HANG_MS: "4000",
         ...env,
       },
@@ -130,7 +136,7 @@ test("rejects a task id that is not a Linear identifier", () => {
   const r = spawnSync(
     process.execPath,
     [SPAWN, "--run", runId, "--squad", "dev", "--task", "not-an-id", "--prompt", "x", "--repo", repo],
-    { encoding: "utf8", env: { ...process.env, LA_CLAUDE_BIN: MOCK, LA_SUPERVISOR_NO_TELEMETRY: "1" } },
+    { encoding: "utf8", env: { ...process.env, LA_CLAUDE_BIN: MOCK, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1" } },
   );
   if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
   if (!parse(r).error.includes("TEAM-NUM")) fail("error did not explain the expected format");
@@ -553,6 +559,188 @@ test("every squad's committed settings.json already denies git push", () => {
     const deny = JSON.parse(readFileSync(join(ROOT, "agents", squad, "settings.json"), "utf8")).permissions?.deny ?? [];
     if (!deny.includes("Bash(git push:*)")) fail(`agents/${squad}/settings.json no longer denies git push`);
   }
+});
+
+// ── CodeGraph launch readiness (plan §4) ─────────────────────────────────────
+// runSpawn defaults to LA_SUPERVISOR_NO_CODEGRAPH=1, so the tests above never
+// provision a real index. The ones below are the only place the preflight runs —
+// against the fake CLI (fixtures/codegraph-fake-cli.mjs), which records every
+// call it receives; the real bundle stays behind it on PATH and is never hit.
+console.log("\nCodeGraph launch readiness");
+
+const norm = (p) => String(p).replace(/\\/g, "/").toLowerCase();
+
+function fakeCodegraphEnv({ mode = "ready" } = {}) {
+  const base = mkdtempSync(join(tmpdir(), "la-cg-"));
+  cleanup.push(base);
+  const logPath = join(base, "log.jsonl");
+  const fake = makeFakeCodegraphCli({ dir: join(base, "bin"), mode, logPath });
+  return {
+    env: {
+      PATH: `${fake.dir}${delimiter}${process.env.PATH}`,
+      LA_SUPERVISOR_NO_CODEGRAPH: "0",
+      ...fake.env,
+    },
+    readLog: () => fake.readLog(readFileSync),
+  };
+}
+
+test("the seam skips the preflight — no index is ever provisioned in a mock suite", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const out = parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_HANG_MS: "0" }));
+  const cg = out.codegraph;
+  if (cg?.skipped !== true) fail(`the preflight ran anyway: ${JSON.stringify(cg)}`);
+  if (!cg.reason.includes("LA_SUPERVISOR_NO_CODEGRAPH")) fail(`reason does not name the seam: ${cg.reason}`);
+  if (!cg.kickoff.includes("SKIPPED")) fail(`kickoff does not say SKIPPED:\n${cg.kickoff}`);
+  if (existsSync(join(out.worktree, ".codegraph"))) fail("a mock-suite worktree got an index");
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("a NEW worktree: init -y at the worktree once, ready kickoff, no approval for an unguarded target", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const fake = fakeCodegraphEnv({ mode: "ready" });
+  const out = parse(runSpawn(runId, repo, [], { ...fake.env, MOCK_CLAUDE_HANG_MS: "0" }));
+
+  const cg = out.codegraph;
+  if (cg.ok !== true) fail(`preflight not ready: ${JSON.stringify(cg)}`);
+  if (cg.initialized !== true) fail("the index was not reported as initialized");
+  if (cg.synced !== false) fail("a clean worktree needed a sync?");
+  if (cg.version !== "fake-1.6.0") fail(`unexpected CLI version: ${cg.version}`);
+  if (!cg.kickoff.includes("status: ready") || !cg.kickoff.includes("graph-first")) {
+    fail(`kickoff does not route graph-first:\n${cg.kickoff}`);
+  }
+  if (!existsSync(join(out.worktree, ".codegraph", "fake-initialized"))) fail("no index marker in the worktree");
+
+  const calls = fake.readLog();
+  const init = calls.find((c) => c.cmd === "init" && !c.args.includes("--help"));
+  if (!init) fail(`the index was never provisioned: ${JSON.stringify(calls)}`);
+  if (init.args[0] !== "-y") fail(`init was not non-interactive: ${JSON.stringify(init)}`);
+  if (norm(init.args[init.args.length - 1]) !== norm(out.worktree)) fail(`init addressed the wrong root: ${JSON.stringify(init)}`);
+  for (const c of calls) {
+    const rootArg = c.args.find((a) => !a.startsWith("-"));
+    if (rootArg && norm(rootArg) !== norm(out.worktree)) fail(`a call addressed another root: ${JSON.stringify(c)}`);
+  }
+
+  // The fixture has no .mcp.json: no approval may happen — and none may be
+  // attempted against the real agents/dev config either.
+  const mcp = cg.mcp;
+  if (mcp.ok !== false || mcp.written !== false) fail(`unguarded target was approved: ${JSON.stringify(mcp)}`);
+  if (!cg.kickoff.includes("mcp: not approved")) fail("kickoff does not show the CLI fallback");
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("a degraded index is DEGRADED-UNKNOWN with sanctioned Read/Grep — the spawn still proceeds", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const fake = fakeCodegraphEnv({ mode: "degraded" });
+  const r = runSpawn(runId, repo, [], { ...fake.env, MOCK_CLAUDE_HANG_MS: "0" });
+  if (r.status !== 0) fail(`a degraded index refused the spawn (exit ${r.status}):\n${r.stdout}\n${r.stderr}`);
+  const out = parse(r);
+  const cg = out.codegraph;
+  if (cg.ok !== false) fail("degraded readiness reported ok");
+  if (!String(cg.reason ?? "").startsWith("pending-after-sync")) fail(`unexpected reason: ${cg.reason}`);
+  if (!cg.kickoff.includes("DEGRADED-UNKNOWN")) fail("kickoff does not shout DEGRADED-UNKNOWN");
+  if (!cg.kickoff.includes("Read/Grep are SANCTIONED")) fail("kickoff does not sanction the fallback");
+  if (!fake.readLog().some((c) => c.cmd === "sync")) fail("the degraded index was never synced");
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("a REUSED worktree is re-checked at launch — status only, same root, never a second init", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const first = fakeCodegraphEnv({ mode: "ready" });
+  const out1 = parse(runSpawn(runId, repo, ["--child", "dev-1"], { ...first.env, MOCK_CLAUDE_HANG_MS: "0" }));
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out1.childId], { encoding: "utf8" });
+
+  const reuse = fakeCodegraphEnv({ mode: "ready" });
+  const out2 = parse(runSpawn(runId, repo, ["--child", "dev-2"], { ...reuse.env, MOCK_CLAUDE_HANG_MS: "0" }));
+  if (out2.worktreeCreated !== false) fail("the second spawn created a new worktree instead of reusing");
+  if (norm(out2.worktree) !== norm(out1.worktree)) fail("the second spawn used a different worktree");
+  const cg = out2.codegraph;
+  if (cg.ok !== true) fail(`reused worktree not ready: ${JSON.stringify(cg)}`);
+  if (cg.synced !== false) fail("a settled worktree was synced for no reason");
+
+  const calls = reuse.readLog();
+  if (!calls.some((c) => c.cmd === "status")) fail("the reused worktree was not re-checked at launch");
+  if (calls.some((c) => c.cmd === "init")) fail(`once per MISSING index only — init ran again: ${JSON.stringify(calls)}`);
+  for (const c of calls) {
+    const rootArg = c.args.find((a) => !a.startsWith("-"));
+    if (rootArg && norm(rootArg) !== norm(out2.worktree)) fail(`a call addressed another root: ${JSON.stringify(c)}`);
+  }
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out2.childId], { encoding: "utf8" });
+});
+
+test("a guarded .mcp.json at the target gets codegraph approved in the config dir AND the worktree's settings.local.json", () => {
+  const { repo } = fixtureRepo();
+  // The guarded boundary entry, committed so it rides into the worktree.
+  writeFileSync(
+    join(repo, ".mcp.json"),
+    JSON.stringify({
+      mcpServers: { codegraph: { command: "node", args: ["scripts/mcp/server-codegraph.mjs"] } },
+    }),
+  );
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("add", "-A");
+  git("commit", "-m", "mcp");
+
+  const runId = fixtureRun();
+  const fake = fakeCodegraphEnv({ mode: "ready" });
+  const configDir = mkdtempSync(join(tmpdir(), "la-mcp-"));
+  cleanup.push(configDir);
+  const configPath = join(configDir, ".claude.json");
+  const seed = {
+    helper: { keep: "me" },
+    projects: {
+      "C:/Users/elsewhere/other": { enabledMcpjsonServers: ["linear"], hasTrustDialogAccepted: true },
+    },
+  };
+  writeFileSync(configPath, JSON.stringify(seed, null, 2) + "\n");
+
+  const out = parse(runSpawn(runId, repo, [], { ...fake.env, MOCK_CLAUDE_HANG_MS: "0", LA_SUPERVISOR_MCP_CONFIG_DIR: configDir }));
+  const mcp = out.codegraph.mcp;
+  if (mcp.ok !== true || mcp.written !== true) fail(`guarded target not approved: ${JSON.stringify(mcp)}`);
+  if (!out.codegraph.kickoff.includes("mcp: approved for this worktree")) fail("kickoff does not say the MCP is live");
+
+  const cfg = JSON.parse(readFileSync(configPath, "utf8"));
+  const wtKey = Object.keys(cfg.projects).find((k) => norm(k) === norm(out.worktree));
+  if (!wtKey) fail(`no project key for the worktree: ${JSON.stringify(Object.keys(cfg.projects))}`);
+  if (JSON.stringify(cfg.projects[wtKey].enabledMcpjsonServers) !== JSON.stringify(["codegraph"])) {
+    fail(`enabled the wrong servers: ${JSON.stringify(cfg.projects[wtKey].enabledMcpjsonServers)}`);
+  }
+  if (cfg.projects[wtKey].hasTrustDialogAccepted !== true) fail("trust dialog not accepted");
+  // The 2.1.280 half: without enabledMcpjsonServers in the worktree's own
+  // .claude/settings.local.json the trusted server still shows ⏸ Pending.
+  const local = JSON.parse(readFileSync(join(out.worktree, ".claude", "settings.local.json"), "utf8"));
+  if (JSON.stringify(local.enabledMcpjsonServers) !== JSON.stringify(["codegraph"])) {
+    fail(`the worktree's settings.local.json is wrong: ${JSON.stringify(local)}`);
+  }
+  if (JSON.stringify(cfg.projects["C:/Users/elsewhere/other"]) !== JSON.stringify(seed.projects["C:/Users/elsewhere/other"])) {
+    fail("an unrelated project entry was touched");
+  }
+  if (JSON.stringify(cfg.helper) !== JSON.stringify(seed.helper)) fail("global keys were not preserved");
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("a target without the guarded .mcp.json gets NO approval and the config file is byte-identical", () => {
+  const { repo } = fixtureRepo(); // no .mcp.json committed
+  const runId = fixtureRun();
+  const fake = fakeCodegraphEnv({ mode: "ready" });
+  const configDir = mkdtempSync(join(tmpdir(), "la-mcp-"));
+  cleanup.push(configDir);
+  const configPath = join(configDir, ".claude.json");
+  writeFileSync(configPath, JSON.stringify({ projects: {} }, null, 2) + "\n");
+  const before = readFileSync(configPath, "utf8");
+
+  const out = parse(runSpawn(runId, repo, [], { ...fake.env, MOCK_CLAUDE_HANG_MS: "0", LA_SUPERVISOR_MCP_CONFIG_DIR: configDir }));
+  const mcp = out.codegraph.mcp;
+  if (mcp.ok !== false || mcp.written !== false) fail(`unguarded target was approved: ${JSON.stringify(mcp)}`);
+  if (!String(mcp.reason ?? "").includes("guarded codegraph MCP")) fail(`reason does not say why: ${mcp.reason}`);
+  if (readFileSync(configPath, "utf8") !== before) fail("the config was rewritten despite refusing");
+  if (existsSync(join(out.worktree, ".claude"))) fail("an unguarded worktree got a .claude dir anyway");
+  if (!out.codegraph.kickoff.includes("mcp: not approved")) fail("kickoff does not show the CLI fallback");
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

@@ -511,7 +511,7 @@ console.log("\nintegracja ze spawnem");
 
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
 const spawnCli = (args, env = {}) =>
-  spawnSync(process.execPath, [SPAWN, ...args], { cwd: ROOT, encoding: "utf8", env: { ...process.env, LA_SUPERVISOR_NO_TELEMETRY: "1", ...env } });
+  spawnSync(process.execPath, [SPAWN, ...args], { cwd: ROOT, encoding: "utf8", env: { ...process.env, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1", ...env } });
 
 test("no triage.json → spawn refuses (AC-2, fail-closed)", () => {
   const runId = withRun();

@@ -69,6 +69,7 @@ const baseEnv = (extra = {}) => ({
   ...process.env,
   LA_CLAUDE_BIN: MOCK,
   LA_SUPERVISOR_NO_TELEMETRY: "1",
+  LA_SUPERVISOR_NO_CODEGRAPH: "1",
   ...extra,
 });
 

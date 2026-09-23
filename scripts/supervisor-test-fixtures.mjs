@@ -178,12 +178,17 @@ export const fixtureChild = (over = {}) => ({
 
 /**
  * The env every supervisor test needs. LA_CLAUDE_BIN keeps a real model out of
- * the suite; LA_SUPERVISOR_NO_TELEMETRY keeps test runs out of the cost ledger.
+ * the suite; LA_SUPERVISOR_NO_TELEMETRY keeps test runs out of the cost ledger;
+ * LA_SUPERVISOR_NO_CODEGRAPH keeps the launch-readiness preflight out of every
+ * fixture worktree — it has `initialize: true` and would provision a REAL
+ * index on a machine that has the CLI on PATH (supervisor-spawn.test.mjs's
+ * readiness section opts back in against the fake CLI).
  */
 export const baseEnv = (extra = {}) => ({
   ...process.env,
   LA_CLAUDE_BIN: MOCK,
   LA_SUPERVISOR_NO_TELEMETRY: "1",
+  LA_SUPERVISOR_NO_CODEGRAPH: "1",
   MOCK_CLAUDE_HANG_MS: "0",
   ...extra,
 });

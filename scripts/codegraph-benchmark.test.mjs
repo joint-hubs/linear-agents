@@ -112,6 +112,11 @@ console.log("codegraph-benchmark core tests\n");
   mkdirSync(join(root, "scripts"));
   copyFileSync(HARNESS, join(root, "scripts", "codegraph-benchmark.mjs"));
   copyFileSync(WRAPPER_SRC, join(root, "scripts", "code-intel.mjs"));
+  // The wrapper imports its shared contract from ./codegraph-runtime.mjs — the
+  // copy pins the runtime to the fixture tree too, exactly as it pins the
+  // wrapper (without it every spawn dies on MODULE_NOT_FOUND and grades as
+  // fail, not as the ungraded refusal this case pins).
+  copyFileSync(join(__dirname, "codegraph-runtime.mjs"), join(root, "scripts", "codegraph-runtime.mjs"));
   copyFileSync(MANIFEST, join(root, "scripts", "codegraph-benchmark-questions.json"));
 
   const res = spawnSync(process.execPath, [join(root, "scripts", "codegraph-benchmark.mjs")], {

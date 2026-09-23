@@ -38,6 +38,15 @@ robi `node scripts/mcp-enable.mjs --verify` (raz na maszynę; sam pyta Claude Co
 Zestaw narzędzi rozszerza `CODEGRAPH_MCP_TOOLS` w `.mcp.json` — domyślnie MCP wystawia tylko
 `explore`. Zweryfikowane na żywym dziecku: 8 narzędzi `mcp__codegraph__*`, serwer `connected`.
 
+**MCP tego repo idzie przez strażnik, nie przez surowy serwer.** `.mcp.json` wystawia
+`scripts/mcp/server-codegraph.mjs` — fail-closed proxy nad `codegraph serve --mcp`: handshake
+i `tools/list` przechodzą dosłownie, każde zapytanie o indeks ma przed sobą gate świeżości
+(współdzielony runtime `scripts/codegraph-runtime.mjs`), a świeżości nieudowodnionej proxy nie
+puszcza dalej — wraca typowane UNKNOWN (`isError`, wskazuje sankcjonowany fallback Read/Grep,
+nie podaje nazwy odpytywanego symbolu). Uwaga: `codegraph install` **nadpisuje `.mcp.json`**
+z powrotem na surowy serwer — po takiej instalacji przywróć wpis proxy i zatwierdź go ponownie
+(`node scripts/mcp-enable.mjs --verify`).
+
 **CLI — `scripts/code-intel.mjs`.** Podłoga, nie sufit. Działa bez żadnej konfiguracji MCP,
 da się wołać ze skryptu i wystawia każdy werb osobno. Gdy pytanie jest wąskie („kto to woła"),
 jest tańsze niż `explore`.
@@ -59,6 +68,8 @@ node $LA_ROOT/scripts/code-intel.mjs status                       # czy indeks j
 ```
 
 Flagi lecą wprost do `codegraph`: `--json`, `--limit N`, `--kind K`, `--depth N`.
+`--project-root <root>` wskazuje repo, którego indeks odpytujesz (nowy kod domyślnie katalog
+wołający); `$LA_ROOT` to checkout toolingu, nie cel grafu.
 
 </commands>
 
@@ -71,15 +82,20 @@ bywa fałszem. Dlatego przy braku `.codegraph/` narzędzie **odmawia i wychodzi 
 zamiast odpowiedzieć pustką — pusta odpowiedź wygląda jak „nie istnieje" i wysyła agenta w
 złą stronę.
 
-Gdy zobaczysz exit 3: zbuduj indeks (`codegraph init`) albo potwierdź Grepem, ale **nie pisz
-w raporcie, że czegoś nie ma.**
+Gdy zobaczysz exit 3: potwierdź Grepem i **nie pisz w raporcie, że czegoś nie ma** — UNKNOWN
+nie jest dowodem nieistnienia. Budowa indeksu (`codegraph init`) należy do gotowości launchu,
+nie do zadania: nie inicjalizuj indeksu ad hoc w trakcie pracy.
 
-**Świeżość działa inaczej niż w GitNexusie.** CodeGraph pilnuje indeksu sam — watcher plików,
-debounce i uzgodnienie przy podłączeniu MCP. Nie ma czego odświeżać po edycji i nie ma hooka
-post-commit. W krótkim oknie po zapisie odpowiedzi MCP dostają baner `⚠️` z nazwą pliku —
-wtedy przeczytaj ten plik wprost, zamiast ufać kopii z indeksu.
+**Świeżość pilnuje strażnik, nie watcher.** Watcher plików z debounce istnieje, ale nie on jest
+dowodem świeżości. Dowodem jest strażnik: proxy MCP i wrapper CLI sprawdzają świeżość **przed
+każdym zapytaniem** (gate → sync przy pending → dopiero odpowiedź), więc nie ma hooka
+post-commit ani niczego, co trzeba odświeżać po edycji. Przez strażnika baner `⚠️` z nazwą
+pliku nie dochodzi do klienta: proxy go odbiera, robi bounded re-gate i retry, a gdy świeżości
+nie da się udowodnić — odpowiada typowanym UNKNOWN. Surowe CLI (bez strażnika) taki baner
+przepuszcza — dlatego nie ufaj mu po edycji. Gdy dostaniesz UNKNOWN: przeczytaj plik wprost
+(Grep/Read), zamiast ufać kopii z indeksu.
 
-**Świeżość: wrapper pilnuje, surowe CLI nie** (FOC-114, rundy 4–5). `code-intel.mjs` przed
+**Świeżość: strażnik pilnuje (wrapper CLI i proxy MCP), surowe CLI nie** (FOC-114, rundy 4–5). `code-intel.mjs` przed
 każdym werbem zapytania sprawdza `status --json` → `pendingChanges`: przy oczekujących
 zmianach sam robi `codegraph sync <root>` i odpytuje dopiero przy zerze pending; gdy świeżości
 nie da się udowodnić (sync nieudany, stan nieczytelny, **brak bazowej linii gita** — bez

@@ -334,6 +334,7 @@ function sandboxRepo() {
 const baseEnv = (env) => ({
   ...process.env,
   LA_SUPERVISOR_NO_TELEMETRY: "1",
+  LA_SUPERVISOR_NO_CODEGRAPH: "1",
   LA_CLAUDE_BIN: join(ROOT, "scripts", "mock-claude.mjs"),
   ...env,
 });

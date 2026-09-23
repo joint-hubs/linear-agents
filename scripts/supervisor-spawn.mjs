@@ -36,6 +36,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { buildBranchName } from "./dev-branch.mjs";
+import { ensureCodegraphReady } from "./codegraph-runtime.mjs";
+import { approveGuardedCodegraphForProject } from "./mcp-enable.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 import {
   INIT_TIMEOUT_MS,
@@ -512,6 +514,117 @@ if (referencedFiles.length) {
   pinnedVerification.checks.push({ name: "referenced-files", ok: true });
 }
 
+// ── CodeGraph launch readiness (plan 2026-09-23 §4: prepare once) ─────────────
+// Sits right after the pinned-state validation on purpose (the plan's anchor):
+// the kickoff is about to tell this child the graph is its first move, so the
+// tree it will work in must actually have a usable index. NEW and REUSED
+// worktrees take the SAME check — readiness is a property of the tree's index,
+// not of how the tree came to exist — and it runs before the registry entry,
+// the settings file and the watcher exist, so the bounded wait (30 s default)
+// is the whole cost and a degraded outcome leaves nothing behind.
+//
+// NOT fail-closed, and that is the contract, not an oversight: an index that
+// cannot be proven fresh degrades the child to the sanctioned direct-file
+// fallback (Read/Grep) and says so loudly in the kickoff below; refusing the
+// spawn over an optional index would trade a bounded degradation for a dead
+// child. `initialize: true` is the AUTHORIZED provision path — once per missing
+// index, never per question — and only for a worktree THIS spawn owns.
+const CODEGRAPH_LAUNCH_TIMEOUT_MS = 30_000;
+
+function prepareCodegraphLaunchReadiness(worktreeRoot, squad) {
+  // Test/offline seam: the mock-children suites spawn against fixture repos,
+  // and `initialize: true` would index them for real. The seam skips the
+  // preflight entirely and reports itself as skipped — a skipped check is a
+  // visible state, never a silent ready.
+  if (process.env.LA_SUPERVISOR_NO_CODEGRAPH === "1") {
+    return {
+      ok: false,
+      skipped: true,
+      root: worktreeRoot,
+      reason: "skipped: LA_SUPERVISOR_NO_CODEGRAPH=1 (test/offline seam)",
+      synced: false,
+      initialized: false,
+    };
+  }
+  let readiness;
+  try {
+    readiness = ensureCodegraphReady({
+      projectRoot: worktreeRoot,
+      initialize: true,
+      timeoutMs: CODEGRAPH_LAUNCH_TIMEOUT_MS,
+    });
+  } catch (err) {
+    readiness = {
+      ok: false,
+      root: worktreeRoot,
+      reason: `runtime-error: ${String(err?.message ?? err).split("\n")[0]}`,
+      synced: false,
+      initialized: false,
+    };
+  }
+  // Headless MCP access is the other half of "usable" (plan §4): a worktree is
+  // a NEW project key for Claude Code, and the ROOT approval in the squad's
+  // config covers only the main checkout — without this, the worktree's
+  // project-scoped .mcp.json stays `Pending approval` and a headless child can
+  // never click the trust dialog. Only the repo-owned GUARDED codegraph entry
+  // is approved, never a foreign repo's servers and never the unguarded raw
+  // upstream `codegraph install` leaves behind; a target without it keeps
+  // CLI-only access, which the role prompts already route correctly.
+  let mcp;
+  try {
+    mcp = approveGuardedCodegraphForProject({
+      squad,
+      projectRoot: worktreeRoot,
+      ...(process.env.LA_SUPERVISOR_MCP_CONFIG_DIR
+        ? { configDir: process.env.LA_SUPERVISOR_MCP_CONFIG_DIR }
+        : {}),
+    });
+  } catch (err) {
+    mcp = { ok: false, written: false, reason: `mcp-approval-error: ${String(err?.message ?? err).split("\n")[0]}` };
+  }
+  return { ...readiness, mcp };
+}
+
+// The kickoff block the child reads. Rendered here and not inside
+// pinnedStatePrologue: the FOC-286 ten-field shape is pinned by
+// supervisor-pinned-state.test.mjs and stays fixed; CodeGraph state is a
+// separate, additive section. A degraded index must be UNMISSABLE — the child
+// is one prompt line away from treating a missing graph answer as absence,
+// which is exactly the confidently-wrong failure this whole contract exists to
+// prevent — so the fallback is spelled out, not implied.
+function codegraphKickoffBlock(codegraph) {
+  const lines = ["=== CODEGRAPH (launch readiness) ==="];
+  if (codegraph.skipped) {
+    lines.push(`status: SKIPPED — ${codegraph.reason}`);
+  } else if (codegraph.ok) {
+    lines.push(
+      `status: ready | index: initialized, freshness proven${codegraph.synced ? " (synced at launch)" : ""}` +
+        `${codegraph.version ? ` | CLI ${codegraph.version}` : ""}`,
+    );
+    lines.push("graph-first: use codegraph_explore (or the guarded CLI) BEFORE grepping — one call replaces a read sweep.");
+  } else {
+    lines.push(`status: DEGRADED-UNKNOWN — ${codegraph.reason}`);
+    lines.push(
+      "fallback: Read/Grep are SANCTIONED for structural questions in this run — a missing",
+      "graph answer here is UNKNOWN, never absence. The guarded CLI exits 3 UNKNOWN rather",
+      "than answer from an unproven index; never read that refusal as 'symbol not found'.",
+    );
+  }
+  if (codegraph.mcp) {
+    lines.push(
+      codegraph.mcp.ok
+        ? `mcp: approved for this worktree (${codegraph.mcp.written ? "written at launch" : "already approved"}) — codegraph_explore is live`
+        : `mcp: not approved — ${codegraph.mcp.reason ?? "no guarded codegraph MCP at this target"}; ` +
+          "use the guarded CLI: node \"$LA_ROOT/scripts/code-intel.mjs\" <verb> --project-root <this worktree>",
+    );
+  }
+  lines.push("=== END CODEGRAPH ===");
+  return lines.join("\n");
+}
+
+const codegraph = prepareCodegraphLaunchReadiness(worktree.worktree, squad);
+codegraph.kickoff = codegraphKickoffBlock(codegraph);
+
 // ── registry entry, written BEFORE the watcher starts ────────────────────────
 // Single-writer discipline: spawn owns the entry until the watcher launches,
 // and the watcher owns it afterwards. Nothing writes it concurrently.
@@ -597,6 +710,11 @@ registry.children[childId] = {
   // the prologue its LA_RUN_ID value — still before the watcher launches, so
   // spawn remains the entry's only writer.
   pinnedStateVerification: pinnedVerification,
+  // CodeGraph launch readiness (plan §4): what the index state was decided to
+  // be — `ok` or a visible degraded reason plus the kickoff block verbatim, so
+  // a later reader can see what the child was told without the temp prompt
+  // file, which does not survive the machine.
+  codegraph,
 };
 writeRegistry(runId, registry);
 
@@ -671,7 +789,9 @@ const prologue = pinnedStatePrologue({
   knownQuirks,
   referencedFiles,
 });
-writeFileSync(promptFile, `${prologue}\n\n${kickoff}`, "utf8");
+// The CodeGraph block rides the same prompt file, AFTER the pinned-state
+// prologue — a separate section, so the FOC-286 ten-field shape stays fixed.
+writeFileSync(promptFile, `${prologue}\n\n${codegraph.kickoff}\n\n${kickoff}`, "utf8");
 // The registry entry recorded what was verified; now it can also say WHAT THE
 // CHILD WAS TOLD — the prologue verbatim. Patched while spawn still owns the
 // entry (the watcher has not launched), so the single-writer discipline holds.
@@ -792,6 +912,10 @@ console.log(
       // spawn time, not just where the child is but that the state it was
       // handed was checked before it existed.
       pinnedStateVerification: { ...pinnedVerification, prologue },
+      // CodeGraph launch readiness: the Supervisor can say at spawn time which
+      // navigation path the child actually has — ready, degraded (Read/Grep
+      // sanctioned) or skipped — instead of the child discovering it mid-turn.
+      codegraph,
     },
     null,
     2,

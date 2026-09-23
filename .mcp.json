@@ -2,9 +2,9 @@
   "mcpServers": {
     "codegraph": {
       "type": "stdio",
-      "command": "codegraph",
-      "args": ["serve", "--mcp"],
-      "_env": "CODEGRAPH_MCP_TOOLS re-enables the seven tools the MCP server hides by default (it lists only `explore`). NOTE: `codegraph install` REWRITES this file and drops the env block — verified twice (2026-08-26, 2026-09-07). Re-add it after any `codegraph install`, then re-run `node scripts/mcp-enable.mjs --verify`.",
+      "command": "node",
+      "args": ["scripts/mcp/server-codegraph.mjs"],
+      "_env": "Fail-closed boundary (plan 2026-09-23 §4): a PreToolUse hook FAILS OPEN on its own timeout/launch failure, so freshness cannot be enforced from a hook — scripts/mcp/server-codegraph.mjs proxies the real `codegraph serve --mcp` and answers typed UNKNOWN (isError) whenever index freshness is unproven. CODEGRAPH_MCP_TOOLS re-enables the seven tools the MCP server hides by default (it lists only `explore`); the boundary inherits it. NOTE: `codegraph install` REWRITES this file and restores the raw `codegraph serve --mcp` entry (dropping this boundary, the env block and the guard) — verified twice (2026-08-26, 2026-09-07). Re-apply this whole entry after any `codegraph install`, then re-run `node scripts/mcp-enable.mjs --verify`.",
       "env": {
         "CODEGRAPH_MCP_TOOLS": "explore,node,search,callers,callees,impact,files,status"
       }
