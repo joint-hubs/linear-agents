@@ -291,7 +291,8 @@
       "xiaomi/mimo-v2.6-pro": {
         "input": 0.435,
         "output": 0.87,
-        "provenance": "OpenRouter GET /api/v1/models, checked 2026-09-23: prompt $0.435/M, completion $0.870/M."
+        "cacheRead": 0.0036,
+        "provenance": "OpenRouter GET /api/v1/models, checked 2026-09-23: prompt $0.435/M, completion $0.870/M. input_cache_read $0.0036/M, checked 2026-09-24."
       }
     },
     "nebul": {
