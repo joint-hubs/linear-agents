@@ -3,6 +3,17 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Fenix supervisor contract: `agents/supervisor/CLAUDE.md`. Squad model routing: `config/models.json`. Execution plan: `docs/BUILD-BACKLOG.md`. Atlas delegation is a separate mechanism.
 
+## 2026-09-25 (wieczór) — PUSH 4 commitów, FOC-522 wg decyzji C, §3.12 zacommitowane (run 8b24)
+
+- **PUSH WYKONANY** (`3f720e2..10f88a8`, main == origin/main): 3 commity FOC-576 kroku 2 (`9af6247`, `3d3b779`, `9705fbf`) + `10f88a8` `docs(state): FOC-576 step 2 + SAC probe`. Egress-screen diffu STATE.md czysty (fałszywy traf pełnego pliku: linia 188, stary filename `foc-283-handoff-compressor-stage1` — 33 znaki pod heurystykę b64url, poza difem, już na origin).
+- **FOC-522 `gate-dev-12-1` ODPOWIEDZIANA — opcja C ze skończonym limitem:** (A) `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=2700000` (45 min) w env dziecka w `supervisor-spawn.mjs` + `supervisor-followup.mjs`, jedno źródło wartości + test obu env; zmienna wewnętrzna CLI, potwierdzona w Claude Code 2.1.282, do sprawdzenia przy aktualizacji CLI; (B) reguła foreground w prologu spawnu, promptach followup i docs supervisora. dev-12 wznowiony (followup, turn 1) — w toku.
+- **FOC-515 §3.12 ZATWIERDZONE i zacommitowane `866b40f`** na `foc-515-plan` (+339/−0, sam dokument). Jedyny otwarty punkt (krawędź powrotu rozmowy §6.4) = follow-up FOC-517. **Implementacja FOC-515: kickoff gotowy** (`.state/krok0-2026-09-25/foc-515-dev-kickoff.md`), spawn **HELD** (`held-dev-1790367440502`, `node-full`). Reguła Mateusza: p90 > 30 s albo koszt > $0.01/call → pokazać liczby, bez cichej zmiany modelu.
+- **Release HOLD FOC-515: dopiero po MERGE'U FOC-522** (decyzja cf8a v2) — dzieci FOC-515 mają wtedy odziedziczyć limit 45 min na zadania w tle (fix FOC-522). Wyjątek: jeśli REVIEW/TEST FOC-522 utkną na **>~2 h**, zwolnić FOC-515 po samym wyjściu dev-12 i powiadomić Mateusza. **Concurrency dev zostaje 1** — powrót do tematu po FOC-547 (głód pętli zdarzeń przy obciążeniu).
+- Dywergencja werdyktu FOC-522 zanotowana punktem danych w FOC-387 (komentarz `198dc742`; seam large 0.54/0.45 vs medium, propose plan vs dev).
+- **FOC-577 filed** (child FOC-472, est. S, label tech): detektor nagłówka AC w `supervisor-triage propose` łapie tylko `## Acceptance criteria` — nie `## Acceptance` ani `Kryteria akceptacji`; test = 3 warianty nagłówka → task z AC rozpoznany. Link dopisany w FOC-387 (komentarz `f8d6e6ea`) — może tłumaczyć część dywergencji plan→dev.
+- Cron `554b74c1` (probe security-scan) zostawiony do jutra rana; jeśli SAC nie zablokuje ponownie → usunąć i odnotować w FOC-576.
+- **Kolejność wg Mateusza:** FOC-522 (dev-12 wg C) → merge → FOC-515 (release HOLD po merge); tor B potem: FOC-381 → FOC-547.
+
 ## 2026-09-25 (po południu) — okno SAC + FOC-576 krok 1 LANDED/push + krok 2 kandydat `3d3b779` (run 8b24)
 
 - **Blokada SAC zdjęta ~12:23 BEZ żadnej zmiany z naszej strony** (timeline: start 10:08, ostatnia blokada 12:23; 13:24 weryfikacja Mateusza). Natywny semgrep **1.172.0 działa** — `PASS semgrep (1.172.0) — 0 findings`, exit 0. Pełny suite na main: **84/85** (jedyny czerwony = znany flake FOC-461 `supervisor-stop.test.mjs` EPERM przy obciążeniu; standalone 11/11 zielony); `security-scan.test.mjs` **56/56 na żywym semgrepiem** (na bazie 26/13 — kontrakt uczciwości kroku 1 robi robotę).
