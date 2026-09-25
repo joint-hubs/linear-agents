@@ -10,7 +10,7 @@
 // repo tree is scanned once as the end-to-end negative case (secretlint must
 // pass; semgrep must be honest about whatever actually ran).
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -62,31 +62,51 @@ function fixtureDir() {
   return mkdtempSync(join(tmpdir(), "secscan-test-"));
 }
 
-// FOC-576 honesty probes: drive scanSast through a preload stub of
-// spawnSync('semgrep', ...) — no real semgrep needed (SECSCAN_STUB_MODE picks
-// the simulated failure). Only 'semgrep' invocations are intercepted; the
-// stub lives OUTSIDE the scanned fixture so it never enters the report.
-function stubScan(args, mode) {
+// FOC-576 honesty probes: drive scanSast through a preload stub of the
+// semgrep spawnSync calls — no real semgrep needed (SECSCAN_STUB_MODE picks
+// the simulated failure). The stub intercepts the native 'semgrep' calls AND
+// the LA_SEMGREP_CMD executable named via SECSCAN_STUB_CMD (a configured
+// command means the spawned executable is no longer 'semgrep', e.g. 'docker');
+// everything else passes through. Intercept keys moved with the FOC-576 step-2
+// change: the scan call is recognized by its '--config' flag (native: args[0]
+// === 'scan'; configured: the semgrep argv sits behind the launcher's fixed
+// args), the version probe by a trailing '--version'. Every intercepted call
+// is recorded to SECSCAN_SPAWN_LOG so tests can assert the spawned command
+// line. The stub lives OUTSIDE the scanned fixture so it never enters the
+// report.
+function stubScan(args, mode, extraEnv = {}) {
   const stubDir = fixtureDir();
   const stubFile = join(stubDir, "semgrep-stub.cjs");
+  const logFile = join(stubDir, "spawn-log.jsonl");
   writeFileSync(
     stubFile,
     [
-      "// Test preload: intercepts spawnSync('semgrep', ...) only; everything else passes through.",
+      "// Test preload: intercepts semgrep scanner spawnSync calls only; everything else passes through.",
       "const cp = require('node:child_process');",
+      "const fs = require('node:fs');",
       "const realSpawnSync = cp.spawnSync;",
+      "const STUB_CMD = process.env.SECSCAN_STUB_CMD;",
+      "const LOG = process.env.SECSCAN_SPAWN_LOG;",
       "cp.spawnSync = function (cmd, args, opts) {",
-      "  if (cmd === 'semgrep' && args[0] === 'scan') {",
+      "  const isScanner = cmd === 'semgrep' || (STUB_CMD && cmd === STUB_CMD);",
+      "  if (isScanner && LOG) fs.appendFileSync(LOG, JSON.stringify({ cmd, args }) + '\\n');",
+      "  if (isScanner && args.includes('--config')) {",
       "    if (process.env.SECSCAN_STUB_MODE === 'empty-stdout') {",
       "      return { status: 2, stdout: '', stderr: 'simulated: launcher blocked', error: undefined };",
       "    }",
       "    if (process.env.SECSCAN_STUB_MODE === 'version-unknown') {",
       "      return { status: 0, stdout: '{\"results\": [], \"errors\": []}', stderr: '' };",
       "    }",
+      "    if (process.env.SECSCAN_STUB_MODE === 'ok') {",
+      "      return { status: 0, stdout: '{\"results\": [], \"errors\": []}', stderr: '' };",
+      "    }",
       "  }",
-      "  if (cmd === 'semgrep' && args[0] === '--version') {",
+      "  if (isScanner && args[args.length - 1] === '--version') {",
       "    if (process.env.SECSCAN_STUB_MODE === 'version-unknown') {",
       "      return { status: 0, stdout: 'not-a-version-line\\n', stderr: '' };",
+      "    }",
+      "    if (process.env.SECSCAN_STUB_MODE === 'ok') {",
+      "      return { status: 0, stdout: '1.178.0\\n', stderr: '' };",
       "    }",
       "  }",
       "  return realSpawnSync(cmd, args, opts);",
@@ -94,7 +114,26 @@ function stubScan(args, mode) {
     ].join("\n"),
   );
   try {
-    return scan(args, { env: { ...process.env, SECSCAN_STUB_MODE: mode, NODE_OPTIONS: `--require=${stubFile}` } });
+    const res = scan(args, {
+      env: {
+        ...process.env,
+        SECSCAN_STUB_MODE: mode,
+        NODE_OPTIONS: `--require=${stubFile}`,
+        SECSCAN_SPAWN_LOG: logFile,
+        ...extraEnv,
+      },
+    });
+    let log = [];
+    try {
+      log = readFileSync(logFile, "utf-8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l));
+    } catch (e) {
+      log = [];
+    }
+    return { ...res, log };
   } finally {
     rmSync(stubDir, { recursive: true, force: true });
   }
@@ -238,6 +277,138 @@ console.log("honesty (FOC-576): semgrep version unknown → error row, exit 2, n
       sg && /version could not be determined/.test(sg.reason || ""),
       "reason names the unverifiable scanner version",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("LA_SEMGREP_CMD: configured command is used — executable + fixed args reach the spawn");
+{
+  const dir = fixtureDir();
+  try {
+    writeFileSync(join(dir, "clean.js"), "const x = 1;\n");
+    // The stub intercepts the configured executable (SECSCAN_STUB_CMD) and
+    // records every intercepted spawn, so the test can assert the exact
+    // command line the wrapper built (FOC-576 step 2).
+    const res = stubScan(["--root", dir], "ok", {
+      LA_SEMGREP_CMD: "semgrep-stub-exe --fixed-a --fixed-b",
+      SECSCAN_STUB_CMD: "semgrep-stub-exe",
+    });
+    assert(res.status === 0, `clean scan via configured command exits 0 (got ${res.status})`);
+    assert(res.out.includes("PASS semgrep (1.178.0)"), "version attested from the configured command's --version");
+    const scanCall = res.log.find((e) => e.args.includes("--config"));
+    assert(scanCall && scanCall.cmd === "semgrep-stub-exe", "spawned executable is the configured one, not native semgrep");
+    assert(
+      scanCall && scanCall.args[0] === "--fixed-a" && scanCall.args[1] === "--fixed-b" && scanCall.args[2] === "scan",
+      "launcher fixed args precede the semgrep argv",
+    );
+    const cfgIdx = scanCall ? scanCall.args.indexOf("--config") : -1;
+    const cfg = cfgIdx >= 0 ? scanCall.args[cfgIdx + 1] : "";
+    assert(
+      cfg.endsWith("config/security/semgrep-rules.yml") && !cfg.includes("\\") && !/^[A-Za-z]:/.test(cfg) && !cfg.startsWith("/"),
+      `config path is root-relative with forward slashes (got ${cfg})`,
+    );
+    assert(scanCall && scanCall.args[scanCall.args.length - 1] === ".", "scan target is the cwd-relative root ('.')");
+    const versionCall = res.log.find((e) => e.args[e.args.length - 1] === "--version");
+    assert(
+      versionCall && versionCall.cmd === "semgrep-stub-exe" && versionCall.args[0] === "--fixed-a",
+      "--version probe runs through the same configured command",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("LA_SEMGREP_CMD: honesty contract holds for the configured command (empty stdout)");
+{
+  const dir = fixtureDir();
+  try {
+    writeFileSync(join(dir, "clean.js"), "const x = 1;\n");
+    const res = stubScan(["--root", dir], "empty-stdout", {
+      LA_SEMGREP_CMD: "semgrep-stub-exe",
+      SECSCAN_STUB_CMD: "semgrep-stub-exe",
+    });
+    assert(res.status === 2, `exit 2 when the configured command produced no output (got ${res.status})`);
+    assert(res.out.includes("NOT SCANNED semgrep"), "configured-command scan without evidence is NOT SCANNED");
+    assert(
+      res.out.includes("semgrep produced no output (exit 2) — no scan evidence"),
+      "reason names the missing scan evidence",
+    );
+    assert(!res.out.includes("PASS semgrep"), "no PASS row for a scan that produced nothing");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("LA_SEMGREP_CMD: honesty contract holds for the configured command (version unknown)");
+{
+  const dir = fixtureDir();
+  try {
+    writeFileSync(join(dir, "clean.js"), "const x = 1;\n");
+    const res = stubScan(["--root", dir, "--json"], "version-unknown", {
+      LA_SEMGREP_CMD: "semgrep-stub-exe",
+      SECSCAN_STUB_CMD: "semgrep-stub-exe",
+    });
+    assert(res.status === 2, `exit 2 when the configured command's version is unknown (got ${res.status})`);
+    let report = null;
+    try {
+      report = JSON.parse(res.out);
+    } catch (e) {
+      report = null;
+    }
+    const sg = report && report.tools.find((t) => t.tool === "semgrep");
+    assert(sg && sg.status === "error" && !sg.version, "configured-command row status=error with no version claim");
+    assert(
+      sg && /version could not be determined/.test(sg.reason || ""),
+      "reason names the unverifiable scanner version",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("LA_SEMGREP_CMD: nonexistent executable → unavailable row, exit 2, no native fallback");
+{
+  const dir = fixtureDir();
+  try {
+    writeFileSync(join(dir, "clean.js"), "const x = 1;\n");
+    // No stub: the real spawnSync hits ENOENT for the configured executable.
+    const res = scan(["--root", dir], {
+      env: { ...process.env, LA_SEMGREP_CMD: "secscan-no-such-exe-does-not-exist" },
+    });
+    assert(res.status === 2, `exit 2 when the configured executable is missing (got ${res.status})`);
+    assert(res.out.includes("NOT SCANNED semgrep"), "unavailable row names the tool");
+    assert(
+      res.out.includes("secscan-no-such-exe-does-not-exist") && res.out.includes("LA_SEMGREP_CMD"),
+      "reason names the configured executable and the env var",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("LA_SEMGREP_CMD: empty/whitespace-only value fails closed — error row, exit 2, never native");
+{
+  const dir = fixtureDir();
+  try {
+    writeFileSync(join(dir, "clean.js"), "const x = 1;\n");
+    for (const blank of ["", "   "]) {
+      const res = scan(["--root", dir, "--json"], { env: { ...process.env, LA_SEMGREP_CMD: blank } });
+      let report = null;
+      try {
+        report = JSON.parse(res.out);
+      } catch (e) {
+        report = null;
+      }
+      const sg = report && report.tools.find((t) => t.tool === "semgrep");
+      assert(res.status === 2, `exit 2 for LA_SEMGREP_CMD=${JSON.stringify(blank)} (got ${res.status})`);
+      assert(sg && sg.status === "error", `semgrep row status=error for LA_SEMGREP_CMD=${JSON.stringify(blank)}`);
+      assert(
+        sg && /LA_SEMGREP_CMD/.test(sg.reason || "") && /refusing to fall back/.test(sg.reason || ""),
+        `reason names the misconfiguration for LA_SEMGREP_CMD=${JSON.stringify(blank)}`,
+      );
+      assert(!res.out.includes("PASS semgrep"), "blank value never degrades to a native PASS");
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

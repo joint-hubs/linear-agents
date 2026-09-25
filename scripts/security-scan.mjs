@@ -13,6 +13,8 @@
  *      explicitly — the preset ships it off by default to cut false positives.
  *   2. SAST — semgrep with the committed local ruleset config/security/semgrep-rules.yml.
  *      No registry, no network: --config points at the local file, metrics off.
+ *      The binary can be swapped for a custom launcher via LA_SEMGREP_CMD
+ *      (split on whitespace; Docker recipe in docs/tools/security-scan.md).
  *
  * Findings are reported as file:line + rule id + severity ONLY. Matched source
  * lines and rule messages are deliberately NOT echoed — secretlint messages embed
@@ -225,6 +227,23 @@ function secretlintVersion() {
 // ── Scanner 2: semgrep (child process, local ruleset) ────────────────
 
 /**
+ * Resolve the scanner command from LA_SEMGREP_CMD (FOC-576).
+ * Unset → the historical native invocation, byte-identical. Set → the value is
+ * split on whitespace: the first token is the executable, the rest are fixed
+ * args prepended to every semgrep argv (scan + --version). No shell, no
+ * quoting — a single token containing spaces is unsupported
+ * (docs/tools/security-scan.md). Set but blank → `misconfigured`: the caller
+ * must fail closed rather than silently fall back to native semgrep.
+ */
+function scannerCmd() {
+  const raw = process.env.LA_SEMGREP_CMD;
+  if (raw === undefined) return { cmd: 'semgrep', prefix: [], misconfigured: false };
+  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return { cmd: 'semgrep', prefix: [], misconfigured: true };
+  return { cmd: tokens[0], prefix: tokens.slice(1), misconfigured: false };
+}
+
+/**
  * Run the semgrep SAST pass over `root` with the committed local ruleset.
  * Returns the same row shape as scanSecrets.
  */
@@ -233,9 +252,31 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
     return { tool: 'semgrep', status: 'unavailable', reason: `ruleset missing: ${rulesPath}`, findings: [] };
   }
 
+  const { cmd, prefix, misconfigured } = scannerCmd();
+  if (misconfigured) {
+    // A set-but-blank LA_SEMGREP_CMD is a misconfiguration, not a request for
+    // the native default: failing closed keeps a half-configured run from
+    // silently degrading to whatever binary happens to be on PATH (FOC-576).
+    return {
+      tool: 'semgrep',
+      status: 'error',
+      reason: 'LA_SEMGREP_CMD is set but empty/whitespace-only — refusing to fall back to native semgrep (fail closed; see docs/tools/security-scan.md)',
+      findings: [],
+    };
+  }
+
+  // A configured launcher (e.g. `docker run ... -w /src ... semgrep`) views the
+  // filesystem differently from this process: the documented Docker recipe
+  // mounts the repo at /src and sets it as the container workdir, which equals
+  // the spawn cwd (root) on the host. Root-relative forward-slash paths
+  // therefore resolve to the same files in both worlds, while host absolute
+  // paths would only resolve natively. The unset (native) case keeps the
+  // historical absolute argv byte-identical (FOC-576).
+  const configured = prefix.length > 0 || cmd !== 'semgrep';
   const semgrepArgs = [
+    ...prefix,
     'scan',
-    '--config', rulesPath,
+    '--config', configured ? path.relative(root, rulesPath).replace(/\\/g, '/') : rulesPath,
     '--json',
     '--error',
     '--quiet',
@@ -249,9 +290,9 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
     // fixtures under .state/ — the flag turns that off there. Git mode keeps the
     // default cascade, matching the lint.mjs scope philosophy.
     ...(noGitIgnore ? ['--no-git-ignore'] : []),
-    root,
+    configured ? '.' : root,
   ];
-  const res = spawnSync('semgrep', semgrepArgs, {
+  const res = spawnSync(cmd, semgrepArgs, {
     cwd: root,
     encoding: 'utf-8',
     timeout: SEMGREP_TIMEOUT_MS,
@@ -260,7 +301,10 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
   });
 
   if (res.error && res.error.code === 'ENOENT') {
-    return { tool: 'semgrep', status: 'unavailable', reason: 'semgrep not on PATH — run: pip install semgrep==1.172.0 (see docs/tools/security-scan.md)', findings: [] };
+    const reason = configured
+      ? `configured scanner command not found: '${cmd}' (LA_SEMGREP_CMD) — see docs/tools/security-scan.md`
+      : 'semgrep not on PATH — run: pip install semgrep==1.172.0 (see docs/tools/security-scan.md)';
+    return { tool: 'semgrep', status: 'unavailable', reason, findings: [] };
   }
 
   // Empty stdout is the evidence failure itself, whatever the exit code: no
@@ -307,7 +351,10 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
   const findings = (parsed.results || []).map((r) => {
     // semgrep echoes absolute paths when given a directory target — normalize to
     // root-relative (forward slashes) so report rows match the secretlint rows.
-    const absPath = path.resolve(String(r.path || ''));
+    // Relative result paths (a configured-command target '.') resolve against
+    // the scan root; absolute paths pass through unchanged, so the native case
+    // is unaffected.
+    const absPath = path.resolve(root, String(r.path || ''));
     const rel = absPath.startsWith(path.resolve(root))
       ? path.relative(path.resolve(root), absPath).replace(/\\/g, '/')
       : absPath.replace(/\\/g, '/');
@@ -334,7 +381,11 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
 }
 
 function semgrepVersion() {
-  const res = spawnSync('semgrep', ['--version'], { encoding: 'utf-8', timeout: 30000 });
+  // Same configured command as the scan itself — the version must attest the
+  // scanner that actually produced the evidence (FOC-576).
+  const { cmd, prefix, misconfigured } = scannerCmd();
+  if (misconfigured) return 'unknown';
+  const res = spawnSync(cmd, [...prefix, '--version'], { encoding: 'utf-8', timeout: 30000 });
   const line = (res.stdout || '').split(/\r?\n/).find((l) => /^\d+\.\d+\.\d+/.test(l.trim()));
   return line ? line.trim() : 'unknown';
 }
