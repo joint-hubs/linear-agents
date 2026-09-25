@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
+import { PRINT_BG_WAIT_CEILING_MS, PRINT_BG_WAIT_ENV, TURN_END_CONTRACT, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -232,7 +232,9 @@ test("a relative --prompt-file resolves against the caller's cwd, not the worktr
   const calls = readFileSync(argvFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   if (calls.length !== 2) fail(`expected 2 claude invocations, got ${calls.length} — the resumed turn never started`);
   const prompt = calls[1][calls[1].indexOf("-p") + 1];
-  if (prompt !== "PROMPT FROM THE CALLER'S FILE") fail(`resumed turn received ${JSON.stringify(prompt)}`);
+  // FOC-522: every resume prompt carries the turn-end contract up front, so the
+  // caller's file content is asserted as the payload's tail, not byte equality.
+  if (!prompt.endsWith("PROMPT FROM THE CALLER'S FILE")) fail(`resumed turn received ${JSON.stringify(prompt)}`);
 });
 
 test("an absolute --prompt-file is passed through unchanged", () => {
@@ -257,7 +259,8 @@ test("an absolute --prompt-file is passed through unchanged", () => {
   const calls = readFileSync(argvFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   if (calls.length !== 2) fail(`expected 2 claude invocations, got ${calls.length} — the resumed turn never started`);
   const prompt = calls[1][calls[1].indexOf("-p") + 1];
-  if (prompt !== "PROMPT FROM THE CALLER'S FILE") fail(`resumed turn received ${JSON.stringify(prompt)}`);
+  // Same FOC-522 shape as the relative-path test: the file's content is the tail.
+  if (!prompt.endsWith("PROMPT FROM THE CALLER'S FILE")) fail(`resumed turn received ${JSON.stringify(prompt)}`);
 });
 
 test("an unreadable --prompt-file is refused before a turn is recorded", () => {
@@ -471,6 +474,54 @@ test("a real applied/applied return stays silent — the mirror does not fire on
   if (/pending|unlanded return transition|linearEffects|probably missing/.test(r.stderr)) {
     fail(`unexpected incident warning:\n       ${r.stderr}`);
   }
+});
+
+// ── background-wait ceiling + turn-end contract (FOC-522) ────────────────────
+// The follow-up env is NOT a copy of the spawn env — it was written separately
+// once and drifted before (FOC-171, RUN_ID). So the resume carrier gets its own
+// end-to-end proof: the ceiling the resumed turn runs under, and the contract
+// prepended to the delivered prompt.
+console.log("\nbackground-wait ceiling and the turn-end contract");
+
+test("the resumed turn's env carries the same ceiling — the second carrier (FOC-522)", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const envFile = join(runDir(runId), "env.log");
+  const child = spawnChild(runId, repo, { MOCK_CLAUDE_ENV_FILE: envFile });
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const out = parse(followup(runId, child.childId, [], { MOCK_CLAUDE_ENV_FILE: envFile }));
+  if (!out.ok) fail(`followup failed: ${out.error}`);
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const envs = readFileSync(envFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  if (envs.length !== 2) fail(`expected 2 claude invocations, got ${envs.length}`);
+  for (const [turn, env] of envs.entries()) {
+    if (env[PRINT_BG_WAIT_ENV] !== String(PRINT_BG_WAIT_CEILING_MS)) {
+      fail(`turn ${turn} env carried ${PRINT_BG_WAIT_ENV}=${JSON.stringify(env[PRINT_BG_WAIT_ENV])}`);
+    }
+  }
+});
+
+test("every resume prompt embeds the turn-end contract without displacing the answer (FOC-522)", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const argvFile = join(runDir(runId), "argv.log");
+  const child = spawnChild(runId, repo, { MOCK_CLAUDE_ARGV_FILE: argvFile });
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const out = parse(followup(runId, child.childId, [], { MOCK_CLAUDE_ARGV_FILE: argvFile }));
+  if (!out.ok) fail(`followup failed: ${out.error}`);
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const calls = readFileSync(argvFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  if (calls.length !== 2) fail(`expected 2 claude invocations, got ${calls.length}`);
+  const payload = calls[1][calls[1].indexOf("-p") + 1];
+  if (payload === undefined) fail(`the resumed turn had no -p payload: ${JSON.stringify(calls[1])}`);
+  for (const line of TURN_END_CONTRACT.split("\n")) {
+    if (!payload.includes(line)) fail(`the resumed prompt lost the contract line: "${line}"`);
+  }
+  if (!payload.endsWith("answer")) fail(`the contract displaced the delivered answer: ...${payload.slice(-80)}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

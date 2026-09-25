@@ -22,6 +22,7 @@ import {
   INIT_TIMEOUT_MS,
   ROOT,
   TERMINAL_STATUSES,
+  TURN_END_CONTRACT,
   assertStageBudget,
   assertWithinBudget,
   comparableProgress,
@@ -29,6 +30,7 @@ import {
   gatePath,
   killTree,
   parseArgs,
+  printBgWaitCeilingEnv,
   readRegistry,
   roundsFor,
   teeAbsPath,
@@ -288,7 +290,10 @@ const promptDir = mkdtempSync(join(tmpdir(), "la-supervisor-"));
 const promptFile = join(promptDir, "prompt.txt");
 // The watcher always gets a path this script wrote, never the caller's — the
 // same contract as spawn. See the prompt read at the top.
-writeFileSync(promptFile, promptText, "utf8");
+// The turn-end contract (FOC-522) is PREPENDED to every resume prompt: a
+// resumed turn can end on a live background task exactly like a first turn
+// can, and the resume prompt is the only text the follow-up path controls.
+writeFileSync(promptFile, `${TURN_END_CONTRACT}\n\n${promptText}`, "utf8");
 
 const watcherArgs = [
   join(ROOT, "scripts", "supervisor-watch.mjs"),
@@ -308,6 +313,11 @@ const watcher = spawn(process.execPath, watcherArgs, {
   cwd: entry.worktree,
   env: {
     ...process.env,
+    // FOC-522: the same finite background-wait ceiling spawn sets. This env
+    // block is NOT a copy of spawn's — it was written separately once and
+    // drifted before (FOC-171, RUN_ID) — so the value comes from the shared
+    // helper, and supervisor-followup.test.mjs proves this carrier sets it.
+    ...printBgWaitCeilingEnv(),
     CLAUDE_CONFIG_DIR: join(ROOT, "agents", entry.squad),
     LA_SUPERVISOR: "1",
     LA_SUPERVISOR_RUN: runId,
