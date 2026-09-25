@@ -449,6 +449,345 @@ kept verbatim for the nine consumers.
 }
 ```
 
+### 3.12 plan.intent — [G] — the interpretation map (FOC-515)
+
+One bounded model call that writes the **interpretation map** — what PLAN understood from the
+inbox entry, from where (stated, inferred or unknown), and what it does not know — before anything
+is put to Mateusz. Chain position: between `plan.dor` (§3.1) and `plan.intent.select` (FOC-516,
+designed separately) — dor assesses readiness and lists gaps, intent turns the entry into a typed
+map of readings, select scores that map into gate questions. The node does NOT write questions;
+which interpretations become questions is entirely FOC-516's — selection by significance and
+uncertainty. **Flagged, not silently resolved:** for two points only, this section supersedes the
+§3 preamble's argued changes 1–2 — `plan.gate1` moves from after spec to after the intent steps
+(the chain runs `plan.dor → plan.intent → plan.intent.select → plan.gate1 → plan.dod → …`), and the
+interpretation work change 2 folded into `plan.spec` moves out into `plan.intent` (spec keeps
+drafting, not first-reading). §3.11's worked example predates this node — extending its JSON block
+is follow-up; the preamble is not edited here.
+
+**Perspective catalogue.** The map's coverage grid — eight readings PLAN must pin down per entry,
+each weighted (per FOC-515) for the task types where it earns its keep:
+
+| perspective | what PLAN must pin down | weighted for |
+|---|---|---|
+| goal | what should change for Mateusz, and why | all |
+| user | who uses the result | feature |
+| scope | what is in, what is explicitly out | all |
+| success | how he will recognise it works (feeds DoD/AC) | all |
+| constraints | what must not change: compatibility, cost, time | feature, refactor, research |
+| risk | data, secrets, external systems, irreversible steps | all (required via base) |
+| priority | quick MVP vs thorough; what matters most if time runs out | feature, research |
+| terms | uncertain words from voice dictation (v1 transcript-uncertain) | all |
+
+**Decision (2026-09-24) — one rule for `risk`:** required in the internal map for every task type
+(via the `base` set, see the table below) and NO obligation to ask a question. The row's former
+"weighted for" emphasis guidance is REMOVED as ambiguous — this single rule is the whole policy.
+
+**Task-type → perspectives ([D] config).** Which perspectives a given task requires is a
+configuration table read by check (b) — not a model opinion at call time. The taxonomy is
+`config/linear/labels.json` → `type.labels` = `["feature", "bug", "spike", "tech", "docs", "test",
+"chore"]` — the same seven keys `plan.labels.type` pins. The catalogue's "all" set is
+{goal, scope, success, terms}; the **base** set is "all" plus `risk` — **Decision (2026-09-24):
+`risk` is required in the internal map for EVERY task type**, and its presence obliges no question
+to Mateusz (FOC-516 selects questions by significance and uncertainty). The weighting vocabulary
+maps onto the repo taxonomy as feature → feature, refactor → tech, research → spike (**Decision
+(2026-09-24)** — confirmed; docs/test/chore have no row in the issue's weighting):
+
+| task type | required perspectives | why |
+|---|---|---|
+| feature | base + user + constraints + priority | user-facing change; compatibility and the MVP/thorough trade-off matter |
+| bug | base | a fix must not break data, secrets or external systems |
+| spike | base + constraints + priority | timeboxed research — cost and the quick-vs-thorough call are the point |
+| tech | base + constraints | refactor/infra — nothing may change observably, irreversible steps lurk |
+| docs | base | documentation scope and success are the whole task |
+| test | base | coverage intent and success definition are the whole task |
+| chore | base | maintenance scope and success definition are the whole task |
+
+The table lives in config — proposed `config/intent-perspectives.json`; the exact location is the
+implementation phase's call — and is read by check (b).
+**Decision (2026-09-24) — mapping (formerly F3):** the issue's weighting vocabulary
+(feature/refactor/research) maps onto the repo's seven labels as tabulated (refactor → tech,
+research → spike); re-drawing it is a committed config edit, not a prompt change.
+**Decision (2026-09-24) — risk trigger (formerly F4):** there is NO phrase-trigger detector and none
+will be built — the read surface carries no such signal at all. `risk` is covered by requiring it
+in every type row via the `base` set.
+
+**Output schema.** The bounded Polish output contract — the same shape discipline as
+`plan.dod`/`plan.ac` (§3.11): one object, `additionalProperties: false`, every string bounded:
+
+```json
+{
+  "type": "object", "required": ["goal", "why", "mapVersion", "interpretations"], "additionalProperties": false,
+  "properties": {
+    "goal": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "why": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "mapVersion": { "type": "integer", "minimum": 1 },
+    "idMap": {
+      "type": "object", "maxProperties": 12, "additionalProperties": false,
+      "propertyNames": { "pattern": "^IN-([1-9]|1[0-2])$" },
+      "patternProperties": { "^IN-([1-9]|1[0-2])$": { "type": "string", "pattern": "^IN-([1-9]|1[0-2])$" } }
+    },
+    "interpretations": {
+      "type": "array", "minItems": 1, "maxItems": 12,
+      "items": {
+        "type": "object", "required": ["id", "perspective", "claim", "source", "alternatives", "covers"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^IN-([1-9]|1[0-2])$" },
+          "perspective": { "enum": ["goal", "user", "scope", "success", "constraints", "risk", "priority", "terms"] },
+          "claim": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "source": { "enum": ["stated", "inferred", "unknown"] },
+          "quote": { "type": "string", "minLength": 1, "maxLength": 150 },
+          "alternatives": { "type": "array", "maxItems": 3, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+          "covers": { "type": "array", "maxItems": 3, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+          "options": {
+            "type": "array", "minItems": 2, "maxItems": 4,
+            "items": {
+              "type": "object", "required": ["text", "recommended"], "additionalProperties": false,
+              "properties": {
+                "text": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "recommended": { "type": "boolean" },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 150 }
+              }
+            }
+          }
+        },
+        "allOf": [
+          { "if": { "properties": { "source": { "const": "stated" } }, "required": ["source"] }, "then": { "required": ["quote"], "properties": { "quote": { "minLength": 1 } } } },
+          { "if": { "properties": { "source": { "const": "unknown" } }, "required": ["source"] }, "then": { "required": ["options"], "not": { "required": ["quote"] } } },
+          { "if": { "properties": { "source": { "enum": ["stated", "inferred"] } }, "required": ["source"] }, "then": { "not": { "required": ["options"] } } }
+        ]
+      }
+    }
+  }
+}
+```
+
+| field | bound | note |
+|---|---|---|
+| `goal` / `why` | strings ≤300, Polish | what should change for Mateusz / why it should change |
+| `mapVersion` | integer ≥1, always present | identifies exactly ONE persisted map snapshot — allocated/validated by code at persist time, monotonic, never reused for another map (Decision 2026-09-24); the generator's hint is `1 +` the highest `mapVersion` the gate fields referenced (1 when none) |
+| `idMap` | 0..12 × `IN-n` → `IN-n` | present only when ids were RENUMBERED between map versions — verbatim-identical content only (pure id translation; never a content change, never a carrier of confirmation — Decision 2026-09-24) |
+| `interpretations` | 1..12 items per map version | the cap binds the ACTIVE map (each version is 1..12); rounds continue past a full 12-slot map (Decision 2026-09-24) |
+| `id` | pattern `^IN-([1-9]|1[0-2])$` | mirrors plan.ac's `^AC-…`; no leading-zero aliases, capped at 12 PER MAP VERSION — identity is the pair (`mapVersion`, `id`) |
+| `claim` | ≤200, Polish, first person "Rozumiem, że …" | for `source: unknown` it must name what is not established ("Rozumiem, że z opisu nie wynika, …") |
+| `quote` | ≤150 | REQUIRED and non-empty when `source: stated`; optional for `inferred`; omitted for `unknown` (Decision 2026-09-24) |
+| `alternatives` | 0..3 × ≤200 | other plausible readings |
+| `covers` | 0..3 × ≤200, each verbatim-EQUAL to one entry of `plan.dor.gaps` | ADDED field (not in the AC's field list) so check (a) is computable in code — **Decision (2026-09-24): stays** (formerly F1); the check confirms the formal linkage, its semantic quality is judged in the eval |
+| `options` | 2..4 × `{ text ≤200, recommended: bool, reason ≤150 }` | REQUIRED iff `source: unknown`, absent otherwise; EXACTLY one `recommended: true`; `reason` required iff `recommended` |
+
+Four rules the schema cannot express and the [D] validation code enforces: exactly-one-
+`recommended: true` per `options`; `reason` present iff `recommended`; every `id` EXACTLY ONCE
+within `interpretations` (answers/corrections are keyed by `IN-` id — a duplicate or alias would
+corrupt the round-2 fold); no empty strings anywhere in the output. The `covers` field exists
+because `plan.dor.gaps` entries are plain strings without ids (§3.1's output
+`{ready, gaps[≤8 × ≤200]}`) — a reference must carry the gap text itself, not an id. One compact
+`stated` example: `{ "id": "IN-3", "perspective": "scope", "claim": "Rozumiem, że zmiana
+dotyczy wyłącznie walidatora grafu.", "source": "stated", "quote": "squad nodes keep their v1
+contract fields", "alternatives": ["Rozumiem, że cały plik przechodzi przegląd."], "covers": [] }`.
+
+**Read surface.** **Contract:** reads `inbox.entry`, `plan.dor.gaps`, `<task type from intake>`,
+`gate.plan.gate1.answers`, `gate.plan.gate1.corrections` → bounded output
+`{ goal, why, mapVersion, idMap?, interpretations (1..12) }` (schema above); tier `cheap`; failure
+`stop`; writes `run-record`. The task type is delivered as `intake.taskType` — **Decision
+(2026-09-24) (formerly F6):** the name is accepted; the CONTRACT OWNER is the intake / input
+adapter (the FOC-397 intake side), which supplies the type from task metadata and supplies an
+EXPLICIT `unknown` when it cannot be determined. The field does not exist yet (a grep of
+`config/graph.json` and `config/decisions.json` for intake outputs finds the three landed [J] intake
+decisions but NO run-record output path carrying a task type) — a contract to be implemented on the
+intake side, not a ready integration. **Anything answerable from the repo is NOT a question — it
+belongs to the [D] pinned state or to plan.spec** (conventions and repo-derivable facts included).
+Rounds: round 1 reads only `inbox.entry`, `plan.dor.gaps` and the task type; from round 2 the two
+gate fields join — the map is re-generated per gate1 round. The steps stay separate `G → J/D → H`,
+with `plan.intent` re-invoked in the next round (**Decision (2026-09-24) (formerly F7)**: the whole
+conversation is NOT closed inside one [G] step); the conversation mechanics and the `≤3 rounds`
+limit are FOC-517's. The gate1 → plan.intent re-entry (round 2+) has no representation in §6.4's
+edge types — step-level edges are sequence-only there, with the single step-level decide at
+`plan.ready`; extending §6.4 with a re-entry/loop edge is follow-up under FOC-517's conversation
+mechanics — **Flagged, not silently resolved** (the one flag this section still carries).
+**Decision (2026-09-24) (formerly F5):** `gate.plan.gate1.answers` / `.corrections` do not exist in
+the run-record contract yet (§3.6: plan.gate1's output is `{approved}` only) — their write side is
+FOC-517's (the gate1 fields are in FOC-517's existing scope); §3.12 pins their read shape in the
+answer contract below and treats the §3.6 contract update as FOC-517 follow-up.
+
+**Answer contract (closed 2026-09-24; cross-round consistency tightened by decision the same
+day).** What the two gate fields must satisfy — FOC-517's gate1 fields implement it; it is closed
+here before implementation:
+
+- **Reference triple.** Every answer/correction record carries the `round`, the `mapVersion` and the
+  `interpretationId` (`IN-n`) it answers;
+- **Validation source: the persisted map and the presented options (Decision 2026-09-24).** The
+  validator reads its ground truth from two immutable run-record stores, never from the answer's own
+  copy: (1) `run-record.plan.intent.maps[mapVersion]` — the map exactly as generated and persisted
+  for that version (claim/option texts included), and (2)
+  `run-record.gate.plan.gate1.presented[round]` — the exact items and option texts actually put to
+  the user in that round. Their write side is FOC-517's (the gate1 fields plus the §3.6 contract
+  update). An answer whose `mapVersion` names no persisted map, or whose round has no presented
+  record, is STALE. The maps store is append-only per conversation — a persisted version is
+  immutable once written;
+- **Preserved content (`about` is a cross-check, not the source).** Each record still carries the
+  `about` snapshot — the claim text (≤200) it answered, and the option text (≤200) when it answered
+  an option — plus the answer text (a correction also carries the corrected content). `about` must
+  MATCH the persisted texts verbatim, but `about` alone never validates anything (Decision
+  2026-09-24);
+- **Anchor for `stated` (Decision 2026-09-24).** Anchor text for a `quote` may sit in
+  `inbox.entry`, in the user's actual answer, or in an explicitly ACCEPTED option from an earlier
+  round. The model's own proposal never becomes `stated` by being offered. `quote` is REQUIRED for
+  `stated`, OPTIONAL for `inferred`, ABSENT for `unknown` — non-empty whenever present. A user
+  correction supersedes the earlier reading it answers (precedence);
+- **Renumbering only (`idMap`).** `IN-` ids are stable across rounds; when ids are renumbered between
+  two map versions the new map declares `idMap` (old → new). An `idMap` entry is legal ONLY between
+  items whose content is verbatim-identical (same claim, same options where present) — it is pure id
+  translation. An entry whose target content differs is CONTRACT-ILLEGAL: the fold rejects it and
+  the reference is stale. `idMap` NEVER carries a user's confirmation onto a changed claim or option
+  (Decision 2026-09-24). `mapVersion` identifies exactly one persisted map — allocated and validated
+  by code at persist time, monotonic within the conversation, never reused for a different map; an
+  old reference resolves only through its own persisted map and its `idMap` chain, never into
+  another map. (`mapVersion`/`idMap` remain decision-mandated schema additions, like `covers`);
+- **The 12 cap binds the ACTIVE map (Decision 2026-09-24).** Interpretation identity is the pair
+  (`mapVersion`, `interpretationId`): `IN-` numbers are scoped to their map version and may recur in
+  a later version (every reference pins its version, so nothing collides). Every round writes a NEW
+  map of 1..12 items, so the conversation continues even when the first map used all 12 slots: a
+  content change takes a fresh identity in the new map (no `idMap` link), the superseded item leaves
+  the active map, and its own persisted version keeps the history. There is no conversation-level id
+  pool to exhaust — the 12-item limit and the "content change needs a new identity" rule no longer
+  conflict;
+- **No re-binding, no inherited confirmation (Decision 2026-09-24).** A content change makes a
+  different reading: NO earlier answer or confirmation attaches to it, and it reappears as
+  `unknown`/`inferred`. The user's correction (`gate.plan.gate1.corrections`) is the separate,
+  explicit source of such a change — and of any confirmation over the changed item. Renumbering
+  never stands in for a correction;
+- **Stale/unknown references are detected, never silently applied.** At fold time each reference
+  must resolve (round ≤ current; `mapVersion` present in the persisted maps store, reachable through
+  the `idMap` chain where renumbered; `interpretationId` present in that map) AND its `about`
+  content must match the persisted claim/option verbatim. Otherwise it is STALE: detected, recorded
+  in the `run-record` log, NOT applied, and the affected point must reappear as `unknown`/`inferred`
+  in the new map (check (a) still covers it).
+
+**[D] checks (fail closed).** Three checks in code, each REJECTING the node's output — never a
+warning:
+
+- **(a) coverage** — every entry of `plan.dor.gaps` is `covers`-referenced by at least one
+  COUNTING interpretation: an interpretation counts when (i) its `source` is `unknown` or
+  `inferred`, or (ii) it is round ≥2 and `stated` with its `quote` anchored per the answer contract
+  (the resolved case). Explicitly: round 1 counts only `unknown`/`inferred` items — a `stated`
+  item's `covers` is ignored by this check; from round 2, gate-anchored `stated` items count too;
+- **(b) presence** — every perspective the task-type table requires for this task (the type row;
+  `risk` is in every row via `base`) appears in at least one interpretation. Fail-closed on task
+  type: an absent type, the explicit `unknown`, or a value outside the seven keys requires ALL EIGHT
+  perspectives (the union of every type row);
+- **(c) quote fidelity** — every `quote` occurs verbatim in the round's anchor text (answer
+  contract): `inbox.entry` alone in round 1; from round 2 `inbox.entry` plus the user's actual
+  answers and explicitly accepted options. Extended to any present `quote` — an `inferred` quote,
+  when present, is verbatim too (the AC words the check for `stated` only; this deviation stands by
+  Decision 2026-09-24).
+
+**Decision (2026-09-24) (formerly F2) — anchor and quote presence:** the anchor set is the one
+above (the AC words check (c) against `inbox.entry` only — the expansion to user answers and
+accepted options stands by decision, and a model proposal is never anchor text). `quote` is
+non-empty whenever present (schema-pinned `minLength 1`, re-checked in code) — the earlier
+"non-empty iff stated" wording is REMOVED as contradictory. Sub-check: each `covers` entry equals a
+`plan.dor.gaps` entry verbatim. The fold validation of the answer contract runs BEFORE these checks
+on round ≥2 inputs and is fail-closed in the same sense. **Decision (2026-09-24) (formerly F1):
+check (a) confirms the formal linkage only** — the semantic quality of each `covers` linkage is
+judged in the eval, not in code. Failure behaviour: a rejected output is ONE retry, then the step
+fails (`failure: "stop"`) — never a partial map.
+
+**Latency and cost.** Budget measured ON THE EVAL SET: p90 ≤ 30 s, ≤ $0.01 per call — demonstrable
+ONLY by that measurement (**Decision (2026-09-24)**: the arithmetic and the item-count bound below
+are a hypothesis and a lever, never proof of p90). One call, no tools, bounded JSON. Proposed
+model/tier: `tier: "cheap"` (D7), routed `routing.plan.intent: "glm53flash"` =
+`z-ai/glm-5.3-flash` — the same tier as every other `routing.plan` role in `config/models.json`,
+whose pricing row reads `"input": 0.075, "output": 0.25, "cacheRead": 0.015` (USD per 1M tokens).
+Cost arithmetic (estimate): a typical call (~6k in, ~2.5k out) ≈ $0.001; the schema's worst case
+(~15k in, ~7.5k out) ≈ $0.003 — 3× under the cap (cache reads only lower it). Latency arithmetic
+(hypothesis): plan.dod's worst measured call on this model was 299.2 s for 16,348 output tokens
+≈ 55 tok/s — at that rate a ~2.5k-out call takes ≈ 45 s, so p90 ≤ 30 s would require p90 output
+≲ 1.5k tokens. The lever committed UPFRONT, not "if the eval misses": the node's prompt contract
+asks for the smallest sufficient map (~8 items typical; up to 12 only when the required-perspectives
+set demands it). The eval records, per call: latency, in/out tokens, cost, AND retries and errors —
+the budget claim stands only over that table. No automatic tier switch (**Decision (2026-09-24)**):
+`deepseek/deepseek-v4-flash` (pricing row `"input": 0.08554, "output": 0.17108`) is named as an
+option for discussion only; when the measurement fails, the procedure is to publish the numbers and
+propose the next step — Mateusz's decision, never a silent fallback. Registry note (nothing edited
+in this phase): the `config/decisions.json` entry follows the existing field convention — the list
+actually found on the landed entries (`plan.dod`, `plan.ac`, the intake [J]s) is `id, kind, owner,
+hookPoint, autonomy, threshold, fallback, metrics, criteriaVersion, reads, output, tier, failure,
+writes` (the [G] entries additionally carry `prompt`). For plan.intent: `kind: "G"`, `autonomy:
+null`, `threshold: null` — never invent numbers. `metrics`: the landed `plan.dod`/`plan.ac` entries
+use `["durationMs", "inputTokens", "outputTokens", "cost"]` — plan.intent's entry uses the same
+four (`confidence` is the [J] entries' fifth metric, not a [G] one).
+
+**Eval design.** `docs/benchmark/plan-intent-eval.md` — written in a later phase; §3.12 designs it
+here. It mirrors `docs/benchmark/plan-dod-eval.md`'s structure: title
+`# plan.intent [G] — interpretation-map eval (FOC-515)` → intro + bullets (harness / transport /
+model / re-run) → `## Input partition` → `## Where the [G] answers land` →
+`## Rubric (human-graded — the harness ships outputs, not grades)` → `## Results` (two per-case
+tables) → `## Findings` → `## Notes` — the rubric human-graded, stated as such: no LLM judge, no
+automated grade. Input partition = the 12 FOC-474 cases: FOC-406, 416, 417, 441, 443, 448, 449,
+451, 452, 473, 397, 396. Per case, four measurements (Decision 2026-09-24):
+
+- **coverage** — the significant ambiguities and boundaries THAT ARISE FROM THE INPUT (derived from
+  that case's input at grading time): does the map surface each as an `inferred`/`unknown` item?
+  Exact details hidden in the reference DoD are NOT required — an item asserting one as `stated`
+  counts as invented, not covered. The semantic quality of each item's `covers` linkage is judged
+  here too (code checks only the formal linkage);
+- **pointless items** ("zbędne pytania") — no decision value at gate1, INCLUDING items whose content
+  is repo-derivable or a known convention (those are never questions to Mateusz) — ids + count;
+- **invented requirements** ("wymyślone wymagania") — requirements or facts asserted but not
+  grounded in the input (a GT-hidden detail claimed as `stated` above all) — ids + count;
+- verdict `pass | partial | fail` + one-line reason, mirroring the sibling rubric — a FAIL is a
+  measurement, not an error.
+
+No prompt tuning to benchmark answers: the eval measures; the prompt is never fitted to the 12
+cases. Per-case coverage targets are classified three ways against `docs/benchmark/
+plan-dod-eval.md`'s "Input partition" section and Findings (what the inputs carried vs what was
+GT-only): (i) input-arising → coverage target; (ii) hidden in the reference GT / not derivable from
+the input → NOT required (asserting it = invented); (iii) output-side artefact of the sibling's DoD
+generation (the wrong-id halves) → N/A, behavioural notes only. Where the sibling does not settle
+(i) vs (ii), the row is marked "verify at grading time":
+
+| case | known miss | classification |
+|---|---|---|
+| FOC-416 | "diff limited to scripts/mcp/**" boundary / commit item naming FOC-401 | verify at grading time / (iii) N/A — output-side artefact |
+| FOC-417 | `npm ci` prep + exact commit-message form / wrong id | verify at grading time / (iii) N/A |
+| FOC-473 | "accepted by Mateusz" + "comment on the epic" | (ii) NOT required — both GT-only; asserting either as `stated` is invented |
+| FOC-448 | test-count guard + J2 decision-log item + sub-epic comment | (ii) GT-only template item / verify at grading time / (ii) convention |
+| FOC-449 | guard not derivable / wrong id (FOC-386) | (ii) NOT required / (iii) N/A |
+| FOC-397 | guard not derivable / wrong id (FOC-380) | (ii) NOT required / (iii) N/A |
+| FOC-451 | guard + STATE.md + sub-epic comment | (ii) / (ii) repo convention / (ii) convention |
+| FOC-452 | the scope inversion ("candidates … via Linear search") | (i) TARGET — the input states Linear search is out of scope |
+| FOC-396 | the merge action + epic-comment link | verify at grading time / (ii) convention |
+
+FOC-441/443 are clean (nothing to cover); FOC-406 has no ground truth. Results carry two per-case
+tables — the mechanical record first:
+
+| id | items | stated/inferred/unknown | latency | in/out tok | cost USD | retries | errors |
+|---|---|---|---|---|---|---|---|
+
+(latency = measured call duration; cost provider-metered via `usage`, joined per issue — no second
+meter, no estimate.) Then the rubric table:
+
+| id | input-arising target | covered by (IN- id) | pointless items | invented items | verdict |
+|---|---|---|---|---|---|
+
+Aggregated over the 12 cases with FOC-406's coverage recorded UNKNOWN and excluded from the
+completeness aggregate (never score a fake pass); the sibling plan.dod eval's aggregate is 2 pass
+/ 9 partial / 0 fail over the 11 cases with ground truth (3/9/0 including FOC-406's pass).
+
+**What §3.12 does not decide.** **Which interpretations become questions is FOC-516**
+(`plan.intent.select` [J] scoring + [D] selection policy — by significance and uncertainty);
+plan.intent only writes the interpretation map, and a `risk` item obliges no question. **FOC-517's
+existing scope is likewise outside this section:** the gate1 fields (implementing the answer
+contract above), `plan.intent.confirmed` (the confirmed-intent record), plan.dod/plan.ac reading the
+confirmed intent, the real answer/resume test, the conversation mechanics and the `≤3 rounds`
+limit. **Answer-contract tests required of FOC-517 (Mateusz, 2026-09-24):** (1) a full 12-slot map
+plus a user correction — the next round proceeds and the cap binds only the active map; (2) an
+answer referencing an older `mapVersion` — detected STALE, recorded in the `run-record` log, never
+applied; (3) a content change that does NOT inherit the superseded item's confirmation
+(renumbering never carries a confirmation). Also not decided here: question phrasing; the §6.4
+re-entry edge representation (FOC-517 follow-up — the one flag this section still carries); spec
+content; the perspectives config file's location.
+
 ## 4. One [G] step end-to-end: plan.ac (AC generation)
 
 - **One API call, no tool loop.** The step receives its declared inputs, makes exactly one model
