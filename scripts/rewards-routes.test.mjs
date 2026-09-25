@@ -2,7 +2,10 @@
 //
 // Spawns the REAL telemetry-server on port 7391 with fully isolated stores
 // (LA_TELEMETRY_DB / LA_REWARDS_DB / LA_REWARDS_HOME under a tmp dir), so
-// production 7331/5173 and the fixture stack are never touched. The ingest
+// production 7331/5173 and the fixture stack are never touched. FOC-545: the
+// mutable state root is isolated too (LA_STATE_ROOT) and so is the replay
+// spool (LA_TELEMETRY_HOME) — without them the spawned server reads the
+// repo's REAL .state tree at boot and was healthy only after 139 s. The ingest
 // half of GET /api/manager/rewards is proven by reward-ingest.test.mjs; here
 // we prove the HTTP contract:
 //   - GET returns the server-facts payload (rules constants, squads, ratings,
@@ -18,7 +21,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { connect } from "node:net";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,12 +55,27 @@ function portBusy(port) {
 }
 
 const dir = mkdtempSync(join(tmpdir(), "rewards-routes-"));
+// Synthetic supervisor fixture under the isolated state root: one run dir with
+// one pass verdict. The tmp telemetry db links no producing run to FIX-1, so
+// the ingest must HOLD that award — observable in GET /api/manager/rewards as
+// ingest.scannedRuns ≥ 1 + a held row. That keeps the ingest path genuinely
+// exercised end-to-end (not silently empty, and never against host state).
+const stateRoot = join(dir, "state-root");
+mkdirSync(join(stateRoot, "supervisor", "foc-fixture-run-1", "verdicts"), { recursive: true });
+mkdirSync(join(stateRoot, "runs"), { recursive: true });
+writeFileSync(
+  join(stateRoot, "supervisor", "foc-fixture-run-1", "verdicts", "round1.json"),
+  JSON.stringify({ taskId: "FIX-1", round: 1, verdict: "pass", recordedAt: "2026-09-24T12:00:00.000Z" }, null, 2),
+  "utf8",
+);
 const env = {
   ...process.env,
   TELEMETRY_PORT: String(PORT),
   LA_TELEMETRY_DB: join(dir, "telemetry.sqlite"),
+  LA_TELEMETRY_HOME: join(dir, "telemetry-home"),
   LA_REWARDS_DB: join(dir, "rewards.sqlite"),
   LA_REWARDS_HOME: join(dir, "rewards-home"),
+  LA_STATE_ROOT: stateRoot,
 };
 
 // Pre-seed the isolated ledger with a squad no real evidence can produce, so
@@ -108,6 +126,7 @@ async function teardown() {
 }
 
 let setupError = null;
+let bootMs = null;
 const squads = (() => {
   try { return Object.keys(readSquadConfig().squads || {}); } catch { return []; }
 })();
@@ -117,7 +136,9 @@ try {
   if (await portBusy(PORT)) {
     throw new TestSkip(`port ${PORT} is busy — stop the fixture backend first`);
   }
+  const bootStartedAt = Date.now();
   await waitForServer();
+  bootMs = Date.now() - bootStartedAt;
 } catch (err) {
   if (err instanceof TestSkip) setupError = err;
   else setupError = err;
@@ -140,6 +161,25 @@ test("GET /api/manager/rewards returns the server-facts payload", async () => {
   assert.ok(proof, `seeded squad missing: ${Object.keys(body.squads)}`);
   assert.equal(proof.xp, 100, `seeded xp wrong: ${proof.xp}`);
   assert.equal(proof.recent[0].taskId, "ROUTE-1", "seeded record must surface");
+  // the ingest scanned the SYNTHETIC fixture under LA_STATE_ROOT — a pass
+  // verdict with no linked producing run in the tmp db must be held, proving
+  // the scan hit this fixture (not silently empty, not the host's real tree)
+  assert.ok(body.ingest.scannedRuns >= 1, `ingest must scan the tmp fixture, got scannedRuns=${body.ingest.scannedRuns}`);
+  assert.ok(body.ingest.held >= 1, `fixture pass verdict must hold an award, got held=${body.ingest.held}`);
+  const heldFix = body.held.find((h) => h.taskId === "FIX-1");
+  assert.ok(heldFix, `held award for FIX-1 must surface: ${JSON.stringify(body.held)}`);
+});
+
+test("AC3: isolated state root — the server is healthy in ≤ 15 s", () => {
+  if (setupError) throw setupError;
+  // With LA_STATE_ROOT unset this server backfilled ~500 real host manifests
+  // at boot and answered its first health check only after 139 s (FOC-545).
+  // If the seam regresses — the server reads host state at boot again — the
+  // boot time blows past this bound and this test goes red.
+  assert.ok(
+    bootMs !== null && bootMs <= 15000,
+    `server took ${bootMs} ms to become healthy — host-state boot work is back`,
+  );
 });
 
 test("CORS: a loopback origin is reflected, a foreign origin gets no ACAO header", async () => {
@@ -291,7 +331,9 @@ test("C6f: an unavailable rewards db must not take /api/manager/snapshot down", 
       ...process.env,
       TELEMETRY_PORT: String(PORT2),
       LA_TELEMETRY_DB: join(dir2, "telemetry.sqlite"),
+      LA_TELEMETRY_HOME: join(dir2, "telemetry-home"),
       LA_REWARDS_DB: join(blocker, "rewards.sqlite"),
+      LA_STATE_ROOT: join(dir2, "state-root"),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

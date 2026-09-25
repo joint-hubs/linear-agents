@@ -9,7 +9,7 @@ import { createServer } from 'node:http';
 import { readFile, writeFile, readdir, stat, rename } from 'node:fs/promises';
 import { readFileSync as readFileSyncNode } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, extname } from 'node:path';
+import { dirname, join, extname, resolve } from 'node:path';
 // Reuse the shared Linear GraphQL client (linear-client.mjs) — the same layer
 // linear-query.mjs is built on. A workspace-wide query (all teams) isn't
 // expressible via the team-scoped linear-query CLI, so we call graphql()
@@ -71,6 +71,12 @@ import { listDatasets, listRuns, getRun, launchTrain, stopRun } from './ft.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
+// Root of the mutable state tree (runs manifest, supervisor ledger, snapshots).
+// LA_STATE_ROOT lets tests point the server at an isolated tmp tree; with it
+// unset this is the same repo-local `.state` as before (byte-identical paths).
+const stateRoot = process.env.LA_STATE_ROOT
+  ? resolve(process.env.LA_STATE_ROOT)
+  : join(root, '.state');
 
 // Load .env so the Linear API keys (LINEAR_API_KEY / LINEAR_API_KEY_PISI) are
 // available to chooseApiKey() inside graphql(). Benign for other endpoints —
@@ -234,7 +240,7 @@ function withManifestConsolePid(runs) {
   return runs.map((run) => {
     if (run.endedAt || run.consolePid) return run;
     try {
-      const raw = readFileSyncNode(join(root, '.state', 'runs', `${run.runId}.json`), 'utf8');
+      const raw = readFileSyncNode(join(stateRoot, 'runs', `${run.runId}.json`), 'utf8');
       const manifest = JSON.parse(raw);
       if (!Number.isInteger(manifest.consolePid)) return run;
       return {
@@ -264,8 +270,8 @@ async function renderedHistoryRunIds(db) {
   try {
     const snapshot = await getCachedManagerSnapshot({
       db,
-      supervisorRoot: join(root, '.state', 'supervisor'),
-      runsManifestDir: join(root, '.state', 'runs'),
+      supervisorRoot: join(stateRoot, 'supervisor'),
+      runsManifestDir: join(stateRoot, 'runs'),
       checkProcessesAlive: areProcessesAlive,
     });
     const ids = [];
@@ -374,7 +380,7 @@ async function bootstrapTelemetry() {
   try { runCount = db.prepare('SELECT COUNT(*) AS count FROM runs').get().count; } finally { db.close(); }
   let manifestCount = 0;
   try {
-    manifestCount = (await readdir(join(root, '.state', 'runs'))).filter((name) => name.endsWith('.json')).length;
+    manifestCount = (await readdir(join(stateRoot, 'runs'))).filter((name) => name.endsWith('.json')).length;
   } catch {
     manifestCount = 0;
   }
@@ -1270,7 +1276,7 @@ const server = createServer(async (req, res) => {
             const payload = await buildRewardsPayload({
               telemetryDb: db,
               rewardsDb: rewards,
-              supervisorRoot: join(root, '.state', 'supervisor'),
+              supervisorRoot: join(stateRoot, 'supervisor'),
               renderedRunIds: await renderedHistoryRunIds(db),
             });
             json(res, 200, payload);
@@ -1354,8 +1360,8 @@ const server = createServer(async (req, res) => {
         try {
           const snapshot = await getCachedManagerSnapshot({
             db,
-            supervisorRoot: join(root, '.state', 'supervisor'),
-            runsManifestDir: join(root, '.state', 'runs'),
+            supervisorRoot: join(stateRoot, 'supervisor'),
+            runsManifestDir: join(stateRoot, 'runs'),
             checkProcessesAlive: areProcessesAlive,
           });
           json(res, 200, snapshot);
