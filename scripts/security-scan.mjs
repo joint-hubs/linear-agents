@@ -271,7 +271,9 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
   // the spawn cwd (root) on the host. Root-relative forward-slash paths
   // therefore resolve to the same files in both worlds, while host absolute
   // paths would only resolve natively. The unset (native) case keeps the
-  // historical absolute argv byte-identical (FOC-576).
+  // historical absolute argv byte-identical (FOC-576). The Docker recipe itself
+  // is live-verification pending — NOT verified: the image pull fails on this
+  // machine (Docker Desktop internal proxy cuts blob downloads with EOF).
   const configured = prefix.length > 0 || cmd !== 'semgrep';
   const semgrepArgs = [
     ...prefix,

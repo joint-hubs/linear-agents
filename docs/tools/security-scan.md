@@ -85,15 +85,21 @@ może widzieć system plików inaczej niż proces wrappera — spawn cwd (root) 
 kontenera (`-w /src`, repo zamontowane pod `/src`) rozwiązują wtedy te same pliki. Tryb
 natywny (zmienna nieustawiona) zachowuje historyczne argumenty bezwzględne, bajt w bajt.
 
-Przepis Docker (obraz `semgrep/semgrep:1.178.0`), bez dodatkowych flag:
+Przepis Docker (obraz `semgrep/semgrep:1.178.0`), bez dodatkowych flag.
+Status: **live verification pending — NOT verified** — na tej maszynie pull obrazu się nie
+powiódł (znany problem: wewnętrzny proxy Docker Desktop `http.docker.internal:3128` ucina
+pobieranie blobów z EOF, mimo że host pobiera te same URL-e poprawnie). Przepis jest
+dokumentowany na podstawie analizy ścieżek, nie wykonanego skanu.
 
 ```bash
 export LA_SEMGREP_CMD='docker run --rm -v <repo-root>:/src:ro -w /src semgrep/semgrep:1.178.0 semgrep'
 node scripts/security-scan.mjs        # z roota repo — realny skan przez mount
 ```
 
-Uwaga platformowa: **Smart App Control na tej maszynie blokuje natywny semgrep**, więc Docker
-jest tutaj udokumentowaną, działającą ścieżką; przepis wyżej działa bez dodatkowych flag.
+Uwaga platformowa: Smart App Control na tej maszynie **blokował** natywny semgrep (blok
+zdjęty 2026-09-25 — natywny `semgrep` 1.172.0 działa ponownie i jest domyślną ścieżką).
+Docker pozostaje udokumentowaną ścieżką omijania blokady SAC, jeśli wróci — przepis wyżej
+bez dodatkowych flag, ale **NIE zweryfikowany na żywo** (patrz status wyżej).
 
 </scanner_cmd>
 
