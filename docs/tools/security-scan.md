@@ -32,6 +32,9 @@ Exit: `0` czysto · `1` findings · `2` skaner niedostępny (dowody niekompletne
 Wyjście: **file:line + rule id + severity — nigdy wartość trafienia**. Komunikaty secretlinta osadzają
 dopasowany sekret, więc wrapper ich nie echo-uje; reviewer otwiera plik w cytowanej linii (AC4 FOC-285).
 Skaner, który nie odpalił, dostaje wiersz `NOT SCANNED <tool>` i exit 2 — nigdy nie jest „czysto".
+To samo dotyczy skanera, który nie zostawił dowodów (FOC-576): pusty stdout semgrepa albo niemożliwa
+do ustalenia wersja skanera (`--version` bez linii x.y.z) to też `NOT SCANNED` + exit 2 — brak dowodów
+skanu nigdy nie czyta się jako „czysto".
 
 </invocation>
 
