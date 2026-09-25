@@ -263,10 +263,22 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
     return { tool: 'semgrep', status: 'unavailable', reason: 'semgrep not on PATH — run: pip install semgrep==1.172.0 (see docs/tools/security-scan.md)', findings: [] };
   }
 
+  // Empty stdout is the evidence failure itself, whatever the exit code: no
+  // output means no scan happened. Parsing nothing into a fake-clean `{}` is
+  // exactly how a dead scanner used to read as a clean one (FOC-576).
+  if (!(res.stdout || '').trim()) {
+    return {
+      tool: 'semgrep',
+      status: 'error',
+      reason: `semgrep produced no output (exit ${res.status}) — no scan evidence`,
+      findings: [],
+    };
+  }
+
   // semgrep --json prints pure JSON on stdout (banner text goes to stderr).
   let parsed;
   try {
-    parsed = JSON.parse(res.stdout || '{}');
+    parsed = JSON.parse(res.stdout);
   } catch (e) {
     return {
       tool: 'semgrep',
@@ -307,7 +319,18 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
       severity: (r.extra && r.extra.severity) || 'WARNING',
     };
   });
-  return { tool: 'semgrep', status: 'ok', version: semgrepVersion(), findings };
+  // A scan whose scanner version cannot be attested is not evidence: 'ok' with
+  // version 'unknown' would let an unverifiable run read as a clean one (FOC-576).
+  const version = semgrepVersion();
+  if (version === 'unknown') {
+    return {
+      tool: 'semgrep',
+      status: 'error',
+      reason: 'semgrep version could not be determined (no x.y.z line from semgrep --version) — scan evidence cannot be attributed to a scanner version',
+      findings,
+    };
+  }
+  return { tool: 'semgrep', status: 'ok', version, findings };
 }
 
 function semgrepVersion() {
