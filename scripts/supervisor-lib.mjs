@@ -36,6 +36,44 @@ export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // identify is worse than no child at all. Fail rather than register a ghost.
 export const INIT_TIMEOUT_MS = 30_000;
 
+// ── background-wait ceiling (FOC-522) ─────────────────────────────────────────
+// `claude -p` tears down a child's in-flight background tasks at turn end,
+// waiting at most CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS before killing them. The
+// CLI default is 600 s, which is BELOW this repo's full suite (640-740 s) — the
+// exact truncation mechanism observed in FOC-513 (3 premature turn ends),
+// FOC-474 (5) and FOC-165 (a bogus 26/64). The ceiling is raised to a FINITE
+// 45 min rather than 0 (wait indefinitely): 45 min is >3x the full suite, and a
+// genuinely hung turn is still caught by the supervisor-status stall SLA
+// (5 × the poll timeout, wall-clock), so a finite ceiling cannot silently hang
+// a run forever.
+//
+// CLI-INTERNAL variable, verified in the installed Claude Code 2.1.282 — its
+// own message reads "terminating. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to
+// wait indefinitely." It is NOT a supported public API and must be re-checked at
+// every CLI update.
+//
+// ONE source for the value: both env carriers (supervisor-spawn.mjs's childEnv
+// and supervisor-followup.mjs's resume env) build it through
+// printBgWaitCeilingEnv(), and supervisor-spawn.test.mjs /
+// supervisor-followup.test.mjs each prove their carrier sets it end-to-end.
+export const PRINT_BG_WAIT_ENV = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS";
+export const PRINT_BG_WAIT_CEILING_MS = 2_700_000; // 45 min — see rationale above
+export const printBgWaitCeilingEnv = () => ({ [PRINT_BG_WAIT_ENV]: String(PRINT_BG_WAIT_CEILING_MS) });
+
+// The turn-end contract (FOC-522, option B): the rule the ceiling alone cannot
+// enforce — the ceiling bounds the WAIT, it does not make ending a turn on a
+// live background task safe. A child that ends its turn on one still loses it.
+// Embedded by supervisor-spawn.mjs in every kickoff prompt and by
+// supervisor-followup.mjs in every resume prompt, so kickoff authors never have
+// to repeat it. Single source: both scripts import this exact text.
+export const TURN_END_CONTRACT = [
+  "=== TURN-END CONTRACT (background work) ===",
+  "Tests and measurements run in the FOREGROUND, or in background ONLY with this turn held open until they complete and their output has been read.",
+  "NEVER end the turn while a background task is still running — turn teardown kills in-flight background tasks; the wait ceiling only bounds the wait, it does not save the result.",
+  "A result you have not read is `not read` — never invented, never reported as verified.",
+  "=== END TURN-END CONTRACT ===",
+].join("\n");
+
 export const runDir = (runId) => join(ROOT, ".state", "supervisor", runId);
 export const registryPath = (runId) => join(runDir(runId), "children.json");
 export const triagePath = (runId) => join(runDir(runId), "triage.json");

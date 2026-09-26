@@ -17,7 +17,18 @@ import { tmpdir } from "node:os";
 import { delimiter, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { SUPERVISOR_DENY, buildChildSettings, childSettingsPath, readHeld, readRegistry, runDir } from "./supervisor-lib.mjs";
+import {
+  PRINT_BG_WAIT_CEILING_MS,
+  PRINT_BG_WAIT_ENV,
+  SUPERVISOR_DENY,
+  TURN_END_CONTRACT,
+  buildChildSettings,
+  childSettingsPath,
+  printBgWaitCeilingEnv,
+  readHeld,
+  readRegistry,
+  runDir,
+} from "./supervisor-lib.mjs";
 import { makeFakeCodegraphCli } from "./fixtures/codegraph-fake-cli.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -741,6 +752,59 @@ test("a target without the guarded .mcp.json gets NO approval and the config fil
   if (existsSync(join(out.worktree, ".claude"))) fail("an unguarded worktree got a .claude dir anyway");
   if (!out.codegraph.kickoff.includes("mcp: not approved")) fail("kickoff does not show the CLI fallback");
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+// ── background-wait ceiling + turn-end contract (FOC-522) ────────────────────
+// Turn teardown kills a child's in-flight background tasks after at most
+// CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS; the CLI default (600 s) sits BELOW our
+// full suite. Both halves of option C are pinned here: the FINITE ceiling this
+// carrier sets, and the contract text every kickoff embeds.
+console.log("\nbackground-wait ceiling and the turn-end contract");
+
+test("the ceiling is one finite constant above the full suite, exposed through one helper (FOC-522)", () => {
+  // 45 min: >3x the 640-740 s full suite, and finite — a hung turn is still the
+  // supervisor-status stall SLA's to catch, never an infinite wait.
+  if (!Number.isFinite(PRINT_BG_WAIT_CEILING_MS) || PRINT_BG_WAIT_CEILING_MS <= 0) {
+    fail(`the ceiling must be finite and positive, got ${PRINT_BG_WAIT_CEILING_MS}`);
+  }
+  if (PRINT_BG_WAIT_CEILING_MS !== 2_700_000) fail(`the 45 min decision drifted: ${PRINT_BG_WAIT_CEILING_MS}`);
+  if (PRINT_BG_WAIT_ENV !== "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS") {
+    fail(`the env name drifted from the CLI's own message: ${PRINT_BG_WAIT_ENV}`);
+  }
+  const env = printBgWaitCeilingEnv();
+  if (JSON.stringify(env) !== `{"${PRINT_BG_WAIT_ENV}":"2700000"}`) {
+    fail(`the helper does more than carry the value: ${JSON.stringify(env)}`);
+  }
+});
+
+test("the spawn env carries the ceiling end-to-end — the first carrier (FOC-522)", () => {
+  // MOCK_CLAUDE_ENV_FILE records the environment claude actually received, so
+  // this proves the value survived spawn → watcher → claude, not just that the
+  // script mentions it.
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const envFile = join(runDir(runId), "env.log");
+  parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_ENV_FILE: envFile, MOCK_CLAUDE_HANG_MS: "0" }));
+  if (!existsSync(envFile)) fail("the mock never recorded an env — claude was not invoked");
+  const env = JSON.parse(readFileSync(envFile, "utf8"));
+  if (env[PRINT_BG_WAIT_ENV] !== "2700000") {
+    fail(`${PRINT_BG_WAIT_ENV} was ${JSON.stringify(env[PRINT_BG_WAIT_ENV])} in the child env`);
+  }
+});
+
+test("every kickoff embeds the turn-end contract without displacing the kickoff body (FOC-522)", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const argvFile = join(runDir(runId), "argv.log");
+  parse(runSpawn(runId, repo, ["--prompt", "KICKOFF BODY MARKER"], { MOCK_CLAUDE_ARGV_FILE: argvFile, MOCK_CLAUDE_HANG_MS: "0" }));
+  const argv = JSON.parse(readFileSync(argvFile, "utf8"));
+  const payload = argv[argv.indexOf("-p") + 1];
+  if (payload === undefined) fail(`claude was not given a -p payload: ${JSON.stringify(argv)}`);
+  for (const line of TURN_END_CONTRACT.split("\n")) {
+    if (!payload.includes(line)) fail(`the prompt claude received lost the contract line: "${line}"`);
+  }
+  if (!payload.includes("FOREGROUND")) fail("the contract does not state the foreground rule");
+  if (!payload.includes("KICKOFF BODY MARKER")) fail("the contract displaced the kickoff body");
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

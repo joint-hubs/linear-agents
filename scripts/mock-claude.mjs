@@ -18,6 +18,9 @@
 //   MOCK_CLAUDE_ARGV_FILE    append the argv it was called with, one JSON array
 //                            per line — how tests assert --resume carried the
 //                            right session id
+//   MOCK_CLAUDE_ENV_FILE     append the env it received, one JSON object per
+//                            line — how tests assert what the supervisor put
+//                            into the child's environment (FOC-522)
 //
 // FOC-127 extends this for the full suite; it is kept deliberately small so a
 // failing test points at the system under test rather than at the mock.
@@ -28,6 +31,9 @@ const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 
 if (process.env.MOCK_CLAUDE_ARGV_FILE) {
   appendFileSync(process.env.MOCK_CLAUDE_ARGV_FILE, JSON.stringify(process.argv.slice(2)) + "\n");
+}
+if (process.env.MOCK_CLAUDE_ENV_FILE) {
+  appendFileSync(process.env.MOCK_CLAUDE_ENV_FILE, JSON.stringify(process.env) + "\n");
 }
 
 const sessionId = process.env.MOCK_CLAUDE_SESSION_ID || "11111111-2222-3333-4444-555555555555";

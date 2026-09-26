@@ -41,11 +41,12 @@ import { approveGuardedCodegraphForProject } from "./mcp-enable.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 import {
   INIT_TIMEOUT_MS,
+  ROOT,
+  TERMINAL_STATUSES,
+  TURN_END_CONTRACT,
   admissionCheck,
   heldDir,
   heldPath,
-  ROOT,
-  TERMINAL_STATUSES,
   asArray,
   assertStageBudget,
   assertWithinBudget,
@@ -57,6 +58,7 @@ import {
   git,
   killTree,
   listWorktrees,
+  printBgWaitCeilingEnv,
   readHeld,
   parseArgs,
   pinnedStatePrologue,
@@ -791,7 +793,10 @@ const prologue = pinnedStatePrologue({
 });
 // The CodeGraph block rides the same prompt file, AFTER the pinned-state
 // prologue — a separate section, so the FOC-286 ten-field shape stays fixed.
-writeFileSync(promptFile, `${prologue}\n\n${codegraph.kickoff}\n\n${kickoff}`, "utf8");
+// The turn-end contract (FOC-522) rides the same way: one more separate
+// section, so every kickoff tells the child that a background task must never
+// outlive the turn — without kickoff authors repeating the rule by hand.
+writeFileSync(promptFile, `${prologue}\n\n${codegraph.kickoff}\n\n${TURN_END_CONTRACT}\n\n${kickoff}`, "utf8");
 // The registry entry recorded what was verified; now it can also say WHAT THE
 // CHILD WAS TOLD — the prologue verbatim. Patched while spawn still owns the
 // entry (the watcher has not launched), so the single-writer discipline holds.
@@ -814,6 +819,11 @@ if (telemetryRunId) watcherArgs.push("--telemetry-run", telemetryRunId);
 
 const childEnv = {
   ...process.env,
+  // FOC-522: the finite background-wait ceiling. The CLI default (600 s) sits
+  // below our full suite, and turn teardown kills whatever is still running —
+  // see the rationale at PRINT_BG_WAIT_CEILING_MS in supervisor-lib.mjs. Built
+  // through the helper so the value has exactly one source.
+  ...printBgWaitCeilingEnv(),
   CLAUDE_CONFIG_DIR: join(ROOT, "agents", squad),
   LA_SUPERVISOR: "1",
   LA_SUPERVISOR_RUN: runId,

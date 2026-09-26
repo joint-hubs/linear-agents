@@ -10,10 +10,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { isAbsolute, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
+import { PRINT_BG_WAIT_CEILING_MS, PRINT_BG_WAIT_ENV, TURN_END_CONTRACT, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
+import { waitForStatus } from "./supervisor-test-fixtures.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -37,7 +38,6 @@ function test(name, fn) {
   }
 }
 const fail = (msg) => { throw new Error(msg); };
-const pause = (ms) => execFileSync(process.execPath, ["-e", `setTimeout(()=>{},${ms})`]);
 
 function fixtureRepo() {
   const base = mkdtempSync(join(tmpdir(), "la-sup-fu-"));
@@ -73,12 +73,47 @@ const baseEnv = (extra = {}) => ({
   ...extra,
 });
 
+// FOC-522 follow-up — a load-crashed spawn used to flow through here as a
+// success-shaped object: parse() checked JSON-parseability only, so spawn's
+// failJson ({ok:false, error, tee: <ABSOLUTE path>}) passed as if the child had
+// started, waitForStatus(["exited","crashed"]) accepted the crash, and the
+// absolute tee mangled by join() surfaced three assertions later as an ENOENT
+// nobody could read. Every call site now declares what it expects:
+//   · parseOk      — the call must succeed; a failJson fails the test HERE with
+//                    the actual error field (the load-flake names its cause).
+//   · parseRefusal — the call must refuse; asserts the ok:false shape instead
+//                    of assuming it.
 const parse = (r) => {
   try {
     return JSON.parse(r.stdout);
   } catch {
     fail(`stdout was not JSON (exit ${r.status}):\n       ${r.stdout}\n       ${r.stderr}`);
   }
+};
+const parseOk = (r) => {
+  const out = parse(r);
+  if (!out || out.ok !== true) {
+    fail(`the script reported failure (exit ${r.status}): ${out?.error ?? JSON.stringify(out)}`);
+  }
+  return out;
+};
+const parseRefusal = (r) => {
+  const out = parse(r);
+  if (!out || out.ok !== false) {
+    fail(`expected a refusal (ok:false), got exit ${r.status}: ${JSON.stringify(out).slice(0, 300)}`);
+  }
+  return out;
+};
+
+// The success payloads carry a run-RELATIVE tee (teeRelPath); spawn's failJson
+// carries an ABSOLUTE one (teeAbsPath). A blind join() on an absolute path
+// mangles it on win32 and the ENOENT that follows hides the real error —
+// validate the shape instead of trusting it.
+const followupTeePath = (runId, tee) => {
+  if (typeof tee !== "string" || !tee || isAbsolute(tee)) {
+    fail(`tee is not a run-relative path: ${JSON.stringify(tee)}`);
+  }
+  return join(runDir(runId), tee);
 };
 
 function spawnChild(runId, repo, env = {}) {
@@ -87,18 +122,7 @@ function spawnChild(runId, repo, env = {}) {
     [SPAWN, "--run", runId, "--squad", "dev", "--task", "FOC-123", "--prompt", "kickoff", "--repo", repo],
     { encoding: "utf8", env: baseEnv({ MOCK_CLAUDE_HANG_MS: "0", ...env }) },
   );
-  return parse(r);
-}
-
-function waitForStatus(runId, childId, wanted, ms = 8000) {
-  const deadline = Date.now() + ms;
-  let entry;
-  while (Date.now() < deadline) {
-    entry = readRegistry(runId).children[childId];
-    if (wanted.includes(entry.status)) return entry;
-    pause(150);
-  }
-  return entry;
+  return parseOk(r);
 }
 
 const followup = (runId, childId, extra = [], env = {}) =>
@@ -118,8 +142,7 @@ test("re-invokes claude with --resume and the captured session id", () => {
   const child = spawnChild(runId, repo, { MOCK_CLAUDE_SESSION_ID: "sess-xyz", MOCK_CLAUDE_ARGV_FILE: argvFile });
   waitForStatus(runId, child.childId, ["exited", "crashed"]);
 
-  const out = parse(followup(runId, child.childId, [], { MOCK_CLAUDE_ARGV_FILE: argvFile }));
-  if (!out.ok) fail(`followup failed: ${out.error}`);
+  const out = parseOk(followup(runId, child.childId, [], { MOCK_CLAUDE_ARGV_FILE: argvFile }));
   if (out.sessionId !== "sess-xyz") fail(`sessionId changed to ${out.sessionId}`);
   waitForStatus(runId, child.childId, ["exited", "crashed"]);
 
@@ -158,10 +181,10 @@ test("appends to the same tee and pushes a new turn", () => {
   const child = spawnChild(runId, repo);
   waitForStatus(runId, child.childId, ["exited", "crashed"]);
 
-  const tee = join(runDir(runId), child.tee);
+  const tee = followupTeePath(runId, child.tee);
   const sizeBefore = readFileSync(tee, "utf8").length;
 
-  const out = parse(followup(runId, child.childId));
+  const out = parseOk(followup(runId, child.childId));
   if (out.turn !== 1) fail(`expected turn index 1, got ${out.turn}`);
   waitForStatus(runId, child.childId, ["exited", "crashed"]);
 
@@ -181,7 +204,7 @@ test("refuses while a turn is still in flight", () => {
 
   const r = followup(runId, child.childId);
   if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
-  const out = parse(r);
+  const out = parseRefusal(r);
   if (!/in flight|running/i.test(out.error)) fail(`unhelpful error: ${out.error}`);
 
   const entry = readRegistry(runId).children[child.childId];
@@ -194,7 +217,7 @@ test("refuses an unknown child and lists what it knows", () => {
   const runId = fixtureRun();
   const r = followup(runId, "ghost");
   if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
-  if (!Array.isArray(parse(r).known)) fail("error does not list known children");
+  if (!Array.isArray(parseRefusal(r).known)) fail("error does not list known children");
 });
 
 // ── --prompt-file ───────────────────────────────────────────────────────────
@@ -223,16 +246,17 @@ test("a relative --prompt-file resolves against the caller's cwd, not the worktr
   const child = spawnChild(runId, repo, { MOCK_CLAUDE_ARGV_FILE: argvFile });
   waitForStatus(runId, child.childId, ["exited", "crashed"]);
 
-  const out = parse(
+  const out = parseOk(
     followupFromCwd(caller, runId, child.childId, ["--prompt-file", ".state/round2.md"], { MOCK_CLAUDE_ARGV_FILE: argvFile }),
   );
-  if (!out.ok) fail(`followup refused a readable file: ${out.error}`);
   waitForStatus(runId, child.childId, ["exited", "crashed"]);
 
   const calls = readFileSync(argvFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   if (calls.length !== 2) fail(`expected 2 claude invocations, got ${calls.length} — the resumed turn never started`);
   const prompt = calls[1][calls[1].indexOf("-p") + 1];
-  if (prompt !== "PROMPT FROM THE CALLER'S FILE") fail(`resumed turn received ${JSON.stringify(prompt)}`);
+  // FOC-522: every resume prompt carries the turn-end contract up front, so the
+  // caller's file content is asserted as the payload's tail, not byte equality.
+  if (!prompt.endsWith("PROMPT FROM THE CALLER'S FILE")) fail(`resumed turn received ${JSON.stringify(prompt)}`);
 });
 
 test("an absolute --prompt-file is passed through unchanged", () => {
@@ -248,16 +272,16 @@ test("an absolute --prompt-file is passed through unchanged", () => {
   const child = spawnChild(runId, repo, { MOCK_CLAUDE_ARGV_FILE: argvFile });
   waitForStatus(runId, child.childId, ["exited", "crashed"]);
 
-  const out = parse(
+  const out = parseOk(
     followupFromCwd(caller, runId, child.childId, ["--prompt-file", promptFile], { MOCK_CLAUDE_ARGV_FILE: argvFile }),
   );
-  if (!out.ok) fail(`followup refused a readable file: ${out.error}`);
   waitForStatus(runId, child.childId, ["exited", "crashed"]);
 
   const calls = readFileSync(argvFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   if (calls.length !== 2) fail(`expected 2 claude invocations, got ${calls.length} — the resumed turn never started`);
   const prompt = calls[1][calls[1].indexOf("-p") + 1];
-  if (prompt !== "PROMPT FROM THE CALLER'S FILE") fail(`resumed turn received ${JSON.stringify(prompt)}`);
+  // Same FOC-522 shape as the relative-path test: the file's content is the tail.
+  if (!prompt.endsWith("PROMPT FROM THE CALLER'S FILE")) fail(`resumed turn received ${JSON.stringify(prompt)}`);
 });
 
 test("an unreadable --prompt-file is refused before a turn is recorded", () => {
@@ -271,7 +295,8 @@ test("an unreadable --prompt-file is refused before a turn is recorded", () => {
 
   const r = followupFromCwd(ROOT, runId, child.childId, ["--prompt-file", ".state/does-not-exist-fu-test.md"]);
   if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
-  if (!/not readable/.test(parse(r).error)) fail(`unhelpful error: ${parse(r).error}`);
+  const refusal = parseRefusal(r);
+  if (!/not readable/.test(refusal.error)) fail(`unhelpful error: ${refusal.error}`);
 
   const after = readRegistry(runId).children[child.childId];
   if (after.turns.length !== before.turns.length) fail("a turn was recorded for a prompt that could not be read");
@@ -294,7 +319,7 @@ test("--gate is recorded on the turn for audit", () => {
   // The gate has to exist and be ANSWERED before it can be delivered (FOC-122):
   // a turn carrying an unrecorded answer leaves the gate `pending` forever.
   // supervisor-gate.test.mjs owns the refusal cases; this one just needs a real gate.
-  const gateId = parse(
+  const gateId = parseOk(
     spawnSync(
       process.execPath,
       [GATE, "--run", runId, "emit", "--child", child.childId, "--kind", "question", "--summary", "s", "--question", "q?"],
@@ -471,6 +496,52 @@ test("a real applied/applied return stays silent — the mirror does not fire on
   if (/pending|unlanded return transition|linearEffects|probably missing/.test(r.stderr)) {
     fail(`unexpected incident warning:\n       ${r.stderr}`);
   }
+});
+
+// ── background-wait ceiling + turn-end contract (FOC-522) ────────────────────
+// The follow-up env is NOT a copy of the spawn env — it was written separately
+// once and drifted before (FOC-171, RUN_ID). So the resume carrier gets its own
+// end-to-end proof: the ceiling the resumed turn runs under, and the contract
+// prepended to the delivered prompt.
+console.log("\nbackground-wait ceiling and the turn-end contract");
+
+test("the resumed turn's env carries the same ceiling — the second carrier (FOC-522)", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const envFile = join(runDir(runId), "env.log");
+  const child = spawnChild(runId, repo, { MOCK_CLAUDE_ENV_FILE: envFile });
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const out = parseOk(followup(runId, child.childId, [], { MOCK_CLAUDE_ENV_FILE: envFile }));
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const envs = readFileSync(envFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  if (envs.length !== 2) fail(`expected 2 claude invocations, got ${envs.length}`);
+  for (const [turn, env] of envs.entries()) {
+    if (env[PRINT_BG_WAIT_ENV] !== String(PRINT_BG_WAIT_CEILING_MS)) {
+      fail(`turn ${turn} env carried ${PRINT_BG_WAIT_ENV}=${JSON.stringify(env[PRINT_BG_WAIT_ENV])}`);
+    }
+  }
+});
+
+test("every resume prompt embeds the turn-end contract without displacing the answer (FOC-522)", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const argvFile = join(runDir(runId), "argv.log");
+  const child = spawnChild(runId, repo, { MOCK_CLAUDE_ARGV_FILE: argvFile });
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const out = parseOk(followup(runId, child.childId, [], { MOCK_CLAUDE_ARGV_FILE: argvFile }));
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const calls = readFileSync(argvFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  if (calls.length !== 2) fail(`expected 2 claude invocations, got ${calls.length}`);
+  const payload = calls[1][calls[1].indexOf("-p") + 1];
+  if (payload === undefined) fail(`the resumed turn had no -p payload: ${JSON.stringify(calls[1])}`);
+  for (const line of TURN_END_CONTRACT.split("\n")) {
+    if (!payload.includes(line)) fail(`the resumed prompt lost the contract line: "${line}"`);
+  }
+  if (!payload.endsWith("answer")) fail(`the contract displaced the delivered answer: ...${payload.slice(-80)}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────
