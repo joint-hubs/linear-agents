@@ -6,6 +6,7 @@ import Timeline from './screens/Timeline.jsx';
 import Runs from './screens/Runs.jsx';
 import RunDetail from './screens/RunDetail.jsx';
 import Costs from './screens/Costs.jsx';
+import Analysis from './screens/Analysis.jsx';
 import Tasks from './screens/Tasks.jsx';
 import Flow from './screens/Flow.jsx';
 import SquadConfig from './screens/SquadConfig.jsx';
@@ -43,6 +44,13 @@ const I = {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
       <line x1="12" y1="2" x2="12" y2="22" />
       <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+    </svg>
+  ),
+  analysis: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="10.5" cy="10.5" r="7" />
+      <line x1="15.5" y1="15.5" x2="21" y2="21" />
+      <path d="M7.5 12.5v-2M10.5 12.5v-4M13.5 12.5v-3" />
     </svg>
   ),
   tasks: (
@@ -110,6 +118,7 @@ export default function App() {
             <NavItem to="/timeline" icon={I.timeline}>Timeline</NavItem>
             <NavItem to="/runs" icon={I.runs}>Runs</NavItem>
             <NavItem to="/costs" icon={I.costs}>Costs</NavItem>
+            <NavItem to="/analysis" icon={I.analysis}>Analysis</NavItem>
             <NavItem to="/tasks" icon={I.tasks}>Tasks</NavItem>
             <NavItem to="/flow" icon={I.flow}>Flow</NavItem>
             <NavItem to="/squad-config" icon={I.config}>Konfiguracja</NavItem>
@@ -130,6 +139,7 @@ export default function App() {
               <Route path="/runs" element={<Runs />} />
               <Route path="/runs/:id" element={<RunDetail />} />
               <Route path="/costs" element={<Costs />} />
+              <Route path="/analysis" element={<Analysis />} />
               <Route path="/tasks" element={<Tasks />} />
               <Route path="/flow" element={<Flow />} />
               <Route path="/squad-config" element={<SquadConfig />} />
