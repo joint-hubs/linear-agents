@@ -20,12 +20,12 @@
 // Both are easy to forget in one file out of six, and neither fails loudly.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ensureRunDir, readRegistry, runDir, worktreePathFor, writeRegistry } from "./supervisor-lib.mjs";
+import { ensureRunDir, readRegistry, runDir, teeAbsPath, worktreePathFor, writeRegistry } from "./supervisor-lib.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -228,12 +228,34 @@ export function parse(result, fail) {
  * handle to await. Returns the entry, or throws naming what it saw instead —
  * a timeout that says "expected exited" and nothing else costs a debugging
  * session every time it fires.
+ *
+ * FOC-522 follow-up: `crashed` is never an acceptable outcome to return. Call
+ * sites listed it in `statuses` as belt-and-braces ("any terminal state will
+ * do"), so a child that crashed under full-suite load flowed back as a
+ * success-shaped entry and the real cause surfaced later as a mystery failure
+ * (the followup-suite flake: a crashed spawn's absolute tee path hit a blind
+ * join() and became an ENOENT). A crashed entry now fails HERE, naming the
+ * registry error and the tee tail. The one suite that deliberately produces a
+ * crashed child (supervisor-spawn.test.mjs) polls the registry inline and
+ * never goes through this helper.
  */
 export function waitForStatus(runId, childId, statuses, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
   let entry;
   while (Date.now() < deadline) {
     entry = readRegistry(runId).children[childId];
+    if (entry && entry.status === "crashed") {
+      let tail = "";
+      try {
+        tail = readFileSync(teeAbsPath(runId, childId), "utf8").slice(-600);
+      } catch {
+        /* no tee to read — the registry error is the primary detail */
+      }
+      throw new Error(
+        `child ${childId} crashed while waiting for ${statuses.join("|")}: ${entry.error ?? "no error recorded"}` +
+          (tail ? `\n  tee tail: ...${tail}` : "\n  (no tee to read)"),
+      );
+    }
     if (entry && statuses.includes(entry.status)) return entry;
     sleepSync(120);
   }
