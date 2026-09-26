@@ -6,8 +6,9 @@
 //   --smoke: start, print ready, auto-shutdown after 10s (for CI/manual smoke test)
 
 import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
 import { readFile, writeFile, readdir, stat, rename } from 'node:fs/promises';
-import { readFileSync as readFileSyncNode } from 'node:fs';
+import { readFileSync as readFileSyncNode, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, extname, resolve } from 'node:path';
 // Reuse the shared Linear GraphQL client (linear-client.mjs) — the same layer
@@ -68,6 +69,26 @@ import { validateRating } from './manager-ratings.mjs';
 // FT control plane (FOC-359): datasets, training-run lifecycle, log tail.
 // Pure logic in scripts/ft.mjs; the server only does HTTP guards + dispatch.
 import { listDatasets, listRuns, getRun, launchTrain, stopRun } from './ft.mjs';
+
+// Analysis screen (read side): panels over the canonical views via STRICTLY
+// read-only connections (openAnalysisDb — never openTelemetryDb, which
+// migrates and writes), the decision-log analytics, and the read-only SQL
+// console. All dispatch lives in one block below, before static file serving.
+import {
+  openAnalysisDb,
+  normalizeFilters,
+  metaPanel,
+  costPanel,
+  toolsPanel,
+  handoffsPanel,
+  qualityPanel,
+} from './telemetry-analysis.mjs';
+import { resolveRunsDir, readDecisionLog, decisionsPanel, decisionTables } from './decision-analytics.mjs';
+import { runReadOnlyQuery } from './analysis-sql.mjs';
+// The derived analysis cache: the panels' data source (see analysis-cache.mjs
+// for why the store's views are too slow to query live). The server only
+// reads it and spawns builds as a CHILD process — never in-process.
+import { cachePath, cacheStatus } from './analysis-cache.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
@@ -631,6 +652,104 @@ async function resolveTaskRepo(taskId) {
     return { repo: null, warning: `no repo mapped for Linear project "${projectName}" — launching in linear-agents` };
   }
   return { repo: entry.repo, warning: null };
+}
+
+// ---------------------------------------------------------------------------
+// Analysis cache — panel reads + the background build child
+//
+// The Analysis panels read the DERIVED cache, not the store's window-function
+// views (measured on real data: panels 0.04–6 s on the cache vs minutes on
+// the views). A build takes ~55 s, so it must NEVER run in-process: node:sqlite
+// is synchronous and would freeze this event loop — including the 15 s ingest
+// timer. The server spawns `node scripts/analysis-cache.mjs build` as a child
+// and tracks it here; a lock held by ANOTHER process is seen via cacheStatus().
+// ---------------------------------------------------------------------------
+
+const analysisBuildState = {
+  building: false, // this server's build child is running
+  lastBuild: null, // { startedAt, finishedAt, ok, buildMs, error } of that child
+};
+
+// A hung build child would leave building=true forever — every later rebuild
+// would 409 until restart — so each child gets a watchdog. 15 min default: a
+// real build takes ~1 min, only a stuck child reaches the ceiling. Injectable
+// via LA_ANALYSIS_BUILD_TIMEOUT_MS for tests.
+const ANALYSIS_BUILD_TIMEOUT_MS = 15 * 60 * 1000;
+
+function analysisBuildTimeoutMs() {
+  const raw = Number(process.env.LA_ANALYSIS_BUILD_TIMEOUT_MS);
+  return Number.isInteger(raw) && raw > 0 ? raw : ANALYSIS_BUILD_TIMEOUT_MS;
+}
+
+// Start a build child unless this server already runs one. env passes through
+// verbatim so LA_TELEMETRY_DB / LA_TELEMETRY_HOME / LA_ANALYSIS_CACHE all
+// carry over to the child.
+function startAnalysisCacheBuild() {
+  if (analysisBuildState.building) return false;
+  // Test hook: LA_ANALYSIS_BUILD_CMD_TEST (JSON argv array) replaces the
+  // build command, honoured ONLY under NODE_ENV === 'test' — the env var
+  // alone must never redirect a production build, and the test harness
+  // already controls NODE_ENV, so no second flag is needed. Read at call
+  // time (not module load) so each test spawn can set its own command.
+  let buildArgs = [join(__dir, 'analysis-cache.mjs'), 'build'];
+  if (process.env.NODE_ENV === 'test' && process.env.LA_ANALYSIS_BUILD_CMD_TEST) {
+    buildArgs = JSON.parse(process.env.LA_ANALYSIS_BUILD_CMD_TEST);
+  }
+  const child = spawn(process.execPath, buildArgs, {
+    env: process.env,
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  const build = { startedAt: new Date().toISOString(), finishedAt: null, ok: null, buildMs: null, error: null };
+  analysisBuildState.building = true;
+  analysisBuildState.lastBuild = build;
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  // Watchdog: SIGKILL a child that hangs past the timeout (nothing else can
+  // interrupt node:sqlite mid-call) so `building` can never stick at true.
+  let timedOut = false;
+  const watchdog = setTimeout(() => {
+    timedOut = true;
+    child.kill('SIGKILL');
+    analysisBuildState.building = false;
+    build.finishedAt = new Date().toISOString();
+    build.ok = false;
+    build.buildMs = Date.parse(build.finishedAt) - Date.parse(build.startedAt);
+    build.error = 'build_timeout';
+  }, analysisBuildTimeoutMs());
+  // Both handlers clear `building` — it must never stick at true, or every
+  // later rebuild would 409 forever.
+  child.on('error', (err) => {
+    clearTimeout(watchdog);
+    analysisBuildState.building = false;
+    build.finishedAt = new Date().toISOString();
+    build.ok = false;
+    build.error = String(err?.message ?? err).slice(-2048);
+  });
+  child.on('exit', (code) => {
+    clearTimeout(watchdog);
+    if (timedOut) return; // the watchdog already recorded the timeout
+    analysisBuildState.building = false;
+    build.finishedAt = new Date().toISOString();
+    build.ok = code === 0;
+    build.buildMs = Date.parse(build.finishedAt) - Date.parse(build.startedAt);
+    if (code !== 0) build.error = stderr.slice(-2048) || `build child exited with code ${code}`;
+  });
+  return true;
+}
+
+// Open the derived cache read-only, or answer 503 cache_building (starting a
+// build child on the miss — the ONLY automatic build). Returns null once the
+// response is sent. A STALE cache still serves: the UI shows staleness from
+// GET /api/analysis/cache and rebuild is manual — the store changes every 15 s
+// with the ingest timer, so auto-rebuild on staleness would never catch up.
+function openAnalysisCache(res, method, path) {
+  if (!existsSync(cachePath())) {
+    startAnalysisCacheBuild(); // no-op when this server already runs one
+    json(res, 503, { error: 'Analysis cache is being built', code: 'cache_building' });
+    log(method, path, 503);
+    return null;
+  }
+  return openAnalysisDb(cachePath());
 }
 
 // ---------------------------------------------------------------------------
@@ -1402,6 +1521,231 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // -----------------------------------------------------------------
+    // Analysis screen (read side) — panels over the canonical views +
+    // decision-log analytics + a read-only SQL console. One commented
+    // block, dispatched BEFORE static file serving.
+    //
+    // DB discipline: GET panels open the DERIVED cache with
+    // openAnalysisDb(cachePath()) — a strict READ-ONLY connection (never
+    // openTelemetryDb(), which migrates and writes) — and ALWAYS close it
+    // in finally. A missing cache answers 503 cache_building and starts a
+    // build child; a stale one serves (staleness is read from
+    // GET /api/analysis/cache). Error mapping (all bodies { error, code }):
+    // bad_filter→400, views_missing→503, rejected→400, timeout→408,
+    // sql_error→422, anything else→500 "internal".
+    // -----------------------------------------------------------------
+    if (path.startsWith('/api/analysis/')) {
+      // Map a thrown analysis/SQL error to its HTTP status. Returns the
+      // status so the caller can log it (same convention as respondBodyError).
+      const analysisErrorStatus = (res2, err) => {
+        const code = err?.code;
+        const status =
+          code === 'bad_filter' ? 400 :
+          code === 'views_missing' ? 503 :
+          code === 'rejected' ? 400 :
+          code === 'timeout' ? 408 :
+          code === 'sql_error' ? 422 :
+          500;
+        json(res2, status, { error: err?.message ?? 'internal error', code: status === 500 ? 'internal' : code });
+        return status;
+      };
+
+      // GET /api/analysis/cache — the panels' data-source status. building
+      // covers BOTH this server's child and a live lock held by another
+      // process (cacheStatus's lock probe); lastBuild is this server's most
+      // recent child build.
+      if (method === 'GET' && path === '/api/analysis/cache') {
+        try {
+          const status = cacheStatus();
+          json(res, 200, {
+            ...status,
+            building: analysisBuildState.building || status.building,
+            lastBuild: analysisBuildState.lastBuild,
+          });
+          log(method, path, 200);
+        } catch (err) {
+          log(method, path, analysisErrorStatus(res, err));
+        }
+        return;
+      }
+
+      // GET /api/analysis/meta — cache overview (no filters).
+      if (method === 'GET' && path === '/api/analysis/meta') {
+        let db;
+        try {
+          db = openAnalysisCache(res, method, path);
+          if (!db) return; // 503 cache_building already sent
+          json(res, 200, metaPanel(db));
+          log(method, path, 200);
+        } catch (err) {
+          log(method, path, analysisErrorStatus(res, err));
+        } finally {
+          db?.close();
+        }
+        return;
+      }
+
+      // GET /api/analysis/cost|tools|handoffs|quality — filtered panels.
+      // Each opens its own read-only connection so one request's failure
+      // never leaves a handle behind for the others.
+      if (method === 'GET' && (
+        path === '/api/analysis/cost' ||
+        path === '/api/analysis/tools' ||
+        path === '/api/analysis/handoffs' ||
+        path === '/api/analysis/quality'
+      )) {
+        const panel = {
+          '/api/analysis/cost': costPanel,
+          '/api/analysis/tools': toolsPanel,
+          '/api/analysis/handoffs': handoffsPanel,
+          '/api/analysis/quality': qualityPanel,
+        }[path];
+        let db;
+        try {
+          const filters = normalizeFilters(url.searchParams);
+          db = openAnalysisCache(res, method, path);
+          if (!db) return; // 503 cache_building already sent
+          json(res, 200, panel(db, filters));
+          log(method, path, 200);
+        } catch (err) {
+          log(method, path, analysisErrorStatus(res, err));
+        } finally {
+          db?.close();
+        }
+        return;
+      }
+
+      // GET /api/analysis/decisions — decision-log analytics. Reads the
+      // .jsonl decision I/O log (no squad/model filtering on this one —
+      // decisionsPanel takes { from, to, era, eraBoundary } only), pointed
+      // at the runs dir resolveRunsDir() resolves (LA_DECISION_RUNS_DIR
+      // overrides for tests).
+      if (method === 'GET' && path === '/api/analysis/decisions') {
+        try {
+          const f = normalizeFilters(url.searchParams);
+          const result = decisionsPanel(
+            { from: f.from, to: f.to, era: f.era, eraBoundary: f.eraBoundary },
+            { runsDir: resolveRunsDir() },
+          );
+          // squad/model have no meaning for decision events (decisionsPanel
+          // takes { from, to, era, eraBoundary } only) — dropping them
+          // silently would lie in the numbers, so the response says so.
+          if (f.squad || f.model) {
+            result.caveats.push({
+              level: 'info',
+              code: 'filter_not_applied',
+              message: 'squad/model filters do not apply to decision events — figures are for all squads/models',
+            });
+          }
+          json(res, 200, result);
+          log(method, path, 200);
+        } catch (err) {
+          log(method, path, analysisErrorStatus(res, err));
+        }
+        return;
+      }
+
+      // POST /api/analysis/cache/rebuild — manually (re)build the derived
+      // cache. Same local-only + loopback-origin discipline as the other
+      // POST routes (a cross-site page must not be able to drive builds).
+      // Rebuild is MANUAL by design: the store changes every 15 s with the
+      // ingest timer, so auto-rebuilding on staleness would never catch up —
+      // the panels' missing-cache path above is the only automatic build.
+      if (method === 'POST' && path === '/api/analysis/cache/rebuild') {
+        if (!isLocalOrigin(req.socket.remoteAddress)) {
+          json(res, 403, { error: 'forbidden: /api/analysis/cache/rebuild is 127.0.0.1 only' });
+          log(method, path, 403);
+          return;
+        }
+        if (!isAllowedOrigin(req.headers.origin)) {
+          json(res, 403, { error: 'forbidden origin' });
+          log(method, path, 403);
+          return;
+        }
+        // A live lock belongs to ANOTHER process — ours is tracked in
+        // analysisBuildState. Both mean "already building" → 409.
+        let buildingElsewhere = false;
+        try { buildingElsewhere = cacheStatus().building; } catch { /* lock probe failure — let the child fail loudly */ }
+        if (analysisBuildState.building || buildingElsewhere) {
+          json(res, 409, { error: 'an analysis cache build is already in progress', code: 'build_in_progress' });
+          log(method, path, 409);
+          return;
+        }
+        startAnalysisCacheBuild();
+        json(res, 202, { started: true, startedAt: analysisBuildState.lastBuild.startedAt });
+        log(method, path, 202);
+        return;
+      }
+
+      // POST /api/analysis/sql — the read-only SQL console. Same local-only
+      // + loopback-origin discipline as the other POST routes (a cross-site
+      // page could otherwise drive arbitrary SELECTs from Mateusz's
+      // browser). Body: { sql, target }, capped at 64 KB.
+      if (method === 'POST' && path === '/api/analysis/sql') {
+        if (!isLocalOrigin(req.socket.remoteAddress)) {
+          json(res, 403, { error: 'forbidden: /api/analysis/sql is 127.0.0.1 only' });
+          log(method, path, 403);
+          return;
+        }
+        if (!isAllowedOrigin(req.headers.origin)) {
+          json(res, 403, { error: 'forbidden origin' });
+          log(method, path, 403);
+          return;
+        }
+        let body;
+        try {
+          body = await readJsonBody(req, 64 * 1024);
+        } catch (err) {
+          // Coded body errors (the console's contract): over-limit → 413
+          // "too_large", malformed JSON → 400 "bad_json". readJsonBody's
+          // messages carry the detail; the code makes the class machine-readable.
+          if (err?.tooLarge) {
+            json(res, 413, { error: err.message, code: 'too_large' });
+            log(method, path, 413);
+          } else {
+            json(res, 400, { error: 'invalid JSON body: ' + (err?.message ?? err), code: 'bad_json' });
+            log(method, path, 400);
+          }
+          return;
+        }
+        // target: "cache" (default — the fast materialisation the panels
+        // read) or "store" (the raw tables; the store's views are slow, but
+        // querying them live is the user's explicit choice). Anything else is
+        // rejected, never silently coerced to the default.
+        const target = body.target === undefined ? 'cache' : String(body.target);
+        if (target !== 'cache' && target !== 'store') {
+          json(res, 400, { error: `target must be "cache" or "store", got ${JSON.stringify(target)}`, code: 'rejected' });
+          log(method, path, 400);
+          return;
+        }
+        if (target === 'cache' && !existsSync(cachePath())) {
+          startAnalysisCacheBuild(); // same missing-cache contract as the panels
+          json(res, 503, { error: 'Analysis cache is being built', code: 'cache_building' });
+          log(method, path, 503);
+          return;
+        }
+        try {
+          const result = await runReadOnlyQuery(String(body.sql ?? ''), {
+            dbPath: target === 'store' ? telemetryStore.telemetryDbPath() : cachePath(),
+            extraTables: decisionTables(readDecisionLog(resolveRunsDir())),
+          });
+          json(res, 200, result);
+          log(method, path, 200);
+        } catch (err) {
+          log(method, path, analysisErrorStatus(res, err));
+        }
+        return;
+      }
+
+      // Unknown /api/analysis/* route → plain 404 (the trailing catch-all
+      // would 404 it too, but staying inside the block keeps analysis
+      // dispatch self-contained).
+      json(res, 404, { error: 'not found' });
+      log(method, path, 404);
+      return;
+    }
+
     // --- Only GET is supported beyond this point (other POST/PUT/DELETE → 404) ---
     if (method !== 'GET') {
       json(res, 404, { error: 'not found' });
@@ -1989,7 +2333,28 @@ server.listen(PORT, '127.0.0.1', () => {
       '/api/live',
       '/api/flow',
       '/api/flow/patterns',
+      // Analysis screen panels (meta + the four filtered panels + decisions).
+      '/api/analysis/meta',
+      '/api/analysis/cost',
+      '/api/analysis/tools',
+      '/api/analysis/handoffs',
+      '/api/analysis/quality',
+      '/api/analysis/decisions',
+      '/api/analysis/cache',
     ];
+    // Analysis panels serve from the DERIVED cache; against a fresh temp home
+    // it does not exist and the panel's documented answer is 503 cache_building
+    // (which also starts a build child). That is a valid state, not a smoke
+    // failure — the smoke accepts it instead of forcing a synchronous build
+    // before listening (node:sqlite is synchronous: a real-store build would
+    // freeze the server for ~55 s before it ever listened).
+    const smokeMay503 = new Set([
+      '/api/analysis/meta',
+      '/api/analysis/cost',
+      '/api/analysis/tools',
+      '/api/analysis/handoffs',
+      '/api/analysis/quality',
+    ]);
     // L1b: also exercise POST /api/launch validation. dryRun=true returns 200
     // WITHOUT spawning a window (so smoke is safe to run in CI / headless);
     // the bad-input cases assert 400 (AC2). No real agent is started.
@@ -2009,7 +2374,7 @@ server.listen(PORT, '127.0.0.1', () => {
         const base = `http://127.0.0.1:${PORT}`;
         for (const p of smokePaths) {
           const res = await fetch(base + p);
-          const ok = res.ok;
+          const ok = res.ok || (res.status === 503 && smokeMay503.has(p));
           console.log(`  smoke GET ${p} -> ${res.status} ${ok ? 'OK' : 'FAIL'}`);
           if (!ok) failed = true;
         }
