@@ -83,6 +83,7 @@ import { appendShadow, canonicalJson, createDecisionCaller, DECISION_STEP, SHADO
 import { loadGraph, validateGraph } from "./graph-validate.mjs";
 import { getRegistryEntry, loadRegistry } from "./decision-registry.mjs";
 import { AC_TESTABLE_DECISION, runPlanAcNode } from "./plan-ac.mjs";
+import { runPlanIntentNode } from "./plan-intent.mjs";
 import { KINDS } from "./supervisor-gate.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -239,6 +240,39 @@ function stepRecord(runId, now, key, status, extra = {}) {
 // "gate.plan.gate1.record"). A record's operative output is its done output;
 // an A0 annotation is deliberately NOT an output — downstream steps cannot
 // read a decision the frontman has not made.
+
+// plan.intent is the one step with round-dependent reads (design doc §3.12):
+// round 1 reads the inbox entry, the DoR gaps and the task type; from round 2
+// the gate1 answers and corrections join. The task type and the two gate1
+// fields are therefore ABSENT in round 1, and that absence is a round marker
+// rather than missing input — the read loop below must not fail the step over
+// them. Everything else stays fail-closed: a step never guesses a read. The
+// missing task type is not a hole either: the node takes the explicit
+// "unknown" path and requires all eight perspectives.
+const OPTIONAL_INTENT_READS = new Set([
+  "intake.taskType",
+  "gate.plan.gate1.answers",
+  "gate.plan.gate1.corrections",
+]);
+
+// The answer contract's two run-record stores, read back from the step records
+// this run has already appended (design doc §3.12):
+//   - `run-record.plan.intent.maps[mapVersion]` — the maps the node persisted.
+//     A done record carries the WHOLE store (append-only per conversation, a
+//     persisted version immutable once written), so the latest one IS the
+//     store and nothing has to walk the log.
+//   - `run-record.gate.plan.gate1.presented[round]` — the exact items and
+//     option texts put to the user, on the gate record's output where the read
+//     surface resolves the sibling `answers`/`corrections`. Its write side is
+//     FOC-517's; until that lands it is empty and every round-2 reference
+//     folds STALE, which is the fail-closed answer rather than a silent pass.
+function intentStores(records) {
+  let maps = {};
+  for (const record of records?.values?.() ?? []) {
+    if (record?.stepId === "plan.intent" && record.maps) maps = record.maps;
+  }
+  return { maps, presented: records?.get?.("gate.plan.gate1")?.output?.presented ?? {} };
+}
 
 function resolveRead(read, { inputs, steps }) {
   if (Object.prototype.hasOwnProperty.call(inputs, read)) return inputs[read];
@@ -650,7 +684,41 @@ export function createGraphRunner({
   // node regenerates once carrying the gate's reasons, then escalates typed.
   // The loop is node-internal — the graph-level retry EDGE is FOC-476's, and
   // no graph edge is added here.
-  async function runGStep(stepId, step, reads) {
+  async function runGStep(stepId, step, reads, records) {
+    if (stepId === "plan.intent") {
+      // plan.intent carries the answer contract's two run-record stores
+      // (design doc §3.12): its own persisted maps, append-only per
+      // conversation, and gate1's `presented` (FOC-517's write side). Each
+      // done record carries the WHOLE map store, so the latest record is the
+      // store — round 1 sees both empty and the fold is a no-op.
+      let result;
+      try {
+        result = await runPlanIntentNode({
+          stepId,
+          step,
+          reads,
+          generator,
+          validate: (raw) => outputValidate.get(stepId)(raw),
+          ...intentStores(records),
+        });
+      } catch (err) {
+        return failRecord(stepId, errorOf(err, "plan.intent node threw"));
+      }
+      const stale = result.fold?.stale ?? [];
+      if (result.status === "done") {
+        return stepRecord(runId, now, stepId, "done", {
+          stepId,
+          output: result.output,
+          mapVersion: result.mapVersion,
+          maps: result.maps,
+          ...(stale.length ? { stale } : {}),
+        });
+      }
+      return failRecord(stepId, result.error, {
+        ...(stale.length ? { stale } : {}),
+        ...(result.problems?.length ? { problems: result.problems } : {}),
+      });
+    }
     if (stepId === "plan.ac") {
       let result;
       try {
@@ -817,6 +885,10 @@ export function createGraphRunner({
       for (const read of step.reads ?? []) {
         const value = resolveRead(read, { inputs, steps: state.steps });
         if (value === undefined) {
+          // Round-dependent reads of plan.intent are absent by design in
+          // round 1; the key stays out of the read map and the node reads
+          // that as "round 1" and "task type unknown".
+          if (stepId === "plan.intent" && OPTIONAL_INTENT_READS.has(read)) continue;
           return stopped(stepId, failRecord(stepId, { code: "invalid_input", message: `read "${read}" is not available for step "${stepId}" — no resolved run record or run input supplies it` }));
         }
         reads[read] = value;
@@ -824,7 +896,7 @@ export function createGraphRunner({
 
       let next;
       if (step.kind === "J") next = await runJStep(stepId, step, reads);
-      else if (step.kind === "G") next = await runGStep(stepId, step, reads);
+      else if (step.kind === "G") next = await runGStep(stepId, step, reads, state.steps);
       else if (step.kind === "A") next = runAStep(stepId, reads);
       else if (step.kind === "H") next = await runHStep(stepId, reads);
       else if (step.kind === "D") next = await runDStep(stepId, reads);

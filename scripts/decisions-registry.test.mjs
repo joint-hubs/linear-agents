@@ -78,7 +78,7 @@ const QUESTION_VALIDATE = new Ajv().compile(QUESTION_SCHEMA);
 
 // ── the shipped seed set ────────────────────────────────────────────────────
 const SEED_IDS = [
-  "plan.dor", "plan.dod", "plan.ac", "plan.spec", "plan.gate1", "plan.decompose",
+  "plan.dor", "plan.intent", "plan.dod", "plan.ac", "plan.spec", "plan.gate1", "plan.decompose",
   "plan.gate2", "plan.push", "gate.screen", "extraction", "prompt-refinement",
   // The six FOC-397 decide-edge entries (graph decisionEdges bindings), the
   // FOC-451 DoR intake gate bound the same way, and the ten FOC-452 PLAN gate
@@ -89,18 +89,18 @@ const SEED_IDS = [
   "plan.labels.type", "plan.labels.risk", "plan.estimate",
   "plan.needs_adr", "plan.security_sensitive", "plan.duplicate_of", "plan.ac.testable",
 ];
-const NODE_IDS = SEED_IDS.slice(0, 8);
+const NODE_IDS = SEED_IDS.slice(0, 9);
 // The decide-edge bindings (config/graph.json decisionEdges): kind-J transport
 // entries that additionally pin their cascade ladder start (tier {cascade, min}).
-const DECIDE_EDGE_IDS = SEED_IDS.slice(11, 17);
+const DECIDE_EDGE_IDS = SEED_IDS.slice(12, 18);
 // The FOC-452 PLAN gate entries: seam-served A0 transports that are NOT decide
 // edges — no graph.json binding, no tier pin.
-const PLAN_GATE_IDS = SEED_IDS.slice(17);
-const TRANSPORT_IDS = SEED_IDS.slice(8);
+const PLAN_GATE_IDS = SEED_IDS.slice(18);
+const TRANSPORT_IDS = SEED_IDS.slice(9);
 // OUT of scope per the FOC-448 contract — they enter when their owners land.
 const OUT_OF_SCOPE = ["egress.contains_secret", "test.failure.cause"];
 const AUTONOMY_MAP = {
-  "plan.dor": "A0", "plan.dod": null, "plan.ac": null, "plan.spec": null, "plan.gate1": null,
+  "plan.dor": "A0", "plan.intent": null, "plan.dod": null, "plan.ac": null, "plan.spec": null, "plan.gate1": null,
   "plan.decompose": "A0", "plan.gate2": null, "plan.push": null,
   "gate.screen": "A0", "extraction": "A0", "prompt-refinement": "A0",
   "intake.triage_node": "A0", "intake.has_acceptance_criteria": "A0", "intake.task_size": "A0", "review.depth": "A0",
@@ -115,6 +115,7 @@ const METRICS_BY_ID = {
   "gate.screen": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
   extraction: ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
   "prompt-refinement": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.intent": ["durationMs", "inputTokens", "outputTokens", "cost"],
   "plan.ac": ["durationMs", "inputTokens", "outputTokens", "cost"],
   "plan.dod": ["durationMs", "inputTokens", "outputTokens", "cost"],
   "plan.spec": ["durationMs", "inputTokens", "outputTokens", "cost"],
@@ -148,7 +149,7 @@ await test("registry loads, passes REGISTRY_SCHEMA directly, and carries _doc + 
   eq(Object.keys(entries).length, SEED_IDS.length, "entry count");
 });
 
-await test("the seed set is exactly the twenty-seven contracted ids", () => {
+await test("the seed set is exactly the twenty-eight contracted ids", () => {
   deepEq([...Object.keys(entries)].sort(), [...SEED_IDS].sort(), "id set");
 });
 
@@ -245,12 +246,13 @@ await test("fallback tier2 is disabled everywhere and corresponds to the shipped
   }
 });
 
-console.log("\ndecisions-registry: D7 node entries (design doc §3.1–§3.9, verbatim)");
+console.log("\ndecisions-registry: D7 node entries (design doc §3.1–§3.12, verbatim)");
 
 // Full D7 pins per node entry — reads / tier / failure / writes verbatim from
 // the design doc; output schemas are covered by the compile + sample tests.
 const D7 = {
   "plan.dor": { reads: ["inbox.entry", "repoState.pinned"], tier: { cascade: true, min: 1 }, failure: "escalate", writes: "run-record" },
+  "plan.intent": { reads: ["inbox.entry", "plan.dor.gaps", "intake.taskType", "gate.plan.gate1.answers", "gate.plan.gate1.corrections"], tier: "cheap", failure: "stop", writes: "run-record" },
   "plan.dod": { reads: ["inbox.entry"], tier: "cheap", failure: "stop", writes: "run-record" },
   "plan.ac": { reads: ["inbox.entry", "features.list"], tier: "cheap", failure: "stop", writes: "run-record" },
   "plan.spec": { reads: ["inbox.entry", "plan.dod.definitionOfDone", "plan.ac.acs", "repoState.pinned"], tier: "agent", failure: "escalate", writes: "run-record" },
@@ -260,7 +262,7 @@ const D7 = {
   "plan.push": { reads: ["plan.decompose.record", "gate.plan.gate2.record"], tier: null, failure: "stop", writes: "run-record" },
 };
 
-await test("the eight node entries carry the full D7 contract; transports carry no D7 fields", () => {
+await test("the nine node entries carry the full D7 contract; transports carry no D7 fields", () => {
   for (const id of NODE_IDS) {
     const e = entries[id];
     deepEq(e.reads, D7[id].reads, `reads of ${id}`);
@@ -408,6 +410,10 @@ await test("the two per-instance PLAN gates are templates; the eight concrete ga
 await test("every node output schema compiles and accepts a valid sample / rejects an invalid one", () => {
   const SAMPLES = {
     "plan.dor": { ok: { ready: true, gaps: ["x"] }, bad: { ready: "yes", gaps: [] } },
+    "plan.intent": {
+      ok: { goal: "g", why: "w", mapVersion: 1, interpretations: [{ id: "IN-1", perspective: "goal", claim: "c", source: "inferred", alternatives: [], covers: [] }] },
+      bad: { goal: "g", why: "w", mapVersion: 1, interpretations: [{ id: "IN-1", perspective: "goal", claim: "c", source: "stated", alternatives: [], covers: [] }] },
+    },
     "plan.dod": { ok: { definitionOfDone: [{ check: "c", kind: "test", bounded: true }] }, bad: { definitionOfDone: [] } },
     "plan.ac": { ok: { acs: [{ id: "AC-1", text: "t", kind: "behaviour", evidence: "test" }] }, bad: { acs: [{ id: "AC-1", text: "t", kind: "behaviour" }] } },
     "plan.spec": { ok: { briefs: ["b"], adr: "a", summary: "s" }, bad: { briefs: "b", adr: "a", summary: "s" } },

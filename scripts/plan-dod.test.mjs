@@ -70,6 +70,24 @@ const DOD_OUTPUT = {
 const AC_OUTPUT = {
   acs: [{ id: "AC-1", text: "The DoD node generates a bounded checklist.", kind: "behaviour", evidence: "test" }],
 };
+// plan.intent sits between plan.dor and plan.dod now (FOC-515). These cases
+// are about plan.dod / plan.ac, so they serve the map and move on: round 1
+// with an unknown task type needs all eight perspectives (design doc §3.12),
+// and an inferred item carries neither a quote nor options.
+const INTENT_OUTPUT = {
+  goal: "Plan rozumie wejście.",
+  why: "By nic nie umknęło przed pytaniem do użytkownika.",
+  mapVersion: 1,
+  interpretations: ["goal", "user", "scope", "success", "constraints", "risk", "priority", "terms"].map((perspective, i) => ({
+    id: `IN-${i + 1}`,
+    perspective,
+    claim: "Rozumiem, że to poza zakresem tego testu.",
+    source: "inferred",
+    alternatives: [],
+    covers: [],
+  })),
+};
+
 const RUN_INPUTS = {
   "inbox.entry": "Dictated entry (test): the plan chain generates the DoD as a bounded checklist.",
   "repoState.pinned": { branch: "foc-474-dev", head: "e31d971" },
@@ -159,17 +177,17 @@ await test("the output schema is the design's bounded checklist schema", () => {
 
 console.log("\nplan-dod: the graph wiring");
 
-await test("8 plan steps, 7 sequence edges, plan.dod sits between plan.dor and plan.ac", () => {
+await test("9 plan steps, 8 sequence edges, plan.dod sits between plan.intent and plan.ac", () => {
   eq(validateGraph(GRAPH).length, 0, "the committed graph validates");
   const stepIds = Object.keys(PLAN.steps);
-  eq(stepIds.length, 8, `8 steps, got ${stepIds.length}`);
+  eq(stepIds.length, 9, `9 steps, got ${stepIds.length}`);
   if (!stepIds.includes("plan.dod")) fail("plan.dod missing from the steps map");
-  eq(PLAN.stepFlow.length, 7, "7 sequence edges");
+  eq(PLAN.stepFlow.length, 8, "8 sequence edges");
   const chain = PLAN.stepFlow.map((e) => `${e.from}>${e.to}`).join(" ");
   eq(
     chain,
-    "plan.dor>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.gate2 plan.gate2>plan.push",
-    "the chain runs dor → dod → ac → spec → gate1 → decompose → gate2 → push",
+    "plan.dor>plan.intent plan.intent>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.gate2 plan.gate2>plan.push",
+    "the chain runs dor → intent → dod → ac → spec → gate1 → decompose → gate2 → push",
   );
   eq(PLAN.steps["plan.dor"].kind, "J", "plan.dor stays [J]");
   eq(DOD_STEP.kind, "G", "plan.dod is [G]");
@@ -241,19 +259,21 @@ await test("the walk executes plan.dod [G] through the generator: one call, reso
     const genCalls = [];
     const generator = async ({ stepId, step, reads }) => {
       genCalls.push({ stepId, step, reads });
+      if (stepId === "plan.intent") return INTENT_OUTPUT;
       if (stepId === "plan.dod") {
         if (step.reads.length !== 1 || step.reads[0] !== "inbox.entry") fail("plan.dod declares one read: inbox.entry");
         if (typeof reads["inbox.entry"] === "undefined") fail("inbox.entry read missing");
         return DOD_OUTPUT;
       }
-      eq(stepId, "plan.ac", "generator serves plan.dod then plan.ac");
+      eq(stepId, "plan.ac", "generator serves plan.intent, plan.dod then plan.ac");
       return AC_OUTPUT;
     };
     const result = await makeRunner({ generator, storePath }).run({ inputs: RUN_INPUTS });
     eq(result.status, "stopped", "run stops at the [A] hand-off after the [G]s");
     eq(result.stepId, "plan.spec", "stops at plan.spec");
-    eq(genCalls.length, 2, "exactly two [G] calls (plan.dod, plan.ac)");
-    eq(genCalls[0].stepId, "plan.dod", "plan.dod first");
+    eq(genCalls.length, 3, "exactly three [G] calls (plan.intent, plan.dod, plan.ac)");
+    eq(genCalls[0].stepId, "plan.intent", "plan.intent first");
+    eq(genCalls[1].stepId, "plan.dod", "plan.dod second");
 
     const records = readLines(storePath);
     const dodRecord = records.find((r) => r.key === "plan.dod" && r.status === "done");
@@ -270,7 +290,7 @@ await test("a schema-invalid plan.dod output lands as ONE typed failed record �
   const storePath = join(d, "graph-steps.jsonl");
   try {
     seedPlanDor(storePath);
-    const generator = async ({ stepId }) => (stepId === "plan.dod" ? { definitionOfDone: [] } : AC_OUTPUT); // minItems 1 violated
+    const generator = async ({ stepId }) => (stepId === "plan.intent" ? INTENT_OUTPUT : stepId === "plan.dod" ? { definitionOfDone: [] } : AC_OUTPUT); // minItems 1 violated
     const runner = makeRunner({ generator, storePath });
     let result = await runner.run({ inputs: RUN_INPUTS });
     eq(result.status, "stopped", "run stops on the invalid output");
@@ -553,7 +573,7 @@ await test("a real runner + the default generator: the graph-steps done record A
   try {
     seedPlanDor(storePath);
     // The default generator rides the real registry prompt per call; the
-    // stubbed fetch answers plan.dod then plan.ac.
+    // stubbed fetch answers plan.intent, plan.dod then plan.ac.
     let calls = 0;
     const generator = createDefaultGenerator({
       apiKey: "test-key",
@@ -561,13 +581,13 @@ await test("a real runner + the default generator: the graph-steps done record A
       shadowDir, // no taskKey — the runner composes its own provenance
       fetchImpl: async () => {
         calls++;
-        return okResponse(calls === 1 ? DOD_OUTPUT : AC_OUTPUT);
+        return okResponse(calls === 1 ? INTENT_OUTPUT : calls === 2 ? DOD_OUTPUT : AC_OUTPUT);
       },
     });
     const runner = makeRunner({ generator, storePath });
     const result = await runner.run({ inputs: RUN_INPUTS });
     eq(result.stepId, "plan.spec", "the [G]s executed; run stopped at the [A] hand-off");
-    eq(calls, 2, "both [G] calls went through the default generator");
+    eq(calls, 3, "all three [G] calls went through the default generator");
 
     // Ledger 1 — the run record store.
     const records = readLines(storePath);
@@ -577,8 +597,8 @@ await test("a real runner + the default generator: the graph-steps done record A
 
     // Ledger 2 — the I/O log: one event line per successful [G] call.
     const events = readLines(join(shadowDir, "decisions.jsonl"));
-    eq(events.length, 2, "two event lines (plan.dod, plan.ac)");
-    eq(events.map((e) => e.decisionId).sort().join(","), "plan.ac,plan.dod", "both steps logged");
+    eq(events.length, 3, "three event lines (plan.intent, plan.dod, plan.ac)");
+    eq(events.map((e) => e.decisionId).sort().join(","), "plan.ac,plan.dod,plan.intent", "all three steps logged");
     eq(events[0].runId, "run-both-ledgers", "the event line keys to the run");
     if (!events.every((e) => e.ok === true && e.type === "event")) fail("served event lines only");
     const dodEvent = events.find((e) => e.decisionId === "plan.dod");

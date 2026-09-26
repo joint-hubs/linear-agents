@@ -1,0 +1,28 @@
+{
+  "_doc": "plan.intent's task-type -> required-perspectives table ([D] config, design doc §3.12). Check (b) reads `byType` — which perspectives a task requires is configuration, never a model opinion at call time. Re-drawing a row is a committed config edit here, not a prompt change. The taxonomy is config/linear/labels.json -> groups.type.labels (the seven keys plan.labels.type pins); a type outside it, the explicit `unknown`, or an absent type requires ALL EIGHT perspectives (fail closed). `sets` names the spec's set vocabulary: `all` = {goal, scope, success, terms}, `base` = all plus `risk` — Decision 2026-09-24: `risk` is required in the internal map for EVERY task type and its presence obliges no question to Mateusz. There is NO phrase-trigger detector and none will be built (Decision 2026-09-24, formerly F4): `risk` is covered by requiring it in every row via `base`.",
+  "perspectives": ["goal", "user", "scope", "success", "constraints", "risk", "priority", "terms"],
+  "sets": {
+    "all": ["goal", "scope", "success", "terms"],
+    "base": ["goal", "scope", "success", "terms", "risk"]
+  },
+  "catalogue": {
+    "_note": "Descriptive only — check (b) reads `byType`. The perspective catalogue's 'weighted for' column, stated in the repo taxonomy (Decision 2026-09-24 mapping: feature -> feature, refactor -> tech, research -> spike).",
+    "goal": ["all"],
+    "user": ["feature"],
+    "scope": ["all"],
+    "success": ["all"],
+    "constraints": ["feature", "tech", "spike"],
+    "risk": ["all"],
+    "priority": ["feature", "spike"],
+    "terms": ["all"]
+  },
+  "byType": {
+    "feature": ["goal", "scope", "success", "terms", "risk", "user", "constraints", "priority"],
+    "bug": ["goal", "scope", "success", "terms", "risk"],
+    "spike": ["goal", "scope", "success", "terms", "risk", "constraints", "priority"],
+    "tech": ["goal", "scope", "success", "terms", "risk", "constraints"],
+    "docs": ["goal", "scope", "success", "terms", "risk"],
+    "test": ["goal", "scope", "success", "terms", "risk"],
+    "chore": ["goal", "scope", "success", "terms", "risk"]
+  }
+}
