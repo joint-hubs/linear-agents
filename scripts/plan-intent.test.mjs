@@ -30,6 +30,7 @@ import {
   persistMap,
   requiredPerspectives,
   resolveReference,
+  runPlanIntentNode,
   verifyIdMap,
 } from "./plan-intent.mjs";
 import { DECISION_STEP } from "./decision-call.mjs";
@@ -786,6 +787,154 @@ async function main() {
     const got = verifyIdMap({ 1: v1 });
     eq(got.ok, false, "refused");
     eq(/no mapVersion 0 to renumber from/.test(got.errors[0]), true, `named: ${got.errors[0]}`);
+  });
+
+  // ── the node: one retry, then stop ────────────────────────────────────────
+
+  const STEP = { kind: "G", reads: ["inbox.entry", "plan.dor.gaps", "intake.taskType", "gate.plan.gate1.answers", "gate.plan.gate1.corrections"] };
+  const validate = new Ajv({ allErrors: true }).compile(getRegistryEntry("plan.intent").output);
+  const RUN_READS = { "inbox.entry": ENTRY, "plan.dor.gaps": GAPS, "intake.taskType": "feature" };
+
+  await test("the node returns a done map and persists it as the next version", async () => {
+    const map = mapWith({ covers: { goal: [GAPS[0]], scope: [GAPS[1]] }, quotes: { risk: "Out of scope: the mobile layout" } });
+    const seen = [];
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RUN_READS,
+      generator: async (args) => { seen.push(args); return map; },
+      validate,
+    });
+    eq(result.status, "done", `done: ${JSON.stringify(result.error)}`);
+    eq(result.mapVersion, 1, "the first persisted version");
+    eq(result.maps[1], map, "and the store carries it");
+    eq(result.attempts, 1, "one call, no retry");
+    eq(seen.length, 1, "one generator call");
+    deepEq(Object.keys(seen[0].reads).sort(), ["inbox.entry", "intake.taskType", "plan.dor.gaps"], "the declared reads, no revision on the first attempt");
+  });
+
+  await test("the node retries ONCE carrying the reasons and the rejected map, then stops", async () => {
+    const bad = mapWith({ covers: { goal: [GAPS[0]] }, quotes: { risk: "tego w opisie nie ma" } });
+    const seen = [];
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RUN_READS,
+      generator: async (args) => { seen.push(args); return bad; },
+      validate,
+    });
+    eq(result.status, "failed", "refused");
+    eq(result.error.code, "schema_invalid", "typed as schema_invalid");
+    eq(seen.length, 2, "exactly ONE retry");
+    eq(/rejected after one retry/.test(result.error.message), true, `names the retry: ${result.error.message}`);
+    eq(result.problems.length, 2, `both problems surface: ${result.problems.join(" | ")}`);
+    eq(result.problems.some((p) => p.includes(GAPS[1])), true, "the uncovered gap is named");
+    eq(result.problems.some((p) => /occurs verbatim in no anchor text/.test(p)), true, "the unanchored quote is named");
+
+    const revision = seen[1].reads.revision;
+    eq(revision.attempt, 2, "the second attempt is marked");
+    eq(revision.problems.length, 2, "carries the reasons");
+    eq(revision.previous, bad, "and the rejected map itself");
+    eq(seen[1].reads["inbox.entry"], ENTRY, "the entry stays VERBATIM — our feedback is never quote-able anchor text");
+    deepEq(seen[1].reads["plan.dor.gaps"], GAPS, "the declared reads are unchanged on the retry");
+  });
+
+  await test("a schema-invalid map is refused before the checks run", async () => {
+    const notAMap = { goal: "g", why: "w", mapVersion: 1 };
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RUN_READS,
+      generator: async () => notAMap,
+      validate,
+    });
+    eq(result.status, "failed", "refused");
+    eq(result.error.code, "schema_invalid", "typed");
+    eq(result.problems.length, 1, `one problem: ${result.problems.join(" | ")}`);
+    eq(result.checks, undefined, "the [D] checks never saw it");
+  });
+
+  await test("a mis-numbered mapVersion is a rejection — the store allocates identity", async () => {
+    const map = mapWith({ covers: { goal: [GAPS[0]], scope: [GAPS[1]] }, quotes: { risk: "Out of scope: the mobile layout" }, mapVersion: 7 });
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RUN_READS,
+      generator: async () => map,
+      validate,
+    });
+    eq(result.status, "failed", "refused");
+    eq(result.problems.some((p) => /mapVersion 7 is not the next persisted version \(1\)/.test(p)), true, `named: ${result.problems.join(" | ")}`);
+  });
+
+  await test("the node fails closed on malformed reads with zero generator calls", async () => {
+    let calls = 0;
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: { "inbox.entry": ENTRY, "plan.dor.gaps": ["x", "y", "z", "a", "b", "c", "d", "e", "f"] },
+      generator: async () => { calls++; return mapWith(); },
+      validate,
+    });
+    eq(result.status, "failed", "refused");
+    eq(result.error.code, "invalid_input", "typed as invalid_input");
+    eq(calls, 0, "zero provider calls");
+  });
+
+  await test("the node needs its wiring and says so rather than guessing", async () => {
+    for (const broken of [{ generator: undefined, validate }, { generator: async () => mapWith(), validate: undefined }, { generator: async () => mapWith(), validate, step: undefined }]) {
+      let thrown = null;
+      try { await runPlanIntentNode({ step: STEP, reads: RUN_READS, ...broken }); } catch (err) { thrown = err; }
+      eq(thrown?.code, "invalid_input", `typed: ${thrown?.message}`);
+    }
+  });
+
+  await test("round 2: the fold drops a stale answer from the anchors, so its point cannot come back as stated", async () => {
+    const v1 = mapWith({ mapVersion: 1 });
+    const { maps } = persistMap({}, v1);
+    const presented = { 1: { round: 1, items: [{ interpretationId: "IN-1", claim: v1.interpretations[0].claim }] } };
+    const staleAnswer = {
+      round: 1,
+      mapVersion: 42,
+      interpretationId: "IN-1",
+      about: { claim: v1.interpretations[0].claim },
+      answer: "Tak, w całości po polsku.",
+    };
+    const reads = {
+      ...RUN_READS,
+      "gate.plan.gate1.answers": [staleAnswer],
+      "gate.plan.gate1.corrections": [],
+    };
+    // The map quotes the stale answer — which is NOT anchor text once the fold
+    // has dropped it, so the map must be rejected.
+    const map = mapWith({ mapVersion: 2, covers: { goal: [GAPS[0]], scope: [GAPS[1]] }, quotes: { risk: "Tak, w całości po polsku." } });
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads,
+      generator: async () => map,
+      validate,
+      maps,
+      presented,
+    });
+    eq(result.status, "failed", "refused");
+    eq(result.problems.some((p) => /occurs verbatim in no anchor text/.test(p)), true, `the stale quote is not anchor text: ${result.problems.join(" | ")}`);
+    eq(result.fold.stale.length, 1, "the stale answer is logged, not applied");
+    eq(/no persisted map for mapVersion 42/.test(result.fold.stale[0].reason), true, `logged: ${result.fold.stale[0].reason}`);
+  });
+
+  await test("an illegal idMap in the store stops the node before any provider call", async () => {
+    const v1 = mapWith({ mapVersion: 1 });
+    const v2 = mapWith({ mapVersion: 2 });
+    v2.interpretations[2].claim = "Rozumiem, że to jest inny odczyt niż w wersji pierwszej.";
+    v2.idMap = { "IN-3": "IN-3" };
+    let calls = 0;
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: { ...RUN_READS, "gate.plan.gate1.answers": [], "gate.plan.gate1.corrections": [] },
+      generator: async () => { calls++; return mapWith({ mapVersion: 3 }); },
+      validate,
+      maps: { 1: v1, 2: v2 },
+      presented: { 1: { round: 1, items: [] }, 2: { round: 2, items: [] } },
+    });
+    eq(result.status, "failed", "refused");
+    eq(result.error.code, "invalid_input", "typed");
+    eq(/illegal idMap/.test(result.error.message), true, `named: ${result.error.message}`);
+    eq(calls, 0, "zero provider calls");
   });
 
   console.log(`plan-intent: ${passed} passed, ${failures.length} failed`);

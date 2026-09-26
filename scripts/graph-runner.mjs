@@ -83,6 +83,7 @@ import { appendShadow, canonicalJson, createDecisionCaller, DECISION_STEP, SHADO
 import { loadGraph, validateGraph } from "./graph-validate.mjs";
 import { getRegistryEntry, loadRegistry } from "./decision-registry.mjs";
 import { AC_TESTABLE_DECISION, runPlanAcNode } from "./plan-ac.mjs";
+import { runPlanIntentNode } from "./plan-intent.mjs";
 import { KINDS } from "./supervisor-gate.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -253,6 +254,25 @@ const OPTIONAL_INTENT_READS = new Set([
   "gate.plan.gate1.answers",
   "gate.plan.gate1.corrections",
 ]);
+
+// The answer contract's two run-record stores, read back from the step records
+// this run has already appended (design doc §3.12):
+//   - `run-record.plan.intent.maps[mapVersion]` — the maps the node persisted.
+//     A done record carries the WHOLE store (append-only per conversation, a
+//     persisted version immutable once written), so the latest one IS the
+//     store and nothing has to walk the log.
+//   - `run-record.gate.plan.gate1.presented[round]` — the exact items and
+//     option texts put to the user, on the gate record's output where the read
+//     surface resolves the sibling `answers`/`corrections`. Its write side is
+//     FOC-517's; until that lands it is empty and every round-2 reference
+//     folds STALE, which is the fail-closed answer rather than a silent pass.
+function intentStores(records) {
+  let maps = {};
+  for (const record of records?.values?.() ?? []) {
+    if (record?.stepId === "plan.intent" && record.maps) maps = record.maps;
+  }
+  return { maps, presented: records?.get?.("gate.plan.gate1")?.output?.presented ?? {} };
+}
 
 function resolveRead(read, { inputs, steps }) {
   if (Object.prototype.hasOwnProperty.call(inputs, read)) return inputs[read];
@@ -664,7 +684,41 @@ export function createGraphRunner({
   // node regenerates once carrying the gate's reasons, then escalates typed.
   // The loop is node-internal — the graph-level retry EDGE is FOC-476's, and
   // no graph edge is added here.
-  async function runGStep(stepId, step, reads) {
+  async function runGStep(stepId, step, reads, records) {
+    if (stepId === "plan.intent") {
+      // plan.intent carries the answer contract's two run-record stores
+      // (design doc §3.12): its own persisted maps, append-only per
+      // conversation, and gate1's `presented` (FOC-517's write side). Each
+      // done record carries the WHOLE map store, so the latest record is the
+      // store — round 1 sees both empty and the fold is a no-op.
+      let result;
+      try {
+        result = await runPlanIntentNode({
+          stepId,
+          step,
+          reads,
+          generator,
+          validate: (raw) => outputValidate.get(stepId)(raw),
+          ...intentStores(records),
+        });
+      } catch (err) {
+        return failRecord(stepId, errorOf(err, "plan.intent node threw"));
+      }
+      const stale = result.fold?.stale ?? [];
+      if (result.status === "done") {
+        return stepRecord(runId, now, stepId, "done", {
+          stepId,
+          output: result.output,
+          mapVersion: result.mapVersion,
+          maps: result.maps,
+          ...(stale.length ? { stale } : {}),
+        });
+      }
+      return failRecord(stepId, result.error, {
+        ...(stale.length ? { stale } : {}),
+        ...(result.problems?.length ? { problems: result.problems } : {}),
+      });
+    }
     if (stepId === "plan.ac") {
       let result;
       try {
@@ -842,7 +896,7 @@ export function createGraphRunner({
 
       let next;
       if (step.kind === "J") next = await runJStep(stepId, step, reads);
-      else if (step.kind === "G") next = await runGStep(stepId, step, reads);
+      else if (step.kind === "G") next = await runGStep(stepId, step, reads, state.steps);
       else if (step.kind === "A") next = runAStep(stepId, reads);
       else if (step.kind === "H") next = await runHStep(stepId, reads);
       else if (step.kind === "D") next = await runDStep(stepId, reads);

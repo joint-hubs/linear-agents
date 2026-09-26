@@ -640,4 +640,158 @@ export function anchorSet(records, entry) {
   return out;
 }
 
+// ── the node ────────────────────────────────────────────────────────────────
+
+const REGEN_NOTE = "One regeneration: the interpretation map below was rejected before anything reached "
+  + "the user. The reasons are listed under problems. Regenerate the FULL map against the same reads, "
+  + "with every problem resolved: the map is all-or-nothing and a partially valid map is never kept.";
+
+/**
+ * Run ONE plan.intent step execution: compose → fold → generate → validate →
+ * persist. A rejected map is ONE retry carrying the rejection reasons and the
+ * rejected map itself, then the step fails — `failure: "stop"`, one typed
+ * record, never a partial map.
+ *
+ * `maps` / `presented` are the two immutable run-record stores of the answer
+ * contract; their write side is FOC-517's (the gate1 fields) and the intake
+ * side FOC-397's. In round 1 both are empty and the fold is a no-op. The
+ * result carries the folded `stale` log so the run record can carry it too.
+ *
+ * Returns `{status:"done", output, mapVersion, maps, checks, fold, attempts}`
+ * or `{status:"failed", error, checks?, fold}` — it never throws on data
+ * failures (fail-closed typed shapes), only on missing wiring.
+ */
+export async function runPlanIntentNode({
+  stepId = "plan.intent",
+  step,
+  reads,
+  generator,
+  validate,
+  maps = {},
+  presented = {},
+} = {}) {
+  if (typeof generator !== "function") {
+    throw new TypedError("invalid_input", "runPlanIntentNode needs the [G] generator (the default transport)");
+  }
+  if (typeof validate !== "function") {
+    throw new TypedError("invalid_input", "runPlanIntentNode needs the step's output validator");
+  }
+  if (!step) {
+    throw new TypedError("invalid_input", "runPlanIntentNode needs the plan.intent step object");
+  }
+
+  // 1. compose — malformed or over-cap reads fail closed BEFORE any provider
+  //    call (zero fetch calls).
+  let inputs;
+  try {
+    inputs = composeIntentInputs(reads);
+  } catch (err) {
+    return { status: "failed", error: { code: err?.code ?? "invalid_input", message: err?.message ?? "composition failed" } };
+  }
+  const { round, gaps, required, payload } = inputs;
+
+  // 2. the fold — round ≥2 only, and fail-closed in the same sense. Whatever
+  //    it finds STALE is dropped from the anchor set, so a stale point cannot
+  //    come back as `stated` and must reappear as unknown/inferred.
+  let fold = { valid: [], stale: [], anchors: [], idMap: { ok: true, errors: [] } };
+  if (round >= 2) {
+    fold = foldGateAnswers({
+      round,
+      maps,
+      presented,
+      answers: reads?.["gate.plan.gate1.answers"] ?? [],
+      corrections: reads?.["gate.plan.gate1.corrections"] ?? [],
+    });
+    if (!fold.idMap.ok) {
+      return {
+        status: "failed",
+        error: { code: "invalid_input", message: `plan.intent: the maps store carries an illegal idMap — ${fold.idMap.errors[0]}` },
+        fold,
+      };
+    }
+  }
+  const anchors = anchorSet(fold.valid.map((v) => v.record), reads?.["inbox.entry"]);
+
+  // 3–4. generate → validate → (one regeneration) → validate → stop.
+  let previousMap = null;
+  let problems = [];
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    let raw;
+    try {
+      raw = await generator({ stepId, step, reads: attempt === 1 ? payload : regenReads(payload, previousMap, problems) });
+    } catch (err) {
+      return {
+        status: "failed",
+        fold,
+        error: { code: err instanceof Error && err.code ? err.code : "provider_error", message: err?.message || "generator threw" },
+      };
+    }
+
+    problems = [];
+    if (!validate(raw)) {
+      problems.push("the map failed the step's output schema");
+    } else {
+      // Identity is the STORE's to allocate: monotonic, never reused. A
+      // mis-numbered map is a rejection, never a silent renumber.
+      const allocated = allocateMapVersion(maps);
+      if (raw.mapVersion !== allocated) {
+        problems.push(`mapVersion ${raw.mapVersion} is not the next persisted version (${allocated})`);
+      }
+      const checked = checkMap({ output: raw, gaps, round, anchors, required });
+      problems.push(...checked.errors);
+      if (problems.length === 0) {
+        const persisted = persistMap(maps, raw);
+        return {
+          status: "done",
+          output: raw,
+          mapVersion: persisted.mapVersion,
+          maps: persisted.maps,
+          checks: checked.checks,
+          fold,
+          attempts: attempt,
+          taskType: inputs.taskType,
+          failClosedType: inputs.failClosedType,
+        };
+      }
+      if (attempt === 2) {
+        return { status: "failed", error: { code: "schema_invalid", message: rejectedMessage(stepId, problems) }, checks: checked.checks, fold, problems };
+      }
+      previousMap = raw;
+      continue;
+    }
+
+    // Schema-invalid: the four [D] checks have nothing to say about a map the
+    // validator already refused.
+    if (attempt === 2) {
+      return { status: "failed", error: { code: "schema_invalid", message: rejectedMessage(stepId, problems) }, fold, problems };
+    }
+    previousMap = raw;
+  }
+  // Unreachable: the loop returns on every branch.
+  throw new TypedError("provider_error", "plan.intent: the node exited without a verdict");
+}
+
+function rejectedMessage(stepId, problems) {
+  return `[G] ${stepId} map rejected after one retry (${problems.length} problem${problems.length === 1 ? "" : "s"}): ${problems.join(" | ")}`;
+}
+
+/**
+ * The regeneration reads: the SAME payload with a `revision` field carrying
+ * the rejection reasons and the rejected map. Payload fields are caller
+ * composition (the FOC-474 precedent the plan.ac loop follows) — the declared
+ * reads stay exactly five, and `inbox.entry` is left VERBATIM so the anchor
+ * set cannot pick up our own feedback as quote text.
+ */
+function regenReads(payload, previous, problems) {
+  return {
+    ...payload,
+    revision: {
+      attempt: 2,
+      note: REGEN_NOTE,
+      problems: [...problems],
+      previous: previous ?? null,
+    },
+  };
+}
+
 
