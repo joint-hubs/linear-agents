@@ -70,10 +70,17 @@ function jsonLineEvents(path, runId, sessionId, includeWorkspace = true) {
     }
     if (line.type !== "assistant" || !line.message?.usage) continue;
     const usage = line.message.usage;
+    // FOC-381 (B1): message.id identifies the physical model call. One
+    // assistant message lands as several transcript lines (thinking / text /
+    // tool_use), each repeating the same usage object — or zeros on some
+    // lines. The event stays per line with its own dedup key; message.id
+    // travels in the payload so the projection (applyUsageRecorded) can
+    // merge the lines into one usage_facts row instead of counting each.
     events.push(makeEvent("usage.recorded", {
       runId, sessionId: line.sessionId || line.session_id || sessionId || null,
       agentKey: line.attributionAgent || (line.agentId ? `agent-${line.agentId}` : "_lead"),
       model: line.message.model || null, observedAt,
+      messageId: line.message?.id ?? null,
       inputTokens: usage.input_tokens ?? 0, outputTokens: usage.output_tokens ?? 0,
       cacheReadTokens: usage.cache_read_input_tokens ?? 0,
       cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,

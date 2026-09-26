@@ -37,6 +37,12 @@ const usage = db.prepare(`INSERT INTO usage_facts
    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
    source_path, source_offset, created_at)
   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+// FOC-381 B6 fixtures: per-message rows carry a non-null message_id.
+const usageMsg = db.prepare(`INSERT INTO usage_facts
+  (usage_id, run_id, session_id, agent_key, model, observed_at,
+   input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+   source_path, source_offset, created_at, message_id)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
 const cost = db.prepare("INSERT INTO cost_facts (run_id, usage_id, price_set_id, cost_usd) VALUES (?,?,?,?)");
 
 // --- fixture: run-scoped claims ------------------------------------------
@@ -151,6 +157,35 @@ cost.run("runA", "tieA", "ps1", 7.0);
 usage.run("bE", "runE", "sb", "implementer", "m2", "2026-09-01T10:30:00.000Z", 61, 62, 0, 0, "/boundary.jsonl", 10, "2026-09-01T10:30:00.000Z");
 usage.run("bF", "runF", "sb", "implementer", "m2", "2026-09-01T10:30:00.000Z", 61, 62, 0, 0, "/boundary.jsonl", 10, "2026-09-01T10:30:00.000Z");
 
+// --- fixture: message_id island guard (FOC-381 B6) ------------------------
+// Two DIFFERENT messages can be adjacent with the same token tuple (e.g. two
+// consecutive zero-usage messages); the tuple+gap proxy would merge them.
+// Where both neighbours carry a non-null message_id, a difference splits the
+// island unconditionally; a NULL on either side keeps the legacy tuple+gap
+// merge (the deploy window has both row shapes in one partition).
+
+// /midsplit.jsonl — two distinct messages, identical tuples, 10 s apart:
+// the guard must beat the proxy and keep two physical calls.
+usageMsg.run("ms10", "runM", "sm", "implementer", "m1", "2026-09-01T10:00:00.000Z", 5, 5, 0, 0, "/midsplit.jsonl", 10, "2026-09-01T10:00:00.000Z", "msg-a");
+usageMsg.run("ms20", "runM", "sm", "implementer", "m1", "2026-09-01T10:00:10.000Z", 5, 5, 0, 0, "/midsplit.jsonl", 20, "2026-09-01T10:00:10.000Z", "msg-b");
+
+// /midlegacy.jsonl — a per-message row and a legacy NULL line of the same
+// message next to it: NULL keeps the legacy merge (one row).
+usageMsg.run("ml10", "runM", "sm", "implementer", "m1", "2026-09-01T10:00:00.000Z", 6, 6, 0, 0, "/midlegacy.jsonl", 10, "2026-09-01T10:00:00.000Z", "msg-c");
+usage.run("ml20", "runM", "sm", "implementer", "m1", "2026-09-01T10:00:10.000Z", 6, 6, 0, 0, "/midlegacy.jsonl", 20, "2026-09-01T10:00:10.000Z");
+
+// /midnull.jsonl — both legacy NULL lines: unchanged legacy behaviour.
+usage.run("mn10", "runM", "sm", "implementer", "m1", "2026-09-01T10:00:00.000Z", 7, 7, 0, 0, "/midnull.jsonl", 10, "2026-09-01T10:00:00.000Z");
+usage.run("mn20", "runM", "sm", "implementer", "m1", "2026-09-01T10:00:10.000Z", 7, 7, 0, 0, "/midnull.jsonl", 20, "2026-09-01T10:00:10.000Z");
+
+// /midmixed.jsonl — the NULL bridge: msg-d, then a legacy NULL line, then
+// msg-e, all identical tuples within the gap. Each adjacent pair has a NULL
+// side, so the proxy applies at every hop and all three lines form ONE
+// island — documented consequence of keeping the deploy-window merge.
+usageMsg.run("mm10", "runM", "sm", "implementer", "m1", "2026-09-01T10:00:00.000Z", 8, 8, 0, 0, "/midmixed.jsonl", 10, "2026-09-01T10:00:00.000Z", "msg-d");
+usage.run("mm20", "runM", "sm", "implementer", "m1", "2026-09-01T10:00:10.000Z", 8, 8, 0, 0, "/midmixed.jsonl", 20, "2026-09-01T10:00:10.000Z");
+usageMsg.run("mm30", "runM", "sm", "implementer", "m1", "2026-09-01T10:00:20.000Z", 8, 8, 0, 0, "/midmixed.jsonl", 30, "2026-09-01T10:00:20.000Z", "msg-e");
+
 // --- assertions ----------------------------------------------------------
 const rows = db.prepare("SELECT * FROM canonical_usage ORDER BY source_path, source_offset").all();
 const byKey = (path, offset) => rows.find((r) => r.source_path === path && r.source_offset === offset);
@@ -246,13 +281,49 @@ const boundary = byKey("/boundary.jsonl", 10);
 check("in-window beats before-start claimant", boundary?.run_id === "runE", `got ${boundary?.run_id}`);
 check("before-start claimant survives in claim_count", boundary?.claim_count === 2, `got ${boundary?.claim_count}`);
 
+// message_id island guard (FOC-381 B6): expected island counts here; the
+// twin/view row-for-row contract below covers these fixtures as well.
+const viewMidRows = (path) => rows.filter((r) => r.source_path === path);
+
+check("distinct message_ids split despite identical tuple",
+  viewMidRows("/midsplit.jsonl").length === 2, `got ${viewMidRows("/midsplit.jsonl").length}`);
+check("split rows expose their own message_id",
+  byKey("/midsplit.jsonl", 10)?.message_id === "msg-a" && byKey("/midsplit.jsonl", 20)?.message_id === "msg-b",
+  `got ${byKey("/midsplit.jsonl", 10)?.message_id}/${byKey("/midsplit.jsonl", 20)?.message_id}`);
+check("split rows stay single-line", viewMidRows("/midsplit.jsonl").every((r) => r.line_count === 1));
+
+check("NULL message_id keeps the legacy merge with a per-message row",
+  viewMidRows("/midlegacy.jsonl").length === 1 && viewMidRows("/midlegacy.jsonl")[0]?.line_count === 2,
+  `got ${viewMidRows("/midlegacy.jsonl").length} rows`);
+check("legacy-merged island carries the representative's message_id",
+  viewMidRows("/midlegacy.jsonl")[0]?.message_id === "msg-c", `got ${viewMidRows("/midlegacy.jsonl")[0]?.message_id}`);
+
+check("both-NULL rows still merge (legacy behaviour unchanged)",
+  viewMidRows("/midnull.jsonl").length === 1 && viewMidRows("/midnull.jsonl")[0]?.line_count === 2,
+  `got ${viewMidRows("/midnull.jsonl").length} rows`);
+check("both-NULL island keeps message_id NULL",
+  viewMidRows("/midnull.jsonl")[0]?.message_id == null, `got ${viewMidRows("/midnull.jsonl")[0]?.message_id}`);
+
+// The NULL bridge: every adjacent pair has a NULL side, so the deploy-window
+// tuple+gap merge applies at each hop — one island of three lines.
+check("NULL bridge merges msg-d/NULL/msg-e into one island",
+  viewMidRows("/midmixed.jsonl").length === 1 && viewMidRows("/midmixed.jsonl")[0]?.line_count === 3,
+  `got ${viewMidRows("/midmixed.jsonl").length} rows`);
+check("NULL-bridged island exposes the winner's message_id",
+  viewMidRows("/midmixed.jsonl")[0]?.message_id === "msg-d", `got ${viewMidRows("/midmixed.jsonl")[0]?.message_id}`);
+
+// message_id is a first-class column of the view, present on every row.
+check("canonical_usage exposes message_id on every row",
+  rows.every((r) => "message_id" in r), "column missing");
+
 // A sum over the view must not exceed the sum of distinct calls: 8 priced
-// islands ($1+$2+$0+$3+$4+$5+$6+$7), 7 unpriced rows stay NULL.
+// islands ($1+$2+$0+$3+$4+$5+$6+$7), 12 unpriced rows stay NULL (the 7
+// original plus the 5 message_id-guard fixtures, none priced).
 const totals = db.prepare(`SELECT COUNT(*) n, ROUND(SUM(COALESCE(cost_usd,0)),2) usd,
     SUM(cost_usd IS NULL) unpriced FROM canonical_usage`).get();
-check("one row per physical call across all scenarios", totals.n === 15, `got ${totals.n}`);
+check("one row per physical call across all scenarios", totals.n === 20, `got ${totals.n}`);
 check("fleet cost counts each call once", totals.usd === 28.0, `got ${totals.usd}`);
-check("unpriced rows counted, never folded to 0", totals.unpriced === 7, `got ${totals.unpriced}`);
+check("unpriced rows counted, never folded to 0", totals.unpriced === 12, `got ${totals.unpriced}`);
 
 // --- JS twin vs view (contract) ------------------------------------------
 // aggregateUsageByTask runs the collapse in JS for speed; the view is the
@@ -260,7 +331,7 @@ check("unpriced rows counted, never folded to 0", totals.unpriced === 7, `got ${
 const rawRows = db.prepare(
   `SELECT u.usage_id, u.run_id, u.session_id, u.agent_key, u.model, u.observed_at,
      u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens,
-     u.source_path, u.source_offset, r.squad, r.started_at, r.ended_at,
+     u.source_path, u.source_offset, u.message_id, r.squad, r.started_at, r.ended_at,
      c.cost_usd
    FROM usage_facts u
    JOIN runs r ON r.run_id=u.run_id
@@ -282,7 +353,7 @@ for (const t of twinRows) {
   for (const field of ["source_path", "source_offset", "usage_id", "run_id", "session_id", "squad",
     "agent_key", "model", "observed_at", "started_at", "ended_at",
     "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
-    "claim_count", "line_count", "attribution", "cost_usd"]) {
+    "claim_count", "line_count", "attribution", "cost_usd", "message_id"]) {
     if (v[field] !== t[field]) {
       twinMismatches++;
       failures.push(`twin/view diverge on ${keyOf(t)} field ${field}: view=${JSON.stringify(v[field])} twin=${JSON.stringify(t[field])}`);

@@ -32,7 +32,7 @@ try {
   DatabaseSync = null;
 }
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 // Per-step migration version markers. Each one-shot migration step is guarded
 // by its own constant rather than the shared SCHEMA_VERSION, so bumping the
@@ -45,6 +45,10 @@ export const MIGRATION_VERSIONS = {
   // The column add itself is PRAGMA-guarded and idempotent on every open
   // (same pattern as addRunColumns); the marker is the paper trail.
   toolFactIdentity: 7,
+  // FOC-381: additive usage_facts column (message.id). PRAGMA-guarded and
+  // idempotent on every open, same pattern as toolFactIdentity; the marker is
+  // the paper trail.
+  usageMessageId: 8,
 };
 
 export function sqliteAvailable() {
@@ -403,6 +407,27 @@ function addToolFactColumns(db) {
   }
 }
 
+// Column added to `usage_facts` after its initial CREATE TABLE (FOC-381 B4).
+// Claude Code writes one assistant message as several transcript lines
+// (thinking / text / tool_use), each repeating the same usage object; the
+// projection merges those lines into one row keyed by message.id, and the id
+// must be stored so reproject/reprice passes and queries can see which
+// message a row belongs to. Nullable: legacy lines without message.id and
+// pre-FOC-381 rows keep NULL. Same declarative PRAGMA-guarded pattern as
+// TOOL_FACT_COLUMNS; additive ALTER, so no VACUUM snapshot (precedent:
+// toolFactIdentity).
+const USAGE_MESSAGE_COLUMNS = [
+  ["message_id", "TEXT"],
+];
+
+function addUsageMessageColumns(db) {
+  const existing = new Set(db.prepare("PRAGMA table_info(usage_facts)").all().map((c) => c.name));
+  for (const [name, type] of USAGE_MESSAGE_COLUMNS) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE usage_facts ADD COLUMN ${name} ${type}`);
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_usage_facts_message ON usage_facts(run_id, message_id)");
+}
+
 // One-time backfill: every pre-existing run gets the price set that was live
 // at migration time, so cost queries never see a NULL price_set_id.
 function backfillPriceSetId(db) {
@@ -684,6 +709,10 @@ export function migrate(db, path) {
   // FOC-220 columns must be added AFTER the v5 rebuild: migrateRunScopedUsage
   // recreates tool_facts from its own DDL, which would drop columns added earlier.
   addToolFactColumns(db);
+  // FOC-381: same ordering constraint as above — the v5 rebuild recreates
+  // usage_facts from its own DDL and would drop message_id if it were added
+  // before migrateRunScopedUsage ran.
+  addUsageMessageColumns(db);
   ensureManagerRunIndex(db);
   ensureCanonicalViews(db);
   // Record every migration marker. Each step guards itself above; this loop
@@ -706,25 +735,42 @@ export function migrate(db, path) {
 //      rows. Measured 2026-09-04: 161,221 rows for 142,841 distinct calls.
 //   2. Repeated per-message usage lines (F7.1b): one assistant message is
 //      written to the transcript as several lines — thinking, text, tool_use —
-//      and each line repeats the same usage object. Ingest keys rows by byte
-//      offset (message.id is not stored), so the lines became distinct
-//      usage_facts rows. Measured 2026-09-12 on the live store copy:
-//      182,796 rows collapse to 74,086 calls; naive tokens 15.28 bn vs 4.77 bn.
+//      and each line repeats the same usage object. At the time this view was
+//      built ingest keyed rows by byte offset because message.id was not
+//      stored, so the lines became distinct usage_facts rows. Measured
+//      2026-09-12 on the live store copy: 182,796 rows collapse to 74,086
+//      calls; naive tokens 15.28 bn vs 4.77 bn. FOC-381 has since made the
+//      projection itself one row per message (message_id stored), so this
+//      over-count now survives only in legacy rows with message_id NULL —
+//      exactly the rows the island rule below still collapses.
 //
-// A physical call is therefore one assistant MESSAGE, identified without
-// message.id by an island over the file's line sequence: within one
-// (source_path, agent_key, model), consecutive rows (by source_offset) whose
-// token tuples are IDENTICAL belong to the same message, unless their
-// observed_at values are more than MESSAGE_GAP_MS apart. message.id is not
-// stored in the DB, so the only ground truth available is a sample: on a
-// 2,161-message sample of real transcripts the rule reproduced message.id
-// grouping — zero false merges, zero splits on that sample (validated there,
-// not proven universal). The gap only has to cover the
+// A physical call is therefore one assistant MESSAGE. Rows carrying a
+// non-null message_id (FOC-381) are already one-per-message and their ids are
+// ground truth; the island below exists for the legacy NULL rows, where no id
+// is available: within one (source_path, agent_key, model), consecutive rows
+// (by source_offset) whose token tuples are IDENTICAL belong to the same
+// message, unless their observed_at values are more than MESSAGE_GAP_MS
+// apart. For that legacy remainder the only ground truth available was a
+// sample: on a 2,161-message sample of real transcripts the rule reproduced
+// message.id grouping — zero false merges, zero splits on that sample
+// (validated there, not proven universal). The gap only has to cover the
 // longest observed stream (172.9 s); strict tuple identity already prevents
 // merging distinct calls. Two conservative consequences, both deliberate:
 // zero-token lines are never merged with non-zero neighbours (a zero line
 // that bridges two different calls would undercount one of them), and rows
 // with NULL observed_at collapse by tuple identity alone.
+//
+// FOC-381 B6: message.id is now stored (nullable — legacy per-line rows and
+// lines without an id keep NULL). Tuple identity is a *sampled* proxy for
+// message identity with a known false-merge: two DIFFERENT adjacent messages
+// carrying the same tuple (consecutive zero-usage messages, identical small
+// calls). Where both neighbours carry a non-null message_id, the ids are
+// ground truth and a difference splits the island regardless of tuple and
+// gap. If either side is NULL the tuple+gap rule applies unchanged — during
+// the deploy window a legacy per-line row still merges with the adjacent
+// per-message row of the same message. The same non-null id on both sides
+// follows tuple+gap as well (robustness: layer 1 should already have made
+// those rows identical, but the collapse must not depend on that).
 //
 // Among the runs claiming an island, one wins, ranked by fit (in_window >
 // after_end > before_start > no_timestamp), then time distance to the run's
@@ -770,14 +816,15 @@ WITH ordered AS (
   SELECT
     u.usage_id, u.run_id, u.session_id, u.agent_key, u.model, u.observed_at,
     u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens,
-    u.source_path, u.source_offset, u.created_at,
+    u.source_path, u.source_offset, u.created_at, u.message_id,
     r.squad, r.started_at, r.ended_at, r.price_set_id,
     ${FIT_RANK_SQL} AS fit_rank,
     LAG(u.input_tokens)          OVER w AS p_input,
     LAG(u.output_tokens)         OVER w AS p_output,
     LAG(u.cache_read_tokens)     OVER w AS p_cache_read,
     LAG(u.cache_creation_tokens) OVER w AS p_cache_creation,
-    LAG(u.observed_at)           OVER w AS p_observed_at
+    LAG(u.observed_at)           OVER w AS p_observed_at,
+    LAG(u.message_id)            OVER w AS p_message_id
   FROM usage_facts u JOIN runs r ON r.run_id = u.run_id
   WINDOW w AS (PARTITION BY u.source_path, u.agent_key, u.model
                ORDER BY u.source_offset, u.run_id, u.usage_id)
@@ -786,6 +833,11 @@ flagged AS (
   SELECT *,
     CASE
       WHEN p_input IS NULL THEN 0
+      -- FOC-381 B6: non-null ids that differ are ground truth for "different
+      -- message" — split even when the tuple is identical and the gap is small.
+      -- Either side NULL (legacy row) falls through to the tuple+gap rule.
+      WHEN message_id IS NOT NULL AND p_message_id IS NOT NULL
+        AND message_id != p_message_id THEN 1
       WHEN input_tokens != p_input OR output_tokens != p_output
         OR cache_read_tokens != p_cache_read
         OR cache_creation_tokens != p_cache_creation THEN 1
@@ -820,7 +872,8 @@ SELECT
   k.input_tokens, k.output_tokens, k.cache_read_tokens, k.cache_creation_tokens,
   s.claim_count, s.line_count,
   ${FIT_LABEL_SQL} AS attribution,
-  c.cost_usd
+  c.cost_usd,
+  k.message_id
 FROM ranked k
 JOIN island_stats s ON s.source_path = k.source_path AND s.agent_key = k.agent_key
   AND s.model IS k.model AND s.island_id = k.island_id
@@ -1138,16 +1191,21 @@ function eventFromRow(row) {
  * construction — it never deletes, so a replay cannot lose history.
  *
  * @param {object} db
- * @param {{runId?: string, eventTypes?: string[], dryRun?: boolean}} [options]
+ * @param {{runId?: string, sourcePath?: string, eventTypes?: string[], dryRun?: boolean}} [options]
  *   eventTypes defaults to the fact-building events. Widening it to task.linked
  *   or quality.reported replays attribution decisions too, which can reopen
  *   issues that were resolved by hand — opt in deliberately.
+ *   sourcePath constrains the replay to events of ONE transcript (exact match
+ *   on events.source_path, the stored canonical path). The FOC-381 (B5) usage
+ *   rewrite reprojects exactly the (run_id, source_path) pair it just rewrote,
+ *   so other sources' projections are untouched.
  */
 export function reprojectEvents(db, options = {}) {
   const types = options.eventTypes || ["usage.recorded", "transcript.progress"];
   const clauses = [`event_type IN (${types.map(() => "?").join(",")})`];
   const args = [...types];
   if (options.runId) { clauses.push("run_id IS ?"); args.push(options.runId); }
+  if (options.sourcePath) { clauses.push("source_path = ?"); args.push(options.sourcePath); }
   const rows = db.prepare(
     `SELECT event_id, event_type, run_id, observed_at, host_id, source_kind, source_path,
             source_offset, payload_json
@@ -1566,6 +1624,109 @@ export function resolveQualityIssue(db, runId, issueType, options = {}) {
   return { closed: result.changes };
 }
 
+// FOC-381 (B2): merge all lines of ONE assistant message into a single
+// usage_facts row. Claude Code writes the message as several transcript lines
+// (thinking / text / tool_use), each repeating the same usage object — or
+// zeros on some lines — which the per-line identity counted ~2.1x too high.
+//
+// Identity: usage_id = hash(source_path:msg:messageId), ALWAYS — an explicit
+// payload.usageId is deliberately IGNORED on this path: the projection merges
+// per (run, message), and honouring a per-LINE explicit id would re-key each
+// line into its own row (N rows per message that verify would still pass),
+// resurrecting the ~2.1x over-count this merge exists to fix. Lines without a
+// messageId never reach here; they keep payload.usageId precedence in
+// applyUsageRecorded's per-line branch. Scoped per run by the v5 composite
+// PK. The events table keeps one event per line with its own identity (B1) —
+// this is a projection-level merge, not a re-keying of the source tables à la
+// JOI-259, so no schema rebuild is involved.
+//
+// Convergence: counters merge with MAX(), observed_at with a NULL-safe MIN,
+// so lines arriving in any order — late flushes, separate ingest passes, a
+// full reprojectEvents replay — converge to the same row. MAX also makes the
+// zeros-lines harmless: they never lower a real counter that landed first.
+//
+// source_offset is set on INSERT only and NEVER updated: a second line of the
+// same message carries a different offset, and updating would collide with
+// UNIQUE(run_id, source_path, source_offset) — a conflict SQLite resolves by
+// throwing, which would roll back the whole applyEvents batch mid-loop.
+function applyUsageMessage(db, event, messageId) {
+  const payload = event.payload;
+  const runId = event.runId || payload.runId;
+  // Per-message identity is the message hash, unconditionally — payload.usageId
+  // must never override it (see the identity note above).
+  const usageId = hash(`${event.source.path}:msg:${messageId}`);
+  // The trailing target-less ON CONFLICT DO NOTHING absorbs a UNIQUE(run_id,
+  // source_path, source_offset) clash with a legacy per-line row squatting the
+  // same offset (deploy-window straddle: the line was first written by the
+  // pre-FOC-381 per-line identity). Absorb, never throw — same reason as the
+  // insert-only source_offset above. Requires SQLite 3.35+ for multiple ON
+  // CONFLICT clauses; verified against node:sqlite 3.50.4.
+  db.prepare(
+    `INSERT INTO usage_facts (usage_id, run_id, session_id, agent_key, model, observed_at,
+       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, source_path, source_offset, created_at, message_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(run_id, usage_id) DO UPDATE SET
+       input_tokens=MAX(usage_facts.input_tokens, excluded.input_tokens),
+       output_tokens=MAX(usage_facts.output_tokens, excluded.output_tokens),
+       cache_read_tokens=MAX(usage_facts.cache_read_tokens, excluded.cache_read_tokens),
+       cache_creation_tokens=MAX(usage_facts.cache_creation_tokens, excluded.cache_creation_tokens),
+       observed_at=CASE
+         WHEN usage_facts.observed_at IS NULL THEN excluded.observed_at
+         WHEN excluded.observed_at IS NULL THEN usage_facts.observed_at
+         WHEN excluded.observed_at < usage_facts.observed_at THEN excluded.observed_at
+         ELSE usage_facts.observed_at END,
+       agent_key=COALESCE(usage_facts.agent_key, excluded.agent_key),
+       model=COALESCE(usage_facts.model, excluded.model),
+       session_id=COALESCE(usage_facts.session_id, excluded.session_id),
+       message_id=excluded.message_id
+     ON CONFLICT DO NOTHING`,
+  ).run(usageId, runId, payload.sessionId || null, payload.agentKey || "_lead", payload.model || null,
+    payload.observedAt || event.observedAt || null, payload.inputTokens || 0, payload.outputTokens || 0,
+    payload.cacheReadTokens || 0, payload.cacheCreationTokens || 0, event.source.path, event.source.offset, now(), messageId);
+  const row = db.prepare(
+    "SELECT agent_key, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM usage_facts WHERE run_id=? AND usage_id=?",
+  ).get(runId, usageId);
+  if (!row) {
+    // The offset clash above was absorbed before the row ever existed — the
+    // message's first line landed on a squatted offset and nothing was
+    // written under this usage_id. Later lines of the same message (different
+    // offsets) still create the row via the same upsert.
+    return { duplicate: true, usageId };
+  }
+  for (const [field, incoming, existing] of [
+    ["agent_key", payload.agentKey || null, row.agent_key],
+    ["model", payload.model || null, row.model],
+  ]) {
+    if (incoming != null && existing != null && incoming !== existing) {
+      raiseIssue(db, runId, "usage_message_field_conflict", "warning",
+        { runId, usageId, field, existingValue: existing, incomingValue: incoming });
+    }
+  }
+  const run = db.prepare("SELECT price_set_id FROM runs WHERE run_id=?").get(runId);
+  let snapshot;
+  if (run?.price_set_id) {
+    snapshot = loadPriceSet(db, run.price_set_id);
+  } else {
+    snapshot = ensurePriceSet(db);
+    db.prepare("UPDATE runs SET price_set_id=? WHERE run_id=?").run(snapshot.id, runId);
+  }
+  // Recompute cost from the row's CURRENT counters, not from this line's
+  // payload: after a zeros-first write the row is a frozen partial (the
+  // frozen-partial bug this merge exists to fix), and a later real line must
+  // reprice the row it grew into. The counters only ever grow (MAX), so this
+  // is idempotent across replays.
+  const cost = calculateCost({
+    inputTokens: row.input_tokens, outputTokens: row.output_tokens,
+    cacheReadTokens: row.cache_read_tokens, cacheCreationTokens: row.cache_creation_tokens,
+  }, row.model, snapshot.prices, null, snapshot.scoped);
+  if (cost == null && !isSyntheticModel(row.model)) {
+    raiseIssue(db, runId, "pricing_missing", "warning", { model: row.model, usageId, runId: event.runId ?? null });
+  }
+  db.prepare("INSERT OR REPLACE INTO cost_facts (run_id, usage_id, price_set_id, cost_usd) VALUES (?, ?, ?, ?)")
+    .run(runId, usageId, snapshot.id, cost);
+  return { usageId, costUSD: cost };
+}
+
 function applyUsageRecorded(db, event) {
   const payload = event.payload;
   const runId = event.runId || payload.runId;
@@ -1573,6 +1734,11 @@ function applyUsageRecorded(db, event) {
     throw new Error("usage.recorded requires runId and source path/offset");
   }
   db.prepare("INSERT OR IGNORE INTO runs (run_id, status, updated_at) VALUES (?, 'running', ?)").run(runId, now());
+  // FOC-381: lines carrying a message.id collapse per message; lines without
+  // one keep the legacy per-line identity, byte-for-byte unchanged.
+  if (typeof payload.messageId === "string" && payload.messageId) {
+    return applyUsageMessage(db, event, payload.messageId);
+  }
   const usageId = payload.usageId || hash(`${event.source.path}:${event.source.offset}`);
   const inserted = db.prepare(
     `INSERT OR IGNORE INTO usage_facts (usage_id, run_id, session_id, agent_key, model, observed_at, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, source_path, source_offset, created_at)
@@ -2176,11 +2342,21 @@ export function collapseUsageIslands(rows) {
 
   const islands = [];
   let current = null;
+  // The view's LAG compares each row to the PREVIOUS row, not to the island
+  // head. Tuples are identical across an island by construction, but
+  // message_id is not: a NULL legacy line may sit between two different
+  // non-null ids (FOC-381 B6), so the id — like observed_at — needs a chain
+  // anchor, or the twin would split where the view merges.
+  const messageId = (r) => r.message_id ?? null;
   for (const row of sorted) {
     const sameIsland = current
       && current.source_path === row.source_path
       && current.agent_key === row.agent_key
       && (current.model ?? null) === (row.model ?? null)
+      // FOC-381 B6: differing non-null ids always split (ground truth beats
+      // the sampled tuple+gap proxy); NULL on either side keeps the proxy.
+      && !(messageId(row) !== null && current.last_message_id !== null
+        && messageId(row) !== current.last_message_id)
       && current.input_tokens === row.input_tokens
       && current.output_tokens === row.output_tokens
       && current.cache_read_tokens === row.cache_read_tokens
@@ -2190,8 +2366,9 @@ export function collapseUsageIslands(rows) {
     if (sameIsland) {
       current.lines.push(row);
       current.observed_at = row.observed_at; // chain anchor, like the view's LAG
+      current.last_message_id = messageId(row);
     } else {
-      current = { ...row, lines: [row] };
+      current = { ...row, lines: [row], last_message_id: messageId(row) };
       islands.push(current);
     }
   }
@@ -2234,6 +2411,7 @@ export function collapseUsageIslands(rows) {
       line_count: island.lines.length,
       attribution: FIT_LABELS[fitRank(winner.observed_at, winner.started_at, winner.ended_at)],
       cost_usd: winner.cost_usd,
+      message_id: messageId(winner),
     };
   });
 }
@@ -2348,7 +2526,7 @@ function aggregateUsageByTask(db, priceMode) {
   const rows = db.prepare(
     `SELECT u.usage_id, u.run_id, u.session_id, u.agent_key, u.model, u.observed_at,
        u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens,
-       u.source_path, u.source_offset, r.squad, r.started_at, r.ended_at,
+       u.source_path, u.source_offset, u.message_id, r.squad, r.started_at, r.ended_at,
        c.cost_usd
      FROM usage_facts u
      JOIN runs r ON r.run_id=u.run_id
@@ -2481,7 +2659,7 @@ export function queryHealth(db) {
 // the collapsed surface.
 const COST_BASIS_RAW = "raw";
 const COST_BASIS_CANONICAL = "canonical";
-const COST_BASIS_RAW_NOTE = "cost figures and the turns counts beside them are raw usage-line sums from usage_facts LEFT JOIN cost_facts: run-scoped claim copies and repeated per-message usage lines are included, not collapsed — canonical_usage (FOC-221 island rule) is the collapsed surface";
+const COST_BASIS_RAW_NOTE = "cost figures and the turns counts beside them are raw per-row sums from usage_facts LEFT JOIN cost_facts, run-scoped claim copies included and not collapsed: since FOC-381 a row is one assistant message when message_id is set, and one transcript line (~2x inflated, flagged usage_legacy_inflated) where message_id is NULL — canonical_usage (FOC-221 island rule) is the collapsed surface";
 const COST_BASIS_CANONICAL_NOTE = "these buckets are island-collapsed per the FOC-221 rule (one row per physical message): they do not carry the raw over-counts the raw-layer figures above do";
 
 export function queryTrace(db, taskId) {
