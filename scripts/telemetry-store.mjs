@@ -423,7 +423,16 @@ const USAGE_MESSAGE_COLUMNS = [
 function addUsageMessageColumns(db) {
   const existing = new Set(db.prepare("PRAGMA table_info(usage_facts)").all().map((c) => c.name));
   for (const [name, type] of USAGE_MESSAGE_COLUMNS) {
-    if (!existing.has(name)) db.exec(`ALTER TABLE usage_facts ADD COLUMN ${name} ${type}`);
+    if (existing.has(name)) continue;
+    // The live store is opened by many processes (server, supervisor
+    // children, scripts); two of them can pass the PRAGMA check at once. The
+    // loser's ALTER fails with "duplicate column name" — the column it wanted
+    // exists, so that is success, not a reason to crash the opener.
+    try {
+      db.exec(`ALTER TABLE usage_facts ADD COLUMN ${name} ${type}`);
+    } catch (error) {
+      if (!/duplicate column name/i.test(String(error?.message))) throw error;
+    }
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_usage_facts_message ON usage_facts(run_id, message_id)");
 }
