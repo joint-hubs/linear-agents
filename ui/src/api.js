@@ -1,8 +1,21 @@
+import { buildAnalysisQuery } from './screens/analysis/query.js';
+
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
-async function apiFetch(path) {
-  const r = await fetch(API_BASE + path);
-  if (!r.ok) throw new Error('API ' + r.status);
+// Non-OK responses throw an Error carrying .status and — when the body is the
+// server's { error, code } JSON — the body's error text as the message and
+// .code for callers that switch on it (e.g. cache_building). Without a JSON
+// body the message stays the legacy 'API <status>' so existing callers render
+// the same as before.
+async function apiFetch(path, signal) {
+  const r = await fetch(API_BASE + path, { signal });
+  if (!r.ok) {
+    const data = await r.json().catch(() => null);
+    const err = new Error((data && data.error) || 'API ' + r.status);
+    err.status = r.status;
+    if (data && data.code) err.code = data.code;
+    throw err;
+  }
   return r.json();
 }
 
@@ -277,5 +290,56 @@ export async function postFtStop(id) {
   const r = await fetch(API_BASE + '/api/ft/runs/' + encodeURIComponent(id) + '/stop', { method: 'POST' });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) { const err = new Error(data?.error || ('API ' + r.status)); err.data = data; throw err; }
+  return data;
+}
+
+// ===== Analysis screen (FOC-397 analysis dashboard) =====
+// Panel GETs are { filters, data, caveats }; errors are { error, code } with
+// an HTTP status. The query string skips empty values (buildAnalysisQuery).
+
+export function getAnalysisMeta() {
+  return apiFetch('/api/analysis/meta');
+}
+
+export function getAnalysisPanel(name, filters = {}, signal) {
+  return apiFetch('/api/analysis/' + encodeURIComponent(name) + buildAnalysisQuery(filters), signal);
+}
+
+// target: 'cache' (canonical views, fast — default) or 'store' (raw tables,
+// read-only). Returns { columns, rows, rowCount, truncated, elapsedMs }.
+export async function postAnalysisSql(sql, target = 'cache') {
+  const r = await fetch(API_BASE + '/api/analysis/sql', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql, target }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.status = r.status;
+    if (data?.code) err.code = data.code;
+    throw err;
+  }
+  return data;
+}
+
+// Cache status: { exists, builtAt, buildMs, stale, building, watermark,
+// current, lastBuild }.
+export function getAnalysisCache() {
+  return apiFetch('/api/analysis/cache');
+}
+
+// 202 { started:true, startedAt } or 409 { code:'build_in_progress' } — the
+// 409 reaches the caller as a thrown Error with .code so the UI can treat
+// "already building" as a no-op rather than a failure.
+export async function postAnalysisCacheRebuild() {
+  const r = await fetch(API_BASE + '/api/analysis/cache/rebuild', { method: 'POST' });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.status = r.status;
+    if (data?.code) err.code = data.code;
+    throw err;
+  }
   return data;
 }

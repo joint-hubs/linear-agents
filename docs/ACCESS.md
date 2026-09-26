@@ -95,6 +95,23 @@ Zakładka **Konfiguracja** (`localhost:7331/squad-config`) edytuje modele per sk
 - **Niepełny koszt:** `costUSD:null` oznacza brak ceny co najmniej jednego modelu; `partialCostUSD` jest znanym minimum i UI pokazuje je jako `≥$...`.
 - **Nagrody / XP (FOC-225):** osobna baza append-only `%LOCALAPPDATA%\linear-agents\rewards\rewards.sqlite` (override: `LA_REWARDS_DB`; katalog: `LA_REWARDS_HOME`) — nigdy `telemetry.sqlite`. Ingest działa przy odczycie `GET /api/manager/rewards` (cache TTL 30 s obejmuje sam ingest; squad-y/ratingi/held czytane świeżo do każdego payloadu).
 
+### Analysis screen (branch `feat/telemetry-analysis-dashboard`)
+
+- **Po merge:** `http://127.0.0.1:7331/analysis` — pięć paneli + read-only SQL console; dane z derived analysis cache.
+- **Na branchu (dev server, port 7341 — nie koliduje z `:7331`):**
+
+  ```
+  TELEMETRY_PORT=7341
+  LA_TELEMETRY_HOME=%LOCALAPPDATA%\linear-agents\telemetry-dev-381
+  LA_TELEMETRY_DB=%LOCALAPPDATA%\linear-agents\telemetry-dev-381\telemetry.sqlite
+  LA_STATE_ROOT=%LOCALAPPDATA%\linear-agents\telemetry-dev-381\state
+  LA_DECISION_RUNS_DIR=<repo>\.state\runs
+  node scripts/telemetry-server.mjs
+  ```
+
+- **Cache:** `%LOCALAPPDATA%\linear-agents\telemetry-dev-381\analysis-cache.sqlite` (override: `LA_ANALYSIS_CACHE`) — dysposylna pochodna store'a; odbudowa przyciskiem **Refresh** w UI (rebuild chodzi jako child process).
+- **Zasada twarda:** dev server **nigdy** nie wskazuje na live store (`%LOCALAPPDATA%\linear-agents\telemetry\`) — tylko na kopię dev (`telemetry-dev-381`). Live store otwiera dopiero okno produkcyjne (merge + rewrite `--apply --live`), na wyraźne „go" Mateusza.
+
 ---
 
 ## Prywatność i ekspozycja danych (JOI-71, pt 4)

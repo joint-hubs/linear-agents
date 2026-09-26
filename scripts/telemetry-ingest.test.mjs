@@ -160,6 +160,7 @@ const v4SchemaSql = `
     source_path TEXT NOT NULL,
     source_offset INTEGER NOT NULL,
     created_at TEXT NOT NULL,
+    message_id TEXT,
     UNIQUE(source_path, source_offset)
   );
   CREATE INDEX idx_usage_facts_run ON usage_facts(run_id, observed_at);
@@ -349,7 +350,7 @@ async function run() {
       const dbA = openTelemetryDb(dbPathA);
       try {
         const health = queryHealth(dbA);
-        assertEqual(health.schemaVersion, 7, "schemaVersion"); // FOC-220: additive tool_facts columns (6→7)
+        assertEqual(health.schemaVersion, 8, "schemaVersion"); // FOC-381: additive usage_facts message_id (7→8)
         // cost_facts.run_id populated from JOIN with usage_facts.
         const costRow = dbA.prepare("SELECT run_id FROM cost_facts WHERE usage_id=?").get(usageId);
         assert(costRow && costRow.run_id === "run-v4-1", `cost_facts.run_id=${costRow?.run_id} (expected run-v4-1)`);

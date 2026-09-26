@@ -205,7 +205,7 @@ test("scenario (a): v4 DB migrated to v5 with composite PK and cost_facts.run_id
     const db = openTelemetryDb(dbPath);
     try {
       const health = queryHealth(db);
-      assert(health.schemaVersion === 7, `schemaVersion=${health.schemaVersion} (expected 7)`); // FOC-220: additive tool_facts columns
+      assert(health.schemaVersion === 8, `schemaVersion=${health.schemaVersion} (expected 8)`); // FOC-381: additive usage_facts message_id
 
       // composite PK: usage_facts has two pk>0 columns
       const cols = db.prepare("PRAGMA table_info(usage_facts)").all();
@@ -323,7 +323,7 @@ test("scenario (b): reopening same DB preserves existing pre-v5-backup snapshot"
     const db3 = openTelemetryDb(dbPath);
     try {
       const h = queryHealth(db3);
-      assert(h.schemaVersion === 7, `schemaVersion after reopen=${h.schemaVersion}`);
+      assert(h.schemaVersion === 8, `schemaVersion after reopen=${h.schemaVersion}`);
     } finally { db3.close(); }
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -403,7 +403,7 @@ test("scenario (d): fresh DB has both v4 and v5 markers in schema_migrations", (
       assert(versions.includes(6), `schema_migrations missing v6 (have ${versions.join(",")})`); // slice 2: manager run index
       assert(versions.includes(7), `schema_migrations missing v7 (have ${versions.join(",")})`); // FOC-220: tool identity columns
       const h = queryHealth(db);
-      assert(h.schemaVersion === 7, `fresh DB schemaVersion=${h.schemaVersion}`);
+      assert(h.schemaVersion === 8, `fresh DB schemaVersion=${h.schemaVersion}`); // FOC-381: additive usage_facts message_id
     } finally { db.close(); }
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -416,9 +416,9 @@ test(":memory: DB skips pre-v5 backup snapshot", () => {
   const db = openTelemetryDb(":memory:");
   try {
     const h = queryHealth(db);
-    assert(h.schemaVersion === 7, `:memory: schemaVersion=${h.schemaVersion}`);
+    assert(h.schemaVersion === 8, `:memory: schemaVersion=${h.schemaVersion}`); // FOC-381: additive usage_facts message_id
     const versions = db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => r.version);
-    assert(versions.includes(4) && versions.includes(5) && versions.includes(6) && versions.includes(7), `:memory: missing markers (have ${versions.join(",")})`);
+    assert(versions.includes(4) && versions.includes(5) && versions.includes(6) && versions.includes(7) && versions.includes(8), `:memory: missing markers (have ${versions.join(",")})`);
   } finally { db.close(); }
 });
 

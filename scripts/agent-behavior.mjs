@@ -185,7 +185,7 @@ function classifyOccurrence({ members, index, ordered, posOf, positionsByRunAgen
   };
 }
 
-const REPEAT_CATEGORIES = ["reread_after_edit", "rerun_after_change", "result_changed", "unchanged", "unknown"];
+export const REPEAT_CATEGORIES = ["reread_after_edit", "rerun_after_change", "result_changed", "unchanged", "unknown"];
 const emptyCategories = () => Object.fromEntries(REPEAT_CATEGORIES.map((c) => [c, 0]));
 
 // A call whose outcome cannot be vouched for: the result never came back
