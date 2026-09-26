@@ -13,8 +13,15 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+import Ajv from "ajv";
+import { getRegistryEntry } from "./decision-registry.mjs";
 import {
   PERSPECTIVES,
+  checkCoverage,
+  checkMap,
+  checkPresence,
+  checkQuoteFidelity,
+  checkSchemaExternal,
   composeIntentInputs,
   loadPerspectiveTable,
   loadTaskTypes,
@@ -71,6 +78,57 @@ const GAPS = ["brak określenia formatu eksportu", "nie wiadomo, czy snapshot je
 
 function sorted(list) {
   return [...list].sort();
+}
+
+// ── map fixtures ────────────────────────────────────────────────────────────
+//
+// One claim per perspective so a map can be built for any required set. The
+// claims are Polish and first person ("Rozumiem, że …") as §3.12 words them.
+
+const CLAIMS = {
+  goal: "Rozumiem, że ma powstać biblioteka snapshotów Gantta.",
+  user: "Rozumiem, że użytkownikiem jest Mateusz i jego zespół.",
+  scope: "Rozumiem, że zmiana obejmuje eksport jednego PNG na widok.",
+  success: "Rozumiem, że sukces to poprawny PNG dla każdego widoku.",
+  constraints: "Rozumiem, że pola kontraktu v1 nie mogą się zmienić.",
+  risk: "Rozumiem, że zmiana dotyka zapisu plików na dysk.",
+  priority: "Rozumiem, że ważniejsze jest pełne formatowanie niż szybkość.",
+  terms: "Rozumiem, że „snapshot” oznacza pojedynczy eksport widoku.",
+};
+
+const OPTIONS = [
+  { text: "Ustalamy format z Mateuszem.", recommended: true, reason: "Bez formatu nie ma akceptacji." },
+  { text: "Zostawiamy do wyboru przy implementacji.", recommended: false },
+];
+
+/**
+ * Build a map over the given perspectives. `source` is one value or one per
+ * item; `quotes`/`covers` are keyed by perspective. A `stated` item gets a
+ * quote (the schema requires one) defaulting to an anchored phrase of ENTRY,
+ * and an `unknown` item carries the two options the schema requires — so every
+ * fixture here is schema-valid as well as check-shaped.
+ */
+function mapWith({ perspectives = PERSPECTIVES, source = "inferred", quotes = {}, covers = {}, mapVersion = 1 } = {}) {
+  return {
+    goal: "Rozumiem, że ma powstać biblioteka snapshotów Gantta.",
+    why: "Rozumiem, że potrzebny jest eksport widoków do PNG.",
+    mapVersion,
+    interpretations: perspectives.map((p, i) => {
+      const src = Array.isArray(source) ? source[i] : source;
+      const item = {
+        id: `IN-${i + 1}`,
+        perspective: p,
+        claim: CLAIMS[p],
+        source: src,
+        alternatives: [],
+        covers: covers[p] ?? [],
+      };
+      if (src === "unknown") item.options = OPTIONS;
+      if (quotes[p] !== undefined) item.quote = quotes[p];
+      else if (src === "stated") item.quote = "Export one PNG per view";
+      return item;
+    }),
+  };
 }
 
 async function main() {
@@ -286,6 +344,253 @@ async function main() {
     });
     eq(got.anchors.some((a) => a.includes("Gantt snapshot lib")), true, "title is anchor text");
     eq(got.anchors.some((a) => a === ENTRY), true, "scopeSummary is anchor text");
+  });
+
+  // ── the fixtures are the real contract ────────────────────────────────────
+
+  await test("every fixture map satisfies the committed plan.intent output schema", () => {
+    const validate = new Ajv({ allErrors: true }).compile(getRegistryEntry("plan.intent").output);
+    const fixtures = {
+      inferred: mapWith(),
+      stated: mapWith({ source: "stated", quotes: { goal: "Gantt snapshot lib" } }),
+      unknown: mapWith({ source: "unknown" }),
+      partial: mapWith({ perspectives: BASE }),
+    };
+    for (const [name, map] of Object.entries(fixtures)) {
+      eq(validate(map), true, `${name} is schema-valid: ${JSON.stringify(validate.errors)}`);
+    }
+  });
+
+  await test("the schema already refuses what the four rules add — except the ones it cannot express", () => {
+    const validate = new Ajv({ allErrors: true }).compile(getRegistryEntry("plan.intent").output);
+    const map = mapWith({ perspectives: ["goal"], source: "unknown" });
+    map.interpretations[0].options = [
+      { text: "A", recommended: true, reason: "bo A" },
+      { text: "B", recommended: true, reason: "bo B" },
+    ];
+    eq(validate(map), true, "two recommended is schema-VALID — the schema cannot express exactly-one");
+    map.interpretations[0].claim = "   ";
+    eq(validate(map), true, "a whitespace claim is schema-VALID — minLength passes it");
+    eq(checkSchemaExternal(map).ok, false, "and the code check refuses both");
+  });
+
+  // ── the four rules the schema cannot express ───────────────────────────────
+
+  await test("a clean map passes the schema-external rules", () => {
+    const got = checkSchemaExternal(mapWith({ source: "unknown" }));
+    eq(got.ok, true, `ok: ${got.errors.join(" | ")}`);
+    eq(got.errors.length, 0, "no errors");
+  });
+
+  await test("options carry EXACTLY ONE recommended: true", () => {
+    const map = mapWith({ perspectives: ["goal"], source: "unknown" });
+    map.interpretations[0].options = [
+      { text: "A", recommended: true, reason: "bo A" },
+      { text: "B", recommended: true, reason: "bo B" },
+    ];
+    let got = checkSchemaExternal(map);
+    eq(got.ok, false, "two recommended refused");
+    eq(/EXACTLY ONE "recommended": true/.test(got.errors[0]), true, `names the rule: ${got.errors[0]}`);
+    map.interpretations[0].options = [{ text: "A", recommended: false }, { text: "B", recommended: false }];
+    got = checkSchemaExternal(map);
+    eq(got.ok, false, "zero recommended refused");
+    eq(/found 0/.test(got.errors[0]), true, `names the count: ${got.errors[0]}`);
+  });
+
+  await test("reason is present iff recommended", () => {
+    const map = mapWith({ perspectives: ["goal"], source: "unknown" });
+    map.interpretations[0].options = [
+      { text: "A", recommended: true },
+      { text: "B", recommended: false, reason: "niepotrzebne" },
+    ];
+    const got = checkSchemaExternal(map);
+    eq(got.ok, false, "refused");
+    eq(got.errors.length, 2, `both halves of the rule: ${got.errors.join(" | ")}`);
+    eq(got.errors.some((e) => /must carry a "reason"/.test(e)), true, "recommended without reason named");
+    eq(got.errors.some((e) => /must not carry a "reason"/.test(e)), true, "unrecommended with reason named");
+  });
+
+  await test("every id appears EXACTLY ONCE — a duplicate would corrupt the round-2 fold", () => {
+    const map = mapWith({ perspectives: ["goal", "scope"] });
+    map.interpretations[1].id = "IN-1";
+    const got = checkSchemaExternal(map);
+    eq(got.ok, false, "refused");
+    eq(/appears more than once/.test(got.errors[0]), true, `names the rule: ${got.errors[0]}`);
+  });
+
+  await test("no blank strings anywhere — minLength passes whitespace, this check trims", () => {
+    const map = mapWith({ perspectives: ["goal", "scope"] });
+    map.interpretations[1].claim = "   ";
+    const got = checkSchemaExternal(map);
+    eq(got.ok, false, "refused");
+    eq(/blank string at .*interpretations\[1\]\.claim/.test(got.errors[0]), true, `names the path: ${got.errors[0]}`);
+  });
+
+  // ── (a) coverage ──────────────────────────────────────────────────────────
+
+  await test("check (a): round 1 counts only unknown/inferred — a stated item's covers is ignored", () => {
+    const inferredOnly = mapWith({ covers: { goal: [GAPS[0]], scope: [GAPS[1]] } });
+    const round1 = checkCoverage({ interpretations: inferredOnly.interpretations, gaps: GAPS, round: 1, anchors: [ENTRY] });
+    eq(round1.ok, true, `inferred items cover both gaps: ${round1.errors.join(" | ")}`);
+    const statedCoversOne = mapWith({
+      source: ["stated", "inferred", "inferred", "inferred", "inferred", "inferred", "inferred", "inferred"],
+      quotes: { goal: "Gantt snapshot lib" },
+      covers: { goal: [GAPS[0]], scope: [GAPS[1]] },
+    });
+    const refused = checkCoverage({ interpretations: statedCoversOne.interpretations, gaps: GAPS, round: 1, anchors: [ENTRY] });
+    eq(refused.ok, false, "round 1 ignores the stated item's covers");
+    eq(refused.errors.length, 1, `only the gap the stated item claimed surfaces: ${refused.errors.join(" | ")}`);
+    eq(refused.errors.some((e) => e.includes(GAPS[0])), true, "the gap the stated item covers is uncovered");
+    const onlyStated = mapWith({
+      source: "stated",
+      quotes: { goal: "Gantt snapshot lib", scope: "Export one PNG per view" },
+      covers: { goal: [GAPS[0]], scope: [GAPS[1]] },
+    });
+    const allRefused = checkCoverage({ interpretations: onlyStated.interpretations, gaps: GAPS, round: 1, anchors: [ENTRY] });
+    eq(allRefused.ok, false, "round 1 refuses a map whose gaps are covered by stated items only");
+    eq(allRefused.errors.length, 2, `both gaps surface: ${allRefused.errors.join(" | ")}`);
+  });
+
+  await test("check (a): from round 2 a gate-anchored stated item counts", () => {
+    const map = mapWith({
+      source: ["stated", "stated", "inferred", "inferred", "inferred", "inferred", "inferred", "inferred"],
+      quotes: { goal: "Gantt snapshot lib", scope: "Export one PNG per view" },
+      covers: { goal: [GAPS[0]], scope: [GAPS[1]] },
+    });
+    const round1 = checkCoverage({ interpretations: map.interpretations, gaps: GAPS, round: 1, anchors: [ENTRY] });
+    eq(round1.ok, false, "round 1 refuses it");
+    const round2 = checkCoverage({ interpretations: map.interpretations, gaps: GAPS, round: 2, anchors: [ENTRY] });
+    eq(round2.ok, true, `round 2 counts the anchored stated items: ${round2.errors.join(" | ")}`);
+  });
+
+  await test("check (a): a round-2 stated item whose quote is not anchored does not count", () => {
+    const map = mapWith({
+      source: ["stated", "inferred", "inferred", "inferred", "inferred", "inferred", "inferred", "inferred"],
+      quotes: { goal: "tego w opisie nie ma" },
+      covers: { goal: [GAPS[0]], scope: [GAPS[1]] },
+    });
+    const got = checkCoverage({ interpretations: map.interpretations, gaps: GAPS, round: 2, anchors: [ENTRY] });
+    eq(got.ok, false, "refused");
+    eq(got.errors.some((e) => e.includes(GAPS[0])), true, `the gap surfaces as uncovered: ${got.errors.join(" | ")}`);
+  });
+
+  await test("check (a): an unknown item counts in round 1", () => {
+    const map = mapWith({
+      source: ["unknown", "inferred", "inferred", "inferred", "inferred", "inferred", "inferred", "inferred"],
+      covers: { goal: [GAPS[0]], scope: [GAPS[1]] },
+    });
+    const got = checkCoverage({ interpretations: map.interpretations, gaps: GAPS, round: 1, anchors: [ENTRY] });
+    eq(got.ok, true, `counts: ${got.errors.join(" | ")}`);
+  });
+
+  await test("check (a) sub-check: a covers entry must equal a plan.dor.gaps entry verbatim", () => {
+    const map = mapWith({ covers: { goal: ["brak określenia formatu eksportu."], scope: [GAPS[1]] } });
+    const got = checkCoverage({ interpretations: map.interpretations, gaps: GAPS, round: 1, anchors: [ENTRY] });
+    eq(got.ok, false, "refused");
+    eq(/no such entry in plan.dor.gaps/.test(got.errors[0]), true, `names the rule: ${got.errors[0]}`);
+    eq(got.errors.some((e) => e.includes(GAPS[0])), true, "the gap also surfaces as uncovered");
+  });
+
+  // ── (b) presence ──────────────────────────────────────────────────────────
+
+  await test("check (b): every required perspective appears in at least one interpretation", () => {
+    const got = checkPresence({ interpretations: mapWith().interpretations, required: PERSPECTIVES });
+    eq(got.ok, true, `ok: ${got.errors.join(" | ")}`);
+    const missing = mapWith({ perspectives: PERSPECTIVES.filter((p) => p !== "risk") });
+    const refused = checkPresence({ interpretations: missing.interpretations, required: PERSPECTIVES });
+    eq(refused.ok, false, "refused");
+    eq(refused.errors.length, 1, `one missing perspective: ${refused.errors.join(" | ")}`);
+    eq(/"risk" appears in no interpretation/.test(refused.errors[0]), true, "names the perspective");
+  });
+
+  await test("check (b): a feature task requires all eight; a base-only map is refused", () => {
+    const { perspectives: required, failClosed } = requiredPerspectives("feature", { table: TABLE });
+    eq(failClosed, false, "feature resolves");
+    eq(required.length, 8, "all eight");
+    const baseOnly = mapWith({ perspectives: BASE });
+    const got = checkPresence({ interpretations: baseOnly.interpretations, required });
+    eq(got.ok, false, "refused");
+    eq(got.errors.length, 3, `user, constraints, priority missing: ${got.errors.join(" | ")}`);
+  });
+
+  await test("check (b): a chore task is satisfied by the base set", () => {
+    const { perspectives: required } = requiredPerspectives("chore", { table: TABLE });
+    eq(required.length, BASE.length, "the base set is all a chore needs");
+    const got = checkPresence({ interpretations: mapWith({ perspectives: BASE }).interpretations, required });
+    eq(got.ok, true, `ok: ${got.errors.join(" | ")}`);
+    const dropped = mapWith({ perspectives: BASE.filter((p) => p !== "terms") });
+    eq(checkPresence({ interpretations: dropped.interpretations, required }).ok, false, "a base perspective dropped is refused");
+  });
+
+  // ── (c) quote fidelity ────────────────────────────────────────────────────
+
+  await test("check (c): every quote occurs verbatim in the round's anchor text", () => {
+    const map = mapWith({ source: "inferred", quotes: { goal: "Gantt snapshot lib", scope: "Export one PNG per view" } });
+    const got = checkQuoteFidelity({ interpretations: map.interpretations, anchors: [ENTRY] });
+    eq(got.ok, true, `ok: ${got.errors.join(" | ")}`);
+  });
+
+  await test("check (c): an inferred quote is verbatim too (Decision 2026-09-24 deviation)", () => {
+    const map = mapWith({ source: "inferred", quotes: { goal: "snapshot jest zapisywany na dysk" } });
+    const got = checkQuoteFidelity({ interpretations: map.interpretations, anchors: [ENTRY] });
+    eq(got.ok, false, "an unanchored inferred quote is refused");
+    eq(got.errors.length, 1, `one error: ${got.errors.join(" | ")}`);
+  });
+
+  await test("check (c): the anchor set grows from round 2 with the user's own words", () => {
+    const map = mapWith({ source: "inferred", quotes: { goal: "cały plik przechodzi przegląd" } });
+    eq(checkQuoteFidelity({ interpretations: map.interpretations, anchors: [ENTRY] }).ok, false, "round 1 refuses it");
+    const composed = composeIntentInputs({
+      "inbox.entry": ENTRY,
+      "plan.dor.gaps": GAPS,
+      "intake.taskType": "tech",
+      "gate.plan.gate1.answers": [{ round: 2, mapVersion: 1, interpretationId: "IN-1", answer: "Nie, cały plik przechodzi przegląd." }],
+      "gate.plan.gate1.corrections": [],
+    });
+    eq(composed.round, 2, "round 2");
+    eq(checkQuoteFidelity({ interpretations: map.interpretations, anchors: composed.anchors }).ok, true, "round 2 anchors it");
+  });
+
+  await test("check (c): no quotes is trivially satisfied", () => {
+    eq(checkQuoteFidelity({ interpretations: mapWith().interpretations, anchors: [] }).ok, true, "ok");
+  });
+
+  // ── the aggregate ─────────────────────────────────────────────────────────
+
+  await test("checkMap aggregates every check and reports each one separately", () => {
+    const composed = composeIntentInputs({ "inbox.entry": ENTRY, "plan.dor.gaps": GAPS, "intake.taskType": "feature" });
+    const map = mapWith({
+      covers: { goal: [GAPS[0]], scope: [GAPS[1]] },
+      quotes: { risk: "Out of scope: the mobile layout" },
+    });
+    const got = checkMap({
+      output: map,
+      gaps: composed.gaps,
+      round: composed.round,
+      anchors: composed.anchors,
+      required: composed.required,
+    });
+    eq(got.ok, true, `the committed entry and gaps admit a valid map: ${got.errors.join(" | ")}`);
+    deepEq(sorted(Object.keys(got.checks)), ["coverage", "presence", "quoteFidelity", "schemaExternal"], "check names");
+    eq(got.checks.coverage.ok, true, "coverage");
+    eq(got.checks.presence.ok, true, "presence");
+    eq(got.checks.quoteFidelity.ok, true, "quoteFidelity");
+    eq(got.checks.schemaExternal.ok, true, "schemaExternal");
+  });
+
+  await test("checkMap never returns a partial pass — one broken rule fails the whole map", () => {
+    const composed = composeIntentInputs({ "inbox.entry": ENTRY, "plan.dor.gaps": GAPS, "intake.taskType": "feature" });
+    const map = mapWith({ covers: { goal: [GAPS[0]] }, quotes: { risk: "tego nie ma" } });
+    const got = checkMap({
+      output: map,
+      gaps: composed.gaps,
+      round: composed.round,
+      anchors: composed.anchors,
+      required: composed.required,
+    });
+    eq(got.ok, false, "refused");
+    eq(got.checks.quoteFidelity.ok, false, "quoteFidelity failed");
+    eq(got.errors.some((e) => e.includes(GAPS[1])), true, "coverage failure surfaces too");
   });
 
   console.log(`plan-intent: ${passed} passed, ${failures.length} failed`);

@@ -269,3 +269,164 @@ export function composeIntentInputs(reads, { cap = stateCap() } = {}) {
 function stateCap() {
   return DECISION_STEP.inputSchema.properties.state.maxLength;
 }
+
+// ── the [D] checks (fail closed) ────────────────────────────────────────────
+//
+// Each check REJECTS the map — never a warning. A rejected map is ONE retry,
+// then the step fails (`failure: "stop"`); a partial map is never persisted.
+// Every check returns `{ ok, errors }` with the errors in the order found, so
+// the retry note can name them.
+
+const isBlank = (s) => typeof s !== "string" || !s.trim();
+
+/**
+ * The four rules the schema cannot express (§3.12): exactly one
+ * `recommended: true` per `options`; `reason` present iff `recommended`; every
+ * `id` EXACTLY ONCE within `interpretations` (answers/corrections are keyed by
+ * `IN-` id — a duplicate or alias would corrupt the round-2 fold); and no
+ * blank strings anywhere in the output. The schema pins `minLength: 1`, which
+ * a whitespace-only string passes — so this check trims.
+ */
+export function checkSchemaExternal(output) {
+  const errors = [];
+  const seen = new Set();
+  for (const item of output?.interpretations ?? []) {
+    if (seen.has(item?.id)) {
+      errors.push(`interpretation id "${item?.id}" appears more than once — every id must be EXACTLY ONCE per map`);
+    }
+    seen.add(item?.id);
+    const options = item?.options;
+    if (options !== undefined) {
+      const recommended = options.filter((o) => o?.recommended === true);
+      if (recommended.length !== 1) {
+        errors.push(`${item?.id}: options must carry EXACTLY ONE "recommended": true — found ${recommended.length}`);
+      }
+      for (const option of options) {
+        const hasReason = option && Object.prototype.hasOwnProperty.call(option, "reason");
+        if (option?.recommended === true && !hasReason) {
+          errors.push(`${item?.id}: the recommended option "${option.text}" must carry a "reason"`);
+        }
+        if (option?.recommended !== true && hasReason) {
+          errors.push(`${item?.id}: option "${option.text}" is not recommended and must not carry a "reason"`);
+        }
+      }
+    }
+  }
+  for (const path of blankPaths(output)) {
+    errors.push(`blank string at ${path} — no empty strings anywhere in the output`);
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+/** Every blank string in the output, as a JSON-ish path. Iterative, bounded. */
+function blankPaths(output, root = "output", out = []) {
+  const stack = [[output, root]];
+  while (stack.length) {
+    const [value, path] = stack.pop();
+    if (typeof value === "string") {
+      if (isBlank(value)) out.push(path);
+    } else if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) stack.push([value[i], `${path}[${i}]`]);
+    } else if (value && typeof value === "object") {
+      for (const [k, v] of Object.entries(value)) stack.push([v, `${path}.${k}`]);
+    }
+  }
+  return out;
+}
+
+/**
+ * (a) coverage — every entry of `plan.dor.gaps` is `covers`-referenced by at
+ * least one COUNTING interpretation. An interpretation counts when (i) its
+ * `source` is `unknown` or `inferred`, or (ii) it is round ≥2 and `stated`
+ * with its `quote` anchored per the answer contract (the resolved case).
+ * Explicitly: round 1 counts only `unknown`/`inferred` items — a `stated`
+ * item's `covers` is ignored here; from round 2, gate-anchored `stated` items
+ * count too.
+ *
+ * Sub-check: each `covers` entry equals a `plan.dor.gaps` entry verbatim — the
+ * `covers` field exists because gaps are plain strings without ids (§3.1), so
+ * a reference carries the gap text itself.
+ *
+ * Decision 2026-09-24 (formerly F1): this confirms the FORMAL linkage only —
+ * the semantic quality of each linkage is judged in the eval, not here.
+ */
+export function checkCoverage({ interpretations, gaps, round, anchors }) {
+  const errors = [];
+  const gapSet = new Set(gaps ?? []);
+  for (const item of interpretations ?? []) {
+    for (const ref of item?.covers ?? []) {
+      if (!gapSet.has(ref)) {
+        errors.push(`${item?.id}: covers "${ref}" — no such entry in plan.dor.gaps (verbatim equality)`);
+      }
+    }
+  }
+  const counts = (item) => item?.source !== "stated"
+    || (round >= 2 && (item?.quote === undefined || isQuoteAnchored(item.quote, anchors)));
+  const counting = (interpretations ?? []).filter(counts);
+  for (const gap of gaps ?? []) {
+    const hit = counting.some((item) => (item?.covers ?? []).includes(gap));
+    if (!hit) {
+      errors.push(`plan.dor.gaps entry "${gap}" is not covered by any COUNTING interpretation`);
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+/**
+ * (b) presence — every perspective the task-type table requires for this task
+ * appears in at least one interpretation. `risk` is in every row via `base`
+ * (Decision 2026-09-24: required in the internal map for every task type, no
+ * question obligation).
+ */
+export function checkPresence({ interpretations, required }) {
+  const errors = [];
+  const present = new Set((interpretations ?? []).map((i) => i?.perspective));
+  for (const perspective of required ?? []) {
+    if (!present.has(perspective)) {
+      errors.push(`required perspective "${perspective}" appears in no interpretation`);
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+/**
+ * (c) quote fidelity — every `quote` occurs verbatim in the round's anchor
+ * text: `inbox.entry` alone in round 1; from round 2 `inbox.entry` plus the
+ * user's actual answers and explicitly accepted options. Extended to ANY
+ * present `quote` — an `inferred` quote, when present, is verbatim too (the AC
+ * words the check for `stated` only; this deviation stands by Decision
+ * 2026-09-24). "Verbatim" is strict substring containment with no
+ * normalisation: §3.12 specifies none.
+ */
+export function checkQuoteFidelity({ interpretations, anchors }) {
+  const errors = [];
+  for (const item of interpretations ?? []) {
+    const quote = item?.quote;
+    if (quote === undefined) continue;
+    if (!isQuoteAnchored(quote, anchors)) {
+      errors.push(`${item?.id}: quote "${quote}" occurs verbatim in no anchor text of this round`);
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+function isQuoteAnchored(quote, anchors) {
+  return (anchors ?? []).some((anchor) => typeof anchor === "string" && anchor.includes(quote));
+}
+
+/**
+ * Run every [D] check against one candidate map. `fold` runs FIRST on round
+ * ≥2 inputs (the answer contract, fail-closed in the same sense) and is
+ * expected to have already dropped whatever it found STALE.
+ */
+export function checkMap({ output, gaps, round, anchors, required }) {
+  const checks = {
+    schemaExternal: checkSchemaExternal(output),
+    coverage: checkCoverage({ interpretations: output?.interpretations, gaps, round, anchors }),
+    presence: checkPresence({ interpretations: output?.interpretations, required }),
+    quoteFidelity: checkQuoteFidelity({ interpretations: output?.interpretations, anchors }),
+  };
+  const errors = Object.values(checks).flatMap((c) => c.errors);
+  return { ok: errors.length === 0, errors, checks };
+}
+
