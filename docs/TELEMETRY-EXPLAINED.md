@@ -4,7 +4,7 @@ status: active
 audience: Mateusz (scena + Q&A), kontrybutorzy
 tags: [type/explainer, area/telemetry, topic/cost, topic/cache, topic/prompts]
 created: 2026-07-29
-source: scripts/telemetry-{store,ingest,hook}.mjs, scripts/ledger.mjs, scripts/cost-report.mjs, bin/*.bat, scripts/prompt-library.mjs
+source: scripts/telemetry-{store,ingest,hook}.mjs, scripts/ledger.mjs, scripts/cost-report.mjs, bin/*.bat, scripts/prompt-library.mjs, scripts/{analysis-cache,telemetry-analysis,analysis-sql,decision-analytics}.mjs
 ---
 
 # Skąd biorą się liczby — telemetria, tokeny, cache, prompty
@@ -91,7 +91,9 @@ dashboard liczy „ile kosztu poszło na subagentów".
 ## 2. Co właściwie mierzymy
 
 **Jednostką obserwacji jest jedna tura asystenta.** Wszystko inne — run, zadanie, skład,
-rola, model, dzień — to wymiary agregacji, nie osobne pomiary.
+rola, model, dzień — to wymiary agregacji, nie osobne pomiary. (Od FOC-381 precyzyjnie:
+jeden wiersz `usage_facts` na **komunikat** asystenta — tura bywa zapisana jako 2–3 linie
+transkryptu, patrz §8.)
 
 Na turę zapisujemy cztery liczniki:
 
@@ -388,6 +390,100 @@ ten sam regex, którym zrobiłem tabelę wyżej), jeden endpoint i jedna sekcja 
 
 ---
 
+## 8. Tożsamość per-message — FOC-381 (schema v8)
+
+Jeden komunikat asystenta ląduje w transkrypcie jako **~2–3 linie JSONL** (thinking / text /
+tool_use), a każda z nich powtarza ten sam blok `usage` (część z zerami). Do FOC-381
+`usage_facts` trzymało **wiersz na linię** (`usage_id = hash(source_path:source_offset)`),
+więc jeden komunikat liczony był 2–3×: zmierzone 2026-09-19 **1,98×–2,97× zależnie od składu**
+(supervisor 2,05×, dev 1,98×, review 2,42×, test 2,49×, plan 2,97×). Niejednorodność gorsza od
+średniej — zawyżały nie tylko totalki, ale i **udziały składów** w koszcie (raw 2,4% planu to
+naprawdę 1,7%).
+
+FOC-381 (ADR-0013: `docs/adr/0013-per-message-usage-identity.md`, design B) przenosi deduplikację
+do projekcji, gdzie może być monotoniczna:
+
+- **Zdarzenia bez zmian** — dalej jedno `usage.recorded` na linię transkryptu; payload dostaje
+  `messageId`. Brak hold-backu, brak zmian w skip-cache — partial ingest pozostaje bezpieczny.
+- **Projekcja per message** — dla linii z `message.id` wiersz docelowy to
+  `usage_id = sha256(path:msg:<id>)`, upsert `ON CONFLICT(run_id, usage_id)` biorący **MAX**
+  każdego licznika (idempotentny i niezależny od kolejności — partial ingest, spóźnione linie
+  i pełny replay zbiegają do tych samych wierszy). Koszt przeliczany z liczników wiersza, nie
+  z payloadu pojedynczej linii. Klucz kompozytowy `(run_id, usage_id)` nie scala dwóch runów —
+  to nie regres JOI-259.
+- **Schema v8** — nullable `usage_facts.message_id` + indeks `(run_id, message_id)`; migracja
+  addytywna (ALTER z guardem PRAGMA), bez przebudowy tabel.
+
+**Historia:** jednorazowy `scripts/telemetry-usage-rewrite.mjs` przepisuje pary
+`(run_id, source_path)`, których transkrypt wciąż istnieje — tylko gdy zapisane zdarzenia
+potrafią odbudować **co najmniej** wszystkie istniejące wiersze (guard coverage: przycięty
+log zdarzeń = brak przepisu, bo `telemetry-prune.mjs` kasuje zdarzenia; `--apply` odmawia
+live path bez `--live`). Pary bez transkryptu albo nieprzepisywalne zostają per-line
+(`message_id` NULL) z flagą jakości **`usage_legacy_inflated`** — jawny caveat dla każdego
+czytającego, nie cicha strata.
+
+**Widok kanoniczny:** `canonical_usage` (i jego JS twin `collapseUsageIslands`) dostaje kolumnę
+`message_id` i regułę — **dwa wiersze z różnymi non-null `message_id` nigdy się nie łączą**
+(ground truth tnie wyspę niezależnie od identycznej tuple i małej przerwy); strona NULL spada
+do starej reguły tuple+gap, więc deploy-window nie rozcina komunikatu na pół.
+
+**Skutek:** surowe sumy `usage_facts` są teraz uczciwe dla przepisanej historii (per run) —
+naprawa dzieje się u źródła, nie tylko w widokach. Pytania flotowe i tak czytają z
+`canonical_usage`: duplikacja run-scoped z ADR-0008 to **osobna oś** i naprawa per-message jej
+nie dotyka. Weryfikacja na kopii store'a: **72 598 / 72 598 komunikatów matched, 0,0000%
+różnicy per skład** (`scripts/telemetry-usage-verify.mjs` — niezależny skan transkryptów,
+zerowy udział kodu z `telemetry-store.mjs`).
+
+---
+
+## 9. Analysis screen
+
+Nowy ekran **`/analysis`** w dashboardzie (branch `feat/telemetry-analysis-dashboard`): pięć
+paneli + konsola SQL, a nad wszystkim pasek filtrów — okno czasowe, skład, model, **era**
+pre/post graph v2. Granica ery to nazwana stała `2026-09-22T00:00:00Z` (merge FOC-397,
+architektura grafowa), pokazana w UI i nadpisywalna w filtrze — bo to decyzja, nie fizyka,
+i decyzja powinna być widoczna.
+
+| Panel | Pytanie | Źródło |
+|---|---|---|
+| Cost & tokens | dokąd idą pieniądze (skład, model, rola, tydzień; lead vs subagent) | `canonical_usage` |
+| Tool behaviour | powtórki wg kategorii FOC-220, error rate, udział outcome-unknown | `canonical_tool_facts` |
+| Graph decisions | volume / confidence / koszt / zgoda z zapisanym outcome per `decisionId` | `decisions.jsonl` |
+| Handoffs & delegation | delegacja parent→child i jej koszt | `delegation_links`, `canonical_usage` |
+| Data quality | unpriced per model, mix pewności atrybucji, coverage | widoki kanoniczne, `data_quality_issues` |
+
+**Wszystko czyta z derived analysis cache** — `analysis-cache.sqlite` obok store'a (override:
+`LA_ANALYSIS_CACHE`). Powód: widoki kanoniczne to widoki z funkcjami okna — na prawdziwym
+store (849 MB) `COUNT(*)` po `canonical_usage` = 12,9 s, po `canonical_tool_facts` = **90,1 s**;
+panele potrzebują kilku przejść każdy, a konsola ma timeout 10 s. Cache to te same widoki
+skopiowane **raz** jako zwykłe tabelki z indeksami — **dysposylna pochodna**: jej skasowanie
+nie gubi niczego, odbudowuje się z store'a jednym przejściem, a store nigdy nie jest przez nią
+zapisywany. Świeżość: watermark (liczby wierszy raw + max `observed_at`, złapany PRZED
+czytaniem widoków) porównywany z zapisanym przy budowie; nieświeży cache → **Refresh** w UI.
+Rebuild chodzi jako **child process** (~25–55 s) i podmienia plik atomowo (build do
+`*.building`, rename na koniec) — wysypany build nie psuje starego cache'u.
+
+**Konsola SQL ma dwa cele:** cache (widoki kanoniczne jako tabele — szybkie) i store (surowe
+tabele — read-only, wolne widoki). Strażniki w warstwach, żadna nie jest jedyną:
+połączenie otwarte `readOnly: true` (SQLite samo odmawia zapisu na poziomie C); statyczny
+skan przed dotknięciem bazy — dokładnie jedno wyrażenie, pierwsze słowo `SELECT` albo `WITH`,
+zakaz `ATTACH`/`PRAGMA`/DDL jako whole words (komentarze i literały string ignorowane przy
+skanie); cap **5 000 wierszy** z flagą `truncated`; timeout **10 s** — egzekucja w child
+procesie ubijanym `SIGKILL`/TerminateProcess, bo `worker.terminate()` nie przerywa wątku
+zaspanego w natywnym wywołaniu `node:sqlite` (zmierzone na Node 22.20: rekurencyjny CTE
+biegł dalej 30 s po terminate).
+
+**Tabele decyzyjne:** `decision_events` / `decision_labels` czytane z `LA_DECISION_RUNS_DIR`
+(domyślnie `<repo>/.state/runs`, pliki `*/decisions.jsonl`), join po `eventId`, wystawione
+konsoli jako TEMP tabele na read-only połączeniu (schemat temp jest osobny i zapisywalny) —
+decyzje można joinować z telemetrią bez zapisywania czegokolwiek. Zgoda odpowiedzi z outcome
+liczona tylko tam, gdzie mapowanie answers→outcome jest dowiedzione z `config/decisions.json`;
+poza tym `agreement_unknown`, nie zgadywanka. Caveat (mała próba, próg n<30; unpriced; niska
+pewność atrybucji) stoi **obok liczby**, nie w przypisie; eksport CSV/JSON z każdego panelu
+i z wyniku konsoli.
+
+---
+
 ## Ściąga na Q&A
 
 **„Skąd wiesz, ile to kosztowało?"** — Claude Code zapisuje każdą turę do transkryptu
@@ -401,6 +497,10 @@ wierszy, celowo (ADR-0008), bo inaczej wszystkie poza pierwszym pokazywały $0. 
 całej flocie liczy wtedy jedno wywołanie wielokrotnie: 124 269 wierszy to 106 357
 wywołań, $4 394 to naprawdę $2 042. Dlatego pytania flotowe idą przez `canonical_usage`
 (patrz §4), a nie przez surowe `usage_facts`.
+Od FOC-381 (schema v8, §8) znika **drugie** podwojenie: jeden komunikat = jeden wiersz
+`usage_facts` (wcześniej jeden na linię, ~2–3× zawyżenie per skład) — dla przepisanej
+historii surowe sumy są już uczciwe. Duplikacja run-scoped zostaje: jest celowa i to ona
+wymaga widoków kanonicznych.
 
 **„Co z cache?"** — odczyt z cache liczymy po 10% ceny inputu (albo po jawnej stawce
 z cennika), zapis po cenie inputu. Oszczędność raportujemy osobno, jako różnicę wobec
