@@ -229,12 +229,10 @@ export function composeIntentInputs(reads, { cap = stateCap() } = {}) {
   // either numbering convention FOC-517 may pick for an answer's `round`.
   const round = gatePresent ? Math.max(2, maxGateRound(answers, corrections)) : 1;
 
-  const anchors = anchorStringsOf(entry);
-  if (round >= 2) {
-    for (const record of [...(Array.isArray(answers) ? answers : []), ...(Array.isArray(corrections) ? corrections : [])]) {
-      anchorStringsOf({ answer: record?.answer, corrected: record?.corrected, acceptedOptions: record?.acceptedOptions }, anchors);
-    }
-  }
+  const folded = round >= 2
+    ? [...(Array.isArray(answers) ? answers : []), ...(Array.isArray(corrections) ? corrections : [])]
+    : [];
+  const anchors = anchorSet(folded, entry);
   if (anchors.length === 0) {
     throw new TypedError(
       "invalid_input",
@@ -415,9 +413,9 @@ function isQuoteAnchored(quote, anchors) {
 }
 
 /**
- * Run every [D] check against one candidate map. `fold` runs FIRST on round
- * ≥2 inputs (the answer contract, fail-closed in the same sense) and is
- * expected to have already dropped whatever it found STALE.
+ * Run every [D] check against one candidate map. The fold runs FIRST on round
+ * ≥2 inputs (the answer contract, fail-closed in the same sense) and has
+ * already dropped whatever it found STALE from the anchor set.
  */
 export function checkMap({ output, gaps, round, anchors, required }) {
   const checks = {
@@ -429,4 +427,217 @@ export function checkMap({ output, gaps, round, anchors, required }) {
   const errors = Object.values(checks).flatMap((c) => c.errors);
   return { ok: errors.length === 0, errors, checks };
 }
+
+// ── the answer contract (the fold) ──────────────────────────────────────────
+//
+// What the two gate1 fields must satisfy (§3.12, closed 2026-09-24). The
+// validator reads its ground truth from two IMMUTABLE run-record stores, never
+// from the answer's own copy:
+//
+//   maps      run-record.plan.intent.maps[mapVersion] — the map exactly as
+//             generated and persisted for that version, append-only per
+//             conversation; a persisted version is immutable once written.
+//   presented run-record.gate.plan.gate1.presented[round] — the exact items
+//             and option texts actually put to the user in that round.
+//
+// Their write side is FOC-517's (the gate1 fields plus the §3.6 contract
+// update); this side is the read and the validation. A gate record carries the
+// reference triple (`round`, `mapVersion`, `interpretationId`), the `about`
+// snapshot it answered, and the user's own words:
+//
+//   { round, mapVersion, interpretationId,
+//     about: { claim, option? },
+//     answer,                // the user's actual answer
+//     corrected?,            // a correction's corrected content
+//     acceptedOptions? }     // option texts the user explicitly accepted
+//
+// `about` must MATCH the persisted texts verbatim but alone validates nothing —
+// a record whose `about` is right and whose triple is wrong is still STALE.
+
+const IN_ID = /^IN-([1-9]|1[0-2])$/;
+
+/**
+ * The code's allocation at persist time: monotonic within the conversation and
+ * never reused for a different map (Decision 2026-09-24). The generator's
+ * `mapVersion` is a hint and must match this number — the store, not the
+ * model, owns identity.
+ */
+export function allocateMapVersion(maps) {
+  const highest = Object.keys(maps ?? {}).reduce((m, k) => {
+    const n = Number(k);
+    return Number.isInteger(n) && n > m ? n : m;
+  }, 0);
+  return highest + 1;
+}
+
+function sameText(a, b) {
+  return typeof a === "string" && typeof b === "string" && a === b;
+}
+
+function sameOptions(a, b) {
+  const left = (a ?? []).map((o) => o?.text);
+  const right = (b ?? []).map((o) => o?.text);
+  return left.length === right.length && left.every((t, i) => sameText(t, right[i]));
+}
+
+/**
+ * Persist ONE map. Append-only: a version is immutable once written, so a
+ * second write of the same `mapVersion` is refused rather than merged. The
+ * emitted `mapVersion` is validated against the allocation above; a mismatch
+ * is a rejection, never a silent renumber.
+ */
+export function persistMap(maps, map) {
+  const store = maps ?? {};
+  const allocated = allocateMapVersion(store);
+  if (!map || !Number.isInteger(map.mapVersion)) {
+    throw new TypedError("invalid_input", "plan.intent: the map carries no integer mapVersion to persist");
+  }
+  if (store[map.mapVersion] !== undefined) {
+    throw new TypedError("invalid_input", `plan.intent: mapVersion ${map.mapVersion} is already persisted and immutable`);
+  }
+  if (map.mapVersion !== allocated) {
+    throw new TypedError(
+      "invalid_input",
+      `plan.intent: mapVersion ${map.mapVersion} is not the next persisted version (${allocated}) — `
+        + "the store allocates identity, monotonic and never reused",
+    );
+  }
+  return { maps: { ...store, [map.mapVersion]: map }, mapVersion: map.mapVersion };
+}
+
+/**
+ * The `idMap` legality rule: an entry is legal ONLY between items whose
+ * content is verbatim-identical (same claim, same options where present) — it
+ * is pure id translation. An entry whose target content differs is
+ * CONTRACT-ILLEGAL: the fold rejects it and the reference is stale. `idMap`
+ * NEVER carries a user's confirmation onto a changed claim or option.
+ *
+ * Renumbering happens between TWO map versions, so the old side is read from
+ * the map immediately before the declaring one; with no predecessor every
+ * entry is illegal (you cannot renumber from nothing).
+ */
+export function verifyIdMap(maps) {
+  const errors = [];
+  for (const key of Object.keys(maps ?? {}).sort((a, b) => Number(a) - Number(b))) {
+    const version = Number(key);
+    const map = maps[key];
+    const idMap = map?.idMap;
+    if (!idMap || Object.keys(idMap).length === 0) continue;
+    const previous = maps[version - 1];
+    if (!previous) {
+      errors.push(`mapVersion ${version} declares an idMap with no mapVersion ${version - 1} to renumber from`);
+      continue;
+    }
+    for (const [oldId, newId] of Object.entries(idMap)) {
+      const from = (previous.interpretations ?? []).find((i) => i?.id === oldId);
+      const to = (map.interpretations ?? []).find((i) => i?.id === newId);
+      if (!from) {
+        errors.push(`mapVersion ${version}: idMap "${oldId}" -> "${newId}" — "${oldId}" is not in mapVersion ${version - 1}`);
+        continue;
+      }
+      if (!to) {
+        errors.push(`mapVersion ${version}: idMap "${oldId}" -> "${newId}" — "${newId}" is not in mapVersion ${version}`);
+        continue;
+      }
+      if (!sameText(from.claim, to.claim) || !sameOptions(from.options, to.options)) {
+        errors.push(
+          `mapVersion ${version}: idMap "${oldId}" -> "${newId}" is CONTRACT-ILLEGAL — the content is not verbatim-identical `
+            + "(a renumber is pure id translation and never carries a confirmation onto a changed claim or option)",
+        );
+      }
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+/**
+ * Resolve one (mapVersion, interpretationId) pair against the persisted store.
+ * An old reference resolves ONLY through its own persisted map and its `idMap`
+ * chain, never into another map.
+ */
+export function resolveReference({ maps, mapVersion, interpretationId }) {
+  const map = maps?.[mapVersion];
+  if (!map) {
+    return { ok: false, reason: `no persisted map for mapVersion ${mapVersion}` };
+  }
+  const direct = (map.interpretations ?? []).find((i) => i?.id === interpretationId);
+  if (direct) return { ok: true, item: direct, mapVersion, id: interpretationId };
+  // Renumbered within this map: the id the reference names is a declared
+  // source of the map's own idMap, so it reaches the item the id became.
+  const renumbered = map.idMap?.[interpretationId];
+  const via = renumbered ? (map.interpretations ?? []).find((i) => i?.id === renumbered) : undefined;
+  if (via) return { ok: true, item: via, mapVersion, id: renumbered, renumberedFrom: interpretationId };
+  return { ok: false, reason: `interpretationId ${interpretationId} is not in mapVersion ${mapVersion} (nor reachable through its idMap)` };
+}
+
+/**
+ * Fold the gate1 answers and corrections into the validated set. Every
+ * reference must resolve AND its `about` must match the persisted claim/option
+ * verbatim; anything else is STALE — detected, recorded, NOT applied. The
+ * affected point must then reappear as `unknown`/`inferred` in the new map
+ * (check (a) still covers it).
+ */
+export function foldGateAnswers({ round, maps, presented, answers = [], corrections = [] }) {
+  const idMapCheck = verifyIdMap(maps);
+  const valid = [];
+  const stale = [];
+  for (const [kind, record] of [
+    ...answers.map((r) => ["answer", r]),
+    ...corrections.map((r) => ["correction", r]),
+  ]) {
+    const triple = `${record?.round}/${record?.mapVersion}/${record?.interpretationId}`;
+    const push = (reason) => stale.push({ kind, record, round: record?.round, mapVersion: record?.mapVersion, interpretationId: record?.interpretationId, reason });
+    if (!Number.isInteger(record?.round) || !Number.isInteger(record?.mapVersion) || !IN_ID.test(record?.interpretationId ?? "")) {
+      push("the record carries no complete (round, mapVersion, interpretationId) reference triple");
+      continue;
+    }
+    if (record.round > round) {
+      push(`the reference names round ${record.round} but the current round is ${round}`);
+      continue;
+    }
+    if (!presented?.[record.round]) {
+      push(`round ${record.round} has no presented record — nothing was actually put to the user in it`);
+      continue;
+    }
+    if (!idMapCheck.ok) {
+      push(`the maps store carries an illegal idMap (${idMapCheck.errors[0]})`);
+      continue;
+    }
+    const resolved = resolveReference({ maps, mapVersion: record.mapVersion, interpretationId: record.interpretationId });
+    if (!resolved.ok) {
+      push(resolved.reason);
+      continue;
+    }
+    const aboutClaim = record.about?.claim;
+    if (!sameText(aboutClaim, resolved.item.claim)) {
+      push(`about.claim does not match the persisted claim of ${record.mapVersion}/${resolved.id} verbatim`);
+      continue;
+    }
+    const aboutOption = record.about?.option;
+    if (aboutOption !== undefined) {
+      const texts = (resolved.item.options ?? []).map((o) => o?.text);
+      if (!texts.some((t) => sameText(t, aboutOption))) {
+        push(`about.option does not match any persisted option text of ${record.mapVersion}/${resolved.id} verbatim`);
+        continue;
+      }
+    }
+    valid.push({ kind, record, mapVersion: record.mapVersion, interpretationId: resolved.id, item: resolved.item, ...(resolved.renumberedFrom ? { renumberedFrom: resolved.renumberedFrom } : {}) });
+  }
+  return { valid, stale, anchors: anchorSet(valid.map((v) => v.record)), idMap: idMapCheck };
+}
+
+/**
+ * The round's anchor text: `inbox.entry`, the user's ACTUAL answers, and the
+ * options they explicitly ACCEPTED. A model proposal never becomes `stated` by
+ * being offered, so the `about` snapshot is never collected here.
+ */
+export function anchorSet(records, entry) {
+  const out = [];
+  if (entry !== undefined) anchorStringsOf(entry, out);
+  for (const record of records ?? []) {
+    anchorStringsOf({ answer: record?.answer, corrected: record?.corrected, acceptedOptions: record?.acceptedOptions }, out);
+  }
+  return out;
+}
+
 

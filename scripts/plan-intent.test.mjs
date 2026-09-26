@@ -17,15 +17,20 @@ import Ajv from "ajv";
 import { getRegistryEntry } from "./decision-registry.mjs";
 import {
   PERSPECTIVES,
+  allocateMapVersion,
   checkCoverage,
   checkMap,
   checkPresence,
   checkQuoteFidelity,
   checkSchemaExternal,
   composeIntentInputs,
+  foldGateAnswers,
   loadPerspectiveTable,
   loadTaskTypes,
+  persistMap,
   requiredPerspectives,
+  resolveReference,
+  verifyIdMap,
 } from "./plan-intent.mjs";
 import { DECISION_STEP } from "./decision-call.mjs";
 
@@ -129,6 +134,22 @@ function mapWith({ perspectives = PERSPECTIVES, source = "inferred", quotes = {}
       return item;
     }),
   };
+}
+
+/** A full 12-slot map — the schema's `maxItems` is the cap, so ids run IN-1..IN-12. */
+function mapOf12(version = 1) {
+  const map = mapWith({ mapVersion: version });
+  for (let i = PERSPECTIVES.length + 1; i <= 12; i++) {
+    map.interpretations.push({
+      id: `IN-${i}`,
+      perspective: "scope",
+      claim: `Rozumiem, że punkt ${i} jest w zakresie zmiany.`,
+      source: "inferred",
+      alternatives: [],
+      covers: [],
+    });
+  }
+  return map;
 }
 
 async function main() {
@@ -591,6 +612,180 @@ async function main() {
     eq(got.ok, false, "refused");
     eq(got.checks.quoteFidelity.ok, false, "quoteFidelity failed");
     eq(got.errors.some((e) => e.includes(GAPS[1])), true, "coverage failure surfaces too");
+  });
+
+  // ── the answer contract (fold) ────────────────────────────────────────────
+
+  await test("persistMap allocates identity: monotonic, never reused, mismatched versions refused", () => {
+    eq(allocateMapVersion({}), 1, "an empty store starts at 1");
+    const first = persistMap({}, mapOf12(1));
+    eq(first.mapVersion, 1, "first version");
+    eq(allocateMapVersion(first.maps), 2, "the next allocation");
+    let thrown = null;
+    try { persistMap(first.maps, mapWith({ mapVersion: 1 })); } catch (err) { thrown = err; }
+    eq(thrown?.code, "invalid_input", "a reused version is refused");
+    eq(/already persisted and immutable/.test(thrown?.message), true, `names the rule: ${thrown?.message}`);
+    thrown = null;
+    try { persistMap(first.maps, mapWith({ mapVersion: 5 })); } catch (err) { thrown = err; }
+    eq(thrown?.code, "invalid_input", "a non-allocated version is refused");
+    eq(/is not the next persisted version \(2\)/.test(thrown?.message), true, `names the allocation: ${thrown?.message}`);
+  });
+
+  await test("a persisted version is immutable — the maps store is append-only", () => {
+    const { maps } = persistMap({}, mapOf12(1));
+    const mutated = { ...maps, 1: mapWith({ mapVersion: 1 }) };
+    eq(mutated[1].interpretations.length, 8, "an in-memory overwrite is possible");
+    eq(maps[1].interpretations.length, 12, "but the persisted store never sees it");
+  });
+
+  // ── required test 1: a full 12-slot map and a correction ──────────────────
+
+  await test("answer contract 1: a full 12-slot map and a correction — the next round proceeds, the cap binds the ACTIVE map", () => {
+    const v1 = mapOf12(1);
+    eq(v1.interpretations.length, 12, "round 1 uses every slot");
+    const validate = new Ajv({ allErrors: true }).compile(getRegistryEntry("plan.intent").output);
+    eq(validate(v1), true, `12 items is schema-valid: ${JSON.stringify(validate.errors)}`);
+    const thirteen = mapOf12(1);
+    thirteen.interpretations.push({ id: "IN-1", perspective: "goal", claim: "Rozumiem, że to jest punkt trzynasty.", source: "inferred", alternatives: [], covers: [] });
+    eq(validate(thirteen), false, "13 items is schema-invalid — the cap is 12 per map version");
+
+    const { maps } = persistMap({}, v1);
+    const presented = { 1: { round: 1, items: v1.interpretations.map((i) => ({ interpretationId: i.id, claim: i.claim })) } };
+    const corrections = [{
+      round: 1,
+      mapVersion: 1,
+      interpretationId: "IN-7",
+      about: { claim: v1.interpretations[6].claim },
+      answer: "Niezupełnie.",
+      corrected: "Rozumiem, że punkt 7 obejmuje też widok listy.",
+    }];
+    const fold = foldGateAnswers({ round: 2, maps, presented, answers: [], corrections });
+    eq(fold.stale.length, 0, `nothing stale: ${JSON.stringify(fold.stale)}`);
+    eq(fold.valid.length, 1, "the correction is applied");
+    eq(fold.valid[0].kind, "correction", "typed as a correction");
+    eq(fold.anchors.some((a) => a.includes("Rozumiem, że punkt 7 obejmuje też widok listy.")), true, "the corrected content is anchor text");
+
+    // The next round writes a NEW map. The 12 cap binds the ACTIVE map, and
+    // identity is the pair (mapVersion, interpretationId) — IN-1 may recur.
+    const v2 = mapWith({ mapVersion: 2 });
+    const next = persistMap(maps, v2);
+    eq(next.mapVersion, 2, "the next round gets a fresh version");
+    eq(v2.interpretations.some((i) => i.id === "IN-1"), true, "IN-1 recurs in the new map");
+    eq(resolveReference({ maps: next.maps, mapVersion: 1, interpretationId: "IN-1" }).item.claim, v1.interpretations[0].claim, "and (1, IN-1) still resolves to the FIRST map's item");
+    eq(resolveReference({ maps: next.maps, mapVersion: 2, interpretationId: "IN-1" }).item.claim, v2.interpretations[0].claim, "while (2, IN-1) resolves to the second");
+    eq(resolveReference({ maps: next.maps, mapVersion: 1, interpretationId: "IN-12" }).ok, true, "the superseded map keeps its history");
+    eq(resolveReference({ maps: next.maps, mapVersion: 2, interpretationId: "IN-12" }).ok, false, "and the new map carries only its own 8");
+  });
+
+  // ── required test 2: an answer to a stale mapVersion ──────────────────────
+
+  await test("answer contract 2: an answer to a stale mapVersion is STALE — detected, logged, never applied", () => {
+    const { maps } = persistMap({}, mapOf12(1));
+    const presented = { 1: { round: 1, items: [{ interpretationId: "IN-1", claim: maps[1].interpretations[0].claim }] } };
+    const good = {
+      round: 1,
+      mapVersion: 1,
+      interpretationId: "IN-1",
+      about: { claim: maps[1].interpretations[0].claim },
+      answer: "Tak.",
+    };
+    const fold = foldGateAnswers({
+      round: 2,
+      maps,
+      presented,
+      answers: [good],
+      corrections: [
+        { ...good, mapVersion: 99, about: { claim: maps[1].interpretations[0].claim }, answer: "mapVersion 99 nigdy nie istniał" },
+        { ...good, round: 5, answer: "z przyszłej rundy" },
+        { ...good, round: 2, answer: "runda 2 nic nie zaprezentowała" },
+        { ...good, interpretationId: "IN-12", answer: "IN-12 jest w mapie, ale about nie pasuje" },
+        { ...good, interpretationId: "IN-9", about: { claim: "czegoś takiego w mapie nie ma" }, answer: "about nie pasuje" },
+        { answer: "bez potrójnej referencji" },
+      ],
+    });
+    eq(fold.valid.length, 1, `only the resolvable reference is applied: ${JSON.stringify(fold.stale.map((s) => s.reason))}`);
+    eq(fold.valid[0].record, good, "and it is the good one");
+    eq(fold.stale.length, 6, "every other reference is stale");
+    const reasons = fold.stale.map((s) => s.reason).join(" | ");
+    eq(/no persisted map for mapVersion 99/.test(reasons), true, "an unallocated mapVersion is stale");
+    eq(/names round 5 but the current round is 2/.test(reasons), true, "a future round is stale");
+    eq(/round 2 has no presented record/.test(reasons), true, "a round that presented nothing is stale");
+    eq(/about.claim does not match/.test(reasons), true, "an about that does not match the persisted claim is stale");
+    eq(/no complete \(round, mapVersion, interpretationId\)/.test(reasons), true, "an incomplete triple is stale");
+    eq(fold.anchors.length, 1, "a stale record contributes no anchor text — its point must reappear as unknown/inferred");
+    eq(fold.anchors.some((a) => a.includes("mapVersion 99 nigdy nie istniał")), false, "the stale answer is not anchor text");
+  });
+
+  // ── required test 3: a content change inherits no confirmation ────────────
+
+  await test("answer contract 3: a content change inherits no confirmation — renumber never carries it", () => {
+    const v1 = mapWith({ mapVersion: 1 });
+    const confirmedClaim = v1.interpretations[2].claim;
+    const v2 = mapWith({ mapVersion: 2 });
+    v2.interpretations[2].claim = "Rozumiem, że zmiana obejmuje też widok listy."; // a DIFFERENT reading
+    const presented = {
+      1: { round: 1, items: [{ interpretationId: "IN-3", claim: confirmedClaim }] },
+      2: { round: 2, items: [{ interpretationId: "IN-3", claim: v2.interpretations[2].claim }] },
+    };
+    const { maps } = persistMap(persistMap({}, v1).maps, v2);
+
+    // The old confirmation, replayed against the changed claim.
+    const inherited = {
+      round: 2,
+      mapVersion: 2,
+      interpretationId: "IN-3",
+      about: { claim: confirmedClaim },
+      answer: "Tak, potwierdzam.",
+    };
+    const fold = foldGateAnswers({ round: 3, maps, presented, answers: [inherited], corrections: [] });
+    eq(fold.valid.length, 0, "the old confirmation is NOT applied to the changed claim");
+    eq(fold.stale.length, 1, "it is detected");
+    eq(/about.claim does not match the persisted claim of 2\/IN-3/.test(fold.stale[0].reason), true, `logged as stale: ${fold.stale[0].reason}`);
+    eq(fold.anchors.length, 0, "and it is not anchor text — the point reappears as unknown/inferred");
+
+    // A fresh answer about the NEW content is a different reading and applies.
+    const fresh = { ...inherited, about: { claim: v2.interpretations[2].claim } };
+    const applied = foldGateAnswers({ round: 3, maps, presented, answers: [fresh], corrections: [] });
+    eq(applied.valid.length, 1, "the fresh answer applies");
+    eq(applied.stale.length, 0, "cleanly");
+
+    // Renumbering between DIFFERENT content is CONTRACT-ILLEGAL.
+    const illegal = {
+      ...maps,
+      2: { ...v2, idMap: { "IN-3": "IN-3" } },
+    };
+    const idMapCheck = verifyIdMap(illegal);
+    eq(idMapCheck.ok, false, "an idMap onto changed content is refused");
+    eq(/CONTRACT-ILLEGAL/.test(idMapCheck.errors[0]), true, `named as such: ${idMapCheck.errors[0]}`);
+    const refused = foldGateAnswers({ round: 3, maps: illegal, presented, answers: [fresh], corrections: [] });
+    eq(refused.valid.length, 0, "and no reference folds while the store carries it");
+  });
+
+  await test("an idMap between verbatim-identical content is legal and resolves the renumbered id", () => {
+    const v1 = mapWith({ mapVersion: 1 });
+    const claimA = v1.interpretations[2].claim;
+    // v2 renumbers v1's IN-3 to IN-7: the SAME content under a new id, so the
+    // translation is pure and the id IN-3 no longer appears in v2 at all.
+    const v2 = mapWith({ mapVersion: 2, perspectives: ["goal", "user", "scope"] });
+    v2.interpretations[2].id = "IN-7";
+    v2.interpretations[2].claim = claimA;
+    v2.idMap = { "IN-3": "IN-7" };
+    const { maps } = persistMap(persistMap({}, v1).maps, v2);
+    const idMapCheck = verifyIdMap(maps);
+    eq(idMapCheck.ok, true, `a verbatim-identical renumber is legal: ${idMapCheck.errors.join(" | ")}`);
+    const resolved = resolveReference({ maps, mapVersion: 2, interpretationId: "IN-3" });
+    eq(resolved.ok, true, "the renamed-away id still resolves");
+    eq(resolved.id, "IN-7", "through the map's own idMap");
+    eq(resolved.renumberedFrom, "IN-3", "and the link is visible");
+    eq(resolved.item.claim, claimA, "to the identical content");
+  });
+
+  await test("an idMap with no predecessor to renumber from is refused", () => {
+    const v1 = mapWith({ mapVersion: 1 });
+    v1.idMap = { "IN-1": "IN-2" };
+    const got = verifyIdMap({ 1: v1 });
+    eq(got.ok, false, "refused");
+    eq(/no mapVersion 0 to renumber from/.test(got.errors[0]), true, `named: ${got.errors[0]}`);
   });
 
   console.log(`plan-intent: ${passed} passed, ${failures.length} failed`);
