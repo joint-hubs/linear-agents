@@ -240,6 +240,20 @@ function stepRecord(runId, now, key, status, extra = {}) {
 // an A0 annotation is deliberately NOT an output — downstream steps cannot
 // read a decision the frontman has not made.
 
+// plan.intent is the one step with round-dependent reads (design doc §3.12):
+// round 1 reads the inbox entry, the DoR gaps and the task type; from round 2
+// the gate1 answers and corrections join. The task type and the two gate1
+// fields are therefore ABSENT in round 1, and that absence is a round marker
+// rather than missing input — the read loop below must not fail the step over
+// them. Everything else stays fail-closed: a step never guesses a read. The
+// missing task type is not a hole either: the node takes the explicit
+// "unknown" path and requires all eight perspectives.
+const OPTIONAL_INTENT_READS = new Set([
+  "intake.taskType",
+  "gate.plan.gate1.answers",
+  "gate.plan.gate1.corrections",
+]);
+
 function resolveRead(read, { inputs, steps }) {
   if (Object.prototype.hasOwnProperty.call(inputs, read)) return inputs[read];
   // Longest record-key prefix wins: "gate.plan.gate1.record" binds to the
@@ -817,6 +831,10 @@ export function createGraphRunner({
       for (const read of step.reads ?? []) {
         const value = resolveRead(read, { inputs, steps: state.steps });
         if (value === undefined) {
+          // Round-dependent reads of plan.intent are absent by design in
+          // round 1; the key stays out of the read map and the node reads
+          // that as "round 1" and "task type unknown".
+          if (stepId === "plan.intent" && OPTIONAL_INTENT_READS.has(read)) continue;
           return stopped(stepId, failRecord(stepId, { code: "invalid_input", message: `read "${read}" is not available for step "${stepId}" — no resolved run record or run input supplies it` }));
         }
         reads[read] = value;

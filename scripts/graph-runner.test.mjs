@@ -1,7 +1,7 @@
 // scripts/graph-runner.test.mjs — FOC-397: the graph.json v2 executor.
 //
 // Covers the runner contract end to end, all offline: the resumable walk over
-// the committed PLAN subgraph (8 steps, 7 sequence edges) with every external
+// the committed PLAN subgraph (9 steps, 8 sequence edges) with every external
 // dependency injected — the seam caller stub (never a real decision call, and
 // never a real Linear write or gate emit), the [G] generator, the supervisor
 // gate emitter and the Linear boundary. The run-record store is a temp-dir
@@ -72,6 +72,27 @@ const AC_OUTPUT = {
 
 const DOD_OUTPUT = {
   definitionOfDone: [{ check: "node scripts/graph-runner.test.mjs is green", kind: "test", bounded: true }],
+};
+
+// plan.intent joined the chain between plan.dor and plan.dod (FOC-515). The
+// stub map is round 1 with the task type unknown, so §3.12 requires all eight
+// perspectives; the items are inferred, which carries neither a quote nor
+// options. plan.dor resolves with no gaps here, so the coverage check is
+// vacuous — the check itself is pinned in scripts/plan-intent.test.mjs.
+const INTENT_OUTPUT = {
+  goal: "The runner executes the PLAN subgraph with typed run records.",
+  why: "So the executor is provably resumable before it runs a real task.",
+  mapVersion: 1,
+  interpretations: [
+    { id: "IN-1", perspective: "goal", claim: "Rozumiem, że zmiana dotyczy wykonawcy grafu.", source: "inferred", alternatives: [], covers: [] },
+    { id: "IN-2", perspective: "user", claim: "Rozumiem, że odbiorcą jest zespół utrzymujący runnera.", source: "inferred", alternatives: [], covers: [] },
+    { id: "IN-3", perspective: "scope", claim: "Rozumiem, że w zakresie jest tylko wykonawca grafu.", source: "inferred", alternatives: [], covers: [] },
+    { id: "IN-4", perspective: "success", claim: "Rozumiem, że sukces to zielony test runnera.", source: "inferred", alternatives: [], covers: [] },
+    { id: "IN-5", perspective: "constraints", claim: "Rozumiem, że nie wolno zmieniać kontraktu rekordów.", source: "inferred", alternatives: [], covers: [] },
+    { id: "IN-6", perspective: "risk", claim: "Rozumiem, że ryzykiem jest trwałość rekordów runu.", source: "inferred", alternatives: [], covers: [] },
+    { id: "IN-7", perspective: "priority", claim: "Rozumiem, że ważniejsza jest poprawność niż szybkość.", source: "inferred", alternatives: [], covers: [] },
+    { id: "IN-8", perspective: "terms", claim: "Rozumiem, że opis nie zawiera niejasnych terminów.", source: "inferred", alternatives: [], covers: [] },
+  ],
 };
 
 const SPEC_OUTPUT = { briefs: ["brief: implement the runner"], adr: "ADR-0013", summary: "Runner executes steps with typed records." };
@@ -205,7 +226,7 @@ await test("missing caller / generator / runId fail at construction with typed e
 
 console.log("\ngraph-runner: the PLAN subgraph end to end (all stubs injected)");
 
-await test("the full resumable walk: 8 steps, 2 A0 annotations, 2 [G] calls, 2 gates, one push, idempotent resume", async () => {
+await test("the full resumable walk: 9 steps, 2 A0 annotations, 3 [G] calls, 2 gates, one push, idempotent resume", async () => {
   const { storePath } = tempStore();
   const callerCalls = [];
   const caller = async (input) => {
@@ -218,11 +239,17 @@ await test("the full resumable walk: 8 steps, 2 A0 annotations, 2 [G] calls, 2 g
   let generatorCalls = 0;
   const generator = async ({ stepId, reads }) => {
     generatorCalls++;
+    if (stepId === "plan.intent") {
+      if (typeof reads["inbox.entry"] === "undefined") fail("inbox.entry read missing");
+      if (typeof reads["plan.dor.gaps"] === "undefined") fail("plan.dor.gaps read missing");
+      if ("intake.taskType" in reads) fail("the round-1 reads are absent by design, not supplied empty");
+      return INTENT_OUTPUT;
+    }
     if (stepId === "plan.dod") {
       if (typeof reads["inbox.entry"] === "undefined") fail("inbox.entry read missing");
       return DOD_OUTPUT;
     }
-    eq(stepId, "plan.ac", "generator serves plan.dod then plan.ac");
+    eq(stepId, "plan.ac", "generator serves plan.intent, plan.dod then plan.ac");
     if (typeof reads["features.list"] === "undefined") fail("features.list read missing");
     return AC_OUTPUT;
   };
@@ -273,7 +300,7 @@ await test("the full resumable walk: 8 steps, 2 A0 annotations, 2 [G] calls, 2 g
   eq(result.stepId, "plan.spec", "run 2 stops at the [A] step");
   eq(result.record.status, "handed-off", "plan.spec hands off");
   deepEq(result.record.handoff.reads["plan.ac.acs"], AC_OUTPUT.acs, "the [A] hand-off carries the resolved reads");
-  eq(generatorCalls, 2, "[G] executed exactly once each (plan.dod, plan.ac)");
+  eq(generatorCalls, 3, "[G] executed exactly once each (plan.intent, plan.dod, plan.ac)");
 
   resolve(storePath, "plan.spec", SPEC_OUTPUT, "spec-agent");
 
@@ -319,7 +346,7 @@ await test("the full resumable walk: 8 steps, 2 A0 annotations, 2 [G] calls, 2 g
   records = readRecords(storePath);
   eq(latest(records, "plan.push").status, "done", "push done");
   eq(latest(records, "plan.push").output.epicId, "FEN-900", "push output recorded");
-  eq(generatorCalls, 2, "[G] never re-executed across resumes");
+  eq(generatorCalls, 3, "[G] never re-executed across resumes");
   eq(callerCalls.length, 2, "two seam calls since the reset (plan.ac.testable, plan.decompose)");
 
   // Run 7 — fully idempotent: every step done, nothing re-runs.
@@ -371,8 +398,8 @@ await test("a schema-invalid [G] output fails the step and stops the run", async
   const { storePath } = tempStore();
   const runner = makeRunner({
     caller: async () => a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } }),
-    // plan.dod runs first and must pass; the invalid shape fails plan.ac's output schema
-    generator: async ({ stepId }) => (stepId === "plan.dod" ? DOD_OUTPUT : { acs: "not-a-list" }),
+    // plan.intent and plan.dod run first and must pass; the invalid shape fails plan.ac's output schema
+    generator: async ({ stepId }) => (stepId === "plan.intent" ? INTENT_OUTPUT : stepId === "plan.dod" ? DOD_OUTPUT : { acs: "not-a-list" }),
     gateEmitter: async () => ({}),
     linearEffect: async () => ({}),
     storePath,
@@ -449,7 +476,7 @@ await test("a resolution without a base run record is a typed failure, not a sil
   const { storePath } = tempStore();
   const runner = makeRunner({
     caller: async () => a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } }),
-    generator: async ({ stepId }) => (stepId === "plan.dod" ? DOD_OUTPUT : AC_OUTPUT),
+    generator: async ({ stepId }) => (stepId === "plan.intent" ? INTENT_OUTPUT : stepId === "plan.dod" ? DOD_OUTPUT : AC_OUTPUT),
     gateEmitter: async () => ({}),
     linearEffect: async () => ({}),
     storePath,
@@ -480,6 +507,7 @@ await test("the default Linear boundary refuses — the runner never writes to L
   // Drive the predecessors by hand-recorded resolutions: seed done records.
   const done = (key, stepId, output) => JSON.stringify({ type: "graph.step", runId: "run-e2e", ts: "2026-01-01T00:00:00.000Z", key, status: "done", stepId, output });
   appendFileSync(storePath, done("plan.dor", "plan.dor", { ready: true, gaps: [] }) + "\n");
+  appendFileSync(storePath, done("plan.intent", "plan.intent", INTENT_OUTPUT) + "\n");
   appendFileSync(storePath, done("plan.dod", "plan.dod", DOD_OUTPUT) + "\n");
   appendFileSync(storePath, done("plan.ac", "plan.ac", AC_OUTPUT) + "\n");
   appendFileSync(storePath, done("plan.spec", "plan.spec", SPEC_OUTPUT) + "\n");
@@ -497,7 +525,7 @@ await test("a gate answered rejected records gate-rejected and stops (downstream
   const { storePath } = tempStore();
   const runner = makeRunner({
     caller: async (input) => (input.decisionId === "plan.ac.testable" ? testableEnvelope(input) : a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } })),
-    generator: async ({ stepId }) => (stepId === "plan.dod" ? DOD_OUTPUT : AC_OUTPUT),
+    generator: async ({ stepId }) => (stepId === "plan.intent" ? INTENT_OUTPUT : stepId === "plan.dod" ? DOD_OUTPUT : AC_OUTPUT),
     gateEmitter: async () => ({ gateId: "gate-test-1" }),
     linearEffect: async () => { fail("linear effect must not run after a rejection"); },
     storePath,

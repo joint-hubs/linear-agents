@@ -210,9 +210,9 @@ console.log("\nv2 — version, steps, stepFlow, decisionEdges");
 test("v2: the committed graph carries the plan step chain and six decision edges", () => {
   const plan = GRAPH.nodes.plan;
   const stepIds = Object.keys(plan.steps || {});
-  if (stepIds.length !== 8) fail(`expected 8 plan steps, got ${stepIds.length}`);
+  if (stepIds.length !== 9) fail(`expected 9 plan steps, got ${stepIds.length}`);
   const flow = plan.stepFlow || [];
-  if (flow.length !== 7) fail(`expected 7 sequence edges, got ${flow.length}`);
+  if (flow.length !== 8) fail(`expected 8 sequence edges, got ${flow.length}`);
   if (flow[0].from !== "plan.dor" || flow[flow.length - 1].to !== "plan.push") {
     fail("the step chain does not run plan.dor → plan.push");
   }
@@ -288,13 +288,14 @@ test("v2 malformed: a tier that does not match the kind is caught", () => {
 
 test("v2 malformed: a broken stepFlow is caught", () => {
   const g1 = clone();
-  // One head, one tail, seven edges for eight steps — but plan.dod/plan.dor/
+  // One head, one tail, eight edges for nine steps — but plan.dod/plan.dor/
   // plan.ac form a cycle off the main line, so the walk from the single head
-  // (plan.spec) reaches only 5 of 8.
+  // (plan.intent) reaches only 6 of 9.
   g1.nodes.plan.stepFlow = [
     { from: "plan.dod", to: "plan.dor", type: "sequence" },
     { from: "plan.dor", to: "plan.ac", type: "sequence" },
     { from: "plan.ac", to: "plan.dod", type: "sequence" },
+    { from: "plan.intent", to: "plan.spec", type: "sequence" },
     { from: "plan.spec", to: "plan.gate1", type: "sequence" },
     { from: "plan.gate1", to: "plan.decompose", type: "sequence" },
     { from: "plan.decompose", to: "plan.gate2", type: "sequence" },

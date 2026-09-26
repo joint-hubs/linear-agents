@@ -71,6 +71,24 @@ const DOD_OUTPUT = {
   definitionOfDone: [{ check: "node scripts/plan-ac.test.mjs is green", kind: "test", bounded: true }],
 };
 
+// plan.intent sits between plan.dor and plan.dod now (FOC-515). These cases
+// are about plan.ac, so they serve the map and move on: round 1 with an
+// unknown task type needs all eight perspectives (design doc §3.12), and an
+// inferred item carries neither a quote nor options.
+const INTENT_OUTPUT = {
+  goal: "Plan rozumie wejście.",
+  why: "By nic nie umknęło przed pytaniem do użytkownika.",
+  mapVersion: 1,
+  interpretations: ["goal", "user", "scope", "success", "constraints", "risk", "priority", "terms"].map((perspective, i) => ({
+    id: `IN-${i + 1}`,
+    perspective,
+    claim: "Rozumiem, że to poza zakresem tego testu.",
+    source: "inferred",
+    alternatives: [],
+    covers: [],
+  })),
+};
+
 const RUN_INPUTS = {
   "inbox.entry": "Dictated entry (test): the plan chain generates acceptance criteria as bounded statements.",
   "features.list": [{ name: "plan.ac [G] node" }],
@@ -162,16 +180,16 @@ await test("plan.spec reads plan.dod.definitionOfDone — never the retired merg
   if (PLAN.steps["plan.spec"].reads.includes("plan.ac.definitionOfDone")) fail("the merged field is retired everywhere");
 });
 
-// ── (h) the counts hold: 27 entries, 8 steps / 7 edges, 6 decision edges ─────
+// ── (h) the counts hold: 28 entries, 9 steps / 8 edges, 6 decision edges ─────
 
-await test("the seed partition survives the restructure: 27 entries, 8 steps on the 7-edge chain, 6 decision edges", () => {
-  eq(Object.keys(registry).length, 27, "27 registry entries (no new ids)");
+await test("the seed partition survives the restructure: 28 entries, 9 steps on the 8-edge chain, 6 decision edges", () => {
+  eq(Object.keys(registry).length, 28, "28 registry entries (plan.intent joined, FOC-515)");
   const stepIds = Object.keys(PLAN.steps);
-  eq(stepIds.length, 8, "8 steps");
-  eq(PLAN.stepFlow.length, 7, "7 sequence edges — no graph edge was added for the loop (FOC-476's)");
+  eq(stepIds.length, 9, "9 steps");
+  eq(PLAN.stepFlow.length, 8, "8 sequence edges — no graph edge was added for the loop (FOC-476's)");
   eq(GRAPH.decisionEdges.length, 6, "6 decision edges — the testable gate is node-internal, not an edge");
   const chain = PLAN.stepFlow.map((e) => `${e.from}>${e.to}`).join(" ");
-  eq(chain, "plan.dor>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.gate2 plan.gate2>plan.push", "the chain is unchanged");
+  eq(chain, "plan.dor>plan.intent plan.intent>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.gate2 plan.gate2>plan.push", "plan.intent joined the chain after plan.dor (FOC-515)");
 });
 
 // ── composeAcInputs: the payload partition + the over-length posture ─────────
@@ -546,7 +564,7 @@ await test("success: ONE [G] call, one event line, a done record whose output is
   const shadowDir = join(dir, "shadow");
   try {
     let gcall = 0;
-    const generator = createDefaultGenerator({ apiKey: "test-key", runId: "run-ac-runner", shadowDir, fetchImpl: async () => okResponse(++gcall === 1 ? DOD_OUTPUT : AC_OUTPUT) });
+    const generator = createDefaultGenerator({ apiKey: "test-key", runId: "run-ac-runner", shadowDir, fetchImpl: async () => okResponse(++gcall === 1 ? INTENT_OUTPUT : gcall === 2 ? DOD_OUTPUT : AC_OUTPUT) });
     const caller = async (input) => ({
       ok: true,
       decisionId: AC_TESTABLE_DECISION,
@@ -562,7 +580,7 @@ await test("success: ONE [G] call, one event line, a done record whose output is
     deepEq(acRecord.output, AC_OUTPUT, "the schema-valid output lands in the record");
 
     const events = readLines(join(shadowDir, "decisions.jsonl"));
-    eq(events.length, 2, "one event line per successful [G] call (plan.dod first, then plan.ac — success-only)");
+    eq(events.length, 3, "one event line per successful [G] call (plan.intent, plan.dod, plan.ac — success-only)");
     const acEvents = events.filter((e) => e.decisionId === "plan.ac");
     eq(acEvents.length, 1, "ONE plan.ac event line for ONE successful [G] call");
     eq(acEvents[0].ok, true, "ok");
@@ -577,7 +595,7 @@ await test("(f) the escalation lands as a typed graph.step record; the [G] event
   const shadowDir = join(dir, "shadow");
   try {
     let calls = 0;
-    const generator = createDefaultGenerator({ apiKey: "test-key", runId: "run-ac-runner", shadowDir, fetchImpl: async () => { calls++; return okResponse(calls === 1 ? DOD_OUTPUT : AC_OUTPUT); } });
+    const generator = createDefaultGenerator({ apiKey: "test-key", runId: "run-ac-runner", shadowDir, fetchImpl: async () => { calls++; return okResponse(calls === 1 ? INTENT_OUTPUT : calls === 2 ? DOD_OUTPUT : AC_OUTPUT); } });
     const caller = async (input) => ({
       ok: true,
       decisionId: AC_TESTABLE_DECISION,
@@ -602,9 +620,9 @@ await test("(f) the escalation lands as a typed graph.step record; the [G] event
     // Ledger 2 — decisions.jsonl: every successful [G] call — plan.dod once,
     // plan.ac twice (initial + regeneration); the failed gate attempts log nothing.
     const events = readLines(join(shadowDir, "decisions.jsonl"));
-    eq(events.length, 3, "one event line per successful [G] call (plan.dod, plan.ac ×2 — success-only transport)");
+    eq(events.length, 4, "one event line per successful [G] call (plan.intent, plan.dod, plan.ac ×2 — success-only transport)");
     if (!events.every((e) => e.ok === true)) fail("only successful [G] calls logged");
-    if (!events.every((e) => e.decisionId === "plan.ac" || e.decisionId === "plan.dod")) fail("only the two [G] steps logged");
+    if (!events.every((e) => e.decisionId === "plan.ac" || e.decisionId === "plan.dod" || e.decisionId === "plan.intent")) fail("only the three [G] steps logged");
     const acEvents = events.filter((e) => e.decisionId === "plan.ac");
     eq(acEvents.length, 2, "two plan.ac event lines (initial + regeneration)");
     if (events.some((e) => e.decisionId === "escalation" || e.decisionId === AC_TESTABLE_DECISION)) {
