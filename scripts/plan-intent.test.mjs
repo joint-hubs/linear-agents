@@ -34,6 +34,7 @@ import {
   verifyIdMap,
 } from "./plan-intent.mjs";
 import { DECISION_STEP } from "./decision-call.mjs";
+import { buildInputs, splitGroundTruth } from "./plan-intent-eval.mjs";
 
 let passed = 0;
 const failures = [];
@@ -935,6 +936,90 @@ async function main() {
     eq(result.error.code, "invalid_input", "typed");
     eq(/illegal idMap/.test(result.error.message), true, `named: ${result.error.message}`);
     eq(calls, 0, "zero provider calls");
+  });
+
+  // ── the eval harness's input partition (scripts/plan-intent-eval.mjs) ─────
+  //
+  // Pinned here because the ground-truth strip is the one thing whose quiet
+  // failure would invalidate every number in docs/benchmark/plan-intent-eval.md:
+  // if an Acceptance-criteria or Definition-of-done line ever reaches the
+  // model's inputs, the map is reading the answer key.
+
+  await test("no ground-truth marker and no roadmap metadata reaches any eval scope summary", () => {
+    const fx = JSON.parse(readFileSync(join(__dir, "plan-intent-eval-fixture.json"), "utf8"));
+    eq(fx.issues.length, 12, "12 cases");
+    for (const row of fx.issues) {
+      const i = buildInputs(row);
+      eq(/\*\*(?:Acceptance criteria|AC|Definition of done|DoD):\*\*/.test(i.scopeSummary), false, `${i.id}: an inline ground-truth marker leaked`);
+      eq(/^## (?:Acceptance|Definition of)/m.test(i.scopeSummary), false, `${i.id}: a ground-truth heading leaked`);
+      eq(/fenix-roadmap/.test(i.scopeSummary), false, `${i.id}: roadmap metadata leaked`);
+    }
+  });
+
+  await test("the eval fixture copies the FOC-474 descriptions verbatim", () => {
+    const dod = JSON.parse(readFileSync(join(__dir, "plan-dod-eval-fixture.json"), "utf8"));
+    const fx = JSON.parse(readFileSync(join(__dir, "plan-intent-eval-fixture.json"), "utf8"));
+    eq(fx.issues.length, dod.issues.length, "the same 12 cases");
+    for (const row of fx.issues) {
+      const src = dod.issues.find((i) => i.id === row.id);
+      eq(src !== undefined, true, `${row.id}: present in the FOC-474 fixture`);
+      eq(row.description, src.description, `${row.id}: description copied verbatim`);
+      eq(row.title, src.title, `${row.id}: title copied verbatim`);
+    }
+  });
+
+  await test("the eval gaps respect the DoR gap contract and never quote the answer key", () => {
+    const fx = JSON.parse(readFileSync(join(__dir, "plan-intent-eval-fixture.json"), "utf8"));
+    for (const row of fx.issues) {
+      const i = buildInputs(row);
+      eq(i.gaps.length <= 8, true, `${i.id}: at most 8 gaps`);
+      eq(i.gaps.length > 0, true, `${i.id}: the gap list is what drives coverage — it is never empty`);
+      for (const gap of i.gaps) {
+        eq(gap.trim().length > 0, true, `${i.id}: a gap is non-empty`);
+        eq(gap.length <= 200, true, `${i.id}: a gap is at most 200 chars`);
+        // The gaps are authored from the Context/Scope text only, so a gap may
+        // not quote the stripped answer key — that would leak it through
+        // `covers` even with the sections cut from the entry.
+        eq(i.groundTruth === null || !i.groundTruth.includes(gap), true, `${i.id}: a gap quotes the stripped ground truth`);
+      }
+    }
+  });
+
+  await test("FOC-406 has no ground truth and takes the fail-closed task-type path", () => {
+    const fx = JSON.parse(readFileSync(join(__dir, "plan-intent-eval-fixture.json"), "utf8"));
+    const i = buildInputs(fx.issues.find((r) => r.id === "FOC-406"));
+    eq(i.hasGroundTruth, false, "no AC and no DoD section — coverage is UNKNOWN");
+    eq(i.taskType, "unknown", "type never set — the explicit unknown path");
+    eq(requiredPerspectives(i.taskType).failClosed, true, "all eight perspectives, fail closed");
+  });
+
+  await test("the split keeps the entry's own text and reports the key it cut out", () => {
+    const { scopeText, groundTruth } = splitGroundTruth(
+      "## Context\nbody text\n\n## Acceptance criteria\n* AC-1: one\n\n## Definition of done\n* done-1\n",
+    );
+    eq(/body text/.test(scopeText), true, "context kept");
+    eq(/AC-1/.test(scopeText), false, "AC cut from the entry");
+    eq(/AC-1/.test(groundTruth), true, "AC reported as the key");
+    eq(/done-1/.test(groundTruth), true, "DoD reported as the key");
+  });
+
+  await test("buildInputs refuses a malformed fixture row rather than trusting it", () => {
+    const ok = { id: "X-1", title: "t", description: "d", taskType: "tech", gaps: ["g"] };
+    eq(buildInputs(ok).id, "X-1", "a well-formed row builds");
+    for (const [label, bad] of [
+      ["no id", { ...ok, id: "" }],
+      ["no title", { ...ok, title: " " }],
+      ["no description", { ...ok, description: undefined }],
+      ["no taskType", { ...ok, taskType: "" }],
+      ["gaps not a list", { ...ok, gaps: "g" }],
+      ["a blank gap", { ...ok, gaps: [" "] }],
+      ["an over-long gap", { ...ok, gaps: ["x".repeat(201)] }],
+      ["more than 8 gaps", { ...ok, gaps: Array.from({ length: 9 }, (_, n) => `g${n}`) }],
+    ]) {
+      let threw = false;
+      try { buildInputs(bad); } catch { threw = true; }
+      eq(threw, true, `${label} is refused`);
+    }
   });
 
   console.log(`plan-intent: ${passed} passed, ${failures.length} failed`);
