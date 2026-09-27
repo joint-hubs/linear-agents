@@ -131,6 +131,57 @@ test("labels survive both shapes Linear returns", () => {
   assert.deepEqual(extractSignals({ identifier: "X", labels: ["raw"] }).labels, ["raw"]);
 });
 
+// ── 1b. the AC heading variants (FOC-577) ─────────────────────────────────────
+console.log("\nwarianty nagłówka AC (FOC-577)");
+
+test("all three AC heading variants are recognized", () => {
+  // FOC-577: a bare `## Acceptance` heading routed to `plan` because the signal
+  // read false. `Kryteria akceptacji` was already matched — pinned here so it
+  // stays that way.
+  for (const body of [
+    "## Acceptance criteria\n\n* it works",
+    "## Acceptance\n\n* it works",
+    "## Kryteria akceptacji\n\n* działa",
+  ]) {
+    assert.equal(extractSignals(issue({ body })).hasAcceptanceCriteria, true, JSON.stringify(body));
+  }
+  // The `propose` path agrees: the "no acceptance criteria section" unknown
+  // must not be raised over a body that carries the bare heading.
+  const r = p({ body: "## Acceptance\n\n* it works", estimate: 3 });
+  assert.ok(!r.unknowns.some((u) => u.includes("no acceptance criteria section")), JSON.stringify(r.unknowns));
+});
+
+test("AC heading matching keeps its tolerance: case, level 1-6, trailing colon", () => {
+  for (const body of [
+    "# acceptance criteria",
+    "###### ACCEPTANCE:",
+    "### Kryteria Akceptacji:",
+    "## Acceptance Criteria:",
+  ]) {
+    assert.equal(extractSignals(issue({ body })).hasAcceptanceCriteria, true, JSON.stringify(body));
+  }
+});
+
+test("`## Acceptance ceremony notes` is not the acceptance criteria section", () => {
+  // The bare variant is anchored to end-of-line: a heading that merely STARTS
+  // with "Acceptance" is a different section and must not light the signal.
+  assert.equal(extractSignals(issue({ body: "## Acceptance ceremony notes\n\n* wear a hat" })).hasAcceptanceCriteria, false);
+  // The long variants keep their prefix semantics — a suffix after the heading
+  // text is still the section.
+  assert.equal(
+    extractSignals(issue({ body: "## Acceptance criteria for the widget\n\n* it works" })).hasAcceptanceCriteria,
+    true,
+  );
+});
+
+test("inline AC forms keep working (regression pin)", () => {
+  assert.equal(
+    extractSignals(issue({ body: "**Given** a thing **When** it happens **Then** it works" })).hasAcceptanceCriteria,
+    true,
+  );
+  assert.equal(extractSignals(issue({ body: "AC-1: it works" })).hasAcceptanceCriteria, true);
+});
+
 // ── 2. The four AC cases ──────────────────────────────────────────────────────
 console.log("\npropozycje — cztery przypadki z AC");
 
