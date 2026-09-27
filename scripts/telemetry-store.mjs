@@ -18,7 +18,7 @@ import {
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { INPUT_IDENTITY_SCHEME_VERSION, contentDigest, inputIdentity } from "./tool-identity.mjs";
 
@@ -121,6 +121,13 @@ export function openTelemetryDb(path = telemetryDbPath()) {
   if (path !== ":memory:") ensureParent(path);
   const db = new DatabaseSync(path);
   db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
+  // FOC-547 (AC2): the default 1000-page (4 MB) WAL turns db.close() and the
+  // periodic checkpoints into multi-hundred-ms synchronous transfers on this
+  // corpus (measured ~0.7–1.4 s per phase boundary). Capping the WAL at 1 MB
+  // spreads the page transfer across commits (each bounded) so no single one
+  // — and not the close — pays the whole backlog. Durability is unchanged:
+  // WAL commits still fsync per transaction either way.
+  db.exec("PRAGMA wal_autocheckpoint = 256;");
   migrate(db, path);
   return db;
 }
@@ -1031,9 +1038,14 @@ function transaction(db, fn) {
 
 export function emitEvent(event, options = {}) {
   const pendingPath = spoolPending(event);
-  let db;
+  // FOC-547: callers already holding an open connection (backfill passes one
+  // db through the whole manifest loop) can share it via options.db — without
+  // this, every emitted event paid an openTelemetryDb() open + migrate + close.
+  // A passed-in db is owned by the caller and never closed here.
+  const ownsDb = !options.db;
+  let db = options.db || null;
   try {
-    db = openTelemetryDb(options.dbPath);
+    if (ownsDb) db = openTelemetryDb(options.dbPath);
     const result = transaction(db, () => applyEvent(db, event));
     if (result?.duplicate) {
       rmSync(pendingPath, { force: true });
@@ -1044,7 +1056,7 @@ export function emitEvent(event, options = {}) {
   } catch (error) {
     return { ingested: false, pending: true, error: error.message, pendingPath };
   } finally {
-    db?.close();
+    if (ownsDb) db?.close();
   }
 }
 
@@ -1297,28 +1309,133 @@ function applySessionLinked(db, event) {
   return { runId, sessionId };
 }
 
+function gitFactsFromOutputs(cwd, [refName, headSha, commonDirRaw, gitDir, remoteUrl]) {
+  return {
+    cwd,
+    refType: refName ? "branch" : headSha ? "detached" : "unknown",
+    refName,
+    headSha,
+    commonDir: commonDirRaw ? normalizePath(commonDirRaw) : null,
+    gitDir: gitDir ? normalizePath(gitDir) : null,
+    remoteUrl,
+  };
+}
+
+const GIT_FACTS_ARGS = [
+  ["symbolic-ref", "--quiet", "--short", "HEAD"],
+  ["rev-parse", "HEAD"],
+  ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+  ["rev-parse", "--path-format=absolute", "--git-dir"],
+  ["remote", "get-url", "origin"],
+];
+
 function gitFacts(cwd) {
   if (!cwd || !existsSync(cwd)) return { cwd, refType: "unknown", refName: null, headSha: null, commonDir: null, gitDir: null, remoteUrl: null };
   const run = (args) => {
     try { return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null; } catch { return null; }
   };
-  const refName = run(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  const headSha = run(["rev-parse", "HEAD"]);
-  const commonDirRaw = run(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-  const gitDir = run(["rev-parse", "--path-format=absolute", "--git-dir"]);
-  const remoteUrl = run(["remote", "get-url", "origin"]);
-  return { cwd, refType: refName ? "branch" : headSha ? "detached" : "unknown", refName, headSha, commonDir: commonDirRaw ? normalizePath(commonDirRaw) : null, gitDir: gitDir ? normalizePath(gitDir) : null, remoteUrl };
+  return gitFactsFromOutputs(cwd, GIT_FACTS_ARGS.map(run));
+}
+
+// FOC-547 (D2): every workspace.observed application used to run 5 synchronous
+// git subprocesses (~200 ms on the real corpus; a cold first call up to ~600 ms
+// with Windows AV scanning). The projection only consumes
+// common_dir/git_dir/remote_url from git — the ref fields are always carried in
+// the event payload (every producer sets them, so the `{ ...gitFacts, ...payload }`
+// spread overrides git's) — and those are a pure function of cwd. A workspace
+// cluster inside one ingest chunk therefore re-ran the same 5 git calls
+// hundreds of times back to back: measured 2026-09-27, spawnSync was 45% of an
+// entire real-corpus backfill and the cluster flushed as ONE 87 s event-loop
+// block. Two mitigations, because a cache alone cannot hold the 250 ms bar (a
+// single cold call breaches it):
+//   1. LRU cache per cwd (TTL bounds staleness when a worktree is pruned and
+//      re-created at the same path mid-run); ref correctness is unaffected
+//      because it never came from git for these events.
+//   2. `warmGitFacts` lets async callers (ingest flush, backfill record loop)
+//      prefetch a batch of cwds with ASYNC git subprocesses before the
+//      synchronous apply pass needs them — git then runs while the event loop
+//      is free, and the synchronous fallback inside applyWorkspaceObserved
+//      becomes a cache hit in the normal path.
+const GIT_FACTS_TTL_MS = 5 * 60 * 1000;
+const GIT_FACTS_CACHE_MAX = 512;
+const gitFactsCache = new Map();
+
+function gitFactsFresh(entry) {
+  return entry && Date.now() - entry.at < GIT_FACTS_TTL_MS;
+}
+
+function gitFactsPut(cwd, facts) {
+  if (gitFactsCache.size >= GIT_FACTS_CACHE_MAX) {
+    gitFactsCache.delete(gitFactsCache.keys().next().value);
+  }
+  gitFactsCache.set(cwd, { facts, at: Date.now() });
+}
+
+// Prefetch git facts for `cwds` using non-blocking child processes. Resolves
+// once every missing cwd is in the cache; failures (non-repo paths, missing
+// git) resolve to the same unknown-shape the synchronous path produces.
+export async function warmGitFacts(cwds) {
+  const pending = [];
+  for (const cwd of new Set(cwds)) {
+    if (!cwd) continue;
+    const hit = gitFactsCache.get(cwd);
+    if (gitFactsFresh(hit)) {
+      gitFactsCache.delete(cwd); // LRU refresh on access
+      gitFactsCache.set(cwd, hit);
+      continue;
+    }
+    pending.push(cwd);
+  }
+  // Spawn SERIALLY, one yield between spawns. uv_spawn runs synchronously
+  // on the main thread and a single CreateProcess can take ~100 ms under
+  // Windows AV — parallel warm-up of several cwds (5 spawns each) measured
+  // as one 1–2.4 s continuous block (FOC-547 AC2). One spawn per event-loop
+  // turn keeps each block at the single-spawn cost.
+  for (const cwd of pending) {
+    const outputs = [];
+    for (const args of GIT_FACTS_ARGS) {
+      outputs.push(await new Promise((resolve) => {
+        execFile("git", args, { cwd, encoding: "utf8", windowsHide: true }, (error, stdout) => {
+          resolve(error ? null : String(stdout).trim() || null);
+        });
+      }));
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    gitFactsPut(cwd, gitFactsFromOutputs(cwd, outputs));
+  }
+}
+
+function gitFactsCached(cwd) {
+  const hit = gitFactsCache.get(cwd);
+  if (gitFactsFresh(hit)) {
+    gitFactsCache.delete(cwd); // LRU refresh on access
+    gitFactsCache.set(cwd, hit);
+    return hit.facts;
+  }
+  const facts = gitFacts(cwd);
+  gitFactsPut(cwd, facts);
+  return facts;
 }
 
 function applyWorkspaceObserved(db, event) {
   const payload = event.payload;
   const runId = event.runId || payload.runId;
   if (!runId) throw new Error("workspace.observed requires runId");
+  const observedAt = event.observedAt || now();
+  const cwd = normalizePath(payload.cwd);
+  // Early dedup BEFORE the git subprocesses: an observation of the same
+  // (run, moment, cwd) was already recorded — the re-emitted event would
+  // produce an identical row (a run cannot be at two branches at one
+  // timestamp), so paying 5 git calls to discover that is pure waste. The
+  // exact-column dedup below stays for the remaining cases.
+  const preexisting = db.prepare(
+    "SELECT 1 FROM workspace_observations WHERE run_id=? AND observed_at=? AND cwd IS ?",
+  ).get(runId, observedAt, cwd);
+  if (preexisting) return { duplicate: true, runId };
   db.prepare("INSERT OR IGNORE INTO runs (run_id, status, updated_at) VALUES (?, 'running', ?)").run(runId, now());
-  const facts = { ...gitFacts(payload.cwd), ...payload };
+  const facts = { ...gitFactsCached(payload.cwd), ...payload };
   let repositoryId = null;
   let worktreeId = null;
-  const cwd = normalizePath(facts.cwd);
   if (facts.commonDir) {
     repositoryId = hash(facts.commonDir);
     db.prepare(
@@ -1342,7 +1459,6 @@ function applyWorkspaceObserved(db, event) {
        ON CONFLICT(path) DO UPDATE SET repository_id=COALESCE(excluded.repository_id, worktrees.repository_id), git_dir=COALESCE(excluded.git_dir, worktrees.git_dir)`,
     ).run(worktreeId, repositoryId, cwd, facts.gitDir || null, now());
   }
-  const observedAt = event.observedAt || now();
   const refType = facts.refType || "unknown";
   const refName = facts.refName || null;
   const headSha = facts.headSha || null;
@@ -2187,6 +2303,21 @@ export function queryRuns(db, options = {}) {
   return options.priceMode === "current" ? repriceCurrent(db, runs) : runs;
 }
 
+// FOC-547 (AC2): the ingest loop only needs run identity and the fields its
+// ingest decisions consume (status/endedAt for the settled gate, session/
+// transcript/squad/configDir for transcript location). queryRuns() projects
+// usage/cost/workspace aggregates per row — ~1 ms per run, measured as ONE
+// ~0.9 s synchronous event-loop block per tick on the ~1000-run corpus. The
+// full projection stays the API/reader path; the ingest tick uses this.
+export function queryRunsForIngest(db) {
+  return db.prepare(
+    `SELECT run_id AS runId, squad, status, started_at AS startedAt, ended_at AS endedAt,
+            session_id AS sessionId, transcript_path AS transcriptPath,
+            claude_config_dir AS claudeConfigDir
+     FROM runs ORDER BY started_at DESC`,
+  ).all();
+}
+
 // ── Manager live overlay (FOC-225 slice 2) ───────────────────────────────────
 //
 // Bounded, allowlisted read for GET /api/manager/snapshot. queryRuns() above
@@ -2902,7 +3033,12 @@ export function toolIdentityScheme(db) {
 }
 
 export async function recordToolFact(record, options = {}) {
-  const db = openTelemetryDb(options.dbPath);
+  // FOC-547: the ingest loop calls this once per tool fact; with ~31 MB live
+  // transcripts that was an openTelemetryDb() open + migrate + close PER
+  // RECORD. Callers holding an open connection pass it via options.db (never
+  // closed here); without it the standalone open/close behavior is kept.
+  const ownsDb = !options.db;
+  const db = options.db || openTelemetryDb(options.dbPath);
   try {
     const toolFactId = createHash("sha1")
       .update(`${record.source_path}:${record.source_offset}:${record.tool_index}`)
@@ -2956,15 +3092,35 @@ export async function recordToolFact(record, options = {}) {
       toolInputId, Number.isInteger(record.tool_index) ? record.tool_index : null,
       toolResultState, toolResultBytes, toolResultId,
     );
-    if (result.changes === 0) return { recorded: false, reason: "duplicate" };
+    if (result.changes === 0) {
+      // FOC-547 (AC7): an incremental pass records a tool_use BEFORE its
+      // tool_result arrives (state NULL = unknown); when the outcome lands in
+      // a later chunk, upgrade the existing row in place instead of leaving
+      // it unknown forever. Upgrade only — never overwrite a known outcome,
+      // and identity fields (input digest, indices) stay untouched. 'missing'
+      // is also upgradable: the old full-file pass wrote it finally, but under
+      // incremental parsing it is just "no result seen so far".
+      if (toolResultState) {
+        const upgraded = db.prepare(
+          `UPDATE tool_facts
+             SET tool_result_state = ?, tool_result_bytes = ?, tool_result_id = ?, tool_has_error = ?
+           WHERE tool_fact_id = ? AND (tool_result_state IS NULL OR tool_result_state = 'missing')`,
+        ).run(toolResultState, toolResultBytes, toolResultId, hasError, toolFactId);
+        if (upgraded.changes > 0) return { recorded: false, upgraded: true, reason: "upgraded", id: toolFactId };
+      }
+      return { recorded: false, reason: "duplicate" };
+    }
     return { recorded: true, id: toolFactId };
   } finally {
-    db.close();
+    if (ownsDb) db.close();
   }
 }
 
 export async function recordDelegationLink(record, options = {}) {
-  const db = openTelemetryDb(options.dbPath);
+  // FOC-547: same options.db sharing as recordToolFact — one connection for
+  // the whole ingest pass instead of an open + migrate + close per link.
+  const ownsDb = !options.db;
+  const db = options.db || openTelemetryDb(options.dbPath);
   try {
     const delegationId = createHash("sha1")
       .update(`${record.parent_run_id}:${record.parent_agent}:${record.child_agent}:${record.observed_at}`)
@@ -2982,6 +3138,6 @@ export async function recordDelegationLink(record, options = {}) {
     if (result.changes === 0) return { recorded: false, reason: "duplicate" };
     return { recorded: true, id: delegationId };
   } finally {
-    db.close();
+    if (ownsDb) db.close();
   }
 }

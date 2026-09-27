@@ -21,11 +21,12 @@
  *     from './scripts/telemetry-delegation-recon.mjs';
  */
 
-import { existsSync, readFileSync, readdirSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { createPacer, jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -33,6 +34,13 @@ import { tmpdir } from "node:os";
 
 /** Tool names that indicate a subagent spawn in the lead transcript. */
 const SPAWN_TOOL_NAMES = new Set(["Agent", "Task", "agent_spawn"]);
+
+// FOC-547: subagent metadata (agentId / attributionAgent / model / first
+// timestamp) lives in the first handful of lines. Scanning the first 512 KiB
+// chunked keeps the metadata pass off the event loop for large subagent
+// transcripts; fields genuinely absent from the head fall back to the
+// filename-derived agent key, same as before for unreadable files.
+const META_SCAN_BYTES = 1 << 19;
 
 // ---------------------------------------------------------------------------
 // Exported: findSubagentTranscripts
@@ -118,6 +126,60 @@ export function resolveChildAgentKey({ leadTranscriptPath, subagentPath }) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Build one delegation record for a subagent, or null when the subagent has
+ * no usable metadata. Shared by the sync and async reconstruction paths so
+ * the record shape can never drift between them.
+ */
+function delegationRecordFor({ runId, parentAgent, sub, subMeta, spawns }) {
+  if (!subMeta) return null;
+
+  // Resolve child agent_key
+  let childAgent = agentKeyFromPath(sub.path);
+  if (subMeta.attributionAgent) {
+    const match = spawns.find((s) => s.subagentType === subMeta.attributionAgent);
+    if (match) childAgent = subMeta.attributionAgent;
+  }
+
+  // Find the matching spawn event for observed_at
+  const spawnEvent = subMeta.attributionAgent
+    ? spawns.find((s) => s.subagentType === subMeta.attributionAgent)
+    : null;
+
+  const observedAt = spawnEvent?.timestamp || subMeta.firstTimestamp || new Date().toISOString();
+
+  // Build dedup key: (parent_run_id, parent_agent, child_agent, observed_at)
+  const dedupKey = `${runId}|${parentAgent}|${childAgent}|${observedAt}`;
+
+  // delegation_id = hash of the dedup key (matches the SQL PK convention)
+  const delegationId = createHash("sha256")
+    .update(dedupKey)
+    .digest("hex")
+    .slice(0, 16);
+
+  return {
+    dedupKey,
+    record: {
+      delegation_id: delegationId,
+      parent_run_id: runId,
+      parent_agent: parentAgent,
+      child_agent: childAgent,
+      child_model: subMeta.model || null,
+      child_transcript: sub.path,
+      observed_at: observedAt,
+      // child_tokens, child_cost_usd, child_turns are null here because this
+      // module does NOT query SQLite. A separate post-pass (in the orchestrator
+      // or telemetry-ingest integration) populates them from usage_facts and
+      // cost_facts for the same (run_id, agent_key) pair.
+      child_tokens: null,
+      child_cost_usd: null,
+      child_turns: null,
+      source: "transcript",
+      created_at: new Date().toISOString(),
+    },
+  };
+}
+
+/**
  * Reconstruct delegation links from a lead transcript and its subagents/ dir.
  *
  * For each subagent found, produces a record matching the delegation_links
@@ -147,51 +209,151 @@ export function reconstructDelegationLinks({ runId, parentAgent, transcriptPath 
 
   for (const sub of subagents) {
     const subMeta = readSubagentMetadata(sub.path);
-    if (!subMeta) continue;
+    const built = delegationRecordFor({ runId, parentAgent, sub, subMeta, spawns });
+    if (!built || seen.has(built.dedupKey)) continue;
+    seen.add(built.dedupKey);
+    records.push(built.record);
+  }
 
-    // Resolve child agent_key
-    let childAgent = agentKeyFromPath(sub.path);
-    if (subMeta.attributionAgent) {
-      const match = spawns.find((s) => s.subagentType === subMeta.attributionAgent);
-      if (match) childAgent = subMeta.attributionAgent;
+  return records;
+}
+
+/**
+ * Scan the NEW tail of a lead transcript for spawn tool_use blocks.
+ *
+ * FOC-547 incremental path: reads only from `startOffset`, chunked, so a
+ * growing lead transcript is never re-read from byte 0 per ingest pass.
+ * Returns the spawns found in that range ({ subagentType, description,
+ * timestamp } — same shape findSpawnToolUses produces).
+ *
+ * @param {string} leadTranscriptPath
+ * @param {number} [startOffset]
+ * @returns {Promise<Array<{subagentType: string|null, description: string|null, timestamp: string|null}>>}
+ */
+export async function scanSpawnToolUsesAsync(leadTranscriptPath, startOffset = 0) {
+  const results = [];
+  // FOC-547 (AC2): chunk reads are synchronous — pace so the loop breathes
+  // (a first-pass scan of a full lead transcript is otherwise one block).
+  const pacer = createPacer();
+  for await (const { lines } of jsonlChunksFrom(leadTranscriptPath, startOffset)) {
+    await pacer();
+    for (const { raw } of lines) {
+      if (!raw) continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        continue; // skip unparseable lines
+      }
+      if (parsed.type !== "assistant" || !parsed.message?.content) continue;
+      const blocks = Array.isArray(parsed.message.content) ? parsed.message.content : [];
+      for (const block of blocks) {
+        if (block.type === "tool_use" && SPAWN_TOOL_NAMES.has(block.name)) {
+          results.push({
+            subagentType: block.input?.subagent_type || null,
+            description: block.input?.description || null,
+            timestamp: parsed.timestamp || null,
+          });
+        }
+      }
     }
+  }
+  return results;
+}
 
-    // Find the matching spawn event for observed_at
-    const spawnEvent = subMeta.attributionAgent
-      ? spawns.find((s) => s.subagentType === subMeta.attributionAgent)
-      : null;
+/**
+ * Async metadata scan for one subagent transcript (chunked, first META_SCAN_BYTES).
+ * Same fields as readSubagentMetadata; unreadable file → null.
+ *
+ * @param {string} subagentPath
+ * @returns {Promise<{ agentId: string|null, attributionAgent: string|null, model: string|null, firstTimestamp: string|null } | null>}
+ */
+export async function readSubagentMetadataAsync(subagentPath) {
+  try {
+    let agentId = null;
+    let attributionAgent = null;
+    let model = null;
+    let firstTimestamp = null;
+    const pacer = createPacer();
+    for await (const { lines } of jsonlChunksFrom(subagentPath, 0, { chunkBytes: META_SCAN_BYTES })) {
+      await pacer();
+      for (const { raw } of lines) {
+        if (!raw) continue;
+        try {
+          const parsed = JSON.parse(raw);
+          // Capture first timestamp from any line
+          if (!firstTimestamp && parsed.timestamp) firstTimestamp = parsed.timestamp;
+          // agentId from user messages (sidechain subagents)
+          if (parsed.agentId) agentId = parsed.agentId;
+          // attributionAgent from assistant messages
+          if (parsed.attributionAgent) attributionAgent = parsed.attributionAgent;
+          // model from assistant messages (first one wins — all should be same)
+          if (parsed.type === "assistant" && parsed.message?.model && !model) {
+            model = parsed.message.model;
+          }
+        } catch {
+          continue; // skip unparseable lines
+        }
+      }
+      // One META_SCAN_BYTES chunk is the whole point — stop after the first.
+      break;
+    }
+    return { agentId, attributionAgent, model, firstTimestamp };
+  } catch {
+    return null;
+  }
+}
 
-    const observedAt = spawnEvent?.timestamp || subMeta.firstTimestamp || new Date().toISOString();
+/**
+ * Incremental delegation reconstruction (FOC-547).
+ *
+ * Same output contract as reconstructDelegationLinks, but driven by
+ * caller-held incremental state:
+ *   - `spawns` — spawn tool_uses collected so far (callers append the results
+ *     of scanSpawnToolUsesAsync over new transcript ranges),
+ *   - `metaCache` — Map<subagentPath, { size, meta }>; a subagent's metadata
+ *     is re-scanned only when the file is new or has grown.
+ *
+ * Records are deduped by the same natural key, and recordDelegationLink's
+ * INSERT OR IGNORE makes re-emission idempotent.
+ *
+ * @param {object} opts
+ * @param {string} opts.runId
+ * @param {string} opts.parentAgent
+ * @param {string} opts.transcriptPath - Path to the lead's .jsonl transcript
+ * @param {Array<{subagentType: string|null, timestamp: string|null}>} opts.spawns
+ * @param {Map<string, {size: number, meta: object}>} [opts.metaCache]
+ * @returns {Promise<Array<object>>}
+ */
+export async function reconstructDelegationLinksAsync({ runId, parentAgent, transcriptPath, spawns, metaCache }) {
+  if (!transcriptPath || !existsSync(transcriptPath)) return [];
 
-    // Build dedup key: (parent_run_id, parent_agent, child_agent, observed_at)
-    const dedupKey = `${runId}|${parentAgent}|${childAgent}|${observedAt}`;
-    if (seen.has(dedupKey)) continue;
-    seen.add(dedupKey);
+  const subagents = findSubagentTranscripts(transcriptPath);
+  if (subagents.length === 0) return [];
 
-    // delegation_id = hash of the dedup key (matches the SQL PK convention)
-    const delegationId = createHash("sha256")
-      .update(dedupKey)
-      .digest("hex")
-      .slice(0, 16);
+  const spawnList = Array.isArray(spawns) ? spawns : [];
+  const records = [];
+  const seen = new Set();
 
-    records.push({
-      delegation_id: delegationId,
-      parent_run_id: runId,
-      parent_agent: parentAgent,
-      child_agent: childAgent,
-      child_model: subMeta.model || null,
-      child_transcript: sub.path,
-      observed_at: observedAt,
-      // child_tokens, child_cost_usd, child_turns are null here because this
-      // module does NOT query SQLite. A separate post-pass (in the orchestrator
-      // or telemetry-ingest integration) populates them from usage_facts and
-      // cost_facts for the same (run_id, agent_key) pair.
-      child_tokens: null,
-      child_cost_usd: null,
-      child_turns: null,
-      source: "transcript",
-      created_at: new Date().toISOString(),
-    });
+  for (const sub of subagents) {
+    let subMeta = null;
+    if (metaCache) {
+      const cached = metaCache.get(sub.path);
+      let size = 0;
+      try { size = statSync(sub.path).size; } catch { /* unreadable → rescan */ }
+      if (cached && cached.size === size) {
+        subMeta = cached.meta;
+      } else {
+        subMeta = await readSubagentMetadataAsync(sub.path);
+        metaCache.set(sub.path, { size, meta: subMeta });
+      }
+    } else {
+      subMeta = await readSubagentMetadataAsync(sub.path);
+    }
+    const built = delegationRecordFor({ runId, parentAgent, sub, subMeta, spawns: spawnList });
+    if (!built || seen.has(built.dedupKey)) continue;
+    seen.add(built.dedupKey);
+    records.push(built.record);
   }
 
   return records;

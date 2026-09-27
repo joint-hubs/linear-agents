@@ -38,7 +38,7 @@ import {
   reloadKickoffTemplates,
 } from './launch.mjs';
 import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools, validateProvidersPatch } from './squad-config.mjs';
-import { listTerminalsAsync, flashWindowByPid, focusWindowByPid, stopByPid, isProcessAlive, areProcessesAlive } from './terminals.mjs';
+import { listTerminalsAsync, flashWindowByPid, focusWindowByPid, stopByPid, areProcessesAlive } from './terminals.mjs';
 import {
   buildPromptTree,
   readRoleDoc,
@@ -337,6 +337,14 @@ async function telemetryHealth() {
  *     guess is visible. Skipping these entirely was the old behaviour and it
  *     made them permanent: a run with no pid could never be closed by anything.
  *
+ * Liveness (FOC-547): one BATCHED async probe for all pids. The old path
+ * called the synchronous isProcessAlive per pid — a blocking PowerShell spawn
+ * (~0.1–0.5 s each) on the event loop, every reconcile. Same probe semantics
+ * (absent pid = dead); the only difference is a broken checker (spawn
+ * failure), where the sync probe's catch answered "dead" and would have closed
+ * live runs on a broken host — this defers the closures to the next tick
+ * instead. Whether a run is closed is unchanged; only how it is checked.
+ *
  * @returns {number} how many runs were closed
  */
 async function reconcileDeadRuns() {
@@ -358,12 +366,24 @@ async function reconcileDeadRuns() {
 
   try {
     const active = withManifestConsolePid(await telemetryRuns()).filter((r) => !r.endedAt);
-    for (const run of active) {
-      if (Number.isInteger(run.consolePid) && run.consolePid > 0) {
-        if (isProcessAlive(run.consolePid)) continue;
-        close(run, run.lastActivityAt, `console pid ${run.consolePid} gone`);
-        continue;
+    const pidRuns = active.filter((r) => Number.isInteger(r.consolePid) && r.consolePid > 0);
+    let aliveMap = null;
+    if (pidRuns.length > 0) {
+      try {
+        aliveMap = await areProcessesAlive(pidRuns.map((r) => r.consolePid));
+      } catch (error) {
+        // Broken checker — skip the pid-based closures this tick; the orphan
+        // path below still runs (it needs no probe). Next tick retries.
+        console.error(`[telemetry] reconcile liveness check failed: ${error.message}`);
       }
+    }
+    for (const run of pidRuns) {
+      if (!aliveMap) break; // checker failed above — defer, never guess "dead"
+      if (aliveMap.get(run.consolePid) === true) continue;
+      close(run, run.lastActivityAt, `console pid ${run.consolePid} gone`);
+    }
+    for (const run of active) {
+      if (Number.isInteger(run.consolePid) && run.consolePid > 0) continue;
       // No pid to check. Leaving these alone made them immortal — see
       // orphanRunVerdict() for what that cost. Closing one is a guess, so it
       // also raises a data-quality issue rather than disappearing silently.
@@ -382,17 +402,30 @@ async function reconcileDeadRuns() {
   return closed;
 }
 
+// One ingest tick at a time (FOC-547): a tick that outlives the 15 s timer
+// used to let the next interval fire on top of it — overlapping full
+// transcript parses stacked into an ever-longer event-loop block. With
+// incremental chunked parsing a tick is short, but the guard keeps the
+// overlapping-tick pile-up structurally impossible.
+let ingestInFlight = false;
+
 async function ingestTelemetry() {
+  if (ingestInFlight) return;
+  ingestInFlight = true;
   try {
-    const replay = telemetryStore.replayPending();
-    const result = await ingestKnownRuns();
-    if (replay.ingested || result.usageEvents) {
-      console.log(`[telemetry] replayed=${replay.ingested} usage=${result.usageEvents}`);
+    try {
+      const replay = telemetryStore.replayPending();
+      const result = await ingestKnownRuns();
+      if (replay.ingested || result.usageEvents) {
+        console.log(`[telemetry] replayed=${replay.ingested} usage=${result.usageEvents}`);
+      }
+    } catch (error) {
+      console.error(`[telemetry] background ingest failed: ${error.message}`);
     }
-  } catch (error) {
-    console.error(`[telemetry] background ingest failed: ${error.message}`);
+    await reconcileDeadRuns();
+  } finally {
+    ingestInFlight = false;
   }
-  reconcileDeadRuns();
 }
 
 async function bootstrapTelemetry() {
@@ -1460,10 +1493,10 @@ const server = createServer(async (req, res) => {
     // GET /api/manager/snapshot — bounded, cached live-state view for the
     // /manager overlay (FOC-225 slice 2). Read-only: store reader is
     // allowlisted/bounded (queryManagerRuns), supervisor scan is capped.
-    // Liveness probing is the ASYNC batched checker — the per-pid sync
-    // isProcessAlive blocks the event loop for the whole build and is kept
-    // for the background reconcile path only. /api/runs and
-    // /api/prompts/runs are deliberately untouched.
+    // Liveness probing is the ASYNC batched checker — the old per-pid sync
+    // isProcessAlive blocked the event loop for the whole build and is gone
+    // (FOC-547): the background reconcile now uses the same batched probe.
+    // /api/runs and /api/prompts/runs are deliberately untouched.
     // This route sits BEFORE the ledger gate on purpose: post-slice-3 the
     // rewards ledger is a separate rewards.sqlite, while the snapshot needs
     // only the telemetry store — an unavailable or broken ledger must not
@@ -2193,7 +2226,7 @@ const server = createServer(async (req, res) => {
       // Batched async liveness — ONE PowerShell spawn per build. The sync
       // per-pid isProcessAlive probe here blocked the event loop for the
       // whole build (same class as the slice-2 manager-snapshot blocker);
-      // it stays only on the background reconcile path.
+      // it is gone everywhere since FOC-547 — reconcile uses this too.
       const data = await listTerminalsAsync(runs, { finishedLimit: 15 });
       json(res, 200, data);
       log(method, path, 200);
