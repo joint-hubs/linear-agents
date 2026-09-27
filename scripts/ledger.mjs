@@ -18,6 +18,9 @@ import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join, dirname, basename, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+// FOC-547: chunked JSONL reader (one event-loop turn per chunk) for
+// parseTranscriptAsync — the sync full-file read stays for direct callers.
+import { jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
 
 // ---------------------------------------------------------------------------
 // Internals
@@ -188,6 +191,57 @@ export function listTranscriptDir() {
 }
 
 /**
+ * Per-line collector shared by parseTranscript (sync, whole-file read) and
+ * parseTranscriptAsync (chunked streaming) so the two can never drift.
+ *
+ * `sidechainFallback` — subagent turns fall back to `agent-<agentId>` for
+ * attribution when the line carries no attributionAgent, so subagent usage
+ * never collapses into "_lead".
+ */
+function collectTranscriptLine(result, line, sidechainFallback) {
+  if (!line || typeof line !== "object") return;
+
+  // Capture session metadata from any line that carries it
+  if (line.sessionId && !result.sessionId) result.sessionId = line.sessionId;
+  if (line.cwd && !result.cwd) result.cwd = line.cwd;
+  if (line.gitBranch && !result.gitBranch) result.gitBranch = line.gitBranch;
+
+  // First non-sidechain user message — the operator's kickoff. Used for
+  // task-id inference: branches go stale between runs, kickoffs don't.
+  if (!result.firstUserText && line.type === "user" && !line.isSidechain) {
+    const c = line.message?.content ?? line.content;
+    let text = "";
+    if (typeof c === "string") text = c;
+    else if (Array.isArray(c)) {
+      text = c
+        .filter((p) => p && p.type === "text" && typeof p.text === "string")
+        .map((p) => p.text)
+        .join("\n");
+    }
+    if (text.trim()) result.firstUserText = text.slice(0, 2000);
+  }
+
+  // Only assistant lines carry usage data
+  if (line.type !== "assistant") return;
+  if (!line.message || !line.message.usage) return;
+
+  const msg = line.message;
+  const usage = msg.usage;
+
+  result.turns.push({
+    model: msg.model || null,
+    attributionAgent: sidechainFallback
+      ? line.attributionAgent || (line.agentId ? `agent-${line.agentId}` : null)
+      : line.attributionAgent || null,
+    inputTokens: usage.input_tokens ?? 0,
+    outputTokens: usage.output_tokens ?? 0,
+    cacheCreation: usage.cache_creation_input_tokens ?? 0,
+    cacheRead: usage.cache_read_input_tokens ?? 0,
+    ts: line.timestamp || null,
+  });
+}
+
+/**
  * Parse a single transcript .jsonl file.
  *
  * @param {string} absPath  Absolute path to the .jsonl file.
@@ -217,44 +271,7 @@ export function parseTranscript(absPath) {
     } catch {
       continue; // skip malformed lines
     }
-    if (!line || typeof line !== "object") continue;
-
-    // Capture session metadata from any line that carries it
-    if (line.sessionId && !result.sessionId) result.sessionId = line.sessionId;
-    if (line.cwd && !result.cwd) result.cwd = line.cwd;
-    if (line.gitBranch && !result.gitBranch) result.gitBranch = line.gitBranch;
-
-    // First non-sidechain user message — the operator's kickoff. Used for
-    // task-id inference: branches go stale between runs, kickoffs don't.
-    if (!result.firstUserText && line.type === "user" && !line.isSidechain) {
-      const c = line.message?.content ?? line.content;
-      let text = "";
-      if (typeof c === "string") text = c;
-      else if (Array.isArray(c)) {
-        text = c
-          .filter((p) => p && p.type === "text" && typeof p.text === "string")
-          .map((p) => p.text)
-          .join("\n");
-      }
-      if (text.trim()) result.firstUserText = text.slice(0, 2000);
-    }
-
-    // Only assistant lines carry usage data
-    if (line.type !== "assistant") continue;
-    if (!line.message || !line.message.usage) continue;
-
-    const msg = line.message;
-    const usage = msg.usage;
-
-    result.turns.push({
-      model: msg.model || null,
-      attributionAgent: line.attributionAgent || null,
-      inputTokens: usage.input_tokens ?? 0,
-      outputTokens: usage.output_tokens ?? 0,
-      cacheCreation: usage.cache_creation_input_tokens ?? 0,
-      cacheRead: usage.cache_read_input_tokens ?? 0,
-      ts: line.timestamp || null,
-    });
+    collectTranscriptLine(result, line, false);
   }
 
   // Merge subagent transcripts. Real Claude Code layout: a directory NAMED
@@ -290,24 +307,82 @@ export function parseTranscript(absPath) {
         } catch {
           continue;
         }
-        if (!line || typeof line !== "object") continue;
-        if (line.type !== "assistant") continue;
-        if (!line.message || !line.message.usage) continue;
+        collectTranscriptLine(result, line, true);
+      }
+    }
+  }
 
-        const msg = line.message;
-        const usage = msg.usage;
+  return result;
+}
 
-        result.turns.push({
-          model: msg.model || null,
-          // Sidechain lines carry attributionAgent (role name); fall back to
-          // the agentId so subagent usage never collapses into "_lead".
-          attributionAgent: line.attributionAgent || (line.agentId ? `agent-${line.agentId}` : null),
-          inputTokens: usage.input_tokens ?? 0,
-          outputTokens: usage.output_tokens ?? 0,
-          cacheCreation: usage.cache_creation_input_tokens ?? 0,
-          cacheRead: usage.cache_read_input_tokens ?? 0,
-          ts: line.timestamp || null,
-        });
+/**
+ * Chunked, event-loop-friendly twin of parseTranscript (FOC-547).
+ *
+ * Same result shape and same turn semantics (see collectTranscriptLine), but
+ * reads via jsonlChunksFrom — one macrotask turn per chunk instead of one
+ * synchronous readFileSync + parse of the whole file. scanRuns() over the real
+ * corpus full-parses every transcript in the session dir; done synchronously
+ * that was a minutes-long event-loop block during boot backfill.
+ *
+ * @param {string} absPath
+ * @returns {Promise<{ sessionId: string|null, cwd: string|null, gitBranch: string|null, turns: Array<object> }>}
+ */
+export async function parseTranscriptAsync(absPath) {
+  const result = {
+    sessionId: null,
+    cwd: null,
+    gitBranch: null,
+    firstUserText: null,
+    turns: [],
+  };
+
+  if (!existsSync(absPath)) return result;
+
+  const parentDir = dirname(absPath);
+
+  for await (const { lines } of jsonlChunksFrom(absPath, 0)) {
+    for (const { raw } of lines) {
+      if (!raw) continue;
+      let line;
+      try {
+        line = JSON.parse(raw);
+      } catch {
+        continue; // skip malformed lines
+      }
+      collectTranscriptLine(result, line, false);
+    }
+  }
+
+  // Same subagent discovery as parseTranscript (see it for the layout notes).
+  const subagentsDirCandidates = [
+    join(parentDir, basename(absPath, ".jsonl"), "subagents"),
+    join(parentDir, "subagents"),
+  ];
+  const subagentsDir = subagentsDirCandidates.find(
+    (d) => existsSync(d) && statSync(d).isDirectory(),
+  );
+  if (subagentsDir) {
+    let agentFiles;
+    try {
+      agentFiles = readdirSync(subagentsDir).filter(
+        (f) => f.startsWith("agent-") && f.endsWith(".jsonl") && !f.endsWith(".meta.json"),
+      );
+    } catch {
+      agentFiles = [];
+    }
+
+    for (const agentFile of agentFiles) {
+      for await (const { lines } of jsonlChunksFrom(join(subagentsDir, agentFile), 0)) {
+        for (const { raw } of lines) {
+          if (!raw) continue;
+          let line;
+          try {
+            line = JSON.parse(raw);
+          } catch {
+            continue;
+          }
+          collectTranscriptLine(result, line, true);
+        }
       }
     }
   }
@@ -510,7 +585,7 @@ function statusFromManifest(manifest) {
  * turns) — the match + aggregation logic in `aggregateRun` is unchanged, it
  * just iterates this pre-parsed list instead of globbing itself.
  */
-function buildTranscriptIndex(transcriptDir) {
+async function buildTranscriptIndex(transcriptDir) {
   if (!transcriptDir || !existsSync(transcriptDir)) return null;
   let sessionFiles;
   try {
@@ -523,7 +598,9 @@ function buildTranscriptIndex(transcriptDir) {
   const index = [];
   for (const sessionFile of sessionFiles) {
     const sessionPath = join(transcriptDir, sessionFile);
-    index.push({ path: sessionPath, parsed: parseTranscript(sessionPath) });
+    // FOC-547: chunked parse — one event-loop turn per chunk, never a
+    // multi-second synchronous block per file.
+    index.push({ path: sessionPath, parsed: await parseTranscriptAsync(sessionPath) });
   }
   return index;
 }
@@ -672,7 +749,7 @@ export function discoverTranscriptsForRuns(manifests) {
   return byRun;
 }
 
-export function aggregateRun(manifest, transcriptIndex, discoveredMatch) {
+export async function aggregateRun(manifest, transcriptIndex, discoveredMatch) {
   const transcriptDir = listTranscriptDir();
   const result = {
     runId: manifest.runId,
@@ -709,7 +786,7 @@ export function aggregateRun(manifest, transcriptIndex, discoveredMatch) {
   if (manifest.sessionId) {
     const transcriptPath =
       manifest.transcriptPath || join(transcriptDir, manifest.sessionId + ".jsonl");
-    const parsed = parseTranscript(transcriptPath);
+    const parsed = await parseTranscriptAsync(transcriptPath);
 
     if (parsed.turns.length === 0) {
       result.missing = true;
@@ -749,7 +826,7 @@ export function aggregateRun(manifest, transcriptIndex, discoveredMatch) {
       : discoveredMatch;
 
   if (lateMatch) {
-    const parsed = parseTranscript(lateMatch.path);
+    const parsed = await parseTranscriptAsync(lateMatch.path);
     const runStart = new Date(manifest.startedAt).getTime();
     const runEnd = manifest.endedAt
       ? new Date(manifest.endedAt).getTime() + 60 * 1000
@@ -798,10 +875,12 @@ export function aggregateRun(manifest, transcriptIndex, discoveredMatch) {
     } catch {
       return result;
     }
-    sessions = sessionFiles.map((f) => {
+    // FOC-547: chunked parse instead of a synchronous full-file parse per file.
+    sessions = [];
+    for (const f of sessionFiles) {
       const sessionPath = join(transcriptDir, f);
-      return { path: sessionPath, parsed: parseTranscript(sessionPath) };
-    });
+      sessions.push({ path: sessionPath, parsed: await parseTranscriptAsync(sessionPath) });
+    }
   }
 
   let matchedCount = 0;
@@ -849,7 +928,7 @@ export async function scanRuns() {
   // Without this, each of the N window-mode runs re-parses the entire
   // transcript dir → O(runs × transcripts). EXACT-mode runs ignore the index
   // (they parse only their own sessionId file).
-  const transcriptIndex = buildTranscriptIndex(listTranscriptDir());
+  const transcriptIndex = await buildTranscriptIndex(listTranscriptDir());
 
   // Read all manifests first, then batch-discover transcripts for the
   // sessionId-less ones (1:1 file↔run assignment across the whole scan).
@@ -866,7 +945,7 @@ export async function scanRuns() {
   const results = [];
   for (const manifest of manifests) {
     results.push(
-      aggregateRun(manifest, transcriptIndex, discovered.get(manifest.runId) || null),
+      await aggregateRun(manifest, transcriptIndex, discovered.get(manifest.runId) || null),
     );
   }
 

@@ -2,6 +2,13 @@
 // telemetry-ingest.mjs — imports legacy manifests and incrementally parses
 // transcript JSONL into the central telemetry store. It is the only path that
 // reads raw transcript trees; HTTP handlers query SQLite projections only.
+//
+// FOC-547: every transcript read is CHUNKED (jsonlChunksFrom — one event-loop
+// turn per ~256 KiB) and INCREMENTAL (a pass resumes at the byte offset stored
+// in transcript_sources). On the real corpus this is what keeps a single
+// ingest tick from blocking Node's event loop for minutes: the previous full
+// readFileSync + per-line parse per manifest produced 120–152 s single blocks
+// during boot backfill and starved request serving outright.
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -25,12 +32,18 @@ import {
   resolveQualityIssue,
   sqliteAvailable,
 } from "./telemetry-store.mjs";
-import { extractToolFacts } from "./telemetry-tool-extract.mjs";
-import { reconstructDelegationLinks } from "./telemetry-delegation-recon.mjs";
+import { createToolLinkState, extractToolFacts, jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
+import { reconstructDelegationLinksAsync, scanSpawnToolUsesAsync } from "./telemetry-delegation-recon.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
 const runsDir = join(root, ".state", "runs");
+
+// The runId format run-manifest.mjs stamps into manifests and transcripts
+// (e.g. "2026-06-29T17-43-31-dev"). Used by the lazy transcript-locating sweep
+// below; a runId that does not match simply stays unlocated — the same answer
+// the old content scan produced when nothing matched.
+const RUN_ID_PATTERN = /\b\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[a-z][a-z0-9]*\b/g;
 
 function refFromBranch(branch) {
   if (branch === "HEAD") return { refType: "detached", refName: null };
@@ -38,90 +51,13 @@ function refFromBranch(branch) {
   return { refType: "unknown", refName: null };
 }
 
-function jsonLineEvents(path, runId, sessionId, includeWorkspace = true) {
-  const content = readFileSync(path, "utf8");
-  const lines = content.split(/(?<=\n)/);
-  const events = [];
-  let offset = 0;
-  let lastWorkspace = null;
-  let lastCwd = null;
-  let lastBranch = null;
-  let lastObservedAt = null;
-  for (const rawLine of lines) {
-    const raw = rawLine.trim();
-    const lineOffset = offset;
-    offset += Buffer.byteLength(rawLine, "utf8");
-    if (!raw) continue;
-    let line;
-    try { line = JSON.parse(raw); } catch { continue; }
-    const observedAt = line.timestamp || lastObservedAt || new Date().toISOString();
-    const observedCwd = line.relocatedCwd || line.worktreeSession?.worktreePath || line.cwd || lastCwd;
-    const branch = line.worktreeSession?.worktreeBranch || line.gitBranch || lastBranch;
-    if (line.timestamp) lastObservedAt = line.timestamp;
-    if (observedCwd) lastCwd = observedCwd;
-    if (branch) lastBranch = branch;
-    if (includeWorkspace && observedCwd && `${observedCwd}:${branch || ""}` !== lastWorkspace) {
-      lastWorkspace = `${observedCwd}:${branch || ""}`;
-      const ref = refFromBranch(branch);
-      events.push(makeEvent("workspace.observed", {
-        runId, cwd: observedCwd, ...ref, headSha: null,
-        source: "transcript",
-      }, { runId, observedAt, sourceKind: "transcript-workspace", sourcePath: path, sourceOffset: lineOffset }));
-    }
-    if (line.type !== "assistant" || !line.message?.usage) continue;
-    const usage = line.message.usage;
-    // FOC-381 (B1): message.id identifies the physical model call. One
-    // assistant message lands as several transcript lines (thinking / text /
-    // tool_use), each repeating the same usage object — or zeros on some
-    // lines. The event stays per line with its own dedup key; message.id
-    // travels in the payload so the projection (applyUsageRecorded) can
-    // merge the lines into one usage_facts row instead of counting each.
-    events.push(makeEvent("usage.recorded", {
-      runId, sessionId: line.sessionId || line.session_id || sessionId || null,
-      agentKey: line.attributionAgent || (line.agentId ? `agent-${line.agentId}` : "_lead"),
-      model: line.message.model || null, observedAt,
-      messageId: line.message?.id ?? null,
-      inputTokens: usage.input_tokens ?? 0, outputTokens: usage.output_tokens ?? 0,
-      cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-      cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
-    }, { runId, observedAt, sourceKind: "transcript", sourcePath: path, sourceOffset: lineOffset }));
-  }
-  return { events, size: Buffer.byteLength(content, "utf8") };
-}
-
-function latestWorkspaceFromTranscript(path) {
-  if (!path || !existsSync(path)) return null;
-  let cwd = null;
-  let branch = null;
-  let observedAt = null;
-  for (const raw of readFileSync(path, "utf8").split("\n")) {
-    try {
-      const line = JSON.parse(raw);
-      cwd = line.relocatedCwd || line.worktreeSession?.worktreePath || line.cwd || cwd;
-      branch = line.worktreeSession?.worktreeBranch || line.gitBranch || branch;
-      observedAt = line.timestamp || observedAt;
-    } catch {
-      // Ignore malformed transcript rows.
-    }
-  }
-  return cwd ? { cwd, branch, observedAt } : null;
-}
-
-function taskLinkTimeFromTranscript(path, taskId) {
-  if (!path || !taskId || !existsSync(path)) return null;
-  const normalized = taskId.toUpperCase();
-  for (const raw of readFileSync(path, "utf8").split("\n")) {
-    if (!raw.includes("run-manifest.mjs") || !raw.toUpperCase().includes(normalized)) continue;
-    try {
-      const line = JSON.parse(raw);
-      if (line.timestamp) return line.timestamp;
-    } catch {
-      // Ignore malformed rows.
-    }
-  }
-  return null;
-}
-
+/**
+ * Subagent transcripts belonging to a lead transcript. Mirrors the layout
+ * convention in telemetry-delegation-recon.mjs:findSubagentTranscripts —
+ *   1. `<dirname(leadPath)>/<basename-without-.jsonl>/subagents/`
+ *   2. `<dirname(leadPath)>/subagents/`
+ * Each agent-*.jsonl gets its own incremental ingest pass (ingestTranscript).
+ */
 function subagentPaths(transcriptPath) {
   const candidates = [
     join(dirname(transcriptPath), basename(transcriptPath, ".jsonl"), "subagents"),
@@ -138,25 +74,64 @@ function subagentPaths(transcriptPath) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Per-(run, path) incremental parse state
+// ---------------------------------------------------------------------------
+
+// FOC-547: workspace emission state and pending tool-fact links must survive
+// BETWEEN passes (a growing transcript is parsed once per 15 s tick, not once
+// per process). Keyed by (runId, path) — the same run-scoped semantics as the
+// transcript_sources skip-cache (JOI-260): two runs ingesting the same file
+// never share state. The maps are pruned per pass; a state whose file stopped
+// growing is finalized and dropped (see ingestTranscript).
+const parseStates = new Map();
+
+function getParseState(runId, path) {
+  const key = `${runId}\u0000${path}`;
+  let state = parseStates.get(key);
+  if (!state) {
+    state = {
+      toolLinks: createToolLinkState(),
+      agentKey: null,
+      // Carries lastWorkspace/lastCwd/lastBranch/lastObservedAt between passes
+      // so an unchanged cwd:branch emits no new workspace.observed event.
+      workspace: { lastWorkspace: null, lastCwd: null, lastBranch: null, lastObservedAt: null },
+      // Lead transcripts only: incremental delegation-link reconstruction.
+      delegation: null,
+      // One-time full re-scan guard for the restart gap (see ingestTranscript).
+      fullToolScanDone: false,
+    };
+    parseStates.set(key, state);
+  }
+  return state;
+}
+
+/** Test seam: simulate a process restart (state is deliberately in-memory). */
+export function _resetTranscriptParseStateForTests() {
+  parseStates.clear();
+}
+
 /**
  * Determine the agent_key for a transcript path.
  *
  * For the lead transcript (isLead=true), returns "_lead".
- * For subagent transcripts, scans the first few lines for attributionAgent
- * (e.g. "first-pass", "security") or agentId, falling back to the filename.
+ * For subagent transcripts, scans the file (chunked, FOC-547 — no full-file
+ * synchronous read) for attributionAgent (e.g. "first-pass", "security") or
+ * agentId, falling back to the filename. Semantics are identical to the old
+ * full readFileSync scan: first matching line wins, wherever it sits.
  */
-function agentKeyFromTranscript(path, isLead) {
+async function agentKeyFromTranscript(path, isLead) {
   if (isLead) return "_lead";
-  try {
-    const content = readFileSync(path, "utf8");
-    for (const line of content.split("\n").filter(Boolean)) {
+  for await (const { lines } of jsonlChunksFrom(path, 0)) {
+    for (const { raw } of lines) {
+      if (!raw) continue;
       try {
-        const parsed = JSON.parse(line);
+        const parsed = JSON.parse(raw);
         if (parsed.attributionAgent) return parsed.attributionAgent;
         if (parsed.agentId) return `agent-${parsed.agentId}`;
       } catch { /* skip unparseable lines */ }
     }
-  } catch { /* file not readable */ }
+  }
   return basename(path).replace(/\.jsonl$/, "");
 }
 
@@ -176,50 +151,327 @@ function addToolIndex(records) {
   return records;
 }
 
+// ---------------------------------------------------------------------------
+// One chunked pass over a transcript range: usage + workspace events
+// ---------------------------------------------------------------------------
+
+/**
+ * Stream the transcript from `startOffset`, emit usage.recorded (and, for the
+ * lead, workspace.observed) events exactly like the previous full-file
+ * jsonLineEvents, applied to the store one CHUNK per transaction.
+ *
+ * Why per-chunk transactions: a 31 MB transcript is ~100k events; applying
+ * them in one transaction was a multi-second synchronous block on the event
+ * loop. Per-chunk application is safe by design — every event dedups on its
+ * (source_path, source_offset) natural key, so a pass that dies mid-way is
+ * simply re-parsed from the last stored offset and the already-applied lines
+ * are absorbed as duplicates. The transcript.progress event (which advances
+ * the skip-cache byte_offset) is only written after the pass reached EOF.
+ */
+async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
+  const { startOffset, isLead, state, statsSize } = opts;
+  const ws = state.workspace;
+  let eventsApplied = 0;
+  let pendingEvents = [];
+  let lastFlushedOffset = startOffset;
+  let sawEof = false;
+
+  const flush = () => {
+    if (pendingEvents.length === 0) return;
+    const batch = pendingEvents;
+    pendingEvents = [];
+    const results = applyEvents(db, batch);
+    eventsApplied += results.filter((result) => !result?.duplicate).length;
+  };
+
+  for await (const chunk of jsonlChunksFrom(path, startOffset)) {
+    for (const { raw, offset: lineOffset } of chunk.lines) {
+      if (!raw) continue;
+      let line;
+      try { line = JSON.parse(raw); } catch { continue; }
+      const observedAt = line.timestamp || ws.lastObservedAt || new Date().toISOString();
+      const observedCwd = line.relocatedCwd || line.worktreeSession?.worktreePath || line.cwd || ws.lastCwd;
+      const branch = line.worktreeSession?.worktreeBranch || line.gitBranch || ws.lastBranch;
+      if (line.timestamp) ws.lastObservedAt = line.timestamp;
+      if (observedCwd) ws.lastCwd = observedCwd;
+      if (branch) ws.lastBranch = branch;
+      if (isLead && observedCwd && `${observedCwd}:${branch || ""}` !== ws.lastWorkspace) {
+        ws.lastWorkspace = `${observedCwd}:${branch || ""}`;
+        const ref = refFromBranch(branch);
+        pendingEvents.push(makeEvent("workspace.observed", {
+          runId, cwd: observedCwd, ...ref, headSha: null,
+          source: "transcript",
+        }, { runId, observedAt, sourceKind: "transcript-workspace", sourcePath: path, sourceOffset: lineOffset }));
+      }
+      if (line.type !== "assistant" || !line.message?.usage) continue;
+      const usage = line.message.usage;
+      // FOC-381 (B1): message.id identifies the physical model call. One
+      // assistant message lands as several transcript lines (thinking / text /
+      // tool_use), each repeating the same usage object — or zeros on some
+      // lines. The event stays per line with its own dedup key; message.id
+      // travels in the payload so the projection (applyUsageRecorded) can
+      // merge the lines into one usage_facts row instead of counting each.
+      pendingEvents.push(makeEvent("usage.recorded", {
+        runId, sessionId: line.sessionId || line.session_id || sessionId || null,
+        agentKey: line.attributionAgent || (line.agentId ? `agent-${line.agentId}` : "_lead"),
+        model: line.message.model || null, observedAt,
+        messageId: line.message?.id ?? null,
+        inputTokens: usage.input_tokens ?? 0, outputTokens: usage.output_tokens ?? 0,
+        cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+        cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
+      }, { runId, observedAt, sourceKind: "transcript", sourcePath: path, sourceOffset: lineOffset }));
+    }
+    try {
+      flush();
+      lastFlushedOffset = chunk.endOffset;
+      if (chunk.atEof) sawEof = true;
+    } catch (error) {
+      // A failed chunk leaves the stored offset untouched — the next pass
+      // re-parses from there and dedup absorbs what already landed. Never
+      // advance the skip-cache past a chunk that did not commit.
+      console.error(`[telemetry] transcript chunk apply failed for ${path}: ${error.message}`);
+      return { events: eventsApplied, eofOffset: lastFlushedOffset, complete: false };
+    }
+  }
+
+  if (!sawEof) return { events: eventsApplied, eofOffset: lastFlushedOffset, complete: false };
+
+  // Progress AFTER the whole range applied — this is what arms the skip-cache
+  // (transcript_sources.file_size) for the next pass.
+  let modifiedAt = null;
+  try { modifiedAt = statSync(path).mtime.toISOString(); } catch { /* transient file */ }
+  const progressEvent = makeEvent("transcript.progress", {
+    runId, sessionId, byteOffset: lastFlushedOffset, fileSize: statsSize, modifiedAt, parseStatus: "parsed",
+  }, { runId, sourceKind: "transcript-progress", sourcePath: path, sourceOffset: lastFlushedOffset });
+  try {
+    flush(); // no-op unless a race left events pending
+    applyEvents(db, [progressEvent]);
+  } catch (error) {
+    console.error(`[telemetry] transcript progress write failed for ${path}: ${error.message}`);
+    return { events: eventsApplied, eofOffset: lastFlushedOffset, complete: false };
+  }
+  return { events: eventsApplied, eofOffset: lastFlushedOffset, complete: true };
+}
+
+// ---------------------------------------------------------------------------
+// Tool facts + delegation links (incremental)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve pending tool facts whose tool_result has arrived in linkState.results,
+ * then prune result entries that resolve nothing (bounds memory across passes).
+ */
+async function resolvePendingToolFacts(db, linkState) {
+  for (const [id, use] of linkState.uses) {
+    const result = linkState.results.get(id);
+    if (!result) continue;
+    await recordToolFact({
+      run_id: use.run_id,
+      source_path: use.source_path,
+      source_offset: use.source_offset,
+      tool_index: use.tool_index,
+      tool_has_error: result.isError ? 1 : 0,
+      tool_result_state: result.isError ? "error" : "ok",
+      tool_result_bytes: result.bytes,
+      tool_result_full: result.text,
+    }, { db });
+    linkState.uses.delete(id);
+    linkState.results.delete(id);
+  }
+}
+
+/**
+ * Finalize pending tool facts as 'missing': the file has stopped growing (the
+ * skip-cache matched its size), so their tool_result never arrived. This
+ * reproduces the old full-file EOF semantics — without it an incremental pass
+ * would leave the outcome NULL forever (FOC-547 AC7).
+ */
+async function finalizePendingToolFacts(db, linkState) {
+  for (const [, use] of linkState.uses) {
+    await recordToolFact({
+      run_id: use.run_id,
+      source_path: use.source_path,
+      source_offset: use.source_offset,
+      tool_index: use.tool_index,
+      tool_has_error: 0,
+      tool_result_state: "missing",
+      tool_result_bytes: null,
+      tool_result_full: null,
+    }, { db });
+  }
+  linkState.uses.clear();
+}
+
+/**
+ * DB-side twin of finalizePendingToolFacts for the RESTART case: the in-memory
+ * pending registry died with the previous process, but the NULL rows it wrote
+ * are still in tool_facts. On an unchanged pass (file size matches — no new
+ * tool_result can arrive) those rows finalize to 'missing', exactly like the
+ * old full-file EOF semantics. Without this, a crash between a pending write
+ * and its resolution would leave the outcome NULL forever.
+ */
+async function finalizeOrphanedPendingToolFacts(db, runId, path) {
+  const pending = db
+    .prepare("SELECT source_offset, tool_index FROM tool_facts WHERE run_id=? AND source_path=? AND tool_result_state IS NULL")
+    .all(runId, path);
+  for (const row of pending) {
+    await recordToolFact({
+      run_id: runId,
+      source_path: path,
+      source_offset: row.source_offset,
+      tool_index: row.tool_index,
+      // Columns the INSERT binds but the UPDATE path never touches — explicit
+      // nulls so the bind never sees undefined.
+      agent_key: null,
+      tool_name_raw: null,
+      turn_index: null,
+      tool_has_error: 0,
+      tool_result_state: "missing",
+      tool_result_bytes: null,
+      tool_result_full: null,
+    }, { db });
+  }
+  return pending.length;
+}
+
+/**
+ * Tool-fact ingest for ONE transcript range (FOC-547).
+ *
+ * extractToolFacts scans only [startOffset, EOF); outcomes are carried in
+ * state.toolLinks so a result arriving in a later pass still resolves the
+ * tool_use recorded by an earlier one (recordToolFact upgrades the row in
+ * place). Pending uses are written immediately with a NULL outcome — never as
+ * a final 'missing' — so the fact exists (crash-safe) and is resolvable later.
+ *
+ * Restart gap: a result for a tool_use parsed by a PREVIOUS process has no
+ * pending entry. One bounded full re-scan per (run, path) per process rebuilds
+ * the pending map (recordToolFact dedup absorbs the already-written facts);
+ * after that, truly orphan results (no matching tool_use in the file at all —
+ * the old extractor ignored them too) are pruned.
+ */
+async function ingestToolFactsRange(db, runId, path, agentKey, startOffset, state) {
+  const linkState = state.toolLinks;
+  // One shared write path for range records and full-re-scan records: BOTH
+  // must register unresolved uses in linkState.uses — otherwise a use
+  // (re)discovered by the restart-gap re-scan would never be tracked, and the
+  // later finalize pass would have nothing to finalize (found by the AC5
+  // tool-fact regression test).
+  const writeToolFact = async (record) => {
+    if (record._toolUseId) {
+      // Pending: outcome not in this range (yet). Register for later passes;
+      // extractToolFacts leaves the outcome NULL in linkState mode.
+      linkState.uses.set(record._toolUseId, {
+        run_id: record.run_id,
+        source_path: record.source_path,
+        source_offset: record.source_offset,
+        tool_index: record.tool_index,
+      });
+    }
+    await recordToolFact(record, { db });
+  };
+  const records = await extractToolFacts(path, runId, agentKey, { startOffset, linkState });
+  addToolIndex(records);
+  for (const record of records) {
+    await writeToolFact(record);
+  }
+  await resolvePendingToolFacts(db, linkState);
+
+  const orphans = [...linkState.results.keys()].filter((id) => !linkState.uses.has(id));
+  if (orphans.length > 0 && !state.fullToolScanDone) {
+    state.fullToolScanDone = true;
+    const fullRecords = await extractToolFacts(path, runId, agentKey, { startOffset: 0, linkState });
+    addToolIndex(fullRecords);
+    for (const record of fullRecords) {
+      await writeToolFact(record);
+    }
+    await resolvePendingToolFacts(db, linkState);
+  }
+  // Prune results that resolve nothing — they would otherwise sit in memory
+  // for the lifetime of a growing transcript.
+  for (const id of [...linkState.results.keys()]) {
+    if (!linkState.uses.has(id)) linkState.results.delete(id);
+  }
+}
+
+/**
+ * Delegation-link ingest for a LEAD transcript (incremental, FOC-547).
+ *
+ * Spawn tool_uses are scanned from the NEW range only (state.delegation
+ * .spawnOffset tracks the scan frontier), subagent metadata is re-read only
+ * when a subagent file is new or grown, and recordDelegationLink's INSERT OR
+ * IGNORE keeps re-emission idempotent.
+ */
+async function ingestDelegationRange(db, runId, path, eofOffset, state) {
+  const delegation = state.delegation || (state.delegation = { spawnOffset: 0, spawns: [], meta: new Map() });
+  const spawnStart = Math.min(delegation.spawnOffset, eofOffset);
+  const newSpawns = await scanSpawnToolUsesAsync(path, spawnStart);
+  delegation.spawns.push(...newSpawns);
+  delegation.spawnOffset = eofOffset;
+  const records = await reconstructDelegationLinksAsync({
+    runId, parentAgent: "_lead", transcriptPath: path,
+    spawns: delegation.spawns, metaCache: delegation.meta,
+  });
+  for (const record of records) {
+    await recordDelegationLink(record, { db });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public ingest API
+// ---------------------------------------------------------------------------
+
 export async function ingestTranscript(db, runId, transcriptPath, sessionId = null) {
   if (!transcriptPath || !existsSync(transcriptPath)) return { files: 0, events: 0, missing: true };
   const paths = [transcriptPath, ...subagentPaths(transcriptPath)];
   let eventsApplied = 0;
   for (const path of paths) {
     const stats = statSync(path);
+    const isLead = path === transcriptPath;
     // Skip-cache is run-scoped: transcript_sources PK is (source_path, run_id)
     // (v5, JOI-260), so run B parsing the same file as run A must NOT be skipped
     // by run A's row. Querying source_path alone matched any prior run's row and
     // silently dropped run B's ingest — binding run_id constrains the lookup to
     // this run's own row (or none), so each run parses its own copy.
-    const known = db.prepare("SELECT file_size, parse_status FROM transcript_sources WHERE source_path=? AND run_id=?").get(path, runId);
-    if (known?.parse_status === "parsed" && known.file_size === stats.size) continue;
-    const { events, size } = jsonLineEvents(path, runId, sessionId, path === transcriptPath);
-    const progressEvent = makeEvent("transcript.progress", {
-      runId, sessionId, byteOffset: size, fileSize: size, modifiedAt: statSync(path).mtime.toISOString(), parseStatus: "parsed",
-    }, { runId, sourceKind: "transcript-progress", sourcePath: path, sourceOffset: size });
-    const results = applyEvents(db, [...events, progressEvent]);
-    eventsApplied += results.slice(0, -1).filter((result) => !result?.duplicate).length;
+    const known = db.prepare("SELECT byte_offset, file_size, parse_status FROM transcript_sources WHERE source_path=? AND run_id=?").get(path, runId);
+    if (known?.parse_status === "parsed" && known.file_size === stats.size) {
+      // FOC-547: the file has not grown since the last pass — any still-pending
+      // tool facts can only be genuinely missing. Finalize them (old full-file
+      // EOF semantics) and drop the in-memory state. With no in-memory state
+      // (previous process died holding the pending registry) the NULL rows it
+      // wrote are finalized straight from the store.
+      const state = parseStates.get(`${runId}\u0000${path}`);
+      if (sqliteAvailable()) {
+        if (state) await finalizePendingToolFacts(db, state.toolLinks);
+        else await finalizeOrphanedPendingToolFacts(db, runId, path);
+      }
+      parseStates.delete(`${runId}\u0000${path}`);
+      continue;
+    }
+    let startOffset = 0;
+    if (known && Number.isInteger(known.byte_offset) && known.byte_offset > 0) {
+      // Resume at the stored line boundary. A SHRUNKEN file (rotated/truncated)
+      // forces a full re-parse; the natural-key dedup absorbs already-applied
+      // lines as duplicates.
+      startOffset = known.byte_offset <= stats.size ? known.byte_offset : 0;
+    }
+    const state = getParseState(runId, path);
+    const range = await ingestTranscriptRange(db, runId, path, sessionId, { startOffset, isLead, state, statsSize: stats.size });
+    eventsApplied += range.events;
 
-    // Extract tool_facts and delegation_links for this transcript.
+    // Extract tool_facts and delegation_links for the SAME incremental range.
     // Wrapped in sqliteAvailable() so Node degrades gracefully when node:sqlite
     // is unavailable (e.g. Node 20 or custom builds).
     if (sqliteAvailable()) {
-      const isLead = path === transcriptPath;
-      const agentKey = agentKeyFromTranscript(path, isLead);
-      const toolRecords = await extractToolFacts(path, runId, agentKey);
-      addToolIndex(toolRecords);
-      for (const record of toolRecords) {
-        await recordToolFact(record);
+      const agentKey = state.agentKey || (state.agentKey = await agentKeyFromTranscript(path, isLead));
+      if (range.eofOffset > startOffset) {
+        await ingestToolFactsRange(db, runId, path, agentKey, startOffset, state);
       }
       // For the lead transcript only, reconstruct delegation links from the
       // subagents/ directory. Subagent transcripts are processed separately
       // above (they get their own tool_facts), but the parent→child link is
       // recorded once on the lead.
       if (isLead) {
-        const delegationRecords = reconstructDelegationLinks({
-          runId,
-          parentAgent: "_lead",
-          transcriptPath: path,
-        });
-        for (const record of delegationRecords) {
-          await recordDelegationLink(record);
-        }
+        await ingestDelegationRange(db, runId, path, range.eofOffset, state);
       }
     }
   }
@@ -266,23 +518,114 @@ export function transcriptForSession(run) {
   return null;
 }
 
-function transcriptContainingRunId(run) {
-  if (!run.runId || !run.squad) return null;
-  const projectsRoot = join(root, "agents", run.squad, "projects");
-  try {
-    for (const hashDirectory of readdirSync(projectsRoot)) {
-      const hashPath = join(projectsRoot, hashDirectory);
-      if (!statSync(hashPath).isDirectory()) continue;
-      for (const file of readdirSync(hashPath).filter((name) => name.endsWith(".jsonl"))) {
-        const candidate = join(hashPath, file);
-        if (readFileSync(candidate, "utf8").includes(run.runId)) return candidate;
+// ---------------------------------------------------------------------------
+// Transcript metadata (backfill) — one chunked pass instead of three full reads
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything backfill needs from a transcript, in ONE chunked streaming pass:
+ * the first sessionId, the LAST workspace observation (cwd/branch/timestamp —
+ * last line wins, same as the old latestWorkspaceFromTranscript), and the
+ * timestamp of the first line mentioning run-manifest.mjs together with the
+ * manifest's auto-picked taskId (same as the old taskLinkTimeFromTranscript).
+ *
+ * The old code full-read the file up to three separate times per manifest
+ * (ledger.parseTranscript + latestWorkspaceFromTranscript +
+ * taskLinkTimeFromTranscript); this replaces all three. Line offsets are not
+ * consumed here, so byte-accurate offsets for events stay the domain of
+ * ingestTranscriptRange.
+ */
+async function scanTranscriptMeta(path, taskId) {
+  const normalized = taskId ? taskId.toUpperCase() : null;
+  let sessionId = null;
+  let cwd = null;
+  let branch = null;
+  let observedAt = null;
+  let taskLinkTime = null;
+  for await (const { lines } of jsonlChunksFrom(path, 0)) {
+    for (const { raw } of lines) {
+      if (!raw) continue;
+      let line = null;
+      try { line = JSON.parse(raw); } catch { /* ignore malformed rows */ }
+      if (normalized && !taskLinkTime && raw.includes("run-manifest.mjs") && raw.toUpperCase().includes(normalized)) {
+        if (line?.timestamp) taskLinkTime = line.timestamp;
+      }
+      if (!line) continue;
+      if (line.sessionId && !sessionId) sessionId = line.sessionId;
+      cwd = line.relocatedCwd || line.worktreeSession?.worktreePath || line.cwd || cwd;
+      branch = line.worktreeSession?.worktreeBranch || line.gitBranch || branch;
+      observedAt = line.timestamp || observedAt;
+    }
+  }
+  return { sessionId, workspace: cwd ? { cwd, branch, observedAt } : null, taskLinkTime };
+}
+
+// ---------------------------------------------------------------------------
+// Lazy runId → transcript index (bounded fallback, FOC-547 AC3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Locate a legacy transcript by runId WITHOUT reading every file per manifest.
+ *
+ * The old transcriptContainingRunId() ran a full readFileSync+includes sweep
+ * over agents/<squad>/projects for EVERY manifest (~1014 manifests × the whole
+ * corpus = the dominant backfill blocker). This builds the same runId→path
+ * mapping with ONE chunked streamed sweep per squad root, lazily — only when a
+ * manifest actually has no recorded path — and reuses it for every subsequent
+ * miss. Files are matched on the runId token pattern; a runId that appears in
+ * no file stays unlocated (null), exactly like the old sweep coming up empty.
+ * Only direct children of the hash directories are indexed (lead transcripts);
+ * subagents/ subtrees are not — the old two-level readdir saw the same files.
+ */
+async function buildRunIdTranscriptIndex(projectsRoot) {
+  const index = new Map();
+  let hashDirs;
+  try { hashDirs = readdirSync(projectsRoot); } catch { return index; }
+  for (const hashDirectory of hashDirs) {
+    const hashPath = join(projectsRoot, hashDirectory);
+    let isDir = false;
+    try { isDir = statSync(hashPath).isDirectory(); } catch { continue; }
+    if (!isDir) continue;
+    let files;
+    try {
+      files = readdirSync(hashPath).filter((name) => name.endsWith(".jsonl"));
+    } catch { continue; }
+    for (const file of files) {
+      const candidate = join(hashPath, file);
+      try {
+        for await (const { lines } of jsonlChunksFrom(candidate, 0, { chunkBytes: 1 << 20 })) {
+          for (const { raw } of lines) {
+            if (!raw) continue;
+            for (const match of raw.match(RUN_ID_PATTERN) || []) {
+              if (!index.has(match)) index.set(match, candidate);
+            }
+          }
+        }
+      } catch {
+        // Unreadable file — skip; the manifest stays unlocated.
       }
     }
-  } catch {
-    // No local squad transcript root for this legacy run.
   }
-  return null;
+  return index;
 }
+
+/**
+ * RunId → transcript path for manifests with no recorded path, via the lazy
+ * per-squad index. indexCache is per-backfill.
+ */
+async function runIdTranscriptLookup(manifest, indexCache) {
+  if (!manifest.runId || !manifest.squad) return null;
+  let index = indexCache.get(manifest.squad);
+  if (index === undefined) {
+    index = await buildRunIdTranscriptIndex(join(root, "agents", manifest.squad, "projects"));
+    indexCache.set(manifest.squad, index);
+  }
+  return index.get(manifest.runId) || null;
+}
+
+// ---------------------------------------------------------------------------
+// Backfill
+// ---------------------------------------------------------------------------
 
 function manifests() {
   if (!existsSync(runsDir)) return [];
@@ -299,70 +642,104 @@ export async function backfill(options = {}) {
   summary.pending = replayPending(options).ingested;
   const sourceRuns = await ledger.scanRuns();
   const discovered = new Map(sourceRuns.map((run) => [run.runId, run]));
-  for (const { path, manifest } of manifests()) {
-    summary.manifests++;
-    const aggregate = discovered.get(manifest.runId);
-    if (aggregate?.ambiguous || manifest.sessionAmbiguous) {
-      reportDataQuality(manifest.runId, "legacy_session_ambiguous", {
-        sessionId: manifest.sessionId || aggregate?.sessionId || null,
-        transcriptPath: manifest.transcriptPath || aggregate?.transcriptPath || null,
-      }, { ...options, sourceKind: "legacy-discovery", severity: "warning" });
-    }
-    const recoveredPath = transcriptContainingRunId(manifest);
-    const transcriptPath = manifest.transcriptPath || aggregate?.transcriptPath || recoveredPath || null;
-    const parsed = transcriptPath ? ledger.parseTranscript(transcriptPath) : null;
-    const sessionId = manifest.sessionId || aggregate?.sessionId || parsed?.sessionId || null;
-    const startManifest = manifest.taskIdAuto ? { ...manifest, taskIdAuto: null } : manifest;
-    recordManifest(startManifest, "started", { ...options, sourcePath: path });
-    if (manifest.endedAt) recordManifest(manifest, "ended", { ...options, sourcePath: path });
-    if (!manifest.taskId && manifest.taskIdAuto) {
-      const pickTime = taskLinkTimeFromTranscript(transcriptPath, manifest.taskIdAuto);
-      recordTaskLink(manifest.runId, manifest.taskIdAuto, "agent_pick", {
-        ...options,
-        observedAt: pickTime || manifest.startedAt,
-        confidence: pickTime ? 1 : 0.6,
-        correctExisting: true,
-        sourceKind: pickTime ? "legacy-agent-pick" : "legacy-inference",
-        sourcePath: path,
-        sourceOffset: 4,
-      });
-    } else if (!manifest.taskId && !manifest.taskIdAuto && aggregate?.taskId) {
-      const source = aggregate.taskIdKickoff ? "kickoff_inference" : "branch_inference";
-      recordTaskLink(manifest.runId, aggregate.taskId, source, {
-        ...options,
-        observedAt: manifest.startedAt,
-        confidence: aggregate.taskIdKickoff ? 0.7 : 0.4,
-        sourceKind: "legacy-inference",
-        sourcePath: path,
-        sourceOffset: 4,
-      });
-    }
-    if (sessionId) {
-      recordSessionLink(manifest.runId, sessionId, { transcriptPath, source: manifest.sessionId ? "manifest" : "legacy_discovery" }, options);
-    }
-    const workspace = latestWorkspaceFromTranscript(transcriptPath);
-    if (workspace || aggregate?.cwd) {
-      const cwd = workspace?.cwd || aggregate.cwd;
-      const branch = workspace?.branch || aggregate.gitBranch || null;
-      recordWorkspace(manifest.runId, cwd, { ...refFromBranch(branch), headSha: null, source: "legacy_transcript" }, {
-        ...options,
-        observedAt: workspace?.observedAt || manifest.endedAt || manifest.startedAt,
-      });
-    }
-    const db = openTelemetryDb(options.dbPath);
-    try {
+  // Per-backfill cache for the lazy runId→transcript index (one sweep per
+  // squad root at most — see buildRunIdTranscriptIndex).
+  const runIdIndexes = new Map();
+  // One db connection for the whole loop: recordManifest/recordTaskLink/…
+  // (options.db) and ingestTranscript (first argument) share it instead of
+  // paying an open + migrate + close per manifest and per record (FOC-547).
+  const db = openTelemetryDb(options.dbPath);
+  try {
+    for (const { path, manifest } of manifests()) {
+      summary.manifests++;
+      const aggregate = discovered.get(manifest.runId);
+      if (aggregate?.ambiguous || manifest.sessionAmbiguous) {
+        reportDataQuality(manifest.runId, "legacy_session_ambiguous", {
+          sessionId: manifest.sessionId || aggregate?.sessionId || null,
+          transcriptPath: manifest.transcriptPath || aggregate?.transcriptPath || null,
+        }, { ...options, db, sourceKind: "legacy-discovery", severity: "warning" });
+      }
+      const recoveredPath = manifest.transcriptPath || aggregate?.transcriptPath
+        ? null
+        : await runIdTranscriptLookup(manifest, runIdIndexes);
+      const transcriptPath = manifest.transcriptPath || aggregate?.transcriptPath || recoveredPath || null;
+
+      // FOC-547: metadata (sessionId fallback / latest workspace / auto-task
+      // pick time) needs transcript reads. They run only when THIS file
+      // version has not been ingested before — once transcript_sources shows
+      // the (path, run) row parsed at the current size, the previous pass
+      // already recorded everything the reads produce (all of it is event-
+      // deduped downstream), and re-reading is pure waste on every boot.
+      let leadSettled = false;
+      let leadSize = 0;
+      if (transcriptPath && existsSync(transcriptPath)) {
+        try {
+          leadSize = statSync(transcriptPath).size;
+          const leadKnown = db.prepare("SELECT file_size, parse_status FROM transcript_sources WHERE source_path=? AND run_id=?").get(transcriptPath, manifest.runId);
+          leadSettled = Boolean(leadKnown?.parse_status === "parsed" && leadKnown.file_size === leadSize);
+        } catch { /* unreadable — treat as unsettled */ }
+      }
+      let sessionId = manifest.sessionId || aggregate?.sessionId || null;
+      let workspace = null;
+      let pickTime = null;
+      const needsTaskPickTime = !manifest.taskId && manifest.taskIdAuto;
+      if (transcriptPath && existsSync(transcriptPath) && !leadSettled) {
+        const meta = await scanTranscriptMeta(transcriptPath, needsTaskPickTime ? manifest.taskIdAuto : null);
+        if (!sessionId) sessionId = meta.sessionId;
+        workspace = meta.workspace;
+        pickTime = meta.taskLinkTime;
+      }
+
+      const startManifest = manifest.taskIdAuto ? { ...manifest, taskIdAuto: null } : manifest;
+      recordManifest(startManifest, "started", { ...options, db, sourcePath: path });
+      if (manifest.endedAt) recordManifest(manifest, "ended", { ...options, db, sourcePath: path });
+      if (!manifest.taskId && manifest.taskIdAuto) {
+        recordTaskLink(manifest.runId, manifest.taskIdAuto, "agent_pick", {
+          ...options,
+          db,
+          observedAt: pickTime || manifest.startedAt,
+          confidence: pickTime ? 1 : 0.6,
+          correctExisting: true,
+          sourceKind: pickTime ? "legacy-agent-pick" : "legacy-inference",
+          sourcePath: path,
+          sourceOffset: 4,
+        });
+      } else if (!manifest.taskId && !manifest.taskIdAuto && aggregate?.taskId) {
+        const source = aggregate.taskIdKickoff ? "kickoff_inference" : "branch_inference";
+        recordTaskLink(manifest.runId, aggregate.taskId, source, {
+          ...options,
+          db,
+          observedAt: manifest.startedAt,
+          confidence: aggregate.taskIdKickoff ? 0.7 : 0.4,
+          sourceKind: "legacy-inference",
+          sourcePath: path,
+          sourceOffset: 4,
+        });
+      }
+      if (sessionId) {
+        recordSessionLink(manifest.runId, sessionId, { transcriptPath, source: manifest.sessionId ? "manifest" : "legacy_discovery" }, { ...options, db });
+      }
+      if (workspace || aggregate?.cwd) {
+        const cwd = workspace?.cwd || aggregate.cwd;
+        const branch = workspace?.branch || aggregate.gitBranch || null;
+        recordWorkspace(manifest.runId, cwd, { ...refFromBranch(branch), headSha: null, source: "legacy_transcript" }, {
+          ...options,
+          db,
+          observedAt: workspace?.observedAt || manifest.endedAt || manifest.startedAt,
+        });
+      }
       const result = await ingestTranscript(db, manifest.runId, transcriptPath, sessionId);
       if (result.missing) {
         summary.missingTranscripts++;
         if (!hasOpenQualityIssue(db, manifest.runId, "transcript_missing")) {
-          reportDataQuality(manifest.runId, "transcript_missing", { manifestPath: path, sessionId }, options);
+          reportDataQuality(manifest.runId, "transcript_missing", { manifestPath: path, sessionId }, { ...options, db });
         }
       }
       else { summary.transcripts += result.files; summary.usageEvents += result.events; }
       summary.runs++;
-    } finally {
-      db.close();
     }
+  } finally {
+    db.close();
   }
   return summary;
 }

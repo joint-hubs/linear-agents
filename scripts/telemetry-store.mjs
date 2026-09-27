@@ -1031,9 +1031,14 @@ function transaction(db, fn) {
 
 export function emitEvent(event, options = {}) {
   const pendingPath = spoolPending(event);
-  let db;
+  // FOC-547: callers already holding an open connection (backfill passes one
+  // db through the whole manifest loop) can share it via options.db — without
+  // this, every emitted event paid an openTelemetryDb() open + migrate + close.
+  // A passed-in db is owned by the caller and never closed here.
+  const ownsDb = !options.db;
+  let db = options.db || null;
   try {
-    db = openTelemetryDb(options.dbPath);
+    if (ownsDb) db = openTelemetryDb(options.dbPath);
     const result = transaction(db, () => applyEvent(db, event));
     if (result?.duplicate) {
       rmSync(pendingPath, { force: true });
@@ -1044,7 +1049,7 @@ export function emitEvent(event, options = {}) {
   } catch (error) {
     return { ingested: false, pending: true, error: error.message, pendingPath };
   } finally {
-    db?.close();
+    if (ownsDb) db?.close();
   }
 }
 
@@ -2902,7 +2907,12 @@ export function toolIdentityScheme(db) {
 }
 
 export async function recordToolFact(record, options = {}) {
-  const db = openTelemetryDb(options.dbPath);
+  // FOC-547: the ingest loop calls this once per tool fact; with ~31 MB live
+  // transcripts that was an openTelemetryDb() open + migrate + close PER
+  // RECORD. Callers holding an open connection pass it via options.db (never
+  // closed here); without it the standalone open/close behavior is kept.
+  const ownsDb = !options.db;
+  const db = options.db || openTelemetryDb(options.dbPath);
   try {
     const toolFactId = createHash("sha1")
       .update(`${record.source_path}:${record.source_offset}:${record.tool_index}`)
@@ -2956,15 +2966,35 @@ export async function recordToolFact(record, options = {}) {
       toolInputId, Number.isInteger(record.tool_index) ? record.tool_index : null,
       toolResultState, toolResultBytes, toolResultId,
     );
-    if (result.changes === 0) return { recorded: false, reason: "duplicate" };
+    if (result.changes === 0) {
+      // FOC-547 (AC7): an incremental pass records a tool_use BEFORE its
+      // tool_result arrives (state NULL = unknown); when the outcome lands in
+      // a later chunk, upgrade the existing row in place instead of leaving
+      // it unknown forever. Upgrade only — never overwrite a known outcome,
+      // and identity fields (input digest, indices) stay untouched. 'missing'
+      // is also upgradable: the old full-file pass wrote it finally, but under
+      // incremental parsing it is just "no result seen so far".
+      if (toolResultState) {
+        const upgraded = db.prepare(
+          `UPDATE tool_facts
+             SET tool_result_state = ?, tool_result_bytes = ?, tool_result_id = ?, tool_has_error = ?
+           WHERE tool_fact_id = ? AND (tool_result_state IS NULL OR tool_result_state = 'missing')`,
+        ).run(toolResultState, toolResultBytes, toolResultId, hasError, toolFactId);
+        if (upgraded.changes > 0) return { recorded: false, upgraded: true, reason: "upgraded", id: toolFactId };
+      }
+      return { recorded: false, reason: "duplicate" };
+    }
     return { recorded: true, id: toolFactId };
   } finally {
-    db.close();
+    if (ownsDb) db.close();
   }
 }
 
 export async function recordDelegationLink(record, options = {}) {
-  const db = openTelemetryDb(options.dbPath);
+  // FOC-547: same options.db sharing as recordToolFact — one connection for
+  // the whole ingest pass instead of an open + migrate + close per link.
+  const ownsDb = !options.db;
+  const db = options.db || openTelemetryDb(options.dbPath);
   try {
     const delegationId = createHash("sha1")
       .update(`${record.parent_run_id}:${record.parent_agent}:${record.child_agent}:${record.observed_at}`)
@@ -2982,6 +3012,6 @@ export async function recordDelegationLink(record, options = {}) {
     if (result.changes === 0) return { recorded: false, reason: "duplicate" };
     return { recorded: true, id: delegationId };
   } finally {
-    db.close();
+    if (ownsDb) db.close();
   }
 }

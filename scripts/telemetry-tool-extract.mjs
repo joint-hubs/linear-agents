@@ -9,7 +9,9 @@
 // Zero deps except node:crypto and existing project utils. ESM (.mjs), Node 18+.
 
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { open as fsOpen } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { join, dirname, resolve } from "node:path";
 
@@ -19,6 +21,103 @@ import { join, dirname, resolve } from "node:path";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
+
+// FOC-547: transcript reads are chunked and yield to the event loop between
+// chunks. 256 KiB keeps the synchronous work per chunk (decode + split +
+// the consumer's JSON.parse of that chunk) in the low tens of milliseconds on
+// the real corpus, so ingest never blocks request serving for longer than a
+// single chunk.
+export const TRANSCRIPT_CHUNK_BYTES = 1 << 18;
+
+/** Yield the main thread back to the event loop (macrotask boundary). */
+export function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+// ---------------------------------------------------------------------------
+// Exported: jsonlChunksFrom / jsonlLinesFrom
+// ---------------------------------------------------------------------------
+
+/**
+ * Stream a JSONL file in chunks, starting at `startOffset` (default 0).
+ *
+ * Yields one object per chunk: { lines, endOffset, atEof } where `lines` is
+ * an array of { raw, offset } (raw = trimmed line text, offset = the line's
+ * absolute START byte offset) and endOffset is the byte offset after the last
+ * complete line in the chunk — the resume point for the next incremental pass.
+ *
+ * Offsets are byte-accurate and identical to what a full-file line split would
+ * produce (Buffer.byteLength of each raw part, newline included), so events
+ * and tool facts derived from an incremental pass carry the same
+ * (source_path, source_offset) keys as a full parse — the dedup natural keys
+ * stay valid (FOC-547 AC7).
+ *
+ * StringDecoder reassembles multi-byte UTF-8 characters split across chunk
+ * boundaries; "\n" can never appear inside a multi-byte sequence, so line
+ * splits are never corrupted by the chunking.
+ *
+ * @param {string} filePath
+ * @param {number} [startOffset]  Byte offset to resume from (line boundary)
+ * @param {{ chunkBytes?: number }} [opts]
+ */
+export async function* jsonlChunksFrom(filePath, startOffset = 0, opts = {}) {
+  const chunkBytes = opts.chunkBytes || TRANSCRIPT_CHUNK_BYTES;
+  let handle = null;
+  try {
+    handle = await fsOpen(filePath, "r");
+    const size = (await handle.stat()).size;
+    let position = Math.min(Math.max(startOffset, 0), size);
+    const decoder = new StringDecoder("utf8");
+    const buffer = Buffer.alloc(chunkBytes);
+    let text = "";
+    let textStart = position;
+    while (position < size || text.length > 0) {
+      if (position < size) {
+        const length = Math.min(chunkBytes, size - position);
+        const { bytesRead } = await handle.read(buffer, 0, length, position);
+        if (bytesRead <= 0) break;
+        position += bytesRead;
+        text += decoder.write(buffer.subarray(0, bytesRead));
+      }
+      const parts = text.split(/(?<=\n)/);
+      const tail = parts.pop() || "";
+      const lines = [];
+      let consumed = 0;
+      for (const part of parts) {
+        lines.push({ raw: part.trim(), offset: textStart + consumed });
+        consumed += Buffer.byteLength(part, "utf8");
+      }
+      if (position >= size) {
+        // End of file: the tail is the final line (files may lack a trailing
+        // newline). Empty tail = the file ended with a newline.
+        if (tail.trim()) {
+          lines.push({ raw: tail.trim(), offset: textStart + consumed });
+          consumed += Buffer.byteLength(tail, "utf8");
+        }
+        yield { lines, endOffset: textStart + consumed, atEof: true };
+        return;
+      }
+      text = tail;
+      textStart += consumed;
+      if (lines.length > 0) yield { lines, endOffset: textStart, atEof: false };
+      // One event-loop turn per chunk — ingest work and request serving
+      // interleave instead of the loop starving (FOC-547 AC1/AC2).
+      await yieldToEventLoop();
+    }
+    yield { lines: [], endOffset: textStart, atEof: true };
+  } finally {
+    if (handle) {
+      try { await handle.close(); } catch { /* best-effort close */ }
+    }
+  }
+}
+
+/** Per-line convenience wrapper over jsonlChunksFrom (same { raw, offset }). */
+export async function* jsonlLinesFrom(filePath, startOffset = 0, opts = {}) {
+  for await (const chunk of jsonlChunksFrom(filePath, startOffset, opts)) {
+    for (const line of chunk.lines) yield line;
+  }
+}
 
 /**
  * Deterministic hash from (source_path, source_offset, tool_index).
@@ -31,37 +130,18 @@ function hashToolFactId(sourcePath, sourceOffset, toolIndex) {
 }
 
 /**
- * Stream a JSONL file line-by-line, yielding { line, byteOffset } tuples.
- * Tracks byte offset via Buffer.byteLength so source_offset is accurate
- * even for multi-byte UTF-8 characters.
+ * Caller-held link state for incremental extraction (FOC-547).
+ *
+ * `results` carries tool_result outcomes across passes so a result arriving in
+ * a later chunk can still resolve the tool_use recorded by an earlier pass
+ * (results always arrive AFTER their tool_use line — see extractToolFacts).
+ * `uses` tracks pending tool_use facts (by tool_use_id) whose outcome is not
+ * known yet, so the caller can upgrade them the moment their result appears.
+ * `turnIndex` carries the running assistant-turn counter so turn_index stays
+ * file-global instead of restarting at 0 on every incremental pass.
  */
-async function* jsonlLines(filePath) {
-  const stream = createReadStream(filePath, { encoding: "utf8", highWaterMark: 65536 });
-  let remainder = "";
-  let byteOffset = 0;
-
-  for await (const chunk of stream) {
-    remainder += chunk;
-    const lines = remainder.split(/(?<=\n)/);
-    // The last element may be an incomplete line — keep it as remainder
-    remainder = lines.pop() || "";
-
-    for (const rawLine of lines) {
-      const lineByteLen = Buffer.byteLength(rawLine, "utf8");
-      const trimmed = rawLine.trim();
-      if (!trimmed) {
-        byteOffset += lineByteLen;
-        continue;
-      }
-      yield { raw: trimmed, byteOffset };
-      byteOffset += lineByteLen;
-    }
-  }
-
-  // Emit the final line if there's no trailing newline
-  if (remainder.trim()) {
-    yield { raw: remainder.trim(), byteOffset };
-  }
+export function createToolLinkState() {
+  return { results: new Map(), uses: new Map(), turnIndex: 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -95,24 +175,41 @@ function toolResultText(content) {
  * digests at the single write point; they are never persisted and must not be
  * logged. All other fields map 1:1 onto the tool_facts columns.
  *
+ * FOC-547 incremental mode: pass `startOffset` to scan only the range from
+ * that byte offset, and `linkState` (createToolLinkState()) to carry
+ * tool_result outcomes across passes. With linkState, an unresolved tool_use
+ * keeps its `_toolUseId` and a NULL outcome — NOT a final 'missing' — so the
+ * caller can register it as pending; the ingest layer finalizes genuinely
+ * missing outcomes once the file has stopped growing (telemetry-ingest.mjs).
+ * Without linkState the behavior is the original end-of-file semantics: a
+ * tool_result that never appears yields state 'missing'.
+ *
  * @param {string} transcriptPath  Path to the .jsonl transcript file
  * @param {string} runId           Run ID to stamp on every record
  * @param {string} agentKey        Agent key (e.g. 'lead', 'implementer', 'first-pass')
+ * @param {{ startOffset?: number, linkState?: object }} [opts]
  * @returns {Promise<Array>}       Array of tool_fact records ready for SQLite insert
  */
-export async function extractToolFacts(transcriptPath, runId, agentKey) {
+export async function extractToolFacts(transcriptPath, runId, agentKey, opts = {}) {
   if (!transcriptPath || !existsSync(transcriptPath)) {
     return [];
   }
+  const startOffset = Number.isInteger(opts.startOffset) && opts.startOffset > 0 ? opts.startOffset : 0;
+  const linkState = opts.linkState || null;
 
   const records = [];
   // tool_use_id → how that call came back. Filled from tool_result blocks,
   // which is why it cannot be resolved inside the loop (below).
   const resultByToolUseId = new Map();
-  let turnIndex = 0;
+  // Outcomes recorded by EARLIER passes are still live in incremental mode.
+  if (linkState) {
+    for (const [id, result] of linkState.results) resultByToolUseId.set(id, result);
+  }
+  let turnIndex = linkState ? linkState.turnIndex : 0;
   const now = new Date().toISOString();
 
-  for await (const { raw, byteOffset } of jsonlLines(transcriptPath)) {
+  for await (const { raw, offset: byteOffset } of jsonlLinesFrom(transcriptPath, startOffset)) {
+    if (!raw) continue;
     let line;
     try {
       line = JSON.parse(raw);
@@ -130,11 +227,14 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
       for (const block of content) {
         if (block?.type === "tool_result" && block.tool_use_id) {
           const text = toolResultText(block.content);
-          resultByToolUseId.set(block.tool_use_id, {
+          const result = {
             isError: block.is_error === true,
             bytes: Buffer.byteLength(text, "utf8"),
             text,
-          });
+          };
+          resultByToolUseId.set(block.tool_use_id, result);
+          // Carry the outcome forward for later passes (incremental mode).
+          if (linkState) linkState.results.set(block.tool_use_id, result);
         }
       }
     }
@@ -201,6 +301,8 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
     turnIndex++;
   }
 
+  if (linkState) linkState.turnIndex = turnIndex;
+
   // Three things could not be filled during the streaming pass: the canonical
   // category (needs config/tool-norm.json) and the outcome fields (need the
   // tool_result that appears later in the file). Resolve them here, and drop
@@ -208,7 +310,10 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
   //
   // A tool_use whose tool_result never appears in the file gets state
   // 'missing' — NOT ok, NOT error. Under the old scheme that case was
-  // indistinguishable from success (tool_has_error stayed 0).
+  // indistinguishable from success (tool_has_error stayed 0). In incremental
+  // mode (linkState) the outcome stays UNKNOWN instead — the caller owns the
+  // 'missing' finalization, which must only happen once the file has stopped
+  // growing (a later chunk may still deliver the result).
   const { rawToCanon } = normMap();
   for (const record of records) {
     record.tool_name_canon =
@@ -219,13 +324,21 @@ export async function extractToolFacts(transcriptPath, runId, agentKey) {
       record.tool_result_state = result.isError ? "error" : "ok";
       record.tool_result_bytes = result.bytes;
       record.tool_result_full = result.text;
+      if (linkState) linkState.results.delete(record._toolUseId);
+      delete record._toolUseId;
+    } else if (linkState) {
+      // Outcome not yet known — leave it to the caller (pending registration).
+      record.tool_has_error = null;
+      record.tool_result_state = null;
+      record.tool_result_bytes = null;
+      record.tool_result_full = null;
     } else {
       record.tool_has_error = 0;
       record.tool_result_state = "missing";
       record.tool_result_bytes = null;
       record.tool_result_full = null;
+      delete record._toolUseId;
     }
-    delete record._toolUseId;
   }
 
   return records;
