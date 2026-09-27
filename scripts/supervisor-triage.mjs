@@ -72,6 +72,11 @@ const STATE_CAP = 16000;
 // Nothing infers intent; that is the Supervisor's job, with Mateusz.
 
 const RE_AC = /^#{1,6}\s*(acceptance criteria|kryteria akceptacji)\b/im;
+// The bare `## Acceptance` heading (FOC-577) gets its own pattern: anchored to
+// end-of-line (optional trailing colon) so `## Acceptance ceremony notes` — a
+// different section — never counts, while the long variants above keep their
+// prefix semantics.
+const RE_AC_BARE = /^#{1,6}\s*acceptance\b\s*:?\s*$/im;
 const RE_AC_INLINE = /(\*\*Given\*\*|\bAC-\d+\b)/im;
 const RE_DOD = /^#{1,6}\s*(definition of done|dod)\b/im;
 const RE_LIVE_VERIFY = /\b(live[- ]verif\w*|smoke test|end-to-end|e2e)\b/i;
@@ -106,7 +111,7 @@ export function extractSignals(issue) {
     stateType: issue.state?.type ?? null,
     labels,
     bodyEmpty: description.trim().length === 0,
-    hasAcceptanceCriteria: RE_AC.test(description) || RE_AC_INLINE.test(description),
+    hasAcceptanceCriteria: RE_AC.test(description) || RE_AC_BARE.test(description) || RE_AC_INLINE.test(description),
     hasDefinitionOfDone: RE_DOD.test(description),
     handoffFrom,
     liveVerify: RE_LIVE_VERIFY.test(description),
