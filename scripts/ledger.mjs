@@ -15,12 +15,13 @@
 //   extractAgentTurns(path, agentKey, opts) -> turn log with text (Flow screen)
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import { readdir as readdirAsync, stat as statAsync } from "node:fs/promises";
 import { join, dirname, basename, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 // FOC-547: chunked JSONL reader (one event-loop turn per chunk) for
 // parseTranscriptAsync — the sync full-file read stays for direct callers.
-import { jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
+import { createPacer, jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
 
 // ---------------------------------------------------------------------------
 // Internals
@@ -319,10 +320,15 @@ export function parseTranscript(absPath) {
  * Chunked, event-loop-friendly twin of parseTranscript (FOC-547).
  *
  * Same result shape and same turn semantics (see collectTranscriptLine), but
- * reads via jsonlChunksFrom — one macrotask turn per chunk instead of one
- * synchronous readFileSync + parse of the whole file. scanRuns() over the real
- * corpus full-parses every transcript in the session dir; done synchronously
- * that was a minutes-long event-loop block during boot backfill.
+ * reads via jsonlChunksFrom in bounded slices instead of one synchronous
+ * readFileSync + parse of the whole file. scanRuns() over the real corpus
+ * full-parses every transcript in the session dir; done synchronously that
+ * was a minutes-long event-loop block during boot backfill.
+ *
+ * Note (FOC-547): chunking alone is NOT enough — the reads are synchronous,
+ * so a bare `for await` drains the generator's promises in microtasks and
+ * never reaches the event loop. The pacer below is what actually returns
+ * control to the loop.
  *
  * @param {string} absPath
  * @returns {Promise<{ sessionId: string|null, cwd: string|null, gitBranch: string|null, turns: Array<object> }>}
@@ -340,7 +346,14 @@ export async function parseTranscriptAsync(absPath) {
 
   const parentDir = dirname(absPath);
 
+  // FOC-547 (AC2): the chunk reads are synchronous, so a bare `for await`
+  // over the generator drains its promises in microtasks and never reaches
+  // the event loop. The pacer yields at least every ~40 ms of accumulated
+  // work; without it a full-corpus scanRuns pass measures as one
+  // multi-second event-loop block per transcript.
+  const pacer = createPacer();
   for await (const { lines } of jsonlChunksFrom(absPath, 0)) {
+    await pacer();
     for (const { raw } of lines) {
       if (!raw) continue;
       let line;
@@ -373,6 +386,7 @@ export async function parseTranscriptAsync(absPath) {
 
     for (const agentFile of agentFiles) {
       for await (const { lines } of jsonlChunksFrom(join(subagentsDir, agentFile), 0)) {
+        await pacer();
         for (const { raw } of lines) {
           if (!raw) continue;
           let line;
@@ -638,15 +652,23 @@ export function birthUpperBound(manifest, startedMs) {
   return Number.isFinite(ended) ? Math.max(fallback, ended) : fallback;
 }
 
-/** All hash subdirectories of a `<configDir>/projects` root (existing dirs only). */
-function projectHashDirs(projectsRoot) {
+/** All hash subdirectories of a `<configDir>/projects` root (existing dirs only).
+ * FOC-547 (AC2): this is a readdir + statSync per entry, and callers resolve
+ * candidates per run manifest — ~1000 uncached scans measured as one ~0.5 s
+ * continuous event-loop block. The caller passes a per-scan cache keyed by
+ * the projects root; the hash dirs do not change mid-scan. */
+function projectHashDirs(projectsRoot, cache) {
+  if (cache?.has(projectsRoot)) return cache.get(projectsRoot);
+  let dirs;
   try {
-    return readdirSync(projectsRoot)
+    dirs = readdirSync(projectsRoot)
       .map((e) => join(projectsRoot, e))
       .filter((p) => statSync(p).isDirectory());
   } catch {
-    return [];
+    dirs = [];
   }
+  cache?.set(projectsRoot, dirs);
+  return dirs;
 }
 
 /**
@@ -663,16 +685,16 @@ function projectHashDirs(projectsRoot) {
  * squad launchers always run with CLAUDE_CONFIG_DIR, so matching a squad run
  * against the user's personal sessions would be a false positive.
  */
-function candidateRootsForManifest(manifest) {
+function candidateRootsForManifest(manifest, hashDirsCache) {
   const roots = [];
   if (manifest.claudeConfigDir && manifest.cwd) {
-    roots.push(...projectHashDirs(join(resolve(manifest.cwd, manifest.claudeConfigDir), "projects")));
+    roots.push(...projectHashDirs(join(resolve(manifest.cwd, manifest.claudeConfigDir), "projects"), hashDirsCache));
   }
   if (roots.length === 0 && manifest.squad) {
     // Killed-window manifests never got claudeConfigDir (launchers set it
     // AFTER `run-manifest start`; `end` backfills it — which never ran).
     // Squad config dirs are deterministic: <repo>/agents/<squad>.
-    roots.push(...projectHashDirs(join(root, "agents", manifest.squad, "projects")));
+    roots.push(...projectHashDirs(join(root, "agents", manifest.squad, "projects"), hashDirsCache));
   }
   if (roots.length === 0 && manifest.cwd) {
     roots.push(join(homedir(), ".claude", "projects", cwdToHashName(manifest.cwd)));
@@ -691,8 +713,29 @@ function candidateRootsForManifest(manifest) {
  * @param {Array<object>} manifests
  * @returns {Map<string, {path: string, ambiguous: boolean}>}
  */
+// One root's candidate enumeration (sync twin): readdir + statSync per
+// .jsonl file, keeping the birth time used for the window match.
+function discoverTranscriptDir(rootDir) {
+  try {
+    return readdirSync(rootDir)
+      .filter((f) => f.endsWith(".jsonl"))
+      .map((f) => {
+        const p = join(rootDir, f);
+        const st = statSync(p);
+        if (!st.isFile()) return null;
+        const birth =
+          st.birthtime && st.birthtime.getTime() ? st.birthtime.getTime() : st.mtime.getTime();
+        return { path: p, birth };
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 export function discoverTranscriptsForRuns(manifests) {
   const dirCache = new Map();
+  const hashDirsCache = new Map();
   const pairs = [];
 
   for (const manifest of manifests) {
@@ -701,23 +744,57 @@ export function discoverTranscriptsForRuns(manifests) {
     if (!Number.isFinite(started)) continue;
     const upper = birthUpperBound(manifest, started);
 
-    for (const rootDir of candidateRootsForManifest(manifest)) {
+    for (const rootDir of candidateRootsForManifest(manifest, hashDirsCache)) {
       if (!dirCache.has(rootDir)) {
-        let files = [];
+        dirCache.set(rootDir, discoverTranscriptDir(rootDir));
+      }
+
+      for (const { path, birth } of dirCache.get(rootDir)) {
+        if (birth >= started - BIRTH_BEFORE_MS && birth <= upper) {
+          pairs.push({ runId: manifest.runId, path, diff: Math.abs(birth - started) });
+        }
+      }
+    }
+  }
+
+  return discoverPairsToRuns(pairs);
+}
+
+// Paced twin of discoverTranscriptsForRuns for the boot-time scan (FOC-547
+// AC2): the per-root enumeration is a readdir + statSync per .jsonl file, and
+// across ~1000 manifests the uncached roots measure as one ~1 s continuous
+// event-loop block. This twin runs the enumeration through the fs promises
+// API (libuv threadpool — the enumeration syscall itself never blocks the
+// loop, however cold the directory) and paces the pairing loop besides.
+// The single-manifest and one-shot CLI callers keep the synchronous twin.
+export async function discoverTranscriptsForRunsAsync(manifests) {
+  const pacer = createPacer();
+  const dirCache = new Map();
+  const hashDirsCache = new Map();
+  const pairs = [];
+
+  for (const manifest of manifests) {
+    if (manifest.sessionId || !manifest.startedAt || !manifest.cwd) continue;
+    const started = new Date(manifest.startedAt).getTime();
+    if (!Number.isFinite(started)) continue;
+    const upper = birthUpperBound(manifest, started);
+
+    for (const rootDir of candidateRootsForManifest(manifest, hashDirsCache)) {
+      if (!dirCache.has(rootDir)) {
+        const files = [];
         try {
-          files = readdirSync(rootDir)
-            .filter((f) => f.endsWith(".jsonl"))
-            .map((f) => {
-              const p = join(rootDir, f);
-              const st = statSync(p);
-              if (!st.isFile()) return null;
-              const birth =
-                st.birthtime && st.birthtime.getTime() ? st.birthtime.getTime() : st.mtime.getTime();
-              return { path: p, birth };
-            })
-            .filter(Boolean);
+          for (const f of await readdirAsync(rootDir)) {
+            if (!f.endsWith(".jsonl")) continue;
+            const p = join(rootDir, f);
+            const st = await statAsync(p);
+            if (!st.isFile()) continue;
+            const birth =
+              st.birthtime && st.birthtime.getTime() ? st.birthtime.getTime() : st.mtime.getTime();
+            files.push({ path: p, birth });
+            await pacer();
+          }
         } catch {
-          files = [];
+          /* unreadable root — no candidates from it */
         }
         dirCache.set(rootDir, files);
       }
@@ -730,15 +807,33 @@ export function discoverTranscriptsForRuns(manifests) {
     }
   }
 
+  return discoverPairsToRuns(pairs);
+}
+
+// Shared tail of both discover variants: greedy closest-start assignment,
+// strictly 1:1 (see the contract comment above).
+function discoverPairsToRuns(pairs) {
   pairs.sort((a, b) => a.diff - b.diff);
+  // FOC-547 (AC2): the contested check used to scan ALL pairs per candidate —
+  // O(pairs²) measured as one ~440 ms synchronous block on the real corpus.
+  // A pair's competitors share its runId or its path, so two small indexes
+  // replace the full scan with identical semantics.
+  const byRunId = new Map();
+  const byPath = new Map();
+  for (const pair of pairs) {
+    if (!byRunId.has(pair.runId)) byRunId.set(pair.runId, []);
+    byRunId.get(pair.runId).push(pair);
+    if (!byPath.has(pair.path)) byPath.set(pair.path, []);
+    byPath.get(pair.path).push(pair);
+  }
   const byRun = new Map();
   const usedFiles = new Set();
   for (const pair of pairs) {
     if (byRun.has(pair.runId) || usedFiles.has(pair.path)) continue;
-    const contested = pairs.some(
+    const competitors = [...(byRunId.get(pair.runId) || []), ...(byPath.get(pair.path) || [])];
+    const contested = competitors.some(
       (o) =>
         o !== pair &&
-        (o.runId === pair.runId || o.path === pair.path) &&
         !byRun.has(o.runId) &&
         !usedFiles.has(o.path) &&
         o.diff - pair.diff < AMBIGUOUS_MARGIN_MS,
@@ -932,18 +1027,24 @@ export async function scanRuns() {
 
   // Read all manifests first, then batch-discover transcripts for the
   // sessionId-less ones (1:1 file↔run assignment across the whole scan).
+  // FOC-547 (AC2): thousands of synchronous small reads in a row measured as
+  // one ~4 s continuous event-loop block — pace the loop.
+  const pacer = createPacer();
   const manifests = [];
   for (const f of files) {
+    await pacer();
     try {
       manifests.push(JSON.parse(readFileSync(join(runsDir, f), "utf8")));
     } catch {
       continue; // skip malformed manifests
     }
   }
-  const discovered = discoverTranscriptsForRuns(manifests);
+  const discovered = await discoverTranscriptsForRunsAsync(manifests);
+  await pacer();
 
   const results = [];
   for (const manifest of manifests) {
+    await pacer();
     results.push(
       await aggregateRun(manifest, transcriptIndex, discovered.get(manifest.runId) || null),
     );

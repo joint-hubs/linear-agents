@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
+import { createPacer, jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -232,7 +232,11 @@ export function reconstructDelegationLinks({ runId, parentAgent, transcriptPath 
  */
 export async function scanSpawnToolUsesAsync(leadTranscriptPath, startOffset = 0) {
   const results = [];
+  // FOC-547 (AC2): chunk reads are synchronous — pace so the loop breathes
+  // (a first-pass scan of a full lead transcript is otherwise one block).
+  const pacer = createPacer();
   for await (const { lines } of jsonlChunksFrom(leadTranscriptPath, startOffset)) {
+    await pacer();
     for (const { raw } of lines) {
       if (!raw) continue;
       let parsed;
@@ -270,7 +274,9 @@ export async function readSubagentMetadataAsync(subagentPath) {
     let attributionAgent = null;
     let model = null;
     let firstTimestamp = null;
+    const pacer = createPacer();
     for await (const { lines } of jsonlChunksFrom(subagentPath, 0, { chunkBytes: META_SCAN_BYTES })) {
+      await pacer();
       for (const { raw } of lines) {
         if (!raw) continue;
         try {

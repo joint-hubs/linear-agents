@@ -194,6 +194,105 @@ if (DatabaseSync) {
   console.log("  SKIP identity end-to-end: node:sqlite unavailable");
 }
 
+// --- FOC-547: jsonlChunksFrom — offsets, giant-line heartbeats, resume ------
+// The chunker feeds every incremental ingest pass, so three properties are
+// pinned here:
+//   1. byte-accurate parity with a full-file line split, at chunk sizes both
+//      larger and far smaller than the lines (multi-byte UTF-8 included);
+//   2. a single line larger than the whole chunk stream cannot hold the event
+//      loop: the reader emits `{ lines: [] }` heartbeat chunks so callers
+//      interleave (pre-fix it read and re-split the accumulated text without a
+//      single yield — measured 38.6 s of regex time across one backfill);
+//   3. a resumed pass (start at a previous chunk's endOffset) emits exactly the
+//      same (raw, offset) keys as a full parse — the dedup natural keys stay
+//      valid across incremental runs (FOC-547 AC7).
+{
+  const { jsonlChunksFrom } = await import("./telemetry-tool-extract.mjs");
+  const { openSync, readSync, closeSync, statSync } = await import("node:fs");
+
+  // Reference: full-file byte-accurate line offsets.
+  function fullSplitOffsets(path) {
+    const size = statSync(path).size;
+    const fd = openSync(path, "r");
+    const buf = Buffer.alloc(size);
+    readSync(fd, buf, 0, size, 0);
+    closeSync(fd);
+    const lines = [];
+    let start = 0;
+    for (let i = 0; i <= buf.length; i++) {
+      if (i === buf.length || buf[i] === 0x0a) {
+        const raw = buf.toString("utf8", start, i).trim();
+        if (raw) lines.push({ raw, offset: start });
+        start = i + 1;
+      }
+    }
+    return lines;
+  }
+
+  async function collect(path, startOffset = 0, opts = {}) {
+    const out = [];
+    let heartbeats = 0;
+    for await (const chunk of jsonlChunksFrom(path, startOffset, opts)) {
+      if (chunk.lines.length === 0) heartbeats++;
+      out.push(...chunk.lines);
+    }
+    return { lines: out, heartbeats };
+  }
+
+  const chunkerPath = join(temp, "chunker.jsonl");
+  const SAMPLE_LINES = [
+    JSON.stringify({ n: 0, text: "ascii line" }),
+    JSON.stringify({ n: 1, text: "multi-byte ✓ ünïcödé ✓ line" }),
+    JSON.stringify({ n: 2, pad: "p".repeat(5000) }),
+    JSON.stringify({ n: 3 }),
+    "   leading spaces preserved in offset, trimmed in raw",
+    JSON.stringify({ n: 5, pad: "q".repeat(200000) }),
+    JSON.stringify({ n: 6 }),
+  ];
+  writeFileSync(chunkerPath, SAMPLE_LINES.join("\n") + "\n", "utf8");
+  const expected = fullSplitOffsets(chunkerPath);
+
+  for (const chunkBytes of [64, 1024, 1 << 18]) {
+    const { lines } = await collect(chunkerPath, 0, { chunkBytes });
+    check(`chunker offset parity (chunkBytes=${chunkBytes})`,
+      lines.length === expected.length &&
+      lines.every((l, i) => l.offset === expected[i].offset && l.raw === expected[i].raw),
+      `got ${lines.length} lines vs ${expected.length}`);
+  }
+
+  // Giant line: one line bigger than the 8 MiB heartbeat budget.
+  const giantPath = join(temp, "giant.jsonl");
+  const GIANT = "g".repeat(20 * 1024 * 1024);
+  writeFileSync(giantPath,
+    JSON.stringify({ n: 0 }) + "\n" + JSON.stringify({ pad: GIANT }) + "\n" + JSON.stringify({ n: 2 }) + "\n",
+    "utf8");
+  const giantExpected = fullSplitOffsets(giantPath);
+  const giant = await collect(giantPath);
+  check("giant line parses with full-offset parity",
+    giant.lines.length === giantExpected.length &&
+    giant.lines.every((l, i) => l.offset === giantExpected[i].offset && l.raw === giantExpected[i].raw),
+    `got ${giant.lines.length} lines vs ${giantExpected.length}`);
+  check("giant line yields heartbeat chunks (event loop interleaves)", giant.heartbeats >= 1,
+    `heartbeats=${giant.heartbeats}`);
+
+  // Resume parity: parse [0, mid) then resume at the recorded endOffset —
+  // the union must equal the full parse, key for key.
+  const first = [];
+  let resumeAt = null;
+  for await (const chunk of jsonlChunksFrom(chunkerPath, 0, { chunkBytes: 1024 })) {
+    if (chunk.atEof) break;
+    first.push(...chunk.lines);
+    resumeAt = chunk.endOffset;
+    break; // stop after the FIRST chunk — the next pass resumes from its endOffset
+  }
+  const resumed = await collect(chunkerPath, resumeAt);
+  const union = [...first, ...resumed.lines];
+  check("resumed pass emits identical (raw, offset) keys as a full parse",
+    union.length === expected.length &&
+    union.every((l, i) => l.offset === expected[i].offset && l.raw === expected[i].raw),
+    `first=${first.length} resumed=${resumed.lines.length} expected=${expected.length}`);
+}
+
 // Windows can hold the SQLite file briefly after close (AV/indexer) — the same
 // reason telemetry-ingest.test.mjs ignores cleanup failures. A leftover temp
 // directory must not fail an otherwise green run.

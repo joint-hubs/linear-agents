@@ -34,6 +34,22 @@ export function yieldToEventLoop() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+/**
+ * Pacer for per-item synchronous work (FOC-547 AC2): call the returned function
+ * after every item; it yields to the event loop only when the caller's current
+ * un-yielded run has exceeded `softMs`. Time-based, not count-based, so the
+ * bound holds whatever the per-item cost (a 10 KB tool input costs orders of
+ * magnitude more than a 100 B one). The check itself is nanoseconds.
+ */
+export function createPacer(softMs = 40) {
+  let last = performance.now();
+  return async () => {
+    if (performance.now() - last < softMs) return;
+    last = performance.now();
+    await yieldToEventLoop();
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Exported: jsonlChunksFrom / jsonlLinesFrom
 // ---------------------------------------------------------------------------
@@ -62,6 +78,17 @@ export function yieldToEventLoop() {
  */
 export async function* jsonlChunksFrom(filePath, startOffset = 0, opts = {}) {
   const chunkBytes = opts.chunkBytes || TRANSCRIPT_CHUNK_BYTES;
+  // A chunk that completes no line (a single line larger than the chunk — up
+  // to 3.7 MB measured in the real corpus) used to keep reading without a
+  // single event-loop turn, and re-split the ACCUMULATED text with
+  // text.split(/(?<=\n)/) on every read — O(n²) in the line length (measured
+  // 38.6 s of pure regex time across one backfill, FOC-547). This rewrite
+  // scans only unscanned text (indexOf) and compacts the consumed prefix
+  // instead of re-deriving it, and HEARTBEAT_BYTES bounds how long the reader
+  // runs without handing the loop a turn: consumers see a `{ lines: [] }`
+  // heartbeat chunk, which every caller skips harmlessly.
+  const HEARTBEAT_BYTES = 1 << 23; // 8 MiB
+  const COMPACT_THRESHOLD = 1 << 20; // 1 MiB of consumed prefix before slicing
   let handle = null;
   try {
     handle = await fsOpen(filePath, "r");
@@ -70,41 +97,62 @@ export async function* jsonlChunksFrom(filePath, startOffset = 0, opts = {}) {
     const decoder = new StringDecoder("utf8");
     const buffer = Buffer.alloc(chunkBytes);
     let text = "";
-    let textStart = position;
+    let textStart = position; // byte offset of text[0]
+    let lineStart = 0;        // char index in text where the next line starts
+    let scanned = 0;          // char index in text already scanned for "\n"
+    let consumedBytes = 0;    // bytes before lineStart, relative to textStart
+    let bytesSinceYield = 0;
     while (position < size || text.length > 0) {
       if (position < size) {
         const length = Math.min(chunkBytes, size - position);
         const { bytesRead } = await handle.read(buffer, 0, length, position);
         if (bytesRead <= 0) break;
         position += bytesRead;
+        bytesSinceYield += bytesRead;
         text += decoder.write(buffer.subarray(0, bytesRead));
       }
-      const parts = text.split(/(?<=\n)/);
-      const tail = parts.pop() || "";
       const lines = [];
-      let consumed = 0;
-      for (const part of parts) {
-        lines.push({ raw: part.trim(), offset: textStart + consumed });
-        consumed += Buffer.byteLength(part, "utf8");
+      let nl;
+      while ((nl = text.indexOf("\n", scanned)) !== -1) {
+        const part = text.slice(lineStart, nl);
+        if (part.trim()) lines.push({ raw: part.trim(), offset: textStart + consumedBytes });
+        consumedBytes += Buffer.byteLength(text.slice(lineStart, nl + 1), "utf8");
+        lineStart = nl + 1;
+        scanned = nl + 1;
       }
       if (position >= size) {
         // End of file: the tail is the final line (files may lack a trailing
         // newline). Empty tail = the file ended with a newline.
+        const tail = text.slice(lineStart);
         if (tail.trim()) {
-          lines.push({ raw: tail.trim(), offset: textStart + consumed });
-          consumed += Buffer.byteLength(tail, "utf8");
+          lines.push({ raw: tail.trim(), offset: textStart + consumedBytes });
+          consumedBytes += Buffer.byteLength(tail, "utf8");
         }
-        yield { lines, endOffset: textStart + consumed, atEof: true };
+        yield { lines, endOffset: textStart + consumedBytes, atEof: true };
         return;
       }
-      text = tail;
-      textStart += consumed;
-      if (lines.length > 0) yield { lines, endOffset: textStart, atEof: false };
-      // One event-loop turn per chunk — ingest work and request serving
-      // interleave instead of the loop starving (FOC-547 AC1/AC2).
-      await yieldToEventLoop();
+      if (lines.length > 0) {
+        yield { lines, endOffset: textStart + consumedBytes, atEof: false };
+        bytesSinceYield = 0;
+        if (lineStart >= COMPACT_THRESHOLD) {
+          // Drop the consumed prefix (only when it is worth the copy); the
+          // index bookkeeping keeps the byte offsets exact.
+          text = text.slice(lineStart);
+          textStart += consumedBytes;
+          scanned -= lineStart;
+          lineStart = 0;
+          consumedBytes = 0;
+        }
+        // One event-loop turn per chunk — ingest work and request serving
+        // interleave instead of the loop starving (FOC-547 AC1/AC2).
+        await yieldToEventLoop();
+      } else if (bytesSinceYield >= HEARTBEAT_BYTES) {
+        yield { lines: [], endOffset: textStart + consumedBytes, atEof: false };
+        bytesSinceYield = 0;
+        await yieldToEventLoop();
+      }
     }
-    yield { lines: [], endOffset: textStart, atEof: true };
+    yield { lines: [], endOffset: textStart + consumedBytes, atEof: true };
   } finally {
     if (handle) {
       try { await handle.close(); } catch { /* best-effort close */ }
@@ -208,7 +256,12 @@ export async function extractToolFacts(transcriptPath, runId, agentKey, opts = {
   let turnIndex = linkState ? linkState.turnIndex : 0;
   const now = new Date().toISOString();
 
+  // FOC-547 (AC2): per-line work (JSON.parse, result-size scans, input
+  // serializations) is synchronous; the time-based pacer keeps the loop's
+  // un-yielded runs below the block bar whatever the line sizes are.
+  const pacer = createPacer();
   for await (const { raw, offset: byteOffset } of jsonlLinesFrom(transcriptPath, startOffset)) {
+    await pacer();
     if (!raw) continue;
     let line;
     try {

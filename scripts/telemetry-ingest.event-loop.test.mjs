@@ -277,6 +277,68 @@ await test("a fact whose result never arrives is finalized only when the file st
   assertEqual(b.tool_result_state, "missing", "call_B's result never arrived and the file is idle — 'missing' now");
 });
 
+// --- Scenario 5 (FOC-547 D1): same-process pending upgrade -------------------
+// The crash the real-corpus driver exposed: pass 1 registers a pending
+// tool_use in the SAME process's link state; the tool_result arrives while the
+// file grows; the next pass resolves the pending use through recordToolFact.
+// The pending entry must carry every bound column — the pre-fix snapshot held
+// only the natural key, so agent_key (SQLite parameter 3) was undefined and
+// node:sqlite threw "Provided value cannot be bound to SQLite parameter 3".
+const tools2Dir = join(temp, "tools2");
+mkdirSync(tools2Dir, { recursive: true });
+const tools2Transcript = join(tools2Dir, "lead.jsonl");
+const tools2SessionId = "session-tools2-1";
+const tools2RunId = "run-tools2-1";
+
+writeFileSync(tools2Transcript, [
+  toolsLine({ type: "user", timestamp: "2026-09-01T10:00:00.000Z", sessionId: tools2SessionId, cwd: "C:/repos/fenix", gitBranch: "foc-547" }),
+  toolsLine(toolUseLine("2026-09-01T10:00:01.000Z", "call_C", "Read", { file_path: "/tmp/c.txt" })),
+  toolsLine(toolUseLine("2026-09-01T10:00:02.000Z", "call_D", "Bash", { command: "pwd" })),
+].join(""), "utf8");
+
+applyEvent(db, makeEvent("run.started", {
+  runId: tools2RunId, squad: "dev", startedAt: "2026-09-01T10:00:00.000Z", cwd: "C:/repos/fenix",
+}, { runId: tools2RunId }));
+applyEvent(db, makeEvent("session.linked", {
+  runId: tools2RunId, sessionId: tools2SessionId, transcriptPath: tools2Transcript,
+}, { runId: tools2RunId }));
+
+function toolFactRows2() {
+  return db.prepare("SELECT agent_key, tool_name_raw, tool_result_state, tool_result_bytes FROM tool_facts WHERE run_id=? AND source_path=? ORDER BY tool_name_raw")
+    .all(tools2RunId, tools2Transcript);
+}
+
+await test("same-process pass resolves a pending fact once its result arrives (D1)", async () => {
+  const passA = await ingestTranscript(db, tools2RunId, tools2Transcript, tools2SessionId);
+  assertEqual(passA.missing, false, "transcript present");
+  let rows = toolFactRows2();
+  assertEqual(rows.length, 2, "both tool_uses recorded pending");
+  for (const row of rows) {
+    assertEqual(row.agent_key, "_lead", "pending row carries its agent_key from the start");
+    assertEqual(row.tool_result_state, null, "both pending (NULL) after pass A");
+  }
+  appendFileSync(tools2Transcript, toolsLine(toolResultLine("2026-09-01T10:00:05.000Z", "call_C", "gamma result text")));
+  // NO state reset — same process, same link state, the live-tick shape.
+  await ingestTranscript(db, tools2RunId, tools2Transcript, tools2SessionId);
+  rows = toolFactRows2();
+  const c = rows.find((r) => r.tool_name_raw === "Read");
+  const d = rows.find((r) => r.tool_name_raw === "Bash");
+  assertEqual(c.tool_result_state, "ok", "call_C resolved in-process once its result arrived");
+  assert(c.tool_result_bytes > 0, "resolved row carries the result size");
+  assertEqual(c.agent_key, "_lead", "resolved row keeps its identity fields");
+  assertEqual(d.tool_result_state, null, "call_D still pending");
+});
+
+await test("same-process finalize of a still-pending fact keeps identity (D1)", async () => {
+  // File unchanged since the last pass → the skip branch finalizes the
+  // in-memory pending registry. The finalize re-bind must see every column.
+  await ingestTranscript(db, tools2RunId, tools2Transcript, tools2SessionId);
+  const rows = toolFactRows2();
+  const d = rows.find((r) => r.tool_name_raw === "Bash");
+  assertEqual(d.tool_result_state, "missing", "call_D finalized as 'missing' once the file is idle");
+  assertEqual(d.agent_key, "_lead", "finalized row keeps its identity fields");
+});
+
 // --- Cleanup + summary -------------------------------------------------------
 db.close();
 try { rmSync(temp, { recursive: true, force: true }); } catch { /* Windows file locks */ }

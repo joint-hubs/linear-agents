@@ -30,9 +30,11 @@ import {
   reportDataQuality,
   replayPending,
   resolveQualityIssue,
+  queryRunsForIngest,
+  warmGitFacts,
   sqliteAvailable,
 } from "./telemetry-store.mjs";
-import { createToolLinkState, extractToolFacts, jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
+import { createPacer, createToolLinkState, extractToolFacts, jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
 import { reconstructDelegationLinksAsync, scanSpawnToolUsesAsync } from "./telemetry-delegation-recon.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -122,7 +124,11 @@ export function _resetTranscriptParseStateForTests() {
  */
 async function agentKeyFromTranscript(path, isLead) {
   if (isLead) return "_lead";
+  // FOC-547 (AC2): chunk reads are synchronous — pace so a worst-case
+  // full-file scan (no attribution line found) stays below the block bar.
+  const pacer = createPacer();
   for await (const { lines } of jsonlChunksFrom(path, 0)) {
+    await pacer();
     for (const { raw } of lines) {
       if (!raw) continue;
       try {
@@ -168,6 +174,27 @@ function addToolIndex(records) {
  * are absorbed as duplicates. The transcript.progress event (which advances
  * the skip-cache byte_offset) is only written after the pass reached EOF.
  */
+// FOC-547 (AC2): one ingest chunk can carry hundreds of events; applying them
+// in a single transaction blocked the event loop for seconds per large chunk.
+// Slices keep every apply — and the event-loop turn between them — bounded; a
+// failed slice leaves the stored offset untouched exactly like a failed
+// whole-chunk apply did, and dedup absorbs the partially applied events on the
+// re-parse.
+const FLUSH_SLICE = 25;
+
+// FOC-547 (D2): applyWorkspaceObserved consults git SYNCHRONOUSLY inside the
+// apply transaction. Prefetching the slice's cwds with async git first means
+// git runs while the event loop is free and the synchronous fallback is a
+// cache hit — a single cold git call measured up to ~600 ms, well over the
+// 250 ms AC2 bar.
+async function warmWorkspaceCwds(events) {
+  const cwds = new Set();
+  for (const event of events) {
+    if (event.eventType === "workspace.observed" && event.payload?.cwd) cwds.add(event.payload.cwd);
+  }
+  if (cwds.size > 0) await warmGitFacts([...cwds]);
+}
+
 async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
   const { startOffset, isLead, state, statsSize } = opts;
   const ws = state.workspace;
@@ -175,13 +202,19 @@ async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
   let pendingEvents = [];
   let lastFlushedOffset = startOffset;
   let sawEof = false;
+  const pacer = createPacer();
 
-  const flush = () => {
+  const flush = async () => {
     if (pendingEvents.length === 0) return;
     const batch = pendingEvents;
     pendingEvents = [];
-    const results = applyEvents(db, batch);
-    eventsApplied += results.filter((result) => !result?.duplicate).length;
+    while (batch.length > 0) {
+      const slice = batch.splice(0, FLUSH_SLICE);
+      await warmWorkspaceCwds(slice);
+      const results = await applyEvents(db, slice);
+      eventsApplied += results.filter((result) => !result?.duplicate).length;
+      await pacer();
+    }
   };
 
   for await (const chunk of jsonlChunksFrom(path, startOffset)) {
@@ -222,7 +255,7 @@ async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
       }, { runId, observedAt, sourceKind: "transcript", sourcePath: path, sourceOffset: lineOffset }));
     }
     try {
-      flush();
+      await flush();
       lastFlushedOffset = chunk.endOffset;
       if (chunk.atEof) sawEof = true;
     } catch (error) {
@@ -244,7 +277,7 @@ async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
     runId, sessionId, byteOffset: lastFlushedOffset, fileSize: statsSize, modifiedAt, parseStatus: "parsed",
   }, { runId, sourceKind: "transcript-progress", sourcePath: path, sourceOffset: lastFlushedOffset });
   try {
-    flush(); // no-op unless a race left events pending
+    await flush(); // no-op unless a race left events pending
     applyEvents(db, [progressEvent]);
   } catch (error) {
     console.error(`[telemetry] transcript progress write failed for ${path}: ${error.message}`);
@@ -262,14 +295,16 @@ async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
  * then prune result entries that resolve nothing (bounds memory across passes).
  */
 async function resolvePendingToolFacts(db, linkState) {
+  const pacer = createPacer();
   for (const [id, use] of linkState.uses) {
     const result = linkState.results.get(id);
     if (!result) continue;
+    // `use` is the FULL record snapshotted at pending-registration time (see
+    // writeToolFact) — the upgrade path re-binds every INSERT column, so the
+    // identity fields (agent_key, tool_name_raw, turn_index, …) must be
+    // present; node:sqlite refuses to bind undefined.
     await recordToolFact({
-      run_id: use.run_id,
-      source_path: use.source_path,
-      source_offset: use.source_offset,
-      tool_index: use.tool_index,
+      ...use,
       tool_has_error: result.isError ? 1 : 0,
       tool_result_state: result.isError ? "error" : "ok",
       tool_result_bytes: result.bytes,
@@ -277,6 +312,7 @@ async function resolvePendingToolFacts(db, linkState) {
     }, { db });
     linkState.uses.delete(id);
     linkState.results.delete(id);
+    await pacer();
   }
 }
 
@@ -287,17 +323,18 @@ async function resolvePendingToolFacts(db, linkState) {
  * would leave the outcome NULL forever (FOC-547 AC7).
  */
 async function finalizePendingToolFacts(db, linkState) {
+  const pacer = createPacer();
   for (const [, use] of linkState.uses) {
+    // Same full-record requirement as resolvePendingToolFacts: the pending
+    // entry carries every bound column, the outcome fields are overridden.
     await recordToolFact({
-      run_id: use.run_id,
-      source_path: use.source_path,
-      source_offset: use.source_offset,
-      tool_index: use.tool_index,
+      ...use,
       tool_has_error: 0,
       tool_result_state: "missing",
       tool_result_bytes: null,
       tool_result_full: null,
     }, { db });
+    await pacer();
   }
   linkState.uses.clear();
 }
@@ -314,6 +351,7 @@ async function finalizeOrphanedPendingToolFacts(db, runId, path) {
   const pending = db
     .prepare("SELECT source_offset, tool_index FROM tool_facts WHERE run_id=? AND source_path=? AND tool_result_state IS NULL")
     .all(runId, path);
+  const pacer = createPacer();
   for (const row of pending) {
     await recordToolFact({
       run_id: runId,
@@ -330,6 +368,7 @@ async function finalizeOrphanedPendingToolFacts(db, runId, path) {
       tool_result_bytes: null,
       tool_result_full: null,
     }, { db });
+    await pacer();
   }
   return pending.length;
 }
@@ -360,19 +399,23 @@ async function ingestToolFactsRange(db, runId, path, agentKey, startOffset, stat
     if (record._toolUseId) {
       // Pending: outcome not in this range (yet). Register for later passes;
       // extractToolFacts leaves the outcome NULL in linkState mode.
-      linkState.uses.set(record._toolUseId, {
-        run_id: record.run_id,
-        source_path: record.source_path,
-        source_offset: record.source_offset,
-        tool_index: record.tool_index,
-      });
+      //
+      // Store the FULL record, not just the natural key: a later pass re-emits
+      // it through recordToolFact (resolve/finalize), and that call binds every
+      // INSERT column — agent_key, tool_name_raw, turn_index included. The
+      // earlier key-only snapshot left those undefined and the tick died with
+      // "Provided value cannot be bound to SQLite parameter 3" (agent_key) the
+      // moment a pending use got resolved in-process.
+      linkState.uses.set(record._toolUseId, record);
     }
     await recordToolFact(record, { db });
   };
+  const pacer = createPacer();
   const records = await extractToolFacts(path, runId, agentKey, { startOffset, linkState });
   addToolIndex(records);
   for (const record of records) {
     await writeToolFact(record);
+    await pacer();
   }
   await resolvePendingToolFacts(db, linkState);
 
@@ -383,6 +426,7 @@ async function ingestToolFactsRange(db, runId, path, agentKey, startOffset, stat
     addToolIndex(fullRecords);
     for (const record of fullRecords) {
       await writeToolFact(record);
+      await pacer();
     }
     await resolvePendingToolFacts(db, linkState);
   }
@@ -411,8 +455,10 @@ async function ingestDelegationRange(db, runId, path, eofOffset, state) {
     runId, parentAgent: "_lead", transcriptPath: path,
     spawns: delegation.spawns, metaCache: delegation.meta,
   });
+  const pacer = createPacer();
   for (const record of records) {
     await recordDelegationLink(record, { db });
+    await pacer();
   }
 }
 
@@ -542,7 +588,14 @@ async function scanTranscriptMeta(path, taskId) {
   let branch = null;
   let observedAt = null;
   let taskLinkTime = null;
+  // FOC-547 (AC2): this scans a FULL lead transcript on first ingest (it must
+  // reach EOF for the latest cwd/branch), and the chunk reads are synchronous
+  // — a bare `for await` never reaches the event loop, measured as one
+  // multi-second block per transcript on the real corpus. The pacer yields at
+  // least every ~40 ms of accumulated work.
+  const pacer = createPacer();
   for await (const { lines } of jsonlChunksFrom(path, 0)) {
+    await pacer();
     for (const { raw } of lines) {
       if (!raw) continue;
       let line = null;
@@ -581,6 +634,13 @@ async function buildRunIdTranscriptIndex(projectsRoot) {
   const index = new Map();
   let hashDirs;
   try { hashDirs = readdirSync(projectsRoot); } catch { return index; }
+  // FOC-547 (AC2): this sweep reads the WHOLE per-squad projects corpus line
+  // by line. The reads are synchronous, so a bare `for await` over the
+  // chunk generator drains its already-resolved promises in microtasks and
+  // never reaches the event loop — measured as one uninterrupted 0.8–5 s
+  // block per squad root on the real corpus. The pacer returns control to
+  // the loop at least every ~40 ms of accumulated sweep work.
+  const pacer = createPacer();
   for (const hashDirectory of hashDirs) {
     const hashPath = join(projectsRoot, hashDirectory);
     let isDir = false;
@@ -594,6 +654,7 @@ async function buildRunIdTranscriptIndex(projectsRoot) {
       const candidate = join(hashPath, file);
       try {
         for await (const { lines } of jsonlChunksFrom(candidate, 0, { chunkBytes: 1 << 20 })) {
+          await pacer();
           for (const { raw } of lines) {
             if (!raw) continue;
             for (const match of raw.match(RUN_ID_PATTERN) || []) {
@@ -627,19 +688,25 @@ async function runIdTranscriptLookup(manifest, indexCache) {
 // Backfill
 // ---------------------------------------------------------------------------
 
-function manifests() {
+// FOC-547 (AC2): paced — ~1000 small manifest reads in a bare synchronous
+// loop measure as one ~0.4 s event-loop block. The pacer yields at least
+// every ~40 ms of reads.
+async function manifests() {
   if (!existsSync(runsDir)) return [];
-  return readdirSync(runsDir)
-    .filter((file) => file.endsWith(".json"))
-    .flatMap((file) => {
-      const path = join(runsDir, file);
-      try { return [{ path, manifest: JSON.parse(readFileSync(path, "utf8")) }]; } catch { return []; }
-    });
+  const pacer = createPacer();
+  const out = [];
+  for (const file of readdirSync(runsDir)) {
+    if (!file.endsWith(".json")) continue;
+    const path = join(runsDir, file);
+    try { out.push({ path, manifest: JSON.parse(readFileSync(path, "utf8")) }); } catch { /* skip malformed */ }
+    await pacer();
+  }
+  return out;
 }
 
 export async function backfill(options = {}) {
   const summary = { manifests: 0, runs: 0, transcripts: 0, usageEvents: 0, missingTranscripts: 0, pending: 0 };
-  summary.pending = replayPending(options).ingested;
+  summary.pending = await replayPending(options).ingested;
   const sourceRuns = await ledger.scanRuns();
   const discovered = new Map(sourceRuns.map((run) => [run.runId, run]));
   // Per-backfill cache for the lazy runId→transcript index (one sweep per
@@ -648,10 +715,16 @@ export async function backfill(options = {}) {
   // One db connection for the whole loop: recordManifest/recordTaskLink/…
   // (options.db) and ingestTranscript (first argument) share it instead of
   // paying an open + migrate + close per manifest and per record (FOC-547).
-  const db = openTelemetryDb(options.dbPath);
+  const db = await openTelemetryDb(options.dbPath);
   try {
-    for (const { path, manifest } of manifests()) {
+    // FOC-547 (AC2): the per-manifest work between transcripts is synchronous
+    // (SQL checks, record* emits, fs) and the `await`s inside are microtask-
+    // only — a bare loop can run its whole body without one event-loop
+    // iteration. Pace it: at least one loop turn every ~40 ms of work.
+    const pacer = createPacer();
+    for (const { path, manifest } of await manifests()) {
       summary.manifests++;
+      await pacer();
       const aggregate = discovered.get(manifest.runId);
       if (aggregate?.ambiguous || manifest.sessionAmbiguous) {
         reportDataQuality(manifest.runId, "legacy_session_ambiguous", {
@@ -691,42 +764,53 @@ export async function backfill(options = {}) {
       }
 
       const startManifest = manifest.taskIdAuto ? { ...manifest, taskIdAuto: null } : manifest;
-      recordManifest(startManifest, "started", { ...options, db, sourcePath: path });
-      if (manifest.endedAt) recordManifest(manifest, "ended", { ...options, db, sourcePath: path });
-      if (!manifest.taskId && manifest.taskIdAuto) {
-        recordTaskLink(manifest.runId, manifest.taskIdAuto, "agent_pick", {
-          ...options,
-          db,
-          observedAt: pickTime || manifest.startedAt,
-          confidence: pickTime ? 1 : 0.6,
-          correctExisting: true,
-          sourceKind: pickTime ? "legacy-agent-pick" : "legacy-inference",
-          sourcePath: path,
-          sourceOffset: 4,
-        });
-      } else if (!manifest.taskId && !manifest.taskIdAuto && aggregate?.taskId) {
-        const source = aggregate.taskIdKickoff ? "kickoff_inference" : "branch_inference";
-        recordTaskLink(manifest.runId, aggregate.taskId, source, {
-          ...options,
-          db,
-          observedAt: manifest.startedAt,
-          confidence: aggregate.taskIdKickoff ? 0.7 : 0.4,
-          sourceKind: "legacy-inference",
-          sourcePath: path,
-          sourceOffset: 4,
-        });
-      }
-      if (sessionId) {
-        recordSessionLink(manifest.runId, sessionId, { transcriptPath, source: manifest.sessionId ? "manifest" : "legacy_discovery" }, { ...options, db });
-      }
-      if (workspace || aggregate?.cwd) {
-        const cwd = workspace?.cwd || aggregate.cwd;
-        const branch = workspace?.branch || aggregate.gitBranch || null;
-        recordWorkspace(manifest.runId, cwd, { ...refFromBranch(branch), headSha: null, source: "legacy_transcript" }, {
-          ...options,
-          db,
-          observedAt: workspace?.observedAt || manifest.endedAt || manifest.startedAt,
-        });
+      // FOC-547 (D2): the record* calls below emit workspace.observed events
+      // whose synchronous apply consults git per cwd. Prefetch the facts with
+      // async git first (git runs while the event loop is free) so the apply
+      // is a cache hit — a cold sync git call measured up to ~600 ms.
+      {
+        const warmCwds = new Set();
+        if (manifest.cwd) warmCwds.add(manifest.cwd);
+        if (workspace?.cwd) warmCwds.add(workspace.cwd);
+        if (aggregate?.cwd) warmCwds.add(aggregate.cwd);
+        if (warmCwds.size > 0) await warmGitFacts([...warmCwds]);
+        recordManifest(startManifest, "started", { ...options, db, sourcePath: path });
+        if (manifest.endedAt) recordManifest(manifest, "ended", { ...options, db, sourcePath: path });
+        if (!manifest.taskId && manifest.taskIdAuto) {
+          recordTaskLink(manifest.runId, manifest.taskIdAuto, "agent_pick", {
+            ...options,
+            db,
+            observedAt: pickTime || manifest.startedAt,
+            confidence: pickTime ? 1 : 0.6,
+            correctExisting: true,
+            sourceKind: pickTime ? "legacy-agent-pick" : "legacy-inference",
+            sourcePath: path,
+            sourceOffset: 4,
+          });
+        } else if (!manifest.taskId && !manifest.taskIdAuto && aggregate?.taskId) {
+          const source = aggregate.taskIdKickoff ? "kickoff_inference" : "branch_inference";
+          recordTaskLink(manifest.runId, aggregate.taskId, source, {
+            ...options,
+            db,
+            observedAt: manifest.startedAt,
+            confidence: aggregate.taskIdKickoff ? 0.7 : 0.4,
+            sourceKind: "legacy-inference",
+            sourcePath: path,
+            sourceOffset: 4,
+          });
+        }
+        if (sessionId) {
+          recordSessionLink(manifest.runId, sessionId, { transcriptPath, source: manifest.sessionId ? "manifest" : "legacy_discovery" }, { ...options, db });
+        }
+        if (workspace || aggregate?.cwd) {
+          const cwd = workspace?.cwd || aggregate.cwd;
+          const branch = workspace?.branch || aggregate.gitBranch || null;
+          recordWorkspace(manifest.runId, cwd, { ...refFromBranch(branch), headSha: null, source: "legacy_transcript" }, {
+            ...options,
+            db,
+            observedAt: workspace?.observedAt || manifest.endedAt || manifest.startedAt,
+          });
+        }
       }
       const result = await ingestTranscript(db, manifest.runId, transcriptPath, sessionId);
       if (result.missing) {
@@ -739,7 +823,7 @@ export async function backfill(options = {}) {
       summary.runs++;
     }
   } finally {
-    db.close();
+    await db.close();
   }
   return summary;
 }
@@ -797,15 +881,21 @@ export async function ingestKnownRuns(options = {}) {
       if (hasOpenQualityIssue(db, runId, "transcript_missing")) return;
       reportDataQuality(runId, "transcript_missing", details, options);
     };
-    for (const run of queryRuns(db)) {
+    // FOC-547 (AC2): for settled runs this loop is pure synchronous SQL plus
+    // microtask awaits — measured as one multi-second continuous block per
+    // tick with no loop iteration at all (the phase histogram missed it
+    // because its resume sample landed after the stats were read). Pace it.
+    const pacer = createPacer();
+    for (const run of await queryRunsForIngest(db)) {
+      await pacer();
       // Checked before transcriptForSession: that helper stats the path and
       // may search three roots for it, which is itself per-run work this loop
       // repeats every 15 s for runs that finished days ago.
-      if (settledRun(db, run)) {
+      if (await settledRun(db, run)) {
         summary.settled++;
         continue;
       }
-      const transcriptPath = transcriptForSession(run);
+      const transcriptPath = await transcriptForSession(run);
       if (!transcriptPath) {
         reportMissing(run.runId, { sessionId: run.sessionId || null });
         continue;
@@ -818,7 +908,7 @@ export async function ingestKnownRuns(options = {}) {
       else { summary.transcripts += result.files; summary.usageEvents += result.events; }
     }
   } finally {
-    db.close();
+    await db.close();
   }
   return summary;
 }
