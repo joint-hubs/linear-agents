@@ -5,7 +5,7 @@
 // Usage:
 //   import { idempotentCreate, reviewRound } from "./utils.mjs";
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,18 +24,66 @@ function ensureStateDir() {
   return d;
 }
 
+/** Blocking (synchronous) sleep — the write path this serves is sync end to end. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// Windows-only transient rename failures: another process (AV/Defender scan,
+// indexer, a parallel run) holds the destination open for a moment. Anything
+// else — ENOENT, EISDIR, … — is a real defect and fails on the first attempt.
+const TRANSIENT_RENAME_CODES = new Set(["EPERM", "EACCES"]);
+const RENAME_MAX_ATTEMPTS = 5;
+// Deterministic backoff, capped so the worst-case blocking on the live write
+// path stays in the low hundreds of ms (25 + 50 + 100 + 100 = 275ms).
+const renameBackoffMs = (attempt) => Math.min(25 * 2 ** (attempt - 1), 100);
+
 /**
  * Atomically write a JSON file: write to a temp path, then rename over target.
  * This prevents partial reads by concurrent processes on most filesystems.
  *
+ * The rename is retried up to 5 times on transient Windows `EPERM`/`EACCES`
+ * (destination momentarily held open by another process), with a capped
+ * deterministic backoff (~275ms worst case); any other error code fails on the
+ * first attempt, unchanged. When retries are exhausted the temp file is
+ * removed (best effort — a cleanup failure never masks the rename error) and
+ * the error is rethrown with the destination path and the attempt count in its
+ * message. A failed rename leaves the destination untouched — either the old
+ * content or the new content, never partial.
+ *
  * Exported because four other scripts used to carry a byte-identical private
  * copy (code-review-2026-08-03 §3) — they could not import it while it lived
  * here unexported.
+ *
+ * @param {string} filePath - Destination path.
+ * @param {unknown} data    - JSON-serializable payload (written as
+ *                            `JSON.stringify(data, null, 2) + "\n"`).
+ * @param {object}  [opts]  - Test-only seams; production callers never pass
+ *                            them and get today's behaviour byte-for-byte.
+ * @param {Function} [opts.rename] - rename(tmp, dest) override (tests).
+ * @param {Function} [opts.sleep]  - Synchronous backoff override (tests).
  */
-export function atomicWriteJSON(filePath, data) {
+export function atomicWriteJSON(filePath, data, { rename = renameSync, sleep = sleepSync } = {}) {
   const tmp = filePath + "." + randomBytes(4).readUInt32BE(0).toString(36);
   writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
-  renameSync(tmp, filePath);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      rename(tmp, filePath);
+      return;
+    } catch (err) {
+      if (!TRANSIENT_RENAME_CODES.has(err?.code)) throw err;
+      if (attempt >= RENAME_MAX_ATTEMPTS) {
+        err.message = `${err.message} (atomicWriteJSON: gave up on "${filePath}" after ${attempt} attempts)`;
+        try {
+          unlinkSync(tmp);
+        } catch {
+          // Best effort only — the rename error below is the one that matters.
+        }
+        throw err;
+      }
+      sleep(renameBackoffMs(attempt));
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
