@@ -13,13 +13,16 @@
 //      a content-identical corpus.
 //   4. Key-order guard: report equals a key-by-key rebuilt snapshot (catches
 //      accidental raw-JSON spread or key-order drift on schema'd surfaces).
-//   5. Real-corpus read-only A/B against the main checkout (skipped when
-//      .state/ is absent, e.g. a fresh worktree), asserting the design
-//      baseline: logicalVerdicts 118, matched 11, unmatched 104, ambiguous 3.
+//   5. Design-baseline A/B over a fixture corpus synthesized in code (FOC-601:
+//      the old `git worktree list` live-corpus route went permanently red when
+//      8 structured verdict files were deleted from the live disk) — named
+//      immutable cells, the FOC-142 reviewRunId join, evidence-asymmetry,
+//      unsupervised pseudo-attempt, cross-stage recording, fp: workId, sum
+//      invariant, growth-tolerant floors.
 // The suite is hermetic: every fixture pins dbPath to null / a nonexistent
 // LA_TELEMETRY_DB so the machine's real telemetry DB never leaks in.
 
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -498,7 +501,7 @@ const corpusB = writeStableCorpus(dirB, "reverse");
 // ── 3. idempotency: two child processes × two creation-order variants ─────────
 
 {
-  const cliEnv = { ...process.env, LA_TELEMETRY_DB: join(root, "no-such-db.sqlite") };
+  const cliEnv = { ...process.env, LA_TELEMETRY_DB: join(root, "no-such-db.sqlite"), LA_SUPERVISOR_NO_TELEMETRY: "1" };
   const runCli = (dir) => {
     const r = spawnSync(process.execPath, [CLI, "--json",
       "--supervisor-root", join(dir, "supervisor"),
@@ -887,41 +890,98 @@ console.log("\n# FOC-257 literal UNKNOWN anomaly\n");
     JSON.stringify(unknownAnoms));
 }
 
-// ── 5. real-corpus read-only A/B (skipped without the main checkout) ──────────
-// The corpus is APPEND-ONLY and self-referential: this very candidate's own
-// REVIEW verdicts (FOC-218, FOC-219 …) are recorded into the same .state/ the
-// A/B reads, so exact aggregate totals flip on every supervised run — they
-// moved 118 → 119 → 120 logical verdicts within a day of pinning. Human
+// ── 5. design-baseline A/B over a fixture corpus (FOC-601) ────────────────────
+// This section used to A/B the MAIN checkout's live .state/ (resolved via
+// `git worktree list --porcelain`), asserting named immutable cells. The
+// corpus is APPEND-ONLY and self-referential, so exact totals were never
+// asserted — they moved 118 → 119 → 120 within a day of pinning. Human
 // decision (Mateusz, 2026-09-08): the pinned SEMANTICS live on named
 // immutable cells — historical records that can no longer change — never on
-// exact totals. Totals are sanity-checked only via the sum invariant and
-// growth-tolerant floors.
+// exact totals; totals are bounded only by the sum invariant and
+// growth-tolerant floors. When 8 structured verdict files were later deleted
+// from that live disk, 10 checks went permanently red on main (FOC-601); the
+// records are historical and unrecoverable. The pinned semantics now live on
+// a fixture corpus synthesized in code below (same record shapes as §1), so
+// the section is hermetic: identical results on a machine with no .state/ at
+// all and on one with a full live corpus. Check names keep the "real-corpus:"
+// prefix from the live-corpus era verbatim, for 1:1 traceability with the
+// FOC-601 failure list.
 
-function mainCheckoutRoot() {
-  const r = spawnSync("git", ["worktree", "list", "--porcelain"], { cwd: join(__dirname, ".."), encoding: "utf8" });
-  if (r.status !== 0) return null;
-  const m = r.stdout.match(/^worktree (.+)$/m); // the main worktree is listed first
-  return m ? m[1] : null;
-}
+console.log("\n# design-baseline A/B (fixture corpus)\n");
 
-console.log("\n# real-corpus A/B\n");
-const mainRoot = mainCheckoutRoot();
-const supDir = mainRoot ? join(mainRoot, ".state", "supervisor") : null;
-const revDir = mainRoot ? join(mainRoot, ".state", "reviews") : null;
+// Deterministic ids carried over from the live corpus: the FOC-142 legacy
+// reviewRunId and the supervisor run it must resolve to are themselves part
+// of the pinned semantics (reviewRunId → telemetryRunId → run join).
+const BASELINE = {
+  run142: "2026-08-27T06-45-08-262-supervisor-2d75",
+  reviewRun142: "2026-08-27T08-08-45-487-review-63bc",
+};
 
-if (mainRoot && supDir && revDir && existsSync(supDir) && existsSync(revDir)) {
+{
+  const dir = join(root, "design-baseline");
+  const c = mkCorpus(dir);
+
+  // Run 2d75: FOC-142 (r1 structured FAIL vs legacy UNKNOWN; r2 both PASS),
+  // FOC-211 (structured PASS; legacy has no **Run:** line → unsupervised
+  // pseudo-attempt), FOC-156 r1 (structured PASS vs legacy FAIL → ambiguous).
+  writeRun(c.sup, BASELINE.run142, {
+    verdicts: [
+      rec({ taskId: "FOC-142", round: 1, childId: "review-1", verdict: "fail", findings: [{ id: "F1" }] }),
+      rec({ taskId: "FOC-142", round: 2, childId: "review-1", verdict: "pass" }),
+      rec({ taskId: "FOC-211", round: 1, childId: "review-2", verdict: "pass" }),
+      rec({ taskId: "FOC-156", round: 1, childId: "review-3", verdict: "pass" }),
+    ],
+    children: {
+      "review-1": kid("review-1", "review", "FOC-142", { telemetryRunId: BASELINE.reviewRun142 }),
+      "review-2": kid("review-2", "review", "FOC-211"),
+      "review-3": kid("review-3", "review", "FOC-156"),
+    },
+  });
+  writeReview(c.reviews, "FOC-142", 1, "UNKNOWN", UNKNOWN_BODY, BASELINE.reviewRun142);
+  writeReview(c.reviews, "FOC-142", 2, "PASS", PASS_BODY, BASELINE.reviewRun142);
+  writeReview(c.reviews, "FOC-211", 1, "PASS", PASS_BODY);
+  writeReview(c.reviews, "FOC-156", 1, "FAIL", FAIL_BODY);
+
+  // FOC-151: r2 recorded by a TEST child with review-shaped acMapping
+  // (cross-stage-recording — the row stays test, the cell rolls up to review,
+  // and the legacy side disagrees → ambiguous), r3 the mirror conflict.
+  writeRun(c.sup, "2026-08-27T09-00-00-000-supervisor-f151", {
+    verdicts: [
+      rec({ taskId: "FOC-151", round: 2, squad: "test", childId: "test-4", verdict: "pass", acMapping: [{ ac: "AC1", status: "pass" }] }),
+      rec({ taskId: "FOC-151", round: 3, childId: "review-7", verdict: "fail" }),
+    ],
+  });
+  writeReview(c.reviews, "FOC-151", 2, "FAIL", FAIL_BODY);
+  writeReview(c.reviews, "FOC-151", 3, "PASS", PASS_BODY);
+
+  // FOC-218: structured-only cell with a fingerprint — the fp: workId
+  // (self-referential growth in the live corpus; pinned presence here).
+  writeRun(c.sup, "2026-08-27T10-00-00-000-supervisor-f218", {
+    verdicts: [rec({ taskId: "FOC-218", round: 1, childId: "review-8", verdict: "pass", fingerprint: { combined: "2188218821882188" } })],
+  });
+
+  // Matched filler: one agreeing structured+legacy cell per task, so the
+  // growth-tolerant floors (matched >= 11) are genuinely satisfied by the
+  // fixture itself (2 FOC-142 + 1 FOC-211 + 9 filler = 12 matched).
+  const fillerTasks = ["FOC-301", "FOC-302", "FOC-303", "FOC-304", "FOC-305", "FOC-306", "FOC-307", "FOC-308", "FOC-309"];
+  writeRun(c.sup, "2026-08-27T11-00-00-000-supervisor-fb01", {
+    verdicts: fillerTasks.map((t, i) => rec({ taskId: t, round: 1, childId: `review-${10 + i}`, verdict: "pass" })),
+  });
+  for (const t of fillerTasks) writeReview(c.reviews, t, 1, "PASS", PASS_BODY);
+
   // Hermetic: pin dbPath to a nonexistent file so the machine's telemetry DB
-  // (and anything machine-local) never leaks into the assertion.
+  // (and anything machine-local) never leaks into the assertion; roundsPath
+  // to an absent file (same contract as the project() helper).
   const rep = projectVerdictEvidence({
-    supervisorRoot: supDir,
-    reviewsDir: revDir,
-    roundsPath: join(mainRoot, ".state", "review-rounds.json"),
+    supervisorRoot: c.sup,
+    reviewsDir: c.reviews,
+    roundsPath: join(dir, "review-rounds.json"),
     dbPath: join(root, "no-such-db.sqlite"),
   });
 
-  // Append-only totals: never asserted exactly — printed so every run shows
-  // the live corpus state, and bounded only by the invariant + floors.
-  console.log(`  live corpus coverage: ${JSON.stringify(rep.coverage)} (evidenceRows: ${rep.evidenceRows.length})`);
+  // Growth-tolerant totals: never asserted exactly — printed so every run
+  // shows the corpus state, and bounded only by the invariant + floors.
+  console.log(`  fixture corpus coverage: ${JSON.stringify(rep.coverage)} (evidenceRows: ${rep.evidenceRows.length})`);
   check("real-corpus: sum invariant", sumInvariant(rep.coverage));
   check("real-corpus: growth-tolerant floors (matched >= 11, ambiguous >= 3)",
     rep.coverage.matched >= 11 && rep.coverage.ambiguous >= 3,
@@ -947,14 +1007,14 @@ if (mainRoot && supDir && revDir && existsSync(supDir) && existsSync(revDir)) {
   const r142legacy = rep.evidenceRows.filter((r) => r.issue === "FOC-142" && r.source === "legacy");
   check("real-corpus: FOC-142 legacy attempt resolves via reviewRunId join to run 2d75",
     r142legacy.length === 2 && r142legacy.every((r) =>
-      r.attempt === "2026-08-27T06-45-08-262-supervisor-2d75"
-      && r.work.reviewRunId === "2026-08-27T08-08-45-487-review-63bc"),
+      r.attempt === BASELINE.run142
+      && r.work.reviewRunId === BASELINE.reviewRun142),
     JSON.stringify(r142legacy.map((r) => [r.round, r.attempt, r.work.reviewRunId])));
   const l142r1 = logicalOf(rep, "FOC-142", "review", 1);
   check("real-corpus: FOC-142 r1 matched, evidence-asymmetry, FAIL, attempt joined to run 2d75",
     l142r1?.coverageClass === "matched" && l142r1?.resolution === "evidence-asymmetry"
       && l142r1?.resolvedVerdict === "FAIL"
-      && l142r1?.attempt === "2026-08-27T06-45-08-262-supervisor-2d75",
+      && l142r1?.attempt === BASELINE.run142,
     JSON.stringify(l142r1));
   const l142r2 = logicalOf(rep, "FOC-142", "review", 2);
   check("real-corpus: FOC-142 r2 matched PASS",
@@ -983,9 +1043,6 @@ if (mainRoot && supDir && revDir && existsSync(supDir) && existsSync(revDir)) {
   check("real-corpus: read-only A/B leaves no artifacts (sha12 digests only, paths .state-relative)",
     rep.evidenceRows.every((r) => r.artifacts.every((a) => isSha12(a.sha256)))
       && rep.evidenceRows.every((r) => r.artifacts.every((a) => !a.path.includes("\\") && (a.path.startsWith("supervisor/") || a.path.startsWith("reviews/")))));
-} else {
-  results.skip++;
-  console.log(`  SKIP real-corpus A/B — main checkout .state not found (mainRoot=${mainRoot || "unknown"})`);
 }
 
 // ── wrap up ───────────────────────────────────────────────────────────────────
