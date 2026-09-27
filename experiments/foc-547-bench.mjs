@@ -9,6 +9,12 @@
 // READ-ONLY input here. All mutable stores (telemetry db/home, rewards
 // db/home) live under a mkdtemp tmp dir.
 //
+// Env seams:
+//   LA_BENCH_ROOT — spawn scripts/telemetry-server.mjs from this checkout
+//     instead of the bench script's own repo (base-code export vs candidate).
+//   LA_BENCH_DB  — reuse a pre-built telemetry db instead of a fresh one
+//     (controlled same-db comparison); only the homes stay under tmp.
+//
 // Usage: node experiments/foc-547-bench.mjs <outDir>
 
 import { spawn } from "node:child_process";
@@ -27,7 +33,9 @@ const OVERALL_MS = Number(process.env.LA_BENCH_OVERALL_MS) || 540000;
 
 const experimentsDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(experimentsDir);
-const serverScript = join(repoRoot, "scripts", "telemetry-server.mjs");
+const spawnRoot = process.env.LA_BENCH_ROOT || repoRoot;
+const serverScript = join(spawnRoot, "scripts", "telemetry-server.mjs");
+const presetDb = process.env.LA_BENCH_DB || null;
 
 const outDirArg = process.argv[2];
 if (!outDirArg) {
@@ -65,7 +73,7 @@ if (await portBusy(port)) {
 const childEnv = { ...process.env };
 delete childEnv.LA_STATE_ROOT;
 childEnv.TELEMETRY_PORT = String(port);
-childEnv.LA_TELEMETRY_DB = join(tmpDir, "telemetry.sqlite");
+childEnv.LA_TELEMETRY_DB = presetDb || join(tmpDir, "telemetry.sqlite");
 childEnv.LA_TELEMETRY_HOME = join(tmpDir, "telemetry-home");
 childEnv.LA_REWARDS_DB = join(tmpDir, "rewards.sqlite");
 childEnv.LA_REWARDS_HOME = join(tmpDir, "rewards-home");
