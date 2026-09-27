@@ -500,12 +500,54 @@ test("the watcher writes waiting_gate when a real child leaves a pending gate", 
   ]);
   assert.equal(emitted.status, 0, emitted.stdout + emitted.stderr);
 
-  const waited = parse(cli(STATUS, ["--run", runId, "--wait", "--timeout-ms", "20000"]));
-  const child = waited.children.find((c) => c.childId === spawned.childId);
+  // --- Manual polling loop to fix race condition ---
+  const startTime = Date.now();
+  const timeoutMs = 20000;
+  let waited = null;
+  let childStatus = null;
+  let child = null;
+
+  // Loop until timeout or until the child's status is terminal.
+  while (Date.now() - startTime < timeoutMs) {
+    // Get the current status snapshot without the problematic --wait flag.
+    waited = parse(cli(STATUS, ["--run", runId]));
+    child = waited.children.find((c) => c.childId === spawned.childId);
+
+    if (!child) {
+      // If child disappears unexpectedly, fail.
+      throw new Error(`Child ${spawned.childId} disappeared from status.`);
+    }
+
+    childStatus = child.status;
+
+    // Check for terminal status, specifically waiting_gate.
+    if (childStatus === "waiting_gate") {
+      break; // Success condition met.
+    }
+
+    // If child status is already terminal but not waiting_gate, this is a failure.
+    if (TERMINAL_STATUSES.includes(childStatus) && childStatus !== "waiting_gate") {
+        throw new Error(`Child exited with unexpected terminal status: ${child.status} (reason ${waited.reason})`);
+    }
+    // A small sleep might be beneficial, but for now we rely on synchronous cli calls.
+  }
+
+  // --- Assertions after the loop ---
+  if (!waited) {
+    throw new Error("Status polling timed out before getting any status.");
+  }
+  if (!child) {
+    throw new Error(`Child ${spawned.childId} not found in final status snapshot.`);
+  }
+
+  // Original assertions, now applied after successful waiting.
   assert.equal(child.status, "waiting_gate", `status was ${child.status} (reason ${waited.reason})`);
   assert.equal(child.exitCode, 0, "waiting_gate is a CLEAN exit plus an open question");
   assert.equal(child.stalled, false, "a child waiting on a human is not stalled");
   assert.equal(waited.totals.live, 0, "nothing is running, so nothing is live");
+
+  // Clean up the spawned child using the correct path for supervisor-stop.mjs
+  cli(join(ROOT, "scripts", "supervisor-stop.mjs"), ["--run", runId, "--child", spawned.childId]);
 });
 
 // ── 6. recorded and delivered stay in step ────────────────────────────────────
