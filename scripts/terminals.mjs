@@ -3,10 +3,12 @@
 //
 // Primary API (PID-based — reliable, used by dashboard):
 //   isProcessAlive(pid)        → boolean   (SYNC — one PowerShell spawn per pid;
-//                                          background reconcile path only, never
-//                                          an HTTP request path)
+//                                          ft.mjs CLI only — since FOC-547 the
+//                                          server uses the batched probe below
+//                                          on every path, reconcile included)
 //   areProcessesAlive(pids)    → Promise<Map<pid, boolean>>  (ASYNC batched — one
-//                                          spawn for all pids; request paths)
+//                                          spawn for all pids; request paths
+//                                          and the background reconcile)
 //   listTerminalsAsync(runs)   → Promise<array>  (batched probe + listTerminals —
 //                                          the /api/terminals request path)
 //   listTerminals(runs, opts)  → array of terminal entries (sync probe injection
