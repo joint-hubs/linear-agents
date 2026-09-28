@@ -71,6 +71,30 @@ const RE_FILE_LINE_REF = /`([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]+:\d+)`/g;
 // Blast-radius bullets: - `symbolName` (file:line) — ...
 const RE_SYMBOL_BULLET = /^-\s+`([A-Za-z_$][\w$]*)`\s+\(/gm;
 
+// impact render (FOC-640): file groups are **path:** — colon-terminated and NOT
+// backticked, unlike explore's **`path`**. Requiring a slash keeps bold labels
+// (**Location:**, **Signature:**) from ever reading as files.
+const RE_IMPACT_SHAPE = /^\*\*Impact: /m;
+const RE_IMPACT_FILE_HEADER = /^\*\*([^`\n]*\/[^`\n]*):\*\*/gm;
+// impact content lines carry SYM:LINE / path:LINE tokens (e.g.
+// `SUPERVISOR_DENY:270, buildChildSettings:302`). The lookbehind keeps the tail
+// of a path ("…mjs:1") from reading as a symbol.
+const RE_SYMBOL_TOKEN = /(?<![\w.$/\\-])([A-Za-z_$][\w$]*):\d+/g;
+const RE_BARE_FILE_LINE = /(?<![\w/\\-])([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]+):\d+/g;
+// node render (symbol mode): a **sym** (kind) header, its **Location:** target,
+// and the trail lines `sym (path:line)`. The header requires an unbroken
+// **sym** — **Files (149)** and **CodeGraph Status** do not match it.
+const RE_NODE_SHAPE = /^\*\*[A-Za-z_$][\w$]*\*\* \(\w+\)/m;
+const RE_NODE_SYMBOL_HEADER = /^\*\*([A-Za-z_$][\w$]*)\*\* \(\w+\)/gm;
+const RE_TRAIL_SYMBOL = /(?<![\w.$/\\-])([A-Za-z_$][\w$]*) \([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]+:\d+\)/g;
+// files render: **Files (N)** heading with - path (lang, N symbols) bullets.
+// The backtick-less bullet cannot collide with explore's `- \`sym\` (…)` bullets.
+const RE_FILES_SHAPE = /^\*\*Files \(\d+\)\*\*/m;
+const RE_FILES_BULLET = /^- ([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]+) \(/gm;
+// status render: a ready status is a recognised shape (its freshness may be
+// established) but carries NO identifiers — it is never an "answer".
+const RE_STATUS_SHAPE = /^\*\*CodeGraph Status\*\*/m;
+
 const unique = (items) => [...new Set(items.filter(Boolean))];
 
 /**
@@ -99,7 +123,11 @@ export function deriveCodegraphCapture({ resultText } = {}) {
   } else if (RE_FRESHNESS_UNPROVEN.test(text)) {
     freshness = "unknown";
     reason = "result reports an unproven or missing index";
-  } else if (RE_ANSWER_SHAPE.test(text) || RE_FOUND_COUNT.test(text)) {
+  } else if (
+    RE_ANSWER_SHAPE.test(text) || RE_FOUND_COUNT.test(text)
+    || RE_IMPACT_SHAPE.test(text) || RE_NODE_SHAPE.test(text)
+    || RE_FILES_SHAPE.test(text) || RE_STATUS_SHAPE.test(text)
+  ) {
     // The MCP server enforces the freshness guard before answering, so a recognised
     // successful answer is the only thing that may claim `fresh`.
     freshness = "fresh";
@@ -107,11 +135,33 @@ export function deriveCodegraphCapture({ resultText } = {}) {
   }
 
   // --- returned identifiers (identifiers only, never the text) ---
+  // The original explore regexes stay unconditional. Each non-explore shape
+  // scopes its OWN token regexes behind its shape check: a render whose shape is
+  // not one of these must yield nothing new, or a re-run would re-label explore
+  // renders the original vocabulary already graded (the corpus is keyed on it).
+  const impactShape = RE_IMPACT_SHAPE.test(text);
+  const nodeShape = RE_NODE_SHAPE.test(text);
+  const filesShape = RE_FILES_SHAPE.test(text);
   const files = [];
-  for (const m of text.matchAll(RE_FILE_HEADER)) files.push(m[1]);
-  for (const m of text.matchAll(RE_FILE_LINE_REF)) files.push(m[1].replace(/:\d+$/, ""));
   const symbols = [];
+  for (const m of text.matchAll(RE_FILE_HEADER)) files.push(m[1]);
   for (const m of text.matchAll(RE_SYMBOL_BULLET)) symbols.push(m[1]);
+  for (const m of text.matchAll(RE_FILE_LINE_REF)) files.push(m[1].replace(/:\d+$/, ""));
+  if (impactShape) {
+    for (const m of text.matchAll(RE_IMPACT_FILE_HEADER)) files.push(m[1]);
+    for (const m of text.matchAll(RE_SYMBOL_TOKEN)) symbols.push(m[1]);
+  }
+  if (impactShape || nodeShape) {
+    // bare path:LINE refs — impact content lines, the node **Location:** target
+    for (const m of text.matchAll(RE_BARE_FILE_LINE)) files.push(m[1]);
+  }
+  if (nodeShape) {
+    for (const m of text.matchAll(RE_NODE_SYMBOL_HEADER)) symbols.push(m[1]);
+    for (const m of text.matchAll(RE_TRAIL_SYMBOL)) symbols.push(m[1]);
+  }
+  if (filesShape) {
+    for (const m of text.matchAll(RE_FILES_BULLET)) files.push(m[1]);
+  }
 
   const returnsFiles = unique(files.map(normaliseIdentPath));
   const returnsSymbols = unique(symbols);
@@ -124,7 +174,9 @@ export function deriveCodegraphCapture({ resultText } = {}) {
   // nothing — the render changed, the answer did not.
   const found = RE_FOUND_COUNT.exec(text);
   const foundCount = found ? Number(found[1]) : null;
-  const shapeRecognised = RE_ANSWER_SHAPE.test(text) || foundCount != null;
+  const shapeRecognised = RE_ANSWER_SHAPE.test(text) || foundCount != null
+    || RE_IMPACT_SHAPE.test(text) || RE_NODE_SHAPE.test(text)
+    || RE_FILES_SHAPE.test(text) || RE_STATUS_SHAPE.test(text);
   const hasReturns = returnsFiles.length > 0 || returnsSymbols.length > 0;
   const graphAnswered = Boolean(shapeRecognised && freshness !== "unknown" && (hasReturns || foundCount > 0));
 

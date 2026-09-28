@@ -190,6 +190,135 @@ section("C. deriveCodegraphCapture");
 }
 
 // ---------------------------------------------------------------------------
+// C2. Capture derivation — the non-explore render shapes (FOC-640)
+//
+// impact, node, files and status are real recorded renders (corpus transcripts
+// + live samples), mirroring section C's rule: fixtures track the real render,
+// or the vocabulary drifts silently. One no-identifier case per shape pins the
+// AC5 half: a render without identifiers is NEVER an answer, whichever tool
+// served it.
+// ---------------------------------------------------------------------------
+
+section("C2. deriveCodegraphCapture — impact / node / files / status renders");
+
+// Real impact render: **path:** groups (colon-terminated, NOT backticked),
+// SYM:LINE token lists, and bare path:LINE refs on content lines.
+const IMPACT = [
+  '**Impact: "SUPERVISOR_DENY" affects 4 symbols**',
+  "",
+  "**scripts/supervisor-lib.mjs:**",
+  "SUPERVISOR_DENY:270, buildChildSettings:302",
+  "",
+  "**scripts/supervisor-spawn.test.mjs:**",
+  "supervisor-spawn.test.mjs:1",
+].join("\n");
+
+// Real node render (symbol mode): **sym** (kind) header, **Location:** target,
+// the signature code-span, a fenced code block, and the trail lines.
+const NODE = [
+  "**verifyPinnedState** (function)",
+  "",
+  "**Location:** scripts/supervisor-lib.mjs:950",
+  "**Signature:** `({ worktree, branch, baseRevision, created })`",
+  "",
+  "```javascript",
+  "950\texport function verifyPinnedState(worktree) { /* ... */ }",
+  "```",
+  "**Trail — codegraph_node any of these to follow it (no Read needed)**",
+  "**Calls →** removeIntegrationTree (scripts/supervisor-merge.mjs:207), resolve (scripts/gen-model-map.mjs:57)",
+  "**Called by ←** supervisor-merge.mjs (scripts/supervisor-merge.mjs:1)",
+].join("\n");
+
+// Real files render: **Files (N)** heading with - path (lang, N symbols) bullets.
+const FILES = [
+  "**Files (149)**",
+  "",
+  "- scripts/agent-behavior.mjs (javascript, 43 symbols)",
+  "- scripts/agent-behavior.test.mjs (javascript, 27 symbols)",
+].join("\n");
+
+{
+  const cap = deriveCodegraphCapture({ resultText: IMPACT });
+  check("an impact render is FRESH", cap.freshness === "fresh", cap.reason);
+  check("an impact render with identifiers counts as answered", cap.graphAnswered === true, cap.reason);
+  check("impact file groups are extracted from the **path:** headers",
+    JSON.stringify(cap.returnsFiles) ===
+      JSON.stringify(["scripts/supervisor-lib.mjs", "scripts/supervisor-spawn.test.mjs", "supervisor-spawn.test.mjs"]),
+    JSON.stringify(cap.returnsFiles));
+  check("impact SYM:LINE tokens are extracted as symbols",
+    JSON.stringify(cap.returnsSymbols) === JSON.stringify(["SUPERVISOR_DENY", "buildChildSettings"]),
+    JSON.stringify(cap.returnsSymbols));
+}
+{
+  const cap = deriveCodegraphCapture({ resultText: 'ℹ Symbol "zzzNoSuchSymbolQq" not found' });
+  check("an impact miss is NOT answered and carries no identifiers",
+    cap.graphAnswered === false && cap.returnsFiles.length === 0 && cap.returnsSymbols.length === 0,
+    cap.reason);
+}
+{
+  const cap = deriveCodegraphCapture({ resultText: NODE });
+  check("a node render is FRESH", cap.freshness === "fresh", cap.reason);
+  check("a node render with identifiers counts as answered", cap.graphAnswered === true, cap.reason);
+  check("node identifiers come from the Location target and the trail refs",
+    JSON.stringify(cap.returnsFiles) ===
+      JSON.stringify(["scripts/supervisor-lib.mjs", "scripts/supervisor-merge.mjs", "scripts/gen-model-map.mjs"]),
+    JSON.stringify(cap.returnsFiles));
+  check("node symbols come from the header and the trail",
+    JSON.stringify(cap.returnsSymbols) ===
+      JSON.stringify(["verifyPinnedState", "removeIntegrationTree", "resolve"]),
+    JSON.stringify(cap.returnsSymbols));
+  check("the tail of a path never becomes a symbol (Called by ← file.mjs (...))",
+    !cap.returnsSymbols.includes("mjs"), JSON.stringify(cap.returnsSymbols));
+  check("a bold label (**Location:**) is never a file",
+    !cap.returnsFiles.includes("Location"), JSON.stringify(cap.returnsFiles));
+}
+{
+  const cap = deriveCodegraphCapture({ resultText: 'Symbol "zzzNoSuchSymbolQq" not found in the codebase' });
+  check("a node miss is NOT answered and carries no identifiers",
+    cap.graphAnswered === false && cap.returnsFiles.length === 0 && cap.returnsSymbols.length === 0,
+    cap.reason);
+}
+{
+  const cap = deriveCodegraphCapture({ resultText: FILES });
+  check("a files render is FRESH", cap.freshness === "fresh", cap.reason);
+  check("a files render with bullets counts as answered", cap.graphAnswered === true, cap.reason);
+  check("files bullets are extracted as files, not symbols",
+    JSON.stringify(cap.returnsFiles) ===
+      JSON.stringify(["scripts/agent-behavior.mjs", "scripts/agent-behavior.test.mjs"]),
+    JSON.stringify(cap.returnsFiles));
+  check("a files render returns no symbols", cap.returnsSymbols.length === 0,
+    JSON.stringify(cap.returnsSymbols));
+}
+{
+  const cap = deriveCodegraphCapture({ resultText: "**Files (0)**\n\n(no files)" });
+  check("an empty files render is a recognised shape but NOT answered (no identifiers)",
+    cap.freshness === "fresh" && cap.graphAnswered === false, cap.reason);
+}
+{
+  const cap = deriveCodegraphCapture({ resultText: [
+    "**CodeGraph Status**",
+    "",
+    "**Files indexed:** 304",
+    "**Total nodes:** 7219",
+  ].join("\n") });
+  check("a ready status establishes freshness", cap.freshness === "fresh", cap.reason);
+  check("a ready status carries NO identifiers and is NOT an answer",
+    cap.graphAnswered === false && cap.returnsFiles.length === 0 && cap.returnsSymbols.length === 0,
+    cap.reason);
+}
+{
+  const cap = deriveCodegraphCapture({ resultText:
+    "The project at C:/worktrees/foc-357-dev isn't indexed with codegraph (no .codegraph/ directory found " +
+    "walking up from it), so codegraph cannot query it. Use your built-in tools (Read/Grep/Glob) for that " +
+    "codebase instead, and don't call codegraph for it again this session. Indexing is the user's decision — " +
+    "they can run 'codegraph init' in that project to enable it." });
+  check("a not-indexed refusal stays UNKNOWN", cap.freshness === "unknown", cap.reason);
+  check("a not-indexed refusal is NOT answered and carries no identifiers",
+    cap.graphAnswered === false && cap.returnsFiles.length === 0 && cap.returnsSymbols.length === 0,
+    cap.reason);
+}
+
+// ---------------------------------------------------------------------------
 // D. captureFromRecord
 // ---------------------------------------------------------------------------
 
