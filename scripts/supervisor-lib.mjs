@@ -74,7 +74,16 @@ export const TURN_END_CONTRACT = [
   "=== END TURN-END CONTRACT ===",
 ].join("\n");
 
-export const runDir = (runId) => join(ROOT, ".state", "supervisor", runId);
+// FOC-608: the state root is a SEAM, in the same spirit as telemetry-store's
+// LA_TELEMETRY_HOME — one function derives every path below it, and the default
+// is never inlined anywhere else. `LA_SUPERVISOR_STATE_HOME` redirects the whole
+// supervisor state tree (runs, gates, tees, wake queues) to another directory,
+// which is what lets tests run against a temp dir instead of the repo's real
+// `.state/supervisor/`. Unset means the historical location, unchanged.
+export const supervisorStateHome = () =>
+  process.env.LA_SUPERVISOR_STATE_HOME || join(ROOT, ".state", "supervisor");
+
+export const runDir = (runId) => join(supervisorStateHome(), runId);
 export const registryPath = (runId) => join(runDir(runId), "children.json");
 export const triagePath = (runId) => join(runDir(runId), "triage.json");
 // FOC-451: the intake annotations live as triage.json's sibling, so a reviewer
