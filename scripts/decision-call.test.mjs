@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDecisionCaller, inputsHash, canonicalJson, DECISION_STEP, FALLBACK_MODEL } from "./decision-call.mjs";
 import { JEV_MODEL, JEV_ENDPOINT } from "./mcp/provider-jev.mjs";
+import { EGRESS_BLOCKED } from "./egress-screen.mjs";
 
 // The shipped constant (null = tier-2 disabled) and the ADR that must agree
 // with it — the drift guard below fails on divergence between the two.
@@ -347,6 +348,81 @@ await test("error paths never echo key-shaped material", async () => {
   if (!JSON.stringify(envelope).includes("[REDACTED]")) fail("expected a scrubbed error message");
 });
 
+console.log("\ndecision-call: egress screen before the provider call (FOC-643)");
+
+// Synthetic secret shape — the same literal the egress-screen suite uses,
+// never a real credential (FOC-220). KEY_PREFIX_RE detects it reliably.
+const SCREEN_SECRET = "sk-or-".concat("v1-", "0123456789abcdef", "0123456789abcdef", "0123456789abcdef", "0123456789abcdef");
+const SCREEN_SECRET_STATE = `Operator pasted the run token into the issue body: ${SCREEN_SECRET}`;
+
+await test("a secret in the state blocks the call with ZERO provider requests (transport and fallback both unreachable)", async () => {
+  let calls = 0;
+  // fallbackModel is armed so the fallback WOULD have been reachable — the
+  // zero count proves the block precedes both tiers, not just tier 1.
+  const envelope = await caller(() => { calls++; return jsonResponse(PROBE_BODY); }, { fallbackModel: SEAM_MODEL })({
+    state: SCREEN_SECRET_STATE,
+    questions: NOUL_INPUT.questions,
+  });
+  eq(calls, 0, "zero requests reached the transport and the fallback");
+  eq(envelope.ok, false, "typed failure, not a degrade");
+  eq(envelope.error.code, EGRESS_BLOCKED, "the screen's typed marker");
+  eq(envelope.tier, null, "no tier — nothing was sent");
+  eq(envelope.mode, null, "no mode — nothing was sent");
+  if ("decision" in envelope) fail("a blocked call never carries a decision");
+  if (JSON.stringify(envelope).includes("v1-0123456789abcdef")) fail("the hit VALUE never travels in the envelope");
+  if (!envelope.error.message.includes("decision-call input")) fail(`the refusal names the checkpoint label: ${envelope.error.message}`);
+});
+
+await test("a secret fails a registry-backed A0 call closed too — no annotation, nothing sent, shadow line honest", async () => {
+  let calls = 0;
+  const dir = mkdtempSync(join(tmpdir(), "decision-call-egress-"));
+  try {
+    const envelope = await caller(() => { calls++; return jsonResponse(PROBE_BODY); }, { shadowDir: dir })({
+      state: SCREEN_SECRET_STATE,
+      decisionId: "intake.triage_node",
+    });
+    eq(calls, 0, "zero requests despite successful registry resolution");
+    eq(envelope.ok, false, "ok:false");
+    eq(envelope.error.code, EGRESS_BLOCKED, "code");
+    eq(envelope.decisionId, "intake.triage_node", "provenance stamped even on the block");
+    if ("annotation" in envelope) fail("a blocked A0 call carries no annotation");
+    if ("decision" in envelope) fail("a blocked call carries no decision");
+    const lines = readFileSync(join(dir, "decisions.jsonl"), "utf8").trim().split("\n");
+    eq(lines.length, 1, "one shadow line");
+    const line = JSON.parse(lines[0]);
+    eq(line.ok, false, "shadow line ok:false");
+    eq(line.error.code, EGRESS_BLOCKED, "shadow error code");
+    eq(line.input, null, "input null — nothing was sent");
+    eq(line.scrub, null, "no scrub record for an unsent input");
+    if (!line.eventId) fail("eventId present so the FOC-449 label can still join");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("a secret fails the graph-node class too (plan.dor, runner-built questions under the registry id)", async () => {
+  let calls = 0;
+  const envelope = await caller(() => { calls++; return jsonResponse(PROBE_BODY); })({
+    state: SCREEN_SECRET_STATE,
+    decisionId: "plan.dor",
+    questions: { q0: { type: "noul", instructions: "Is the entry ready?", criteria: { true: "ready", false: "not ready" } } },
+  });
+  eq(calls, 0, "zero requests");
+  eq(envelope.ok, false, "ok:false");
+  eq(envelope.error.code, EGRESS_BLOCKED, "code");
+  eq(envelope.decisionId, "plan.dor", "provenance stamped");
+});
+
+await test("clean text reaches the provider exactly as before — the screen adds no friction", async () => {
+  const calls = [];
+  const envelope = await caller((url, options) => { calls.push(url); return jsonResponse(PROBE_BODY); })(NOUL_INPUT);
+  eq(calls.length, 1, "the call happens as today");
+  eq(calls[0], JEV_ENDPOINT, "tier-1 endpoint");
+  eq(envelope.ok, true, "ok");
+  eq(envelope.tier, 1, "tier 1");
+  eq(envelope.decision.answers.q0.noul, 0.98, "answer served unchanged");
+});
+
 console.log("\ndecision-call: inputs hash and shadow log");
 
 await test("inputs hash is deterministic and order-insensitive", async () => {
@@ -657,11 +733,15 @@ await test("inline-questions calls stay byte-identical (no provenance keys anywh
 
 console.log("\ndecision-call: full decision event record (FOC-449)");
 
-// Secret-shaped state: a tokenized param, an sk-style key and a 32+ char run —
-// the three shapes mcp/scrub.mjs exists to mask. Normal long prose has no such
-// run and must survive UNTRUNCATED (the E1b point: no 120-char error cap on
-// stored inputs).
-const SECRET_STATE = "pre-screen for FOC-449; api_key=sk-or-v1-0123456789abcdef0123456789abcdef in state";
+// Screen-clean but scrub-maskable state: an inline tokenized param
+// (`api_key=…` mid-prose — the egress screen's env-assignment detector is
+// line-anchored and this is prose, no key prefix) that mcp/scrub.mjs masks in
+// the stored record. Since FOC-643 a key-PREFIX shape in the state never gets
+// this far — the screen blocks it before the provider (the egress section
+// above); this covers the scrub layer beneath the screen. Normal long prose
+// has no such run and must survive UNTRUNCATED (the E1b point: no 120-char
+// error cap on stored inputs).
+const SECRET_STATE = "pre-screen for FOC-449; api_key=abc123def456 in state";
 const LONG_PLAIN_STATE = "plain prose sentence for the no-cap check. ".repeat(12);
 
 await test("a served registry call records a full event (identity, scrubbed input as sent, work key, latency)", async () => {
@@ -766,8 +846,8 @@ await test("the stored input is masked without the error-text cap (E1b routing)"
     const envelope = await caller(async () => jsonResponse(GATE_PROBE_BODY), { shadowDir: dir })({ state: SECRET_STATE, decisionId: "gate.screen" });
     eq(envelope.ok, true, "ok");
     const line = JSON.parse(readFileSync(join(dir, "decisions.jsonl"), "utf8").trim());
-    if (line.input.state.includes("sk-or-v1-0123456789abcdef0123456789abcdef")) {
-      fail("secret-shaped state material leaked into .state");
+    if (line.input.state.includes("abc123def456")) {
+      fail("key-shaped state material leaked into .state unmasked");
     }
     if (!line.input.state.includes("[REDACTED]")) fail("expected masked state");
     eq(line.input.state.startsWith("pre-screen for FOC-449;"), true, "readable prose kept");
