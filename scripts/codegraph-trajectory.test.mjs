@@ -155,12 +155,79 @@ section("C. deriveCodegraphCapture");
 }
 
 {
-  const cap = deriveCodegraphCapture({ resultText: `${ANSWER}\n\n⚠️ index is stale` });
+  // Legacy detector vocabulary, kept alongside the real-banner match (FOC-641).
+  // Every banner-ish fixture below is built by concatenation, the same way
+  // scripts/mcp/server-codegraph.mjs splits its heads: an indexed copy of this
+  // file must not echo a banner back and self-trip the detector it tests.
+  const cap = deriveCodegraphCapture({ resultText: `${ANSWER}\n\n⚠️ index is` + ` stale` });
   check("a staleness banner forces STALE", cap.freshness === "stale", cap.reason);
 }
 {
-  const cap = deriveCodegraphCapture({ resultText: "⚠️ staleness banner: pending sync" });
+  const cap = deriveCodegraphCapture({ resultText: "⚠ changed since" + " last index sync" });
   check("a banner alone is STALE, never fresh", cap.freshness === "stale", cap.reason);
+}
+
+// ---------------------------------------------------------------------------
+// C1. The REAL freshness banners the boundary forwards (FOC-641)
+//
+// These mirror the strings scripts/mcp/server-codegraph.mjs actually emits
+// (STALE_BANNER_HEAD / DEGRADED_BANNER_HEAD / DRIFT_MARKERS), so the fix cannot
+// swing past a real banner into a false fresh. The negative half pins the
+// FOC-641 change: a bare ⚠️ and explore's "no covering tests" blast-radius
+// bullet are NOT staleness evidence — a real banner names a file edited within
+// the debounce window (repo CLAUDE.md).
+// ---------------------------------------------------------------------------
+
+const REAL_STALE_HEAD = "⚠️ Some files referenced below were edited since the last" +
+  " index sync — their codegraph entries may be stale:";
+const REAL_DEGRADED_HEAD = "⚠️ CodeGraph auto-sync is" + " DISABLED — live file watching stopped";
+// Real blast-radius bullet shape: "- `sym` (file:line) — N caller(s); ⚠️ …".
+const BLAST_BULLET =
+  "- `ingestToolFactsRange` (scripts/telemetry-ingest.mjs:452) — 3 caller(s); ⚠️ no covering tests found";
+
+{
+  const cap = deriveCodegraphCapture({ resultText: `${ANSWER}\n\n${REAL_STALE_HEAD}` });
+  check("the real staleness banner head forces STALE", cap.freshness === "stale", cap.reason);
+}
+{
+  const cap = deriveCodegraphCapture({ resultText: REAL_DEGRADED_HEAD });
+  check("the real degraded banner forces STALE", cap.freshness === "stale", cap.reason);
+}
+{
+  // Explore per-file drift suffix: bare ⚠ (no VS16), "…the symbol list may be outdated".
+  const cap = deriveCodegraphCapture({ resultText:
+    `${ANSWER}\n- \`supervisorSpawn\` (scripts/supervisor-spawn.mjs:44) — 2 callers; ⚠ changed since` +
+    " last index sync — the symbol list may be outdated" });
+  check("an explore per-file drift marker forces STALE", cap.freshness === "stale", cap.reason);
+}
+{
+  // Explore stale-omitted header / response-level summary footer.
+  const cap = deriveCodegraphCapture({ resultText:
+    `${ANSWER}\n\n⚠ changed on disk after the last` + " index sync (1 file omitted from the results)" });
+  check("the on-disk drift summary marker forces STALE", cap.freshness === "stale", cap.reason);
+}
+{
+  // codegraph_node notice: indexed line range no longer matches.
+  const cap = deriveCodegraphCapture({ resultText:
+    "scripts/telemetry-ingest.mjs:172 changed on disk after it was last" + " indexed" });
+  check("a codegraph_node drift notice forces STALE", cap.freshness === "stale", cap.reason);
+}
+{
+  const cap = deriveCodegraphCapture({ resultText: `${ANSWER}\n\n${BLAST_BULLET}` });
+  check("the real blast-radius bullet (⚠️ no covering tests found) is NOT stale",
+    cap.freshness === "fresh", cap.reason);
+  check("an answer with blast-radius bullets still counts as answered", cap.graphAnswered === true, cap.reason);
+}
+{
+  const cap = deriveCodegraphCapture({ resultText: `${ANSWER}\n\n⚠️` });
+  check("a bare warning emoji is NOT staleness evidence", cap.freshness === "fresh", cap.reason);
+}
+{
+  // A borrowed-index worktree notice is not a staleness banner either — the
+  // capture module keeps deriving from the response itself.
+  const cap = deriveCodegraphCapture({ resultText:
+    "⚠ CodeGraph results below come from a different git worktree (C:/other)\n\n" + ANSWER });
+  check("a worktree-mismatch notice does NOT derive stale", cap.freshness === "fresh", cap.reason);
 }
 {
   const cap = deriveCodegraphCapture({ resultText: "Index is missing — fall back to reading the files." });
