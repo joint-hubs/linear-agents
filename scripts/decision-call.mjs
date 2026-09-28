@@ -95,6 +95,18 @@
 // scrubber shared with the envelope, the Jev provider and the JSON-RPC layer
 // (FOC-411 lesson, unified in FOC-417).
 //
+// Outbound screen (FOC-643): the RAW dynamic decision content is screened at
+// ONE checkpoint BEFORE the provider (assertEgressClean — the same fail-closed
+// chokepoint linear-ops.mjs applies to Linear write bodies): the state
+// verbatim and every raw string leaf of the questions. Raw, not the
+// serialized body — JSON escaping turns newlines into literal \n sequences
+// and the screen's env-assignment detector is line-anchored, so a compact
+// serialization would blind that whole family (review round 1). A hit is a
+// pre-provider failure: envelope error.code EGRESS_BLOCKED, zero requests
+// reach the transport or the fallback. A0 callers degrade to "no annotation"
+// through the existing !ok path; every other decision sees the typed
+// failure. Never an unfiltered send.
+//
 // Run: import { createDecisionCaller } from "./decision-call.mjs" (no CLI —
 // callers are the MCP step family and the graph runner).
 
@@ -107,6 +119,7 @@ import { runDecision, TypedError } from "./mcp/envelope.mjs";
 import { scrub, scrubMask } from "./mcp/scrub.mjs";
 import { createJevProvider, JEV_MODEL, probabilityOf, choiceOf, confidenceOf } from "./mcp/provider-jev.mjs";
 import { getRegistryEntry, resolveEntryQuestions, instantiateEntryQuestions } from "./decision-registry.mjs";
+import { assertEgressClean, EgressBlockedError } from "./egress-screen.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -521,6 +534,36 @@ function scrubEventInput(effective) {
   }
 }
 
+// FOC-643: the raw string leaves the egress screen sees, as [label, text]
+// pairs. The state verbatim; per question the id and, at the QUESTION_SCHEMA
+// shape (type, instructions, criteria), each field's string value and — for
+// an object field like criteria — each label and text. Fixed depth, no
+// recursion: deeper shapes are schema-rejected before the provider, so they
+// are never sent and need no screening. Raw text only: the screen runs on
+// exactly the strings a caller or the registry (including instantiated
+// FOC-452 variables) put into {state, questions}, never on a serialization.
+function egressLeaves(effective) {
+  const leaves = [];
+  if (typeof effective?.state === "string") leaves.push(["state", effective.state]);
+  const questions = effective?.questions;
+  if (!questions || typeof questions !== "object") return leaves;
+  for (const [qid, q] of Object.entries(questions)) {
+    leaves.push([`questions.${qid}`, qid]);
+    if (!q || typeof q !== "object") continue;
+    for (const [field, value] of Object.entries(q)) {
+      if (typeof value === "string") {
+        leaves.push([`questions.${qid}.${field}`, value]);
+      } else if (value && typeof value === "object" && !Array.isArray(value)) {
+        for (const [k, v] of Object.entries(value)) {
+          leaves.push([`questions.${qid}.${field}.${k}`, k]);
+          if (typeof v === "string") leaves.push([`questions.${qid}.${field}.${k}`, v]);
+        }
+      }
+    }
+  }
+  return leaves;
+}
+
 /**
  * The decision-call seam. Returns an async call({state, questions}) →
  * envelope (the shared fail-closed shape, plus answers/usage/responseId and
@@ -657,6 +700,33 @@ export function createDecisionCaller({
             ? err
             : new TypedError("provider_error", `decision registry lookup failed: ${scrub(err?.message || "unknown error")}`);
         }
+      }
+    }
+
+    // FOC-643: ONE egress checkpoint before the provider, over the RAW
+    // dynamic content — the state verbatim (real newlines preserved: the
+    // screen's env-assignment detector is line-anchored and a compact JSON
+    // serialization would blind it, review round 1) plus every raw string
+    // leaf of the questions. These leaves are the only dynamic text either
+    // tier puts on the wire (toJev sends {state, questions}; the fallback
+    // serializes the same pair); anything else the caller passes is
+    // schema-rejected before the provider, so it is never sent. The same
+    // fail-closed chokepoint linear-ops.mjs applies to Linear write bodies
+    // (FOC-450). A hit is a pre-provider failure: the envelope carries the
+    // screen's typed marker (error.code EGRESS_BLOCKED — hits describe
+    // shape, never value) and zero requests reach the transport or the
+    // fallback. A0 intake callers degrade to "no annotation" through the
+    // existing !envelope.ok path; every other decision sees the typed
+    // failure. Never a silent degrade to an unfiltered send.
+    if (!preProviderFailure) {
+      try {
+        for (const [label, text] of egressLeaves(effective)) {
+          assertEgressClean(text, `decision-call input (${label})`);
+        }
+      } catch (err) {
+        preProviderFailure = err instanceof EgressBlockedError
+          ? err
+          : new TypedError("provider_error", `decision input could not be screened at the egress checkpoint; nothing was sent to the provider: ${scrub(err?.message || "unknown error")}`);
       }
     }
 

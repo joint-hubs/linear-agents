@@ -111,6 +111,7 @@ are unchanged (FOC-417, FOC-443).
 | `provider_error` | the provider call failed | network error, timeout (30 s), non-2xx status — status only, never the body |
 | `unparseable_output` | the provider response could not be parsed into the expected shape | alpha shape change, missing `noul` probability, unknown choice label |
 | `schema_invalid` | the parsed result failed the step's output schema | the model's JSON violates the typed output contract |
+| `EGRESS_BLOCKED` | the decision input was refused at the egress screen (FOC-643) | secret-shaped material in `state`/`questions` — the decision-call seam blocks BEFORE the provider (zero requests reach the transport or the fallback); the code is the egress screen's marker, not a `TypedError` code |
 
 Over the MCP protocol boundary (`scripts/mcp/jsonrpc.mjs`) an `ok:false` envelope becomes a
 `tools/call` result with `isError: true` whose text IS the typed error — the fail-closed contract
