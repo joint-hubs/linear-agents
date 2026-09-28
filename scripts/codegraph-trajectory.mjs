@@ -295,7 +295,9 @@ export function attributeOne(row, { laterRows = [], proseAfter = "" } = {}) {
   return row;
 }
 
-function parseJsonArray(value) {
+// Exported for the FOC-627 eval harness (the only consumer outside this file);
+// semantics unchanged.
+export function parseJsonArray(value) {
   if (typeof value !== "string" || !value) return [];
   try {
     const parsed = JSON.parse(value);
