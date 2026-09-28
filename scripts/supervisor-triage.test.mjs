@@ -132,7 +132,7 @@ test("labels survive both shapes Linear returns", () => {
 });
 
 // ── 1b. the AC heading variants (FOC-577) ─────────────────────────────────────
-console.log("\nwarianty nagłówka AC (FOC-577)");
+console.log("\nwarianty nagłówka AC (FOC-577, FOC-605)");
 
 test("all three AC heading variants are recognized", () => {
   // FOC-577: a bare `## Acceptance` heading routed to `plan` because the signal
@@ -180,6 +180,47 @@ test("inline AC forms keep working (regression pin)", () => {
     true,
   );
   assert.equal(extractSignals(issue({ body: "AC-1: it works" })).hasAcceptanceCriteria, true);
+});
+
+test("the bare `## AC` heading is the acceptance criteria section (FOC-605)", () => {
+  // FOC-605: `## AC` matched none of the three patterns, so a body whose only
+  // AC marker was that heading read as having none — and an implementable task
+  // routed to `plan`, costing a plan round before any code. None of these
+  // bodies carry `AC-<n>` or `**Given**`, so the bare heading is the ONLY
+  // thing that can light the signal here.
+  for (const body of ["## AC\n\n* it works", "## AC:\n\n* it works", "# AC\n\n* it works", "###### AC:\n\n* it works"]) {
+    assert.equal(extractSignals(issue({ body })).hasAcceptanceCriteria, true, JSON.stringify(body));
+  }
+  // The `propose` path agrees, exactly as for the bare `## Acceptance` heading.
+  const r = p({ body: "## AC\n\n* it works", estimate: 3 });
+  assert.ok(!r.unknowns.some((u) => u.includes("no acceptance criteria section")), JSON.stringify(r.unknowns));
+});
+
+test("the `## AC` shorthand keeps the bare heading's end-of-line anchoring (FOC-605)", () => {
+  // AC-3: the property FOC-577 pinned has to hold for the new alternative too.
+  // `## Acceptance ceremony notes` and its `## AC ...` equivalent are the same
+  // kind of other-section heading, and neither may light the signal.
+  for (const body of [
+    "## Acceptance ceremony notes\n\n* wear a hat",
+    "## AC ceremony notes\n\n* wear a hat",
+    "## AC review notes\n\n* look at it",
+  ]) {
+    assert.equal(extractSignals(issue({ body })).hasAcceptanceCriteria, false, JSON.stringify(body));
+  }
+});
+
+test("`## ACME notes` and `## Action items` are not the acceptance criteria section (FOC-605)", () => {
+  // AC-2 negatives. `AC` followed by more word characters is a different word,
+  // not the shorthand — the `\b` after the alternative is what says so, and the
+  // end-of-line anchor is what says it twice.
+  for (const body of [
+    "## ACME notes\n\n* accounting",
+    "## Action items\n\n* do the thing",
+    "## ACK log\n\n* who approved what",
+    "no marker at all\n\n* just prose",
+  ]) {
+    assert.equal(extractSignals(issue({ body })).hasAcceptanceCriteria, false, JSON.stringify(body));
+  }
 });
 
 // ── 2. The four AC cases ──────────────────────────────────────────────────────
