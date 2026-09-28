@@ -1,0 +1,340 @@
+{
+  "evalSet": "FOC-627 CodeGraph trajectory eval set — provenance-keyed corpus of real recorded queries",
+  "source": "Every entry is drawn from one recorded tool_facts row (live telemetry DB). Provenance key tool_fact_id = sha1(source_path:source_offset:tool_index) as recorded at capture time; the harness re-reads the query's transcript trajectory from the source_path:source_offset the key names.",
+  "privacy": "Identifiers only (FOC-220): file paths, symbol names, the recorded query arguments, and rubric identifiers. No source text, no tool-result text, no transcript prose is stored in this file.",
+  "gradingKinds": {
+    "reference": "the recorded tool result itself supplies the correct answer's identifiers; mustName items are checked as substrings of the answer text (same convention as scripts/codegraph-benchmark-questions.json expectedContains)",
+    "rubric": "mustName items are grounded in what the recorded trajectory shows was actually used downstream (later tool calls or the turn's own prose), not in the result text alone"
+  },
+  "excluded": [
+    {
+      "reason": "transcript file deleted since capture — the trajectory is unreadable, so the query cannot be replayed or graded",
+      "count": 8,
+      "toolFactIds": [
+        "dbe1db09d1e3f435ccbf08baeeef4c8613cf31e8",
+        "52ad46d4b08b7ece6f55f59b9b45d1a34f044980",
+        "b49d1d106b11a24a2766f2846d605b8052f613eb",
+        "f7836fcdc4cac16633ac33a107e8c136855cfe04",
+        "e0f56b0754c9a811b27b5b6aa5501a79fd34cc72",
+        "47976ac3684402999cb65298f010ba18fad42121",
+        "bc443062b7125684a11f508fd6ca69362ee7a8bc",
+        "66c9562c31a2b79a1b54a48d0524b0f1ae1c6dae"
+      ]
+    },
+    {
+      "reason": "tool_result_state='missing' — the result never arrived in the recorded transcript, so there is no answer to grade (truncated trajectory)",
+      "count": 11,
+      "toolFactIds": [
+        "2aa374f6cdf19b217f09a583a13a431fadc90a77",
+        "81094b22e8e6bf0d4972f0949cc240c27e8bb779",
+        "fef36366bbb91940ce5c6feb20e00fd9ec2e634f",
+        "4e5c19c5e061d0d4808f3102327d558022360f83",
+        "ec6621b84d780b342fa4b2def696feb0f569ba7b",
+        "57b4aaf04bd77cae510ca6c6e83ba52f4654a4c5",
+        "c380f26592dde82a8187a497fcdcdb8f16f87756",
+        "26d9efcb75c9083800acf31cfc4ffd338b07fa18",
+        "a2900318cb7ae8292cc8d7191f6fc2ff3674222d",
+        "118292e1df90bcbbda6205b3bed7f537e2e03a75",
+        "8ac2749a1cb78072206cd486cc033749435a1626"
+      ]
+    },
+    {
+      "reason": "tool_result_state unresolved (null) and the result was not verified gradeable during curation",
+      "count": 2,
+      "toolFactIds": [
+        "1c7738cca8115cdbb38dd965a7ec6fd602fa4f97",
+        "6c879c4e745f3280ef45ad51bc5cd44072d7870e"
+      ]
+    }
+  ],
+  "curationNote": "167 CodeGraph tool_facts rows existed at curation time (2026-09-28); 21 rows are excluded above, leaving 146 gradeable candidates. 18 entries were selected for run and tool spread (15 distinct runs; explore majority plus node, impact, files and status). Unselected candidates are same-shape variants of selected entries, not exclusions.",
+  "entries": [
+    {
+      "id": "q-explore-claude-command",
+      "tool": "explore",
+      "tool_fact_id": "af269dfb802ee68a6fde181d0730b3c71561537d",
+      "run_id": "2026-08-25T20-24-20-114-supervisor-4811",
+      "agent_key": "_lead",
+      "args": { "query": "claudeCommand how the claude binary is resolved and spawned on win32", "maxFiles": 2 },
+      "question": "How is the claude binary resolved and spawned on win32 (claudeCommand)?",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["claudeCommand", "scripts/supervisor-lib.mjs", "scripts/supervisor-watch.mjs"],
+        "grounded": "the recorded result lists claudeCommand at scripts/supervisor-lib.mjs:1022 with its single caller in scripts/supervisor-watch.mjs; the recorded follow-up edits touched the spawn sites in supervisor-watch.mjs and supervisor-followup.mjs"
+      }
+    },
+    {
+      "id": "q-impact-supervisor-deny",
+      "tool": "impact",
+      "tool_fact_id": "9ab2cb27370f83151aec6168381eeee3170c1ba8",
+      "run_id": "2026-08-25T20-24-20-114-supervisor-4811",
+      "agent_key": "_lead",
+      "args": { "symbol": "SUPERVISOR_DENY", "depth": 2 },
+      "question": "What is the blast radius of changing SUPERVISOR_DENY at depth 2?",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["SUPERVISOR_DENY", "scripts/supervisor-lib.mjs", "buildChildSettings", "scripts/supervisor-spawn.test.mjs"],
+        "grounded": "the recorded impact lists scripts/supervisor-lib.mjs (SUPERVISOR_DENY:270, buildChildSettings:302) and the scripts/supervisor-spawn.test.mjs import of SUPERVISOR_DENY and buildChildSettings; the recorded follow-up greps and edits followed those identifiers"
+      }
+    },
+    {
+      "id": "q-impact-latest-cleanup-gate",
+      "tool": "impact",
+      "tool_fact_id": "0eb52ee1b69fb5610209713ae33d9a92a9737d77",
+      "run_id": "2026-08-25T20-24-20-114-supervisor-4811",
+      "agent_key": "_lead",
+      "args": { "symbol": "latestCleanupGate", "depth": 2 },
+      "question": "What is the blast radius of changing latestCleanupGate at depth 2?",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["latestCleanupGate", "scripts/supervisor-cleanup.mjs", "cmdList"],
+        "grounded": "the recorded impact lists latestCleanupGate:147 with callers cmdList:252, cmdPropose:297, cmdRemove:410, main:578 in scripts/supervisor-cleanup.mjs; the recorded follow-up edited supervisor-cleanup.mjs and ran its test file"
+      }
+    },
+    {
+      "id": "q-explore-transcript-run-attribution",
+      "tool": "explore",
+      "tool_fact_id": "55210468320c1cdaf1a1afd0f08d073629b77012",
+      "run_id": "2026-08-27T07-35-33-004-supervisor-792a",
+      "agent_key": "_lead",
+      "args": { "query": "how does a transcript get attributed to a run_id when ingesting usage_facts — discoverTranscriptsForRuns, ingest, session attribution" },
+      "question": "How does a transcript get attributed to a run_id when ingesting usage_facts (discoverTranscriptsForRuns, session attribution)?",
+      "grading": {
+        "kind": "rubric",
+        "mustName": ["ingestTranscript", "scripts/telemetry-ingest.mjs", "scripts/context-attribution.mjs"],
+        "grounded": "the recorded result carries a staleness banner for scripts/context-attribution.mjs and names ingestTranscript at scripts/telemetry-ingest.mjs:172; the recorded follow-up greps enumerated ingestTranscript callers"
+      }
+    },
+    {
+      "id": "q-explore-repo-architecture",
+      "tool": "explore",
+      "tool_fact_id": "baf933ef5d71102475da845559c2d665a5774b91",
+      "run_id": "2026-09-05T20-31-57-862-supervisor-42cc",
+      "agent_key": "_lead",
+      "args": {
+        "query": "repository architecture supervisor graph telemetry canonical agent-behavior evaluation learning routing",
+        "maxFiles": 7,
+        "projectPath": "C:\\Users\\mateu\\Documents\\GitHub\\linear-agents"
+      },
+      "question": "Map this repository's architecture: supervisor, graph, telemetry, canonical behaviour, evaluation and routing.",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["loadGraph", "scripts/graph-validate.mjs"],
+        "grounded": "the recorded result names loadGraph at scripts/graph-validate.mjs:32 with 14 callers across supervisor-triage, supervisor-budget and supervisor-verdict; freshness at query time was STALE (staleness banner on scripts/telemetry-server.mjs)"
+      }
+    },
+    {
+      "id": "q-explore-ui-routing",
+      "tool": "explore",
+      "tool_fact_id": "03ddd65702c2e8de49ab6886121504a78f05f1c1",
+      "run_id": "2026-09-05T22-04-01-074-supervisor-b5b1",
+      "agent_key": "_lead",
+      "args": {
+        "query": "ui/src App routing SquadConfig Flow Graph Prompts configuration model prompt editing telemetry API endpoints",
+        "maxFiles": 6,
+        "projectPath": "C:/Users/mateu/Documents/GitHub/linear-agents"
+      },
+      "question": "How do the UI App, its routing and the configuration screens (SquadConfig, Flow, Graph, Prompts) reach the telemetry API endpoints?",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["App", "Prompts", "getPrompts", "ui/src/api.js", "ui/src/App.jsx"],
+        "grounded": "the recorded result gives the flow App (ui/src/App.jsx:80) -> Prompts (ui/src/screens/Prompts.jsx:65) -> getPrompts (ui/src/api.js:70) -> apiFetch (ui/src/api.js:3); the recorded follow-up read ui/src/App.jsx"
+      }
+    },
+    {
+      "id": "q-explore-worktree-setup",
+      "tool": "explore",
+      "tool_fact_id": "22bc500fd940f828ae8d1416f7856fa5d12d6c15",
+      "run_id": "2026-09-15T21-39-29-681-supervisor-0575",
+      "agent_key": "_lead",
+      "args": {
+        "query": "supervisor-spawn worktree setup: git worktree add, what the child worktree gets — node_modules, .state, npm ci, install, copy"
+      },
+      "question": "What does the child worktree setup provide: git worktree add, node_modules, .state, npm ci?",
+      "grading": {
+        "kind": "rubric",
+        "mustName": ["ensureWorktree", "scripts/supervisor-lib.mjs", "scripts/supervisor-merge.mjs"],
+        "grounded": "the turn's own prose cites ensureWorktree (scripts/supervisor-lib.mjs:939) as a plain git worktree add, and the verify path running npm ci and node scripts/test-all.mjs inside the child worktree via scripts/supervisor-merge.mjs; the recorded follow-up read scripts/supervisor-lib.mjs directly"
+      }
+    },
+    {
+      "id": "q-explore-build-intake",
+      "tool": "explore",
+      "tool_fact_id": "61375da2b9645c7f2e5d93dcc4bb381c8daab2a1",
+      "run_id": "2026-09-23T18-34-40-195-dev-2a0e",
+      "agent_key": "_lead",
+      "args": {
+        "query": "buildIntake supervisor-triage intakeFlows flowReason answerValueOf record A0 disagreement triage_node"
+      },
+      "question": "How do buildIntake, intakeFlows and flowReason work in supervisor-triage, and where does answerValueOf handle the A0 disagreement?",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["buildIntake", "scripts/supervisor-triage.mjs", "answerValueOf", "scripts/plan-gates.mjs"],
+        "grounded": "the recorded result gives the flow disagreementsOf (scripts/plan-gates.mjs:254) -> seamValueOf -> answerValueOf (:107) and buildIntake (scripts/supervisor-triage.mjs:290); the recorded follow-up read buildIntake with includeCode"
+      }
+    },
+    {
+      "id": "q-explore-triage-ac-regex",
+      "tool": "explore",
+      "tool_fact_id": "dd8b2464dff7733d5667f491cac8e94f6b96813a",
+      "run_id": "2026-09-27T08-45-28-226-dev-7db1",
+      "agent_key": "_lead",
+      "args": {
+        "query": "supervisor-triage RE_AC RE_AC_INLINE hasAcceptanceCriteria propose",
+        "maxFiles": 3
+      },
+      "question": "Where are the acceptance-criteria heading regexes (RE_AC, RE_AC_INLINE) and hasAcceptanceCriteria in supervisor-triage's propose path?",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["RE_AC", "RE_AC_INLINE", "scripts/supervisor-triage.mjs"],
+        "grounded": "the recorded result lists RE_AC_INLINE (scripts/supervisor-triage.mjs:75), RE_AC (:74) and cmdPropose (:567); the turn's prose confirms the anchors and the recorded follow-up read the regex block directly"
+      }
+    },
+    {
+      "id": "q-explore-waiting-gate-status",
+      "tool": "explore",
+      "tool_fact_id": "4d50b2b9aa07f5fd46ad923110466bebe9cd72ba",
+      "run_id": "2026-09-27T19-03-12-332-supervisor-be93",
+      "agent_key": "_lead",
+      "args": {
+        "query": "supervisor-status watcher classify waiting_gate crashed idle terminal status TERMINAL_STATUSES",
+        "projectPath": "C:\\Users\\mateu\\Documents\\GitHub\\linear-agents"
+      },
+      "question": "Is waiting_gate written into the children registry by updateChild, or computed only by the supervisor-status watcher classify (crashed, idle, terminal statuses)?",
+      "grading": {
+        "kind": "rubric",
+        "mustName": ["TERMINAL_STATUSES", "scripts/supervisor-lib.mjs", "scripts/supervisor-watch.mjs"],
+        "grounded": "the recorded result lists TERMINAL_STATUSES (scripts/supervisor-lib.mjs:886) with callers in supervisor-status, supervisor-followup and supervisor-spawn; the turn's prose works out that the watcher assigns status atomically at exit and the recorded follow-up explored supervisor-watch.mjs"
+      }
+    },
+    {
+      "id": "q-explore-atomic-write-json",
+      "tool": "explore",
+      "tool_fact_id": "ea499b09b2d1bdc43a68225800b5461d99506ef5",
+      "run_id": "2026-09-27T21-23-53-855-dev-2268",
+      "agent_key": "_lead",
+      "args": {
+        "query": "atomicWriteJSON in scripts/utils.mjs — its full source, all callers (writeRegistry, gates, verdicts), and any existing utils test file"
+      },
+      "question": "Give atomicWriteJSON's source location in scripts/utils.mjs, its callers (writeRegistry, gates, verdicts), and whether a utils test file exists.",
+      "grading": {
+        "kind": "rubric",
+        "mustName": ["atomicWriteJSON", "scripts/utils.mjs", "writeRegistry", "scripts/supervisor-lib.mjs"],
+        "grounded": "the turn's prose cites the recorded source location scripts/utils.mjs:35 and the failure path writeRegistry -> updateChild; the recorded result lists writeRegistry (scripts/supervisor-lib.mjs:113) with 25 callers"
+      }
+    },
+    {
+      "id": "q-explore-test-all-runner",
+      "tool": "explore",
+      "tool_fact_id": "e55a3ee23c986ab994b64893ce622791cf7f6f32",
+      "run_id": "2026-09-28T12-43-58-572-dev-93e3",
+      "agent_key": "_lead",
+      "args": {
+        "query": "test-all.mjs runner how tests are discovered and run, docs-count-guard test file counting"
+      },
+      "question": "How does the test-all.mjs runner discover and run tests, and how does docs-count-guard count test files?",
+      "grading": {
+        "kind": "rubric",
+        "mustName": ["test-all.mjs", "docs-count-guard", "runTests"],
+        "grounded": "the recorded result lists runTests entries across the repo's test files; the recorded follow-up read scripts/test-all.mjs and scripts/docs-count-guard.test.mjs, and the turn's prose states docs-count-guard counts scripts/*.test.mjs"
+      }
+    },
+    {
+      "id": "q-explore-not-indexed-orderkey",
+      "tool": "explore",
+      "tool_fact_id": "c9cc771654419d02de5092f2dae96524b472ee2d",
+      "run_id": "2026-09-12T14-35-29-590-dev-afea",
+      "agent_key": "_lead",
+      "args": {
+        "query": "orderKeyOf byOrderKey ORDER_KEYS total order comparator agent-behavior.mjs shuffle test agent-behavior.test.mjs",
+        "projectPath": "C:/Users/mateu/Documents/GitHub/la-wt/linear-agents/foc-220-dev-r1"
+      },
+      "question": "How do orderKeyOf, byOrderKey and ORDER_KEYS implement a total-order comparator in agent-behavior.mjs (shuffle test)?",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["not indexed"],
+        "grounded": "the recorded result is a refusal: the target project is not indexed with codegraph (no .codegraph/ directory found); the correct answer reports that and directs to Read/Grep — which the recorded follow-up did (it read agent-behavior.mjs directly)"
+      }
+    },
+    {
+      "id": "q-node-verify-pinned-state",
+      "tool": "node",
+      "tool_fact_id": "0f928c6a3b1edb61c3206ff2116677b47e7350eb",
+      "run_id": "2026-09-15T06-54-59-361-supervisor-f885",
+      "agent_key": "_lead",
+      "args": { "symbol": "verifyPinnedState", "includeCode": true },
+      "question": "Show verifyPinnedState's source — what does it check?",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["verifyPinnedState", "scripts/supervisor-lib.mjs", "baseRevision"],
+        "grounded": "the recorded result gives the signature ({ worktree, branch, baseRevision, created }) at scripts/supervisor-lib.mjs:950; the turn's prose verifies branch match, HEAD equals baseRevision and a clean tree"
+      }
+    },
+    {
+      "id": "q-node-scan-sast",
+      "tool": "node",
+      "tool_fact_id": "42d9362d247a7073ecfdf6ed39173144b2329838",
+      "run_id": "2026-09-25T10-04-44-436-dev-5cd8",
+      "agent_key": "_lead",
+      "args": {
+        "symbol": "scanSast",
+        "includeCode": true,
+        "projectPath": "C:\\Users\\mateu\\Documents\\GitHub\\la-wt\\linear-agents\\foc-576-dev"
+      },
+      "question": "Show scanSast's source — what does the semgrep pass return when the ruleset is missing?",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["scanSast", "scripts/security-scan.mjs", "semgrepVersion"],
+        "grounded": "the recorded result gives scanSast at scripts/security-scan.mjs:231 with an unavailable status row when the ruleset is missing; the turn's prose names scanSast and semgrepVersion and the recorded follow-up read semgrepVersion with includeCode"
+      }
+    },
+    {
+      "id": "q-node-make-integration-tree",
+      "tool": "node",
+      "tool_fact_id": "176de461c0e81b2b43f17d5877bbd0582d1bfa8d",
+      "run_id": "2026-09-15T21-39-29-681-supervisor-0575",
+      "agent_key": "_lead",
+      "args": {
+        "file": "scripts/supervisor-merge.mjs",
+        "includeCode": true,
+        "symbol": "makeIntegrationTree"
+      },
+      "question": "Show makeIntegrationTree's source — how does it prepare the integration worktree?",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["makeIntegrationTree", "scripts/supervisor-merge.mjs", "removeIntegrationTree"],
+        "grounded": "the recorded result gives makeIntegrationTree at scripts/supervisor-merge.mjs:191 calling removeIntegrationTree first and then git worktree add; the recorded follow-up read the call sites at lines 180 and 205"
+      }
+    },
+    {
+      "id": "q-files-scripts-flat",
+      "tool": "files",
+      "tool_fact_id": "bb95b21addbeebc2e8c166830ed3d4f2a1cf387b",
+      "run_id": "2026-09-15T21-39-29-681-supervisor-0575",
+      "agent_key": "_lead",
+      "args": { "format": "flat", "path": "scripts" },
+      "question": "List the JavaScript files under scripts/ (flat format) with their symbol counts.",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["scripts/agent-behavior.mjs", "scripts/check.mjs", "scripts/code-intel.mjs"],
+        "grounded": "the recorded result is a flat list of 149 scripts/ files with symbol counts, including scripts/agent-behavior.mjs, scripts/check.mjs and scripts/code-intel.mjs"
+      }
+    },
+    {
+      "id": "q-status-not-indexed",
+      "tool": "status",
+      "tool_fact_id": "a1dfa9120be27cb41fb166a96361a1e359e0edb3",
+      "run_id": "2026-09-16T20-59-25-399-dev-2af3",
+      "agent_key": "_lead",
+      "args": {
+        "projectPath": "C:\\Users\\mateu\\Documents\\GitHub\\la-wt\\linear-agents\\foc-357-dev"
+      },
+      "question": "Is the CodeGraph index healthy for this project's worktree?",
+      "grading": {
+        "kind": "reference",
+        "mustName": ["not indexed"],
+        "grounded": "the recorded result is a refusal: the project is not indexed (no .codegraph/ directory found walking up from it); the recorded follow-up switched to Read/Grep over supervisor-spawn.mjs and supervisor-lib.mjs — the correct answer reports the missing index rather than fabricating counts"
+      }
+    }
+  ]
+}
