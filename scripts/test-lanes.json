@@ -213,6 +213,14 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "supervisor-wait-budget.test.mjs",
+      "reason": "isolation audit FOC-608: reads repo sources only (no writes at all); no ports, no socket binds; supervisor state only via the LA_SUPERVISOR_STATE_HOME seam pointed at a mkdtemp path"
+    },
+    {
+      "file": "supervisor-wake-queue.test.mjs",
+      "reason": "isolation audit FOC-608: mkdtemp/tmpdir fixtures with every path derived through the LA_SUPERVISOR_STATE_HOME seam; no ports, no socket binds, no real-repo-path writes; imports supervisor-lib only (no telemetry DB)"
+    },
+    {
       "file": "supervisor-zombie.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
