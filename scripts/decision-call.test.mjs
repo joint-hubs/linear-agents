@@ -355,6 +355,51 @@ console.log("\ndecision-call: egress screen before the provider call (FOC-643)")
 const SCREEN_SECRET = "sk-or-".concat("v1-", "0123456789abcdef", "0123456789abcdef", "0123456789abcdef", "0123456789abcdef");
 const SCREEN_SECRET_STATE = `Operator pasted the run token into the issue body: ${SCREEN_SECRET}`;
 
+// The line-anchored family (env-assignment): a raw newline inside the content
+// is what the detector needs — a JSON-serialized screen would escape it into
+// a literal \n sequence and the family would go blind (review round 1).
+const ENV_SECRET_LINE = "OPENROUTER_API_KEY=abc123def4567890";
+
+await test("an env-assignment line on its own line in the state blocks the call with ZERO provider requests (line-anchored family stays alive)", async () => {
+  let calls = 0;
+  const envelope = await caller(() => { calls++; return jsonResponse(PROBE_BODY); }, { fallbackModel: SEAM_MODEL })({
+    state: `config paste:\n${ENV_SECRET_LINE}\n`,
+    questions: NOUL_INPUT.questions,
+  });
+  eq(calls, 0, "zero requests reached the transport and the fallback");
+  eq(envelope.ok, false, "typed failure, not a degrade");
+  eq(envelope.error.code, EGRESS_BLOCKED, "the screen's typed marker");
+  eq(envelope.tier, null, "no tier — nothing was sent");
+  if (!envelope.error.message.includes("decision-call input (state)")) fail(`the refusal names the scanned leaf: ${envelope.error.message}`);
+});
+
+await test("an env-assignment line inside a question string blocks the call too", async () => {
+  let calls = 0;
+  const envelope = await caller(() => { calls++; return jsonResponse(PROBE_BODY); }, { fallbackModel: SEAM_MODEL })({
+    state: "clean state prose for the question-leaf check",
+    questions: {
+      q0: { type: "noul", instructions: `Judge this config paste:\n${ENV_SECRET_LINE}`, criteria: { true: "t", false: "f" } },
+    },
+  });
+  eq(calls, 0, "zero requests");
+  eq(envelope.ok, false, "ok:false");
+  eq(envelope.error.code, EGRESS_BLOCKED, "code");
+  if (!envelope.error.message.includes("questions.q0.instructions")) fail(`the refusal names the scanned leaf: ${envelope.error.message}`);
+});
+
+await test("an env-assignment line carried only in a FOC-452 instance variable blocks the call after instantiation", async () => {
+  let calls = 0;
+  const envelope = await caller(() => { calls++; return jsonResponse(PROBE_BODY); }, { fallbackModel: SEAM_MODEL })({
+    state: "clean state prose for the instances check",
+    decisionId: "plan.duplicate_of",
+    instances: [{ key: "FEN-10", title: `Gantt snapshot export\n${ENV_SECRET_LINE}` }],
+  });
+  eq(calls, 0, "zero requests — the instantiated question text is screened");
+  eq(envelope.ok, false, "ok:false");
+  eq(envelope.error.code, EGRESS_BLOCKED, "code");
+  eq(envelope.decisionId, "plan.duplicate_of", "provenance stamped");
+});
+
 await test("a secret in the state blocks the call with ZERO provider requests (transport and fallback both unreachable)", async () => {
   let calls = 0;
   // fallbackModel is armed so the fallback WOULD have been reachable — the
