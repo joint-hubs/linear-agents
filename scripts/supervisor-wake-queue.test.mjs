@@ -29,7 +29,6 @@ import {
   appendWakeEvent,
   readWakeAck,
   readWakeQueue,
-  runDir,
   supervisorStateHome,
   wakeQueuePath,
   wakeDedupKey,
@@ -39,11 +38,9 @@ import {
 
 // THE SEAM, set before anything resolves runDir. supervisor-lib reads the env
 // per call, so this redirects every path helper from here on.
-const homes = [];
 function fixtureHome(name) {
   const home = mkdtempSync(join(tmpdir(), `foc-608-${name}-`));
   process.env.LA_SUPERVISOR_STATE_HOME = home;
-  homes.push(home);
   return home;
 }
 
