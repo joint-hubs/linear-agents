@@ -209,6 +209,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "supervisor-guard.test.mjs",
+      "reason": "isolation audit FOC-609: mkdtemp/tmpdir fixtures with every path derived through the LA_SUPERVISOR_STATE_HOME seam (set at module load, inherited by spawned guard/status processes); no ports, no socket binds, no real-repo-path writes; imports supervisor-lib only (no telemetry DB)"
+    },
+    {
       "file": "supervisor-headless.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
