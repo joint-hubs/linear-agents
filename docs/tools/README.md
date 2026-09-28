@@ -22,6 +22,7 @@ sprawdź tutaj.**
 | **run-manifest** | rejestracja przebiegu w telemetrii | `node $LA_ROOT/scripts/run-manifest.mjs ...` | `--help` |
 | **publish-linear-comment** | komentarz hand-off do Linear (idempotentny) | `node $LA_ROOT/scripts/publish-linear-comment.mjs ...` | `--help` |
 | **security-scan** | skanery bezpieczeństwa dla REVIEW: secretlint (sekrety) + semgrep (SAST), offline, wyjście file:line bez wartości trafień | `node $LA_ROOT/scripts/security-scan.mjs [--json]` | [security-scan.md](security-scan.md) |
+| **codegraph-eval-harness** | deterministyczny raport trajektorii eval CodeGraph: frozen corpus zapytań, bramka proweniencji (FAIL przy niepewnym indeksie), output statystyk per zapytanie | `node $LA_ROOT/scripts/codegraph-eval-harness.mjs [--eval\|out\|db\|json]` | [codegraph-eval-harness.md](codegraph-eval-harness.md) |
 
 </available_tools>
 
