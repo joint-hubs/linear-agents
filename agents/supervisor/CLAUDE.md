@@ -80,15 +80,22 @@ node $LA_ROOT/scripts/supervisor-budget.mjs allocate --total <usd>
 ```
 It divides the total across stages from the `budget.shareHint` values in `config/graph.json` and enforces them per turn; stages do not borrow from each other. `LA_SUPERVISOR_MAX_COST_USD` stays the outer backstop; every refusal names which control fired. Semantics: `<supervisor_budget>`.
 
-### 4. Monitor — never busy-loop
+### 4. Monitor — drain, judge, acknowledge
+The watcher classifies events into a durable wake queue on disk (`<run>/wake-queue.jsonl`): a child exit, a gate appearing, a child stalled past the SLA. You are never the waiter, only the judge. **Start every turn by draining the queue** — it carries what happened while nobody was waiting, and a `gate` or `exit` lands there even when no one was watching for it:
 ```
-node $LA_ROOT/scripts/supervisor-status.mjs --wait --timeout-ms <ms> --tail 20
+node $LA_ROOT/scripts/supervisor-status.mjs --drain --tail 20
 ```
-`--wait` blocks and tells you which of **five** things happened: `exit` (a live child finished), `gate` (a new gate appeared), `timeout` (still running, nothing new), `held` (nothing is live but a spawn is waiting for a slot), `idle` (nothing is live and nothing is waiting — it returned without waiting). **Cadence:** after every spawn or follow-up, call `--wait`. On `timeout` **only**, re-issue with backoff ×1, ×2, ×4 — capped at 4× the base timeout (`nextBackoffHint` gives you the number). On `exit` or `idle`, stop waiting and read the result — backing off there is waiting on no one. On `held`, **release** (`supervisor-spawn.mjs --release`) and wait again; stopping there abandons work that was never started.
+Handle each row — an `exit` means read the result and route on, a `gate` means present it to Mateusz, a `stall` means stop + escalate (§failure modes) — then retire what you handled:
+```
+node $LA_ROOT/scripts/supervisor-status.mjs --ack <seq>
+```
+Acks are persisted; acked rows never come back, and a row you skip is redelivered next turn.
 
-**Max silence is wall-clock, not a poll count:** the tee must be silent for 5 × the base timeout (default 5 × 120 s = 10 min) before a child counts as stalled. Backoff cannot stretch it. Any child listed in `stalledChildren` → stop it and escalate (§failure modes). Do not invent a second counter of your own.
+A **short bounded wait** is still fine when you want to hold the turn open: `--wait --timeout-ms ≤ 120000`. It returns one of the same **five** things as before: `exit` (a live child finished), `gate` (a new gate appeared), `timeout` (still running, nothing new), `held` (nothing is live but a spawn is waiting for a slot), `idle` (nothing is live and nothing is waiting). What is gone is the in-turn wait chain: on `timeout` there is nothing to judge — **do not re-issue the wait, do not back off**; end the turn and let the wake queue carry the event to your next turn. On `exit` or `idle`, stop waiting and read the result — waiting further is waiting on no one.
 
-`status` also lists `held` — spawns that were admitted-later rather than started. A held request is **not** a stalled child and **not** a failure: it is waiting for a slot. Release them with `supervisor-spawn.mjs --release`; never re-issue the spawn by hand, or the same work is queued twice.
+`status` also lists `held` — spawns that were admitted-later rather than started. A held request is **not** a stalled child and **not** a failure: it is waiting for a slot. Release it with `supervisor-spawn.mjs --release` and drain again; never re-issue the spawn by hand, or the same work is queued twice.
+
+**Max silence is wall-clock, not a poll count:** the tee must be silent for 5 × the base timeout (default 5 × 120 s = 10 min) before a child counts as stalled. The watcher owns that judgment and enqueues a `stall` row at the same threshold. On one → stop the child and escalate (§failure modes). Do not invent a second counter of your own.
 
 Never describe child output you have not read from `supervisor-status.mjs`. The tee is the record; your memory of it is not.
 

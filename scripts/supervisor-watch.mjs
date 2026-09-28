@@ -10,21 +10,30 @@
 // and the tee, and NEVER probes a pid or infers liveness. If a status is wrong,
 // this file is where the bug is.
 //
+// The same ownership makes this the single writer of the run's durable wake
+// queue (FOC-608, <runDir>/wake-queue.jsonl): child exit, new gate, stall past
+// the SLA — one JSONL row each, deduped by key. supervisor-status.mjs drains
+// and acks the queue; it never appends to it.
+//
 // Not invoked by hand. supervisor-spawn.mjs (and later supervisor-followup.mjs)
 // start it with { detached: true, stdio: 'ignore' } + unref.
 
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { calculateCost, priceThreshold, pricingSnapshot } from "./telemetry-store.mjs";
 
 import {
   ROOT,
   addCost,
+  appendWakeEvent,
   claudeCommand,
   costFromResult,
+  gatesDir,
   hasPendingGate,
   parseArgs,
   readRegistry,
+  stallSilenceMs,
   teeAbsPath,
   updateChild,
 } from "./supervisor-lib.mjs";
@@ -131,6 +140,73 @@ function patchTurn(patch) {
 
 patchTurn({ pid: child.pid, startedAt: new Date().toISOString(), endedAt: null, exitCode: null });
 
+// ── durable wake queue (FOC-608) ─────────────────────────────────────────────
+// This watcher is the SINGLE writer of <runDir>/wake-queue.jsonl. It classifies
+// three event classes into it and nothing else: a child exit, a gate appearing,
+// a stall past the SLA. Zero-token by construction — it only reads files and
+// appends rows; judging what a row means is the Supervisor's job (drain at the
+// start of a turn → handle → ack, agents/supervisor/CLAUDE.md §4).
+//
+// Exactly-once lives in appendWakeEvent's dedup key (supervisor-lib.mjs), not
+// here: re-observing an event is free, so a coarse scan is correct. A queue
+// failure must never kill the watcher's real job (owning the child), so every
+// append is best-effort and leaves a note in the tee.
+const wake = (event) => {
+  try {
+    appendWakeEvent(runId, event);
+  } catch (err) {
+    note({ subtype: "wake_enqueue_failed", message: err.message });
+  }
+};
+
+// Pending gates that have not been enqueued yet. `gate:<gateId>` is the dedup
+// key, so rescanning is free across ticks and across watcher restarts.
+function scanGates() {
+  const dir = gatesDir(runId);
+  if (!existsSync(dir)) return;
+  for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+    try {
+      const gate = JSON.parse(readFileSync(join(dir, file), "utf8"));
+      if (gate.status !== "pending") continue;
+      wake({
+        event: "gate",
+        gateId: gate.gateId ?? file.replace(/\.json$/, ""),
+        childId: gate.childId ?? childId,
+        detail: { kind: gate.kind ?? null },
+      });
+    } catch {
+      continue; // an unreadable gate file is not an event; status reports it
+    }
+  }
+}
+
+// Stall past the SLA — the same wall-clock rule supervisor-status.mjs displays,
+// from the same shared constant. The tee GROWING is the activity signal; mtime
+// alone can be touched without a write. At most one row per turn (the dedup key
+// makes that true even if this scan ran twice).
+const STALL_AFTER_MS = stallSilenceMs();
+const GATE_SCAN_MS = 5_000;
+let lastTeeSize = null;
+
+function scanStall() {
+  try {
+    if (!existsSync(tee)) return;
+    const { size, mtimeMs } = statSync(tee);
+    if (lastTeeSize !== null && size === lastTeeSize && Date.now() - mtimeMs >= STALL_AFTER_MS) {
+      wake({ event: "stall", childId, turn: turnIndex, detail: { silentMs: Date.now() - mtimeMs } });
+    }
+    lastTeeSize = size;
+  } catch {
+    /* nothing to classify without the tee */
+  }
+}
+
+const scanner = setInterval(() => {
+  scanGates();
+  scanStall();
+}, GATE_SCAN_MS);
+scanner.unref(); // the child's pipes own this process's lifetime, not the timer
+
 // stream-json is NDJSON, but a chunk boundary can land mid-line — buffer until a
 // newline or the tee gets corrupt records that nothing downstream can parse.
 let buffer = "";
@@ -184,12 +260,15 @@ child.stderr.on("data", (chunk) => {
 
 child.on("error", (err) => {
   note({ subtype: "spawn_failed", message: err.message });
+  clearInterval(scanner);
+  scanGates();
   updateChild(runId, childId, {
     status: "crashed",
     exitCode: null,
     endedAt: new Date().toISOString(),
     error: err.message,
   });
+  wake({ event: "exit", childId, turn: turnIndex, detail: { status: "crashed", spawnFailed: true } });
   endTelemetryRun(args["telemetry-run"], 1);
   process.exit(1);
 });
@@ -238,6 +317,13 @@ child.on("exit", (code, signal) => {
   if (!sawInit) {
     note({ subtype: "no_init", message: "child exited before emitting system/init — no session_id, not resumable" });
   }
+
+  // One row for this turn's end, whatever the final status — `waiting_gate`
+  // included. The gate itself got its own row from the final scan above; the
+  // exit is a separate event with its own dedup key.
+  clearInterval(scanner);
+  scanGates();
+  wake({ event: "exit", childId, turn: turnIndex, detail: { status, exitCode: code } });
 
   endTelemetryRun(args["telemetry-run"], code ?? 1);
   process.exit(0);
