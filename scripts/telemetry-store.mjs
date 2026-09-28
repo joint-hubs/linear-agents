@@ -49,6 +49,13 @@ export const MIGRATION_VERSIONS = {
   // idempotent on every open, same pattern as toolFactIdentity; the marker is
   // the paper trail.
   usageMessageId: 8,
+  // FOC-624: the codegraph_query_facts table (CodeGraph query trajectories).
+  // CREATE TABLE IF NOT EXISTS, so idempotent on every open like the column adds
+  // above; the marker is the paper trail. Deliberately a SEPARATE TABLE rather
+  // than columns on tool_facts: migrateRunScopedUsage rebuilds tool_facts from its
+  // own DDL and would drop columns added earlier (the ordering trap the FOC-220
+  // and FOC-381 comments both warn about). A side table is immune to that.
+  codegraphQueryFacts: 9,
 };
 
 export function sqliteAvailable() {
@@ -705,6 +712,43 @@ function ensureManagerRunIndex(db) {
   db.exec("CREATE INDEX IF NOT EXISTS idx_runs_squad_ended ON runs(squad, ended_at, started_at)");
 }
 
+// FOC-624 (collection half). One row per CodeGraph query, keyed on the same
+// tool_fact_id recordToolFact computes (sha1 of source_path:source_offset:tool_index)
+// so the trajectory joins tool_facts without a second identity scheme.
+//
+// PRIVACY (FOC-220): `returns_*` and `used_*` hold IDENTIFIERS ONLY — file paths and
+// symbol names. The tool result text is never persisted anywhere, only its salted
+// digest and byte count on tool_facts, so these identifiers are the one place the
+// shape of a CodeGraph answer survives. No source text, no prose, no excerpts.
+//
+// `used_*` and `outcome` are NULL until the attribution pass runs: "which returned
+// symbols/files were later used" is future information and cannot be known at
+// capture time. See scripts/codegraph-trajectory.mjs.
+function ensureCodegraphQueryFacts(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS codegraph_query_facts (
+      tool_fact_id     TEXT PRIMARY KEY,
+      run_id           TEXT NOT NULL,
+      agent_key        TEXT NOT NULL,
+      turn_index       INTEGER,
+      tool_name_raw    TEXT,
+      observed_at      TEXT,
+      source_path      TEXT,
+      source_offset    INTEGER,
+      tool_index       INTEGER,
+      freshness        TEXT NOT NULL,
+      graph_answered   INTEGER NOT NULL,
+      returns_files    TEXT NOT NULL,
+      returns_symbols  TEXT NOT NULL,
+      used_files       TEXT,
+      used_symbols     TEXT,
+      outcome          TEXT,
+      created_at       TEXT NOT NULL
+    )
+  `);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_codegraph_query_run_agent ON codegraph_query_facts(run_id, agent_key, source_offset)");
+}
+
 export function migrate(db, path) {
   // Views are dropped first and recreated at the end: the migrations below
   // rebuild the fact tables they select from (DROP + RENAME), and SQLite
@@ -730,6 +774,9 @@ export function migrate(db, path) {
   // before migrateRunScopedUsage ran.
   addUsageMessageColumns(db);
   ensureManagerRunIndex(db);
+  // FOC-624: a side table, so it is immune to the tool_facts rebuild above and can
+  // go anywhere in this sequence. Kept next to the other additive step for symmetry.
+  ensureCodegraphQueryFacts(db);
   ensureCanonicalViews(db);
   // Record every migration marker. Each step guards itself above; this loop
   // just persists the paper trail. INSERT OR IGNORE keeps it idempotent across

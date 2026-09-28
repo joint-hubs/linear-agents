@@ -303,13 +303,19 @@ async function resolvePendingToolFacts(db, linkState) {
     // writeToolFact) — the upgrade path re-binds every INSERT column, so the
     // identity fields (agent_key, tool_name_raw, turn_index, …) must be
     // present; node:sqlite refuses to bind undefined.
-    await recordToolFact({
+    const resolved = {
       ...use,
       tool_has_error: result.isError ? 1 : 0,
       tool_result_state: result.isError ? "error" : "ok",
       tool_result_bytes: result.bytes,
       tool_result_full: result.text,
-    }, { db });
+    };
+    await recordToolFact(resolved, { db });
+    // FOC-624: capture here too. The pending use was written without a result, so
+    // this is the first moment the result text is in hand and freshness/returns can
+    // be derived. (finalizePendingToolFacts passes tool_result_full: null and so
+    // correctly captures nothing.)
+    await captureCodegraphFact(db, resolved);
     linkState.uses.delete(id);
     linkState.results.delete(id);
     await pacer();
@@ -373,6 +379,60 @@ async function finalizeOrphanedPendingToolFacts(db, runId, path) {
   return pending.length;
 }
 
+// FOC-624 (collection half): CodeGraph query-trajectory capture and attribution.
+// Dynamically imported and memoised — the ingest hot path pays the module lookup
+// once per process, and node caches it either way.
+let codegraphTrajectory = null;
+async function codegraphTrajectoryModule() {
+  if (!codegraphTrajectory) codegraphTrajectory = await import("./codegraph-trajectory.mjs");
+  return codegraphTrajectory;
+}
+
+/**
+ * FOC-624: capture one CodeGraph query's trajectory while its result text is still
+ * in hand — freshness and the returned identifiers. IDENTIFIERS ONLY (FOC-220 keeps
+ * the result text out of the store; see scripts/codegraph-trajectory.mjs).
+ *
+ * No-op for every other tool, and for a use whose result has not arrived yet — that
+ * case is captured from resolvePendingToolFacts once the outcome lands.
+ */
+async function captureCodegraphFact(db, record) {
+  if (!record || typeof record.tool_result_full !== "string") return;
+  const { captureFromRecord, recordCodegraphCapture } = await codegraphTrajectoryModule();
+  const row = captureFromRecord(record);
+  if (row) recordCodegraphCapture(db, row);
+}
+
+/**
+ * FOC-624: back-fill which returned identifiers were later used, and the 3-way
+ * outcome FOC-627 grades (answered / fallback / unused, plus `unknown` so the
+ * classification never fabricates). "Later used" is future information, so this can
+ * only run once a pass has seen what follows the query.
+ *
+ * Idempotent UPDATE: re-running over a grown transcript widens `used`, never
+ * narrows it.
+ */
+async function attributeCodegraphUse(db, { runId, agentKey, sourcePath }) {
+  const { attributeQueries, loadProseAfter } = await codegraphTrajectoryModule();
+  const queries = db.prepare(
+    "SELECT * FROM codegraph_query_facts WHERE run_id=? AND agent_key=? AND source_path=?",
+  ).all(runId, agentKey, sourcePath);
+  if (queries.length === 0) return 0;
+  const toolRows = db.prepare(
+    `SELECT tool_fact_id, run_id, agent_key, source_offset, tool_index, tool_name_raw, tool_name_canon, tool_input
+       FROM tool_facts WHERE run_id=? AND agent_key=?`,
+  ).all(runId, agentKey);
+  // tool_facts keeps a 1000-char preview of tool_input (the full text feeds only the
+  // identity digest), so usage matching can only UNDER-report. Stated, not hidden.
+  const proseByOffset = await loadProseAfter(queries);
+  attributeQueries({ queries, toolRows, proseByOffset });
+  for (const row of queries) {
+    db.prepare("UPDATE codegraph_query_facts SET used_files=?, used_symbols=?, outcome=? WHERE tool_fact_id=?")
+      .run(row.used_files, row.used_symbols, row.outcome, row.tool_fact_id);
+  }
+  return queries.length;
+}
+
 /**
  * Tool-fact ingest for ONE transcript range (FOC-547).
  *
@@ -388,6 +448,7 @@ async function finalizeOrphanedPendingToolFacts(db, runId, path) {
  * after that, truly orphan results (no matching tool_use in the file at all —
  * the old extractor ignored them too) are pruned.
  */
+
 async function ingestToolFactsRange(db, runId, path, agentKey, startOffset, state) {
   const linkState = state.toolLinks;
   // One shared write path for range records and full-re-scan records: BOTH
@@ -409,6 +470,7 @@ async function ingestToolFactsRange(db, runId, path, agentKey, startOffset, stat
       linkState.uses.set(record._toolUseId, record);
     }
     await recordToolFact(record, { db });
+    await captureCodegraphFact(db, record);
   };
   const pacer = createPacer();
   const records = await extractToolFacts(path, runId, agentKey, { startOffset, linkState });
@@ -435,6 +497,10 @@ async function ingestToolFactsRange(db, runId, path, agentKey, startOffset, stat
   for (const id of [...linkState.results.keys()]) {
     if (!linkState.uses.has(id)) linkState.results.delete(id);
   }
+  // FOC-624: attribute "returned -> later used" only now, once the pass has seen
+  // what follows each query. Idempotent UPDATE — a later pass over a grown
+  // transcript can widen `used`, never narrow it.
+  await attributeCodegraphUse(db, { runId, agentKey, sourcePath: path });
 }
 
 /**
