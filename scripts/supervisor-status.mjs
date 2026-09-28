@@ -1,39 +1,47 @@
-// scripts/supervisor-status.mjs — what are the children doing, and the lead's
-// only way to wait.
+// scripts/supervisor-status.mjs — what are the children doing, and how the lead
+// drains the wake queue.
 //
 //   node scripts/supervisor-status.mjs [--run <id>] [--child <id>] [--tail <n>]
 //                                      [--wait] [--timeout-ms <ms>]
+//                                      [--drain] [--ack <seq>]
 //
 // Snapshot mode returns immediately. Wait mode blocks until the child exits, a
-// pending gate appears, or the timeout elapses — Claude Code has no spontaneous
-// wakeup, so without this the lead would burn a turn per poll. It reports which
-// of four things happened:
+// pending gate appears, or the timeout elapses — kept for a SHORT bounded wait
+// (≤ 120 s). It reports which of five things happened:
 //
 //   exit     a child that was live has finished       → read the result, route on
 //   gate     a gate appeared that was not pending     → present it to Mateusz
-//   timeout  still running, nothing new               → re-issue with backoff
+//   timeout  still running, nothing new               → end the turn; the wake
+//                                                     queue replaces the old
+//                                                     in-turn backoff chain
 //   idle     nothing is live; there is nothing to     → read the result, route on
 //            wait for, so it returned without waiting
+//
+// Drain mode (FOC-608) prints the wake queue's un-acked rows — child exits,
+// gates and stalls the watcher classified while nobody was waiting. Ack mode
+// retires rows through a seq, persisting the watermark so a reader restart does
+// not re-deliver them. This script writes ONLY the ack store; the queue itself
+// is written only by the watcher.
 //
 // HARD CONTRACT: this script NEVER probes a process. Liveness is written by the
 // watcher (supervisor-watch.mjs) and read here. If a status is wrong, the bug is
 // in the watcher, not in a missing `kill -0` — adding one would create a second
 // source of truth that disagrees with the first at exactly the worst moment.
 //
-// Monitor cadence (the lead's contract; FOC-124 restates this in
-// agents/supervisor/CLAUDE.md): after every spawn or follow-up, call
-// `status --wait`; on `timeout`, re-issue with backoff ×1, ×2, ×4, capped at 4×
-// the base timeout. Stall is judged on WALL CLOCK, not on how many times the
-// lead called: the tee has to be silent for 5 × the base timeout (default
-// 5 × 120 s = 10 min). That is why backoff cannot stretch the kill SLA, and why
-// there is one constant here rather than two that drift apart.
+// Stall is judged on WALL CLOCK: the tee has to be silent for 5 × the base
+// timeout (default 5 × 120 s = 10 min). The watcher enqueues a `stall` row at
+// the same threshold — one shared constant, not two that drift apart.
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import {
   TERMINAL_STATUSES,
+  pollBaseMs,
   readHeld,
+  readWakeAck,
+  readWakeQueue,
+  stallSilenceMs,
   addCost,
   budgetStatus,
   failJson,
@@ -42,10 +50,11 @@ import {
   readRegistry,
   runDir,
   teeAbsPath,
+  writeWakeAck,
 } from "./supervisor-lib.mjs";
 
-const BASE_POLL_MS = Number(process.env.LA_SUPERVISOR_POLL_MS ?? 120_000);
-const STALL_SILENCE_MS = BASE_POLL_MS * 5;
+const BASE_POLL_MS = pollBaseMs();
+const STALL_SILENCE_MS = stallSilenceMs();
 const SNIPPET_CHARS = 200;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -221,6 +230,49 @@ const tail = Number(args.tail ?? 0);
 if (!runId) failJson("--run <runId> is required (or set LA_SUPERVISOR_RUN)");
 if (!existsSync(runDir(runId))) failJson(`no such run: ${runId}`, { expected: runDir(runId) });
 
+// ── drain / ack (FOC-608) ────────────────────────────────────────────────────
+// The Supervisor's start-of-turn read: what happened while nobody was waiting.
+// Un-acked rows only — acked ones never come back, because the watermark is
+// persisted next to the queue, not held in this process.
+if (args.drain) {
+  const rows = readWakeQueue(runId);
+  const ackedThrough = readWakeAck(runId);
+  const unacked = rows.filter((r) => r.seq > ackedThrough);
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        runId,
+        mode: "drain",
+        ackedThrough,
+        unackedCount: unacked.length,
+        totalRows: rows.length,
+        unacked,
+        stalledChildren: snapshot(runId, { childFilter, tail: 0 }).children
+          .filter((c) => c.stalled)
+          .map((c) => c.childId),
+      },
+      null,
+      2,
+    ),
+  );
+  process.exit(0);
+}
+
+if (args.ack !== undefined) {
+  if (typeof args.ack !== "string" || !/^\d+$/.test(args.ack)) {
+    failJson("--ack <seq> requires the sequence number to retire through", {
+      got: args.ack === true ? "(no seq given)" : String(args.ack),
+    });
+  }
+  const ackedThrough = writeWakeAck(runId, Number(args.ack));
+  const remaining = readWakeQueue(runId).filter((r) => r.seq > ackedThrough).length;
+  console.log(
+    JSON.stringify({ ok: true, runId, mode: "ack", ackedThrough, unackedCount: remaining }, null, 2),
+  );
+  process.exit(0);
+}
+
 if (!args.wait) {
   console.log(JSON.stringify({ ...snapshot(runId, { childFilter, tail }), mode: "snapshot" }, null, 2));
   process.exit(0);
@@ -241,12 +293,10 @@ let current = before;
 
 // Nothing live means nothing CAN change: only a running child writes the
 // registry or drops a gate file. Without this guard the loop burns the whole
-// timeout and reports `timeout` — which the cadence in agents/supervisor/CLAUDE.md
-// answers with a backoff, so up to 4x the base timeout is spent waiting on a
-// child that had already finished before the wait began. The baselining below
-// is what makes that reachable: an already-terminal child is deliberately not
-// reported as "just exited", and with no live sibling there is nothing else to
-// report either.
+// timeout and reports `timeout` on a child that had already finished before the
+// wait began. The baselining below is what makes that reachable: an
+// already-terminal child is deliberately not reported as "just exited", and
+// with no live sibling there is nothing else to report either.
 //
 // Found by running the pipeline end to end (triage → spawn → status), where the
 // mock child exits in milliseconds and the gap is always hit. A read-through
@@ -299,8 +349,10 @@ console.log(
       // to Mateusz.
       repeatedTasks: final.repeatedTasks ?? [],
       // Only `timeout` means "still running, ask again later". `idle` means
-      // there is nothing left to wait for, so backing off would be waiting on
-      // no one.
+      // there is nothing left to wait for. Kept for output compatibility with
+      // existing consumers (FOC-608): the Monitor loop no longer re-issues
+      // waits in a backoff chain — it ends the turn and drains the wake queue —
+      // but the field's value and shape are unchanged.
       nextBackoffHint: reason === "timeout" ? Math.min(timeoutMs * 2, BASE_POLL_MS * 4) : BASE_POLL_MS,
       // Only present when the reason is `held`, so the lead does not have to
       // work out what to do with a run that is neither running nor finished.

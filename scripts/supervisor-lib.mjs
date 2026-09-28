@@ -8,11 +8,13 @@
 //   children.json        the registry (§2.5)
 //   children/<id>.jsonl  the raw stream-json tee for one child (§2.7)
 //   gates/<gateId>.json  gate records (supervisor-gate.mjs, FOC-122)
+//   wake-queue.jsonl     the durable wake queue (FOC-608; watcher writes, status drains)
+//   wake-ack.json        the persisted drain watermark (FOC-608; status writes)
 //   triage.json          the recorded verdict (FOC-123, read here, never written)
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -158,7 +160,131 @@ export function hasPendingGate(runId, childId) {
     });
 }
 
+// ── poll base and the stall SLA (FOC-608) ────────────────────────────────────
+// One number, two readers: supervisor-status.mjs computes the stall column from
+// it and the watcher judges the same SLA when it enqueues a `stall` row. They
+// must never drift — a queue that says "stalled" at a different threshold than
+// the status display would be two sources of truth about liveness.
+export const pollBaseMs = () => Number(process.env.LA_SUPERVISOR_POLL_MS ?? 120_000);
+export const stallSilenceMs = () => pollBaseMs() * 5;
+
+// ── durable wake queue (FOC-608) ─────────────────────────────────────────────
+//
+// The Supervisor used to wait in-turn with long `supervisor-status.mjs --wait`
+// chains. The watcher now classifies events into an append-only queue on disk;
+// the Supervisor drains it at the start of a turn, handles, acknowledges. The
+// model is never the waiter, only the judge.
+//
+// Writer discipline (same shape as the registry's, see updateChild): the queue
+// is appended ONLY by the watcher (supervisor-watch.mjs), the ack store is
+// written ONLY by the reader (supervisor-status.mjs). With one live child per
+// run — the current execution policy — there is exactly one watcher process, so
+// read-max-then-append cannot interleave. If the one-live-child policy is ever
+// lifted, this append path needs a real lock first, exactly like updateChild.
+//
+// Layout: wake-queue.jsonl (one JSON row per line, append-only) and
+// wake-ack.json (a single ack watermark) next to it under <runDir>.
+
+export const wakeQueuePath = (runId) => join(runDir(runId), "wake-queue.jsonl");
+export const wakeAckPath = (runId) => join(runDir(runId), "wake-ack.json");
+
+export const WAKE_EVENTS = ["exit", "gate", "stall"];
+
+// One row per EVENT, never one per observation. The key is what makes the
+// exactly-once guarantee testable:
+//
+//   · exit  → `exit:<childId>:<turn>`  a turn ends exactly once; two polls
+//             observing the same exit carry the same key, the second append
+//             is a no-op. `turn` comes from the watcher's own --turn, and the
+//             registry already records turns[] per child — no parallel source
+//             of truth is invented here.
+//   · gate  → `gate:<gateId>`          gate identity; a gate file appearing is
+//             one event no matter how many scans or watcher restarts see it.
+//   · stall → `stall:<childId>:<turn>` at most one stall row per turn: the SLA
+//             breach is one event, and the response (stop + escalate) is the
+//             same whether it fired once or would have fired ten times.
+export function wakeDedupKey({ event, childId = null, turn = 0, gateId = null }) {
+  if (event === "gate") return `gate:${gateId}`;
+  return `${event}:${childId}:${turn}`;
+}
+
+/**
+ * Every valid row, in file order. A torn trailing line — the one shape a crash
+ * mid-append can leave — is skipped, not fatal: the events before it survive,
+ * and the next append continues from the last VALID seq.
+ */
+export function readWakeQueue(runId) {
+  const path = wakeQueuePath(runId);
+  if (!existsSync(path)) return [];
+  const rows = [];
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const row = JSON.parse(line);
+      if (row && typeof row.seq === "number" && row.dedupKey) rows.push(row);
+    } catch {
+      /* torn trailing line — see the doc comment */
+    }
+  }
+  return rows;
+}
+
+/**
+ * Append one row unless its dedup key is already on disk. Returns the row, or
+ * null when the event was already recorded. seq is max(existing)+1, so a
+ * watcher restart never reissues or collides: the count comes from the file,
+ * not from memory.
+ */
+export function appendWakeEvent(runId, event) {
+  if (!WAKE_EVENTS.includes(event.event)) {
+    throw new Error(`unknown wake event class: ${event.event} (known: ${WAKE_EVENTS.join(", ")})`);
+  }
+  const key = wakeDedupKey(event);
+  const rows = readWakeQueue(runId);
+  if (rows.some((r) => r.dedupKey === key)) return null;
+  const row = {
+    seq: rows.reduce((max, r) => Math.max(max, r.seq), 0) + 1,
+    event: event.event,
+    childId: event.childId ?? null,
+    turn: event.turn ?? 0,
+    gateId: event.gateId ?? null,
+    dedupKey: key,
+    detail: event.detail ?? {},
+    ts: new Date().toISOString(),
+  };
+  ensureRunDir(runId);
+  appendFileSync(wakeQueuePath(runId), JSON.stringify(row) + "\n");
+  return row;
+}
+
+/**
+ * The ack watermark. Acks are PERSISTED, not in-process: a reader restart does
+ * not re-deliver acked rows. It lives in ONE small JSON file written through
+ * atomicWriteJSON (temp + rename) rather than an ack log: rename is atomic, so
+ * a torn ack record is impossible by construction and the reader never needs
+ * partial-line tolerance.
+ *
+ * What happens when an ack and an append disagree (crash between the two): the
+ * queue row exists and the watermark does not cover it — the row is re-read on
+ * the next drain. Redelivery, never loss; the queue is a pointer to facts that
+ * live in the registry/gates/tee, so judging an event twice is safe, losing one
+ * is not. The reverse (watermark past an append) cannot happen: an ack is only
+ * ever written for a seq the acker read from the file.
+ */
+export function readWakeAck(runId) {
+  const ack = readJsonOr(wakeAckPath(runId), null);
+  return typeof ack?.ackedThrough === "number" ? ack.ackedThrough : 0;
+}
+
+/** Retire rows through `seq`. The watermark never moves backwards. */
+export function writeWakeAck(runId, seq) {
+  const ackedThrough = Math.max(readWakeAck(runId), seq);
+  atomicWriteJSON(wakeAckPath(runId), { ackedThrough, ackedAt: new Date().toISOString() });
+  return ackedThrough;
+}
+
 // ── cost (FOC-165) ───────────────────────────────────────────────────────────
+
 // The stream's `total_cost_usd` is NOT a measurement. Claude Code computes it
 // from its own table, and it does not recognise a single model id this repo
 // routes to — every child run prints `[claude-code:unrecognized_model]` to
