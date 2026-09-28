@@ -3,7 +3,7 @@
 //
 //   node scripts/supervisor-status.mjs [--run <id>] [--child <id>] [--tail <n>]
 //                                      [--wait] [--timeout-ms <ms>]
-//                                      [--drain] [--ack <seq>]
+//                                      [--drain] [--ack <seq>] [--briefing]
 //
 // Snapshot mode returns immediately. Wait mode blocks until the child exits, a
 // pending gate appears, or the timeout elapses — kept for a SHORT bounded wait
@@ -31,31 +31,44 @@
 // Stall is judged on WALL CLOCK: the tee has to be silent for 5 × the base
 // timeout (default 5 × 120 s = 10 min). The watcher enqueues a `stall` row at
 // the same threshold — one shared constant, not two that drift apart.
+//
+// Briefing mode (FOC-609) is the SessionStart digest: one call at the start of
+// a turn that names everything the lead owes attention to — live and held
+// children, pending gates, un-acked wake rows, the last action per child. It is
+// read-only and deliberately tolerant of a run that does not exist yet: the
+// SessionStart hook fires before the first spawn too, and a hook that exits 1
+// would inject an error into the session context instead of a briefing.
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+import { atomicWriteJSON } from "./utils.mjs";
 import {
   TERMINAL_STATUSES,
   pollBaseMs,
   readHeld,
   readWakeAck,
   readWakeQueue,
+  readRegistry,
   stallSilenceMs,
   addCost,
   budgetStatus,
   failJson,
   gatesDir,
   parseArgs,
-  readRegistry,
   runDir,
   teeAbsPath,
+  waitArmedPath,
   writeWakeAck,
 } from "./supervisor-lib.mjs";
 
 const BASE_POLL_MS = pollBaseMs();
 const STALL_SILENCE_MS = stallSilenceMs();
 const SNIPPET_CHARS = 200;
+// The armed-wait marker's TTL is the wait's own timeout plus this grace, so a
+// wait that is finishing up as the guard fires is still counted as armed, while
+// a wait process that crashed without cleaning up expires out of the judgement.
+const ARMED_GRACE_MS = 60_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -227,6 +240,70 @@ const runId = args.run || process.env.LA_SUPERVISOR_RUN;
 const childFilter = args.child || null;
 const tail = Number(args.tail ?? 0);
 
+// ── briefing (FOC-609) ───────────────────────────────────────────────────────
+// The SessionStart digest. Unlike every other mode this one is TOLERANT of a
+// missing run: the hook fires on session start, which may precede the first
+// spawn, and a failing hook would inject an error into the session context
+// instead of a briefing. No run resolvable, or the run dir not there yet →
+// say so on stderr and exit 0 with empty stdout.
+if (args.briefing) {
+  if (!runId || !existsSync(runDir(runId))) {
+    console.error(`briefing: no run to brief (${runId ? "run dir missing" : "no --run / LA_SUPERVISOR_RUN"})`);
+    process.exit(0);
+  }
+  const registry = readRegistry(runId);
+  const ackedThrough = readWakeAck(runId);
+  const rows = readWakeQueue(runId);
+  const unacked = rows.filter((r) => r.seq > ackedThrough);
+  const entries = Object.values(registry.children);
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        runId,
+        mode: "briefing",
+        live: entries
+          .filter((c) => !TERMINAL_STATUSES.includes(c.status))
+          .map((c) => ({ childId: c.childId, squad: c.squad ?? null, status: c.status })),
+        held: readHeld(runId).map((h) => ({
+          heldId: h.heldId,
+          squad: h.squad ?? null,
+          taskId: h.taskId ?? null,
+          reason: h.reason ?? (h.unreadable ? "unreadable" : null),
+        })),
+        pendingGates: pendingGates(runId).map((g) => ({
+          gateId: g.gateId,
+          kind: g.kind,
+          childId: g.childId ?? null,
+          summary: g.summary,
+        })),
+        wake: {
+          ackedThrough,
+          unackedCount: unacked.length,
+          totalRows: rows.length,
+          unacked: unacked.map((r) => ({ seq: r.seq, event: r.event, childId: r.childId ?? null })),
+        },
+        // Last action per child, from the registry only: the watcher's status,
+        // plus when the last turn ended and how. No tee content here — the
+        // drain (`--drain --tail n`) is where the events themselves are read.
+        lastAction: entries.map((c) => {
+          const turns = Array.isArray(c.turns) ? c.turns : [];
+          const last = turns[turns.length - 1] ?? null;
+          return {
+            childId: c.childId,
+            status: c.status,
+            lastTurnEndedAt: last?.endedAt ?? null,
+            lastTurnExitCode: last?.exitCode ?? null,
+          };
+        }),
+      },
+      null,
+      2,
+    ),
+  );
+  process.exit(0);
+}
+
 if (!runId) failJson("--run <runId> is required (or set LA_SUPERVISOR_RUN)");
 if (!existsSync(runDir(runId))) failJson(`no such run: ${runId}`, { expected: runDir(runId) });
 
@@ -282,6 +359,18 @@ if (!args.wait) {
 const timeoutMs = Number(args["timeout-ms"] ?? BASE_POLL_MS);
 const deadline = Date.now() + timeoutMs;
 
+// Armed-wait marker (FOC-609): for as long as this wait is blocked, the stop-
+// hook guard must see the turn as legitimately open and allow it to end. The
+// marker carries a TTL (the wait's timeout plus a small grace) rather than
+// relying on cleanup — a wait process killed mid-poll leaves the marker behind,
+// and it expires out of the guard's judgement on its own. Removed on a normal
+// completion, so a finished wait does not look armed.
+mkdirSync(runDir(runId), { recursive: true });
+atomicWriteJSON(waitArmedPath(runId), {
+  armedAt: new Date().toISOString(),
+  expiresAt: deadline + ARMED_GRACE_MS,
+});
+
 const before = snapshot(runId, { childFilter, tail: 0 });
 const gatesBefore = new Set(before.pendingGates.map((g) => g.gateId));
 const wasTerminal = new Set(
@@ -310,24 +399,28 @@ if (before.totals.live === 0) {
   reason = before.held?.length ? "held" : "idle";
 }
 
-while (reason === "timeout" && Date.now() < deadline) {
-  await sleep(500);
-  current = snapshot(runId, { childFilter, tail: 0 });
+try {
+  while (reason === "timeout" && Date.now() < deadline) {
+    await sleep(500);
+    current = snapshot(runId, { childFilter, tail: 0 });
 
-  // (a) a child that was live has finished
-  const justExited = current.children.find(
-    (c) => TERMINAL_STATUSES.includes(c.status) && !wasTerminal.has(c.childId),
-  );
-  if (justExited) {
-    reason = "exit";
-    break;
-  }
+    // (a) a child that was live has finished
+    const justExited = current.children.find(
+      (c) => TERMINAL_STATUSES.includes(c.status) && !wasTerminal.has(c.childId),
+    );
+    if (justExited) {
+      reason = "exit";
+      break;
+    }
 
-  // (b) a gate appeared that was not pending when we started waiting
-  if (current.pendingGates.some((g) => !gatesBefore.has(g.gateId))) {
-    reason = "gate";
-    break;
+    // (b) a gate appeared that was not pending when we started waiting
+    if (current.pendingGates.some((g) => !gatesBefore.has(g.gateId))) {
+      reason = "gate";
+      break;
+    }
   }
+} finally {
+  rmSync(waitArmedPath(runId), { force: true });
 }
 
 const final = snapshot(runId, { childFilter, tail });

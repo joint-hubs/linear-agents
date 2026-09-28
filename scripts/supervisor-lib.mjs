@@ -283,6 +283,40 @@ export function writeWakeAck(runId, seq) {
   return ackedThrough;
 }
 
+// ── stop-hook turn-end guard (FOC-609) ───────────────────────────────────────
+//
+// When the Supervisor's session tries to end its turn, the Stop hook
+// (supervisor-guard.mjs) checks whether anything is still owed: live children,
+// held spawns, pending gates. The one legitimate way to end a turn with work
+// outstanding is a `--wait` running in this turn — so --wait persists a
+// short-TTL marker here (wait-armed.json, written by supervisor-status.mjs and
+// read by the guard), and an unexpired marker reads as "wait armed".
+//
+// Writer discipline: wait-armed.json is written ONLY by supervisor-status.mjs
+// (--wait) and everything under guard/ ONLY by supervisor-guard.mjs. Neither
+// touches the registry, the wake queue, gates or held — the guard is read-only
+// except for its own records.
+export const guardDir = (runId) => join(runDir(runId), "guard");
+export const guardStatePath = (runId) => join(guardDir(runId), "state.json");
+export const guardAlarmsPath = (runId) => join(guardDir(runId), "alarms.jsonl");
+export const waitArmedPath = (runId) => join(runDir(runId), "wait-armed.json");
+
+// Consecutive blocks the guard allows before concluding the lead is stuck in a
+// stop-restart loop and letting the turn end with exactly one alarm recorded.
+export const GUARD_BLOCK_LIMIT = 3;
+
+/**
+ * Is a `--wait` armed for this run right now? Armed means: the marker exists
+ * and its TTL has not expired. A stale marker (the wait process crashed without
+ * cleaning up) expires out of the judgement on its own — the guard never needs
+ * to probe whether the wait process is alive.
+ */
+export function readWaitArmed(runId) {
+  const marker = readJsonOr(waitArmedPath(runId), null);
+  const expiresAt = typeof marker?.expiresAt === "number" ? marker.expiresAt : null;
+  return { armed: expiresAt !== null && expiresAt > Date.now(), expiresAt };
+}
+
 // ── cost (FOC-165) ───────────────────────────────────────────────────────────
 
 // The stream's `total_cost_usd` is NOT a measurement. Claude Code computes it
