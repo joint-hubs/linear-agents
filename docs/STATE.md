@@ -3,6 +3,262 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Fenix supervisor contract: `agents/supervisor/CLAUDE.md`. Squad model routing: `config/models.json`. Execution plan: `docs/BUILD-BACKLOG.md`. Atlas delegation is a separate mechanism.
 
+## 2026-09-28 (12) — DECYZJE cf4c-tertia (koszty: tylko „wycenione") · FOC-608 TEST PASS (test-12) → merge weryfikowany w tle
+
+**Skąd.** Trzecia odpowiedź Mateusza (dyrektywa `cf4c`, blok 3): „działaj dalej według kolejki".
+
+| # | temat | decyzja |
+|---|---|---|
+| 1 | kolejka | Bez zmian — jadę dalej. |
+| 2 | **priority FOC-643** | Mateusz ustawi po swojej stronie. Pytanie zamknięte. |
+| 3 | **koszty dzieci** | Raportowany koszt (np. 65,09 vs 1,62 USD) = **wyłącznie dowód do FOC-165** (skomentowane tam, dedup `foc165-run-be93-costs`). Bramki, raporty i STATE używają **tylko kosztu wycenionego**, opisanego jako „wycenione". |
+
+### FOC-608 — TEST PASS (test-12, exit 0 @ 2026-09-28T17:42Z)
+
+Koszt tury: **0,025 USD wycenione**. `VERDICT: pass` (tee, raport pełny w `.state/supervisor/2026-09-27T19-03-12-332-supervisor-be93/children/test-12.jsonl`). `test-all.mjs` **102/102 EXIT=0** (492 s), `lint.mjs` 0/540.
+
+- **AC1 PASS** — 8/8 ponownie (`supervisor-wake-queue.test.mjs`): exactly-once ×4 (de-dup kluczami `exit:<child>:<turn>` / `gate:<gateId>` / `stall:<child>:<turn>`, `supervisor-lib.mjs:206-209,242-244`), seq/replay ×3 (torn-line `:220-228`, acki atomowo do `wake-ack.json` `:280-283`, acked nie wracają / un-acked przeżywają restart), state-home seam ×1.
+- **AC2 PASS** (proxy ratyfikowany) — 39/39 plus **własny dowód czerwony** test-12: wstrzyknięty `--wait --timeout-ms 480000` → 39 pass / **1 fail EXIT=1**, plik scratch usunięty, drzewo czyste. Etykieta rezydualna obecna (`supervisor-status.mjs:8-10`, default 120 s `lib:168`); `nextBackoffHint` tylko dla byte-compat (jedyny konsument: własny test). Pełna weryfikacja na żywym runie = moje zobowiązanie (patrz niżej).
+- **AC3 PASS** — `LA_SUPERVISOR_STATE_HOME` na mkdtemp przed jakąkolwiek rezolucją ścieżek (`test:41-51`, lib czyta env per call `:85-86`); jawny test, że repozytoryjny live `.state/supervisor/<runId>` **nie powstaje** (`test:73-77`); brak importu telemetrii.
+- **Design piny ✓** (cytowane): single writer (`supervisor-lib.mjs:256`, `supervisor-watch.mjs:154-160`), monotonic seq, exactly-one-row, crash-idempotent replay z persistowanymi ackami (redelivery-never-loss `lib:267-272`), `status` nie tyka pidów (`status:26-29`), model nie jest waiterem. CLAUDE.md: jedna zmiana w §4 Monitor (`3b00a10`), hard rules byte-identical (linie 146-155).
+
+Findings → rozdysponowane: (1) trailer 5/5 — **już rozstrzygnięte** przez Mateusza (historii nie ruszamy; merge bez rebase); (2) `--ack` bez walidacji sekwencji (`--ack 999` chowa przyszłe wiersze ≤999) → **FOC-621**; (5) klucz de-dup stall nie odróżnia epizodów (recover-then-restall bez drugiego wiersza) → **FOC-621**; (3) doc nit — `exitCode` opcjonalny dla gałęzi `spawnFailed` (`supervisor-watch.mjs:271`) → **FOC-461**; (4) nit — lane reason `test-lanes.json:217` mylnie opisuje test read-only → **FOC-461**.
+
+### Domknięcie
+
+`supervisor-merge.mjs --run … --child dev-11 --verify "npm ci && node scripts/test-all.mjs"` → **ACCEPT** (kandydat solo ✓, allowedPaths ✓, integracja ✓ 102/102 w 511 s; log: `.state/krok0-2026-09-27/merge-verify-foc608.log`). Lądowanie lokalne: **`8cd77f5`** = `git merge --no-ff foc-608-dev` na main (merge commit bez trailera). Komentarz close-out + `transition --status Done` w FOC-608. Dalej: **FOC-643** (wejście: **tylko `propose`** — bez `intake`, bez adnotacji A0).
+
+**Zobowiązanie AC2** (decyzja 5 sekcji (11)): pełna weryfikacja na następnym realnym runie po merge'u — cykl **FOC-643** liczę jako ten run (Monitor drain→handle→ack, żadne `--wait` > 120 s); dowód komentarzem do FOC-608.
+
+**Uwaga origin:** `main` == `origin/main` (0 przed origin) — origin dogonił main w trakcie runu (push poza mną, zgodnie z podziałem ról). Po lądowaniu FOC-608: 6 przed origin (5 commitów + merge).
+
+## 2026-09-28 (11) — DECYZJE cf4c-bis (intake ZABLOKOWANY do FOC-643) · FOC-643 ZGŁOSZONY · FOC-608 DEV done (9c408ec) → TEST test-12 w toku
+
+**Skąd.** Druga odpowiedź Mateusza (dyrektywa `cf4c`, 2026-09-28, blok 2). Nadpisuje punkt 2 sekcji (10).
+
+### Decyzje
+
+| # | temat | decyzja |
+|---|---|---|
+| 1 | **intake / STOP #2** | **ZABLOKOWANY do czasu lądowania poprawki.** Jadę na deterministycznym `propose` **bez adnotacji A0**. Plan preflightu-nadzbioru z sekcji (10) **porzucony** (niepotrzebny — nic nie wychodzi do providera). Regułę allow dla `supervisor-triage.mjs intake` Mateusz doda **dopiero po FOC-643**. |
+| 2 | **FOC-643** | Założone na jego warunkach: dziecko **FOC-466** (epic M1), typ **bug**, est. **S**, tytuł „decision-call: egress screen before the provider call". Zakres: jeden punkt kontrolny w `decision-call.mjs` **PRZED** `runDecision` — `assertEgressClean` (wzór `linear-ops.mjs:612-614`) na zserializowanym wejściu; trafienie = typed failure **bez wysyłki** (A0 degraduje się do „brak adnotacji", nigdy do wysyłki bez filtra); obejmuje **wszystkie** decyzje [G]/[J]; testy: sekret w treści issue → brak wywołania providera, czysty tekst → wywołanie jak dziś. Kolejka: **zaraz po FOC-608, przed FOC-609**. |
+| 3 | `--check-coverage` (FOC-614) | **Zawsze włączony** — ratyfikacja mojej rekomendacji. Zamknięte. |
+| 4 | **trailer** | Historii **nie ruszam**. W kickoffie każdego dziecka od teraz: „commity bez trailera Co-Authored-By". dev-11 startował przed decyzją — **5/5 jego commitów niesie trailer** (sprawdzone `git log`), nietknięte. |
+| 5 | **AC2 FOC-608** | Zobowiązanie przyjęte: pełną weryfikację robię **sam** na następnym realnym runie po merge'u i dopisuję komentarzem do taska. |
+
+**Uwaga techniczna do FOC-643:** `create-child` nie ustawia pola priority; etykiet `p1` / `priority:p1` nie ma w zespole FOC (obie próby: „Label not found in team"). Ustawione: `type:bug`, est. S, parent FOC-466 (= M1). **Priority p1 do ustawienia ręcznie w Linear.**
+
+### FOC-608 — DEV zamknięty (dev-11, exit 0 @ 2026-09-28T16:49Z)
+
+Koszt tury: **1,62 USD wycenione** (rozjazd raportowany → wyłącznie dowód FOC-165, skomentowane tam). Drzewo czyste. 5 commitów na `foc-608-dev` nad `d19b372`:
+`686eeaf` seam `LA_SUPERVISOR_STATE_HOME` · `4728026` wake queue (watcher = jedyny writer; status drain/ack) · `9215f09` testy + lane + checklist · `3b00a10` Monitor → drain/handle/ack · `9c408ec` cleanup.
+
+Dowody z tee (do zweryfikowania przez TEST): `test-all.mjs` **102/102 exit 0** (~8,3 min, hold-the-turn), `lint.mjs` 0/540.
+
+- **AC1** — 8 testów: exactly-once exit/gate/stall (także restart watchera), torn-line recovery, crash-replay (acked nie wracają, un-acked przeżywają, post-watermark = redelivery).
+- **AC2** — **proxy mechaniczny + uczciwa etykieta rezydualna** (wariant dopuszczony przez Mateusza): skan literałów `--wait`/timeout > 120 s + brak drabiny backoff w Monitorze; **czerwony dwukrotnie** (ręczne `--timeout-ms 480000`, drabina ×1/×2/×4) → 39/39 zielone. Etykieta: proxy falsyfikuje literały, nie zachowanie żywego biegu — pełna weryfikacja to decyzja 5.
+- **AC3** — seam mkdtemp przed pierwszym `runDir`, materializacja kolejki w temp home, czerwony przy pominięciu seamu (7/1) → 8/8; live telemetry DB nietknięte.
+
+Decyzje dev-11 tam, gdzie firstmate milczał: watermark zamiast ack-logu; de-dup z istniejących faktów na dysku (`exit:<childId>:<turn>`, `gate:<gateId>`, `stall:<childId>:<turn>`); wspólna stała SLA stall-silence; nowy `docs/tools/supervisor-wake-queue.md` (row-shape dla FOC-621/frontmana); `nextBackoffHint` zostawiony w `--wait` dla byte-compat (usunięcie = follow-up po FOC-621). Rozbieżność ack/append resolwuje się do **redelivery, nigdy utraty**.
+
+Out of scope (notatka dev-11, niefilowana — FOC-642 już to trzyma): 17 plików serial-lane pisze do domyślnego state root; single-writer opiera się o politykę one-live-child. Znany quirk potwierdzony: świeży worktree bez `node_modules` → `npm install` (objaw: `Cannot find package 'ajv'`). Handoff: `.state/foc-608-handoff.md`.
+
+### TEST — test-12 w toku
+
+Spawn 2026-09-28T17:29Z: `--squad test --task FOC-608 --candidate 9c408ec --model z-ai/glm-5.3-flash`, worktree `foc-608-test`, **base-revision = 9c408ec** (pin FOC-406 zadziałał), kickoff `.state/krok0-2026-09-27/foc-608-test-kickoff.md` (linia o trailerze + rulingi Mateusza: AC2 proxy+etykieta OK, AC3 seam in-scope, FOC-642 poza zakresem).
+
+### Kolejka (po FOC-608)
+
+`FOC-643` → `FOC-609` → `FOC-640` → `FOC-641` → `FOC-621` → `FOC-626` → `FOC-613` → `FOC-612` → `FOC-602/603` → M1 → M2 → M4/M5 (FOC-622, FOC-623) → M6 (FOC-625). `FOC-642` poza kolejką (reguła FOC-472: „picked only when a lane is idle"). **Wejście w każdy task: tylko `propose` bez A0** (decyzja 1), opisy M3–M6 czytane z Linear przy wejściu w blok.
+
+## 2026-09-28 (10) — DECYZJE cf4c (push / intake / trailer) · FOC-640, FOC-641, FOC-642 ZGŁOSZONE · FOC-608 w toku (dev-11)
+
+**Skąd.** Odpowiedź Mateusza na dwa pytania STOP + ratyfikacje (dyrektywa `cf4c`, 2026-09-28). Wszystko poniżej obowiązuje od teraz.
+
+### Decyzje
+
+| # | temat | decyzja |
+|---|---|---|
+| STOP #1 | **push** | **(b)** — dzieci nigdy nie pushują; lądowanie zostaje **lokalnie na main**; push zrobi Mateusz osobno, we własnym momencie. **Nie pytać o push przy każdym tasku** — w raporcie końcowym podać tylko, ile commitów main jest przed origin (teraz: **49**). Bramka `gate-dev-9-1` zamknięta tym tekstem, bez followupu do dev-9. |
+| STOP #2 | **intake → OpenRouter** | **(c)** — dopuszczony, ale **wyłącznie po tym samym filtrze sekretów** co komentarze w Linear (`assertEgressClean` lub odpowiednik). |
+| FOC-608 | edycja `agents/supervisor/CLAUDE.md` | OK — **wyłącznie sekcja Monitor**, zgodnie z zatwierdzoną kolejką. |
+| FOC-608 | **AC2** (behawioralne) | OK — mechaniczny proxy pokazany jak zawodzi **albo** uczciwe „nieweryfikowalne w worktree". **ZOBOWIĄZANIE: pełną weryfikację AC2 zrobię sam na następnym realnym runie po merge'u i dopiszę do taska.** |
+| FOC-608 | **AC3** | seam na katalog stanu **w zakresie**; migracja 17 plików do pasa równoległego = **follow-up** → zgłoszone jako **FOC-642** (dziecko FOC-472, related FOC-614 + FOC-602). |
+| FOC-608 | `firstmate` | nie pobierać, pracować z opisów w issue — zgoda. |
+| R1 | **lądowanie lokalne bez słowa „commituj"** | **TAK — RATYFIKOWANE.** Tylko lokalne commity i merge do main w ramach flow z gate'ami, **nigdy push**. Gdy wejdzie **FOC-613**, zgodę przenieść do `config/autonomy.json` (**zobowiązanie otwarte**). |
+| R2 | **FOC-626** | wstawiony do kolejki (FOC-614 jest Done) — slot w sekcji Kolejka. |
+| R3 | **follow-upy z FOC-624** | **TAK, założone**: **FOC-640** (słownik przechwytu) + **FOC-641** (`RE_STALE_BANNER`). **Zrobić PRZED FOC-621** — psują jakość danych, na których FOC-621/624 stoją. |
+| R4 | **trailer `Co-Authored-By`** | **NIE dodawać** — stała preferencja (wcześniejsze „instancja, pytaj o generalizację" jest nieaktualne). Commity bez trailera, komunikaty konkretne. Dotyczy też commitów dzieci → linia w kickoffach. |
+| R5 | **retro-fill `codegraph_query_facts`** | niepotrzebny — odstąpione. |
+| — | **rozjazd kosztu 52×** | dopisany jako dowód do **FOC-165** (komentarz `26e35cda-5dfd-4aa3-8dc5-1fbb0f7488e2`): **0,2963 USD wycenione** vs **15,33 raportowane**. Bramka 3 USD wciąż liczona z ceny **wycenionej**. |
+
+### STOP #2 — stan faktyczny filtra (zmienia warunek)
+
+`supervisor-triage.mjs` **nie ma żadnego filtra sekretów**: grep po `assertEgressClean|scanEgress|EgressBlocked|scrub` w tym pliku → **0 trafień**. `scrubEventInput` w `decision-call.mjs:702` działa na rejestrze cienia **po** wysyłce (`runDecision` idzie w `:666`), więc nie jest to filtr wychodzący. Dla porównania `linear-ops.mjs:612-614` ma dokładnie taki chokepoint dla treści wychodzącej.
+
+Ścieżka wysyłki: `supervisor-triage.mjs:772` `createDecisionCaller({ apiKey: process.env.OPENROUTER_API_KEY, … })` → `:335` `caller({ state, decisionId })` → transport Jev / fallback chat-completions. `state` = treść issue.
+
+**Warunek (c) nie jest więc spełniony w narzędziu.** Równoważny filtr, którego będę używać: **preflight** — `scripts/egress-screen.mjs` (ten sam `scanEgress`) na **nadzbiorze** payloadu issue (tytuł + opis + wszystkie komentarze + nazwy etykiet) tuż przed `intake`. Trafienie ⇒ **nie wysyłam**, jadę na `propose`. Nadzbiór czysty ⇒ podzbiór wysyłany przez `intake` jest czysty.
+
+**Dokładna komenda do reguły allow** (ta, którą klasyfikator zablokował):
+
+```
+node C:/Users/mateu/Documents/GitHub/linear-agents/scripts/supervisor-triage.mjs intake --issue <ID>
+```
+
+wywołana z katalogu głównego repo, z ustawionym `LA_ROOT`. Treść odmowy klasyfikatora (2026-09-28, przy `--issue FOC-608`):
+
+> Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Data Exfiltration] Attempting to push code to a remote repository without explicit user authorization, which is explicitly gated by user configuration and listed on the STOP list.
+
+Uzasadnienie klasyfikatora jest błędne w szczegółach (intake nie pcha kodu), ale pod spodem jest prawdziwy fakt: to **jest** wyjście poza maszynę. Do czasu reguły allow: **jedno** podejście `intake` przy następnym wejściu w task (FOC-609), po preflight-screenie; jeśli klasyfikator nadal odmówi — zapisuję odmowę, jadę na `propose` i **nie ponawiam w tym runie**.
+
+**Kandydat na follow-up (NIE zgłoszony, czeka na decyzję):** domknąć właściwy luk — jeden `assertEgressClean(state, "intake state")` w ścieżce `intake` (wzór `linear-ops.mjs:612-614`). Wtedy warunek (c) jest spełniony w narzędziu, bez mojego preflightu.
+
+### Kolejka (po FOC-608, ze wstawkami z pkt 2 i 3)
+
+`FOC-608` (dev-11 w toku) → `FOC-609` → **`FOC-640`** → **`FOC-641`** → `FOC-621` → **`FOC-626`** → `FOC-613` → `FOC-612` → `FOC-602/603` → M1 (FOC-511, FOC-512, FOC-616, FOC-607, FOC-597, FOC-598, FOC-271, FOC-599) → M2 (FOC-596 → FOC-519 → FOC-520 → FOC-516 → FOC-517 → FOC-476 → FOC-477) → M4/M5 (FOC-622, FOC-623) → M6 (FOC-625).
+
+- `FOC-640`/`FOC-641` **przed FOC-621** — zgodnie z pkt 3.
+- `FOC-609` czyta „unread wake rows" w briefingu → jest sparowany z FOC-608 i musi iść po nim (kolejność bez zmian).
+- **`FOC-626` za FOC-621` — moja decyzja, miejsce było cicho.** Argument: kampania jest wielogodzinna i maszynowa (100 standalone + ≥50 pełnych suit pod sztucznym obciążeniem), więc nie może zablokować tanich zadań przed nią; a i tak musi wystartować **po FOC-608 i FOC-609**, bo oba ruszają `scripts/supervisor-watch.mjs` / `supervisor-status.mjs`, czyli dokładnie to, co kampania mierzy (trzy writery `crashed`: `supervisor-watch.mjs:188`, `:219`, `supervisor-spawn.mjs` init-timeout 30 s). I przed M1, żeby zmiany z M-bloku nie unieważniły pomiaru. **Ryzyko kosztu:** kampania niemal na pewno przekroczy bramkę 3 USD na childa → zatrzymanie na granicy tury i pytanie (decyzja 3).
+- `FOC-642` **nie jest w kolejce** — reguła FOC-472: *„picked only when a lane is idle"*.
+
+### Nowe taski
+
+| id | tytuł | rodzic | est. |
+|---|---|---|---|
+| **FOC-640** | `codegraph-trajectory`: capture vocabulary recognises only explore renders | FOC-624 | M |
+| **FOC-641** | `codegraph-trajectory`: `RE_STALE_BANNER` matches a bare warning emoji | FOC-624 | S |
+| **FOC-642** | Migrate the serial-lane supervisor tests onto the state-dir seam | FOC-472 (related FOC-614, FOC-602) | L |
+
+### W toku
+
+**FOC-608** — `dev-11`, worktree `foc-608-dev`, baza `d19b372`, model `z-ai/glm-5.3-flash`, weryfikacja przypięcia 5/5, drzewo czyste. Kontrakt: `.state/krok0-2026-09-27/foc-608-dev-kickoff.md`. Uwaga do kickoffa: dev-11 startował **przed** decyzją R4, więc jego commity mogą nieść trailer `Co-Authored-By` — nie przepisuję historii, od FOC-609 kickoff mówi wprost „no trailer".
+
+---
+
+## 2026-09-28 (9) — FOC-627 DOMKNIĘTY (merge `d19b372`) · PUSH ZAMROŻONY — bramka `push-approval` czeka na Mateusza · kolejka: FOC-608
+
+**Zadanie.** FOC-627 = połowa „ewaluacja" wydzielona z FOC-624: zamrożony zbiór zapytań do CodeGraph + harness. TEST (test-10) **PASS 5/5 AC**, `VERDICT: pass`.
+
+**Wynik.**
+
+| | |
+|---|---|
+| zbiór | `scripts/codegraph-eval-set.json` — 18 wpisów (`explore` 11 · `node` 3 · `impact` 2 · `files` 1 · `status` 1), 13× `reference` / 5× `rubric`; każdy z 40-hex `tool_fact_id`; 21 wykluczeń opisanych w pliku |
+| harness | `scripts/codegraph-eval-harness.mjs` — jedno wywołanie → jeden raport JSON; **bramka pochodności** (exit 2, brak raportu) pokazana jak **zawodzi** dla nieistniejącego i pustego id |
+| AC3 | `byOutcome {answered:8, fallback:7, unused:3, unknown:0}`; `successRate`/`passRate`/`accuracy`/`score` **brak** w całym raporcie |
+| AC4 | dwa przebiegi na niezmienionym drzewie → `diff` **pusty**; brak pól zegara ściennego |
+| AC5 | suita **100/100 w 507 s**, `lint` 537/0, `docs-count-guard` OK (100/100), zmiana licznika w tym samym commitcie co nowy plik testowy (`9776bee`) |
+| prywatność | audyt 340 linii — **brak defektów krytycznych**; 2 niskie (`:270` sygnatura w składni źródłowej w `grading.grounded`; fragmenty tekstu odmowy w `mustName`, uzasadnione) + kosmetyczny (`:50` „15 distinct runs" vs 14) |
+
+**Rozstrzygnięcie projektowe (AC4 przesądza).** Klasa wyniku to własność zachowania agenta *po* zapytaniu, a AC4 wymaga powtarzalnego zbioru wyników — model nie jest deterministyczny. Więc harness **odtwarza zarejestrowane trajektorie**, nie generuje nowych. Reużywa `codegraph-trajectory.mjs`; diff do bazy `4554e86` = **tylko eksport** (`parseJsonArray` + komentarz). Jedna implementacja atrybucji, brak drugiej kopii do dryfu.
+
+**Dwie degradacje odziedziczone po połowie zbierania (FOC-624, poza zakresem).** (1) Słownik przechwytu rozpoznaje tylko render `explore` → wszystkie 7 wpisów non-explore wymuszone w `fallback`/`unused`; w pełni ocenialnych **11/18**. (2) `RE_STALE_BANNER` (`codegraph-trajectory.mjs:63`) łapie goły `⚠️`, a punkt `⚠️ no covering tests` w blast-radius go odpala → **9/11** wpisów `explore` zgłasza fałszywe `stale`. **To defekt w mojej własnej części z FOC-624** — punkt wyjścia do follow-upu, nie ruszone (atrybucja = zakres FOC-624). Do przeniesienia do FOC-621, żeby skill nie czytał `18` jako 18 ocenialnych przypadków.
+
+**Koszt (cf4c §3, autonomia — bez przekroczenia).** dev-9 wyceniony **0,2649** / raportowany 13,7572; test-10 **0,0315** / 1,5718. Razem **0,2963 USD** wycenione. Rampa 50–52× dla `z-ai/glm-5.3-flash` (FOC-165). Bramka 3 USD ani drgnęła.
+
+**`supervisor-merge.mjs` pomijam i mówię to wprost** (jak przy FOC-614): main stał dokładnie na bazie DEV (`4554e86`, **0** commity poza nią), `foc-627-dev` jej bezpośredni potomek → drzewo integracyjne byłoby bajtowo identyczne z `66317b5`, które TEST już zmierzyło. Gdyby main drgnął choć o jeden commit — poszedłbym przez `supervisor-merge`.
+
+### ⛔ Pytanie STOP — NIEODPOWIEDZIANE, blokuje push
+
+Bramka **`gate-dev-9-1`** (`push-approval`, `pending`) od dev-9, pytanie dosłownie:
+
+> *„Approve pushing foc-627-dev to origin? 3 local commits (6553a2c eval set, 9776bee harness+tests, 66317b5 registry row), lint 0 violations, test-all 100/100, AC1-AC4 evidenced in handoff."*
+
+Nie odpowiedziałem i **nic nie wypuściłem**. Opcje podane Mateuszowi: (a) puść `foc-627-dev` na origin, (b) nie puszczaj — ląduj lokalnie i jedna fala pusha później, (c) zamroź do TEST. TEST przeszedł, więc (c) rozstrzyga się na (a) albo (b). **Wybrałem (b) co do lądowania lokalnego** (jak FOC-605/620/624/614) — ale **push pozostaje zamrożony**, bo to pozycja z listy STOP i musi paść jego słowo.
+
+**Lądowanie lokalne bez słowa „commituj" — DO RATYFIKACJI** (decyzja z `## 2026-09-28 (2)`, zastosowana piąty raz).
+
+**Commity FOC-627 na main (lokalnie, niepushnięte):** `6553a2c` · `9776bee` · `66317b5` · merge `d19b372`. main **49** przed origin. Komentarz domknięcia `0b876445`. `FOC-627: Backlog → Done`.
+
+**Dalej: FOC-608** („Supervisor: durable wake queue from the watcher instead of in-turn `--wait` chains", M, dziecko epika **FOC-470 = M5**). Uwaga na wejściu: *inspiracją* jest `firstmate`, którego **nie ma na tej maszynie i nie wolno go pobierać** (zakaz sieci) — DEV pracuje z opisu w issue. Druga uwaga: Scope każe zmienić `agents/supervisor/CLAUDE.md` (sekcja Monitor), czyli **własny kontrakt tego Supervisora** — zgodne z `<precedence_policy>`, ale zmienia to, jak działam od tamtej pory; odnotowuję, nie przesądzam.
+
+## 2026-09-28 (8) — FOC-614 DOMKNIĘTY (merge `4554e86`) · bramka 3 USD czytana z ceny WYCENIONEJ, nie raportowanej
+
+**Decyzja kosztowa (cf4c §3, autonomia).** Przy pierwszej granicy tury dev-7 linia `result` podała
+`cost=6.503`, co na oko przekracza próg 3 USD. To jest `costUsdReported` — liczba, której
+`<supervisor_budget>` wprost **nie ufa** (FOC-165). Cena liczona przez `config/models.json`, czyli
+ta wiążąca, to **`costUsd: 0.2628`**. Stosunek 24,7×; w całym runie 871,18 / 14,70 = **59×**, czyli
+dokładnie znany mnożnik zawyżenia dla `z-ai/glm-5.3-flash`. `unpricedModels: []`, `evaluable: true`
+— komplet wierszy cen, więc liczba jest kompletna.
+
+**Werdykt: bramka NIE przekroczona** (0,26 USD ≪ 3 USD). Praca kontynuowana na tej samej sesji.
+Zapisuję to wyraźnie, bo bramka postawiona na `costUsdReported` zatrzymałaby run bez powodu.
+
+**Drugi fakt, ważniejszy:** dev-7 **zakończył turę z pracą w locie** — ostatnia wypowiedź to
+„Implementer czeka na własny background run suity (waiter `ba4ydz7gd`) — wznowi się sam po jego
+zakończeniu". **To się nigdy nie dzieje**: `claude -p` kończy się do końca, wznawianie jest tylko
+na granicy tury. Czekanie jest tym, co zamknęło turę. `exitCode: 0`, sesja resumowalna — to nie
+crash i nie ponowna próba, tylko `supervisor-followup` na tym samym `sessionId`.
+
+**Stan drzewa dev-7 w momencie wznawiania** (`foc-614-dev`, baza `8946222`) — `git log` **pusty**,
+wszystko niezacommitowane, a to jest teraz **jedyna kopia**:
+```
+ M docs/supervisor-e2e-checklist.md
+ M scripts/test-all.mjs
+?? scripts/test-lanes.json
+?? scripts/test-run.mjs
+?? scripts/test-run.test.mjs
+```
+Dziecko delegowało implementację do subagenta „implementer" i czekało na jego raport — w followupie
+dostał nakaz **zweryfikować drzewo sam**, nie zakładać, co subagent skończył.
+
+**Baseline AC1 zmierzony**: serial `98/98` w **670 s** (`.state/test-all-foc614-baseline.log`).
+To jest punkt odniesienia do dowodu „same pass/fail set as serial".
+
+**Konflikt instrukcji zgłoszony, nie rozstrzygnięty w ciszy:** CLAUDE.md §4 każe po `timeout`
+zwiększać `--wait` (×1, ×2, ×4 → do 240 s/480 s), a decyzja F mówi wprost „`--wait` maks. 120 s,
+pojedyncze krótkie odczyty na pierwszym planie" (reaper przy braku pamięci zabija długie łańcuchy).
+Biorę **120 s** — ostrzejsze i późniejsze.
+
+**Odczyt tee:** `supervisor-status.mjs` ucina tekst zdarzeń do ~200 znaków, więc raportu dziecka
+nie da się z niego odczytać w całości. Czytałem **plik tee bezpośrednio** (`.state/supervisor/<run>/children/dev-7.jsonl`,
+4593 linii) i mówię o tym wprost, zamiast relacjonować z pamięci.
+
+### Wynik — FOC-614 DOMKNIĘTY
+
+DEV `dev-7` (0,43 USD) → TEST `test-8` (0,038 USD) → **merge `4554e86`** na main (5 plików, 1016+/65−),
+push wstrzymany. `test-run.mjs` (395 ln) ma selekcję, lane'y, ograniczoną współbieżność, per-file
+timing i `--max-wall-ms`; `test-all.mjs` to delegat 72→17 linii. **79 parallel / 20 serial = 99 plików**,
+każdy serial z pisanym powodem w `scripts/test-lanes.json`.
+
+- **AC1 PASS** — `99/99 w 452 778 ms` (≈453 s < 600 s) vs baseline serialny `98/98 w 670 156 ms`.
+  Diff plik-po-pliku policzyłem **sam**, bo TEST szukał baseline'u w `.state/` głównego repo, a ten
+  leżał w worktree DEV (`foc-614-dev/.state/test-all-foc614-baseline.log`) i zgłosił słabszą tezę:
+  **0 przewrotów werdyktu** na 98 wspólnych plikach, **0 porażek** po obu stronach, jedyna różnica
+  to nowy `test-run.test.mjs`. Pełne „same pass/fail set as serial" potwierdzone.
+- **AC2 PASS** — kontrola pokrycia pokazana jako **padająca** w trzech przypadkach, exit 1:
+  plik w żadnym lane / wpis nieistniejący / plik w obu lane'ach.
+- **AC3 PASS** — `docs count (99) matches actual test file count (99)`, zmiana licznika w tym samym
+  commicie co nowy plik testowy (`3af80e5`).
+
+**Dowód izolacji sfalsyfikowany i wytrzymał** (TEST, niezależnie): wstrzyknął `const PORT = 7391`
+i `createServer()` do pliku z lane'u parallel → audyt odrzucił oba **z nazwy**, exit 1, nic nie
+uruchomione. Dowód, którego nie da się złamać, nie jest dowodem.
+
+**Odstępstwo od Scope (udokumentowane, nie defect):** brak flagi `--check-coverage` — kontrola
+pokrycia jest **always-on** (`test-run.mjs:11`, `:127-162`, przed audytem i selekcją). AC2 jest
+spełnione ściślej niż przez flagę opt-in, którą da się pominąć. Dodanie flagi ≈5 linii; oba childy
+zalecają zostawić always-on.
+
+**Integracja:** `supervisor-merge.mjs` **pominięty** dla tego jednego kandydata — `main` = `8946222`
+= baza dev, `foc-614-dev` liniowym potomkiem, 0 commitów maina poza bazą, więc drzewo integracyjne
+byłoby bajt w bajt identyczne z kandydatem już zmierzonym przez TEST. Uzasadnienie narzędzia
+(FOC-160: dwa zielone patche ≠ jeden zielony patch) przy jednym kandydacie jest tautologią, a koszt
+to 2–3 pełne przebiegi suity (~25 min) + RAM przy znanym ryzyku reapera. Przy choć jednym commicie
+maina poza bazą wchodziłbym przez `supervisor-merge`.
+
+**Sanity w main po lądowaniu:** `test-all.mjs zz-suite-env-scrub` → `1/1 passed in 86ms`
+(delegat działa z mainowego `node_modules`); `docs-count-guard` OK (99/99); cudzy `scripts/linear-ops.mjs`
+nietknięty. Close-out w Linear: komentarz `b36dee1d-9adc-4b0f-b0db-6cd433dd29d7`, Backlog → Done.
+
+**Bonus, FOC-614 robi dla reszty runu:** pełny przebieg suity mieści się teraz w granicy shella
+600 s (453 s), więc **można zdjąć wzorzec „hold the turn"** przy weryfikacjach — ale zostawiam,
+dopóki ktoś nie zmierzy tego pod obciążeniem (FOC-407: flake pod loadem).
+
+---
+
 ## 2026-09-28 (7) — FOC-624 (część „zbieranie") DOMKNIĘTE · `codegraph_query_facts` żywa od teraz
 
 Zgodnie z dyrektywą kolejki: z FOC-624 zrobiona **tylko** część „zbieranie". Zestaw ewaluacyjny
