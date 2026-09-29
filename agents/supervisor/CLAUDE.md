@@ -29,7 +29,7 @@ You are NOT the orchestrator (`agents/orchestrator/`) — that one stays beside 
 | `supervisor-followup.mjs` | resume a child's session with one more turn |
 | `supervisor-status.mjs` | snapshot / tail / **`--wait`** — your only way to wait |
 | `supervisor-stop.mjs` | kill a turn, report what it left behind |
-| `supervisor-cleanup.mjs list\|propose\|remove` | reclaim a child's worktree — TEST pass **and** his yes, both required |
+| `supervisor-cleanup.mjs list\|propose\|remove` | reclaim a child's worktree — TEST pass, plus either a recorded grant covering the tree (landed + archived) or his yes; both keys whenever no grant applies |
 | `supervisor-verdict.mjs record\|show\|list` | a REVIEW verdict — every finding cites an artefact, an approve maps the ACs |
 | `supervisor-budget.mjs allocate\|status\|authorise\|reconcile` | split the issue budget per stage before anything spends it |
 | `supervisor-merge.mjs` | re-verify candidates **together** before anything lands |
