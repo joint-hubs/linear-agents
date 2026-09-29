@@ -4,6 +4,7 @@
 //   node scripts/supervisor-cleanup.mjs list    [--run <id>]
 //   node scripts/supervisor-cleanup.mjs propose --child <id> [--run <id>] [--issue-file <path>]
 //   node scripts/supervisor-cleanup.mjs remove  --child <id> [--run <id>] [--issue-file <path>]
+//   node scripts/supervisor-cleanup.mjs prune   [--run <id>] [--dry-run]
 //
 // WHY THIS EXISTS: every spawn creates ../la-wt/<branch> and nothing ever
 // reclaimed it. ADR-0009 said "cleanup happens on handoff, never on stop" and
@@ -50,7 +51,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, isAbsolute } from "node:path";
 
 import { allGates } from "./supervisor-gate.mjs";
@@ -954,6 +955,114 @@ function performRemoval({ runId, childId, entry, repo, state, forced, keys, arch
   );
 }
 
+// ── prune (FOC-649) ──────────────────────────────────────────────────────────
+
+// Retention for test-artifacts/: the intersection, never the union. A run is
+// kept only while it is BOTH among the newest KEEP_RUNS AND inside the window;
+// failing either side makes it prunable. The boundary is strict: a run at
+// exactly PRUNE_MAX_AGE_MS is OUTSIDE the window (ageMs < window retains).
+const PRUNE_KEEP_RUNS = 20;
+const PRUNE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** { files, bytes } for a directory tree, or null when it does not exist. */
+function treeStats(dir) {
+  if (!existsSync(dir)) return null;
+  let files = 0;
+  let bytes = 0;
+  const walk = (d) => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else {
+        files++;
+        try {
+          bytes += statSync(p).size;
+        } catch {
+          // a file vanishing mid-walk must not corrupt the total; count the rest
+        }
+      }
+    }
+  };
+  walk(dir);
+  return { files, bytes };
+}
+
+/**
+ * Retention for `<state-home>/<run>/test-artifacts/`. The ONLY thing it may
+ * delete is a run's test-artifacts subtree — never children.json, never the
+ * wake queue or triage or merge records, never a branch, never a worktree. If a
+ * future edit finds itself adding an evidence file to the prune set, that edit
+ * is the bug.
+ *
+ * `--run <id>` narrows DELETION to one run; ranking and age are always computed
+ * across the whole state home, so a single-run prune applies the same retention
+ * rule, not a weaker local one. `--dry-run` lists exactly what a real run would
+ * delete and touches nothing.
+ */
+function cmdPrune(args) {
+  const dryRun = args["dry-run"] === true;
+  const target = args.run && args.run !== true ? args.run : null;
+  const home = supervisorStateHome();
+  const runDirs = existsSync(home)
+    ? readdirSync(home, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => ({ runId: e.name, dir: join(home, e.name) }))
+    : [];
+
+  const mtimeOf = (dir) => {
+    try {
+      return statSync(dir).mtimeMs;
+    } catch {
+      return 0;
+    }
+  };
+  const now = Date.now();
+  const ranked = runDirs
+    .map((r) => ({ ...r, mtime: mtimeOf(r.dir) }))
+    .sort((a, b) => b.mtime - a.mtime)
+    .map((r, i) => ({ ...r, rank: i + 1, ageMs: now - r.mtime }));
+
+  const prunable = ranked.filter((r) => !(r.rank <= PRUNE_KEEP_RUNS && r.ageMs < PRUNE_MAX_AGE_MS));
+  const retentionNote =
+    `retained = newest ${PRUNE_KEEP_RUNS} runs ∩ runs from the last ${PRUNE_MAX_AGE_MS / 86_400_000} days — ` +
+    "the intersection, never the union";
+
+  if (target && !prunable.some((r) => r.runId === target)) {
+    console.log(
+      JSON.stringify({ ok: true, dryRun, run: target, pruned: [], retained: true, note: retentionNote }, null, 2),
+    );
+    return;
+  }
+
+  const selected = target ? prunable.filter((r) => r.runId === target) : prunable;
+  const pruned = [];
+  for (const r of selected) {
+    const artifacts = join(r.dir, "test-artifacts");
+    const stats = treeStats(artifacts);
+    if (!stats || stats.files === 0) continue; // nothing archived here — nothing to report
+    pruned.push({ run: r.runId, rank: r.rank, ageDays: Math.round(r.ageMs / 86_400_000), ...stats });
+    if (!dryRun) rmSync(artifacts, { recursive: true, force: true });
+  }
+
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        dryRun,
+        scannedRuns: ranked.length,
+        retention: retentionNote,
+        pruned: pruned.map(({ run, rank, ageDays, files, bytes }) => ({ run, rank, ageDays, files, bytes })),
+        bytes: pruned.reduce((a, p) => a + p.bytes, 0),
+        note: dryRun
+          ? "dry run — nothing was deleted"
+          : "deleted only each listed run's test-artifacts/ subtree; registry, gates, wake queue, triage and merge records are never touched",
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
 function requireRun(args) {
@@ -971,8 +1080,9 @@ function main() {
   if (cmd === "list") return cmdList(args);
   if (cmd === "propose") return cmdPropose(args);
   if (cmd === "remove") return cmdRemove(args);
+  if (cmd === "prune") return cmdPrune(args);
 
-  failJson(`unknown subcommand "${cmd ?? ""}" — expected list | propose | remove`);
+  failJson(`unknown subcommand "${cmd ?? ""}" — expected list | propose | remove | prune`);
 }
 
 export { GATE_KIND, AFFIRMATIVE, treeState };
