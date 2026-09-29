@@ -384,6 +384,18 @@ function cmdList(args) {
     const present = Boolean(entry.worktree) && existsSync(entry.worktree);
     const state = present ? treeState(entry.worktree, entry.baseRevision) : null;
 
+    // FOC-613: the grant path, reported per tree. Only for a present, idle
+    // tree — the grant is moot otherwise. Offline by contract, like the rest
+    // of `list`: the verdict touches no Linear, and it short-circuits on scope
+    // before any git work past resolving the main repo.
+    let grantPath = null;
+    if (present && state && !LIVE_STATUSES.includes(entry.status)) {
+      const verdict = cleanupGrantVerdict(entry, mainRepoFor(entry, args), state, runId);
+      grantPath = verdict.covered
+        ? { covered: true, grantId: verdict.grantId }
+        : { covered: false, note: verdict.note.trim() };
+    }
+
     // Deliberately offline: `list` must stay cheap enough to run on every
     // digest. The TEST key needs Linear, so it is reported as unchecked rather
     // than guessed — `propose` is where that key gets turned.
@@ -396,11 +408,16 @@ function cmdList(args) {
     if (!entry.worktree) localBlockers.push("no worktree recorded");
     else if (!present) localBlockers.push("worktree already gone");
     if (LIVE_STATUSES.includes(entry.status)) localBlockers.push(`child is ${entry.status}`);
-    if (!gate) localBlockers.push("no cleanup-approval gate yet — run `propose`");
-    else if (gate.status !== "answered") localBlockers.push(`gate ${gate.gateId} is ${gate.status}`);
-    else if (!isAffirmative(gate.answer?.text)) localBlockers.push(`gate ${gate.gateId} was not approved`);
-    else if (gate.facts?.fingerprint !== state?.fingerprint) {
-      localBlockers.push(`gate ${gate.gateId} approved a different tree state`);
+    // The gate blockers stop only the two-key route. When the grant covers the
+    // tree they are not blockers for removal — listing them would make a
+    // reclaimable tree look stuck. The TEST key stays unchecked either way.
+    if (!grantPath?.covered) {
+      if (!gate) localBlockers.push("no cleanup-approval gate yet — run `propose`");
+      else if (gate.status !== "answered") localBlockers.push(`gate ${gate.gateId} is ${gate.status}`);
+      else if (!isAffirmative(gate.answer?.text)) localBlockers.push(`gate ${gate.gateId} was not approved`);
+      else if (gate.facts?.fingerprint !== state?.fingerprint) {
+        localBlockers.push(`gate ${gate.gateId} approved a different tree state`);
+      }
     }
 
     return {
@@ -417,6 +434,7 @@ function cmdList(args) {
       gate: gate ? { gateId: gate.gateId, status: gate.status } : null,
       testApproval: "unchecked — `propose` reads Linear",
       localBlockers,
+      grantPath,
     };
   });
 

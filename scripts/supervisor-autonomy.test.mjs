@@ -502,6 +502,41 @@ test("unarchivedIgnoredContent answers directly, for the FOC-472 reuse", () => {
   assert.ok(!existsSync(archivePath(s2)));
 });
 
+console.log("\nlist — grantPath per tree");
+test("list reports the grant path honestly per tree", () => {
+  // A covered tree must SAY it is covered (which grant), not sit there with
+  // gate blockers that only stop the two-key route. A missing precondition
+  // must be named — "not archived", not a bare covered:false.
+  const s = scenario({ ignored: ["debug.log"] });
+  const cfg = autonomyConfig(s.base, [coveringGrant(s)]);
+  const row = () =>
+    parse(cleanup(["list", "--run", s.runId], { LA_AUTONOMY_CONFIG: cfg }), fail).children.find(
+      (c) => c.childId === "dev-1",
+    );
+
+  let r = row();
+  assert.equal(r.grantPath.covered, false);
+  assert.match(r.grantPath.note, /not archived/, `note must name the failed half: ${r.grantPath.note}`);
+  assert.doesNotMatch(r.grantPath.note, /not landed/);
+  assert.doesNotMatch(r.grantPath.note, /no recorded grant/);
+  assert.ok(r.localBlockers.some((b) => /propose/.test(b)), JSON.stringify(r.localBlockers));
+
+  archiveFile(s, "debug.log");
+  r = row();
+  assert.equal(r.grantPath.covered, true);
+  assert.equal(r.grantPath.grantId, "cleanup-own-worktree");
+  assert.deepEqual(r.localBlockers, [], "gate blockers stop only the two-key route");
+  assert.match(r.testApproval, /unchecked/, "the TEST key is not granted away");
+
+  // Shipped config: the repo scope does not match, so the tree keeps its
+  // two-key blockers — the note says which half failed (repo).
+  const f = scenario();
+  const fr = parse(cleanup(["list", "--run", f.runId]), fail).children.find((c) => c.childId === "dev-1");
+  assert.equal(fr.grantPath.covered, false);
+  assert.match(fr.grantPath.note, /out of scope: repo/);
+  assert.ok(fr.localBlockers.some((b) => /propose/.test(b)), JSON.stringify(fr.localBlockers));
+});
+
 test("with the shipped config, a foreign repo's tree falls through to the two-key path", () => {
   // The shipped grant scopes repo to "linear-agents"; a worktree of any other
   // repo is declined by the grant and handled by the unchanged two-key path.
