@@ -28,6 +28,14 @@
 //      a yes covers the tree he was SHOWN (that HEAD, those dirty paths), not
 //      whatever the tree became while the gate sat there.
 //
+// A RECORDED GRANT CAN STAND IN FOR KEY 2 (FOC-613). config/autonomy.json may
+// record a standing operator decision; the `cleanup-own-worktree` grant lets
+// `remove` proceed without an answered cleanup-approval gate when the tree is
+// the Supervisor's own, clean, and entirely landed in main (branch and worktree
+// HEAD both ancestors of main). Key 1 (TEST) is never replaced. Nothing in the
+// config's `neverCovers` is grantable, and the two-key path remains the only
+// path for every tree the grant does not cover.
+//
 // AND the caller must be the Supervisor. A child runs with LA_SUPERVISOR_CHILD
 // set (supervisor-spawn.mjs), so its presence here means a child is trying to
 // reclaim the checkout it is standing in. Refused by identity, before any
@@ -43,9 +51,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join, relative, resolve, isAbsolute } from "node:path";
+import { basename, join, relative, resolve, isAbsolute } from "node:path";
 
 import { allGates } from "./supervisor-gate.mjs";
+import { globMatch, grantIsActive, loadAutonomyGrants } from "./autonomy-grants.mjs";
 import {
   AFFIRMATIVE,
   LIVE_STATUSES,
@@ -59,7 +68,10 @@ import {
   parseArgs,
   readRegistry,
   resolveGitRoot,
+  supervisorStateHome,
+  unarchivedIgnoredContent,
   updateChild,
+  worktreeRoot,
 } from "./supervisor-lib.mjs";
 
 const GATE_KIND = "cleanup-approval";
@@ -197,6 +209,127 @@ const insideOf = (parent, child) => {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 };
 
+// ── the recorded grant (FOC-613) ─────────────────────────────────────────────
+
+const CLEANUP_GRANT_ID = "cleanup-own-worktree";
+
+function isAncestorOf(rev, base, repo) {
+  if (!rev || !base) return false;
+  try {
+    git(["merge-base", "--is-ancestor", rev, base], repo);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does the recorded autonomy grant stand in for Key 2 on this removal?
+ *
+ * Returns a verdict, never throws: `{covered, grantId, note, archive}`. `note`
+ * is the human-readable reason the grant did NOT fire ("" when covered) —
+ * cmdRemove appends it to the two-key path's refusals, so a refusal names
+ * which half failed: no grant / out of scope / not archived / not landed /
+ * expired. An unusable config file never unlocks anything — it only makes the
+ * grant path inert, loudly.
+ *
+ * The grant covers a removal only when ALL of its scope holds: repo and branch
+ * match the grant's patterns, the tree sits in the spawn worktree root (a
+ * Supervisor-owned tree, not one made by hand), the tree is clean, every
+ * git-ignored/untracked file is already archived into the run's
+ * `test-artifacts/<childId>/` (path-preserving — see unarchivedIgnoredContent;
+ * vacuously satisfied with no ignored content and no archive), and the landed
+ * proof holds. Anything else falls back to the two-key human path.
+ */
+function cleanupGrantVerdict(entry, repo, state, runId) {
+  let config;
+  try {
+    config = loadAutonomyGrants();
+  } catch (err) {
+    return {
+      covered: false,
+      grantId: null,
+      note: ` (autonomy config unusable, no grant consulted: ${err.message.split("\n")[0]})`,
+    };
+  }
+  const grant = config.grants.find((g) => g.id === CLEANUP_GRANT_ID) ?? null;
+  if (!grant) return { covered: false, grantId: null, note: " (no recorded grant covers worktree cleanup)" };
+
+  const miss = (reason) => ({
+    covered: false,
+    grantId: grant.id,
+    note: ` (recorded grant "${grant.id}" does not cover this removal: ${reason})`,
+  });
+
+  if (!grantIsActive(grant)) return miss(`the grant expired at ${grant.expires}`);
+  const scope = grant.scope;
+  const repoName = basename(repo);
+  if (!globMatch(scope.repo, repoName)) {
+    return miss(`out of scope: repo "${repoName}" is outside scope.repo "${scope.repo}"`);
+  }
+  if (!entry.branch || !scope.branches.some((p) => globMatch(p, entry.branch))) {
+    return miss(
+      `out of scope: branch "${entry.branch ?? "none"}" is outside scope.branches [${scope.branches.join(", ")}]`,
+    );
+  }
+  if (!insideOf(worktreeRoot(repo), resolve(entry.worktree))) {
+    return miss("out of scope: the worktree is not a Supervisor-owned tree (outside the spawn worktree root)");
+  }
+  if (state.dirty.length > 0) {
+    return miss(`out of scope: the tree is dirty (${state.dirty.length} uncommitted path(s))`);
+  }
+
+  // The archive precondition (FOC-613): ignored/untracked content must already
+  // be in the run's test-artifacts dir before the grant may stand in for the
+  // human key — removal would otherwise destroy the only copy of files neither
+  // the fingerprint nor the dirty set ever showed anyone.
+  const archiveDir = join(supervisorStateHome(), runId, "test-artifacts", entry.childId);
+  const archive = unarchivedIgnoredContent(entry.worktree, archiveDir);
+  if (!archive.covered) {
+    const names = archive.unarchived.filter((p) => !p.startsWith("<git ls-files failed"));
+    const shown = names.slice(0, 5).join(", ");
+    return miss(
+      `not archived: ${archive.unarchived.length} ignored/untracked file(s) missing from ${archiveDir}` +
+        (shown ? `: ${shown}${names.length > 5 ? ` (+${names.length - 5} more)` : ""}` : ""),
+    );
+  }
+
+  // Landed proof: branch AND worktree HEAD, both ancestors of `main`. This is
+  // ancestry against main — NOT against the registry's baseRevision, which
+  // says where the tree started, not whether the work arrived. Reachability
+  // only: no patch-equivalence, no squash detection.
+  let main;
+  try {
+    main = git(["rev-parse", "--verify", "refs/heads/main"], repo);
+  } catch {
+    main = null;
+  }
+  if (!main) return miss("not landed: the repo has no `main` branch to land in");
+  let branchTip = null;
+  try {
+    branchTip = git(["rev-parse", "--verify", `refs/heads/${entry.branch}`], repo);
+  } catch {
+    branchTip = null;
+  }
+  if (!isAncestorOf(branchTip, main, repo) || !isAncestorOf(state.head, main, repo)) {
+    let ahead = null;
+    try {
+      ahead = Number(git(["rev-list", "--count", `${main}..${branchTip ?? state.head}`], repo));
+    } catch {
+      ahead = null;
+    }
+    return miss(`not landed: branch ${entry.branch} carries ${ahead ?? "unknown"} commit(s) main does not have`);
+  }
+
+  const archiveCount = archive.ignored.length + archive.untracked.length;
+  return {
+    covered: true,
+    grantId: grant.id,
+    note: "",
+    archive: { archiveDir, vacuous: archiveCount === 0, count: archiveCount },
+  };
+}
+
 // ── guards shared by propose and remove ──────────────────────────────────────
 
 /**
@@ -251,6 +384,18 @@ function cmdList(args) {
     const present = Boolean(entry.worktree) && existsSync(entry.worktree);
     const state = present ? treeState(entry.worktree, entry.baseRevision) : null;
 
+    // FOC-613: the grant path, reported per tree. Only for a present, idle
+    // tree — the grant is moot otherwise. Offline by contract, like the rest
+    // of `list`: the verdict touches no Linear, and it short-circuits on scope
+    // before any git work past resolving the main repo.
+    let grantPath = null;
+    if (present && state && !LIVE_STATUSES.includes(entry.status)) {
+      const verdict = cleanupGrantVerdict(entry, mainRepoFor(entry, args), state, runId);
+      grantPath = verdict.covered
+        ? { covered: true, grantId: verdict.grantId }
+        : { covered: false, note: verdict.note.trim() };
+    }
+
     // Deliberately offline: `list` must stay cheap enough to run on every
     // digest. The TEST key needs Linear, so it is reported as unchecked rather
     // than guessed — `propose` is where that key gets turned.
@@ -263,11 +408,16 @@ function cmdList(args) {
     if (!entry.worktree) localBlockers.push("no worktree recorded");
     else if (!present) localBlockers.push("worktree already gone");
     if (LIVE_STATUSES.includes(entry.status)) localBlockers.push(`child is ${entry.status}`);
-    if (!gate) localBlockers.push("no cleanup-approval gate yet — run `propose`");
-    else if (gate.status !== "answered") localBlockers.push(`gate ${gate.gateId} is ${gate.status}`);
-    else if (!isAffirmative(gate.answer?.text)) localBlockers.push(`gate ${gate.gateId} was not approved`);
-    else if (gate.facts?.fingerprint !== state?.fingerprint) {
-      localBlockers.push(`gate ${gate.gateId} approved a different tree state`);
+    // The gate blockers stop only the two-key route. When the grant covers the
+    // tree they are not blockers for removal — listing them would make a
+    // reclaimable tree look stuck. The TEST key stays unchecked either way.
+    if (!grantPath?.covered) {
+      if (!gate) localBlockers.push("no cleanup-approval gate yet — run `propose`");
+      else if (gate.status !== "answered") localBlockers.push(`gate ${gate.gateId} is ${gate.status}`);
+      else if (!isAffirmative(gate.answer?.text)) localBlockers.push(`gate ${gate.gateId} was not approved`);
+      else if (gate.facts?.fingerprint !== state?.fingerprint) {
+        localBlockers.push(`gate ${gate.gateId} approved a different tree state`);
+      }
     }
 
     return {
@@ -284,6 +434,7 @@ function cmdList(args) {
       gate: gate ? { gateId: gate.gateId, status: gate.status } : null,
       testApproval: "unchecked — `propose` reads Linear",
       localBlockers,
+      grantPath,
     };
   });
 
@@ -467,28 +618,63 @@ function cmdRemove(args) {
     failJson(`TEST has not approved this work: ${test.reason}`, { childId, state: test.state });
   }
 
+  const state = treeState(entry.worktree, entry.baseRevision);
+
+  // The recorded-grant path (FOC-613). A grant stands in for Key 2 only, and
+  // only when its whole scope holds and the landed proof passes. Key 1 is
+  // never replaced: TEST's verdict is not the operator's to delegate. When the
+  // grant does not fire, the two-key path below runs exactly as before — and
+  // its refusals carry WHY the grant did not fire, so a refusal never reads as
+  // if a recorded grant had been silently ignored.
+  const grantVerdict = cleanupGrantVerdict(entry, repo, state, runId);
+  if (grantVerdict.covered) {
+    performRemoval({
+      runId,
+      childId,
+      entry,
+      repo,
+      state,
+      forced: false, // the grant covers clean trees only — there is nothing to force
+      keys: {
+        test: `${test.issue} is ${test.state}`,
+        grant: `${grantVerdict.grantId} (recorded grant, config/autonomy.json)`,
+        landed: `branch ${entry.branch} and the worktree HEAD are both ancestors of main`,
+        archive: grantVerdict.archive.vacuous
+          ? "no ignored/untracked content — nothing needed archiving"
+          : `${grantVerdict.archive.count} ignored/untracked file(s) covered by ${grantVerdict.archive.archiveDir}`,
+        fingerprint: state.fingerprint,
+      },
+      registryExtra: { cleanupGrant: grantVerdict.grantId },
+    });
+    return;
+  }
+  // Also on the human log: a grant that quietly would not fire is how the grant
+  // path rots while everything stays green on the two-key path.
+  if (grantVerdict.note) console.error(`[cleanup] grant not applied: ${grantVerdict.note.trim()}`);
+  const grantNote = grantVerdict.note;
+
   // Key 2.
   const gate = latestCleanupGate(runId, childId);
   if (!gate) {
-    failJson(`no ${GATE_KIND} gate for "${childId}" — Mateusz has not been asked`, {
+    failJson(`no ${GATE_KIND} gate for "${childId}" — Mateusz has not been asked${grantNote}`, {
       hint: `node scripts/supervisor-cleanup.mjs propose --run ${runId} --child ${childId}`,
     });
   }
   if (gate.status !== "answered") {
-    failJson(`gate ${gate.gateId} is ${gate.status} — TEST approving is one key, not two`, {
+    failJson(`gate ${gate.gateId} is ${gate.status} — TEST approving is one key, not two${grantNote}`, {
       gateId: gate.gateId,
       question: gate.questions,
     });
   }
   if (isNegative(gate.answer?.text)) {
-    failJson(`gate ${gate.gateId} was answered "${gate.answer?.text}" — Mateusz said no`, {
+    failJson(`gate ${gate.gateId} was answered "${gate.answer?.text}" — Mateusz said no${grantNote}`, {
       gateId: gate.gateId,
       hint: "if that has changed, propose again; an answered gate is never rewritten",
     });
   }
   if (!isAffirmative(gate.answer?.text)) {
     failJson(
-      `gate ${gate.gateId} was answered "${gate.answer?.text}", which is not an unambiguous approval`,
+      `gate ${gate.gateId} was answered "${gate.answer?.text}", which is not an unambiguous approval${grantNote}`,
       {
         gateId: gate.gateId,
         accepted: AFFIRMATIVE,
@@ -502,7 +688,6 @@ function cmdRemove(args) {
   // The fingerprint. This is the one that earns its keep: the yes covered the
   // tree Mateusz was shown, and a tree that moved since is a tree nobody
   // approved.
-  const state = treeState(entry.worktree, entry.baseRevision);
   const approvedFingerprint = gate.facts?.fingerprint ?? null;
   if (!approvedFingerprint) {
     failJson(`gate ${gate.gateId} carries no fingerprint — it cannot be matched against the tree`, {
@@ -511,7 +696,7 @@ function cmdRemove(args) {
     });
   }
   if (approvedFingerprint !== state.fingerprint) {
-    failJson(`the worktree changed since gate ${gate.gateId} was approved`, {
+    failJson(`the worktree changed since gate ${gate.gateId} was approved${grantNote}`, {
       gateId: gate.gateId,
       approved: { head: gate.facts?.head ?? null, dirty: gate.facts?.dirty ?? [], fingerprint: approvedFingerprint },
       now: { head: state.head, dirty: state.dirty, fingerprint: state.fingerprint },
@@ -522,7 +707,26 @@ function cmdRemove(args) {
   // `--force` only because the dirty set in front of him is byte-for-byte the
   // dirty set here — the fingerprint above is what makes that true. Without it
   // this flag would be the script deciding which uncommitted work is expendable.
-  const forced = state.dirty.length > 0;
+  performRemoval({
+    runId,
+    childId,
+    entry,
+    repo,
+    state,
+    forced: state.dirty.length > 0,
+    keys: {
+      test: `${test.issue} is ${test.state}`,
+      human: `gate ${gate.gateId} answered "${gate.answer?.text}" at ${gate.answer?.answeredAt}`,
+      fingerprint: state.fingerprint,
+    },
+  });
+}
+
+/**
+ * The one destructive act, shared by both paths (FOC-613): `git worktree
+ * remove`, the registry timestamp, and a report that says what was kept.
+ */
+function performRemoval({ runId, childId, entry, repo, state, forced, keys, registryExtra = {} }) {
   const gitArgs = ["worktree", "remove", entry.worktree, ...(forced ? ["--force"] : [])];
   try {
     git(gitArgs, repo);
@@ -536,8 +740,9 @@ function cmdRemove(args) {
   // worktree/branch/baseRevision are KEPT. Whoever picks this up later — the
   // merge node, or Mateusz reading a digest — needs to know where the work was
   // and which branch holds it. Clearing them on removal would orphan the record
-  // of a branch that still exists.
-  updateChild(runId, childId, { worktreeRemovedAt: new Date().toISOString() });
+  // of a branch that still exists. On the grant path, `cleanupGrant` is added:
+  // the removal record names the grant that stood in for the human key.
+  updateChild(runId, childId, { worktreeRemovedAt: new Date().toISOString(), ...registryExtra });
 
   console.log(
     JSON.stringify(
@@ -553,11 +758,7 @@ function cmdRemove(args) {
           ? `branch ${entry.branch} is untouched — ${state.commitsAhead ?? "?"} commit(s) ahead of the base, still reachable`
           : "no branch recorded",
         destroyed: state.dirty,
-        keys: {
-          test: `${test.issue} is ${test.state}`,
-          human: `gate ${gate.gateId} answered "${gate.answer?.text}" at ${gate.answer?.answeredAt}`,
-          fingerprint: state.fingerprint,
-        },
+        keys,
       },
       null,
       2,

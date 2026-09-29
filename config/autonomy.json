@@ -1,0 +1,30 @@
+{
+  "_doc": "Recorded autonomy grants for the Supervisor (FOC-613). A grant is a standing operator decision the Supervisor may act on without re-asking, within that grant's own `scope`, and never for anything in `neverCovers` — the loader (scripts/autonomy-grants.mjs) refuses a grant naming a neverCovers action at load time. Grants are consulted where the decision is enforced, not as a general licence: today that is supervisor-cleanup.mjs `remove`, which accepts the `cleanup-own-worktree` grant as a stand-in for the cleanup-approval gate when the landed proof holds. How a grant weighs against a live instruction is the precedence ladder in agents/supervisor/CLAUDE.md (<precedence_policy>). A recorded prohibition (\"no push\", \"children never push\") is NOT a grant and must not be recorded here — prohibitions are enforced, grants are permissions.",
+
+  "neverCovers": ["push", "force", "discard", "delete-branch", "secrets"],
+
+  "grants": [
+    {
+      "id": "land-local",
+      "actions": ["land-local"],
+      "scope": { "repo": "linear-agents", "branches": ["main"] },
+      "source": "Operator decision cf4c, 2026-09-28 — local landing on main within the Supervisor gate flow is RATIFIED.",
+      "grantedAt": "2026-09-28",
+      "expires": null
+    },
+    {
+      "id": "cleanup-own-worktree",
+      "actions": ["cleanup-own-worktree"],
+      "scope": {
+        "repo": "linear-agents",
+        "branches": ["foc-*-dev", "foc-*-test", "foc-*-plan"],
+        "clean": true,
+        "landed": true,
+        "ownership": "supervisor-worktree"
+      },
+      "source": "Operator directive krok0, 2026-09-29, verbatim: \"DECYDUJESZ SAM: sprzątanie wyłącznie własnych worktrees i branchy `la-merge/*` w całości obecnych w main\". The recorded scope is deliberately narrower than the quote's la-merge clause: la-merge/* branch pruning is a separate task and is not built here, and no foc-*-review branch is covered — review trees always go through the cleanup-approval gate. Scope semantics enforced by the consumer: repo and branch must match the patterns, the tree must sit in the spawn worktree root (a Supervisor-owned tree, not one made by hand), the tree must be clean, and the landed proof must hold — branch and worktree HEAD both ancestors of main.",
+      "grantedAt": "2026-09-29",
+      "expires": null
+    }
+  ]
+}
