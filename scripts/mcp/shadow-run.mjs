@@ -24,6 +24,7 @@ import { createExtractionServer, SERVER_INFO as EXTRACTION_INFO, TOOL as EXTRACT
 import { createPromptRefinementServer, SERVER_INFO as REFINEMENT_INFO, TOOL as REFINEMENT_TOOL } from "./server-prompt-refinement.mjs";
 import { createOfflineProvider } from "./provider-offline.mjs";
 import { createJevProvider } from "./provider-jev.mjs";
+import { assertEgressClean, egressLeaves } from "../egress-screen.mjs";
 import { EXTRACTION_STEP, PROMPT_REFINEMENT_STEP } from "./steps.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -73,6 +74,10 @@ export async function runShadowRun({
   write = true,
   outPath = DEFAULT_OUT,
   now = () => new Date().toISOString(),
+  // TEST SEAM (FOC-646): injectable fixture sets — the egress regression
+  // passes a blocked fixture; production callers never set these.
+  extractionFixtures = EXTRACTION_FIXTURES,
+  refinementFixtures = REFINEMENT_FIXTURES,
 } = {}) {
   const envKey = apiKey !== undefined ? apiKey : process.env[AUTH_ENV];
   const path = mode === "auto" ? (envKey ? "live" : "offline") : mode;
@@ -94,7 +99,7 @@ export async function runShadowRun({
       serverInfo: EXTRACTION_INFO,
       tool: EXTRACTION_TOOL.name,
       step: EXTRACTION_STEP,
-      fixtures: EXTRACTION_FIXTURES,
+      fixtures: extractionFixtures,
       factory: createExtractionServer,
     },
     {
@@ -102,10 +107,31 @@ export async function runShadowRun({
       serverInfo: REFINEMENT_INFO,
       tool: REFINEMENT_TOOL.name,
       step: PROMPT_REFINEMENT_STEP,
-      fixtures: REFINEMENT_FIXTURES,
+      fixtures: refinementFixtures,
       factory: createPromptRefinementServer,
     },
   ];
+
+  // FOC-646: live mode screens every fixture argument at the egress
+  // chokepoint BEFORE any request. Shadow-run builds its provider directly
+  // and bypasses the decision-call seam, where FOC-643 screens the same way —
+  // without this, fixture content would go on the wire unscreened. The screen
+  // runs over the RAW string leaves the provider will receive (extraction
+  // text; refinement prompt and feature names/sizes) via the ONE shared leaf
+  // extractor (egress-screen.mjs), never a serialization — the screen's
+  // env-assignment detector is line-anchored and a compact-JSON serialization
+  // would blind it. Everything is screened upfront, so a hit anywhere leaves
+  // ZERO provider fetches and no partial evidence: the typed
+  // EgressBlockedError propagates out of the run, never recorded as a result.
+  if (path === "live") {
+    for (const entry of servers) {
+      for (const fixture of entry.fixtures) {
+        for (const [label, text] of egressLeaves(fixtureArguments(fixture))) {
+          assertEgressClean(text, `shadow-run live input ${entry.key}/${fixture.name} (${label})`);
+        }
+      }
+    }
+  }
 
   const evidence = {
     _doc:

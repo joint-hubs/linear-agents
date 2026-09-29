@@ -482,6 +482,60 @@ export function assertEgressClean(text, label) {
 }
 
 // ---------------------------------------------------------------------------
+// Raw-leaf extraction for the egress checkpoint
+// ---------------------------------------------------------------------------
+
+// FOC-643/FOC-646: the raw string leaves an egress checkpoint screens, as
+// [label, text] pairs — ONE extractor shared by both callers so the screened
+// leaf sets cannot drift. Decision seam shape ({state, questions}): the state
+// verbatim; per question the id and, at the QUESTION_SCHEMA shape (type,
+// instructions, criteria), each field's string value and — for an object field
+// like criteria — each label and text. Shadow-run replay shapes (FOC-646):
+// extraction {text}; refinement {prompt, features} — the prompt and every
+// feature's name and size. Fixed depth, no recursion: deeper shapes are
+// schema-rejected before the provider, so they are never sent and need no
+// screening. Raw text only: the screen runs on exactly the strings a caller
+// puts into the provider input, never on a serialization — the env-assignment
+// detector is line-anchored and a compact-JSON serialization would blind it
+// (FOC-643 review round 1).
+export function egressLeaves(input) {
+  const leaves = [];
+  // Decision seam ({state, questions}) — the FOC-643 screened set, unchanged.
+  if (typeof input?.state === "string") leaves.push(["state", input.state]);
+  const questions = input?.questions;
+  if (questions && typeof questions === "object") {
+    for (const [qid, q] of Object.entries(questions)) {
+      leaves.push([`questions.${qid}`, qid]);
+      if (!q || typeof q !== "object") continue;
+      for (const [field, value] of Object.entries(q)) {
+        if (typeof value === "string") {
+          leaves.push([`questions.${qid}.${field}`, value]);
+        } else if (value && typeof value === "object" && !Array.isArray(value)) {
+          for (const [k, v] of Object.entries(value)) {
+            leaves.push([`questions.${qid}.${field}.${k}`, k]);
+            if (typeof v === "string") leaves.push([`questions.${qid}.${field}.${k}`, v]);
+          }
+        }
+      }
+    }
+  }
+  // Shadow-run replay shapes (FOC-646): extraction {text}; refinement
+  // {prompt, features:[{name,size},...]}. Disjoint from the seam shape in
+  // practice — the seam input is schema-locked to {state, questions}.
+  if (typeof input?.text === "string") leaves.push(["text", input.text]);
+  if (typeof input?.prompt === "string") leaves.push(["prompt", input.prompt]);
+  const features = input?.features;
+  if (Array.isArray(features)) {
+    for (const [i, f] of features.entries()) {
+      if (!f || typeof f !== "object") continue;
+      if (typeof f.name === "string") leaves.push([`features.${i}.name`, f.name]);
+      if (typeof f.size === "string") leaves.push([`features.${i}.size`, f.size]);
+    }
+  }
+  return leaves;
+}
+
+// ---------------------------------------------------------------------------
 // CLI — the local guard for text composed outside a chokepoint (PR bodies,
 // ad-hoc posts): node scripts/egress-screen.mjs check (--body <t> | --body-file <p>)
 // ---------------------------------------------------------------------------

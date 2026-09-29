@@ -119,7 +119,7 @@ import { runDecision, TypedError } from "./mcp/envelope.mjs";
 import { scrub, scrubMask } from "./mcp/scrub.mjs";
 import { createJevProvider, JEV_MODEL, probabilityOf, choiceOf, confidenceOf } from "./mcp/provider-jev.mjs";
 import { getRegistryEntry, resolveEntryQuestions, instantiateEntryQuestions } from "./decision-registry.mjs";
-import { assertEgressClean, EgressBlockedError } from "./egress-screen.mjs";
+import { assertEgressClean, egressLeaves, EgressBlockedError } from "./egress-screen.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -532,36 +532,6 @@ function scrubEventInput(effective) {
       note: `${note}; unserializable input redacted in full`,
     };
   }
-}
-
-// FOC-643: the raw string leaves the egress screen sees, as [label, text]
-// pairs. The state verbatim; per question the id and, at the QUESTION_SCHEMA
-// shape (type, instructions, criteria), each field's string value and — for
-// an object field like criteria — each label and text. Fixed depth, no
-// recursion: deeper shapes are schema-rejected before the provider, so they
-// are never sent and need no screening. Raw text only: the screen runs on
-// exactly the strings a caller or the registry (including instantiated
-// FOC-452 variables) put into {state, questions}, never on a serialization.
-function egressLeaves(effective) {
-  const leaves = [];
-  if (typeof effective?.state === "string") leaves.push(["state", effective.state]);
-  const questions = effective?.questions;
-  if (!questions || typeof questions !== "object") return leaves;
-  for (const [qid, q] of Object.entries(questions)) {
-    leaves.push([`questions.${qid}`, qid]);
-    if (!q || typeof q !== "object") continue;
-    for (const [field, value] of Object.entries(q)) {
-      if (typeof value === "string") {
-        leaves.push([`questions.${qid}.${field}`, value]);
-      } else if (value && typeof value === "object" && !Array.isArray(value)) {
-        for (const [k, v] of Object.entries(value)) {
-          leaves.push([`questions.${qid}.${field}.${k}`, k]);
-          if (typeof v === "string") leaves.push([`questions.${qid}.${field}.${k}`, v]);
-        }
-      }
-    }
-  }
-  return leaves;
 }
 
 /**
