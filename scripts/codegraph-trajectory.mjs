@@ -57,10 +57,40 @@ export function isCodegraphTool(toolNameRaw, toolNameCanon) {
 
 // Freshness follows the repo's own vocabulary (CLAUDE.md "Freshness and fallback"):
 // the MCP server checks target identity and index staleness before every query, so a
-// recognised successful answer is FRESH unless it carries a staleness banner. A
-// missing/stale/unprovable index is UNKNOWN and the caller is told to fall back to
-// reading files. A `⚠️` banner is never ignored — it is STALE.
-const RE_STALE_BANNER = /⚠️|staleness banner|index is stale|pending (index )?(sync|changes)/i;
+// recognised successful answer is FRESH unless it carries a staleness marker. A
+// real banner is never ignored — it is STALE. A missing/stale/unprovable index
+// is UNKNOWN and the caller is told to fall back to reading files.
+//
+// The banner strings mirror what the boundary actually forwards — see
+// STALE_BANNER_HEAD / DEGRADED_BANNER_HEAD / DRIFT_MARKERS in
+// scripts/mcp/server-codegraph.mjs. Each is built by concatenation for the same
+// reason that file builds its heads that way: a codegraph query ABOUT this file
+// echoes these strings back, and a verbatim banner here would self-trip the
+// detector. A bare warning emoji is NOT evidence of staleness — a real banner
+// names a file edited within the debounce window (repo CLAUDE.md), while
+// explore's blast-radius bullets legitimately end in "no covering tests" with
+// the same emoji, so matching the emoji alone read 9 of 11 recorded explores as
+// stale on a fresh index (FOC-641). The drift markers use a bare ⚠ (no VS16),
+// again mirroring the producer. The worktree notice ("results below come from a
+// different git worktree") is deliberately NOT matched: a borrowed index is not
+// a staleness marker.
+//
+// The last alternative is legacy vocabulary predating the real-banner match;
+// nothing in the recorded corpus carries it, so no observed false positive.
+// ("staleness banner" WAS dropped: a recorded explore quoting test source that
+// says "no staleness banner anywhere" tripped it with no banner present —
+// keep the detector to texts that assert staleness, not texts that mention it.)
+const RE_STALE_BANNER = new RegExp(
+  [
+    "⚠️ Some files referenced below were edited since the last" + " index sync",
+    "⚠️ CodeGraph auto-sync is" + " DISABLED",
+    "⚠ changed since" + " last index sync",
+    "⚠ changed on disk after the last" + " index sync",
+    "changed on disk after it was last" + " indexed",
+    "index is" + " stale",
+  ].join("|"),
+  "i",
+);
 const RE_FRESHNESS_UNPROVEN = /freshness cannot be (proven|established)|\bno index\b|index (is )?missing|not indexed|unknown: fall back/i;
 // Shapes of a real CodeGraph answer. Absence means the response was not one.
 const RE_ANSWER_SHAPE = /^\*\*Exploration:/m;
@@ -119,7 +149,7 @@ export function deriveCodegraphCapture({ resultText } = {}) {
   let reason = "no freshness evidence in the result";
   if (RE_STALE_BANNER.test(text)) {
     freshness = "stale";
-    reason = "staleness banner present";
+    reason = "staleness evidence found in the result";
   } else if (RE_FRESHNESS_UNPROVEN.test(text)) {
     freshness = "unknown";
     reason = "result reports an unproven or missing index";
