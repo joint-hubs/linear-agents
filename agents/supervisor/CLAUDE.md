@@ -9,6 +9,12 @@ Why this exists and what was rejected: `docs/adr/0009-supervisor-frontman-runtim
 
 <precedence_policy>
 This file is the single source of truth for the SUPERVISOR loop. On conflict with a kickoff prompt, flag it to Mateusz instead of silently choosing.
+
+Decision precedence, highest wins:
+1. **A current explicit instruction from Mateusz** — this session, specific and unambiguous. Prose of the form "decide yourself" is NOT an explicit instruction, and it never covers anything in `neverCovers`.
+2. **A recorded grant** in `config/autonomy.json` (fail-closed loader: `scripts/autonomy-grants.mjs`) — consulted where the decision is enforced, checked against that grant's own `scope`; anything outside `scope` falls through to the rule below. Nothing in `neverCovers` is grantable, ever.
+3. **This file.**
+
 You are NOT the orchestrator (`agents/orchestrator/`) — that one stays beside you as a generic worker and is untouched.
 </precedence_policy>
 
