@@ -3,6 +3,132 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Fenix supervisor contract: `agents/supervisor/CLAUDE.md`. Squad model routing: `config/models.json`. Execution plan: `docs/BUILD-BACKLOG.md`. Atlas delegation is a separate mechanism.
 
+## Stałe zasady — od 2026-09-29 (dyrektywa Mateusza, „obowiązują od teraz")
+
+Nadrzędne wobec wcześniejszych notatek z 2026-09-28 tam, gdzie są węższe.
+
+1. **`neverCovers` zostaje przy pięciu** (`push`, `force`, `discard`, `delete-branch`, `secrets`). Szósty wpis `merge` **nie wchodzi** — lokalny merge do `main` jest ratyfikowaną autonomią, push zakazany jak dotąd. Pytanie zamknięte, nie wracać.
+2. **Archiwizacja: tylko dorobek.** Odtwarzalny cache (`node_modules/`, `.codegraph/`, `dist/`, `.vite/`, `coverage/` i ta klasa) poza inwentarzem. Zwężenie predykatu `unarchivedIgnoredContent` (FOC-613) **zatwierdzone** — wchodzi w zakres FOC-649, nie jako pytanie. Plus **retencja `test-artifacts/`**.
+3. **`lint.mjs` / `intake` — bez obchodzenia klasyfikatora.** Allow regułę dodaje Mateusz. Do tego czasu lint leci **w dziecku (w worktree)**, a jego wynik **cytowany w rekordzie**. `intake` dalej tylko deterministyczny `propose`.
+4. **Zmiana zatwierdzonej reguły, która jest węższa / bezpieczniejsza / odwracalna → decyduję sam**, z uzasadnieniem w tym pliku i w raporcie. Pytam **wyłącznie** o rzeczy z listy STOP oraz o **poszerzenie** uprawnień.
+5. **Zgoda na commit własnych wpisów w `docs/STATE.md`** — tylko ten plik, komunikat `docs(state): …`, **bez trailera**, po każdym zamkniętym tasku. Cudzych plików w drzewie nie ruszam.
+6. **Raport zbiorczo** — krótki raport co **3** zamknięte taski, albo natychmiast przy pozycji z listy STOP. **Nie czekam na odpowiedź między taskami** — idę po kolejce.
+7. **Cudze pliki w drzewie = inna sesja** („precedent index"): `docs/adr/0014-precedent-index-two-layer.md`, `docs/prd/prd-precedent-index.md`, `docs/plans/brainstorm-precedent-search.md`, `tools/precedent-spike/`, zmiana w `docs/adr/README.md`. Nie dotykam. **Uwaga dla FOC-384: numer ADR-0014 jest już zajęty — wziąć kolejny wolny.**
+8. **Resztki** (`foc-518-dev` sierota, `la-merge/*` nie w całości w `main`, cudze worktree) — zostają, Mateusz zajmie się nimi osobno.
+
+Kolejka do przerobienia bez przystanków: FOC-649 → FOC-612 → FOC-621 → FOC-626 → FOC-602 → FOC-603 → FOC-642 → M1 (FOC-511, 512, 616, 607, 597, 598, 271, 599) → M2 (FOC-596 → 519 → 520 → 516 → 517 → 476 → 477).
+
+### Uzasadnienia decyzji podjętych samodzielnie (wymóg reguły 4)
+
+**Retencja `test-artifacts/`: 20 runów ∩ 14 dni, `prune` suchy-raportem.** Liczby oddelegowane do mnie („decyzja o liczbach twoja"). 20 runów ≈ tydzień pracy przy polityce jednego dziecka; 14 dni wiąże dysk przy gęstych runach. Każda granica z osobna jest gorsza — same 20 runów pozwala przestarzałemu archiwum żyć wiecznie na bezczynnym repo, same 14 dni potrafią w jednym przejściu wymazać zrzut 40 runów. **Przecięcie** jest bezpieczniejszym kierunkiem i dokładnie tym, o co prosił „co mniejsze". Prune wyłącznie payload `test-artifacts/`, nigdy plików dowodowych (`children.json`, `wake-queue.jsonl`, `triage.json`, `merge.json`, `intake.json`, `partial-status.json`), nigdy gałęzi ani worktree — i wyłącznie po `--dry-run`, który najpierw pokazuje, co zniknie.
+
+**Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
+
+## 2026-09-29 (13) — run 36e0: FOC-641 DOMKNIĘTY (`925d6f3`) · FOC-646 DOMKNIĘTY (`6dd9aa1`) · sweep sprzątania 24 worktrees
+
+**Skąd.** Nowa sesja autonomiczna (dyrektywa `krok0`), run `2026-09-29T13-03-56-513-supervisor-36e0`. Poprzedni run `be93` sprawdzony na starcie: **0 żywych dzieci, 2/2 bramki odpowiedziane, wake queue 10/10 ack** (FOC-608 AC2 odrobione komentarzem `foc-608-ac2-live-2026-09-28`; FOC-627 Done). `main` = `ce052a9` na wejściu.
+
+### FOC-641 — DOMKNIĘTY
+
+Lądowanie lokalne: **`925d6f3`** = `git merge --no-ff foc-641-dev` (kandydat `d8b95a7`, 1 commit nad `ce052a9`, 2 pliki +104/−7). Komentarz close-out `foc641-run-36e0-closeout` + `transition --status Done`.
+
+**Weryfikacja merge (`supervisor-merge.mjs`) = ACCEPT.** Wznowiona w tej sesji po tym, jak poprzednią próbę (ta sama komenda, run `be93`, 2026-09-29 02:30) **zabił memory-pressure reaper przy bezczynnej sesji**, w fazie izolacji. Decyzja zapadła w dyrektywie `krok0` („domknij go — merge z weryfikacją") = **opcja (1)** z notatki poniżej; opcja (3) (lądowanie bez combined-verify) **nie została użyta**. Izolacja `foc-641-dev` **103/103** exit 0 (531 s), integracja na `la-merge/…-be93` **103/103** exit 0, zero konfliktów, `findings: []`, scratch usunięty na akceptacji. Jeden zapis driftu, **nie odrzucenie**: `allowedPathDrift` → `undeclared: true`, bo spawn dev-20 niósł `allowedPaths: []`; ruszony zbiór to dokładnie 2 pliki z zakresu, `outside: []` — pusta deklaracja, nie ucieczka.
+
+TEST (test-21) `VERDICT: pass`, pozycje AC 1–4 niezależnie przełożone (AC2 z korektą roszczenia ticketa: 9/1/2 sumuje się do 12 przy 11 wpisach — niemożliwe; TEST wyprowadził 9/1/1 przed i 6/4/1 po, 5 flipów = gołe `⚠️`). Koszty wycenione: dev-20 **0,0682** + test-21 **0,3135** = **0,3817 USD** (raportowane 16,21 → dowód FOC-165, komentarz `foc165-divergence-foc641`, ~42× dla `z-ai/glm-5.3-flash`).
+
+### FOC-646 — DOMKNIĘTY (`6dd9aa1`) (wejście: tylko `propose`)
+
+Deterministyczny `propose` → `plan` (unknowns: brak sekcji AC/DoD w treści) — to sygnał **formatowania**, nie zakresu. **Nagrany werdykt: `dev`, rozmiar `medium` → flow [dev, test]** (`config/graph.json` `intakeFlows`, precedens FOC-641/643). Pewność 85. Moja interpretacja AC → komentarz `foc646-triage-ac` w FOC-646 (założenia tam, zgodnie z zasadą). `intake` **niewywoływane** — reguła stoi, dopóki Mateusz nie doda allow.
+
+**Kierunek (na poziomie AC):** opcja 2 z ticketa — screen na transporcie `shadow-run`, **nie** opcja 1 (przez `createDecisionCaller`), bo opcja 1 wciąga metering / shadow records / envelope w ścieżkę eval i łamie AC3. Wiążące: **jeden** zbiór liści (`egressLeaves`, `scripts/decision-call.mjs:545`) współdzielony z seamem, bez kopiowania — lekcja FOC-643 (screen serializacji widzi czysty payload, który czysty nie jest; rodzina env-assignment jest niewidoczna w `canonicalJson`).
+
+Spawn `dev-1` @ 2026-09-29T13:30Z: worktree `foc-646-dev`, **base-revision `925d6f3`** (= main po FOC-641), model `z-ai/glm-5.3-flash`, **repo = `LA_SUPERVISOR_REPO` = `C:/Users/mateu/Documents/GitHub/linear-agents`** (`repoFrom: LA_SUPERVISOR_REPO` — repo, którego dotyczy issue; bez zgadywania). Kickoff: `.state/krok0-2026-09-29/foc-646-dev-kickoff.md`.
+
+**DEV `VERDICT: pass`** — dev-1, exit 0 @ 2026-09-29T13:52Z, **0,0785 USD wycenione** (4,327 zgłoszone = 55× → dowód FOC-165). Kandydat **`0c24b61`**, branch `foc-646-dev`, **5 plików +250/−35**, drzewo czyste, brak trailera. Pełny hand-off: `la-wt/linear-agents/foc-646-dev/.state/handoff-foc-646.md`.
+
+* `egressLeaves` **przeniesione** z `decision-call.mjs` do `egress-screen.mjs` (32 linie ubyły z seamu — **nie kopia**; wiążący constraint dotrzymany), uogólnione o kształty replay (`{text}`, `{prompt, features}`). Liście seamu `{state, questions}` przypięte byte-exact testem na pełną listę `[label, value]` **łącznie z kolejnością**.
+* Screen w `shadow-run.mjs:129-130`, **all-upfront** przed budą providera — trafienie w dowolnym fixture = zero fetchów i brak pliku evidence.
+* `mcp-shadow-run.test.mjs` **14 passed** (4 nowe), w tym asercje `counter.n === 0` w `:191`/`:216`/`:240` (dowód zero-request w kodzie); `egress-screen.test.mjs` 79/79; `decision-call.test.mjs` **48 passed, bez edycji** (FOC-643 nietknięte); `test-all.mjs` **103/103**, `lint.mjs` 542 pliki / 0 naruszeń.
+* **AC3 z kwalifikacją** (uczciwie zgłoszoną): before/after rekordu identyczny **modulo `measuredAt`/`durationMs`** — wall-clock z `runDecision`, nie inżektowalne przez `runShadowRun`. TEST ma to osądzić **wprost**: czy to zadowala „byte-identical for clean input", czy to odstępstwo.
+* Poza zakresem (notatki, nie plikowane): nad-ekranowanie `size` (stały enum, bias fail-closed); `runShadowRun` dostał test-only fixture params (wzorzec `fallbackModel` z `decision-call`).
+* Implementacja delegowana do subagenta `implementer` (1 spawn); lead zrobił **spot-check** twierdzeń (git log --stat, grep screen, lint, asercje AC2 w kodzie) — zgodnie z notką FOC-288/450.
+
+**TEST `test-2`** @ 2026-09-29T14:05Z: worktree `foc-646-test`, **repo = `C:/Users/mateu/Documents/GitHub/linear-agents`** (`repoFrom: --repo`), base `925d6f3`, model `z-ai/glm-5.3-flash`, kickoff `.state/krok0-2026-09-29/foc-646-test-kickoff.md`. Wiraż znany obsłużony w kickoffie (worktree TEST startuje z **main**, nie z kandydata → jawne `git checkout`); dziecko zrobiło to czyściej — przestawiło się na własny branch **`foc-646-test-verify` @ `0c24b61`**, czyli siedzi **na kandydacie**. Flow `medium` = `[dev, test]` — **węzła REVIEW tu nie ma**; propozycja dziecka „In Review" to jego zgadywanie przepływu, `config/graph.json` jest wiążący.
+
+Linear: komentarz DEV hand-off dedup `foc646-dev-handoff` (id `fbc26701-…`) + `transition --status "In Review"` (był w **Backlog**).
+
+**TEST `VERDICT: pass`** — test-2, exit 0 @ 2026-09-29T14:17Z, **0,0256 USD wycenione**. Każda liczba DEV-a wyprowadzona niezależnie i **trafiona co do cyfry** (14/79/48/103/0 naruszeń). Własny probe AC1 (liście surowe vs zserializowane): **`raw leaf hits: 1`, `canonicalJson hits: 0`, `JSON.stringify hits: 0`** — lekcja FOC-643 domknięta end-to-end. Wiążący constraint potwierdzony: dokładnie **jeden** `egressLeaves` (`egress-screen.mjs:501`, importy `decision-call.mjs:122` + `mcp/shadow-run.mjs:27`), test pinujący byte-exact **łącznie z kolejnością** (`egress-screen.test.mjs:303-321`); diff `decision-call.mjs` = dokładnie 2 hunki, checkpoint FOC-643 (`:693`) nietknięty. Zakres czysty: 5 deklarowanych plików, `decision-call.test.mjs` / `linear-ops.mjs` / `test-lanes.json` / `graph.json` / `agents/orchestrator/` bez zmian.
+
+**Rozstrzygnięcie pytania `measuredAt`/`durationMs` (AC3)** — TEST wywiódł je sam (stub + wstrzyknięte `now`, kandydat vs `925d6f3`, `scripts/` zamienione i przywrócone, drzewo czyste): surowy diff schodzi się **wyłącznie** na tych dwóch polach, znormalizowany jest byte-identical dla rekordu live i offline. Osąd TEST-u, cytatem:
+
+> since I pinned the injectable `now`, yet `measuredAt` still moved between runs, those fields are empirically owned by `runDecision`'s internal clock and **not injectable through `runShadowRun`** — DEV's framing is correct. I judge this **not a deviation**: identity modulo wall-clock fields that no caller can control is the strongest achievable form of "byte-identical".
+
+**Domknięcie.** Weryfikacja merge = **ACCEPT** (`findings: []`): izolacja `foc-646-dev` **103/103** exit 0 (485 s), combined replay jednego commita na `925d6f3` **103/103** exit 0 (484 s), 0 konfliktów, `outside: []`. Lądowanie lokalne **`6dd9aa1`** = `git merge --no-ff foc-646-dev` (5 plików +250/−35, bez trailera). Komentarz close-out `foc646-closeout` (id `b8dc62bd`) + `transition --status Done` (z **In Review**). Koszty wycenione: dev-1 **0,0785** + test-2 **0,0256** = **0,1040 USD** (raportowane 5,716 → dowód FOC-165, ~55× dla `z-ai/glm-5.3-flash`).
+
+**Worktree'y odzyskane 2/2** (propose → `gate answer --text "tak"` → remove; oba `destroyed: []`, `forced: false`, branch'e `foc-646-dev` / `foc-646-test` zostają osiągalne). Przed usunięciem **zabezpieczone artefakty TEST-u** (gitignore → `remove` ich nie zgłasza, ale kasuje): `before.json`, `after.json`, `probe-ac3.mjs`, `test-all-foc646.log` → `.state/supervisor/<run>/test-artifacts/` (precedens FOC-641: logi testów przetrwają w run state).
+
+### FOC-613 — DOMKNIĘTY (`74721f5`) · DEV (dev-3, 2 tury) → TEST (test-4) → merge ACCEPT ×2 → sprzątanie grantem
+
+Werdykt nagrany: **`dev`**, rozmiar **`medium`** → flow `[dev, test]**, pewność 85, 4 unknowns (run 36e0 → snapshot `triage.foc646.snapshot.json` + `--force`, znany wiraż jednego werdyktu na run). Założenia opublikowane (`8761c56f`) i **rozstrzygnięte przez Mateusza** (komentarz `589664e9`): A1 **zgoda** — „work proven landed" = osiągalność (tip gałęzi rejestru **i** HEAD worktree'a przodkami `main`), bo lądujemy wyłącznie `merge --no-ff`; patch-equivalence i pruning zostają w **FOC-615**, które **nie blokuje** FOC-613.
+
+**Nowy wiążący warunek grantu** (dodany przez Mateusza): zmiękczony drugi klucz obejmuje **tylko** worktree, z którego `.state/` dziecka i inne pliki ignorowane przez gita zostały **najpierw** zarchiwizowane do `test-artifacts/`. Bez tego grant nie działa i obowiązują dwa klucze. Trzy połówki: nagrany grant + osiągalność + **warunek archiwizacji** (fail-closed; brak treści ignorowanej = spełnione próżniowo).
+
+**Tura 0 dev-3 zamknięta** (exit 0 @ 15:40Z): 3 commity bez trailera — `4515ac0` (`config/autonomy.json` + `scripts/autonomy-grants.mjs`, loader fail-closed na Ajv, odmowa przy ładowaniu gdy `actions[]` przecina `neverCovers`), `fb77cc3` (`supervisor-cleanup.mjs`: grant zastępuje ludzki klucz dla drzew lądownych, odmowy nazywają połówkę — `no recorded grant` / `out of scope` / `not landed` / `expired`, rekord nosi `cleanupGrant`), `1f4516a` (drabina precedensu w `<precedence_policy>` + licznik e2e 103→104). Nowa suita `supervisor-autonomy.test.mjs` **21/21** (AC1 w obu kierunkach + AC2 po jednym na każdy wpis `neverCovers`, bez współdzielonej pętli), `supervisor-cleanup.test.mjs` 26/26, `test-all.mjs` **104/104**, lint czysty. Hygiena: `linear-ops.mjs` i `agents/orchestrator/` puste w diffie.
+
+**Tura 1 zamknięta** (followup `.state/krok0-2026-09-29/foc-613-dev-followup-1.md`): F1 = warunek archiwizacji (predykat, **nie** automatyczna archiwizacja — ta jest w FOC-649), F2 = nieświeża linia w tools table `<precedence_policy>` (pytanie 2 dziecka), F3 = `localBlockers` kłamie dla drzew objętych grantem (pytanie 3). Pytanie 1 dziecka (szósty wpis `neverCovers`: `merge`) **odrzucone** — A3 zabrania rozszerzania listy przez analogię, pytanie wyniesione do komentarza dla Mateusza.
+
+**FOC-649** (NOWY, child of FOC-472, bug, est. M) — `remove` kasuje pliki gitignore'owane raportując `destroyed: []`. Zakres: (a) raport wymienia pliki ignorowane/nieśledzone, które usuwa; (b) automatyczna archiwizacja `.state/` dziecka do `.state/supervisor/<run>/test-artifacts/<child>/` przed usunięciem (fail-closed); (c) containment sprawdza **oba** tipy — gałąź z rejestru **i** HEAD worktree'a (dziecko potrafi zrobić własny branch w środku). Wstawiony **po** FOC-613 — oba ruszają `supervisor-cleanup.mjs`, więc po kolei.
+
+**Tura 1 — wynik.** F1 = predykat archiwizacji jako `unarchivedIgnoredContent(worktree, archiveDir)` w `scripts/supervisor-lib.mjs` (współdzielony celowo: warunek grantu i przyszły raport `destroyed` mają się nigdy nie rozjechać), pokrycie po ścieżkach — `<archiveDir>/<rel>` ⊇ `<worktree>/<rel>`, próżniowo spełnione przy braku treści. F2 = nieświeża linia w `<supervisor_tools>` poprawiona. F3 = `localBlockers` przestał kłamać dla drzew objętych grantem. Commity bez trailera: `9a84b38`, `e5f1f52`, `ee788e6`. Suity: `supervisor-autonomy.test.mjs` **28/28**, `supervisor-cleanup.test.mjs` **26/26**, `test-all.mjs` **104/104**, `lint.mjs` exit 0, licznik e2e 104 w trzech miejscach `docs/supervisor-e2e-checklist.md`.
+
+**TEST (test-4) `VERDICT: pass` — 35/35, nic nieobalone.** Niezależna weryfikacja black-box przez prawdziwy CLI `supervisor-cleanup.mjs` na scratch repozytoriach, wyłącznie przez dokumentowane seamy (`LA_SUPERVISOR_STATE_HOME`, `LA_AUTONOMY_CONFIG`, `--issue-file`). Odnotowane: `foc-*-review` wykazane poza grantem **z nazwy**; przypadek częściowego archiwum **odrzucony**, nie „prawie pokryte"; przy braku configu cała ścieżka dwukluczowa `propose` → `answer` → `remove` żywa end-to-end (więc nic się nie odblokowuje i nic nie ginie); kontrola własności słusznie odmówiła drzewa scratch poza `worktreeRoot` — zostawione jako dowód fail-closed.
+
+**Weryfikacja merge — dwa razy, celowo.** Pierwszy ACCEPT liczony na bazie `6dd9aa1`, potem wleciał `929df57` dotykający `scripts/supervisor-lib.mjs`, czyli **tego samego pliku** co FOC-613. Zamiast lądować na werdykcie, który nie obejmuje kombinacji, przeliczone na `--base 929df57`: **ACCEPT**, `findings: []`, izolacja 104/104, combined 104/104, replay 6 commitów / 0 konfliktów, `pathsOutsideDeclaration: []`. Lądowanie lokalne **`74721f5`** = `git merge --no-ff`. Po auto-merge obie połówki `supervisor-lib.mjs` potwierdzone (`wakeQueueMaxSeq`, `unarchivedIgnoredContent`), obie dotknięte suity przeliczone zielone.
+
+**Koszty FOC-613 — 0,8146 USD wycenione** (dev-3 `0,7350` + test-4 `0,0796`). Zgłoszone przez stream `45,2239`, czyli **~55×** → wyłącznie dowód FOC-165 (komentarz korygujący `a9fa6210`; w bulletcie close-out była literówka „FOC-615/FOC-165", poprawiona). Kontrola 3 USD wycenione nie przekroczona, więc decyzja na granicy tury nie była potrzebna. Close-out w Linear: `af794c45`. Status: In Progress → **Done**.
+
+### Sprzątanie FOC-613 — PIERWSZA PRODUKCJA grantu `cleanup-own-worktree`
+
+Podstawa: Mateusz, 2026-09-29 — *„jezeli wszystkie zmiany sa na main to mozna posprzatac"*. Warunek „na main" sprawdzony twardo, nie z pamięci: tip `ee788e6` obu gałęzi **i** HEAD obu drzew to przodkowie `main` (FOC-613 lądował wyłącznie `merge --no-ff`, więc osiągalność jest miarodajna).
+
+`list` **przed** archiwum: `grantPath.covered: false`, powód `not archived: 865 / 935 ignored/untracked file(s) missing`, `dirtyCount: 0` w obu. Snapshot **pełny** drzewa (bez `.git`) do `.state/supervisor/<run>/test-artifacts/<child>/`, zachowujący ścieżki: `dev-3` 1514 plików / 43,8 MB, `test-4` 1758 / 43,8 MB. `list` **po**: `covered: true`, `localBlockers: []`.
+
+`remove` ×2 → `ok: true`, **`destroyed: []`**, `forced: false`, gałęzie zostają (po 6 commitów, osiągalne). Zgłoszone `keys`: `test` / `grant` / `landed` / `archive` z fingerprintem `f586debe68b260f3`. Zero trackowanych plików straconych.
+
+**Sygnał dla FOC-649 — z produkcji, nie z teorii.** Predykat archiwizacji jest ścisły wobem **całości** treści ignorowanej i waży odtwarzalny cache tak samo jak dorobek:
+
+| | `dev-3` | `test-4` | charakter |
+|---|---|---|---|
+| `.state/` (hand-offy, artefakty TEST) | 36 KB | 1,3 MB | **prawdziwy dorobek** |
+| `node_modules/` | 5,4 MB | 5,4 MB | `npm install` |
+| `.codegraph/` | 32 MB | 32 MB | jeden rebuild |
+| snapshot razem | 43,8 MB | 43,8 MB | ~88 MB na run |
+
+Decyzja projektowa do rozstrzygnięcia **w FOC-649** (to kształt polityki archiwizacji, nie mechanika sprzątania): czy `remove` ma rozróżniać dorobek od odtwarzalnego cache (`node_modules/`, `.codegraph/`) i kasować drugie bez archiwizacji, czy reguła zostaje literalna i każdy run dokłada ~88 MB do `test-artifacts/`. Obie ścieżki są dziś zgodne z prawem — grant wymaga archiwum, a przy jego braku „obowiązują dwa klucze", co Mateusz w tej sesji spełnił wprost.
+
+### Kolejka (korygowana przy wejściu w każdy task)
+
+`FOC-613` (dev-3 tura 1 w toku: warunek archiwizacji + dwie poprawki) → **`FOC-649`** (NOWY, bug pod FOC-472, est. M — `remove` kasuje pliki gitignore'owane raportując `destroyed: []`; zakres (a) raport (b) auto-archiwizacja do `test-artifacts/<child>/` (c) containment obu tipów; **po** FOC-613, oba ruszają `supervisor-cleanup.mjs`) → `FOC-612` → `FOC-621` (+ dwa findingi FOC-608 **potwierdzone na poziomie linii** → `.state/krok0-2026-09-29/foc-621-findings-foc608.md`: (1) `supervisor-status.mjs:339-345` — `--ack` waliduje tylko `/^\d+$/`, `--ack 999999` windowałby watermark poza każdy wiersz i schowałby go bezpowrotnie; (2) `supervisor-lib.mjs:196-207` — klucz `stall:<childId>:<turn>` nie odróżnia drugiego epizodu stall w tej samej turze, bo `:244` dedupuje po kluczu) → `FOC-626` (odblokowane — FOC-614 wylądowało) → `FOC-602` → `FOC-603` → `FOC-642` (reguła FOC-472: „picked only when a lane is idle") → M1 (511, 512, 616, 607, 597, 598, 271, 599) → M2 (596 → 519 → 520 → 516 → 517 → 476 → 477, z decyzją go/no-go dla M4) → M4 → M3 (**FOC-384: ADR-0013 zajęty — użyj kolejnego numeru**) → M5 → M6. Opisy M3–M6 czytane z Linear przy wejściu w blok; wsad metryk = `docs/research/research_quality_accuracy_metrics.md` (bez implementacji bez taska).
+
+### Sweep sprzątania worktrees (zlecony w dyrektywie `krok0`)
+
+**22/22 usunięte** przez `supervisor-cleanup.mjs` (propose → `gate answer --text "tak"` → remove), każdy z `destroyed: []`, `forced: false` — **nic niezacommitowanego nie zginęło**, gałęzie i commity zostają osiągalne (reguła obu kluczy; podstawą `--note` jest standing w dyrektywie: „sprzątanie wyłącznie własnych worktrees i branchy `la-merge/*` w całości obecnych w main", po weryfikacji Done + czyste drzewo + przodek `main` dla **gałęzi i HEAD-a**). Zasięg: run `be93` (20 dzieci, m.in. FOC-407/600/601/608/609/614/620/627/640/641/643) + run `04b5` (para FOC-577).
+
+**Nietknięte, świadomie:**
+- `la-wt/la-merge-…-8b24` i `la-wt/la-merge-…-04b5` — branch `la-merge/*` **nie jest w `main`** (18 takich branchy = gałęzie replay, zero skasowanych). Warunek dyrektywy nie spełniony.
+- `foc-518-dev` — **osierocony**: gałąź w `main` (`8c23b006`), drzewo czyste, FOC-518 Done, ale **brak rekordu w jakimkolwiek `children.json`** (tylko wpisy w tee `.jsonl`), więc `supervisor-cleanup.mjs` nie ma pary (run, child) i nie da się tego zrobić narzędziami. Ręczne `git worktree remove` jest zabronione (twarda reguła) → **zostaje jako rezydual**.
+- Cudze / spoza zakresu: `.claude/worktrees/telemetry-dashboard` (`feat/telemetry-analysis-dashboard`), `.claude/worktrees/agent-a1492af7bda782af1` (`foc-443-dev-agent`), `C:/Users/mateu/.codex/worktrees/prompt-codegraph-refresh/linear-agents`.
+- Wszystkie `OUT` (nie w całości w `main`) i brudne drzewa — `foc-208-plan` (dirty 2), `foc-240-plan` (1), `foc-403-*` (do 14), `foc-554-*`, `foc-579-*`, `foc-580-dev`, `foc-587-dev`, `foc-509-*`, `foc-212-*`, `foc-239-*`, `foc-123-*`, `foc-132-*`, `foc-136-*`, całe `PFM-*` (inny projekt) — **nietknięte**.
+
+### Uwagi operacyjne
+
+- **`node_modules` w drzewie głównym wyzerowane w trakcie sesji (mtime 09-29 15:49, 0 wpisów), przyczyna NIEROZSTRZYGNIĘTA.** Objaw: `ERR_MODULE_NOT_FOUND: Cannot find package 'ajv' imported from scripts/decision-call.mjs` — padło 20/22 wywołań sweepu (pierwsze 2 przeszły, więc nastąpiło **w trakcie**). Przywrócone `npm install` (19 pakietów). **Wykluczone:** (a) żaden skrypt w `scripts/` nie woła `npm` (same komentarze w docach); (b) **teoria junction obalona** — `node_modules` we wszystkich worktree'ach to zwykłe katalogi, `link=false`, żaden nie wskazuje na ROOT (na Windows `git worktree remove` schodzący przez junction kasuje zawartość celu — tu to nie zaszło); (c) tee dev-1 zawiera wyłącznie `npm install` (bez `npm ci`) i to we własnym worktree („19 pakietów"), nie w ROOT. Do obserwacji — jeśli się powtórzy, szukać współbieżnego `npm ci` w ROOT. **To nie jest błąd komendy sweepu**: `destroyed: []` przy każdym `remove`.
+- **Wyścig wake queue (FOC-608).** `--drain` @ 15:52 zwrócił `totalRows: 0`, a `wake-queue.jsonl` dostał wiersz `exit:dev-1:0` **166 B, mtime 15:52** — czyli zdarzenie dopisało się **tuż po** odpytaniu. Nie luka w nadawcy (single writer działa), tylko granica odpytania: **drain raz jeszcze przed uznaniem braku zdarzeń.**
+- **`main` = 18 przed origin** (po lądowaniach FOC-641 i FOC-646). Bez pusha — standing; dzieci nigdy nie pushują, push i PR wyłącznie moje i po ludzkiej zgodzie.
+- **Reaper RAM** zabił tło przy bezczynnej sesji (02:30, faza izolacji). Ta sesja przeżyła (izolacja 15:08–15:17, integracja 15:17–15:24). Obserwacja: **tło dłuższe niż ~10 min przy bezczynnej sesji jest w strefie ryzyka** — przy długich `--verify` trzymam turę żywą lub traktuję zaginięcie jako klasę znaną, nie jako błąd komendy.
+- `scripts/linear-ops.mjs` w drzewie głównym ma **niezacommitowaną** subkomendę `due-date` (nie moja, nie w całości w main) — **nie ląduje**; dzieci mają w kickoffie zakaz jej dotykania.
+- `docs/research/research_quality_accuracy_metrics.md` — niezacommitowany wsad metryk, nie ruszany (dla M3/M4/M6; bez implementacji bez taska).
+
 ## 2026-09-28 (12) — DECYZJE cf4c-tertia (koszty: tylko „wycenione") · FOC-608 TEST PASS (test-12) → merge weryfikowany w tle
 
 **Skąd.** Trzecia odpowiedź Mateusza (dyrektywa `cf4c`, blok 3): „działaj dalej według kolejki".
@@ -2172,3 +2298,6 @@ Co-Authored-By** (preferencja Mateusza).
 - Claude Code: 2.1.187. Przy upgrade CC — re-run spike'a T-A1 (ryzyko zmiany pass-through `model:`).
 - `CLAUDE_CODE_SUBAGENT_MODEL` ustawiony w env orkiestratora (=glm-5.2:cloud) — dlatego squady muszą
   go czyścić (zrobione w `_lib.bat`); bez tego subagenty spłaszczają się na jeden model.
+## 2026-09-29 — [ROZSTRZYGNIĘTE] run be93: merge-verify FOC-641 zabity przez reaper (RAM)
+
+**Rozstrzygnięte 2026-09-29 w sekcji (13).** Tamten `supervisor-merge.mjs --child dev-20 --verify "npm ci && node scripts/test-all.mjs"` (task `bmzyqc8ui`) zabił memory-pressure reap przy bezczynnej sesji o 02:30, w fazie izolacji — nie był to błąd komendy (znana klasa: FOC-396). Lądowanie wstrzymano do decyzji; dyrektywa `krok0` („domknij go — merge z weryfikacją") = **opcja (1)** i merge wznowiono w runie `36e0` → **ACCEPT**, `925d6f3` na main. Opcja (3) (lądowanie bez combined-verify) nie została użyta. Gałąź `la-merge/…-be93` zostaje (integracyjna runu).
