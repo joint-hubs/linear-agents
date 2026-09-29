@@ -29,9 +29,9 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import {
   NEVER_COVERS,
@@ -53,7 +53,7 @@ import {
   harness,
   parse,
 } from "./supervisor-test-fixtures.mjs";
-import { readRegistry, writeRegistry } from "./supervisor-lib.mjs";
+import { readRegistry, unarchivedIgnoredContent, writeRegistry } from "./supervisor-lib.mjs";
 
 const { test, fail, summary } = harness();
 
@@ -87,8 +87,16 @@ function issueFile(dir, stateName, stateType) {
 }
 
 /** A run + a registry child + a real worktree: the state every remove test starts from. */
-function scenario({ status = "exited", dirty = null } = {}) {
+function scenario({ status = "exited", dirty = null, ignored = null } = {}) {
   const { base, repo } = fixtureRepo();
+  if (ignored) {
+    // The ignore rules must land on main BEFORE the worktree branches off, so
+    // the ignored files stay ignored without moving the branch ahead of main
+    // (which would break the landed proof the grant path needs).
+    writeFileSync(join(repo, ".gitignore"), `${ignored.join("\n")}\n`);
+    gitIn(repo, "add", ".gitignore");
+    gitIn(repo, "commit", "-m", "gitignore");
+  }
   const wt = fixtureWorktree(repo);
   const runId = fixtureRun();
 
@@ -112,9 +120,24 @@ function scenario({ status = "exited", dirty = null } = {}) {
   });
 
   if (dirty) writeFileSync(join(wt.worktree, dirty), "uncommitted\n");
+  if (ignored) {
+    for (const rel of ignored) {
+      const p = join(wt.worktree, rel);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, "ignored content\n");
+    }
+  }
 
   return { base, repo, runId, repoName: basename(repo), ...wt, done: issueFile(base, "Done", "completed") };
 }
+
+/** The archive dir the grant's third precondition reads: state-home/<run>/test-artifacts/<child>/. */
+const archivePath = (s, ...rest) => join(STATE_HOME, s.runId, "test-artifacts", "dev-1", ...rest);
+const archiveFile = (s, rel) => {
+  const p = archivePath(s, rel);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, "archived copy\n");
+};
 
 /** A schema-valid autonomy config written to a temp dir, for the LA_AUTONOMY_CONFIG seam. */
 let cfgCounter = 0;
@@ -389,6 +412,94 @@ test("landed is ancestry against main, not against the registry's baseRevision",
   assert.equal(out.ok, true, out.error);
   assert.match(out.keys.landed, /ancestors of main/);
   assert.ok(!existsSync(s.worktree));
+});
+
+// ── 4. the archive precondition (third half of the relaxed key) ──────────────
+console.log("\nAC1 — warunek archiwizacji (trzeci warunek)");
+
+test("archive precondition: archived ignored content + grant + landed removes with no gate", () => {
+  const s = scenario({ ignored: ["debug.log"] });
+  archiveFile(s, "debug.log");
+  const cfg = autonomyConfig(s.base, [coveringGrant(s)]);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done], { LA_AUTONOMY_CONFIG: cfg }), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.ok(!existsSync(s.worktree), "the directory survived the grant-path removal");
+  assert.equal(allGates(s.runId).length, 0, "a gate was emitted for a grant-covered removal");
+  assert.match(out.keys.grant, /cleanup-own-worktree/);
+  assert.match(out.keys.archive, /1 ignored\/untracked file\(s\) covered by/, "the record does not say what was archived");
+  assert.equal(readRegistry(s.runId).children["dev-1"].cleanupGrant, "cleanup-own-worktree");
+});
+
+test("archive precondition: ignored content NOT archived → refuses naming 'not archived', not 'not landed'", () => {
+  const s = scenario({ ignored: ["debug.log"] });
+  const cfg = autonomyConfig(s.base, [coveringGrant(s)]);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done], { LA_AUTONOMY_CONFIG: cfg }), fail);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /not archived/, `wrong refusal: ${out.error}`);
+  assert.doesNotMatch(out.error, /not landed/, "the refusal must blame the archive half, not the landed half");
+  assert.doesNotMatch(out.error, /no recorded grant/, "the refusal must blame the archive half, not a missing grant");
+  assert.ok(existsSync(s.worktree), "the tree was removed despite the archive refusal");
+  assert.ok(existsSync(join(s.worktree, "debug.log")), "the only copy of the ignored file was destroyed");
+});
+
+test("archive precondition: an archive that misses one file does not cover", () => {
+  const s = scenario({ ignored: ["debug.log", "trace.log"] });
+  archiveFile(s, "debug.log");
+  const cfg = autonomyConfig(s.base, [coveringGrant(s)]);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done], { LA_AUTONOMY_CONFIG: cfg }), fail);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /not archived/);
+  assert.match(out.error, /trace\.log/, "the refusal must name what it found uncovered");
+  assert.ok(existsSync(join(s.worktree, "trace.log")));
+});
+
+test("archive coverage is path-preserving: .state/ content covers only at the same relative path", () => {
+  const covered = scenario({ ignored: [".state/cache.json"] });
+  archiveFile(covered, ".state/cache.json");
+  const ok = parse(cleanup(["remove", "--run", covered.runId, "--child", "dev-1", "--issue-file", covered.done], { LA_AUTONOMY_CONFIG: autonomyConfig(covered.base, [coveringGrant(covered)]) }), fail);
+  assert.equal(ok.ok, true, ok.error);
+
+  // A flattened copy (content moved out of .state/) is out of convention —
+  // an archive that renamed paths does not cover, fail-closed.
+  const flattened = scenario({ ignored: [".state/cache.json"] });
+  archiveFile(flattened, "cache.json");
+  const out = parse(cleanup(["remove", "--run", flattened.runId, "--child", "dev-1", "--issue-file", flattened.done], { LA_AUTONOMY_CONFIG: autonomyConfig(flattened.base, [coveringGrant(flattened)]) }), fail);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /not archived/);
+  assert.ok(existsSync(join(flattened.worktree, ".state", "cache.json")));
+});
+
+test("archive precondition vacuous: no ignored/untracked content needs no archive directory", () => {
+  const s = scenario();
+  assert.ok(!existsSync(archivePath(s)), "the test premise broke: an archive dir exists");
+  const cfg = autonomyConfig(s.base, [coveringGrant(s)]);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done], { LA_AUTONOMY_CONFIG: cfg }), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.match(out.keys.archive, /nothing needed archiving/);
+});
+
+test("unarchivedIgnoredContent answers directly, for the FOC-472 reuse", () => {
+  const s = scenario({ ignored: ["debug.log", ".state/x.json"] });
+  const rep = unarchivedIgnoredContent(s.worktree, archivePath(s));
+  assert.equal(rep.covered, false);
+  assert.deepEqual(
+    [...rep.unarchived].sort(),
+    [".state/x.json", "debug.log"],
+    `unexpected unarchived set: ${JSON.stringify(rep.unarchived)}`,
+  );
+  archiveFile(s, "debug.log");
+  archiveFile(s, ".state/x.json");
+  assert.equal(unarchivedIgnoredContent(s.worktree, archivePath(s)).covered, true);
+
+  // Vacuous direction: clean tree, no ignored content, no archive dir.
+  const s2 = scenario();
+  const rep2 = unarchivedIgnoredContent(s2.worktree, archivePath(s2));
+  assert.equal(rep2.covered, true);
+  assert.ok(!existsSync(archivePath(s2)));
 });
 
 test("with the shipped config, a foreign repo's tree falls through to the two-key path", () => {

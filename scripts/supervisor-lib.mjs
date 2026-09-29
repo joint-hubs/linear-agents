@@ -1215,6 +1215,67 @@ export function dirtyTreeReport(cwd) {
   }
 }
 
+// ── the archive precondition (FOC-613) ───────────────────────────────────────
+//
+// The relaxed second key covers a worktree only after its git-ignored content
+// has been archived into the run's test-artifacts directory — otherwise `git
+// worktree remove` would silently destroy the only copy of it: ignored files
+// are invisible to `git status --porcelain`, so neither the fingerprint nor
+// the dirty set ever showed them.
+//
+// COVERAGE CONVENTION (the one contract, stated here because both sides of it
+// live in different scripts): path-preserving. Every git-ignored/untracked
+// path `<rel>` under the worktree must exist in the archive as
+// `<archiveDir>/<rel>` — e.g. the child's `<worktree>/.state/foo.json` is
+// archived at `test-artifacts/<childId>/.state/foo.json`, and an ignored
+// `build.log` at the worktree root at `test-artifacts/<childId>/build.log`.
+// An archive that renamed, flattened or dropped paths does not cover —
+// fail-closed.
+//
+// Built for two consumers: supervisor-cleanup.mjs consults it at the grant
+// verdict (FOC-613), and the FOC-472 follow-up calls it for `remove`'s honest
+// destroyed report and for pre-removal archiving. Pure predicate — it never
+// archives, never deletes.
+
+/**
+ * Enumerate the worktree's git-ignored and untracked files; report which of
+ * them the archive does not cover.
+ *
+ * Returns `{ ignored, untracked, unarchived, archiveDir, covered }`:
+ *   · `ignored`    — ignored files, worktree-relative, forward slashes
+ *                    (git expands ignored directories into individual files);
+ *   · `untracked`  — untracked non-ignored files, same shape;
+ *   · `unarchived` — the union whose `<archiveDir>/<rel>` does not exist, plus
+ *                    a `<git ls-files failed: ...>` sentinel if git failed;
+ *   · `covered`    — `unarchived.length === 0`. Vacuously true with no
+ *                    ignored/untracked content and NO archive directory —
+ *                    nothing needed archiving, so none is required.
+ *
+ * A failed listing is never read as "covered": the sentinel lands in
+ * `unarchived`, so `covered` stays false and the caller's refusal names the
+ * real problem.
+ */
+export function unarchivedIgnoredContent(worktree, archiveDir) {
+  const list = (extra) => {
+    try {
+      const out = git(["-c", "core.quotepath=off", "ls-files", "--others", ...extra, "--exclude-standard"], worktree);
+      return out ? out.split(/\r?\n/).filter(Boolean) : [];
+    } catch (err) {
+      return [`<git ls-files failed: ${err.message.split("\n")[0]}>`];
+    }
+  };
+  const ignored = list(["--ignored"]);
+  const untracked = list([]);
+  const failed = [...ignored, ...untracked].filter((p) => p.startsWith("<git ls-files failed"));
+  const unarchived = [
+    ...failed,
+    ...[...ignored, ...untracked]
+      .filter((p) => !p.startsWith("<git ls-files failed"))
+      .filter((rel) => !existsSync(join(archiveDir, rel))),
+  ];
+  return { ignored, untracked, unarchived, archiveDir, covered: unarchived.length === 0 };
+}
+
 // ── pinned state (FOC-286) ───────────────────────────────────────────────────
 //
 // FOC-272's topology review (F-12, §6) measured what children spend their first

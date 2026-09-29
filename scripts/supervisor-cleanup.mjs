@@ -68,6 +68,8 @@ import {
   parseArgs,
   readRegistry,
   resolveGitRoot,
+  supervisorStateHome,
+  unarchivedIgnoredContent,
   updateChild,
   worktreeRoot,
 } from "./supervisor-lib.mjs";
@@ -224,18 +226,22 @@ function isAncestorOf(rev, base, repo) {
 /**
  * Does the recorded autonomy grant stand in for Key 2 on this removal?
  *
- * Returns a verdict, never throws: `{covered, grantId, note}`. `note` is the
- * human-readable reason the grant did NOT fire ("" when covered) — cmdRemove
- * appends it to the two-key path's refusals, so a refusal names which half
- * failed: no grant / out of scope / not landed / expired. An unusable config
- * file never unlocks anything — it only makes the grant path inert, loudly.
+ * Returns a verdict, never throws: `{covered, grantId, note, archive}`. `note`
+ * is the human-readable reason the grant did NOT fire ("" when covered) —
+ * cmdRemove appends it to the two-key path's refusals, so a refusal names
+ * which half failed: no grant / out of scope / not archived / not landed /
+ * expired. An unusable config file never unlocks anything — it only makes the
+ * grant path inert, loudly.
  *
  * The grant covers a removal only when ALL of its scope holds: repo and branch
  * match the grant's patterns, the tree sits in the spawn worktree root (a
- * Supervisor-owned tree, not one made by hand), the tree is clean, and the
- * landed proof holds. Anything else falls back to the two-key human path.
+ * Supervisor-owned tree, not one made by hand), the tree is clean, every
+ * git-ignored/untracked file is already archived into the run's
+ * `test-artifacts/<childId>/` (path-preserving — see unarchivedIgnoredContent;
+ * vacuously satisfied with no ignored content and no archive), and the landed
+ * proof holds. Anything else falls back to the two-key human path.
  */
-function cleanupGrantVerdict(entry, repo, state) {
+function cleanupGrantVerdict(entry, repo, state, runId) {
   let config;
   try {
     config = loadAutonomyGrants();
@@ -273,6 +279,21 @@ function cleanupGrantVerdict(entry, repo, state) {
     return miss(`out of scope: the tree is dirty (${state.dirty.length} uncommitted path(s))`);
   }
 
+  // The archive precondition (FOC-613): ignored/untracked content must already
+  // be in the run's test-artifacts dir before the grant may stand in for the
+  // human key — removal would otherwise destroy the only copy of files neither
+  // the fingerprint nor the dirty set ever showed anyone.
+  const archiveDir = join(supervisorStateHome(), runId, "test-artifacts", entry.childId);
+  const archive = unarchivedIgnoredContent(entry.worktree, archiveDir);
+  if (!archive.covered) {
+    const names = archive.unarchived.filter((p) => !p.startsWith("<git ls-files failed"));
+    const shown = names.slice(0, 5).join(", ");
+    return miss(
+      `not archived: ${archive.unarchived.length} ignored/untracked file(s) missing from ${archiveDir}` +
+        (shown ? `: ${shown}${names.length > 5 ? ` (+${names.length - 5} more)` : ""}` : ""),
+    );
+  }
+
   // Landed proof: branch AND worktree HEAD, both ancestors of `main`. This is
   // ancestry against main — NOT against the registry's baseRevision, which
   // says where the tree started, not whether the work arrived. Reachability
@@ -300,7 +321,13 @@ function cleanupGrantVerdict(entry, repo, state) {
     return miss(`not landed: branch ${entry.branch} carries ${ahead ?? "unknown"} commit(s) main does not have`);
   }
 
-  return { covered: true, grantId: grant.id, note: "" };
+  const archiveCount = archive.ignored.length + archive.untracked.length;
+  return {
+    covered: true,
+    grantId: grant.id,
+    note: "",
+    archive: { archiveDir, vacuous: archiveCount === 0, count: archiveCount },
+  };
 }
 
 // ── guards shared by propose and remove ──────────────────────────────────────
@@ -581,7 +608,7 @@ function cmdRemove(args) {
   // grant does not fire, the two-key path below runs exactly as before — and
   // its refusals carry WHY the grant did not fire, so a refusal never reads as
   // if a recorded grant had been silently ignored.
-  const grantVerdict = cleanupGrantVerdict(entry, repo, state);
+  const grantVerdict = cleanupGrantVerdict(entry, repo, state, runId);
   if (grantVerdict.covered) {
     performRemoval({
       runId,
@@ -594,6 +621,9 @@ function cmdRemove(args) {
         test: `${test.issue} is ${test.state}`,
         grant: `${grantVerdict.grantId} (recorded grant, config/autonomy.json)`,
         landed: `branch ${entry.branch} and the worktree HEAD are both ancestors of main`,
+        archive: grantVerdict.archive.vacuous
+          ? "no ignored/untracked content — nothing needed archiving"
+          : `${grantVerdict.archive.count} ignored/untracked file(s) covered by ${grantVerdict.archive.archiveDir}`,
         fingerprint: state.fingerprint,
       },
       registryExtra: { cleanupGrant: grantVerdict.grantId },
