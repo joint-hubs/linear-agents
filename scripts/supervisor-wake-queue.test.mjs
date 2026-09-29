@@ -32,6 +32,7 @@ import {
   supervisorStateHome,
   wakeQueuePath,
   wakeDedupKey,
+  wakeQueueMaxSeq,
   writeWakeAck,
   writeRegistry,
 } from "./supervisor-lib.mjs";
@@ -207,6 +208,77 @@ describe("FOC-608 wake queue — monotonic seq and crash-idempotent replay (AC1)
       [wakeDedupKey(exitEvent("dev-2", 0))],
       "the post-ack row is redelivered on the next drain",
     );
+  });
+});
+
+describe("FOC-621 — an ack can retire the past, never the future", () => {
+  // The failure this pins is silent and total: delivery is exactly
+  // `seq > ackedThrough`, and new rows are numbered `max(seq)+1`. An ack above
+  // the last row therefore retires every event that has not happened yet — the
+  // queue keeps working, keeps appending, and delivers nothing, forever. A
+  // mistyped --ack ends supervision of the run and reports success doing it.
+  it("an ack above the last row is refused and the watermark does not move", () => {
+    const home = fixtureHome("ack-above");
+    const runId = fixtureRun(home, `ack-above-${Date.now()}`);
+
+    appendWakeEvent(runId, exitEvent("dev-1", 0));
+    appendWakeEvent(runId, exitEvent("dev-1", 1));
+    assert.equal(wakeQueueMaxSeq(runId), 2, "the bound is the last row on disk");
+
+    assert.throws(() => writeWakeAck(runId, 999999), /last row is seq 2/);
+    assert.equal(readWakeAck(runId), 0, "the refusal must leave the watermark untouched");
+
+    // The queue is still alive: nothing was retired, including what comes next.
+    appendWakeEvent(runId, exitEvent("dev-1", 2));
+    assert.deepEqual(
+      readWakeQueue(runId).filter((r) => r.seq > readWakeAck(runId)).map((r) => r.seq),
+      [1, 2, 3],
+      "every row, past and future, is still delivered",
+    );
+  });
+
+  it("on an empty queue only 0 is ackable — row 1 has not happened yet", () => {
+    const home = fixtureHome("ack-empty");
+    const runId = fixtureRun(home, `ack-empty-${Date.now()}`);
+
+    assert.equal(wakeQueueMaxSeq(runId), 0, "an empty queue has no last row");
+    assert.throws(() => writeWakeAck(runId, 1), /last row is seq 0/);
+
+    // Without the guard this is the sharpest form of the bug: acking 1 against
+    // an empty queue makes the very FIRST event undeliverable.
+    appendWakeEvent(runId, exitEvent("dev-1", 0));
+    assert.deepEqual(
+      readWakeQueue(runId).filter((r) => r.seq > readWakeAck(runId)).map((r) => r.seq),
+      [1],
+      "the first row appended after the refused ack is still delivered",
+    );
+  });
+
+  it("the bound tracks the file, so a torn trailing line cannot fake headroom", () => {
+    const home = fixtureHome("ack-torn");
+    const runId = fixtureRun(home, `ack-torn-${Date.now()}`);
+
+    appendWakeEvent(runId, exitEvent("dev-1", 0));
+    // A crash mid-append leaves a partial line claiming a seq far ahead. It is
+    // not a row and must not widen the ackable range — otherwise the torn line
+    // is a way back into the same blindness.
+    appendFileSync(wakeQueuePath(runId), '{"seq":999,"event":"ex');
+
+    assert.equal(wakeQueueMaxSeq(runId), 1, "only valid rows count towards the bound");
+    assert.throws(() => writeWakeAck(runId, 2), /last row is seq 1/);
+    assert.equal(readWakeAck(runId), 0, "still nothing retired");
+  });
+
+  it("acking exactly the last row is allowed and stays idempotent", () => {
+    const home = fixtureHome("ack-exact");
+    const runId = fixtureRun(home, `ack-exact-${Date.now()}`);
+
+    appendWakeEvent(runId, exitEvent("dev-1", 0));
+    appendWakeEvent(runId, exitEvent("dev-1", 1));
+
+    assert.equal(writeWakeAck(runId, 2), 2, "retiring through the last row is the normal case");
+    assert.equal(writeWakeAck(runId, 2), 2, "retrying the same ack is a no-op");
+    assert.equal(readWakeAck(runId), 2);
   });
 });
 

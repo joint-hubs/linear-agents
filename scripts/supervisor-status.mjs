@@ -59,6 +59,7 @@ import {
   runDir,
   teeAbsPath,
   waitArmedPath,
+  wakeQueueMaxSeq,
   writeWakeAck,
 } from "./supervisor-lib.mjs";
 
@@ -342,7 +343,19 @@ if (args.ack !== undefined) {
       got: args.ack === true ? "(no seq given)" : String(args.ack),
     });
   }
-  const ackedThrough = writeWakeAck(runId, Number(args.ack));
+  const seq = Number(args.ack);
+  let ackedThrough;
+  try {
+    ackedThrough = writeWakeAck(runId, seq);
+  } catch (err) {
+    // Refused, not recorded. An ack past the last row blinds the queue to
+    // everything that has not happened yet — see wakeQueueMaxSeq(). A typo here
+    // would otherwise end supervision of the run and report success doing it.
+    failJson(err.message, {
+      validRange: `0..${wakeQueueMaxSeq(runId)}`,
+      why: "rows are numbered max(seq)+1 and delivered while seq > ackedThrough, so an ack above the last row retires every future event",
+    });
+  }
   const remaining = readWakeQueue(runId).filter((r) => r.seq > ackedThrough).length;
   console.log(
     JSON.stringify({ ok: true, runId, mode: "ack", ackedThrough, unackedCount: remaining }, null, 2),

@@ -276,8 +276,34 @@ export function readWakeAck(runId) {
   return typeof ack?.ackedThrough === "number" ? ack.ackedThrough : 0;
 }
 
-/** Retire rows through `seq`. The watermark never moves backwards. */
+/**
+ * The highest `seq` on disk — the bound every ack has to respect.
+ *
+ * This is not cosmetic bookkeeping. `appendWakeEvent` numbers rows
+ * `max(seq)+1` **from the file**, and `seq > ackedThrough` is the ONLY delivery
+ * filter there is. So a watermark set above this line does not merely retire
+ * rows nobody handled: it retires the FUTURE. Every event appended afterwards
+ * is born numerically below the watermark and is never delivered, and nothing
+ * anywhere reports that the queue has gone silent. An ack above `maxSeq` is
+ * therefore unsatisfiable rather than aggressive, and must be refused.
+ */
+export function wakeQueueMaxSeq(runId) {
+  return readWakeQueue(runId).reduce((max, r) => Math.max(max, r.seq), 0);
+}
+
+/**
+ * Retire rows through `seq`. The watermark never moves backwards — a late or
+ * retried ack is harmless, it can only leave the watermark where it was, which
+ * is why a lower `seq` is tolerated rather than refused — and never moves past
+ * the last row, which is what `wakeQueueMaxSeq` guards.
+ */
 export function writeWakeAck(runId, seq) {
+  const maxSeq = wakeQueueMaxSeq(runId);
+  if (seq > maxSeq) {
+    throw new Error(
+      `cannot ack through seq ${seq}: the queue's last row is seq ${maxSeq} (valid range 0..${maxSeq})`,
+    );
+  }
   const ackedThrough = Math.max(readWakeAck(runId), seq);
   atomicWriteJSON(wakeAckPath(runId), { ackedThrough, ackedAt: new Date().toISOString() });
   return ackedThrough;
