@@ -8,12 +8,13 @@
 //
 // Run: node scripts/mcp-shadow-run.test.mjs
 
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { runShadowRun, DEFAULT_OUT } from "./mcp/shadow-run.mjs";
+import { EGRESS_BLOCKED } from "./egress-screen.mjs";
 
 const SHADOW_RUN = fileURLToPath(new URL("./mcp/shadow-run.mjs", import.meta.url));
 
@@ -120,6 +121,124 @@ await test("unknown mode is rejected", async () => {
     rejected = err;
   }
   if (!rejected) fail("unknown mode must be rejected");
+});
+
+// FOC-646: live mode screens every fixture argument at the egress chokepoint
+// BEFORE any request. Shadow-run bypasses the decision-call seam (FOC-643
+// screens there), so this transport-level screen is the only one these inputs
+// get. Secret shapes below are synthetic (FOC-220) — the same literals the
+// decision-call egress suite uses, assembled so no contiguous literal is a
+// usable credential.
+console.log("\nshadow-run: live-mode egress screen before the provider (FOC-646)");
+
+const ENV_SECRET_LINE = "OPENROUTER_API_KEY=abc123def4567890";
+const SCREEN_SECRET = "sk-or-".concat("v1-", "0123456789abcdef", "0123456789abcdef", "0123456789abcdef", "0123456789abcdef");
+
+// A stub Jev transport answering the request's own questions, so a clean live
+// run produces full ok envelopes with measured confidence — zero network.
+const jevStub = (counter) => async (_url, opts) => {
+  counter.n++;
+  const req = JSON.parse(opts.body);
+  const answers = {};
+  for (const [id, q] of Object.entries(req.questions)) {
+    const labels = Object.keys(q.criteria ?? {});
+    answers[id] = q.type === "choice"
+      ? { type: "choice", choice: labels[0], probabilities: Object.fromEntries(labels.map((l) => [l, 1 / labels.length])), confidence: 0.9 }
+      : { type: "noul", noul: 0.9 };
+  }
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ model: "typesafe/jev-1.13-stub", answers, usage: { inputTokens: 11, outputTokens: 7, cost: 0.0002 } }),
+  };
+};
+
+await test("a clean live run is unaffected: ok envelopes, measured confidence, path live, three provider fetches", async () => {
+  const counter = { n: 0 };
+  const evidence = await runShadowRun({ mode: "live", apiKey: "test-only-key", fetchImpl: jevStub(counter), write: false });
+  if (evidence.path !== "live") fail("path: " + evidence.path);
+  for (const server of evidence.servers) {
+    for (const call of server.calls) {
+      if (call.path !== "live") fail("call path: " + call.path);
+      if (call.envelope?.ok !== true) fail(`${server.tool} [${call.fixture}]: ${JSON.stringify(call.envelope).slice(0, 120)}`);
+      if (typeof call.envelope.confidence !== "number") fail(`${server.tool}: live confidence must be measured, got ${call.envelope.confidence}`);
+    }
+  }
+  if (counter.n !== 3) fail(`expected 3 provider fetches (2 extraction + 1 refinement), got ${counter.n}`);
+});
+
+await test("a secret-shaped extraction fixture blocks the live run: typed error, ZERO provider fetches, no evidence file", async () => {
+  const counter = { n: 0 };
+  const dir = mkdtempSync(join(tmpdir(), "mcp-shadow-egress-"));
+  try {
+    const outPath = join(dir, "evidence.json");
+    let refused = null;
+    try {
+      await runShadowRun({
+        mode: "live",
+        apiKey: "test-only-key",
+        fetchImpl: jevStub(counter),
+        write: true,
+        outPath,
+        extractionFixtures: [{ name: "leaky", text: `config paste:\n${ENV_SECRET_LINE}\n` }],
+      });
+    } catch (err) {
+      refused = err;
+    }
+    if (!refused) fail("a secret-shaped fixture must block the live run");
+    if (refused.name !== "EgressBlockedError") fail("typed error: " + refused.name);
+    if (refused.code !== EGRESS_BLOCKED) fail("code: " + refused.code);
+    if (counter.n !== 0) fail(`zero requests required, got ${counter.n}`);
+    if (!refused.message.includes("shadow-run live input extraction/leaky (text)")) fail(`the refusal names the checkpoint and leaf: ${refused.message}`);
+    if (refused.message.includes(ENV_SECRET_LINE)) fail("the hit VALUE never travels in the refusal");
+    if (existsSync(outPath)) fail("a blocked run writes no evidence file — no partial success");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("a secret in a refinement feature name blocks too — the screen covers the refinement leaf shape", async () => {
+  const counter = { n: 0 };
+  let refused = null;
+  try {
+    await runShadowRun({
+      mode: "live",
+      apiKey: "test-only-key",
+      fetchImpl: jevStub(counter),
+      write: false,
+      refinementFixtures: [{ name: "leaky-features", prompt: "clean prompt prose", features: [{ name: `retry with token ${SCREEN_SECRET}`, size: "small" }] }],
+    });
+  } catch (err) {
+    refused = err;
+  }
+  if (!refused) fail("a secret-shaped feature name must block the live run");
+  if (refused.code !== EGRESS_BLOCKED) fail("code: " + refused.code);
+  if (counter.n !== 0) fail(`zero requests required, got ${counter.n}`);
+  if (!refused.message.includes("promptRefinement/leaky-features (features.0.name)")) fail(`the refusal names the checkpoint and leaf: ${refused.message}`);
+  if (refused.message.includes("0123456789abcdef")) fail("the hit VALUE never travels in the refusal");
+});
+
+await test("the screen runs upfront: a hit in the SECOND fixture still sends nothing", async () => {
+  const counter = { n: 0 };
+  let refused = null;
+  try {
+    await runShadowRun({
+      mode: "live",
+      apiKey: "test-only-key",
+      fetchImpl: jevStub(counter),
+      write: false,
+      extractionFixtures: [
+        { name: "clean-one", text: "clean dictated text about a gantt export" },
+        { name: "dirty-two", text: `more dictated text\n${ENV_SECRET_LINE}\n` },
+      ],
+    });
+  } catch (err) {
+    refused = err;
+  }
+  if (!refused) fail("a hit anywhere must block the whole run");
+  if (refused.code !== EGRESS_BLOCKED) fail("code: " + refused.code);
+  if (counter.n !== 0) fail(`screen-all-upfront required — the clean first fixture sent ${counter.n} request(s)`);
+  if (!refused.message.includes("extraction/dirty-two (text)")) fail(`the refusal names the offending fixture: ${refused.message}`);
 });
 
 // The argv parse contract is only reachable through a real CLI invocation (the

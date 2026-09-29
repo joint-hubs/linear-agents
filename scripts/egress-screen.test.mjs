@@ -27,7 +27,7 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = join(__dirname, "..");
 const NODE = process.execPath;
 
-const { scanEgress, assertEgressClean, EgressBlockedError, EGRESS_BLOCKED } = await import(
+const { scanEgress, assertEgressClean, egressLeaves, EgressBlockedError, EGRESS_BLOCKED } = await import(
   pathToFileURL(join(__dirname, "egress-screen.mjs")).href
 );
 const { SYNTHETIC_SET } = await import(
@@ -288,6 +288,52 @@ console.log("cli: egress-screen.mjs check");
 
   const usage = spawnSync(NODE, [join(__dirname, "egress-screen.mjs"), "check"], { encoding: "utf-8" });
   assert(usage.status === 2, "no text source → exit 2 (usage)");
+}
+
+// ---------------------------------------------------------------------------
+// 6. egressLeaves — the ONE shared raw-leaf extractor for the egress
+//    checkpoints (decision seam FOC-643, shadow-run live replay FOC-646)
+// ---------------------------------------------------------------------------
+
+console.log("egressLeaves: the shared raw-leaf extractor");
+{
+  // The decision seam's screened leaf set is pinned EXACTLY — labels, values,
+  // and order. This is the contract FOC-643 shipped; drift here would change
+  // what the seam screens (or blind a family it used to catch).
+  const seamLeaves = egressLeaves({
+    state: "state prose",
+    questions: {
+      q0: { type: "noul", instructions: "judge this", criteria: { true: "yes", false: "no" } },
+    },
+  });
+  assert(
+    JSON.stringify(seamLeaves) === JSON.stringify([
+      ["state", "state prose"],
+      ["questions.q0", "q0"],
+      ["questions.q0.type", "noul"],
+      ["questions.q0.instructions", "judge this"],
+      ["questions.q0.criteria.true", "true"],
+      ["questions.q0.criteria.true", "yes"],
+      ["questions.q0.criteria.false", "false"],
+      ["questions.q0.criteria.false", "no"],
+    ]),
+    "the seam's {state, questions} leaf set is byte-exact (FOC-643, unchanged)",
+  );
+
+  assert(
+    JSON.stringify(egressLeaves({ text: "dictated text" })) === JSON.stringify([["text", "dictated text"]]),
+    "extraction replay shape {text} yields the raw text leaf",
+  );
+  assert(
+    JSON.stringify(egressLeaves({ prompt: "p", features: [{ name: "f1", size: "small" }, { name: "f2" }] })) === JSON.stringify([
+      ["prompt", "p"],
+      ["features.0.name", "f1"],
+      ["features.0.size", "small"],
+      ["features.1.name", "f2"],
+    ]),
+    "refinement replay shape {prompt, features} yields prompt and per-feature leaves",
+  );
+  assert(egressLeaves({}).length === 0, "an empty input yields no leaves");
 }
 
 // ---------------------------------------------------------------------------
