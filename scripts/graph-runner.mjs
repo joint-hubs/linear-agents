@@ -85,6 +85,7 @@ import { getRegistryEntry, loadRegistry } from "./decision-registry.mjs";
 import { AC_TESTABLE_DECISION, runPlanAcNode } from "./plan-ac.mjs";
 import { runPlanIntentNode } from "./plan-intent.mjs";
 import { KINDS } from "./supervisor-gate.mjs";
+import { holdsForCompletion } from "./supervisor-lib.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -526,6 +527,10 @@ export function createGraphRunner({
   generator,
   gateEmitter,
   linearEffect,
+  // FOC-612: the completion check's view of the holds store, injectable so
+  // tests never touch the supervisor state home. The default reads
+  // <supervisorStateHome>/<runId>/holds.json (absent store = no holds).
+  listOpenHolds = holdsForCompletion,
   now = () => new Date().toISOString(),
 } = {}) {
   if (!runId || typeof runId !== "string") {
@@ -912,6 +917,41 @@ export function createGraphRunner({
       }
     }
 
+    // FOC-612: a run is not complete while a hold is open. Deliberately a RUN
+    // rule at the close point, not a turn-end rule — the guard only blocks on
+    // holds that still owe their presentation, because a hold deferred 30 days
+    // must not wedge every turn end forever. Completion is stricter: even a
+    // deferred hold is unanswered, and a run that closed over an open question
+    // would report Done work nobody decided on. The refusal is returned, not
+    // appended: a wait is not a failure, and the holds store itself is the
+    // persistent record of what is owed — appending a failed record per
+    // attempt would pollute the store every retry.
+    const holds = listOpenHolds(runId);
+    if (holds.error) {
+      return {
+        status: "stopped",
+        stepId: "holds.close",
+        record: failRecord("holds.close", {
+          code: "holds_unreadable",
+          message: `the holds store for run ${runId} could not be read: ${holds.error} — a store nobody can parse is not a store`,
+        }),
+      };
+    }
+    if (holds.open.length) {
+      return {
+        status: "stopped",
+        stepId: "holds.close",
+        record: failRecord("holds.close", {
+          code: "holds_open",
+          message:
+            `run ${runId} is not complete while ${holds.open.length} hold(s) are open: ` +
+            `${holds.open.map((h) => h.id).join(", ")} — answer them ` +
+            `(node scripts/supervisor-gate.mjs answer --hold <id>) or the run stays open`,
+        }, {
+          openHolds: holds.open.map((h) => ({ id: h.id, question: h.question })),
+        }),
+      };
+    }
     return { status: "completed", runId };
   }
 

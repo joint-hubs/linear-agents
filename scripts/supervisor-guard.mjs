@@ -4,8 +4,11 @@
 //   node scripts/supervisor-guard.mjs [--run <id>]     (Stop hook: payload on stdin)
 //
 // The Supervisor session must not end a turn while it still owes work: a child
-// running, a spawn held for a slot, a gate awaiting an answer. The harness calls
-// this script when the session tries to stop:
+// running, a spawn held for a slot, a gate awaiting an answer, an open hold
+// still owing its presentation (FOC-612 — presented-and-deferred holds stay
+// quiet until their `until`; run COMPLETION is the stricter rule and it lives
+// at the close point in graph-runner.mjs). The harness calls this script when
+// the session tries to stop:
 //
 //   · exit 0  — allow the stop (nothing owed, or a --wait is armed, or the
 //               block budget is exhausted — see below)
@@ -37,6 +40,7 @@ import {
   guardAlarmsPath,
   guardDir,
   guardStatePath,
+  holdsOwingTurnEnd,
   liveChildren,
   parseArgs,
   readHeld,
@@ -107,8 +111,16 @@ const live = liveChildren(readRegistry(runId));
 const held = readHeld(runId);
 const pending = pendingGateRefs(runId);
 const wait = readWaitArmed(runId);
+// FOC-612: open holds that still owe work block the turn end, exactly like
+// pending gates. Deliberately NOT every open hold: a hold deferred into the
+// future must not wedge every turn end for 30 days — only un-presented (or
+// resurfaced) holds are owed RIGHT NOW. Run COMPLETION is the stricter rule
+// and it lives at the close point (graph-runner.mjs), not here.
+// Fail-closed: a holds store nobody can parse is a block naming the parse
+// error, never a silent "nothing owed".
+const owedHolds = holdsOwingTurnEnd(runId);
 
-if (!live.length && !held.length && !pending.length) {
+if (!live.length && !held.length && !pending.length && !owedHolds.error && !owedHolds.blocking.length) {
   // Nothing owed. An expired marker may still be on disk — it is expired, so
   // the guard's answer does not depend on it and it is left for its owner.
   allow(runId);
@@ -123,6 +135,14 @@ const describe = () => {
   if (live.length) parts.push(`${live.length} live child(ren): ${live.map((c) => `${c.childId} (${c.status})`).join(", ")}`);
   if (held.length) parts.push(`${held.length} held spawn(s): ${held.map((h) => h.heldId).join(", ")}`);
   if (pending.length) parts.push(`${pending.length} pending gate(s): ${pending.map((g) => `${g.gateId}${g.kind ? ` [${g.kind}]` : ""}`).join(", ")}`);
+  // FOC-620-style honesty in the refusal: say HOW the hold stops blocking.
+  if (owedHolds.error) parts.push(`holds store unreadable — blocking fail-closed: ${owedHolds.error}`);
+  else if (owedHolds.blocking.length) {
+    parts.push(
+      `${owedHolds.blocking.length} open hold(s) owed: ${owedHolds.blocking.map((h) => h.id).join(", ")} — ` +
+        `present (supervisor-gate.mjs list --open), then answer (--hold) or defer (--until)`,
+    );
+  }
   return parts.join("; ");
 };
 
@@ -155,6 +175,10 @@ appendFileSync(
     live: live.map((c) => ({ childId: c.childId, squad: c.squad ?? null, status: c.status })),
     held: held.map((h) => ({ heldId: h.heldId, squad: h.squad ?? null })),
     pendingGates: pending,
+    // FOC-612 — ids and deferral timestamps only, never hold text (FOC-220):
+    // the alarm is evidence for the escalation, not a copy of the question.
+    openHolds: owedHolds.blocking.map((h) => ({ id: h.id, until: h.until })),
+    holdsError: owedHolds.error,
     waitArmed: wait.armed,
   }) + "\n",
 );
