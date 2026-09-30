@@ -218,10 +218,13 @@ async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
   };
 
   for await (const chunk of jsonlChunksFrom(path, startOffset)) {
+    // FOC-597: the EOF tail may commit only if it parses as a whole record.
+    let tailParsed = false;
     for (const { raw, offset: lineOffset } of chunk.lines) {
       if (!raw) continue;
       let line;
       try { line = JSON.parse(raw); } catch { continue; }
+      if (chunk.tail && lineOffset === chunk.tail.offset) tailParsed = true;
       const observedAt = line.timestamp || ws.lastObservedAt || new Date().toISOString();
       const observedCwd = line.relocatedCwd || line.worktreeSession?.worktreePath || line.cwd || ws.lastCwd;
       const branch = line.worktreeSession?.worktreeBranch || line.gitBranch || ws.lastBranch;
@@ -256,7 +259,12 @@ async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
     }
     try {
       await flush();
-      lastFlushedOffset = chunk.endOffset;
+      // FOC-597: never advance past the unterminated EOF tail unless it parsed
+      // as a whole record — a torn write is resumed at its start, so the line
+      // that completes it is parsed on the next pass instead of being lost.
+      lastFlushedOffset = chunk.tail
+        ? (tailParsed ? chunk.tail.end : chunk.tail.offset)
+        : chunk.endOffset;
       if (chunk.atEof) sawEof = true;
     } catch (error) {
       // A failed chunk leaves the stored offset untouched — the next pass
