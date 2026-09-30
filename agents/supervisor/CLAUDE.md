@@ -121,6 +121,20 @@ WHY — the file is the record (§2.6). Deliver without recording and the gate s
 
 `list` gives you the question **verbatim** — that is what you relay. `supervisor-status.mjs` redacts its snippets, so never quote a gate from there.
 
+### 5b. Holds — non-blocking decisions (FOC-612)
+A hold is a decision record that does **not** stop the run: work that does not name it keeps going (`holds.json`; `blocks: null` means nothing waits — only queue items that explicitly name a hold wait on it). Raise, present, answer or defer:
+```
+node $LA_ROOT/scripts/supervisor-gate.mjs hold --origin <who> --question "..." --recommendation "..." --option '<{"label","model","costUsd"}>' [--option ...] [--impact high|medium|low]
+node $LA_ROOT/scripts/supervisor-gate.mjs list --run <runId> --open          # renders the ONE hold to put to him; stamps presentedAt
+node $LA_ROOT/scripts/supervisor-gate.mjs answer --hold <holdId> --text "<his answer>"
+node $LA_ROOT/scripts/supervisor-gate.mjs defer --hold <holdId> --until <ISO timestamp>
+```
+
+- **Present ONE hold per turn, impact first.** Several holds may be `open` at once; only one is put to him at a time.
+- **Present it WITH a recommendation, and its costed options alongside.** This supersedes the neutral-options rule *for holds* — sign-off recorded: **Mateusz approved the recommendation change on 2026-09-29 (FOC-612)**, same shape as the `cf4c` / `krok0` consents in `config/autonomy.json`. The constraint that survives: a recommendation that appears without its alternatives is a fail — the CLI refuses a hold whose options carry no priced cost at write time, and every option shows its cost (priced through `config/models.json`, "wycenione"; a missing price row says `UNKNOWN` and names the model — never zero, never the stream's figure).
+- **A hold that is `open` and not yet presented blocks the turn end** — the guard counts it as owed work, exactly like a pending gate. Once presented, an answer closes it; `defer --until` quiets the guard until the timestamp arrives, then it resurfaces. An un-presented hold blocks even when deferred — the presentation itself is still owed.
+- **A run is not complete while a hold is open.** The completion check refuses and names the open holds; a deferral does not lift that. This is a RUN rule, deliberately not a blanket turn-end rule — a hold deferred 30 days must not wedge every turn end forever.
+
 ### 6. Integrate and route on
 On a child turn ending: read the result, decide the next node, spawn it. REVIEW fail → **record the verdict first** (`supervisor-verdict.mjs record`), then resume the **same dev session** with the findings (`--review-loop`), then re-review. `--review-loop` refuses without a recorded verdict: there is nothing to hand back and nothing to compare.
 
@@ -158,6 +172,7 @@ WHY NOT EARLIER — `config/graph.json` has `review-to-dev-return` and `test-to-
 - **Never put secrets or login data in Linear comments.** Snippets you show Mateusz already pass the status redaction filter; anything you paste elsewhere does not.
 - **Present options, not a recommendation dressed as the only path.** Every gate you raise offers 2–3 options with their costs, neutrally phrased. Estimates are ranges from comparable past work, never point values.
   WHY — a single leading option is a decision you made and labelled as his.
+  **Holds are the recorded exception (FOC-612, sign-off 2026-09-29):** a hold is presented WITH a recommendation — but always alongside its options and their priced costs; the CLI refuses a recommendation without alternatives. See §5b.
 - **A verdict is recorded before the first spawn**, with `unknowns[]` and calibrated `confidence`.
 - Any destructive or irreversible action not listed here → ask Mateusz first.
 </supervisor_hard_rules>
