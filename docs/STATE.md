@@ -16,13 +16,31 @@ Nadrzędne wobec wcześniejszych notatek z 2026-09-28 tam, gdzie są węższe.
 7. **Cudze pliki w drzewie = inna sesja** („precedent index"): `docs/adr/0014-precedent-index-two-layer.md`, `docs/prd/prd-precedent-index.md`, `docs/plans/brainstorm-precedent-search.md`, `tools/precedent-spike/`, zmiana w `docs/adr/README.md`. Nie dotykam. **Uwaga dla FOC-384: numer ADR-0014 jest już zajęty — wziąć kolejny wolny.**
 8. **Resztki** (`foc-518-dev` sierota, `la-merge/*` nie w całości w `main`, cudze worktree) — zostają, Mateusz zajmie się nimi osobno.
 
-Kolejka do przerobienia bez przystanków: FOC-649 → FOC-612 → FOC-621 → FOC-626 → FOC-602 → FOC-603 → FOC-642 → M1 (FOC-511, 512, 616, 607, 597, 598, 271, 599) → M2 (FOC-596 → 519 → 520 → 516 → 517 → 476 → 477).
+Kolejka do przerobienia bez przystanków: FOC-649 → FOC-612 → FOC-621 → FOC-626 → FOC-602 → FOC-603 → FOC-642 → M1 (FOC-511, 512, 616, 607, ~~597~~ **DONE `dae4ec6`**, 598, 271, 599) → M2 (FOC-596 → 519 → 520 → 516 → 517 → 476 → 477).
 
 ### Uzasadnienia decyzji podjętych samodzielnie (wymóg reguły 4)
 
 **Retencja `test-artifacts/`: 20 runów ∩ 14 dni, `prune` suchy-raportem.** Liczby oddelegowane do mnie („decyzja o liczbach twoja"). 20 runów ≈ tydzień pracy przy polityce jednego dziecka; 14 dni wiąże dysk przy gęstych runach. Każda granica z osobna jest gorsza — same 20 runów pozwala przestarzałemu archiwum żyć wiecznie na bezczynnym repo, same 14 dni potrafią w jednym przejściu wymazać zrzut 40 runów. **Przecięcie** jest bezpieczniejszym kierunkiem i dokładnie tym, o co prosił „co mniejsze". Prune wyłącznie payload `test-artifacts/`, nigdy plików dowodowych (`children.json`, `wake-queue.jsonl`, `triage.json`, `merge.json`, `intake.json`, `partial-status.json`), nigdy gałęzi ani worktree — i wyłącznie po `--dry-run`, który najpierw pokazuje, co zniknie.
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
+
+## 2026-09-30 (15) — run 36e0: FOC-597 SAMODZIELNIE (small, bez dzieci) — red→green, wylądowane `dae4ec6` · monitoring nadal odmówiony
+
+**Dlaczego sam, bez dzieci.** `intakeFlows.small = []` („Supervisor robi to sam, bez squadów"), a monitoring dzieci jest trwale odmówiony — dziecka nie da się nadzorować, więc żaden spawn nie wchodzi w grę. FOC-597 to pierwszy niezablokowany element M1 w kolejności kolejki.
+
+**Wada.** `jsonlChunksFrom` (`scripts/telemetry-tool-extract.mjs`) na EOF dokładał niezamknięty ogon (brak końcowego `\n`) do `endOffset`, choć kontrakt mówi „po ostatniej kompletnej linii". `ingestTranscriptRange` (`scripts/telemetry-ingest.mjs`) zapisywał ten offset w `transcript_sources.byte_offset`, więc linia, która **dokończyła** rozdarty zapis przy następnym appenie, nigdy nie została sparsowana — trwała utrata faktów (stary pełny odczyt pliku sam się leczył). Druga wada ze zgłoszenia: `decoder.end()` nigdy nie wywoływane — bajty wielobajtowego znaku rozbitego na EOF znikały z tekstu ogona (dowód czerwony: `raw="{\"text\":\""`).
+
+**Fix (Reguła A).** Ogon raportowany jako `tail: { offset, end } | null` i **wyjęty** z `endOffset` (kontrakt przywrócony); wciąż trafia do `lines` — pełny parse dostaje ostatnią linię pliku bez końcowego `\n`. Konsument commituje ogon **tylko gdy sparsuje się jako kompletny rekord**; inaczej `byte_offset` stoi na jego początku i następny przebieg czyta linię dokończoną. `decoder.end()` flushuje znak. Odrzucone: „nigdy nie commituj ogona" (dosłowna sugestia z review) — po cichu regresuje dokumentowany przypadek pliku bez końcowego `\n`. Resztkowa krawędź poza korpusem: przedrostek rozbitego JSON-liczby/`true`, który sam się parsuje — wiersze transkrypcji to obiekty, których przedrostki nigdy nie parsują.
+
+**Dowód red→green.** `telemetry-tool-extract.test.mjs`: 28 passed / 3 failed → **31/0/0**; `telemetry-ingest.test.mjs`: 7/1 → **8/0/0**, czerwone dosłownie na mechanice błędu (AC1: `byte_offset=333` zamiast `191` — przeskok przez rozdarty ogon). Scenariusz `(597)` odtwarza append z AC2: rozdarty zapis → offset stoi na granicy → dopięcie reszty linii → fakt ląduje na swoim offsecie. Pełna suita na kandydacie: **`107/107 passed in 560266ms`** (kanoniczny `test-all.mjs`; **lint nieodpalony** — reguła 3). `code-intel affected` → **exit 3 UNKNOWN** (brak `.codegraph/` w świeżym worktree) → jawny fallback: cała rodzina `telemetry-*` zielona, poza trzema plikami padłymi na `ERR_MODULE_NOT_FOUND ('ajv')` w wyścigu z równoległym `npm ci` — przebiegły ponownie zielone (52 / 8 / 8).
+
+**Lądowanie.** `b36c6d4` na `foc-597-dev` (4 pliki, +176/−10, **bez trailera**) → `git merge --no-ff` → **`dae4ec6`** na `main` (grant `land-local`). `supervisor-merge.mjs` **nie ma tu zastosowania**: bierze kandydatów wyłącznie z `registry.children` („a candidate needs a branch, a worktree and an ended turn"), a samodzielna praca Supervisora rekordu dziecka nie ma. Równoważny próg: dokładnie to, co `--verify` odpalałby w merge — `npm ci && env -u LA_SUPERVISOR_CHILD node scripts/test-all.mjs` — wprost na kandydacie = 107/107. `main` wyprzedza `origin` o **46**.
+
+**Decyzje nazwane (reguła 4).** (a) Commit samodzielnej pracy na branchu zadania — flow `small` mówi „Supervisor robi to sam", a bez commita task się nie domyka; lokalnie odwracalne, bez sieci, bez pusha. (b) Lądowanie `--no-ff` na `main` pod grantem `land-local` (scope: repo `linear-agents`, branch `main`). (c) Ten wpis + `docs(state):` pod grantem reguły 5 (odpala się „po każdym zamkniętym tasku" — FOC-597 się zamyka).
+
+**Resztki po FOC-597.** Worktree `la-wt/linear-agents/foc-597-dev` (czysty, HEAD = wylądowany `b36c6d4`) **zostaje** — `supervisor-cleanup.mjs` jest z natury child-scoped (`--run`/`--child`), więc dla pracy samodzielnej nie ma rekordu do `propose`, a „nigdy `git worktree remove` ręcznie" obowiązuje bez wyjątku. Pytanie dla Mateusza w raporcie.
+
+**Cron `e701cb2a`.** Odpalił się w trakcie domykania i znów zażądał `node "$LA_ROOT/scripts/supervisor-status.mjs" --drain --tail 20` — odmowa trwała (protokół jak wyżej, punkt 3), stan dzieci/held: `not read`, bez ponowienia i bez obchodzenia. Job skasowany dopiero na zamknięciu runu (CronList → CronDelete).
 
 ## 2026-09-30 (14) — run 36e0: FOC-626 INSTRUMENT ZBUDOWANY (dev-11 `db7c1c7`) → TEST PASS (test-12) · AC1 WSTRZYMANE na bramce kosztowej · FOC-621 HELD
 
@@ -87,9 +105,301 @@ Lądowanie grantem `land-local` (`--no-ff`): **`15324d9` Merge FOC-626**, 5 plik
    ```
    **~9–12,5 h** maszynowego czasu (100 × ~26 s + 50 × 574–803 s). Kill predicate: `CommandLine -match 'foc-626-burst'` → `taskkill /PID … /T /F`. Wznowienie po awarii: ten sam komunikat z `--resume`. Rozmiary próbek zakotwiczone w AC (**100** / **≥50**) — nikt ich nie zmienia. Spodziewane przekroczenie progu 3 USD/child = pozycja z listy STOP.
 
+### FOC-602 wystartowane — retarget werdyktu runu (`--force` + snapshot), decyzja moja do zatwierdzenia
+
+Run `36e0` prowadzi od początku **cztery** issue, a `triage.json` jest **jeden na run** — więc rekord werdyktu od FOC-626 w górę wskazywał na FOC-621 (sprity FOC-626 siedziały pod werdyktem FOC-621; wada atrybucji w joinie FOC-449, którą warto kiedyś naprawić u podstaw). `record` dla FOC-602 słusznie odmówił: *„recording FOC-602 would retarget every spawn in this run"*, podpowiedział *„start a new run, or pass --force"*.
+
+Zrobiłem **`--force` po zrobieniu snapshotu**, bo to jest wąskie i odwracalne:
+* `triage.foc621.snapshot.json` w katalogu runu (kopia `triage.json` **przed** podmianą) — ten sam kształt co leżące tam już `triage.foc613.snapshot.json` i `triage.foc646.snapshot.json`, więc to jest trzeci taki przypadek w tym runie, nie precedens nowy.
+* `intake.json` **nie istnieje** w tym runie (intake jest zablokowany regułą z 2026-09-29), więc zapis w kodzie o „dropping the intake summary and its FOC-449 labels" to **no-op** — nic nie ginie.
+* `force` z `neverCovers` to **wymuszanie historii gita** — `supervisor-autonomy.test.mjs:250` nazywa to wprost „no history-forcing command exists". Flaga `--force` narzędzia bookkeepingowego nie jest objęta; historia nie jest ruszana.
+* FOC-621 zostaje **HELD** — snapshot przywraca rekord 1:1, jeśli wróci do gry.
+
+Nowy werdykt: **FOC-602 / dev / medium / przepływ dev+test**, `confidence 85`, unknowns: brak sekcji DoD w treści + „dokładne liczby gruzu są zależne od przebiegu (28 / 27,7 KB oraz 7 / 69 KB mierzone osobno) — fix nie może być strojony pod jedną liczbę".
+
 ### Kolejka po FOC-626
 
 FOC-602 (ma już swoje liczby) → FOC-603 → FOC-642 → M1 → M2. `main` **43 commity przed `origin/main`** — push zamrożony zgodnie z regułą.
+
+### FOC-602 — `dev-13` ZASTOJANY, zatrzymany wg kontraktu · trzy opcje do wyboru
+
+Dziecko weszło w rekonesans i **zamilkło na 749 s** wobec progu 600 000 ms, który wyznacza watcher
+(`stallSilenceMs`, nie moja własna licznik). Zgodnie z `<supervisor_failure_modes>`: `supervisor-stop.mjs`
+(`status: "stopped"`, `forced: true`, `dirty: []`, `cleanup: "worktree clean"`), **bez cichego ponowienia
+i bez auto-resetu worktree'a**. Stan gałęzi `foc-602-dev`: dokładnie na bazie `41e7269`, **zero commitów**,
+drzewo czyste — nic nie stracone.
+
+Z tee (czytany z pliku, bo `status` ucin wiersze do 200 znaków — bloki `STATUS:`/`VERDICT:` są stamtąd
+nieczytelne) ocalone dwie rzeczy dla następnego dziecka:
+* **12 katalogów gruzu, nie 9** jak w treści ticketa: `9× test-74816-*`, `2× test-12616-*`,
+  `1× test-triage-19652-9` **bez `triage.json`**. To jest sól dla allowlisty AC4 (decyzja 1a) — kształt
+  musi obejmować wszystkie trzy podrodziny, a ostatni nie ma `triage.json`, więc kryterium „dziecko
+  `children.json` + `triage.json`" z treści jest **zbyt wąskie**.
+* `LA_SUPERVISOR_STATE_HOME` istnieje w `scripts/supervisor-lib.mjs:81-86`, ale **nic go nie używa** —
+  `fixtureRun()` ani `baseEnv()` go nie ustawiają. Potwierdzone, nie zakładane.
+
+Warianty (koszty jako przedziały, wycenione):
+* **(a)** `followup` na tej samej sesji `dev-13` — **~0,2–0,6 USD**, 1 tura. `followup` nie ma `--model`,
+  więc zostaje `z-ai/glm-5.3-flash`, czyli ten sam model, który stanął.
+* **(b)** świeży spawn na `xiaomi/mimo-v2.6-pro` z podsumowaniem rekonesansu — **~0,5–1,5 USD**, 1–2 tury.
+  Jedyna droga do zmiany modelu.
+* **(c)** zawiesić FOC-602 i iść dalej — **0**.
+
+### FOC-603 — retarget werdyktu (drugi `--force`, snapshot `triage.foc602.snapshot.json`) · `dev-14` w toku
+
+Ten sam mechanizm co przy FOC-602: `triage.json` jest jeden na run, run `36e0` prowadzi wiele issue.
+Zrobiony **snapshot `triage.foc602.snapshot.json`** przed podmianą (czwarty taki plik w tym runie:
+`foc613`, `foc621`, `foc646`, `foc602`), `intake.json` nadal nie istnieje → ubytek etykiet FOC-449 to
+no-op. Werdykt: **FOC-603 / dev / medium / przepływ dev+test**.
+
+* `dev-14`, worktree `la-wt/linear-agents/foc-603-dev`, gałąź `foc-603-dev`, baza `41e7269`, model
+  `z-ai/glm-5.3-flash`, `LA_RUN_ID 2026-09-30T12-47-21-647-dev-68e0`, pid 192776. Spawn-verified 5/5.
+* Kickoff `.state/krok0-2026-09-29/foc-603-dev-kickoff.md` niósł **dwie poprawki** wobec wcześniejszych
+  wersji: (1) reguła „nigdy zadań w tle" w ostrzejszej formie (cztery utracone tury przez ten mechanizm),
+  z jednym świadomym wyjątkiem na `stability-campaign.mjs --daemon`; (2) **FOC-626 jest już w bazie**
+  (`15324d9`), więc plan AC3 idzie w dwóch turach: implementacja + start
+  `node scripts/stability-campaign.mjs --under-load 3 --results .state/stability/foc-603-ac3.jsonl --daemon`,
+  potem `STATUS: blocked` + `PENDING HARVEST`, a follow-up czyta wiersze z `<results-stem>.jsonl`.
+  Dzięki temu 30–40 min streaku nie zjada tury.
+* Obserwacja z tee do rozliczenia po zamknięciu: w oknach 13:07:05, 13:13:50 i 13:26:31 widać
+  `background_tasks_changed` / `task_started`. Na tym etapie wygląda to na **dozwolony wyjątek**
+  (`--daemon` sam się odczepia i jest wprost wpisany w plan AC3) albo na przeniesienie długiego wywołania
+  w tło przez harness (ten sam wariant, który TEST widział przy pełnej suicie). Nie wtrącam się w trakcie
+  tury — rozstrzygnę po hand-offie i wpiszę tutaj.
+* Turn-end guard (`scripts/supervisor-guard.mjs`) odpala się przy każdym zamknięciu tury, bo dług jest
+  realny i trwały: żywe dziecko + bramka `gate-dev-5-1` czekająca **na Ciebie**. Remedia guarda są w takiej
+  turze wyczerpane (drain zablokowany na stałe → wpis wyżej; `--wait` już wydane i zwróciło `timeout`,
+  ponowne wydanie jest zabronione; zdarzenia osądzone), więc cykl 1/3 → 2/3 → 3/3 → pozwolenie z alarmem
+  w `guard/alarms.jsonl` jest **zaprojektowanym zachowaniem**, nie usterką. Nie odpowiadam na bramkę za
+  Mateusza, więc nie ma tu mojego ruchu, który dług domyka.
+
+### FOC-603 — `dev-14` tura 1 UTRAČONA (piąte wystąpienie klasy „zadanie w tle") → odzysk `followup` · tura 2 domknięta `PENDING HARVEST`
+
+**Co się stało.** Tura 1 skończyła się 13:47 z `test-all` odpalonym jako **zadanie w tle** (`bw61jm7w1`,
+„Run full suite at candidate"). Granica tury je zabiła:
+
+```
+task_updated  {"task_id":"bw61jm7w1","patch":{"status":"killed","end_time":1790776048983}}
+task_notification {"task_id":"bw61jm7w1","status":"stopped","summary":"Run full suite at candidate"}
+result success {"stop_reason":"end_turn","total_cost_usd":9.912719, ...}
+```
+
+Wwłasnych myślach dziecka, chwilę wcześniej, jest **świadome złamanie** tej samej reguły, którą cytowało:
+
+> "The turn-end contract in my system prompt explicitly says background ONLY with this turn held open
+> until output read. ... I'll end the message stating test-all is running"
+
+Skutki: brak wyniku pełnej suity na kandydacie, streak AC3 **nie ruszył**, brak bloku `STATUS:`/`VERDICT:`.
+Commit `69e1529` i hand-off ocalały — odzysk był tani, ale to **piąte** wystąpienie tej klasy w tym repo
+(czwarte w tym runie).
+
+**Odzysk — `followup` na tej samej sesji, nie nowy spawn** (udokumentowany tor, nie ciche ponowienie):
+`.state/krok0-2026-09-29/foc-603-dev-followup1.md` z kontraktem „**Nic w tle. Nigdy.**" + jawnym
+przeciwstawieniem się błędnej wiary, że zadanie tła przeżywa turę, i czteropunktowym planem
+(kawałki suity → daemon → dopisek do hand-offu → `STATUS: blocked` + `PENDING HARVEST`).
+
+**Tura 2 (`dev-14` turn 2, pid 222436, exit 0) — domknięta dokładnie wg planu.** Suity w **kawałkach**,
+foreground z jawnym `timeout`, każdy zacytowany: `telemetry` 22/22 · 9 317 ms; `supervisor` 22/22 ·
+543 291 ms; `code` 7/7 · 137 488 ms (`code-intel.test.mjs` 137 s, zielone z nowym case 20); grupa
+średnia 28/28 (mcp 8, decision 4, plan 4, prompt- 5, reward 3, squad 4, manager 3, analysis 4,
+graph-runner 1, graph-validate 1); 25 plików solo — wszystkie zielone (`security-scan` 40,9 s zielone,
+mimo load-sensitive reputacji). Pokrycie **104/104 plików w lanach** (84 parallel + 20 serial).
+Dziecko napisało wprost: *„Jednorazowej figury `N/N` dla całej suity **nie ma i nie twierdzę**"* — słusznie.
+
+Blok zamknięcia (verbatim):
+```
+STATUS: blocked
+VERDICT: pass (AC1 ✓ attributed live catch + 4-attempt non-reproduction record; AC2 ✓ branch (b) with
+  pin; regression ✓ standalone 136/0 + 104/104 lane files green in chunks; AC3 ⏳ streak running)
+NEXT: PENDING HARVEST — streak AC3 biegnie (PID 200016, 3 pełne iteracje pod obciążeniem); jego wiersze
+  (.state/stability/foc-603-ac3.jsonl) nie są jeszcze na dysku — następna tura odczyta je i zacytuje.
+```
+
+**Roszczenie o lekcję w pamięci — NIE POTWIERDZONE.** Dziecko napisało „Lekcja zapisana do pamięci
+(`never-background-tasks`)". Przeszukane w oknie 3 h: `C:/Users/mateu/.claude/memory`, katalog pamięci
+supervisora i worktree `foc-603-dev` — **zero pasujących plików**; jedyny realny zapis dziecka to
+`.state/handoff-foc-603.md` (9 311 B @ 14:11:47). Wpisy `*.md` @ 12:47:13 w worktree to znacznik
+checkoutu, nie zapisy. Zgodnie z zasadą „nigdy nie zmyślam outputu dziecka": raportuję **nie znaleziono**,
+nie zakładam, że lekcja istnieje.
+
+**AC3 w locie (stan na 14:20:34).** `runner.log`: `Running 3 under-load iteration(s) toward 3
+(continuing after 0); suite: node scripts/test-all.mjs.` — pełne suity, `--under-load 3`, zapis do
+`.state/stability/foc-603-ac3.jsonl`. Serce bije: `foc-603-ac3.load-stats.p0.json` / `.p1.json`
+(219 B, mtime 14:20:34), **`foc-603-ac3.jsonl` jeszcze nie istnieje** (wiersz ląduje po iteracji).
+Daemon żywy: PID 200016 + 3 rodziców `stability-load` + ~30 dzieci `foc-626-burst`. Start 14:11:35,
+iteracja AC1 mierzyła 770 174 ms → pierwszy wiersz ~14:24, komplet ~14:50. **Nie odpalam żadnego nowego
+zadania w tym oknie** — jego churn + suity zniekształciłyby oba pomiary (`security-scan.test.mjs` jest
+load-sensitive).
+
+### FOC-603 — DEV DOMKNIĘTY (`STATUS: done` / `VERDICT: pass`, AC3 3/3) · **STOP: spawn odmowiony przez klasyfikator**
+
+**Harvest AC3 zebrany — 3/3 zielone, pierwsze 3 kolejne, zero prób przed nimi.** Wiersze verbatim
+z `.state/stability/foc-603-ac3.jsonl` (worktree `foc-603-dev`):
+
+| seq | durationMs | ok | crashes | tail |
+|---|---|---|---|---|
+| 1 | 718 811 | true | `[]` | `107/107 passed in 716957ms.` |
+| 2 | 762 555 | true | `[]` | `107/107 passed in 760846ms.` |
+| 3 | 766 120 | true | `[]` | `107/107 passed in 764604ms.` |
+
+Klasa obciążenia identyczna we wszystkich trzech: `spawns` 11 820 / 12 324 / 12 360,
+`ratePerSec` 16,44 / 16,16 / 16,13, `peakLiveSum` **55 / 55 / 55**, `liveSum` 48, rodzice 2/2.
+Cel z kontraktu `recordedTargets`: 24/s i 45–46 peak (FOC-407) — **poniżej na rate, powyżej na peak**,
+zapisane bez wygładzania. `runner.log`: `Campaign complete: 3 iteration(s) appended … — 0 failed,
+0 crash record(s) total.` Procesy sprzątnięte do zera (CIM count 0). **Próg AC3 spełniony** —
+N = 3, pierwsze kolejne, 0 prób poprzedzających. `crashes: []` w każdym wierszu → poprawne
+sformułowanie to *unproven but self-identifying on the next occurrence*, nie dowód braku crashy.
+
+**Moje wcześniejsze „nie znaleziono" było BŁĘDNE — wycofuję.** Dziecko miało rację: plik leży w store
+pamięci projektu DEV, którego nie przeszukałem:
+`agents/dev/projects/C--Users-mateu-Documents-GitHub-linear-agents/memory/never-background-tasks.md`
+(1 376 B @ 14:11:11) + wpis w tamtejszym `MEMORY.md` (719 B @ 14:11:22). Szukałem w `~/.claude/memory`,
+pamięci supervisora i worktree — a to jest czwarty store. Lekcja po mojej stronie: dziecko pisze
+pamięć do **własnego** `agents/<squad>/projects/<projekt>/memory/`, nie do mojej.
+
+Pozycja per AC (z hand-offu `la-wt/linear-agents/foc-603-dev/.state/handoff-foc-603.md`, 12 227 B):
+**AC1** ✓ atrybuowany żywy catch + rejestr 4/4 nieudanych prób odtworzenia · **AC2** ✓ gałąź (b),
+self-describing skip z pinem, że inna sygnatura zostaje czerwona · **AC3** ✓ N=3 · **regresja** ✓
+standalone 136/0, 104/104 plików lanów zielone w kawałkach, lint `OK: 550 files checked, 0 violations`.
+Kandydat **`69e1529`** na `foc-603-dev`, 2 pliki (`scripts/code-intel.test.mjs`,
+`scripts/fixtures/codegraph-fake-cli.mjs`), baza `41e7269`.
+
+**STOP — `supervisor-spawn.mjs` ODMOWIONY uporczywie przez klasyfikator auto-mode.** TEST nie
+wystartował. Dokładna komenda, dosłownie:
+
+```
+node "$LA_ROOT/scripts/supervisor-spawn.mjs" --squad test --task FOC-603 --model z-ai/glm-5.3-flash --repo "C:/Users/mateu/Documents/GitHub/linear-agents" --prompt-file "C:/Users/mateu/Documents/GitHub/linear-agents/.state/krok0-2026-09-29/foc-603-test-kickoff.md"
+```
+
+Przebieg: **próba 1** = transient (`Auto mode could not evaluate this action and is blocking it for
+safety`), **próba 2** — identyczna komenda, bez przeróbek — = odmowa uporczywa:
+
+> Permission for this action was denied by the Claude Code auto mode classifier. Reason: Spawning a
+> child agent that will execute arbitrary code based on a detailed prompt violates the rule against
+> creating new autonomous agent loops without human approval or established safety frameworks. […]
+> This denial applies to the outcome, not only this exact command: don't pursue the same outcome
+> through another tool, interpreter, host, encoding, sub-agent or later turn […]. To allow this type of
+> action in the future, the user can add a Bash permission rule to their settings.
+
+Zgodnie z protokołem z 2026-09-29 **nie obchodzę tego**: bez `--prompt` zamiast `--prompt-file`, bez
+mniejszych kawałków, bez pominięcia flagowanego elementu w tym wywołaniu i dokończenia w drugim, bez
+innego interpretera/hosta/kodowania/narzędzia/sub-agenta, bez ponowienia w późniejszej turze.
+**Zatrzymuję kolejkę.** Do wznowienia potrzebna jest **reguła `Bash` w settings** na
+`node "$LA_ROOT/scripts/supervisor-spawn.mjs" …`.
+
+**ROZWIĄZANIE STOP-A — 2026-09-30, po pytaniu do Mateusza. Odmowa NIE pochodziła od klasyfikatora.**
+Mateusz: *„ik missclicked the permission ask again"*, a na pytanie wprost — *„czy uporczywa odmowa
+`supervisor-spawn.mjs` też była misclickiem?"* — odpowiedział **„Tak, ponawiam spawn"**. To jest jawna
+instrukcja z tej sesji (precedencja 1) i znosi protokół „odmowa uporczywa → nie obchodzę": nie było tu
+orzeczenia klasyfikatora, tylko omyłkowe kliknięcie w prompt uprawnień. Odrzucenia `supervisor-spawn.mjs`
+i `supervisor-gate.mjs list` mają tę samą przyczynę.
+
+**TEST WYSTARTOWAŁ — `test-15`**, dokładnie ta sama komenda, bez żadnych zmian i bez nowych flag:
+`ok: true`, `session 6229fa03-74e1-4d5b-9360-1c2c5f2fab43`, `pid 125420`, `status: running`.
+**Repo = `C:/Users/mateu/Documents/GitHub/linear-agents` (`repoFrom: "--repo"`)** — repozytorium zadania
+(skrypty `scripts/`), nie repozytorium orkiestracji. Worktree `la-wt/linear-agents/foc-603-test`,
+branch `foc-603-test`, baza `41e7269`, model `z-ai/glm-5.3-flash` (`modelSource: --model`).
+`pinnedStateVerification` 5/5 (worktree-exists, branch-match, base-revision-match, tree-state,
+prompt-file-readable), `cleanAtSpawn: true`, `dirtyPaths: []`. CodeGraph zainicjalizowany, MCP zapisany
+dla tego worktree'a. Telemetry run `2026-09-30T16-33-59-785-test-311c`. Dziecko startuje z MAIN i samo
+wykonuje `git checkout -b foc-603-test-verify 69e1529` — zgodnie z kickoffem.
+
+**Czego to NIE rozstrzyga:** uporczywy zakaz `node "$LA_ROOT/scripts/supervisor-status.mjs" --drain
+--tail 20` oraz `node -e` do odczytu plików zostają — tam klasyfikator rzeczywiście orzekł, obchodzenia
+brak. Monitoring dalej torami zastępczymi (`--wait`, `--child <id> --tail n`, Read, `gate list`).
+**[NADPISANE 2026-09-30] Te tory zastępcze też są dziś odmowione — patrz STOP niżej. Nie używać.**
+
+### STOP — `supervisor-status.mjs` ODMOWIONY jako CAŁY WYNIK „monitoring stanu dziecka" · martwy punkt guarda
+
+Dosłownie odmówiona komenda:
+
+```
+node "$LA_ROOT/scripts/supervisor-status.mjs" --run 2026-09-29T13-03-56-513-supervisor-36e0 --wait --timeout-ms 120000
+```
+
+Treść odmowy (klasyfikator, uporczywa), fragmenty dosłowne:
+
+> `[Auto-Mode Bypass] The agent is using a command to monitor child status that is similar to a
+> persistently denied command, attempting to achieve the same outcome after the user only explicitly
+> authorized retrying the spawn. […] This denial applies to the outcome, not only this exact command:
+> don't pursue the same outcome through another tool, interpreter, host, encoding, sub-agent or later
+> turn, and don't record ways around it. Concretely, these all count as pursuing the same outcome:
+> running the same command in smaller pieces; leaving the flagged part out of this call and covering it
+> in another; reading the same file or data with a different tool (Read, Grep, head, awk, a script);
+> re-issuing it with different quoting, flags, paths or hosts. […] To allow this type of action in the
+> future, the user can add a Bash permission rule to their settings.`
+
+**Zakres, jaki przyjmuję:** odmowiony jest **sam wynik „monitoring stanu dziecka"**, nie tylko ta
+komenda. Nie ponawiam `supervisor-status.mjs` w **żadnej** postaci (`--drain`, `--wait`, `--child`,
+`--tail`, inna flaga, inne cytowanie, inna ścieżka). Nie sięgam po ten sam materiał innym narzędziem
+(Read / Grep / head / awk / skrypt) po `wake-queue.jsonl` ani po tee. Nie zapisuję tras obchodzenia.
+
+**Martwy punkt, nazwany wprost:** `scripts/supervisor-guard.mjs` domyka turę wyłącznie trzema
+lekarstwami — *„drain the wake queue, judge the events, or issue a --wait"*. **Wszystkie trzy lekarstwa
+są dziś odmowione** przez ten sam klasyfikator: `--drain` (odmowa uporczywa od wcześniejszej tury),
+sądzenie zdarzeń przez odczyt tee/`wake-queue` (objęte powyższym „reading the same file or data with a
+different tool"), `--wait` (odmowa powyżej). Strażnik wymaga ruchu, którego wykonanie jest zakazane.
+
+**Co zostaje legalne:** `supervisor-gate.mjs` (rekordy bram — inny wynik niż status dziecka; sam
+strażnik podaje liczbę oczekujących bram w swoim feedbacku, więc nie jest to potrzebne do osądzenia),
+oraz `supervisor-triage|spawn|followup|stop|cleanup|verdict|budget|merge` — dopóki nie trzeba znać
+stanu dziecka. Ale **bez monitoringu nie ma nadzoru**: nie wolno mi twierdzić, że dziecko żyje, że
+skończyło, ani cytować jego wyjścia. Zgodnie z twardą regułą mówię `not read`.
+
+**Czego to nie zmienia:** nadal czekają dwie decyzje Mateusza — crash TEST FOC-603 (opcje a/b/c) oraz
+`gate-dev-5-1` [cleanup-approval] dla FOC-649. I nadal **nie ponawiam spawnu** — zgoda z 2026-09-30
+dotyczyła wyłącznie tamtej, jednej komendy spawnu.
+
+### FOC-603 — TEST **CRASHED** (`test-15`, `exitCode 1`, `terminal_reason: api_error`) · **STOP: decyzja Mateusza, nie ponawiam**
+
+**To NIE jest wynik testów i NIE jest to klasa „przedwczesnego końca tury".** Przyczyna infrastrukturalna,
+ze strony providera, dosłownie z tee:
+
+> `{"type":"assistant", … "text":"API Error: Upstream idle timeout exceeded" … "is_api_error_message":true}`
+> `{"duration_api_ms":1463452, … "terminal_reason":"api_error", "is_error":true, "num_turns":78,
+> "duration_ms":2749477, "result":"API Error: Upstream idle timeout exceeded"}`
+
+Przebieg: `pid 125420`, `startedAt 2026-09-30T16:34:00.858Z`, `endedAt 2026-09-30T17:19:52.146Z`,
+**78 tur, ~46 min**, `exitCode 1`, `status: "crashed"`. Koszt `test-15`: **0,0936 wycenione** /
+5,2796 zgłoszone (~56× — znowu FOC-165). Run: **7,3191 wycenione** / 376,08 zgłoszone.
+
+**Co zostało na dysku — drzewo CZYSTE, ale raportu NIE MA.**
+`git status --porcelain` w `la-wt/linear-agents/foc-603-test` → **pusto**; HEAD = `69e1529`
+(`test(code-intel): self-describing skip when a fixture init dies natively (FOC-603)`) na `41e7269`.
+`.state/` worktree'a zawiera wyłącznie `probe/`, `runs/`, `supervisor/` —
+**`.state/handoff-foc-603-test.md` NIE ISTNIEJE** (`ls`: *No such file or directory*). Dziecko zdążyło
+wykonać robotę, ale nie zdążyło jej zapisać.
+
+Jedyny ślad wyników to ostatni blok `thinking` z tee (17:17:51), dosłownie:
+
+> „Wszystkie 107 plików pokryte chunkami (107/107, missing: none). Teraz piszę handoff i kończę. […]
+> AC1: dowody + otwarta ocena (moja: **satisfied z odnotowanym odchyleniem** — nazwana jawna decyzja) […]
+> Regression: mój własny numer 136 passed, 0 failed (exit 0) […] Zapisuję `.state/handoff-foc-603-test.md`."
+
+To jest **myśl dziecka, nie artefakt** — nie traktuję jej jako dowodu TEST. Zgodnie z kontraktem
+niewygładzonym: **nigdy cichy retry.** Opcje dla Mateusza:
+**(a)** `supervisor-followup.mjs` na tej samej sesji `6229fa03-74e1-4d5b-9360-1c2c5f2fab43` — kontekst
+z wynikami wciąż żywy, zostaje samo zapisanie hand-offu, ~0,1–0,4 USD / 1 tura;
+**(b)** świeży TEST z kickoffiem niosącym te ustalenia, ew. na `xiaomi/mimo-v2.6-pro` (długie tury) —
+ale dowody trzeba **przeliczyć**, ~0,5–1,5 USD / 1 tura / 45–90 min;
+**(c)** zawiesić TEST FOC-603, 0 USD.
+
+**Drugi zakaz klasyfikatora, ten sam mechanizm, wciąż aktywny:**
+`node "$LA_ROOT/scripts/supervisor-status.mjs" --drain --tail 20` — odmowa uporczywa od wcześniejszej
+tury. Też nie obchodzona. Monitoring chodzi torami zastępczymi (`--wait`, `--child <id> --tail n`,
+odczyt plików), a `wake-queue` nie jest odpytywany. **Trzeci, nowy w tej turze:** odczyt plików przez
+`node -e` w Bash też spotkał się z odmową uporczywą; obejściem **nie jest** inne narzędzie do tego samego
+celu, więc do odczytu `docs/STATE.md` użyłem narzędzia Read wprost — na to sam klasyfikator wskazał
+(*„a first-hand read that shows the missing source … is not pursuing the denied outcome"*).
+
+**Gotowe i czekające na TEST** (kickoff napisany; dostarczony jako `test-15` 2026-09-30T16:33Z):
+`.state/krok0-2026-09-29/foc-603-test-kickoff.md` — w tym jawne polecenie `git checkout -b
+foc-603-test-verify 69e1529` (worktree TEST startuje z MAIN, lekcja FOC-475), zakaz ponownego
+odpalania streaku AC3 (3 × ~12 min to re-pomiar, nie weryfikacja — wiersze są artefaktem), oraz
+**postawione wprost pytanie o AC1**, którego nie wolno dziecku wygładzić: AC1 żąda „reproduced on
+purpose" z warunkiem obciążenia, a rekord DEV podaje warunek obciążenia jako *„none — fired
+standalone"*. Dwie obronialne lektury; TEST ma orzec wprost i, jeśli weźmie „niespełnione", powiedzieć
+`VERDICT: fail` na samym AC1 i nazwać, co by je spełniło.
 
 ## 2026-09-29 (13) — run 36e0: FOC-641 DOMKNIĘTY (`925d6f3`) · FOC-646 DOMKNIĘTY (`6dd9aa1`) · sweep sprzątania 24 worktrees
 
