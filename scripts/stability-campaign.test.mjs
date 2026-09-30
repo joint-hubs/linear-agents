@@ -7,28 +7,32 @@
 // Isolation (the claim this file's parallel-lane entry in test-lanes.json
 // makes): mkdtemp/tmpdir fixtures only; no ports, no socket binds, no
 // real-repo-path writes; no telemetry DB. The one thing spawned is
-// scripts/stability-load.mjs with a ~2.5 s budget and a TEST-ONLY marker
-// (foc-626-test-burst), and the test asserts zero matching processes remain
-// after it stops.
+// scripts/stability-load.mjs with a short budget and a TEST-ONLY marker
+// (foc-626-test-burst); the lifecycle test asserts zero matching processes
+// remain after it stops, and the forced-kill test leaves the same zero behind
+// after a taskkill tree kill.
 //
 // Run: node scripts/stability-campaign.test.mjs
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 import {
+  aggregateLoadStats,
   classifyCrash,
   crashesFromOutput,
   crashesFromRegistry,
+  loadStatsBase,
   readResultsFile,
   resumeState,
   validateRow,
 } from "./stability-campaign.mjs";
+import { parentStatsFile } from "./stability-load.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LOAD = join(HERE, "stability-load.mjs");
@@ -67,6 +71,18 @@ const writeResultsFile = (dir, rawLines) => {
 };
 
 const jsonLines = (rows) => rows.map((r) => JSON.stringify(r));
+
+// Test-side heartbeat reader (same skip-if-unreadable contract as the
+// runner's): the polling loop in the forced-kill test uses it before the
+// runner's aggregateLoadStats ever runs.
+const readHeartbeatFile = (file) => {
+  try {
+    const s = JSON.parse(readFileSync(file, "utf8"));
+    return typeof s.spawns === "number" ? s : null;
+  } catch {
+    return null;
+  }
+};
 
 // Independent process-table check: how many live processes carry the marker on
 // their command line. The querying powershell's own command line contains the
@@ -275,6 +291,75 @@ describe("crash classifier", () => {
   });
 });
 
+describe("observed load", () => {
+  const statsFile = (dir) => join(dir, "results.load-stats.json");
+
+  it("aggregateLoadStats sums the parents' heartbeats and carries the FOC-407 targets", () => {
+    withTempDir((dir) => {
+      const base = statsFile(dir);
+      writeFileSync(parentStatsFile(base, 0), `${JSON.stringify({ spawns: 120, live: 4, peakLive: 8 })}\n`);
+      writeFileSync(parentStatsFile(base, 1), `${JSON.stringify({ spawns: 118, live: 3, peakLive: 7 })}\n`);
+      const agg = aggregateLoadStats(join(dir, "results.jsonl"), 2, 5000);
+      assert.equal(agg.spawns, 238);
+      assert.equal(agg.peakLiveSum, 15);
+      assert.equal(agg.liveSum, 7);
+      assert.equal(agg.parentsReporting, 2);
+      assert.equal(agg.parentsExpected, 2);
+      assert.equal(agg.wallMs, 5000);
+      assert.equal(agg.ratePerSec, 47.6);
+      assert.deepEqual(agg.recordedTargets, { ratePerSec: 24, peakLive: "45-46 (FOC-407)" });
+      assert.deepEqual(validateRow({ ...ROW, mode: "under-load", observedLoad: agg }), []);
+    });
+  });
+
+  it("missing and torn heartbeats are skipped and counted, not fatal", () => {
+    withTempDir((dir) => {
+      const base = statsFile(dir);
+      writeFileSync(parentStatsFile(base, 1), `${JSON.stringify({ spawns: 50, live: 0, peakLive: 6 })}\n`);
+      writeFileSync(parentStatsFile(base, 2), '{"spawns":'); // torn mid-write by a kill
+      const agg = aggregateLoadStats(join(dir, "results.jsonl"), 3, 1000);
+      assert.equal(agg.spawns, 50);
+      assert.equal(agg.parentsReporting, 1);
+      assert.equal(agg.parentsExpected, 3);
+      assert.ok(validateRow({ ...ROW, mode: "under-load", observedLoad: agg }).length === 0);
+    });
+  });
+
+  it("no heartbeats at all → null, which a row may carry", () => {
+    withTempDir((dir) => {
+      assert.equal(aggregateLoadStats(join(dir, "results.jsonl"), 2, 1000), null);
+      assert.deepEqual(validateRow({ ...ROW, mode: "under-load", observedLoad: null }), []);
+    });
+  });
+
+  it("broken observedLoad shapes are problems", () => {
+    for (const bad of [{}, { spawns: -1 }, { spawns: "many" }, { spawns: 1 }, { spawns: 1, wallMs: 1 }, { spawns: 1, wallMs: 1, ratePerSec: 0, peakLiveSum: 0, parentsReporting: 0 }, { spawns: 1, wallMs: 1, ratePerSec: 0, peakLiveSum: 0, parentsReporting: 0, recordedTargets: { ratePerSec: 1, peakLive: "x" } }]) {
+      assert.ok(validateRow({ ...ROW, mode: "under-load", observedLoad: bad }).length > 0, `expected a problem for ${JSON.stringify(bad)}`);
+    }
+    assert.ok(validateRow({ ...ROW, mode: "under-load", observedLoad: 7 }).length > 0);
+    assert.ok(validateRow({ ...ROW, mode: "under-load", observedLoad: [{}] }).length > 0);
+  });
+
+  it("standalone rows are unaffected by the field", () => {
+    assert.deepEqual(validateRow({ ...ROW }), []);
+  });
+
+  it("the runner passes the generator a --stats-file whose per-parent files land where the aggregation reads them", () => {
+    // Path-identity check, no processes: the exact mismatch that would
+    // silently produce nulls on every real iteration.
+    withTempDir((dir) => {
+      const resultsPath = join(dir, "results.jsonl");
+      const base = loadStatsBase(resultsPath);
+      for (let i = 0; i < 2; i++) {
+        writeFileSync(parentStatsFile(base, i), `${JSON.stringify({ spawns: 1, live: 0, peakLive: 1 })}\n`);
+      }
+      const agg = aggregateLoadStats(resultsPath, 2, 1000);
+      assert.equal(agg.parentsReporting, 2, `aggregation must find both heartbeats beside the results file`);
+      assert.equal(readFileSync(parentStatsFile(base, 0), "utf8").trim().endsWith("}"), true);
+    });
+  });
+});
+
 describe("load generator lifecycle", () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -290,9 +375,14 @@ describe("load generator lifecycle", () => {
   };
 
   it("marker-matching processes exist during the run and zero remain after it stops", async () => {
+    // Warm the CIM query first: on a cold/loaded box the first query can take
+    // longer than the generator's whole budget, which once read as "counted 0"
+    // against an already-finished run (observed on this machine).
+    const warm = await countWithRetry(TEST_MARKER);
+    assert.ok(warm >= 0, `the process-table query itself failed ${warm === -1 ? "(counted -1)" : ""}`);
     const gen = spawn(
       process.execPath,
-      [LOAD, "--parents", "1", "--burst", "3", "--budget-ms", "2500", "--child-ms", "500", "--interval-ms", "400", "--marker", TEST_MARKER],
+      [LOAD, "--parents", "1", "--burst", "3", "--budget-ms", "10000", "--child-ms", "500", "--interval-ms", "400", "--marker", TEST_MARKER],
       { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
     );
     let out = "";
@@ -304,8 +394,10 @@ describe("load generator lifecycle", () => {
     });
     try {
       // Poll rather than sample once: the first round may still be ramping up.
+      // The window matches the 10 s budget rather than the budget itself, so a
+      // slow-but-warming query still lands while the generator is alive.
       let during = -1;
-      for (let waited = 0; waited <= 4000 && during < 1; waited += 500) {
+      for (let waited = 0; waited <= 10000 && during < 1; waited += 500) {
         await sleep(500);
         during = await countWithRetry(TEST_MARKER);
       }
@@ -341,6 +433,78 @@ describe("load generator lifecycle", () => {
           /* already gone */
         }
       }
+    }
+  });
+
+  it("heartbeat stats survive a forced kill of the whole tree (the campaign's taskkill path)", async () => {
+    // Not withTempDir: the rmSync in its finally would run as soon as this
+    // async body returns its first await, while the tree is still live.
+    const dir = mkdtempSync(join(tmpdir(), "foc-626-"));
+    const resultsPath = join(dir, "results.jsonl");
+    const base = loadStatsBase(resultsPath);
+    const gen = spawn(
+      process.execPath,
+      [LOAD, "--parents", "1", "--burst", "3", "--budget-ms", "60000", "--child-ms", "500", "--interval-ms", "300", "--marker", TEST_MARKER, "--stats-file", base],
+      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, detached: process.platform === "win32" },
+    );
+    let out = "";
+    gen.stdout.on("data", (d) => {
+      out += d;
+    });
+    try {
+      // Wait until the parent has actually spawned children (i.e. has written
+      // a non-zero heartbeat), then hard-kill the tree exactly the way the
+      // campaign runner stops the load — taskkill /T /F on win32, the group
+      // kill on POSIX. No graceful exit, no stdout summary.
+      let spawns = 0;
+      for (let waited = 0; waited <= 8000 && spawns === 0; waited += 400) {
+        await new Promise((r) => setTimeout(r, 400));
+        const hb = readHeartbeatFile(parentStatsFile(base, 0));
+        if (hb) spawns = hb.spawns;
+      }
+      assert.ok(spawns > 0, `expected a non-zero heartbeat before the kill; output: ${out}`);
+
+      if (process.platform === "win32") {
+        spawnSync("taskkill", ["/PID", String(gen.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      } else {
+        try {
+          process.kill(-gen.pid, "SIGKILL");
+        } catch {
+          try {
+            gen.kill("SIGKILL");
+          } catch {
+            /* already gone */
+          }
+        }
+      }
+      await new Promise((res) => {
+        if (gen.exitCode !== null || gen.signalCode !== null) return res();
+        const timer = setTimeout(res, 10_000);
+        gen.once("close", () => {
+          clearTimeout(timer);
+          res();
+        });
+      });
+
+      const agg = aggregateLoadStats(resultsPath, 1, 1234);
+      assert.ok(agg, `no heartbeat survived the forced kill; generator output: ${out}`);
+      assert.ok(agg.spawns > 0, `the surviving heartbeat must record spawns, got ${JSON.stringify(agg)}`);
+      assert.ok(agg.peakLiveSum > 0, `the surviving heartbeat must record a live peak, got ${JSON.stringify(agg)}`);
+      assert.equal(agg.parentsReporting, 1);
+      // The generator's stdout summary (the only place spawns were recorded
+      // before) is printed by runTop after the parents close — a tree kill
+      // takes runTop itself, so it must never have been printed here.
+      assert.doesNotMatch(out, /parentFailures/, "the forced kill must pre-empt the stdout summary — the heartbeat is the only evidence");
+      assert.deepEqual(validateRow({ ...ROW, mode: "under-load", observedLoad: agg }), []);
+    } finally {
+      if (gen.exitCode === null) {
+        try {
+          gen.kill();
+        } catch {
+          /* already gone */
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

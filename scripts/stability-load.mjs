@@ -26,13 +26,23 @@
 //
 //   Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'foc-626-burst' } | ForEach-Object { taskkill /PID $_.ProcessId /T /F }
 //
-// Touches nothing but the process table: no ports, no sockets, no repo-tree
-// writes, no telemetry DB.
+// With --stats-file <path> each parent rewrites its own heartbeat file
+// <path sans .json>.p<N>.json at startup, after every spawn round, and once
+// more before exiting — cumulative spawns, current/peak live children, start
+// and write timestamps. Rewritten files (not an appended log) are the point:
+// the campaign runner stops the load with a forced taskkill tree kill, so the
+// top-level never gets to print its summary — whatever the parents counted
+// last is already on disk and survives the kill.
 //
-// Run: node scripts/stability-load.mjs [--parents 2] [--burst 12] [--budget-ms 900000] [--child-ms 1900] [--interval-ms 1000] [--marker foc-626-burst]
+// Touches nothing but the process table and, with --stats-file, the
+// caller-designated stats file: no ports, no sockets, no repo-tree writes, no
+// telemetry DB.
+//
+// Run: node scripts/stability-load.mjs [--parents 2] [--burst 12] [--budget-ms 900000] [--child-ms 1900] [--interval-ms 1000] [--marker foc-626-burst] [--stats-file <path>]
 
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SELF = fileURLToPath(import.meta.url);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -45,7 +55,7 @@ const posInt = (flag, v) => {
 };
 
 function parseArgs(argv) {
-  const args = { role: null, parents: 2, burst: 12, budgetMs: 900_000, childMs: 1_900, intervalMs: 1_000, marker: "foc-626-burst" };
+  const args = { role: null, parents: 2, burst: 12, budgetMs: 900_000, childMs: 1_900, intervalMs: 1_000, marker: "foc-626-burst", statsFile: null, parentIndex: 0 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--role") {
@@ -64,6 +74,13 @@ function parseArgs(argv) {
     } else if (a === "--marker") {
       args.marker = argv[++i];
       if (!args.marker) throw new Error("--marker needs a marker string");
+    } else if (a === "--stats-file") {
+      args.statsFile = argv[++i];
+      if (!args.statsFile) throw new Error("--stats-file needs a path");
+    } else if (a === "--parent-index") {
+      const v = argv[++i];
+      if (v === undefined || !/^\d+$/.test(v)) throw new Error(`--parent-index needs a non-negative integer, got ${v === undefined ? "nothing" : `"${v}"`}`);
+      args.parentIndex = Number(v);
     } else {
       throw new Error(`unknown argument: ${a}`);
     }
@@ -77,55 +94,93 @@ function parseArgs(argv) {
 // the point: its only job is to be visible to Win32_Process.
 const CHILD_SCRIPT = "setTimeout(() => {}, Number(process.argv[2]) || 1000);";
 
+// Heartbeat: rewrite the parent's own stats file with the counts as of now.
+// Rewrite (not append) so a mid-write kill leaves the previous complete
+// snapshot, not a torn tail; the parent writes only to its own
+// <stem>.p<index>.json — one writer per file, no locking.
+function writeHeartbeat(file, stats) {
+  try {
+    writeFileSync(file, `${JSON.stringify({ ...stats, writtenAt: new Date().toISOString() })}\n`);
+  } catch {
+    // A stats write must never take the load generator down — the load IS the
+    // deliverable; the heartbeat is best-effort evidence.
+  }
+}
+
 // Parent: rounds of `--burst` short-lived children every `--interval-ms` until
 // the budget elapses, then stops spawning and reaps the in-flight children
 // (they exit on their own timers) so zero matching processes remain behind.
-async function runParent({ burst, childMs, budgetMs, intervalMs, marker }) {
+// With a stats file, every state change (start, each round, graceful exit) is
+// rewritten to the parent's own heartbeat file.
+async function runParent({ burst, childMs, budgetMs, intervalMs, marker, statsFile, parentIndex }) {
+  const stats = { role: "parent", marker, parentIndex, burst, childMs, intervalMs, spawns: 0, live: 0, peakLive: 0, startedAt: new Date().toISOString() };
+  if (statsFile) writeHeartbeat(statsFile, stats);
   const deadline = Date.now() + budgetMs;
   const children = new Set();
-  let spawns = 0;
-  let live = 0;
-  let peakLive = 0;
   while (Date.now() < deadline) {
     for (let i = 0; i < burst && Date.now() < deadline; i++) {
       const child = spawn(process.execPath, ["-e", CHILD_SCRIPT, marker, String(childMs)], {
         stdio: "ignore",
         windowsHide: true,
       });
-      spawns++;
-      live++;
-      if (live > peakLive) peakLive = live;
+      stats.spawns++;
+      stats.live++;
+      if (stats.live > stats.peakLive) stats.peakLive = stats.live;
       child.on("exit", () => {
-        live--;
+        stats.live--;
         children.delete(child);
       });
       children.add(child);
     }
+    if (statsFile) writeHeartbeat(statsFile, stats);
     await sleep(intervalMs);
   }
   await Promise.all(
     [...children].map((c) => (c.exitCode !== null || c.signalCode !== null ? null : new Promise((res) => c.once("exit", res)))),
   );
-  console.log(JSON.stringify({ role: "parent", marker, spawns, peakLive }));
+  if (statsFile) writeHeartbeat(statsFile, stats);
+  console.log(JSON.stringify({ role: "parent", marker, spawns: stats.spawns, peakLive: stats.peakLive }));
+}
+
+// The parent role's own file, derived from --stats-file: <stem>.p<index>.json
+// so N parents never write the same path. Exported so the campaign runner and
+// the tests enumerate exactly the same files.
+export function parentStatsFile(statsFile, parentIndex) {
+  return statsFile.replace(/\.json$/i, "") + `.p${parentIndex}.json`;
+}
+
+// Read one heartbeat. Truncated mid-write JSON (a kill landed during the
+// writeFileSync) is skipped — the next rewrite was seconds away.
+export function readHeartbeat(file) {
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const s = JSON.parse(text);
+    return typeof s.spawns === "number" ? s : null;
+  } catch {
+    return null;
+  }
 }
 
 async function runTop(args) {
   const start = Date.now();
   const parents = [];
   for (let i = 0; i < args.parents; i++) {
-    const p = spawn(
-      process.execPath,
-      [
-        SELF,
-        "--role", "parent",
-        "--burst", String(args.burst),
-        "--child-ms", String(args.childMs),
-        "--budget-ms", String(args.budgetMs),
-        "--interval-ms", String(args.intervalMs),
-        "--marker", args.marker,
-      ],
-      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
-    );
+    const parentArgs = [
+      SELF,
+      "--role", "parent",
+      "--burst", String(args.burst),
+      "--child-ms", String(args.childMs),
+      "--budget-ms", String(args.budgetMs),
+      "--interval-ms", String(args.intervalMs),
+      "--marker", args.marker,
+    ];
+    if (args.statsFile) parentArgs.push("--stats-file", parentStatsFile(args.statsFile, i), "--parent-index", String(i));
+    const p = spawn(process.execPath, parentArgs, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     const record = { p, out: "", err: "" };
     parents.push(record);
     p.stdout.on("data", (d) => {
@@ -164,7 +219,9 @@ async function runTop(args) {
   let spawns = 0;
   let peakLiveSum = 0;
   let parentFailures = 0;
-  for (const r of results) {
+  const perParent = [];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
     const lastLine = r.out.split("\n").filter(Boolean).pop();
     let summary = null;
     try {
@@ -175,10 +232,19 @@ async function runTop(args) {
     if (r.code !== 0 || !summary) {
       parentFailures++;
       console.error(`a parent generator failed (exit ${r.code}): ${(r.err.trim() || r.out.trim()) || "no output"}`);
+      // A forced kill on this parent leaves no stdout summary — its heartbeat
+      // file (written through the last spawn round) is the surviving evidence.
+      const hb = args.statsFile ? readHeartbeat(parentStatsFile(args.statsFile, i)) : null;
+      if (hb) {
+        spawns += hb.spawns || 0;
+        peakLiveSum += hb.peakLive || 0;
+      }
+      perParent.push(hb);
       continue;
     }
     spawns += summary.spawns || 0;
     peakLiveSum += summary.peakLive || 0;
+    perParent.push(summary);
   }
 
   const wallMs = Date.now() - start;
@@ -200,17 +266,24 @@ async function runTop(args) {
       peakLiveSum,
       recordedTargets: { ratePerSec: 24, peakLive: "45-46 (FOC-407)" },
       parentFailures,
+      perParent,
     })}`,
   );
   process.exit(parentFailures ? 1 : 0);
 }
 
-try {
-  const args = parseArgs(process.argv.slice(2));
-  if (args.role === "parent") await runParent(args);
-  else await runTop(args);
-} catch (err) {
-  console.error(`stability-load: ${err.message}`);
-  console.error("Run with no arguments to see the defaults in the header comment.");
-  process.exit(2);
+// Main-module guard: importing this file (the campaign runner imports
+// parentStatsFile/readHeartbeat, tests import the same) must never start the
+// load — only a direct `node scripts/stability-load.mjs` invocation runs it.
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  try {
+    const args = parseArgs(process.argv.slice(2));
+    if (args.role === "parent") await runParent(args);
+    else await runTop(args);
+  } catch (err) {
+    console.error(`stability-load: ${err.message}`);
+    console.error("Run with no arguments to see the defaults in the header comment.");
+    process.exit(2);
+  }
 }

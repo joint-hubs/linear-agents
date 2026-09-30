@@ -30,6 +30,13 @@
 // per iteration goes to <results-base>.iter<seq>.log beside the results file
 // and is kept; the row carries only a short tail.
 //
+// Observed load (under-load mode): the generator's normal stdout summary dies
+// with the runner's forced taskkill, so each parent rewrites a heartbeat file
+// <results-stem>.load-stats.p<N>.json beside the results file every spawn
+// round. After teardown the runner aggregates them into the row's
+// observedLoad field (and the iteration log) — cumulative spawns, elapsed
+// time, current/peak live children — beside the FOC-407 recorded targets.
+//
 // --resume counts the valid rows already on the results file (same mode and
 // command) and runs only the remainder toward the requested total. A line that
 // does not parse is skipped, never fatal — the previous process may have died
@@ -47,10 +54,12 @@
 //
 // Run: node scripts/stability-campaign.mjs --standalone 3
 
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { parentStatsFile, readHeartbeat } from "./stability-load.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(HERE);
@@ -58,18 +67,27 @@ const SELF = fileURLToPath(import.meta.url);
 const TEST_ALL = join(HERE, "test-all.mjs");
 const STABILITY_DIR = join(REPO_ROOT, ".state", "stability");
 const LOAD_SCRIPT = join(HERE, "stability-load.mjs");
+// The generator's heartbeat files live beside the results file, named after it
+// so concurrent campaigns with different --results never collide:
+// <results-stem>.load-stats.p<N>.json (one per parent, rewritten in place).
+// The suffix derivation is the generator's own (parentStatsFile), so the
+// runner and the parents can never disagree about the paths.
+const loadStatsBase = (resultsPath) => join(dirname(resultsPath), `${basename(resultsPath).replace(/\.jsonl$/i, "")}.load-stats.json`);
+export { loadStatsBase };
+const loadStatsPath = (resultsPath, i) => parentStatsFile(loadStatsBase(resultsPath), i);
 
 // The FOC-407 recorded load class, passed through to stability-load.mjs's
 // defaults: 2 parents bursting 12 short-lived node processes, ≈24 spawns/s,
 // 45-46 live node at peak. The budget is one full suite (≈780 s) plus margin,
 // so the load outlasts a full-suite iteration.
+const LOAD_PARAMS = { parents: 2, burst: 12, childMs: 1900, intervalMs: 1000, budgetMs: 900_000, marker: "foc-626-burst" };
 const LOAD_ARGS = [
-  "--parents", "2",
-  "--burst", "12",
-  "--child-ms", "1900",
-  "--interval-ms", "1000",
-  "--budget-ms", "900000",
-  "--marker", "foc-626-burst",
+  "--parents", String(LOAD_PARAMS.parents),
+  "--burst", String(LOAD_PARAMS.burst),
+  "--child-ms", String(LOAD_PARAMS.childMs),
+  "--interval-ms", String(LOAD_PARAMS.intervalMs),
+  "--budget-ms", String(LOAD_PARAMS.budgetMs),
+  "--marker", LOAD_PARAMS.marker,
 ];
 
 // Row tail budget: the full evidence lives in the iteration's .log file; the
@@ -150,6 +168,11 @@ export function crashesFromOutput(text) {
 //   crashes    array of { writer, evidence, ... } — never a bare "crashed"
 //   tail       short tail of the iteration's suite output
 //   logFile    the full-output log beside the results file
+//   observedLoad  under-load only: the churn actually observed, aggregated
+//                 from the generator parents' heartbeat files (which survive
+//                 the runner's forced taskkill — the generator's stdout
+//                 summary does not). Absent or null when no heartbeat was
+//                 readable.
 export function validateRow(row) {
   if (!row || typeof row !== "object" || Array.isArray(row)) return ["row is not a JSON object"];
   const problems = [];
@@ -183,6 +206,23 @@ export function validateRow(row) {
   if (typeof row.tail !== "string") problems.push("tail must be a string — the row carries a short output tail");
   if (typeof row.logFile !== "string" || row.logFile === "") {
     problems.push("logFile must be a non-empty string — the full output lives in the log beside the results file");
+  }
+  if (row.observedLoad !== undefined && row.observedLoad !== null) {
+    const o = row.observedLoad;
+    if (typeof o !== "object" || Array.isArray(o)) {
+      problems.push("observedLoad must be an object or null");
+    } else {
+      if (!Number.isInteger(o.spawns) || o.spawns < 0) problems.push(`observedLoad.spawns must be a non-negative integer, got ${JSON.stringify(o.spawns)}`);
+      if (!Number.isFinite(o.wallMs) || o.wallMs < 0) problems.push(`observedLoad.wallMs must be a non-negative finite number, got ${JSON.stringify(o.wallMs)}`);
+      if (!Number.isFinite(o.ratePerSec) || o.ratePerSec < 0) problems.push(`observedLoad.ratePerSec must be a non-negative finite number, got ${JSON.stringify(o.ratePerSec)}`);
+      if (!Number.isInteger(o.peakLiveSum) || o.peakLiveSum < 0) problems.push(`observedLoad.peakLiveSum must be a non-negative integer, got ${JSON.stringify(o.peakLiveSum)}`);
+      if (!Number.isInteger(o.parentsReporting) || o.parentsReporting < 0) {
+        problems.push(`observedLoad.parentsReporting must be a non-negative integer, got ${JSON.stringify(o.parentsReporting)}`);
+      }
+      if (o.recordedTargets?.ratePerSec !== 24 || o.recordedTargets?.peakLive !== "45-46 (FOC-407)") {
+        problems.push('observedLoad.recordedTargets must carry the FOC-407 targets: ratePerSec 24, peakLive "45-46 (FOC-407)"');
+      }
+    }
   }
   return problems;
 }
@@ -341,6 +381,36 @@ function tailOf(text) {
   return lines.slice(-TAIL_LINES).join("\n").slice(-TAIL_CHARS);
 }
 
+// Aggregate the load parents' heartbeat files into one observed-load record.
+// Called AFTER the tree kill: a heartbeat is rewritten every spawn round, so
+// whatever the parents counted last survives the forced taskkill even though
+// the generator's stdout summary never gets printed. Heartbeats that are
+// missing or torn (a kill landed mid-write) are skipped — the record states
+// how many of the expected parents actually reported, so a degraded capture
+// is visible instead of silently looking complete.
+export function aggregateLoadStats(resultsPath, parents, elapsedMs) {
+  const heartbeats = [];
+  for (let i = 0; i < parents; i++) {
+    const hb = readHeartbeat(loadStatsPath(resultsPath, i));
+    if (hb) heartbeats.push(hb);
+  }
+  if (heartbeats.length === 0) return null;
+  const spawns = heartbeats.reduce((s, h) => s + (h.spawns || 0), 0);
+  const peakLiveSum = heartbeats.reduce((s, h) => s + (h.peakLive || 0), 0);
+  const liveSum = heartbeats.reduce((s, h) => s + (h.live || 0), 0);
+  const wallMs = Math.max(0, Math.round(elapsedMs));
+  return {
+    spawns,
+    wallMs,
+    ratePerSec: wallMs > 0 ? Math.round((spawns / (wallMs / 1000)) * 100) / 100 : 0,
+    peakLiveSum,
+    liveSum,
+    parentsReporting: heartbeats.length,
+    parentsExpected: parents,
+    recordedTargets: { ratePerSec: 24, peakLive: "45-46 (FOC-407)" },
+  };
+}
+
 async function runIteration({ seq, mode, suiteArgs, suiteCommand, resultsPath, withLoad }) {
   const startedAt = new Date().toISOString();
   const t0 = Date.now();
@@ -349,7 +419,10 @@ async function runIteration({ seq, mode, suiteArgs, suiteCommand, resultsPath, w
   let gen = null;
   let genOut = "";
   if (withLoad) {
-    gen = spawn(process.execPath, [LOAD_SCRIPT, ...LOAD_ARGS], {
+    // Stale heartbeats from a previous iteration of the same results file must
+    // never be read as this iteration's evidence.
+    for (let i = 0; i < LOAD_PARAMS.parents; i++) rmSync(loadStatsPath(resultsPath, i), { force: true });
+    gen = spawn(process.execPath, [LOAD_SCRIPT, ...LOAD_ARGS, "--stats-file", loadStatsBase(resultsPath)], {
       cwd: REPO_ROOT,
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -387,9 +460,14 @@ async function runIteration({ seq, mode, suiteArgs, suiteCommand, resultsPath, w
 
   const crashes = collectCrashes(before, registrySnapshots(), out);
   const durationMs = Date.now() - t0;
+  const observedLoad = gen ? aggregateLoadStats(resultsPath, LOAD_PARAMS.parents, durationMs) : null;
   const logFile = `${basename(resultsPath).replace(/\.jsonl$/i, "")}.iter${seq}.log`;
-  appendFileSync(join(dirname(resultsPath), logFile), `${out}${out.endsWith("\n") ? "" : "\n"}`);
+  appendFileSync(
+    join(dirname(resultsPath), logFile),
+    `${out}${out.endsWith("\n") ? "" : "\n"}${observedLoad ? `\n--- observed load (heartbeat aggregate) ---\n${JSON.stringify(observedLoad)}\n` : ""}`,
+  );
   const row = { seq, mode, command: suiteCommand, startedAt, durationMs, ok: exitCode === 0, exitCode, crashes, tail: tailOf(out), logFile };
+  if (mode === "under-load") row.observedLoad = observedLoad;
   appendFileSync(resultsPath, `${JSON.stringify(row)}\n`);
   return row;
 }
