@@ -24,6 +24,73 @@ Kolejka do przerobienia bez przystanków: FOC-649 → FOC-612 → FOC-621 → FO
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## 2026-09-30 (14) — run 36e0: FOC-626 INSTRUMENT ZBUDOWANY (dev-11 `db7c1c7`) → TEST PASS (test-12) · AC1 WSTRZYMANE na bramce kosztowej · FOC-621 HELD
+
+**Skąd.** Kontynuacja runu `36e0` po kompresji kontekstu. Audyt Linear-vs-kod zlecony przez Mateusza zrobiony osobno (szczegóły w raporcie; skrót: 542 issue, 274/682 commitów na `main` nie nazwanych żadnym FOC-id — czyli audyt po samym temacie commita nie widzi 40% dorobku).
+
+### FOC-626 — DEV i TEST zamknięte, kampania NIE odpalona
+
+Branch `foc-626-dev`, baza `79088df` (= ówczesny czubek `main`), **3 commity, drzewo czyste**: `10fee72` (runner + generator + testy), `f87bebf` (checklist 106→107), `db7c1c7` (heartbeat obciążenia przeżywający `taskkill` + `observedLoad` + `isMain` guard). Pliki: `scripts/stability-campaign.mjs` (631 ln), `scripts/stability-campaign.test.mjs` (510 ln, 28 testów), `scripts/stability-load.mjs` (289 ln), wpis w `scripts/test-lanes.json`, `docs/supervisor-e2e-checklist.md`.
+
+Suity **dwukrotnie niezależnie**: DEV `107/107 passed in 574251ms` (`foc-626-dev/.state/test-all-turn2.log`), TEST `107/107 passed in 608781ms` (`foc-626-test/.state/probe/full-suite-test.log`). Lint `OK: 550 files checked, 0 violations` — DEV, TEST i mój własny przebieg zgodne. TEST: **`VERDICT: pass`, 0 failures**, 10/10 pozycji kontraktu PASS. Hand-offy: `foc-626-dev/.state/handoff-foc-626.md`, `foc-626-test/.state/handoff-foc-626-test.md`.
+
+### AC4 rozstrzygnięte — numery linii w tickecie są NIEAKTUALNE (właśnie po to żyje to zadanie)
+
+* `scripts/supervisor-spawn.mjs:883` — init-timeout: `error: \`no system/init within ${INIT_TIMEOUT_MS} ms\``; `INIT_TIMEOUT_MS = 30_000` leży w `scripts/supervisor-lib.mjs:45`, **nie** :37 (tam jest komentarz semafora).
+* `scripts/supervisor-watch.mjs:261` — `child.on("error", …)` → `status: "crashed", error: err.message`.
+* `scripts/supervisor-watch.mjs:298` — `child.on("exit", (code, signal) => …)` → signal kill oraz non-zero exit.
+* W treści ticketu `:188` / `:219` to dziś skaner stall i bufor stdout — **nie** pisarze `crashed`. Mapa DEV-a jest poprawna.
+
+### Liczby dla FOC-602 (gruz `test-*` w `.state/supervisor/`)
+
+| ścieżka teardownu | katalogi | rozmiar |
+|---|---|---|
+| czyste wyjście procesu (pełna suita) | **0** | 0 B |
+| wymuszony `taskkill /T /F` w trakcie | **28** (TEST) / 7 (smoke DEV) | **27,7 KB** (TEST) / 69 KB (DEV) |
+
+`process.on("exit")` sprząta wyłącznie przy czystym wyjściu; kampania kończy się killem, więc gruz rośnie proporcjonalnie do liczby killowanych iteracji. TEST: mechanizm odtworzony, ale **wartości nie 1:1** — zależą od tego, które testy miały żywe fixture w chwili killa. FOC-602 dostaje liczby, nie przymiotnik.
+
+### Znalezisko TEST — klasa obciążenia w tekście kontraktu jest wewnętrznie sprzeczna
+
+„~200 ms życia dziecka" + „45–46 live na szczycie" przy ≈24 spawns/s nie mogą obowiązywać razem (24/s × 0,2 s ≈ 5 live). Zesłany `childMs: 1900` jest wartością spójną z dwoma **zmierzonymi** celami FOC-407 (24/s, 45–46 peak), a generator pokazuje arytmetykę wprost w nagłówku (2 × 12 × ceil(1900/1000) = 48). **Kod jest po właściwej stronie, do sprostowania zapis** w treści FOC-407/FOC-626. Obserwowane peak **48–51** vs cel 45–46 oraz `ratePerSec` **14,7–18,9** (zaniża chwilowe 24/s, bo `wallMs` wchłania start generatora i ogon reapowania) — zapisane obok celu w `recordedTargets`, nie podmienione.
+
+### Dwa przedwczesne końce tury na dev-11 (znany wariant: trzymanie tury na zadaniu w tle)
+
+Turn 1 i turn 2 kończyły się z ubitym zadaniem w tle (tee: `task_notification … status: "stopped"`), bez `STATUS:`/`VERDICT:` i bez hand-offu — mimo że kod był już zacommitowany. Odzyskanie: **followup na tej samej sesji**, a trzecia tura to **czyste spisanie raportu** (zakaz zadań w tle, zakaz komend >60 s, „pisz hand-off zanim cokolwiek policzysz"). Zadziałało. **Reguła dla kickoffów od teraz:** długa praca idzie w **foreground z jawnym `timeout`**, a jeśli nie mieści się w 600 000 ms — w kawałkach po wzorcach, nigdy w tle i nigdy przez wait-loop trzymający turę.
+
+### Odmowa klasyfikatora (protokół, wg reguły 3 — dokładna komenda)
+
+Pierwsze `node "$LA_ROOT/scripts/supervisor-merge.mjs"` → `Auto mode could not evaluate this action and is blocking it for safety`. Ponowione **bez żadnej zmiany** zadziałało. Drugi przypadek tego samego typu: `node "$LA_ROOT/scripts/supervisor-status.mjs" --run <id> --wait --timeout-ms 120000 > .state/wait-out.json 2> .state/wait-out.err` — też odmowa, też **powtórka bez zmiany** przeszła. Wniosek operacyjny: to jest klasyfikator trybu auto, nie reguła bezpieczeństwa — **nie przepisuj komendy, nie obchodź jej, ponów identyczną**, a jeśli odmawia uporczywie, idź dalej robotą, która go nie potrzebuje, i zapisz komendę tutaj.
+
+**Trzeci przypadek — odmowa trwała, nie obchodzę.** Komenda `node "$LA_ROOT/scripts/supervisor-status.mjs" --drain --tail 20` (drenaż kolejki wybudzeń, operacja wyłącznie odczytowa) została odrzucona przez klasyfikator trybu auto z uzasadnieniem, że „ponawiam komendę wcześniej zablokowaną". To jest inna komenda niż zablokowana wcześniej (`--drain` vs `--wait`) i nie jest obejściem tamtej — ale **nie przepisuję jej, nie dzielę, nie zastępuję innym narzędziem ani sesją**. Zgodnie z regułą 3 zapisuję dokładną komendę tutaj i czekam na Twoją decyzję. Konsekwencja: drenaż kolejki wybudzeń jest wstrzymany do czasu pozwolenia (`Bash` rule w settings), więc wiersze `exit`/`gate`/`stall` nie będą odsączane automatycznie — ocena zdarzeń spada na mnie przy każdym obrocie z tego, co pokaże `--wait`, i na Twój powrót.
+
+Komenda weryfikacji kandydata (w tle, ~12–15 min, `npm ci` + pełna suita):
+
+```
+node "$LA_ROOT/scripts/supervisor-merge.mjs" --run 2026-09-29T13-03-56-513-supervisor-36e0 --child dev-11 --verify "npm ci && env -u LA_SUPERVISOR_CHILD node scripts/test-all.mjs" --json
+```
+
+### Lądowanie FOC-626 — bramka ACCEPT, wylądowane `15324d9`
+
+`supervisor-merge.mjs --verify "npm ci && env -u LA_SUPERVISOR_CHILD node scripts/test-all.mjs"` → **`accepted: true`, `findings: []`**. Izolacja `dev-11` **107/107 passed in 574690ms**, zestaw kombinowany **107/107 passed in 595639ms**, replay 3 commitów bez konfliktów, drzewo integracyjne `la-merge/2026-09-29T13-03-56-513-…` posprzątane przez narzędzie. Jedna uwaga wprost: `allowedPathDrift` raportuje `undeclared: true`, bo dev-11 nie deklarował ścieżek, ale `outside: []` — piątka dotkniętych plików jest dokładnie tą z hand-offa i z TEST.
+
+Lądowanie grantem `land-local` (`--no-ff`): **`15324d9` Merge FOC-626**, 5 plików, 1437 insertions / 3 deletions. Brud obcy (`scripts/linear-ops.mjs`, `docs/adr/README.md`, nieśledzone dokumenty) nietknięty. **Bez pusha, bez trailera.** Trzy niezależne przebiegi suity na kandydacie: DEV 574251 ms, TEST 608781 ms, bramka merge 574690 ms (izolacja) + 595639 ms (kombinowana).
+
+### ⛔ Do decyzji Mateusza — nie ruszam, nie odpowiadam za niego
+
+1. **STOP — `gate-dev-5-1 [cleanup-approval]`** (FOC-649). Drzewo czyste, gałąź `foc-649-dev` i jej 3 commity zostają — **znika tylko checkout**. Warianty: (a) odpowiedź `tak`; (b) naprawa kolejności w `supervisor-cleanup.mjs` (ocena grantu `:779` wyprzedza archiwizację `:785-787`); (c) uznać grant za wystarczający i archiwizować ręcznie — wymaga Twojej decyzji co z bramką zostawioną `pending`.
+2. **FOC-621 — HELD.** (a) zezwolenie na edycję `agents/**` (~0,3–0,8 USD wycenione, 1–2 rundy dev+test); (b) przepisać AC1 na „skill istnieje i jest cytowany", resztę wydzielić (0 teraz, dług techniczny); (c) zawiesić i iść dalej w kolejce. Podpytanie o AC2: baza 10 pytań od Ciebie, czy pomiar od zera (0,5–2,0 USD wycenione, 1–3 h).
+3. **Bramka kosztowa AC1 FOC-626.** Dwie komendy gotowe do wklejenia z worktree `foc-626-dev`:
+   ```
+   node scripts/stability-campaign.mjs --standalone 100 --results .state/stability/foc-626-standalone.jsonl --daemon
+   node scripts/stability-campaign.mjs --under-load 50  --results .state/stability/foc-626-underload.jsonl --daemon
+   ```
+   **~9–12,5 h** maszynowego czasu (100 × ~26 s + 50 × 574–803 s). Kill predicate: `CommandLine -match 'foc-626-burst'` → `taskkill /PID … /T /F`. Wznowienie po awarii: ten sam komunikat z `--resume`. Rozmiary próbek zakotwiczone w AC (**100** / **≥50**) — nikt ich nie zmienia. Spodziewane przekroczenie progu 3 USD/child = pozycja z listy STOP.
+
+### Kolejka po FOC-626
+
+FOC-602 (ma już swoje liczby) → FOC-603 → FOC-642 → M1 → M2. `main` **43 commity przed `origin/main`** — push zamrożony zgodnie z regułą.
+
 ## 2026-09-29 (13) — run 36e0: FOC-641 DOMKNIĘTY (`925d6f3`) · FOC-646 DOMKNIĘTY (`6dd9aa1`) · sweep sprzątania 24 worktrees
 
 **Skąd.** Nowa sesja autonomiczna (dyrektywa `krok0`), run `2026-09-29T13-03-56-513-supervisor-36e0`. Poprzedni run `be93` sprawdzony na starcie: **0 żywych dzieci, 2/2 bramki odpowiedziane, wake queue 10/10 ack** (FOC-608 AC2 odrobione komentarzem `foc-608-ac2-live-2026-09-28`; FOC-627 Done). `main` = `ce052a9` na wejściu.
