@@ -2418,3 +2418,56 @@ Opcje dla Mateusza (w każdym wariancie `destroyed: []`, archiwum = kopie, gał�
   drzewa stoją do tego czasu.
 * **(c)** uznać grant za wystarczający i pozwolić mi zarchiwizować ręcznie — wymaga też rozstrzygnięcia, co z bramką,
   która po grant-cie zostaje `pending` (domykać wpisem `cleanupGrant`, czy zostawić do jego słowa).
+
+## 2026-09-30 — run 36e0: FOC-612 DOMKNIĘTE (merge 3a22fd4) · odłożony hold nie daje się domknąć
+
+**FOC-612 — decyzje jako nieblokujące rekordy hold, prezentowane po jednym z rekomendacją.**
+Przepływ `dev → test` (bez REVIEW — `suggestedFlow` z triage). DEV `dev-7` (tury 0 i 1 — tura 0 padła na suficie
+2700 s, patrz niżej), TEST `test-8`.
+
+* **Lądowanie:** merge `3a22fd4` (`--no-ff`, 8 plików, +1543/−9), kandydat `foc-612-dev` @ `fc93c2a`, baza `09c6adf`.
+  `main` **38** przed `origin` (było 32). **Bez pusha.**
+* **Komentarz zamknięcia:** `b6edce5a-7828-42e9-83f2-e1bac68506d6` (dry-run, potem post). Linear `Backlog → Done`.
+* **TEST 12/12 przypadków adwersarialnych**, każda liczba DEV odtworzona niezależnie (m.in. polowanie na sentinel —
+  treść holda nie trafia ani do `guard/alarms.jsonl`, ani do payloadu odmowy; FOC-220).
+* **Merge-verify ACCEPT** (`supervisor-merge --child dev-7 --base 09c6adf --verify "npm ci && node scripts/test-all.mjs"`):
+  isolation `106/106` w 658 567 ms + combined `106/106` w 786 721 ms, replay 5/5 commitów bez konfliktu, `findings: []`.
+  `allowedPathDrift` — `undeclared: true` (dev nie zadeklarował `allowedPaths`), `outside: []`, `error: null` — informacyjne,
+  nie blocker.
+* **Koszt wyceniony:** `dev-7` **0.21** + `test-8` **0.10** = **0.31 USD**. Strumień razem 22.97 (`dev-7` 17.90 +
+  `test-8` 5.07) → FOC-165.
+
+### Reguła operacyjna, która wychodzi z tego ticketa — obowiązuje mnie od dziś
+
+**Odłożenie holda nie daje się domknąć.** `holdsForCompletion` przepuszcza run dopiero, gdy hold ma `state: answered`;
+`defer --until` wycisza **wyłącznie** guard turn-end. Czyli run z holdem odłożonym o 30 dni **nie może zostać
+zamknięty** przez 30 dni. Kto odkłada, żeby zyskać czas, musi wrócić i odpowiedzieć, zanim run da się domknąć.
+TEST wyłożył to wprost (case 8) na życzenie z kickoffu — wolę, żebyś to zobaczył teraz niż przy zamykaniu runa.
+
+Cztery przypadki blokady turn-end (źródło: `holdBlocksTurnEnd`, `scripts/supervisor-lib.mjs`):
+`answered` → nigdy; `open` bez `presentedAt` → blokuje (nawet gdy odłożony — prezentacja jest dłużna);
+`open`, przedstawiony, bez `until` → blokuje (odpowiedź jest dłużna); `open`, przedstawiony, `until` w przyszłości →
+cichnie, po `until` wraca i blokuje ponownie.
+
+### Znów przedwczesny koniec tury — ten sam mechanizm co wcześniej
+
+Tura 0 `dev-7` zakończyła się na `stderr: Background tasks still running after 2700s; terminating.` — długa suita
+wystartowana jako **zadanie w tle**, suficie 2700 s, tura padła razem z nią. Nic nie było wtedy zakomitowane.
+Odzyskanie: `supervisor-followup.mjs --prompt-file` na **tym samym** `session_id`, z jednym zakazem w promptcie
+(*"nigdy nie odpalaj suity jako zadania w tle"*), drzewo nietknięte. Zadziałało: 5 commitów, czyste drzewo,
+druga tura zamknęła się poprawnie. To czwarte wystąpienie tej klasy w tym repo — reguła „suity wyłącznie
+w foreground, trzymaj turę" jest w każdym kickoffie i nadal bywa łamana.
+
+### Dla FOC-642 — treść ticketa jest nieaktualna w trzech miejscach (sprawdzone w repo 2026-09-30)
+
+Kickoff `.state/krok0-2026-09-29/foc-642-dev-kickoff.md` niesie to wprost, tu dla śladu:
+
+1. Tickiet: *"`supervisor-lib.mjs:77` anchors `runDir` to the repo root with **no env redirect**"* → **fałsz**.
+   Seam jest: `scripts/supervisor-lib.mjs:85-88`, `supervisorStateHome()` czyta `LA_SUPERVISOR_STATE_HOME`.
+2. Tickiet: *"17 serial-lane test files"* → w `scripts/test-lanes.json` jest **20**. Tickiet pomija
+   `rewards-routes`, `telemetry-analysis-api`, `telemetry-settled`, `telemetry-usage-rewrite`.
+3. Uzasadnienie 14 z 20 wpisów serial (`"…runDir is repo-anchored, no env redirect"`) jest już **fałszywe**, więc AC2
+   nie jest spełnione samym faktem istnienia wpisu.
+
+Do tego AC3 żąda „zero failures", a repo ma jeden znany plik wrażliwy na obciążenie (`security-scan.test.mjs`).
+Jeśli się zaczerwieni — AC3 **nie jest spełnione literalnie** i wymaga Twojej decyzji, nie mojej.
