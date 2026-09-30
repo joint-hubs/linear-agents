@@ -2301,3 +2301,120 @@ Co-Authored-By** (preferencja Mateusza).
 ## 2026-09-29 — [ROZSTRZYGNIĘTE] run be93: merge-verify FOC-641 zabity przez reaper (RAM)
 
 **Rozstrzygnięte 2026-09-29 w sekcji (13).** Tamten `supervisor-merge.mjs --child dev-20 --verify "npm ci && node scripts/test-all.mjs"` (task `bmzyqc8ui`) zabił memory-pressure reap przy bezczynnej sesji o 02:30, w fazie izolacji — nie był to błąd komendy (znana klasa: FOC-396). Lądowanie wstrzymano do decyzji; dyrektywa `krok0` („domknij go — merge z weryfikacją") = **opcja (1)** i merge wznowiono w runie `36e0` → **ACCEPT**, `925d6f3` na main. Opcja (3) (lądowanie bez combined-verify) nie została użyta. Gałąź `la-merge/…-be93` zostaje (integracyjna runu).
+
+## 2026-09-30 — run 36e0: budzik nadzoru + komenda zablokowana przez klasyfikator
+
+**Budzik nadzoru (decyzja własna — węższa, bezpieczniejsza, odwracalna; nie wymaga pytania wg reguły z 2026-09-29).**
+`dev-5` skończył turę 0 o **21:54:59**, a ja zareagowałem dopiero o **02:33** — **4 h 48 min martwego czasu**
+(`silentMs` 17 202 415 ms). Przyczyna: wake queue jest trwała na dysku, ale **nic nie pcha zdarzenia do sesji**.
+Stop-hook (`supervisor-guard`) blokuje koniec tury do 3 razy, potem tura się kończy i budzik już nie istnieje;
+kontrakt monitora zabrania ponawiać `--wait`, więc tury nie dało się utrzymać przy życiu w nieskończoność.
+Projektowe „zaczynaj każdą turę od draina" zakładało, że tura w ogóle się zacznie.
+
+Zmiana: **własny budzik sesji** — `CronCreate`, job **`e701cb2a`**, `4-59/9 * * * *` (co 9 min; świadomie omija
+`:00` i `:30`). Prompt: drain → sądź wiersze → `--ack` obsłużonych → kontynuuj kolejkę; przy pustej kolejce jedna
+linia i stop; przy zamkniętym runie skasuj job (`CronList` → `CronDelete`). Skasuje się samo po zamknięciu runu,
+a po 7 dniach wygasa. Nie dotyka żadnej ratyfikowanej reguły (polityka jednego dziecka, `neverCovers`, zakaz pusha —
+bez zmian), nie wychodzi poza maszynę, nie rusza repo ani Linear. `CronDelete` to pełne cofnięcie.
+
+Efekt: maksymalny czas reakcji na wyjście dziecka spada z godzin do **~9 min**. Notatka operacyjna:
+`supervisor-status.mjs --wait --child <id>` zwraca ~7 KB zamiast ~35 KB pełnego snapshota — używać tego wariantu.
+
+**Zablokowane przez klasyfikator — NIE obchodzę.** Dosłowna komenda:
+`node $LA_ROOT/scripts/linear-query.mjs issue FOC-612 --json`
+Dwie odmowy trybu auto: „Auto mode could not evaluate this action and is blocking it for safety", a przy ponowieniu
+„the agent is retrying a command that was previously blocked by the auto-mode classifier". Skutek: draft kickoffa
+`.state/krok0-2026-09-29/foc-612-dev-kickoff.md` zachowuje **twardy warunek wejścia** — przed użyciem przeczytać
+żywy issue FOC-612 **i jego komentarze**, a treść live wygrywa z draftem. Kickoff nie zostanie odpalony bez tej
+weryfikacji. Pozostaje do odblokowania regułą allow po stronie Mateusza.
+
+**Nowa resztka (do listy obok `foc-518-dev`):** `la-wt/linear-agents/foc-649-base` — drapacz porównawczy bazy,
+który zrobił `dev-5`, żeby dowieść znany-czerwony `security-scan.test.mjs`. Nie da się go usunąć z sesji dziecka
+(`git worktree remove` tam deny-listowane), a **ręcznie `git worktree remove` jest u mnie zakazane** (omija oba
+klucze) → nie ruszam. Prośba dev-5 w hand-offie: `git worktree remove ../foc-649-base --force`. Drugi taki sam zostawił TEST w
+`%LOCALAPPDATA%/Temp/foc649-base` (detached, `node_modules` jako junction) — też nietknięty.
+
+**Weryfikacja scalenia FOC-649 zabita przez reaper RAM (2026-09-30) — DO DECYZJI MATEUSZA.**
+`node scripts/supervisor-merge.mjs --child dev-5 --verify "npm ci && node scripts/test-all.mjs"` (tło, task
+`bz55gcd7m`) → `status: killed`, „Background command … was stopped because the system is running low on memory
+while the session was idle". Ta sama klasa co FOC-641 w runie be93 i FOC-396 (znana: `bg-merge` bity przy
+naprężeniu RAM). **Nie restartuję sam** — wprosty zakaz z zawiadomienia („Do not start it again on your own …
+start it again only when asked") i reguła „nigdy cichy retry" mówią to samo. Wariant wyłączenia reapera
+(`CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`) działa tylko przy starcie `bin/supervisor.bat` — ustawienie
+z komendy shellowej nic nie daje; to decyzja Mateusza.
+
+Nic nie zginęło: TEST ma pełne niezależne weryfikacje na dysku (53/53 sond, `.state/probes/foc649-probe.mjs`),
+kandydat `cfc2709` nietknięty, TEST `VERDICT: pass`. Drzewo integracyjne
+`la-wt/la-merge-2026-09-29T13-03-56-513-supervisor-36e0` zostaje na `686759b` — kolejna resztka klasy `la-merge/*`.
+**Opcja „lądowanie bez combined-verify" jest niedostępna**: `--verify` jest wymaganą własnością bezpieczeństwa
+(FOC-160 — dwa kandydaci mogą przechodzić osobno, a padać razem), więc nie jest przedmiotem wyboru.
+
+## 2026-09-30 — run 36e0: kickoffi pod kolejkę (opcja c) · trzy decyzje zakresowe
+
+**Tryb.** Opcja (c): dzieci wstrzymane (krótka pamięć + reaper), przez co przygotowuję kontrakty zamiast spinnąć.
+Budzik (`CronCreate` `e701cb2a`, co 9 min) działa — kolejka wake 8/8 odAckowana, 0 żywych dzieci, 0 bramek pending.
+Drafty kickoffów w `.state/krok0-2026-09-29/`: **`foc-621-dev-kickoff.md`**, **`foc-626-dev-kickoff.md`**,
+**`foc-602-dev-kickoff.md`** (FOC-612 wcześniej). Każdy niesie twarde „verify at entry" — odczyt żywego issue i komentarzy
+zanim dziecko zacznie, bo **`linear-query.mjs` nie wywołuję w tej sesji wcale** (blokada klasyfikatora nie jest obchodzona;
+zakres blokady = pytanie do Mateusza).
+
+**Decyzja A — FOC-621: liczby w kontrakcie to snapshot sprzed FOC-640/641.** `docs/tools/codegraph-eval-harness.md`
+wciąż mówi, że wpisy `node`/`impact` wchodzą w `fallback`/`unused`, i pokazuje `byOutcome {answered:8, fallback:7,
+unused:3}` — mierzone, zanim wylądowały FOC-640 (słownik przechwytu rozpoznaje też rendery `impact`/`node`/`files`/
+`status`) i FOC-641 (`925d6f3` — `RE_STALE_BANNER` nie odpala już na samym ⚠️). Notatka z FOC-627 („zanieść do FOC-621,
+żeby skill nie czytał 18 jako 18 ocenialnych przypadków") zmienia więc kształt: to nie jest bug do nazwania w skillu,
+tylko **zakaz twardych liczb**. W kickoffie jako decyzja 7: plik = kontrakt schematu, raport = jedyne źródło liczb.
+
+**Decyzja B — granica FOC-602 vs FOC-642 (węższa, moja, do wycofania jednym słowem).** FOC-602 = moduł fixture'owy +
+sprzątanie odporne na zabójstwo procesu. FOC-642 = migracja 17 plików serial-lane + ruchy w `test-lanes.json`, które
+wymagają per-plikowego `--prove-isolation`. Czyli FOC-602 **nie rusza członkostwa w lanach**: skoro seam
+`LA_SUPERVISOR_STATE_HOME` (`supervisor-lib.mjs:86`, od FOC-608/AC3 — istnieje i **nie jest używany** przez `fixtureRun`
+ani `baseEnv`) zdejmuje współdzielony zasób, pliki, które się przez to kwalifikują, spisuje jako obserwację dla FOC-642.
+Ryzyko nakładania było realne, więc rozgraniczenie stoi wprost w obu kickoffach.
+
+**Decyzja C — kształt FOC-626 (rozwinięcie decyzji z `## 2026-09-28 (5)`).** Kampania to **~12–13 h czasu maszynowego**
+(50 × 780–810 s pod obciążeniem + 100 standalone). Żadna tura tego nie utrzyma → runner ma być **odporny na granicę tury**
+(proces odłączony, `unref`, jeden wiersz JSONL na iterację, `--resume`), a generator obciążenia (klasa FOC-407: 2 rodziców
+× 12 krótkich `node`, ≈24 spawnów/s, 45–46 żywych `node`) wchodzi do repo z zapisanym kill-predykatem. **Tura 1 buduje
+instrument i podaje komendę startu; sama kampanii nie odpala** — start po słowie Mateusza (bramka 3 USD na childa).
+Rozmiarów AC (100 / ≥50) dziecko nie zmniejsza. Notatka z FOC-602/626: kampania ~150-krotnie przetoczy suity, więc
+zostanie po niej śmieć `test-74816-*`-owy — ma go **zmierzyć i podać jako liczbę** dla FOC-602, nie sprzątać.
+
+## 2026-09-30 — run 36e0: FOC-649 DOMKNIĘTE (merge `80c6635`) · dziura w ścieżce grantu przy sprzątaniu
+
+**FOC-649 — DONE.** TEST niezależny 53/53 (`VERDICT: pass`); weryfikacja scalenia **ACCEPT** — izolacja `105/105`
+w 549 413 ms, łączone `105/105` w 547 720 ms, replay 3 commity / 0 konfliktów, `findings: []`. Landing lokalnie
+`git merge --no-ff foc-649-dev` → **`80c6635`** (6 plików, +713/−24, nowy `scripts/supervisor-cleanup-prune.test.mjs`),
+`TRAILERS[]` puste. Komentarz domknięcia `aa76e06d-bd65-46d5-877d-96ee11bcc15b` (dedup `foc-649-close-2026-09-30`),
+status `Backlog → Done`. Koszt dzieci wyceniony: dev-5 `0.597` + test-6 `0.127` = **0.72 USD** (strumień podał 33.7 —
+~45× za dużo, dowód do FOC-165). `git rev-list --count origin/main..main` = **31** (push nadal wstrzymany).
+
+Rozbieżność testowa podana jak zmierzona, nie wygładzona: DEV widział `security-scan` **69 passed / 13 failed** w OBU
+rewizjach (baza `e3dea40` i kandydat), TEST przepuścił ten plik standalone w obu i dostał **81 / 0**. Plik jest czuły
+na obciążenie — dopisane w `cfc2709` do `docs/supervisor-e2e-checklist.md`; samotna czerwień w `security-scan`
+to flake do udowodnienia przy bazie, nie sygnał regresji.
+
+**Znalezisko przy sprzątaniu — STOP, decyzja po stronie Mateusza.** Zapisany grant `cleanup-own-worktree` (FOC-613)
+odmawia na OBU drzewach FOC-649: `dev-5` (4 pliki) i `test-6` (6 plików) — `not archived`. Przyczyna jest konstrukcyjna,
+na styku FOC-613 ↔ FOC-649: `cleanupGrantVerdict` (`scripts/supervisor-cleanup.mjs:779`) liczy warunek archiwum **w
+samym werdykcie**, a automat `archiveWorkProduct` odpala się **dopiero po nim** (`:785-878`), więc na ścieżce grantu
+nie może zarchiwizować niczego nowego — jest najwyżej no-opem. W efekcie nagrany grant („jezeli wszystkie zmiany sa na
+main to mozna posprzatac") strzela wyłącznie do drzew **bez niczego do zachowania**, czyli dokładnie odwrotnie niż
+w przypadku, w którym jest potrzebny. Na ścieżce dwukluczowej (ludzkiej) kolejność jest poprawna: strażniki → klucze →
+containment → **archiwum** → usunięcie (`:871-874`).
+
+Czego **nie** zrobiłem i dlaczego: nie przepisywałem ręcznie tych 4/6 plików do `test-artifacts/<child>/`, żeby odblokować
+grant. Odmowa jest funkcją, nie przeszkodą; zadowolenie warunku wstępnego destrukcyjnej akcji własną ręką ma kształt
+obchodzenia kontroli, a poszerzenie zasięgu grantu podlega pod „zakres = pytaj". Gałąź i commity przeżyją w każdym
+wariancie (`branchNote`), więc koszt postoju drzew jest niski. Druga połowa tego samego znaleziska: po usunięciu
+grant-cie bramka `gate-dev-5-1` zostaje `pending`, bo ścieżka grantu nie zamyka bramek — a pusta bramka na domkniętym
+biegu to zanieczyszczenie kolejki.
+
+Opcje dla Mateusza (w każdym wariancie `destroyed: []`, archiwum = kopie, gałąź zostaje):
+* **(a)** odpisać `tak` na `gate-dev-5-1` (+ analogiczna bramka dla `test-6`) — ścieżka ludzka sama archiwizuje i usuwa;
+  jedno słowo na drzewo, zero zmian w kodzie.
+* **(b)** poprawić kolejność w `scripts/supervisor-cleanup.mjs` (archiwum **przed** werdyktem grantu) jako drobny
+  follow-up — to naprawa projektowa, ale **poszerza** to, co dzieje się bez ludzkiego klucza, więc wymaga jego zgody;
+  drzewa stoją do tego czasu.
+* **(c)** uznać grant za wystarczający i pozwolić mi zarchiwizować ręcznie — wymaga też rozstrzygnięcia, co z bramką,
+  która po grant-cie zostaje `pending` (domykać wpisem `cleanupGrant`, czy zostawić do jego słowa).
