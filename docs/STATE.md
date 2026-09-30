@@ -16,13 +16,43 @@ Nadrzędne wobec wcześniejszych notatek z 2026-09-28 tam, gdzie są węższe.
 7. **Cudze pliki w drzewie = inna sesja** („precedent index"): `docs/adr/0014-precedent-index-two-layer.md`, `docs/prd/prd-precedent-index.md`, `docs/plans/brainstorm-precedent-search.md`, `tools/precedent-spike/`, zmiana w `docs/adr/README.md`. Nie dotykam. **Uwaga dla FOC-384: numer ADR-0014 jest już zajęty — wziąć kolejny wolny.**
 8. **Resztki** (`foc-518-dev` sierota, `la-merge/*` nie w całości w `main`, cudze worktree) — zostają, Mateusz zajmie się nimi osobno.
 
-Kolejka do przerobienia bez przystanków: FOC-649 → FOC-612 → FOC-621 → FOC-626 → FOC-602 → FOC-603 → FOC-642 → M1 (FOC-511, 512, 616, 607, ~~597~~ **DONE `dae4ec6`**, 598, 271, 599) → M2 (FOC-596 → 519 → 520 → 516 → 517 → 476 → 477).
+Kolejka do przerobienia bez przystanków: FOC-649 → FOC-612 → FOC-621 → FOC-626 → FOC-602 → FOC-603 → FOC-642 → M1 (FOC-511, 512, 616, 607, ~~597~~ **DONE `dae4ec6`**, 598 **(cz.1 `8d8ceba` — widelec AC1b otwarty)**, ~~271~~ **DONE `21cfbe4`**, 599) → M2 (FOC-596 → 519 → 520 → 516 → 517 → 476 → 477).
 
 ### Uzasadnienia decyzji podjętych samodzielnie (wymóg reguły 4)
 
 **Retencja `test-artifacts/`: 20 runów ∩ 14 dni, `prune` suchy-raportem.** Liczby oddelegowane do mnie („decyzja o liczbach twoja"). 20 runów ≈ tydzień pracy przy polityce jednego dziecka; 14 dni wiąże dysk przy gęstych runach. Każda granica z osobna jest gorsza — same 20 runów pozwala przestarzałemu archiwum żyć wiecznie na bezczynnym repo, same 14 dni potrafią w jednym przejściu wymazać zrzut 40 runów. **Przecięcie** jest bezpieczniejszym kierunkiem i dokładnie tym, o co prosił „co mniejsze". Prune wyłącznie payload `test-artifacts/`, nigdy plików dowodowych (`children.json`, `wake-queue.jsonl`, `triage.json`, `merge.json`, `intake.json`, `partial-status.json`), nigdy gałęzi ani worktree — i wyłącznie po `--dry-run`, który najpierw pokazuje, co zniknie.
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
+
+## 2026-10-01 (17) — run 36e0: FOC-271 DOMKNIĘTY (`21cfbe4`) — okno ciszy detektora stall od startu tury · 107/107 na kandydacie
+
+**Wada (kierunek 2 z issue).** Detektora stall liczył ciszę wyłącznie od ostatniego zapisu tee. Wznowiona tura startująca >10 min po ostatnim bajcie poprzedniej tury dostawała `stalled: true` od pierwszego snapshota do pierwszego nowego wyjścia, a watcher enqueue'ował fałszywy wiersz `stall`. Kierunek 1 (followup meldował `ok: true` dla tury, która nie wystartowała) był już naprawiony wcześniej: `INIT_TIMEOUT_MS` + kill + `status: crashed` w `supervisor-followup.mjs`, kryty testami `supervisor-zombie.test.mjs` (8/0) i `supervisor-followup.test.mjs` (18/0).
+
+**Fix.** Cisza liczy się od NAJPÓŹNIEJSZEGO z (zapis tee, start żywej tury) — w obu implementacjach tej samej reguły: `supervisor-status.mjs` (snapshot dla leada) i `supervisor-watch.mjs` (enqueue wiersza). Fixture'y testów stall postarzają turę razem z tee — scenariuszem jest tura, która milczy, nie świeża tura na ciszy poprzedniczki.
+
+**Red→green.** Regresja „a turn that just started is never stalled on its predecessor's silence" czerwona na źródłach sprzed fixa (**21/1** — `stalled: true` przy tee starym 20 min i turze startującej teraz), zielona po fixie **22/0**. `supervisor-zombie.test.mjs` dostaje test PARY detektorów (pliki rozjeżdżały się 4 razy — zasada „para nie dryfuje"; najpierw padł na `TURN_START` vs wzorzec `turnStart`, poprawiony na `turn[_]?start`). Pełna suita kanoniczna na kandydacie: **107/107 w 586 s, exit 0** — bez flake'ów w tym przebiegu. Rodzina `supervisor-*` (21 plików) cała zielona.
+
+**Lądowanie.** `a7d840c` (fix, 4 pliki +69/−10, bez trailera) → `21cfbe4` (`--no-ff`, grant `land-local`). `main` bez pusha (jak zawsze). Worktree `foc-271-dev` czyste — kolejna resztka self-work obok `foc-597-dev`/`foc-598-dev` (narzędzie sprzątania jest child-scoped; pytanie do Mateusza nierozstrzygnięte).
+
+**Kolejka dalej: FOC-599** (resztki review FOC-547 — 7 drobnych pozycji, est 2). Po nim raport zbiorczy (3 zamknięte: 597, 271, 599) z widelcem FOC-598 i listą pytań.
+
+## 2026-10-01 (16) — run 36e0: FOC-598 cz.1 — rdzeń na gałęzi (`8d8ceba`) · AC1b = WIDELEC projektowy · suita: flake'e load, nie moja zmiana
+
+**Wada (red→green).** Rotacja/truncacja transkryptu: `applyTranscriptProgress` scalwał `byte_offset`/`file_size` przez `MAX()`, więc pomniejszony plik nigdy nie resetował wiersza skip-cache — każdy kolejny tick robił pełny re-parse od 0 (AC2 złamane). Test regresyjny (598) czerwony: `expected 191, got 382`. Fix: `transcript.progress` niesie `resetOffset`, gdy przebieg wykrył skurcz (plik mniejszy niż zapisany `file_size` albo zapisany offset za EOF), a upsert pisze offsety tego przebiegu dosłownie. Komentarz przy skurczu nie twierdzi już, że dedup „odzyskuje" — nazywa limit.
+
+**Dowód absorpcji (AC1b — zmierzone, nie teoria).** Po fixie AC1a+AC2 zielone, asercja kolizji: `expected 1, got 0` — nowa treść przy offsecie zajętym przez poprzednią inkarnację jest zjadana. Trzy twarde constrainty, niezależnie od tożsamości zdarzeń: (1) `events` UNIQUE(`run_id, source_kind, source_path, source_offset, event_type`) + treść-nieświadome `eventAlreadyApplied`; (2) `usage_facts` UNIQUE(`run_id, source_path, source_offset`) — nawet świeży `message.id` pada na squacie offsetu; (3) `tool_facts` dedup po (`source_path, source_offset, tool_index`).
+
+**WIDELEC (pytanie do Mateusza — jedzie w raporcie zbiorczym):**
+- **(a) migracja `source_generation`** — 4 tabele (`events`/`usage_facts`/`tool_facts`/`transcript_sources`), tożsamości warunkowo wg generacji (klucze `gen 0` bitowo identyczne = brak duplikacji historii), rebuild 3 UNIQUE; est 5–8; ryzyko: migracja schematu żywego DB telemetrii (additive, marker wersji).
+- **(b) zawęzić AC1b** i osobny ticket na redesign kluczy (content-hash); FOC-598 zamyka się dziś na rdzeniu + jawny zapis limitu.
+- **(c) czekać** z rdzeniem na gałęzi.
+Test kolizji jest gotowy w kodzie i SKIP z nazwanym powodem (`telemetry-ingest.test.mjs`) — odblokowanie = skasowanie jednego `throw new TestSkip`.
+
+**Weryfikacja.** Rodzina `telemetry-*` zielona (ingest 9/0/**1 skip**, store 57/0/0, tool-extract 31/0/0, usage-verify 61/0/0, analysis 115/0/0, canonical 66/0/0). Pełna suita `test-all.mjs` 2×: **106/107** i **105/107** — czerwone: `code-intel.test.mjs` (79 s przy równoległym obciążeniu; **solo 130/0/0 exit 0**) i `security-scan.test.mjs` (**solo 81/0/0 exit 0**); oba poza obszarem zmiany (codegraph-wrapper, skan sekretów), niestabilna liczba czerwonych plików między przebiegami = klasa flake'a FOC-351/396 (spawn-timeout pod obciążeniem). `lint.mjs` nieodpalony (zakaz z dyrektywy 2026-09-29) — jawnie.
+
+**Stan.** Commit `8d8ceba` na `foc-598-dev` (3 pliki, +160/−10, bez trailera). **NIE wylądowane** — lądowanie w zamknięciu taska (rytm runu), brama = ponowny `test-all` na kandydacie. `foc-598-dev` ma `node_modules` (npm ci). Monitoring nadal odmówiony (patrz 15); w tym oknie strażnik turn-end odpalił się 2× (block 1/3) — jego trzy lekarstwa (`--drain`, `--wait`, odczyt tee/`wake-queue`) to ten sam zakazany wynik, stoję; fuzja 3 bloki → alarm jest zaprojektowana.
+
+**Następny w kolejce: FOC-271.** Rekonesans: oba kierunki fixa JUŻ są w kodzie — `supervisor-followup.mjs:389-392` (odmowa `no system/init` w oknie 30 s + kill zombie-tury) i `TERMINAL_STATUSES` z `waiting_gate` (`supervisor-lib.mjs:1406`) + wykluczenie statusów terminalnych z `stalled` (`supervisor-status.mjs:185`). Testy regresyjne istnieją: `supervisor-followup.test.mjs`, `supervisor-zombie.test.mjs`. Kandydat: zamknięcie jako „już naprawione" z komentarzem dowodowym — po sprawdzeniu, że testy pokrywają oba kierunki.
 
 ## 2026-09-30 (15) — run 36e0: FOC-597 SAMODZIELNIE (small, bez dzieci) — red→green, wylądowane `dae4ec6` · monitoring nadal odmówiony
 
