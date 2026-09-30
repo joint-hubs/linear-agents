@@ -19,6 +19,15 @@
 //   · "landed" means ancestry against main, not against the registry's
 //     baseRevision.
 //
+// FOC-649 additions (asserted here because the grant fixtures live here):
+//   · AC1 — `remove`'s report names every ignored/untracked path before it
+//     dies: work product in `archived`, rebuildable cache in `skippedCache`;
+//   · AC2 — the archive automation copies work product out before ANY removal
+//     path deletes, and a blocked destination refuses with nothing deleted;
+//   · AC3 — both-tips containment: the grant refusal names the tip that
+//     actually failed (never "0 commits" for a divergent tree), and the two-key
+//     path refuses a HEAD on a branch the record does not name.
+//
 // Isolation: the supervisor state home is redirected to a mkdtemp dir at
 // module load (the LA_SUPERVISOR_STATE_HOME seam, same as
 // supervisor-guard.test.mjs) and the spawned cleanup processes inherit it; the
@@ -570,6 +579,162 @@ test("a schema-invalid autonomy config is inert at the gate, not fatal", () => {
   assert.equal(out.ok, false);
   assert.match(out.error, /autonomy config/);
   assert.ok(existsSync(s.worktree));
+});
+
+console.log("\nFOC-649 — honest report, archive automation, both-tips containment");
+
+test("AC1: removal names the ignored content it destroys, and archives it first", () => {
+  const s = scenario({ ignored: ["debug.log", ".state/cache.json"] });
+  const proposed = parse(cleanup(["propose", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  parse(gate(["answer", "--run", s.runId, "--gate", proposed.gateId, "--text", "yes"]), fail);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.archived.count, 2, JSON.stringify(out.archived));
+  assert.deepEqual([...out.archived.paths].sort(), [".state/cache.json", "debug.log"]);
+  assert.match(out.destroyedKind, /tracked, uncommitted/, "the report must say which list is the tracked-dirty one");
+  assert.ok(!existsSync(s.worktree), "the worktree survived a successful removal");
+  assert.ok(existsSync(archivePath(s, "debug.log")), "the ignored file died with the tree, unarchived");
+  assert.ok(existsSync(archivePath(s, ".state/cache.json")), "the .state file died with the tree, unarchived");
+});
+
+test("AC1: rebuildable cache is skipped by name, never archived", () => {
+  const s = scenario({ ignored: ["node_modules/x.js", ".codegraph/i.db", ".state/cache.json"] });
+  const proposed = parse(cleanup(["propose", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  parse(gate(["answer", "--run", s.runId, "--gate", proposed.gateId, "--text", "yes"]), fail);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.deepEqual([...out.archived.paths].sort(), [".state/cache.json"], "only work product is archived");
+  assert.deepEqual(
+    [...out.skippedCache].sort(),
+    [
+      ".codegraph/ — 1 file(s), skipped: rebuildable by codegraph index init",
+      "node_modules/ — 1 file(s), skipped: rebuildable by npm install",
+    ],
+    `the report must name what was skipped and why: ${JSON.stringify(out.skippedCache)}`,
+  );
+  assert.ok(!existsSync(archivePath(s, "node_modules")), "cache must not be copied into the archive");
+});
+
+test("AC2 negative: a blocked archive destination refuses the whole removal, having deleted nothing", () => {
+  // A FILE at the destination path makes every mkdir fail on every platform —
+  // chmod-based unwritability is unreliable on win32, this is not.
+  const s = scenario({ ignored: ["debug.log"] });
+  mkdirSync(join(STATE_HOME, s.runId, "test-artifacts"), { recursive: true });
+  writeFileSync(archivePath(s), "a file sitting where the archive dir must go");
+  const proposed = parse(cleanup(["propose", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  parse(gate(["answer", "--run", s.runId, "--gate", proposed.gateId, "--text", "yes"]), fail);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /archive destination cannot be created/);
+  assert.ok(existsSync(s.worktree), "the worktree was removed despite the archive refusal");
+  assert.ok(existsSync(join(s.worktree, "debug.log")), "the only copy of the ignored file was destroyed");
+});
+
+test("AC3 grant path: the refusal names the checked-out branch, never a landed one with '0 commits'", () => {
+  // The mis-attribution FOC-649 fixes: the registry branch is fully landed,
+  // but the worktree HEAD sits on a child-made branch with unlanded work.
+  const s = scenario();
+  gitIn(s.worktree, "checkout", "-b", "wip-local");
+  writeFileSync(join(s.worktree, "wip.txt"), "child-branch work\n");
+  gitIn(s.worktree, "add", "-A");
+  gitIn(s.worktree, "commit", "-m", "wip");
+  const cfg = autonomyConfig(s.base, [coveringGrant(s)]);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done], { LA_AUTONOMY_CONFIG: cfg }), fail);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /not landed/);
+  assert.match(out.error, /wip-local/, "the refusal must name the branch that actually failed");
+  assert.match(out.error, /carries 1 commit/);
+  assert.doesNotMatch(out.error, /carries 0/, "a divergent tree must never be described as carrying 0 commits");
+  assert.ok(existsSync(s.worktree));
+});
+
+test("AC3 two-key: HEAD on a child-made branch with unlanded work is refused by name", () => {
+  const s = scenario();
+  gitIn(s.worktree, "checkout", "-b", "wip-local");
+  writeFileSync(join(s.worktree, "wip.txt"), "child-branch work\n");
+  gitIn(s.worktree, "add", "-A");
+  gitIn(s.worktree, "commit", "-m", "wip");
+  const proposed = parse(cleanup(["propose", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  parse(gate(["answer", "--run", s.runId, "--gate", proposed.gateId, "--text", "yes"]), fail);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /wip-local/);
+  assert.match(out.error, /does not name/, "the refusal must say WHY a foreign branch is outside the approval");
+  assert.ok(existsSync(s.worktree));
+});
+
+test("AC3 two-key: a HEAD on a foreign branch that IS landed proceeds", () => {
+  const s = scenario();
+  gitIn(s.worktree, "checkout", "-b", "wip-local");
+  writeFileSync(join(s.worktree, "landed.txt"), "landed\n");
+  gitIn(s.worktree, "add", "-A");
+  gitIn(s.worktree, "commit", "-m", "landed");
+  gitIn(s.repo, "merge", "--ff-only", "wip-local");
+  const proposed = parse(cleanup(["propose", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  parse(gate(["answer", "--run", s.runId, "--gate", proposed.gateId, "--text", "yes"]), fail);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.ok(!existsSync(s.worktree));
+});
+
+test("AC3 two-key: a detached HEAD with unlanded work is refused too", () => {
+  const s = scenario();
+  gitIn(s.worktree, "checkout", "-b", "wip-local");
+  writeFileSync(join(s.worktree, "wip.txt"), "child-branch work\n");
+  gitIn(s.worktree, "add", "-A");
+  gitIn(s.worktree, "commit", "-m", "wip");
+  gitIn(s.worktree, "checkout", "--detach");
+  const proposed = parse(cleanup(["propose", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  parse(gate(["answer", "--run", s.runId, "--gate", proposed.gateId, "--text", "yes"]), fail);
+
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /detached/);
+  assert.match(out.error, /does not name/);
+  assert.ok(existsSync(s.worktree));
+});
+
+test("narrowed inventory: cache trees leave the inventory, ambiguity stays in it", () => {
+  const s = scenario({ ignored: ["node_modules/g.js", ".codegraph/i.db", ".state/cache.json"] });
+  writeFileSync(join(s.worktree, "notes.txt"), "untracked, not ignored, not a known cache\n");
+
+  const rep = unarchivedIgnoredContent(s.worktree, archivePath(s));
+  assert.equal(rep.covered, false);
+  assert.deepEqual([...rep.unarchived].sort(), [".state/cache.json", "notes.txt"]);
+  assert.deepEqual([...rep.ignored].sort(), [".state/cache.json"], "cache paths must leave `ignored`");
+  assert.deepEqual([...rep.untracked].sort(), ["notes.txt"], "an ambiguous untracked file stays IN");
+  assert.deepEqual(
+    rep.skippedCache.map((e) => [e.prefix, e.files]).sort(),
+    [[".codegraph/", 1], ["node_modules/", 1]],
+  );
+
+  archiveFile(s, ".state/cache.json");
+  archiveFile(s, "notes.txt");
+  assert.equal(unarchivedIgnoredContent(s.worktree, archivePath(s)).covered, true);
+});
+
+test("narrowed inventory flows into the grant precondition: only work product blocks coverage", () => {
+  const s = scenario({ ignored: ["node_modules/g.js", ".state/cache.json"] });
+  const cfg = autonomyConfig(s.base, [coveringGrant(s)]);
+  const remove = () => cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done], { LA_AUTONOMY_CONFIG: cfg });
+
+  let out = parse(remove(), fail);
+  assert.equal(out.ok, false);
+  assert.match(out.error, /not archived/);
+  assert.match(out.error, /cache\.json/);
+  assert.doesNotMatch(out.error, /node_modules/, "cache must not block the grant — it is not work product");
+
+  archiveFile(s, ".state/cache.json");
+  out = parse(remove(), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.match(out.keys.archive, /1 ignored\/untracked file\(s\) covered/);
+  assert.match(out.skippedCache.join("\n"), /node_modules/);
 });
 
 summary();

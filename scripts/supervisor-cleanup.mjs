@@ -4,6 +4,7 @@
 //   node scripts/supervisor-cleanup.mjs list    [--run <id>]
 //   node scripts/supervisor-cleanup.mjs propose --child <id> [--run <id>] [--issue-file <path>]
 //   node scripts/supervisor-cleanup.mjs remove  --child <id> [--run <id>] [--issue-file <path>]
+//   node scripts/supervisor-cleanup.mjs prune   [--run <id>] [--dry-run]
 //
 // WHY THIS EXISTS: every spawn creates ../la-wt/<branch> and nothing ever
 // reclaimed it. ADR-0009 said "cleanup happens on handoff, never on stop" and
@@ -50,8 +51,8 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { basename, join, relative, resolve, isAbsolute } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, join, relative, resolve, isAbsolute } from "node:path";
 
 import { allGates } from "./supervisor-gate.mjs";
 import { globMatch, grantIsActive, loadAutonomyGrants } from "./autonomy-grants.mjs";
@@ -283,7 +284,7 @@ function cleanupGrantVerdict(entry, repo, state, runId) {
   // be in the run's test-artifacts dir before the grant may stand in for the
   // human key — removal would otherwise destroy the only copy of files neither
   // the fingerprint nor the dirty set ever showed anyone.
-  const archiveDir = join(supervisorStateHome(), runId, "test-artifacts", entry.childId);
+  const archiveDir = archiveDirFor(runId, entry.childId);
   const archive = unarchivedIgnoredContent(entry.worktree, archiveDir);
   if (!archive.covered) {
     const names = archive.unarchived.filter((p) => !p.startsWith("<git ls-files failed"));
@@ -311,14 +312,37 @@ function cleanupGrantVerdict(entry, repo, state, runId) {
   } catch {
     branchTip = null;
   }
-  if (!isAncestorOf(branchTip, main, repo) || !isAncestorOf(state.head, main, repo)) {
-    let ahead = null;
-    try {
-      ahead = Number(git(["rev-list", "--count", `${main}..${branchTip ?? state.head}`], repo));
-    } catch {
-      ahead = null;
-    }
-    return miss(`not landed: branch ${entry.branch} carries ${ahead ?? "unknown"} commit(s) main does not have`);
+
+  // FOC-649: the refusal names the tip that ACTUALLY failed, not whichever one
+  // the registry names. The worktree HEAD can sit on a child-made local branch
+  // while the registry branch is fully landed — the old message computed the
+  // ahead-count from `branchTip ?? state.head` and could say a landed branch
+  // "carries 0 commit(s)" while the real offender went unnamed.
+  let headBranch = null;
+  try {
+    headBranch = git(["rev-parse", "--abbrev-ref", "HEAD"], entry.worktree);
+    if (headBranch === "HEAD") headBranch = null; // detached
+  } catch {
+    headBranch = null;
+  }
+  const tips = [{ label: `branch ${entry.branch}`, rev: branchTip }];
+  if (state.head && state.head !== branchTip) {
+    tips.push({ label: headBranch ? `worktree HEAD on ${headBranch}` : "worktree HEAD (detached)", rev: state.head });
+  }
+  const unlanded = tips.filter((t) => !isAncestorOf(t.rev, main, repo));
+  if (unlanded.length > 0) {
+    const detail = unlanded
+      .map((t) => {
+        let ahead = null;
+        try {
+          ahead = Number(git(["rev-list", "--count", `${main}..${t.rev}`], repo));
+        } catch {
+          ahead = null;
+        }
+        return `${t.label} @ ${String(t.rev ?? "unknown").slice(0, 12)} carries ${ahead ?? "unknown"} commit(s) main does not have`;
+      })
+      .join("; ");
+    return miss(`not landed: ${detail}`);
   }
 
   const archiveCount = archive.ignored.length + archive.untracked.length;
@@ -554,6 +578,132 @@ function cmdPropose(args) {
   );
 }
 
+// ── archive automation (FOC-649) ─────────────────────────────────────────────
+
+// Past this many work-product paths the report narrows to the first CAP plus an
+// "and N more" line — a 793-file tree must not make the removal report unusable.
+// The archive dir always holds the full set; the report is the bounded VIEW.
+const ARCHIVE_PATH_CAP = 20;
+
+function boundedPaths(paths, cap = ARCHIVE_PATH_CAP) {
+  if (paths.length <= cap) return paths;
+  return [...paths.slice(0, cap), `... and ${paths.length - cap} more (the archive dir holds the full set)`];
+}
+
+/**
+ * Copy every work-product path out of the worktree, path-preservingly, BEFORE
+ * anything deletes it (FOC-649, AC2). Fail-closed in both directions:
+ *
+ *   · a listing failure (the `<git ls-files failed>` sentinel) means UNKNOWN —
+ *     and UNKNOWN is never read as "nothing to lose";
+ *   · any copy or verification failure refuses the WHOLE removal having deleted
+ *     nothing — the tree is still standing when the refusal prints.
+ *
+ * Verification reuses unarchivedIgnoredContent itself, so the archive is proven
+ * covered by the exact predicate the grant precondition uses — not by a recount
+ * that could disagree with it.
+ */
+function archiveWorkProduct({ worktree, inventory, archiveDir }) {
+  const work = [...inventory.ignored, ...inventory.untracked].sort();
+  const broken = work.filter((p) => p.startsWith("<git ls-files failed"));
+  if (broken.length > 0) {
+    failJson("cannot enumerate the worktree's ignored/untracked content — refusing to delete anything", {
+      broken,
+      hint: "what would be lost is UNKNOWN, so the removal is refused (fail-closed)",
+    });
+  }
+  if (work.length === 0) return { dir: archiveDir, count: 0, paths: [] };
+
+  console.error(`[cleanup] archiving ${work.length} ignored/untracked work-product path(s) to ${archiveDir}`);
+  try {
+    mkdirSync(archiveDir, { recursive: true });
+  } catch (err) {
+    failJson(`archive destination cannot be created: ${archiveDir} (${err.message.split("\n")[0]})`, {
+      hint: "nothing was deleted — the worktree and every file in it are untouched",
+    });
+  }
+  for (const rel of work) {
+    try {
+      const dest = join(archiveDir, rel);
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(join(worktree, rel), dest);
+    } catch (err) {
+      failJson(`archiving ${rel} failed: ${err.message.split("\n")[0]}`, {
+        archiveDir,
+        hint: "nothing was deleted — the removal is refused until every work-product path is archived",
+      });
+    }
+  }
+  const check = unarchivedIgnoredContent(worktree, archiveDir);
+  if (!check.covered) {
+    failJson(
+      `archive verification failed: ${check.unarchived.length} path(s) still missing from ${archiveDir}`,
+      {
+        unarchived: check.unarchived.slice(0, 10),
+        hint: "nothing was deleted — the removal is refused until the archive covers the whole inventory",
+      },
+    );
+  }
+  return { dir: archiveDir, count: work.length, paths: boundedPaths(work) };
+}
+
+/**
+ * The archive dir every removal path shares: state-home/<run>/test-artifacts/<childId>.
+ */
+const archiveDirFor = (runId, childId) => join(supervisorStateHome(), runId, "test-artifacts", childId);
+
+/**
+ * Two-key containment (FOC-649, AC3): the human key covers unlanded work on the
+ * branch the record names — that is the existing, tested behaviour — but it
+ * cannot cover work sitting on a branch the record does not even name. A HEAD
+ * on a child-made local branch (or detached) with commits outside main is
+ * refused by name, before anything is archived or deleted. Both tips landed →
+ * proceed. When `main` cannot be resolved at all this check cannot evaluate and
+ * stays out of the way: it narrows an explicit human approval, it is not an
+ * independent absolute.
+ */
+function refuseUnlandedForeignHead(entry, repo, state) {
+  if (!state.head) return; // unreadable HEAD — the fingerprint guard already refused anything movable
+  let main = null;
+  try {
+    main = git(["rev-parse", "--verify", "refs/heads/main"], repo);
+  } catch {
+    return; // no main → ancestry is unevaluable; the two keys carry this removal alone
+  }
+  if (isAncestorOf(state.head, main, repo)) return; // landed — nothing to contain
+  let headBranch = null;
+  try {
+    headBranch = git(["rev-parse", "--abbrev-ref", "HEAD"], entry.worktree);
+    if (headBranch === "HEAD") headBranch = null; // detached
+  } catch {
+    headBranch = null;
+  }
+  // Detached HEAD or a foreign branch: either way the unlanded work sits
+  // somewhere the record does not name. Only the registry branch itself keeps
+  // the human key's reach (the existing, tested behaviour).
+  if (headBranch === entry.branch) return;
+  const where = headBranch ? `branch "${headBranch}"` : "a detached HEAD";
+  let ahead = null;
+  try {
+    ahead = Number(git(["rev-list", "--count", `${main}..${state.head}`], repo));
+  } catch {
+    ahead = null;
+  }
+  failJson(
+    `refusing: worktree HEAD is on ${where} @ ${state.head.slice(0, 12)}, ` +
+      `which carries ${ahead ?? "unknown"} commit(s) main does not have — the approval covers ` +
+      `branch ${entry.branch}, the one the record names; it cannot cover work on a branch it does not name`,
+    {
+      headBranch: headBranch ?? null,
+      head: state.head,
+      registryBranch: entry.branch ?? null,
+      hint: headBranch
+        ? `land ${headBranch} in main first, or move the worktree back to ${entry.branch}, then remove`
+        : `check ${entry.branch} out (or land the detached commit in main), then remove`,
+    },
+  );
+}
+
 // ── remove ───────────────────────────────────────────────────────────────────
 
 function cmdRemove(args) {
@@ -628,6 +778,13 @@ function cmdRemove(args) {
   // if a recorded grant had been silently ignored.
   const grantVerdict = cleanupGrantVerdict(entry, repo, state, runId);
   if (grantVerdict.covered) {
+    // Ordering (FOC-613 kept, FOC-649 added): the verdict above was evaluated
+    // on the tree AS FOUND; the archive automation below runs after it — a no-op
+    // when the precondition already held, and the closer of the race where
+    // content appeared between the verdict and this line.
+    const archiveDir = archiveDirFor(runId, childId);
+    const inventory = unarchivedIgnoredContent(entry.worktree, archiveDir);
+    const archived = archiveWorkProduct({ worktree: entry.worktree, inventory, archiveDir });
     performRemoval({
       runId,
       childId,
@@ -644,6 +801,7 @@ function cmdRemove(args) {
           : `${grantVerdict.archive.count} ignored/untracked file(s) covered by ${grantVerdict.archive.archiveDir}`,
         fingerprint: state.fingerprint,
       },
+      archive: { ...archived, skippedCache: inventory.skippedCache },
       registryExtra: { cleanupGrant: grantVerdict.grantId },
     });
     return;
@@ -707,6 +865,13 @@ function cmdRemove(args) {
   // `--force` only because the dirty set in front of him is byte-for-byte the
   // dirty set here — the fingerprint above is what makes that true. Without it
   // this flag would be the script deciding which uncommitted work is expendable.
+  // Sequence (FOC-649): guards → keys → containment → archive → remove. The
+  // containment refusal fires BEFORE the archive step, so a refused removal
+  // writes nothing anywhere.
+  refuseUnlandedForeignHead(entry, repo, state);
+  const archiveDir = archiveDirFor(runId, childId);
+  const inventory = unarchivedIgnoredContent(entry.worktree, archiveDir);
+  const archived = archiveWorkProduct({ worktree: entry.worktree, inventory, archiveDir });
   performRemoval({
     runId,
     childId,
@@ -719,14 +884,22 @@ function cmdRemove(args) {
       human: `gate ${gate.gateId} answered "${gate.answer?.text}" at ${gate.answer?.answeredAt}`,
       fingerprint: state.fingerprint,
     },
+    archive: { ...archived, skippedCache: inventory.skippedCache },
   });
 }
 
 /**
  * The one destructive act, shared by both paths (FOC-613): `git worktree
  * remove`, the registry timestamp, and a report that says what was kept.
+ *
+ * The report's honesty contract (FOC-649, R1): every path this removal destroys
+ * appears in ONE of two named lists before it dies. `destroyed` is the
+ * tracked-dirty set (unchanged meaning — `git status --porcelain`, what the
+ * approval covered); `archived` is the ignored/untracked work product that was
+ * copied out first; `skippedCache` is the rebuildable cache left to die by name.
+ * Skipping is fine; skipping silently is not.
  */
-function performRemoval({ runId, childId, entry, repo, state, forced, keys, registryExtra = {} }) {
+function performRemoval({ runId, childId, entry, repo, state, forced, keys, archive, registryExtra = {} }) {
   const gitArgs = ["worktree", "remove", entry.worktree, ...(forced ? ["--force"] : [])];
   try {
     git(gitArgs, repo);
@@ -757,8 +930,132 @@ function performRemoval({ runId, childId, entry, repo, state, forced, keys, regi
         branchNote: entry.branch
           ? `branch ${entry.branch} is untouched — ${state.commitsAhead ?? "?"} commit(s) ahead of the base, still reachable`
           : "no branch recorded",
+        // List 1: tracked, uncommitted — the set the approval showed. Never archived.
         destroyed: state.dirty,
+        destroyedKind: "tracked, uncommitted paths (git status --porcelain) — approved for deletion, not archived",
+        // List 2: ignored/untracked work product, copied to `archived.dir` before removal.
+        archived: {
+          dir: archive.dir,
+          count: archive.count,
+          kind:
+            archive.count > 0
+              ? "git-ignored/untracked work product — copied here before removal"
+              : "nothing needed archiving",
+          paths: archive.paths,
+        },
+        // List 3: rebuildable cache, skipped by name with the command that regrows it.
+        skippedCache: (archive.skippedCache ?? []).map(
+          (e) => `${e.prefix} — ${e.files} file(s), skipped: rebuildable by ${e.regenerate}`,
+        ),
         keys,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+// ── prune (FOC-649) ──────────────────────────────────────────────────────────
+
+// Retention for test-artifacts/: the intersection, never the union. A run is
+// kept only while it is BOTH among the newest KEEP_RUNS AND inside the window;
+// failing either side makes it prunable. The boundary is strict: a run at
+// exactly PRUNE_MAX_AGE_MS is OUTSIDE the window (ageMs < window retains).
+const PRUNE_KEEP_RUNS = 20;
+const PRUNE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** { files, bytes } for a directory tree, or null when it does not exist. */
+function treeStats(dir) {
+  if (!existsSync(dir)) return null;
+  let files = 0;
+  let bytes = 0;
+  const walk = (d) => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else {
+        files++;
+        try {
+          bytes += statSync(p).size;
+        } catch {
+          // a file vanishing mid-walk must not corrupt the total; count the rest
+        }
+      }
+    }
+  };
+  walk(dir);
+  return { files, bytes };
+}
+
+/**
+ * Retention for `<state-home>/<run>/test-artifacts/`. The ONLY thing it may
+ * delete is a run's test-artifacts subtree — never children.json, never the
+ * wake queue or triage or merge records, never a branch, never a worktree. If a
+ * future edit finds itself adding an evidence file to the prune set, that edit
+ * is the bug.
+ *
+ * `--run <id>` narrows DELETION to one run; ranking and age are always computed
+ * across the whole state home, so a single-run prune applies the same retention
+ * rule, not a weaker local one. `--dry-run` lists exactly what a real run would
+ * delete and touches nothing.
+ */
+function cmdPrune(args) {
+  const dryRun = args["dry-run"] === true;
+  const target = args.run && args.run !== true ? args.run : null;
+  const home = supervisorStateHome();
+  const runDirs = existsSync(home)
+    ? readdirSync(home, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => ({ runId: e.name, dir: join(home, e.name) }))
+    : [];
+
+  const mtimeOf = (dir) => {
+    try {
+      return statSync(dir).mtimeMs;
+    } catch {
+      return 0;
+    }
+  };
+  const now = Date.now();
+  const ranked = runDirs
+    .map((r) => ({ ...r, mtime: mtimeOf(r.dir) }))
+    .sort((a, b) => b.mtime - a.mtime)
+    .map((r, i) => ({ ...r, rank: i + 1, ageMs: now - r.mtime }));
+
+  const prunable = ranked.filter((r) => !(r.rank <= PRUNE_KEEP_RUNS && r.ageMs < PRUNE_MAX_AGE_MS));
+  const retentionNote =
+    `retained = newest ${PRUNE_KEEP_RUNS} runs ∩ runs from the last ${PRUNE_MAX_AGE_MS / 86_400_000} days — ` +
+    "the intersection, never the union";
+
+  if (target && !prunable.some((r) => r.runId === target)) {
+    console.log(
+      JSON.stringify({ ok: true, dryRun, run: target, pruned: [], retained: true, note: retentionNote }, null, 2),
+    );
+    return;
+  }
+
+  const selected = target ? prunable.filter((r) => r.runId === target) : prunable;
+  const pruned = [];
+  for (const r of selected) {
+    const artifacts = join(r.dir, "test-artifacts");
+    const stats = treeStats(artifacts);
+    if (!stats || stats.files === 0) continue; // nothing archived here — nothing to report
+    pruned.push({ run: r.runId, rank: r.rank, ageDays: Math.round(r.ageMs / 86_400_000), ...stats });
+    if (!dryRun) rmSync(artifacts, { recursive: true, force: true });
+  }
+
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        dryRun,
+        scannedRuns: ranked.length,
+        retention: retentionNote,
+        pruned: pruned.map(({ run, rank, ageDays, files, bytes }) => ({ run, rank, ageDays, files, bytes })),
+        bytes: pruned.reduce((a, p) => a + p.bytes, 0),
+        note: dryRun
+          ? "dry run — nothing was deleted"
+          : "deleted only each listed run's test-artifacts/ subtree; registry, gates, wake queue, triage and merge records are never touched",
       },
       null,
       2,
@@ -783,8 +1080,9 @@ function main() {
   if (cmd === "list") return cmdList(args);
   if (cmd === "propose") return cmdPropose(args);
   if (cmd === "remove") return cmdRemove(args);
+  if (cmd === "prune") return cmdPrune(args);
 
-  failJson(`unknown subcommand "${cmd ?? ""}" — expected list | propose | remove`);
+  failJson(`unknown subcommand "${cmd ?? ""}" — expected list | propose | remove | prune`);
 }
 
 export { GATE_KIND, AFFIRMATIVE, treeState };

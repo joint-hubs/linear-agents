@@ -1262,19 +1262,58 @@ export function dirtyTreeReport(cwd) {
 // verdict (FOC-613), and the FOC-472 follow-up calls it for `remove`'s honest
 // destroyed report and for pre-removal archiving. Pure predicate — it never
 // archives, never deletes.
+//
+// REBUILDABLE CACHE (FOC-649): the trees below are excluded from the inventory
+// by construction — out of `ignored`/`untracked`/`unarchived`, hence out of the
+// grant's archive precondition and out of every archive copy. Deleting a
+// checkout that holds them destroys nothing a command cannot regenerate, and
+// archiving gigabytes of node_modules into the state home is not retention, it
+// is noise. The set is deliberately SHORT and each entry names the command that
+// rebuilds it; anything ambiguous stays IN the inventory, because
+// over-archiving costs bytes and under-archiving loses work.
+
+/**
+ * Worktree-relative path prefixes (forward slashes, the ls-files convention)
+ * whose content is reproducible with one command. One exported constant so the
+ * grant precondition, the archive copy and the removal report cannot disagree
+ * about what a cache is.
+ */
+export const REBUILDABLE_CACHE_PREFIXES = [
+  // `npm install` regenerates the whole tree from package.json + lockfile
+  { prefix: "node_modules/", regenerate: "npm install" },
+  // the codegraph index is provisioned by codegraph index init at launch readiness
+  { prefix: ".codegraph/", regenerate: "codegraph index init" },
+  // `npm run build` emits dist/ from source
+  { prefix: "dist/", regenerate: "npm run build" },
+  // vite build regenerates .vite/ (dep cache and build output)
+  { prefix: ".vite/", regenerate: "vite build" },
+  // `npm test -- --coverage` rewrites coverage/ on every instrumented run
+  { prefix: "coverage/", regenerate: "npm test -- --coverage" },
+];
+
+const cacheEntryFor = (rel) =>
+  REBUILDABLE_CACHE_PREFIXES.find((c) => rel.startsWith(c.prefix)) ?? null;
 
 /**
  * Enumerate the worktree's git-ignored and untracked files; report which of
  * them the archive does not cover.
  *
- * Returns `{ ignored, untracked, unarchived, archiveDir, covered }`:
- *   · `ignored`    — ignored files, worktree-relative, forward slashes
- *                    (git expands ignored directories into individual files);
- *   · `untracked`  — untracked non-ignored files, same shape;
+ * Returns `{ ignored, untracked, unarchived, skippedCache, archiveDir, covered }`:
+ *   · `ignored`    — ignored WORK-PRODUCT files, worktree-relative, forward
+ *                    slashes (git expands ignored directories into individual
+ *                    files); rebuildable-cache paths (REBUILDABLE_CACHE_PREFIXES)
+ *                    are excluded — FOC-649;
+ *   · `untracked`  — untracked non-ignored work-product files, same shape and
+ *                    same exclusion;
  *   · `unarchived` — the union whose `<archiveDir>/<rel>` does not exist, plus
  *                    a `<git ls-files failed: ...>` sentinel if git failed;
+ *   · `skippedCache` — the cache entries actually present in the tree, with
+ *                    per-prefix file counts and the command that regenerates
+ *                    each: `[{ prefix, regenerate, files }]`. Empty when the
+ *                    tree holds no cache. This is what `remove`'s report uses
+ *                    to say, per tree, what was skipped and why;
  *   · `covered`    — `unarchived.length === 0`. Vacuously true with no
- *                    ignored/untracked content and NO archive directory —
+ *                    work-product content and NO archive directory —
  *                    nothing needed archiving, so none is required.
  *
  * A failed listing is never read as "covered": the sentinel lands in
@@ -1290,8 +1329,21 @@ export function unarchivedIgnoredContent(worktree, archiveDir) {
       return [`<git ls-files failed: ${err.message.split("\n")[0]}>`];
     }
   };
-  const ignored = list(["--ignored"]);
-  const untracked = list([]);
+  // Sentinels and cache paths are both kept out of the work-product lists, but
+  // for opposite reasons: the cache is SAFE to drop, the sentinel is a failure
+  // that must reach `unarchived` so `covered` reads false (fail-closed).
+  const isWork = (p) => p.startsWith("<git ls-files failed") || !cacheEntryFor(p);
+  const raw = { ignored: list(["--ignored"]), untracked: list([]) };
+  const ignored = raw.ignored.filter(isWork);
+  const untracked = raw.untracked.filter(isWork);
+  const cacheFiles = [...raw.ignored, ...raw.untracked].filter((p) => cacheEntryFor(p));
+  const skippedCache = REBUILDABLE_CACHE_PREFIXES
+    .map(({ prefix, regenerate }) => ({
+      prefix,
+      regenerate,
+      files: cacheFiles.filter((p) => p.startsWith(prefix)).length,
+    }))
+    .filter((e) => e.files > 0);
   const failed = [...ignored, ...untracked].filter((p) => p.startsWith("<git ls-files failed"));
   const unarchived = [
     ...failed,
@@ -1299,7 +1351,7 @@ export function unarchivedIgnoredContent(worktree, archiveDir) {
       .filter((p) => !p.startsWith("<git ls-files failed"))
       .filter((rel) => !existsSync(join(archiveDir, rel))),
   ];
-  return { ignored, untracked, unarchived, archiveDir, covered: unarchived.length === 0 };
+  return { ignored, untracked, unarchived, skippedCache, archiveDir, covered: unarchived.length === 0 };
 }
 
 // ── pinned state (FOC-286) ───────────────────────────────────────────────────
