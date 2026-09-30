@@ -437,6 +437,76 @@ async function run() {
     }
   });
 
+  // --- FOC-597: append-torn-then-complete (unterminated EOF tail) -----------
+  // A live writer caught mid-append leaves a torn JSON tail. It must NOT be
+  // consumed: the stored byte_offset stays at the last complete line boundary,
+  // so the line that COMPLETES it on the next append is parsed (no fact loss).
+  await test("(597) torn EOF tail held at the line boundary; the completed line lands next pass", async () => {
+    const tempT = mkdtempSync(join(tmpdir(), "foc-597-"));
+    const savedHome = process.env.LA_TELEMETRY_HOME;
+    const savedDb = process.env.LA_TELEMETRY_DB;
+    const dbPathT = join(tempT, "telemetry.sqlite");
+    // Point the env default at this DB so ingestTranscript's internal
+    // recordToolFact/recordDelegationLink open the same DB as `dbT`.
+    process.env.LA_TELEMETRY_HOME = tempT;
+    process.env.LA_TELEMETRY_DB = dbPathT;
+    try {
+      const dbT = openTelemetryDb(dbPathT);
+      try {
+        const runId = "run-foc-597";
+        const sessionIdT = "session-foc-597";
+        const sourcePath = join(tempT, "lead.jsonl");
+        applyEvent(dbT, makeEvent("run.started", {
+          runId, squad: "dev", startedAt: "2026-09-30T10:00:00.000Z", cwd: "C:/repos/office",
+        }, { runId }));
+        applyEvent(dbT, makeEvent("session.linked", {
+          runId, sessionId: sessionIdT, transcriptPath: sourcePath,
+        }, { runId }));
+
+        const line1 = JSON.stringify({
+          type: "assistant", timestamp: "2026-09-30T10:01:00.000Z", sessionId: sessionIdT,
+          message: { id: "msg-1", model: "deepseek-v4-flash", usage: { input_tokens: 100, output_tokens: 50 } },
+        });
+        const line2 = JSON.stringify({
+          type: "assistant", timestamp: "2026-09-30T10:02:00.000Z", sessionId: sessionIdT,
+          message: { id: "msg-2", model: "deepseek-v4-flash", usage: { input_tokens: 200, output_tokens: 70 } },
+        });
+        // Torn write: line 1 complete, line 2 cut mid-JSON (before its usage).
+        const tornAt = line2.indexOf("usage");
+        assert(tornAt > 0, "fixture: line2 must contain a usage key to tear before");
+        const torn = line2.slice(0, tornAt);
+        let tornParses = true;
+        try { JSON.parse(torn); } catch { tornParses = false; }
+        assert(!tornParses, "fixture: the torn prefix must not parse as JSON");
+        const boundary = Buffer.byteLength(line1 + "\n", "utf8");
+        writeFileSync(sourcePath, line1 + "\n" + torn, "utf8");
+
+        await ingestTranscript(dbT, runId, sourcePath, sessionIdT);
+        const usage1 = dbT.prepare("SELECT COUNT(*) AS c FROM usage_facts WHERE source_path=?").get(sourcePath).c;
+        assertEqual(usage1, 1, "pass 1: only the complete line is ingested");
+        const ts1 = dbT.prepare("SELECT byte_offset FROM transcript_sources WHERE source_path=? AND run_id=?").get(sourcePath, runId);
+        assert(ts1, "pass 1: transcript_sources row missing");
+        assertEqual(ts1.byte_offset, boundary, "AC1: byte_offset held at the last complete line boundary (not past the torn tail)");
+
+        // The writer completes the line — exactly the append AC2 names.
+        writeFileSync(sourcePath, line2.slice(torn.length) + "\n", { flag: "a" });
+        await ingestTranscript(dbT, runId, sourcePath, sessionIdT);
+        const usageRows = dbT.prepare("SELECT source_offset FROM usage_facts WHERE source_path=? ORDER BY source_offset").all(sourcePath);
+        assertEqual(usageRows.length, 2, "AC2: the completed line is ingested on the next pass (no fact loss)");
+        assertEqual(usageRows[1].source_offset, boundary, "AC2: at its own offset (the tail start)");
+        const ts2 = dbT.prepare("SELECT byte_offset FROM transcript_sources WHERE source_path=? AND run_id=?").get(sourcePath, runId);
+        assertEqual(ts2.byte_offset, boundary + Buffer.byteLength(line2 + "\n", "utf8"),
+          "byte_offset converges past the completed line once the tail resolves");
+      } finally {
+        dbT.close();
+      }
+    } finally {
+      process.env.LA_TELEMETRY_HOME = savedHome;
+      process.env.LA_TELEMETRY_DB = savedDb;
+      try { rmSync(tempT, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
   console.log(`\n${passed} passed, ${skipped} skipped, ${failed} failed`);
   if (failed) console.log(failures.join("\n"));
   exitCode = failed ? 1 : 0;

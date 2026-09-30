@@ -291,6 +291,78 @@ if (DatabaseSync) {
     union.length === expected.length &&
     union.every((l, i) => l.offset === expected[i].offset && l.raw === expected[i].raw),
     `first=${first.length} resumed=${resumed.lines.length} expected=${expected.length}`);
+
+  // --- FOC-597: the unterminated EOF tail is held back, not consumed --------
+  // The tail after the last newline is both "the final line" (files may lack a
+  // trailing newline — the shape full-parse callers rely on) and the exact shape
+  // of a live writer caught mid-append. It stays in `lines`, but it is EXCLUDED
+  // from endOffset: committing past a torn write loses the line that later
+  // completes it (FOC-597 fact loss). Consumers commit the tail only once it
+  // parses as a whole record.
+  const tornPath = join(temp, "torn.jsonl");
+  const TORN_HEAD = JSON.stringify({ n: 0 }) + "\n";
+  const TORN_TAIL = '{"n":1,"text":"mid-wri';
+  writeFileSync(tornPath, TORN_HEAD + TORN_TAIL, "utf8");
+  const tornBoundary = Buffer.byteLength(TORN_HEAD, "utf8");
+  const tornSize = statSync(tornPath).size;
+  const torn = await collect(tornPath);
+  let tornEof = null;
+  for await (const chunk of jsonlChunksFrom(tornPath, 0, { chunkBytes: 1 << 18 })) {
+    if (chunk.atEof) tornEof = chunk;
+  }
+  check("FOC-597 torn tail: still yielded as a line (full-parse parity)",
+    torn.lines.length === 2 && torn.lines[1].raw === TORN_TAIL && torn.lines[1].offset === tornBoundary,
+    `got ${torn.lines.length} lines, tail raw=${JSON.stringify(torn.lines[1]?.raw)}`);
+  check("FOC-597 torn tail: endOffset stops at the tail, tail reports [offset,end)",
+    tornEof && tornEof.endOffset === tornBoundary &&
+    tornEof.tail && tornEof.tail.offset === tornBoundary && tornEof.tail.end === tornSize,
+    `endOffset=${tornEof?.endOffset} tail=${JSON.stringify(tornEof?.tail)}`);
+  const rereadTail = await collect(tornPath, tornBoundary);
+  check("FOC-597 torn tail: resuming at endOffset re-reads the whole tail (nothing lost)",
+    rereadTail.lines.length === 1 && rereadTail.lines[0].offset === tornBoundary &&
+    rereadTail.lines[0].raw === TORN_TAIL,
+    `got ${rereadTail.lines.length} lines`);
+
+  // Twin: a final line WITHOUT a trailing newline is still a line — the
+  // generator documents that shape and full-parse callers take the last line.
+  const finalPath = join(temp, "final-no-newline.jsonl");
+  writeFileSync(finalPath, JSON.stringify({ n: 0 }) + "\n" + JSON.stringify({ n: 1 }), "utf8");
+  const finalExpected = fullSplitOffsets(finalPath);
+  const finalParsed = await collect(finalPath);
+  check("FOC-597 no-trailing-newline file: full-split parity (final line kept)",
+    finalParsed.lines.length === finalExpected.length &&
+    finalParsed.lines.every((l, i) => l.offset === finalExpected[i].offset && l.raw === finalExpected[i].raw),
+    `got ${finalParsed.lines.length} vs ${finalExpected.length}`);
+  let finalEof = null;
+  for await (const chunk of jsonlChunksFrom(finalPath, 0)) { if (chunk.atEof) finalEof = chunk; }
+  check("FOC-597 no-trailing-newline file: tail marked, endOffset stops at its start",
+    finalEof && finalEof.tail && finalEof.tail.offset === finalEof.endOffset &&
+    finalEof.tail.end === statSync(finalPath).size,
+    `endOffset=${finalEof?.endOffset} tail=${JSON.stringify(finalEof?.tail)}`);
+
+  const closedPath = join(temp, "closed.jsonl");
+  writeFileSync(closedPath, JSON.stringify({ n: 0 }) + "\n", "utf8");
+  let closedEof = null;
+  for await (const chunk of jsonlChunksFrom(closedPath, 0)) { if (chunk.atEof) closedEof = chunk; }
+  check("FOC-597 newline-terminated file: no tail, endOffset at EOF",
+    closedEof && closedEof.tail == null && closedEof.endOffset === statSync(closedPath).size,
+    `endOffset=${closedEof?.endOffset} tail=${JSON.stringify(closedEof?.tail)}`);
+
+  // Related (same issue): decoder.end() flushes a multi-byte char split at EOF
+  // instead of silently dropping its bytes from the tail text.
+  const midCharPath = join(temp, "mid-char.jsonl");
+  const MID_CHAR_SIZE = 10; // '{"text":"' + first byte of U+2713
+  writeFileSync(midCharPath, Buffer.concat([Buffer.from('{"text":"'), Buffer.from([0xe2])]));
+  const midChar = [];
+  let midCharEof = null;
+  for await (const chunk of jsonlChunksFrom(midCharPath, 0)) {
+    midChar.push(...chunk.lines);
+    if (chunk.atEof) midCharEof = chunk;
+  }
+  check("FOC-597 split multi-byte char at EOF: flushed via decoder.end(), tail at file size",
+    midChar.length === 1 && midChar[0].raw === '{"text":"�' &&
+    midCharEof?.tail && midCharEof.tail.offset === 0 && midCharEof.tail.end === MID_CHAR_SIZE,
+    `raw=${JSON.stringify(midChar[0]?.raw)} tail=${JSON.stringify(midCharEof?.tail)}`);
 }
 
 // Windows can hold the SQLite file briefly after close (AV/indexer) — the same
