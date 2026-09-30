@@ -8,6 +8,7 @@
 //   children.json        the registry (§2.5)
 //   children/<id>.jsonl  the raw stream-json tee for one child (§2.7)
 //   gates/<gateId>.json  gate records (supervisor-gate.mjs, FOC-122)
+//   holds.json           holds — non-blocking decision records (FOC-612)
 //   wake-queue.jsonl     the durable wake queue (FOC-608; watcher writes, status drains)
 //   wake-ack.json        the persisted drain watermark (FOC-608; status writes)
 //   triage.json          the recorded verdict (FOC-123, read here, never written)
@@ -19,6 +20,11 @@ import { join, dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { atomicWriteJSON } from "./utils.mjs";
+// Single source of the never-grantable action list. This pulls ajv into every
+// supervisor-lib importer (the loader compiles lazily, so only the cost is the
+// module evaluation) — accepted over duplicating the list, because two copies
+// of "what no hold may ever cover" would drift exactly when it mattered.
+import { NEVER_COVERS } from "./autonomy-grants.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -342,6 +348,325 @@ export function readWaitArmed(runId) {
   const expiresAt = typeof marker?.expiresAt === "number" ? marker.expiresAt : null;
   return { armed: expiresAt !== null && expiresAt > Date.now(), expiresAt };
 }
+
+// ── holds (FOC-612) ──────────────────────────────────────────────────────────
+//
+// A hold is a decision the Supervisor owes Mateusz that does NOT stop the run.
+// That is the difference from a gate (§2.6): a gate stops a child's turn and
+// everything behind it; a hold is presented and answered in the background, and
+// only the work that explicitly names it waits. Several holds may be open at
+// once — one is put to Mateusz per turn, ordered by impact.
+//
+// The store is ONE versioned file (`holds.json`, schema version field plus
+// append-only per-hold history), not one-file-per-record like gates. The
+// ticket mandates that shape, and a hold is genuinely not a gate record: its
+// options/recommendation/blocks fields have no place in the §2.6 record whose
+// exact key set supervisor-cleanup.mjs reads.
+//
+// Writer discipline: `hold`/`answer --hold`/`defer`/`list --open` in
+// supervisor-gate.mjs are the only writers. Everything here is read-modify-write
+// through atomicWriteJSON, single-writer per turn — same discipline as the
+// registry (see updateChild).
+
+export const HOLDS_SCHEMA_VERSION = 1;
+export const HOLD_STATES = ["open", "answered"];
+// "One at a time, ordered by impact" needs an order. Three bands, newest tiebreak:
+// high first — the impact ordering is the Supervisor's, declared at raise time.
+export const HOLD_IMPACTS = ["high", "medium", "low"];
+
+export const holdsPath = (runId) => join(runDir(runId), "holds.json");
+
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/;
+const isIso = (v) => typeof v === "string" && ISO_RE.test(v) && !Number.isNaN(Date.parse(v));
+
+/**
+ * Fail-closed validation, inline in supervisor-lib style (supervisor-lib stays
+ * free of a schema compiler; autonomy-grants.mjs earns ajv because it loads a
+ * hand-edited config, while holds.json is written only by our own CLI).
+ *
+ * THROWS, never guesses: unlike the gates DIRECTORY, where a malformed file is
+ * tolerated per-file so it cannot hide the well-formed ones, the holds store is
+ * ONE file — there is nothing well-formed to keep visible, and a store nobody
+ * can parse must not read as "no holds owed". Callers decide what a throw
+ * means: the guard fails closed (blocks the turn end naming the error), the
+ * CLI refuses, the completion check refuses. A hold whose `resolution` names a
+ * neverCovers action is refused HERE — at load, not honoured — exactly like a
+ * grant naming one (autonomy-grants.validateAutonomy).
+ */
+export function validateHoldStore(data, where = "holds.json") {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error(`${where} is not a JSON object`);
+  }
+  if (data.version !== HOLDS_SCHEMA_VERSION) {
+    throw new Error(
+      `${where} carries version ${JSON.stringify(data.version)} — expected ${HOLDS_SCHEMA_VERSION}; ` +
+        `migrate or re-create the store, never guess across versions`,
+    );
+  }
+  if (!Array.isArray(data.holds)) throw new Error(`${where} carries no holds array`);
+  const seen = new Set();
+  for (const hold of data.holds) {
+    const at = `hold ${JSON.stringify(hold?.id ?? "?")}`;
+    if (!/^hold-\d+$/.test(String(hold?.id))) throw new Error(`${at}: id must be hold-<number>`);
+    if (seen.has(hold.id)) throw new Error(`${at}: duplicate id`);
+    seen.add(hold.id);
+    for (const field of ["origin", "question", "recommendation"]) {
+      if (typeof hold[field] !== "string" || !hold[field].trim()) {
+        throw new Error(`${at}: ${field} must be a non-empty string`);
+      }
+    }
+    if (!Array.isArray(hold.options) || !hold.options.length) {
+      throw new Error(`${at}: options must be a non-empty array — a recommendation without its alternatives is a fail`);
+    }
+    for (const option of hold.options) {
+      if (!option || typeof option !== "object" || Array.isArray(option)) {
+        throw new Error(`${at}: every option must be an object`);
+      }
+      if (typeof option.label !== "string" || !option.label.trim()) {
+        throw new Error(`${at}: option label must be a non-empty string`);
+      }
+      if (typeof option.model !== "string" || !option.model.trim()) {
+        throw new Error(`${at}: option "${option.label}" must name the model its cost is priced against`);
+      }
+      if (option.costUsd !== null && !(typeof option.costUsd === "number" && option.costUsd >= 0)) {
+        throw new Error(`${at}: option "${option.label}" costUsd must be a number >= 0 or null (UNKNOWN), got ${JSON.stringify(option.costUsd)}`);
+      }
+      // FOC-165 carries over: costUsdReported is NOT a measurement and never
+      // enters a hold — an option priced by nothing has costUsd null and names
+      // its model instead.
+      if ("costUsdReported" in option) {
+        throw new Error(`${at}: option "${option.label}" carries costUsdReported — the stream's figure is not a price and never enters a hold`);
+      }
+      if (option.costUsd === null && (typeof option.unpricedModel !== "string" || !option.unpricedModel.trim())) {
+        throw new Error(`${at}: option "${option.label}" has no priced cost — it must name unpricedModel (UNKNOWN names the model, never zero)`);
+      }
+    }
+    if (!HOLD_STATES.includes(hold.state)) {
+      throw new Error(`${at}: state must be one of ${HOLD_STATES.join(" | ")}`);
+    }
+    if (!isIso(hold.createdAt)) throw new Error(`${at}: createdAt must be an ISO timestamp`);
+    if (hold.presentedAt !== null && !isIso(hold.presentedAt)) {
+      throw new Error(`${at}: presentedAt must be null or an ISO timestamp`);
+    }
+    if (hold.until !== null && !isIso(hold.until)) {
+      throw new Error(`${at}: until must be null or an ISO timestamp`);
+    }
+    if (hold.answer !== null) {
+      if (!hold.answer || typeof hold.answer.text !== "string" || !hold.answer.text.trim()) {
+        throw new Error(`${at}: answer.text must be a non-empty string`);
+      }
+      if (!isIso(hold.answer.answeredAt)) throw new Error(`${at}: answer.answeredAt must be an ISO timestamp`);
+    }
+    if (!Array.isArray(hold.history) || !hold.history.length) {
+      throw new Error(`${at}: history must be a non-empty array (append-only — answers are new entries, never overwrites)`);
+    }
+    for (const entry of hold.history) {
+      if (!entry || typeof entry.event !== "string" || !isIso(entry.at)) {
+        throw new Error(`${at}: every history entry carries event + ISO at`);
+      }
+    }
+    if (hold.blocks !== null && (!Array.isArray(hold.blocks) || hold.blocks.some((b) => typeof b !== "string"))) {
+      // blocks is null (nothing waits) or the ids of the queue items that
+      // declared they wait on this hold.
+      throw new Error(`${at}: blocks must be null or an array of item ids`);
+    }
+    if (hold.resolution !== null && hold.resolution !== undefined) {
+      if (typeof hold.resolution !== "string" || !hold.resolution.trim()) {
+        throw new Error(`${at}: resolution must be null or a non-empty string`);
+      }
+      if (NEVER_COVERS.includes(hold.resolution)) {
+        throw new Error(
+          `${where}: ${at} names resolution "${hold.resolution}", which is in neverCovers — ` +
+            `a hold can never cover it (refused at load, not honoured)`,
+        );
+      }
+    }
+  }
+  return data;
+}
+
+/** Missing store is an empty one; unreadable or invalid is a thrown error (see validateHoldStore). */
+export function readHolds(runId) {
+  const path = holdsPath(runId);
+  if (!existsSync(path)) return { version: HOLDS_SCHEMA_VERSION, holds: [] };
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new Error(`${path} is not readable JSON: ${err.message}`);
+  }
+  return validateHoldStore(parsed, path);
+}
+
+export function writeHolds(runId, store) {
+  validateHoldStore(store, holdsPath(runId));
+  ensureRunDir(runId);
+  atomicWriteJSON(holdsPath(runId), store);
+  return store;
+}
+
+// Sayable ids, counted from the file — the Supervisor reads them aloud to
+// Mateusz and types them back into `answer --hold`, same rule as gate ids.
+export function nextHoldId(runId) {
+  const used = readHolds(runId)
+    .holds.map((h) => Number(String(h.id).slice("hold-".length)))
+    .filter((n) => Number.isInteger(n));
+  return `hold-${(used.length ? Math.max(...used) : 0) + 1}`;
+}
+
+/** Read-modify-write one hold; a history entry rides along, appended (never rewritten). */
+export function patchHold(runId, holdId, patch, historyEntry = null) {
+  const store = readHolds(runId);
+  const hold = store.holds.find((h) => h.id === holdId);
+  if (!hold) {
+    throw new Error(`hold ${holdId} does not exist in run ${runId} (known: ${store.holds.map((h) => h.id).join(", ") || "none"})`);
+  }
+  Object.assign(hold, patch);
+  if (historyEntry) hold.history.push(historyEntry);
+  writeHolds(runId, store);
+  return hold;
+}
+
+const impactRank = (h) => HOLD_IMPACTS.indexOf(h.impact);
+
+/**
+ * Does this hold block the TURN END right now? The three-line rule (FOC-612
+ * decision 3), deliberately kept a turn rule and not folded into anything:
+ *
+ *   · open and not yet presented  → blocks (owed work, exactly like a pending gate);
+ *   · presented, not answered, not deferred → blocks (the answer is still owed);
+ *   · presented and deferred → quiet until `until` arrives, then it resurfaces
+ *     (blocks again) — so `defer --until` in the past resurfaces immediately;
+ *   · answered → never blocks again.
+ *
+ * A hold deferred 30 days must not wedge every turn end forever — but an
+ * un-presented one blocks even when deferred, because the presentation itself
+ * is still owed (deferring before showing the hold to Mateusz is the
+ * conversation happening in private).
+ */
+export function holdBlocksTurnEnd(hold, now = new Date()) {
+  if (hold.state !== "open") return false;
+  if (hold.presentedAt === null) return true;
+  if (hold.until === null) return true;
+  return new Date(hold.until).getTime() <= now.getTime();
+}
+
+/** Presentable = the Supervisor still owes the showing: never shown, or resurfaced past its deferral. */
+export function holdIsPresentable(hold, now = new Date()) {
+  if (hold.state !== "open") return false;
+  if (hold.presentedAt === null) return true;
+  return hold.until !== null && new Date(hold.until).getTime() <= now.getTime();
+}
+
+const byImpact = (a, b) =>
+  impactRank(a) - impactRank(b) || String(a.createdAt).localeCompare(String(b.createdAt));
+
+/** Open holds, impact first, oldest first within a band — the "one per turn" order. */
+export function openHolds(runId) {
+  return readHolds(runId).holds.filter((h) => h.state === "open").sort(byImpact);
+}
+
+/**
+ * The guard's view. Never throws: a store nobody can parse is fail-closed
+ * material, and the guard needs the ERROR, not an exception — it blocks and
+ * names the parse error instead of crashing with a non-contract exit code.
+ */
+export function holdsOwingTurnEnd(runId, now = new Date()) {
+  let store;
+  try {
+    store = readHolds(runId);
+  } catch (err) {
+    return { blocking: [], error: err.message };
+  }
+  return { blocking: store.holds.filter((h) => holdBlocksTurnEnd(h, now)), error: null };
+}
+
+/**
+ * The completion check's view: a run is not complete while ANY hold is open —
+ * answered or deferred does not matter here, only `answered` closes a hold for
+ * good. Same never-throws contract as holdsOwingTurnEnd.
+ */
+export function holdsForCompletion(runId) {
+  let store;
+  try {
+    store = readHolds(runId);
+  } catch (err) {
+    return { open: [], error: err.message };
+  }
+  return { open: store.holds.filter((h) => h.state === "open"), error: null };
+}
+
+/**
+ * FOC-612 AC1: partition a queue of work items against the holds store.
+ *
+ * An item is RUNNABLE unless it names a hold that is still `open` — an open
+ * hold stops ONLY the item that depends on its answer, never its neighbours
+ * (`blocks: null` really means nothing waits). The returned `blocks` map is the
+ * per-hold record field: the ids waiting on that hold, or null when nothing
+ * does.
+ *
+ * The graph does not declare hold dependencies yet; when a producer does, this
+ * is the partition it must use, and setHoldBlocks is how the record field
+ * gets refreshed.
+ */
+export function partitionByHolds(items, holds) {
+  const answered = new Set(holds.filter((h) => h.state === "answered").map((h) => h.id));
+  const waiting = items.filter((i) => i.dependsOn && !answered.has(i.dependsOn));
+  const runnable = items.filter((i) => !i.dependsOn || answered.has(i.dependsOn));
+  const blocks = {};
+  for (const hold of holds) {
+    const ids = waiting.filter((i) => i.dependsOn === hold.id).map((i) => i.id);
+    blocks[hold.id] = ids.length ? ids : null;
+  }
+  return { runnable, waiting, blocks };
+}
+
+/**
+ * Persist the blocks map onto the hold records. Only holds named in the map are
+ * touched — a hold whose dependency set nobody recomputed keeps what it had.
+ */
+export function setHoldBlocks(runId, blocksMap) {
+  const store = readHolds(runId);
+  for (const [holdId, blocks] of Object.entries(blocksMap)) {
+    if (blocks !== null && (!Array.isArray(blocks) || blocks.some((b) => typeof b !== "string"))) {
+      throw new Error(`blocks for ${holdId} must be null or an array of item ids`);
+    }
+    const hold = store.holds.find((h) => h.id === holdId);
+    if (!hold) throw new Error(`hold ${holdId} does not exist in run ${runId}`);
+    hold.blocks = blocks;
+  }
+  writeHolds(runId, store);
+}
+
+/**
+ * Does config/models.json carry a price row for this model? Read-only check so
+ * a hold option's cost is always PRICED (FOC-165: through config/models.json,
+ * never the stream's reported figure) — supervisor-lib cannot import
+ * telemetry-store's pricingSnapshot (node:sqlite), so this mirrors its shape
+ * heuristic: metadata keys stripped, a flat pricing level is the openrouter
+ * scope, a nested one is the provider map; a provider-qualified id matches a
+ * bare key by its short name, as resolveInScope does. `LA_MODELS_ROOT` is the
+ * test seam (unset = the repo's own config).
+ */
+export function hasPriceRow(model, rootDir = process.env.LA_MODELS_ROOT || ROOT) {
+  const source = join(rootDir, "config", "models.json");
+  let config;
+  try {
+    config = JSON.parse(readFileSync(source, "utf8"));
+  } catch (err) {
+    return { priced: false, error: `${source} could not be read: ${err.message}` };
+  }
+  const stripMeta = (scope) => Object.fromEntries(Object.entries(scope || {}).filter(([k]) => !k.startsWith("_")));
+  const pricing = stripMeta(config.pricing);
+  const values = Object.values(pricing);
+  const nested = values.length > 0 && values.every((v) => v && typeof v === "object" && v.input === undefined);
+  const scopes = nested ? values : [pricing];
+  const keys = scopes.flatMap((s) => Object.keys(stripMeta(s)));
+  if (keys.includes(model)) return { priced: true };
+  const short = String(model).split("/").pop().replace(/\./g, "-");
+  return { priced: keys.some((k) => k.split("/").pop().replace(/\./g, "-") === short) };
+}
+
 
 // ── cost (FOC-165) ───────────────────────────────────────────────────────────
 

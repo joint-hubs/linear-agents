@@ -5,7 +5,13 @@
 //                                           [--decision-event <eventId> ...] [--decision-run <runId> ...]
 //                                           [--child <id>] [--run <id>]
 //   node scripts/supervisor-gate.mjs answer --gate <gateId> --text "..." [--note "..."] [--run <id>]
+//   node scripts/supervisor-gate.mjs answer --hold <holdId> --text "..." [--note "..."] [--run <id>]
+//   node scripts/supervisor-gate.mjs hold   --origin <who|what> --question "..." --recommendation "..."
+//                                           --option '<json>' [--option ...] [--impact high|medium|low]
+//                                           [--resolution <action>] [--run <id>]
+//   node scripts/supervisor-gate.mjs defer  --hold <holdId> --until <ISO> [--run <id>]
 //   node scripts/supervisor-gate.mjs list   [--run <id>] [--status pending|answered] [--child <id>]
+//   node scripts/supervisor-gate.mjs list   --open [--run <id>]
 //
 // THE FILE IS THE SOURCE OF TRUTH (spec §2.6). Not Linear: there is deliberately
 // no `needs:*` mirror in MVP. Not the transcript: a question a child only wrote
@@ -26,6 +32,23 @@
 // to relay a child's question word for word, and a relay through a redactor is
 // not a relay. The control against leaking is "never put secrets in Linear
 // comments", which lives where the leak would happen, not here.
+//
+// ── holds (FOC-612) ──────────────────────────────────────────────────────────
+//
+// A hold is a decision the Supervisor owes Mateusz that does NOT stop the run:
+// work that does not depend on the answer keeps going, and only queue items
+// that name the hold wait (supervisor-lib.partitionByHolds). Unlike a gate's
+// neutral options, a hold carries ONE recommended option — with its costed
+// alternatives alongside (the sign-off is recorded in
+// agents/supervisor/CLAUDE.md <supervisor_holds>). Costs are priced through
+// config/models.json only; a missing price row is UNKNOWN plus the model name,
+// never zero and never the stream's reported figure.
+//
+// `answer` stays the ONE answer verb: --gate answers a gate record, --hold
+// answers a hold. One subcommand, one dispatch — never two answer paths for a
+// reader to guess between. Holds live in ONE versioned file
+// (`<run>/holds.json`, supervisor-lib), not one-file-per-record like gates; the
+// shape difference is documented at supervisor-lib's holds section.
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
@@ -33,14 +56,24 @@ import { isAbsolute, resolve } from "node:path";
 import {
   AFFIRMATIVE,
   NEGATIVE,
+  HOLD_IMPACTS,
+  HOLDS_SCHEMA_VERSION,
   ensureRunDir,
   failJson,
   gatePath,
   gatesDir,
+  hasPriceRow,
+  holdIsPresentable,
+  holdsPath,
   isAffirmative,
   isNegative,
+  nextHoldId,
+  openHolds,
   parseArgs,
+  patchHold,
+  readHolds,
   readRegistry,
+  writeHolds,
 } from "./supervisor-lib.mjs";
 import { autoLabel, pairDecisionEvents } from "./decision-log.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
@@ -67,9 +100,14 @@ const KINDS = [
 
 const STATUSES = ["pending", "answered"];
 
-const REPEATABLE = new Set(["question", "artifact", "decision-event", "decision-run"]);
+const REPEATABLE = new Set(["question", "artifact", "decision-event", "decision-run", "option"]);
 
 const asList = (v) => (v === undefined || v === true ? [] : Array.isArray(v) ? v : [v]);
+
+const requireText = (value, flag) => {
+  if (!value || value === true) failJson(`--${flag} "..." is required`);
+  return String(value);
+};
 
 /**
  * `--facts <json>` or `--facts @<path>` — a structured payload stored verbatim
@@ -259,11 +297,181 @@ function cmdEmit(args) {
   console.log(JSON.stringify({ ok: true, path, warnings, ...record }, null, 2));
 }
 
+// ── hold (FOC-612) ───────────────────────────────────────────────────────────
+
+/**
+ * One `--option <json>`: `{ "label": "...", "model": "...", "costUsd": 0.01 }`.
+ *
+ * Why the model is required even when the cost is given: the FOC-165 rule —
+ * a hold's costs are PRICED numbers, and "priced" means priced through
+ * config/models.json. An option's costUsd is stored only when the model it is
+ * priced against actually has a row there; without the row the figure would be
+ * an unpriced guess wearing a price's clothes, and costUsdReported (the
+ * stream's own figure) is refused outright — it is not a measurement.
+ */
+function parseOption(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    failJson(`--option is not readable JSON: ${err.message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    failJson(`--option must be a JSON object ({ label, model, costUsd }), got ${Array.isArray(parsed) ? "an array" : typeof parsed}`);
+  }
+  if ("costUsdReported" in parsed) {
+    failJson(`--option "${parsed.label ?? "?"}" carries costUsdReported — the stream's figure is not a price and never enters a hold`, {
+      hint: "price the cost yourself from token counts through config/models.json, or omit costUsd to record UNKNOWN",
+    });
+  }
+  if (typeof parsed.label !== "string" || !parsed.label.trim()) failJson('--option needs a non-empty "label"');
+  if (typeof parsed.model !== "string" || !parsed.model.trim()) {
+    failJson(`--option "${parsed.label}" needs "model" — the model its cost is priced against`);
+  }
+  let costUsd = null;
+  let unpricedModel = null;
+  if (parsed.costUsd !== undefined && parsed.costUsd !== null) {
+    if (typeof parsed.costUsd !== "number" || !Number.isFinite(parsed.costUsd) || parsed.costUsd < 0) {
+      failJson(`--option "${parsed.label}" costUsd must be a number >= 0`);
+    }
+    const priced = hasPriceRow(parsed.model);
+    if (priced.error) failJson(`cannot price option "${parsed.label}": ${priced.error}`, { hint: "fix config/models.json — a hold's costs are priced against it" });
+    if (!priced.priced) {
+      failJson(`option "${parsed.label}" gives costUsd for ${parsed.model}, but config/models.json has no price row for it — a hold's costs are priced numbers only`, {
+        hint: `add ${parsed.model} to pricing in config/models.json, or drop costUsd to record UNKNOWN (never zero, never the stream's figure)`,
+      });
+    }
+    costUsd = parsed.costUsd;
+  } else {
+    // No figure given: UNKNOWN, naming the model — never zero, never guessed
+    // from the stream. At least one option must still be costed (cmdHold
+    // refuses a hold whose options are all UNKNOWN).
+    unpricedModel = parsed.model;
+  }
+  return { label: parsed.label, model: parsed.model, costUsd, ...(unpricedModel ? { unpricedModel } : {}) };
+}
+
+// ── hold rendering (FOC-612) ─────────────────────────────────────────────────
+
+// The human-readable presentation Mateusz is read. Numeric costs carry the
+// "wycenione" label on purpose: it says the figure came from
+// config/models.json, not from a stream or a guess (FOC-165).
+function renderHold(hold) {
+  const lines = [
+    `[${hold.id}] (${hold.state} · impact: ${hold.impact})`,
+    `Pytanie: ${hold.question}`,
+    `Pochodzenie: ${hold.origin}`,
+    "Opcje (koszt wyceniony z config/models.json):",
+  ];
+  for (const [i, option] of hold.options.entries()) {
+    lines.push(
+      option.costUsd === null
+        ? `  ${i + 1}) ${option.label} — model ${option.model} — koszt: UNKNOWN (brak wiersza wyceny dla ${option.unpricedModel ?? option.model} w config/models.json)`
+        : `  ${i + 1}) ${option.label} — model ${option.model} — koszt: $${option.costUsd.toFixed(4)} (wycenione)`,
+    );
+  }
+  lines.push(`Rekomendacja: ${hold.recommendation}`);
+  if (hold.until) lines.push(`Odroczone do: ${hold.until}`);
+  return lines.join("\n");
+}
+
+/**
+ * `hold` — raise a non-blocking decision record.
+ *
+ * WHY a hold and not a gate: a gate stops a child's turn; a hold does not stop
+ * the run — work that does not name it keeps going, and `blocks: null` (below)
+ * is what makes several open holds safe at once. Refusals fire BEFORE any
+ * write, exactly like cmdEmit's: a hold that cannot be priced or one without
+ * its alternatives must never reach Mateusz's screen half-formed.
+ */
+function cmdHold(args) {
+  const runId = args.run || process.env.LA_SUPERVISOR_RUN;
+  if (!runId) failJson("--run <supervisorRunId> is required (or set LA_SUPERVISOR_RUN)");
+
+  const origin = requireText(args.origin, "origin");
+  const question = requireText(args.question, "question");
+  const recommendation = requireText(args.recommendation, "recommendation");
+  const impact = args.impact && args.impact !== true ? args.impact : "medium";
+  if (!HOLD_IMPACTS.includes(impact)) {
+    failJson(`--impact must be one of ${HOLD_IMPACTS.join(" | ")}`);
+  }
+  const resolution = args.resolution && args.resolution !== true ? args.resolution : null;
+
+  const rawOptions = asList(args.option);
+  if (!rawOptions.length) failJson('--option <json> is required at least once — a recommendation without its alternatives is a fail');
+  const options = rawOptions.map(parseOption);
+
+  // Decision 1 (FOC-612): a recommendation without costed alternatives is a
+  // fail — refused at WRITE time, not rendered. UNKNOWN options are allowed
+  // alongside a priced one; a hold where nothing is priced is not.
+  if (!options.some((o) => o.costUsd !== null)) {
+    failJson("no option carries a priced cost — a recommendation without costed options is a fail", {
+      hint: "price at least one option through config/models.json (its model needs a price row)",
+    });
+  }
+
+  // Validate FIRST (writeHolds validates the whole store), then write. A
+  // resolution naming a neverCovers action is refused by the store validation
+  // — same refusal at load, so a hand-edited hold cannot honour one either.
+  // The throw is converted to the JSON contract here — the CLI never prints a
+  // stack (supervisor-lib style: the lib throws, the CLI layer failJson's).
+  let store;
+  try {
+    store = readHolds(runId);
+  } catch (err) {
+    failJson(`the holds store for run ${runId} is unreadable: ${err.message}`, {
+      hint: "fix or delete holds.json — a store nobody can parse is not a store",
+    });
+  }
+  const id = nextHoldId(runId);
+  const now = new Date().toISOString();
+  const hold = {
+    id,
+    origin,
+    question,
+    options,
+    recommendation,
+    impact,
+    resolution,
+    state: "open",
+    createdAt: now,
+    // Presentation is tracked, not assumed: the guard blocks on a hold that is
+    // open and not yet presented (owed work, exactly like a pending gate), and
+    // `list --open` is the act that stamps this.
+    presentedAt: null,
+    until: null,
+    answer: null,
+    // FOC-612 decision 2: `blocks: null` is what makes several open holds safe
+    // at once. null means NOTHING waits on this hold — only queue items that
+    // explicitly name it (partitionByHolds) ever populate it, so the
+    // "one hold presented per turn" rule cannot silently stop unrelated work.
+    blocks: null,
+    history: [{ event: "created", at: now }],
+  };
+
+  const updated = { version: HOLDS_SCHEMA_VERSION, holds: [...store.holds, hold] };
+  try {
+    writeHolds(runId, updated);
+  } catch (err) {
+    failJson(`hold ${id} could not be written: ${err.message}`);
+  }
+
+  console.log(JSON.stringify({ ok: true, path: holdsPath(runId), rendered: renderHold(hold), ...updated }, null, 2));
+}
+
 // ── answer (Supervisor side) ─────────────────────────────────────────────────
 
 function cmdAnswer(args) {
   const runId = args.run || process.env.LA_SUPERVISOR_RUN;
   if (!runId) failJson("--run <supervisorRunId> is required (or set LA_SUPERVISOR_RUN)");
+
+  // ONE answer verb, two record types: --gate answers a gate record, --hold
+  // answers a hold (FOC-612). Mutually exclusive — one answer per invocation,
+  // so the reader never guesses which record an answer landed on.
+  if (args.gate && args.hold && args.gate !== true && args.hold !== true) {
+    failJson("--gate and --hold are mutually exclusive — one answer per invocation");
+  }
+  if (args.hold && args.hold !== true) return cmdAnswerHold(args, runId, args.hold);
 
   const gateId = args.gate;
   if (!gateId || gateId === true) failJson("--gate <gateId> is required");
@@ -333,11 +541,142 @@ function cmdAnswer(args) {
   );
 }
 
+// ── answer --hold (FOC-612) ──────────────────────────────────────────────────
+
+function cmdAnswerHold(args, runId, holdId) {
+  const text = requireText(args.text, "text");
+  const note = args.note && args.note !== true ? String(args.note) : null;
+  const now = new Date().toISOString();
+
+  let store;
+  try {
+    store = readHolds(runId);
+  } catch (err) {
+    failJson(`the holds store for run ${runId} is unreadable: ${err.message}`, {
+      hint: "fix or delete holds.json — a store nobody can parse is not a store",
+    });
+  }
+  const hold = store.holds.find((h) => h.id === holdId);
+  if (!hold) {
+    failJson(`hold ${holdId} does not exist in run ${runId}`, {
+      known: store.holds.map((h) => h.id),
+    });
+  }
+
+  // Same rule as a gate: a hold is answered once. Re-answering would overwrite
+  // the record of what Mateusz actually said. Versioning keeps the rule honest:
+  // the answer in force is NAMED in the refusal, and the history stays
+  // append-only — the fix for a wrong answer is a new turn, not a rewrite.
+  if (hold.state !== "open") {
+    failJson(`hold ${holdId} is already answered — the answer in force is "${hold.answer.text}" (recorded ${hold.answer.answeredAt})`, {
+      hint: "a hold is answered once; to change course, raise a new hold",
+    });
+  }
+
+  const answer = { text, ...(note ? { note } : {}), answeredAt: now };
+  // An answer is a new history entry, never an overwrite — the file read back
+  // after this shows created AND answered, in order. (A throw here is the
+  // store validation refusing; converted to the JSON contract, never a stack.)
+  let updated;
+  try {
+    updated = patchHold(runId, holdId, { state: "answered", answer }, { event: "answered", at: now, text });
+  } catch (err) {
+    failJson(`hold ${holdId} could not be updated: ${err.message}`);
+  }
+
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        path: holdsPath(runId),
+        // Recording is the whole act for a hold: unlike a gate there is no
+        // followup delivery step — queue items that named this hold may proceed.
+        next: "the answer is in force; dependent queue items may proceed",
+        hold: updated,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+// ── defer (FOC-612) ──────────────────────────────────────────────────────────
+
+/**
+ * `defer --until <ISO>` — quiet the hold's turn-end block until the timestamp
+ * arrives, then it resurfaces (an `until` in the past resurfaces immediately —
+ * that is the mechanism AC2 tests, not a corner case). Deferral never answers:
+ * a deferred hold still keeps the run from completing (the completion check
+ * refuses while any hold is open), and an un-presented hold keeps blocking the
+ * turn end even when deferred — the presentation itself is still owed.
+ */
+function cmdDefer(args) {
+  const runId = args.run || process.env.LA_SUPERVISOR_RUN;
+  if (!runId) failJson("--run <supervisorRunId> is required (or set LA_SUPERVISOR_RUN)");
+
+  const holdId = args.hold && args.hold !== true ? args.hold : null;
+  if (!holdId) failJson("--hold <holdId> is required");
+  const until = args.until && args.until !== true ? args.until : null;
+  if (!until) failJson("--until <ISO timestamp> is required — say when the hold resurfaces");
+  if (Number.isNaN(Date.parse(until))) {
+    failJson(`--until "${until}" is not a parseable timestamp`);
+  }
+
+  let store;
+  try {
+    store = readHolds(runId);
+  } catch (err) {
+    failJson(`the holds store for run ${runId} is unreadable: ${err.message}`, {
+      hint: "fix or delete holds.json — a store nobody can parse is not a store",
+    });
+  }
+  const hold = store.holds.find((h) => h.id === holdId);
+  if (!hold) {
+    failJson(`hold ${holdId} does not exist in run ${runId}`, {
+      known: store.holds.map((h) => h.id),
+    });
+  }
+  if (hold.state !== "open") {
+    failJson(`hold ${holdId} is already answered — its answer is in force; deferring is for open holds`, {
+      answerInForce: hold.answer,
+    });
+  }
+
+  const now = new Date().toISOString();
+  let updated;
+  try {
+    updated = patchHold(runId, holdId, { until }, { event: "deferred", at: now, until });
+  } catch (err) {
+    failJson(`hold ${holdId} could not be updated: ${err.message}`);
+  }
+
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        path: holdsPath(runId),
+        next: `the hold resurfaces after ${until} — until then the turn-end guard leaves it alone; the run still cannot complete while it is open`,
+        hold: updated,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 // ── list ─────────────────────────────────────────────────────────────────────
 
 function cmdList(args) {
   const runId = args.run || process.env.LA_SUPERVISOR_RUN;
   if (!runId) failJson("--run <supervisorRunId> is required (or set LA_SUPERVISOR_RUN)");
+
+  // `list --open` is the holds presentation surface — NOT a passive read. It
+  // renders the ONE hold to put to Mateusz this turn (impact first) and stamps
+  // `presentedAt` on it: the reading and the presenting are the same act, and
+  // the stamp is what stops the turn-end guard from treating the hold as work
+  // nobody has shown yet. A second hold waits for the next invocation — one per
+  // turn is the whole point (FOC-612 decision 2).
+  if (args.open === true) return cmdListOpenHolds(args, runId);
 
   const status = args.status && args.status !== true ? args.status : null;
   if (status && !STATUSES.includes(status)) {
@@ -367,6 +706,57 @@ function cmdList(args) {
   );
 }
 
+function cmdListOpenHolds(args, runId) {
+  let store;
+  try {
+    store = readHolds(runId);
+  } catch (err) {
+    failJson(`the holds store for run ${runId} is unreadable: ${err.message}`, {
+      hint: "fix or delete holds.json — a store nobody can parse is not a store",
+    });
+  }
+
+  const now = new Date();
+  // Impact first (high > medium > low, oldest tiebreak): the presentation order
+  // is the impact order — one hold per invocation, the next `list --open` gives
+  // the next one.
+  const open = openHolds(runId);
+  const presentNext = open.find((h) => holdIsPresentable(h, now)) ?? null;
+
+  let stamped = null;
+  if (presentNext && presentNext.presentedAt === null) {
+    // Stamp the showing. Resurfaced holds keep their original presentedAt —
+    // their resurfacing is carried by `until`, not by a second stamp.
+    stamped = presentNext.id;
+    try {
+      patchHold(runId, presentNext.id, { presentedAt: now.toISOString() }, { event: "presented", at: now.toISOString() });
+    } catch (err) {
+      failJson(`hold ${presentNext.id} could not be marked presented: ${err.message}`);
+    }
+  }
+
+  const target = stamped ? { ...presentNext, presentedAt: now.toISOString() } : presentNext;
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        runId,
+        counts: { open: open.length },
+        // All open holds, ordered — `presentNext` is the ONE to put to Mateusz.
+        open,
+        presentNext: target ? target.id : null,
+        rendered: target ? renderHold(target) : null,
+        note:
+          open.length && !target
+            ? "every open hold has been presented — present the record fields directly, then answer or defer it"
+            : null,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
 function main() {
@@ -375,9 +765,11 @@ function main() {
 
   if (cmd === "emit") return cmdEmit(args);
   if (cmd === "answer") return cmdAnswer(args);
+  if (cmd === "hold") return cmdHold(args);
+  if (cmd === "defer") return cmdDefer(args);
   if (cmd === "list") return cmdList(args);
 
-  failJson(`unknown subcommand "${cmd ?? ""}" — expected emit | answer | list`);
+  failJson(`unknown subcommand "${cmd ?? ""}" — expected emit | answer | list (gate records) or hold | defer | list --open (holds, FOC-612)`);
 }
 
 export { KINDS, allGates, nextGateId };
