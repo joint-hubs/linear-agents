@@ -3148,11 +3148,15 @@ export async function recordToolFact(record, options = {}) {
       // is also upgradable: the old full-file pass wrote it finally, but under
       // incremental parsing it is just "no result seen so far".
       if (toolResultState) {
+        // Scope the upgrade to THIS run's row: the PK is (run_id, tool_fact_id)
+        // and tool_fact_id is run-agnostic (sha1 of path:offset:tool_index), so
+        // the same id legitimately exists under other runs (FOC-599 — matching
+        // tool_fact_id alone landed one run's outcome on every run's row).
         const upgraded = db.prepare(
           `UPDATE tool_facts
              SET tool_result_state = ?, tool_result_bytes = ?, tool_result_id = ?, tool_has_error = ?
-           WHERE tool_fact_id = ? AND (tool_result_state IS NULL OR tool_result_state = 'missing')`,
-        ).run(toolResultState, toolResultBytes, toolResultId, hasError, toolFactId);
+           WHERE tool_fact_id = ? AND run_id = ? AND (tool_result_state IS NULL OR tool_result_state = 'missing')`,
+        ).run(toolResultState, toolResultBytes, toolResultId, hasError, toolFactId, record.run_id);
         if (upgraded.changes > 0) return { recorded: false, upgraded: true, reason: "upgraded", id: toolFactId };
       }
       return { recorded: false, reason: "duplicate" };
