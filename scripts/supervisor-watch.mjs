@@ -182,8 +182,10 @@ function scanGates() {
 
 // Stall past the SLA — the same wall-clock rule supervisor-status.mjs displays,
 // from the same shared constant. The tee GROWING is the activity signal; mtime
-// alone can be touched without a write. At most one row per turn (the dedup key
-// makes that true even if this scan ran twice).
+// alone can be touched without a write. One row per silence EPISODE, not per
+// turn (FOC-621): re-polls of the same silence carry the same tee size as the
+// episode discriminator and dedup to a no-op, while output between two silence
+// periods grows the tee, so the next breach is a new episode with its own row.
 const STALL_AFTER_MS = stallSilenceMs();
 const GATE_SCAN_MS = 5_000;
 let lastTeeSize = null;
@@ -193,7 +195,9 @@ function scanStall() {
     if (!existsSync(tee)) return;
     const { size, mtimeMs } = statSync(tee);
     if (lastTeeSize !== null && size === lastTeeSize && Date.now() - mtimeMs >= STALL_AFTER_MS) {
-      wake({ event: "stall", childId, turn: turnIndex, detail: { silentMs: Date.now() - mtimeMs } });
+      // `episode` = the tee size at silence onset: stable across re-polls of
+      // the same silence (a silent tee does not grow), new after any output.
+      wake({ event: "stall", childId, turn: turnIndex, episode: size, detail: { silentMs: Date.now() - mtimeMs } });
     }
     lastTeeSize = size;
   } catch {

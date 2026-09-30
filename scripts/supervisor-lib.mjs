@@ -206,11 +206,22 @@ export const WAKE_EVENTS = ["exit", "gate", "stall"];
 //             of truth is invented here.
 //   · gate  → `gate:<gateId>`          gate identity; a gate file appearing is
 //             one event no matter how many scans or watcher restarts see it.
-//   · stall → `stall:<childId>:<turn>` at most one stall row per turn: the SLA
-//             breach is one event, and the response (stop + escalate) is the
-//             same whether it fired once or would have fired ten times.
-export function wakeDedupKey({ event, childId = null, turn = 0, gateId = null }) {
+//   · stall → `stall:<childId>:<turn>:<episode>`
+//                                     at most one row per silence EPISODE, not
+//             per turn. `episode` is the discriminator that lets two distinct
+//             silences inside one turn both surface: the watcher anchors it on
+//             the tee's size at silence onset — a silent tee does not grow, so
+//             every re-poll of the SAME episode carries the same anchor and
+//             dedups, while output between two silences grows the tee, so the
+//             next breach carries a new anchor and lands as its own row. The
+//             response (stop + escalate) still does not scale with
+//             re-observations of one episode. `<turn>` moves only when the
+//             Supervisor resumes the child, so a new turn starts episode
+//             identity from scratch. `0` is the unspecified/legacy value; the
+//             real watcher always anchors.
+export function wakeDedupKey({ event, childId = null, turn = 0, gateId = null, episode = null }) {
   if (event === "gate") return `gate:${gateId}`;
+  if (event === "stall") return `stall:${childId}:${turn}:${episode ?? 0}`;
   return `${event}:${childId}:${turn}`;
 }
 
@@ -253,6 +264,7 @@ export function appendWakeEvent(runId, event) {
     event: event.event,
     childId: event.childId ?? null,
     turn: event.turn ?? 0,
+    episode: event.episode ?? null,
     gateId: event.gateId ?? null,
     dedupKey: key,
     detail: event.detail ?? {},

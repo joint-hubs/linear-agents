@@ -37,6 +37,7 @@ persists the watermark (never moves backwards).
 | `event` | `"exit" \| "gate" \| "stall"` | the three event classes |
 | `childId` | string \| null | the child the event is about (always set except for a gate with no `childId` in its record) |
 | `turn` | number | the child turn index the watcher was spawned for (0-based) |
+| `episode` | number \| null | stall rows only (FOC-621) — the episode discriminator: the tee size at silence onset, anchored by the watcher |
 | `gateId` | string \| null | gate identity, `gate` rows only |
 | `dedupKey` | string | the exactly-once key — see table below |
 | `detail` | object | event-specific: `exit` → `{ status, exitCode, spawnFailed? }`; `gate` → `{ kind }`; `stall` → `{ silentMs }` |
@@ -48,7 +49,7 @@ persists the watermark (never moves backwards).
 |---|---|---|
 | `exit` | `exit:<childId>:<turn>` | a turn ends exactly once; the registry's `turns[]` already owns this identity, no parallel source of truth |
 | `gate` | `gate:<gateId>` | gate identity; re-observed across scans and watcher restarts for free |
-| `stall` | `stall:<childId>:<turn>` | the SLA breach is one event; the response (stop + escalate) does not scale with re-observations |
+| `stall` | `stall:<childId>:<turn>:<episode>` | one row per silence EPISODE, not per turn: a silent tee does not grow, so re-polls of the same silence carry the same episode anchor (the tee size at silence onset) and dedup; output between two silences grows the tee, so the next breach anchors on a new size and lands as its own row — two distinct stall episodes in one turn both surface. A resume starts the next turn (`<turn>` moves), resetting episode identity |
 
 ## Acks and crash semantics
 
@@ -75,3 +76,9 @@ leaves) is skipped on read; the next append continues from the last valid seq.
 (`stallSilenceMs()` in `supervisor-lib.mjs`) the status display uses. The
 response to a stall row is the standing one: stop the child, escalate. Nothing
 here probes a pid; the watcher owns liveness.
+
+One silence period is one episode and one row; re-polling a still-silent tee
+never re-fires. But two DISTINCT silences inside one turn both surface (the
+episode discriminator — the tee size at silence onset — differs once the child
+has output anything in between), so a child that stalls, speaks, and stalls
+again cannot hide the second breach behind the first row's dedup key.
