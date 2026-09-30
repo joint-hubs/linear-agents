@@ -39,6 +39,11 @@
 //                                   verbs never answer (they outlive any
 //                                   sane budget) — pins that a bounded caller
 //                                   times out into UNKNOWN instead of hanging
+//                          crash     `init` dies with FAKE_CODEGRAPH_CRASH_EXIT
+//                                   (default 3221225477 = 0xC0000005) without
+//                                   writing anything — the deterministic
+//                                   stand-in for the native fixture-init crash
+//                                   (FOC-603); every other verb answers "ready"
 //     FAKE_CODEGRAPH_LOG   append one JSON line per invocation: {cmd, args}
 //
 // Index state lives in the TARGET root (<root>/.codegraph/fake-initialized),
@@ -134,6 +139,11 @@ if (cmd === "index") {
 
 if (cmd === "init") {
   log();
+  if (MODE === "crash") {
+    // FOC-603: stand-in for the native 0xC0000005 crash — init dies with the
+    // configured abnormal exit code and writes nothing.
+    process.exit(Number(process.env.FAKE_CODEGRAPH_CRASH_EXIT) || 3221225477);
+  }
   mkdirSync(join(rootArg, ".codegraph"), { recursive: true });
   writeFileSync(join(rootArg, ".codegraph", "fake-initialized"), "fake\\n");
   writeFileSync(join(rootArg, ".codegraph", "fake-schema-ok"), "ok\\n");
@@ -164,7 +174,7 @@ if (MODE === "hang") {
 /**
  * Write the fake CLI into `dir` and return it (the directory to prepend to PATH).
  */
-export function makeFakeCodegraphCli({ dir, mode = "ready", logPath = null } = {}) {
+export function makeFakeCodegraphCli({ dir, mode = "ready", logPath = null, crashExit = null } = {}) {
   mkdirSync(dir, { recursive: true });
 
   if (process.platform === "win32") {
@@ -189,6 +199,7 @@ export function makeFakeCodegraphCli({ dir, mode = "ready", logPath = null } = {
     dir,
     env: {
       FAKE_CODEGRAPH_MODE: mode,
+      ...(crashExit !== null ? { FAKE_CODEGRAPH_CRASH_EXIT: String(crashExit) } : {}),
       ...(logPath ? { FAKE_CODEGRAPH_LOG: logPath } : {}),
     },
     // Read the invocation log back as parsed JSON lines.
