@@ -88,8 +88,10 @@ import { scrub, scrubMask } from "./mcp/scrub.mjs";
 import { appendShadow, canonicalJson, createDecisionCaller, DECISION_STEP, SHADOW_EVENT_TYPE, usageOf } from "./decision-call.mjs";
 import { loadGraph, validateGraph } from "./graph-validate.mjs";
 import { getRegistryEntry, loadRegistry } from "./decision-registry.mjs";
+import { appendLabel, RUNS_DIR } from "./decision-log.mjs";
 import { AC_TESTABLE_DECISION, runPlanAcNode } from "./plan-ac.mjs";
 import { runPlanIntentNode } from "./plan-intent.mjs";
+import { runPlanIntentSelectNode, SELECT_SCORE_DECISION, selectDeltaLabel } from "./plan-intent-select.mjs";
 import { runPlanRenderNode } from "./plan-render.mjs";
 import { KINDS } from "./supervisor-gate.mjs";
 import { holdsForCompletion } from "./supervisor-lib.mjs";
@@ -263,6 +265,14 @@ const OPTIONAL_INTENT_READS = new Set([
   "gate.plan.gate1.corrections",
 ]);
 
+// plan.intent.select joins that round-dependence (FOC-516): the two gate1
+// fields are its dedupe evidence and are absent in round 1. Their absence is
+// the round marker, not a missing input; the map record itself is mandatory.
+const OPTIONAL_SELECT_READS = new Set([
+  "gate.plan.gate1.answers",
+  "gate.plan.gate1.corrections",
+]);
+
 // The answer contract's two run-record stores, read back from the step records
 // this run has already appended (design doc §3.12):
 //   - `run-record.plan.intent.maps[mapVersion]` — the maps the node persisted.
@@ -301,6 +311,11 @@ function resolveRead(read, { inputs, steps }) {
       status: record.status,
       output: record.output,
       ...(record.resolvedBy ? { resolvedBy: record.resolvedBy } : {}),
+      // FOC-516: plan.intent's fold carries its STALE log on the record (never
+      // in the output). It rides the record view so the selection's dedupe can
+      // exclude refused answers — a stale answer's point must re-ask, never
+      // silently disappear from the selection.
+      ...(Array.isArray(record.stale) && record.stale.length ? { stale: record.stale } : {}),
     };
   }
   let value = record.output;
@@ -538,6 +553,10 @@ export function createGraphRunner({
   // tests never touch the supervisor state home. The default reads
   // <supervisorStateHome>/<runId>/holds.json (absent store = no holds).
   listOpenHolds = holdsForCompletion,
+  // FOC-516: where the gate1 selection-delta label lands (decision-log.mjs
+  // layout — one decisions.jsonl per run id). Injectable so tests never write
+  // the live .state/runs ledger.
+  decisionRunsDir = RUNS_DIR,
   now = () => new Date().toISOString(),
 } = {}) {
   if (!runId || typeof runId !== "string") {
@@ -623,6 +642,18 @@ export function createGraphRunner({
     }
     if (!gateEntry || gateEntry.autonomy !== "A0" || gateEntry.threshold !== null || gateEntry.fallback?.tier2 !== "disabled") {
       throw new TypedError("schema_invalid", `step "plan.ac" binds a ${AC_TESTABLE_DECISION} entry the runner cannot honestly serve (A0, threshold null, tier 2 disabled)`);
+    }
+  }
+  // plan.intent.select is the second [G] step with a node-internal [J] call
+  // (FOC-516): plan.intent.select.score scores every interpretation, the same
+  // A0, threshold-null, tier-2-dead posture pinned at construction.
+  if (steps["plan.intent.select"]?.kind === "G") {
+    const scoreEntry = registry.entries[SELECT_SCORE_DECISION];
+    if (typeof caller !== "function") {
+      throw new TypedError("invalid_input", `step "plan.intent.select" runs the node-internal ${SELECT_SCORE_DECISION} call — inject a caller (createDecisionCaller)`);
+    }
+    if (!scoreEntry || scoreEntry.autonomy !== "A0" || scoreEntry.threshold !== null || scoreEntry.fallback?.tier2 !== "disabled") {
+      throw new TypedError("schema_invalid", `step "plan.intent.select" binds a ${SELECT_SCORE_DECISION} entry the runner cannot honestly serve (A0, threshold null, tier 2 disabled)`);
     }
   }
 
@@ -731,6 +762,33 @@ export function createGraphRunner({
         ...(result.problems?.length ? { problems: result.problems } : {}),
       });
     }
+    if (stepId === "plan.intent.select") {
+      // FOC-516: the selection over the persisted map. No [G] model call —
+      // deterministic routing plus the node-internal [J] scoring call; the
+      // result carries the [J] eventId (the FOC-449 join key for the gate1
+      // delta label) and the deduped ids the policy filtered out.
+      let result;
+      try {
+        result = await runPlanIntentSelectNode({
+          stepId,
+          reads,
+          caller,
+          validate: (raw) => outputValidate.get(stepId)(raw),
+        });
+      } catch (err) {
+        return failRecord(stepId, errorOf(err, "plan.intent.select node threw"));
+      }
+      if (result.status === "done") {
+        return stepRecord(runId, now, stepId, "done", {
+          stepId,
+          output: result.output,
+          eventId: result.eventId ?? null,
+          ...(result.scores?.length ? { scores: result.scores } : {}),
+          ...(result.dedupedIds?.length ? { dedupedIds: result.dedupedIds } : {}),
+        });
+      }
+      return failRecord(stepId, result.error);
+    }
     if (stepId === "plan.ac") {
       let result;
       try {
@@ -775,7 +833,7 @@ export function createGraphRunner({
   // [H] — stop and emit the supervisor gate; the gate record lives in the
   // supervisor run directory, the run record marks the run as waiting.
   const GATE_SUMMARIES = {
-    "plan.gate1": "Approve the SPEC hand-off (plan.spec) before decomposition",
+    "plan.gate1": "Approve the interpretation selection (plan.intent.select) — questions, confirmations and 'Rozumiem tak' lines — before the DoD/AC/spec hand-off (FOC-516)",
     "plan.gate2": "Approve the rendered issue (plan.render) before the Linear push",
   };
   async function runHStep(stepId, reads) {
@@ -898,6 +956,44 @@ export function createGraphRunner({
           return { status: "stopped", stepId, record: rejected };
         }
         const done = stepRecord(runId, now, key, "done", { stepId, output, resolvedBy: resolution.by ?? null });
+        // FOC-516: the gate1 approval is where the FOC-449 selection delta is
+        // labelled — did Mateusz's answers differ from the selection's
+        // recommendations, or correct a "Rozumiem tak" line? The delta is a
+        // pure function over the selection record + the gate1 answer records
+        // (run inputs); it appends ONE label next to the scoring event, and a
+        // failed write is a warning on the record, never a broken primary flow
+        // (the autoLabel posture). No answers / no selection / no eventId →
+        // nothing labelled, nothing warned.
+        if (step.kind === "H" && stepId === "plan.gate1" && output.approved === true) {
+          const sel = state.steps.get("plan.intent.select");
+          const label = selectDeltaLabel({
+            selection: sel?.output ?? null,
+            answers: inputs["gate.plan.gate1.answers"],
+            corrections: inputs["gate.plan.gate1.corrections"],
+            eventId: sel?.eventId ?? null,
+          });
+          if (label) {
+            let written = null;
+            let warning = null;
+            try {
+              const res = appendLabel({
+                eventId: label.eventId,
+                outcome: label.outcome,
+                by: label.by,
+                source: label.source,
+                via: label.via,
+                runId,
+                runsDir: decisionRunsDir,
+              });
+              written = res.path;
+            } catch (err) {
+              warning = err?.message ?? "label write failed";
+            }
+            done.deltaLabel = label;
+            if (written) done.deltaLabelWritten = written;
+            if (warning) done.deltaLabelWarning = warning;
+          }
+        }
         store.append(done);
         state.steps.set(key, done);
         continue;
@@ -919,10 +1015,11 @@ export function createGraphRunner({
       for (const read of step.reads ?? []) {
         const value = resolveRead(read, { inputs, steps: state.steps });
         if (value === undefined) {
-          // Round-dependent reads of plan.intent are absent by design in
-          // round 1; the key stays out of the read map and the node reads
-          // that as "round 1" and "task type unknown".
+          // Round-dependent reads of plan.intent and plan.intent.select are
+          // absent by design in round 1; the key stays out of the read map and
+          // the nodes read that as "round 1" and "task type unknown".
           if (stepId === "plan.intent" && OPTIONAL_INTENT_READS.has(read)) continue;
+          if (stepId === "plan.intent.select" && OPTIONAL_SELECT_READS.has(read)) continue;
           return stopped(stepId, failRecord(stepId, { code: "invalid_input", message: `read "${read}" is not available for step "${stepId}" — no resolved run record or run input supplies it` }));
         }
         reads[read] = value;

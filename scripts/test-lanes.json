@@ -161,6 +161,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "plan-intent-select.test.mjs",
+      "reason": "isolation audit FOC-516: mkdtemp/tmpdir fixtures only (policy mutations via temp copies, the wiring test's delta-label ledger in an injected temp runs dir); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
       "file": "plan-render.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },

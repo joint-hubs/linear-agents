@@ -177,17 +177,17 @@ await test("the output schema is the design's bounded checklist schema", () => {
 
 console.log("\nplan-dod: the graph wiring");
 
-await test("10 plan steps, 9 sequence edges, plan.dod sits between plan.intent and plan.ac", () => {
+await test("11 plan steps, 10 sequence edges, plan.dod sits after gate1 (FOC-516 moved the gate ahead)", () => {
   eq(validateGraph(GRAPH).length, 0, "the committed graph validates");
   const stepIds = Object.keys(PLAN.steps);
-  eq(stepIds.length, 10, `10 steps, got ${stepIds.length}`);
+  eq(stepIds.length, 11, `11 steps, got ${stepIds.length}`);
   if (!stepIds.includes("plan.dod")) fail("plan.dod missing from the steps map");
-  eq(PLAN.stepFlow.length, 9, "9 sequence edges");
+  eq(PLAN.stepFlow.length, 10, "10 sequence edges");
   const chain = PLAN.stepFlow.map((e) => `${e.from}>${e.to}`).join(" ");
   eq(
     chain,
-    "plan.dor>plan.intent plan.intent>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push",
-    "the chain runs dor → intent → dod → ac → spec → gate1 → decompose → render → gate2 → push",
+    "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push",
+    "the chain runs dor → intent → intent.select → gate1 → dod → ac → spec → decompose → render → gate2 → push",
   );
   eq(PLAN.steps["plan.dor"].kind, "J", "plan.dor stays [J]");
   eq(DOD_STEP.kind, "G", "plan.dod is [G]");
@@ -215,8 +215,22 @@ function seedDone(storePath, stepId, output) {
 }
 
 function makeRunner({ generator, storePath, caller = async (input) => {
+  // plan.intent.select scores every interpretation through its node-internal
+  // [J] call (FOC-516) — two noul verdicts per instance, above the impact
+  // threshold so the inferred items route to confirmations.
+  if (input?.decisionId === "plan.intent.select.score") {
+    return {
+      ok: true,
+      step: "decision-call",
+      decisionId: "plan.intent.select.score",
+      criteriaVersion: 1,
+      autonomy: "A0",
+      annotation: { answers: Object.fromEntries((input.instances ?? []).flatMap((_, i) => [[`impact${i}`, { type: "noul", noul: 0.9 }], [`grounded${i}`, { type: "noul", noul: 0.9 }]])), confidence: 0.9 },
+      pinnedModel: "typesafe/jev-1.13",
+    };
+  }
   // plan.ac executes through the FOC-475 node-internal loop, so its gate call
-  // is the one seam call a dod-first walk makes — serve it above the verdict
+  // is the other seam call a dod-first walk makes — serve it above the verdict
   // threshold; anything else reaching the default caller is a bug.
   if (input?.decisionId === "plan.ac.testable") {
     return {
@@ -229,7 +243,7 @@ function makeRunner({ generator, storePath, caller = async (input) => {
       pinnedModel: "typesafe/jev-1.13",
     };
   }
-  fail(`unexpected caller decisionId ${input?.decisionId ?? "none"} — the default caller serves only plan.ac.testable`);
+  fail(`unexpected caller decisionId ${input?.decisionId ?? "none"} — the default caller serves only plan.intent.select.score and plan.ac.testable`);
 } }) {
   return createGraphRunner({
     runId: "run-plan-dod",
@@ -242,9 +256,25 @@ function makeRunner({ generator, storePath, caller = async (input) => {
 }
 
 // plan.dor is already done (the frontman resolved it) — the walk executes
-// plan.dod, then plan.ac, then stops at the plan.spec [A] hand-off.
+// plan.intent, the FOC-516 selection, gate 1 (repositioned ahead of the
+// DoD/AC/spec hand-off), then plan.dod, plan.ac, and stops at the plan.spec
+// [A] hand-off.
 function seedPlanDor(storePath) {
   seedDone(storePath, "plan.dor", { ready: true, gaps: [] });
+}
+
+// The frontman's pen: resolution records are appended by the DECIDING agent —
+// the runner consumes them, never creates them.
+function resolveGate(storePath, key, output, by = "mateusz") {
+  appendFileSync(storePath, `${JSON.stringify({
+    type: "graph.resolution",
+    runId: "run-plan-dod",
+    ts: "2026-01-01T00:00:00.000Z",
+    key: `${key}.resolution`,
+    stepId: key,
+    by,
+    output,
+  })}\n`);
 }
 
 console.log("\nplan-dod: the runner executes plan.dod");
@@ -268,8 +298,15 @@ await test("the walk executes plan.dod [G] through the generator: one call, reso
       eq(stepId, "plan.ac", "generator serves plan.intent, plan.dod then plan.ac");
       return AC_OUTPUT;
     };
-    const result = await makeRunner({ generator, storePath }).run({ inputs: RUN_INPUTS });
-    eq(result.status, "stopped", "run stops at the [A] hand-off after the [G]s");
+    const runner = makeRunner({ generator, storePath });
+    let result = await runner.run({ inputs: RUN_INPUTS });
+    eq(result.status, "stopped", "run 1 stops at the repositioned gate 1 (FOC-516)");
+    eq(result.stepId, "plan.gate1", "run 1 stops gate-pending after plan.intent.select");
+    eq(result.record.status, "gate-pending", "gate record pending");
+    eq(genCalls.length, 1, "only plan.intent executed before the gate");
+    resolveGate(storePath, "gate.plan.gate1", { approved: true });
+    result = await runner.run({ inputs: RUN_INPUTS });
+    eq(result.status, "stopped", "run 2 stops at the [A] hand-off after the [G]s");
     eq(result.stepId, "plan.spec", "stops at plan.spec");
     eq(genCalls.length, 3, "exactly three [G] calls (plan.intent, plan.dod, plan.ac)");
     eq(genCalls[0].stepId, "plan.intent", "plan.intent first");
@@ -293,6 +330,9 @@ await test("a schema-invalid plan.dod output lands as ONE typed failed record �
     const generator = async ({ stepId }) => (stepId === "plan.intent" ? INTENT_OUTPUT : stepId === "plan.dod" ? { definitionOfDone: [] } : AC_OUTPUT); // minItems 1 violated
     const runner = makeRunner({ generator, storePath });
     let result = await runner.run({ inputs: RUN_INPUTS });
+    eq(result.stepId, "plan.gate1", "run 1 stops gate-pending before plan.dod");
+    resolveGate(storePath, "gate.plan.gate1", { approved: true });
+    result = await runner.run({ inputs: RUN_INPUTS });
     eq(result.status, "stopped", "run stops on the invalid output");
     eq(result.record.status, "failed", "failed record");
     eq(result.record.error.code, "schema_invalid", "typed schema_invalid");
@@ -585,7 +625,11 @@ await test("a real runner + the default generator: the graph-steps done record A
       },
     });
     const runner = makeRunner({ generator, storePath });
-    const result = await runner.run({ inputs: RUN_INPUTS });
+    let result = await runner.run({ inputs: RUN_INPUTS });
+    eq(result.stepId, "plan.gate1", "run 1 stops gate-pending after the selection (FOC-516)");
+    eq(calls, 1, "only plan.intent went through the default generator before the gate");
+    resolveGate(storePath, "gate.plan.gate1", { approved: true });
+    result = await runner.run({ inputs: RUN_INPUTS });
     eq(result.stepId, "plan.spec", "the [G]s executed; run stopped at the [A] hand-off");
     eq(calls, 3, "all three [G] calls went through the default generator");
 
