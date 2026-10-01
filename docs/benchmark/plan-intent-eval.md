@@ -220,3 +220,74 @@ survived none of the three checks is not gradeable and is never scored as partia
 - **Cost accounting for aborts needs a policy.** A failed call appends no event line by design (no
   fabricated answers), so aborted spend is unobservable. FOC-449 may want a failure-line variant that
   records usage without answers.
+
+## plan.intent.select eval (FOC-516) — [J] scores + [D] policy on the same eval set
+
+The select eval drives the FULL live pipeline per fixture case — the same two node calls a live
+graph run executes: `runPlanIntentNode` (the [G] map, runner default generator) then
+`runPlanIntentSelectNode` (the ONE `plan.intent.select.score` [J] call per map, two noul verdicts —
+impact + grounded — per interpretation, via the real seam caller), both against the real transports
+(`scripts/plan-intent-select-eval.mjs`). A case whose map fails closed has nothing to select from —
+the skip IS the measurement, never a faked row.
+
+**Run** (2026-10-01T17:34–17:45Z, contract budget 300 s/call both stages — no deviation): 12/12
+cases attempted → **2 selection ok / 10 skipped** (no map), 0 failed. Both accepted selections were
+schema-valid. Live provider: `z-ai/glm-5.3-flash` (maps) + `typesafe/jev-1.13-20260917` (scores).
+
+Where the 10 skips come from — the map stage, not the selection:
+
+| map failure | cases | detail |
+|---|---|---|
+| `provider_error` (fast) | FOC-416 (0.6 s), FOC-449 (1.1 s), FOC-397 (1.3 s), FOC-451 (1.5 s), FOC-396 (0.9 s) | HTTP 400 within seconds of the call |
+| `provider_error` (budget) | FOC-452 | aborted at the 300 s budget |
+| `unparseable_output` (fast) | FOC-417 (1.3 s), FOC-441 (1.8 s), FOC-473 (1.3 s), FOC-448 (2.7 s) | empty content — "Unexpected end of JSON input" |
+
+This is provider-side variance, measured, not a budget story like run 2's: run 2 (600 s) rejected 8
+with schema/abortion causes after 17–600 s; today's provider refused or returned empty on 9 maps
+within 0.6–2.7 s and burned the budget once. The selection itself was never the failure point.
+
+Mechanical facts on the 2 accepted maps (routes q/c/u/a = questions/confirmations/understood/
+assumptions; latency = pipeline wall-clock):
+
+| id | items | st/inf/un | q/c/u/a | cap overflow | alternatives override | latency | notes |
+|---|---|---|---|---|---|---|---|
+| FOC-406 | 11 | 4/1/6 | 4/0/0/7 | 3 overflowed → assumptions, listed | yes — every question carries "the map's current reading" as the recommended option | 225.0 s | ground truth UNKNOWN (as in FOC-515 — excluded from rubric) |
+| FOC-443 | 9 | 3/3/3 | 4/0/0/5 | 5 overflowed → assumptions, listed | yes | 260.7 s | – |
+
+- **Questions per case: 4 + 4 — the cap binds on every accepted map.** Ordering by impact
+  probability held: FOC-406 asked IN-1 (0.9), IN-7 (0.88), IN-3 (0.78), IN-4 (0.71); FOC-443 asked
+  IN-3 (0.78), IN-4 (0.73), IN-6 (0.72), IN-1 (0.69).
+- **Confirmations/understood: 0 — via the cap, not via hiding.** On FOC-443 the inferred/stated
+  confirmation candidates (impacts 0.72 and below) all lost the cap race to higher-impact
+  option-carrying unknown items and landed in the assumptions list as "below the 4-question cap".
+  Nothing was dropped: all 5 overflow items are listed with their impact probabilities (A0 honesty).
+- **Dedupe (round-0):** no `gate.plan.gate1` record exists before gate1's first approval, so both
+  selections ran with an empty answered-set (`dedupedIds` `[]`) — the check is exercised by tests
+  (`plan-intent-select.test.mjs`), not by this run.
+- **Cost honesty:** $0.037978 ledger total covers the 4 completed calls (maps 2,375 in / 62,566 out;
+  scores 8,054 in / 750 out). The 10 failed map calls append no event line — their spend is invisible
+  to our ledger (same caveat as FOC-515 finding 6). Fast failures bound it: a refused call costs one
+  round trip, not a reasoning budget.
+- **Latency is bimodal, same shape as run 2:** p50 1.3 s (fast refusals) · p90 260.7 s · max 300.1 s;
+  real map generation took 225–261 s — inside the 300 s contract budget this time, unlike run 2.
+- **Annotation fix during this run:** the measured rows carry a pre-fix overflow `rank` in the
+  assumption reason that named the item's MAP-ORDER position, not its impact standing (e.g. FOC-443
+  IN-2, impact 0.47, 8th by impact, labelled "rank 2"). Fixed in this change set and regression-pinned
+  (`plan-intent-select.test.mjs`, FOC-443 regression test); every count in this report is unaffected —
+  the rank string is an annotation, the routing and cap arithmetic were already correct.
+
+**Coverage of the known misses (AC7)** — against the FOC-515 rubric targets:
+
+- **FOC-443** (the graded case): all three input-arising targets are SURFACED, none hidden —
+  IN-3 (test-shadow file) impact 0.78 → **question with closing options**; IN-8 (MAX_ERROR_TEXT vs
+  the 120-char parse cap) impact 0.53 and IN-5 (Security-note replacement wording) impact 0.48 →
+  below-cap assumptions, listed with claims and impact probabilities. 1/3 known misses **earned a
+  question**, 3/3 **surfaced**. The policy's job is routing, not scoring accuracy — a missed question
+  costs a misplaced display, never a lost interpretation (A0).
+- **FOC-406**: coverage UNKNOWN (no ground truth; excluded in FOC-515, excluded here).
+- The other 10 cases: no map — no interpretations to score or route; skips recorded verbatim above.
+
+Artifacts: `.state/foc-516/select-eval/foc-516-run/` (gitignored) — `outputs.jsonl` (per-case maps,
+selections, scores, usage), `summary.json` (aggregates above), `table.txt`, `foc-516-select-eval/
+decisions.jsonl` (the FOC-449 event lines). Scoring of selection substance stays human; the graded
+read-out above is limited to what the mechanical facts support.
