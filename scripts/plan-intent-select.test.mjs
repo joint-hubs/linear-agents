@@ -300,6 +300,21 @@ await test("selectFromMap: the cap ranks by impact probability (ties in map orde
   if (!out.assumptions[0].reason.includes("never dropped")) fail("the overflow reason carries the A0 honesty note");
 });
 
+await test("selectFromMap: the overflow reason names the IMPACT rank, not the map-order position (FOC-443 regression)", () => {
+  const policy = loadSelectPolicy(); // cap 4
+  // Map order deliberately diverges from impact order: IN-1 is mapped first but
+  // impacts 6th; the measured FOC-443 case labelled such an item by its
+  // map-order position ("rank 2") instead of its standing in the impact ordering.
+  const items = [1, 2, 3, 4, 5, 6].map((n) => ({ id: `IN-${n}`, claim: `claim ${n}`, source: "inferred", alternatives: [] }));
+  const impacts = [0.5, 0.9, 0.8, 0.75, 0.7, 0.65];
+  const out = selectFromMap({ items, scores: items.map((it, i) => ({ id: it.id, impactProbability: impacts[i], groundedProbability: 0.1 })), policy, mapVersion: 1 });
+  deepEq(out.confirmations.map((q) => q.id), ["IN-2", "IN-3", "IN-4", "IN-5"], "the top four by impact");
+  deepEq(out.assumptions.map((a) => a.id), ["IN-6", "IN-1"], "the overflow is LISTED, never dropped, in impact order");
+  if (!out.assumptions[0].reason.includes("rank 5")) fail(`IN-6 impacts 5th, the reason must say rank 5: ${out.assumptions[0].reason}`);
+  if (!out.assumptions[1].reason.includes("rank 6")) fail(`IN-1 impacts 6th, the reason must say rank 6: ${out.assumptions[1].reason}`);
+  if (out.assumptions[1].reason.includes("rank 1")) fail(`map-order position leaked into the rank: ${out.assumptions[1].reason}`);
+});
+
 await test("selectFromMap: ties rank in map order and table-routed assumptions carry the policy row", () => {
   const policy = loadSelectPolicy();
   const items = [

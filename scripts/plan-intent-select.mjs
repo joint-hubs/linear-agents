@@ -338,11 +338,14 @@ export function selectFromMap({ items, scores, policy, mapVersion }) {
   // An overflowed question/confirmation becomes an assumption: the options
   // field has no place in the assumption shape and is dropped here — the map
   // record itself still carries the alternatives and options verbatim.
-  const overflow = ranked.slice(policy.capQuestions).map((r) => ({
+  const overflow = ranked.slice(policy.capQuestions).map((r, i) => ({
     id: r.q.id,
     claim: r.q.claim,
     impactProbability: r.q.impactProbability,
-    reason: `below the ${policy.capQuestions}-question cap (rank ${r.idx + 1}) — listed, never dropped (A0 honesty)`,
+    // The rank is the item's standing in the IMPACT ordering (post-sort), not
+    // its map-order position — measured on FOC-443/FOC-406 (2026-10-01), where
+    // a map-order-2 item ranked 8th by impact had been labelled "rank 2".
+    reason: `below the ${policy.capQuestions}-question cap (rank ${policy.capQuestions + i + 1}) — listed, never dropped (A0 honesty)`,
   }));
   return {
     mapVersion,
