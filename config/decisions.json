@@ -275,7 +275,7 @@
       ],
       "criteriaVersion": 1,
       "reads": [
-        "inbox.entry"
+        "plan.intent.confirmed"
       ],
       "output": {
         "type": "object",
@@ -342,7 +342,7 @@
       ],
       "criteriaVersion": 1,
       "reads": [
-        "inbox.entry",
+        "plan.intent.confirmed",
         "features.list"
       ],
       "output": {
@@ -420,6 +420,7 @@
       ],
       "criteriaVersion": 1,
       "reads": [
+        "plan.intent.confirmed",
         "inbox.entry",
         "plan.dod.definitionOfDone",
         "plan.ac.acs",
@@ -459,8 +460,8 @@
     "plan.gate1": {
       "id": "plan.gate1",
       "kind": "H",
-      "owner": "plan node v2 (FOC-397 runner); gate contract untouched (GAPS §4)",
-      "hookPoint": "plan chain, after plan.intent.select — GATE 1 (interpretation selection approval; FOC-516 moved the gate ahead of the DoD/AC/spec hand-off), relayed mechanically by supervisor-gate.mjs; Mateusz decides",
+      "owner": "plan node v2 (FOC-397 runner); conversation contract FOC-517 (design doc §3.6 revision)",
+      "hookPoint": "plan chain, after plan.intent.select — GATE 1, the intent conversation (FOC-517): the display shows what PLAN understood; a round without confirmation re-enters plan.intent (≤3 rounds, then intent_not_settled); free text is annotated by plan.intent.reply, settled only by Mateusz's answer",
       "autonomy": null,
       "threshold": null,
       "fallback": {
@@ -470,7 +471,8 @@
       "metrics": [],
       "criteriaVersion": 1,
       "reads": [
-        "plan.intent.select.record"
+        "plan.intent.select.record",
+        "plan.intent.record"
       ],
       "output": {
         "type": "object",
@@ -481,8 +483,286 @@
         "properties": {
           "approved": {
             "type": "boolean"
+          },
+          "answer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "confirmed": {
+            "type": "boolean"
+          },
+          "round": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3
+          },
+          "answers": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "required": [
+                "round",
+                "mapVersion",
+                "interpretationId"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "round": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3
+                },
+                "mapVersion": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "interpretationId": {
+                  "type": "string",
+                  "pattern": "^IN-([1-9]|1[0-2])$"
+                },
+                "about": {
+                  "type": "object",
+                  "required": [
+                    "claim"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "claim": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "option": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  }
+                },
+                "answer": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "acceptedOptions": {
+                  "type": "array",
+                  "maxItems": 4,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          },
+          "corrections": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "required": [
+                "round",
+                "mapVersion",
+                "interpretationId",
+                "corrected"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "round": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3
+                },
+                "mapVersion": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "interpretationId": {
+                  "type": "string",
+                  "pattern": "^IN-([1-9]|1[0-2])$"
+                },
+                "about": {
+                  "type": "object",
+                  "required": [
+                    "claim"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "claim": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  }
+                },
+                "corrected": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                }
+              }
+            }
+          },
+          "presented": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 3,
+            "propertyNames": {
+              "pattern": "^[123]$"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "required": [
+                "mapVersion"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "mapVersion": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "understood": {
+                  "type": "array",
+                  "maxItems": 12,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "claim"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^IN-([1-9]|1[0-2])$"
+                      },
+                      "claim": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    }
+                  }
+                },
+                "confirmations": {
+                  "type": "array",
+                  "maxItems": 12,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "claim"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^IN-([1-9]|1[0-2])$"
+                      },
+                      "claim": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    }
+                  }
+                },
+                "assumptions": {
+                  "type": "array",
+                  "maxItems": 12,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "claim"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^IN-([1-9]|1[0-2])$"
+                      },
+                      "claim": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    }
+                  }
+                },
+                "questions": {
+                  "type": "array",
+                  "maxItems": 4,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "claim",
+                      "options"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^IN-([1-9]|1[0-2])$"
+                      },
+                      "claim": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "options": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 4,
+                        "items": {
+                          "type": "object",
+                          "required": [
+                            "text",
+                            "recommended"
+                          ],
+                          "additionalProperties": false,
+                          "properties": {
+                            "text": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            },
+                            "recommended": {
+                              "type": "boolean"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "approved": {
+                  "const": true
+                }
+              },
+              "required": [
+                "approved"
+              ]
+            },
+            "then": {
+              "required": [
+                "answer"
+              ]
+            }
+          }
+        ]
       },
       "tier": null,
       "failure": "stop",
@@ -593,6 +873,7 @@
       "metrics": [],
       "criteriaVersion": 1,
       "reads": [
+        "plan.spec.record",
         "plan.decompose.record",
         "gate.plan.gate1.record",
         "plan.render.issueText"
@@ -1496,6 +1777,53 @@
           "criteria": {
             "true": "grounded — the entry itself states or fixes this reading",
             "false": "not grounded — the reading is inference, extrapolation or guess"
+          }
+        }
+      }
+    },
+    "plan.intent.reply": {
+      "id": "plan.intent.reply",
+      "kind": "J",
+      "owner": "plan node v2; gate1 conversation annotation FOC-517 (design doc §3.6)",
+      "hookPoint": "plan chain, inside the plan.gate1 resolution — ONE seam call per free-text answer; instances = the presented items; A0 annotation recorded next to the raw answer, shown to the frontman, nothing auto-acted until calibrated (M3); the round settles by Mateusz's answer, never by this call",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "reply": {
+          "type": "choice",
+          "instructions": "FOC-517 gate1 conversation: Mateusz answered the presented intent display in free (dictated) text. Read the raw answer against the presented items and classify what it meant overall. confirmed = the answer accepts the reading as shown; corrected = it corrects at least one presented item; new_scope = it adds work beyond the presented reading (propose splitting it into a separate task — Mateusz confirms at gate2); stop = the conversation should stop (the entry is misunderstood beyond repair).",
+          "criteria": {
+            "confirmed": "the answer accepts the presented reading as shown",
+            "corrected": "the answer corrects at least one presented item",
+            "new_scope": "the answer adds work beyond the presented reading — propose a separate task, confirmed at gate2",
+            "stop": "the conversation should stop — the entry is misunderstood beyond repair"
+          }
+        },
+        "touched{i}": {
+          "type": "noul",
+          "instructions": "Per presented item {{id}} — \"{{claim}}\" (kind: {{kind}}). Does the raw answer TOUCH this item — confirm it, correct it, or speak about exactly what it covers? Answer true = touched.",
+          "criteria": {
+            "true": "the answer speaks about this item (confirms, corrects or extends it)",
+            "false": "the answer does not concern this item"
           }
         }
       }
