@@ -144,6 +144,44 @@ export async function areProcessesAlive(pids) {
 }
 
 /**
+ * The reconcile path's liveness half: which active runs are CONFIRMED dead and
+ * safe to close (FOC-599 — extracted from telemetry-server.mjs reconcileDeadRuns
+ * so the contract is testable; that function is not exported and boots a server).
+ *
+ * This contract is the deliberate opposite of the PANEL path
+ * (listTerminalsAsync): there, a broken checker maps to alive=false because a
+ * stale row in a UI is harmless. Here, answering "dead" on a broken host would
+ * CLOSE LIVE RUNS — so a checker failure yields no closeable runs at all and
+ * the caller defers every closure to the next tick (the old sync probe's catch
+ * answered "dead" and did exactly that).
+ *
+ * A pid the map does not cover is read as dead: areProcessesAlive pre-fills
+ * every requested pid, so an absent pid means the caller passed a map that did
+ * not come from the probe contract.
+ *
+ * @param {Array<{consolePid: number, runId?: string}>} runs  active runs
+ * @param {object} [opts]
+ * @param {(pids: number[]) => Promise<Map<number, boolean>>} [opts.probeAsync]
+ * @returns {Promise<{closeable: Array<object>, checkerError: Error|null}>}
+ */
+export async function reconcileLiveness(runs, { probeAsync = areProcessesAlive } = {}) {
+  const candidates = (Array.isArray(runs) ? runs : [])
+    .filter((r) => Number.isInteger(r?.consolePid) && r.consolePid > 0);
+  if (candidates.length === 0) return { closeable: [], checkerError: null };
+  let aliveMap;
+  try {
+    aliveMap = await probeAsync(candidates.map((r) => r.consolePid));
+  } catch (error) {
+    // Broken checker — defer, never guess "dead".
+    return { closeable: [], checkerError: error };
+  }
+  return {
+    closeable: candidates.filter((run) => aliveMap.get(run.consolePid) !== true),
+    checkerError: null,
+  };
+}
+
+/**
  * Flash the taskbar button for a console window by its process PID.
  *
  * Uses Win32 FlashWindowEx via PowerShell Add-Type. Unlike SetForegroundWindow,
