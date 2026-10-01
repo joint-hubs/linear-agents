@@ -177,17 +177,17 @@ await test("the output schema is the design's bounded checklist schema", () => {
 
 console.log("\nplan-dod: the graph wiring");
 
-await test("9 plan steps, 8 sequence edges, plan.dod sits between plan.intent and plan.ac", () => {
+await test("10 plan steps, 9 sequence edges, plan.dod sits between plan.intent and plan.ac", () => {
   eq(validateGraph(GRAPH).length, 0, "the committed graph validates");
   const stepIds = Object.keys(PLAN.steps);
-  eq(stepIds.length, 9, `9 steps, got ${stepIds.length}`);
+  eq(stepIds.length, 10, `10 steps, got ${stepIds.length}`);
   if (!stepIds.includes("plan.dod")) fail("plan.dod missing from the steps map");
-  eq(PLAN.stepFlow.length, 8, "8 sequence edges");
+  eq(PLAN.stepFlow.length, 9, "9 sequence edges");
   const chain = PLAN.stepFlow.map((e) => `${e.from}>${e.to}`).join(" ");
   eq(
     chain,
-    "plan.dor>plan.intent plan.intent>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.gate2 plan.gate2>plan.push",
-    "the chain runs dor → intent → dod → ac → spec → gate1 → decompose → gate2 → push",
+    "plan.dor>plan.intent plan.intent>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push",
+    "the chain runs dor → intent → dod → ac → spec → gate1 → decompose → render → gate2 → push",
   );
   eq(PLAN.steps["plan.dor"].kind, "J", "plan.dor stays [J]");
   eq(DOD_STEP.kind, "G", "plan.dod is [G]");
