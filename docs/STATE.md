@@ -2888,3 +2888,52 @@ Kickoff `.state/krok0-2026-09-29/foc-642-dev-kickoff.md` niesie to wprost, tu dl
 
 Do tego AC3 żąda „zero failures", a repo ma jeden znany plik wrażliwy na obciążenie (`security-scan.test.mjs`).
 Jeśli się zaczerwieni — AC3 **nie jest spełnione literalnie** i wymaga Twojej decyzji, nie mojej.
+
+## 2026-10-01 — FOC-596 close-out (self-work, run 36e0): 5-run plan.intent re-measurement + notatki operacyjne
+
+**Measurement DONE on branch `foc-596-dev`; landing waits for one decision.** Five serial runs on the
+same 12-case fixture, `z-ai/glm-5.3-flash` unchanged (**no model/tier/routing change**):
+before-600s 3/12 · after-600s 1/12 · after-300s 1/12 · after-600s-rep 0/12 · before-600s-rep 6/12
+accepted. Matrix + reading in `docs/benchmark/plan-intent-eval.md` addendum 2026-10-01; artifacts per
+run under `.state/foc-596/eval/<run>/` (gitignored). Bottom line: the lever-2 output-shape
+pre-commitment sentence pins latency (p90 ≤ 48 s vs 545–600 s) but collapses conformance (0–8% vs
+25–50%) via `covers` omission; pre-change day drift is a provider output-length regime flip (same
+prompt: run cost $0.016203 → $0.147735, p50 56.6 s → 222.8 s two hours later). Lever-2 sentence fate
+(keep / revert / second named iteration) = Mateusz's call — options in the close report. Nothing of
+FOC-596 is on main yet; `config/decisions.json` on the branch carries the sentence as measured.
+
+**Prompt-swap provenance procedure (used for `before-600s-rep`):** edit the lever-2 sentence out of
+`config/decisions.json` → launch the eval → restore the exact sentence after completion → `git diff`
+must show it as the only change in that file. `scripts/plan-intent-eval.mjs` loads `plan.intent` once
+at `runEval` start, so a mid-run edit cannot contaminate a running process; FOC-449's `hash` is a
+per-case input hash and does NOT encode the prompt version. Sanity after restore:
+`decisions-registry.test.mjs` 38/0.
+
+**One-verdict-per-run guard — the exact refused command (standing directive: record it here):**
+
+    node $LA_ROOT/scripts/supervisor-triage.mjs record --issue FOC-596 --verdict plan --proposal plan --rationale 'deterministic propose = plan node (supervised); deliverable is one prompt-surface change (output-shape pre-commitment) plus a 12-case re-measurement on the existing harness and a dated addendum to docs/benchmark/plan-intent-eval.md; zero child spend; the model-policy lever (reasoning effort / cheap tier) is Mateuszs call and is NOT touched; if the change grows past the prompt surface, re-triage to medium with dev+test' --confidence 75 --unknown 'no acceptance criteria section in the body' --unknown 'no definition of done section in the body' --size small
+
+Refused verbatim: `run 2026-09-29T13-03-56-513-supervisor-36e0 already has a verdict for FOC-603;
+recording FOC-596 would retarget every spawn in this run` (hint: "start a new run, or pass --force if
+this is deliberate"). The same guard earlier refused FOC-602 against FOC-621's verdict in the same
+run. **Mateusz approved `--force` + snapshot on 2026-10-01.** Disciplines: (1) snapshot `triage.json`
+before every forced overwrite, (2) `record` immediately before the `spawn` it retargets (ritual
+pair), (3) `intake --issue <new>` before `record` when the annotations should pair. First exercise:
+FOC-519 or the FOC-603 TEST retry. FOC-596's own verdict was never recorded — self-work, no spawn,
+and `spawn` is the guard's only consumer.
+
+**Auto-mode classifier block (transient; no workaround used):** `node scripts/security-scan.test.mjs`
+was blocked with *"Auto mode could not evaluate this action and is blocking it for safety — run with
+--debug… usually transient — wait briefly and try this action again as-is; don't rewrite it."*
+Identical command retried later in the measurement gap → 81/0 (native semgrep 1.172.0 live at the SAC
+lift).
+
+**Docker semgrep path still NOT verified (FOC-576 thread).** `docker pull semgrep/semgrep:1.178.0`
+failed twice on the same blob — `failed to copy: httpReadSeeker: failed open: failed to do request:
+Get "https://production.cloudfront.docker.com/registry-v2/.../blobs/sha256/49/490afa66…/data": EOF` —
+the known `http.docker.internal:3128` DD-proxy truncation (FOC-576; STATE 2026-09-30). Options with
+costs put to Mateusz: (1) host-side download + `docker load` (~30–60 min supervisor work, 0 USD),
+(2) he changes the DD proxy config himself (~2 min — his reserved action), (3) park the path (native
+semgrep is green now). Prohibitions stand: no DD proxy config changes, no Docker restart (restart
+kills the thoughtmap containers of another session), no new binary downloads (SAC blocks unsigned
+exes).
