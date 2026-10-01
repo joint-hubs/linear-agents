@@ -37,9 +37,9 @@ import {
 import { createPacer, createToolLinkState, extractToolFacts, jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
 import { reconstructDelegationLinksAsync, scanSpawnToolUsesAsync } from "./telemetry-delegation-recon.mjs";
 
-const __dir = dirname(fileURLToPath(import.meta.url));
-const root = join(__dir, "..");
-const runsDir = join(root, ".state", "runs");
+// Data roots (runs manifests, per-squad transcript corpora) resolve through
+// ledger.runsManifestDir() / ledger.squadProjectsRoot() — the LA_STATE_ROOT /
+// LA_CORPUS_ROOT seams (FOC-599), so tests never open the live `.state`.
 
 // The runId format run-manifest.mjs stamps into manifests and transcripts
 // (e.g. "2026-06-29T17-43-31-dev"). Used by the lazy transcript-locating sweep
@@ -622,7 +622,7 @@ export function transcriptForSession(run) {
   if (stripped && stripped !== run.transcriptPath && existsSync(stripped)) return stripped;
   const roots = [
     run.claudeConfigDir ? join(run.claudeConfigDir, "projects") : null,
-    run.squad ? join(root, "agents", run.squad, "projects") : null,
+    run.squad ? ledger.squadProjectsRoot(run.squad) : null,
     join(homedir(), ".claude", "projects"),
   ].filter(Boolean);
   for (const projectsRoot of roots) {
@@ -752,7 +752,7 @@ async function runIdTranscriptLookup(manifest, indexCache) {
   if (!manifest.runId || !manifest.squad) return null;
   let index = indexCache.get(manifest.squad);
   if (index === undefined) {
-    index = await buildRunIdTranscriptIndex(join(root, "agents", manifest.squad, "projects"));
+    index = await buildRunIdTranscriptIndex(ledger.squadProjectsRoot(manifest.squad));
     indexCache.set(manifest.squad, index);
   }
   return index.get(manifest.runId) || null;
@@ -766,6 +766,7 @@ async function runIdTranscriptLookup(manifest, indexCache) {
 // loop measure as one ~0.4 s event-loop block. The pacer yields at least
 // every ~40 ms of reads.
 async function manifests() {
+  const runsDir = ledger.runsManifestDir();
   if (!existsSync(runsDir)) return [];
   const pacer = createPacer();
   const out = [];

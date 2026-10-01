@@ -18,6 +18,13 @@
 //      the result arriving in a later pass upgrades the row in place — across
 //      a simulated process restart; a fact whose result never arrives is
 //      finalized as 'missing' only when the file has stopped growing.
+//   5. Same-process pending upgrade (FOC-547 D1): a pending fact resolved in
+//      the SAME process's link state keeps every bound identity column.
+//   6. AC1 regression (FOC-599): the backfill() tick — manifest sweep, lazy
+//      runId→transcript index, chunked meta scans, ingest — must not block
+//      the event loop past AC2's 250 ms bar (the loop-starvation half of
+//      AC1's "a fresh GET answers ≤ 2 s while a run appends"). See the
+//      scenario's own header for the hermeticity seams.
 //
 // Deterministic: fixed synthetic content, wall-clock assertions are budgeted
 // against the MEASURED T_full of the same fixture in the same run (no absolute
@@ -29,7 +36,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { makeEvent, openTelemetryDb, applyEvent } from "./telemetry-store.mjs";
-import { ingestTranscript, ingestKnownRuns, _resetTranscriptParseStateForTests } from "./telemetry-ingest.mjs";
+import * as ledger from "./ledger.mjs";
+import { ingestTranscript, ingestKnownRuns, backfill, _resetTranscriptParseStateForTests } from "./telemetry-ingest.mjs";
 
 let passed = 0;
 let skipped = 0;
@@ -343,6 +351,121 @@ await test("same-process finalize of a still-pending fact keeps identity (D1)", 
   const d = rows.find((r) => r.tool_name_raw === "Bash");
   assertEqual(d.tool_result_state, "missing", "call_D finalized as 'missing' once the file is idle");
   assertEqual(d.agent_key, "_lead", "finalized row keeps its identity fields");
+});
+
+// --- Scenario 6 (FOC-599 item 4c): AC1 regression — the backfill tick ------
+// AC1 is "a fresh GET answers within its 2 s budget while a run appends"; what
+// starves a request is the TICK's longest synchronous block, so this asserts
+// the loop-starvation half of AC1 at AC2's stricter 250 ms bar while backfill()
+// runs the FOC-545 pipeline (manifest sweep → lazy runId→transcript index →
+// chunked meta scans → ingest) over a synthetic corpus. That backfill path is
+// what the manual AC1 driver (experiments/foc-547-tick-lag.mjs) exercises; no
+// scenario before this one touched it.
+//
+// Hermeticity (house rule: tests never open the live `.state` or the live
+// transcript tree): LA_STATE_ROOT + LA_CORPUS_ROOT point the manifests and the
+// squad corpus at the fixture (ledger resolves both per call), and USERPROFILE
+// redirects os.homedir() at call time so the ~/.claude fallbacks cannot reach
+// the host either. The manifests carry no cwd and no sessionId and the files
+// are named lead-<i>.jsonl, so transcript discovery (which requires cwd) and
+// name matching are structurally skipped and the ONLY way backfill can find
+// the fixture transcripts is the lazy runId index — the legacy-recovery path.
+const AC1_RUNS = 4;
+const AC1_LINES = 2000; // ~3 KB each → ~6 MB per transcript, ~24 MB corpus
+// Line DENSITY matters twice: the tick's work is SQL-per-line (~0.27 ms) while
+// its yields come per 256 KiB chunk, so lines must stay big enough for one
+// chunk to hold few of them (3 KB → ~85 lines ≈ 21 ms of green block), and
+// 2000 lines make one file's UNINTERRUPTED ingest ≈ 540 ms — the pre-FOC-547
+// drain shape trips the 250 ms bar at fixture scale that way (measured).
+const AC1_FILLER = "x".repeat(2900);
+const ac1StateRoot = join(temp, "ac1-state");
+const ac1CorpusRoot = join(temp, "ac1-corpus");
+const ac1Home = join(temp, "ac1-home");
+const ac1DbPath = join(temp, "ac1-telemetry.sqlite");
+mkdirSync(join(ac1StateRoot, "runs"), { recursive: true });
+mkdirSync(join(ac1Home, ".claude", "projects"), { recursive: true });
+
+const ac1RunIds = Array.from({ length: AC1_RUNS }, (_, i) => `2026-09-01T10-0${i}-00-ac1${i}`);
+for (let i = 0; i < AC1_RUNS; i++) {
+  const dir = join(ac1CorpusRoot, "agents", "squad-ac1", "projects", `hash-${i}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `lead-${i}.jsonl`),
+    Array.from({ length: AC1_LINES }, (_, n) => JSON.stringify({
+      type: "assistant",
+      timestamp: new Date(Date.UTC(2026, 8, 1, 10, 0, 0) + n * 1000).toISOString(),
+      sessionId: `session-ac1-${i}`,
+      runId: ac1RunIds[i], // the lazy index's match token
+      filler: AC1_FILLER,
+      message: { model: "deepseek-v4-flash", usage: { input_tokens: 100 + n, output_tokens: 50 } },
+    })).join("\n") + "\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(ac1StateRoot, "runs", `${ac1RunIds[i]}.json`),
+    JSON.stringify({
+      runId: ac1RunIds[i],
+      squad: "squad-ac1",
+      startedAt: "2026-09-01T10:00:00.000Z",
+      endedAt: "2026-09-01T11:00:00.000Z",
+      status: "completed",
+      taskId: "FOC-599",
+    }),
+    "utf8",
+  );
+}
+
+await test("(599) AC1: the backfill tick stays under AC2's 250ms block bar", async () => {
+  const saved = {};
+  const seams = {
+    LA_STATE_ROOT: ac1StateRoot,
+    LA_CORPUS_ROOT: ac1CorpusRoot,
+    USERPROFILE: ac1Home,
+    LA_TELEMETRY_HOME: join(temp, "ac1-telemetry-home"),
+    LA_TELEMETRY_DB: ac1DbPath,
+  };
+  for (const [k, v] of Object.entries(seams)) { saved[k] = process.env[k]; process.env[k] = v; }
+  try {
+    // Seam self-check: if the seams regress, fail in milliseconds — never by
+    // silently falling back to the live tree and reading host state first.
+    assertEqual(ledger.runsManifestDir(), join(ac1StateRoot, "runs"), "LA_STATE_ROOT seam");
+    assertEqual(
+      ledger.squadProjectsRoot("squad-ac1"),
+      join(ac1CorpusRoot, "agents", "squad-ac1", "projects"),
+      "LA_CORPUS_ROOT seam",
+    );
+
+    const sampler = startLoopSampler();
+    const t0 = performance.now();
+    const summary = await backfill({ dbPath: ac1DbPath });
+    const elapsed = performance.now() - t0;
+    sampler.stop();
+
+    // Non-vacuous: the tick really walked the manifests, recovered every
+    // transcript through the lazy index (nothing else can — see the header),
+    // and parsed every line of them.
+    assertEqual(summary.manifests, AC1_RUNS, "every fixture manifest read");
+    assertEqual(summary.runs, AC1_RUNS, "every manifest processed");
+    assertEqual(summary.missingTranscripts, 0, "the lazy runId index must locate every transcript");
+    assertEqual(summary.transcripts, AC1_RUNS, "one transcript ingested per run");
+    assertEqual(summary.usageEvents, AC1_RUNS * AC1_LINES, "every usage line applied");
+
+    // THE AC1 ASSERTION (its loop-starvation half, at AC2's bar): a tick whose
+    // longest synchronous block stays under 250 ms cannot starve a request past
+    // AC1's 2 s GET budget. The paced pipeline measures maxBlock in the tens of
+    // ms; with the pacers removed (the pre-FOC-547 shape) the same tick drains
+    // as ONE multi-second block and this goes red — proven red-first in the
+    // commit that introduced this scenario.
+    assert(
+      sampler.maxBlockMs < 250,
+      `backfill tick blocked the event loop ${sampler.maxBlockMs.toFixed(0)}ms (budget 250ms, tick total ${elapsed.toFixed(0)}ms) — a run appending now would starve behind it`,
+    );
+    console.log(`    backfill tick: ${elapsed.toFixed(0)}ms total, maxBlock=${sampler.maxBlockMs.toFixed(0)}ms`);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
 });
 
 // --- Cleanup + summary -------------------------------------------------------
