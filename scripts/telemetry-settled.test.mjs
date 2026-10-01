@@ -56,7 +56,7 @@ test("the gate is checked BEFORE the per-run filesystem lookup", () => {
   // earlier in the file, and a first draft of this test compared those instead
   // — it failed against correct code, which is the worse kind of red.
   const loopAt = code.indexOf("for (const run of await queryRunsForIngest(db))");
-  assert.ok(loopAt > -1, "the ingest loop no longer iterates queryRunsForIngest");
+  assert.ok(loopAt > -1, "the ingest loop must iterate queryRunsForIngest (pinned shape not found: for (const run of await queryRunsForIngest(db)))");
   const body = code.slice(loopAt);
 
   const gate = body.indexOf("settledRun(db, run)");

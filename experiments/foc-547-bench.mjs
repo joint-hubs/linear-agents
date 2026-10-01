@@ -6,8 +6,12 @@
 // <outDir>/summary.json after every phase, so a killed run keeps partial numbers.
 //
 // The repo's .state junctions point at the real host corpus; that tree is
-// READ-ONLY input here. All mutable stores (telemetry db/home, rewards
-// db/home) live under a mkdtemp tmp dir.
+// READ-ONLY input here — ENFORCED (FOC-599 item 6), not assumed: the env-shape
+// assertion below refuses a run whose child env still carries an input-root
+// seam (pinning the drops) or whose mutable stores would land outside tmp, and
+// LA_STATE_READ_ONLY=1 makes the child's one state-root writer refuse. All
+// mutable stores (telemetry db/home, rewards db/home) live under a mkdtemp tmp
+// dir.
 //
 // Env seams:
 //   LA_BENCH_ROOT — spawn scripts/telemetry-server.mjs from this checkout
@@ -21,7 +25,7 @@ import { spawn } from "node:child_process";
 import { connect } from "node:net";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const CLIENT_TIMEOUT_MS = 60000;
@@ -69,14 +73,48 @@ if (await portBusy(port)) {
 
 // Child env: isolated mutable stores under tmpDir. No LA_STATE_ROOT override —
 // the default repo-root/.state (the read-only host corpus junction) is wanted,
-// so drop any ambient value instead of passing it through.
+// so drop any ambient value instead of passing it through. Same for
+// LA_CORPUS_ROOT (the transcript-corpus seam, FOC-599 item 4c) — an ambient
+// value would silently retarget the corpus the child scans.
 const childEnv = { ...process.env };
 delete childEnv.LA_STATE_ROOT;
+delete childEnv.LA_CORPUS_ROOT;
 childEnv.TELEMETRY_PORT = String(port);
 childEnv.LA_TELEMETRY_DB = presetDb || join(tmpDir, "telemetry.sqlite");
 childEnv.LA_TELEMETRY_HOME = join(tmpDir, "telemetry-home");
 childEnv.LA_REWARDS_DB = join(tmpDir, "rewards.sqlite");
 childEnv.LA_REWARDS_HOME = join(tmpDir, "rewards-home");
+// The input tree is READ-ONLY INPUT (header): enforced now, not assumed.
+// LA_STATE_READ_ONLY=1 makes the one state-root writer in the child's import
+// graph (writeLaunchBat → .state/launch-*.bat) refuse instead of write
+// (telemetry-store.assertStateWritable).
+childEnv.LA_STATE_READ_ONLY = "1";
+
+// FOC-599 item 6 — the env-shape assertion (store-side): both input-root seams
+// stay dropped and every mutable store resolves under tmpDir, or the run
+// refuses BEFORE the spawn rather than discovering a live-tree write after.
+// The only store allowed outside tmp is LA_BENCH_DB when explicitly preset
+// (the controlled same-db comparison is the operator's choice). Verified
+// 2026-10-01: the boot/tick path writes only the telemetry/rewards stores and
+// the analysis cache (all under LA_TELEMETRY_HOME — redirected here); the
+// state-root writers in the graph are the launch-wrapper write (flag-guarded
+// above) and the child-side run-manifest.mjs, which this probe never runs.
+const inputSeams = ["LA_STATE_ROOT", "LA_CORPUS_ROOT"].filter((key) => childEnv[key]);
+if (inputSeams.length > 0) {
+  rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  console.error(`refusing to run: input-root seam(s) still set: ${inputSeams.join(", ")} — the input tree must stay the repo default`);
+  process.exit(2);
+}
+for (const key of ["LA_TELEMETRY_DB", "LA_TELEMETRY_HOME", "LA_REWARDS_DB", "LA_REWARDS_HOME"]) {
+  const value = resolve(childEnv[key] || "");
+  const underTmp = value === tmpDir || value.startsWith(tmpDir + sep);
+  const isPreset = key === "LA_TELEMETRY_DB" && presetDb && resolve(presetDb) === value;
+  if (!underTmp && !isPreset) {
+    rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    console.error(`refusing to run: ${key}=${childEnv[key] ?? "(unset)"} is not under ${tmpDir} — a mutable store would land outside tmp`);
+    process.exit(2);
+  }
+}
 
 let childLog = "";
 const captureLog = (chunk) => { childLog = (childLog + chunk.toString()).slice(-2000); };
