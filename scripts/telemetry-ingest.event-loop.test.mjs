@@ -151,7 +151,13 @@ await test("unchanged tick applies 0 events and skips the re-read (AC5)", async 
   sampler.stop();
   assertEqual(again.usageEvents, 0, "an unchanged file must not re-emit usage events");
   assertEqual(again.settled, 0, "run is still running — the skip must come from the size gate, not the settle gate");
-  const budget = Math.max(400, T_full / 5);
+  // FOC-599: T_full/10, not max(400, T_full/5). A genuine full re-read of this
+  // fixture measures 200-275 ms (POKE 201 ms; 274 ms forced, this box) — BELOW
+  // the old 400 ms floor, so the headline assertion stayed green on its own
+  // target regression. A warm full re-parse costs about T_full/5, so the budget
+  // must sit under that: T_full/10 leaves the skip path (measured 5 ms) ~20x
+  // headroom and trips at ~2-3x under a real re-read.
+  const budget = T_full / 10;
   assert(
     elapsed < budget,
     `unchanged tick took ${elapsed.toFixed(0)}ms (budget ${budget.toFixed(0)}ms, T_full ${T_full.toFixed(0)}ms) — the unchanged transcript was re-read`,
