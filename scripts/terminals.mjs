@@ -101,8 +101,11 @@ export function isProcessAlive(pid) {
  * whole PowerShell startup, ~0.1–0.5 s per pid); the manager snapshot path
  * probes up to 10 pids per build and must never block the server's event
  * loop, so it uses this instead: a single `Get-Process -Id a,b,c` spawn,
- * awaited. Resolves a Map pid → boolean (a missing pid is simply absent
- * from Get-Process output → false). REJECTS on spawn failure; what a
+ * awaited. Resolves a Map pid → boolean — complete by construction: every
+ * VALID requested pid gets an entry (pre-filled false; a pid absent from
+ * Get-Process output stays false), while invalid pids are filtered out and
+ * get no entry. Callers may rely on that completeness; reconcileLiveness
+ * enforces it. REJECTS on spawn failure; what a
  * rejection means is the CALLER's contract, and the two callers disagree on
  * purpose: listTerminalsAsync (/api/terminals) maps it to alive=false — the
  * same answer the old sync probe's catch path produced, so a broken checker
@@ -155,9 +158,13 @@ export async function areProcessesAlive(pids) {
  * the caller defers every closure to the next tick (the old sync probe's catch
  * answered "dead" and did exactly that).
  *
- * A pid the map does not cover is read as dead: areProcessesAlive pre-fills
- * every requested pid, so an absent pid means the caller passed a map that did
- * not come from the probe contract.
+ * A pid the answer set does not cover — or covers with a non-boolean — is
+ * UNKNOWN, not dead: only an explicit false closes a run. A map missing an
+ * answer violates the probe contract (areProcessesAlive pre-fills every
+ * requested pid), and a contract violation is untrustworthy as a whole, so it
+ * behaves exactly like a throwing checker: nothing closes, and the caller gets
+ * the error to log. The old "not true means dead" reading closed live runs on
+ * any partial map, silently betting correctness on Map completeness.
  *
  * @param {Array<{consolePid: number, runId?: string}>} runs  active runs
  * @param {object} [opts]
@@ -175,8 +182,18 @@ export async function reconcileLiveness(runs, { probeAsync = areProcessesAlive }
     // Broken checker — defer, never guess "dead".
     return { closeable: [], checkerError: error };
   }
+  const unanswered = candidates
+    .map((r) => r.consolePid)
+    .filter((pid) => !aliveMap.has(pid) || typeof aliveMap.get(pid) !== "boolean");
+  if (unanswered.length > 0) {
+    // Contract violation (see above) — same handling as a broken checker.
+    return {
+      closeable: [],
+      checkerError: new Error(`liveness probe did not answer for pid(s): ${unanswered.join(", ")}`),
+    };
+  }
   return {
-    closeable: candidates.filter((run) => aliveMap.get(run.consolePid) !== true),
+    closeable: candidates.filter((run) => aliveMap.get(run.consolePid) === false),
     checkerError: null,
   };
 }

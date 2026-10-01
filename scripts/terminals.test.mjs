@@ -421,6 +421,35 @@ test("reconcileLiveness: runs without a usable pid are never closeable (the orph
   assert(closeable.length === 0 && checkerError === null, `closeable=${closeable.length} checkerError=${checkerError}`);
 });
 
+test("reconcileLiveness: a pid absent from the answer set is UNKNOWN — deferred, never guessed dead", async () => {
+  // The kernel used to read "not true" as dead, so a map that answered for only
+  // some of the requested pids closed the rest — correctness silently hinged on
+  // the probe's Map-completeness contract (areProcessesAlive pre-fills, so its
+  // own maps are complete; an injected or future probe need not be). An
+  // unanswered pid is UNKNOWN: the whole answer set is untrusted this tick,
+  // exactly like a throwing checker, and the violation surfaces as the error.
+  const { closeable, checkerError } = await terminals.reconcileLiveness(
+    [makeRun({ runId: "answered", consolePid: 100 }), makeRun({ runId: "unanswered", consolePid: 300 })],
+    { probeAsync: async () => new Map([[100, false], [200, true]]) }, // 300 not answered
+  );
+  assert(closeable.length === 0,
+    `an incomplete answer set must close nothing (absent is unknown, not dead), got ${JSON.stringify(closeable.map((r) => r.runId))}`);
+  assert(checkerError instanceof Error && /300/.test(checkerError.message),
+    `the contract violation must surface and name the pid, got ${checkerError}`);
+});
+
+test("reconcileLiveness: a non-boolean answer is a contract violation, not a dead pid", async () => {
+  // Same story as above with a subtler map: every pid present, but one answer
+  // is null (unknown). Only an explicit false closes a run.
+  const { closeable, checkerError } = await terminals.reconcileLiveness(
+    [makeRun({ runId: "alive", consolePid: 100 }), makeRun({ runId: "unknown", consolePid: 200 })],
+    { probeAsync: async () => new Map([[100, true], [200, null]]) },
+  );
+  assert(closeable.length === 0,
+    `a non-boolean answer must close nothing, got ${JSON.stringify(closeable.map((r) => r.runId))}`);
+  assert(checkerError instanceof Error, "the contract violation must surface");
+});
+
 test("telemetry-server: reconcile defers through the kernel, orphan path stays ungated", async () => {
   // reconcileDeadRuns boots a server on import, so its orchestration is pinned
   // by shape: the liveness half must stay the shared kernel (whose defer
