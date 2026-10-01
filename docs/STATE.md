@@ -2983,3 +2983,35 @@ komunikat.
 (0 USD), (b) druga iteracja z regułą `covers: [...]` + 2 pomiary (0,02–0,30 USD), (c) zostaw +
 follow-up strukturalny (0,3–1,0 USD); (2) wątek Dockera/semgrep (opcje z kosztami wyżej); (3) push
 wave + sprzątanie worktree'ów. Kolejka: **FOC-520** → 516 → 517 → 476 → 477.
+
+## 2026-10-01 — FOC-520 DOMKNIĘTE (merge `a81ab5e`) · `plan.render [D]` · pierwsza czysta runda dev+test
+
+**Bottom line:** deterministyczny renderer tekstu issue `plan.render [D]` wylądował na main jako
+merge `a81ab5e` (kandydat: `dd724b3` feat + `931ae59` golden suite + `0f5b172` checklist, 14 plików
++689/−50). Łańcuch planu: `decompose → render → gate2 → push`, realnie **10 kroków / 9 krawędzi**;
+tekst zaakceptowany na gate2 trafia do Linear 1:1 (`plan.push` bierze `plan.render.issueText`
+werymicie). TEST PASS 109/109 + golden 15/15, merge-verify ACCEPT za pierwszym razem (izolacja
+109/109 + integracja 109/109). Komentarz `648df652`, Backlog → Done. Main **19 ahead of origin**.
+
+**Dwie oceny rozstrzygnięte przez TEST-a (z cytatom wierszy):** (1) ticketowy „9-krokowy łańcuch"
+jest nieaktualny — przed wstawieniem było 9 kroków / 8 krawędzi, `validateStepFlow` wymusza n−1,
+więc testy przypinają 10/9; (2) obowiązkowy wpis rejestru [D] `plan.render` w
+`config/decisions.json` to artefakt wymagany przez `crossCheckSteps` (D7 deep-equal), nie rozszerzenie
+zakresu — rejestr bez driftu (29 wpisów, wpisy FOC-448 nadal nieobecne).
+
+**Flow i koszty (wycenione):** dev-18 **0,226** (10,87 raportowane) → test-19 **0,025** (1,26).
+Pierwsza runda dev+test dzisiaj **bez przedwczesnego końca tury** i bez followupu.
+
+**merge-verify:** `--verify "npm ci && node scripts/test-all.mjs"` za pierwszym podejściem ACCEPT —
+potwierdzenie, że luka `node_modules` z FOC-519 to stała cecha świeżych drzew scratch, nie cecha
+kandydata.
+
+**Notatki procesowe (obserwacje):** (1) martwy drugi regex w `docs-count-guard.test.mjs`
+(`test-all.mjs → N/N files`) — nie trafia w checklistę, WARN przy exit OK, pre-existing; (2) świeże
+drzewo bez `.state/` + redirect wyjścia = fałszywy „exit 0" bez startu testów (artefakt harnessu
+TEST-a, naprawiony `mkdir .state`) — warto dodać do checklisty merge-verify/TEST kickoffów;
+(3) `config/models.native.map` migał jako zmodyfikowany i wrócił sam (watcher, nie reprodukowane).
+
+**Czeka na Mateusza (bez zmian):** (1) los zdania lewara 2 dla FOC-596 (a/b/c jak wyżej); (2) czy
+`npm ci` w merge-verify zostaje (ruch do rejestru npm) — alternatywa kopiowanie `node_modules`;
+(3) push wave + sprzątanie worktree'ów. Kolejka: **FOC-516** → 517 → 476 → 477.
