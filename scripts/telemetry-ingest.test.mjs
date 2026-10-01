@@ -595,6 +595,60 @@ async function run() {
     }
   });
 
+  // FOC-599 item 7 (nit 3): the unchanged-file skip branch finalizes pending
+  // tool facts and used to DROP the whole in-memory parse state. The next grown
+  // pass then started from a fresh state (workspace.lastWorkspace = null) and
+  // re-emitted workspace.observed for an unchanged cwd:branch — and the store's
+  // dedup key is (run_id, observed_at, cwd), so a re-emit with the NEW line
+  // timestamp lands as a real duplicate row.
+  await test("the skip branch keeps workspace memory across an idle→grow gap (no duplicate workspace.observed)", async () => {
+    const jsonl2 = (ls) => ls.map((l) => JSON.stringify(l)).join("\n") + "\n";
+    const savedHome = process.env.LA_TELEMETRY_HOME;
+    const savedDbEnv = process.env.LA_TELEMETRY_DB;
+    const tempW = mkdtempSync(join(tmpdir(), "foc-599-ws-"));
+    process.env.LA_TELEMETRY_HOME = tempW;
+    process.env.LA_TELEMETRY_DB = join(tempW, "telemetry.sqlite");
+    const dbW = openTelemetryDb(process.env.LA_TELEMETRY_DB);
+    try {
+      const sourcePath = join(tempW, "lead.jsonl");
+      applyEvent(dbW, makeEvent("run.started", {
+        runId: "run-ws", squad: "dev", startedAt: "2026-10-01T09:00:00.000Z", cwd: "C:/repos/fenix",
+      }, { runId: "run-ws" }));
+      applyEvent(dbW, makeEvent("session.linked", {
+        runId: "run-ws", sessionId: "session-ws", transcriptPath: sourcePath,
+      }, { runId: "run-ws" }));
+      const observed = () => dbW
+        .prepare("SELECT COUNT(*) AS n FROM workspace_observations WHERE run_id=?")
+        .get("run-ws").n;
+
+      // Pass 1: one cwd-bearing line → exactly one workspace observation.
+      writeFileSync(sourcePath, jsonl2([
+        { type: "user", timestamp: "2026-10-01T09:00:01.000Z", sessionId: "session-ws", cwd: "C:/repos/fenix", gitBranch: "main" },
+      ]), "utf8");
+      await ingestTranscript(dbW, "run-ws", sourcePath, "session-ws");
+      assertEqual(observed(), 1, "workspace_observations after the first ingest");
+
+      // Pass 2: the file is UNCHANGED → the skip branch (finalize pending tool
+      // facts, then the state swap this test pins).
+      await ingestTranscript(dbW, "run-ws", sourcePath, "session-ws");
+      assertEqual(observed(), 1, "workspace_observations after an unchanged re-ingest");
+
+      // Pass 3: the file grows with the SAME cwd:branch and a new timestamp.
+      // A fresh parse state re-emits workspace.observed here (lastWorkspace is
+      // null again); a kept one stays silent.
+      writeFileSync(sourcePath, jsonl2([
+        { type: "user", timestamp: "2026-10-01T09:05:00.000Z", sessionId: "session-ws", cwd: "C:/repos/fenix", gitBranch: "main" },
+      ]), { flag: "a" });
+      await ingestTranscript(dbW, "run-ws", sourcePath, "session-ws");
+      assertEqual(observed(), 1, "idle→grow re-emitted workspace.observed (the skip branch dropped workspace memory)");
+    } finally {
+      dbW.close();
+      try { rmSync(tempW, { recursive: true, force: true }); } catch { /* ignore */ }
+      process.env.LA_TELEMETRY_HOME = savedHome;
+      process.env.LA_TELEMETRY_DB = savedDbEnv;
+    }
+  });
+
   console.log(`\n${passed} passed, ${skipped} skipped, ${failed} failed`);
   if (failed) console.log(failures.join("\n"));
   exitCode = failed ? 1 : 0;

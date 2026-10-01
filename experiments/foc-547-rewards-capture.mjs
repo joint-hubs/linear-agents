@@ -24,7 +24,11 @@ if (!dbPath || !outPath) {
   process.exit(2);
 }
 process.env.LA_TELEMETRY_DB = dbPath;
-process.env.LA_TELEMETRY_HOME = process.env.LA_CAP_HOME || join(tmpdir(), "ac4-cap-home");
+// A fixed shared home collides across concurrent runs and leaks spool state
+// between them — a private mkdtemp dir per run, removed below unless the
+// operator pinned one with LA_CAP_HOME (their dir is never touched).
+const ownedHome = process.env.LA_CAP_HOME ? null : mkdtempSync(join(tmpdir(), "ac4-cap-home-"));
+process.env.LA_TELEMETRY_HOME = process.env.LA_CAP_HOME || ownedHome;
 
 const tmp = mkdtempSync(join(tmpdir(), "ac4-rewards-cap-"));
 process.env.LA_REWARDS_DB = join(tmp, "rewards.sqlite");
@@ -55,4 +59,5 @@ try {
   telemetryDb.close();
   rewardsDb.close();
   rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  if (ownedHome) rmSync(ownedHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
