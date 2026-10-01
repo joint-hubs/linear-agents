@@ -2937,3 +2937,49 @@ costs put to Mateusz: (1) host-side download + `docker load` (~30–60 min super
 semgrep is green now). Prohibitions stand: no DD proxy config changes, no Docker restart (restart
 kills the thoughtmap containers of another session), no new binary downloads (SAC blocks unsigned
 exes).
+
+## 2026-10-01 — FOC-519 DOMKNIĘTE (merge `ce84a34`) · 5. przedwczesny koniec tury + luka node_modules w merge-verify
+
+**Bottom line:** deterministyczny [D] retrieval kandydatów duplikatów wylądował na main jako merge
+`ce84a34` (kandydat `40dd6c1`, 4 pliki, +589/−3): `scripts/plan-duplicate-retrieval.mjs` — top-5,
+team-scoped, Done/Canceled wykluczane po **typie** stanu (`completed`/`canceled`), sort
+deterministyczny (numeryczna część identyfikatora rosnąco, tie-break po identyfikatorze) przypięty
+testem na 3 permutacjach, fail-closed → `[]` → istniejący skip `no_candidates`. TEST PASS 108/108
+(plus 15/15 nowych hermetycznych), merge-verify ACCEPT (izolacja 108/108 + integracja 108/108).
+Komentarz domykający `85b8741d`, status Backlog → Done. Main 14 ahead of origin — push zwyczajowo
+defferowany.
+
+**Flow:** dev-16 (0,106 wycenione / 5,73 raportowane) → test-17 (0,086 wycenione / 4,62
+raportowane, 2 tury). AC2 (kształt kandydata) — TEST zajął stanowisko: ticket przypina 4 klucze
+najwyższego poziomu, `state` jako trójka `{id,name,type}` jest zgodna (wymagana przez filtr typu);
+zaakceptowane jako domknięcie pytania.
+
+### 5. wystąpienie przedwczesnego końca tury (wariant background-suite)
+
+test-17 turn 0 skończył turę z `test-all.mjs` w locie (log zamrożony na 170 B od 13:40:01Z; zdążyły
+tylko `plan-dup` 15/15 i lint). Wznowienie tej samej sesji przez `supervisor-followup` (wzorzec
+FOC-612/FOC-475) → turn 1 dokończył foreground, 108/108, hand-off z werdyktem PASS. `test-17` sam
+sprawdził CIM-em, że nie ma zombie procesów.
+
+### merge-verify: REJECT → ACCEPT (luka `node_modules`, precedens FOC-513)
+
+Podejście #1 (`--verify "node scripts/test-all.mjs"`) REJECTED: izolacja kandydata zielona 108/108,
+ale świeże drzewo integracyjne `la-merge/…` startuje **bez `node_modules`** → 46 plików runęło na
+`ERR_MODULE_NOT_FOUND: 'ajv'`. Jedyna czerwień nie-ajv: test budżetu czasowego telemetrii (backfill
+tick 1315 ms przy barierce 250 ms) — klasa flake'ów obciążeniowych (FOC-451/515), w izolacji
+przeszedł. Podejście #2 `--verify "npm ci && node scripts/test-all.mjs"` (dokładnie precedens FOC-513:
+„verify needs `npm ci &&`") → ACCEPT, findings puste, flake telemetrii nie wrócił.
+
+**Do decyzji Mateusza (zapytane wprost):** `npm ci` w merge-verify to ruch do rejestru npm —
+potraktowane jak zwykły ruch budowy (dzieci robią `npm ci` przy starcie drzew), ale skoro STOP-lista
+mówi „wszystko, co wychodzi poza maszynę", zaznaczone; alternatywa = kopiowanie `node_modules`
+między drzewami, jeśli chce to uciąć.
+
+**Klasyfikator trybu auto (transient, bez obchodzenia):** 3 bloki „Auto mode could not evaluate this
+action…" (merge ×2, drain ×1) — identyczna komenda powtórzona bez zmian zadziałała, jak każe
+komunikat.
+
+**W toku / czeka na Mateusza:** (1) los zdania lewara 2 dla FOC-596 — (a) cofnij i ląduj raport
+(0 USD), (b) druga iteracja z regułą `covers: [...]` + 2 pomiary (0,02–0,30 USD), (c) zostaw +
+follow-up strukturalny (0,3–1,0 USD); (2) wątek Dockera/semgrep (opcje z kosztami wyżej); (3) push
+wave + sprzątanie worktree'ów. Kolejka: **FOC-520** → 516 → 517 → 476 → 477.
