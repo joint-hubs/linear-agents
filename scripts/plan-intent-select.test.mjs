@@ -460,23 +460,23 @@ await test("differed — every evidence channel: about.option, acceptedOptions, 
 
 await test("corrected 'Rozumiem tak' lines and correction-supersedes-answer", () => {
   const corrected = selectDeltaLabel({ selection: SEL, corrections: [{ about: { claim: CLAIM_S } }], eventId: EV });
-  eq(corrected.outcome, "corrected:IN-3 unanswered:IN-1,IN-2", "the understood line was corrected; the ask went unanswered");
+  eq(corrected.outcome, "corrected:IN-3 unanswered:IN-1", "the understood line was corrected; the question went unanswered (the confirmation needs no answer — FOC-517)");
   const both = selectDeltaLabel({
     selection: SEL,
     answers: [{ about: { claim: CLAIM_U, option: "Offline nie" } }],
     corrections: [{ about: { claim: CLAIM_U } }],
     eventId: EV,
   });
-  eq(both.outcome, "corrected:IN-1 unanswered:IN-2", "the correction supersedes the differed answer it corrects");
+  eq(both.outcome, "corrected:IN-1", "the correction supersedes the differed answer it corrects");
 });
 
-await test("partial answers → unanswered; no answers at all → approved-unanswered; unmatched counted", () => {
+await test("a question answered → nothing unanswered (a confirmation is accepted by silence, FOC-517); no answers at all → approved-unanswered; unmatched counted", () => {
   const partial = selectDeltaLabel({ selection: SEL, answers: [{ about: { claim: CLAIM_U, option: "Offline tak" } }], eventId: EV });
-  eq(partial.outcome, "unanswered:IN-2", "the confirmation got no answer");
+  eq(partial.outcome, "accepted", "the question was answered on the recommendation; the un-answered confirmation is accepted by silence (FOC-517)");
   const none = selectDeltaLabel({ selection: SEL, answers: [], corrections: [], eventId: EV });
   eq(none.outcome, "approved-unanswered", "an approval with questions asked and nothing answered — the honest marker");
   const unmatched = selectDeltaLabel({ selection: SEL, answers: [{ about: { claim: "obce twierdzenie" } }], eventId: EV });
-  eq(unmatched.outcome, "unanswered:IN-1,IN-2 unmatched:1", "a record matching no selection item is flagged, not swallowed");
+  eq(unmatched.outcome, "unanswered:IN-1 unmatched:1", "a record matching no selection item is flagged, not swallowed");
 });
 
 await test("nothing to label → null (no eventId, no selection, malformed selection); an empty ask still records 'accepted'", () => {
@@ -500,10 +500,26 @@ await test("a gate1 approval writes the delta label next to the scoring event �
     appendFileSync(join(runsDir, "run-wire", "decisions.jsonl"), `${JSON.stringify({ type: "event", eventId: "evt-wire", decisionId: SELECT_SCORE_DECISION })}\n`);
     const step = (key, stepId, output, extra = {}) => JSON.stringify({ type: "graph.step", runId: "run-wire", ts: "2026-01-01T00:00:00.000Z", key, stepId, status: "done", output, ...extra });
     appendFileSync(storePath, step("plan.dor", "plan.dor", { ready: true, gaps: [] }) + "\n");
-    appendFileSync(storePath, step("plan.intent", "plan.intent", MAP_OUTPUT) + "\n");
+    appendFileSync(storePath, JSON.stringify({ type: "graph.step", runId: "run-wire", ts: "2026-01-01T00:00:00.000Z", key: "plan.intent", stepId: "plan.intent", status: "done", output: MAP_OUTPUT, maps: { 1: MAP_OUTPUT } }) + "\n");
     appendFileSync(storePath, step("plan.intent.select", "plan.intent.select", SEL, { eventId: "evt-wire" }) + "\n");
-    appendFileSync(storePath, JSON.stringify({ type: "graph.step", runId: "run-wire", ts: "2026-01-01T00:00:00.000Z", key: "gate.plan.gate1", stepId: "plan.gate1", status: "gate-pending", gateKind: "plan.gate1", gateId: "g1" }) + "\n");
-    appendFileSync(storePath, JSON.stringify({ type: "graph.resolution", runId: "run-wire", ts: "2026-01-01T00:00:00.000Z", key: "gate.plan.gate1.resolution", stepId: "plan.gate1", by: "mateusz", output: { approved: true } }) + "\n");
+    // FOC-517: the pending gate record carries the round's presented slice —
+    // the settlement parses the answer against what was actually shown.
+    appendFileSync(storePath, JSON.stringify({
+      type: "graph.step", runId: "run-wire", ts: "2026-01-01T00:00:00.000Z", key: "gate.plan.gate1", stepId: "plan.gate1", status: "gate-pending", gateKind: "plan.gate1", gateId: "g1",
+      output: {
+        round: 1,
+        presented: {
+          1: {
+            mapVersion: 1,
+            understood: [],
+            confirmations: [],
+            assumptions: [],
+            questions: [{ id: "IN-1", claim: CLAIM_U, options: [{ text: "Offline tak", recommended: true }, { text: "Offline nie", recommended: false }] }],
+          },
+        },
+      },
+    }) + "\n");
+    appendFileSync(storePath, JSON.stringify({ type: "graph.resolution", runId: "run-wire", ts: "2030-01-01T00:00:00.000Z", key: "gate.plan.gate1.resolution", stepId: "plan.gate1", by: "mateusz", output: { approved: true, answer: "1b" } }) + "\n");
 
     const runner = createGraphRunner({
       runId: "run-wire",
@@ -514,20 +530,18 @@ await test("a gate1 approval writes the delta label next to the scoring event �
       linearEffect: async () => ({}),
       decisionRunsDir: runsDir,
     });
-    await runner.run({
-      inputs: { "gate.plan.gate1.answers": [{ about: { claim: CLAIM_U, option: "Offline nie" }, answer: "Offline nie" }] },
-    }); // gate1 completes (label written); the walk then stops at the unseeded plan.dod
+    await runner.run({ inputs: {} }); // gate1 completes (label written); the walk then stops at the unseeded plan.dod
 
     const records = readFileSync(storePath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     const done = records.filter((r) => r.key === "gate.plan.gate1").pop();
     eq(done.status, "done", "the gate completed");
-    eq(done.deltaLabel?.outcome, "differed:IN-1 unanswered:IN-2", "Mateusz's answer differed from the recommendation; the confirmation went unanswered");
+    eq(done.deltaLabel?.outcome, "differed:IN-1", "Mateusz's answer differed from the recommendation");
     eq(done.deltaLabelWritten, join(runsDir, "run-wire", "decisions.jsonl"), "the label landed next to the event");
     const ledger = readFileSync(join(runsDir, "run-wire", "decisions.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
     const label = ledger.find((l) => l.type === "label");
     if (!label) fail("the label line is in the ledger");
     eq(label.eventId, "evt-wire", "label keyed to the scoring event");
-    eq(label.outcome, "differed:IN-1 unanswered:IN-2", "outcome recorded");
+    eq(label.outcome, "differed:IN-1", "outcome recorded");
     eq(label.source, "auto", "auto-join provenance");
     eq(label.via, "gate", "via the gate");
   } finally {

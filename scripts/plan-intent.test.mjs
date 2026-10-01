@@ -652,7 +652,7 @@ async function main() {
     eq(validate(thirteen), false, "13 items is schema-invalid — the cap is 12 per map version");
 
     const { maps } = persistMap({}, v1);
-    const presented = { 1: { round: 1, items: v1.interpretations.map((i) => ({ interpretationId: i.id, claim: i.claim })) } };
+    const presented = { 1: { round: 1, mapVersion: 1, items: v1.interpretations.map((i) => ({ interpretationId: i.id, claim: i.claim })) } };
     const corrections = [{
       round: 1,
       mapVersion: 1,
@@ -683,7 +683,7 @@ async function main() {
 
   await test("answer contract 2: an answer to a stale mapVersion is STALE — detected, logged, never applied", () => {
     const { maps } = persistMap({}, mapOf12(1));
-    const presented = { 1: { round: 1, items: [{ interpretationId: "IN-1", claim: maps[1].interpretations[0].claim }] } };
+    const presented = { 1: { round: 1, mapVersion: 1, items: [{ interpretationId: "IN-1", claim: maps[1].interpretations[0].claim }] } };
     const good = {
       round: 1,
       mapVersion: 1,
@@ -709,7 +709,7 @@ async function main() {
     eq(fold.valid[0].record, good, "and it is the good one");
     eq(fold.stale.length, 6, "every other reference is stale");
     const reasons = fold.stale.map((s) => s.reason).join(" | ");
-    eq(/no persisted map for mapVersion 99/.test(reasons), true, "an unallocated mapVersion is stale");
+    eq(/names mapVersion 99 but round 1 presented mapVersion 1/.test(reasons), true, "an unallocated mapVersion is stale (the FOC-517 presented-mapVersion cross-check fires first)");
     eq(/names round 5 but the current round is 2/.test(reasons), true, "a future round is stale");
     eq(/round 2 has no presented record/.test(reasons), true, "a round that presented nothing is stale");
     eq(/about.claim does not match/.test(reasons), true, "an about that does not match the persisted claim is stale");
@@ -726,8 +726,8 @@ async function main() {
     const v2 = mapWith({ mapVersion: 2 });
     v2.interpretations[2].claim = "Rozumiem, że zmiana obejmuje też widok listy."; // a DIFFERENT reading
     const presented = {
-      1: { round: 1, items: [{ interpretationId: "IN-3", claim: confirmedClaim }] },
-      2: { round: 2, items: [{ interpretationId: "IN-3", claim: v2.interpretations[2].claim }] },
+      1: { round: 1, mapVersion: 1, items: [{ interpretationId: "IN-3", claim: confirmedClaim }] },
+      2: { round: 2, mapVersion: 2, items: [{ interpretationId: "IN-3", claim: v2.interpretations[2].claim }] },
     };
     const { maps } = persistMap(persistMap({}, v1).maps, v2);
 
@@ -888,7 +888,7 @@ async function main() {
   await test("round 2: the fold drops a stale answer from the anchors, so its point cannot come back as stated", async () => {
     const v1 = mapWith({ mapVersion: 1 });
     const { maps } = persistMap({}, v1);
-    const presented = { 1: { round: 1, items: [{ interpretationId: "IN-1", claim: v1.interpretations[0].claim }] } };
+    const presented = { 1: { round: 1, mapVersion: 1, items: [{ interpretationId: "IN-1", claim: v1.interpretations[0].claim }] } };
     const staleAnswer = {
       round: 1,
       mapVersion: 42,
@@ -915,7 +915,7 @@ async function main() {
     eq(result.status, "failed", "refused");
     eq(result.problems.some((p) => /occurs verbatim in no anchor text/.test(p)), true, `the stale quote is not anchor text: ${result.problems.join(" | ")}`);
     eq(result.fold.stale.length, 1, "the stale answer is logged, not applied");
-    eq(/no persisted map for mapVersion 42/.test(result.fold.stale[0].reason), true, `logged: ${result.fold.stale[0].reason}`);
+    eq(/names mapVersion 42 but round 1 presented mapVersion 1/.test(result.fold.stale[0].reason), true, `logged: ${result.fold.stale[0].reason}`);
   });
 
   await test("an illegal idMap in the store stops the node before any provider call", async () => {
@@ -930,7 +930,7 @@ async function main() {
       generator: async () => { calls++; return mapWith({ mapVersion: 3 }); },
       validate,
       maps: { 1: v1, 2: v2 },
-      presented: { 1: { round: 1, items: [] }, 2: { round: 2, items: [] } },
+      presented: { 1: { round: 1, mapVersion: 1, items: [] }, 2: { round: 2, mapVersion: 2, items: [] } },
     });
     eq(result.status, "failed", "refused");
     eq(result.error.code, "invalid_input", "typed");
