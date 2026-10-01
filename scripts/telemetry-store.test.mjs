@@ -26,6 +26,7 @@ import {
   recordToolFact,
   resolvePrice,
   orphanRunVerdict,
+  assertStateWritable,
   ORPHAN_RUN_IDLE_MS,
   SCHEMA_VERSION,
   MIGRATION_VERSIONS,
@@ -1035,6 +1036,32 @@ test("orphanRunVerdict: consolePid 0 and negatives count as no pid", () => {
   for (const pid of [0, -1]) {
     const v = orphanRunVerdict({ runId: "r", consolePid: pid, lastActivityAt: ago(20 * 3600_000) }, NOW);
     assert(v != null, `consolePid=${pid} must fall through to the orphan path`);
+  }
+});
+
+test("assertStateWritable: LA_STATE_READ_ONLY=1 refuses a state-tree write", () => {
+  // The bench's "the .state tree is read-only input" claim used to live in a
+  // comment (FOC-599 item 6). The flag makes it enforceable at the write —
+  // writeLaunchBat (the one state-root writer in telemetry-server's import
+  // graph) calls this first. Unset it must be a no-op: zero behavior change
+  // outside read-only runs.
+  const saved = process.env.LA_STATE_READ_ONLY;
+  try {
+    delete process.env.LA_STATE_READ_ONLY;
+    assertStateWritable("/x/.state/launch-dev-FOC-1.bat", "a launch wrapper"); // must not throw
+    process.env.LA_STATE_READ_ONLY = "1";
+    let threw = null;
+    try {
+      assertStateWritable("/x/.state/launch-dev-FOC-1.bat", "a launch wrapper");
+    } catch (err) {
+      threw = err;
+    }
+    assert(threw instanceof Error, "a read-only run must refuse the write");
+    assert(/LA_STATE_READ_ONLY/.test(threw?.message || "") && /launch-dev-FOC-1\.bat/.test(threw?.message || ""),
+      `the refusal must name the flag and the target, got: ${threw && threw.message}`);
+  } finally {
+    if (saved === undefined) delete process.env.LA_STATE_READ_ONLY;
+    else process.env.LA_STATE_READ_ONLY = saved;
   }
 });
 

@@ -2987,6 +2987,19 @@ export function queryPatterns(db, filters = {}) {
   return { stepStats, repeats, bounces, failures, costBasis: COST_BASIS_RAW, costBasisNote: COST_BASIS_RAW_NOTE };
 }
 
+/**
+ * LA_STATE_READ_ONLY=1 declares the state tree READ-ONLY INPUT for this
+ * process (FOC-599 item 6): every state-root write must call this first and
+ * gets a throw instead of a write. The bench sets the flag in its child env —
+ * its "that tree is read-only input" claim is enforced at the write, not
+ * asserted in a comment. Unset (the default), this is a no-op: zero behavior
+ * change outside read-only runs.
+ */
+export function assertStateWritable(targetPath, what = "the state tree") {
+  if (process.env.LA_STATE_READ_ONLY !== "1") return;
+  throw new Error(`LA_STATE_READ_ONLY=1: refusing to write ${what} (${targetPath})`);
+}
+
 export function exportTelemetry(db, format, destination) {
   ensureParent(destination);
   if (format === "sqlite") {

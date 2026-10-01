@@ -576,8 +576,13 @@ async function fetchLinearQueue(workspace) {
 
 // Write the wrapper to .state/ (gitignored) and return its path. One stable
 // name per (squad, taskId) — re-launching overwrites, no file accumulation.
+// This is the ONE state-root writer in the server's import graph (the rest of
+// the boot/tick path only reads .state and writes the telemetry/rewards stores,
+// which a bench redirects to tmp), so it is where LA_STATE_READ_ONLY bites
+// (FOC-599 item 6).
 async function writeLaunchBat(squad, taskId, kickoff, targetRepo) {
   const wrapper = join(root, '.state', `launch-${squad}-${taskId}.bat`);
+  telemetryStore.assertStateWritable(wrapper, 'a launch wrapper');
   await writeFile(wrapper, buildLaunchBat(squad, taskId, kickoff, root, targetRepo), 'utf8');
   return wrapper;
 }
