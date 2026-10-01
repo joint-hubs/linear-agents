@@ -3015,3 +3015,51 @@ TEST-a, naprawiony `mkdir .state`) — warto dodać do checklisty merge-verify/T
 **Czeka na Mateusza (bez zmian):** (1) los zdania lewara 2 dla FOC-596 (a/b/c jak wyżej); (2) czy
 `npm ci` w merge-verify zostaje (ruch do rejestru npm) — alternatywa kopiowanie `node_modules`;
 (3) push wave + sprzątanie worktree'ów. Kolejka: **FOC-516** → 517 → 476 → 477.
+
+## 2026-10-01 — FOC-516 DOMKNIĘTE (merge `47ae5e3`) · `plan.intent.select` [J]+[D] · dev+test z recovery followupem
+
+**Bottom line:** `plan.intent.select` wylądował na main jako merge `47ae5e3` (kandydat: `2d9c150`
+feat + `cd27132` fix rankingu + `ec5aad0` harness evala + `5d790ee` raport evala; 17 plików
++2255/−117). Krok [G] z węzłowym [J] `plan.intent.select.score` i polityką [D] w
+`config/intent-select-policy.json`; gate1 przepięty na pozycję konwersacji intentu, `config/graph.json`
+= łańcuch §3.12: `dor → intent → select → gate1 → dod → ac → spec → decompose → render → gate2 → push`
+(**11 kroków / 10 krawędzi**) — carry **cb7d199e** zamknięty w tym samym secie, kontrakt
+`plan.render` (FOC-520) nietknięty. TEST PASS 110/110, merge-verify ACCEPT za pierwszym razem
+(izolacja 110/110 + integracja 110/110), lint 0 (558 plików), graph-validate OK. Komentarz
+`04a9ca3c`, Backlog → Done. Main ahead of origin rośnie (push odroczony).
+
+**Trzy judgments (TEST: wszystkie SUPPORTED, z własnymi cytatami):** (1) kardynalność [J] = jedno
+wywołanie na mapę, 2×N pytań przez klucze szablonów `impact{i}`/`grounded{i}` w jednym wpisie
+rejestru — kanał instancji wyraża oba pytania na interpretację, błąd = fail-closed bez zgubionej
+interpretacji; (2) kształt = krok [G] + węzły [J] (wzór `plan.ac` + `plan.ac.testable`, A0,
+tier-2 wyłączony), D7 deep-equal obu wpisów, routing wyłącznie w konfigu; (3) gate1 czyta dokładnie
+`["plan.intent.select.record"]` + kanał rund `presented[round]` / `gate.plan.gate1.answers` /
+`.corrections` — **dokładny kształt 4 sufiksów record key zapisany w hand-offie TEST jako spadek
+dla FOC-517**.
+
+**Eval (AC7, live, fixture FOC-515):** 2/12 pipeline ok (FOC-406, FOC-443) / 10 skipów na etapie
+mapy (6 `provider_error` — 5 fast HTTP 400 + 1 budget abort; 4 `unparseable_output`) — każdy skip
+z przyczyną i latencją, żaden wiersz nie sfabrykowany. Cap wiąże (pytania 4+4, założenia 7+5,
+overflow listowany); znane missy FOC-443: 1/3 zarobiło pytanie, 3/3 wyprowadzone, 0 ukrytych.
+Ledger 0,038.
+
+**Flow i koszty (wycenione):** dev-20 **2,02** (2 tury; strumień raportował 22,59 za turę 1 —
+FOC-165) → test-21 **0,033**; eval 0,038. Razem ~**2,09**.
+
+**Notatki procesowe (obserwacje):** (1) **nowa klasa: „background-task kill" (2700 s)** — pierwszą
+turę DEV uciął harness zabijając subagenta implementera i smoke-run evala przy końcu tury
+(exit 0, ale bez hand-offu i batcha 2); recovery = **followup na tej samej sesji** (zadziałało;
+do kickoffu TEST dodałem zakaz subagentów i zadań tła); (2) `test-all` ~610–630 s > 600 s
+foregroundowego capu Bash — dzieci planują lane parallelism (`--jobs 16`) albo partycje; (3) wiersze
+evala niosą sprzed-fixową adnotację rankingu (map-order) — counts nietknięte, disclosed w dokumencie;
+(4) `IMPACT_THRESHOLD = 0.5` jako stała węzła (konwencja noul, nie routing) — obserwacja TEST;
+(5) trym awarii providera przesunął się vs FOC-515 run 2 (fast 400 / empty content zamiast
+schema-rejectów) — sygnał do wariantu failure-line w FOC-449; (6) transient klasyfikatora auto-mode
+(„could not evaluate this action", merge ×2, drain ×1) — identyczna komenda ponowiona bez zmian
+przechodzi, jak każe komunikat.
+
+**Czeka na Mateusza (bez zmian):** (1) los zdania lewara 2 dla FOC-596 — (a) cofnij i ląduj raport
+(0 USD), (b) druga iteracja z regułą `covers: [...]` + 2 pomiary (0,02–0,30 USD), (c) zostaw +
+follow-up strukturalny (0,3–1,0 USD); (2) czy `npm ci` w merge-verify zostaje (ruch do rejestru npm)
+— alternatywa kopiowanie `node_modules`; (3) push wave + sprzątanie worktree'ów (foc-519/520/516
+drzewa na dysku, gałęzie zostają). Kolejka: **FOC-517** → 476 → 477.
