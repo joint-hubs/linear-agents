@@ -46,10 +46,16 @@
 //       .state/supervisor/<runId>/). A resolution with approved:true completes
 //       the gate; approved:false records gate-rejected and stops, handing the
 //       record to the frontman.
-//   [D] plan.push — deterministic code over a strictly injectable Linear
-//       boundary (linearEffect). The DEFAULT boundary refuses: the runner
-//       NEVER writes to Linear on its own — a real write is the caller's
-//       injected effect, and the refusal is a typed failure record + stop.
+//   [D] plan.render, plan.push — deterministic code. plan.render (FOC-520)
+//       composes the Linear issue text from the resolved reads: pure code, no
+//       model call, no boundary — the same reads always render byte-identical
+//       text, and malformed reads fail closed. plan.push executes over a
+//       strictly injectable Linear boundary (linearEffect); the pushed
+//       issueText is plan.render's output VERBATIM — the text plan.gate2
+//       approved is exactly the text written to Linear. The DEFAULT boundary
+//       refuses: the runner NEVER writes to Linear on its own — a real write
+//       is the caller's injected effect, and the refusal is a typed failure
+//       record + stop.
 //
 // Resolution records (type "graph.resolution", key "<key>.resolution") are
 // written BY the deciding agent (frontman, supervisor, Mateusz) — the runner
@@ -84,6 +90,7 @@ import { loadGraph, validateGraph } from "./graph-validate.mjs";
 import { getRegistryEntry, loadRegistry } from "./decision-registry.mjs";
 import { AC_TESTABLE_DECISION, runPlanAcNode } from "./plan-ac.mjs";
 import { runPlanIntentNode } from "./plan-intent.mjs";
+import { runPlanRenderNode } from "./plan-render.mjs";
 import { KINDS } from "./supervisor-gate.mjs";
 import { holdsForCompletion } from "./supervisor-lib.mjs";
 
@@ -769,7 +776,7 @@ export function createGraphRunner({
   // supervisor run directory, the run record marks the run as waiting.
   const GATE_SUMMARIES = {
     "plan.gate1": "Approve the SPEC hand-off (plan.spec) before decomposition",
-    "plan.gate2": "Approve the decomposition (plan.decompose) before the Linear push",
+    "plan.gate2": "Approve the rendered issue (plan.render) before the Linear push",
   };
   async function runHStep(stepId, reads) {
     const summary = GATE_SUMMARIES[stepId] ?? `Approve "${stepId}" before the run continues`;
@@ -787,15 +794,37 @@ export function createGraphRunner({
     });
   }
 
-  // [D] — deterministic code over the injectable Linear boundary. The payload
-  // is shaped here (deterministically, from the resolved reads); the boundary
-  // performs whatever writes it was injected to perform.
+  // [D] — deterministic code. plan.render (FOC-520) composes the Linear issue
+  // text from the resolved reads — no model call, no boundary; the same reads
+  // always render byte-identical text and malformed reads fail closed. The
+  // gate2 facts carry the rendered text, and plan.push's payload takes it
+  // VERBATIM — what the gate showed is what would be written to Linear, no
+  // rewording anywhere. plan.push's payload is shaped here (deterministically,
+  // from the resolved reads); the injectable Linear boundary performs whatever
+  // writes it was injected to perform. Any other [D] step id has no runner
+  // implementation and fails typed — never a guessed execution.
   async function runDStep(stepId, reads) {
+    if (stepId === "plan.render") {
+      let result;
+      try {
+        result = runPlanRenderNode({ stepId, reads, validate: (raw) => outputValidate.get(stepId)(raw) });
+      } catch (err) {
+        return failRecord(stepId, errorOf(err, "plan.render node threw"));
+      }
+      if (result.status === "done") {
+        return stepRecord(runId, now, stepId, "done", { stepId, output: result.output });
+      }
+      return failRecord(stepId, result.error);
+    }
+    if (stepId !== "plan.push") {
+      return failRecord(stepId, { code: "invalid_input", message: `[D] step "${scrub(String(stepId))}" has no runner implementation — a [D] step is plan.render or plan.push` });
+    }
     const decompose = reads["plan.decompose.record"];
     const gate2 = reads["gate.plan.gate2.record"];
     const payload = {
       runId,
       epicTitle: `Plan — dictated entry (run ${runId})`,
+      issueText: reads["plan.render.issueText"],
       children: (decompose?.output?.tasks ?? []).map((t) => ({ title: t.title, size: t.size, labels: t.labels, relations: t.relations })),
       handoffComment: `Planned by the FOC-397 graph runner (run ${runId}); gate plan.gate2 ${gate2?.status ?? "unknown"}.`,
     };

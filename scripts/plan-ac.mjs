@@ -40,7 +40,7 @@
 // auto-advance).
 //
 // The loop is NODE-INTERNAL by design: no graph edge is added and the
-// stepFlow stays the linear 8-step chain — the graph-level retry EDGE is
+// stepFlow stays the linear step chain — the graph-level retry EDGE is
 // FOC-476's.
 
 import { TypedError } from "./mcp/envelope.mjs";

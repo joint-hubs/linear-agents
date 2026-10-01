@@ -486,7 +486,8 @@
       "criteriaVersion": 1,
       "reads": [
         "plan.decompose.record",
-        "gate.plan.gate1.record"
+        "gate.plan.gate1.record",
+        "plan.render.issueText"
       ],
       "output": {
         "type": "object",
@@ -504,6 +505,43 @@
       "failure": "stop",
       "writes": "graph-state"
     },
+    "plan.render": {
+      "id": "plan.render",
+      "kind": "D",
+      "owner": "plan node v2 (FOC-397 runner); renderer added FOC-520",
+      "hookPoint": "plan chain, after plan.decompose — deterministic issue-text render; the text plan.gate2 approves is the text plan.push writes, verbatim",
+      "autonomy": null,
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "no model call — deterministic script over the resolved reads; malformed or empty reads fail closed (D7 failure: stop)"
+      },
+      "metrics": [],
+      "criteriaVersion": 1,
+      "reads": [
+        "plan.dod.definitionOfDone",
+        "plan.ac.acs",
+        "plan.spec.summary",
+        "plan.decompose.record"
+      ],
+      "output": {
+        "type": "object",
+        "required": [
+          "issueText"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "issueText": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 30000
+          }
+        }
+      },
+      "tier": null,
+      "failure": "stop",
+      "writes": "run-record"
+    },
     "plan.push": {
       "id": "plan.push",
       "kind": "D",
@@ -519,6 +557,7 @@
       "criteriaVersion": 1,
       "reads": [
         "plan.decompose.record",
+        "plan.render.issueText",
         "gate.plan.gate2.record"
       ],
       "output": {

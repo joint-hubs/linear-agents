@@ -1,7 +1,7 @@
 // scripts/graph-runner.test.mjs — FOC-397: the graph.json v2 executor.
 //
 // Covers the runner contract end to end, all offline: the resumable walk over
-// the committed PLAN subgraph (9 steps, 8 sequence edges) with every external
+// the committed PLAN subgraph (10 steps, 9 sequence edges) with every external
 // dependency injected — the seam caller stub (never a real decision call, and
 // never a real Linear write or gate emit), the [G] generator, the supervisor
 // gate emitter and the Linear boundary. The run-record store is a temp-dir
@@ -226,7 +226,7 @@ await test("missing caller / generator / runId fail at construction with typed e
 
 console.log("\ngraph-runner: the PLAN subgraph end to end (all stubs injected)");
 
-await test("the full resumable walk: 9 steps, 2 A0 annotations, 3 [G] calls, 2 gates, one push, idempotent resume", async () => {
+await test("the full resumable walk: 10 steps, 2 A0 annotations, 3 [G] calls, 2 gates, one push, idempotent resume", async () => {
   const { storePath } = tempStore();
   const callerCalls = [];
   const caller = async (input) => {
@@ -328,11 +328,20 @@ await test("the full resumable walk: 9 steps, 2 A0 annotations, 3 [G] calls, 2 g
 
   resolve(storePath, "plan.decompose", DECOMPOSE_OUTPUT, "mateusz");
 
-  // Run 5 — plan.gate2 emits and waits.
+  // Run 5 — plan.render [D] composes the issue text deterministically, then
+  // plan.gate2 emits and waits. The gate's resolved reads are the facts shown
+  // to the human, so they carry the rendered text VERBATIM.
   result = await runner.run({ inputs: RUN_INPUTS });
   eq(result.status, "stopped", "run 5 stops");
   eq(result.stepId, "plan.gate2", "run 5 stops at gate2");
   eq(result.record.status, "gate-pending", "gate2 pending");
+  records = readRecords(storePath);
+  const renderRecord = latest(records, "plan.render");
+  eq(renderRecord.status, "done", "plan.render executed before the gate");
+  if (typeof renderRecord.output?.issueText !== "string" || !renderRecord.output.issueText.includes("AC-1")) {
+    fail("the render record carries the composed issue text");
+  }
+  eq(gateCalls[1].facts.reads["plan.render.issueText"], renderRecord.output.issueText, "gate2 facts carry the rendered text verbatim");
 
   resolve(storePath, "gate.plan.gate2", { approved: true }, "mateusz");
 
@@ -341,6 +350,7 @@ await test("the full resumable walk: 9 steps, 2 A0 annotations, 3 [G] calls, 2 g
   eq(result.status, "completed", "run 6 completes the subgraph");
   eq(linearCalls.length, 1, "one Linear-boundary call");
   eq(linearCalls[0].action, "push-plan", "action shape");
+  eq(linearCalls[0].payload.issueText, renderRecord.output.issueText, "the pushed issueText is the rendered text 1:1 — no rewording");
   eq(linearCalls[0].payload.children.length, 1, "payload carries the decomposed tasks");
   eq(linearCalls[0].payload.children[0].title, "graph-runner.mjs", "payload task title");
   records = readRecords(storePath);
@@ -513,6 +523,7 @@ await test("the default Linear boundary refuses — the runner never writes to L
   appendFileSync(storePath, done("plan.spec", "plan.spec", SPEC_OUTPUT) + "\n");
   appendFileSync(storePath, done("gate.plan.gate1", "plan.gate1", { approved: true }) + "\n");
   appendFileSync(storePath, done("plan.decompose", "plan.decompose", DECOMPOSE_OUTPUT) + "\n");
+  appendFileSync(storePath, done("plan.render", "plan.render", { issueText: "Rendered issue text (seed)." }) + "\n");
   appendFileSync(storePath, done("gate.plan.gate2", "plan.gate2", { approved: true }) + "\n");
   const result = await runner.run({ inputs: RUN_INPUTS });
   eq(result.status, "stopped", "run stops at the boundary refusal");

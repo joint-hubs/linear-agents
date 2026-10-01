@@ -180,16 +180,16 @@ await test("plan.spec reads plan.dod.definitionOfDone — never the retired merg
   if (PLAN.steps["plan.spec"].reads.includes("plan.ac.definitionOfDone")) fail("the merged field is retired everywhere");
 });
 
-// ── (h) the counts hold: 28 entries, 9 steps / 8 edges, 6 decision edges ─────
+// ── (h) the counts hold: 29 entries, 10 steps / 9 edges, 6 decision edges ────
 
-await test("the seed partition survives the restructure: 28 entries, 9 steps on the 8-edge chain, 6 decision edges", () => {
-  eq(Object.keys(registry).length, 28, "28 registry entries (plan.intent joined, FOC-515)");
+await test("the seed partition survives the restructure: 29 entries, 10 steps on the 9-edge chain, 6 decision edges", () => {
+  eq(Object.keys(registry).length, 29, "29 registry entries (plan.render joined, FOC-520)");
   const stepIds = Object.keys(PLAN.steps);
-  eq(stepIds.length, 9, "9 steps");
-  eq(PLAN.stepFlow.length, 8, "8 sequence edges — no graph edge was added for the loop (FOC-476's)");
+  eq(stepIds.length, 10, "10 steps");
+  eq(PLAN.stepFlow.length, 9, "9 sequence edges — no graph edge was added for the loop (FOC-476's)");
   eq(GRAPH.decisionEdges.length, 6, "6 decision edges — the testable gate is node-internal, not an edge");
   const chain = PLAN.stepFlow.map((e) => `${e.from}>${e.to}`).join(" ");
-  eq(chain, "plan.dor>plan.intent plan.intent>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.gate2 plan.gate2>plan.push", "plan.intent joined the chain after plan.dor (FOC-515)");
+  eq(chain, "plan.dor>plan.intent plan.intent>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push", "plan.render joined the chain between plan.decompose and plan.gate2 (FOC-520)");
 });
 
 // ── composeAcInputs: the payload partition + the over-length posture ─────────

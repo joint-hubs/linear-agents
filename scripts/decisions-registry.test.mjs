@@ -79,7 +79,7 @@ const QUESTION_VALIDATE = new Ajv().compile(QUESTION_SCHEMA);
 // ── the shipped seed set ────────────────────────────────────────────────────
 const SEED_IDS = [
   "plan.dor", "plan.intent", "plan.dod", "plan.ac", "plan.spec", "plan.gate1", "plan.decompose",
-  "plan.gate2", "plan.push", "gate.screen", "extraction", "prompt-refinement",
+  "plan.render", "plan.gate2", "plan.push", "gate.screen", "extraction", "prompt-refinement",
   // The six FOC-397 decide-edge entries (graph decisionEdges bindings), the
   // FOC-451 DoR intake gate bound the same way, and the ten FOC-452 PLAN gate
   // entries (seam-served transports with NO decide-edge binding and no tier).
@@ -89,19 +89,19 @@ const SEED_IDS = [
   "plan.labels.type", "plan.labels.risk", "plan.estimate",
   "plan.needs_adr", "plan.security_sensitive", "plan.duplicate_of", "plan.ac.testable",
 ];
-const NODE_IDS = SEED_IDS.slice(0, 9);
+const NODE_IDS = SEED_IDS.slice(0, 10);
 // The decide-edge bindings (config/graph.json decisionEdges): kind-J transport
 // entries that additionally pin their cascade ladder start (tier {cascade, min}).
-const DECIDE_EDGE_IDS = SEED_IDS.slice(12, 18);
+const DECIDE_EDGE_IDS = SEED_IDS.slice(13, 19);
 // The FOC-452 PLAN gate entries: seam-served A0 transports that are NOT decide
 // edges — no graph.json binding, no tier pin.
-const PLAN_GATE_IDS = SEED_IDS.slice(18);
-const TRANSPORT_IDS = SEED_IDS.slice(9);
+const PLAN_GATE_IDS = SEED_IDS.slice(19);
+const TRANSPORT_IDS = SEED_IDS.slice(10);
 // OUT of scope per the FOC-448 contract — they enter when their owners land.
 const OUT_OF_SCOPE = ["egress.contains_secret", "test.failure.cause"];
 const AUTONOMY_MAP = {
   "plan.dor": "A0", "plan.intent": null, "plan.dod": null, "plan.ac": null, "plan.spec": null, "plan.gate1": null,
-  "plan.decompose": "A0", "plan.gate2": null, "plan.push": null,
+  "plan.decompose": "A0", "plan.render": null, "plan.gate2": null, "plan.push": null,
   "gate.screen": "A0", "extraction": "A0", "prompt-refinement": "A0",
   "intake.triage_node": "A0", "intake.has_acceptance_criteria": "A0", "intake.task_size": "A0", "review.depth": "A0",
   "orchestration.next_step": "A0", "monitor.child_state": "A0",
@@ -120,6 +120,7 @@ const METRICS_BY_ID = {
   "plan.dod": ["durationMs", "inputTokens", "outputTokens", "cost"],
   "plan.spec": ["durationMs", "inputTokens", "outputTokens", "cost"],
   "plan.gate1": [],
+  "plan.render": [],
   "plan.gate2": [],
   "plan.push": [],
   "plan.dor.criteria_testable": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
@@ -149,7 +150,7 @@ await test("registry loads, passes REGISTRY_SCHEMA directly, and carries _doc + 
   eq(Object.keys(entries).length, SEED_IDS.length, "entry count");
 });
 
-await test("the seed set is exactly the twenty-eight contracted ids", () => {
+await test("the seed set is exactly the twenty-nine contracted ids", () => {
   deepEq([...Object.keys(entries)].sort(), [...SEED_IDS].sort(), "id set");
 });
 
@@ -258,11 +259,12 @@ const D7 = {
   "plan.spec": { reads: ["inbox.entry", "plan.dod.definitionOfDone", "plan.ac.acs", "repoState.pinned"], tier: "agent", failure: "escalate", writes: "run-record" },
   "plan.gate1": { reads: ["plan.spec.record"], tier: null, failure: "stop", writes: "graph-state" },
   "plan.decompose": { reads: ["plan.spec.record", "plan.ac.acs"], tier: { cascade: true, min: 1 }, failure: "escalate", writes: "run-record" },
-  "plan.gate2": { reads: ["plan.decompose.record", "gate.plan.gate1.record"], tier: null, failure: "stop", writes: "graph-state" },
-  "plan.push": { reads: ["plan.decompose.record", "gate.plan.gate2.record"], tier: null, failure: "stop", writes: "run-record" },
+  "plan.render": { reads: ["plan.dod.definitionOfDone", "plan.ac.acs", "plan.spec.summary", "plan.decompose.record"], tier: null, failure: "stop", writes: "run-record" },
+  "plan.gate2": { reads: ["plan.decompose.record", "gate.plan.gate1.record", "plan.render.issueText"], tier: null, failure: "stop", writes: "graph-state" },
+  "plan.push": { reads: ["plan.decompose.record", "plan.render.issueText", "gate.plan.gate2.record"], tier: null, failure: "stop", writes: "run-record" },
 };
 
-await test("the nine node entries carry the full D7 contract; transports carry no D7 fields", () => {
+await test("the ten node entries carry the full D7 contract; transports carry no D7 fields", () => {
   for (const id of NODE_IDS) {
     const e = entries[id];
     deepEq(e.reads, D7[id].reads, `reads of ${id}`);
@@ -419,6 +421,7 @@ await test("every node output schema compiles and accepts a valid sample / rejec
     "plan.spec": { ok: { briefs: ["b"], adr: "a", summary: "s" }, bad: { briefs: "b", adr: "a", summary: "s" } },
     "plan.gate1": { ok: { approved: true }, bad: { approved: "yes" } },
     "plan.gate2": { ok: { approved: true }, bad: {} },
+    "plan.render": { ok: { issueText: "# Plan\n\nDeterministic render." }, bad: { issueText: "" } },
     "plan.decompose": { ok: { tasks: [{ title: "t", size: "small", labels: [], relations: [] }] }, bad: { tasks: [] } },
     "plan.push": { ok: { epicId: "FEN-1", childrenIds: ["FEN-2"], handoffCommentPosted: false }, bad: { epicId: "FEN-1", childrenIds: ["FEN-2"], handoffCommentPosted: false, extra: 1 } },
   };
