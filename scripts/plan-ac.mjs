@@ -6,11 +6,10 @@
 // consumed HERE, per criterion, by the node itself.
 //
 // One step execution:
-//   1. compose the declared reads' payload — `inbox.entry` carries exactly
-//      {issueId, title, scopeSummary, dorFacts} (dorFacts null when the run
-//      state has none — the node never invents DoR facts; runtime composition
-//      of DoR facts into the entry is a follow-up) and `features.list` the
-//      candidate files the CALLER retrieved deterministically. The composed
+//   1. compose the declared reads' payload — `plan.intent.confirmed` carries
+//      the runner-appended confirmed-intent record's output (FOC-517) and
+//      `features.list` the candidate files the CALLER retrieved
+//      deterministically. The composed
 //      payload is bounded by the seam's state cap and FAILS CLOSED before any
 //      provider call over it — no truncation. Truncation precedent
 //      (plan-gates STATE_CAP) covers [J] triage, where partial context is
@@ -23,8 +22,8 @@
 //      plan-gates.mjs).
 //   4. any criterion below the verdict → EXACTLY ONE regeneration whose reads
 //      carry the failing criteria + the gate's reasons (a `revision` field on
-//      the `inbox.entry` payload — caller composition, the FOC-474 precedent
-//      of payload fields; the declared reads stay exactly two); ALL criteria
+//      the `plan.intent.confirmed` payload — caller composition, the FOC-474
+//      precedent of payload fields; the declared reads stay exactly two); ALL criteria
 //      are re-scored.
 //   5. still below → a typed ESCALATION record: per-criterion verdicts,
 //      reasons and the attempt count, visibly typed on the graph.step record
@@ -63,10 +62,10 @@ function stateCap() {
 
 /**
  * Normalize the resolved reads into the exact plan.ac payload. Pure.
- *   - `inbox.entry` is the dictated entry text (string) or the composed
- *     payload object; both normalize to {issueId, title, scopeSummary,
- *     dorFacts} with absent fields null (dorFacts null when the state has
- *     none — never invented).
+ *   - `plan.intent.confirmed` is the runner-appended confirmed-intent record's
+ *     output (FOC-517): the ACs are generated from the CONFIRMED reading —
+ *     goal as the scope summary, why/mapVersion/round and the confirmed map's
+ *     claims as the dorFacts — never from the raw dictated entry.
  *   - `features.list` is the candidate-files array the caller retrieved.
  * The whole reads payload (all reads JSON-serialized) is bounded by the
  * seam's state cap: over it the composition fails closed BEFORE any provider
@@ -75,46 +74,49 @@ function stateCap() {
  * typed failure.
  */
 export function composeAcInputs(reads, { cap = stateCap() } = {}) {
-  const entry = reads?.["inbox.entry"];
+  const confirmed = reads?.["plan.intent.confirmed"];
   const features = reads?.["features.list"];
-  if (entry === undefined || entry === null) {
-    throw new TypedError("invalid_input", 'plan.ac: the "inbox.entry" read is missing — nothing to compose from');
+  if (confirmed === undefined || confirmed === null) {
+    throw new TypedError("invalid_input", 'plan.ac: the "plan.intent.confirmed" read is missing — acceptance criteria are never generated from an unconfirmed intent (FOC-517)');
   }
   if (features === undefined || features === null) {
     throw new TypedError("invalid_input", 'plan.ac: the "features.list" read is missing — no candidate files composed');
   }
-  const source = typeof entry === "string"
-    ? { scopeSummary: entry }
-    : entry && typeof entry === "object" && !Array.isArray(entry) ? entry : null;
-  if (!source) {
+  if (!confirmed || typeof confirmed !== "object" || Array.isArray(confirmed)) {
     throw new TypedError(
       "invalid_input",
-      'plan.ac: the "inbox.entry" read must be the dictated entry text or a {issueId, title, scopeSummary, dorFacts} payload',
+      'plan.ac: the "plan.intent.confirmed" read must be the confirmed-intent record\'s output ({goal, why, mapVersion, interpretations, answers, corrections, round})',
     );
   }
   if (!Array.isArray(features)) {
     throw new TypedError("invalid_input", 'plan.ac: the "features.list" read must be the candidate-files array');
   }
   const payload = {
-    issueId: typeof source.issueId === "string" && source.issueId.trim() ? source.issueId : null,
-    title: typeof source.title === "string" ? source.title : null,
-    scopeSummary: typeof source.scopeSummary === "string" ? source.scopeSummary : null,
-    dorFacts: source.dorFacts ?? null,
+    issueId: null,
+    title: null,
+    scopeSummary: typeof confirmed.goal === "string" && confirmed.goal.trim() ? confirmed.goal : null,
+    dorFacts: {
+      why: typeof confirmed.why === "string" ? confirmed.why : null,
+      mapVersion: Number.isInteger(confirmed.mapVersion) ? confirmed.mapVersion : null,
+      round: Number.isInteger(confirmed.round) ? confirmed.round : null,
+      understandings: (Array.isArray(confirmed.interpretations) ? confirmed.interpretations : [])
+        .filter((i) => i && typeof i.claim === "string")
+        .map((i) => ({ id: typeof i.id === "string" ? i.id : null, claim: i.claim, source: typeof i.source === "string" ? i.source : null })),
+    },
   };
-  if (!(typeof payload.scopeSummary === "string" && payload.scopeSummary.trim())
-    && !(typeof payload.title === "string" && payload.title.trim())) {
+  if (!(typeof payload.scopeSummary === "string" && payload.scopeSummary.trim())) {
     throw new TypedError(
       "invalid_input",
-      "plan.ac: the composed entry carries neither a scope summary nor a title — nothing to generate acceptance criteria from",
+      "plan.ac: the confirmed intent carries no goal — nothing to generate acceptance criteria from",
     );
   }
-  const composed = { "inbox.entry": payload, "features.list": features };
+  const composed = { "plan.intent.confirmed": payload, "features.list": features };
   const serialized = JSON.stringify(composed);
   if (serialized.length > cap) {
     throw new TypedError(
       "invalid_input",
       `plan.ac: the composed reads payload exceeds the seam's state cap (${serialized.length} > ${cap}) — `
-        + "fail closed before any provider call, no truncation (AC generation from truncated DoR facts would "
+        + "fail closed before any provider call, no truncation (AC generation from truncated intent facts would "
         + "generate acceptance criteria from half the facts)",
     );
   }
@@ -174,10 +176,10 @@ function reasonFor(verdict, threshold, falseCriteria) {
     + (falseCriteria ? `: ${falseCriteria}` : "");
 }
 
-// The regeneration note rides the `inbox.entry` payload as a `revision` field
-// (one regeneration, node-internal): the declared reads stay exactly two, and
-// the note is the loop's own feedback — node-internal state, not a new
-// declared input and not a sibling call's output.
+// The regeneration note rides the `plan.intent.confirmed` payload as a
+// `revision` field (one regeneration, node-internal): the declared reads stay
+// exactly two, and the note is the loop's own feedback — node-internal state,
+// not a new declared input and not a sibling call's output.
 const REGEN_NOTE = "One regeneration: the previous acceptance-criteria list failed the node-internal "
   + "plan.ac.testable gate for the criteria listed under failing (their verdict p fell below the "
   + "threshold — the gate judged them not concrete and checkable as written). Regenerate the FULL "
@@ -290,7 +292,7 @@ function regenReads(payload, composed, previousScores, threshold, falseCriteria)
   const failing = (previousScores ?? []).filter((s) => s.verdict < threshold);
   return {
     ...composed,
-    "inbox.entry": {
+    "plan.intent.confirmed": {
       ...payload,
       revision: {
         attempt: 2,

@@ -2,12 +2,17 @@
 // against the 12 Fenix issues whose DoD Mateusz already approved.
 //
 // For each fixture issue the harness builds the SAME input partition the
-// runner hands a live plan.dod step (title + accepted-scope summary — the
-// approved DoD section is GROUND TRUTH and never enters the inputs), then
-// drives ONE real cheap-tier call through the runner's own default generator
-// (createDefaultGenerator, the exact transport a live graph run uses). Usage
-// and cost come off the FOC-449 event lines the generator wrote — the same
-// ledger a live run produces, never a second meter.
+// runner hands a live plan.dod step, then drives ONE real cheap-tier call
+// through the runner's own default generator (createDefaultGenerator, the
+// exact transport a live graph run uses). Usage and cost come off the FOC-449
+// event lines the generator wrote — the same ledger a live run produces,
+// never a second meter.
+//
+// FOC-517: the runtime input is the runner-appended `plan.intent.confirmed`
+// record (the gate1 conversation's output), not the raw dictated entry. The
+// harness feeds the same shape — the fixture's scope summary as the confirmed
+// goal, no interpretation map (the dod fixture carries none) — so the re-run
+// measures the confirmed-brief composition against the FOC-474 recorded runs.
 //
 // Scoring (complete / verifiable / no-invented-scope, pass/partial/fail) is
 // human: an LLM grader would need its own validation, so the harness ships
@@ -157,12 +162,14 @@ export async function runAll({
   runId = "foc-474-eval",
   issues: issuesOverride,
   limit,
+  only,
 } = {}) {
   if (!outDir || typeof outDir !== "string") throw new TypeError("outDir is required — artifacts land under it");
   const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
   const source = issuesOverride ?? fixture.issues;
   if (!Array.isArray(source) || source.length === 0) throw new TypeError("fixture carries no issues — nothing to measure");
-  const issues = source.slice(0, Number.isInteger(limit) ? limit : undefined);
+  const issues = source.slice(0, Number.isInteger(limit) ? limit : undefined)
+    .filter((i) => !only || i?.id === only);
 
   const step = loadGraph().nodes?.plan?.steps?.["plan.dod"];
   if (!step) throw new TypeError("config/graph.json has no plan.dod step — the eval drives the runner's real step object");
@@ -192,7 +199,22 @@ export async function runAll({
         fetchImpl,
         timeoutMs,
       });
-      const output = await generator({ stepId: "plan.dod", step, reads: { "inbox.entry": { title: inputs.title, scopeSummary: inputs.scopeSummary } } });
+      // FOC-517: plan.dod composes from the runner-appended confirmed intent,
+      // never the raw dictated entry. The eval feeds the same shape the runner
+      // appends at gate1 confirmation — the fixture's scope summary as the
+      // confirmed goal, no interpretation map (the dod fixture carries none;
+      // that absence is part of the measured delta), round 1.
+      const confirmed = {
+        goal: inputs.scopeSummary,
+        why: null,
+        mapVersion: 1,
+        interpretations: [],
+        answers: [],
+        corrections: [],
+        round: 1,
+      };
+      const output = await generator({ stepId: "plan.dod", step, reads: { "plan.intent.confirmed": confirmed } });
+      row.confirmedBrief = confirmed;
       row.ok = true;
       row.output = output;
       row.schemaValid = validate(output) === true;
@@ -299,6 +321,7 @@ async function main() {
     fixturePath: flag("fixture") ?? FIXTURE_PATH,
     outDir,
     limit,
+    ...(flag("only") ? { only: flag("only") } : {}),
     runId: flag("run-id") ?? "foc-474-eval",
     ...(flag("timeout") ? { timeoutMs: Number.parseInt(flag("timeout"), 10) } : {}),
   });

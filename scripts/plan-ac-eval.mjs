@@ -154,6 +154,25 @@ export function buildInputs(issue) {
   };
 }
 
+/**
+ * The eval's simulated reads under the FOC-517 node contract: plan.ac composes
+ * from the CONFIRMED intent, so the harness stands in for the runner — the
+ * fixture's scope summary becomes the confirmed goal and the DoR-fact lines
+ * become the confirmed map's claims (source "fixture", never live state).
+ */
+export function evalReads(inputs) {
+  return {
+    "plan.intent.confirmed": {
+      goal: inputs.scopeSummary,
+      why: null,
+      mapVersion: null,
+      round: null,
+      interpretations: (inputs.dorFacts ?? []).map((claim, i) => ({ id: `IN-${i + 1}`, claim, source: "fixture" })),
+    },
+    "features.list": inputs.candidateFiles,
+  };
+}
+
 /** Read the FOC-449 event lines a run wrote, keyed by taskKey (arrays — a
  * node-internal loop makes up to two [G] calls and up to two gate calls per
  * issue; every line is kept, never overwritten). */
@@ -232,12 +251,14 @@ export async function runAll({
   runId = "foc-475-eval",
   issues: issuesOverride,
   limit,
+  only,
 } = {}) {
   if (!outDir || typeof outDir !== "string") throw new TypeError("outDir is required — artifacts land under it");
   const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
   const source = issuesOverride ?? fixture.issues;
   if (!Array.isArray(source) || source.length === 0) throw new TypeError("fixture carries no issues — nothing to measure");
-  const issues = source.slice(0, Number.isInteger(limit) ? limit : undefined);
+  const issues = source.slice(0, Number.isInteger(limit) ? limit : undefined)
+    .filter((i) => !only || i?.id === only);
 
   const step = loadGraph().nodes?.plan?.steps?.["plan.ac"];
   if (!step) throw new TypeError("config/graph.json has no plan.ac step — the eval drives the runner's real step object");
@@ -280,15 +301,7 @@ export async function runAll({
       const result = await runPlanAcNode({
         stepId: "plan.ac",
         step,
-        reads: {
-          "inbox.entry": {
-            issueId: inputs.issueId,
-            title: inputs.title,
-            scopeSummary: inputs.scopeSummary,
-            dorFacts: inputs.dorFacts,
-          },
-          "features.list": inputs.candidateFiles,
-        },
+        reads: evalReads(inputs),
         generator,
         caller,
         validate,
@@ -428,6 +441,7 @@ async function main() {
     fixturePath: flag("fixture") ?? FIXTURE_PATH,
     outDir,
     limit,
+    ...(flag("only") ? { only: flag("only") } : {}),
     runId: flag("run-id") ?? "foc-475-eval",
     ...(flag("timeout") ? { timeoutMs: Number.parseInt(flag("timeout"), 10) } : {}),
   });
