@@ -1,7 +1,7 @@
 // scripts/graph-runner.test.mjs — FOC-397: the graph.json v2 executor.
 //
 // Covers the runner contract end to end, all offline: the resumable walk over
-// the committed PLAN subgraph (10 steps, 9 sequence edges) with every external
+// the committed PLAN subgraph (11 steps, 10 sequence edges) with every external
 // dependency injected — the seam caller stub (never a real decision call, and
 // never a real Linear write or gate emit), the [G] generator, the supervisor
 // gate emitter and the Linear boundary. The run-record store is a temp-dir
@@ -76,9 +76,13 @@ const DOD_OUTPUT = {
 
 // plan.intent joined the chain between plan.dor and plan.dod (FOC-515). The
 // stub map is round 1 with the task type unknown, so §3.12 requires all eight
-// perspectives; the items are inferred, which carries neither a quote nor
-// options. plan.dor resolves with no gaps here, so the coverage check is
-// vacuous — the check itself is pinned in scripts/plan-intent.test.mjs.
+// perspectives. The items exercise every FOC-516 selection route: IN-1/IN-2
+// inferred (confirmations at high impact), IN-3 stated with a quote (the
+// "Rozumiem tak" route when grounding reads yes), IN-4..IN-7 inferred low
+// (assumptions), IN-8 unknown with options (the question route — a map item
+// the schema REQUIRES to carry options). plan.dor resolves with no gaps here,
+// so the coverage check is vacuous — the check itself is pinned in
+// scripts/plan-intent.test.mjs.
 const INTENT_OUTPUT = {
   goal: "The runner executes the PLAN subgraph with typed run records.",
   why: "So the executor is provably resumable before it runs a real task.",
@@ -86,12 +90,18 @@ const INTENT_OUTPUT = {
   interpretations: [
     { id: "IN-1", perspective: "goal", claim: "Rozumiem, że zmiana dotyczy wykonawcy grafu.", source: "inferred", alternatives: [], covers: [] },
     { id: "IN-2", perspective: "user", claim: "Rozumiem, że odbiorcą jest zespół utrzymujący runnera.", source: "inferred", alternatives: [], covers: [] },
-    { id: "IN-3", perspective: "scope", claim: "Rozumiem, że w zakresie jest tylko wykonawca grafu.", source: "inferred", alternatives: [], covers: [] },
+    { id: "IN-3", perspective: "scope", claim: "Rozumiem, że w zakresie jest tylko wykonawca grafu.", source: "stated", quote: "the PLAN subgraph", alternatives: [], covers: [] },
     { id: "IN-4", perspective: "success", claim: "Rozumiem, że sukces to zielony test runnera.", source: "inferred", alternatives: [], covers: [] },
     { id: "IN-5", perspective: "constraints", claim: "Rozumiem, że nie wolno zmieniać kontraktu rekordów.", source: "inferred", alternatives: [], covers: [] },
     { id: "IN-6", perspective: "risk", claim: "Rozumiem, że ryzykiem jest trwałość rekordów runu.", source: "inferred", alternatives: [], covers: [] },
     { id: "IN-7", perspective: "priority", claim: "Rozumiem, że ważniejsza jest poprawność niż szybkość.", source: "inferred", alternatives: [], covers: [] },
-    { id: "IN-8", perspective: "terms", claim: "Rozumiem, że opis nie zawiera niejasnych terminów.", source: "inferred", alternatives: [], covers: [] },
+    {
+      id: "IN-8", perspective: "terms", claim: "Rozumiem, że opis nie zawiera niejasnych terminów.", source: "unknown", alternatives: [], covers: [],
+      options: [
+        { text: "Rozumiem, że opis nie zawiera niejasnych terminów.", recommended: true, reason: "the reading the dictated entry supports" },
+        { text: "Rozumiem, że opis używa terminów wymagających słownika.", recommended: false },
+      ],
+    },
   ],
 };
 
@@ -121,6 +131,24 @@ function testableEnvelope(input) {
   return a0Envelope("plan.ac.testable", answers);
 }
 
+// The node-internal plan.intent.select.score call (FOC-516): two noul verdicts
+// per interpretation instance, keyed by instance id. IN-1/IN-2 impact 0.9
+// (inferred high → confirmations), IN-3 grounded 0.9 (stated grounded-yes →
+// "Rozumiem tak"), IN-4..IN-7 impact 0.1 (inferred low → assumptions), IN-8
+// impact 0.9 (unknown high → the question route). The eventId rides the
+// envelope so the gate1 approval can label the delta next to this event.
+const SELECT_IMPACT = { "IN-1": 0.9, "IN-2": 0.9, "IN-3": 0.1, "IN-4": 0.1, "IN-5": 0.1, "IN-6": 0.1, "IN-7": 0.1, "IN-8": 0.9 };
+const SELECT_GROUNDED = { "IN-1": 0.9, "IN-2": 0.9, "IN-3": 0.9, "IN-4": 0.1, "IN-5": 0.1, "IN-6": 0.1, "IN-7": 0.1, "IN-8": 0.1 };
+function selectScoreEnvelope(input) {
+  const answers = {};
+  (input.instances ?? []).forEach((inst, i) => {
+    if (!(inst.id in SELECT_IMPACT)) fail(`unexpected select instance ${inst.id}`);
+    answers[`impact${i}`] = { type: "noul", noul: SELECT_IMPACT[inst.id] };
+    answers[`grounded${i}`] = { type: "noul", noul: SELECT_GROUNDED[inst.id] };
+  });
+  return { ok: true, decisionId: "plan.intent.select.score", autonomy: "A0", eventId: "evt-select-walk", annotation: { answers, confidence: 0.9 } };
+}
+
 // The frontman's pen: resolution records are appended by the DECIDING agent —
 // the runner consumes them, never creates them.
 function resolve(storePath, key, output, by = "frontman") {
@@ -144,9 +172,14 @@ function latest(records, key) {
   return matching[matching.length - 1] ?? null;
 }
 
-// A runner wired to injected stubs; each test gets its own store dir.
-function makeRunner({ caller, generator, gateEmitter, linearEffect, storePath, runId = "run-e2e" }) {
-  return createGraphRunner({ runId, storePath, caller, generator, gateEmitter, linearEffect });
+// A runner wired to injected stubs; each test gets its own store dir. The
+// delta-label runs dir (FOC-516) defaults to a temp sibling of the store —
+// a gate1 approval must never write the live .state/runs ledger.
+function makeRunner({ caller, generator, gateEmitter, linearEffect, storePath, runId = "run-e2e", decisionRunsDir }) {
+  return createGraphRunner({
+    runId, storePath, caller, generator, gateEmitter, linearEffect,
+    decisionRunsDir: decisionRunsDir ?? join(dirname(storePath), "runs"),
+  });
 }
 
 function tempStore() {
@@ -226,12 +259,19 @@ await test("missing caller / generator / runId fail at construction with typed e
 
 console.log("\ngraph-runner: the PLAN subgraph end to end (all stubs injected)");
 
-await test("the full resumable walk: 10 steps, 2 A0 annotations, 3 [G] calls, 2 gates, one push, idempotent resume", async () => {
-  const { storePath } = tempStore();
+await test("the full resumable walk: 11 steps, 2 [J] annotations + the node-internal selection score, 3 [G] calls, 2 gates, one push, idempotent resume", async () => {
+  const { dir, storePath } = tempStore();
+  // The FOC-449 delta-label ledger: a temp runs dir pre-seeded with the event
+  // the selection's scoring call will log, so the gate1 approval can write its
+  // label next to it — never the live .state/runs.
+  const runsDir = join(dir, "label-runs");
+  mkdirSync(join(runsDir, "run-e2e"), { recursive: true });
+  appendFileSync(join(runsDir, "run-e2e", "decisions.jsonl"), `${JSON.stringify({ type: "event", eventId: "evt-select-walk", decisionId: "plan.intent.select.score" })}\n`);
   const callerCalls = [];
   const caller = async (input) => {
     callerCalls.push(input);
     if (input.decisionId === "plan.dor") return a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } });
+    if (input.decisionId === "plan.intent.select.score") return selectScoreEnvelope(input);
     if (input.decisionId === "plan.ac.testable") return testableEnvelope(input);
     if (input.decisionId === "plan.decompose") return a0Envelope("plan.decompose", { q_size: { type: "choice", choice: "medium", probabilities: { medium: 0.9 } }, q_relations: { type: "choice", choice: "standalone", probabilities: { standalone: 0.8 } } });
     return fail(`unexpected caller decisionId ${input.decisionId}`);
@@ -264,7 +304,7 @@ await test("the full resumable walk: 10 steps, 2 A0 annotations, 3 [G] calls, 2 
     return { epicId: "FEN-900", childrenIds: ["FEN-901"], handoffCommentPosted: true };
   };
 
-  const runner = makeRunner({ caller, generator, gateEmitter, linearEffect, storePath });
+  const runner = makeRunner({ caller, generator, gateEmitter, linearEffect, storePath, decisionRunsDir: runsDir });
 
   // Run 1 — plan.dor executes, A0 annotation recorded, run stops handed-off.
   let result = await runner.run({ inputs: RUN_INPUTS });
@@ -294,37 +334,57 @@ await test("the full resumable walk: 10 steps, 2 A0 annotations, 3 [G] calls, 2 
   if (records.some((r) => r.type === "graph.resolution")) fail("the runner never writes resolutions");
   resolve(storePath, "plan.dor", { ready: true, gaps: [] }, "mateusz");
 
-  // Run 2 — plan.dod + plan.ac [G] execute, plan.spec [A] hands off.
+  // Run 2 — plan.intent [G] executes, plan.intent.select routes the map (its
+  // node-internal [J] call, no [G] generator call), and the REPOSITIONED gate1
+  // emits the supervisor gate and stops gate-pending (FOC-516).
   result = await runner.run({ inputs: RUN_INPUTS });
   eq(result.status, "stopped", "run 2 stops");
-  eq(result.stepId, "plan.spec", "run 2 stops at the [A] step");
-  eq(result.record.status, "handed-off", "plan.spec hands off");
-  deepEq(result.record.handoff.reads["plan.ac.acs"], AC_OUTPUT.acs, "the [A] hand-off carries the resolved reads");
-  eq(generatorCalls, 3, "[G] executed exactly once each (plan.intent, plan.dod, plan.ac)");
-
-  resolve(storePath, "plan.spec", SPEC_OUTPUT, "spec-agent");
-
-  // Run 3 — plan.gate1 emits the supervisor gate and stops gate-pending.
-  result = await runner.run({ inputs: RUN_INPUTS });
-  eq(result.status, "stopped", "run 3 stops");
-  eq(result.stepId, "plan.gate1", "run 3 stops at the [H] step");
+  eq(result.stepId, "plan.gate1", "run 2 stops at the repositioned [H] step");
   eq(result.record.status, "gate-pending", "gate record pending");
   eq(result.record.gateId, "gate-test-1", "gate id provenance");
+  eq(generatorCalls, 1, "only plan.intent made a [G] call — the selection is node-internal code + one [J] call");
+  eq(callerCalls.length, 1, "one seam call: the selection's plan.intent.select.score");
+  eq(callerCalls[0].decisionId, "plan.intent.select.score", "call by registry id");
+  eq(callerCalls[0].instances.length, 8, "one instance per interpretation");
   eq(gateCalls[0].gateKind, "plan.gate1", "gate kind is a supervisor kind");
-  if (!gateCalls[0].summary.includes("SPEC")) fail("gate summary names what is approved");
-  eq(gateCalls[0].facts.reads["plan.spec.record"].status, "done", "gate facts carry the record view");
-  eq(gateCalls[0].facts.reads["plan.spec.record"].resolvedBy, "spec-agent", "resolution provenance rides the record view");
+  if (!gateCalls[0].summary.includes("selection")) fail("gate summary names the interpretation selection");
+  eq(gateCalls[0].facts.reads["plan.intent.select.record"].status, "done", "gate facts carry the selection record view");
+
+  records = readRecords(storePath);
+  const sel = latest(records, "plan.intent.select");
+  eq(sel.status, "done", "the selection record landed before the gate");
+  eq(sel.output.questions.length, 1, "IN-8 (unknown, high impact) is the one question");
+  eq(sel.output.questions[0].id, "IN-8", "the question carries the map's own options");
+  eq(sel.output.confirmations.map((c) => c.id).join(","), "IN-1,IN-2", "inferred high-impact items are confirmations");
+  eq(sel.output.understood.map((c) => c.id).join(","), "IN-3", "the stated item reads as a 'Rozumiem tak' line");
+  eq(sel.output.assumptions.length, 4, "the inferred low-impact items stay listed as assumptions");
+  eq(sel.eventId, "evt-select-walk", "the scoring event id rides the record");
 
   resolve(storePath, "gate.plan.gate1", { approved: true }, "mateusz");
 
-  // Run 4 — the gate completes via resolution; plan.decompose A0 hands off.
+  // Run 3 — the gate completes via resolution and the FOC-449 delta label is
+  // written next to the scoring event (no answers came in, so the honest
+  // marker is approved-unanswered); plan.dod + plan.ac [G] execute; plan.spec
+  // [A] hands off.
+  result = await runner.run({ inputs: RUN_INPUTS });
+  eq(result.status, "stopped", "run 3 stops");
+  eq(result.stepId, "plan.spec", "run 3 stops at the [A] step");
+  eq(result.record.status, "handed-off", "plan.spec hands off");
+  deepEq(result.record.handoff.reads["plan.ac.acs"], AC_OUTPUT.acs, "the [A] hand-off carries the resolved reads");
+  eq(generatorCalls, 3, "[G] executed exactly once each (plan.intent, plan.dod, plan.ac)");
+  records = readRecords(storePath);
+  eq(latest(records, "gate.plan.gate1").status, "done", "gate completed by resolution");
+  eq(latest(records, "gate.plan.gate1").resolvedBy, "mateusz", "resolution provenance on the done record");
+  eq(latest(records, "gate.plan.gate1").deltaLabel?.outcome, "approved-unanswered", "no answers in the inputs — the honest marker");
+  eq(latest(records, "gate.plan.gate1").deltaLabelWritten, join(runsDir, "run-e2e", "decisions.jsonl"), "the label landed next to the scoring event");
+
+  resolve(storePath, "plan.spec", SPEC_OUTPUT, "spec-agent");
+
+  // Run 4 — plan.decompose A0 hands off.
   result = await runner.run({ inputs: RUN_INPUTS });
   eq(result.status, "stopped", "run 4 stops");
   eq(result.stepId, "plan.decompose", "run 4 stops at the second [J] step");
   eq(result.record.status, "handed-off", "plan.decompose hands off");
-  records = readRecords(storePath);
-  eq(latest(records, "gate.plan.gate1").status, "done", "gate completed by resolution");
-  eq(latest(records, "gate.plan.gate1").resolvedBy, "mateusz", "resolution provenance on the done record");
 
   resolve(storePath, "plan.decompose", DECOMPOSE_OUTPUT, "mateusz");
 
@@ -357,7 +417,7 @@ await test("the full resumable walk: 10 steps, 2 A0 annotations, 3 [G] calls, 2 
   eq(latest(records, "plan.push").status, "done", "push done");
   eq(latest(records, "plan.push").output.epicId, "FEN-900", "push output recorded");
   eq(generatorCalls, 3, "[G] never re-executed across resumes");
-  eq(callerCalls.length, 2, "two seam calls since the reset (plan.ac.testable, plan.decompose)");
+  eq(callerCalls.length, 3, "three seam calls since the reset (plan.intent.select.score, plan.ac.testable, plan.decompose)");
 
   // Run 7 — fully idempotent: every step done, nothing re-runs.
   const callsBefore = callerCalls.length;
@@ -407,7 +467,7 @@ await test("a [J] provider error exhausts the cascade: tier 2 dead, tier 3 front
 await test("a schema-invalid [G] output fails the step and stops the run", async () => {
   const { storePath } = tempStore();
   const runner = makeRunner({
-    caller: async () => a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } }),
+    caller: async (input) => (input.decisionId === "plan.intent.select.score" ? selectScoreEnvelope(input) : a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } })),
     // plan.intent and plan.dod run first and must pass; the invalid shape fails plan.ac's output schema
     generator: async ({ stepId }) => (stepId === "plan.intent" ? INTENT_OUTPUT : stepId === "plan.dod" ? DOD_OUTPUT : { acs: "not-a-list" }),
     gateEmitter: async () => ({}),
@@ -416,6 +476,8 @@ await test("a schema-invalid [G] output fails the step and stops the run", async
   });
   await runner.run({ inputs: RUN_INPUTS }); // plan.dor handed-off
   resolve(storePath, "plan.dor", { ready: true, gaps: [] });
+  await runner.run({ inputs: RUN_INPUTS }); // the selection routes the map; gate1 stops gate-pending
+  resolve(storePath, "gate.plan.gate1", { approved: true });
   const result = await runner.run({ inputs: RUN_INPUTS }); // plan.ac [G] runs
   eq(result.status, "stopped", "run stops");
   eq(result.stepId, "plan.ac", "stopped at the [G] step");
@@ -485,7 +547,7 @@ await test("an invalid resolution is refused, not recorded — the step can be r
 await test("a resolution without a base run record is a typed failure, not a silent continue", async () => {
   const { storePath } = tempStore();
   const runner = makeRunner({
-    caller: async () => a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } }),
+    caller: async (input) => (input.decisionId === "plan.intent.select.score" ? selectScoreEnvelope(input) : a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } })),
     generator: async ({ stepId }) => (stepId === "plan.intent" ? INTENT_OUTPUT : stepId === "plan.dod" ? DOD_OUTPUT : AC_OUTPUT),
     gateEmitter: async () => ({}),
     linearEffect: async () => ({}),
@@ -494,7 +556,9 @@ await test("a resolution without a base run record is a typed failure, not a sil
   await runner.run({ inputs: RUN_INPUTS }); // plan.dor handed-off
   resolve(storePath, "plan.dor", { ready: true, gaps: [] });
   resolve(storePath, "plan.ac", AC_OUTPUT); // a resolution with NO plan.ac run record
-  const result = await runner.run({ inputs: RUN_INPUTS }); // plan.dor completes; plan.ac hits the orphan
+  await runner.run({ inputs: RUN_INPUTS }); // plan.dor completes; the selection routes; gate1 stops gate-pending
+  resolve(storePath, "gate.plan.gate1", { approved: true });
+  const result = await runner.run({ inputs: RUN_INPUTS }); // plan.dod runs; plan.ac hits the orphan
   eq(result.status, "stopped", "run stops");
   eq(result.stepId, "plan.ac", "stopped at the orphaned step");
   eq(result.record.status, "failed", "failed record");
@@ -518,6 +582,7 @@ await test("the default Linear boundary refuses — the runner never writes to L
   const done = (key, stepId, output) => JSON.stringify({ type: "graph.step", runId: "run-e2e", ts: "2026-01-01T00:00:00.000Z", key, status: "done", stepId, output });
   appendFileSync(storePath, done("plan.dor", "plan.dor", { ready: true, gaps: [] }) + "\n");
   appendFileSync(storePath, done("plan.intent", "plan.intent", INTENT_OUTPUT) + "\n");
+  appendFileSync(storePath, done("plan.intent.select", "plan.intent.select", { mapVersion: 1, questions: [], confirmations: [], understood: [], assumptions: [] }) + "\n"); // FOC-516
   appendFileSync(storePath, done("plan.dod", "plan.dod", DOD_OUTPUT) + "\n");
   appendFileSync(storePath, done("plan.ac", "plan.ac", AC_OUTPUT) + "\n");
   appendFileSync(storePath, done("plan.spec", "plan.spec", SPEC_OUTPUT) + "\n");
@@ -535,7 +600,9 @@ await test("the default Linear boundary refuses — the runner never writes to L
 await test("a gate answered rejected records gate-rejected and stops (downstream never runs)", async () => {
   const { storePath } = tempStore();
   const runner = makeRunner({
-    caller: async (input) => (input.decisionId === "plan.ac.testable" ? testableEnvelope(input) : a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } })),
+    caller: async (input) => (input.decisionId === "plan.intent.select.score" ? selectScoreEnvelope(input)
+      : input.decisionId === "plan.ac.testable" ? testableEnvelope(input)
+      : a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } })),
     generator: async ({ stepId }) => (stepId === "plan.intent" ? INTENT_OUTPUT : stepId === "plan.dod" ? DOD_OUTPUT : AC_OUTPUT),
     gateEmitter: async () => ({ gateId: "gate-test-1" }),
     linearEffect: async () => { fail("linear effect must not run after a rejection"); },
@@ -543,9 +610,7 @@ await test("a gate answered rejected records gate-rejected and stops (downstream
   });
   await runner.run({ inputs: RUN_INPUTS }); // plan.dor handed-off
   resolve(storePath, "plan.dor", { ready: true, gaps: [] });
-  await runner.run({ inputs: RUN_INPUTS }); // plan.ac done, plan.spec handed-off
-  resolve(storePath, "plan.spec", SPEC_OUTPUT);
-  const result = await runner.run({ inputs: RUN_INPUTS }); // gate1 pending
+  const result = await runner.run({ inputs: RUN_INPUTS }); // the selection routes the map; gate1 pending (FOC-516: before dod/ac/spec)
   eq(result.record.status, "gate-pending", "gate waited");
   resolve(storePath, "gate.plan.gate1", { approved: false }, "mateusz");
   const rejected = await runner.run({ inputs: RUN_INPUTS });

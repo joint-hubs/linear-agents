@@ -5,7 +5,7 @@
 
   "version": 2,
 
-  "_v2": "v2 additive shape (FOC-397, Option A per docs/plans/graph-json-v2-design.md §6.1): everything v1 stays byte-identical — the six squad-node contracts, the top-level `edges` array, handoff-rules.json and the PUML rendering. Additions: the plan node carries `steps` (the 10-step PLAN decomposition — plan.dor [J], plan.intent [G], plan.dod [G], plan.ac [G], plan.spec [A], plan.gate1 [H], plan.decompose [J], plan.render [D], plan.gate2 [H], plan.push [D]; each step object is exactly the D7 list — id = its key, kind, reads, output, tier, failure, writes) and `stepFlow` (sequence edges — ordered step-to-step connectors inside the node, never matcher edges), plus a top-level `decisionEdges` array for the six decide transitions (MAP #1/#2/#14/#16, hook #17 and the FOC-451 DoR intake gate; each names the registry entry in config/decisions.json that owns autonomy, threshold, fallback and metrics). graph-validate v2 mode cross-checks step fields deep-equal against the registry entries. FOC-520 inserts plan.render between plan.decompose and plan.gate2: the Linear issue text is rendered deterministically BEFORE GATE 2, so the gate approves exactly the text plan.push writes (verbatim, no rewording anywhere). Deferred (FOC-397): step branching, monitor.child_state hook wiring, step-level diagram emitter.",
+  "_v2": "v2 additive shape (FOC-397, Option A per docs/plans/graph-json-v2-design.md §6.1): everything v1 stays byte-identical — the six squad-node contracts, the top-level `edges` array, handoff-rules.json and the PUML rendering. Additions: the plan node carries `steps` (the 11-step PLAN decomposition — plan.dor [J], plan.intent [G], plan.intent.select [G], plan.dod [G], plan.ac [G], plan.spec [A], plan.gate1 [H], plan.decompose [J], plan.render [D], plan.gate2 [H], plan.push [D]; each step object is exactly the D7 list — id = its key, kind, reads, output, tier, failure, writes) and `stepFlow` (sequence edges — ordered step-to-step connectors inside the node, never matcher edges), plus a top-level `decisionEdges` array for the six decide transitions (MAP #1/#2/#14/#16, hook #17 and the FOC-451 DoR intake gate; each names the registry entry in config/decisions.json that owns autonomy, threshold, fallback and metrics). graph-validate v2 mode cross-checks step fields deep-equal against the registry entries. FOC-516 inserts plan.intent.select between plan.intent and plan.gate1 and moves GATE 1 there: the selection routes every interpretation of the map to question / confirmation / 'Rozumiem tak' line / assumption by the policy table config/intent-select-policy.json (scored by the node-internal [J] plan.intent.select.score, the plan.ac + plan.ac.testable pattern), and the gate approves the interpretation selection before the DoD/AC/spec hand-off is produced. FOC-520 inserts plan.render between plan.decompose and plan.gate2: the Linear issue text is rendered deterministically BEFORE GATE 2, so the gate approves exactly the text plan.push writes (verbatim, no rewording anywhere). Deferred (FOC-397): step branching, monitor.child_state hook wiring, step-level diagram emitter.",
 
   "entryNodes": ["plan", "cadence"],
 
@@ -106,6 +106,85 @@
           "failure": "stop",
           "writes": "run-record"
         },
+        "plan.intent.select": {
+          "kind": "G",
+          "reads": ["plan.intent.record", "gate.plan.gate1.answers", "gate.plan.gate1.corrections"],
+          "output": {
+            "type": "object",
+            "required": ["mapVersion", "questions", "confirmations", "understood", "assumptions"],
+            "additionalProperties": false,
+            "properties": {
+              "mapVersion": { "type": "integer", "minimum": 1 },
+              "questions": {
+                "type": "array", "maxItems": 4,
+                "items": {
+                  "type": "object",
+                  "required": ["id", "claim", "options", "impactProbability"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": { "type": "string", "pattern": "^IN-([1-9]|1[0-2])$" },
+                    "claim": { "type": "string", "minLength": 1, "maxLength": 200 },
+                    "options": {
+                      "type": "array", "minItems": 2, "maxItems": 4,
+                      "items": {
+                        "type": "object", "required": ["text", "recommended"], "additionalProperties": false,
+                        "properties": {
+                          "text": { "type": "string", "minLength": 1, "maxLength": 200 },
+                          "recommended": { "type": "boolean" },
+                          "reason": { "type": "string", "minLength": 1, "maxLength": 150 }
+                        }
+                      }
+                    },
+                    "impactProbability": { "type": "number", "minimum": 0, "maximum": 1 }
+                  }
+                }
+              },
+              "confirmations": {
+                "type": "array", "maxItems": 4,
+                "items": {
+                  "type": "object",
+                  "required": ["id", "claim", "impactProbability"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": { "type": "string", "pattern": "^IN-([1-9]|1[0-2])$" },
+                    "claim": { "type": "string", "minLength": 1, "maxLength": 200 },
+                    "impactProbability": { "type": "number", "minimum": 0, "maximum": 1 }
+                  }
+                }
+              },
+              "understood": {
+                "type": "array", "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "required": ["id", "claim", "groundedProbability"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": { "type": "string", "pattern": "^IN-([1-9]|1[0-2])$" },
+                    "claim": { "type": "string", "minLength": 1, "maxLength": 200 },
+                    "groundedProbability": { "type": "number", "minimum": 0, "maximum": 1 }
+                  }
+                }
+              },
+              "assumptions": {
+                "type": "array", "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "required": ["id", "claim", "impactProbability", "reason"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": { "type": "string", "pattern": "^IN-([1-9]|1[0-2])$" },
+                    "claim": { "type": "string", "minLength": 1, "maxLength": 200 },
+                    "impactProbability": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "reason": { "type": "string", "minLength": 1, "maxLength": 200 }
+                  }
+                }
+              }
+            }
+          },
+          "tier": "cheap",
+          "failure": "stop",
+          "writes": "run-record"
+        },
         "plan.dod": {
           "kind": "G",
           "reads": ["inbox.entry"],
@@ -171,7 +250,7 @@
         },
         "plan.gate1": {
           "kind": "H",
-          "reads": ["plan.spec.record"],
+          "reads": ["plan.intent.select.record"],
           "output": { "type": "object", "required": ["approved"], "additionalProperties": false, "properties": { "approved": { "type": "boolean" } } },
           "tier": null,
           "failure": "stop",
@@ -232,11 +311,12 @@
       },
       "stepFlow": [
         { "from": "plan.dor", "to": "plan.intent", "type": "sequence" },
-        { "from": "plan.intent", "to": "plan.dod", "type": "sequence" },
+        { "from": "plan.intent", "to": "plan.intent.select", "type": "sequence" },
+        { "from": "plan.intent.select", "to": "plan.gate1", "type": "sequence" },
+        { "from": "plan.gate1", "to": "plan.dod", "type": "sequence" },
         { "from": "plan.dod", "to": "plan.ac", "type": "sequence" },
         { "from": "plan.ac", "to": "plan.spec", "type": "sequence" },
-        { "from": "plan.spec", "to": "plan.gate1", "type": "sequence" },
-        { "from": "plan.gate1", "to": "plan.decompose", "type": "sequence" },
+        { "from": "plan.spec", "to": "plan.decompose", "type": "sequence" },
         { "from": "plan.decompose", "to": "plan.render", "type": "sequence" },
         { "from": "plan.render", "to": "plan.gate2", "type": "sequence" },
         { "from": "plan.gate2", "to": "plan.push", "type": "sequence" }

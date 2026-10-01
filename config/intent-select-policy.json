@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "_doc": "FOC-516 — the plan.intent.select routing policy. Which interpretations of the plan.intent map become what for Mateusz is POLICY, not code: this table is the single owner of the routing, the per-round question cap, the ordering and the dedupe flag, and scripts/plan-intent-select.mjs consumes it. Nothing policy-like is hardcoded in the node or in any [J] prompt — the [J] decision (plan.intent.select.score) only measures, this table decides. Routes: 'question' = a question with options, exactly one recommended; 'confirm' = a confirmation question ('Założłem X — dobrze?' over an inferred/ungrounded reading); 'understood' = a 'Rozumiem tak' line Mateusz confirms with a single 'ok'; 'assumption' = listed in the assumptions block of the gate facts, visible but not asked. Keys: 'high'/'low' split on the impact probability (verdict p >= 0.5, plan-gates.mjs answerValueOf); the 'stated' row splits first on grounding, then on impact. A0 honesty: every routed item stays visible in the selection record — 'assumption' is a display route, never a drop; items overflowing the question cap fall to 'assumption' with a reason naming the cap rank. The alternatives block overrides the table: an interpretation the map itself carries two or more alternative readings for ALWAYS becomes a question carrying those alternatives as options, whatever its source or impact.",
+
+  "cap": { "questions": 4 },
+
+  "dedupe": true,
+
+  "ordering": "impactProbability",
+
+  "alternatives": { "min": 2, "route": "question", "overridesTable": true },
+
+  "routes": {
+    "unknown": { "high": "question", "low": "assumption" },
+    "inferred": { "high": "confirm", "low": "assumption" },
+    "stated": {
+      "grounded-yes": "understood",
+      "grounded-no": { "high": "confirm", "low": "assumption" }
+    }
+  }
+}

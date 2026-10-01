@@ -24,6 +24,7 @@ import { loadGraph, validateGraph } from "./graph-validate.mjs";
 import { createGraphRunner, createDefaultGenerator } from "./graph-runner.mjs";
 import { DECISION_STEP, SHADOW_EVENT_TYPE } from "./decision-call.mjs";
 import { AC_TESTABLE_DECISION, TESTABLE_THRESHOLD, composeAcInputs, runPlanAcNode } from "./plan-ac.mjs";
+import { SELECT_SCORE_DECISION } from "./plan-intent-select.mjs";
 import { buildInputs } from "./plan-ac-eval.mjs";
 
 let passed = 0;
@@ -180,16 +181,16 @@ await test("plan.spec reads plan.dod.definitionOfDone — never the retired merg
   if (PLAN.steps["plan.spec"].reads.includes("plan.ac.definitionOfDone")) fail("the merged field is retired everywhere");
 });
 
-// ── (h) the counts hold: 29 entries, 10 steps / 9 edges, 6 decision edges ────
+// ── (h) the counts hold: 31 entries, 11 steps / 10 edges, 6 decision edges ───
 
-await test("the seed partition survives the restructure: 29 entries, 10 steps on the 9-edge chain, 6 decision edges", () => {
-  eq(Object.keys(registry).length, 29, "29 registry entries (plan.render joined, FOC-520)");
+await test("the seed partition survives the restructure: 31 entries, 11 steps on the 10-edge chain, 6 decision edges", () => {
+  eq(Object.keys(registry).length, 31, "31 registry entries (plan.intent.select joined, FOC-516)");
   const stepIds = Object.keys(PLAN.steps);
-  eq(stepIds.length, 10, "10 steps");
-  eq(PLAN.stepFlow.length, 9, "9 sequence edges — no graph edge was added for the loop (FOC-476's)");
-  eq(GRAPH.decisionEdges.length, 6, "6 decision edges — the testable gate is node-internal, not an edge");
+  eq(stepIds.length, 11, "11 steps");
+  eq(PLAN.stepFlow.length, 10, "10 sequence edges — no graph edge was added for the loop (FOC-476's)");
+  eq(GRAPH.decisionEdges.length, 6, "6 decision edges — the testable gate and the select score are node-internal, not edges");
   const chain = PLAN.stepFlow.map((e) => `${e.from}>${e.to}`).join(" ");
-  eq(chain, "plan.dor>plan.intent plan.intent>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push", "plan.render joined the chain between plan.decompose and plan.gate2 (FOC-520)");
+  eq(chain, "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push", "plan.intent.select joined the chain before gate1 (FOC-516)");
 });
 
 // ── composeAcInputs: the payload partition + the over-length posture ─────────
@@ -544,7 +545,8 @@ function tempStore() {
 
 // A runner with the REAL default generator (stubbed fetch) and a stub caller —
 // the live wiring minus the network. plan.dor is seeded done: the walk under
-// test is plan.ac's node loop.
+// test is plan.ac's node loop. Gate 1 sits after plan.intent.select now
+// (FOC-516), so a walk to plan.ac resolves the gate between two run() calls.
 function makeRunner({ generator, caller, storePath }) {
   appendFileSync(storePath, `${JSON.stringify({
     type: "graph.step", runId: "run-ac-runner", ts: "2026-01-01T00:00:00.000Z", key: "plan.dor", stepId: "plan.dor", status: "done", output: { ready: true, gaps: [] },
@@ -556,7 +558,37 @@ function makeRunner({ generator, caller, storePath }) {
     generator,
     gateEmitter: async () => ({ gateId: "gate-test" }),
     linearEffect: async () => ({}),
+    decisionRunsDir: join(dirname(storePath), "runs"), // never the live .state/runs
   });
+}
+
+// The frontman's pen: resolution records are appended by the DECIDING agent —
+// the runner consumes them, never creates them.
+function resolveGate(storePath, key, output, by = "mateusz") {
+  appendFileSync(storePath, `${JSON.stringify({
+    type: "graph.resolution",
+    runId: "run-ac-runner",
+    ts: "2026-01-01T00:00:00.000Z",
+    key: `${key}.resolution`,
+    stepId: key,
+    by,
+    output,
+  })}\n`);
+}
+
+// The plan.intent.select.score stub: two noul verdicts per interpretation
+// instance, impact above the threshold so the inferred map items route to
+// confirmations (the question path needs map options this fixture omits).
+function selectScoreEnvelope(input) {
+  return {
+    ok: true,
+    decisionId: SELECT_SCORE_DECISION,
+    autonomy: "A0",
+    annotation: {
+      answers: Object.fromEntries((input.instances ?? []).flatMap((_, i) => [[`impact${i}`, { type: "noul", noul: 0.9 }], [`grounded${i}`, { type: "noul", noul: 0.9 }]])),
+      confidence: 0.9,
+    },
+  };
 }
 
 await test("success: ONE [G] call, one event line, a done record whose output is the schema-valid {acs}", async () => {
@@ -565,15 +597,26 @@ await test("success: ONE [G] call, one event line, a done record whose output is
   try {
     let gcall = 0;
     const generator = createDefaultGenerator({ apiKey: "test-key", runId: "run-ac-runner", shadowDir, fetchImpl: async () => okResponse(++gcall === 1 ? INTENT_OUTPUT : gcall === 2 ? DOD_OUTPUT : AC_OUTPUT) });
-    const caller = async (input) => ({
-      ok: true,
-      decisionId: AC_TESTABLE_DECISION,
-      autonomy: "A0",
-      annotation: { answers: Object.fromEntries((input.instances ?? []).map((_, i) => [`ac${i}`, { type: "noul", noul: 0.9 }])), confidence: 0.9 },
-    });
-    const result = await makeRunner({ generator, caller, storePath }).run({ inputs: RUN_INPUTS });
+    const caller = async (input) => {
+      if (input.decisionId === SELECT_SCORE_DECISION) return selectScoreEnvelope(input);
+      return {
+        ok: true,
+        decisionId: AC_TESTABLE_DECISION,
+        autonomy: "A0",
+        annotation: { answers: Object.fromEntries((input.instances ?? []).map((_, i) => [`ac${i}`, { type: "noul", noul: 0.9 }])), confidence: 0.9 },
+      };
+    };
+    const runner = makeRunner({ generator, caller, storePath });
+    let result = await runner.run({ inputs: RUN_INPUTS });
+    eq(result.stepId, "plan.gate1", "run 1 stops gate-pending after the FOC-516 selection");
+    eq(result.record.status, "gate-pending", "gate 1 waits for Mateusz");
+    eq(gcall, 1, "only plan.intent executed before the gate");
+    resolveGate(storePath, "gate.plan.gate1", { approved: true });
+    result = await runner.run({ inputs: RUN_INPUTS });
     eq(result.stepId, "plan.spec", "plan.ac completed; the run continued to the [A] hand-off");
     const records = readLines(storePath);
+    const selRecord = records.find((r) => r.key === "plan.intent.select");
+    eq(selRecord?.status, "done", "the selection record landed before the gate");
     const acRecord = records.find((r) => r.key === "plan.ac");
     if (!acRecord) fail("no record for plan.ac");
     eq(acRecord.status, "done", "done record");
@@ -596,13 +639,20 @@ await test("(f) the escalation lands as a typed graph.step record; the [G] event
   try {
     let calls = 0;
     const generator = createDefaultGenerator({ apiKey: "test-key", runId: "run-ac-runner", shadowDir, fetchImpl: async () => { calls++; return okResponse(calls === 1 ? INTENT_OUTPUT : calls === 2 ? DOD_OUTPUT : AC_OUTPUT); } });
-    const caller = async (input) => ({
-      ok: true,
-      decisionId: AC_TESTABLE_DECISION,
-      autonomy: "A0",
-      annotation: { answers: Object.fromEntries((input.instances ?? []).map((_, i) => [`ac${i}`, { type: "noul", noul: 0.2 }])), confidence: 0.2 },
-    });
-    const result = await makeRunner({ generator, caller, storePath }).run({ inputs: RUN_INPUTS });
+    const caller = async (input) => {
+      if (input.decisionId === SELECT_SCORE_DECISION) return selectScoreEnvelope(input);
+      return {
+        ok: true,
+        decisionId: AC_TESTABLE_DECISION,
+        autonomy: "A0",
+        annotation: { answers: Object.fromEntries((input.instances ?? []).map((_, i) => [`ac${i}`, { type: "noul", noul: 0.2 }])), confidence: 0.2 },
+      };
+    };
+    const runner = makeRunner({ generator, caller, storePath });
+    let result = await runner.run({ inputs: RUN_INPUTS });
+    eq(result.stepId, "plan.gate1", "run 1 stops gate-pending before the DoD/AC walk");
+    resolveGate(storePath, "gate.plan.gate1", { approved: true });
+    result = await runner.run({ inputs: RUN_INPUTS });
     eq(result.status, "stopped", "the escalation stops the run");
     eq(result.record.status, "failed", "terminal failed record");
     eq(result.record.error.code, "escalated", "typed escalation code on the record");

@@ -129,13 +129,13 @@ console.log("\nplan-render: the committed spec (real loader — no fixture drift
 await test("plan.render sits on the chain between plan.decompose and plan.gate2, kind D, tier null", () => {
   eq(validateGraph(GRAPH).length, 0, "the committed graph validates");
   const stepIds = Object.keys(PLAN.steps);
-  eq(stepIds.length, 10, "10 steps");
-  eq(PLAN.stepFlow.length, 9, "9 sequence edges");
+  eq(stepIds.length, 11, "11 steps");
+  eq(PLAN.stepFlow.length, 10, "10 sequence edges");
   const chain = PLAN.stepFlow.map((e) => `${e.from}>${e.to}`).join(" ");
   eq(
     chain,
-    "plan.dor>plan.intent plan.intent>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push",
-    "plan.render joined the chain between plan.decompose and plan.gate2 (FOC-520)",
+    "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push",
+    "plan.render keeps its place between plan.decompose and plan.gate2 (FOC-520); plan.intent.select joined before gate1 (FOC-516)",
   );
   eq(RENDER_STEP.kind, "D", "kind D — deterministic, no model tier");
   eq(RENDER_STEP.tier, null, "tier null");
@@ -290,6 +290,7 @@ await test("the walk renders, gate2 facts carry the text verbatim, the push payl
     // Seed every predecessor done — the walk starts straight at plan.render.
     seedDone(storePath, "plan.dor", "plan.dor", { ready: true, gaps: [] });
     seedDone(storePath, "plan.intent", "plan.intent", { goal: "g", why: "w", mapVersion: 1, interpretations: [] });
+    seedDone(storePath, "plan.intent.select", "plan.intent.select", { mapVersion: 1, questions: [], confirmations: [], understood: [], assumptions: [] }); // FOC-516
     seedDone(storePath, "plan.dod", "plan.dod", { definitionOfDone: FIXTURE_READS["plan.dod.definitionOfDone"] });
     seedDone(storePath, "plan.ac", "plan.ac", { acs: FIXTURE_READS["plan.ac.acs"] });
     seedDone(storePath, "plan.spec", "plan.spec", { briefs: ["b"], adr: "a", summary: FIXTURE_READS["plan.spec.summary"] });
@@ -353,6 +354,7 @@ await test("a failed render stops the run before the gate — the gate never see
   try {
     seedDone(storePath, "plan.dor", "plan.dor", { ready: true, gaps: [] });
     seedDone(storePath, "plan.intent", "plan.intent", { goal: "g", why: "w", mapVersion: 1, interpretations: [] });
+    seedDone(storePath, "plan.intent.select", "plan.intent.select", { mapVersion: 1, questions: [], confirmations: [], understood: [], assumptions: [] }); // FOC-516
     seedDone(storePath, "plan.dod", "plan.dod", { definitionOfDone: FIXTURE_READS["plan.dod.definitionOfDone"] });
     // plan.ac done with an EMPTY acs list — valid for the schema? No: the
     // schema pins minItems 1, but a hand-seeded record bypasses nothing here;
