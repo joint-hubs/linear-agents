@@ -25,7 +25,7 @@ import { createGraphRunner, createDefaultGenerator } from "./graph-runner.mjs";
 import { DECISION_STEP, SHADOW_EVENT_TYPE } from "./decision-call.mjs";
 import { AC_TESTABLE_DECISION, TESTABLE_THRESHOLD, composeAcInputs, runPlanAcNode } from "./plan-ac.mjs";
 import { SELECT_SCORE_DECISION } from "./plan-intent-select.mjs";
-import { buildInputs } from "./plan-ac-eval.mjs";
+import { buildInputs, evalReads } from "./plan-ac-eval.mjs";
 
 let passed = 0;
 const failures = [];
@@ -94,6 +94,18 @@ const RUN_INPUTS = {
   "inbox.entry": "Dictated entry (test): the plan chain generates acceptance criteria as bounded statements.",
   "features.list": [{ name: "plan.ac [G] node" }],
   "repoState.pinned": { branch: "foc-475-dev", head: "9a6d20e" },
+};
+
+// The runner-appended confirmed-intent record's output (FOC-517): plan.dod,
+// plan.ac and plan.spec compose from THIS — never from the raw dictated entry.
+const CONFIRMED_OUTPUT = {
+  goal: INTENT_OUTPUT.goal,
+  why: INTENT_OUTPUT.why,
+  mapVersion: 1,
+  interpretations: INTENT_OUTPUT.interpretations,
+  answers: [],
+  corrections: [],
+  round: 1,
 };
 
 const okResponse = (content) => ({
@@ -169,57 +181,82 @@ await test("the gate entry the node binds is A0, threshold null, tier-2 dead —
   eq(GATE_REGISTRY.autonomy, "A0", "the gate is A0");
   eq(GATE_REGISTRY.threshold, null, "the gate carries no threshold");
   eq(GATE_REGISTRY.fallback.tier2, "disabled", "the gate's tier 2 is disabled");
-  deepEq(AC_STEP.reads, ["inbox.entry", "features.list"], "plan.ac declares exactly two reads — issueId rides the payload (wrong-id carry)");
+  deepEq(AC_STEP.reads, ["plan.intent.confirmed", "features.list"], "plan.ac declares exactly two reads — the ACs compose from the confirmed intent (FOC-517)");
 });
 
 // ── (g) plan.spec reads plan.dod.definitionOfDone ────────────────────────────
 
 await test("plan.spec reads plan.dod.definitionOfDone — never the retired merged field", () => {
-  const expected = ["inbox.entry", "plan.dod.definitionOfDone", "plan.ac.acs", "repoState.pinned"];
-  deepEq(PLAN.steps["plan.spec"].reads, expected, "graph step reads");
+  const expected = ["plan.intent.confirmed", "inbox.entry", "plan.dod.definitionOfDone", "plan.ac.acs", "repoState.pinned"];
+  deepEq(PLAN.steps["plan.spec"].reads, expected, "graph step reads — the confirmed intent joined the spec's reads (FOC-517)");
   deepEq(registry["plan.spec"].reads, expected, "registry entry reads");
   if (PLAN.steps["plan.spec"].reads.includes("plan.ac.definitionOfDone")) fail("the merged field is retired everywhere");
 });
 
 // ── (h) the counts hold: 31 entries, 11 steps / 10 edges, 6 decision edges ───
 
-await test("the seed partition survives the restructure: 31 entries, 11 steps on the 10-edge chain, 6 decision edges", () => {
-  eq(Object.keys(registry).length, 31, "31 registry entries (plan.intent.select joined, FOC-516)");
+await test("the seed partition survives the restructure: 32 entries, 11 steps, 10 sequence edges + the gate1 reentry, 6 decision edges", () => {
+  eq(Object.keys(registry).length, 32, "32 registry entries (plan.intent.reply joined, FOC-517)");
   const stepIds = Object.keys(PLAN.steps);
   eq(stepIds.length, 11, "11 steps");
-  eq(PLAN.stepFlow.length, 10, "10 sequence edges — no graph edge was added for the loop (FOC-476's)");
-  eq(GRAPH.decisionEdges.length, 6, "6 decision edges — the testable gate and the select score are node-internal, not edges");
-  const chain = PLAN.stepFlow.map((e) => `${e.from}>${e.to}`).join(" ");
-  eq(chain, "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push", "plan.intent.select joined the chain before gate1 (FOC-516)");
+  const flow = PLAN.stepFlow;
+  eq(flow.length, 11, "11 stepFlow edges — the linear chain plus the FOC-517 reentry");
+  eq(flow.filter((e) => e.type === "sequence").length, 10, "10 sequence edges — no graph edge was added for the loop (FOC-476's)");
+  const reentry = flow.filter((e) => e.type === "reentry");
+  eq(reentry.length, 1, "exactly one reentry edge");
+  deepEq([reentry[0].from, reentry[0].to], ["plan.gate1", "plan.intent"], "gate1 re-enters plan.intent on an unconfirmed round (FOC-517)");
+  eq(GRAPH.decisionEdges.length, 6, "6 decision edges — the testable gate, the select score and the reply are node-internal, not edges");
+  const chain = flow.filter((e) => e.type === "sequence").map((e) => `${e.from}>${e.to}`).join(" ");
+  eq(chain, "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push", "the linear chain holds; the reentry rides beside it (FOC-517)");
 });
 
 // ── composeAcInputs: the payload partition + the over-length posture ─────────
 
 console.log("\nplan-ac: composeAcInputs — the payload partition and the fail-closed cap");
 
-await test("the entry payload carries exactly the four ingredients (+issueId), extra fields dropped", () => {
+await test("the confirmed-intent payload carries exactly the four ingredients, extra fields dropped", () => {
   const { payload, composed } = composeAcInputs({
-    "inbox.entry": { issueId: "FOC-473", title: "t", scopeSummary: "s", dorFacts: ["f"], linearComments: "never", telemetry: "never" },
+    "plan.intent.confirmed": { ...CONFIRMED_OUTPUT, answers: [{ round: 1, mapVersion: 1 }], corrections: [{ round: 1 }], extra: "drop me" },
     "features.list": ["scripts/mcp/steps.mjs"],
   });
   deepEq(Object.keys(payload).sort(), ["dorFacts", "issueId", "scopeSummary", "title"], "exactly four payload fields");
-  deepEq(payload, { issueId: "FOC-473", title: "t", scopeSummary: "s", dorFacts: ["f"] }, "the four ingredients");
-  deepEq(Object.keys(composed), ["inbox.entry", "features.list"], "exactly the two declared reads compose");
+  deepEq(payload.dorFacts.understandings, CONFIRMED_OUTPUT.interpretations.map((i) => ({ id: i.id, claim: i.claim, source: i.source })), "the confirmed map's claims compose the understandings (id/claim/source only)");
+  eq(payload.scopeSummary, CONFIRMED_OUTPUT.goal, "the confirmed goal is the scope summary");
+  eq(payload.issueId, null, "issueId is not a confirmed-intent field — null");
+  eq(payload.title, null, "title is not a confirmed-intent field — null");
+  deepEq(Object.keys(composed), ["plan.intent.confirmed", "features.list"], "exactly the two declared reads compose");
 });
 
-await test("a string entry composes as the scope summary; absent dorFacts compose null — never invented", () => {
-  const a = composeAcInputs({ "inbox.entry": "dictated text", "features.list": [] });
-  deepEq(a.payload, { issueId: null, title: null, scopeSummary: "dictated text", dorFacts: null }, "string entry → scopeSummary, dorFacts null");
-  const b = composeAcInputs({ "inbox.entry": { title: "t", scopeSummary: "s" }, "features.list": [] });
-  eq(b.payload.dorFacts, null, "no dorFacts in state → null (runtime composition deferred)");
-  eq(b.payload.issueId, null, "no issueId in state → null");
+await test("absent fields compose null/empty — never invented; a goal-less confirmed intent fails typed", () => {
+  const b = composeAcInputs({ "plan.intent.confirmed": { goal: "g" }, "features.list": [] });
+  deepEq(b.payload.dorFacts, { why: null, mapVersion: null, round: null, understandings: [] }, "absent why/mapVersion/round/interpretations compose null/empty");
+  eq(b.payload.scopeSummary, "g", "the goal survives");
+
+  let thrown = null;
+  try { composeAcInputs({ "plan.intent.confirmed": { why: "facts, no goal" }, "features.list": [] }); } catch (err) { thrown = err; }
+  if (!thrown || thrown.code !== "invalid_input") fail("a confirmed intent without a goal fails typed");
+  if (!thrown.message.includes("carries no goal")) fail("the message names the missing goal");
+
+  thrown = null;
+  try { composeAcInputs({ "features.list": [] }); } catch (err) { thrown = err; }
+  if (!thrown || thrown.code !== "invalid_input") fail("a missing confirmed-intent read fails typed");
+  if (!thrown.message.includes("unconfirmed intent")) fail("the message names the unconfirmed-intent posture (FOC-517)");
+
+  thrown = null;
+  try { composeAcInputs({ "plan.intent.confirmed": "a string is not the record's output", "features.list": [] }); } catch (err) { thrown = err; }
+  if (!thrown || thrown.code !== "invalid_input") fail("a non-object confirmed-intent read fails typed");
+  if (!thrown.message.includes("confirmed-intent record")) fail("the message names the expected shape");
+
+  thrown = null;
+  try { composeAcInputs({ "plan.intent.confirmed": { goal: "g" }, "features.list": "not-an-array" }); } catch (err) { thrown = err; }
+  if (!thrown || !thrown.message.includes("candidate-files array")) fail("a non-array features.list fails typed");
 });
 
 await test("over the seam's state cap the composition fails closed BEFORE any provider call — no truncation, zero fetch", async () => {
   const big = "x".repeat(STATE_CAP + 100);
   let thrown = null;
   try {
-    composeAcInputs({ "inbox.entry": { title: "t", scopeSummary: big }, "features.list": [] });
+    composeAcInputs({ "plan.intent.confirmed": { goal: big }, "features.list": [] });
   } catch (err) {
     thrown = err;
   }
@@ -231,7 +268,7 @@ await test("over the seam's state cap the composition fails closed BEFORE any pr
   let genCalls = 0;
   const result = await runPlanAcNode({
     step: AC_STEP,
-    reads: { "inbox.entry": { title: "t", scopeSummary: big }, "features.list": [] },
+    reads: { "plan.intent.confirmed": { goal: big }, "features.list": [] },
     generator: async () => { genCalls++; return AC_OUTPUT; },
     caller: async () => { fail("the gate must not be reached when composition fails closed"); },
     validate,
@@ -239,19 +276,6 @@ await test("over the seam's state cap the composition fails closed BEFORE any pr
   eq(result.status, "failed", "failed record");
   eq(result.error.code, "invalid_input", "typed code");
   eq(genCalls, 0, "zero provider calls — fail before the wire");
-});
-
-await test("an empty entry (no scope, no title) fails closed; a non-array features.list fails closed", () => {
-  let thrown = null;
-  try {
-    composeAcInputs({ "inbox.entry": { dorFacts: ["only facts"] }, "features.list": [] });
-  } catch (err) { thrown = err; }
-  if (!thrown || thrown.code !== "invalid_input") fail("an entry with nothing to generate from fails typed");
-  thrown = null;
-  try {
-    composeAcInputs({ "inbox.entry": "text", "features.list": "not-an-array" });
-  } catch (err) { thrown = err; }
-  if (!thrown || !thrown.message.includes("candidate-files array")) fail("a non-array features.list fails typed");
 });
 
 // ── (d) the node-internal loop ───────────────────────────────────────────────
@@ -270,7 +294,7 @@ await test("above-threshold on the first pass: ONE [G] call, one gate call, no r
   const result = await runPlanAcNode({
     stepId: "plan.ac",
     step: AC_STEP,
-    reads: { "inbox.entry": { issueId: "FOC-1", title: "t", scopeSummary: "s", dorFacts: null }, "features.list": ["a.mjs"] },
+    reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT, "features.list": ["a.mjs"] },
     generator,
     caller: gate.caller,
     validate,
@@ -312,7 +336,7 @@ await test("below-threshold → EXACTLY ONE regeneration carrying the failing cr
   const result = await runPlanAcNode({
     stepId: "plan.ac",
     step: AC_STEP,
-    reads: { "inbox.entry": { issueId: "FOC-1", title: "t", scopeSummary: "s", dorFacts: ["fact"] }, "features.list": [] },
+    reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT, "features.list": [] },
     generator,
     caller,
     validate,
@@ -323,7 +347,7 @@ await test("below-threshold → EXACTLY ONE regeneration carrying the failing cr
   eq(gateCalls.length, 2, "ALL criteria re-scored after the regeneration");
   deepEq(gateCalls[1].instances.map((i) => i.id), ["AC-1", "AC-2", "AC-3"], "re-score ALL criteria, not just the failing ones");
 
-  const revision = genReads[1]["inbox.entry"].revision;
+  const revision = genReads[1]["plan.intent.confirmed"].revision;
   eq(revision.attempt, 2, "the revision names attempt 2");
   deepEq(revision.failing.map((f) => f.id), ["AC-1", "AC-2"], "the failing criteria ride the revision");
   deepEq(revision.failing.map((f) => f.verdict), [0.2, 0.2], "their measured verdicts ride too");
@@ -331,7 +355,7 @@ await test("below-threshold → EXACTLY ONE regeneration carrying the failing cr
     if (!f.reason.includes("vague, unmeasurable or unverifiable as written")) fail("the gate's reason rides the revision");
     if (!f.reason.includes(`p=${f.verdict}`)) fail("the measured verdict rides the reason");
   }
-  if (!genReads[1]["inbox.entry"].revision.note.includes("Regenerate the FULL list")) fail("the regeneration note is on the payload");
+  if (!genReads[1]["plan.intent.confirmed"].revision.note.includes("Regenerate the FULL list")) fail("the regeneration note is on the payload");
   deepEq(genReads[1]["features.list"], [], "the declared reads stay exactly two");
 });
 
@@ -347,7 +371,7 @@ await test("still below after the one regeneration → a typed ESCALATION with p
   const result = await runPlanAcNode({
     stepId: "plan.ac",
     step: AC_STEP,
-    reads: { "inbox.entry": { title: "t", scopeSummary: "s" }, "features.list": [] },
+    reads: { "plan.intent.confirmed": { goal: "s" }, "features.list": [] },
     generator,
     caller,
     validate,
@@ -362,13 +386,13 @@ await test("still below after the one regeneration → a typed ESCALATION with p
   eq(result.escalation.criteria[0].testable, false, "the verdict typed");
   if (!result.escalation.criteria[0].reason.includes("vague, unmeasurable or unverifiable as written")) fail("the reason rides the record");
   eq(genReads.length, 2, "exactly one regeneration happened");
-  deepEq(Object.keys(genReads[1]["inbox.entry"].revision.failing[0]), ["id", "text", "verdict", "reason"], "the revision's failing record shape");
+  deepEq(Object.keys(genReads[1]["plan.intent.confirmed"].revision.failing[0]), ["id", "text", "verdict", "reason"], "the revision's failing record shape");
 });
 
 await test("a gate failure fails closed — envelope not ok, a throwing caller, a malformed answer: never a silent pass", async () => {
   const notOk = await runPlanAcNode({
     step: AC_STEP,
-    reads: { "inbox.entry": { title: "t", scopeSummary: "s" }, "features.list": [] },
+    reads: { "plan.intent.confirmed": { goal: "s" }, "features.list": [] },
     generator: async () => AC_OUTPUT,
     caller: async () => ({ ok: false, error: { code: "provider_error", message: "the decisions endpoint failed" } }),
     validate,
@@ -378,7 +402,7 @@ await test("a gate failure fails closed — envelope not ok, a throwing caller, 
 
   const throwing = await runPlanAcNode({
     step: AC_STEP,
-    reads: { "inbox.entry": { title: "t", scopeSummary: "s" }, "features.list": [] },
+    reads: { "plan.intent.confirmed": { goal: "s" }, "features.list": [] },
     generator: async () => AC_OUTPUT,
     caller: async () => { throw new Error("caller blew up"); },
     validate,
@@ -388,7 +412,7 @@ await test("a gate failure fails closed — envelope not ok, a throwing caller, 
 
   const malformed = await runPlanAcNode({
     step: AC_STEP,
-    reads: { "inbox.entry": { title: "t", scopeSummary: "s" }, "features.list": [] },
+    reads: { "plan.intent.confirmed": { goal: "s" }, "features.list": [] },
     generator: async () => AC_OUTPUT,
     caller: async () => ({ ok: true, annotation: { answers: {}, confidence: 1 } }),
     validate,
@@ -401,7 +425,7 @@ await test("a schema-invalid [G] output fails typed BEFORE the gate — no gate 
   let gateCalls = 0;
   const result = await runPlanAcNode({
     step: AC_STEP,
-    reads: { "inbox.entry": { title: "t", scopeSummary: "s" }, "features.list": [] },
+    reads: { "plan.intent.confirmed": { goal: "s" }, "features.list": [] },
     generator: async () => ({ acs: "not-a-list" }),
     caller: async () => { gateCalls++; return { ok: true, annotation: { answers: {} } }; },
     validate,
@@ -420,14 +444,14 @@ await test("the four ingredients (+issueId) reach the message and nothing else �
   try {
     const fetchCalls = [];
     const generator = createDefaultGenerator({ apiKey: "test-key", runId: "run-ac-test", taskKey: "T1", shadowDir: dir, fetchImpl: async (url, options) => { fetchCalls.push({ url, options }); return okResponse(AC_OUTPUT); } });
-    const payload = { issueId: "FOC-473", title: "Fifth kind", scopeSummary: "the accepted scope", dorFacts: ["one fact"] };
-    await generator({ stepId: "plan.ac", step: AC_STEP, reads: composeAcInputs({ "inbox.entry": payload, "features.list": ["scripts/plan-ac.mjs"] }).composed });
+    const confirmed = { goal: "the accepted scope", why: "the accepted why", mapVersion: 1, round: 1, interpretations: [] };
+    await generator({ stepId: "plan.ac", step: AC_STEP, reads: composeAcInputs({ "plan.intent.confirmed": confirmed, "features.list": ["scripts/plan-ac.mjs"] }).composed });
 
     eq(fetchCalls.length, 1, "one fetch");
     const message = JSON.parse(fetchCalls[0].options.body).messages[0].content;
     if (!message.includes("You generate acceptance criteria for one planning inbox entry")) fail("the AC-only registry prompt is on the wire");
-    if (!message.includes('- inbox.entry: {"issueId":"FOC-473","title":"Fifth kind","scopeSummary":"the accepted scope","dorFacts":["one fact"]}')) {
-      fail("the EXACT four-ingredient payload is the declared input (nothing else reaches the wire)");
+    if (!message.includes('- plan.intent.confirmed: {"issueId":null,"title":null,"scopeSummary":"the accepted scope","dorFacts":{"why":"the accepted why","mapVersion":1,"round":1,"understandings":[]}}')) {
+      fail("the EXACT confirmed-intent payload is the declared input (nothing else reaches the wire)");
     }
     if (!message.includes('- features.list: ["scripts/plan-ac.mjs"]')) fail("the candidate files are the second read");
     const inputLines = message.split("\n").filter((l) => /^- [a-z]/.test(l));
@@ -464,7 +488,7 @@ await test("the regeneration's wire message carries the failing criteria + the g
     const result = await runPlanAcNode({
       stepId: "plan.ac",
       step: AC_STEP,
-      reads: { "inbox.entry": { title: "t", scopeSummary: "s" }, "features.list": [] },
+      reads: { "plan.intent.confirmed": { goal: "s" }, "features.list": [] },
       generator: createDefaultGenerator({ apiKey: "test-key", runId: "run-ac-regen", taskKey: "T2", shadowDir: dir, fetchImpl }),
       caller,
       validate,
@@ -511,10 +535,7 @@ await test("(c) the ground truth never enters the inputs: no AC line (>25 chars)
   const fixture = JSON.parse(readFileSync(join(__dir, "plan-dod-eval-fixture.json"), "utf8"));
   for (const issue of fixture.issues) {
     const b = buildInputs(issue);
-    const payloadJson = JSON.stringify({
-      "inbox.entry": { issueId: b.issueId, title: b.title, scopeSummary: b.scopeSummary, dorFacts: b.dorFacts },
-      "features.list": b.candidateFiles,
-    });
+    const payloadJson = JSON.stringify(evalReads(b));
     const gtLines = (b.acGroundTruth ?? "").split("\n").map((s) => s.trim()).filter((s) => s.length > 25);
     if (!gtLines.length && b.hasGroundTruth) fail(`${b.id}: AC ground truth present but no >25-char lines found — the strip rule is broken`);
     const leaked = gtLines.filter((l) => payloadJson.includes(l));
@@ -563,12 +584,14 @@ function makeRunner({ generator, caller, storePath }) {
 }
 
 // The frontman's pen: resolution records are appended by the DECIDING agent —
-// the runner consumes them, never creates them.
+// the runner consumes them, never creates them. The ts sits AFTER any pending
+// record the runner writes with its real clock — an earlier ts answers an
+// earlier round and the STALE guard keeps it waiting (FOC-517).
 function resolveGate(storePath, key, output, by = "mateusz") {
   appendFileSync(storePath, `${JSON.stringify({
     type: "graph.resolution",
     runId: "run-ac-runner",
-    ts: "2026-01-01T00:00:00.000Z",
+    ts: "2030-01-01T00:00:00.000Z",
     key: `${key}.resolution`,
     stepId: key,
     by,
@@ -611,7 +634,7 @@ await test("success: ONE [G] call, one event line, a done record whose output is
     eq(result.stepId, "plan.gate1", "run 1 stops gate-pending after the FOC-516 selection");
     eq(result.record.status, "gate-pending", "gate 1 waits for Mateusz");
     eq(gcall, 1, "only plan.intent executed before the gate");
-    resolveGate(storePath, "gate.plan.gate1", { approved: true });
+    resolveGate(storePath, "gate.plan.gate1", { approved: true, answer: "ok" });
     result = await runner.run({ inputs: RUN_INPUTS });
     eq(result.stepId, "plan.spec", "plan.ac completed; the run continued to the [A] hand-off");
     const records = readLines(storePath);
@@ -651,7 +674,7 @@ await test("(f) the escalation lands as a typed graph.step record; the [G] event
     const runner = makeRunner({ generator, caller, storePath });
     let result = await runner.run({ inputs: RUN_INPUTS });
     eq(result.stepId, "plan.gate1", "run 1 stops gate-pending before the DoD/AC walk");
-    resolveGate(storePath, "gate.plan.gate1", { approved: true });
+    resolveGate(storePath, "gate.plan.gate1", { approved: true, answer: "ok" });
     result = await runner.run({ inputs: RUN_INPUTS });
     eq(result.status, "stopped", "the escalation stops the run");
     eq(result.record.status, "failed", "terminal failed record");

@@ -212,12 +212,19 @@ test("v2: the committed graph carries the plan step chain and six decision edges
   const stepIds = Object.keys(plan.steps || {});
   if (stepIds.length !== 11) fail(`expected 11 plan steps, got ${stepIds.length}`);
   const flow = plan.stepFlow || [];
-  if (flow.length !== 10) fail(`expected 10 sequence edges, got ${flow.length}`);
-  if (flow[0].from !== "plan.dor" || flow[flow.length - 1].to !== "plan.push") {
+  if (flow.length !== 11) fail(`expected 11 stepFlow edges (10 sequence + the FOC-517 reentry), got ${flow.length}`);
+  const seq = flow.filter((e) => e.type === "sequence");
+  if (seq.length !== 10) fail(`expected 10 sequence edges, got ${seq.length}`);
+  const reentries = flow.filter((e) => e.type === "reentry");
+  if (reentries.length !== 1) fail(`expected exactly 1 reentry edge, got ${reentries.length}`);
+  if (reentries[0].from !== "plan.gate1" || reentries[0].to !== "plan.intent") {
+    fail("the reentry edge does not run plan.gate1 → plan.intent");
+  }
+  if (flow[0].from !== "plan.dor" || seq[seq.length - 1].to !== "plan.push") {
     fail("the step chain does not run plan.dor → plan.push");
   }
   for (const e of flow) {
-    if (e.type !== "sequence") fail(`stepFlow edge typed "${e.type}"`);
+    if (e.type !== "sequence" && e.type !== "reentry") fail(`stepFlow edge typed "${e.type}"`);
   }
   if (!Array.isArray(GRAPH.decisionEdges) || GRAPH.decisionEdges.length !== 6) {
     fail(`expected 6 decision edges, got ${(GRAPH.decisionEdges || []).length}`);

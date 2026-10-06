@@ -130,8 +130,8 @@ await test("plan.render sits on the chain between plan.decompose and plan.gate2,
   eq(validateGraph(GRAPH).length, 0, "the committed graph validates");
   const stepIds = Object.keys(PLAN.steps);
   eq(stepIds.length, 11, "11 steps");
-  eq(PLAN.stepFlow.length, 10, "10 sequence edges");
-  const chain = PLAN.stepFlow.map((e) => `${e.from}>${e.to}`).join(" ");
+  eq(PLAN.stepFlow.length, 11, "11 stepFlow edges — the linear chain plus the FOC-517 reentry");
+  const chain = PLAN.stepFlow.filter((e) => e.type === "sequence").map((e) => `${e.from}>${e.to}`).join(" ");
   eq(
     chain,
     "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push",

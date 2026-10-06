@@ -376,10 +376,14 @@ export function selectFromMap({ items, scores, policy, mapVersion }) {
  *
  * Outcome vocabulary: "accepted" | "differed:IN-x[,...]" |
  * "corrected:IN-x[,...]" | "unanswered:IN-x[,...]" (answers exist but not for
- * every asked item) | "approved-unanswered" (no answer records at all while
- * questions were asked — the provisional shape's honest marker) |
+ * every presented QUESTION) | "approved-unanswered" (no answer records at all
+ * while questions were asked — the provisional shape's honest marker) |
  * "unmatched:N" (answer/correction records whose claim matches no selection
  * item — contract drift, flagged not swallowed).
+ *
+ * FOC-517: a presented confirmation is accepted by silence — its block reads
+ * "Założyłem — popraw, jeśli źle", so only a correction speaks against it.
+ * Only the presented questions owe answers; they alone can go unanswered.
  */
 export function selectDeltaLabel({ selection, answers = [], corrections = [], eventId, by = "human", now }) {
   if (!eventId || !selection || typeof selection !== "object" || !Array.isArray(selection.questions)) {
@@ -396,7 +400,7 @@ export function selectDeltaLabel({ selection, answers = [], corrections = [], ev
 
   const differed = [];
   const corrected = [];
-  const unanswered = new Set(ask.map((i) => i.id));
+  const unanswered = new Set(selection.questions.map((i) => i.id));
   let unmatched = 0;
   const answerDiffers = (rec, item) => {
     const rec_ = recommendedText(item);

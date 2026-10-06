@@ -3063,3 +3063,54 @@ przechodzi, jak każe komunikat.
 follow-up strukturalny (0,3–1,0 USD); (2) czy `npm ci` w merge-verify zostaje (ruch do rejestru npm)
 — alternatywa kopiowanie `node_modules`; (3) push wave + sprzątanie worktree'ów (foc-519/520/516
 drzewa na dysku, gałęzie zostają). Kolejka: **FOC-517** → 476 → 477.
+
+## 2026-10-02 — FOC-517 ZAIMPLEMENTOWANE (branch `foc-517-dev`, kandydat do REVIEW) · gate1 = konwersacja intentu ≤3 rundy · confirmed-intent reads
+
+**Bottom line:** `plan.gate1` [H] stał się konwersacją intentu: reentry edge `plan.gate1 → plan.intent`
+(pierwsza krawędź typu `reentry` w `config/graph.json` — obok `sequence` i step-level `decide`),
+`plan-intent-gate.mjs` (display PL ≤14 linii + parser odpowiedzi: picks / `a nie …` / free fallback,
+każdy rekord z `round` + presented slice), runner prowadzi pętlę ≤3 rund (cap → typed
+`intent_not_settled`), przy potwierdzeniu dokleja rekord **`plan.intent.confirmed`** [D] (tylko
+potwierdzająca runda: answers/corrections), a `plan.dod` / `plan.ac` / `plan.spec` czytają go zamiast
+surowego wpisu inbox (brak rekordu = typed fail — AC nigdy z niepotwierdzonego intentu).
+`plan.intent.reply` [J] A0 (seam transport, 32. wpis rejestru) adnotuje wolne odpowiedzi — nie
+rozstrzyga rundy. STALE guard: resolution ts < pending record ts → waiting. Semantyka: presented
+confirmations/assumptions przyjmowane milczeniem („popraw, jeśli źle"), tylko pytania — `selectDeltaLabel.unanswered`.
+
+**Kandydat (7 commitów na `foc-517-dev`, baza `f6f70d6`):** `dba1507` docs (§3.11 regenerowany
+programatycznie z configa, §6.4 reentry, §3.12 flaga zamknięta) → `8be7493` config+validator →
+`d8938da` plan-intent-gate + lane → `7599d4e` runner+kontrakty+e2e → `84cc4ce` compose AC/DOD z
+`plan.intent.confirmed` + `--only` w evalach → `75d3ece` checklist 110→111 → wpis STATE.
+TEST **111/111** (625 s, `--jobs 16`; nowa suita plan-intent-gate 12 testów), lint 0 (560 plików),
+graph-validate exit 0. Dotknięte suity wszystkie zielone (plan-intent 61, select 27, gate 12, ac 21,
+dod 21, runner 27, validate 42, registry 38, render 15, plan-gates 21, dup-retrieval 15, drift 26).
+Bez push — merge po REVIEW.
+
+**Trzy judgments (opisane w hand-offie, do oceny przez REVIEW):** (1) chain/scope — FOC-517 dodaje
+TYLKO reentry + kontrakt konwersacji + rekord confirmed + rewire reads; decide edge `plan.ready`
+zostaje FOC-476; (2) kształt `plan.intent.confirmed` = dokładny klucz, runner dokleja jako [D],
+downstream czyta exact-key przez `resolveRead`; (3) `plan.intent.reply` = JEDNO wywołanie seam na
+wolną odpowiedź (nie per item), pytania `reply` + `touched{i}` w kolejności presented display.
+Plus wyrównanie semantyki `unanswered` (pytania only). **Runner bug znaleziony i naprawiony przy
+e2e:** guard reentry `if (resolution)` → `if (!record && resolution)` (konsumowana resolution to
+historia, nie oczekująca odpowiedź) — złapany testem runnera, nie inspekcją.
+
+**Eval re-runs (live, ten sam fixture 12 issue, confirmed briefs; prompts byte-identyczne, tylko
+`reads` — criteriaVersion nadal 1):** plan.dod **11 ok / 1 failed** (FOC-448 3× transport fail,
+wiersz zarejestrowany jako failed; 110 items vs 119 w run-2; $0.0910), plan.ac **8 ok / 4 escalated**
+vs recorded 7/5 (flips: 416/451/452 escalated→ok, 448/397 ok→escalated; $0.0893 ok rows); schema
+validity 100% serwowanych wierszy, failury = transport (timeout 300 s / empty content), nie schema.
+Werdykty pass/partial — dla Mateusza (honest-eval: run once, nic nie iterowane against GT).
+
+**Notatki procesowe (obserwacje):** (1) parser: `"1b, a nie c"` trafia w PICK (przecinek za pickiem)
+— kanał korekt wymaga pominięcia przecinka lub litery na początku; free fallback łapie bezpiecznie
+(adnotacja, nie cichy fold); (2) prompty `plan.dod`/`plan.ac` wciąż mówią „one planning inbox entry"
+przy nowych reads — celowo (criteriaVersion); (3) zabity sonda `--help` evala ac: 2 live calls
+ledgered (`.state/foc-475/eval/2026-10-01T20-13-34/`) — realny, nieprzypisany wydatek, zachowany jako
+dowód; (4) mix awarii providera przesunięty vs FOC-515 run 2 (timeout/empty zamiast schema-rejects);
+(5) `test-all` wymaga wpisu w `test-lanes.json` (lane check fail-closed) — nowa suita = nowy wiersz
+z powodem.
+
+**Czeka na Mateusza (bez zmian):** (1) los zdania lewara 2 dla FOC-596; (2) czy `npm ci` w
+merge-verify zostaje; (3) push wave + sprzątanie worktree'ów. Kolejka: **FOC-476** → 477
+(FOC-517 czeka na REVIEW/merge).
