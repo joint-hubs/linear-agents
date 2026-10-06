@@ -4,7 +4,9 @@
 // What is pinned, and why it can fail loudly:
 //   - EXACTLY-ONCE (AC1): a child exit observed N times, a gate re-scanned
 //     across watcher restarts, and a stall re-sampled all produce ONE row — the
-//     dedup key is the guarantee, not the caller's discipline;
+//     dedup key is the guarantee, not the caller's discipline. A stall's row is
+//     one per silence EPISODE (FOC-621): two distinct silences in one turn both
+//     surface; re-polls of the same silence stay exactly-once;
 //   - REPLAY (AC1): acks are persisted next to the queue, so a reader restart
 //     re-delivers un-acked rows and never re-delivers acked ones;
 //   - SEQ (AC1): monotonic and durable — a watcher restart continues from the
@@ -121,23 +123,84 @@ describe("FOC-608 wake queue — exactly once (AC1)", () => {
     });
   });
 
-  it("a stall re-sampled every tick stays one row per turn", () => {
+  it("a stall re-sampled every tick stays one row per episode", () => {
     const home = fixtureHome("stall-once");
     const runId = fixtureRun(home, `stall-once-${Date.now()}`);
 
-    appendWakeEvent(runId, { event: "stall", childId: "dev-1", turn: 2, detail: { silentMs: 600_000 } });
+    // The watcher anchors the episode on the tee size at silence onset; every
+    // re-poll of the SAME silence observes the same anchor (a silent tee does
+    // not grow), so the dedup key is identical and the appends are no-ops.
+    appendWakeEvent(runId, { event: "stall", childId: "dev-1", turn: 2, episode: 4_096, detail: { silentMs: 600_000 } });
     for (let i = 0; i < 3; i++) {
-      appendWakeEvent(runId, { event: "stall", childId: "dev-1", turn: 2, detail: { silentMs: 605_000 } });
+      appendWakeEvent(runId, { event: "stall", childId: "dev-1", turn: 2, episode: 4_096, detail: { silentMs: 605_000 + i * 5_000 } });
     }
     const rows = readWakeQueue(runId);
-    assert.equal(rows.length, 1, "one stall row per turn");
+    assert.equal(rows.length, 1, "one stall row per silence episode");
     assert.equal(rows[0].event, "stall");
+    assert.equal(rows[0].episode, 4_096, "the row carries the episode discriminator");
   });
 
   it("an unknown event class is refused, not silently queued", () => {
     const home = fixtureHome("unknown");
     const runId = fixtureRun(home, `unknown-${Date.now()}`);
     assert.throws(() => appendWakeEvent(runId, { event: "vibes", childId: "dev-1" }));
+  });
+});
+
+describe("FOC-621 — two stall episodes in one turn both surface", () => {
+  it("a second silence episode in the same turn gets its own row", () => {
+    // The failure this pins: the old key `stall:<childId>:<turn>` collapsed
+    // the two. The first stall fired, the supervisor judged it, the child
+    // spoke again and went silent again — and the second breach deduped
+    // against the first row, so "stop the child and escalate" never arrived.
+    // The episode discriminator (the watcher's tee-size anchor at silence
+    // onset) separates the two silences even though the turn did not move.
+    const home = fixtureHome("stall-two-episodes");
+    const runId = fixtureRun(home, `stall-two-episodes-${Date.now()}`);
+
+    const first = appendWakeEvent(runId, { event: "stall", childId: "dev-1", turn: 2, episode: 1_024, detail: { silentMs: 600_000 } });
+    // Between the two silences the child produced output: the tee grew, so
+    // the next breach anchors on a new size — a new episode, not a re-poll.
+    const second = appendWakeEvent(runId, { event: "stall", childId: "dev-1", turn: 2, episode: 4_096, detail: { silentMs: 610_000 } });
+
+    assert.ok(first, "the first episode enqueues");
+    assert.ok(second, "the second episode enqueues — the old key swallowed it");
+    const rows = readWakeQueue(runId).filter((r) => r.event === "stall");
+    assert.equal(rows.length, 2, "two stall episodes in one turn = two rows");
+    assert.deepEqual(
+      rows.map((r) => r.dedupKey),
+      ["stall:dev-1:2:1024", "stall:dev-1:2:4096"],
+      "the two rows differ only in the episode component",
+    );
+  });
+
+  it("a resume moves the turn, and episode identity starts over", () => {
+    const home = fixtureHome("stall-resume");
+    const runId = fixtureRun(home, `stall-resume-${Date.now()}`);
+
+    appendWakeEvent(runId, { event: "stall", childId: "dev-1", turn: 2, episode: 1_024, detail: { silentMs: 600_000 } });
+    // The Supervisor resumes the child; supervisor-followup creates the NEXT
+    // turn entry and the watcher is spawned with --turn 3. Even the same
+    // anchor breached again is a new event, not a re-poll of turn 2's.
+    const next = appendWakeEvent(runId, { event: "stall", childId: "dev-1", turn: 3, episode: 1_024, detail: { silentMs: 600_000 } });
+
+    assert.ok(next, "a stall in the resumed turn enqueues");
+    assert.equal(readWakeQueue(runId).length, 2, "the resumed turn's stall is a separate row");
+  });
+
+  it("exit and gate keep their key shape — no episode component", () => {
+    const home = fixtureHome("exit-shape");
+    const runId = fixtureRun(home, `exit-shape-${Date.now()}`);
+
+    assert.equal(wakeDedupKey({ event: "exit", childId: "dev-1", turn: 2 }), "exit:dev-1:2");
+    assert.equal(wakeDedupKey({ event: "gate", gateId: "g-1" }), "gate:g-1");
+    assert.equal(wakeDedupKey({ event: "stall", childId: "dev-1", turn: 2, episode: 4_096 }), "stall:dev-1:2:4096");
+
+    // And a turn genuinely still ends once: the exit row dedups no matter
+    // what an episode value a caller might attach would suggest.
+    appendWakeEvent(runId, exitEvent("dev-1", 2));
+    assert.equal(appendWakeEvent(runId, exitEvent("dev-1", 2)), null, "second observation of the same exit is still a no-op");
+    assert.equal(readWakeQueue(runId).length, 1, "exit stays exactly-once per turn");
   });
 });
 

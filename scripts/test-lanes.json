@@ -37,6 +37,10 @@
       "reason": "isolation audit FOC-627: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp fixture stores (same fixture pattern as codegraph-trajectory.test.mjs)"
     },
     {
+      "file": "codegraph-expert-brief.test.mjs",
+      "reason": "isolation audit FOC-621: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; hand-built fixture report, no telemetry DB opened (same fixture pattern as codegraph-eval-harness.test.mjs)"
+    },
+    {
       "file": "codegraph-runtime.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
