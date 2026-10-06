@@ -599,6 +599,17 @@ export function foldGateAnswers({ round, maps, presented, answers = [], correcti
       push(`round ${record.round} has no presented record — nothing was actually put to the user in it`);
       continue;
     }
+    // FOC-517 cross-check: the reference must name the mapVersion the round
+    // actually presented (run-record.gate.plan.gate1.presented[round].mapVersion),
+    // not just any map the run ever persisted. An answer keyed to an older
+    // map's ids is STALE — the renumbered or regenerated map would fold it
+    // onto the wrong point otherwise.
+    if (presented[record.round].mapVersion !== record.mapVersion) {
+      push(
+        `the reference names mapVersion ${record.mapVersion} but round ${record.round} presented mapVersion ${presented[record.round].mapVersion} — the answer answers a map that was not shown`,
+      );
+      continue;
+    }
     if (!idMapCheck.ok) {
       push(`the maps store carries an illegal idMap (${idMapCheck.errors[0]})`);
       continue;

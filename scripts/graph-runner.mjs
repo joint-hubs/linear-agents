@@ -46,10 +46,16 @@
 //       .state/supervisor/<runId>/). A resolution with approved:true completes
 //       the gate; approved:false records gate-rejected and stops, handing the
 //       record to the frontman.
-//   [D] plan.push — deterministic code over a strictly injectable Linear
-//       boundary (linearEffect). The DEFAULT boundary refuses: the runner
-//       NEVER writes to Linear on its own — a real write is the caller's
-//       injected effect, and the refusal is a typed failure record + stop.
+//   [D] plan.render, plan.push — deterministic code. plan.render (FOC-520)
+//       composes the Linear issue text from the resolved reads: pure code, no
+//       model call, no boundary — the same reads always render byte-identical
+//       text, and malformed reads fail closed. plan.push executes over a
+//       strictly injectable Linear boundary (linearEffect); the pushed
+//       issueText is plan.render's output VERBATIM — the text plan.gate2
+//       approved is exactly the text written to Linear. The DEFAULT boundary
+//       refuses: the runner NEVER writes to Linear on its own — a real write
+//       is the caller's injected effect, and the refusal is a typed failure
+//       record + stop.
 //
 // Resolution records (type "graph.resolution", key "<key>.resolution") are
 // written BY the deciding agent (frontman, supervisor, Mateusz) — the runner
@@ -82,8 +88,12 @@ import { scrub, scrubMask } from "./mcp/scrub.mjs";
 import { appendShadow, canonicalJson, createDecisionCaller, DECISION_STEP, SHADOW_EVENT_TYPE, usageOf } from "./decision-call.mjs";
 import { loadGraph, validateGraph } from "./graph-validate.mjs";
 import { getRegistryEntry, loadRegistry } from "./decision-registry.mjs";
+import { appendLabel, RUNS_DIR } from "./decision-log.mjs";
 import { AC_TESTABLE_DECISION, runPlanAcNode } from "./plan-ac.mjs";
-import { runPlanIntentNode } from "./plan-intent.mjs";
+import { foldGateAnswers, runPlanIntentNode } from "./plan-intent.mjs";
+import { runPlanIntentSelectNode, SELECT_SCORE_DECISION, selectDeltaLabel } from "./plan-intent-select.mjs";
+import { parseGate1Answer, renderGate1Display, GATE1_MAX_ROUNDS } from "./plan-intent-gate.mjs";
+import { runPlanRenderNode } from "./plan-render.mjs";
 import { KINDS } from "./supervisor-gate.mjs";
 import { holdsForCompletion } from "./supervisor-lib.mjs";
 
@@ -127,6 +137,19 @@ const TERMINAL_STATUSES = new Set(["failed", "gate-rejected"]);
 // The statuses that WAIT for an external actor: handed-off and gate-pending
 // steps resolve through a <key>.resolution record.
 const WAITING_STATUSES = new Set(["handed-off", "gate-pending"]);
+
+// FOC-517: "reset" is not a status a step ends on — the runner appends one per
+// re-entered step when the gate1 conversation turns back to plan.intent. The
+// latest record per key being a reset record means RE-EXECUTE this step; the
+// append-only stores the step carries forward (plan.intent's maps, gate1's
+// presented + the round's answers/corrections) ride on the record and
+// intentStores/resolveRead read them back.
+const RESET_STATUS = "reset";
+
+// FOC-517: the gate1 conversation's free-text classifier — one seam call per
+// unparseable answer, annotation only (A0), settled by the frontman's answer,
+// never by the call itself.
+const REPLY_DECISION = "plan.intent.reply";
 
 // FOC-474 eval — 7/12 calls timed out at 120 s, 12/12 succeeded at 300 s with a max of 299.2 s; 420 s leaves headroom.
 export const G_TIMEOUT_MS = 420000;
@@ -256,6 +279,14 @@ const OPTIONAL_INTENT_READS = new Set([
   "gate.plan.gate1.corrections",
 ]);
 
+// plan.intent.select joins that round-dependence (FOC-516): the two gate1
+// fields are its dedupe evidence and are absent in round 1. Their absence is
+// the round marker, not a missing input; the map record itself is mandatory.
+const OPTIONAL_SELECT_READS = new Set([
+  "gate.plan.gate1.answers",
+  "gate.plan.gate1.corrections",
+]);
+
 // The answer contract's two run-record stores, read back from the step records
 // this run has already appended (design doc §3.12):
 //   - `run-record.plan.intent.maps[mapVersion]` — the maps the node persisted.
@@ -277,6 +308,15 @@ function intentStores(records) {
 
 function resolveRead(read, { inputs, steps }) {
   if (Object.prototype.hasOwnProperty.call(inputs, read)) return inputs[read];
+  // FOC-517: an EXACT record-key read binds to that record before any prefix
+  // search — "plan.intent.confirmed" is the runner-appended derived record's
+  // key, and the longest-prefix rule would otherwise dig plan.intent's output
+  // for a "confirmed" property that is not there. Only a done record has an
+  // operative output.
+  if (steps.has(read)) {
+    const exact = steps.get(read);
+    return exact.status === "done" ? exact.output : undefined;
+  }
   // Longest record-key prefix wins: "gate.plan.gate1.record" binds to the
   // record keyed "gate.plan.gate1", not to a hypothetical node "gate".
   let head = null;
@@ -294,6 +334,11 @@ function resolveRead(read, { inputs, steps }) {
       status: record.status,
       output: record.output,
       ...(record.resolvedBy ? { resolvedBy: record.resolvedBy } : {}),
+      // FOC-516: plan.intent's fold carries its STALE log on the record (never
+      // in the output). It rides the record view so the selection's dedupe can
+      // exclude refused answers — a stale answer's point must re-ask, never
+      // silently disappear from the selection.
+      ...(Array.isArray(record.stale) && record.stale.length ? { stale: record.stale } : {}),
     };
   }
   let value = record.output;
@@ -531,6 +576,10 @@ export function createGraphRunner({
   // tests never touch the supervisor state home. The default reads
   // <supervisorStateHome>/<runId>/holds.json (absent store = no holds).
   listOpenHolds = holdsForCompletion,
+  // FOC-516: where the gate1 selection-delta label lands (decision-log.mjs
+  // layout — one decisions.jsonl per run id). Injectable so tests never write
+  // the live .state/runs ledger.
+  decisionRunsDir = RUNS_DIR,
   now = () => new Date().toISOString(),
 } = {}) {
   if (!runId || typeof runId !== "string") {
@@ -550,11 +599,14 @@ export function createGraphRunner({
   const flow = node.stepFlow ?? [];
 
   // Walk the chain head → tail (validateGraph guarantees a single head/tail
-  // and full coverage) into the execution order the run loop follows.
+  // and full coverage) into the execution order the run loop follows. FOC-517:
+  // reentry edges (gate → earlier step) are NOT walked — the re-entry loop
+  // re-walks this same order after a reset.
   const order = [];
   if (flow.length) {
-    const next = new Map(flow.map((e) => [e.from, e.to]));
-    let cursor = Object.keys(steps).find((id) => !flow.some((e) => e.to === id));
+    const seq = flow.filter((e) => e.type === "sequence");
+    const next = new Map(seq.map((e) => [e.from, e.to]));
+    let cursor = Object.keys(steps).find((id) => !seq.some((e) => e.to === id));
     while (cursor) {
       order.push(cursor);
       cursor = next.get(cursor);
@@ -616,6 +668,31 @@ export function createGraphRunner({
     }
     if (!gateEntry || gateEntry.autonomy !== "A0" || gateEntry.threshold !== null || gateEntry.fallback?.tier2 !== "disabled") {
       throw new TypedError("schema_invalid", `step "plan.ac" binds a ${AC_TESTABLE_DECISION} entry the runner cannot honestly serve (A0, threshold null, tier 2 disabled)`);
+    }
+  }
+  // plan.intent.select is the second [G] step with a node-internal [J] call
+  // (FOC-516): plan.intent.select.score scores every interpretation, the same
+  // A0, threshold-null, tier-2-dead posture pinned at construction.
+  if (steps["plan.intent.select"]?.kind === "G") {
+    const scoreEntry = registry.entries[SELECT_SCORE_DECISION];
+    if (typeof caller !== "function") {
+      throw new TypedError("invalid_input", `step "plan.intent.select" runs the node-internal ${SELECT_SCORE_DECISION} call — inject a caller (createDecisionCaller)`);
+    }
+    if (!scoreEntry || scoreEntry.autonomy !== "A0" || scoreEntry.threshold !== null || scoreEntry.fallback?.tier2 !== "disabled") {
+      throw new TypedError("schema_invalid", `step "plan.intent.select" binds a ${SELECT_SCORE_DECISION} entry the runner cannot honestly serve (A0, threshold null, tier 2 disabled)`);
+    }
+  }
+  // plan.gate1 is the [H] step with a node-internal [J] call (FOC-517): a
+  // free-text answer is classified by plan.intent.reply — the same A0,
+  // threshold-null, tier-2-dead posture pinned at construction. The
+  // annotation never settles the round; the frontman's answer does.
+  if (steps["plan.gate1"]?.kind === "H") {
+    const replyEntry = registry.entries[REPLY_DECISION];
+    if (typeof caller !== "function") {
+      throw new TypedError("invalid_input", `step "plan.gate1" runs the node-internal ${REPLY_DECISION} call for free-text answers — inject a caller (createDecisionCaller)`);
+    }
+    if (!replyEntry || replyEntry.autonomy !== "A0" || replyEntry.threshold !== null || replyEntry.fallback?.tier2 !== "disabled") {
+      throw new TypedError("schema_invalid", `step "plan.gate1" binds a ${REPLY_DECISION} entry the runner cannot honestly serve (A0, threshold null, tier 2 disabled)`);
     }
   }
 
@@ -724,6 +801,33 @@ export function createGraphRunner({
         ...(result.problems?.length ? { problems: result.problems } : {}),
       });
     }
+    if (stepId === "plan.intent.select") {
+      // FOC-516: the selection over the persisted map. No [G] model call —
+      // deterministic routing plus the node-internal [J] scoring call; the
+      // result carries the [J] eventId (the FOC-449 join key for the gate1
+      // delta label) and the deduped ids the policy filtered out.
+      let result;
+      try {
+        result = await runPlanIntentSelectNode({
+          stepId,
+          reads,
+          caller,
+          validate: (raw) => outputValidate.get(stepId)(raw),
+        });
+      } catch (err) {
+        return failRecord(stepId, errorOf(err, "plan.intent.select node threw"));
+      }
+      if (result.status === "done") {
+        return stepRecord(runId, now, stepId, "done", {
+          stepId,
+          output: result.output,
+          eventId: result.eventId ?? null,
+          ...(result.scores?.length ? { scores: result.scores } : {}),
+          ...(result.dedupedIds?.length ? { dedupedIds: result.dedupedIds } : {}),
+        });
+      }
+      return failRecord(stepId, result.error);
+    }
     if (stepId === "plan.ac") {
       let result;
       try {
@@ -768,14 +872,44 @@ export function createGraphRunner({
   // [H] — stop and emit the supervisor gate; the gate record lives in the
   // supervisor run directory, the run record marks the run as waiting.
   const GATE_SUMMARIES = {
-    "plan.gate1": "Approve the SPEC hand-off (plan.spec) before decomposition",
-    "plan.gate2": "Approve the decomposition (plan.decompose) before the Linear push",
+    "plan.gate1": "Answer the intent conversation (FOC-517) — confirm what PLAN understood or correct it; ≤3 rounds before the DoD/AC/spec hand-off",
+    "plan.gate2": "Approve the rendered issue (plan.render) before the Linear push",
   };
-  async function runHStep(stepId, reads) {
+  async function runHStep(stepId, reads, state) {
     const summary = GATE_SUMMARIES[stepId] ?? `Approve "${stepId}" before the run continues`;
+    let facts = { runId, reads };
+    let pendingOutput;
+    if (stepId === "plan.gate1") {
+      // FOC-517: the round number and the displayed slice are runner-computed
+      // from the accumulated presented store — the round the display shows is
+      // the round the answer contract settles against. The gate facts carry
+      // the display so the supervisor gate file shows what was asked.
+      const prior = state.steps.get(`gate.${stepId}`);
+      const accumulated = prior?.output?.presented ?? {};
+      const round = Object.keys(accumulated).length + 1;
+      const selection = reads["plan.intent.select.record"];
+      const intent = reads["plan.intent.record"];
+      let view;
+      try {
+        view = renderGate1Display({
+          round,
+          selection: selection?.output ?? null,
+          interpretations: intent?.output?.interpretations ?? [],
+        });
+      } catch (err) {
+        return failRecord(stepId, errorOf(err, "gate1 display render threw"));
+      }
+      facts = { ...facts, display: view.display, round };
+      pendingOutput = {
+        round,
+        presented: { ...accumulated, [String(round)]: view.presented },
+        display: view.display,
+      };
+      if (view.dropped) pendingOutput.dropped = view.dropped;
+    }
     let emitted;
     try {
-      emitted = await emitGate({ stepId, gateKind: stepId, summary, facts: { runId, reads } });
+      emitted = await emitGate({ stepId, gateKind: stepId, summary, facts });
     } catch (err) {
       return failRecord(stepId, errorOf(err, "gate emitter threw"));
     }
@@ -784,18 +918,41 @@ export function createGraphRunner({
       gateKind: stepId,
       gateId: emitted?.gateId ?? null,
       summary,
+      ...(pendingOutput ? { output: pendingOutput } : {}),
     });
   }
 
-  // [D] — deterministic code over the injectable Linear boundary. The payload
-  // is shaped here (deterministically, from the resolved reads); the boundary
-  // performs whatever writes it was injected to perform.
+  // [D] — deterministic code. plan.render (FOC-520) composes the Linear issue
+  // text from the resolved reads — no model call, no boundary; the same reads
+  // always render byte-identical text and malformed reads fail closed. The
+  // gate2 facts carry the rendered text, and plan.push's payload takes it
+  // VERBATIM — what the gate showed is what would be written to Linear, no
+  // rewording anywhere. plan.push's payload is shaped here (deterministically,
+  // from the resolved reads); the injectable Linear boundary performs whatever
+  // writes it was injected to perform. Any other [D] step id has no runner
+  // implementation and fails typed — never a guessed execution.
   async function runDStep(stepId, reads) {
+    if (stepId === "plan.render") {
+      let result;
+      try {
+        result = runPlanRenderNode({ stepId, reads, validate: (raw) => outputValidate.get(stepId)(raw) });
+      } catch (err) {
+        return failRecord(stepId, errorOf(err, "plan.render node threw"));
+      }
+      if (result.status === "done") {
+        return stepRecord(runId, now, stepId, "done", { stepId, output: result.output });
+      }
+      return failRecord(stepId, result.error);
+    }
+    if (stepId !== "plan.push") {
+      return failRecord(stepId, { code: "invalid_input", message: `[D] step "${scrub(String(stepId))}" has no runner implementation — a [D] step is plan.render or plan.push` });
+    }
     const decompose = reads["plan.decompose.record"];
     const gate2 = reads["gate.plan.gate2.record"];
     const payload = {
       runId,
       epicTitle: `Plan — dictated entry (run ${runId})`,
+      issueText: reads["plan.render.issueText"],
       children: (decompose?.output?.tasks ?? []).map((t) => ({ title: t.title, size: t.size, labels: t.labels, relations: t.relations })),
       handoffComment: `Planned by the FOC-397 graph runner (run ${runId}); gate plan.gate2 ${gate2?.status ?? "unknown"}.`,
     };
@@ -845,7 +1002,270 @@ export function createGraphRunner({
     return { status: "handed-off", record: rec };
   }
 
-  async function run({ inputs = {} } = {}) {
+  // ── FOC-517: the gate1 conversation ─────────────────────────────────────────
+  // ONE plan.intent.reply seam call per free-text (unparseable) answer: the
+  // raw dictated answer plus the round's presented slice go in, the
+  // classification + touched ids come out as an ANNOTATION (A0 — recorded next
+  // to the answer, shown to the frontman, never acted on). The call failing
+  // closed throws — the round cannot settle on an invented classification.
+  async function annotateReply(round, shown, answer) {
+    const instances = [
+      ...(shown.understood ?? []),
+      ...(shown.confirmations ?? []),
+      ...(shown.assumptions ?? []),
+      ...(shown.questions ?? []).map((q) => ({ id: q.id, claim: q.claim })),
+    ].slice(0, 12);
+    const state = canonicalJson({ round, answer, presented: shown });
+    const cap = DECISION_STEP.inputSchema.properties.state.maxLength;
+    if (state.length > cap) {
+      throw new TypedError("invalid_input", `plan.intent.reply: the annotation state exceeds the seam's state cap (${state.length} > ${cap})`);
+    }
+    let envelope;
+    try {
+      envelope = await caller({ state, decisionId: REPLY_DECISION, instances });
+    } catch (err) {
+      throw new TypedError(
+        err instanceof Error && err.code ? err.code : "provider_error",
+        `plan.gate1: the ${REPLY_DECISION} call failed closed: ${err?.message || "caller threw"}`,
+      );
+    }
+    if (!envelope.ok) {
+      throw new TypedError(
+        envelope.error?.code ?? "provider_error",
+        `plan.gate1: the ${REPLY_DECISION} call returned an error envelope: ${envelope.error?.message ?? "unknown"}`,
+      );
+    }
+    const answers = envelope.annotation?.answers ?? {};
+    const touched = instances
+      .map((inst, i) => (answers[`touched${i}`]?.noul === true ? inst.id : null))
+      .filter((id) => id !== null);
+    return {
+      classification: answers.reply?.choice ?? null,
+      touched,
+      eventId: envelope.eventId ?? null,
+      confidence: envelope.annotation?.confidence ?? null,
+    };
+  }
+
+  // The gate1 settlement: a resolution answers ONE presented round. The runner
+  // — never the deciding agent — computes confirmed, the round bookkeeping and
+  // the parsed answers/corrections; an agent-supplied copy of a computed field
+  // is cross-checked and refused on mismatch. A resolution older than the
+  // pending record is STALE (it answered an earlier round; the re-entry
+  // re-emits the gate) and waits without being applied. Outcomes:
+  //   confirmed      → done record + the plan.intent.confirmed record; the
+  //                    chain continues (plan.dod reads the confirmed map)
+  //   not confirmed  → done record + one reset record per re-entered step;
+  //                    run() re-walks the chain. ≤3 rounds, then a typed
+  //                    intent_not_settled stop — the plan is never built on
+  //                    an unconfirmed intent
+  //   free text      → one plan.intent.reply annotation on a handed-off
+  //                    record; the frontman settles the round by appending a
+  //                    NEW resolution carrying answers/corrections — the raw
+  //                    answer is kept verbatim, the annotation only pre-fills
+  //                    the next round
+  async function settleGate1({ state, record, resolution }) {
+    const output = requireResolutionOutput("plan.gate1", resolution); // throws on invalid — nothing appended
+    if (output.approved === false) {
+      const rejected = stepRecord(runId, now, "gate.plan.gate1", "gate-rejected", {
+        stepId: "plan.gate1",
+        reason: "gate answered rejected — handed to the frontman",
+        output,
+      });
+      store.append(rejected);
+      state.steps.set("gate.plan.gate1", rejected);
+      return { action: "stopped", record: rejected };
+    }
+    const resTs = Date.parse(resolution.ts ?? "");
+    const pendingTs = Date.parse(record.ts ?? "");
+    if (Number.isFinite(resTs) && Number.isFinite(pendingTs) && resTs < pendingTs) {
+      return { action: "waiting", record };
+    }
+
+    const round = record.output?.round;
+    const presented = record.output?.presented ?? {};
+    const shown = presented[round];
+    if (!Number.isInteger(round) || !shown) {
+      throw new TypedError(
+        "schema_invalid",
+        `the pending plan.gate1 record carries no presented slice for round ${scrub(String(round))} — the conversation cannot be settled against nothing`,
+      );
+    }
+    const maps = intentStores(state.steps).maps;
+    const parsed = parseGate1Answer(output.answer, round, shown);
+
+    let answers;
+    let corrections;
+    let reply = record.output?.reply ?? null;
+    if (parsed.kind === "free") {
+      answers = output.answers ?? [];
+      corrections = output.corrections ?? [];
+      if (!answers.length && !corrections.length) {
+        if (record.status === "handed-off" && record.output?.answer === output.answer) {
+          return { action: "waiting", record }; // already annotated, nothing new
+        }
+        reply = await annotateReply(round, shown, output.answer);
+        const handedOff = stepRecord(runId, now, "gate.plan.gate1", "handed-off", {
+          stepId: "plan.gate1",
+          reason: "free-text answer — the plan.intent.reply annotation is recorded; the frontman settles the round with answers/corrections in a NEW gate.plan.gate1.resolution (the annotation never settles it)",
+          tier: TIER_SEAM,
+          output: { approved: true, answer: output.answer, round, presented, reply },
+        });
+        store.append(handedOff);
+        state.steps.set("gate.plan.gate1", handedOff);
+        return { action: "waiting", record: handedOff };
+      }
+    } else {
+      answers = parsed.answers;
+      corrections = parsed.corrections;
+      // An agent-supplied copy of a runner-computed field is cross-checked —
+      // a mismatch is a refused resolution, not a silent overwrite.
+      for (const [field, computed] of [["answers", parsed.answers], ["corrections", parsed.corrections]]) {
+        if (output[field] !== undefined && canonicalJson(output[field]) !== canonicalJson(computed)) {
+          throw new TypedError(
+            "schema_invalid",
+            `the resolution's ${field} do not match what the runner parsed from the answer — fix the resolution or drop the field (the runner computes ${field})`,
+          );
+        }
+      }
+    }
+
+    // Fold-validate every answer/correction against the presented slice and
+    // the persisted map — the same reference contract the round-2 fold
+    // applies. STALE references are recorded (the point re-asks next round),
+    // never silently dropped.
+    const fold = foldGateAnswers({ round, maps, presented, answers, corrections });
+    const settledAnswers = fold.valid.filter((v) => v.kind === "answer").map((v) => v.record);
+    const settledCorrections = fold.valid.filter((v) => v.kind === "correction").map((v) => v.record);
+    const stale = fold.stale;
+
+    const answeredIds = new Set(settledAnswers.map((a) => a.interpretationId));
+    const confirmed = settledCorrections.length === 0
+      && (shown.questions ?? []).every((q) => answeredIds.has(q.id));
+    if (output.confirmed !== undefined && output.confirmed !== confirmed) {
+      throw new TypedError(
+        "schema_invalid",
+        `the resolution claims confirmed=${String(output.confirmed)} but the runner computes confirmed=${String(confirmed)} — confirmed is always runner-computed`,
+      );
+    }
+
+    if (!confirmed && round >= GATE1_MAX_ROUNDS) {
+      const failed = failRecord("plan.gate1", {
+        code: "intent_not_settled",
+        message: `the intent conversation did not settle in ${GATE1_MAX_ROUNDS} rounds — round ${round} still carries corrections or unanswered presented questions; the plan is never built on an unconfirmed intent`,
+      }, {
+        output: {
+          approved: true,
+          answer: output.answer,
+          confirmed: false,
+          round,
+          answers: settledAnswers,
+          corrections: settledCorrections,
+          presented,
+          ...(reply ? { reply } : {}),
+          ...(stale.length ? { stale } : {}),
+        },
+      });
+      store.append(failed);
+      state.steps.set("gate.plan.gate1", failed);
+      return { action: "stopped", record: failed };
+    }
+
+    const doneOutput = {
+      approved: true,
+      answer: output.answer,
+      confirmed,
+      round,
+      answers: settledAnswers,
+      corrections: settledCorrections,
+      presented,
+      ...(reply ? { reply } : {}),
+    };
+    const done = stepRecord(runId, now, "gate.plan.gate1", "done", {
+      stepId: "plan.gate1",
+      output: doneOutput,
+      resolvedBy: resolution.by ?? null,
+      ...(stale.length ? { stale } : {}),
+    });
+    // FOC-516: the FOC-449 selection delta is labelled wherever Mateusz's
+    // answers exist — the settled records replace the old run-input path. A
+    // failed write is a warning on the record, never a broken primary flow.
+    const sel = state.steps.get("plan.intent.select");
+    const label = selectDeltaLabel({
+      selection: sel?.output ?? null,
+      answers: settledAnswers,
+      corrections: settledCorrections,
+      eventId: sel?.eventId ?? null,
+    });
+    if (label) {
+      let written = null;
+      let warning = null;
+      try {
+        const res = appendLabel({
+          eventId: label.eventId,
+          outcome: label.outcome,
+          by: label.by,
+          source: label.source,
+          via: label.via,
+          runId,
+          runsDir: decisionRunsDir,
+        });
+        written = res.path;
+      } catch (err) {
+        warning = err?.message ?? "label write failed";
+      }
+      done.deltaLabel = label;
+      if (written) done.deltaLabelWritten = written;
+      if (warning) done.deltaLabelWarning = warning;
+    }
+    store.append(done);
+    state.steps.set("gate.plan.gate1", done);
+
+    if (confirmed) {
+      // The chain continues on the CONFIRMED intent only: the derived record
+      // is what plan.dod/plan.ac/plan.spec read from here on.
+      const intentOut = state.steps.get("plan.intent")?.output ?? {};
+      const confirmedRecord = stepRecord(runId, now, "plan.intent.confirmed", "done", {
+        stepId: "plan.intent.confirmed",
+        output: {
+          goal: intentOut.goal ?? null,
+          why: intentOut.why ?? null,
+          mapVersion: shown.mapVersion,
+          interpretations: intentOut.interpretations ?? [],
+          answers: settledAnswers,
+          corrections: settledCorrections,
+          round,
+        },
+      });
+      store.append(confirmedRecord);
+      state.steps.set("plan.intent.confirmed", confirmedRecord);
+      return { action: "continue" };
+    }
+
+    // Re-entry: the round folds into plan.intent — the map regenerates with
+    // the answers/corrections folded (round-2 reads resolve from the reset
+    // record's output), plan.intent.select re-asks, gate1 shows round n+1.
+    const resets = [
+      stepRecord(runId, now, "plan.intent", RESET_STATUS, { stepId: "plan.intent", maps }),
+      stepRecord(runId, now, "plan.intent.select", RESET_STATUS, { stepId: "plan.intent.select" }),
+      stepRecord(runId, now, "gate.plan.gate1", RESET_STATUS, {
+        stepId: "plan.gate1",
+        output: {
+          presented,
+          answers: settledAnswers,
+          corrections: settledCorrections,
+          ...(stale.length ? { stale } : {}),
+        },
+      }),
+    ];
+    for (const reset of resets) {
+      store.append(reset);
+      state.steps.set(reset.key, reset);
+    }
+    return { action: "reenter" };
+  }
+
+  async function run({ inputs = {} } = {}, reentries = 0) {
     const state = store.load();
 
     for (const stepId of order) {
@@ -862,6 +1282,25 @@ export function createGraphRunner({
 
       if (record && WAITING_STATUSES.has(record.status)) {
         if (!resolution) return { status: "stopped", stepId, record };
+        // FOC-517: gate1's conversation has its own settlement (the parsed
+        // answer, the round bookkeeping, the re-entry) — every other waiting
+        // step keeps the generic resolution path below.
+        if (step.kind === "H" && stepId === "plan.gate1") {
+          const outcome = await settleGate1({ state, record, resolution });
+          if (outcome.action === "stopped") return { status: "stopped", stepId, record: outcome.record };
+          if (outcome.action === "waiting") return { status: "stopped", stepId, record: outcome.record };
+          if (outcome.action === "reenter") {
+            // An unconfirmed round re-enters plan.intent: re-walk the chain
+            // from the top on a freshly loaded store. Rounds are bounded (≤3),
+            // so re-entries are too — the cap here is the walk breaking loose,
+            // not the conversation.
+            if (reentries + 1 > GATE1_MAX_ROUNDS - 1) {
+              return stopped(stepId, failRecord(stepId, { code: "invalid_input", message: "gate1 re-entry exceeded the round cap — round accounting is broken" }));
+            }
+            return run({ inputs }, reentries + 1);
+          }
+          continue; // confirmed — the chain continues on the confirmed intent
+        }
         const output = requireResolutionOutput(stepId, resolution); // throws on invalid — nothing appended
         if (step.kind === "H" && output.approved === false) {
           const rejected = stepRecord(runId, now, key, "gate-rejected", { stepId, reason: "gate answered rejected — handed to the frontman", output });
@@ -876,11 +1315,21 @@ export function createGraphRunner({
 
       if (record?.status === "done") continue;
 
-      if (record) {
+      if (record?.status === RESET_STATUS) {
+        // FOC-517 re-entry: the latest record for this step is a reset marker
+        // — re-execute the step. The append-only stores it carries forward
+        // (plan.intent's maps, gate1's presented + the round's answers/
+        // corrections) are read back by intentStores and resolveRead from
+        // this same record.
+      } else if (record) {
         return stopped(stepId, failRecord(stepId, { code: "invalid_input", message: `step "${stepId}" is in unknown record status "${scrub(String(record.status))}"` }));
       }
 
-      if (resolution) {
+      // A resolution with no run record at all is a typed failure. A record
+      // that is a reset marker re-executes instead — its earlier round's
+      // resolution was already consumed by that settlement and stays in the
+      // append-only store; it is history, not a pending answer (FOC-517).
+      if (!record && resolution) {
         return stopped(stepId, failRecord(stepId, { code: "invalid_input", message: `resolution "${key}.resolution" exists with no run record for "${stepId}"` }));
       }
 
@@ -890,10 +1339,11 @@ export function createGraphRunner({
       for (const read of step.reads ?? []) {
         const value = resolveRead(read, { inputs, steps: state.steps });
         if (value === undefined) {
-          // Round-dependent reads of plan.intent are absent by design in
-          // round 1; the key stays out of the read map and the node reads
-          // that as "round 1" and "task type unknown".
+          // Round-dependent reads of plan.intent and plan.intent.select are
+          // absent by design in round 1; the key stays out of the read map and
+          // the nodes read that as "round 1" and "task type unknown".
           if (stepId === "plan.intent" && OPTIONAL_INTENT_READS.has(read)) continue;
+          if (stepId === "plan.intent.select" && OPTIONAL_SELECT_READS.has(read)) continue;
           return stopped(stepId, failRecord(stepId, { code: "invalid_input", message: `read "${read}" is not available for step "${stepId}" — no resolved run record or run input supplies it` }));
         }
         reads[read] = value;
@@ -903,7 +1353,7 @@ export function createGraphRunner({
       if (step.kind === "J") next = await runJStep(stepId, step, reads);
       else if (step.kind === "G") next = await runGStep(stepId, step, reads, state.steps);
       else if (step.kind === "A") next = runAStep(stepId, reads);
-      else if (step.kind === "H") next = await runHStep(stepId, reads);
+      else if (step.kind === "H") next = await runHStep(stepId, reads, state);
       else if (step.kind === "D") next = await runDStep(stepId, reads);
       else {
         return stopped(stepId, failRecord(stepId, { code: "invalid_input", message: `step "${stepId}" has unknown kind "${scrub(String(step.kind))}"` }));

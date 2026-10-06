@@ -148,6 +148,114 @@
       "writes": "run-record",
       "prompt": "You generate the interpretation map for one planning inbox entry — what PLAN understood from the entry, from where (stated, inferred or unknown), and what it does not know — before anything is put to the user. Work only from the declared inputs you are given: the inbox entry, the gap list the DoR step produced, and the task type when the intake adapter supplied one; from the second round on you also get the user's answers and corrections from gate1. No repo tree, no telemetry, no prior runs, no Linear comments. Make exactly one model call with no tool loop. Decide the map's shape before you draft anything: fix how many interpretations there will be and each one's perspective and source first, then fill every field once within the caps below — never write a long draft and cut it down. The map is a typed reading grid, not a question list: you write NO questions to the user — which interpretations become questions is a later node's decision, and anything answerable from the repo is not a question at all. Cover every perspective this task type requires out of goal, user, scope, success, constraints, risk, priority and terms — risk is required for every type; when the task type is missing, unknown, or outside feature, bug, spike, tech, docs, test and chore, cover all eight. Every entry of the gap list must be covered by at least one interpretation's covers field, and each covers entry quotes the gap entry verbatim. Every interpretation states what you read, in first person Polish (\"Rozumiem, że …\"), where it came from — stated (quoted verbatim from the anchor text), inferred (your reading, quote optional), or unknown (name what is NOT established) — what else it could plausibly mean, and, for unknown only, two to four options with exactly one recommended and a reason for that one. Each interpretation is EXACTLY {id, perspective, claim, source, quote?, alternatives, covers, options?} and no other property: id is \"IN-1\" … \"IN-12\", unique across the map; perspective is one of the eight names above; claim is your first-person Polish reading, at most 200 characters; source is stated, inferred or unknown; quote is required for stated and forbidden for unknown, at most 150 characters; alternatives is up to 3 other plausible readings, each at most 200 characters; covers is up to 3 gap entries quoted verbatim, each at most 200 characters; options is required for unknown and forbidden otherwise, 2 to 4 objects of exactly {text, recommended, reason?}, text at most 200 and reason at most 150 characters, exactly one with recommended true and that one carries reason while the rest carry neither. A quote must occur verbatim in the anchor text: the inbox entry in round 1; from round 2 the inbox entry plus the user's actual answers and the options they explicitly accepted. Your own proposal is never anchor text. Keep the map to the smallest sufficient set, at most 12 interpretations. Your output must validate against this entry's output schema — one object {goal, why, mapVersion, idMap?, interpretations} — before anything downstream sees it; mapVersion is allocated by code at persist time and must be exactly 1 + the highest mapVersion already persisted (1 when none); monotonic, never reused, and a mismatch is a rejection rather than a silent renumber. An idMap is present only when ids were renumbered between two map versions, is pure id translation between verbatim-identical content, and never carries a user confirmation onto a changed claim or option. a schema-invalid or rejected map is retried once with the rejection reasons, then the step stops fail-closed with one typed failure record, never a partial map. Runs on the cheap tier."
     },
+    "plan.intent.select": {
+      "id": "plan.intent.select",
+      "kind": "G",
+      "owner": "FOC-516 — selection of what PLAN puts to Mateusz from the interpretation map; deterministic routing code plus the node-internal [J] scoring call, mirroring the plan.ac + plan.ac.testable pattern",
+      "hookPoint": "plan chain, after plan.intent — routes every interpretation to question / confirmation / 'Rozumiem tak' / assumption by config/intent-select-policy.json, and GATE 1 approves this selection before the DoD/AC/spec hand-off; A0 honesty: the selection only routes DISPLAY, never hides an item",
+      "autonomy": null,
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "the node-internal [J] scoring call (plan.intent.select.score) fails closed and the step stops with one typed failure record (failure stop) — a selection nobody scored is never put to Mateusz"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost"
+      ],
+      "criteriaVersion": 1,
+      "reads": [
+        "plan.intent.record",
+        "gate.plan.gate1.answers",
+        "gate.plan.gate1.corrections"
+      ],
+      "output": {
+        "type": "object",
+        "required": ["mapVersion", "questions", "confirmations", "understood", "assumptions"],
+        "additionalProperties": false,
+        "properties": {
+          "mapVersion": { "type": "integer", "minimum": 1 },
+          "questions": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "required": ["id", "claim", "options", "impactProbability"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string", "pattern": "^IN-([1-9]|1[0-2])$" },
+                "claim": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "options": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 4,
+                  "items": {
+                    "type": "object",
+                    "required": ["text", "recommended"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "text": { "type": "string", "minLength": 1, "maxLength": 200 },
+                      "recommended": { "type": "boolean" },
+                      "reason": { "type": "string", "minLength": 1, "maxLength": 150 }
+                    }
+                  }
+                },
+                "impactProbability": { "type": "number", "minimum": 0, "maximum": 1 }
+              }
+            }
+          },
+          "confirmations": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "required": ["id", "claim", "impactProbability"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string", "pattern": "^IN-([1-9]|1[0-2])$" },
+                "claim": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "impactProbability": { "type": "number", "minimum": 0, "maximum": 1 }
+              }
+            }
+          },
+          "understood": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "required": ["id", "claim", "groundedProbability"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string", "pattern": "^IN-([1-9]|1[0-2])$" },
+                "claim": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "groundedProbability": { "type": "number", "minimum": 0, "maximum": 1 }
+              }
+            }
+          },
+          "assumptions": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "required": ["id", "claim", "impactProbability", "reason"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string", "pattern": "^IN-([1-9]|1[0-2])$" },
+                "claim": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "impactProbability": { "type": "number", "minimum": 0, "maximum": 1 },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 200 }
+              }
+            }
+          }
+        }
+      },
+      "tier": "cheap",
+      "failure": "stop",
+      "writes": "run-record",
+      "prompt": "This step performs no [G] model call of its own — the prompt field is a schema requirement for kind G and documents the node's deterministic contract instead (scripts/plan-intent-select.mjs). The node reads the interpretation map from the plan.intent record, drops the points Mateusz already answered in a previous round (dedupe against the gate1 answers and corrections when the policy's dedupe flag is set), scores every remaining interpretation through the node-internal [J] plan.intent.select.score seam call — two noul verdicts per item, impact and grounding — and routes each item by the source-by-impact table in config/intent-select-policy.json: unknown and high-impact becomes a question with options (the map's own options with exactly one recommended; an interpretation carrying two or more alternative readings always becomes a question carrying those alternatives as options, overriding the table); inferred, or stated but not grounded, and high-impact becomes a confirmation question; every low-impact route and the cap overflow becomes an assumption — listed, never dropped; stated and grounded becomes a 'Rozumiem tak' line Mateusz confirms with a single ok. At most cap.questions (4) questions and confirmations per round, ordered by impact probability, highest first. The step output is the selection record the gate facts put to Mateusz verbatim; the two gate1 reads are round-dependent and absent in round 1."
+    },
     "plan.dod": {
       "id": "plan.dod",
       "kind": "G",
@@ -167,7 +275,7 @@
       ],
       "criteriaVersion": 1,
       "reads": [
-        "inbox.entry"
+        "plan.intent.confirmed"
       ],
       "output": {
         "type": "object",
@@ -234,7 +342,7 @@
       ],
       "criteriaVersion": 1,
       "reads": [
-        "inbox.entry",
+        "plan.intent.confirmed",
         "features.list"
       ],
       "output": {
@@ -312,6 +420,7 @@
       ],
       "criteriaVersion": 1,
       "reads": [
+        "plan.intent.confirmed",
         "inbox.entry",
         "plan.dod.definitionOfDone",
         "plan.ac.acs",
@@ -351,8 +460,8 @@
     "plan.gate1": {
       "id": "plan.gate1",
       "kind": "H",
-      "owner": "plan node v2 (FOC-397 runner); gate contract untouched (GAPS §4)",
-      "hookPoint": "plan chain, after plan.spec — GATE 1 (plan approval), relayed mechanically by supervisor-gate.mjs; Mateusz decides",
+      "owner": "plan node v2 (FOC-397 runner); conversation contract FOC-517 (design doc §3.6 revision)",
+      "hookPoint": "plan chain, after plan.intent.select — GATE 1, the intent conversation (FOC-517): the display shows what PLAN understood; a round without confirmation re-enters plan.intent (≤3 rounds, then intent_not_settled); free text is annotated by plan.intent.reply, settled only by Mateusz's answer",
       "autonomy": null,
       "threshold": null,
       "fallback": {
@@ -362,7 +471,8 @@
       "metrics": [],
       "criteriaVersion": 1,
       "reads": [
-        "plan.spec.record"
+        "plan.intent.select.record",
+        "plan.intent.record"
       ],
       "output": {
         "type": "object",
@@ -373,8 +483,286 @@
         "properties": {
           "approved": {
             "type": "boolean"
+          },
+          "answer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "confirmed": {
+            "type": "boolean"
+          },
+          "round": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3
+          },
+          "answers": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "required": [
+                "round",
+                "mapVersion",
+                "interpretationId"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "round": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3
+                },
+                "mapVersion": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "interpretationId": {
+                  "type": "string",
+                  "pattern": "^IN-([1-9]|1[0-2])$"
+                },
+                "about": {
+                  "type": "object",
+                  "required": [
+                    "claim"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "claim": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "option": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  }
+                },
+                "answer": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "acceptedOptions": {
+                  "type": "array",
+                  "maxItems": 4,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          },
+          "corrections": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "required": [
+                "round",
+                "mapVersion",
+                "interpretationId",
+                "corrected"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "round": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3
+                },
+                "mapVersion": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "interpretationId": {
+                  "type": "string",
+                  "pattern": "^IN-([1-9]|1[0-2])$"
+                },
+                "about": {
+                  "type": "object",
+                  "required": [
+                    "claim"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "claim": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  }
+                },
+                "corrected": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                }
+              }
+            }
+          },
+          "presented": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 3,
+            "propertyNames": {
+              "pattern": "^[123]$"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "required": [
+                "mapVersion"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "mapVersion": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "understood": {
+                  "type": "array",
+                  "maxItems": 12,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "claim"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^IN-([1-9]|1[0-2])$"
+                      },
+                      "claim": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    }
+                  }
+                },
+                "confirmations": {
+                  "type": "array",
+                  "maxItems": 12,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "claim"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^IN-([1-9]|1[0-2])$"
+                      },
+                      "claim": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    }
+                  }
+                },
+                "assumptions": {
+                  "type": "array",
+                  "maxItems": 12,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "claim"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^IN-([1-9]|1[0-2])$"
+                      },
+                      "claim": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    }
+                  }
+                },
+                "questions": {
+                  "type": "array",
+                  "maxItems": 4,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "claim",
+                      "options"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^IN-([1-9]|1[0-2])$"
+                      },
+                      "claim": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "options": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 4,
+                        "items": {
+                          "type": "object",
+                          "required": [
+                            "text",
+                            "recommended"
+                          ],
+                          "additionalProperties": false,
+                          "properties": {
+                            "text": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            },
+                            "recommended": {
+                              "type": "boolean"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "approved": {
+                  "const": true
+                }
+              },
+              "required": [
+                "approved"
+              ]
+            },
+            "then": {
+              "required": [
+                "answer"
+              ]
+            }
+          }
+        ]
       },
       "tier": null,
       "failure": "stop",
@@ -485,8 +873,10 @@
       "metrics": [],
       "criteriaVersion": 1,
       "reads": [
+        "plan.spec.record",
         "plan.decompose.record",
-        "gate.plan.gate1.record"
+        "gate.plan.gate1.record",
+        "plan.render.issueText"
       ],
       "output": {
         "type": "object",
@@ -504,6 +894,43 @@
       "failure": "stop",
       "writes": "graph-state"
     },
+    "plan.render": {
+      "id": "plan.render",
+      "kind": "D",
+      "owner": "plan node v2 (FOC-397 runner); renderer added FOC-520",
+      "hookPoint": "plan chain, after plan.decompose — deterministic issue-text render; the text plan.gate2 approves is the text plan.push writes, verbatim",
+      "autonomy": null,
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "no model call — deterministic script over the resolved reads; malformed or empty reads fail closed (D7 failure: stop)"
+      },
+      "metrics": [],
+      "criteriaVersion": 1,
+      "reads": [
+        "plan.dod.definitionOfDone",
+        "plan.ac.acs",
+        "plan.spec.summary",
+        "plan.decompose.record"
+      ],
+      "output": {
+        "type": "object",
+        "required": [
+          "issueText"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "issueText": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 30000
+          }
+        }
+      },
+      "tier": null,
+      "failure": "stop",
+      "writes": "run-record"
+    },
     "plan.push": {
       "id": "plan.push",
       "kind": "D",
@@ -519,6 +946,7 @@
       "criteriaVersion": 1,
       "reads": [
         "plan.decompose.record",
+        "plan.render.issueText",
         "gate.plan.gate2.record"
       ],
       "output": {
@@ -1304,6 +1732,98 @@
           "criteria": {
             "true": "concrete and checkable as written",
             "false": "vague, unmeasurable or unverifiable as written"
+          }
+        }
+      }
+    },
+    "plan.intent.select.score": {
+      "id": "plan.intent.select.score",
+      "kind": "J",
+      "owner": "FOC-516 PLAN gate — per-interpretation impact and grounding verdicts; the map items are serve-time input (instances) and the routing decision is config/intent-select-policy.json's, never this entry's",
+      "hookPoint": "PLAN node, inside plan.intent.select — seam decisionId channel, per-item questions instantiated via the registry loader (two template keys per instance: impact{i} and grounded{i}); A0 annotation only — the scores feed the policy routing, never an action",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "impact{i}": {
+          "type": "noul",
+          "instructions": "Per-interpretation impact (FOC-516): item {{id}} — \"{{claim}}\" (source: {{source}}). How probable is it that getting this point WRONG materially changes what gets built, or breaks a promise the entry made? Answer true = high impact.",
+          "criteria": {
+            "true": "high impact — a wrong reading materially changes the work or breaks a promise",
+            "false": "low impact — a wrong reading is cosmetic or easily corrected later"
+          }
+        },
+        "grounded{i}": {
+          "type": "noul",
+          "instructions": "Per-interpretation grounding (FOC-516): item {{id}} — \"{{claim}}\" (source: {{source}}). Is this reading established by the entry itself — quoted or directly fixed there — rather than PLAN's own inference or a guess? Answer true = grounded.",
+          "criteria": {
+            "true": "grounded — the entry itself states or fixes this reading",
+            "false": "not grounded — the reading is inference, extrapolation or guess"
+          }
+        }
+      }
+    },
+    "plan.intent.reply": {
+      "id": "plan.intent.reply",
+      "kind": "J",
+      "owner": "plan node v2; gate1 conversation annotation FOC-517 (design doc §3.6)",
+      "hookPoint": "plan chain, inside the plan.gate1 resolution — ONE seam call per free-text answer; instances = the presented items; A0 annotation recorded next to the raw answer, shown to the frontman, nothing auto-acted until calibrated (M3); the round settles by Mateusz's answer, never by this call",
+      "autonomy": "A0",
+      "threshold": null,
+      "fallback": {
+        "tier2": "disabled",
+        "onModelFailure": "fail closed and escalate one rung up (tier → frontman → Mateusz) — never an invented answer (FOC-473)"
+      },
+      "metrics": [
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "cost",
+        "confidence"
+      ],
+      "criteriaVersion": 1,
+      "serving": [
+        {
+          "via": "seam",
+          "actsOnAnswers": false,
+          "a0Enforced": true
+        }
+      ],
+      "questions": {
+        "reply": {
+          "type": "choice",
+          "instructions": "FOC-517 gate1 conversation: Mateusz answered the presented intent display in free (dictated) text. Read the raw answer against the presented items and classify what it meant overall. confirmed = the answer accepts the reading as shown; corrected = it corrects at least one presented item; new_scope = it adds work beyond the presented reading (propose splitting it into a separate task — Mateusz confirms at gate2); stop = the conversation should stop (the entry is misunderstood beyond repair).",
+          "criteria": {
+            "confirmed": "the answer accepts the presented reading as shown",
+            "corrected": "the answer corrects at least one presented item",
+            "new_scope": "the answer adds work beyond the presented reading — propose a separate task, confirmed at gate2",
+            "stop": "the conversation should stop — the entry is misunderstood beyond repair"
+          }
+        },
+        "touched{i}": {
+          "type": "noul",
+          "instructions": "Per presented item {{id}} — \"{{claim}}\" (kind: {{kind}}). Does the raw answer TOUCH this item — confirm it, correct it, or speak about exactly what it covers? Answer true = touched.",
+          "criteria": {
+            "true": "the answer speaks about this item (confirms, corrects or extends it)",
+            "false": "the answer does not concern this item"
           }
         }
       }
