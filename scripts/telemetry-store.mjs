@@ -1943,12 +1943,20 @@ function applyTranscriptProgress(db, event) {
   // NOT NULL DEFAULT '' — unattributed events use the sentinel '' so the
   // upsert matches the legacy row keyed by (path, '').
   const runId = event.runId || payload.runId || "";
+  // FOC-598: `resetOffset` marks a shrink/rotation pass — the transcript was
+  // replaced by a SMALLER incarnation that reuses the low offsets. Taking MAX()
+  // there would retain the old incarnation's byte_offset/file_size forever (the
+  // new file never regrows past them), so every later tick misses the
+  // unchanged-file skip and full-re-parses from 0. On reset the pass's own
+  // offsets win verbatim; every other pass keeps the MAX() merge.
+  const offsetMerge = payload.resetOffset
+    ? "byte_offset=excluded.byte_offset, file_size=excluded.file_size"
+    : "byte_offset=MAX(excluded.byte_offset, transcript_sources.byte_offset), file_size=MAX(excluded.file_size, transcript_sources.file_size)";
   db.prepare(
     `INSERT INTO transcript_sources (source_path, session_id, run_id, byte_offset, file_size, modified_at, parse_status, last_error, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(source_path, run_id) DO UPDATE SET session_id=COALESCE(excluded.session_id, transcript_sources.session_id),
-       byte_offset=MAX(excluded.byte_offset, transcript_sources.byte_offset),
-       file_size=MAX(excluded.file_size, transcript_sources.file_size),
+       ${offsetMerge},
        modified_at=CASE WHEN excluded.modified_at > transcript_sources.modified_at THEN excluded.modified_at ELSE transcript_sources.modified_at END,
        parse_status=excluded.parse_status, last_error=excluded.last_error, updated_at=excluded.updated_at`,
   ).run(event.source.path, payload.sessionId || null, runId, payload.byteOffset || 0,

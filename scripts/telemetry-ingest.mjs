@@ -220,7 +220,7 @@ async function warmWorkspaceCwds(events) {
 }
 
 async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
-  const { startOffset, isLead, state, statsSize } = opts;
+  const { startOffset, isLead, state, statsSize, resetOffset } = opts;
   const ws = state.workspace;
   let eventsApplied = 0;
   let pendingEvents = [];
@@ -307,6 +307,9 @@ async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
   try { modifiedAt = statSync(path).mtime.toISOString(); } catch { /* transient file */ }
   const progressEvent = makeEvent("transcript.progress", {
     runId, sessionId, byteOffset: lastFlushedOffset, fileSize: statsSize, modifiedAt, parseStatus: "parsed",
+    // FOC-598: a shrink/rotation pass resets the skip-cache row instead of
+    // max()-merging into the previous incarnation's offsets.
+    resetOffset: Boolean(resetOffset),
   }, { runId, sourceKind: "transcript-progress", sourcePath: path, sourceOffset: lastFlushedOffset });
   try {
     await flush(); // no-op unless a race left events pending
@@ -591,15 +594,22 @@ export async function ingestTranscript(db, runId, transcriptPath, sessionId = nu
       swapParseState(`${runId}\u0000${path}`);
       continue;
     }
+    // FOC-598: a SHRUNKEN file (rotated/truncated) forces a full re-parse from 0
+    // AND a reset of the skip-cache row (`resetOffset`) — the max() upsert would
+    // otherwise retain the old incarnation's byte_offset/file_size and every
+    // later tick would re-parse the whole file again. Honest limit: the offset
+    // row recovers, but the natural-key dedup still absorbs genuinely NEW
+    // content at offsets the previous incarnation already claimed — only a
+    // content/generation-aware key fixes that (FOC-598 AC1b, open).
+    const knownBytes = Number.isInteger(known?.byte_offset) ? known.byte_offset : 0;
+    const knownSize = Number.isInteger(known?.file_size) ? known.file_size : 0;
+    const shrunk = stats.size < knownSize || knownBytes > stats.size;
     let startOffset = 0;
-    if (known && Number.isInteger(known.byte_offset) && known.byte_offset > 0) {
-      // Resume at the stored line boundary. A SHRUNKEN file (rotated/truncated)
-      // forces a full re-parse; the natural-key dedup absorbs already-applied
-      // lines as duplicates.
-      startOffset = known.byte_offset <= stats.size ? known.byte_offset : 0;
-    }
+    if (knownBytes > 0 && !shrunk) startOffset = knownBytes;
     const state = getParseState(runId, path);
-    const range = await ingestTranscriptRange(db, runId, path, sessionId, { startOffset, isLead, state, statsSize: stats.size });
+    const range = await ingestTranscriptRange(db, runId, path, sessionId, {
+      startOffset, isLead, state, statsSize: stats.size, resetOffset: shrunk,
+    });
     eventsApplied += range.events;
 
     // Extract tool_facts and delegation_links for the SAME incremental range.

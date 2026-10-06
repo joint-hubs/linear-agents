@@ -507,6 +507,138 @@ async function run() {
     }
   });
 
+  // --- FOC-598: shrink/rotation — the offset row must RESET, new facts land --
+  // A rotated transcript reuses the low offsets of its previous incarnation.
+  // The skip-cache row must reset (not MAX) so the next tick is incremental
+  // again, and the new content's facts must be recorded — not dedup-absorbed
+  // into the OLD content's rows at the same (source_path, source_offset).
+  await test("(598) rotation resets the offset row and returns to incremental ticks", async () => {
+    const tempR = mkdtempSync(join(tmpdir(), "foc-598-"));
+    const savedHome = process.env.LA_TELEMETRY_HOME;
+    const savedDb = process.env.LA_TELEMETRY_DB;
+    const dbPathR = join(tempR, "telemetry.sqlite");
+    // Point the env default at this DB so ingestTranscript's internal
+    // recordToolFact/recordDelegationLink open the same DB as `dbR`.
+    process.env.LA_TELEMETRY_HOME = tempR;
+    process.env.LA_TELEMETRY_DB = dbPathR;
+    try {
+      const dbR = openTelemetryDb(dbPathR);
+      try {
+        const runId = "run-foc-598";
+        const sessionIdR = "session-foc-598";
+        const sourcePath = join(tempR, "lead.jsonl");
+        applyEvent(dbR, makeEvent("run.started", {
+          runId, squad: "dev", startedAt: "2026-10-01T10:00:00.000Z", cwd: "C:/repos/office",
+        }, { runId }));
+        applyEvent(dbR, makeEvent("session.linked", {
+          runId, sessionId: sessionIdR, transcriptPath: sourcePath,
+        }, { runId }));
+
+        const line1 = JSON.stringify({
+          type: "assistant", timestamp: "2026-10-01T10:01:00.000Z", sessionId: sessionIdR,
+          message: { id: "msg-1", model: "deepseek-v4-flash", usage: { input_tokens: 100, output_tokens: 50 } },
+        });
+        const line2 = JSON.stringify({
+          type: "assistant", timestamp: "2026-10-01T10:02:00.000Z", sessionId: sessionIdR,
+          message: { id: "msg-2", model: "deepseek-v4-flash", usage: { input_tokens: 200, output_tokens: 70 } },
+        });
+        writeFileSync(sourcePath, line1 + "\n" + line2 + "\n", "utf8");
+        await ingestTranscript(dbR, runId, sourcePath, sessionIdR);
+        const after1 = dbR.prepare("SELECT byte_offset, file_size, updated_at FROM transcript_sources WHERE source_path=? AND run_id=?").get(sourcePath, runId);
+        assert(after1, "pass 1: transcript_sources row missing");
+        assertEqual(dbR.prepare("SELECT COUNT(*) AS c FROM usage_facts WHERE source_path=?").get(sourcePath).c, 2, "pass 1: both lines ingested");
+
+        // Rotate: the file is REPLACED by a smaller one reusing the low offsets.
+        const lineB = JSON.stringify({
+          type: "assistant", timestamp: "2026-10-01T10:03:00.000Z", sessionId: sessionIdR,
+          message: { id: "msg-B", model: "deepseek-v4-flash", usage: { input_tokens: 300, output_tokens: 90 } },
+        });
+        writeFileSync(sourcePath, lineB + "\n", "utf8");
+        const sizeB = Buffer.byteLength(lineB + "\n", "utf8");
+        assert(sizeB < after1.file_size, "fixture: the rotated file must be smaller (shrink)");
+
+        await ingestTranscript(dbR, runId, sourcePath, sessionIdR);
+        const after2 = dbR.prepare("SELECT byte_offset, file_size, updated_at FROM transcript_sources WHERE source_path=? AND run_id=?").get(sourcePath, runId);
+        assertEqual(after2.byte_offset, sizeB, "AC1: byte_offset RESET to the new incarnation (no MAX retention)");
+        assertEqual(after2.file_size, sizeB, "AC1: file_size RESET to the new incarnation (no MAX retention)");
+
+        // AC2: the next unchanged tick must take the skip-cache fast path —
+        // observable as "no progress write": transcript_sources stays untouched.
+        // 5 ms of slack so a re-parse's `updated_at = now()` cannot land in the
+        // same millisecond and hide the write.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await ingestTranscript(dbR, runId, sourcePath, sessionIdR);
+        const after3 = dbR.prepare("SELECT updated_at FROM transcript_sources WHERE source_path=? AND run_id=?").get(sourcePath, runId);
+        assertEqual(after3.updated_at, after2.updated_at, "AC2: unchanged tick after rotation does not re-parse (no progress write)");
+      } finally {
+        dbR.close();
+      }
+    } finally {
+      process.env.LA_TELEMETRY_HOME = savedHome;
+      process.env.LA_TELEMETRY_DB = savedDb;
+      try { rmSync(tempR, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  // --- FOC-598 AC1b/AC3 (the collision half) — PENDING a design decision ------
+  // This is the real AC3 regression test: the rotated incarnation's fact sits at
+  // an offset the previous incarnation already claimed (offset 0, msg-B vs
+  // msg-1). It measures "expected 1, got 0" today because three content-UNaware
+  // constraints absorb the new content: events' UNIQUE(run_id, source_kind,
+  // source_path, source_offset, event_type), usage_facts' UNIQUE(run_id,
+  // source_path, source_offset), and tool_facts' (source_path, source_offset,
+  // tool_index) dedup. Recording both incarnations needs generation-qualified
+  // keys (a source_generation migration) — until that decision lands this test
+  // stays SKIPPED, not deleted (FOC-598 fork, see STATE).
+  await test("(598) AC1b: the new incarnation's fact at a reused offset lands", async () => {
+    if (true) { throw new TestSkip("needs generation-aware keys (source_generation migration) — FOC-598 fork, see STATE"); }
+    const tempB = mkdtempSync(join(tmpdir(), "foc-598-b-"));
+    const savedHome = process.env.LA_TELEMETRY_HOME;
+    const savedDb = process.env.LA_TELEMETRY_DB;
+    const dbPathB = join(tempB, "telemetry.sqlite");
+    process.env.LA_TELEMETRY_HOME = tempB;
+    process.env.LA_TELEMETRY_DB = dbPathB;
+    try {
+      const dbB = openTelemetryDb(dbPathB);
+      try {
+        const runId = "run-foc-598b";
+        const sessionIdB = "session-foc-598b";
+        const sourcePath = join(tempB, "lead.jsonl");
+        applyEvent(dbB, makeEvent("run.started", {
+          runId, squad: "dev", startedAt: "2026-10-01T10:00:00.000Z", cwd: "C:/repos/office",
+        }, { runId }));
+        applyEvent(dbB, makeEvent("session.linked", {
+          runId, sessionId: sessionIdB, transcriptPath: sourcePath,
+        }, { runId }));
+
+        const line1 = JSON.stringify({
+          type: "assistant", timestamp: "2026-10-01T10:01:00.000Z", sessionId: sessionIdB,
+          message: { id: "msg-1", model: "deepseek-v4-flash", usage: { input_tokens: 100, output_tokens: 50 } },
+        });
+        writeFileSync(sourcePath, line1 + "\n", "utf8");
+        await ingestTranscript(dbB, runId, sourcePath, sessionIdB);
+
+        // Rotate: a NEW line (fresh message id, new counters) starts at offset 0
+        // — the offset the old incarnation's msg-1 row/event already occupies.
+        const lineB = JSON.stringify({
+          type: "assistant", timestamp: "2026-10-01T10:03:00.000Z", sessionId: sessionIdB,
+          message: { id: "msg-B", model: "deepseek-v4-flash", usage: { input_tokens: 300, output_tokens: 90 } },
+        });
+        writeFileSync(sourcePath, lineB + "\n", "utf8");
+        await ingestTranscript(dbB, runId, sourcePath, sessionIdB);
+
+        const fresh = dbB.prepare("SELECT COUNT(*) AS c FROM usage_facts WHERE source_path=? AND input_tokens=300 AND output_tokens=90").get(sourcePath).c;
+        assertEqual(fresh, 1, "AC1/AC3: the new content's fact is recorded, not dedup-absorbed");
+      } finally {
+        dbB.close();
+      }
+    } finally {
+      process.env.LA_TELEMETRY_HOME = savedHome;
+      process.env.LA_TELEMETRY_DB = savedDb;
+      try { rmSync(tempB, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
   // --- FOC-599 (AC4): the incremental path serves the SAME facts -----------
   // FOC-547's AC4 ("served facts unchanged") was verified only by manual
   // before/after payload captures (experiments/foc-547-payload-diff.mjs with
