@@ -224,13 +224,21 @@ export const DECISION_STEP = {
     additionalProperties: false,
     properties: {
       state: { type: "string", minLength: 1, maxLength: 16000 },
-      questions: { type: "object", minProperties: 1, maxProperties: 12, additionalProperties: QUESTION_SCHEMA },
+      // FOC-516: the caps below are OUR fail-closed bounds, not the provider's
+      // measured contract (the module header keys answers by question id with
+      // no count cap). They bound the WORST legal seam call: one template key
+      // fanned out over the maximum 12 instances the registry schema allows —
+      // 24 questions/answers for a two-template entry (plan.intent.select.score
+      // asks impact{i} + grounded{i} per interpretation), 12 for a one-template
+      // entry. plan-gates' INSTANCE_CAP=12 stays its own invariant.
+      questions: { type: "object", minProperties: 1, maxProperties: 24, additionalProperties: QUESTION_SCHEMA },
       decisionId: { type: "string", minLength: 1, maxLength: 200 },
       // Serve-time var records for a registry-owned TEMPLATE entry (FOC-452):
       // the caller passes data, never question text — the seam instantiates
       // the entry's templates itself and the registry stays the one owner of
-      // the words the model is asked. One instance ⇒ one fanned-out question,
-      // so the array is capped at the same 12 the question set is.
+      // the words the model is asked. One instance ⇒ one fanned-out question
+      // per {i} template key, so the array is capped at the registry's own
+      // 12-instance maximum (FOC-516: was the question-set cap).
       instances: { type: "array", minItems: 1, maxItems: 12, items: { type: "object" } },
     },
     // Exactly one questions source per call: inline; a registry entry
@@ -251,7 +259,7 @@ export const DECISION_STEP = {
     required: ["answers"],
     additionalProperties: false,
     properties: {
-      answers: { type: "object", minProperties: 1, maxProperties: 12, additionalProperties: { oneOf: [NOUL_ANSWER, CHOICE_ANSWER, SCORE_ANSWER] } },
+      answers: { type: "object", minProperties: 1, maxProperties: 24, additionalProperties: { oneOf: [NOUL_ANSWER, CHOICE_ANSWER, SCORE_ANSWER] } },
     },
   },
 };

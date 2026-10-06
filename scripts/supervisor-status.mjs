@@ -175,7 +175,16 @@ function snapshot(runId, { childFilter, tail }) {
 
   const children = entries.map((entry) => {
     const activity = teeActivity(runId, entry.childId);
-    const silentMs = activity.mtimeMs ? now - activity.mtimeMs : null;
+    // FOC-271: the silence window is wall-clock from the LAST sign of activity.
+    // A resumed turn can start long after the previous turn's last tee write, so
+    // the tee's mtime alone counts the predecessor's silence against the fresh
+    // turn — "stalled" before it ever spoke. The window resets at turn start:
+    // silence runs from the LATEST of the tee write and the live turn's start.
+    const turns = Array.isArray(entry.turns) ? entry.turns : [];
+    const liveTurn = [...turns].reverse().find((t) => t && !t.endedAt) || null;
+    const turnStart = liveTurn?.startedAt ? Date.parse(liveTurn.startedAt) : NaN;
+    const activityMs = Math.max(activity.mtimeMs || 0, Number.isFinite(turnStart) ? turnStart : 0);
+    const silentMs = activityMs ? now - activityMs : null;
     return {
       ...entry,
       events: tailEvents(runId, entry.childId, tail),

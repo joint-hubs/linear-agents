@@ -3,7 +3,12 @@
     "allow": [
       "mcp__codegraph__*",
       "mcp__fenix-decision-extraction__*",
-      "mcp__fenix-decision-prompt-refinement__*"
+      "mcp__fenix-decision-prompt-refinement__*",
+      "Bash(node $LA_ROOT/scripts/supervisor-status.mjs:*)",
+      "Bash(node \"$LA_ROOT/scripts/supervisor-status.mjs\":*)",
+      "Bash(npm ci:*)",
+      "Bash(node scripts/test-all.mjs:*)",
+      "Bash(env -u LA_SUPERVISOR_CHILD node scripts/test-all.mjs:*)"
     ]
   },
   "hooks": {

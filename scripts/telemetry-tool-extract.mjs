@@ -57,10 +57,18 @@ export function createPacer(softMs = 40) {
 /**
  * Stream a JSONL file in chunks, starting at `startOffset` (default 0).
  *
- * Yields one object per chunk: { lines, endOffset, atEof } where `lines` is
- * an array of { raw, offset } (raw = trimmed line text, offset = the line's
+ * Yields one object per chunk: { lines, endOffset, atEof, tail? } where `lines`
+ * is an array of { raw, offset } (raw = trimmed line text, offset = the line's
  * absolute START byte offset) and endOffset is the byte offset after the last
  * complete line in the chunk — the resume point for the next incremental pass.
+ *
+ * The unterminated tail (no trailing newline) is still yielded in `lines` —
+ * full-parse callers want the final line of such a file — but it is EXCLUDED
+ * from endOffset and reported as `tail: { offset, end } | null`, because the
+ * same bytes are exactly a live writer caught mid-append: resuming past a torn
+ * write loses the line that completes it (FOC-597). Consumers commit the tail
+ * (its `end`) only once it parses as a whole record; otherwise the next pass
+ * resumes at `tail.offset`.
  *
  * Offsets are byte-accurate and identical to what a full-file line split would
  * produce (Buffer.byteLength of each raw part, newline included), so events
@@ -121,14 +129,22 @@ export async function* jsonlChunksFrom(filePath, startOffset = 0, opts = {}) {
         scanned = nl + 1;
       }
       if (position >= size) {
-        // End of file: the tail is the final line (files may lack a trailing
-        // newline). Empty tail = the file ended with a newline.
+        // End of file. The tail is the final line (files may lack a trailing
+        // newline) — but it is also exactly the shape of a live writer caught
+        // mid-append, so it is yielded in `lines` (full-parse parity) yet left
+        // OUT of endOffset and reported as `tail` (FOC-597): resuming past a
+        // torn write loses the line that completes it. Empty tail = the file
+        // ended with a newline.
+        text += decoder.end(); // flush a split multi-byte char instead of dropping its bytes (FOC-597)
+        const tailOffset = textStart + consumedBytes;
         const tail = text.slice(lineStart);
-        if (tail.trim()) {
-          lines.push({ raw: tail.trim(), offset: textStart + consumedBytes });
-          consumedBytes += Buffer.byteLength(tail, "utf8");
-        }
-        yield { lines, endOffset: textStart + consumedBytes, atEof: true };
+        if (tail.trim()) lines.push({ raw: tail.trim(), offset: tailOffset });
+        yield {
+          lines,
+          endOffset: tailOffset,
+          atEof: true,
+          tail: tailOffset < size ? { offset: tailOffset, end: size } : null,
+        };
         return;
       }
       if (lines.length > 0) {
@@ -253,7 +269,14 @@ export async function extractToolFacts(transcriptPath, runId, agentKey, opts = {
   if (linkState) {
     for (const [id, result] of linkState.results) resultByToolUseId.set(id, result);
   }
-  let turnIndex = linkState ? linkState.turnIndex : 0;
+  // A scan from byte 0 re-observes every assistant turn in the file, so its
+  // counter restarts at 0: resuming linkState.turnIndex would stamp these
+  // records with the already-advanced EOF count (FOC-599 — the restart-gap
+  // recovery re-scan is exactly that call). Incremental passes (startOffset >
+  // 0) keep carrying the counter, which is what makes turn_index file-global
+  // across a growing transcript; the write-back below then lands on the true
+  // total for the next pass either way.
+  let turnIndex = linkState && startOffset > 0 ? linkState.turnIndex : 0;
   const now = new Date().toISOString();
 
   // FOC-547 (AC2): per-line work (JSON.parse, result-size scans, input

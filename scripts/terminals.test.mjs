@@ -385,6 +385,90 @@ test("listTerminalsAsync: empty runs → empty result, no probe call", async () 
 });
 
 // ---------------------------------------------------------------------------
+// reconcileLiveness — the RECONCILE path's opposite contract (FOC-599)
+// ---------------------------------------------------------------------------
+
+test("reconcileLiveness: a broken checker defers every closure — never guesses dead", async () => {
+  // The panel maps a checker rejection to alive=false (test above) because a
+  // stale row is harmless. Closing a LIVE run is not: on a checker failure the
+  // reconcile path must close nothing this tick and defer to the next one —
+  // the old sync probe's catch answered "dead" and closed live runs on a
+  // broken host.
+  const { closeable, checkerError } = await terminals.reconcileLiveness(
+    [makeRun({ runId: "live", consolePid: 77 }), makeRun({ runId: "live2", consolePid: 78 })],
+    { probeAsync: async () => { throw new Error("powershell broken"); } },
+  );
+  assert(closeable.length === 0, `a broken checker must close nothing, got ${closeable.length}`);
+  assert(checkerError instanceof Error, "the caller needs the failure to log it");
+});
+
+test("reconcileLiveness: alive survives, confirmed-gone closes", async () => {
+  const { closeable, checkerError } = await terminals.reconcileLiveness(
+    [makeRun({ runId: "alive", consolePid: 100 }), makeRun({ runId: "gone", consolePid: 200 })],
+    { probeAsync: async () => new Map([[100, true], [200, false]]) },
+  );
+  assert(checkerError === null, `checkerError=${checkerError}`);
+  assert(closeable.length === 1 && closeable[0].runId === "gone", `closeable=${closeable.map((r) => r.runId)}`);
+});
+
+test("reconcileLiveness: runs without a usable pid are never closeable (the orphan path's business)", async () => {
+  let calls = 0;
+  const { closeable, checkerError } = await terminals.reconcileLiveness(
+    [{ ...makeRun({ runId: "nopid" }), consolePid: null }, makeRun({ runId: "zero", consolePid: 0 })],
+    { probeAsync: async () => { calls++; return new Map(); } },
+  );
+  assert(calls === 0, `no pid-bearing run → no probe, got ${calls} calls`);
+  assert(closeable.length === 0 && checkerError === null, `closeable=${closeable.length} checkerError=${checkerError}`);
+});
+
+test("reconcileLiveness: a pid absent from the answer set is UNKNOWN — deferred, never guessed dead", async () => {
+  // The kernel used to read "not true" as dead, so a map that answered for only
+  // some of the requested pids closed the rest — correctness silently hinged on
+  // the probe's Map-completeness contract (areProcessesAlive pre-fills, so its
+  // own maps are complete; an injected or future probe need not be). An
+  // unanswered pid is UNKNOWN: the whole answer set is untrusted this tick,
+  // exactly like a throwing checker, and the violation surfaces as the error.
+  const { closeable, checkerError } = await terminals.reconcileLiveness(
+    [makeRun({ runId: "answered", consolePid: 100 }), makeRun({ runId: "unanswered", consolePid: 300 })],
+    { probeAsync: async () => new Map([[100, false], [200, true]]) }, // 300 not answered
+  );
+  assert(closeable.length === 0,
+    `an incomplete answer set must close nothing (absent is unknown, not dead), got ${JSON.stringify(closeable.map((r) => r.runId))}`);
+  assert(checkerError instanceof Error && /300/.test(checkerError.message),
+    `the contract violation must surface and name the pid, got ${checkerError}`);
+});
+
+test("reconcileLiveness: a non-boolean answer is a contract violation, not a dead pid", async () => {
+  // Same story as above with a subtler map: every pid present, but one answer
+  // is null (unknown). Only an explicit false closes a run.
+  const { closeable, checkerError } = await terminals.reconcileLiveness(
+    [makeRun({ runId: "alive", consolePid: 100 }), makeRun({ runId: "unknown", consolePid: 200 })],
+    { probeAsync: async () => new Map([[100, true], [200, null]]) },
+  );
+  assert(closeable.length === 0,
+    `a non-boolean answer must close nothing, got ${JSON.stringify(closeable.map((r) => r.runId))}`);
+  assert(checkerError instanceof Error, "the contract violation must surface");
+});
+
+test("telemetry-server: reconcile defers through the kernel, orphan path stays ungated", async () => {
+  // reconcileDeadRuns boots a server on import, so its orchestration is pinned
+  // by shape: the liveness half must stay the shared kernel (whose defer
+  // contract the tests above pin), and the no-pid orphan path must stay outside
+  // every liveness gate — it needs no probe and runs even when the checker broke.
+  const { readFileSync } = await import("node:fs");
+  const { dirname, join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "telemetry-server.mjs"), "utf8");
+  const fn = src.slice(src.indexOf("async function reconcileDeadRuns"), src.indexOf("async function ingestTelemetry"));
+  assert(fn.includes("reconcileLiveness("), "reconcileDeadRuns no longer defers through the shared liveness kernel");
+  assert(fn.includes("checkerError"), "the liveness failure is no longer surfaced to the log");
+  const orphanAt = fn.indexOf("telemetryStore.orphanRunVerdict");
+  const closeableAt = fn.indexOf("for (const run of closeable)");
+  assert(closeableAt > -1 && orphanAt > closeableAt,
+    "the orphan path must stay after the pid closures and outside the liveness gate");
+});
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 

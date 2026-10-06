@@ -437,6 +437,218 @@ async function run() {
     }
   });
 
+  // --- FOC-597: append-torn-then-complete (unterminated EOF tail) -----------
+  // A live writer caught mid-append leaves a torn JSON tail. It must NOT be
+  // consumed: the stored byte_offset stays at the last complete line boundary,
+  // so the line that COMPLETES it on the next append is parsed (no fact loss).
+  await test("(597) torn EOF tail held at the line boundary; the completed line lands next pass", async () => {
+    const tempT = mkdtempSync(join(tmpdir(), "foc-597-"));
+    const savedHome = process.env.LA_TELEMETRY_HOME;
+    const savedDb = process.env.LA_TELEMETRY_DB;
+    const dbPathT = join(tempT, "telemetry.sqlite");
+    // Point the env default at this DB so ingestTranscript's internal
+    // recordToolFact/recordDelegationLink open the same DB as `dbT`.
+    process.env.LA_TELEMETRY_HOME = tempT;
+    process.env.LA_TELEMETRY_DB = dbPathT;
+    try {
+      const dbT = openTelemetryDb(dbPathT);
+      try {
+        const runId = "run-foc-597";
+        const sessionIdT = "session-foc-597";
+        const sourcePath = join(tempT, "lead.jsonl");
+        applyEvent(dbT, makeEvent("run.started", {
+          runId, squad: "dev", startedAt: "2026-09-30T10:00:00.000Z", cwd: "C:/repos/office",
+        }, { runId }));
+        applyEvent(dbT, makeEvent("session.linked", {
+          runId, sessionId: sessionIdT, transcriptPath: sourcePath,
+        }, { runId }));
+
+        const line1 = JSON.stringify({
+          type: "assistant", timestamp: "2026-09-30T10:01:00.000Z", sessionId: sessionIdT,
+          message: { id: "msg-1", model: "deepseek-v4-flash", usage: { input_tokens: 100, output_tokens: 50 } },
+        });
+        const line2 = JSON.stringify({
+          type: "assistant", timestamp: "2026-09-30T10:02:00.000Z", sessionId: sessionIdT,
+          message: { id: "msg-2", model: "deepseek-v4-flash", usage: { input_tokens: 200, output_tokens: 70 } },
+        });
+        // Torn write: line 1 complete, line 2 cut mid-JSON (before its usage).
+        const tornAt = line2.indexOf("usage");
+        assert(tornAt > 0, "fixture: line2 must contain a usage key to tear before");
+        const torn = line2.slice(0, tornAt);
+        let tornParses = true;
+        try { JSON.parse(torn); } catch { tornParses = false; }
+        assert(!tornParses, "fixture: the torn prefix must not parse as JSON");
+        const boundary = Buffer.byteLength(line1 + "\n", "utf8");
+        writeFileSync(sourcePath, line1 + "\n" + torn, "utf8");
+
+        await ingestTranscript(dbT, runId, sourcePath, sessionIdT);
+        const usage1 = dbT.prepare("SELECT COUNT(*) AS c FROM usage_facts WHERE source_path=?").get(sourcePath).c;
+        assertEqual(usage1, 1, "pass 1: only the complete line is ingested");
+        const ts1 = dbT.prepare("SELECT byte_offset FROM transcript_sources WHERE source_path=? AND run_id=?").get(sourcePath, runId);
+        assert(ts1, "pass 1: transcript_sources row missing");
+        assertEqual(ts1.byte_offset, boundary, "AC1: byte_offset held at the last complete line boundary (not past the torn tail)");
+
+        // The writer completes the line — exactly the append AC2 names.
+        writeFileSync(sourcePath, line2.slice(torn.length) + "\n", { flag: "a" });
+        await ingestTranscript(dbT, runId, sourcePath, sessionIdT);
+        const usageRows = dbT.prepare("SELECT source_offset FROM usage_facts WHERE source_path=? ORDER BY source_offset").all(sourcePath);
+        assertEqual(usageRows.length, 2, "AC2: the completed line is ingested on the next pass (no fact loss)");
+        assertEqual(usageRows[1].source_offset, boundary, "AC2: at its own offset (the tail start)");
+        const ts2 = dbT.prepare("SELECT byte_offset FROM transcript_sources WHERE source_path=? AND run_id=?").get(sourcePath, runId);
+        assertEqual(ts2.byte_offset, boundary + Buffer.byteLength(line2 + "\n", "utf8"),
+          "byte_offset converges past the completed line once the tail resolves");
+      } finally {
+        dbT.close();
+      }
+    } finally {
+      process.env.LA_TELEMETRY_HOME = savedHome;
+      process.env.LA_TELEMETRY_DB = savedDb;
+      try { rmSync(tempT, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  // --- FOC-599 (AC4): the incremental path serves the SAME facts -----------
+  // FOC-547's AC4 ("served facts unchanged") was verified only by manual
+  // before/after payload captures (experiments/foc-547-payload-diff.mjs with
+  // the runs/rewards capture drivers). This is its automated form: the live
+  // grow-and-re-ingest path must serve the same runs, usage and costs as one
+  // full parse of the same bytes. The fingerprint aggregates FACTS — ingest
+  // wall-clock stamps are not served facts and stay out of it.
+  await test("(599) AC4: incremental ingest serves the same runs/usage/costs as a full parse", async () => {
+    const jsonl = (ls) => ls.map((l) => JSON.stringify(l)).join("\n") + "\n";
+    const lines = [
+      { type: "user", timestamp: "2026-09-30T11:00:01.000Z", sessionId: "session-ac4", cwd: "C:/repos/fenix", gitBranch: "foc-599" },
+      { type: "assistant", timestamp: "2026-09-30T11:01:00.000Z", sessionId: "session-ac4", message: { id: "m1", model: "deepseek-v4-flash", usage: { input_tokens: 110, output_tokens: 55 } } },
+      { type: "assistant", timestamp: "2026-09-30T11:02:00.000Z", sessionId: "session-ac4", message: { id: "m2", model: "deepseek-v4-flash", usage: { input_tokens: 220, output_tokens: 66 }, content: [{ type: "tool_use", id: "t1", name: "Read", input: { file_path: "/a" } }] } },
+      { type: "user", timestamp: "2026-09-30T11:02:05.000Z", sessionId: "session-ac4", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } },
+      { type: "assistant", timestamp: "2026-09-30T11:03:00.000Z", sessionId: "session-ac4", message: { id: "m3", model: "deepseek-v4-flash", usage: { input_tokens: 330, output_tokens: 77 } } },
+    ];
+    // transcript.progress is per-pass bookkeeping (the skip-cache ledger) — its
+    // row count depends on how many passes ran, not on the transcript's content,
+    // so it is the one event type left out of the compare (same reasoning as the
+    // `ingest.*` counters the manual payload diff strips). Every other event
+    // type stays in — the first run of this test caught precisely this
+    // difference and nothing else.
+    const facts = (dbX) => ({
+      runs: queryRuns(dbX).map((r) => ({ runId: r.runId, status: r.status, totals: r.totals, byAgent: r.byAgent })),
+      usage: dbX.prepare("SELECT COUNT(*) AS n, SUM(input_tokens) AS input, SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cacheRead, SUM(cache_creation_tokens) AS cacheWrite FROM usage_facts").get(),
+      events: dbX.prepare("SELECT event_type, COUNT(*) AS n FROM events WHERE event_type != 'transcript.progress' GROUP BY event_type ORDER BY event_type").all(),
+      tools: dbX.prepare("SELECT tool_name_raw, COUNT(*) AS n, SUM(tool_has_error) AS errors FROM tool_facts GROUP BY tool_name_raw ORDER BY tool_name_raw").all(),
+      costs: dbX.prepare("SELECT COUNT(*) AS n, ROUND(SUM(cost_usd), 9) AS total FROM cost_facts").get(),
+    });
+    const seed = (dbX, dir) => {
+      const sourcePath = join(dir, "lead.jsonl");
+      applyEvent(dbX, makeEvent("run.started", {
+        runId: "run-ac4", squad: "dev", startedAt: "2026-09-30T11:00:00.000Z", cwd: "C:/repos/fenix",
+      }, { runId: "run-ac4" }));
+      applyEvent(dbX, makeEvent("session.linked", {
+        runId: "run-ac4", sessionId: "session-ac4", transcriptPath: sourcePath,
+      }, { runId: "run-ac4" }));
+      return sourcePath;
+    };
+    const savedHome = process.env.LA_TELEMETRY_HOME;
+    const savedDbEnv = process.env.LA_TELEMETRY_DB;
+    try {
+      // Path FULL: one pass over all bytes.
+      const tempF = mkdtempSync(join(tmpdir(), "foc-599-ac4-full-"));
+      process.env.LA_TELEMETRY_HOME = tempF;
+      process.env.LA_TELEMETRY_DB = join(tempF, "telemetry.sqlite");
+      const dbF = openTelemetryDb(process.env.LA_TELEMETRY_DB);
+      let full;
+      try {
+        const sourcePath = seed(dbF, tempF);
+        writeFileSync(sourcePath, jsonl(lines), "utf8");
+        await ingestTranscript(dbF, "run-ac4", sourcePath, "session-ac4");
+        full = facts(dbF);
+        assertEqual(full.usage.n, 3, "fixture must be non-vacuous: three usage facts");
+        assertEqual(full.tools.length, 1, "fixture must be non-vacuous: one tool name");
+        assert(full.costs.n > 0, "fixture must be non-vacuous: priced cost rows");
+      } finally {
+        dbF.close();
+        try { rmSync(tempF, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+
+      // Path INCREMENTAL: the live grow-and-re-ingest sequence.
+      const tempI = mkdtempSync(join(tmpdir(), "foc-599-ac4-incr-"));
+      process.env.LA_TELEMETRY_HOME = tempI;
+      process.env.LA_TELEMETRY_DB = join(tempI, "telemetry.sqlite");
+      const dbI = openTelemetryDb(process.env.LA_TELEMETRY_DB);
+      let incr;
+      try {
+        const sourcePath = seed(dbI, tempI);
+        writeFileSync(sourcePath, jsonl(lines.slice(0, 2)), "utf8");
+        await ingestTranscript(dbI, "run-ac4", sourcePath, "session-ac4");
+        writeFileSync(sourcePath, jsonl(lines.slice(2)), { flag: "a" });
+        await ingestTranscript(dbI, "run-ac4", sourcePath, "session-ac4");
+        incr = facts(dbI);
+        assertEqual(incr.usage.n, 3, "fixture must be non-vacuous on the incremental path too");
+      } finally {
+        dbI.close();
+        try { rmSync(tempI, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+
+      assert(JSON.stringify(incr) === JSON.stringify(full),
+        `served facts diverged between paths:\n  full: ${JSON.stringify(full)}\n  incr: ${JSON.stringify(incr)}`);
+    } finally {
+      process.env.LA_TELEMETRY_HOME = savedHome;
+      process.env.LA_TELEMETRY_DB = savedDbEnv;
+    }
+  });
+
+  // FOC-599 item 7 (nit 3): the unchanged-file skip branch finalizes pending
+  // tool facts and used to DROP the whole in-memory parse state. The next grown
+  // pass then started from a fresh state (workspace.lastWorkspace = null) and
+  // re-emitted workspace.observed for an unchanged cwd:branch — and the store's
+  // dedup key is (run_id, observed_at, cwd), so a re-emit with the NEW line
+  // timestamp lands as a real duplicate row.
+  await test("the skip branch keeps workspace memory across an idle→grow gap (no duplicate workspace.observed)", async () => {
+    const jsonl2 = (ls) => ls.map((l) => JSON.stringify(l)).join("\n") + "\n";
+    const savedHome = process.env.LA_TELEMETRY_HOME;
+    const savedDbEnv = process.env.LA_TELEMETRY_DB;
+    const tempW = mkdtempSync(join(tmpdir(), "foc-599-ws-"));
+    process.env.LA_TELEMETRY_HOME = tempW;
+    process.env.LA_TELEMETRY_DB = join(tempW, "telemetry.sqlite");
+    const dbW = openTelemetryDb(process.env.LA_TELEMETRY_DB);
+    try {
+      const sourcePath = join(tempW, "lead.jsonl");
+      applyEvent(dbW, makeEvent("run.started", {
+        runId: "run-ws", squad: "dev", startedAt: "2026-10-01T09:00:00.000Z", cwd: "C:/repos/fenix",
+      }, { runId: "run-ws" }));
+      applyEvent(dbW, makeEvent("session.linked", {
+        runId: "run-ws", sessionId: "session-ws", transcriptPath: sourcePath,
+      }, { runId: "run-ws" }));
+      const observed = () => dbW
+        .prepare("SELECT COUNT(*) AS n FROM workspace_observations WHERE run_id=?")
+        .get("run-ws").n;
+
+      // Pass 1: one cwd-bearing line → exactly one workspace observation.
+      writeFileSync(sourcePath, jsonl2([
+        { type: "user", timestamp: "2026-10-01T09:00:01.000Z", sessionId: "session-ws", cwd: "C:/repos/fenix", gitBranch: "main" },
+      ]), "utf8");
+      await ingestTranscript(dbW, "run-ws", sourcePath, "session-ws");
+      assertEqual(observed(), 1, "workspace_observations after the first ingest");
+
+      // Pass 2: the file is UNCHANGED → the skip branch (finalize pending tool
+      // facts, then the state swap this test pins).
+      await ingestTranscript(dbW, "run-ws", sourcePath, "session-ws");
+      assertEqual(observed(), 1, "workspace_observations after an unchanged re-ingest");
+
+      // Pass 3: the file grows with the SAME cwd:branch and a new timestamp.
+      // A fresh parse state re-emits workspace.observed here (lastWorkspace is
+      // null again); a kept one stays silent.
+      writeFileSync(sourcePath, jsonl2([
+        { type: "user", timestamp: "2026-10-01T09:05:00.000Z", sessionId: "session-ws", cwd: "C:/repos/fenix", gitBranch: "main" },
+      ]), { flag: "a" });
+      await ingestTranscript(dbW, "run-ws", sourcePath, "session-ws");
+      assertEqual(observed(), 1, "idle→grow re-emitted workspace.observed (the skip branch dropped workspace memory)");
+    } finally {
+      dbW.close();
+      try { rmSync(tempW, { recursive: true, force: true }); } catch { /* ignore */ }
+      process.env.LA_TELEMETRY_HOME = savedHome;
+      process.env.LA_TELEMETRY_DB = savedDbEnv;
+    }
+  });
+
   console.log(`\n${passed} passed, ${skipped} skipped, ${failed} failed`);
   if (failed) console.log(failures.join("\n"));
   exitCode = failed ? 1 : 0;

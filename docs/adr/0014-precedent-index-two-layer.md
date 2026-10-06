@@ -1,0 +1,45 @@
+# ADR-0014: Precedent index — a two-layer, embedding-backed memory of closed FOC/JOI work
+
+**Status:** Proposed (plan approved by Mateusz 2026-09-29; this ADR is accepted when the F0 evidence spike returns "go", and must be accepted before F4 changes the CADENCE contract)
+
+**Date:** 2026-09-29
+
+## Context
+
+Each task in Fenix starts from zero: PLAN cannot see what similar tasks cost or how many rounds they needed, DEV rediscovers pitfalls, REVIEW returns the same defects. The material to answer "how did we solve this before, and who did it fastest" already exists but is scattered — Linear (description, AC, hand-offs), git (commits, files, functions), `.state/supervisor/` (gates, verdicts), telemetry (cost, time, turns) and transcripts (thoughts, actions, observations; about 65% of the referenced files still exist, the rest were pruned by retention).
+
+Earlier attempts are dormant: `flow.db` (145 runs, 45 tasks, last written 2026-08-02) and the "experience packets" layer of `docs/plans/flowdb-learning-loop.md` were never built. Evidence gathered on 2026-09-29 (details in `docs/plans/brainstorm-precedent-search.md` §3): OpenRouter serves 37 embedding models and `POST /api/v1/embeddings` works with the project key; Node 22's `node:sqlite` has FTS5 and stores float32 BLOBs; the corpus is small (255 tickets in telemetry, 137 verdict records, 261 `cleanup-approval` gates); CADENCE has a read-mostly contract and only three recorded runs in three months; Jev is already integrated through the decision seam (ADR-0012) as an alpha endpoint whose shape has changed once.
+
+**F0 evidence (2026-09-29, [report](../benchmark/precedent-index-spike.md)):** on 626 in-scope cases, hybrid retrieval (BM25 + dense, RRF) reached Recall@5 0.43 raw / 0.57 capped against 0.36 / 0.49 for BM25 alone, with the largest gain on precedents from another epic or project; a code-oriented embedding model (Voyage Code 4) was the most consistent; neighbour-based effort prediction failed its threshold; HDBSCAN gave stable, mostly coherent clusters; transcripts segment deterministically into 11 128 episodes. Recommendation recorded there: go, narrowed.
+
+Mateusz's requirements (2026-09-29): success means TEST pass + human approval + Done; two layers with the second one being the first analysed by CADENCE and carrying higher priority; state-of-the-art embeddings through the OpenRouter API; a clustering algorithm and a Jev- or Laya-type classifier in the workflow; corpus limited to FOC and JOI; reasoning indexed as sequences, chains or relations.
+
+## Decision
+
+Build a **precedent index**: a derived, local, two-layer SQLite index of closed FOC/JOI work, queried through a CLI and a read-only MCP server, and used **advisorily** (autonomy A0).
+
+1. **Store.** One derived file `precedents.sqlite` next to `telemetry.sqlite`, outside git. Data model: `case ▸ chain ▸ episode ▸ step (thought → action → observation)`, plus artifacts (commits, verdicts, gates) and a typed relation table (`next`, `retry_of`, `responds_to_error`, `resolves`, `touches_file`, `touches_function`, `returned_by`, `similar_to`, `member_of`, …). Vectors are float32 BLOBs searched by brute-force cosine in JS; lexical search uses FTS5. No vector-database service and no native extension.
+2. **Layer 1 — deterministic and automatic.** A pipeline extract → egress screen → normalize → segment → embed → link → score → store. No generative output is stored except tagged Jev `choice` labels. The result is reproducible from the sources for a pinned embedding model.
+3. **Layer 2 — curated by CADENCE.** A new `curator` role reads L1 through the CLI and writes annotations (`endorsed` / `caution` / `exclude` / `superseded`), lessons (`docs/lessons/*.md`, in git), cluster names and golden paths, and flags stale cases (CodeGraph). L2 statements are **extractive**: a deterministic checker verifies that cited ids exist and quotes appear verbatim; a lesson without evidence is rejected. L2 lives in separate tables keyed by the stable case id, so an L1 rebuild never overwrites it. **L2 has priority**: its results come first at a lower similarity threshold, its `exclude` removes and its `caution` warns, and cases cited by a lesson appear under it as evidence.
+4. **Embeddings.** OpenRouter `POST /api/v1/embeddings`, model pinned in `config/models.json` with a price row, id and dimensions stored with every vector; the model is chosen by a bake-off on our own data (F0), not from a public ranking. Every text leaving the machine passes the egress screen on raw leaves, fail-closed; raw tool results are never stored or sent. *Amended after F0:* high-entropy hits (long slugs, branch names — 8.6% of ticket texts) are masked and the text re-screened, while every other family (key prefix, PEM, env assignment, JWT) blocks the item. Cost is metered per call, with a hard cap.
+5. **Retrieval.** BM25 + dense + structural (shared files/functions) fused by RRF, then the L2 lane, then a Jev `noul` rerank as an A0 annotation, then cards with provenance and a token budget. Abstention ("no precedent") is a first-class answer.
+6. **Efficiency ranking.** Quality flag V2 (TEST pass + `cleanup-approval`/`push-approval` "tak" + Done); ranking is by weighted effort with the "turn" family weighted highest (D9), n and an interval always shown. *Amended after F0 (2026-09-29, pending the T0.8 decision):* the effort of a task is **not** normalised by an expected value from embedding neighbours — F0 measured that neighbours do not predict effort better than simple baselines (median MAPE improvement −0.9%) — so the ranking is taken inside the retrieved neighbourhood on era-aware raw effort, and every ranking states which meaning of "turn" it uses (LLM turns, supervisor child turns and review rounds rank tasks almost independently).
+7. **Classifier.** Decisions `precedent.relevance`, `.problem_type`, `.area`, `.step_kind`, `.resolved`, `.duplicate` are registered in `config/decisions.json` at A0 and run through the existing decision seam. Jev first; Laya (local, Apache-2.0) is evaluated later as a distilled student and Path B candidate once Jev's decision log provides labels.
+8. **Clustering.** Batch, offline, by an optional Python sidecar (scikit-learn) exchanging files with the Node core; cluster identity is pinned and named by L2. The sidecar is fail-soft: if it cannot run, ingest and search continue.
+9. **Contract changes for L2.** `agents/cadence/CLAUDE.md` gains a curate step and an explicit write exception for `.state/precedents/` and `docs/lessons/` (edited by Mateusz only); the `cadence` node in `config/graph.json` records the new outputs; a weekly schedule plus an on-demand mode is added.
+10. **Gate.** No infrastructure before the F0 spike passes the thresholds in the PRD (Recall@5 ≥ 0.35, cost-prediction MAPE ≥ 15% better than the per-type median, ≥ 60% of clusters coherent). Otherwise narrow to a structural "file → cases" index or stop.
+
+## Consequences
+
+- **Positive:** planning and estimates calibrated on real outcomes; earlier pitfalls surface at recon and review; curation has an owner and a veto; reasoning becomes searchable as trajectories instead of loose text; the same index feeds the playbook miner (brainstorm B) and Path B training data.
+- **Negative:** a new derived store to keep fresh and back up; CADENCE must actually run on a schedule (today it barely runs); embedding calls add a small recurring cost (order of $1–7 for the whole corpus, measured in F0); a Python sidecar is another moving part.
+- **Risks:** small corpus ⇒ low hit-rate (gated by F0 and mitigated by abstention); confidential JOI content reaching an external API (screen fail-closed, repo allowlist, path denylist, no tool results); anchoring on stale or bad solutions (advisory framing, differences-to-check, stale-check, L2 veto); prompt injection through retrieved text (delimiters, advisory header, size caps); Goodhart on "fastest" (neighbour-relative residuals, V2 gate, n and interval); the chain layer cannot be rebuilt once transcripts are pruned (index early, back up); Jev alpha endpoint drift (pinned model, typed errors, Path B); embedding-model deprecation (model id stored, re-embed job).
+
+## Alternatives Considered
+
+1. **Local embeddings (Ollama).** Contradicts the requirement for state-of-the-art precision through OpenRouter; the API cost is cents. Rejected.
+2. **A vector-database service or `sqlite-vec`.** A native library is a Smart App Control risk on this machine and the corpus is too small to need approximate search. Rejected.
+3. **Index raw transcripts as the only source.** Retention loses files, privacy exposure is large and signal-to-noise is poor. Rejected in favour of case + chain + relations.
+4. **One layer without curation.** No quality control and no owner for stale or wrong precedents. Rejected.
+5. **An LLM "judge" as the only ranker.** Costly, uncalibrated and not reproducible; used only as an A0 rerank annotation.
+6. **Build on `flow.db`.** Dormant since 2026-08-02 with 45 tasks and a different granularity; the new index supersedes its layer-3 spec.

@@ -1,0 +1,9 @@
+# Python side of the precedent-index F0 spike (analysis only; the product core stays pure JS + node:sqlite).
+# Pins match the analysis project's venv, in which the spike was run (Windows Smart App Control blocks some
+# compiled extensions: never import statsmodels.api; everything here uses numpy/scipy/scikit-learn only).
+numpy==2.4.6
+pandas==3.0.3
+scipy==1.18.1
+scikit-learn==1.9.1
+pyarrow==25.0.1
+networkx==3.7

@@ -12,6 +12,7 @@
  *   comment-replace <id|identifier> --dedup-tag <tag> (--body <text> | --body-file <path>) [--dry-run]
  *   update-description <id|identifier> (--body <text> | --body-file <path>) [--dry-run]
  *   estimate <id|identifier> --estimate <XS|S|M|L|XL> [--dry-run]
+ *   due-date <id|identifier> --date <YYYY-MM-DD> [--clear] [--dry-run]
  *   create-child <parentId|parentIdentifier> --title <text> (--body <text> | --body-file <path>)
  *                [--type feat|bug|spike|tech] [--estimate <XS|S|M|L|XL>] [--label <l> ...] [--dry-run]
  *     Creates a NEW issue as a real Linear sub-issue (parentId) of an EXISTING
@@ -178,6 +179,10 @@ function parseArgs(argv) {
       args.dedupTag = argv[++i];
     } else if (a === "--estimate" && i + 1 < argv.length) {
       args.estimate = argv[++i];
+    } else if (a === "--date" && i + 1 < argv.length) {
+      args.date = argv[++i];
+    } else if (a === "--clear") {
+      args.clear = true;
     } else if (a === "--title" && i + 1 < argv.length) {
       args.title = argv[++i];
     } else if (a === "--type" && i + 1 < argv.length) {
@@ -204,6 +209,7 @@ function printUsage() {
   console.error("  node scripts/linear-ops.mjs comment-replace <id|identifier> --dedup-tag <tag> (--body <text> | --body-file <path>) [--dry-run]");
   console.error("  node scripts/linear-ops.mjs update-description <id|identifier> (--body <text> | --body-file <path>) [--dry-run]");
   console.error("  node scripts/linear-ops.mjs estimate <id|identifier> --estimate <XS|S|M|L|XL> [--dry-run]");
+  console.error("  node scripts/linear-ops.mjs due-date <id|identifier> --date <YYYY-MM-DD> [--clear] [--dry-run]");
   console.error("  node scripts/linear-ops.mjs create-child <parentId|parentIdentifier> --title <text> (--body <text> | --body-file <path>) [--type feat|bug|spike|tech] [--estimate <XS|S|M|L|XL>] [--label <l> ...] [--dry-run]");
 }
 
@@ -773,6 +779,58 @@ async function handleEstimate(identifier, args, dryRunCtx) {
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: due-date — set or clear the issue dueDate
+// ---------------------------------------------------------------------------
+
+const DUE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+async function handleDueDate(identifier, args, dryRunCtx) {
+  const hasDate = typeof args.date === "string" && args.date.length > 0;
+  if (!hasDate && !args.clear) {
+    console.error("Error: --date <YYYY-MM-DD> is required for due-date (or --clear to remove it)");
+    process.exit(2);
+  }
+  if (hasDate && args.clear) {
+    console.error("Error: --date and --clear are mutually exclusive");
+    process.exit(2);
+  }
+  if (hasDate && !DUE_DATE_RE.test(args.date)) {
+    console.error(`Error: invalid date "${args.date}" — expected YYYY-MM-DD`);
+    process.exit(2);
+  }
+  const input = args.clear ? { dueDate: null } : { dueDate: args.date };
+  const shown = args.clear ? "(cleared)" : args.date;
+
+  if (dryRunCtx.dryRun) {
+    const issue = resolveIssueFromFixture(dryRunCtx.fixture, identifier);
+    console.log(`[dry-run:${dryRunCtx.squad}] would set dueDate ${shown} on ${issue.identifier}`);
+    return;
+  }
+
+  const { issue } = await resolveIssueWithTeam(identifier);
+
+  if (args.dryRun) {
+    console.log(`[dry-run] ${issue.identifier}: dueDate → ${shown}`);
+    return;
+  }
+
+  const result = await graphql(
+    `mutation($id:String!,$input:IssueUpdateInput!){
+      issueUpdate(id:$id,input:$input){ success issue{ id identifier dueDate } }
+    }`,
+    { id: issue.id, input },
+  );
+
+  if (result.issueUpdate.success) {
+    const updated = result.issueUpdate.issue;
+    console.log(`${issue.identifier}: dueDate → ${updated.dueDate ?? "(cleared)"}`);
+  } else {
+    console.error(`Error: dueDate update failed for ${issue.identifier}`);
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Subcommand: create-child — real Linear sub-issue under an EXISTING issue
 // ---------------------------------------------------------------------------
 
@@ -932,6 +990,9 @@ async function main() {
       break;
     case "estimate":
       await handleEstimate(identifier, args, dryRunCtx);
+      break;
+    case "due-date":
+      await handleDueDate(identifier, args, dryRunCtx);
       break;
     case "create-child":
       await handleCreateChild(identifier, args, dryRunCtx);

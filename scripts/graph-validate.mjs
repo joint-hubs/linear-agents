@@ -144,20 +144,42 @@ function validateStepFlow(nodeName, steps, flow, problems) {
     return;
   }
   const ids = Object.keys(steps);
+  // FOC-517: two edge types. "sequence" edges still form ONE linear chain and
+  // carry every structural check below; "reentry" edges (gate → earlier step)
+  // are validated separately — declared endpoints, target strictly earlier on
+  // the chain, and a "why" — and are ignored by the linear walk.
+  const seq = flow.filter((e) => e.type === "sequence");
+  const reentry = flow.filter((e) => e.type === "reentry");
   for (const [i, e] of flow.entries()) {
     const label = `stepFlow edge #${i}`;
-    if (e.type !== "sequence") problems.push(`${label} has type "${e.type}", expected "sequence"`);
+    if (e.type !== "sequence" && e.type !== "reentry") {
+      problems.push(`${label} has type "${e.type}", expected "sequence" or "reentry"`);
+    }
     if (!steps[e.from]) problems.push(`${label} references unknown step "${e.from}" as from`);
     if (!steps[e.to]) problems.push(`${label} references unknown step "${e.to}" as to`);
   }
-  if (flow.length !== Math.max(ids.length - 1, 0)) {
+  for (const e of reentry) {
+    if (steps[e.from] && steps[e.to]) {
+      const fromIdx = ids.indexOf(e.from);
+      const toIdx = ids.indexOf(e.to);
+      if (fromIdx !== -1 && toIdx !== -1 && toIdx >= fromIdx) {
+        problems.push(
+          `reentry edge ${e.from} → ${e.to} must target a step strictly earlier on the chain — a reentry that does not go back is a sequence edge in disguise`,
+        );
+      }
+    }
+    if (typeof e.why !== "string" || e.why.trim().length === 0) {
+      problems.push(`reentry edge ${e.from} → ${e.to} needs a "why" — the non-linear edge must carry its justification in the config`);
+    }
+  }
+  if (seq.length !== Math.max(ids.length - 1, 0)) {
     problems.push(
-      `node "${nodeName}" declares ${ids.length} steps but ${flow.length} sequence edges — a linear step chain carries exactly n-1`,
+      `node "${nodeName}" declares ${ids.length} steps but ${seq.length} sequence edges — a linear step chain carries exactly n-1`,
     );
   }
   const inbound = {};
   const outbound = {};
-  for (const e of flow) {
+  for (const e of seq) {
     outbound[e.from] = (outbound[e.from] || 0) + 1;
     inbound[e.to] = (inbound[e.to] || 0) + 1;
   }
@@ -180,7 +202,7 @@ function validateStepFlow(nodeName, steps, flow, problems) {
     const seen = new Set([heads[0]]);
     let cursor = heads[0];
     for (let i = 0; i <= ids.length; i++) {
-      const next = flow.find((e) => e.from === cursor);
+      const next = seq.find((e) => e.from === cursor);
       if (!next) break;
       if (seen.has(next.to)) {
         problems.push("stepFlow contains a cycle — steps execute once, in sequence");

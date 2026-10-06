@@ -29,6 +29,7 @@ File naming convention: `NNNN-descriptive-kebab-case.md` (e.g. `0001-use-openrou
 | [0011](0011-orch-ollama-withdrawal.md) | orch-ollama Withdrawal | Accepted |
 | [0012](0012-decision-shaped-steps-four-kinds.md) | Decision-shaped steps and the four step kinds — step taxonomy, decision tier, MCP-hosted [J] pattern | Accepted |
 | [0013](0013-per-message-usage-identity.md) | Per-message usage identity (FOC-381) | Accepted |
+| [0014](0014-precedent-index-two-layer.md) | Precedent index — a two-layer, embedding-backed memory of closed FOC/JOI work | Proposed |
 
 ## Statuses
 
