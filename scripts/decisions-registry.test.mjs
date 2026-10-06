@@ -78,36 +78,40 @@ const QUESTION_VALIDATE = new Ajv().compile(QUESTION_SCHEMA);
 
 // ── the shipped seed set ────────────────────────────────────────────────────
 const SEED_IDS = [
-  "plan.dor", "plan.intent", "plan.dod", "plan.ac", "plan.spec", "plan.gate1", "plan.decompose",
-  "plan.gate2", "plan.push", "gate.screen", "extraction", "prompt-refinement",
+  "plan.dor", "plan.intent", "plan.intent.select", "plan.dod", "plan.ac", "plan.spec", "plan.gate1", "plan.decompose",
+  "plan.render", "plan.gate2", "plan.push", "gate.screen", "extraction", "prompt-refinement",
   // The six FOC-397 decide-edge entries (graph decisionEdges bindings), the
-  // FOC-451 DoR intake gate bound the same way, and the ten FOC-452 PLAN gate
-  // entries (seam-served transports with NO decide-edge binding and no tier).
+  // FOC-451 DoR intake gate bound the same way, and the FOC-452/FOC-516 PLAN
+  // gate entries (seam-served transports with NO decide-edge binding, no tier).
   "intake.triage_node", "intake.has_acceptance_criteria", "intake.task_size", "review.depth",
   "orchestration.next_step", "monitor.child_state",
   "plan.dor.criteria_testable", "plan.dor.scope_clear", "plan.dor.context_sufficient",
   "plan.labels.type", "plan.labels.risk", "plan.estimate",
-  "plan.needs_adr", "plan.security_sensitive", "plan.duplicate_of", "plan.ac.testable",
+  "plan.needs_adr", "plan.security_sensitive", "plan.duplicate_of", "plan.ac.testable", "plan.intent.select.score",
+  // FOC-517: the gate1 conversation annotation seam — an A0 transport, not a
+  // decide edge (the round settles by the frontman's answer, never this call).
+  "plan.intent.reply",
 ];
-const NODE_IDS = SEED_IDS.slice(0, 9);
+const NODE_IDS = SEED_IDS.slice(0, 11);
 // The decide-edge bindings (config/graph.json decisionEdges): kind-J transport
 // entries that additionally pin their cascade ladder start (tier {cascade, min}).
-const DECIDE_EDGE_IDS = SEED_IDS.slice(12, 18);
-// The FOC-452 PLAN gate entries: seam-served A0 transports that are NOT decide
-// edges — no graph.json binding, no tier pin.
-const PLAN_GATE_IDS = SEED_IDS.slice(18);
-const TRANSPORT_IDS = SEED_IDS.slice(9);
+const DECIDE_EDGE_IDS = SEED_IDS.slice(14, 20);
+// The FOC-452/FOC-516/FOC-517 PLAN gate + seam entries: seam-served A0
+// transports that are NOT decide edges — no graph.json binding, no tier pin.
+const PLAN_GATE_IDS = SEED_IDS.slice(20);
+const TRANSPORT_IDS = SEED_IDS.slice(11);
 // OUT of scope per the FOC-448 contract — they enter when their owners land.
 const OUT_OF_SCOPE = ["egress.contains_secret", "test.failure.cause"];
 const AUTONOMY_MAP = {
-  "plan.dor": "A0", "plan.intent": null, "plan.dod": null, "plan.ac": null, "plan.spec": null, "plan.gate1": null,
-  "plan.decompose": "A0", "plan.gate2": null, "plan.push": null,
+  "plan.dor": "A0", "plan.intent": null, "plan.intent.select": null, "plan.dod": null, "plan.ac": null, "plan.spec": null, "plan.gate1": null,
+  "plan.decompose": "A0", "plan.render": null, "plan.gate2": null, "plan.push": null,
   "gate.screen": "A0", "extraction": "A0", "prompt-refinement": "A0",
   "intake.triage_node": "A0", "intake.has_acceptance_criteria": "A0", "intake.task_size": "A0", "review.depth": "A0",
   "orchestration.next_step": "A0", "monitor.child_state": "A0",
   "plan.dor.criteria_testable": "A0", "plan.dor.scope_clear": "A0", "plan.dor.context_sufficient": "A0",
   "plan.labels.type": "A0", "plan.labels.risk": "A0", "plan.estimate": "A0",
   "plan.needs_adr": "A0", "plan.security_sensitive": "A0", "plan.duplicate_of": "A0", "plan.ac.testable": "A0",
+  "plan.intent.select.score": "A0", "plan.intent.reply": "A0",
 };
 const METRICS_BY_ID = {
   "plan.dor": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
@@ -116,10 +120,12 @@ const METRICS_BY_ID = {
   extraction: ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
   "prompt-refinement": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
   "plan.intent": ["durationMs", "inputTokens", "outputTokens", "cost"],
+  "plan.intent.select": ["durationMs", "inputTokens", "outputTokens", "cost"],
   "plan.ac": ["durationMs", "inputTokens", "outputTokens", "cost"],
   "plan.dod": ["durationMs", "inputTokens", "outputTokens", "cost"],
   "plan.spec": ["durationMs", "inputTokens", "outputTokens", "cost"],
   "plan.gate1": [],
+  "plan.render": [],
   "plan.gate2": [],
   "plan.push": [],
   "plan.dor.criteria_testable": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
@@ -132,6 +138,8 @@ const METRICS_BY_ID = {
   "plan.security_sensitive": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
   "plan.duplicate_of": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
   "plan.ac.testable": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.intent.select.score": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
+  "plan.intent.reply": ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"],
 };
 for (const id of DECIDE_EDGE_IDS) {
   METRICS_BY_ID[id] = ["durationMs", "inputTokens", "outputTokens", "cost", "confidence"];
@@ -149,7 +157,7 @@ await test("registry loads, passes REGISTRY_SCHEMA directly, and carries _doc + 
   eq(Object.keys(entries).length, SEED_IDS.length, "entry count");
 });
 
-await test("the seed set is exactly the twenty-eight contracted ids", () => {
+await test("the seed set is exactly the thirty-two contracted ids", () => {
   deepEq([...Object.keys(entries)].sort(), [...SEED_IDS].sort(), "id set");
 });
 
@@ -213,6 +221,8 @@ const SERVING_BY_ID = {
   "plan.security_sensitive": SEAM_SERVING,
   "plan.duplicate_of": SEAM_SERVING,
   "plan.ac.testable": SEAM_SERVING,
+  "plan.intent.select.score": SEAM_SERVING,
+  "plan.intent.reply": SEAM_SERVING,
 };
 
 await test("serving is pinned per kind-J entry: enforced seam paths + the declared inline boundary", () => {
@@ -253,16 +263,18 @@ console.log("\ndecisions-registry: D7 node entries (design doc §3.1–§3.12, v
 const D7 = {
   "plan.dor": { reads: ["inbox.entry", "repoState.pinned"], tier: { cascade: true, min: 1 }, failure: "escalate", writes: "run-record" },
   "plan.intent": { reads: ["inbox.entry", "plan.dor.gaps", "intake.taskType", "gate.plan.gate1.answers", "gate.plan.gate1.corrections"], tier: "cheap", failure: "stop", writes: "run-record" },
-  "plan.dod": { reads: ["inbox.entry"], tier: "cheap", failure: "stop", writes: "run-record" },
-  "plan.ac": { reads: ["inbox.entry", "features.list"], tier: "cheap", failure: "stop", writes: "run-record" },
-  "plan.spec": { reads: ["inbox.entry", "plan.dod.definitionOfDone", "plan.ac.acs", "repoState.pinned"], tier: "agent", failure: "escalate", writes: "run-record" },
-  "plan.gate1": { reads: ["plan.spec.record"], tier: null, failure: "stop", writes: "graph-state" },
+  "plan.intent.select": { reads: ["plan.intent.record", "gate.plan.gate1.answers", "gate.plan.gate1.corrections"], tier: "cheap", failure: "stop", writes: "run-record" },
+  "plan.dod": { reads: ["plan.intent.confirmed"], tier: "cheap", failure: "stop", writes: "run-record" },
+  "plan.ac": { reads: ["plan.intent.confirmed", "features.list"], tier: "cheap", failure: "stop", writes: "run-record" },
+  "plan.spec": { reads: ["plan.intent.confirmed", "inbox.entry", "plan.dod.definitionOfDone", "plan.ac.acs", "repoState.pinned"], tier: "agent", failure: "escalate", writes: "run-record" },
+  "plan.gate1": { reads: ["plan.intent.select.record", "plan.intent.record"], tier: null, failure: "stop", writes: "graph-state" },
   "plan.decompose": { reads: ["plan.spec.record", "plan.ac.acs"], tier: { cascade: true, min: 1 }, failure: "escalate", writes: "run-record" },
-  "plan.gate2": { reads: ["plan.decompose.record", "gate.plan.gate1.record"], tier: null, failure: "stop", writes: "graph-state" },
-  "plan.push": { reads: ["plan.decompose.record", "gate.plan.gate2.record"], tier: null, failure: "stop", writes: "run-record" },
+  "plan.render": { reads: ["plan.dod.definitionOfDone", "plan.ac.acs", "plan.spec.summary", "plan.decompose.record"], tier: null, failure: "stop", writes: "run-record" },
+  "plan.gate2": { reads: ["plan.spec.record", "plan.decompose.record", "gate.plan.gate1.record", "plan.render.issueText"], tier: null, failure: "stop", writes: "graph-state" },
+  "plan.push": { reads: ["plan.decompose.record", "plan.render.issueText", "gate.plan.gate2.record"], tier: null, failure: "stop", writes: "run-record" },
 };
 
-await test("the nine node entries carry the full D7 contract; transports carry no D7 fields", () => {
+await test("the eleven node entries carry the full D7 contract; transports carry no D7 fields", () => {
   for (const id of NODE_IDS) {
     const e = entries[id];
     deepEq(e.reads, D7[id].reads, `reads of ${id}`);
@@ -332,7 +344,11 @@ await test("the PLAN gates are A0 seam transports with no tier pin and no D7 fie
     for (const field of ["reads", "output", "failure", "writes", "prompt", "tier"]) {
       if (e[field] !== undefined) fail(`${id}: a PLAN gate is not a decide edge — it must not carry ${field}`);
     }
-    eq(Object.keys(e.questions).length, 1, `one question on ${id}`);
+    // plan.intent.select.score asks TWO questions per instance (impact{i} +
+    // grounded{i}, FOC-516) and plan.intent.reply asks TWO per round (reply +
+    // touched{i}, FOC-517); every other PLAN gate asks exactly one.
+    const qCount = id === "plan.intent.select.score" || id === "plan.intent.reply" ? 2 : 1;
+    eq(Object.keys(e.questions).length, qCount, `${qCount} question(s) on ${id}`);
   }
 });
 
@@ -378,11 +394,15 @@ await test("plan.estimate is a score over the t-shirt anchors of labels.json", (
   }
 });
 
-await test("the two per-instance PLAN gates are templates; the eight concrete gates resolve", () => {
+await test("the four per-instance PLAN gates are templates; the eight concrete gates resolve", () => {
   deepEq(Object.keys(entries["plan.duplicate_of"].questions), ["cand{i}"], "duplicate template key");
   deepEq(Object.keys(entries["plan.ac.testable"].questions), ["ac{i}"], "ac template key");
+  deepEq(Object.keys(entries["plan.intent.select.score"].questions), ["impact{i}", "grounded{i}"], "select template keys (FOC-516: two verdicts per interpretation)");
+  deepEq(Object.keys(entries["plan.intent.reply"].questions), ["reply", "touched{i}"], "reply template keys (FOC-517: classification + per-item touched verdicts)");
   throwsCode(() => resolveEntryQuestions("plan.duplicate_of"), "invalid_input", "instantiate via the registry loader");
   throwsCode(() => resolveEntryQuestions("plan.ac.testable"), "invalid_input", "instantiate via the registry loader");
+  throwsCode(() => resolveEntryQuestions("plan.intent.select.score"), "invalid_input", "instantiate via the registry loader");
+  throwsCode(() => resolveEntryQuestions("plan.intent.reply"), "invalid_input", "instantiate via the registry loader");
 
   const dup = instantiateEntryQuestions("plan.duplicate_of", [{ key: "FEN-10", title: "Gantt snapshot lib" }]);
   deepEq(Object.keys(dup), ["cand0"], "candidate fan-out");
@@ -398,13 +418,35 @@ await test("the two per-instance PLAN gates are templates; the eight concrete ga
     fail("criterion id/text substituted into the instructions");
   }
 
-  const concrete = PLAN_GATE_IDS.filter((id) => id !== "plan.duplicate_of" && id !== "plan.ac.testable");
+  const score = instantiateEntryQuestions("plan.intent.select.score", [{ id: "IN-3", claim: "Rozumiem, że X.", source: "inferred" }]);
+  deepEq(Object.keys(score), ["impact0", "grounded0"], "both template keys fan out per instance");
+  eq(score.impact0.type, "noul", "impact type");
+  eq(score.grounded0.type, "noul", "grounded type");
+  for (const key of ["impact0", "grounded0"]) {
+    if (!score[key].instructions.includes("IN-3") || !score[key].instructions.includes("Rozumiem, że X.") || !score[key].instructions.includes("inferred")) {
+      fail(`${key}: instance vars substituted into the instructions`);
+    }
+    deepEq(Object.keys(score[key].criteria), ["true", "false"], `${key} criteria`);
+  }
+
+  const concrete = PLAN_GATE_IDS.filter((id) => !["plan.duplicate_of", "plan.ac.testable", "plan.intent.select.score", "plan.intent.reply"].includes(id));
   eq(concrete.length, 8, "eight concrete gates");
   for (const id of concrete) {
     const resolved = resolveEntryQuestions(id);
     eq(resolved.autonomy, "A0", `autonomy of ${id}`);
     eq(resolved.criteriaVersion, 1, `criteriaVersion of ${id}`);
   }
+
+  // FOC-516: a full 12-item map fans out to 24 questions — the seam's own
+  // question/answer caps were raised 12 → 24 to let one template key pair
+  // serve the maximum registry schema allows (DECISION_STEP.inputSchema).
+  const full = instantiateEntryQuestions(
+    "plan.intent.select.score",
+    Array.from({ length: 12 }, (_, i) => ({ id: `IN-${i + 1}`, claim: `claim ${i}`, source: "inferred" })),
+  );
+  eq(Object.keys(full).length, 24, "12 instances x 2 template keys = 24 questions");
+  eq(DECISION_STEP.inputSchema.properties.questions.maxProperties, 24, "seam question cap raised for the two-template entry (FOC-516)");
+  eq(DECISION_STEP.outputSchema.properties.answers.maxProperties, 24, "seam answer cap raised with it (FOC-516)");
 });
 
 await test("every node output schema compiles and accepts a valid sample / rejects an invalid one", () => {
@@ -417,8 +459,13 @@ await test("every node output schema compiles and accepts a valid sample / rejec
     "plan.dod": { ok: { definitionOfDone: [{ check: "c", kind: "test", bounded: true }] }, bad: { definitionOfDone: [] } },
     "plan.ac": { ok: { acs: [{ id: "AC-1", text: "t", kind: "behaviour", evidence: "test" }] }, bad: { acs: [{ id: "AC-1", text: "t", kind: "behaviour" }] } },
     "plan.spec": { ok: { briefs: ["b"], adr: "a", summary: "s" }, bad: { briefs: "b", adr: "a", summary: "s" } },
-    "plan.gate1": { ok: { approved: true }, bad: { approved: "yes" } },
+    "plan.intent.select": {
+      ok: { mapVersion: 1, questions: [], confirmations: [{ id: "IN-2", claim: "c", impactProbability: 0.9 }], understood: [{ id: "IN-3", claim: "c", groundedProbability: 0.8 }], assumptions: [{ id: "IN-4", claim: "c", impactProbability: 0.2, reason: "policy route" }] },
+      bad: { mapVersion: 1, questions: [], confirmations: [], understood: [], assumptions: [{ id: "IN-4", claim: "c", impactProbability: 2, reason: "out of range" }] },
+    },
+    "plan.gate1": { ok: { approved: true, answer: "ok" }, bad: { approved: "yes" } },
     "plan.gate2": { ok: { approved: true }, bad: {} },
+    "plan.render": { ok: { issueText: "# Plan\n\nDeterministic render." }, bad: { issueText: "" } },
     "plan.decompose": { ok: { tasks: [{ title: "t", size: "small", labels: [], relations: [] }] }, bad: { tasks: [] } },
     "plan.push": { ok: { epicId: "FEN-1", childrenIds: ["FEN-2"], handoffCommentPosted: false }, bad: { epicId: "FEN-1", childrenIds: ["FEN-2"], handoffCommentPosted: false, extra: 1 } },
   };

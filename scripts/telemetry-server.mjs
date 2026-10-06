@@ -38,7 +38,7 @@ import {
   reloadKickoffTemplates,
 } from './launch.mjs';
 import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools, validateProvidersPatch } from './squad-config.mjs';
-import { listTerminalsAsync, flashWindowByPid, focusWindowByPid, stopByPid, areProcessesAlive } from './terminals.mjs';
+import { listTerminalsAsync, flashWindowByPid, focusWindowByPid, stopByPid, areProcessesAlive, reconcileLiveness } from './terminals.mjs';
 import {
   buildPromptTree,
   readRoleDoc,
@@ -366,20 +366,14 @@ async function reconcileDeadRuns() {
 
   try {
     const active = withManifestConsolePid(await telemetryRuns()).filter((r) => !r.endedAt);
-    const pidRuns = active.filter((r) => Number.isInteger(r.consolePid) && r.consolePid > 0);
-    let aliveMap = null;
-    if (pidRuns.length > 0) {
-      try {
-        aliveMap = await areProcessesAlive(pidRuns.map((r) => r.consolePid));
-      } catch (error) {
-        // Broken checker — skip the pid-based closures this tick; the orphan
-        // path below still runs (it needs no probe). Next tick retries.
-        console.error(`[telemetry] reconcile liveness check failed: ${error.message}`);
-      }
+    // Liveness half is terminals.reconcileLiveness (FOC-599): its contract is
+    // that a broken checker closes NOTHING this tick (defer to the next one).
+    // The orphan path below needs no probe and runs either way.
+    const { closeable, checkerError } = await reconcileLiveness(active);
+    if (checkerError) {
+      console.error(`[telemetry] reconcile liveness check failed: ${checkerError.message}`);
     }
-    for (const run of pidRuns) {
-      if (!aliveMap) break; // checker failed above — defer, never guess "dead"
-      if (aliveMap.get(run.consolePid) === true) continue;
+    for (const run of closeable) {
       close(run, run.lastActivityAt, `console pid ${run.consolePid} gone`);
     }
     for (const run of active) {
@@ -582,8 +576,13 @@ async function fetchLinearQueue(workspace) {
 
 // Write the wrapper to .state/ (gitignored) and return its path. One stable
 // name per (squad, taskId) — re-launching overwrites, no file accumulation.
+// This is the ONE state-root writer in the server's import graph (the rest of
+// the boot/tick path only reads .state and writes the telemetry/rewards stores,
+// which a bench redirects to tmp), so it is where LA_STATE_READ_ONLY bites
+// (FOC-599 item 6).
 async function writeLaunchBat(squad, taskId, kickoff, targetRepo) {
   const wrapper = join(root, '.state', `launch-${squad}-${taskId}.bat`);
+  telemetryStore.assertStateWritable(wrapper, 'a launch wrapper');
   await writeFile(wrapper, buildLaunchBat(squad, taskId, kickoff, root, targetRepo), 'utf8');
   return wrapper;
 }

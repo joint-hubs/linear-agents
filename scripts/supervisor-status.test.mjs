@@ -81,7 +81,7 @@ const parse = (r) => {
 
 // A child entry written by hand, so the test controls status and tee content
 // without needing a live process.
-function seedChild(runId, { childId = "dev-1", status: st = "running", costUsd = 0, lines = [] } = {}) {
+function seedChild(runId, { childId = "dev-1", status: st = "running", costUsd = 0, lines = [], turnStartedAt = new Date().toISOString() } = {}) {
   writeRegistry(runId, {
     runId,
     children: {
@@ -92,7 +92,7 @@ function seedChild(runId, { childId = "dev-1", status: st = "running", costUsd =
         sessionId: "sess-1",
         status: st,
         tee: join("children", `${childId}.jsonl`),
-        turns: [{ pid: 999999, startedAt: new Date().toISOString(), endedAt: null, exitCode: null }],
+        turns: [{ pid: 999999, startedAt: turnStartedAt, endedAt: null, exitCode: null }],
         costUsd,
         worktree: ROOT,
       },
@@ -218,12 +218,15 @@ console.log("\nstall is wall-clock, not a poll count");
 
 test("a silent live child trips the stall threshold", () => {
   const runId = fixtureRun();
+  // Backdate the tee AND the turn (FOC-271: silence runs from the latest of
+  // both) well past 5 x base poll (base 100 ms here -> 500 ms). The scenario is
+  // a turn that has been running for a minute without a byte.
+  const old = new Date(Date.now() - 60_000);
   const childId = seedChild(runId, {
     status: "running",
     lines: [{ type: "assistant", message: { content: [{ type: "text", text: "hi" }] } }],
+    turnStartedAt: old.toISOString(),
   });
-  // Backdate the tee well past 5 x base poll (base 100 ms here -> 500 ms).
-  const old = new Date(Date.now() - 60_000);
   utimesSync(teeAbsPath(runId, childId), old, old);
 
   const out = parse(status(runId, [], { LA_SUPERVISOR_POLL_MS: "100" }));
@@ -233,8 +236,8 @@ test("a silent live child trips the stall threshold", () => {
 
 test("the threshold scales with the base timeout — one constant, not two", () => {
   const runId = fixtureRun();
-  const childId = seedChild(runId, { status: "running", lines: [{ type: "system", subtype: "init" }] });
   const old = new Date(Date.now() - 60_000);
+  const childId = seedChild(runId, { status: "running", lines: [{ type: "system", subtype: "init" }], turnStartedAt: old.toISOString() });
   utimesSync(teeAbsPath(runId, childId), old, old);
 
   // Same 60 s of silence, a base big enough that 5x has not elapsed.
@@ -249,8 +252,8 @@ test("stall is wall-clock, so backoff cannot stretch the kill SLA", () => {
   // sooner. The threshold is 5 x the BASE timeout in wall-clock, and the number
   // of calls that happened in between is irrelevant.
   const runId = fixtureRun();
-  const childId = seedChild(runId, { status: "running", lines: [{ type: "system", subtype: "init" }] });
   const old = new Date(Date.now() - 60_000);
+  const childId = seedChild(runId, { status: "running", lines: [{ type: "system", subtype: "init" }], turnStartedAt: old.toISOString() });
   utimesSync(teeAbsPath(runId, childId), old, old);
 
   // Base 10 s => threshold 50 s. 60 s of silence is past it.
@@ -271,6 +274,30 @@ test("a finished child is silent by definition, never stalled", () => {
   utimesSync(teeAbsPath(runId, childId), old, old);
   const out = parse(status(runId, [], { LA_SUPERVISOR_POLL_MS: "100" }));
   if (out.children[0].stalled) fail("a completed child was reported as stalled");
+});
+
+test("a turn that just started is never stalled on its predecessor's silence", () => {
+  // FOC-271 (2). A resume can start long after the previous turn's last tee
+  // write — the observed case was a child resumed >10 min later showing
+  // `stalled: true` from its first snapshot until its first new byte. Silence
+  // is wall-clock from the LATEST of the tee write and the live turn's start,
+  // so a fresh turn is quiet-but-alive, not stalled.
+  const runId = fixtureRun();
+  const childId = seedChild(runId, {
+    status: "running",
+    lines: [{ type: "system", subtype: "init" }],
+    turnStartedAt: new Date().toISOString(),
+  });
+  // The tee still holds the PREVIOUS turn's last write: 20 min old, far past
+  // any threshold this test could set.
+  const old = new Date(Date.now() - 1_200_000);
+  utimesSync(teeAbsPath(runId, childId), old, old);
+
+  const out = parse(status(runId, [], { LA_SUPERVISOR_POLL_MS: "100" }));
+  if (out.children[0].stalled) fail(`a just-started turn was reported stalled (silentMs=${out.children[0].silentMs})`);
+  if (!(out.children[0].silentMs < 60_000)) {
+    fail(`silentMs=${out.children[0].silentMs} still counts the predecessor's silence`);
+  }
 });
 
 // ── wait mode ────────────────────────────────────────────────────────────────
@@ -371,8 +398,8 @@ test("a gate already pending before the wait does not fire it", () => {
 
 test("names stalled children on every wait result", () => {
   const runId = fixtureRun();
-  const childId = seedChild(runId, { status: "running", lines: [{ type: "system", subtype: "init" }] });
   const old = new Date(Date.now() - 60_000);
+  const childId = seedChild(runId, { status: "running", lines: [{ type: "system", subtype: "init" }], turnStartedAt: old.toISOString() });
   utimesSync(teeAbsPath(runId, childId), old, old);
 
   const out = parse(status(runId, ["--wait", "--timeout-ms", "1000"], { LA_SUPERVISOR_POLL_MS: "100" }));

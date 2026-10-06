@@ -1943,12 +1943,20 @@ function applyTranscriptProgress(db, event) {
   // NOT NULL DEFAULT '' — unattributed events use the sentinel '' so the
   // upsert matches the legacy row keyed by (path, '').
   const runId = event.runId || payload.runId || "";
+  // FOC-598: `resetOffset` marks a shrink/rotation pass — the transcript was
+  // replaced by a SMALLER incarnation that reuses the low offsets. Taking MAX()
+  // there would retain the old incarnation's byte_offset/file_size forever (the
+  // new file never regrows past them), so every later tick misses the
+  // unchanged-file skip and full-re-parses from 0. On reset the pass's own
+  // offsets win verbatim; every other pass keeps the MAX() merge.
+  const offsetMerge = payload.resetOffset
+    ? "byte_offset=excluded.byte_offset, file_size=excluded.file_size"
+    : "byte_offset=MAX(excluded.byte_offset, transcript_sources.byte_offset), file_size=MAX(excluded.file_size, transcript_sources.file_size)";
   db.prepare(
     `INSERT INTO transcript_sources (source_path, session_id, run_id, byte_offset, file_size, modified_at, parse_status, last_error, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(source_path, run_id) DO UPDATE SET session_id=COALESCE(excluded.session_id, transcript_sources.session_id),
-       byte_offset=MAX(excluded.byte_offset, transcript_sources.byte_offset),
-       file_size=MAX(excluded.file_size, transcript_sources.file_size),
+       ${offsetMerge},
        modified_at=CASE WHEN excluded.modified_at > transcript_sources.modified_at THEN excluded.modified_at ELSE transcript_sources.modified_at END,
        parse_status=excluded.parse_status, last_error=excluded.last_error, updated_at=excluded.updated_at`,
   ).run(event.source.path, payload.sessionId || null, runId, payload.byteOffset || 0,
@@ -2987,6 +2995,19 @@ export function queryPatterns(db, filters = {}) {
   return { stepStats, repeats, bounces, failures, costBasis: COST_BASIS_RAW, costBasisNote: COST_BASIS_RAW_NOTE };
 }
 
+/**
+ * LA_STATE_READ_ONLY=1 declares the state tree READ-ONLY INPUT for this
+ * process (FOC-599 item 6): every state-root write must call this first and
+ * gets a throw instead of a write. The bench sets the flag in its child env —
+ * its "that tree is read-only input" claim is enforced at the write, not
+ * asserted in a comment. Unset (the default), this is a no-op: zero behavior
+ * change outside read-only runs.
+ */
+export function assertStateWritable(targetPath, what = "the state tree") {
+  if (process.env.LA_STATE_READ_ONLY !== "1") return;
+  throw new Error(`LA_STATE_READ_ONLY=1: refusing to write ${what} (${targetPath})`);
+}
+
 export function exportTelemetry(db, format, destination) {
   ensureParent(destination);
   if (format === "sqlite") {
@@ -3148,11 +3169,15 @@ export async function recordToolFact(record, options = {}) {
       // is also upgradable: the old full-file pass wrote it finally, but under
       // incremental parsing it is just "no result seen so far".
       if (toolResultState) {
+        // Scope the upgrade to THIS run's row: the PK is (run_id, tool_fact_id)
+        // and tool_fact_id is run-agnostic (sha1 of path:offset:tool_index), so
+        // the same id legitimately exists under other runs (FOC-599 — matching
+        // tool_fact_id alone landed one run's outcome on every run's row).
         const upgraded = db.prepare(
           `UPDATE tool_facts
              SET tool_result_state = ?, tool_result_bytes = ?, tool_result_id = ?, tool_has_error = ?
-           WHERE tool_fact_id = ? AND (tool_result_state IS NULL OR tool_result_state = 'missing')`,
-        ).run(toolResultState, toolResultBytes, toolResultId, hasError, toolFactId);
+           WHERE tool_fact_id = ? AND run_id = ? AND (tool_result_state IS NULL OR tool_result_state = 'missing')`,
+        ).run(toolResultState, toolResultBytes, toolResultId, hasError, toolFactId, record.run_id);
         if (upgraded.changes > 0) return { recorded: false, upgraded: true, reason: "upgraded", id: toolFactId };
       }
       return { recorded: false, reason: "duplicate" };

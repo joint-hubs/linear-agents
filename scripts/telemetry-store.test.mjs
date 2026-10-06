@@ -26,6 +26,7 @@ import {
   recordToolFact,
   resolvePrice,
   orphanRunVerdict,
+  assertStateWritable,
   ORPHAN_RUN_IDLE_MS,
   SCHEMA_VERSION,
   MIGRATION_VERSIONS,
@@ -783,6 +784,34 @@ test("recordToolFact deduplicates on same source_path+source_offset+tool_index",
   assert(r2.reason === "duplicate", `reason=${r2.reason}`);
 });
 
+test("recordToolFact upgrade is scoped to its own run (PK is run_id+tool_fact_id)", async () => {
+  // The upgrade UPDATE matched tool_fact_id alone while the PK is
+  // (run_id, tool_fact_id). tool_fact_id is sha1(source_path:source_offset:tool_index)
+  // — run-agnostic by construction — so the same id legitimately exists under
+  // several runs (a re-ingest, a shared transcript): one run's outcome landed on
+  // EVERY run's pending row (FOC-599).
+  applyEvent(db, makeEvent("run.started", { runId: "test-b", squad: "dev", startedAt: "2026-07-26T19:30:00.000Z" },
+    { runId: "test-b", observedAt: "2026-07-26T19:30:00.000Z", sourceKind: "test" }));
+  const identity = {
+    agent_key: "x", tool_name_raw: "Bash", tool_input: "{}",
+    turn_index: 0, source_path: "/tmp/y", source_offset: 0, tool_index: 0,
+  };
+  const a1 = await recordToolFact({ ...identity, run_id: "test" }, { dbPath });
+  const b1 = await recordToolFact({ ...identity, run_id: "test-b" }, { dbPath });
+  assert(a1.recorded === true && b1.recorded === true, `both runs must record their own row: ${a1.recorded}/${b1.recorded}`);
+  assert(a1.id === b1.id, `fixture broken: the identity must collide across runs (${a1.id} vs ${b1.id})`);
+
+  const b2 = await recordToolFact({
+    ...identity, run_id: "test-b", tool_result_state: "ok", tool_result_bytes: 4, tool_result_full: "done",
+  }, { dbPath });
+  assert(b2.upgraded === true, `test-b's pending row must upgrade: ${JSON.stringify(b2)}`);
+
+  const rowB = db.prepare("SELECT tool_result_state FROM tool_facts WHERE run_id='test-b' AND tool_fact_id=?").get(b1.id);
+  const rowA = db.prepare("SELECT tool_result_state FROM tool_facts WHERE run_id='test' AND tool_fact_id=?").get(a1.id);
+  assert(rowB.tool_result_state === "ok", `test-b row=${rowB.tool_result_state}`);
+  assert(rowA.tool_result_state == null, `test's row must stay pending — the upgrade crossed runs, got ${rowA.tool_result_state}`);
+});
+
 test("recordDelegationLink deduplicates on same parent_run_id+parent_agent+child_agent+observed_at", async () => {
   const d1 = await recordDelegationLink({
     parent_run_id: "test", parent_agent: "lead", child_agent: "implementer",
@@ -1007,6 +1036,32 @@ test("orphanRunVerdict: consolePid 0 and negatives count as no pid", () => {
   for (const pid of [0, -1]) {
     const v = orphanRunVerdict({ runId: "r", consolePid: pid, lastActivityAt: ago(20 * 3600_000) }, NOW);
     assert(v != null, `consolePid=${pid} must fall through to the orphan path`);
+  }
+});
+
+test("assertStateWritable: LA_STATE_READ_ONLY=1 refuses a state-tree write", () => {
+  // The bench's "the .state tree is read-only input" claim used to live in a
+  // comment (FOC-599 item 6). The flag makes it enforceable at the write —
+  // writeLaunchBat (the one state-root writer in telemetry-server's import
+  // graph) calls this first. Unset it must be a no-op: zero behavior change
+  // outside read-only runs.
+  const saved = process.env.LA_STATE_READ_ONLY;
+  try {
+    delete process.env.LA_STATE_READ_ONLY;
+    assertStateWritable("/x/.state/launch-dev-FOC-1.bat", "a launch wrapper"); // must not throw
+    process.env.LA_STATE_READ_ONLY = "1";
+    let threw = null;
+    try {
+      assertStateWritable("/x/.state/launch-dev-FOC-1.bat", "a launch wrapper");
+    } catch (err) {
+      threw = err;
+    }
+    assert(threw instanceof Error, "a read-only run must refuse the write");
+    assert(/LA_STATE_READ_ONLY/.test(threw?.message || "") && /launch-dev-FOC-1\.bat/.test(threw?.message || ""),
+      `the refusal must name the flag and the target, got: ${threw && threw.message}`);
+  } finally {
+    if (saved === undefined) delete process.env.LA_STATE_READ_ONLY;
+    else process.env.LA_STATE_READ_ONLY = saved;
   }
 });
 

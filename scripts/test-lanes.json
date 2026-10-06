@@ -153,11 +153,27 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "plan-duplicate-retrieval.test.mjs",
+      "reason": "isolation audit FOC-519: no file writes at all, no ports, no socket binds; the Linear transport is an injected fetchPage stub, or the real client behind the LA_LINEAR_NO_ENV_FILE + deleted-key seams with global fetch stubbed to throw — the network is provably never reached; no telemetry DB"
+    },
+    {
       "file": "plan-gates.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
       "file": "plan-intent.test.mjs",
+      "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "plan-intent-gate.test.mjs",
+      "reason": "isolation audit FOC-517: pure unit fixtures only (render/parse over literal selections and presented slices); no filesystem, no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "plan-intent-select.test.mjs",
+      "reason": "isolation audit FOC-516: mkdtemp/tmpdir fixtures only (policy mutations via temp copies, the wiring test's delta-label ledger in an injected temp runs dir); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
+      "file": "plan-render.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
@@ -211,6 +227,10 @@
     {
       "file": "squad-config-write.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "stability-campaign.test.mjs",
+      "reason": "isolation audit FOC-626: mkdtemp/tmpdir fixtures only; the one process spawned is scripts/stability-load.mjs with a ~2.5 s budget and a test-only marker (foc-626-test-burst), asserted zero matching processes after it stops; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
       "file": "supervisor-autonomy.test.mjs",

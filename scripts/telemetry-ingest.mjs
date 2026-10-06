@@ -20,7 +20,6 @@ import {
   makeEvent,
   hasOpenQualityIssue,
   openTelemetryDb,
-  queryRuns,
   recordDelegationLink,
   recordManifest,
   recordSessionLink,
@@ -37,9 +36,9 @@ import {
 import { createPacer, createToolLinkState, extractToolFacts, jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
 import { reconstructDelegationLinksAsync, scanSpawnToolUsesAsync } from "./telemetry-delegation-recon.mjs";
 
-const __dir = dirname(fileURLToPath(import.meta.url));
-const root = join(__dir, "..");
-const runsDir = join(root, ".state", "runs");
+// Data roots (runs manifests, per-squad transcript corpora) resolve through
+// ledger.runsManifestDir() / ledger.squadProjectsRoot() — the LA_STATE_ROOT /
+// LA_CORPUS_ROOT seams (FOC-599), so tests never open the live `.state`.
 
 // The runId format run-manifest.mjs stamps into manifests and transcripts
 // (e.g. "2026-06-29T17-43-31-dev"). Used by the lazy transcript-locating sweep
@@ -106,6 +105,31 @@ function getParseState(runId, path) {
     parseStates.set(key, state);
   }
   return state;
+}
+
+/**
+ * FOC-599 item 7 (nit 3): the unchanged-file skip branch finalizes pending
+ * tool facts and used to DROP the whole in-memory state. The next grown pass
+ * then started fresh (workspace.lastWorkspace = null) and re-emitted
+ * workspace.observed for an unchanged cwd:branch — and the store's dedup key
+ * is (run_id, observed_at, cwd), so a re-emit with the NEW line timestamp
+ * lands as a real duplicate row.
+ *
+ * The pause must not lose the FILE-GLOBAL state: keep workspace, delegation
+ * (else the spawn scan restarts at 0 and re-pushes every spawn), agentKey
+ * (else the attributionAgent scan re-reads the file) and the turn_index
+ * counter (extractToolFacts carries linkState.turnIndex across incremental
+ * passes so turn_index stays file-global). Only the tool-fact link maps
+ * restart — their pending uses were just finalized — and the restart-gap full
+ * re-scan is re-armed: with the uses registry empty, a late tool_result can
+ * only find its use through that re-scan.
+ */
+function swapParseState(key) {
+  const state = parseStates.get(key);
+  if (!state) return; // no state to keep (orphan finalization path) — nothing to do
+  const toolLinks = createToolLinkState();
+  toolLinks.turnIndex = state.toolLinks.turnIndex;
+  parseStates.set(key, { ...state, toolLinks, fullToolScanDone: false });
 }
 
 /** Test seam: simulate a process restart (state is deliberately in-memory). */
@@ -196,7 +220,7 @@ async function warmWorkspaceCwds(events) {
 }
 
 async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
-  const { startOffset, isLead, state, statsSize } = opts;
+  const { startOffset, isLead, state, statsSize, resetOffset } = opts;
   const ws = state.workspace;
   let eventsApplied = 0;
   let pendingEvents = [];
@@ -218,10 +242,13 @@ async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
   };
 
   for await (const chunk of jsonlChunksFrom(path, startOffset)) {
+    // FOC-597: the EOF tail may commit only if it parses as a whole record.
+    let tailParsed = false;
     for (const { raw, offset: lineOffset } of chunk.lines) {
       if (!raw) continue;
       let line;
       try { line = JSON.parse(raw); } catch { continue; }
+      if (chunk.tail && lineOffset === chunk.tail.offset) tailParsed = true;
       const observedAt = line.timestamp || ws.lastObservedAt || new Date().toISOString();
       const observedCwd = line.relocatedCwd || line.worktreeSession?.worktreePath || line.cwd || ws.lastCwd;
       const branch = line.worktreeSession?.worktreeBranch || line.gitBranch || ws.lastBranch;
@@ -256,7 +283,12 @@ async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
     }
     try {
       await flush();
-      lastFlushedOffset = chunk.endOffset;
+      // FOC-597: never advance past the unterminated EOF tail unless it parsed
+      // as a whole record — a torn write is resumed at its start, so the line
+      // that completes it is parsed on the next pass instead of being lost.
+      lastFlushedOffset = chunk.tail
+        ? (tailParsed ? chunk.tail.end : chunk.tail.offset)
+        : chunk.endOffset;
       if (chunk.atEof) sawEof = true;
     } catch (error) {
       // A failed chunk leaves the stored offset untouched — the next pass
@@ -275,6 +307,9 @@ async function ingestTranscriptRange(db, runId, path, sessionId, opts) {
   try { modifiedAt = statSync(path).mtime.toISOString(); } catch { /* transient file */ }
   const progressEvent = makeEvent("transcript.progress", {
     runId, sessionId, byteOffset: lastFlushedOffset, fileSize: statsSize, modifiedAt, parseStatus: "parsed",
+    // FOC-598: a shrink/rotation pass resets the skip-cache row instead of
+    // max()-merging into the previous incarnation's offsets.
+    resetOffset: Boolean(resetOffset),
   }, { runId, sourceKind: "transcript-progress", sourcePath: path, sourceOffset: lastFlushedOffset });
   try {
     await flush(); // no-op unless a race left events pending
@@ -556,18 +591,25 @@ export async function ingestTranscript(db, runId, transcriptPath, sessionId = nu
         if (state) await finalizePendingToolFacts(db, state.toolLinks);
         else await finalizeOrphanedPendingToolFacts(db, runId, path);
       }
-      parseStates.delete(`${runId}\u0000${path}`);
+      swapParseState(`${runId}\u0000${path}`);
       continue;
     }
+    // FOC-598: a SHRUNKEN file (rotated/truncated) forces a full re-parse from 0
+    // AND a reset of the skip-cache row (`resetOffset`) — the max() upsert would
+    // otherwise retain the old incarnation's byte_offset/file_size and every
+    // later tick would re-parse the whole file again. Honest limit: the offset
+    // row recovers, but the natural-key dedup still absorbs genuinely NEW
+    // content at offsets the previous incarnation already claimed — only a
+    // content/generation-aware key fixes that (FOC-598 AC1b, open).
+    const knownBytes = Number.isInteger(known?.byte_offset) ? known.byte_offset : 0;
+    const knownSize = Number.isInteger(known?.file_size) ? known.file_size : 0;
+    const shrunk = stats.size < knownSize || knownBytes > stats.size;
     let startOffset = 0;
-    if (known && Number.isInteger(known.byte_offset) && known.byte_offset > 0) {
-      // Resume at the stored line boundary. A SHRUNKEN file (rotated/truncated)
-      // forces a full re-parse; the natural-key dedup absorbs already-applied
-      // lines as duplicates.
-      startOffset = known.byte_offset <= stats.size ? known.byte_offset : 0;
-    }
+    if (knownBytes > 0 && !shrunk) startOffset = knownBytes;
     const state = getParseState(runId, path);
-    const range = await ingestTranscriptRange(db, runId, path, sessionId, { startOffset, isLead, state, statsSize: stats.size });
+    const range = await ingestTranscriptRange(db, runId, path, sessionId, {
+      startOffset, isLead, state, statsSize: stats.size, resetOffset: shrunk,
+    });
     eventsApplied += range.events;
 
     // Extract tool_facts and delegation_links for the SAME incremental range.
@@ -614,7 +656,7 @@ export function transcriptForSession(run) {
   if (stripped && stripped !== run.transcriptPath && existsSync(stripped)) return stripped;
   const roots = [
     run.claudeConfigDir ? join(run.claudeConfigDir, "projects") : null,
-    run.squad ? join(root, "agents", run.squad, "projects") : null,
+    run.squad ? ledger.squadProjectsRoot(run.squad) : null,
     join(homedir(), ".claude", "projects"),
   ].filter(Boolean);
   for (const projectsRoot of roots) {
@@ -744,7 +786,7 @@ async function runIdTranscriptLookup(manifest, indexCache) {
   if (!manifest.runId || !manifest.squad) return null;
   let index = indexCache.get(manifest.squad);
   if (index === undefined) {
-    index = await buildRunIdTranscriptIndex(join(root, "agents", manifest.squad, "projects"));
+    index = await buildRunIdTranscriptIndex(ledger.squadProjectsRoot(manifest.squad));
     indexCache.set(manifest.squad, index);
   }
   return index.get(manifest.runId) || null;
@@ -758,6 +800,7 @@ async function runIdTranscriptLookup(manifest, indexCache) {
 // loop measure as one ~0.4 s event-loop block. The pacer yields at least
 // every ~40 ms of reads.
 async function manifests() {
+  const runsDir = ledger.runsManifestDir();
   if (!existsSync(runsDir)) return [];
   const pacer = createPacer();
   const out = [];
@@ -772,7 +815,7 @@ async function manifests() {
 
 export async function backfill(options = {}) {
   const summary = { manifests: 0, runs: 0, transcripts: 0, usageEvents: 0, missingTranscripts: 0, pending: 0 };
-  summary.pending = await replayPending(options).ingested;
+  summary.pending = replayPending(options).ingested;
   const sourceRuns = await ledger.scanRuns();
   const discovered = new Map(sourceRuns.map((run) => [run.runId, run]));
   // Per-backfill cache for the lazy runId→transcript index (one sweep per

@@ -94,6 +94,18 @@ const RUN_INPUTS = {
   "features.list": [{ name: "plan.dod [G] node" }],
 };
 
+// The runner-appended confirmed-intent record's output (FOC-517): plan.dod,
+// plan.ac and plan.spec compose from THIS — never from the raw dictated entry.
+const CONFIRMED_OUTPUT = {
+  goal: "Plan rozumie wejście.",
+  why: "By nic nie umknęło przed pytaniem do użytkownika.",
+  mapVersion: 1,
+  interpretations: INTENT_OUTPUT.interpretations,
+  answers: [],
+  corrections: [],
+  round: 1,
+};
+
 // OpenRouter-shaped response the stubbed fetch serves.
 function okResponse(content, usage = { input_tokens: 123, output_tokens: 45, cost: 0.000045 }) {
   return {
@@ -127,7 +139,7 @@ await test("the plan.dod entry carries the D7 contract: exactly-kind, cheap tier
   eq(REGISTRY.tier, "cheap", "cheap tier (D7: [G] runs cheap by default)");
   eq(REGISTRY.failure, "stop", "failure stop — the chain stops at one typed failure record");
   eq(REGISTRY.writes, "run-record", "writes run-record");
-  deepEq(REGISTRY.reads, ["inbox.entry"], "single declared read (input partition: title + accepted scope summary)");
+  deepEq(REGISTRY.reads, ["plan.intent.confirmed"], "single declared read — the DoD composes from the confirmed intent, never the raw entry (FOC-517)");
   eq(REGISTRY.autonomy, null, "no autonomy — a [G] node never decides a gate");
   eq(REGISTRY.threshold, null, "no threshold until calibration");
   eq(REGISTRY.criteriaVersion, 1, "criteria version");
@@ -177,17 +189,21 @@ await test("the output schema is the design's bounded checklist schema", () => {
 
 console.log("\nplan-dod: the graph wiring");
 
-await test("9 plan steps, 8 sequence edges, plan.dod sits between plan.intent and plan.ac", () => {
+await test("11 plan steps, 10 sequence edges + the gate1 reentry, plan.dod sits after gate1 (FOC-516 moved the gate ahead)", () => {
   eq(validateGraph(GRAPH).length, 0, "the committed graph validates");
   const stepIds = Object.keys(PLAN.steps);
-  eq(stepIds.length, 9, `9 steps, got ${stepIds.length}`);
+  eq(stepIds.length, 11, `11 steps, got ${stepIds.length}`);
   if (!stepIds.includes("plan.dod")) fail("plan.dod missing from the steps map");
-  eq(PLAN.stepFlow.length, 8, "8 sequence edges");
-  const chain = PLAN.stepFlow.map((e) => `${e.from}>${e.to}`).join(" ");
+  eq(PLAN.stepFlow.length, 11, "11 stepFlow edges — the linear chain plus the FOC-517 reentry");
+  eq(PLAN.stepFlow.filter((e) => e.type === "sequence").length, 10, "10 sequence edges");
+  const reentry = PLAN.stepFlow.filter((e) => e.type === "reentry");
+  eq(reentry.length, 1, "exactly one reentry edge");
+  deepEq([reentry[0].from, reentry[0].to], ["plan.gate1", "plan.intent"], "gate1 re-enters plan.intent on an unconfirmed round (FOC-517)");
+  const chain = PLAN.stepFlow.filter((e) => e.type === "sequence").map((e) => `${e.from}>${e.to}`).join(" ");
   eq(
     chain,
-    "plan.dor>plan.intent plan.intent>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.gate1 plan.gate1>plan.decompose plan.decompose>plan.gate2 plan.gate2>plan.push",
-    "the chain runs dor → intent → dod → ac → spec → gate1 → decompose → gate2 → push",
+    "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push",
+    "the chain runs dor → intent → intent.select → gate1 → dod → ac → spec → decompose → render → gate2 → push",
   );
   eq(PLAN.steps["plan.dor"].kind, "J", "plan.dor stays [J]");
   eq(DOD_STEP.kind, "G", "plan.dod is [G]");
@@ -215,8 +231,22 @@ function seedDone(storePath, stepId, output) {
 }
 
 function makeRunner({ generator, storePath, caller = async (input) => {
+  // plan.intent.select scores every interpretation through its node-internal
+  // [J] call (FOC-516) — two noul verdicts per instance, above the impact
+  // threshold so the inferred items route to confirmations.
+  if (input?.decisionId === "plan.intent.select.score") {
+    return {
+      ok: true,
+      step: "decision-call",
+      decisionId: "plan.intent.select.score",
+      criteriaVersion: 1,
+      autonomy: "A0",
+      annotation: { answers: Object.fromEntries((input.instances ?? []).flatMap((_, i) => [[`impact${i}`, { type: "noul", noul: 0.9 }], [`grounded${i}`, { type: "noul", noul: 0.9 }]])), confidence: 0.9 },
+      pinnedModel: "typesafe/jev-1.13",
+    };
+  }
   // plan.ac executes through the FOC-475 node-internal loop, so its gate call
-  // is the one seam call a dod-first walk makes — serve it above the verdict
+  // is the other seam call a dod-first walk makes — serve it above the verdict
   // threshold; anything else reaching the default caller is a bug.
   if (input?.decisionId === "plan.ac.testable") {
     return {
@@ -229,7 +259,7 @@ function makeRunner({ generator, storePath, caller = async (input) => {
       pinnedModel: "typesafe/jev-1.13",
     };
   }
-  fail(`unexpected caller decisionId ${input?.decisionId ?? "none"} — the default caller serves only plan.ac.testable`);
+  fail(`unexpected caller decisionId ${input?.decisionId ?? "none"} — the default caller serves only plan.intent.select.score and plan.ac.testable`);
 } }) {
   return createGraphRunner({
     runId: "run-plan-dod",
@@ -242,9 +272,27 @@ function makeRunner({ generator, storePath, caller = async (input) => {
 }
 
 // plan.dor is already done (the frontman resolved it) — the walk executes
-// plan.dod, then plan.ac, then stops at the plan.spec [A] hand-off.
+// plan.intent, the FOC-516 selection, gate 1 (repositioned ahead of the
+// DoD/AC/spec hand-off), then plan.dod, plan.ac, and stops at the plan.spec
+// [A] hand-off.
 function seedPlanDor(storePath) {
   seedDone(storePath, "plan.dor", { ready: true, gaps: [] });
+}
+
+// The frontman's pen: resolution records are appended by the DECIDING agent —
+// the runner consumes them, never creates them. The ts sits AFTER any pending
+// record the runner writes with its real clock — an earlier ts answers an
+// earlier round and the STALE guard keeps it waiting (FOC-517).
+function resolveGate(storePath, key, output, by = "mateusz") {
+  appendFileSync(storePath, `${JSON.stringify({
+    type: "graph.resolution",
+    runId: "run-plan-dod",
+    ts: "2030-01-01T00:00:00.000Z",
+    key: `${key}.resolution`,
+    stepId: key,
+    by,
+    output,
+  })}\n`);
 }
 
 console.log("\nplan-dod: the runner executes plan.dod");
@@ -261,15 +309,23 @@ await test("the walk executes plan.dod [G] through the generator: one call, reso
       genCalls.push({ stepId, step, reads });
       if (stepId === "plan.intent") return INTENT_OUTPUT;
       if (stepId === "plan.dod") {
-        if (step.reads.length !== 1 || step.reads[0] !== "inbox.entry") fail("plan.dod declares one read: inbox.entry");
-        if (typeof reads["inbox.entry"] === "undefined") fail("inbox.entry read missing");
+        if (step.reads.length !== 1 || step.reads[0] !== "plan.intent.confirmed") fail("plan.dod declares one read: plan.intent.confirmed (FOC-517)");
+        if (typeof reads["plan.intent.confirmed"] === "undefined") fail("plan.intent.confirmed read missing");
+        eq(reads["plan.intent.confirmed"].goal, INTENT_OUTPUT.goal, "the confirmed goal reaches the generator");
         return DOD_OUTPUT;
       }
       eq(stepId, "plan.ac", "generator serves plan.intent, plan.dod then plan.ac");
       return AC_OUTPUT;
     };
-    const result = await makeRunner({ generator, storePath }).run({ inputs: RUN_INPUTS });
-    eq(result.status, "stopped", "run stops at the [A] hand-off after the [G]s");
+    const runner = makeRunner({ generator, storePath });
+    let result = await runner.run({ inputs: RUN_INPUTS });
+    eq(result.status, "stopped", "run 1 stops at the repositioned gate 1 (FOC-516)");
+    eq(result.stepId, "plan.gate1", "run 1 stops gate-pending after plan.intent.select");
+    eq(result.record.status, "gate-pending", "gate record pending");
+    eq(genCalls.length, 1, "only plan.intent executed before the gate");
+    resolveGate(storePath, "gate.plan.gate1", { approved: true, answer: "ok" });
+    result = await runner.run({ inputs: RUN_INPUTS });
+    eq(result.status, "stopped", "run 2 stops at the [A] hand-off after the [G]s");
     eq(result.stepId, "plan.spec", "stops at plan.spec");
     eq(genCalls.length, 3, "exactly three [G] calls (plan.intent, plan.dod, plan.ac)");
     eq(genCalls[0].stepId, "plan.intent", "plan.intent first");
@@ -293,6 +349,9 @@ await test("a schema-invalid plan.dod output lands as ONE typed failed record �
     const generator = async ({ stepId }) => (stepId === "plan.intent" ? INTENT_OUTPUT : stepId === "plan.dod" ? { definitionOfDone: [] } : AC_OUTPUT); // minItems 1 violated
     const runner = makeRunner({ generator, storePath });
     let result = await runner.run({ inputs: RUN_INPUTS });
+    eq(result.stepId, "plan.gate1", "run 1 stops gate-pending before plan.dod");
+    resolveGate(storePath, "gate.plan.gate1", { approved: true, answer: "ok" });
+    result = await runner.run({ inputs: RUN_INPUTS });
     eq(result.status, "stopped", "run stops on the invalid output");
     eq(result.record.status, "failed", "failed record");
     eq(result.record.error.code, "schema_invalid", "typed schema_invalid");
@@ -331,7 +390,7 @@ await test("plan.dod rides the registry prompt, the resolved reads and the stric
       shadowDir: dir,
       fetchImpl,
     });
-    const output = await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "inbox.entry": { title: "DoD generator", scope: "runs the plan chain" } } });
+    const output = await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT } });
     deepEq(output, DOD_OUTPUT, "parsed output returned");
 
     eq(fetchCalls.length, 1, "ONE fetch call");
@@ -343,7 +402,7 @@ await test("plan.dod rides the registry prompt, the resolved reads and the stric
     const message = body.messages[0].content;
     if (!message.includes("You generate the Definition of Done for one planning inbox entry")) fail("the REGISTRY PROMPT is on the wire (the fix)");
     if (!message.includes('Produce the "plan.dod" step output')) fail("the step ask names the step id");
-    if (!message.includes("- inbox.entry: {\"title\":\"DoD generator\",\"scope\":\"runs the plan chain\"}")) fail("the RESOLVED reads are the inputs (never STATE:undefined)");
+    if (!message.includes(`- plan.intent.confirmed: ${JSON.stringify(CONFIRMED_OUTPUT)}`)) fail("the RESOLVED reads are the inputs (never STATE:undefined)");
     if (/STATE:/.test(message)) fail("no state dump — the declared reads only");
     deepEq(body.response_format, { type: "json_schema", json_schema: { name: "plan.dod", strict: true, schema: DOD_STEP.output } }, "strict json_schema with the step's output schema");
     deepEq(body.usage, { include: true }, "usage requested — cost honesty");
@@ -374,7 +433,7 @@ await test("plan.dod rides the registry prompt, the resolved reads and the stric
     if (!/^[0-9a-f]{64}$/.test(line.hash)) fail("hash is a sha256 hex string");
     eq(line.input.questions, null, "questions null — a [G] generation sends no question set");
     if (typeof line.input.state !== "string" || !line.input.state.includes("You generate the Definition of Done")) fail("the scrubbed input-as-sent carries the prompt");
-    if (!line.input.state.includes('"title":"DoD generator"')) fail("the scrubbed input carries the resolved read");
+    if (!line.input.state.includes('"mapVersion":1')) fail("the scrubbed input carries the resolved read");
     deepEq(line.scrub, { variant: "mask-only", redacted: false, note: line.scrub.note }, "scrub provenance, unredacted");
     if (!line.scrub.note.includes("mask-only")) fail("the scrub note names the variant");
     eq(typeof line.durationMs, "number", "latency recorded");
@@ -393,14 +452,14 @@ await test("plan.ac rides the same generator: its own registry prompt, its reads
       return okResponse(AC_OUTPUT);
     };
     const generate = createDefaultGenerator({ apiKey: "test-key", runId: "run-g-test", taskKey: "T1", shadowDir: dir, fetchImpl });
-    const output = await generate({ stepId: "plan.ac", step: AC_STEP, reads: { "inbox.entry": "the dictated entry", "features.list": [{ name: "f1" }] } });
+    const output = await generate({ stepId: "plan.ac", step: AC_STEP, reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT, "features.list": [{ name: "f1" }] } });
     deepEq(output, AC_OUTPUT, "parsed output returned");
 
     const body = JSON.parse(fetchCalls[0].options.body);
     const message = body.messages[0].content;
     if (!message.includes("You generate acceptance criteria for one planning inbox entry")) fail("plan.ac's REGISTRY PROMPT is on the wire (FOC-475 inherits the fixed transport)");
     if (message.includes("definition of done")) fail("plan.ac is AC-only since FOC-475 — no DoD ask in its prompt");
-    if (!message.includes('- inbox.entry: "the dictated entry"') || !message.includes("- features.list: ")) fail("both declared reads reach the message");
+    if (!message.includes(`- plan.intent.confirmed: ${JSON.stringify(CONFIRMED_OUTPUT)}`) || !message.includes("- features.list: ")) fail("both declared reads reach the message");
     deepEq(body.response_format, { type: "json_schema", json_schema: { name: "plan.ac", strict: true, schema: AC_STEP.output } }, "plan.ac's schema");
 
     const lines = readLines(join(dir, "decisions.jsonl"));
@@ -420,7 +479,7 @@ await test("an HTTP failure throws provider_error and appends NOTHING to decisio
     const generate = createDefaultGenerator({ apiKey: "test-key", runId: "r", taskKey: "T", shadowDir: dir, fetchImpl });
     let err;
     try {
-      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "inbox.entry": "x" } });
+      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": "x" } });
       fail("must throw");
     } catch (e) {
       err = e;
@@ -439,7 +498,7 @@ await test("a network failure throws provider_error and appends NOTHING", async 
     const generate = createDefaultGenerator({ apiKey: "test-key", runId: "r", taskKey: "T", shadowDir: dir, fetchImpl });
     let err;
     try {
-      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "inbox.entry": "x" } });
+      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": "x" } });
       fail("must throw");
     } catch (e) {
       err = e;
@@ -466,7 +525,7 @@ await test("a timed-out request is provider_error — never 'response is not JSO
     const generate = createDefaultGenerator({ apiKey: "test-key", runId: "r", taskKey: "T", shadowDir: dir, fetchImpl, timeoutMs: 50 });
     let err;
     try {
-      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "inbox.entry": "x" } });
+      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": "x" } });
       fail("must throw");
     } catch (e) {
       err = e;
@@ -486,7 +545,7 @@ await test("unparseable content throws unparseable_output and appends NOTHING", 
     const generate = createDefaultGenerator({ apiKey: "test-key", runId: "r", taskKey: "T", shadowDir: dir, fetchImpl });
     let err;
     try {
-      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "inbox.entry": "x" } });
+      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": "x" } });
       fail("must throw");
     } catch (e) {
       err = e;
@@ -505,7 +564,7 @@ await test("a response with no message content throws unparseable_output and app
     const generate = createDefaultGenerator({ apiKey: "test-key", runId: "r", taskKey: "T", shadowDir: dir, fetchImpl });
     let err;
     try {
-      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "inbox.entry": "x" } });
+      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": "x" } });
       fail("must throw");
     } catch (e) {
       err = e;
@@ -525,7 +584,7 @@ await test("no apiKey fails closed before any fetch; an unknown stepId fails on 
     const noKey = createDefaultGenerator({ runId: "r", taskKey: "T", shadowDir: dir, fetchImpl });
     let err;
     try {
-      await noKey({ stepId: "plan.dod", step: DOD_STEP, reads: { "inbox.entry": "x" } });
+      await noKey({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": "x" } });
       fail("must throw");
     } catch (e) {
       err = e;
@@ -535,7 +594,7 @@ await test("no apiKey fails closed before any fetch; an unknown stepId fails on 
 
     const unknown = createDefaultGenerator({ apiKey: "test-key", runId: "r", taskKey: "T", shadowDir: dir, fetchImpl });
     try {
-      await unknown({ stepId: "plan.nope", step: DOD_STEP, reads: { "inbox.entry": "x" } });
+      await unknown({ stepId: "plan.nope", step: DOD_STEP, reads: { "plan.intent.confirmed": "x" } });
       fail("must throw");
     } catch (e) {
       eqCode(e, "invalid_input", "unknown stepId → typed invalid_input from the registry");
@@ -553,7 +612,7 @@ await test("the event line's input-as-sent is mask-only scrubbed — a key-shape
     const secret = "sk-or-v1-abcdefghijklmnopqrst";
     const fetchImpl = async () => okResponse(DOD_OUTPUT);
     const generate = createDefaultGenerator({ apiKey: "test-key", runId: "r", taskKey: "T", shadowDir: dir, fetchImpl });
-    await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "inbox.entry": `entry with key=${secret} inside` } });
+    await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": `confirmed intent with key=${secret} inside` } });
     const line = readLines(join(dir, "decisions.jsonl"))[0];
     if (line.input.state.includes(secret)) fail("the raw key leaked into the event line");
     if (!line.input.state.includes("[REDACTED]")) fail("the key shape was masked");
@@ -585,7 +644,11 @@ await test("a real runner + the default generator: the graph-steps done record A
       },
     });
     const runner = makeRunner({ generator, storePath });
-    const result = await runner.run({ inputs: RUN_INPUTS });
+    let result = await runner.run({ inputs: RUN_INPUTS });
+    eq(result.stepId, "plan.gate1", "run 1 stops gate-pending after the selection (FOC-516)");
+    eq(calls, 1, "only plan.intent went through the default generator before the gate");
+    resolveGate(storePath, "gate.plan.gate1", { approved: true, answer: "ok" });
+    result = await runner.run({ inputs: RUN_INPUTS });
     eq(result.stepId, "plan.spec", "the [G]s executed; run stopped at the [A] hand-off");
     eq(calls, 3, "all three [G] calls went through the default generator");
 

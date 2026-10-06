@@ -188,16 +188,25 @@ function scanGates() {
 // periods grows the tee, so the next breach is a new episode with its own row.
 const STALL_AFTER_MS = stallSilenceMs();
 const GATE_SCAN_MS = 5_000;
+// FOC-271: this watcher IS the turn, so the turn's start is the other activity
+// signal. A resume launched long after the previous turn's last tee write would
+// otherwise be "stalled" — and enqueue a spurious stall row — before its child
+// produced a single byte. Silence runs from the LATEST of the tee write and the
+// turn start, the same rule supervisor-status.mjs displays.
+const TURN_START_MS = Date.now();
 let lastTeeSize = null;
 
 function scanStall() {
   try {
     if (!existsSync(tee)) return;
     const { size, mtimeMs } = statSync(tee);
-    if (lastTeeSize !== null && size === lastTeeSize && Date.now() - mtimeMs >= STALL_AFTER_MS) {
-      // `episode` = the tee size at silence onset: stable across re-polls of
-      // the same silence (a silent tee does not grow), new after any output.
-      wake({ event: "stall", childId, turn: turnIndex, episode: size, detail: { silentMs: Date.now() - mtimeMs } });
+    // FOC-271: silence runs from the LATEST of the tee write and the turn start.
+    // FOC-621: `episode` = the tee size at silence onset — stable across re-polls
+    // of the same silence (a silent tee does not grow), new after any output, so
+    // a recover-then-restall turn emits a second row instead of being deduped.
+    const activityMs = Math.max(mtimeMs, TURN_START_MS);
+    if (lastTeeSize !== null && size === lastTeeSize && Date.now() - activityMs >= STALL_AFTER_MS) {
+      wake({ event: "stall", childId, turn: turnIndex, episode: size, detail: { silentMs: Date.now() - activityMs } });
     }
     lastTeeSize = size;
   } catch {
