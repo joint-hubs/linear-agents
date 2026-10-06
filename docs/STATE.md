@@ -16,13 +16,71 @@ Nadrzędne wobec wcześniejszych notatek z 2026-09-28 tam, gdzie są węższe.
 7. **Cudze pliki w drzewie = inna sesja** („precedent index"): `docs/adr/0014-precedent-index-two-layer.md`, `docs/prd/prd-precedent-index.md`, `docs/plans/brainstorm-precedent-search.md`, `tools/precedent-spike/`, zmiana w `docs/adr/README.md`. Nie dotykam. **Uwaga dla FOC-384: numer ADR-0014 jest już zajęty — wziąć kolejny wolny.**
 8. **Resztki** (`foc-518-dev` sierota, `la-merge/*` nie w całości w `main`, cudze worktree) — zostają, Mateusz zajmie się nimi osobno.
 
-Kolejka do przerobienia bez przystanków: FOC-649 → FOC-612 → FOC-621 → FOC-626 → FOC-602 → FOC-603 → FOC-642 → M1 (FOC-511, 512, 616, 607, ~~597~~ **DONE `dae4ec6`**, 598, 271, 599) → M2 (FOC-596 → 519 → 520 → 516 → 517 → 476 → 477).
+Kolejka do przerobienia bez przystanków: FOC-649 → FOC-612 → FOC-621 → FOC-626 → FOC-602 → FOC-603 → FOC-642 → M1 (FOC-511, 512, 616, 607, ~~597~~ **DONE `dae4ec6`**, 598 **(cz.1 `8d8ceba` — widelec AC1b otwarty)**, ~~271~~ **DONE `21cfbe4`**, ~~599~~ **DONE `14c0108`**) → M2 (FOC-596 → 519 → 520 → 516 → 517 → 476 → 477).
 
 ### Uzasadnienia decyzji podjętych samodzielnie (wymóg reguły 4)
 
 **Retencja `test-artifacts/`: 20 runów ∩ 14 dni, `prune` suchy-raportem.** Liczby oddelegowane do mnie („decyzja o liczbach twoja"). 20 runów ≈ tydzień pracy przy polityce jednego dziecka; 14 dni wiąże dysk przy gęstych runach. Każda granica z osobna jest gorsza — same 20 runów pozwala przestarzałemu archiwum żyć wiecznie na bezczynnym repo, same 14 dni potrafią w jednym przejściu wymazać zrzut 40 runów. **Przecięcie** jest bezpieczniejszym kierunkiem i dokładnie tym, o co prosił „co mniejsze". Prune wyłącznie payload `test-artifacts/`, nigdy plików dowodowych (`children.json`, `wake-queue.jsonl`, `triage.json`, `merge.json`, `intake.json`, `partial-status.json`), nigdy gałęzi ani worktree — i wyłącznie po `--dry-run`, który najpierw pokazuje, co zniknie.
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
+
+## 2026-10-06 (19) — run 36e0: FOC-517 DOMKNIĘTY (PR #39, merge `83bfd0c`) — `plan.gate1` rozmową o intencji, ≤3 rundy przed specyfikacją · TEST 111/111 · nowy obieg lądowania: gałąź → PR → merge
+
+**Zakres (12/12 AC).** `plan.gate1` [H] wraca przed cały spend i staje się rozmową o intencji; `plan.gate2` [H] zatwierdza plan + zadania razem. Dwie interakcje z człowiekiem zostają dwie. Łańcuch w `config/graph.json`: `plan.dor → plan.intent → plan.intent.select → plan.gate1 → plan.dod → plan.ac → plan.spec → plan.decompose → plan.render → plan.gate2 → plan.push` — 10 krawędzi `sequence` + jedyna `reentry` (`plan.gate1 → plan.intent`, `why` wymagany). `plan.dod`/`plan.ac` czytają `plan.intent.confirmed`; `plan.spec` czyta je plus `inbox.entry`; `plan.gate2` czyta `plan.spec.record` + `plan.decompose.record` + `gate.plan.gate1.record`. Nowy `scripts/plan-intent-gate.mjs`: `renderGate1Display` (polski, ≤14 linii, nagłówek „Czy dobrze rozumiem? (runda n/3)", trzy bloki — *Rozumiem tak* z cytatem / *Założyłem — popraw, jeśli źle* / *Pytania*) i `parseGate1Answer` (`ok`, `B nie, …`, `1b 2a`, wolny tekst dyktowany). `plan.intent.reply` [J] A0 w `config/decisions.json` — adnotacja przy odpowiedziach wolnych, nigdy nie rozstrzyga rundy. Kolejność commitów wymuszona importem (`graph-runner.mjs:95` importuje `plan-intent-gate.mjs`); pośrednie drzewa nie są wszystkie zielone — weryfikowane jest drzewo FINALNE.
+
+**Lądowanie — nowy obieg (dyrektywa Mateusza 2026-10-06).** `commit na gałąź → PR → merge → status w Linear → zarządzanie taskami, jeżeli wymagania spełnione`. Gałąź `foc-517-dev` (7 commitów `dba1507..b0560d2`, bez trailerów) wypchnięta, **PR #39** scalony merge-commitem **`83bfd0c`**, `main` == `origin/main`. Gałąź zostaje (`delete-branch` w `neverCovers`). Wcześniejszych 6 commitów porządkujących (`827f916..14051ce`) nie lądowało się przez PR — to commity już leżące lokalnie na `main`, poszły zwykłym `push origin main` jako synchronizacja.
+
+**Weryfikacja.** `test-all --jobs 16` **111/111**, exit 0 (baza 110; +1 = `plan-intent-gate.test.mjs`, wpisany w `test-lanes.json` z powodem — lane check jest fail-closed). `lint.mjs` 560 plików / 0 naruszeń. `graph-validate` exit 0. Trzy testy kontraktu odpowiedzi z komentarza `41a0ecd7` (mapa 12 slotów + korekta; odpowiedź na zdezaktualizowany `mapVersion` = STALE, nigdy cicho; zmiana treści bez dziedziczonego potwierdzenia) — obecne i zielone. E2E idzie realną ścieżką answer/resume z dokładnym kluczem rozstrzygnięcia `gate.plan.gate1.resolution`; 3 rundy bez potwierdzenia → typowany `intent_not_settled`.
+
+**Eval re-run na tych samych 12 przypadkach** (potwierdzony brief zamiast surowego wpisu; prompty bajtowo identyczne, zmieniły się tylko `reads`): plan.dod **11 ok / 1 failed** (FOC-448 = 3× awaria transportu, zapisane nie sfałszowane), plan.ac **8 ok / 4 escalated** wobec zapisanych 7/5. Schema ważna w 100% serwowanych wierszy. Ocena pass/partial zostaje przy człowieku — tabela do odhaczenia przez Mateusza.
+
+**Znany czerwony — środowiskowy, nie regresja.** `security-scan.test.mjs` = 69 passed / 13 failed: WDAC blokuje `pysemgrep` → skaner oddaje niekompletne dowody (exit 2) → fixture'y probe nie odpalają. Ten sam plik przeszedł w tym samym drzewie 2026-10-02 (`✓ security-scan.test.mjs (62325ms)` w środku 111/111). Merge-verify 2026-10-06 = REJECTED **wyłącznie** z tego powodu. Follow-up: **FOC-667**.
+
+**Bug znaleziony przy e2e.** `graph-runner.mjs` — strażnik rozstrzygania re-entry (`if (resolution)` bez rekordu run) wywoływał typowany błąd przy każdym ponownym przejściu: zużyta runda zostaje w append-only store jako historia, nie jako oczekująca odpowiedź. Naprawione na `if (!record && resolution)`. Złapane testem konwersacji na poziomie runnera, nie oględzinami.
+
+**Tablica po lądowaniu.** EPIC FOC-467: **15/17 dzieci Done**; odblokowane **FOC-476 → FOC-477** (kolejka M2 domknięta do końca). Nie ruszone, z nie wylądowanymi commitami na gałęziach lokalnych: FOC-596 (2 — „lever 2 pod pomiarem", świadomie otwarte), FOC-621 (2 — `6f249c6` skill + `a6819ce` dyskryminator epizodu stall; w hand-offie 107/107 + lint 0, `security-scan` zielony przy tej rewizji), FOC-603 (1 — `69e1529`; AC3 spełnione: 3×107/107 pod obciążeniem, pierwsze-N-kolejnych), FOC-598 (1 — `8d8ceba`, rdzeń; **widelec AC1b nadal otwarty**: migracja `source_generation` / zawęzić AC1b + osobny ticket na redesign kluczy / czekać).
+
+**Resztki.** 17 drzew-czyścicieli (0 unikalnych commitów, HEAD przodkiem `main`, drzewa czyste) + ~465 plików gitignored (~5 MB) poza cache. Archiwizacja dorobku przez `archiveWorkProduct` dopiero po odpowiedzi na bramkę `cleanup-approval` (`supervisor-cleanup.mjs:787`) — bramka jest zamkiem, nie grant.
+
+## 2026-10-01 (18) — run 36e0: FOC-599 DOMKNIĘTY (`14c0108`) — 7 rezydualiów z review r1 FOC-547 · 106/107 na kandydacie, znany czerwony `security-scan` udowodniony na bazie
+
+**Zakres.** Siedem pozycji z werdyktu review r1 FOC-547 (pass, non-blocking) na `foc-599-dev`, 9 commitów bez trailerów: `8387600` (turn_index restartuje się przy pełnym re-skanie tool-facts), `22b668b` (`recordToolFact` scope'owany na własny run), `fc24ee6` (budżet AC5), `0ef8f45`/`e89a15e`/`81a07a7` (AC1/AC4 + kontrakt `reconcileLiveness`), `28f7d0e` (kontrakt `aliveMap`), `92e2ce9` (bench read-only wymuszalny), `2fed217` (5 nitów — m.in. `swapParseState` trzyma pamięć workspace przez pauzę skip-branch, bez duplikatu `workspace.observed`).
+
+**Weryfikacja i znany czerwony.** `npm ci && node scripts/test-all.mjs` (Mateusz, `!`) = **106/107**; jedyny czerwony: `security-scan.test.mjs` (13 asercji). Celowany re-run pliku = identyczne 13 (nie flake obciążeniowy). **Dowód na bazie**: main @ `4364a5e`, `node scripts/test-all.mjs security-scan` = identyczne 69/13. Przyczyna środowiskowa: WDAC/SAC blokuje backend `pysemgrep` (`semgrep --version` → exit 127, „Zasady kontroli aplikacji zablokowały ten plik") → `security-scan.mjs` fail-closed (exit 2 „no scan evidence") → asercje oczekujące findings semgrepa czerwone, testy uczciwości (FOC-576) zielone. Diff FOC-599 nie dotyka `security-scan*` ani rulesetu. Polityki aplikacji nie zmieniamy (decyzja Mateusza). Follow-up: **FOC-667** (dziecko FOC-472, tech, S) — zablokowany skaner ma dawać jeden jawny stan „scanner unavailable — environment", a brak skanu w werdyktach REVIEW = UNKNOWN, nigdy „czysto".
+
+**Decyzje nazwane (reguła 4).** (a) Wyjątek „znany czerwony" zastosowany za wprost poleceniem Mateusza (reguła FOC-450: czerwień udowodniona na bazie nie jest regresją kandydata). (b) `--ack <seq>` to watermark (`ackedThrough`) — jedno `--ack 25` wycofuje wiersze ≤ 25; zgoda Mateusza na `--drain`/`--ack` własnej kolejki (FOC-608) jest trwała. (c) `test-6` sprzątnięty pod grantem `cleanup-own-worktree` (zasięg + archiwum dorobku bez odtwarzalnego cache) — jego „decydujesz sam".
+
+**Resztki.** Worktree `foc-599-dev` zostaje (praca samodzielna; `supervisor-cleanup.mjs` jest child-scoped — pytanie dla Mateusza otwarte). `.claude/settings.json` w main checkout jest **brudny** — `/permissions` zapisał 5 reguł Bash do pliku trackowanego; do decyzji: zostawić niezcommitowane albo przenieść do `settings.local.json`. Monitoring dzieci wrócił po dodaniu reguł dla `supervisor-status.mjs`.
+
+## 2026-10-01 (17) — run 36e0: FOC-271 DOMKNIĘTY (`21cfbe4`) — okno ciszy detektora stall od startu tury · 107/107 na kandydacie
+
+**Wada (kierunek 2 z issue).** Detektora stall liczył ciszę wyłącznie od ostatniego zapisu tee. Wznowiona tura startująca >10 min po ostatnim bajcie poprzedniej tury dostawała `stalled: true` od pierwszego snapshota do pierwszego nowego wyjścia, a watcher enqueue'ował fałszywy wiersz `stall`. Kierunek 1 (followup meldował `ok: true` dla tury, która nie wystartowała) był już naprawiony wcześniej: `INIT_TIMEOUT_MS` + kill + `status: crashed` w `supervisor-followup.mjs`, kryty testami `supervisor-zombie.test.mjs` (8/0) i `supervisor-followup.test.mjs` (18/0).
+
+**Fix.** Cisza liczy się od NAJPÓŹNIEJSZEGO z (zapis tee, start żywej tury) — w obu implementacjach tej samej reguły: `supervisor-status.mjs` (snapshot dla leada) i `supervisor-watch.mjs` (enqueue wiersza). Fixture'y testów stall postarzają turę razem z tee — scenariuszem jest tura, która milczy, nie świeża tura na ciszy poprzedniczki.
+
+**Red→green.** Regresja „a turn that just started is never stalled on its predecessor's silence" czerwona na źródłach sprzed fixa (**21/1** — `stalled: true` przy tee starym 20 min i turze startującej teraz), zielona po fixie **22/0**. `supervisor-zombie.test.mjs` dostaje test PARY detektorów (pliki rozjeżdżały się 4 razy — zasada „para nie dryfuje"; najpierw padł na `TURN_START` vs wzorzec `turnStart`, poprawiony na `turn[_]?start`). Pełna suita kanoniczna na kandydacie: **107/107 w 586 s, exit 0** — bez flake'ów w tym przebiegu. Rodzina `supervisor-*` (21 plików) cała zielona.
+
+**Lądowanie.** `a7d840c` (fix, 4 pliki +69/−10, bez trailera) → `21cfbe4` (`--no-ff`, grant `land-local`). `main` bez pusha (jak zawsze). Worktree `foc-271-dev` czyste — kolejna resztka self-work obok `foc-597-dev`/`foc-598-dev` (narzędzie sprzątania jest child-scoped; pytanie do Mateusza nierozstrzygnięte).
+
+**Kolejka dalej: FOC-599** (resztki review FOC-547 — 7 drobnych pozycji, est 2). Po nim raport zbiorczy (3 zamknięte: 597, 271, 599) z widelcem FOC-598 i listą pytań.
+
+## 2026-10-01 (16) — run 36e0: FOC-598 cz.1 — rdzeń na gałęzi (`8d8ceba`) · AC1b = WIDELEC projektowy · suita: flake'e load, nie moja zmiana
+
+**Wada (red→green).** Rotacja/truncacja transkryptu: `applyTranscriptProgress` scalwał `byte_offset`/`file_size` przez `MAX()`, więc pomniejszony plik nigdy nie resetował wiersza skip-cache — każdy kolejny tick robił pełny re-parse od 0 (AC2 złamane). Test regresyjny (598) czerwony: `expected 191, got 382`. Fix: `transcript.progress` niesie `resetOffset`, gdy przebieg wykrył skurcz (plik mniejszy niż zapisany `file_size` albo zapisany offset za EOF), a upsert pisze offsety tego przebiegu dosłownie. Komentarz przy skurczu nie twierdzi już, że dedup „odzyskuje" — nazywa limit.
+
+**Dowód absorpcji (AC1b — zmierzone, nie teoria).** Po fixie AC1a+AC2 zielone, asercja kolizji: `expected 1, got 0` — nowa treść przy offsecie zajętym przez poprzednią inkarnację jest zjadana. Trzy twarde constrainty, niezależnie od tożsamości zdarzeń: (1) `events` UNIQUE(`run_id, source_kind, source_path, source_offset, event_type`) + treść-nieświadome `eventAlreadyApplied`; (2) `usage_facts` UNIQUE(`run_id, source_path, source_offset`) — nawet świeży `message.id` pada na squacie offsetu; (3) `tool_facts` dedup po (`source_path, source_offset, tool_index`).
+
+**WIDELEC (pytanie do Mateusza — jedzie w raporcie zbiorczym):**
+- **(a) migracja `source_generation`** — 4 tabele (`events`/`usage_facts`/`tool_facts`/`transcript_sources`), tożsamości warunkowo wg generacji (klucze `gen 0` bitowo identyczne = brak duplikacji historii), rebuild 3 UNIQUE; est 5–8; ryzyko: migracja schematu żywego DB telemetrii (additive, marker wersji).
+- **(b) zawęzić AC1b** i osobny ticket na redesign kluczy (content-hash); FOC-598 zamyka się dziś na rdzeniu + jawny zapis limitu.
+- **(c) czekać** z rdzeniem na gałęzi.
+Test kolizji jest gotowy w kodzie i SKIP z nazwanym powodem (`telemetry-ingest.test.mjs`) — odblokowanie = skasowanie jednego `throw new TestSkip`.
+
+**Weryfikacja.** Rodzina `telemetry-*` zielona (ingest 9/0/**1 skip**, store 57/0/0, tool-extract 31/0/0, usage-verify 61/0/0, analysis 115/0/0, canonical 66/0/0). Pełna suita `test-all.mjs` 2×: **106/107** i **105/107** — czerwone: `code-intel.test.mjs` (79 s przy równoległym obciążeniu; **solo 130/0/0 exit 0**) i `security-scan.test.mjs` (**solo 81/0/0 exit 0**); oba poza obszarem zmiany (codegraph-wrapper, skan sekretów), niestabilna liczba czerwonych plików między przebiegami = klasa flake'a FOC-351/396 (spawn-timeout pod obciążeniem). `lint.mjs` nieodpalony (zakaz z dyrektywy 2026-09-29) — jawnie.
+
+**Stan.** Commit `8d8ceba` na `foc-598-dev` (3 pliki, +160/−10, bez trailera). **NIE wylądowane** — lądowanie w zamknięciu taska (rytm runu), brama = ponowny `test-all` na kandydacie. `foc-598-dev` ma `node_modules` (npm ci). Monitoring nadal odmówiony (patrz 15); w tym oknie strażnik turn-end odpalił się 2× (block 1/3) — jego trzy lekarstwa (`--drain`, `--wait`, odczyt tee/`wake-queue`) to ten sam zakazany wynik, stoję; fuzja 3 bloki → alarm jest zaprojektowana.
+
+**Następny w kolejce: FOC-271.** Rekonesans: oba kierunki fixa JUŻ są w kodzie — `supervisor-followup.mjs:389-392` (odmowa `no system/init` w oknie 30 s + kill zombie-tury) i `TERMINAL_STATUSES` z `waiting_gate` (`supervisor-lib.mjs:1406`) + wykluczenie statusów terminalnych z `stalled` (`supervisor-status.mjs:185`). Testy regresyjne istnieją: `supervisor-followup.test.mjs`, `supervisor-zombie.test.mjs`. Kandydat: zamknięcie jako „już naprawione" z komentarzem dowodowym — po sprawdzeniu, że testy pokrywają oba kierunki.
 
 ## 2026-09-30 (15) — run 36e0: FOC-597 SAMODZIELNIE (small, bez dzieci) — red→green, wylądowane `dae4ec6` · monitoring nadal odmówiony
 
@@ -2848,3 +2906,229 @@ Kickoff `.state/krok0-2026-09-29/foc-642-dev-kickoff.md` niesie to wprost, tu dl
 
 Do tego AC3 żąda „zero failures", a repo ma jeden znany plik wrażliwy na obciążenie (`security-scan.test.mjs`).
 Jeśli się zaczerwieni — AC3 **nie jest spełnione literalnie** i wymaga Twojej decyzji, nie mojej.
+
+## 2026-10-01 — FOC-596 close-out (self-work, run 36e0): 5-run plan.intent re-measurement + notatki operacyjne
+
+**Measurement DONE on branch `foc-596-dev`; landing waits for one decision.** Five serial runs on the
+same 12-case fixture, `z-ai/glm-5.3-flash` unchanged (**no model/tier/routing change**):
+before-600s 3/12 · after-600s 1/12 · after-300s 1/12 · after-600s-rep 0/12 · before-600s-rep 6/12
+accepted. Matrix + reading in `docs/benchmark/plan-intent-eval.md` addendum 2026-10-01; artifacts per
+run under `.state/foc-596/eval/<run>/` (gitignored). Bottom line: the lever-2 output-shape
+pre-commitment sentence pins latency (p90 ≤ 48 s vs 545–600 s) but collapses conformance (0–8% vs
+25–50%) via `covers` omission; pre-change day drift is a provider output-length regime flip (same
+prompt: run cost $0.016203 → $0.147735, p50 56.6 s → 222.8 s two hours later). Lever-2 sentence fate
+(keep / revert / second named iteration) = Mateusz's call — options in the close report. Nothing of
+FOC-596 is on main yet; `config/decisions.json` on the branch carries the sentence as measured.
+
+**Prompt-swap provenance procedure (used for `before-600s-rep`):** edit the lever-2 sentence out of
+`config/decisions.json` → launch the eval → restore the exact sentence after completion → `git diff`
+must show it as the only change in that file. `scripts/plan-intent-eval.mjs` loads `plan.intent` once
+at `runEval` start, so a mid-run edit cannot contaminate a running process; FOC-449's `hash` is a
+per-case input hash and does NOT encode the prompt version. Sanity after restore:
+`decisions-registry.test.mjs` 38/0.
+
+**One-verdict-per-run guard — the exact refused command (standing directive: record it here):**
+
+    node $LA_ROOT/scripts/supervisor-triage.mjs record --issue FOC-596 --verdict plan --proposal plan --rationale 'deterministic propose = plan node (supervised); deliverable is one prompt-surface change (output-shape pre-commitment) plus a 12-case re-measurement on the existing harness and a dated addendum to docs/benchmark/plan-intent-eval.md; zero child spend; the model-policy lever (reasoning effort / cheap tier) is Mateuszs call and is NOT touched; if the change grows past the prompt surface, re-triage to medium with dev+test' --confidence 75 --unknown 'no acceptance criteria section in the body' --unknown 'no definition of done section in the body' --size small
+
+Refused verbatim: `run 2026-09-29T13-03-56-513-supervisor-36e0 already has a verdict for FOC-603;
+recording FOC-596 would retarget every spawn in this run` (hint: "start a new run, or pass --force if
+this is deliberate"). The same guard earlier refused FOC-602 against FOC-621's verdict in the same
+run. **Mateusz approved `--force` + snapshot on 2026-10-01.** Disciplines: (1) snapshot `triage.json`
+before every forced overwrite, (2) `record` immediately before the `spawn` it retargets (ritual
+pair), (3) `intake --issue <new>` before `record` when the annotations should pair. First exercise:
+FOC-519 or the FOC-603 TEST retry. FOC-596's own verdict was never recorded — self-work, no spawn,
+and `spawn` is the guard's only consumer.
+
+**Auto-mode classifier block (transient; no workaround used):** `node scripts/security-scan.test.mjs`
+was blocked with *"Auto mode could not evaluate this action and is blocking it for safety — run with
+--debug… usually transient — wait briefly and try this action again as-is; don't rewrite it."*
+Identical command retried later in the measurement gap → 81/0 (native semgrep 1.172.0 live at the SAC
+lift).
+
+**Docker semgrep path still NOT verified (FOC-576 thread).** `docker pull semgrep/semgrep:1.178.0`
+failed twice on the same blob — `failed to copy: httpReadSeeker: failed open: failed to do request:
+Get "https://production.cloudfront.docker.com/registry-v2/.../blobs/sha256/49/490afa66…/data": EOF` —
+the known `http.docker.internal:3128` DD-proxy truncation (FOC-576; STATE 2026-09-30). Options with
+costs put to Mateusz: (1) host-side download + `docker load` (~30–60 min supervisor work, 0 USD),
+(2) he changes the DD proxy config himself (~2 min — his reserved action), (3) park the path (native
+semgrep is green now). Prohibitions stand: no DD proxy config changes, no Docker restart (restart
+kills the thoughtmap containers of another session), no new binary downloads (SAC blocks unsigned
+exes).
+
+## 2026-10-01 — FOC-519 DOMKNIĘTE (merge `ce84a34`) · 5. przedwczesny koniec tury + luka node_modules w merge-verify
+
+**Bottom line:** deterministyczny [D] retrieval kandydatów duplikatów wylądował na main jako merge
+`ce84a34` (kandydat `40dd6c1`, 4 pliki, +589/−3): `scripts/plan-duplicate-retrieval.mjs` — top-5,
+team-scoped, Done/Canceled wykluczane po **typie** stanu (`completed`/`canceled`), sort
+deterministyczny (numeryczna część identyfikatora rosnąco, tie-break po identyfikatorze) przypięty
+testem na 3 permutacjach, fail-closed → `[]` → istniejący skip `no_candidates`. TEST PASS 108/108
+(plus 15/15 nowych hermetycznych), merge-verify ACCEPT (izolacja 108/108 + integracja 108/108).
+Komentarz domykający `85b8741d`, status Backlog → Done. Main 14 ahead of origin — push zwyczajowo
+defferowany.
+
+**Flow:** dev-16 (0,106 wycenione / 5,73 raportowane) → test-17 (0,086 wycenione / 4,62
+raportowane, 2 tury). AC2 (kształt kandydata) — TEST zajął stanowisko: ticket przypina 4 klucze
+najwyższego poziomu, `state` jako trójka `{id,name,type}` jest zgodna (wymagana przez filtr typu);
+zaakceptowane jako domknięcie pytania.
+
+### 5. wystąpienie przedwczesnego końca tury (wariant background-suite)
+
+test-17 turn 0 skończył turę z `test-all.mjs` w locie (log zamrożony na 170 B od 13:40:01Z; zdążyły
+tylko `plan-dup` 15/15 i lint). Wznowienie tej samej sesji przez `supervisor-followup` (wzorzec
+FOC-612/FOC-475) → turn 1 dokończył foreground, 108/108, hand-off z werdyktem PASS. `test-17` sam
+sprawdził CIM-em, że nie ma zombie procesów.
+
+### merge-verify: REJECT → ACCEPT (luka `node_modules`, precedens FOC-513)
+
+Podejście #1 (`--verify "node scripts/test-all.mjs"`) REJECTED: izolacja kandydata zielona 108/108,
+ale świeże drzewo integracyjne `la-merge/…` startuje **bez `node_modules`** → 46 plików runęło na
+`ERR_MODULE_NOT_FOUND: 'ajv'`. Jedyna czerwień nie-ajv: test budżetu czasowego telemetrii (backfill
+tick 1315 ms przy barierce 250 ms) — klasa flake'ów obciążeniowych (FOC-451/515), w izolacji
+przeszedł. Podejście #2 `--verify "npm ci && node scripts/test-all.mjs"` (dokładnie precedens FOC-513:
+„verify needs `npm ci &&`") → ACCEPT, findings puste, flake telemetrii nie wrócił.
+
+**Do decyzji Mateusza (zapytane wprost):** `npm ci` w merge-verify to ruch do rejestru npm —
+potraktowane jak zwykły ruch budowy (dzieci robią `npm ci` przy starcie drzew), ale skoro STOP-lista
+mówi „wszystko, co wychodzi poza maszynę", zaznaczone; alternatywa = kopiowanie `node_modules`
+między drzewami, jeśli chce to uciąć.
+
+**Klasyfikator trybu auto (transient, bez obchodzenia):** 3 bloki „Auto mode could not evaluate this
+action…" (merge ×2, drain ×1) — identyczna komenda powtórzona bez zmian zadziałała, jak każe
+komunikat.
+
+**W toku / czeka na Mateusza:** (1) los zdania lewara 2 dla FOC-596 — (a) cofnij i ląduj raport
+(0 USD), (b) druga iteracja z regułą `covers: [...]` + 2 pomiary (0,02–0,30 USD), (c) zostaw +
+follow-up strukturalny (0,3–1,0 USD); (2) wątek Dockera/semgrep (opcje z kosztami wyżej); (3) push
+wave + sprzątanie worktree'ów. Kolejka: **FOC-520** → 516 → 517 → 476 → 477.
+
+## 2026-10-01 — FOC-520 DOMKNIĘTE (merge `a81ab5e`) · `plan.render [D]` · pierwsza czysta runda dev+test
+
+**Bottom line:** deterministyczny renderer tekstu issue `plan.render [D]` wylądował na main jako
+merge `a81ab5e` (kandydat: `dd724b3` feat + `931ae59` golden suite + `0f5b172` checklist, 14 plików
++689/−50). Łańcuch planu: `decompose → render → gate2 → push`, realnie **10 kroków / 9 krawędzi**;
+tekst zaakceptowany na gate2 trafia do Linear 1:1 (`plan.push` bierze `plan.render.issueText`
+werymicie). TEST PASS 109/109 + golden 15/15, merge-verify ACCEPT za pierwszym razem (izolacja
+109/109 + integracja 109/109). Komentarz `648df652`, Backlog → Done. Main **19 ahead of origin**.
+
+**Dwie oceny rozstrzygnięte przez TEST-a (z cytatom wierszy):** (1) ticketowy „9-krokowy łańcuch"
+jest nieaktualny — przed wstawieniem było 9 kroków / 8 krawędzi, `validateStepFlow` wymusza n−1,
+więc testy przypinają 10/9; (2) obowiązkowy wpis rejestru [D] `plan.render` w
+`config/decisions.json` to artefakt wymagany przez `crossCheckSteps` (D7 deep-equal), nie rozszerzenie
+zakresu — rejestr bez driftu (29 wpisów, wpisy FOC-448 nadal nieobecne).
+
+**Flow i koszty (wycenione):** dev-18 **0,226** (10,87 raportowane) → test-19 **0,025** (1,26).
+Pierwsza runda dev+test dzisiaj **bez przedwczesnego końca tury** i bez followupu.
+
+**merge-verify:** `--verify "npm ci && node scripts/test-all.mjs"` za pierwszym podejściem ACCEPT —
+potwierdzenie, że luka `node_modules` z FOC-519 to stała cecha świeżych drzew scratch, nie cecha
+kandydata.
+
+**Notatki procesowe (obserwacje):** (1) martwy drugi regex w `docs-count-guard.test.mjs`
+(`test-all.mjs → N/N files`) — nie trafia w checklistę, WARN przy exit OK, pre-existing; (2) świeże
+drzewo bez `.state/` + redirect wyjścia = fałszywy „exit 0" bez startu testów (artefakt harnessu
+TEST-a, naprawiony `mkdir .state`) — warto dodać do checklisty merge-verify/TEST kickoffów;
+(3) `config/models.native.map` migał jako zmodyfikowany i wrócił sam (watcher, nie reprodukowane).
+
+**Czeka na Mateusza (bez zmian):** (1) los zdania lewara 2 dla FOC-596 (a/b/c jak wyżej); (2) czy
+`npm ci` w merge-verify zostaje (ruch do rejestru npm) — alternatywa kopiowanie `node_modules`;
+(3) push wave + sprzątanie worktree'ów. Kolejka: **FOC-516** → 517 → 476 → 477.
+
+## 2026-10-01 — FOC-516 DOMKNIĘTE (merge `47ae5e3`) · `plan.intent.select` [J]+[D] · dev+test z recovery followupem
+
+**Bottom line:** `plan.intent.select` wylądował na main jako merge `47ae5e3` (kandydat: `2d9c150`
+feat + `cd27132` fix rankingu + `ec5aad0` harness evala + `5d790ee` raport evala; 17 plików
++2255/−117). Krok [G] z węzłowym [J] `plan.intent.select.score` i polityką [D] w
+`config/intent-select-policy.json`; gate1 przepięty na pozycję konwersacji intentu, `config/graph.json`
+= łańcuch §3.12: `dor → intent → select → gate1 → dod → ac → spec → decompose → render → gate2 → push`
+(**11 kroków / 10 krawędzi**) — carry **cb7d199e** zamknięty w tym samym secie, kontrakt
+`plan.render` (FOC-520) nietknięty. TEST PASS 110/110, merge-verify ACCEPT za pierwszym razem
+(izolacja 110/110 + integracja 110/110), lint 0 (558 plików), graph-validate OK. Komentarz
+`04a9ca3c`, Backlog → Done. Main ahead of origin rośnie (push odroczony).
+
+**Trzy judgments (TEST: wszystkie SUPPORTED, z własnymi cytatami):** (1) kardynalność [J] = jedno
+wywołanie na mapę, 2×N pytań przez klucze szablonów `impact{i}`/`grounded{i}` w jednym wpisie
+rejestru — kanał instancji wyraża oba pytania na interpretację, błąd = fail-closed bez zgubionej
+interpretacji; (2) kształt = krok [G] + węzły [J] (wzór `plan.ac` + `plan.ac.testable`, A0,
+tier-2 wyłączony), D7 deep-equal obu wpisów, routing wyłącznie w konfigu; (3) gate1 czyta dokładnie
+`["plan.intent.select.record"]` + kanał rund `presented[round]` / `gate.plan.gate1.answers` /
+`.corrections` — **dokładny kształt 4 sufiksów record key zapisany w hand-offie TEST jako spadek
+dla FOC-517**.
+
+**Eval (AC7, live, fixture FOC-515):** 2/12 pipeline ok (FOC-406, FOC-443) / 10 skipów na etapie
+mapy (6 `provider_error` — 5 fast HTTP 400 + 1 budget abort; 4 `unparseable_output`) — każdy skip
+z przyczyną i latencją, żaden wiersz nie sfabrykowany. Cap wiąże (pytania 4+4, założenia 7+5,
+overflow listowany); znane missy FOC-443: 1/3 zarobiło pytanie, 3/3 wyprowadzone, 0 ukrytych.
+Ledger 0,038.
+
+**Flow i koszty (wycenione):** dev-20 **2,02** (2 tury; strumień raportował 22,59 za turę 1 —
+FOC-165) → test-21 **0,033**; eval 0,038. Razem ~**2,09**.
+
+**Notatki procesowe (obserwacje):** (1) **nowa klasa: „background-task kill" (2700 s)** — pierwszą
+turę DEV uciął harness zabijając subagenta implementera i smoke-run evala przy końcu tury
+(exit 0, ale bez hand-offu i batcha 2); recovery = **followup na tej samej sesji** (zadziałało;
+do kickoffu TEST dodałem zakaz subagentów i zadań tła); (2) `test-all` ~610–630 s > 600 s
+foregroundowego capu Bash — dzieci planują lane parallelism (`--jobs 16`) albo partycje; (3) wiersze
+evala niosą sprzed-fixową adnotację rankingu (map-order) — counts nietknięte, disclosed w dokumencie;
+(4) `IMPACT_THRESHOLD = 0.5` jako stała węzła (konwencja noul, nie routing) — obserwacja TEST;
+(5) trym awarii providera przesunął się vs FOC-515 run 2 (fast 400 / empty content zamiast
+schema-rejectów) — sygnał do wariantu failure-line w FOC-449; (6) transient klasyfikatora auto-mode
+(„could not evaluate this action", merge ×2, drain ×1) — identyczna komenda ponowiona bez zmian
+przechodzi, jak każe komunikat.
+
+**Czeka na Mateusza (bez zmian):** (1) los zdania lewara 2 dla FOC-596 — (a) cofnij i ląduj raport
+(0 USD), (b) druga iteracja z regułą `covers: [...]` + 2 pomiary (0,02–0,30 USD), (c) zostaw +
+follow-up strukturalny (0,3–1,0 USD); (2) czy `npm ci` w merge-verify zostaje (ruch do rejestru npm)
+— alternatywa kopiowanie `node_modules`; (3) push wave + sprzątanie worktree'ów (foc-519/520/516
+drzewa na dysku, gałęzie zostają). Kolejka: **FOC-517** → 476 → 477.
+
+## 2026-10-02 — FOC-517 ZAIMPLEMENTOWANE (branch `foc-517-dev`, kandydat do REVIEW) · gate1 = konwersacja intentu ≤3 rundy · confirmed-intent reads
+
+**Bottom line:** `plan.gate1` [H] stał się konwersacją intentu: reentry edge `plan.gate1 → plan.intent`
+(pierwsza krawędź typu `reentry` w `config/graph.json` — obok `sequence` i step-level `decide`),
+`plan-intent-gate.mjs` (display PL ≤14 linii + parser odpowiedzi: picks / `a nie …` / free fallback,
+każdy rekord z `round` + presented slice), runner prowadzi pętlę ≤3 rund (cap → typed
+`intent_not_settled`), przy potwierdzeniu dokleja rekord **`plan.intent.confirmed`** [D] (tylko
+potwierdzająca runda: answers/corrections), a `plan.dod` / `plan.ac` / `plan.spec` czytają go zamiast
+surowego wpisu inbox (brak rekordu = typed fail — AC nigdy z niepotwierdzonego intentu).
+`plan.intent.reply` [J] A0 (seam transport, 32. wpis rejestru) adnotuje wolne odpowiedzi — nie
+rozstrzyga rundy. STALE guard: resolution ts < pending record ts → waiting. Semantyka: presented
+confirmations/assumptions przyjmowane milczeniem („popraw, jeśli źle"), tylko pytania — `selectDeltaLabel.unanswered`.
+
+**Kandydat (7 commitów na `foc-517-dev`, baza `f6f70d6`):** `dba1507` docs (§3.11 regenerowany
+programatycznie z configa, §6.4 reentry, §3.12 flaga zamknięta) → `8be7493` config+validator →
+`d8938da` plan-intent-gate + lane → `7599d4e` runner+kontrakty+e2e → `84cc4ce` compose AC/DOD z
+`plan.intent.confirmed` + `--only` w evalach → `75d3ece` checklist 110→111 → wpis STATE.
+TEST **111/111** (625 s, `--jobs 16`; nowa suita plan-intent-gate 12 testów), lint 0 (560 plików),
+graph-validate exit 0. Dotknięte suity wszystkie zielone (plan-intent 61, select 27, gate 12, ac 21,
+dod 21, runner 27, validate 42, registry 38, render 15, plan-gates 21, dup-retrieval 15, drift 26).
+Bez push — merge po REVIEW.
+
+**Trzy judgments (opisane w hand-offie, do oceny przez REVIEW):** (1) chain/scope — FOC-517 dodaje
+TYLKO reentry + kontrakt konwersacji + rekord confirmed + rewire reads; decide edge `plan.ready`
+zostaje FOC-476; (2) kształt `plan.intent.confirmed` = dokładny klucz, runner dokleja jako [D],
+downstream czyta exact-key przez `resolveRead`; (3) `plan.intent.reply` = JEDNO wywołanie seam na
+wolną odpowiedź (nie per item), pytania `reply` + `touched{i}` w kolejności presented display.
+Plus wyrównanie semantyki `unanswered` (pytania only). **Runner bug znaleziony i naprawiony przy
+e2e:** guard reentry `if (resolution)` → `if (!record && resolution)` (konsumowana resolution to
+historia, nie oczekująca odpowiedź) — złapany testem runnera, nie inspekcją.
+
+**Eval re-runs (live, ten sam fixture 12 issue, confirmed briefs; prompts byte-identyczne, tylko
+`reads` — criteriaVersion nadal 1):** plan.dod **11 ok / 1 failed** (FOC-448 3× transport fail,
+wiersz zarejestrowany jako failed; 110 items vs 119 w run-2; $0.0910), plan.ac **8 ok / 4 escalated**
+vs recorded 7/5 (flips: 416/451/452 escalated→ok, 448/397 ok→escalated; $0.0893 ok rows); schema
+validity 100% serwowanych wierszy, failury = transport (timeout 300 s / empty content), nie schema.
+Werdykty pass/partial — dla Mateusza (honest-eval: run once, nic nie iterowane against GT).
+
+**Notatki procesowe (obserwacje):** (1) parser: `"1b, a nie c"` trafia w PICK (przecinek za pickiem)
+— kanał korekt wymaga pominięcia przecinka lub litery na początku; free fallback łapie bezpiecznie
+(adnotacja, nie cichy fold); (2) prompty `plan.dod`/`plan.ac` wciąż mówią „one planning inbox entry"
+przy nowych reads — celowo (criteriaVersion); (3) zabity sonda `--help` evala ac: 2 live calls
+ledgered (`.state/foc-475/eval/2026-10-01T20-13-34/`) — realny, nieprzypisany wydatek, zachowany jako
+dowód; (4) mix awarii providera przesunięty vs FOC-515 run 2 (timeout/empty zamiast schema-rejects);
+(5) `test-all` wymaga wpisu w `test-lanes.json` (lane check fail-closed) — nowa suita = nowy wiersz
+z powodem.
+
+**Czeka na Mateusza (bez zmian):** (1) los zdania lewara 2 dla FOC-596; (2) czy `npm ci` w
+merge-verify zostaje; (3) push wave + sprzątanie worktree'ów. Kolejka: **FOC-476** → 477
+(FOC-517 czeka na REVIEW/merge).

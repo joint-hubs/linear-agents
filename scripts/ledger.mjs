@@ -30,6 +30,26 @@ import { createPacer, jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
 
+// ---------------------------------------------------------------------------
+// Data-root seams (FOC-599): tests must never open the live `.state` or the
+// live transcript tree (house rule), so both data roots resolve at CALL time
+// from the env and default to the repo tree — with the vars unset, every path
+// is byte-identical to the old hard-coded one. Same shape as
+// telemetry-server.mjs's own LA_STATE_ROOT seam.
+// ---------------------------------------------------------------------------
+
+/** Run manifests: <stateRoot>/runs — stateRoot is LA_STATE_ROOT or <repo>/.state. */
+export function runsManifestDir() {
+  const stateRoot = process.env.LA_STATE_ROOT ? resolve(process.env.LA_STATE_ROOT) : join(root, ".state");
+  return join(stateRoot, "runs");
+}
+
+/** The per-squad transcript corpus: <corpusRoot>/agents/<squad>/projects. */
+export function squadProjectsRoot(squad) {
+  const corpusRoot = process.env.LA_CORPUS_ROOT ? resolve(process.env.LA_CORPUS_ROOT) : root;
+  return join(corpusRoot, "agents", squad, "projects");
+}
+
 /** Lazy-loaded pricing table from config/models.json (OpenRouter scope). */
 let _pricing = null;
 function getPricing() {
@@ -694,7 +714,7 @@ function candidateRootsForManifest(manifest, hashDirsCache) {
     // Killed-window manifests never got claudeConfigDir (launchers set it
     // AFTER `run-manifest start`; `end` backfills it — which never ran).
     // Squad config dirs are deterministic: <repo>/agents/<squad>.
-    roots.push(...projectHashDirs(join(root, "agents", manifest.squad, "projects"), hashDirsCache));
+    roots.push(...projectHashDirs(squadProjectsRoot(manifest.squad), hashDirsCache));
   }
   if (roots.length === 0 && manifest.cwd) {
     roots.push(join(homedir(), ".claude", "projects", cwdToHashName(manifest.cwd)));
@@ -1009,7 +1029,7 @@ export async function aggregateRun(manifest, transcriptIndex, discoveredMatch) {
  * @returns {Promise<Array<object>>} Sorted by startedAt descending (newest first).
  */
 export async function scanRuns() {
-  const runsDir = join(root, ".state", "runs");
+  const runsDir = runsManifestDir();
   if (!existsSync(runsDir)) return [];
 
   let files;

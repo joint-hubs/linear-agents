@@ -113,4 +113,20 @@ test("neither spawn nor followup hands the watcher the caller's --prompt-file pa
   if (turnAt > -1 && readAt > turnAt) fail("followup reads the prompt only after it has recorded the turn");
 });
 
+console.log("\nstall liczy cisze od startu tury w obu detektorach");
+
+test("the stall window resets at turn start in both detectors", () => {
+  // Direction 2 of FOC-271: the silence window was the tee's last write alone,
+  // so a resume that started >10 min after the previous turn's last byte showed
+  // `stalled: true` from its first snapshot until its first new byte — and the
+  // watcher enqueued a spurious stall row for it. Silence runs from the LATEST
+  // of the tee write and the turn start. One detector written twice (same
+  // shared constant, same rule) — both must say so, or the pair drifts again.
+  for (const [name, file] of [["status", "supervisor-status.mjs"], ["watch", "supervisor-watch.mjs"]]) {
+    const src = strip(file);
+    if (!/turn[_]?start/i.test(src)) fail(`${name} no longer anchors the silence window at the turn start`);
+    if (!/Math\.max\(/.test(src)) fail(`${name} no longer clamps the silence window to the turn start`);
+  }
+});
+
 summary();

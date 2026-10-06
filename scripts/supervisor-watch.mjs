@@ -186,14 +186,21 @@ function scanGates() {
 // makes that true even if this scan ran twice).
 const STALL_AFTER_MS = stallSilenceMs();
 const GATE_SCAN_MS = 5_000;
+// FOC-271: this watcher IS the turn, so the turn's start is the other activity
+// signal. A resume launched long after the previous turn's last tee write would
+// otherwise be "stalled" — and enqueue a spurious stall row — before its child
+// produced a single byte. Silence runs from the LATEST of the tee write and the
+// turn start, the same rule supervisor-status.mjs displays.
+const TURN_START_MS = Date.now();
 let lastTeeSize = null;
 
 function scanStall() {
   try {
     if (!existsSync(tee)) return;
     const { size, mtimeMs } = statSync(tee);
-    if (lastTeeSize !== null && size === lastTeeSize && Date.now() - mtimeMs >= STALL_AFTER_MS) {
-      wake({ event: "stall", childId, turn: turnIndex, detail: { silentMs: Date.now() - mtimeMs } });
+    const activityMs = Math.max(mtimeMs, TURN_START_MS);
+    if (lastTeeSize !== null && size === lastTeeSize && Date.now() - activityMs >= STALL_AFTER_MS) {
+      wake({ event: "stall", childId, turn: turnIndex, detail: { silentMs: Date.now() - activityMs } });
     }
     lastTeeSize = size;
   } catch {

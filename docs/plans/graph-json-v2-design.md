@@ -71,6 +71,26 @@ telemetry-viz-export), the return-edge id + `when.labels[0]` (supervisor-verdict
 > carries a sixth top-level decision edge (`decide-has-acceptance-criteria`, FOC-451) that the
 > §3.11 example does not show.
 
+> **Revision note (2026-10-01, FOC-517):** the intent conversation lands. The chain below is the
+> one FOC-516 left in `config/graph.json` — 11 steps / 10 sequence edges:
+> `plan.dor → plan.intent → plan.intent.select → plan.gate1 → plan.dod → plan.ac → plan.spec →
+> plan.decompose → plan.render → plan.gate2 → plan.push`; `plan.gate1` already sits before any
+> spend (FOC-516 moved it in the same change that inserted `plan.intent.select`), so this revision
+> does NOT reposition it. What FOC-517 adds: (1) the gate1 → plan.intent **re-entry edge** — the
+> second edge type in `stepFlow` besides `sequence` (§6.4), implementing the ≤3-round conversation
+> of §3.6; (2) the gate1 conversation contract (display, accepted answers, the `gate.plan.gate1`
+> record fields, the typed `intent_not_settled` stop); (3) the **`plan.intent.confirmed`** record —
+> the final map + answers, written by [D] code at the gate1 confirmation — and the read rewiring:
+> `plan.dod`/`plan.ac` read it instead of `inbox.entry`, `plan.spec` reads it plus `inbox.entry`,
+> and `plan.gate2` additionally reads `plan.spec.record` (§3.8). `plan.ready` [J] in the older
+> diagram below is FOC-476's deliverable (this issue BLOCKS FOC-476) — decided there, not here;
+> `plan.decompose` is already [J] as the diagram requires. Why gate1 sits before any spend: the
+> FOC-474 eval scored 2 pass / 9 partial / 0 fail, with a large share of the partial misses being
+> scope/boundary details the dictated text never stated — `plan.dod`/`plan.ac` [G] calls generated
+> from an unconfirmed reading. A quick confirmed conversation first (Mateusz, 2026-09-23: PLAN must
+> hold a quick conversation to make sure it knows what he wants — reading the Linear text alone can
+> misread it) is cheaper than regenerating downstream artefacts from a misreading.
+
 The prior-art sketch (GAPS §3.3) is `plan.dor → plan.ac → plan.spec → plan.decompose → plan.push`.
 v2 adopts it with four argued changes:
 
@@ -185,16 +205,57 @@ failed call, escalates; writes `run-record`. **Frontman:** none on the happy pat
 is a runner-side cheap call); he enters only on the second-failure escalation rung, or to compose
 gate1's context if the retry exhausted and the typed record alone is insufficient for Mateusz.
 
-### 3.6 plan.gate1 — [H]
+### 3.6 plan.gate1 — [H] — the intent conversation (FOC-517)
 
-Plan approval is a human decision — the existing gate contract is untouched (GAPS §4: "czego nie
-ruszać: kontraktu gate'ów"). This is v1's `plan.gate1`, now placed in the chain.
-**Contract:** reads `plan.spec.record` → `{ approved: boolean }`; tier `null`; failure `stop` (no
-approval → no decompose, no push); writes `graph-state` (gate record under
-`.state/supervisor/<run>/gates/`, as today). **Frontman:** the supervisor relays the gate record
-mechanically (`supervisor-gate.mjs`); **Mateusz decides** — the frontman's turn is emission, not
-judgment, and a [G] node never decides this gate (its output is material the human reads, not an
-answer to it).
+Plan approval here is the intent conversation: ≤3 quick rounds BEFORE any spec is written —
+"czy dobrze rozumiem?" (Mateusz, 2026-09-23). The gate stays a human decision relayed mechanically
+(GAPS §4: "czego nie ruszać: kontraktu gate'ów" — the KINDS list is untouched; only position and
+reads changed).
+
+**Display ([D] code, from FOC-516's selection).** Polish, ≤14 lines, header
+`Czy dobrze rozumiem? (runda n/3)`, three blocks rendered from `plan.intent.select.record` +
+`plan.intent.record` (the map supplies the quotes):
+
+- **"Rozumiem tak"** — the selection's `understood` items, each with its quoted fragment;
+- **"Założyłem — popraw, jeśli źle"** — lettered (a, b, …): the `confirmations` and `assumptions`;
+- **"Pytania"** — numbered (1, 2, …), each with lettered options (a, b, …), the recommended one
+  marked — the selection's `questions`.
+
+The 4-question selection cap bounds block 3; when the 14-line budget runs out the renderer omits
+the lowest-priority items with an explicit `… (+N w rekordzie)` marker — omitted items are NOT
+presented (never answerable, never confirmed by `ok`) and reappear in the next round's selection
+(the FOC-516 dedupe only drops answered claims). The exact items shown are persisted as
+`presented[round]` on the gate record — the answer contract's ground truth.
+
+**Accepted answers** (free text relayed from the gate; parsed by [D] code against
+`presented[round]`):
+
+- `ok` — accepts everything plus the recommended options;
+- `B nie, …` — corrects one lettered assumption/confirmation item (a correction);
+- `1b 2a` — picks options for the numbered questions;
+- free dictated text (voice) — not deterministically parseable: the `plan.intent.reply` [J]
+  classifier annotates it (A0), the annotation is shown to the frontman next to the raw answer, and
+  the round is settled by the frontman's decision — nothing is auto-acted until calibrated (M3).
+
+**Round mechanics.** `confirmed` = no corrections AND every presented question answered (`ok`
+answers all with the recommended options). Not confirmed → the runner re-enters `plan.intent`
+(the re-entry edge) with the round's answers/corrections folded — the map regenerates (§3.12),
+select re-asks only what is unanswered, gate1 shows round n+1. After 3 rounds without confirmation
+the chain stops with a typed **`intent_not_settled`** record — it never plans on an unconfirmed
+intent.
+
+**Contract:** reads `plan.intent.select.record`, `plan.intent.record` → output
+`{ approved: boolean, answer?: string (≤2000), confirmed?: boolean, round?: integer (1..3),
+answers?: […], corrections?: […], presented?: {…} }` — the deciding agent's resolution writes only
+`{approved, answer}`; the runner computes the rest from the immutable stores and REFUSES a
+resolution whose self-carried copies disagree (fail-closed, same trust model as `about`).
+`approved: false` stays gate-rejected (terminal — the conversation is killed, not continued).
+tier `null`; failure `stop`; writes `graph-state`. On confirmation the runner appends the derived
+**`plan.intent.confirmed`** record = the final map + answers (§3.12) — `plan.dod`/`plan.ac` read it
+instead of `inbox.entry`. **Frontman:** relays mechanically; for free-text answers he also sees the
+`plan.intent.reply` annotation next to the raw answer and settles the round — the frontman's only
+per-round turn, and an A0-posture one (the classification is recorded, never acted on its own).
+**Mateusz decides** what the answer meant; a [G] node never decides this gate.
 
 ### 3.7 plan.decompose — [J]
 
@@ -210,10 +271,13 @@ small|medium|large, labels, relations}] (max 12) }`; tier D2 cascade, min pin 1;
 ### 3.8 plan.gate2 — [H]
 
 Push approval — v1's `plan.gate2`; `config/graph.json` plan.failure already forbids pushing without
-it. Human decision, gate contract untouched.
-**Contract:** reads `plan.decompose.record`, `gate.plan.gate1.record` → `{ approved: boolean }`;
-tier `null`; failure `stop`; writes `graph-state`. **Frontman:** relays mechanically; Mateusz
-decides.
+it. Human decision, gate contract untouched. **FOC-517:** gate2 is the ONE final approval of plan +
+tasks before push, so it also reads the confirmed intent's downstream artefacts:
+**Contract:** reads `plan.spec.record`, `plan.decompose.record`, `gate.plan.gate1.record` (which
+carries the conversation's `confirmed`/`round`/`new_scope` annotations, if any) and
+`plan.render.issueText` (the rendered text — what the gate shows is what would be pushed) →
+`{ approved: boolean }`; tier `null`; failure `stop`; writes `graph-state`. **Frontman:** relays
+mechanically; Mateusz decides.
 
 ### 3.9 plan.push — [D]
 
@@ -244,9 +308,12 @@ arithmetic.
 The block below is the **plan-node delta** to `config/graph.json` (Option A, §6.1): dev/review/
 test/cadence/human and the top-level `edges` array stay v1-unchanged. Step objects carry exactly
 the D7 field list (id = its key, kind, reads, output, tier, failure, writes) — nothing else.
-`stepFlow` carries the linear sequence edges plus plan.ready's step-level decide edge — the first
-of its kind in the schema (§5, §6.4). Fields outside `steps`/`stepFlow` are the v1 squad contract,
-kept verbatim for the nine consumers.
+**Revision (FOC-517, 2026-10-01):** the block below is generated verbatim from the committed
+`config/graph.json` — 11 steps; `stepFlow` = 10 `sequence` edges plus ONE `reentry` edge
+(`plan.gate1 → plan.intent`, the intent conversation's loop, §3.6) — the first reentry edge of its
+kind in the schema (§6.4). plan.ready and its step-level decide edge are FOC-476's deliverable
+(this issue blocks FOC-476) and are NOT shown. Fields outside `steps`/`stepFlow` are the v1 squad
+contract, kept verbatim for the nine consumers.
 
 ```json
 {
@@ -271,30 +338,478 @@ kept verbatim for the nine consumers.
       "steps": {
         "plan.dor": {
           "kind": "J",
-          "reads": ["inbox.entry", "repoState.pinned"],
-          "output": { "type": "object", "required": ["ready", "gaps"], "additionalProperties": false, "properties": { "ready": { "type": "boolean" }, "gaps": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 200 } } } },
-          "tier": { "cascade": true, "min": 1 },
+          "reads": [
+            "inbox.entry",
+            "repoState.pinned"
+          ],
+          "output": {
+            "type": "object",
+            "required": [
+              "ready",
+              "gaps"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "ready": {
+                "type": "boolean"
+              },
+              "gaps": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              }
+            }
+          },
+          "tier": {
+            "cascade": true,
+            "min": 1
+          },
           "failure": "escalate",
+          "writes": "run-record"
+        },
+        "plan.intent": {
+          "kind": "G",
+          "reads": [
+            "inbox.entry",
+            "plan.dor.gaps",
+            "intake.taskType",
+            "gate.plan.gate1.answers",
+            "gate.plan.gate1.corrections"
+          ],
+          "output": {
+            "type": "object",
+            "required": [
+              "goal",
+              "why",
+              "mapVersion",
+              "interpretations"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "goal": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "why": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "mapVersion": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "idMap": {
+                "type": "object",
+                "maxProperties": 12,
+                "additionalProperties": false,
+                "propertyNames": {
+                  "pattern": "^IN-([1-9]|1[0-2])$"
+                },
+                "patternProperties": {
+                  "^IN-([1-9]|1[0-2])$": {
+                    "type": "string",
+                    "pattern": "^IN-([1-9]|1[0-2])$"
+                  }
+                }
+              },
+              "interpretations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "perspective",
+                    "claim",
+                    "source",
+                    "alternatives",
+                    "covers"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^IN-([1-9]|1[0-2])$"
+                    },
+                    "perspective": {
+                      "enum": [
+                        "goal",
+                        "user",
+                        "scope",
+                        "success",
+                        "constraints",
+                        "risk",
+                        "priority",
+                        "terms"
+                      ]
+                    },
+                    "claim": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "source": {
+                      "enum": [
+                        "stated",
+                        "inferred",
+                        "unknown"
+                      ]
+                    },
+                    "quote": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 150
+                    },
+                    "alternatives": {
+                      "type": "array",
+                      "maxItems": 3,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "covers": {
+                      "type": "array",
+                      "maxItems": 3,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "options": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 4,
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "text",
+                          "recommended"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                          "text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "recommended": {
+                            "type": "boolean"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 150
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "source": {
+                            "const": "stated"
+                          }
+                        },
+                        "required": [
+                          "source"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "quote"
+                        ],
+                        "properties": {
+                          "quote": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "source": {
+                            "const": "unknown"
+                          }
+                        },
+                        "required": [
+                          "source"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "options"
+                        ],
+                        "not": {
+                          "required": [
+                            "quote"
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "source": {
+                            "enum": [
+                              "stated",
+                              "inferred"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "source"
+                        ]
+                      },
+                      "then": {
+                        "not": {
+                          "required": [
+                            "options"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "tier": "cheap",
+          "failure": "stop",
+          "writes": "run-record"
+        },
+        "plan.intent.select": {
+          "kind": "G",
+          "reads": [
+            "plan.intent.record",
+            "gate.plan.gate1.answers",
+            "gate.plan.gate1.corrections"
+          ],
+          "output": {
+            "type": "object",
+            "required": [
+              "mapVersion",
+              "questions",
+              "confirmations",
+              "understood",
+              "assumptions"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "mapVersion": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "questions": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "claim",
+                    "options",
+                    "impactProbability"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^IN-([1-9]|1[0-2])$"
+                    },
+                    "claim": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "options": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 4,
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "text",
+                          "recommended"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                          "text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "recommended": {
+                            "type": "boolean"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 150
+                          }
+                        }
+                      }
+                    },
+                    "impactProbability": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  }
+                }
+              },
+              "confirmations": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "claim",
+                    "impactProbability"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^IN-([1-9]|1[0-2])$"
+                    },
+                    "claim": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "impactProbability": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  }
+                }
+              },
+              "understood": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "claim",
+                    "groundedProbability"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^IN-([1-9]|1[0-2])$"
+                    },
+                    "claim": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "groundedProbability": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  }
+                }
+              },
+              "assumptions": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "claim",
+                    "impactProbability",
+                    "reason"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^IN-([1-9]|1[0-2])$"
+                    },
+                    "claim": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "impactProbability": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "tier": "cheap",
+          "failure": "stop",
           "writes": "run-record"
         },
         "plan.dod": {
           "kind": "G",
-          "reads": ["inbox.entry"],
+          "reads": [
+            "plan.intent.confirmed"
+          ],
           "output": {
             "type": "object",
-            "required": ["definitionOfDone"],
+            "required": [
+              "definitionOfDone"
+            ],
             "additionalProperties": false,
             "properties": {
               "definitionOfDone": {
-                "type": "array", "minItems": 1, "maxItems": 12,
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
                 "items": {
                   "type": "object",
-                  "required": ["check", "kind", "bounded"],
+                  "required": [
+                    "check",
+                    "kind",
+                    "bounded"
+                  ],
                   "additionalProperties": false,
                   "properties": {
-                    "check": { "type": "string", "minLength": 1, "maxLength": 200 },
-                    "kind": { "enum": ["test", "lint", "manual", "linear"] },
-                    "bounded": { "type": "boolean" }
+                    "check": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "kind": {
+                      "enum": [
+                        "test",
+                        "lint",
+                        "manual",
+                        "linear"
+                      ]
+                    },
+                    "bounded": {
+                      "type": "boolean"
+                    }
                   }
                 }
               }
@@ -306,23 +821,56 @@ kept verbatim for the nine consumers.
         },
         "plan.ac": {
           "kind": "G",
-          "reads": ["inbox.entry", "features.list"],
+          "reads": [
+            "plan.intent.confirmed",
+            "features.list"
+          ],
           "output": {
             "type": "object",
-            "required": ["acs"],
+            "required": [
+              "acs"
+            ],
             "additionalProperties": false,
             "properties": {
               "acs": {
-                "type": "array", "minItems": 1, "maxItems": 12,
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
                 "items": {
                   "type": "object",
-                  "required": ["id", "text", "kind", "evidence"],
+                  "required": [
+                    "id",
+                    "text",
+                    "kind",
+                    "evidence"
+                  ],
                   "additionalProperties": false,
                   "properties": {
-                    "id": { "type": "string", "pattern": "^AC-[0-9]{1,2}$" },
-                    "text": { "type": "string", "minLength": 1, "maxLength": 300 },
-                    "kind": { "enum": ["behaviour", "boundary", "verification"] },
-                    "evidence": { "type": "string", "enum": ["test", "command_output", "file_state", "human_check"] }
+                    "id": {
+                      "type": "string",
+                      "pattern": "^AC-[0-9]{1,2}$"
+                    },
+                    "text": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    },
+                    "kind": {
+                      "enum": [
+                        "behaviour",
+                        "boundary",
+                        "verification"
+                      ]
+                    },
+                    "evidence": {
+                      "type": "string",
+                      "enum": [
+                        "test",
+                        "command_output",
+                        "file_state",
+                        "human_check"
+                      ]
+                    }
                   }
                 }
               }
@@ -334,83 +882,556 @@ kept verbatim for the nine consumers.
         },
         "plan.spec": {
           "kind": "A",
-          "reads": ["inbox.entry", "plan.dod.definitionOfDone", "plan.ac.acs", "repoState.pinned"],
-          "output": { "type": "object", "required": ["briefs", "adr", "summary"], "additionalProperties": false, "properties": { "briefs": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 200 } }, "adr": { "type": "string", "maxLength": 200 }, "summary": { "type": "string", "maxLength": 2000 } } },
+          "reads": [
+            "plan.intent.confirmed",
+            "inbox.entry",
+            "plan.dod.definitionOfDone",
+            "plan.ac.acs",
+            "repoState.pinned"
+          ],
+          "output": {
+            "type": "object",
+            "required": [
+              "briefs",
+              "adr",
+              "summary"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "briefs": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "adr": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "summary": {
+                "type": "string",
+                "maxLength": 2000
+              }
+            }
+          },
           "tier": "agent",
-          "failure": "escalate",
-          "writes": "run-record"
-        },
-        "plan.ready": {
-          "kind": "J",
-          "reads": ["plan.dod.record", "plan.ac.record", "plan.spec.record"],
-          "output": { "type": "object", "required": ["ready", "failedStep"], "additionalProperties": false, "properties": { "ready": { "type": "boolean" }, "failedStep": { "enum": ["plan.dod", "plan.ac", "plan.spec", "none"] }, "reason": { "type": "string", "maxLength": 300 } } },
-          "tier": { "cascade": true, "min": 1 },
           "failure": "escalate",
           "writes": "run-record"
         },
         "plan.gate1": {
           "kind": "H",
-          "reads": ["plan.spec.record"],
-          "output": { "type": "object", "required": ["approved"], "additionalProperties": false, "properties": { "approved": { "type": "boolean" } } },
+          "reads": [
+            "plan.intent.select.record",
+            "plan.intent.record"
+          ],
+          "output": {
+            "type": "object",
+            "required": [
+              "approved"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "approved": {
+                "type": "boolean"
+              },
+              "answer": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "confirmed": {
+                "type": "boolean"
+              },
+              "round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3
+              },
+              "answers": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "round",
+                    "mapVersion",
+                    "interpretationId"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "round": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 3
+                    },
+                    "mapVersion": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "interpretationId": {
+                      "type": "string",
+                      "pattern": "^IN-([1-9]|1[0-2])$"
+                    },
+                    "about": {
+                      "type": "object",
+                      "required": [
+                        "claim"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "claim": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "option": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        }
+                      }
+                    },
+                    "answer": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "acceptedOptions": {
+                      "type": "array",
+                      "maxItems": 4,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    }
+                  }
+                }
+              },
+              "corrections": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "round",
+                    "mapVersion",
+                    "interpretationId",
+                    "corrected"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "round": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 3
+                    },
+                    "mapVersion": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "interpretationId": {
+                      "type": "string",
+                      "pattern": "^IN-([1-9]|1[0-2])$"
+                    },
+                    "about": {
+                      "type": "object",
+                      "required": [
+                        "claim"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "claim": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        }
+                      }
+                    },
+                    "corrected": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    }
+                  }
+                }
+              },
+              "presented": {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": 3,
+                "propertyNames": {
+                  "pattern": "^[123]$"
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "required": [
+                    "mapVersion"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "mapVersion": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "understood": {
+                      "type": "array",
+                      "maxItems": 12,
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "claim"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "pattern": "^IN-([1-9]|1[0-2])$"
+                          },
+                          "claim": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          }
+                        }
+                      }
+                    },
+                    "confirmations": {
+                      "type": "array",
+                      "maxItems": 12,
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "claim"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "pattern": "^IN-([1-9]|1[0-2])$"
+                          },
+                          "claim": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          }
+                        }
+                      }
+                    },
+                    "assumptions": {
+                      "type": "array",
+                      "maxItems": 12,
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "claim"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "pattern": "^IN-([1-9]|1[0-2])$"
+                          },
+                          "claim": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          }
+                        }
+                      }
+                    },
+                    "questions": {
+                      "type": "array",
+                      "maxItems": 4,
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "claim",
+                          "options"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "pattern": "^IN-([1-9]|1[0-2])$"
+                          },
+                          "claim": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "options": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 4,
+                            "items": {
+                              "type": "object",
+                              "required": [
+                                "text",
+                                "recommended"
+                              ],
+                              "additionalProperties": false,
+                              "properties": {
+                                "text": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 200
+                                },
+                                "recommended": {
+                                  "type": "boolean"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "approved": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "approved"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "answer"
+                  ]
+                }
+              }
+            ]
+          },
           "tier": null,
           "failure": "stop",
           "writes": "graph-state"
         },
         "plan.decompose": {
           "kind": "J",
-          "reads": ["plan.spec.record", "plan.ac.acs"],
+          "reads": [
+            "plan.spec.record",
+            "plan.ac.acs"
+          ],
           "output": {
             "type": "object",
-            "required": ["tasks"],
+            "required": [
+              "tasks"
+            ],
             "additionalProperties": false,
             "properties": {
               "tasks": {
-                "type": "array", "minItems": 1, "maxItems": 12,
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
                 "items": {
                   "type": "object",
-                  "required": ["title", "size", "labels", "relations"],
+                  "required": [
+                    "title",
+                    "size",
+                    "labels",
+                    "relations"
+                  ],
                   "additionalProperties": false,
                   "properties": {
-                    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
-                    "size": { "enum": ["small", "medium", "large"] },
-                    "labels": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 60 } },
-                    "relations": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 60 } }
+                    "title": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "size": {
+                      "enum": [
+                        "small",
+                        "medium",
+                        "large"
+                      ]
+                    },
+                    "labels": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 60
+                      }
+                    },
+                    "relations": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 60
+                      }
+                    }
                   }
                 }
               }
             }
           },
-          "tier": { "cascade": true, "min": 1 },
+          "tier": {
+            "cascade": true,
+            "min": 1
+          },
           "failure": "escalate",
+          "writes": "run-record"
+        },
+        "plan.render": {
+          "kind": "D",
+          "reads": [
+            "plan.dod.definitionOfDone",
+            "plan.ac.acs",
+            "plan.spec.summary",
+            "plan.decompose.record"
+          ],
+          "output": {
+            "type": "object",
+            "required": [
+              "issueText"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "issueText": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 30000
+              }
+            }
+          },
+          "tier": null,
+          "failure": "stop",
           "writes": "run-record"
         },
         "plan.gate2": {
           "kind": "H",
-          "reads": ["plan.decompose.record", "gate.plan.gate1.record"],
-          "output": { "type": "object", "required": ["approved"], "additionalProperties": false, "properties": { "approved": { "type": "boolean" } } },
+          "reads": [
+            "plan.spec.record",
+            "plan.decompose.record",
+            "gate.plan.gate1.record",
+            "plan.render.issueText"
+          ],
+          "output": {
+            "type": "object",
+            "required": [
+              "approved"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "approved": {
+                "type": "boolean"
+              }
+            }
+          },
           "tier": null,
           "failure": "stop",
           "writes": "graph-state"
         },
         "plan.push": {
           "kind": "D",
-          "reads": ["plan.decompose.record", "gate.plan.gate2.record"],
-          "output": { "type": "object", "required": ["epicId", "childrenIds", "handoffCommentPosted"], "additionalProperties": false, "properties": { "epicId": { "type": "string", "maxLength": 20 }, "childrenIds": { "type": "array", "maxItems": 12, "items": { "type": "string", "maxLength": 20 } }, "handoffCommentPosted": { "type": "boolean" } } },
+          "reads": [
+            "plan.decompose.record",
+            "plan.render.issueText",
+            "gate.plan.gate2.record"
+          ],
+          "output": {
+            "type": "object",
+            "required": [
+              "epicId",
+              "childrenIds",
+              "handoffCommentPosted"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "epicId": {
+                "type": "string",
+                "maxLength": 20
+              },
+              "childrenIds": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {
+                  "type": "string",
+                  "maxLength": 20
+                }
+              },
+              "handoffCommentPosted": {
+                "type": "boolean"
+              }
+            }
+          },
           "tier": null,
           "failure": "stop",
           "writes": "run-record"
         }
       },
       "stepFlow": [
-        { "from": "plan.dor", "to": "plan.dod", "type": "sequence" },
-        { "from": "plan.dod", "to": "plan.ac", "type": "sequence" },
-        { "from": "plan.ac", "to": "plan.spec", "type": "sequence" },
-        { "from": "plan.spec", "to": "plan.ready", "type": "sequence" },
-        { "from": "plan.ready", "to": ["plan.dod", "plan.ac", "plan.spec"], "type": "decide", "registry": "plan.readiness", "when": { "answer": "ready=false" }, "why": "FOC-476 retry-then-escalate: a ready=false answer routes back to the step named in failedStep, carrying reason; a second no from the same step escalates (the failure field's terminal rung). The runtime return target is dynamic - the array enumerates the possible targets. When the branch does not fire (ready=true) the sequence continuation below applies. First step-level decide edge in the schema; the other decide edges are top-level - five of them (see the decide-edge binding and schema sections)." },
-        { "from": "plan.ready", "to": "plan.gate1", "type": "sequence" },
-        { "from": "plan.gate1", "to": "plan.decompose", "type": "sequence" },
-        { "from": "plan.decompose", "to": "plan.gate2", "type": "sequence" },
-        { "from": "plan.gate2", "to": "plan.push", "type": "sequence" }
+        {
+          "from": "plan.dor",
+          "to": "plan.intent",
+          "type": "sequence"
+        },
+        {
+          "from": "plan.intent",
+          "to": "plan.intent.select",
+          "type": "sequence"
+        },
+        {
+          "from": "plan.intent.select",
+          "to": "plan.gate1",
+          "type": "sequence"
+        },
+        {
+          "from": "plan.gate1",
+          "to": "plan.dod",
+          "type": "sequence"
+        },
+        {
+          "from": "plan.gate1",
+          "to": "plan.intent",
+          "type": "reentry",
+          "why": "FOC-517 intent conversation: a round answered without confirmation (corrections, or presented questions left unanswered) re-enters plan.intent — the map regenerates with the round's answers/corrections folded, plan.intent.select re-asks only what is unanswered, plan.gate1 shows round n+1 of 3. Three rounds without confirmation stop the chain typed (intent_not_settled) — the plan is never built on an unconfirmed intent."
+        },
+        {
+          "from": "plan.dod",
+          "to": "plan.ac",
+          "type": "sequence"
+        },
+        {
+          "from": "plan.ac",
+          "to": "plan.spec",
+          "type": "sequence"
+        },
+        {
+          "from": "plan.spec",
+          "to": "plan.decompose",
+          "type": "sequence"
+        },
+        {
+          "from": "plan.decompose",
+          "to": "plan.render",
+          "type": "sequence"
+        },
+        {
+          "from": "plan.render",
+          "to": "plan.gate2",
+          "type": "sequence"
+        },
+        {
+          "from": "plan.gate2",
+          "to": "plan.push",
+          "type": "sequence"
+        }
       ]
     }
   },
@@ -600,10 +1621,9 @@ Rounds: round 1 reads only `inbox.entry`, `plan.dor.gaps` and the task type; fro
 gate fields join — the map is re-generated per gate1 round. The steps stay separate `G → J/D → H`,
 with `plan.intent` re-invoked in the next round (**Decision (2026-09-24) (formerly F7)**: the whole
 conversation is NOT closed inside one [G] step); the conversation mechanics and the `≤3 rounds`
-limit are FOC-517's. The gate1 → plan.intent re-entry (round 2+) has no representation in §6.4's
-edge types — step-level edges are sequence-only there, with the single step-level decide at
-`plan.ready`; extending §6.4 with a re-entry/loop edge is follow-up under FOC-517's conversation
-mechanics — **Flagged, not silently resolved** (the one flag this section still carries).
+limit are FOC-517's. The gate1 → plan.intent re-entry (round 2+) rode §6.4's edge types as a
+RESOLVED flag: FOC-517 landed the `reentry` edge type there (one instance, fixed target, round-cap
+bounded — see §6.4's table); this section's former "no representation" flag is closed.
 **Decision (2026-09-24) (formerly F5):** `gate.plan.gate1.answers` / `.corrections` do not exist in
 the run-record contract yet (§3.6: plan.gate1's output is `{approved}` only) — their write side is
 FOC-517's (the gate1 fields are in FOC-517's existing scope); §3.12 pins their read shape in the
@@ -930,7 +1950,8 @@ contract are the same list; a field outside it has no place in a node."
 | failure behaviour | `failure` | `"stop" \| "escalate"` — typed, fail-closed; a failed node never invents output, never silently passes. Retry counts are runner policy (FOC-397), not node schema: the field declares the terminal behaviour |
 | output destination | `writes` | `"run-record" \| "envelope" \| "graph-state"` — one named place |
 
-`stepFlow` (sequence edges plus plan.ready's step-level decide edge) and `steps` live on the
+`stepFlow` (sequence edges, the gate1 → plan.intent `reentry` — §6.4 — and plan.ready's step-level
+decide edge) and `steps` live on the
 **squad node**, which keeps its full v1 contract — the D7 list binds step objects, not squad nodes
 (that is the Option-A migration compromise, stated in §3.11's `_doc`).
 
@@ -966,7 +1987,8 @@ evidence).
 | `handoff` | top-level `edges` | unchanged | graph-route's filter and the 6-routable pin depend on it |
 | `return` | top-level `edges` | unchanged | supervisor-verdict hardcodes the review return id + `when.labels[0]` |
 | `escalate`, `gate` | top-level `edges` | unchanged | declared non-routable; routing handled by the order-1 gate edge |
-| `sequence` | node-local `stepFlow` | new | ordered step-to-step connectors inside a node; never matcher edges; step-level edges are sequence-only EXCEPT one step-level `decide` (below); step-level rendering (a PLAN pipeline diagram) is a new render target for FOC-397 |
+| `sequence` | node-local `stepFlow` | new | ordered step-to-step connectors inside a node; never matcher edges; step-level edges are sequence-only EXCEPT the two named exceptions below; step-level rendering (a PLAN pipeline diagram) is a new render target for FOC-397 |
+| `reentry` | node-local `stepFlow` (one instance: plan.gate1 → plan.intent, §3.6) | new (FOC-517) | the loop-capped conversation edge: a gate round answered without confirmation re-enters the step that feeds the gate, with the round's answers/corrections folded; a fixed `why`-carrying target (never an enumerated array), bounded by the gate's own round cap (3) — a third kind of step-level edge beside `sequence` and the step-level `decide` |
 | `decide` | top-level `decisionEdges`; one step-level instance in node-local `stepFlow` (plan.ready, §5) | new | never matched by graph-route (it reads `edges` only); `emitHandoffRules` filters `routable` from `edges` only — inert by construction; `from`/`to` name the scope where the decision applies, not a routable target; the registry entry owns autonomy, threshold, fallback and metrics. The step-level instance (plan.ready) may enumerate candidate return targets in `to`; the registry answer picks the runtime target (`failedStep`) |
 
 Any routable-edge change in FOC-397 must regenerate `config/handoff-rules.json` + the PUML in the
@@ -1063,6 +2085,18 @@ rounding level this section's own units support, and no band shifts. Should plan
 second-failure escalations become routine, they ADD frontman turns (the escalation rung, §3.10) —
 a frequency the corpus does not measure; flagged, not quantified.
 
+**Revision delta (FOC-517, 2026-10-01):** gate1 moved ahead of any spec/DoD/AC spend (FOC-516) and
+became the intent conversation (≤3 rounds, §3.6). Frontman turns per plan run: gate1 goes from one
+relay turn to at most three (the confirmed round plus up to two unconfirmed ones), each carrying a
+short dictated answer instead of a read-and-approve — and a round that fails parseability also
+carries an A0 `plan.intent.reply` annotation, which costs the [J] seam a cheap call, not the
+frontman a turn. The compensating saving is the one the AC sits on: a misreading no longer
+generates a wasted [A] plan.spec child + decompose + render before anyone notices — the misread is
+caught at gate1 for the price of one cheap [G] map regeneration. PLAN stays ~1.7% of corrected
+corpus volume; the frontman-share arithmetic above (43.5%, bands ~17–30 pp, residuals ~26% /
+~13–21%) stands unchanged to the rounding level this section's own units support. The ≤2 extra
+relay turns per plan run are real but unmeasured at corpus scale — flagged, not quantified.
+
 ## 9. Collector notes (FOC-461)
 
 Noticed while designing; bullets only, no diffs, all outside this task's paths:
@@ -1078,11 +2112,12 @@ Noticed while designing; bullets only, no diffs, all outside this task's paths:
 
 ## 10. Open questions for FOC-397
 
-1. **Step branching:** v2's `stepFlow` is linear per node, with exactly ONE exception: plan.ready's
-   step-level decide edge (§3.11, §5, FOC-476) branches back to the step named in its answer.
-   General conditional step-branching beyond that one edge is deferred (no measured need; the
-   decide-edges cover the judgment points). If FOC-397 needs more branches, the schema grows in
-   v2.1 — not by overloading `sequence`.
+1. **Step branching:** v2's `stepFlow` is linear per node, with exactly TWO named exceptions: the
+   step-level decide edge (plan.ready, §3.11, §5, FOC-476), which branches back to the step named
+   in its answer, and the reentry edge (plan.gate1 → plan.intent, §3.6, FOC-517), which loops to a
+   FIXED target under a hard round cap. General conditional step-branching beyond these two edges
+   is deferred (no measured need; the decide-edges cover the judgment points). If FOC-397 needs
+   more branches, the schema grows in v2.1 — not by overloading `sequence`.
 2. **plan.ready retry semantics (FOC-476):** the decide edge returns to `failedStep`, but the
    open items are which inputs re-feed that step (does plan.spec re-run on the same `plan.*`
    records, or on fresh ones?), who owns the retry counter (the runner's step-state machine vs

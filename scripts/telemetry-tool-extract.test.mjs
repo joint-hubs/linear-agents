@@ -16,7 +16,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { extractToolFacts } from "./telemetry-tool-extract.mjs";
+import { createToolLinkState, extractToolFacts } from "./telemetry-tool-extract.mjs";
 import { openTelemetryDb, recordToolFact } from "./telemetry-store.mjs";
 
 let DatabaseSync;
@@ -192,6 +192,38 @@ if (DatabaseSync) {
 } else {
   skipped += 5;
   console.log("  SKIP identity end-to-end: node:sqlite unavailable");
+}
+
+// --- FOC-599: turn_index across passes — a full re-scan counts from 0 -------
+// turnIndex is file-global (createToolLinkState): incremental passes carry it so
+// a growing transcript's records number the same assistant turns the full file
+// would. The restart-gap recovery re-scan reads from byte 0, where it re-observes
+// EVERY turn — inheriting the counter already advanced to EOF stamped the
+// recovered records with EOF-shifted indices.
+{
+  const path = writeJsonl("turn-index.jsonl", [
+    assistant("2026-09-27T00:00:01.000Z", [toolUse("u1", "Read", { file_path: "/a" })]),
+    userResults("2026-09-27T00:00:02.000Z", [{ tool_use_id: "u1", content: "ok" }]),
+    assistant("2026-09-27T00:00:03.000Z", [{ type: "text", text: "a tool-less turn still counts" }]),
+    assistant("2026-09-27T00:00:04.000Z", [toolUse("u2", "Bash", { command: "ls" })]),
+    userResults("2026-09-27T00:00:05.000Z", [{ tool_use_id: "u2", content: "out" }]),
+    assistant("2026-09-27T00:00:06.000Z", [toolUse("u3", "Grep", { pattern: "x" })]),
+    userResults("2026-09-27T00:00:07.000Z", [{ tool_use_id: "u3", content: "hit" }]),
+  ]);
+  const linkState = createToolLinkState();
+  const first = await extractToolFacts(path, "run-turn-index", "lead", { startOffset: 0, linkState });
+  check("fixture: records numbered across assistant turns (tool-less turn included)",
+    first.map((r) => r.turn_index).join() === "0,2,3",
+    `got ${first.map((r) => r.turn_index).join()}`);
+  const advanced = linkState.turnIndex;
+
+  const rescan = await extractToolFacts(path, "run-turn-index", "lead", { startOffset: 0, linkState });
+  check("FOC-599 full re-scan restarts the turn counter: records stay file-global",
+    rescan.map((r) => r.turn_index).join() === "0,2,3",
+    `got ${rescan.map((r) => r.turn_index).join()} (counter was already ${advanced})`);
+  check("FOC-599 the counter lands on the file's turn total after the re-scan",
+    linkState.turnIndex === 4,
+    `got ${linkState.turnIndex}, want 4 (was ${advanced})`);
 }
 
 // --- FOC-547: jsonlChunksFrom — offsets, giant-line heartbeats, resume ------

@@ -220,3 +220,163 @@ survived none of the three checks is not gradeable and is never scored as partia
 - **Cost accounting for aborts needs a policy.** A failed call appends no event line by design (no
   fabricated answers), so aborted spend is unobservable. FOC-449 may want a failure-line variant that
   records usage without answers.
+
+---
+
+## Addendum 2026-10-01 — FOC-596: latency re-measurement, output-shape pre-commitment (lever 2), contract budget (lever 4)
+
+Same 12-case fixture, same transport (`createDefaultGenerator` driving the real `runPlanIntentNode`,
+one-regeneration-then-stop), runs serial on one machine. Artifacts under
+`.state/foc-596/eval/<run>/` (gitignored), one directory per run.
+
+**Explicitly named — what changed and what did not:**
+
+- **Model: unchanged.** `z-ai/glm-5.3-flash`, `config/models.json` untouched, call rides
+  `routing.plan.discovery` → `ids.glm53flash`. **No tier change. No routing change.**
+- **Prompt: one change (lever 2 only)** in `config/decisions.json` (the `plan.intent` registry
+  entry's `prompt` field): output-shape pre-commitment prepended to the map instructions —
+  *"Decide the map's shape before you draft anything: fix how many interpretations there will be
+  and each one's perspective and source first, then fill every field once within the caps below —
+  never write a long draft and cut it down."* No reasoning-length instruction was added (that is
+  lever 1 — the model-policy decision, Mateusz's), and `criteriaVersion` stays **1** (the output
+  contract is unchanged; precedent `e3962e7`). One lever per change, so the delta stays legible.
+- **Harness budget: named per run** (lever 4). 600 000 ms per call for the lever-2 delta runs (same
+  headroom as the FOC-515 baseline), 300 000 ms = the decided eval contract budget for the
+  lever-4 run.
+- **Lever 3 stays unavailable:** `response_format: json_schema, strict: true` is not enforced by
+  `z-ai/glm-5.3-flash` through OpenRouter, so the schema-retry path cannot be cut at the transport.
+
+### Run matrix (2026-10-01)
+
+| run | prompt | timeout | ok/12 | rejected | aborted | p50 | p90 | max | calls | cost (priced) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `before-600s` | pre-change | 600 s | 3 | 7 | 2 | 56.6 s | 600.0 s | 600.1 s | 17 | $0.016203 |
+| `after-600s` | lever 2 | 600 s | 1 | 11 | 0 | 32.7 s | 47.9 s | 47.9 s | 24 | $0.019731 |
+| `after-300s` | lever 2 | 300 s | 1 | 11 | 0 | 25.7 s | 38.7 s | 40.5 s | 24 | $0.020989 |
+| `after-600s-rep` | lever 2 | 600 s | 0 | 12 | 0 | 26.3 s | 33.2 s | 564.3 s | 22 | $0.020303 |
+| `before-600s-rep` | pre-change | 600 s | 6 | 6 | 0 | 222.8 s | 545.9 s | 900.4 s | 10 | $0.147735 |
+
+Every rejected case got at most one regeneration, per the node's policy; `retries` = 12/12, 12/12 and
+11/12 in the lever-2 runs vs 7/12 and 3/12 on the pre-change prompt (aborts and fast transport
+failures never reached a retry). Per-case wall-clock spans that regeneration when one happened, so
+`max` can exceed the 600 s call budget — `before-600s-rep`'s FOC-396: 900.4 s over two calls.
+
+### Reading the numbers
+
+1. **Day drift is now sized (n=2 per prompt at 600 s), and it is larger than the effect under
+   test.** The pre-change prompt ran p50 56.6 s / p90 600.0 s (3/12 accepted) in the morning and
+   p50 222.8 s / p90 545.9 s (6/12) two hours later — same prompt, fixture, model and routing. The
+   mechanism is visible in the output tokens: every lever-2 call returns 3–5k out-tokens, while the
+   pre-change replicate's accepted maps ran 24–68k out-tokens each (run total $0.147735 — 9× the
+   morning run's $0.016203) and its wall-clock sits in the 2026-09-26 baseline's 218–489 s regime,
+   while the morning run sat in the 33–44 s regime. Day drift here is a provider-side output-length
+   regime flip. Lever 2 pins output length and therefore latency (p50 25.7–32.7 s, p90 33.2–47.9 s,
+   zero aborts across three runs) — but that is enforced shortness, not a faster model.
+2. **Conformance: pre-change 3/12 and 6/12 accepted vs lever-2 1/12, 1/12, 0/12 — and the failure
+   modes differ by prompt.** Lever 2 fails structurally: `covers` (required field) omitted — 5/179
+   items (2.8%) in `before-600s`, 10/247 (4.0%) in `after-600s`, 23/239 (9.6%) in `after-300s` —
+   plus the [D] checks doing their job (uncovered `plan.dor.gaps`, missing `user`/`priority`
+   perspectives, one paraphrased quote). The pre-change replicate fails differently: 4×
+   `unparseable_output` (two at ~2 s, two at 222–258 s), 1× schema-invalid, 1× provider error —
+   and its six accepted maps are complete (64 items, 8–12 per case). "Fill every field once"
+   plausibly reads as "hurry": the shape gets pre-committed and the fields do not.
+3. **Neither prompt meets the bar; lever 2 as written does not earn its place.** Pre-change
+   conformance (25–50%) is better, but its latency and cost are uncontrolled (p50 56.6 → 222.8 s,
+   run cost 9×, p90 at the mercy of the provider regime). Lever 2 buys a bounded p90 (≤ 48 s, no
+   aborts) at conformance 0–8%. Named options are in the FOC-596 close report: (a) revert the
+   sentence, (b) a second named iteration — an explicit `covers: [...]` never-omit rule, still no
+   reasoning-length instruction (that is lever 1, Mateusz's), (c) keep the sentence and land the
+   structural fix as follow-up. Lever 3 (strict `json_schema`) remains provider-blocked.
+4. **Cost honesty:** $0.016–$0.148 per run. Accepted pre-change maps are long and expensive
+   (24–68k out-tokens each); lever-2 calls are short ($0.0008–0.0025 per call). As in the base
+   report, an aborted or unparseable call writes no FOC-449 event line and often no usage line, so
+   failed-call spend is invisible to the ledger and real spend is higher than the run totals.
+
+### Caveats on the comparison
+
+- **n = 2 per prompt at 600 s** (`after-300s` n = 1), same 12 cases — a paired comparison, not a
+  distributional claim. The pre-change pair's own spread (3/12 → 6/12 accepted, p50 ×4, cost ×9)
+  exceeds every between-prompt difference claimed here, and is reported for exactly that reason.
+- **Prompt provenance is by construction:** `before-600s-rep` was launched with the lever-2 sentence
+  edited out of the working tree, and the sentence was restored only after the run finished. The
+  harness loads `plan.intent` once at `runEval` start, so a mid-run edit cannot leak into a running
+  process. The FOC-449 `hash` field is a per-case input hash (identical across runs) and does not
+  encode the prompt version.
+- Per-case wall-clock includes the one regeneration when it happened (see the note under the
+  matrix), so `max` can exceed the call budget.
+- Latency is node wall-clock of the model call only (no [D] checks, no IO), as in the base report.
+- Same model, tier and routing in every run — **no model/tier/routing change is claimed anywhere in
+  this addendum.**
+
+---
+
+## plan.intent.select eval (FOC-516) — [J] scores + [D] policy on the same eval set
+
+The select eval drives the FULL live pipeline per fixture case — the same two node calls a live
+graph run executes: `runPlanIntentNode` (the [G] map, runner default generator) then
+`runPlanIntentSelectNode` (the ONE `plan.intent.select.score` [J] call per map, two noul verdicts —
+impact + grounded — per interpretation, via the real seam caller), both against the real transports
+(`scripts/plan-intent-select-eval.mjs`). A case whose map fails closed has nothing to select from —
+the skip IS the measurement, never a faked row.
+
+**Run** (2026-10-01T17:34–17:45Z, contract budget 300 s/call both stages — no deviation): 12/12
+cases attempted → **2 selection ok / 10 skipped** (no map), 0 failed. Both accepted selections were
+schema-valid. Live provider: `z-ai/glm-5.3-flash` (maps) + `typesafe/jev-1.13-20260917` (scores).
+
+Where the 10 skips come from — the map stage, not the selection:
+
+| map failure | cases | detail |
+|---|---|---|
+| `provider_error` (fast) | FOC-416 (0.6 s), FOC-449 (1.1 s), FOC-397 (1.3 s), FOC-451 (1.5 s), FOC-396 (0.9 s) | HTTP 400 within seconds of the call |
+| `provider_error` (budget) | FOC-452 | aborted at the 300 s budget |
+| `unparseable_output` (fast) | FOC-417 (1.3 s), FOC-441 (1.8 s), FOC-473 (1.3 s), FOC-448 (2.7 s) | empty content — "Unexpected end of JSON input" |
+
+This is provider-side variance, measured, not a budget story like run 2's: run 2 (600 s) rejected 8
+with schema/abortion causes after 17–600 s; today's provider refused or returned empty on 9 maps
+within 0.6–2.7 s and burned the budget once. The selection itself was never the failure point.
+
+Mechanical facts on the 2 accepted maps (routes q/c/u/a = questions/confirmations/understood/
+assumptions; latency = pipeline wall-clock):
+
+| id | items | st/inf/un | q/c/u/a | cap overflow | alternatives override | latency | notes |
+|---|---|---|---|---|---|---|---|
+| FOC-406 | 11 | 4/1/6 | 4/0/0/7 | 3 overflowed → assumptions, listed | yes — every question carries "the map's current reading" as the recommended option | 225.0 s | ground truth UNKNOWN (as in FOC-515 — excluded from rubric) |
+| FOC-443 | 9 | 3/3/3 | 4/0/0/5 | 5 overflowed → assumptions, listed | yes | 260.7 s | – |
+
+- **Questions per case: 4 + 4 — the cap binds on every accepted map.** Ordering by impact
+  probability held: FOC-406 asked IN-1 (0.9), IN-7 (0.88), IN-3 (0.78), IN-4 (0.71); FOC-443 asked
+  IN-3 (0.78), IN-4 (0.73), IN-6 (0.72), IN-1 (0.69).
+- **Confirmations/understood: 0 — via the cap, not via hiding.** On FOC-443 the inferred/stated
+  confirmation candidates (impacts 0.72 and below) all lost the cap race to higher-impact
+  option-carrying unknown items and landed in the assumptions list as "below the 4-question cap".
+  Nothing was dropped: all 5 overflow items are listed with their impact probabilities (A0 honesty).
+- **Dedupe (round-0):** no `gate.plan.gate1` record exists before gate1's first approval, so both
+  selections ran with an empty answered-set (`dedupedIds` `[]`) — the check is exercised by tests
+  (`plan-intent-select.test.mjs`), not by this run.
+- **Cost honesty:** $0.037978 ledger total covers the 4 completed calls (maps 2,375 in / 62,566 out;
+  scores 8,054 in / 750 out). The 10 failed map calls append no event line — their spend is invisible
+  to our ledger (same caveat as FOC-515 finding 6). Fast failures bound it: a refused call costs one
+  round trip, not a reasoning budget.
+- **Latency is bimodal, same shape as run 2:** p50 1.3 s (fast refusals) · p90 260.7 s · max 300.1 s;
+  real map generation took 225–261 s — inside the 300 s contract budget this time, unlike run 2.
+- **Annotation fix during this run:** the measured rows carry a pre-fix overflow `rank` in the
+  assumption reason that named the item's MAP-ORDER position, not its impact standing (e.g. FOC-443
+  IN-2, impact 0.47, 8th by impact, labelled "rank 2"). Fixed in this change set and regression-pinned
+  (`plan-intent-select.test.mjs`, FOC-443 regression test); every count in this report is unaffected —
+  the rank string is an annotation, the routing and cap arithmetic were already correct.
+
+**Coverage of the known misses (AC7)** — against the FOC-515 rubric targets:
+
+- **FOC-443** (the graded case): all three input-arising targets are SURFACED, none hidden —
+  IN-3 (test-shadow file) impact 0.78 → **question with closing options**; IN-8 (MAX_ERROR_TEXT vs
+  the 120-char parse cap) impact 0.53 and IN-5 (Security-note replacement wording) impact 0.48 →
+  below-cap assumptions, listed with claims and impact probabilities. 1/3 known misses **earned a
+  question**, 3/3 **surfaced**. The policy's job is routing, not scoring accuracy — a missed question
+  costs a misplaced display, never a lost interpretation (A0).
+- **FOC-406**: coverage UNKNOWN (no ground truth; excluded in FOC-515, excluded here).
+- The other 10 cases: no map — no interpretations to score or route; skips recorded verbatim above.
+
+Artifacts: `.state/foc-516/select-eval/foc-516-run/` (gitignored) — `outputs.jsonl` (per-case maps,
+selections, scores, usage), `summary.json` (aggregates above), `table.txt`, `foc-516-select-eval/
+decisions.jsonl` (the FOC-449 event lines). Scoring of selection substance stays human; the graded
+read-out above is limited to what the mechanical facts support.
