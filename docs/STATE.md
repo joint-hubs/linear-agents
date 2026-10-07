@@ -40,7 +40,7 @@ Kolejka do przerobienia bez przystanków: FOC-649 → FOC-612 → FOC-621 → FO
 
 **Tablica.** EPIC FOC-467: **16/17 dzieci Done**. Zostaje **FOC-477** (domyka epik). **FOC-712** (wycięte z AC1: DoR facts + estimate/labels) — Backlog, est M. Nity → **FOC-461** (komentarz `4bfe52ca`: 5 z review r1 + defekt `supervisor-merge`). Poza zasięgiem: FOC-598 (migracja `source_generation`), FOC-621 (AC2 paired eval), FOC-691 (wajcha 1 modelu `plan.intent` — decyzja Mateusza), FOC-666, FOC-667.
 
-**Koszty (wycenione).** `dev-1` 2,53 · `review-2` 0,49 · `test-3` 2,72 → run **5,74** / raportowane 192,1 (~33×, FOC-165). Bez capa.
+**Koszty (wycenione).** `dev-1` 2,53 · `review-2` 0,49 · `test-3` 0,09 → run **3,11** / raportowane 159,2 (51,2×, FOC-165). Bez capa.
 
 
 ## 2026-10-07 — FOC-476 W TOKU (dev turn, gałąź `foc-476-dev`, **nie lądowane**) — ogon grafu PLAN: `plan.ready` + `draft-approval` + push z logowaniem etykiet
