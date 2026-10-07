@@ -12,12 +12,15 @@
 //       with runner-built questions (graph-node entries carry no question set
 //       of their own; resolveEntryQuestions refuses them by design, so the
 //       questions come from the runner and the id governs provenance and
-//       autonomy). Every plan J entry is autonomy A0 with threshold null, so
-//       a served answer is recorded as an ANNOTATION and the step is handed
-//       to the frontman — never auto-acted. Cascade ladder: tier 1 = the seam
-//       call (the seam owns its own retries), tier 2 is dead by contract
-//       (every entry pins fallback.tier2 "disabled", FOC-473), tier 3 =
-//       frontman hand-off carrying the triggering envelope error.
+//       autonomy). plan.ready (FOC-476) is the exception: it is served through
+//       its own transport entry (plan.readiness) whose question set the seam
+//       instantiates — the plan.ac ↔ plan.ac.testable pattern. Every plan J
+//       entry is autonomy A0 with threshold null, so a served answer is
+//       recorded as an ANNOTATION and the step is handed to the frontman —
+//       never auto-acted. Cascade ladder: tier 1 = the seam call (the seam
+//       owns its own retries), tier 2 is dead by contract (every entry pins
+//       fallback.tier2 "disabled", FOC-473), tier 3 = frontman hand-off
+//       carrying the triggering envelope error.
 //   [G] plan.dod, plan.ac — ONE schema-validated model call through the
 //       injectable generator; the result is validated against the step's
 //       output schema and recorded done. The default generator is a single
@@ -41,17 +44,19 @@
 //   [A] plan.spec — stop + hand-off record: the work belongs to an agent
 //       outside the runner; the deciding agent writes <step>.resolution and
 //       the next run resumes.
-//   [H] plan.gate1, plan.gate2 — stop + supervisor-gate emit (kind = the step
-//       id, already in supervisor-gate.mjs KINDS; the gate record lives in
-//       .state/supervisor/<runId>/). A resolution with approved:true completes
-//       the gate; approved:false records gate-rejected and stops, handing the
-//       record to the frontman.
+//   [H] plan.gate1, draft-approval — stop + supervisor-gate emit (kind = the
+//       step id, already in supervisor-gate.mjs KINDS; the gate record lives
+//       in .state/supervisor/<runId>/). A resolution with approved:true
+//       completes the gate; approved:false records gate-rejected and stops,
+//       handing the record to the frontman. draft-approval (FOC-476) carries
+//       ADR-0012 D5 semantics: the whole rendered artifact rides the gate
+//       record (--artifact), the answer is approve/reject.
 //   [D] plan.render, plan.push — deterministic code. plan.render (FOC-520)
 //       composes the Linear issue text from the resolved reads: pure code, no
 //       model call, no boundary — the same reads always render byte-identical
 //       text, and malformed reads fail closed. plan.push executes over a
 //       strictly injectable Linear boundary (linearEffect); the pushed
-//       issueText is plan.render's output VERBATIM — the text plan.gate2
+//       issueText is plan.render's output VERBATIM — the text draft-approval
 //       approved is exactly the text written to Linear. The DEFAULT boundary
 //       refuses: the runner NEVER writes to Linear on its own — a real write
 //       is the caller's injected effect, and the refusal is a typed failure
@@ -79,7 +84,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
@@ -94,6 +99,7 @@ import { foldGateAnswers, runPlanIntentNode } from "./plan-intent.mjs";
 import { runPlanIntentSelectNode, SELECT_SCORE_DECISION, selectDeltaLabel } from "./plan-intent-select.mjs";
 import { parseGate1Answer, renderGate1Display, GATE1_MAX_ROUNDS } from "./plan-intent-gate.mjs";
 import { runPlanRenderNode } from "./plan-render.mjs";
+import { PLAN_READINESS_DECISION, PLAN_READY_STEP, READY_MAX_ATTEMPTS, readyRetriesPathFor, runPlanReadyNode } from "./plan-ready.mjs";
 import { KINDS } from "./supervisor-gate.mjs";
 import { holdsForCompletion } from "./supervisor-lib.mjs";
 
@@ -366,12 +372,14 @@ function defaultLinearEffect() {
 
 // ── the default gate emitter ─────────────────────────────────────────────────
 // [H] steps stop the run and submit the question through supervisor-gate.mjs
-// (kind = the step id — plan.gate1/plan.gate2 are well-known kinds). The
+// (kind = the step id — plan.gate1/draft-approval are well-known kinds). The
 // emitter spawns the CLI with the supervisor run/child env the runner already
 // executes under; tests inject gateEmitter instead of registering children.
+// A gate carrying an artifact (FOC-476, ADR-0012 D5) passes it through so the
+// gate record attaches the WHOLE artifact, not a summary of it.
 
 function defaultGateEmitter() {
-  return ({ stepId, summary, facts }) => {
+  return ({ stepId, summary, facts, artifact = null }) => {
     const runId = process.env.LA_SUPERVISOR_RUN;
     const childId = process.env.LA_SUPERVISOR_CHILD;
     if (!runId || !childId) {
@@ -380,18 +388,16 @@ function defaultGateEmitter() {
         `gate emit for "${stepId}" needs LA_SUPERVISOR_RUN and LA_SUPERVISOR_CHILD (or an injected gateEmitter)`,
       );
     }
-    const res = spawnSync(
-      process.execPath,
-      [
-        join(__dir, "supervisor-gate.mjs"), "emit",
-        "--run", runId,
-        "--child", childId,
-        "--kind", stepId,
-        "--summary", summary,
-        "--facts", JSON.stringify(facts),
-      ],
-      { encoding: "utf8" },
-    );
+    const args = [
+      join(__dir, "supervisor-gate.mjs"), "emit",
+      "--run", runId,
+      "--child", childId,
+      "--kind", stepId,
+      "--summary", summary,
+      "--facts", JSON.stringify(facts),
+    ];
+    if (artifact) args.push("--artifact", artifact);
+    const res = spawnSync(process.execPath, args, { encoding: "utf8" });
     if (res.status !== 0) {
       throw new TypedError(
         "provider_error",
@@ -632,8 +638,13 @@ export function createGraphRunner({
       if (entry.autonomy !== "A0") throw new TypedError("schema_invalid", `step "${id}" is not an A0 entry — the runner serves annotations only`);
       if (entry.threshold !== null) throw new TypedError("schema_invalid", `step "${id}" carries a threshold — the runner never auto-acts`);
       if (entry.fallback?.tier2 !== "disabled") throw new TypedError("schema_invalid", `step "${id}" carries an enabled tier 2 — the ladder contract is broken`);
-      if (!RUNNER_QUESTIONS[id]) throw new TypedError("schema_invalid", `step "${id}" has no runner-built question set`);
-      if (!questionValidate(RUNNER_QUESTIONS[id])) {
+      // FOC-476: plan.ready is served through its transport entry's question
+      // set (plan.readiness — instantiateEntryQuestions), not runner-built
+      // questions; every other [J] step carries its questions here.
+      if (id !== PLAN_READY_STEP && !RUNNER_QUESTIONS[id]) {
+        throw new TypedError("schema_invalid", `step "${id}" has no runner-built question set`);
+      }
+      if (id !== PLAN_READY_STEP && !questionValidate(RUNNER_QUESTIONS[id])) {
         throw new TypedError("schema_invalid", `runner-built questions for "${id}" fail the seam's question schema`);
       }
     }
@@ -695,10 +706,24 @@ export function createGraphRunner({
       throw new TypedError("schema_invalid", `step "plan.gate1" binds a ${REPLY_DECISION} entry the runner cannot honestly serve (A0, threshold null, tier 2 disabled)`);
     }
   }
+  // plan.ready is the [J] step served through its transport entry (FOC-476):
+  // the plan.readiness seam call judges the artefacts against the confirmed
+  // intent — the same A0, threshold-null, tier-2-dead posture pinned here, and
+  // the question set comes from the entry itself (the plan.ac ↔
+  // plan.ac.testable pattern), not from RUNNER_QUESTIONS.
+  if (steps[PLAN_READY_STEP]?.kind === "J") {
+    const readinessEntry = registry.entries[PLAN_READINESS_DECISION];
+    if (!readinessEntry || readinessEntry.autonomy !== "A0" || readinessEntry.threshold !== null || readinessEntry.fallback?.tier2 !== "disabled") {
+      throw new TypedError("schema_invalid", `step "${PLAN_READY_STEP}" binds a ${PLAN_READINESS_DECISION} entry the runner cannot honestly serve (A0, threshold null, tier 2 disabled)`);
+    }
+  }
 
   const emitGate = gateEmitter ?? defaultGateEmitter();
   const linear = linearEffect ?? defaultLinearEffect();
   const store = createStore({ path: storePath ?? join(root, ".state", "runs", runId, "graph-steps.jsonl") });
+  // FOC-476: the readiness retry budget lives next to the run store — per run
+  // by construction, dies with the run directory.
+  const readyRetriesPath = readyRetriesPathFor(store.path);
   const recordKey = (stepId) => (steps[stepId]?.kind === "H" ? `gate.${stepId}` : stepId);
 
   // Validate a resolution's output against the step's output schema. An
@@ -757,6 +782,73 @@ export function createGraphRunner({
       return failRecord(stepId, errorOf(err, "caller threw"));
     }
     return stepRecord(runId, now, stepId, "handed-off", handOffFields(stepId, envelope));
+  }
+
+  // [J] FOC-476 — plan.ready, the readiness gate. ONE plan.readiness seam call
+  // per attempt; the node returns the outcome and the runner turns it into
+  // records:
+  //   done      → the ready:true record (or the ready:false record that is
+  //               only ever intermediate — see retry)
+  //   retry     → the ready:false done record + ONE reset record for the
+  //               failed step (carrying the reason) + one for plan.ready; the
+  //               run re-walks — this is the step-level decide edge at runtime
+  //               (the reason rides the reset record; the plan.spec [A]
+  //               hand-off regenerates with the re-executed chain)
+  //   escalate  → ONE failed record, code "readiness_escalated" — the SECOND
+  //               ready:false in a run, terminal (failed is terminal on
+  //               resume); over-escalation is fail-safe
+  //   failed    → the node's typed failure (compose/serve/counter/schema)
+  async function runPlanReadyStep(stepId, step, reads) {
+    let result;
+    try {
+      result = await runPlanReadyNode({
+        stepId,
+        reads,
+        caller,
+        validate: (raw) => outputValidate.get(stepId)(raw),
+        retriesPath: readyRetriesPath,
+        runId,
+        decisionRunsDir,
+      });
+    } catch (err) {
+      return { record: failRecord(stepId, errorOf(err, "plan.ready node threw")) };
+    }
+    if (result.status === "failed") return { record: failRecord(stepId, result.error) };
+    const extras = {
+      output: result.output,
+      eventId: result.eventId ?? null,
+      confidence: result.confidence ?? null,
+      attempt: result.attempt,
+      ...(result.labels?.length ? { labels: result.labels } : {}),
+      ...(result.labelWarnings?.length ? { labelWarnings: result.labelWarnings } : {}),
+    };
+    if (result.status === "done") {
+      return { record: stepRecord(runId, now, stepId, "done", { stepId, ...extras }) };
+    }
+    if (result.status === "escalate") {
+      return {
+        record: failRecord(stepId, {
+          code: "readiness_escalated",
+          message: `plan.ready escalated after ${result.attempt} attempt(s): ${result.output.reason}`,
+        }, { ...extras, escalation: result.escalation }),
+      };
+    }
+    // retry — the first ready:false. The failed step's reset record carries
+    // the reason (the re-executed step's own trail shows why it is redoing
+    // work); plan.ready's reset marks the re-ask.
+    const doneRecord = stepRecord(runId, now, stepId, "done", {
+      stepId,
+      ...extras,
+      reason: "ready:false — the step-level decide edge re-enters the failed step (second ready:false escalates)",
+    });
+    const resets = [
+      stepRecord(runId, now, result.failedStep, RESET_STATUS, {
+        stepId: result.failedStep,
+        output: { readyReason: result.output.reason },
+      }),
+      stepRecord(runId, now, stepId, RESET_STATUS, { stepId }),
+    ];
+    return { retry: true, done: doneRecord, resets };
   }
 
   // [G] — one schema-validated model call; the runner validates whatever the
@@ -873,7 +965,7 @@ export function createGraphRunner({
   // supervisor run directory, the run record marks the run as waiting.
   const GATE_SUMMARIES = {
     "plan.gate1": "Answer the intent conversation (FOC-517) — confirm what PLAN understood or correct it; ≤3 rounds before the DoD/AC/spec hand-off",
-    "plan.gate2": "Approve the rendered issue (plan.render) before the Linear push",
+    "draft-approval": "Approve the rendered issue (plan.render) before the Linear push",
   };
   async function runHStep(stepId, reads, state) {
     const summary = GATE_SUMMARIES[stepId] ?? `Approve "${stepId}" before the run continues`;
@@ -907,9 +999,27 @@ export function createGraphRunner({
       };
       if (view.dropped) pendingOutput.dropped = view.dropped;
     }
+    if (stepId === "draft-approval") {
+      // FOC-476: ADR-0012 D5 — the gate record carries the WHOLE artifact. The
+      // rendered issue text is written to the run dir and the gate facts point
+      // at the file; the reads in the facts still carry the text itself, so
+      // the record shows exactly what was asked. A missing/empty text is a
+      // typed failure, never an artifact-less gate.
+      const issueText = reads["plan.render.issueText"];
+      if (typeof issueText !== "string" || !issueText.trim()) {
+        return failRecord(stepId, { code: "invalid_input", message: 'draft-approval: the "plan.render.issueText" read is missing or empty — a draft gate approves a rendered artifact, never nothing' });
+      }
+      try {
+        const artifactPath = join(dirname(store.path), "draft-approval-issue.md");
+        writeFileSync(artifactPath, issueText, "utf8");
+        facts = { ...facts, artifact: artifactPath };
+      } catch (err) {
+        return failRecord(stepId, errorOf(err, "the draft-approval artifact could not be written"));
+      }
+    }
     let emitted;
     try {
-      emitted = await emitGate({ stepId, gateKind: stepId, summary, facts });
+      emitted = await emitGate({ stepId, gateKind: stepId, summary, facts, artifact: facts.artifact ?? null });
     } catch (err) {
       return failRecord(stepId, errorOf(err, "gate emitter threw"));
     }
@@ -922,16 +1032,38 @@ export function createGraphRunner({
     });
   }
 
+  // FOC-476: the no-push outcomes (draft-approval answered reject, an
+  // egress-blocked push) carry their FOC-449 label on the plan.ready event —
+  // the readiness attempt's seam event is the run's last [J] decision. By
+  // vocabulary: a human gate answer labels "human", a code-side refusal
+  // "agent". Best-effort — a failed label is a warning on the record, never a
+  // broken primary flow; no plan.ready event → nothing labelled, nothing
+  // warned.
+  function labelPlanReadyEvent(state, outcome, by, via) {
+    const eventId = state.steps.get(PLAN_READY_STEP)?.eventId ?? null;
+    if (!eventId) return null;
+    const label = { eventId, outcome, by, via };
+    try {
+      const res = appendLabel({ eventId, outcome, by, source: "auto", via, runId, runsDir: decisionRunsDir });
+      return { ...label, written: res.path };
+    } catch (err) {
+      return { ...label, warning: err?.message ?? "label write failed" };
+    }
+  }
+
   // [D] — deterministic code. plan.render (FOC-520) composes the Linear issue
   // text from the resolved reads — no model call, no boundary; the same reads
   // always render byte-identical text and malformed reads fail closed. The
-  // gate2 facts carry the rendered text, and plan.push's payload takes it
-  // VERBATIM — what the gate showed is what would be written to Linear, no
-  // rewording anywhere. plan.push's payload is shaped here (deterministically,
-  // from the resolved reads); the injectable Linear boundary performs whatever
-  // writes it was injected to perform. Any other [D] step id has no runner
-  // implementation and fails typed — never a guessed execution.
-  async function runDStep(stepId, reads) {
+  // draft-approval facts carry the rendered text, and plan.push's payload
+  // takes it VERBATIM — what the gate approved is what would be written to
+  // Linear, no rewording anywhere. plan.push's payload is shaped here
+  // (deterministically, from the resolved reads); the injectable Linear
+  // boundary performs whatever writes it was injected to perform, and its
+  // egress screen (FOC-450/473 discipline) refusing the payload is a typed
+  // EGRESS_BLOCKED failure — no mutation, run stops, outcome labelled on the
+  // plan.ready event. Any other [D] step id has no runner implementation and
+  // fails typed — never a guessed execution.
+  async function runDStep(stepId, reads, state) {
     if (stepId === "plan.render") {
       let result;
       try {
@@ -948,18 +1080,26 @@ export function createGraphRunner({
       return failRecord(stepId, { code: "invalid_input", message: `[D] step "${scrub(String(stepId))}" has no runner implementation — a [D] step is plan.render or plan.push` });
     }
     const decompose = reads["plan.decompose.record"];
-    const gate2 = reads["gate.plan.gate2.record"];
+    const gate = reads["gate.draft-approval.record"];
     const payload = {
       runId,
       epicTitle: `Plan — dictated entry (run ${runId})`,
       issueText: reads["plan.render.issueText"],
       children: (decompose?.output?.tasks ?? []).map((t) => ({ title: t.title, size: t.size, labels: t.labels, relations: t.relations })),
-      handoffComment: `Planned by the FOC-397 graph runner (run ${runId}); gate plan.gate2 ${gate2?.status ?? "unknown"}.`,
+      handoffComment: `Planned by the FOC-397 graph runner (run ${runId}); gate draft-approval ${gate?.status ?? "unknown"}.`,
     };
     let result;
     try {
       result = await linear({ action: "push-plan", payload });
     } catch (err) {
+      if (err?.code === "EGRESS_BLOCKED") {
+        // FOC-476: the boundary's egress screen refused the payload — fail
+        // closed before any mutation, stop the run, and carry the outcome on
+        // the plan.ready event (best-effort; the store's typed failure is the
+        // authoritative trace).
+        const label = labelPlanReadyEvent(state, "plan.push.egress_blocked", "agent", "egress-screen");
+        return failRecord(stepId, errorOf(err, "the Linear boundary refused the payload (egress screen)"), label ? { label } : {});
+      }
       return failRecord(stepId, errorOf(err, "linear effect threw"));
     }
     const output = {
@@ -1265,7 +1405,7 @@ export function createGraphRunner({
     return { action: "reenter" };
   }
 
-  async function run({ inputs = {} } = {}, reentries = 0) {
+  async function run({ inputs = {} } = {}, reentries = 0, readyRetries = 0) {
     const state = store.load();
 
     for (const stepId of order) {
@@ -1304,6 +1444,10 @@ export function createGraphRunner({
         const output = requireResolutionOutput(stepId, resolution); // throws on invalid — nothing appended
         if (step.kind === "H" && output.approved === false) {
           const rejected = stepRecord(runId, now, key, "gate-rejected", { stepId, reason: "gate answered rejected — handed to the frontman", output });
+          // FOC-476: a rejected draft never pushes — the outcome label rides
+          // the plan.ready event (best-effort).
+          const noPushLabel = labelPlanReadyEvent(state, "plan.ready.approved=false", "human", "gate");
+          if (noPushLabel) rejected.noPushLabel = noPushLabel;
           store.append(rejected);
           return { status: "stopped", stepId, record: rejected };
         }
@@ -1350,11 +1494,33 @@ export function createGraphRunner({
       }
 
       let next;
-      if (step.kind === "J") next = await runJStep(stepId, step, reads);
+      if (stepId === PLAN_READY_STEP) {
+        // FOC-476: the readiness gate has its own executor — the retry path
+        // appends THREE records (the ready:false done record, the failed
+        // step's reset, plan.ready's reset) and re-walks; every other outcome
+        // is a single record.
+        const outcome = await runPlanReadyStep(stepId, step, reads);
+        if (outcome.retry) {
+          store.append(outcome.done);
+          state.steps.set(outcome.done.key, outcome.done);
+          for (const reset of outcome.resets) {
+            store.append(reset);
+            state.steps.set(reset.key, reset);
+          }
+          // The decide-edge walk is bounded twice over: the per-run counter
+          // makes the second ready:false escalate (never a third walk), and
+          // this cap catches a counter that somehow failed to persist.
+          if (readyRetries + 1 > READY_MAX_ATTEMPTS - 1) {
+            return stopped(stepId, failRecord(stepId, { code: "invalid_input", message: "plan.ready re-entry exceeded the retry budget — the attempt counter is broken" }));
+          }
+          return run({ inputs }, reentries, readyRetries + 1);
+        }
+        next = outcome.record;
+      } else if (step.kind === "J") next = await runJStep(stepId, step, reads);
       else if (step.kind === "G") next = await runGStep(stepId, step, reads, state.steps);
       else if (step.kind === "A") next = runAStep(stepId, reads);
       else if (step.kind === "H") next = await runHStep(stepId, reads, state);
-      else if (step.kind === "D") next = await runDStep(stepId, reads);
+      else if (step.kind === "D") next = await runDStep(stepId, reads, state);
       else {
         return stopped(stepId, failRecord(stepId, { code: "invalid_input", message: `step "${stepId}" has unknown kind "${scrub(String(step.kind))}"` }));
       }

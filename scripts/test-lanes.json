@@ -97,6 +97,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "plan-ready.test.mjs",
+      "reason": "isolation audit FOC-476: mkdtemp/tmpdir fixtures only; the seam caller is an in-process stub (no network, no provider spawn); label writes go to a temp decisionRunsDir; no ports, no socket binds, no real-repo-path writes"
+    },
+    {
       "file": "linear-client.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },

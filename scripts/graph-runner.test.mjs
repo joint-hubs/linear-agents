@@ -262,7 +262,7 @@ await test("missing caller / generator / runId fail at construction with typed e
 
 console.log("\ngraph-runner: the PLAN subgraph end to end (all stubs injected)");
 
-await test("the full resumable walk: 11 steps, 2 [J] annotations + the node-internal selection score, 3 [G] calls, 2 gates, one push, idempotent resume", async () => {
+await test("the full resumable walk: 12 steps, 2 [J] annotations + the node-internal selection score + the readiness seam call, 3 [G] calls, 2 gates, one push, idempotent resume", async () => {
   const { dir, storePath } = tempStore();
   // The FOC-449 delta-label ledger: a temp runs dir pre-seeded with the event
   // the selection's scoring call will log, so the gate1 approval can write its
@@ -276,6 +276,13 @@ await test("the full resumable walk: 11 steps, 2 [J] annotations + the node-inte
     if (input.decisionId === "plan.dor") return a0Envelope("plan.dor", { q_ready: { type: "noul", noul: 0.9 } });
     if (input.decisionId === "plan.intent.select.score") return selectScoreEnvelope(input);
     if (input.decisionId === "plan.ac.testable") return testableEnvelope(input);
+    if (input.decisionId === "plan.readiness") {
+      // FOC-476: the readiness gate — the base verdict clears and every
+      // confirmed item is covered, so the chain continues to plan.decompose.
+      const answers = { ready: { type: "noul", noul: 0.9 } };
+      INTENT_OUTPUT.interpretations.forEach((_, i) => { answers[`q${i}`] = { type: "noul", noul: 0.9 }; });
+      return a0Envelope("plan.readiness", answers);
+    }
     if (input.decisionId === "plan.decompose") return a0Envelope("plan.decompose", { q_size: { type: "choice", choice: "medium", probabilities: { medium: 0.9 } }, q_relations: { type: "choice", choice: "standalone", probabilities: { standalone: 0.8 } } });
     return fail(`unexpected caller decisionId ${input.decisionId}`);
   };
@@ -409,21 +416,21 @@ await test("the full resumable walk: 11 steps, 2 [J] annotations + the node-inte
   resolve(storePath, "plan.decompose", DECOMPOSE_OUTPUT, "mateusz");
 
   // Run 5 — plan.render [D] composes the issue text deterministically, then
-  // plan.gate2 emits and waits. The gate's resolved reads are the facts shown
-  // to the human, so they carry the rendered text VERBATIM.
+  // draft-approval emits and waits. The gate's resolved reads are the facts
+  // shown to the human, so they carry the rendered text VERBATIM.
   result = await runner.run({ inputs: RUN_INPUTS });
   eq(result.status, "stopped", "run 5 stops");
-  eq(result.stepId, "plan.gate2", "run 5 stops at gate2");
-  eq(result.record.status, "gate-pending", "gate2 pending");
+  eq(result.stepId, "draft-approval", "run 5 stops at the draft-approval [H] step");
+  eq(result.record.status, "gate-pending", "draft-approval pending");
   records = readRecords(storePath);
   const renderRecord = latest(records, "plan.render");
   eq(renderRecord.status, "done", "plan.render executed before the gate");
   if (typeof renderRecord.output?.issueText !== "string" || !renderRecord.output.issueText.includes("AC-1")) {
     fail("the render record carries the composed issue text");
   }
-  eq(gateCalls[1].facts.reads["plan.render.issueText"], renderRecord.output.issueText, "gate2 facts carry the rendered text verbatim");
+  eq(gateCalls[1].facts.reads["plan.render.issueText"], renderRecord.output.issueText, "draft-approval facts carry the rendered text verbatim");
 
-  resolve(storePath, "gate.plan.gate2", { approved: true }, "mateusz");
+  resolve(storePath, "gate.draft-approval", { approved: true }, "mateusz");
 
   // Run 6 — plan.push [D] through the injected Linear boundary.
   result = await runner.run({ inputs: RUN_INPUTS });
@@ -437,7 +444,7 @@ await test("the full resumable walk: 11 steps, 2 [J] annotations + the node-inte
   eq(latest(records, "plan.push").status, "done", "push done");
   eq(latest(records, "plan.push").output.epicId, "FEN-900", "push output recorded");
   eq(generatorCalls, 3, "[G] never re-executed across resumes");
-  eq(callerCalls.length, 3, "three seam calls since the reset (plan.intent.select.score, plan.ac.testable, plan.decompose)");
+  eq(callerCalls.length, 4, "four seam calls since the reset (plan.intent.select.score, plan.ac.testable, plan.readiness, plan.decompose)");
 
   // Run 7 — fully idempotent: every step done, nothing re-runs.
   const callsBefore = callerCalls.length;
@@ -857,10 +864,13 @@ await test("the default Linear boundary refuses — the runner never writes to L
   appendFileSync(storePath, done("plan.dod", "plan.dod", DOD_OUTPUT) + "\n");
   appendFileSync(storePath, done("plan.ac", "plan.ac", AC_OUTPUT) + "\n");
   appendFileSync(storePath, done("plan.spec", "plan.spec", SPEC_OUTPUT) + "\n");
+  // FOC-476: plan.ready sits between plan.spec and plan.decompose — seed it
+  // done so the seeded walk skips the readiness seam call entirely.
+  appendFileSync(storePath, done("plan.ready", "plan.ready", { ready: true, failedStep: "none", reason: "ok" }) + "\n");
   appendFileSync(storePath, done("gate.plan.gate1", "plan.gate1", { approved: true }) + "\n");
   appendFileSync(storePath, done("plan.decompose", "plan.decompose", DECOMPOSE_OUTPUT) + "\n");
   appendFileSync(storePath, done("plan.render", "plan.render", { issueText: "Rendered issue text (seed)." }) + "\n");
-  appendFileSync(storePath, done("gate.plan.gate2", "plan.gate2", { approved: true }) + "\n");
+  appendFileSync(storePath, done("gate.draft-approval", "draft-approval", { approved: true }) + "\n");
   const result = await runner.run({ inputs: RUN_INPUTS });
   eq(result.status, "stopped", "run stops at the boundary refusal");
   eq(result.record.status, "failed", "failed record");
