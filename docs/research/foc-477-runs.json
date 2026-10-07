@@ -1,0 +1,152 @@
+{
+  "protocol": "docs/plans/foc-477-measurement-protocol.md",
+  "confirmedAt": "2026-10-07",
+  "confirmedBy": "Mateusz",
+  "goNoGo": "A",
+  "goNoGoRule": "GO iff >=2 of 3 axes win AND zero axes in regression > 5%",
+  "qualityAxis": "A (body delta: edit count + chars)",
+  "costField": "costUsd (priced/wycenione) — never costUsdReported",
+  "arms": {
+    "A": "PLAN graph via scripts/graph-runner.mjs on current config/graph.json",
+    "B": "historical squad: plan child from .state/supervisor/<run>/children.json"
+  },
+  "corpus": [
+    {
+      "issue": "FOC-198",
+      "estimate": 5,
+      "shape": "spike / UX + PRD",
+      "armB": {
+        "runId": "20260903-supervisor-foc-198",
+        "childId": "plan-1",
+        "status": "exited",
+        "costUsd": 0.0749,
+        "turns": 3
+      },
+      "whyIn": "era floor (oldest run) + only spike in the pool + largest known estimate"
+    },
+    {
+      "issue": "FOC-236",
+      "estimate": 2,
+      "shape": "docs / runbook",
+      "armB": {
+        "runId": "2026-09-22T13-50-37-550-supervisor-foc464-b4ae",
+        "childId": "plan-4",
+        "status": "exited",
+        "costUsd": 0.6952,
+        "turns": 1
+      },
+      "whyIn": "small, cheap baseline; docs shape"
+    },
+    {
+      "issue": "FOC-436",
+      "estimate": 2,
+      "shape": "docs + tech checklist",
+      "armB": {
+        "runId": "2026-09-20T19-52-44-565-supervisor-f67a",
+        "childId": "plan-1",
+        "status": "exited",
+        "costUsd": 0.0489,
+        "turns": 1
+      },
+      "whyIn": "smallest priced baseline in the pool (cost floor)"
+    },
+    {
+      "issue": "FOC-240",
+      "estimate": 3,
+      "shape": "tech / key provisioning",
+      "armB": {
+        "runId": "2026-09-19T12-24-47-301-supervisor-a38f",
+        "childId": "plan-1",
+        "status": "exited",
+        "costUsd": 0.1084,
+        "turns": 1
+      },
+      "whyIn": "mid-size security framework"
+    },
+    {
+      "issue": "FOC-239",
+      "estimate": null,
+      "shape": "tech / prompt encryption",
+      "armB": {
+        "runId": "2026-09-19T18-22-29-852-supervisor-848c",
+        "childId": "plan-1",
+        "status": "exited",
+        "costUsd": 0.3462,
+        "turns": 2
+      },
+      "whyIn": "returned-by:review — arm B has real review friction"
+    },
+    {
+      "issue": "FOC-132",
+      "estimate": null,
+      "shape": "i18n titles + summaries",
+      "armB": {
+        "runId": "2026-09-20T15-48-27-928-supervisor-01c9",
+        "childId": "plan-1",
+        "status": "exited",
+        "costUsd": 0.7336,
+        "turns": 2
+      },
+      "whyIn": "returned-by:review; non-security product logic"
+    },
+    {
+      "issue": "FOC-136",
+      "estimate": null,
+      "shape": "UI / mail account config",
+      "armB": {
+        "runId": "2026-09-20T12-18-04-854-supervisor-3e29",
+        "childId": "plan-1",
+        "status": "exited",
+        "costUsd": 1.6236,
+        "turns": 2
+      },
+      "whyIn": "returned-by:review; only issue with two arm-B runs (variance signal)"
+    },
+    {
+      "issue": "FOC-403",
+      "estimate": null,
+      "shape": "content / training materials",
+      "armB": {
+        "runId": "2026-09-19T15-24-33-122-supervisor-0151",
+        "childId": "plan-1",
+        "status": "exited",
+        "costUsd": 0.1396,
+        "turns": 1
+      },
+      "whyIn": "non-code deliverable — different output shape"
+    },
+    {
+      "issue": "FOC-550",
+      "estimate": null,
+      "shape": "product UI / Gantt",
+      "armB": {
+        "runId": "2026-09-24T19-10-11-004-supervisor-2d20",
+        "childId": "plan-1",
+        "status": "exited",
+        "costUsd": 0.4820,
+        "turns": 2
+      },
+      "whyIn": "representative of the 5-issue UI cluster (551-554 under-sampled)"
+    },
+    {
+      "issue": "FOC-688",
+      "estimate": 5,
+      "shape": "tech / AI architecture",
+      "armB": {
+        "runId": "2026-10-06T15-09-19-713-supervisor-26c7",
+        "childId": "plan-1",
+        "status": "exited",
+        "costUsd": 3.3333,
+        "turns": 5
+      },
+      "whyIn": "newest run + largest priced baseline (cost ceiling)"
+    }
+  ],
+  "exclusions": [
+    { "issue": "FOC-515", "criterion": "C2", "reason": "PLAN-graph development task; output is plan.intent — grading the graph on the issue that wrote it" },
+    { "issue": "FOC-425", "criterion": "C3", "reason": "id drift — Linear now returns PFM-99 (moved to another team)" },
+    { "issue": "FOC-136/a38f", "criterion": "C1", "reason": "stopped (child killed, 1 turn, $0) — later run 3e29 is the usable baseline" },
+    { "issue": "FOC-208", "criterion": "C1", "reason": "waiting_gate — baseline never reached terminal state" },
+    { "issue": "FOC-551/552/553/554", "criterion": "C5", "reason": "deliberate under-sampling — siblings of FOC-550 in the Gantt/roadmap UI cluster" }
+  ]
+}
