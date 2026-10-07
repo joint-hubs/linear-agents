@@ -624,15 +624,16 @@ function completionGraph() {
 
 // The reads `plan.push` (a [D] step, copied verbatim from config/graph.json)
 // consumes to build its linear payload — including the rendered issue text
-// plan.render (FOC-520) puts on the chain before gate2. The runner resolves
-// reads from inputs before the step runs; the shapes are loose on purpose —
-// the fixture only needs the step to reach "done" (the linearEffect stub
-// answers it) so the walk ends and the completion line is what the tests
+// plan.render (FOC-520) puts on the chain before the draft-approval gate
+// (FOC-476 retired plan.gate2 and renamed the gate record read). The runner
+// resolves reads from inputs before the step runs; the shapes are loose on
+// purpose — the fixture only needs the step to reach "done" (the linearEffect
+// stub answers it) so the walk ends and the completion line is what the tests
 // exercise.
 const COMPLETION_INPUTS = {
   "plan.decompose.record": { output: { tasks: [] } },
   "plan.render.issueText": "Rendered issue text (fixture).",
-  "gate.plan.gate2.record": { status: "answered" },
+  "gate.draft-approval.record": { status: "answered" },
 };
 
 const tempStore = () => {

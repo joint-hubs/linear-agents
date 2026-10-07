@@ -189,21 +189,24 @@ await test("the output schema is the design's bounded checklist schema", () => {
 
 console.log("\nplan-dod: the graph wiring");
 
-await test("11 plan steps, 10 sequence edges + the gate1 reentry, plan.dod sits after gate1 (FOC-516 moved the gate ahead)", () => {
+await test("12 plan steps, 11 sequence edges + the gate1 reentry + the FOC-476 decide edge, plan.dod sits after gate1 (FOC-516 moved the gate ahead)", () => {
   eq(validateGraph(GRAPH).length, 0, "the committed graph validates");
   const stepIds = Object.keys(PLAN.steps);
-  eq(stepIds.length, 11, `11 steps, got ${stepIds.length}`);
+  eq(stepIds.length, 12, `12 steps, got ${stepIds.length} (plan.ready joined after plan.spec, FOC-476)`);
   if (!stepIds.includes("plan.dod")) fail("plan.dod missing from the steps map");
-  eq(PLAN.stepFlow.length, 11, "11 stepFlow edges — the linear chain plus the FOC-517 reentry");
-  eq(PLAN.stepFlow.filter((e) => e.type === "sequence").length, 10, "10 sequence edges");
+  eq(PLAN.stepFlow.length, 13, "13 stepFlow edges — the linear chain plus the FOC-517 reentry plus the FOC-476 decide edge");
+  eq(PLAN.stepFlow.filter((e) => e.type === "sequence").length, 11, "11 sequence edges");
   const reentry = PLAN.stepFlow.filter((e) => e.type === "reentry");
   eq(reentry.length, 1, "exactly one reentry edge");
   deepEq([reentry[0].from, reentry[0].to], ["plan.gate1", "plan.intent"], "gate1 re-enters plan.intent on an unconfirmed round (FOC-517)");
+  const decide = PLAN.stepFlow.filter((e) => e.type === "decide");
+  eq(decide.length, 1, "exactly one step-level decide edge");
+  deepEq([decide[0].from, decide[0].to], ["plan.ready", ["plan.dod", "plan.ac", "plan.spec"]], "the FOC-476 decide edge routes ready:false back by failedStep — plan.dod is a candidate target");
   const chain = PLAN.stepFlow.filter((e) => e.type === "sequence").map((e) => `${e.from}>${e.to}`).join(" ");
   eq(
     chain,
-    "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push",
-    "the chain runs dor → intent → intent.select → gate1 → dod → ac → spec → decompose → render → gate2 → push",
+    "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.ready plan.ready>plan.decompose plan.decompose>plan.render plan.render>draft-approval draft-approval>plan.push",
+    "the chain runs dor → intent → intent.select → gate1 → dod → ac → spec → ready → decompose → render → draft-approval → push (FOC-476)",
   );
   eq(PLAN.steps["plan.dor"].kind, "J", "plan.dor stays [J]");
   eq(DOD_STEP.kind, "G", "plan.dod is [G]");
