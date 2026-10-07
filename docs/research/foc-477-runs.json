@@ -2,9 +2,9 @@
   "protocol": "docs/plans/foc-477-measurement-protocol.md",
   "confirmedAt": "2026-10-07",
   "confirmedBy": "Mateusz",
-  "goNoGo": "A",
-  "goNoGoRule": "GO iff >=2 of 3 axes win AND zero axes in regression > 5%",
-  "qualityAxis": "A (body delta: edit count + chars)",
+  "goNoGo": "A (confirmed Q1=A); axes reduced to 2 by Q3 2026-10-07",
+  "goNoGoRule": "GO iff BOTH axes (cost, time) win AND zero axes in regression > 5%",
+  "qualityAxis": "withdrawn 2026-10-07 (Q3) — plan quality is descriptive only, not a go/no-go axis; see docs/plans/foc-477-measurement-protocol.md §4.3 and §7 Q3",
   "costField": "costUsd (priced/wycenione) — never costUsdReported",
   "arms": {
     "A": "PLAN graph via scripts/graph-runner.mjs on current config/graph.json",
@@ -20,7 +20,8 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.0749,
-        "turns": 3
+        "turns": 3,
+        "gateFriction": 1
       },
       "whyIn": "era floor (oldest run) + only spike in the pool + largest known estimate"
     },
@@ -33,7 +34,8 @@
         "childId": "plan-4",
         "status": "exited",
         "costUsd": 0.6952,
-        "turns": 1
+        "turns": 1,
+        "gateFriction": 1
       },
       "whyIn": "small, cheap baseline; docs shape"
     },
@@ -46,7 +48,8 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.0489,
-        "turns": 1
+        "turns": 1,
+        "gateFriction": 1
       },
       "whyIn": "smallest priced baseline in the pool (cost floor)"
     },
@@ -59,7 +62,8 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.1084,
-        "turns": 1
+        "turns": 1,
+        "gateFriction": 1
       },
       "whyIn": "mid-size security framework"
     },
@@ -72,7 +76,8 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.3462,
-        "turns": 2
+        "turns": 2,
+        "gateFriction": 1
       },
       "whyIn": "returned-by:review — arm B has real review friction"
     },
@@ -85,7 +90,8 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.7336,
-        "turns": 2
+        "turns": 2,
+        "gateFriction": 2
       },
       "whyIn": "returned-by:review; non-security product logic"
     },
@@ -98,7 +104,8 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 1.6236,
-        "turns": 2
+        "turns": 2,
+        "gateFriction": 2
       },
       "whyIn": "returned-by:review; only issue with two arm-B runs (variance signal)"
     },
@@ -111,7 +118,8 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.1396,
-        "turns": 1
+        "turns": 1,
+        "gateFriction": 0
       },
       "whyIn": "non-code deliverable — different output shape"
     },
@@ -123,8 +131,9 @@
         "runId": "2026-09-24T19-10-11-004-supervisor-2d20",
         "childId": "plan-1",
         "status": "exited",
-        "costUsd": 0.4820,
-        "turns": 2
+        "costUsd": 0.482,
+        "turns": 2,
+        "gateFriction": 2
       },
       "whyIn": "representative of the 5-issue UI cluster (551-554 under-sampled)"
     },
@@ -137,16 +146,42 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 3.3333,
-        "turns": 5
+        "turns": 5,
+        "gateFriction": 3
       },
       "whyIn": "newest run + largest priced baseline (cost ceiling)"
     }
   ],
   "exclusions": [
-    { "issue": "FOC-515", "criterion": "C2", "reason": "PLAN-graph development task; output is plan.intent — grading the graph on the issue that wrote it" },
-    { "issue": "FOC-425", "criterion": "C3", "reason": "id drift — Linear now returns PFM-99 (moved to another team)" },
-    { "issue": "FOC-136/a38f", "criterion": "C1", "reason": "stopped (child killed, 1 turn, $0) — later run 3e29 is the usable baseline" },
-    { "issue": "FOC-208", "criterion": "C1", "reason": "waiting_gate — baseline never reached terminal state" },
-    { "issue": "FOC-551/552/553/554", "criterion": "C5", "reason": "deliberate under-sampling — siblings of FOC-550 in the Gantt/roadmap UI cluster" }
-  ]
+    {
+      "issue": "FOC-515",
+      "criterion": "C2",
+      "reason": "PLAN-graph development task; output is plan.intent — grading the graph on the issue that wrote it"
+    },
+    {
+      "issue": "FOC-425",
+      "criterion": "C3",
+      "reason": "id drift — Linear now returns PFM-99 (moved to another team)"
+    },
+    {
+      "issue": "FOC-136/a38f",
+      "criterion": "C1",
+      "reason": "stopped (child killed, 1 turn, $0) — later run 3e29 is the usable baseline"
+    },
+    {
+      "issue": "FOC-208",
+      "criterion": "C1",
+      "reason": "waiting_gate — baseline never reached terminal state"
+    },
+    {
+      "issue": "FOC-551/552/553/554",
+      "criterion": "C5",
+      "reason": "deliberate under-sampling — siblings of FOC-550 in the Gantt/roadmap UI cluster"
+    }
+  ],
+  "qualityAxisWithdrawnAt": "2026-10-07",
+  "qualityAxisReason": "bodyDelta has no source in the Linear API (IssueHistory carries no body text) and arm B has no body-edit surface; gate friction exists on both arms but is not monotone in plan quality (FOC-403 = 0 plan gates is \"nobody asked\", not \"the plan was perfect\")",
+  "gateFrictionDefinition": "count of plan-phase gate rounds. Arm B: gates/gate-plan-*.json (childId prefix \"plan\"). Arm A: gates/*.json with kind plan.gate1 or draft-approval. Implementation review verdicts (verdicts/*-roundN.json) are EXCLUDED — they review code, not the plan. Descriptive only (§4.3b); never a go/no-go axis.",
+  "armBGateFrictionMedian": 1,
+  "armBGateFrictionNote": "frozen 2026-10-07 before any arm-A run; median 1 (sorted 0,1,1,1,1,1,2,2,2,3)"
 }

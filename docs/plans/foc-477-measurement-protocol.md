@@ -117,15 +117,36 @@ without a reproducer is not a result (Hermes spec, §5).
 and **excluded** from exec time. Arm B's gate-wait is real history (Mateusz was at those gates
 too) and must not be silently dropped — it is the honest cost of HITL in both arms.
 
-### 4.3 Mateusz's edits before approval — **two columns, one axis** (see §7 Q2)
+### 4.3 Quality — **descriptive only, not a go/no-go axis** (superseded 2026-10-07, see §7 Q3)
 
-| Definition | Measures | How |
-|---|---|---|
-| **(a) body delta** | how much he rewrote the plan | Linear body diff between plan-published and approved: edit count + character delta, via the Linear activity log |
-| **(b) gate friction** | how often the system forced him to intervene | count of gate rejections + followup rounds he drove, from the gate records |
+Both candidate sources fail, and both failures are verified against the data, not assumed.
 
-Both are reported for every pair. §7 Q2 decides only which one loads the **quality axis** of the
-go/no-go.
+**(a) body delta — the source does not exist.** §4.3a as confirmed stated a Linear body diff
+"via the Linear activity log". `IssueHistory` exposes `updatedDescription: Boolean`,
+`descriptionUpdatedBy` and `changes: JSONObject` — and **no body text of any kind**. On real data
+`changes` carries only `{"descriptionUpdatedByIds": ["…"]}`, i.e. *who* edited, never *what*:
+no before, no after, no character delta. Across the frozen 10, exactly one issue (FOC-236) has
+any description-edit event at all, and it yields an edit count of 2 with zero content. Arm B is
+worse: its plan was never the Linear body (FOC-550's `Issue.description` is a 573-character task
+brief — `## Context` / `## Scope` — written at creation and never touched), so there is neither
+a published draft nor an edited final to diff. Evidence and probe scripts:
+`.state/foc-477-quality-axis-finding.md`.
+
+**(b) gate friction — real, symmetric, free, but not monotone in quality.** The count of
+plan-phase gate rounds exists on both arms and costs nothing to capture: `gates/gate-plan-*.json`
+on arm B, `kind: "plan.gate1"` / `"draft-approval"` records on arm A (same `gate-<child>-<seq>`
+id shape, `supervisor-gate.mjs:nextGateId`). But **fewer gates is not a better plan**. Arm B's
+lowest value (FOC-403, 0 plan gates) is a plan child that asked nothing — which may mean "the
+plan was obviously right" or "nobody checked it", and the metric cannot tell those apart. Making
+it a quality axis would reward whichever arm skips confirmation, while arm A's code states the
+opposite contract: *"the plan is never built on an unconfirmed intent"*. Not monotone in the
+thing it claims to measure ⇒ it cannot load a go/no-go axis.
+
+**Therefore §5 runs on the two axes with a valid, monotone, symmetric source: cost (4.1) and
+time (4.2).** Gate friction is reported as the descriptive column §4.3b always described — "how
+often the system forced him to intervene" is genuine HITL-cost information — and it is explicitly
+**not** a go/no-go axis. The report must state plainly that plan quality is unmeasured in this
+design, and why; that gap is itself a finding for FOC-469.
 
 ### 4.4 Escalations
 
@@ -138,18 +159,26 @@ Agreement rate between what the graph/squad asked and what he actually answered 
 / edit), plus a per-decision breakdown. **Descriptives only** — with n=10 paired runs and 5 gate
 families we are far under n=30; no significance claims (FOC-387 rule of three).
 
-## 5. Go/no-go rule — **CONFIRMED (Q1 = A)**
+## 5. Go/no-go rule — **CONFIRMED (Q1 = A); axes reduced to 2 (§7 Q3)**
 
-Three axes: **cost** (4.1), **time** (4.2 exec), **quality** (4.3).
+Two axes: **cost** (4.1), **time** (4.2 exec). Quality is descriptive only (§4.3).
 
 - **win** — median arm A < median arm B × 0.85
 - **draw** — inconclusive; reportable, never counted as GO
 - **loss** — median arm A > median arm B × 1.05
 
-> **GO iff ≥2 of 3 axes are win AND zero axes are in regression > 5%.**
+> **GO iff both axes are win AND zero axes are in regression > 5%.**
 > **NO-GO** otherwise, and NO-GO always carries a contract-delta list (§6).
 
-Per-axis table with win/draw/loss is mandatory in the report.
+This is **narrower** than the confirmed "≥2 of 3", not wider: with quality withdrawn the study
+needs *both* remaining axes to win, where before any two of three would do. The 0.85 / 1.05
+ratios are unchanged — they were written for the continuous cost and time metrics, and both of
+those are still continuous. (They are not transferable to an integer count metric: with a median
+of 0 on either side `median A < median B × 0.85` becomes unsatisfiable, which is one more reason
+a count could never be dropped into this rule.)
+
+Per-axis table with win/draw/loss is mandatory in the report, and the gate-friction column
+(§4.3b) is mandatory alongside it — as a descriptive, with no axis verdict.
 
 ## 6. M4 contract deltas — mandatory even on GO
 
@@ -167,8 +196,33 @@ Whatever the verdict, the report must contain concrete deltas for FOC-469 / FOC-
 ### Q1 — go/no-go threshold → **A (confirmed)**
 GO iff ≥2 of 3 axes win **and** zero axes in regression > 5%.
 
-### Q2 — quality axis definition → **A (confirmed)**
+### Q2 — quality axis definition → **A (confirmed, then superseded by Q3)**
 Body delta (edit count + chars) loads the quality axis. Gate friction is reported alongside.
+
+### Q3 — quality axis withdrawn → **2026-10-07, delegated to the Supervisor**
+
+Mateusz was shown the finding (`.state/foc-477-quality-axis-finding.md`) with options and
+answered: *"rekomenduj i idziemy wedlug twojej rekomendacji"* — recommend, and we follow the
+recommendation. The recommendation, and what is now in force:
+
+- **Q2=A is withdrawn.** Its stated source (Linear body diff via the activity log) does not
+  exist in the API, and arm B has no body-edit surface at all. Verified, not assumed.
+- **Option C is withdrawn with it.** Publishing arm-A drafts to scratch Linear issues so he
+  edits them buys only arm A's column; arm B's stays structurally null, so the tabulator's
+  `vals.some((v) => v == null)` would return `INCONCLUSIVE` no matter what was collected.
+- **Gate friction is NOT promoted to the axis** (the tempting fix). It exists on both arms but
+  is not monotone in plan quality — see §4.3b. Reporting it as a quality axis would reward
+  skipping confirmation.
+- **The study runs on 2 axes: cost + time.** GO iff **both** win and neither is in regression.
+  Narrower than Q1=A's "≥2 of 3", never wider. Q1's ratios are untouched.
+- **Gate friction is still collected and reported**, as §4.3b always defined it: how often the
+  system forced him to intervene. Descriptive, no axis verdict.
+- **The report must name the gap.** Plan quality is unmeasured in this design. That is a finding
+  for FOC-469 in its own right, not a footnote.
+
+Basis for deciding rather than re-relaying: the fork had already been put to Mateusz with costed
+options; he delegated the choice. The change is a **withdrawal**, which is the safe direction —
+it makes GO harder to reach and invents no new metric, no new threshold and no new rule shape.
 
 ### Corpus → **confirmed**
 §3.2 list of 10 stands. No swaps.
