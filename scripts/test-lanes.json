@@ -89,6 +89,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "foc-477-measure.test.mjs",
+      "reason": "isolation audit FOC-477: mkdtemp/tmpdir fixtures only (corpus + children.json + fake worktree/.git-pointer trees synthesized under os.tmpdir and removed after each case); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
       "file": "graph-runner.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
