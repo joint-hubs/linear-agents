@@ -8,7 +8,8 @@
 // every fail-closed path (missing/empty reads, malformed DoD/AC/task items,
 // over-cap text) is a typed invalid_input — never a partial or guessed issue.
 // The runner section walks the committed graph with seeded predecessor
-// records: plan.render executes before plan.gate2, the gate facts carry the
+// records: plan.render executes before the draft-approval gate (FOC-476
+// retired plan.gate2), the gate facts carry the
 // rendered text VERBATIM, and the pushed payload's issueText is the same
 // string 1:1 — what the gate showed is what would be written to Linear.
 //
@@ -126,16 +127,16 @@ function seedDone(storePath, key, stepId, output) {
 
 console.log("\nplan-render: the committed spec (real loader — no fixture drift)");
 
-await test("plan.render sits on the chain between plan.decompose and plan.gate2, kind D, tier null", () => {
+await test("plan.render sits on the chain between plan.decompose and draft-approval, kind D, tier null", () => {
   eq(validateGraph(GRAPH).length, 0, "the committed graph validates");
   const stepIds = Object.keys(PLAN.steps);
-  eq(stepIds.length, 11, "11 steps");
-  eq(PLAN.stepFlow.length, 11, "11 stepFlow edges — the linear chain plus the FOC-517 reentry");
+  eq(stepIds.length, 12, "12 steps — plan.ready joined after plan.spec (FOC-476)");
+  eq(PLAN.stepFlow.length, 13, "13 stepFlow edges — the linear chain plus the FOC-517 reentry plus the FOC-476 decide edge");
   const chain = PLAN.stepFlow.filter((e) => e.type === "sequence").map((e) => `${e.from}>${e.to}`).join(" ");
   eq(
     chain,
-    "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push",
-    "plan.render keeps its place between plan.decompose and plan.gate2 (FOC-520); plan.intent.select joined before gate1 (FOC-516)",
+    "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.ready plan.ready>plan.decompose plan.decompose>plan.render plan.render>draft-approval draft-approval>plan.push",
+    "plan.render keeps its place before the approval gate — draft-approval since FOC-476 (plan.gate2 retired); plan.intent.select joined before gate1 (FOC-516)",
   );
   eq(RENDER_STEP.kind, "D", "kind D — deterministic, no model tier");
   eq(RENDER_STEP.tier, null, "tier null");
@@ -281,9 +282,9 @@ await test("over-cap text fails closed BEFORE the gate — never truncated", asy
   await failsTyped({ ...FIXTURE_READS, "plan.spec.summary": big }, "invalid_input", "fail closed");
 });
 
-console.log("\nplan-render: the runner executes plan.render before plan.gate2");
+console.log("\nplan-render: the runner executes plan.render before draft-approval");
 
-await test("the walk renders, gate2 facts carry the text verbatim, the push payload is 1:1", async () => {
+await test("the walk renders, draft-approval facts carry the text verbatim, the push payload is 1:1", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plan-render-test-"));
   const storePath = join(dir, "graph-steps.jsonl");
   try {
@@ -294,6 +295,7 @@ await test("the walk renders, gate2 facts carry the text verbatim, the push payl
     seedDone(storePath, "plan.dod", "plan.dod", { definitionOfDone: FIXTURE_READS["plan.dod.definitionOfDone"] });
     seedDone(storePath, "plan.ac", "plan.ac", { acs: FIXTURE_READS["plan.ac.acs"] });
     seedDone(storePath, "plan.spec", "plan.spec", { briefs: ["b"], adr: "a", summary: FIXTURE_READS["plan.spec.summary"] });
+    seedDone(storePath, "plan.ready", "plan.ready", { ready: true, failedStep: "none", reason: "ok" }); // FOC-476
     seedDone(storePath, "gate.plan.gate1", "plan.gate1", { approved: true });
     seedDone(storePath, "plan.decompose", "plan.decompose", { tasks: FIXTURE_READS["plan.decompose.record"].output.tasks });
 
@@ -314,10 +316,10 @@ await test("the walk renders, gate2 facts carry the text verbatim, the push payl
       },
     });
 
-    // Run 1 — plan.render composes deterministically, then plan.gate2 stops gate-pending.
+    // Run 1 — plan.render composes deterministically, then draft-approval stops gate-pending.
     const result = await runner.run({ inputs: {} });
-    eq(result.status, "stopped", "run stops at gate2");
-    eq(result.stepId, "plan.gate2", "gate2 is where the walk waits");
+    eq(result.status, "stopped", "run stops at the approval gate");
+    eq(result.stepId, "draft-approval", "draft-approval is where the walk waits");
     eq(result.record.status, "gate-pending", "gate record pending");
     eq(gateCalls.length, 1, "one gate emit");
     if (!gateCalls[0].summary.includes("plan.render")) fail("the gate summary names the rendered issue");
@@ -333,8 +335,8 @@ await test("the walk renders, gate2 facts carry the text verbatim, the push payl
       type: "graph.resolution",
       runId: "run-plan-render",
       ts: "2026-01-01T00:00:00.000Z",
-      key: "gate.plan.gate2.resolution",
-      stepId: "plan.gate2",
+      key: "gate.draft-approval.resolution",
+      stepId: "draft-approval",
       by: "mateusz",
       output: { approved: true },
     })}\n`);
@@ -361,6 +363,7 @@ await test("a failed render stops the run before the gate — the gate never see
     // the renderer itself fails closed on the empty list.
     seedDone(storePath, "plan.ac", "plan.ac", { acs: [] });
     seedDone(storePath, "plan.spec", "plan.spec", { briefs: ["b"], adr: "a", summary: FIXTURE_READS["plan.spec.summary"] });
+    seedDone(storePath, "plan.ready", "plan.ready", { ready: true, failedStep: "none", reason: "ok" }); // FOC-476
     seedDone(storePath, "gate.plan.gate1", "plan.gate1", { approved: true });
     seedDone(storePath, "plan.decompose", "plan.decompose", { tasks: FIXTURE_READS["plan.decompose.record"].output.tasks });
 
@@ -379,7 +382,7 @@ await test("a failed render stops the run before the gate — the gate never see
     eq(result.record.error.code, "invalid_input", "typed code");
     if (!result.record.error.message.includes("plan.ac.acs")) fail("the failure names the malformed read");
     const records = readFileSync(storePath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-    if (records.some((r) => r.key === "gate.plan.gate2")) fail("gate2 never emitted after a failed render");
+    if (records.some((r) => r.key === "gate.draft-approval")) fail("draft-approval never emitted after a failed render");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

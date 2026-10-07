@@ -210,21 +210,26 @@ console.log("\nv2 — version, steps, stepFlow, decisionEdges");
 test("v2: the committed graph carries the plan step chain and six decision edges", () => {
   const plan = GRAPH.nodes.plan;
   const stepIds = Object.keys(plan.steps || {});
-  if (stepIds.length !== 11) fail(`expected 11 plan steps, got ${stepIds.length}`);
+  if (stepIds.length !== 12) fail(`expected 12 plan steps, got ${stepIds.length}`);
   const flow = plan.stepFlow || [];
-  if (flow.length !== 11) fail(`expected 11 stepFlow edges (10 sequence + the FOC-517 reentry), got ${flow.length}`);
+  if (flow.length !== 13) fail(`expected 13 stepFlow edges (11 sequence + the FOC-517 reentry + the FOC-476 decide), got ${flow.length}`);
   const seq = flow.filter((e) => e.type === "sequence");
-  if (seq.length !== 10) fail(`expected 10 sequence edges, got ${seq.length}`);
+  if (seq.length !== 11) fail(`expected 11 sequence edges, got ${seq.length}`);
   const reentries = flow.filter((e) => e.type === "reentry");
   if (reentries.length !== 1) fail(`expected exactly 1 reentry edge, got ${reentries.length}`);
   if (reentries[0].from !== "plan.gate1" || reentries[0].to !== "plan.intent") {
     fail("the reentry edge does not run plan.gate1 → plan.intent");
   }
+  const decides = flow.filter((e) => e.type === "decide");
+  if (decides.length !== 1) fail(`expected exactly 1 step-level decide edge, got ${decides.length}`);
+  if (decides[0].from !== "plan.ready" || JSON.stringify(decides[0].to) !== JSON.stringify(["plan.dod", "plan.ac", "plan.spec"])) {
+    fail("the decide edge does not run plan.ready → [plan.dod, plan.ac, plan.spec]");
+  }
   if (flow[0].from !== "plan.dor" || seq[seq.length - 1].to !== "plan.push") {
     fail("the step chain does not run plan.dor → plan.push");
   }
   for (const e of flow) {
-    if (e.type !== "sequence" && e.type !== "reentry") fail(`stepFlow edge typed "${e.type}"`);
+    if (e.type !== "sequence" && e.type !== "reentry" && e.type !== "decide") fail(`stepFlow edge typed "${e.type}"`);
   }
   if (!Array.isArray(GRAPH.decisionEdges) || GRAPH.decisionEdges.length !== 6) {
     fail(`expected 6 decision edges, got ${(GRAPH.decisionEdges || []).length}`);
@@ -295,20 +300,21 @@ test("v2 malformed: a tier that does not match the kind is caught", () => {
 
 test("v2 malformed: a broken stepFlow is caught", () => {
   const g1 = clone();
-  // One head, one tail, ten edges for eleven steps — but plan.dod/plan.dor/
+  // One head, one tail, eleven edges for twelve steps — but plan.dod/plan.dor/
   // plan.ac form a cycle off the main line, so the walk from the single head
-  // (plan.intent) reaches only 8 of 11.
+  // (plan.intent) reaches only 9 of 12.
   g1.nodes.plan.stepFlow = [
     { from: "plan.dod", to: "plan.dor", type: "sequence" },
     { from: "plan.dor", to: "plan.ac", type: "sequence" },
     { from: "plan.ac", to: "plan.dod", type: "sequence" },
     { from: "plan.intent", to: "plan.intent.select", type: "sequence" },
-    { from: "plan.intent.select", to: "plan.spec", type: "sequence" },
-    { from: "plan.spec", to: "plan.gate1", type: "sequence" },
-    { from: "plan.gate1", to: "plan.decompose", type: "sequence" },
+    { from: "plan.intent.select", to: "plan.gate1", type: "sequence" },
+    { from: "plan.gate1", to: "plan.spec", type: "sequence" },
+    { from: "plan.spec", to: "plan.ready", type: "sequence" },
+    { from: "plan.ready", to: "plan.decompose", type: "sequence" },
     { from: "plan.decompose", to: "plan.render", type: "sequence" },
-    { from: "plan.render", to: "plan.gate2", type: "sequence" },
-    { from: "plan.gate2", to: "plan.push", type: "sequence" },
+    { from: "plan.render", to: "draft-approval", type: "sequence" },
+    { from: "draft-approval", to: "plan.push", type: "sequence" },
   ];
   if (!hasProblem(validateGraph(g1), "every step must sit on the chain")) {
     fail("a disconnected stepFlow was accepted");

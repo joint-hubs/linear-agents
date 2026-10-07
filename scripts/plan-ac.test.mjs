@@ -193,21 +193,24 @@ await test("plan.spec reads plan.dod.definitionOfDone — never the retired merg
   if (PLAN.steps["plan.spec"].reads.includes("plan.ac.definitionOfDone")) fail("the merged field is retired everywhere");
 });
 
-// ── (h) the counts hold: 31 entries, 11 steps / 10 edges, 6 decision edges ───
+// ── (h) the counts hold: 34 entries, 12 steps / 11 sequence edges + the decide edge ──
 
-await test("the seed partition survives the restructure: 32 entries, 11 steps, 10 sequence edges + the gate1 reentry, 6 decision edges", () => {
-  eq(Object.keys(registry).length, 32, "32 registry entries (plan.intent.reply joined, FOC-517)");
+await test("the seed partition survives the restructure: 34 entries, 12 steps, 11 sequence edges + the gate1 reentry + the FOC-476 decide edge, 6 decision edges", () => {
+  eq(Object.keys(registry).length, 34, "34 registry entries (plan.ready + plan.readiness joined, FOC-476)");
   const stepIds = Object.keys(PLAN.steps);
-  eq(stepIds.length, 11, "11 steps");
+  eq(stepIds.length, 12, "12 steps — plan.ready joined between plan.spec and plan.decompose (FOC-476)");
   const flow = PLAN.stepFlow;
-  eq(flow.length, 11, "11 stepFlow edges — the linear chain plus the FOC-517 reentry");
-  eq(flow.filter((e) => e.type === "sequence").length, 10, "10 sequence edges — no graph edge was added for the loop (FOC-476's)");
+  eq(flow.length, 13, "13 stepFlow edges — the linear chain plus the FOC-517 reentry plus the FOC-476 decide edge");
+  eq(flow.filter((e) => e.type === "sequence").length, 11, "11 sequence edges — the ac quality loop stays node-internal (FOC-476's decide edge is step-level, not here)");
   const reentry = flow.filter((e) => e.type === "reentry");
   eq(reentry.length, 1, "exactly one reentry edge");
   deepEq([reentry[0].from, reentry[0].to], ["plan.gate1", "plan.intent"], "gate1 re-enters plan.intent on an unconfirmed round (FOC-517)");
+  const decides = flow.filter((e) => e.type === "decide");
+  eq(decides.length, 1, "exactly one step-level decide edge");
+  deepEq([decides[0].from, decides[0].to], ["plan.ready", ["plan.dod", "plan.ac", "plan.spec"]], "the decide edge routes ready:false back by failedStep (FOC-476)");
   eq(GRAPH.decisionEdges.length, 6, "6 decision edges — the testable gate, the select score and the reply are node-internal, not edges");
   const chain = flow.filter((e) => e.type === "sequence").map((e) => `${e.from}>${e.to}`).join(" ");
-  eq(chain, "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.decompose plan.decompose>plan.render plan.render>plan.gate2 plan.gate2>plan.push", "the linear chain holds; the reentry rides beside it (FOC-517)");
+  eq(chain, "plan.dor>plan.intent plan.intent>plan.intent.select plan.intent.select>plan.gate1 plan.gate1>plan.dod plan.dod>plan.ac plan.ac>plan.spec plan.spec>plan.ready plan.ready>plan.decompose plan.decompose>plan.render plan.render>draft-approval draft-approval>plan.push", "the linear chain holds; the reentry and the decide edge ride beside it (FOC-517, FOC-476)");
 });
 
 // ── composeAcInputs: the payload partition + the over-length posture ─────────

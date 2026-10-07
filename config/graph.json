@@ -5,7 +5,7 @@
 
   "version": 2,
 
-  "_v2": "v2 additive shape (FOC-397, Option A per docs/plans/graph-json-v2-design.md §6.1): everything v1 stays byte-identical — the six squad-node contracts, the top-level `edges` array, handoff-rules.json and the PUML rendering. Additions: the plan node carries `steps` (the 11-step PLAN decomposition — plan.dor [J], plan.intent [G], plan.intent.select [G], plan.dod [G], plan.ac [G], plan.spec [A], plan.gate1 [H], plan.decompose [J], plan.render [D], plan.gate2 [H], plan.push [D]; each step object is exactly the D7 list — id = its key, kind, reads, output, tier, failure, writes) and `stepFlow` (sequence edges — ordered step-to-step connectors inside the node, never matcher edges), plus a top-level `decisionEdges` array for the six decide transitions (MAP #1/#2/#14/#16, hook #17 and the FOC-451 DoR intake gate; each names the registry entry in config/decisions.json that owns autonomy, threshold, fallback and metrics). graph-validate v2 mode cross-checks step fields deep-equal against the registry entries. FOC-516 inserts plan.intent.select between plan.intent and plan.gate1 and moves GATE 1 there: the selection routes every interpretation of the map to question / confirmation / 'Rozumiem tak' line / assumption by the policy table config/intent-select-policy.json (scored by the node-internal [J] plan.intent.select.score, the plan.ac + plan.ac.testable pattern), and the gate approves the interpretation selection before the DoD/AC/spec hand-off is produced. FOC-520 inserts plan.render between plan.decompose and plan.gate2: the Linear issue text is rendered deterministically BEFORE GATE 2, so the gate approves exactly the text plan.push writes (verbatim, no rewording anywhere). FOC-517 turns plan.gate1 into the intent conversation: the gate reads plan.intent.select.record + plan.intent.record and shows Mateusz what was understood (Polish display, ≤14 lines); a round answered without confirmation re-enters plan.intent through the stepFlow reentry edge (≤3 rounds, then a typed intent_not_settled stop), and on confirmation the runner appends the plan.intent.confirmed record that plan.dod/plan.ac/plan.spec read instead of inbox.entry. Deferred (FOC-397): step branching, monitor.child_state hook wiring, step-level diagram emitter.",
+  "_v2": "v2 additive shape (FOC-397, Option A per docs/plans/graph-json-v2-design.md §6.1): everything v1 stays byte-identical — the six squad-node contracts, the top-level `edges` array, handoff-rules.json and the PUML rendering. Additions: the plan node carries `steps` (the 12-step PLAN decomposition — plan.dor [J], plan.intent [G], plan.intent.select [G], plan.dod [G], plan.ac [G], plan.spec [A], plan.ready [J], plan.gate1 [H], plan.decompose [J], plan.render [D], draft-approval [H], plan.push [D]; each step object is exactly the D7 list — id = its key, kind, reads, output, tier, failure, writes) and `stepFlow` (sequence edges — ordered step-to-step connectors inside the node — plus reentry edges and, since FOC-476, ONE step-level decide edge), plus a top-level `decisionEdges` array for the six decide transitions (MAP #1/#2/#14/#16, hook #17 and the FOC-451 DoR intake gate; each names the registry entry in config/decisions.json that owns autonomy, threshold, fallback and metrics). graph-validate v2 mode cross-checks step fields deep-equal against the registry entries. FOC-516 inserts plan.intent.select between plan.intent and plan.gate1 and moves GATE 1 there: the selection routes every interpretation of the map to question / confirmation / 'Rozumiem tak' line / assumption by the policy table config/intent-select-policy.json (scored by the node-internal [J] plan.intent.select.score, the plan.ac + plan.ac.testable pattern), and the gate approves the interpretation selection before the DoD/AC/spec hand-off is produced. FOC-520 inserts plan.render between plan.decompose and the draft approval: the Linear issue text is rendered deterministically BEFORE the approval gate, so the gate approves exactly the text plan.push writes (verbatim, no rewording anywhere). FOC-517 turns plan.gate1 into the intent conversation: the gate reads plan.intent.select.record + plan.intent.record and shows Mateusz what was understood (Polish display, ≤14 lines); a round answered without confirmation re-enters plan.intent through the stepFlow reentry edge (≤3 rounds, then a typed intent_not_settled stop), and on confirmation the runner appends the plan.intent.confirmed record that plan.dod/plan.ac/plan.spec read instead of inbox.entry. FOC-476 inserts plan.ready between plan.spec and plan.decompose — the readiness gate: one seam call (the plan.readiness transport) judges the DoD, the ACs and the spec against the confirmed intent; ready:false flows back to the failed step through the FIRST step-level decide edge (plan.ready → [plan.dod, plan.ac, plan.spec], registry plan.readiness — the output's failedStep picks the target; reentry edges are not used, their fixed target cannot route by failedStep), and the SECOND ready:false in the same run escalates instead (retry-then-escalate, fail-safe — no silent default). FOC-476 also retires plan.gate2: draft-approval takes its slot after plan.render with ADR-0012 D5 semantics — the whole rendered artifact is attached to the gate record and the answer is approve/reject; plan.push reads gate.draft-approval.record. Deferred (FOC-397): monitor.child_state hook wiring, step-level diagram emitter.",
 
   "entryNodes": ["plan", "cadence"],
 
@@ -40,8 +40,8 @@
         "artifacts": ["planning/briefs/{discovery,spec,plan}-*.md", "docs/adr/NNNN-*.md"]
       },
       "completion": "Idempotent push to Linear succeeded AND the hand-off comment is posted. Re-running must not duplicate issues.",
-      "failure": "A HITL gate did not get its ✅ → stop without pushing. NEVER push to Linear without GATE 2 approval.",
-      "gates": ["plan.gate1", "plan.gate2"],
+      "failure": "A HITL gate did not get its ✅ → stop without pushing. NEVER push to Linear without the draft-approval gate's approval.",
+      "gates": ["plan.gate1", "draft-approval"],
       "steps": {
         "plan.dor": {
           "kind": "J",
@@ -248,6 +248,14 @@
           "failure": "escalate",
           "writes": "run-record"
         },
+        "plan.ready": {
+          "kind": "J",
+          "reads": ["plan.dod.record", "plan.ac.record", "plan.spec.record", "plan.intent.confirmed"],
+          "output": { "type": "object", "required": ["ready", "failedStep", "reason"], "additionalProperties": false, "properties": { "ready": { "type": "boolean" }, "failedStep": { "type": "string", "enum": ["plan.dod", "plan.ac", "plan.spec", "none"] }, "reason": { "type": "string", "maxLength": 300 } }, "if": { "properties": { "ready": { "const": false } }, "required": ["ready"] }, "then": { "properties": { "failedStep": { "enum": ["plan.dod", "plan.ac", "plan.spec"] } } } },
+          "tier": { "cascade": true, "min": 1 },
+          "failure": "escalate",
+          "writes": "run-record"
+        },
         "plan.gate1": {
           "kind": "H",
           "reads": ["plan.intent.select.record", "plan.intent.record"],
@@ -426,9 +434,9 @@
           "failure": "stop",
           "writes": "run-record"
         },
-        "plan.gate2": {
+        "draft-approval": {
           "kind": "H",
-          "reads": ["plan.spec.record", "plan.decompose.record", "gate.plan.gate1.record", "plan.render.issueText"],
+          "reads": ["plan.render.issueText"],
           "output": { "type": "object", "required": ["approved"], "additionalProperties": false, "properties": { "approved": { "type": "boolean" } } },
           "tier": null,
           "failure": "stop",
@@ -436,7 +444,7 @@
         },
         "plan.push": {
           "kind": "D",
-          "reads": ["plan.decompose.record", "plan.render.issueText", "gate.plan.gate2.record"],
+          "reads": ["plan.decompose.record", "plan.render.issueText", "gate.draft-approval.record"],
           "output": { "type": "object", "required": ["epicId", "childrenIds", "handoffCommentPosted"], "additionalProperties": false, "properties": { "epicId": { "type": "string", "maxLength": 20 }, "childrenIds": { "type": "array", "maxItems": 12, "items": { "type": "string", "maxLength": 20 } }, "handoffCommentPosted": { "type": "boolean" } } },
           "tier": null,
           "failure": "stop",
@@ -454,10 +462,18 @@
         },
         { "from": "plan.dod", "to": "plan.ac", "type": "sequence" },
         { "from": "plan.ac", "to": "plan.spec", "type": "sequence" },
-        { "from": "plan.spec", "to": "plan.decompose", "type": "sequence" },
+        { "from": "plan.spec", "to": "plan.ready", "type": "sequence" },
+        {
+          "from": "plan.ready",
+          "to": ["plan.dod", "plan.ac", "plan.spec"],
+          "type": "decide",
+          "registry": "plan.readiness",
+          "why": "FOC-476 readiness routing: ready:false flows back to the failed step — output.failedStep picks the target (an uncovered item's perspective 'success' names plan.dod, 'scope' plan.ac, every other perspective and a base-verdict miss with all items covered name plan.spec). The walk re-executes that step and re-asks plan.ready; the SECOND ready:false in the same run escalates instead (retry-then-escalate, fail-safe — never a silent default). The first step-level decide edge: one decide edge with the enumerated candidate targets per design doc §6.4 — reentry edges are NOT used, their fixed target cannot route by failedStep."
+        },
+        { "from": "plan.ready", "to": "plan.decompose", "type": "sequence" },
         { "from": "plan.decompose", "to": "plan.render", "type": "sequence" },
-        { "from": "plan.render", "to": "plan.gate2", "type": "sequence" },
-        { "from": "plan.gate2", "to": "plan.push", "type": "sequence" }
+        { "from": "plan.render", "to": "draft-approval", "type": "sequence" },
+        { "from": "draft-approval", "to": "plan.push", "type": "sequence" }
       ]
     },
 
@@ -652,8 +668,8 @@
       "type": "gate",
       "order": 10,
       "routable": false,
-      "when": { "gates": ["plan.gate1", "plan.gate2"] },
-      "why": "PLAN's two HITL gates. Not routable: today they block inline in the PLAN REPL and are never expressed as Linear state, so there is nothing for a label matcher to see. FOC-122 turns them into gate records relayed by the Supervisor, at which point this edge gains an observable condition."
+      "when": { "gates": ["plan.gate1", "draft-approval"] },
+      "why": "PLAN's two HITL gates (the intent conversation and, since FOC-476, draft-approval — the retired plan.gate2 slot). Not routable: today they block inline in the PLAN REPL and are never expressed as Linear state, so there is nothing for a label matcher to see. FOC-122 turns them into gate records relayed by the Supervisor, at which point this edge gains an observable condition."
     }
   ],
 

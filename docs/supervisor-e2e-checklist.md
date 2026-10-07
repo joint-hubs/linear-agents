@@ -1,6 +1,6 @@
 # Supervisor — manual e2e checklist (FOC-116, spec §8.12)
 
-The scripted suite (`node scripts/test-all.mjs`, 111 files) proves the parts against a mock
+The scripted suite (`node scripts/test-all.mjs`, 113 files) proves the parts against a mock
 `claude`. It cannot prove the one thing this epic is actually about: that **Mateusz never opens a
 child terminal**. That is a claim about a human session, so it gets walked by hand, once, on a
 throwaway issue, before first real use.
@@ -19,7 +19,7 @@ order they are numbered.
 
 ```bash
 node scripts/linear-query.mjs team FOC          # confirm the workspace answers
-node scripts/test-all.mjs                       # 111 test files before you start; a red file invalidates the walk,
+node scripts/test-all.mjs                       # 113 test files before you start; a red file invalidates the walk,
                                                 # except security-scan.test.mjs — load-sensitive, seen red (13 probe
                                                 # misses) at base e3dea40 too, so its red alone is not a regression signal
 git diff --stat -- agents/orchestrator          # AC-10, see below
@@ -205,7 +205,7 @@ All of it is **inert unless `LA_SUPERVISOR=1`**, which only `supervisor-spawn.mj
 what keeps AC-10 true while the squad prompts changed.
 
 ### Verification
-- `node scripts/test-all.mjs` → 111 files, all green (§8.1–8.11); `security-scan.test.mjs` is
+- `node scripts/test-all.mjs` → 113 files, all green (§8.1–8.11); `security-scan.test.mjs` is
   load-sensitive and has been observed red at base `e3dea40` as well — see §0 before reading a red
   security-scan as a regression.
 - This checklist, walked once on a throwaway issue (§8.12).
