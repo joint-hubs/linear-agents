@@ -138,25 +138,32 @@ function validateSteps(nodeName, steps, problems) {
   }
 }
 
-function validateStepFlow(nodeName, steps, flow, problems) {
+function validateStepFlow(nodeName, steps, flow, problems, entries = {}) {
   if (!Array.isArray(flow)) {
     problems.push(`node "${nodeName}" declares steps but "stepFlow" is not an array`);
     return;
   }
   const ids = Object.keys(steps);
-  // FOC-517: two edge types. "sequence" edges still form ONE linear chain and
-  // carry every structural check below; "reentry" edges (gate → earlier step)
-  // are validated separately — declared endpoints, target strictly earlier on
-  // the chain, and a "why" — and are ignored by the linear walk.
+  // FOC-517 + FOC-476: three edge types. "sequence" edges still form ONE linear
+  // chain and carry every structural check below; "reentry" edges (gate →
+  // earlier step) are validated separately — declared endpoints, target
+  // strictly earlier on the chain, and a "why" — and are ignored by the linear
+  // walk; "decide" edges (step → array of earlier candidate steps) are the
+  // first step-level decide edge — the runtime routes to output.failedStep
+  // among the candidates, so the config pins WHICH steps are reachable and that
+  // they all sit strictly earlier on the chain.
   const seq = flow.filter((e) => e.type === "sequence");
   const reentry = flow.filter((e) => e.type === "reentry");
+  const decide = flow.filter((e) => e.type === "decide");
   for (const [i, e] of flow.entries()) {
     const label = `stepFlow edge #${i}`;
-    if (e.type !== "sequence" && e.type !== "reentry") {
-      problems.push(`${label} has type "${e.type}", expected "sequence" or "reentry"`);
+    if (e.type !== "sequence" && e.type !== "reentry" && e.type !== "decide") {
+      problems.push(`${label} has type "${e.type}", expected "sequence", "reentry" or "decide"`);
     }
     if (!steps[e.from]) problems.push(`${label} references unknown step "${e.from}" as from`);
-    if (!steps[e.to]) problems.push(`${label} references unknown step "${e.to}" as to`);
+    // A decide edge's "to" is an array of candidate targets, not one step id —
+    // the string endpoint check below does not apply to it.
+    if (e.type !== "decide" && !steps[e.to]) problems.push(`${label} references unknown step "${e.to}" as to`);
   }
   for (const e of reentry) {
     if (steps[e.from] && steps[e.to]) {
@@ -170,6 +177,34 @@ function validateStepFlow(nodeName, steps, flow, problems) {
     }
     if (typeof e.why !== "string" || e.why.trim().length === 0) {
       problems.push(`reentry edge ${e.from} → ${e.to} needs a "why" — the non-linear edge must carry its justification in the config`);
+    }
+  }
+  if (decide.length > 1) {
+    problems.push(`node "${nodeName}" declares ${decide.length} decide edges — at most one step-level decide edge per stepFlow (FOC-476)`);
+  }
+  for (const e of decide) {
+    const targets = Array.isArray(e.to) ? e.to.join(", ") : JSON.stringify(e.to);
+    const label = `decide edge ${e.from} → [${targets}]`;
+    if (!Array.isArray(e.to) || e.to.length === 0) {
+      problems.push(`${label} — "to" must be a non-empty array of candidate target steps (the runtime routes to output.failedStep among them)`);
+    } else {
+      for (const t of e.to) {
+        if (!steps[t]) {
+          problems.push(`${label} references unknown step "${t}" as a candidate target`);
+        } else if (ids.indexOf(e.from) !== -1 && ids.indexOf(t) >= ids.indexOf(e.from)) {
+          problems.push(`${label} candidate "${t}" must sit strictly earlier on the chain — a decide edge flows back to redo work, never forward`);
+        }
+      }
+    }
+    if (typeof e.why !== "string" || e.why.trim().length === 0) {
+      problems.push(`${label} needs a "why" — the non-linear edge must carry its justification in the config`);
+    }
+    if (!e.registry) {
+      problems.push(`${label} names no registry entry — the registry entry owns autonomy, threshold, fallback and metrics`);
+    } else if (!entries[e.registry]) {
+      problems.push(`${label} names registry entry "${e.registry}", which does not exist in config/decisions.json`);
+    } else if (entries[e.registry].kind !== "J") {
+      problems.push(`${label} names registry entry "${e.registry}" of kind ${entries[e.registry].kind} — decide edges bind kind-J entries`);
     }
   }
   if (seq.length !== Math.max(ids.length - 1, 0)) {
@@ -386,7 +421,7 @@ export function validateGraph(graph) {
           problems.push(`node "${name}" declares steps but no "stepFlow" — the step chain needs its sequence edges`);
         }
         validateSteps(name, node.steps, problems);
-        validateStepFlow(name, node.steps, node.stepFlow, problems);
+        validateStepFlow(name, node.steps, node.stepFlow, problems, entries);
       } else if (node.stepFlow != null) {
         problems.push(`node "${name}" declares a "stepFlow" but no "steps"`);
       }

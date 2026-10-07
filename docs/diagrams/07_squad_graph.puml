@@ -26,7 +26,7 @@ test -[#B5651D]-> dev : return: In Progress + returned-by:test
 dev -[#C0392B]-> human : escalate: escalated (declared, not routed)
 review -[#C0392B]-> human : escalate: escalated (declared, not routed)
 test -[#C0392B]-> human : escalate: escalated (declared, not routed)
-plan -[#7D3C98]-> human : gate: plan.gate1 / plan.gate2 (declared, not routed)
+plan -[#7D3C98]-> human : gate: plan.gate1 / draft-approval (declared, not routed)
 
 legend right
   handoff = normal forward flow
