@@ -332,9 +332,18 @@ export function writeWakeAck(runId, seq) {
 // When the Supervisor's session tries to end its turn, the Stop hook
 // (supervisor-guard.mjs) checks whether anything is still owed: live children,
 // held spawns, pending gates. The one legitimate way to end a turn with work
-// outstanding is a `--wait` running in this turn — so --wait persists a
-// short-TTL marker here (wait-armed.json, written by supervisor-status.mjs and
-// read by the guard), and an unexpired marker reads as "wait armed".
+// outstanding is a `--wait`, so --wait persists a short-TTL marker here
+// (wait-armed.json, written by supervisor-status.mjs and read by the guard).
+// The marker has two states:
+//
+//   armed  — a wait is blocked in this turn RIGHT NOW (no outcome recorded
+//            yet). The guard allows the turn end.
+//   spent  — a `--wait` already ran in this turn and returned `timeout`: the
+//            lead gave the child its window and there is nothing to judge, so
+//            the turn ends and the wake queue carries the event on. The guard
+//            allows exactly ONE turn end on it (owner ruling 2026-10-07) and
+//            records the use in guard/state.json, so the allowance cannot leak
+//            into a later turn.
 //
 // Writer discipline: wait-armed.json is written ONLY by supervisor-status.mjs
 // (--wait) and everything under guard/ ONLY by supervisor-guard.mjs. Neither
@@ -350,15 +359,33 @@ export const waitArmedPath = (runId) => join(runDir(runId), "wait-armed.json");
 export const GUARD_BLOCK_LIMIT = 3;
 
 /**
- * Is a `--wait` armed for this run right now? Armed means: the marker exists
- * and its TTL has not expired. A stale marker (the wait process crashed without
- * cleaning up) expires out of the judgement on its own — the guard never needs
- * to probe whether the wait process is alive.
+ * The wait-lifecycle marker for this run.
+ *
+ * `armed` — a wait is blocked in this turn right now: the marker exists, its
+ * TTL has not expired, and no outcome has been written to it yet.
+ *
+ * `spent` — a `--wait` already ran in this turn and returned `timeout`. Only
+ * `timeout` counts: `exit`, `gate`, `held` and `idle` each changed the
+ * situation, so the normal rules apply to them. `spentAt` is what the guard
+ * charges the single allowance against.
+ *
+ * A stale marker (the wait process crashed without finishing) expires out of
+ * the judgement on its own — the guard never needs to probe whether the wait
+ * process is alive.
  */
 export function readWaitArmed(runId) {
   const marker = readJsonOr(waitArmedPath(runId), null);
   const expiresAt = typeof marker?.expiresAt === "number" ? marker.expiresAt : null;
-  return { armed: expiresAt !== null && expiresAt > Date.now(), expiresAt };
+  const unexpired = expiresAt !== null && expiresAt > Date.now();
+  const outcome = typeof marker?.outcome === "string" ? marker.outcome : null;
+  const spentAt = typeof marker?.spentAt === "string" ? marker.spentAt : null;
+  return {
+    armed: unexpired && outcome === null,
+    spent: unexpired && outcome === "timeout" && spentAt !== null,
+    spentAt: unexpired && outcome === "timeout" ? spentAt : null,
+    outcome,
+    expiresAt,
+  };
 }
 
 // ── holds (FOC-612) ──────────────────────────────────────────────────────────

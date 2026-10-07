@@ -39,7 +39,7 @@
 // SessionStart hook fires before the first spawn too, and a hook that exits 1
 // would inject an error into the session context instead of a briefing.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { atomicWriteJSON } from "./utils.mjs";
@@ -70,6 +70,13 @@ const SNIPPET_CHARS = 200;
 // wait that is finishing up as the guard fires is still counted as armed, while
 // a wait process that crashed without cleaning up expires out of the judgement.
 const ARMED_GRACE_MS = 60_000;
+// A finished `--wait` leaves its outcome behind instead of vanishing. The grace
+// is deliberately long: the lead owes real work after a timeout (read the tee,
+// judge, write the state doc) and the marker has to still be there at the turn
+// end. What scopes the allowance to ONE turn end is not this TTL but the guard
+// charging it in guard/state.json — the TTL is only the crash net for a turn end
+// that never reached the guard at all.
+const SPENT_GRACE_MS = 45 * 60_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -385,11 +392,12 @@ const deadline = Date.now() + timeoutMs;
 // hook guard must see the turn as legitimately open and allow it to end. The
 // marker carries a TTL (the wait's timeout plus a small grace) rather than
 // relying on cleanup — a wait process killed mid-poll leaves the marker behind,
-// and it expires out of the guard's judgement on its own. Removed on a normal
-// completion, so a finished wait does not look armed.
+// and it expires out of the guard's judgement on its own. A normal completion
+// rewrites the marker with the outcome rather than erasing it (see `finally`).
+const armedAt = new Date().toISOString();
 mkdirSync(runDir(runId), { recursive: true });
 atomicWriteJSON(waitArmedPath(runId), {
-  armedAt: new Date().toISOString(),
+  armedAt,
   expiresAt: deadline + ARMED_GRACE_MS,
 });
 
@@ -442,7 +450,18 @@ try {
     }
   }
 } finally {
-  rmSync(waitArmedPath(runId), { force: true });
+  // The wait is over. Erase nothing: record the outcome instead, so the guard
+  // can tell "a wait is running now" from "a wait already ran in this turn".
+  // A `timeout` is the lead's one diligence step for the turn (CLAUDE.md §4 —
+  // the child got its window, there is nothing to judge, end the turn and let
+  // the wake queue carry the event on), and the guard allows exactly one turn
+  // end on it. Any other outcome changed the situation and grants nothing.
+  atomicWriteJSON(waitArmedPath(runId), {
+    armedAt,
+    spentAt: new Date().toISOString(),
+    outcome: reason,
+    expiresAt: Date.now() + SPENT_GRACE_MS,
+  });
 }
 
 const final = snapshot(runId, { childFilter, tail });

@@ -265,6 +265,132 @@ test("an allowed stop in between breaks the consecutive streak", () => {
   if (r.status !== 2) fail(`expected exit 2 after the reset, got ${r.status}`);
 });
 
+// ── spent wait: one timeout discharges one turn end ──────────────────────────
+// Owner ruling 2026-10-07 (Mateusz, option A): the loop rule is right — after a
+// `--wait` that returned `timeout` the guard lets the turn end, even with a
+// child still live. The lead gave the child its window and there is nothing to
+// judge (agents/supervisor/CLAUDE.md §4); the wake queue carries the event to
+// the next turn. ONE turn end per timeout, and live children only.
+console.log("\nspent wait — one timeout discharges one turn end");
+
+const seedSpentWait = (runId, outcome, { spentAt = new Date().toISOString(), expiresIn = 60_000 } = {}) =>
+  writeFileSync(
+    waitArmedPath(runId),
+    JSON.stringify({
+      armedAt: new Date().toISOString(),
+      spentAt,
+      outcome,
+      expiresAt: Date.now() + expiresIn,
+    }),
+  );
+
+test("a spent `timeout` marker allows the turn end with a live child", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { childId: "dev-wait" });
+  seedSpentWait(runId, "timeout");
+  const r = guard(runId);
+  if (r.status !== 0) fail(`expected exit 0, got ${r.status} (stderr: ${r.stderr})`);
+  if (!r.stderr.includes("dev-wait")) fail(`the allowance does not name what it covers: ${r.stderr}`);
+});
+
+test("the allowance is spent once — the second turn end on the same marker blocks", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { childId: "dev-once" });
+  seedSpentWait(runId, "timeout", { spentAt: "spent-1" });
+  if (guard(runId).status !== 0) fail("the first turn end was not allowed");
+  const r = guard(runId);
+  if (r.status !== 2) fail(`the allowance was handed out twice (exit ${r.status})`);
+});
+
+test("a later wait buys its own allowance", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { childId: "dev-twice" });
+  seedSpentWait(runId, "timeout", { spentAt: "spent-A" });
+  if (guard(runId).status !== 0) fail("the first allowance was not granted");
+  seedSpentWait(runId, "timeout", { spentAt: "spent-B" });
+  const r = guard(runId);
+  if (r.status !== 0) fail(`a fresh timeout did not buy a fresh allowance (exit ${r.status})`);
+});
+
+test("only `timeout` counts — a spent `gate` outcome grants nothing", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { childId: "dev-gatewait" });
+  seedSpentWait(runId, "gate");
+  const r = guard(runId);
+  if (r.status !== 2) fail(`a spent \`gate\` outcome allowed the stop (exit ${r.status})`);
+});
+
+test("only `timeout` counts — a spent `exit` outcome grants nothing", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { childId: "dev-exitwait" });
+  seedSpentWait(runId, "exit");
+  const r = guard(runId);
+  if (r.status !== 2) fail(`a spent \`exit\` outcome allowed the stop (exit ${r.status})`);
+});
+
+test("an EXPIRED spent marker grants nothing", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { childId: "dev-stalespent" });
+  seedSpentWait(runId, "timeout", { expiresIn: -1000 });
+  const r = guard(runId);
+  if (r.status !== 2) fail(`an expired spent marker allowed the stop (exit ${r.status})`);
+});
+
+test("a pending gate still blocks — waiting on a child discharges no human question", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { childId: "dev-gateowed" });
+  seedSpentWait(runId, "timeout");
+  writeFileSync(
+    join(runDir(runId), "gates", "g-owed.json"),
+    JSON.stringify({ gateId: "g-owed", status: "pending", kind: "question", summary: "need an answer", questions: [] }),
+  );
+  const r = guard(runId);
+  if (r.status !== 2) fail(`a pending gate was waved past by a spent wait (exit ${r.status})`);
+  if (!r.stderr.includes("g-owed")) fail(`the refusal does not name the gate: ${r.stderr}`);
+});
+
+test("a held spawn still blocks alongside a spent wait", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { childId: "dev-heldowed" });
+  seedSpentWait(runId, "timeout");
+  seedHeld(runId, "held-owed");
+  const r = guard(runId);
+  if (r.status !== 2) fail(`a held spawn was waved past by a spent wait (exit ${r.status})`);
+});
+
+test("the charge survives a block streak and a counter reset", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { childId: "dev-charge" });
+  seedSpentWait(runId, "timeout", { spentAt: "spent-charge" });
+  if (guard(runId).status !== 0) fail("the allowance was not granted");
+  for (let i = 1; i <= 3; i++) {
+    if (guard(runId).status !== 2) fail(`block ${i} did not block`);
+  }
+  if (guard(runId).status !== 0) fail("the 4th block must allow through the alarm path");
+  // The streak reset must not hand the SAME spent marker a second allowance.
+  const after = guard(runId);
+  if (after.status !== 2) fail(`a reset let the same spent marker buy again (exit ${after.status})`);
+});
+
+test("--wait records its outcome instead of erasing the marker", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { childId: "dev-realwait" });
+  const out = parse(status(runId, ["--wait", "--timeout-ms", "600"]));
+  if (out.reason !== "timeout") fail(`expected reason \`timeout\`, got \`${out.reason}\``);
+
+  let marker = null;
+  try {
+    marker = JSON.parse(readUtf8(waitArmedPath(runId)));
+  } catch {
+    fail("the wait erased its marker — the guard cannot tell a spent turn from a live one");
+  }
+  if (marker.outcome !== "timeout") fail(`marker outcome was ${marker.outcome}`);
+  if (!marker.spentAt) fail("the spent marker carries no spentAt to charge the allowance against");
+
+  const r = guard(runId);
+  if (r.status !== 0) fail(`a real timed-out wait did not allow the turn end (exit ${r.status})`);
+});
+
 // ── briefing ─────────────────────────────────────────────────────────────────
 // ── briefing ─────────────────────────────────────────────────────────────────
 console.log("\nbriefing mode");

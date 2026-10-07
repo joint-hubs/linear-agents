@@ -80,14 +80,30 @@ function pendingGateRefs(runId) {
 
 // Counted blocks only. state.json is the guard's own single-writer record, so
 // read-modify-write needs no lock (one Stop hook fires per turn end).
-function readBlockCount(runId) {
+function readGuardState(runId) {
   const state = readJsonOr(guardStatePath(runId), null);
-  return typeof state?.consecutiveBlocks === "number" ? state.consecutiveBlocks : 0;
+  return state && typeof state === "object" ? state : {};
+}
+
+function readBlockCount(runId) {
+  const state = readGuardState(runId);
+  return typeof state.consecutiveBlocks === "number" ? state.consecutiveBlocks : 0;
+}
+
+// Every write MERGES with the guard's own record instead of replacing it: the
+// spent-wait allowance (`waitAllowanceUsedAt`) has to survive both a block and a
+// counter reset, or the same spent marker would hand out a second allowance.
+function writeGuardState(runId, patch) {
+  mkdirSync(guardDir(runId), { recursive: true });
+  atomicWriteJSON(guardStatePath(runId), {
+    ...readGuardState(runId),
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 function resetCounter(runId) {
-  mkdirSync(guardDir(runId), { recursive: true });
-  atomicWriteJSON(guardStatePath(runId), { consecutiveBlocks: 0, updatedAt: new Date().toISOString() });
+  writeGuardState(runId, { consecutiveBlocks: 0 });
 }
 
 const allow = (runId, note = "") => {
@@ -146,11 +162,46 @@ const describe = () => {
   return parts.join("; ");
 };
 
+// A `--wait` that already ran in THIS turn and returned `timeout` discharges the
+// live-child obligation and NOTHING ELSE (owner ruling 2026-10-07: the loop rule
+// is right, the guard lets a turn end after one timeout in the turn). The lead
+// gave the child its window, there is nothing to judge (CLAUDE.md §4), and the
+// turn ends so the wake queue carries the next event to the following turn.
+//
+// ONE allowance, not many: the use is charged in guard/state.json against this
+// marker's `spentAt`, so a second turn end on the same spent marker blocks
+// again. The guard has no Supervisor-turn id — `spentAt` is the finest
+// granularity it has — and CLAUDE.md §4's "do not re-issue the wait" is what
+// makes this one-per-turn in practice.
+//
+// Live children ONLY. A pending gate or an open hold is owed to Mateusz
+// personally and no amount of waiting discharges it; a held spawn is queued
+// work nobody has judged. Those still block, timeout or not.
+if (
+  wait.spent &&
+  live.length &&
+  !held.length &&
+  !pending.length &&
+  !owedHolds.error &&
+  !owedHolds.blocking.length &&
+  readGuardState(runId).waitAllowanceUsedAt !== wait.spentAt
+) {
+  writeGuardState(runId, {
+    consecutiveBlocks: 0,
+    waitAllowanceUsedAt: wait.spentAt,
+    lastAllowReason: `in-turn --wait returned timeout; ${describe()}`,
+  });
+  console.error(
+    `supervisor-guard: turn end allowed — a --wait already ran in this turn and returned timeout; ` +
+      `${describe()}. The wake queue carries the next event.`,
+  );
+  process.exit(0);
+}
+
 const blocks = readBlockCount(runId) + 1;
 
 if (blocks <= GUARD_BLOCK_LIMIT) {
-  mkdirSync(guardDir(runId), { recursive: true });
-  atomicWriteJSON(guardStatePath(runId), {
+  writeGuardState(runId, {
     consecutiveBlocks: blocks,
     lastBlockAt: new Date().toISOString(),
     lastReason: describe(),
