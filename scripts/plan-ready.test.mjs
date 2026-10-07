@@ -671,6 +671,79 @@ await test("the walk: ready:false twice escalates — typed, terminal, no third 
   }
 });
 
+await test("the walk: ready:false from two DIFFERENT steps escalates — the budget is per run, not per step", async () => {
+  const { dir, storePath, runsDir, logPath, cleanup } = tempStore({ eventIds: ["evt-ready-diff-1", "evt-ready-diff-2"] });
+  try {
+    seedPredecessors(storePath);
+    let readinessCalls = 0;
+    const genCalls = [];
+    const caller = async (input) => {
+      if (input.decisionId === PLAN_READINESS_DECISION) {
+        readinessCalls++;
+        // Attempt 1: IN-1 uncovered (perspective "success") → plan.dod;
+        // attempt 2: IN-2 uncovered (perspective "scope") → plan.ac. Two
+        // different failedSteps — a per-step counter would grant the ac
+        // branch its own retry and never escalate.
+        const attempt = readinessCalls;
+        const uncovered = attempt === 1 ? ["IN-1"] : ["IN-2"];
+        return a0Envelope(PLAN_READINESS_DECISION, readinessAnswers({ uncovered }), `evt-ready-diff-${attempt}`);
+      }
+      // NO plan.ac.testable stub, on purpose: the second ready:false escalates
+      // WITHOUT re-executing its failedStep (the escalate branch emits one
+      // failed record, graph-runner.mjs) — an accidental plan.ac re-execution
+      // would land here and turn the test red.
+      return fail(`unexpected caller decisionId ${input.decisionId}`);
+    };
+    const runner = createGraphRunner({
+      runId: "run-plan-ready",
+      storePath,
+      caller,
+      generator: async ({ stepId }) => {
+        genCalls.push(stepId);
+        if (stepId === "plan.dod") return DOD_OUTPUT;
+        fail(`unexpected generator step ${stepId}`);
+      },
+      gateEmitter: async () => fail("no gate on an escalated walk"),
+      linearEffect: async () => fail("no push on an escalated walk"),
+      decisionRunsDir: runsDir,
+    });
+    const result = await runner.run({ inputs: {} });
+    eq(result.status, "stopped", "the escalated run stops");
+    eq(result.stepId, PLAN_READY_STEP, "stopped at plan.ready");
+    eq(result.record.status, "failed", "a failed record — terminal on resume");
+    eq(result.record.error.code, "readiness_escalated", "the typed escalation code");
+    eq(result.record.attempt, 2, "attempt 2 on the record");
+    eq(result.record.escalation.failedStep, "plan.ac", "the escalation names the LAST failed step, not the first");
+    eq(result.record.output.failedStep, "plan.ac", "the attempt-2 verdict rides the failed record");
+    eq(readinessCalls, 2, "exactly two calls — the budget is spent");
+    deepEq(genCalls, ["plan.dod"], "only the FIRST failed step re-executed (attempt 1: plan.dod) — the second ready:false escalates without re-executing plan.ac");
+    const records = readRecords(storePath);
+    const dodRecords = records.filter((r) => r.key === "plan.dod");
+    eq(dodRecords.length, 3, "plan.dod: done + reset + re-executed done");
+    eq(dodRecords[1].status, "reset", "the first failed step's reset marker");
+    if (!dodRecords[1].output?.readyReason?.includes("IN-1")) fail("the reset carries the attempt-1 reason");
+    const acRecords = records.filter((r) => r.key === "plan.ac");
+    eq(acRecords.length, 1, "plan.ac untouched — the escalation names it for the human instead of re-executing it");
+    const readyRecords = records.filter((r) => r.key === PLAN_READY_STEP);
+    eq(readyRecords.length, 3, "ready:false done + reset + the escalation failed record");
+    eq(readyRecords[0].output.failedStep, "plan.dod", "attempt 1 routed to plan.dod");
+    eq(readyRecords[0].attempt, 1, "attempt 1 on the record");
+    eq(readyRecords[2].status, "failed", "the terminal record");
+    // The budget write happens only when a retry is granted (the escalating
+    // attempt writes nothing) — the file ends at the one persisted attempt;
+    // the escalation itself is proven by attempt 2 on the record + two calls.
+    eq(JSON.parse(readFileSync(readyRetriesPathFor(storePath), "utf8")).attempts, 1, "the per-run counter persisted the granted retry");
+    const labels = readFileSync(logPath, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.type === "label");
+    deepEq(labels.map((l) => l.outcome), ["plan.ready.false", "plan.ready.first", "plan.ready.false", "plan.ready.escalated"], "both attempts labelled, the stage markers follow the attempts");
+    // A resume stays stopped: failed is terminal, the budget stays spent.
+    const again = await runner.run({ inputs: {} });
+    eq(again.stepId, PLAN_READY_STEP, "the resume stops at the same failed record");
+    eq(readinessCalls, 2, "no further seam call on resume");
+  } finally {
+    cleanup();
+  }
+});
+
 console.log("\nplan-ready: the draft-approval gate + the no-push outcomes");
 
 const GOLDEN_ISSUE = [
