@@ -16,10 +16,11 @@
 // emitted (protocol §4.1 and §9 — it is FOC-165 evidence, not a metric).
 //
 // Exit codes: 0 on success (including pairs with missing arms), 2 on
-// malformed input (unparseable JSON, missing required corpus fields).
+// malformed input — unparseable JSON or missing required fields, in the
+// corpus or in any children.json run data it points at.
 
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -54,7 +55,11 @@ export function ratioAB(a, b) {
 
 // --- corpus ----------------------------------------------------------------
 
-export function parseCorpus(text) {
+// runId is joined into a filesystem path (children.json lookup) — restrict it
+// to the supervisor run-id shape before it ever touches the path.
+const RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
+
+export function parseCorpus(text, warn) {
   let doc;
   try {
     doc = JSON.parse(text);
@@ -81,14 +86,31 @@ export function parseCorpus(text) {
         `corpus[${i}] (${entry.issue}): armB { runId, childId } is required`,
       );
     }
+    if (!RUN_ID_RE.test(armB.runId)) {
+      throw new InputError(
+        `corpus[${i}] (${entry.issue}): armB.runId "${armB.runId}" has characters outside [A-Za-z0-9._-]`,
+      );
+    }
     if (entry.armA != null) {
       if (typeof entry.armA !== "object" || typeof entry.armA.runId !== "string" || !entry.armA.runId) {
         throw new InputError(
           `corpus[${i}] (${entry.issue}): armA, when present, must carry a runId`,
         );
       }
+      if (!RUN_ID_RE.test(entry.armA.runId)) {
+        throw new InputError(
+          `corpus[${i}] (${entry.issue}): armA.runId "${entry.armA.runId}" has characters outside [A-Za-z0-9._-]`,
+        );
+      }
     }
   });
+  const seenIssues = new Set();
+  for (const entry of doc.corpus) {
+    if (seenIssues.has(entry.issue)) {
+      warn?.(`corpus: duplicate issue ${entry.issue} — both rows are tabulated`);
+    }
+    seenIssues.add(entry.issue);
+  }
   return doc;
 }
 
@@ -99,7 +121,8 @@ export function parseCorpus(text) {
 // protocol §4.2). Queue time is not derivable: children.json carries no
 // child-level start timestamp, so it is reported as null rather than dropped
 // into another column. Turns without parseable timestamps are skipped for
-// time math but never affect cost.
+// time math but never affect cost. Seconds are raw here; rounding to the
+// published precision happens once, at serialization (roundForDisplay).
 export function childWallTime(turns) {
   if (!Array.isArray(turns)) {
     return { totalSec: null, queueSec: null, execSec: null, gateWaitSec: null };
@@ -121,22 +144,25 @@ export function childWallTime(turns) {
     return { totalSec: null, queueSec: null, execSec: null, gateWaitSec: null };
   }
   return {
-    totalSec: round((prevEnd - firstStart) / 1000, 2),
+    totalSec: (prevEnd - firstStart) / 1000,
     queueSec: null,
-    execSec: round(execMs / 1000, 2),
-    gateWaitSec: round(gapMs / 1000, 2),
+    execSec: execMs / 1000,
+    gateWaitSec: gapMs / 1000,
   };
 }
 
 // Locate a child inside a parsed children.json. `childId` null picks the
 // first child (used for arm-A runs where the corpus may not pin a child).
 // Only `costUsd` is read — `costUsdReported` is deliberately untouched.
-export function extractArmFromChildren(parsed, { childId = null } = {}) {
+export function extractArmFromChildren(parsed, { childId = null, warn } = {}) {
   if (!parsed || typeof parsed !== "object" || !parsed.children || typeof parsed.children !== "object") {
     throw new InputError('children.json has no "children" object');
   }
   const children = Object.values(parsed.children);
   if (!children.length) return { status: "missing-child" };
+  if (!childId && children.length > 1) {
+    warn?.(`children.json ${parsed.runId ?? "(no runId)"} has ${children.length} children and no childId pinned — using the first (${children[0].childId ?? "?"})`);
+  }
   const child = childId
     ? parsed.children[childId] ?? null
     : children[0];
@@ -183,12 +209,14 @@ export function decide(axes) {
 // approved. No arm records it today, so it is null — never 0, never a crash
 // (a null is an honest "no data", a 0 would be a fabricated "no edits").
 export function pairRow(entry, armA, armB) {
+  // Optional-chain the metric fields so a future arm producer that forgets
+  // one degrades to a null metric, never a TypeError.
   const costA = armA?.status === "ok" ? armA.costUsd : null;
   const costB = armB?.status === "ok" ? armB.costUsd : null;
-  const execA = armA?.status === "ok" ? armA.wallTime.execSec : null;
-  const execB = armB?.status === "ok" ? armB.wallTime.execSec : null;
-  const editsA = armA?.status === "ok" ? armA.bodyDelta.editCount : null;
-  const editsB = armB?.status === "ok" ? armB.bodyDelta.editCount : null;
+  const execA = armA?.status === "ok" ? armA.wallTime?.execSec ?? null : null;
+  const execB = armB?.status === "ok" ? armB.wallTime?.execSec ?? null : null;
+  const editsA = armA?.status === "ok" ? armA.bodyDelta?.editCount ?? null : null;
+  const editsB = armB?.status === "ok" ? armB.bodyDelta?.editCount ?? null : null;
   return {
     issue: entry.issue,
     estimate: entry.estimate ?? null,
@@ -207,7 +235,10 @@ export function pairRow(entry, armA, armB) {
 }
 
 // `entryArm` is the corpus's arm descriptor for THIS arm (entry.armA or
-// entry.armB) — a non-ok arm still carries the runId the corpus named.
+// entry.armB) — a non-ok arm still carries the runId/childId the corpus
+// named. Values are kept raw here; rounding to the published precision
+// happens once, at serialization (roundForDisplay), so aggregate medians
+// are computed from raw numbers, never from already-rounded ones.
 function armOut(entryArm, arm) {
   if (arm?.status === "ok") {
     return {
@@ -215,7 +246,7 @@ function armOut(entryArm, arm) {
       runId: arm.runId,
       childId: arm.childId,
       childStatus: arm.childStatus,
-      costUsd: round(arm.costUsd, 4),
+      costUsd: arm.costUsd,
       turns: arm.turns,
       wallTime: arm.wallTime,
       bodyDelta: arm.bodyDelta,
@@ -224,7 +255,7 @@ function armOut(entryArm, arm) {
   return {
     status: arm?.status ?? "pending",
     runId: entryArm?.runId ?? null,
-    childId: arm?.childId ?? null,
+    childId: arm?.childId ?? entryArm?.childId ?? null,
     childStatus: null,
     costUsd: null,
     turns: null,
@@ -240,12 +271,14 @@ export function aggregate(pairs) {
   const aRows = ok("armA");
   const bRows = ok("armB");
 
+  // Medians run on the raw row values; serialization rounding happens
+  // afterwards (roundForDisplay) so it can never feed back into the math.
   const medianA = median(aRows.map((p) => p.armA.costUsd));
   const medianB = median(bRows.map((p) => p.armB.costUsd));
-  const medianExecA = median(aRows.map((p) => p.armA.wallTime.execSec));
-  const medianExecB = median(bRows.map((p) => p.armB.wallTime.execSec));
-  const medianQualA = median(aRows.map((p) => p.armA.bodyDelta.editCount));
-  const medianQualB = median(bRows.map((p) => p.armB.bodyDelta.editCount));
+  const medianExecA = median(aRows.map((p) => p.armA.wallTime?.execSec ?? null));
+  const medianExecB = median(bRows.map((p) => p.armB.wallTime?.execSec ?? null));
+  const medianQualA = median(aRows.map((p) => p.armA.bodyDelta?.editCount ?? null));
+  const medianQualB = median(bRows.map((p) => p.armB.bodyDelta?.editCount ?? null));
   const medianQualDelta = median(pairs.map((p) => p.metrics.qualityDelta?.editCount ?? null));
 
   const axes = {
@@ -318,7 +351,7 @@ export function loadArmFromDisk(runRoot, runId, childId, { warn } = {}) {
   } catch (e) {
     throw new InputError(`${childrenPath} is not valid JSON (${e.message})`);
   }
-  const arm = extractArmFromChildren(parsed, { childId });
+  const arm = extractArmFromChildren(parsed, { childId, warn });
   if (arm.status !== "ok") return { ...arm, runId };
   // Optional per-run decision log (escalations + gate agreement). Absent
   // today — null, never fabricated.
@@ -383,8 +416,12 @@ export function resolveDefaultSupervisorDir(root = SCRIPT_ROOT) {
         const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(gitPath, "utf8"));
         if (m) {
           let gitDir = resolve(dirname(gitPath), m[1].trim());
-          while (gitDir && basename(gitDir) !== ".git") gitDir = dirname(gitDir);
-          if (gitDir) mainRoot = dirname(gitDir);
+          // climb to the .git dir; stop at the filesystem root too, so a
+          // pointer naming a path without a .git component cannot loop forever
+          while (gitDir && basename(gitDir) !== ".git" && dirname(gitDir) !== gitDir) {
+            gitDir = dirname(gitDir);
+          }
+          if (gitDir && basename(gitDir) === ".git") mainRoot = dirname(gitDir);
         }
       }
       if (mainRoot) candidates.push(join(mainRoot, ".state", "supervisor"));
@@ -397,6 +434,36 @@ export function resolveDefaultSupervisorDir(root = SCRIPT_ROOT) {
     if (existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+// Display rounding: the aggregate math runs on raw values; this rounds each
+// row to the published precision exactly once, at serialization. Aggregate
+// medians are NOT re-rounded here — they stay raw so the published table and
+// the published medians can never disagree about precision.
+function roundForDisplay(row) {
+  const arm = (a) => {
+    if (a.status !== "ok") return a;
+    return {
+      ...a,
+      costUsd: round(a.costUsd, 4),
+      wallTime: {
+        ...a.wallTime,
+        totalSec: round(a.wallTime?.totalSec, 2),
+        execSec: round(a.wallTime?.execSec, 2),
+        gateWaitSec: round(a.wallTime?.gateWaitSec, 2),
+      },
+    };
+  };
+  return { ...row, armA: arm(row.armA), armB: arm(row.armB) };
+}
+
+// Provenance without absolute paths: run roots are emitted relative to the
+// repo root this script ships in.
+function displayPath(dir) {
+  if (!dir) return null;
+  const rel = relative(SCRIPT_ROOT, dir);
+  if (!rel) return ".";
+  return rel.split(sep).join("/");
 }
 
 export function tabulate({ corpusDoc, supervisorDir, armADir, warn } = {}) {
@@ -430,15 +497,15 @@ export function tabulate({ corpusDoc, supervisorDir, armADir, warn } = {}) {
     protocol: corpusDoc.protocol ?? null,
     confirmedAt: corpusDoc.confirmedAt ?? null,
     qualityAxis: corpusDoc.qualityAxis ?? null,
-    supervisorDir: armBRoot ?? null,
-    armADir: armARoot ?? null,
+    supervisorDir: displayPath(armBRoot),
+    armADir: displayPath(armARoot),
     notes: [
       "cost = costUsd only (protocol §4.1); costUsdReported is never read",
       "wall time: queue not recorded in children.json (null); gate-wait = inter-turn gaps, own column, excluded from exec (§4.2)",
       "quality = body delta, Q2=A (§4.3) — no arm records it yet, reported as null until a source exists",
       "arm-A runs do not exist yet (§8 step 3) — pending rows are the normal state today",
     ],
-    pairs,
+    pairs: pairs.map(roundForDisplay),
     aggregate: aggregate(pairs),
   };
 }
@@ -497,7 +564,7 @@ export function run({ argv = process.argv.slice(2), stdout = console.log, exitFn
 
   let corpusDoc;
   try {
-    corpusDoc = parseCorpus(readFileSync(values.runs, "utf8"));
+    corpusDoc = parseCorpus(readFileSync(values.runs, "utf8"), warn);
   } catch (e) {
     if (e instanceof InputError) fail(e.message, exitFn);
     else fail(`cannot read corpus ${values.runs}: ${e.message}`, exitFn);
@@ -509,12 +576,19 @@ export function run({ argv = process.argv.slice(2), stdout = console.log, exitFn
     warn("no supervisor runs root found — arm-B rows will be flagged missing (pass --supervisor-dir)");
   }
 
-  const output = tabulate({
-    corpusDoc,
-    supervisorDir,
-    armADir: values["arm-a-dir"] ?? supervisorDir,
-    warn,
-  });
+  let output;
+  try {
+    output = tabulate({
+      corpusDoc,
+      supervisorDir,
+      armADir: values["arm-a-dir"] ?? supervisorDir,
+      warn,
+    });
+  } catch (e) {
+    if (e instanceof InputError) fail(e.message, exitFn);
+    else fail(`tabulation failed: ${e.message}`, exitFn);
+    return 2;
+  }
   stdout(JSON.stringify(output, null, 2));
   return 0;
 }

@@ -15,7 +15,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it } from "node:test";
 
@@ -135,6 +135,23 @@ describe("parseCorpus", () => {
   it("rejects an armA block without a runId", () => {
     assert.throws(() => parseCorpus(corpusText({ entry0: { armA: { childId: "plan-1" } } })), InputError);
   });
+  it("rejects runIds with characters outside [A-Za-z0-9._-] (they join a filesystem path)", () => {
+    assert.throws(() => parseCorpus(corpusText({ entry0: { armB: { runId: "../evil", childId: "plan-1" } } })), InputError);
+    assert.throws(() => parseCorpus(corpusText({ entry0: { armA: { runId: "a/b" } } })), InputError);
+    assert.doesNotThrow(() => parseCorpus(corpusText({ entry0: { armB: { runId: "2026-10-06T15-09-19-713-supervisor-26c7", childId: "plan-1" } } })));
+  });
+  it("warns on duplicate issue entries without dropping either row", () => {
+    const warnings = [];
+    const doc = parseCorpus(JSON.stringify({
+      corpus: [
+        { issue: "FOC-1", armB: { runId: "r1", childId: "c" } },
+        { issue: "FOC-1", armB: { runId: "r2", childId: "c" } },
+      ],
+    }), (m) => warnings.push(m));
+    assert.equal(doc.corpus.length, 2);
+    assert.equal(warnings.length, 1);
+    assert.ok(warnings[0].includes("duplicate issue FOC-1"));
+  });
 });
 
 describe("childWallTime", () => {
@@ -188,6 +205,14 @@ describe("extractArmFromChildren", () => {
   });
   it("an absent child is missing-child, not a crash", () => {
     assert.equal(extractArmFromChildren(JSON.parse(childrenJson("r", child())), { childId: "plan-9" }).status, "missing-child");
+  });
+  it("unpinned childId over a multi-child run warns instead of silently picking", () => {
+    const parsed = JSON.parse(childrenJson("run-a1", child({ childId: "graph-1" }), child({ childId: "graph-2" })));
+    const warnings = [];
+    const arm = extractArmFromChildren(parsed, { warn: (m) => warnings.push(m) });
+    assert.equal(arm.childId, "graph-1");
+    assert.equal(warnings.length, 1);
+    assert.ok(warnings[0].includes("2 children"));
   });
   it("a children.json without a children object is malformed input", () => {
     assert.throws(() => extractArmFromChildren({ runId: "r" }, { childId: "plan-1" }), InputError);
@@ -367,7 +392,7 @@ function writeChildren(root, runId, ...children) {
 }
 
 describe("loadArmFromDisk (I/O)", () => {
-  it("loads a real children.json with warnings for identity drift", () => {
+  it("loads a children.json from disk (costUsd, wallTime, honest nulls)", () => {
     withTempDir((temp) => {
       const sup = join(temp, "sup");
       writeChildren(sup, "run-b1", child({ costUsd: 1.5 }));
@@ -391,6 +416,36 @@ describe("loadArmFromDisk (I/O)", () => {
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "children.json"), "{oops");
       assert.throws(() => loadArmFromDisk(join(temp, "sup"), "broken", "plan-1"), InputError);
+    });
+  });
+  it("run() maps an InputError from corrupt run data to exit 2 with the documented message, no stack trace", () => {
+    withTempDir((temp) => {
+      const sup = join(temp, "sup");
+      const dir = join(sup, "run-b1");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "children.json"), "{oops");
+      const corpusPath = join(temp, "corpus.json");
+      writeFileSync(corpusPath, corpusText());
+      const errors = [];
+      const origError = console.error;
+      console.error = (m) => errors.push(String(m));
+      let exitCode = null;
+      try {
+        const code = run({
+          argv: ["--runs", corpusPath, "--supervisor-dir", sup],
+          stdout: () => {},
+          exitFn: (c) => { exitCode = c; },
+        });
+        assert.equal(code, 2);
+      } finally {
+        console.error = origError;
+      }
+      assert.equal(exitCode, 2);
+      assert.equal(errors.length, 1);
+      assert.ok(errors[0].startsWith("foc-477-measure: "), errors[0]);
+      assert.ok(errors[0].includes("children.json"), errors[0]);
+      assert.ok(errors[0].includes("not valid JSON"), errors[0]);
+      assert.ok(!errors[0].includes("\n    at "), `stack trace leaked: ${errors[0]}`);
     });
   });
   it("decisions.json feeds escalations by reason and gate agreement when present", () => {
@@ -493,6 +548,33 @@ describe("run (CLI surface)", () => {
       assert.equal(doc.pairs[0].armA.status, "pending");
       assert.equal(doc.aggregate.verdict, "INCONCLUSIVE");
       assert.ok(doc.notes.some((n) => n.includes("costUsdReported")));
+      assert.ok(!isAbsolute(doc.supervisorDir), `supervisorDir must be repo-relative, got ${doc.supervisorDir}`);
+    });
+  });
+  it("aggregate medians are computed from raw values; pair rows are display-rounded once", () => {
+    withTempDir((temp) => {
+      const sup = join(temp, "sup");
+      writeChildren(sup, "run-b1", child({ taskId: "FOC-198", costUsd: 0.111111, costUsdReported: 999 }));
+      writeChildren(sup, "run-b2", child({ taskId: "FOC-236", costUsd: 0.222222, costUsdReported: 999 }));
+      const corpusPath = join(temp, "corpus.json");
+      writeFileSync(corpusPath, JSON.stringify({
+        corpus: [
+          { issue: "FOC-198", armB: { runId: "run-b1", childId: "plan-1", status: "exited", costUsd: 0.111111, turns: 1 } },
+          { issue: "FOC-236", armB: { runId: "run-b2", childId: "plan-1", status: "exited", costUsd: 0.222222, turns: 1 } },
+        ],
+      }));
+      let out = "";
+      const code = run({
+        argv: ["--runs", corpusPath, "--supervisor-dir", sup],
+        stdout: (s) => { out += s; },
+      });
+      assert.equal(code, 0);
+      const doc = JSON.parse(out);
+      // pair rows are rounded to the published precision
+      assert.equal(doc.pairs[0].armB.costUsd, 0.1111);
+      assert.equal(doc.pairs[1].armB.costUsd, 0.2222);
+      // but the median comes from the RAW costs — rounded pairs would give 0.16665
+      assert.equal(doc.aggregate.cost.medianB, (0.111111 + 0.222222) / 2);
     });
   });
   it("a corpus entry whose children.json is absent is flagged missing; the script still exits 0", () => {
@@ -510,6 +592,7 @@ describe("run (CLI surface)", () => {
       const doc = JSON.parse(out);
       assert.equal(doc.pairs[1].armB.status, "missing");
       assert.equal(doc.pairs[1].armB.runId, "run-b2");
+      assert.equal(doc.pairs[1].armB.childId, "plan-1"); // corpus-named child survives the missing row
       assert.equal(doc.pairs[1].metrics.costRatioAB, null);
       assert.equal(doc.aggregate.pairsArmBOk, 1);
     });
