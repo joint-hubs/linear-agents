@@ -337,5 +337,74 @@ console.log("egressLeaves: the shared raw-leaf extractor");
 }
 
 // ---------------------------------------------------------------------------
+// 7. Linear issue-URL slug exemption (FOC-733) — family E only, deliberately
+//    narrow: the segment IMMEDIATELY after /issue/<KEY>/ on https://linear.app,
+//    and only when it is a COMPLETE path segment (terminated by /, ?, #, end
+//    of string or a closing delimiter). Anything else stays screened.
+// ---------------------------------------------------------------------------
+
+{
+  // The four real flagged strings from docs/research/foc-477-runs.json
+  // (egressScreenScan20261008.distinctFlaggedStrings) — issue-TITLE slugs, not
+  // secrets; the false positive this exemption exists for.
+  const CORPUS = [
+    ["FOC-143", "foc-143-r5-red-team-ip-extraction-attempt-on-deployed-protected-stack"],
+    ["FOC-143", "foc-143-r6-raise-the-bar-crown-jewel-logic-server-side-key"],
+    ["FOC-209", "foc-209-f12-set-document-content-encryption-key-docs-at-rest"],
+    ["FOC-209", "foc-209-f8-installer-chmod-600-env-640-realm-json-world-readable"],
+  ];
+  // Synthetic fake, same shape as the corpus slugs: lowercase + digits + hyphen
+  // (3 classes), 39 chars, well over the relaxed threshold. Assembled at
+  // runtime per the file convention.
+  const FAKE_KEBAB = "nq7z".concat("-x4m2-k9p5-", "r3t8-w1v6-", "y4b2-c9l5-", "d8j3");
+  const issueUrl = (i) => `https://linear.app/joint-hubs/issue/${CORPUS[i][0]}/${CORPUS[i][1]}`;
+
+  console.log("linear-slug: the four corpus issue slugs scan clean inside their Linear issue URLs");
+  for (let i = 0; i < CORPUS.length; i++) {
+    const short = CORPUS[i][1].slice(0, 24);
+    assert(scanEgress(`state ${issueUrl(i)}`).length === 0, `corpus slug exempt at end of string (#${i + 1}, ${short}...)`);
+    // The corpus states are JSON.stringify'd into ONE line — the raw JSON quote
+    // is the closing delimiter that terminated the really-flagged segments.
+    assert(scanEgress(`{"url":"${issueUrl(i)}"}`).length === 0, `corpus slug exempt inside a one-line JSON state (#${i + 1}, ${short}...)`);
+    assert(scanEgress(`prose ${CORPUS[i][1]} end`).length >= 1, `same corpus slug OUTSIDE a Linear URL is still blocked (#${i + 1}, ${short}...)`);
+  }
+
+  console.log("linear-slug: same-shape secret outside any Linear URL is still blocked");
+  assert(scanEgress(`rotated ${FAKE_KEBAB} today`).length >= 1, "kebab-shaped synthetic secret in prose is still blocked");
+
+  console.log("linear-slug: a secret in the URL query stays blocked while the slug stays exempt");
+  {
+    const text = `${issueUrl(0)}?token=${FAKE_ENTROPY}`;
+    const hits = scanEgress(text);
+    assert(hits.length === 1, "exactly one hit: the query value, not the slug");
+    assert(hits[0].family === "high-entropy", "query hit is family E");
+    assert(hits[0].column === `${issueUrl(0)}?token=`.length + 1, "hit sits at the query value's position, past the exempted slug");
+  }
+
+  console.log("linear-slug: the same path shape on another host is still blocked");
+  {
+    const slug = CORPUS[0][1];
+    assert(scanEgress(`https://evil.example.com/joint-hubs/issue/FOC-143/${slug}`).length >= 1, "non-linear.app host is blocked");
+    assert(scanEgress(`https://linear.app.evil.test/joint-hubs/issue/FOC-143/${slug}`).length >= 1, "linear.app SUBDOMAIN lookalike is blocked (host must be exactly linear.app)");
+  }
+
+  console.log("linear-slug: per-run scoping and family-E-only reach");
+  {
+    // A legitimate Linear URL and an unrelated secret in the SAME text: the
+    // slug stays exempt, the secret is caught, and nothing else is excused.
+    const mixed = `{"url":"${issueUrl(0)}"} rotated with ${FAKE_KEBAB}`;
+    const hits = scanEgress(mixed);
+    assert(hits.length === 1 && hits[0].family === "high-entropy", "Linear URL in the text does not shield the unrelated secret (1 hit)");
+    // A space is NOT a segment terminator: the slug is not a complete path
+    // segment there, so the narrow exemption does not apply.
+    assert(scanEgress(`${issueUrl(0)} more prose`).length >= 1, "slug followed by whitespace (not a complete-segment terminator) is still blocked");
+    // The exemption feeds family E only — family A still fires on a prefixed
+    // token even in the exempted segment position.
+    const prefixed = scanEgress(`https://linear.app/joint-hubs/issue/FOC-143/${FAKE_SK_OR}`);
+    assert(prefixed.some((h) => h.family === "key-prefix"), "key-prefix family still fires in the slug position (exemption is family-E-only)");
+  }
+}
+
+// ---------------------------------------------------------------------------
 console.log(`\n${passed}/${passed + failed} assertions passed.`);
 if (failed > 0) process.exit(1);

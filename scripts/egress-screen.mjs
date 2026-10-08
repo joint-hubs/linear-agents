@@ -44,7 +44,8 @@
  *   pem             PEM private-key blocks, multi-line, including a truncated BEGIN-only paste
  *   env-assignment  KEY=value / KEY: value lines whose KEY name looks secret-bearing
  *   jwt             three dot-separated base64url segments with an eyJ… header
- *   high-entropy    long mixed-class runs with high Shannon entropy (hex/UUID/data-URI excluded)
+ *   high-entropy    long mixed-class runs with high Shannon entropy (hex/UUID/data-URI excluded;
+ *                   Linear issue-URL slug segments exempt, FOC-733)
  *
  * Usage (library): scanEgress(text) -> hits; assertEgressClean(text, label) throws.
  * Usage (CLI):     node scripts/egress-screen.mjs check (--body <text> | --body-file <path>)
@@ -182,6 +183,18 @@ const BASE64_PAYLOAD_WINDOW = 64; // chars before a run to look for ";base64,"
 // release or timestamp slug — comment authors paste those constantly, and a
 // random token essentially never contains a digit-dash-digit-dash group.
 const ISO_DATE_LIKE_RE = /\d{4}-\d{2}-\d{2}/;
+
+// FOC-733: the slug segment of a Linear issue URL (…/issue/FOC-733/<slug>) is
+// a human-written kebab-case title, not a secret — lowercase + digits + hyphen
+// is exactly 3 char classes, and real titles measure 3.9-4.2 bits/char, i.e.
+// the relaxed branch's shape. The exemption is deliberately narrow: host
+// exactly linear.app, https only, the segment IMMEDIATELY after /issue/<KEY>/
+// (KEY = Linear key shape: uppercase + digits, hyphen, digits), and a COMPLETE
+// path segment (terminated by /, ?, #, end of string or a closing delimiter —
+// a JSON quote closes the one-line-serialized corpus states). The captured
+// group's span is what detectHighEntropy skips; a key-shaped run in any other
+// position — query values, other hosts, bare prose — stays screened.
+const LINEAR_ISSUE_SLUG_RE = /https:\/\/linear\.app\/[A-Za-z0-9][A-Za-z0-9_-]*\/issue\/[A-Z][A-Z0-9]*-[0-9]+\/([A-Za-z0-9_-]+)(?=$|[/?#)}\]"'\x60])/g;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -355,7 +368,8 @@ function detectJwt(text, spans) {
  * Family E hits: long mixed-class runs with high Shannon entropy. Runs already
  * reported by families A–D are skipped (same secret, not a second shape).
  * Pure-hex runs, data-URI payloads, and low-class runs are excluded — see
- * HEX_RUN_RE above for the why.
+ * HEX_RUN_RE above for the why. Linear issue-URL slug segments (FOC-733,
+ * via extraSpans) are exempt.
  */
 function detectHighEntropy(text, spans, extraSpans = []) {
   const hits = [];
@@ -416,7 +430,7 @@ export function scanEgress(text) {
     ...detectPem(text, spans),
     ...detectEnvAssignments(text, spans),
     ...detectJwt(text, spans),
-    ...detectHighEntropy(text, spans, publicBlockSpans(text)),
+    ...detectHighEntropy(text, spans, publicBlockSpans(text).concat(linearIssueSlugSpans(text))),
   ];
   return hits.sort((a, b) => a.line - b.line || a.column - b.column);
 }
@@ -429,6 +443,23 @@ function publicBlockSpans(text) {
   let m;
   while ((m = PEM_ANY_BLOCK_RE.exec(text)) !== null) {
     spans.push([m.index, m.index + m[0].length]);
+  }
+  return spans;
+}
+
+/** Spans of Linear issue-URL slug segments (FOC-733) — natural-language
+ * kebab-case titles the relaxed entropy branch misreads as secrets. The match
+ * anchors the segment IMMEDIATELY after /issue/<KEY>/ and requires a COMPLETE
+ * path segment (see LINEAR_ISSUE_SLUG_RE), so only that exact segment is
+ * exempt: a Linear URL elsewhere in the text never shields a neighbouring run,
+ * and the same slug outside such a URL is still screened. */
+function linearIssueSlugSpans(text) {
+  const spans = [];
+  LINEAR_ISSUE_SLUG_RE.lastIndex = 0;
+  let m;
+  while ((m = LINEAR_ISSUE_SLUG_RE.exec(text)) !== null) {
+    const start = m.index + m[0].length - m[1].length;
+    spans.push([start, start + m[1].length]);
   }
   return spans;
 }
