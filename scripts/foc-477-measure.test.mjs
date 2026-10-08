@@ -25,6 +25,7 @@ import {
   childWallTime,
   decide,
   decideAxis,
+  deriveGateFriction,
   extractArmFromChildren,
   loadArmFromDisk,
   median,
@@ -152,6 +153,37 @@ describe("parseCorpus", () => {
     assert.equal(warnings.length, 1);
     assert.ok(warnings[0].includes("duplicate issue FOC-1"));
   });
+  it("accepts an optional non-negative integer gateFriction on either arm; 0 is a real value", () => {
+    const doc = parseCorpus(JSON.stringify({
+      corpus: [
+        {
+          issue: "FOC-1",
+          armA: { runId: "run-a1", gateFriction: 0 },
+          armB: { runId: "run-b1", childId: "plan-1", gateFriction: 3 },
+        },
+      ],
+    }));
+    assert.equal(doc.corpus[0].armA.gateFriction, 0);
+    assert.equal(doc.corpus[0].armB.gateFriction, 3);
+  });
+  it("rejects negative and non-integer gateFriction; null/absent pass through as no data", () => {
+    const mk = (gfA, gfB) => JSON.stringify({
+      corpus: [
+        {
+          issue: "FOC-1",
+          armA: { runId: "run-a1", gateFriction: gfA },
+          armB: { runId: "run-b1", childId: "plan-1", gateFriction: gfB },
+        },
+      ],
+    });
+    assert.throws(() => parseCorpus(mk(-1, undefined)), InputError);
+    assert.throws(() => parseCorpus(mk(undefined, 1.5)), InputError);
+    assert.throws(() => parseCorpus(mk("2", undefined)), InputError);
+    assert.throws(() => parseCorpus(mk(true, undefined)), InputError);
+    // null / absent mean "no data" and survive validation untouched — never coerced to 0
+    assert.equal(parseCorpus(mk(null, undefined)).corpus[0].armA.gateFriction, null);
+    assert.equal(parseCorpus(mk(undefined, undefined)).corpus[0].armB.gateFriction, undefined);
+  });
 });
 
 describe("childWallTime", () => {
@@ -219,7 +251,7 @@ describe("extractArmFromChildren", () => {
   });
 });
 
-describe("go/no-go rule (§5, Q1=A)", () => {
+describe("go/no-go rule (§5, amended Q3 2026-10-07 — two axes: cost, time)", () => {
   it("win: A below B*0.85; the 0.85 edge itself is NOT a win", () => {
     assert.equal(decideAxis(0.84, 1), "win");
     assert.equal(decideAxis(0.85, 1), "draw");
@@ -235,18 +267,25 @@ describe("go/no-go rule (§5, Q1=A)", () => {
     assert.equal(decideAxis(null, 1), null);
     assert.equal(decideAxis(1, null), null);
   });
-  it("GO: >=2 wins and zero losses (a draw never counts as a win)", () => {
-    assert.equal(decide({ cost: "win", timeExec: "win", quality: "draw" }), "GO");
-    assert.equal(decide({ cost: "win", timeExec: "win", quality: "win" }), "GO");
+  it("GO: both axes win — zero regressions", () => {
+    assert.equal(decide({ cost: "win", timeExec: "win" }), "GO");
   });
-  it("NO-GO: any loss blocks GO, and fewer than two wins is NO-GO", () => {
-    assert.equal(decide({ cost: "win", timeExec: "win", quality: "loss" }), "NO-GO");
-    assert.equal(decide({ cost: "win", timeExec: "draw", quality: "draw" }), "NO-GO");
-    assert.equal(decide({ cost: "loss", timeExec: "loss", quality: "loss" }), "NO-GO");
+  it("NO-GO: a loss or a draw on either axis blocks GO", () => {
+    assert.equal(decide({ cost: "win", timeExec: "loss" }), "NO-GO");
+    assert.equal(decide({ cost: "draw", timeExec: "win" }), "NO-GO");
+    assert.equal(decide({ cost: "draw", timeExec: "draw" }), "NO-GO");
   });
-  it("INCONCLUSIVE: any axis without medians (today's normal state)", () => {
-    assert.equal(decide({ cost: "win", timeExec: null, quality: null }), "INCONCLUSIVE");
-    assert.equal(decide({ cost: null, timeExec: null, quality: null }), "INCONCLUSIVE");
+  it("INCONCLUSIVE only when cost or timeExec has no median", () => {
+    assert.equal(decide({ cost: "win", timeExec: null }), "INCONCLUSIVE");
+    assert.equal(decide({ cost: null, timeExec: "win" }), "INCONCLUSIVE");
+    assert.equal(decide({ cost: null, timeExec: null }), "INCONCLUSIVE");
+  });
+  it("the withdrawn quality axis never enters the decision", () => {
+    // arm B records no bodyDelta — under the old 3-axis rule this corpus was
+    // permanently INCONCLUSIVE; the amendment makes it a computable verdict
+    assert.equal(decide({ cost: "win", timeExec: "win", quality: null }), "GO");
+    assert.equal(decide({ cost: "win", timeExec: "win", quality: "loss" }), "GO");
+    assert.equal(decide({ cost: "win", timeExec: "loss", quality: "win" }), "NO-GO");
   });
 });
 
@@ -315,6 +354,20 @@ describe("pairRow", () => {
     assert.equal(missingB.metrics.costRatioAB, null);
     assert.equal(missingB.metrics.execTimeRatioAB, null);
   });
+  it("gate friction rides on each arm: absent stays null, explicit 0 stays 0", () => {
+    const mk = (gateFriction) => ({
+      status: "ok", runId: "r", childId: "c", childStatus: "exited", costUsd: 1, turns: 1,
+      wallTime: { totalSec: 1, queueSec: null, execSec: 1, gateWaitSec: 0 },
+      bodyDelta: { editCount: null, charDelta: null }, gateFriction, escalations: null, gateAgreement: null,
+    });
+    const row = pairRow(entry, mk(0), mk(null));
+    assert.equal(row.armA.gateFriction, 0); // explicit 0 is a real value, not "no data"
+    assert.equal(row.armB.gateFriction, null);
+    // degraded arms still carry the friction resolved by tabulate
+    const degraded = pairRow(entry, { status: "pending" }, { status: "missing", runId: "run-b1", gateFriction: 3 });
+    assert.equal(degraded.armA.gateFriction, null);
+    assert.equal(degraded.armB.gateFriction, 3);
+  });
 });
 
 describe("aggregate", () => {
@@ -330,10 +383,11 @@ describe("aggregate", () => {
     assert.equal(agg.pairsArmBOk, 0);
     assert.equal(agg.cost.medianA, null);
     assert.equal(agg.verdict, "INCONCLUSIVE");
-    assert.deepEqual(agg.axes, { cost: null, timeExec: null, quality: null });
+    assert.deepEqual(agg.axes, { cost: null, timeExec: null });
+    assert.deepEqual(agg.gateFriction, { medianA: null, medianB: null });
   });
 
-  it("arm A dominating cost and exec, quality absent → still INCONCLUSIVE (axis missing)", () => {
+  it("arm A dominating cost and exec, bodyDelta absent on both arms → GO (the old 3-axis rule was permanently INCONCLUSIVE here)", () => {
     const okArm = (costUsd, execSec) => ({
       status: "ok", runId: "r", childId: "c", childStatus: "exited", costUsd, turns: 1,
       wallTime: { totalSec: execSec, queueSec: null, execSec, gateWaitSec: 0 },
@@ -349,13 +403,11 @@ describe("aggregate", () => {
     assert.equal(agg.cost.medianB, 1);
     assert.equal(agg.cost.ratioAB, 0.5);
     assert.equal(agg.timeExec.medianA, 60);
-    assert.equal(agg.axes.cost, "win");
-    assert.equal(agg.axes.timeExec, "win");
-    assert.equal(agg.axes.quality, null);
-    assert.equal(agg.verdict, "INCONCLUSIVE");
+    assert.deepEqual(agg.axes, { cost: "win", timeExec: "win" });
+    assert.equal(agg.verdict, "GO");
   });
 
-  it("full data: two wins + draw → GO; a loss anywhere → NO-GO", () => {
+  it("full data: both axes win → GO; a loss anywhere → NO-GO", () => {
     const mk = (costUsd, execSec, editCount) => ({
       status: "ok", runId: "r", childId: "c", childStatus: "exited", costUsd, turns: 1,
       wallTime: { totalSec: execSec, queueSec: null, execSec, gateWaitSec: 0 },
@@ -367,10 +419,27 @@ describe("aggregate", () => {
       mk(costB, execB, 1),
     ));
     // cost 0.5/1 and exec 60/120 both clear the win thresholds; equal edit
-    // counts are a quality draw (reportable, never a win)
+    // counts are the withdrawn quality descriptive — reportable, never decisive
     assert.equal(aggregate(mkPair(0.5, 60, 1, 120)).verdict, "GO");
     // exec regression 200 > 120 * 1.05 blocks GO even with a cost win
     assert.equal(aggregate(mkPair(0.5, 200, 1, 120)).verdict, "NO-GO");
+  });
+
+  it("gate friction is a descriptive: medians per arm, never an axis, never in the verdict", () => {
+    const mk = (costUsd, execSec, gateFriction) => ({
+      status: "ok", runId: "r", childId: "c", childStatus: "exited", costUsd, turns: 1,
+      wallTime: { totalSec: execSec, queueSec: null, execSec, gateWaitSec: 0 },
+      bodyDelta: { editCount: null, charDelta: null }, gateFriction, escalations: null, gateAgreement: null,
+    });
+    const rows = [1, 2].map((i) => pairRow(
+      { issue: `X-${i}`, armB: { runId: "r", childId: "c" } },
+      mk(0.5, 0.5, i - 1), // arm A friction 0 and 1
+      mk(1, 1, i),         // arm B friction 1 and 2
+    ));
+    const agg = aggregate(rows);
+    assert.deepEqual(agg.gateFriction, { medianA: 0.5, medianB: 1.5 });
+    assert.deepEqual(agg.axes, { cost: "win", timeExec: "win" });
+    assert.equal(agg.verdict, "GO"); // friction present but never decides
   });
 });
 
@@ -487,6 +556,61 @@ describe("loadArmFromDisk (I/O)", () => {
       assert.equal(arm.status, "ok");
       assert.equal(arm.escalations, null);
       assert.equal(warnings.length, 1);
+    });
+  });
+});
+
+describe("deriveGateFriction (I/O)", () => {
+  it("arm A counts plan-graph gate kinds (plan.gate1, draft-approval); squad question gates are not counted", () => {
+    withTempDir((temp) => {
+      const runDir = join(temp, "run-a1");
+      mkdirSync(join(runDir, "gates"), { recursive: true });
+      writeFileSync(join(runDir, "gates", "gate-1.json"), JSON.stringify({ gateId: "gate-1", kind: "plan.gate1", status: "answered" }));
+      writeFileSync(join(runDir, "gates", "gate-2.json"), JSON.stringify({ gateId: "gate-2", kind: "draft-approval", status: "approved" }));
+      writeFileSync(join(runDir, "gates", "gate-3.json"), JSON.stringify({ gateId: "gate-plan-1-1", kind: "question" }));
+      assert.equal(deriveGateFriction(runDir, { arm: "A" }), 2);
+    });
+  });
+  it("arm B counts gate-plan-* records; dev gates are excluded", () => {
+    withTempDir((temp) => {
+      const runDir = join(temp, "run-b1");
+      mkdirSync(join(runDir, "gates"), { recursive: true });
+      writeFileSync(join(runDir, "gates", "gate-plan-1-1.json"), JSON.stringify({ gateId: "gate-plan-1-1", childId: "plan-1", kind: "question" }));
+      writeFileSync(join(runDir, "gates", "gate-plan-2-1.json"), JSON.stringify({ gateId: "gate-plan-2-1", childId: "plan-2", kind: "question" }));
+      writeFileSync(join(runDir, "gates", "gate-dev-3-1.json"), JSON.stringify({ gateId: "gate-dev-3-1", childId: "dev-3", kind: "question" }));
+      assert.equal(deriveGateFriction(runDir, { arm: "B" }), 2);
+    });
+  });
+  it("implementation-review verdicts in the sibling verdicts/ directory are never counted", () => {
+    withTempDir((temp) => {
+      const runDir = join(temp, "run-b1");
+      mkdirSync(join(runDir, "gates"), { recursive: true });
+      mkdirSync(join(runDir, "verdicts"), { recursive: true });
+      writeFileSync(join(runDir, "gates", "gate-plan-1-1.json"), JSON.stringify({ gateId: "gate-plan-1-1", childId: "plan-1" }));
+      // the real-run shape: a dozen foc-403-roundN verdicts plus a sibling-task verdict
+      for (let i = 1; i <= 13; i++) {
+        writeFileSync(join(runDir, "verdicts", `foc-403-round${i}.json`), JSON.stringify({ verdict: "approve" }));
+      }
+      writeFileSync(join(runDir, "verdicts", "foc-696-round1.json"), JSON.stringify({ verdict: "approve" }));
+      assert.equal(deriveGateFriction(runDir, { arm: "B" }), 1);
+    });
+  });
+  it("a missing gates directory is null — honest no data, never 0", () => {
+    withTempDir((temp) => {
+      assert.equal(deriveGateFriction(join(temp, "run-x"), { arm: "B" }), null);
+      assert.equal(deriveGateFriction(join(temp, "run-x"), { arm: "A" }), null);
+    });
+  });
+  it("an unparseable gate record warns and is excluded from the count", () => {
+    withTempDir((temp) => {
+      const runDir = join(temp, "run-b1");
+      mkdirSync(join(runDir, "gates"), { recursive: true });
+      writeFileSync(join(runDir, "gates", "gate-plan-1-1.json"), JSON.stringify({ gateId: "gate-plan-1-1" }));
+      writeFileSync(join(runDir, "gates", "broken.json"), "{oops");
+      const warnings = [];
+      assert.equal(deriveGateFriction(runDir, { arm: "B", warn: (m) => warnings.push(m) }), 1);
+      assert.equal(warnings.length, 1);
+      assert.ok(warnings[0].includes("broken.json"));
     });
   });
 });
@@ -621,8 +745,98 @@ describe("run (CLI surface)", () => {
       assert.equal(doc.pairs[0].metrics.costRatioAB, 0.5);
       assert.equal(doc.pairs[0].metrics.execTimeRatioAB, 0.5); // exec 60/120, not wall 90/150
       assert.equal(doc.aggregate.pairsArmAOk, 2);
-      // quality axis still has no source → INCONCLUSIVE, not GO
+      // cost 0.75/1.5 and exec 60/120 both clear the win thresholds → GO; the
+      // withdrawn quality axis (no bodyDelta source) never blocks the verdict
+      assert.equal(doc.aggregate.verdict, "GO");
+    });
+  });
+  it("arm-A gate friction derives from the same state root by default; the verdict depends only on cost/time", () => {
+    withTempDir((temp) => {
+      const sup = join(temp, "sup");
+      writeChildren(sup, "run-b1", child({ taskId: "FOC-198", costUsd: 1, turns: [{ startedAt: T0, endedAt: iso(2) }] }));
+      writeChildren(sup, "run-b2", child({ taskId: "FOC-236", costUsd: 1, turns: [{ startedAt: T0, endedAt: iso(2) }] }));
+      writeChildren(sup, "run-a1", child({ childId: "graph-1", taskId: "FOC-198", costUsd: 0.5, turns: [{ startedAt: T0, endedAt: iso(1) }] }));
+      writeChildren(sup, "run-a2", child({ childId: "graph-1", taskId: "FOC-236", costUsd: 0.5, turns: [{ startedAt: T0, endedAt: iso(1) }] }));
+      // arm A: plan-graph gates — run-a1 has 2, run-a2 has 1
+      mkdirSync(join(sup, "run-a1", "gates"), { recursive: true });
+      writeFileSync(join(sup, "run-a1", "gates", "g1.json"), JSON.stringify({ gateId: "gate-1", kind: "plan.gate1" }));
+      writeFileSync(join(sup, "run-a1", "gates", "g2.json"), JSON.stringify({ gateId: "gate-2", kind: "draft-approval" }));
+      mkdirSync(join(sup, "run-a2", "gates"), { recursive: true });
+      writeFileSync(join(sup, "run-a2", "gates", "g1.json"), JSON.stringify({ gateId: "gate-1", kind: "draft-approval" }));
+      const corpusPath = join(temp, "corpus.json");
+      writeFileSync(corpusPath, corpusText({
+        entry0: { armA: { runId: "run-a1", childId: "graph-1" } },
+        entry1: { armA: { runId: "run-a2", childId: "graph-1" } },
+      }));
+      let out = "";
+      const code = run({
+        argv: ["--runs", corpusPath, "--supervisor-dir", sup], // no --state-root → defaults to the supervisor root
+        stdout: (s) => { out += s; },
+      });
+      assert.equal(code, 0);
+      const doc = JSON.parse(out);
+      assert.equal(doc.pairs[0].armA.gateFriction, 2);
+      assert.equal(doc.pairs[1].armA.gateFriction, 1);
+      assert.equal(doc.pairs[0].armB.gateFriction, null); // no gates dir for run-b1 → null, never 0
+      assert.deepEqual(doc.aggregate.gateFriction, { medianA: 1.5, medianB: null });
+      // cost 0.5/1 and exec 60/120 both win → GO even with gate friction present
+      assert.equal(doc.aggregate.verdict, "GO");
+    });
+  });
+  it("gate friction: a corpus literal beats derivation, explicit 0 included; --state-root separates the gates root", () => {
+    withTempDir((temp) => {
+      const sup = join(temp, "sup");
+      const state = join(temp, "state");
+      writeChildren(sup, "run-b1", child({ taskId: "FOC-198", costUsd: 1, turns: [{ startedAt: T0, endedAt: iso(2) }] }));
+      writeChildren(sup, "run-b2", child({ taskId: "FOC-236", costUsd: 1, turns: [{ startedAt: T0, endedAt: iso(2) }] }));
+      // gates live under the separate state root: run-b1 has 2 plan gates, run-b2 has 1
+      mkdirSync(join(state, "run-b1", "gates"), { recursive: true });
+      writeFileSync(join(state, "run-b1", "gates", "gate-plan-1-1.json"), JSON.stringify({ gateId: "gate-plan-1-1", childId: "plan-1" }));
+      writeFileSync(join(state, "run-b1", "gates", "gate-plan-1-2.json"), JSON.stringify({ gateId: "gate-plan-1-2", childId: "plan-1" }));
+      mkdirSync(join(state, "run-b2", "gates"), { recursive: true });
+      writeFileSync(join(state, "run-b2", "gates", "gate-plan-1-1.json"), JSON.stringify({ gateId: "gate-plan-1-1", childId: "plan-1" }));
+      const corpusPath = join(temp, "corpus.json");
+      writeFileSync(corpusPath, JSON.stringify({
+        corpus: [
+          { issue: "FOC-198", armB: { runId: "run-b1", childId: "plan-1", status: "exited", costUsd: 1, gateFriction: 7 } },
+          { issue: "FOC-236", armB: { runId: "run-b2", childId: "plan-1", status: "exited", costUsd: 1, gateFriction: 0 } },
+        ],
+      }));
+      let out = "";
+      const code = run({
+        argv: ["--runs", corpusPath, "--supervisor-dir", sup, "--state-root", state],
+        stdout: (s) => { out += s; },
+      });
+      assert.equal(code, 0);
+      const doc = JSON.parse(out);
+      assert.equal(doc.pairs[0].armB.gateFriction, 7); // literal beats the derived 2
+      assert.equal(doc.pairs[1].armB.gateFriction, 0); // explicit 0 beats the derived 1
+      assert.deepEqual(doc.aggregate.gateFriction, { medianA: null, medianB: 3.5 });
+      assert.ok(!isAbsolute(doc.stateRoot), `stateRoot must be repo-relative, got ${doc.stateRoot}`);
+      // arm A is pending → INCONCLUSIVE regardless of the friction values
       assert.equal(doc.aggregate.verdict, "INCONCLUSIVE");
+    });
+  });
+  it("a negative gateFriction in the corpus exits 2 with exactly one stderr line, no stack trace", () => {
+    withTempDir((temp) => {
+      const corpusPath = join(temp, "corpus.json");
+      writeFileSync(corpusPath, JSON.stringify({
+        corpus: [{ issue: "FOC-1", armB: { runId: "run-b1", childId: "plan-1", gateFriction: -2 } }],
+      }));
+      const errors = [];
+      const origError = console.error;
+      console.error = (m) => errors.push(String(m));
+      let code;
+      try {
+        code = run({ argv: ["--runs", corpusPath], stdout: () => {}, exitFn: () => {} });
+      } finally {
+        console.error = origError;
+      }
+      assert.equal(code, 2);
+      assert.equal(errors.length, 1);
+      assert.ok(errors[0].startsWith("foc-477-measure: "), errors[0]);
+      assert.ok(errors[0].includes("gateFriction"), errors[0]);
+      assert.ok(!errors[0].includes("\n    at "), `stack trace leaked: ${errors[0]}`);
     });
   });
   it("missing --runs exits 2 with usage (injected exit keeps the harness alive)", () => {
@@ -684,5 +898,6 @@ describe("run (CLI surface)", () => {
     assert.ok(out.includes("--runs"));
     assert.ok(out.includes("--supervisor-dir"));
     assert.ok(out.includes("--arm-a-dir"));
+    assert.ok(out.includes("--state-root"));
   });
 });
