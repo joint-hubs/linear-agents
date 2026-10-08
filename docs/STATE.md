@@ -24,6 +24,72 @@ Kolejka — sekwencja z `docs/ROADMAP.md` (2026-10-08). **Tor A (krytyczna ście
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## 2026-10-08 (23) — run 0984: FOC-477 ramię A — run 2 ZATRZYMANY przez fałszywy traf ekranu egress (3 z 10 korpusu) · opcja 1 wykonana (`plan.intent` OK) · 3 reguły pomiarowe zapisane, zanim mogły zaważyć
+
+**Opcja 1 — jedno diagnostyczne wywołanie `plan.intent`, nic nie zapisane do runu.**
+`createDefaultGenerator` z przechwytującym `fetchImpl` (`runId`/`shadowDir: null`; `appendShadow`
+to no-op bez `shadowDir`, `decision-call.mjs:510`). Wejście = odtworzony zbiór odczytów rundy 1 dla
+FOC-198 (`inputs-01-foc198.json` + wyjście `plan.dor`). **Wynik: HTTP 200, upstream `Fireworks`,
+`z-ai/glm-5.3-flash`, poprawny kształt `plan.intent`** (goal, why, mapVersion 1, 11 interpretacji);
+`responseId gen-1791473267-vit8Vcpq5FgekMwjEowD`; usage 1359 prompt / 24 214 completion /
+21 619 reasoning / 25 573 total = **$0,018466275 wycenione**. Wiadomość 5851 znaków == długość
+wiadomości produkcyjnej zapisanej dla próby 1 i zbudowana przez sam `createDefaultGenerator`, więc
+rekonstrukcja jest wierna — ale **zgodność bajt-w-bajt nie jest udowodniona haszem** i tak nie jest
+zgłaszana. **To współwskazuje hipotezę routingu upstream, nie jej nie dowodzi** (próby 1–2 padły na
+`CoreWeave 429 → OpenRouter failover → Sail Research 400 invalid_request_error`). Sonda:
+`.state/foc-477-armA/diag-plan-intent.mjs`.
+
+**Korekta hasza `2870f05f…` — wcześniejszy zapis był nieprecyzyjny.** To **nie** jest hash
+wiadomości `plan.intent`. To `inputsHash` wywołania seam **`plan.dor`** (`decision-call.mjs:286-291`,
+`JEV_MODEL` wpisane na twardo jako `typesafe/jev-1.13`). Nieudane `plan.intent` nie zapisało wiersza
+zdarzenia (FOC-461 nit 2), więc **żaden** hash tej wiadomości nie istnieje. Przetestowano 11 konwencji
+hashowania — żadna nie trafia; wyjaśnienie jest wyżej, nie w konwencji.
+
+**Run 2 (FOC-236) — `EGRESS_BLOCKED` na `plan.dor`, tier 3 = frontman.** To **nie jest** awaria
+kroku: `runJStep` oddaje `handed-off` z błędem niesionym do mnie (drabina: tier 1 = seam, tier 2
+wyłączony wg FOC-473, tier 3 = frontman). **Diagnoza (2 hity = JEDEN napis):**
+`foc-143-r5-red-team-ip-extraction-attempt-on-deployed-protected-stack` — slug z URL-a Linear w opisie
+zadania. 69 znaków, kebab-case, 3 klasy znaków (lower + digit + dywiz), 3,961 bits/char → gałąź
+`RELAXED` rodziny E (`len ≥ 32`, `h ≥ 3,9`, `≥ 3 klasy`). **W żadnym wejściu korpusu nie ma wartości
+sekretu** — slugi zawierają słowa w rodzaju „key", bo same zadania są **o** obsłudze kluczy.
+**Skan całego korpusu** (te same bajty stanu `plan.dor`, `.state/foc-477-armA/scan-corpus-egress.mjs`):
+FOC-236 ×2, **FOC-240 ×6, FOC-239 ×4**, pozostałe 7 = 0. Cztery różne napisy, wszystkie slugi URL-i
+Linear, 58–69 znaków.
+
+**Drugi fakt obciążający — `inbox.entry` puste dla 2 z 10.** FOC-132 i FOC-136 mają w Linear
+`description: ""`; jedyna proza to historyczne komentarze z zamkniętych runów (wpisy arm B), nie brief.
+`composeIntentInputs` rzuca `invalid_input` przy pustym zbiorze kotwic (`plan-intent.mjs:235-240`),
+czyli `plan.intent` w ogóle nie wystartuje — dwa wpisy padną przed jakimkolwiek wywołaniem modelu.
+Lądowany kontrakt dopuszcza **payload złożony** obok tekstu dyktowanego (`plan-intent.mjs:193-194`),
+a konwencja evala FOC-515 to `{issueId, title, scopeSummary}` — ale squady arm B dla tych dwóch
+startowały z **ręcznego kickoffu**, nie z opisu zadania, więc pusty wpis czyni je nieporównywalnymi.
+
+**Obserwacja poboczna (zgłoszona, nie naprawiana):** `composeState` (`graph-runner.mjs:765`)
+`JSON.stringify`-uje mapę odczytów w **jedną linię**, co oślepia zakotwiczony do linii detektor
+przypisań zmiennych środowiskowych (rodzina C) dla stanów `[J]`. Ekran więc obecnie wykrywa **za
+mało** na wejściach `[J]`. Ta sama granica `neverCovers` — nie ruszam.
+
+**Reguły pomiarowe zapisane przed pierwszym runem liczącym** (decyzje Mateusza z kickoffu, zapisane
+w protokole §4.2 / §7 Q7–Q9, pliki moje, jeszcze niezacommitowane):
+**§4.2 + Q7** — postój narzędzia frontmana idzie **do** liczby głównej (wariant ostrożny, ten sam
+mechanizm co koszt), wrażliwość „frontman stall excluded" obok, obie liczby obowiązkowe;
+**Q8** — przypięcie providera to **routing**, nie zmiana modelu/tieru, FOC-691 stoi;
+**Q9** — kolejność 1 → 3 → 2; FOC-198 = `deferred: infra (provider routing)`, wraca na koniec
+kampanii, bez podmiany korpusu; twarda granica zmiany przyrządu (wszystkie liczone ramię A na jednym
+`runnerSha`, wcześniejsze próby zostają `excluded (C1)`, wersji się nie miesza, zmiana pełnym torem i
+**nigdy** w środku aktywnego runu).
+
+**Czeka na Mateusza — DWA pytania STOP (raport przekazuje warianty z kosztami).**
+**(1) Ekran egress odrzuca 3 z 10 wpisów korpusu.** Ekran egress to kontrola sekretów, a `secrets`
+jest w `neverCovers` — bez obejścia, bez osłabiania i bez przeredagowywania wejścia z mojej strony.
+**(2) Konwencja `inbox.entry` dla pary z pustym opisem.** Zmiana konwencji wejść to zmiana przyrządu.
+**Oba są rozstrzygalne bez straty czystości:** żaden run liczący jeszcze nie istnieje, więc każda
+zmiana przyrządu po tym momencie to wciąż **czysta granica** — i to jest ostatni moment, w którym to
+prawda.
+
+**Notka:** FOC-598 **Done na wylądowanym rdzeniu**, reszta przeniesiona do **FOC-732** (wg ROADMAP,
+decyzja 5).
+
 ## 2026-10-08 (22) — run 0984: `dd96ad8` WLĄDOWANY (PR #50, merge `7d999e7`) — event-loop budget bez fałszywych FAIL-i · synchronizacja z Mateuszem wdrożona · LUKA: `foc-477-measure.mjs` nie liczy udziału frontmana
 
 **Lądowanie — opcja B Mateusza** (fix w tej samej gałęzi, przed domknięciem FOC-477; koszt zakupiony wprost: diff rośnie poza blast radius, dowód lądowania z poprzedniej rundy odrzucony, bramka merge od zera, nowe REVIEW/TEST, jedno lądowanie zamiast dwóch). Diff: **dokładnie jeden plik**, `scripts/telemetry-ingest.event-loop.test.mjs`, `+52/-21`. Łańcuch wykonany w całości: **TEST → bramka merge → PR → merge**.
