@@ -108,14 +108,126 @@ without a reproducer is not a result (Hermes spec, §5).
 - **Tier-2 fallback:** report **both** conventions side by side — `(i) disabled call = $0` and
   `(ii) disabled call = skipped, ratio disabled/enabled` — with no single blended number. This is
   the neutral resolution of Hermes's open question 3; it is not a fork.
-- **Reproducer:** `node scripts/foc-477-measure.mjs --runs docs/research/foc-477-runs.json`
-  (deliverable of the dev step).
+- **Attribution of the Supervisor's own turns — decided 2026-10-08 (§7 Q4 = A).** Arm B's
+  `costUsd` covers a whole plan child, including the turns that authored its spec. Arm A has no
+  such child, so the symmetric cost is **not** "graph nodes only". In force for all 10 runs:
+  - **Main number:** `usage.cost` of every node event in the run's `decisions.jsonl`, **plus** the
+    Supervisor's turns whose work arm B's `costUsd` contains — `plan.spec` authoring and the
+    `[J] A0` resolutions — priced from the telemetry window through `config/models.json`.
+  - **`plan.spec` is booked as a separate PLAN child** (`costUsd` in
+    `.state/supervisor/<armA-runId>/children.json`), not as a session turn — §7 Q5. A0 resolutions
+    stay on the frontman-turn line: they are interleaved annotations, not separable work products.
+  - **Sensitivity line ("nodes only"):** `usage.cost` alone. Reported alongside the main number,
+    never instead of it.
+  - **Separate line, outside the main number in both arms:** turns that only relay a gate to
+    Mateusz and carry his answer back. HITL cost is real, but it is not plan-production cost and
+    arm B's `costUsd` does not contain it either.
+  - **Every turn is counted exactly once, in exactly one bucket.** A turn priced to arm A is
+    priced **wholly** to arm A even if it also transcribed a measurement record — the
+    conservative direction, the one that cannot produce a false GO.
+  - **Lane discipline:** no Lane-B work in a turn that carries arm-A work (Mateusz, 2026-10-08:
+    *"w aktywnym oknie runu A nie mieszaj w tych samych turach pracy toru B"*). A turn is
+    single-lane.
+- **Run-input conventions — written before any counted run exists (2026-10-08).** Arm A's `inputs`
+  JSON has three keys, built by one code path (`.state/foc-477-armA/build-inputs.mjs`) and never
+  retyped — a transcribed issue body would silently change the message the model sees.
+  - `inbox.entry` — the Linear issue's `description` field **verbatim**. Verified byte-identical on
+    FOC-198 (2015 chars, `description === inbox.entry`). The title is **not** prepended; production
+    never sent it.
+  - `repoState.pinned` — `{branch, head}` of the **orchestrator** checkout (linear-agents) at run
+    start. Same convention as excluded attempts 1–2. Arm A's plans are not anchored to the issue's
+    own target repo (FOC-198 is trading_assist work, FOC-236 is joint-flows work, and both pin
+    linear-agents). **Named rather than changed mid-campaign** — it is not on a go/no-go axis, and a
+    convention that shifts between runs costs more than the wrong pin does.
+  - `features.list` — the extracted **candidate files** (`plan-ac.mjs:69`: *"the candidate-files
+    array the caller retrieved"*; the `plan.ac` prompt: *"the extracted candidate files"*). Kept as
+    `{name, text}` — the only wire shape that exists — with `name` = path and `text` = why it is a
+    candidate; the files are the ones the issue text names. **Attempts 1–2 put ACs here**, which the
+    model was explicitly told were files. Both attempts are `excluded (C1)`, so no counted run is
+    contaminated; the convention is fixed now so that all 10 counted runs share it.
+- **Implementation status at run 2 (2026-10-08) — the rules above are decided; the tabulator does
+  not yet implement them.** Named now so none of it is decided after a number exists.
+  `scripts/foc-477-measure.mjs` reads `costUsd` from `children.json` only (its own header says
+  *"Cost is `costUsd` only"*) and wall time from `childWallTime(child.turns)`. Three gaps follow:
+  **(i)** no `usage.cost` from `decisions.jsonl` ⇒ Q4's main cost number is unimplemented and the
+  cost axis currently understates arm A; **(ii)** arm A's graph walk lives in
+  `.state/runs/<runId>/graph-steps.jsonl`, not in a child's `turns[]` ⇒ `timeExec` for arm A would
+  measure only the `plan.spec` child (Q5) and not the walk; **(iii)** `childWallTime` lumps every
+  inter-turn gap into `gateWaitSec` and excludes it from `execSec` ⇒ Q7's stall-inclusion is
+  unimplemented and the time axis currently flatters arm A. **All three are report-side, not
+  instrument-side:** every run still records the raw data each rule needs — node timestamps in
+  `graph-steps.jsonl`, `usage.cost` per event in `decisions.jsonl`, gate records for gate-wait, and
+  the frontman-stall intervals as gaps that carry no gate. **No counted run is wasted by this gap,
+  and no counted run's treatment is decided by it.** Implementing (i)–(iii) is a change to
+  `scripts/foc-477-measure.mjs` and takes the full track (branch → REVIEW → TEST → PR → merge),
+  before the report is produced. It does not touch `graph-runner.mjs`, so Q9's instrument boundary
+  is unaffected.
+- **Instrument identity.** The blob sha of `scripts/graph-runner.mjs` is recorded per arm-A run in
+  `docs/research/foc-477-runs.json` (`armARuns[].runnerSha`). The `[G]` observability patch lands
+  **after the 10th run** (§7 Q6), never inside a run, so all 10 runs share one instrument.
+- **Instrument findings at run 2 (2026-10-08) — two findings, both DECIDED by Mateusz the same
+  day.** Full evidence in `docs/research/foc-477-runs.json` (`egressScreenScan20261008`,
+  `egressScreenFix20261008`, `inboxEntryEmpty20261008`, `inboxEntryRecovery20261008`).
+  1. **The egress screen refused 3 of the 10 corpus entries** (`EGRESS_BLOCKED` at `plan.dor`,
+     tier-3 handed-off). Family E (high-entropy, relaxed branch: `len ≥ 32`, `≥ 3.9 bits/char`,
+     `≥ 3` char classes) flagged **Linear URL slugs** — `foc-143-r5-…-protected-stack` and three
+     siblings, 58–69 chars, lowercase + digits + hyphen = 3 classes. **No secret value is present
+     in any corpus input**; the slugs contain words like "key" because the issues are *about* key
+     provisioning. Hits: FOC-236 ×2, FOC-240 ×6, FOC-239 ×4; the other seven were clean.
+     **DECIDED (Mateusz, 2026-10-08) — variant A, in a narrow scope.** An exception for the
+     `<slug>` segment of a Linear issue URL only
+     (`https://linear.app/<workspace>/issue/<KLUCZ-N>/<slug>`, the slug derived from the issue
+     title and not a secret). The same string outside such a URL is still caught exactly as today.
+     **No general loosening of family E.** Required tests: the 4 real corpus slugs pass; and three
+     negatives stay blocked — a secret of the same shape outside a Linear URL, a secret appended to
+     a Linear URL (`?token=…`), a key in the path of a URL on another domain. Full track
+     (branch → REVIEW → TEST → PR → merge), outside an active run window.
+     *Side observation, routed out of FOC-477 by the same decision:* `composeState`
+     (`graph-runner.mjs:765`) `JSON.stringify`s the read map into a single line, which blinds the
+     line-anchored family-C env-assignment detector for `[J]` states — the screen is currently
+     **under**-firing on `[J]` inputs. Separate task, child of FOC-466, bug, High. It must not
+     change the instrument mid-campaign, and it does not.
+  2. **`inbox.entry` is empty for FOC-132 and FOC-136** (Linear `description` is `""`; the only
+     prose is historical arm-B run writeback). `composeIntentInputs` throws `invalid_input` on an
+     empty anchor set (`plan-intent.mjs:235-240`), so `plan.intent` cannot run on those two —
+     they fail before any model call. **DECIDED (Mateusz, 2026-10-08) — variant D: arm A sees what
+     arm B saw (criterion C4).** For those two, `inbox.entry` is the hand-written brief arm B's
+     PLAN child was spawned with, reproduced **verbatim** from the run record. Recovered literally
+     from disk, so the `{issueId, title, scopeSummary}` fallback is not needed and was not used.
+     Only the launcher's PINNED-STATE prologue is excluded (it is harness chrome whose content arm A
+     models separately as `repoState.pinned`); the whole hand-written kickoff file is reproduced
+     byte-for-byte, **including** its squad-role framing. That framing is meaningless for a graph
+     node and the excerpted-brief variant is the **sensitivity** line — keeping the extra tokens can
+     only make arm A worse on both axes, never better, so the whole file is the conservative main
+     number, exactly as with the §4.2 stall rule. Brief bodies are not copied into the repo; the
+     record carries source path + `sha256` + byte counts instead.
+  - **Instrument boundary (supersedes the earlier freeze note).** No counted run existed when either
+    change was decided, so nothing had to be re-run. The **fix's `sha` is the instrument boundary**:
+    run 2 (FOC-236) restarts from scratch on that version and nothing before it counts — the two
+    `excluded (C1)` attempts and run 2's `EGRESS_BLOCKED` stop all sit before the boundary and stay
+    excluded. Every counted arm-A run therefore shares one runner **and** one screen version. This
+    replaces "no instrument change before the 10th run", which assumed none would be needed.
 
 ### 4.2 Wall time
 
 `start → approval`, split **queue time** vs **exec time**; gate-wait is reported in its own column
 and **excluded** from exec time. Arm B's gate-wait is real history (Mateusz was at those gates
 too) and must not be silently dropped — it is the honest cost of HITL in both arms.
+
+**Frontman-tooling stall — third column, rule settled before it can matter (2026-10-08, §7 Q7).** Time the
+run spends parked because the Supervisor's own tooling refused (permission denials, harness
+restarts) is neither exec time nor gate-wait: it is an artefact of the measurement harness and has
+no counterpart in arm B. It is reported in its own column **and counted in the go/no-go exec
+figure**. That is the **conservative** direction — the stall makes arm A slower, so including it
+can only cost arm A the axis, never buy it a false GO — and it is the **same rule as cost (§7
+Q4)**: the main number is the variant that cannot flatter the measured arm. The exclusion is
+printed alongside as an explicit sensitivity line ("frontman stall excluded"), never instead of the
+main figure and never silently. Both numbers are mandatory in the report.
+
+First occurrence: run `arma-01r2`, 35 min between the `plan.dor` resolution (`13:39:45Z`) and the
+resume (`14:14:27Z`) — an auto-mode permission deadlock, in an attempt that is excluded anyway
+(§3). The rule is written now so that no counted run ever has its stall treatment decided after
+the fact.
 
 ### 4.3 Quality — **descriptive only, not a go/no-go axis** (superseded 2026-10-07, see §7 Q3)
 
@@ -224,6 +336,88 @@ Basis for deciding rather than re-relaying: the fork had already been put to Mat
 options; he delegated the choice. The change is a **withdrawal**, which is the safe direction —
 it makes GO harder to reach and invents no new metric, no new threshold and no new rule shape.
 
+### Q4 — attribution of the Supervisor's own turns → **A (Mateusz, 2026-10-08)**
+
+*"Koszt ramienia A — decyzja: A."* The conservative variant stands as the main number:
+`usage.cost` of nodes **plus** the Supervisor's turns doing work that arm B's `costUsd` contains
+(`plan.spec`, `[J] A0` resolutions), priced from the telemetry window. "Nodes only" is an explicit
+sensitivity line. Gate-relay turns are a separate line, outside the main number in **both** arms.
+Operational definition in §4.1.
+
+### Q5 — `plan.spec` as a separate PLAN child → **yes (Supervisor's call, 2026-10-08, delegated)**
+
+Mateusz: *"Rozważ plan.spec jako osobne dziecko PLAN (wyceniony costUsd, symetria z B) — wybierz
+teraz, zapisz w protokole i trzymaj dla wszystkich 10 runów."* Booked as `costUsd` of a PLAN child
+in the run's `children.json`, held identically for all 10.
+
+Basis: arm B's number **is** a plan child's `costUsd`, and it covers spec authoring. Booking
+`plan.spec` the same way makes the comparison one quantity of one kind — a plan child's priced
+`costUsd`, arm A against arm B. The alternative prices `plan.spec` as a session turn and arm B's
+equivalent work as a child, i.e. it compares two pricing mechanisms for the same work.
+
+### Q6 — where the `[G]` observability patch lands → **after the 10th run (Supervisor's call, 2026-10-08)**
+
+Two windows were offered: before continuing run `arma-01r2`, or after the 10th run. Chosen:
+**after run 10.**
+
+- The standing rule is that run A never waits on a Lane-B child (sync 2026-10-08, item 3), and
+  landing the patch first parks run `arma-01r2` across the whole dev → REVIEW → TEST → merge-gate
+  → PR → merge chain.
+- The argument for landing early does not survive the runner's own logic. It runs: a `[G]` failure
+  with no event line understates arm A and biases toward a **false GO**. But `[G]` has no retry
+  and `failed` is terminal on resume (`graph-runner.mjs:141`, `TERMINAL_STATUSES`) — so any run
+  carrying an unrecorded failed `[G]` **dies and enters the §3 exclusions bucket**, which is never
+  in a median. A completed run cannot hide one. The patch's cost-accounting value for the
+  go/no-go is therefore nil; its value is diagnostic (provider error body, serving provider) and
+  it lands for future campaigns.
+- Neither change touches a go/no-go axis (patch contract AC4: request body and returned output
+  byte-identical), so the window choice is about instrument uniformity, not about the numbers.
+- Net: all 10 runs share one instrument and one runner sha, with no straddle across a patch.
+
+### Q7 — frontman-tooling stall attribution → **A (Mateusz, 2026-10-08)**
+
+*"liczba główna = wariant ostrożny, czyli postój WLICZONY w czas ramienia A. Wariant z wyłączeniem
+idzie jako jawna linia wrażliwości. Ta sama zasada co przy koszcie."*
+
+The stall (§4.2) is **in** the go/no-go exec figure. The exclusion is a reported sensitivity line.
+This is the conservative direction and it is deliberately the same shape as Q4's cost rule: **the
+main number is whichever variant cannot flatter arm A.** Cost books the Supervisor's arm-B-shaped
+turns *in*; time books the harness's arm-B-absent stalls *in*. A metric that credited arm A for the
+measurement harness's own failures would compare arm A plus a free lunch against arm B's real
+history.
+
+### Q8 — provider pinning is routing, not a model change → **named explicitly (FOC-691)**
+
+FOC-691 stands untouched: **no model and no tier change for `plan.intent`.** Pinning an OpenRouter
+upstream (provider order + `allow_fallbacks: false`) is a **routing** change — the model id
+(`z-ai/glm-5.3-flash` via `routing.plan.discovery`) and the tier are byte-identical before and
+after. It is nonetheless a change to what serves the request, so it is named explicitly here and in
+`docs/STATE.md`, and it is subject to Q9's instrument boundary exactly like any other runner edit.
+
+### Q9 — FOC-198 deferral and the provider-pinning trigger → **Supervisor's call, ordered by Mateusz (2026-10-08)**
+
+Sequence **1 → 3 → 2**, not 1 → 2 → 3:
+
+- **(1) one diagnostic `plan.intent` call** through `createDefaultGenerator` with a capturing
+  `fetchImpl`, writing to no run — done 2026-10-08T15:30Z, see `docs/STATE.md`.
+- **(3) corpus entry 2 (FOC-236) is next.** FOC-198 is **not** dropped and **not** swapped: its
+  `armARuns` status becomes `deferred: infra (provider routing)` and it returns at the end of the
+  campaign.
+- **(2) provider pinning is the response to a repeated failure only** — it is armed if and only if
+  FOC-236 fails the same way (the same `provider_error` HTTP 400 on `plan.intent`).
+
+**If FOC-198 still will not start at the end of the campaign:** the main number counts it as an
+**arm-A failure** (the conservative variant — a run that cannot start is not a cheap win), and the
+result computed without it is reported as an explicit sensitivity line. **No corpus swap.** The
+corpus was frozen before any arm-A run (§3) and is not reopened on outcome.
+
+**Instrument boundary if (2) fires — hard rule.** Every counted arm-A run executes on the pinned
+runner version; its `armARuns[].runnerSha` is recorded. Earlier attempts stay `excluded (C1)`.
+**Versions are never mixed inside a counted set.** The change goes the full track — branch →
+REVIEW → TEST → PR → merge — and **never lands in the middle of an active run**. The `[G]`
+observability patch (old option C) rides the **same** change when (2) fires; standalone it waits
+until after the 10th run (Q6).
+
 ### Corpus → **confirmed**
 §3.2 list of 10 stands. No swaps.
 
@@ -251,3 +445,11 @@ it makes GO harder to reach and invents no new metric, no new threshold and no n
 - **He is in both loops.** His gate answers in arm A are informed by having seen these issues
   before. Unavoidable in a replay; stated, not corrected.
 - **`costUsdReported` is never a number in this report** — it is FOC-165 evidence and nothing else.
+- **`z-ai/glm-5.3-flash` is multi-homed, and OpenRouter fails over between upstreams.** Same
+  request, same model id, same schema: Fireworks returned 200, while CoreWeave → 429 → failover →
+  Sail Research returned 400 `invalid_request_error` (probes 2026-10-08,
+  `.state/foc-461-armA-probe-nits.md`, `.state/foc-477-armA/arma-01-attempt-1-failure.md`). Arm
+  A's cost and time are therefore conditioned on routing the protocol does not control. All 10
+  runs execute on the pre-patch runner (§7 Q6), which records no serving provider, so per-run
+  upstream identity is unmeasured; the threat is stated from probe evidence and cannot be
+  corrected per pair.

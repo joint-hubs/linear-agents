@@ -10,11 +10,124 @@
     "A": "PLAN graph via scripts/graph-runner.mjs on current config/graph.json",
     "B": "historical squad: plan child from .state/supervisor/<run>/children.json"
   },
+  "costAttribution": "docs/plans/foc-477-measurement-protocol.md §4.1 + §7 Q4/Q5 — decided 2026-10-08 (Mateusz: A; plan.spec as a PLAN child = Supervisor's delegated call). Main = node usage.cost + frontman turns doing arm-B-contained work; 'nodes only' = sensitivity line; gate-relay turns = separate line outside both arms' numbers",
+  "runnerShaPolicy": "scripts/graph-runner.mjs blob sha recorded per arm-A run in armARuns[].runnerSha; the [G] observability patch lands AFTER the 10th run (§7 Q6) — all 10 runs share one instrument",
+  "stallAttribution": "§7 Q7 (Mateusz 2026-10-08): frontman-tooling stall is INCLUDED in the go/no-go exec figure (conservative). The exclusion is an explicit sensitivity line only. Same shape as costAttribution (Q4). Gate-wait stays excluded from exec and reported in its own column (§4.2, unchanged).",
+  "providerPinning": "§7 Q8 — provider pinning (upstream order + allow_fallbacks:false) is ROUTING, not a model or tier change. FOC-691 stands: no model/tier change for plan.intent. Named explicitly wherever the runner version is named.",
+  "foc198Policy": "§7 Q9 — FOC-198 is deferred, not dropped and not swapped: armAStatus 'deferred: infra (provider routing)', returns at the end of the campaign. If it still will not start then, the MAIN number counts it as an arm-A failure (conservative) and the result without it is an explicit sensitivity line. No corpus swap — the corpus was frozen before any arm-A run.",
+  "instrumentGaps": "§4.1 'Implementation status at run 2' — foc-477-measure.mjs implements neither Q4 (usage.cost from decisions.jsonl), nor arm-A walk time (graph-steps.jsonl), nor Q7 (stall vs gate-wait split). Report-side only: every run records the raw data each rule needs. Implementing them is a change to foc-477-measure.mjs on the full track (branch -> REVIEW -> TEST -> PR -> merge) BEFORE the report. graph-runner.mjs is untouched, so the Q9 instrument boundary is unaffected.",
+  "egressScreenScan20261008": {
+    "kind": "corpus-wide scan of the EXACT plan.dor state bytes through scanEgress — diagnostic only, wrote no run, mutated no Linear state",
+    "at": "2026-10-08T16:13:34.891Z",
+    "tool": ".state/foc-477-armA/scan-corpus-egress.mjs",
+    "trigger": "run 2 (FOC-236) stopped at plan.dor: EGRESS_BLOCKED, tier-3 handed-off to the frontman, 2 secret-shaped hit(s)",
+    "verdict": "FALSE POSITIVE on natural-language kebab-case Linear URL slugs. No secret value is present in any corpus input. Family E (high-entropy) relaxed branch fires at run length >= 32 AND Shannon >= 3.9 bits/char AND >= 3 char classes; a hyphenated English slug counts the hyphen as its third class.",
+    "perIssueHits": { "FOC-198": 0, "FOC-236": 2, "FOC-436": 0, "FOC-240": 6, "FOC-239": 4, "FOC-132": 0, "FOC-136": 0, "FOC-403": 0, "FOC-550": 0, "FOC-688": 0 },
+    "distinctFlaggedStrings": [
+      "foc-143-r5-red-team-ip-extraction-attempt-on-deployed-protected-stack",
+      "foc-143-r6-raise-the-bar-crown-jewel-logic-server-side-key",
+      "foc-209-f12-set-document-content-encryption-key-docs-at-rest",
+      "foc-209-f8-installer-chmod-600-env-640-realm-json-world-readable"
+    ],
+    "shape": "58-69 chars, lowercase + digits + hyphen = 3 classes, 3.9-4.2 bits/char",
+    "status": "DECIDED 2026-10-08 by Mateusz — variant A, narrow: an exception ONLY for the <slug> segment of a Linear issue URL. See egressScreenFix20261008. No unilateral change had been made here.",
+    "sideObservation": "composeState (graph-runner.mjs:765) JSON.stringify-s the read map into ONE line, which blinds the line-anchored family-C env-assignment detector for [J] states. The screen is therefore under-firing on [J] inputs. Reported, not fixed — same neverCovers boundary. Routed out of FOC-477 by Mateusz 2026-10-08: a separate task, child of FOC-466, bug, High; it must not change the instrument mid-campaign."
+  },
+  "inboxEntryEmpty20261008": {
+    "kind": "input-fidelity finding from building run 2's inputs and scanning the corpus",
+    "at": "2026-10-08T16:13:34.891Z",
+    "affected": ["FOC-132", "FOC-136"],
+    "fact": "Linear description is the empty string for both (descChars 0). The only prose on those issues is historical run-completion comments (arm-B writeback), not a task brief.",
+    "consequence": "composeIntentInputs (plan-intent.mjs:235-240) throws TypedError('invalid_input') when the anchor set is empty — 'carries no text ... nothing to interpret'. plan.intent cannot run on an empty inbox.entry, so those two entries fail before any model call.",
+    "landedContract": "plan-intent.mjs:193-194 accepts EITHER the dictated entry text (string) OR a composed payload object. plan-intent-eval.mjs:19-28 (FOC-515, mirroring the plan.ac eval's decided point 4) uses {issueId, title, scopeSummary} with the AC and DoD sections and the <!-- fenix-roadmap-... --> block stripped.",
+    "armBComparability": "Arm B's squads for these two were launched from a hand-written kickoff, not from an issue description. An empty inbox.entry makes arm A incomparable to arm B on those entries.",
+    "status": "DECIDED 2026-10-08 by Mateusz — variant D (arm A sees what arm B saw, criterion C4). Recovered literally from the run record; the {issueId, title, scopeSummary} fallback (variant A) is NOT needed. See inboxEntryRecovery20261008. Variant B (that shape for all 10) rejected."
+  },
+  "egressScreenFix20261008": {
+    "kind": "instrument change — decided by Mateusz 2026-10-08, variant A in a narrow scope. Lands on the full track (branch -> REVIEW -> TEST -> PR -> merge) outside an active run window.",
+    "scope": "An exception for the <slug> segment of a Linear issue URL ONLY: https://linear.app/<workspace>/issue/<KLUCZ-N>/<slug>. The slug is derived from the issue title and is not a secret. The SAME string outside such a URL is still caught exactly as today. NO general loosening of family E.",
+    "requiredTests": [
+      "POSITIVE: the 4 real corpus slugs pass",
+      "NEGATIVE 1: a secret of the same shape outside a Linear URL is still blocked",
+      "NEGATIVE 2: a secret appended to a Linear URL (e.g. ?token=...) is still blocked",
+      "NEGATIVE 3: a key in the path of a URL on another domain is still blocked"
+    ],
+    "instrumentBoundary": "The fix's sha IS the instrument boundary. Run 2 (FOC-236) restarts from scratch on that version; nothing before it counts. The two `excluded (C1)` attempts and run 2's EGRESS_BLOCKED stop all sit BEFORE the boundary and are excluded. All counted arm-A runs therefore share one runner + one screen version. This replaces the earlier 'no instrument change before the 10th run' freeze statement, which assumed no change would be needed.",
+    "suiteConstraint": "scripts/docs-count-guard.test.mjs requires docs' stated test-file count to match the real one (115 at 2026-10-08). The new cases go into the EXISTING scripts/egress-screen.test.mjs — a new test file would break the guard.",
+    "routedOut": "The composeState one-line flattening (graph-runner.mjs:765) is NOT part of this fix and NOT part of FOC-477. Separate task, child of FOC-466, bug, High (Mateusz 2026-10-08).",
+    "status": "IN FLIGHT on the full track at the time of this record"
+  },
+  "inboxEntryRecovery20261008": {
+    "kind": "Q2 variant D recovery — the arm-A inbox.entry for FOC-132 and FOC-136, reproduced literally from the run record",
+    "at": "2026-10-08T17:07:57.856Z",
+    "tool": ".state/foc-477-armA/scan-recovered-briefs.mjs",
+    "recovered": "LITERALLY, from disk — variant A ({issueId, title, scopeSummary}) is NOT needed. The briefs survive as the --prompt-file each arm-B PLAN child was spawned with, and each spawn's pinned-state check `prompt-file-readable` names the path, so the provenance chain is: spawn record -> check -> file bytes.",
+    "perIssue": {
+      "FOC-132": {
+        "armBRunId": "2026-09-20T15-48-27-928-supervisor-01c9",
+        "armBChildId": "plan-1",
+        "sourcePath": "C:\\Users\\mateu\\Documents\\GitHub\\joint-flows\\.state\\foc132-plan-kickoff.md",
+        "evidence": "pinnedStateVerification.checks[prompt-file-readable] in .state/supervisor/2026-09-20T15-48-27-928-supervisor-01c9/children.json",
+        "bytes": 4207, "chars": 4164, "lines": 78,
+        "sha256": "ef93b617dd24db8382a0ad0c545cc531137b0c6df5b8deeb2a0c4ab1293b5267",
+        "egressHits": 0
+      },
+      "FOC-136": {
+        "armBRunId": "2026-09-20T12-18-04-854-supervisor-3e29",
+        "armBChildId": "plan-1",
+        "sourcePath": "C:\\Users\\mateu\\Documents\\GitHub\\joint-flows\\.state\\foc136-plan-kickoff.md",
+        "evidence": "pinnedStateVerification.checks[prompt-file-readable] in .state/supervisor/2026-09-20T12-18-04-854-supervisor-3e29/children.json",
+        "bytes": 4427, "chars": 4374, "lines": 78,
+        "sha256": "2a7b924782be99db63765a3c18c06a1a7719d21291ce9664d58b75cc24b21d4d",
+        "egressHits": 0
+      }
+    },
+    "whatIsExcludedAndWhy": "ONLY the PINNED-STATE prologue the launcher prepends at spawn is excluded from inbox.entry. That prologue carries repo/worktree/branch/base-revision/run ids — harness chrome that arm A models separately as `repoState.pinned` ({branch, head}), so including it would double-count and would leak run ids into the model prompt. Everything the hand-written kickoff file itself contains is reproduced byte-for-byte, INCLUDING the squad-role framing at its top ('You are the PLAN child ... emit ONE supervisor gate').",
+    "chromeCaveat": "That squad-role framing is meaningless-to-misleading for arm A's plan.intent (it is a graph node, not a squad child). It is kept anyway, and the excerpted-brief variant is the SENSITIVITY line. Reason: criterion C4 says arm A sees what arm B saw; and keeping the extra tokens can only make arm A look worse on both axes, never better — so the whole file is the conservative-direction main number (§4.2 / Q7 rule), exactly as with the stall rule.",
+    "bodyNotCopiedIntoRepo": "The brief bodies are NOT stored in this file or in the repo: they contain a customer host address and other customer context. The record carries the source path + sha256 + byte counts instead, which is what 'ze zrodlem zapisanym w foc-477-runs.json' requires and is enough to prove later that the run input matched byte-for-byte.",
+    "egress": "Both recovered briefs CLEAR the egress screen (0 hits on the exact plan.dor state bytes) — verified 2026-10-08T17:07:57.856Z. Runs 6 and 7 are therefore unblocked on the screen axis as well as the anchor axis.",
+    "armBRepoNote": "Both arm-B PLAN children ran in the joint-flows repo (worktrees la-wt\\joint-flows\\foc-132-plan etc.), baseRevision 54bbfc01 (FOC-132) / 5e94824e (FOC-136) — NOT linear-agents. Named, not changed; the repoState.pinned convention (§4.1) already records arm A's anchor as the ORCHESTRATOR checkout and that is unchanged."
+  },
+  "diagnostics": {
+    "planIntent20261008": {
+      "kind": "one diagnostic plan.intent call through createDefaultGenerator with a capturing fetchImpl (§7 Q9 step 1); wrote to no run",
+      "at": "2026-10-08T15:30:53Z",
+      "httpStatus": 200,
+      "upstreamProvider": "Fireworks",
+      "modelServed": "z-ai/glm-5.3-flash",
+      "responseId": "gen-1791473267-vit8Vcpq5FgekMwjEowD",
+      "usage": { "promptTokens": 1359, "completionTokens": 24214, "reasoningTokens": 21619, "totalTokens": 25573, "costUsd": 0.018466275 },
+      "output": "valid plan.intent shape — goal, why, mapVersion 1, 11 interpretations",
+      "inputIdentity": "message 5851 chars == the production message length recorded for attempt 1; built by createDefaultGenerator itself from inputs-01-foc198.json + the plan.dor done output; registry prompt 3448 chars unchanged",
+      "note": "the hash 2870f05f144602e794b5812ef358008a4a4b5b505f90d54f37d36b26f1c1dc21 recorded under the excluded attempts is the plan.dor seam-call inputsHash (pinnedModel typesafe/jev-1.13), NOT a plan.intent message hash — the failed plan.intent call wrote no event line (FOC-461 nit 2), so no stored hash of that message exists"
+    }
+  },
+  "armARuns": [
+    {
+      "issue": "FOC-198",
+      "attempt": 1,
+      "runId": "2026-10-08-supervisor-foc477-arma-01-foc198",
+      "runnerSha": "a1f8577e328fd94bf6f5f52fd70b3e02db5fcdc8",
+      "headSha": "8fd0e7802b8a7fef3db376ece02713f70caaecc8",
+      "status": "excluded (C1)",
+      "issueStatus": "deferred: infra (provider routing)"
+    },
+    {
+      "issue": "FOC-198",
+      "attempt": 2,
+      "runId": "2026-10-08-supervisor-foc477-arma-01r2-foc198",
+      "runnerSha": "a1f8577e328fd94bf6f5f52fd70b3e02db5fcdc8",
+      "headSha": "8fd0e7802b8a7fef3db376ece02713f70caaecc8",
+      "status": "excluded (C1)",
+      "issueStatus": "deferred: infra (provider routing)"
+    }
+  ],
   "corpus": [
     {
       "issue": "FOC-198",
       "estimate": 5,
       "shape": "spike / UX + PRD",
+      "armAStatus": "deferred: infra (provider routing)",
       "armB": {
         "runId": "20260903-supervisor-foc-198",
         "childId": "plan-1",
@@ -167,6 +280,16 @@
       "issue": "FOC-136/a38f",
       "criterion": "C1",
       "reason": "stopped (child killed, 1 turn, $0) — later run 3e29 is the usable baseline"
+    },
+    {
+      "issue": "FOC-198/arma-01-a1",
+      "criterion": "C1",
+      "reason": "arm-A attempt 1 stopped (plan.intent failed on a provider transient: CoreWeave 429 -> failover -> Sail Research 400) — $0.000039102 priced, 1 decision event, run 2026-10-08-supervisor-foc477-arma-01-foc198. Re-run authorised by Mateusz 2026-10-08 (option A). Corpus entry 1 survives; attempt 2 = run 2026-10-08-supervisor-foc477-arma-01r2-foc198"
+    },
+    {
+      "issue": "FOC-198/arma-01r2-a2",
+      "criterion": "C1",
+      "reason": "arm-A attempt 2 stopped — plan.intent failed again with the identical provider_error HTTP 400. Input hash 2870f05f144602e794b5812ef358008a4a4b5b505f90d54f37d36b26f1c1dc21 identical to attempt 1 and plan.dor usage 931/21/$0.000039102 identical, so the only free variable is OpenRouter upstream routing. 1 decision event $0.000039102; the failed plan.intent call wrote no event line (instrument defect — FOC-461 nit 2). Second failure of the same type: frontman safety limit reached, escalated to Mateusz, no third attempt without his answer"
     },
     {
       "issue": "FOC-208",
