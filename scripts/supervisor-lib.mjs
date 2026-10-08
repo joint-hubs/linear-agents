@@ -327,6 +327,48 @@ export function writeWakeAck(runId, seq) {
   return ackedThrough;
 }
 
+// ── waker lease ──────────────────────────────────────────────────────────────
+//
+// The queue is a file, not an alarm: nothing re-enters an idle Supervisor
+// session when a row lands. supervisor-wake.mjs (a Stop hook with asyncRewake)
+// is the alarm — it watches the queue in the background and exits 2 on a new
+// row, which the harness turns into a wake-up. Every turn end starts one, and
+// the harness does not deduplicate firings, so the waker keeps a lease:
+//
+//   waker.json = { pid, sessionId, startedAt, heartbeatAt, firedThrough }
+//
+// A lease is alive while its heartbeat is fresh — nobody probes the pid. The
+// session id scopes it: a fresh lease of the SAME session means a waker is
+// already on duty; a different session (a restarted Supervisor) takes over, so
+// an orphan of a closed session cannot keep the new one asleep. firedThrough is
+// the highest seq any waker has woken the session for; it survives takeovers so
+// one row never wakes twice.
+//
+// Writer discipline: waker.json is written ONLY by supervisor-wake.mjs.
+export const wakerPath = (runId) => join(runDir(runId), "waker.json");
+
+// A waker writes its heartbeat once per poll (1 s by default); 15 s of silence
+// means it is gone.
+export const WAKER_LEASE_STALE_MS = 15_000;
+
+/** The waker lease, or null when absent or unreadable. Never throws. */
+export function readWakerLease(runId) {
+  const lease = readJsonOr(wakerPath(runId), null);
+  return lease && typeof lease === "object" && !Array.isArray(lease) ? lease : null;
+}
+
+/**
+ * "alive" | "ended" | "stale" | "absent". `ended` = the last waker exited on
+ * its own (woke the session, or nothing was live); `stale` = its heartbeat
+ * stopped without an exit (killed). Only `alive` means a waker is on duty.
+ */
+export function wakerState(lease, now = Date.now(), staleMs = WAKER_LEASE_STALE_MS) {
+  if (!lease) return "absent";
+  if (lease.endedAt) return "ended";
+  const beat = Date.parse(lease.heartbeatAt ?? "");
+  return Number.isFinite(beat) && now - beat <= staleMs ? "alive" : "stale";
+}
+
 // ── stop-hook turn-end guard (FOC-609) ───────────────────────────────────────
 //
 // When the Supervisor's session tries to end its turn, the Stop hook

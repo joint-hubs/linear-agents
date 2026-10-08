@@ -171,6 +171,12 @@
             "type": "command",
             "command": "node \"$LA_ROOT/scripts/supervisor-guard.mjs\"",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node \"$LA_ROOT/scripts/supervisor-wake.mjs\"",
+            "asyncRewake": true,
+            "timeout": 21600
           }
         ]
       }
