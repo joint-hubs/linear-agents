@@ -340,6 +340,7 @@ const neverStarted = [...parallelRun.neverStarted, ...serialRun.neverStarted].so
 // only for failures (passes are verified by exit code; use the file's own run
 // to see its full output).
 let passed = 0;
+const degradedStates = []; // SECSCAN_STATE lines from passing files (FOC-667)
 const failedFiles = [];
 for (const r of finished) {
   if (r.killed) {
@@ -349,6 +350,18 @@ for (const r of finished) {
   if (r.code === 0) {
     passed++;
     console.log(`  ✓ ${r.file} (${r.duration}ms)`);
+    // FOC-667: a passing file may report one honest degraded state (e.g.
+    // security-scan.test.mjs running with the semgrep scanner blocked by
+    // application control). Surface its SECSCAN_STATE line next to the pass
+    // row so the pass count never reads as unqualified; the exit code stays 0
+    // — a blocked scanner is one honest state, not a failure.
+    for (const line of r.out.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("SECSCAN_STATE:")) {
+        console.log(`      ${trimmed}`);
+        degradedStates.push(`${r.file}: ${trimmed}`);
+      }
+    }
   } else {
     failedFiles.push(r);
     const how = r.signal ? `signal ${r.signal}` : `exit ${r.code}`;
@@ -383,6 +396,13 @@ if (slowest.length) {
 
 const ranCount = finished.filter((r) => !r.killed).length;
 console.log(`\n${passed}/${ranCount} passed in ${wallMs}ms.`);
+
+// FOC-667: repeat the degraded states next to the final summary so the last
+// line a reader sees is never an unqualified pass count.
+if (degradedStates.length) {
+  console.log("\nPassing files that reported a degraded-but-honest state (skips are not failures):");
+  for (const s of degradedStates) console.log(`  ${s}`);
+}
 
 const killedCount = finished.filter((r) => r.killed).length;
 const problems = [];

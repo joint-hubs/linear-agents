@@ -25,6 +25,23 @@
  * A scanner that did not run must never look like a pass: an unavailable tool is
  * an explicit "Not scanned" line and a non-zero exit, never a silent clean.
  *
+ * FOC-667 — three scanner states, classified from evidence:
+ *   'ok'          the scanner ran and its version is attested
+ *   'error'       the scanner produced unusable evidence (empty stdout,
+ *                 non-JSON output, hard scan errors, unverifiable version)
+ *   'unavailable' the scanner could not run at all — not installed (ENOENT)
+ *                 or blocked by the environment: Windows application control
+ *                 (WDAC/AppLocker) killing the launcher with exit 127 + policy
+ *                 text, or the OS refusing the spawn (EACCES/EPERM). The block
+ *                 classification is read from the spawn's observable output on
+ *                 EVERY run — never cached — because the same machine flips
+ *                 between blocked and unblocked minutes apart.
+ * A scanner that did not run is 'unavailable', not 'error': the reason names
+ * the environment so REVIEW can quote it verbatim. Exit-code semantics are
+ * unchanged — every non-'ok' state is fail-closed (exit 2 with 0 findings).
+ * JSON tool rows carry a boolean `scanned` (true iff status 'ok') so a
+ * consumer never re-derives it from the reason text.
+ *
  * Scope (default mode, run inside the repo):
  *   every file git tracks or would track (git ls-files --cached --others
  *   --exclude-standard). Binary-looking files (NUL byte in the first 8 KiB) and
@@ -309,6 +326,30 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
     return { tool: 'semgrep', status: 'unavailable', reason, findings: [] };
   }
 
+  // FOC-667: an OS-level block is an environment property, not a scan-evidence
+  // failure — classify it as 'unavailable' with a reason that names the
+  // environment, BEFORE the generic empty-stdout/non-JSON branches so the
+  // specific reason wins. Detection is evidence-driven from this spawn's own
+  // output (WDAC blocking is intermittent on this machine; caching a
+  // "machine has no scanner" fact would be wrong): spawn exit 127, an
+  // application-control policy message in the output (observed Polish WDAC
+  // text or English equivalents), or a spawn refusal (EACCES/EPERM).
+  const policyBlockRe = /zasady kontroli aplikacji|application control|blocked by (application )?control|applocker|wdac/i;
+  const osRefusal = res.error && (res.error.code === 'EACCES' || res.error.code === 'EPERM');
+  const policyHit = policyBlockRe.test(`${res.stderr || ''}\n${res.stdout || ''}`);
+  if (res.status === 127 || osRefusal || policyHit) {
+    const details = [];
+    if (osRefusal) details.push(`spawn error ${res.error.code}`);
+    if (res.status === 127) details.push('spawn exit 127');
+    if (policyHit) details.push('policy text in scanner output');
+    return {
+      tool: 'semgrep',
+      status: 'unavailable',
+      reason: `scanner unavailable — environment (blocked by application control) — ${details.join('; ')}`,
+      findings: [],
+    };
+  }
+
   // Empty stdout is the evidence failure itself, whatever the exit code: no
   // output means no scan happened. Parsing nothing into a fake-clean `{}` is
   // exactly how a dead scanner used to read as a clean one (FOC-576).
@@ -530,6 +571,10 @@ if (isMain) {
       tools: tools.map((t) => ({
         tool: t.tool,
         status: t.status,
+        // FOC-667: 'scanned' is the derived fact a consumer needs — true iff
+        // the scanner actually ran — so no report reader re-derives it from
+        // status/reason text.
+        scanned: t.status === 'ok',
         version: t.version,
         reason: t.reason,
         findingsCount: t.findings.length,

@@ -9,6 +9,23 @@
 // appears in any output (AC4). Fixtures live in temp directories; the real
 // repo tree is scanned once as the end-to-end negative case (secretlint must
 // pass; semgrep must be honest about whatever actually ran).
+//
+// FOC-667 — three scanner states and the skip contract. A scanner is either
+// 'ok' (ran, version attested), 'error' (ran but produced unusable evidence)
+// or 'unavailable' (did not run: not installed, or blocked by the environment
+// — e.g. Windows application control killing the launcher with exit 127 +
+// policy text). The suite gates semgrep-dependent assertions on EVIDENCE from
+// that case's own output: semgrep actually ran iff its report row is a
+// PASS/FAIL row. When it did not run, every semgrep-dependent assertion is
+// reported as a named SKIP carrying the reason from the NOT SCANNED row —
+// never silently dropped, never counted as passed, never an unconditional
+// skip (the WDAC block on this machine is intermittent, so gating is
+// per-case, per-run). Skips are counted separately and summarized in a
+// machine-readable SECSCAN_STATE line the test runner surfaces; the suite
+// exits 0 on skips (they are one honest state, not a failure) and 1 only on
+// real failures. Honesty-shaped asserts (row present and honest, exit-code
+// honesty, "never reported as clean") stay UNCONDITIONAL — they must hold in
+// both worlds.
 
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -38,6 +55,8 @@ const FAKE_AWS_KEY_ID = "AKIA" + ["J7XKQSYQZ4TG", "NB2A"].join("");
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
+let stateReason = null; // first skip reason — feeds the closing SECSCAN_STATE line
 
 function assert(cond, label) {
   if (cond) {
@@ -47,6 +66,26 @@ function assert(cond, label) {
     console.error(`  FAIL: ${label}`);
     failed++;
   }
+}
+
+// FOC-667 skip plumbing: a skip is a named, visible non-execution — never a
+// silent drop, never a pass. The reason always comes from the observed NOT
+// SCANNED row of the very case being gated.
+function skip(label, reason) {
+  console.log(`  SKIP: ${label} — ${reason}`);
+  if (!stateReason) stateReason = reason;
+  skipped++;
+}
+
+// Evidence gate (FOC-667): semgrep actually ran iff its report row is a
+// PASS/FAIL row. When it did not, the reason is lifted from the observed
+// NOT SCANNED row and returned as the skip reason. Gating is per case, from
+// that case's own output — never a cached "machine has no scanner" fact, the
+// block on this machine is intermittent.
+function semgrepBlockReason(out) {
+  if (out.includes("PASS semgrep") || out.includes("FAIL semgrep")) return null;
+  const line = out.split("\n").find((l) => l.includes("NOT SCANNED semgrep"));
+  return line ? line.replace(/^.*NOT SCANNED semgrep — /, "").trim() : "semgrep row missing from output";
 }
 
 function scan(args, opts = {}) {
@@ -64,7 +103,9 @@ function fixtureDir() {
 
 // FOC-576 honesty probes: drive scanSast through a preload stub of the
 // semgrep spawnSync calls — no real semgrep needed (SECSCAN_STUB_MODE picks
-// the simulated failure). The stub intercepts the native 'semgrep' calls AND
+// the simulated failure; FOC-667 adds 'app-control': an application-control
+// policy block — spawn exit 127, empty stdout, policy text on stderr). The
+// stub intercepts the native 'semgrep' calls AND
 // the LA_SEMGREP_CMD executable named via SECSCAN_STUB_CMD (a configured
 // command means the spawned executable is no longer 'semgrep', e.g. 'docker');
 // everything else passes through. Intercept keys moved with the FOC-576 step-2
@@ -94,6 +135,9 @@ function stubScan(args, mode, extraEnv = {}) {
       "    if (process.env.SECSCAN_STUB_MODE === 'empty-stdout') {",
       "      return { status: 2, stdout: '', stderr: 'simulated: launcher blocked', error: undefined };",
       "    }",
+      "    if (process.env.SECSCAN_STUB_MODE === 'app-control') {",
+      "      return { status: 127, stdout: '', stderr: 'Zasady kontroli aplikacji zablokowaly ten plik (simulated WDAC policy block)', error: undefined };",
+      "    }",
       "    if (process.env.SECSCAN_STUB_MODE === 'version-unknown') {",
       "      return { status: 0, stdout: '{\"results\": [], \"errors\": []}', stderr: '' };",
       "    }",
@@ -102,6 +146,9 @@ function stubScan(args, mode, extraEnv = {}) {
       "    }",
       "  }",
       "  if (isScanner && args[args.length - 1] === '--version') {",
+      "    if (process.env.SECSCAN_STUB_MODE === 'app-control') {",
+      "      return { status: 127, stdout: '', stderr: 'Zasady kontroli aplikacji zablokowaly ten plik', error: undefined };",
+      "    }",
       "    if (process.env.SECSCAN_STUB_MODE === 'version-unknown') {",
       "      return { status: 0, stdout: 'not-a-version-line\\n', stderr: '' };",
       "    }",
@@ -114,15 +161,22 @@ function stubScan(args, mode, extraEnv = {}) {
     ].join("\n"),
   );
   try {
-    const res = scan(args, {
-      env: {
-        ...process.env,
-        SECSCAN_STUB_MODE: mode,
-        NODE_OPTIONS: `--require=${stubFile}`,
-        SECSCAN_SPAWN_LOG: logFile,
-        ...extraEnv,
-      },
-    });
+    const childEnv = {
+      ...process.env,
+      SECSCAN_STUB_MODE: mode,
+      NODE_OPTIONS: `--require=${stubFile}`,
+      SECSCAN_SPAWN_LOG: logFile,
+      // FOC-667: the stub cases exercise the native semgrep path unless they
+      // explicitly configure a command via extraEnv — pin the var unset so an
+      // outer LA_SEMGREP_CMD (e.g. a forced-unavailable verification run)
+      // cannot reroute the spawn the stub is supposed to intercept.
+      LA_SEMGREP_CMD: undefined,
+      ...extraEnv,
+    };
+    for (const k of Object.keys(childEnv)) {
+      if (childEnv[k] === undefined) delete childEnv[k];
+    }
+    const res = scan(args, { env: childEnv });
     let log = [];
     try {
       log = readFileSync(logFile, "utf-8")
@@ -158,10 +212,18 @@ console.log("positive case: planted secret + eval → exit 1, rows named, values
       ].join("\n"),
     );
     const res = scan(["--root", dir]);
+    // Exit 1 already holds when secretlint findings exist (loudest fact wins),
+    // so it is unconditional; only the SAST detection itself needs a running
+    // scanner (FOC-667).
     assert(res.status === 1, `exit 1 on findings (got ${res.status})`);
     assert(res.out.includes("[secretlint] src/app.js:1 @secretlint/secretlint-rule-aws"), "secretlint names AWS secret at file:line");
     assert(res.out.includes("@secretlint/secretlint-rule-github"), "secretlint catches GitHub PAT");
-    assert(res.out.includes("security.eval-usage"), "semgrep catches eval() usage");
+    const evalGate = semgrepBlockReason(res.out);
+    if (evalGate === null) {
+      assert(res.out.includes("security.eval-usage"), "semgrep catches eval() usage");
+    } else {
+      skip("semgrep catches eval() usage", evalGate);
+    }
     assert(!res.out.includes(FAKE_AWS_SECRET), "redaction: AWS secret value not in stdout");
     assert(!res.out.includes(FAKE_GITHUB_PAT), "redaction: GitHub PAT value not in stdout");
     assert(!res.out.includes(FAKE_AWS_KEY_ID), "redaction: AWS key ID value not in stdout");
@@ -277,6 +339,51 @@ console.log("honesty (FOC-576): semgrep version unknown → error row, exit 2, n
       sg && /version could not be determined/.test(sg.reason || ""),
       "reason names the unverifiable scanner version",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("honesty (FOC-667): application-control block → unavailable row with environment reason, exit 2");
+{
+  // Deterministic: the stub simulates WDAC killing the pysemgrep launcher —
+  // spawn exit 127, empty stdout, application-control policy text on stderr —
+  // so the classification is proven without relying on the machine's
+  // intermittent real block. The row must be 'unavailable' with a reason that
+  // names the environment (checked BEFORE the generic empty-stdout branch),
+  // the JSON row must carry scanned=false with no version claim, and
+  // secretlint must be unaffected.
+  const dir = fixtureDir();
+  try {
+    writeFileSync(join(dir, "clean.js"), "const x = 1;\n");
+    // Human rows come from a plain run (--json suppresses humanReport); the
+    // JSON rows from a second --json run of the same simulated block.
+    const human = stubScan(["--root", dir], "app-control");
+    assert(human.status === 2, `exit 2 when the scanner is blocked by application control (got ${human.status})`);
+    assert(
+      human.out.includes("NOT SCANNED semgrep — scanner unavailable — environment (blocked by application control)"),
+      "human row names the environment block",
+    );
+    assert(human.out.includes("never reported as clean"), "incomplete-evidence statement printed");
+    assert(human.out.includes("PASS secretlint"), "secretlint still reports normally");
+    assert(!human.out.includes("PASS semgrep"), "no PASS row for a blocked scanner");
+    const res = stubScan(["--root", dir, "--json"], "app-control");
+    let report = null;
+    try {
+      report = JSON.parse(res.out);
+    } catch (e) {
+      report = null;
+    }
+    const sg = report && report.tools.find((t) => t.tool === "semgrep");
+    assert(sg && sg.status === "unavailable", "blocked scanner row status=unavailable, not error");
+    assert(sg && sg.scanned === false, "blocked scanner JSON row carries scanned=false");
+    assert(sg && !sg.version, "blocked scanner row makes no version claim");
+    assert(
+      sg && /application control/i.test(sg.reason || "") && !/produced no output/.test(sg.reason || ""),
+      "reason names the environment block, not the generic no-output text",
+    );
+    const sl = report && report.tools.find((t) => t.tool === "secretlint");
+    assert(sl && sl.status === "ok" && sl.scanned === true, "secretlint row unaffected, scanned=true");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -429,8 +536,15 @@ console.log("taint precision: repo-standard schema interpolation is NOT flagged"
     // FOC-576: only a running scanner can prove non-flagging. Whatever semgrep's
     // state, the fixture must never come back FLAGGED, and the row must be
     // honest — a dead semgrep exits 2 as NOT SCANNED, it never reads as clean.
+    // FOC-667: the exit-code honesty assert stays unconditional; the
+    // non-flagging row assert is evidence-shaped and skips without a scanner.
     assert(res.status !== 1, `schema fixture never flagged (exit ${res.status})`);
-    assert(!res.out.includes("[semgrep] src/schema.js"), "no SAST finding row names the schema fixture");
+    const taintGate = semgrepBlockReason(res.out);
+    if (taintGate === null) {
+      assert(!res.out.includes("[semgrep] src/schema.js"), "no SAST finding row names the schema fixture");
+    } else {
+      skip("no SAST finding row names the schema fixture", taintGate);
+    }
     const semgrepPass = res.out.includes("PASS semgrep");
     const semgrepNotScanned = res.out.includes("NOT SCANNED semgrep");
     assert(semgrepPass || semgrepNotScanned, "semgrep row present and honest");
@@ -483,44 +597,61 @@ console.log("ruleset precision: REVIEW round-1 probe forms — flagged vs clean 
     const res = scan(["--root", dir]);
     const ln = (src, prefix) => src.findIndex((l) => l.startsWith(prefix)) + 1;
 
-    assert(res.status === 1, `exit 1 with probe fixture (got ${res.status})`);
-    for (const prefix of [
+    // FOC-667: every assert in this block is evidence-shaped — fire splits and
+    // no-fire splits alike prove nothing without a running scanner. The gate
+    // reads THIS case's own output; when semgrep did not run, each assert
+    // becomes a named SKIP and the labels stay identical for the runs where it
+    // did.
+    const execProbes = [
       'execSync("ping " + host)',
       'exec("ls " + dir2)',
       "execSync(`ping ${host}`)",
       "cp.exec(",
       "child_process.execSync(",
-    ]) {
-      assert(
-        res.out.includes(`src/execprobe.js:${ln(execSrc, prefix)} security.child-process-exec-concat`),
-        `exec probe fires: ${prefix}`,
-      );
-    }
-    assert(
-      !res.out.includes(`src/execprobe.js:${ln(execSrc, 'execSync("ping localhost")')} security.`),
-      "clean exec literal does NOT fire",
-    );
-    for (const prefix of [
+    ];
+    const pathProbes = [
       "path.join(baseDir, req.params.file)",
       "path.resolve(baseDir, request.query.p)",
       "path.join(baseDir, req['file'])",
       "path.join(baseDir, req.file)",
       "path.resolve(baseDir, req.params.file)",
       "path.join(baseDir, req.file, 'sub')",
-    ]) {
+    ];
+    const probeGate = semgrepBlockReason(res.out);
+    if (probeGate === null) {
+      assert(res.status === 1, `exit 1 with probe fixture (got ${res.status})`);
+      for (const prefix of execProbes) {
+        assert(
+          res.out.includes(`src/execprobe.js:${ln(execSrc, prefix)} security.child-process-exec-concat`),
+          `exec probe fires: ${prefix}`,
+        );
+      }
       assert(
-        res.out.includes(`src/pathprobe.js:${ln(pathSrc, prefix)} security.path-join-request-data`),
-        `path probe fires: ${prefix}`,
+        !res.out.includes(`src/execprobe.js:${ln(execSrc, 'execSync("ping localhost")')} security.`),
+        "clean exec literal does NOT fire",
       );
+      for (const prefix of pathProbes) {
+        assert(
+          res.out.includes(`src/pathprobe.js:${ln(pathSrc, prefix)} security.path-join-request-data`),
+          `path probe fires: ${prefix}`,
+        );
+      }
+      assert(
+        !res.out.includes(`src/pathprobe.js:${ln(pathSrc, "path.join(baseDir, 'static'")} security.`),
+        "literal path join does NOT fire",
+      );
+      assert(
+        !res.out.includes(`src/pathprobe.js:${ln(pathSrc, "path.join(baseDir, userChoice)")} security.`),
+        "non-request variable does NOT fire",
+      );
+    } else {
+      skip(`exit 1 with probe fixture (got ${res.status})`, probeGate);
+      for (const prefix of execProbes) skip(`exec probe fires: ${prefix}`, probeGate);
+      skip("clean exec literal does NOT fire", probeGate);
+      for (const prefix of pathProbes) skip(`path probe fires: ${prefix}`, probeGate);
+      skip("literal path join does NOT fire", probeGate);
+      skip("non-request variable does NOT fire", probeGate);
     }
-    assert(
-      !res.out.includes(`src/pathprobe.js:${ln(pathSrc, "path.join(baseDir, 'static'")} security.`),
-      "literal path join does NOT fire",
-    );
-    assert(
-      !res.out.includes(`src/pathprobe.js:${ln(pathSrc, "path.join(baseDir, userChoice)")} security.`),
-      "non-request variable does NOT fire",
-    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -547,5 +678,12 @@ console.log("end-to-end: the real repo tree — secretlint PASS; semgrep row hon
   }
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
+// FOC-667: one machine-readable state line when anything skipped — the test
+// runner surfaces it next to the file's pass row so a suite that ran with a
+// blocked scanner never reads as an unqualified pass. The reason is the one
+// extracted from the observed NOT SCANNED row (first skip).
+if (skipped > 0) {
+  console.log(`\nSECSCAN_STATE: ${stateReason} — skipped ${skipped} assertion(s)`);
+}
+console.log(`\n${passed} passed, ${failed} failed, ${skipped} skipped`);
 if (failed > 0) process.exit(1);
