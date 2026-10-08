@@ -36,6 +36,11 @@
  *                 classification is read from the spawn's observable output on
  *                 EVERY run — never cached — because the same machine flips
  *                 between blocked and unblocked minutes apart.
+ *                 Discriminator: parseable scan evidence wins — the block
+ *                 classification is reachable only when the spawn produced no
+ *                 parseable JSON stdout, so a real finding whose matched
+ *                 source line quotes a policy phrase can never be swallowed
+ *                 by the block label.
  * A scanner that did not run is 'unavailable', not 'error': the reason names
  * the environment so REVIEW can quote it verbatim. Exit-code semantics are
  * unchanged — every non-'ok' state is fail-closed (exit 2 with 0 findings).
@@ -326,34 +331,44 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
     return { tool: 'semgrep', status: 'unavailable', reason, findings: [] };
   }
 
-  // FOC-667: an OS-level block is an environment property, not a scan-evidence
-  // failure — classify it as 'unavailable' with a reason that names the
-  // environment, BEFORE the generic empty-stdout/non-JSON branches so the
-  // specific reason wins. Detection is evidence-driven from this spawn's own
-  // output (WDAC blocking is intermittent on this machine; caching a
-  // "machine has no scanner" fact would be wrong): spawn exit 127, an
-  // application-control policy message in the output (observed Polish WDAC
-  // text or English equivalents), or a spawn refusal (EACCES/EPERM).
+  // FOC-667: an OS-level block (WDAC/AppLocker) is an environment property,
+  // not a scan-evidence failure — classify it as 'unavailable' with a reason
+  // that names the environment. Discriminator (TEST round 2): parseable scan
+  // evidence WINS — blockSignal() is reachable only from the empty-stdout and
+  // non-JSON branches below, never once the stdout parsed as JSON. Semgrep
+  // echoes matched source lines inside its JSON (extra.lines), and source
+  // lines can legitimately quote policy phrases, so testing the whole output
+  // before parsing would let a real finding vanish behind an environmental
+  // excuse. Detection is evidence-driven from this spawn's own output on
+  // every run — never cached (WDAC blocking is intermittent on this
+  // machine): spawn exit 127, an application-control policy message (observed
+  // Polish WDAC text or English equivalents), or a spawn refusal
+  // (EACCES/EPERM).
   const policyBlockRe = /zasady kontroli aplikacji|application control|blocked by (application )?control|applocker|wdac/i;
-  const osRefusal = res.error && (res.error.code === 'EACCES' || res.error.code === 'EPERM');
-  const policyHit = policyBlockRe.test(`${res.stderr || ''}\n${res.stdout || ''}`);
-  if (res.status === 127 || osRefusal || policyHit) {
-    const details = [];
-    if (osRefusal) details.push(`spawn error ${res.error.code}`);
-    if (res.status === 127) details.push('spawn exit 127');
-    if (policyHit) details.push('policy text in scanner output');
-    return {
-      tool: 'semgrep',
-      status: 'unavailable',
-      reason: `scanner unavailable — environment (blocked by application control) — ${details.join('; ')}`,
-      findings: [],
-    };
-  }
+  const blockSignal = () => {
+    const osRefusal = res.error && (res.error.code === 'EACCES' || res.error.code === 'EPERM');
+    const policyHit = policyBlockRe.test(`${res.stderr || ''}\n${res.stdout || ''}`);
+    if (res.status === 127 || osRefusal || policyHit) {
+      const details = [];
+      if (osRefusal) details.push(`spawn error ${res.error.code}`);
+      if (res.status === 127) details.push('spawn exit 127');
+      if (policyHit) details.push('policy text in scanner output');
+      return {
+        tool: 'semgrep',
+        status: 'unavailable',
+        reason: `scanner unavailable — environment (blocked by application control) — ${details.join('; ')}`,
+        findings: [],
+      };
+    }
+    return null;
+  };
 
   // Empty stdout is the evidence failure itself, whatever the exit code: no
   // output means no scan happened. Parsing nothing into a fake-clean `{}` is
   // exactly how a dead scanner used to read as a clean one (FOC-576).
   if (!(res.stdout || '').trim()) {
+    const blocked = blockSignal();
+    if (blocked) return blocked;
     return {
       tool: 'semgrep',
       status: 'error',
@@ -367,6 +382,8 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
   try {
     parsed = JSON.parse(res.stdout);
   } catch (e) {
+    const blocked = blockSignal();
+    if (blocked) return blocked;
     return {
       tool: 'semgrep',
       status: 'error',

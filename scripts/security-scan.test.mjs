@@ -135,6 +135,14 @@ function stubScan(args, mode, extraEnv = {}) {
       "    if (process.env.SECSCAN_STUB_MODE === 'empty-stdout') {",
       "      return { status: 2, stdout: '', stderr: 'simulated: launcher blocked', error: undefined };",
       "    }",
+      "    if (process.env.SECSCAN_STUB_MODE === 'finding-policy-text') {",
+      "      // FOC-667 round 2 regression shape: a REAL finding (exit 0, valid JSON)",
+      "      // whose matched source line quotes an application-control policy",
+      "      // phrase. The discriminator must keep this 'ok' — parseable scan",
+      "      // evidence wins over block classification.",
+      "      const finding = { check_id: 'security.eval-usage', path: 'src/evalprobe.js', start: { line: 1 }, extra: { severity: 'WARNING', lines: { line: '// matched line quoting policy text: blocked by application control policy' } } };",
+      "      return { status: 0, stdout: JSON.stringify({ results: [finding], errors: [] }), stderr: '', error: undefined };",
+      "    }",
       "    if (process.env.SECSCAN_STUB_MODE === 'app-control') {",
       "      return { status: 127, stdout: '', stderr: 'Zasady kontroli aplikacji zablokowaly ten plik (simulated WDAC policy block)', error: undefined };",
       "    }",
@@ -146,6 +154,9 @@ function stubScan(args, mode, extraEnv = {}) {
       "    }",
       "  }",
       "  if (isScanner && args[args.length - 1] === '--version') {",
+      "    if (process.env.SECSCAN_STUB_MODE === 'finding-policy-text') {",
+      "      return { status: 0, stdout: '1.178.0\\n', stderr: '' };",
+      "    }",
       "    if (process.env.SECSCAN_STUB_MODE === 'app-control') {",
       "      return { status: 127, stdout: '', stderr: 'Zasady kontroli aplikacji zablokowaly ten plik', error: undefined };",
       "    }",
@@ -384,6 +395,51 @@ console.log("honesty (FOC-667): application-control block → unavailable row wi
     );
     const sl = report && report.tools.find((t) => t.tool === "secretlint");
     assert(sl && sl.status === "ok" && sl.scanned === true, "secretlint row unaffected, scanned=true");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("honesty (FOC-667): policy text in matched source lines cannot swallow a real finding");
+{
+  // Regression (TEST round 2): the block classifier once tested the WHOLE
+  // scanner output, and semgrep's JSON echoes matched source lines — a real
+  // finding whose line quotes a policy phrase came back 'unavailable' and the
+  // finding vanished behind an environmental excuse. Discriminator: parseable
+  // scan evidence wins — the block classification is reachable only when the
+  // spawn produced no parseable JSON.
+  const dir = fixtureDir();
+  try {
+    mkdirSync(join(dir, "src"));
+    writeFileSync(
+      join(dir, "src", "evalprobe.js"),
+      "// matched line quoting policy text: blocked by application control policy\nconst out = eval(userInput);\n",
+    );
+    const res = stubScan(["--root", dir, "--json"], "finding-policy-text");
+    assert(res.status === 1, `exit 1 with the real finding (got ${res.status})`);
+    let report = null;
+    try {
+      report = JSON.parse(res.out);
+    } catch (e) {
+      report = null;
+    }
+    const sg = report && report.tools.find((t) => t.tool === "semgrep");
+    assert(sg && sg.status === "ok", "finding row status=ok — the scanner ran");
+    assert(sg && sg.scanned === true, "finding row scanned=true");
+    assert(sg && sg.version === "1.178.0", "version attested");
+    assert(sg && sg.findingsCount === 1, "findingsCount 1");
+    assert(
+      sg && sg.findings[0] && sg.findings[0].file === "src/evalprobe.js" && sg.findings[0].line === 1 && sg.findings[0].rule === "security.eval-usage",
+      "finding named with file:line + rule",
+    );
+    assert(!/blocked by application control/i.test(res.out), "no policy-block reason anywhere in the JSON report");
+    assert(!/produced no output/.test(res.out), "no generic no-output reason — a clean ok, not an accident");
+    // Human rows come from a plain run (--json suppresses humanReport).
+    const human = stubScan(["--root", dir], "finding-policy-text");
+    assert(human.status === 1, `human run exits 1 (got ${human.status})`);
+    assert(human.out.includes("FAIL semgrep"), "human row FAIL semgrep");
+    assert(!human.out.includes("NOT SCANNED semgrep"), "no NOT SCANNED semgrep row");
+    assert(!/blocked by application control/i.test(human.out), "no policy-block reason in human output");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
