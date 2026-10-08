@@ -49,6 +49,7 @@ import {
   readHeld,
   readWakeAck,
   readWakeQueue,
+  readWakerLease,
   readRegistry,
   stallSilenceMs,
   addCost,
@@ -60,6 +61,7 @@ import {
   teeAbsPath,
   waitArmedPath,
   wakeQueueMaxSeq,
+  wakerState,
   writeWakeAck,
 } from "./supervisor-lib.mjs";
 
@@ -300,6 +302,17 @@ if (args.briefing) {
           totalRows: rows.length,
           unacked: unacked.map((r) => ({ seq: r.seq, event: r.event, childId: r.childId ?? null })),
         },
+        // Is anyone going to wake this session when the next row lands? Only
+        // `alive` means yes (supervisor-wake.mjs, the asyncRewake Stop hook).
+        waker: (() => {
+          const lease = readWakerLease(runId);
+          return {
+            state: wakerState(lease),
+            heartbeatAt: lease?.heartbeatAt ?? null,
+            firedThrough: lease?.firedThrough ?? null,
+            sessionId: lease?.sessionId ?? null,
+          };
+        })(),
         // Last action per child, from the registry only: the watcher's status,
         // plus when the last turn ended and how. No tee content here — the
         // drain (`--drain --tail n`) is where the events themselves are read.
