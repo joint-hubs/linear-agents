@@ -10,22 +10,28 @@
 // repo tree is scanned once as the end-to-end negative case (secretlint must
 // pass; semgrep must be honest about whatever actually ran).
 //
-// FOC-667 — three scanner states and the skip contract. A scanner is either
-// 'ok' (ran, version attested), 'error' (ran but produced unusable evidence)
-// or 'unavailable' (did not run: not installed, or blocked by the environment
-// — e.g. Windows application control killing the launcher with exit 127 +
-// policy text). The suite gates semgrep-dependent assertions on EVIDENCE from
-// that case's own output: semgrep actually ran iff its report row is a
-// PASS/FAIL row. When it did not run, every semgrep-dependent assertion is
-// reported as a named SKIP carrying the reason from the NOT SCANNED row —
-// never silently dropped, never counted as passed, never an unconditional
-// skip (the WDAC block on this machine is intermittent, so gating is
-// per-case, per-run). Skips are counted separately and summarized in a
-// machine-readable SECSCAN_STATE line the test runner surfaces; the suite
-// exits 0 on skips (they are one honest state, not a failure) and 1 only on
-// real failures. Honesty-shaped asserts (row present and honest, exit-code
-// honesty, "never reported as clean") stay UNCONDITIONAL — they must hold in
-// both worlds.
+// FOC-667 — scanner states and the skip contract. A scanner row is either
+// 'ok' (ran, version attested, evidence complete), 'partial' (the scan
+// produced findings but the spawn carried a structural block signal —
+// exit 127, EACCES/EPERM, policy text on stderr; findings are reported,
+// completeness is NOT attested, scanned:false), 'error' (ran but produced
+// unusable evidence — empty/non-JSON/non-report-shaped output, hard scan
+// errors, unverifiable version) or 'unavailable' (did not run: not
+// installed, or blocked by the environment with no findings to show).
+// Post-parse, only structural signals count — policy text inside parsed
+// stdout is evidence content (semgrep echoes matched source lines) and can
+// never block a healthy scan. The suite gates semgrep-dependent assertions on
+// EVIDENCE from that case's own output: semgrep actually ran iff its report
+// row is a PASS/FAIL row. When it did not run, every semgrep-dependent
+// assertion is reported as a named SKIP carrying the reason from the NOT
+// SCANNED row — never silently dropped, never counted as passed, never an
+// unconditional skip (the WDAC block on this machine is intermittent, so
+// gating is per-case, per-run). Skips are counted separately and summarized
+// in a machine-readable SECSCAN_STATE line the test runner surfaces; the
+// suite exits 0 on skips (they are one honest state, not a failure) and 1
+// only on real failures. Honesty-shaped asserts (row present and honest,
+// exit-code honesty, "never reported as clean") stay UNCONDITIONAL — they
+// must hold in both worlds.
 
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -143,6 +149,42 @@ function stubScan(args, mode, extraEnv = {}) {
       "      const finding = { check_id: 'security.eval-usage', path: 'src/evalprobe.js', start: { line: 1 }, extra: { severity: 'WARNING', lines: { line: '// matched line quoting policy text: blocked by application control policy' } } };",
       "      return { status: 0, stdout: JSON.stringify({ results: [finding], errors: [] }), stderr: '', error: undefined };",
       "    }",
+      "    if (process.env.SECSCAN_STUB_MODE === 'block-clean-json') {",
+      "      // FOC-667 round 3 (TEST probe a/e): blocked spawn (exit 127 + WDAC",
+      "      // policy text on stderr) whose stdout still parses as an EMPTY report —",
+      "      // the round-2 discriminator read this as 'ok' with an attested version.",
+      "      // Post-parse structural signals must close it: findings empty →",
+      "      // 'unavailable', regardless of what the version probe answers.",
+      "      return { status: 127, stdout: '{\"results\":[],\"errors\":[]}', stderr: 'Zasady kontroli aplikacji zablokowaly ten plik (simulated WDAC policy block)', error: undefined };",
+      "    }",
+      "    if (process.env.SECSCAN_STUB_MODE === 'block-finding-json') {",
+      "      // FOC-667 round 3 (TEST probe d): blocked spawn + well-shaped report",
+      "      // WITH a finding → 'partial': findings kept, completeness not attested.",
+      "      const finding = { check_id: 'security.eval-usage', path: 'src/evalprobe.js', start: { line: 1 }, extra: { severity: 'WARNING', lines: { line: 'const out = eval(userInput);' } } };",
+      "      return { status: 127, stdout: JSON.stringify({ results: [finding], errors: [] }), stderr: 'Zasady kontroli aplikacji zablokowaly ten plik (simulated WDAC policy block)', error: undefined };",
+      "    }",
+      "    if (process.env.SECSCAN_STUB_MODE === 'shape-array') {",
+      "      // FOC-667 round 3 (TEST probe b): valid JSON, wrong shape — an array",
+      "      // parsed as {errors: undefined, results: undefined} → fake-clean. Must",
+      "      // be a named 'error', never a clean.",
+      "      return { status: 0, stdout: '[1,2,3]', stderr: '', error: undefined };",
+      "    }",
+      "    if (process.env.SECSCAN_STUB_MODE === 'shape-null') {",
+      "      // FOC-667 round 3 (TEST probe c): JSON.parse('null') returns null —",
+      "      // dereferencing it crashed with an uncaught TypeError. Must be a named",
+      "      // 'error', never a crash.",
+      "      return { status: 0, stdout: 'null', stderr: '', error: undefined };",
+      "    }",
+      "    if (process.env.SECSCAN_STUB_MODE === 'shape-truncated') {",
+      "      // FOC-667 round 3: truncated JSON → non-JSON branch, named reason.",
+      "      return { status: 0, stdout: '{\"results\":', stderr: '', error: undefined };",
+      "    }",
+      "    if (process.env.SECSCAN_STUB_MODE === 'policy-in-stdout-clean-json') {",
+      "      // FOC-667 round 3 discriminator boundary: policy phrase inside the",
+      "      // parsed stdout (semgrep metadata/matched lines) with a healthy spawn",
+      "      // (exit 0, clean stderr) — evidence content, never a block signal.",
+      "      return { status: 0, stdout: '{\"results\":[],\"errors\":[],\"searched_files\":{\"status\":\"ok\",\"message\":\"policy text embedded in scanner output: blocked by application control policy\"}}', stderr: '', error: undefined };",
+      "    }",
       "    if (process.env.SECSCAN_STUB_MODE === 'app-control') {",
       "      return { status: 127, stdout: '', stderr: 'Zasady kontroli aplikacji zablokowaly ten plik (simulated WDAC policy block)', error: undefined };",
       "    }",
@@ -154,6 +196,9 @@ function stubScan(args, mode, extraEnv = {}) {
       "    }",
       "  }",
       "  if (isScanner && args[args.length - 1] === '--version') {",
+      "    if (process.env.SECSCAN_STUB_MODE === 'block-clean-json' || process.env.SECSCAN_STUB_MODE === 'block-finding-json' || process.env.SECSCAN_STUB_MODE === 'policy-in-stdout-clean-json' || process.env.SECSCAN_STUB_MODE === 'shape-array' || process.env.SECSCAN_STUB_MODE === 'shape-null' || process.env.SECSCAN_STUB_MODE === 'shape-truncated') {",
+      "      return { status: 0, stdout: '1.178.0\\n', stderr: '' };",
+      "    }",
       "    if (process.env.SECSCAN_STUB_MODE === 'finding-policy-text') {",
       "      return { status: 0, stdout: '1.178.0\\n', stderr: '' };",
       "    }",
@@ -440,6 +485,157 @@ console.log("honesty (FOC-667): policy text in matched source lines cannot swall
     assert(human.out.includes("FAIL semgrep"), "human row FAIL semgrep");
     assert(!human.out.includes("NOT SCANNED semgrep"), "no NOT SCANNED semgrep row");
     assert(!/blocked by application control/i.test(human.out), "no policy-block reason in human output");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("honesty (FOC-667 round 3): blocked spawn with parseable EMPTY report cannot read as clean");
+{
+  // TEST's headline fail-open probe at 8db87df: spawn blocked (exit 127 +
+  // WDAC policy text on stderr) but stdout parsed as {"results":[],"errors":[]}
+  // → the round-2 discriminator returned 'ok' with an attested version. The
+  // post-parse structural check closes it: findings empty → 'unavailable',
+  // scanned:false, exit 2 — and the healthy --version probe never attests a
+  // scan that never ran (the row carries no version).
+  const dir = fixtureDir();
+  try {
+    writeFileSync(join(dir, "clean.js"), "const x = 1;\n");
+    const human = stubScan(["--root", dir], "block-clean-json");
+    assert(human.status === 2, `exit 2 when a blocked spawn produced no findings (got ${human.status})`);
+    assert(
+      human.out.includes("NOT SCANNED semgrep — scanner unavailable — environment (blocked by application control)"),
+      "human row names the environment block",
+    );
+    assert(human.out.includes("never reported as clean"), "incomplete-evidence statement printed");
+    assert(!human.out.includes("PASS semgrep"), "no PASS row for a blocked spawn");
+    const res = stubScan(["--root", dir, "--json"], "block-clean-json");
+    assert(res.status === 2, `JSON run exits 2 (got ${res.status})`);
+    let report = null;
+    try {
+      report = JSON.parse(res.out);
+    } catch (e) {
+      report = null;
+    }
+    const sg = report && report.tools.find((t) => t.tool === "semgrep");
+    assert(sg && sg.status === "unavailable", "blocked clean-JSON row status=unavailable");
+    assert(sg && sg.scanned === false, "scanned=false — a scan that did not run is never scanned");
+    assert(sg && sg.findingsCount === 0, "findingsCount 0");
+    assert(sg && !sg.version, "healthy --version probe does not attest a scan that never ran");
+    assert(sg && /application control/i.test(sg.reason || ""), "reason names the environment block");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("honesty (FOC-667 round 3): blocked spawn with findings → PARTIAL, findings kept, never clean");
+{
+  // TEST probe d: the scan demonstrably started and produced a finding, but
+  // the spawn carried a structural block signal — evidence completeness is
+  // NOT attested. The finding is reported row by row under an unmistakable
+  // PARTIAL label; scanned stays false; exit 1 via the loudest-fact rule.
+  const dir = fixtureDir();
+  try {
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src", "evalprobe.js"), "const out = eval(userInput);\n");
+    const human = stubScan(["--root", dir], "block-finding-json");
+    assert(human.status === 1, `exit 1 with partial evidence + findings (got ${human.status})`);
+    assert(
+      human.out.includes("PARTIAL semgrep (1.178.0) — 1 finding(s) reported, scan did not complete cleanly"),
+      "human PARTIAL row names the incomplete scan",
+    );
+    assert(human.out.includes("[semgrep] src/evalprobe.js:1 security.eval-usage"), "finding printed with file:line + rule");
+    assert(human.out.includes("partial scan evidence is never a clean verdict"), "partial verdict statement printed");
+    assert(!human.out.includes("NOT SCANNED semgrep"), "findings are not swallowed into NOT SCANNED");
+    assert(!human.out.includes("PASS semgrep"), "partial evidence never reads as a PASS");
+    const res = stubScan(["--root", dir, "--json"], "block-finding-json");
+    assert(res.status === 1, `JSON run exits 1 — loudest fact (got ${res.status})`);
+    let report = null;
+    try {
+      report = JSON.parse(res.out);
+    } catch (e) {
+      report = null;
+    }
+    const sg = report && report.tools.find((t) => t.tool === "semgrep");
+    assert(sg && sg.status === "partial", "row status=partial");
+    assert(sg && sg.scanned === false, "scanned=false — completeness not attested");
+    assert(sg && sg.version === "1.178.0", "version carried when attested");
+    assert(
+      sg && sg.findingsCount === 1 && sg.findings[0].file === "src/evalprobe.js" && sg.findings[0].line === 1 && sg.findings[0].rule === "security.eval-usage",
+      "findings array populated with the named row",
+    );
+    assert(sg && /block signal/.test(sg.reason || ""), "reason names the block signal");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("honesty (FOC-667 round 3): JSON that is not report-shaped is a named error, never a crash, never a clean");
+{
+  // TEST probes b and c: '[1,2,3]' parsed as {errors: undefined,
+  // results: undefined} → fake-clean 'ok'; 'null' crashed with an uncaught
+  // TypeError. Both must be a named 'error' with exit 2. Truncated JSON stays
+  // on the named non-JSON branch.
+  const dir = fixtureDir();
+  try {
+    writeFileSync(join(dir, "clean.js"), "const x = 1;\n");
+    for (const s of [["shape-array", "array"], ["shape-null", "null"]]) {
+      const [mode, label] = s;
+      const res = stubScan(["--root", dir, "--json"], mode);
+      assert(res.status === 2, `exit 2 for ${label} stdout (got ${res.status})`);
+      let report = null;
+      try {
+        report = JSON.parse(res.out);
+      } catch (e) {
+        report = null;
+      }
+      const sg = report && report.tools.find((t) => t.tool === "semgrep");
+      assert(sg && sg.status === "error", `${label} row status=error`);
+      assert(sg && /report-shaped object/.test(sg.reason || ""), `${label} reason names the wrong shape`);
+      assert(!/TypeError/.test(res.err), `no crash stack for ${label}`);
+      assert(!res.out.includes("PASS semgrep"), `${label} never reads as clean`);
+    }
+    const trunc = stubScan(["--root", dir, "--json"], "shape-truncated");
+    assert(trunc.status === 2, `exit 2 for truncated JSON (got ${trunc.status})`);
+    let truncReport = null;
+    try {
+      truncReport = JSON.parse(trunc.out);
+    } catch (e) {
+      truncReport = null;
+    }
+    const tsg = truncReport && truncReport.tools.find((t) => t.tool === "semgrep");
+    assert(tsg && tsg.status === "error", "truncated JSON row status=error");
+    assert(
+      tsg && /output was not JSON/.test(tsg.reason || ""),
+      "truncated JSON keeps the named non-JSON reason",
+    );
+    assert(!/TypeError/.test(trunc.err), "no crash stack for truncated JSON");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("honesty (FOC-667 round 3): policy text inside parsed stdout is evidence content, not a block signal");
+{
+  // Discriminator boundary, pinned in the fail-closed-safe direction: the
+  // JSON CONTENT may quote a policy phrase while the spawn itself is healthy
+  // (exit 0, clean stderr). Only structural signals count post-parse — this
+  // stays 'ok' with an attested version.
+  const dir = fixtureDir();
+  try {
+    writeFileSync(join(dir, "clean.js"), "const x = 1;\n");
+    const res = stubScan(["--root", dir, "--json"], "policy-in-stdout-clean-json");
+    assert(res.status === 0, `exit 0 with healthy spawn, zero findings (got ${res.status})`);
+    let report = null;
+    try {
+      report = JSON.parse(res.out);
+    } catch (e) {
+      report = null;
+    }
+    const sg = report && report.tools.find((t) => t.tool === "semgrep");
+    assert(sg && sg.status === "ok" && sg.scanned === true, "policy phrase in stdout content never blocks a healthy scan");
+    assert(sg && sg.version === "1.178.0", "version attested");
+    assert(!/blocked by application control/i.test(res.out), "no block reason anywhere in the report");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

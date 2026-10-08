@@ -25,27 +25,43 @@
  * A scanner that did not run must never look like a pass: an unavailable tool is
  * an explicit "Not scanned" line and a non-zero exit, never a silent clean.
  *
- * FOC-667 — three scanner states, classified from evidence:
- *   'ok'          the scanner ran and its version is attested
+ * FOC-667 — scanner states, classified from evidence:
+ *   'ok'          the scanner ran, its version is attested, evidence complete
+ *   'partial'     the scan demonstrably started and produced findings, but
+ *                 the spawn carried a structural block signal (exit 127,
+ *                 EACCES/EPERM, policy text on stderr) — findings are
+ *                 reported row by row and scan completeness is NOT attested
+ *                 (scanned:false; exit 1 via the loudest-fact rule, the row
+ *                 is never a clean verdict)
  *   'error'       the scanner produced unusable evidence (empty stdout,
- *                 non-JSON output, hard scan errors, unverifiable version)
+ *                 non-JSON output, JSON that is not report-shaped, hard scan
+ *                 errors, unverifiable version)
  *   'unavailable' the scanner could not run at all — not installed (ENOENT)
- *                 or blocked by the environment: Windows application control
- *                 (WDAC/AppLocker) killing the launcher with exit 127 + policy
- *                 text, or the OS refusing the spawn (EACCES/EPERM). The block
- *                 classification is read from the spawn's observable output on
- *                 EVERY run — never cached — because the same machine flips
- *                 between blocked and unblocked minutes apart.
- *                 Discriminator: parseable scan evidence wins — the block
- *                 classification is reachable only when the spawn produced no
- *                 parseable JSON stdout, so a real finding whose matched
- *                 source line quotes a policy phrase can never be swallowed
- *                 by the block label.
+ *                 or blocked by the environment with no findings to show.
+ * The block classification is read from the spawn's observable output on
+ * EVERY run — never cached — because the same machine flips between blocked
+ * and unblocked minutes apart. Discriminator, two levels:
+ *   PRE-parse  (empty stdout / non-JSON — no scan evidence): block signals
+ *              are spawn exit 127, policy text in stderr OR raw stdout, and
+ *              EACCES/EPERM; the environment reason wins over the generic
+ *              no-output/non-JSON reasons.
+ *   POST-parse (stdout parsed as JSON): only STRUCTURAL signals count —
+ *              exit 127, EACCES/EPERM, policy text in STDERR ONLY. Policy
+ *              text inside the parsed stdout is evidence content (semgrep
+ *              JSON echoes matched source lines) and is never a signal, so a
+ *              real finding quoting a policy phrase can never be swallowed
+ *              by the block label. A blocked spawn that emits a well-shaped
+ *              report cannot read as clean either: findings → 'partial',
+ *              no findings → 'unavailable'. Parsed output must additionally
+ *              be report-shaped (a non-null plain object with a results
+ *              array) — arrays, null and primitives are a named 'error',
+ *              never a crash.
  * A scanner that did not run is 'unavailable', not 'error': the reason names
  * the environment so REVIEW can quote it verbatim. Exit-code semantics are
- * unchanged — every non-'ok' state is fail-closed (exit 2 with 0 findings).
- * JSON tool rows carry a boolean `scanned` (true iff status 'ok') so a
- * consumer never re-derives it from the reason text.
+ * unchanged and fail-closed: exit 2 whenever a scanner is not 'ok' with 0
+ * findings; exit 1 only when real findings are on the table (loudest fact
+ * wins). JSON tool rows carry a boolean `scanned` (true iff status 'ok') so
+ * a consumer never re-derives it from the reason text.
  *
  * Scope (default mode, run inside the repo):
  *   every file git tracks or would track (git ls-files --cached --others
@@ -332,42 +348,54 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
   }
 
   // FOC-667: an OS-level block (WDAC/AppLocker) is an environment property,
-  // not a scan-evidence failure — classify it as 'unavailable' with a reason
-  // that names the environment. Discriminator (TEST round 2): parseable scan
-  // evidence WINS — blockSignal() is reachable only from the empty-stdout and
-  // non-JSON branches below, never once the stdout parsed as JSON. Semgrep
-  // echoes matched source lines inside its JSON (extra.lines), and source
-  // lines can legitimately quote policy phrases, so testing the whole output
-  // before parsing would let a real finding vanish behind an environmental
-  // excuse. Detection is evidence-driven from this spawn's own output on
-  // every run — never cached (WDAC blocking is intermittent on this
-  // machine): spawn exit 127, an application-control policy message (observed
-  // Polish WDAC text or English equivalents), or a spawn refusal
-  // (EACCES/EPERM).
+  // not a scan-evidence failure. Detection is evidence-driven from this
+  // spawn's own output on every run — never cached (WDAC blocking is
+  // intermittent on this machine) — and the policy regex covers the observed
+  // Polish WDAC text plus English equivalents. Block-signal classification is
+  // TWO-LEVEL (TEST round 3):
+  //   PRE-parse (empty stdout / non-JSON — no scan evidence): exit 127,
+  //   policy text in stderr OR raw stdout, EACCES/EPERM. Genuine WDAC blocks
+  //   print their message with no scan evidence, so the environment reason
+  //   wins over the generic no-output/non-JSON reasons here.
+  //   POST-parse (stdout parsed as JSON): only STRUCTURAL signals count —
+  //   exit 127, EACCES/EPERM, policy text in STDERR ONLY. Policy text inside
+  //   the parsed stdout is evidence content — semgrep echoes matched source
+  //   lines (TEST round 1 proved a finding can be swallowed that way) — and
+  //   must never be a signal.
   const policyBlockRe = /zasady kontroli aplikacji|application control|blocked by (application )?control|applocker|wdac/i;
-  const blockSignal = () => {
+  const unavailableRow = (details) => ({
+    tool: 'semgrep',
+    status: 'unavailable',
+    reason: `scanner unavailable — environment (blocked by application control) — ${details.join('; ')}`,
+    findings: [],
+  });
+  const preParseBlock = () => {
     const osRefusal = res.error && (res.error.code === 'EACCES' || res.error.code === 'EPERM');
     const policyHit = policyBlockRe.test(`${res.stderr || ''}\n${res.stdout || ''}`);
-    if (res.status === 127 || osRefusal || policyHit) {
-      const details = [];
-      if (osRefusal) details.push(`spawn error ${res.error.code}`);
-      if (res.status === 127) details.push('spawn exit 127');
-      if (policyHit) details.push('policy text in scanner output');
-      return {
-        tool: 'semgrep',
-        status: 'unavailable',
-        reason: `scanner unavailable — environment (blocked by application control) — ${details.join('; ')}`,
-        findings: [],
-      };
-    }
-    return null;
+    if (res.status !== 127 && !osRefusal && !policyHit) return null;
+    const details = [];
+    if (osRefusal) details.push(`spawn error ${res.error.code}`);
+    if (res.status === 127) details.push('spawn exit 127');
+    if (policyHit) details.push('policy text in scanner output');
+    return unavailableRow(details);
+  };
+  // Returns the structural block signal detail list post-parse, or null.
+  const postParseBlockDetails = () => {
+    const osRefusal = res.error && (res.error.code === 'EACCES' || res.error.code === 'EPERM');
+    const policyHit = policyBlockRe.test(res.stderr || '');
+    if (res.status !== 127 && !osRefusal && !policyHit) return null;
+    const details = [];
+    if (osRefusal) details.push(`spawn error ${res.error.code}`);
+    if (res.status === 127) details.push('spawn exit 127');
+    if (policyHit) details.push('policy text in scanner stderr');
+    return details;
   };
 
   // Empty stdout is the evidence failure itself, whatever the exit code: no
   // output means no scan happened. Parsing nothing into a fake-clean `{}` is
   // exactly how a dead scanner used to read as a clean one (FOC-576).
   if (!(res.stdout || '').trim()) {
-    const blocked = blockSignal();
+    const blocked = preParseBlock();
     if (blocked) return blocked;
     return {
       tool: 'semgrep',
@@ -382,7 +410,7 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
   try {
     parsed = JSON.parse(res.stdout);
   } catch (e) {
-    const blocked = blockSignal();
+    const blocked = preParseBlock();
     if (blocked) return blocked;
     return {
       tool: 'semgrep',
@@ -390,6 +418,65 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
       reason: `semgrep output was not JSON (exit ${res.status}) — stderr: ${(res.stderr || '').slice(0, 200).replace(/\s+/g, ' ')}`,
       findings: [],
     };
+  }
+
+  // Shape gate FIRST (TEST round 3): parsed must be a non-null plain object
+  // with a results array. An array, null or a primitive parses as valid JSON
+  // but is not a report — treating it as clean would be fail-open (an array
+  // once parsed as `{errors: undefined, results: undefined}` → 0 findings),
+  // and dereferencing null crashed in an unnamed state. If a structural block
+  // signal is ALSO present on a wrong-shape output, the block ('unavailable')
+  // reason wins — nothing was parsed to lose.
+  const wellShaped = Boolean(parsed) && typeof parsed === 'object' && !Array.isArray(parsed) && Array.isArray(parsed.results);
+  const blockedDetails = postParseBlockDetails();
+  if (!wellShaped) {
+    if (blockedDetails) return unavailableRow(blockedDetails);
+    return {
+      tool: 'semgrep',
+      status: 'error',
+      reason: 'semgrep output was not a report-shaped object (no results array) — scan evidence unusable',
+      findings: [],
+    };
+  }
+
+  const mapFindings = () =>
+    (parsed.results || []).map((r) => {
+      // semgrep echoes absolute paths when given a directory target — normalize to
+      // root-relative (forward slashes) so report rows match the secretlint rows.
+      // Relative result paths (a configured-command target '.') resolve against
+      // the scan root; absolute paths pass through unchanged, so the native case
+      // is unaffected.
+      const absPath = path.resolve(root, String(r.path || ''));
+      const rel = absPath.startsWith(path.resolve(root))
+        ? path.relative(path.resolve(root), absPath).replace(/\\/g, '/')
+        : absPath.replace(/\\/g, '/');
+      return {
+        tool: 'semgrep',
+        rule: r.check_id,
+        file: rel,
+        line: r.start && r.start.line ? r.start.line : 0,
+        severity: (r.extra && r.extra.severity) || 'WARNING',
+      };
+    });
+
+  // Structural block on a well-shaped report: the scan demonstrably started
+  // and produced findings, but the spawn carried a block signal, so evidence
+  // completeness is NOT attested. Findings non-empty → 'partial' (reported
+  // row by row, never swallowed, never a clean verdict); findings empty →
+  // 'unavailable' with the named environment reason (fail-closed exit 2).
+  if (blockedDetails) {
+    const blockFindings = mapFindings();
+    if (blockFindings.length) {
+      const version = semgrepVersion();
+      return {
+        tool: 'semgrep',
+        status: 'partial',
+        version: version === 'unknown' ? undefined : version,
+        reason: `scan ended in a block signal (${blockedDetails.join('; ')}) — findings reported, scan completeness not attested`,
+        findings: blockFindings,
+      };
+    }
+    return unavailableRow(blockedDetails);
   }
 
   if (res.error) {
@@ -408,24 +495,7 @@ export function scanSast(root, rulesPath = SEMGREP_RULES, { noGitIgnore = false 
     };
   }
 
-  const findings = (parsed.results || []).map((r) => {
-    // semgrep echoes absolute paths when given a directory target — normalize to
-    // root-relative (forward slashes) so report rows match the secretlint rows.
-    // Relative result paths (a configured-command target '.') resolve against
-    // the scan root; absolute paths pass through unchanged, so the native case
-    // is unaffected.
-    const absPath = path.resolve(root, String(r.path || ''));
-    const rel = absPath.startsWith(path.resolve(root))
-      ? path.relative(path.resolve(root), absPath).replace(/\\/g, '/')
-      : absPath.replace(/\\/g, '/');
-    return {
-      tool: 'semgrep',
-      rule: r.check_id,
-      file: rel,
-      line: r.start && r.start.line ? r.start.line : 0,
-      severity: (r.extra && r.extra.severity) || 'WARNING',
-    };
-  });
+  const findings = mapFindings();
   // A scan whose scanner version cannot be attested is not evidence: 'ok' with
   // version 'unknown' would let an unverifiable run read as a clean one (FOC-576).
   const version = semgrepVersion();
@@ -480,6 +550,13 @@ export function humanReport({ scope, tools }) {
         lines.push(`FAIL ${t.tool} (${t.version || 'version unknown'}) — ${t.findings.length} finding(s):`);
         for (const f of t.findings) lines.push(fmtRow(f));
       }
+    } else if (t.status === 'partial') {
+      // FOC-667: the scan produced findings but carried a structural block
+      // signal — completeness is not attested. Findings are printed row by
+      // row (never swallowed) and the row is unmistakably not a PASS.
+      lines.push(`PARTIAL ${t.tool} (${t.version || 'version unknown'}) — ${t.findings.length} finding(s) reported, scan did not complete cleanly — ${t.reason}:`);
+      for (const f of t.findings) lines.push(fmtRow(f));
+      lines.push('  (partial scan evidence is never a clean verdict)');
     } else {
       lines.push(`NOT SCANNED ${t.tool} — ${t.reason}`);
       lines.push('  (a scanner that did not run is never reported as clean)');
@@ -611,7 +688,9 @@ if (isMain) {
   }
 
   if (totalFindings > 0) {
-    console.log(`FAIL: ${totalFindings} finding(s) across ${tools.filter((t) => t.status === 'ok').length} scanner(s) — see rows above`);
+    // 'partial' counts as a reporting scanner here — its findings are real
+    // and named on the rows above, even though completeness is not attested.
+    console.log(`FAIL: ${totalFindings} finding(s) across ${tools.filter((t) => t.status === 'ok' || t.status === 'partial').length} scanner(s) — see rows above`);
     process.exit(1);
   }
   if (!ranClean) {
