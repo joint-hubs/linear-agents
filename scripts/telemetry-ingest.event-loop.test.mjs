@@ -26,10 +26,14 @@
 //      AC1's "a fresh GET answers ≤ 2 s while a run appends"). See the
 //      scenario's own header for the hermeticity seams.
 //
-// Deterministic: fixed synthetic content, wall-clock assertions are budgeted
-// against the MEASURED T_full of the same fixture in the same run (no absolute
-// machine-speed assumption beyond "re-reading 20 MB is not 20x faster than
-// parsing it"), and the whole file runs well under 60 s.
+// Deterministic under load: fixed synthetic content; wall-clock ratio
+// assertions are budgeted against the MEASURED T_full of the same fixture in
+// the same run (no absolute machine-speed assumption beyond "re-reading 20 MB
+// is not 20x faster than parsing it"); and every 250 ms block bar asserts the
+// sampler's CPU-bound block estimate — min(gap, process.cpuUsage() delta) —
+// not the raw setImmediate gap, so background load that deschedules this
+// process (and inflates raw gaps with zero blocking) cannot fail them. The
+// whole file runs well under 60 s.
 
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -71,18 +75,39 @@ function assertEqual(actual, expected, message) {
   if (actual !== expected) throw new Error(`${message || "mismatch"}: expected ${expected}, got ${actual}`);
 }
 
-// --- Event-loop sampler: max gap between consecutive macrotask ticks --------
-// The gap between two setImmediate callbacks is an upper bound on how long the
-// loop was blocked by synchronous work between them.
+// --- Event-loop sampler: longest CPU-bound synchronous block -----------------
+// The wall-clock gap between two setImmediate callbacks is only an UPPER BOUND
+// on how long the loop was blocked by synchronous work between them — and an
+// untrustworthy one: the OS can deschedule the whole process between two ticks
+// (a genuinely idle await, background load on the box) and inflate the gap
+// with ZERO blocking (measured: 438 ms raw gap under load where the quiet tick
+// showed ~39 ms and no block at all). So each gap is paired with the process
+// CPU time consumed across it (process.cpuUsage()): work that blocks the loop
+// runs on this thread and burns CPU; a descheduled process burns almost none.
+// The blocking estimate for one gap is min(wallGap, cpuDelta) and the
+// assertion statistic is maxCpuBlockMs — the largest such estimate:
+//   real block:   cpuDelta ≈ wallGap → estimate ≈ the block itself;
+//   descheduled:  cpuDelta << wallGap → estimate stays near the CPU used.
+// What it still cannot exclude: a synchronous syscall that stalls the thread
+// WITHOUT burning CPU (a slow readFileSync on a cold/network volume) reads as
+// idle, so a pure-I/O synchronous block is undercounted; and cpuUsage is
+// process-wide, so CPU from V8 platform threads (GC etc.) inside a gap can
+// only inflate the estimate — false FAILs, never false passes.
 function startLoopSampler() {
-  const state = { maxBlockMs: 0, stopped: false };
+  const state = { maxBlockMs: 0, maxCpuBlockMs: 0, stopped: false };
   let last = performance.now();
+  let lastCpu = process.cpuUsage();
   const tick = () => {
     if (state.stopped) return;
     const now = performance.now();
+    const cpu = process.cpuUsage();
     const gap = now - last;
+    const cpuDelta = (cpu.user - lastCpu.user + cpu.system - lastCpu.system) / 1000; // µs → ms
     if (gap > state.maxBlockMs) state.maxBlockMs = gap;
+    const cpuBlock = Math.min(gap, cpuDelta);
+    if (cpuBlock > state.maxCpuBlockMs) state.maxCpuBlockMs = cpuBlock;
     last = now;
+    lastCpu = cpu;
     setImmediate(tick);
   };
   setImmediate(tick);
@@ -142,7 +167,7 @@ await test("full first pass parses the whole ~20 MB transcript (baseline)", asyn
   // workspace events): 2400 usage.recorded + 1 workspace.observed.
   assertEqual(summary.usageEvents, LINE_COUNT + 1, "one usage event per assistant line + the workspace observation");
   assertEqual(summary.settled, 0, "a running run is never settled — the tick must reach the ingest path");
-  console.log(`    T_full=${T_full.toFixed(0)}ms maxBlock=${sampler.maxBlockMs.toFixed(0)}ms`);
+  console.log(`    T_full=${T_full.toFixed(0)}ms cpuBlock=${sampler.maxCpuBlockMs.toFixed(0)}ms (raw gap ${sampler.maxBlockMs.toFixed(0)}ms)`);
   assert(T_full > 0);
 });
 
@@ -170,8 +195,8 @@ await test("unchanged tick applies 0 events and skips the re-read (AC5)", async 
     elapsed < budget,
     `unchanged tick took ${elapsed.toFixed(0)}ms (budget ${budget.toFixed(0)}ms, T_full ${T_full.toFixed(0)}ms) — the unchanged transcript was re-read`,
   );
-  assert(sampler.maxBlockMs < 250, `unchanged tick blocked the event loop ${sampler.maxBlockMs.toFixed(0)}ms (AC2 budget 250ms)`);
-  console.log(`    skip pass: ${elapsed.toFixed(0)}ms (budget ${budget.toFixed(0)}ms), maxBlock=${sampler.maxBlockMs.toFixed(0)}ms`);
+  assert(sampler.maxCpuBlockMs < 250, `unchanged tick blocked the event loop ${sampler.maxCpuBlockMs.toFixed(0)}ms (AC2 budget 250ms)`);
+  console.log(`    skip pass: ${elapsed.toFixed(0)}ms (budget ${budget.toFixed(0)}ms), cpuBlock=${sampler.maxCpuBlockMs.toFixed(0)}ms (raw gap ${sampler.maxBlockMs.toFixed(0)}ms)`);
 });
 
 // --- Scenario 3: growth is incremental ---------------------------------------
@@ -200,8 +225,8 @@ await test("growth tick parses only the appended lines, bounded sync blocks", as
     elapsed < budget,
     `growth tick took ${elapsed.toFixed(0)}ms (budget ${budget.toFixed(0)}ms, T_full ${T_full.toFixed(0)}ms) — the full transcript was re-read`,
   );
-  assert(sampler.maxBlockMs < 250, `growth tick blocked the event loop ${sampler.maxBlockMs.toFixed(0)}ms (AC2 budget 250ms)`);
-  console.log(`    growth pass: ${elapsed.toFixed(0)}ms (budget ${budget.toFixed(0)}ms), maxBlock=${sampler.maxBlockMs.toFixed(0)}ms`);
+  assert(sampler.maxCpuBlockMs < 250, `growth tick blocked the event loop ${sampler.maxCpuBlockMs.toFixed(0)}ms (AC2 budget 250ms)`);
+  console.log(`    growth pass: ${elapsed.toFixed(0)}ms (budget ${budget.toFixed(0)}ms), cpuBlock=${sampler.maxCpuBlockMs.toFixed(0)}ms (raw gap ${sampler.maxBlockMs.toFixed(0)}ms)`);
 });
 
 // --- Scenario 4: tool-fact trap (AC7) on a small fixture --------------------
@@ -451,16 +476,22 @@ await test("(599) AC1: the backfill tick stays under AC2's 250ms block bar", asy
     assertEqual(summary.usageEvents, AC1_RUNS * AC1_LINES, "every usage line applied");
 
     // THE AC1 ASSERTION (its loop-starvation half, at AC2's bar): a tick whose
-    // longest synchronous block stays under 250 ms cannot starve a request past
-    // AC1's 2 s GET budget. The paced pipeline measures maxBlock in the tens of
-    // ms; with the pacers removed (the pre-FOC-547 shape) the same tick drains
-    // as ONE multi-second block and this goes red — proven red-first in the
-    // commit that introduced this scenario.
+    // longest CPU-bound synchronous block stays under 250 ms cannot starve a
+    // request past AC1's 2 s GET budget. The statistic is the sampler's
+    // maxCpuBlockMs, NOT the raw setImmediate gap: the gap is a descheduling-
+    // sensitive upper bound (an idle await under background load inflated it to
+    // 438 ms on this fixture while the true block stayed ~39 ms), so asserting
+    // on the raw gap fails spuriously under load. The paced pipeline measures
+    // cpuBlock in the tens of ms; with the pacers AND the chunk-boundary
+    // yields removed (the pre-FOC-547 whole-file drain shape — defeating the
+    // pacers alone still leaves ~90 ms blocks at the chunk reads) the same
+    // tick blocks for over a second of CPU and this goes red — re-proven
+    // against this metric (1172 ms measured).
     assert(
-      sampler.maxBlockMs < 250,
-      `backfill tick blocked the event loop ${sampler.maxBlockMs.toFixed(0)}ms (budget 250ms, tick total ${elapsed.toFixed(0)}ms) — a run appending now would starve behind it`,
+      sampler.maxCpuBlockMs < 250,
+      `backfill tick blocked the event loop ${sampler.maxCpuBlockMs.toFixed(0)}ms of CPU-bound work (budget 250ms, tick total ${elapsed.toFixed(0)}ms, raw gap upper bound ${sampler.maxBlockMs.toFixed(0)}ms) — a run appending now would starve behind it`,
     );
-    console.log(`    backfill tick: ${elapsed.toFixed(0)}ms total, maxBlock=${sampler.maxBlockMs.toFixed(0)}ms`);
+    console.log(`    backfill tick: ${elapsed.toFixed(0)}ms total, cpuBlock=${sampler.maxCpuBlockMs.toFixed(0)}ms (raw gap ${sampler.maxBlockMs.toFixed(0)}ms)`);
   } finally {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
