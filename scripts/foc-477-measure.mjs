@@ -3,7 +3,9 @@
 //
 // Paired replay: PLAN graph (arm A) vs historical PLAN squad (arm B), per the
 // frozen protocol docs/plans/foc-477-measurement-protocol.md (CONFIRMED
-// 2026-10-07, Q1=A go/no-go rule, Q2=A body-delta quality axis).
+// 2026-10-07, Q1=A go/no-go rule; amended Q3 2026-10-07: the study runs on
+// TWO axes — cost and time; body-delta quality is withdrawn as an axis and
+// gate friction becomes a per-pair descriptive derived from run state).
 //
 // Reproducer (protocol §4.1):
 //   node scripts/foc-477-measure.mjs --runs docs/research/foc-477-runs.json
@@ -19,7 +21,7 @@
 // malformed input — unparseable JSON or missing required fields, in the
 // corpus or in any children.json run data it points at.
 
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -103,6 +105,18 @@ export function parseCorpus(text, warn) {
         );
       }
     }
+    // gateFriction (protocol §5, Q3 amendment): optional non-negative integer
+    // per arm. Absent/null = "no data" — stays null downstream, never coerced
+    // to 0; an explicit 0 is a real value.
+    for (const [armName, arm] of [["armB", armB], ["armA", entry.armA]]) {
+      const gf = arm?.gateFriction;
+      if (gf == null) continue;
+      if (!Number.isInteger(gf) || gf < 0) {
+        throw new InputError(
+          `corpus[${i}] (${entry.issue}): ${armName}.gateFriction must be a non-negative integer (got ${JSON.stringify(gf)})`,
+        );
+      }
+    }
   });
   const seenIssues = new Set();
   for (const entry of doc.corpus) {
@@ -180,7 +194,7 @@ export function extractArmFromChildren(parsed, { childId = null, warn } = {}) {
   };
 }
 
-// --- go/no-go rule (protocol §5, Q1=A) -------------------------------------
+// --- go/no-go rule (protocol §5, amended Q3 2026-10-07: two axes) -----------
 
 // One axis: win = A < B × 0.85; loss = A > B × 1.05; between = draw.
 // Null when either median is unavailable (not enough arm-A data).
@@ -191,23 +205,28 @@ export function decideAxis(medianA, medianB) {
   return "draw";
 }
 
-// Verdict: GO iff >=2 of 3 axes win AND zero axes are a loss; NO-GO otherwise;
-// INCONCLUSIVE when any axis could not be computed (missing arm-A data).
+// Verdict (protocol §5, amended Q3 2026-10-07): the study runs on TWO axes —
+// cost and time. GO iff both axes are win AND zero axes are in regression
+// > 5% (with two axes, both-win already means zero regressions); NO-GO
+// otherwise, and NO-GO always carries a contract-delta list (§6).
+// INCONCLUSIVE ONLY when cost or timeExec could not be computed (a null
+// median). The withdrawn body-delta axis and gate friction never enter the
+// decision and never cause INCONCLUSIVE.
 export function decide(axes) {
-  const vals = Object.values(axes ?? {});
-  if (vals.some((v) => v == null)) return "INCONCLUSIVE";
-  const wins = vals.filter((v) => v === "win").length;
-  const losses = vals.filter((v) => v === "loss").length;
-  return wins >= 2 && losses === 0 ? "GO" : "NO-GO";
+  const cost = axes?.cost;
+  const timeExec = axes?.timeExec;
+  if (cost == null || timeExec == null) return "INCONCLUSIVE";
+  return cost === "win" && timeExec === "win" ? "GO" : "NO-GO";
 }
 
 // --- pair metrics -----------------------------------------------------------
 
 // One row per corpus entry. `armA`/`armB` are resolved arm objects (or the
 // literal { status: "pending" } / { status: "missing" }). Quality is the
-// body delta (Q2=A): edit count + character delta between plan-published and
-// approved. No arm records it today, so it is null — never 0, never a crash
-// (a null is an honest "no data", a 0 would be a fabricated "no edits").
+// withdrawn body-delta descriptive (Q3 amendment 2026-10-07): reported when
+// both arms carry it, never an axis, never in the verdict. Gate friction is
+// attached by tabulate (corpus literal, else derived from run state) and
+// rides on each arm as a descriptive.
 export function pairRow(entry, armA, armB) {
   // Optional-chain the metric fields so a future arm producer that forgets
   // one degrades to a null metric, never a TypeError.
@@ -250,6 +269,7 @@ function armOut(entryArm, arm) {
       turns: arm.turns,
       wallTime: arm.wallTime,
       bodyDelta: arm.bodyDelta,
+      gateFriction: arm.gateFriction ?? null,
     };
   }
   return {
@@ -261,6 +281,7 @@ function armOut(entryArm, arm) {
     turns: null,
     wallTime: { totalSec: null, queueSec: null, execSec: null, gateWaitSec: null },
     bodyDelta: { editCount: null, charDelta: null },
+    gateFriction: arm?.gateFriction ?? null,
   };
 }
 
@@ -280,11 +301,16 @@ export function aggregate(pairs) {
   const medianQualA = median(aRows.map((p) => p.armA.bodyDelta?.editCount ?? null));
   const medianQualB = median(bRows.map((p) => p.armB.bodyDelta?.editCount ?? null));
   const medianQualDelta = median(pairs.map((p) => p.metrics.qualityDelta?.editCount ?? null));
+  // Gate friction (Q3 amendment): a descriptive — median per arm, no axis,
+  // never in the verdict. Runs over ALL pairs, not just ok arms: the value
+  // derives from the run's gates/ directory and survives a degraded
+  // children.json.
+  const medianGateA = median(pairs.map((p) => p.armA.gateFriction ?? null));
+  const medianGateB = median(pairs.map((p) => p.armB.gateFriction ?? null));
 
   const axes = {
     cost: decideAxis(medianA, medianB),
     timeExec: decideAxis(medianExecA, medianExecB),
-    quality: decideAxis(medianQualA, medianQualB),
   };
 
   return {
@@ -298,10 +324,11 @@ export function aggregate(pairs) {
       medianB: medianQualB === null ? null : { editCount: medianQualB },
       delta: medianQualDelta === null ? null : { editCount: medianQualDelta },
     },
+    gateFriction: { medianA: medianGateA, medianB: medianGateB },
     escalations: mergeEscalations(pairs.map((p) => p.metrics.escalations)),
     gateAgreement: mergeGateAgreement(pairs.map((p) => p.metrics.gateAgreement)),
     axes,
-    rule: "win: medianA < medianB * 0.85; loss: medianA > medianB * 1.05; between: draw (reportable, never a win)",
+    rule: "GO iff both axes are win AND zero axes are in regression > 5%. NO-GO otherwise, and NO-GO always carries a contract-delta list (§6). win: medianA < medianB * 0.85; loss: medianA > medianB * 1.05; between: draw (reportable, never a win)",
     verdict: decide(axes),
   };
 }
@@ -400,6 +427,48 @@ function readDecisions(runDir, { warn } = {}) {
   };
 }
 
+// Gate-friction derivation (protocol §5, Q3 amendment): count the plan gates
+// a run actually produced, from its <runId>/gates/ directory — the same
+// derivation path for both arms so the comparison is symmetric. Arm A (plan
+// graph): records whose `kind` is "plan.gate1" or "draft-approval". Arm B
+// (squad): records whose `gateId` names the plan child ("gate-plan-*").
+// Implementation-review verdicts live in a sibling verdicts/ directory and
+// are never read here — they review the code, not the plan, and real runs
+// hold up to a dozen of them. No gates directory (or an unreadable one) →
+// null: an honest "no data", never 0, never a crash.
+function gateRecordMatches(rec, arm) {
+  if (!rec || typeof rec !== "object") return false;
+  if (arm === "A") return rec.kind === "plan.gate1" || rec.kind === "draft-approval";
+  return typeof rec.gateId === "string" && /^gate-plan-/.test(rec.gateId);
+}
+
+export function deriveGateFriction(runDir, { arm, warn } = {}) {
+  if (!runDir || (arm !== "A" && arm !== "B")) return null;
+  const gatesDir = join(runDir, "gates");
+  let names;
+  try {
+    names = readdirSync(gatesDir);
+  } catch (e) {
+    if (e?.code !== "ENOENT") {
+      warn?.(`cannot read ${gatesDir} (${e.message}) — gate friction reported as null`);
+    }
+    return null;
+  }
+  let count = 0;
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    let rec;
+    try {
+      rec = JSON.parse(readFileSync(join(gatesDir, name), "utf8"));
+    } catch (e) {
+      warn?.(`${join(gatesDir, name)} is not valid JSON (${e.message}) — excluded from the gate-friction count`);
+      continue;
+    }
+    if (gateRecordMatches(rec, arm)) count += 1;
+  }
+  return count;
+}
+
 // Default supervisor root for this repo layout. The worktree has no .state/
 // — the data lives in the main checkout, reachable through the worktree's
 // .git pointer (gitdir: <main>/.git/worktrees/<name>). Falls back to the
@@ -466,9 +535,19 @@ function displayPath(dir) {
   return rel.split(sep).join("/");
 }
 
-export function tabulate({ corpusDoc, supervisorDir, armADir, warn } = {}) {
+export function tabulate({ corpusDoc, supervisorDir, armADir, stateRoot, warn } = {}) {
   const armBRoot = supervisorDir;
   const armARoot = armADir ?? supervisorDir;
+  const gatesRoot = stateRoot ?? supervisorDir;
+  // Gate friction for one corpus arm (protocol §5, Q3 amendment): a corpus
+  // literal wins; without one the value derives from the run's gates/
+  // directory; neither source → null. Descriptive only — never an axis,
+  // never in the verdict.
+  const gateFrictionFor = (entryArm, arm) => {
+    if (entryArm?.gateFriction != null) return entryArm.gateFriction;
+    if (!entryArm?.runId || !gatesRoot) return null;
+    return deriveGateFriction(join(gatesRoot, entryArm.runId), { arm, warn });
+  };
   const pairs = corpusDoc.corpus.map((entry) => {
     let armB = loadArmFromDisk(armBRoot, entry.armB.runId, entry.armB.childId, { warn });
     if (armB.status === "ok") {
@@ -491,6 +570,8 @@ export function tabulate({ corpusDoc, supervisorDir, armADir, warn } = {}) {
     } else {
       armA = { status: "pending" };
     }
+    armB = { ...armB, gateFriction: gateFrictionFor(entry.armB, "B") };
+    armA = { ...armA, gateFriction: gateFrictionFor(entry.armA ?? null, "A") };
     return pairRow(entry, armA, armB);
   });
   return {
@@ -499,10 +580,12 @@ export function tabulate({ corpusDoc, supervisorDir, armADir, warn } = {}) {
     qualityAxis: corpusDoc.qualityAxis ?? null,
     supervisorDir: displayPath(armBRoot),
     armADir: displayPath(armARoot),
+    stateRoot: displayPath(gatesRoot),
     notes: [
       "cost = costUsd only (protocol §4.1); costUsdReported is never read",
       "wall time: queue not recorded in children.json (null); gate-wait = inter-turn gaps, own column, excluded from exec (§4.2)",
-      "quality = body delta, Q2=A (§4.3) — no arm records it yet, reported as null until a source exists",
+      "body delta withdrawn as an axis (Q3 amendment 2026-10-07) — reported as a descriptive only, never in the verdict",
+      "gate friction = plan gates per run, derived from <runId>/gates/ (Q3 amendment 2026-10-07) — a descriptive, never an axis, never in the verdict",
       "arm-A runs do not exist yet (§8 step 3) — pending rows are the normal state today",
     ],
     pairs: pairs.map(roundForDisplay),
@@ -520,6 +603,8 @@ function usage() {
     "  --supervisor-dir <dir> supervisor runs root (.state/supervisor); default resolves",
     "                         the main checkout through this worktree's .git pointer",
     "  --arm-a-dir <dir>      root holding arm-A run dirs; defaults to --supervisor-dir",
+    "  --state-root <dir>     root holding <runId>/gates/ for gate-friction",
+    "                         derivation; defaults to the supervisor runs root",
     "  -h, --help             this text",
     "",
     "Emits the per-pair table + aggregate go/no-go as JSON on stdout.",
@@ -540,6 +625,7 @@ export function run({ argv = process.argv.slice(2), stdout = console.log, exitFn
         runs: { type: "string" },
         "supervisor-dir": { type: "string" },
         "arm-a-dir": { type: "string" },
+        "state-root": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     }));
@@ -582,6 +668,7 @@ export function run({ argv = process.argv.slice(2), stdout = console.log, exitFn
       corpusDoc,
       supervisorDir,
       armADir: values["arm-a-dir"] ?? supervisorDir,
+      stateRoot: values["state-root"],
       warn,
     });
   } catch (e) {
