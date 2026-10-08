@@ -24,6 +24,59 @@ Kolejka — sekwencja z `docs/ROADMAP.md` (2026-10-08). **Tor A (krytyczna ście
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## 2026-10-08 (24) — run 57a9: FOC-733 domknięty do TEST (kandydat `4d88de9`) · MERGE REJECT z JEDNEGO migającego pliku, kombinowane 115/115 · ZNACZNIK PRZEŁĄCZENIA NA TOR B: 19:57:51Z · FOC-726 rusza (dev-4)
+
+**FOC-733 (ekran egress: wąski wyjątek sluga z URL-a Linear) — DEV/REVIEW/TEST zamknięte.**
+dev-1 `4d88de9` na `foc-733-dev` (baza `7e474aa`, 2 pliki: `scripts/egress-screen.mjs` +
+`scripts/egress-screen.test.mjs`, drzewo czyste, bez trailerów). REVIEW r1 **pass**, 10/10 AC,
+fingerprint `4863ab5a657a3490`, korpus 0/10 odtworzony niezależnie. TEST zielone: `test-all`
+114/115 (jedyny czerwony = migający `security-scan.test.mjs`), lint 0/583 plików, docs-count-guard
+115=115, `egress-screen.test.mjs` 100/100, 8 pozytywów clean, 9 negatywów zablokowanych, korpus
+0/10 (trzeci niezależny pomiar, `2026-10-08T17:56:17.662Z`). Strona PRZED: 3 z 10 refused, 12
+hits, 4 distinct strings (`egressScreenScan20261008`).
+
+**Weryfikacja scalania: REJECT — przyczyna to migający plik, nie kandydat.**
+`supervisor-merge --verify "npm ci && node scripts/test-all.mjs"` → `accepted: false`,
+`findings: ["dev-1: failed its own verify (exit 1)"]`. Noga izolacji: **jeden** plik testowy
+czerwony — `security-scan.test.mjs`, 69 passed / 13 failed (probes exec+path nie odpalają,
+`exit 1 with probe fixture (got 2)`). Noga kombinowana **w tym samym przebiegu: 115/115 passed,
+exit 0**; replay 1 commit, 0 konfliktów. `allowedPathDrift`: `touched` = 2 pliki, `outside: []`,
+`undeclared: true` (pusta deklaracja = UNDECLARED, nie „wszystko zakazane"). Drzewo integracyjne
+**zostawione** do inspekcji (`keptForInspection`) — nie ruszam go rękami. Decyzja u Mateusza
+(3 opcje), bez cichego ponowienia.
+
+**Korekta pamięci: czerwień `security-scan.test.mjs` NIE jest deterministyczna.** To samo drzewo,
+ten sam plik, ten sam node, ~15 min później: **81 passed / 0 failed, exit 0** (`exit 1 with probe
+fixture (got 1)`, każdy probe odpala). Liczba asercji też się zmienia (82 ↔ 81 — ścieżkowo
+warunkowa). Wniosek: jeden wynik nie dowodzi „known-red" (wpis `semgrep-wdac-blocked`
+poprawiony), a sam exit code `test-all.mjs` nie jest stabilnym sygnałem bramki lądowania. To
+samo zdarzenie jest materiałem dowodowym dla **FOC-667**.
+
+**Znacznik przełączenia toru: `2026-10-08T19:57:51Z` (21:57:51+02:00).** Ramię A (FOC-477) czeka
+na decyzję Mateusza, więc zgodnie z dyrektywą („po raporcie w tej samej turze ruszasz dalej")
+przechodzę na tor B. Żaden run arm-A nie jest aktywny — run 2 (FOC-236) nie wznowiony, więc okno
+atrybucji jest czyste.
+
+**FOC-726 rusza (tor B #1).** verdict `dev`, rozmiar **`medium`** → flow `[dev, test]` (jak
+FOC-649). Seam `intake.task_size` mówił `small` (0.52 vs medium 0.30) — niezgodność
+wyświetlona w rekordzie (`sizeDisagreement`), nie auto-akcja; FOC-597 pokazuje, że self-work przy
+`small` jest znaną ścieżką, więc werdykt da się cofnąć jednym zdaniem. Uzasadnienie: zmiana siedzi
+w **bramce lądowania**, więc niezależny black-box TEST jest realnym weryfikatorem.
+`intake.has_acceptance_criteria` = `noul` 0.98 przy `hasAcceptanceCriteria: true` w
+deterministycznym `propose` — niezgodność seam/frontman pokazana, AC z ciała zadania są
+miarodajne. Snapshot poprzedniego verdictu (FOC-733) przed nadpisaniem:
+`triage.foc733.snapshot-2026-10-08T19-57-51Z.json`. dev-4 (`z-ai/glm-5.3-flash`, pin 5/5 PASS) na
+bazie `7e474aa`, worktree `la-wt/linear-agents/foc-726-foc-726`, `allowedPaths` =
+`scripts/supervisor-merge.mjs` + `scripts/supervisor-merge.test.mjs` (deklaracja jawna — nie
+pusta).
+
+**Kolejność lądowania (zapisana w `unknowns`):** FOC-726 **nie ląduje przed** FOC-733 — zmienia
+`supervisor-merge.mjs`, czyli narzędzie, którym FOC-733 ma jeszcze przejść bramkę.
+
+**Czeka na Mateusza (FOC-733):** (1) weryfikacja scalania — 3 opcje; (2) pytanie 1: zestaw
+terminatorów (`>` zadeklarowane, niezaimplementowane; 3 kształty prozy); (3) pytanie 2: sekret
+wewnątrz pozycji sluga przechodzi rodzinę E. Push i PR po Jego stronie.
+
 ## 2026-10-08 (23) — run 0984: FOC-477 ramię A — run 2 ZATRZYMANY przez fałszywy traf ekranu egress (3 z 10 korpusu) · opcja 1 wykonana (`plan.intent` OK) · 3 reguły pomiarowe zapisane, zanim mogły zaważyć
 
 **Opcja 1 — jedno diagnostyczne wywołanie `plan.intent`, nic nie zapisane do runu.**
