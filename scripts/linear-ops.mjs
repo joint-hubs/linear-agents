@@ -14,10 +14,17 @@
  *   estimate <id|identifier> --estimate <XS|S|M|L|XL> [--dry-run]
  *   due-date <id|identifier> --date <YYYY-MM-DD> [--clear] [--dry-run]
  *   create-child <parentId|parentIdentifier> --title <text> (--body <text> | --body-file <path>)
- *                [--type feat|bug|spike|tech] [--estimate <XS|S|M|L|XL>] [--label <l> ...] [--dry-run]
+ *                [--type feat|bug|spike|tech] [--estimate <XS|S|M|L|XL>] [--label <l> ...]
+ *                [--project <id|name>] [--milestone <id|name>] [--no-milestone] [--dry-run]
  *     Creates a NEW issue as a real Linear sub-issue (parentId) of an EXISTING
  *     issue — e.g. adding a follow-up under an epic like JOI-73. Distinct from
  *     linear-push.mjs, which always creates a brand-new top-level parent.
+ *
+ *     Project + milestone are INHERITED from the parent chain (FOC-716): the
+ *     first ancestor that carries a project supplies both, so a child always
+ *     lands where its epic lives. Flags override; without any project the call
+ *     fails closed (exit 1) instead of creating an orphan. Success prints one
+ *     extra JSON line echoing the project and milestone that were written.
  *
  * Dependencies: Node 18+ (global fetch). No npm install required.
  */
@@ -49,7 +56,7 @@ const ISSUE_CREATE_MUTATION = `
   mutation IssueCreate($input: IssueCreateInput!) {
     issueCreate(input: $input) {
       success
-      issue { id identifier url title }
+      issue { id identifier url title project { id name } projectMilestone { id name } }
     }
   }
 `;
@@ -190,6 +197,12 @@ function parseArgs(argv) {
     } else if (a === "--label" && i + 1 < argv.length) {
       if (!args.label) args.label = [];
       args.label.push(argv[++i]);
+    } else if (a === "--project" && i + 1 < argv.length) {
+      args.project = argv[++i];
+    } else if (a === "--milestone" && i + 1 < argv.length) {
+      args.milestone = argv[++i];
+    } else if (a === "--no-milestone") {
+      args.noMilestone = true;
     } else if (a.startsWith("--")) {
       // Unknown flag — skip
     } else {
@@ -210,7 +223,7 @@ function printUsage() {
   console.error("  node scripts/linear-ops.mjs update-description <id|identifier> (--body <text> | --body-file <path>) [--dry-run]");
   console.error("  node scripts/linear-ops.mjs estimate <id|identifier> --estimate <XS|S|M|L|XL> [--dry-run]");
   console.error("  node scripts/linear-ops.mjs due-date <id|identifier> --date <YYYY-MM-DD> [--clear] [--dry-run]");
-  console.error("  node scripts/linear-ops.mjs create-child <parentId|parentIdentifier> --title <text> (--body <text> | --body-file <path>) [--type feat|bug|spike|tech] [--estimate <XS|S|M|L|XL>] [--label <l> ...] [--dry-run]");
+  console.error("  node scripts/linear-ops.mjs create-child <parentId|parentIdentifier> --title <text> (--body <text> | --body-file <path>) [--type feat|bug|spike|tech] [--estimate <XS|S|M|L|XL>] [--label <l> ...] [--project <id|name>] [--milestone <id|name>] [--no-milestone] [--dry-run]");
 }
 
 // ---------------------------------------------------------------------------
@@ -831,6 +844,182 @@ async function handleDueDate(identifier, args, dryRunCtx) {
 }
 
 // ---------------------------------------------------------------------------
+// Placement (project + milestone) — FOC-716
+// ---------------------------------------------------------------------------
+
+/** A raw UUID, so a flag can be an id or a name without a second flag. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * FOC-716: "walks up the parent chain to the epic (max depth 4)".
+ * Counted in NODES, parent included — the smaller cap is the safer error: a
+ * missed ancestor fails closed (exit 1, no write), a wrong distant one writes
+ * misplaced data silently.
+ */
+const MAX_PARENT_CHAIN_NODES = 4;
+
+const ISSUE_CHAIN_NODE_QUERY = `
+  query($id:String!){
+    issue(id:$id){
+      id identifier
+      parent { id identifier }
+      project { id name }
+      projectMilestone { id name }
+    }
+  }
+`;
+
+/**
+ * Collect the inherited project + milestone from a parent chain, FOC-716.
+ *
+ * A child inherits from its parent; when the parent carries no project the walk
+ * continues up to the epic and takes the first node that has one. The milestone
+ * travels WITH that project: a projectMilestone belongs to exactly one project,
+ * so pairing them is the only combination that can be written without producing
+ * either an orphan or a cross-project mismatch.
+ *
+ * Exported and pure so `scripts/linear-ops.test.mjs` can pin it against a
+ * recorded response instead of the live API.
+ *
+ * @param {{id?:string, identifier?:string,
+ *          project?:{id:string, name?:string}|null,
+ *          projectMilestone?:{id:string, name?:string}|null}[]} chain
+ *        Parent chain, nearest ancestor first (parent at index 0).
+ * @returns {{project:{id:string,name:string}|null,
+ *            milestone:{id:string,name:string}|null,
+ *            from:string|null}} `from` names the node the values came from.
+ */
+export function collectInheritance(chain) {
+  for (const node of chain || []) {
+    if (node?.project?.id) {
+      return {
+        project: { id: node.project.id, name: node.project.name ?? null },
+        milestone: node.projectMilestone?.id
+          ? { id: node.projectMilestone.id, name: node.projectMilestone.name ?? null }
+          : null,
+        from: node.identifier || node.id || null,
+      };
+    }
+  }
+  return { project: null, milestone: null, from: null };
+}
+
+/**
+ * Apply the explicit flags on top of what the chain supplied, FOC-716.
+ *
+ * Precedence: `--project` / `--milestone` override inheritance, `--no-milestone`
+ * clears it (maintenance children under an epic that has no milestone). An
+ * explicit `--project` drops an inherited milestone rather than pairing two
+ * values that belong to different projects — `droppedMilestone` reports it so
+ * the caller can say so out loud instead of losing it silently.
+ *
+ * Exported and pure; the id/name resolution stays in the handler.
+ *
+ * @param {{project:{id:string,name:string}|null, milestone:{id:string,name:string}|null}} inherited
+ * @param {{project?:{id:string,name:string}|null, milestone?:{id:string,name:string}|null,
+ *          noMilestone?:boolean}} [flags] already-resolved override values.
+ * @returns {{project:{id:string,name:string}|null,
+ *            milestone:{id:string,name:string}|null,
+ *            droppedMilestone:{id:string,name:string}|null}}
+ */
+export function applyPlacementOverrides(inherited, flags = {}) {
+  let project = inherited?.project ?? null;
+  let milestone = inherited?.milestone ?? null;
+  let droppedMilestone = null;
+
+  if (flags.project) {
+    if (milestone) {
+      droppedMilestone = milestone;
+      milestone = null;
+    }
+    project = flags.project;
+  }
+  if (flags.noMilestone) {
+    if (milestone) droppedMilestone = milestone;
+    milestone = null;
+  }
+  if (flags.milestone) milestone = flags.milestone;
+
+  return { project, milestone, droppedMilestone };
+}
+
+/**
+ * Walk the parent chain, nearest ancestor first, capped at `maxNodes`.
+ *
+ * `fetchNode` is injected so `scripts/linear-ops.test.mjs` can pin the depth cap
+ * and the cycle guard offline. The `seen` set is defensive: a parent cycle must
+ * not hang the CLI.
+ *
+ * @param {string} startId
+ * @param {(id:string) => Promise<object|null>} fetchNode
+ * @param {number} [maxNodes]
+ * @returns {Promise<object[]>} chain nodes, nearest first.
+ */
+export async function walkParentChain(startId, fetchNode, maxNodes = MAX_PARENT_CHAIN_NODES) {
+  const chain = [];
+  const seen = new Set();
+  let currentId = startId;
+  while (currentId && chain.length < maxNodes && !seen.has(currentId)) {
+    seen.add(currentId);
+    const node = await fetchNode(currentId);
+    if (!node) break;
+    chain.push(node);
+    currentId = node.parent?.id || null;
+  }
+  return chain;
+}
+
+/** Live fetcher for walkParentChain. */
+async function fetchParentChain(startId) {
+  return walkParentChain(startId, async (id) => {
+    const data = await graphql(ISSUE_CHAIN_NODE_QUERY, { id });
+    return data?.issue || null;
+  });
+}
+
+/** Resolve `--project` to {id,name}, by UUID or by case-insensitive team name. */
+async function resolveProjectFlag(teamId, value) {
+  const data = await graphql(
+    `query($teamId:String!){ team(id:$teamId){ projects(first:100){ nodes{ id name } } } }`,
+    { teamId },
+  );
+  const projects = data.team?.projects?.nodes || [];
+  const byId = UUID_RE.test(value);
+  const hit = byId
+    ? projects.find((p) => p.id === value)
+    : projects.find((p) => (p.name || "").trim().toLowerCase() === value.trim().toLowerCase());
+  if (!hit) {
+    const available = projects.map((p) => `"${p.name}"`).join(", ");
+    console.error(
+      `Error: project ${byId ? "id" : "name"} "${value}" not found in team. Available: ${available || "(none)"}`,
+    );
+    process.exit(1);
+  }
+  return { id: hit.id, name: hit.name ?? null };
+}
+
+/** Resolve `--milestone` to {id,name} inside `project`, by UUID or by name. */
+async function resolveMilestoneFlag(project, value) {
+  const data = await graphql(
+    `query($id:String!){ project(id:$id){ projectMilestones(first:100){ nodes{ id name } } } }`,
+    { id: project.id },
+  );
+  const nodes = data.project?.projectMilestones?.nodes || [];
+  const byId = UUID_RE.test(value);
+  const hit = byId
+    ? nodes.find((m) => m.id === value)
+    : nodes.find((m) => (m.name || "").trim().toLowerCase() === value.trim().toLowerCase());
+  if (!hit) {
+    const available = nodes.map((m) => `"${m.name}"`).join(", ");
+    console.error(
+      `Error: milestone ${byId ? "id" : "name"} "${value}" not found in project "${project.name}". Available: ${available || "(none)"}`,
+    );
+    process.exit(1);
+  }
+  return { id: hit.id, name: hit.name ?? null };
+}
+
+// ---------------------------------------------------------------------------
 // Subcommand: create-child — real Linear sub-issue under an EXISTING issue
 // ---------------------------------------------------------------------------
 
@@ -844,11 +1033,47 @@ async function handleCreateChild(identifier, args, dryRunCtx) {
     console.error("Error: --title <text> is required for create-child");
     process.exit(2);
   }
+  if (args.milestone && args.noMilestone) {
+    console.error("Error: --milestone and --no-milestone are mutually exclusive");
+    process.exit(2);
+  }
   // Egress screen (FOC-450): the title is outbound text too.
   assertEgressClean(args.title, "create-child title");
   const body = readBodyArg(args, "create-child");
 
   const { issue: parent, teamId } = await resolveIssueWithTeam(identifier);
+
+  // Placement (FOC-716): inherit project + milestone from the parent chain,
+  // then let the flags override. Fail closed BEFORE any write.
+  const inherited = collectInheritance(await fetchParentChain(parent.id));
+  const flagProject = args.project ? await resolveProjectFlag(teamId, args.project) : null;
+  const placement = applyPlacementOverrides(inherited, {
+    project: flagProject,
+    noMilestone: args.noMilestone,
+    milestone: null, // resolved below — it needs the FINAL project to look in
+  });
+  if (args.milestone) {
+    if (!placement.project) {
+      console.error("Error: --milestone needs a project — pass --project, or inherit one from the parent chain");
+      process.exit(2);
+    }
+    placement.milestone = await resolveMilestoneFlag(placement.project, args.milestone);
+    placement.droppedMilestone = null;
+  }
+  if (!placement.project) {
+    console.error(
+      `Error: no project for the new child — none on the parent chain of ${parent.identifier} ` +
+        `(walked ${MAX_PARENT_CHAIN_NODES} nodes) and no --project. Refusing to create an orphan (FOC-716).`,
+    );
+    process.exit(1);
+  }
+  if (placement.droppedMilestone) {
+    console.error(
+      `Note: inherited milestone "${placement.droppedMilestone.name}" was dropped — a projectMilestone ` +
+        `belongs to one project, and this child is being placed in "${placement.project.name}". ` +
+        `Pass --milestone to set one.`,
+    );
+  }
 
   // Team labels — same G:C (group:child) resolution as `label` (handleLabel).
   const teamData = await graphql(
@@ -925,6 +1150,8 @@ async function handleCreateChild(identifier, args, dryRunCtx) {
     title: args.title,
     description: body,
     stateId: defaultState.id,
+    projectId: placement.project.id,
+    ...(placement.milestone ? { projectMilestoneId: placement.milestone.id } : {}),
     ...(labelIds.length > 0 ? { labelIds } : {}),
     ...(estimateValue !== undefined ? { estimate: estimateValue } : {}),
   };
@@ -935,6 +1162,9 @@ async function handleCreateChild(identifier, args, dryRunCtx) {
     console.log(`  stateId: ${defaultState.id} ("${defaultState.name}")`);
     console.log(`  labels: ${labelNames.join(", ") || "(none)"}`);
     console.log(`  estimate: ${args.estimate || "(none)"}`);
+    console.log(`  project: ${placement.project.name} (${placement.project.id})`);
+    console.log(`  milestone: ${placement.milestone ? `${placement.milestone.name} (${placement.milestone.id})` : "(none)"}`);
+    console.log(`  inherited from: ${inherited.from || "(none)"}`);
     return;
   }
 
@@ -942,6 +1172,17 @@ async function handleCreateChild(identifier, args, dryRunCtx) {
   if (result.issueCreate.success) {
     const issue = result.issueCreate.issue;
     console.log(`✅ ${issue.identifier} (child of ${parent.identifier}) ${issue.url}`);
+    // FOC-716: machine-readable echo of what was WRITTEN, read back from the
+    // create result — not of what was intended.
+    console.log(JSON.stringify({
+      identifier: issue.identifier,
+      url: issue.url,
+      parent: parent.identifier,
+      project: issue.project ? { id: issue.project.id, name: issue.project.name } : null,
+      milestone: issue.projectMilestone
+        ? { id: issue.projectMilestone.id, name: issue.projectMilestone.name }
+        : null,
+    }));
   } else {
     console.error("Error: issue creation failed");
     process.exit(1);
