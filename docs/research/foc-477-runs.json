@@ -128,11 +128,16 @@
       "runId": "2026-10-09-supervisor-foc477-arma-02r2-foc236",
       "runnerSha": "a1f8577e328fd94bf6f5f52fd70b3e02db5fcdc8",
       "headSha": "e61aa37cc69482b5c4cbbed4a7c68d410a87d2ab",
-      "status": "stopped",
-      "pricedCostUsd": 0.02916988,
-      "note": "run 2 restarted FROM SCRATCH on the instrument boundary 4bc5bc222725637127e0b7b5d4c011a359857f36 (the landed FOC-733 fix). headSha is main at launch and carries docs-only commits after the boundary; the instrument content IS the boundary. Attempt 1 (2026-10-08-supervisor-foc477-arma-02-foc236) stopped at plan.dor with EGRESS_BLOCKED and sits BEFORE the boundary — excluded, nothing before the boundary counts. Inputs: .state/foc-477-armA/inputs-02-foc236.json. STOPPED at plan.gate1 (2026-10-09T13:53:23.012Z): gate emit needs LA_SUPERVISOR_RUN and LA_SUPERVISOR_CHILD (graph-runner.mjs defaultGateEmitter) and an arm-A run launched standalone sets neither — the [H] step threw provider_error locally after 4/4 successful decision calls (plan.dor, plan.intent x2, plan.intent.select.score, all ok:true). failed is TERMINAL on resume (graph-runner.mjs:1417-1419), so the store is dead. First contact with an [H] step in arm A (FOC-198 died at plan.intent x2, FOC-236 attempt 1 at plan.dor), so the gate context was never exercised. Priced 0.02916988 USD over 4 events. No re-run without Mateusz (FOC-198 precedent: a re-run is authorised per attempt)."
+      "status": "excluded (C1)",
+      "countedInMainNumber": false,
+      "pricedCostUsdOutsideMainNumber": 0.02916988,
+      "note": "run 2 restarted FROM SCRATCH on the instrument boundary 4bc5bc222725637127e0b7b5d4c011a359857f36 (the landed FOC-733 fix). headSha is main at launch and carries docs-only commits after the boundary; the instrument content IS the boundary. Attempt 1 (2026-10-08-supervisor-foc477-arma-02-foc236) stopped at plan.dor with EGRESS_BLOCKED and sits BEFORE the boundary — excluded, nothing before the boundary counts. Inputs: .state/foc-477-armA/inputs-02-foc236.json. STOPPED at plan.gate1 (2026-10-09T13:53:23.012Z): gate emit needs LA_SUPERVISOR_RUN and LA_SUPERVISOR_CHILD (graph-runner.mjs defaultGateEmitter) and an arm-A run launched standalone sets neither — the [H] step threw provider_error locally after 4/4 successful decision calls (plan.dor, plan.intent x2, plan.intent.select.score, all ok:true). failed is TERMINAL on resume (graph-runner.mjs:1417-1419), so the store is dead. First contact with an [H] step in arm A (FOC-198 died at plan.intent x2, FOC-236 attempt 1 at plan.dor), so the gate context was never exercised. EXCLUDED AS C1 2026-10-09 (Mateusz): a launch defect — the harness set neither env var and registered no child — not an instrument cost. Priced 0.02916988 USD over 4 events, recorded on its own line outside the main number and never summed into the go/no-go cost axis. No re-run without Mateusz (FOC-198 precedent: a re-run is authorised per attempt)."
     }
   ],
+  "excludedPricedCostUsd": {
+    "_note": "priced (wycenione) cost of C1-excluded arm-A attempts, on its own line OUTSIDE the main number (§4.1). These runs bought no counted plan; the spend is evidence, never a go/no-go input. Never merged into costUsd / usage.cost totals.",
+    "FOC-236/arma-02r2-a2": 0.02916988
+  },
   "corpus": [
     {
       "issue": "FOC-198",
@@ -301,6 +306,11 @@
       "issue": "FOC-198/arma-01r2-a2",
       "criterion": "C1",
       "reason": "arm-A attempt 2 stopped — plan.intent failed again with the identical provider_error HTTP 400. Input hash 2870f05f144602e794b5812ef358008a4a4b5b505f90d54f37d36b26f1c1dc21 identical to attempt 1 and plan.dor usage 931/21/$0.000039102 identical, so the only free variable is OpenRouter upstream routing. 1 decision event $0.000039102; the failed plan.intent call wrote no event line (instrument defect — FOC-461 nit 2). Second failure of the same type: frontman safety limit reached, escalated to Mateusz, no third attempt without his answer"
+    },
+    {
+      "issue": "FOC-236/arma-02r2-a2",
+      "criterion": "C1",
+      "reason": "arm-A attempt 2 stopped at plan.gate1 — a LAUNCH defect, not an instrument cost: defaultGateEmitter needs LA_SUPERVISOR_RUN and LA_SUPERVISOR_CHILD and a standalone arm-A launch set neither, so the [H] step threw provider_error after 4/4 successful decision calls. First [H] contact in arm A; the gate context was never exercised. failed is TERMINAL on resume, so the store is dead. Priced 0.02916988 USD over 4 events, recorded on its own line outside the main number (see excludedPricedCostUsd). Run 2026-10-09-supervisor-foc477-arma-02r2-foc236, inputs .state/foc-477-armA/inputs-02-foc236.json, instrument boundary 4bc5bc222725637127e0b7b5d4c011a359857f36. Excluded as C1 by Mateusz 2026-10-09; attempt 3 re-authorised on the same instrument after the arm-A launcher (scripts/foc-477-armA-launch.mjs) and a dry-run of the never-walked tail."
     },
     {
       "issue": "FOC-208",
