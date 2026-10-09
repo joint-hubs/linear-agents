@@ -9,11 +9,17 @@
 //
 // Run: node scripts/linear-ops.test.mjs
 
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
   collectInheritance,
   applyPlacementOverrides,
   walkParentChain,
 } from "./linear-ops.mjs";
+
+const OPS = path.join(path.dirname(fileURLToPath(import.meta.url)), "linear-ops.mjs");
 
 let passed = 0;
 const failures = [];
@@ -216,6 +222,41 @@ const INHERITED = { project: { id: "proj-a", name: "A" }, milestone: { id: "ms-1
     got.milestone?.id === "ms-2",
     JSON.stringify(got),
   );
+}
+
+// ---------------------------------------------------------------------------
+// handlePriority — FOC-606. The refusals run through the real CLI: `priority`
+// validates before it resolves, so these exit before any network access and
+// write nothing. The success path is NOT covered here — it needs a live Linear
+// write and is exercised by the verb's own dry-run and by TEST.
+// ---------------------------------------------------------------------------
+
+console.log("priority verb (FOC-606)");
+
+{
+  const run = (argv) => spawnSync(process.execPath, [OPS, "priority", ...argv], { encoding: "utf8" });
+
+  const unknown = run(["FOC-1", "--priority", "P9"]);
+  check("unknown --priority is refused before any write (exit 2)", unknown.status === 2, `exit ${unknown.status}`);
+  check("the refusal names the accepted values", /Valid: P0, P1, P2, P3/.test(unknown.stderr), unknown.stderr.trim());
+  check("nothing was written — stdout is empty", unknown.stdout.trim() === "", JSON.stringify(unknown.stdout));
+
+  const missing = run(["FOC-1"]);
+  check("missing --priority is refused (exit 2)", missing.status === 2, `exit ${missing.status}`);
+  check("the missing-flag message names the flag shape", /--priority <P0\|P1\|P2\|P3> is required/.test(missing.stderr), missing.stderr.trim());
+
+  const noIssue = run(["--priority", "P3"]);
+  check("no issue identifier is refused (exit 2)", noIssue.status === 2, `exit ${noIssue.status}`);
+  check("the no-identifier refusal prints usage", /Usage:/.test(noIssue.stderr), noIssue.stderr.trim());
+
+  // `--issue` is the alias FOC-606's fix proposal spells. Hitting the
+  // "Valid:" text proves the alias reached handlePriority and not the shared
+  // usage guard, which is what makes the alias real rather than declared.
+  const alias = run(["--issue", "FOC-1", "--priority", "nope"]);
+  check("--issue reaches the priority verb", alias.status === 2 && /Valid: P0, P1, P2, P3/.test(alias.stderr), `exit ${alias.status}: ${alias.stderr.trim()}`);
+
+  const lower = run(["FOC-1", "--priority", "p9"]);
+  check("--priority is case-insensitive (still refused here, same message)", /Valid: P0, P1, P2, P3/.test(lower.stderr), lower.stderr.trim());
 }
 
 // ---------------------------------------------------------------------------

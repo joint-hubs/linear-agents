@@ -12,6 +12,7 @@
  *   comment-replace <id|identifier> --dedup-tag <tag> (--body <text> | --body-file <path>) [--dry-run]
  *   update-description <id|identifier> (--body <text> | --body-file <path>) [--dry-run]
  *   estimate <id|identifier> --estimate <XS|S|M|L|XL> [--dry-run]
+ *   priority <id|identifier> --priority <P0|P1|P2|P3> [--dry-run]
  *   due-date <id|identifier> --date <YYYY-MM-DD> [--clear] [--dry-run]
  *   create-child <parentId|parentIdentifier> --title <text> (--body <text> | --body-file <path>)
  *                [--type feat|bug|spike|tech] [--estimate <XS|S|M|L|XL>] [--label <l> ...]
@@ -48,6 +49,17 @@ const root = join(__dir, "..");
 
 /** T-shirt → Linear numeric estimate (mirrors linear-push.mjs ESTIMATE_MAP + XS). */
 const ESTIMATE_MAP = { XS: 1, S: 2, M: 3, L: 5, XL: 8 };
+
+/**
+ * P0..P3 → Linear's numeric priority (FOC-606). Linear encodes priority as
+ * 0 = no priority, 1 = Urgent, 2 = High, 3 = Medium, 4 = Low (source:
+ * `agents/orchestrator/skills/refine/SKILL.md`, verified against the live
+ * schema: `IssueUpdateInput.priority` exists, SCALAR). p0 is the most urgent,
+ * so p3 — the level FOC-606 itself carries — is Low. The names are the
+ * friendly ones exactly as `estimate` takes XS..XL rather than raw numbers,
+ * which is the symmetry FOC-606's AC 3 asks for.
+ */
+const PRIORITY_MAP = { P0: 1, P1: 2, P2: 3, P3: 4 };
 
 /** feat/fix/... -> type:<name> label suffix (mirrors linear-push.mjs TYPE_ALIAS). */
 const TYPE_ALIAS = { feat: "feature", feature: "feature", fix: "bug", bug: "bug", spike: "spike", tech: "tech", refactor: "tech" };
@@ -186,6 +198,12 @@ function parseArgs(argv) {
       args.dedupTag = argv[++i];
     } else if (a === "--estimate" && i + 1 < argv.length) {
       args.estimate = argv[++i];
+    } else if (a === "--priority" && i + 1 < argv.length) {
+      args.priority = argv[++i];
+    } else if (a === "--issue" && i + 1 < argv.length) {
+      // FOC-606 only — see main(). Kept out of the shared identifier guard so
+      // no other verb changes shape.
+      args.issue = argv[++i];
     } else if (a === "--date" && i + 1 < argv.length) {
       args.date = argv[++i];
     } else if (a === "--clear") {
@@ -222,6 +240,7 @@ function printUsage() {
   console.error("  node scripts/linear-ops.mjs comment-replace <id|identifier> --dedup-tag <tag> (--body <text> | --body-file <path>) [--dry-run]");
   console.error("  node scripts/linear-ops.mjs update-description <id|identifier> (--body <text> | --body-file <path>) [--dry-run]");
   console.error("  node scripts/linear-ops.mjs estimate <id|identifier> --estimate <XS|S|M|L|XL> [--dry-run]");
+  console.error("  node scripts/linear-ops.mjs priority <id|identifier> --priority <P0|P1|P2|P3> [--dry-run]   (issue may also be given as --issue <id>)");
   console.error("  node scripts/linear-ops.mjs due-date <id|identifier> --date <YYYY-MM-DD> [--clear] [--dry-run]");
   console.error("  node scripts/linear-ops.mjs create-child <parentId|parentIdentifier> --title <text> (--body <text> | --body-file <path>) [--type feat|bug|spike|tech] [--estimate <XS|S|M|L|XL>] [--label <l> ...] [--project <id|name>] [--milestone <id|name>] [--no-milestone] [--dry-run]");
 }
@@ -792,6 +811,85 @@ async function handleEstimate(identifier, args, dryRunCtx) {
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: priority  (FOC-606)
+// ---------------------------------------------------------------------------
+
+/**
+ * Set the Linear priority field. Mirrors `estimate` exactly — same flag style,
+ * same failure mode, same output envelope — plus one extra JSON line echoing
+ * the value that was actually WRITTEN (read back from the update result, not
+ * from the request), which FOC-606's AC 1 asks for and which is the same
+ * non-destructive addition `create-child` already makes after its human line.
+ *
+ * EXIT CODE — the issue disagrees with itself. AC 2 says an unknown value is
+ * "refused with exit 1"; the fix proposal says "exactly as `estimate` refuses
+ * an unknown `--estimate`" and AC 3 says "same failure mode". `estimate` exits
+ * 2 for a usage error and so does every other usage error in this file, so
+ * `priority` exits 2 as well: one consistent convention across the verb beats
+ * one literal number in an AC that contradicts another AC. AC 2's other half —
+ * no write happens, and the error names the accepted values — is honoured.
+ * Flipping this to exit 1 is a one-line change.
+ *
+ * The issue may be named positionally (as every verb here does) or as
+ * `--issue <id>`, which is how FOC-606's fix proposal spells it. Only this
+ * verb accepts the flag.
+ */
+async function handlePriority(identifier, args, dryRunCtx) {
+  // Validate FIRST, before anything else: an unknown value is refused with no
+  // write — and with no read either. `estimate` resolves the issue before it
+  // validates; `priority` deliberately does not, because fail-closed here is
+  // narrower and safer and costs nothing a caller can observe. It also means
+  // the refusal is testable without a network round trip.
+  if (!args.priority) {
+    console.error("Error: --priority <P0|P1|P2|P3> is required for priority");
+    process.exit(2);
+  }
+
+  const upper = String(args.priority).toUpperCase();
+  const value = PRIORITY_MAP[upper];
+  if (value === undefined) {
+    console.error(`Error: invalid priority "${args.priority}". Valid: ${Object.keys(PRIORITY_MAP).join(", ")}`);
+    process.exit(2);
+  }
+
+  // --- Dry-run: fully offline ---
+  if (dryRunCtx.dryRun) {
+    const issue = resolveIssueFromFixture(dryRunCtx.fixture, identifier);
+    console.log(`[dry-run:${dryRunCtx.squad}] would set priority ${upper} (${value}) on ${issue.identifier}`);
+    return;
+  }
+
+  const { issue } = await resolveIssueWithTeam(identifier);
+
+  if (args.dryRun) {
+    console.log(`[dry-run] ${issue.identifier}: priority → ${upper} (${value})`);
+    return;
+  }
+
+  const result = await graphql(
+    `mutation($id:String!,$input:IssueUpdateInput!){
+      issueUpdate(id:$id,input:$input){ success issue{ id identifier priority } }
+    }`,
+    { id: issue.id, input: { priority: value } },
+  );
+
+  if (result.issueUpdate.success) {
+    const updated = result.issueUpdate.issue;
+    console.log(`${issue.identifier}: priority → ${upper} (${updated.priority})`);
+    // AC 1: machine-readable echo of what was WRITTEN, read back from the
+    // update result — not of what was requested.
+    console.log(JSON.stringify({
+      identifier: issue.identifier,
+      requested: upper,
+      written: updated.priority,
+    }));
+  } else {
+    console.error(`Error: priority update failed for ${issue.identifier}`);
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Subcommand: due-date — set or clear the issue dueDate
 // ---------------------------------------------------------------------------
 
@@ -1200,7 +1298,11 @@ async function main() {
 
   const args = parseArgs(process.argv);
   const cmd = args._[0];
-  const identifier = args._[1];
+  // FOC-606: `priority` accepts the issue positionally (like every verb here,
+  // `estimate` included) or as `--issue <id>`, which is how its fix proposal
+  // spells it. Contained to this one verb — the shared guard below and every
+  // other verb's shape are untouched.
+  const identifier = args._[1] || (cmd === "priority" ? args.issue : undefined);
 
   // Env DRY_RUN forces no-write regardless of --dry-run flag (mechanical safety)
   if (dryRunCtx.dryRun) {
@@ -1231,6 +1333,9 @@ async function main() {
       break;
     case "estimate":
       await handleEstimate(identifier, args, dryRunCtx);
+      break;
+    case "priority":
+      await handlePriority(identifier, args, dryRunCtx);
       break;
     case "due-date":
       await handleDueDate(identifier, args, dryRunCtx);

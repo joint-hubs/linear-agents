@@ -106,7 +106,7 @@
     },
     {
       "file": "linear-ops.test.mjs",
-      "reason": "isolation audit FOC-716: no filesystem writes at all, no ports, no socket binds; the parent-chain fetch is an injected fetchNode stub (no network, no Linear call) and every other input is a literal recorded-response shape; no telemetry DB"
+      "reason": "isolation audit FOC-716/FOC-606: no filesystem writes at all, no ports, no socket binds; the parent-chain fetch is an injected fetchNode stub (no network, no Linear call) and every other input is a literal recorded-response shape; the FOC-606 group spawns the real CLI but only its refusal paths, which validate and exit before any network access (asserted: stdout empty); no telemetry DB"
     },
     {
       "file": "linear-client.test.mjs",
