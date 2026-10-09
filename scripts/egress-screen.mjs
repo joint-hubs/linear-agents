@@ -190,11 +190,50 @@ const ISO_DATE_LIKE_RE = /\d{4}-\d{2}-\d{2}/;
 // the relaxed branch's shape. The exemption is deliberately narrow: host
 // exactly linear.app, https only, the segment IMMEDIATELY after /issue/<KEY>/
 // (KEY = Linear key shape: uppercase + digits, hyphen, digits), and a COMPLETE
-// path segment (terminated by /, ?, #, end of string or a closing delimiter —
-// a JSON quote closes the one-line-serialized corpus states). The captured
-// group's span is what detectHighEntropy skips; a key-shaped run in any other
-// position — query values, other hosts, bare prose — stays screened.
-const LINEAR_ISSUE_SLUG_RE = /https:\/\/linear\.app\/[A-Za-z0-9][A-Za-z0-9_-]*\/issue\/[A-Z][A-Z0-9]*-[0-9]+\/([A-Za-z0-9_-]+)(?=$|[/?#)}\]"'\x60])/g;
+// path segment. The captured group's span is what detectHighEntropy skips; a
+// key-shaped run in any other position — query values, other hosts, bare prose
+// — stays screened.
+//
+// Terminators (Q1-B): a segment ends at exactly these ELEVEN characters and
+// nothing else — end of string, `/`, `?`, `#`, `)`, `]`, `}`, `>`, `"`, `'`,
+// backtick. Four are URL-structural, seven are closing delimiters. `>` is
+// here because of Q1-B: the round-1 declaration listed all seven closing
+// delimiters (`gt` among them) while the code carried six, so the class below
+// is now the declaration — no separate list to drift. A JSON quote closes the
+// one-line-serialized corpus states.
+//
+// Deliberately NOT terminators, and not being added here: end of line (a URL at
+// the end of a prose line — deferred to FOC-512, whose input is PR prose) and a
+// trailing `,`, `:` or `;`. Those keep the original false positive; they are
+// under-fixes in the fail-closed direction, not leaks.
+const LINEAR_ISSUE_SLUG_RE = /https:\/\/linear\.app\/[A-Za-z0-9][A-Za-z0-9_-]*\/issue\/[A-Z][A-Z0-9]*-[0-9]+\/([A-Za-z0-9_-]+)(?=$|[/?#)}>\]"'\x60])/g;
+
+// Q2-B (Mateusz, 2026-10-09): the exemption fires ONLY for a segment that has
+// the shape of a Linear issue-title slug — tokens of [a-z0-9] joined by SINGLE
+// hyphens, a purely alphabetic token at most 20 chars, and a token containing a
+// digit at most 8 chars. Anything else in that position falls back to the
+// ordinary family E rules: the grant is this one exception, never a general
+// loosening.
+//
+// ACCEPTED RESIDUAL, documented on purpose (Mateusz, 2026-10-09): a secret
+// spelled out of short kebab-case words ("correct-horse-battery-staple" shape)
+// does satisfy this profile and is therefore not caught here. Closing it would
+// need a lookup against Linear, which would break this screen's contract as a
+// pure text function — that option was put to Mateusz and rejected (Q2-C).
+const SLUG_TOKEN_RE = /^[a-z0-9]+$/;
+const SLUG_TOKEN_MAX_ALPHA = 20;
+const SLUG_TOKEN_MAX_ALNUM = 8;
+
+/** True when `segment` has the shape of a Linear issue-title slug (Q2-B). */
+function isLinearIssueSlug(segment) {
+  if (!segment) return false;
+  for (const token of segment.split("-")) {
+    if (!SLUG_TOKEN_RE.test(token)) return false;
+    const max = /[0-9]/.test(token) ? SLUG_TOKEN_MAX_ALNUM : SLUG_TOKEN_MAX_ALPHA;
+    if (token.length > max) return false;
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -450,16 +489,21 @@ function publicBlockSpans(text) {
 /** Spans of Linear issue-URL slug segments (FOC-733) — natural-language
  * kebab-case titles the relaxed entropy branch misreads as secrets. The match
  * anchors the segment IMMEDIATELY after /issue/<KEY>/ and requires a COMPLETE
- * path segment (see LINEAR_ISSUE_SLUG_RE), so only that exact segment is
- * exempt: a Linear URL elsewhere in the text never shields a neighbouring run,
- * and the same slug outside such a URL is still screened. */
+ * path segment (see LINEAR_ISSUE_SLUG_RE), and Q2-B additionally requires the
+ * segment to LOOK like a Linear title slug (isLinearIssueSlug). So only that
+ * exact segment is exempt: a Linear URL elsewhere in the text never shields a
+ * neighbouring run, the same slug outside such a URL is still screened, and a
+ * secret-shaped value sitting in the slug position falls back to the ordinary
+ * family E rules. */
 function linearIssueSlugSpans(text) {
   const spans = [];
   LINEAR_ISSUE_SLUG_RE.lastIndex = 0;
   let m;
   while ((m = LINEAR_ISSUE_SLUG_RE.exec(text)) !== null) {
-    const start = m.index + m[0].length - m[1].length;
-    spans.push([start, start + m[1].length]);
+    const segment = m[1];
+    if (!isLinearIssueSlug(segment)) continue;
+    const start = m.index + m[0].length - segment.length;
+    spans.push([start, start + segment.length]);
   }
   return spans;
 }
