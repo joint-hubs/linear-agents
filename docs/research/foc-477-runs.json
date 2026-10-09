@@ -53,9 +53,10 @@
       "NEGATIVE 3: a key in the path of a URL on another domain is still blocked"
     ],
     "instrumentBoundary": "The fix's sha IS the instrument boundary. Run 2 (FOC-236) restarts from scratch on that version; nothing before it counts. The two `excluded (C1)` attempts and run 2's EGRESS_BLOCKED stop all sit BEFORE the boundary and are excluded. All counted arm-A runs therefore share one runner + one screen version. This replaces the earlier 'no instrument change before the 10th run' freeze statement, which assumed no change would be needed.",
+    "instrumentBoundarySha": "4bc5bc222725637127e0b7b5d4c011a359857f36",
     "suiteConstraint": "scripts/docs-count-guard.test.mjs requires docs' stated test-file count to match the real one (115 at 2026-10-08). The new cases go into the EXISTING scripts/egress-screen.test.mjs — a new test file would break the guard.",
     "routedOut": "The composeState one-line flattening (graph-runner.mjs:765) is NOT part of this fix and NOT part of FOC-477. Separate task, child of FOC-466, bug, High (Mateusz 2026-10-08).",
-    "status": "IN FLIGHT on the full track at the time of this record"
+    "status": "LANDED at 4bc5bc222725637127e0b7b5d4c011a359857f36 (2026-10-09, merge of foc-733-dev onto main; merge ACCEPT 115/115 isolation + 116/116 combined). Q1-B (the `>` terminator, code = the declaration) and Q2-B (the exemption fires only for slug-shaped segments) are in the landed diff. Run 2 (FOC-236) restarts from scratch on this sha."
   },
   "inboxEntryRecovery20261008": {
     "kind": "Q2 variant D recovery — the arm-A inbox.entry for FOC-132 and FOC-136, reproduced literally from the run record",
