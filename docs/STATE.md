@@ -24,6 +24,54 @@ Kolejka — sekwencja z `docs/ROADMAP.md` (2026-10-08). **Tor A (krytyczna ście
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## 2026-10-09 (26) — bramka partii ZAMKNIĘTA (suite 116/116 poza moim drzewem) · FOC-606: trzy odstępstwa zapisane w Linear · decyzje 1–4 · start rundy FOC-733 (Q1-B + Q2-B)
+
+**Bramka partii FOC-667 / FOC-726 / FOC-716 / FOC-606 zamknięta.** Pełna suita na scalonym `main`
+(`0023a25`): **116/116, exit 0, 483 s, bez `SECSCAN_STATE` — skaner żywy, 0 skipów.**
+Źródło: **osobna sesja poza moim drzewem**, tymczasowy worktree, pełny log do pliku (zasada
+„jedna ciężka suita naraz" dotrzymana — ja w tym czasie nie odpalałem żadnej). Skaner żywy ⇒
+reguła lądowania **(b)** jest spełniona dla całej partii z konstrukcji. Push robi Mateusz po
+zielonej suicie. **Pełna suita jest znowu moja — jedna naraz.**
+
+**FOC-606 — trzy odstępstwa przyjęte i zapisane w Linear** (komentarz `d21f6ddc-6284-45f8-bdfe-d88789c7bd41`),
+żeby rekord zgadzał się z kodem: (1) odmowa użycia = **exit 2** nie 1 (jedna konwencja w verbie
+wygrywa z AC, które przeczy innemu AC — `estimate` też exit 2); (2) **obie** formy podania zadania
+(pozycyjnie + `--issue`, alias zamknięty wyłącznie w verbie `priority`); (3) walidacja **przed**
+odczytem (węższe, bezpieczniejsze, odwraczalne — zasada 4).
+
+**`docs/tools/security-scan.md` zostaje po polsku** (spójność pliku). Tłumaczenie całego pliku na EN
+= osobny chore, Low, w **FOC-472**.
+
+**Cudze zmiany w drzewie** (`agents/dev/CLAUDE.md`, `agents/review/CLAUDE.md`) = poprawka **drugiego
+Supervisora** (run `jawnosc-wynagrodzen`: lint gate drzewa kandydata zamiast sztywnego
+`scripts/lint.mjs`). Commit idzie przez tamtą sesję — nie ruszam, nie wciągam do swoich commitów.
+
+**Runda FOC-733 (Q1-B + Q2-B) — pomiar przed kodem, 18 przypadków, syntetyczne wartości**
+(`.state/foc-733-q2-probe.mjs`, gitignored). Kolumna „w pozycji sluga" vs ta sama wartość w prozie:
+
+| kształt | sam | `<slug>-<sekret>` | `<sekret>-<slug>` |
+|---|---|---|---|
+| 40-zn. hex (małe litery) | 0 / 0 | 0 / **1** | 0 / **1** |
+| 40-zn. hex (wielkość mieszana) | 0 / **1** | 0 / **1** | 0 / **1** |
+| 40-zn. ciąg cyfr | 0 / 0 | 0 / **1** | 0 / **1** |
+| base64 (35 zn., korpus base64) | 0 / **1** | 0 / **1** | 0 / **1** |
+| 20-zn. token mieszany (20 różnych znaków) | 0 / **1** | 0 / **1** | 0 / **1** |
+
+Lewe `0` = obecne zwolnienie wariantu A chowa **14 z 18** przypadków (to jest dokładnie klasa
+ucieczki C1/C2 z recenzji). Prawa liczba = ta sama wartość w prozie, czyli **zwykłe reguły rodziny E**.
+Profil sluga z decyzji 4 (Q2-B) działa dokładnie jak zadany: 4 slugi korpusu + zwykły slug = `true`,
+wszystkie 4 kształty we wszystkich 3 wariantach = `false`, `--` / myślnik na końcu / token z wielką
+literą = `false`.
+
+**Fakt do decyzji (nie zgaduję):** dwa z dwunastu wymaganych przypadków rodzina E **nie widzi
+nigdy**, niezależnie od zwolnienia — `40-zn. hex` (małe litery) sam w pozycji sluga oraz `40-zn.
+ciąg cyfr` sam w pozycji sluga. Przyczyny zmierzone: czysty hex jest jawnym blind spotem ekranu
+(`HEX_RUN_RE` pomija — repo cytuje commity SHA non-stop), a 40 cyfr dziesiętnych ma Shannon
+≤ 3.32 bita/znak przy progach 4.3 / 3.9. Ich warianty doklejone **są** blokowane (bieg jest już
+mieszany). Zdanie reguły („wraca do zwykłych reguł rodziny E") daje 10/12 zablokowanych; lista
+testów mówi „blokowane" dla 12/12, co wymaga zmiany **samej rodziny E**. Rozstrzygnięcie idzie do
+Mateusza — to `secrets`, nie decyzja wymuszona.
+
 ## 2026-10-09 (25) — decyzje Mateusza wdrożone: nowa kolejność lądowań · FOC-667 wylądował `367ac52` · lint domknięty · reguły lądowania (a)/(b) zapisane
 
 **Kolejność lądowań zmieniona: FOC-667 → FOC-726 → FOC-716 (+FOC-606 osobnym commitem) → FOC-733
