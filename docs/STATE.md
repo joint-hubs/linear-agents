@@ -24,6 +24,55 @@ Kolejka — sekwencja z `docs/ROADMAP.md` (2026-10-08). **Tor A (krytyczna ście
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## 2026-10-09 (27) — FOC-733 WYLĄDOWANY (`4bc5bc2`) · ACCEPT 115/115 + 116/116 · decyzja A (reguła wiąże) · granica przyrządu zapisana · run 2 (FOC-236) startuje na niej
+
+**Runda Q1-B + Q2-B na `foc-733-dev` (dwa commity).** `a37963e` kod: `>` w klasie terminatorów —
+klasa **jest** deklaracją, nie ma drugiej listy do rozjazdu; `isLinearIssueSlug()` zawęża wyjątek
+do segmentów o kształcie sluga tytułu (tokeny `[a-z0-9]` z pojedynczym `-`, token czysto literowy
+≤ 20 zn., token z cyfrą ≤ 8 zn.). `0332c36` dokumentacja: zakres, klasa terminatorów, dwa przyjęte
+rezydua i **mierzona** granica 2/12. Testy w **istniejącym** `egress-screen.test.mjs` (bez nowego
+pliku — `docs-count-guard` wiąże liczbę): **132/132**, blok 7 (21 asercji) bajt-w-bajt nietknięty,
+blok 8 = 32 nowe (tożsamość pozycji sluga vs proza dla 12 przypadków, 2 pinowane jako ślepy punkt
+rodziny E).
+
+**Decyzja A (Mateusz, 2026-10-09) — lądować `0332c36` tak, jak jest.** Wiążąca jest **reguła**, nie
+lista testów: segment spoza profilu punktuje identycznie jak w prozie (testy tożsamości) — to
+spełnione. 40-zn. hex i 40-zn. ciąg cyfr przechodzą **wszędzie**, nie tylko w pozycji sluga, więc
+wyjątek nie dokłada żadnej nowej drogi wycieku. **B** nic nie daje (ten sam sekret przejdzie w prozie
+obok), a reguła zależna od pozycji tylko komplikuje kontrolkę. **C** to osobna decyzja o kontrolce
+secrets (fałszywe alarmy na SHA, digestach, UUID-ach) — nie w tym tasku. Ślepa plama czystego
+hex/cyfr **zostaje** tak, jak zapisana: pinowana w testach, opisana w `docs/egress-screen.md`, bez
+nowego taska. Jego korekta: lista testów przeczyła regule — błąd po jego stronie.
+
+**Weryfikacja finalnego sha `0332c36` (moja, poza lądowaniem):** `npm ci && node scripts/test-all.mjs`
+→ **115/115 passed in 450886 ms**, `EXIT=0`, `grep FAIL` → 0 dopasowań, `security-scan.test.mjs`
+`✓ (36839 ms)`, w logu **zero** `SECSCAN_STATE`/`skip` (skaner żywy). 115 nie 116 — `foc-733-dev`
+rozgałęzia się sprzed FOC-606 (`linear-ops.test.mjs`), a `docs-count-guard` zielone. Log:
+`test-all-0332c36.log`.
+
+**Bramka scalania: ACCEPT.** `supervisor-merge.mjs --verify "npm ci && node scripts/test-all.mjs"
+--child dev-1 --base 10bf72a`. Baza **jawna** = tip `main`: domyślna baza kandydata (`7e474aa`,
+jego `baseRevision`) dałoby drzewo kombinowane bez `linear-ops.test.mjs`, czyli 115 — oczekiwane
+116 wymaga scalenia z tipem `main`. Nogi: izolacja **115/115 (460241 ms)**, kombinowana
+**116/116 (474692 ms)**; replay 3 commity, **0 konfliktów**; `findings: []`; drift
+`undeclared: true`, `outside: []`; drzewo integracyjne po ACCEPT usunięte. Poprzedni REJECT
+(migający `security-scan.test.mjs` na nodze izolacji, kandydat niewinny) zachowany jako
+`merge.foc733-r1-rejected.json`. Pełne ogony obu nóg w `merge.json`.
+
+**Lądowanie: `4bc5bc222725637127e0b7b5d4c011a359857f36`** — `git merge --no-ff foc-733-dev`, 3 pliki
+(`scripts/egress-screen.mjs`, `scripts/egress-screen.test.mjs`, `docs/egress-screen.md`, +264/−4).
+`0332c36` potwierdzone jako przodek HEAD.
+
+**Granica przyrządu FOC-477 = `4bc5bc22…`** — wpisana w `docs/research/foc-477-runs.json`
+(`egressScreenFix20261008.instrumentBoundarySha`, status → LANDED). `runnerSha`
+(`scripts/graph-runner.mjs`) **bez zmian** — `a1f8577e328fd94bf6f5f52fd70b3e02db5fcdc8`, czyli
+wszystkie liczone runy arm-A mają jeden runner i jeden ekran. **Run 2 (FOC-236) startuje na tym
+sha, świeżym `run-id`, od zera** — próba sprzed granicy (`arma-02-foc236`, `EGRESS_BLOCKED`) jest
+wykluczona i nic sprzed granicy nie liczę.
+
+**Push robi Mateusz** — jednym pushem po lądowaniu. Komentarz domknięcia FOC-733 + status Done w
+Linear idą **za Jego pushem** (jak przy FOC-396).
+
 ## 2026-10-09 (26) — bramka partii ZAMKNIĘTA (suite 116/116 poza moim drzewem) · FOC-606: trzy odstępstwa zapisane w Linear · decyzje 1–4 · start rundy FOC-733 (Q1-B + Q2-B)
 
 **Bramka partii FOC-667 / FOC-726 / FOC-716 / FOC-606 zamknięta.** Pełna suita na scalonym `main`
