@@ -27,16 +27,59 @@ node scripts/security-scan.mjs --output .state/security-scan.json   # raport do 
 node scripts/security-scan.mjs --root <dir>   # fixture mode: raw walk, bez gitignore
 ```
 
-Exit: `0` czysto · `1` findings · `2` skaner niedostępny (dowody niekompletne) · `3` scope unavailable.
+Exit: `0` czysto · `1` findings (obejmuje też stan `partial` — najgłośniejszy fakt wygrywa) ·
+`2` skaner niedostępny albo w stanie `error` — dowody niekompletne · `3` scope unavailable.
 
 Wyjście: **file:line + rule id + severity — nigdy wartość trafienia**. Komunikaty secretlinta osadzają
 dopasowany sekret, więc wrapper ich nie echo-uje; reviewer otwiera plik w cytowanej linii (AC4 FOC-285).
 Skaner, który nie odpalił, dostaje wiersz `NOT SCANNED <tool>` i exit 2 — nigdy nie jest „czysto".
 To samo dotyczy skanera, który nie zostawił dowodów (FOC-576): pusty stdout semgrepa albo niemożliwa
 do ustalenia wersja skanera (`--version` bez linii x.y.z) to też `NOT SCANNED` + exit 2 — brak dowodów
-skanu nigdy nie czyta się jako „czysto".
+skanu nigdy nie czyta się jako „czysto". Czwarty stan, `partial`, ma własny wiersz — patrz `<states>`.
 
 </invocation>
+
+<states>
+
+Każdy skaner kończy w jednym z czterech stanów, klasyfikowanych z **dowodów wyjścia procesu przy
+każdym uruchomieniu** — nigdy z cache, bo ta sama maszyna potrafi się przełączać między blokadą
+a brakiem blokady w przeciągu minut (FOC-667).
+
+| stan | kiedy | wiersz w raporcie | `scanned` |
+|---|---|---|---|
+| `ok` | skan zadziałał, wersja potwierdzona, dowody kompletne | `PASS` / `FAIL <tool>` | `true` |
+| `partial` | skan **faktycznie wystartował** i przyniósł findingi, ale spawn niósł sygnał blokady | `PARTIAL <tool>` + wiersze findingów | `false` |
+| `error` | dowody niezdatne: pusty stdout, wyjście nie-JSON, JSON niebędący raportem (tablica, `null`, wartość prosta), twarde błędy skanu, wersja nie do ustalenia | `NOT SCANNED <tool>` | `false` |
+| `unavailable` | skaner w ogóle nie wystartował — brak instalacji (ENOENT) albo blokada środowiska bez findingów | `NOT SCANNED <tool>` | `false` |
+
+Sygnał blokady to exit spawnu `127`, `EACCES`/`EPERM` albo tekst polityki kontroli aplikacji.
+Czyta się go **dwupoziomowo**: przed parsowaniem (brak dowodów skanu) liczy się też tekst polityki
+w surowym stdout; **po** sparsowaniu liczą się wyłącznie sygnały strukturalne, a tekst polityki
+w samym sparsowanym stdout jest **treścią dowodu** (JSON semgrepa cytował dopasowane linie
+źródła), nigdy sygnałem — więc realne trafienie przywołujące frazę z polityki nie może zostać
+pochłonięte przez etykietę blokady. Sparsowane wyjście musi dodatkowo mieć kształt raportu
+(obiekt niebędący `null`, z tablicą `results`); tablica, `null` i wartość prosta to jawny `error`,
+nigdy crash.
+
+`partial` jest stanem **pośrednim i celowo niewygodnym**: findingi są raportowane wiersz po wierszu
+(nigdy nie znikają), ale **kompletność skanu nie jest potwierdzona**, więc wiersz nie jest czystym
+verdyktem. Konsument dostaje jawne `scanned: false`, żeby nie wyciągał go sam z tekstu `reason`
+(`scanned === (status === 'ok')` to niezmiennik raportu). Przykład wiersza:
+
+```
+PARTIAL semgrep (1.172.0) — 1 finding(s) reported, scan did not complete cleanly — scan ended in a block signal (...):
+<file:line + rule + severity>
+  (partial scan evidence is never a clean verdict)
+```
+
+Linia zbiorcza `FAIL: N finding(s) …` liczy skanery `ok` **i** `partial` — findingi ze stanu
+`partial` są realne i wchodzą do sumy.
+
+**Ryzyko resztkowe, zaakceptowane:** `unavailable` i `error` mają ten sam wiersz
+`NOT SCANNED <tool>` — w raporcie tekstowym różni je tylko pole `reason` w JSON-ie. Osobne wiersze
+dla tych dwóch stanów to zadanie odrębne (FOC-667, reguła resztek).
+
+</states>
 
 <provisioning>
 
@@ -140,6 +183,9 @@ repo i nie jest flagowana — tylko przepływy z danych zewnętrznych.
   wyłącza (`--no-git-ignore`), żeby fixture pod `.state/` dało się skanować.
 - To nie jest diff-scan ani skan historii gita — skanuje stan drzewa. Historia (wycieki w starych
   commitach) jest poza zakresem tego provisioningu.
+- Znany defekt poza modelem stanów: ścieżka `ETIMEDOUT` połyka już zebrane findingi zamiast je
+  raportować (starszy niż FOC-667, osobny task). Nie jest to właściwość `partial` — `partial`
+  gwarantuje, że findingi **są** raportowane.
 - sekrety testowe w `scripts/security-scan.test.mjs` są składane w runtime z rozbitych literałów,
   żeby plik testowy sam nie świecił na repo-wide skanie.
 
