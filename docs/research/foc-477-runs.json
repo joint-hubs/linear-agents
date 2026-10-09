@@ -128,8 +128,9 @@
       "runId": "2026-10-09-supervisor-foc477-arma-02r2-foc236",
       "runnerSha": "a1f8577e328fd94bf6f5f52fd70b3e02db5fcdc8",
       "headSha": "e61aa37cc69482b5c4cbbed4a7c68d410a87d2ab",
-      "status": "running",
-      "note": "run 2 restarted FROM SCRATCH on the instrument boundary 4bc5bc222725637127e0b7b5d4c011a359857f36 (the landed FOC-733 fix). headSha is main at launch and carries docs-only commits after the boundary; the instrument content IS the boundary. Attempt 1 (2026-10-08-supervisor-foc477-arma-02-foc236) stopped at plan.dor with EGRESS_BLOCKED and sits BEFORE the boundary — excluded, nothing before the boundary counts. Inputs: .state/foc-477-armA/inputs-02-foc236.json"
+      "status": "stopped",
+      "pricedCostUsd": 0.02916988,
+      "note": "run 2 restarted FROM SCRATCH on the instrument boundary 4bc5bc222725637127e0b7b5d4c011a359857f36 (the landed FOC-733 fix). headSha is main at launch and carries docs-only commits after the boundary; the instrument content IS the boundary. Attempt 1 (2026-10-08-supervisor-foc477-arma-02-foc236) stopped at plan.dor with EGRESS_BLOCKED and sits BEFORE the boundary — excluded, nothing before the boundary counts. Inputs: .state/foc-477-armA/inputs-02-foc236.json. STOPPED at plan.gate1 (2026-10-09T13:53:23.012Z): gate emit needs LA_SUPERVISOR_RUN and LA_SUPERVISOR_CHILD (graph-runner.mjs defaultGateEmitter) and an arm-A run launched standalone sets neither — the [H] step threw provider_error locally after 4/4 successful decision calls (plan.dor, plan.intent x2, plan.intent.select.score, all ok:true). failed is TERMINAL on resume (graph-runner.mjs:1417-1419), so the store is dead. First contact with an [H] step in arm A (FOC-198 died at plan.intent x2, FOC-236 attempt 1 at plan.dor), so the gate context was never exercised. Priced 0.02916988 USD over 4 events. No re-run without Mateusz (FOC-198 precedent: a re-run is authorised per attempt)."
     }
   ],
   "corpus": [
