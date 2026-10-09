@@ -337,5 +337,147 @@ console.log("egressLeaves: the shared raw-leaf extractor");
 }
 
 // ---------------------------------------------------------------------------
+// 7. Linear issue-URL slug exemption (FOC-733) — family E only, deliberately
+//    narrow: the segment IMMEDIATELY after /issue/<KEY>/ on https://linear.app,
+//    and only when it is a COMPLETE path segment (terminated by /, ?, #, end
+//    of string or a closing delimiter). Anything else stays screened.
+// ---------------------------------------------------------------------------
+
+// The four real flagged strings from docs/research/foc-477-runs.json
+// (egressScreenScan20261008.distinctFlaggedStrings) — issue-TITLE slugs, not
+// secrets; the false positive this exemption exists for. Shared by blocks 7
+// and 8.
+const CORPUS = [
+  ["FOC-143", "foc-143-r5-red-team-ip-extraction-attempt-on-deployed-protected-stack"],
+  ["FOC-143", "foc-143-r6-raise-the-bar-crown-jewel-logic-server-side-key"],
+  ["FOC-209", "foc-209-f12-set-document-content-encryption-key-docs-at-rest"],
+  ["FOC-209", "foc-209-f8-installer-chmod-600-env-640-realm-json-world-readable"],
+];
+const issueUrl = (i) => `https://linear.app/joint-hubs/issue/${CORPUS[i][0]}/${CORPUS[i][1]}`;
+
+{
+  // Synthetic fake, same shape as the corpus slugs: lowercase + digits + hyphen
+  // (3 classes), 39 chars, well over the relaxed threshold. Assembled at
+  // runtime per the file convention.
+  const FAKE_KEBAB = "nq7z".concat("-x4m2-k9p5-", "r3t8-w1v6-", "y4b2-c9l5-", "d8j3");
+
+  console.log("linear-slug: the four corpus issue slugs scan clean inside their Linear issue URLs");
+  for (let i = 0; i < CORPUS.length; i++) {
+    const short = CORPUS[i][1].slice(0, 24);
+    assert(scanEgress(`state ${issueUrl(i)}`).length === 0, `corpus slug exempt at end of string (#${i + 1}, ${short}...)`);
+    // The corpus states are JSON.stringify'd into ONE line — the raw JSON quote
+    // is the closing delimiter that terminated the really-flagged segments.
+    assert(scanEgress(`{"url":"${issueUrl(i)}"}`).length === 0, `corpus slug exempt inside a one-line JSON state (#${i + 1}, ${short}...)`);
+    assert(scanEgress(`prose ${CORPUS[i][1]} end`).length >= 1, `same corpus slug OUTSIDE a Linear URL is still blocked (#${i + 1}, ${short}...)`);
+  }
+
+  console.log("linear-slug: same-shape secret outside any Linear URL is still blocked");
+  assert(scanEgress(`rotated ${FAKE_KEBAB} today`).length >= 1, "kebab-shaped synthetic secret in prose is still blocked");
+
+  console.log("linear-slug: a secret in the URL query stays blocked while the slug stays exempt");
+  {
+    const text = `${issueUrl(0)}?token=${FAKE_ENTROPY}`;
+    const hits = scanEgress(text);
+    assert(hits.length === 1, "exactly one hit: the query value, not the slug");
+    assert(hits[0].family === "high-entropy", "query hit is family E");
+    assert(hits[0].column === `${issueUrl(0)}?token=`.length + 1, "hit sits at the query value's position, past the exempted slug");
+  }
+
+  console.log("linear-slug: the same path shape on another host is still blocked");
+  {
+    const slug = CORPUS[0][1];
+    assert(scanEgress(`https://evil.example.com/joint-hubs/issue/FOC-143/${slug}`).length >= 1, "non-linear.app host is blocked");
+    assert(scanEgress(`https://linear.app.evil.test/joint-hubs/issue/FOC-143/${slug}`).length >= 1, "linear.app SUBDOMAIN lookalike is blocked (host must be exactly linear.app)");
+  }
+
+  console.log("linear-slug: per-run scoping and family-E-only reach");
+  {
+    // A legitimate Linear URL and an unrelated secret in the SAME text: the
+    // slug stays exempt, the secret is caught, and nothing else is excused.
+    const mixed = `{"url":"${issueUrl(0)}"} rotated with ${FAKE_KEBAB}`;
+    const hits = scanEgress(mixed);
+    assert(hits.length === 1 && hits[0].family === "high-entropy", "Linear URL in the text does not shield the unrelated secret (1 hit)");
+    // A space is NOT a segment terminator: the slug is not a complete path
+    // segment there, so the narrow exemption does not apply.
+    assert(scanEgress(`${issueUrl(0)} more prose`).length >= 1, "slug followed by whitespace (not a complete-segment terminator) is still blocked");
+    // The exemption feeds family E only — family A still fires on a prefixed
+    // token even in the exempted segment position.
+    const prefixed = scanEgress(`https://linear.app/joint-hubs/issue/FOC-143/${FAKE_SK_OR}`);
+    assert(prefixed.some((h) => h.family === "key-prefix"), "key-prefix family still fires in the slug position (exemption is family-E-only)");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 8. Q1-B + Q2-B (Mateusz's decisions, 2026-10-09).
+//    Q1-B: `>` terminates the exempt slug segment — the closing delimiter the
+//          round-1 declaration already listed and the code lacked.
+//    Q2-B: the exemption fires only for a segment shaped like a Linear issue
+//          title slug. Everything else in that position falls back to the
+//          ordinary family E rules — asserted here AS AN IDENTITY: the slug
+//          position must score exactly like the same string in prose.
+// ---------------------------------------------------------------------------
+
+{
+  // Synthetic secrets, assembled from split literals per the file convention.
+  const HEX40 = "a1b2c3d4".concat("e5f60718", "293a4b5c", "6d7e8f90", "a1b2c3d4");
+  const DIGITS40 = "01234567".concat("89012345", "67890123", "45678901", "23456789");
+  const B64 = "QUJDREVGR0h".concat("JSktMTU5PUFF", "SU1RVVldYWVo");
+  const MIXED20 = "aBcDeFgHiJ".concat("kLmNoP0123");
+
+  // A profile-conforming Linear title slug: lowercase kebab, alpha tokens <= 20,
+  // alnum-with-digit tokens <= 8. This is the real corpus slug, already pinned
+  // above as blocked in prose — so the fixture is known to be live.
+  const SLUG = CORPUS[0][1];
+  const url = (seg) => `https://linear.app/joint-hubs/issue/FOC-143/${seg}`;
+  const prose = (seg) => `rotated ${seg} today`;
+
+  console.log("q1-b: `>` terminates the exempt slug segment (autolink / HTML shape)");
+  assert(scanEgress(`<${url(SLUG)}>`).length === 0, "slug closed by `>` is exempt (Q1-B adds the gt terminator)");
+
+  console.log("q2-b: a slug-profile segment is still exempt");
+  assert(scanEgress(url(SLUG)).length === 0, "profile-conforming title slug is exempt in the slug position");
+  assert(scanEgress(`${url(SLUG)}/`).length === 0, "profile-conforming slug terminated by `/` is exempt");
+  assert(scanEgress(`${url(SLUG)}?x=1`).length === 0, "profile-conforming slug terminated by `?` is exempt");
+
+  console.log("q2-b: a non-slug-shaped segment falls back to the ordinary family E rules");
+  assert(scanEgress(url(`${SLUG}--x`)).length >= 1, "double hyphen (empty token) is not a slug profile - blocked");
+  assert(scanEgress(url(`${SLUG}-`)).length >= 1, "trailing hyphen (empty token) is not a slug profile - blocked");
+  assert(scanEgress(url(SLUG.toUpperCase())).length >= 1, "uppercase tokens are not a slug profile - blocked");
+
+  console.log("q2-b: slug position scores exactly like prose (the identity behind 'returns to the ordinary rules')");
+  const SECRETS = { "40-char hex": HEX40, "40-char digits": DIGITS40, base64: B64, "20-char mixed": MIXED20 };
+  const POSITIONS = {
+    "alone in the slug position": (s) => s,
+    "appended (<slug>-<secret>)": (s) => `${SLUG}-${s}`,
+    "before the slug (<secret>-<slug>)": (s) => `${s}-${SLUG}`,
+  };
+  const blindSpots = [];
+  for (const [shapeName, secret] of Object.entries(SECRETS)) {
+    for (const [posName, seg] of Object.entries(POSITIONS)) {
+      const segment = seg(secret);
+      const inSlug = scanEgress(url(segment)).length;
+      const outside = scanEgress(prose(segment)).length;
+      assert(inSlug === outside, `${shapeName}, ${posName}: slug position scores exactly like prose (${inSlug} vs ${outside})`);
+      if (outside >= 1) {
+        assert(inSlug >= 1, `${shapeName}, ${posName}: blocked in the slug position`);
+      } else {
+        blindSpots.push(`${shapeName}, ${posName}`);
+      }
+    }
+  }
+
+  // The cases the identity does NOT turn into a block: family E cannot see them
+  // anywhere, and a slug-position exception cannot invent a signal family E does
+  // not have. A pure hex run is skipped by design (HEX_RUN_RE - this repo cites
+  // commit SHAs constantly), and 40 decimal digits top out at log2(10) = 3.32
+  // bits/char against the 3.9 relaxed threshold. Their composite variants above
+  // ARE blocked; only the bare run is invisible.
+  console.log("q2-b: family E's documented blind spots are unchanged by the narrowing");
+  assert(scanEgress(prose(HEX40)).length === 0, "a pure hex run is not a family E hit anywhere (documented HEX_RUN_RE blind spot)");
+  assert(scanEgress(prose(DIGITS40)).length === 0, "a pure digit run is not a family E hit anywhere (entropy below threshold)");
+  assert(blindSpots.length === 2, `exactly 2 of the 12 slug-position cases are outside family E's reach (got ${blindSpots.length}: ${blindSpots.join(" | ")})`);
+}
+
+// ---------------------------------------------------------------------------
 console.log(`\n${passed}/${passed + failed} assertions passed.`);
 if (failed > 0) process.exit(1);

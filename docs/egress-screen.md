@@ -61,13 +61,56 @@ complement, not the engine, for three reasons:
 | (b) PEM private-key blocks | local detector | Full `BEGIN … PRIVATE KEY … END` blocks (multi-line, line count reported) plus a truncated `BEGIN` without `END`. | secretlint has a privatekey rule for the file path; same local-first reasons. |
 | (c) env-style `KEY=value` / `KEY: value` with secret-bearing names | local detector | Line-anchored name gate (`*_TOKEN`, `*_SECRET`, `*_KEY`, `*_PASSWORD`, `API_KEY`, …) with a value gate (placeholders, `$VAR` indirection and `# comments` are not literals). | secretlint has no generic env-assignment rule for arbitrary names; this family is inherently local. |
 | (d) JWT | local detector | Three dot-separated base64url segments with an `eyJ…` header. | Not covered by the secretlint preset. |
-| (e) high-entropy tokens | local detector | 20+ char base62/base64url runs, ≥3 char classes, Shannon entropy ≥4.3 bits/char (≥3.9 at 32+ chars). Excludes pure-hex runs (digests/SHAs — this repo's comments cite them constantly), UUIDs, data-URI payloads, public PEM blocks, and ISO-date-like slugs. | No generic entropy rule exists in the preset. |
+| (e) high-entropy tokens | local detector | 20+ char base62/base64url runs, ≥3 char classes, Shannon entropy ≥4.3 bits/char (≥3.9 at 32+ chars). Excludes pure-hex runs (digests/SHAs — this repo's comments cite them constantly), UUIDs, data-URI payloads, public PEM blocks, ISO-date-like slugs, and the slug segment of a Linear issue URL (FOC-733, see below). | No generic entropy rule exists in the preset. |
 
 **Known blind spot (documented, accepted):** an UNPREFIXED hex-shaped key is not
 flagged by family (e) — pure-hex runs are excluded because they are
 overwhelmingly digests/SHAs here, and blocking every cited commit SHA would be
 warn-fatigue that trains people to bypass the screen. The prefixed families
 (a) and (c) still catch such a key when it carries a prefix or a config name.
+A 40-char decimal run is invisible for a second, independent reason: it tops out
+at log2(10) = 3.32 bits/char, under both entropy thresholds.
+
+### Linear issue-URL slug segments (FOC-733) — family (e) only, narrow on purpose
+
+The slug of `https://linear.app/<workspace>/issue/<KEY>/<slug>` is a human-written
+kebab-case title, and its lowercase + digits + hyphen shape is exactly the relaxed
+branch's shape (3 char classes, 3.9–4.2 bits/char). That one segment is exempt
+from family (e) — and from family (e) alone: a prefixed token in the same position
+still fires family (a).
+
+The exemption is deliberately narrow. Host exactly `linear.app`, `https` only, the
+segment IMMEDIATELY after `/issue/<KEY>/`, and a COMPLETE path segment — terminated
+by end of string, `/`, `?`, `#`, `)`, `]`, `}`, `>`, `"`, `'` or a backtick. That
+terminator class is four URL-structural characters plus seven closing delimiters;
+the class in `LINEAR_ISSUE_SLUG_RE` is the declaration, so there is no second list
+left to drift. A key-shaped run in any other position — query values, other hosts,
+bare prose — is still screened, and a Linear URL never shields a neighbouring run.
+
+On top of that, the exemption fires only for a segment that has the SHAPE of a
+Linear title slug: tokens of `[a-z0-9]` joined by single hyphens, an alphabetic
+token at most 20 chars, and a token containing a digit at most 8 chars. Anything
+else in that position falls back to the ordinary family (e) rules.
+
+Two accepted residuals sit on top of the exception:
+
+- **A secret spelled from short kebab-case words** (the "correct horse battery
+  staple" shape) does satisfy that title profile and is therefore not caught in
+  this position. Closing it would need a lookup against Linear, which would break
+  the screen's contract as a pure text function; that option was weighed and
+  rejected (Q2-C).
+- **The terminator class contains neither end of line nor a trailing `,`, `:` or
+  `;`.** A slug closed by one of those keeps its false positive. Both under-fix in
+  the fail-closed direction; end-of-line closing (end of a URL in prose) is
+  deferred to FOC-512.
+
+One more boundary, measured rather than assumed: a test list can ask for more than
+family (e) can reach. In the slug position a 40-char pure hex run and a 40-char
+decimal run cannot be blocked at all — the first is the documented blind spot
+above, the second the entropy floor above — because a positional exception cannot
+invent a signal the detector does not have. `scripts/egress-screen.test.mjs` pins
+those two as blind-spot cases and pins every other case in the position as an
+IDENTITY: the slug position must score exactly like the same string in prose.
 
 ## Fail-closed refusal
 
