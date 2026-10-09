@@ -215,7 +215,7 @@ function makeIntegrationTree() {
   }
   // Normalize the checkout — worktree add -B can leave a dirty index
   // when the base branch has been force-updated. A clean tree means
-  // cherry-pick never refuses for stale-index reasons.
+  // the merge never refuses for stale-index reasons.
   try {
     git(["checkout", "--", "."], resolve(integrationTree));
   } catch {
@@ -251,26 +251,41 @@ function removeIntegrationTree({ force = false } = {}) {
   }
 }
 
-/** Replay one candidate's commits onto the integration tree. */
+/**
+ * Replay one candidate onto the integration tree by MERGING its branch.
+ *
+ * FOC-726: every landing goes branch→PR→merge, so a candidate's history
+ * contains merge commits — and `git cherry-pick` refuses those outright ("is a
+ * merge but no -m option was given"), which used to surface as a verification
+ * REJECT over a tree that was never built. Merging the branch makes the
+ * candidate's own merge commits ordinary ancestors that `git merge` handles.
+ */
 function replay(child, tree) {
   const range = `${base}..${child.branch}`;
-  let commits = [];
+  let commits = 0;
   try {
-    const out = git(["rev-list", "--reverse", range], mainRepo);
-    commits = out ? out.split(/\r?\n/).filter(Boolean) : [];
+    commits = Number(git(["rev-list", "--count", range], mainRepo)) || 0;
   } catch (err) {
     return { childId: child.childId, ok: false, conflicts: [], error: (err.stderr || err.message).trim().split("\n")[0], commits: 0 };
   }
 
-  if (!commits.length) {
-    return { childId: child.childId, ok: true, conflicts: [], commits: 0, note: "nothing to replay — no commits ahead of the base" };
+  // Already an ancestor of the integration HEAD — no work of its own, or
+  // another candidate's merge carried it in — so there is nothing to replay.
+  try {
+    git(["merge-base", "--is-ancestor", child.branch, "HEAD"], tree);
+    return { childId: child.childId, ok: true, conflicts: [], commits, note: "nothing to replay — already contained in the integration tree" };
+  } catch {
+    /* not an ancestor — merge it below */
   }
 
   try {
-    git(["cherry-pick", ...commits], tree);
-    return { childId: child.childId, ok: true, conflicts: [], commits: commits.length, error: null };
+    git(["merge", "--no-ff", "--no-edit", child.branch], tree);
+    return { childId: child.childId, ok: true, conflicts: [], commits, error: null };
   } catch (err) {
-    // The files git could not merge ARE the textual conflict.
+    // The files git could not merge ARE the textual conflict. Any other refusal
+    // — unrelated histories, an unreadable rev, git failing outright — is this
+    // TOOL failing, not the candidates contradicting each other, and must never
+    // be reported as a verification result.
     let conflicts = [];
     try {
       const out = git(["diff", "--name-only", "--diff-filter=U"], tree);
@@ -279,15 +294,15 @@ function replay(child, tree) {
       /* the conflict list is best effort; the failure itself is the finding */
     }
     try {
-      git(["cherry-pick", "--abort"], tree);
+      git(["merge", "--abort"], tree);
     } catch {
-      /* leave it as it is; the tree is kept for inspection anyway */
+      /* nothing in progress, or the abort failed; the tree is kept for inspection anyway */
     }
     return {
       childId: child.childId,
       ok: false,
       conflicts,
-      commits: commits.length,
+      commits,
       error: (err.stderr || err.message).trim().split("\n")[0],
     };
   }
@@ -342,19 +357,29 @@ for (const child of candidates) {
 }
 
 // Step 5 — the combined regression. Only meaningful if everything replayed.
-const replayedCleanly = replays.every((r) => r.ok);
+// FOC-726: a replay failure with unmerged files left behind is the candidates'
+// genuine textual conflict — a verification result, rejected as before. A
+// replay failure WITHOUT them is git refusing to build the tree at all, and a
+// tree that was never assembled has no verification verdict to report.
+const conflicted = replays.some((r) => !r.ok && r.conflicts.length > 0);
+const toolFailure = replays.some((r) => !r.ok && r.conflicts.length === 0);
 let combined = null;
-if (replayedCleanly) {
+if (!conflicted && !toolFailure) {
   combined = verify(tree, "combined");
   if (!combined.ok) {
     findings.push(`the combined suite failed (exit ${combined.exitCode}) — each candidate passed alone`);
   }
-} else {
+} else if (conflicted) {
   findings.push("the combined suite was not run: the candidates could not be replayed together");
+} else {
+  findings.push("the combined suite was not run: the integration tree could not be assembled");
 }
 
-// Step 6 — one verdict per candidate.
-const accepted = findings.length === 0;
+// Step 6 — one verdict per candidate. `accepted: null` on a tool failure is the
+// point of the classification: no tree was tested, so no candidate can be
+// reported as having failed verification — but none passes either.
+const accepted = conflicted || !toolFailure ? findings.length === 0 : null;
+const status = accepted === null ? "tool_error" : accepted ? "accepted" : "rejected";
 
 const verdicts = candidates.map((c) => ({
   childId: c.childId,
@@ -379,6 +404,9 @@ const report = {
   runId,
   base,
   verifyCommand: verifyCmd,
+  // FOC-726: always present, always one of the three. "tool_error" means the
+  // tree was never assembled and nothing was tested — it is not a verdict.
+  status,
   accepted,
   candidates: verdicts,
   isolation,
@@ -396,10 +424,15 @@ const report = {
   },
   // Stated on every rejection: this script does not retry, and it does not
   // clean up after a child. Both are decisions for the Supervisor and Mateusz.
-  next: accepted
-    ? "integration verified — the Supervisor may proceed; child worktrees are untouched"
-    : "REJECTED. No candidate is accepted. No retry was attempted and no worktree was cleaned; " +
-      "report the conflicting pair and the failing check to Mateusz.",
+  next:
+    accepted === null
+      ? "TOOL ERROR, not a verification result: the integration tree could not be assembled, " +
+        "so the combined suite never ran. No candidate is rejected. No retry was attempted; " +
+        "the tree is kept for inspection — report the failure to Mateusz."
+      : accepted
+        ? "integration verified — the Supervisor may proceed; child worktrees are untouched"
+        : "REJECTED. No candidate is accepted. No retry was attempted and no worktree was cleaned; " +
+          "report the conflicting pair and the failing check to Mateusz.",
 };
 
 atomicWriteJSON(join(runDir(runId), "merge.json"), report);
@@ -417,5 +450,6 @@ for (const w of labelWarnings) console.error(`[merge] ${w}`);
 
 console.log(JSON.stringify(report, null, 2));
 // Exit 1 on rejection so a caller that only checks the status code cannot read
-// a rejected integration as a successful run.
-process.exit(accepted ? 0 : 1);
+// a rejected integration as a successful run. Exit 2 on a tool error for the
+// same reason in the other direction: an untested tree is not a verdict either.
+process.exit(accepted === null ? 2 : accepted ? 0 : 1);

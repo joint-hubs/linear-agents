@@ -280,4 +280,114 @@ test("a live child cannot be integrated", () => {
   assert.match(out.error, /in flight/);
 });
 
+// ── 6. the tree is built by merging, not cherry-picking (FOC-726) ────────────
+console.log("\nscalanie, nie cherry-pick");
+
+/**
+ * Register one candidate by hand — for the fixtures below the `fixture()`
+ * helper's single-commit-per-branch shape is exactly what is under test, so
+ * the history is built directly and only the registry entry is shared.
+ */
+function registerChild(runId, { childId = "dev-1", taskId = "FOC-100", branch, worktree, baseRevision, allowedPaths = [] }) {
+  writeRegistry(runId, {
+    runId,
+    children: {
+      [childId]: { childId, squad: "dev", taskId, status: "exited", turns: [{ pid: 1 }], costUsd: 0, worktree, branch, baseRevision, allowedPaths },
+    },
+    rounds: {},
+  });
+}
+
+test("a candidate whose history carries a merge commit is merged, not cherry-picked", () => {
+  // Every landing goes branch→PR→merge, so a real candidate's history contains
+  // merge commits — which cherry-pick refuses outright. The defect this test
+  // pins: the combination used to be reported as a verification REJECT without
+  // a single tree ever being tested.
+  const { repo } = fixtureRepo();
+  writeFileSync(join(repo, "value.txt"), "ok\n");
+  gitIn(repo, "add", "-A");
+  gitIn(repo, "commit", "-m", "base: value is ok");
+  const baseRevision = gitIn(repo, "rev-parse", "HEAD");
+
+  // A side branch the candidate will merge in, so base..candidate contains a
+  // merge commit — exactly the shape that used to kill the replay.
+  gitIn(repo, "checkout", "-b", "side", baseRevision);
+  writeFileSync(join(repo, "side.txt"), "side\n");
+  gitIn(repo, "add", "-A");
+  gitIn(repo, "commit", "-m", "side: its own file");
+
+  const branch = "foc-100-dev";
+  gitIn(repo, "checkout", "-b", branch, baseRevision);
+  writeFileSync(join(repo, "main.txt"), "main\n");
+  gitIn(repo, "add", "-A");
+  gitIn(repo, "commit", "-m", `${branch}: work`);
+  gitIn(repo, "merge", "--no-ff", "side", "-m", `${branch}: merge side`);
+  gitIn(repo, "checkout", "main");
+
+  const worktree = resolve(join(repo, "..", "la-wt", branch));
+  gitIn(repo, "worktree", "add", worktree, branch);
+
+  const runId = fixtureRun();
+  registerChild(runId, { branch, worktree, baseRevision });
+
+  const r = merge(runId);
+  const out = parse(r, fail);
+
+  assert.equal(out.accepted, true, JSON.stringify(out.findings));
+  assert.equal(out.status, "accepted");
+  assert.equal(r.status, 0);
+  // The combined suite actually RAN — this is the assertion that separates
+  // "merged" from "silently skipped".
+  assert.ok(out.combined && out.combined.ok, JSON.stringify(out.combined));
+  assert.ok(out.replays[0].ok, JSON.stringify(out.replays));
+  // The branch carried its own commit, the side commit and the merge commit.
+  assert.ok(out.replays[0].commits >= 2, JSON.stringify(out.replays));
+  // Built by merging: the integration branch's own history has a merge commit.
+  const merges = gitIn(repo, "log", "--merges", "--format=%s", `la-merge/${runId}`);
+  assert.ok(merges.length > 0, `no merge commit on la-merge/${runId}`);
+});
+
+test("a merge refusal without conflicts is a tool error, not a verification reject", () => {
+  // The candidate sits on an unrelated history: its own verify passes (it
+  // carries the same value.txt), but git refuses the merge outright. No tree
+  // was tested, so `accepted` must stay null — a tool failure dressed as a
+  // reject is exactly how a verdict nobody earned gets believed.
+  const { repo } = fixtureRepo();
+  writeFileSync(join(repo, "value.txt"), "ok\n");
+  gitIn(repo, "add", "-A");
+  gitIn(repo, "commit", "-m", "base: value is ok");
+  const baseRevision = gitIn(repo, "rev-parse", "HEAD");
+
+  gitIn(repo, "checkout", "--orphan", "orphan");
+  gitIn(repo, "rm", "-rf", ".");
+  writeFileSync(join(repo, "value.txt"), "ok\n");
+  writeFileSync(join(repo, "own.txt"), "own\n");
+  gitIn(repo, "add", "-A");
+  gitIn(repo, "commit", "-m", "orphan: unrelated history");
+  gitIn(repo, "checkout", "main");
+
+  const worktree = resolve(join(repo, "..", "la-wt", "orphan"));
+  gitIn(repo, "worktree", "add", worktree, "orphan");
+
+  const runId = fixtureRun();
+  registerChild(runId, { branch: "orphan", worktree, baseRevision });
+
+  const r = merge(runId);
+  const out = parse(r, fail);
+
+  assert.equal(out.status, "tool_error");
+  assert.equal(out.accepted, null);
+  assert.equal(out.combined, null);
+  assert.equal(r.status, 2);
+  // The git error reaches the findings, not a fabricated rejection.
+  assert.ok(out.findings.some((x) => /unrelated histories/.test(x)), JSON.stringify(out.findings));
+  // No candidate is marked rejected by a tool failure, and none is accepted.
+  assert.ok(out.candidates.every((c) => c.accepted === null), JSON.stringify(out.candidates));
+  // The untested tree is kept for inspection, the child's tree untouched.
+  assert.equal(out.integration.keptForInspection, true);
+  assert.ok(out.integration.worktree && existsSync(out.integration.worktree));
+  assert.ok(existsSync(worktree), "the child's worktree was touched by a tool failure");
+  assert.match(out.next, /not a verification result/i);
+});
+
 summary();
