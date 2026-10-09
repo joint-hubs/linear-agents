@@ -105,6 +105,10 @@
       "reason": "isolation audit FOC-476: mkdtemp/tmpdir fixtures only; the seam caller is an in-process stub (no network, no provider spawn); label writes go to a temp decisionRunsDir; no ports, no socket binds, no real-repo-path writes"
     },
     {
+      "file": "linear-ops.test.mjs",
+      "reason": "isolation audit FOC-716/FOC-606: no filesystem writes at all, no ports, no socket binds; the parent-chain fetch is an injected fetchNode stub (no network, no Linear call) and every other input is a literal recorded-response shape; the FOC-606 group spawns the real CLI but only its refusal paths, which validate and exit before any network access (asserted: stdout empty); no telemetry DB"
+    },
+    {
       "file": "linear-client.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
