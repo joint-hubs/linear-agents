@@ -24,6 +24,54 @@ Kolejka — sekwencja z `docs/ROADMAP.md` (2026-10-08). **Tor A (krytyczna ście
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## 2026-10-09 (25) — decyzje Mateusza wdrożone: nowa kolejność lądowań · FOC-667 wylądował `367ac52` · lint domknięty · reguły lądowania (a)/(b) zapisane
+
+**Kolejność lądowań zmieniona: FOC-667 → FOC-726 → FOC-716 (+FOC-606 osobnym commitem) → FOC-733
+(po rundzie Q1/Q2).** Stara zasada „FOC-726 nie przed FOC-733" **przestaje obowiązywać** — FOC-733
+dostaje nową rundę i przechodzi pełną weryfikację na finalnym sha, więc nic nie jest w locie przez
+starą bramkę. Przyczyna przestawienia: REJECT FOC-733 i obie czerwienie mają jedno źródło —
+migający `security-scan.test.mjs` (WDAC przerywa semgrep). FOC-667 jest jego naprawą, więc ląduje
+pierwszy i stabilizuje bramkę dla reszty.
+
+**FOC-667 wylądował na `main` jako `367ac52`** (fast-forward `2b7243d..367ac52`, historia nietknięta).
+Bezpośrednio przedtem, na `foc-667-dev`, `367ac52 docs(tools): …` — aktualizacja
+`docs/tools/security-scan.md` o cztery stany skanera (`ok` / `partial` / `error` / `unavailable`),
+dwupoziomowy dyskryminator sygnału blokady (treść dowodu nigdy nie jest sygnałem), niezmiennik
+`scanned === (status === 'ok')` oraz znane ograniczenia. Bez nowej rundy dev. Dowody po zmianie:
+`security-scan.test.mjs` **143 passed, 0 failed, 0 skipped**, exit 0 — **×2**, więc warunek (b)
+poniżej jest spełniony.
+
+**Lint domknięty.** `git restore agents/supervisor/plans/greedy-popping-wilkes.md` (wersja z HEAD,
+nic nie skasowane) → `node scripts/lint.mjs` **exit 0, `OK: 584 files checked, 0 violations`**.
+Przyczyna: zacommitowany design leżał w katalogu zarządzanym przez Claude Code
+(`CLAUDE_CONFIG_DIR/plans`), auto-cleanup po ~30 dniach (commit 2026-09-06). To samo grozi
+`agents/plan/plans/foc-218-design.md` i `agents/plan/plans/foc-219-design.md` (31–32 dni).
+Reszta jako **FOC-472** (chore): przenieść te 3 designy do `docs/plans/` i poprawić odwołania
+w `docs/ui/fenix-manager.md` i `docs/ui/fenix-manager-rewards.md`. Zakładać **dopiero po
+lądowaniu FOC-716** (lokalne wystarczy) — nowy `create-child` dziedziczy projekt + milestone,
+zero sierot.
+
+**Źródło dowodu AC 4 (suite) dla FOC-716 — nie moje.** Pomiar Mateusza **poza moim drzewem**:
+osobny worktree na `c6b89f4`, `--jobs 2`, pełny log do pliku → `test-all` **116/116, exit 0,
+482 s**; pojedynczo `linear-ops` 16/0, `test-run` 10/10, `test-all.test` 1/1, `config-drift` 26/0,
+`security-scan` 81/0 ×2. Moje 115/116 = **flake**, nie FOC-716. Nazwy czerwonego pliku nie
+odzyskujemy i nie zgadujemy.
+
+**Nowa stała zasada suity (od dziś): pełny log ZAWSZE do pliku w katalogu runu**
+(`> <run>/test-all-<sha>.log 2>&1`), potem `grep FAIL`. **Nigdy `| tail`** — ucięty ogon kosztował
+już raz nazwę czerwonego pliku i raz zmyśloną liczbę kosztu. **Jedna ciężka suita naraz.**
+
+**Reguły lądowania (decyzja 7 / Q4) — od dziś w mocy:**
+- **(a)** każdy raport TEST/verify zawierający linię `SECSCAN_STATE` **cytuje ją dosłownie obok
+  wyniku** („116/116, SAST skipped: <powód>"), nigdy gołe `N/N`.
+- **(b)** kandydat dotykający `scripts/security-scan.mjs` albo jego testu musi mieć w dowodach
+  **co najmniej jeden przebieg z żywym skanerem (0 skipów)**. FOC-667 to ma (143/0/0 ×2).
+
+**Q-A (FOC-733) — opcje 2 i 3 odpadły na stałe.** Weryfikacja wyłącznie opcją 1: identyczna komenda
+`npm ci && node scripts/test-all.mjs` na **finalnym sha** po rundzie Q1-B + Q2-B, **po** lądowaniu
+FOC-667. REJECT finalnego sha z przyczyny innej niż kandydat → **stop i raport, bez ponawiania**.
+Granica przyrządu FOC-477 = finalny sha; run 2 (FOC-236) startuje dopiero na nim.
+
 ## 2026-10-08 (24) — run 57a9: FOC-733 domknięty do TEST (kandydat `4d88de9`) · MERGE REJECT z JEDNEGO migającego pliku, kombinowane 115/115 · ZNACZNIK PRZEŁĄCZENIA NA TOR B: 19:57:51Z · FOC-726 rusza (dev-4)
 
 **FOC-733 (ekran egress: wąski wyjątek sluga z URL-a Linear) — DEV/REVIEW/TEST zamknięte.**
