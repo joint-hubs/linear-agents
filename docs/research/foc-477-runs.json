@@ -121,6 +121,15 @@
       "headSha": "8fd0e7802b8a7fef3db376ece02713f70caaecc8",
       "status": "excluded (C1)",
       "issueStatus": "deferred: infra (provider routing)"
+    },
+    {
+      "issue": "FOC-236",
+      "attempt": 2,
+      "runId": "2026-10-09-supervisor-foc477-arma-02r2-foc236",
+      "runnerSha": "a1f8577e328fd94bf6f5f52fd70b3e02db5fcdc8",
+      "headSha": "e61aa37cc69482b5c4cbbed4a7c68d410a87d2ab",
+      "status": "running",
+      "note": "run 2 restarted FROM SCRATCH on the instrument boundary 4bc5bc222725637127e0b7b5d4c011a359857f36 (the landed FOC-733 fix). headSha is main at launch and carries docs-only commits after the boundary; the instrument content IS the boundary. Attempt 1 (2026-10-08-supervisor-foc477-arma-02-foc236) stopped at plan.dor with EGRESS_BLOCKED and sits BEFORE the boundary — excluded, nothing before the boundary counts. Inputs: .state/foc-477-armA/inputs-02-foc236.json"
     }
   ],
   "corpus": [
