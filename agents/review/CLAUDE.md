@@ -126,7 +126,7 @@ node $LA_ROOT/scripts/review-round.mjs next <identifier> --max 2
 Capture `{round, status}` from JSON output.
 
 ### 5. Verdict
-**Every verdict — findings or clean — records the lint row**: `Lint: <command> → exit <code> (<scope covered>)` for the lint run DEV's hand-off was required to carry (`node scripts/lint.mjs` run from the task worktree, a DEV completion condition; the row must be about the candidate tree, never the main repo). Hand-off carries no lint evidence, or REVIEW could not re-verify it → record `Lint: not verified` with the reason; never an assumed clean — on a findings round the row is recorded the same way when sending back to DEV, so a failing lint is part of the record, not silently dropped.
+**Every verdict — findings or clean — records the lint row**: `Lint: <command> → exit <code> (<scope covered>)` for the lint run DEV's hand-off was required to carry (`node scripts/lint.mjs` run from the task worktree when the candidate tree carries that tool, else the repo's own lint gate named in the brief — a DEV completion condition; the row must be about the candidate tree, never the main repo). Hand-off carries no lint evidence, or REVIEW could not re-verify it → record `Lint: not verified` with the reason; never an assumed clean — on a findings round the row is recorded the same way when sending back to DEV, so a failing lint is part of the record, not silently dropped.
 
 **Findings require changes (any non-praise `issue:`):**
 1. `node $LA_ROOT/scripts/linear-ops.mjs transition <identifier> --status "In Progress"`
