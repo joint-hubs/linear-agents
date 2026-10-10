@@ -3475,3 +3475,45 @@ z powodem.
 **Czeka na Mateusza (bez zmian):** (1) los zdania lewara 2 dla FOC-596; (2) czy `npm ci` w
 merge-verify zostaje; (3) push wave + sprzątanie worktree'ów. Kolejka: **FOC-476** → 477
 (FOC-517 czeka na REVIEW/merge).
+
+---
+
+## 2026-10-10 — FOC-758 (instrument) + decyzje telemetrii modeli/kosztów
+
+**FOC-758 w toku.** dev-1 (tura 2, `xiaomi/mimo-v2.6-pro`) implementuje (d) — pin providerów
+`[Wafer, Fireworks]`, `allow_fallbacks: false`, w `config/models.json` jako top-level
+`providerPins["plan.discovery"]` (nigdy pod `routing` — ten klucz jest czytany jako lista squadów).
+Na `a3d447a`: (a) konkretne naruszenia schematu w `problems` + `allErrors: true` jako jawna część
+(a), (b) jedna regeneracja na śmieci providera, (c) event line z providerem. (d) jeszcze nie jest
+w drzewie. Bramka `gate-dev-1-1` odpowiedziana 14:55Z (0/5 to nie pomiar AC — 4/5 wywołań poza
+{Wafer, Fireworks}, bo (d) nie było w kodzie); kryterium lądowania doprecyzowane PRZED pomiarem
+(`foc758LandingCriterion20261010` w `foc-477-runs.json`, commit `db0004c`; opis FOC-758 w Linear
+podmieniony). Dostawa odpowiedzi leży w `.state/foc-477-armA/followup-foc758-gate-answer.md` —
+idzie przez `--gate` na granicy tury.
+
+**Decyzje telemetrii (Mateusz 2026-10-10, review `docs/research/2026-10-10-model-cost-telemetry-review.md`,
+FOC-759…765 w Linear):**
+
+1. **FOC-759** — baseline arm B przeliczony z transkryptów PLAN (lead + `subagents/`, dedup
+   `message.id`, `pricingSnapshot`+`calculateCost`), nowe pole obok starego, metoda do protokołu.
+   Przed pierwszym zliczonym runem arm A. To korekta danych, nie przyrządu — granica bez zmian, nie
+   blokuje lądowania FOC-758. FOC-198: transkrypt skasowany, result niemonotoniczne
+   (0.023 → 0.045 → 0.009) — reguła **zaproponowana** (podłoga 0.009, kierunek „przeciw GO";
+   alternatywa: wykluczenie z mediany osi kosztu), decyzja Mateusza.
+2. **Modele** — każdy spawn z jawnym `--model` z routingu (`plan/dev/review/test` =
+   `z-ai/glm-5.3-flash`), bez dziedziczenia `ANTHROPIC_MODEL` (dotąd 57% dzieci, 101 na mimo).
+   W Task **nigdy** parametru `model` — klasa „sonnet" to `gemini-2.5-flash-lite`, model
+   klasyfikatora. `plan.spec` w arm A na glm-5.3-flash jako **stały element przyrządu**
+   (protokół Q10; zliczonego runu jeszcze nie ma, więc to nie jest ruch granicy).
+   **dev-1 FOC-758 na mimo dokończy tak jak jest** — ostatnie dziecko na mimo, odnotowane.
+3. **Koszty** — do FOC-760 `costUsd` z rejestru z adnotacją „zawyżone (suma narastających
+   result)", nigdy jako „wycenione"; gdzie się da, koszt z transkryptu. (Rejestr jest 5.05×
+   ground truth — F4.)
+4. **Kolejka** — FOC-760+761 razem (jeden skrypt rekoncyliacji rejestr/telemetria/transkrypt =
+   akceptacja obu; FOC-761 wymaga jednorazowego ponownego ingestu do ŻYWEGO store'u telemetrii →
+   plan ingestu najpierw do Mateusza, **żadne dziecko nie otwiera live store do zapisu**); potem
+   FOC-762–764 (M5); zmiany kontraktów `agents/plan/**` (FOC-763/764) dopiero po zakończeniu
+   kampanii FOC-477; FOC-765 (M7) czeka na decyzję o pluginie draw.io.
+
+**Push robi Mateusz.** Main: `db0004c`, przed origin.
+

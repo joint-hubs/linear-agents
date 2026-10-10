@@ -445,6 +445,45 @@ REVIEW → TEST → PR → merge — and **never lands in the middle of an activ
 observability patch (old option C) rides the **same** change when (2) fires; standalone it waits
 until after the 10th run (Q6).
 
+### Q10 — the arm-A `plan.spec` model is a fixed instrument parameter → **Mateusz, 2026-10-10**
+
+Mateusz: *"dotyczy też dziecka plan.spec w arm A — zapisz w protokole jego model jako stały element
+przyrządu (zliczonego runu jeszcze nie ma, więc to nie jest ruch granicy)."*
+
+The arm-A `plan.spec` PLAN child runs on **`z-ai/glm-5.3-flash`** — the model `config/models.json`
+routes `plan` to. Held for all 10 runs, exactly as Q5 holds the booking shape. No counted arm-A run
+exists yet, so fixing it is **not** a boundary move.
+
+The operational rule that produced it (Mateusz, 2026-10-10, in force until FOC-762): **every spawn
+carries an explicit `--model` from routing** — `plan`/`dev`/`review`/`test` = `z-ai/glm-5.3-flash`,
+never inherited from `ANTHROPIC_MODEL`. So far 57 % of children inherited it, and 101 of them ran on
+`xiaomi/mimo-v2.6-pro` while routing says glm-5.3-flash (review F2). And **never pass a `model`
+parameter to `Task`**: the `sonnet` class resolves to `google/gemini-2.5-flash-lite`, the permission
+classifier's model — work routed there by class name is a silent quality drop (F3).
+
+`dev-1` (FOC-758) is the recorded exception: it runs on `xiaomi/mimo-v2.6-pro` and **finishes there
+as-is** (*"dev-1 FOC-758 na mimo dokończ, jak jest; odnotuj w rekordzie"*). Last mimo child.
+
+**Cost reporting until FOC-760.** Registry `costUsd` is reported annotated *"zawyżone (suma
+narastających result)"*, never as "wycenione" — the watcher sums cumulative `result.modelUsage`
+snapshots (review F4, 5.05× ground truth). A transcript-priced figure is reported wherever one
+exists. The method, and with it the arm-B baseline correction, is FOC-759.
+
+**FOC-759 — arm-B baseline, due before the first counted arm-A run.** The `armB.costUsd` figures are
+registry numbers, 3.82× ground truth in sum ($7.51 recorded vs $1.97 transcript-priced over the 9
+recoverable entries). They are recomputed from the PLAN children's transcripts (lead + `subagents/`,
+dedup `message.id`, `pricingSnapshot()` + `calculateCost()`) into a **new field beside the old** —
+the old stays as history, with a note saying why it is not used. **Baseline data, not the
+instrument**: the boundary does not move, and FOC-758's landing is not blocked by it. FOC-198's
+transcript is deleted and its three cumulative result values are non-monotone (0.023 → 0.045 →
+0.009), so it needs a conservative rule; one is proposed and Mateusz decides.
+
+**Q9's acceptance sentence is superseded.** The "5/5 … otherwise nothing lands" wording at the end
+of the pinned-route paragraph was replaced **before** the measurement (Mateusz, 2026-10-10) — a map
+rejected after one regeneration is a *landable* outcome, not a failure. The operative bar is
+`foc758LandingCriterion20261010` in `docs/research/foc-477-runs.json` and the FOC-758 issue
+description. Q9 is left as written; it records what was decided on 2026-10-08.
+
 ### Corpus → **confirmed**
 §3.2 list of 10 stands. No swaps.
 

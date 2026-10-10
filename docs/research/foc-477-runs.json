@@ -30,6 +30,44 @@
     "allErrors": "Ajv allErrors:true on the shared outputValidate map is accepted as an explicit part of (a) (Mateusz 2026-10-10, gate question 3). Without it (a) cannot work - attempt 4 carried two violations and the validator reported one. validate() stays a plain boolean at every call site; other .errors readers keep their own Ajv instances.",
     "status": "DECIDED 2026-10-10 by Mateusz. Recorded in the FOC-758 issue description the same day. X/5 is NOT yet recorded - it is written here only after the measurement on the pinned route is FINAL."
   },
+  "telemetryCorrections20261010": {
+    "kind": "Mateusz's decisions on the model/cost telemetry review (docs/research/2026-10-10-model-cost-telemetry-review.md), 2026-10-10 - data and process corrections AROUND the campaign, not an instrument change",
+    "boundary": "NONE of this moves the instrument boundary. FOC-759 is a baseline-data correction; the model rule governs future spawns. No counted arm-A run exists yet, so nothing here is a boundary move.",
+    "modelRule": {
+      "until": "FOC-762 (spawn resolves the squad model from config/models.json routing)",
+      "rule": "every spawn carries an explicit --model taken from routing: plan/dev/review/test = z-ai/glm-5.3-flash. No ANTHROPIC_MODEL inheritance (so far 57% of children inherited it, 101 of them on xiaomi/mimo-v2.6-pro while routing says glm-5.3-flash).",
+      "taskTool": "NEVER pass a model parameter to Task/Agent. The 'sonnet' class resolves to google/gemini-2.5-flash-lite (the permission classifier's model) - work routed there by class name is a silent quality drop. The Supervisor's own general-purpose tasks landed there on 2026-10-10.",
+      "planSpecInstrument": "The arm-A plan.spec child runs on z-ai/glm-5.3-flash - a FIXED part of the instrument (Mateusz 2026-10-10). No counted arm-A run exists yet, so fixing it is not a boundary move. See the protocol Q10.",
+      "dev1Exception": "dev-1 (FOC-758) runs on xiaomi/mimo-v2.6-pro by explicit --model and FINISHES there as-is (Mateusz 2026-10-10: 'dev-1 FOC-758 na mimo dokoncz, jak jest; odnotuj w rekordzie'). Last mimo child. Recorded, not changed."
+    },
+    "costReporting": {
+      "until": "FOC-760 (watcher prices child cost from transcript messages)",
+      "rule": "registry costUsd is reported with the annotation 'zawyzone (suma narastajacych result)', NEVER as 'wycenione'. Where a transcript-priced figure exists, report that instead.",
+      "why": "supervisor-watch.mjs sums costFromResult for every result event, and result.modelUsage is cumulative for the session - every background-task wake and every resumed turn re-adds the whole session. Registry is 5.05x transcript ground truth overall (review F4)."
+    },
+    "armBBaseline": {
+      "status": "PENDING - FOC-759, due BEFORE the first counted arm-A run (attempt 5 FOC-236)",
+      "what": "armB.costUsd in this corpus is registry costUsd and is 3.82x ground truth in sum ($7.51 recorded vs $1.97 transcript-priced over the 9 recoverable entries; per issue x1.00-11.71). Arm A is priced from OpenRouter usage.cost, so the cost axis is tilted toward arm A.",
+      "method": "recompute from the PLAN child's transcripts: lead + subagents/, assistant messages deduplicated by message.id, priced with pricingSnapshot() + calculateCost(). NEW field next to the old one; the old value stays as history with a note why it is not used. Method goes into docs/plans/foc-477-measurement-protocol.md.",
+      "scope": "data correction, NOT an instrument change - boundary unchanged, does not block FOC-758 landing (Mateusz 2026-10-10)."
+    },
+    "foc198Rule": {
+      "status": "PROPOSED by the Supervisor 2026-10-10 - decision is Mateusz's, NOT yet decided",
+      "problem": "FOC-198's transcript is deleted. Its tee holds three cumulative result values 0.023 -> 0.045 -> 0.009, non-monotone, so no safe reconstruction. Its armB.costUsd 0.0749 is registry-inflated like the rest.",
+      "goRuleContext": "the cost axis is a MEDIAN comparison: win iff median arm A < median arm B x 0.85 (protocol, the win/loss rule). GO iff both axes win AND zero axes in regression > 5%.",
+      "proposal": "Score FOC-198's arm-B cost on the cost axis at 0.009 - the smallest surviving cumulative snapshot, the only number the record can defend without inventing data, and a floor the session total cannot go below. Rationale: with the 9 known ground-truth B values the median is 0.1168; a low B_198 drops the 10-entry median to 0.1126 (the hardest bar A can face), a high B_198 raises it to 0.1277. The floor is the direction that makes GO harder - what 'przeciw GO' asks for. If the cost axis still wins with B_198 at its floor, the win does not depend on the lost transcript.",
+      "alternative": "exclude FOC-198 from the cost-axis median (n=9) and mark the axis win* with the exclusion named. Invents nothing, but the 9-entry median 0.1168 is an easier bar than 0.1126 - less conservative against GO.",
+      "decisionOwner": "Mateusz. Until he rules, FOC-759's AC2 stays open and the cost axis reports FOC-198 as unreconstructible."
+    },
+    "queue": {
+      "FOC-759": "now / before the first counted arm-A run (High, child of FOC-477)",
+      "FOC-760+FOC-761": "together next (M1, High) - ONE reconciliation script (registry / telemetry / transcript) is the acceptance for both. FOC-761 needs a one-time re-ingest into the LIVE telemetry store: the ingest plan goes to Mateusz FIRST; no child opens the live store for writing.",
+      "FOC-762-764": "M5, after 760+761. FOC-763/764 change contracts under agents/plan/** only AFTER the FOC-477 campaign ends - plan.spec runs as a PLAN child in arm A, so changing its contract mid-campaign moves the instrument.",
+      "FOC-765": "M7, waits for Mateusz's decision on the draw.io plugin",
+      "push": "Mateusz's - 'Push robię ja.'"
+    },
+    "status": "DECIDED 2026-10-10 by Mateusz (model/cost telemetry review). The FOC-198 rule is the one open sub-decision. armB.costUsd values in this corpus are NOT yet recomputed - they stay as history until FOC-759 writes the new field beside them."
+  },
   "egressScreenScan20261008": {
     "kind": "corpus-wide scan of the EXACT plan.dor state bytes through scanEgress — diagnostic only, wrote no run, mutated no Linear state",
     "at": "2026-10-08T16:13:34.891Z",
