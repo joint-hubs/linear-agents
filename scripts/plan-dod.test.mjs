@@ -7,8 +7,11 @@
 // the DEFAULT generator — the one live [G] calls actually ride — is exercised
 // on an injected fetch: registry prompt + resolved reads reach the wire, the
 // strict json_schema travels, and ONE FOC-449 event line lands in
-// decisions.jsonl per successful call (input as sent, mask-only scrubbed,
-// answers, usage/cost, latency) while every failure path appends NOTHING.
+// decisions.jsonl per TERMINAL call (FOC-758): a successful call carries the
+// parsed answers; a failed or unparseable call carries ok:false, a typed
+// `error` and whatever usage the body carried — a failed call's cost must
+// exist somewhere. Only a pre-fetch wiring failure (no key, unknown stepId)
+// appends NOTHING — no provider call was attempted.
 // The eval harness's input partition is tested against the committed fixture:
 // the approved DoD section is ground truth and never enters the inputs.
 //
@@ -114,7 +117,8 @@ function okResponse(content, usage = { input_tokens: 123, output_tokens: 45, cos
     json: async () => ({
       id: "resp-plan-dod-test",
       model: "z-ai/glm-5.3-flash",
-      choices: [{ message: { content: typeof content === "string" ? content : JSON.stringify(content) } }],
+      choices: [{ message: { content: typeof content === "string" ? content : JSON.stringify(content) }, finish_reason: "stop" }],
+      provider: "z-ai",
       usage,
     }),
   };
@@ -430,6 +434,8 @@ await test("plan.dod rides the registry prompt, the resolved reads and the stric
     eq(line.formatConfidence, null, "no format confidence");
     deepEq(line.usage, { inputTokens: 123, outputTokens: 45, cost: 0.000045 }, "usage normalized");
     eq(line.responseId, "resp-plan-dod-test", "response id");
+    eq(line.provider, "z-ai", "provider on the success line (FOC-758)");
+    eq(line.finish_reason, "stop", "finish_reason on the success line (FOC-758)");
     deepEq(line.error, null, "no error on success");
     eq(typeof line.eventId, "string", "event id present");
     if (line.eventId.length < 10) fail("event id looks like a UUID");
@@ -473,9 +479,9 @@ await test("plan.ac rides the same generator: its own registry prompt, its reads
   }
 });
 
-console.log("\nplan-dod: the default generator fails closed (no event line, ever)");
+console.log("\nplan-dod: the default generator's failure paths (FOC-758: ONE ok:false event line per failed call)");
 
-await test("an HTTP failure throws provider_error and appends NOTHING to decisions.jsonl", async () => {
+await test("an HTTP failure throws provider_error and appends ONE ok:false event line", async () => {
   const { dir, cleanup } = tempDir();
   try {
     const fetchImpl = async () => ({ ok: false, status: 500, json: async () => ({}) });
@@ -488,13 +494,28 @@ await test("an HTTP failure throws provider_error and appends NOTHING to decisio
       err = e;
     }
     eqCode(err, "provider_error", "typed provider_error");
-    eq(existsSync(join(dir, "decisions.jsonl")), false, "no event line may exist for a failed call");
+    if (!err.message.includes("HTTP 500")) fail(`the message names the status: ${err.message}`);
+
+    const lines = readLines(join(dir, "decisions.jsonl"));
+    eq(lines.length, 1, "exactly one event line for the failed call");
+    const line = lines[0];
+    eq(line.type, SHADOW_EVENT_TYPE, "type event");
+    eq(line.ok, false, "ok:false on the failure line");
+    deepEq(line.answers, null, "no fabricated answers");
+    deepEq(line.error, { code: "provider_error", message: "[G] plan.dod returned HTTP 500" }, "typed error");
+    deepEq(line.usage, null, "no usage on the wire — usage null, never invented");
+    eq(line.provider, null, "no provider claim when the body carries none");
+    eq(line.finish_reason, null, "no finish_reason when the body carries none");
+    eq(line.model, "z-ai/glm-5.3-flash", "the configured model stands in when the body names none");
+    eq(line.decisionId, "plan.dod", "decisionId = stepId");
+    eq(typeof line.eventId, "string", "event id present");
+    eq(typeof line.durationMs, "number", "latency recorded");
   } finally {
     cleanup();
   }
 });
 
-await test("a network failure throws provider_error and appends NOTHING", async () => {
+await test("a network failure throws provider_error and appends ONE ok:false event line (usage null — no body ever arrived)", async () => {
   const { dir, cleanup } = tempDir();
   try {
     const fetchImpl = async () => { throw new Error("ECONNRESET"); };
@@ -507,13 +528,18 @@ await test("a network failure throws provider_error and appends NOTHING", async 
       err = e;
     }
     eqCode(err, "provider_error", "typed provider_error");
-    eq(existsSync(join(dir, "decisions.jsonl")), false, "no event line");
+    const lines = readLines(join(dir, "decisions.jsonl"));
+    eq(lines.length, 1, "one event line");
+    eq(lines[0].ok, false, "ok:false");
+    deepEq(lines[0].error, { code: "provider_error", message: "[G] plan.dod request failed: ECONNRESET" }, "typed error");
+    deepEq(lines[0].answers, null, "no fabricated answers");
+    deepEq(lines[0].usage, null, "usage null — no body");
   } finally {
     cleanup();
   }
 });
 
-await test("a timed-out request is provider_error — never 'response is not JSON' — and appends NOTHING", async () => {
+await test("a timed-out request is provider_error — never 'response is not JSON' — with ONE ok:false event line", async () => {
   const { dir, cleanup } = tempDir();
   try {
     // The abort can fire while the body streams (measured on the eval's first
@@ -535,13 +561,17 @@ await test("a timed-out request is provider_error — never 'response is not JSO
     }
     eqCode(err, "provider_error", "a timeout is a provider failure");
     if (!err.message.includes("timed out")) fail(`the message names the timeout: ${err.message}`);
-    eq(existsSync(join(dir, "decisions.jsonl")), false, "no event line");
+    const lines = readLines(join(dir, "decisions.jsonl"));
+    eq(lines.length, 1, "one event line");
+    eq(lines[0].ok, false, "ok:false");
+    deepEq(lines[0].error, { code: "provider_error", message: "[G] plan.dod request timed out after 50ms" }, "typed error");
+    deepEq(lines[0].usage, null, "usage null — the body never arrived");
   } finally {
     cleanup();
   }
 });
 
-await test("unparseable content throws unparseable_output and appends NOTHING", async () => {
+await test("unparseable content throws unparseable_output and appends ONE ok:false event line carrying the body's usage", async () => {
   const { dir, cleanup } = tempDir();
   try {
     const fetchImpl = async () => okResponse("this is not JSON");
@@ -554,13 +584,42 @@ await test("unparseable content throws unparseable_output and appends NOTHING", 
       err = e;
     }
     eqCode(err, "unparseable_output", "typed unparseable_output");
-    eq(existsSync(join(dir, "decisions.jsonl")), false, "no event line — no fabricated answers");
+    const lines = readLines(join(dir, "decisions.jsonl"));
+    eq(lines.length, 1, "one event line");
+    const line = lines[0];
+    eq(line.ok, false, "ok:false — no fabricated answers");
+    deepEq(line.answers, null, "answers null");
+    if (!line.error.message.includes("content is not JSON")) fail(`the error names the parse failure: ${line.error.message}`);
+    deepEq(line.usage, { inputTokens: 123, outputTokens: 45, cost: 0.000045 }, "usage from the body — the failed call's cost exists (FOC-758)");
+    eq(line.provider, "z-ai", "provider from the body, also on the error path");
+    eq(line.finish_reason, "stop", "finish_reason from the body, also on the error path");
   } finally {
     cleanup();
   }
 });
 
-await test("a response with no message content throws unparseable_output and appends NOTHING", async () => {
+await test("a failed call's cost: 0 records 0, not nothing; no usage records null — never invented", async () => {
+  const { dir, cleanup } = tempDir();
+  try {
+    const zeroUsage = { input_tokens: 10, output_tokens: 5, cost: 0 };
+    const fetchImpl = async () => okResponse("not JSON", zeroUsage);
+    const generate = createDefaultGenerator({ apiKey: "test-key", runId: "r", taskKey: "T", shadowDir: dir, fetchImpl });
+    let err;
+    try {
+      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": "x" } });
+      fail("must throw");
+    } catch (e) {
+      err = e;
+    }
+    eqCode(err, "unparseable_output", "typed unparseable_output");
+    const line = readLines(join(dir, "decisions.jsonl"))[0];
+    deepEq(line.usage, { inputTokens: 10, outputTokens: 5, cost: 0 }, "cost 0 survives as 0");
+  } finally {
+    cleanup();
+  }
+});
+
+await test("a response with no message content throws unparseable_output with ONE ok:false event line (usage null — the body carries none)", async () => {
   const { dir, cleanup } = tempDir();
   try {
     const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: {} }] }) });
@@ -573,7 +632,11 @@ await test("a response with no message content throws unparseable_output and app
       err = e;
     }
     eqCode(err, "unparseable_output", "typed unparseable_output");
-    eq(existsSync(join(dir, "decisions.jsonl")), false, "no event line");
+    const lines = readLines(join(dir, "decisions.jsonl"));
+    eq(lines.length, 1, "one event line");
+    eq(lines[0].ok, false, "ok:false");
+    eq(lines[0].error.code, "unparseable_output", "typed error code");
+    deepEq(lines[0].usage, null, "usage null — the body carries no usage");
   } finally {
     cleanup();
   }

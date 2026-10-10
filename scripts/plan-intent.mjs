@@ -22,9 +22,12 @@
 // STALE detection, no inherited confirmation) runs BEFORE these checks on
 // round ≥2 inputs and is fail-closed in the same sense.
 //
-// Event-line discipline follows the transports, not the node: a successful [G]
-// call appends ONE FOC-449 event line through the generator, a failed call
-// appends nothing.
+// Event-line discipline follows the transports, not the node: every TERMINAL
+// [G] call appends ONE FOC-449 event line through the generator — a successful
+// call with the map as `answers`, a failed call with `ok: false`, a typed
+// `error` and whatever usage the provider returned (FOC-758: a failed call's
+// cost must exist somewhere). A pre-fetch wiring failure — no provider call
+// attempted — still appends nothing.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -658,10 +661,50 @@ const REGEN_NOTE = "One regeneration: the interpretation map below was rejected 
   + "with every problem resolved: the map is all-or-nothing and a partially valid map is never kept.";
 
 /**
+ * FOC-758: the validator's concrete violations as regeneration problems — ONE
+ * entry per violation the validator reported, each naming the field path, the
+ * rule, the limit and the actual value (for maxLength, the string's length
+ * resolved through the JSON-pointer `instancePath`). The arm-A evidence
+ * (FOC-236) had one map overrunning TWO quote fields at once while the
+ * rejection named only "the map failed the step's output schema" — a
+ * regeneration cannot converge when it is not told which fields to shorten and
+ * by how much. Returns null when the validator exposed no `.errors` (a test
+ * mock, for instance) so the caller falls back to the generic problem.
+ */
+function schemaProblems(output, errors) {
+  if (!Array.isArray(errors) || errors.length === 0) return null;
+  return errors.map((e) => {
+    const path = typeof e?.instancePath === "string" && e.instancePath ? e.instancePath : "(root)";
+    const rule = typeof e?.keyword === "string" ? e.keyword : "unknown";
+    const limit = e?.params?.limit;
+    const actual = stringLengthAt(output, path);
+    const facts = [limit === undefined ? null : `limit ${limit}`, actual === null ? null : `actual ${actual}`]
+      .filter(Boolean)
+      .join(", ");
+    return `schema violation at ${path} (${rule})${facts ? `: ${facts}` : ""} — ${e?.message ?? "the output failed the schema"}`;
+  });
+}
+
+/** The string's length at a JSON-pointer path (~1 and ~0 unescaped), or null. */
+function stringLengthAt(output, instancePath) {
+  let cur = output;
+  for (const part of String(instancePath).split("/").filter(Boolean)) {
+    const key = part.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (cur === null || typeof cur !== "object" || !Object.prototype.hasOwnProperty.call(cur, key)) return null;
+    cur = cur[key];
+  }
+  return typeof cur === "string" ? cur.length : null;
+}
+
+/**
  * Run ONE plan.intent step execution: compose → fold → generate → validate →
  * persist. A rejected map is ONE retry carrying the rejection reasons and the
  * rejected map itself, then the step fails — `failure: "stop"`, one typed
- * record, never a partial map.
+ * record, never a partial map. A schema rejection carries the validator's
+ * CONCRETE violations (field path, rule, limit, actual — one problem per
+ * violation, FOC-758) and an empty or non-JSON generator response counts as a
+ * rejected map with the same one regeneration; a transport failure (HTTP
+ * non-2xx, timeout, network) fails closed with zero attempts spent.
  *
  * `maps` / `presented` are the two immutable run-record stores of the answer
  * contract; their write side is FOC-517's (the gate1 fields) and the intake
@@ -723,7 +766,12 @@ export async function runPlanIntentNode({
   }
   const anchors = anchorSet(fold.valid.map((v) => v.record), reads?.["inbox.entry"]);
 
-  // 3–4. generate → validate → (one regeneration) → validate → stop.
+  // 3–4. generate → validate → (one regeneration) → validate → stop. An empty
+  //      or non-JSON generator response (unparseable_output) is a REJECTED
+  //      MAP, not a transport failure: it gets the same ONE regeneration, its
+  //      problems saying what was wrong (FOC-758). A transport failure — HTTP
+  //      non-2xx, timeout, network — stays fail-closed with zero attempts
+  //      spent, exactly as before.
   let previousMap = null;
   let problems = [];
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -731,16 +779,28 @@ export async function runPlanIntentNode({
     try {
       raw = await generator({ stepId, step, reads: attempt === 1 ? payload : regenReads(payload, previousMap, problems) });
     } catch (err) {
+      const code = err instanceof Error && err.code ? err.code : "provider_error";
+      if (code === "unparseable_output" && attempt === 1) {
+        // No map came back, so there is no rejected map to carry: the
+        // regeneration's problems name what was wrong (empty content vs
+        // content that is not JSON — the typed message already distinguishes).
+        previousMap = null;
+        problems = [`the generator returned no map — unparseable output: ${err?.message || "unparseable output"}`];
+        continue;
+      }
       return {
         status: "failed",
         fold,
-        error: { code: err instanceof Error && err.code ? err.code : "provider_error", message: err?.message || "generator threw" },
+        error: { code, message: err?.message || "generator threw" },
       };
     }
 
     problems = [];
     if (!validate(raw)) {
-      problems.push("the map failed the step's output schema");
+      // FOC-758: one problem per violation the validator reported — field
+      // path, rule, limit, actual — so a single regeneration sees EVERY field
+      // to shorten. Without .errors the generic problem stands (mock seam).
+      problems.push(...(schemaProblems(raw, validate.errors) ?? ["the map failed the step's output schema"]));
     } else {
       // Identity is the STORE's to allocate: monotonic, never reused. A
       // mis-numbered map is a rejection, never a silent renumber.

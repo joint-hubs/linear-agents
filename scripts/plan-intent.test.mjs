@@ -35,6 +35,7 @@ import {
 } from "./plan-intent.mjs";
 import { DECISION_STEP } from "./decision-call.mjs";
 import { buildInputs, splitGroundTruth } from "./plan-intent-eval.mjs";
+import { summarize } from "./plan-intent-acceptance.mjs";
 
 let passed = 0;
 const failures = [];
@@ -838,7 +839,7 @@ async function main() {
     deepEq(seen[1].reads["plan.dor.gaps"], GAPS, "the declared reads are unchanged on the retry");
   });
 
-  await test("a schema-invalid map is refused before the checks run", async () => {
+  await test("a schema-invalid map is refused before the checks run — and the problem is the CONCRETE violation", async () => {
     const notAMap = { goal: "g", why: "w", mapVersion: 1 };
     const result = await runPlanIntentNode({
       step: STEP,
@@ -849,7 +850,114 @@ async function main() {
     eq(result.status, "failed", "refused");
     eq(result.error.code, "schema_invalid", "typed");
     eq(result.problems.length, 1, `one problem: ${result.problems.join(" | ")}`);
+    eq(/schema violation at \(root\) \(required\)/.test(result.problems[0]), true, `the violation names path and rule: ${result.problems[0]}`);
+    eq(/interpretations/.test(result.problems[0]), true, "the missing field is named");
     eq(result.checks, undefined, "the [D] checks never saw it");
+  });
+
+  await test("a schema rejection carries ONE problem per violation — path, rule, limit, actual (FOC-758)", async () => {
+    // The arm-A shape: one map overrunning TWO fields at once (FOC-236) — the
+    // rejection must name both in one pass, not only the first ajv stops at.
+    const map = mapWith();
+    map.interpretations[0].claim = "x".repeat(201); // claim cap 200
+    map.interpretations[1].claim = "y".repeat(202);
+    const seen = [];
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RUN_READS,
+      generator: async (args) => { seen.push(args); return map; },
+      validate,
+    });
+    eq(result.status, "failed", "refused after the one regeneration");
+    eq(seen.length, 2, "exactly one regeneration");
+    eq(result.problems.length, 2, `both violations in ONE rejection: ${result.problems.join(" | ")}`);
+    eq(/schema violation at \/interpretations\/0\/claim \(maxLength\): limit 200, actual 201/.test(result.problems[0]), true, `first violation concrete: ${result.problems[0]}`);
+    eq(/schema violation at \/interpretations\/1\/claim \(maxLength\): limit 200, actual 202/.test(result.problems[1]), true, `second violation concrete: ${result.problems[1]}`);
+    const regen = seen[1].reads.revision;
+    eq(regen.problems.length, 2, "the regeneration sees EVERY field to shorten");
+    deepEq(regen.previous, map, "the rejected map still rides the revision");
+  });
+
+  await test("a validator without .errors falls back to the generic problem (the mock seam)", async () => {
+    const seen = [];
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RUN_READS,
+      generator: async (args) => { seen.push(args); return mapWith(); },
+      validate: () => false, // a mock: plain boolean, no .errors
+    });
+    eq(result.status, "failed", "refused");
+    eq(seen.length, 2, "the regeneration still ran");
+    deepEq(result.problems, ["the map failed the step's output schema"], "the generic problem stands");
+    eq(seen[1].reads.revision.problems[0], "the map failed the step's output schema", "the generic problem rides the revision too");
+  });
+
+  await test("an unparseable generator response is a rejected map: the same ONE regeneration, then done (FOC-758)", async () => {
+    const map = mapWith({ covers: { goal: [GAPS[0]], scope: [GAPS[1]] }, quotes: { risk: "Out of scope: the mobile layout" } });
+    const seen = [];
+    let call = 0;
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RUN_READS,
+      generator: async (args) => {
+        seen.push(args);
+        if (++call === 1) {
+          throw Object.assign(new Error("[G] plan.intent content is not JSON: unexpected token"), { code: "unparseable_output" });
+        }
+        return map;
+      },
+      validate,
+    });
+    eq(result.status, "done", `the regeneration recovered: ${JSON.stringify(result.error)}`);
+    eq(result.attempts, 2, "two attempts");
+    eq(seen.length, 2, "the same ONE regeneration the schema path gets");
+    const revision = seen[1].reads.revision;
+    eq(revision.attempt, 2, "marked as the regeneration");
+    if (!revision.problems[0].includes("unparseable output")) fail(`the regeneration names what was wrong: ${revision.problems[0]}`);
+    deepEq(revision.previous, null, "no rejected map exists to carry");
+    eq(seen[1].reads["inbox.entry"], ENTRY, "the declared reads stay verbatim");
+  });
+
+  await test("a second unparseable response fails typed with no third call", async () => {
+    let calls = 0;
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RUN_READS,
+      generator: async () => {
+        calls++;
+        throw Object.assign(new Error("no content"), { code: "unparseable_output" });
+      },
+      validate,
+    });
+    eq(result.status, "failed", "refused");
+    eq(result.error.code, "unparseable_output", "typed");
+    eq(calls, 2, "exactly the one regeneration, then stop");
+  });
+
+  await test("a transport failure fails closed with zero attempts spent — no regeneration (FOC-758)", async () => {
+    let calls = 0;
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RUN_READS,
+      generator: async () => { calls++; throw Object.assign(new Error("[G] plan.intent returned HTTP 500"), { code: "provider_error" }); },
+      validate,
+    });
+    eq(result.status, "failed", "refused");
+    eq(result.error.code, "provider_error", "typed");
+    eq(calls, 1, "one call, no regeneration");
+    eq(result.problems, undefined, "no problems — no map was rejected");
+
+    // A codeless throw is transport too: fail closed, no regeneration.
+    let bareCalls = 0;
+    const bare = await runPlanIntentNode({
+      step: STEP,
+      reads: RUN_READS,
+      generator: async () => { bareCalls++; throw new Error("socket hang up"); },
+      validate,
+    });
+    eq(bare.status, "failed", "refused");
+    eq(bare.error.code, "provider_error", "a codeless throw defaults to transport");
+    eq(bareCalls, 1, "no regeneration");
   });
 
   await test("a mis-numbered mapVersion is a rejection — the store allocates identity", async () => {
@@ -936,6 +1044,35 @@ async function main() {
     eq(result.error.code, "invalid_input", "typed");
     eq(/illegal idMap/.test(result.error.message), true, `named: ${result.error.message}`);
     eq(calls, 0, "zero provider calls");
+  });
+
+  // ── the FOC-758 acceptance harness (the offline parts) ─────────────────────
+
+  await test("the acceptance fixture is the arm-A attempt 3/4 reads and composes as a round-1 payload", () => {
+    const reads = JSON.parse(readFileSync(join(__dir, "fixtures", "plan-intent-arma-reads.json"), "utf8"));
+    eq(typeof reads["inbox.entry"], "string", "the dictated entry is a string");
+    eq(reads["inbox.entry"].length > 1000, true, "the long-entry shape that overran the quotes");
+    eq(Array.isArray(reads["plan.dor.gaps"]), true, "the gaps are an array");
+    eq(reads["plan.dor.gaps"].length > 0, true, "at least one gap");
+    const composed = composeIntentInputs(reads);
+    eq(composed.round, 1, "round 1");
+    eq(composed.gaps.length, reads["plan.dor.gaps"].length, "the gaps ride the payload");
+  });
+
+  await test("the acceptance summary: done passes, failed does not, the N/M line, the bar only at full count", () => {
+    const rows = [
+      { status: "done", attempts: 2 },
+      { status: "done", attempts: 1 },
+      { status: "failed", error: { code: "schema_invalid", message: "rejected" } },
+    ];
+    const s = summarize(rows, 5);
+    eq(s.passes, 2, "two passes");
+    eq(s.total, 3, "three recorded");
+    eq(s.met, false, "2/3 recorded of 5 owed — not met");
+    eq(s.line, "2/5", "the N/5 line");
+    eq(summarize([{ status: "done", attempts: 1 }, { status: "done", attempts: 2 }, { status: "done", attempts: 1 }, { status: "done", attempts: 2 }, { status: "done", attempts: 1 }], 5).met, true, "5/5 done rows meet the bar");
+    eq(summarize([{ status: "done", attempts: 2 }, { status: "failed" }], 2).met, false, "a failed run breaks the bar even at full count");
+    eq(summarize([], 5).met, false, "nothing recorded is never met");
   });
 
   // ── the eval harness's input partition (scripts/plan-intent-eval.mjs) ─────

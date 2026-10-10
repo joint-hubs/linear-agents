@@ -659,7 +659,7 @@ await test("success: ONE [G] call, one event line, a done record whose output is
   }
 });
 
-await test("(f) the escalation lands as a typed graph.step record; the [G] event lines stay success-only", async () => {
+await test("(f) the escalation lands as a typed graph.step record; the failing gate attempts log nothing", async () => {
   const { dir, storePath, cleanup } = tempStore();
   const shadowDir = join(dir, "shadow");
   try {
@@ -696,7 +696,7 @@ await test("(f) the escalation lands as a typed graph.step record; the [G] event
     // Ledger 2 — decisions.jsonl: every successful [G] call — plan.dod once,
     // plan.ac twice (initial + regeneration); the failed gate attempts log nothing.
     const events = readLines(join(shadowDir, "decisions.jsonl"));
-    eq(events.length, 4, "one event line per successful [G] call (plan.intent, plan.dod, plan.ac ×2 — success-only transport)");
+    eq(events.length, 4, "one event line per successful [G] call (plan.intent, plan.dod, plan.ac ×2 — the gate failures are not provider calls)");
     if (!events.every((e) => e.ok === true)) fail("only successful [G] calls logged");
     if (!events.every((e) => e.decisionId === "plan.ac" || e.decisionId === "plan.dod" || e.decisionId === "plan.intent")) fail("only the three [G] steps logged");
     const acEvents = events.filter((e) => e.decisionId === "plan.ac");
@@ -709,7 +709,7 @@ await test("(f) the escalation lands as a typed graph.step record; the [G] event
   }
 });
 
-await test("a failed [G] call appends NOTHING to decisions.jsonl and lands the typed failed record", async () => {
+await test("a failed [G] call appends ONE ok:false event line (FOC-758) and lands the typed failed record", async () => {
   const { dir, storePath, cleanup } = tempStore();
   const shadowDir = join(dir, "shadow");
   try {
@@ -718,7 +718,15 @@ await test("a failed [G] call appends NOTHING to decisions.jsonl and lands the t
     eq(result.status, "stopped", "stopped");
     eq(result.record.status, "failed", "failed record");
     eq(result.record.error.code, "provider_error", "typed provider_error");
-    if (existsSync(join(shadowDir, "decisions.jsonl"))) fail("a failed call appends no event line (success-only)");
+    // FOC-758: the failed call's event line exists — ok:false, typed error,
+    // no fabricated answers, usage null (the error body carries none).
+    const lines = readLines(join(shadowDir, "decisions.jsonl"));
+    eq(lines.length, 1, "ONE event line for the failed call");
+    eq(lines[0].ok, false, "ok:false");
+    eq(lines[0].decisionId, "plan.intent", "the failed step's line");
+    deepEq(lines[0].answers, null, "no fabricated answers");
+    eq(lines[0].error.code, "provider_error", "typed error on the line");
+    deepEq(lines[0].usage, null, "usage null — the error body carries none");
   } finally {
     cleanup();
   }
