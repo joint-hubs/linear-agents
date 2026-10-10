@@ -406,6 +406,30 @@ Sequence **1 → 3 → 2**, not 1 → 2 → 3:
 - **(2) provider pinning is the response to a repeated failure only** — it is armed if and only if
   FOC-236 fails the same way (the same `provider_error` HTTP 400 on `plan.intent`).
 
+  **TRIGGER FIRED 2026-10-10 — decision: Mateusz.** Five diagnostic generator probes on the
+  attempt 3/4 reads (probe-C: `composeIntentInputs` → `createDefaultGenerator` with a capturing
+  `fetchImpl`, bodies outside the repo) returned **1 × HTTP 400 `provider_error` on `plan.intent`**
+  — exactly the FOC-198 failure class, now on the FOC-236 entry — plus **2 further provider-side
+  failures out of 5** (one call whose response body never arrived and timed out at 420 000 ms; one
+  OpenInference `finish_reason: error` with an upstream 502 and empty content). 0 of 5 produced a
+  schema-valid map. The trigger fires **on its own terms, not widened**: the rule keyed on a
+  repeated `provider_error` HTTP 400 on `plan.intent`, and probe 1 is that class verbatim.
+  Mateusz, 2026-10-10: *"pierwotny trigger Q9 jest de facto spełniony, nie poszerzony."*
+  The rejected alternative — a latency-spread threshold (> 10×) — measured the wrong thing and is
+  retired: the identified providers sat at 1103 / 1775 / 3797 ms (3.4×), while the actual spread
+  was in reliability.
+
+  **Pinned route — same change as FOC-758, same instrument boundary.** Provider order
+  `["wafer", "fireworks"]` with `allow_fallbacks: false`, recorded in `config/models.json` against
+  `routing.plan.discovery`. Slugs are the exact OpenRouter identifiers (Wafer → `wafer`, Fireworks
+  → `fireworks`; the second Fireworks endpoint `fireworks/us` exists and is deliberately **not**
+  pinned). Model and tier are byte-identical before and after (Q8). The runner must actually send
+  it — the `[G]` request body carries no `provider` field today — and the test asserts the request
+  body (`order` + `allow_fallbacks: false`); the FOC-758 event line records which provider served.
+  Acceptance is extended accordingly: 5/5 `runPlanIntentNode` → `done` in ≤ 1 regeneration **on the
+  pinned route**, every serving provider ∈ {Wafer, Fireworks}. Otherwise the numbers are reported
+  and **nothing lands**.
+
 **If FOC-198 still will not start at the end of the campaign:** the main number counts it as an
 **arm-A failure** (the conservative variant — a run that cannot start is not a cheap win), and the
 result computed without it is reported as an explicit sensitivity line. **No corpus swap.** The
