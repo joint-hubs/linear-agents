@@ -402,11 +402,14 @@ Sequence **1 → 3 → 2**, not 1 → 2 → 3:
   `fetchImpl`, writing to no run — done 2026-10-08T15:30Z, see `docs/STATE.md`.
 - **(3) corpus entry 2 (FOC-236) is next.** FOC-198 is **not** dropped and **not** swapped: its
   `armARuns` status becomes `deferred: infra (provider routing)` and it returns at the end of the
-  campaign.
+  campaign — **already on the pinned route** (Mateusz, 2026-10-10: *"FOC-198 zostaje na końcu
+  kampanii, jak w Q9 — już na przypiętej trasie"*).
 - **(2) provider pinning is the response to a repeated failure only** — it is armed if and only if
   FOC-236 fails the same way (the same `provider_error` HTTP 400 on `plan.intent`).
 
-  **TRIGGER FIRED 2026-10-10 — decision: Mateusz.** Five diagnostic generator probes on the
+  **TRIGGER FIRED 2026-10-10 — decision: Mateusz.** Q9 is recorded as Mateusz dictated it:
+  *"trigger odpalony 2026-10-10 na dowodzie z probe C (1× HTTP 400 jak FOC-198 + 2× inne awarie
+  providera na 5 wywołań)"*. Five diagnostic generator probes on the
   attempt 3/4 reads (probe-C: `composeIntentInputs` → `createDefaultGenerator` with a capturing
   `fetchImpl`, bodies outside the repo) returned **1 × HTTP 400 `provider_error` on `plan.intent`**
   — exactly the FOC-198 failure class, now on the FOC-236 entry — plus **2 further provider-side
