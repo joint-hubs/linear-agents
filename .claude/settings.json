@@ -8,7 +8,9 @@
       "Bash(node \"$LA_ROOT/scripts/supervisor-status.mjs\":*)",
       "Bash(npm ci:*)",
       "Bash(node scripts/test-all.mjs:*)",
-      "Bash(env -u LA_SUPERVISOR_CHILD node scripts/test-all.mjs:*)"
+      "Bash(env -u LA_SUPERVISOR_CHILD node scripts/test-all.mjs:*)",
+      "Bash(node scripts/graph-runner.mjs:*)",
+      "Bash(LA_RUN_ID=* node scripts/graph-runner.mjs *)"
     ]
   },
   "hooks": {
