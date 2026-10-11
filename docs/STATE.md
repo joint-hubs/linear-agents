@@ -3551,3 +3551,52 @@ mimo). Bramek brak, kolejka wybudzeń czysta, budżet bez capa.
 
 **Push robi Mateusz.** Main: `b0a304a`, 32 przed origin.
 
+## 2026-10-11 — FOC-758: luka dostarczania `revision` naprawiona (`17d3854`) · kryterium SPEŁNIONE, X/5 = 2/5 zapisane · warunek (a) czysty
+
+**Co zaszło.** dev-1 domknął turę 2 raportem pomiarowym (exit 0, 2026-10-11 02:28Z) i wyszedł z dwiema
+decyzjami. Twoje „popraw co masz poprawic i commituj na branch odpowiedni” autoryzowało trzeci hunk w
+`createDefaultGenerator` — i to jest dokładnie ten ruch granicy, o który prosiłem.
+
+**Luka (a): regeneracja była ślepa.** `regenReads` (`plan-intent.mjs:856`) dokłada `revision` jako caller
+composition i celowo trzyma pięć deklarowanych odczytów; `graph-runner.mjs` budował prompt wyłącznie z
+`step.reads`, więc `revision` było cicho porzucane. Dowód bajtowy z pomiaru sprzed poprawki (run 5): obie
+próby po 7936 znaków, `IDENTICAL: true`, a na drucie `revision:false / problems:false / previous:false`.
+Naruszenia były liczone i niedostarczane — dlatego run 5 nie mógł się zbiec, nie dlatego że budżet
+regeneracji był za mały. Poszerzanie budżetu nic by tu nie zmieniło.
+
+**Poprawka i commit.** `revision` jedzie **po** deklarowanych odczytach i **tylko gdy jest obecne**; wezwanie
+bez rewizji ma wiadomość bajtowo identyczną, hash wejścia FOC-449 bez zmian. `17d3854` na `foc-758-dev`:
+`config/models.json` (+6, pin `providerPins["plan.discovery"]`), `scripts/graph-runner.mjs` (+34, pole
+`provider` + dostarczenie `revision`), `scripts/plan-dod.test.mjs` (+105, testy pinu, no-pin i rewizji **na
+drucie**), `scripts/plan-intent-acceptance.mjs` (+28, pin jako druga połowa paska). 169 wstawień, 4
+usunięcia, bez trailera. Nowy test trzyma drut, nie obiekt wręczony generatorowi — bo tamta strona już to
+widziała i właśnie dlatego luki nie było widać.
+
+**Testy: 8 plików sięganych przez zmianę, 242/242.** `code-intel.mjs affected` wskazał osiem; graph-runner
+27, plan-ac 21, plan-dod 24, plan-intent-select 27, plan-intent 68, plan-ready 24, plan-render 15,
+supervisor-holds 36. Zero linii FAIL.
+
+**Pomiar na trasie pinowanej po poprawce: 2/5.** Nowy plik `results-revfix.jsonl`, pomiar sprzed poprawki
+zostaje jako historia. Wszystkie 5 runów obsłużył Wafer, zero poza {wafer, fireworks}, zero garbage ze
+strony providera. Runy 4 i 5 done na pierwszej próbie; 1, 2, 3 odrzucone po jednej regeneracji.
+
+**Kryterium zapisane PRZED pomiarem — SPEŁNIONE (LAND).**
+1. Pin 5/5 ✅.
+2. Provider garbage 0/5, poniżej progu STOP ✅.
+3. Odrzucone po jednej regeneracji = jakość modelu → LAND, **pod warunkiem że żadna regeneracja nie
+   powtórzy naruszenia, które (a) jej wskazało**. Warunek **czysty: 0 powtórzeń**, odczytane z event-linii,
+   nie z pamięci. Run 1: próba 1 nazwała 9 naruszeń schematu, próba 2 wszystkie 9 posprzątała i wpadła na
+   2 [D] (pokrycie + kotwica). Runy 2 i 3: próba 1 nazwała po jednym [D], próba 2 je posprzątała i
+   przekroczyła **inny** maxLength (`/interpretations/6/claim` 200/231, `/interpretations/2/claim` 200/202).
+   Runy 4 i 5 bez regeneracji. Model zrobił, co mu kazano, i potknął się gdzie indziej — to jest jakość
+   modelu, dokładnie ten przypadek, który reguła 3 czyni lądowalnym.
+
+**X/5 = 2/5 zapisane** w `docs/research/foc-477-runs.json` (`foc758LandingCriterion20261010`): werdykt,
+wynik z rozbiciem na runy, sprawdzenie warunku, oraz pomiar sprzed poprawki (3/5) z powodem, dla którego
+nie był pomiar lądującym. Suma pomiaru $0.029673, 1080.5 s.
+
+**Co dalej.** Lądowanie gitowe jest **osobne i niezrobione**: `foc-758-dev` @ `17d3854`, przed nim
+REVIEW → TEST → merge. Dopiero po lądowaniu (reguła 4): granica = sha na main, ostatni ruch, a potem
+**attempt 5 FOC-236 od zera**. Attempt 5 nie startuje przed lądowaniem.
+
+**Push robi Mateusz.** Main: `24c0ad6`, 35 przed origin (odczytane w tej turze; po commicie tego wpisu +1).
