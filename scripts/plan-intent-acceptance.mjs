@@ -57,11 +57,26 @@ export function summarize(rows, runs = RUNS) {
 
 // FOC-758 (d): the acceptance bar is TWO conditions — done in ≤ 1 regeneration
 // in RUNS/RUNS runs AND every serving provider on the pinned route. The pin
-// slugs come from config/models.json providerPins (order: wafer, fireworks).
-// Provider names arrive as OpenRouter's display names ("Wafer", "Fireworks
-// AI", "OpenInference", ...) — match the pin slugs case-insensitively so a
-// display name that contains its slug still counts as pinned.
-const PINNED_SLUGS = ["wafer", "fireworks"];
+// slugs are the config's — providerPins["plan.discovery"].order, read at
+// startup (round-1 nit: a hardcoded copy here silently diverged from the gate
+// when the config pin changed). The list below is only the FALLBACK for a
+// config without a usable pin. Provider names arrive as OpenRouter's display
+// names ("Wafer", "Fireworks AI", "OpenInference", ...) — match the pin slugs
+// case-insensitively so a display name that contains its slug still counts as
+// pinned.
+const PIN_SLUG_FALLBACK = ["wafer", "fireworks"];
+const PINNED_SLUGS = (() => {
+  try {
+    const models = JSON.parse(readFileSync(join(ROOT, "config", "models.json"), "utf8"));
+    const order = models?.providerPins?.["plan.discovery"]?.order;
+    const slugs = Array.isArray(order)
+      ? order.filter((p) => typeof p === "string" && p).map((p) => p.toLowerCase())
+      : [];
+    return slugs.length ? slugs : PIN_SLUG_FALLBACK;
+  } catch {
+    return PIN_SLUG_FALLBACK; // an unreadable config falls back too — the gate still runs
+  }
+})();
 
 /** Every distinct serving provider in the rows that is NOT on the pinned route. */
 export function offPinnedProviders(rows) {
@@ -135,12 +150,21 @@ async function main() {
     console.error(`acceptance: the fixture must carry a non-empty "inbox.entry" string and "plan.dor.gaps" array`);
     return 2;
   }
-  composeIntentInputs(reads); // fail fast on a malformed fixture — before any spend
-
-  const step = loadGraph().nodes.plan.steps["plan.intent"];
-  // The runner's own compile posture (FOC-758): allErrors so the rejection
-  // carries EVERY violation, not only the first one.
-  const validate = new Ajv({ allErrors: true }).compile(step.output);
+  // Construction is a WIRING concern (round-1 nit): a graph or compile failure
+  // is exit 2, not "does not meet the bar" (exit 1). Wrapped so its exit code
+  // honours the header's contract.
+  let step;
+  let validate;
+  try {
+    composeIntentInputs(reads); // fail fast on a malformed fixture — before any spend
+    step = loadGraph().nodes.plan.steps["plan.intent"];
+    // The runner's own compile posture (FOC-758): allErrors so the rejection
+    // carries EVERY violation, not only the first one.
+    validate = new Ajv({ allErrors: true }).compile(step.output);
+  } catch (err) {
+    console.error(`acceptance: wiring error — ${err?.code ? `${err.code}: ` : ""}${err?.message ?? err}`);
+    return 2;
+  }
 
   const rows = [];
   if (existsSync(RESULTS)) {

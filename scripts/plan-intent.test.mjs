@@ -8,7 +8,7 @@
 //
 // Run: node scripts/plan-intent.test.mjs
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,7 @@ import {
   runPlanIntentNode,
   verifyIdMap,
 } from "./plan-intent.mjs";
+import { createGraphRunner } from "./graph-runner.mjs";
 import { DECISION_STEP } from "./decision-call.mjs";
 import { buildInputs, splitGroundTruth } from "./plan-intent-eval.mjs";
 import { summarize } from "./plan-intent-acceptance.mjs";
@@ -876,6 +877,7 @@ async function main() {
     const regen = seen[1].reads.revision;
     eq(regen.problems.length, 2, "the regeneration sees EVERY field to shorten");
     deepEq(regen.previous, map, "the rejected map still rides the revision");
+    if (!regen.note.includes("the interpretation map below was rejected")) fail(`a rejected map sits below the note: ${regen.note}`);
   });
 
   await test("a validator without .errors falls back to the generic problem (the mock seam)", async () => {
@@ -915,6 +917,7 @@ async function main() {
     eq(revision.attempt, 2, "marked as the regeneration");
     if (!revision.problems[0].includes("unparseable output")) fail(`the regeneration names what was wrong: ${revision.problems[0]}`);
     deepEq(revision.previous, null, "no rejected map exists to carry");
+    if (!revision.note.includes("no map at all")) fail(`previous is null — the note must not promise a map below: ${revision.note}`);
     eq(seen[1].reads["inbox.entry"], ENTRY, "the declared reads stay verbatim");
   });
 
@@ -1044,6 +1047,86 @@ async function main() {
     eq(result.error.code, "invalid_input", "typed");
     eq(/illegal idMap/.test(result.error.message), true, `named: ${result.error.message}`);
     eq(calls, 0, "zero provider calls");
+  });
+
+  // ── the runner seam: the validator the runner hands the node ───────────────
+  //
+  // FOC-758 round-1 blocker: the plan.intent `validate:` site in the runner
+  // wrapped the compiled validator in an arrow. The wrapper does not carry
+  // Ajv `.errors`, so schemaProblems saw undefined and every concrete-violation
+  // rejection collapsed to the generic string — on the PRODUCTION wiring, the
+  // seam arm-A runs. The node tests above inject a hand-assembled
+  // `ajv.compile(...)` and could not see this; this test rides the runner's own
+  // validate construction (createGraphRunner builds outputValidate and wires it
+  // into runPlanIntentNode).
+
+  await test("through the runner seam, a rejected map's concrete violations reach the regeneration (FOC-758)", async () => {
+    const d = mkdtempSync(join(tmpdir(), "foc-758-seam-"));
+    const storePath = join(d, "graph-steps.jsonl");
+    try {
+      // plan.dor is already done (the frontman resolved it) — the walk executes
+      // plan.intent first, exactly as plan-dod.test.mjs's walk does.
+      appendFileSync(storePath, `${JSON.stringify({
+        type: "graph.step",
+        runId: "run-foc-758-seam",
+        ts: "2026-01-01T00:00:00.000Z",
+        key: "plan.dor",
+        stepId: "plan.dor",
+        status: "done",
+        output: { ready: true, gaps: [] },
+      })}\n`);
+      const bad = mapWith();
+      bad.interpretations[0].claim = "x".repeat(260); // the claim cap is 200
+      const good = mapWith();
+      const genCalls = [];
+      const runner = createGraphRunner({
+        runId: "run-foc-758-seam",
+        storePath,
+        caller: async (input) => ({
+          ok: true,
+          step: "decision-call",
+          decisionId: input.decisionId,
+          criteriaVersion: 1,
+          autonomy: "A0",
+          annotation: {
+            answers: Object.fromEntries((input.instances ?? []).flatMap((_, i) => [
+              [`impact${i}`, { type: "noul", noul: 0.9 }],
+              [`grounded${i}`, { type: "noul", noul: 0.9 }],
+            ])),
+            confidence: 0.9,
+          },
+          pinnedModel: "typesafe/jev-1.13",
+        }),
+        generator: async (args) => {
+          genCalls.push(args);
+          return genCalls.length === 1 ? bad : good;
+        },
+        gateEmitter: async () => ({ gateId: "gate-test" }),
+        linearEffect: async () => ({}),
+      });
+      const result = await runner.run({
+        inputs: {
+          "inbox.entry": ENTRY,
+          "repoState.pinned": { branch: "foc-758-dev", head: "17d3854" },
+          "features.list": [{ name: "plan.intent concrete violations on the runner seam" }],
+        },
+      });
+      eq(result.status, "stopped", `the walk ends gate-pending: ${JSON.stringify(result.record?.error ?? result.stepId)}`);
+      eq(result.stepId, "plan.gate1", "plan.intent completed and the walk reached gate 1");
+      eq(genCalls.length, 2, "exactly one regeneration");
+      eq(genCalls[0].stepId, "plan.intent", "plan.intent first");
+      eq(genCalls[1].stepId, "plan.intent", "the second call is the plan.intent regeneration");
+      const revision = genCalls[1].reads.revision;
+      eq(revision.problems.length, 1, `ONE concrete problem rides the revision: ${JSON.stringify(revision.problems)}`);
+      eq(
+        /schema violation at \/interpretations\/0\/claim \(maxLength\): limit 200, actual 260/.test(revision.problems[0]),
+        true,
+        `the CONCRETE violation reaches the regeneration through the runner's own validate construction: ${revision.problems[0]}`,
+      );
+      deepEq(revision.previous, bad, "the rejected map rides the revision");
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
   });
 
   // ── the FOC-758 acceptance harness (the offline parts) ─────────────────────

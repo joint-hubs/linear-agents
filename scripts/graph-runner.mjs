@@ -558,6 +558,10 @@ export function createDefaultGenerator({
         usage: usageOf(body?.usage),
         responseId: typeof body?.id === "string" ? body.id : null,
         provider: typeof body?.provider === "string" && body.provider ? body.provider : null,
+        // `finish_reason` is deliberately snake_case in an otherwise camelCase
+        // registry (durationMs, inputTokens): the column echoes OpenRouter's
+        // wire field verbatim, so a reader joins the line against the
+        // provider's own response shape without a mapping (FOC-758 (c)).
         finish_reason: typeof body?.choices?.[0]?.finish_reason === "string" ? body.choices[0].finish_reason : null,
         error: ok ? null : error,
         decisionId: stepId,
@@ -949,7 +953,13 @@ export function createGraphRunner({
           step,
           reads,
           generator,
-          validate: (raw) => outputValidate.get(stepId)(raw),
+          // FOC-758 blocker: hand over the COMPILED validator itself. An arrow
+          // wrapper does not carry Ajv `.errors`, so schemaProblems
+          // (plan-intent.mjs) saw `undefined` and every concrete-violation
+          // rejection collapsed to the generic string — on this, the
+          // production wiring. Ajv rewrites the compiled function's own
+          // `.errors` on every call, which is exactly what the node reads.
+          validate: outputValidate.get(stepId),
           ...intentStores(records),
         });
       } catch (err) {

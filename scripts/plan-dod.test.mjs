@@ -510,6 +510,51 @@ await test("no pin configured: the request body carries NO provider key at all (
   }
 });
 
+await test("a pin with order but a NON-BOOLEAN allowFallbacks omits allow_fallbacks from the wire (FOC-758 d)", async () => {
+  // The third pin shape, previously untested: order present, allowFallbacks
+  // not a boolean. The wire carries the order ALONE — no allow_fallbacks key —
+  // which leaves OpenRouter's default fallback behaviour in effect. This pins
+  // the existing behaviour (an omitted field is OpenRouter's default, not an
+  // explicit opt-in or opt-out).
+  const root = join(__dir, "..");
+  const workDir = join(root, ".state", `plan-dod-pinorder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  let cleanup = () => {};
+  try {
+    mkdirSync(workDir, { recursive: true });
+    cpSync(join(root, "scripts"), join(workDir, "scripts"), { recursive: true });
+    mkdirSync(join(workDir, "config"), { recursive: true });
+    for (const name of ["graph.json", "decisions.json"]) {
+      cpSync(join(root, "config", name), join(workDir, "config", name));
+    }
+    const live = JSON.parse(readFileSync(join(root, "config", "models.json"), "utf8"));
+    const pinned = { ...live, providerPins: { "plan.discovery": { order: ["wafer"], allowFallbacks: "yes" } } };
+    writeFileSync(join(workDir, "config", "models.json"), `${JSON.stringify(pinned, null, 2)}\n`);
+    cleanup = () => rmSync(workDir, { recursive: true, force: true });
+
+    const runnerUrl = pathToFileURL(join(workDir, "scripts", "graph-runner.mjs")).href;
+    const runner = await import(`${runnerUrl}?pinorder-${Date.now()}`); // cache-bust: a fresh module instance
+    const fetchCalls = [];
+    const fetchImpl = async (url, options) => {
+      fetchCalls.push({ options });
+      return okResponse(DOD_OUTPUT);
+    };
+    const generate = runner.createDefaultGenerator({
+      apiKey: "test-key",
+      runId: "run-g-pinorder",
+      taskKey: "T1",
+      shadowDir: join(workDir, "shadow"),
+      fetchImpl,
+    });
+    const output = await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT } });
+    deepEq(output, DOD_OUTPUT, "parsed output returned (order-pin tree)");
+    eq(fetchCalls.length, 1, "ONE fetch call (order-pin tree)");
+    const body = JSON.parse(fetchCalls[0].options.body);
+    deepEq(body.provider, { order: ["wafer"] }, "the order rides the wire with NO allow_fallbacks key — OpenRouter's default fallback stays in effect");
+  } finally {
+    cleanup();
+  }
+});
+
 await test("a revision payload rides the wire; without it the message carries no REVISION section (FOC-758 (a) delivery)", async () => {
   // `regenReads` (plan-intent.mjs) attaches `revision` as CALLER COMPOSITION
   // and keeps the declared reads at five. The message is composed from

@@ -660,6 +660,13 @@ const REGEN_NOTE = "One regeneration: the interpretation map below was rejected 
   + "the user. The reasons are listed under problems. Regenerate the FULL map against the same reads, "
   + "with every problem resolved: the map is all-or-nothing and a partially valid map is never kept.";
 
+// FOC-758 round-1 nit: on the unparseable-output path (previous === null) NO
+// map sits below the note — the note must not promise one.
+const REGEN_NOTE_NO_MAP = "One regeneration: the previous attempt produced no map at all (unparseable output), "
+  + "so there is no rejected map to show below. The reasons are listed under problems. Regenerate the FULL "
+  + "map against the same reads, with every problem resolved: the map is all-or-nothing and a partially "
+  + "valid map is never kept.";
+
 /**
  * FOC-758: the validator's concrete violations as regeneration problems — ONE
  * entry per violation the validator reported, each naming the field path, the
@@ -858,7 +865,7 @@ function regenReads(payload, previous, problems) {
     ...payload,
     revision: {
       attempt: 2,
-      note: REGEN_NOTE,
+      note: previous === null ? REGEN_NOTE_NO_MAP : REGEN_NOTE,
       problems: [...problems],
       previous: previous ?? null,
     },
