@@ -5,7 +5,7 @@
   "goNoGo": "A (confirmed Q1=A); axes reduced to 2 by Q3 2026-10-07",
   "goNoGoRule": "GO iff BOTH axes (cost, time) win AND zero axes in regression > 5%",
   "qualityAxis": "withdrawn 2026-10-07 (Q3) — plan quality is descriptive only, not a go/no-go axis; see docs/plans/foc-477-measurement-protocol.md §4.3 and §7 Q3",
-  "costField": "costUsd (priced/wycenione) — never costUsdReported",
+  "costField": "arm A: usage.cost from the decision-call envelope. arm B: armB.costUsdTranscript (transcript-priced, FOC-759). armB.costUsd is the registry figure, kept as HISTORY ONLY and never used on the cost axis (3.82x transcript ground truth). Never costUsdReported. Replaces the earlier wording, which was: costUsd (priced/wycenione) — never costUsdReported",
   "arms": {
     "A": "PLAN graph via scripts/graph-runner.mjs on current config/graph.json",
     "B": "historical squad: plan child from .state/supervisor/<run>/children.json"
@@ -46,10 +46,20 @@
       "why": "supervisor-watch.mjs sums costFromResult for every result event, and result.modelUsage is cumulative for the session - every background-task wake and every resumed turn re-adds the whole session. Registry is 5.05x transcript ground truth overall (review F4)."
     },
     "armBBaseline": {
-      "status": "PENDING - FOC-759, due BEFORE the first counted arm-A run (attempt 5 FOC-236)",
+      "status": "DONE 2026-10-11 (FOC-759 AC1) - the 9 recoverable entries carry armB.costUsdTranscript, recomputed from the transcripts on disk and reproducing the review table to the cent. AC2 (the FOC-198 rule) is still open on Mateusz's decision - see foc198Rule.",
       "what": "armB.costUsd in this corpus is registry costUsd and is 3.82x ground truth in sum ($7.51 recorded vs $1.97 transcript-priced over the 9 recoverable entries; per issue x1.00-11.71). Arm A is priced from OpenRouter usage.cost, so the cost axis is tilted toward arm A.",
       "method": "recompute from the PLAN child's transcripts: lead + subagents/, assistant messages deduplicated by message.id, priced with pricingSnapshot() + calculateCost(). NEW field next to the old one; the old value stays as history with a note why it is not used. Method goes into docs/plans/foc-477-measurement-protocol.md.",
-      "scope": "data correction, NOT an instrument change - boundary unchanged, does not block FOC-758 landing (Mateusz 2026-10-10)."
+      "scope": "data correction, NOT an instrument change - boundary unchanged, does not block FOC-758 landing (Mateusz 2026-10-10).",
+      "recomputedAt": "2026-10-11",
+      "newField": "corpus[].armB.costUsdTranscript (plus costUsdTranscriptRounded, costUsdRatio, transcriptMessages, transcriptSources). armB.costUsd is left byte-identical as history.",
+      "sum9Transcript": 1.964989,
+      "sum9Registry": 7.5108,
+      "verification": "AC1: the 9 numbers reproduce docs/research/2026-10-10-model-cost-telemetry-review.md F6 (the ground-truth column) to the cent - recomputed 2026-10-11 from the transcripts on disk, not copied from the review. Per-issue ratios reproduce the review's x1.00-11.71 column (FOC-136 worst at 11.714x).",
+      "counted": "every transcript line with type=assistant and message.usage present (telemetry-ingest.mjs:266-282); one row per physical model call deduplicated by message.id with counters merged by MAX(), exactly as telemetry-store.mjs applyUsageMessage does (FOC-381 B2). 0 of the counted lines lacked message.id.",
+      "sources": "the PLAN child's transcript only - lead <projects>/<cwdHash>/<sessionId>.jsonl plus every sibling under <sessionId>/subagents/ (the flat <projects>/<cwdHash>/subagents/ layout is the fallback; none of the 9 needed it). dev/review/test children of those runs are NOT arm B.",
+      "pricing": "pricingSnapshot() + calculateCost() from scripts/telemetry-store.mjs against config/models.json - the same code the watcher and the ingest use; covers input, output, cacheRead and cacheCreation. Three <synthetic> placeholder messages (FOC-240 x1, FOC-550 x2) have no price row and are excluded as zero-cost.",
+      "reproduce": ".state/research-scratch/foc759-price.mjs (local scratch; it lands in the repo with FOC-760's reconciliation script). sha256 5e9fb12b4141765167b895f9b9faef7b887b94072313ec4220e6473481bdf985. Writes .state/research-scratch/foc759-baseline.json.",
+      "caveat": "FOC-550 and FOC-688 are mixed-model PLAN children (xiaomi/mimo-v2.6-pro lead + z-ai/glm-5.3-flash subagents): the transcript prices each message on its own model, which the registry figure cannot show."
     },
     "foc198Rule": {
       "status": "PROPOSED by the Supervisor 2026-10-10 - decision is Mateusz's, NOT yet decided",
@@ -60,13 +70,13 @@
       "decisionOwner": "Mateusz. Until he rules, FOC-759's AC2 stays open and the cost axis reports FOC-198 as unreconstructible."
     },
     "queue": {
-      "FOC-759": "now / before the first counted arm-A run (High, child of FOC-477)",
+      "FOC-759": "AC1 DONE 2026-10-11 (baseline recomputed and recorded); AC2 open on Mateusz's FOC-198 decision. Still due before the first counted arm-A run (attempt 5 FOC-236) only in the sense that the AC2 ruling is.",
       "FOC-760+FOC-761": "together next (M1, High) - ONE reconciliation script (registry / telemetry / transcript) is the acceptance for both. FOC-761 needs a one-time re-ingest into the LIVE telemetry store: the ingest plan goes to Mateusz FIRST; no child opens the live store for writing.",
       "FOC-762-764": "M5, after 760+761. FOC-763/764 change contracts under agents/plan/** only AFTER the FOC-477 campaign ends - plan.spec runs as a PLAN child in arm A, so changing its contract mid-campaign moves the instrument.",
       "FOC-765": "M7, waits for Mateusz's decision on the draw.io plugin",
       "push": "Mateusz's - 'Push robię ja.'"
     },
-    "status": "DECIDED 2026-10-10 by Mateusz (model/cost telemetry review). The FOC-198 rule is the one open sub-decision. armB.costUsd values in this corpus are NOT yet recomputed - they stay as history until FOC-759 writes the new field beside them."
+    "status": "DECIDED 2026-10-10 by Mateusz (model/cost telemetry review). The FOC-198 rule is the one open sub-decision. armB.costUsd is recomputed (FOC-759, 2026-10-11): corpus[].armB.costUsdTranscript is the value the cost axis reads, the old armB.costUsd stays as history."
   },
   "egressScreenScan20261008": {
     "kind": "corpus-wide scan of the EXACT plan.dor state bytes through scanEgress — diagnostic only, wrote no run, mutated no Linear state",
@@ -231,6 +241,8 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.0749,
+        "costUsdTranscript": null,
+        "costUsdTranscriptStatus": "unrecoverable: the transcript is gone (30-day retention) and the tee's three cumulative result values 0.023 -> 0.045 -> 0.009 are non-monotone, so no safe reconstruction (review F6) - see foc198Rule",
         "turns": 3,
         "gateFriction": 1
       },
@@ -245,6 +257,11 @@
         "childId": "plan-4",
         "status": "exited",
         "costUsd": 0.6952,
+        "costUsdTranscript": 0.13904,
+        "costUsdTranscriptRounded": 0.139,
+        "costUsdRatio": 5,
+        "transcriptMessages": 75,
+        "transcriptSources": ["lead:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-236-plan/fff9d723-29e1-4bd6-b3c4-da4b65c029e9.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-236-plan/fff9d723-29e1-4bd6-b3c4-da4b65c029e9/subagents/agent-a3979b19f8e8123c3.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-236-plan/fff9d723-29e1-4bd6-b3c4-da4b65c029e9/subagents/agent-a458b1b8a4361bbf9.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-236-plan/fff9d723-29e1-4bd6-b3c4-da4b65c029e9/subagents/agent-a59720963743afd1f.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-236-plan/fff9d723-29e1-4bd6-b3c4-da4b65c029e9/subagents/agent-ac4bc38f4c9e1efab.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-236-plan/fff9d723-29e1-4bd6-b3c4-da4b65c029e9/subagents/agent-af3113e433ae3d551.jsonl"],
         "turns": 1,
         "gateFriction": 1
       },
@@ -259,6 +276,11 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.0489,
+        "costUsdTranscript": 0.048886,
+        "costUsdTranscriptRounded": 0.0489,
+        "costUsdRatio": 1,
+        "transcriptMessages": 11,
+        "transcriptSources": ["lead:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-436-plan/ec8371dd-6bef-4fec-b692-e043b5ec7bbf.jsonl"],
         "turns": 1,
         "gateFriction": 1
       },
@@ -273,6 +295,11 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.1084,
+        "costUsdTranscript": 0.108445,
+        "costUsdTranscriptRounded": 0.1084,
+        "costUsdRatio": 1,
+        "transcriptMessages": 54,
+        "transcriptSources": ["lead:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-240-plan/fd4ff2bc-e0dc-4aa9-b817-c6d8713378af.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-240-plan/fd4ff2bc-e0dc-4aa9-b817-c6d8713378af/subagents/agent-a1d3a1f04126db7df.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-240-plan/fd4ff2bc-e0dc-4aa9-b817-c6d8713378af/subagents/agent-ac250c7109bd28af2.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-240-plan/fd4ff2bc-e0dc-4aa9-b817-c6d8713378af/subagents/agent-ac2b1ab8db6b785a5.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-240-plan/fd4ff2bc-e0dc-4aa9-b817-c6d8713378af/subagents/agent-accb718c43130d3cb.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-240-plan/fd4ff2bc-e0dc-4aa9-b817-c6d8713378af/subagents/agent-ad416f77ba1d9fa7f.jsonl"],
         "turns": 1,
         "gateFriction": 1
       },
@@ -287,6 +314,11 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.3462,
+        "costUsdTranscript": 0.08033,
+        "costUsdTranscriptRounded": 0.0803,
+        "costUsdRatio": 4.31,
+        "transcriptMessages": 69,
+        "transcriptSources": ["lead:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-239-plan/3e688caa-0715-40cb-b01c-e6fbee4f2435.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-239-plan/3e688caa-0715-40cb-b01c-e6fbee4f2435/subagents/agent-a75ce29ceb65898c6.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-239-plan/3e688caa-0715-40cb-b01c-e6fbee4f2435/subagents/agent-aa3d908cf28a96730.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-239-plan/3e688caa-0715-40cb-b01c-e6fbee4f2435/subagents/agent-ac722e1fd58eae79d.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-239-plan/3e688caa-0715-40cb-b01c-e6fbee4f2435/subagents/agent-afd1d43315924dbd4.jsonl"],
         "turns": 2,
         "gateFriction": 1
       },
@@ -301,6 +333,11 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.7336,
+        "costUsdTranscript": 0.116796,
+        "costUsdTranscriptRounded": 0.1168,
+        "costUsdRatio": 6.281,
+        "transcriptMessages": 83,
+        "transcriptSources": ["lead:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-132-plan/a3349bfb-ea03-41cd-a0bc-c6bb208828d0.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-132-plan/a3349bfb-ea03-41cd-a0bc-c6bb208828d0/subagents/agent-a640c1d88850b74ac.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-132-plan/a3349bfb-ea03-41cd-a0bc-c6bb208828d0/subagents/agent-a965e13aee16a7d85.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-132-plan/a3349bfb-ea03-41cd-a0bc-c6bb208828d0/subagents/agent-abf84125b5cadb7fc.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-132-plan/a3349bfb-ea03-41cd-a0bc-c6bb208828d0/subagents/agent-ad282f26aa94a4865.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-132-plan/a3349bfb-ea03-41cd-a0bc-c6bb208828d0/subagents/agent-af10bc9a2e6784ec2.jsonl"],
         "turns": 2,
         "gateFriction": 2
       },
@@ -315,6 +352,11 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 1.6236,
+        "costUsdTranscript": 0.138604,
+        "costUsdTranscriptRounded": 0.1386,
+        "costUsdRatio": 11.714,
+        "transcriptMessages": 95,
+        "transcriptSources": ["lead:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-136-plan/7847c2aa-80f5-4b0b-a0c4-bc8215d7f68c.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-136-plan/7847c2aa-80f5-4b0b-a0c4-bc8215d7f68c/subagents/agent-a2b4259d8386bd22d.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-136-plan/7847c2aa-80f5-4b0b-a0c4-bc8215d7f68c/subagents/agent-a50553da1961ac17f.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-136-plan/7847c2aa-80f5-4b0b-a0c4-bc8215d7f68c/subagents/agent-ab7064443878da3e5.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-joint-flows-foc-136-plan/7847c2aa-80f5-4b0b-a0c4-bc8215d7f68c/subagents/agent-af8b7f9628e8d752c.jsonl"],
         "turns": 2,
         "gateFriction": 2
       },
@@ -329,6 +371,11 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.1396,
+        "costUsdTranscript": 0.06981,
+        "costUsdTranscriptRounded": 0.0698,
+        "costUsdRatio": 2,
+        "transcriptMessages": 39,
+        "transcriptSources": ["lead:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-os-foc-403-plan/1b931ea3-d502-4dd7-96f5-7d1baeb674ac.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-os-foc-403-plan/1b931ea3-d502-4dd7-96f5-7d1baeb674ac/subagents/agent-a0b9095d13c1330da.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-os-foc-403-plan/1b931ea3-d502-4dd7-96f5-7d1baeb674ac/subagents/agent-a968c1ab1cb59c6f5.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-os-foc-403-plan/1b931ea3-d502-4dd7-96f5-7d1baeb674ac/subagents/agent-a9fe999a19360d65f.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-os-foc-403-plan/1b931ea3-d502-4dd7-96f5-7d1baeb674ac/subagents/agent-abfd52e921d12f94d.jsonl"],
         "turns": 1,
         "gateFriction": 0
       },
@@ -343,6 +390,11 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 0.482,
+        "costUsdTranscript": 0.23258,
+        "costUsdTranscriptRounded": 0.2326,
+        "costUsdRatio": 2.073,
+        "transcriptMessages": 91,
+        "transcriptSources": ["lead:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-dashboard-foc-550-plan/9c2e9e33-6714-4fad-9697-c1572f7dec44.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-dashboard-foc-550-plan/9c2e9e33-6714-4fad-9697-c1572f7dec44/subagents/agent-a0771f4a1199c624b.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-dashboard-foc-550-plan/9c2e9e33-6714-4fad-9697-c1572f7dec44/subagents/agent-a236b767303b80fea.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-dashboard-foc-550-plan/9c2e9e33-6714-4fad-9697-c1572f7dec44/subagents/agent-a3b5dbd34624d963d.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-dashboard-foc-550-plan/9c2e9e33-6714-4fad-9697-c1572f7dec44/subagents/agent-a9a2adc72b8d61eeb.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-dashboard-foc-550-plan/9c2e9e33-6714-4fad-9697-c1572f7dec44/subagents/agent-a9db57bd4d4b7c4a7.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-dashboard-foc-550-plan/9c2e9e33-6714-4fad-9697-c1572f7dec44/subagents/agent-aa043c8d2adba2467.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-dashboard-foc-550-plan/9c2e9e33-6714-4fad-9697-c1572f7dec44/subagents/agent-ac26205337633dfe0.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jointhubs-dashboard-foc-550-plan/9c2e9e33-6714-4fad-9697-c1572f7dec44/subagents/agent-aef5a4738df77ad63.jsonl"],
         "turns": 2,
         "gateFriction": 2
       },
@@ -357,6 +409,11 @@
         "childId": "plan-1",
         "status": "exited",
         "costUsd": 3.3333,
+        "costUsdTranscript": 1.030498,
+        "costUsdTranscriptRounded": 1.0305,
+        "costUsdRatio": 3.235,
+        "transcriptMessages": 297,
+        "transcriptSources": ["lead:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b/subagents/agent-a1f54f9846b2f9887.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b/subagents/agent-a5b7cfab28b75db39.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b/subagents/agent-a897931acd6cea058.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b/subagents/agent-a9a1f50ddc7f4a1f1.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b/subagents/agent-aafa69581fdf01bed.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b/subagents/agent-abc39607ef32b5484.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b/subagents/agent-ac611f8591614bc20.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b/subagents/agent-ac70652a97d2d91c8.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b/subagents/agent-ae56e8ed9517b8967.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b/subagents/agent-af2fbf5ecf6ece3c9.jsonl","subagent:agents/plan/projects/C--Users-mateu-Documents-GitHub-la-wt-jawnosc-wynagrodzen-foc-688-plan/338728c8-7904-43e1-bf1e-2fd80bf8300b/subagents/agent-af6b88d8aacff89c7.jsonl"],
         "turns": 5,
         "gateFriction": 3
       },

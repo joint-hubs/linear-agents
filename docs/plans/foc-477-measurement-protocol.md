@@ -96,7 +96,9 @@ without a reproducer is not a result (Hermes spec, §5).
 ### 4.1 Cost to approved plan — **the load-bearing metric**
 
 - **Source:** `costUsd` from `.state/supervisor/<run>/children.json`, and `usage.cost` from the
-  decision-call envelope. **Never `costUsdReported`** (AC wording: "computed from usage, never
+  decision-call envelope. Arm B's figure is **not** `costUsd` (registry, 3.82x transcript ground
+  truth): it is `corpus[].armB.costUsdTranscript` — see *Arm-B cost baseline is transcript-priced*
+  below. **Never `costUsdReported`** (AC wording: "computed from usage, never
   `costUsdReported`").
 - **Field semantics, verified 2026-10-07 on run `8b24`:** `costUsd` is the priced/wycenione figure
   (sum across children `$12.23`); `costUsdReported` is Claude Code's own `total_cost_usd`
@@ -207,6 +209,36 @@ without a reproducer is not a result (Hermes spec, §5).
     `excluded (C1)` attempts and run 2's `EGRESS_BLOCKED` stop all sit before the boundary and stay
     excluded. Every counted arm-A run therefore shares one runner **and** one screen version. This
     replaces "no instrument change before the 10th run", which assumed none would be needed.
+
+- **Arm-B cost baseline is transcript-priced (FOC-759, recorded 2026-10-11).** The registry
+  `costUsd` of a PLAN child sums cumulative `result` events and is **3.82x** transcript ground
+  truth over the 9 recoverable corpus entries ($7.51 recorded vs $1.96 priced; per issue
+  x1.00—11.71). Arm A is priced from OpenRouter `usage.cost`, so a baseline taken from the
+  registry tilts the cost axis toward arm A. From 2026-10-11 the cost axis reads
+  **`corpus[].armB.costUsdTranscript`**; the old `armB.costUsd` stays in the record as history
+  and is never used on the axis. Full record: `docs/research/foc-477-runs.json`
+  (`telemetryCorrections20261010.armBBaseline`).
+  - **Sources.** The PLAN child's transcript only — lead
+    `agents/plan/projects/<cwdHash>/<sessionId>.jsonl` plus every sibling under
+    `<sessionId>/subagents/` (the flat `<cwdHash>/subagents/` layout is the fallback; none of
+    the 9 needed it). The dev/review/test children of the same run are not arm B.
+  - **Counted.** Every transcript line with `type === "assistant"` and `message.usage` present
+    (`telemetry-ingest.mjs:266-282`), one row per physical model call — deduplicated by
+    `message.id` with the four counters merged by `MAX()`, the same merge `applyUsageMessage`
+    applies (FOC-381 B2). A line without a `message.id` keeps its own row. None of the 9
+    children had one.
+  - **Priced.** `pricingSnapshot()` + `calculateCost()` from `scripts/telemetry-store.mjs`
+    against `config/models.json` — the same code the watcher and the ingest use, covering
+    input, output, cacheRead and cacheCreation. `<synthetic>` placeholder messages have no
+    price row and count as zero (3 of them across the corpus: FOC-240 x1, FOC-550 x2).
+  - **Verification (AC1).** The 9 recomputed numbers reproduce review F6's ground-truth column
+    **to the cent** — 0.1390 / 0.0489 / 0.1084 / 0.0803 / 0.1168 / 0.1386 / 0.0698 / 0.2326
+    / 1.0305, sum **$1.964989**. Recomputed from the transcripts on disk on 2026-10-11, not copied
+    from the review.
+  - **FOC-198 is unrecoverable** — its transcript is past the 30-day retention and the tee's
+    three cumulative values (0.023 -> 0.045 -> 0.009) are non-monotone, so no safe
+    reconstruction exists. Its arm-B cost on the axis awaits Mateusz's ruling on the
+    conservative rule recorded in `foc198Rule`. Until then the cost axis reports 9 entries.
 
 ### 4.2 Wall time
 
