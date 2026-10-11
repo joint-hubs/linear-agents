@@ -17,10 +17,10 @@
 //
 // Run: node scripts/plan-dod.test.mjs
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { getRegistryEntry } from "./decision-registry.mjs";
 import { loadGraph, validateGraph } from "./graph-validate.mjs";
@@ -413,6 +413,10 @@ await test("plan.dod rides the registry prompt, the resolved reads and the stric
     if (/STATE:/.test(message)) fail("no state dump — the declared reads only");
     deepEq(body.response_format, { type: "json_schema", json_schema: { name: "plan.dod", strict: true, schema: DOD_STEP.output } }, "strict json_schema with the step's output schema");
     deepEq(body.usage, { include: true }, "usage requested — cost honesty");
+    // FOC-758 (d): the live config/models.json pins plan.discovery to two
+    // OpenRouter providers — the request BODY (what fetchImpl received) must
+    // carry the pin in OpenRouter's wire shape, camelCase mapped to snake_case.
+    deepEq(body.provider, { order: ["wafer", "fireworks"], allow_fallbacks: false }, "the plan.discovery provider pin rides the wire (FOC-758 d)");
     if (!(options.signal instanceof AbortSignal)) fail("an abort signal bounds the call");
 
     // The FOC-449 event line — one, complete, scrubbed.
@@ -447,6 +451,103 @@ await test("plan.dod rides the registry prompt, the resolved reads and the stric
     if (!line.scrub.note.includes("mask-only")) fail("the scrub note names the variant");
     eq(typeof line.durationMs, "number", "latency recorded");
     eq(typeof line.ts, "string", "timestamp recorded");
+  } finally {
+    cleanup();
+  }
+});
+
+await test("no pin configured: the request body carries NO provider key at all (FOC-758 d)", async () => {
+  // The live config/models.json now pins plan.discovery, so the no-pin case
+  // needs a config WITHOUT providerPins. createDefaultGenerator resolves
+  // models.json against its module directory, so the test copies the whole
+  // scripts/ tree (the import closure — decision-log, plan-ac/intent, mcp/,
+  // graph-validate …) plus a stripped config/ into a temp dir UNDER the repo
+  // ROOT (node resolves ajv upward from there), imports the copied runner and
+  // points it at the stripped config. The frozen originals are never touched.
+  const root = join(__dir, "..");
+  const workDir = join(root, ".state", `plan-dod-nopin-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  let cleanup = () => {};
+  try {
+    mkdirSync(workDir, { recursive: true });
+    cpSync(join(root, "scripts"), join(workDir, "scripts"), { recursive: true });
+    mkdirSync(join(workDir, "config"), { recursive: true });
+    for (const name of ["graph.json", "decisions.json"]) {
+      cpSync(join(root, "config", name), join(workDir, "config", name));
+    }
+    // models.json minus providerPins: build it from the live file, one key at a time.
+    const live = JSON.parse(readFileSync(join(root, "config", "models.json"), "utf8"));
+    const stripped = {};
+    for (const [k, v] of Object.entries(live)) {
+      if (k !== "providerPins") stripped[k] = v;
+    }
+    writeFileSync(join(workDir, "config", "models.json"), `${JSON.stringify(stripped, null, 2)}\n`);
+    cleanup = () => rmSync(workDir, { recursive: true, force: true });
+
+    const runnerUrl = pathToFileURL(join(workDir, "scripts", "graph-runner.mjs")).href;
+    const runner = await import(`${runnerUrl}?nopin-${Date.now()}`); // cache-bust: a fresh module instance
+    const fetchCalls = [];
+    const fetchImpl = async (url, options) => {
+      fetchCalls.push({ url, options });
+      return okResponse(DOD_OUTPUT);
+    };
+    const generate = runner.createDefaultGenerator({
+      apiKey: "test-key",
+      runId: "run-g-nopin",
+      taskKey: "T1",
+      shadowDir: join(workDir, "shadow"),
+      fetchImpl,
+    });
+    const output = await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT } });
+    deepEq(output, DOD_OUTPUT, "parsed output returned (no-pin tree)");
+    eq(fetchCalls.length, 1, "ONE fetch call (no-pin tree)");
+    const body = JSON.parse(fetchCalls[0].options.body);
+    eq(body.model, "z-ai/glm-5.3-flash", "the model resolution is untouched by the stripped config");
+    if ("provider" in body) fail("no providerPins in config: the body must NOT carry a provider key (FOC-758 d)");
+    deepEq(body.response_format, { type: "json_schema", json_schema: { name: "plan.dod", strict: true, schema: DOD_STEP.output } }, "the rest of the body is unchanged");
+    deepEq(body.usage, { include: true }, "usage still requested");
+  } finally {
+    cleanup();
+  }
+});
+
+await test("a revision payload rides the wire; without it the message carries no REVISION section (FOC-758 (a) delivery)", async () => {
+  // `regenReads` (plan-intent.mjs) attaches `revision` as CALLER COMPOSITION
+  // and keeps the declared reads at five. The message is composed from
+  // `step.reads`, so without an explicit carry the rejection feedback never
+  // reached the model and the regeneration prompt was byte-identical to the
+  // first attempt's (pinned acceptance run 5: both attempts 7936 chars,
+  // IDENTICAL). This test pins the WIRE, not the object handed to the
+  // generator - the object side was already covered and could not see this.
+  const REVISION = {
+    attempt: 2,
+    note: "previous map rejected",
+    problems: ["/interpretations/0/quote (maxLength): limit 150, actual 170"],
+    previous: { mapVersion: 1, covers: { goal: [] } },
+  };
+  const { dir, cleanup } = tempDir();
+  try {
+    const fetchCalls = [];
+    const fetchImpl = async (url, options) => {
+      fetchCalls.push({ options });
+      return okResponse(DOD_OUTPUT);
+    };
+    const generate = createDefaultGenerator({ apiKey: "test-key", runId: "run-g-rev", taskKey: "T1", shadowDir: dir, fetchImpl });
+
+    // with revision: the feedback is on the wire
+    await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT, revision: REVISION } });
+    const withRev = JSON.parse(fetchCalls[0].options.body).messages[0].content;
+    if (!withRev.includes("REVISION (the previous attempt was rejected")) fail("the REVISION section is on the wire");
+    if (!withRev.includes("/interpretations/0/quote (maxLength): limit 150, actual 170")) fail("the CONCRETE violation reaches the model");
+    if (!withRev.includes('"attempt":2')) fail("the attempt marker reaches the model");
+    if (!withRev.includes('"previous"')) fail("the rejected map reaches the model");
+    if (!withRev.includes(`- plan.intent.confirmed: ${JSON.stringify(CONFIRMED_OUTPUT)}`)) fail("the declared reads are still the inputs");
+    if (withRev.indexOf("REVISION") < withRev.indexOf("INPUTS (declared reads")) fail("REVISION rides AFTER the declared reads, never in place of them");
+
+    // without revision: no REVISION section at all - an unrevised call is unchanged
+    await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT } });
+    const noRev = JSON.parse(fetchCalls[1].options.body).messages[0].content;
+    if (/REVISION \(/.test(noRev)) fail("an unrevised call carries NO REVISION section");
+    if (!noRev.includes(`- plan.intent.confirmed: ${JSON.stringify(CONFIRMED_OUTPUT)}`)) fail("the declared reads are unchanged");
   } finally {
     cleanup();
   }

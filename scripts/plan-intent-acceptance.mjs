@@ -55,6 +55,20 @@ export function summarize(rows, runs = RUNS) {
   };
 }
 
+// FOC-758 (d): the acceptance bar is TWO conditions — done in ≤ 1 regeneration
+// in RUNS/RUNS runs AND every serving provider on the pinned route. The pin
+// slugs come from config/models.json providerPins (order: wafer, fireworks).
+// Provider names arrive as OpenRouter's display names ("Wafer", "Fireworks
+// AI", "OpenInference", ...) — match the pin slugs case-insensitively so a
+// display name that contains its slug still counts as pinned.
+const PINNED_SLUGS = ["wafer", "fireworks"];
+
+/** Every distinct serving provider in the rows that is NOT on the pinned route. */
+export function offPinnedProviders(rows) {
+  return [...new Set(rows.flatMap((r) => r?.providers ?? []))]
+    .filter((p) => !PINNED_SLUGS.some((slug) => p?.toLowerCase().includes(slug)));
+}
+
 /** The run's shadow-ledger evidence: total cost, providers seen, per-call outcomes. */
 function shadowStats(shadowDir) {
   try {
@@ -149,7 +163,8 @@ async function main() {
     const outcome = row.status === "done"
       ? `done (attempts ${row.attempts}, ${row.attempts === 1 ? "0 regenerations" : "1 regeneration"})`
       : `FAILED (${row.error?.code}: ${row.error?.message ?? ""})`;
-    console.log(`run ${row.n}: ${outcome} — ${cost}, ${(row.wallMs / 1000).toFixed(1)}s`);
+    console.log(`run ${row.n}: ${outcome} — ${cost}, ${(row.wallMs / 1000).toFixed(1)}s`
+      + ` — providers: ${row.providers.length ? row.providers.join(", ") : "none recorded"}`);
     if (row.problems?.length) console.log(`  problems: ${row.problems.join(" | ")}`);
   }
 
@@ -178,7 +193,16 @@ async function main() {
     console.log(`acceptance NOT met — the bar is done in ≤ 1 regeneration in ${RUNS}/${RUNS} runs`);
     return 1;
   }
-  console.log(`acceptance met — done in ≤ 1 regeneration in ${summary.passes} of ${RUNS} runs`);
+  // Second half of the bar (FOC-758 d): every serving provider must sit on the
+  // pinned route. Reported independently of the convergence tally.
+  const offPinned = offPinnedProviders(rows);
+  if (offPinned.length) {
+    console.log(`acceptance NOT met — pinned route {${PINNED_SLUGS.join(", ")}} violated:`
+      + ` served by ${offPinned.join(", ")}`);
+    return 1;
+  }
+  console.log(`acceptance met — done in ≤ 1 regeneration in ${summary.passes} of ${RUNS} runs`
+    + `, every serving provider on the pinned route {${PINNED_SLUGS.join(", ")}}`);
   return 0;
 }
 

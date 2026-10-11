@@ -478,6 +478,32 @@ export function createDefaultGenerator({
     if (!model) {
       throw new TypedError("provider_error", `config/models.json has no ids row for routing.plan.discovery ("${scrub(String(alias))}")`);
     }
+    // FOC-758 (d): a provider pin for this routing entry, when configured,
+    // rides the request as OpenRouter's wire `provider` field. Config stores
+    // camelCase `allowFallbacks`; only the wire boundary maps it to
+    // `allow_fallbacks`. With no pin (or a pin without a usable `order`) the
+    // request body stays byte-identical to before — no `provider` key at all.
+    const pin = models.providerPins?.["plan.discovery"];
+    const pinOrder = Array.isArray(pin?.order) ? pin.order.filter((p) => typeof p === "string" && p) : null;
+    const providerField = pinOrder && pinOrder.length
+      ? {
+          order: [...pinOrder],
+          ...(typeof pin.allowFallbacks === "boolean" ? { allow_fallbacks: pin.allowFallbacks } : {}),
+        }
+      : null;
+
+    // FOC-758 (a) delivery. `regenReads` (plan-intent.mjs) attaches `revision`
+    // as CALLER COMPOSITION and deliberately keeps the declared reads at five
+    // (its own docstring: the FOC-474 precedent, and `inbox.entry` stays
+    // verbatim so our feedback is never quote-able anchor text). This message
+    // is composed from `step.reads`, so without an explicit carry the rejection
+    // feedback never reached the model and the regeneration prompt was
+    // byte-identical to the first attempt's (pinned acceptance run 5: both
+    // attempts 7936 chars, IDENTICAL). `revision` is the one caller-composition
+    // field the [G] path carries; it rides AFTER the declared reads and only
+    // when present, so an unrevised call's message - and its FOC-449 input
+    // hash - is byte-identical to before.
+    const revision = reads?.revision ?? null;
 
     const message = [
       entry.prompt,
@@ -486,6 +512,13 @@ export function createDefaultGenerator({
       "",
       "INPUTS (declared reads, in order):",
       ...step.reads.map((r) => `- ${r}: ${JSON.stringify(reads[r] ?? null)}`),
+      ...(revision
+        ? [
+            "",
+            "REVISION (the previous attempt was rejected - fix these problems and produce a different map):",
+            `- revision: ${JSON.stringify(revision)}`,
+          ]
+        : []),
     ].join("\n");
 
     // The FOC-449 record's input and hash are the request's own — identical
@@ -548,6 +581,7 @@ export function createDefaultGenerator({
           messages: [{ role: "user", content: message }],
           response_format: { type: "json_schema", json_schema: { name: stepId, strict: true, schema: step.output } },
           usage: { include: true },
+          ...(providerField ? { provider: providerField } : {}),
         }),
         signal: AbortSignal.timeout(timeoutMs),
       });
