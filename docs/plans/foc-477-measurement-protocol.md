@@ -324,6 +324,26 @@ a count could never be dropped into this rule.)
 Per-axis table with win/draw/loss is mandatory in the report, and the gate-friction column
 (§4.3b) is mandatory alongside it — as a descriptive, with no axis verdict.
 
+### 5.1 Futility rule and the treatment of model-quality misses (Mateusz, 2026-10-11)
+
+Recorded **before the first counted arm-A run exists**, exactly like the run-input conventions
+in 4.1: no counted run's treatment is decided after the fact.
+
+**Futility rule — campaign STOP.** After **4 counted arm-A runs**, if **≥ 3** of them failed
+on `plan.intent` for **model-quality** reasons (a schema rejection or a [D] coverage miss
+**after** the one regeneration), the campaign **STOPs**: report to Mateusz, no further runs, and
+no instrument change. Provider and harness failures do **not** enter this rule — they count as
+before under the C1 exclusion vocabulary (a run where no attempt ever returned a map is an
+environment miss, not a model-quality miss).
+
+**Length limits stay.** The `maxLength` caps `claim` 200 / `quote` 150 are **not** moved. An
+overrun of 1–15 % is FOC-691 material — a note about model capability on this route — and
+**never** another instrument-boundary move. A run that dies on such an overrun is a model-quality
+miss and counts toward the futility rule above.
+
+The first counted arm-A run is attempt 5 FOC-236, which starts only after the FOC-758 git
+landing (5.1 is written on 2026-10-11, while that landing is still ahead).
+
 ## 6. M4 contract deltas — mandatory even on GO
 
 Whatever the verdict, the report must contain concrete deltas for FOC-469 / FOC-478:
