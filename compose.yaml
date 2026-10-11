@@ -1,0 +1,55 @@
+# Fenix dev stack — start with ./fenix up.
+# Provider keys live in ./.fenix/secrets/ (gitignored, owner-only) and are
+# mounted as Compose secrets; they are never baked into the image or printed.
+# The API is published on 127.0.0.1 only — it serves local-only endpoints.
+# FOC-776 hardens this file (per-squad transcript volumes, resume).
+name: fenix
+
+x-fenix: &fenix
+  image: fenix:dev
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - path: ./.fenix/fenix.env
+      required: false
+  secrets:
+    - openrouter_api_key
+    - linear_api_key
+    - github_token
+  volumes:
+    - fenix-data:/data
+  restart: unless-stopped
+
+services:
+  fenix-api:
+    <<: *fenix
+    command: ["api"]
+    ports:
+      - "127.0.0.1:${FENIX_PORT:-4600}:7331"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7331/api/telemetry/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  fenix-supervisor:
+    <<: *fenix
+    command: ["idle"]
+    stdin_open: true
+    tty: true
+    depends_on:
+      fenix-api:
+        condition: service_healthy
+
+secrets:
+  openrouter_api_key:
+    file: ./.fenix/secrets/openrouter_api_key
+  linear_api_key:
+    file: ./.fenix/secrets/linear_api_key
+  github_token:
+    file: ./.fenix/secrets/github_token
+
+volumes:
+  fenix-data: {}

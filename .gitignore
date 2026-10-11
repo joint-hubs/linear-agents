@@ -115,3 +115,6 @@ tools/nebul/NEBUL_*_LOG.txt
 # are a different thing: one SKILL.md each, written here.
 # To version these properly: submodule for diagram-design, vendor archify.
 agents/supervisor/skills/
+
+# Fenix local runtime (keys, env) — never committed
+.fenix/

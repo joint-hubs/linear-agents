@@ -105,6 +105,11 @@ const stateRoot = process.env.LA_STATE_ROOT
 loadEnv();
 
 const PORT = parseInt(process.env.TELEMETRY_PORT, 10) || 7331;
+// FOC-775: inside the Fenix container the API binds 0.0.0.0 (TELEMETRY_HOST)
+// so Compose can publish the port; Compose then publishes it on the HOST's
+// 127.0.0.1 only, and the per-request isLocalOrigin checks stay unchanged —
+// POST /api/launch remains loopback-only from any client's perspective.
+const HOST = process.env.TELEMETRY_HOST || '127.0.0.1';
 const isSmoke = process.argv.includes('--smoke');
 
 // Central SQLite store is a hard requirement (README: "Node 22.5+ — centralna
@@ -2340,8 +2345,13 @@ const server = createServer(async (req, res) => {
 // Start
 // ---------------------------------------------------------------------------
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Telemetry server listening on http://127.0.0.1:${PORT} (loopback only — POST /api/launch is local-only, §5)`);
+server.listen(PORT, HOST, () => {
+  const loopback = HOST === '127.0.0.1' || HOST === 'localhost';
+  console.log(
+    loopback
+      ? `Telemetry server listening on http://${HOST}:${PORT} (loopback only — POST /api/launch is local-only, §5)`
+      : `Telemetry server listening on http://${HOST}:${PORT} (container bind — published on the host's 127.0.0.1 only; POST /api/launch stays local-only, §5)`,
+  );
 
   void bootstrapTelemetry().catch((error) => console.error(`[telemetry] bootstrap failed: ${error.message}`));
   const ingestTimer = isSmoke ? null : setInterval(ingestTelemetry, 15_000);

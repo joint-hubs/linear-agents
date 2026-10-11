@@ -5,3 +5,10 @@
 # -text: no EOL conversion in either direction, so a fresh checkout is
 # byte-identical to the blobs and the hash list verifies on every platform.
 docs/benchmark/evidence/** -text
+
+# Shell and container files must keep LF (core.autocrlf=true on Windows breaks /bin/sh)
+*.sh text eol=lf
+/fenix text eol=lf
+Dockerfile text eol=lf
+compose.yaml text eol=lf
+docker/** text eol=lf
