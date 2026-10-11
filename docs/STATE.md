@@ -3600,3 +3600,31 @@ REVIEW → TEST → merge. Dopiero po lądowaniu (reguła 4): granica = sha na m
 **attempt 5 FOC-236 od zera**. Attempt 5 nie startuje przed lądowaniem.
 
 **Push robi Mateusz.** Main: `24c0ad6`, 35 przed origin (odczytane w tej turze; po commicie tego wpisu +1).
+## 2026-10-11 — REGUŁA DAREMNOŚCI w protokole (`05bbee0`) PRZED pierwszym zliczonym runem · FOC-758 pchnięty do REVIEW (`review-2`)
+
+**Reguła daremności zapisana, zanim powstał jakikolwiek zliczony run.** Sekcja 5.1 w
+`docs/plans/foc-477-measurement-protocol.md` (commit `05bbee0`, +20 linii, bez trailera):
+po **4 zliczonych runach arm A**, jeśli **≥ 3** padły na `plan.intent` z przyczyny jakości
+modelu (schema albo [D] **po** jednej regeneracji) — kampania **STOP** i raport do Mateusza, bez
+dalszych runów i bez zmian przyrządu. Porażki providera / harnessu **nie** wchodzą do tej reguły —
+liczą się jak dotąd pod C1 (run, w którym żadna próba nie zwróciła mapy, to miss środowiskowy,
+nie jakościowy).
+
+**Limity długości zostają.** `maxLength` `claim` 200 / `quote` 150 nie są ruszane. Przekroczenie
+1—15 % to materiał do FOC-691 — notatka o możliwości modelu na tej trasie — i **nigdy** kolejny
+ruch granicy przyrządu. Run, który ginie na takim przekroczeniu, jest missem jakościowym i liczy
+się do reguły daremności. Pierwszym zliczonym runem jest attempt 5 FOC-236, który startuje
+dopiero po lądowaniu FOC-758.
+
+**FOC-758 → REVIEW.** `review-2` w runie `2026-10-10-supervisor-foc477-instr-foc758`: worktree
+`foc-758-review` przypięty do kandydata `17d3854b588a18147022f37199adde7614ba46c9`, model `z-ai/glm-5.3-flash` z routingu przez `--model`, telemetry run `2026-10-11T19-34-18-609-review-7e87`.
+Pinned-state verification PASS (5/5 kontroli). Zakres recenzji: `a2ff976..17d3854`, 8 plików,
+758 wstawień, 80 usunięć — oba commity FOC-758 (`a3d447a`, `17d3854`). Kickoff wymienia cztery
+sankcjonowane hunki w `graph-runner.mjs` i zastrzega, że CLI verbs / record shapes / step loop /
+`resolveRead` / `createStore` / `RESET_STATUS` mają pozostać bajtowo identyczne.
+
+**Stan.** dev-1 (FOC-758, mimo) wyszedł z exit 0; `gate-dev-1-1` answered, 0 pending. Origin/main
+po Twoim pushu: `f2e81d8`. Lokalny main: `05bbee0` (1 przed origin). Tor B (M8) rusza, gdy tor A
+czeka — teraz tor A jest aktywny (REVIEW), nie mieszam pasm.
+
+**Push robi Mateusz.**
