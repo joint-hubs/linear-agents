@@ -25,7 +25,8 @@ autonomous queue (one live child at a time).
 | M4 Delivery loop as a graph | FOC-469 | 0 % | waits for FOC-477 go | FOC-478, FOC-382, FOC-390, FOC-617, FOC-622, FOC-456, FOC-393, FOC-453, FOC-619, FOC-618, FOC-117 |
 | M5 Slim DEV and Supervisor | FOC-470 | 14 % | in progress | **FOC-727–731 agent working state** (early, lane B), FOC-621 rest, FOC-623, FOC-610, FOC-611, FOC-647, FOC-455, FOC-479, FOC-457, FOC-388, FOC-389, FOC-395, FOC-454, FOC-394, FOC-458, FOC-635, FOC-691 |
 | M6 Optimization and learning | FOC-471 | 27 % | data first | FOC-625, FOC-398, FOC-459, FOC-399, FOC-273, FOC-110, FOC-222, FOC-223, FOC-224 |
-| M7 Release discipline and living docs | FOC-714 | 0 % | new 2026-10-08 | FOC-715–724 (planning templates, hygiene, CodeGraph → DrawIO dossier, Fenix 1.1) |
+| M7 Release discipline and living docs | FOC-714 | 0 % | new 2026-10-08 | FOC-715–724 (planning templates, hygiene, CodeGraph → DrawIO dossier; FOC-724 retargeted to the Fenix 1.0.0 dossier) |
+| M8 Fenix 1.0.0 — portable release | FOC-768 | 0 % | new 2026-10-11 | FOC-769–790 + FOC-760/761/762/724 — one-command Docker quick start, dashboard v2, one cost truth (PRD `docs/prd/fenix-1.0.0-release-prd.md`) |
 | Maintenance (standing) | FOC-472 | — | idle-lane only | FOC-726 (High), FOC-667 (High), FOC-602, FOC-642, FOC-604, FOC-606, FOC-615, FOC-725, FOC-461 + nits |
 
 PRDs for the 2026-10-08 additions: `docs/prd/release-dossier-prd.md` (M7),
@@ -74,9 +75,10 @@ Taken by Mateusz:
 4. **FOC-691 (`plan.intent` model/tier policy) needs a deeper analysis first** — no model or tier change
    until then.
 
+5. **FOC-598 AC1b → (b)**: closed on the landed core; key redesign moved to FOC-732 (maintenance).
+
 Still open:
 
-5. FOC-598 AC1b — recommended (b): close on the landed core, file the key redesign separately.
 6. Push of local `main` (ahead of `origin/main`).
 
 <!-- roadmap:current:end -->
