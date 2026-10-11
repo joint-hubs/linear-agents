@@ -125,12 +125,13 @@ its turns can be charged to that ticket (§8, task P0.3).
 - Earlier dashboards: maps not interactive / sliders without meaning (2026-06-07) — every chart must
   say what it measures and be explorable.
 
-### 6.2 Information architecture (5 areas instead of 12 screens)
+### 6.2 Information architecture (6 areas instead of 12 screens — spec: `docs/ui/dashboard-v2-spec.md`)
 
 | area | what the developer does there |
 |---|---|
 | **Cockpit** (home) | talk to the Supervisor (chat with the full terminal one click away); **"Needs you"** inbox: gates, STOP reports, push/PR approvals; live children with honest status |
 | **Work** | tickets from Linear as a board: plan → dev → review → test → landed; per ticket: rounds, cost (children + Supervisor share), evidence links (verdicts, diffs, logs) |
+| **Team** | the agent architecture as a high-level diagram: Supervisor → squad leads → the line-up each lead actually picks (roles by share), the bench; per squad cost and the lead's own share (replaces the Manager tactical board, decision 2026-10-11) |
 | **Costs & quality** | cost per ticket p20/p50/p80, model mix, rework share, first-time-right, human interventions per ticket — candidates for the later headline set |
 | **Insights** | curated analyses from the marimo notebook: Money (cost per ticket, Supervisor overhead, outlier ledger), Behaviour (loop episodes), Human steering (what Mateusz had to do), Flow |
 | **Settings** | keys, repositories, routing (models + prices + benchmarks), squads and prompts, budget |
