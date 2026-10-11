@@ -3517,3 +3517,37 @@ FOC-759…765 w Linear):**
 
 **Push robi Mateusz.** Main: `db0004c`, przed origin.
 
+## 2026-10-11 — FOC-759 AC1 domknięte (baseline arm B z transkryptów, co do grosza) · FOC-758 tura 2 w toku
+
+**FOC-759 AC1.** Baseline arm B przeliczony z transkryptów dzieci PLAN i zapisany w
+`docs/research/foc-477-runs.json` jako nowe pole `corpus[].armB.costUsdTranscript` obok starego
+— `armB.costUsd` zostaje jako historia, bajtowo bez zmian. Dziewięć odtworzalnych wpisów
+odtwarza tabelę F6 z review **co do grosza**: 0.1390 / 0.0489 / 0.1084 / 0.0803 / 0.1168 /
+0.1386 / 0.0698 / 0.2326 / 1.0305, suma **$1.964989** (rejestr $7.51, ×3.82; per issue ×1.00–11.71,
+najgorzej FOC-136 ×11.714). Liczone z plików na dysku, nie przepisane z review. Metoda w
+`docs/plans/foc-477-measurement-protocol.md` §4.1: źródła (lead + `subagents/`), co liczone
+(asystent + `message.usage`, dedup `message.id`, scalanie `MAX()` jak w `applyUsageMessage`),
+wycena (`pricingSnapshot()` + `calculateCost()`), weryfikacja. Skrypt lokalny:
+`.state/research-scratch/foc759-price.mjs` (do repo wejdzie razem ze skryptem rekoncyliacji
+FOC-760). **Oś kosztu czyta teraz `costUsdTranscript`.** Trzy wiadomości `<synthetic>`
+(FOC-240 ×1, FOC-550 ×2) nie mają wiersza ceny — liczone jako zero, odnotowane. FOC-550 i FOC-688
+to dzieci mieszane modelowo (mimo lead + glm-5.3-flash subagenty) — transkrypt wycenia każdą
+wiadomość po jej własnym modelu, czego rejestr nie pokazuje.
+
+**AC2 otwarte — reguła dla FOC-198 czeka na Twoją decyzję** (`foc198Rule`): propozycja to podłoga
+**0.009** (kierunek „przeciw GO": najtrudniejszy słupek, mediana 10 wpisów 0.1126 vs 0.1277 przy
+wysokim B₁₉₈), alternatywa to wyłączyć FOC-198 z mediany osi kosztu (n=9, mediana 0.1168, oś
+`win*`). Bez wyboru oś kosztu raportuje 9 wpisów.
+
+**FOC-758 / dev-1 — tura 2 żywa** (od 2026-10-10 14:35Z, pid 75588, tee pisze na bieżąco, nie
+zastany). Worktree `foc-758-dev` na `a3d447a` z trzema niezacommitowanymi plikami (80 wstawień,
+2 usunięcia): `config/models.json` (+6, wpis `providerPins["plan.discovery"]` — dokładnie zakres
+(d)), `scripts/graph-runner.mjs` (+14, pole `provider` w ciele requestu — zakres (d)),
+`scripts/plan-dod.test.mjs` (+60/−2, testy pinu i przypadku bez pinu). Trzeci plik jest poza
+nazwanym zakresem — to testy, nie przyrząd; odnotowane do oceny diffa przy REVIEW. Koszt runu:
+rejestr **0.35 USD zawyżone (suma narastających result)**, `costUsdReported` 14.10 (dowód
+FOC-165). Model `xiaomi/mimo-v2.6-pro` przez jawne `--model` — zapisany wyjątek (dokończa na
+mimo). Bramek brak, kolejka wybudzeń czysta, budżet bez capa.
+
+**Push robi Mateusz.** Main: `b0a304a`, 32 przed origin.
+
