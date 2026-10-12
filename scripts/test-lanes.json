@@ -85,8 +85,16 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "fenix-container-helpers.test.mjs",
+      "reason": "isolation audit FOC-776: mkdtemp/tmpdir fixtures only; fetch and git are injected (no network, no real git config writes); no ports, no socket binds, no telemetry DB"
+    },
+    {
       "file": "fenix-paths.test.mjs",
       "reason": "isolation audit FOC-770: pure path resolution with explicit env objects and a read-only scan of scripts/*.mjs; no fs writes, no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "fenix-seed-agents.test.mjs",
+      "reason": "isolation audit FOC-776: mkdtemp/tmpdir fixtures only (image and volume agent trees synthesized and removed); no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
       "file": "flow-turns.test.mjs",
