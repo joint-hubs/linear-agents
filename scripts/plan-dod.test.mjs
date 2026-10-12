@@ -7,17 +7,20 @@
 // the DEFAULT generator — the one live [G] calls actually ride — is exercised
 // on an injected fetch: registry prompt + resolved reads reach the wire, the
 // strict json_schema travels, and ONE FOC-449 event line lands in
-// decisions.jsonl per successful call (input as sent, mask-only scrubbed,
-// answers, usage/cost, latency) while every failure path appends NOTHING.
+// decisions.jsonl per TERMINAL call (FOC-758): a successful call carries the
+// parsed answers; a failed or unparseable call carries ok:false, a typed
+// `error` and whatever usage the body carried — a failed call's cost must
+// exist somewhere. Only a pre-fetch wiring failure (no key, unknown stepId)
+// appends NOTHING — no provider call was attempted.
 // The eval harness's input partition is tested against the committed fixture:
 // the approved DoD section is ground truth and never enters the inputs.
 //
 // Run: node scripts/plan-dod.test.mjs
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { getRegistryEntry } from "./decision-registry.mjs";
 import { loadGraph, validateGraph } from "./graph-validate.mjs";
@@ -114,7 +117,8 @@ function okResponse(content, usage = { input_tokens: 123, output_tokens: 45, cos
     json: async () => ({
       id: "resp-plan-dod-test",
       model: "z-ai/glm-5.3-flash",
-      choices: [{ message: { content: typeof content === "string" ? content : JSON.stringify(content) } }],
+      choices: [{ message: { content: typeof content === "string" ? content : JSON.stringify(content) }, finish_reason: "stop" }],
+      provider: "z-ai",
       usage,
     }),
   };
@@ -409,6 +413,10 @@ await test("plan.dod rides the registry prompt, the resolved reads and the stric
     if (/STATE:/.test(message)) fail("no state dump — the declared reads only");
     deepEq(body.response_format, { type: "json_schema", json_schema: { name: "plan.dod", strict: true, schema: DOD_STEP.output } }, "strict json_schema with the step's output schema");
     deepEq(body.usage, { include: true }, "usage requested — cost honesty");
+    // FOC-758 (d): the live config/models.json pins plan.discovery to two
+    // OpenRouter providers — the request BODY (what fetchImpl received) must
+    // carry the pin in OpenRouter's wire shape, camelCase mapped to snake_case.
+    deepEq(body.provider, { order: ["wafer", "fireworks"], allow_fallbacks: false }, "the plan.discovery provider pin rides the wire (FOC-758 d)");
     if (!(options.signal instanceof AbortSignal)) fail("an abort signal bounds the call");
 
     // The FOC-449 event line — one, complete, scrubbed.
@@ -430,6 +438,8 @@ await test("plan.dod rides the registry prompt, the resolved reads and the stric
     eq(line.formatConfidence, null, "no format confidence");
     deepEq(line.usage, { inputTokens: 123, outputTokens: 45, cost: 0.000045 }, "usage normalized");
     eq(line.responseId, "resp-plan-dod-test", "response id");
+    eq(line.provider, "z-ai", "provider on the success line (FOC-758)");
+    eq(line.finish_reason, "stop", "finish_reason on the success line (FOC-758)");
     deepEq(line.error, null, "no error on success");
     eq(typeof line.eventId, "string", "event id present");
     if (line.eventId.length < 10) fail("event id looks like a UUID");
@@ -441,6 +451,148 @@ await test("plan.dod rides the registry prompt, the resolved reads and the stric
     if (!line.scrub.note.includes("mask-only")) fail("the scrub note names the variant");
     eq(typeof line.durationMs, "number", "latency recorded");
     eq(typeof line.ts, "string", "timestamp recorded");
+  } finally {
+    cleanup();
+  }
+});
+
+await test("no pin configured: the request body carries NO provider key at all (FOC-758 d)", async () => {
+  // The live config/models.json now pins plan.discovery, so the no-pin case
+  // needs a config WITHOUT providerPins. createDefaultGenerator resolves
+  // models.json against its module directory, so the test copies the whole
+  // scripts/ tree (the import closure — decision-log, plan-ac/intent, mcp/,
+  // graph-validate …) plus a stripped config/ into a temp dir UNDER the repo
+  // ROOT (node resolves ajv upward from there), imports the copied runner and
+  // points it at the stripped config. The frozen originals are never touched.
+  const root = join(__dir, "..");
+  const workDir = join(root, ".state", `plan-dod-nopin-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  let cleanup = () => {};
+  try {
+    mkdirSync(workDir, { recursive: true });
+    cpSync(join(root, "scripts"), join(workDir, "scripts"), { recursive: true });
+    mkdirSync(join(workDir, "config"), { recursive: true });
+    for (const name of ["graph.json", "decisions.json"]) {
+      cpSync(join(root, "config", name), join(workDir, "config", name));
+    }
+    // models.json minus providerPins: build it from the live file, one key at a time.
+    const live = JSON.parse(readFileSync(join(root, "config", "models.json"), "utf8"));
+    const stripped = {};
+    for (const [k, v] of Object.entries(live)) {
+      if (k !== "providerPins") stripped[k] = v;
+    }
+    writeFileSync(join(workDir, "config", "models.json"), `${JSON.stringify(stripped, null, 2)}\n`);
+    cleanup = () => rmSync(workDir, { recursive: true, force: true });
+
+    const runnerUrl = pathToFileURL(join(workDir, "scripts", "graph-runner.mjs")).href;
+    const runner = await import(`${runnerUrl}?nopin-${Date.now()}`); // cache-bust: a fresh module instance
+    const fetchCalls = [];
+    const fetchImpl = async (url, options) => {
+      fetchCalls.push({ url, options });
+      return okResponse(DOD_OUTPUT);
+    };
+    const generate = runner.createDefaultGenerator({
+      apiKey: "test-key",
+      runId: "run-g-nopin",
+      taskKey: "T1",
+      shadowDir: join(workDir, "shadow"),
+      fetchImpl,
+    });
+    const output = await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT } });
+    deepEq(output, DOD_OUTPUT, "parsed output returned (no-pin tree)");
+    eq(fetchCalls.length, 1, "ONE fetch call (no-pin tree)");
+    const body = JSON.parse(fetchCalls[0].options.body);
+    eq(body.model, "z-ai/glm-5.3-flash", "the model resolution is untouched by the stripped config");
+    if ("provider" in body) fail("no providerPins in config: the body must NOT carry a provider key (FOC-758 d)");
+    deepEq(body.response_format, { type: "json_schema", json_schema: { name: "plan.dod", strict: true, schema: DOD_STEP.output } }, "the rest of the body is unchanged");
+    deepEq(body.usage, { include: true }, "usage still requested");
+  } finally {
+    cleanup();
+  }
+});
+
+await test("a pin with order but a NON-BOOLEAN allowFallbacks omits allow_fallbacks from the wire (FOC-758 d)", async () => {
+  // The third pin shape, previously untested: order present, allowFallbacks
+  // not a boolean. The wire carries the order ALONE — no allow_fallbacks key —
+  // which leaves OpenRouter's default fallback behaviour in effect. This pins
+  // the existing behaviour (an omitted field is OpenRouter's default, not an
+  // explicit opt-in or opt-out).
+  const root = join(__dir, "..");
+  const workDir = join(root, ".state", `plan-dod-pinorder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  let cleanup = () => {};
+  try {
+    mkdirSync(workDir, { recursive: true });
+    cpSync(join(root, "scripts"), join(workDir, "scripts"), { recursive: true });
+    mkdirSync(join(workDir, "config"), { recursive: true });
+    for (const name of ["graph.json", "decisions.json"]) {
+      cpSync(join(root, "config", name), join(workDir, "config", name));
+    }
+    const live = JSON.parse(readFileSync(join(root, "config", "models.json"), "utf8"));
+    const pinned = { ...live, providerPins: { "plan.discovery": { order: ["wafer"], allowFallbacks: "yes" } } };
+    writeFileSync(join(workDir, "config", "models.json"), `${JSON.stringify(pinned, null, 2)}\n`);
+    cleanup = () => rmSync(workDir, { recursive: true, force: true });
+
+    const runnerUrl = pathToFileURL(join(workDir, "scripts", "graph-runner.mjs")).href;
+    const runner = await import(`${runnerUrl}?pinorder-${Date.now()}`); // cache-bust: a fresh module instance
+    const fetchCalls = [];
+    const fetchImpl = async (url, options) => {
+      fetchCalls.push({ options });
+      return okResponse(DOD_OUTPUT);
+    };
+    const generate = runner.createDefaultGenerator({
+      apiKey: "test-key",
+      runId: "run-g-pinorder",
+      taskKey: "T1",
+      shadowDir: join(workDir, "shadow"),
+      fetchImpl,
+    });
+    const output = await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT } });
+    deepEq(output, DOD_OUTPUT, "parsed output returned (order-pin tree)");
+    eq(fetchCalls.length, 1, "ONE fetch call (order-pin tree)");
+    const body = JSON.parse(fetchCalls[0].options.body);
+    deepEq(body.provider, { order: ["wafer"] }, "the order rides the wire with NO allow_fallbacks key — OpenRouter's default fallback stays in effect");
+  } finally {
+    cleanup();
+  }
+});
+
+await test("a revision payload rides the wire; without it the message carries no REVISION section (FOC-758 (a) delivery)", async () => {
+  // `regenReads` (plan-intent.mjs) attaches `revision` as CALLER COMPOSITION
+  // and keeps the declared reads at five. The message is composed from
+  // `step.reads`, so without an explicit carry the rejection feedback never
+  // reached the model and the regeneration prompt was byte-identical to the
+  // first attempt's (pinned acceptance run 5: both attempts 7936 chars,
+  // IDENTICAL). This test pins the WIRE, not the object handed to the
+  // generator - the object side was already covered and could not see this.
+  const REVISION = {
+    attempt: 2,
+    note: "previous map rejected",
+    problems: ["/interpretations/0/quote (maxLength): limit 150, actual 170"],
+    previous: { mapVersion: 1, covers: { goal: [] } },
+  };
+  const { dir, cleanup } = tempDir();
+  try {
+    const fetchCalls = [];
+    const fetchImpl = async (url, options) => {
+      fetchCalls.push({ options });
+      return okResponse(DOD_OUTPUT);
+    };
+    const generate = createDefaultGenerator({ apiKey: "test-key", runId: "run-g-rev", taskKey: "T1", shadowDir: dir, fetchImpl });
+
+    // with revision: the feedback is on the wire
+    await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT, revision: REVISION } });
+    const withRev = JSON.parse(fetchCalls[0].options.body).messages[0].content;
+    if (!withRev.includes("REVISION (the previous attempt was rejected")) fail("the REVISION section is on the wire");
+    if (!withRev.includes("/interpretations/0/quote (maxLength): limit 150, actual 170")) fail("the CONCRETE violation reaches the model");
+    if (!withRev.includes('"attempt":2')) fail("the attempt marker reaches the model");
+    if (!withRev.includes('"previous"')) fail("the rejected map reaches the model");
+    if (!withRev.includes(`- plan.intent.confirmed: ${JSON.stringify(CONFIRMED_OUTPUT)}`)) fail("the declared reads are still the inputs");
+    if (withRev.indexOf("REVISION") < withRev.indexOf("INPUTS (declared reads")) fail("REVISION rides AFTER the declared reads, never in place of them");
+
+    // without revision: no REVISION section at all - an unrevised call is unchanged
+    await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": CONFIRMED_OUTPUT } });
+    const noRev = JSON.parse(fetchCalls[1].options.body).messages[0].content;
+    if (/REVISION \(/.test(noRev)) fail("an unrevised call carries NO REVISION section");
+    if (!noRev.includes(`- plan.intent.confirmed: ${JSON.stringify(CONFIRMED_OUTPUT)}`)) fail("the declared reads are unchanged");
   } finally {
     cleanup();
   }
@@ -473,9 +625,9 @@ await test("plan.ac rides the same generator: its own registry prompt, its reads
   }
 });
 
-console.log("\nplan-dod: the default generator fails closed (no event line, ever)");
+console.log("\nplan-dod: the default generator's failure paths (FOC-758: ONE ok:false event line per failed call)");
 
-await test("an HTTP failure throws provider_error and appends NOTHING to decisions.jsonl", async () => {
+await test("an HTTP failure throws provider_error and appends ONE ok:false event line", async () => {
   const { dir, cleanup } = tempDir();
   try {
     const fetchImpl = async () => ({ ok: false, status: 500, json: async () => ({}) });
@@ -488,13 +640,28 @@ await test("an HTTP failure throws provider_error and appends NOTHING to decisio
       err = e;
     }
     eqCode(err, "provider_error", "typed provider_error");
-    eq(existsSync(join(dir, "decisions.jsonl")), false, "no event line may exist for a failed call");
+    if (!err.message.includes("HTTP 500")) fail(`the message names the status: ${err.message}`);
+
+    const lines = readLines(join(dir, "decisions.jsonl"));
+    eq(lines.length, 1, "exactly one event line for the failed call");
+    const line = lines[0];
+    eq(line.type, SHADOW_EVENT_TYPE, "type event");
+    eq(line.ok, false, "ok:false on the failure line");
+    deepEq(line.answers, null, "no fabricated answers");
+    deepEq(line.error, { code: "provider_error", message: "[G] plan.dod returned HTTP 500" }, "typed error");
+    deepEq(line.usage, null, "no usage on the wire — usage null, never invented");
+    eq(line.provider, null, "no provider claim when the body carries none");
+    eq(line.finish_reason, null, "no finish_reason when the body carries none");
+    eq(line.model, "z-ai/glm-5.3-flash", "the configured model stands in when the body names none");
+    eq(line.decisionId, "plan.dod", "decisionId = stepId");
+    eq(typeof line.eventId, "string", "event id present");
+    eq(typeof line.durationMs, "number", "latency recorded");
   } finally {
     cleanup();
   }
 });
 
-await test("a network failure throws provider_error and appends NOTHING", async () => {
+await test("a network failure throws provider_error and appends ONE ok:false event line (usage null — no body ever arrived)", async () => {
   const { dir, cleanup } = tempDir();
   try {
     const fetchImpl = async () => { throw new Error("ECONNRESET"); };
@@ -507,13 +674,18 @@ await test("a network failure throws provider_error and appends NOTHING", async 
       err = e;
     }
     eqCode(err, "provider_error", "typed provider_error");
-    eq(existsSync(join(dir, "decisions.jsonl")), false, "no event line");
+    const lines = readLines(join(dir, "decisions.jsonl"));
+    eq(lines.length, 1, "one event line");
+    eq(lines[0].ok, false, "ok:false");
+    deepEq(lines[0].error, { code: "provider_error", message: "[G] plan.dod request failed: ECONNRESET" }, "typed error");
+    deepEq(lines[0].answers, null, "no fabricated answers");
+    deepEq(lines[0].usage, null, "usage null — no body");
   } finally {
     cleanup();
   }
 });
 
-await test("a timed-out request is provider_error — never 'response is not JSON' — and appends NOTHING", async () => {
+await test("a timed-out request is provider_error — never 'response is not JSON' — with ONE ok:false event line", async () => {
   const { dir, cleanup } = tempDir();
   try {
     // The abort can fire while the body streams (measured on the eval's first
@@ -535,13 +707,17 @@ await test("a timed-out request is provider_error — never 'response is not JSO
     }
     eqCode(err, "provider_error", "a timeout is a provider failure");
     if (!err.message.includes("timed out")) fail(`the message names the timeout: ${err.message}`);
-    eq(existsSync(join(dir, "decisions.jsonl")), false, "no event line");
+    const lines = readLines(join(dir, "decisions.jsonl"));
+    eq(lines.length, 1, "one event line");
+    eq(lines[0].ok, false, "ok:false");
+    deepEq(lines[0].error, { code: "provider_error", message: "[G] plan.dod request timed out after 50ms" }, "typed error");
+    deepEq(lines[0].usage, null, "usage null — the body never arrived");
   } finally {
     cleanup();
   }
 });
 
-await test("unparseable content throws unparseable_output and appends NOTHING", async () => {
+await test("unparseable content throws unparseable_output and appends ONE ok:false event line carrying the body's usage", async () => {
   const { dir, cleanup } = tempDir();
   try {
     const fetchImpl = async () => okResponse("this is not JSON");
@@ -554,13 +730,42 @@ await test("unparseable content throws unparseable_output and appends NOTHING", 
       err = e;
     }
     eqCode(err, "unparseable_output", "typed unparseable_output");
-    eq(existsSync(join(dir, "decisions.jsonl")), false, "no event line — no fabricated answers");
+    const lines = readLines(join(dir, "decisions.jsonl"));
+    eq(lines.length, 1, "one event line");
+    const line = lines[0];
+    eq(line.ok, false, "ok:false — no fabricated answers");
+    deepEq(line.answers, null, "answers null");
+    if (!line.error.message.includes("content is not JSON")) fail(`the error names the parse failure: ${line.error.message}`);
+    deepEq(line.usage, { inputTokens: 123, outputTokens: 45, cost: 0.000045 }, "usage from the body — the failed call's cost exists (FOC-758)");
+    eq(line.provider, "z-ai", "provider from the body, also on the error path");
+    eq(line.finish_reason, "stop", "finish_reason from the body, also on the error path");
   } finally {
     cleanup();
   }
 });
 
-await test("a response with no message content throws unparseable_output and appends NOTHING", async () => {
+await test("a failed call's cost: 0 records 0, not nothing; no usage records null — never invented", async () => {
+  const { dir, cleanup } = tempDir();
+  try {
+    const zeroUsage = { input_tokens: 10, output_tokens: 5, cost: 0 };
+    const fetchImpl = async () => okResponse("not JSON", zeroUsage);
+    const generate = createDefaultGenerator({ apiKey: "test-key", runId: "r", taskKey: "T", shadowDir: dir, fetchImpl });
+    let err;
+    try {
+      await generate({ stepId: "plan.dod", step: DOD_STEP, reads: { "plan.intent.confirmed": "x" } });
+      fail("must throw");
+    } catch (e) {
+      err = e;
+    }
+    eqCode(err, "unparseable_output", "typed unparseable_output");
+    const line = readLines(join(dir, "decisions.jsonl"))[0];
+    deepEq(line.usage, { inputTokens: 10, outputTokens: 5, cost: 0 }, "cost 0 survives as 0");
+  } finally {
+    cleanup();
+  }
+});
+
+await test("a response with no message content throws unparseable_output with ONE ok:false event line (usage null — the body carries none)", async () => {
   const { dir, cleanup } = tempDir();
   try {
     const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: {} }] }) });
@@ -573,7 +778,11 @@ await test("a response with no message content throws unparseable_output and app
       err = e;
     }
     eqCode(err, "unparseable_output", "typed unparseable_output");
-    eq(existsSync(join(dir, "decisions.jsonl")), false, "no event line");
+    const lines = readLines(join(dir, "decisions.jsonl"));
+    eq(lines.length, 1, "one event line");
+    eq(lines[0].ok, false, "ok:false");
+    eq(lines[0].error.code, "unparseable_output", "typed error code");
+    deepEq(lines[0].usage, null, "usage null — the body carries no usage");
   } finally {
     cleanup();
   }

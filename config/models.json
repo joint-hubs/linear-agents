@@ -317,5 +317,11 @@
     "deepseek_flash": [
       "minimax"
     ]
+  },
+  "providerPins": {
+    "plan.discovery": {
+      "order": ["wafer", "fireworks"],
+      "allowFallbacks": false
+    }
   }
 }

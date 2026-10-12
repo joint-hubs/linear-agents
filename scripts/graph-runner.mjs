@@ -30,11 +30,14 @@
 //       call, no pricing row); tests inject a generator or an injected
 //       fetch. It rides the registry: the entry for the step id owns the
 //       prompt, and the message is composed from the RESOLVED reads — the
-//       declared inputs, never the whole run state. A successful call
+//       declared inputs, never the whole run state. Every TERMINAL call
 //       appends ONE FOC-449 event line to the run's decisions.jsonl (input
 //       as sent, mask-only scrubbed, parsed output as `answers`, usage/
-//       cost, latency); a failed or unparseable call appends NOTHING — the
-//       typed failure record in the run store is the only trace.
+//       cost, latency): a successful call with ok:true, a failed or
+//       unparseable call with ok:false, a typed `error` and whatever usage
+//       the provider returned — a failed call's cost must exist somewhere
+//       (FOC-758; the FOC-461 nit). A pre-fetch wiring failure — no provider
+//       call attempted — still appends nothing.
 //       Deliberately NOT the decision-call seam: the seam's contract is
 //       typed question/answer sets, and a [G] output (an open checklist or
 //       AC list) is not a decision — routing it through would misstate what
@@ -430,10 +433,15 @@ function defaultGateEmitter() {
 // (mask-only scrub), the parsed output as `answers`, usage/cost, latency.
 // [G] answers persist as event lines, never as outcome labels — the label
 // machinery stays [J]/gate-only (ADR-0012 D7: a [G] node never decides a
-// gate). A failed/unparseable call appends NOTHING: the step's typed failure
-// record in the run store is the only trace, and no fabricated answers are
-// ever written. Constructed with the run id it runs under — the event line
-// keys to it like every seam-driven line.
+// gate). A failed/unparseable call appends ONE event line with ok:false, a
+// typed `error` and whatever usage the provider returned — the failed call's
+// cost must exist somewhere (FOC-758; the FOC-461 nit: a failed plan.intent
+// wrote no event row, so no cost existed anywhere for it). No fabricated
+// answers are ever written — a failure line carries `answers: null`. A
+// pre-fetch wiring failure (no key, unknown stepId, unreadable models.json)
+// still appends NOTHING: no provider call was attempted, so there is no
+// usage and no latency to observe. Constructed with the run id it runs
+// under — the event line keys to it like every seam-driven line.
 
 // Node's abort timeout rejects with an AbortError (or TimeoutError through
 // some adapters); either way the call never completed — a provider failure,
@@ -470,6 +478,32 @@ export function createDefaultGenerator({
     if (!model) {
       throw new TypedError("provider_error", `config/models.json has no ids row for routing.plan.discovery ("${scrub(String(alias))}")`);
     }
+    // FOC-758 (d): a provider pin for this routing entry, when configured,
+    // rides the request as OpenRouter's wire `provider` field. Config stores
+    // camelCase `allowFallbacks`; only the wire boundary maps it to
+    // `allow_fallbacks`. With no pin (or a pin without a usable `order`) the
+    // request body stays byte-identical to before — no `provider` key at all.
+    const pin = models.providerPins?.["plan.discovery"];
+    const pinOrder = Array.isArray(pin?.order) ? pin.order.filter((p) => typeof p === "string" && p) : null;
+    const providerField = pinOrder && pinOrder.length
+      ? {
+          order: [...pinOrder],
+          ...(typeof pin.allowFallbacks === "boolean" ? { allow_fallbacks: pin.allowFallbacks } : {}),
+        }
+      : null;
+
+    // FOC-758 (a) delivery. `regenReads` (plan-intent.mjs) attaches `revision`
+    // as CALLER COMPOSITION and deliberately keeps the declared reads at five
+    // (its own docstring: the FOC-474 precedent, and `inbox.entry` stays
+    // verbatim so our feedback is never quote-able anchor text). This message
+    // is composed from `step.reads`, so without an explicit carry the rejection
+    // feedback never reached the model and the regeneration prompt was
+    // byte-identical to the first attempt's (pinned acceptance run 5: both
+    // attempts 7936 chars, IDENTICAL). `revision` is the one caller-composition
+    // field the [G] path carries; it rides AFTER the declared reads and only
+    // when present, so an unrevised call's message - and its FOC-449 input
+    // hash - is byte-identical to before.
+    const revision = reads?.revision ?? null;
 
     const message = [
       entry.prompt,
@@ -478,7 +512,68 @@ export function createDefaultGenerator({
       "",
       "INPUTS (declared reads, in order):",
       ...step.reads.map((r) => `- ${r}: ${JSON.stringify(reads[r] ?? null)}`),
+      ...(revision
+        ? [
+            "",
+            "REVISION (the previous attempt was rejected - fix these problems and produce a different map):",
+            `- revision: ${JSON.stringify(revision)}`,
+          ]
+        : []),
     ].join("\n");
+
+    // The FOC-449 record's input and hash are the request's own — identical
+    // whichever way the call ends. Input AS SENT, mask-only scrubbed (no
+    // error-text cap — the cap bounds an error path, not a record whose
+    // point is the complete input); questions stays null because a [G]
+    // generation sends no question set.
+    const note = "state masked via mcp/scrub.mjs key patterns (variant: mask-only, no error-text cap); questions null — a [G] generation sends no question set";
+    let input;
+    try {
+      input = { state: scrubMask(message), redacted: false, note };
+    } catch {
+      input = { state: "[REDACTED]", redacted: true, note: `${note}; unserializable input redacted in full` };
+    }
+
+    // FOC-758: ONE event line per TERMINAL provider call — success or
+    // failure alike. A failed call writes ok:false, a typed `error`,
+    // `answers: null` (no fabricated answers) and whatever usage, provider
+    // and finish_reason the wire carried — null when there was no body to
+    // read, never invented. The hash mirrors inputsHash's join key (model +
+    // state + questions) with the [G] call's own resolved model in place of
+    // the pinned one — inputsHash hardcodes JEV_MODEL, which is not what
+    // served here. Best-effort, like every shadow write.
+    const appendEventLine = ({ ok, output = null, error = null, body = null }) => {
+      appendShadow(shadowDir, {
+        ts: now(),
+        runId: runId ?? null,
+        hash: createHash("sha256").update(canonicalJson({ model, questions: null, state: message })).digest("hex"),
+        pinnedModel: null,
+        model: typeof body?.model === "string" && body.model ? body.model : model,
+        tier: "cheap",
+        mode: "live",
+        ok,
+        answers: ok ? output : null,
+        confidence: null,
+        formatConfidence: null,
+        usage: usageOf(body?.usage),
+        responseId: typeof body?.id === "string" ? body.id : null,
+        provider: typeof body?.provider === "string" && body.provider ? body.provider : null,
+        // `finish_reason` is deliberately snake_case in an otherwise camelCase
+        // registry (durationMs, inputTokens): the column echoes OpenRouter's
+        // wire field verbatim, so a reader joins the line against the
+        // provider's own response shape without a mapping (FOC-758 (c)).
+        finish_reason: typeof body?.choices?.[0]?.finish_reason === "string" ? body.choices[0].finish_reason : null,
+        error: ok ? null : error,
+        decisionId: stepId,
+        criteriaVersion: entry.criteriaVersion,
+        type: SHADOW_EVENT_TYPE,
+        eventId: shadowDir ? randomUUID() : null,
+        input: { state: input.state, questions: null },
+        scrub: { variant: "mask-only", redacted: input.redacted, note: input.note },
+        taskKey: taskKey ?? null,
+        durationMs: Date.now() - startedAt,
+      });
+    };
 
     let res;
     try {
@@ -490,14 +585,30 @@ export function createDefaultGenerator({
           messages: [{ role: "user", content: message }],
           response_format: { type: "json_schema", json_schema: { name: stepId, strict: true, schema: step.output } },
           usage: { include: true },
+          ...(providerField ? { provider: providerField } : {}),
         }),
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
-      if (isAbort(err)) throw new TypedError("provider_error", `[G] ${stepId} request timed out after ${timeoutMs}ms`);
+      if (isAbort(err)) {
+        appendEventLine({ ok: false, error: { code: "provider_error", message: `[G] ${stepId} request timed out after ${timeoutMs}ms` } });
+        throw new TypedError("provider_error", `[G] ${stepId} request timed out after ${timeoutMs}ms`);
+      }
+      appendEventLine({ ok: false, error: { code: "provider_error", message: `[G] ${stepId} request failed: ${scrub(err?.message || "network error")}` } });
       throw new TypedError("provider_error", `[G] ${stepId} request failed: ${scrub(err?.message || "network error")}`);
     }
-    if (!res.ok) throw new TypedError("provider_error", `[G] ${stepId} returned HTTP ${res.status}`);
+    if (!res.ok) {
+      // The error body is read best-effort: a provider that reports usage on
+      // a failure still leaves a cost on the event line (FOC-758).
+      let errBody = null;
+      try {
+        errBody = await res.json();
+      } catch {
+        errBody = null;
+      }
+      appendEventLine({ ok: false, error: { code: "provider_error", message: `[G] ${stepId} returned HTTP ${res.status}` }, body: errBody });
+      throw new TypedError("provider_error", `[G] ${stepId} returned HTTP ${res.status}`);
+    }
 
     let body;
     try {
@@ -506,61 +617,27 @@ export function createDefaultGenerator({
       // The abort can fire while the body streams — a timed-out read is a
       // provider failure (measured on the eval's first pass: FOC-443 took
       // 119.9s), never a claim that the response "was not JSON".
-      if (isAbort(err)) throw new TypedError("provider_error", `[G] ${stepId} request timed out after ${timeoutMs}ms`);
+      if (isAbort(err)) {
+        appendEventLine({ ok: false, error: { code: "provider_error", message: `[G] ${stepId} request timed out after ${timeoutMs}ms` } });
+        throw new TypedError("provider_error", `[G] ${stepId} request timed out after ${timeoutMs}ms`);
+      }
+      appendEventLine({ ok: false, error: { code: "unparseable_output", message: `[G] ${stepId} response is not JSON: ${scrub(err.message)}` } });
       throw new TypedError("unparseable_output", `[G] ${stepId} response is not JSON: ${scrub(err.message)}`);
     }
     const content = body?.choices?.[0]?.message?.content;
     if (typeof content !== "string") {
+      appendEventLine({ ok: false, error: { code: "unparseable_output", message: `[G] ${stepId} response carries no message content` }, body });
       throw new TypedError("unparseable_output", `[G] ${stepId} response carries no message content`);
     }
     let output;
     try {
       output = JSON.parse(content);
     } catch (err) {
+      appendEventLine({ ok: false, error: { code: "unparseable_output", message: `[G] ${stepId} content is not JSON: ${scrub(err.message)}` }, body });
       throw new TypedError("unparseable_output", `[G] ${stepId} content is not JSON: ${scrub(err.message)}`);
     }
 
-    // Success ⇒ the FOC-449 event line. Input AS SENT, mask-only scrubbed
-    // (no error-text cap — the cap bounds an error path, not a record whose
-    // point is the complete input); questions stays null because a [G]
-    // generation sends no question set. The hash mirrors inputsHash's join
-    // key (model + state + questions) with the [G] call's own resolved model
-    // in place of the pinned one — inputsHash hardcodes JEV_MODEL, which is
-    // not what served here. Best-effort, like every shadow write.
-    const usage = usageOf(body?.usage);
-    const servedModel = typeof body?.model === "string" && body.model ? body.model : model;
-    const eventId = shadowDir ? randomUUID() : null;
-    const note = "state masked via mcp/scrub.mjs key patterns (variant: mask-only, no error-text cap); questions null — a [G] generation sends no question set";
-    let input;
-    try {
-      input = { state: scrubMask(message), redacted: false, note };
-    } catch {
-      input = { state: "[REDACTED]", redacted: true, note: `${note}; unserializable input redacted in full` };
-    }
-    appendShadow(shadowDir, {
-      ts: now(),
-      runId: runId ?? null,
-      hash: createHash("sha256").update(canonicalJson({ model, questions: null, state: message })).digest("hex"),
-      pinnedModel: null,
-      model: servedModel,
-      tier: "cheap",
-      mode: "live",
-      ok: true,
-      answers: output,
-      confidence: null,
-      formatConfidence: null,
-      usage,
-      responseId: typeof body?.id === "string" ? body.id : null,
-      error: null,
-      decisionId: stepId,
-      criteriaVersion: entry.criteriaVersion,
-      type: SHADOW_EVENT_TYPE,
-      eventId,
-      input: { state: input.state, questions: null },
-      scrub: { variant: "mask-only", redacted: input.redacted, note: input.note },
-      taskKey: taskKey ?? null,
-      durationMs: Date.now() - startedAt,
-    });
+    appendEventLine({ ok: true, output, body });
     return output;
   };
 }
@@ -621,7 +698,11 @@ export function createGraphRunner({
     order.push(...Object.keys(steps));
   }
 
-  const ajv = new Ajv();
+  // FOC-758: allErrors so ONE validation pass reports EVERY violation — the
+  // regeneration's problems must name every field to shorten, not only the
+  // first one ajv stops at. validate(raw) stays a plain boolean everywhere;
+  // only the compiled validator's `.errors` gains entries.
+  const ajv = new Ajv({ allErrors: true });
   const outputValidate = new Map();
   for (const [id, step] of Object.entries(steps)) {
     outputValidate.set(id, ajv.compile(step.output ?? { type: "object" }));
@@ -872,7 +953,13 @@ export function createGraphRunner({
           step,
           reads,
           generator,
-          validate: (raw) => outputValidate.get(stepId)(raw),
+          // FOC-758 blocker: hand over the COMPILED validator itself. An arrow
+          // wrapper does not carry Ajv `.errors`, so schemaProblems
+          // (plan-intent.mjs) saw `undefined` and every concrete-violation
+          // rejection collapsed to the generic string — on this, the
+          // production wiring. Ajv rewrites the compiled function's own
+          // `.errors` on every call, which is exactly what the node reads.
+          validate: outputValidate.get(stepId),
           ...intentStores(records),
         });
       } catch (err) {
