@@ -261,6 +261,21 @@ with Debian 12 on `e2-standard-4` (4 vCPU / 16 GB) and a 100 GB disk.
    PowerShell script there and swallows a bare `--`. On Windows the tunnel runs
    in a PuTTY window — leave it open.
 
+Sizing, measured on `fenix-vm` on 2026-10-12 (one Supervisor, one test-squad
+child on a real ticket — a single sample, not a benchmark):
+
+| | CPU (4 vCPU) | memory | disk / network |
+|---|---|---|---|
+| idle (Supervisor waiting) | ~1 % | ~1.2 GB used (Supervisor `claude` ~380 MB, API ~100 MB) | writes ~3 MB/min |
+| one child at work (22 min) | peaks ~38 % (≈1.5 vCPU) | ~2–3 GB above idle, page cache included | ~530 MB downloaded (toolchains), ~2.9 GB written |
+| first image build | peaks ~41 % | up to ~10 GB incl. page cache | ~1 GB downloaded |
+
+Disk after the first ticket: 9.7 GB — image 2 GB, Docker build cache 3.8 GB
+(`docker builder prune` frees it), agent toolchains in the container 1.8 GB,
+data volume 0.3 GB. Recommended: 4 vCPU, 16 GB RAM, 100 GB disk (what the
+measurement ran on). One child at a time — Fenix's default — would likely fit
+in 2 vCPU / 8 GB / 50 GB; that is not verified yet.
+
 The VM runs (and costs) until you stop it:
 `gcloud compute instances stop fenix-vm --zone=europe-central2-a`. Data stays on
 the disk; after `start` the stack comes back by itself.
