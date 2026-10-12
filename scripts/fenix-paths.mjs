@@ -49,6 +49,13 @@ export function supervisorSessionPath(env = process.env, platform = process.plat
   return join(dataHome(env, platform), "supervisor", "session.json");
 }
 
+// The Supervisor's current-run pointer (FOC-807) — the run id the live
+// supervisor session belongs to, written by supervisor-current-run.mjs next to
+// session.json so both containers read the same truth from the shared volume.
+export function supervisorCurrentRunPath(env = process.env, platform = process.platform) {
+  return join(dataHome(env, platform), "supervisor", "current-run.json");
+}
+
 // The host's bearer token — written by `supervisor-host.mjs serve` at start
 // (FOC-783) and re-read per request by the API container: a supervisor
 // restart rotates it, so nothing may cache it.
