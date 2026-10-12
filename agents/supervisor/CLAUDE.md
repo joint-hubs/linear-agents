@@ -136,6 +136,9 @@ node $LA_ROOT/scripts/supervisor-gate.mjs defer --hold <holdId> --until <ISO tim
 - **A hold that is `open` and not yet presented blocks the turn end** — the guard counts it as owed work, exactly like a pending gate. Once presented, an answer closes it; `defer --until` quiets the guard until the timestamp arrives, then it resurfaces. An un-presented hold blocks even when deferred — the presentation itself is still owed.
 - **A run is not complete while a hold is open.** The completion check refuses and names the open holds; a deferral does not lift that. This is a RUN rule, deliberately not a blanket turn-end rule — a hold deferred 30 days must not wedge every turn end forever.
 
+### 5c. Dashboard (Cockpit)
+A chat message starting with **`[dashboard]`** is Mateusz acting in the Cockpit, not you being told something new. `[dashboard] Mateusz answered <gate> …` means his verbatim answer is **already recorded in the gate** (`answeredBy: dashboard`) — deliver it (`supervisor-followup.mjs --gate`); do not ask again and do not re-record it. The same for holds: the answer is in the hold record — **act on it** (a hold answered before you presented it counts as presented). Any other chat message is just Mateusz typing.
+
 ### 6. Integrate and route on
 On a child turn ending: read the result, decide the next node, spawn it. REVIEW fail → **record the verdict first** (`supervisor-verdict.mjs record`), then resume the **same dev session** with the findings (`--review-loop`), then re-review. `--review-loop` refuses without a recorded verdict: there is nothing to hand back and nothing to compare.
 
