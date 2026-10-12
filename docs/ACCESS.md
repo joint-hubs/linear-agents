@@ -36,6 +36,8 @@ w komentarzach Linear, nigdy w kodzie ani logach. Domyślny provider `openrouter
 `OPENROUTER_API_KEY`. Dodanie nowego providera = nowy wpis `authEnv` w `.env` + wpis profilu w
 `config/models.json::providers`. PRD: `docs/ui/provider-config.md`, ADR: `docs/adr/0010-provider-profiles.md`.
 
+- **Fenix w Dockerze (1.0.0):** klucze w `.fenix/secrets/` (`openrouter_api_key`, `linear_api_key`, `github_token` — owner-only, gitignored, nigdy w obrazie ani w logach), montowane jako Compose secrets pod `/run/secrets/`. Wpis/podmiana: `fenix keys`; po rotacji `fenix stop` + `fenix up` (sekrety czytane przy starcie kontenera).
+
 ---
 
 ## Onboarding nowego workspace'a
@@ -111,6 +113,12 @@ Zakładka **Konfiguracja** (`localhost:7331/squad-config`) edytuje modele per sk
 
 - **Cache:** `%LOCALAPPDATA%\linear-agents\telemetry-dev-381\analysis-cache.sqlite` (override: `LA_ANALYSIS_CACHE`) — dysposylna pochodna store'a; odbudowa przyciskiem **Refresh** w UI (rebuild chodzi jako child process).
 - **Zasada twarda:** dev server **nigdy** nie wskazuje na live store (`%LOCALAPPDATA%\linear-agents\telemetry\`) — tylko na kopię dev (`telemetry-dev-381`). Live store otwiera dopiero okno produkcyjne (merge + rewrite `--apply --live`), na wyraźne „go" Mateusza.
+
+### Fenix w Dockerze (1.0.0)
+
+- **Dashboard/API:** `http://localhost:4600` — publikowany tylko na `127.0.0.1` hosta (port kontenera 7331). Inny port hosta: env `FENIX_PORT` (np. `FENIX_PORT=4601 ./fenix up`).
+- **Kontenery:** `fenix-api` (dashboard + telemetry API) i `fenix-supervisor` (bezczynny; `fenix attach` startuje w nim Supervisora — Claude Code).
+- **Dane:** wolumen `fenix_fenix-data` zamontowany w `/data` — telemetry DB `/data/telemetry/telemetry.sqlite`, stan Supervisora `/data/state/supervisor`, workspaces `/data/workspaces`.
 
 ---
 

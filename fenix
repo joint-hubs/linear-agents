@@ -1,0 +1,356 @@
+#!/bin/sh
+# Fenix one-command launcher (POSIX sh).
+set -eu
+cd "$(dirname "$0")"
+
+# Git Bash (MSYS) rewrites /opt/... arguments into Windows paths before they
+# reach docker.exe; container paths must pass through untouched. No-op elsewhere.
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+
+PORT="${FENIX_PORT:-4600}"
+API_SERVICE="fenix-api"
+ENTRYPOINT="/opt/fenix/docker/entrypoint.sh"
+SECRET_DIR=".fenix/secrets"
+ENV_FILE=".fenix/fenix.env"
+
+usage() {
+  cat <<'EOF'
+Fenix launcher.
+
+Usage: fenix [command]
+
+  up               preflight, set up missing keys, build and start the stack
+  stop             stop the stack
+  down             stop and remove containers (the data volume is kept)
+  logs [service]   follow logs (default: all services)
+  doctor           host preflight plus in-container diagnostics
+  keys             run the key wizard (enter or replace API keys)
+  attach           attach to the fenix-supervisor container
+  shell [service]  open a shell in a service (default: fenix-supervisor)
+  update           git pull --ff-only, rebuild with fresh base images, restart
+
+Exit codes: 0 ok | 2 usage | 3 preflight failed | 4 health timeout | 5 key rejected
+EOF
+}
+
+# --- preflight ---------------------------------------------------------------
+
+pf_ok()        { printf 'OK  %s\n' "$1"; }
+pf_fail_line() { printf 'FAIL %s — %s — fix: %s\n' "$1" "$2" "$3"; }
+pf_warn()      { printf 'WARN %s — %s\n' "$1" "$2"; }
+
+preflight() {
+  # $1 = strict (first FAIL exits 3) | full (report every check, return 1 on any FAIL)
+  mode="$1"
+  pf_fail=0
+
+  if command -v docker >/dev/null 2>&1; then
+    pf_ok "docker on PATH"
+  else
+    pf_fail_line "docker" "docker not found on PATH" "install Docker Desktop (or add docker to PATH)"
+    if [ "$mode" = "strict" ]; then exit 3; fi
+    pf_fail=$((pf_fail + 1))
+  fi
+
+  if docker info >/dev/null 2>&1; then
+    pf_ok "docker daemon running"
+  else
+    pf_fail_line "docker daemon" "cannot reach the Docker daemon" "start Docker Desktop and wait until it is running"
+    if [ "$mode" = "strict" ]; then exit 3; fi
+    pf_fail=$((pf_fail + 1))
+  fi
+
+  if docker compose version >/dev/null 2>&1; then
+    pf_ok "docker compose available"
+  else
+    pf_fail_line "docker compose" "compose plugin not available" "update Docker (the compose plugin ships with it)"
+    if [ "$mode" = "strict" ]; then exit 3; fi
+    pf_fail=$((pf_fail + 1))
+  fi
+
+  # Free disk >= 10 GB in the repo directory (WARN, not FAIL, if df fails).
+  avail_kb=$(df -Pk . 2>/dev/null | awk 'NR == 2 { print $4 }')
+  if [ -n "$avail_kb" ]; then
+    if awk -v a="$avail_kb" 'BEGIN { exit !(a >= 10485760) }'; then
+      pf_ok "free disk >= 10 GB"
+    else
+      pf_fail_line "free disk" "$(awk -v a="$avail_kb" 'BEGIN { printf "%.1f", a / 1048576 }') GB free (need 10 GB)" "free up disk space"
+      if [ "$mode" = "strict" ]; then exit 3; fi
+      pf_fail=$((pf_fail + 1))
+    fi
+  else
+    pf_warn "free disk" "could not read free space (df failed) — continuing"
+  fi
+
+  # Docker memory >= 4 GB (WARN, not FAIL, if lower or unreadable).
+  mem=$(docker info --format '{{.MemTotal}}' 2>/dev/null) || mem=""
+  if [ -n "$mem" ]; then
+    if awk -v m="$mem" 'BEGIN { exit !(m >= 4294967296) }'; then
+      pf_ok "docker memory >= 4 GB"
+    else
+      pf_warn "docker memory" "$(awk -v m="$mem" 'BEGIN { printf "%.1f", m / 1073741824 }') GB — below 4 GB, the build may fail"
+    fi
+  else
+    pf_warn "docker memory" "could not read MemTotal from docker info — continuing"
+  fi
+
+  if [ "$pf_fail" -gt 0 ]; then
+    return 1
+  fi
+  return 0
+}
+
+# --- key wizard --------------------------------------------------------------
+
+restore_tty() {
+  stty echo 2>/dev/null || true
+}
+
+read_secret() {
+  # $1 = prompt text; result in REPLY_SECRET (never echoed).
+  k=""
+  printf '%s' "$1"
+  if [ -t 0 ]; then
+    stty -echo 2>/dev/null || true
+  fi
+  IFS= read -r k || true
+  if [ -t 0 ]; then
+    stty echo 2>/dev/null || true
+  fi
+  printf '\n'
+  REPLY_SECRET="$k"
+}
+
+validate_key() {
+  # $1 = kind, $2 = key; prints the HTTP status code. Key is passed as a
+  # header argument only, never in a URL, and is never printed.
+  case "$1" in
+    openrouter)
+      curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $2" https://openrouter.ai/api/v1/key
+      ;;
+    linear)
+      curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" -H "Authorization: $2" --data '{"query":"{ viewer { id } }"}' https://api.linear.app/graphql
+      ;;
+    github)
+      curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $2" https://api.github.com/user
+      ;;
+  esac
+}
+
+get_one_key() {
+  # $1 = display name, $2 = kind, $3 = target file. Max 3 tries, then exit 5.
+  name="$1"
+  kind="$2"
+  target="$3"
+
+  if [ -f "$target" ] && [ -s "$target" ]; then
+    printf '%s already exists (%s).\nOverwrite? [y/N] ' "$name" "$target"
+    ans=""
+    IFS= read -r ans || true
+    case "$ans" in
+      y|Y|yes|Yes|YES) ;;
+      *)
+        printf 'Keeping the existing %s.\n' "$name"
+        return 0
+        ;;
+    esac
+  fi
+
+  tries=0
+  while [ "$tries" -lt 3 ]; do
+    tries=$((tries + 1))
+    read_secret "Enter $name [try $tries/3]: "
+    k="$REPLY_SECRET"
+    if [ -z "$k" ]; then
+      printf 'FAIL %s key empty — try again.\n' "$name"
+      continue
+    fi
+    if command -v curl >/dev/null 2>&1; then
+      code=$(validate_key "$kind" "$k")
+      if [ "$code" != "200" ]; then
+        printf 'FAIL %s key rejected (HTTP %s)\n' "$name" "$code"
+        continue
+      fi
+      printf 'OK  %s key validated.\n' "$name"
+    else
+      printf 'WARN cannot validate (curl missing)\n'
+    fi
+    printf '%s' "$k" > "$target"
+    chmod 600 "$target" 2>/dev/null || true
+    unset k
+    return 0
+  done
+
+  unset k
+  printf 'Giving up on %s after 3 attempts.\n' "$name"
+  exit 5
+}
+
+write_env_line() {
+  # Replace (or append) the LINEAR_TEAM_KEY line in fenix.env, keeping other lines.
+  line="$1"
+  tmp="$ENV_FILE.tmp"
+  if [ -f "$ENV_FILE" ]; then
+    awk -v new="$line" '
+      /^LINEAR_TEAM_KEY=/ { if (!done) { print new; done = 1 } next }
+      { print }
+      END { if (!done) print new }
+    ' "$ENV_FILE" > "$tmp"
+    mv "$tmp" "$ENV_FILE"
+  else
+    printf '%s\n' "$line" > "$ENV_FILE"
+  fi
+}
+
+key_wizard() {
+  mkdir -p "$SECRET_DIR"
+  umask 077
+  trap restore_tty EXIT
+  trap 'restore_tty; exit 130' INT
+  trap 'restore_tty; exit 143' TERM
+
+  get_one_key "OpenRouter API key" openrouter "$SECRET_DIR/openrouter_api_key"
+  get_one_key "Linear API key" linear "$SECRET_DIR/linear_api_key"
+  get_one_key "GitHub token" github "$SECRET_DIR/github_token"
+
+  team=""
+  while :; do
+    printf 'Enter the Linear team key (e.g. FOC): '
+    if ! IFS= read -r team; then
+      printf '\nNo input — aborting.\n'
+      exit 1
+    fi
+    if [ -n "$team" ]; then
+      break
+    fi
+    printf 'Team key must not be empty.\n'
+  done
+  write_env_line "LINEAR_TEAM_KEY=$team"
+
+  unset k REPLY_SECRET team ans
+  printf 'Keys saved in %s; config in %s.\n' "$SECRET_DIR" "$ENV_FILE"
+}
+
+keys_ok() {
+  for f in "$SECRET_DIR/openrouter_api_key" "$SECRET_DIR/linear_api_key" "$SECRET_DIR/github_token"; do
+    if [ ! -s "$f" ]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+# --- commands ----------------------------------------------------------------
+
+wait_healthy() {
+  waited=0
+  while [ "$waited" -lt 180 ]; do
+    cid=$(docker compose ps -q fenix-api 2>/dev/null) || cid=""
+    if [ -n "$cid" ]; then
+      st=$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null) || st=""
+      if [ "$st" = "healthy" ]; then
+        return 0
+      fi
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+  return 1
+}
+
+cmd_up() {
+  preflight strict
+
+  if ! keys_ok; then
+    printf 'Some keys are missing or empty — running the key wizard.\n'
+    key_wizard
+  fi
+
+  printf 'Building and starting the stack...\n'
+  docker compose up -d --build
+
+  if ! wait_healthy; then
+    printf 'FAIL fenix-api health — not healthy after 180 s — fix: fenix logs fenix-api\n'
+    exit 4
+  fi
+
+  printf 'Fenix is up: http://localhost:%s\n' "$PORT"
+  url="http://localhost:$PORT"
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" >/dev/null 2>&1 || true
+  elif command -v open >/dev/null 2>&1; then
+    open "$url" >/dev/null 2>&1 || true
+  elif command -v cmd.exe >/dev/null 2>&1; then
+    cmd.exe /c start "" "$url" >/dev/null 2>&1 || true
+  fi
+}
+
+cmd_doctor() {
+  rc=0
+  if ! preflight full; then
+    rc=1
+  fi
+  cid=$(docker compose ps -q fenix-api 2>/dev/null) || cid=""
+  if [ -n "$cid" ]; then
+    if ! docker compose exec -T fenix-api "$ENTRYPOINT" doctor; then
+      rc=1
+    fi
+  else
+    printf 'WARN fenix-api not running — run: fenix up\n'
+  fi
+  exit "$rc"
+}
+
+# --- dispatch ----------------------------------------------------------------
+
+cmd="${1:-}"
+if [ $# -gt 0 ]; then
+  shift
+fi
+
+case "$cmd" in
+  ""|help|-h|--help)
+    usage
+    exit 0
+    ;;
+  up)
+    cmd_up
+    ;;
+  stop)
+    exec docker compose stop
+    ;;
+  down)
+    printf 'Stopping and removing containers (the data volume is kept).\n'
+    exec docker compose down
+    ;;
+  logs)
+    if [ $# -ge 1 ]; then
+      exec docker compose logs -f --tail 200 "$1"
+    else
+      exec docker compose logs -f --tail 200
+    fi
+    ;;
+  keys)
+    key_wizard
+    ;;
+  doctor)
+    cmd_doctor
+    ;;
+  attach)
+    exec docker compose exec fenix-supervisor "$ENTRYPOINT" supervisor
+    ;;
+  shell)
+    svc="${1:-fenix-supervisor}"
+    exec docker compose exec "$svc" "$ENTRYPOINT" shell
+    ;;
+  update)
+    git pull --ff-only
+    docker compose build --pull
+    exec docker compose up -d
+    ;;
+  *)
+    printf 'Unknown command: %s\n\n' "$cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

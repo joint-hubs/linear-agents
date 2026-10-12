@@ -1,0 +1,23 @@
+# Excluded from the Docker build context (image deps install fresh, state is in /data).
+.git
+**/node_modules
+ui/dist
+.state
+.codegraph
+.cache
+.fenix
+.env
+.env.*
+*.log
+.claude/worktrees
+agents/*/projects
+agents/*/todos
+agents/*/shell-snapshots
+agents/*/statsig
+agents/*/plans
+la-wt
+tmp
+coverage
+experiments
+**/__pycache__
+docs/benchmark/evidence
