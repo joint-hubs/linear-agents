@@ -3,17 +3,100 @@
 // composer, the wake-backlog call to action and a confirmed "New session".
 //
 // Chat is the default view (spec decision 1). Both views run in Docker; chat
-// is additionally disabled while a dialog is open (needs-input) — the terminal
-// is exactly what answers it, so only host problems disable the terminal
+// is additionally disabled while the Supervisor waits on an ask or a dialog
+// (needs-input) — the AskCard / DialogCard above the tabs answers it from the
+// dashboard (FOC-810), so only host problems disable the terminal
 // (terminalDisabledReason).
 
-import { useState } from 'react';
-import { postSupervisorSession, postSupervisorWake } from '../../api';
-import { chatDisabledReason, terminalDisabledReason, wakeBanner } from '../../cockpitModel';
+import { useEffect, useRef, useState } from 'react';
+import { postSupervisorAsk, postSupervisorDialog, postSupervisorSession, postSupervisorWake } from '../../api';
+import { chatDisabledReason, terminalDisabledReason, answerResultText, wakeBanner } from '../../cockpitModel';
+import AskCard from './AskCard';
+import DialogCard from './DialogCard';
 import ChatView from './ChatView';
 import TerminalView from './TerminalView';
 
 const QUICK_PROMPTS = ['Start a ticket…', 'Status of all children', 'What is blocked?'];
+
+// useSupervisorAnswers({ onRefresh, identity }) — the one submit path for the
+// Supervisor's asks and dialogs (FOC-810), shared by the Supervisor panel and
+// the Needs-you inbox (which imports it from here). Wraps POST
+// /api/supervisor/ask and /api/supervisor/dialog: busy/error/sent state plus
+// the host's success body (`result`, so the banner can be honest — see
+// answerResultText), a 409 (ask-changed / dialog-changed) becomes the fixed
+// "changed — refreshed" sentence — or, when the host says partial: true
+// (keys already went through before the drift), the honest partial sentence —
+// and triggers the snapshot refresh, and every success refreshes too (the
+// next snapshot drops the answered card). onRefresh is optional — the
+// Cockpit's own 5 s poll refreshes regardless. `identity` is what the answer
+// state is about (the ask's toolUseId or the dialog's id, prefixed); when a
+// DIFFERENT one appears the state resets — a stale "Answer sent." must not
+// sit under the next dialog or question. Nothing shown (identity null)
+// keeps the banner: it is the record of the last answer once its card is
+// gone.
+export function useSupervisorAnswers({ onRefresh, identity } = {}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [sent, setSent] = useState(false);
+  const [result, setResult] = useState(null); // the host's success body
+
+  const shownRef = useRef(identity);
+  useEffect(() => {
+    const prev = shownRef.current;
+    shownRef.current = identity;
+    if (identity != null && identity !== prev) {
+      setError(null);
+      setSent(false);
+      setResult(null);
+    }
+  }, [identity]);
+
+  const run = async (fn) => {
+    setBusy(true);
+    setError(null);
+    setSent(false);
+    setResult(null);
+    try {
+      const res = await fn();
+      setResult(res);
+      setSent(true);
+      if (onRefresh) onRefresh();
+      return res;
+    } catch (e) {
+      if (e.status === 409) {
+        setError(
+          e.data?.error === 'dialog-changed' && e.data?.partial
+            ? 'The dialog changed while answering — some answers may be applied; check the Terminal.'
+            : 'The dialog changed — refreshed.',
+        );
+        if (onRefresh) onRefresh();
+      } else {
+        setError(e.data?.error || e.message || String(e));
+      }
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitAsk = (toolUseId, answers) => run(() => postSupervisorAsk({ toolUseId, answers }));
+  const submitDialog = (id, choice, note) => run(() => postSupervisorDialog({ id, choice, note }));
+  return { busy, error, sent, result, submitAsk, submitDialog };
+}
+
+// The success banner for an answer: honest about what actually happened —
+// a green "Answer sent." only when the host really closed it cleanly
+// (FOC-810); a caveat (still on screen, some answers already applied) is
+// a warning banner, not a green one.
+export function AnswerSentBanner({ result }) {
+  const text = answerResultText(result);
+  const ok = text === 'Answer sent.' || text.startsWith('Sent —');
+  return (
+    <div className={ok ? 'banner banner-ok' : 'banner banner-warn'} style={{ marginTop: 8 }}>
+      {text}
+    </div>
+  );
+}
 
 // Supervisor state → chip tone. idle ok, busy running, needs-input waiting,
 // everything else (ended/absent/unknown/null) neutral.
@@ -26,7 +109,7 @@ const STATE_CHIP = {
   unknown: { label: 'unknown', tone: 'neutral' },
 };
 
-export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, onDraftChange }) {
+export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, onDraftChange, onRefresh }) {
   const [wakeBusy, setWakeBusy] = useState(false);
   const [wakeStatus, setWakeStatus] = useState(null); // { kind, text }
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -37,6 +120,19 @@ export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, o
   const disabledReason = chatDisabledReason(sup);
   const terminalReason = terminalDisabledReason(sup);
   const wakeInfo = wakeBanner(sup);
+  // The ask card wins when both are present (the ask is what blocks the
+  // session); ask/ask-review dialogs are shown in the inbox, not here.
+  const dialogForCard =
+    sup.dialog && sup.dialog.kind !== 'ask' && sup.dialog.kind !== 'ask-review' ? sup.dialog : null;
+  // What the shared answer state is about — the pending ask's toolUseId or
+  // the dialog's id. useSupervisorAnswers resets its banner/error when a
+  // different one appears.
+  const answerIdentity = sup.pendingAsk
+    ? 'ask:' + sup.pendingAsk.toolUseId
+    : dialogForCard
+      ? 'dialog:' + dialogForCard.id
+      : null;
+  const answers = useSupervisorAnswers({ onRefresh, identity: answerIdentity });
 
   const wake = async () => {
     setWakeBusy(true);
@@ -113,6 +209,29 @@ export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, o
             </button>
           )}
         </div>
+      )}
+
+      {answers.sent && <AnswerSentBanner result={answers.result} />}
+
+      {sup.pendingAsk ? (
+        <AskCard
+          key={sup.pendingAsk.toolUseId}
+          ask={sup.pendingAsk}
+          busy={answers.busy}
+          error={answers.error}
+          onSubmit={(ans) => answers.submitAsk(sup.pendingAsk.toolUseId, ans)}
+        />
+      ) : (
+        dialogForCard && (
+          <DialogCard
+            key={dialogForCard.id}
+            dialog={dialogForCard}
+            busy={answers.busy}
+            error={answers.error}
+            onChoose={(choice, note) => answers.submitDialog(dialogForCard.id, choice, note)}
+            onOpenTerminal={() => onTabChange('terminal')}
+          />
+        )
       )}
 
       <div className="ck-tabs" role="tablist" aria-label="Supervisor views">

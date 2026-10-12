@@ -460,9 +460,26 @@ export async function getConversation({ after, limit } = {}, signal) {
 }
 
 // 200 { sent, confirmed, queued } | 400 { error } | 409 { error, notification }
-// | 503 { error }. err.data carries the body on failure.
+// | 503 { error }. err.data carries the body on failure. On success the body
+// may carry `output` — the on-screen result of /context or /cost, shown in the
+// chat as a command bubble.
 export function postSupervisorMessage(text) {
   return postJson('/api/supervisor/message', { text });
+}
+
+// Answer the Supervisor's pending AskUserQuestion (FOC-810): one entry per
+// question, { choices: [optionIndex…], text? }. 200 { answered: true } |
+// 409 { error: 'ask-changed' | 'dialog-changed', step? } | 503 { error } —
+// same write guards and error shape as postSupervisorMessage.
+export function postSupervisorAsk(body) {
+  return postJson('/api/supervisor/ask', body);
+}
+
+// Answer a TUI permission/select dialog (FOC-810): choice
+// 'allow-once' | 'allow-always' | 'deny' with an optional note (deny only).
+// 200 { sent, closed } | 409 { error: 'dialog-changed' } | 503 { error }.
+export function postSupervisorDialog(body) {
+  return postJson('/api/supervisor/dialog', body);
 }
 
 // Start (or restart fresh) the Supervisor session inside the container.

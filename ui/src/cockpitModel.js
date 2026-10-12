@@ -89,11 +89,75 @@ export function inboxPrimaryAction(item) {
       return { kind: 'yesno', label: 'Approve / Reject' };
     case 'option':
       return { kind: 'option', label: 'Choose an option' };
+    // Supervisor interactivity (FOC-810): an AskUserQuestion (answerKind ask)
+    // and a TUI dialog (answerKind dialog) are answered in place with their
+    // own card — distinct kinds so the read-only "ask the Supervisor" path
+    // below keeps its meaning.
+    case 'ask':
+      return { kind: 'ask-card', label: 'Answer the question' };
+    case 'dialog':
+      return { kind: 'dialog-card', label: 'Answer the dialog' };
     default:
       // answerKind null: a problem is read-only — the human asks the
       // Supervisor about it; anything else answerable falls back to ask too.
       return item.answerable ? { kind: 'ask', label: 'Ask the Supervisor' } : { kind: 'none', label: '' };
   }
+}
+
+// inboxQuestionLines(item) -> the generic questions list as plain strings for
+// the inbox <li> render. A category "ask" item (a pending AskUserQuestion)
+// carries question objects ({ question, header, multiSelect, options }) that
+// AskCard renders — the generic list shows nothing for it (a bare object child
+// is React error #31, the blank-Cockpit crash). Elsewhere a string passes
+// through as is; an object contributes its `question` field when that is a
+// string; anything else is skipped.
+export function inboxQuestionLines(item) {
+  if (!item || item.category === 'ask') return [];
+  return textLines(item && item.questions, 'question');
+}
+
+// inboxFactLines(item) -> the generic facts list as plain strings. Gate facts
+// (collectNeedsYou only forwards non-array objects) are an object map —
+// rendered as "key: value" lines for primitive values, objects and arrays
+// skipped; an array of facts keeps the entry-as-string rule (an object entry
+// has no meaningful field to extract, so it is skipped). Anything else is no
+// list at all.
+export function inboxFactLines(item) {
+  const facts = item ? item.facts : null;
+  if (Array.isArray(facts)) return textLines(facts, null);
+  if (facts && typeof facts === 'object') {
+    const lines = [];
+    for (const [key, value] of Object.entries(facts)) {
+      if (
+        typeof value === 'string' ||
+        typeof value === 'number' ||
+        typeof value === 'boolean'
+      ) {
+        lines.push(key + ': ' + value);
+      }
+    }
+    return lines;
+  }
+  return [];
+}
+
+// textLines(entries, objectField) -> the entries as renderable strings: a
+// string passes through as is; an object contributes entries[objectField] when
+// objectField is set and that field is a string; anything else is skipped.
+function textLines(entries, objectField) {
+  if (!Array.isArray(entries)) return [];
+  const lines = [];
+  for (const entry of entries) {
+    if (typeof entry === 'string') {
+      lines.push(entry);
+      continue;
+    }
+    if (entry && typeof entry === 'object' && objectField) {
+      const field = entry[objectField];
+      if (typeof field === 'string') lines.push(field);
+    }
+  }
+  return lines;
 }
 
 // hostDisabledReason(supervisor) -> the sentence for a host-level blocker
@@ -110,14 +174,20 @@ function hostDisabledReason(supervisor) {
 
 // chatDisabledReason(supervisor) -> null when chat may send, otherwise the
 // sentence explaining why (host problem, or an open dialog — keystrokes must
-// never answer a permission prompt, plan §1).
+// never answer a permission prompt, plan §1). With a pendingAsk or a dialog in
+// the snapshot the card above the chat answers it; a bare needs-input state
+// (the snapshot could not parse what is on screen) still points at Terminal.
 export function chatDisabledReason(supervisor) {
   if (!supervisor) return null;
   return (
     hostDisabledReason(supervisor) ||
-    (supervisor.state === 'needs-input'
-      ? 'The Supervisor is asking for input — answer it in the Terminal.'
-      : null)
+    (supervisor.pendingAsk
+      ? 'The Supervisor is asking you — answer the question above the chat.'
+      : supervisor.dialog
+        ? 'The Supervisor is waiting on a dialog — answer it in the card above the chat.'
+        : supervisor.state === 'needs-input'
+          ? 'The Supervisor is asking for input — answer it in the Terminal.'
+          : null)
   );
 }
 
@@ -234,4 +304,117 @@ export function wakeBanner(sup) {
       ? 'Waker not running — press Wake to deliver them.'
       : 'Waker not running.';
   return { count, since, sinceLabel, waker, wakerAlive, canWake, text, detail };
+}
+
+// ===== Supervisor dialogs and asks (FOC-810) =====
+
+// dialogActions(dialog) -> [{ choice, label }] — the buttons DialogCard
+// renders. A permission dialog offers Allow once / Always allow / Deny, but
+// only the choices an option on screen actually carries (deny is always
+// present — Esc works even when the list changed under us); an auto-mode
+// option is NEVER pressed from the dashboard (that is a deliberate policy
+// switch, plan FOC-810). "Always allow" is titled with the pattern after
+// "for:" in the option's label, falling back to the whole label. Any other
+// kind (select lists, anything unrecognised) only dismisses with Esc.
+export function dialogActions(dialog) {
+  if (!dialog || dialog.kind !== 'permission') {
+    return [{ choice: 'deny', label: 'Dismiss (Esc)' }];
+  }
+  const options = Array.isArray(dialog.options) ? dialog.options : [];
+  const actions = [];
+  const allowOnce = options.find((o) => o && o.choice === 'allow-once');
+  if (allowOnce) actions.push({ choice: 'allow-once', label: 'Allow once' });
+  const allowAlways = options.find((o) => o && o.choice === 'allow-always');
+  if (allowAlways) {
+    const label = allowAlways.label || '';
+    const m = /for:\s*(.+)$/.exec(label);
+    actions.push({ choice: 'allow-always', label: 'Always allow: ' + (m ? m[1].trim() : label) });
+  }
+  actions.push({ choice: 'deny', label: 'Deny' });
+  return actions;
+}
+
+// dialogTextLines(dialog) -> the body lines DialogCard renders between the
+// title and the actions. The pane capture repeats what the card shows
+// elsewhere, so the raw `lines` are filtered: the title (its own header),
+// option lines — numbered ("❯ 1. Yes", "2. No") or equal to an option label
+// with or without the leading focus marker (the buttons dialogActions()
+// derives stand in for them) — any line mentioning "auto mode" (the
+// dashboard never presses it), the footer (rendered separately) and the
+// command (its own <pre>; a multi-line command matches line by line).
+// Everything else stays in capture order ("Audit dependencies",
+// "Do you want to proceed?", …).
+export function dialogTextLines(dialog) {
+  if (!dialog || !Array.isArray(dialog.lines)) return [];
+  const title = typeof dialog.title === 'string' && dialog.title.trim() ? dialog.title.trim() : null;
+  const footer = typeof dialog.footer === 'string' && dialog.footer.trim() ? dialog.footer.trim() : null;
+  const command = typeof dialog.command === 'string' && dialog.command.trim() ? dialog.command : null;
+  const commandLines = command ? command.split('\n').map((l) => l.trim()) : [];
+  const labels = (Array.isArray(dialog.options) ? dialog.options : [])
+    .map((o) => (o && typeof o.label === 'string' ? o.label.trim() : ''))
+    .filter(Boolean);
+  const out = [];
+  for (const line of dialog.lines) {
+    if (typeof line !== 'string' || !line.trim()) continue;
+    const t = line.trim();
+    if (title !== null && t === title) continue;
+    if (footer !== null && t === footer) continue;
+    if (command !== null && (t === command.trim() || commandLines.includes(t))) continue;
+    const unfocused = t.replace(/^❯\s*/, '');
+    if (/^\d+\.\s/.test(unfocused)) continue; // a numbered option line
+    if (labels.includes(unfocused)) continue; // an unnumbered (select) option
+    if (t.toLowerCase().includes('auto mode')) continue;
+    out.push(line);
+  }
+  return out;
+}
+
+// askAnswers(ask, selection) -> { ok: true, answers } | { ok: false, reason }.
+// selection is { [questionIndex]: { choices: [optionIndex…], text } } from the
+// AskCard state. A single-select question needs exactly one choice or a
+// non-empty text (the text wins when both are set — it is sent alone, the
+// host's key plan cannot combine a picked option with typed text); a
+// multiSelect question needs at least one choice and carries no text.
+export function askAnswers(ask, selection) {
+  const questions = (ask && ask.questions) || [];
+  if (questions.length === 0) return { ok: false, reason: 'The ask has no questions.' };
+  const answers = [];
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i] || {};
+    const sel = (selection && selection[i]) || {};
+    const choices = Array.isArray(sel.choices) ? sel.choices.filter((c) => Number.isInteger(c)) : [];
+    const text = typeof sel.text === 'string' ? sel.text.trim() : '';
+    const n = i + 1;
+    if (q.multiSelect) {
+      if (choices.length === 0) return { ok: false, reason: 'Question ' + n + ' needs at least one choice.' };
+      answers.push({ choices });
+    } else if (text) {
+      answers.push({ choices: [], text });
+    } else if (choices.length === 1) {
+      answers.push({ choices });
+    } else if (choices.length === 0) {
+      return { ok: false, reason: 'Question ' + n + ' needs a choice or some text.' };
+    } else {
+      return { ok: false, reason: 'Question ' + n + ' takes exactly one choice.' };
+    }
+  }
+  return { ok: true, answers };
+}
+
+// answerResultText(result) -> the honest sentence for the success banner
+// (SupervisorPanel + NeedsYouInbox). The host's answer is not always a clean
+// yes: answered === false or closed === false means the dialog is still on
+// screen, and a resumedFrom > 0 means the first steps had already been
+// applied (the re-answer was a no-op for them). A 409 — including
+// partial: true — never reaches here: useSupervisorAnswers routes it to the
+// error state with its own sentence.
+export function answerResultText(result) {
+  const r = result || {};
+  if (r.answered === false || r.closed === false) {
+    return 'The dialog is still on screen — check the Terminal.';
+  }
+  if (Number.isInteger(r.resumedFrom) && r.resumedFrom > 0) {
+    return 'Sent — the first ' + r.resumedFrom + ' answer' + (r.resumedFrom === 1 ? ' was' : 's were') + ' already applied.';
+  }
+  return 'Answer sent.';
 }

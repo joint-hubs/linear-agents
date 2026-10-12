@@ -170,6 +170,123 @@
 
 .ck-chat-pending { opacity: 0.75; }
 
+/* A slash command sent from the chat with its captured output (FOC-810) —
+   client-side only, monospace like the terminal it mirrors. */
+.ck-chat-command-out {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2, #f0f2f6);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* --- ask / dialog cards (FOC-810) ------------------------------------------ */
+
+.ck-card {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--ck-waiting-fg, #92400e);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+
+.ck-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.ck-card-line {
+  margin-top: 6px;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ck-card-command {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2, #f0f2f6);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ck-card-footer {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ck-card-q { margin-top: 10px; }
+
+.ck-card-q-text {
+  margin-top: 4px;
+  font-size: 12.5px;
+}
+
+.ck-card-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.ck-card-opt {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.ck-card-opt input[type='checkbox'],
+.ck-card-opt input[type='radio'] {
+  margin-top: 2px;
+}
+
+.ck-card-opt-desc {
+  display: block;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.ck-card-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.ck-card-error {
+  color: var(--ck-danger-fg, #991b1b);
+  font-size: 12px;
+}
+
+.ck-card-note {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.ck-card-note .filter-search { margin: 0; }
+
+.ck-card-link {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
 .ck-composer {
   display: flex;
   gap: 8px;

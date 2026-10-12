@@ -4,7 +4,9 @@
 // pages forward from the previous offset (mergeConversation dedupes; reset
 // switches to the new session). A full forward page (a burst) is followed
 // immediately, capped per tick. Sends through /api/supervisor/message and
-// shows per-message queued/unconfirmed state.
+// shows per-message queued/unconfirmed state. A confirmed slash command
+// (/context, /cost, /compact — it never reaches the transcript) is shown as
+// local entries instead: the user line plus its output bubble.
 //
 // Enter sends, Shift+Enter is a newline. When the Supervisor shows a dialog
 // (409 needs-input) chat refuses and points at the Terminal — keystrokes must
@@ -23,6 +25,17 @@ import {
 // Quick prompts live in SupervisorPanel (they pre-fill this composer).
 
 function Entry({ entry }) {
+  if (entry.role === 'command') {
+    // A slash command sent from this view (/context, /cost) with the on-screen
+    // result the server captured — client-side only, never part of the
+    // transcript (FOC-810).
+    return (
+      <div className="ck-chat-line ck-chat-command">
+        <span className="ck-chat-who">Command</span>
+        <pre className="ck-chat-command-out">{(entry.text || '') + (entry.output ? '\n' + entry.output : '')}</pre>
+      </div>
+    );
+  }
   if (entry.role === 'tool') {
     const t = entry.tool || {};
     return (
@@ -157,8 +170,35 @@ export default function ChatView({ supervisor, draft, onDraftChange, onOpenTermi
     const id = Date.now() + ':' + Math.random();
     setPending((ps) => [...ps, { id, text, state: 'sent' }]);
     onDraftChange('');
+    // A slash command (/context, /cost, /compact) never appears in the
+    // transcript, so its pending line would wait forever for a user entry
+    // that never comes — and a command bubble merged at the tail would
+    // render ABOVE that line. When the 200 carries the confirmation (an
+    // `output` capture, or confirmed: true), local entries are added
+    // instead: the user line (no pending label) with the command bubble
+    // directly after it — the pending-drop effect then clears the pending
+    // copy. Normal messages keep the transcript-confirmed flow.
+    const isSlash = text.startsWith('/');
     try {
       const res = await postSupervisorMessage(text);
+      if (isSlash && res && (typeof res.output === 'string' || res.confirmed === true)) {
+        const locals = [{
+          uuid: 'local:' + id + ':user',
+          ts: new Date().toISOString(),
+          role: 'user',
+          text,
+        }];
+        if (typeof res.output === 'string') {
+          locals.push({
+            uuid: 'local:' + id + ':command',
+            ts: new Date().toISOString(),
+            role: 'command',
+            text,
+            output: res.output === '' ? '(no output captured)' : res.output,
+          });
+        }
+        setEntries((prev) => mergeConversation(prev, { entries: locals }, {}));
+      }
       const state = res.queued ? 'queued' : 'sent';
       setPending((ps) => ps.map((p) => (p.id === id ? { ...p, state } : p)));
     } catch (e) {
@@ -168,6 +208,9 @@ export default function ChatView({ supervisor, draft, onDraftChange, onOpenTermi
       setSendError({
         text: e.data?.error || e.message || String(e),
         status: e.status,
+        // 400 slash-command: the server says which commands work and why this
+        // one does not — show its message verbatim.
+        slashMessage: e.data?.error === 'slash-command' ? e.data.message || e.data.error : null,
         notification: e.data?.notification || null,
       });
     } finally {
@@ -218,11 +261,13 @@ export default function ChatView({ supervisor, draft, onDraftChange, onOpenTermi
       {sendError && (
         <div className="banner banner-warn" style={{ marginTop: 8 }}>
           <div>
-            {sendError.status === 409
-              ? 'The Supervisor is showing a dialog — answer it in the Terminal.'
-              : sendError.status === 400
-                ? 'Refused: slash commands go through the Terminal.'
-                : 'Could not send: ' + sendError.text}
+            {sendError.slashMessage
+              ? sendError.slashMessage
+              : sendError.status === 409
+                ? 'The Supervisor is showing a dialog — answer it in the card above the chat.'
+                : sendError.status === 400
+                  ? 'Refused: only /compact, /context and /cost work from the chat.'
+                  : 'Could not send: ' + sendError.text}
           </div>
           {sendError.notification?.message && (
             <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
@@ -255,7 +300,7 @@ export default function ChatView({ supervisor, draft, onDraftChange, onOpenTermi
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder={disabledReason ? 'Chat is unavailable' : 'Message the Supervisor… (Enter sends, Shift+Enter newline)'}
+          placeholder={disabledReason ? 'Chat is unavailable' : 'Message the Supervisor… (/compact, /context and /cost work here — Enter sends, Shift+Enter newline)'}
           aria-label="Message the Supervisor"
           disabled={!!disabledReason || busy}
         />
