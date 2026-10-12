@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  xiaomi/mimo-v2.6-pro · API Usage Billing
+ ▝▝   ▝▝   /data/workspaces
+
+
+❯ MOCK-TOOL-BASH please
+
+  Ran 1 shell command
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Churned for 0s · done 9:09 PM
+
+❯ MOCK-TOOL-ASK1 please
+
+● User answered Claude's questions:
+  ⎿  · npm audit found 2 critical advisories in devDependencies. What now? → Separate ticket
+
+● done.
+
+✻ Churned for 0s · done 9:09 PM
+
+❯ MOCK-TOOL-ASK2 please
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Export  ☒ Checks  ✔ Submit  →
+
+Which checks should run before the PR?
+
+❯ 1. [✔] Unit tests
+         npm test
+  2. [✔] npm audit
+         dependency audit
+  3. [ ] E2E
+         browser journey
+  4. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,50 @@
+
+     /context all to expand
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Settings  Status   Config   Usage   Stats
+
+   Session
+
+   Total cost:            $0.0057 (costs may be inaccurate due to usage of unknown models)
+   Total duration (API):  0s
+   Total duration (wall): 5m 12s
+   Total code changes:    0 lines added, 0 lines removed
+   Usage by model:
+     z-ai/glm-5.3-flash:  210 input, 40 output, 0 cache read, 0 cache write ($0.0020)
+   xiaomi/mimo-v2.6-pro:  378 input, 72 output, 0 cache read, 0 cache write ($0.0037)
+   Prompt cache (main):   9 requests · 0% of input tokens from cache · no misses · no prompt caching reported by the API
+
+   Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

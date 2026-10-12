@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  xiaomi/mimo-v2.6-pro · API Usage Billing
+ ▝▝   ▝▝   /data/workspaces
+
+
+❯ MOCK-TOOL-BASH please
+
+  Ran 1 shell command
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Churned for 0s · done 9:09 PM
+
+❯ MOCK-TOOL-ASK1 please
+
+● User answered Claude's questions:
+  ⎿  · npm audit found 2 critical advisories in devDependencies. What now? → Separate ticket
+
+● done.
+
+✻ Churned for 0s · done 9:09 PM
+
+❯ MOCK-TOOL-ASK2 please
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Export  ☐ Checks  ✔ Submit  →
+
+Should the export land in v1?
+
+❯ 1. Narrow the AC
+     Export moves out of v1
+  2. Finish before landing
+     One more DEV round
+  3. Leave as a DoD gap
+     Document it
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+

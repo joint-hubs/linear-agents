@@ -1,0 +1,50 @@
+
+
+✻ Churned for 0s · done 9:09 PM
+
+❯ MOCK-TOOL-ASK1 please
+
+● User answered Claude's questions:
+  ⎿  · npm audit found 2 critical advisories in devDependencies. What now? → Separate ticket
+
+● done.
+
+✻ Churned for 0s · done 9:09 PM
+
+❯ MOCK-TOOL-ASK2 please
+
+● User answered Claude's questions:
+  ⎿  · Should the export land in v1? → Narrow the AC
+     · Which checks should run before the PR? → Unit tests, npm audit
+
+● done.
+
+✻ Cooked for 0s · done 9:10 PM
+
+❯ MOCK-TOOL-ASK1 again
+
+● User answered Claude's questions:
+  ⎿  · npm audit found 2 critical advisories in devDependencies. What now? → Diagnose first, then decide
+
+● done.
+
+✻ Sautéed for 0s · done 9:10 PM
+
+❯ MOCK-TOOL-ASK3 please
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Review  ✔ Submit  →
+
+Which reviewers should look at this PR?
+
+❯ 1. [ ] Security
+         trust boundaries
+  2. [ ] Frontend
+         UI changes
+  3. [ ] Docs
+         wording
+  4. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
