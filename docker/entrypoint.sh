@@ -1,6 +1,9 @@
 #!/bin/sh
 # Fenix container entrypoint: boots the telemetry API, an idle supervisor
-# holder (for `fenix attach`), the doctor, a shell, or a passthrough command.
+# holder (for `fenix attach`), the doctor, a shell, a passthrough command, or
+# manages shared repos (repo-add clones into the workspaces root, repo-list
+# shows them). The supervisor resumes its last session for the repo directory
+# unless started with --new.
 # Provider credentials come from Compose secret files under /run/secrets and
 # are exported into the environment only — never printed, logged, or echoed.
 set -eu
@@ -49,28 +52,86 @@ resolve_provider() {
     rm -f "$provider_tmp"
 }
 
+# Git over HTTPS answers GitHub from GITHUB_TOKEN in this process's env —
+# the helper below is stored in ~/.gitconfig, the token never is.
+configure_git() {
+    git config --global credential.https://github.com.helper \
+        '!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f'
+    node "$LA_ROOT/scripts/fenix-git-identity.mjs" || true
+}
+
+# Squad config on the volume follows the image unless you edited it (dpkg rule, D3).
+seed_agents() {
+    node "$LA_ROOT/scripts/fenix-seed-agents.mjs" --from "$LA_ROOT/agents" --to "$LA_SQUAD_HOME"
+}
+
 load_secrets
-mkdir -p "$LA_TELEMETRY_HOME" "$LA_SUPERVISOR_STATE_HOME" /data/workspaces
+mkdir -p "$LA_TELEMETRY_HOME" "$LA_SUPERVISOR_STATE_HOME" "$LA_SQUAD_HOME" "$GITHUB_ROOT" "$LA_WORKTREE_HOME"
 
 case "${1:-api}" in
     api)
+        seed_agents
         cd "$LA_ROOT"
         exec node scripts/telemetry-server.mjs
         ;;
     supervisor)
         resolve_provider
-        CLAUDE_CONFIG_DIR="$LA_ROOT/agents/supervisor"
+        configure_git
+        new_session=0
+        if [ "${2:-}" = "--new" ]; then new_session=1; fi
+        CLAUDE_CONFIG_DIR="$LA_SQUAD_HOME/supervisor"
         export CLAUDE_CONFIG_DIR
         ANTHROPIC_MODEL="${SUPERVISOR_MODEL:-xiaomi/mimo-v2.6-pro}"
         export ANTHROPIC_MODEL
-        LA_SUPERVISOR_REPO="${FENIX_REPO_DIR:-$LA_ROOT}"
+        LA_SUPERVISOR_REPO="${FENIX_REPO_DIR:-$GITHUB_ROOT}"
         export LA_SUPERVISOR_REPO
+        mkdir -p "$LA_SUPERVISOR_REPO"
         cd "$LA_SUPERVISOR_REPO"
+        node "$LA_ROOT/scripts/fenix-claude-prefs.mjs" --config-dir "$CLAUDE_CONFIG_DIR" --trust "$LA_SUPERVISOR_REPO"
+        # Resume the last Supervisor session for this directory unless --new (D5).
+        project_dir="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$LA_SUPERVISOR_REPO" | sed 's|[^A-Za-z0-9]|-|g')"
+        if [ "$new_session" -eq 0 ] && ls "$project_dir"/*.jsonl >/dev/null 2>&1; then
+            exec claude --continue
+        fi
         exec claude
         ;;
     idle)
-        # Hold the container up so `fenix attach` can reach the supervisor.
+        # Hold the container up so `fenix attach` can reach the supervisor;
+        # children are spawned from this container.
+        configure_git
         exec sleep infinity
+        ;;
+    repo-add)
+        shift
+        repo_url="${1:-}"
+        if [ -z "$repo_url" ]; then
+            printf '%s\n' 'usage: repo-add <git-url|owner/name> [--project <Linear project>]' >&2
+            exit 2
+        fi
+        shift
+        project=""
+        if [ "${1:-}" = "--project" ]; then project="${2:-}"; fi
+        case $repo_url in
+            http*://*|git@*|ssh://*) ;;
+            */*) repo_url="https://github.com/$repo_url.git" ;;
+        esac
+        repo_name="$(basename "$repo_url" .git)"
+        if [ -e "$GITHUB_ROOT/$repo_name" ]; then
+            printf 'fenix: %s already exists in %s\n' "$repo_name" "$GITHUB_ROOT" >&2
+            exit 3
+        fi
+        configure_git
+        git clone "$repo_url" "$GITHUB_ROOT/$repo_name"
+        if [ -n "$project" ]; then
+            node "$LA_ROOT/scripts/fenix-projects.mjs" add --linear-project "$project" --repo "\${GITHUB_ROOT}/$repo_name"
+        fi
+        ;;
+    repo-list)
+        for d in "$GITHUB_ROOT"/*/; do
+            [ -d "$d.git" ] || continue
+            printf '%s\t%s\t%s\n' "$(basename "$d")" "$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" "$(git -C "$d" remote get-url origin 2>/dev/null)"
+        done
+        node "$LA_ROOT/scripts/fenix-projects.mjs" list || true
         ;;
     doctor)
         shift

@@ -13,9 +13,9 @@ ARG CLAUDE_CODE_VERSION=2.1.296
 ARG CODEGRAPH_VERSION=1.6.0
 ARG SEMGREP_VERSION=1.172.0
 
-# System deps: git/curl for tooling, procps for `ps` (stability tests), tini as init, python3 for semgrep.
+# System deps: git/gh/curl for tooling (squads call `gh`), procps for `ps` (stability tests), tini as init, python3 for semgrep.
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl tini procps python3 python3-venv python3-pip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git gh ca-certificates curl tini procps python3 python3-venv python3-pip && rm -rf /var/lib/apt/lists/*
 
 # Python tools (semgrep, uv) in an isolated venv, on PATH ahead of system python.
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" uv
@@ -43,6 +43,10 @@ RUN cd ui && npm run build && rm -rf node_modules && chmod +x /opt/fenix/docker/
 ENV LA_ROOT=/opt/fenix \
     LA_TELEMETRY_HOME=/data/telemetry \
     LA_SUPERVISOR_STATE_HOME=/data/state/supervisor \
+    LA_DATA_HOME=/data \
+    LA_SQUAD_HOME=/data/agents \
+    GITHUB_ROOT=/data/workspaces \
+    LA_WORKTREE_HOME=/data/workspaces/la-wt \
     TELEMETRY_HOST=0.0.0.0 \
     TELEMETRY_PORT=7331 \
     LA_PROVIDER=openrouter \
