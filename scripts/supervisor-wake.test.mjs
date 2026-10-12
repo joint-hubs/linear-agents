@@ -364,6 +364,73 @@ await test("queue rows and edit rows together produce both lines", () => {
   if (lease.firedThrough !== 1 || lease.editsFiredThrough !== 1) fail(`watermarks: ${JSON.stringify(lease)}`);
 });
 
+await test("formatEditsMessage renders gate-answer / hold-answer rows as path (field)", () => {
+  const msg = formatEditsMessage("run-x", [
+    { seq: 1, path: "gates/gate-dev-1-1.json", type: "gate-answer", changes: [{ field: "answer" }] },
+    { seq: 2, path: "holds.json", type: "hold-answer", changes: [{ field: "hold-1.answer" }] },
+  ]);
+  if (!msg.includes("gates/gate-dev-1-1.json (answer)")) fail(`gate-answer not rendered: ${msg}`);
+  if (!msg.includes("holds.json (hold-1.answer)")) fail(`hold-answer not rendered: ${msg}`);
+});
+
+// notified rows (FOC-783): the dashboard answered a gate/hold and told the
+// Supervisor through its session — the row is audit-only for the waker.
+
+const notifiedRow = (runId, seq, path, fields) => ({ ...editRow(runId, seq, path, fields), notified: true });
+
+await test("a notified edit row never wakes, but editsFiredThrough still advances past it", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  writeEdits(runId, [notifiedRow(runId, 1, "triage.json", ["node"])]);
+  const r = runWakerSync(runId);
+  if (r.code !== 0) fail(`expected exit 0 (notified rows never wake), got ${r.code} (${r.stderr})`);
+  if (r.stderr.includes("Mateusz edited")) fail(`woke for a notified row: ${r.stderr}`);
+  const lease = readWakerLease(runId);
+  if (lease.editsFiredThrough !== 1) fail(`editsFiredThrough ${lease.editsFiredThrough} — must advance past notified rows`);
+  const again = runWakerSync(runId);
+  if (again.code !== 0) fail(`the advanced watermark did not hold (${again.code}): ${again.stderr}`);
+  if (readWakerLease(runId).editsFiredThrough !== 1) fail("watermark moved after the advance");
+});
+
+await test("an un-notified gate-answer row wakes and renders as path (field)", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  writeEdits(runId, [
+    {
+      seq: 1,
+      ts: new Date().toISOString(),
+      who: "dashboard",
+      runId,
+      path: "gates/gate-dev-1-1.json",
+      type: "gate-answer",
+      changes: [{ field: "answer", before: null, after: '"tak"' }],
+    },
+  ]);
+  const r = runWakerSync(runId);
+  if (r.code !== 2) fail(`expected exit 2, got ${r.code} (${r.stderr})`);
+  if (!r.stderr.includes("Mateusz edited 1 record(s)")) fail(`stderr: ${r.stderr}`);
+  if (!r.stderr.includes("gates/gate-dev-1-1.json (answer)")) fail(`gate-answer not rendered: ${r.stderr}`);
+  if (readWakerLease(runId).editsFiredThrough !== 1) fail("editsFiredThrough did not advance");
+});
+
+await test("notified rows beside a fresh one: the fresh row wakes and the watermark passes all", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  writeEdits(runId, [
+    notifiedRow(runId, 1, "triage.json", ["node"]),
+    { ...editRow(runId, 2, "holds.json", ["hold-1.answer"]), type: "hold-answer" },
+    notifiedRow(runId, 3, "intake.json", ["summary"]),
+  ]);
+  const r = runWakerSync(runId);
+  if (r.code !== 2) fail(`expected exit 2, got ${r.code} (${r.stderr})`);
+  if (!r.stderr.includes("holds.json (hold-1.answer)")) fail(`the fresh row missing: ${r.stderr}`);
+  if (r.stderr.includes("triage.json (node)") || r.stderr.includes("intake.json (summary)")) {
+    fail(`a notified row was woken for: ${r.stderr}`);
+  }
+  const lease = readWakerLease(runId);
+  if (lease.editsFiredThrough !== 3) fail(`editsFiredThrough ${lease.editsFiredThrough} — must pass notified rows too`);
+});
+
 // ── config sync + briefing ───────────────────────────────────────────────────
 
 await test("settings.json: the waker is a Stop hook with asyncRewake and a timeout above its lifetime", () => {

@@ -21,7 +21,8 @@
 //                                         verdicts/<name>.annotations.jsonl
 //   other           everything else       listed read-only, never writable
 //   (hidden)        .originals/**, edits*.json*,   not listed at all
-//                   verdicts/*.annotations.jsonl
+//                   verdicts/*.annotations.jsonl,
+//                   *.lock (answer locks, supervisor-gate withAnswerLock)
 //
 // `editableFields` semantics: a fixed list means exactly those dot-paths may
 // change; `null` means every field of the record except the type's immutable
@@ -164,6 +165,9 @@ export function classifyPath(rel, { runId } = {}) {
 
   if (parts[0] === ".originals") return null; // the audit originals — internal
   if (/^edits.*\.json/.test(rel)) return null; // edits.jsonl, edits-seen.json — this module's own state
+  // Answer locks (supervisor-gate's withAnswerLock: gates/<id>.json.lock,
+  // holds.json.lock) — transient internal state, never a record.
+  if (rel.endsWith(".lock")) return null;
 
   const [top, second] = parts;
   if (parts.length === 1) {
@@ -472,6 +476,55 @@ export function annotateVerdict({ runId, path, note, who }) {
   return { ok: true, sha256: sha, seq };
 }
 
+// ── answer notice rows (FOC-783) ─────────────────────────────────────────────
+
+/**
+ * The edits.jsonl row for a gate or hold answer made from the dashboard. The
+ * ANSWER itself is written by supervisor-gate.mjs's answerGate/answerHold —
+ * the same rules the CLI enforces; this is only the audit/notice row, through
+ * the SAME single-writer append and seq logic as every other write here, so
+ * the waker's and the hook's watermarks stay one sequence.
+ *
+ * `notified: true` means the Supervisor was already told through its session:
+ * the row stays in the audit, but the wake and the edits hook skip it (no
+ * wake, no re-show) — the notice was delivered where the answer happened.
+ */
+export function recordAnswerRow({ runId, kind, id, text, who, notified }) {
+  if (!validRunId(runId)) throw badPath(`invalid runId: ${JSON.stringify(runId ?? null)}`);
+  if (kind !== "gate-answer" && kind !== "hold-answer") {
+    throw Object.assign(
+      new Error(`kind must be "gate-answer" or "hold-answer", got ${JSON.stringify(kind ?? null)}`),
+      { code: "invalid-kind" },
+    );
+  }
+  // The id names the answered record — a gate id lands in the row's path
+  // (gates/<id>.json), so it is bounded to the same sayable token set the
+  // answer functions enforce, which is also the traversal guard.
+  if (typeof id !== "string" || !RUN_ID_RE.test(id) || id === "." || id === "..") {
+    throw Object.assign(new Error(`invalid answer id: ${JSON.stringify(id ?? null)}`), { code: "bad-id" });
+  }
+  if (typeof who !== "string" || !who.trim()) {
+    throw Object.assign(new Error("who is required"), { code: "invalid" });
+  }
+  if (typeof text !== "string" || !text.trim()) {
+    throw Object.assign(new Error("answer text is required"), { code: "invalid" });
+  }
+
+  const isGate = kind === "gate-answer";
+  const row = {
+    seq: nextEditSeq(runId),
+    ts: new Date().toISOString(),
+    who,
+    runId,
+    path: isGate ? `gates/${id}.json` : "holds.json",
+    type: kind,
+    changes: [{ field: isGate ? "answer" : `${id}.answer`, before: null, after: trunc(text) }],
+    notified: Boolean(notified),
+  };
+  appendEditRow(runId, row);
+  return row;
+}
+
 // ── reads ────────────────────────────────────────────────────────────────────
 
 function readJsonLines(path) {
@@ -493,6 +546,10 @@ function readJsonLines(path) {
  */
 export function readRecord({ runId, path }) {
   const { base, abs, rel } = resolveRecordPath(runId, path);
+  // A lock file is not a hidden record but no record at all — not-found, not bad-path.
+  if (rel.endsWith(".lock")) {
+    throw Object.assign(new Error(`record not found: ${rel}`), { code: "not-found" });
+  }
   assertNoSymlink(base, abs);
 
   const cls = classifyPath(rel, { runId });
@@ -560,11 +617,12 @@ function walkRunDir(dir) {
   const rels = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.name.startsWith(".")) continue; // .originals — hidden by classification anyway
+    if (entry.name.endsWith(".lock")) continue; // answer locks — never a record
     if (entry.isFile()) {
       rels.push(entry.name);
     } else if (entry.isDirectory()) {
       for (const inner of readdirSync(join(dir, entry.name), { withFileTypes: true })) {
-        if (inner.isFile()) rels.push(`${entry.name}/${inner.name}`);
+        if (inner.isFile() && !inner.name.endsWith(".lock")) rels.push(`${entry.name}/${inner.name}`);
       }
     }
   }

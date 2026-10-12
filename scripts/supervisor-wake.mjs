@@ -19,7 +19,10 @@
 //         (stderr names the rows and the drain command);
 //   · 2 — an edit record above the lease's editsFiredThrough landed: Mateusz
 //         edited a record the session may hold a stale copy of (stderr names
-//         the paths and the re-read command);
+//         the paths and the re-read command). An edit row carrying
+//         notified === true (FOC-783: the dashboard answered a gate/hold and
+//         told the Supervisor through its session) never wakes — it is
+//         audit-only and only advances editsFiredThrough past itself;
 //   · 2 — its lifetime ran out while children are still live (stderr says it
 //         only re-arms: draining and ending the turn starts a fresh waker);
 //   · 0 — nothing is live any more, the run is not there, another waker of
@@ -146,9 +149,27 @@ export function readEdits(runId) {
   return rows;
 }
 
-/** Edit rows above the watermark, in seq order. */
+/**
+ * Edit rows above the watermark that should WAKE, in seq order. A row with
+ * notified === true (FOC-783: the dashboard answered a gate/hold and told the
+ * Supervisor through its session) is audit-only and never wakes — but the
+ * watermark still advances past it (latestEditSeq, applied in main), so a
+ * notified-only stream is not rescanned forever.
+ */
 export function freshEdits(rows, editsFiredThrough = 0) {
-  return rows.filter((r) => r.seq > editsFiredThrough).sort((a, b) => a.seq - b.seq);
+  return rows
+    .filter((r) => r.seq > editsFiredThrough && r.notified !== true)
+    .sort((a, b) => a.seq - b.seq);
+}
+
+/**
+ * The watermark to advance to: the newest row above the watermark SEEN THIS
+ * PASS, notified or not — while any un-notified row beyond it still re-delivers.
+ */
+export function latestEditSeq(rows, editsFiredThrough = 0) {
+  let max = editsFiredThrough;
+  for (const r of rows) if (r.seq > max) max = r.seq;
+  return max;
 }
 
 // Tolerant, like the guard: an empty or malformed payload is an unknown stop.
@@ -231,23 +252,34 @@ async function main() {
       ackedThrough: readWakeAck(runId),
       firedThrough: seqOr0(lease.firedThrough),
     });
-    const freshEditsRows = freshEdits(readEdits(runId), seqOr0(lease.editsFiredThrough));
+    const editRows = readEdits(runId);
+    const editsThrough = seqOr0(lease.editsFiredThrough);
+    const freshEditsRows = freshEdits(editRows, editsThrough);
+    const editsSeenUpTo = latestEditSeq(editRows, editsThrough);
     const now = new Date().toISOString();
     if (fresh.length || freshEditsRows.length) {
       // Each watermark advances to the newest row SEEN IN ITS OWN STREAM — a
       // fresh edit must never retire an unfired queue row, or the reverse.
+      // editsSeenUpTo passes notified rows too: they were seen, they just do
+      // not wake.
       writeLease(runId, {
         ...lease,
         heartbeatAt: now,
         endedAt: now,
         firedThrough: fresh.length ? fresh[fresh.length - 1].seq : seqOr0(lease.firedThrough),
-        editsFiredThrough: freshEditsRows.length
-          ? freshEditsRows[freshEditsRows.length - 1].seq
-          : seqOr0(lease.editsFiredThrough),
+        editsFiredThrough: editsSeenUpTo,
       });
       if (fresh.length) process.stderr.write(formatWakeMessage(runId, fresh) + "\n");
       if (freshEditsRows.length) process.stderr.write(formatEditsMessage(runId, freshEditsRows) + "\n");
       return 2;
+    }
+    if (editsSeenUpTo !== editsThrough) {
+      // Notified rows only (FOC-783): nothing wakes, but the watermark moves
+      // past them so the audit stream is never rescanned as fresh. The local
+      // lease is updated too — the loop's heartbeat write would otherwise
+      // clobber the advance with the stale watermark.
+      lease = { ...lease, heartbeatAt: now, editsFiredThrough: editsSeenUpTo };
+      writeLease(runId, lease);
     }
 
     const live = liveCount(runId);
