@@ -3628,3 +3628,49 @@ po Twoim pushu: `f2e81d8`. Lokalny main: `05bbee0` (1 przed origin). Tor B (M8) 
 czeka — teraz tor A jest aktywny (REVIEW), nie mieszam pasm.
 
 **Push robi Mateusz.**
+## 2026-10-12 — FOC-198 = opcja A (podłoga 0.009) + piąty hunk ratyfikowany — REVIEW round 2 PASS (`7d277ec`) — TEST leci
+
+**Dwie decyzje zapadły i obie są zapisane.**
+
+1. **FOC-198 — opcja A (Mateusz).** `foc198Rule` w `docs/research/foc-477-runs.json` jest
+   **DECIDED**: koszt arm B dla FOC-198 na osi kosztu liczy się jako **0.009** — najmniejsza
+   ocalała wartość skumulowana, jedyna którą broni rekord. To konserwatywna podłoga
+   (`przeciw GO`): mediana 10 wejść spada do **0.1126** zamiast 0.1168 bez FOC-198, więc oś
+   kosztu mierzy się z najtrudniejszym progiem, jaki zapis obroni. Odrzucona alternatywa
+   (wykluczyć, n = 9, oś `win*`) zostawia łatwiejszy próg 0.1168. **AC2 w FOC-759 zamknięte**
+   — przestaje blokować attempt 5.
+   Zapisy: `foc477-runs.json` (`foc198Rule.chosen` / `rationale` / `rejectedAlternative`, status
+   PROPOSED → DECIDED) i protokół §4.1 (—21 linii w sumie z punktem 2).
+
+2. **Piąty hunk w `graph-runner.mjs` — ratyfikowany (Supervisor, delegacja).** DoD enumeruje
+   cztery wejścia; piąte doszło przy zamykaniu blokera z REVIEW round 1 i jest
+   **ratyfikowane jako explicitna część (a)** — ten sam kształt orzeczenia co linia
+   `allErrors: true` (*`bez tego (a) nie może działać`*). Bez czytelnego `.errors` na walidatorze,
+   który dostaje węzeł, `schemaProblems` zwija się do generycznego napisu i (a) nie istnieje
+   na ścieżce, którą jedzie arm A. Zakres — celowo jedna linia: wyłącznie stanowisko
+   `plan.intent` (`validate: outputValidate.get(stepId)` zamiast strzałki). Pozostałe cztery
+   szyny `validate:`, CLI verbs, record shapes, step loop, `resolveRead`, `createStore`,
+   `RESET_STATUS` — bajtowo identyczne. Mateusz scedował ratyfikację 2026-10-12
+   (`co do punktu 2 to zdaje się na ciebie`); wziętą na zasadzie 4 (węższa / bezpieczniejsza /
+   odwraczalna). Zapis: protokół (akapit o piątym hunku przy Q9) + opis FOC-758 w Linear.
+
+**REVIEW round 2 = PASS**, 8/8 AC, fingerprint `03876a6847199fbf` (diff `b23faf940919`,
+brak padających testów). Blocker zamknięty na szwie runnera: seam test w
+`plan-intent.test.mjs` jeździ na `createGraphRunner` bez własnego Ajv i dowozi konkretne
+naruszenie (`schema violation at /interpretations/0/claim (maxLength): limit 200, actual 260`)
+aż do `revision.problems`. Cztery pozostałe szyny `validate:` potwierdzone bajtowo identyczne.
+Pozostałe 3 findings round 2: 1 todo (harness akceptacji nadal bokiem szwu — uznane za
+dopuszczalne, walidator behawioralnie identyczny), 2 nity nieblokujące, 1 pochwała.
+
+**TEST leci** (`test-3`, worktree `foc-758-test`, model `z-ai/glm-5.3-flash` z routingu).
+Złapany w locie znany quir: worktree TEST startuje z main, nie z kandydata — korekta poszła
+na followup, ale nie da się steerować w połowie tury, więc liczby z main odrzucimy na
+granicach i poprawimy checkout przed pomiarem.
+
+**Kolejka:** TEST → merge gate → lądowanie lokalne (boundary = sha na main) → attempt 5
+FOC-236 od zera jako pierwszy zliczony run arm A. Po nim FOC-759 (AC2 już zamknięte,
+zostaje rozliczenie osi kosztu). Tor B (M8) rusza, gdy tor A stanie: FOC-760+761 → 769 →
+770/771/772/762/773/774 → 776/778/779/780 → 783…788 → 724/789/790. Nie biorę FOC-782,
+775, 777, 781 — osobna sesja, leci przez PR.
+
+**Push robi Mateusz.**
