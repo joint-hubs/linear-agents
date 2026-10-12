@@ -39,6 +39,10 @@ import {
   reloadKickoffTemplates,
 } from './launch.mjs';
 import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools, validateProvidersPatch } from './squad-config.mjs';
+// Agent records (FOC-795) — the record layer the dashboard's /api/records
+// routes proxy. Path validation, editability rules and the edits.jsonl audit
+// trail all live there; the routes below only guard, parse and map statuses.
+import { listRecords, readRecord, writeRecord, annotateVerdict } from './agent-records.mjs';
 import { listTerminalsAsync, flashWindowByPid, focusWindowByPid, stopByPid, areProcessesAlive, reconcileLiveness } from './terminals.mjs';
 import {
   buildPromptTree,
@@ -210,6 +214,20 @@ function respondBodyError(res, err) {
   const status = err?.tooLarge ? 413 : 400;
   json(res, status, { error: err?.tooLarge ? err.message : 'invalid JSON body: ' + err.message });
   return status;
+}
+
+// Map a record-layer error code to its HTTP status. The layer reports the
+// distinction in `code` — on refusal results ({ ok: false, error }) and on
+// thrown errors (err.code) alike — so the mapping stays here, at the transport
+// boundary, and the layer keeps returning plain data. Policy refusals — the
+// path is not editable, the target is not a verdict — are 403; a well-formed
+// path with no record behind it is 404; bad/escaping paths and validation
+// problems are 400. Anything unrecognized is a bug in the layer: 500.
+function recordErrorStatus(code) {
+  if (code === 'not-editable' || code === 'not-annotatable') return 403;
+  if (code === 'not-found') return 404;
+  if (code === 'bad-path' || code === 'invalid') return 400;
+  return 500;
 }
 
 // Read + parse a JSON request body. Caps the size so a runaway client can't
@@ -1785,6 +1803,119 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // PUT /api/records/file — save an edit. Body { run, path, baseSha256,
+    // content }. The 300 KB cap mirrors /api/prompts/file's opt-in for
+    // document-sized bodies: a record's content is a whole JSON/text document,
+    // not the 8 KB control payload the default fits. Guards run BEFORE the
+    // body is read, matching /api/launch.
+    if (method === 'PUT' && path === '/api/records/file') {
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/records/file is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden origin: /api/records/file is same-origin loopback only' });
+        log(method, path, 403);
+        return;
+      }
+      let body;
+      try {
+        body = await readJsonBody(req, 300 * 1024);
+      } catch (err) {
+        log(method, path, respondBodyError(res, err));
+        return;
+      }
+      if (!body.run || !body.path || typeof body.content !== 'string') {
+        json(res, 400, { error: 'run, path and content (string) are required' });
+        log(method, path, 400);
+        return;
+      }
+      let result;
+      try {
+        result = await writeRecord({
+          runId: body.run,
+          path: body.path,
+          baseSha256: body.baseSha256,
+          content: body.content,
+          who: 'dashboard',
+        });
+      } catch (err) {
+        const status = recordErrorStatus(err?.code);
+        if (status === 500) console.error('[records/file]', err?.message || err);
+        json(res, status, { error: err?.code || 'internal', reason: err?.message });
+        log(method, path, status);
+        return;
+      }
+      let status;
+      if (result.ok) {
+        status = 200;
+        json(res, 200, { ok: result.ok, sha256: result.sha256, seq: result.seq });
+      } else if (result.conflict) {
+        // The agent changed the record since the editor loaded it — hand back
+        // the current sha + content so the UI can offer a reload/diff.
+        status = 409;
+        json(res, 409, { conflict: true, sha256: result.sha256, content: result.content });
+      } else {
+        status = recordErrorStatus(result.error);
+        json(res, status, { error: result.error, reason: result.reason });
+      }
+      log(method, path, status);
+      return;
+    }
+
+    // POST /api/records/annotate — attach a note to a verdict record. Body
+    // { run, path, note }; same guards, body cap and status mapping as the
+    // PUT above (not a verdict -> 403, malformed note/path -> 400).
+    if (method === 'POST' && path === '/api/records/annotate') {
+      if (!isLocalOrigin(req.socket.remoteAddress)) {
+        json(res, 403, { error: 'forbidden: /api/records/annotate is 127.0.0.1 only' });
+        log(method, path, 403);
+        return;
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        json(res, 403, { error: 'forbidden origin: /api/records/annotate is same-origin loopback only' });
+        log(method, path, 403);
+        return;
+      }
+      let body;
+      try {
+        body = await readJsonBody(req, 300 * 1024);
+      } catch (err) {
+        log(method, path, respondBodyError(res, err));
+        return;
+      }
+      if (!body.run || !body.path || typeof body.note !== 'string') {
+        json(res, 400, { error: 'run, path and note (string) are required' });
+        log(method, path, 400);
+        return;
+      }
+      let result;
+      try {
+        result = await annotateVerdict({
+          runId: body.run,
+          path: body.path,
+          note: body.note,
+          who: 'dashboard',
+        });
+      } catch (err) {
+        const status = recordErrorStatus(err?.code);
+        if (status === 500) console.error('[records/annotate]', err?.message || err);
+        json(res, status, { error: err?.code || 'internal', reason: err?.message });
+        log(method, path, status);
+        return;
+      }
+      if (result.ok) {
+        json(res, 200, result);
+        log(method, path, 200);
+      } else {
+        const status = recordErrorStatus(result.error);
+        json(res, status, { error: result.error, reason: result.reason });
+        log(method, path, status);
+      }
+      return;
+    }
+
     // --- Only GET is supported beyond this point (other POST/PUT/DELETE → 404) ---
     if (method !== 'GET') {
       json(res, 404, { error: 'not found' });
@@ -1865,6 +1996,68 @@ const server = createServer(async (req, res) => {
         json(res, 200, links);
         log(method, path, 200);
       } finally { db.close(); }
+      return;
+    }
+
+    // --- Agent records (FOC-795, editable-agent-records plan §API) ---
+    // The dashboard's Records panel reads and edits supervisor records via
+    // agent-records.mjs. Reads are open; writes go through the same guard
+    // sequence as every write endpoint (/api/launch): loopback first, then
+    // same-origin. `who` is always 'dashboard' — the record layer owns the
+    // audit trail.
+
+    // GET /api/records?task=<ID> or ?run=<runId> — the records of one task or
+    // one supervisor run. Exactly one selector is required to have something
+    // to list at all; with both, the record layer narrows to their overlap.
+    if (path === '/api/records') {
+      const task = url.searchParams.get('task') || '';
+      const run = url.searchParams.get('run') || '';
+      if (!task && !run) {
+        json(res, 400, { error: 'task or run query param is required' });
+        log(method, path, 400);
+        return;
+      }
+      let records;
+      try {
+        records = await listRecords({ runId: run || undefined, taskId: task || undefined });
+      } catch (err) {
+        // The only throw listRecords has is a bad/escaping selector — 400;
+        // anything else is unexpected and a 500 with the message logged.
+        const status = err?.code === 'bad-path' ? 400 : 500;
+        if (status === 500) console.error('[records]', err?.message || err);
+        json(res, status, { error: err?.code || 'internal', reason: err?.message });
+        log(method, path, status);
+        return;
+      }
+      json(res, 200, { records });
+      log(method, path, 200);
+      return;
+    }
+
+    // GET /api/records/file?run=<runId>&path=<rel> — one record: content,
+    // sha256, editability, annotations. A malformed/escaping path is thrown by
+    // the record layer and answered as 400; a well-formed path with no record
+    // behind it is a 404.
+    if (path === '/api/records/file') {
+      const run = url.searchParams.get('run') || '';
+      const relPath = url.searchParams.get('path') || '';
+      if (!run || !relPath) {
+        json(res, 400, { error: 'run and path query params are required' });
+        log(method, path, 400);
+        return;
+      }
+      let record;
+      try {
+        record = await readRecord({ runId: run, path: relPath });
+      } catch (err) {
+        const status = recordErrorStatus(err?.code);
+        if (status === 500) console.error('[records/file]', err?.message || err);
+        json(res, status, { error: err?.code || 'internal', reason: err?.message });
+        log(method, path, status);
+        return;
+      }
+      json(res, 200, record);
+      log(method, path, 200);
       return;
     }
 

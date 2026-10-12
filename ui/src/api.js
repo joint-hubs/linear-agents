@@ -329,6 +329,57 @@ export function getAnalysisCache() {
   return apiFetch('/api/analysis/cache');
 }
 
+// ===== Agent records (FOC-795) =====
+// List / read / edit the files a Supervisor run wrote for a task. Same origin
+// as the rest of the dashboard API.
+
+export async function getRecords(taskId) {
+  return apiFetch('/api/records?task=' + encodeURIComponent(taskId));
+}
+
+export async function getRecordFile(runId, path) {
+  return apiFetch(
+    '/api/records/file?run=' + encodeURIComponent(runId) + '&path=' + encodeURIComponent(path)
+  );
+}
+
+// PUT /api/records/file — 200 { ok, sha256, seq } | 409 { conflict, sha256,
+// content } | 4xx { error, reason }. Every body is parsed and carried on the
+// thrown error: the UI needs the 409 content to offer "reload theirs" and the
+// 4xx reason to show why the write was refused.
+export async function putRecordFile(payload) {
+  const r = await fetch(API_BASE + '/api/records/file', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.status = r.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+// POST /api/records/annotate — verdicts only; 4xx carries { error, reason }.
+export async function postRecordAnnotate(payload) {
+  const r = await fetch(API_BASE + '/api/records/annotate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.status = r.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
 // 202 { started:true, startedAt } or 409 { code:'build_in_progress' } — the
 // 409 reaches the caller as a thrown Error with .code so the UI can treat
 // "already building" as a no-op rather than a failure.

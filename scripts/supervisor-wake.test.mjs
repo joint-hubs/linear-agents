@@ -8,7 +8,7 @@
 //     session (lease), a superseded waker stands down without writing;
 //   · it never exits 0 one poll before the row it exists for (grace window);
 //   · it is READ-ONLY outside waker.json;
-//   · the hook in agents/supervisor/settings.json stays in sync with the code.
+//   · the hooks in agents/supervisor/settings.json stay in sync with the code.
 //
 // Everything runs through the LA_SUPERVISOR_STATE_HOME seam pointed at a
 // mkdtemp dir, so no test touches the repo's real .state/supervisor/.
@@ -32,7 +32,7 @@ import {
   registryPath,
   writeRegistry,
 } from "./supervisor-lib.mjs";
-import { DEFAULT_MAX_LIFETIME_MS, formatWakeMessage, freshRows } from "./supervisor-wake.mjs";
+import { DEFAULT_MAX_LIFETIME_MS, formatEditsMessage, formatWakeMessage, freshRows } from "./supervisor-wake.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WAKE = join(ROOT, "scripts", "supervisor-wake.mjs");
@@ -276,6 +276,94 @@ await test("superseded mid-wait → exit 0 within ~1 s, the newer lease is left 
   if (lease.pid !== 1 || lease.endedAt) fail(`superseded waker wrote the lease: ${JSON.stringify(lease)}`);
 });
 
+// ── edit records (FOC-795) ───────────────────────────────────────────────────
+
+const editsPath = (runId) => join(runDir(runId), "edits.jsonl");
+const writeEdits = (runId, rows) =>
+  writeFileSync(editsPath(runId), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+const editRow = (runId, seq, path, fields) => ({
+  seq,
+  ts: new Date().toISOString(),
+  who: "dashboard",
+  runId,
+  path,
+  type: "triage",
+  changes: fields.map((field) => ({ field, before: "old", after: "new" })),
+});
+
+await test("formatEditsMessage: paths and fields, at most 5 rows listed, re-read command named", () => {
+  const rows = [
+    { seq: 1, path: "triage.json", changes: [{ field: "node" }] },
+    { seq: 2, path: "gates/gate-dev-1-1.json", changes: [{ field: "facts.branch" }, { field: "facts.notes" }] },
+    ...[3, 4, 5, 6, 7].map((seq) => ({ seq, path: `child-settings-${seq}.json`, changes: [{ field: "text" }] })),
+  ];
+  const msg = formatEditsMessage("run-x", rows);
+  for (const part of [
+    "Mateusz edited 7 record(s) in run run-x",
+    "triage.json (node)",
+    "gates/gate-dev-1-1.json (facts.branch, facts.notes)",
+    "+2 more",
+    "agent-records.mjs edits --run run-x",
+  ]) {
+    if (!msg.includes(part)) fail(`message lacks "${part}": ${msg}`);
+  }
+  if (msg.includes("child-settings-6")) fail(`more than 5 rows listed: ${msg}`);
+});
+
+await test("a fresh edit row wakes the session (exit 2) with the edits line naming path and fields", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  writeEdits(runId, [
+    editRow(runId, 1, "triage.json", ["node"]),
+    editRow(runId, 2, "gates/gate-dev-1-1.json", ["facts.branch"]),
+  ]);
+  const bytes = readOrNull(editsPath(runId));
+  const r = runWakerSync(runId);
+  if (r.code !== 2) fail(`expected exit 2, got ${r.code} (${r.stderr})`);
+  if (!r.stderr.includes(`Mateusz edited 2 record(s) in run ${runId}`)) fail(`stderr: ${r.stderr}`);
+  if (!r.stderr.includes("triage.json (node)")) fail(`stderr: ${r.stderr}`);
+  if (!r.stderr.includes("gates/gate-dev-1-1.json (facts.branch)")) fail(`stderr: ${r.stderr}`);
+  if (!r.stderr.includes(`agent-records.mjs edits --run ${runId}`)) fail(`stderr: ${r.stderr}`);
+  const lease = readWakerLease(runId);
+  if (lease.editsFiredThrough !== 2) fail(`editsFiredThrough ${lease.editsFiredThrough}`);
+  if (lease.firedThrough !== 0) fail(`queue watermark moved: ${lease.firedThrough}`);
+  if (readOrNull(editsPath(runId)) !== bytes) fail("the waker wrote edits.jsonl");
+  const again = runWakerSync(runId);
+  if (again.code !== 0) {
+    fail(`expected the next waker to inherit editsFiredThrough (exit 0), got ${again.code} (${again.stderr})`);
+  }
+});
+
+await test("editsFiredThrough prevents a second wake for the same rows", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  writeEdits(runId, [editRow(runId, 1, "triage.json", ["node"])]);
+  seedLease(runId, {
+    pid: 1,
+    sessionId: "old",
+    heartbeatAt: new Date(Date.now() - 3_600_000).toISOString(),
+    firedThrough: 0,
+    editsFiredThrough: 1,
+  });
+  const r = runWakerSync(runId);
+  if (r.code !== 0) fail(`expected exit 0 (no re-fire), got ${r.code} (${r.stderr})`);
+  if (r.stderr.includes("Mateusz edited")) fail(`re-fired: ${r.stderr}`);
+  if (readWakerLease(runId).editsFiredThrough !== 1) fail("editsFiredThrough moved");
+});
+
+await test("queue rows and edit rows together produce both lines", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  appendWakeEvent(runId, exitRow());
+  writeEdits(runId, [editRow(runId, 1, "intake.json", ["summary"])]);
+  const r = runWakerSync(runId);
+  if (r.code !== 2) fail(`expected exit 2, got ${r.code}`);
+  if (!r.stderr.includes("1 new wake event(s) in run")) fail(`queue line missing: ${r.stderr}`);
+  if (!r.stderr.includes("Mateusz edited 1 record(s)")) fail(`edits line missing: ${r.stderr}`);
+  const lease = readWakerLease(runId);
+  if (lease.firedThrough !== 1 || lease.editsFiredThrough !== 1) fail(`watermarks: ${JSON.stringify(lease)}`);
+});
+
 // ── config sync + briefing ───────────────────────────────────────────────────
 
 await test("settings.json: the waker is a Stop hook with asyncRewake and a timeout above its lifetime", () => {
@@ -288,6 +376,15 @@ await test("settings.json: the waker is a Stop hook with asyncRewake and a timeo
   if (!(wake.timeout * 1000 > DEFAULT_MAX_LIFETIME_MS)) {
     fail(`hook timeout ${wake.timeout}s does not exceed the waker lifetime ${DEFAULT_MAX_LIFETIME_MS} ms — the harness would kill it first`);
   }
+});
+
+await test("settings.json: the edits hook is a UserPromptSubmit hook with a bounded timeout", () => {
+  const settings = JSON.parse(readFileSync(SETTINGS, "utf8"));
+  const hooks = (settings.hooks?.UserPromptSubmit ?? []).flatMap((m) => m.hooks ?? []);
+  const hook = hooks.find((h) => String(h.command).includes("supervisor-edits-hook.mjs"));
+  if (!hook) fail("no supervisor-edits-hook.mjs UserPromptSubmit hook");
+  if (hook.type !== "command") fail(`type ${hook.type}`);
+  if (hook.timeout !== 10) fail(`timeout ${hook.timeout}`);
 });
 
 await test("briefing shows waker.state absent / alive / ended", () => {

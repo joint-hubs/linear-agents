@@ -181,6 +181,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$LA_ROOT/scripts/supervisor-edits-hook.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   },
   "theme": "dark",

@@ -17,6 +17,9 @@
 //
 //   · 2 — a row the session has neither acked nor been woken for landed
 //         (stderr names the rows and the drain command);
+//   · 2 — an edit record above the lease's editsFiredThrough landed: Mateusz
+//         edited a record the session may hold a stale copy of (stderr names
+//         the paths and the re-read command);
 //   · 2 — its lifetime ran out while children are still live (stderr says it
 //         only re-arms: draining and ending the turn starts a fresh waker);
 //   · 0 — nothing is live any more, the run is not there, another waker of
@@ -40,7 +43,7 @@
 // up — otherwise it could exit 0 one poll before the row it exists for.
 //
 // Writer discipline: writes ONLY <run>/waker.json. The queue, the ack, the
-// registry and gates are read-only here.
+// registry, gates and edits.jsonl are read-only here.
 //
 // Env knobs (tests): LA_SUPERVISOR_WAKE_POLL_MS (default 1000),
 // LA_SUPERVISOR_WAKE_GRACE_MS (default 3000), LA_SUPERVISOR_WAKE_MAX_MS
@@ -48,6 +51,7 @@
 // agents/supervisor/settings.json, or the harness kills the waker first).
 
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -92,6 +96,59 @@ export function formatWakeMessage(runId, rows) {
     `supervisor-wake: ${rows.length} new wake event(s) in run ${runId}: ${shown}${more}` +
     " — drain now: node $LA_ROOT/scripts/supervisor-status.mjs --drain --tail 20"
   );
+}
+
+// ── edit records (FOC-795) ───────────────────────────────────────────────────
+//
+// edits.jsonl (one JSON row per line, single writer: scripts/agent-records.mjs)
+// carries an audit row for every record Mateusz edits from the dashboard. The
+// session holds its own copy of those records in context, so a row it has not
+// been woken for is a stale-copy hazard: the rows above the lease's
+// editsFiredThrough wake it exactly like queue rows, with a message that names
+// the paths to re-read. Both watermarks live on the same lease and survive
+// takeovers, so neither stream can wake twice for the same row.
+
+/** The change field names of one edit row, joined — the "(fields)" of the message. */
+export function editFields(row) {
+  return (Array.isArray(row?.changes) ? row.changes : [])
+    .map((c) => (c && typeof c.field === "string" ? c.field : null))
+    .filter(Boolean)
+    .join(", ");
+}
+
+/** The one-line system reminder for fresh edit rows. Paths and fields only. */
+export function formatEditsMessage(runId, rows) {
+  const shown = rows.slice(0, LISTED_ROWS).map((r) => `${r.path ?? "?"} (${editFields(r)})`).join(", ");
+  const more = rows.length > LISTED_ROWS ? `, +${rows.length - LISTED_ROWS} more` : "";
+  return (
+    `supervisor-wake: Mateusz edited ${rows.length} record(s) in run ${runId}: ${shown}${more}` +
+    ` — re-read them before acting: node $LA_ROOT/scripts/agent-records.mjs edits --run ${runId}`
+  );
+}
+
+/**
+ * Every valid edit row of the run, in file order. A torn or malformed line is
+ * skipped, not fatal — same discipline as readWakeQueue.
+ */
+export function readEdits(runId) {
+  const path = join(runDir(runId), "edits.jsonl");
+  if (!existsSync(path)) return [];
+  const rows = [];
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const row = JSON.parse(line);
+      if (row && typeof row.seq === "number" && Number.isFinite(row.seq)) rows.push(row);
+    } catch {
+      /* torn or malformed line — see the doc comment */
+    }
+  }
+  return rows;
+}
+
+/** Edit rows above the watermark, in seq order. */
+export function freshEdits(rows, editsFiredThrough = 0) {
+  return rows.filter((r) => r.seq > editsFiredThrough).sort((a, b) => a.seq - b.seq);
 }
 
 // Tolerant, like the guard: an empty or malformed payload is an unknown stop.
@@ -145,6 +202,7 @@ async function main() {
     startedAt,
     heartbeatAt: startedAt,
     firedThrough: seqOr0(existing?.firedThrough),
+    editsFiredThrough: seqOr0(existing?.editsFiredThrough),
   };
   // Without a lease there is no firedThrough to record, and a waker that cannot
   // record what it fired for could wake the session in a loop. Stand down.
@@ -173,15 +231,22 @@ async function main() {
       ackedThrough: readWakeAck(runId),
       firedThrough: seqOr0(lease.firedThrough),
     });
+    const freshEditsRows = freshEdits(readEdits(runId), seqOr0(lease.editsFiredThrough));
     const now = new Date().toISOString();
-    if (fresh.length) {
+    if (fresh.length || freshEditsRows.length) {
+      // Each watermark advances to the newest row SEEN IN ITS OWN STREAM — a
+      // fresh edit must never retire an unfired queue row, or the reverse.
       writeLease(runId, {
         ...lease,
         heartbeatAt: now,
         endedAt: now,
-        firedThrough: fresh[fresh.length - 1].seq,
+        firedThrough: fresh.length ? fresh[fresh.length - 1].seq : seqOr0(lease.firedThrough),
+        editsFiredThrough: freshEditsRows.length
+          ? freshEditsRows[freshEditsRows.length - 1].seq
+          : seqOr0(lease.editsFiredThrough),
       });
-      process.stderr.write(formatWakeMessage(runId, fresh) + "\n");
+      if (fresh.length) process.stderr.write(formatWakeMessage(runId, fresh) + "\n");
+      if (freshEditsRows.length) process.stderr.write(formatEditsMessage(runId, freshEditsRows) + "\n");
       return 2;
     }
 
