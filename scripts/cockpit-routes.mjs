@@ -30,6 +30,7 @@ import { answerGate, answerHold } from "./supervisor-gate.mjs";
 import { autoLabel } from "./decision-log.mjs";
 import { resolveRunsDir } from "./decision-analytics.mjs";
 import { recordAnswerRow } from "./agent-records.mjs";
+import { readCurrentRun } from "./supervisor-current-run.mjs";
 import { hostTokenPath, supervisorSessionPath, squadConfigDir } from "./fenix-paths.mjs";
 
 // The body cap for the cockpit POSTs: chat messages and gate/hold answers are
@@ -73,28 +74,44 @@ function wakerOf(runId) {
   };
 }
 
-/** Un-acked wake-queue rows across the given runs — read-only, never writes the ack. */
-function wakeBacklog(runIds) {
-  let sum = 0;
-  for (const runId of runIds) {
+/**
+ * The run the live Supervisor session belongs to (FOC-807): the current-run
+ * record's id when the pointer file exists, else the focus-ticket run — the
+ * pre-record heuristic, kept as the fallback. One resolution for every wake
+ * concern: the snapshot's waker/backlog and the Wake prompt all use it.
+ */
+function supRunIdOf(current, focus) {
+  return current?.runId ?? focus?.runId ?? null;
+}
+
+/** Un-acked wake-queue rows — { count, oldestAt }, oldestAt the oldest un-acked row's ts (null when none). Read-only, never writes the ack. When `supRunId` is known ONLY that run is counted; otherwise the 14-day sum over every recent run. */
+function wakeBacklog(runIds, supRunId = null) {
+  let count = 0;
+  let oldestAt = null;
+  for (const runId of supRunId ? [supRunId] : runIds) {
     const ackedThrough = readWakeAck(runId);
-    sum += readWakeQueue(runId).filter((r) => r.seq > ackedThrough).length;
+    for (const row of readWakeQueue(runId)) {
+      if (row.seq <= ackedThrough) continue;
+      count++;
+      const t = Date.parse(row.ts);
+      if (Number.isFinite(t) && (oldestAt === null || t < Date.parse(oldestAt))) oldestAt = row.ts;
+    }
   }
-  return sum;
+  return { count, oldestAt };
 }
 
 /** The drain prompt the Wake button sends: the waker's own wording, prefixed. */
 function wakePromptText() {
   const prefix = "[dashboard] Mateusz asked you to check waiting events: ";
   const drain = "drain now: node $LA_ROOT/scripts/supervisor-status.mjs --drain --tail 20";
-  const focus = focusTicket();
-  if (focus?.runId) {
+  const runId = supRunIdOf(readCurrentRun(), focusTicket());
+  if (runId) {
     const fresh = freshRows({
-      rows: readWakeQueue(focus.runId),
-      ackedThrough: readWakeAck(focus.runId),
-      firedThrough: readWakerLease(focus.runId)?.firedThrough ?? 0,
+      rows: readWakeQueue(runId),
+      ackedThrough: readWakeAck(runId),
+      firedThrough: readWakerLease(runId)?.firedThrough ?? 0,
     });
-    if (fresh.length) return prefix + formatWakeMessage(focus.runId, fresh);
+    if (fresh.length) return prefix + formatWakeMessage(runId, fresh);
   }
   return prefix + drain;
 }
@@ -229,6 +246,12 @@ async function buildCockpitSnapshot() {
   const needsYou = collectNeedsYou({ runIds });
   const children = await collectChildren({ runIds, probe });
   const focus = focusTicket({ runIds });
+  // FOC-807: the current-run record (<dataHome>/supervisor/current-run.json)
+  // pins the run the live session belongs to; without it the focus-ticket
+  // heuristic stands in, exactly as before.
+  const current = readCurrentRun();
+  const supRunId = supRunIdOf(current, focus);
+  const backlog = wakeBacklog(runIds, supRunId);
   const supervisor = {
     host: hostState,
     state: sessionInfo?.state ?? null,
@@ -237,10 +260,13 @@ async function buildCockpitSnapshot() {
     // Attached tmux clients — only when the host reported them (native mode
     // has no host to ask).
     ...(sessionInfo?.clients !== undefined ? { clients: sessionInfo.clients } : {}),
-    model: process.env.SUPERVISOR_MODEL || null,
+    model: current?.model || process.env.SUPERVISOR_MODEL || null,
     focus,
-    waker: focus ? wakerOf(focus.runId) : null,
-    wakeBacklog: wakeBacklog(runIds),
+    runId: supRunId,
+    runSource: current ? current.source : (focus ? "focus" : null),
+    waker: supRunId ? wakerOf(supRunId) : null,
+    wakeBacklog: backlog.count,
+    wakeOldestAt: backlog.oldestAt,
   };
   return redactDeep({
     supervisor,
