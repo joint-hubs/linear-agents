@@ -148,12 +148,12 @@ await test("classifyPath: each fixture path lands on its type and editability", 
   const verdict = classifyPath("verdicts/foc-1-round1.json");
   deepEq([verdict.type, verdict.editable, verdict.editableFields], ["verdict", false, []], "verdict");
 
-  for (const readonly of ["children.json", "wake-queue.jsonl", "wake-ack.json", "waker.json", "children/dev-1.jsonl", "evidence/run.log", "guard/state.json", "verdicts/foc-1-round1.annotations.jsonl", "gates/sub/deep.json"]) {
+  for (const readonly of ["children.json", "wake-queue.jsonl", "wake-ack.json", "waker.json", "children/dev-1.jsonl", "evidence/run.log", "guard/state.json", "gates/sub/deep.json"]) {
     const cls = classifyPath(readonly);
     deepEq([cls.type, cls.editable], ["other", false], `read-only: ${readonly}`);
   }
 
-  for (const hidden of ["edits.jsonl", "edits-seen.json", ".originals/gates/gate-dev-1-1.json"]) {
+  for (const hidden of ["edits.jsonl", "edits-seen.json", ".originals/gates/gate-dev-1-1.json", "verdicts/foc-1-round1.annotations.jsonl"]) {
     eq(classifyPath(hidden), null, `hidden: ${hidden}`);
   }
 });
@@ -176,7 +176,7 @@ await test("listRecords by run: lists records, skips hidden, carries the write c
   ]) {
     if (!(expected in byPath)) fail(`missing record: ${expected}`);
   }
-  for (const hidden of ["edits.jsonl", "edits-seen.json", ".originals/gates/gate-dev-1-1.json"]) {
+  for (const hidden of ["edits.jsonl", "edits-seen.json", ".originals/gates/gate-dev-1-1.json", "verdicts/foc-1-round1.annotations.jsonl"]) {
     if (hidden in byPath) fail(`hidden path must not be listed: ${hidden}`);
   }
 
@@ -347,6 +347,11 @@ await test("verdict write refused; annotate appends sidecar + audit row; bytes u
   eq(record.annotations[0].who, "dashboard", "annotation carries who");
   eq(readFileSync(join(rd, "verdicts", "foc-1-round1.json"), "utf8"), before, "verdict bytes unchanged");
   eq(shaOf("verdicts/foc-1-round1.json"), shaBefore, "verdict sha unchanged");
+
+  const listed = listRecords({ runId: RUN }).map((r) => r.path);
+  if (listed.includes("verdicts/foc-1-round1.annotations.jsonl")) {
+    fail("annotation sidecar must not be listed — readRecord folds it into the verdict");
+  }
 
   const row = readEdits({ runId: RUN }).find((r) => r.seq === ann.seq);
   eq(row.type, "verdict-annotation", "audit row type");

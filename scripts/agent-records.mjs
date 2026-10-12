@@ -20,7 +20,8 @@
 //   verdict         verdicts/*.json       never editable; annotatable via
 //                                         verdicts/<name>.annotations.jsonl
 //   other           everything else       listed read-only, never writable
-//   (hidden)        .originals/**, edits*.json*   not listed at all
+//   (hidden)        .originals/**, edits*.json*,   not listed at all
+//                   verdicts/*.annotations.jsonl
 //
 // `editableFields` semantics: a fixed list means exactly those dot-paths may
 // change; `null` means every field of the record except the type's immutable
@@ -179,11 +180,12 @@ export function classifyPath(rel, { runId } = {}) {
       return second.endsWith(".json") ? gateClass(second, runId) : { ...OTHER };
     }
     if (top === "verdicts") {
-      return second.endsWith(".json") && !second.endsWith(".annotations.jsonl")
+      if (second.endsWith(".annotations.jsonl")) return null; // the verdict's sidecar — readRecord folds it into the verdict
+      return second.endsWith(".json")
         ? { type: "verdict", editable: false, editableFields: [] }
         : { ...OTHER };
     }
-    return { ...OTHER }; // children/*.jsonl, evidence/*, guard/*, verdicts/*.annotations.jsonl…
+    return { ...OTHER }; // children/*.jsonl, evidence/*, guard/*…
   }
   return { ...OTHER }; // deeper than two levels is never a record
 }
