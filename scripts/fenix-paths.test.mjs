@@ -22,7 +22,9 @@ import {
   telemetryDbPath,
   liveTelemetryDbPath,
   rewardsHome,
+  squadConfigRoot,
   squadConfigDir,
+  projectsConfigPath,
   worktreeRoot,
   integrationTreePath,
 } from "./fenix-paths.mjs";
@@ -137,9 +139,30 @@ test("live store ignores LA_TELEMETRY_HOME and LA_TELEMETRY_DB but honours LA_DA
 
 console.log("\nfenix-paths: squad config and worktrees");
 
+test("squadConfigRoot: <repo>/agents by default, or LA_SQUAD_HOME", () => {
+  assert.equal(squadConfigRoot({}), join(REPO_ROOT, "agents"));
+  assert.equal(squadConfigRoot({ LA_SQUAD_HOME: join("s", "home") }), join("s", "home"));
+});
+
 test("squadConfigDir: agents/<squad> under the repo root, or LA_SQUAD_HOME", () => {
   assert.equal(squadConfigDir("dev", {}), join(REPO_ROOT, "agents", "dev"));
   assert.equal(squadConfigDir("dev", { LA_SQUAD_HOME: join("s", "home") }), join("s", "home", "dev"));
+});
+
+test("projectsConfigPath: LA_PROJECTS_FILE wins only when it exists; else the repo map", () => {
+  const repoMap = join(REPO_ROOT, "config", "projects.json");
+  // Set and present — the user-owned file wins.
+  assert.equal(
+    projectsConfigPath({ LA_PROJECTS_FILE: join("u", "projects.json") }, () => true),
+    join("u", "projects.json"),
+  );
+  // Set but missing — fall back to the repo's map.
+  assert.equal(
+    projectsConfigPath({ LA_PROJECTS_FILE: join("u", "projects.json") }, () => false),
+    repoMap,
+  );
+  // Unset — the repo's map.
+  assert.equal(projectsConfigPath({}, () => true), repoMap);
 });
 
 test("worktreeRoot: ../la-wt/<repo> by default, or LA_WORKTREE_HOME/<repo>", () => {

@@ -37,8 +37,9 @@
 import { createReadStream, existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { squadConfigRoot } from "./fenix-paths.mjs";
 
 const COUNTERS = [
   "input_tokens",
@@ -229,8 +230,9 @@ function finishStats(stats) {
 
 function defaultRoot() {
   if (process.env.LA_TRANSCRIPT_ROOT) return process.env.LA_TRANSCRIPT_ROOT;
-  // The repo this script lives in: <repo>/scripts/*.mjs -> <repo>/agents
-  return join(dirname(fileURLToPath(import.meta.url)), "..", "agents");
+  // The squads' transcript root — LA_SQUAD_HOME when set, else <repo>/agents
+  // (scripts/fenix-paths.mjs).
+  return squadConfigRoot();
 }
 
 function parseArgs(argv) {

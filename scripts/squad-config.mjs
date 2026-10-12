@@ -27,6 +27,7 @@ import { randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { atomicWriteJSON } from "./utils.mjs";
+import { squadConfigRoot } from "./fenix-paths.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -38,6 +39,13 @@ const __dirname = dirname(__filename);
 function repoRoot(custom) {
   if (custom) return custom;
   return join(__dirname, "..");
+}
+
+// Squad dirs for a root: the default repo root routes through squadConfigRoot()
+// so reads and writes land where squads actually live (LA_SQUAD_HOME); an
+// explicit custom root keeps its own agents/ below it.
+function agentsRootFor(r) {
+  return r === repoRoot() ? squadConfigRoot() : join(r, "agents");
 }
 
 /** Detect line ending of a file: "\r\n" or "\n". */
@@ -333,7 +341,7 @@ export function readSquadConfig(root) {
     const lead = readLeadFromBat(mainBat);
     const provider = readProviderFromBat(mainBat);
 
-    const squadDir = join(r, "agents", squad);
+    const squadDir = join(agentsRootFor(r), squad);
     const agents = readAgentConfigs(squadDir);
 
     squads[squad] = { lead, provider, leadFiles, agents };
@@ -996,8 +1004,7 @@ export function writeSquadConfig(patch, root, { dryRun = false } = {}) {
       if (squadPatch.agents) {
         for (const [role, value] of Object.entries(squadPatch.agents)) {
           const agentFile = join(
-            r,
-            "agents",
+            agentsRootFor(r),
             squad,
             "agents",
             `${role}.md`
