@@ -3,6 +3,10 @@
 set -eu
 cd "$(dirname "$0")"
 
+# Git Bash (MSYS) rewrites /opt/... arguments into Windows paths before they
+# reach docker.exe; container paths must pass through untouched. No-op elsewhere.
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+
 PORT="${FENIX_PORT:-4600}"
 API_SERVICE="fenix-api"
 ENTRYPOINT="/opt/fenix/docker/entrypoint.sh"
@@ -276,6 +280,8 @@ cmd_up() {
     xdg-open "$url" >/dev/null 2>&1 || true
   elif command -v open >/dev/null 2>&1; then
     open "$url" >/dev/null 2>&1 || true
+  elif command -v cmd.exe >/dev/null 2>&1; then
+    cmd.exe /c start "" "$url" >/dev/null 2>&1 || true
   fi
 }
 
