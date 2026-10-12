@@ -60,6 +60,8 @@ REM Caught by running the launcher with a shim; a read-through would not have.
 set "ANTHROPIC_MODEL=%SUPERVISOR_MODEL%"
 REM Children inherit this so they can find the run directory without being told.
 if not defined LA_SUPERVISOR_RUN set "LA_SUPERVISOR_RUN=%RUN_ID%"
+REM FOC-807: record the current run so the dashboard reads the same truth.
+node "%ROOT%\scripts\supervisor-current-run.mjs" record "%LA_SUPERVISOR_RUN%" --model "%ANTHROPIC_MODEL%" >nul 2>&1 || echo [supervisor] could not record the current run for the dashboard ^(supervisor-current-run.mjs record^)
 echo [supervisor] CLAUDE_CONFIG_DIR=%CLAUDE_CONFIG_DIR%
 echo [supervisor] main=%ANTHROPIC_MODEL% small_fast=%ANTHROPIC_SMALL_FAST_MODEL%
 echo [supervisor] run=%LA_SUPERVISOR_RUN%  issue=%SOURCE_PATH%
