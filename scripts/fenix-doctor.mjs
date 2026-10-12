@@ -22,6 +22,7 @@ const REQUIRED_TOOLS = [
   ['git', ['--version']],
   ['claude', ['--version']],
   ['codegraph', ['--version']],
+  ['gh', ['--version']], // squads call gh (FOC-776)
 ];
 const OPTIONAL_TOOLS = [
   ['semgrep', ['--version']],

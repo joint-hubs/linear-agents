@@ -17,8 +17,11 @@ x-fenix: &fenix
     - openrouter_api_key
     - linear_api_key
     - github_token
+  environment:
+    LA_PROJECTS_FILE: /fenix-config/projects.json
   volumes:
     - fenix-data:/data
+    - ./.fenix/config:/fenix-config
   restart: unless-stopped
 
 services:
@@ -40,9 +43,13 @@ services:
     stdin_open: true
     tty: true
     healthcheck:
-      # The image HEALTHCHECK probes the API, which this container does not run.
-      # FOC-776 adds a real supervisor liveness check.
-      disable: true
+      # Liveness: the data volume is writable and the API answers over the
+      # compose network (the Supervisor's telemetry and dashboard depend on it).
+      test: ["CMD", "sh", "-c", "test -w /data/state/supervisor && node -e \"fetch('http://fenix-api:7331/api/telemetry/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       fenix-api:
         condition: service_healthy

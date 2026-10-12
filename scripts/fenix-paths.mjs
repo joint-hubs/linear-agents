@@ -7,6 +7,7 @@
 // it at the /data volume.
 //
 // Functions take (env, platform) so tests can pin both; callers use defaults.
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,8 +42,21 @@ export function rewardsHome(env = process.env, platform = process.platform) {
   return env.LA_REWARDS_HOME || join(dataHome(env, platform), "rewards");
 }
 
+// Root of the per-squad config dirs (LA_SQUAD_HOME, default <repo>/agents).
+export function squadConfigRoot(env = process.env) {
+  return env.LA_SQUAD_HOME || join(REPO_ROOT, "agents");
+}
+
 export function squadConfigDir(squad, env = process.env) {
-  return join(env.LA_SQUAD_HOME || join(REPO_ROOT, "agents"), squad);
+  return join(squadConfigRoot(env), squad);
+}
+
+// The Linear project → repo map. A user-owned file (LA_PROJECTS_FILE — in the
+// container /fenix-config/projects.json) wins when it exists; otherwise the
+// repo's config/projects.json.
+export function projectsConfigPath(env = process.env, exists = existsSync) {
+  if (env.LA_PROJECTS_FILE && exists(env.LA_PROJECTS_FILE)) return env.LA_PROJECTS_FILE;
+  return join(REPO_ROOT, "config", "projects.json");
 }
 
 // Child worktrees: siblings of the repo by default (../la-wt/<repo>/<branch>).

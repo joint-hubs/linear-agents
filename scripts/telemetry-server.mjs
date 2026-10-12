@@ -17,6 +17,7 @@ import { dirname, join, extname, resolve } from 'node:path';
 // directly. No MCP, no new client (control-plane-plan §3.1, DoD "reuse
 // scripts/linear-query.mjs" = reuse the Linear query layer).
 import { loadEnv, graphql, chooseApiKey } from './linear-client.mjs';
+import { projectsConfigPath } from './fenix-paths.mjs';
 import * as telemetryStore from './telemetry-store.mjs';
 import { backfill, ingestKnownRuns } from './telemetry-ingest.mjs';
 // The state+labels -> next-node matcher. Shared with supervisor-triage.mjs so
@@ -636,13 +637,14 @@ function expandEnvVarsDeep(value) {
 }
 
 function loadProjectsConfig() {
+  const path = projectsConfigPath();
   try {
-    const raw = readFileSyncNode(join(root, 'config', 'projects.json'), 'utf8');
+    const raw = readFileSyncNode(path, 'utf8');
     const parsed = JSON.parse(raw);
     const projects = Array.isArray(parsed?.projects) ? parsed.projects : [];
     return projects.map(expandEnvVarsDeep);
   } catch (err) {
-    console.error('[launch] config/projects.json not loaded —', err.message);
+    console.error('[launch] projects map not loaded —', path, err.message);
     return [];
   }
 }

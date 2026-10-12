@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { KICKOFF_TEMPLATES } from "./launch.mjs";
 import { readSquadConfig } from "./squad-config.mjs";
+import { squadConfigRoot } from "./fenix-paths.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -26,6 +27,13 @@ import { readSquadConfig } from "./squad-config.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const defaultRoot = join(__dir, "..");
+
+// Squad dirs for a prompt root: the default repo root routes through
+// squadConfigRoot() so dashboard prompt edits land where squads actually read
+// them (LA_SQUAD_HOME); an external root keeps its own agents/ below it.
+function agentsRootFor(r) {
+  return r === defaultRoot ? squadConfigRoot() : join(r, "agents");
+}
 
 // Read from squad-config rather than listed again. Eight copies of this array
 // are why the Supervisor was invisible in the dashboard for as long as it
@@ -170,7 +178,7 @@ export function buildPromptTree(root) {
   const squads = {};
 
   for (const squad of SQUADS) {
-    const squadDir = join(r, "agents", squad);
+    const squadDir = join(agentsRootFor(r), squad);
     const roles = readSquadRoles(squadDir);
 
     squads[squad] = {
@@ -205,7 +213,7 @@ export function readRoleDoc(squad, role, root) {
   const roleCheck = validateRole(role);
   if (roleCheck.error) return { error: roleCheck.error };
 
-  const filePath = join(r, "agents", squad, "agents", `${role}.md`);
+  const filePath = join(agentsRootFor(r), squad, "agents", `${role}.md`);
   if (!existsSync(filePath)) {
     return { error: "not found" };
   }
@@ -239,7 +247,7 @@ export function readLeadDoc(squad, root) {
   const squadCheck = validateSquad(squad);
   if (squadCheck.error) return { error: squadCheck.error };
 
-  const filePath = join(r, "agents", squad, "CLAUDE.md");
+  const filePath = join(agentsRootFor(r), squad, "CLAUDE.md");
   if (!existsSync(filePath)) {
     return { error: "not found" };
   }
@@ -478,7 +486,7 @@ export function resolvePromptRefs(root, opts = {}) {
     }
 
     // Every role doc in the squad.
-    for (const { role: roleName } of readSquadRoles(join(r, "agents", squad))) {
+    for (const { role: roleName } of readSquadRoles(join(agentsRootFor(r), squad))) {
       const roleRel = `agents/${squad}/agents/${roleName}.md`;
       const roleSt = statRef(r, roleRel);
       if (!roleSt) continue;

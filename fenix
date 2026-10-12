@@ -25,8 +25,11 @@ Usage: fenix [command]
   logs [service]   follow logs (default: all services)
   doctor           host preflight plus in-container diagnostics
   keys             run the key wizard (enter or replace API keys)
-  attach           attach to the fenix-supervisor container
+  attach [--new]   attach to the Supervisor (resumes its last session; --new starts fresh)
   shell [service]  open a shell in a service (default: fenix-supervisor)
+  repo add <url|owner/name> [--project <Linear project>]
+                   clone a repository into the workspaces volume (optionally map a Linear project)
+  repo list        repositories in the workspaces volume and the project map
   update           git pull --ff-only, rebuild with fresh base images, restart
   test [args]      lint and the full test suite on Linux, inside the image
 
@@ -267,6 +270,9 @@ cmd_up() {
     key_wizard
   fi
 
+  # The project map lives in a host dir mounted at /fenix-config; create it
+  # first so Docker does not create it root-owned.
+  mkdir -p .fenix/config
   printf 'Building and starting the stack...\n'
   docker compose up -d --build
 
@@ -349,7 +355,7 @@ case "$cmd" in
     cmd_doctor
     ;;
   attach)
-    exec docker compose exec fenix-supervisor "$ENTRYPOINT" supervisor
+    exec docker compose exec fenix-supervisor "$ENTRYPOINT" supervisor "$@"
     ;;
   shell)
     svc="${1:-fenix-supervisor}"
@@ -359,6 +365,26 @@ case "$cmd" in
     git pull --ff-only
     docker compose build --pull
     exec docker compose up -d
+    ;;
+  repo)
+    sub="${1:-}"
+    if [ $# -gt 0 ]; then shift; fi
+    case "$sub" in
+      add)
+        if [ $# -lt 1 ]; then
+          printf 'usage: fenix repo add <url|owner/name> [--project <Linear project>]\n' >&2
+          exit 2
+        fi
+        exec docker compose exec -T fenix-supervisor "$ENTRYPOINT" repo-add "$@"
+        ;;
+      list)
+        exec docker compose exec -T fenix-supervisor "$ENTRYPOINT" repo-list
+        ;;
+      *)
+        printf 'usage: fenix repo add <url|owner/name> [--project <Linear project>] | fenix repo list\n' >&2
+        exit 2
+        ;;
+    esac
     ;;
   test)
     cmd_test "$@"
