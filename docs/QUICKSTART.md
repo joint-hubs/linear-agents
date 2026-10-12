@@ -87,6 +87,7 @@ What `fenix up` does:
 | `fenix attach` | start the Supervisor (Claude Code) in `fenix-supervisor` |
 | `fenix shell [service]` | shell in a service (default: `fenix-supervisor`) |
 | `fenix update` | `git pull --ff-only`, rebuild with fresh base images, restart |
+| `fenix test [pattern]` | lint and the test suite on Linux, inside the image, on a throwaway copy of this checkout (uncommitted changes included) — the same job CI runs on every PR |
 
 `fenix attach` runs Claude Code inside `fenix-supervisor` in your terminal —
 exit the session and you are back on the host; the container keeps idling.

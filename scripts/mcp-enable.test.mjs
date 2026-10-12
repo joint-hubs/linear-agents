@@ -24,7 +24,11 @@ let passed = 0;
 const failures = [];
 const cleanup = [];
 
-function test(name, fn) {
+function test(name, fn, winOnly) {
+  if (winOnly && process.platform !== "win32") {
+    console.log(`  SKIP ${name} — ${winOnly}`);
+    return;
+  }
   try {
     fn();
     passed++;
@@ -165,7 +169,7 @@ test("a backslash-spelled existing key is MIGRATED to the CLI-canonical key — 
   const entry = cfg.projects[canonical];
   if (JSON.stringify(entry.history) !== JSON.stringify([{ display: "keep me" }])) fail("carried fields were lost");
   if (JSON.stringify(entry.enabledMcpjsonServers) !== JSON.stringify(["codegraph"])) fail("approval missing");
-});
+}, "backslash-spelled project keys exist only on Windows (path.resolve has no backslashes on POSIX)");
 
 test("a case-variant existing key is migrated too — the CLI key is case-sensitive", () => {
   // Also measured: a lowercased key is invisible; nothing lowercases the key

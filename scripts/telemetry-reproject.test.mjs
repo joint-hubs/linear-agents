@@ -20,7 +20,8 @@ const failures = [];
 const temp = mkdtempSync(join(tmpdir(), "telemetry-reproject-"));
 const db = openTelemetryDb(join(temp, "telemetry.sqlite"));
 
-function test(name, fn) {
+function test(name, fn, winOnly) {
+  if (winOnly && process.platform !== "win32") { console.log(`  SKIP ${name} — ${winOnly}`); return; }
   try { fn(); passed++; console.log(`  PASS ${name}`); }
   catch (error) { failed++; failures.push(`${name}: ${error.message}`); console.log(`  FAIL ${name}: ${error.message}`); }
 }
@@ -168,7 +169,7 @@ test("11. the same file under two spellings is one fact, not two", () => {
   eq(usageRows(runId), 1, "usage_facts rows for one turn recorded twice");
   const run = queryRuns(db, { runId })[0];
   eq(run.totals.inputTokens, 1000, "tokens must not double");
-});
+}, "canonicalSourcePath() is platform-native by design; the C:\\ vs C:/ spellings only exist on Windows");
 
 test("12. canonicalisation does not merge genuinely different files", () => {
   const runId = "run-distinct";

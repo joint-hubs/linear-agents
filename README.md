@@ -128,6 +128,15 @@ node scripts\<file>.test.mjs
 
 The wrapper runs every `scripts/*.test.mjs` in order and reports a summary. Each file is self-contained (just `node`).
 
+On Linux, inside the Fenix image — the same job CI (`.github/workflows/linux.yml`) runs on every PR:
+
+```bash
+./fenix test                 # lint + full suite on a throwaway copy of this checkout
+./fenix test linear-client   # one pattern, as with test-all
+```
+
+Windows-only cases (backslash path spellings, `.cmd` shims) print `SKIP … — <reason>` on Linux.
+
 ## License
 
 [MIT](LICENSE) — Copyright (c) 2026 Mateusz Stachowicz.
