@@ -22,9 +22,9 @@ ARG CLAUDE_CODE_VERSION=2.1.296
 ARG CODEGRAPH_VERSION=1.6.0
 ARG SEMGREP_VERSION=1.172.0
 
-# System deps: git/gh/curl for tooling (squads call `gh`), procps for `ps` (stability tests), tini as init, python3 for semgrep, tmux for the Supervisor session host (FOC-783).
+# System deps: git/gh/curl for tooling (squads call `gh`), procps for `ps` (stability tests), tini as init, python3 for semgrep, tmux for the Supervisor session host (FOC-783), passwd for usermod/groupmod (FOC-803 uid match) — not in bookworm-slim.
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends git gh ca-certificates curl tini procps tmux python3 python3-venv python3-pip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git gh ca-certificates curl tini procps tmux passwd python3 python3-venv python3-pip && rm -rf /var/lib/apt/lists/*
 
 # Python tools (semgrep, uv) in an isolated venv, on PATH ahead of system python.
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" uv
@@ -36,6 +36,29 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@colbymch
 # App owned by `node` from the start, so no `chown -R` layer is needed
 # (a chown -R would copy the whole tree into a new layer).
 RUN mkdir -p /opt/fenix /data && chown node:node /opt/fenix /data
+
+# FOC-803: build the image for the host user's uid/gid (default: the image's
+# node user, 1000:1000). On a Linux host with another uid the bind-mounted host
+# files (.fenix/secrets, .fenix/config at /fenix-config) would otherwise be
+# unreadable/unwritable inside the container. Kept as late as possible so a
+# different uid only rebuilds from here — but it must run BEFORE the
+# COPY --chown=node:node steps below, which resolve `node` against /etc/passwd.
+ARG FENIX_UID=1000
+ARG FENIX_GID=1000
+RUN if [ "${FENIX_UID}:${FENIX_GID}" != "$(id -u node):$(id -g node)" ]; then \
+      if [ "$FENIX_UID" = "0" ]; then \
+        echo "FENIX_UID=0 refused — Fenix never runs as root; run ./fenix as your normal user" >&2; \
+        exit 1; \
+      fi; \
+      if [ "$FENIX_GID" = "0" ]; then \
+        echo "FENIX_GID=0 refused — Fenix never runs as root; run ./fenix as your normal user" >&2; \
+        exit 1; \
+      fi; \
+      groupmod -o -g "$FENIX_GID" node \
+      && usermod -o -u "$FENIX_UID" -g "$FENIX_GID" node \
+      && chown -R node:node /home/node /opt/fenix /data; \
+    fi
+
 WORKDIR /opt/fenix
 USER node
 
@@ -52,6 +75,7 @@ RUN cd ui && npm run build && rm -rf node_modules && chmod +x /opt/fenix/docker/
 
 ENV LA_ROOT=/opt/fenix \
     LA_TELEMETRY_HOME=/data/telemetry \
+    LA_STATE_ROOT=/data/state \
     LA_SUPERVISOR_STATE_HOME=/data/state/supervisor \
     LA_DATA_HOME=/data \
     LA_SQUAD_HOME=/data/agents \

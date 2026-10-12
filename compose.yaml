@@ -10,6 +10,14 @@ x-fenix: &fenix
   build:
     context: .
     dockerfile: Dockerfile
+    args:
+      # FOC-803: the launcher sets these on Linux from id -u/-g, so the image
+      # is built for the host user and the bind-mounted host files
+      # (.fenix/secrets, .fenix/config) stay readable inside the container.
+      # The launcher warns and leaves them unset for root; Docker Desktop
+      # (macOS/Windows) maps file ownership itself.
+      FENIX_UID: ${FENIX_UID:-1000}
+      FENIX_GID: ${FENIX_GID:-1000}
   env_file:
     - path: ./.fenix/fenix.env
       required: false

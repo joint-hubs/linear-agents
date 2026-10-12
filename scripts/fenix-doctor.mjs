@@ -16,6 +16,12 @@ import { squadConfigDir } from './fenix-paths.mjs';
 const GIB = 1024 ** 3;
 const TOOL_FIX = 'rebuild the image: fenix update';
 const VOLUME_FIX = 'check the fenix-data volume';
+const UID_FIX = 'rebuild the image for your user: ./fenix up (sets FENIX_UID/FENIX_GID from id -u/-g)';
+// FOC-803: rebuilding the image re-owns the bind mounts but NOT the named
+// data volume — it keeps the uid it was first created with, so a rebuild for
+// a new uid leaves /data unwritable. The recovery is a one-time chown.
+const VOLUME_REOWN_FIX =
+  'the data volume belongs to another uid — re-own it once: docker run --rm -u 0 -v fenix_fenix-data:/data --entrypoint chown fenix:dev -R $(id -u):$(id -g) /data';
 
 // Tools the agent runtime needs (missing → FAIL) vs optional analysis/scan
 // tooling (missing → WARN: security scan or analysis degrade, not a dead box).
@@ -81,6 +87,10 @@ function checkKeys(env) {
 }
 
 function checkDirs(env, fsImpl) {
+  // A failing writable-dir check for a path under /data is the FOC-803 volume
+  // uid case in the container, not a generic volume problem — name the re-own.
+  const dirFix = (dir) =>
+    env.FENIX_IN_CONTAINER === '1' && (dir === '/data' || dir.startsWith('/data/')) ? VOLUME_REOWN_FIX : VOLUME_FIX;
   return DIRS.map(([envName, fallback]) => {
     const dir = env[envName] || fallback;
     // Doctor must not create directories on a dev machine — only the container
@@ -91,7 +101,7 @@ function checkDirs(env, fsImpl) {
         fsImpl.accessSync(dir, fsImpl.constants.W_OK);
         return { name: `dir ${envName}`, status: 'ok', detail: dir };
       } catch (err) {
-        return { name: `dir ${envName}`, status: 'fail', detail: `${dir} (${err.message})`, fix: VOLUME_FIX };
+        return { name: `dir ${envName}`, status: 'fail', detail: `${dir} (${err.message})`, fix: dirFix(dir) };
       }
     }
     if (fsImpl.existsSync(dir)) {
@@ -99,7 +109,7 @@ function checkDirs(env, fsImpl) {
         fsImpl.accessSync(dir, fsImpl.constants.W_OK);
         return { name: `dir ${envName}`, status: 'ok', detail: dir };
       } catch (err) {
-        return { name: `dir ${envName}`, status: 'fail', detail: `${dir} (${err.message})`, fix: VOLUME_FIX };
+        return { name: `dir ${envName}`, status: 'fail', detail: `${dir} (${err.message})`, fix: dirFix(dir) };
       }
     }
     return { name: `dir ${envName}`, status: 'warn', detail: `${dir} (missing — created on first start inside the container)` };
@@ -166,13 +176,68 @@ function checkCockpitHooks(env, fsImpl) {
   return { name: 'cockpit hooks', status: 'ok', detail: 'session + edits hooks present' };
 }
 
+// FOC-803: the image must be built for the host user's uid/gid. When it was
+// not, the bind-mounted host files keep their host ownership and stay
+// unreadable/unwritable inside the container: the Compose secrets (written
+// 0600 by `fenix keys` on the host) and the project-map directory mounted at
+// /fenix-config. Both checks run only in the container; paths are injectable
+// so tests can point them at temp files. Exported for those tests.
+const DEFAULT_SECRETS_DIR = '/run/secrets';
+
+/** Every file under secretsDir that exists must be readable by this process. */
+export function checkSecretsReadable(env, fsImpl, secretsDir = DEFAULT_SECRETS_DIR) {
+  let names;
+  try {
+    names = fsImpl.readdirSync(secretsDir);
+  } catch (err) {
+    // No secrets at all yet — checkKeys already reports the missing keys.
+    return { name: 'secrets readable', status: 'warn', detail: `${secretsDir} not listable (${err.message})`, fix: 'fenix keys' };
+  }
+  const unreadable = names.filter((name) => {
+    try {
+      fsImpl.accessSync(path.join(secretsDir, name), fsImpl.constants.R_OK);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (unreadable.length) {
+    return {
+      name: 'secrets readable',
+      status: 'fail',
+      detail: `${unreadable.length} of ${names.length} file(s) under ${secretsDir} not readable: ${unreadable.join(', ')}`,
+      fix: UID_FIX,
+    };
+  }
+  return { name: 'secrets readable', status: 'ok', detail: `${names.length} file(s) readable under ${secretsDir}` };
+}
+
+/** LA_PROJECTS_FILE's directory exists but must also be writable. */
+export function checkProjectsDir(env, fsImpl, projectsFile) {
+  const file = projectsFile || env.LA_PROJECTS_FILE || '/fenix-config/projects.json';
+  const dir = path.dirname(file);
+  try {
+    fsImpl.statSync(dir);
+  } catch (err) {
+    // The host dir is created by `fenix up`; a missing one is a setup state,
+    // not the uid mismatch this check exists for.
+    return { name: 'config writable', status: 'warn', detail: `${dir} missing (${err.message})`, fix: 'fenix up' };
+  }
+  try {
+    fsImpl.accessSync(dir, fsImpl.constants.W_OK);
+    return { name: 'config writable', status: 'ok', detail: dir };
+  } catch (err) {
+    return { name: 'config writable', status: 'fail', detail: `${dir} not writable (${err.message})`, fix: UID_FIX };
+  }
+}
+
 /**
  * Run every check in order. Dependencies are injectable so future tests can
  * pass fakes: spawn (spawnSync-shaped), fsImpl (mkdirSync/accessSync/
  * constants/statfsSync), fetchImpl (fetch-shaped), env, withApi.
  * @returns {Promise<Array<{ name, status: 'ok'|'warn'|'fail', detail, fix? }>>}
  */
-export async function runChecks({ env = process.env, withApi = false, spawn = spawnSync, fsImpl = fs, fetchImpl = fetch } = {}) {
+export async function runChecks({ env = process.env, withApi = false, spawn = spawnSync, fsImpl = fs, fetchImpl = fetch, secretsDir, projectsFile } = {}) {
   const checks = [
     checkNode(),
     ...REQUIRED_TOOLS.map(([name, args]) => checkTool(spawn, name, args, 'fail')),
@@ -182,6 +247,11 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     checkDisk(env, fsImpl),
     checkCockpitHooks(env, fsImpl),
   ];
+  // FOC-803 uid checks: only meaningful in the container, where the process
+  // runs as the image's user against host-owned bind mounts.
+  if (env.FENIX_IN_CONTAINER === '1') {
+    checks.push(checkSecretsReadable(env, fsImpl, secretsDir), checkProjectsDir(env, fsImpl, projectsFile));
+  }
   if (withApi) checks.push(await checkApi(fetchImpl, env));
   return checks;
 }
