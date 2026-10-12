@@ -58,7 +58,9 @@ cd linear-agents
 
 `fenix up` checks Docker, asks once for the OpenRouter, Linear and GitHub keys,
 builds the image and opens the dashboard at http://localhost:4600. `./fenix attach`
-starts the Supervisor. Details in [docs/QUICKSTART.md](docs/QUICKSTART.md).
+attaches to the Supervisor — it already runs in the container (the Cockpit's
+Chat and Terminal talk to the same session). Details in
+[docs/QUICKSTART.md](docs/QUICKSTART.md).
 
 ### Native Windows (without Docker)
 

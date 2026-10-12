@@ -1464,6 +1464,49 @@ export function buildChildSettings(...baseSettings) {
   return { permissions: { deny } };
 }
 
+// ── redaction (moved here from supervisor-status.mjs, FOC-783) ───────────────
+//
+// Minimal denylist, applied ONLY to text shown to the operator (the status
+// display, the Cockpit routes). The tee on disk stays unredacted — it is local
+// and gitignored, and a scrubbed tee would be useless for debugging the one
+// case where the secret matters.
+//
+// This is not a secret scanner and does not pretend to be: it catches the shapes
+// that actually show up in agent output (a key echoed by a failing curl, an
+// Authorization header in a stack trace), not every possible credential.
+const REDACTIONS = [
+  [/\bsk-[A-Za-z0-9_-]{6,}/g, "sk-***"],
+  [/\blin_api_[A-Za-z0-9_-]{6,}/g, "lin_api_***"],
+  [/\b(api[_-]?key)\s*[=:]\s*\S+/gi, "$1=***"],
+  [/\bBearer\s+\S+/gi, "Bearer ***"],
+  [/\b(password)\s*[=:]\s*\S+/gi, "$1=***"],
+];
+
+export function redact(text) {
+  let out = String(text ?? "");
+  for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
+  return out;
+}
+
+/**
+ * redact over a whole structure: every string is redacted, recursing through
+ * arrays and plain objects; everything else passes through unchanged (null
+ * stays null, numbers/booleans/dates are returned as they are). The result is
+ * a NEW structure — the caller's object is never mutated. Cycle-safe (a seen
+ * object comes back by reference, which cannot happen for JSON-sourced data
+ * anyway, but the Cockpit feeds this untrusted-shaped state).
+ */
+export function redactDeep(value, seen = new WeakSet()) {
+  if (typeof value === "string") return redact(value);
+  if (value === null || typeof value !== "object") return value;
+  if (seen.has(value)) return value;
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((v) => redactDeep(v, seen));
+  const out = {};
+  for (const [key, v] of Object.entries(value)) out[key] = redactDeep(v, seen);
+  return out;
+}
+
 export function readJsonOr(path, fallback) {
   if (!existsSync(path)) return fallback;
   try {

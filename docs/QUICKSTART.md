@@ -1,18 +1,25 @@
 # Fenix quick start (Docker)
 
 Fenix runs as two Docker containers: `fenix-api` (dashboard + telemetry API)
-and `fenix-supervisor` (the Supervisor, idle until you attach to it).
+and `fenix-supervisor` (the Supervisor, running permanently in a tmux session
+inside the container).
 Everything needed at runtime is inside the image `fenix:dev` (~2 GB on disk):
 Node 22, git, Claude Code 2.1.296, CodeGraph 1.6.0, semgrep 1.172.0, uv,
 Python 3.11. The container runs as the non-root user `node`.
 
 ## What you get
 
-- A dashboard at http://localhost:4600 — telemetry, runs, prompts, configuration.
+- A dashboard at http://localhost:4600 — the home page is the **Cockpit**
+  (FOC-783): the Supervisor panel with **Chat** (default) and **Terminal** on
+  the same tmux session, the Needs-you inbox (pending gates, approvals, holds,
+  problems) and the live children. Chat refuses slash commands (send them
+  through the Terminal) and refuses while the Supervisor shows a dialog —
+  answer the dialog in the Terminal. Chat and Terminal are Docker-only;
+  natively (without Docker) the Cockpit shows the inbox and children only.
 - The telemetry API on the same port, published on the host's 127.0.0.1 only.
-- The Supervisor (Claude Code) running in the `fenix-supervisor` container;
-  `fenix attach` starts a session with it. Supervisor chat in the dashboard is
-  not yet in 1.0 (FOC-783) — until then `fenix attach` is the way to talk to it.
+- The Supervisor (Claude Code) running permanently in the `fenix-supervisor`
+  container; `fenix attach` attaches to it, Ctrl-b d detaches — it keeps
+  running.
 - The API keys stay on the host in `.fenix/secrets/` and are mounted into the
   containers as Compose secrets — never baked into the image, never printed.
 - All mutable state (telemetry, Supervisor state, workspaces) lives in the
@@ -24,9 +31,9 @@ transcripts survive `fenix down` and `fenix update` (they are on the data
 volume). If the supervisor container stops mid-turn, the interrupted child is
 marked `crashed` (reason `container-restart`) on the next start, so the
 Supervisor can resume it with a follow-up. CodeGraph MCP is approved for every
-squad on the volume. Known gaps: model-routing edits from the dashboard are not
-kept across `fenix update` (FOC-786); Supervisor chat in the dashboard is not
-yet in 1.0 (FOC-783).
+squad on the volume. The Supervisor chat and terminal in the dashboard (the
+Cockpit) work in Docker. Known gaps: model-routing edits from the dashboard are
+not kept across `fenix update` (FOC-786).
 
 ## Before you start
 
@@ -129,15 +136,18 @@ maps a Linear issue's project to a repository through it:
 | `fenix keys` | key wizard: enter or replace keys |
 | `fenix repo add <url\|owner/name> [--project <Linear project>]` | clone a repository into the workspaces volume (optionally map a Linear project) |
 | `fenix repo list` | repositories in the workspaces volume and the project map |
-| `fenix attach [--new]` | attach to the Supervisor (Claude Code) in `fenix-supervisor`; resumes its last session, `--new` starts a fresh one |
+| `fenix attach [--new]` | attach to the Supervisor (Claude Code) running in tmux in `fenix-supervisor`; Ctrl-b d detaches and the Supervisor keeps running, `--new` starts a fresh session (kills the current one) |
 | `fenix shell [service]` | shell in a service (default: `fenix-supervisor`) |
 | `fenix update` | `git pull --ff-only`, rebuild with fresh base images, restart |
 | `fenix test [pattern]` | lint and the test suite on Linux, inside the image, on a throwaway copy of this checkout (uncommitted changes included) — the same job CI runs on every PR |
 
-`fenix attach` runs Claude Code inside `fenix-supervisor` in your terminal —
-exit the session and you are back on the host; the container keeps idling.
-`fenix down` removes the containers but keeps the data volume, so telemetry
-and Supervisor state survive a recreate; a later `fenix up` reattaches them.
+The Supervisor runs permanently inside the container, in a tmux session.
+`fenix attach` attaches your terminal to it — Ctrl-b d detaches and you are
+back on the host while the Supervisor keeps running (the Cockpit's Chat and
+Terminal stay with it). `fenix attach --new` kills the current session and
+starts a fresh one. `fenix down` removes the containers but keeps the data
+volume, so telemetry and Supervisor state survive a recreate; a later
+`fenix up` reattaches them.
 
 ## Where things live
 
@@ -207,6 +217,11 @@ Runs `git pull --ff-only`, rebuilds the image with fresh base images
 (`docker compose build --pull`) and restarts the stack. Keys and the data
 volume are untouched; on start the squad config is re-seeded from the image
 with the same dpkg rule as every other start (see "Where things live").
+
+Upgrade note (FOC-783): if `fenix doctor` warns about the **Cockpit hooks** —
+your `agents/supervisor/settings.json` was edited locally and the image now
+ships a version with them — merge the Cockpit hooks from the
+`settings.json.fenix-new` twin parked next to it, then delete the twin.
 
 ## Uninstall
 

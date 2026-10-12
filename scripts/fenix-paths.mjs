@@ -42,6 +42,20 @@ export function rewardsHome(env = process.env, platform = process.platform) {
   return env.LA_REWARDS_HOME || join(dataHome(env, platform), "rewards");
 }
 
+// The Supervisor session file — what the frontman's Claude Code session is
+// doing right now (state + last notification), written by the session hook
+// (FOC-783) so the dashboard can show it.
+export function supervisorSessionPath(env = process.env, platform = process.platform) {
+  return join(dataHome(env, platform), "supervisor", "session.json");
+}
+
+// The host's bearer token — written by `supervisor-host.mjs serve` at start
+// (FOC-783) and re-read per request by the API container: a supervisor
+// restart rotates it, so nothing may cache it.
+export function hostTokenPath(env = process.env, platform = process.platform) {
+  return join(dataHome(env, platform), "run", "host.token");
+}
+
 // Root of the per-squad config dirs (LA_SQUAD_HOME, default <repo>/agents).
 export function squadConfigRoot(env = process.env) {
   return env.LA_SQUAD_HOME || join(REPO_ROOT, "agents");

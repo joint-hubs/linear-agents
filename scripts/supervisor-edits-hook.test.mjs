@@ -157,6 +157,61 @@ test("more than 20 rows truncate with a +N more line; seenThrough advances only 
   eq(seen.seenThrough, 20, "seenThrough stops at the last shown row");
 });
 
+console.log("\nsupervisor-edits-hook: notified rows (FOC-783)");
+
+// The hook scans the whole state home, so earlier tests' undelivered rows may
+// ride along in the same stdout — every assertion here is scoped to THIS
+// test's run dir.
+const linesFor = (stdout, runId) => listedLines(stdout).filter((l) => l.includes(runId));
+
+test("a notified row is never printed, but seenThrough advances past it", () => {
+  const runId = fixtureRun();
+  writeEdits(runId, [{ ...editRow(1), notified: true }]);
+  const r = runHook();
+  eq(r.code, 0, "exit code");
+  eq(linesFor(r.stdout, runId).length, 0, "a notified row is audit-only — the Supervisor was told through its session");
+  const seen = JSON.parse(readFileSync(seenPath(runId), "utf8"));
+  eq(seen.seenThrough, 1, "seenThrough passed the notified row");
+  // And it never re-delivers: a second run prints nothing for this run.
+  eq(linesFor(runHook().stdout, runId).length, 0, "no redelivery of a notified row");
+});
+
+test("notified and un-notified rows mix: only un-notified print, the watermark passes all", () => {
+  const runId = fixtureRun();
+  writeEdits(runId, [
+    { ...editRow(1, { path: "gates/gate-dev-1-1.json", type: "gate-answer", fields: ["answer"] }), notified: true },
+    editRow(2, { path: "gates/gate-dev-1-2.json", type: "gate-answer", fields: ["answer"] }),
+    { ...editRow(3, { path: "holds.json", type: "hold-answer", fields: ["hold-1.answer"] }), notified: true },
+  ]);
+  const r = runHook();
+  eq(r.code, 0, "exit code");
+  const mine = linesFor(r.stdout, runId);
+  eq(mine.length, 1, `only the un-notified row prints: ${JSON.stringify(mine)}`);
+  if (!mine[0].includes(`#2 gate-answer gates/gate-dev-1-2.json: answer`)) fail(`row 2 missing: ${mine[0]}`);
+  const seen = JSON.parse(readFileSync(seenPath(runId), "utf8"));
+  eq(seen.seenThrough, 3, "the watermark passed the notified rows too");
+});
+
+test("a notified row past the budget cut never hides an unseen row: the watermark stops at the cut", () => {
+  const runId = fixtureRun();
+  writeEdits(runId, [
+    editRow(1),
+    editRow(2),
+    { ...editRow(3), notified: true },
+    ...Array.from({ length: 23 }, (_, i) => editRow(i + 4)),
+  ]);
+  const r = runHook();
+  eq(r.code, 0, "exit code");
+  eq(linesFor(r.stdout, runId).length, 20, "exactly 20 displayable rows listed");
+  const seen = JSON.parse(readFileSync(seenPath(runId), "utf8"));
+  eq(seen.seenThrough, 21, "the watermark consumed rows 1-2, 3 (notified) and 4-21");
+  // The cut tail re-delivers — a notified row inside it must not swallow it.
+  const second = runHook();
+  eq(linesFor(second.stdout, runId).length, 5, "rows 22-26 re-deliver");
+  const seen2 = JSON.parse(readFileSync(seenPath(runId), "utf8"));
+  eq(seen2.seenThrough, 26, "everything consumed after the redelivery");
+});
+
 try {
   rmSync(HOME, { recursive: true, force: true });
 } catch {

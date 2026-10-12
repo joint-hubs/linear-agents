@@ -50,8 +50,9 @@
 // (`<run>/holds.json`, supervisor-lib), not one-file-per-record like gates; the
 // shape difference is documented at supervisor-lib's holds section.
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   AFFIRMATIVE,
@@ -147,13 +148,35 @@ function parseFacts(raw) {
   return parsed;
 }
 
+// ── gate records: shared readers and answer rules (FOC-783) ──────────────────
+//
+// The dashboard must answer gates and holds with EXACTLY the CLI's rules — a
+// gate is answered once, cleanup-approval takes one yes/no token, ids cannot
+// leave the run dir — so the rules are lifted out of the CLI commands into the
+// exported answerGate/answerHold below (answer section) and the CLI calls them
+// instead of the other way round. Errors throw with a `code` ("bad-id" |
+// "not-found" | "already-answered" | "invalid-answer" | "unreadable") and carry
+// the CLI's failJson extras on `extras`, so a CLI refusal is the same throw
+// rendered through failJson: one set of rules, two renderings, no drift.
+
+const RECORD_ID_RE = /^[A-Za-z0-9._-]+$/;
+const answerError = (code, message, extras = {}) => Object.assign(new Error(message), { code, extras });
+
+// A gateId is joined into a path under the run's gates dir, and the runId into
+// the state home — so both are bounded to the same sayable token set
+// agent-records.mjs bounds its runId with, which is also the traversal guard:
+// no separators, no dot segments that leave the directory.
+const invalidId = (v) => typeof v !== "string" || !RECORD_ID_RE.test(v) || v === "." || v === "..";
+
+const invalidText = (text) => typeof text !== "string" || !text.trim();
+
 function readGate(runId, gateId) {
   const path = gatePath(runId, gateId);
   if (!existsSync(path)) return null;
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
-    failJson(`gate ${gateId} is not readable JSON: ${err.message}`, { path });
+    throw answerError("unreadable", `gate ${gateId} is not readable JSON: ${err.message}`, { path });
   }
 }
 
@@ -461,6 +484,224 @@ function cmdHold(args) {
 
 // ── answer (Supervisor side) ─────────────────────────────────────────────────
 
+// ── the answered-once lock (FOC-783) ─────────────────────────────────────────
+//
+// The answered-once rule is read-check-write, which is NOT atomic: the dashboard
+// API and the Supervisor's CLI answering the same gate in the same instant can
+// both pass the pending check and both write, the second clobbering the first —
+// and a gate is answered ONCE, so the loss is silent. A lock file created with
+// openSync(..., "wx") makes claim-and-answer exclusive: only one process holds
+// the lock at a time, and the loser re-reads the record inside the lock and
+// fails the way a late second answer always should ("already-answered").
+//
+// The id checks stay OUTSIDE the lock on purpose: the lock path is derived from
+// the ids, so an unvalidated id must never reach the filesystem — a traversal
+// would try to create a lock file outside the run dir.
+
+const LOCK_STALE_MS = 30_000; // a lock older than this is a crashed writer's leftover
+const LOCK_RETRY_MS = 50;
+const LOCK_TIMEOUT_MS = 2_000;
+
+// No async here: answerGate/answerHold are synchronous for both callers (CLI and
+// the dashboard API), so the wait has to block. Atomics.wait is Node's one
+// primitive for that — it sleeps without a busy loop.
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+const gateLockPath = (runId, gateId) => `${gatePath(runId, gateId)}.lock`;
+const holdsLockPath = (runId) => `${holdsPath(runId)}.lock`;
+
+/**
+ * Run `fn` holding an exclusive lock file at `lockPath`.
+ *
+ * Created with "wx" — exclusive, no clobbering. On EEXIST: a lock whose mtime is
+ * older than LOCK_STALE_MS is a crashed writer's leftover and is unlinked and
+ * retried ONCE (a fresh lock after that means a live writer has it — back to
+ * waiting); otherwise poll every LOCK_RETRY_MS up to `waitMs`, then throw
+ * code "busy". `waitMs` defaults to LOCK_TIMEOUT_MS (the CLI waits up to 2 s);
+ * the dashboard passes 0 — a held lock throws busy immediately, because the API
+ * server must never block on Atomics.wait while polling clients wait. The lock
+ * is always closed and unlinked in `finally` — an answer that threw
+ * (already-answered, unreadable, …) must not leave the gate locked for the
+ * next 30 s.
+ *
+ * A missing parent directory means no gate record exists to race over; the lock
+ * is skipped and fn runs unlocked — the body's not-found is the whole answer.
+ */
+export function withAnswerLock(lockPath, fn, waitMs = LOCK_TIMEOUT_MS) {
+  let fd = null;
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      fd = openSync(lockPath, "wx");
+      break;
+    } catch (err) {
+      if (err.code === "ENOENT") return fn(); // no run/gates dir → nothing to lock
+      if (err.code !== "EEXIST") throw err;
+      let stale = false;
+      try {
+        stale = Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS;
+      } catch {
+        continue; // the holder released between open and stat — try to claim again
+      }
+      if (stale) {
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          /* another waiter already took it over */
+        }
+        try {
+          fd = openSync(lockPath, "wx");
+          break;
+        } catch (err2) {
+          if (err2.code !== "EEXIST") throw err2;
+        }
+      }
+      if (Date.now() >= deadline) {
+        throw answerError("busy", `another answer holds the lock at ${lockPath} — try again`, { lockPath });
+      }
+      sleepSync(LOCK_RETRY_MS);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      closeSync(fd);
+    } catch { /* already closed */ }
+    try {
+      unlinkSync(lockPath);
+    } catch { /* a stale-takeover unlink raced us — nothing left to clean */ }
+  }
+}
+
+/**
+ * Record Mateusz's answer on a gate — the file-side act only; delivering it to
+ * the child stays supervisor-followup.mjs's job (see the header). Returns the
+ * updated record. `answeredBy` joins the answer object ONLY when given: the
+ * CLI path passes nothing, so its records keep their exact shape, while the
+ * dashboard names who answered.
+ */
+export function answerGate({ runId, gateId, text, note = null, answeredBy = null, now = new Date(), lockWaitMs = LOCK_TIMEOUT_MS }) {
+  if (invalidId(runId)) throw answerError("bad-id", `invalid runId: ${JSON.stringify(runId ?? null)}`);
+  if (invalidId(gateId)) throw answerError("bad-id", `invalid gateId: ${JSON.stringify(gateId ?? null)}`);
+  if (invalidText(text)) throw answerError("invalid-answer", '--text "..." is required');
+
+  return withAnswerLock(gateLockPath(runId, gateId), () => {
+    const gate = readGate(runId, gateId);
+    if (!gate) {
+      throw answerError("not-found", `gate ${gateId} does not exist in run ${runId}`, {
+        known: allGates(runId).map((g) => g.gateId),
+      });
+    }
+    // Re-answering would overwrite the record of what Mateusz actually said, and
+    // the first answer may already have been delivered to the child. If the answer
+    // was wrong, the fix is a new turn, not a rewritten history.
+    if (gate.status !== "pending") {
+      throw answerError(
+        "already-answered",
+        `gate ${gateId} is already ${gate.status} — a gate is answered once`,
+        { existingAnswer: gate.answer, hint: "to correct a delivered answer, send another turn with supervisor-followup.mjs" },
+      );
+    }
+
+    // A cleanup-approval answer is acted on by supervisor-cleanup.mjs, which only
+    // accepts a whole yes/no token. Recording anything else used to succeed here
+    // and fail there — and since a gate is answered once, the gate was burnt and
+    // had to be proposed again (gate-dev-5-2, run a93f). Refuse it BEFORE writing.
+    // The reasoning behind the answer belongs in --note, which cleanup never reads.
+    if (gate.kind === "cleanup-approval" && !isAffirmative(text) && !isNegative(text)) {
+      throw answerError(
+        "invalid-answer",
+        `a cleanup-approval answer must be a single yes/no token, got "${text}" — nothing was recorded`,
+        {
+          gateId,
+          accepted: { yes: AFFIRMATIVE, no: NEGATIVE },
+          hint: 'put the basis for the answer in --note: --text "tak" --note "TEST Done, tree clean, fingerprint …"',
+        },
+      );
+    }
+
+    const updated = {
+      ...gate,
+      status: "answered",
+      answer: {
+        text,
+        ...(note ? { note } : {}),
+        ...(answeredBy ? { answeredBy } : {}),
+        answeredAt: now.toISOString(),
+      },
+    };
+    atomicWriteJSON(gatePath(runId, gateId), updated);
+    return updated;
+  }, lockWaitMs);
+}
+
+/**
+ * Record Mateusz's answer on a hold — same rules, applied to the ONE holds
+ * store through patchHold, so the history stays append-only. Returns the
+ * updated hold.
+ */
+export function answerHold({ runId, holdId, text, note = null, answeredBy = null, now = new Date(), lockWaitMs = LOCK_TIMEOUT_MS }) {
+  if (invalidId(runId)) throw answerError("bad-id", `invalid runId: ${JSON.stringify(runId ?? null)}`);
+  if (invalidId(holdId)) throw answerError("bad-id", `invalid holdId: ${JSON.stringify(holdId ?? null)}`);
+  if (invalidText(text)) throw answerError("invalid-answer", '--text "..." is required');
+
+  // One lock for the WHOLE holds store, not per hold: holds.json is one
+  // versioned file, so two answers to two different holds still race on the
+  // same write — the lock is the store's write gate for the answer path.
+  return withAnswerLock(holdsLockPath(runId), () => {
+    let store;
+    try {
+      store = readHolds(runId);
+    } catch (err) {
+      throw answerError("unreadable", `the holds store for run ${runId} is unreadable: ${err.message}`, {
+        hint: "fix or delete holds.json — a store nobody can parse is not a store",
+      });
+    }
+    const hold = store.holds.find((h) => h.id === holdId);
+    if (!hold) {
+      throw answerError("not-found", `hold ${holdId} does not exist in run ${runId}`, {
+        known: store.holds.map((h) => h.id),
+      });
+    }
+    // Same rule as a gate: a hold is answered once. Re-answering would overwrite
+    // the record of what Mateusz actually said. Versioning keeps the rule honest:
+    // the answer in force is NAMED in the refusal, and the history stays
+    // append-only — the fix for a wrong answer is a new turn, not a rewrite.
+    if (hold.state !== "open") {
+      throw answerError(
+        "already-answered",
+        `hold ${holdId} is already answered — the answer in force is "${hold.answer.text}" (recorded ${hold.answer.answeredAt})`,
+        { hint: "a hold is answered once; to change course, raise a new hold" },
+      );
+    }
+
+    const at = now.toISOString();
+    const answer = {
+      text,
+      ...(note ? { note } : {}),
+      ...(answeredBy ? { answeredBy } : {}),
+      answeredAt: at,
+    };
+    // An answer is a new history entry, never an overwrite — the file read back
+    // after this shows created AND answered, in order. (A throw here is the store
+    // validation refusing; surfaced with the CLI's message, never a stack.)
+    try {
+      return patchHold(runId, holdId, { state: "answered", answer }, { event: "answered", at, text });
+    } catch (err) {
+      throw answerError("invalid-answer", `hold ${holdId} could not be updated: ${err.message}`);
+    }
+  }, lockWaitMs);
+}
+
+// A refusal from the shared rules keeps the CLI's exact JSON contract: the
+// message and its extras render through failJson (stdout + exit 1). An error
+// with no code is not one of ours — rethrow it.
+function failFromThrow(err) {
+  if (err.code) failJson(err.message, err.extras);
+  throw err;
+}
+
 function cmdAnswer(args) {
   const runId = args.run || process.env.LA_SUPERVISOR_RUN;
   if (!runId) failJson("--run <supervisorRunId> is required (or set LA_SUPERVISOR_RUN)");
@@ -471,49 +712,44 @@ function cmdAnswer(args) {
   if (args.gate && args.hold && args.gate !== true && args.hold !== true) {
     failJson("--gate and --hold are mutually exclusive — one answer per invocation");
   }
-  if (args.hold && args.hold !== true) return cmdAnswerHold(args, runId, args.hold);
+  if (args.hold && args.hold !== true) {
+    const text = requireText(args.text, "text");
+    const note = args.note && args.note !== true ? String(args.note) : null;
+    let hold;
+    try {
+      hold = answerHold({ runId, holdId: args.hold, text, note });
+    } catch (err) {
+      failFromThrow(err);
+    }
+
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          path: holdsPath(runId),
+          // Recording is the whole act for a hold: unlike a gate there is no
+          // followup delivery step — queue items that named this hold may proceed.
+          next: "the answer is in force; dependent queue items may proceed",
+          hold,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
 
   const gateId = args.gate;
   if (!gateId || gateId === true) failJson("--gate <gateId> is required");
-  const text = args.text;
-  if (!text || text === true) failJson('--text "..." is required');
-
-  const gate = readGate(runId, gateId);
-  if (!gate) {
-    failJson(`gate ${gateId} does not exist in run ${runId}`, {
-      known: allGates(runId).map((g) => g.gateId),
-    });
-  }
-  // Re-answering would overwrite the record of what Mateusz actually said, and
-  // the first answer may already have been delivered to the child. If the answer
-  // was wrong, the fix is a new turn, not a rewritten history.
-  if (gate.status !== "pending") {
-    failJson(`gate ${gateId} is already ${gate.status} — a gate is answered once`, {
-      existingAnswer: gate.answer,
-      hint: "to correct a delivered answer, send another turn with supervisor-followup.mjs",
-    });
-  }
-
-  // A cleanup-approval answer is acted on by supervisor-cleanup.mjs, which only
-  // accepts a whole yes/no token. Recording anything else used to succeed here
-  // and fail there — and since a gate is answered once, the gate was burnt and
-  // had to be proposed again (gate-dev-5-2, run a93f). Refuse it BEFORE writing.
-  // The reasoning behind the answer belongs in --note, which cleanup never reads.
-  if (gate.kind === "cleanup-approval" && !isAffirmative(text) && !isNegative(text)) {
-    failJson(`a cleanup-approval answer must be a single yes/no token, got "${text}" — nothing was recorded`, {
-      gateId,
-      accepted: { yes: AFFIRMATIVE, no: NEGATIVE },
-      hint: 'put the basis for the answer in --note: --text "tak" --note "TEST Done, tree clean, fingerprint …"',
-    });
-  }
-
+  const text = requireText(args.text, "text");
   const note = args.note && args.note !== true ? String(args.note) : null;
-  const updated = {
-    ...gate,
-    status: "answered",
-    answer: { text, ...(note ? { note } : {}), answeredAt: new Date().toISOString() },
-  };
-  atomicWriteJSON(gatePath(runId, gateId), updated);
+
+  let gate;
+  try {
+    gate = answerGate({ runId, gateId, text, note });
+  } catch (err) {
+    failFromThrow(err);
+  }
 
   // FOC-449 auto-join: the recorded answer IS the outcome for every decision
   // event the gate carried provenance for — outcome = the answer value,
@@ -533,66 +769,7 @@ function cmdAnswer(args) {
         // technically exists.
         next: `deliver it: node scripts/supervisor-followup.mjs --child ${gate.childId} --gate ${gateId} --prompt "<the answer>"`,
         warnings: labelWarnings,
-        ...updated,
-      },
-      null,
-      2,
-    ),
-  );
-}
-
-// ── answer --hold (FOC-612) ──────────────────────────────────────────────────
-
-function cmdAnswerHold(args, runId, holdId) {
-  const text = requireText(args.text, "text");
-  const note = args.note && args.note !== true ? String(args.note) : null;
-  const now = new Date().toISOString();
-
-  let store;
-  try {
-    store = readHolds(runId);
-  } catch (err) {
-    failJson(`the holds store for run ${runId} is unreadable: ${err.message}`, {
-      hint: "fix or delete holds.json — a store nobody can parse is not a store",
-    });
-  }
-  const hold = store.holds.find((h) => h.id === holdId);
-  if (!hold) {
-    failJson(`hold ${holdId} does not exist in run ${runId}`, {
-      known: store.holds.map((h) => h.id),
-    });
-  }
-
-  // Same rule as a gate: a hold is answered once. Re-answering would overwrite
-  // the record of what Mateusz actually said. Versioning keeps the rule honest:
-  // the answer in force is NAMED in the refusal, and the history stays
-  // append-only — the fix for a wrong answer is a new turn, not a rewrite.
-  if (hold.state !== "open") {
-    failJson(`hold ${holdId} is already answered — the answer in force is "${hold.answer.text}" (recorded ${hold.answer.answeredAt})`, {
-      hint: "a hold is answered once; to change course, raise a new hold",
-    });
-  }
-
-  const answer = { text, ...(note ? { note } : {}), answeredAt: now };
-  // An answer is a new history entry, never an overwrite — the file read back
-  // after this shows created AND answered, in order. (A throw here is the
-  // store validation refusing; converted to the JSON contract, never a stack.)
-  let updated;
-  try {
-    updated = patchHold(runId, holdId, { state: "answered", answer }, { event: "answered", at: now, text });
-  } catch (err) {
-    failJson(`hold ${holdId} could not be updated: ${err.message}`);
-  }
-
-  console.log(
-    JSON.stringify(
-      {
-        ok: true,
-        path: holdsPath(runId),
-        // Recording is the whole act for a hold: unlike a gate there is no
-        // followup delivery step — queue items that named this hold may proceed.
-        next: "the answer is in force; dependent queue items may proceed",
-        hold: updated,
+        ...gate,
       },
       null,
       2,
@@ -774,4 +951,9 @@ function main() {
 
 export { KINDS, allGates, nextGateId };
 
-if (process.argv[1]?.endsWith("supervisor-gate.mjs")) main();
+// Main-module guard, agent-records.mjs style: the API imports the answer
+// functions, so the CLI must run only when THIS file is the entry point — and
+// the comparison is case-insensitive on win32, where argv[1] preserves the
+// case the caller typed.
+const samePath = (a, b) => (process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
+if (process.argv[1] && samePath(pathToFileURL(process.argv[1]).href, import.meta.url)) main();

@@ -25,7 +25,7 @@ Usage: fenix [command]
   logs [service]   follow logs (default: all services)
   doctor           host preflight plus in-container diagnostics
   keys             run the key wizard (enter or replace API keys)
-  attach [--new]   attach to the Supervisor (resumes its last session; --new starts fresh)
+  attach [--new]   open the Supervisor (Ctrl-b d detaches; it keeps running in the container)
   shell [service]  open a shell in a service (default: fenix-supervisor)
   repo add <url|owner/name> [--project <Linear project>]
                    clone a repository into the workspaces volume (optionally map a Linear project)
@@ -355,7 +355,7 @@ case "$cmd" in
     cmd_doctor
     ;;
   attach)
-    exec docker compose exec fenix-supervisor "$ENTRYPOINT" supervisor "$@"
+    exec docker compose exec fenix-supervisor "$ENTRYPOINT" attach "$@"
     ;;
   shell)
     svc="${1:-fenix-supervisor}"

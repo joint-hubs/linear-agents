@@ -26,6 +26,7 @@ const {
   writeRecord,
   annotateVerdict,
   readEdits,
+  recordAnswerRow,
 } = await import("./agent-records.mjs");
 
 let passed = 0;
@@ -108,6 +109,10 @@ writeFileSync(
   "utf8",
 );
 writeFileSync(join(rd, "wake-queue.jsonl"), JSON.stringify({ seq: 1, event: "exit" }) + "\n", "utf8");
+// Answer locks (supervisor-gate.mjs withAnswerLock): transient internal state
+// beside the records they guard — never a record itself.
+writeFileSync(join(rd, "gates", "gate-dev-1-1.json.lock"), "", "utf8");
+writeFileSync(join(rd, "holds.json.lock"), "", "utf8");
 
 // A second run with a different issue — the negative half of the by-task listing.
 const rd2 = join(home, "run-2");
@@ -206,6 +211,16 @@ await test("listRecords by task: triage issue and registry child, case-insensiti
   );
   deepEq(listRecords({ taskId: "FOC-999" }).map((r) => r.runId), ["run-2"], "other task maps to run-2 only");
   deepEq(listRecords({ taskId: "FOC-000" }), [], "unknown task lists nothing");
+});
+
+await test("answer locks (.lock) are never listed nor readable as records", () => {
+  const listed = listRecords({ runId: RUN }).map((r) => r.path);
+  for (const lock of ["gates/gate-dev-1-1.json.lock", "holds.json.lock"]) {
+    if (listed.includes(lock)) fail(`a lock file must not be listed: ${lock}`);
+    eq(classifyPath(lock, { runId: RUN }), null, `classifyPath hides the lock: ${lock}`);
+    const err = expectThrow(() => readRecord({ runId: RUN, path: lock }), `readRecord(${lock})`);
+    eq(err.code, "not-found", `readRecord on a lock is not-found: ${lock}`);
+  }
 });
 
 console.log("\nagent-records: gate edits");
@@ -436,6 +451,60 @@ await test("the CLI prints one line per row (contract shape)", async () => {
   if (!/^#7 \S+ dashboard intake intake\.json: goal$/.test(lines[0])) {
     fail(`unexpected CLI line: ${lines[0]}`);
   }
+});
+
+console.log("\nagent-records: answer notice rows (FOC-783)");
+
+await test("recordAnswerRow: seq continues from the file, gate row shape, notified flag", () => {
+  const row = recordAnswerRow({
+    runId: RUN,
+    kind: "gate-answer",
+    id: "gate-dev-1-1",
+    text: "tak",
+    who: "dashboard",
+    notified: true,
+  });
+  eq(row.seq, 8, "seq continues after the existing rows, like every other write");
+  if (typeof row.ts !== "string" || Number.isNaN(Date.parse(row.ts))) fail(`row.ts must be an ISO timestamp, got ${JSON.stringify(row.ts)}`);
+  eq(row.who, "dashboard", "row.who");
+  eq(row.runId, RUN, "row.runId");
+  eq(row.path, "gates/gate-dev-1-1.json", "the row names the answered record");
+  eq(row.type, "gate-answer", "row.type");
+  deepEq(row.changes, [{ field: "answer", before: null, after: '"tak"' }], "the change names answer, before null");
+  eq(row.notified, true, "notified flag carried");
+  if ("baseSha256" in row || "newSha256" in row) fail("a notice row is not a content write — no sha pair");
+  deepEq(readEdits({ runId: RUN, sinceSeq: 7 }).map((r) => r.seq), [8], "row readable back through readEdits");
+});
+
+await test("recordAnswerRow: hold row uses holds.json and <id>.answer; notified defaults to false", () => {
+  const row = recordAnswerRow({ runId: RUN, kind: "hold-answer", id: "hold-3", text: "idź", who: "dashboard" });
+  eq(row.seq, 9, "seq keeps counting");
+  eq(row.path, "holds.json", "the whole store is the record");
+  eq(row.type, "hold-answer", "row.type");
+  eq(row.notified, false, "notified defaults to false");
+  deepEq(row.changes, [{ field: "hold-3.answer", before: null, after: '"idź"' }], "the change names the hold");
+});
+
+await test("recordAnswerRow: after is truncated like every audit value", () => {
+  const long = "x".repeat(600);
+  const row = recordAnswerRow({ runId: RUN, kind: "hold-answer", id: "hold-4", text: long, who: "dashboard" });
+  eq(row.changes[0].after, JSON.stringify(long).slice(0, 500), "truncated to 500 chars, same trunc() rule");
+  eq(row.changes[0].after.length, 500, "length capped");
+});
+
+await test("recordAnswerRow: refusals append no row", () => {
+  const before = readEdits({ runId: RUN }).map((r) => r.seq);
+  const badKind = expectThrow(() => recordAnswerRow({ runId: RUN, kind: "other", id: "x", text: "t", who: "w" }), "bad kind");
+  eq(badKind.code, "invalid-kind", "bad kind code");
+  const traversal = expectThrow(() => recordAnswerRow({ runId: RUN, kind: "gate-answer", id: "../x", text: "t", who: "w" }), "traversal");
+  eq(traversal.code, "bad-id", "traversal id code");
+  const badRun = expectThrow(() => recordAnswerRow({ runId: "../evil", kind: "gate-answer", id: "g", text: "t", who: "w" }), "bad runId");
+  eq(badRun.code, "bad-path", "traversal runId code");
+  const noWho = expectThrow(() => recordAnswerRow({ runId: RUN, kind: "gate-answer", id: "g", text: "t" }), "missing who");
+  eq(noWho.code, "invalid", "who required");
+  const noText = expectThrow(() => recordAnswerRow({ runId: RUN, kind: "gate-answer", id: "g", who: "w" }), "missing text");
+  eq(noText.code, "invalid", "text required");
+  deepEq(readEdits({ runId: RUN }).map((r) => r.seq), before, "refusals leave the stream untouched");
 });
 
 for (const dir of [home]) rmSync(dir, { recursive: true, force: true });
