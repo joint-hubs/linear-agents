@@ -33,6 +33,7 @@ import {
   containerGateway,
   isAllowedOrigin,
   buildLaunchBat,
+  launchEnvironment,
 } from './launch.mjs';
 
 const ok = 'JOI-51';
@@ -186,6 +187,34 @@ test('isLocalOrigin(gateway): non-local address with null gateway → false', ()
   assert.equal(isLocalOrigin('172.17.0.1', null), false));
 test('isLocalOrigin(gateway): loopback still true with null gateway', () =>
   assert.equal(isLocalOrigin('127.0.0.1', null), true));
+
+// --- launchEnvironment (FOC-804) ---
+test('launchEnvironment: win32, no env → supported, not in container', () => {
+  assert.deepEqual(launchEnvironment({ env: {}, platform: 'win32' }), {
+    inContainer: false,
+    platform: 'win32',
+    launchSupported: true,
+  });
+});
+
+test('launchEnvironment: win32 + FENIX_IN_CONTAINER=1 → unsupported, in container', () => {
+  assert.deepEqual(launchEnvironment({ env: { FENIX_IN_CONTAINER: '1' }, platform: 'win32' }), {
+    inContainer: true,
+    platform: 'win32',
+    launchSupported: false,
+  });
+});
+
+test('launchEnvironment: linux → unsupported regardless of env', () => {
+  assert.equal(launchEnvironment({ env: {}, platform: 'linux' }).launchSupported, false);
+  assert.equal(launchEnvironment({ env: { FENIX_IN_CONTAINER: '1' }, platform: 'linux' }).inContainer, true);
+});
+
+test('launchEnvironment: FENIX_IN_CONTAINER other than "1" → not in container', () => {
+  for (const v of ['', '0', 'true', 'yes', ' 1']) {
+    assert.equal(launchEnvironment({ env: { FENIX_IN_CONTAINER: v }, platform: 'win32' }).inContainer, false, `value "${v}"`);
+  }
+});
 
 // --- isAllowedOrigin (D-S1 CSRF defense) ---
 test('isAllowedOrigin: absent Origin → true (curl / smoke / server-to-server)', () => {

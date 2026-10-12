@@ -37,6 +37,7 @@ import {
   buildLaunchBat,
   spawnLauncher,
   reloadKickoffTemplates,
+  launchEnvironment,
 } from './launch.mjs';
 import { readSquadConfig, writeSquadConfig, validateSlug, readToolCatalog, validateTools, validateProvidersPatch } from './squad-config.mjs';
 // Agent records (FOC-795) — the record layer the dashboard's /api/records
@@ -896,6 +897,18 @@ const server = createServer(async (req, res) => {
       if (target === 'vm') {
         json(res, 501, {
           error: 'vm target not implemented in L1 (blocked on VM provisioning; see control-plane-plan §4)',
+        });
+        log(method, path, 501);
+        return;
+      }
+      // FOC-804: spawning a console window is a Windows-native capability.
+      // In the container (or on any non-Windows host) refuse non-dry runs —
+      // the UI offers "Start in Cockpit" instead — while dry-run previews
+      // (the branch above) keep working everywhere.
+      if (!launchEnvironment().launchSupported) {
+        json(res, 501, {
+          error: 'launch-unsupported',
+          reason: 'Starting a squad window needs Windows; in Docker hand the ticket to the Supervisor from the Cockpit.',
         });
         log(method, path, 501);
         return;
@@ -1943,6 +1956,15 @@ const server = createServer(async (req, res) => {
     }
 
     // --- Route matching ---
+
+    // GET /api/environment (FOC-804) — what this server could do natively.
+    // The dashboard reads it to pick between the native launch button and
+    // "Start in Cockpit"; launchSupported mirrors POST /api/launch's refusal.
+    if (path === '/api/environment') {
+      json(res, 200, launchEnvironment());
+      log(method, path, 200);
+      return;
+    }
 
     // GET /api/ft/datasets — list dataset JSONL files with pair counts + sample.
     if (path === '/api/ft/datasets') {
