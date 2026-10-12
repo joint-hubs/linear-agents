@@ -853,7 +853,11 @@ async function main() {
       `the reason names the presented store: ${never.stale[0].reason}`,
     );
 
-    // The budget dropped the question: nothing was presented to match against.
+    // The budget dropped the question: the presented slice carries no options
+    // for the id, so the check falls back to the map's own options — and a
+    // stated item carries NONE, so the answer is still STALE (the contract's
+    // step-3 fallback; a map item WITH options would fold through it — see
+    // the fallback test below).
     const dropped = foldGateAnswers({ round: 2, maps, presented: { 1: { round: 1, mapVersion: 1, questions: [] } }, answers: [answer(claim)], corrections: [] });
     eq(dropped.valid.length, 0, "an option answer to a question that was never shown is stale");
     eq(/presented/.test(dropped.stale[0].reason), true, `named: ${dropped.stale[0].reason}`);
@@ -903,6 +907,74 @@ async function main() {
     eq(v1.interpretations[0].options, undefined, "the stated item has NO map options — only the presented slice carries them");
   });
 
+  await test("answer contract 4 fallback: with no presented options the check falls back to the map's own (FOC-801)", () => {
+    // A minimal fixture / non-question item presents no options for the id —
+    // the contract's step 3 falls back to the map's own options then.
+    const v1 = mapWith({ mapVersion: 1, source: "unknown" }); // IN-1 carries OPTIONS
+    const claim = v1.interpretations[0].claim;
+    const { maps } = persistMap({}, v1);
+    const presented = { 1: { round: 1, mapVersion: 1, questions: [{ id: "IN-1", claim }] } };
+    const answer = (option) => ({
+      round: 1,
+      mapVersion: 1,
+      interpretationId: "IN-1",
+      about: { claim, option },
+      answer: option,
+      acceptedOptions: [option],
+    });
+
+    const own = foldGateAnswers({ round: 2, maps, presented, answers: [answer(OPTIONS[0].text)], corrections: [] });
+    eq(own.valid.length, 1, `the map's own option text folds through the fallback: ${JSON.stringify(own.stale.map((s) => s.reason))}`);
+
+    const foreign = foldGateAnswers({ round: 2, maps, presented, answers: [answer("Rozumiem, że nie.")], corrections: [] });
+    eq(foreign.valid.length, 0, "an option neither presented nor carried is stale");
+    eq(foreign.stale.length, 1, "one stale");
+    eq(/does not match any option text presented for 1\/IN-1 in round 1 verbatim/.test(foreign.stale[0].reason), true, `the reason names the presented store: ${foreign.stale[0].reason}`);
+  });
+
+  await test("answer contract 4 fallback: a renumbered reference finds its question under the resolved id (FOC-801)", () => {
+    // v2 renumbers v1's IN-1 to IN-9 (verbatim-identical content); the round-2
+    // question was presented under the map's NEW id while the record still
+    // names the pre-renumber one — the lookup falls back to the idMap-resolved id.
+    const v1 = mapWith({ mapVersion: 1 });
+    const item = v1.interpretations[0];
+    item.source = "stated";
+    item.alternatives = ["Rozumiem, że ma powstać biblioteka snapshotów Gantta w kolejności aneksu."];
+    const v2 = mapWith({ mapVersion: 2 });
+    v2.interpretations[0].id = "IN-9";
+    v2.idMap = { "IN-1": "IN-9" };
+    const { maps } = persistMap(persistMap({}, v1).maps, v2);
+    eq(verifyIdMap(maps).ok, true, "the renumber is legal");
+    const presented = {
+      2: {
+        round: 2,
+        mapVersion: 2,
+        questions: [{
+          id: "IN-9",
+          claim: item.claim,
+          options: [{ text: item.claim, recommended: true }, { text: item.alternatives[0], recommended: false }],
+        }],
+      },
+    };
+    const answer = (option) => ({
+      round: 2,
+      mapVersion: 2,
+      interpretationId: "IN-1",
+      about: { claim: item.claim, option },
+      answer: option,
+      acceptedOptions: [option],
+    });
+
+    const resolvedRef = foldGateAnswers({ round: 3, maps, presented, answers: [answer(item.alternatives[0])], corrections: [] });
+    eq(resolvedRef.valid.length, 1, `the pre-renumber id folds through the fallback: ${JSON.stringify(resolvedRef.stale.map((s) => s.reason))}`);
+    eq(resolvedRef.valid[0].interpretationId, "IN-9", "under the resolved id");
+    eq(resolvedRef.valid[0].renumberedFrom, "IN-1", "and keeps the renumber link");
+
+    const foreign = foldGateAnswers({ round: 3, maps, presented, answers: [answer("Rozumiem, że nie.")], corrections: [] });
+    eq(foreign.valid.length, 0, "an option presented under NEITHER id is stale");
+    eq(/does not match any option text presented for 2\/IN-1 in round 2 verbatim/.test(foreign.stale[0].reason), true, `the reason names the presented store: ${foreign.stale[0].reason}`);
+  });
+
   // ── the node: one retry, then stop ────────────────────────────────────────
 
   const STEP = { kind: "G", reads: ["inbox.entry", "plan.dor.gaps", "intake.taskType", "gate.plan.gate1.answers", "gate.plan.gate1.corrections"] };
@@ -924,7 +996,14 @@ async function main() {
     eq(result.attempts, 1, "one call, no retry");
     eq(seen.length, 1, "one generator call");
     eq(seen[0].nextMapVersion, 1, "the FIRST attempt already carries the store's allocation (FOC-801)");
-    deepEq(Object.keys(seen[0].reads).sort(), ["inbox.entry", "intake.taskType", "plan.dor.gaps"], "the declared reads, no revision on the first attempt");
+    // FOC-801: the hint rides the READS, not just the args — the production
+    // transport composes its message from the reads and may drop unknown args.
+    eq(seen[0].reads.nextMapVersion, 1, "the hint field rides the first attempt's reads");
+    deepEq(
+      Object.keys(seen[0].reads).sort(),
+      ["inbox.entry", "intake.taskType", "nextMapVersion", "plan.dor.gaps"],
+      "the declared reads plus the hint field, no revision on the first attempt",
+    );
   });
 
   await test("the node retries ONCE carrying the reasons and the rejected map, then stops", async () => {
@@ -953,6 +1032,7 @@ async function main() {
     deepEq(revision.previous, bad, "and the rejected map itself (deep-equal through the identity copy)");
     eq(revision.nextMapVersion, 1, "the revision carries the store's allocation");
     eq(seen[1].nextMapVersion, 1, "the hint rides the generator args on the retry too");
+    eq(seen[1].reads.revision.nextMapVersion === 1 && seen[1].reads.nextMapVersion === undefined, true, "on the retry the hint rides the READS inside the revision");
     eq(seen[1].reads["inbox.entry"], ENTRY, "the entry stays VERBATIM — our feedback is never quote-able anchor text");
     deepEq(seen[1].reads["plan.dor.gaps"], GAPS, "the declared reads are unchanged on the retry");
   });
@@ -1118,6 +1198,7 @@ async function main() {
     eq(result.maps[2], v2, "and the store carries it");
     eq(seen.length, 1, "one call, no retry");
     eq(seen[0].nextMapVersion, 2, "the FIRST attempt already carries the hint");
+    eq(seen[0].reads.nextMapVersion, 2, "and the hint rides the READS, the transport the production generator composes from");
   });
 
   await test("a generator that ignores the hint is still rejected — the store owns identity (FOC-801)", async () => {
@@ -1152,7 +1233,9 @@ async function main() {
     eq(result.status, "done", `the regeneration recovered: ${JSON.stringify(result.error)}`);
     eq(result.mapVersion, 2, "the next persisted version");
     eq(seen[0].nextMapVersion, 2, "the hint on the first attempt");
+    eq(seen[0].reads.nextMapVersion, 2, "riding the first attempt's READS (FOC-801: the contract's transport)");
     eq(seen[1].nextMapVersion, 2, "the same hint on the retry");
+    eq(seen[1].reads.nextMapVersion === undefined && seen[1].reads.revision.nextMapVersion === 2, true, "the retry's READS carry it inside the revision");
     eq(seen[1].reads.revision.nextMapVersion, 2, "the revision carries the allocation for transports that serialize it whole");
     eq(seen[1].reads.revision.previous.mapVersion, 2, "the rejected map's stale 7 is overwritten with the allocation");
     eq(bad.mapVersion, 7, "the caller's rejected map object is untouched — the copy is the revision's");

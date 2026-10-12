@@ -633,15 +633,22 @@ export function foldGateAnswers({ round, maps, presented, answers = [], correcti
     }
     const aboutOption = record.about?.option;
     if (aboutOption !== undefined) {
-      // FOC-801: the option's ground truth is the PRESENTED store, never the
-      // map's own options. The selection may present different texts than the
-      // map carries (the alternatives override builds a question's options
-      // from the claim and its alternatives — a `stated`/`inferred` item has
-      // NO map options at all), and the display budget may have dropped the
-      // item entirely. An `about.option` that was never actually put to the
-      // user in that round answers nothing — STALE.
-      const shown = (presented[record.round].questions ?? []).find((q) => q?.id === record.interpretationId);
-      const texts = (shown?.options ?? []).map((o) => o?.text);
+      // FOC-801: the option's ground truth is the PRESENTED store — the
+      // question actually put to the user in that round, looked up by the
+      // record's interpretationId and falling back to the idMap-resolved id
+      // (a renumbered reference answers the question its id was shown as).
+      // The selection may present texts the map itself does not carry (the
+      // alternatives override builds a question's options from the claim and
+      // its alternatives — a `stated`/`inferred` item has NO map options at
+      // all). When the presented slice carries no options for the id (minimal
+      // fixtures, non-question items), the check falls back to the map's own
+      // options; anything else is STALE with a reason naming the presented
+      // store.
+      const questions = presented[record.round].questions ?? [];
+      const shown = questions.find((q) => q?.id === record.interpretationId)
+        ?? (resolved.renumberedFrom ? questions.find((q) => q?.id === resolved.id) : undefined);
+      const presentedTexts = (shown?.options ?? []).map((o) => o?.text);
+      const texts = presentedTexts.length > 0 ? presentedTexts : (resolved.item.options ?? []).map((o) => o?.text);
       if (!texts.some((t) => sameText(t, aboutOption))) {
         push(`about.option does not match any option text presented for ${record.mapVersion}/${record.interpretationId} in round ${record.round} verbatim`);
         continue;
@@ -731,12 +738,16 @@ function stringLengthAt(output, instancePath) {
  * result carries the folded `stale` log so the run record can carry it too.
  *
  * FOC-801: the next mapVersion is allocated BEFORE the generator call and
- * rides both attempts as a `nextMapVersion` hint — the model cannot see the
- * persisted store, so a resumed run (re-entry after gate1 reset, maps already
- * holding a version) could only guess a number persistMap would reject,
- * burning the single regeneration on the same mismatch and failing the node.
- * The store still owns identity: the hint prevents the mismatch, a generator
- * that ignores it is still rejected, never silently renumbered.
+ * rides both attempts' READS as a `nextMapVersion` hint (a top-level field
+ * over the payload on attempt 1, inside the serialized revision on the
+ * retry) — the model cannot see the persisted store, so a resumed run
+ * (re-entry after gate1 reset, maps already holding a version) could only
+ * guess a number persistMap would reject, burning the single regeneration on
+ * the same mismatch and failing the node. The reads carry the hint because
+ * the production transport composes its message from the reads alone and may
+ * drop unknown generator args. The store still owns identity: the hint
+ * prevents the mismatch, a generator that ignores it is still rejected,
+ * never silently renumbered.
  *
  * Returns `{status:"done", output, mapVersion, maps, checks, fold, attempts}`
  * or `{status:"failed", error, checks?, fold}` — it never throws on data
@@ -795,10 +806,10 @@ export async function runPlanIntentNode({
 
   // Identity is the STORE's to allocate: monotonic, never reused (Decision
   // 2026-09-24). The number is computed BEFORE the generator call so the
-  // model gets it as a hint (FOC-801) — the prompt states the rule, but the
-  // model cannot see the store, and a resumed run's guess is a guaranteed
-  // persistMap rejection. A map that arrives mis-numbered anyway is still a
-  // rejection, never a silent renumber.
+  // model gets it as a hint riding the reads (FOC-801) — the prompt states
+  // the rule, but the model cannot see the store, and a resumed run's guess
+  // is a guaranteed persistMap rejection. A map that arrives mis-numbered
+  // anyway is still a rejection, never a silent renumber.
   const allocated = allocateMapVersion(maps);
 
   // 3–4. generate → validate → (one regeneration) → validate → stop. An empty
@@ -815,7 +826,12 @@ export async function runPlanIntentNode({
       raw = await generator({
         stepId,
         step,
-        reads: attempt === 1 ? payload : regenReads(payload, previousMap, problems, allocated),
+        // FOC-801: the hint rides the READS on both attempts — the production
+        // transport composes the model's message from the reads alone and may
+        // drop unknown generator args, so attempt 1 carries it as a
+        // clearly-named field over the payload and the retry carries it
+        // inside the serialized revision (regenReads).
+        reads: attempt === 1 ? { ...payload, nextMapVersion: allocated } : regenReads(payload, previousMap, problems, allocated),
         nextMapVersion: allocated,
       });
     } catch (err) {
@@ -904,6 +920,10 @@ function rejectedMessage(stepId, problems) {
  *     the number the prompt's rule cannot compute. The store still owns
  *     identity: runPlanIntentNode re-checks and persistMap still rejects a
  *     wrong number, never a silent renumber.
+ *
+ * Together with attempt 1's top-level `nextMapVersion` payload field (see
+ * runPlanIntentNode) this is the READS transport of the hint on both
+ * attempts; the generator arg is a convenience for injected generators.
  */
 function regenReads(payload, previous, problems, nextMapVersion) {
   return {
