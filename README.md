@@ -50,6 +50,18 @@ Rationale and rejected alternatives: [ADR-0009](docs/adr/0009-supervisor-frontma
 
 ## Quickstart
 
+```bash
+git clone https://github.com/joint-hubs/linear-agents.git
+cd linear-agents
+./fenix up   # Windows: fenix up (cmd) or .\fenix.cmd up (PowerShell)
+```
+
+`fenix up` checks Docker, asks once for the OpenRouter, Linear and GitHub keys,
+builds the image and opens the dashboard at http://localhost:4600. `./fenix attach`
+starts the Supervisor. Details in [docs/QUICKSTART.md](docs/QUICKSTART.md).
+
+### Native Windows (without Docker)
+
 ```bat
 copy .env.example .env   :: fill in keys (OpenRouter, Anthropic, Linear)
 :: edit config/projects.json (repo<->project, GCP VM, team IDs)
@@ -94,13 +106,15 @@ using the `ATLAS_VENV_PYTHON` and `ATLAS_ROOT` env vars you set in `.env`.
 
 ## Requirements
 
-- Windows 10/11
-- [Claude Code](https://claude.com/claude-code) (CLI)
-- Node.js **22.5+** (the central telemetry server uses `node:sqlite`)
-- Java 21 (only for rendering PlantUML diagrams)
-- API keys: OpenRouter, Anthropic, Linear (see `.env.example`)
+- **Docker path:** Docker Desktop or Docker Engine with Compose v2, git, curl (Windows: Git for Windows). Everything else is in the image.
+- **Native Windows path:**
+  - Windows 10/11
+  - [Claude Code](https://claude.com/claude-code) (CLI)
+  - Node.js **22.5+** (the central telemetry server uses `node:sqlite`)
+  - Java 21 (only for rendering PlantUML diagrams)
+  - API keys: OpenRouter, Anthropic, Linear (see `.env.example`)
 
-Forks running on macOS/Linux will need to translate the `.bat` launchers to `.sh` — the underlying `.mjs` scripts are portable.
+macOS and Linux: use the Docker path.
 
 ## Running tests
 
