@@ -39,6 +39,10 @@ services:
     command: ["idle"]
     stdin_open: true
     tty: true
+    healthcheck:
+      # The image HEALTHCHECK probes the API, which this container does not run.
+      # FOC-776 adds a real supervisor liveness check.
+      disable: true
     depends_on:
       fenix-api:
         condition: service_healthy
