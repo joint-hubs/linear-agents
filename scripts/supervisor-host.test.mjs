@@ -21,6 +21,19 @@
 //     means the prompt was taken (busy, idle or needs-input — a fast turn can
 //     start AND end between two polls); an unconfirmed send during a running
 //     turn is queued, never retried;
+//   · dialogs are answered from the pane (FOC-810): GET /dialog parses the
+//     capture; /dialog/answer presses only an option that carries the exact
+//     choice (an auto-mode option is never pressed), deny Escapes and with a
+//     note pastes it through the shared paste path once the prompt is back;
+//   · /dialog/ask replans the ask keys and re-captures before EVERY step —
+//     a mismatch is re-polled for a 2 s settle window (the TUI redraws
+//     asynchronously after a step's keys) before it is a 409
+//     dialog-changed with the step; a first capture already on a later step
+//     of the same ask resumes there (resumedFrom), a mid-flow drift that
+//     outlives the window is 409 with partial:true (no automatic Escape);
+//   · slash commands are gated by the policy: /context and /cost are sent and
+//     their scrollback output returned (a modal is Esc-closed), anything else
+//     is 400 with the allowed list;
 //   · every non-healthz request passes TWO gates in order — peer (403) then
 //     token (401; a missing token FILE is 503) — and the token is re-read per
 //     request so a supervisor restart rotates it;
@@ -42,12 +55,17 @@
 
 import assert from "node:assert/strict";
 import net from "node:net";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 
 import { createHost, MAX_MESSAGE_BYTES, BODY_CAP_BYTES } from "./supervisor-host.mjs";
+import { extractCommandOutput, parseDialog } from "./session-dialog.mjs";
+
+const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "session-dialogs");
+const readFixture = (name) => readFileSync(join(FIXTURES, name), "utf8");
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -96,6 +114,9 @@ const fakeTmux = (init = {}) => {
     // The pane shows a free prompt unless a test says otherwise; `fail` with
     // "capture-pane" makes the pane unreadable (ok=false path).
     capture: init.capture ?? READY_PANE,
+    // Optional scripted capture SEQUENCE: capture-pane pops entries until one
+    // remains, which then repeats forever (the pane settled).
+    captureSeq: init.captureSeq ?? null,
     calls: [],
     onCall: null,
   };
@@ -107,6 +128,10 @@ const fakeTmux = (init = {}) => {
       case "has-session":
         return { status: api.present ? 0 : 1, stdout: "", stderr: "" };
       case "capture-pane":
+        if (api.captureSeq) {
+          if (api.captureSeq.length > 1) return { status: 0, stdout: api.captureSeq.shift(), stderr: "" };
+          return { status: 0, stdout: api.captureSeq[0], stderr: "" };
+        }
         return { status: 0, stdout: api.capture, stderr: "" };
       case "list-panes":
         return api.present
@@ -193,6 +218,9 @@ const until = async (fn, ms = 3000, label = "condition") => {
     await new Promise((r) => setTimeout(r, 10));
   }
 };
+
+// Every send-keys invocation, in order — the keys a flow actually pressed.
+const sendKeysArgs = (tmux) => tmux.calls.filter((c) => c.args[0] === "send-keys").map((c) => c.args);
 
 // A fake node-pty IPty: onData/onExit registrations, write/resize/kill.
 const fakePtyFactory = () => {
@@ -1082,6 +1110,420 @@ test("heartbeat: a client that misses its pong is terminated and its pty killed"
   await until(() => conn.closeCode !== null || conn.error, 3000, "terminated");
   eq(pty.made[0].killed, true, "pty killed after the missed pong");
   await closeServer(built.host);
+});
+
+// ── dialogs: GET /dialog, /dialog/answer (FOC-810) ───────────────────────────
+
+console.log("\nsupervisor-host: dialogs");
+
+const PERM = readFixture("permission-bash.txt");
+const PERM_ID = parseDialog(PERM).id;
+const IDLE = readFixture("idle-after-cancel.txt");
+const NUDGE = readFixture("auto-mode-nudge.txt");
+const ASK_SINGLE = readFixture("ask-single.txt");
+const ASK_Q1 = readFixture("ask-multi-q1.txt");
+const ASK_Q2 = readFixture("ask-multi-q2.txt");
+const ASK_REVIEW = readFixture("ask-multi-review.txt");
+const IDLE_AFTER_ANSWER = readFixture("idle-after-answer.txt");
+const TWO_QUESTIONS = [
+  {
+    question: "Should the export land in v1?",
+    multiSelect: false,
+    options: [{ label: "Narrow the AC" }, { label: "Finish before landing" }, { label: "Leave as a DoD gap" }],
+  },
+  {
+    question: "Which checks should run before the PR?",
+    multiSelect: true,
+    options: [{ label: "Unit tests" }, { label: "npm audit" }, { label: "E2E" }],
+  },
+];
+
+test("GET /dialog: permission pane → the parsed dialog", async () => {
+  const { host } = build({ tmux: fakeTmux({ present: true, capture: PERM }) });
+  const port = await listen(host);
+  const r = await call(port, "GET", "/dialog");
+  eq(r.status, 200, "status");
+  eq(r.json.dialog.id, PERM_ID, "id matches the parser");
+  eq(r.json.dialog.kind, "permission", "kind");
+  eq(r.json.dialog.command, "npm audit --json", "command");
+  eq(r.json.dialog.options.length, 4, "options");
+  await closeServer(host);
+});
+
+test("GET /dialog: idle pane → null; unreadable pane → 503 pane-unreadable", async () => {
+  const a = build({ tmux: fakeTmux({ present: true, capture: IDLE }) });
+  const p1 = await listen(a.host);
+  eq(await call(p1, "GET", "/dialog").then((r) => r.json), { dialog: null }, "idle → null");
+  await closeServer(a.host);
+
+  const b = build({ tmux: fakeTmux({ present: true, fail: new Set(["capture-pane"]) }) });
+  const p2 = await listen(b.host);
+  const r = await call(p2, "GET", "/dialog");
+  eq(r.status, 503, "unreadable → 503");
+  eq(r.json, { error: "pane-unreadable" }, "error");
+  await closeServer(b.host);
+});
+
+test("answer allow-once presses option key 1 and reports closed", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [PERM, IDLE] });
+  const { host } = build({ tmux });
+  const r = await host.answerDialog({ id: PERM_ID, choice: "allow-once" });
+  eq(r.status, 200, "status");
+  eq(r.body, { sent: true, closed: true }, "body");
+  eq(sendKeysArgs(tmux), [["send-keys", "-t", "supervisor", "1"]], "pressed 1");
+  assert.ok(!tmux.calls.some((c) => c.args[0] === "load-buffer"), "no paste for a bare answer");
+});
+
+test("answer allow-always presses option key 2 (the don't-ask-again option)", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [PERM, IDLE] });
+  const { host } = build({ tmux });
+  const r = await host.answerDialog({ id: PERM_ID, choice: "allow-always" });
+  eq(r.body, { sent: true, closed: true }, "body");
+  eq(sendKeysArgs(tmux), [["send-keys", "-t", "supervisor", "2"]], "pressed 2");
+});
+
+test("answer deny presses Escape", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [PERM, IDLE] });
+  const { host } = build({ tmux });
+  const r = await host.answerDialog({ id: PERM_ID, choice: "deny" });
+  eq(r.body, { sent: true, closed: true }, "body");
+  eq(sendKeysArgs(tmux), [["send-keys", "-t", "supervisor", "Escape"]], "Escape");
+});
+
+test("answer closed:false when the dialog is still there after the 3 s cap", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [PERM] });
+  const { host } = build({ tmux });
+  const r = await host.answerDialog({ id: PERM_ID, choice: "deny" });
+  eq(r.body, { sent: true, closed: false }, "reported honestly");
+  eq(sendKeysArgs(tmux), [["send-keys", "-t", "supervisor", "Escape"]], "Escape was still pressed");
+});
+
+test("answer choice auto-mode → 400 bad-choice, no keys pressed", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [PERM] });
+  const { host } = build({ tmux });
+  const r = await host.answerDialog({ id: PERM_ID, choice: "auto-mode" });
+  eq(r.status, 400, "status");
+  eq(r.body.error, "bad-choice", "error");
+  eq(sendKeysArgs(tmux), [], "never pressed the auto-mode option");
+});
+
+test("answer with a wrong id → 409 dialog-changed, no keys; no dialog → 409 no-dialog", async () => {
+  const a = build({ tmux: fakeTmux({ present: true, captureSeq: [PERM] }) });
+  const r = await a.host.answerDialog({ id: "0123456789ab", choice: "allow-once" });
+  eq(r.status, 409, "status");
+  eq(r.body, { error: "dialog-changed" }, "body");
+  eq(sendKeysArgs(a.tmux), [], "no keys");
+
+  const b = build({ tmux: fakeTmux({ present: true, captureSeq: [IDLE] }) });
+  const r2 = await b.host.answerDialog({ id: PERM_ID, choice: "deny" });
+  eq(r2.status, 409, "status");
+  eq(r2.body, { error: "no-dialog" }, "body");
+  eq(sendKeysArgs(b.tmux), [], "no keys");
+});
+
+test("answer allow-* on a select dialog and deny on an ask dialog → 400 bad-choice", async () => {
+  const a = build({ tmux: fakeTmux({ present: true, captureSeq: [NUDGE] }) });
+  const r = await a.host.answerDialog({ id: parseDialog(NUDGE).id, choice: "allow-once" });
+  eq(r.status, 400, "allow on select refused");
+  eq(r.body.error, "bad-choice", "error");
+  eq(sendKeysArgs(a.tmux), [], "no keys");
+
+  const b = build({ tmux: fakeTmux({ present: true, captureSeq: [ASK_SINGLE] }) });
+  const r2 = await b.host.answerDialog({ id: parseDialog(ASK_SINGLE).id, choice: "deny" });
+  eq(r2.status, 400, "deny on ask refused");
+  eq(r2.body.error, "bad-choice", "error");
+  eq(sendKeysArgs(b.tmux), [], "no keys");
+});
+
+test("deny with a note: Escape first, the note pasted once the prompt is back, control chars stripped", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [PERM, IDLE] });
+  const { host } = build({ tmux });
+  const r = await host.answerDialog({ id: PERM_ID, choice: "deny", note: "fix\u0000 it\r\nplease" });
+  eq(r.status, 200, "status");
+  eq(r.body, { sent: true, closed: true, noteSent: true }, "note delivered");
+  const keys = sendKeysArgs(tmux);
+  eq(keys[0], ["send-keys", "-t", "supervisor", "Escape"], "Escape dismissed the dialog first");
+  eq(keys[keys.length - 1], ["send-keys", "-t", "supervisor", "Enter"], "note submitted with Enter");
+  const load = tmux.calls.find((c) => c.args[0] === "load-buffer");
+  eq(load.input, "fix it\nplease", "the note went through the chat paste path, cleaned");
+});
+
+test("deny with an over-long note → 400 bad-note before any key", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [PERM] });
+  const { host } = build({ tmux });
+  const r = await host.answerDialog({ id: PERM_ID, choice: "deny", note: "x".repeat(4001) });
+  eq(r.status, 400, "status");
+  eq(r.body.error, "bad-note", "error");
+  eq(sendKeysArgs(tmux), [], "no keys, no paste");
+});
+
+test("answer behind the HTTP router, gated like every other action", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [PERM, IDLE] });
+  const { host } = build({ tmux });
+  const port = await listen(host);
+  const r = await call(port, "POST", "/dialog/answer", { body: { id: PERM_ID, choice: "allow-once" } });
+  eq(r.status, 200, "answer status");
+  eq(r.json, { sent: true, closed: true }, "answer body");
+  await closeServer(host);
+
+  const tmux2 = fakeTmux({ present: true, captureSeq: [ASK_Q1, IDLE_AFTER_ANSWER] });
+  const built = build({ tmux: tmux2 });
+  const port2 = await listen(built.host);
+  const r2 = await call(port2, "POST", "/dialog/ask", {
+    body: {
+      questions: [TWO_QUESTIONS[0]],
+      answers: [{ choices: [1] }],
+    },
+  });
+  eq(r2.status, 200, "ask status");
+  eq(r2.json, { answered: true }, "ask body");
+  await closeServer(built.host);
+
+  const gated = build({ tmux: fakeTmux({ present: true }), peers: ["10.9.9.9"] });
+  const port3 = await listen(gated.host);
+  eq((await call(port3, "GET", "/dialog")).status, 403, "peer gate on /dialog");
+  eq((await call(port3, "POST", "/dialog/answer", { body: {} })).status, 403, "peer gate on /dialog/answer");
+  eq((await call(port3, "POST", "/dialog/ask", { body: {} })).status, 403, "peer gate on /dialog/ask");
+  await closeServer(gated.host);
+});
+
+test("paneState treats the auto-mode nudge as a dialog (needs-input via the parser)", async () => {
+  const { host } = build({
+    tmux: fakeTmux({ present: true, capture: NUDGE }),
+    stateNow: () => ({ state: "idle", updatedAt: "1970-01-01T00:00:00.000Z", notification: null }),
+  });
+  const s = host.getState();
+  eq(s.dialog, true, "select dialog detected");
+  eq(s.promptReady, false, "no free prompt");
+  eq(s.state, "needs-input", "effective state");
+});
+
+// ── dialogs: /dialog/ask (FOC-810) ────────────────────────────────────────────
+
+console.log("\nsupervisor-host: /dialog/ask");
+
+test("ask: two-question flow q1 → q2 → review → idle sends the planned keys", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [ASK_Q1, ASK_Q2, ASK_REVIEW, IDLE_AFTER_ANSWER] });
+  const { host } = build({ tmux });
+  const r = await host.answerAsk({
+    questions: TWO_QUESTIONS,
+    answers: [{ choices: [0] }, { choices: [0, 1] }],
+  });
+  eq(r.status, 200, "status");
+  eq(r.body, { answered: true }, "answered");
+  eq(sendKeysArgs(tmux), [
+    ["send-keys", "-t", "supervisor", "1"],
+    ["send-keys", "-t", "supervisor", "1"],
+    ["send-keys", "-t", "supervisor", "2"],
+    ["send-keys", "-t", "supervisor", "Right"],
+    ["send-keys", "-t", "supervisor", "1"],
+  ], "q1 pick, q2 toggles + advance, review submit");
+});
+
+test("ask: a pane that does not show the expected question → 409 with the step, no keys", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [ASK_Q1] });
+  const { host } = build({ tmux });
+  const r = await host.answerAsk({
+    questions: [{ ...TWO_QUESTIONS[0], question: "Something else entirely?" }, TWO_QUESTIONS[1]],
+    answers: [{ choices: [0] }, { choices: [0, 1] }],
+  });
+  eq(r.status, 409, "status");
+  eq(r.body, { error: "dialog-changed", step: 0 }, "step reported");
+  eq(sendKeysArgs(tmux), [], "no keys");
+});
+
+test("ask: free-text answer sends the Type-something key, the literal with -l, then Enter", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [ASK_SINGLE, IDLE_AFTER_ANSWER] });
+  const { host } = build({ tmux });
+  const r = await host.answerAsk({
+    questions: [{
+      question: "npm audit found 2 critical advisories in devDependencies. What now?",
+      multiSelect: false,
+      options: [{ label: "Override tinypool" }, { label: "Separate ticket" }, { label: "Upgrade vitest" }],
+    }],
+    answers: [{ choices: [], text: "Diagnose first, then decide" }],
+  });
+  eq(r.status, 200, "status");
+  eq(r.body, { answered: true }, "answered");
+  eq(sendKeysArgs(tmux), [
+    ["send-keys", "-t", "supervisor", "4"],
+    ["send-keys", "-l", "-t", "supervisor", "Diagnose first, then decide"],
+    ["send-keys", "-t", "supervisor", "Enter"],
+  ], "option key, literal text, submit");
+});
+
+test("ask: a plan that throws → 400 bad-answers with the message, no keys", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [ASK_Q1] });
+  const { host } = build({ tmux });
+  const r = await host.answerAsk({ questions: TWO_QUESTIONS, answers: [{ choices: [0] }] });
+  eq(r.status, 400, "status");
+  eq(r.body.error, "bad-answers", "error");
+  assert.match(r.body.message, /lengths must match/, "message from askKeyPlan");
+  eq(sendKeysArgs(tmux), [], "no keys");
+});
+
+test("ask: the dialog still open after the last step → answered:false", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [ASK_Q1] });
+  const { host } = build({ tmux });
+  const r = await host.answerAsk({
+    questions: [TWO_QUESTIONS[0]],
+    answers: [{ choices: [0] }],
+  });
+  eq(r.status, 200, "status");
+  eq(r.body, { answered: false }, "reported honestly");
+  eq(sendKeysArgs(tmux), [["send-keys", "-t", "supervisor", "1"]], "the key was still sent");
+});
+
+test("ask: the pane may lag a step — the 2 s settle window retries before any 409", async () => {
+  // The acceptance-stack race: the capture right after the step-0 key still
+  // shows the previous screen; the redraw lands a moment later.
+  const tmux = fakeTmux({
+    present: true,
+    captureSeq: [ASK_Q1, ASK_Q1, ASK_Q1, ASK_Q2, ASK_REVIEW, IDLE_AFTER_ANSWER],
+  });
+  const { host, clk } = build({ tmux });
+  const r = await host.answerAsk({
+    questions: TWO_QUESTIONS,
+    answers: [{ choices: [0] }, { choices: [0, 1] }],
+  });
+  eq(r.status, 200, "status");
+  eq(r.body, { answered: true }, "answered");
+  eq(sendKeysArgs(tmux), [
+    ["send-keys", "-t", "supervisor", "1"],
+    ["send-keys", "-t", "supervisor", "1"],
+    ["send-keys", "-t", "supervisor", "2"],
+    ["send-keys", "-t", "supervisor", "Right"],
+    ["send-keys", "-t", "supervisor", "1"],
+  ], "the flow completed once the pane settled");
+  assert.ok(clk.sleeps.includes(150), "the settle poll slept between captures");
+});
+
+test("ask: a mid-flow mismatch that outlives the window → 409 with partial:true, no Escape", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [ASK_Q1, ASK_Q1] });
+  const { host } = build({ tmux });
+  const r = await host.answerAsk({
+    questions: TWO_QUESTIONS,
+    answers: [{ choices: [0] }, { choices: [0, 1] }],
+  });
+  eq(r.status, 409, "status");
+  eq(r.body, { error: "dialog-changed", step: 1, partial: true }, "step + partial");
+  eq(sendKeysArgs(tmux), [["send-keys", "-t", "supervisor", "1"]], "only step 0's key was sent");
+});
+
+test("ask: a pane already on question 2 (tab 1 done) resumes the plan → resumedFrom:1", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [ASK_Q2, ASK_Q2, ASK_REVIEW, IDLE_AFTER_ANSWER] });
+  const { host } = build({ tmux });
+  const r = await host.answerAsk({
+    questions: TWO_QUESTIONS,
+    answers: [{ choices: [0] }, { choices: [0, 1] }],
+  });
+  eq(r.status, 200, "status");
+  eq(r.body, { answered: true, resumedFrom: 1 }, "the first answer was already applied");
+  eq(sendKeysArgs(tmux), [
+    ["send-keys", "-t", "supervisor", "1"],
+    ["send-keys", "-t", "supervisor", "2"],
+    ["send-keys", "-t", "supervisor", "Right"],
+    ["send-keys", "-t", "supervisor", "1"],
+  ], "only q2's toggles and the review submit were sent");
+});
+
+test("ask: a pane already on the review screen resumes there → resumedFrom:2", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [ASK_REVIEW, ASK_REVIEW, IDLE_AFTER_ANSWER] });
+  const { host } = build({ tmux });
+  const r = await host.answerAsk({
+    questions: TWO_QUESTIONS,
+    answers: [{ choices: [0] }, { choices: [0, 1] }],
+  });
+  eq(r.status, 200, "status");
+  eq(r.body, { answered: true, resumedFrom: 2 }, "both answers were already applied");
+  eq(sendKeysArgs(tmux), [["send-keys", "-t", "supervisor", "1"]], "only the review submit");
+});
+
+test("ask: a later question whose earlier tabs are NOT done is not a resume → 409 step 0", async () => {
+  // Question 2 on screen but tab 1 unchecked: nothing proves question 1 was
+  // answered, so the pane matches nothing in the plan.
+  const stale = readFixture("ask-multi-q2.txt").replace("☒ Export", "☐ Export");
+  const tmux = fakeTmux({ present: true, captureSeq: [stale] });
+  const { host } = build({ tmux });
+  const r = await host.answerAsk({
+    questions: TWO_QUESTIONS,
+    answers: [{ choices: [0] }, { choices: [0, 1] }],
+  });
+  eq(r.status, 409, "status");
+  eq(r.body, { error: "dialog-changed", step: 0 }, "no resume without the done tabs");
+  eq(sendKeysArgs(tmux), [], "no keys");
+});
+
+// ── slash commands from the chat (FOC-810) ────────────────────────────────────
+
+console.log("\nsupervisor-host: slash commands");
+
+const IDLE_HOOK = () => ({ state: "idle", updatedAt: "1970-01-01T00:00:00.000Z", notification: null });
+
+test("slash: /context is pasted and its scrollback output returned", async () => {
+  const context = readFixture("slash-context-scrollback.txt");
+  const tmux = fakeTmux({ present: true, captureSeq: [READY_PANE, context] });
+  const { host } = build({ tmux, stateNow: IDLE_HOOK });
+  const r = await host.sendMessage("/context");
+  eq(r.status, 200, "status");
+  eq(r.body.sent, true, "sent");
+  eq(r.body.confirmed, true, "the rendered output is the confirmation");
+  eq(r.body.output, extractCommandOutput(context, "/context"), "output from the scrollback");
+  const load = tmux.calls.find((c) => c.args[0] === "load-buffer");
+  eq(load.input, "/context", "pasted as-is");
+  assert.ok(!sendKeysArgs(tmux).some((a) => a[3] === "Escape"), "no Escape for a non-modal command");
+});
+
+test("slash: /cost returns the panel output and Esc-closes the modal", async () => {
+  const cost = readFixture("slash-cost-scrollback.txt");
+  const tmux = fakeTmux({ present: true, captureSeq: [READY_PANE, cost] });
+  const { host } = build({ tmux, stateNow: IDLE_HOOK });
+  const r = await host.sendMessage("/cost");
+  eq(r.status, 200, "status");
+  eq(r.body.confirmed, true, "confirmed");
+  eq(r.body.output, extractCommandOutput(cost, "/cost"), "panel output");
+  const keys = sendKeysArgs(tmux);
+  eq(keys[keys.length - 1], ["send-keys", "-t", "supervisor", "Escape"], "Escape closed the modal last");
+});
+
+test("slash: a refused command is 400 with the allowed list and touches nothing", async () => {
+  const tmux = fakeTmux({ present: true });
+  const { host } = build({ tmux });
+  const r = await host.sendMessage("/exit");
+  eq(r.status, 400, "status");
+  eq(r.body.error, "slash-command", "error");
+  eq(r.body.message, "only /compact, /context and /cost can be sent from the chat", "allowed list");
+  eq(tmux.calls, [], "no tmux call at all");
+});
+
+test("slash: /compact keeps the hook confirmation path (no output, no Escape)", async () => {
+  const tmux = fakeTmux({ present: true, captureSeq: [READY_PANE] });
+  const clk = fakeClock();
+  let sent = false;
+  const { host } = build({
+    tmux,
+    clk,
+    stateNow: () => (sent
+      ? { state: "busy", updatedAt: iso(clk), notification: null }
+      : IDLE_HOOK()),
+  });
+  tmux.onCall = (args) => {
+    if (args[0] === "send-keys") sent = true;
+  };
+  const r = await host.sendMessage("/compact focus tests");
+  eq(r.status, 200, "status");
+  eq(r.body, { sent: true, confirmed: true, queued: false }, "hook-confirmed");
+  assert.ok(!("output" in r.body), "no output field for /compact");
+  assert.ok(!sendKeysArgs(tmux).some((a) => a[3] === "Escape"), "no Escape");
+});
+
+test("slash: an allowed command still hits the dialog check → 409", async () => {
+  const tmux = fakeTmux({ present: true, capture: DIALOG_PANE });
+  const { host } = build({ tmux, stateNow: IDLE_HOOK });
+  const r = await host.sendMessage("/context");
+  eq(r.status, 409, "status");
+  eq(r.body.error, "needs-input", "error");
+  eq(tmux.calls.map((c) => c.args[0]), ["has-session", "capture-pane"], "refused before any paste");
 });
 
 // ── runner ────────────────────────────────────────────────────────────────────
