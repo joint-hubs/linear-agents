@@ -2352,7 +2352,7 @@ server.listen(PORT, HOST, () => {
   console.log(
     loopback
       ? `Telemetry server listening on http://${HOST}:${PORT} (loopback only — POST /api/launch is local-only, §5)`
-      : `Telemetry server listening on http://${HOST}:${PORT} (container bind — published on the host's 127.0.0.1 only; POST /api/launch stays local-only, §5)`,
+      : `Telemetry server listening on http://${HOST}:${PORT} (container bind — published on the host's 127.0.0.1 only; write endpoints accept loopback and the network gateway, FOC-800)`,
   );
 
   void bootstrapTelemetry().catch((error) => console.error(`[telemetry] bootstrap failed: ${error.message}`));

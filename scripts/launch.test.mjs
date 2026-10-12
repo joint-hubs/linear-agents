@@ -29,6 +29,8 @@ import {
   kickoffPrompt,
   windowTitle,
   isLocalOrigin,
+  parseDefaultGateway,
+  containerGateway,
   isAllowedOrigin,
   buildLaunchBat,
 } from './launch.mjs';
@@ -153,6 +155,37 @@ for (const addr of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
 for (const addr of ['8.8.8.8', '192.168.1.1', '10.0.0.1', null, undefined, '']) {
   test(`isLocalOrigin("${addr}") → false`, () => assert.equal(isLocalOrigin(addr), false));
 }
+
+// --- parseDefaultGateway / containerGateway / isLocalOrigin gateway (FOC-800) ---
+const ROUTE_TABLE =
+  'Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n' +
+  'eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n' +
+  'eth0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n';
+test('parseDefaultGateway: realistic route table → 172.17.0.1', () =>
+  assert.equal(parseDefaultGateway(ROUTE_TABLE), '172.17.0.1'));
+test('parseDefaultGateway: no default row → null', () =>
+  assert.equal(parseDefaultGateway(ROUTE_TABLE.replace('00000000\t010011AC', '000011AC\t010011AC')), null));
+test('parseDefaultGateway: garbage → null', () =>
+  assert.equal(parseDefaultGateway('total nonsense\n\x00\x01\x02'), null));
+test('containerGateway: FENIX_IN_CONTAINER unset → null', () =>
+  assert.equal(containerGateway({ env: {} }), null));
+test('containerGateway: in container + route table → 172.17.0.1', () =>
+  assert.equal(
+    containerGateway({ env: { FENIX_IN_CONTAINER: '1' }, readFile: () => ROUTE_TABLE }),
+    '172.17.0.1',
+  ));
+test('containerGateway: readFile throws → null', () =>
+  assert.equal(containerGateway({ env: { FENIX_IN_CONTAINER: '1' }, readFile: () => { throw new Error('no /proc'); } }), null));
+test('isLocalOrigin(gateway): gateway address → true', () =>
+  assert.equal(isLocalOrigin('172.17.0.1', '172.17.0.1'), true));
+test('isLocalOrigin(gateway): IPv4-mapped gateway → true', () =>
+  assert.equal(isLocalOrigin('::ffff:172.17.0.1', '172.17.0.1'), true));
+test('isLocalOrigin(gateway): sibling container address → false', () =>
+  assert.equal(isLocalOrigin('172.17.0.3', '172.17.0.1'), false));
+test('isLocalOrigin(gateway): non-local address with null gateway → false', () =>
+  assert.equal(isLocalOrigin('172.17.0.1', null), false));
+test('isLocalOrigin(gateway): loopback still true with null gateway', () =>
+  assert.equal(isLocalOrigin('127.0.0.1', null), true));
 
 // --- isAllowedOrigin (D-S1 CSRF defense) ---
 test('isAllowedOrigin: absent Origin → true (curl / smoke / server-to-server)', () => {
