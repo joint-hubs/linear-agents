@@ -7,15 +7,24 @@
 # All mutable state (telemetry, supervisor) lives in the /data volume,
 # so the image itself is stateless and freely replaceable.
 
+# Builder stage for the native optional dependency node-pty (FOC-783): it is
+# compiled with node-gyp, which needs python3/make/g++ — the slim runtime has
+# none of them, the full bookworm image has all three. Same npm command the
+# runtime stage used (npm ci, all deps: devDeps include runtime tools).
+FROM node:22-bookworm AS deps
+WORKDIR /opt/fenix
+COPY package.json package-lock.json ./
+RUN npm ci
+
 FROM node:22-bookworm-slim
 
 ARG CLAUDE_CODE_VERSION=2.1.296
 ARG CODEGRAPH_VERSION=1.6.0
 ARG SEMGREP_VERSION=1.172.0
 
-# System deps: git/gh/curl for tooling (squads call `gh`), procps for `ps` (stability tests), tini as init, python3 for semgrep.
+# System deps: git/gh/curl for tooling (squads call `gh`), procps for `ps` (stability tests), tini as init, python3 for semgrep, tmux for the Supervisor session host (FOC-783).
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends git gh ca-certificates curl tini procps python3 python3-venv python3-pip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git gh ca-certificates curl tini procps tmux python3 python3-venv python3-pip && rm -rf /var/lib/apt/lists/*
 
 # Python tools (semgrep, uv) in an isolated venv, on PATH ahead of system python.
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" uv
@@ -30,9 +39,10 @@ RUN mkdir -p /opt/fenix /data && chown node:node /opt/fenix /data
 WORKDIR /opt/fenix
 USER node
 
-# Layer-cached dependency install (all deps: devDeps include runtime tools).
-COPY --chown=node:node package.json package-lock.json ./
-RUN npm ci
+# Dependencies from the builder stage above (node-pty arrives compiled — the
+# runtime stage has no toolchain). Fail the build if it does not load.
+COPY --from=deps --chown=node:node /opt/fenix/node_modules ./node_modules
+RUN node -e "require('node-pty')"
 COPY --chown=node:node ui/package.json ui/package-lock.json ./ui/
 RUN cd ui && npm ci
 

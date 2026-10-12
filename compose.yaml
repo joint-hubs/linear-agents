@@ -18,6 +18,9 @@ x-fenix: &fenix
     - linear_api_key
     - github_token
   environment:
+    # YAML merge keys (<<) are SHALLOW: a service that declares its own
+    # `environment:` replaces this one wholesale — so every service must
+    # restate LA_PROJECTS_FILE (and anything else added here later).
     LA_PROJECTS_FILE: /fenix-config/projects.json
   volumes:
     - fenix-data:/data
@@ -28,6 +31,11 @@ services:
   fenix-api:
     <<: *fenix
     command: ["api"]
+    environment:
+      LA_PROJECTS_FILE: /fenix-config/projects.json
+      # Cockpit (FOC-783): where the fenix-api reaches the Supervisor session
+      # host over the compose network (HTTP + WebSocket, never published).
+      FENIX_SUPERVISOR_HOST: http://fenix-supervisor:7332
     ports:
       - "127.0.0.1:${FENIX_PORT:-4600}:7331"
     healthcheck:
@@ -39,13 +47,20 @@ services:
 
   fenix-supervisor:
     <<: *fenix
-    command: ["idle"]
+    command: ["host"]
+    environment:
+      LA_PROJECTS_FILE: /fenix-config/projects.json
+      # The host HTTP server accepts requests only from this peer container
+      # (children run in the supervisor container as the same user).
+      FENIX_HOST_PEER: fenix-api
     stdin_open: true
     tty: true
     healthcheck:
-      # Liveness: the data volume is writable and the API answers over the
-      # compose network (the Supervisor's telemetry and dashboard depend on it).
-      test: ["CMD", "sh", "-c", "test -w /data/state/supervisor && node -e \"fetch('http://fenix-api:7331/api/telemetry/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      # Liveness: the data volume is writable, the API answers over the compose
+      # network (the Supervisor's telemetry and dashboard depend on it), and the
+      # session host on :7332 answers its loopback /healthz — a wedged host
+      # restarts the container.
+      test: ["CMD", "sh", "-c", "test -w /data/state/supervisor && node -e \"fetch('http://fenix-api:7331/api/telemetry/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\" && node -e \"fetch('http://127.0.0.1:7332/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 30s
       timeout: 5s
       retries: 3
