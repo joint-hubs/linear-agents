@@ -184,3 +184,17 @@ export function buildTerminalSocketUrl(base, loc, cols, rows) {
     wsProto + '//' + host + prefix + '/api/supervisor/terminal?cols=' + cols + '&rows=' + rows
   );
 }
+
+// ===== Start-in-Cockpit prefill (FOC-804) =====
+
+// cockpitPrefill(search) -> the text of the `prompt` query parameter, or null.
+// Tasks hands a ticket over with /?prompt=Start ticket FOC-…: <title>; the
+// Cockpit puts that text into the chat composer draft — it never sends it, the
+// human still presses Send. Takes the raw location.search string so the plain
+// node tests can pin the parsing; an absent, empty or whitespace-only prompt
+// is no prefill at all.
+export function cockpitPrefill(search) {
+  if (!search) return null;
+  const text = new URLSearchParams(search).get('prompt');
+  return text && text.trim() ? text : null;
+}

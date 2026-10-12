@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import Cockpit from './screens/Cockpit.jsx';
 import Manager from './screens/Manager.jsx';
 import Live from './screens/Live.jsx';
@@ -13,10 +13,13 @@ import Flow from './screens/Flow.jsx';
 import SquadConfig from './screens/SquadConfig.jsx';
 import Prompts from './screens/Prompts.jsx';
 import Ft from './screens/Ft.jsx';
+import AreaTabs from './components/AreaTabs.jsx';
+import { NAV_AREAS, areaForPath } from './navAreas';
 import { getCockpit } from './api';
 import { usePoll } from './hooks/usePoll';
 
-// Minimal 17px stroke icons (no icon-lib dependency).
+// Minimal 17px stroke icons (no icon-lib dependency). One per nav area; the
+// v1 sub-page tabs are text-only.
 const I = {
   cockpit: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -30,24 +33,6 @@ const I = {
       <rect x="3" y="4" width="8" height="7" rx="1.5" />
       <rect x="13" y="4" width="8" height="7" rx="1.5" />
       <rect x="8" y="14" width="8" height="7" rx="1.5" />
-    </svg>
-  ),
-  live: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-    </svg>
-  ),
-  timeline: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <line x1="4" y1="6" x2="14" y2="6" />
-      <line x1="8" y1="12" x2="20" y2="12" />
-      <line x1="4" y1="18" x2="16" y2="18" />
-    </svg>
-  ),
-  runs: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 5h18M3 12h18M3 19h18" />
-      <circle cx="3" cy="5" r="0.5" />
     </svg>
   ),
   costs: (
@@ -69,47 +54,13 @@ const I = {
       <path d="M9 10l2 2 4-4" />
     </svg>
   ),
-  flow: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="5" cy="6" r="2.5" />
-      <circle cx="19" cy="6" r="2.5" />
-      <circle cx="12" cy="18" r="2.5" />
-      <path d="M7 7.5 10.5 16M17 7.5 13.5 16" />
-    </svg>
-  ),
   config: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
     </svg>
   ),
-  prompts: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-      <path d="M8 9h8M8 13h5" />
-    </svg>
-  ),
-  ft: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 3v18h18" />
-      <path d="M7 14l3-4 4 3 5-7" />
-    </svg>
-  ),
 };
-
-function NavItem({ to, end, icon, children, badge = null }) {
-  return (
-    <NavLink
-      to={to}
-      end={end}
-      className={({ isActive }) => (isActive ? 'nav-item nav-item-active' : 'nav-item')}
-    >
-      {icon}
-      <span>{children}</span>
-      {badge}
-    </NavLink>
-  );
-}
 
 // Needs-you count on the Cockpit nav item (spec §2). Lightweight poll every
 // 15 s; an old server without /api/cockpit (404) or a down API must never
@@ -138,58 +89,102 @@ function NeedsYouBadge() {
   );
 }
 
+// v1 Costs stays the Costs & quality area's only screen until FOC-785 rebuilds
+// it. The banner lives here (the route element) rather than inside Costs.jsx so
+// the v1 screen is untouched — and so the FOC-785 rebuild removes it with the
+// route, not by editing the screen.
+function CostsRoute() {
+  return (
+    <>
+      <div className="banner banner-warn" style={{ marginBottom: 16 }}>
+        Unreconciled — these costs come from the run registry and can be several
+        times higher than the transcript ground truth. The reconciled view comes
+        with Costs & quality (FOC-785).
+      </div>
+      <Costs />
+    </>
+  );
+}
+
+// The six-area navigation (FOC-804). Highlighting is driven by areaForPath(),
+// not by the link's own route match — e.g. /runs/:id must light up Work even
+// though the item links to /tasks. Live (/live) and Fine-tune (/ft) keep their
+// routes but no longer appear here.
+function Sidebar({ pathname }) {
+  const active = areaForPath(pathname);
+  return (
+    <aside className="sidebar">
+      <div className="brand">
+        <div className="brand-mark">F</div>
+        <div>
+          <div className="brand-name">Fenix</div>
+          <div className="brand-sub">agent observability</div>
+        </div>
+      </div>
+      <nav className="nav">
+        {NAV_AREAS.map((area) => (
+          <Link
+            key={area.id}
+            to={area.defaultRoute}
+            className={area.id === active ? 'nav-item nav-item-active' : 'nav-item'}
+          >
+            {I[area.icon]}
+            <span>{area.label}</span>
+            {area.id === 'cockpit' && <NeedsYouBadge />}
+          </Link>
+        ))}
+      </nav>
+      <div className="sidebar-foot">
+        <span className="dot dot-ok" style={{ width: 7, height: 7 }} />
+        <span>telemetry :7331</span>
+      </div>
+    </aside>
+  );
+}
+
+// Router context (useLocation) needs a component below <BrowserRouter>, so the
+// shell reads the pathname here and hands it to the sidebar; AreaTabs renders
+// above the screen content for areas with more than one page (Work, Insights,
+// Settings) — the v1 screens themselves stay untouched.
+function Shell() {
+  const { pathname } = useLocation();
+  return (
+    <div className="shell">
+      <Sidebar pathname={pathname} />
+      <div className="main">
+        <div className="page">
+          <AreaTabs pathname={pathname} />
+          <Routes>
+            <Route path="/" element={<Cockpit />} />
+            <Route path="/manager" element={<Manager />} />
+            <Route path="/live" element={<Live />} />
+            <Route path="/timeline" element={<Timeline />} />
+            <Route path="/runs" element={<Runs />} />
+            <Route path="/runs/:id" element={<RunDetail />} />
+            <Route path="/costs" element={<CostsRoute />} />
+            <Route path="/analysis" element={<Analysis />} />
+            <Route path="/tasks" element={<Tasks />} />
+            <Route path="/flow" element={<Flow />} />
+            <Route path="/squad-config" element={<SquadConfig />} />
+            <Route path="/prompts" element={<Prompts />} />
+            <Route path="/ft" element={<Ft />} />
+            {/* Area shortcuts (FOC-804): land on the area's default route. */}
+            <Route path="/work" element={<Navigate to="/tasks" replace />} />
+            <Route path="/team" element={<Navigate to="/manager" replace />} />
+            <Route path="/insights" element={<Navigate to="/analysis" replace />} />
+            <Route path="/settings" element={<Navigate to="/squad-config" replace />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <BrowserRouter>
-      <div className="shell">
-        <aside className="sidebar">
-          <div className="brand">
-            <div className="brand-mark">F</div>
-            <div>
-              <div className="brand-name">Fenix</div>
-              <div className="brand-sub">agent observability</div>
-            </div>
-          </div>
-          <nav className="nav">
-            <NavItem to="/" end icon={I.cockpit} badge={<NeedsYouBadge />}>Cockpit</NavItem>
-            <NavItem to="/manager" icon={I.manager}>Manager</NavItem>
-            <NavItem to="/live" icon={I.live}>Live (v1)</NavItem>
-            <NavItem to="/timeline" icon={I.timeline}>Timeline</NavItem>
-            <NavItem to="/runs" icon={I.runs}>Runs</NavItem>
-            <NavItem to="/costs" icon={I.costs}>Costs</NavItem>
-            <NavItem to="/analysis" icon={I.analysis}>Analysis</NavItem>
-            <NavItem to="/tasks" icon={I.tasks}>Tasks</NavItem>
-            <NavItem to="/flow" icon={I.flow}>Flow</NavItem>
-            <NavItem to="/squad-config" icon={I.config}>Konfiguracja</NavItem>
-            <NavItem to="/prompts" icon={I.prompts}>Prompty</NavItem>
-            <NavItem to="/ft" icon={I.ft}>Fine-tune</NavItem>
-          </nav>
-          <div className="sidebar-foot">
-            <span className="dot dot-ok" style={{ width: 7, height: 7 }} />
-            <span>telemetry :7331</span>
-          </div>
-        </aside>
-        <div className="main">
-          <div className="page">
-            <Routes>
-              <Route path="/" element={<Cockpit />} />
-              <Route path="/manager" element={<Manager />} />
-              <Route path="/live" element={<Live />} />
-              <Route path="/timeline" element={<Timeline />} />
-              <Route path="/runs" element={<Runs />} />
-              <Route path="/runs/:id" element={<RunDetail />} />
-              <Route path="/costs" element={<Costs />} />
-              <Route path="/analysis" element={<Analysis />} />
-              <Route path="/tasks" element={<Tasks />} />
-              <Route path="/flow" element={<Flow />} />
-              <Route path="/squad-config" element={<SquadConfig />} />
-              <Route path="/prompts" element={<Prompts />} />
-              <Route path="/ft" element={<Ft />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </div>
-        </div>
-      </div>
+      <Shell />
     </BrowserRouter>
   );
 }

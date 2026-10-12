@@ -201,6 +201,16 @@ export function containerGateway({ env = process.env, readFile = readFileSync } 
   }
 }
 
+// FOC-804: can this environment spawn a local squad window at all? The
+// dashboard's Tasks "Start" button reads GET /api/environment to decide
+// between native launch and "Start in Cockpit"; POST /api/launch refuses
+// (501) where launchSupported is false. Args are injectable so tests can
+// probe win32/linux/container shapes without spawning a server.
+export function launchEnvironment({ env = process.env, platform = process.platform } = {}) {
+  const inContainer = env.FENIX_IN_CONTAINER === '1';
+  return { inContainer, platform, launchSupported: platform === 'win32' && !inContainer };
+}
+
 let cachedGateway;
 function trustedGateway() {
   if (cachedGateway === undefined) cachedGateway = containerGateway();

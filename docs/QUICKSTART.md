@@ -223,6 +223,63 @@ your `agents/supervisor/settings.json` was edited locally and the image now
 ships a version with them — merge the Cockpit hooks from the
 `settings.json.fenix-new` twin parked next to it, then delete the twin.
 
+## Fenix on a VM (GCP)
+
+The same stack runs on a Linux VM. The dashboard stays on the VM's
+`127.0.0.1` and you reach it through an SSH tunnel — never publish port 4600:
+the dashboard has no login, so anyone who reaches it could read telemetry and
+transcripts. Through the tunnel the API sees a local peer, so chat, inbox
+answers and the terminal work as on your own machine. Checked on 2026-10-12
+with Debian 12 on `e2-standard-4` (4 vCPU / 16 GB) and a 100 GB disk.
+
+1. Create the VM (from your machine):
+
+   ```bash
+   gcloud compute instances create fenix-vm --zone=europe-central2-a --machine-type=e2-standard-4 --image-family=debian-12 --image-project=debian-cloud --boot-disk-size=100GB --boot-disk-type=pd-balanced
+   ```
+
+2. On the VM (`gcloud compute ssh fenix-vm --zone=europe-central2-a`): install
+   Docker Engine and the Compose plugin from Docker's apt repository
+   (docs.docker.com → Install Docker Engine on Debian), add yourself to the
+   `docker` group, log in again, then:
+
+   ```bash
+   git clone https://github.com/joint-hubs/linear-agents.git ~/fenix && cd ~/fenix && ./fenix up
+   ```
+
+   Check `id -u` first: until FOC-803 the host user must be uid 1000 (the
+   container user), or the container cannot read the keys the wizard writes.
+
+3. The tunnel, from your machine — keep it open while you use the dashboard,
+   then open `http://localhost:4600`:
+
+   ```bash
+   gcloud compute ssh fenix-vm --zone=europe-central2-a --ssh-flag="-N" --ssh-flag="-L 4600:localhost:4600"
+   ```
+
+   In PowerShell, pass SSH options with `--ssh-flag` as above: `gcloud` is a
+   PowerShell script there and swallows a bare `--`. On Windows the tunnel runs
+   in a PuTTY window — leave it open.
+
+Sizing, measured on `fenix-vm` on 2026-10-12 (one Supervisor, one test-squad
+child on a real ticket — a single sample, not a benchmark):
+
+| | CPU (4 vCPU) | memory | disk / network |
+|---|---|---|---|
+| idle (Supervisor waiting) | ~1 % | ~1.2 GB used (Supervisor `claude` ~380 MB, API ~100 MB) | writes ~3 MB/min |
+| one child at work (22 min) | peaks ~38 % (≈1.5 vCPU) | ~2–3 GB above idle, page cache included | ~530 MB downloaded (toolchains), ~2.9 GB written |
+| first image build | peaks ~41 % | up to ~10 GB incl. page cache | ~1 GB downloaded |
+
+Disk after the first ticket: 9.7 GB — image 2 GB, Docker build cache 3.8 GB
+(`docker builder prune` frees it), agent toolchains in the container 1.8 GB,
+data volume 0.3 GB. Recommended: 4 vCPU, 16 GB RAM, 100 GB disk (what the
+measurement ran on). One child at a time — Fenix's default — would likely fit
+in 2 vCPU / 8 GB / 50 GB; that is not verified yet.
+
+The VM runs (and costs) until you stop it:
+`gcloud compute instances stop fenix-vm --zone=europe-central2-a`. Data stays on
+the disk; after `start` the stack comes back by itself.
+
 ## Uninstall
 
 ```bash
