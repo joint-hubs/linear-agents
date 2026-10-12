@@ -168,16 +168,53 @@ export function windowTitle(squad, taskId) {
   return `fenix - ${squad}`;
 }
 
+// FOC-800: inside the Fenix container the host's browser reaches the API
+// through Docker's port forwarding, so remoteAddress is the container
+// network's gateway, never 127.0.0.1. Compose publishes the API only on the
+// host's 127.0.0.1, so a request from the gateway came from the local machine
+// — the same trust as loopback. Other containers keep their own addresses and
+// stay refused; outside a container (FENIX_IN_CONTAINER unset) nothing changes.
+
+// Linux /proc/net/route: skip the header line; the first row whose Destination
+// (2nd column) is "00000000" is the default route. Its Gateway (3rd column) is
+// 8 hex digits in little-endian byte order — "010011AC" is 172.17.0.1 (bytes
+// taken from offsets 6, 4, 2, 0).
+export function parseDefaultGateway(routeTable) {
+  const lines = routeTable.split('\n');
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].trim().split(/\s+/);
+    if (cols.length < 3) continue;
+    if (cols[1] !== '00000000') continue;
+    const hex = cols[2];
+    if (!/^[0-9A-Fa-f]{8}$/.test(hex)) return null;
+    return `${parseInt(hex.slice(6, 8), 16)}.${parseInt(hex.slice(4, 6), 16)}.${parseInt(hex.slice(2, 4), 16)}.${parseInt(hex.slice(0, 2), 16)}`;
+  }
+  return null;
+}
+
+export function containerGateway({ env = process.env, readFile = readFileSync } = {}) {
+  if (env.FENIX_IN_CONTAINER !== '1') return null;
+  try {
+    return parseDefaultGateway(readFile('/proc/net/route', 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+let cachedGateway;
+function trustedGateway() {
+  if (cachedGateway === undefined) cachedGateway = containerGateway();
+  return cachedGateway;
+}
+
 // AC3: launch is 127.0.0.1 only. Binding to 127.0.0.1 is the real enforcement
 // (no external socket); this check makes rejection observable and defends if
 // the server is ever fronted by a proxy (X-Forwarded-* is intentionally NOT
 // honored — launch must be a direct local call).
-export function isLocalOrigin(remoteAddress) {
-  return (
-    remoteAddress === '127.0.0.1' ||
-    remoteAddress === '::1' ||
-    remoteAddress === '::ffff:127.0.0.1'
-  );
+// In the Fenix container the network gateway counts as local too (FOC-800, see above).
+export function isLocalOrigin(remoteAddress, gateway = trustedGateway()) {
+  if (remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1') return true;
+  return Boolean(gateway) && (remoteAddress === gateway || remoteAddress === `::ffff:${gateway}`);
 }
 
 // D-S1 (review round 1, 🟠 security): the remoteAddress check alone can't tell

@@ -117,6 +117,7 @@ Zakładka **Konfiguracja** (`localhost:7331/squad-config`) edytuje modele per sk
 ### Fenix w Dockerze (1.0.0)
 
 - **Dashboard/API:** `http://localhost:4600` — publikowany tylko na `127.0.0.1` hosta (port kontenera 7331). Inny port hosta: env `FENIX_PORT` (np. `FENIX_PORT=4601 ./fenix up`).
+- **Zapisy z dashboardu w kontenerze:** API ufa loopbackowi i bramce sieci Dockera (ruch z hosta przez port 127.0.0.1:4600); inne kontenery są odrzucane, sprawdzanie `Origin` bez zmian (FOC-800).
 - **Kontenery:** `fenix-api` (dashboard + telemetry API) i `fenix-supervisor` (bezczynny; `fenix attach` startuje w nim Supervisora — Claude Code).
 - **Dane:** wolumen `fenix_fenix-data` zamontowany w `/data` — telemetry DB `/data/telemetry/telemetry.sqlite`, stan Supervisora `/data/state/supervisor`, workspaces `/data/workspaces`.
 - **Mapa projektów:** `.fenix/config/projects.json` na hoście (katalog montowany jako `/fenix-config`; `fenix up` go tworzy; env `LA_PROJECTS_FILE=/fenix-config/projects.json`). Wygrywa z `config/projects.json` repozytorium; zapisuje ją `fenix repo add --project <projekt Linear>`; kształt: `{"projects":[{"linearProject","workspace":"joi","repo":"${GITHUB_ROOT}/<name>","deploy":{"type":"none"}}]}`.
