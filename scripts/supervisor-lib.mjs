@@ -2037,7 +2037,8 @@ export function processAlive(pid) {
  * On win32 this is ALWAYS a tree kill (`taskkill /T`). A claude child routinely
  * spawns cmd.exe for build and test commands; signalling only the top pid
  * leaves those nested shells running, holding file locks in a worktree nobody
- * owns any more.
+ * owns any more. On POSIX it signals the child's process group (the watcher
+ * spawns it detached), falling back to the pid alone when no such group exists.
  *
  * @param {"graceful"|"force"} mode
  */
@@ -2049,7 +2050,15 @@ export function killTree(pid, mode = "graceful") {
       if (mode === "force") args.push("/F");
       execFileSync("taskkill", args, { stdio: "ignore" });
     } else {
-      process.kill(-pid, mode === "force" ? "SIGKILL" : "SIGTERM");
+      const signal = mode === "force" ? "SIGKILL" : "SIGTERM";
+      try {
+        process.kill(-pid, signal);
+      } catch (err) {
+        // No group led by pid (a child spawned before it led its own group):
+        // signal the process itself instead of reporting a kill that never landed.
+        if (err.code !== "ESRCH") throw err;
+        process.kill(pid, signal);
+      }
     }
     return true;
   } catch {

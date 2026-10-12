@@ -98,6 +98,10 @@ const child = spawn(command, spawnArgs, {
   // window people actually see is this one. Pipes are unaffected: the watcher
   // still reads stdout/stderr, it just does not get a visible console with it.
   windowsHide: true,
+  // POSIX: lead a process group of its own, so killTree's group signal (-pid)
+  // reaches the bash and test processes claude spawns. Never on win32: there
+  // detached means a fresh console, and taskkill /T already walks the tree.
+  detached: process.platform !== "win32",
 });
 
 const turnIndex = Number(args.turn ?? 0);
