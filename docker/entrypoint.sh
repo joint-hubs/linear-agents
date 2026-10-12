@@ -65,18 +65,37 @@ seed_agents() {
     node "$LA_ROOT/scripts/fenix-seed-agents.mjs" --from "$LA_ROOT/agents" --to "$LA_SQUAD_HOME"
 }
 
+# Claude Code creates a squad's .claude.json on its first run. Create it now —
+# `claude config list` makes no model call — so per-spawn MCP approvals
+# (CodeGraph) can land on the volume before the first child (FOC-799).
+init_claude_configs() {
+    for d in "$LA_SQUAD_HOME"/*/; do
+        case "$(basename "$d")" in _shared) continue ;; esac
+        [ -f "${d}.claude.json" ] && continue
+        (cd /tmp && CLAUDE_CONFIG_DIR="${d%/}" timeout 30 claude config list >/dev/null 2>&1) || true
+    done
+}
+
+# A child turn that started before this container did cannot be alive here —
+# its watcher died with the previous container. Mark it crashed (FOC-799).
+mark_orphans() {
+    node "$LA_ROOT/scripts/supervisor-orphans.mjs" --container || true
+}
+
 load_secrets
 mkdir -p "$LA_TELEMETRY_HOME" "$LA_SUPERVISOR_STATE_HOME" "$LA_SQUAD_HOME" "$GITHUB_ROOT" "$LA_WORKTREE_HOME"
 
 case "${1:-api}" in
     api)
         seed_agents
+        init_claude_configs
         cd "$LA_ROOT"
         exec node scripts/telemetry-server.mjs
         ;;
     supervisor)
         resolve_provider
         configure_git
+        mark_orphans
         new_session=0
         if [ "${2:-}" = "--new" ]; then new_session=1; fi
         CLAUDE_CONFIG_DIR="$LA_SQUAD_HOME/supervisor"
@@ -98,6 +117,7 @@ case "${1:-api}" in
     idle)
         # Hold the container up so `fenix attach` can reach the supervisor;
         # children are spawned from this container.
+        mark_orphans
         configure_git
         exec sleep infinity
         ;;

@@ -21,11 +21,12 @@ Python 3.11. The container runs as the non-root user `node`.
 Status (1.0.0): the Supervisor works in the container end to end — it clones
 your repositories (`fenix repo add`), resumes its session after a restart, and
 transcripts survive `fenix down` and `fenix update` (they are on the data
-volume). Known gaps: a child agent whose container was killed mid-turn still
-shows `running` after a restart, and CodeGraph MCP is not yet approved for
-squads in the container (the CLI fallback works) — both tracked in FOC-799;
-model-routing edits from the dashboard are not kept across `fenix update`
-(FOC-786); Supervisor chat in the dashboard is not yet in 1.0 (FOC-783).
+volume). If the supervisor container stops mid-turn, the interrupted child is
+marked `crashed` (reason `container-restart`) on the next start, so the
+Supervisor can resume it with a follow-up. CodeGraph MCP is approved for every
+squad on the volume. Known gaps: model-routing edits from the dashboard are not
+kept across `fenix update` (FOC-786); Supervisor chat in the dashboard is not
+yet in 1.0 (FOC-783).
 
 ## Before you start
 
