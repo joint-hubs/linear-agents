@@ -6,9 +6,9 @@
 // mergeConversation (append by uuid, reset, 1000-entry cap),
 // conversation paging (tail-mode first request, burst follow, per-tick cap),
 // inboxPrimaryAction (the per-item primary action), chatDisabledReason,
-// terminalDisabledReason, buildTerminalSocketUrl and cockpitPrefill (the
-// Start-in-Cockpit ?prompt= parsing, FOC-804). Fixtures only — no
-// network, no DOM.
+// terminalDisabledReason, buildTerminalSocketUrl, cockpitPrefill (the
+// Start-in-Cockpit ?prompt= parsing, FOC-804) and wakeBanner (the wake-backlog
+// banner, FOC-807). Fixtures only — no network, no DOM.
 
 import assert from 'node:assert/strict';
 
@@ -25,6 +25,7 @@ import {
   terminalDisabledReason,
   buildTerminalSocketUrl,
   cockpitPrefill,
+  wakeBanner,
 } from './cockpitModel.js';
 
 // --- Minimal test harness (same shape as _test_utils.mjs) -------------------
@@ -382,6 +383,97 @@ await test('cockpitPrefill ignores other params around the prompt', () => {
 await test('cockpitPrefill null/undefined search -> null', () => {
   eq(cockpitPrefill(null), null);
   eq(cockpitPrefill(undefined), null);
+});
+
+// --- wakeBanner (FOC-807 wake-backlog banner) --------------------------------
+
+await test('wakeBanner(null) and missing backlog -> null', () => {
+  eq(wakeBanner(null), null);
+  eq(wakeBanner(undefined), null);
+  eq(wakeBanner({ host: 'reachable', state: 'idle' }), null);
+  eq(wakeBanner({ host: 'reachable', state: 'idle', wakeBacklog: 0 }), null);
+});
+
+await test('wakeBanner 1 event -> singular text without since', () => {
+  const w = wakeBanner({ host: 'reachable', state: 'idle', wakeBacklog: 1 });
+  eq(w.count, 1);
+  eq(w.since, null);
+  eq(w.sinceLabel, null);
+  eq(w.text, '1 event waiting for the Supervisor');
+});
+
+await test('wakeBanner 3 events -> plural text, count mirrored', () => {
+  const w = wakeBanner({ host: 'reachable', state: 'idle', wakeBacklog: 3 });
+  eq(w.count, 3);
+  eq(w.text, '3 events waiting for the Supervisor');
+});
+
+await test('wakeBanner since -> local HH:MM in sinceLabel and text', () => {
+  const d = new Date(2026, 9, 12, 9, 7); // local wall clock 09:07
+  const w = wakeBanner({ host: 'reachable', state: 'idle', wakeBacklog: 2, wakeOldestAt: d.toISOString() });
+  const expected = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  eq(w.since, d.toISOString());
+  eq(w.sinceLabel, expected);
+  eq(w.text, '2 events waiting for the Supervisor since ' + expected);
+});
+
+await test('wakeBanner invalid since -> sinceLabel null, no " since" in text', () => {
+  const w = wakeBanner({ host: 'reachable', state: 'idle', wakeBacklog: 2, wakeOldestAt: 'not-a-date' });
+  eq(w.since, 'not-a-date');
+  eq(w.sinceLabel, null);
+  eq(w.text.includes(' since'), false);
+  eq(w.text, '2 events waiting for the Supervisor');
+});
+
+await test('wakeBanner waker alive -> wakerAlive true + on-duty detail', () => {
+  const w = wakeBanner({
+    host: 'reachable',
+    state: 'busy',
+    wakeBacklog: 2,
+    waker: { state: 'alive', heartbeatAt: '2026-10-12T10:00:00Z' },
+  });
+  eq(w.waker, 'alive');
+  eq(w.wakerAlive, true);
+  eq(w.detail, 'Waker on duty — it delivers them when the current turn ends.');
+});
+
+await test('wakeBanner waker missing/null -> waker absent', () => {
+  eq(wakeBanner({ host: 'reachable', state: 'idle', wakeBacklog: 1 }).waker, 'absent');
+  eq(wakeBanner({ host: 'reachable', state: 'idle', wakeBacklog: 1, waker: null }).waker, 'absent');
+  eq(wakeBanner({ host: 'reachable', state: 'idle', wakeBacklog: 1, waker: {} }).waker, 'absent');
+});
+
+await test('wakeBanner canWake false for busy, needs-input, unreachable host, not-docker host, unknown state and missing host', () => {
+  eq(wakeBanner({ host: 'reachable', state: 'busy', wakeBacklog: 1 }).canWake, false);
+  eq(wakeBanner({ host: 'reachable', state: 'needs-input', wakeBacklog: 1 }).canWake, false);
+  eq(wakeBanner({ host: 'unreachable', state: 'idle', wakeBacklog: 1 }).canWake, false);
+  // Native host: POST /api/supervisor/wake answers 503 docker-only there.
+  eq(wakeBanner({ host: 'not-docker', state: 'idle', wakeBacklog: 1 }).canWake, false);
+  eq(wakeBanner({ host: 'not-docker', state: 'idle', wakeBacklog: 1, waker: { state: 'stale' } }).detail, 'Waker not running.');
+  // Unknown states must not offer Wake.
+  eq(wakeBanner({ host: 'reachable', state: 'unknown', wakeBacklog: 1 }).canWake, false);
+  eq(wakeBanner({ state: 'idle', wakeBacklog: 1 }).canWake, false);
+});
+
+await test('wakeBanner canWake true for idle, ended, absent and null state', () => {
+  eq(wakeBanner({ host: 'reachable', state: 'idle', wakeBacklog: 1 }).canWake, true);
+  eq(wakeBanner({ host: 'reachable', state: 'ended', wakeBacklog: 1 }).canWake, true);
+  eq(wakeBanner({ host: 'reachable', state: 'absent', wakeBacklog: 1 }).canWake, true);
+  eq(wakeBanner({ host: 'reachable', state: null, wakeBacklog: 1 }).canWake, true);
+});
+
+await test('wakeBanner waker not alive + canWake -> press-Wake detail', () => {
+  eq(
+    wakeBanner({ host: 'reachable', state: 'idle', wakeBacklog: 1, waker: { state: 'stale' } }).detail,
+    'Waker not running — press Wake to deliver them.',
+  );
+});
+
+await test('wakeBanner waker not alive + cannot wake -> bare detail', () => {
+  eq(
+    wakeBanner({ host: 'unreachable', state: 'idle', wakeBacklog: 1, waker: { state: 'ended' } }).detail,
+    'Waker not running.',
+  );
 });
 
 // --- Summary ----------------------------------------------------------------

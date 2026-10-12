@@ -140,6 +140,27 @@ case "${1:-api}" in
         cd "$LA_SUPERVISOR_REPO"
         resolve_provider
         node "$LA_ROOT/scripts/fenix-claude-prefs.mjs" --config-dir "$CLAUDE_CONFIG_DIR" --trust "$LA_SUPERVISOR_REPO"
+        # FOC-807: the waker, guard, briefing and telemetry hooks read the run id
+        # from the claude process env — export the same trio (LA_SUPERVISOR_RUN,
+        # RUN_ID, LA_RUN_ID) the Windows launcher sets. Resolve failure keeps
+        # today's behaviour: start without the id, the Cockpit shows no waker.
+        run_new_arg=""
+        if [ "$new_session" -eq 1 ]; then run_new_arg="--new"; fi
+        if run_out="$(node "$LA_ROOT/scripts/supervisor-current-run.mjs" resolve $run_new_arg --model "$ANTHROPIC_MODEL")"; then
+            run_id="${run_out%% *}"
+            run_source="${run_out#* }"
+            export LA_SUPERVISOR_RUN="$run_id" RUN_ID="$run_id" LA_RUN_ID="$run_id"
+            printf 'fenix: Supervisor run %s (%s)\n' "$run_id" "$run_source" >&2
+            # A brand-new run registers in the shared manifest store — never on a
+            # resume, where `start` would blindly overwrite the existing manifest.
+            if [ "$run_source" = "new" ]; then
+                if ! node "$LA_ROOT/scripts/run-manifest.mjs" start "$run_id" supervisor "$LA_SUPERVISOR_REPO" >/dev/null 2>&1; then
+                    printf 'fenix: run-manifest start failed for %s - telemetry may miss this run\n' "$run_id" >&2
+                fi
+            fi
+        else
+            printf '%s\n' 'fenix: no Supervisor run id - waker, guard and briefing stay off' >&2
+        fi
         # Resume the last Supervisor session for this directory unless --new (D5).
         project_dir="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$LA_SUPERVISOR_REPO" | sed 's|[^A-Za-z0-9]|-|g')"
         if [ "$new_session" -eq 0 ] && ls "$project_dir"/*.jsonl >/dev/null 2>&1; then

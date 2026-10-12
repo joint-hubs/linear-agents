@@ -9,7 +9,7 @@
 
 import { useState } from 'react';
 import { postSupervisorSession, postSupervisorWake } from '../../api';
-import { chatDisabledReason, terminalDisabledReason } from '../../cockpitModel';
+import { chatDisabledReason, terminalDisabledReason, wakeBanner } from '../../cockpitModel';
 import ChatView from './ChatView';
 import TerminalView from './TerminalView';
 
@@ -36,7 +36,7 @@ export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, o
   const chip = STATE_CHIP[sup.state] || STATE_CHIP.unknown;
   const disabledReason = chatDisabledReason(sup);
   const terminalReason = terminalDisabledReason(sup);
-  const showWake = sup.wakeBacklog > 0 && sup.state === 'idle';
+  const wakeInfo = wakeBanner(sup);
 
   const wake = async () => {
     setWakeBusy(true);
@@ -99,12 +99,19 @@ export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, o
         </div>
       )}
 
-      {showWake && (
-        <div className="banner banner-warn" style={{ marginTop: 8, display: 'flex', gap: 10, alignItems: 'center' }}>
-          <span style={{ flex: 1 }}>{sup.wakeBacklog} event{sup.wakeBacklog === 1 ? '' : 's'} waiting</span>
-          <button type="button" className="btn-secondary" disabled={wakeBusy} onClick={wake}>
-            {wakeBusy ? 'Waking…' : 'Wake'}
-          </button>
+      {wakeInfo && (
+        <div
+          className={wakeInfo.wakerAlive ? 'banner banner-ok' : 'banner banner-warn'}
+          style={{ marginTop: 8, display: 'flex', gap: 10, alignItems: 'center' }}
+        >
+          <span style={{ flex: 1 }}>
+            <strong>{wakeInfo.text}</strong> {wakeInfo.detail}
+          </span>
+          {wakeInfo.canWake && (
+            <button type="button" className="btn-secondary" disabled={wakeBusy} onClick={wake}>
+              {wakeBusy ? 'Waking…' : 'Wake'}
+            </button>
+          )}
         </div>
       )}
 

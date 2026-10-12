@@ -281,6 +281,10 @@
       "reason": "isolation audit FOC-783: LA_DATA_HOME pointed at a mkdtemp dir; the hook runs as a child process over fixture payloads (same pattern as supervisor-edits-hook.test.mjs); no ports, no socket binds, no telemetry DB"
     },
     {
+      "file": "supervisor-current-run.test.mjs",
+      "reason": "isolation audit FOC-807: mkdtemp/tmpdir fixtures only; library paths passed explicitly and the CLI child inherits the LA_DATA_HOME / LA_SUPERVISOR_STATE_HOME seams pointed at temp dirs; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "supervisor-edits-hook.test.mjs",
       "reason": "isolation audit FOC-795: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir; the hook runs as a child process over fixture run dirs; no ports, no socket binds, no telemetry DB"
     },

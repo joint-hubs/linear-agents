@@ -145,7 +145,9 @@ The Supervisor runs permanently inside the container, in a tmux session.
 `fenix attach` attaches your terminal to it — Ctrl-b d detaches and you are
 back on the host while the Supervisor keeps running (the Cockpit's Chat and
 Terminal stay with it). `fenix attach --new` kills the current session and
-starts a fresh one. `fenix down` removes the containers but keeps the data
+starts a fresh one — with a new run (its own children, gates and waker); a
+resumed session or a container restart keeps the current run, recorded in
+`/data/supervisor/current-run.json`. `fenix down` removes the containers but keeps the data
 volume, so telemetry and Supervisor state survive a recreate; a later
 `fenix up` reattaches them.
 

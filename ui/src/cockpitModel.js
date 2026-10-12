@@ -198,3 +198,40 @@ export function cockpitPrefill(search) {
   const text = new URLSearchParams(search).get('prompt');
   return text && text.trim() ? text : null;
 }
+
+// ===== Wake backlog banner (FOC-807) =====
+
+// wakeBanner(sup) -> null when there is nothing to report (no supervisor, or
+// wakeBacklog is not > 0), otherwise { count, since, sinceLabel, waker,
+// wakerAlive, canWake, text, detail } for the Supervisor panel banner.
+// `since` is the raw wakeOldestAt (oldest undelivered event, may be null);
+// sinceLabel is its local HH:MM or null when absent/invalid. waker mirrors
+// sup.waker?.state ('absent' when the waker block is missing); canWake follows
+// the wake endpoint's own rules — POST /api/supervisor/wake only works through
+// the Docker session host (natively, host: 'not-docker', it answers 503
+// docker-only), and unknown states must not offer Wake: so only host
+// 'reachable' with state idle/ended/absent/null may be woken (waking an ended
+// session starts a new one). detail tells the human who delivers the
+// backlog: the waker when it is alive, otherwise the Wake button.
+export function wakeBanner(sup) {
+  if (!sup || !(sup.wakeBacklog > 0)) return null;
+  const count = sup.wakeBacklog;
+  const since = sup.wakeOldestAt ?? null;
+  const sinceDate = since ? new Date(since) : null;
+  const sinceLabel =
+    sinceDate && !Number.isNaN(sinceDate.getTime())
+      ? String(sinceDate.getHours()).padStart(2, '0') + ':' + String(sinceDate.getMinutes()).padStart(2, '0')
+      : null;
+  const waker = (sup.waker && sup.waker.state) || 'absent';
+  const wakerAlive = waker === 'alive';
+  const canWake =
+    sup.host === 'reachable' && ['idle', 'ended', 'absent', null].includes(sup.state ?? null);
+  const text =
+    count + ' event' + (count === 1 ? '' : 's') + ' waiting for the Supervisor' + (sinceLabel ? ' since ' + sinceLabel : '');
+  const detail = wakerAlive
+    ? 'Waker on duty — it delivers them when the current turn ends.'
+    : canWake
+      ? 'Waker not running — press Wake to deliver them.'
+      : 'Waker not running.';
+  return { count, since, sinceLabel, waker, wakerAlive, canWake, text, detail };
+}

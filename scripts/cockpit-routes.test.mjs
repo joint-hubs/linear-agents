@@ -20,6 +20,9 @@
 //     state on top, sessionId/notification/clients from the hook, an absent
 //     session reporting "absent"), supervisor.host reachable/unreachable/
 //     not-docker, waker lease state, wake backlog, redaction of gate text;
+//     the current-run record (FOC-807): runId/runSource/waker/backlog/
+//     wakeOldestAt/model follow the record, the Wake prompt targets its run,
+//     the focus heuristic stands in when no record exists;
 //     the 2 s TTL cache: two requests in the TTL build once (single-flight),
 //     a request past the TTL rebuilds, an error is never cached;
 //   - GET /api/supervisor/conversation: entries + redaction, byte-offset
@@ -54,6 +57,7 @@ import { fileURLToPath } from "node:url";
 
 import { openTelemetryDb } from "./telemetry-store.mjs";
 import { ensureViews } from "./telemetry-canonical.mjs";
+import { writeCurrentRun } from "./supervisor-current-run.mjs";
 import { hostTokenPath } from "./fenix-paths.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -727,6 +731,74 @@ try {
     });
     check("terminal pipes bytes both ways", echoed === true);
     ok.socket.destroy();
+    child.kill();
+  }
+
+  // ── the current-run record (FOC-807) ─────────────────────────────────────
+  //
+  // A third run with a REAL run-id shape, its own wake queue (two un-acked
+  // rows, distinct ts) and its own waker lease — the record points HERE, so
+  // every assertion doubles as a proof that run-1's rows/lease are ignored.
+  {
+    const curRunId = "2026-10-12T10-00-00-000-supervisor-c0de";
+    const curOldest = "2026-10-12T09:55:00.000Z";
+    const curNewer = "2026-10-12T09:58:00.000Z";
+    const recordPath = join(dataHome, "supervisor", "current-run.json");
+    mkdirSync(join(supState, curRunId), { recursive: true });
+    writeFileSync(join(supState, curRunId, "wake-queue.jsonl"), [
+      JSON.stringify({ seq: 5, event: "exit", childId: "child-c", turn: 1, dedupKey: "exit:child-c:5", detail: {}, ts: curOldest }),
+      JSON.stringify({ seq: 6, event: "gate", gateId: "gate-1", dedupKey: "gate:gate-1", detail: {}, ts: curNewer }),
+      "",
+    ].join("\n"), "utf8");
+    writeFileSync(join(supState, curRunId, "waker.json"), JSON.stringify({
+      pid: LIVE_PID, sessionId: "waker-cur", startedAt: NOW, heartbeatAt: NOW, firedThrough: 0,
+    }), "utf8");
+
+    const { child, port } = await spawnServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL, SUPERVISOR_MODEL: "env-model" });
+    servers.push(child);
+    await waitForServer(port, child);
+    const P = port;
+
+    // No record yet: the focus run (run-1) drives runId, runSource says so,
+    // and the backlog counts the focus run only — the new run's un-acked rows
+    // stay out even though they sit in a recent run dir.
+    let snap = await call(P, "GET", "/api/cockpit");
+    let sup = snap.body?.supervisor;
+    check("current-run absent -> runId falls back to focus", sup?.runId === "run-1", JSON.stringify(sup));
+    check("current-run absent -> runSource focus", sup?.runSource === "focus", String(sup?.runSource));
+    check("current-run absent -> waker from the focus run", sup?.waker?.state === "alive", JSON.stringify(sup?.waker));
+    check("current-run absent -> backlog counts the focus run only", sup?.wakeBacklog === 2, String(sup?.wakeBacklog));
+    check("current-run absent -> wakeOldestAt is the focus run's oldest ts", sup?.wakeOldestAt === NOW, String(sup?.wakeOldestAt));
+    check("current-run absent -> model from env", sup?.model === "env-model", String(sup?.model));
+
+    // The record arrives: runId/runSource/waker/backlog/model all follow it.
+    writeCurrentRun(
+      { runId: curRunId, model: "record-model", startedAt: NOW, updatedAt: NOW, source: "pointer" },
+      { path: recordPath },
+    );
+    await new Promise((r) => setTimeout(r, 2100)); // the 2 s TTL cache
+    snap = await call(P, "GET", "/api/cockpit");
+    sup = snap.body?.supervisor;
+    check("current-run record -> runId from the record", sup?.runId === curRunId, JSON.stringify(sup));
+    check("current-run record -> runSource from the record", sup?.runSource === "pointer", String(sup?.runSource));
+    check("current-run record -> waker read from that run",
+      sup?.waker?.sessionId === "waker-cur" && sup?.waker?.state === "alive", JSON.stringify(sup?.waker));
+    check("current-run record -> backlog counts ONLY that run (run-1's rows not counted)",
+      sup?.wakeBacklog === 2, String(sup?.wakeBacklog));
+    check("current-run record -> wakeOldestAt is that run's oldest un-acked ts",
+      sup?.wakeOldestAt === curOldest, String(sup?.wakeOldestAt));
+    check("current-run record -> model wins over SUPERVISOR_MODEL", sup?.model === "record-model", String(sup?.model));
+    check("current-run record -> focus unchanged", sup?.focus?.runId === "run-1", JSON.stringify(sup?.focus));
+
+    // The Wake prompt targets the record's run, not the focus heuristic's.
+    const wake = await call(P, "POST", "/api/supervisor/wake", { body: {} });
+    const wakeMsg = hostCalls.filter((c) => c.url === "/message").pop();
+    check("wake prompt targets the current-run record's run",
+      wake.status === 200 && typeof wakeMsg?.body?.text === "string"
+      && wakeMsg.body.text.startsWith("[dashboard] Mateusz asked you to check waiting events: ")
+      && wakeMsg.body.text.includes(`2 new wake event(s) in run ${curRunId}`),
+      JSON.stringify(wakeMsg?.body));
+
     child.kill();
   }
 } catch (err) {
