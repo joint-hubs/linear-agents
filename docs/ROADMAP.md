@@ -3,83 +3,71 @@ type: roadmap
 status: active
 audience: Mateusz (decision) → Supervisor (execution order)
 created: 2026-07-03
-updated: 2026-10-08
+updated: 2026-10-12
 principle: pull-based — the platform is good enough to WORK WITH; every next feature must be justified by friction observed while running real tasks, not invented ahead of need.
 ---
 
 # linear-agents — roadmap
 
-<!-- roadmap:current:start — hand-written 2026-10-08; FOC-718 replaces this block with a render from Linear -->
+<!-- roadmap:current:start — hand-written 2026-10-12; FOC-718 replaces this block with a render from Linear -->
 
-## Current roadmap (2026-10-08)
+## Current roadmap (2026-10-12)
 
-Source of truth: Linear project **FENIX** (team Focus). One epic per milestone; order inside an epic = the
-epic's order. Two lanes: **A** = critical path that needs Mateusz at gates, **B** = the Supervisor's
-autonomous queue (one live child at a time).
+Source of truth: Linear project **FENIX** (team Focus). Order = `blocked by` relations; every scheduled task
+carries a due date. Three lanes run at once; each lane is a chain, cross-lane links are named below.
 
-| Milestone | Epic | Linear progress | State | What is left |
-|---|---|---|---|---|
-| M1 Foundations | FOC-466 | 67 % | in progress | FOC-598 (core landed, AC1b decision), FOC-511, FOC-512, FOC-607, FOC-616, FOC-626 (campaign) |
-| M2 Graph engine + PLAN graph | FOC-467 | 88 % | closing | **FOC-477** (10 PLAN-graph runs with Mateusz at gates → go/no-go for M4), FOC-712 |
-| M3 Jev at the gates | FOC-468 | 28 % | in progress | FOC-391, FOC-387, FOC-410, FOC-384, FOC-392 |
-| M4 Delivery loop as a graph | FOC-469 | 0 % | waits for FOC-477 go | FOC-478, FOC-382, FOC-390, FOC-617, FOC-622, FOC-456, FOC-393, FOC-453, FOC-619, FOC-618, FOC-117 |
-| M5 Slim DEV and Supervisor | FOC-470 | 14 % | in progress | **FOC-727–731 agent working state** (early, lane B), FOC-621 rest, FOC-623, FOC-610, FOC-611, FOC-647, FOC-455, FOC-479, FOC-457, FOC-388, FOC-389, FOC-395, FOC-454, FOC-394, FOC-458, FOC-635, FOC-691 |
-| M6 Optimization and learning | FOC-471 | 27 % | data first | FOC-625, FOC-398, FOC-459, FOC-399, FOC-273, FOC-110, FOC-222, FOC-223, FOC-224 |
-| M7 Release discipline and living docs | FOC-714 | 0 % | new 2026-10-08 | FOC-715–724 (planning templates, hygiene, CodeGraph → DrawIO dossier; FOC-724 retargeted to the Fenix 1.0.0 dossier) |
-| M8 Fenix 1.0.0 — portable release | FOC-768 | 0 % | new 2026-10-11 | FOC-769–790 + FOC-760/761/762/724 — one-command Docker quick start, dashboard v2, one cost truth (PRD `docs/prd/fenix-1.0.0-release-prd.md`) |
-| Maintenance (standing) | FOC-472 | — | idle-lane only | FOC-726 (High), FOC-667 (High), FOC-602, FOC-642, FOC-604, FOC-606, FOC-615, FOC-725, FOC-461 + nits |
+| Milestone | Epic | Target | What decides it |
+|---|---|---|---|
+| M1 Foundations | FOC-466 | 2026-11-15 | cost truth (FOC-760/761), egress PR path (FOC-512), deny gaps (FOC-511), model overrides (FOC-607) |
+| M2 Graph engine + PLAN graph | FOC-467 | 2026-11-13 | FOC-801 fix → FOC-477 (10 arm-A runs, report, go/no-go) → FOC-712 |
+| M3 Jev at the gates | FOC-468 | 2027-01-16 | starts after FOC-724, by the FOC-477 verdict |
+| M4 Delivery loop as a graph | FOC-469 | 2027-03-31 | starts after FOC-724, by the FOC-477 verdict |
+| M5 Slim DEV and Supervisor | FOC-470 | 2027-05-31 | agent working state FOC-727–731 run early in lane B |
+| M6 Optimization and learning | FOC-471 | 2027-10-31 | data first; no scheduled work |
+| M7 Release discipline and living docs | FOC-714 | 2026-11-27 | FOC-715 → … → FOC-723 → FOC-724 (the 1.0.0 dossier) |
+| M8 Fenix 1.0.0 — portable release | FOC-768 | 2026-12-01 | lane O below + FOC-724 → FOC-790 (tag) |
 
-PRDs for the 2026-10-08 additions: `docs/prd/release-dossier-prd.md` (M7),
-`docs/prd/agent-working-state-prd.md` (M5, FOC-727–731).
+### Lane O — Fenix 1.0.0 build (orchestrator session with Mateusz)
 
-### Task sequence
+| Due | Task |
+|---|---|
+| 10-13 | FOC-804 dashboard v2 navigation (PR #63) · FOC-807 Docker Supervisor run id (waker, guard, briefing) |
+| 10-14 | FOC-803 Linux hosts with uid ≠ 1000 |
+| 10-16 | FOC-784 Work board |
+| 10-19 → 10-21 | FOC-760 registry cost from transcripts → FOC-761 resumed turns in telemetry (+ FOC-759 arm-B baseline) → FOC-769 Supervisor focus ticket |
+| 10-23 | FOC-785 Costs & quality |
+| 10-26 → 10-30 | FOC-773 pluggable provider → FOC-778 key wizard → FOC-786 Settings → FOC-788 human push / PR |
+| 11-02 → 11-06 | FOC-762 child model from routing → FOC-771 Node entry points → FOC-772 optional integrations → FOC-779 generated artifacts → FOC-780 retention |
+| 11-09 → 11-13 | FOC-808 VM hygiene → FOC-802 child isolation → FOC-791 Team → FOC-787 Insights |
+| 11-16 | FOC-809 sizing on a dev-squad run |
+| 11-18 | FOC-789 fresh-machine acceptance (closes FOC-781 docs) |
+| 11-30 | FOC-775 image on GHCR → FOC-777 `update` pulls the pinned image |
+| 12-01 | FOC-790 release notes + tag `v1.0.0` (after FOC-724) |
 
-**Lane A — critical path (needs Mateusz):**
+### Lane A — FOC-477 measurement (Supervisor as frontman, Mateusz at the gates)
 
-1. FOC-477 — 10 PLAN-graph runs (arm A) on the frozen corpus, one at a time, Mateusz answers `plan.gate1`
-   and `draft-approval` → report `docs/research/foc-477-plan-graph-vs-squad.md` → M2 Done → go/no-go for M4.
+FOC-801 (10-14; it killed arm-A attempt 5, the first counted run) → 10 arm-A runs, one at a time → FOC-759
+baseline (10-20, needs FOC-760) → FOC-477 report + go/no-go (10-30) → FOC-712 (11-06) → M2 done.
 
-**Lane B — Supervisor queue (in this order):**
+### Lane B — Supervisor queue (one live child at a time)
 
-1. FOC-726 — supervisor-merge builds the combined tree across merge commits (every PR landing depends on it).
-2. Land `dd96ad8` (event-loop test budget, FOC-461 nit 4) — already on `foc-477-q3-dev`.
-3. FOC-667 — blocked scanner = one honest UNKNOWN state, not 13 reds (ends the known-red ritual).
-4. FOC-512 — egress screen on PR bodies (PR landing flow is live since 2026-10-06).
-5. FOC-716 — `create-child` inherits project + milestone (+ FOC-606 priority verb, same file).
-6. FOC-727 → FOC-728 → FOC-729 — agent working state: store, base keys, re-injection after compaction.
-7. FOC-715 — planning templates; milestone and epic descriptions rewritten.
-8. FOC-717 — Linear hygiene report.
-9. FOC-511 — SUPERVISOR_DENY gaps.
-10. FOC-730 + FOC-621 remainder — one batch, needs Mateusz's OK for editing `agents/**`.
-11. FOC-598 (after the AC1b decision) and FOC-607.
-12. FOC-718 — ROADMAP render + STATE.md compaction.
-13. FOC-719 → FOC-720 → FOC-721 — converter port, Fenix views, architecture delta.
-14. FOC-722 → FOC-723 — release scope graph, release audit.
-15. FOC-724 — Fenix 1.1 (M1 + M2) dossier, after FOC-477; FOC-712 and FOC-691 are scoped in or deferred there.
-16. By the FOC-477 verdict: M4 (FOC-478 → FOC-382 → FOC-390 → FOC-617 → FOC-622 → FOC-456 → FOC-393 →
-    FOC-453) or M3 (FOC-391 → FOC-387 → FOC-410 → FOC-384 → FOC-392).
+FOC-512 (10-15) → FOC-727 (10-19) → FOC-728 (10-21) → FOC-729 (10-23) → FOC-715 (10-27) → FOC-717 (10-29) →
+FOC-511 (11-02) → FOC-730 + FOC-621 rest (11-04) → FOC-607 (11-06) → FOC-718 (11-10) → FOC-719 (11-13) →
+FOC-720 (11-17) → FOC-721 (11-19) → FOC-722 (11-23) → FOC-723 (11-25) → FOC-724 1.0.0 dossier (11-27, also
+needs FOC-789). Then by the FOC-477 verdict: M4 (FOC-478 → 382 → 390 → 617 → 622 → 456 → 393 → 453) or M3
+(FOC-391 → 387 → 410 → 384 → 392); both chains are in Linear without dates.
 
-**Idle-lane fillers:** FOC-602, FOC-642, FOC-604, FOC-615, FOC-616 (budgeted), FOC-626 (cost gate),
-FOC-647 (research), FOC-635 and FOC-731 (after 10 real tasks).
+**Idle-lane fillers (no dates):** FOC-602, FOC-642, FOC-604, FOC-615, FOC-616, FOC-626, FOC-647, FOC-635,
+FOC-731.
 
-### Decisions (2026-10-08)
+### Changes on 2026-10-12
 
-Taken by Mateusz:
-
-1. **FOC-477 runs start now** — right after the `dd96ad8` fix lands. The Supervisor is the frontman (that is
-   the measured setup); Mateusz answers the gates. `config/graph.json`, `config/decisions.json` and
-   `config/models.json` are frozen until the 10th run is recorded.
-2. **Editing `agents/**` is allowed** (FOC-621 remainder + FOC-730).
-3. **No cost gates for now** — priced cost is still recorded and reported; nothing waits on a cost gate
-   (FOC-626 campaign may run as an idle-lane filler).
-4. **FOC-691 (`plan.intent` model/tier policy) needs a deeper analysis first** — no model or tier change
-   until then.
-
-5. **FOC-598 AC1b → (b)**: closed on the landed core; key redesign moved to FOC-732 (maintenance).
-
-Still open:
-
-6. Push of local `main` (ahead of `origin/main`).
+* Landed but still open in Linear, closed with their commit: FOC-726 (`659ad72`), FOC-667 (`367ac52`),
+  FOC-733 (`4bc5bc2`), FOC-758 (`d9f6cc2`), FOC-716 + FOC-606 (`0023a25`); FOC-794 (pi recon delivered).
+* 16 tasks of other products moved out of FENIX to their parents' projects (TRADING, BIZNES, NEO).
+* New from the GCP VM run: FOC-802, FOC-803, FOC-807, FOC-808, FOC-809.
+* Dates assume one task per working day in lane O and two per task in lane B; lane B shares the Supervisor
+  with product work (jawnosc-wynagrodzen), so its dates move when the Supervisor works elsewhere.
 
 <!-- roadmap:current:end -->
 
