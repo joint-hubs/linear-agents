@@ -42,6 +42,8 @@ Container env: `LA_DATA_HOME=/data`, `LA_SQUAD_HOME=/data/agents`, `GITHUB_ROOT=
 - **B4 Supervisor session** — works from `/data/workspaces` (D4); `fenix attach` resumes the last session (D5); onboarding and folder trust pre-seeded in the Supervisor's `.claude.json`; a real liveness check (data dir writable, API reachable).
 - **B5 Acceptance** — both services healthy; `fenix repo add` of a public repo; restart and recreate keep transcripts, registry, telemetry and the session; killing the supervisor container mid-turn loses no registry or telemetry data (FOC-776 AC2); suite green on Linux and Windows.
 
+Implemented in FOC-776; the project map lives in `.fenix/config/projects.json` (a mounted directory — Docker turns a missing single-file mount into a directory, and the container writes the file). Acceptance results and follow-ups: FOC-799.
+
 ## Phase C — edit the agent's persisted records while it works (new, Mateusz 2026-10-12)
 
 What agents write and later read lives in the run dir: gates (`gates/*.json`: `summary`, `questions`, `facts`, `artifacts`, `answer`), `triage.json` / `intake.json`, briefs and prompts for children (`*-kickoff.md`, `*-fix-N.md`), per-child settings (`child-settings-*.json`), verdicts (`verdicts/*.json`, evidence).
@@ -52,14 +54,14 @@ What agents write and later read lives in the run dir: gates (`gates/*.json`: `s
 
 Ticket: FOC-795 (M8). Open questions are listed there and in the decisions below.
 
-## Decisions for Mateusz
+## Decisions (Mateusz, 2026-10-12)
 
-1. **D1 Repos** — `fenix repo add` clones into the volume inside the container, with the token from memory via a credential helper; bind-mounting a host repo is an advanced option later. *(recommended)*
-2. **D2 Project map** — a user-owned `.fenix/projects.json` (same shape as `config/projects.json`), mounted read-only and preferred over the repo's file; `fenix repo add --project <Linear project>` writes the entry; Settings (FOC-786) edits it later. *(recommended)*
-3. **D3 Squad config seeding** — the dpkg rule: a config file you never edited follows the image on every start; one you edited (e.g. in the dashboard prompt editor) is kept and reported. *(recommended; alternatives: always overwrite — loses edits; copy only missing — never gets updates)*
-4. **D4** — the Supervisor works from `/data/workspaces`; `linear-agents` itself is cloned there like any repo when Fenix should work on its own tickets. *(recommended)*
-5. **D5** — `fenix attach` resumes the last Supervisor session; `fenix attach --new` starts a fresh one. *(recommended)*
-6. **C1–C4** (Phase C) — see FOC-795.
+1. **D1 Repos** — `fenix repo add` clones into the volume inside the container, with the token from memory via a credential helper; bind-mounting a host repo is an advanced option later. — decided as recommended
+2. **D2 Project map** — a user-owned `.fenix/projects.json` (same shape as `config/projects.json`), mounted read-only and preferred over the repo's file; `fenix repo add --project <Linear project>` writes the entry; Settings (FOC-786) edits it later. — decided as recommended
+3. **D3 Squad config seeding** — the dpkg rule: a config file you never edited follows the image on every start; one you edited (e.g. in the dashboard prompt editor) is kept and reported. — decided as recommended *(alternatives considered: always overwrite — loses edits; copy only missing — never gets updates)*
+4. **D4** — the Supervisor works from `/data/workspaces`; `linear-agents` itself is cloned there like any repo when Fenix should work on its own tickets. — decided as recommended
+5. **D5** — `fenix attach` resumes the last Supervisor session; `fenix attach --new` starts a fresh one. — decided as recommended
+6. **C1–C4** (Phase C) — C1 scope in 1.0: as wide as possible — every persisted record type; C2 notice via the wake queue; C3 audit always on; C4 verdicts read-only + audited annotation.
 
 ## Out of scope here
 

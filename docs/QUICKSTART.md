@@ -18,13 +18,14 @@ Python 3.11. The container runs as the non-root user `node`.
 - All mutable state (telemetry, Supervisor state, workspaces) lives in the
   `fenix_fenix-data` volume, so the image itself is stateless and replaceable.
 
-Status (1.0.0 in progress): the stack, keys and diagnostics work end to end.
-Pointing the Supervisor at your own repositories (cloned into
-`/data/workspaces`) and resuming its session after a restart arrive with
-FOC-776; until then `fenix attach` opens the Supervisor in the image's own
-checkout. Also until FOC-776: Claude Code transcripts are written inside the
-container, not to the data volume, so `fenix down` and `fenix update` delete
-them — use `fenix stop` if you want to keep a session's transcripts.
+Status (1.0.0): the Supervisor works in the container end to end — it clones
+your repositories (`fenix repo add`), resumes its session after a restart, and
+transcripts survive `fenix down` and `fenix update` (they are on the data
+volume). Known gaps: a child agent whose container was killed mid-turn still
+shows `running` after a restart, and CodeGraph MCP is not yet approved for
+squads in the container (the CLI fallback works) — both tracked in FOC-799;
+model-routing edits from the dashboard are not kept across `fenix update`
+(FOC-786); Supervisor chat in the dashboard is not yet in 1.0 (FOC-783).
 
 ## Before you start
 
@@ -74,6 +75,47 @@ What `fenix up` does:
 4. Waits up to 180 s for `fenix-api` to become healthy.
 5. Prints and opens http://localhost:4600.
 
+## Your repositories
+
+The Supervisor works from `/data/workspaces` inside the container. Clone a
+repository with:
+
+```bash
+./fenix repo add your-org/your-repo --project "Your Linear project"
+```
+
+`repo add` accepts a full git URL or `owner/name` (short for
+`https://github.com/owner/name.git`) and clones it into the workspaces volume
+(`/data/workspaces/<name>`) inside the container. Git authenticates to GitHub
+with `GITHUB_TOKEN` from memory through a credential helper — the token is
+never written to disk — so a private repository needs a token that has access
+to it. With `--project` it also writes an entry into the project map (below).
+If the repository is already cloned, `repo add` exits with code 3.
+
+`./fenix repo list` prints every cloned repository (name, branch, origin) and
+the project map.
+
+The project map lives on the host at `.fenix/config/projects.json` (the
+directory is mounted into the containers at `/fenix-config`; `fenix up` creates
+it) and wins over the repository's own `config/projects.json`. The Supervisor
+maps a Linear issue's project to a repository through it:
+
+```json
+{
+  "projects": [
+    {
+      "linearProject": "Your Linear project",
+      "workspace": "joi",
+      "repo": "${GITHUB_ROOT}/your-repo",
+      "deploy": { "type": "none" }
+    }
+  ]
+}
+```
+
+`${GITHUB_ROOT}` is the workspaces root inside the container
+(`/data/workspaces`).
+
 ## Daily use
 
 | Command | What it does |
@@ -84,7 +126,9 @@ What `fenix up` does:
 | `fenix logs [service]` | follow logs (default: all services) |
 | `fenix doctor` | host preflight plus in-container diagnostics |
 | `fenix keys` | key wizard: enter or replace keys |
-| `fenix attach` | start the Supervisor (Claude Code) in `fenix-supervisor` |
+| `fenix repo add <url\|owner/name> [--project <Linear project>]` | clone a repository into the workspaces volume (optionally map a Linear project) |
+| `fenix repo list` | repositories in the workspaces volume and the project map |
+| `fenix attach [--new]` | attach to the Supervisor (Claude Code) in `fenix-supervisor`; resumes its last session, `--new` starts a fresh one |
 | `fenix shell [service]` | shell in a service (default: `fenix-supervisor`) |
 | `fenix update` | `git pull --ff-only`, rebuild with fresh base images, restart |
 | `fenix test [pattern]` | lint and the test suite on Linux, inside the image, on a throwaway copy of this checkout (uncommitted changes included) — the same job CI runs on every PR |
@@ -103,7 +147,13 @@ and Supervisor state survive a recreate; a later `fenix up` reattaches them.
 - Data volume `fenix_fenix-data`, mounted at `/data` in both containers:
   - telemetry DB: `/data/telemetry/telemetry.sqlite`
   - Supervisor state: `/data/state/supervisor`
-  - workspaces: `/data/workspaces`
+  - squad config and transcripts: `/data/agents` — at every start the API
+    container seeds squad config from the image with the dpkg rule: a file you
+    never edited follows the image, a file you edited is kept
+  - repositories: `/data/workspaces`; child worktrees:
+    `/data/workspaces/la-wt/<repo>/<branch>`
+- Project map: `.fenix/config/projects.json` on the host, mounted at
+  `/fenix-config` (see "Your repositories").
 - Logs and transcripts are kept by default (retention is configurable later,
   FOC-780).
 
@@ -138,6 +188,13 @@ Common cases:
   `fenix keys` later.
 - **Key rotation** — `fenix keys`, then `fenix stop` and `fenix up` (secrets
   are read at container start).
+- **A config file has a `.fenix-new` twin** — you edited the file (e.g. in the
+  dashboard prompt editor) and the image ships a new version of it too; the
+  fresh image version was written next to your file. Merge the twin's changes
+  into your file by hand, then delete the twin — while the image version
+  differs from yours, it is written again on the next start.
+- **`repo add` says the repository already exists** (exit 3) — it is already
+  cloned into the workspaces volume; `fenix repo list` shows what is there.
 
 ## Upgrade
 
@@ -147,7 +204,8 @@ Common cases:
 
 Runs `git pull --ff-only`, rebuilds the image with fresh base images
 (`docker compose build --pull`) and restarts the stack. Keys and the data
-volume are untouched.
+volume are untouched; on start the squad config is re-seeded from the image
+with the same dpkg rule as every other start (see "Where things live").
 
 ## Uninstall
 

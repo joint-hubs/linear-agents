@@ -119,6 +119,10 @@ Zakładka **Konfiguracja** (`localhost:7331/squad-config`) edytuje modele per sk
 - **Dashboard/API:** `http://localhost:4600` — publikowany tylko na `127.0.0.1` hosta (port kontenera 7331). Inny port hosta: env `FENIX_PORT` (np. `FENIX_PORT=4601 ./fenix up`).
 - **Kontenery:** `fenix-api` (dashboard + telemetry API) i `fenix-supervisor` (bezczynny; `fenix attach` startuje w nim Supervisora — Claude Code).
 - **Dane:** wolumen `fenix_fenix-data` zamontowany w `/data` — telemetry DB `/data/telemetry/telemetry.sqlite`, stan Supervisora `/data/state/supervisor`, workspaces `/data/workspaces`.
+- **Mapa projektów:** `.fenix/config/projects.json` na hoście (katalog montowany jako `/fenix-config`; `fenix up` go tworzy; env `LA_PROJECTS_FILE=/fenix-config/projects.json`). Wygrywa z `config/projects.json` repozytorium; zapisuje ją `fenix repo add --project <projekt Linear>`; kształt: `{"projects":[{"linearProject","workspace":"joi","repo":"${GITHUB_ROOT}/<name>","deploy":{"type":"none"}}]}`.
+- **`/data/agents`** (wolumen): konfiguracja squadów (CLAUDE.md, settings.json, definicje ról, skills, memory) + transkrypty Claude Code + zgody (approvals). Przy każdym starcie API seeduje konfigurację z obrazu regułą dpkg: plik nieedytowany → podąża za obrazem, edytowany → zostaje, a nowa wersja z obrazu ląduje obok jako `<plik>.fenix-new`. Transkrypty przeżywają `fenix down` i `fenix update`.
+- **`/data/workspaces`** (wolumen): repozytoria klonowane przez `fenix repo add`; worktree dzieci: `/data/workspaces/la-wt/<repo>/<branch>`.
+- **Zmienne środowiskowe w obrazie:** `LA_DATA_HOME=/data`, `LA_SQUAD_HOME=/data/agents`, `GITHUB_ROOT=/data/workspaces`, `LA_WORKTREE_HOME=/data/workspaces/la-wt`, `LA_TELEMETRY_HOME=/data/telemetry`, `LA_SUPERVISOR_STATE_HOME=/data/state/supervisor`; compose ustawia `LA_PROJECTS_FILE=/fenix-config/projects.json`.
 
 ---
 
