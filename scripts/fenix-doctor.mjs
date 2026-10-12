@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { squadConfigDir } from './fenix-paths.mjs';
 
 const GIB = 1024 ** 3;
 const TOOL_FIX = 'rebuild the image: fenix update';
@@ -139,6 +140,32 @@ async function checkApi(fetchImpl, env) {
   }
 }
 
+// The Cockpit (FOC-783) drives the Supervisor through two hooks in the squad
+// settings the container actually uses. A settings.json kept from a pre-783
+// image (the dpkg rule keeps edited files) lacks them — the dashboard then
+// cannot see or talk to the session. Warn, never fail: the Supervisor itself
+// works without the hooks.
+function checkCockpitHooks(env, fsImpl) {
+  const settingsPath = path.join(squadConfigDir('supervisor', env), 'settings.json');
+  const hooks = ['supervisor-session-hook.mjs', 'supervisor-edits-hook.mjs'];
+  let src;
+  try {
+    src = fsImpl.readFileSync(settingsPath, 'utf8');
+  } catch (err) {
+    return { name: 'cockpit hooks', status: 'warn', detail: `${settingsPath} not readable (${err.message})`, fix: VOLUME_FIX };
+  }
+  const missing = hooks.filter((hook) => !src.includes(hook));
+  if (missing.length) {
+    return {
+      name: 'cockpit hooks',
+      status: 'warn',
+      detail: `agents/supervisor/settings.json was edited locally and lacks the Cockpit hooks (${missing.join(', ')}) — merge them from settings.json.fenix-new (the image's version, parked next to it)`,
+      fix: 'merge the twin, then delete it',
+    };
+  }
+  return { name: 'cockpit hooks', status: 'ok', detail: 'session + edits hooks present' };
+}
+
 /**
  * Run every check in order. Dependencies are injectable so future tests can
  * pass fakes: spawn (spawnSync-shaped), fsImpl (mkdirSync/accessSync/
@@ -153,6 +180,7 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     ...checkKeys(env),
     ...checkDirs(env, fsImpl),
     checkDisk(env, fsImpl),
+    checkCockpitHooks(env, fsImpl),
   ];
   if (withApi) checks.push(await checkApi(fetchImpl, env));
   return checks;
