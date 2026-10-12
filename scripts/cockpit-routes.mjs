@@ -31,12 +31,22 @@ import { autoLabel } from "./decision-log.mjs";
 import { resolveRunsDir } from "./decision-analytics.mjs";
 import { recordAnswerRow } from "./agent-records.mjs";
 import { readCurrentRun } from "./supervisor-current-run.mjs";
+import { readPendingAsk } from "./session-dialog.mjs";
 import { hostTokenPath, supervisorSessionPath, squadConfigDir } from "./fenix-paths.mjs";
 
 // The body cap for the cockpit POSTs: chat messages and gate/hold answers are
 // control payloads, not documents — 16 KB like the contract, above the 8 KB
 // default but far below the record-editor's 300 KB.
 const BODY_CAP = 16 * 1024;
+
+// The snapshot's GET /dialog budget (FOC-810): the host captures the tmux pane
+// and parses it, but the snapshot must stay a fast poll — a slow or broken
+// host reads as "no dialog" (null), never as a hung snapshot.
+const DIALOG_TIMEOUT_MS = 1_500;
+
+// One free-text ask answer is capped at this many characters in the audit row
+// (the same bound askKeyPlan enforces on the host side).
+const ASK_ANSWER_CAP = 2_000;
 
 // ── small shared readers ─────────────────────────────────────────────────────
 
@@ -199,12 +209,53 @@ export function resetCockpitSnapshotCache({ now, ttlMs } = {}) {
   snapshotBuild = null;
 }
 
+/**
+ * Drop the cached snapshot after an answer changed the world (FOC-810): the
+ * next poll rebuilds immediately instead of serving the just-stale dialog /
+ * pending ask for up to 2 s. An in-flight build is left alone — it started
+ * before the answer and the poll after it rebuilds again.
+ */
+function invalidateCockpitSnapshot() {
+  snapshotCache = null;
+}
+
+/**
+ * The audit payload of an ask answer: toolUseId plus, per question, the
+ * CHOSEN LABELS for index choices and the free text — each string capped at
+ * ASK_ANSWER_CAP characters. Answers align by index with the pending ask's
+ * questions; an out-of-range choice degrades to its index text.
+ */
+function askAnswerPayload(pending, answers) {
+  return {
+    toolUseId: pending.toolUseId,
+    answers: (pending.questions ?? []).map((q, i) => {
+      const a = answers?.[i] ?? {};
+      const choices = (Array.isArray(a.choices) ? a.choices : [])
+        .map((c) => String(q.options?.[c]?.label ?? c).slice(0, ASK_ANSWER_CAP));
+      const text = typeof a.text === "string" ? a.text.slice(0, ASK_ANSWER_CAP) : null;
+      return { question: q.question ?? null, choices, ...(text !== null ? { text } : {}) };
+    }),
+  };
+}
+
+/** One-line summary of an ask answer for the audit row's `changes` value. */
+function askAnswerSummary(pending, answers) {
+  return askAnswerPayload(pending, answers)
+    .answers.map((a, i) => {
+      const chosen = [...a.choices, a.text ?? ""].filter(Boolean).join(", ");
+      return `${a.question || `question ${i + 1}`}: ${chosen || "(no answer)"}`;
+    })
+    .join(" | ");
+}
+
 /** The full snapshot body — everything the GET /api/cockpit route used to do inline. */
 async function buildCockpitSnapshot() {
   const runIds = recentRunIds();
   let probe;
   let sessionInfo = null;
   let hostState = "not-docker";
+  let dialog = null;
+  let supTranscript = null;
   const base = hostBase();
   if (!base) {
     probe = (pids) => Object.fromEntries(pids.map((p) => [String(p), processAlive(p)]));
@@ -234,6 +285,18 @@ async function buildCockpitSnapshot() {
         notification: body.hook?.notification ?? null,
       };
       if (body.clients !== undefined) sessionInfo.clients = body.clients;
+      // The Supervisor session's own transcript (FOC-810): the pending ask is
+      // read from it — same confinement rule as the conversation route.
+      supTranscript = confinedTranscriptPath(body.hook);
+      // The pane's dialog, only while the session actually waits for input.
+      // Any failure — unreachable, non-200, malformed body — reads as null.
+      if (sessionInfo.state === "needs-input") {
+        const dlg = await hostRequest("GET", "/dialog", null, { timeoutMs: DIALOG_TIMEOUT_MS });
+        if (dlg.status === 200 && dlg.body && typeof dlg.body === "object"
+          && dlg.body.dialog && typeof dlg.body.dialog === "object") {
+          dialog = dlg.body.dialog;
+        }
+      }
     }
     probe = async (pids) => {
       const alive = await hostRequest("POST", "/alive", { pids }, { timeoutMs: FAST_TIMEOUT_MS });
@@ -243,14 +306,19 @@ async function buildCockpitSnapshot() {
     };
   }
 
-  const needsYou = collectNeedsYou({ runIds });
-  const children = await collectChildren({ runIds, probe });
-  const focus = focusTicket({ runIds });
   // FOC-807: the current-run record (<dataHome>/supervisor/current-run.json)
   // pins the run the live session belongs to; without it the focus-ticket
   // heuristic stands in, exactly as before.
+  const focus = focusTicket({ runIds });
   const current = readCurrentRun();
   const supRunId = supRunIdOf(current, focus);
+  // FOC-810: the unanswered AskUserQuestion from the transcript — only while
+  // the pane actually shows an ask dialog for it.
+  const pendingAsk = dialog && (dialog.kind === "ask" || dialog.kind === "ask-review") && supTranscript
+    ? readPendingAsk(supTranscript)
+    : null;
+  const needsYou = [...supervisorSessionItems({ dialog, pendingAsk, supRunId, focus }), ...collectNeedsYou({ runIds })];
+  const children = await collectChildren({ runIds, probe });
   const backlog = wakeBacklog(runIds, supRunId);
   const supervisor = {
     host: hostState,
@@ -267,6 +335,8 @@ async function buildCockpitSnapshot() {
     waker: supRunId ? wakerOf(supRunId) : null,
     wakeBacklog: backlog.count,
     wakeOldestAt: backlog.oldestAt,
+    dialog,
+    pendingAsk,
   };
   return redactDeep({
     supervisor,
@@ -275,6 +345,50 @@ async function buildCockpitSnapshot() {
     counts: cockpitCounts({ needsYou, children }),
     checkedAt: new Date(snapshotClock()).toISOString(),
   });
+}
+
+/**
+ * The Needs-you items the LIVE Supervisor session contributes (FOC-810),
+ * prepended ahead of the run-store items: the pending ask (category "ask")
+ * outranks everything, else a permission or select dialog (category "dialog")
+ * the pane is showing. Both are answerable from the dashboard, so the counts
+ * include them as-is. An ask-review dialog is covered by the pending ask —
+ * never by a dialog item.
+ */
+function supervisorSessionItems({ dialog, pendingAsk, supRunId, focus }) {
+  const shared = {
+    runId: supRunId ?? null,
+    taskId: focus?.taskId ?? null,
+    childId: null,
+    createdAt: null,
+    ageMs: null,
+    state: "pending",
+    answerable: true,
+  };
+  if (pendingAsk) {
+    return [{
+      ...shared,
+      id: `ask:${pendingAsk.toolUseId}`,
+      category: "ask",
+      kind: "ask",
+      answerKind: "ask",
+      summary: pendingAsk.questions[0]?.question ?? "",
+      toolUseId: pendingAsk.toolUseId,
+      questions: pendingAsk.questions,
+    }];
+  }
+  if (dialog && (dialog.kind === "permission" || dialog.kind === "select")) {
+    return [{
+      ...shared,
+      id: `dialog:${dialog.id}`,
+      category: "dialog",
+      kind: dialog.kind,
+      answerKind: "dialog",
+      summary: dialog.title ?? "",
+      dialog,
+    }];
+  }
+  return [];
 }
 
 /**
@@ -419,6 +533,109 @@ export async function handleCockpitRoute(req, res, url, ctx) {
   if (method === "POST" && path === "/api/supervisor/wake") {
     if (!writeGuards(req, res, path, ctx)) return true;
     await forwardToHost(res, ctx, path, "/message", { text: wakePromptText() }, SLOW_TIMEOUT_MS);
+    return true;
+  }
+
+  // POST /api/supervisor/ask { toolUseId, answers } — answer the Supervisor's
+  // pending AskUserQuestion from the dashboard (FOC-810). Optimistic like the
+  // gate answer: the pending ask is re-read from the transcript (the path
+  // comes from the host's /state hook block, confined like the conversation
+  // route's) and a toolUseId mismatch means the Supervisor moved on — 409
+  // ask-changed, nothing forwarded. The host runs askKeyPlan and validates the
+  // answers; its status/body pass through unchanged. On a real answer the
+  // audit row is recorded in the current run's edits and the snapshot cache is
+  // dropped so the next poll no longer offers the answered ask.
+  if (method === "POST" && path === "/api/supervisor/ask") {
+    if (!writeGuards(req, res, path, ctx)) return true;
+    let body;
+    try {
+      body = await readJsonBody(req, BODY_CAP);
+    } catch (err) {
+      log(method, path, respondBodyError(res, err));
+      return true;
+    }
+    if (typeof body.toolUseId !== "string" || !body.toolUseId.trim() || !Array.isArray(body.answers)) {
+      json(res, 400, { error: "toolUseId (string) and answers (array) are required" });
+      log(method, path, 400);
+      return true;
+    }
+    if (!hostBase()) {
+      json(res, 503, { error: "docker-only" });
+      log(method, path, 503);
+      return true;
+    }
+    const state = await hostRequest("GET", "/state", null, { timeoutMs: FAST_TIMEOUT_MS });
+    if (state.status !== 200 || !state.body || typeof state.body !== "object") {
+      json(res, 503, {
+        error: "host-unreachable",
+        reason: state.status === 0 ? state.error : `host /state answered ${state.status}`,
+      });
+      log(method, path, 503);
+      return true;
+    }
+    const transcriptPath = confinedTranscriptPath(state.body.hook);
+    const pending = transcriptPath ? readPendingAsk(transcriptPath) : null;
+    if (!pending || pending.toolUseId !== body.toolUseId) {
+      json(res, 409, { error: "ask-changed" });
+      log(method, path, 409);
+      return true;
+    }
+    const result = await forwardToHost(res, ctx, path, "/dialog/ask", {
+      // The host re-plans the keys from the tool_use shape — labels only, no
+      // descriptions, exactly what the transcript carried.
+      questions: pending.questions.map((q) => ({
+        question: q.question,
+        multiSelect: q.multiSelect,
+        options: (q.options ?? []).map((o) => ({ label: o.label })),
+      })),
+      answers: body.answers,
+    }, SLOW_TIMEOUT_MS);
+    if (result && result.status === 200 && result.body?.answered === true) {
+      invalidateCockpitSnapshot();
+      const runId = readCurrentRun()?.runId;
+      const summary = askAnswerSummary(pending, body.answers);
+      if (runId && summary.trim()) {
+        try {
+          recordAnswerRow({
+            runId,
+            kind: "ask-answer",
+            id: pending.toolUseId,
+            text: summary,
+            who: "dashboard",
+            notified: true, // the answer went into the pane — already delivered
+            payload: askAnswerPayload(pending, body.answers),
+          });
+        } catch (err) {
+          // The answer IS delivered; the audit row is the only thing that failed.
+          console.error("[supervisor/ask] edit row failed:", err);
+        }
+      }
+    }
+    return true;
+  }
+
+  // POST /api/supervisor/dialog { id, choice, note? } — answer a permission
+  // or select dialog the pane is showing (FOC-810). The host owns the rules
+  // (id must still match the pane's dialog, allow-once/allow-always/deny for
+  // a permission, Esc-only for a select); the status/body pass through.
+  if (method === "POST" && path === "/api/supervisor/dialog") {
+    if (!writeGuards(req, res, path, ctx)) return true;
+    let body;
+    try {
+      body = await readJsonBody(req, BODY_CAP);
+    } catch (err) {
+      log(method, path, respondBodyError(res, err));
+      return true;
+    }
+    if (typeof body.id !== "string" || !body.id.trim() || typeof body.choice !== "string" || !body.choice.trim()) {
+      json(res, 400, { error: "id and choice (string) are required" });
+      log(method, path, 400);
+      return true;
+    }
+    const payload = { id: body.id, choice: body.choice };
+    if (typeof body.note === "string" && body.note.trim()) payload.note = body.note;
+    const result = await forwardToHost(res, ctx, path, "/dialog/answer", payload, SLOW_TIMEOUT_MS);
+    if (result && result.status === 200) invalidateCockpitSnapshot();
     return true;
   }
 

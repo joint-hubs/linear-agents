@@ -31,6 +31,12 @@
 //   - POST /api/supervisor/message and /session: pass-through of the host's
 //     status/body (200, 409 needs-input), 503 host-unreachable, 503
 //     docker-only natively, fresh requires confirm:"new-session";
+//   - FOC-810, the Supervisor's dialogs: supervisor.dialog / pendingAsk in the
+//     snapshot (permission dialog, ask dialog + transcript, failing host
+//     /dialog, idle), the ask / dialog Needs-you items and their counts,
+//     POST /api/supervisor/ask (forwarded questions+answers, 409 ask-changed,
+//     the ask-answer audit row, cache invalidation, 403), POST
+//     /api/supervisor/dialog (forwarded id/choice/note, 409 pass-through, 403);
 //   - POST /api/gates/answer and /api/holds/answer: happy path (gate recorded
 //     with answeredBy "dashboard", audit row notified:true, the FOC-449
 //     decision-event label written like the CLI's answer, the Supervisor's
@@ -193,6 +199,15 @@ function writeSession(extra = {}) {
 }
 writeSession();
 
+// Rewrite a run's waker lease with a fresh heartbeat, right before the snapshot
+// request an "alive" assertion reads: the 15 s stale window (wakerState) is
+// tight under a loaded suite, so the assertion must not depend on suite speed.
+function beatWaker(runId, sessionId) {
+  writeFileSync(join(supState, runId, "waker.json"), JSON.stringify({
+    pid: LIVE_PID, sessionId, startedAt: NOW, heartbeatAt: new Date().toISOString(), firedThrough: 0,
+  }), "utf8");
+}
+
 // ── the fake session host ────────────────────────────────────────────────────
 
 const hostCalls = []; // { method, url, token, body }
@@ -239,6 +254,24 @@ const fakeHost = createServer(async (req, res) => {
   }
   if (req.url === "/session") {
     const b = fakeHostBehavior.session ?? { status: 200, body: { ready: true } };
+    res.writeHead(b.status, { "content-type": "application/json" });
+    res.end(JSON.stringify(b.body));
+    return;
+  }
+  if (req.url === "/dialog") {
+    const b = fakeHostBehavior.dialog ?? { status: 200, body: { dialog: null } };
+    res.writeHead(b.status, { "content-type": "application/json" });
+    res.end(JSON.stringify(b.body));
+    return;
+  }
+  if (req.url === "/dialog/answer") {
+    const b = fakeHostBehavior.dialogAnswer ?? { status: 200, body: { sent: true, closed: true, noteSent: false } };
+    res.writeHead(b.status, { "content-type": "application/json" });
+    res.end(JSON.stringify(b.body));
+    return;
+  }
+  if (req.url === "/dialog/ask") {
+    const b = fakeHostBehavior.dialogAsk ?? { status: 200, body: { answered: true } };
     res.writeHead(b.status, { "content-type": "application/json" });
     res.end(JSON.stringify(b.body));
     return;
@@ -300,10 +333,10 @@ function spawnServer(env) {
       env: { ...env, TELEMETRY_PORT: String(port) },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let stderr = "";
-    child.stderr.on("data", (c) => { stderr += c; });
+    child.stderrBuf = "";
+    child.stderr.on("data", (c) => { child.stderrBuf += c; });
     child.on("exit", (code) => { if (code !== 0 && code !== null) child._exitCode = code; });
-    resolve({ child, port, stderr });
+    resolve({ child, port });
   }));
 }
 
@@ -380,6 +413,7 @@ try {
     const P = port;
 
     // GET /api/cockpit — full shape, probe through the host, redaction.
+    beatWaker("run-1", "waker-sess"); // fresh heartbeat — "alive" below must not depend on suite speed
     const snap = await call(P, "GET", "/api/cockpit");
     check("cockpit -> 200", snap.status === 200, JSON.stringify(snap.body).slice(0, 200));
     check("cockpit shape", ["supervisor", "needsYou", "children", "counts", "checkedAt"].every((k) => k in snap.body),
@@ -579,11 +613,207 @@ try {
     const notifyNeither = await call(P, "POST", "/api/gates/notify", { body: { runId: "run-1" } });
     check("notify neither id -> 400", notifyNeither.status === 400, JSON.stringify(notifyNeither));
 
+    // ── FOC-810: the Supervisor's dialogs in the snapshot and the answer routes ──
+    const hostStateBehavior = (state, transcriptPath) => ({
+      status: 200,
+      body: {
+        session: "running", panePid: 4242, paneDead: false, clients: ["tmux-dash-1"],
+        hook: { sessionId: "sess-host-1", transcriptPath, cwd: dir, state, notification: null, updatedAt: NOW },
+        state,
+      },
+    });
+    const PERM_DIALOG = {
+      id: "dlg-perm-1", kind: "permission", title: "Bash command",
+      lines: ["Bash command", "Do you want to proceed?"],
+      command: "npm audit --json", question: null, tabs: null,
+      options: [
+        { key: "1", label: "Yes", description: null, focused: true, checked: null, choice: "allow-once" },
+        { key: "2", label: "Yes, and don't ask again for: Bash(npm audit:*)", description: null, focused: false, checked: null, choice: "allow-always" },
+        { key: "3", label: "Yes, and switch to auto mode", description: null, focused: false, checked: null, choice: "auto-mode" },
+        { key: "4", label: "No", description: null, focused: false, checked: null, choice: "deny" },
+      ],
+      footer: "Esc to cancel · 1-4 select",
+    };
+    const ASK_DIALOG = {
+      id: "dlg-ask-1", kind: "ask", title: "Export",
+      lines: ["Should the export land in v1?"],
+      command: null,
+      question: "Should the export land in v1?",
+      tabs: [{ label: "Export", done: false }, { label: "Checks", done: false }, { label: "Submit", done: false }],
+      options: [
+        { key: "1", label: "Narrow the AC", description: "Export moves out of v1", focused: true, checked: null, choice: null },
+        { key: "2", label: "Finish before landing", description: "One more DEV round", focused: false, checked: null, choice: null },
+        { key: "3", label: "Leave as a DoD gap", description: "Document it", focused: false, checked: null, choice: null },
+      ],
+      footer: "Esc to cancel · 1-3 select · → next",
+    };
+    // A pending ask transcript copied from the parser's fixture: the LAST
+    // AskUserQuestion (2 questions, the second multiSelect) is unanswered.
+    const askTranscriptPath = join(squadHome, "supervisor", "projects", "ask-pending.jsonl");
+    writeFileSync(askTranscriptPath, readFileSync(join(__dir, "fixtures", "session-dialogs", "pending-ask-multi.jsonl")), "utf8");
+    const ASK_TOOL_ID = "toolu_mock_0450d5b7-a1be-4ca7-8270-405f3a99368a";
+
+    // needs-input + a permission dialog: supervisor.dialog set, a dialog item
+    // in Needs-you, counted, pendingAsk null.
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "");
+    fakeHostBehavior.dialog = { status: 200, body: { dialog: PERM_DIALOG } };
+    await new Promise((r) => setTimeout(r, 2100)); // the 2 s TTL cache
+    const snapPerm = await call(P, "GET", "/api/cockpit");
+    check("dialog: needs-input snapshot carries supervisor.dialog",
+      snapPerm.body?.supervisor?.dialog?.id === "dlg-perm-1" && snapPerm.body?.supervisor?.dialog?.kind === "permission",
+      JSON.stringify(snapPerm.body?.supervisor?.dialog));
+    check("dialog: pendingAsk null for a permission dialog", snapPerm.body?.supervisor?.pendingAsk === null,
+      JSON.stringify(snapPerm.body?.supervisor?.pendingAsk));
+    const dlgItem = (snapPerm.body?.needsYou ?? []).find((it) => it.category === "dialog");
+    check("dialog: needs-you dialog item prepended, answerable",
+      dlgItem?.id === "dialog:dlg-perm-1" && dlgItem?.kind === "permission" && dlgItem?.answerKind === "dialog"
+      && dlgItem?.state === "pending" && dlgItem?.answerable === true && dlgItem?.summary === "Bash command"
+      && dlgItem?.dialog?.id === "dlg-perm-1" && dlgItem?.runId === "run-1" && dlgItem?.taskId === "FIX-42"
+      && dlgItem?.createdAt === null && dlgItem?.ageMs === null,
+      JSON.stringify(dlgItem));
+    check("dialog: counts include the dialog item", snapPerm.body?.counts?.needsYou === 3,
+      JSON.stringify(snapPerm.body?.counts));
+    check("dialog: the snapshot fetched /dialog with the host token",
+      hostCalls.some((c) => c.url === "/dialog" && c.token === TOKEN),
+      JSON.stringify(hostCalls.filter((c) => c.url === "/dialog")));
+
+    // needs-input + an ask dialog + a real pending-ask transcript:
+    // supervisor.pendingAsk read from the transcript, an ask item, no dialog item.
+    fakeHostBehavior.state = hostStateBehavior("needs-input", askTranscriptPath);
+    fakeHostBehavior.dialog = { status: 200, body: { dialog: ASK_DIALOG } };
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapAsk = await call(P, "GET", "/api/cockpit");
+    const pendingAsk = snapAsk.body?.supervisor?.pendingAsk;
+    check("ask: pendingAsk read from the session transcript",
+      pendingAsk?.toolUseId === ASK_TOOL_ID && pendingAsk?.questions?.length === 2 && pendingAsk?.questions?.[1]?.multiSelect === true,
+      JSON.stringify(pendingAsk));
+    check("ask: pendingAsk questions carry labels and descriptions",
+      JSON.stringify(pendingAsk?.questions?.[0]?.options?.map((o) => o.label)) === '["Narrow the AC","Finish before landing","Leave as a DoD gap"]'
+      && pendingAsk?.questions?.[1]?.options?.[0]?.description === "npm test",
+      JSON.stringify(pendingAsk?.questions));
+    const askItem = (snapAsk.body?.needsYou ?? []).find((it) => it.category === "ask");
+    check("ask: needs-you ask item, first question as summary",
+      askItem?.id === `ask:${ASK_TOOL_ID}` && askItem?.kind === "ask" && askItem?.answerKind === "ask"
+      && askItem?.answerable === true && askItem?.toolUseId === ASK_TOOL_ID
+      && askItem?.summary === "Should the export land in v1?" && askItem?.questions?.length === 2,
+      JSON.stringify(askItem));
+    check("ask: an ask dialog produces NO dialog item",
+      !(snapAsk.body?.needsYou ?? []).some((it) => it.category === "dialog"),
+      JSON.stringify((snapAsk.body?.needsYou ?? []).map((it) => it.category)));
+    check("ask: counts include the ask item", snapAsk.body?.counts?.needsYou === 3,
+      JSON.stringify(snapAsk.body?.counts));
+
+    // POST /api/supervisor/ask — wrong toolUseId: 409 ask-changed, nothing forwarded.
+    hostCalls.length = 0;
+    const askWrong = await call(P, "POST", "/api/supervisor/ask", { body: { toolUseId: "toolu_stale", answers: [{ choices: [0] }] } });
+    check("ask wrong toolUseId -> 409 ask-changed", askWrong.status === 409 && askWrong.body?.error === "ask-changed",
+      JSON.stringify(askWrong));
+    check("ask wrong toolUseId forwards nothing", !hostCalls.some((c) => c.url === "/dialog/ask"),
+      JSON.stringify(hostCalls.map((c) => c.url)));
+    const askMissing = await call(P, "POST", "/api/supervisor/ask", { body: { toolUseId: ASK_TOOL_ID } });
+    check("ask without answers -> 400", askMissing.status === 400, JSON.stringify(askMissing));
+
+    // Happy path: forwarded { questions, answers }, audit row in the current
+    // run's edits (the record is written here and removed again — the
+    // current-run block below expects no record at its start).
+    const runId810 = "2026-10-12T11-00-00-000-supervisor-f10c";
+    mkdirSync(join(supState, runId810), { recursive: true });
+    writeCurrentRun(
+      { runId: runId810, model: "m1", startedAt: NOW, updatedAt: NOW, source: "pointer" },
+      { path: join(dataHome, "supervisor", "current-run.json") },
+    );
+    hostCalls.length = 0;
+    const askOk = await call(P, "POST", "/api/supervisor/ask", { body: { toolUseId: ASK_TOOL_ID, answers: [{ choices: [1] }, { choices: [0, 2] }] } });
+    check("ask -> host 200 answered", askOk.status === 200 && askOk.body?.answered === true, JSON.stringify(askOk));
+    const askFwd = hostCalls.find((c) => c.url === "/dialog/ask");
+    check("ask forwards questions (labels only) and answers verbatim",
+      JSON.stringify(askFwd?.body) === JSON.stringify({
+        questions: [
+          { question: "Should the export land in v1?", multiSelect: false, options: [{ label: "Narrow the AC" }, { label: "Finish before landing" }, { label: "Leave as a DoD gap" }] },
+          { question: "Which checks should run before the PR?", multiSelect: true, options: [{ label: "Unit tests" }, { label: "npm audit" }, { label: "E2E" }] },
+        ],
+        answers: [{ choices: [1] }, { choices: [0, 2] }],
+      }), JSON.stringify(askFwd?.body));
+    check("ask route resolved the transcript via host /state", hostCalls.some((c) => c.url === "/state"),
+      JSON.stringify(hostCalls.map((c) => c.url)));
+    // The audit row is written after forwardToHost has already served the 200,
+    // so the read may land a tick ahead of it — poll briefly instead of racing.
+    let askRow = null;
+    for (let waited = 0; waited < 2000; waited += 25) {
+      try {
+        askRow = readFileSync(join(supState, runId810, "edits.jsonl"), "utf8")
+          .split("\n").filter(Boolean).map((l) => JSON.parse(l))
+          .find((r) => r.type === "ask-answer") ?? null;
+      } catch {
+        askRow = null; // edits.jsonl not written yet — keep polling
+      }
+      if (askRow) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    check("ask audit row: who dashboard, notified, structured payload with chosen labels",
+      askRow?.who === "dashboard" && askRow?.notified === true && askRow?.payload?.toolUseId === ASK_TOOL_ID
+      && JSON.stringify(askRow?.payload?.answers?.[0]?.choices) === JSON.stringify(["Finish before landing"])
+      && JSON.stringify(askRow?.payload?.answers?.[1]?.choices) === JSON.stringify(["Unit tests", "E2E"]),
+      JSON.stringify(askRow));
+
+    // The answer invalidated the 2 s cache: the immediate poll (well inside
+    // the TTL) no longer offers the answered ask.
+    fakeHostBehavior.dialog = { status: 200, body: { dialog: null } };
+    const snapAfterAsk = await call(P, "GET", "/api/cockpit");
+    check("ask answer invalidates the snapshot cache",
+      snapAfterAsk.body?.supervisor?.dialog === null && snapAfterAsk.body?.supervisor?.pendingAsk === null
+      && !(snapAfterAsk.body?.needsYou ?? []).some((it) => it.category === "ask" || it.category === "dialog"),
+      JSON.stringify(snapAfterAsk.body?.supervisor));
+
+    // POST /api/supervisor/dialog — forwarded { id, choice, note }, pass-through.
+    hostCalls.length = 0;
+    const dlgOk = await call(P, "POST", "/api/supervisor/dialog", { body: { id: "dlg-perm-1", choice: "deny", note: "not now" } });
+    check("dialog answer -> host 200 pass-through", dlgOk.status === 200 && dlgOk.body?.sent === true && dlgOk.body?.closed === true,
+      JSON.stringify(dlgOk));
+    const dlgFwd = hostCalls.find((c) => c.url === "/dialog/answer");
+    check("dialog answer forwards id, choice and note",
+      dlgFwd?.body?.id === "dlg-perm-1" && dlgFwd?.body?.choice === "deny" && dlgFwd?.body?.note === "not now",
+      JSON.stringify(dlgFwd?.body));
+    fakeHostBehavior.dialogAnswer = { status: 409, body: { error: "dialog-changed" } };
+    const dlg409 = await call(P, "POST", "/api/supervisor/dialog", { body: { id: "dlg-perm-1", choice: "allow-once" } });
+    check("dialog answer 409 dialog-changed passes through", dlg409.status === 409 && dlg409.body?.error === "dialog-changed",
+      JSON.stringify(dlg409));
+    delete fakeHostBehavior.dialogAnswer;
+    const dlgMissing = await call(P, "POST", "/api/supervisor/dialog", { body: { id: "dlg-perm-1" } });
+    check("dialog answer without choice -> 400", dlgMissing.status === 400, JSON.stringify(dlgMissing));
+
+    // A failing host /dialog reads as null — never a broken snapshot.
+    fakeHostBehavior.dialog = { status: 500, body: { error: "capture failed" } };
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapDlgFail = await call(P, "GET", "/api/cockpit");
+    check("dialog: a failing host /dialog reads as null",
+      snapDlgFail.body?.supervisor?.dialog === null && snapDlgFail.body?.supervisor?.pendingAsk === null
+      && !(snapDlgFail.body?.needsYou ?? []).some((it) => it.category === "ask" || it.category === "dialog"),
+      JSON.stringify(snapDlgFail.body?.supervisor));
+
+    // Idle again: both null, no session items; an ask with no pending ask is
+    // 409 ask-changed. The current-run record is removed — the block below
+    // starts from "no record".
+    delete fakeHostBehavior.state;
+    delete fakeHostBehavior.dialog;
+    rmSync(join(dataHome, "supervisor", "current-run.json"));
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapIdle = await call(P, "GET", "/api/cockpit");
+    check("dialog: idle state -> dialog and pendingAsk null, no session items",
+      snapIdle.body?.supervisor?.dialog === null && snapIdle.body?.supervisor?.pendingAsk === null
+      && !(snapIdle.body?.needsYou ?? []).some((it) => it.category === "ask" || it.category === "dialog"),
+      JSON.stringify(snapIdle.body?.supervisor));
+    const askNone = await call(P, "POST", "/api/supervisor/ask", { body: { toolUseId: ASK_TOOL_ID, answers: [{ choices: [0] }] } });
+    check("ask with no pending ask -> 409 ask-changed", askNone.status === 409 && askNone.body?.error === "ask-changed",
+      JSON.stringify(askNone));
+
     // Foreign Origin → 403 on every POST route.
     for (const [p, body] of [
       ["/api/supervisor/message", { text: "hi" }],
       ["/api/supervisor/session", {}],
       ["/api/supervisor/wake", {}],
+      ["/api/supervisor/ask", { toolUseId: "toolu_x", answers: [] }],
+      ["/api/supervisor/dialog", { id: "dlg-1", choice: "deny" }],
       ["/api/gates/answer", { runId: "run-1", gateId: "gate-1", text: "x" }],
       ["/api/holds/answer", { runId: "run-1", holdId: "hold-1", text: "x" }],
       ["/api/gates/notify", { runId: "run-1", gateId: "gate-1" }],
@@ -613,6 +843,16 @@ try {
     const msg = await call(P, "POST", "/api/supervisor/message", { body: { text: "hi" } });
     check("message host-down -> 503 host-unreachable", msg.status === 503 && msg.body?.error === "host-unreachable",
       JSON.stringify(msg));
+    const askDown = await call(P, "POST", "/api/supervisor/ask", { body: { toolUseId: "toolu_x", answers: [] } });
+    check("ask host-down -> 503 host-unreachable", askDown.status === 503 && askDown.body?.error === "host-unreachable",
+      JSON.stringify(askDown));
+    const dlgDown = await call(P, "POST", "/api/supervisor/dialog", { body: { id: "dlg-1", choice: "deny" } });
+    check("dialog answer host-down -> 503 host-unreachable", dlgDown.status === 503 && dlgDown.body?.error === "host-unreachable",
+      JSON.stringify(dlgDown));
+    const snapDown = await call(P, "GET", "/api/cockpit");
+    check("cockpit host-down -> dialog and pendingAsk null",
+      snapDown.body?.supervisor?.dialog === null && snapDown.body?.supervisor?.pendingAsk === null,
+      JSON.stringify(snapDown.body?.supervisor));
 
     // A held answer lock + the route's lockWaitMs: 0 → busy 503 with the fixed
     // retryable reason, without the API waiting out the 2 s lock deadline.
@@ -641,11 +881,19 @@ try {
 
     const msg = await call(P, "POST", "/api/supervisor/message", { body: { text: "hi" } });
     check("message native -> 503 docker-only", msg.status === 503 && msg.body?.error === "docker-only", JSON.stringify(msg));
+    const askNative = await call(P, "POST", "/api/supervisor/ask", { body: { toolUseId: "toolu_x", answers: [] } });
+    check("ask native -> 503 docker-only", askNative.status === 503 && askNative.body?.error === "docker-only", JSON.stringify(askNative));
+    const dlgNative = await call(P, "POST", "/api/supervisor/dialog", { body: { id: "dlg-1", choice: "deny" } });
+    check("dialog answer native -> 503 docker-only", dlgNative.status === 503 && dlgNative.body?.error === "docker-only",
+      JSON.stringify(dlgNative));
     const fresh = await call(P, "POST", "/api/supervisor/session", { body: { fresh: true } });
     check("session fresh without confirm -> 400 even natively", fresh.status === 400, JSON.stringify(fresh));
 
     const snap = await call(P, "GET", "/api/cockpit");
     check("cockpit native -> not-docker", snap.body?.supervisor?.host === "not-docker", snap.body?.supervisor?.host);
+    check("cockpit native -> dialog and pendingAsk null",
+      snap.body?.supervisor?.dialog === null && snap.body?.supervisor?.pendingAsk === null,
+      JSON.stringify(snap.body?.supervisor));
     check("cockpit native state/session from session.json",
       snap.body?.supervisor?.state === "idle" && snap.body?.supervisor?.sessionId === "sess-1",
       JSON.stringify(snap.body?.supervisor));
@@ -762,6 +1010,7 @@ try {
     // No record yet: the focus run (run-1) drives runId, runSource says so,
     // and the backlog counts the focus run only — the new run's un-acked rows
     // stay out even though they sit in a recent run dir.
+    beatWaker("run-1", "waker-sess"); // fresh heartbeat — "alive" below must not depend on suite speed
     let snap = await call(P, "GET", "/api/cockpit");
     let sup = snap.body?.supervisor;
     check("current-run absent -> runId falls back to focus", sup?.runId === "run-1", JSON.stringify(sup));
@@ -777,6 +1026,7 @@ try {
       { path: recordPath },
     );
     await new Promise((r) => setTimeout(r, 2100)); // the 2 s TTL cache
+    beatWaker(curRunId, "waker-cur"); // fresh heartbeat after the TTL wait — "alive" below must not age out
     snap = await call(P, "GET", "/api/cockpit");
     sup = snap.body?.supervisor;
     check("current-run record -> runId from the record", sup?.runId === curRunId, JSON.stringify(sup));
@@ -804,6 +1054,7 @@ try {
 } catch (err) {
   failed++;
   failures.push(`unexpected error — ${err?.stack || err}`);
+  for (const s of servers) if (s.stderrBuf) console.error(`[child stderr] ${s.stderrBuf}`);
 } finally {
   for (const child of servers) {
     if (child.exitCode === null) child.kill();
