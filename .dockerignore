@@ -10,11 +10,20 @@ ui/dist
 .env.*
 *.log
 .claude/worktrees
-agents/*/projects
-agents/*/todos
-agents/*/shell-snapshots
-agents/*/statsig
-agents/*/plans
+# Squad config dirs: only the tracked config goes into the image. Everything
+# else there is Claude Code runtime data from the developer's machine —
+# transcripts, prompt history, paste cache, OAuth credentials — and must
+# never be baked into an image.
+agents/*/*
+!agents/*/CLAUDE.md
+!agents/*/settings.json
+!agents/*/agents
+!agents/*/skills
+!agents/*/memory
+# Belt and braces: never, even if a whitelisted dir ever holds them.
+**/.credentials.json
+**/.claude.json
+**/history.jsonl
 la-wt
 tmp
 coverage
