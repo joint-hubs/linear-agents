@@ -21,9 +21,9 @@
 // loses history permanently.
 
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { liveTelemetryDbPath } from "./fenix-paths.mjs";
 import {
   hasOpenQualityIssue,
   openTelemetryDb,
@@ -407,8 +407,7 @@ function printSummary(summary) {
 // point right back AT the live store, so the guard below must decide by WHERE
 // the resolved target leads, never by which env vars happen to be set.
 function defaultLiveDbPath() {
-  const home = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
-  return join(home, "linear-agents", "telemetry", "telemetry.sqlite");
+  return liveTelemetryDbPath();
 }
 
 function sameDbFile(a, b) {

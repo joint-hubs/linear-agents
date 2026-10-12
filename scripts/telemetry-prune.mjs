@@ -35,15 +35,12 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { telemetryDbPath as telemetryDbPathFromPaths } from "./fenix-paths.mjs";
 
 // Resolved locally rather than imported: this script must stay runnable against
 // a store whose schema the current code might not open cleanly.
 function telemetryDbPath() {
-  if (process.env.LA_TELEMETRY_DB) return process.env.LA_TELEMETRY_DB;
-  const local = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
-  return join(local, "linear-agents", "telemetry", "telemetry.sqlite");
+  return telemetryDbPathFromPaths();
 }
 
 // Real run ids are timestamp-prefixed (2026-08-17T07-40-01-139-orch-ollama-f739),

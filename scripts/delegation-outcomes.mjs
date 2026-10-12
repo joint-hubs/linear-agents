@@ -39,14 +39,12 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { homedir } from "node:os";
+import { telemetryDbPath } from "./fenix-paths.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REVIEWS = join(ROOT, ".state", "reviews");
 const ROUNDS = join(ROOT, ".state", "review-rounds.json");
-const DB_PATH = process.env.LA_TELEMETRY_DB
-  || join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"),
-          "linear-agents", "telemetry", "telemetry.sqlite");
+const DB_PATH = telemetryDbPath();
 
 const args = process.argv.slice(2);
 const AS_JSON = args.includes("--json");

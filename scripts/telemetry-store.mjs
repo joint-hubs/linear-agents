@@ -17,10 +17,10 @@ import {
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { homedir } from "node:os";
 import { execFile, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { INPUT_IDENTITY_SCHEME_VERSION, contentDigest, inputIdentity } from "./tool-identity.mjs";
+import { telemetryHome as telemetryHomeFromPaths, telemetryDbPath as telemetryDbPathFromPaths } from "./fenix-paths.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
@@ -63,11 +63,11 @@ export function sqliteAvailable() {
 }
 
 export function telemetryHome() {
-  return process.env.LA_TELEMETRY_HOME || join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "linear-agents", "telemetry");
+  return telemetryHomeFromPaths();
 }
 
 export function telemetryDbPath() {
-  return process.env.LA_TELEMETRY_DB || join(telemetryHome(), "telemetry.sqlite");
+  return telemetryDbPathFromPaths();
 }
 
 export function spoolPaths() {

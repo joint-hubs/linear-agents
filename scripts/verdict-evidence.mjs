@@ -49,7 +49,7 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { homedir } from "node:os";
+import { telemetryDbPath } from "./fenix-paths.mjs";
 import { loadReviews, aggregateOutcomes, delegationsByTask } from "./delegation-outcomes.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -58,9 +58,7 @@ const DEFAULT_REVIEWS = join(ROOT, ".state", "reviews");
 const DEFAULT_ROUNDS = join(ROOT, ".state", "review-rounds.json");
 // Same resolution as delegation-outcomes.mjs (LA_TELEMETRY_DB env seam) so both
 // surfaces read the same telemetry store.
-const DEFAULT_DB = process.env.LA_TELEMETRY_DB
-  || join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"),
-          "linear-agents", "telemetry", "telemetry.sqlite");
+const DEFAULT_DB = telemetryDbPath();
 
 const DELEGATION_NOTE = "correlation, not causal credit — telemetry run_task_links (role=primary) via delegation-outcomes.delegationsByTask; cost and token volume deliberately omitted";
 
