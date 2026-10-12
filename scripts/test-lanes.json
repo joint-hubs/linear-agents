@@ -5,6 +5,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "agent-records.test.mjs",
+      "reason": "isolation audit FOC-795: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir before import; record fixtures only; no ports, no socket binds, no telemetry DB"
+    },
+    {
       "file": "analysis-cache.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
@@ -263,6 +267,10 @@
     {
       "file": "supervisor-cleanup-prune.test.mjs",
       "reason": "isolation audit FOC-649: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam passed per invocation (spawned prune processes inherit it); run ages pinned with fs.utimesSync; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
+      "file": "supervisor-edits-hook.test.mjs",
+      "reason": "isolation audit FOC-795: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir; the hook runs as a child process over fixture run dirs; no ports, no socket binds, no telemetry DB"
     },
     {
       "file": "supervisor-guard.test.mjs",
