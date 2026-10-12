@@ -22,6 +22,8 @@ import { homedir } from "node:os";
 // FOC-547: chunked JSONL reader (one event-loop turn per chunk) for
 // parseTranscriptAsync — the sync full-file read stays for direct callers.
 import { createPacer, jsonlChunksFrom } from "./telemetry-tool-extract.mjs";
+// FOC-811: the runs-manifest dir comes from the shared path seam.
+import { runsDir } from "./fenix-paths.mjs";
 
 // ---------------------------------------------------------------------------
 // Internals
@@ -40,8 +42,7 @@ const root = join(__dir, "..");
 
 /** Run manifests: <stateRoot>/runs — stateRoot is LA_STATE_ROOT or <repo>/.state. */
 export function runsManifestDir() {
-  const stateRoot = process.env.LA_STATE_ROOT ? resolve(process.env.LA_STATE_ROOT) : join(root, ".state");
-  return join(stateRoot, "runs");
+  return runsDir();
 }
 
 /** The per-squad transcript corpus: <corpusRoot>/agents/<squad>/projects. */

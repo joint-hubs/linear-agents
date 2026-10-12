@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 import { readFile, writeFile, readdir, stat, rename } from 'node:fs/promises';
 import { readFileSync as readFileSyncNode, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, extname, resolve } from 'node:path';
+import { dirname, join, extname } from 'node:path';
 // Reuse the shared Linear GraphQL client (linear-client.mjs) — the same layer
 // linear-query.mjs is built on. A workspace-wide query (all teams) isn't
 // expressible via the team-scoped linear-query CLI, so we call graphql()
@@ -96,6 +96,9 @@ import {
 } from './telemetry-analysis.mjs';
 import { resolveRunsDir, readDecisionLog, decisionsPanel, decisionTables } from './decision-analytics.mjs';
 import { runReadOnlyQuery } from './analysis-sql.mjs';
+// FOC-811: the state root comes from the shared path seam (one LA_STATE_ROOT
+// definition for every runs-path builder, the container points it at /data).
+import { stateRoot as resolveStateRoot } from './fenix-paths.mjs';
 // The derived analysis cache: the panels' data source (see analysis-cache.mjs
 // for why the store's views are too slow to query live). The server only
 // reads it and spawns builds as a CHILD process — never in-process.
@@ -106,9 +109,7 @@ const root = join(__dir, '..');
 // Root of the mutable state tree (runs manifest, supervisor ledger, snapshots).
 // LA_STATE_ROOT lets tests point the server at an isolated tmp tree; with it
 // unset this is the same repo-local `.state` as before (byte-identical paths).
-const stateRoot = process.env.LA_STATE_ROOT
-  ? resolve(process.env.LA_STATE_ROOT)
-  : join(root, '.state');
+const stateRoot = resolveStateRoot();
 
 // Load .env so the Linear API keys (LINEAR_API_KEY / LINEAR_API_KEY_PISI) are
 // available to chooseApiKey() inside graphql(). Benign for other endpoints —

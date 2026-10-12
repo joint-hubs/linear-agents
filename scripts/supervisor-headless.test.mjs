@@ -57,15 +57,19 @@ function manifestFor(extraArgs) {
   homes.push(home);
   const runId = `test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}-dev`;
 
+  const env = {
+    ...process.env,
+    // Keep this out of the real telemetry store and the real .state/runs.
+    LA_TELEMETRY_DB: join(home, "telemetry.sqlite"),
+    LA_TELEMETRY_HOME: home,
+  };
+  // The manifest is asserted at the repo-root .state/runs path — an exported
+  // dev LA_STATE_ROOT would redirect the child elsewhere.
+  delete env.LA_STATE_ROOT;
   execFileSync(process.execPath, [MANIFEST, "start", runId, "dev", ...extraArgs], {
     cwd: ROOT,
     encoding: "utf8",
-    env: {
-      ...process.env,
-      // Keep this out of the real telemetry store and the real .state/runs.
-      LA_TELEMETRY_DB: join(home, "telemetry.sqlite"),
-      LA_TELEMETRY_HOME: home,
-    },
+    env,
   });
 
   const path = join(ROOT, ".state", "runs", `${runId}.json`);

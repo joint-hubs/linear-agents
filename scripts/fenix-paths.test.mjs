@@ -12,10 +12,11 @@
 // Run: node scripts/fenix-paths.test.mjs
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import {
   dataHome,
   telemetryHome,
@@ -28,6 +29,8 @@ import {
   worktreeRoot,
   integrationTreePath,
   hostTokenPath,
+  stateRoot,
+  runsDir,
 } from "./fenix-paths.mjs";
 
 let passed = 0;
@@ -199,6 +202,65 @@ test("integrationTreePath: ../la-wt/<name> by default, or LA_WORKTREE_HOME/<name
     integrationTreePath(mainRepo, "merge-integration", { LA_WORKTREE_HOME: join("w", "home") }),
     join("w", "home", "merge-integration"),
   );
+});
+
+console.log("\nfenix-paths: run-state tree (FOC-811)");
+
+test("stateRoot: LA_STATE_ROOT when set, <repo>/.state when not", () => {
+  assert.equal(stateRoot({}), join(REPO_ROOT, ".state"));
+  // Relative overrides resolve against the cwd — the seam the FOC-599
+  // ledger/telemetry-server copies established. Pin it with an absolute path.
+  const abs = mkdtempSync(join(tmpdir(), "foc-811-"));
+  try {
+    assert.equal(stateRoot({ LA_STATE_ROOT: abs }), abs);
+  } finally {
+    rmSync(abs, { recursive: true, force: true });
+  }
+});
+
+test("runsDir: <stateRoot>/runs with and without the override", () => {
+  assert.equal(runsDir({}), join(REPO_ROOT, ".state", "runs"));
+  const abs = mkdtempSync(join(tmpdir(), "foc-811-"));
+  try {
+    assert.equal(runsDir({ LA_STATE_ROOT: abs }), join(abs, "runs"));
+  } finally {
+    rmSync(abs, { recursive: true, force: true });
+  }
+});
+
+test("run-manifest start --headless writes to LA_STATE_ROOT, never the repo's .state/runs", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "foc-811-"));
+  const runId = `foc811-${Date.now().toString(36)}`;
+  try {
+    const env = {
+      ...process.env,
+      LA_STATE_ROOT: tmp,
+      // Keep the central telemetry store in the sandbox too.
+      LA_DATA_HOME: tmp,
+    };
+    // An exported dev seam must not leak in on top of the overrides above —
+    // only LA_STATE_ROOT/LA_DATA_HOME decide where the child writes.
+    for (const key of ["LA_TELEMETRY_HOME", "LA_TELEMETRY_DB", "LA_SUPERVISOR_STATE_HOME", "LA_DECISION_RUNS_DIR"]) {
+      delete env[key];
+    }
+    const result = spawnSync(
+      process.execPath,
+      [join(HERE, "run-manifest.mjs"), "start", runId, "dev", "--headless"],
+      {
+        cwd: tmp,
+        env,
+        encoding: "utf8",
+      },
+    );
+    assert.equal(result.status, 0, `run-manifest start failed: ${result.stderr}`);
+    assert.ok(existsSync(join(tmp, "runs", `${runId}.json`)), "manifest written to the override root");
+    assert.ok(
+      !existsSync(join(REPO_ROOT, ".state", "runs", `${runId}.json`)),
+      "nothing leaked into the repo's own .state/runs",
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 console.log("\nfenix-paths: AC1 guard — no hardcoded paths outside this module");

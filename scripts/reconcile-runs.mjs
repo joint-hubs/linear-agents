@@ -26,14 +26,13 @@
 // Safe to re-run any time (idempotent). ESM, zero deps (Node 18+).
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join, dirname, basename } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, basename } from "node:path";
 import { parseTranscript, discoverTranscriptsForRuns } from "./ledger.mjs";
+import { runsDir } from "./fenix-paths.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 
-const __dir = dirname(fileURLToPath(import.meta.url));
-const root = join(__dir, "..");
-const RUNS_DIR = join(root, ".state", "runs");
+// FOC-811: resolved through the shared seam — LA_STATE_ROOT, else <repo>/.state.
+const RUNS_DIR = runsDir();
 
 const IDLE_MS = 60 * 60 * 1000; // transcript idle for 1 h → run is over
 const ORPHAN_MS = 24 * 60 * 60 * 1000; // no transcript + this old → aborted launch

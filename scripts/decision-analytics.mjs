@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * scripts/decision-analytics.mjs — read-side analytics over the decision I/O
- * log (FOC-449's .state/runs/<runId>/decisions.jsonl), for the dashboard's
- * decision-quality panel.
+ * log (FOC-449's runs/<runId>/decisions.jsonl under LA_STATE_ROOT or
+ * <repo>/.state), for the dashboard's decision-quality panel.
  *
  * Why this exists. The log is the only place that holds, per registry-backed
  * decision call, BOTH sides of the story: what the model answered (the event
@@ -40,7 +40,8 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ROOT, SHADOW_LABEL_TYPE } from "./decision-log.mjs";
+import { SHADOW_LABEL_TYPE } from "./decision-log.mjs";
+import { runsDir } from "./fenix-paths.mjs";
 import { SHADOW_EVENT_TYPE, SHADOW_FILENAME } from "./decision-call.mjs";
 
 /** Below this per-decision event count the rates are noise, not signal. */
@@ -64,9 +65,9 @@ function fail(code, message) {
   return error;
 }
 
-/** The runs directory this module reads: env override, else the repo's .state/runs. */
+/** The runs directory this module reads: env override first, then the shared seam (FOC-811). */
 export function resolveRunsDir() {
-  return process.env.LA_DECISION_RUNS_DIR || join(ROOT, ".state", "runs");
+  return process.env.LA_DECISION_RUNS_DIR || runsDir();
 }
 
 /**
