@@ -28,6 +28,7 @@ Usage: fenix [command]
   attach           attach to the fenix-supervisor container
   shell [service]  open a shell in a service (default: fenix-supervisor)
   update           git pull --ff-only, rebuild with fresh base images, restart
+  test [args]      lint and the full test suite on Linux, inside the image
 
 Exit codes: 0 ok | 2 usage | 3 preflight failed | 4 health timeout | 5 key rejected
 EOF
@@ -301,6 +302,17 @@ cmd_doctor() {
   exit "$rc"
 }
 
+cmd_test() {
+  # Docker on Windows needs a Windows path for the bind mount; Git Bash gives
+  # one with pwd -W (path conversion is off for this script).
+  src=$(pwd -W 2>/dev/null || pwd)
+  if ! docker image inspect fenix:dev >/dev/null 2>&1; then
+    printf 'Building the image first...\n'
+    docker compose build
+  fi
+  exec docker run --rm -v "$src:/src:ro" fenix:dev sh /src/docker/test-in-container.sh "$@"
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 cmd="${1:-}"
@@ -347,6 +359,9 @@ case "$cmd" in
     git pull --ff-only
     docker compose build --pull
     exec docker compose up -d
+    ;;
+  test)
+    cmd_test "$@"
     ;;
   *)
     printf 'Unknown command: %s\n\n' "$cmd" >&2
