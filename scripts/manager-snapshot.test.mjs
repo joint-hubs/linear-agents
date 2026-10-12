@@ -288,7 +288,6 @@ test("supervisor scan: pending gates only, malformed documented, 20-dir mtime ca
     for (let i = 1; i <= 25; i++) {
       const runId = `run-${String(i).padStart(2, "0")}`;
       mkdirSync(join(supRoot, runId), { recursive: true });
-      setMtime(join(supRoot, runId), Date.UTC(2026, 7, 1, 0, i));
       writeGate(supRoot, runId, "g.json", { gateId: `gate-${i}`, squad: `sq-${i}`, kind: "plan.gate1", createdAt: "2026-08-01T00:00:00.000Z", status: "pending" });
     }
     // answered gate in a scanned dir → ignored; malformed gate → skipped + documented
@@ -296,6 +295,13 @@ test("supervisor scan: pending gates only, malformed documented, 20-dir mtime ca
     writeGate(supRoot, "run-25", "broken.json", "{ not json");
     // squad-less pending gate lands under 'unknown'
     writeGate(supRoot, "run-25", "nosquad.json", { gateId: "g-nosquad", kind: "question", status: "pending" });
+
+    // Set the run-dir mtimes LAST: creating <run>/gates/ bumps the dir's mtime
+    // to "now", and on Linux the kernel's coarse file clock gives all 25 dirs
+    // the same "now" — the newest-20 cut then depends on readdir order.
+    for (let i = 1; i <= 25; i++) {
+      setMtime(join(supRoot, `run-${String(i).padStart(2, "0")}`), Date.UTC(2026, 7, 1, 0, i));
+    }
 
     const snapshot = await buildManagerSnapshot({ db, supervisorRoot: supRoot });
     const squadKeys = Object.keys(snapshot.squads).sort();

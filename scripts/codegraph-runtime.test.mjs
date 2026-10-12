@@ -83,7 +83,11 @@ process.on("exit", () => {
   }
 });
 
-function test(name, fn) {
+function test(name, fn, winOnly) {
+  if (winOnly && process.platform !== "win32") {
+    console.log(`  SKIP ${name} — ${winOnly}`);
+    return;
+  }
   try {
     fn();
     passed++;
@@ -296,7 +300,7 @@ test("a shim with a relative JS target unwraps against the shim's own dir", () =
     where: () => ({ status: 0, stdout: join(dir, "codegraph.cmd") + "\r\n" }),
   });
   eq(cmd.args, [join(holder, "cli.js")], "relative %~dp0 target resolves");
-});
+}, "%~dp0 .cmd shims exist only on Windows");
 
 test("a shim whose JS target is missing falls through to the next candidate", () => {
   const dir = tmpDir("shim-miss");
@@ -363,7 +367,8 @@ test("a failed resolution is never cached — the next call re-probes the PATH",
   void probe;
   const onPath = (() => {
     try {
-      const { status } = execFileSync("where", ["codegraph"], { encoding: "utf8", stdio: "pipe" }) ? { status: 0 } : { status: 1 };
+      const probeCmd = process.platform === "win32" ? "where" : "which";
+      const { status } = execFileSync(probeCmd, ["codegraph"], { encoding: "utf8", stdio: "pipe" }) ? { status: 0 } : { status: 1 };
       return status === 0;
     } catch {
       return false;

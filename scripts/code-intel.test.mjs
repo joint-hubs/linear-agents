@@ -47,7 +47,7 @@
 // The real worktree tree is never used as a fixture and is never modified.
 
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync, chmodSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -382,13 +382,21 @@ function runIndexedCases(root) {
     // exit 0. Tripwire against the raw CLI (the wrapper now guards —
     // case 7): if the CLI ever auto-syncs or flags staleness, this FAILS and
     // must be updated to assert the new behavior.
+    // Since codegraph 1.6.0 this holds on win32 only — on POSIX the CLI flags it.
     const probe = runRawCli(root, ["node", "foc114ProbeTarget", "--path", root]);
     const out = norm(probe.stdout) + norm(probe.stderr);
     assertEq(probe.status, 0, "stale query: observed exit 0");
     assert(out.includes("src/lib.mjs:1"), "stale query: answer cites the outdated location (line 1), not the current one (line 5)");
     // Same name-strip as Case 4: the symbol's own name must never count as a hit.
     const outNoName = out.split("foc114ProbeTarget").join("");
-    assert(!/pending|stale|outdated|⚠/i.test(outNoName), "stale query: no staleness banner anywhere");
+    if (process.platform === "win32") {
+      assert(!/pending|stale|outdated|⚠/i.test(outNoName), "stale query: no staleness banner anywhere");
+    } else {
+      // Measured 2026-10-12, codegraph 1.6.0 on Linux: the raw CLI flags the
+      // stale file itself ("⚠ … changed on disk after it was last indexed").
+      // The gap this tripwire pins is Windows-only; on POSIX pin the banner.
+      assert(/⚠/.test(outNoName), "stale query (POSIX): the raw CLI flags the stale file with a ⚠ banner");
+    }
   }
 
   // ---- Case 6: pending file THROUGH THE WRAPPER — guard syncs, then answers ----
@@ -839,7 +847,7 @@ function runIndexedCases(root) {
     const logPath = join(holder, "calls.log");
     const fake = makeFakeCodegraphCli({ dir: join(holder, "bin"), mode: "dirty", logPath });
     const envWithFake = {
-      PATH: [fake.dir, process.env.PATH].join(";"),
+      PATH: [fake.dir, process.env.PATH].join(delimiter),
       ...fake.env,
     };
     const fixture = makeFixture("sameroot");
@@ -896,7 +904,7 @@ function runIndexedCases(root) {
     const logPath = join(holder, "calls.log");
     const fake = makeFakeCodegraphCli({ dir: join(holder, "bin"), mode: "ready", logPath });
     const envWithFake = {
-      PATH: [fake.dir, process.env.PATH].join(";"),
+      PATH: [fake.dir, process.env.PATH].join(delimiter),
       ...fake.env,
     };
     const fixture = makeFixture("stampboot");
@@ -937,7 +945,7 @@ function runIndexedCases(root) {
     const logPath = join(holder, "calls.log");
     const fake = makeFakeCodegraphCli({ dir: join(holder, "bin"), mode: "schema", logPath });
     const envWithFake = {
-      PATH: [fake.dir, process.env.PATH].join(";"),
+      PATH: [fake.dir, process.env.PATH].join(delimiter),
       ...fake.env,
     };
     const fixture = makeFixture("schemastale");
@@ -972,7 +980,7 @@ function runIndexedCases(root) {
     const logPath = join(holder, "calls.log");
     const fake = makeFakeCodegraphCli({ dir: join(holder, "bin"), mode: "hang", logPath });
     const envWithFake = {
-      PATH: [fake.dir, process.env.PATH].join(";"),
+      PATH: [fake.dir, process.env.PATH].join(delimiter),
       ...fake.env,
     };
     const fixture = makeFixture("hangquery");
@@ -1005,7 +1013,7 @@ function runIndexedCases(root) {
       cleanupDirs.push(holder);
       const nestedEnv = (fake) => ({
         ...process.env,
-        PATH: [fake.dir, process.env.PATH].join(";"),
+        PATH: [fake.dir, process.env.PATH].join(delimiter),
         ...fake.env,
         CODE_INTEL_TEST_NESTED: "1",
       });
