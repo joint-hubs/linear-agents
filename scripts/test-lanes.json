@@ -53,6 +53,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "cockpit.test.mjs",
+      "reason": "isolation audit FOC-783: mkdtemp/tmpdir fixtures only; cockpit state via the LA_SUPERVISOR_STATE_HOME seam pointed at temp paths (poll tuning via LA_SUPERVISOR_POLL_MS); the probe is an injected stub, no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
       "file": "config-drift.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
@@ -269,8 +273,20 @@
       "reason": "isolation audit FOC-649: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam passed per invocation (spawned prune processes inherit it); run ages pinned with fs.utimesSync; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
+      "file": "supervisor-conversation.test.mjs",
+      "reason": "isolation audit FOC-783: mkdtemp/tmpdir fixtures only (transcript fixtures under temp paths); a pure reader over literal JSONL shapes; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
+      "file": "supervisor-session-hook.test.mjs",
+      "reason": "isolation audit FOC-783: LA_DATA_HOME pointed at a mkdtemp dir; the hook runs as a child process over fixture payloads (same pattern as supervisor-edits-hook.test.mjs); no ports, no socket binds, no telemetry DB"
+    },
+    {
       "file": "supervisor-edits-hook.test.mjs",
       "reason": "isolation audit FOC-795: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir; the hook runs as a child process over fixture run dirs; no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "supervisor-gate-answer.test.mjs",
+      "reason": "isolation audit FOC-783: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam set per invocation (spawned gate-answer processes inherit it; offline codegraph/telemetry seams set in the child env); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
       "file": "supervisor-guard.test.mjs",
@@ -411,6 +427,10 @@
   ],
   "serial": [
     {
+      "file": "cockpit-routes.test.mjs",
+      "reason": "spawns the real telemetry-server and fake hosts on ephemeral ports (createServer + .listen, raw net.connect sockets for the upgrade tests)"
+    },
+    {
       "file": "decision-log.test.mjs",
       "reason": "writes fixture run logs into the repo's real .state/runs/"
     },
@@ -437,6 +457,10 @@
     {
       "file": "supervisor-followup.test.mjs",
       "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
+    },
+    {
+      "file": "supervisor-host.test.mjs",
+      "reason": "binds the host's HTTP server on an ephemeral port (.listen) and exercises WebSocket upgrade handling — the static audit cannot clear it, and the file itself says it belongs in the serial lane"
     },
     {
       "file": "supervisor-gate.test.mjs",
