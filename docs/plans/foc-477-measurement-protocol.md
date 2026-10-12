@@ -237,8 +237,13 @@ without a reproducer is not a result (Hermes spec, §5).
     from the review.
   - **FOC-198 is unrecoverable** — its transcript is past the 30-day retention and the tee's
     three cumulative values (0.023 -> 0.045 -> 0.009) are non-monotone, so no safe
-    reconstruction exists. Its arm-B cost on the axis awaits Mateusz's ruling on the
-    conservative rule recorded in `foc198Rule`. Until then the cost axis reports 9 entries.
+    reconstruction exists. **DECIDED (Mateusz, 2026-10-12, option A):** its arm-B cost on the
+    cost axis is scored at **0.009** — the smallest surviving cumulative snapshot. This is the
+    conservative floor: the 10-entry median is **0.1126** instead of 0.1168 without FOC-198, so
+    the cost axis faces the hardest bar the record can defend. If the axis still wins at the
+    floor, the win does not depend on the lost transcript. The rejected alternative (exclude,
+    n = 9, axis marked `win*`) leaves the easier 0.1168 bar and is less conservative against GO.
+    FOC-759's AC2 is closed by this ruling.
 
 ### 4.2 Wall time
 
@@ -496,6 +501,22 @@ runner version; its `armARuns[].runnerSha` is recorded. Earlier attempts stay `e
 REVIEW → TEST → PR → merge — and **never lands in the middle of an active run**. The `[G]`
 observability patch (old option C) rides the **same** change when (2) fires; standalone it waits
 until after the 10th run (Q6).
+
+**The fifth sanctioned hunk (FOC-758, ratified 2026-10-12).** The DoD enumerates four touches
+to `scripts/graph-runner.mjs`: (c) the event line, (d) the `provider` field of the request body,
+the one Ajv `allErrors: true` line, and the `revision`-delivery hunk. A fifth was added while
+closing REVIEW round 1's blocker and is **ratified as an explicit part of (a)** — the same
+ruling shape as the `allErrors` line (Mateusz, 2026-10-10: *"without it (a) cannot work"*).
+Without Ajv's `.errors` readable on the validator the node receives, `schemaProblems` collapses
+to the generic string and (a) does not exist on the path arm A runs.
+
+Scope, deliberately one line: the `plan.intent` call site only,
+`validate: outputValidate.get(stepId)` in place of an arrow wrapper. The other four `validate:`
+sites (plan.ready, plan.intent.select, plan.ac, plan.render) stay byte-identical. CLI verbs,
+record shapes, the step loop, `resolveRead`, `createStore` and `RESET_STATUS` stay
+byte-identical. Mateusz delegated the ratification to the Supervisor on 2026-10-12
+("co do punktu 2 to zdaje się na ciebie"); the Supervisor ratified it on the
+narrower/safer/reversible rule (zasada 4), with the justification above.
 
 ### Q10 — the arm-A `plan.spec` model is a fixed instrument parameter → **Mateusz, 2026-10-10**
 

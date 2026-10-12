@@ -122,21 +122,24 @@
       "caveat": "FOC-550 and FOC-688 are mixed-model PLAN children (xiaomi/mimo-v2.6-pro lead + z-ai/glm-5.3-flash subagents): the transcript prices each message on its own model, which the registry figure cannot show."
     },
     "foc198Rule": {
-      "status": "PROPOSED by the Supervisor 2026-10-10 - decision is Mateusz's, NOT yet decided",
+      "status": "DECIDED 2026-10-12 by Mateusz - option A (the 0.009 floor). Recorded by the Supervisor the same day.",
       "problem": "FOC-198's transcript is deleted. Its tee holds three cumulative result values 0.023 -> 0.045 -> 0.009, non-monotone, so no safe reconstruction. Its armB.costUsd 0.0749 is registry-inflated like the rest.",
       "goRuleContext": "the cost axis is a MEDIAN comparison: win iff median arm A < median arm B x 0.85 (protocol, the win/loss rule). GO iff both axes win AND zero axes in regression > 5%.",
       "proposal": "Score FOC-198's arm-B cost on the cost axis at 0.009 - the smallest surviving cumulative snapshot, the only number the record can defend without inventing data, and a floor the session total cannot go below. Rationale: with the 9 known ground-truth B values the median is 0.1168; a low B_198 drops the 10-entry median to 0.1126 (the hardest bar A can face), a high B_198 raises it to 0.1277. The floor is the direction that makes GO harder - what 'przeciw GO' asks for. If the cost axis still wins with B_198 at its floor, the win does not depend on the lost transcript.",
       "alternative": "exclude FOC-198 from the cost-axis median (n=9) and mark the axis win* with the exclusion named. Invents nothing, but the 9-entry median 0.1168 is an easier bar than 0.1126 - less conservative against GO.",
-      "decisionOwner": "Mateusz. Until he rules, FOC-759's AC2 stays open and the cost axis reports FOC-198 as unreconstructible."
+      "chosen": "A - score FOC-198\u2019s arm-B cost on the cost axis at 0.009, the smallest surviving cumulative snapshot.",
+      "rationale": "Mateusz, 2026-10-12: \"foc 198 - opcja A\". The floor is the conservative direction (\"przeciw GO\"): the 10-entry median drops to 0.1126 vs 0.1168 without FOC-198, so the cost axis faces the hardest bar the record can defend. If the axis still wins at the floor, the win does not depend on the lost transcript.",
+      "rejectedAlternative": "B - exclude FOC-198 from the cost-axis median (n=9) and mark the axis win*. Invents nothing, but 0.1168 is an easier bar than 0.1126 - less conservative against GO.",
+      "decisionOwner": "Mateusz. DECIDED 2026-10-12 (option A). FOC-759 AC2 is closed by this ruling; the cost axis counts FOC-198 at 0.009."
     },
     "queue": {
-      "FOC-759": "AC1 DONE 2026-10-11 (baseline recomputed and recorded); AC2 open on Mateusz's FOC-198 decision. Still due before the first counted arm-A run (attempt 5 FOC-236) only in the sense that the AC2 ruling is.",
+      "FOC-759": "AC1 DONE 2026-10-11 (baseline recomputed and recorded); AC2 DONE 2026-10-12 - Mateusz ruled option A (FOC-198 scores 0.009 on the cost axis, the conservative floor). No longer blocks the first counted arm-A run (attempt 5 FOC-236).",
       "FOC-760+FOC-761": "together next (M1, High) - ONE reconciliation script (registry / telemetry / transcript) is the acceptance for both. FOC-761 needs a one-time re-ingest into the LIVE telemetry store: the ingest plan goes to Mateusz FIRST; no child opens the live store for writing.",
       "FOC-762-764": "M5, after 760+761. FOC-763/764 change contracts under agents/plan/** only AFTER the FOC-477 campaign ends - plan.spec runs as a PLAN child in arm A, so changing its contract mid-campaign moves the instrument.",
       "FOC-765": "M7, waits for Mateusz's decision on the draw.io plugin",
       "push": "Mateusz's - 'Push robię ja.'"
     },
-    "status": "DECIDED 2026-10-10 by Mateusz (model/cost telemetry review). The FOC-198 rule is the one open sub-decision. armB.costUsd is recomputed (FOC-759, 2026-10-11): corpus[].armB.costUsdTranscript is the value the cost axis reads, the old armB.costUsd stays as history."
+    "status": "DECIDED 2026-10-10 by Mateusz (model/cost telemetry review). The FOC-198 sub-decision is now closed too (2026-10-12, option A: FOC-198 scores 0.009 on the cost axis). armB.costUsd is recomputed (FOC-759, 2026-10-11): corpus[].armB.costUsdTranscript is the value the cost axis reads, the old armB.costUsd stays as history."
   },
   "egressScreenScan20261008": {
     "kind": "corpus-wide scan of the EXACT plan.dor state bytes through scanEgress — diagnostic only, wrote no run, mutated no Linear state",
