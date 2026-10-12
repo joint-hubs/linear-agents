@@ -71,6 +71,11 @@ import { buildRewardsPayload } from './reward-ingest.mjs';
 // open). Mirrors validateLaunch's { status, error } convention.
 import { validateRating } from './manager-ratings.mjs';
 
+// Cockpit routes (FOC-783): the /api/cockpit snapshot, the Supervisor chat /
+// wake endpoints, gate/hold answering, and the terminal WS proxy. Transport
+// only — the guards, body caps and error shapes below are passed in as ctx.
+import { handleCockpitRoute, handleTerminalUpgrade } from './cockpit-routes.mjs';
+
 // FT control plane (FOC-359): datasets, training-run lifecycle, log tail.
 // Pure logic in scripts/ft.mjs; the server only does HTTP guards + dispatch.
 import { listDatasets, listRuns, getRun, launchTrain, stopRun } from './ft.mjs';
@@ -825,6 +830,13 @@ const server = createServer(async (req, res) => {
       log(method, path, 204);
       return;
     }
+
+    // --- Cockpit routes (FOC-783) ---
+    // Dispatched first so its POSTs (/api/supervisor/*, /api/gates/*,
+    // /api/holds/*) sit before the GET-only guard below, exactly like
+    // /api/launch and the records routes. The ctx is the same guard + body +
+    // send helper set the write routes here use.
+    if (await handleCockpitRoute(req, res, url, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin })) return;
 
     // --- POST /api/launch (L1b) ---
     // Spawns a local agent window. Bound to 127.0.0.1 + origin-checked (AC3),
@@ -2534,6 +2546,21 @@ const server = createServer(async (req, res) => {
     json(res, 500, { error: err.message });
     log(method, path, 500);
   }
+});
+
+// The terminal WebSocket (FOC-783): an upgrade, not a route — validated and
+// TCP-proxied to the session host in cockpit-routes.mjs. Every other upgrade
+// path is destroyed outright; nothing else here speaks WebSocket.
+server.on('upgrade', (req, socket, head) => {
+  let pathname = null;
+  try {
+    pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
+  } catch { /* destroyed below */ }
+  if (pathname === '/api/supervisor/terminal') {
+    handleTerminalUpgrade(req, socket, head, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin });
+    return;
+  }
+  socket.destroy();
 });
 
 // ---------------------------------------------------------------------------

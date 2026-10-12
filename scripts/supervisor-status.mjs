@@ -50,6 +50,7 @@ import {
   readWakeAck,
   readWakeQueue,
   readWakerLease,
+  redact,
   readRegistry,
   stallSilenceMs,
   addCost,
@@ -82,26 +83,11 @@ const SPENT_GRACE_MS = 45 * 60_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Minimal denylist, applied ONLY to text printed to the operator. The tee on
-// disk stays unredacted — it is local and gitignored, and a scrubbed tee would
-// be useless for debugging the one case where the secret matters.
-//
-// This is not a secret scanner and does not pretend to be: it catches the shapes
-// that actually show up in agent output (a key echoed by a failing curl, an
-// Authorization header in a stack trace), not every possible credential.
-const REDACTIONS = [
-  [/\bsk-[A-Za-z0-9_-]{6,}/g, "sk-***"],
-  [/\blin_api_[A-Za-z0-9_-]{6,}/g, "lin_api_***"],
-  [/\b(api[_-]?key)\s*[=:]\s*\S+/gi, "$1=***"],
-  [/\bBearer\s+\S+/gi, "Bearer ***"],
-  [/\b(password)\s*[=:]\s*\S+/gi, "$1=***"],
-];
-
-export function redact(text) {
-  let out = String(text ?? "");
-  for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
-  return out;
-}
+// `redact` (and its REDACTIONS list) moved to supervisor-lib.mjs (FOC-783 — the
+// Cockpit routes redact too, and two copies of a denylist drift). Imported with
+// the other lib state above and re-exported here so every existing importer and
+// test of supervisor-status sees the same export as before.
+export { redact };
 
 function snippetOf(event) {
   if (event.type === "assistant") {
