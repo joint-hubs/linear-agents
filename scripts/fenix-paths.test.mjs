@@ -27,6 +27,7 @@ import {
   projectsConfigPath,
   worktreeRoot,
   integrationTreePath,
+  hostTokenPath,
 } from "./fenix-paths.mjs";
 
 let passed = 0;
@@ -134,6 +135,23 @@ test("live store ignores LA_TELEMETRY_HOME and LA_TELEMETRY_DB but honours LA_DA
   assert.equal(
     liveTelemetryDbPath({ LA_TELEMETRY_DB: join("t", "db.sqlite") }, "linux"),
     join(homedir(), ".local", "share", "linear-agents", "telemetry", "telemetry.sqlite"),
+  );
+});
+
+console.log("\nfenix-paths: host token (FOC-783)");
+
+test("hostTokenPath: <dataHome>/run/host.token on both platforms, honouring LA_DATA_HOME", () => {
+  assert.equal(
+    hostTokenPath({ LOCALAPPDATA: join("x", "local") }, "win32"),
+    join("x", "local", "linear-agents", "run", "host.token"),
+  );
+  assert.equal(
+    hostTokenPath({ XDG_DATA_HOME: join("x", "xdg") }, "linux"),
+    join("x", "xdg", "linear-agents", "run", "host.token"),
+  );
+  assert.equal(
+    hostTokenPath({ LA_DATA_HOME: join("d", "1") }, "linux"),
+    join("d", "1", "run", "host.token"),
   );
 });
 
