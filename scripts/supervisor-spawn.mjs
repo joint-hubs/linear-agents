@@ -36,6 +36,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { buildBranchName } from "./dev-branch.mjs";
+import { squadConfigDir } from "./fenix-paths.mjs";
 import { ensureCodegraphReady } from "./codegraph-runtime.mjs";
 import { approveGuardedCodegraphForProject } from "./mcp-enable.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
@@ -655,7 +656,7 @@ const knownQuirks = asArray(args["known-quirk"]);
 // a replacement: a deny-only merge can tighten what a child may do, and cannot
 // loosen it. That asymmetry is the point — there must be no flag that hands a
 // child the push it is not allowed to have.
-const squadSettings = readJsonOr(join(ROOT, "agents", squad, "settings.json"), {});
+const squadSettings = readJsonOr(join(squadConfigDir(squad), "settings.json"), {});
 const extraSettings = args.settings ? readJsonOr(args.settings, {}) : {};
 const childSettings = childSettingsPath(runId, childId);
 atomicWriteJSON(childSettings, buildChildSettings(squadSettings, extraSettings));
@@ -729,7 +730,7 @@ writeRegistry(runId, registry);
 let telemetryRunId = null;
 try {
   if (process.env.LA_SUPERVISOR_NO_TELEMETRY === "1") throw new Error("telemetry disabled");
-  const env = { ...process.env, LA_TASK_ID: taskId, CLAUDE_CONFIG_DIR: join(ROOT, "agents", squad) };
+  const env = { ...process.env, LA_TASK_ID: taskId, CLAUDE_CONFIG_DIR: squadConfigDir(squad) };
   telemetryRunId = execFileSync(
     process.execPath,
     [join(ROOT, "scripts", "run-manifest.mjs"), "gen-id", squad],
@@ -824,7 +825,7 @@ const childEnv = {
   // see the rationale at PRINT_BG_WAIT_CEILING_MS in supervisor-lib.mjs. Built
   // through the helper so the value has exactly one source.
   ...printBgWaitCeilingEnv(),
-  CLAUDE_CONFIG_DIR: join(ROOT, "agents", squad),
+  CLAUDE_CONFIG_DIR: squadConfigDir(squad),
   LA_SUPERVISOR: "1",
   LA_SUPERVISOR_RUN: runId,
   LA_SUPERVISOR_CHILD: childId,

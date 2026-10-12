@@ -27,7 +27,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { rewardsHome as rewardsHomeFromPaths } from "./fenix-paths.mjs";
 
 export const REWARDS_SCHEMA_VERSION = 2;
 
@@ -64,10 +64,7 @@ const KIND_CHECK = REWARDS_RECORD_KINDS.join("','");
 export const UNKNOWN = "unknown";
 
 export function rewardsHome() {
-  return (
-    process.env.LA_REWARDS_HOME ||
-    join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "linear-agents", "rewards")
-  );
+  return rewardsHomeFromPaths();
 }
 
 export function rewardsDbPath() {

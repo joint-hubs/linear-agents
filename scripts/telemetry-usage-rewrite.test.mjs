@@ -519,7 +519,10 @@ async function run() {
       // nothing real is ever touched.
       delete env.LA_TELEMETRY_HOME;
       delete env.LA_TELEMETRY_DB;
+      // The data home is LOCALAPPDATA on win32 and XDG_DATA_HOME on POSIX (scripts/fenix-paths.mjs); point both at the throwaway dir.
       env.LOCALAPPDATA = localAppData;
+      env.XDG_DATA_HOME = localAppData;
+      delete env.LA_DATA_HOME;
 
       const result = spawnSync(process.execPath, [script, "--apply"], { env, encoding: "utf8" });
       assertEqual(result.status, 2, `exit code 2 (stderr: ${result.stderr})`);
@@ -536,7 +539,8 @@ async function run() {
     try {
       const script = fileURLToPath(new URL("./telemetry-usage-rewrite.mjs", import.meta.url));
       const liveDefault = join(localAppData, "linear-agents", "telemetry", "telemetry.sqlite");
-      const env = { ...process.env, LOCALAPPDATA: localAppData };
+      const env = { ...process.env, LOCALAPPDATA: localAppData, XDG_DATA_HOME: localAppData };
+      delete env.LA_DATA_HOME;
       delete env.LA_TELEMETRY_HOME;
       delete env.LA_TELEMETRY_DB;
 
@@ -574,7 +578,8 @@ async function run() {
     try {
       const script = fileURLToPath(new URL("./telemetry-usage-rewrite.mjs", import.meta.url));
       const dbPath = join(elsewhere, "copy.sqlite");
-      const env = { ...process.env, LOCALAPPDATA: localAppData, LA_TELEMETRY_DB: dbPath };
+      const env = { ...process.env, LOCALAPPDATA: localAppData, XDG_DATA_HOME: localAppData, LA_TELEMETRY_DB: dbPath };
+      delete env.LA_DATA_HOME;
       delete env.LA_TELEMETRY_HOME;
 
       // A path that is NOT the default live location must proceed: an

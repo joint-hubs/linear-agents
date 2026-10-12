@@ -45,6 +45,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { squadConfigDir } from "./fenix-paths.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -69,7 +70,7 @@ if (!args.spend) {
 }
 
 const SQUAD = args.squad === true || !args.squad ? "dev" : args.squad;
-const squadDir = join(ROOT, "agents", SQUAD);
+const squadDir = squadConfigDir(SQUAD);
 if (!existsSync(squadDir)) {
   console.error(`no such squad config dir: ${squadDir}`);
   process.exit(2);

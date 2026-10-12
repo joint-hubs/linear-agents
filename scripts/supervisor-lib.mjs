@@ -16,7 +16,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { join, dirname, resolve, basename } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { atomicWriteJSON } from "./utils.mjs";
@@ -25,6 +25,7 @@ import { atomicWriteJSON } from "./utils.mjs";
 // module evaluation) — accepted over duplicating the list, because two copies
 // of "what no hold may ever cover" would drift exactly when it mattered.
 import { NEVER_COVERS } from "./autonomy-grants.mjs";
+import { worktreeRoot as worktreeRootFromPaths } from "./fenix-paths.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -1538,7 +1539,7 @@ export function resolveGitRoot(cwd) {
 // `git worktree list` on the branch, which is per-repo and does not care where
 // the directory sits. Only new ones land in the scoped path.
 export function worktreeRoot(gitRoot) {
-  return join(gitRoot, "..", "la-wt", basename(gitRoot));
+  return worktreeRootFromPaths(gitRoot);
 }
 
 // Always resolved. `git worktree list` prints forward slashes on win32 while

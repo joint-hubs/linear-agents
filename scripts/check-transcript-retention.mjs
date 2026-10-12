@@ -9,9 +9,10 @@
 
 import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
+import { telemetryDbPath as telemetryDbPathFromPaths } from "./fenix-paths.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -38,8 +39,8 @@ EXIT CODES:
   3  DB_ERROR  database not found or cannot be opened
 
 DB PATH:
-  %LOCALAPPDATA%/linear-agents/telemetry/telemetry.sqlite
-  Override via LA_TELEMETRY_DB env var.
+  <data home>/telemetry/telemetry.sqlite (see scripts/fenix-paths.mjs)
+  Override via LA_TELEMETRY_DB, LA_TELEMETRY_HOME or LA_DATA_HOME.
 `.trim();
   console.log(text);
 }
@@ -47,9 +48,7 @@ DB PATH:
 // ── DB path ─────────────────────────────────────────────────────────────────
 
 function telemetryDbPath() {
-  if (process.env.LA_TELEMETRY_DB) return process.env.LA_TELEMETRY_DB;
-  const localAppData = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
-  return join(localAppData, "linear-agents", "telemetry", "telemetry.sqlite");
+  return telemetryDbPathFromPaths();
 }
 
 // ── SQLite helpers ───────────────────────────────────────────────────────────

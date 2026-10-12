@@ -85,6 +85,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "fenix-paths.test.mjs",
+      "reason": "isolation audit FOC-770: pure path resolution with explicit env objects and a read-only scan of scripts/*.mjs; no fs writes, no ports, no socket binds, no telemetry DB"
+    },
+    {
       "file": "flow-turns.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },

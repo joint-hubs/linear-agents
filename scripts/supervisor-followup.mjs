@@ -18,6 +18,8 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { squadConfigDir } from "./fenix-paths.mjs";
+
 import {
   INIT_TIMEOUT_MS,
   ROOT,
@@ -318,7 +320,7 @@ const watcher = spawn(process.execPath, watcherArgs, {
     // drifted before (FOC-171, RUN_ID) — so the value comes from the shared
     // helper, and supervisor-followup.test.mjs proves this carrier sets it.
     ...printBgWaitCeilingEnv(),
-    CLAUDE_CONFIG_DIR: join(ROOT, "agents", entry.squad),
+    CLAUDE_CONFIG_DIR: squadConfigDir(entry.squad),
     LA_SUPERVISOR: "1",
     LA_SUPERVISOR_RUN: runId,
     LA_SUPERVISOR_CHILD: childId,

@@ -30,13 +30,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, renameSync, rmSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
-
-function telemetryHome() {
-  if (process.env.LA_TELEMETRY_HOME) return process.env.LA_TELEMETRY_HOME;
-  const local = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
-  return join(local, "linear-agents", "telemetry");
-}
+import { telemetryHome } from "./fenix-paths.mjs";
 
 const HOME = telemetryHome();
 const DB_PATH = process.env.LA_TELEMETRY_DB || join(HOME, "telemetry.sqlite");

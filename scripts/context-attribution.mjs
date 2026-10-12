@@ -44,8 +44,7 @@
 // sawtooth.
 
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { telemetryDbPath as telemetryDbPathFromPaths } from "./fenix-paths.mjs";
 
 const { DatabaseSync } = await import("node:sqlite");
 
@@ -64,9 +63,7 @@ const LIMIT = Number(args.limit ?? 25);
 // ── selecting sessions ───────────────────────────────────────────────────────
 
 function telemetryDbPath() {
-  if (process.env.LA_TELEMETRY_DB) return process.env.LA_TELEMETRY_DB;
-  const localAppData = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
-  return join(localAppData, "linear-agents", "telemetry", "telemetry.sqlite");
+  return telemetryDbPathFromPaths();
 }
 
 function pickSessions() {
