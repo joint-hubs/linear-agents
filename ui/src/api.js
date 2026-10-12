@@ -1,4 +1,5 @@
 import { buildAnalysisQuery } from './screens/analysis/query.js';
+import { buildTerminalSocketUrl } from './cockpitModel';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
@@ -14,9 +15,32 @@ async function apiFetch(path, signal) {
     const err = new Error((data && data.error) || 'API ' + r.status);
     err.status = r.status;
     if (data && data.code) err.code = data.code;
+    // The parsed body rides along (err.data) so callers can read fields beyond
+    // `error`/`code` — e.g. the 409 notification from /api/supervisor/message.
+    if (data) err.data = data;
     throw err;
   }
   return r.json();
+}
+
+// Shared POST helper for the Cockpit endpoints (FOC-783): parses the body even
+// on failure so the thrown error carries .status and .data — the UI needs the
+// 409 notification and the 400/503 reason verbatim.
+async function postJson(path, payload, signal) {
+  const r = await fetch(API_BASE + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload ?? {}),
+    signal,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.status = r.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
 }
 
 export async function getRuns() {
@@ -393,4 +417,64 @@ export async function postAnalysisCacheRebuild() {
     throw err;
   }
   return data;
+}
+
+// ===== Cockpit (FOC-783) =====
+// One snapshot of the Supervisor session, the needs-you inbox and the live
+// children. Poll every 5 s from the Cockpit, every 15 s from the nav badge.
+// Errors are { error, ... } with an HTTP status — postJson keeps .status and
+// the parsed body (err.data) so the UI can react to 409/400/503 specifically.
+
+export async function getCockpit(signal) {
+  return apiFetch('/api/cockpit', signal);
+}
+
+// Transcript read since a byte offset — { sessionId, state, offset, entries,
+// reset, truncated }. Entries: { uuid, ts, role: user|assistant|tool,
+// text?, tool?: { name, summary } }.
+export async function getConversation({ after, limit } = {}, signal) {
+  const q = new URLSearchParams();
+  if (after != null) q.set('after', String(after));
+  if (limit != null) q.set('limit', String(limit));
+  const qs = q.toString();
+  return apiFetch('/api/supervisor/conversation' + (qs ? '?' + qs : ''), signal);
+}
+
+// 200 { sent, confirmed, queued } | 400 { error } | 409 { error, notification }
+// | 503 { error }. err.data carries the body on failure.
+export function postSupervisorMessage(text) {
+  return postJson('/api/supervisor/message', { text });
+}
+
+// Start (or restart fresh) the Supervisor session inside the container.
+export function postSupervisorSession() {
+  return postJson('/api/supervisor/session', { fresh: true, confirm: 'new-session' });
+}
+
+// Same shape as message — drains the wake backlog with the standard prompt.
+export function postSupervisorWake() {
+  return postJson('/api/supervisor/wake', {});
+}
+
+// Record a gate answer (verbatim text, answered once) and tell the Supervisor.
+export function postGateAnswer(body) {
+  return postJson('/api/gates/answer', body);
+}
+
+// Record a hold answer (option label or free text) and tell the Supervisor.
+export function postHoldAnswer(body) {
+  return postJson('/api/holds/answer', body);
+}
+
+// Re-send the "[dashboard] … answered" notice for an answered-but-undelivered
+// gate/hold.
+export function postGateNotify(body) {
+  return postJson('/api/gates/notify', body);
+}
+
+// Terminal WebSocket URL on the same origin (wss behind https). API_BASE as an
+// absolute URL switches the origin and keeps its path prefix. The pure builder
+// lives in cockpitModel.js so the node tests can pin it.
+export function terminalSocketUrl(cols, rows) {
+  return buildTerminalSocketUrl(API_BASE, window.location, cols, rows);
 }

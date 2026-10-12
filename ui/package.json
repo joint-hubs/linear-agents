@@ -6,10 +6,12 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node src/_test_utils.mjs && node src/_tests_manager.mjs && node src/_tests_palette.mjs && node src/_tests_rewards.mjs && node src/_tests_analysis.mjs",
+    "test": "node src/_test_utils.mjs && node src/_tests_manager.mjs && node src/_tests_palette.mjs && node src/_tests_rewards.mjs && node src/_tests_analysis.mjs && node src/_tests_cockpit.mjs",
     "test:manager": "node src/_tests_manager.mjs"
   },
   "dependencies": {
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/xterm": "5.5.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.0"

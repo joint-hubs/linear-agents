@@ -1,0 +1,323 @@
+/* Cockpit (FOC-783). Scoped under .cockpit — theme.css stays untouched.
+   Status tokens from dashboard-v2-spec §7. */
+
+.cockpit {
+  /* Status chips: running / waiting / ok / danger (spec §7). */
+  --ck-running-fg: #1e40af;
+  --ck-running-bg: #e8efff;
+  --ck-waiting-fg: #92400e;
+  --ck-waiting-bg: #fdf3e1;
+  --ck-ok-fg: #065f46;
+  --ck-ok-bg: #e6f6ee;
+  --ck-danger-fg: #991b1b;
+  --ck-danger-bg: #fdecec;
+  --ck-neutral-fg: #4b5563;
+  --ck-neutral-bg: #eef0f4;
+}
+
+/* --- header strip --------------------------------------------------------- */
+
+.ck-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  align-items: center;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+
+.ck-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* --- layout: supervisor ~60% left, inbox right; stacked on phones --------- */
+
+.ck-grid {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .ck-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --- status chips ---------------------------------------------------------- */
+
+.ck-chip {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 9px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.ck-tone-running { background: var(--ck-running-bg, #e8efff); color: var(--ck-running-fg, #1e40af); }
+.ck-tone-waiting { background: var(--ck-waiting-bg, #fdf3e1); color: var(--ck-waiting-fg, #92400e); }
+.ck-tone-ok { background: var(--ck-ok-bg, #e6f6ee); color: var(--ck-ok-fg, #065f46); }
+.ck-tone-danger { background: var(--ck-danger-bg, #fdecec); color: var(--ck-danger-fg, #991b1b); }
+.ck-tone-neutral { background: var(--ck-neutral-bg, #eef0f4); color: var(--ck-neutral-fg, #4b5563); }
+
+/* --- supervisor panel ------------------------------------------------------ */
+
+.ck-sup-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ck-tabs {
+  display: inline-flex;
+  gap: 2px;
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.ck-tab {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-2, #4b5563);
+  padding: 5px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ck-tab:hover { color: var(--text); }
+
+.ck-tab-active {
+  background: var(--accent-soft, #eef0fd);
+  color: var(--accent-strong, #312e81);
+  font-weight: 600;
+}
+
+.ck-quick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+/* --- chat ------------------------------------------------------------------ */
+
+.ck-chat {
+  display: flex;
+  flex-direction: column;
+  margin-top: 10px;
+}
+
+.ck-chat-scroll {
+  min-height: 240px;
+  max-height: 420px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+
+.ck-chat-line {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--surface-2, #f0f2f6);
+  font-size: 12.5px;
+}
+
+.ck-chat-line:last-child { border-bottom: none; }
+
+.ck-chat-who {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 8px;
+}
+
+.ck-chat-user .ck-chat-who { color: var(--accent-strong, #312e81); }
+
+.ck-chat-assistant .ck-chat-text {
+  display: inline;
+}
+
+/* Assistant text keeps its transcript line breaks but wraps long lines. */
+.ck-chat-pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ck-chat-tool {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ck-chat-pending { opacity: 0.75; }
+
+.ck-composer {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 8px;
+}
+
+/* --- terminal --------------------------------------------------------------- */
+
+.ck-terminal {
+  position: relative;
+  height: 420px;
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #101418;
+  overflow: hidden;
+}
+
+.ck-terminal-host {
+  position: absolute;
+  inset: 0;
+  padding: 6px 8px;
+}
+
+.ck-terminal-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 20, 24, 0.85);
+  color: #e5e7eb;
+  font-size: 12.5px;
+  text-align: center;
+  padding: 20px;
+}
+
+/* --- needs-you inbox --------------------------------------------------------- */
+
+.ck-inbox-list-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ck-inbox-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+
+.ck-inbox-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ck-inbox-summary {
+  margin-top: 6px;
+  font-size: 12.5px;
+}
+
+.ck-inbox-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.ck-inbox-facts { color: var(--muted); }
+
+.ck-inbox-actions {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.ck-inbox-actions .filter-search { margin: 0; }
+
+.ck-inbox-options {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.ck-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ck-option-meta {
+  font-size: 10.5px;
+  opacity: 0.75;
+  font-family: var(--mono);
+}
+
+/* --- live children ------------------------------------------------------------ */
+
+.ck-scroll { overflow-x: auto; }
+
+.ck-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.ck-table th {
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.ck-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--surface-2, #f0f2f6);
+  white-space: nowrap;
+}
+
+.ck-table tr:last-child td { border-bottom: none; }
+
+.ck-num { font-variant-numeric: tabular-nums; }
+
+.ck-mono { font-family: var(--mono); font-size: 11.5px; }
+
+.ck-mono-small {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.ck-squad {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.ck-checked { font-size: 10.5px; }
