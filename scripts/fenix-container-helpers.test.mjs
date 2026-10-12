@@ -73,6 +73,10 @@ await test("creates .claude.json when missing and sets onboarding + trust flags"
   ok(existsSync(file), "config file created");
   const prefs = jsonOf(file);
   eq(prefs.hasCompletedOnboarding, true, "hasCompletedOnboarding");
+  eq(prefs.hasSeenAutoDefaultNudge, true, "hasSeenAutoDefaultNudge");
+  eq(prefs.hasSeenAutoDefaultNotice, true, "hasSeenAutoDefaultNotice");
+  ok(!("permissions" in prefs), "no permissions key written");
+  ok(!("defaultMode" in prefs), "no defaultMode key written");
   eq(prefs.projects[trustPath].hasTrustDialogAccepted, true, "hasTrustDialogAccepted");
   eq(prefs.projects[trustPath].hasCompletedProjectOnboarding, true, "hasCompletedProjectOnboarding");
 });
@@ -85,6 +89,7 @@ await test("preserves unrelated keys and other projects, is idempotent on re-run
   writeFileSync(join(configDir, ".claude.json"), JSON.stringify({
     theme: "dark",
     numStartups: 7,
+    permissions: { defaultMode: "default", allow: ["Read"] },
     projects: { [other]: { allowedTools: ["bash"] } },
   }), "utf8");
   await withLogs(() => applyClaudePrefs({ configDir, trustPath }));
@@ -92,6 +97,9 @@ await test("preserves unrelated keys and other projects, is idempotent on re-run
   const prefs = jsonOf(join(configDir, ".claude.json"));
   eq(prefs.theme, "dark", "unrelated key preserved");
   eq(prefs.numStartups, 7, "unrelated key preserved");
+  eq(JSON.stringify(prefs.permissions), JSON.stringify({ defaultMode: "default", allow: ["Read"] }), "existing permissions/defaultMode untouched");
+  eq(prefs.hasSeenAutoDefaultNudge, true, "hasSeenAutoDefaultNudge set on existing config");
+  eq(prefs.hasSeenAutoDefaultNotice, true, "hasSeenAutoDefaultNotice set on existing config");
   eq(prefs.projects[other].allowedTools.join(","), "bash", "other project preserved");
   eq(Object.keys(prefs.projects).sort().join(","), [other, trustPath].sort().join(","), "exactly the two projects");
   eq(prefs.projects[trustPath].hasTrustDialogAccepted, true, "trust flag set");
