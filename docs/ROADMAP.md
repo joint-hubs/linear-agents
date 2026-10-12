@@ -28,20 +28,21 @@ in FOC-790, and the M7 tooling cuts the next release (1.1, FOC-724) with 1.0.0 a
 | M5 Slim DEV and Supervisor | FOC-470 | 2027-05-31 | agent working state FOC-727–730 in lane B before the tag |
 | M6 Optimization and learning | FOC-471 | 2027-10-31 | data first; no scheduled work |
 | M7 Release discipline and living docs | FOC-714 | 2026-12-15 | after the tag: FOC-715 → … → FOC-723 → FOC-724 (the 1.1 dossier) |
-| **M8 Fenix 1.0.0 — portable release** | FOC-768 | **2026-11-19** | lane O + lane B's 1.0 slice (FOC-762/779/780) → FOC-789 → FOC-790 (tag) |
+| **M8 Fenix 1.0.0 — portable release** | FOC-768 | **2026-11-19** | lane O + lane B's 1.0 slice (FOC-762/779/780/772/808) → FOC-789 → FOC-790 (tag) |
 
 ### Lane O — Fenix 1.0.0 build (orchestrator session with Mateusz)
 
 | Due | Task |
 |---|---|
 | 10-13 | FOC-807 Docker Supervisor run id (waker, guard, briefing) |
-| 10-14 | FOC-803 Linux hosts with uid ≠ 1000 |
-| 10-16 | FOC-784 Work board |
-| 10-19 → 10-21 | FOC-760 registry cost from transcripts → FOC-761 resumed turns in telemetry (+ FOC-759 arm-B baseline) → FOC-769 Supervisor focus ticket |
-| 10-23 | FOC-785 Costs & quality |
-| 10-26 → 10-30 | FOC-773 pluggable provider → FOC-778 key wizard → FOC-786 Settings → FOC-788 human push / PR |
-| 11-02 → 11-04 | FOC-771 Node entry points → FOC-772 optional integrations → FOC-808 VM hygiene |
-| 11-06 → 11-10 | FOC-802 child isolation → FOC-791 Team → FOC-787 Insights |
+| 10-14 → 10-15 | FOC-810 Cockpit without the terminal: questions and permission prompts in the dashboard, safe slash commands |
+| 10-16 | FOC-803 Linux hosts with uid ≠ 1000 |
+| 10-19 → 10-20 | FOC-784 Work board |
+| 10-21 → 10-23 | FOC-760 registry cost from transcripts → FOC-761 resumed turns in telemetry (+ FOC-759 arm-B baseline) → FOC-769 Supervisor focus ticket |
+| 10-26 → 10-27 | FOC-785 Costs & quality |
+| 10-28 → 11-03 | FOC-773 pluggable provider → FOC-778 key wizard → FOC-786 Settings → FOC-788 human push / PR |
+| 11-04 | FOC-771 Node entry points |
+| 11-05 → 11-10 | FOC-802 child isolation → FOC-791 Team → FOC-787 Insights |
 | 11-11 | FOC-809 sizing on a dev-squad run |
 | 11-12 → 11-13 | FOC-775 image on GHCR (release candidate) → FOC-777 `update` pulls the pinned image |
 | 11-16 → 11-17 | FOC-789 fresh-machine acceptance on the published image → FOC-781 docs |
@@ -51,22 +52,22 @@ in FOC-790, and the M7 tooling cuts the next release (1.1, FOC-724) with 1.0.0 a
 ### Lane A — FOC-477 measurement (Supervisor as frontman, Mateusz at the gates)
 
 FOC-801 (10-14; it killed arm-A attempt 5, the first counted run) → 10 arm-A runs, one at a time → FOC-759
-baseline (10-20, needs FOC-760) → FOC-477 report + go/no-go (10-30) → FOC-712 (11-06) → M2 done.
+baseline (10-22, needs FOC-760) → FOC-477 report + go/no-go (10-30) → FOC-712 (11-06) → M2 done.
 
 ### Lane B — Supervisor queue (one live child at a time)
 
 1. **Before the tag, 1.0 first:** FOC-512 (10-15) → FOC-511 (10-19) → FOC-607 (10-21) → FOC-762 (10-23) →
-   FOC-779 (10-27) → FOC-780 (10-29; blocks FOC-789). FOC-762/779/780 moved here from lane O: self-contained,
-   no dashboard work, and they shorten lane O by three days. If lane B is more than a week late on them, lane O
+   FOC-779 (10-27) → FOC-780 (10-29) → FOC-772 (11-02) → FOC-808 (11-04; blocks FOC-789). FOC-762/779/780/772/808
+   moved here from lane O: self-contained, no dashboard work; they make room for FOC-810 without moving the tag. If lane B is more than a week late on them, lane O
    takes them back.
-2. **Then M5 agent working state:** FOC-727 (11-02) → FOC-728 (11-04) → FOC-729 (11-06) → FOC-730 + FOC-621
-   rest (11-10).
+2. **Then M5 agent working state:** FOC-727 (11-06) → FOC-728 (11-10) → FOC-729 (11-12) → FOC-730 + FOC-621
+   rest (11-16).
 3. **After the tag, M7:** FOC-715 (11-23) → FOC-717 (11-25) → FOC-718 (11-27) → FOC-719 (12-01) →
    FOC-720 (12-03) → FOC-721 (12-07) → FOC-722 (12-09) → FOC-723 (12-11) → FOC-724 1.1 dossier (12-15).
    Then by the FOC-477 verdict: M4 (FOC-478 → 382 → 390 → 617 → 622 → 456 → 393 → 453) or M3
    (FOC-391 → 387 → 410 → 384 → 392); both chains are in Linear without dates.
 
-**Idle-lane fillers (no dates; 11-10 → 11-23 in lane B):** FOC-602, FOC-642, FOC-604, FOC-615, FOC-616,
+**Idle-lane fillers (no dates; 11-16 → 11-23 in lane B):** FOC-602, FOC-642, FOC-604, FOC-615, FOC-616,
 FOC-626, FOC-647, FOC-635, FOC-731.
 
 ### Changes on 2026-10-12
@@ -80,6 +81,9 @@ FOC-626, FOC-647, FOC-635, FOC-731.
 * Evening revision (Mateusz: M7 later, 1.0 first): FOC-790 no longer waits for FOC-724; FOC-724 is back to
   being the 1.1 dossier; lane B takes FOC-762/779/780 before M5 and M7; M8 2026-12-01 → **2026-11-19**,
   M7 2026-11-27 → 2026-12-15.
+* Cockpit feedback from the VM (Mateusz: clunky, chat ↔ terminal, questions not in Needs-you, Supervisor
+  never woke up): FOC-807 → Urgent with a visible "something waits" state; new FOC-810 right after it; FOC-772 and
+  FOC-808 moved to lane B so the tag stays on 11-19.
 * Fixed a dependency cycle: FOC-775 ← FOC-789 ← FOC-777 ← FOC-775. The image goes to GHCR first and the
   acceptance run uses the published image.
 * Dates assume one task per working day in lane O and two per task in lane B; lane B shares the Supervisor
