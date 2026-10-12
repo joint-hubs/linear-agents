@@ -223,6 +223,48 @@ your `agents/supervisor/settings.json` was edited locally and the image now
 ships a version with them — merge the Cockpit hooks from the
 `settings.json.fenix-new` twin parked next to it, then delete the twin.
 
+## Fenix on a VM (GCP)
+
+The same stack runs on a Linux VM. The dashboard stays on the VM's
+`127.0.0.1` and you reach it through an SSH tunnel — never publish port 4600:
+the dashboard has no login, so anyone who reaches it could read telemetry and
+transcripts. Through the tunnel the API sees a local peer, so chat, inbox
+answers and the terminal work as on your own machine. Checked on 2026-10-12
+with Debian 12 on `e2-standard-4` (4 vCPU / 16 GB) and a 100 GB disk.
+
+1. Create the VM (from your machine):
+
+   ```bash
+   gcloud compute instances create fenix-vm --zone=europe-central2-a --machine-type=e2-standard-4 --image-family=debian-12 --image-project=debian-cloud --boot-disk-size=100GB --boot-disk-type=pd-balanced
+   ```
+
+2. On the VM (`gcloud compute ssh fenix-vm --zone=europe-central2-a`): install
+   Docker Engine and the Compose plugin from Docker's apt repository
+   (docs.docker.com → Install Docker Engine on Debian), add yourself to the
+   `docker` group, log in again, then:
+
+   ```bash
+   git clone https://github.com/joint-hubs/linear-agents.git ~/fenix && cd ~/fenix && ./fenix up
+   ```
+
+   Check `id -u` first: until FOC-803 the host user must be uid 1000 (the
+   container user), or the container cannot read the keys the wizard writes.
+
+3. The tunnel, from your machine — keep it open while you use the dashboard,
+   then open `http://localhost:4600`:
+
+   ```bash
+   gcloud compute ssh fenix-vm --zone=europe-central2-a --ssh-flag="-N" --ssh-flag="-L 4600:localhost:4600"
+   ```
+
+   In PowerShell, pass SSH options with `--ssh-flag` as above: `gcloud` is a
+   PowerShell script there and swallows a bare `--`. On Windows the tunnel runs
+   in a PuTTY window — leave it open.
+
+The VM runs (and costs) until you stop it:
+`gcloud compute instances stop fenix-vm --zone=europe-central2-a`. Data stays on
+the disk; after `start` the stack comes back by itself.
+
 ## Uninstall
 
 ```bash

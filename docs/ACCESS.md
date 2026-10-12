@@ -126,6 +126,14 @@ Zakładka **Konfiguracja** (`localhost:7331/squad-config`) edytuje modele per sk
 - **`/data/workspaces`** (wolumen): repozytoria klonowane przez `fenix repo add`; worktree dzieci: `/data/workspaces/la-wt/<repo>/<branch>`.
 - **Zmienne środowiskowe w obrazie:** `LA_DATA_HOME=/data`, `LA_SQUAD_HOME=/data/agents`, `GITHUB_ROOT=/data/workspaces`, `LA_WORKTREE_HOME=/data/workspaces/la-wt`, `LA_TELEMETRY_HOME=/data/telemetry`, `LA_SUPERVISOR_STATE_HOME=/data/state/supervisor`; compose ustawia `LA_PROJECTS_FILE=/fenix-config/projects.json`.
 
+### Fenix na VM w GCP (`fenix-vm`, od 2026-10-12)
+
+- **Maszyna:** projekt GCP `dochubs`, VM `fenix-vm`, strefa `europe-central2-a` (Warszawa), `e2-standard-4` (4 vCPU / 16 GB), Debian 12, dysk 100 GB `pd-balanced`. Zewnętrzny IP efemeryczny (zmienia się po stop/start) — z zewnątrz otwarty tylko SSH (reguła `default-allow-ssh`).
+- **SSH:** `gcloud compute ssh fenix-vm --zone=europe-central2-a` — użytkownik `mateu` (uid **1000** — wymagane, dopóki nie ma FOC-803), klucz `~/.ssh/google_compute_engine` w metadanych projektu `dochubs` (OS Login wyłączony).
+- **Fenix:** `~/fenix` (klon publicznego `joint-hubs/linear-agents`), Docker CE + Compose z repozytorium apt Dockera. Klucze: `~/fenix/.fenix/secrets/` na VM (wpisane przez `./fenix up` / `./fenix keys`). Aktualizacja: `./fenix update`.
+- **Dashboard:** port 4600 tylko na `127.0.0.1` maszyny — **nie wystawiać**. Dostęp tunelem z laptopa (PowerShell; okno PuTTY = tunel, zostawić otwarte): `gcloud compute ssh fenix-vm --zone=europe-central2-a --ssh-flag="-N" --ssh-flag="-L 4600:localhost:4600"` → `http://localhost:4600`. W PowerShellu `--` przed flagami SSH nie działa (gcloud to skrypt `.ps1`) — tylko `--ssh-flag`.
+- **Koszt:** maszyna działa 24/7, dopóki jej nie zatrzymasz: `gcloud compute instances stop fenix-vm --zone=europe-central2-a` (dane na dysku zostają; po `start` stack wstaje sam — `restart: unless-stopped`).
+
 ---
 
 ## Prywatność i ekspozycja danych (JOI-71, pt 4)
