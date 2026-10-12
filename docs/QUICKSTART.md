@@ -22,7 +22,9 @@ Status (1.0.0 in progress): the stack, keys and diagnostics work end to end.
 Pointing the Supervisor at your own repositories (cloned into
 `/data/workspaces`) and resuming its session after a restart arrive with
 FOC-776; until then `fenix attach` opens the Supervisor in the image's own
-checkout.
+checkout. Also until FOC-776: Claude Code transcripts are written inside the
+container, not to the data volume, so `fenix down` and `fenix update` delete
+them — use `fenix stop` if you want to keep a session's transcripts.
 
 ## Before you start
 
