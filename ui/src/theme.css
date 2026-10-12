@@ -727,6 +727,42 @@ input[type='checkbox'] { accent-color: var(--accent); }
   color: var(--warn);
 }
 
+.banner-ok {
+  background: var(--ok-soft);
+  border-color: #b3e3c9;
+  color: var(--ok);
+}
+
+/* Records panel (FOC-795) — clickable record rows in RunDetail */
+.records-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 4px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.records-row:hover,
+.records-row.active {
+  background: var(--surface-2);
+}
+
+.records-row:last-child { border-bottom: none; }
+
+.records-path {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  color: var(--text);
+}
+
 .empty {
   color: var(--muted);
   text-align: center;

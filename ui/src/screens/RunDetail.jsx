@@ -13,6 +13,7 @@ import {
   isStale,
 } from '../utils';
 import RunTaskModal from '../components/RunTaskModal';
+import RecordsPanel from '../components/RecordsPanel';
 
 // Provider label: the `native` flag wins (anthropic-sub); otherwise show the
 // recorded provider (legacy rows default to 'openrouter'); '—' only when nothing
@@ -303,6 +304,9 @@ export default function RunDetail() {
               </tbody>
             </table>
           </div>
+
+          {/* Records (FOC-795) — only when the run is attached to a task */}
+          {run.taskId && <RecordsPanel taskId={run.taskId} />}
 
           {/* RunTaskModal */}
           {taskModalOpen && run && (
