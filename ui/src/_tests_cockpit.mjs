@@ -6,7 +6,8 @@
 // mergeConversation (append by uuid, reset, 1000-entry cap),
 // conversation paging (tail-mode first request, burst follow, per-tick cap),
 // inboxPrimaryAction (the per-item primary action), chatDisabledReason,
-// terminalDisabledReason and buildTerminalSocketUrl. Fixtures only — no
+// terminalDisabledReason, buildTerminalSocketUrl and cockpitPrefill (the
+// Start-in-Cockpit ?prompt= parsing, FOC-804). Fixtures only — no
 // network, no DOM.
 
 import assert from 'node:assert/strict';
@@ -23,6 +24,7 @@ import {
   chatDisabledReason,
   terminalDisabledReason,
   buildTerminalSocketUrl,
+  cockpitPrefill,
 } from './cockpitModel.js';
 
 // --- Minimal test harness (same shape as _test_utils.mjs) -------------------
@@ -348,6 +350,38 @@ await test('buildTerminalSocketUrl relative base is prefixed', () => {
     buildTerminalSocketUrl('/dashboard', LOC_HTTP, 120, 40),
     'ws://localhost:5173/dashboard/api/supervisor/terminal?cols=120&rows=40',
   );
+});
+
+// --- cockpitPrefill (FOC-804 start-in-Cockpit) --------------------------------
+
+await test('cockpitPrefill decodes the prompt param verbatim', () => {
+  eq(
+    cockpitPrefill('?prompt=Start%20ticket%20FOC-123%3A%20Fix%20the%20widget'),
+    'Start ticket FOC-123: Fix the widget',
+  );
+});
+
+await test('cockpitPrefill keeps a multi-word prompt intact (a + is a space)', () => {
+  eq(cockpitPrefill('?prompt=Start+ticket+FOC-1'), 'Start ticket FOC-1');
+});
+
+await test('cockpitPrefill no prompt param -> null', () => {
+  eq(cockpitPrefill(''), null);
+  eq(cockpitPrefill('?other=1'), null);
+});
+
+await test('cockpitPrefill empty or whitespace-only prompt -> null', () => {
+  eq(cockpitPrefill('?prompt='), null);
+  eq(cockpitPrefill('?prompt=%20%20'), null);
+});
+
+await test('cockpitPrefill ignores other params around the prompt', () => {
+  eq(cockpitPrefill('?a=1&prompt=hello&b=2'), 'hello');
+});
+
+await test('cockpitPrefill null/undefined search -> null', () => {
+  eq(cockpitPrefill(null), null);
+  eq(cockpitPrefill(undefined), null);
 });
 
 // --- Summary ----------------------------------------------------------------

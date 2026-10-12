@@ -1,10 +1,24 @@
 import { useState, useEffect, useRef } from 'react';
-import { Link } from 'react-router-dom';
-import { getLinearQueue, getRuns, postLaunch, getTerminals, focusTerminal, stopTerminal } from '../api';
+import { Link, useNavigate } from 'react-router-dom';
+import {
+  getLinearQueue,
+  getRuns,
+  postLaunch,
+  getTerminals,
+  focusTerminal,
+  stopTerminal,
+  getEnvironment,
+} from '../api';
 import { linearUrl, WORKSPACES, DEFAULT_WORKSPACE } from '../config';
 import { fmtTime, elapsed, taskLabel, fmtUSD, fmtCost, costValue, isStale } from '../utils';
 
 const POLL_MS = 10000;
+
+// The 501 launch-unsupported body ({ error, reason }) is shown verbatim; other
+// failures keep the thrown message.
+function launchErrorText(e) {
+  return e.data?.reason || e.message || String(e);
+}
 
 // Squads that have a launcher (bin/<squad>.bat) AND a HOW-TO §4 kickoff. Must
 // match SQUAD_ALLOWLIST in scripts/launch.mjs — a Launch click sends one of these
@@ -32,7 +46,10 @@ function TaskChip({ id }) {
 }
 
 // One NEXT UP row: identifier, title, state · labels, →SQUAD, Launch button.
-function NextUpRow({ task, onLaunch, taskCost }) {
+// cockpitStart (FOC-804) replaces Launch when the host cannot open a console
+// (container / non-Windows): the button hands the ticket to the Cockpit chat
+// composer instead — the human still presses Send there.
+function NextUpRow({ task, onLaunch, taskCost, cockpitStart }) {
   const squad = task.suggestedSquad;
   return (
     <div className="task-row">
@@ -51,8 +68,11 @@ function NextUpRow({ task, onLaunch, taskCost }) {
       </div>
       <div className="task-row-title">{task.title}</div>
       <div className="task-row-foot">
-        <button className="launch-btn" onClick={() => onLaunch(task)}>
-          ▶ Launch local
+        <button
+          className="launch-btn"
+          onClick={() => (cockpitStart ? cockpitStart(task) : onLaunch(task))}
+        >
+          {cockpitStart ? 'Start in Cockpit' : '▶ Launch local'}
         </button>
       </div>
     </div>
@@ -130,7 +150,7 @@ function LaunchModal({ task, onClose, onLaunched }) {
       await postLaunch({ taskId: task.identifier, squad, target: 'local', dryRun: false });
       onLaunched({ ok: true, squad, taskId: task.identifier });
     } catch (e) {
-      onLaunched({ ok: false, error: e.message });
+      onLaunched({ ok: false, error: launchErrorText(e) });
     }
   };
 
@@ -189,6 +209,28 @@ export default function Tasks() {
   const [modalTask, setModalTask] = useState(null);
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
+  const navigate = useNavigate();
+
+  // FOC-804: a container (or non-Windows host) cannot open the bin/<squad>.bat
+  // console — GET /api/environment decides between Launch local and Start in
+  // Cockpit. Old servers (404) are treated as launch-capable (getEnvironment).
+  const [launchSupported, setLaunchSupported] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    getEnvironment()
+      .then((env) => alive && setLaunchSupported(env.launchSupported !== false))
+      .catch(() => {}); // a down API must not break the queue view
+    return () => { alive = false; };
+  }, []);
+
+  // Open the Cockpit with the ticket pre-filled in the chat composer; the
+  // human presses Send there (the Supervisor never picks tickets on its own).
+  const startInCockpit = (task) => {
+    const text = task.title
+      ? `Start ticket ${task.identifier}: ${task.title}`
+      : `Start ticket ${task.identifier}`;
+    navigate('/?prompt=' + encodeURIComponent(text));
+  };
 
   // Terminale
   const [terminals, setTerminals] = useState([]);
@@ -286,7 +328,7 @@ export default function Tasks() {
       await postLaunch({ squad: t.squad, taskId: t.taskId, target: 'local', dryRun: false });
       setToast({ ok: true, squad: t.squad, taskId: t.taskId });
     } catch (e) {
-      setToast({ ok: false, error: e.message });
+      setToast({ ok: false, error: launchErrorText(e) });
     }
   };
 
@@ -554,7 +596,13 @@ export default function Tasks() {
         {queueError && <div className="empty">Linear unavailable: {queueError}</div>}
         {!queueError && nextUp.length === 0 && <div className="empty">No tasks ready to hand off.</div>}
         {nextUp.map((t) => (
-          <NextUpRow key={t.id} task={t} onLaunch={setModalTask} taskCost={taskCosts[t.identifier]} />
+          <NextUpRow
+            key={t.id}
+            task={t}
+            onLaunch={setModalTask}
+            taskCost={taskCosts[t.identifier]}
+            cockpitStart={launchSupported ? null : startInCockpit}
+          />
         ))}
       </div>
 

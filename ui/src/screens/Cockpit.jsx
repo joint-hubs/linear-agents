@@ -4,10 +4,12 @@
 // Supervisor panel and the needs-you inbox sit side by side on desktop, and
 // the live children table closes the page.
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import './cockpit.css';
 import { getCockpit } from '../api';
 import { usePoll } from '../hooks/usePoll';
+import { cockpitPrefill } from '../cockpitModel';
 import SupervisorPanel from '../components/cockpit/SupervisorPanel';
 import NeedsYouInbox from '../components/cockpit/NeedsYouInbox';
 import LiveChildren from '../components/cockpit/LiveChildren';
@@ -33,6 +35,23 @@ export default function Cockpit() {
   const { data, error, loading, refresh } = usePoll((signal) => getCockpit(signal), 5000, []);
   const [tab, setTab] = useState('chat');
   const [draft, setDraft] = useState('');
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // Start in Cockpit (FOC-804): Tasks lands here with /?prompt=Start ticket ….
+  // Once on mount the text goes into the same composer draft the quick prompts
+  // fill, the Chat tab opens, and the parameter leaves the URL — the message is
+  // NEVER sent automatically; the human still presses Send.
+  useEffect(() => {
+    const prefill = cockpitPrefill(location.search);
+    if (prefill) {
+      setDraft(prefill);
+      setTab('chat');
+      navigate('/', { replace: true });
+    }
+    // mount-only: the prefill is decided by the URL the screen mounted with
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const counts = data?.counts || {};
   const supervisor = data?.supervisor || null;

@@ -77,6 +77,8 @@ export async function getLinearQueue(workspace) {
 // 127.0.0.1 + Origin-checked (§5); a browser at localhost:5173 passes. dryRun
 // returns the kickoff prompt + wrapper .bat preview without spawning. A real
 // launch (dryRun:false) opens a new console window running bin/<squad>.bat.
+// Throws with .status and the parsed body (err.data) attached — the 501
+// launch-unsupported reason is shown verbatim in Tasks (FOC-804).
 export async function postLaunch(payload) {
   const r = await fetch(API_BASE + '/api/launch', {
     method: 'POST',
@@ -84,8 +86,25 @@ export async function postLaunch(payload) {
     body: JSON.stringify(payload),
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data?.error || ('API ' + r.status));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.status = r.status;
+    err.data = data;
+    throw err;
+  }
   return data;
+}
+
+// Host environment (FOC-804) — { inContainer, platform, launchSupported }
+// (launchSupported = Windows and not in a container). An older server without
+// the endpoint (404) is treated as launch-capable: v1 behavior.
+export async function getEnvironment() {
+  try {
+    return await apiFetch('/api/environment');
+  } catch (e) {
+    if (e.status === 404) return { launchSupported: true };
+    throw e;
+  }
 }
 
 // Flow screen — interactive Overview. getFlow() returns squad -> agent(step)
