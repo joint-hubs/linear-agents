@@ -55,6 +55,7 @@ import {
   runDir,
 } from "./supervisor-lib.mjs";
 import { autoLabel, pairDecisionEvents } from "./decision-log.mjs";
+import { integrationTreePath } from "./fenix-paths.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
 
 const REPEATABLE = new Set(["child", "decision-event", "decision-run"]);
@@ -198,7 +199,7 @@ function commonBase() {
 }
 
 const integrationBranch = `la-merge/${runId}`;
-const integrationTree = join(mainRepo, "..", "la-wt", integrationBranch.replace(/\//g, "-"));
+const integrationTree = integrationTreePath(mainRepo, integrationBranch.replace(/\//g, "-"));
 
 function makeIntegrationTree() {
   // A leftover from an earlier run would silently integrate onto the wrong

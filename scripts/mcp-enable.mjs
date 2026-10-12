@@ -70,6 +70,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { squadConfigDir } from "./fenix-paths.mjs";
 
 const ROOT = resolve(join(dirname(fileURLToPath(import.meta.url)), ".."));
 const SQUADS = ["plan", "dev", "review", "test", "cadence", "supervisor"];
@@ -241,7 +242,7 @@ export function approveGuardedCodegraphForProject({ squad, projectRoot, configDi
         "(external repos use the guarded CLI; a rewritten .mcp.json needs the boundary re-applied)",
     };
   }
-  const dir = configDir ?? join(ROOT, "agents", squad);
+  const dir = configDir ?? squadConfigDir(squad);
   const config = approveServersForProject({ configPath: join(dir, ".claude.json"), projectRoot, servers });
   if (!config.ok) return config; // nothing approved — the target's settings were never touched either
   const settings = enableServersInProjectSettings({ projectRoot, servers });
@@ -257,7 +258,7 @@ function askClaude(squad) {
   const res = spawnSync("claude", ["mcp", "list"], {
     cwd: ROOT,
     encoding: "utf8",
-    env: { ...process.env, CLAUDE_CONFIG_DIR: join(ROOT, "agents", squad) },
+    env: { ...process.env, CLAUDE_CONFIG_DIR: squadConfigDir(squad) },
     shell: process.platform === "win32",
     timeout: 90_000,
   });
@@ -346,7 +347,7 @@ function main() {
     // for the main checkout, rewritten unconditionally (see the header: Claude
     // Code clears enabledMcpjsonServers once connected, so "already done" is
     // not inferable from the file).
-    const configPath = join(ROOT, "agents", squad, ".claude.json");
+    const configPath = join(squadConfigDir(squad), ".claude.json");
     if (!existsSync(configPath)) {
       // The file appears the first time that squad's launcher runs. Not an error.
       console.log(`  ${squad.padEnd(11)} no .claude.json yet (run bin/${squad}.bat once, then re-run this)`);
