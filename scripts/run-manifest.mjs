@@ -4,6 +4,7 @@
 //   node scripts/run-manifest.mjs gen-id <squad>
 //   node scripts/run-manifest.mjs start <runId> <squad> [sourcePath]
 //   node scripts/run-manifest.mjs end <runId> [exitCode]
+//   node scripts/run-manifest.mjs reopen <runId> <turn>
 //   ...start also takes --headless: no console, no launcher (supervisor children)
 //
 // ESM, zero runtime deps (Node 18+).
@@ -221,6 +222,10 @@ async function cmdEnd(runId, exitCodeStr) {
 
   manifest.endedAt = new Date().toISOString();
   manifest.exitCode = exitCode;
+  // FOC-761: a resumed turn re-ends the same run id. The first end keeps the
+  // historic event identity (kind `manifest`, offset 1); every later end bumps
+  // endSeq so its `run.ended` event is distinct and survives the dedup.
+  manifest.endSeq = (manifest.endSeq || 0) + 1;
 
   // Discover squad session transcript
   try {
@@ -343,6 +348,53 @@ async function cmdEnd(runId, exitCodeStr) {
   }
 }
 
+function cmdReopen(runId, turnStr) {
+  if (!runId || turnStr === undefined) {
+    console.error("Usage: node scripts/run-manifest.mjs reopen <runId> <turn>");
+    process.exit(1);
+  }
+  const turn = Number.parseInt(turnStr, 10);
+  if (!Number.isInteger(turn) || turn < 0) {
+    console.error("Usage: node scripts/run-manifest.mjs reopen <runId> <turn>");
+    process.exit(1);
+  }
+
+  const filePath = join(runsDir(), `${runId}.json`);
+  if (!existsSync(filePath)) {
+    console.error(`[run-manifest] Warning: manifest not found: ${filePath}`);
+    process.exit(0);
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(filePath, "utf8"));
+  } catch {
+    console.error(`[run-manifest] Warning: could not parse manifest: ${filePath}`);
+    process.exit(0);
+  }
+
+  // FOC-761: a resumed child turn reuses the run id. Re-open the manifest so
+  // the watcher's next `end` produces a fresh end identity (endSeq) instead of
+  // a `run.ended` the telemetry dedup drops, and emit `run.resumed` so the
+  // projection keeps the run open while the resumed turn works.
+  manifest.endedAt = null;
+  manifest.exitCode = null;
+  // Reopen is only used for headless Supervisor children — turn 0's console
+  // pid is stale for the resumed turn, and a dead pid would make
+  // telemetry-server's reconcileDeadRuns close the run mid-turn. null puts it
+  // on the inactivity path instead.
+  manifest.consolePid = null;
+  manifest.resumedAt = new Date().toISOString();
+  manifest.turns = Math.max(manifest.turns || 1, turn + 1);
+
+  atomicWriteJSON(filePath, manifest);
+  try {
+    recordManifest(manifest, "resumed", { sourcePath: filePath, turn });
+  } catch (err) {
+    console.error(`[run-manifest] Warning: central telemetry resume write failed: ${err.message}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -367,6 +419,9 @@ const command = process.argv[2];
     case "end":
       await cmdEnd(process.argv[3], process.argv[4]);
       break;
+    case "reopen":
+      cmdReopen(process.argv[3], process.argv[4]);
+      break;
     case "tag":
       cmdTag(process.argv[3], process.argv[4]);
       break;
@@ -378,6 +433,7 @@ const command = process.argv[2];
       console.error("  node scripts/run-manifest.mjs gen-id <squad>");
       console.error("  node scripts/run-manifest.mjs start <runId> <squad> [sourcePath]");
       console.error("  node scripts/run-manifest.mjs end <runId> [exitCode]");
+      console.error("  node scripts/run-manifest.mjs reopen <runId> <turn>");
       console.error("  node scripts/run-manifest.mjs tag <runId> <taskId>");
       console.error("  node scripts/run-manifest.mjs set-task <runId> <taskId>");
       process.exit(1);

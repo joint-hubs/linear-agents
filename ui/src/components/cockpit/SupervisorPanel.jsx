@@ -10,7 +10,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { postSupervisorAsk, postSupervisorDialog, postSupervisorSession, postSupervisorWake } from '../../api';
-import { chatDisabledReason, terminalDisabledReason, answerResultText, wakeBanner } from '../../cockpitModel';
+import { chatDisabledReason, terminalDisabledReason, answerResultText, wakeBanner, focusChip } from '../../cockpitModel';
 import AskCard from './AskCard';
 import DialogCard from './DialogCard';
 import ChatView from './ChatView';
@@ -117,6 +117,8 @@ export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, o
 
   const sup = supervisor || {};
   const chip = STATE_CHIP[sup.state] || STATE_CHIP.unknown;
+  // FOC-769: the declared focus (or the triage fallback) as label + tooltip.
+  const focusInfo = focusChip(sup.focus);
   const disabledReason = chatDisabledReason(sup);
   const terminalReason = terminalDisabledReason(sup);
   const wakeInfo = wakeBanner(sup);
@@ -167,9 +169,9 @@ export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, o
       <div className="ck-sup-head">
         <div className="section-h" style={{ marginBottom: 0 }}>Supervisor</div>
         <span className={`ck-chip ck-tone-${chip.tone}`}>{chip.label}</span>
-        {sup.focus?.taskId && (
-          <span className="muted" style={{ fontSize: 12 }}>
-            focus <code className="ck-mono">{sup.focus.taskId}</code>
+        {focusInfo && (
+          <span className="muted" style={{ fontSize: 12 }} title={focusInfo.title}>
+            focus <code className="ck-mono">{focusInfo.label}</code>
           </span>
         )}
         {sup.model && <span className="chip ck-mono-small">{sup.model}</span>}

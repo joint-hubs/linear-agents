@@ -1038,7 +1038,8 @@ try {
     check("current-run record -> wakeOldestAt is that run's oldest un-acked ts",
       sup?.wakeOldestAt === curOldest, String(sup?.wakeOldestAt));
     check("current-run record -> model wins over SUPERVISOR_MODEL", sup?.model === "record-model", String(sup?.model));
-    check("current-run record -> focus unchanged", sup?.focus?.runId === "run-1", JSON.stringify(sup?.focus));
+    check("current-run record -> focus unchanged (heuristic, marked inferred)",
+      sup?.focus?.runId === "run-1" && sup?.focus?.declared === false, JSON.stringify(sup?.focus));
 
     // The Wake prompt targets the record's run, not the focus heuristic's.
     const wake = await call(P, "POST", "/api/supervisor/wake", { body: {} });
@@ -1048,6 +1049,51 @@ try {
       && wakeMsg.body.text.startsWith("[dashboard] Mateusz asked you to check waiting events: ")
       && wakeMsg.body.text.includes(`2 new wake event(s) in run ${curRunId}`),
       JSON.stringify(wakeMsg?.body));
+
+    // ── the declared focus (FOC-769) ─────────────────────────────────────
+    // The record's `focus` field (what supervisor-focus.mjs writes) wins over
+    // the triage heuristic when it names the record's own run; the heuristic
+    // comes back, marked inferred, when the focus is gone.
+    writeCurrentRun(
+      {
+        runId: curRunId, model: "record-model", startedAt: NOW, updatedAt: NOW, source: "pointer",
+        focus: { kind: "ticket", taskId: "FOC-777", at: NOW, source: "manual" },
+      },
+      { path: recordPath },
+    );
+    await new Promise((r) => setTimeout(r, 2100)); // the 2 s TTL cache
+    snap = await call(P, "GET", "/api/cockpit");
+    sup = snap.body?.supervisor;
+    check("declared focus wins over the heuristic",
+      sup?.focus?.taskId === "FOC-777" && sup?.focus?.kind === "ticket" && sup?.focus?.declared === true
+      && sup?.focus?.runId === curRunId && sup?.focus?.source === "manual" && sup?.focus?.at === NOW,
+      JSON.stringify(sup?.focus));
+
+    writeCurrentRun(
+      {
+        runId: curRunId, model: "record-model", startedAt: NOW, updatedAt: NOW, source: "pointer",
+        focus: { kind: "overhead", taskId: null, at: NOW, source: "spawn" },
+      },
+      { path: recordPath },
+    );
+    await new Promise((r) => setTimeout(r, 2100));
+    snap = await call(P, "GET", "/api/cockpit");
+    sup = snap.body?.supervisor;
+    check("declared overhead focus keeps kind overhead and a null taskId",
+      sup?.focus?.kind === "overhead" && sup?.focus?.taskId === null && sup?.focus?.declared === true
+      && sup?.focus?.source === "spawn",
+      JSON.stringify(sup?.focus));
+
+    writeCurrentRun(
+      { runId: curRunId, model: "record-model", startedAt: NOW, updatedAt: NOW, source: "pointer" },
+      { path: recordPath },
+    );
+    await new Promise((r) => setTimeout(r, 2100));
+    snap = await call(P, "GET", "/api/cockpit");
+    sup = snap.body?.supervisor;
+    check("record without a focus -> heuristic fallback, marked inferred",
+      sup?.focus?.taskId === "FIX-42" && sup?.focus?.runId === "run-1" && sup?.focus?.declared === false,
+      JSON.stringify(sup?.focus));
 
     child.kill();
   }

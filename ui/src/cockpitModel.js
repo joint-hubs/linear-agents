@@ -306,6 +306,24 @@ export function wakeBanner(sup) {
   return { count, since, sinceLabel, waker, wakerAlive, canWake, text, detail };
 }
 
+// ===== Supervisor focus chip (FOC-769) =====
+
+// focusChip(focus) -> { label, title } | null — the Supervisor panel's focus
+// chip. An overhead focus carries taskId null and renders as the word
+// "Overhead"; a focus with neither taskId nor the overhead kind renders
+// nothing. The declared vs inferred distinction rides the tooltip: the
+// Supervisor itself set a declared focus (spawn/followup/`focus set`), a
+// triage heuristic inferred the other kind.
+export function focusChip(focus) {
+  if (!focus) return null;
+  const overhead = focus.kind === 'overhead';
+  if (!overhead && !focus.taskId) return null;
+  return {
+    label: overhead ? 'Overhead' : focus.taskId,
+    title: focus.declared ? 'declared by the Supervisor' : 'inferred from triage',
+  };
+}
+
 // ===== Supervisor dialogs and asks (FOC-810) =====
 
 // dialogActions(dialog) -> [{ choice, label }] — the buttons DialogCard

@@ -484,6 +484,80 @@ i z wyniku konsoli.
 
 ---
 
+## 10. Wznowione tury i settling — FOC-761
+
+Run dziecka może przeżyć więcej niż jedną turę: `supervisor-followup` wznawia tę samą sesję
+pod **tym samym run id**. Do FOC-761 drugi koniec runu wpadał w dedup (ta sama tożsamość
+zdarzenia co pierwszy) i `runs.ended_at` zostawał na turze 1 — transkrypty wznowionych tur
+nigdy nie były czytane, a po 5 minutach run się settle'ował z niepełnymi danymi
+(zmierzone 0,25× ground truth dla dzieci multi-turn).
+
+Cykl życia po FOC-761:
+
+1. **Re-open przy wznowieniu** — watcher wywołuje `run-manifest reopen <runId> <turn>`,
+   co emituje `run.resumed` (kind `manifest-turn`, offset = numer tury). Projekcja ustawia
+   z powrotem `status='running'`, `ended_at=NULL` — ingest czyta dalej.
+2. **Tożsamość końca per tura** — pierwszy `run.ended` zachowuje dzisiejszą tożsamość
+   (kind `manifest`, offset 1 — stare zdarzenia replayują się identycznie); każdy dalszy
+   koniec niesie kind `manifest-turn-end`, offset = `endSeq`. `applyRunEnded` nigdy nie
+   cofa `ended_at` (guard działa na wierszu sprzed UPDATE, więc out-of-order replay nie
+   wygrywa z późniejszym końcem).
+3. **Settling.** Tick 15 s w dalszym ciąu pomija zsettlowane runy **bez statu** (AC3 —
+   koszt per-run w pętli 15 s to to, co kiedyś przypięło dashboard). Wzrost transkryptu
+   po settle łapie **wolny sweep** w serwerze telemetrii (`sweepSettledGrowth`: co 10 min,
+   runy zakończone w ostatnich 14 dniach; jeden przebieg przy booście **bez limitu wieku**
+   — to jednorazowe dosypanie runów zsettlowanych przed wdrożeniem). Sweep statuje tylko
+   zapisane ścieżki `transcript_sources`; plik większy niż sparsowany `file_size` wraca do
+   `parse_status='pending'` (ingest wznawia od zapamiętanego bajtowego offsetu — bez
+   pełnego re-parse) i podnosi problem jakości danych `transcript_grew_after_settle`
+   (raz na run).
+
+Znany limit (ADR-0008, run-scoped duplication): kilka runów roszczących sobie jeden
+transkrypt każdy dokeczy wzrostu. Kanoniczne widoki (`§4`) i tak zwijają te roszczenia —
+sweep zrobi nadporządkową robotę, nie zepsuje danych.
+
+---
+
+## 11. Koszt dziecka z transkryptu i fokus Supervisora — FOC-760 / FOC-769
+
+### Koszt dziecka (FOC-760)
+
+Rejestr sumował każde zdarzenie `result`, a `result.modelUsage` jest **kumulatywny dla
+sesji** (wake-upy tasków w tle emitują go ponownie; wznowiona tura niesie całą sesję) —
+zmierzono 5,05× ground truth ($781.85 vs $154.70, 366 dzieci). Prawdą jest teraz
+**transkrypt dziecka**: przy końcu tury koszt jest **ustawiany** (`costSource:
+"transcript"`, `costMessages`) z wyceny per komunikat asystenta — linie z jednym
+`message.id` scala się MAX-em per licznik (ta sama reguła co ingest, `§8`), zero-tokenowe
+komunikaty kosztują $0. Gdy transkryptu nie ma (nie powinno się zdarzyć tuż po turze):
+**ostatni** snapshot `result` (kumulatywny — czytany jako MAX serii, nigdy suma),
+`costSource: "result-max"`; `costUsdReported` to tylko dowód. Istniejące rejestry
+poprawia jednorazowo `scripts/registry-cost-recompute.mjs` (patrz `docs/ACCESS.md`) —
+dzieci bez transkryptu zostają z `costSource: "legacy-unverified"` (wartość zachowana,
+nigdy nie traktowana cicho jako sprawdzona). `budgetStatus` bez zmian — cap widzi już
+prawdziwe liczby.
+
+### Fokus Supervisora (FOC-769)
+
+Tury samego Supervisora trafiają do kosztu ticketa tylko wtedy, gdy Supervisór **powie**,
+na czym pracuje. `supervisor-focus.mjs set <TICKET|overhead>` zapisuje deklarację
+(`focus.jsonl` + pole `focus` w `current-run.json`) i emituje `supervisor.focus`; projekcja
+`run_focus(run_id, valid_from, valid_to, task_id, kind, source)` trzyma przedziały — nowa
+deklaracja zamyka otwarty. `spawn` i `followup` ustawiają fokus automatycznie na ticket
+dziecka (`source: "spawn" | "followup"`); wyraźny `set` wygrywa do następnego
+spawn/followup.
+
+Raport (`scripts/ticket-cost.mjs`, read-only; eksport `ticketCostReport`) kubełkuje koszt
+po `observed_at`: per ticket `{childrenUsd, supervisorUsd, totalUsd}` (dzieci trzymają
+własne linki run→task), plus `overheadUsd` (zadeklarowane „bez ticketa" — **liczy się jako
+atrybuowane**), `unattributedUsd` (komunikaty Supervisora bez pokrywającego przedziału
+— brak fokusu jest faktem, nie zgadywanką) i `untaggedChildrenUsd`. Udział atrybucji
+Supervisora = (ticket + overhead) / total, target ≥ 80 % (PRD §3). Wycena idzie po
+**własnym** `price_set_id` runu (`cost_facts` ma wiersz per snapshot cen — join bez tego
+predykatu liczyłby każdy komunikat raz per snapshot). Run_focus jest addytywny: store bez
+tej tabeli raportuje normalnie — każdy komunikat Supervisora ląduje w unattributed.
+
+---
+
 ## Ściąga na Q&A
 
 **„Skąd wiesz, ile to kosztowało?"** — Claude Code zapisuje każdą turę do transkryptu

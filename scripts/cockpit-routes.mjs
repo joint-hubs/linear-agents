@@ -94,6 +94,29 @@ function supRunIdOf(current, focus) {
   return current?.runId ?? focus?.runId ?? null;
 }
 
+/**
+ * The current-run record's DECLARED focus (FOC-769) — what supervisor-focus.mjs
+ * wrote (`{ kind, taskId, at, source }` on the live record) — as the snapshot
+ * shape `{ taskId, kind, runId, at, source, declared: true }`. Returned only
+ * when the record carries a focus AND names the Supervisor run it was declared
+ * for (`supRunIdOf` semantics unchanged: the record's runId leads). Anything
+ * else is null — the caller falls back to the triage heuristic. An overhead
+ * focus keeps taskId null; `kind` is what the UI reads it by.
+ */
+function declaredFocusOf(current, supRunId) {
+  const f = current?.focus;
+  if (!f || typeof f !== "object" || Array.isArray(f)) return null;
+  if (!current.runId || current.runId !== supRunId) return null;
+  return {
+    taskId: typeof f.taskId === "string" ? f.taskId : null,
+    kind: f.kind === "overhead" ? "overhead" : "ticket",
+    runId: current.runId,
+    at: typeof f.at === "string" ? f.at : null,
+    source: typeof f.source === "string" ? f.source : null,
+    declared: true,
+  };
+}
+
 /** Un-acked wake-queue rows — { count, oldestAt }, oldestAt the oldest un-acked row's ts (null when none). Read-only, never writes the ack. When `supRunId` is known ONLY that run is counted; otherwise the 14-day sum over every recent run. */
 function wakeBacklog(runIds, supRunId = null) {
   let count = 0;
@@ -309,9 +332,15 @@ async function buildCockpitSnapshot() {
   // FOC-807: the current-run record (<dataHome>/supervisor/current-run.json)
   // pins the run the live session belongs to; without it the focus-ticket
   // heuristic stands in, exactly as before.
-  const focus = focusTicket({ runIds });
+  // FOC-769: the DECLARED focus wins when the record carries one for the
+  // Supervisor run — the triage heuristic stays the fallback, marked
+  // `declared: false` so the UI can say which kind of fact it is showing.
+  const heuristicFocus = focusTicket({ runIds });
   const current = readCurrentRun();
-  const supRunId = supRunIdOf(current, focus);
+  const supRunId = supRunIdOf(current, heuristicFocus);
+  const focus =
+    declaredFocusOf(current, supRunId) ??
+    (heuristicFocus ? { ...heuristicFocus, declared: false } : null);
   // FOC-810: the unanswered AskUserQuestion from the transcript — only while
   // the pane actually shows an ask dialog for it.
   const pendingAsk = dialog && (dialog.kind === "ask" || dialog.kind === "ask-review") && supTranscript

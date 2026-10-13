@@ -33,6 +33,7 @@ import {
   costFromResult,
   ensureRunDir,
   runDir,
+  turnEndCostPatch,
   writeRegistry,
 } from "./supervisor-lib.mjs";
 import { calculateCost, priceThreshold, pricingSnapshot } from "./telemetry-store.mjs";
@@ -505,25 +506,6 @@ const INIT_MODEL = Object.keys(byName["success-with-tokens"].modelUsage)[0];
 const spentTokens = (e) =>
   e.usage.input_tokens + e.usage.output_tokens + e.usage.cache_read_input_tokens + e.usage.cache_creation_input_tokens;
 
-// Did this event spend anything ANYWHERE? Per-model entries are authoritative
-// when present — a real result can carry `usage` all-zeros while `modelUsage`
-// holds the tokens (FOC-165 (g), the `zero-usage-real-model-tokens` fixture: top
-// level sums to 0, the event carries real per-model tokens worth a snapshot-derived
-// fraction of a dollar — asserted below). Reading only the top-level
-// `usage` here is the same mistake `costFromResult` must not make.
-const anyTokens = (e) => {
-  const models = Object.entries(e.modelUsage ?? {});
-  const sources = models.length ? models.map(([, u]) => u) : [e.usage ?? {}];
-  return sources.some(
-    (u) =>
-      (u.inputTokens ?? u.input_tokens ?? 0) +
-        (u.outputTokens ?? u.output_tokens ?? 0) +
-        (u.cacheReadInputTokens ?? u.cache_read_input_tokens ?? 0) +
-        (u.cacheCreationInputTokens ?? u.cache_creation_input_tokens ?? 0) >
-      0,
-  );
-};
-
 test("a zero-token result prices to the known $0, not unknown", () => {
   for (const name of ["success-zero-tokens", "error-zero-tokens"]) {
     const out = costFromResult(byName[name], INIT_MODEL, priceOne);
@@ -559,21 +541,79 @@ test("tokens present and unpriceable stay null — unknown is not folded into $0
   assert.deepEqual(out.unpriced, ["acme/nobody-priced-this"]);
 });
 
-test("a run of such turns leaves the child total unchanged, not nulled", () => {
-  // The watcher's exact loop (supervisor-watch.mjs): addCost over each result.
-  let costUsd = 0;
-  const unpricedModels = [];
-  for (const event of FIXTURE.events) {
-    const cost = costFromResult(event, INIT_MODEL, priceOne);
-    costUsd = addCost(costUsd, cost.computed);
-    for (const m of cost.unpriced) if (!unpricedModels.includes(m)) unpricedModels.push(m);
-  }
-  const expected = FIXTURE.events
-    .filter(anyTokens)
-    .reduce((sum, e) => sum + costFromResult(e, INIT_MODEL, priceOne).computed, 0);
-  assert.ok(costUsd > 0, "the priced turns survive the zero-token ones");
-  assert.equal(costUsd, expected, "zero-token turns add nothing and null nothing");
-  assert.deepEqual(unpricedModels, []);
+// ── 7. the turn-end cost patch: SET, never add (FOC-760) ─────────────────────
+console.log("\nkoszt na koniec tury — ustawiany, nie dodawany");
+
+test("transcript wins and is SET — the entry's inflated total is replaced", () => {
+  const entry = { costUsd: 5.0, costSource: "result-max", unpricedModels: ["acme/old"], costMessages: 3 };
+  const patch = turnEndCostPatch({
+    entry,
+    transcriptCost: { costUsd: 1.2, messages: 42, unpricedModels: [] },
+    results: [{ computed: 4.9, reported: 0.2, unpriced: ["acme/old"] }],
+  });
+  assert.equal(patch.costUsd, 1.2, "whole-session truth replaces the entry's value, never adds to it");
+  assert.equal(patch.costSource, "transcript");
+  assert.equal(patch.costMessages, 42);
+  assert.deepEqual(patch.unpricedModels, [], "the transcript's own unpriced list is authoritative");
+  assert.equal(patch.costUsdReported, 0.2, "the stream's figure stays beside it as evidence");
+});
+
+test("a transcript carrying an unpriced message SETS unknown, not free", () => {
+  const patch = turnEndCostPatch({
+    entry: { costUsd: 5.0 },
+    transcriptCost: { costUsd: null, messages: 10, unpricedModels: ["acme/unknown"] },
+    results: [{ computed: 4.9, reported: 0.2, unpriced: [] }],
+  });
+  assert.equal(patch.costUsd, null, "an unpriced transcript message must not fall back to the results");
+  assert.equal(patch.costSource, "transcript");
+  assert.deepEqual(patch.unpricedModels, ["acme/unknown"]);
+});
+
+test("fallback: MAX over cumulative snapshots, never the sum (FOC-165 wake-up shapes)", () => {
+  // The exact shape the old addCost loop got wrong: every result here is a
+  // session-cumulative snapshot — a background-task wake-up re-emits the same
+  // cumulative modelUsage with zero new tokens. Summing ran the registry at
+  // ~5x ground truth; MAX reads the largest snapshot the turn produced.
+  const results = FIXTURE.events.map((e) => costFromResult(e, INIT_MODEL, priceOne));
+  const patch = turnEndCostPatch({ entry: { costUsd: 0 }, transcriptCost: null, results });
+  const sum = results.reduce((a, r) => a + (r.computed ?? 0), 0);
+  assert.equal(patch.costUsd, Math.max(...results.map((r) => r.computed)));
+  assert.ok(sum > patch.costUsd, `precondition: the fixture's sum (${sum}) must exceed the MAX (${patch.costUsd}) or this test is vacuous`);
+  assert.equal(patch.costSource, "result-max");
+  assert.deepEqual(patch.unpricedModels, []);
+});
+
+test("fallback: a zero-token wake-up after the real snapshot does not drag it to $0", () => {
+  const real = { computed: 2.5, reported: 2.5, unpriced: [] };
+  const wakeup = { computed: 0, reported: 0, unpriced: [] }; // the all-zeros result shape
+  const patch = turnEndCostPatch({ entry: { costUsd: 0 }, transcriptCost: null, results: [real, wakeup] });
+  assert.equal(patch.costUsd, 2.5);
+});
+
+test("fallback: one unknown snapshot keeps the whole turn unknown", () => {
+  const patch = turnEndCostPatch({
+    entry: { costUsd: 1, unpricedModels: ["acme/earlier"] },
+    transcriptCost: null,
+    results: [
+      { computed: 0.5, reported: null, unpriced: [] },
+      { computed: null, reported: null, unpriced: ["acme/x"] },
+    ],
+  });
+  assert.equal(patch.costUsd, null, "null is contagious — a partial total would look authoritative");
+  assert.equal(patch.costSource, "result-max");
+  assert.deepEqual(patch.unpricedModels, ["acme/earlier", "acme/x"], "the entry's unpriced list and this turn's union");
+});
+
+test("costUsdReported is the MAX of the reported figures, evidence only", () => {
+  const results = FIXTURE.events.map((e) => costFromResult(e, INIT_MODEL, priceOne));
+  const patch = turnEndCostPatch({ entry: { costUsdReported: 0.1 }, transcriptCost: null, results });
+  const reported = FIXTURE.events.map((e) => e.total_cost_usd).filter((v) => typeof v === "number");
+  assert.equal(patch.costUsdReported, Math.max(...reported));
+});
+
+test("no transcript and no results keeps what the entry has", () => {
+  const patch = turnEndCostPatch({ entry: { costUsd: 3.3, costUsdReported: 0.7 }, transcriptCost: null, results: [] });
+  assert.deepEqual(patch, {}, "an empty patch must not wipe the entry's existing fields");
 });
 
 // ── (g) turn 2: the two shapes the four above do not cover.

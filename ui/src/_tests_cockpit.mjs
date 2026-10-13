@@ -34,6 +34,7 @@ import {
   buildTerminalSocketUrl,
   cockpitPrefill,
   wakeBanner,
+  focusChip,
   dialogActions,
   dialogTextLines,
   askAnswers,
@@ -486,6 +487,40 @@ await test('wakeBanner waker not alive + cannot wake -> bare detail', () => {
     wakeBanner({ host: 'unreachable', state: 'idle', wakeBacklog: 1, waker: { state: 'ended' } }).detail,
     'Waker not running.',
   );
+});
+
+// --- focusChip (FOC-769 supervisor focus) ------------------------------------
+
+await test('focusChip(null) and no taskId/kind -> null (nothing rendered)', () => {
+  eq(focusChip(null), null);
+  eq(focusChip(undefined), null);
+  eq(focusChip({}), null);
+  eq(focusChip({ declared: false }), null);
+});
+
+await test('focusChip heuristic ticket -> taskId label, inferred tooltip', () => {
+  eq(focusChip({ taskId: 'FOC-123', runId: 'run-1', declared: false }), {
+    label: 'FOC-123',
+    title: 'inferred from triage',
+  });
+});
+
+await test('focusChip declared ticket -> declared tooltip', () => {
+  eq(focusChip({ taskId: 'FOC-9', kind: 'ticket', declared: true, source: 'spawn' }), {
+    label: 'FOC-9',
+    title: 'declared by the Supervisor',
+  });
+});
+
+await test('focusChip overhead -> the word Overhead despite the null taskId', () => {
+  eq(focusChip({ kind: 'overhead', taskId: null, declared: true, source: 'manual' }), {
+    label: 'Overhead',
+    title: 'declared by the Supervisor',
+  });
+  eq(focusChip({ kind: 'overhead', taskId: null, declared: false }), {
+    label: 'Overhead',
+    title: 'inferred from triage',
+  });
 });
 
 // --- dialogActions (FOC-810 supervisor dialogs) ------------------------------

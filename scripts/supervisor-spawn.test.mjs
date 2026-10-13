@@ -30,6 +30,7 @@ import {
   runDir,
 } from "./supervisor-lib.mjs";
 import { makeFakeCodegraphCli } from "./fixtures/codegraph-fake-cli.mjs";
+import { readFocus } from "./supervisor-focus.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -68,17 +69,24 @@ function fixtureRepo() {
 }
 
 let runCounter = 0;
-function fixtureRun({ triage = true } = {}) {
-  const runId = `test-${process.pid}-${Date.now()}-${runCounter++}`;
-  const dir = runDir(runId);
+function fixtureRun({ triage = true, runId } = {}) {
+  // `runId` override: the auto-focus tests need a run id that matches the
+  // RUN_ID_RE shape (supervisor-focus refuses others), which the counter ids
+  // below deliberately do not have.
+  const id = runId ?? `test-${process.pid}-${Date.now()}-${runCounter++}`;
+  const dir = runDir(id);
   mkdirSync(join(dir, "children"), { recursive: true });
   mkdirSync(join(dir, "gates"), { recursive: true });
   if (triage) {
     writeFileSync(join(dir, "triage.json"), JSON.stringify({ issue: "FOC-123", verdict: "dev" }));
   }
   cleanup.push(dir);
-  return runId;
+  return id;
 }
+
+// A run id that matches RUN_ID_RE (supervisor-current-run.mjs) — the shape the
+// focus declaration refuses to work without.
+const validRunId = (n) => `2026-10-13T10-00-00-000-supervisor-000${n}`;
 
 function runSpawn(runId, repo, extra = [], env = {}) {
   return spawnSync(
@@ -805,6 +813,59 @@ test("every kickoff embeds the turn-end contract without displacing the kickoff 
   }
   if (!payload.includes("FOREGROUND")) fail("the contract does not state the foreground rule");
   if (!payload.includes("KICKOFF BODY MARKER")) fail("the contract displaced the kickoff body");
+});
+
+// ── auto-focus (FOC-769) ─────────────────────────────────────────────────────
+console.log("\nauto-focus");
+
+// The focus declaration writes into the state home; these tests point
+// LA_SUPERVISOR_STATE_HOME at their own temp tree so nothing lands in the
+// checkout's .state. Restored in `finally` so the later tests stay on the
+// default home their fixtureRun dirs were built for.
+function withFocusHome(fn) {
+  const home = mkdtempSync(join(tmpdir(), "la-sup-focus-"));
+  cleanup.push(home);
+  const prev = process.env.LA_SUPERVISOR_STATE_HOME;
+  process.env.LA_SUPERVISOR_STATE_HOME = home;
+  try {
+    fn(home);
+  } finally {
+    if (prev === undefined) delete process.env.LA_SUPERVISOR_STATE_HOME;
+    else process.env.LA_SUPERVISOR_STATE_HOME = prev;
+  }
+}
+
+test("a successful spawn declares the child's ticket as the focus (source spawn)", () => {
+  withFocusHome((home) => {
+    const { repo } = fixtureRepo();
+    const runId = fixtureRun({ runId: validRunId(1) });
+    const out = parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_HANG_MS: "0" }));
+
+    if (!out.focus || out.focus.changed !== true || out.focus.taskId !== "FOC-123") {
+      fail(`spawn did not declare the focus: ${JSON.stringify(out.focus)}`);
+    }
+    if (out.focusError !== undefined) fail(`spawn reported a focus error: ${out.focusError}`);
+    const { current, history } = readFocus(runId, { stateHome: home });
+    if (!current || current.taskId !== "FOC-123" || current.kind !== "ticket" || current.source !== "spawn") {
+      fail(`focus.jsonl does not carry the spawn declaration: ${JSON.stringify(current)}`);
+    }
+    if (history.length !== 1) fail(`expected exactly 1 focus line, got ${history.length}`);
+  });
+});
+
+test("a spawn that cannot attribute focus still succeeds", () => {
+  // The counter run id is not a RUN_ID_RE run id — the declaration must skip
+  // it silently, never fail the spawn, and never half-report a focus.
+  withFocusHome((home) => {
+    const { repo } = fixtureRepo();
+    const runId = fixtureRun();
+    const out = parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_HANG_MS: "0" }));
+
+    if (out.ok !== true) fail(`spawn failed: ${out.error}`);
+    if (out.focus !== undefined) fail(`a focus was declared for an unattributable run id: ${JSON.stringify(out.focus)}`);
+    if (out.focusError !== undefined) fail(`the skip was reported as an error: ${out.focusError}`);
+    if (readFocus(runId, { stateHome: home }).history.length) fail("a focus line was written anyway");
+  });
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

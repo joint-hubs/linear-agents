@@ -19,7 +19,7 @@ import { dirname, join, extname } from 'node:path';
 import { loadEnv, graphql, chooseApiKey } from './linear-client.mjs';
 import { projectsConfigPath } from './fenix-paths.mjs';
 import * as telemetryStore from './telemetry-store.mjs';
-import { backfill, ingestKnownRuns } from './telemetry-ingest.mjs';
+import { backfill, ingestKnownRuns, sweepSettledGrowth } from './telemetry-ingest.mjs';
 // The state+labels -> next-node matcher. Shared with supervisor-triage.mjs so
 // the dashboard's suggestion and the Supervisor's triage proposal can never
 // disagree about what the same rules mean (FOC-123).
@@ -453,6 +453,29 @@ async function ingestTelemetry() {
   }
 }
 
+// FOC-761: a resumed turn appends to a transcript whose run already settled;
+// the 15 s ingest tick must keep skipping settled runs (AC3), so a slow sweep
+// re-pends the grown transcripts instead. Same one-tick-at-a-time guard as the
+// ingest loop — a sweep slower than its interval must never overlap itself.
+// Default cadence: every 10 minutes, runs ended in the last 14 days.
+const SWEEP_INTERVAL_MS = Number(process.env.LA_TELEMETRY_SWEEP_MS) || 10 * 60 * 1000;
+let sweepInFlight = false;
+
+async function sweepTelemetry(options = {}) {
+  if (sweepInFlight) return;
+  sweepInFlight = true;
+  try {
+    const result = await sweepSettledGrowth(options);
+    if (result.grown) {
+      console.log(`[telemetry] sweep checked=${result.checked} grown=${result.grown} runs=${result.runs.length}`);
+    }
+  } catch (error) {
+    console.error(`[telemetry] settled-growth sweep failed: ${error.message}`);
+  } finally {
+    sweepInFlight = false;
+  }
+}
+
 async function bootstrapTelemetry() {
   const db = telemetryStore.openTelemetryDb();
   let runCount = 0;
@@ -468,6 +491,14 @@ async function bootstrapTelemetry() {
     const result = await backfill();
     console.log(`[telemetry] backfill manifests=${result.manifests} usage=${result.usageEvents} force=${forceBackfill}`);
   }
+  // FOC-761 boot pass, after the boot backfill: one sweep with no age limit —
+  // the one-time re-ingest of runs settled before the fix shipped (their
+  // resumed-turn growth is caught on the first start with this code).
+  // Not awaited: on a large store the sweep stats every parsed row and would
+  // delay the first ingest tick behind it. It still runs behind the
+  // sweepInFlight guard (sweepTelemetry's own try/catch logs failures with the
+  // [telemetry] prefix), so an overlapping interval sweep is impossible.
+  sweepTelemetry({ maxAgeDays: null });
   ingestTelemetry();
 }
 
@@ -2601,6 +2632,8 @@ server.listen(PORT, HOST, () => {
   void bootstrapTelemetry().catch((error) => console.error(`[telemetry] bootstrap failed: ${error.message}`));
   const ingestTimer = isSmoke ? null : setInterval(ingestTelemetry, 15_000);
   ingestTimer?.unref();
+  const sweepTimer = isSmoke ? null : setInterval(() => sweepTelemetry({ maxAgeDays: 14 }), SWEEP_INTERVAL_MS);
+  sweepTimer?.unref();
 
   if (isSmoke) {
     console.log('Smoke mode — will self-check endpoints then shut down');

@@ -43,6 +43,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node
 import { join } from "node:path";
 
 import { atomicWriteJSON } from "./utils.mjs";
+import { readFocus } from "./supervisor-focus.mjs";
 import {
   TERMINAL_STATUSES,
   pollBaseMs,
@@ -88,6 +89,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // the other lib state above and re-exported here so every existing importer and
 // test of supervisor-status sees the same export as before.
 export { redact };
+
+// ── focus (FOC-769) ──────────────────────────────────────────────────────────
+// The one-line focus summary for the briefing and the snapshot. `at` renders as
+// HH:MM local (the same rendering the wake banner uses); a missing or
+// unreadable `at` is simply not shown. No focus at all names the command that
+// declares one — the line is an instruction, not an apology.
+export function focusLine(focus) {
+  if (!focus) {
+    return "Focus: none declared — run node $LA_ROOT/scripts/supervisor-focus.mjs set <ticket|overhead>";
+  }
+  const at = focus.at ? new Date(focus.at) : null;
+  const since =
+    at && !Number.isNaN(at.getTime())
+      ? ` since ${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`
+      : "";
+  const label = focus.kind === "overhead" ? "overhead" : focus.taskId;
+  return `Focus: ${label}${since}${focus.source ? ` (${focus.source})` : ""}`;
+}
 
 function snippetOf(event) {
   if (event.type === "assistant") {
@@ -160,6 +179,14 @@ function pendingGates(runId) {
   return out;
 }
 
+// FOC-760: named beside the run total, on stderr — stdout is the JSON the
+// Supervisor parses, and a note it cannot read is a note it cannot act on.
+function noteUnverifiedCost(snap) {
+  const ids = snap.totals?.unverifiedCostChildren ?? [];
+  if (!ids.length) return;
+  console.error(`cost includes ${ids.length} unverified legacy figure(s): ${ids.join(", ")}`);
+}
+
 function snapshot(runId, { childFilter, tail }) {
   const registry = readRegistry(runId);
   const now = Date.now();
@@ -190,11 +217,17 @@ function snapshot(runId, { childFilter, tail }) {
     };
   });
 
+  // FOC-769: the run's declared focus (supervisor-focus.mjs), or null when
+  // nothing has been declared — the snapshot carries both the object and the
+  // one-line summary the briefing prints.
+  const focus = readFocus(runId).current;
   return {
     ok: true,
     runId,
     children,
     pendingGates: pendingGates(runId),
+    focus,
+    focusLine: focusLine(focus),
     totals: {
       // Provenance: the watcher prices each `result` event from its TOKEN COUNTS
       // through config/models.json; this is the sum of those. `null` means at
@@ -206,6 +239,12 @@ function snapshot(runId, { childFilter, tail }) {
       unpricedModels: [...new Set(entries.flatMap((c) => c.unpricedModels || []))],
       children: entries.length,
       live: entries.filter((c) => !TERMINAL_STATUSES.includes(c.status)).length,
+      // FOC-760: children whose cost figure was carried over from the old
+      // result-event sum and never re-priced from transcripts. Named here, never
+      // excluded — the total above keeps summing every entry as it stands.
+      unverifiedCostChildren: entries
+        .filter((c) => c.costSource === "legacy-unverified")
+        .map((c) => c.childId),
     },
     budget: budgetStatus(runId, registry),
     // FOC-163 replaced the round counter with a progress signal. Two distinct
@@ -261,12 +300,17 @@ if (args.briefing) {
   const rows = readWakeQueue(runId);
   const unacked = rows.filter((r) => r.seq > ackedThrough);
   const entries = Object.values(registry.children);
+  const briefingFocus = readFocus(runId).current;
   console.log(
     JSON.stringify(
       {
         ok: true,
         runId,
         mode: "briefing",
+        // FOC-769: what the run's time is being charged to right now — the
+        // declared focus plus the one-line summary for the briefing text.
+        focus: briefingFocus,
+        focusLine: focusLine(briefingFocus),
         live: entries
           .filter((c) => !TERMINAL_STATUSES.includes(c.status))
           .map((c) => ({ childId: c.childId, squad: c.squad ?? null, status: c.status })),
@@ -379,7 +423,9 @@ if (args.ack !== undefined) {
 }
 
 if (!args.wait) {
-  console.log(JSON.stringify({ ...snapshot(runId, { childFilter, tail }), mode: "snapshot" }, null, 2));
+  const snap = { ...snapshot(runId, { childFilter, tail }), mode: "snapshot" };
+  noteUnverifiedCost(snap);
+  console.log(JSON.stringify(snap, null, 2));
   process.exit(0);
 }
 
@@ -464,6 +510,8 @@ try {
 }
 
 const final = snapshot(runId, { childFilter, tail });
+
+noteUnverifiedCost(final);
 
 console.log(
   JSON.stringify(

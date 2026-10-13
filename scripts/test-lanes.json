@@ -435,6 +435,38 @@
     {
       "file": "zz-suite-env-scrub.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "transcript-cost.test.mjs",
+      "reason": "isolation audit FOC-760: pure pricing over mkdtemp transcript fixtures with injected prices; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
+      "file": "supervisor-watch-cost.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
+    },
+    {
+      "file": "registry-cost-recompute.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
+    },
+    {
+      "file": "telemetry-resume.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
+    },
+    {
+      "file": "telemetry-sweep.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
+    },
+    {
+      "file": "supervisor-focus.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
+    },
+    {
+      "file": "ticket-cost.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
+    },
+    {
+      "file": "cost-reconcile.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
     }
   ],
   "serial": [

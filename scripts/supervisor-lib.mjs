@@ -853,6 +853,56 @@ export function costFromResult(event, fallbackModel, priceOne, thresholdOne = nu
   return { computed: unpriced.length ? null : computed, reported, unpriced };
 }
 
+/**
+ * The registry cost patch for one child at turn end (FOC-760).
+ *
+ * The old watcher ADDED every result event's cost to the entry, but
+ * `result.modelUsage` is CUMULATIVE for the session — background-task wake-ups
+ * re-emit it and a resumed turn carries the whole session — so summing ran the
+ * registry at ~5x ground truth ($781.85 vs $154.70, 366 children). Three
+ * sources, resolved in this order:
+ *
+ *   · `transcriptCost` (priceChildTranscripts output) — the child's own
+ *     transcripts, one row per assistant message: whole-session truth, so it is
+ *     SET, never added to what the entry had. `costUsd` null here still means
+ *     unknown (a transcript message on an unpriceable model), not free.
+ *   · otherwise `results` (the turn's costFromResult outputs, in order) — each
+ *     one is a session-cumulative SNAPSHOT, so the honest read is the MAX, never
+ *     the sum. Zero-token wake-up shapes price to $0 and sit below the real
+ *     snapshot, and FOC-198 measured non-monotone snapshots, so MAX is the
+ *     conservative read of the series. Any unknown snapshot keeps the turn
+ *     unknown — `null` is not folded into a number.
+ *   · otherwise nothing — the patch is empty and the entry keeps what it has.
+ *
+ * `costUsdReported` is evidence only in every case: the MAX of the non-null
+ * reported figures seen this turn (cumulative, so the last snapshot dominates),
+ * and simply absent — unchanged — when none was reported.
+ *
+ * @param {{ entry?: object, transcriptCost?: object|null, results?: Array<{computed: number|null, reported: number|null, unpriced: string[]}> }} args
+ * @returns {object} the patch to spread into updateChild
+ */
+export function turnEndCostPatch({ entry, transcriptCost, results }) {
+  const patch = {};
+  const seen = Array.isArray(results) ? results : [];
+  if (transcriptCost) {
+    patch.costUsd = transcriptCost.costUsd;
+    patch.costSource = "transcript";
+    patch.costMessages = transcriptCost.messages;
+    patch.unpricedModels = transcriptCost.unpricedModels ?? [];
+  } else if (seen.length) {
+    patch.costUsd = seen.some((r) => r.computed === null)
+      ? null
+      : Math.max(...seen.map((r) => r.computed));
+    patch.costSource = "result-max";
+    patch.unpricedModels = [
+      ...new Set([...(entry?.unpricedModels || []), ...seen.flatMap((r) => r.unpriced ?? [])]),
+    ];
+  }
+  const reported = seen.map((r) => r.reported).filter((v) => typeof v === "number");
+  if (reported.length) patch.costUsdReported = Math.max(...reported);
+  return patch;
+}
+
 // Add two costs where `null` means "unknown". Unknown + anything is unknown:
 // treating it as zero is exactly how an unpriced model becomes a free one.
 export function addCost(a, b) {
