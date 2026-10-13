@@ -36,9 +36,15 @@ export function usePoll(fetcher, intervalMs, deps = []) {
       if (controller.signal.aborted || err?.name === 'AbortError') return;
       setError(err);
     } finally {
-      if (abortRef.current === controller) abortRef.current = null;
-      inFlightRef.current = false;
-      setLoading(false);
+      // A deps re-arm aborts the old fetch and starts a new one before the old
+      // promise settles — only the controller that still owns the slot may
+      // release it, or the old fetch's finally would clear the new fetch's
+      // in-flight flag and loading state (allowing a third overlapping fetch).
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        inFlightRef.current = false;
+        setLoading(false);
+      }
     }
   }, []);
 

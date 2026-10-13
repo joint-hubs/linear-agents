@@ -77,6 +77,11 @@ import { validateRating } from './manager-ratings.mjs';
 // only — the guards, body caps and error shapes below are passed in as ctx.
 import { handleCockpitRoute, handleTerminalUpgrade } from './cockpit-routes.mjs';
 
+// Work board + Costs & quality routes (FOC-784/785 W5): transport-only
+// dispatch beside the Cockpit, sharing the Linear-queue cache through
+// linearQueue() below.
+import { handleWorkRoute } from './work-routes.mjs';
+
 // FT control plane (FOC-359): datasets, training-run lifecycle, log tail.
 // Pure logic in scripts/ft.mjs; the server only does HTTP guards + dispatch.
 import { listDatasets, listRuns, getRun, launchTrain, stopRun } from './ft.mjs';
@@ -624,6 +629,43 @@ async function fetchLinearQueue(workspace) {
   }
 }
 
+// The shared Linear-queue getter (FOC-785 W5): the /api/linear/queue endpoint
+// and the Work board routes (handleWorkRoute's ctx.linearQueue) read the SAME
+// 60 s cache through this one function, so the board's Ready column can never
+// disagree with the old endpoint about what Linear holds. Cache semantics are
+// the endpoint's original ones: fresh cache → `{ ...payload, cached:true }`,
+// a miss fetches, stores and returns `{ ...payload, cached:false }`.
+//
+// TEST-ONLY SEAM (FENIX_LINEAR_FAKE_FILE + NODE_ENV=test): when BOTH are set
+// the fetch is replaced by a JSON fixture file of the shape
+// `{ queue: { tasks: [...], error, fetchedAt } }`, so route tests never touch
+// the real Linear API. Guarded by NODE_ENV (the same rule as
+// LA_ANALYSIS_BUILD_CMD_TEST) so the env var alone can never redirect a
+// production fetch.
+async function linearQueue(workspace) {
+  if (process.env.NODE_ENV === 'test' && process.env.FENIX_LINEAR_FAKE_FILE) {
+    try {
+      const fixture = JSON.parse(readFileSyncNode(process.env.FENIX_LINEAR_FAKE_FILE, 'utf8'));
+      return {
+        workspace,
+        tasks: Array.isArray(fixture?.queue?.tasks) ? fixture.queue.tasks : [],
+        error: fixture?.queue?.error ?? null,
+        fetchedAt: fixture?.queue?.fetchedAt ?? new Date().toISOString(),
+        cached: false,
+      };
+    } catch (err) {
+      return { workspace, tasks: [], error: `linear fake fixture unreadable: ${err.message}`, fetchedAt: null, cached: false };
+    }
+  }
+  const nowMs = Date.now();
+  if (queueCache && queueCache.workspace === workspace && nowMs - queueCache.ts < QUEUE_TTL_MS) {
+    return { ...queueCache.payload, cached: true };
+  }
+  const payload = await fetchLinearQueue(workspace);
+  queueCache = { workspace, ts: nowMs, payload };
+  return { ...payload, cached: false };
+}
+
 // ---------------------------------------------------------------------------
 // Launch — POST /api/launch (L1b, control-plane-plan §3.1 + §5)
 // Spawns a NEW local terminal window running bin/<squad>.bat with LA_TASK_ID
@@ -870,6 +912,12 @@ const server = createServer(async (req, res) => {
     // /api/launch and the records routes. The ctx is the same guard + body +
     // send helper set the write routes here use.
     if (await handleCockpitRoute(req, res, url, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin })) return;
+
+    // --- Work board + Costs & quality routes (FOC-784/785 W5) ---
+    // Dispatched right beside the Cockpit: same guard + body + send helpers,
+    // plus linearQueue() so the board's Ready column shares the
+    // /api/linear/queue cache instead of fetching Linear on its own.
+    if (await handleWorkRoute(req, res, url, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin, linearQueue })) return;
 
     // --- POST /api/launch (L1b) ---
     // Spawns a local agent window. Bound to 127.0.0.1 + origin-checked (AC3),
@@ -2238,19 +2286,12 @@ const server = createServer(async (req, res) => {
         log(method, path, 400);
         return;
       }
-      const nowMs = Date.now();
-      if (
-        queueCache &&
-        queueCache.workspace === workspace &&
-        nowMs - queueCache.ts < QUEUE_TTL_MS
-      ) {
-        json(res, 200, { ...queueCache.payload, cached: true });
-        log(method, path, 200);
-        return;
-      }
-      const payload = await fetchLinearQueue(workspace);
-      queueCache = { workspace, ts: nowMs, payload };
-      json(res, 200, { ...payload, cached: false });
+      // Served through the shared linearQueue() getter (FOC-785 W5) — the
+      // same 60 s cache the Work board routes read. Payload already carries
+      // `cached` (true on a cache hit, false on a fresh fetch), so the
+      // response shape is unchanged.
+      const payload = await linearQueue(workspace);
+      json(res, 200, payload);
       log(method, path, 200);
       return;
     }

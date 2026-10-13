@@ -6,9 +6,9 @@ import Live from './screens/Live.jsx';
 import Timeline from './screens/Timeline.jsx';
 import Runs from './screens/Runs.jsx';
 import RunDetail from './screens/RunDetail.jsx';
-import Costs from './screens/Costs.jsx';
+import CostsQuality from './screens/CostsQuality.jsx';
 import Analysis from './screens/Analysis.jsx';
-import Tasks from './screens/Tasks.jsx';
+import Work from './screens/Work.jsx';
 import Flow from './screens/Flow.jsx';
 import SquadConfig from './screens/SquadConfig.jsx';
 import Prompts from './screens/Prompts.jsx';
@@ -89,27 +89,10 @@ function NeedsYouBadge() {
   );
 }
 
-// v1 Costs stays the Costs & quality area's only screen until FOC-785 rebuilds
-// it. The banner lives here (the route element) rather than inside Costs.jsx so
-// the v1 screen is untouched — and so the FOC-785 rebuild removes it with the
-// route, not by editing the screen.
-function CostsRoute() {
-  return (
-    <>
-      <div className="banner banner-warn" style={{ marginBottom: 16 }}>
-        Unreconciled — these costs come from the run registry and can be several
-        times higher than the transcript ground truth. The reconciled view comes
-        with Costs & quality (FOC-785).
-      </div>
-      <Costs />
-    </>
-  );
-}
-
 // The six-area navigation (FOC-804). Highlighting is driven by areaForPath(),
-// not by the link's own route match — e.g. /runs/:id must light up Work even
-// though the item links to /tasks. Live (/live) and Fine-tune (/ft) keep their
-// routes but no longer appear here.
+// not by the link's own route match — e.g. /runs/:id and /work/:ticket must
+// light up Work even though the item links to /work. Live (/live) and
+// Fine-tune (/ft) keep their routes but no longer appear here.
 function Sidebar({ pathname }) {
   const active = areaForPath(pathname);
   return (
@@ -161,15 +144,17 @@ function Shell() {
             <Route path="/timeline" element={<Timeline />} />
             <Route path="/runs" element={<Runs />} />
             <Route path="/runs/:id" element={<RunDetail />} />
-            <Route path="/costs" element={<CostsRoute />} />
+            <Route path="/work" element={<Work />} />
+            <Route path="/work/:ticket" element={<Work />} />
+            <Route path="/costs" element={<CostsQuality />} />
             <Route path="/analysis" element={<Analysis />} />
-            <Route path="/tasks" element={<Tasks />} />
             <Route path="/flow" element={<Flow />} />
             <Route path="/squad-config" element={<SquadConfig />} />
             <Route path="/prompts" element={<Prompts />} />
             <Route path="/ft" element={<Ft />} />
-            {/* Area shortcuts (FOC-804): land on the area's default route. */}
-            <Route path="/work" element={<Navigate to="/tasks" replace />} />
+            {/* Area shortcuts (FOC-804): land on the area's default route.
+                /work is a real route now (the board) — no shortcut needed. */}
+            <Route path="/tasks" element={<Navigate to="/work" replace />} />
             <Route path="/team" element={<Navigate to="/manager" replace />} />
             <Route path="/insights" element={<Navigate to="/analysis" replace />} />
             <Route path="/settings" element={<Navigate to="/squad-config" replace />} />

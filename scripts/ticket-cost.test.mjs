@@ -36,10 +36,10 @@ const close = (a, b) => Math.abs(a - b) < 1e-9;
 
 let usageSeq = 0;
 
-function usage(db, runId, at, inputTokens, { messageId = null, usageId = null } = {}) {
+function usage(db, runId, at, inputTokens, { messageId = null, usageId = null, model = "deepseek-v4-flash" } = {}) {
   usageSeq++;
   return applyEvent(db, makeEvent("usage.recorded", {
-    runId, agentKey: "_lead", model: "deepseek-v4-flash",
+    runId, agentKey: "_lead", model,
     observedAt: at, inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
     ...(messageId ? { messageId } : {}), ...(usageId ? { usageId } : {}),
   }, {
@@ -281,6 +281,107 @@ test("(f) CLI --json matches ticketCostReport and works read-only; a store witho
     assert.ok(close(report.unattributedUsd, costOf(70_000)), `library unattributedUsd=${report.unattributedUsd}`);
   } finally {
     readOnly.close();
+  }
+});
+
+test("(g) byDay: two days, every bucket placed by observed_at's UTC date; an undated row skips byDay only (FOC-785)", () => {
+  const db = openTelemetryDb(join(temp, "g.sqlite"));
+  try {
+    supervisorFixture(db, { at: "2026-10-13T08:00:00.000Z" });
+    focus(db, "sup-1", "2026-10-13T08:10:00.000Z", "ticket", "FOC-1", 0);
+    focus(db, "sup-1", "2026-10-14T08:00:00.000Z", "overhead", null, 1);
+    // child-3 has no task link → its spend lands in untaggedChildrenUsd at the
+    // ticket level, but in byDay it is spend on children like any other child.
+    startRun(db, "child-3", "dev", "2026-10-13T10:00:00.000Z");
+
+    usage(db, "child-1", "2026-10-13T08:12:00.000Z", 100_000); // tagged child, day 1
+    usage(db, "child-3", "2026-10-13T10:05:00.000Z", 10_000); // untagged child, day 1
+    usage(db, "sup-1", "2026-10-13T08:05:00.000Z", 20_000); // before ANY focus → unattributed, day 1
+    usage(db, "sup-1", "2026-10-13T08:15:00.000Z", 50_000); // → FOC-1, day 1
+    // The FOC-1 focus interval is still valid until 10-14T08:00, so this row
+    // is charged to FOC-1 — on day 2, like its observed_at says.
+    usage(db, "sup-1", "2026-10-14T07:55:00.000Z", 20_000); // → FOC-1, day 2
+    usage(db, "sup-1", "2026-10-14T08:05:00.000Z", 30_000); // overhead, day 2
+    usage(db, "child-2", "2026-10-14T09:00:00.000Z", 70_000); // tagged child, day 2
+    // No observed_at anywhere: counted in every total, in no byDay bucket.
+    const undated = makeEvent("usage.recorded", {
+      runId: "child-1", agentKey: "_lead", model: "deepseek-v4-flash",
+      inputTokens: 5_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+    }, {
+      runId: "child-1", observedAt: null, sourceKind: "transcript",
+      sourcePath: "C:/sessions/child-1-undated.jsonl", sourceOffset: ++usageSeq,
+    });
+    undated.observedAt = null;
+    undated.payload.observedAt = null;
+    applyEvent(db, undated);
+
+    const report = ticketCostReport(db);
+    assert.deepEqual(report.byDay.map((entry) => entry.day), ["2026-10-13", "2026-10-14"], "byDay sorted by day");
+    const [day1, day2] = report.byDay;
+    // Day 1: tagged + untagged children together, the unattributed row BEFORE
+    // any focus, the FOC-1-charged Supervisor row.
+    assert.ok(close(day1.childrenUsd, costOf(110_000)), `day1 children=${day1.childrenUsd}`);
+    assert.ok(close(day1.supervisorUsd, costOf(50_000)), `day1 supervisor=${day1.supervisorUsd}`);
+    assert.ok(close(day1.unattributedUsd, costOf(20_000)), `day1 unattributed=${day1.unattributedUsd}`);
+    assert.equal(day1.overheadUsd, 0);
+    // Day 2: the 07:55 row rides the still-open FOC-1 interval (charged to a
+    // ticket, on its own day), 08:05 is the overhead interval's first spend.
+    assert.ok(close(day2.childrenUsd, costOf(70_000)), `day2 children=${day2.childrenUsd}`);
+    assert.ok(close(day2.supervisorUsd, costOf(20_000)), `day2 supervisor=${day2.supervisorUsd}`);
+    assert.ok(close(day2.overheadUsd, costOf(30_000)), `day2 overhead=${day2.overheadUsd}`);
+    assert.equal(day2.unattributedUsd, 0);
+    // The undated row is only absent from byDay: FOC-1's children cost and the
+    // grand totals still include it.
+    const foc1 = report.tickets.find((t) => t.taskId === "FOC-1");
+    assert.ok(close(foc1.childrenUsd, costOf(105_000)), `FOC-1 childrenUsd=${foc1.childrenUsd}`);
+    assert.ok(close(foc1.supervisorUsd, costOf(70_000)), `FOC-1 supervisorUsd=${foc1.supervisorUsd}`);
+    assert.ok(
+      close(
+        report.overheadUsd + report.unattributedUsd + report.untaggedChildrenUsd
+        + report.tickets.reduce((sum, t) => sum + t.totalUsd, 0),
+        costOf(305_000),
+      ),
+      "every priced row lands in exactly one ticket-level bucket",
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("(h) byModel: usd desc with a stable tiebreak, NULL model reports as (none), unpriced never folded as free (FOC-785)", () => {
+  const db = openTelemetryDb(join(temp, "h.sqlite"));
+  try {
+    supervisorFixture(db, { at: "2026-10-13T08:00:00.000Z" });
+    usage(db, "child-1", "2026-10-13T08:12:00.000Z", 100_000); // priced
+    usage(db, "child-1", "2026-10-13T08:14:00.000Z", 30_000); // priced, same model
+    // A real-shaped model name the price set does not know: priced nowhere,
+    // so its usd stays 0 while its messages still count (and it drags
+    // unpricedMessages — a NULL cost is unpriced, never free).
+    usage(db, "child-2", "2026-10-13T09:00:00.000Z", 80_000, { messageId: "h-x1", model: "no-such-model" });
+    usage(db, "child-2", "2026-10-13T09:05:00.000Z", 60_000, { messageId: "h-x2", model: "no-such-model" });
+    // NULL model: priced nowhere by definition, reported as "(none)" and NOT
+    // counted unpriced (synthetic rows are never priceable — the classification
+    // costPanel applies).
+    const unnamed = makeEvent("usage.recorded", {
+      runId: "child-2", agentKey: "_lead", model: null,
+      inputTokens: 10_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+    }, {
+      runId: "child-2", observedAt: "2026-10-13T09:10:00.000Z", sourceKind: "transcript",
+      sourcePath: "C:/sessions/child-2-unnamed.jsonl", sourceOffset: ++usageSeq,
+    });
+    applyEvent(db, unnamed);
+
+    const report = ticketCostReport(db);
+    assert.deepEqual(report.byModel, [
+      { model: "deepseek-v4-flash", usd: costOf(130_000), messages: 2 },
+      { model: "(none)", usd: 0, messages: 1 },
+      { model: "no-such-model", usd: 0, messages: 2 },
+    ]);
+    // "(none)" is a placeholder model, so only the genuinely unpriced named
+    // model drags unpricedMessages.
+    assert.equal(report.unpricedMessages, 2);
+  } finally {
+    db.close();
   }
 });
 

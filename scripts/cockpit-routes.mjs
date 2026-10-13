@@ -151,8 +151,13 @@ function wakePromptText() {
 
 // ── the guard / forward / error-mapping helpers ──────────────────────────────
 
-/** The two write guards of every POST route, in the records routes' order and wording. */
-function writeGuards(req, res, path, ctx) {
+/**
+ * The two write guards of every POST route, in the records routes' order and
+ * wording. Exported for the sibling transport modules that forward write
+ * POSTs with the same guards (the Work board's Start, FOC-784 W5) — the
+ * behaviour is shared, not copied.
+ */
+export function writeGuards(req, res, path, ctx) {
   const { isLocalOrigin, isAllowedOrigin, json, log } = ctx;
   if (!isLocalOrigin(req.socket.remoteAddress)) {
     json(res, 403, { error: `forbidden: ${path} is 127.0.0.1 only` });
@@ -188,6 +193,17 @@ async function forwardToHost(res, ctx, routePath, hostPath, payload, timeoutMs) 
   json(res, result.status, result.body);
   log("POST", routePath, result.status);
   return result;
+}
+
+/**
+ * Thin exported wrapper around forwardToHost for the /message forward — the
+ * Work board's Start (FOC-784 W5) sends the hand-off text exactly like the
+ * Cockpit chat does. The caller names its own route path for the log line;
+ * the behaviour (503 docker-only natively, 503 host-unreachable, status/body
+ * pass-through otherwise) is forwardToHost's, unchanged.
+ */
+export async function forwardMessageToHost(res, ctx, routePath, text) {
+  return forwardToHost(res, ctx, routePath, "/message", { text }, SLOW_TIMEOUT_MS);
 }
 
 /** Map an answerGate/answerHold error code to its HTTP status (contract: the recordErrorStatus shape). */

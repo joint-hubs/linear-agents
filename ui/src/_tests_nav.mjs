@@ -43,7 +43,7 @@ await test('exactly the six areas in the agreed order', () => {
 await test('default routes follow the spec table', () => {
   eq(
     NAV_AREAS.map((a) => a.defaultRoute),
-    ['/', '/tasks', '/manager', '/costs', '/analysis', '/squad-config'],
+    ['/', '/work', '/manager', '/costs', '/analysis', '/squad-config'],
   );
 });
 
@@ -54,18 +54,17 @@ await test('labels follow the spec table', () => {
   );
 });
 
-await test('Work sub-pages: Tickets, Runs, Timeline', () => {
+await test('Work sub-pages: Board, Runs (v1 Tickets and Timeline left the nav, FOC-784)', () => {
   const work = NAV_AREAS.find((a) => a.id === 'work');
   eq(work.pages, [
-    { path: '/tasks', label: 'Tickets' },
+    { path: '/work', label: 'Board' },
     { path: '/runs', label: 'Runs' },
-    { path: '/timeline', label: 'Timeline' },
   ]);
 });
 
 await test('Team, Costs, Insights, Settings sub-pages match the spec', () => {
   eq(NAV_AREAS.find((a) => a.id === 'team').pages, [{ path: '/manager', label: 'Manager (v1)' }]);
-  eq(NAV_AREAS.find((a) => a.id === 'costs').pages, [{ path: '/costs', label: 'Costs (v1)' }]);
+  eq(NAV_AREAS.find((a) => a.id === 'costs').pages, [{ path: '/costs', label: 'Costs & quality' }]);
   eq(NAV_AREAS.find((a) => a.id === 'insights').pages, [
     { path: '/analysis', label: 'Analysis' },
     { path: '/flow', label: 'Flow' },
@@ -97,9 +96,12 @@ await test('areaForPath("/") exactly -> cockpit', () => {
 });
 
 await test('areaForPath work paths -> work', () => {
-  eq(areaForPath('/tasks'), 'work');
+  eq(areaForPath('/work'), 'work');
   eq(areaForPath('/runs'), 'work');
-  eq(areaForPath('/timeline'), 'work');
+});
+
+await test('areaForPath /work/:ticket -> work (ticket detail belongs to Work)', () => {
+  eq(areaForPath('/work/FOC-123'), 'work');
 });
 
 await test('areaForPath /runs/:id -> work (run detail belongs to Work)', () => {
@@ -137,17 +139,24 @@ await test('areaForPath unknown path -> null', () => {
 });
 
 await test('areaForPath area shortcuts are not themselves areas', () => {
-  // /work, /team, /insights, /settings redirect server-side (client routes);
-  // nothing should light up for them until the redirect lands.
-  eq(areaForPath('/work'), null);
+  // /team, /insights, /settings redirect to their area's default route;
+  // nothing should light up for them until the redirect lands. (/work is a
+  // real route now — the board — so it lights up Work.)
   eq(areaForPath('/team'), null);
   eq(areaForPath('/insights'), null);
   eq(areaForPath('/settings'), null);
 });
 
+await test('areaForPath: /tasks and /timeline stay out of the nav (FOC-784)', () => {
+  // /tasks redirects to /work; /timeline is routable but unlisted — both map
+  // to no area, like /live and /ft.
+  eq(areaForPath('/tasks'), null);
+  eq(areaForPath('/timeline'), null);
+});
+
 await test('areaForPath prefix does not leak between paths', () => {
-  // /tasksX is not /tasks; /analysis2 is not /analysis.
-  eq(areaForPath('/tasksX'), null);
+  // /workX is not /work; /analysis2 is not /analysis.
+  eq(areaForPath('/workX'), null);
   eq(areaForPath('/analysis2'), null);
 });
 

@@ -1,0 +1,265 @@
+/* Costs & quality (FOC-785). Scoped under .costs-q — theme.css stays untouched.
+   Colour tokens from dashboard-v2-spec §7. */
+
+.costs-q {
+  --cq-children: #0b67c2;   /* DEV blue (spec §7) */
+  --cq-supervisor: #b45309; /* REVIEW amber (spec §7) */
+}
+
+/* --- header ---------------------------------------------------------------- */
+
+.cq-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* --- period segmented control ---------------------------------------------- */
+
+.cq-periods {
+  display: inline-flex;
+  gap: 2px;
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.cq-period {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-2, #4b5563);
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.cq-period:hover { color: var(--text); }
+
+.cq-period-active {
+  background: var(--accent-soft, #eef0fd);
+  color: var(--accent-strong, #312e81);
+  font-weight: 600;
+}
+
+/* Spacing between the PanelBoundary sections (they render as .section). */
+.costs-q .section { margin-top: 16px; }
+
+/* Section headings (h3, under the h2 page title — spec §4.4). */
+.cq-section-h {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-2);
+}
+
+/* --- KPI tiles -------------------------------------------------------------- */
+
+.cq-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .cq-kpis { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 560px) {
+  .cq-kpis { grid-template-columns: 1fr; }
+}
+
+.cq-kpi {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--surface);
+}
+
+.cq-kpi-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.cq-kpi-value {
+  font-size: 22px;
+  font-weight: 600;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cq-kpi-sub {
+  color: var(--text-2, #4b5563);
+  font-size: 11.5px;
+  margin-top: 2px;
+}
+
+.cq-def { margin-top: 8px; font-size: 11.5px; }
+
+.cq-def summary {
+  cursor: pointer;
+  color: var(--text-2, #4b5563);
+  font-size: 11px;
+}
+
+.cq-def p {
+  margin: 6px 0 0;
+  color: var(--text-2, #4b5563);
+}
+
+/* --- spend-by-day stacked bars ---------------------------------------------- */
+
+.cq-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 130px;
+  padding: 4px 0 0;
+}
+
+.cq-bar-col {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.cq-bar-stack {
+  width: 100%;
+  max-width: 28px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: var(--surface-2, #f0f2f6);
+  border-radius: 4px 4px 0 0;
+  overflow: hidden;
+}
+
+.cq-bar-seg { width: 100%; }
+
+.cq-bar-children { background: var(--cq-children); }
+.cq-bar-supervisor { background: var(--cq-supervisor); }
+
+.cq-bar-day {
+  font-size: 9.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.cq-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--text-2, #4b5563);
+}
+
+.cq-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cq-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.cq-swatch-children { background: var(--cq-children); }
+.cq-swatch-supervisor { background: var(--cq-supervisor); }
+
+.cq-bars-summary {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--text-2, #4b5563);
+}
+
+/* --- tables ------------------------------------------------------------------ */
+
+.cq-tablewrap { overflow-x: auto; }
+
+.cq-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.cq-table th {
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.cq-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--surface-2, #f0f2f6);
+}
+
+.cq-table tr:last-child td { border-bottom: none; }
+
+.cq-num { font-variant-numeric: tabular-nums; }
+
+.cq-mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.cq-why {
+  color: var(--text-2, #4b5563);
+  font-size: 11.5px;
+  white-space: normal;
+  min-width: 180px;
+}
+
+/* --- quality signals ----------------------------------------------------------- */
+
+.cq-signals {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+@media (max-width: 700px) {
+  .cq-signals { grid-template-columns: 1fr; }
+}
+
+.cq-signal {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--surface);
+}
+
+.cq-signal-def {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--text-2, #4b5563);
+}
+
+.cq-evidence {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 11.5px;
+}
