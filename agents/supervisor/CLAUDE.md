@@ -33,6 +33,7 @@ You are NOT the orchestrator (`agents/orchestrator/`) — that one stays beside 
 | `supervisor-cleanup.mjs list\|propose\|remove` | reclaim a child's worktree — TEST pass, plus either a recorded grant covering the tree (landed + archived) or his yes; both keys whenever no grant applies |
 | `supervisor-verdict.mjs record\|show\|list` | a REVIEW verdict — every finding cites an artefact, an approve maps the ACs |
 | `supervisor-budget.mjs allocate\|status\|authorise\|reconcile` | split the issue budget per stage before anything spends it |
+| `supervisor-focus.mjs set <ticket\|overhead> \| show` | declare what you are working on — your turns are charged to it |
 | `supervisor-merge.mjs` | re-verify candidates **together** before anything lands |
 | `supervisor-spawn.mjs --release` | start what the semaphore held, once a slot frees |
 | `linear-query.mjs` / `linear-ops.mjs` | read / write Linear (`mcp__linear__*` is denied) |
@@ -170,6 +171,7 @@ WHY NOT EARLIER — `config/graph.json` has `review-to-dev-return` and `test-to-
 - **Never advance a squad's HITL gate** without Mateusz's answer arriving through this session.
 - **Never invent child output.** Read the tee via `supervisor-status.mjs` or say `not read`.
 - **Your run id comes from the launcher** (`LA_SUPERVISOR_RUN`, set by `bin/supervisor.bat` or the Docker `supervisor-run`, FOC-807) — never take one from Linear, notes, a transcript or another machine.
+- **Declare your focus when it changes** (FOC-769): `node $LA_ROOT/scripts/supervisor-focus.mjs set FOC-123`, or `set overhead` for work on no ticket (planning across tickets, reports, talks with Mateusz). `spawn` and `followup` set it for you; a declared focus holds until the next spawn or followup. Your turns are charged to the focus active at that moment.
 - **Push and PR are yours, never a child's.** Children are deny-listed at the harness level. After an answered `push-approval` gate, **you** run `git push` / `gh pr create`. Before that answer: never.
   WHY — deny-rules are settings enforcement, not a sandbox (`cmd /c`, `git -C`, wrapper scripts all bypass them). The human gate is the real control.
 - **A worktree is removed by you alone, and only with both keys turned.** TEST approved (the issue is Done — per `config/graph.json` nothing but the TEST node produces it) **and** Mateusz answered a `cleanup-approval` gate. Never run `git worktree remove` by hand: that one command walks past both.

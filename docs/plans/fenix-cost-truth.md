@@ -22,9 +22,10 @@ ground truth ($781.85 vs $154.70, 366 children).
      `pricingSnapshot()`. Tokens on an unpriceable model → `costUsd: null` + the model in `unpricedModels`; zero-token
      messages cost 0.
 2. Watcher at turn end: the child's cost is **set** from its transcripts (`costSource: "transcript"`,
-   `costMessages`). No transcript found (should not happen right after a turn) → the **last** `result` event's computed
-   cost (a session-cumulative snapshot, never summed), `costSource: "result-last"`. `costUsdReported` = the last
-   result's reported figure (evidence only). `unpricedModels` from the transcript pricing.
+   `costMessages`). No transcript found (should not happen right after a turn) → the **largest** `result` event's
+   computed cost (session-cumulative snapshots, never summed; a zero-token wake-up shape is lower than the real
+   snapshot), `costSource: "result-max"`. `costUsdReported` = the largest reported figure (evidence only).
+   `unpricedModels` from the transcript pricing. A resume that forked a new session id prices both sessions' files.
 3. One-time recompute: `scripts/registry-cost-recompute.mjs [--state-home <dir>] [--apply] [--json]` — dry run by
    default. Every `<stateHome>/<runId>/children.json` child: transcript found → `costUsd` from transcripts,
    `costUsdLegacy` = the old value, `costSource: "transcript"`; not found → value kept, `costSource:
@@ -63,10 +64,11 @@ Supervisor usage is linked only to the pseudo-task `SUP:<run>` (12 % attributabl
 
 **Design.**
 
-1. `scripts/supervisor-focus.mjs set <TICKET|overhead> [--note "…"]`, `show`, `clear` — JSON out, run id from
+1. `scripts/supervisor-focus.mjs set <TICKET|overhead> [--note "…"]`, `show` — JSON out, run id from
    `LA_SUPERVISOR_RUN` (refuses without it). Appends `{ at, taskId|null, kind: ticket|overhead, note, source }` to
    `<stateHome>/<runId>/focus.jsonl`, writes `focus` into `current-run.json`, emits `supervisor.focus` (kind
-   `supervisor-focus`, path = focus.jsonl, offset = line index → idempotent). `Bash(node:*)` already allows it.
+   `supervisor-focus`, event id = hash of run, time, kind and ticket → idempotent, and two writers racing never
+   collide the way a line-index offset would). `Bash(node:*)` already allows it.
 2. Auto-focus: `supervisor-spawn` and `supervisor-followup` set the focus to the child's ticket (`source: "spawn" |
    "followup"`) when it differs — the Supervisor is acting on that ticket at that moment; explicit `set` wins until the
    next spawn/followup.
