@@ -599,7 +599,12 @@ export async function collectChildren({
 
 // ── 4. the focus ticket ──────────────────────────────────────────────────────
 
-/** triage.json `issue` of the first run (newest first) that has one; null when none. */
+/**
+ * triage.json `issue` of the first run (newest first) that has one; null when
+ * none. FOC-769: this heuristic is now the Cockpit's FALLBACK — the declared
+ * focus on the current-run record wins when there is one (cockpit-routes.mjs,
+ * declaredFocusOf).
+ */
 export function focusTicket({ stateHome, runIds } = {}) {
   const home = homeOf(stateHome);
   const runs = runIds ?? recentRunIds({ stateHome: home });

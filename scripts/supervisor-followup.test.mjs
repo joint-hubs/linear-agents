@@ -15,10 +15,12 @@ import { fileURLToPath } from "node:url";
 
 import { PRINT_BG_WAIT_CEILING_MS, PRINT_BG_WAIT_ENV, TURN_END_CONTRACT, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
 import { waitForStatus } from "./supervisor-test-fixtures.mjs";
+import { readFocus } from "./supervisor-focus.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
 const FOLLOWUP = join(ROOT, "scripts", "supervisor-followup.mjs");
+const FOCUS = join(ROOT, "scripts", "supervisor-focus.mjs");
 const STOP = join(ROOT, "scripts", "supervisor-stop.mjs");
 const MOCK = join(ROOT, "scripts", "mock-claude.mjs");
 const GATE = join(ROOT, "scripts", "supervisor-gate.mjs");
@@ -55,15 +57,20 @@ function fixtureRepo() {
 }
 
 let counter = 0;
-function fixtureRun() {
-  const runId = `test-fu-${process.pid}-${Date.now()}-${counter++}`;
-  const dir = runDir(runId);
+function fixtureRun({ runId } = {}) {
+  // `runId` override: the auto-focus tests need a run id matching RUN_ID_RE —
+  // supervisor-focus refuses others — which the counter ids do not carry.
+  const id = runId ?? `test-fu-${process.pid}-${Date.now()}-${counter++}`;
+  const dir = runDir(id);
   mkdirSync(join(dir, "children"), { recursive: true });
   mkdirSync(join(dir, "gates"), { recursive: true });
   writeFileSync(join(dir, "triage.json"), JSON.stringify({ issue: "FOC-123", verdict: "dev" }));
   cleanup.push(dir);
-  return runId;
+  return id;
 }
+
+// A run id that matches RUN_ID_RE (supervisor-current-run.mjs).
+const validRunId = (n) => `2026-10-13T10-00-00-000-supervisor-000${n}`;
 
 const baseEnv = (extra = {}) => ({
   ...process.env,
@@ -542,6 +549,81 @@ test("every resume prompt embeds the turn-end contract without displacing the an
     if (!payload.includes(line)) fail(`the resumed prompt lost the contract line: "${line}"`);
   }
   if (!payload.endsWith("answer")) fail(`the contract displaced the delivered answer: ...${payload.slice(-80)}`);
+});
+
+// ── auto-focus (FOC-769) ─────────────────────────────────────────────────────
+console.log("\nauto-focus");
+
+// Same seam as the spawn tests: the focus declaration writes into the state
+// home, so these tests point LA_SUPERVISOR_STATE_HOME at a temp tree (restored
+// in `finally`) and use run ids that match RUN_ID_RE.
+function withFocusHome(fn) {
+  const home = mkdtempSync(join(tmpdir(), "la-sup-fu-focus-"));
+  cleanup.push(home);
+  const prev = process.env.LA_SUPERVISOR_STATE_HOME;
+  process.env.LA_SUPERVISOR_STATE_HOME = home;
+  try {
+    fn(home);
+  } finally {
+    if (prev === undefined) delete process.env.LA_SUPERVISOR_STATE_HOME;
+    else process.env.LA_SUPERVISOR_STATE_HOME = prev;
+  }
+}
+
+test("a launched follow-up turn declares the child's ticket as the focus (source followup)", () => {
+  withFocusHome((home) => {
+    const repo = fixtureRepo();
+    const runId = fixtureRun({ runId: validRunId(1) });
+
+    // Turn 0 declares FOC-123 (source spawn). Move the focus aside, so the
+    // follow-up's own declaration is a real CHANGE and its line is appended —
+    // a same-focus follow-up dedups to changed:false and writes nothing.
+    const child = spawnChild(runId, repo, { MOCK_CLAUDE_HANG_MS: "0" });
+    waitForStatus(runId, child.childId, ["exited", "crashed"]);
+    execFileSync(process.execPath, [FOCUS, "set", "overhead", "--run", runId], {
+      encoding: "utf8",
+      env: baseEnv(),
+    });
+
+    const out = parseOk(followup(runId, child.childId, [], { MOCK_CLAUDE_HANG_MS: "0" }));
+    waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+    if (!out.focus || out.focus.changed !== true || out.focus.taskId !== "FOC-123") {
+      fail(`the follow-up did not declare the focus: ${JSON.stringify(out.focus)}`);
+    }
+    if (out.focusError !== undefined) fail(`the follow-up reported a focus error: ${out.focusError}`);
+    const { current, history } = readFocus(runId, { stateHome: home });
+    if (!current || current.taskId !== "FOC-123" || current.source !== "followup") {
+      fail(`focus.jsonl does not carry the followup declaration: ${JSON.stringify(current)}`);
+    }
+    if (history.length !== 3) fail(`expected 3 focus lines (spawn, overhead, followup), got ${history.length}`);
+  });
+});
+
+test("a follow-up whose child has no ticket-shaped taskId still succeeds", () => {
+  withFocusHome((home) => {
+    const repo = fixtureRepo();
+    const runId = fixtureRun({ runId: validRunId(2) });
+    const now = new Date().toISOString();
+    writeRegistry(runId, {
+      runId,
+      children: {
+        "dev-9": {
+          childId: "dev-9", squad: "dev", taskId: "not-a-ticket", sessionId: "sess-9",
+          status: "exited", worktree: repo,
+          turns: [{ pid: null, startedAt: now, endedAt: now, exitCode: 0 }],
+        },
+      },
+      rounds: {},
+    });
+
+    const out = parseOk(followup(runId, "dev-9", [], { MOCK_CLAUDE_HANG_MS: "0" }));
+    waitForStatus(runId, "dev-9", ["exited", "crashed"]);
+
+    if (out.focus !== undefined) fail(`a focus was declared for a non-ticket: ${JSON.stringify(out.focus)}`);
+    if (out.focusError !== undefined) fail(`the skip was reported as an error: ${out.focusError}`);
+    if (readFocus(runId, { stateHome: home }).history.length) fail("a focus line was written anyway");
+  });
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

@@ -41,6 +41,8 @@ import {
   writeRegistry,
 } from "./supervisor-lib.mjs";
 import { loadGraph } from "./graph-validate.mjs";
+import { normalizeFocus, setFocus } from "./supervisor-focus.mjs";
+import { RUN_ID_RE } from "./supervisor-current-run.mjs";
 
 // FOC-163 removed the dev↔review round cap. It was `LA_SUPERVISOR_MAX_LOOPS`,
 // default 2, and it counted: it stopped a run that was converging at the same
@@ -349,6 +351,35 @@ const watcher = spawn(process.execPath, watcherArgs, {
 });
 watcher.unref();
 
+// ── auto-focus (FOC-769) ─────────────────────────────────────────────────────
+// Same rule as spawn: the follow-up is the Supervisor acting on the child's
+// ticket RIGHT NOW, so the launched watcher's turn declares the focus for it
+// (source "followup") and holds until the next spawn/followup. Never fails the
+// turn — a setFocus error lands in `focusError` beside the result, not in an
+// exit code. Skipped silently when the child's task is not a ticket shape or
+// the run id is not a run id — nothing to attribute, nothing to escalate.
+// (Same block lives in supervisor-spawn.mjs — the helper home,
+// supervisor-lib.mjs, is not this slice's file.)
+let focus = null;
+let focusError = null;
+if (RUN_ID_RE.test(String(runId))) {
+  const wanted = (() => {
+    try {
+      return normalizeFocus(entry.taskId);
+    } catch {
+      return null; // not a ticket — nothing to attribute, skip silently
+    }
+  })();
+  if (wanted) {
+    try {
+      const res = setFocus({ runId, value: entry.taskId, source: "followup" });
+      focus = { changed: res.changed, taskId: res.focus.taskId };
+    } catch (err) {
+      focusError = `focus: ${err.message}`;
+    }
+  }
+}
+
 // ── wait for system/init (FOC-271) ───────────────────────────────────────────
 // This used to return the moment the watcher was spawned, on the reasoning that
 // the session already exists so there is no session_id to wait for. True, and
@@ -419,6 +450,11 @@ console.log(
       // What replaced the counter. `repeated: null` is UNKNOWN, not "fine" —
       // whoever reads this next has to be able to tell those apart.
       progress,
+      // FOC-769: the focus this follow-up declared (absent when skipped as not
+      // a ticket / not a run id), and the focus failure that did NOT fail the
+      // turn, if there was one.
+      ...(focus ? { focus } : {}),
+      ...(focusError ? { focusError } : {}),
     },
     null,
     2,

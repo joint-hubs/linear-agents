@@ -74,6 +74,8 @@ import {
   writeRegistry,
 } from "./supervisor-lib.mjs";
 import { loadGraph } from "./graph-validate.mjs";
+import { normalizeFocus, setFocus } from "./supervisor-focus.mjs";
+import { RUN_ID_RE } from "./supervisor-current-run.mjs";
 
 // A graph we cannot read means no topology: no per-node limit and no consumer to
 // apply backpressure from. Triage would already have refused a broken graph, so
@@ -890,6 +892,36 @@ if (!entry?.sessionId) {
   });
 }
 
+// ── auto-focus (FOC-769) ─────────────────────────────────────────────────────
+// The Supervisor is acting on THIS ticket at this moment, so the successful
+// spawn declares the focus for it (source "spawn"); an explicit `set` holds
+// until the next spawn/followup. The declaration never fails the spawn — a
+// focus failure is observability, and a child that did start must not be
+// reported as one that did not, so a setFocus error lands in `focusError`
+// beside the result. Skipped silently when the task is not a ticket shape or
+// the run id is not a run id: those are shapes cost cannot be attributed to,
+// not errors to escalate. (Same block lives in supervisor-followup.mjs — the
+// helper home, supervisor-lib.mjs, is not this slice's file.)
+let focus = null;
+let focusError = null;
+if (RUN_ID_RE.test(String(runId))) {
+  const wanted = (() => {
+    try {
+      return normalizeFocus(taskId);
+    } catch {
+      return null; // not a ticket — nothing to attribute, skip silently
+    }
+  })();
+  if (wanted) {
+    try {
+      const res = setFocus({ runId, value: taskId, source: "spawn" });
+      focus = { changed: res.changed, taskId: res.focus.taskId };
+    } catch (err) {
+      focusError = `focus: ${err.message}`;
+    }
+  }
+}
+
 console.log(
   JSON.stringify(
     {
@@ -927,6 +959,11 @@ console.log(
       // navigation path the child actually has — ready, degraded (Read/Grep
       // sanctioned) or skipped — instead of the child discovering it mid-turn.
       codegraph,
+      // FOC-769: the focus this spawn declared (absent when skipped as not a
+      // ticket / not a run id), and the focus failure that did NOT fail the
+      // spawn, if there was one.
+      ...(focus ? { focus } : {}),
+      ...(focusError ? { focusError } : {}),
     },
     null,
     2,

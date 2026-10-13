@@ -412,6 +412,74 @@ test("refuses an unknown run rather than reporting an empty one", () => {
   if (!parse(r).error.includes("no such run")) fail("unhelpful error");
 });
 
+// ── focus and unverified legacy costs (FOC-769 / FOC-760) ────────────────────
+console.log("\nfocus and unverified legacy costs");
+
+test("carries the declared focus and its one-line summary", () => {
+  const runId = fixtureRun();
+  seedChild(runId);
+  writeFileSync(
+    join(runDir(runId), "focus.jsonl"),
+    JSON.stringify({ at: new Date().toISOString(), kind: "ticket", taskId: "FOC-123", source: "spawn" }) + "\n",
+  );
+  const out = parse(status(runId));
+  if (!out.focus || out.focus.taskId !== "FOC-123" || out.focus.kind !== "ticket") {
+    fail(`focus missing: ${JSON.stringify(out.focus)}`);
+  }
+  if (!/^Focus: FOC-123 since \d{2}:\d{2} \(spawn\)$/.test(out.focusLine)) fail(`focusLine was ${out.focusLine}`);
+});
+
+test("no focus declared says so and names the command that declares one", () => {
+  const runId = fixtureRun();
+  seedChild(runId);
+  const out = parse(status(runId));
+  if (out.focus !== null) fail(`focus was ${JSON.stringify(out.focus)}`);
+  if (!out.focusLine.includes("none declared") || !out.focusLine.includes("supervisor-focus.mjs")) {
+    fail(`focusLine was ${out.focusLine}`);
+  }
+});
+
+test("the briefing carries the focus too, overhead spelled out", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  writeFileSync(
+    join(runDir(runId), "focus.jsonl"),
+    JSON.stringify({ at: new Date().toISOString(), kind: "overhead", taskId: null, source: "manual" }) + "\n",
+  );
+  const out = parse(status(runId, ["--briefing"]));
+  if (!out.focus || out.focus.kind !== "overhead" || out.focus.taskId !== null) {
+    fail(`briefing focus was ${JSON.stringify(out.focus)}`);
+  }
+  if (!/^Focus: overhead since \d{2}:\d{2} \(manual\)$/.test(out.focusLine)) fail(`briefing focusLine was ${out.focusLine}`);
+});
+
+test("legacy-unverified children are named beside the total, not excluded from it", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { childId: "dev-1", costUsd: 0.25 });
+  const registryPath = join(runDir(runId), "children.json");
+  const registry = JSON.parse(readFileSync(registryPath, "utf8"));
+  registry.children["dev-2"] = {
+    ...registry.children["dev-1"],
+    childId: "dev-2",
+    tee: join("children", "dev-2.jsonl"),
+    costUsd: 1.5,
+    costSource: "legacy-unverified",
+  };
+  writeFileSync(registryPath, JSON.stringify(registry));
+  writeFileSync(teeAbsPath(runId, "dev-2"), "");
+
+  const r = status(runId);
+  const out = parse(r);
+  if (JSON.stringify(out.totals.unverifiedCostChildren) !== JSON.stringify(["dev-2"])) {
+    fail(`unverifiedCostChildren was ${JSON.stringify(out.totals.unverifiedCostChildren)}`);
+  }
+  // The total keeps summing every entry as it stands — the note never edits it.
+  if (out.totals.costUsd !== 1.75) fail(`totals.costUsd was ${out.totals.costUsd}`);
+  if (!r.stderr.includes("cost includes 1 unverified legacy figure(s): dev-2")) {
+    fail(`stderr did not name the unverified child: ${r.stderr}`);
+  }
+});
+
 // ── summary ──────────────────────────────────────────────────────────────────
 for (const dir of cleanup) {
   try {
