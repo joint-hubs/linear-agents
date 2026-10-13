@@ -3230,12 +3230,49 @@ export function ticketCostReport(db, { since = null, until = null } = {}) {
   let unpricedMessages = 0;
   let legacyRows = 0;
 
+  // FOC-785 (additive): per-day and per-model splits, accumulated in the SAME
+  // streaming pass — a second query would be a second full-store scan.
+  //   · byDay buckets the day's spend children-vs-Supervisor; `childrenUsd`
+  //     holds child rows tagged AND untagged (untaggedChildrenUsd stays the
+  //     separate ticket-level bucket), `supervisorUsd` only Supervisor messages
+  //     charged to a ticket, overhead/unattributed the existing buckets. The
+  //     four buckets partition every priced row. Day = observed_at's UTC date;
+  //     a row without an observed_at cannot be placed on a timeline and is
+  //     left out of byDay ONLY — every other total still counts it.
+  //   · byModel counts every row in the window (timestamped or not); a NULL
+  //     model reports as "(none)", never as a fabricated model name. A NULL
+  //     cost is unpriced, never $0 — it adds nothing to `usd` but counts in
+  //     `messages` (and in unpricedMessages above), the same partial-sum
+  //     convention as every bucket here.
+  const byDay = new Map();
+  const byModel = new Map();
+  const addToDay = (day, field, cost) => {
+    let bucket = byDay.get(day);
+    if (!bucket) {
+      bucket = { day, childrenUsd: 0, supervisorUsd: 0, overheadUsd: 0, unattributedUsd: 0 };
+      byDay.set(day, bucket);
+    }
+    bucket[field] += cost;
+  };
+
   // Streamed, not .all(): a report without --since over a multi-GB store must
   // not load every usage row into memory. Same results, one row at a time.
   for (const row of rowsStatement.iterate(...params)) {
     if (row.message_id == null) legacyRows++;
     if (row.cost_usd == null && !isSyntheticModel(row.model)) unpricedMessages++;
     const cost = row.cost_usd ?? 0;
+    // FOC-785 byModel: every row in the window, timestamped or not; NULL
+    // model reports as "(none)".
+    const modelKey = row.model ?? "(none)";
+    const modelBucket = byModel.get(modelKey);
+    if (modelBucket) {
+      modelBucket.usd += cost;
+      modelBucket.messages++;
+    } else byModel.set(modelKey, { model: modelKey, usd: cost, messages: 1 });
+    // FOC-785 byDay: the UTC date of observed_at. Store timestamps are always
+    // ISO UTC, so the prefix is the date; anything else (NULL, truncated)
+    // cannot be placed on a timeline and skips byDay only.
+    const day = /^\d{4}-\d{2}-\d{2}/.exec(row.observed_at ?? "")?.[0] ?? null;
     // A run is Supervisor's when it declares itself so, OR when it ever
     // declared a focus (the squad column can lag the declaration).
     const isSupervisor = row.squad === SUPERVISOR_SQUAD || focusByRun.has(row.run_id);
@@ -3244,19 +3281,31 @@ export function ticketCostReport(db, { since = null, until = null } = {}) {
       // kind 'ticket' with a NULL task_id cannot happen through the handler
       // (it throws); a legacy/abnormal row like that stays unattributed
       // rather than crashing the report or billing a NULL key.
-      if (focus && focus.kind === "overhead") overheadUsd += cost;
-      else if (focus && focus.kind === "ticket" && focus.task_id) {
+      if (focus && focus.kind === "overhead") {
+        overheadUsd += cost;
+        if (day) addToDay(day, "overheadUsd", cost);
+      } else if (focus && focus.kind === "ticket" && focus.task_id) {
         const bucket = ticket(focus.task_id);
         bucket.supervisorUsd += cost;
         bucket.messages++;
-      } else unattributedUsd += cost;
+        if (day) addToDay(day, "supervisorUsd", cost);
+      } else {
+        unattributedUsd += cost;
+        if (day) addToDay(day, "unattributedUsd", cost);
+      }
     } else {
       const taskId = activeTaskAt(linksByRun.get(row.run_id) ?? [], row.observed_at ?? row.started_at);
       if (taskId && !taskId.startsWith(PSEUDO_TASK_PREFIX)) {
         const bucket = ticket(taskId);
         bucket.childrenUsd += cost;
         bucket.messages++;
-      } else untaggedChildrenUsd += cost;
+        if (day) addToDay(day, "childrenUsd", cost);
+      } else {
+        // Untagged children stay their own ticket-level bucket, but in byDay
+        // they are spend on children like any other child row.
+        untaggedChildrenUsd += cost;
+        if (day) addToDay(day, "childrenUsd", cost);
+      }
     }
   }
 
@@ -3284,6 +3333,11 @@ export function ticketCostReport(db, { since = null, until = null } = {}) {
     },
     unpricedMessages,
     legacyRows,
+    // FOC-785 (additive): per-day spend split and per-model mix, both sorted —
+    // byDay by day ascending, byModel by usd descending (name as the tiebreak,
+    // so equal-cost models come out in one stable order).
+    byDay: [...byDay.values()].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0)),
+    byModel: [...byModel.values()].sort((a, b) => b.usd - a.usd || a.model.localeCompare(b.model)),
   };
 }
 
