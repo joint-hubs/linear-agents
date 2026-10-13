@@ -3,23 +3,23 @@
 // both read it. No React, no router imports — the plain-node tests
 // (_tests_nav.mjs) pin the table and areaForPath outside Vite.
 //
-// The v1 screens stay reachable as an area's `pages` until the area is rebuilt
-// (Work → FOC-784, Team → FOC-791, Costs & quality → FOC-785, Insights →
-// FOC-787, Settings → FOC-786). Live (/live) and Fine-tune (/ft) are hidden
-// from the navigation but their routes keep working — areaForPath maps them
-// to null so no area lights up.
+// The v2 screens live here as they are rebuilt (Work board → FOC-784, Costs &
+// quality → FOC-785); the remaining v1 screens stay reachable as an area's
+// `pages` until rebuilt (Team → FOC-791, Insights → FOC-787, Settings →
+// FOC-786). Timeline stays routable but out of the navigation (/tasks redirects
+// to the board); Live (/live) and Fine-tune (/ft) are hidden too — routes not
+// in `pages` map to no area in areaForPath, so nothing lights up for them.
 
 export const NAV_AREAS = [
   { id: 'cockpit', label: 'Cockpit', defaultRoute: '/', icon: 'cockpit', pages: [] },
   {
     id: 'work',
     label: 'Work',
-    defaultRoute: '/tasks',
+    defaultRoute: '/work',
     icon: 'tasks',
     pages: [
-      { path: '/tasks', label: 'Tickets' },
+      { path: '/work', label: 'Board' },
       { path: '/runs', label: 'Runs' },
-      { path: '/timeline', label: 'Timeline' },
     ],
   },
   {
@@ -34,7 +34,7 @@ export const NAV_AREAS = [
     label: 'Costs & quality',
     defaultRoute: '/costs',
     icon: 'costs',
-    pages: [{ path: '/costs', label: 'Costs (v1)' }],
+    pages: [{ path: '/costs', label: 'Costs & quality' }],
   },
   {
     id: 'insights',
@@ -59,8 +59,9 @@ export const NAV_AREAS = [
 ];
 
 // Which nav item is highlighted for a location. An area owns its pages and
-// everything below them (/runs/:id belongs to Work); an unknown path — or one
-// kept out of the navigation like /live and /ft — belongs to no area.
+// everything below them (/work/:ticket and /runs/:id belong to Work); an
+// unknown path — or one kept out of the navigation like /live, /ft, /timeline
+// (routable but unlisted) and /tasks (redirects to /work) — belongs to no area.
 export function areaForPath(pathname) {
   const p = pathname == null ? '/' : pathname;
   if (p === '/') return 'cockpit';

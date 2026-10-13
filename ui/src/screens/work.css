@@ -1,0 +1,303 @@
+/* Work board (FOC-784). Scoped under .work — theme.css stays untouched.
+   The chip tones are re-declared here (cockpit.css declares its own) so the
+   board renders chips without depending on the Cockpit screen having been
+   loaded; colours ride with text, never alone (spec §7). */
+
+.work {
+  --ck-running-fg: #1e40af;
+  --ck-running-bg: #e8efff;
+  --ck-waiting-fg: #92400e;
+  --ck-waiting-bg: #fdf3e1;
+  --ck-ok-fg: #065f46;
+  --ck-ok-bg: #e6f6ee;
+  --ck-danger-fg: #991b1b;
+  --ck-danger-bg: #fdecec;
+  --ck-neutral-fg: #4b5563;
+  --ck-neutral-bg: #eef0f4;
+}
+
+.work .ck-chip {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 9px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.work .ck-tone-running { background: var(--ck-running-bg); color: var(--ck-running-fg); }
+.work .ck-tone-waiting { background: var(--ck-waiting-bg); color: var(--ck-waiting-fg); }
+.work .ck-tone-ok { background: var(--ck-ok-bg); color: var(--ck-ok-fg); }
+.work .ck-tone-danger { background: var(--ck-danger-bg); color: var(--ck-danger-fg); }
+.work .ck-tone-neutral { background: var(--ck-neutral-bg); color: var(--ck-neutral-fg); }
+
+/* --- header + filters ------------------------------------------------------ */
+
+.wk-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.wk-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 10px 0 14px;
+}
+
+/* --- board: six columns, horizontal scroll on narrow screens --------------- */
+
+.wk-board {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.wk-col {
+  flex: 1 0 216px;
+  min-width: 216px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+}
+
+.wk-col-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.wk-col-count {
+  color: var(--text-2);
+}
+
+.wk-col-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wk-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 4px;
+}
+
+/* --- card (a real button opening /work/<id>) ------------------------------- */
+
+.wk-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.wk-card:hover { border-color: var(--border-strong); }
+
+.wk-card-id {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.wk-card-title {
+  display: block;
+  margin-top: 2px;
+  font-size: 12.5px;
+}
+
+.wk-card-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.wk-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- ticket detail side panel ---------------------------------------------- */
+
+.wk-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 100vw);
+  z-index: 40;
+  overflow-y: auto;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  padding: 16px 18px;
+}
+
+.wk-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.wk-panel-title {
+  margin-top: 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.wk-section { margin-top: 16px; }
+
+.wk-section-h {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.wk-cost-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+  padding: 2px 0;
+}
+
+.wk-cost-total {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- timeline ---------------------------------------------------------------- */
+
+.wk-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.wk-tl-row {
+  display: flex;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--surface-2);
+  font-size: 12.5px;
+}
+
+.wk-tl-row:last-child { border-bottom: none; }
+
+.wk-tl-at {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  padding-top: 1px;
+}
+
+.wk-tl-kind {
+  font-size: 10.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-right: 4px;
+}
+
+/* --- evidence ----------------------------------------------------------------- */
+
+.wk-evidence {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 12.5px;
+}
+
+.wk-ev-row { padding: 4px 0; }
+
+.wk-ev-label { font-weight: 600; }
+
+.wk-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.wk-copy .wk-mono {
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.wk-mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+/* --- children table ------------------------------------------------------------ */
+
+.wk-scroll { overflow-x: auto; }
+
+.wk-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.wk-table th {
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.wk-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--surface-2);
+  white-space: nowrap;
+}
+
+.wk-table tr:last-child td { border-bottom: none; }
+
+.wk-num { font-variant-numeric: tabular-nums; }
+
+/* --- actions --------------------------------------------------------------------- */
+
+.wk-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* The Start dialog portals to <body> (StartDialog.jsx) so the side panel's
+   stacking context (aside.wk-panel, z-index 40) cannot trap its overlay below
+   the app sidebar (theme.css .sidebar, z-index 100). The portal wrapper lifts
+   this overlay above both. */
+.wk-start-portal .modal-overlay { z-index: 101; }

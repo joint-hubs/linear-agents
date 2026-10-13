@@ -508,6 +508,43 @@ export function postGateNotify(body) {
   return postJson('/api/gates/notify', body);
 }
 
+// ===== Work board (FOC-784) =====
+// Board + ticket detail poll with an AbortSignal (usePoll cancels in-flight
+// requests); filters ride the query (?milestone=&priority=) with empty values
+// omitted so the URL stays clean. postStartTicket shares the Cockpit's POST
+// guards — the thrown error carries .status and the parsed body (err.data) so
+// the Start dialog can show the 400/503 reason verbatim.
+
+export async function getWorkTickets(filters, signal) {
+  const f = filters || {};
+  const q = new URLSearchParams();
+  if (f.milestone) q.set('milestone', f.milestone);
+  if (f.priority) q.set('priority', f.priority);
+  const qs = q.toString();
+  return apiFetch('/api/work/tickets' + (qs ? '?' + qs : ''), signal);
+}
+
+export async function getWorkTicket(id, signal) {
+  return apiFetch('/api/work/tickets/' + encodeURIComponent(id), signal);
+}
+
+export async function getStartPreview(id, signal) {
+  return apiFetch('/api/work/tickets/' + encodeURIComponent(id) + '/start-preview', signal);
+}
+
+export function postStartTicket(id, text) {
+  return postJson('/api/work/tickets/' + encodeURIComponent(id) + '/start', { text });
+}
+
+// Costs & quality (FOC-785) — the Costs screen imports these two by name.
+export function getCosts(period, signal) {
+  return apiFetch('/api/costs?period=' + encodeURIComponent(period ?? ''), signal);
+}
+
+export function getQuality(period, signal) {
+  return apiFetch('/api/quality?period=' + encodeURIComponent(period ?? ''), signal);
+}
+
 // Terminal WebSocket URL on the same origin (wss behind https). API_BASE as an
 // absolute URL switches the origin and keeps its path prefix. The pure builder
 // lives in cockpitModel.js so the node tests can pin it.
