@@ -7,8 +7,14 @@
 // conversation paging (tail-mode first request, burst follow, per-tick cap),
 // inboxPrimaryAction (the per-item primary action), chatDisabledReason,
 // terminalDisabledReason, buildTerminalSocketUrl, cockpitPrefill (the
-// Start-in-Cockpit ?prompt= parsing, FOC-804) and wakeBanner (the wake-backlog
-// banner, FOC-807). Fixtures only — no network, no DOM.
+// Start-in-Cockpit ?prompt= parsing, FOC-804), wakeBanner (the wake-backlog
+// banner, FOC-807) and the Supervisor ask/dialog helpers (dialogActions,
+// dialogTextLines, askAnswers, the card-aware chatDisabledReason and
+// inboxPrimaryAction,
+// FOC-810) and the inbox list shapers (inboxQuestionLines / inboxFactLines —
+// the generic lists render strings only; the ask category never leaks its
+// question objects into a <li>, React error #31). Fixtures only — no network,
+// no DOM.
 
 import assert from 'node:assert/strict';
 
@@ -21,11 +27,17 @@ import {
   CONVERSATION_LIMIT,
   CONVERSATION_MAX_PAGES_PER_TICK,
   inboxPrimaryAction,
+  inboxQuestionLines,
+  inboxFactLines,
   chatDisabledReason,
   terminalDisabledReason,
   buildTerminalSocketUrl,
   cockpitPrefill,
   wakeBanner,
+  dialogActions,
+  dialogTextLines,
+  askAnswers,
+  answerResultText,
 } from './cockpitModel.js';
 
 // --- Minimal test harness (same shape as _test_utils.mjs) -------------------
@@ -474,6 +486,365 @@ await test('wakeBanner waker not alive + cannot wake -> bare detail', () => {
     wakeBanner({ host: 'unreachable', state: 'idle', wakeBacklog: 1, waker: { state: 'ended' } }).detail,
     'Waker not running.',
   );
+});
+
+// --- dialogActions (FOC-810 supervisor dialogs) ------------------------------
+
+const permissionDialog = (overrides = {}) => ({
+  id: 'dlg-1',
+  kind: 'permission',
+  title: 'Bash command',
+  lines: ['The Supervisor wants to run a command'],
+  command: 'npm audit --json',
+  question: null,
+  tabs: null,
+  options: [
+    { key: '1', label: 'Yes', description: null, focused: true, checked: null, choice: 'allow-once' },
+    {
+      key: '2',
+      label: "Yes, and don't ask again for: npm audit *",
+      description: null,
+      focused: false,
+      checked: null,
+      choice: 'allow-always',
+    },
+    { key: '3', label: 'Yes, and switch to auto mode', description: null, focused: false, checked: null, choice: 'auto-mode' },
+    { key: '4', label: 'No', description: null, focused: false, checked: null, choice: 'deny' },
+  ],
+  footer: 'Esc to cancel',
+  ...overrides,
+});
+
+await test('dialogActions permission -> allow-once, allow-always (pattern from the label), deny; auto-mode never', () => {
+  eq(dialogActions(permissionDialog()), [
+    { choice: 'allow-once', label: 'Allow once' },
+    { choice: 'allow-always', label: 'Always allow: npm audit *' },
+    { choice: 'deny', label: 'Deny' },
+  ]);
+});
+
+await test('dialogActions permission without allow-once/allow-always options -> deny only', () => {
+  eq(dialogActions(permissionDialog({ options: [permissionDialog().options[3]] })), [
+    { choice: 'deny', label: 'Deny' },
+  ]);
+});
+
+await test('dialogActions allow-always without "for:" in the label falls back to the label', () => {
+  const d = permissionDialog({
+    options: [
+      { key: '1', label: 'Yes', description: null, focused: true, checked: null, choice: 'allow-once' },
+      { key: '2', label: "Yes, and don't ask again", description: null, focused: false, checked: null, choice: 'allow-always' },
+    ],
+  });
+  eq(dialogActions(d)[1], { choice: 'allow-always', label: "Always allow: Yes, and don't ask again" });
+});
+
+await test('dialogActions select -> only Dismiss (Esc)', () => {
+  eq(dialogActions({ id: 'dlg-2', kind: 'select', title: 'Pick one', options: [{ key: '1', label: 'A', choice: null }] }), [
+    { choice: 'deny', label: 'Dismiss (Esc)' },
+  ]);
+});
+
+await test('dialogActions(null) and unknown kind -> only Dismiss (Esc)', () => {
+  eq(dialogActions(null), [{ choice: 'deny', label: 'Dismiss (Esc)' }]);
+  eq(dialogActions({ kind: 'ask' }), [{ choice: 'deny', label: 'Dismiss (Esc)' }]);
+});
+
+// --- dialogTextLines (FOC-810 DialogCard body lines) --------------------------
+
+// Shaped like parseDialog over scripts/fixtures/session-dialogs/permission-bash.txt
+// (title "Bash command", command "npm audit --json", the four options, footer).
+const bashCommandDialog = {
+  id: 'abc123def45',
+  kind: 'permission',
+  title: 'Bash command',
+  lines: [
+    'Bash command',
+    'Tip: auto mode handles these prompts for you — choose "switch to auto mode" below',
+    'Audit dependencies',
+    'npm audit --json',
+    'This command requires approval',
+    'Do you want to proceed?',
+    '❯ 1. Yes',
+    '2. Yes, and don’t ask again for: npm audit *',
+    '3. Yes, and switch to auto mode · auto mode handles these prompts for you',
+    '4. No',
+    'Esc to cancel · Tab to amend',
+  ],
+  command: 'npm audit --json',
+  question: null,
+  tabs: null,
+  options: [
+    { key: '1', label: 'Yes', description: null, focused: true, checked: null, choice: 'allow-once' },
+    { key: '2', label: 'Yes, and don’t ask again for: npm audit *', description: null, focused: false, checked: null, choice: 'allow-always' },
+    { key: '3', label: 'Yes, and switch to auto mode · auto mode handles these prompts for you', description: null, focused: false, checked: null, choice: 'auto-mode' },
+    { key: '4', label: 'No', description: null, focused: false, checked: null, choice: 'deny' },
+  ],
+  footer: 'Esc to cancel · Tab to amend',
+};
+
+await test('dialogTextLines permission-bash-shaped dialog -> exactly the kept lines', () => {
+  eq(dialogTextLines(bashCommandDialog), [
+    'Audit dependencies',
+    'This command requires approval',
+    'Do you want to proceed?',
+  ]);
+});
+
+await test('dialogTextLines drops numbered option lines with or without the focus marker', () => {
+  eq(
+    dialogTextLines({
+      title: null,
+      footer: null,
+      command: null,
+      options: [{ key: '1', label: 'Yes' }],
+      lines: ['❯ 1. Yes', '2. No', 'keep me'],
+    }),
+    ['keep me'],
+  );
+});
+
+await test('dialogTextLines drops unnumbered select options (label equality, ❯ optional)', () => {
+  eq(
+    dialogTextLines({
+      kind: 'select',
+      title: 'Pick one',
+      footer: 'Esc to cancel',
+      command: null,
+      options: [
+        { key: null, label: 'Option A', description: null, focused: true, checked: null, choice: null },
+        { key: null, label: 'Option B', description: null, focused: false, checked: null, choice: null },
+      ],
+      lines: ['Pick one', '❯ Option A', 'Option B', 'Esc to cancel'],
+    }),
+    [],
+  );
+});
+
+await test('dialogTextLines drops any line mentioning auto mode', () => {
+  eq(
+    dialogTextLines({
+      title: null,
+      footer: null,
+      command: null,
+      options: [],
+      lines: ['Tip: auto mode handles these prompts for you', 'AUTO MODE is suggested', 'keep me'],
+    }),
+    ['keep me'],
+  );
+});
+
+await test('dialogTextLines drops a multi-line command line by line', () => {
+  eq(
+    dialogTextLines({
+      title: 'Bash command',
+      footer: null,
+      options: [],
+      command: 'head -1 file\ntail -1 file',
+      lines: ['Bash command', 'head -1 file', 'tail -1 file', 'Do you want to proceed?'],
+    }),
+    ['Do you want to proceed?'],
+  );
+});
+
+await test('dialogTextLines keeps the rest in capture order', () => {
+  eq(
+    dialogTextLines({
+      title: 'Bash command',
+      footer: 'Esc to cancel',
+      command: 'npm audit --json',
+      options: bashCommandDialog.options,
+      lines: [
+        'Esc to cancel',
+        'Audit dependencies',
+        'Bash command',
+        'npm audit --json',
+        'This command requires approval',
+        'Do you want to proceed?',
+      ],
+    }),
+    ['Audit dependencies', 'This command requires approval', 'Do you want to proceed?'],
+  );
+});
+
+await test('dialogTextLines null / no lines / blank lines -> []', () => {
+  eq(dialogTextLines(null), []);
+  eq(dialogTextLines(undefined), []);
+  eq(dialogTextLines({}), []);
+  eq(dialogTextLines({ lines: ['', '   '] }), []);
+});
+
+// --- askAnswers (FOC-810 pending ask) -----------------------------------------
+
+const ask2 = {
+  toolUseId: 'tu_1',
+  questions: [
+    { question: 'Which database?', header: 'DB', multiSelect: false, options: [{ label: 'Postgres' }, { label: 'SQLite' }] },
+    { question: 'Which extras?', header: 'Extras', multiSelect: true, options: [{ label: 'Tests' }, { label: 'Docs' }] },
+  ],
+};
+
+await test('askAnswers single question answered with one choice -> ok', () => {
+  const r = askAnswers(ask2, { 0: { choices: [1], text: '' }, 1: { choices: [0], text: '' } });
+  eq(r.ok, true);
+  eq(r.answers, [{ choices: [1] }, { choices: [0] }]);
+});
+
+await test('askAnswers single question answered with text -> ok, text wins over a picked choice', () => {
+  eq(askAnswers(ask2, { 0: { choices: [0], text: ' MariaDB ' }, 1: { choices: [1], text: '' } }).answers[0], {
+    choices: [],
+    text: 'MariaDB',
+  });
+  eq(askAnswers(ask2, { 0: { choices: [], text: 'MariaDB' }, 1: { choices: [0], text: '' } }).ok, true);
+});
+
+await test('askAnswers single question with nothing -> not ok with a reason', () => {
+  const r = askAnswers(ask2, { 0: { choices: [], text: '' } });
+  eq(r.ok, false);
+  eq(typeof r.reason, 'string');
+});
+
+await test('askAnswers single question with two choices -> not ok (exactly one)', () => {
+  eq(askAnswers(ask2, { 0: { choices: [0, 1], text: '' } }).ok, false);
+});
+
+await test('askAnswers multiSelect with choices -> ok, no text field', () => {
+  const r = askAnswers(ask2, { 0: { choices: [0], text: '' }, 1: { choices: [0, 1], text: '' } });
+  eq(r.ok, true);
+  eq(r.answers, [{ choices: [0] }, { choices: [0, 1] }]);
+});
+
+await test('askAnswers multiSelect empty -> not ok, and text alone does not save it', () => {
+  eq(askAnswers(ask2, { 0: { choices: [0], text: '' }, 1: { choices: [], text: 'nope' } }).ok, false);
+  eq(askAnswers(ask2, { 0: { choices: [0], text: '' }, 1: { choices: [], text: '' } }).ok, false);
+});
+
+await test('askAnswers(null) / empty selection -> not ok', () => {
+  eq(askAnswers(null, {}).ok, false);
+  eq(askAnswers(ask2, {}).ok, false);
+});
+
+// --- answerResultText (FOC-810 honest success banners) -------------------------
+
+await test('answerResultText clean success -> "Answer sent."', () => {
+  eq(answerResultText({ answered: true }), 'Answer sent.');
+  eq(answerResultText({ sent: true, closed: true }), 'Answer sent.');
+  eq(answerResultText(null), 'Answer sent.');
+  eq(answerResultText(undefined), 'Answer sent.');
+});
+
+await test('answerResultText answered/closed false -> the dialog is still on screen', () => {
+  eq(answerResultText({ answered: false }), 'The dialog is still on screen — check the Terminal.');
+  eq(answerResultText({ sent: true, closed: false }), 'The dialog is still on screen — check the Terminal.');
+});
+
+await test('answerResultText resumedFrom -> the already-applied sentence (singular and plural)', () => {
+  eq(answerResultText({ answered: true, resumedFrom: 1 }), 'Sent — the first 1 answer was already applied.');
+  eq(answerResultText({ answered: true, resumedFrom: 2 }), 'Sent — the first 2 answers were already applied.');
+  // resumedFrom 0 is no resume at all.
+  eq(answerResultText({ answered: true, resumedFrom: 0 }), 'Answer sent.');
+});
+
+// --- chatDisabledReason with the card (FOC-810) --------------------------------
+
+await test('chatDisabledReason pendingAsk -> answer the question above the chat', () => {
+  eq(
+    chatDisabledReason({ host: 'reachable', state: 'needs-input', pendingAsk: { toolUseId: 'tu_1', questions: [] } }),
+    'The Supervisor is asking you — answer the question above the chat.',
+  );
+});
+
+await test('chatDisabledReason dialog -> answer it in the card above the chat', () => {
+  eq(
+    chatDisabledReason({ host: 'reachable', state: 'needs-input', dialog: { id: 'd', kind: 'permission' } }),
+    'The Supervisor is waiting on a dialog — answer it in the card above the chat.',
+  );
+});
+
+await test('chatDisabledReason plain needs-input (no dialog/ask in the snapshot) -> the Terminal hint', () => {
+  eq(chatDisabledReason({ host: 'reachable', state: 'needs-input' }), 'The Supervisor is asking for input — answer it in the Terminal.');
+});
+
+await test('chatDisabledReason host problems still come first, pendingAsk or not', () => {
+  eq(
+    chatDisabledReason({ host: 'unreachable', state: 'needs-input', pendingAsk: { toolUseId: 't', questions: [] } }),
+    'The Supervisor host is not reachable.',
+  );
+});
+
+// --- inboxPrimaryAction ask/dialog (FOC-810) -----------------------------------
+
+await test('inboxPrimaryAction answerKind ask -> ask-card / Answer the question', () => {
+  eq(inboxPrimaryAction({ state: 'pending', answerKind: 'ask', answerable: true, category: 'ask' }), {
+    kind: 'ask-card',
+    label: 'Answer the question',
+  });
+});
+
+await test('inboxPrimaryAction answerKind dialog -> dialog-card / Answer the dialog', () => {
+  eq(inboxPrimaryAction({ state: 'pending', answerKind: 'dialog', answerable: true, category: 'dialog' }), {
+    kind: 'dialog-card',
+    label: 'Answer the dialog',
+  });
+});
+
+// --- inboxQuestionLines / inboxFactLines (the blank-Cockpit crash, React #31)
+
+const askItem = {
+  id: 'ask:tu_1',
+  category: 'ask',
+  answerKind: 'ask',
+  questions: [
+    { question: 'Which database?', header: 'DB', multiSelect: false, options: [{ label: 'Postgres' }] },
+    { question: 'Which extras?', header: 'Extras', multiSelect: true, options: [{ label: 'Tests' }] },
+  ],
+};
+
+await test('inboxQuestionLines ask item -> [] (AskCard renders the question objects)', () => {
+  eq(inboxQuestionLines(askItem), []);
+  eq(inboxQuestionLines({ category: 'ask', questions: ['plain'] }), []);
+});
+
+await test('inboxQuestionLines gate item with string questions -> same strings', () => {
+  eq(inboxQuestionLines({ category: 'gate', questions: ['Proceed with the migration?', 'Which branch?'] }), [
+    'Proceed with the migration?',
+    'Which branch?',
+  ]);
+});
+
+await test('inboxQuestionLines mixed strings/objects -> strings only (object contributes its question field)', () => {
+  eq(
+    inboxQuestionLines({
+      category: 'gate',
+      questions: ['plain string', { question: 'from the object', header: 'H' }, { header: 'no question field' }, 42, null],
+    }),
+    ['plain string', 'from the object'],
+  );
+});
+
+await test('inboxQuestionLines missing/empty questions -> []', () => {
+  eq(inboxQuestionLines({ category: 'gate' }), []);
+  eq(inboxQuestionLines({ category: 'gate', questions: [] }), []);
+  eq(inboxQuestionLines(null), []);
+});
+
+await test('inboxFactLines object map -> "key: value" strings (primitive values only)', () => {
+  eq(
+    inboxFactLines({ facts: { branch: 'main', commits: 3, clean: true, nested: { a: 1 }, list: [1], nothing: null } }),
+    ['branch: main', 'commits: 3', 'clean: true'],
+  );
+});
+
+await test('inboxFactLines array facts -> entries as strings, object entries skipped', () => {
+  eq(inboxFactLines({ facts: ['branch=main', 'clean=yes'] }), ['branch=main', 'clean=yes']);
+  eq(inboxFactLines({ facts: ['keep', { note: 'skipped' }] }), ['keep']);
+});
+
+await test('inboxFactLines missing facts / other shapes -> []', () => {
+  eq(inboxFactLines({}), []);
+  eq(inboxFactLines({ facts: 'not-a-list' }), []);
+  eq(inboxFactLines({ facts: 42 }), []);
+  eq(inboxFactLines(null), []);
 });
 
 // --- Summary ----------------------------------------------------------------

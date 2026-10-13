@@ -22,14 +22,11 @@
 // ESM, zero deps (Node 18+).
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join, dirname, basename } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, basename } from "node:path";
 import { inferTaskIdFromBranch, discoverTranscriptsForRuns, TASK_ID_RE } from "./ledger.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
-
-const __dir = dirname(fileURLToPath(import.meta.url));
-const root = join(__dir, "..");
-const RUNS_DIR = join(root, ".state", "runs");
+// FOC-811: the runs dir comes from the shared path seam.
+import { runsDir } from "./fenix-paths.mjs";
 
 // Same prefix list the ledger infers from kickoff text — a local copy here
 // drifted and FOC- runs went untagged.
@@ -102,6 +99,7 @@ export function backfillDecision(data, text, { recheckBranch = false } = {}) {
 if (isMain) {
   const apply = process.argv.includes("--apply");
   const recheckBranch = process.argv.includes("--recheck-branch");
+  const RUNS_DIR = runsDir();
   const files = existsSync(RUNS_DIR)
     ? readdirSync(RUNS_DIR).filter((f) => f.endsWith(".json"))
     : [];

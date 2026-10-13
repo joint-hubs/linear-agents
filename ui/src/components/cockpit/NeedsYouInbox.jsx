@@ -11,13 +11,18 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { postGateAnswer, postHoldAnswer, postGateNotify } from '../../api';
-import { inboxPrimaryAction, formatAge } from '../../cockpitModel';
+import { inboxPrimaryAction, inboxQuestionLines, inboxFactLines, formatAge } from '../../cockpitModel';
+import AskCard from './AskCard';
+import DialogCard from './DialogCard';
+import { useSupervisorAnswers, AnswerSentBanner } from './SupervisorPanel';
 
 const CATEGORY_TONE = {
   gate: 'waiting',
   approval: 'running',
   hold: 'waiting',
   problem: 'danger',
+  ask: 'waiting',
+  dialog: 'waiting',
 };
 
 // Non-pending states are said in words, never only in colour.
@@ -58,14 +63,32 @@ function AnswerResult({ result, item, onTold }) {
   );
 }
 
-function NeedsYouItem({ item, onAskSupervisor }) {
+function NeedsYouItem({ item, onAskSupervisor, onRefresh }) {
   const [answerText, setAnswerText] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null); // { recorded, notified }
-
   const action = inboxPrimaryAction(item);
+  // What the shared answer state is about — the ask's toolUseId or the
+  // dialog's id. useSupervisorAnswers resets its banner/error when a
+  // different one appears (a stale "Answer sent." must not sit under the
+  // next question or dialog).
+  const answerIdentity = action.kind === 'ask-card'
+    ? 'ask:' + item.toolUseId
+    : action.kind === 'dialog-card' && item.dialog
+      ? 'dialog:' + item.dialog.id
+      : null;
+  // Supervisor interactivity (FOC-810): ask/dialog items answer in place with
+  // the same cards and submit path the Supervisor panel uses — onRefresh
+  // threaded through so an answer/409 refreshes the snapshot like the panel
+  // does.
+  const answers = useSupervisorAnswers({ onRefresh, identity: answerIdentity });
+  // The generic lists render plain strings only — ask items carry question
+  // objects for AskCard (React error #31 when rendered raw), gate facts are an
+  // object map (inboxFactLines renders "key: value").
+  const questionLines = inboxQuestionLines(item);
+  const factLines = inboxFactLines(item);
 
   // Gates go through the gate library (text + optional note); holds through the
   // hold library (option label or free text, no separate note field).
@@ -108,16 +131,16 @@ function NeedsYouItem({ item, onAskSupervisor }) {
 
       {item.summary && <div className="ck-inbox-summary">{item.summary}</div>}
 
-      {(item.questions || []).length > 0 && (
+      {questionLines.length > 0 && (
         <ul className="ck-inbox-list">
-          {item.questions.map((q, i) => (
+          {questionLines.map((q, i) => (
             <li key={i}>{q}</li>
           ))}
         </ul>
       )}
-      {(item.facts || []).length > 0 && (
+      {factLines.length > 0 && (
         <ul className="ck-inbox-list ck-inbox-facts">
-          {item.facts.map((f, i) => (
+          {factLines.map((f, i) => (
             <li key={i}>{f}</li>
           ))}
         </ul>
@@ -202,6 +225,28 @@ function NeedsYouItem({ item, onAskSupervisor }) {
         </div>
       )}
 
+      {action.kind === 'ask-card' && (
+        <AskCard
+          key={item.toolUseId}
+          ask={{ toolUseId: item.toolUseId, questions: item.questions }}
+          busy={answers.busy}
+          error={answers.error}
+          onSubmit={(ans) => answers.submitAsk(item.toolUseId, ans)}
+        />
+      )}
+
+      {action.kind === 'dialog-card' && item.dialog && (
+        <DialogCard
+          key={item.dialog.id}
+          dialog={item.dialog}
+          busy={answers.busy}
+          error={answers.error}
+          onChoose={(choice, noteArg) => answers.submitDialog(item.dialog.id, choice, noteArg)}
+        />
+      )}
+
+      {answers.sent && <AnswerSentBanner result={answers.result} />}
+
       {action.kind === 'ask' && (
         <div className="ck-inbox-actions">
           <button
@@ -265,7 +310,7 @@ function NotifyButton({ item, onTold, existing }) {
   );
 }
 
-export default function NeedsYouInbox({ items, onAskSupervisor }) {
+export default function NeedsYouInbox({ items, onAskSupervisor, onRefresh }) {
   // Newest first regardless of the order the API sent (createdAt desc).
   const sorted = [...(items || [])].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
@@ -278,7 +323,7 @@ export default function NeedsYouInbox({ items, onAskSupervisor }) {
       ) : (
         <div className="ck-inbox-list-wrap">
           {sorted.map((item) => (
-            <NeedsYouItem key={item.id} item={item} onAskSupervisor={onAskSupervisor} />
+            <NeedsYouItem key={item.id} item={item} onAskSupervisor={onAskSupervisor} onRefresh={onRefresh} />
           ))}
         </div>
       )}

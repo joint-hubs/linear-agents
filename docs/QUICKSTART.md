@@ -47,6 +47,24 @@ Host prerequisites:
 - Windows only: Git for Windows — the `fenix.cmd` / `fenix.ps1` shims run the
   `fenix` script with Git Bash. WSL users run `./fenix` inside WSL instead.
 
+On Linux hosts, `./fenix` builds the image for your user's uid/gid
+automatically (FOC-803), so the bind-mounted host files — `.fenix/secrets/`
+and `.fenix/config/` — stay readable and writable inside the container. Run
+`./fenix` as your normal user, not root: as root the container keeps uid 1000
+and cannot read your keys. If your user (or uid) changes, rebuild once:
+`./fenix up`.
+
+A rebuild does not touch the `fenix_fenix-data` volume, though: it keeps the
+uid it was first created with, so after a uid change `/data` stays unwritable
+and the supervisor's health checks and the telemetry store fail. Re-own the
+volume once:
+
+```bash
+docker run --rm -u 0 -v fenix_fenix-data:/data --entrypoint chown fenix:dev -R $(id -u):$(id -g) /data
+```
+
+`fenix doctor` names this fix on every failing `/data` check.
+
 Keys (the wizard asks once, validates each key live, and stores it owner-only
 under `.fenix/secrets/`):
 
@@ -201,6 +219,10 @@ Common cases:
   `fenix keys` later.
 - **Key rotation** — `fenix keys`, then `fenix stop` and `fenix up` (secrets
   are read at container start).
+- **`fenix up` exits 4 / the supervisor is unhealthy after your uid changed** —
+  the image was rebuilt for the new uid, but the data volume still belongs to
+  the old one, so `/data` stays unwritable. Re-own the volume once (see
+  "Before you start"), then `./fenix up` again.
 - **A config file has a `.fenix-new` twin** — you edited the file (e.g. in the
   dashboard prompt editor) and the image ships a new version of it too; the
   fresh image version was written next to your file. Merge the twin's changes
@@ -249,8 +271,8 @@ with Debian 12 on `e2-standard-4` (4 vCPU / 16 GB) and a 100 GB disk.
    git clone https://github.com/joint-hubs/linear-agents.git ~/fenix && cd ~/fenix && ./fenix up
    ```
 
-   Check `id -u` first: until FOC-803 the host user must be uid 1000 (the
-   container user), or the container cannot read the keys the wizard writes.
+   Any host user works: `./fenix` builds the image for your uid/gid
+   automatically (see "Before you start"). Run it as yourself, not root.
 
 3. The tunnel, from your machine — keep it open while you use the dashboard,
    then open `http://localhost:4600`:

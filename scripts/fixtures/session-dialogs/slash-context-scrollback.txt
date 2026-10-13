@@ -1,0 +1,50 @@
+
+● done.
+
+✻ Cooked for 0s · done 9:10 PM
+
+❯ MOCK-TOOL-ASK1 again
+
+● User answered Claude's questions:
+  ⎿  · npm audit found 2 critical advisories in devDependencies. What now? → Diagnose first, then decide
+
+● done.
+
+✻ Sautéed for 0s · done 9:10 PM
+
+❯ MOCK-TOOL-ASK3 please
+
+● User answered Claude's questions:
+  ⎿  · Which reviewers should look at this PR? → Security, Docs
+
+● done.
+
+✻ Cooked for 0s · done 9:12 PM
+
+❯ /context
+  ⎿  Context Usage
+     ⛀ ⛀ ⛁ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   xiaomi/mimo-v2.6-pro
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   2.4k/200k tokens (1%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   Estimated usage by category
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System prompt: 420 tokens (0.2%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Memory files: 42 tokens (0.0%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Skills: 2k tokens (1.0%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛶ Free space: 164.6k (82.3%)
+     ⛶ ⛶ ⛶ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝   ⛝ Autocompact buffer: 33k tokens (16.5%)
+     ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝
+
+     Auto-compact window: 200k tokens (default for an unrecognized model)
+
+     Memory files · /memory
+     └ 1 file · 42 tokens
+
+     Skills · /skills
+     └ 13 skills · 2k tokens
+
+     /context all to expand
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← for agents

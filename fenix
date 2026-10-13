@@ -37,6 +37,31 @@ Exit codes: 0 ok | 2 usage | 3 preflight failed | 4 health timeout | 5 key rejec
 EOF
 }
 
+# --- host uid for the image build (FOC-803) ----------------------------------
+
+# On a Linux host the image is built for the invoking user's uid/gid, so the
+# bind-mounted host files (.fenix/secrets, .fenix/config) stay readable and
+# writable inside the container. Docker Desktop (macOS/Windows) maps file
+# ownership itself — leave the variables unset there. As root, warn and keep
+# the default uid 1000: the container never runs as root.
+set_build_uid() {
+  case "$(uname -s)" in
+    Linux) ;;
+    *) return 0 ;;
+  esac
+  if [ -n "${FENIX_UID:-}" ] || [ -n "${FENIX_GID:-}" ]; then
+    return 0
+  fi
+  if [ "$(id -u)" = "0" ]; then
+    printf 'WARN running fenix as root: the container keeps uid 1000; run fenix as your normal user\n'
+    return 0
+  fi
+  FENIX_UID="$(id -u)"
+  FENIX_GID="$(id -g)"
+  export FENIX_UID FENIX_GID
+}
+set_build_uid
+
 # --- preflight ---------------------------------------------------------------
 
 pf_ok()        { printf 'OK  %s\n' "$1"; }
@@ -47,6 +72,14 @@ preflight() {
   # $1 = strict (first FAIL exits 3) | full (report every check, return 1 on any FAIL)
   mode="$1"
   pf_fail=0
+
+  # FOC-803: which uid/gid the image build targets (Linux only — Docker
+  # Desktop maps file ownership itself, so the line stays silent there).
+  case "$(uname -s)" in
+    Linux)
+      pf_ok "host uid for the image build: ${FENIX_UID:-1000}:${FENIX_GID:-1000}"
+      ;;
+  esac
 
   if command -v docker >/dev/null 2>&1; then
     pf_ok "docker on PATH"

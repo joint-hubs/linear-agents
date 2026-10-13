@@ -97,6 +97,8 @@ import { appendShadow, canonicalJson, createDecisionCaller, DECISION_STEP, SHADO
 import { loadGraph, validateGraph } from "./graph-validate.mjs";
 import { getRegistryEntry, loadRegistry } from "./decision-registry.mjs";
 import { appendLabel, RUNS_DIR } from "./decision-log.mjs";
+// FOC-811: the per-run store paths come from the shared path seam.
+import { runsDir } from "./fenix-paths.mjs";
 import { AC_TESTABLE_DECISION, runPlanAcNode } from "./plan-ac.mjs";
 import { foldGateAnswers, runPlanIntentNode } from "./plan-intent.mjs";
 import { runPlanIntentSelectNode, SELECT_SCORE_DECISION, selectDeltaLabel } from "./plan-intent-select.mjs";
@@ -454,7 +456,7 @@ export function createDefaultGenerator({
   apiKey,
   runId = process.env.LA_RUN_ID,
   taskKey = process.env.LA_TASK_ID ?? null,
-  shadowDir = runId ? join(root, ".state", "runs", runId) : null,
+  shadowDir = runId ? join(runsDir(), runId) : null,
   fetchImpl = fetch,
   timeoutMs = G_TIMEOUT_MS,
   now = () => new Date().toISOString(),
@@ -801,7 +803,7 @@ export function createGraphRunner({
 
   const emitGate = gateEmitter ?? defaultGateEmitter();
   const linear = linearEffect ?? defaultLinearEffect();
-  const store = createStore({ path: storePath ?? join(root, ".state", "runs", runId, "graph-steps.jsonl") });
+  const store = createStore({ path: storePath ?? join(runsDir(), runId, "graph-steps.jsonl") });
   // FOC-476: the readiness retry budget lives next to the run store — per run
   // by construction, dies with the run directory.
   const readyRetriesPath = readyRetriesPathFor(store.path);

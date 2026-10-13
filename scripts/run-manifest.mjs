@@ -11,27 +11,22 @@
 import { readFileSync, mkdirSync, existsSync, statSync, readdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { join, dirname, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { recordManifest, recordTaskLink } from "./telemetry-store.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
-
-// ---------------------------------------------------------------------------
-// Paths
-// ---------------------------------------------------------------------------
-
-const __dir = dirname(fileURLToPath(import.meta.url));
-const root = join(__dir, "..");
-const RUNS_DIR = join(root, ".state", "runs");
+// FOC-811: the runs dir resolves at call time — LA_STATE_ROOT when set (the
+// container points it at the /data volume), else the repo's .state/runs.
+import { runsDir } from "./fenix-paths.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Ensure .state/runs/ exists. */
+/** Ensure the runs dir (LA_STATE_ROOT/runs or <repo>/.state/runs) exists. */
 function ensureRunsDir() {
-  if (!existsSync(RUNS_DIR)) mkdirSync(RUNS_DIR, { recursive: true });
+  const dir = runsDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
 /** Get current git branch from the observed workspace, swallowing errors. */
@@ -119,7 +114,7 @@ function cmdStart(runId, squad, sourcePath, { headless = false } = {}) {
   };
 
   ensureRunsDir();
-  const filePath = join(RUNS_DIR, `${runId}.json`);
+  const filePath = join(runsDir(), `${runId}.json`);
   atomicWriteJSON(filePath, manifest);
   try {
     recordManifest(manifest, "started", { sourcePath: filePath });
@@ -134,7 +129,7 @@ function cmdTag(runId, taskId) {
     process.exit(1);
   }
 
-  const filePath = join(RUNS_DIR, `${runId}.json`);
+  const filePath = join(runsDir(), `${runId}.json`);
   if (!existsSync(filePath)) {
     process.exit(0); // idempotent, non-fatal
   }
@@ -167,7 +162,7 @@ function cmdSetTask(runId, taskId) {
     process.exit(1);
   }
 
-  const filePath = join(RUNS_DIR, `${runId}.json`);
+  const filePath = join(runsDir(), `${runId}.json`);
   if (!existsSync(filePath)) {
     console.error(`set-task: manifest not found: ${runId}`);
     process.exit(0);
@@ -206,7 +201,7 @@ async function cmdEnd(runId, exitCodeStr) {
     process.exit(1);
   }
 
-  const filePath = join(RUNS_DIR, `${runId}.json`);
+  const filePath = join(runsDir(), `${runId}.json`);
   if (!existsSync(filePath)) {
     console.error(`[run-manifest] Warning: manifest not found: ${filePath}`);
     process.exit(0);

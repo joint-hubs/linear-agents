@@ -479,21 +479,22 @@ export function annotateVerdict({ runId, path, note, who }) {
 // ── answer notice rows (FOC-783) ─────────────────────────────────────────────
 
 /**
- * The edits.jsonl row for a gate or hold answer made from the dashboard. The
- * ANSWER itself is written by supervisor-gate.mjs's answerGate/answerHold —
- * the same rules the CLI enforces; this is only the audit/notice row, through
- * the SAME single-writer append and seq logic as every other write here, so
- * the waker's and the hook's watermarks stay one sequence.
+ * The edits.jsonl row for a gate, hold or ask answer made from the dashboard.
+ * The ANSWER itself is written by supervisor-gate.mjs's answerGate/answerHold
+ * (gates and holds) or delivered to the Supervisor's pane by the session host
+ * (an ask, FOC-810); this is only the audit/notice row, through the SAME
+ * single-writer append and seq logic as every other write here, so the waker's
+ * and the hook's watermarks stay one sequence.
  *
  * `notified: true` means the Supervisor was already told through its session:
  * the row stays in the audit, but the wake and the edits hook skip it (no
  * wake, no re-show) — the notice was delivered where the answer happened.
  */
-export function recordAnswerRow({ runId, kind, id, text, who, notified }) {
+export function recordAnswerRow({ runId, kind, id, text, who, notified, payload }) {
   if (!validRunId(runId)) throw badPath(`invalid runId: ${JSON.stringify(runId ?? null)}`);
-  if (kind !== "gate-answer" && kind !== "hold-answer") {
+  if (kind !== "gate-answer" && kind !== "hold-answer" && kind !== "ask-answer") {
     throw Object.assign(
-      new Error(`kind must be "gate-answer" or "hold-answer", got ${JSON.stringify(kind ?? null)}`),
+      new Error(`kind must be "gate-answer", "hold-answer" or "ask-answer", got ${JSON.stringify(kind ?? null)}`),
       { code: "invalid-kind" },
     );
   }
@@ -516,10 +517,15 @@ export function recordAnswerRow({ runId, kind, id, text, who, notified }) {
     ts: new Date().toISOString(),
     who,
     runId,
-    path: isGate ? `gates/${id}.json` : "holds.json",
+    // gate answers name the gate file, hold answers the holds store; an ask
+    // answer has no record file — the path names the transcript tool_use.
+    path: isGate ? `gates/${id}.json` : kind === "ask-answer" ? `ask/${id}` : "holds.json",
     type: kind,
-    changes: [{ field: isGate ? "answer" : `${id}.answer`, before: null, after: trunc(text) }],
+    changes: [{ field: kind === "hold-answer" ? `${id}.answer` : "answer", before: null, after: trunc(text) }],
     notified: Boolean(notified),
+    // FOC-810 ask answers carry a structured payload (toolUseId + the chosen
+    // labels / text per question) verbatim — the caller bounds its size.
+    ...(payload !== null && typeof payload === "object" ? { payload } : {}),
   };
   appendEditRow(runId, row);
   return row;

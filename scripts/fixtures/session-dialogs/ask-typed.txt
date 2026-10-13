@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  xiaomi/mimo-v2.6-pro · API Usage Billing
+ ▝▝   ▝▝   /data/workspaces
+
+
+❯ MOCK-TOOL-BASH please
+
+  Ran 1 shell command
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Churned for 0s · done 9:09 PM
+
+❯ MOCK-TOOL-ASK1 please
+
+● User answered Claude's questions:
+  ⎿  · npm audit found 2 critical advisories in devDependencies. What now? → Separate ticket
+
+● done.
+
+✻ Churned for 0s · done 9:09 PM
+
+❯ MOCK-TOOL-ASK2 please
+
+● User answered Claude's questions:
+  ⎿  · Should the export land in v1? → Narrow the AC
+     · Which checks should run before the PR? → Unit tests, npm audit
+
+● done.
+
+✻ Cooked for 0s · done 9:10 PM
+
+❯ MOCK-TOOL-ASK1 again
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Audit
+
+npm audit found 2 critical advisories in devDependencies. What now?
+
+  1. Override tinypool
+     Pin the patched version, ticket the rest
+  2. Separate ticket
+     Nothing now
+  3. Upgrade vitest
+     Major bump
+❯ 4. Diagnose first, then decide
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+

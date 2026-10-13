@@ -97,6 +97,10 @@
       "reason": "isolation audit FOC-776: mkdtemp/tmpdir fixtures only; fetch and git are injected (no network, no real git config writes); no ports, no socket binds, no telemetry DB"
     },
     {
+      "file": "fenix-doctor.test.mjs",
+      "reason": "isolation audit FOC-803: mkdtemp/tmpdir fixtures only (the chmod variants additionally forced through a fake fsImpl); no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "fenix-paths.test.mjs",
       "reason": "isolation audit FOC-770: pure path resolution with explicit env objects and a read-only scan of scripts/*.mjs; no fs writes, no ports, no socket binds, no telemetry DB"
     },
@@ -243,6 +247,10 @@
     {
       "file": "security-scan.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "session-dialog.test.mjs",
+      "reason": "isolation audit FOC-810: pure parsers over checked-in fixture text (scripts/fixtures/session-dialogs read read-only); the only writes are the mkdtemp transcript for the tail-read test; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
       "file": "squad-config-indirect.test.mjs",

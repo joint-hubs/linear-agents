@@ -5,7 +5,8 @@
 //        --by human|agent [--run <runId>]
 //   node scripts/decision-log.mjs export --decision <decisionId> [--out <path>]
 //
-// decisions.jsonl (one file per LA_RUN_ID under <repo>/.state/runs/) carries
+// decisions.jsonl (one file per LA_RUN_ID under LA_STATE_ROOT or
+// <repo>/.state — runs/) carries
 // two line types:
 //   · {type:"event", ...} — one per registry-backed decision call, written by
 //     decision-call.mjs: identity (eventId), the scrubbed input AS SENT, the
@@ -19,7 +20,8 @@
 //     via:"gate"|"verdict"|"merge").
 //
 // The label lands in the run file HOLDING the event: directly when --run is
-// given, otherwise by a newest-first scan of .state/runs/*/decisions.jsonl.
+// given, otherwise by a newest-first scan of the runs dir (LA_STATE_ROOT or
+// <repo>/.state — runs/*/decisions.jsonl).
 // Unknown events are refused — an outcome pointing at nothing is worse than
 // none, because the export joins on it. Errors exit non-zero; the auto-join
 // callers treat every failure from appendLabel as a warning instead.
@@ -37,11 +39,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { SHADOW_EVENT_TYPE, SHADOW_FILENAME } from "./decision-call.mjs";
+// FOC-811: the runs dir comes from the shared path seam — LA_STATE_ROOT when
+// set (the container points it at the /data volume), else <repo>/.state/runs.
+// Imported as defaultRunsDir so the exported functions below resolve it at
+// call time; RUNS_DIR is frozen at import and kept only for compatibility.
+import { runsDir as defaultRunsDir } from "./fenix-paths.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 export const ROOT = join(__dir, "..");
 // Same layout decision-call.mjs writes to: one decisions.jsonl per run id.
-export const RUNS_DIR = join(ROOT, ".state", "runs");
+export const RUNS_DIR = defaultRunsDir();
 
 export const SHADOW_LABEL_TYPE = "label";
 export const LABEL_BY = ["human", "agent"];
@@ -118,7 +125,7 @@ function fileHasEvent(path, eventId) {
  * otherwise the newest log containing it. Throws when the event is nowhere —
  * an unknown event must not collect an outcome.
  */
-export function findEventFile(eventId, { runId = null, runsDir = RUNS_DIR } = {}) {
+export function findEventFile(eventId, { runId = null, runsDir = defaultRunsDir() } = {}) {
   if (runId) {
     const path = join(runsDir, runId, SHADOW_FILENAME);
     if (!existsSync(path)) throw new Error(`no decisions log for run ${runId}: ${path}`);
@@ -135,7 +142,7 @@ export function findEventFile(eventId, { runId = null, runsDir = RUNS_DIR } = {}
  * event or an unwritable log — callers decide whether that is fatal (CLI) or
  * a warning (auto-joins).
  */
-export function appendLabel({ eventId, outcome, by, source = "manual", via = null, runId = null, runsDir = RUNS_DIR, now = defaultNow }) {
+export function appendLabel({ eventId, outcome, by, source = "manual", via = null, runId = null, runsDir = defaultRunsDir(), now = defaultNow }) {
   const record = labelRecord({ eventId, outcome, by, source, via, now });
   const found = findEventFile(eventId, { runId, runsDir });
   appendFileSync(found.path, `${JSON.stringify(record)}\n`);
@@ -148,7 +155,7 @@ export function appendLabel({ eventId, outcome, by, source = "manual", via = nul
  * label (unknown event, unwritable log) is a warning, never a broken primary
  * flow. No provenance → nothing labelled, nothing warned.
  */
-export function autoLabel(pairs, { outcome, by, via, runsDir = RUNS_DIR } = {}) {
+export function autoLabel(pairs, { outcome, by, via, runsDir = defaultRunsDir() } = {}) {
   const labelled = [];
   const warnings = [];
   for (const pair of pairs ?? []) {
@@ -209,7 +216,7 @@ export function splitFor(eventId, decisionId) {
  * exports must not), and each record's key order is the literal below. Legacy
  * lines (no `type`, no eventId) parse but are skipped.
  */
-export function exportDecisionEvents(decisionId, { runsDir = RUNS_DIR } = {}) {
+export function exportDecisionEvents(decisionId, { runsDir = defaultRunsDir() } = {}) {
   const records = [];
   const logs = existsSync(runsDir)
     ? readdirSync(runsDir)

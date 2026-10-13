@@ -339,11 +339,28 @@ try {
   const emptyPanel = decisionsPanel({ era: "all", eraBoundary: BOUNDARY }, { runsDir: join(temp, "absent") });
   check("missing dir → empty panel, no caveats", emptyPanel.data.totals.events === 0 && emptyPanel.data.decisions.length === 0 && emptyPanel.caveats.length === 0);
 
-  // --- resolveRunsDir: env override, repo default -----------------------------------
-  process.env.LA_DECISION_RUNS_DIR = join(temp, "custom-runs");
-  check("LA_DECISION_RUNS_DIR wins", resolveRunsDir() === join(temp, "custom-runs"));
-  delete process.env.LA_DECISION_RUNS_DIR;
-  check("default is <repo root>/.state/runs", resolveRunsDir() === join(ROOT, ".state", "runs"), `got ${resolveRunsDir()}`);
+  // --- resolveRunsDir: env override, LA_STATE_ROOT, repo default ---------------------
+  // The ambient env may carry LA_STATE_ROOT (the container test lane sets it,
+  // FOC-811), which silently redirects the "default" — pin both overrides off
+  // around the assertions that name a default, and restore whatever was set.
+  const savedRunsEnv = {
+    LA_DECISION_RUNS_DIR: process.env.LA_DECISION_RUNS_DIR,
+    LA_STATE_ROOT: process.env.LA_STATE_ROOT,
+  };
+  try {
+    delete process.env.LA_DECISION_RUNS_DIR;
+    process.env.LA_STATE_ROOT = temp;
+    check("LA_STATE_ROOT default is <stateRoot>/runs", resolveRunsDir() === join(temp, "runs"), `got ${resolveRunsDir()}`);
+    delete process.env.LA_STATE_ROOT;
+    check("default is <repo root>/.state/runs", resolveRunsDir() === join(ROOT, ".state", "runs"), `got ${resolveRunsDir()}`);
+    process.env.LA_DECISION_RUNS_DIR = join(temp, "custom-runs");
+    check("LA_DECISION_RUNS_DIR wins", resolveRunsDir() === join(temp, "custom-runs"));
+  } finally {
+    for (const [key, value] of Object.entries(savedRunsEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 
   check("SMALL_SAMPLE_N is 30", SMALL_SAMPLE_N === 30);
 } finally {

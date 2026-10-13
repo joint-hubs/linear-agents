@@ -13,6 +13,7 @@ import { cockpitPrefill } from '../cockpitModel';
 import SupervisorPanel from '../components/cockpit/SupervisorPanel';
 import NeedsYouInbox from '../components/cockpit/NeedsYouInbox';
 import LiveChildren from '../components/cockpit/LiveChildren';
+import PanelBoundary from '../components/cockpit/PanelBoundary';
 
 const COUNT_LABELS = [
   ['needsYou', 'needs you'],
@@ -90,18 +91,27 @@ export default function Cockpit() {
         ))}
       </div>
 
+      {/* Each panel in its own boundary — one bad item shape blanks a panel,
+          never the whole Cockpit (PanelBoundary). */}
       <div className="ck-grid">
-        <SupervisorPanel
-          supervisor={supervisor}
-          tab={tab}
-          onTabChange={setTab}
-          draft={draft}
-          onDraftChange={setDraft}
-        />
-        <NeedsYouInbox items={data?.needsYou || []} onAskSupervisor={askSupervisor} />
+        <PanelBoundary label="Supervisor">
+          <SupervisorPanel
+            supervisor={supervisor}
+            tab={tab}
+            onTabChange={setTab}
+            draft={draft}
+            onDraftChange={setDraft}
+            onRefresh={refresh}
+          />
+        </PanelBoundary>
+        <PanelBoundary label="Needs you">
+          <NeedsYouInbox items={data?.needsYou || []} onAskSupervisor={askSupervisor} onRefresh={refresh} />
+        </PanelBoundary>
       </div>
 
-      <LiveChildren items={data?.children || []} />
+      <PanelBoundary label="Live children">
+        <LiveChildren items={data?.children || []} />
+      </PanelBoundary>
     </div>
   );
 }

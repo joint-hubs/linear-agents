@@ -468,8 +468,13 @@ function fixture(opts) {
   writeFileSync(path, JSON.stringify(issue(opts)), "utf8");
   return path;
 }
-const run = (args, env = {}) =>
-  spawnSync(process.execPath, [CLI, ...args], { cwd: ROOT, encoding: "utf8", env: { ...process.env, ...env } });
+const run = (args, env = {}) => {
+  const childEnv = { ...process.env, ...env };
+  // Tests below read the repo-root .state/runs and .state/supervisor paths —
+  // an exported dev LA_STATE_ROOT would redirect the child elsewhere.
+  delete childEnv.LA_STATE_ROOT;
+  return spawnSync(process.execPath, [CLI, ...args], { cwd: ROOT, encoding: "utf8", env: childEnv });
+};
 
 test("propose --issue-file prints JSON on stdout and exits 0", () => {
   const r = run(["propose", "--issue", "FOC-999", "--issue-file", fixture({ body: "" })]);

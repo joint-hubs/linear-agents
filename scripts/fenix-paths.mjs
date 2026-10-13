@@ -9,10 +9,27 @@
 // Functions take (env, platform) so tests can pin both; callers use defaults.
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// Root of the mutable run-state tree — run manifests and the per-run decision
+// logs / shadow stores under runs/<runId>/. LA_STATE_ROOT wins when set (the
+// container points it at the /data volume, FOC-811 — LA_ROOT is the image
+// layer and would lose every run on `fenix update`); unset, this is the
+// repo-local `.state` the scripts built for themselves, byte-identical.
+// Resolved at call time so tests can set the env after import.
+export function stateRoot(env = process.env) {
+  if (env.LA_STATE_ROOT) return resolve(env.LA_STATE_ROOT);
+  return join(REPO_ROOT, ".state");
+}
+
+// The runs directory: <stateRoot>/runs — <runId>.json manifests plus one
+// directory per run (decisions.jsonl, graph-steps.jsonl, labels).
+export function runsDir(env = process.env) {
+  return join(stateRoot(env), "runs");
+}
 
 export function dataHome(env = process.env, platform = process.platform) {
   if (env.LA_DATA_HOME) return env.LA_DATA_HOME;

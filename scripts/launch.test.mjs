@@ -418,15 +418,19 @@ test('cmdStart writes consolePid as a number > 0', async () => {
   // process.ppid inside the child will be the PID of the cmd.exe or node process
   // that spawned it, which is always > 0.
   await new Promise((resolve, reject) => {
+    const env = {
+      ...process.env,
+      LA_TELEMETRY_HOME: temp,
+      LA_TELEMETRY_DB: join(temp, 'telemetry.sqlite'),
+      LA_TASK_ID: 'JOI-9',
+      LA_LAUNCHED_BY: 'dashboard',
+      LA_WINDOW_TITLE: 'fenix - dev - JOI-9',
+    };
+    // The test reads the manifest from the repo's .state/runs — an exported
+    // dev LA_STATE_ROOT would redirect the child elsewhere.
+    delete env.LA_STATE_ROOT;
     const child = spawn('node', ['scripts/run-manifest.mjs', 'start', runId, 'dev'], {
-      env: {
-        ...process.env,
-        LA_TELEMETRY_HOME: temp,
-        LA_TELEMETRY_DB: join(temp, 'telemetry.sqlite'),
-        LA_TASK_ID: 'JOI-9',
-        LA_LAUNCHED_BY: 'dashboard',
-        LA_WINDOW_TITLE: 'fenix - dev - JOI-9',
-      },
+      env,
       stdio: 'ignore',
       windowsHide: true,
     });

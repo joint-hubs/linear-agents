@@ -4,8 +4,9 @@
 //
 //   node scripts/fenix-claude-prefs.mjs --config-dir <dir> --trust <absPath>
 //
-// It sets hasCompletedOnboarding = true and, under projects[<trustPath>],
-// hasTrustDialogAccepted + hasCompletedProjectOnboarding = true. Every other
+// It sets hasCompletedOnboarding = true (plus the auto-mode-default nudge
+// flags, FOC-810) and, under projects[<trustPath>], hasTrustDialogAccepted +
+// hasCompletedProjectOnboarding = true. Every other
 // key (and every other project entry) is preserved. An unparseable
 // .claude.json is never overwritten — exit 1 and let a human fix it.
 // Writes are atomic (tmp + rename) and configDir is created when missing.
@@ -48,6 +49,12 @@ export function applyClaudePrefs({ configDir, trustPath }) {
     throw new Error(`claude prefs: ${file} is not a JSON object — fix or remove it by hand, not overwritten`);
   }
   prefs.hasCompletedOnboarding = true;
+  // FOC-810: also pre-answer the "Make auto mode your default permission
+  // mode?" startup dialog. These two flags are exactly what the CLI records
+  // when the dialog is declined ("No, keep manual mode"); they must never be
+  // replaced by enabling auto mode — permissions/defaultMode stays untouched.
+  prefs.hasSeenAutoDefaultNudge = true;
+  prefs.hasSeenAutoDefaultNotice = true;
   const projects = (prefs.projects ??= {});
   const project = (projects[trustPath] ??= {});
   project.hasTrustDialogAccepted = true;

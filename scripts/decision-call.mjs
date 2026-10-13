@@ -75,7 +75,8 @@
 // best-effort and gated on LA_RUN_ID, exactly like mcp/envelope.mjs.
 //
 // Shadow log: every terminal decision (ok or fail-closed) is appended as one
-// JSONL line to <repo>/.state/runs/<LA_RUN_ID>/decisions.jsonl with the
+// JSONL line to runs/<LA_RUN_ID>/decisions.jsonl under LA_STATE_ROOT or
+// <repo>/.state with the
 // inputs hash, answers, confidence, both model versions and usage.cost, so
 // the harness can later join it with the real outcome. The inputs hash is
 // sha256 over the canonical (key-sorted) JSON of {model: pinned, state,
@@ -112,17 +113,15 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import Ajv from "ajv";
 import { runDecision, TypedError } from "./mcp/envelope.mjs";
 import { scrub, scrubMask } from "./mcp/scrub.mjs";
 import { createJevProvider, JEV_MODEL, probabilityOf, choiceOf, confidenceOf } from "./mcp/provider-jev.mjs";
 import { getRegistryEntry, resolveEntryQuestions, instantiateEntryQuestions } from "./decision-registry.mjs";
 import { assertEgressClean, egressLeaves, EgressBlockedError } from "./egress-screen.mjs";
-
-const __dir = dirname(fileURLToPath(import.meta.url));
-const root = join(__dir, "..");
+// FOC-811: the per-run shadow dir comes from the shared path seam.
+import { runsDir } from "./fenix-paths.mjs";
 
 // Tier-2 fallback model — DISABLED since FOC-473: null keeps the chat/
 // completions transport below unreachable. Why: ADR-0012's own probe (D3.3)
@@ -501,7 +500,7 @@ function defaultMeter(record) {
 }
 
 function defaultShadowDir(runId) {
-  return runId ? join(root, ".state", "runs", runId) : null;
+  return runId ? join(runsDir(), runId) : null;
 }
 
 // Exported for the [G] generator's event line (FOC-474) — the ONE writer for
@@ -566,9 +565,9 @@ function scrubEventInput(effective) {
  *                  tests pass a model string to keep the dormant chat/
  *                  completions mechanism covered. Production callers never
  *                  set this.
- *   shadowDir  — directory for decisions.jsonl (default
- *                <repo>/.state/runs/<LA_RUN_ID>; explicit dir writes even
- *                without LA_RUN_ID)
+ *   shadowDir  — directory for decisions.jsonl (default runs/<LA_RUN_ID>
+ *                under LA_STATE_ROOT or <repo>/.state; explicit dir writes
+ *                even without LA_RUN_ID)
  *   runId      — run id recorded in shadow lines and meter events
  *                (default process.env.LA_RUN_ID)
  *   taskKey    — the work item the decision belongs to, recorded on

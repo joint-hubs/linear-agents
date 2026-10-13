@@ -6,7 +6,9 @@
 // container; every view (fenix attach, the dashboard Terminal over a
 // WebSocket, the dashboard Chat by pasting into the same pane) attaches to
 // that one process. This host starts it, reports its state, delivers chat
-// messages into it and proxies raw terminal bytes to the dashboard.
+// messages into it, answers its on-screen dialogs (FOC-810: permission
+// prompts, AskUserQuestion, select nudges) and proxies raw terminal bytes
+// to the dashboard.
 //
 // SECURITY MODEL — two gates on every non-healthz request, both fail closed:
 //   1. PEER: the client's address (after stripping the ::ffff: IPv4-mapped
@@ -38,6 +40,7 @@ import { WebSocketServer } from "ws";
 
 import { hostTokenPath, supervisorSessionPath } from "./fenix-paths.mjs";
 import { processAlive as defaultProcessAlive } from "./supervisor-lib.mjs";
+import { askKeyPlan, extractCommandOutput, parseDialog, slashCommandPolicy } from "./session-dialog.mjs";
 
 export const TMUX_SOCKET = "fenix";
 export const TMUX_SESSION = "supervisor";
@@ -48,6 +51,23 @@ export const READINESS_TIMEOUT_MS = 30_000;
 export const CONFIRM_TIMEOUT_MS = 5_000;
 // How long a single message may wait for a free input line before refusing.
 export const SEND_READY_TIMEOUT_MS = 3_000;
+// Dialog answering (FOC-810): the pane re-capture cadence while waiting for a
+// dialog to close, and the caps for the close wait, the ask flow's settle
+// wait and the slash-command output wait.
+export const DIALOG_POLL_MS = 250;
+export const DIALOG_CLOSE_TIMEOUT_MS = 3_000;
+export const ASK_CLOSE_TIMEOUT_MS = 3_000;
+export const SLASH_OUTPUT_TIMEOUT_MS = 4_000;
+// The ask flow's settle window: the TUI redraws asynchronously after a
+// step's keys, so a step's expectation is re-polled at this interval for up
+// to the window before the drift counts as a change (the acceptance stack
+// reproduced a 409 from a capture ~150 ms after the step-0 key).
+export const ASK_SETTLE_TIMEOUT_MS = 2_000;
+export const ASK_SETTLE_POLL_MS = 150;
+// Scrollback depth for command-output extraction (capture-pane -S).
+export const SCROLLBACK_LINES = 200;
+// A denial note pasted back into the chat after the dialog closes.
+export const MAX_NOTE_CHARS = 4000;
 // Bounds for the terminal size, from the query string and resize frames.
 export const COLS_MIN = 20, COLS_MAX = 500, ROWS_MIN = 5, ROWS_MAX = 200;
 export const DEFAULT_COLS = 120, DEFAULT_ROWS = 40;
@@ -76,10 +96,15 @@ const tokensEqual = (provided, expected) => {
 
 const stripV6Prefix = (address) => String(address ?? "").replace(/^::ffff:/, "");
 
+// Whitespace-normalised comparison of ask questions (the pane wraps lines
+// the transcript keeps on one).
+const normalizeSpace = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+
 /**
  * Build the host. Every dep is optional; the defaults are the real thing.
- * Returns { server, ensureSession, sendMessage, getState, alive } — the
- * server is NOT listening; `serve` (CLI) or a test binds it.
+ * Returns { server, ensureSession, sendMessage, getState, alive,
+ * answerDialog, answerAsk } — the server is NOT listening; `serve` (CLI) or
+ * a test binds it.
  */
 export function createHost(deps = {}) {
   const env = deps.env ?? process.env;
@@ -154,7 +179,12 @@ export function createHost(deps = {}) {
     const cap = runTmux(["capture-pane", "-p", "-t", TMUX_SESSION]);
     if (cap.status !== 0) return { ok: false, dialog: false, promptReady: false };
     const text = cap.stdout ?? "";
-    if (DIALOG_RE.test(text)) return { ok: true, dialog: true, promptReady: false };
+    // parseDialog first: any parsed dialog — permission, ask, ask-review,
+    // select (the auto-mode nudge) — counts. DIALOG_RE stays as the fallback
+    // for markers the parser does not frame with a bottom rule (the /cost
+    // modal's "Esc to cancel").
+    const dialog = parseDialog(text) !== null || DIALOG_RE.test(text);
+    if (dialog) return { ok: true, dialog: true, promptReady: false };
     const lines = text.split("\n");
     const promptReady = lines.some((line, i) =>
       i > 0 && PROMPT_LINE_RE.test(line) && RULE_LINE_RE.test(lines[i - 1].trim()));
@@ -277,17 +307,61 @@ export function createHost(deps = {}) {
     body: { error: "tmux", detail: (result.stderr || "").trim() || `${step} failed` },
   });
 
+  const pressKey = (key) => runTmux(["send-keys", "-t", TMUX_SESSION, key]);
+
+  const pressLiteral = (text) => runTmux(["send-keys", "-l", "-t", TMUX_SESSION, text]);
+
+  // Scrollback capture for command-output extraction; null when unreadable.
+  const captureScrollback = () => {
+    const cap = runTmux(["capture-pane", "-p", "-S", `-${SCROLLBACK_LINES}`, "-t", TMUX_SESSION]);
+    return cap.status === 0 ? (cap.stdout ?? "") : null;
+  };
+
+  // THE delivery path — one implementation, shared by chat messages and
+  // dialog notes: load the buffer, bracketed paste, settle, Enter. Returns
+  // the 500 response of the first failed tmux step, or null on success.
+  const pasteAndEnter = async (text) => {
+    const load = runTmux(["load-buffer", "-b", CHAT_BUFFER, "-"], { input: text });
+    if (load.status !== 0) return fail500("load-buffer", load);
+    const paste = runTmux(["paste-buffer", "-p", "-d", "-b", CHAT_BUFFER, "-t", TMUX_SESSION]);
+    if (paste.status !== 0) return fail500("paste-buffer", paste);
+    await sleep(200); // let the paste land before Enter
+    const keys = runTmux(["send-keys", "-t", TMUX_SESSION, "Enter"]);
+    if (keys.status !== 0) return fail500("send-keys", keys);
+    return null;
+  };
+
+  // Poll the pane until the input line is free: "ready", "dialog" (a dialog
+  // appeared — the caller turns it into its 409) or "timeout". The busy
+  // shortcut (queueing behind a running turn without waiting) stays with the
+  // callers, which consult the hook state themselves.
+  const awaitPromptReady = async (timeoutMs) => {
+    const deadline = now() + timeoutMs;
+    while (now() < deadline) {
+      await sleep(250);
+      const p = paneState();
+      if (p.dialog) return "dialog";
+      if (p.promptReady) return "ready";
+    }
+    return "timeout";
+  };
+
   const sendLocked = async (text) => {
     if (typeof text !== "string" || !text.trim()) return { status: 400, body: { error: "empty" } };
     const cleaned = text.replace(/\r/g, "").replace(CONTROL_CHARS, "");
     if (Buffer.byteLength(cleaned, "utf8") > MAX_MESSAGE_BYTES) {
       return { status: 400, body: { error: "too-long" } };
     }
+    // Slash commands are gated by the policy (FOC-810): /compact, /context
+    // and /cost may be typed from the chat and go through the normal send
+    // path below; anything else is refused with the canonical reason.
+    let slash = null;
     if (cleaned.trimStart().startsWith("/")) {
-      return {
-        status: 400,
-        body: { error: "slash-command", message: "slash commands go through the Terminal" },
-      };
+      const policy = slashCommandPolicy(cleaned.trim());
+      if (!policy.allowed) {
+        return { status: 400, body: { error: "slash-command", message: policy.reason } };
+      }
+      slash = policy;
     }
     const ens = await ensureLocked({});
     if (!ens.ready) return { status: 503, body: { error: "starting" } };
@@ -306,33 +380,41 @@ export function createHost(deps = {}) {
       // No empty prompt and no running turn to queue behind: the TUI may be
       // booting or mid-render. Give it a moment, then refuse rather than
       // paste into whatever else the screen is showing.
-      let ready = false;
-      const deadline = now() + SEND_READY_TIMEOUT_MS;
-      while (now() < deadline) {
-        await sleep(250);
-        const p = paneState();
-        if (p.dialog) {
-          return { status: 409, body: { error: "needs-input", notification: hook?.notification ?? null } };
-        }
-        if (p.promptReady) {
-          ready = true;
-          break;
-        }
+      const wait = await awaitPromptReady(SEND_READY_TIMEOUT_MS);
+      if (wait === "dialog") {
+        return { status: 409, body: { error: "needs-input", notification: hook?.notification ?? null } };
       }
-      if (!ready) {
+      if (wait === "timeout") {
         return { status: 503, body: { error: "not-ready", detail: "the Supervisor's input is not ready" } };
       }
     }
 
     const stateBefore = readSessionState()?.state ?? null;
     const sendAt = now();
-    const load = runTmux(["load-buffer", "-b", CHAT_BUFFER, "-"], { input: cleaned });
-    if (load.status !== 0) return fail500("load-buffer", load);
-    const paste = runTmux(["paste-buffer", "-p", "-d", "-b", CHAT_BUFFER, "-t", TMUX_SESSION]);
-    if (paste.status !== 0) return fail500("paste-buffer", paste);
-    await sleep(200); // let the paste land before Enter
-    const keys = runTmux(["send-keys", "-t", TMUX_SESSION, "Enter"]);
-    if (keys.status !== 0) return fail500("send-keys", keys);
+    const pasteErr = await pasteAndEnter(cleaned);
+    if (pasteErr) return pasteErr;
+
+    if (slash && slash.command !== "/compact") {
+      // /context and /cost are local: they never fire a hook write, so the
+      // rendered output on screen IS the confirmation. Poll the scrollback
+      // for it; a modal command (/cost opens a panel) is closed with Esc
+      // once the output has been read.
+      let output = "";
+      const outDeadline = now() + SLASH_OUTPUT_TIMEOUT_MS;
+      while (now() < outDeadline) {
+        await sleep(DIALOG_POLL_MS);
+        const scroll = captureScrollback();
+        if (scroll !== null) {
+          output = extractCommandOutput(scroll, slash.command);
+          if (output) break;
+        }
+      }
+      if (slash.modal) {
+        const esc = pressKey("Escape");
+        if (esc.status !== 0) return fail500("send-keys", esc);
+      }
+      return { status: 200, body: { sent: true, confirmed: Boolean(output), queued: false, output } };
+    }
 
     // Proof, not hope: any hook write AFTER the send, in a state that means
     // the prompt was taken — busy (a turn started), idle (it finished) or
@@ -355,6 +437,248 @@ export function createHost(deps = {}) {
   };
 
   const sendMessage = (text) => serialized(() => sendLocked(text));
+
+  // ── dialog answering (FOC-810) ────────────────────────────────────────────
+  // Both flows run under the send mutex — an answer must never interleave
+  // with a chat paste fighting over the same prompt.
+
+  const ANSWER_CHOICES = new Set(["allow-once", "allow-always", "deny"]);
+  const BAD_CHOICE_MESSAGE = "choice must be one of allow-once, allow-always, deny";
+
+  const answerDialogLocked = async ({ id, choice, note }) => {
+    if (!ANSWER_CHOICES.has(choice)) {
+      return { status: 400, body: { error: "bad-choice", message: BAD_CHOICE_MESSAGE } };
+    }
+    // A note is only ever delivered after a deny; validate it up front so a
+    // bad note never leaves a half-answered dialog behind.
+    let cleanedNote = "";
+    if (typeof note === "string" && note.trim()) {
+      cleanedNote = note.replace(/\r/g, "").replace(CONTROL_CHARS, "").trim();
+      if (cleanedNote.length > MAX_NOTE_CHARS) {
+        return {
+          status: 400,
+          body: { error: "bad-note", message: `note is limited to ${MAX_NOTE_CHARS} characters` },
+        };
+      }
+    }
+
+    const cap = runTmux(["capture-pane", "-p", "-t", TMUX_SESSION]);
+    if (cap.status !== 0) return { status: 503, body: { error: "pane-unreadable" } };
+    const dialog = parseDialog(cap.stdout ?? "");
+    if (!dialog) return { status: 409, body: { error: "no-dialog" } };
+    if (dialog.id !== id) return { status: 409, body: { error: "dialog-changed" } };
+
+    let key;
+    if (choice === "deny") {
+      if (dialog.kind !== "permission" && dialog.kind !== "select") {
+        return {
+          status: 400,
+          body: { error: "bad-choice", message: `deny applies to permission and select dialogs, not ${dialog.kind}` },
+        };
+      }
+      key = "Escape";
+    } else {
+      if (dialog.kind !== "permission") {
+        return {
+          status: 400,
+          body: { error: "bad-choice", message: `${choice} applies to permission dialogs only` },
+        };
+      }
+      // Only an option that carries the exact choice is pressed — an
+      // auto-mode option (choice "auto-mode") can never match an allow-*.
+      const option = dialog.options.find((o) => o.choice === choice);
+      if (!option || typeof option.key !== "string") {
+        return {
+          status: 400,
+          body: { error: "bad-choice", message: `no option offers ${choice}` },
+        };
+      }
+      key = option.key;
+    }
+
+    const pressed = pressKey(key);
+    if (pressed.status !== 0) return fail500("send-keys", pressed);
+
+    // Closed when the dialog is gone — or when a DIFFERENT dialog replaced
+    // it (the original one left the screen either way).
+    let closed = false;
+    const deadline = now() + DIALOG_CLOSE_TIMEOUT_MS;
+    while (now() < deadline) {
+      await sleep(DIALOG_POLL_MS);
+      const poll = runTmux(["capture-pane", "-p", "-t", TMUX_SESSION]);
+      const d = poll.status === 0 ? parseDialog(poll.stdout ?? "") : null;
+      if (!d || d.id !== id) {
+        closed = true;
+        break;
+      }
+    }
+
+    const body = { sent: true, closed };
+    if (choice === "deny" && cleanedNote) {
+      // Deliver the note like a chat message once the prompt is back — the
+      // shared paste path, not a second implementation. A dialog that shows
+      // up instead, or a prompt that never returns, is reported honestly.
+      let noteSent = false;
+      if ((await awaitPromptReady(SEND_READY_TIMEOUT_MS)) === "ready") {
+        const pasteErr = await pasteAndEnter(cleanedNote);
+        if (pasteErr) return pasteErr;
+        noteSent = true;
+      }
+      body.noteSent = noteSent;
+    }
+    return { status: 200, body };
+  };
+
+  const answerDialog = (payload) => serialized(() => answerDialogLocked(payload ?? {}));
+
+  const answerAskLocked = async ({ questions, answers }) => {
+    let steps;
+    try {
+      steps = askKeyPlan(questions, answers);
+    } catch (err) {
+      return { status: 400, body: { error: "bad-answers", message: err.message } };
+    }
+    const questionList = Array.isArray(questions) ? questions : [];
+
+    const capturePane = () => {
+      const cap = runTmux(["capture-pane", "-p", "-t", TMUX_SESSION]);
+      if (cap.status !== 0) return { unreadable: true };
+      return { dialog: parseDialog(cap.stdout ?? "") };
+    };
+
+    // Does the dialog satisfy step i's expectation — the ask dialog with
+    // question i, or the review screen?
+    const matchesStep = (dialog, i) => {
+      if (!dialog) return false;
+      const step = steps[i];
+      if (step.expectQuestion) {
+        return dialog.kind === "ask"
+          && normalizeSpace(dialog.question) === normalizeSpace(questionList[i]?.question);
+      }
+      return !!step.expectReview && dialog.kind === "ask-review";
+    };
+
+    // Where in THIS ask's plan does the pane sit (first capture only)? A
+    // later question j (with tabs 0..j-1 all marked done — proof the earlier
+    // answers were applied, not just re-asked) or the review screen. -1 when
+    // the pane matches nothing in the plan.
+    const resumeStep = (dialog) => {
+      if (!dialog) return -1;
+      if (dialog.kind === "ask-review") {
+        const last = steps.length - 1;
+        return steps[last]?.expectReview ? last : -1;
+      }
+      if (dialog.kind !== "ask") return -1;
+      const wanted = normalizeSpace(dialog.question);
+      const tabs = Array.isArray(dialog.tabs) ? dialog.tabs : [];
+      for (let j = 1; j < questionList.length; j++) {
+        if (normalizeSpace(questionList[j]?.question) !== wanted) continue;
+        let earlierDone = true;
+        for (let t = 0; t < j; t++) {
+          if (!tabs[t]?.done) {
+            earlierDone = false;
+            break;
+          }
+        }
+        if (earlierDone) return j;
+      }
+      return -1;
+    };
+
+    // Re-capture before EVERY step: a question step must show the ask dialog
+    // with the expected question, the review step the review screen. The TUI
+    // redraws asynchronously after the previous step's keys, so a mismatch
+    // is re-polled for up to ASK_SETTLE_TIMEOUT_MS before it counts as a
+    // change (an immediate capture raced the redraw and 409'd a healthy
+    // flow on the acceptance stack). The FIRST capture may also land on a
+    // LATER step of this same ask — a retried answer whose earlier steps
+    // were already applied: the plan resumes there and the result says so
+    // (resumedFrom). A pane that matches nothing in the plan is a different
+    // ask → 409 as before.
+    let start = 0;
+    let settled = null; // the dialog the settle phase already matched for step `start`
+    {
+      const deadline = now() + ASK_SETTLE_TIMEOUT_MS;
+      for (;;) {
+        const cap = capturePane();
+        if (cap.unreadable) return { status: 503, body: { error: "pane-unreadable" } };
+        if (matchesStep(cap.dialog, 0)) {
+          settled = cap.dialog;
+          break;
+        }
+        const resume = resumeStep(cap.dialog);
+        if (resume > 0) {
+          start = resume;
+          settled = cap.dialog;
+          break;
+        }
+        if (now() >= deadline) {
+          return { status: 409, body: { error: "dialog-changed", step: 0 } };
+        }
+        await sleep(ASK_SETTLE_POLL_MS);
+      }
+    }
+
+    for (let i = start; i < steps.length; i++) {
+      const step = steps[i];
+      if (!(i === start && settled)) {
+        // The settle phase already verified step `start` — a fresh capture
+        // there would only race the redraw it just settled.
+        const deadline = now() + ASK_SETTLE_TIMEOUT_MS;
+        for (;;) {
+          const cap = capturePane();
+          if (cap.unreadable) return { status: 503, body: { error: "pane-unreadable" } };
+          if (matchesStep(cap.dialog, i)) break;
+          if (now() >= deadline) {
+            // Mid-flow drift that outlived the window: the steps before i
+            // already pressed keys (and a resume means earlier answers were
+            // applied too) — the 409 says so (partial). Nothing automatic is
+            // pressed afterwards (no Escape); the human looks at the pane.
+            return {
+              status: 409,
+              body: { error: "dialog-changed", step: i, partial: i > start || start > 0 },
+            };
+          }
+          await sleep(ASK_SETTLE_POLL_MS);
+        }
+      }
+      settled = null;
+      for (let k = 0; k < step.keys.length; k++) {
+        if (k > 0) await sleep(150);
+        const pressed = pressKey(step.keys[k]);
+        if (pressed.status !== 0) return fail500("send-keys", pressed);
+      }
+      if (step.literal !== undefined) {
+        await sleep(150);
+        const typed = pressLiteral(step.literal);
+        if (typed.status !== 0) return fail500("send-keys", typed);
+      }
+      for (const key of step.after ?? []) {
+        await sleep(150);
+        const pressed = pressKey(key);
+        if (pressed.status !== 0) return fail500("send-keys", pressed);
+      }
+    }
+
+    // Done when the pane no longer shows an ask dialog (the TUI moved on —
+    // idle, the turn running, or a different kind of dialog entirely).
+    let answered = false;
+    const deadline = now() + ASK_CLOSE_TIMEOUT_MS;
+    while (now() < deadline) {
+      await sleep(DIALOG_POLL_MS);
+      const poll = capturePane();
+      const d = poll.unreadable ? null : poll.dialog;
+      if (!d || (d.kind !== "ask" && d.kind !== "ask-review")) {
+        answered = true;
+        break;
+      }
+    }
+    return start > 0
+      ? { status: 200, body: { answered, resumedFrom: start } }
+      : { status: 200, body: { answered } };
+  };
+
+  const answerAsk = (payload) => serialized(() => answerAskLocked(payload ?? {}));
 
   const alive = (pids) => {
     const out = {};
@@ -485,6 +809,45 @@ export function createHost(deps = {}) {
         return;
       }
       sendJSON(res, 200, alive(payload.pids));
+      return;
+    }
+    if (path === "/dialog" && method === "GET") {
+      const cap = runTmux(["capture-pane", "-p", "-t", TMUX_SESSION]);
+      if (cap.status !== 0) {
+        sendJSON(res, 503, { error: "pane-unreadable" });
+        return;
+      }
+      sendJSON(res, 200, { dialog: parseDialog(cap.stdout ?? "") });
+      return;
+    }
+    if (path === "/dialog/answer" && method === "POST") {
+      const { body, over } = await readBody(req);
+      if (over) {
+        sendJSON(res, 413, { error: "body-too-large" });
+        return;
+      }
+      const payload = parseJSON(body);
+      if (payload === null) {
+        sendJSON(res, 400, { error: "bad-json" });
+        return;
+      }
+      const result = await answerDialog(payload);
+      sendJSON(res, result.status, result.body);
+      return;
+    }
+    if (path === "/dialog/ask" && method === "POST") {
+      const { body, over } = await readBody(req);
+      if (over) {
+        sendJSON(res, 413, { error: "body-too-large" });
+        return;
+      }
+      const payload = parseJSON(body);
+      if (payload === null) {
+        sendJSON(res, 400, { error: "bad-json" });
+        return;
+      }
+      const result = await answerAsk(payload);
+      sendJSON(res, result.status, result.body);
       return;
     }
     sendJSON(res, 404, { error: "not-found" });
@@ -684,7 +1047,7 @@ export function createHost(deps = {}) {
     });
   });
 
-  return { server, ensureSession, sendMessage, getState, alive };
+  return { server, ensureSession, sendMessage, getState, alive, answerDialog, answerAsk };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
