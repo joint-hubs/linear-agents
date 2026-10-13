@@ -22,10 +22,11 @@ import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { calculateCost, priceThreshold, pricingSnapshot } from "./telemetry-store.mjs";
+import { priceChildTranscripts } from "./transcript-cost.mjs";
+import { squadConfigDir } from "./fenix-paths.mjs";
 
 import {
   ROOT,
-  addCost,
   appendWakeEvent,
   claudeCommand,
   costFromResult,
@@ -35,6 +36,7 @@ import {
   readRegistry,
   stallSilenceMs,
   teeAbsPath,
+  turnEndCostPatch,
   updateChild,
 } from "./supervisor-lib.mjs";
 
@@ -87,6 +89,41 @@ if (args.model) claudeArgs.push("--model", args.model);
 
 const { command, args: spawnArgs } = claudeCommand(claudeArgs);
 
+const turnIndex = Number(args.turn ?? 0);
+
+// FOC-760: the session id the registry carried BEFORE this turn. A resumed turn
+// can fork a NEW session id (init's session_id ≠ the registered one) — the init
+// handler below overwrites the registry field, so the old id is captured here,
+// before the spawn, and the turn-end cost prices BOTH transcripts.
+const previousSessionId = (() => {
+  try {
+    return readRegistry(runId).children[childId]?.sessionId ?? null;
+  } catch {
+    return null; // no registry yet — nothing to fall back to
+  }
+})();
+
+// FOC-761: a resumed turn (turnIndex > 0) reuses the child's telemetry run id,
+// and the PREVIOUS turn already ended that run — its `end` wrote run.ended with
+// an identity the ingest dedup keeps, so without a re-open the run stays closed
+// and after 5 min `settledRun` never reads the resumed turn's lines. Re-open
+// the manifest BEFORE claude is spawned, so the run is open while this turn
+// writes. Best effort, same shape as endTelemetryRun: a failure is a note in
+// the tee, never a dead child.
+function reopenTelemetryRun(telemetryRunId, turn) {
+  if (!telemetryRunId) return;
+  try {
+    execFileSync(
+      process.execPath,
+      [`${ROOT}/scripts/run-manifest.mjs`, "reopen", telemetryRunId, String(turn)],
+      { cwd, stdio: "ignore" },
+    );
+  } catch (err) {
+    note({ subtype: "telemetry_reopen_failed", message: err.message });
+  }
+}
+if (turnIndex > 0) reopenTelemetryRun(args["telemetry-run"], turnIndex);
+
 const child = spawn(command, spawnArgs, {
   cwd,
   env: process.env,
@@ -104,11 +141,12 @@ const child = spawn(command, spawnArgs, {
   detached: process.platform !== "win32",
 });
 
-const turnIndex = Number(args.turn ?? 0);
 let sessionId = null;
-let costUsd = 0;
-let costUsdReported = 0;
-const unpricedModels = [];
+// FOC-760: the costFromResult outputs of this turn, kept in order and resolved
+// ONCE at exit. Each is a session-cumulative snapshot — they are never summed
+// here, and no accumulator runs during the turn; turnEndCostPatch decides at
+// the end what the registry entry is set to.
+const resultCosts = [];
 let initModel = null;
 let sawInit = false;
 
@@ -260,11 +298,9 @@ child.stdout.on("data", (chunk) => {
       // number is Claude Code's estimate for a model it does not recognise, and
       // it is provably wrong (FOC-165: $0.2059 reported for a $0 model). The
       // reported figure is kept beside the computed one so a divergence stays
-      // visible instead of one silently replacing the other.
-      const cost = costFromResult(event, initModel, priceOne, thresholdOne);
-      costUsd = addCost(costUsd, cost.computed);
-      if (cost.reported !== null) costUsdReported += cost.reported;
-      for (const m of cost.unpriced) if (!unpricedModels.includes(m)) unpricedModels.push(m);
+      // visible instead of one silently replacing the other. FOC-760: stored,
+      // not accumulated — modelUsage here is cumulative for the session.
+      resultCosts.push(costFromResult(event, initModel, priceOne, thresholdOne));
     }
   }
 });
@@ -318,16 +354,38 @@ child.on("exit", (code, signal) => {
   const turns = entry.turns || [];
   turns[turnIndex] = { ...(turns[turnIndex] || {}), endedAt, exitCode: code };
 
+  // FOC-760: the child's cost is SET from its own transcripts — whole-session
+  // truth, one row per assistant message — not added to what the entry already
+  // carried (the old accumulation ran the registry at ~5x ground truth, because
+  // result.modelUsage is cumulative for the session). No transcript found right
+  // after a turn should be rare; then turnEndCostPatch falls back to the MAX of
+  // this turn's cumulative result snapshots, never their sum. Pricing failure
+  // is a note, not a dead turn — the fallback still applies.
+  let transcriptCost = null;
+  try {
+    // Both the pre-turn registry id (captured before init overwrote it) and
+    // this turn's init id — filtered, distinct. A resume that forked a new
+    // session id prices BOTH transcripts; an unchanged one dedupes to one.
+    transcriptCost = priceChildTranscripts(
+      {
+        configDir: process.env.CLAUDE_CONFIG_DIR || squadConfigDir(entry.squad),
+        cwd,
+        sessionId: sessionId ?? entry.sessionId,
+        sessionIds: [...new Set([previousSessionId, sessionId ?? entry.sessionId].filter(Boolean))],
+      },
+      { priceOne, thresholdOne },
+    );
+  } catch (err) {
+    note({ subtype: "transcript_cost_failed", message: err.message });
+    transcriptCost = null;
+  }
+
   updateChild(runId, childId, {
     status,
     exitCode: code,
     signal: signal || null,
     endedAt,
-    // addCost, not `+`: null means "unknown", and unknown plus anything stays
-    // unknown. Treating it as zero is how an unpriced model becomes a free one.
-    costUsd: addCost(entry.costUsd === undefined ? 0 : entry.costUsd, costUsd),
-    costUsdReported: (entry.costUsdReported || 0) + costUsdReported,
-    unpricedModels: [...new Set([...(entry.unpricedModels || []), ...unpricedModels])],
+    ...turnEndCostPatch({ entry, transcriptCost, results: resultCosts }),
     turns,
   });
 
