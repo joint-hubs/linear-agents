@@ -432,6 +432,13 @@ try {
     check("board WORK-2 landed from the Linear state type",
       byId["WORK-2"]?.stage === "landed" && byId["WORK-2"]?.linearState?.type === "completed",
       JSON.stringify(byId["WORK-2"]));
+    check("board WORK-1 carries the fixture title",
+      byId["WORK-1"]?.title === "Fix the widget"
+        && byId["WORK-1"]?.url === "https://linear.app/jointhubs/issue/WORK-1"
+        && byId["WORK-1"]?.linearState?.name === "In Progress"
+        && byId["WORK-1"]?.priority === null
+        && byId["WORK-1"]?.milestone === null,
+      JSON.stringify(byId["WORK-1"]));
     check("board WORK-3 ready from the queue (not touched)",
       byId["WORK-3"]?.stage === "ready" && byId["WORK-3"]?.title === "Ready ticket",
       JSON.stringify(byId["WORK-3"]));

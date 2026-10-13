@@ -293,7 +293,16 @@ async function linearStatesFor(identifiers) {
     const states = {};
     for (const id of ids) {
       const issue = fake.issues?.[id];
-      if (issue?.state) states[id] = { name: issue.state.name ?? null, type: issue.state.type ?? null };
+      if (issue?.state) {
+        states[id] = {
+          name: issue.state.name ?? null,
+          type: issue.state.type ?? null,
+          title: issue.title ?? null,
+          url: issue.url ?? null,
+          priority: issue.priority ?? null,
+          milestone: issue.milestone ?? null,
+        };
+      }
     }
     return { states, meta: { ok: true, error: null, fetchedAt: new Date().toISOString() } };
   }
