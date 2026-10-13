@@ -56,6 +56,12 @@ export const MIGRATION_VERSIONS = {
   // own DDL and would drop columns added earlier (the ordering trap the FOC-220
   // and FOC-381 comments both warn about). A side table is immune to that.
   codegraphQueryFacts: 9,
+  // FOC-769: the run_focus table (the Supervisor's declared focus intervals).
+  // CREATE TABLE IF NOT EXISTS, so idempotent on every open like the
+  // codegraphQueryFacts side table above; the marker is the paper trail.
+  // Deliberately a SEPARATE TABLE: it is projected from supervisor.focus
+  // events, never joined into the fact tables the v5 rebuild would recreate.
+  supervisorFocus: 10,
 };
 
 export function sqliteAvailable() {
@@ -749,6 +755,32 @@ function ensureCodegraphQueryFacts(db) {
   db.exec("CREATE INDEX IF NOT EXISTS idx_codegraph_query_run_agent ON codegraph_query_facts(run_id, agent_key, source_offset)");
 }
 
+// FOC-769: the Supervisor's declared focus — one interval per CHANGE between
+// tickets (and the explicit `overhead`). Projected from supervisor.focus
+// events (sourcePath = focus.jsonl, sourceOffset = the line index). A side
+// table, like codegraph_query_facts: additive CREATE TABLE IF NOT EXISTS on
+// every open, immune to the fact-table rebuilds above. The primary key covers
+// (run_id, valid_from) lookups; the declared index mirrors it so the report's
+// interval scan reads a named index rather than relying on PK internals.
+// valid_from = the payload's `at` (when the focus BECAME true), valid_to = the
+// smallest later valid_from of the same run — recomputed per arrival, see
+// applySupervisorFocus.
+function ensureRunFocus(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS run_focus (
+      run_id TEXT NOT NULL,
+      valid_from TEXT NOT NULL,
+      valid_to TEXT,
+      task_id TEXT,
+      kind TEXT NOT NULL,
+      source TEXT,
+      note TEXT,
+      PRIMARY KEY(run_id, valid_from)
+    )
+  `);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_run_focus_run ON run_focus(run_id, valid_from)");
+}
+
 export function migrate(db, path) {
   // Views are dropped first and recreated at the end: the migrations below
   // rebuild the fact tables they select from (DROP + RENAME), and SQLite
@@ -777,6 +809,9 @@ export function migrate(db, path) {
   // FOC-624: a side table, so it is immune to the tool_facts rebuild above and can
   // go anywhere in this sequence. Kept next to the other additive step for symmetry.
   ensureCodegraphQueryFacts(db);
+  // FOC-769: run_focus is a side table the same way — additive, immune to the
+  // rebuilds, so it goes anywhere in this sequence too.
+  ensureRunFocus(db);
   ensureCanonicalViews(db);
   // Record every migration marker. Each step guards itself above; this loop
   // just persists the paper trail. INSERT OR IGNORE keeps it idempotent across
@@ -1229,9 +1264,11 @@ export function projectEvent(db, event) {
   switch (event.eventType) {
     case "run.started": return applyRunStarted(db, event);
     case "run.ended": return applyRunEnded(db, event);
+    case "run.resumed": return applyRunResumed(db, event); // FOC-761
     case "session.linked": return applySessionLinked(db, event);
     case "workspace.observed": return applyWorkspaceObserved(db, event);
     case "task.linked": return applyTaskLinked(db, event);
+    case "supervisor.focus": return applySupervisorFocus(db, event); // FOC-769
     case "usage.recorded": return applyUsageRecorded(db, event);
     case "transcript.progress": return applyTranscriptProgress(db, event);
     case "quality.reported": return applyQualityReported(db, event);
@@ -1329,12 +1366,42 @@ function applyRunEnded(db, event) {
   const runId = event.runId || run.runId;
   if (!runId) throw new Error("run.ended requires runId");
   applyRunStarted(db, { ...event, eventType: "run.started" });
+  const endedAt = run.endedAt || event.observedAt;
+  // FOC-761: a resumed turn re-ends the same run id, and replay can deliver a
+  // per-turn end out of order. The terminal fields only apply when this end is
+  // not OLDER than the end already recorded — SQLite evaluates the CASEs
+  // against the pre-UPDATE row, so a later end never moves ended_at backwards.
+  // The COALESCE identity updates and the session link always apply.
   db.prepare(
-    `UPDATE runs SET ended_at=?, status=?, exit_code=?, claude_config_dir=COALESCE(?, claude_config_dir),
-       transcript_path=COALESCE(?, transcript_path), session_id=COALESCE(?, session_id), updated_at=? WHERE run_id=?`,
-  ).run(run.endedAt || event.observedAt, statusFor(run), nullableNumber(run.exitCode), run.claudeConfigDir || null,
-    run.transcriptPath || null, run.sessionId || null, now(), runId);
+    `UPDATE runs SET
+       ended_at=CASE WHEN ended_at IS NULL OR ended_at <= ? THEN ? ELSE ended_at END,
+       status=CASE WHEN ended_at IS NULL OR ended_at <= ? THEN ? ELSE status END,
+       exit_code=CASE WHEN ended_at IS NULL OR ended_at <= ? THEN ? ELSE exit_code END,
+       claude_config_dir=COALESCE(?, claude_config_dir),
+       transcript_path=COALESCE(?, transcript_path),
+       session_id=COALESCE(?, session_id),
+       updated_at=? WHERE run_id=?`,
+  ).run(endedAt, endedAt, endedAt, statusFor(run), endedAt, nullableNumber(run.exitCode),
+    run.claudeConfigDir || null, run.transcriptPath || null, run.sessionId || null, now(), runId);
   if (run.sessionId) applySessionLinked(db, { ...event, eventType: "session.linked", payload: run, runId });
+  return { runId };
+}
+
+// FOC-761: `run-manifest reopen` re-opens a run whose child turn resumed —
+// the projection mirrors it so ingest keeps reading the transcript instead of
+// settling the run at the previous turn's end.
+function applyRunResumed(db, event) {
+  const run = event.payload;
+  const runId = event.runId || run.runId;
+  if (!runId) throw new Error("run.resumed requires runId");
+  const observedAt = event.observedAt || now();
+  db.prepare("INSERT OR IGNORE INTO runs (run_id, status, updated_at) VALUES (?, 'running', ?)").run(runId, now());
+  // A resume older than an already-recorded later end must not re-open the
+  // run (out-of-order replay) — the guard keeps the later end intact.
+  db.prepare(
+    `UPDATE runs SET status='running', ended_at=NULL, exit_code=NULL, updated_at=?
+     WHERE run_id=? AND (ended_at IS NULL OR ended_at <= ?)`,
+  ).run(now(), runId, observedAt);
   return { runId };
 }
 
@@ -1578,6 +1645,53 @@ function applyTaskLinked(db, event) {
   ).run(linkId, runId, taskId, payload.role || "primary", validFrom, payload.validTo || null,
     source, confidence, payload.supersedesLinkId || null, now());
   return { runId, taskId, linkId };
+}
+
+// FOC-769: the Supervisor declares which ticket (or the explicit `overhead`)
+// it is working on — scripts/supervisor-focus.mjs appends to focus.jsonl and
+// emits one supervisor.focus event per change (sourcePath = focus.jsonl,
+// sourceOffset = the line index, so the events dedup makes a replay a no-op).
+// Projection: one run_focus interval per change, PK (run_id, valid_from) so a
+// replayed event's INSERT OR IGNORE is a no-op, and valid_to is RECOMPUTED for
+// the whole run on every arrival — each row's valid_to becomes the smallest
+// LATER valid_from of the same run (NULL for the last) — so events arriving
+// out of order converge to the same intervals, the way closeSupersededPrimaryLinks
+// converges task links. valid_from is the payload's `at` (when the focus
+// BECAME true), not the event's observed_at: the declaration time and the
+// effective time are different facts.
+function applySupervisorFocus(db, event) {
+  const payload = event.payload;
+  const runId = event.runId || payload.runId;
+  const at = payload.at;
+  if (!runId || !at) throw new Error("supervisor.focus requires runId and payload.at");
+  if (payload.kind !== "ticket" && payload.kind !== "overhead") {
+    throw new Error(`supervisor.focus kind must be 'ticket' or 'overhead', got ${JSON.stringify(payload.kind)}`);
+  }
+  const taskId = payload.kind === "ticket" ? normalizeTaskId(payload.taskId) : null;
+  if (payload.kind === "ticket" && !taskId) {
+    throw new Error("supervisor.focus requires a taskId for kind 'ticket'");
+  }
+  // Same shape normalizeFocus produces (uppercase TICKET-123). A malformed id
+  // would silently fall out of the report as unattributed — rejected here,
+  // like the other handler validation, so the writer learns immediately.
+  if (payload.kind === "ticket" && !/^[A-Z][A-Z0-9]*-\d+$/.test(taskId)) {
+    throw new Error(`supervisor.focus ticket id must look like FOC-123, got ${JSON.stringify(taskId)}`);
+  }
+  db.prepare("INSERT OR IGNORE INTO runs (run_id, status, updated_at) VALUES (?, 'running', ?)").run(runId, now());
+  db.prepare(
+    "INSERT OR IGNORE INTO run_focus (run_id, valid_from, task_id, kind, source, note) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(runId, at, taskId, payload.kind, payload.source || null, payload.note ?? null);
+  // One correlated UPDATE over the run: every row picks up its successor's
+  // valid_from (MIN over the strictly later ones), so a row that landed
+  // before its successor converges when the successor arrives.
+  db.prepare(
+    `UPDATE run_focus SET valid_to=(
+       SELECT MIN(next.valid_from) FROM run_focus next
+       WHERE next.run_id=run_focus.run_id AND next.valid_from>run_focus.valid_from
+     )
+     WHERE run_id=?`,
+  ).run(runId);
+  return { runId, at, kind: payload.kind, taskId };
 }
 
 function withoutMetaKeys(entries) {
@@ -1973,15 +2087,33 @@ function applyQualityReported(db, event) {
 }
 
 export function recordManifest(manifest, phase, options = {}) {
-  const eventType = phase === "ended" ? "run.ended" : "run.started";
+  // FOC-761: a resumed child turn reuses the run id, so the watcher's second
+  // `end` must not repeat the first end's identity (kind `manifest`, offset 1)
+  // — eventAlreadyApplied would drop it and runs.ended_at would stay at turn 1.
+  // The first end keeps today's identity (old events replay identically); a
+  // later end carries endSeq as its offset under kind `manifest-turn-end`.
+  const endSeq = manifest.endSeq || 1;
+  // FOC-761: the resume's identity is the turn INDEX the reopener recorded
+  // (0-based), not the post-resume turn count. A caller omitting `turn` falls
+  // back to turns - 1 — the same index cmdReopen had — so omitting the option
+  // cannot mint a second identity for the same resume.
+  const resumedTurn = Number.isInteger(options.turn)
+    ? options.turn
+    : Math.max(0, (manifest.turns || 1) - 1);
+  const eventType = phase === "ended" ? "run.ended" : phase === "resumed" ? "run.resumed" : "run.started";
+  const sourceKind = phase === "resumed" ? "manifest-turn"
+    : phase === "ended" && endSeq > 1 ? "manifest-turn-end"
+    : "manifest";
   const result = emitEvent(makeEvent(eventType, manifest, {
     runId: manifest.runId,
-    observedAt: phase === "ended" ? manifest.endedAt : manifest.startedAt,
-    sourceKind: "manifest",
+    observedAt: phase === "ended" ? manifest.endedAt : phase === "resumed" ? manifest.resumedAt : manifest.startedAt,
+    sourceKind,
     sourcePath: options.sourcePath || null,
-    sourceOffset: phase === "ended" ? 1 : 0,
+    sourceOffset: phase === "ended" ? (endSeq > 1 ? endSeq : 1) : phase === "resumed" ? resumedTurn : 0,
   }), options);
-  if (phase !== "ended" && manifest.cwd) {
+  // FOC-761: workspace/task emits belong to the start of a run only — a resume
+  // or a per-turn end must not re-observe the workspace or re-link the task.
+  if (phase === "started" && manifest.cwd) {
     const refType = manifest.gitRefType || (manifest.gitBranch === "HEAD" ? "detached" : manifest.gitBranch && manifest.gitBranch !== "unknown" ? "branch" : "unknown");
     emitEvent(makeEvent("workspace.observed", {
       runId: manifest.runId,
@@ -1995,7 +2127,8 @@ export function recordManifest(manifest, phase, options = {}) {
       sourceKind: "manifest-workspace", sourcePath: options.sourcePath || null, sourceOffset: phase === "ended" ? 1 : 0,
     }), options);
   }
-  if (phase !== "ended" && (manifest.taskId || manifest.taskIdAuto)) {
+  // FOC-761: task.linked, like workspace.observed, is a start-of-run fact.
+  if (phase === "started" && (manifest.taskId || manifest.taskIdAuto)) {
     emitEvent(makeEvent("task.linked", {
       runId: manifest.runId,
       taskId: manifest.taskId || manifest.taskIdAuto,
@@ -2993,6 +3126,165 @@ export function queryPatterns(db, filters = {}) {
      FROM runs GROUP BY squad ORDER BY squad`,
   ).all();
   return { stepStats, repeats, bounces, failures, costBasis: COST_BASIS_RAW, costBasisNote: COST_BASIS_RAW_NOTE };
+}
+
+// ---------------------------------------------------------------------------
+// Ticket cost report (FOC-769): what each ticket actually cost, with the
+// Supervisor's own spend charged to the focus it DECLARED (plan §FOC-769;
+// PRD §3 asks for ≥ 80 % attributed Supervisor spend).
+//
+// Children keep their own run → task links — the primary link active at
+// COALESCE(observed_at, started_at), the same predicate queryTrace applies,
+// with pseudo tasks (`SUP:%`) excluded so the supervisor's own pseudo-billing
+// does not double-charge a ticket. Supervisor messages (runs.squad =
+// 'supervisor', or any run that ever declared a focus) are charged to the
+// run_focus interval valid at observed_at: kind `ticket` → that task,
+// kind `overhead` → overheadUsd, no interval → unattributedUsd. A missing
+// focus is a fact, never a guess — it stays visible as unattributed.
+//
+// Cost is joined at the run's OWN price set — cost_facts holds a row per
+// price snapshot, so joining without c.price_set_id = r.price_set_id would
+// count every message once per snapshot (the same predicate canonical_usage
+// and queryTrace apply; one message is never counted twice across price
+// sets).
+//
+// Limits, stated rather than hidden:
+//   · legacy rows with message_id NULL are ~2x per-line counts (FOC-381) —
+//     they are counted (legacyRows) and bucketed as-is, never collapsed here;
+//   · several runs claiming one transcript (ADR-0008 run-scoped duplication)
+//     are not collapsed either — canonical_usage is the collapsed surface;
+//   · a NULL cost is unpriced, never free: it counts in unpricedMessages
+//     (synthetic placeholder rows excepted — they are not priceable by
+//     definition, the classification costPanel applies) and is never folded
+//     into the $ sums as 0. The $ sums are therefore partial (priced rows
+//     only) whenever unpricedMessages > 0.
+// ---------------------------------------------------------------------------
+
+const SUPERVISOR_SQUAD = "supervisor";
+const PSEUDO_TASK_PREFIX = "SUP:";
+
+/** All focus intervals of a run, ordered — the report's interval index. */
+function focusIntervalsByRun(db) {
+  const map = new Map();
+  for (const row of db.prepare(
+    "SELECT run_id, valid_from, valid_to, task_id, kind FROM run_focus ORDER BY run_id, valid_from",
+  ).all()) {
+    if (!map.has(row.run_id)) map.set(row.run_id, []);
+    map.get(row.run_id).push(row);
+  }
+  return map;
+}
+
+// The focus valid at `at`: valid_from <= at AND (valid_to IS NULL OR
+// at < valid_to). NULL `at` matches nothing, like SQL's three-valued
+// comparison — a message without a timestamp cannot be placed on a timeline.
+function focusAt(intervals, at) {
+  if (at == null) return null;
+  for (const focus of intervals) {
+    if (focus.valid_from <= at && (focus.valid_to == null || at < focus.valid_to)) return focus;
+  }
+  return null;
+}
+
+export function ticketCostReport(db, { since = null, until = null } = {}) {
+  // run_focus is additive: a store last written before FOC-769 landed has no
+  // table, and a report must still come out — every Supervisor message is
+  // simply unattributed. Checked against sqlite_master rather than
+  // try/catching the query, so a real SQL error cannot masquerade as
+  // "table missing".
+  const hasRunFocus = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE name='run_focus' AND type IN ('table','view')",
+  ).get() != null;
+  // observed_at in [since, until) — the half-open window every other read in
+  // this file filters on. Rows with a NULL observed_at cannot prove they are
+  // in the window, so they are excluded whenever a bound is set.
+  const clauses = [];
+  const params = [];
+  if (since != null) { clauses.push("u.observed_at >= ?"); params.push(since); }
+  if (until != null) { clauses.push("u.observed_at < ?"); params.push(until); }
+  const rowsStatement = db.prepare(
+    `SELECT u.run_id, u.model, u.observed_at, u.message_id,
+            c.cost_usd, r.squad, r.started_at
+     FROM usage_facts u
+     JOIN runs r ON r.run_id = u.run_id
+     LEFT JOIN cost_facts c
+       ON c.run_id = u.run_id AND c.usage_id = u.usage_id AND c.price_set_id = r.price_set_id
+     ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""}`,
+  );
+
+  const focusByRun = hasRunFocus ? focusIntervalsByRun(db) : new Map();
+  const linksByRun = linksByRunIndex(db);
+
+  const tickets = new Map();
+  const ticket = (taskId) => {
+    let bucket = tickets.get(taskId);
+    if (!bucket) {
+      bucket = { taskId, childrenUsd: 0, supervisorUsd: 0, totalUsd: 0, messages: 0 };
+      tickets.set(taskId, bucket);
+    }
+    return bucket;
+  };
+  let overheadUsd = 0;
+  let unattributedUsd = 0;
+  let untaggedChildrenUsd = 0;
+  let unpricedMessages = 0;
+  let legacyRows = 0;
+
+  // Streamed, not .all(): a report without --since over a multi-GB store must
+  // not load every usage row into memory. Same results, one row at a time.
+  for (const row of rowsStatement.iterate(...params)) {
+    if (row.message_id == null) legacyRows++;
+    if (row.cost_usd == null && !isSyntheticModel(row.model)) unpricedMessages++;
+    const cost = row.cost_usd ?? 0;
+    // A run is Supervisor's when it declares itself so, OR when it ever
+    // declared a focus (the squad column can lag the declaration).
+    const isSupervisor = row.squad === SUPERVISOR_SQUAD || focusByRun.has(row.run_id);
+    if (isSupervisor) {
+      const focus = focusAt(focusByRun.get(row.run_id) ?? [], row.observed_at);
+      // kind 'ticket' with a NULL task_id cannot happen through the handler
+      // (it throws); a legacy/abnormal row like that stays unattributed
+      // rather than crashing the report or billing a NULL key.
+      if (focus && focus.kind === "overhead") overheadUsd += cost;
+      else if (focus && focus.kind === "ticket" && focus.task_id) {
+        const bucket = ticket(focus.task_id);
+        bucket.supervisorUsd += cost;
+        bucket.messages++;
+      } else unattributedUsd += cost;
+    } else {
+      const taskId = activeTaskAt(linksByRun.get(row.run_id) ?? [], row.observed_at ?? row.started_at);
+      if (taskId && !taskId.startsWith(PSEUDO_TASK_PREFIX)) {
+        const bucket = ticket(taskId);
+        bucket.childrenUsd += cost;
+        bucket.messages++;
+      } else untaggedChildrenUsd += cost;
+    }
+  }
+
+  const ticketRows = [...tickets.values()]
+    .map((bucket) => ({ ...bucket, totalUsd: bucket.childrenUsd + bucket.supervisorUsd }))
+    .sort((a, b) => b.totalUsd - a.totalUsd);
+  const supervisorTicketUsd = ticketRows.reduce((sum, t) => sum + t.supervisorUsd, 0);
+  const supervisorTotalUsd = supervisorTicketUsd + overheadUsd + unattributedUsd;
+  return {
+    since,
+    until,
+    tickets: ticketRows,
+    overheadUsd,
+    unattributedUsd,
+    untaggedChildrenUsd,
+    supervisor: {
+      totalUsd: supervisorTotalUsd,
+      ticketUsd: supervisorTicketUsd,
+      overheadUsd,
+      unattributedUsd,
+      // (ticket + overhead) / total — the PRD §3 attribution share. Declared
+      // overhead COUNTS as attributed (the Supervisor said "no ticket");
+      // only the undeclared remainder drags the share down.
+      attributedShare: supervisorTotalUsd > 0 ? (supervisorTicketUsd + overheadUsd) / supervisorTotalUsd : null,
+    },
+    unpricedMessages,
+    legacyRows,
+  };
 }
 
 /**

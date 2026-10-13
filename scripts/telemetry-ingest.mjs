@@ -571,6 +571,8 @@ export async function ingestTranscript(db, runId, transcriptPath, sessionId = nu
   if (!transcriptPath || !existsSync(transcriptPath)) return { files: 0, events: 0, missing: true };
   const paths = [transcriptPath, ...subagentPaths(transcriptPath)];
   let eventsApplied = 0;
+  // FOC-761: every pass must reach EOF for the growth issue to be resolvable.
+  let allPassesComplete = true;
   for (const path of paths) {
     const stats = statSync(path);
     const isLead = path === transcriptPath;
@@ -611,6 +613,7 @@ export async function ingestTranscript(db, runId, transcriptPath, sessionId = nu
       startOffset, isLead, state, statsSize: stats.size, resetOffset: shrunk,
     });
     eventsApplied += range.events;
+    if (!range.complete) allPassesComplete = false;
 
     // Extract tool_facts and delegation_links for the SAME incremental range.
     // Wrapped in sqliteAvailable() so Node degrades gracefully when node:sqlite
@@ -634,6 +637,17 @@ export async function ingestTranscript(db, runId, transcriptPath, sessionId = nu
   // this, the issue opened by an earlier failed ingest cycle stays open
   // forever and ingest cycles keep reporting it as still missing.
   resolveQualityIssue(db, runId, "transcript_missing");
+  // FOC-761: sweepSettledGrowth raises transcript_grew_after_settle once per
+  // run; it is resolved here, once the run's transcript has been re-read. Only
+  // a COMPLETE pass closes it — a pass that stopped mid-file (failed chunk, no
+  // EOF) has not seen the whole growth yet, so the issue stays open until a
+  // pass reaches EOF. Resolving on incomplete passes would let the next sweep
+  // raise the same growth again while the tail is still unparsed. Closing it
+  // also re-arms reporting: the next growth on this run raises a NEW issue row
+  // instead of being swallowed by the forever-open one.
+  if (allPassesComplete) {
+    resolveQualityIssue(db, runId, "transcript_grew_after_settle");
+  }
   return { files: paths.length, events: eventsApplied, missing: false };
 }
 
@@ -1022,6 +1036,79 @@ export async function ingestKnownRuns(options = {}) {
   return summary;
 }
 
+// ---------------------------------------------------------------------------
+// Settled-growth sweep (FOC-761)
+// ---------------------------------------------------------------------------
+
+// FOC-761: a resumed turn (supervisor-followup reuses the child's run id)
+// appends to a transcript whose run already settled, and settledRun then keeps
+// the 15 s tick away from it forever — the resumed turns' usage lines were
+// never read. Re-opening the tick's gate for those runs is not an option (the
+// 2026-09-05 measurement above: per-run stat/parse work in the 15 s loop is
+// what pinned the dashboard), so the growth check is a SLOW background sweep:
+// it stats only the stored transcript_sources paths of settled runs — no
+// manifest scans, no session-root searches — and a file larger than its parsed
+// file_size is set back to 'pending' (ingestTranscript then resumes from the
+// stored byte_offset — no full re-parse) plus a data-quality issue, once per
+// run. The tick itself stays untouched: it still skips settled runs without a
+// stat (AC3), and it picks the re-pended rows up on its next pass because
+// settledRun counts them as not settled.
+//
+// The boot pass (maxAgeDays: null, run once after the server's boot backfill)
+// is the one-time re-ingest of runs settled BEFORE this fix shipped — their
+// growth is caught on the first server start with this code, without waiting
+// out the 14-day window.
+//
+// Known limit (ADR-0008 run-scoped duplication): several runs may claim one
+// transcript file, so one growth re-pends one row per claiming run and each of
+// them re-reads the new tail. Canonical views already collapse those claims;
+// the sweep re-does work, it does not corrupt it.
+export async function sweepSettledGrowth(options = {}) {
+  const maxAgeDays = options.maxAgeDays === undefined ? 14 : options.maxAgeDays;
+  const now = Number.isFinite(options.now) ? options.now : Date.now();
+  const summary = { checked: 0, grown: 0, runs: [] };
+  const db = openTelemetryDb(options.dbPath);
+  try {
+    // Same gate as settledRun: only runs STRICTLY past the flush grace.
+    const graceCutoff = new Date(now - REINGEST_GRACE_MS).toISOString();
+    const ageCutoff = maxAgeDays == null ? null : new Date(now - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
+    // ended_at is an ISO UTC string everywhere in the store, so lexicographic
+    // comparison against ISO cutoffs matches the Date math settledRun does.
+    const rows = db.prepare(
+      `SELECT ts.source_path AS sourcePath, ts.run_id AS runId, ts.file_size AS fileSize
+       FROM transcript_sources ts JOIN runs r ON r.run_id = ts.run_id
+       WHERE ts.parse_status='parsed' AND r.status IN ('completed','failed')
+         AND r.ended_at IS NOT NULL AND r.ended_at < ?
+         ${ageCutoff ? "AND r.ended_at > ?" : ""}
+       ORDER BY ts.source_path`,
+    ).all(...(ageCutoff ? [graceCutoff, ageCutoff] : [graceCutoff]));
+    const pacer = createPacer();
+    const grownByRun = new Map();
+    for (const row of rows) {
+      summary.checked++;
+      await pacer();
+      let size = 0;
+      try { size = statSync(row.sourcePath).size; } catch { continue; }
+      if (size <= row.fileSize) continue;
+      db.prepare(
+        "UPDATE transcript_sources SET parse_status='pending', updated_at=? WHERE source_path=? AND run_id=?",
+      ).run(new Date(now).toISOString(), row.sourcePath, row.runId);
+      summary.grown++;
+      if (!grownByRun.has(row.runId)) {
+        grownByRun.set(row.runId, { sourcePath: row.sourcePath, parsedSize: row.fileSize, size });
+      }
+    }
+    for (const [runId, details] of grownByRun) {
+      if (hasOpenQualityIssue(db, runId, "transcript_grew_after_settle")) continue;
+      reportDataQuality(runId, "transcript_grew_after_settle", details, { ...options, db });
+      summary.runs.push(runId);
+    }
+  } finally {
+    await db.close();
+  }
+  return summary;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0] || "ingest";
@@ -1030,8 +1117,9 @@ async function main() {
   if (command === "backfill") result = await backfill();
   else if (command === "ingest") result = await ingestKnownRuns();
   else if (command === "replay") result = replayPending();
+  else if (command === "sweep") result = await sweepSettledGrowth({ maxAgeDays: args.includes("--all") ? null : undefined });
   else {
-    console.error("Usage: node scripts/telemetry-ingest.mjs <backfill|ingest|replay> [--json]");
+    console.error("Usage: node scripts/telemetry-ingest.mjs <backfill|ingest|replay|sweep> [--all] [--json]");
     process.exit(2);
   }
   if (asJson) console.log(JSON.stringify(result, null, 2));
