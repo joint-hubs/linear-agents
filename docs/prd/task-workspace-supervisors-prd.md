@@ -1,6 +1,6 @@
 # PRD — Task Workspace, Concurrent Supervisors, Manager Tool Config, Statistics & Semantic Map
 
-Status: **APPROVED 2026-10-14 — implementation in progress** (all phases P1–P4 approved by Mateusz; "zatwierdzam"). Nothing delivered yet; execution plan: `docs/plans/task-workspace-delivery.md`.
+Status: **DELIVERED 2026-10-14** — approved by Mateusz ("zatwierdzam") and all phases P1–P4 implemented, verified (server-side acceptance + browser walk) and committed on `fenix-settings-keys`. Execution plan and evidence: `docs/plans/task-workspace-delivery.md`.
 Scope: follow-up package, separate from the completed (uncommitted) Settings work. Nothing here supersedes any Settings deliverable.
 Supersedes (only if approved): the single-process navigation decision in `docs/plans/foc-783-cockpit.md` and related board/navigation assumptions in `docs/ui/dashboard-v2-spec.md`. All prior run history is preserved, never rewritten.
 
@@ -214,12 +214,12 @@ Planning (complete):
 - [x] Risks/spikes assigned to owning phases (§14)
 - [x] PRD approved by Mateusz, 2026-10-14 (all P1–P4)
 
-Implementation (IN PROGRESS — PRD approved 2026-10-14; nothing delivered yet):
+Implementation (DELIVERED 2026-10-14 — evidence in `docs/plans/task-workspace-delivery.md`, acceptance log at the end):
 
-- [ ] P1A identity/ownership/events + migration
-- [ ] P1B task-scoped host + coordinator + guards
-- [ ] P1C board home/labels + scoped cockpit
-- [ ] P2 Manager editor + registry + MCP connectors (runtime-verified)
-- [ ] P3 utilization / workflow-choice / rework metrics
-- [ ] P4 semantic map cache + projection + UI
-- [ ] Final E2E: Docker rebuild, redeploy, browser check, real-provider pass
+- [x] P1A identity/ownership/events + migration
+- [x] P1B task-scoped host + coordinator + guards
+- [x] P1C board home/labels + scoped cockpit
+- [x] P2 Manager editor + registry + MCP connectors (runtime-verified)
+- [x] P3 utilization / workflow-choice / rework metrics
+- [x] P4 semantic map cache + projection + UI
+- [x] Final E2E: Docker rebuild, redeploy, browser check, real-provider pass (browser walk DONE 2026-10-14)

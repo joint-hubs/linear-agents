@@ -38,52 +38,58 @@ PRD: `docs/prd/task-workspace-supervisors-prd.md` — **APPROVED 2026-10-14** (a
 
 ### P1b — Task-scoped session host (`scripts/supervisor-host.mjs`, `supervisor-lib.mjs`, `supervisor-current-run.mjs`, `work-routes.mjs`, `cockpit-routes.mjs`)
 
-- [ ] Extend the single host (port 7332) into a session multiplexer routing by validated opaque `sessionId`; no extra public ports.
-- [ ] Per-session state: paths, current-run pointer, transcript, messages, wake file, terminal, config snapshot — isolated under the task's session directory.
-- [ ] Host mirrors the scoped routes under `/sessions/:id` (below); legacy global routes kept **only where unambiguous** (single active session) and otherwise answer with an explicit ambiguity error — never a silent guess (§5).
-- [ ] Task start binds **immutable Linear issue identity** (workspace + issueId) at `ensure` time; display identifiers resolve only within the matching workspace (AC-2, AC-5).
-- [ ] Cancel/stop scoped to `task + generation`; stopping A never touches B (AC-1).
-- [ ] SSE/WS streams scoped per task/session; routing validated server-side (AC-4).
-- [ ] Migration: known existing owner attached once; unknown legacy runs read-only and unassigned; nothing auto-adopted.
+Delivered 2026-10-14 — evidence in the integration / acceptance logs below.
+
+- [x] Extend the single host (port 7332) into a session multiplexer routing by validated opaque `sessionId`; no extra public ports. (`task-session-host.mjs serve` on :7332.)
+- [x] Per-session state: paths, current-run pointer, transcript, messages, wake file, terminal, config snapshot — isolated under the task's session directory.
+- [x] Host mirrors the scoped routes under `/sessions/:id` (below); legacy global routes kept **only where unambiguous** (single active session) and otherwise answer with an explicit ambiguity error — never a silent guess (§5). (Acceptance: 409 `selection-required` vs scoped `taskKey` binding.)
+- [x] Task start binds **immutable Linear issue identity** (workspace + issueId) at `ensure` time; display identifiers resolve only within the matching workspace (AC-2, AC-5).
+- [x] Cancel/stop scoped to `task + generation`; stopping A never touches B (AC-1). (Acceptance: stop A → B byte-identical, C claimed the slot.)
+- [x] SSE/WS streams scoped per task/session; routing validated server-side (AC-4).
+- [x] Migration: known existing owner attached once; unknown legacy runs read-only and unassigned; nothing auto-adopted. (`ensure` is the one attach; `supervisor-current-run` scoped mode has adoption OFF and throws on an owner mismatch; legacy stays readable and unassigned.)
 - [ ] Spike follow-ups (owned here): shared integration-lock blast radius across `supervisor-lib.mjs`; resource benchmark at cap=2.
 
 ### P1c — Scoped API + UI
 
-- [ ] Scoped API (proposed contract):
+Delivered 2026-10-14 — scoped API regressions 48/48; UI helpers + Vite build + browser walk (see the logs below).
+
+- [x] Scoped API (proposed contract):
   - `GET /api/supervisor/sessions` — list (status, taskKey, health).
   - `GET|POST /api/supervisor/sessions/:sessionId/session` — read / (re)start-resume.
   - `GET|POST /api/supervisor/sessions/:sessionId/message` — transcript read / send.
   - `POST /api/supervisor/sessions/:sessionId/stop` — scoped cancel.
   - `WS /api/supervisor/sessions/:sessionId/terminal` — per-session terminal stream.
   - Host-mirrored equivalents under `/sessions/:id` (P1b).
-- [ ] Legacy global endpoints remain functional **only when unambiguous** (≤1 active session); ambiguity → explicit error payload.
-- [ ] Board is home: `/` → board, `/work` alias; cards carry real Linear labels (id/name/color, tooltip overflow, filterable) (AC-5).
-- [ ] Cockpit route `/work/:taskKey/cockpit` (chat/terminal/team/timeline/evidence); header shows task + Supervisor identity + health. Stage shown **separate** from lifecycle status.
-- [ ] Needs-you inbox links every item to its task-scoped cockpit.
-- [ ] No drag-and-drop without a real backend action behind it.
+- [x] Legacy global endpoints remain functional **only when unambiguous** (≤1 active session); ambiguity → explicit error payload.
+- [x] Board is home: `/` → board, `/work` alias; cards carry real Linear labels (id/name/color, tooltip overflow, filterable) (AC-5).
+- [x] Cockpit route `/work/:taskKey/cockpit` (chat/terminal/team/timeline/evidence); header shows task + Supervisor identity + health. Stage shown **separate** from lifecycle status. (Browser walk 2026-10-14.)
+- [x] Needs-you inbox links every item to its task-scoped cockpit.
+- [x] No drag-and-drop without a real backend action behind it.
 
 ### P1 events (runtime, basis for P3)
 
-- [ ] Emit named events: `supervisor_started` / `supervisor_stopped`, `actor_state_changed`, `workflow_selected` / `workflow_revised`, `stage_attempt_started` / `stage_attempt_completed`, `return_to_dev` — shared fields exactly per PRD §9 (`taskKey, supervisorSessionId, workflowRunId, attemptId, actorId/role, parentActorId, seq, eventId, occurredAt, schemaVersion`, cause/evidence). Idempotent event ids; `seq` scoped per actor/session stream.
-- [ ] Migration of existing runs per §5 (explicit, no silent adoption).
+Delivered 2026-10-14 (`feat(runtime)` batch; producers in `runtime-hook.mjs`, store in `runtime-events.mjs`).
+
+- [x] Emit named events: `supervisor_started` / `supervisor_stopped`, `actor_state_changed`, `workflow_selected` / `workflow_revised`, `stage_attempt_started` / `stage_attempt_completed`, `return_to_dev` — shared fields exactly per PRD §9 (`taskKey, supervisorSessionId, workflowRunId, attemptId, actorId/role, parentActorId, seq, eventId, occurredAt, schemaVersion`, cause/evidence). Idempotent event ids; `seq` scoped per actor/session stream.
+- [x] Migration of existing runs per §5 (explicit, no silent adoption). (Scoped `supervisor-current-run` adoption OFF; a foreign run is never adopted into a task.)
 
 **P1 acceptance:** AC-1 … AC-5 pass (PRD §13).
 
 ## 3. P2 — Manager tool config + MCP (Thoughtmap)
 
-- [ ] Versioned MCP registry: connection params + **secret references** (never values); builtin tools and MCP servers as distinct layers.
-- [ ] Manager Tools editor: catalog + discovery + test-connection + per-role selection, staged `preview → apply`, persisted via the existing `squad-config.mjs` write service.
-- [ ] Inheritance `global → squad → role`; per **agent-process launch** capture a profile snapshot (registry revision + resolved tools). Apply affects only the **next** process; restart/resume previews the profile diff and records a new revision (§7).
-- [ ] Config snapshot recorded per session (hooks into P1a `config snapshot` state).
+- [x] Versioned MCP registry: connection params + **secret references** (never values); builtin tools and MCP servers as distinct layers.
+- [x] Manager Tools editor: catalog + discovery + test-connection + per-role selection, staged `preview → apply`, persisted via the existing `squad-config.mjs` write service.
+- [x] Inheritance `global → squad → role`; per **agent-process launch** capture a profile snapshot (registry revision + resolved tools). Apply affects only the **next** process; restart/resume previews the profile diff and records a new revision (§7).
+- [x] Config snapshot recorded per session (hooks into P1a `config snapshot` state).
 - [x] Thoughtmap spike first: runtime packaging, container reachability, actual `tools/list` of the registered stdio adapter (`infra/mcp-chromadb/server.py`); one read-only round-trip before "available" (§8). Five tools only — the seven-tool pipeline module is out of scope. (All five real Thoughtmap tools verified 2026-10-14.)
-- [ ] No write endpoints enabled implicitly; no Docker socket; no sidecar by default.
-- [ ] Tests use fake MCP fixtures; no auth material in responses/logs/frontmatter (AC-6, AC-7).
+- [x] No write endpoints enabled implicitly; no Docker socket; no sidecar by default.
+- [x] Tests use fake MCP fixtures; no auth material in responses/logs/frontmatter (AC-6, AC-7).
 
 ## 4. P3 — Metrics
 
-Code, tests and routes/screen wiring delivered 2026-10-14 (`/insights/runtime`); real-data flow awaits runtime-hook producer integration (see integration checkpoint). Active-span source = native Claude Code OTLP spans.
+Code, tests and routes/screen wiring delivered 2026-10-14 (`/insights/runtime`); the runtime-hook producer integration is coded and landed (entry (32) correction — the 12:36–12:39 Atlas wave came in after this note was first written). Active-span source = native Claude Code OTLP spans.
 
-- [ ] Active-span instrumentation (spike: where `model_request`/`tool_exec` intervals can be measured); historical windows render **unavailable** with coverage — never estimated.
+- [x] Active-span instrumentation (spike: where `model_request`/`tool_exec` intervals can be measured); historical windows render **unavailable** with coverage — never estimated. (Native Claude Code OTLP spans verified in a real GLM 5.3 Flash child run.)
 - [x] Actor active % exactly per PRD §10 (knownTime denominator, coverage shown, null on zero denominator).
 - [x] Role stats as duration pools; team concurrency as a capacity pool.
 - [x] Workflow choice proportions from `workflow_selected` (+ revisions separate); rework from `return_to_dev` with reason/source; infrastructure retry ≠ rework.
@@ -92,7 +98,7 @@ Code, tests and routes/screen wiring delivered 2026-10-14 (`/insights/runtime`);
 
 ## 5. P4 — Semantic task map
 
-Embedding cache, UMAP projection (seed 42), routes and the `/insights/map` screen delivered 2026-10-14; real local Ollama verification PASSED (integration checkpoint). Browser acceptance remains in §6.
+Embedding cache, UMAP projection (seed 42), routes and the `/insights/map` screen delivered 2026-10-14; real local Ollama verification PASSED (integration checkpoint). Browser acceptance DONE 2026-10-14 (§6).
 
 - [x] Embedding cache: per-text digest; reuse vectors only when input contract + model + revision + dims match; batched, off request thread, partial/error states; local cache dir git-ignored; **no automatic export** to Thoughtmap or anywhere else.
 - [x] Projection: UMAP, fixed seed + library version + parameters saved per projection version; filtering never refits; new points transform into the fixed reference; explicit rebuild = new version; tiny-N fallback = list/PCA. Similarity on original vectors; 2D visual only. (Real Ollama `embeddinggemma`: digest `85462619ee721b466c5927d109d4cb765861907d5417b9109caebc4e614679f1`, seed 42 — 5 points fit, 6th transformed with the 5 old coords unchanged — PASSED.)
@@ -102,7 +108,7 @@ Embedding cache, UMAP projection (seed 42), routes and the `/insights/map` scree
 ## 6. Final verification (last, after P1–P4)
 
 - [x] Docker rebuild + redeploy (non-production acceptance stack); **no prod changes, no commits** in this pass. (2026-10-14: image `fenix:task-workspace-candidate` rebuilt from HEAD, both containers healthy.)
-- [ ] Full build + browser E2E for the UI lanes: board, cockpit, Manager, Statistics, map. (Server-side all green — browser walk is Mateusz's, no headless harness exists in `ui/`.)
+- [x] Full build + browser E2E for the UI lanes: board, cockpit, Manager, Statistics, map. (Server-side all green; browser walk DONE by Mateusz 2026-10-14 — "ok wyglada ze wszystko dziala super". No headless harness exists in `ui/`; the walk is the evidence.)
 - [x] Mocked verification first; real-provider verification as a **separate** run — no operational claim from the mock environment (AC-10). (Real runs: in-stack task-map build 137/137 via Ollama; Manager test-connection init+tools+search 14.3 s.)
 - [x] Update `docs/STATE.md` with delivery status; propose commit batches (parent decides). (STATE (31)/(32); 11 batches landed after Mateusz said „commituj".)
 
@@ -159,11 +165,12 @@ Embedding cache, UMAP projection (seed 42), routes and the `/insights/map` scree
 - [x] Real GLM 5.3 Flash run in a native child process: OTLP interaction/model spans stored with task/session trace attribution; no prompt/tool content captured.
 - [x] Explicit stopped-history resume through queue/cap: code + tests, **34 pass**.
 - [x] Test lanes: 18 new backend `*.test.mjs` registered in `scripts/test-lanes.json` (task-workspace suites + `supervisor-watch`, `supervisor-launch`, `worker-tool-profiles`) — parallel vs serial decided per sockets/process/env (9 serial: `runtime-otel`, `task-cockpit-routes`, `task-map-routes`, `task-session-host`, `task-sessions`, `tool-profiles`, `tool-routes`, `workspace-claims`, `supervisor-watch`; 9 parallel). Lane coverage + static isolation audit green (`node scripts/test-run.mjs` inventory pass). Nav tests 24/24 (`/insights/runtime` "Runtime statistics", `/insights/map` "Task map" pinned).
-- [ ] Docs required-count guards (reported, NOT changed — not owned): `docs/supervisor-e2e-checklist.md` line 3 says **152 files**, actual **170** `scripts/*.test.mjs` — update to 170; the prose line (~208, "`test-all.mjs` → 116 files") is not guard-checked but reads stale too. Guard: `scripts/docs-count-guard.test.mjs` fails until line 3 is updated.
+- [x] Docs required-count guards: `docs/supervisor-e2e-checklist.md` updated 152 → 172 and the guard re-run green (`scripts/docs-count-guard.test.mjs`, 172 = 172). The prose line (~208, "`test-all.mjs` → 116 files") is not guard-checked and still reads stale — left as an observation, not owned.
 - Browser E2E acceptance walk: DONE 2026-10-14 (Mateusz: "ok wyglada ze wszystko dziala super"). Native worker MCP distance-tool acceptance: DONE — all five tools answered real payloads on the host Ollama probe (see the acceptance log).
 - Blank task-cockpit page (the walk's first stop) — FIXED 2026-10-14: `TaskCockpit.jsx` dereferenced `snap.data.data` when both the snapshot envelope and the session were absent on first paint (`undefined === undefined` made the ternary take its true branch → TypeError → React unmounted the tree). Extracted as `snapDataFor(envelope, session)` in `taskCockpitModel.js`, null-guards both sides, 6 unit tests; image rebuilt and redeployed.
 - Session `lastError` banner (the "Terminal disconnected" confusion) — FIXED 2026-10-14: the P1 restart quarantine is designed to refuse the terminal WS (409 `session-recovery-required`), but the browser maps the failed handshake to a generic 1006 overlay and the task cockpit never rendered `session.lastError`, so a designed state looked like a dead terminal. `sessionErrorBanner(session)` in `taskCockpitModel.js` (verbatim `lastError`, hint only when the message names a UI-known recovery), banner in `TaskCockpit`, `hint` prop on `TerminalView`; 4 unit tests (40/40). Second redeploy re-quarantined B/C by design — the banner is visible on both cockpits (Stop → Resume this history).
-- Observation from the walk (not a P1–P4 defect): a task session answering "jak tam status" pitched generic frontman intake ("podaj ID issue…") although its `taskKey` is bound to CHECK-B. The isolation probe forbade tools, so the child could not read its own record — the honest answer under that constraint. Worth teaching the kickoff to carry the taskKey so a task session knows its bound ticket without tools.
+- Observation from the walk (not a P1–P4 defect): a task session answering "jak tam status" pitched generic frontman intake ("podaj ID issue…") although its `taskKey` is bound to CHECK-B. The isolation probe forbade tools, so the child could not read its own record — the honest answer under that constraint. **FIXED 2026-10-14** — the kickoff now carries the binding (below).
+- Task binding in the session kickoff — FIXED 2026-10-14: `prepareSupervisorLaunch` (`scripts/supervisor-launch.mjs`) appends a `## Task binding` section to the session's `CLAUDE.md` naming `taskKey` (and the Linear id when it passes `isRuntimeToken`), so a session knows its bound ticket **without tools**. The store and the env carried the identity all along — the model read neither. A managed launch without a task key still refuses outright (telemetry identity is all-or-nothing), so a binding is never fabricated; the Linear id is env-only and is dropped when it is not a short safe identifier — a prompt is never a place for unvalidated text. 5 tests in `supervisor-launch.test.mjs` (suite 92/92).
 - Active Atlas jobs: hook `claude-606ac3`, watcher `claude-dd9312` (both active).
 
 ### Acceptance log — 2026-10-14 (server side, stack `fenix-task-workspace` @ 4602)
