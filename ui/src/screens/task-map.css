@@ -1,0 +1,220 @@
+/* TaskMap (P4) — local styles only; global classes (.section-h, .muted,
+ * .banner, .btn-secondary, .filter-sel) come from theme.css.
+ *
+ * Stage colors: the validated reference categorical palette in its FIXED slot
+ * order (ready→landed = slots 1–6). Six slots cannot clear the all-pairs CVD
+ * floors on colour alone (documented palette.md limitation), so identity is
+ * double-encoded with marker shapes (taskMapModel.STAGE_MARKERS) and every
+ * point's identity is also always readable as text in the list alternative.
+ * Dark steps are the palette's own dark column, swapped under the OS setting.
+ */
+.task-map {
+  --tm-stage-ready: #2a78d6;
+  --tm-stage-plan: #eb6834;
+  --tm-stage-dev: #1baf7a;
+  --tm-stage-review: #eda100;
+  --tm-stage-test: #e87ba4;
+  --tm-stage-landed: #008300;
+  --tm-stage-unknown: #898781;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  .task-map {
+    --tm-stage-ready: #3987e5;
+    --tm-stage-plan: #d95926;
+    --tm-stage-dev: #199e70;
+    --tm-stage-review: #c98500;
+    --tm-stage-test: #d55181;
+    --tm-stage-landed: #008300;
+  }
+}
+
+.tm-head p {
+  margin: 4px 0 0;
+  max-width: 72ch;
+}
+
+/* Toolbar: filters in one row above the plot (interaction.md). */
+.tm-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 16px;
+}
+.tm-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted, var(--text-2, #52514e));
+}
+.tm-radios {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.tm-radios legend {
+  float: left; /* keep the legend on the same row */
+  padding: 0;
+  margin-right: 8px;
+  font-size: 12px;
+}
+.tm-radios label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+.tm-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.tm-confirm-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* Status line: job state, projection state, corpus, destination. */
+.tm-statusline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  font-size: 12px;
+}
+.tm-job-neutral { color: var(--muted, var(--text-2, #52514e)); }
+.tm-job-building { color: var(--accent, #2a78d6); font-weight: 600; }
+.tm-job-ok { color: var(--muted, var(--text-2, #52514e)); }
+.tm-job-danger { color: #d03b3b; font-weight: 600; }
+
+.tm-empty {
+  padding: 24px;
+  border: 1px dashed var(--border, #e1e0d9);
+  border-radius: var(--radius-sm, 6px);
+  text-align: center;
+}
+
+/* Hover/select info strip — fixed position above the plot (no viewBox→pixel
+ * math), aria-live so screen readers hear the hover target too. */
+.tm-infostrip {
+  min-height: 1.6em;
+  padding: 8px 12px;
+  border: 1px solid var(--border, #e1e0d9);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface, #fcfcfb);
+  font-size: 13px;
+}
+.tm-pointsummary strong { font-variant-numeric: tabular-nums; }
+
+/* Legend: shape + color per stage. */
+.tm-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 12px;
+  color: var(--muted, var(--text-2, #52514e));
+}
+.tm-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tm-swatch { flex: none; }
+
+/* The plot: fixed 1000×640 viewBox inside a horizontally scrollable viewport
+ * on narrow screens (responsive overflow, never a squeezed scatter). */
+.tm-plot {
+  overflow-x: auto;
+  border: 1px solid var(--border, #e1e0d9);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface, #fcfcfb);
+}
+.tm-svg { display: block; }
+.tm-plot-bg { fill: var(--surface, #fcfcfb); }
+.tm-point {
+  cursor: pointer;
+}
+.tm-point:focus-visible {
+  outline: 2px solid var(--accent, #2a78d6);
+  outline-offset: 2px;
+}
+.tm-plotnote { margin: 0; font-size: 12px; }
+
+/* Selected panel + neighbors. */
+.tm-selected {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-strong, var(--border, #e1e0d9));
+  border-radius: var(--radius-sm, 6px);
+}
+.tm-open {
+  align-self: flex-start;
+  text-decoration: none;
+}
+.tm-neighbor-list,
+.tm-pointlist,
+.tm-unembedded-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tm-neighbor-btn,
+.tm-pointlist-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-sm, 6px);
+}
+.tm-neighbor-btn:hover,
+.tm-pointlist-btn:hover {
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+}
+.tm-neighbor-key {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.tm-neighbor-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tm-selected-row {
+  outline: 1px solid var(--accent, #2a78d6);
+}
+
+/* Alternatives row: the accessible select + the full list. */
+.tm-alternatives {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Unembedded list. */
+.tm-unembedded-list li {
+  display: flex;
+  gap: 10px;
+  padding: 2px 0;
+  font-size: 13px;
+}
