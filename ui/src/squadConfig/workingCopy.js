@@ -133,6 +133,51 @@ export function setAgentModel(copy, squad, role, model) {
   };
 }
 
+// Stage a role tools change (the same role-frontmatter change ToolEditorModal
+// writes directly in /squad-config — here it stages through the shared working
+// copy so the edit bar's preview → apply → discard owns the write, exactly
+// like model edits). Preserves the role's model; creates the agent entry when
+// missing; unknown squad → unchanged copy.
+export function setAgentTools(copy, squad, role, tools) {
+  const entry = copy?.squads?.[squad];
+  if (!entry) return copy;
+  const agents = entry.agents || {};
+  const existing = agents[role];
+  const model = (existing && typeof existing === 'object') ? (existing.model || '') : '';
+  return {
+    ...copy,
+    squads: {
+      ...copy.squads,
+      [squad]: { ...entry, agents: { ...agents, [role]: { model, tools } } },
+    },
+  };
+}
+
+// Split a configured tools list against the tool catalog: names the catalog
+// knows are editable; unknown names (today: hand-written or MCP tools — the
+// MCP catalog is a later phase) are carried through untouched, so editing the
+// native catalog can never silently drop them. Without a catalog nothing is
+// editable and everything is preserved — the editor shows an error instead of
+// faking a selection.
+export function splitKnownTools(configured, catalogNames) {
+  const configuredList = Array.isArray(configured)
+    ? configured.filter((t) => typeof t === 'string' && t.trim() !== '')
+    : [];
+  const known = catalogNames ? new Set(catalogNames) : null;
+  return {
+    editable: known ? configuredList.filter((t) => known.has(t)) : [],
+    preserved: known ? configuredList.filter((t) => !known.has(t)) : [...configuredList],
+  };
+}
+
+// Configured-vs-staged tools summary (same shape idea as stagedModelSummary):
+// order is not content — sorted comparison.
+export function stagedToolsSummary(configured, staged) {
+  const from = [...(configured || [])].sort();
+  const to = [...(staged || [])].sort();
+  return { changed: JSON.stringify(from) !== JSON.stringify(to), from, to };
+}
+
 // The POST body for preview (dryRun: true) and apply (dryRun: false) — the
 // exact shape /api/squad-config expects: the full working copy plus the flag.
 export function buildSavePayload(copy, dryRun) {

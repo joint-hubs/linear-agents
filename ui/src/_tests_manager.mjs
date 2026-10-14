@@ -42,7 +42,10 @@ import {
   modelSuggestions,
   normalizeSaveError,
   setAgentModel,
+  setAgentTools,
   setLeadModel,
+  splitKnownTools,
+  stagedToolsSummary,
 } from './squadConfig/workingCopy.js';
 import {
   connectivityState,
@@ -452,6 +455,63 @@ await test('hasPriceEntry finds pricing rows only for the same provider', () => 
   eq(hasPriceEntry('z-ai/glm-5.3-flash', 'openrouter', pricing), true);
   eq(hasPriceEntry('z-ai/glm-5.3-flash', 'anthropic', pricing), false);
   eq(hasPriceEntry('z-ai/glm-5.3-flash', 'openrouter', undefined), false);
+});
+
+// --- working copy: tools staging ---------------------------------------------
+
+await test('setAgentTools stages tools and preserves the role model', () => {
+  const copy = buildWorkingCopy(FIXTURE);
+  const next = setAgentTools(copy, 'dev', 'recon', ['Read', 'Edit']);
+  eq(next.squads.dev.agents.recon, { model: 'z-ai/glm-5.3-flash', tools: ['Read', 'Edit'] });
+  // previous copy untouched
+  eq(copy.squads.dev.agents.recon.tools, ['Read', 'Grep', 'Glob', 'Bash']);
+  // clearing to empty stages an honest empty list (the write drops the grants)
+  eq(setAgentTools(copy, 'dev', 'recon', []).squads.dev.agents.recon.tools, []);
+});
+
+await test('setAgentTools creates a missing entry, ignores unknown squads, mirrors setAgentModel shape', () => {
+  const copy = buildWorkingCopy(FIXTURE);
+  const created = setAgentTools(copy, 'dev', 'newRole', ['Read']);
+  eq(created.squads.dev.agents.newRole, { model: '', tools: ['Read'] });
+  eq(setAgentTools(copy, 'ghost', 'recon', ['Read']), copy);
+});
+
+await test('combined model + tools staging counts two changes; reset restores server identity', () => {
+  const base = buildWorkingCopy(FIXTURE);
+  let staged = setAgentModel(base, 'dev', 'implementer', 'other/model');
+  staged = setAgentTools(staged, 'dev', 'implementer', ['Read']);
+  eq(countDirty(base, staged), 2);
+  assert.notEqual(workingFingerprint(staged), workingFingerprint(base));
+  // re-granting the exact configured list is clean again (sorted comparison)
+  const revertedTools = setAgentTools(staged, 'dev', 'implementer', ['Read', 'Edit', 'Write']);
+  eq(countDirty(base, revertedTools), 1); // only the model edit remains
+  // discard = rebuild from the server read: fingerprint and dirty count restore
+  const discarded = buildWorkingCopy(FIXTURE);
+  eq(workingFingerprint(discarded), workingFingerprint(base));
+  eq(countDirty(base, discarded), 0);
+  // the staged copy the user saw is never mutated by a later stage
+  eq(staged.squads.dev.agents.implementer, { model: 'other/model', tools: ['Read'] });
+});
+
+await test('splitKnownTools separates catalog names from preserved unknowns (MCP)', () => {
+  const catalog = ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Write'];
+  const split = splitKnownTools(['Read', 'mcp__fenix__search', 'Bash', '', 5], catalog);
+  eq(split.editable, ['Read', 'Bash']);
+  eq(split.preserved, ['mcp__fenix__search']); // junk filtered, unknown preserved in order
+  // no catalog → nothing editable, everything preserved (the editor errors instead of faking)
+  const blind = splitKnownTools(['Read', 'mcp__x'], null);
+  eq(blind.editable, []);
+  eq(blind.preserved, ['Read', 'mcp__x']);
+  eq(splitKnownTools(undefined, catalog), { editable: [], preserved: [] });
+});
+
+await test('stagedToolsSummary compares order-insensitively', () => {
+  eq(stagedToolsSummary(['Read', 'Edit'], ['Edit', 'Read']).changed, false);
+  const s = stagedToolsSummary(['Read', 'Edit'], ['Read']);
+  eq(s.changed, true);
+  eq(s.from, ['Edit', 'Read']);
+  eq(s.to, ['Read']);
+  eq(stagedToolsSummary(null, []).changed, false);
 });
 
 // --- manager editing helpers ---------------------------------------------------

@@ -42,11 +42,13 @@ import {
   countDirty,
   normalizeSaveError,
   setAgentModel,
+  setAgentTools,
   setLeadModel,
 } from '../squadConfig/workingCopy';
 import RoleCard from '../components/manager/RoleCard.jsx';
 import { SquadRail, RosterTable } from '../components/manager/Roster.jsx';
 import Inspector from '../components/manager/Inspector.jsx';
+import { ToolProfilesPanel, useToolProfilesStore } from '../components/manager/ToolProfiles.jsx';
 import { LiveFreshness, SquadLiveStrip } from '../components/manager/LiveStrip.jsx';
 import { RewardsHeaderChip } from '../components/manager/Rewards.jsx';
 import './manager.css';
@@ -125,6 +127,15 @@ export default function Manager() {
   // discarded. The unsaved-work guard (ratingDirty) stays raised while any
   // entry exists, including entries whose row is currently evicted.
   const [stagedRatings, setStagedRatings] = useState({});
+
+  // --- tool profiles state (P2 slice) ----------------------------------------
+  // A SEPARATE staging surface for the tool-profiles registry (Thoughtmap MCP
+  // server + leadTools) — same mechanics as the squad-config working copy
+  // (stage → dry-run preview → explicit apply), but a different endpoint and
+  // payload, never mixed into the frontmatter write. The store is screen-level
+  // so the panel below and the inspector's lead-tools editor share ONE staged
+  // copy and ONE apply.
+  const toolProfiles = useToolProfilesStore();
 
   const positionsRef = useRef(positions);
   const boardRef = useRef(null);
@@ -502,6 +513,17 @@ export default function Manager() {
     setConfigSave({ phase: 'idle', op: null, result: null, error: null });
   }, []);
 
+  // Tools staging (same slice as model staging): the inspector's tools editor
+  // hands over the full effective list (catalog selection + preserved unknown
+  // names); the change rides the SAME working copy → preview → apply →
+  // discard flow, and countDirty tracks it like any other staged field.
+  const stageAgentTools = useCallback((squadKey, role, tools) => {
+    setWorking((prev) => setAgentTools(prev, squadKey, role, tools));
+    setPreview(null); // any new edit invalidates a previous dry run
+    setPreviewFp(null);
+    setConfigSave({ phase: 'idle', op: null, result: null, error: null });
+  }, []);
+
   const previewChanges = useCallback(async () => {
     if (!working) return;
     const fp = workingFp; // snapshot identity this dry run describes
@@ -726,8 +748,8 @@ export default function Manager() {
             )}
             <span className="mgr-editbar-note">
               installation-global — applies on the next launch · config and prompt saves are
-              separate endpoints, each confirms on its own · provider, pricing and tool edits stay
-              in <code>/squad-config</code>
+              separate endpoints, each confirms on its own · provider and pricing edits stay in{' '}
+              <code>/squad-config</code>
             </span>
             <div className="mgr-editbar-actions">
               <button
@@ -922,8 +944,11 @@ export default function Manager() {
               working,
               onStageLead: stageLeadModel,
               onStageModel: stageAgentModel,
+              onStageTools: stageAgentTools,
               onPromptDirty: setPromptDirty,
             }}
+            toolProfiles={toolProfiles}
+            squadKeys={boardModel.map((s) => s.key)}
             promptDirty={promptDirty}
             live={squadLive}
             liveFailed={live.error != null}
@@ -935,6 +960,8 @@ export default function Manager() {
           />
         </aside>
       </div>
+
+      <ToolProfilesPanel store={toolProfiles} />
 
       <div className="mgr-sr-only" aria-live="polite">
         {announce}
