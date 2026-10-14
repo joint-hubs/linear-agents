@@ -5,6 +5,7 @@
       "baseUrl": "https://openrouter.ai/api",
       "authEnv": "OPENROUTER_API_KEY",
       "authStyle": "token",
+      "defaultModel": "xiaomi/mimo-v2.6-pro",
       "tiers": {
         "opus": "z-ai/glm-5.3-flash",
         "sonnet": "google/gemini-2.5-flash-lite",
@@ -16,6 +17,7 @@
       "baseUrl": "https://api.anthropic.com",
       "authEnv": "ANTHROPIC_API_KEY",
       "authStyle": "apikey",
+      "defaultModel": "claude-opus-5",
       "tiers": {
         "opus": "claude-opus-5",
         "sonnet": "claude-sonnet-4-6",
@@ -31,6 +33,7 @@
         "glm-5.2",
         "glm-5.3"
       ],
+      "defaultModel": "glm-5.3",
       "tiers": {
         "opus": "glm-5.3",
         "sonnet": "glm-5.2",
@@ -42,6 +45,7 @@
       "baseUrl": "https://api.inference.nebul.io",
       "authEnv": "NEBUL_API_KEY",
       "authStyle": "token",
+      "defaultModel": "zai-org/GLM-5.2-FP8",
       "tiers": {
         "opus": "zai-org/GLM-5.2-FP8",
         "sonnet": "zai-org/GLM-5.2-FP8",

@@ -9,9 +9,11 @@
 //
 //   node scripts/fenix-projects.mjs add --linear-project <name> --repo <pathTemplate> [--workspace <ws>]
 //   node scripts/fenix-projects.mjs list
+//   node scripts/fenix-projects.mjs remove <linear-project>
 //
 // add upserts by linearProject (case-sensitive) and writes atomically; list
-// prints one tab-separated line per entry.
+// prints one tab-separated line per entry; remove deletes entries (by
+// linearProject, or by repo via removeByRepo — FOC-786 "unmap", files stay).
 
 import fs from "node:fs";
 import path from "node:path";
@@ -68,6 +70,59 @@ export function listProjects(file) {
   return Array.isArray(data.projects) ? data.projects : [];
 }
 
+/**
+ * Repo directory name a projects-file `repo` value points at. Values are
+ * either the `${GITHUB_ROOT}/<name>` template (as written by the entrypoint's
+ * repo-add), a full path whose basename is the name, or the bare name itself.
+ *
+ * @param {unknown} repo
+ * @returns {string|null}
+ */
+export function repoRefName(repo) {
+  if (typeof repo !== "string" || !repo.trim()) return null;
+  return repo.trim().split(/[\\/]/).pop()?.replace(/\.git$/i, "") || null;
+}
+
+/**
+ * Delete entries by linearProject (case-sensitive), atomically.
+ *
+ * @param {string} file
+ * @param {string} linearProject
+ * @returns {string[]} The linearProjects actually removed (empty when none matched).
+ * @throws {Error} When the existing file is present but unparseable.
+ */
+export function removeProject(file, linearProject) {
+  const data = readProjectsFile(file);
+  const before = Array.isArray(data.projects) ? data.projects : [];
+  const kept = before.filter((p) => p?.linearProject !== linearProject);
+  if (kept.length === before.length) return [];
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  data.projects = kept; // preserve every other top-level field (_doc, default, platforms, unknown)
+  atomicWriteJSON(file, data);
+  return before.filter((p) => p?.linearProject === linearProject).map((p) => p.linearProject);
+}
+
+/**
+ * Delete every entry whose repo points at `repoName` (matched via
+ * repoRefName — the `${GITHUB_ROOT}/<name>` template, a full path, or the
+ * bare name). FOC-786 "unmap": the repo's files are never touched here.
+ *
+ * @param {string} file
+ * @param {string} repoName
+ * @returns {string[]} The linearProjects removed (empty when none matched).
+ * @throws {Error} When the existing file is present but unparseable.
+ */
+export function removeByRepo(file, repoName) {
+  const data = readProjectsFile(file);
+  const before = Array.isArray(data.projects) ? data.projects : [];
+  const kept = before.filter((p) => repoRefName(p?.repo) !== repoName);
+  if (kept.length === before.length) return [];
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  data.projects = kept; // preserve every other top-level field (_doc, default, platforms, unknown)
+  atomicWriteJSON(file, data);
+  return before.filter((p) => repoRefName(p?.repo) === repoName).map((p) => p.linearProject);
+}
+
 // ---------------------------------------------------------------------------
 // Main — only when executed directly (not when imported for the helpers).
 // ---------------------------------------------------------------------------
@@ -97,8 +152,17 @@ if (isMain) {
     const projects = listProjects(file);
     if (projects.length === 0) console.log(`projects: none (${file})`);
     for (const p of projects) console.log(`${p.linearProject}\t${p.workspace}\t${p.repo}`);
+  } else if (command === "remove") {
+    const linearProject = rest[0];
+    if (!linearProject || linearProject.startsWith("--")) {
+      console.error("usage: node scripts/fenix-projects.mjs remove <linear-project>");
+      process.exit(1);
+    }
+    const removed = removeProject(file, linearProject);
+    if (removed.length === 0) console.log(`projects: no entry for ${linearProject}`);
+    else for (const name of removed) console.log(`projects: removed ${name}`);
   } else {
-    console.error("usage: node scripts/fenix-projects.mjs <add|list> [args]");
+    console.error("usage: node scripts/fenix-projects.mjs <add|list|remove> [args]");
     process.exit(1);
   }
 }

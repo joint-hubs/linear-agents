@@ -3,7 +3,9 @@
 
 Reads OpenRouter and rewrites the JSON literal between the DATA:BEGIN / DATA:END
 markers in the HTML. Nothing else in the file is touched, so hand edits to the
-layout, the role presets or the copy survive a refresh.
+layout, the role presets or the copy survive a refresh. The same snapshot is
+also written to config/model-benchmarks.json — the AA intelligence index per
+model the Settings routing table shows (scripts/model-benchmarks.mjs).
 
     python docs/ui/refresh-model-data.py --out docs/ui/model-explorer.html
 
@@ -32,6 +34,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 UA = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 BASE = "https://openrouter.ai"
@@ -74,6 +77,27 @@ PREV = {
 
 EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "on", "default"]
 
+BENCHMARK_SOURCE = "Artificial Analysis intelligence index via OpenRouter (docs/ui/refresh-model-data.py)"
+
+
+def benchmark_models(models):
+    """The AA intelligence index the Settings routing table shows (per model id).
+
+    Derived from the same fetched payload as the HTML — no extra requests. Only
+    variants that carry a finite intel value are kept; a model with none is left
+    out entirely (the reader answers null rather than a guessed score).
+    """
+    out = {}
+    for m in models:
+        scored = [
+            {"e": v["e"], "intel": v["v"]["intel"]}
+            for v in m["vars"]
+            if isinstance(v.get("v"), dict) and isinstance(v["v"].get("intel"), (int, float))
+        ]
+        if scored:
+            out[m["id"]] = scored
+    return out
+
 
 def fetch(url, tries=3, timeout=60):
     req = urllib.request.Request(url, headers=UA)
@@ -110,6 +134,8 @@ def effort_of(aa_name):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="model-explorer.html")
+    ap.add_argument("--benchmarks-out",
+                    default=str(Path(__file__).resolve().parents[2] / "config" / "model-benchmarks.json"))
     ap.add_argument("--workers", type=int, default=6)
     args = ap.parse_args()
 
@@ -215,9 +241,16 @@ def main():
     with open(args.out, "w", encoding="utf-8") as fh:
         fh.write(out)
 
+    # Same snapshot into the standalone file the Settings routing table reads
+    # (scripts/model-benchmarks.mjs), next to the other config/ payloads.
+    bench_out = Path(args.benchmarks_out)
+    bench = {"source": BENCHMARK_SOURCE, "snapshot": payload["snapshot"], "models": benchmark_models(models)}
+    bench_out.write_text(json.dumps(bench, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
     print("\n%s: %d models, %d variants, %d unscored, snapshot %s" % (
         args.out, len(models), sum(len(m["vars"]) for m in models),
         len(unscored), payload["snapshot"]))
+    print("%s: %d models" % (bench_out, len(bench["models"])))
 
 
 if __name__ == "__main__":

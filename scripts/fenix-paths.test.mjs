@@ -26,11 +26,16 @@ import {
   squadConfigRoot,
   squadConfigDir,
   projectsConfigPath,
+  settingsPath,
   worktreeRoot,
   integrationTreePath,
   hostTokenPath,
   stateRoot,
   runsDir,
+  supervisorSessionHome,
+  supervisorSessionPath,
+  supervisorCurrentRunPath,
+  supervisorSessionClaudeDir,
 } from "./fenix-paths.mjs";
 
 let passed = 0;
@@ -186,6 +191,29 @@ test("projectsConfigPath: LA_PROJECTS_FILE wins only when it exists; else the re
   assert.equal(projectsConfigPath({}, () => true), repoMap);
 });
 
+console.log("\nfenix-paths: settings overlay (FOC-773/786)");
+
+test("settingsPath: LA_SETTINGS_FILE wins when set", () => {
+  assert.equal(
+    settingsPath({
+      LA_SETTINGS_FILE: join("s", "my.json"),
+      LA_PROJECTS_FILE: join("u", "projects.json"),
+    }),
+    join("s", "my.json"),
+  );
+});
+
+test("settingsPath: LA_PROJECTS_FILE puts settings.json next to it", () => {
+  assert.equal(
+    settingsPath({ LA_PROJECTS_FILE: join("u", "cfg", "projects.json") }),
+    join("u", "cfg", "settings.json"),
+  );
+});
+
+test("settingsPath: default is the repo's .fenix/config overlay", () => {
+  assert.equal(settingsPath({}), join(REPO_ROOT, ".fenix", "config", "settings.json"));
+});
+
 test("worktreeRoot: ../la-wt/<repo> by default, or LA_WORKTREE_HOME/<repo>", () => {
   const repo = join("x", "repos", "office");
   assert.equal(worktreeRoot(repo, {}), join("x", "repos", "office", "..", "la-wt", "office"));
@@ -280,6 +308,82 @@ test("no scripts/*.mjs hardcodes LOCALAPPDATA, AppData or la-wt", () => {
     }
   }
   assert.deepEqual(hits, []);
+});
+
+console.log("\nfenix-paths: managed supervisor sessions (PRD task-workspace §5)");
+
+const SESSION_ID = "sup-" + "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+
+test("supervisorSessionHome: legacy (no session env) is <dataHome>/supervisor on both platforms", () => {
+  assert.equal(
+    supervisorSessionHome({ LOCALAPPDATA: join("x", "local") }, "win32"),
+    join("x", "local", "linear-agents", "supervisor"),
+  );
+  assert.equal(
+    supervisorSessionHome({ XDG_DATA_HOME: join("x", "xdg") }, "linux"),
+    join("x", "xdg", "linear-agents", "supervisor"),
+  );
+});
+
+test("supervisorSessionHome: a valid session id scopes to <dataHome>/supervisor/sessions/<id>", () => {
+  assert.equal(
+    supervisorSessionHome({ LA_DATA_HOME: join("d", "1"), FENIX_SUPERVISOR_SESSION_ID: SESSION_ID }, "linux"),
+    join("d", "1", "supervisor", "sessions", SESSION_ID),
+  );
+});
+
+test("supervisorSessionHome: an invalid id THROWS instead of composing a path", () => {
+  for (const bad of [
+    "../escape",
+    "sup-ZZ",
+    "sup-short",
+    "sup-" + "a".repeat(33), // too long
+    "sup-" + "A".repeat(16), // uppercase — the pattern is lowercase hex only
+    "/etc",
+  ]) {
+    assert.throws(
+      () => supervisorSessionHome({ FENIX_SUPERVISOR_SESSION_ID: bad }, "linux"),
+      /must match/,
+      `expected a throw for '${bad}'`,
+    );
+  }
+  // An unset (or empty) id means "no managed session" — the legacy home, not
+  // an error; a 31-hex id is INSIDE the {16,32} band and stays valid.
+  assert.doesNotThrow(() => supervisorSessionHome({}, "linux"));
+  assert.doesNotThrow(() =>
+    supervisorSessionHome({ FENIX_SUPERVISOR_SESSION_ID: SESSION_ID.slice(0, -1) }, "linux"));
+});
+
+test("session paths: legacy paths are byte-identical; scoped paths live under the session home", () => {
+  const legacyEnv = { LOCALAPPDATA: join("x", "local") };
+  assert.equal(
+    supervisorSessionPath(legacyEnv, "win32"),
+    join("x", "local", "linear-agents", "supervisor", "session.json"),
+  );
+  assert.equal(
+    supervisorCurrentRunPath(legacyEnv, "win32"),
+    join("x", "local", "linear-agents", "supervisor", "current-run.json"),
+  );
+  const scopedEnv = { LA_DATA_HOME: join("d", "1"), FENIX_SUPERVISOR_SESSION_ID: SESSION_ID };
+  assert.equal(
+    supervisorSessionPath(scopedEnv, "linux"),
+    join("d", "1", "supervisor", "sessions", SESSION_ID, "session.json"),
+  );
+  assert.equal(
+    supervisorCurrentRunPath(scopedEnv, "linux"),
+    join("d", "1", "supervisor", "sessions", SESSION_ID, "current-run.json"),
+  );
+  assert.equal(
+    supervisorSessionClaudeDir(scopedEnv, "linux"),
+    join("d", "1", "supervisor", "sessions", SESSION_ID, "claude"),
+  );
+});
+
+test("hostTokenPath is NOT scoped — the host token stays global", () => {
+  assert.equal(
+    hostTokenPath({ LA_DATA_HOME: join("d", "1"), FENIX_SUPERVISOR_SESSION_ID: SESSION_ID }, "linux"),
+    join("d", "1", "run", "host.token"),
+  );
 });
 
 console.log(`\nfenix-paths: ${passed} passed, ${failures.length} failed`);
