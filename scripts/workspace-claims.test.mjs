@@ -9,7 +9,10 @@
 //   · a legacy (owner-less) ensureWorktree call is refused on a claimed branch;
 //   · the integration lock releases on a throw, refuses a second process while
 //     held, survives a crash as EXPLICIT recovery, and is keyed on the common
-//     git dir so all worktrees of one repo share it.
+//     git dir so all worktrees of one repo share it;
+//   · a managed ensureWorktree (the spawn path) meets a held lock as a FAST
+//     refusal naming the holder — the P1b cap=2 spawn-vs-merge case — with no
+//     worktree or claim written, and succeeds once the holder releases.
 //
 // Run: node scripts/workspace-claims.test.mjs
 // Focused suite only — the whole supervisor suite is not required here.
@@ -35,6 +38,7 @@ import { ensureWorktree } from "./supervisor-lib.mjs";
 const { test, fail, summary } = harness();
 const CLAIMS = join(ROOT, "scripts", "workspace-claims.mjs");
 const CLAIMS_URL = pathToFileURL(CLAIMS).href;
+const SUP_LIB_URL = pathToFileURL(join(ROOT, "scripts", "supervisor-lib.mjs")).href;
 
 const inRoot = (repo, name) => join(worktreeRootOf(repo), name);
 
@@ -279,6 +283,73 @@ console.log("\na corrupt claims registry fails closed");
   assert.throws(() => readWorkspaceClaims({ gitRoot: repo }), /not readable JSON/);
   assert.throws(() => ensureWorktree(repo, "foc-1-dev"), /not readable JSON/);
   test("an unreadable registry throws instead of reading as 'no claims'", () => {});
+}
+
+// ── 11. cap=2 contention: a spawn vs a held integration lock ─────────────────
+console.log();
+console.log("managed ensureWorktree is refused while the lock is held, and succeeds after release");
+{
+  const { base, repo } = fixtureRepo();
+  // The P1b cap=2 scenario: two task sessions share one repo, so a child's
+  // worktree creation (managed ensureWorktree) can meet a merge run that holds
+  // the same integration lock. The contract is fail-fast — the spawn is refused
+  // with the holder named, it never queues behind the merge (the holder holds
+  // until told to stop, so a wait would deadlock this runner) — the refusal
+  // writes neither a worktree nor a claim, and a clean release unblocks the
+  // very same call.
+  const NL = String.fromCharCode(10);
+  const holder = join(base, "merge-holder.mjs");
+  writeFileSync(
+    holder,
+    [
+      `import { existsSync } from "node:fs";`,
+      `import { acquireIntegrationLock } from "${CLAIMS_URL}";`,
+      `acquireIntegrationLock({ gitRoot: process.argv[2], ownerId: "merge:run-x" });`,
+      `const releaseFlag = process.argv[3];`,
+      `const poll = () => (existsSync(releaseFlag) ? process.exit(0) : setTimeout(poll, 50));`,
+      `poll(); // hold until the runner says the probe is done`,
+    ].join(NL),
+  );
+  const runner = join(base, "cap2-runner.mjs");
+  writeFileSync(
+    runner,
+    [
+      `import { spawn } from "node:child_process";`,
+      `import { writeFileSync } from "node:fs";`,
+      `import { readIntegrationLock, readWorkspaceClaims } from "${CLAIMS_URL}";`,
+      `import { ensureWorktree } from "${SUP_LIB_URL}";`,
+      `const [gitRoot, holderScript, releaseFlag] = process.argv.slice(2);`,
+      `const holder = spawn(process.execPath, [holderScript, gitRoot, releaseFlag], { stdio: ["ignore", "ignore", "pipe"] });`,
+      `const deadline = Date.now() + 15_000;`,
+      `while (!readIntegrationLock({ gitRoot })) {`,
+      `  if (Date.now() > deadline) { console.log(JSON.stringify({ ok: false, error: "holder never took the lock" })); process.exit(1); }`,
+      `  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);`,
+      `}`,
+      `let refusedWhileHeld = null;`,
+      `try { ensureWorktree(gitRoot, "foc-cap2-dev", null, { ownerId: "run-2:dev-1" }); } catch (err) { refusedWhileHeld = err.message; }`,
+      `const lockSurvivedRefusal = Boolean(readIntegrationLock({ gitRoot }));`,
+      `const claimUntouched = !readWorkspaceClaims({ gitRoot }).claims.some((c) => c.branch === "foc-cap2-dev");`,
+      `writeFileSync(releaseFlag, "go");`,
+      `const holderExit = await new Promise((r) => holder.on("close", (code) => r(code)));`,
+      `const lockAfterCleanExit = Boolean(readIntegrationLock({ gitRoot }));`,
+      `let createdAfterRelease = null;`,
+      `try { const r = ensureWorktree(gitRoot, "foc-cap2-dev", null, { ownerId: "run-2:dev-1" }); createdAfterRelease = r.created === true && r.owner === "run-2:dev-1"; } catch (err) { createdAfterRelease = "threw: " + err.message; }`,
+      `console.log(JSON.stringify({ ok: true, refusedWhileHeld, lockSurvivedRefusal, claimUntouched, holderExit, lockAfterCleanExit, createdAfterRelease }));`,
+    ].join(NL),
+  );
+  const res = spawnSync(process.execPath, [runner, repo, holder, join(base, "release.flag")], { cwd: ROOT, encoding: "utf8" });
+  if (res.status !== 0) fail(`cap2 runner failed: ${res.stderr}`);
+  const v = JSON.parse(res.stdout);
+  if (!v.ok) fail(`cap2 runner said no: ${v.error}`);
+  if (!/held by owner "merge:run-x"/.test(v.refusedWhileHeld ?? "")) {
+    fail(`the spawn must be refused naming the holder, got: ${v.refusedWhileHeld}`);
+  }
+  if (!v.lockSurvivedRefusal) fail("a refused spawn must not clear or steal the holder's lock");
+  if (!v.claimUntouched) fail("a refused spawn must not write a claim");
+  if (v.holderExit !== 0) fail(`the holder must exit cleanly (release on exit), got code ${v.holderExit}`);
+  if (v.lockAfterCleanExit) fail("a clean exit must release the lock, not leave it for recovery");
+  if (v.createdAfterRelease !== true) fail(`the same call must succeed after release, got ${JSON.stringify(v.createdAfterRelease)}`);
+  test("managed ensureWorktree is refused fail-fast while the lock is held and succeeds after a clean release", () => {});
 }
 
 summary();
