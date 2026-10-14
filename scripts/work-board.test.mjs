@@ -16,6 +16,7 @@ import {
   deriveFlags,
   deriveStage,
   fetchLinearStates,
+  normalizeLabel,
   startText,
 } from "./work-board.mjs";
 
@@ -473,6 +474,143 @@ test("fetchLinearStates: a missing pisi API key skips the pass instead of failin
   assert.equal(second.error, null);
   assert.ok(second.states["FOC-500"]);
   assert.equal(second.states["PISI-8"], undefined);
+});
+
+// ── labels: fetch → normalization → payload → filter (the labels task) ───────
+
+test("normalizeLabel: { id, name, color } only; hex-validated color; nameless dropped", () => {
+  assert.deepEqual(normalizeLabel({ id: "l1", name: "bug", color: "#d4c5f9" }), {
+    id: "l1",
+    name: "bug",
+    color: "#d4c5f9",
+  });
+  // Name is the one required field; id and color degrade to null, never dropped.
+  assert.deepEqual(normalizeLabel({ name: " nocol ", color: "javascript:alert(1)" }), {
+    id: null,
+    name: "nocol",
+    color: null,
+  });
+  // Every hex form Linear issues is sayable; anything else is not a colour.
+  for (const ok of ["#abc", "#aabbcc", "#aabbccdd"]) {
+    assert.equal(normalizeLabel({ name: "x", color: ok }).color, ok);
+  }
+  for (const bad of ["red", "#aabb", "#aabbccddeeff", "", "#GGG"]) {
+    assert.equal(normalizeLabel({ name: "x", color: bad }).color, null);
+  }
+  // A bare queue-name string normalizes too; empty/odd shapes are not labels.
+  assert.deepEqual(normalizeLabel(" tech "), { id: null, name: "tech", color: null });
+  assert.equal(normalizeLabel("   "), null);
+  assert.equal(normalizeLabel(null), null);
+  assert.equal(normalizeLabel({ color: "#fff" }), null);
+  assert.equal(normalizeLabel(42), null);
+});
+
+test("fetchLinearStates: labels ride the state as { id, name, color }", async () => {
+  // Unique ids — fetchLinearStates caches by id list for 60 s.
+  const gql = async (query) => {
+    const aliases = [...query.matchAll(/a(\d+): issue\(id: "([^"]+)"\)/g)];
+    return Object.fromEntries(
+      aliases.map(([, n, id]) => [
+        `a${n}`,
+        {
+          identifier: id,
+          title: `L ${id}`,
+          state: { name: "Todo", type: "unstarted" },
+          labels: {
+            nodes: [
+              { id: "lab-1", name: "bug", color: "#d4c5f9" },
+              { id: "lab-2", name: "uncolored" }, // no color — kept, color null
+              { name: "   " }, // nameless — not a label
+              "name-only-queue-shape", // string form still normalizes
+              { color: "#fff" }, // no name — dropped
+            ],
+          },
+        },
+      ]),
+    );
+  };
+  const { states, error } = await fetchLinearStates(["FOC-601"], { graphqlFor: () => gql });
+  assert.equal(error, null);
+  assert.deepEqual(states["FOC-601"].labels, [
+    { id: "lab-1", name: "bug", color: "#d4c5f9" },
+    { id: "lab-2", name: "uncolored", color: null },
+    { id: null, name: "name-only-queue-shape", color: null },
+  ]);
+});
+
+test("buildBoardPayload: tickets carry normalized labels; absent stays []", () => {
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW });
+  const linearStates = {
+    "FOC-101": {
+      name: "In Progress",
+      type: "started",
+      labels: [
+        { id: "lab-1", name: "bug", color: "#d4c5f9" },
+        { name: "tech" },
+      ],
+    },
+  };
+  const payload = buildBoardPayload({ facts, queue: [], linearStates, now: NOW });
+  const f101 = payload.tickets.find((t) => t.taskId === "FOC-101");
+  assert.deepEqual(f101.labels, [
+    { id: "lab-1", name: "bug", color: "#d4c5f9" },
+    { id: null, name: "tech", color: null },
+  ]);
+  // No Linear state, no queue labels — the empty case is graceful, never null.
+  assert.deepEqual(payload.tickets.find((t) => t.taskId === "FOC-102").labels, []);
+  // The detail's ticket entry shares the same shape.
+  const detail = buildTicketDetail({
+    facts: factsByTask(facts, "FOC-101"),
+    linearState: linearStates["FOC-101"],
+    now: NOW,
+  });
+  assert.deepEqual(detail.ticket.labels, f101.labels);
+});
+
+test("buildBoardPayload: Ready labels normalize from the queue's name strings", () => {
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW });
+  const queue = [
+    { id: "20", identifier: "FOC-230", title: "names only", state: "Todo", stateType: "unstarted", labels: ["bug", "  ", "tech"], updatedAt: iso(1) },
+    { id: "21", identifier: "FOC-231", title: "no labels", state: "Todo", stateType: "unstarted", labels: [], updatedAt: iso(2) },
+    { id: "22", identifier: "FOC-232", title: "labels missing field", state: "Todo", stateType: "unstarted", updatedAt: iso(3) },
+    // An enriched Linear state (fetchLinearStates) wins over the queue names.
+    { id: "23", identifier: "FOC-233", title: "enriched", state: "Todo", stateType: "unstarted", labels: ["stale"], updatedAt: iso(4) },
+    // labelDetails (the queue patch's { id, name, color } list) beats the names.
+    { id: "24", identifier: "FOC-234", title: "detailed", state: "Todo", stateType: "unstarted", labels: ["stale"], labelDetails: [{ id: "lab-8", name: "type:bug", color: "#ff0000" }], updatedAt: iso(5) },
+  ];
+  const linearStates = {
+    "FOC-233": { name: "Todo", type: "unstarted", labels: [{ id: "lab-9", name: "fresh", color: "#00ff00" }] },
+  };
+  const payload = buildBoardPayload({ facts, queue, linearStates, now: NOW });
+  const ready = Object.fromEntries(payload.tickets.filter((t) => t.stage === "ready").map((t) => [t.taskId, t]));
+  assert.deepEqual(ready["FOC-230"].labels, [
+    { id: null, name: "bug", color: null },
+    { id: null, name: "tech", color: null },
+  ]);
+  assert.deepEqual(ready["FOC-231"].labels, []);
+  assert.deepEqual(ready["FOC-232"].labels, []);
+  assert.deepEqual(ready["FOC-233"].labels, [{ id: "lab-9", name: "fresh", color: "#00ff00" }]);
+  assert.deepEqual(ready["FOC-234"].labels, [{ id: "lab-8", name: "type:bug", color: "#ff0000" }]);
+});
+
+test("buildBoardPayload: the label filter matches by name, touched and Ready", () => {
+  const facts = collectTicketFacts({ stateHome: HOME, days: 30, now: NOW });
+  const linearStates = {
+    "FOC-101": { name: "In Progress", type: "started", labels: [{ name: "bug" }] },
+  };
+  const queue = [
+    { id: "30", identifier: "FOC-240", title: "bug too", state: "Todo", stateType: "unstarted", labels: ["bug"], updatedAt: iso(1) },
+    { id: "31", identifier: "FOC-241", title: "other label", state: "Todo", stateType: "unstarted", labels: ["tech"], updatedAt: iso(2) },
+    { id: "32", identifier: "FOC-242", title: "unlabeled", state: "Todo", stateType: "unstarted", updatedAt: iso(3) },
+  ];
+  const all = buildBoardPayload({ facts, queue, linearStates, now: NOW });
+  const labeled = buildBoardPayload({ facts, queue, linearStates, filters: { label: "bug" }, now: NOW });
+  assert.deepEqual(labeled.tickets.map((t) => t.taskId), ["FOC-240", "FOC-101"]);
+  // Unlabeled tickets can never match a named label (the milestone rule).
+  assert.equal(labeled.tickets.some((t) => t.taskId === "FOC-242"), false);
+  // An empty/absent filter is no filter — the full board comes back.
+  const empty = buildBoardPayload({ facts, queue, linearStates, filters: { label: "" }, now: NOW });
+  assert.deepEqual(empty.tickets.map((t) => t.taskId), all.tickets.map((t) => t.taskId));
 });
 
 test("buildTicketDetail: timeline order and evidence links", () => {

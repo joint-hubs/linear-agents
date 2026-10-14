@@ -416,6 +416,41 @@ const cachedLinearStates = new Map(); // key → { states, fetchedAt, fetchedAtM
 // or newlines even if a caller hands us something wider.
 const isSafeLinearId = (id) => typeof id === "string" && id.trim() !== "" && !/["\\\n\r]/.test(id);
 
+// Label normalization (task contract): the payload carries { id, name, color }
+// exactly — never more, never less. A label without a sayable name is not a
+// label; id and color degrade to null rather than being dropped. Colors are
+// validated to the hex forms Linear issues (#rgb, #rgba, #rrggbb, #rrggbbaa):
+// anything else becomes null so the UI can never style from an arbitrary
+// Linear-provided string.
+const LABEL_COLOR_RE = /^#[0-9a-fA-F]{3}$|^#[0-9a-fA-F]{6}$|^#[0-9a-fA-F]{8}$/;
+const MAX_LABELS = 20; // the same cap the Linear queue query uses
+
+export const normalizeLabel = (raw) => {
+  if (typeof raw === "string") {
+    const name = raw.trim();
+    return name ? { id: null, name, color: null } : null;
+  }
+  if (!raw || typeof raw !== "object") return null;
+  const name = typeof raw.name === "string" ? raw.name.trim() : "";
+  if (!name) return null;
+  return {
+    id: typeof raw.id === "string" && raw.id.trim() ? raw.id : null,
+    name,
+    color: typeof raw.color === "string" && LABEL_COLOR_RE.test(raw.color) ? raw.color : null,
+  };
+};
+
+const normalizeLabels = (nodes) => {
+  if (!Array.isArray(nodes)) return [];
+  const out = [];
+  for (const raw of nodes) {
+    const label = normalizeLabel(raw);
+    if (label) out.push(label);
+    if (out.length >= MAX_LABELS) break;
+  }
+  return out;
+};
+
 const linearStateOf = (issue) => ({
   name: issue?.state?.name ?? null,
   type: issue?.state?.type ?? null,
@@ -426,10 +461,11 @@ const linearStateOf = (issue) => ({
     name: issue?.priorityLabel ?? null,
   },
   milestone: issue?.projectMilestone?.name ?? null,
+  labels: normalizeLabels(issue?.labels?.nodes),
 });
 
 /**
- * Linear state (name/type/title/url/priority/milestone) per identifier, one
+ * Linear state (name/type/title/url/priority/milestone/labels) per identifier, one
  * batched alias request per chunk of ≤ 50 ids per workspace: jointhubs first,
  * then pisi for whatever jointhubs did not know (findIssueProject's order).
  * Any failed request degrades gracefully: the states that did resolve come
@@ -455,7 +491,7 @@ export async function fetchLinearStates(identifiers, { graphqlFor = defaultGraph
       const chunk = remaining.slice(i, i + LINEAR_CHUNK);
       const aliases = chunk.map(
         (id, n) =>
-          `a${n}: issue(id: ${JSON.stringify(id)}) { identifier title url priority priorityLabel state { name type } projectMilestone { name } }`,
+          `a${n}: issue(id: ${JSON.stringify(id)}) { identifier title url priority priorityLabel state { name type } projectMilestone { name } labels(first: 20) { nodes { id name color } } }`,
       );
       let data;
       try {
@@ -517,6 +553,10 @@ function touchedTicketEntry(facts, linearState, costReport) {
     linearState: linearState ? { name: linearState.name, type: linearState.type } : null,
     priority: linearState?.priority ?? null,
     milestone: linearState?.milestone ?? null,
+    // Normalized again here: buildBoardPayload also serves callers whose
+    // linearStates did not come from fetchLinearStates (the fixture seam) —
+    // the { id, name, color } contract holds regardless of the source.
+    labels: normalizeLabels(linearState?.labels),
     rounds: facts.rounds,
     lastVerdict: lastVerdict
       ? { round: lastVerdict.round, verdict: lastVerdict.verdict, at: lastVerdict.at }
@@ -543,6 +583,12 @@ function readyTicketEntry(item, linearState) {
       : { name: item.state ?? null, type: item.stateType ?? null },
     priority,
     milestone: linearState?.milestone ?? null,
+    // Ready comes from the queue payload, whose labels are name strings
+    // (telemetry-server's linearQueue; labelDetails — the { id, name, color }
+    // list the queue patch adds — wins when present); the enriched Linear
+    // state, when the caller has one for this id, wins over both. Every shape
+    // normalizes to the same { id, name, color } contract; empty stays [].
+    labels: normalizeLabels(linearState?.labels ?? item.labelDetails ?? item.labels),
     rounds: 0,
     lastVerdict: null,
     flags: [],
@@ -558,6 +604,13 @@ const passesFilters = (entry, filters) => {
   }
   if (filters.priority !== undefined && filters.priority !== null && Number.isFinite(Number(filters.priority))) {
     if (entry.priority?.value !== Number(filters.priority)) return false;
+  }
+  // Label filter matches by NAME (the value the UI select offers and the URL
+  // carries). A ticket with no labels can never match a named label — the
+  // unknown-milestone rule, applied to labels.
+  if (filters.label !== undefined && filters.label !== null && filters.label !== "") {
+    const wanted = String(filters.label);
+    if (!Array.isArray(entry.labels) || !entry.labels.some((l) => l?.name === wanted)) return false;
   }
   return true;
 };
