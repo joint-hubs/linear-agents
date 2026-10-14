@@ -24,6 +24,16 @@ Kolejka — sekwencja z `docs/ROADMAP.md` (2026-10-08). **Tor A (krytyczna ście
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## 2026-10-14 (35) — P1b spike follow-ups closed: integration-lock blast radius + cap=2 benchmark
+
+Mateusz: „commituj i lecimy dalej". Commits landed, then both leftovers from (34)'s "Still open" closed — the stream has nothing uncommitted and nothing unverified.
+
+- **Commits landed (from „commituj"):** `2c05bd9` `fix(sessions): carry the task binding in the session kickoff` + `f7ab451` `docs: plan and PRD checkboxes brought honest; state (34)`. No trailers. 16 commits unpushed on `fenix-settings-keys` — push stays with Mateusz.
+- **Integration-lock blast radius — analyzed and pinned.** The lock is repo-wide by design (`<commonGitDir>/workspace-claims/integration.lock`, atomic `O_EXCL`): sessions in different repos never meet, sessions in one repo share one lock. Holders and hold times: managed `ensureWorktree` (a spawn's worktree creation, seconds) and `supervisor-merge.mjs` (`merge:<runId>`, whole merge run — minutes). Contention is **fail-fast, never a queue**: the loser is refused immediately with the holder named, no worktree or claim written, the holder's lock untouched; per-process reentrancy (no self-deadlock on `claimWorkspace`); clean exit releases via the exit hook, hard kill leaves it for explicit `recover --force`. Nothing else in `supervisor-lib.mjs` is mutable across sessions — wake-queue append and `updateChild` are per-run single-writer, so the one-live-child caveat applies per run and is untouched by cap=2. Pinned by `workspace-claims.test.mjs` §11 (the cap=2 spawn-vs-merge case) — suite **11/11**. Recommendation recorded in the plan: keep fail-fast; a bounded wait in `acquireLockFile` only if spawn-under-merge refusals become noise — and the merge hold must not shrink (it is what makes landing atomic).
+- **Benchmark at cap=2** (both sessions live, 2026-10-14): idle `fenix-supervisor` 0.2–0.5% CPU / 324–329 MiB + `fenix-api` ~0% / 40 MiB; two concurrent light turns peaked 2.5% CPU / 389 MiB. Per-session processes ≈ claude 234–275 MB + launch 64 MB + tmux ~3.5 MB — RSS sums double-count shared node pages, the container working set is the honest total (≈ 330–390 MiB at cap=2). Disk ≈ 20 MB per session home (63 MB `/data` total). Turns were one-word probes without tools — tool-heavy turns cost more CPU; claude RSS grows with conversation length. Full table + caveats in the plan's "P1b spike follow-ups" section.
+- **CHECK-C recovered live** via the designed Stop → Resume (the (34) offer, taken up as instrumental to the benchmark); both sessions answered the probe and sit `idle`.
+- **Still open:** push (Mateusz). Nothing else in this stream.
+
 ## 2026-10-14 (34) — Task binding in the session kickoff; plan/PRD checkboxes brought honest
 
 Mateusz: „super lecimy dalej". Closes the "Still open" in (33) and the walk's one observation.

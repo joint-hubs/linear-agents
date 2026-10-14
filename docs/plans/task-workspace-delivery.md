@@ -47,7 +47,25 @@ Delivered 2026-10-14 — evidence in the integration / acceptance logs below.
 - [x] Cancel/stop scoped to `task + generation`; stopping A never touches B (AC-1). (Acceptance: stop A → B byte-identical, C claimed the slot.)
 - [x] SSE/WS streams scoped per task/session; routing validated server-side (AC-4).
 - [x] Migration: known existing owner attached once; unknown legacy runs read-only and unassigned; nothing auto-adopted. (`ensure` is the one attach; `supervisor-current-run` scoped mode has adoption OFF and throws on an owner mismatch; legacy stays readable and unassigned.)
-- [ ] Spike follow-ups (owned here): shared integration-lock blast radius across `supervisor-lib.mjs`; resource benchmark at cap=2.
+- [x] Spike follow-ups (owned here): shared integration-lock blast radius across `supervisor-lib.mjs`; resource benchmark at cap=2. Closed 2026-10-14 — both write-ups below.
+
+#### P1b spike follow-ups — closed 2026-10-14
+
+**Shared integration-lock blast radius (`supervisor-lib.mjs`).** The lock is repo-wide by design (`<commonGitDir>/workspace-claims/integration.lock`, atomic `O_EXCL`): two task sessions in different repos never meet; two in the same repo share one lock. Holders and their hold times: the managed `ensureWorktree` path (a spawn's worktree creation — seconds) and `supervisor-merge.mjs` (`merge:<runId>` — the whole merge run, minutes). Contention is **fail-fast, never a queue**: the loser is refused immediately with the holder named and the explicit `recover --force` command in the error; the refusal writes no worktree and no claim and leaves the holder's lock untouched. Reentrancy is per-process (depth counter), so `ensureWorktreeCore → claimWorkspace` cannot self-deadlock; a clean exit releases via the exit hook, a hard kill leaves the lock for explicit recovery. Nothing else in `supervisor-lib.mjs` shares mutable state across sessions — the wake-queue append path and `updateChild` are per-run single-writer, so their one-live-child caveat applies per run and is unaffected by cross-session concurrency. Pinned by `workspace-claims.test.mjs` §11 (the cap=2 spawn-vs-merge case: refused fail-fast naming the holder, no side effects, clean release unblocks the very same call) — suite 11/11.
+
+Recommendation: keep fail-fast. If spawn-under-merge refusals ever become noise at cap=2, the change is a bounded wait in `acquireLockFile` — a behavior change, and the merge hold must not shrink (it is what makes landing atomic against concurrent worktree creation). Not needed today.
+
+**Resource benchmark at cap=2** — stack `fenix-task-workspace` @ 4602, two live sessions (CHECK-B `running` + CHECK-C recovered via the designed Stop → Resume), 2026-10-14:
+
+| Measure | Idle, 2 sessions live | 2 concurrent light turns |
+|---|---|---|
+| `fenix-supervisor` container | 0.2–0.5% CPU, 324–329 MiB | 0.4–2.5% CPU, 364–389 MiB |
+| `fenix-api` container | ~0% CPU, 40–42 MiB | ~0% CPU, ~41 MiB |
+| per-session processes | claude 234 / 262 MB, launch 64 MB each, tmux ~3.5 MB each | claude 261 / 275 MB |
+| session host (`task-session-host.mjs`) | 75 MB | 75 MB |
+| disk, per session home | ~20 MB | — |
+
+Notes, stated so the numbers are not over-read: process RSS sums double-count shared node pages — the container working set is the honest total (≈ 330–390 MiB at cap=2). The turns were one-word probes with no tools; tool-heavy turns cost more CPU. `claude` RSS grows with conversation length. One post-burst probe caught `fenix-api` at 11.6% CPU — telemetry ingest plus the probe's own fetches, not attributed to session turns.
 
 ### P1c — Scoped API + UI
 
