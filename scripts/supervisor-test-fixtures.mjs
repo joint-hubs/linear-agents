@@ -185,7 +185,7 @@ export const fixtureChild = (over = {}) => ({
  * readiness section opts back in against the fake CLI).
  */
 export const baseEnv = (extra = {}) => ({
-  ...process.env,
+  ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key",
   LA_CLAUDE_BIN: MOCK,
   LA_SUPERVISOR_NO_TELEMETRY: "1",
   LA_SUPERVISOR_NO_CODEGRAPH: "1",
