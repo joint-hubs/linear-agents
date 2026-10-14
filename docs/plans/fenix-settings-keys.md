@@ -40,8 +40,10 @@ table" a routing change in Settings is not effective on the next spawn (FOC-786 
   `GET /api/v1/key`); `checkLinearKey(key, { teamKey })` — `viewer` + the team; `checkGithubToken(token)` — `/user`,
   `X-OAuth-Scopes` (needs `repo` for classic tokens; fine-grained tokens reported as such). Results
   `{ ok, reason, details }` — never the key; network errors name the endpoint, not the header.
-* `fenix keys` (bash): provider choice (configured providers + custom endpoint), the same checks via curl (team and
-  scopes added), writes the secret files (0600) and the overlay; `fenix keys <name>` rotates one key.
+* `fenix keys` (bash): provider choice (configured providers + custom endpoint), the same checks through the
+  **shared `scripts/key-check.mjs`** run inside the `fenix-api` image (the key travels only via stdin — never
+  argv/env/log; the Linear team check and reported scopes are part of the same checks), writes the secret files
+  (0600) and the overlay; `fenix keys <name>` rotates one key.
 * Leak check `scripts/key-leak-check.mjs`: given canary values, greps `docker inspect`, container logs, the telemetry
   store and spool, run tees and records, and the registry; prints only "found / not found" per surface.
 
@@ -69,6 +71,39 @@ UI: `ui/src/settingsModel.js` (pure) + `screens/Settings.jsx` + `components/sett
 `type="password"`, `autocomplete="off"`, cleared after submit, never kept in state after the request; the nav's Settings
 area becomes `/settings/keys|provider|repos|squads|retention` with v1 SquadConfig / Prompts as sub-tabs.
 
+## Settings API contracts (binding for routes and UI)
+
+```
+GET  /api/settings/keys
+  { writable, keys: [{ name: "openrouter_api_key"|"provider_api_key"|"linear_api_key"|"github_token", label, required,
+                       present, envName, lastCheck: { at, ok, reason } | null }],
+    note: "a rotated key is used by new children at once; the Supervisor picks it up on its next fresh session" }
+POST /api/settings/keys/:name/validate          → { name, check: { ok, reason, details } }
+PUT  /api/settings/keys/:name { value, teamKey? } → 200 { name, saved: true, check }
+                                                  | 400 { error: "key-rejected", check } | 400 { error: "empty" }
+                                                  | 503 { error: "secrets-not-writable" }
+GET  /api/settings/provider
+  { active, source, providers: [{ name, baseUrl, authStyle, keyName, defaultModel, tiers, builtin }],
+    custom: { baseUrl, authStyle, keyName, tiers, defaultModel } | null, effectiveOn }
+PUT  /api/settings/provider { active, custom?, key?: { value } } → live test with candidate or stored key first; 400 { error: "provider-check-failed", check }
+                                                  | 400 { error: "invalid", errors } | 200 { ...GET payload, check }
+POST /api/settings/provider/test { active?, custom? } → { check }
+GET  /api/settings/routing
+  { provider, rows: [{ squad, lead, source: "settings"|"models.json"|"provider-default"|"env"|"fallback"|null, price: { input, output } | null,
+                       unpriced, benchmark | null }],
+    models: [{ id, price, benchmark }] }            // candidates from the active provider's pricing scope
+PUT  /api/settings/routing { squad, lead | null }   → GET payload (null = back to models.json)
+GET  /api/settings/repos                            → { root, repos: listRepos(), jobs: listCloneJobs() }
+POST /api/settings/repos { url, project? }          → 202 { jobId } | 400 { error }
+GET  /api/settings/repos/jobs/:id                   → job | 404
+DELETE /api/settings/repos/:name/mapping            → { removed: [projects] }
+GET  /api/settings/retention                        → cachedRetention() result
+```
+
+Every POST/PUT/DELETE: `writeGuards` (loopback or container gateway + same origin), body ≤ 8 KB, the body is never
+logged, no response ever carries a key value. Squads include `supervisor` (its `lead` = the Supervisor's model on its
+next fresh session; entrypoint chain `SUPERVISOR_MODEL` > settings > provider default > `xiaomi/mimo-v2.6-pro`).
+
 ## Slices (Flash workers)
 
 * Wave 1: A overlay + provider resolution + secrets mapping · B `key-check.mjs` · D `fenix-repos.mjs` (+ fenix-projects
@@ -85,3 +120,28 @@ spawn; provider switched to a custom Anthropic-compatible endpoint (the mock on 
 edit — next child uses it; routing change → next child's model; repo added via the UI (local bare repo URL) and
 unmapped; retention numbers; **leak check: canaries absent from docker inspect, logs, telemetry, tees and records**;
 browser pass over every section (no console errors).
+
+## Delivery status (2026-10-14)
+
+- [x] Recovered the existing Claude worktree and all completed worker output; no implementation was lost.
+- [x] Corrected metadata preservation and first-write routing of the user project map. API clone/unmap no longer writes the curated fleet config when the user map is missing.
+- [x] Fresh provider/key/routing on spawn; launcher-derived env cannot mask Settings. Missing mounted keys fail closed; stale model tiers are cleared. Follow-up keeps the recorded provider name.
+- [x] Provider onboarding accepts an optional write-only key candidate. API and CLI validate before changing the overlay and restore the previous key if the settings write fails. An active custom provider cannot lose its config.
+- [x] Fixed the stored-custom/form-selection mismatch, Supervisor model priority display, overlay-only routing rows and stale key-presence reads.
+- [x] Added the recorded AA benchmark snapshot (112 scored models, 2026-09-03), refresh output and routing column; unavailable scores remain null.
+- [x] Registered all 152 backend test files. Windows: full initial run 141/151, then all 32 Supervisor files passed after fixture correction; failed count guard and changed CLI/API/repo/benchmark tests passed separately. Linux: 151/152 in the full corrected run; the remaining API test passed separately after replacing obsolete null-benchmark assertions and checking first-map creation. No outstanding test failure.
+- [x] Settings API: 166 assertions; Settings UI model: 38 tests; full UI npm test and Vite build pass. CLI rollback: 7 tests. Repo mapping: 19 tests. Lint and diff whitespace check pass.
+- [x] Rebuilt and redeployed the isolated Docker acceptance stack. All 23 API acceptance scenarios pass. A real container spawn with a mock model verifies a fresh mounted key, custom endpoint, routing model and cleared inherited tiers (zero model calls).
+- [x] Six canaries absent from Docker metadata/logs, API data, Supervisor data and temporary files. Positive control detected an intentionally inserted test leak; deleting only that probe restored a clean scan. An unavailable scan now fails instead of claiming clean. Linear itself was not scanned; its egress-screen is covered separately by the suite.
+- [x] Browser pass: Keys, Provider/routing, Repositories (clone + unmap), Retention, Advanced routing and Prompts. Unpriced model apply/reset works; no console errors. Local preview: http://127.0.0.1:4601/settings/keys.
+- [x] ACCESS, QUICKSTART and STATE updated. CodeGraph was UNKNOWN (missing worktree index); review used explicit direct-source fallback.
+
+The Windows bind mount does not expose meaningful POSIX modes; the host acceptance check verifies in-place contents and identity, while the Linux route/unit tests verify mode 0600 on a real Linux filesystem.
+
+Commit/push and production VM deployment are not performed. The changes remain reviewable in this worktree; committing requires Mateusz's explicit `commituj` instruction.
+
+Proposed commit batches (in dependency order):
+1. `feat(provider): settings overlay, fresh child credentials and routed models (FOC-773, FOC-762)`
+2. `feat(settings): validated keys, provider onboarding, repos and retention (FOC-778, FOC-786)`
+3. `feat(ui): Settings screens and recorded model benchmarks (FOC-786)`
+4. `test(settings): acceptance, leak checks, fixtures and delivery docs`

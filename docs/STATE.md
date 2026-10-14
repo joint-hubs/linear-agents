@@ -24,6 +24,55 @@ Kolejka — sekwencja z `docs/ROADMAP.md` (2026-10-08). **Tor A (krytyczna ście
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## 2026-10-14 (32) — Commit batches landed on `fenix-settings-keys`; lane registry complete
+
+Eleven commits landed on the task branch (not pushed — push stays with Mateusz), in the approved order: docs(plan) PRD + delivery plan → feat(settings) (FOC-762, FOC-773, FOC-778, FOC-786) → feat(runtime) events/hooks/workflow → feat(sessions) P1a → feat(tools) P2 → feat(host) P1b → feat(insights) P3/P4 → feat(api) → feat(ui) → test lanes → docs. Working tree left clean except `.task-prompt.tmp.md` (deliberately not committed).
+
+- **Lane registry completed:** `runtime-hook.test.mjs` (parallel) and `runtime-workflow.test.mjs` (serial — spawns real `supervisor-spawn`/`supervisor-followup` children) registered in `scripts/test-lanes.json`; all 172 `scripts/*.test.mjs` accounted for, lane coverage gate green.
+- **Docs guards:** `docs/supervisor-e2e-checklist.md` count guard updated 152 → 172 (`docs-count-guard` green). ACCESS gained the task-workspace acceptance stack (4602).
+- **Correction to (31):** runtime-hook producer integration is CODED and committed — the 12:36–12:39 Atlas wave (`runtime-hook*`, `runtime-workflow*`) landed after (31) was written; its "still NOT delivered" note is superseded.
+- **Still open:** full Docker rebuild/redeploy + browser E2E acceptance (P1 acceptance condition), native worker MCP review/test.
+
+## 2026-10-14 (31) — Task workspaces P1–P4 code + wiring landed; acceptance pending (supersedes the in-progress snapshot in (30))
+
+Status consolidated here so no stale list conflicts with it. Plan checklist updated in place: `docs/plans/task-workspace-delivery.md` (integration + verification logs, 2026-10-14).
+
+- **Delivered (fenix-settings-keys, uncommitted):** P1 store/host/scoped API/UI — API isolation regressions 48/48; host recovery on OS process identity (Linux boot ID + start ticks, uncertain ownership reserves capacity) 17/17; workspace writer claims + common-git integration lock; UI history/isolation links (active owner wins, history generations read-only, board card cockpit links, `/` active tab; 30 helper tests + Vite build pass). P2 tool profiles (global/squad/role inheritance, revision CAS, launch snapshots) + all five real Thoughtmap tools verified. P3 runtime statistics — aggregation + routes + `/insights/runtime` screen, hand-calculated fixture tests. P4 local semantic task map — embedding cache + UMAP (seed 42) projection + routes + `/insights/map` screen. Explicit stopped-history resume through queue/cap: code + tests, **34 pass**.
+- **Real-model verifications:** GLM 5.3 Flash run in a native child process — OTLP interaction/model spans stored with task/session trace attribution, no prompt/tool content captured. Local task map on real Ollama `embeddinggemma`: cache digest `85462619ee721b466c5927d109d4cb765861907d5417b9109caebc4e614679f1`, UMAP seed 42 — 5 points fit, then a 6th transformed with the 5 old coordinates unchanged — **PASSED**.
+- **Test lanes:** 18 new backend `*.test.mjs` registered in `scripts/test-lanes.json` (task-workspace suites + `supervisor-watch`, `supervisor-launch`, `worker-tool-profiles`); 9 serial (sockets/process/env: `runtime-otel`, `task-cockpit-routes`, `task-map-routes`, `task-session-host`, `task-sessions`, `tool-profiles`, `tool-routes`, `workspace-claims`, `supervisor-watch`), 9 parallel. Lane coverage + static isolation audit green (`node scripts/test-run.mjs` inventory pass). Nav tests 24/24 — Insights pins `/insights/runtime` "Runtime statistics" and `/insights/map` "Task map".
+- **Docs count guards (reported, not changed — not owned):** `docs/supervisor-e2e-checklist.md` line 3 says **152 files**, actual **170** `scripts/*.test.mjs` (`scripts/docs-count-guard.test.mjs` fails until updated); the prose line near the end ("→ 116 files") reads stale too.
+- **Still NOT delivered:** runtime-hook producer integration (events/launch snapshots into supervisor/child/followup paths); full Docker rebuild/redeploy + browser E2E acceptance; native worker MCP review/test; final ACCESS.
+- **Active Atlas jobs:** hook `claude-606ac3`, watcher `claude-dd9312`. No commits made.
+
+## 2026-10-14 (30) — Task workspaces PRD APPROVED (P1–P4); delivery started (in progress)
+
+Mateusz approved the PRD (`docs/prd/task-workspace-supervisors-prd.md`, „zatwierdzam") — all phases P1–P4. PRD status updated to APPROVED 2026-10-14, implementation in progress; the planning-phase "awaiting approval" wording was removed (historical reference to the approval flow preserved). Execution plan with granular unchecked tasks and worker contracts: `docs/plans/task-workspace-delivery.md` (NEW).
+
+- [ ] P1 identity/coordinator (`scripts/task-sessions.mjs`: `createTaskSessionStore({dbPath,maxActive=2})` — ensure/get/getByTask/list/claimNext/update/close; fields `sessionId,taskKey,taskId,workspace,issueId,title,status,runId,pid,processStartedAt,createdAt,updatedAt,lastError`; safe `sup-` hex ids; default state `/data/supervisor/task-sessions.sqlite`; lifecycle `queued/starting/running/waiting/stopped/completed/failed`), task-scoped host, scoped API (`GET /api/supervisor/sessions`, `GET|POST /api/supervisor/sessions/:sessionId/{session,message,stop}`, `WS …/terminal`; host-mirrored routes under `/sessions/:id`; legacy global only when unambiguous), board home + labels, cockpit `/work/:taskKey/cockpit`, runtime events; task start binds immutable Linear issue identity.
+- [ ] P2 Manager/MCP/config snapshot; [ ] P3 metrics; [ ] P4 embedding projection/map; [ ] final Docker/build/browser verification — mocked first, real-provider separately.
+
+Worker policy: Flash only (`z-ai/glm-5.3-flash`) via Atlas; parent handles escalations. No production changes, no commits yet. Existing Settings diff preserved; CodeGraph stays UNKNOWN (direct bounded reads only). Lead will refine existing-route compatibility before the host worker starts.
+
+## 2026-10-14 (29) — Task workspaces / concurrent Supervisors PRD awaiting approval
+
+Planning checkpoint (docs only). PRD: `docs/prd/task-workspace-supervisors-prd.md` — status PLANNING, awaiting implementation approval. Recon checked against newer verified facts; three decisions confirmed with Mateusz: one active Supervisor per task (many tasks concurrently), the semantic task map stays in scope, and **Thoughtmap only** as the MCP integration — no second Jointhubs OS server, Google Workspace out of scope. Mock context recorded accurately (4601 = isolated Settings acceptance, not production). Phased delivery: P1 two-task runtime first, then P2 tool config, P3 metrics, P4 map. No implementation, no commits, no production changes — documentation only.
+
+Proposed doc checkpoint (not staged, not committed): `docs(plan): define task workspaces, concurrent supervisors and observability` — the new PRD plus only this (29) STATE hunk, separate from the existing uncommitted Settings changes.
+
+CodeGraph had no worktree index (UNKNOWN); direct source reads were used as fallback for recon.
+
+## 2026-10-14 (28) — Settings recovered and verified locally (FOC-773/778/786 + FOC-762)
+
+Worktree: `C:\Users\mateu\Documents\GitHub\la-wt-mateusz\fenix-settings-keys`, branch `fenix-settings-keys`. Changes are uncommitted; do not work in the older main checkout for this package. Delivery orchestration used Atlas GLM 5.3 Flash; the lead handled escalation and integration directly.
+
+- [x] Recovered all prior Claude worker output and completed integration fixes: fresh provider/key/model on spawn, fail-closed missing key, preserved project metadata and correct first user-map writes, transactional provider setup, correct UI selection and Supervisor priority, recorded benchmark data, honest leak-scan failures.
+- [x] Backend coverage: all 152 files verified across full Windows/Linux runs and focused reruns of corrected failures. Windows Supervisor group: 32/32; Settings API: 166 assertions; Settings UI: 38 tests plus full UI suite/build; lint clean. Exact run history is in `docs/plans/fenix-settings-keys.md`.
+- [x] Docker rebuild/redeploy on isolated `fenix-settings-acceptance`; 23/23 API scenarios, real mock-child spawn with fresh mounted key/endpoint/routing, six canaries clean including a positive leak-detection control.
+- [x] Browser coverage of every Settings tab, clone/unmap and unpriced routing apply/reset; no console errors. Preview: http://127.0.0.1:4601/settings/keys. Test credentials only; model calls disabled.
+- [x] ACCESS/QUICKSTART/plan updated; commit batches proposed. No commits, push or production VM changes.
+
+Resume cheaply: read the plan's Delivery status and `docs/ACCESS.md` (Settings acceptance stack). Local stack config/secrets/fixtures are ignored under `.fenix/acceptance/`; runtime data is the separate `fenix-settings-acceptance_fenix-data` volume. The full logs for this delivery are in the host temp directory as `settings-delivery-*.log`. CodeGraph had no worktree index (UNKNOWN); direct-source review was used.
+
 ## 2026-10-09 (27) — FOC-733 WYLĄDOWANY (`4bc5bc2`) · ACCEPT 115/115 + 116/116 · decyzja A (reguła wiąże) · granica przyrządu zapisana · run 2 (FOC-236) startuje na niej
 
 **Runda Q1-B + Q2-B na `foc-733-dev` (dwa commity).** `a37963e` kod: `>` w klasie terminatorów —
@@ -3674,3 +3723,6 @@ zostaje rozliczenie osi kosztu). Tor B (M8) rusza, gdy tor A stanie: FOC-760+761
 775, 777, 781 — osobna sesja, leci przez PR.
 
 **Push robi Mateusz.**
+
+#### Task workspace integration checkpoint (2026-10-14)
+P1–P4 code and wiring delivered in fenix-settings-keys (status consolidated in entry (31) above). API isolation regressions 48/48; host recovery on OS process identity 17/17; workspace claims + integration lock; UI history/isolation links; P2 tool profiles + all five real Thoughtmap tools; P3 runtime statistics (`/insights/runtime`) and P4 local task map (`/insights/map`); explicit stopped-history resume through queue/cap — 34 tests pass. Real-model probes: GLM Flash native-child OTLP trace attribution; local Ollama `embeddinggemma` map PASSED (digest `85462619ee721b466c5927d109d4cb765861907d5417b9109caebc4e614679f1`). Test lanes: 18 new backend suites registered, lane inventory + audit green; nav 24/24. Outstanding: runtime-hook producer integration, full Docker rebuild/redeploy + browser E2E acceptance, native worker MCP review/test, final ACCESS. Active Atlas jobs: hook `claude-606ac3`, watcher `claude-dd9312`. No commits made. See docs/plans/task-workspace-delivery.md.

@@ -35,8 +35,12 @@ Wartość klucza żyje WYŁĄCZNIE w `.env` (gitignored) — nigdy w `models.jso
 w komentarzach Linear, nigdy w kodzie ani logach. Domyślny provider `openrouter` wymaga
 `OPENROUTER_API_KEY`. Dodanie nowego providera = nowy wpis `authEnv` w `.env` + wpis profilu w
 `config/models.json::providers`. PRD: `docs/ui/provider-config.md`, ADR: `docs/adr/0010-provider-profiles.md`.
+W Dockerze klucz providera żyje w `.fenix/secrets/` (patrz wyżej); overlay `.fenix/config/settings.json` przechowuje tylko aktywnego providera i jego kształt (baseUrl/authStyle/nazwa zmiennej) — nigdy wartość klucza.
 
-- **Fenix w Dockerze (1.0.0):** klucze w `.fenix/secrets/` (`openrouter_api_key`, `linear_api_key`, `github_token` — owner-only, gitignored, nigdy w obrazie ani w logach), montowane jako Compose secrets pod `/run/secrets/`. Wpis/podmiana: `fenix keys`; po rotacji `fenix stop` + `fenix up` (sekrety czytane przy starcie kontenera).
+- **Fenix w Dockerze (1.0.0):** klucze w `.fenix/secrets/` (`openrouter_api_key`, `provider_api_key`, `linear_api_key`, `github_token` — owner-only, gitignored, nigdy w obrazie ani w logach). `fenix-supervisor` czyta je read-only jako Compose secrets pod `/run/secrets/`; `fenix-api` dostaje dodatkowo **read-write bind-mount `.fenix/secrets` → `/fenix-secrets`** (rotacja kluczy z dashboardu — decyzja bezpieczeństwa Mateusza 2026-10-13, ograniczona do `fenix-api`). Puste placeholdery tworzy `fenix` przy `up`, żeby Compose nie padał na brakującym pliku sekretu.
+- **Rotacja klucza (od FOC-773/786):** dwie drogi — `fenix keys [openrouter|provider|linear|github]` (wizard CLI; `fenix keys provider` obraca klucz **aktywnego** providera) albo **Settings → Keys** w dashboardzie (`PUT /api/settings/keys/:name`: live-check przed zapisem, zapis in-place z trybem 0600, odrzucony klucz → 400 i nic nie zapisane). Walidacja idzie przez **wspólny `scripts/key-check.mjs`** uruchamiany w kontenerze `fenix-api` — klucz przekazywany wyłącznie przez stdin (nigdy argv/env/log). Obrócony klucz biorą od razu nowe dzieci; Supervisor podbiera go przy swojej następnej świeżej sesji (kontrakt hot reload w recenzji — patrz QUICKSTART).
+- **Weryfikacja i leak-check:** `node scripts/key-check.mjs provider|linear|github` (klucz na stdin; wynik `{ok, reason, details}` — nigdy wartość klucza; sieciowy błąd nazywa endpoint, nie nagłówek) oraz `node scripts/key-leak-check.mjs --canary-file <plik>` (kanaryjki skanowane po `docker inspect`, logach kontenerów, store'ie telemetrii i spoolu, run tee i records oraz rejestrze; wynik „found / not found" per powierzchnia, wartości kanaryjek tylko z plików, nigdy argv).
+- **Overlay ustawień:** `.fenix/config/settings.json` (w kontenerze `/fenix-config/settings.json`) — `provider.active` / `provider.custom` (baseUrl, authStyle `token|apikey`, keyName, tiers, defaultModel) + `routing.<squad>.lead`; przeżywa `fenix update` (`config/models.json` pozostaje baseline z obrazu). `LA_PROVIDER` env nadal wygrywa z overlayem. Overlay walidowany restrykcyjnie — nieznane klucze i wartości wyglądające jak sekret (regexy `sk-or-`/`sk-ant-`/`gh*_`/`github_pat_`/`lin_api_`) są odrzucane przy zapisie.
 
 ---
 
@@ -85,6 +89,25 @@ Zakładka **Konfiguracja** (`localhost:7331/squad-config`) edytuje modele per sk
 - Zapis chroniony localhost-only. Zawsze najpierw „Podgląd zmian" (dry-run pokazuje diff plików).
 - Po zmianie pliki są zmodyfikowane w gicie — przejrzyj `git diff` i zacommituj świadomie.
 
+### Ustawienia (Settings, FOC-773/778/786)
+Obszar **Settings** w lewej nawigacji: `/settings/keys` (domyślna), `/settings/provider`,
+`/settings/repos`, `/settings/retention`; v1 zakładki `/squad-config` („Advanced routing (v1)") i
+`/prompts` („Squads & prompts (v1)") są częścią tego obszaru.
+- **Keys** — obecność każdego klucza + ostatni live-check (nigdy wartości ani długości); walidacja
+  i rotacja z UI (live-check przed zapisem; odrzucony klucz niczego nie zapisuje).
+- **Provider & routing** — aktywny provider (OpenRouter / skonfigurowany / custom endpoint
+  Anthropic-compatible: baseUrl, authStyle, defaultModel) z live testem przed zapisem; lead model
+  per skład z ceną z zakresu aktywnego providera; model bez ceny = „unpriced" (dozwolony, opisany).
+- **Repositories** — lista repo (origin, HEAD, branch, stan indeksu CodeGraph, liczba worktree,
+  mapowany projekt Linear), dodawanie przez klon w tle (`POST /api/settings/repos` → status joba),
+  usuwanie mapowania projektu (pliki repo zostają).
+- **Retention** — read-only: `cleanupPeriodDays` w mocy, zużycie dysku (transkrypcje / telemetria /
+  workspaces) i wolne miejsce; zarządzanie polityką zostaje w FOC-780.
+
+Edycja providera i rutingu z UI trafia do overlayu `.fenix/config/settings.json` (przeżywa
+`fenix update`); zmiana jest skuteczna od następnego spawna (hot reload w recenzji — QUICKSTART).
+Sekrety nie edytowane w `models.json` ani w UI poza polem hasła (czyszczone po wysłaniu).
+
 ### Centralna telemetria
 
 - **Baza:** `%LOCALAPPDATA%\linear-agents\telemetry\telemetry.sqlite` (override: `LA_TELEMETRY_DB`; katalog: `LA_TELEMETRY_HOME`).
@@ -126,6 +149,7 @@ Zakładka **Konfiguracja** (`localhost:7331/squad-config`) edytuje modele per sk
 - **Session host (FOC-783):** port `7332` wewnątrz sieci compose — **nigdy publikowany na hoście**; przyjmuje wyłącznie kontener `fenix-api` (sprawdzenie adresu peera) + token. Token: `/data/run/host.token` (0600, losowany na każdym starcie supervisora — API czyta go per request). Stan sesji: `/data/supervisor/session.json` (pisany przez hooki). Bieżący run Supervisora: `/data/supervisor/current-run.json` (`runId`, `model`, `source`; FOC-807 — wznowienie zachowuje run, `fenix attach --new` zaczyna nowy; od FOC-769 też pole `focus` — `{kind, taskId, at, source}` — deklaracja `supervisor-focus.mjs set`, pisana tylko gdy rekord wskazuje na ten run; podgląd: `docker compose exec fenix-supervisor node /opt/fenix/scripts/supervisor-current-run.mjs show --json`). Deklaracje fokusu runu: `<stateHome>/<runId>/focus.jsonl` (FOC-769; jedna linia JSON na zmianę: `at`, `kind` `ticket|overhead`, `taskId`, `note`, `source` `manual|spawn|followup` — append-only, odczyt: `node $LA_ROOT/scripts/supervisor-focus.mjs show`). Terminal dashboardu: WebSocket `/api/supervisor/terminal` — tylko same-origin (Host i Origin muszą być `localhost`/`127.0.0.1`/`[::1]`, ostrzejsze niż ogólne `isAllowedOrigin`).
 - **Dane:** wolumen `fenix_fenix-data` zamontowany w `/data` — telemetry DB `/data/telemetry/telemetry.sqlite`, stan Supervisora `/data/state/supervisor`, run manifests i per-run logi decyzyjne `/data/state/runs` (FOC-811), workspaces `/data/workspaces`.
 - **Mapa projektów:** `.fenix/config/projects.json` na hoście (katalog montowany jako `/fenix-config`; `fenix up` go tworzy; env `LA_PROJECTS_FILE=/fenix-config/projects.json`). Wygrywa z `config/projects.json` repozytorium; zapisuje ją `fenix repo add --project <projekt Linear>`; kształt: `{"projects":[{"linearProject","workspace":"joi","repo":"${GITHUB_ROOT}/<name>","deploy":{"type":"none"}}]}`.
+- **Settings (FOC-773/786):** `fenix-api` montuje dodatkowo `./.fenix/config` → `/fenix-config` (overlay `settings.json`, RW) i `./.fenix/secrets` → `/fenix-secrets` (RW — rotacja kluczy z dashboardu); `fenix-supervisor` sekrety ma wyłącznie read-only (`/run/secrets/`). Wyniki ostatnich walidacji kluczy: `/data/settings/key-checks.json` (statusy, bez wartości). API: `/api/settings/*` (te same guardy co zapisy Cockpita, body ≤ 8 KB, żadna odpowiedź nie zawiera wartości klucza). Kontrakty: `docs/plans/fenix-settings-keys.md`.
 - **`/data/agents`** (wolumen): konfiguracja squadów (CLAUDE.md, settings.json, definicje ról, skills, memory) + transkrypty Claude Code + zgody (approvals). Przy każdym starcie API seeduje konfigurację z obrazu regułą dpkg: plik nieedytowany → podąża za obrazem, edytowany → zostaje, a nowa wersja z obrazu ląduje obok jako `<plik>.fenix-new`. Transkrypty przeżywają `fenix down` i `fenix update`.
 - **`/data/workspaces`** (wolumen): repozytoria klonowane przez `fenix repo add`; worktree dzieci: `/data/workspaces/la-wt/<repo>/<branch>`.
 - **Zmienne środowiskowe w obrazie:** `LA_DATA_HOME=/data`, `LA_SQUAD_HOME=/data/agents`, `GITHUB_ROOT=/data/workspaces`, `LA_WORKTREE_HOME=/data/workspaces/la-wt`, `LA_TELEMETRY_HOME=/data/telemetry`, `LA_STATE_ROOT=/data/state`, `LA_SUPERVISOR_STATE_HOME=/data/state/supervisor`; compose ustawia `LA_PROJECTS_FILE=/fenix-config/projects.json`.
@@ -163,3 +187,27 @@ Zakładka **Konfiguracja** (`localhost:7331/squad-config`) edytuje modele per sk
 - Protokół: `docs/decisions/linear-signaling-protocol.md`
 - Bootstrap: `node scripts/bootstrap-linear.mjs` (idempotentny)
 - Push: `node scripts/linear-push.mjs` (GraphQL, zero deps)
+
+
+### Settings acceptance stack (2026-10-14, local only)
+
+- Worktree: `C:\Users\mateu\Documents\GitHub\la-wt-mateusz\fenix-settings-keys`; branch `fenix-settings-keys`.
+- Dashboard: http://127.0.0.1:4601/settings/keys (no login on the loopback-only test stack).
+- Compose project: `fenix-settings-acceptance`; generated, ignored config: `.fenix/acceptance/compose.json`.
+- Image: `fenix:settings-acceptance`. Volume: `fenix-settings-acceptance_fenix-data`.
+- Settings/map: `.fenix/acceptance/config/`; synthetic secrets only: `.fenix/acceptance/secrets/`.
+- Mock validation server: http://127.0.0.1:60659; containers reach it through `http://host.docker.internal:60659`.
+- Model execution is replaced with a local fixture. This stack is a UI/API acceptance environment, not a production Supervisor.
+- Start from this worktree: `docker compose -p fenix-settings-acceptance -f .fenix/acceptance/compose.json up -d --wait`.
+- Stop without deleting data: `docker compose -p fenix-settings-acceptance -f .fenix/acceptance/compose.json stop`.
+- The existing production VM and its secrets were not modified.
+
+### Task workspace acceptance stack (2026-10-14, local only)
+
+- Dashboard: http://127.0.0.1:4602 (loopback only, no login; board is home at `/`).
+- Compose project: `fenix-task-workspace`; generated, ignored config: `.fenix/task-workspace/compose.json`.
+- Purpose: P1–P4 browser acceptance — two concurrent task cockpits, restart, stopping one without touching the other; Manager tools, `/insights/runtime`, `/insights/map`.
+- Session host: the `:7332` host (see above) now multiplexes managed task sessions — legacy global routes answer only while no task session exists; isolated per-task controllers live under `/sessions/:id`. Ambiguity answers with an explicit error, never a silent guess.
+- Start from this worktree: `docker compose -p fenix-task-workspace -f .fenix/task-workspace/compose.json up -d --wait`.
+- Stop without deleting data: `docker compose -p fenix-task-workspace -f .fenix/task-workspace/compose.json stop`.
+- The existing production VM and its secrets were not modified.
