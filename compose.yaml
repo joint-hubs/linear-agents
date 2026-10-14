@@ -25,6 +25,7 @@ x-fenix: &fenix
     - openrouter_api_key
     - linear_api_key
     - github_token
+    - provider_api_key
   environment:
     # YAML merge keys (<<) are SHALLOW: a service that declares its own
     # `environment:` replaces this one wholesale — so every service must
@@ -44,6 +45,17 @@ services:
       # Cockpit (FOC-783): where the fenix-api reaches the Supervisor session
       # host over the compose network (HTTP + WebSocket, never published).
       FENIX_SUPERVISOR_HOST: http://fenix-supervisor:7332
+      # Key rotation from the dashboard (FOC-786): the settings overlay writes
+      # provider keys directly, so the secrets dir is bind-mounted read-write
+      # here — Mateusz chose dashboard key rotation 2026-10-13. Security-boundary
+      # change limited to fenix-api: fenix-supervisor keeps read-only Compose
+      # secrets.
+      LA_SECRETS_DIR: /fenix-secrets
+    volumes:
+      # Volumes must be restated: the << merge is shallow (see the anchor note).
+      - fenix-data:/data
+      - ./.fenix/config:/fenix-config
+      - ./.fenix/secrets:/fenix-secrets
     ports:
       - "127.0.0.1:${FENIX_PORT:-4600}:7331"
     healthcheck:
@@ -84,6 +96,8 @@ secrets:
     file: ./.fenix/secrets/linear_api_key
   github_token:
     file: ./.fenix/secrets/github_token
+  provider_api_key:
+    file: ./.fenix/secrets/provider_api_key
 
 volumes:
   fenix-data: {}

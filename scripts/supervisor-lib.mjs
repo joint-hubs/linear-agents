@@ -20,6 +20,15 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { atomicWriteJSON } from "./utils.mjs";
+// P1 resource ownership: the durable claim registry and the repo-wide
+// integration lock. workspace-claims imports nothing from this module (its git
+// helper is its own), so the edge is one-way.
+import {
+  assertClaimAvailable,
+  claimWorkspace,
+  readWorkspaceClaims,
+  withIntegrationLock,
+} from "./workspace-claims.mjs";
 // Single source of the never-grantable action list. This pulls ajv into every
 // supervisor-lib importer (the loader compiles lazily, so only the cost is the
 // module evaluation) — accepted over duplicating the list, because two copies
@@ -1680,9 +1689,44 @@ export function listWorktrees(gitRoot) {
  * slugs; these guards protect the library's other callers.)
  *
  * @param {string|null} [startPoint] resolved commit a new branch starts at
- * @returns {{ worktree: string, branch: string, baseRevision: string, created: boolean }}
+ * @param {{ ownerId?: string }} [options] P1 resource ownership: when set, the
+ *   whole check-and-create runs under the repo-wide integration lock and the
+ *   resulting workspace is durably claimed for this owner (supervisor-spawn
+ *   passes a stable `runId:childId`). Without it the LEGACY behaviour is kept —
+ *   same signature, same reuse-or-create — except that a branch somebody
+ *   already claims is refused: an owner-less caller must never become an
+ *   unowned writer of a claimed workspace, and a legacy call never claims
+ *   silently.
+ * @returns {{ worktree: string, branch: string, baseRevision: string,
+ *   created: boolean, owner?: string, claim?: object }}
  */
-export function ensureWorktree(gitRoot, branch, startPoint = null) {
+export function ensureWorktree(gitRoot, branch, startPoint = null, options = null) {
+  const ownerId = options?.ownerId ?? null;
+
+  if (!ownerId) {
+    const claim = readWorkspaceClaims({ gitRoot }).claims.find((c) => c.branch === branch);
+    if (claim) {
+      throw new Error(
+        `branch ${branch} is claimed by owner "${claim.ownerId}" (${claim.worktree}, claimed ${claim.claimedAt}) — ` +
+          `an owner-less ensureWorktree call is refused rather than becoming its unowned writer. ` +
+          `Pass ensureWorktree(..., { ownerId }) to claim it, use a branch nobody holds, ` +
+          `or have "${claim.ownerId}" (e.g. its supervisor run) release or finish.`,
+      );
+    }
+    return ensureWorktreeCore(gitRoot, branch, startPoint, null);
+  }
+
+  // Managed: check and creation share the repo-wide integration lock, so a
+  // merge workflow (which holds the same lock) cannot interleave a git
+  // mutation underneath, and a racing claim on the same branch cannot slip
+  // between "found nothing" and "created".
+  return withIntegrationLock(gitRoot, ownerId, () => ensureWorktreeCore(gitRoot, branch, startPoint, ownerId));
+}
+
+/** The reuse-or-create body, plus the ownership stamp when an owner is given. */
+function ensureWorktreeCore(gitRoot, branch, startPoint, ownerId) {
+  if (ownerId) assertClaimAvailable({ gitRoot, branch, ownerId });
+
   const existing = listWorktrees(gitRoot).find((w) => w.branch === branch);
   if (existing) {
     const path = resolve(existing.path);
@@ -1692,7 +1736,7 @@ export function ensureWorktree(gitRoot, branch, startPoint = null) {
         `worktree for ${branch} stands at ${baseRevision}, not at the requested start point ${startPoint}`,
       );
     }
-    return { worktree: path, branch, baseRevision, created: false };
+    return withOwnership(gitRoot, { worktree: path, branch, baseRevision, created: false }, ownerId);
   }
 
   const target = worktreePathFor(gitRoot, branch);
@@ -1726,7 +1770,24 @@ export function ensureWorktree(gitRoot, branch, startPoint = null) {
   git(args, gitRoot);
 
   const path = resolve(target);
-  return { worktree: path, branch, baseRevision: git(["rev-parse", "HEAD"], path), created: true };
+  return withOwnership(gitRoot, { worktree: path, branch, baseRevision: git(["rev-parse", "HEAD"], path), created: true }, ownerId);
+}
+
+/** Stamp the ownership claim onto a finished result (reentrant under the lock). */
+function withOwnership(gitRoot, result, ownerId) {
+  if (!ownerId) return result;
+  const claim = claimWorkspace({
+    gitRoot,
+    branch: result.branch,
+    worktree: result.worktree,
+    ownerId,
+    baseRevision: result.baseRevision,
+  });
+  return {
+    ...result,
+    owner: ownerId,
+    claim: { status: claim.status, claimedAt: claim.claim.claimedAt, updatedAt: claim.claim.updatedAt },
+  };
 }
 
 // Reported after a kill so Mateusz can see what the child left behind. Never

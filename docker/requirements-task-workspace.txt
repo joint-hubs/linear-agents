@@ -1,0 +1,4 @@
+# Local MCP adapter and reproducible semantic projection runtime.
+mcp==1.23.3
+requests==2.34.2
+umap-learn==0.5.12

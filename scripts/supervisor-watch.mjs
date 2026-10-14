@@ -87,6 +87,61 @@ if (args.session) claudeArgs.push("--resume", args.session);
 if (args.settings) claudeArgs.push("--settings", args.settings);
 if (args.model) claudeArgs.push("--model", args.model);
 
+// ── the launch profile's CLI args (task-workspace) ───────────────────────────
+// spawn/followup pass the tool profile's captured args (--tools, --disallowed-
+// Tools, --mcp-config) as ONE JSON-encoded flag; this watcher owns the claude
+// command line, so here is where they become real — appended AFTER the flags
+// above, which therefore keep their meaning (last-value flags the watcher set
+// stay set unless the profile repeats one deliberately).
+//
+// Fail-closed BEFORE the spawn: only a JSON array of strings is accepted. A
+// malformed payload is a crashed child, never a half-profiled launch — the
+// profile was captured to run the child under a KNOWN tool set, and silently
+// dropping it would launch exactly the child the snapshot was taken to prevent.
+// The values ride argv, one string per element: spawn(command, args) involves
+// no shell, so there is nothing to interpolate, quote or split.
+const parseProfileArgs = (raw) => {
+  if (raw === undefined || raw === "") return [];
+  if (raw === true) {
+    throw new Error("--claude-args needs a JSON array-of-strings value — a bare flag is not a launch profile");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`--claude-args is not valid JSON: ${err.message}`);
+  }
+  if (!Array.isArray(parsed) || parsed.some((a) => typeof a !== "string")) {
+    throw new Error(
+      `--claude-args must be a JSON array of strings, got ${JSON.stringify(parsed)?.slice(0, 120)}`,
+    );
+  }
+  return parsed;
+};
+
+let profileArgs = null;
+let profileArgsError = null;
+try {
+  profileArgs = parseProfileArgs(args["claude-args"]);
+} catch (err) {
+  profileArgsError = err.message;
+}
+
+if (profileArgsError) {
+  // stdio is 'ignore', so the refusal travels the same two channels a crash
+  // does: the registry (the Supervisor reads status) and the tee (the why).
+  note({ subtype: "claude_args_rejected", message: profileArgsError });
+  updateChild(runId, childId, {
+    status: "crashed",
+    exitCode: null,
+    endedAt: new Date().toISOString(),
+    error: `refused before launch: ${profileArgsError}`,
+  });
+  endTelemetryRun(args["telemetry-run"], 1);
+  process.exit(1);
+}
+claudeArgs.push(...profileArgs);
+
 const { command, args: spawnArgs } = claudeCommand(claudeArgs);
 
 const turnIndex = Number(args.turn ?? 0);

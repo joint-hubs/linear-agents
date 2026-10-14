@@ -73,7 +73,7 @@ function fixtureRun({ runId } = {}) {
 const validRunId = (n) => `2026-10-13T10-00-00-000-supervisor-000${n}`;
 
 const baseEnv = (extra = {}) => ({
-  ...process.env,
+  ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key",
   LA_CLAUDE_BIN: MOCK,
   LA_SUPERVISOR_NO_TELEMETRY: "1",
   LA_SUPERVISOR_NO_CODEGRAPH: "1",
@@ -551,6 +551,128 @@ test("every resume prompt embeds the turn-end contract without displacing the an
   if (!payload.endsWith("answer")) fail(`the contract displaced the delivered answer: ...${payload.slice(-80)}`);
 });
 
+// ── provider pinning on resume (FOC-762/FOC-773) ─────────────────────────────
+// The resumed turn must run on the SAME provider the first turn ran on, even
+// after a switch in the settings overlay — a pinned model on another provider's
+// endpoint is the exact drift this closes. The env capture is the same
+// MOCK_CLAUDE_ENV_FILE channel the spawn suite uses, so what is asserted is
+// what claude actually received, not what the script mentions.
+console.log("\nthe resumed turn pins the spawn-time provider");
+
+// Two providers in one fixture config, so "the active provider moved on" is a
+// real switch between resolvable providers, not a mock.
+function twoProviderFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "la-sup-fu-prov-"));
+  cleanup.push(dir);
+  const configPath = join(dir, "models.json");
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      providers: {
+        mockprov: { baseUrl: "http://127.0.0.1:9443/api", authEnv: "MOCKPROV_API_KEY", authStyle: "token" },
+        otherprov: { baseUrl: "http://127.0.0.1:9553/api", authEnv: "OTHERPROV_API_KEY", authStyle: "token" },
+      },
+    }),
+  );
+  const envPath = join(dir, ".env");
+  writeFileSync(envPath, "MOCKPROV_API_KEY=mock-key\nOTHERPROV_API_KEY=other-key\n");
+  return { configPath, envPath };
+}
+
+// The mock claude appends one JSON object per invocation; the last line is the
+// env of the most recent turn.
+const lastRecordedEnv = (envFile) => JSON.parse(readFileSync(envFile, "utf8").trim().split("\n").pop());
+
+test("a resumed turn keeps the child's spawn-time provider after the active provider moved on", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const { configPath, envPath } = twoProviderFixture();
+  const envFile = join(runDir(runId), "env.log");
+
+  const child = spawnChild(runId, repo, {
+    LA_PROVIDER: "mockprov",
+    LA_PROVIDER_CONFIG: configPath,
+    LA_PROVIDER_ENV_FILE: envPath,
+    MOCK_CLAUDE_ENV_FILE: envFile,
+  });
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+  if (readRegistry(runId).children[child.childId].provider !== "mockprov") {
+    fail("spawn did not record the resolved provider in the registry entry");
+  }
+
+  // The active provider has moved on: the follow-up itself runs with
+  // otherprov active — the child env must STILL carry mockprov.
+  parseOk(
+    followup(runId, child.childId, [], {
+      LA_PROVIDER: "otherprov",
+      LA_PROVIDER_CONFIG: configPath,
+      LA_PROVIDER_ENV_FILE: envPath,
+      MOCK_CLAUDE_ENV_FILE: envFile,
+    }),
+  );
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const childEnv = lastRecordedEnv(envFile);
+  if (childEnv.ANTHROPIC_BASE_URL !== "http://127.0.0.1:9443/api") {
+    fail(`resumed base URL: ${childEnv.ANTHROPIC_BASE_URL} — the pinned model would run on the wrong endpoint`);
+  }
+  if (childEnv.LA_PROVIDER !== "mockprov") fail(`resumed LA_PROVIDER: ${childEnv.LA_PROVIDER}`);
+});
+
+test("a legacy registry entry without provider resolves the currently active provider", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const { configPath, envPath } = twoProviderFixture();
+  const envFile = join(runDir(runId), "env.log");
+
+  const child = spawnChild(runId, repo, {
+    LA_PROVIDER: "mockprov",
+    LA_PROVIDER_CONFIG: configPath,
+    LA_PROVIDER_ENV_FILE: envPath,
+    MOCK_CLAUDE_ENV_FILE: envFile,
+  });
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  // A child spawned before this slice: the registry entry carries no `provider`.
+  const registry = readRegistry(runId);
+  delete registry.children[child.childId].provider;
+  writeRegistry(runId, registry);
+
+  parseOk(
+    followup(runId, child.childId, [], {
+      LA_PROVIDER: "otherprov",
+      LA_PROVIDER_CONFIG: configPath,
+      LA_PROVIDER_ENV_FILE: envPath,
+      MOCK_CLAUDE_ENV_FILE: envFile,
+    }),
+  );
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const childEnv = lastRecordedEnv(envFile);
+  if (childEnv.LA_PROVIDER !== "otherprov") fail(`legacy resume LA_PROVIDER: ${childEnv.LA_PROVIDER}`);
+  if (childEnv.ANTHROPIC_BASE_URL !== "http://127.0.0.1:9553/api") {
+    fail(`legacy resume base URL: ${childEnv.ANTHROPIC_BASE_URL}`);
+  }
+});
+
+test("a provider resolution failure on resume refuses before any turn starts", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const child = spawnChild(runId, repo);
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const registry = readRegistry(runId);
+  registry.children[child.childId].provider = "does-not-exist";
+  writeRegistry(runId, registry);
+
+  const turnsBefore = readRegistry(runId).children[child.childId].turns.length;
+  const out = parseRefusal(followup(runId, child.childId, [], { LA_PROVIDER: "does-not-exist" }));
+  if (out.reason !== "provider-resolution-failed") fail(`expected a named refusal, got: ${JSON.stringify(out)}`);
+  if (!/does-not-exist/.test(out.error)) fail(`the error does not name the provider: ${out.error}`);
+  const turnsAfter = readRegistry(runId).children[child.childId].turns.length;
+  if (turnsAfter !== turnsBefore) fail(`a turn was appended anyway (${turnsBefore} → ${turnsAfter})`);
+});
+
 // ── auto-focus (FOC-769) ─────────────────────────────────────────────────────
 console.log("\nauto-focus");
 
@@ -624,6 +746,57 @@ test("a follow-up whose child has no ticket-shaped taskId still succeeds", () =>
     if (out.focusError !== undefined) fail(`the skip was reported as an error: ${out.focusError}`);
     if (readFocus(runId, { stateHome: home }).history.length) fail("a focus line was written anyway");
   });
+});
+
+// ── pending runtime return (causal return evidence) ──────────────────────────
+// The verdict flow sets pendingRuntimeReturn on the dev child after a FAIL
+// round; the follow-up carries it to the child env (FENIX_RUNTIME_RETURN) and
+// the SessionStart hook records return_to_dev from it. This file owns the
+// launch-side contract: the pending must survive the launch untouched — it
+// used to be cleared in the same patch that opened the turn, so a launch that
+// died before the hook fired took the only copy of the evidence with it.
+console.log("\nthe pending runtime return survives the launch");
+
+test("a pending runtimeReturn is retained across the follow-up, not cleared at launch", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const envFile = join(runDir(runId), "env.log");
+  const child = spawnChild(runId, repo, {
+    FENIX_SUPERVISOR_SESSION_ID: "sup-session-0001",
+    MOCK_CLAUDE_ENV_FILE: envFile,
+  });
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  // The verdict shape (supervisor-verdict.mjs sets exactly this).
+  const pending = {
+    sourceAttemptId: readRegistry(runId).children[child.childId].attemptId,
+    source: "review",
+    reason: "rejected",
+    evidenceRef: `${runId}:verdict:FOC-123:1`,
+    evidenceKind: "direct",
+  };
+  const reg = readRegistry(runId);
+  reg.children[child.childId].pendingRuntimeReturn = pending;
+  writeRegistry(runId, reg);
+
+  const out = parseOk(followup(runId, child.childId, [], { MOCK_CLAUDE_ENV_FILE: envFile }));
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const entry = readRegistry(runId).children[child.childId];
+  if (JSON.stringify(entry.pendingRuntimeReturn) !== JSON.stringify(pending)) {
+    fail(`the pending return was consumed or mutated at launch: ${JSON.stringify(entry.pendingRuntimeReturn)}`);
+  }
+  if (entry.turns.length !== 2) fail(`the follow-up did not add a turn (${entry.turns.length})`);
+  // The launched turn's env must carry the pending verbatim — that env is what
+  // the SessionStart hook reads to record return_to_dev.
+  const childEnv = JSON.parse(readFileSync(envFile, "utf8").trim().split("\n").pop());
+  if (childEnv.FENIX_RUNTIME_RETURN !== JSON.stringify(pending)) {
+    fail(`the turn env lost the pending return: ${JSON.stringify(childEnv.FENIX_RUNTIME_RETURN)}`);
+  }
+  if (!JSON.parse(childEnv.FENIX_DEPENDS_ON_ATTEMPTS).includes(pending.sourceAttemptId)) {
+    fail(`the turn env dependencies lost the returned-from attempt: ${childEnv.FENIX_DEPENDS_ON_ATTEMPTS}`);
+  }
+  if (out.status !== "running" && out.status !== "exited") fail(`unexpected follow-up status: ${out.status}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

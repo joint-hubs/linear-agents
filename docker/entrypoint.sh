@@ -15,7 +15,9 @@ load_secrets() {
     for spec in \
         'openrouter_api_key OPENROUTER_API_KEY' \
         'linear_api_key LINEAR_API_KEY' \
-        'github_token GITHUB_TOKEN GH_TOKEN'
+        'linear_api_key_pisi LINEAR_API_KEY_PISI' \
+        'github_token GITHUB_TOKEN GH_TOKEN' \
+        'provider_api_key PROVIDER_API_KEY'
     do
         secret_file="/run/secrets/${spec%% *}"
         if [ -s "$secret_file" ]; then
@@ -94,13 +96,15 @@ case "${1:-api}" in
         exec node scripts/telemetry-server.mjs
         ;;
     host)
-        # Supervisor session host (FOC-783): owns the tmux server on socket
-        # `-L fenix` and serves attach / chat / terminal on :7332. Same startup
+        # Supervisor session host (FOC-783), extended into the task-session
+        # multiplexer (PRD task-workspace-supervisors): one server on :7332
+        # fronts the legacy global supervisor (while no task session exists)
+        # and one isolated controller per managed task session. Same startup
         # work the old idle/supervisor cases ran before holding the container up.
         resolve_provider
         configure_git
         mark_orphans
-        exec node "$LA_ROOT/scripts/supervisor-host.mjs" serve
+        exec node "$LA_ROOT/scripts/task-session-host.mjs" serve
         ;;
     idle)
         # Alias of host — kept for old compose files that say command: ["idle"].
@@ -110,15 +114,41 @@ case "${1:-api}" in
         # Attach a terminal to the running Supervisor's tmux session.
         # `supervisor` is kept for backward compatibility: it used to start
         # claude itself, now only the host does, so no path can start a second
-        # claude on the same session.
+        # claude on the same session. With managed task sessions the attach
+        # MUST match that session's tmux identity — an ambiguous or empty
+        # selection is reported, never silently attached to the global pane.
         ensure_args=""
         if [ "${2:-}" = "--new" ]; then ensure_args="--new"; fi
-        if ! node "$LA_ROOT/scripts/supervisor-host.mjs" ensure $ensure_args; then
-            printf '%s\n' 'fenix: the Supervisor host is not ready — check: fenix logs fenix-supervisor' >&2
-            exit 1
+        if [ "${2:-}" = "--session" ]; then
+            target="$(node "$LA_ROOT/scripts/task-session-host.mjs" attach-target --session "${3:-}")" || exit 2
+        else
+            target="$(node "$LA_ROOT/scripts/task-session-host.mjs" attach-target)" || exit 2
         fi
-        printf '%s\n' 'Attaching to the Supervisor — Ctrl-b d detaches, it keeps running.'
-        exec tmux -L fenix attach-session -t supervisor
+        case "$(printf '%s' "$target" | sed -n 's/.*"mode":"\([a-z-]*\)".*/\1/p')" in
+            session)
+                attach_session="$(printf '%s' "$target" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')"
+                if ! node "$LA_ROOT/scripts/supervisor-host.mjs" ensure $ensure_args --session "$attach_session"; then
+                    printf '%s\n' 'fenix: the Supervisor host is not ready — check: fenix logs fenix-supervisor' >&2
+                    exit 1
+                fi
+                printf 'Attaching to task session %s — Ctrl-b d detaches, it keeps running.\n' "$attach_session"
+                exec tmux -L "fenix-$attach_session" attach-session -t "$attach_session"
+                ;;
+            selection-required)
+                printf '%s\n' 'fenix: several task sessions exist — pick one explicitly (fenix attach --session <id>)' >&2
+                printf '%s\n' "$target" >&2
+                exit 1
+                ;;
+            *)
+                # legacy: no managed task sessions — the global supervisor pane.
+                if ! node "$LA_ROOT/scripts/supervisor-host.mjs" ensure $ensure_args; then
+                    printf '%s\n' 'fenix: the Supervisor host is not ready — check: fenix logs fenix-supervisor' >&2
+                    exit 1
+                fi
+                printf '%s\n' 'Attaching to the Supervisor — Ctrl-b d detaches, it keeps running.'
+                exec tmux -L fenix attach-session -t supervisor
+                ;;
+        esac
         ;;
     supervisor-run)
         # Run the Supervisor claude inside the host's tmux session. ONLY the
@@ -130,15 +160,36 @@ case "${1:-api}" in
         # the pane's claude resolves the provider HERE, just before it execs.
         new_session=0
         if [ "${2:-}" = "--new" ]; then new_session=1; fi
-        CLAUDE_CONFIG_DIR="$LA_SQUAD_HOME/supervisor"
+        # A managed task session (FENIX_SUPERVISOR_SESSION_ID set by the host)
+        # MUST NOT share the squad config dir: a `claude --continue` there
+        # would cross-resume another task's native conversation history. Its
+        # isolated dir under the session home is seeded ONCE from the global
+        # supervisor config (prompt/settings/agents/skills only — never
+        # .claude.json or projects/), and resuming the same session keeps
+        # that history. The legacy global supervisor keeps the squad dir.
+        if [ -n "${FENIX_SUPERVISOR_SESSION_ID:-}" ]; then
+            CLAUDE_CONFIG_DIR="$(node "$LA_ROOT/scripts/task-session-host.mjs" config-dir --session "$FENIX_SUPERVISOR_SESSION_ID")" || {
+                printf '%s\n' 'fenix: invalid supervisor session id - refusing to start a managed pane' >&2
+                exit 2
+            }
+        else
+            CLAUDE_CONFIG_DIR="$LA_SQUAD_HOME/supervisor"
+        fi
         export CLAUDE_CONFIG_DIR
-        ANTHROPIC_MODEL="${SUPERVISOR_MODEL:-xiaomi/mimo-v2.6-pro}"
-        export ANTHROPIC_MODEL
         LA_SUPERVISOR_REPO="${FENIX_REPO_DIR:-$GITHUB_ROOT}"
         export LA_SUPERVISOR_REPO
         mkdir -p "$LA_SUPERVISOR_REPO"
         cd "$LA_SUPERVISOR_REPO"
         resolve_provider
+        # Evaluated after resolve_provider: LA_PROVIDER_DEFAULT_MODEL comes from
+        # the provider entry's defaultModel (FOC-773). The Settings overlay's
+        # routing.supervisor.lead sits between SUPERVISOR_MODEL and it; the old
+        # hard-coded xiaomi/mimo-v2.6-pro stays the last-resort fallback. A
+        # broken settings.json is ignored — the CLI fails loudly and the chain
+        # falls through.
+        settings_model="$(node "$LA_ROOT/scripts/fenix-settings.mjs" get routing.supervisor.lead 2>/dev/null || true)"
+        ANTHROPIC_MODEL="${SUPERVISOR_MODEL:-${settings_model:-${LA_PROVIDER_DEFAULT_MODEL:-xiaomi/mimo-v2.6-pro}}}"
+        export ANTHROPIC_MODEL
         node "$LA_ROOT/scripts/fenix-claude-prefs.mjs" --config-dir "$CLAUDE_CONFIG_DIR" --trust "$LA_SUPERVISOR_REPO"
         # FOC-807: the waker, guard, briefing and telemetry hooks read the run id
         # from the claude process env — export the same trio (LA_SUPERVISOR_RUN,
@@ -158,15 +209,21 @@ case "${1:-api}" in
                     printf 'fenix: run-manifest start failed for %s - telemetry may miss this run\n' "$run_id" >&2
                 fi
             fi
+        elif [ -n "${FENIX_SUPERVISOR_SESSION_ID:-}" ]; then
+            # Scoped identity resolution failed (missing context or an owner
+            # mismatch) — fail closed: a managed pane NEVER starts without its
+            # own run id, and never silently adopts another task's run.
+            printf '%s\n' 'fenix: scoped run resolution failed - refusing to start a managed Supervisor without its own run id' >&2
+            exit 2
         else
             printf '%s\n' 'fenix: no Supervisor run id - waker, guard and briefing stay off' >&2
         fi
         # Resume the last Supervisor session for this directory unless --new (D5).
         project_dir="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$LA_SUPERVISOR_REPO" | sed 's|[^A-Za-z0-9]|-|g')"
         if [ "$new_session" -eq 0 ] && ls "$project_dir"/*.jsonl >/dev/null 2>&1; then
-            exec claude --continue
+            exec node "$LA_ROOT/scripts/supervisor-launch.mjs" --continue
         fi
-        exec claude
+        exec node "$LA_ROOT/scripts/supervisor-launch.mjs"
         ;;
     repo-add)
         shift

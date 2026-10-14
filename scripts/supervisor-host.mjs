@@ -38,13 +38,47 @@ import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { WebSocketServer } from "ws";
 
-import { hostTokenPath, supervisorSessionPath } from "./fenix-paths.mjs";
+import { hostTokenPath, supervisorSessionHome, supervisorSessionPath, SUPERVISOR_SESSION_ID_PATTERN } from "./fenix-paths.mjs";
+import { readProcessIdentity, matchesProcess } from "./task-process-identity.mjs";
 import { processAlive as defaultProcessAlive } from "./supervisor-lib.mjs";
 import { askKeyPlan, extractCommandOutput, parseDialog, slashCommandPolicy } from "./session-dialog.mjs";
 
+// Legacy single-session identity — the module constants keep their exact
+// values so every existing deployment, test and note stays byte-identical. A
+// managed task session (PRD task-workspace-supervisors §5) derives its own
+// per-session identity from FENIX_SUPERVISOR_SESSION_ID via tmuxIdentity()
+// below; the derived values are only used INSIDE a createHost whose env
+// carries a validated session id.
 export const TMUX_SOCKET = "fenix";
 export const TMUX_SESSION = "supervisor";
 export const CHAT_BUFFER = "fenix-chat";
+
+/**
+ * The tmux identity a host uses, derived from env. Unscoped (no
+ * FENIX_SUPERVISOR_SESSION_ID) this is exactly the legacy triple above. With a
+ * session id each managed session gets its OWN tmux server socket and session
+ * name (so `fenix attach` of task A can never land on task B's pane) and its
+ * own chat paste buffer. A set-but-invalid id throws — fail closed, never
+ * compose tmux names from unbounded data.
+ */
+export function tmuxIdentity(env = process.env) {
+  const sessionId = env.FENIX_SUPERVISOR_SESSION_ID;
+  if (!sessionId) {
+    return { sessionId: null, scoped: false, socket: TMUX_SOCKET, session: TMUX_SESSION, chatBuffer: CHAT_BUFFER };
+  }
+  if (!SUPERVISOR_SESSION_ID_PATTERN.test(sessionId)) {
+    throw new TypeError(
+      `FENIX_SUPERVISOR_SESSION_ID must match ${SUPERVISOR_SESSION_ID_PATTERN} — refusing to derive tmux names from '${sessionId}'`,
+    );
+  }
+  return {
+    sessionId,
+    scoped: true,
+    socket: `fenix-${sessionId}`,
+    session: sessionId,
+    chatBuffer: `${sessionId}-chat`,
+  };
+}
 export const MAX_MESSAGE_BYTES = 8192;
 export const BODY_CAP_BYTES = 16 * 1024;
 export const READINESS_TIMEOUT_MS = 30_000;
@@ -101,34 +135,16 @@ const stripV6Prefix = (address) => String(address ?? "").replace(/^::ffff:/, "")
 const normalizeSpace = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 
 /**
- * Build the host. Every dep is optional; the defaults are the real thing.
- * Returns { server, ensureSession, sendMessage, getState, alive,
- * answerDialog, answerAsk } — the server is NOT listening; `serve` (CLI) or
- * a test binds it.
+ * The two gates — PEER (only the API container may call in) and TOKEN (fresh,
+ * re-read per request) — shared by the single-session host and the
+ * task-session multiplexer, so both enforce the identical gate order
+ * (peer 403 → missing token file 503 → wrong token 401) and both fail closed.
+ * check(req) returns null when the request may proceed, else {status, body}.
  */
-export function createHost(deps = {}) {
+export function createGatekeeper(deps = {}) {
   const env = deps.env ?? process.env;
-  const port = Number.parseInt(env.FENIX_HOST_PORT ?? "", 10) || 7332;
-  const bind = env.FENIX_HOST_BIND || "0.0.0.0";
   const peerName = env.FENIX_HOST_PEER || "fenix-api";
-  const tmuxBin = env.LA_TMUX_BIN || "tmux";
-  const startCmd = (env.FENIX_SUPERVISOR_CMD || "/opt/fenix/docker/entrypoint.sh supervisor-run")
-    .split(" ")
-    .filter(Boolean);
 
-  const runTmux = deps.runTmux ?? ((args, opts = {}) =>
-    spawnSync(tmuxBin, ["-L", TMUX_SOCKET, ...args], { encoding: "utf8", input: opts.input, env }));
-
-  const readSessionState = deps.readSessionState ?? (() => {
-    try {
-      return JSON.parse(readFileSync(supervisorSessionPath(env), "utf8"));
-    } catch {
-      return null;
-    }
-  });
-
-  // Re-read on EVERY request — a supervisor restart rotates the token, so
-  // nothing here may cache it.
   const readToken = deps.readToken ?? (() => {
     try {
       return readFileSync(hostTokenPath(env), "utf8").trim() || null;
@@ -153,6 +169,97 @@ export function createHost(deps = {}) {
     return peerCache.set;
   });
 
+  const check = async (req) => {
+    const address = req.socket?.remoteAddress ?? "";
+    if (!(await resolvePeer()).has(stripV6Prefix(address))) {
+      return { status: 403, body: { error: "forbidden-peer" } };
+    }
+    const token = readToken();
+    if (token === null) return { status: 503, body: { error: "no-token" } };
+    if (!tokensEqual(req.headers["x-fenix-host-token"], token)) {
+      return { status: 401, body: { error: "unauthorized" } };
+    }
+    return null;
+  };
+
+  return {
+    check,
+    resolvePeer,
+    readToken,
+    loopback: LOOPBACK,
+  };
+}
+
+const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+// Shared JSON plumbing (exported for the task-session multiplexer so both
+// servers answer with identical shapes).
+export const sendJSON = (res, status, body) => {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+};
+
+export const readBody = (req) => new Promise((resolve) => {
+  const chunks = [];
+  let size = 0;
+  let over = false;
+  req.on("data", (chunk) => {
+    size += chunk.length;
+    if (size > BODY_CAP_BYTES) {
+      over = true;
+      chunks.length = 0;
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on("end", () => resolve({ body: Buffer.concat(chunks).toString("utf8"), over }));
+  req.on("error", () => resolve({ body: "", over }));
+});
+
+export const parseJSON = (raw) => {
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Build the host. Every dep is optional; the defaults are the real thing.
+ * Returns { server, ensureSession, sendMessage, getState, alive,
+ * answerDialog, answerAsk } — the server is NOT listening; `serve` (CLI) or
+ * a test binds it.
+ */
+export function createHost(deps = {}) {
+  const env = deps.env ?? process.env;
+  const port = Number.parseInt(env.FENIX_HOST_PORT ?? "", 10) || 7332;
+  const bind = env.FENIX_HOST_BIND || "0.0.0.0";
+  const tmux = tmuxIdentity(env);
+  const tmuxBin = env.LA_TMUX_BIN || "tmux";
+  const startCmd = (env.FENIX_SUPERVISOR_CMD || "/opt/fenix/docker/entrypoint.sh supervisor-run")
+    .split(" ")
+    .filter(Boolean);
+
+  const runTmux = deps.runTmux ?? ((args, opts = {}) =>
+    spawnSync(tmuxBin, ["-L", tmux.socket, ...args], { encoding: "utf8", input: opts.input, env }));
+
+  const readSessionState = deps.readSessionState ?? (() => {
+    try {
+      return JSON.parse(readFileSync(supervisorSessionPath(env), "utf8"));
+    } catch {
+      return null;
+    }
+  });
+
+  // One gate per host: peer + fresh token (createGatekeeper above). The
+  // multiplexer may inject its own via deps.gate so the front door and the
+  // controllers share one DNS cache and one token reader; readToken and
+  // resolvePeer stay exposed here because the WS upgrade path calls them.
+  const gate = deps.gate ?? createGatekeeper({ env, readToken: deps.readToken, resolvePeer: deps.resolvePeer });
+  const readToken = gate.readToken;
+  const resolvePeer = gate.resolvePeer;
+
   const ptyFactory = deps.ptyFactory ?? (async (file, args, opts) => {
     const { spawn: ptySpawn } = await import("node-pty");
     return ptySpawn(file, args, opts);
@@ -176,7 +283,7 @@ export function createHost(deps = {}) {
   const RULE_LINE_RE = /^─{3,}$/;
 
   const paneState = () => {
-    const cap = runTmux(["capture-pane", "-p", "-t", TMUX_SESSION]);
+    const cap = runTmux(["capture-pane", "-p", "-t", tmux.session]);
     if (cap.status !== 0) return { ok: false, dialog: false, promptReady: false };
     const text = cap.stdout ?? "";
     // parseDialog first: any parsed dialog — permission, ask, ask-review,
@@ -203,23 +310,38 @@ export function createHost(deps = {}) {
   };
 
   const ensureLocked = async ({ fresh = false } = {}) => {
-    const present = runTmux(["has-session", "-t", TMUX_SESSION]).status === 0;
+    const present = runTmux(["has-session", "-t", tmux.session]).status === 0;
     if (present && !fresh) return { ready: true };
     if (present && fresh) {
-      const killed = runTmux(["kill-session", "-t", TMUX_SESSION]);
+      const killed = runTmux(["kill-session", "-t", tmux.session]);
       if (killed.status !== 0) {
         return { ready: false, reason: "kill-failed", detail: (killed.stderr || "").trim() };
       }
     }
     // ONE tmux invocation: server options and the new session, semicolon-chained.
+    // A managed session's pane MUST see its task identity — the entrypoint's
+    // supervisor-run branch keys on FENIX_SUPERVISOR_SESSION_ID to pick the
+    // isolated config dir, and the waker/telemetry hooks key on LA_TASK_*.
+    // The env is stamped into the SERVER's global environment (this tmux
+    // invocation created the server, so its global env is the pane's
+    // inheritance) — the host process's own process.env is never mutated.
+    const paneEnvArgs = tmux.scoped
+      ? [
+          "set-environment", "-g", "FENIX_SUPERVISOR_SESSION_ID", tmux.sessionId, ";",
+          "set-environment", "-g", "LA_TASK_KEY", env.LA_TASK_KEY ?? "", ";",
+          "set-environment", "-g", "LA_TASK_ID", env.LA_TASK_ID ?? "", ";",
+          "set-environment", "-g", "LA_SUPERVISOR_SESSION_HOME", env.LA_SUPERVISOR_SESSION_HOME ?? "", ";",
+        ]
+      : [];
     const cmd = fresh ? [...startCmd, "--new"] : startCmd;
     const started = runTmux([
       "start-server", ";",
+      ...paneEnvArgs,
       "set-option", "-g", "history-limit", "50000", ";",
       "set-option", "-g", "default-size", "200x50", ";",
       "set-option", "-g", "window-size", "latest", ";",
       "set-option", "-g", "focus-events", "on", ";",
-      "new-session", "-d", "-s", TMUX_SESSION, "-x", "200", "-y", "50",
+      "new-session", "-d", "-s", tmux.session, "-x", "200", "-y", "50",
       ...cmd,
     ]);
     if (started.status !== 0) {
@@ -229,7 +351,7 @@ export function createHost(deps = {}) {
       // readiness instead of failing.
       const detail = (started.stderr || "").trim();
       const lostRace = /duplicate session/i.test(detail)
-        && runTmux(["has-session", "-t", TMUX_SESSION]).status === 0;
+        && runTmux(["has-session", "-t", tmux.session]).status === 0;
       if (!lostRace) {
         return { ready: false, reason: "start-failed", detail };
       }
@@ -267,7 +389,7 @@ export function createHost(deps = {}) {
   const ensureSession = (opts = {}) => serialized(() => ensureLocked(opts));
 
   const getState = () => {
-    const panes = runTmux(["list-panes", "-t", TMUX_SESSION, "-F", "#{pane_pid} #{pane_dead}"]);
+    const panes = runTmux(["list-panes", "-t", tmux.session, "-F", "#{pane_pid} #{pane_dead}"]);
     const hook = readSessionState();
     if (panes.status !== 0) {
       // A dead or missing pane means "absent" whatever session.json says (no
@@ -281,7 +403,7 @@ export function createHost(deps = {}) {
     const [pidStr, deadStr] = first.split(/\s+/);
     const panePid = /^\d+$/.test(pidStr ?? "") ? Number(pidStr) : null;
     const paneDead = deadStr === "1";
-    const clients = runTmux(["list-clients", "-t", TMUX_SESSION, "-F", "#{client_name}"]);
+    const clients = runTmux(["list-clients", "-t", tmux.session, "-F", "#{client_name}"]);
     const clientList = clients.status === 0
       ? (clients.stdout || "").split("\n").map((l) => l.trim()).filter(Boolean)
       : [];
@@ -307,13 +429,13 @@ export function createHost(deps = {}) {
     body: { error: "tmux", detail: (result.stderr || "").trim() || `${step} failed` },
   });
 
-  const pressKey = (key) => runTmux(["send-keys", "-t", TMUX_SESSION, key]);
+  const pressKey = (key) => runTmux(["send-keys", "-t", tmux.session, key]);
 
-  const pressLiteral = (text) => runTmux(["send-keys", "-l", "-t", TMUX_SESSION, text]);
+  const pressLiteral = (text) => runTmux(["send-keys", "-l", "-t", tmux.session, text]);
 
   // Scrollback capture for command-output extraction; null when unreadable.
   const captureScrollback = () => {
-    const cap = runTmux(["capture-pane", "-p", "-S", `-${SCROLLBACK_LINES}`, "-t", TMUX_SESSION]);
+    const cap = runTmux(["capture-pane", "-p", "-S", `-${SCROLLBACK_LINES}`, "-t", tmux.session]);
     return cap.status === 0 ? (cap.stdout ?? "") : null;
   };
 
@@ -321,12 +443,12 @@ export function createHost(deps = {}) {
   // dialog notes: load the buffer, bracketed paste, settle, Enter. Returns
   // the 500 response of the first failed tmux step, or null on success.
   const pasteAndEnter = async (text) => {
-    const load = runTmux(["load-buffer", "-b", CHAT_BUFFER, "-"], { input: text });
+    const load = runTmux(["load-buffer", "-b", tmux.chatBuffer, "-"], { input: text });
     if (load.status !== 0) return fail500("load-buffer", load);
-    const paste = runTmux(["paste-buffer", "-p", "-d", "-b", CHAT_BUFFER, "-t", TMUX_SESSION]);
+    const paste = runTmux(["paste-buffer", "-p", "-d", "-b", tmux.chatBuffer, "-t", tmux.session]);
     if (paste.status !== 0) return fail500("paste-buffer", paste);
     await sleep(200); // let the paste land before Enter
-    const keys = runTmux(["send-keys", "-t", TMUX_SESSION, "Enter"]);
+    const keys = runTmux(["send-keys", "-t", tmux.session, "Enter"]);
     if (keys.status !== 0) return fail500("send-keys", keys);
     return null;
   };
@@ -462,7 +584,7 @@ export function createHost(deps = {}) {
       }
     }
 
-    const cap = runTmux(["capture-pane", "-p", "-t", TMUX_SESSION]);
+    const cap = runTmux(["capture-pane", "-p", "-t", tmux.session]);
     if (cap.status !== 0) return { status: 503, body: { error: "pane-unreadable" } };
     const dialog = parseDialog(cap.stdout ?? "");
     if (!dialog) return { status: 409, body: { error: "no-dialog" } };
@@ -505,7 +627,7 @@ export function createHost(deps = {}) {
     const deadline = now() + DIALOG_CLOSE_TIMEOUT_MS;
     while (now() < deadline) {
       await sleep(DIALOG_POLL_MS);
-      const poll = runTmux(["capture-pane", "-p", "-t", TMUX_SESSION]);
+      const poll = runTmux(["capture-pane", "-p", "-t", tmux.session]);
       const d = poll.status === 0 ? parseDialog(poll.stdout ?? "") : null;
       if (!d || d.id !== id) {
         closed = true;
@@ -541,7 +663,7 @@ export function createHost(deps = {}) {
     const questionList = Array.isArray(questions) ? questions : [];
 
     const capturePane = () => {
-      const cap = runTmux(["capture-pane", "-p", "-t", TMUX_SESSION]);
+      const cap = runTmux(["capture-pane", "-p", "-t", tmux.session]);
       if (cap.status !== 0) return { unreadable: true };
       return { dialog: parseDialog(cap.stdout ?? "") };
     };
@@ -689,52 +811,13 @@ export function createHost(deps = {}) {
   };
 
   // ── HTTP ──────────────────────────────────────────────────────────────────
-  const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
-
-  const sendJSON = (res, status, body) => {
-    res.writeHead(status, { "content-type": "application/json" });
-    res.end(JSON.stringify(body));
-  };
-
-  const readBody = (req) => new Promise((resolve) => {
-    const chunks = [];
-    let size = 0;
-    let over = false;
-    req.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > BODY_CAP_BYTES) {
-        over = true;
-        chunks.length = 0;
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => resolve({ body: Buffer.concat(chunks).toString("utf8"), over }));
-    req.on("error", () => resolve({ body: "", over }));
-  });
-
-  const parseJSON = (raw) => {
-    try {
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
-  };
-
+  // sendJSON / readBody / parseJSON and the two gates live at module level
+  // (createGatekeeper above) so the task-session multiplexer serves exactly
+  // the same shapes and gate order; only the gate ANSWER is wrapped here.
   const gatekeeper = async (req, res) => {
-    const address = req.socket?.remoteAddress ?? "";
-    if (!(await resolvePeer()).has(stripV6Prefix(address))) {
-      sendJSON(res, 403, { error: "forbidden-peer" });
-      return false;
-    }
-    const token = readToken();
-    if (token === null) {
-      sendJSON(res, 503, { error: "no-token" });
-      return false;
-    }
-    if (!tokensEqual(req.headers["x-fenix-host-token"], token)) {
-      sendJSON(res, 401, { error: "unauthorized" });
+    const denied = await gate.check(req);
+    if (denied) {
+      sendJSON(res, denied.status, denied.body);
       return false;
     }
     return true;
@@ -812,7 +895,7 @@ export function createHost(deps = {}) {
       return;
     }
     if (path === "/dialog" && method === "GET") {
-      const cap = runTmux(["capture-pane", "-p", "-t", TMUX_SESSION]);
+      const cap = runTmux(["capture-pane", "-p", "-t", tmux.session]);
       if (cap.status !== 0) {
         sendJSON(res, 503, { error: "pane-unreadable" });
         return;
@@ -944,7 +1027,7 @@ export function createHost(deps = {}) {
             return;
           }
           try {
-            pty = await ptyFactory(tmuxBin, ["-L", TMUX_SOCKET, "attach-session", "-t", TMUX_SESSION], {
+            pty = await ptyFactory(tmuxBin, ["-L", tmux.socket, "attach-session", "-t", tmux.session], {
               name: "xterm-256color",
               cols,
               rows,
@@ -1052,7 +1135,9 @@ export function createHost(deps = {}) {
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
-const writeToken = () => {
+// Exported so the task-session multiplexer's serve writes the SAME token the
+// single-session host did (global host.token — never per-session).
+export const writeHostToken = () => {
   const path = hostTokenPath();
   const token = randomBytes(32).toString("hex");
   mkdirSync(dirname(path), { recursive: true });
@@ -1068,7 +1153,7 @@ const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv
 if (isMain) {
   const command = process.argv[2];
   if (command === "serve") {
-    const token = writeToken();
+    const token = writeHostToken();
     const host = createHost();
     const { server } = host;
     const bind = process.env.FENIX_HOST_BIND || "0.0.0.0";
@@ -1089,7 +1174,56 @@ if (isMain) {
     process.on("SIGINT", shutdown);
   } else if (command === "ensure") {
     const fresh = process.argv.includes("--new");
-    const host = createHost();
+    const sessionIdx = process.argv.indexOf("--session");
+    const sessionArg = sessionIdx !== -1 ? (process.argv[sessionIdx + 1] ?? "") : null;
+    // Managed task sessions (PRD task-workspace-supervisors §5) change which
+    // tmux identity `ensure` may touch: once ANY task session is known, an
+    // unqualified ensure must never silently start the legacy global
+    // supervisor — it needs an explicit --session <id>, and it then operates
+    // on THAT session's own socket, stamping the task identity the pane's
+    // hooks and entrypoint branch require.
+    let env = process.env;
+    try {
+      const { createTaskSessionStore } = await import("./task-sessions.mjs");
+      const store = createTaskSessionStore({});
+      const known = store.list();
+      store.close();
+      if (known.length > 0) {
+        if (!sessionArg) {
+          console.error("usage: node scripts/supervisor-host.mjs ensure [--new] --session <id>");
+          console.error(`managed task sessions exist (${known.length}); ensure needs an explicit --session. Known:`);
+          for (const s of known) console.error(`  ${s.sessionId}  ${s.taskKey}  ${s.status}`);
+          process.exit(2);
+        }
+        const record = known.find((s) => s.sessionId === sessionArg);
+        if (!record) {
+          console.error(`ensure: unknown session ${sessionArg}`);
+          process.exit(2);
+        }
+        if (fresh || !["running", "waiting"].includes(record.status)) {
+          console.error("ensure: managed sessions must be started through the authenticated task API");
+          process.exit(2);
+        }
+        env = {
+          ...process.env,
+          FENIX_SUPERVISOR_SESSION_ID: record.sessionId,
+          LA_TASK_KEY: record.taskKey,
+          LA_TASK_ID: record.taskId,
+          LA_SUPERVISOR_SESSION_HOME: supervisorSessionHome({ ...process.env, FENIX_SUPERVISOR_SESSION_ID: record.sessionId }),
+        };
+        const existing = createHost({ env }).getState();
+        if (existing.panePid !== record.pid || existing.paneDead || !matchesProcess(record, readProcessIdentity(record.pid))) {
+          console.error("ensure: managed process identity not proven; recover from the task cockpit");
+          process.exit(2);
+        }
+        console.log("ready");
+        process.exit(0);
+      }
+    } catch {
+      console.error("ensure: session registry unavailable; refusing to start an unowned process");
+      process.exit(2);
+    }
+    const host = createHost({ env });
     const result = await host.ensureSession({ fresh });
     if (result.ready) {
       console.log("ready");
@@ -1099,7 +1233,7 @@ if (isMain) {
       process.exit(1);
     }
   } else {
-    console.error("usage: node scripts/supervisor-host.mjs serve | ensure [--new]");
+    console.error("usage: node scripts/supervisor-host.mjs serve | ensure [--new] [--session <id>]");
     process.exit(2);
   }
 }
