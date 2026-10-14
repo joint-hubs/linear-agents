@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { prepareAgentLaunch } from './agent-launch-profile.mjs';
+import { isRuntimeToken } from './runtime-events.mjs';
 
 // The canonical agents dir accumulates every launch's copies (cpSync merges,
 // it never deletes), so a role removed from the squad source would otherwise
@@ -60,7 +61,19 @@ export function prepareSupervisorLaunch(env = process.env) {
  if(context){
    const promptPath=join(configDir,'CLAUDE.md');
    const text=existsSync(promptPath)?readFileSync(promptPath,'utf8'):'';
-   writeFileSync(promptPath,text+'\n\n## Runtime workflow completion\nWhen spawning a next stage, pass --after-child with the comma-separated child IDs whose completed output it depends on. Record every final flow choice with supervisor-triage record --size. Never infer dependency order from timestamps. After the task delivery is verified and all requested work is complete, run node "$LA_ROOT/scripts/runtime-workflow.mjs" complete before your final delivery response. This records an explicit completion event for this task. Never run it for a pause, an idle turn, a failed attempt or unfinished work.\n');
+   // The task binding is the only place the session LEARNS its ticket: the
+   // store and the env carry it, the model reads neither. Without this a bound
+   // session answers a status question with generic frontman intake ("podaj ID
+   // issue") — walk observation 2026-10-14. taskKey is already proven a safe
+   // token upstream (runtimeTelemetryEnv refuses the launch otherwise); the
+   // Linear id is env-only, so it is included only when it passes the same
+   // identifier shape — a prompt is never a place for unvalidated text.
+   const binding=context.taskKey
+     ?'\n\n## Task binding\nThis Supervisor session is bound to task '+context.taskKey+
+      (isRuntimeToken(env.LA_TASK_ID)?' (Linear '+env.LA_TASK_ID+')':'')+
+      '. The binding is fixed for this session — never ask which issue you own and never offer generic issue intake; this session already has its ticket. Read the issue\'s content with your tools when you need it.\n'
+     :'';
+   writeFileSync(promptPath,text+binding+'\n\n## Runtime workflow completion\nWhen spawning a next stage, pass --after-child with the comma-separated child IDs whose completed output it depends on. Record every final flow choice with supervisor-triage record --size. Never infer dependency order from timestamps. After the task delivery is verified and all requested work is complete, run node "$LA_ROOT/scripts/runtime-workflow.mjs" complete before your final delivery response. This records an explicit completion event for this task. Never run it for a pause, an idle turn, a failed attempt or unfinished work.\n');
  }
  const metadata={revision:launch.profile.revision,changes:launch.changes,profileInitial:launch.profileInitial,outputDir,at:new Date().toISOString()};
  writeFileSync(join(dirname(configDir),'launch-profile.json'),JSON.stringify(metadata,null,2));

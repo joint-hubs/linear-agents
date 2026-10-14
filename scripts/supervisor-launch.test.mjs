@@ -101,6 +101,7 @@ function launchEnv(root, { sessionId = null } = {}) {
   if (sessionId) {
     env.FENIX_SUPERVISOR_SESSION_ID = sessionId;
     env.LA_TASK_KEY = "task-1";
+    env.LA_TASK_ID = "FOC-123";
     env.LA_SUPERVISOR_RUN = "run-1";
   }
   return env;
@@ -441,6 +442,91 @@ async function runTests() {
     assert(
       existsSync(join(canonicalAgents, "extra.md")),
       "prune fail-closed: without launch-profile.json nothing is removed"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 14: a managed session's kickoff carries its task binding ----
+  // The walk observation (2026-10-14): a bound session answered "jak tam
+  // status" with generic frontman intake — it had no way to know its ticket
+  // without tools. The binding lives in the prompt the session reads.
+  {
+    const root = buildFixture();
+    const env = launchEnv(root, { sessionId: "sup-session-1" });
+    prepareSupervisorLaunch(env);
+    const claude = readFileSync(join(root, "canonical", "CLAUDE.md"), "utf8");
+    assert(claude.includes("## Task binding"), "binding: the section is in the session prompt");
+    assert(claude.includes("task-1"), "binding: the task key is named");
+    assert(claude.includes("FOC-123"), "binding: the Linear id is named");
+    assert(claude.includes("## Runtime workflow completion"), "binding: the workflow section still lands");
+    assert(
+      claude.indexOf("## Task binding") < claude.indexOf("## Runtime workflow completion"),
+      "binding: precedes the workflow section"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 15: no task key → the managed launch refuses, nothing fabricated ----
+  // The identity is all-or-nothing upstream (runtimeTelemetryEnv), so a
+  // binding can never be invented from a half-valid context: there is no
+  // session at all without its ticket.
+  {
+    const root = buildFixture();
+    const env = launchEnv(root, { sessionId: "sup-session-1" });
+    delete env.LA_TASK_KEY;
+    let error = null;
+    try {
+      prepareSupervisorLaunch(env);
+    } catch (err) {
+      error = err;
+    }
+    assert(error !== null, "binding: a managed launch without a task key is refused");
+    assert(
+      /taskKey/.test(error?.message ?? ""),
+      "binding: the refusal names the task key"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 16: legacy launch — no binding, no workflow section ----
+  {
+    const root = buildFixture();
+    prepareSupervisorLaunch(launchEnv(root));
+    const claude = readFileSync(join(root, "canonical", "CLAUDE.md"), "utf8");
+    assert(!claude.includes("## Task binding"), "legacy: no task binding");
+    assert(!claude.includes("## Runtime workflow completion"), "legacy: no workflow section");
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 17: a relaunch keeps the binding exactly once ----
+  {
+    const root = buildFixture();
+    const env = launchEnv(root, { sessionId: "sup-session-1" });
+    prepareSupervisorLaunch({ ...env });
+    prepareSupervisorLaunch({ ...env });
+    const claude = readFileSync(join(root, "canonical", "CLAUDE.md"), "utf8");
+    const count = claude.split("## Task binding").length - 1;
+    assertEq(count, 1, "binding relaunch: exactly one Task binding section");
+    assertEq(
+      claude.split("## Runtime workflow completion").length - 1,
+      1,
+      "binding relaunch: exactly one workflow section"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 18: an unshaped Linear id never reaches the prompt ----
+  {
+    const root = buildFixture();
+    const env = launchEnv(root, { sessionId: "sup-session-1" });
+    env.LA_TASK_ID = "not a safe identifier\n## Injected";
+    prepareSupervisorLaunch(env);
+    const claude = readFileSync(join(root, "canonical", "CLAUDE.md"), "utf8");
+    assert(claude.includes("## Task binding"), "binding guard: the section still lands");
+    assert(claude.includes("task-1"), "binding guard: the validated task key is named");
+    assert(
+      !claude.includes("## Injected"),
+      "binding guard: the unshaped Linear id is dropped, never injected"
     );
     rmSync(root, { recursive: true, force: true });
   }
