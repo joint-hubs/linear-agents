@@ -1,3 +1,5 @@
+import TaskMap from './screens/TaskMap.jsx';
+import Statistics from './screens/Statistics.jsx';
 import React from 'react';
 import { BrowserRouter, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import Cockpit from './screens/Cockpit.jsx';
@@ -12,6 +14,7 @@ import Work from './screens/Work.jsx';
 import Flow from './screens/Flow.jsx';
 import SquadConfig from './screens/SquadConfig.jsx';
 import Prompts from './screens/Prompts.jsx';
+import Settings from './screens/Settings.jsx';
 import Ft from './screens/Ft.jsx';
 import AreaTabs from './components/AreaTabs.jsx';
 import { NAV_AREAS, areaForPath } from './navAreas';
@@ -89,10 +92,11 @@ function NeedsYouBadge() {
   );
 }
 
-// The six-area navigation (FOC-804). Highlighting is driven by areaForPath(),
-// not by the link's own route match — e.g. /runs/:id and /work/:ticket must
-// light up Work even though the item links to /work. Live (/live) and
-// Fine-tune (/ft) keep their routes but no longer appear here.
+// The six-area navigation (FOC-804 + task workspaces, PRD §3). Highlighting is
+// driven by areaForPath(), not by the link's own route match — e.g. /runs/:id,
+// /work/:ticket and the task cockpit /work/:taskKey/cockpit must light up Work
+// even though the Work item links to /work. Live (/live) and Fine-tune (/ft)
+// keep their routes but no longer appear here.
 function Sidebar({ pathname }) {
   const active = areaForPath(pathname);
   return (
@@ -129,6 +133,11 @@ function Sidebar({ pathname }) {
 // shell reads the pathname here and hands it to the sidebar; AreaTabs renders
 // above the screen content for areas with more than one page (Work, Insights,
 // Settings) — the v1 screens themselves stay untouched.
+function EnvironmentBanner() {
+  const { data } = usePoll(signal => fetch('/api/environment', {signal}).then(r=>r.ok?r.json():null), 60000, []);
+  return data?.mode && data.mode !== 'live' ? <div role="status" style={{padding:'8px 14px',background:'var(--warn-bg, #4a361c)',borderRadius:6,marginBottom:12}}>Test environment · model execution may be simulated. Data and results are for acceptance testing.</div> : null;
+}
+
 function Shell() {
   const { pathname } = useLocation();
   return (
@@ -136,28 +145,41 @@ function Shell() {
       <Sidebar pathname={pathname} />
       <div className="main">
         <div className="page">
+          <EnvironmentBanner />
           <AreaTabs pathname={pathname} />
           <Routes>
-            <Route path="/" element={<Cockpit />} />
+            {/* Board is home (task workspaces, PRD §3): / and /work alias to
+                the same board. The legacy global Cockpit overview keeps an
+                explicit route at /cockpit; a task's own cockpit lives at
+                /work/:taskKey/cockpit — one active Supervisor per task, the
+                header carries task + Supervisor identity. */}
+            <Route path="/" element={<Work />} />
+            <Route path="/work" element={<Work />} />
+            <Route path="/work/:ticket" element={<Work />} />
+            <Route path="/work/:taskKey/cockpit" element={<Cockpit />} />
+            <Route path="/cockpit" element={<Cockpit />} />
             <Route path="/manager" element={<Manager />} />
             <Route path="/live" element={<Live />} />
             <Route path="/timeline" element={<Timeline />} />
             <Route path="/runs" element={<Runs />} />
             <Route path="/runs/:id" element={<RunDetail />} />
-            <Route path="/work" element={<Work />} />
-            <Route path="/work/:ticket" element={<Work />} />
             <Route path="/costs" element={<CostsQuality />} />
+            <Route path="/insights/map" element={<TaskMap />} />
+            <Route path="/insights/runtime" element={<Statistics />} />
             <Route path="/analysis" element={<Analysis />} />
             <Route path="/flow" element={<Flow />} />
             <Route path="/squad-config" element={<SquadConfig />} />
             <Route path="/prompts" element={<Prompts />} />
+            {/* Settings (FOC-786): /settings lands on the keys section; the
+                v1 SquadConfig / Prompts screens stay as sub-tabs. */}
+            <Route path="/settings" element={<Navigate to="/settings/keys" replace />} />
+            <Route path="/settings/:section" element={<Settings />} />
             <Route path="/ft" element={<Ft />} />
             {/* Area shortcuts (FOC-804): land on the area's default route.
                 /work is a real route now (the board) — no shortcut needed. */}
             <Route path="/tasks" element={<Navigate to="/work" replace />} />
             <Route path="/team" element={<Navigate to="/manager" replace />} />
             <Route path="/insights" element={<Navigate to="/analysis" replace />} />
-            <Route path="/settings" element={<Navigate to="/squad-config" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>

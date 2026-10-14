@@ -26,6 +26,8 @@ import {
   filtersFromQuery,
   queryFromFilters,
   startDialogModel,
+  ticketLabels,
+  labelNames,
 } from './workModel.js';
 
 // --- Minimal test harness (same shape as _tests_cockpit.mjs) ----------------
@@ -61,6 +63,10 @@ const ticketDev = {
   linearState: { name: 'In Progress', type: 'started' },
   priority: { value: 2, name: 'High' },
   milestone: 'Dashboard v2',
+  labels: [
+    { id: 'lab-1', name: 'bug', color: '#d4c5f9' },
+    { id: 'lab-2', name: 'dashboard-v2', color: null },
+  ],
   rounds: 2,
   lastVerdict: 'PASS',
   flags: [
@@ -80,6 +86,7 @@ const ticketReady = {
   linearState: null,
   priority: null,
   milestone: null,
+  labels: [],
   rounds: 0,
   lastVerdict: null,
   flags: [],
@@ -129,11 +136,15 @@ await test('groupByStage drops a ticket with a missing/unknown stage', () => {
 
 // --- cardModel ----------------------------------------------------------------
 
-await test('cardModel dev ticket -> id, title, stage label, rounds, money, age', () => {
+await test('cardModel dev ticket -> id, title, stage label, labels, rounds, money, age', () => {
   eq(cardModel(ticketDev, NOW), {
     id: 'FOC-403',
     title: 'Telemetry usage duplicates',
     stageLabel: 'Dev',
+    labels: [
+      { id: 'lab-1', name: 'bug', color: '#d4c5f9' },
+      { id: 'lab-2', name: 'dashboard-v2', color: null },
+    ],
     rounds: '2 rounds',
     cost: '$37.83',
     flags: [
@@ -236,11 +247,63 @@ await test('cardModel(null) -> empty id/title, no stage label, cost null', () =>
     id: null,
     title: '',
     stageLabel: null,
+    labels: [],
     rounds: null,
     cost: null,
     flags: [],
     age: null,
   });
+});
+
+// --- ticketLabels / cardModel labels --------------------------------------------
+
+await test('cardModel labels: absent/malformed -> [], nameless dropped, strings normalized', () => {
+  eq(cardModel({ stage: 'dev' }, NOW).labels, []);
+  eq(cardModel({ stage: 'dev', labels: null }, NOW).labels, []);
+  eq(cardModel({ stage: 'dev', labels: 'bug' }, NOW).labels, []);
+  eq(cardModel({ stage: 'dev', labels: [{ name: '  ' }, 42, { color: '#fff' }] }, NOW).labels, []);
+  eq(cardModel({ stage: 'dev', labels: ['queue-name', { id: 'l', name: ' x ', color: 'red' }] }, NOW).labels, [
+    { id: null, name: 'queue-name', color: null },
+    { id: 'l', name: 'x', color: null },
+  ]);
+});
+
+await test('cardModel labels: only hex colors survive client-side validation', () => {
+  const labels = [
+    { id: 'a', name: 'ok', color: '#00ccff' },
+    { id: 'b', name: 'short', color: '#ab' },
+    { id: 'c', name: 'word', color: 'rebeccapurple' },
+    { id: 'd', name: 'url', color: 'url(#x)' },
+  ];
+  eq(cardModel({ stage: 'dev', labels }, NOW).labels, [
+    { id: 'a', name: 'ok', color: '#00ccff' },
+    { id: 'b', name: 'short', color: null },
+    { id: 'c', name: 'word', color: null },
+    { id: 'd', name: 'url', color: null },
+  ]);
+});
+
+await test('ticketLabels caps at 20 (the payload\'s own cap)', () => {
+  const many = Array.from({ length: 30 }, (_, i) => ({ name: 'l' + i }));
+  eq(ticketLabels(many).length, 20);
+  eq(ticketLabels(many)[19].name, 'l19');
+});
+
+// --- labelNames ------------------------------------------------------------------
+
+await test('labelNames: distinct, sorted across the board; empty board -> []', () => {
+  const tickets = [
+    { labels: [{ name: 'tech' }, { name: 'bug' }] },
+    { labels: ['bug'] },
+    { labels: [] },
+    { labels: null },
+    {},
+    null,
+    { labels: [{ name: 'access' }] },
+  ];
+  eq(labelNames(tickets), ['access', 'bug', 'tech']);
+  eq(labelNames([]), []);
+  eq(labelNames(null), []);
 });
 
 // --- formatMoney (the scripts/ticket-cost.mjs usd() rule) ---------------------
@@ -391,28 +454,32 @@ await test('reconciliationText note -> appended after an em dash', () => {
 
 // --- filters round-trip --------------------------------------------------------------
 
-await test('filtersFromQuery reads milestone and priority', () => {
-  eq(filtersFromQuery('?milestone=Dashboard+v2&priority=high'), { milestone: 'Dashboard v2', priority: 'high' });
-  eq(filtersFromQuery('?milestone=Dashboard+v2&priority=high'), { milestone: 'Dashboard v2', priority: 'high' });
+await test('filtersFromQuery reads milestone, priority and label', () => {
+  eq(filtersFromQuery('?milestone=Dashboard+v2&priority=high&label=bug'), {
+    milestone: 'Dashboard v2',
+    priority: 'high',
+    label: 'bug',
+  });
 });
 
 await test('filtersFromQuery absent/empty values -> null', () => {
-  eq(filtersFromQuery(''), { milestone: null, priority: null });
-  eq(filtersFromQuery('?other=1'), { milestone: null, priority: null });
-  eq(filtersFromQuery('?milestone=&priority='), { milestone: null, priority: null });
-  eq(filtersFromQuery(null), { milestone: null, priority: null });
+  eq(filtersFromQuery(''), { milestone: null, priority: null, label: null });
+  eq(filtersFromQuery('?other=1'), { milestone: null, priority: null, label: null });
+  eq(filtersFromQuery('?milestone=&priority=&label='), { milestone: null, priority: null, label: null });
+  eq(filtersFromQuery(null), { milestone: null, priority: null, label: null });
 });
 
-await test('queryFromFilters writes milestone then priority, omits nulls', () => {
-  eq(queryFromFilters({ milestone: 'M1', priority: 'high' }), '?milestone=M1&priority=high');
+await test('queryFromFilters writes milestone then priority then label, omits nulls', () => {
+  eq(queryFromFilters({ milestone: 'M1', priority: 'high', label: 'bug' }), '?milestone=M1&priority=high&label=bug');
   eq(queryFromFilters({ milestone: 'M1', priority: null }), '?milestone=M1');
-  eq(queryFromFilters({ milestone: null, priority: 'high' }), '?priority=high');
+  eq(queryFromFilters({ priority: 'high', label: 'bug' }), '?priority=high&label=bug');
+  eq(queryFromFilters({ label: 'needs:answer' }), '?label=needs%3Aanswer');
   eq(queryFromFilters({}), '');
   eq(queryFromFilters(null), '');
 });
 
 await test('filters round-trip: queryFromFilters(filtersFromQuery(q)) -> q', () => {
-  for (const q of ['?milestone=M1&priority=high', '?priority=2', '?milestone=Sprint+1']) {
+  for (const q of ['?milestone=M1&priority=high', '?priority=2', '?milestone=Sprint+1', '?label=bug', '?milestone=M1&label=tech']) {
     eq(queryFromFilters(filtersFromQuery(q)), q);
   }
 });

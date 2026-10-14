@@ -149,7 +149,8 @@ export function panelCostLabel(detail) {
 // cardModel(ticket, now) -> the board card's view model. cost is "no cost
 // yet" for Ready (nothing priced yet — no fake zero), "cost unknown" when the
 // payload carries children but no cost, money text otherwise (formatMoney,
-// = the CLI).
+// = the CLI). labels is the normalized Linear label list (empty when the
+// payload has none — never a placeholder chip).
 export function cardModel(ticket, now) {
   const t = ticket || {};
   const stage = STAGE_KEYS.includes(t.stage) ? t.stage : null;
@@ -170,6 +171,7 @@ export function cardModel(ticket, now) {
     id: t.taskId || null,
     title: t.title || '',
     stageLabel: stage ? STAGE_LABELS[stage] : null,
+    labels: ticketLabels(t.labels),
     rounds,
     cost,
     flags,
@@ -232,25 +234,74 @@ export function reconciliationText(rec) {
   return text;
 }
 
-// ===== Board filters (Ready column: milestone / priority, plan Q1) ==========
+// ===== Board filters (Ready column: milestone / priority / label, plan Q1) ==
 
-// filtersFromQuery(search) -> { milestone, priority } from the location
+// filtersFromQuery(search) -> { milestone, priority, label } from the location
 // search ("?" optional). Absent/empty values are null, not "".
 export function filtersFromQuery(search) {
   const p = new URLSearchParams(search || '');
-  return { milestone: p.get('milestone') || null, priority: p.get('priority') || null };
+  return {
+    milestone: p.get('milestone') || null,
+    priority: p.get('priority') || null,
+    label: p.get('label') || null,
+  };
 }
 
 // queryFromFilters(filters) -> the search string for the filters ("?"-prefixed,
-// stable order milestone then priority as the payload documents). No values ->
-// "" so the URL stays clean.
+// stable order milestone then priority then label). No values -> "" so the URL
+// stays clean.
 export function queryFromFilters(filters) {
   const f = filters || {};
   const p = new URLSearchParams();
   if (f.milestone) p.set('milestone', f.milestone);
   if (f.priority) p.set('priority', f.priority);
+  if (f.label) p.set('label', f.label);
   const s = p.toString();
   return s ? '?' + s : '';
+}
+
+// ===== Linear labels (task contract: { id, name, color } only) ==============
+
+// Only a hex form may style the chip's dot (#rgb/#rgba/#rrggbb/#rrggbbaa) —
+// the same rule the backend's normalizeLabel applies, re-checked client side
+// so the payload can never smuggle an arbitrary string into a style.
+const LABEL_COLOR_RE = /^#[0-9a-fA-F]{3,4}$|^#[0-9a-fA-F]{6}$|^#[0-9a-fA-F]{8}$/;
+
+// ticketLabels(labels) -> the card/panel's label list: { id, name, color }
+// entries, a label without a name dropped, color kept only when it validates,
+// id kept only when it is a non-empty string, capped at 20 (the payload's own
+// cap). Non-array input -> [] so an absent field renders as "no labels".
+export function ticketLabels(labels) {
+  if (!Array.isArray(labels)) return [];
+  const out = [];
+  for (const raw of labels) {
+    if (out.length >= 20) break;
+    if (typeof raw === 'string') {
+      const name = raw.trim();
+      if (name) out.push({ id: null, name, color: null });
+      continue;
+    }
+    if (!raw || typeof raw !== 'object') continue;
+    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+    if (!name) continue;
+    out.push({
+      id: typeof raw.id === 'string' && raw.id.trim() ? raw.id : null,
+      name,
+      color: typeof raw.color === 'string' && LABEL_COLOR_RE.test(raw.color) ? raw.color : null,
+    });
+  }
+  return out;
+}
+
+// labelNames(tickets) -> distinct, sorted label names across the board's
+// tickets — the values the label filter select offers (the board offers what
+// it can actually see, the same rule as the milestone/priority selects).
+export function labelNames(tickets) {
+  const out = new Set();
+  for (const t of tickets || []) {
+    for (const l of ticketLabels(t && t.labels)) out.add(l.name);
+  }
+  return [...out].sort();
 }
 
 // ===== Start dialog (plan FOC-784: confirm before the hand-off) =============

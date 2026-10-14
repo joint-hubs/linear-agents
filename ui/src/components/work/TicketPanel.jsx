@@ -15,8 +15,10 @@ import {
   evidenceRows,
   reconciliationText,
   panelCostLabel,
+  ticketLabels,
 } from '../../workModel';
 import StartDialog from './StartDialog';
+import LabelChip from './LabelChip';
 
 // The payload's timeline is chronological; a defensive sort by `at` (missing
 // timestamps last) keeps it that way even when an entry arrives late.
@@ -97,7 +99,7 @@ function EvidenceRow({ row }) {
   );
 }
 
-export default function TicketPanel({ id, onClose, onAskSupervisor }) {
+export default function TicketPanel({ id, taskKey, onClose, onAskSupervisor }) {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -151,6 +153,7 @@ export default function TicketPanel({ id, onClose, onAskSupervisor }) {
   const evidence = evidenceRows(detail);
   const issue = detail?.issue || null;
   const linearUrl = issue?.url || ticket?.url || null;
+  const labels = ticketLabels(ticket?.labels);
 
   return (
     <aside className="wk-panel" role="dialog" aria-labelledby="wk-panel-heading">
@@ -168,6 +171,14 @@ export default function TicketPanel({ id, onClose, onAskSupervisor }) {
           Close
         </button>
       </div>
+
+      {labels.length > 0 && (
+        <div className="wk-labels" aria-label="Linear labels">
+          {labels.map((l) => (
+            <LabelChip key={l.id || l.name} label={l} />
+          ))}
+        </div>
+      )}
 
       {issue?.title && <div className="wk-panel-title">{issue.title}</div>}
       {linearUrl && (
@@ -278,6 +289,19 @@ export default function TicketPanel({ id, onClose, onAskSupervisor }) {
               <button type="button" className="launch-btn" onClick={() => setStartOpen(true)}>
                 Start
               </button>
+            )}
+            {/* Task cockpit (task workspaces, PRD §3): only with a canonical
+                key from the payload — an identifier is never promoted into a
+                cockpit link. No key → the Start / resolve flow above covers
+                the ticket. */}
+            {taskKey && (
+              <Link
+                className="btn-secondary"
+                style={{ textDecoration: 'none' }}
+                to={`/work/${encodeURIComponent(taskKey)}/cockpit`}
+              >
+                Open cockpit
+              </Link>
             )}
             <button type="button" className="btn-secondary" onClick={() => onAskSupervisor(id)}>
               Ask the Supervisor

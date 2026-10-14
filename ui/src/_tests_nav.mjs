@@ -1,11 +1,12 @@
-// Unit tests for the nav areas map (FOC-804, dashboard-v2-spec §2/§3).
+// Unit tests for the nav areas map (FOC-804 + task workspaces, PRD §3).
 // Self-contained Node ESM script — NO test framework, NO deps. Same harness
 // pattern as src/_tests_cockpit.mjs. Invoke via: `npm --prefix ui run test`.
 //
 // Covers: the NAV_AREAS table (order, ids, default routes, sub-page labels)
-// and areaForPath (which area is active for a pathname, including /runs/:id →
-// Work and the routes hidden from the navigation). Fixtures only — no network,
-// no DOM.
+// and areaForPath (which area is active for a pathname, including /runs/:id,
+// /work/:ticket and the task cockpit /work/:taskKey/cockpit → Work, the
+// routes hidden from the navigation, and /cockpit → the explicit legacy
+// overview). Fixtures only — no network, no DOM.
 
 import assert from 'node:assert/strict';
 
@@ -33,24 +34,24 @@ function eq(actual, expected, msg) {
 
 // --- NAV_AREAS table ----------------------------------------------------------
 
-await test('exactly the six areas in the agreed order', () => {
+await test('exactly the six areas, Work first (the board is home, PRD §3)', () => {
   eq(
     NAV_AREAS.map((a) => a.id),
-    ['cockpit', 'work', 'team', 'costs', 'insights', 'settings'],
+    ['work', 'cockpit', 'team', 'costs', 'insights', 'settings'],
   );
 });
 
-await test('default routes follow the spec table', () => {
+await test('default routes: Work home at /, Cockpit demoted to /cockpit', () => {
   eq(
     NAV_AREAS.map((a) => a.defaultRoute),
-    ['/', '/work', '/manager', '/costs', '/analysis', '/squad-config'],
+    ['/', '/cockpit', '/manager', '/costs', '/analysis', '/settings/keys'],
   );
 });
 
-await test('labels follow the spec table', () => {
+await test('labels follow the table (Cockpit no longer the primary)', () => {
   eq(
     NAV_AREAS.map((a) => a.label),
-    ['Cockpit', 'Work', 'Team', 'Costs & quality', 'Insights', 'Settings'],
+    ['Work', 'Cockpit', 'Team', 'Costs & quality', 'Insights', 'Settings'],
   );
 });
 
@@ -66,22 +67,33 @@ await test('Team, Costs, Insights, Settings sub-pages match the spec', () => {
   eq(NAV_AREAS.find((a) => a.id === 'team').pages, [{ path: '/manager', label: 'Manager (v1)' }]);
   eq(NAV_AREAS.find((a) => a.id === 'costs').pages, [{ path: '/costs', label: 'Costs & quality' }]);
   eq(NAV_AREAS.find((a) => a.id === 'insights').pages, [
+    { path: '/insights/runtime', label: 'Runtime statistics' },
+    { path: '/insights/map', label: 'Task map' },
     { path: '/analysis', label: 'Analysis' },
     { path: '/flow', label: 'Flow' },
   ]);
   eq(NAV_AREAS.find((a) => a.id === 'settings').pages, [
-    { path: '/squad-config', label: 'Models & routing' },
-    { path: '/prompts', label: 'Squads & prompts' },
+    { path: '/settings/keys', label: 'Keys' },
+    { path: '/settings/provider', label: 'Provider & routing' },
+    { path: '/settings/repos', label: 'Repositories' },
+    { path: '/settings/retention', label: 'Retention' },
+    { path: '/squad-config', label: 'Advanced routing (v1)' },
+    { path: '/prompts', label: 'Squads & prompts (v1)' },
   ]);
 });
 
-await test('Cockpit is v2 — no sub-pages', () => {
-  eq(NAV_AREAS.find((a) => a.id === 'cockpit').pages, []);
+await test('Cockpit is the explicit legacy overview — one page at /cockpit', () => {
+  eq(NAV_AREAS.find((a) => a.id === 'cockpit').pages, [{ path: '/cockpit', label: 'Overview' }]);
 });
 
-await test('every non-cockpit default route is one of its own pages', () => {
+await test('every default route is its area\'s home: Work aliases /work through /, others are their own page', () => {
   for (const area of NAV_AREAS) {
-    if (area.id === 'cockpit') continue;
+    if (area.id === 'work') {
+      // The board's home route / is an alias of /work — it is not listed as
+      // its own sub-page tab, so this one is special-cased in areaForPath.
+      assert(area.pages.some((p) => p.path === '/work'), 'Work keeps a Board page at /work');
+      continue;
+    }
     assert(
       area.pages.some((p) => p.path === area.defaultRoute),
       `${area.id} default route ${area.defaultRoute} missing from its pages`,
@@ -91,8 +103,8 @@ await test('every non-cockpit default route is one of its own pages', () => {
 
 // --- areaForPath --------------------------------------------------------------
 
-await test('areaForPath("/") exactly -> cockpit', () => {
-  eq(areaForPath('/'), 'cockpit');
+await test('areaForPath("/") exactly -> work (the board is home, PRD §3)', () => {
+  eq(areaForPath('/'), 'work');
 });
 
 await test('areaForPath work paths -> work', () => {
@@ -102,6 +114,14 @@ await test('areaForPath work paths -> work', () => {
 
 await test('areaForPath /work/:ticket -> work (ticket detail belongs to Work)', () => {
   eq(areaForPath('/work/FOC-123'), 'work');
+});
+
+await test('areaForPath /work/:taskKey/cockpit -> work (the task cockpit belongs to Work)', () => {
+  eq(areaForPath('/work/jointhubs%3A12/cockpit'), 'work');
+});
+
+await test('areaForPath /cockpit -> cockpit (the legacy overview is explicit now)', () => {
+  eq(areaForPath('/cockpit'), 'cockpit');
 });
 
 await test('areaForPath /runs/:id -> work (run detail belongs to Work)', () => {
@@ -117,11 +137,17 @@ await test('areaForPath /costs -> costs', () => {
 });
 
 await test('areaForPath insights paths -> insights', () => {
+  eq(areaForPath('/insights/runtime'), 'insights');
+  eq(areaForPath('/insights/map'), 'insights');
   eq(areaForPath('/analysis'), 'insights');
   eq(areaForPath('/flow'), 'insights');
 });
 
-await test('areaForPath settings paths -> settings', () => {
+await test('areaForPath settings paths -> settings (FOC-786 sections + the v1 screens)', () => {
+  eq(areaForPath('/settings/keys'), 'settings');
+  eq(areaForPath('/settings/provider'), 'settings');
+  eq(areaForPath('/settings/repos'), 'settings');
+  eq(areaForPath('/settings/retention'), 'settings');
   eq(areaForPath('/squad-config'), 'settings');
   eq(areaForPath('/prompts'), 'settings');
 });
@@ -161,8 +187,8 @@ await test('areaForPath prefix does not leak between paths', () => {
 });
 
 await test('areaForPath handles a null/undefined pathname like "/"', () => {
-  eq(areaForPath(null), 'cockpit');
-  eq(areaForPath(undefined), 'cockpit');
+  eq(areaForPath(null), 'work');
+  eq(areaForPath(undefined), 'work');
 });
 
 // --- Summary ----------------------------------------------------------------

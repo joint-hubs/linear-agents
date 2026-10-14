@@ -34,7 +34,7 @@ const QUICK_PROMPTS = ['Start a ticket…', 'Status of all children', 'What is b
 // sit under the next dialog or question. Nothing shown (identity null)
 // keeps the banner: it is the record of the last answer once its card is
 // gone.
-export function useSupervisorAnswers({ onRefresh, identity } = {}) {
+export function useSupervisorAnswers({ onRefresh, identity, scope } = {}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [sent, setSent] = useState(false);
@@ -79,8 +79,11 @@ export function useSupervisorAnswers({ onRefresh, identity } = {}) {
     }
   };
 
-  const submitAsk = (toolUseId, answers) => run(() => postSupervisorAsk({ toolUseId, answers }));
-  const submitDialog = (id, choice, note) => run(() => postSupervisorDialog({ id, choice, note }));
+  // Task scoping: with a scope ({ sessionId, taskKey }) the answers go to that
+  // task's session routes (the API worker validates the identity); without
+  // one, the legacy global endpoints.
+  const submitAsk = (toolUseId, answers) => run(() => postSupervisorAsk({ toolUseId, answers }, scope));
+  const submitDialog = (id, choice, note) => run(() => postSupervisorDialog({ id, choice, note }, scope));
   return { busy, error, sent, result, submitAsk, submitDialog };
 }
 
@@ -109,7 +112,7 @@ const STATE_CHIP = {
   unknown: { label: 'unknown', tone: 'neutral' },
 };
 
-export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, onDraftChange, onRefresh }) {
+export default function SupervisorPanel({ supervisor, scope, tab, onTabChange, draft, onDraftChange, onRefresh }) {
   const [wakeBusy, setWakeBusy] = useState(false);
   const [wakeStatus, setWakeStatus] = useState(null); // { kind, text }
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -134,13 +137,13 @@ export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, o
     : dialogForCard
       ? 'dialog:' + dialogForCard.id
       : null;
-  const answers = useSupervisorAnswers({ onRefresh, identity: answerIdentity });
+  const answers = useSupervisorAnswers({ onRefresh, identity: answerIdentity, scope });
 
   const wake = async () => {
     setWakeBusy(true);
     setWakeStatus(null);
     try {
-      await postSupervisorWake();
+      await postSupervisorWake(scope);
       setWakeStatus({ kind: 'ok', text: 'Wake sent' });
     } catch (e) {
       setWakeStatus({ kind: 'err', text: e.data?.error || e.message || String(e) });
@@ -151,11 +154,16 @@ export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, o
 
   const newSession = async () => {
     // Destructive-ish and deliberate — never starts without the confirm.
-    if (!window.confirm('Start a fresh Supervisor session? The current conversation ends.')) return;
+    // Scoped, the confirm names the task: a restart resumes THIS task's
+    // session, never another's (PRD §5).
+    const confirmText = scope?.taskKey
+      ? 'Start a fresh Supervisor session for ' + scope.taskKey + '? The current conversation ends.'
+      : 'Start a fresh Supervisor session? The current conversation ends.';
+    if (!window.confirm(confirmText)) return;
     setSessionBusy(true);
     setSessionStatus(null);
     try {
-      await postSupervisorSession();
+      await postSupervisorSession(scope);
       setSessionStatus({ kind: 'ok', text: 'New session starting' });
     } catch (e) {
       setSessionStatus({ kind: 'err', text: e.data?.error || e.message || String(e) });
@@ -169,6 +177,11 @@ export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, o
       <div className="ck-sup-head">
         <div className="section-h" style={{ marginBottom: 0 }}>Supervisor</div>
         <span className={`ck-chip ck-tone-${chip.tone}`}>{chip.label}</span>
+        {scope?.sessionId && (
+          <span className="muted" style={{ fontSize: 11.5 }} title="Session id (opaque)">
+            <code className="ck-mono-small">{scope.sessionId}</code>
+          </span>
+        )}
         {focusInfo && (
           <span className="muted" style={{ fontSize: 12 }} title={focusInfo.title}>
             focus <code className="ck-mono">{focusInfo.label}</code>
@@ -261,7 +274,7 @@ export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, o
         terminalReason ? (
           <div className="banner banner-warn" style={{ marginTop: 10 }}>{terminalReason}</div>
         ) : (
-          <TerminalView />
+          <TerminalView scope={scope} />
         )
       ) : (
         <>
@@ -282,6 +295,7 @@ export default function SupervisorPanel({ supervisor, tab, onTabChange, draft, o
           </div>
           <ChatView
             supervisor={sup}
+            scope={scope}
             draft={draft}
             onDraftChange={onDraftChange}
             onOpenTerminal={() => onTabChange('terminal')}

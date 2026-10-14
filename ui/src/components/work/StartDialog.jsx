@@ -1,10 +1,17 @@
-// Start dialog (FOC-784) — the confirm step before a Ready ticket is handed
-// to the Supervisor. On open it fetches the start-preview and shows the exact
-// text the Supervisor will receive in a read-only textarea; the primary button
-// follows the delivery (startDialogModel): "supervisor" posts /start with that
-// text, "cockpit" (native, no session host) opens the Cockpit with the text
-// prefilled via /?prompt= — there the human still presses Send. Nothing is
-// ever sent automatically. Errors are shown verbatim.
+// Start dialog (FOC-784 + task workspaces, PRD §3–5) — the confirm step
+// before a Ready ticket is handed to the Supervisor. On open it fetches the
+// start-preview and shows the exact text the Supervisor will receive in a
+// read-only textarea. The primary button follows the delivery:
+// - "cockpit" (native, no session host): opens the legacy Cockpit overview
+//   with the text prefilled via /cockpit?prompt= — the human still presses
+//   Send there.
+// - "supervisor": posts /start with that text. The response carries the
+//   server's landing ({ session, taskKey, delivery, cockpitUrl }) — queued
+//   (202) is a SUCCESS: the dialog navigates straight to the task cockpit,
+//   which shows the session lifecycle and polls; no ready text is guaranteed
+//   immediately (PRD-approved UX). Without a cockpitUrl in the response the
+//   legacy result banner stays.
+// Nothing is ever sent automatically. Errors are shown verbatim.
 //
 // The dialog portals to document.body: rendered inside the side panel's
 // stacking context (aside.wk-panel, z-index 40) its overlay sat below the app
@@ -47,15 +54,23 @@ export default function StartDialog({ id, onClose }) {
   const primary = async () => {
     if (m.disabled || !preview) return;
     if (preview.delivery === 'cockpit') {
-      // Native mode: hand the text to the Cockpit composer (never sent there —
-      // the human still presses Send).
-      navigate('/?prompt=' + encodeURIComponent(preview.text));
+      // Native mode: hand the text to the legacy Cockpit composer (never sent
+      // there — the human still presses Send).
+      navigate('/cockpit?prompt=' + encodeURIComponent(preview.text));
       return;
     }
     setSending(true);
     setError(null);
     try {
       const res = await postStartTicket(id, preview.text);
+      // The server names the landing: a queued (202) start navigates to the
+      // task cockpit immediately — it renders the lifecycle (queued →
+      // starting → running) and polls; nothing here waits for ready text.
+      if (res && typeof res.cockpitUrl === 'string' && res.cockpitUrl.startsWith('/')) {
+        onClose();
+        navigate(res.cockpitUrl);
+        return;
+      }
       setResult(res);
     } catch (e) {
       setError(e.data?.error || e.message || String(e));

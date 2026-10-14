@@ -438,3 +438,53 @@
 }
 
 .ck-checked { font-size: 10.5px; }
+
+/* ===== Task cockpit (task workspaces, PRD §3–5) ========================== */
+
+/* The Tasks switcher: one chip per session, queued visible; the current task
+   is marked (not linked). Wraps on narrow screens. */
+.ck-tasks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.ck-task-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  font-size: 11.5px;
+  background: var(--surface);
+  color: var(--text-2);
+  text-decoration: none;
+}
+
+.ck-task-chip:hover { border-color: var(--faint); color: var(--text); }
+
+.ck-task-chip-current {
+  border-color: var(--border-strong);
+  color: var(--text);
+  cursor: default;
+}
+
+.ck-task-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+/* The scoped stop button — reads as a destructive secondary, the label itself
+   carries the concrete task key. */
+.ck-stop-btn {
+  color: var(--danger, #b91c1c);
+  border-color: var(--danger, #b91c1c);
+}
+
+.ck-stop-btn:hover { color: var(--danger, #b91c1c); border-color: var(--danger, #b91c1c); }

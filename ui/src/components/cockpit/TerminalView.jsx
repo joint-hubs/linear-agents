@@ -28,7 +28,7 @@ const CLOSE_REASONS = {
   1006: 'the connection was lost',
 };
 
-export default function TerminalView() {
+export default function TerminalView({ scope } = {}) {
   const hostRef = useRef(null);
   const [attempt, setAttempt] = useState(0); // reconnect re-runs the effect
   const [closed, setClosed] = useState(null); // { code, reason }
@@ -63,7 +63,11 @@ export default function TerminalView() {
       }
     };
 
-    ws = new WebSocket(terminalSocketUrl(term.cols, term.rows));
+    // Task scoping (task workspaces, PRD §3–5): with a scope the socket points
+    // at /api/supervisor/sessions/:sid/terminal for THIS task's session — the
+    // parent keys this component by sessionId, so a task switch closes the
+    // socket here before the new one opens.
+    ws = new WebSocket(terminalSocketUrl(term.cols, term.rows, scope));
     ws.onopen = sendResize;
     ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') term.write(ev.data);
