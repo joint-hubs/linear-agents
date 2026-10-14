@@ -21,7 +21,9 @@ import {
   cockpitUrl,
   resolveTaskSession,
   sessionChip,
+  sessionErrorBanner,
   sessionTitle,
+  snapDataFor,
   switcherModelForPayload,
 } from '../../taskCockpitModel';
 import SupervisorPanel from './SupervisorPanel';
@@ -157,7 +159,8 @@ export default function TaskCockpit({ taskKey }) {
     }catch(error){setStopStatus({kind:'err',text:error.data?.error||error.message});setResumePreview(null);}finally{setStopBusy(false);}
   };
   const chip = sessionChip(session);
-  const snapData = snap.data?.sessionId === session?.sessionId ? snap.data.data : null;
+  const sessionErr = sessionErrorBanner(session);
+  const snapData = snapDataFor(snap.data, session);
   const sup = snapData?.supervisor || null;
   const counts = snapData?.counts || {};
 
@@ -220,6 +223,19 @@ export default function TaskCockpit({ taskKey }) {
             : 'Sessions unavailable: ' +
               (sessions.error.data?.error || sessions.error.message) +
               ' — retrying.'}
+        </div>
+      )}
+
+      {/* The session's own lastError, verbatim (P1 restart quarantine, start/
+          stop failures). This closes the gap that made the designed quarantine
+          look like a dead terminal: the state existed, the cockpit never showed
+          it. */}
+      {sessionErr && (
+        <div className="banner banner-warn" style={{ marginTop: 8 }}>
+          <div>{sessionErr.text}</div>
+          {sessionErr.hint && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{sessionErr.hint}</div>
+          )}
         </div>
       )}
 
@@ -299,6 +315,7 @@ export default function TaskCockpit({ taskKey }) {
                 draft={draft}
                 onDraftChange={setDraft}
                 onRefresh={refreshAll}
+                terminalHint={sessionErr ? sessionErr.text : null}
               />}
             </PanelBoundary>
             <PanelBoundary label="Needs you">

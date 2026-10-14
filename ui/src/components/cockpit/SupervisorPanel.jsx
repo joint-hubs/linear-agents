@@ -112,7 +112,7 @@ const STATE_CHIP = {
   unknown: { label: 'unknown', tone: 'neutral' },
 };
 
-export default function SupervisorPanel({ supervisor, scope, tab, onTabChange, draft, onDraftChange, onRefresh }) {
+export default function SupervisorPanel({ supervisor, scope, tab, onTabChange, draft, onDraftChange, onRefresh, terminalHint }) {
   const [wakeBusy, setWakeBusy] = useState(false);
   const [wakeStatus, setWakeStatus] = useState(null); // { kind, text }
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -274,7 +274,7 @@ export default function SupervisorPanel({ supervisor, scope, tab, onTabChange, d
         terminalReason ? (
           <div className="banner banner-warn" style={{ marginTop: 10 }}>{terminalReason}</div>
         ) : (
-          <TerminalView scope={scope} />
+          <TerminalView scope={scope} hint={terminalHint} />
         )
       ) : (
         <>

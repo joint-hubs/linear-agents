@@ -3,8 +3,10 @@
 // pattern as src/_tests_cockpit.mjs. Invoke via: `node src/_tests_taskCockpit.mjs`.
 //
 // Covers: sessionChip (the honest lifecycle vocabulary, PRD §4),
-// sessionTitle, resolveTaskSession (route taskKey → session, with the
-// ambiguity guard — never silently pick), switcherModel(ForPayload) (queued
+// sessionTitle, sessionErrorBanner (the lastError banner — never fabricated),
+// resolveTaskSession (route taskKey → session, with the
+// ambiguity guard — never silently pick), snapDataFor (the snapshot/session
+// join — the blank-cockpit crash guard), switcherModel(ForPayload) (queued
 // visible, cap passthrough), the scoped URL builders (conversation path,
 // supervisor action path, terminal socket) and cockpitUrl. Fixtures only —
 // no network, no DOM.
@@ -14,7 +16,9 @@ import assert from 'node:assert/strict';
 import {
   sessionChip,
   sessionTitle,
+  sessionErrorBanner,
   resolveTaskSession,
+  snapDataFor,
   switcherModel,
   switcherModelForPayload,
   buildTaskSupervisorPath,
@@ -269,6 +273,66 @@ await test('active generation wins over normal historical records', () => {
   eq(resolveTaskSession({ sessions: [old, active] }, 'pisi:7', 'old').session, old);
   eq(resolveTaskSession({ sessions: [old, active] }, 'other:7', 'old').session, null);
   eq(switcherModel([old, active, newer], 'pisi:7').items.length, 1);
+});
+
+// --- snapDataFor (the blank-cockpit crash guard) --------------------------------
+
+await test('snapDataFor: both sides absent -> null, never a throw', () => {
+  eq(snapDataFor(null, null), null);
+  eq(snapDataFor(undefined, undefined), null);
+});
+
+await test('snapDataFor: envelope without a session -> null', () => {
+  eq(snapDataFor({ sessionId: 'sup-a', data: { counts: { running: 1 } } }, null), null);
+});
+
+await test('snapDataFor: session without an envelope -> null', () => {
+  eq(snapDataFor(null, { sessionId: 'sup-a' }), null);
+});
+
+await test('snapDataFor: matching sessionId -> the body', () => {
+  const body = { counts: { running: 1 }, supervisor: { model: 'm' } };
+  eq(snapDataFor({ sessionId: 'sup-a', data: body }, { sessionId: 'sup-a' }), body);
+});
+
+await test('snapDataFor: envelope for another session -> null', () => {
+  eq(snapDataFor({ sessionId: 'sup-a', data: { ok: 1 } }, { sessionId: 'sup-b' }), null);
+});
+
+await test('snapDataFor: envelope with no body -> null, not undefined', () => {
+  eq(snapDataFor({ sessionId: 'sup-a' }, { sessionId: 'sup-a' }), null);
+});
+
+// --- sessionErrorBanner (the lastError banner — the gap behind "Terminal
+// disconnected" looking like a dead terminal) --------------------------------
+
+await test('sessionErrorBanner: no error anywhere -> null, never a fabricated banner', () => {
+  eq(sessionErrorBanner(null), null);
+  eq(sessionErrorBanner({}), null);
+  eq(sessionErrorBanner({ lastError: null }), null);
+  eq(sessionErrorBanner({ lastError: '   ' }), null);
+  eq(sessionErrorBanner({ lastError: 42 }), null);
+});
+
+await test('sessionErrorBanner: the restart quarantine -> verbatim text + the stop/resume path', () => {
+  const q = sessionErrorBanner({
+    lastError: 'process identity unproven after restart; capacity reserved; use scoped stop',
+  });
+  eq(q.text, 'process identity unproven after restart; capacity reserved; use scoped stop');
+  eq(q.hint, 'Stop this task, then Resume this history.');
+});
+
+await test('sessionErrorBanner: a delivery failure -> the deliver-manually path', () => {
+  const d = sessionErrorBanner({
+    lastError: 'initial delivery failed (502); prompt NOT resent — deliver manually',
+  });
+  eq(d.hint, 'Send the prompt again in Chat.');
+});
+
+await test('sessionErrorBanner: an unknown error -> text alone, no invented way out', () => {
+  const u = sessionErrorBanner({ lastError: '  something nobody classified  ' });
+  eq(u.text, 'something nobody classified');
+  eq(u.hint, null);
 });
 
 // --- Summary ------------------------------------------------------------------------

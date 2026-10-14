@@ -4,7 +4,10 @@
 // {"t":"r","c":cols,"r":rows}. Closing the socket detaches this client only.
 //
 // Close 1013 = the host is still starting, 1011 = unavailable; either shows a
-// reconnect button with the reason. Disposes everything on unmount.
+// reconnect button with the reason. Disposes everything on unmount. `hint` is
+// the session's own lastError (from the parent, when it has one) — a refused
+// upgrade surfaces as 1006 "the connection was lost", which hides why; the
+// hint is the server's actual reason shown under it.
 
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
@@ -28,7 +31,7 @@ const CLOSE_REASONS = {
   1006: 'the connection was lost',
 };
 
-export default function TerminalView({ scope } = {}) {
+export default function TerminalView({ scope, hint } = {}) {
   const hostRef = useRef(null);
   const [attempt, setAttempt] = useState(0); // reconnect re-runs the effect
   const [closed, setClosed] = useState(null); // { code, reason }
@@ -116,6 +119,9 @@ export default function TerminalView({ scope } = {}) {
       {closed && (
         <div className="ck-terminal-overlay">
           <div>Terminal disconnected — {closed.reason}.</div>
+          {hint && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{hint}</div>
+          )}
           <button type="button" className="btn-secondary" onClick={() => setAttempt((a) => a + 1)}>
             Reconnect
           </button>

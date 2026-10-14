@@ -44,6 +44,25 @@ export function sessionTitle(session) {
   return t || (typeof session.taskKey === 'string' ? session.taskKey : '');
 }
 
+// sessionErrorBanner(session) -> { text, hint } | null. The session's own
+// lastError, verbatim — the host wrote it to be actionable ("use scoped stop",
+// "deliver manually") and paraphrasing it would lose the instruction. A hint
+// (the UI click-path) is added ONLY when the message names a recovery the UI
+// can spell out; otherwise hint is null and the text stands alone — never
+// invent a way out of a message we do not understand. null when there is no
+// error: this never fabricates a banner (the blank-cockpit class of bug).
+export function sessionErrorBanner(session) {
+  const raw = session && session.lastError;
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return null;
+  const hint = /scoped stop|capacity reserved/i.test(text)
+    ? 'Stop this task, then Resume this history.'
+    : /deliver manually/i.test(text)
+      ? 'Send the prompt again in Chat.'
+      : null;
+  return { text, hint };
+}
+
 // resolveTaskSession(payload, taskKey) -> { session, ambiguous, ready }.
 // payload is the GET /api/supervisor/sessions body { sessions, maxActive }.
 // ready:true once the payload arrived (lets the caller distinguish "still
@@ -63,6 +82,17 @@ export function resolveTaskSession(payload, taskKey, selectedSessionId = null) {
   if (owners.length > 1) return { session: null, ambiguous: true, ready };
   const history = [...matches].sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || String(b.sessionId).localeCompare(String(a.sessionId)));
   return { session: owners[0] || history[0] || null, ambiguous: false, ready };
+}
+
+// snapDataFor(envelope, session) -> the scoped cockpit body, only when the
+// envelope belongs to the session on screen. Both sides are absent on first
+// paint (both polls start empty) and the envelope is absent while no session
+// is resolved — comparing two absent sessionIds as equal would dereference a
+// null envelope and unmount the whole screen (the blank-task-cockpit crash).
+// Never returns undefined; an envelope without a body yields null.
+export function snapDataFor(envelope, session) {
+  if (!envelope || !session) return null;
+  return envelope.sessionId === session.sessionId ? envelope.data ?? null : null;
 }
 
 // switcherModel(sessions, currentTaskKey) -> { items, cap }. items is every
