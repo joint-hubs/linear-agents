@@ -722,6 +722,8 @@ function cmdRecord(args) {
   ensureRunDir(runId);
   atomicWriteJSON(path, record);
 
+  if (sizeFlow) { try { recordRuntimeChoice(sizeFlow); } catch { console.error('[runtime] workflow choice could not be recorded'); } }
+
   // A0 display: the seam's annotations are shown next to the recorded choice,
   // never auto-acted — the verdict proceeds regardless of what they say.
   // FOC-513: the triage line's trigger is the seam's UNWRAPPED answer vs the

@@ -82,6 +82,7 @@ import {
   producerOf,
   progressFingerprint,
   readRegistry,
+  updateChild,
   verdictPath,
   verdictsDir,
 } from "./supervisor-lib.mjs";
@@ -769,6 +770,10 @@ function cmdRecord(args) {
   ensureRunDir(runId);
   mkdirSync(verdictsDir(runId), { recursive: true });
   atomicWriteJSON(path, record);
+  if (verdict === 'fail' && ['review','test'].includes(entry.squad) && workChild.squad === 'dev' && entry.attemptId) {
+    try { updateChild(runId,workChild.childId,{pendingRuntimeReturn:{sourceAttemptId:entry.attemptId,source:entry.squad,reason:'rejected',evidenceRef:runId+':verdict:'+taskId+':'+round,evidenceKind:'direct'}}); }
+    catch { warnings.push('runtime return evidence could not be staged'); }
+  }
 
   // FOC-449 auto-join: the verdict IS the outcome for the decision events it
   // carries provenance for — outcome = the verdict value, by:"agent",
