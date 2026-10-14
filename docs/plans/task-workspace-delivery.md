@@ -101,10 +101,10 @@ Embedding cache, UMAP projection (seed 42), routes and the `/insights/map` scree
 
 ## 6. Final verification (last, after P1–P4)
 
-- [ ] Docker rebuild + redeploy (non-production acceptance stack); **no prod changes, no commits** in this pass.
-- [ ] Full build + browser E2E for the UI lanes: board, cockpit, Manager, Statistics, map.
-- [ ] Mocked verification first; real-provider verification as a **separate** run — no operational claim from the mock environment (AC-10).
-- [ ] Update `docs/STATE.md` with delivery status; propose commit batches (parent decides).
+- [x] Docker rebuild + redeploy (non-production acceptance stack); **no prod changes, no commits** in this pass. (2026-10-14: image `fenix:task-workspace-candidate` rebuilt from HEAD, both containers healthy.)
+- [ ] Full build + browser E2E for the UI lanes: board, cockpit, Manager, Statistics, map. (Server-side all green — browser walk is Mateusz's, no headless harness exists in `ui/`.)
+- [x] Mocked verification first; real-provider verification as a **separate** run — no operational claim from the mock environment (AC-10). (Real runs: in-stack task-map build 137/137 via Ollama; Manager test-connection init+tools+search 14.3 s.)
+- [x] Update `docs/STATE.md` with delivery status; propose commit batches (parent decides). (STATE (31)/(32); 11 batches landed after Mateusz said „commituj".)
 
 ## 7. Contracts & escalation summary
 
@@ -125,20 +125,20 @@ Embedding cache, UMAP projection (seed 42), routes and the `/insights/map` scree
 ### Review follow-ups
 
 - [x] Fix task UI selection across session generations: choose one active owner, explicitly select historical generations read-only; do not report normal history as ambiguous. (History/isolation links verified with the UI regression fixes below.)
-- [ ] Remount scoped polling on task/session changes and clear old snapshot immediately; preserve URL prompt prefill without a clearing-effect race.
-- [ ] Board card direct cockpit link; unresolved task Ask must not draft into the global Supervisor.
-- [ ] Register new UI/backend test lanes and make the board tab active at /.
+- [x] Remount scoped polling on task/session changes and clear old snapshot immediately; preserve URL prompt prefill without a clearing-effect race. (TaskCockpit: panel keyed by `sessionId`, prefill mount-only.)
+- [x] Board card direct cockpit link; unresolved task Ask must not draft into the global Supervisor. (UI regression fixes verified 2026-10-14.)
+- [x] Register new UI/backend test lanes and make the board tab active at /. (Lanes registered; nav tests pin `/`.)
 - [x] Implement durable repository/workspace writer claims and common-git integration lock before concurrent child delivery.
-- [ ] Integrate runtime events/traces and launch tool snapshots into supervisor/child/followup paths.
+- [x] Integrate runtime events/traces and launch tool snapshots into supervisor/child/followup paths. (Coded 2026-10-14, landed in commit batch `feat(runtime)`.)
 - [x] Implement P3 aggregation/routes/UI and P4 local embedding/projection/routes/UI. (P3 metrics + `/insights/runtime`, P4 map + `/insights/map`; real local Ollama verification PASSED — integration checkpoint.)
 
 ### Integration review queue (do not accept before resolution)
 
 - [x] Host: restart reconciliation must preserve queued claims and reserve capacity for live/unknown processes; verify PID + OS start identity. RESOLVED 2026-10-14 — OS process identity (boot ID + start ticks, uncertain ownership reserves capacity); stopped-history resume through queue/cap, 34 tests pass.
 - [x] Host: failed terminal generations must reject every mutation/terminal attach; release capacity only after scoped stop is proven, not before kill. Coordinate start/stop races. RESOLVED 2026-10-14 (host recovery and ownership regressions 17/17).
-- Host: serve CLI must stay alive (no immediate process.exit after listen), queue pump must fill the cap and drain after startup/failure; verify the legacy delegate object shape.
-- Tools: explicit empty tool set must disable tools, not omit --tools and regain defaults. --tools controls builtin tools only; enforce MCP exclusions separately, preserve existing MCP servers.
-- Tools: keep worker frontmatter canonical; do not add a competing roleOverrides store. Global/squad/role inheritance and next-process snapshot remain required.
+- [x] Host: serve CLI must stay alive (no immediate process.exit after listen), queue pump must fill the cap and drain after startup/failure; verify the legacy delegate object shape. RESOLVED 2026-10-14 — listen callback only logs (exit only on error/SIGTERM/SIGINT); pump evidence: scoped stop A → queued C claimed the freed slot.
+- [x] Tools: explicit empty tool set must disable tools, not omit --tools and regain defaults. --tools controls builtin tools only; enforce MCP exclusions separately, preserve existing MCP servers. RESOLVED 2026-10-14 — `--tools ''` pushed for empty builtin lists (NONE, not defaults); MCP subset is per-role at stamp time; a pre-existing worker `mcpServers` block is refused, never merged.
+- [x] Tools: keep worker frontmatter canonical; do not add a competing roleOverrides store. Global/squad/role inheritance and next-process snapshot remain required. RESOLVED 2026-10-14 — the tool-profiles registry is the single inheritance store; stamps write tools/mcpServers into the launch-owned copy only and never a second store.
 - [x] UI regression fixes verified: active owner wins over history, explicit history read-only, stale task snapshot hidden, no global Ask fallback, board card cockpit links, / active tab; 30 helper tests + Vite build pass.
 
 ### Integration checkpoint — 2026-10-14
@@ -148,10 +148,10 @@ Embedding cache, UMAP projection (seed 42), routes and the `/insights/map` scree
 - [x] Actual GLM 5.3 Flash telemetry probe: interaction and model spans stored with task/session context; no prompt/tool content captured.
 - [x] Actual Thoughtmap MCP initialize, five-tool discovery and search roundtrip. Distance dependencies still require acceptance.
 - [x] Workspace writer claims and integration lock implemented; focused worker tests passed, parent integration review pending.
-- [ ] Complete runtime hook / child launch profile integration and honest causal/window statistics.
+- [x] Complete runtime hook / child launch profile integration and honest causal/window statistics. (Launch paths carry hooks + tool snapshots; `/api/runtime-statistics` reports known-time denominator with explicit coverage, never estimates.)
 - [x] Wire statistics/map routes and screens, global/squad tool layers, explicit resume semantics.
-- [ ] Final Docker rebuild/redeploy and browser acceptance of concurrent task cockpits, Manager and semantic map.
-- [ ] Update ACCESS/STATE and prepare logical commit batches (do not commit without explicit request). (STATE updated 2026-10-14 entry (31); ACCESS NOT updated yet.)
+- [x] Final Docker rebuild/redeploy and browser acceptance of concurrent task cockpits, Manager and semantic map. (2026-10-14: rebuild+redeploy DONE on `fenix:task-workspace-candidate`; server-side acceptance GREEN — see the acceptance log below; browser walk DONE by Mateusz 2026-10-14 — "ok wyglada ze wszystko dziala super": isolation probe `FENIX_SESSION_B_OK` on CHECK-B, terminals recovered via Stop → Resume, blank-page fix live.)
+- [x] Update ACCESS/STATE and prepare logical commit batches (do not commit without explicit request). (STATE updated 2026-10-14 entries (31)/(32); ACCESS carries the 4602 stack section; 11 commit batches landed on `fenix-settings-keys`.)
 
 ### Verification log — 2026-10-14 (lanes/docs worker)
 
@@ -160,5 +160,21 @@ Embedding cache, UMAP projection (seed 42), routes and the `/insights/map` scree
 - [x] Explicit stopped-history resume through queue/cap: code + tests, **34 pass**.
 - [x] Test lanes: 18 new backend `*.test.mjs` registered in `scripts/test-lanes.json` (task-workspace suites + `supervisor-watch`, `supervisor-launch`, `worker-tool-profiles`) — parallel vs serial decided per sockets/process/env (9 serial: `runtime-otel`, `task-cockpit-routes`, `task-map-routes`, `task-session-host`, `task-sessions`, `tool-profiles`, `tool-routes`, `workspace-claims`, `supervisor-watch`; 9 parallel). Lane coverage + static isolation audit green (`node scripts/test-run.mjs` inventory pass). Nav tests 24/24 (`/insights/runtime` "Runtime statistics", `/insights/map` "Task map" pinned).
 - [ ] Docs required-count guards (reported, NOT changed — not owned): `docs/supervisor-e2e-checklist.md` line 3 says **152 files**, actual **170** `scripts/*.test.mjs` — update to 170; the prose line (~208, "`test-all.mjs` → 116 files") is not guard-checked but reads stale too. Guard: `scripts/docs-count-guard.test.mjs` fails until line 3 is updated.
-- Still NOT delivered: runtime-hook producer integration (events/launch snapshots into supervisor/child/followup paths); full Docker rebuild/redeploy + browser E2E acceptance; native worker MCP review/test; final ACCESS.
+- Browser E2E acceptance walk: DONE 2026-10-14 (Mateusz: "ok wyglada ze wszystko dziala super"). Native worker MCP distance-tool acceptance: DONE — all five tools answered real payloads on the host Ollama probe (see the acceptance log).
+- Blank task-cockpit page (the walk's first stop) — FIXED 2026-10-14: `TaskCockpit.jsx` dereferenced `snap.data.data` when both the snapshot envelope and the session were absent on first paint (`undefined === undefined` made the ternary take its true branch → TypeError → React unmounted the tree). Extracted as `snapDataFor(envelope, session)` in `taskCockpitModel.js`, null-guards both sides, 6 unit tests; image rebuilt and redeployed.
+- Session `lastError` banner (the "Terminal disconnected" confusion) — FIXED 2026-10-14: the P1 restart quarantine is designed to refuse the terminal WS (409 `session-recovery-required`), but the browser maps the failed handshake to a generic 1006 overlay and the task cockpit never rendered `session.lastError`, so a designed state looked like a dead terminal. `sessionErrorBanner(session)` in `taskCockpitModel.js` (verbatim `lastError`, hint only when the message names a UI-known recovery), banner in `TaskCockpit`, `hint` prop on `TerminalView`; 4 unit tests (40/40). Second redeploy re-quarantined B/C by design — the banner is visible on both cockpits (Stop → Resume this history).
+- Observation from the walk (not a P1–P4 defect): a task session answering "jak tam status" pitched generic frontman intake ("podaj ID issue…") although its `taskKey` is bound to CHECK-B. The isolation probe forbade tools, so the child could not read its own record — the honest answer under that constraint. Worth teaching the kickoff to carry the taskKey so a task session knows its bound ticket without tools.
 - Active Atlas jobs: hook `claude-606ac3`, watcher `claude-dd9312` (both active).
+
+### Acceptance log — 2026-10-14 (server side, stack `fenix-task-workspace` @ 4602)
+
+Image `fenix:task-workspace-candidate` rebuilt from HEAD (`2abaa7e`), redeployed, both containers healthy.
+
+- [x] **Restart reconciliation (P1):** redeploying the containers left CHECK-A/B `waiting` with `lastError: process identity unproven after restart; capacity reserved` and CHECK-C `queued` — PID+OS-start identity, capacity reserved for unproven owners, queued claims preserved. Exactly the design under test.
+- [x] **Stop one without touching the other (P1):** scoped `POST /sessions/<A>/stop` → A `stopped` (terminal, tmux ok), B byte-identical (same pid 292 / updatedAt 13:53:03), C claimed the freed slot (`queued → starting`, new pid). Cap=2 respected: B's reserved slot + C's new one.
+- [x] **Terminal generation rejects mutations (P1):** `POST /sessions/<A>/message` → 409 `session-terminal` ("this generation is over"); restart requires an explicit `confirm: "new-session"`.
+- [x] **Ambiguity, never a silent guess (P1):** global `GET /api/cockpit` and `POST /api/supervisor/message` answer 409 `selection-required` while managed sessions exist; scoped mirrors answer with `taskKey` binding. Legacy conversation stays readable (one legacy session — unambiguous by construction).
+- [x] **Manager test-connection (P2):** `POST /api/tool-profiles/test` → `ok: true`, stages initialize/toolsList/searchRoundtrip all true, five tools listed, 14.3 s. (`enabled: false` default held — probe works without enabling.)
+- [x] **Honest statistics (P3):** `/api/runtime-statistics` reports known-time denominator with `coveragePct` (e.g. activePct 90.3 at coverage 0.02%) — no estimates over unknown time.
+- [x] **Map integrity (P4):** before build — `points: []`, `projection: {available:false, reason:"not_built"}` (AC-9, no fabrication). In-stack `POST /api/task-map/build` → 137/137 tasks embedded (`ready: 137`, `error: 0`) and projected (UMAP), points carry `taskKey`/`stage`/`labels`/`x`/`y` for cockpit drill-down.
+- [x] **Native MCP adapter (P2, host path):** product stdio transport against `server-thoughtmap.py` with host Ollama `qwen3-embedding:8b` + the real 154-cluster `clusters.json` — initialize + `tools/list` = 5 tools, then real payloads from every tool: `search_thoughts` (real hits), `list_clusters`, `get_cluster` (cluster 0, representative texts), `text_distance` (distance 0.4203 / similarity 0.5797), `cluster_distances` (cluster 0 → nearest Sim-to-Real Transfer in DRL 0.4119, Physical AI Architecture 0.4417, Robotics and VLMs 0.4505; farthest CD Projekt Stock Analysis 0.7396). First `cluster_distances` call pays a one-time centroid grind over all clusters (cached afterwards); that run took ~16 min CPU-only because the GPU was occupied by a foreign process.
