@@ -161,6 +161,86 @@ test("validateSettings: routing squad names, entries and lead limits", () => {
   assert.equal(validateSettings({ routing: { web: { lead: "Claude" } } }).ok, true);
 });
 
+test("validateSettings: retention valid shapes accepted (FOC-780)", () => {
+  assert.deepEqual(validateSettings({ ...VALID, retention: {} }), { ok: true, errors: [] });
+  assert.equal(validateSettings({ retention: { keepDays: 30 } }).ok, true);
+  assert.equal(validateSettings({ retention: { keepDays: 30, minFreeGiB: 2 } }).ok, true);
+  assert.equal(validateSettings({ retention: { minFreeGiB: 0.5 } }).ok, true);
+  // null keepDays is explicit "keep everything", not a type error
+  assert.equal(validateSettings({ retention: { keepDays: null } }).ok, true);
+  // null retention itself is the default policy
+  assert.equal(validateSettings({ retention: null }).ok, true);
+  assert.equal(validateSettings({ retention: { keepDays: 36500 } }).ok, true);
+});
+
+test("validateSettings: retention invalid types and ranges refused", () => {
+  for (const bad of ["30", true, 0, -1, 36501, 1.5]) {
+    const r = validateSettings({ retention: { keepDays: bad } });
+    assert.equal(r.ok, false, `keepDays ${JSON.stringify(bad)} must be refused`);
+    assert.ok(r.errors.some((e) => e.includes("retention.keepDays")));
+  }
+  for (const bad of ["5", true, 0, 0.4, -1]) {
+    const r = validateSettings({ retention: { minFreeGiB: bad } });
+    assert.equal(r.ok, false, `minFreeGiB ${JSON.stringify(bad)} must be refused`);
+    assert.ok(r.errors.some((e) => e.includes("retention.minFreeGiB")));
+  }
+  assert.equal(validateSettings({ retention: "30 days" }).ok, false);
+  assert.equal(validateSettings({ retention: [30] }).ok, false);
+});
+
+test("validateSettings: retention unknown sub-keys refused", () => {
+  const { ok, errors } = validateSettings({ retention: { keepDays: 30, maxRuns: 5 } });
+  assert.equal(ok, false);
+  assert.ok(errors.some((e) => e.includes("retention.maxRuns") && e.includes("unknown key")));
+});
+
+test("writeSettings: retention merges and persists; null deletes back to the default", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    const merged = writeSettings({ retention: { keepDays: 14, minFreeGiB: 2 } }, { path });
+    assert.deepEqual(merged.retention, { keepDays: 14, minFreeGiB: 2 });
+    assert.deepEqual(readSettings({ path }).retention, { keepDays: 14, minFreeGiB: 2 });
+    // The overlay's null-deletes merge means "null" removes keepDays rather
+    // than storing it — absence IS keep-everything for the resolver.
+    const after = writeSettings({ retention: { keepDays: null } }, { path });
+    assert.deepEqual(after.retention, { minFreeGiB: 2 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeSettings: invalid retention refused, file untouched", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    writeSettings({ retention: { keepDays: 30 } }, { path });
+    const before = readFileSync(path, "utf8");
+    assert.throws(
+      () => writeSettings({ retention: { keepDays: 0 } }, { path }),
+      (err) => err.message.includes("validation failed") && err.message.includes("retention.keepDays"),
+    );
+    assert.equal(readFileSync(path, "utf8"), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI set: retention round-trips through the overlay seam", async () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    await runSet(path, "retention.keepDays", "30");
+    // Numbers print as their JSON (see the `get` tests below); the persisted
+    // value is asserted directly too.
+    const got = await runGet(path, "retention.keepDays");
+    assert.equal(got.stdout, "30\n");
+    assert.equal(readSettings({ path }).retention.keepDays, 30);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("validateSettings: secret-looking values refused anywhere", () => {
   const secrets = [
     "sk-or-v1-0123456789abcdef",
@@ -301,6 +381,61 @@ test("CLI get: settings that fail validation → stderr, exit 1", async () => {
       assert.ok(err.stderr.includes("routing.supervisor.lead"));
       return true;
     });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI get: retention set through the CLI prints as single-line JSON", async () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    await runSet(path, "retention", '{"keepDays": 30, "minFreeGiB": 2}');
+    const { stdout } = await runGet(path, "retention");
+    assert.equal(stdout, '{"keepDays":30,"minFreeGiB":2}\n');
+    const days = await runGet(path, "retention.keepDays");
+    assert.equal(days.stdout, "30\n");
+    // A null keepDays cannot be stored — the overlay's null-deletes merge
+    // erases it (verified by the writeSettings test above) — so `set
+    // retention '{"keepDays": null}'` keeps the sibling minFreeGiB and
+    // drops keepDays. `get` still prints JSON (non-empty), which is what
+    // the launcher's first-run retention question keys on.
+    await runSet(path, "retention", '{"keepDays": null}');
+    const afterNull = await runGet(path, "retention");
+    assert.equal(afterNull.stdout, '{"minFreeGiB":2}\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI get: a stored-null keepDays prints as JSON (direct overlay write)", async () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    writeFileSync(
+      path,
+      JSON.stringify({ ...VALID, retention: { keepDays: null } }),
+      "utf8",
+    );
+    const { stdout } = await runGet(path, "retention");
+    assert.equal(stdout, '{"keepDays":null}\n');
+    const days = await runGet(path, "retention.keepDays");
+    assert.equal(days.stdout, "null\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI get: strings stay bare and absent keys stay silent with exit 0", async () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    await runSet(path, "routing.dev.lead", "z-ai/glm-5.3");
+    const string = await runGet(path, "routing.dev.lead");
+    assert.equal(string.stdout, "z-ai/glm-5.3\n");
+    // An absent sub-key of an existing object behaves like a missing path.
+    const absent = await runGet(path, "retention.minFreeGiB");
+    assert.equal(absent.stdout, "");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
