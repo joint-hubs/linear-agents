@@ -187,6 +187,29 @@ function noteUnverifiedCost(snap) {
   console.error(`cost includes ${ids.length} unverified legacy figure(s): ${ids.join(", ")}`);
 }
 
+// FOC-607: requested vs served, per child. `model`/`modelSource` are the
+// registry pin spawn wrote; `initModel` is what the child's system/init
+// reported — taken from the latest turn that has one, else null (the event
+// never came). Drift means both are known and differ: the run did not happen
+// on the model the registry names.
+function modelFields(entry) {
+  const turns = Array.isArray(entry.turns) ? entry.turns : [];
+  const initModel = [...turns].reverse().find((t) => t && t.initModel != null)?.initModel ?? null;
+  const modelDrift =
+    typeof entry.model === "string" && typeof initModel === "string" && entry.model !== initModel;
+  return { model: entry.model ?? null, modelSource: entry.modelSource ?? null, initModel, modelDrift };
+}
+
+// FOC-607: one line per drifted child, on stderr beside the unverified-cost
+// note — same reasoning, the parsed channel stays unpolluted.
+function noteModelDrift(children) {
+  for (const c of children) {
+    if (c.modelDrift) {
+      console.error(`model drift: ${c.childId} requested ${c.model}, served ${c.initModel}`);
+    }
+  }
+}
+
 function snapshot(runId, { childFilter, tail }) {
   const registry = readRegistry(runId);
   const now = Date.now();
@@ -209,6 +232,8 @@ function snapshot(runId, { childFilter, tail }) {
     const silentMs = activityMs ? now - activityMs : null;
     return {
       ...entry,
+      // FOC-607: what was requested vs what actually served, per child.
+      ...modelFields(entry),
       events: tailEvents(runId, entry.childId, tail),
       silentMs,
       // Stalled is only meaningful for a child that is supposed to be producing
@@ -301,6 +326,12 @@ if (args.briefing) {
   const unacked = rows.filter((r) => r.seq > ackedThrough);
   const entries = Object.values(registry.children);
   const briefingFocus = readFocus(runId).current;
+  // FOC-607: a served model diverging from the pin is attention the lead owes;
+  // stderr keeps the briefing's stdout parseable.
+  for (const c of entries) {
+    const { model, initModel, modelDrift } = modelFields(c);
+    if (modelDrift) console.error(`model drift: ${c.childId} requested ${model}, served ${initModel}`);
+  }
   console.log(
     JSON.stringify(
       {
@@ -425,6 +456,7 @@ if (args.ack !== undefined) {
 if (!args.wait) {
   const snap = { ...snapshot(runId, { childFilter, tail }), mode: "snapshot" };
   noteUnverifiedCost(snap);
+  noteModelDrift(snap.children);
   console.log(JSON.stringify(snap, null, 2));
   process.exit(0);
 }
@@ -512,6 +544,7 @@ try {
 const final = snapshot(runId, { childFilter, tail });
 
 noteUnverifiedCost(final);
+noteModelDrift(final.children);
 
 console.log(
   JSON.stringify(

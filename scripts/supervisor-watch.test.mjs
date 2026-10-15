@@ -66,15 +66,31 @@ process.on("exit", () => {
 });
 
 // The fake claude: dump the argv it was ACTUALLY invoked with, then behave well
-// enough for a turn (init + result + clean exit).
+// enough for a turn (init + result + clean exit). FAKE_SKIP_INIT suppresses the
+// init event; FAKE_INIT_MODEL overrides the served model; the FOC-607 probe
+// dumps what the turn record carries WHILE the child is still alive.
 const FAKE_CLAUDE = join(base, "fake-claude.mjs");
 writeFileSync(
   FAKE_CLAUDE,
   [
-    `import { writeFileSync } from "node:fs";`,
+    `import { readFileSync, writeFileSync } from "node:fs";`,
     `writeFileSync(process.env.FAKE_ARGV_PATH, JSON.stringify(process.argv.slice(2), null, 2));`,
     `const out = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");`,
-    `out({ type: "system", subtype: "init", session_id: process.env.FAKE_SESSION_ID, tools: [], model: "fake/model" });`,
+    `if (!process.env.FAKE_SKIP_INIT) {`,
+    `  out({ type: "system", subtype: "init", session_id: process.env.FAKE_SESSION_ID, tools: [], model: process.env.FAKE_INIT_MODEL ?? "fake/model" });`,
+    `}`,
+    `if (process.env.FAKE_PROBE_PATH) {`,
+    `  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));`,
+    `  let probe = { initModel: null, endedAt: "(turn record not seen)" };`,
+    `  for (let i = 0; i < 120; i++) {`,
+    `    try {`,
+    `      const turn = JSON.parse(readFileSync(process.env.FAKE_REGISTRY_PATH, "utf8")).children["dev-1"].turns[0];`,
+    `      if (turn?.initModel) { probe = { initModel: turn.initModel, endedAt: turn.endedAt }; break; }`,
+    `    } catch {}`,
+    `    await sleep(25);`,
+    `  }`,
+    `  writeFileSync(process.env.FAKE_PROBE_PATH, JSON.stringify(probe));`,
+    `}`,
     `out({ type: "result", subtype: "success", session_id: process.env.FAKE_SESSION_ID, total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0 } });`,
     `process.exit(0);`,
     ``,
@@ -275,6 +291,58 @@ test("no --claude-args flag: the watcher behaves exactly as before", () => {
   assert.equal(readRegistry(runId).children["dev-1"].status, "exited");
   const argv = readDump(dump);
   assert.equal(argv.indexOf("--tools"), -1, "a phantom --tools appeared with no profile");
+});
+
+// ── FOC-607: the turn record carries requestedModel vs initModel ─────────────
+console.log("\nFOC-607: requested vs served model on the turn record");
+
+const runIdDrift = `test-watch-model-drift-${process.pid}`;
+fixtureChild(runIdDrift);
+const probeDrift = join(base, "init-probe-drift.json");
+const resultDrift = runWatcher(
+  runIdDrift,
+  ["--model", "requested/model"],
+  {
+    FAKE_ARGV_PATH: join(base, "argv-drift.json"),
+    FAKE_SESSION_ID: `watch-drift-${process.pid}`,
+    FAKE_INIT_MODEL: "served/other-model",
+    FAKE_PROBE_PATH: probeDrift,
+    FAKE_REGISTRY_PATH: join(runDir(runIdDrift), "children.json"),
+  },
+);
+
+test("initModel is patched onto the turn record while the turn is still live", () => {
+  assert.equal(resultDrift.status, 0, `watcher exit ${resultDrift.status}: ${resultDrift.stderr}`);
+  const probe = JSON.parse(readFileSync(probeDrift, "utf8"));
+  assert.equal(probe.initModel, "served/other-model", `the probe saw ${JSON.stringify(probe)}`);
+  assert.equal(probe.endedAt, null, "the turn was already closed when init was seen");
+});
+
+test("a diverging system/init lands both models on the closed turn record", () => {
+  const turn = readRegistry(runIdDrift).children["dev-1"].turns[0];
+  assert.equal(turn.requestedModel, "requested/model");
+  assert.equal(turn.initModel, "served/other-model");
+  assert.notEqual(turn.endedAt, null, "the turn record was not closed");
+  assert.notEqual(turn.exitCode, null, "the turn record has no exit code");
+});
+
+const runIdNoInit = `test-watch-no-init-${process.pid}`;
+fixtureChild(runIdNoInit);
+const resultNoInit = runWatcher(
+  runIdNoInit,
+  ["--model", "requested/model"],
+  {
+    FAKE_ARGV_PATH: join(base, "argv-no-init.json"),
+    FAKE_SESSION_ID: `watch-noinit-${process.pid}`,
+    FAKE_SKIP_INIT: "1",
+  },
+);
+
+test("no system/init: requestedModel is kept, initModel stays null", () => {
+  assert.equal(resultNoInit.status, 0, `watcher exit ${resultNoInit.status}: ${resultNoInit.stderr}`);
+  const turn = readRegistry(runIdNoInit).children["dev-1"].turns[0];
+  assert.equal(turn.requestedModel, "requested/model");
+  assert.equal(turn.initModel, null);
 });
 
 console.log("");

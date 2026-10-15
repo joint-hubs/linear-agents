@@ -81,7 +81,7 @@ const parse = (r) => {
 
 // A child entry written by hand, so the test controls status and tee content
 // without needing a live process.
-function seedChild(runId, { childId = "dev-1", status: st = "running", costUsd = 0, lines = [], turnStartedAt = new Date().toISOString() } = {}) {
+function seedChild(runId, { childId = "dev-1", status: st = "running", costUsd = 0, lines = [], turnStartedAt = new Date().toISOString(), turns, model, modelSource } = {}) {
   writeRegistry(runId, {
     runId,
     children: {
@@ -92,9 +92,11 @@ function seedChild(runId, { childId = "dev-1", status: st = "running", costUsd =
         sessionId: "sess-1",
         status: st,
         tee: join("children", `${childId}.jsonl`),
-        turns: [{ pid: 999999, startedAt: turnStartedAt, endedAt: null, exitCode: null }],
+        turns: turns ?? [{ pid: 999999, startedAt: turnStartedAt, endedAt: null, exitCode: null }],
         costUsd,
         worktree: ROOT,
+        ...(model !== undefined ? { model } : {}),
+        ...(modelSource !== undefined ? { modelSource } : {}),
       },
     },
     rounds: {},
@@ -478,6 +480,47 @@ test("legacy-unverified children are named beside the total, not excluded from i
   if (!r.stderr.includes("cost includes 1 unverified legacy figure(s): dev-2")) {
     fail(`stderr did not name the unverified child: ${r.stderr}`);
   }
+});
+
+// ── model drift (FOC-607) ────────────────────────────────────────────────────
+console.log("\nmodel drift");
+
+test("a served model that differs from the pin is flagged in JSON and on stderr", () => {
+  const runId = fixtureRun();
+  seedChild(runId, {
+    model: "a",
+    modelSource: "flag",
+    turns: [{ startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), exitCode: 0, initModel: "b" }],
+  });
+  const r = status(runId);
+  const out = parse(r);
+  const c = out.children[0];
+  if (c.model !== "a") fail(`model was ${JSON.stringify(c.model)}`);
+  if (c.modelSource !== "flag") fail(`modelSource was ${JSON.stringify(c.modelSource)}`);
+  if (c.initModel !== "b") fail(`initModel was ${JSON.stringify(c.initModel)}`);
+  if (c.modelDrift !== true) fail(`modelDrift was ${c.modelDrift}`);
+  if (!r.stderr.includes("model drift: dev-1 requested a, served b")) {
+    fail(`stderr did not name the drift: ${r.stderr}`);
+  }
+});
+
+test("equal requested and served models do not drift", () => {
+  const runId = fixtureRun();
+  seedChild(runId, {
+    model: "a",
+    turns: [{ startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), exitCode: 0, initModel: "a" }],
+  });
+  const out = parse(status(runId));
+  if (out.children[0].modelDrift !== false) fail(`modelDrift was ${out.children[0].modelDrift}`);
+  if (out.children[0].initModel !== "a") fail(`initModel was ${JSON.stringify(out.children[0].initModel)}`);
+});
+
+test("a child with no turns has no initModel and no drift", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { model: "a", turns: [] });
+  const out = parse(status(runId));
+  if (out.children[0].initModel !== null) fail(`initModel was ${JSON.stringify(out.children[0].initModel)}`);
+  if (out.children[0].modelDrift !== false) fail(`modelDrift was ${out.children[0].modelDrift}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────
