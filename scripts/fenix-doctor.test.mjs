@@ -216,6 +216,7 @@ test("without FENIX_IN_CONTAINER the uid checks are absent", async () => {
     env: {},
     spawn: () => ({ status: 0, stdout: "fake 1.0\n" }),
     fsImpl: fs,
+    retention: async () => null,
   });
   assert.equal(checks.some((c) => c.name === "secrets readable"), false);
   assert.equal(checks.some((c) => c.name === "config writable"), false);
@@ -229,6 +230,7 @@ test("with FENIX_IN_CONTAINER=1 both uid checks run, with injected paths", async
       spawn: fakeSpawn,
       fsImpl: fs,
       secretsDir: dir,
+      retention: async () => null,
     });
     const secrets = checks.find((c) => c.name === "secrets readable");
     const config = checks.find((c) => c.name === "config writable");
@@ -251,6 +253,7 @@ test("a failing /data dir check in the container names the one-time re-own fix",
     env: { ...IN_CONTAINER, LA_TELEMETRY_HOME: "/data/telemetry" },
     spawn: fakeSpawn,
     fsImpl: fsWithDeniedDir("/data/telemetry"),
+    retention: async () => null,
   });
   const c = checks.find((c) => c.name === "dir LA_TELEMETRY_HOME");
   assert.ok(c, "dir check missing");
@@ -266,6 +269,7 @@ test("a failing dir OUTSIDE /data keeps the generic volume fix", async () => {
       env: { ...IN_CONTAINER, LA_TELEMETRY_HOME: dir },
       spawn: fakeSpawn,
       fsImpl: fsWithDeniedDir(dir),
+      retention: async () => null,
     });
     const c = checks.find((c) => c.name === "dir LA_TELEMETRY_HOME");
     assert.equal(c.status, "fail");
@@ -282,6 +286,7 @@ test("without FENIX_IN_CONTAINER the re-own fix never appears", async () => {
       env: { LA_TELEMETRY_HOME: dir },
       spawn: fakeSpawn,
       fsImpl: fsWithDeniedDir(dir),
+      retention: async () => null,
     });
     const c = checks.find((c) => c.name === "dir LA_TELEMETRY_HOME");
     assert.equal(c.status, "fail");
@@ -304,6 +309,118 @@ test("summarize turns a uid-mismatch fail into ok: false", () => {
 function tempDirRoot() {
   return os.tmpdir();
 }
+
+console.log("\nfenix-doctor: FOC-780 — disk warn threshold + logs usage line");
+
+// fsImpl whose statfsSync always reports the given number of free GiB
+// (bsize pinned to 1 GiB); everything else real.
+function statfsFreeGiB(freeGiB) {
+  return {
+    ...fs,
+    statfsSync: () => ({ bavail: freeGiB, bsize: 1024 ** 3 }),
+  };
+}
+
+const GIB = 1024 ** 3;
+
+const diskCheck = async (runOpts) => {
+  const checks = await runChecks({ env: { LA_TELEMETRY_HOME: "x" }, spawn: fakeSpawn, retention: async () => null, ...runOpts });
+  return checks.find((c) => c.name === "disk");
+};
+
+test("warn threshold from settings: minFreeGiB 2, 3 GiB free -> ok", async () => {
+  const c = await diskCheck({ fsImpl: statfsFreeGiB(3), settings: { retention: { minFreeGiB: 2 } } });
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /warn < 2 GiB/);
+});
+
+test("warn threshold from settings: minFreeGiB 2, 1.5 GiB free -> warn", async () => {
+  const c = await diskCheck({ fsImpl: statfsFreeGiB(1.5), settings: { retention: { minFreeGiB: 2 } } });
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /< 2 GiB/);
+});
+
+test("the 1 GiB fail floor stays even with a low minFreeGiB", async () => {
+  const c = await diskCheck({ fsImpl: statfsFreeGiB(0.8), settings: { retention: { minFreeGiB: 0.5 } } });
+  assert.equal(c.status, "fail");
+  assert.match(c.detail, /< 1 GiB/);
+});
+
+test("default warn threshold 5 when the retention key is absent", async () => {
+  const c = await diskCheck({ fsImpl: statfsFreeGiB(3), settings: {} });
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /< 5 GiB/);
+});
+
+test("a settings read failure falls back to 5 and says so in the detail", async () => {
+  const bad = path.join(tempDir(), "settings.json");
+  fs.writeFileSync(bad, "{not json", "utf8");
+  const prev = process.env.LA_SETTINGS_FILE;
+  process.env.LA_SETTINGS_FILE = bad;
+  try {
+    const c = await diskCheck({ fsImpl: statfsFreeGiB(3) });
+    assert.equal(c.status, "warn");
+    assert.match(c.detail, /retention settings unreadable/);
+    assert.match(c.detail, /falls back to 5 GiB/);
+  } finally {
+    process.env.LA_SETTINGS_FILE = prev;
+    fs.rmSync(path.dirname(bad), { recursive: true, force: true });
+  }
+});
+
+const usageSnapshot = {
+  usage: { transcriptsBytes: 1.5 * GIB, telemetryBytes: 230 * 1024 ** 2, workspacesBytes: 12 * GIB, stateBytes: 340 * 1024 ** 2 },
+  disk: { freeBytes: 42 * GIB, totalBytes: 100 * GIB },
+  partial: [],
+  unreadable: { transcripts: 0, telemetry: 0, workspaces: 0, state: 0 },
+};
+
+test("logs usage line: ok, humanised breakdown, placed right after disk", async () => {
+  const checks = await runChecks({
+    env: { LA_TELEMETRY_HOME: "x" },
+    spawn: fakeSpawn,
+    fsImpl: statfsFreeGiB(3),
+    settings: {},
+    retention: async () => usageSnapshot,
+  });
+  const line = checks.find((c) => c.name === "logs usage");
+  assert.ok(line, "logs usage check missing");
+  assert.equal(line.status, "ok");
+  assert.match(line.detail, /transcripts 1\.5 GiB · telemetry 230\.0 MiB · workspaces 12\.0 GiB · state 340\.0 MiB · free 42\.0 GiB/);
+  assert.equal(checks[checks.findIndex((c) => c.name === "disk") + 1].name, "logs usage");
+});
+
+test("logs usage line: partial walk or unreadable entries warn with the reason", async () => {
+  const partial = {
+    ...usageSnapshot,
+    partial: ["transcripts"],
+    unreadable: { transcripts: 2, telemetry: 0, workspaces: 0, state: 0 },
+    disk: null,
+  };
+  const checks = await runChecks({
+    env: { LA_TELEMETRY_HOME: "x" },
+    spawn: fakeSpawn,
+    fsImpl: statfsFreeGiB(3),
+    retention: async () => partial,
+  });
+  const line = checks.find((c) => c.name === "logs usage");
+  assert.equal(line.status, "warn");
+  assert.match(line.detail, /partial walk: transcripts/);
+  assert.match(line.detail, /2 unreadable entries/);
+  assert.match(line.detail, /free unknown/);
+});
+
+test("logs usage line: a failed snapshot warns, never throws", async () => {
+  const checks = await runChecks({
+    env: { LA_TELEMETRY_HOME: "x" },
+    spawn: fakeSpawn,
+    fsImpl: statfsFreeGiB(3),
+    retention: async () => { throw new Error("boom"); },
+  });
+  const line = checks.find((c) => c.name === "logs usage");
+  assert.equal(line.status, "warn");
+  assert.match(line.detail, /retention snapshot failed: boom/);
+});
 
 console.log(`\nfenix-doctor: ${passed} passed, ${skipped} skipped, ${failures.length} failed`);
 if (failures.length) {
