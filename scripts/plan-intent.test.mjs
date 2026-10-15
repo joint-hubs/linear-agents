@@ -35,6 +35,7 @@ import {
 } from "./plan-intent.mjs";
 import { createGraphRunner } from "./graph-runner.mjs";
 import { DECISION_STEP } from "./decision-call.mjs";
+import { parseGate1Answer } from "./plan-intent-gate.mjs";
 import { buildInputs, splitGroundTruth } from "./plan-intent-eval.mjs";
 import { summarize } from "./plan-intent-acceptance.mjs";
 
@@ -792,6 +793,188 @@ async function main() {
     eq(/no mapVersion 0 to renumber from/.test(got.errors[0]), true, `named: ${got.errors[0]}`);
   });
 
+  // ── required test 4 (FOC-801): about.option answers the PRESENTED store ───
+  //
+  // The selection's alternatives override builds a question's options from the
+  // claim plus the item's alternatives — texts the map's own item never
+  // carries (a stated/inferred item carries NO options at all), and the
+  // display budget may drop the question entirely. The old fold checked
+  // about.option against the MAP's options and folded every such answer
+  // STALE, killing the measurement run: four stated interpretations, four
+  // dead answers, confirmed: false.
+
+  await test("answer contract 4: about.option validates against the PRESENTED options, not the map's own (FOC-801)", () => {
+    const v1 = mapWith({ mapVersion: 1 });
+    const item = v1.interpretations[0];
+    item.source = "stated";
+    item.alternatives = ["Rozumiem, że ma powstać biblioteka snapshotów Gantta w kolejności aneksu."];
+    const { maps } = persistMap({}, v1);
+    const claim = item.claim;
+    const alt = item.alternatives[0];
+    // The question exactly as optionsFor's alternatives branch builds it:
+    // the claim recommended, the alternatives after it. The map item itself
+    // has no options field at all.
+    const presented = {
+      1: {
+        round: 1,
+        mapVersion: 1,
+        questions: [{
+          id: "IN-1",
+          claim,
+          options: [{ text: claim, recommended: true }, { text: alt, recommended: false }],
+        }],
+      },
+    };
+    const answer = (option) => ({
+      round: 1,
+      mapVersion: 1,
+      interpretationId: "IN-1",
+      about: { claim, option },
+      answer: option,
+      acceptedOptions: [option],
+    });
+
+    const recommended = foldGateAnswers({ round: 2, maps, presented, answers: [answer(claim)], corrections: [] });
+    eq(recommended.valid.length, 1, `the claim (the recommended option) folds: ${JSON.stringify(recommended.stale.map((s) => s.reason))}`);
+    eq(recommended.stale.length, 0, "cleanly");
+
+    const picked = foldGateAnswers({ round: 2, maps, presented, answers: [answer(alt)], corrections: [] });
+    eq(picked.valid.length, 1, `a picked alternative folds: ${JSON.stringify(picked.stale.map((s) => s.reason))}`);
+    eq(picked.valid[0].interpretationId, "IN-1", "same id");
+
+    // A text that was never put to the user in that round — the map's own
+    // OPTIONS texts, say — is STALE, and the reason names the presented store.
+    const never = foldGateAnswers({ round: 2, maps, presented, answers: [answer(OPTIONS[0].text)], corrections: [] });
+    eq(never.valid.length, 0, "a never-presented option is stale");
+    eq(never.stale.length, 1, "one stale");
+    eq(
+      /does not match any option text presented for 1\/IN-1 in round 1 verbatim/.test(never.stale[0].reason),
+      true,
+      `the reason names the presented store: ${never.stale[0].reason}`,
+    );
+
+    // The budget dropped the question: the presented slice carries no options
+    // for the id, so the check falls back to the map's own options — and a
+    // stated item carries NONE, so the answer is still STALE (the contract's
+    // step-3 fallback; a map item WITH options would fold through it — see
+    // the fallback test below).
+    const dropped = foldGateAnswers({ round: 2, maps, presented: { 1: { round: 1, mapVersion: 1, questions: [] } }, answers: [answer(claim)], corrections: [] });
+    eq(dropped.valid.length, 0, "an option answer to a question that was never shown is stale");
+    eq(/presented/.test(dropped.stale[0].reason), true, `named: ${dropped.stale[0].reason}`);
+  });
+
+  await test("answer contract 4 round-trip: an 'ok' answer parses and folds VALID against the slice it was parsed from (FOC-801)", () => {
+    // The producer side the fold now relies on: acceptAllAnswers stamps
+    // about.option from the PRESENTED question's options — the same store the
+    // fold validates against, so producer and validator can never drift.
+    const v1 = mapWith({ mapVersion: 1, source: "unknown" });
+    const { maps } = persistMap({}, v1);
+    const shown = {
+      mapVersion: 1,
+      understood: [],
+      confirmations: [],
+      assumptions: [],
+      questions: v1.interpretations.map((i) => ({
+        id: i.id,
+        claim: i.claim,
+        options: i.options.map((o) => ({ text: o.text, recommended: o.recommended === true })),
+      })),
+    };
+    const parsed = parseGate1Answer("ok", 1, shown);
+    eq(parsed.kind, "structured", "the whole-accept parses");
+    const fold = foldGateAnswers({ round: 2, maps, presented: { 1: shown }, answers: parsed.answers, corrections: parsed.corrections });
+    eq(fold.valid.length, parsed.answers.length, `every parsed answer folds: ${JSON.stringify(fold.stale.map((s) => s.reason))}`);
+    eq(fold.stale.length, 0, "nothing stale");
+  });
+
+  await test("answer contract 4 round-trip: a pick over the alternatives-override question folds VALID (FOC-801)", () => {
+    const v1 = mapWith({ mapVersion: 1 });
+    const item = v1.interpretations[0];
+    item.source = "stated";
+    item.alternatives = ["Rozumiem, że ma powstać biblioteka snapshotów Gantta w kolejności aneksu."];
+    const question = {
+      id: item.id,
+      claim: item.claim,
+      options: [{ text: item.claim, recommended: true }, { text: item.alternatives[0], recommended: false }],
+    };
+    const shown = { mapVersion: 1, understood: [], confirmations: [], assumptions: [], questions: [question] };
+    const parsed = parseGate1Answer("1b", 1, shown);
+    eq(parsed.kind, "structured", "the pick parses");
+    eq(parsed.answers[0].about.option, item.alternatives[0], "1b → the override's alternative");
+    const { maps } = persistMap({}, v1);
+    const fold = foldGateAnswers({ round: 2, maps, presented: { 1: shown }, answers: parsed.answers, corrections: [] });
+    eq(fold.valid.length, 1, `the override option folds: ${JSON.stringify(fold.stale.map((s) => s.reason))}`);
+    eq(v1.interpretations[0].options, undefined, "the stated item has NO map options — only the presented slice carries them");
+  });
+
+  await test("answer contract 4 fallback: with no presented options the check falls back to the map's own (FOC-801)", () => {
+    // A minimal fixture / non-question item presents no options for the id —
+    // the contract's step 3 falls back to the map's own options then.
+    const v1 = mapWith({ mapVersion: 1, source: "unknown" }); // IN-1 carries OPTIONS
+    const claim = v1.interpretations[0].claim;
+    const { maps } = persistMap({}, v1);
+    const presented = { 1: { round: 1, mapVersion: 1, questions: [{ id: "IN-1", claim }] } };
+    const answer = (option) => ({
+      round: 1,
+      mapVersion: 1,
+      interpretationId: "IN-1",
+      about: { claim, option },
+      answer: option,
+      acceptedOptions: [option],
+    });
+
+    const own = foldGateAnswers({ round: 2, maps, presented, answers: [answer(OPTIONS[0].text)], corrections: [] });
+    eq(own.valid.length, 1, `the map's own option text folds through the fallback: ${JSON.stringify(own.stale.map((s) => s.reason))}`);
+
+    const foreign = foldGateAnswers({ round: 2, maps, presented, answers: [answer("Rozumiem, że nie.")], corrections: [] });
+    eq(foreign.valid.length, 0, "an option neither presented nor carried is stale");
+    eq(foreign.stale.length, 1, "one stale");
+    eq(/does not match any option text presented for 1\/IN-1 in round 1 verbatim/.test(foreign.stale[0].reason), true, `the reason names the presented store: ${foreign.stale[0].reason}`);
+  });
+
+  await test("answer contract 4 fallback: a renumbered reference finds its question under the resolved id (FOC-801)", () => {
+    // v2 renumbers v1's IN-1 to IN-9 (verbatim-identical content); the round-2
+    // question was presented under the map's NEW id while the record still
+    // names the pre-renumber one — the lookup falls back to the idMap-resolved id.
+    const v1 = mapWith({ mapVersion: 1 });
+    const item = v1.interpretations[0];
+    item.source = "stated";
+    item.alternatives = ["Rozumiem, że ma powstać biblioteka snapshotów Gantta w kolejności aneksu."];
+    const v2 = mapWith({ mapVersion: 2 });
+    v2.interpretations[0].id = "IN-9";
+    v2.idMap = { "IN-1": "IN-9" };
+    const { maps } = persistMap(persistMap({}, v1).maps, v2);
+    eq(verifyIdMap(maps).ok, true, "the renumber is legal");
+    const presented = {
+      2: {
+        round: 2,
+        mapVersion: 2,
+        questions: [{
+          id: "IN-9",
+          claim: item.claim,
+          options: [{ text: item.claim, recommended: true }, { text: item.alternatives[0], recommended: false }],
+        }],
+      },
+    };
+    const answer = (option) => ({
+      round: 2,
+      mapVersion: 2,
+      interpretationId: "IN-1",
+      about: { claim: item.claim, option },
+      answer: option,
+      acceptedOptions: [option],
+    });
+
+    const resolvedRef = foldGateAnswers({ round: 3, maps, presented, answers: [answer(item.alternatives[0])], corrections: [] });
+    eq(resolvedRef.valid.length, 1, `the pre-renumber id folds through the fallback: ${JSON.stringify(resolvedRef.stale.map((s) => s.reason))}`);
+    eq(resolvedRef.valid[0].interpretationId, "IN-9", "under the resolved id");
+    eq(resolvedRef.valid[0].renumberedFrom, "IN-1", "and keeps the renumber link");
+
+    const foreign = foldGateAnswers({ round: 3, maps, presented, answers: [answer("Rozumiem, że nie.")], corrections: [] });
+    eq(foreign.valid.length, 0, "an option presented under NEITHER id is stale");
+    eq(/does not match any option text presented for 2\/IN-1 in round 2 verbatim/.test(foreign.stale[0].reason), true, `the reason names the presented store: ${foreign.stale[0].reason}`);
+  });
+
   // ── the node: one retry, then stop ────────────────────────────────────────
 
   const STEP = { kind: "G", reads: ["inbox.entry", "plan.dor.gaps", "intake.taskType", "gate.plan.gate1.answers", "gate.plan.gate1.corrections"] };
@@ -812,7 +995,15 @@ async function main() {
     eq(result.maps[1], map, "and the store carries it");
     eq(result.attempts, 1, "one call, no retry");
     eq(seen.length, 1, "one generator call");
-    deepEq(Object.keys(seen[0].reads).sort(), ["inbox.entry", "intake.taskType", "plan.dor.gaps"], "the declared reads, no revision on the first attempt");
+    eq(seen[0].nextMapVersion, 1, "the FIRST attempt already carries the store's allocation (FOC-801)");
+    // FOC-801: the hint rides the READS, not just the args — the production
+    // transport composes its message from the reads and may drop unknown args.
+    eq(seen[0].reads.nextMapVersion, 1, "the hint field rides the first attempt's reads");
+    deepEq(
+      Object.keys(seen[0].reads).sort(),
+      ["inbox.entry", "intake.taskType", "nextMapVersion", "plan.dor.gaps"],
+      "the declared reads plus the hint field, no revision on the first attempt",
+    );
   });
 
   await test("the node retries ONCE carrying the reasons and the rejected map, then stops", async () => {
@@ -835,7 +1026,13 @@ async function main() {
     const revision = seen[1].reads.revision;
     eq(revision.attempt, 2, "the second attempt is marked");
     eq(revision.problems.length, 2, "carries the reasons");
-    eq(revision.previous, bad, "and the rejected map itself");
+    // FOC-801: the revision's map is an identity copy — its own mapVersion is
+    // overwritten with the allocation (1 here, an empty store), so it is
+    // deep-equal to the rejected map but never the caller's object.
+    deepEq(revision.previous, bad, "and the rejected map itself (deep-equal through the identity copy)");
+    eq(revision.nextMapVersion, 1, "the revision carries the store's allocation");
+    eq(seen[1].nextMapVersion, 1, "the hint rides the generator args on the retry too");
+    eq(seen[1].reads.revision.nextMapVersion === 1 && seen[1].reads.nextMapVersion === undefined, true, "on the retry the hint rides the READS inside the revision");
     eq(seen[1].reads["inbox.entry"], ENTRY, "the entry stays VERBATIM — our feedback is never quote-able anchor text");
     deepEq(seen[1].reads["plan.dor.gaps"], GAPS, "the declared reads are unchanged on the retry");
   });
@@ -973,6 +1170,175 @@ async function main() {
     });
     eq(result.status, "failed", "refused");
     eq(result.problems.some((p) => /mapVersion 7 is not the next persisted version \(1\)/.test(p)), true, `named: ${result.problems.join(" | ")}`);
+  });
+
+  // ── FOC-801: the store's allocation reaches the generator as a hint ───────
+
+  const CLEAN = (version) => mapWith({ mapVersion: version, covers: { goal: [GAPS[0]], scope: [GAPS[1]] }, quotes: { risk: "Out of scope: the mobile layout" } });
+  const RESUMED_READS = { ...RUN_READS, "gate.plan.gate1.answers": [], "gate.plan.gate1.corrections": [] };
+  const RESUMED_PRESENTED = { 1: { round: 1, mapVersion: 1, questions: [] } };
+
+  await test("a resumed run gets the allocation as a hint and persists the next version (FOC-801)", async () => {
+    // The re-entry shape: maps already holds version 1, the model must write 2.
+    // Without the hint it could only guess — the old flow rejected the guess,
+    // burned the single regeneration on the same mismatch, and failed the node.
+    const { maps } = persistMap({}, CLEAN(1));
+    const v2 = CLEAN(2);
+    const seen = [];
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RESUMED_READS,
+      generator: async (args) => { seen.push(args); return v2; },
+      validate,
+      maps,
+      presented: RESUMED_PRESENTED,
+    });
+    eq(result.status, "done", `a resumed run persists: ${JSON.stringify(result.error)}`);
+    eq(result.mapVersion, 2, "the next persisted version");
+    eq(result.maps[2], v2, "and the store carries it");
+    eq(seen.length, 1, "one call, no retry");
+    eq(seen[0].nextMapVersion, 2, "the FIRST attempt already carries the hint");
+    eq(seen[0].reads.nextMapVersion, 2, "and the hint rides the READS, the transport the production generator composes from");
+    // A re-entry's first attempt carries a `revision` block as well: the
+    // transport serializes only the declared reads plus `revision`, so the
+    // block is what gets the hint onto the actual WIRE (FOC-758's lesson —
+    // a top-level read key the step does not declare is dropped first).
+    eq(seen[0].reads.revision?.attempt, 1, "marked as the first attempt, not a retry");
+    eq(seen[0].reads.revision?.nextMapVersion, 2, "with the hint inside it — the field the model actually sees");
+    eq(seen[0].reads.revision?.previous, null, "no rejected map to carry");
+    eq(/No attempt was rejected/.test(seen[0].reads.revision?.note ?? ""), true, "the note says so in its first sentence — the frozen REVISION header cannot");
+  });
+
+  await test("a generator that ignores the hint is still rejected — the store owns identity (FOC-801)", async () => {
+    const { maps } = persistMap({}, CLEAN(1));
+    // The stale copy a resumed model would re-emit: the previous version's
+    // number, everything else clean.
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RESUMED_READS,
+      generator: async () => CLEAN(1),
+      validate,
+      maps,
+      presented: RESUMED_PRESENTED,
+    });
+    eq(result.status, "failed", "refused");
+    eq(result.error.code, "schema_invalid", "typed as schema_invalid");
+    eq(result.problems.some((p) => /mapVersion 1 is not the next persisted version \(2\)/.test(p)), true, `named: ${result.problems.join(" | ")}`);
+  });
+
+  await test("the retry carries the hint and repairs the rejected map's identity in the revision (FOC-801)", async () => {
+    const { maps } = persistMap({}, CLEAN(1));
+    const bad = CLEAN(7); // mis-numbered AND otherwise clean — the identity is the only problem
+    const seen = [];
+    const result = await runPlanIntentNode({
+      step: STEP,
+      reads: RESUMED_READS,
+      generator: async (args) => { seen.push(args); return seen.length === 1 ? bad : CLEAN(2); },
+      validate,
+      maps,
+      presented: RESUMED_PRESENTED,
+    });
+    eq(result.status, "done", `the regeneration recovered: ${JSON.stringify(result.error)}`);
+    eq(result.mapVersion, 2, "the next persisted version");
+    eq(seen[0].nextMapVersion, 2, "the hint on the first attempt");
+    eq(seen[0].reads.nextMapVersion, 2, "riding the first attempt's READS (FOC-801: the contract's transport)");
+    eq(seen[1].nextMapVersion, 2, "the same hint on the retry");
+    eq(seen[1].reads.nextMapVersion === undefined && seen[1].reads.revision.nextMapVersion === 2, true, "the retry's READS carry it inside the revision");
+    eq(seen[1].reads.revision.nextMapVersion, 2, "the revision carries the allocation for transports that serialize it whole");
+    eq(seen[1].reads.revision.previous.mapVersion, 2, "the rejected map's stale 7 is overwritten with the allocation");
+    eq(bad.mapVersion, 7, "the caller's rejected map object is untouched — the copy is the revision's");
+  });
+
+  // ── the WIRE: the hint must reach the MODEL, not just the seam object ──────
+  //
+  // The FOC-758 lesson, restated for FOC-801: the object handed to the
+  // generator is not the wire. `createDefaultGenerator` composes the model's
+  // message from the DECLARED `step.reads` plus the optional serialized
+  // `revision` — a top-level read key the step does not declare (and
+  // `nextMapVersion` is not one of the five in config/decisions.json) is
+  // dropped before the wire, and an extra generator arg is ignored outright.
+  // These assertions pin the actual request body; without them the fix looks
+  // green while the model still never hears the number on a re-entry.
+
+  await test("FOC-801 wire: the allocation reaches the model on a re-entry's FIRST attempt — and a fresh call stays byte-identical", async () => {
+    const { createDefaultGenerator } = await import("./graph-runner.mjs");
+    const dir = mkdtempSync(join(tmpdir(), "foc-801-wire-"));
+    try {
+      const fetchCalls = [];
+      const serveQueue = []; // maps the stub returns in order; empty → CLEAN(2)
+      const fetchImpl = async (url, options) => {
+        fetchCalls.push({ options });
+        const content = serveQueue.length ? serveQueue.shift() : CLEAN(2);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: "resp-foc-801-wire",
+            model: "z-ai/glm-5.3-flash",
+            choices: [{ message: { content: JSON.stringify(content) }, finish_reason: "stop" }],
+            provider: "z-ai",
+            usage: { input_tokens: 1, output_tokens: 1, cost: 0 },
+          }),
+        };
+      };
+      const generate = createDefaultGenerator({ apiKey: "test-key", runId: "run-foc-801-wire", taskKey: "T1", shadowDir: dir, fetchImpl });
+      const wireMessage = (n) => JSON.parse(fetchCalls[n].options.body).messages[0].content;
+
+      // (1) RE-ENTRY (the store holds v1) — accepted on the FIRST attempt.
+      const { maps } = persistMap({}, CLEAN(1));
+      const reentry = await runPlanIntentNode({
+        step: STEP,
+        reads: RESUMED_READS,
+        generator: (args) => generate(args),
+        validate,
+        maps,
+        presented: RESUMED_PRESENTED,
+      });
+      eq(reentry.status, "done", `re-entry done through the real generator: ${JSON.stringify(reentry.error)}`);
+      eq(reentry.mapVersion, 2, "persisted as the next version");
+      eq(fetchCalls.length, 1, "accepted on the FIRST attempt — the hint removes the wasted rejection round-trip");
+      const first = wireMessage(0);
+      if (!first.includes("REVISION (the previous attempt was rejected")) fail("the REVISION section is on the wire — the transport's only composition channel");
+      if (!first.includes('"nextMapVersion":2')) fail(`the ALLOCATED VERSION reaches the model on the first attempt: …${first.slice(-400)}`);
+      if (!first.includes("No attempt was rejected")) fail("the re-entry note says so in its first sentence — the frozen header cannot");
+      if (first.indexOf('"nextMapVersion"') < first.indexOf("INPUTS (declared reads")) fail("the hint rides in REVISION (after the declared reads), never in place of them");
+
+      // (2) REGENERATION wire — the hint rides the revision as before.
+      fetchCalls.length = 0;
+      serveQueue.push(CLEAN(7)); // mis-numbered: rejected once, then CLEAN(2)
+      const regen = await runPlanIntentNode({
+        step: STEP,
+        reads: RESUMED_READS,
+        generator: (args) => generate(args),
+        validate,
+        maps,
+        presented: RESUMED_PRESENTED,
+      });
+      eq(regen.status, "done", `the regeneration recovered: ${JSON.stringify(regen.error)}`);
+      eq(fetchCalls.length, 2, "the mis-numbered map was rejected once, the regen accepted");
+      const retry = wireMessage(1);
+      if (!retry.includes('"nextMapVersion":2')) fail(`the hint rides the REGENERATION wire too: …${retry.slice(-400)}`);
+
+      // (3) FRESH call (allocation 1) — no re-entry: the message must carry NO
+      // REVISION section at all (the FOC-449 input-hash contract).
+      fetchCalls.length = 0;
+      serveQueue.push(CLEAN(1));
+      const fresh = await runPlanIntentNode({
+        step: STEP,
+        reads: RUN_READS,
+        generator: (args) => generate(args),
+        validate,
+        maps: {},
+        presented: {},
+      });
+      eq(fresh.status, "done", `fresh call done: ${JSON.stringify(fresh.error)}`);
+      eq(fetchCalls.length, 1, "one call");
+      const freshMessage = wireMessage(0);
+      if (/REVISION \(/.test(freshMessage)) fail("a fresh call carries NO REVISION section — its message is byte-identical to before");
+      if (!freshMessage.includes(`- inbox.entry: ${JSON.stringify(ENTRY)}`)) fail("the declared reads are still the inputs");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   await test("the node fails closed on malformed reads with zero generator calls", async () => {

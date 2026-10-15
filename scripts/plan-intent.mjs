@@ -575,10 +575,14 @@ export function resolveReference({ maps, mapVersion, interpretationId }) {
 
 /**
  * Fold the gate1 answers and corrections into the validated set. Every
- * reference must resolve AND its `about` must match the persisted claim/option
- * verbatim; anything else is STALE — detected, recorded, NOT applied. The
- * affected point must then reappear as `unknown`/`inferred` in the new map
- * (check (a) still covers it).
+ * reference must resolve AND its `about` must match the persisted claim and
+ * the option text actually presented in that round verbatim (FOC-801: the
+ * claim's ground truth is the persisted map, the option's is
+ * `presented[round]` — the selection may present texts the map itself does
+ * not carry, and may never have shown the item at all); anything else is
+ * STALE — detected, recorded, NOT applied. The affected point must then
+ * reappear as `unknown`/`inferred` in the new map (check (a) still covers
+ * it).
  */
 export function foldGateAnswers({ round, maps, presented, answers = [], corrections = [] }) {
   const idMapCheck = verifyIdMap(maps);
@@ -629,9 +633,24 @@ export function foldGateAnswers({ round, maps, presented, answers = [], correcti
     }
     const aboutOption = record.about?.option;
     if (aboutOption !== undefined) {
-      const texts = (resolved.item.options ?? []).map((o) => o?.text);
+      // FOC-801: the option's ground truth is the PRESENTED store — the
+      // question actually put to the user in that round, looked up by the
+      // record's interpretationId and falling back to the idMap-resolved id
+      // (a renumbered reference answers the question its id was shown as).
+      // The selection may present texts the map itself does not carry (the
+      // alternatives override builds a question's options from the claim and
+      // its alternatives — a `stated`/`inferred` item has NO map options at
+      // all). When the presented slice carries no options for the id (minimal
+      // fixtures, non-question items), the check falls back to the map's own
+      // options; anything else is STALE with a reason naming the presented
+      // store.
+      const questions = presented[record.round].questions ?? [];
+      const shown = questions.find((q) => q?.id === record.interpretationId)
+        ?? (resolved.renumberedFrom ? questions.find((q) => q?.id === resolved.id) : undefined);
+      const presentedTexts = (shown?.options ?? []).map((o) => o?.text);
+      const texts = presentedTexts.length > 0 ? presentedTexts : (resolved.item.options ?? []).map((o) => o?.text);
       if (!texts.some((t) => sameText(t, aboutOption))) {
-        push(`about.option does not match any persisted option text of ${record.mapVersion}/${resolved.id} verbatim`);
+        push(`about.option does not match any option text presented for ${record.mapVersion}/${record.interpretationId} in round ${record.round} verbatim`);
         continue;
       }
     }
@@ -666,6 +685,20 @@ const REGEN_NOTE_NO_MAP = "One regeneration: the previous attempt produced no ma
   + "so there is no rejected map to show below. The reasons are listed under problems. Regenerate the FULL "
   + "map against the same reads, with every problem resolved: the map is all-or-nothing and a partially "
   + "valid map is never kept.";
+
+// A RE-ENTRY (a new round after the gate answers) is not a retry. The frozen
+// transport's REVISION header still reads "the previous attempt was rejected",
+// so the note opens by saying that nothing was; "produce a different map"
+// under that header is still true for a re-entry (the new map differs from the
+// persisted one). The block exists for DELIVERY: `revision` is the only
+// caller-composition field the transport serializes into the model's message
+// (FOC-758 (a)), so it is what gets `nextMapVersion` to the actual model on
+// the FIRST attempt of a re-entry — a top-level read key the step does not
+// declare is dropped before the wire, the lesson the FOC-801 object-level
+// tests cannot see.
+const REGEN_NOTE_REENTRY = "No attempt was rejected. This call is a RE-ENTRY after the gate answers — a new "
+  + "round over a store that already holds an earlier map (immutable). Produce a DIFFERENT map than that "
+  + "earlier one, folding the answers below into it.";
 
 /**
  * FOC-758: the validator's concrete violations as regeneration problems — ONE
@@ -717,6 +750,21 @@ function stringLengthAt(output, instancePath) {
  * contract; their write side is FOC-517's (the gate1 fields) and the intake
  * side FOC-397's. In round 1 both are empty and the fold is a no-op. The
  * result carries the folded `stale` log so the run record can carry it too.
+ *
+ * FOC-801: the next mapVersion is allocated BEFORE the generator call and
+ * rides both attempts' READS as a `nextMapVersion` hint (a top-level field
+ * over the payload on attempt 1, inside the serialized revision on the
+ * retry) — the model cannot see the persisted store, so a resumed run
+ * (re-entry after gate1 reset, maps already holding a version) could only
+ * guess a number persistMap would reject, burning the single regeneration on
+ * the same mismatch and failing the node. The reads carry the hint because
+ * the production transport composes its message from the reads alone and may
+ * drop unknown generator args. A RE-ENTRY also rides a `revision` block on
+ * attempt 1 (reentryReads): the transport serializes only the DECLARED reads
+ * plus `revision`, so without the block the first attempt's hint is dropped
+ * before the wire and the known-bad call repeats (the FOC-758 class). The
+ * store still owns identity: the hint prevents the mismatch, a generator that
+ * ignores it is still rejected, never silently renumbered.
  *
  * Returns `{status:"done", output, mapVersion, maps, checks, fold, attempts}`
  * or `{status:"failed", error, checks?, fold}` — it never throws on data
@@ -773,6 +821,14 @@ export async function runPlanIntentNode({
   }
   const anchors = anchorSet(fold.valid.map((v) => v.record), reads?.["inbox.entry"]);
 
+  // Identity is the STORE's to allocate: monotonic, never reused (Decision
+  // 2026-09-24). The number is computed BEFORE the generator call so the
+  // model gets it as a hint riding the reads (FOC-801) — the prompt states
+  // the rule, but the model cannot see the store, and a resumed run's guess
+  // is a guaranteed persistMap rejection. A map that arrives mis-numbered
+  // anyway is still a rejection, never a silent renumber.
+  const allocated = allocateMapVersion(maps);
+
   // 3–4. generate → validate → (one regeneration) → validate → stop. An empty
   //      or non-JSON generator response (unparseable_output) is a REJECTED
   //      MAP, not a transport failure: it gets the same ONE regeneration, its
@@ -784,7 +840,24 @@ export async function runPlanIntentNode({
   for (let attempt = 1; attempt <= 2; attempt++) {
     let raw;
     try {
-      raw = await generator({ stepId, step, reads: attempt === 1 ? payload : regenReads(payload, previousMap, problems) });
+      raw = await generator({
+        stepId,
+        step,
+        // FOC-801: the hint rides the READS on both attempts. A fresh call
+        // (allocation 1) carries it as a clearly-named field over the payload
+        // and nothing else — its message stays byte-identical. A RE-ENTRY
+        // (allocation > 1) additionally carries a `revision` block, because
+        // the production transport composes the model's message from the
+        // DECLARED reads alone plus the serialized revision: a top-level read
+        // key the step does not declare is dropped before the wire (FOC-758's
+        // lesson), so without the block the FIRST attempt never sees the
+        // number and burns itself on a guaranteed persistMap rejection. The
+        // retry carries it inside the serialized revision (regenReads).
+        reads: attempt === 1
+          ? (allocated > 1 ? reentryReads(payload, allocated) : { ...payload, nextMapVersion: allocated })
+          : regenReads(payload, previousMap, problems, allocated),
+        nextMapVersion: allocated,
+      });
     } catch (err) {
       const code = err instanceof Error && err.code ? err.code : "provider_error";
       if (code === "unparseable_output" && attempt === 1) {
@@ -809,9 +882,9 @@ export async function runPlanIntentNode({
       // to shorten. Without .errors the generic problem stands (mock seam).
       problems.push(...(schemaProblems(raw, validate.errors) ?? ["the map failed the step's output schema"]));
     } else {
-      // Identity is the STORE's to allocate: monotonic, never reused. A
-      // mis-numbered map is a rejection, never a silent renumber.
-      const allocated = allocateMapVersion(maps);
+      // A mis-numbered map is a rejection, never a silent renumber — the
+      // allocation above is the number the store will accept, and the hint
+      // already handed it to the generator on this attempt (FOC-801).
       if (raw.mapVersion !== allocated) {
         problems.push(`mapVersion ${raw.mapVersion} is not the next persisted version (${allocated})`);
       }
@@ -859,15 +932,55 @@ function rejectedMessage(stepId, problems) {
  * composition (the FOC-474 precedent the plan.ac loop follows) — the declared
  * reads stay exactly five, and `inbox.entry` is left VERBATIM so the anchor
  * set cannot pick up our own feedback as quote text.
+ *
+ * FOC-801, two changes inside the revision:
+ *   - the rejected map's own `mapVersion` is OVERWRITTEN with the store's
+ *     allocation. A stale number the model could copy off the rejected map
+ *     must not re-enter the loop as its own guess — arm-A had exactly that
+ *     shape, the rejection repeating until `schema_invalid`. The copy is a
+ *     new object; the caller's `previousMap` (and the store) are untouched;
+ *   - `nextMapVersion` carries the store's allocation, so a transport that
+ *     serializes the revision whole (the default one does) hands the model
+ *     the number the prompt's rule cannot compute. The store still owns
+ *     identity: runPlanIntentNode re-checks and persistMap still rejects a
+ *     wrong number, never a silent renumber.
+ *
+ * Together with attempt 1's top-level `nextMapVersion` payload field (see
+ * runPlanIntentNode) this is the READS transport of the hint on both
+ * attempts; the generator arg is a convenience for injected generators.
  */
-function regenReads(payload, previous, problems) {
+function regenReads(payload, previous, problems, nextMapVersion) {
   return {
     ...payload,
     revision: {
       attempt: 2,
       note: previous === null ? REGEN_NOTE_NO_MAP : REGEN_NOTE,
       problems: [...problems],
-      previous: previous ?? null,
+      ...(Number.isInteger(nextMapVersion) ? { nextMapVersion } : {}),
+      previous: previous === null ? null : { ...previous, mapVersion: nextMapVersion },
+    },
+  };
+}
+
+/**
+ * The FIRST attempt of a RE-ENTRY (allocation > 1 — the store already holds a
+ * map, so this call produces the next version, not version 1). The `revision`
+ * block here carries NO rejection: it exists so the hint reaches the model at
+ * all — the transport serializes only the declared reads plus `revision`, and
+ * `nextMapVersion` is not a declared read (config/decisions.json is fixed).
+ * `attempt: 1` and `previous: null` say so structurally; the note says so in
+ * words, because the transport's REVISION header is frozen rejection wording.
+ */
+function reentryReads(payload, nextMapVersion) {
+  return {
+    ...payload,
+    nextMapVersion,
+    revision: {
+      attempt: 1,
+      note: REGEN_NOTE_REENTRY,
+      problems: [],
+      ...(Number.isInteger(nextMapVersion) ? { nextMapVersion } : {}),
+      previous: null,
     },
   };
 }
