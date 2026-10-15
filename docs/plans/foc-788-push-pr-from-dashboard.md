@@ -217,3 +217,13 @@ One logical record, three sinks, written before the success response returns:
   bare carries 0 refs and no `publish-actions.jsonl` row exists. The browser confirm-walk and the
   real-provider evidence are Mateusz's separate human run (§6 S5) — no publish with a valid
   confirmToken was ever posted outside the test fixture.
+
+## 9. Follow-up found in the walk — FOC-815 (child of this issue)
+
+The Work board showed `Linear unavailable: … Entity not found: Issue` whenever the WORK-99 fixture
+sat next to real tickets: `fetchLinearStates` batches ≤50 ids per workspace and Linear nulls `data`
+for the whole batch over one unknown id (`errors[]` with `path:["aN"]`, verified live 2026-10-15),
+so one unknown id poisoned every sibling's enrichment. Filed as **FOC-815** (subtask of FOC-788)
+and fixed there: per-issue misses resolve silently (retry without the missing ids, bisect fallback),
+real failures still surface as `Linear unavailable`, misses ride the 60 s cache, and the chunk walk
+no longer skips ids when `remaining` shrinks mid-pass (a second, latent bug at 51+ ids).
