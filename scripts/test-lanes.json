@@ -257,6 +257,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "permission-rules.test.mjs",
+      "reason": "isolation audit (FOC-511): pure unit tests over literal rule strings (a model of the documented Claude Code permission matcher); no fs, no ports, no socket binds, no telemetry DB"
+    },
+    {
       "file": "prompt-external.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
@@ -359,6 +363,10 @@
     {
       "file": "supervisor-current-run.test.mjs",
       "reason": "isolation audit FOC-807: mkdtemp/tmpdir fixtures only; library paths passed explicitly and the CLI child inherits the LA_DATA_HOME / LA_SUPERVISOR_STATE_HOME seams pointed at temp dirs; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
+      "file": "supervisor-deny.test.mjs",
+      "reason": "isolation audit (FOC-511): pure unit test — SUPERVISOR_DENY run through the permission-rules model over literal command strings; no fs, no ports, no socket binds, no telemetry DB"
     },
     {
       "file": "supervisor-edits-hook.test.mjs",

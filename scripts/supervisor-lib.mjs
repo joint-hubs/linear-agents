@@ -1477,18 +1477,33 @@ export const SUPERVISOR_DENY = [
   "Bash(gh api:*)",
   "Bash(git worktree remove:*)",
   "Bash(git worktree prune:*)",
-  // Linear writes go through the frontman, never a child. FOC-213 (2026-09-05):
-  // a dev child found the script path and posted a Linear comment + state
-  // transition behind the mcp__linear__* deny, because the deny-list covers the
-  // MCP server, not the CLI scripts that wrap the same API. The rules below cut
-  // the launcher-documented invocation (`node $LA_ROOT/scripts/...`). Same
-  // caveat as the push rules above — a child that rewrites the path (`node
-  // C:/.../linear-ops.mjs`, `cmd /c`, cd + relative) walks past the prefix
-  // match; this removes the accidental write, and the frontman relay remains
-  // the real control.
+  // Linear writes go through the frontman, never a child. FOC-213 (2026-09-05)
+  // found the launcher-form gap; FOC-511 closes the invocation-form gaps.
+  // Claude Code matches a Bash/PowerShell rule against the whole command text
+  // with `*` matching any text, and a deny applies when any subcommand of a
+  // compound command matches (`cd x && node scripts/linear-ops.mjs …` is
+  // caught). These wildcard forms cover the launcher, relative and absolute
+  // invocations and the PowerShell tool, which every squad allow-lists as
+  // `PowerShell(node *)`. `linear-push.mjs` (the createIssue funnel) and
+  // `gh-screened.mjs` (the Supervisor's screened PR path, FOC-512) join the
+  // list. The `node ` prefix keeps `cat`, `git diff` and
+  // `node --test scripts/<x>.test.mjs` outside the rule.
+  // Residual, documented by Claude Code: a different invocation form
+  // (`sh -c '…'`, `cmd /c`, `node.exe`, wrapper scripts) is not matched —
+  // sandboxing or a PreToolUse hook is the boundary there.
   "Bash(node $LA_ROOT/scripts/linear-ops.mjs:*)",
   "Bash(node $LA_ROOT/scripts/publish-linear-comment.mjs:*)",
   "Bash(node $LA_ROOT/scripts/linear-query.mjs:*)",
+  "Bash(node *linear-ops.mjs*)",
+  "PowerShell(node *linear-ops.mjs*)",
+  "Bash(node *publish-linear-comment.mjs*)",
+  "PowerShell(node *publish-linear-comment.mjs*)",
+  "Bash(node *linear-query.mjs*)",
+  "PowerShell(node *linear-query.mjs*)",
+  "Bash(node *linear-push.mjs*)",
+  "PowerShell(node *linear-push.mjs*)",
+  "Bash(node *gh-screened.mjs*)",
+  "PowerShell(node *gh-screened.mjs*)",
 ];
 
 export const childSettingsPath = (runId, childId) =>

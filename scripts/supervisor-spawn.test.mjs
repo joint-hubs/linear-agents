@@ -666,6 +666,44 @@ test("every squad's committed settings.json already denies git push", () => {
   }
 });
 
+test("the deny list covers relative, absolute and PowerShell forms of every Linear helper and the gh wrapper", () => {
+  // FOC-511: the launcher-form rules cut only `node $LA_ROOT/scripts/<x>.mjs …`.
+  // Each helper also gets the wildcard form, which matches the whole command
+  // text — relative, absolute and PowerShell invocations fall under the same
+  // deny. Membership here pins the list itself; scripts/supervisor-deny.test.mjs
+  // (written against the documented matcher) proves the matching semantics.
+  const forms = [
+    "Bash(node *linear-ops.mjs*)",
+    "PowerShell(node *linear-ops.mjs*)",
+    "Bash(node *publish-linear-comment.mjs*)",
+    "PowerShell(node *publish-linear-comment.mjs*)",
+    "Bash(node *linear-query.mjs*)",
+    "PowerShell(node *linear-query.mjs*)",
+    "Bash(node *linear-push.mjs*)",
+    "PowerShell(node *linear-push.mjs*)",
+    "Bash(node *gh-screened.mjs*)",
+    "PowerShell(node *gh-screened.mjs*)",
+  ];
+  for (const rule of forms) {
+    if (!SUPERVISOR_DENY.includes(rule)) fail(`SUPERVISOR_DENY is missing ${rule}`);
+    const deny = buildChildSettings({ permissions: { deny: [] } }).permissions.deny;
+    if (!deny.includes(rule)) fail(`generated child settings are missing ${rule}`);
+  }
+});
+
+test("dev, review and test committed settings.json deny mcp__linear__* and only plan allows it", () => {
+  // FOC-511: a test child made live Linear mutations on FOC-450 through the MCP
+  // server the squad still allowed. TEST never talks to Linear — the Supervisor
+  // relays — so the allow goes and a deny comes. PLAN keeps its allow; cutting
+  // PLAN's MCP reads is a separate decision.
+  for (const squad of ["dev", "review", "test"]) {
+    const perms = JSON.parse(readFileSync(join(ROOT, "agents", squad, "settings.json"), "utf8")).permissions;
+    if (!(perms?.deny ?? []).includes("mcp__linear__*")) fail(`agents/${squad}/settings.json no longer denies mcp__linear__*`);
+    if ((perms?.allow ?? []).includes("mcp__linear__*")) fail(`agents/${squad}/settings.json still allows mcp__linear__*`);
+  }
+  JSON.parse(readFileSync(join(ROOT, "agents", "plan", "settings.json"), "utf8"));
+});
+
 // ── CodeGraph launch readiness (plan §4) ─────────────────────────────────────
 // runSpawn defaults to LA_SUPERVISOR_NO_CODEGRAPH=1, so the tests above never
 // provision a real index. The ones below are the only place the preflight runs —
