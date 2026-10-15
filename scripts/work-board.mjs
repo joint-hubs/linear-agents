@@ -465,11 +465,47 @@ const linearStateOf = (issue) => ({
 });
 
 /**
+ * A per-issue miss ("Entity not found: Issue"): Linear answered and this id is
+ * simply not in that workspace. Not "Linear unavailable" — and never a reason
+ * to drop the batch's siblings (FOC-815).
+ */
+const isIssueMiss = (message) =>
+  /\bentity not found\b/i.test(String(message)) || /\bissue not found\b/i.test(String(message));
+
+/**
+ * The chunk ids a GraphQL error batch blames, when the batch's errors carry
+ * per-error `path` (linear-client attaches the raw shapes as
+ * `err.graphqlErrors`; a seam that does not leaves this null and the batch is
+ * bisected instead). Any error that is not an issue miss, or any path that
+ * does not name one of this chunk's aliases, makes the attribution unusable →
+ * null.
+ */
+export function issueMissesOf(err, chunk) {
+  const gqlErrors = err?.graphqlErrors;
+  if (!Array.isArray(gqlErrors) || gqlErrors.length === 0) return null;
+  const misses = [];
+  for (const ge of gqlErrors) {
+    if (!isIssueMiss(ge?.message)) return null;
+    const path = Array.isArray(ge?.path) ? ge.path : null;
+    const m = path?.length === 1 && typeof path[0] === "string" ? /^a(\d+)$/.exec(path[0]) : null;
+    const n = m ? Number(m[1]) : NaN;
+    if (!Number.isInteger(n) || n < 0 || n >= chunk.length) return null;
+    misses.push(chunk[n]);
+  }
+  return misses.length ? [...new Set(misses)] : null;
+}
+
+/**
  * Linear state (name/type/title/url/priority/milestone/labels) per identifier, one
  * batched alias request per chunk of ≤ 50 ids per workspace: jointhubs first,
  * then pisi for whatever jointhubs did not know (findIssueProject's order).
- * Any failed request degrades gracefully: the states that did resolve come
- * back, plus an error string the caller shows ("Linear unavailable").
+ * A request that fails with per-issue misses is retried without the missing
+ * ids (attributed by error path) or bisected down to single ids when no paths
+ * are usable — Linear nulls `data` for a whole batch over one unknown id, so
+ * siblings must be re-asked, never discarded. A miss resolves to no state and
+ * no error, exactly like a null alias. Real failures (auth, network, rate
+ * limit) degrade gracefully: the states that did resolve come back, plus an
+ * error string the caller shows ("Linear unavailable").
  */
 export async function fetchLinearStates(identifiers, { graphqlFor = defaultGraphqlFor } = {}) {
   const ids = [...new Set((identifiers ?? []).filter(isSafeLinearId))];
@@ -484,11 +520,21 @@ export async function fetchLinearStates(identifiers, { graphqlFor = defaultGraph
   let fetchedAt = null;
   let remaining = ids;
 
+  // Linear answered (200 — even a miss batch is an answer), so the lookup has
+  // a fetch time. A transport-level failure never reaches this.
+  const markFetched = () => {
+    if (fetchedAt === null) fetchedAt = new Date().toISOString();
+  };
+
   for (const workspace of [undefined, "pisi"]) {
     if (!remaining.length) break;
     const gql = graphqlFor(workspace);
-    for (let i = 0; i < remaining.length; i += LINEAR_CHUNK) {
-      const chunk = remaining.slice(i, i + LINEAR_CHUNK);
+    const label = workspace ?? "jointhubs";
+
+    // Resolve one chunk in this workspace. Returns "ok" (keep going), "stop"
+    // (this workspace is done without an error) or "failed" (a real failure
+    // was recorded in `errors`).
+    const resolveChunk = async (chunk) => {
       const aliases = chunk.map(
         (id, n) =>
           `a${n}: issue(id: ${JSON.stringify(id)}) { identifier title url priority priorityLabel state { name type } projectMilestone { name } labels(first: 20) { nodes { id name color } } }`,
@@ -502,22 +548,55 @@ export async function fetchLinearStates(identifiers, { graphqlFor = defaultGraph
         // graphql() refuses the request with this exact message BEFORE any
         // network call (chooseApiKey found nothing). Skip the pass quietly —
         // the lookup still succeeds with whatever jointhubs resolved.
-        if (workspace === "pisi" && message.includes("LINEAR_API_KEY not set for workspace 'pisi'")) break;
-        errors.push(`${workspace ?? "jointhubs"}: ${message}`);
-        break; // this workspace is out; the next one gets its chance
+        if (workspace === "pisi" && message.includes("LINEAR_API_KEY not set for workspace 'pisi'")) return "stop";
+
+        // Per-issue misses: re-ask without the missing ids when the errors
+        // name their aliases; bisect when they do not. Either way one unknown
+        // id ends as a silent miss — it still gets its pisi chance below.
+        const misses = issueMissesOf(err, chunk);
+        if (misses) {
+          markFetched();
+          const retry = chunk.filter((id) => !misses.includes(id));
+          return retry.length ? resolveChunk(retry) : "ok";
+        }
+        if (isIssueMiss(message)) {
+          markFetched();
+          if (chunk.length === 1) return "ok"; // one unknown id: a miss, like a null alias
+          const mid = Math.ceil(chunk.length / 2);
+          const first = await resolveChunk(chunk.slice(0, mid));
+          return first === "ok" ? resolveChunk(chunk.slice(mid)) : first;
+        }
+
+        errors.push(`${label}: ${message}`);
+        return "failed";
       }
-      if (fetchedAt === null) fetchedAt = new Date().toISOString();
+      markFetched();
       chunk.forEach((id, n) => {
         const issue = data?.[`a${n}`];
         if (issue) states[id] = linearStateOf(issue);
       });
+      return "ok";
+    };
+
+    // The pass walks a snapshot: `remaining` shrinks as ids resolve, and
+    // indexing the shrinking list skipped everything past the first chunk's
+    // resolution (with 51+ ids those were never asked in this workspace).
+    const pass = remaining.slice();
+    for (let i = 0; i < pass.length; i += LINEAR_CHUNK) {
+      const chunk = pass.slice(i, i + LINEAR_CHUNK).filter((id) => !states[id]);
+      if (!chunk.length) continue;
+      const status = await resolveChunk(chunk);
+      if (status !== "ok") break;
       remaining = remaining.filter((id) => !states[id]);
       if (!remaining.length) break;
     }
   }
 
   const error = errors.length ? errors.join("; ") : null;
-  if (error === null && remaining.length === 0) {
+  // Cache misses too (FOC-815): "this id has no state here" is an answer, and
+  // without caching a permanently unknown id re-ran the whole lookup — batch,
+  // retry chain and all — on every board paint.
+  if (error === null) {
     cachedLinearStates.set(key, { states, fetchedAt, fetchedAtMs: Date.now() });
   }
   return { states, error, fetchedAt };

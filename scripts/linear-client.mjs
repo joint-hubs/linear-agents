@@ -119,7 +119,14 @@ export async function graphql(query, vars = {}, workspace) {
     // the worse one would have made diagnostics harder on the push path
     // (code-review-2026-08-03 §2).
     const msgs = body.errors.map((e) => e?.message).filter(Boolean).join("; ");
-    throw new Error(`GraphQL error: ${msgs || JSON.stringify(body.errors[0])}`);
+    const error = new Error(`GraphQL error: ${msgs || JSON.stringify(body.errors[0])}`);
+    // The raw per-error shapes ride the thrown error (FOC-815): a batched
+    // caller (work-board's fetchLinearStates) needs `path` to see WHICH alias
+    // failed and `message` to tell an issue miss from an outage — Linear
+    // answers a batch containing one unknown id by nulling `data` for the
+    // whole operation. Additive: the message text is unchanged.
+    error.graphqlErrors = body.errors;
+    throw error;
   }
 
   return body.data;

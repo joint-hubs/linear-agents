@@ -391,23 +391,28 @@ test("buildBoardPayload: cost rows attach, missing stay null", () => {
   assert.equal(payload.tickets.find((t) => t.taskId === "FOC-103").cost, null);
 });
 
-test("fetchLinearStates: 51 ids → 2 batched requests; then the cache serves the rest", async () => {
+test("fetchLinearStates: 51 ids → 2 batched requests in ONE workspace pass; then the cache serves the rest", async () => {
   const ids = Array.from({ length: 51 }, (_, i) => `FOC-${300 + i}`);
   let requests = 0;
-  const gql = async (query) => {
+  const asked = [];
+  const gql = (workspace) => async (query) => {
     requests += 1;
     const aliases = [...query.matchAll(/a(\d+): issue\(id: "([^"]+)"\)/g)];
     assert.ok(aliases.length <= 50, "never more than 50 aliases per request");
+    asked.push([workspace ?? "jointhubs", aliases.length]);
     return Object.fromEntries(aliases.map(([, n, id]) => [`a${n}`, { identifier: id, title: `T ${id}`, url: `https://linear.app/${id}`, priority: 2, priorityLabel: "High", state: { name: "Todo", type: "unstarted" }, projectMilestone: { name: "M1" } }]));
   };
-  const first = await fetchLinearStates(ids, { graphqlFor: () => gql });
+  const first = await fetchLinearStates(ids, { graphqlFor: gql });
   assert.equal(requests, 2); // 50 + 1
+  // Both chunks belong to the same workspace pass: the 51st id must be asked
+  // of jointhubs — never lost because `remaining` shrank mid-walk (FOC-815).
+  assert.deepEqual(asked, [["jointhubs", 50], ["jointhubs", 1]]);
   assert.equal(Object.keys(first.states).length, 51);
   assert.equal(first.states["FOC-300"].priority.name, "High");
   assert.equal(first.states["FOC-300"].milestone, "M1");
   assert.equal(first.error, null);
 
-  const second = await fetchLinearStates([...ids].reverse(), { graphqlFor: () => gql });
+  const second = await fetchLinearStates([...ids].reverse(), { graphqlFor: gql });
   assert.equal(requests, 2); // cache hit — keyed by the sorted id list
   assert.deepEqual(second.states, first.states);
 });
@@ -474,6 +479,114 @@ test("fetchLinearStates: a missing pisi API key skips the pass instead of failin
   assert.equal(second.error, null);
   assert.ok(second.states["FOC-500"]);
   assert.equal(second.states["PISI-8"], undefined);
+});
+
+// ── FOC-815: one unknown id must not poison the batch ────────────────────────
+
+test("fetchLinearStates: one unknown id does not poison its siblings (error paths attribute the miss)", async () => {
+  // The live API answers a batch containing an unknown id with errors[] (one
+  // entry, path=["aN"]) and data:null for the WHOLE operation — the siblings
+  // must be re-asked without it, not discarded with it.
+  const calls = [];
+  const gql = (workspace) => async (query) => {
+    const ws = workspace ?? "jointhubs";
+    const aliases = [...query.matchAll(/a(\d+): issue\(id: "([^"]+)"\)/g)];
+    calls.push(`${ws}:${aliases.map(([, , id]) => id).join(",")}`);
+    const bad = aliases.find(([, , id]) => id === "WORK-902");
+    if (bad) {
+      const err = new Error("GraphQL error: Entity not found: Issue");
+      err.graphqlErrors = [{ message: "Entity not found: Issue", path: [`a${bad[1]}`] }];
+      throw err;
+    }
+    return Object.fromEntries(aliases.map(([, n, id]) => [`a${n}`, { title: `T ${id}`, state: { name: "Todo", type: "unstarted" } }]));
+  };
+  const { states, error } = await fetchLinearStates(["FOC-901", "WORK-902", "FOC-903"], { graphqlFor: gql });
+  assert.equal(error, null); // a miss is not "Linear unavailable"
+  assert.ok(states["FOC-901"] && states["FOC-903"]);
+  assert.equal(states["WORK-902"], undefined);
+  assert.deepEqual(calls, [
+    "jointhubs:FOC-901,WORK-902,FOC-903", // the poisoned batch
+    "jointhubs:FOC-901,FOC-903", // retry without the missing id
+    "pisi:WORK-902", // the unknown id still gets its pisi chance — and misses there too
+  ]);
+});
+
+test("fetchLinearStates: without usable error paths the batch is bisected, not dropped", async () => {
+  const calls = [];
+  const gql = async (query) => {
+    const aliases = [...query.matchAll(/a(\d+): issue\(id: "([^"]+)"\)/g)];
+    calls.push(aliases.map(([, , id]) => id).join(","));
+    if (aliases.some(([, , id]) => id === "WORK-905")) throw new Error("GraphQL error: Entity not found: Issue");
+    return Object.fromEntries(aliases.map(([, n, id]) => [`a${n}`, { title: `T ${id}`, state: { name: "Todo", type: "unstarted" } }]));
+  };
+  const { states, error } = await fetchLinearStates(["FOC-904", "WORK-905", "FOC-906"], { graphqlFor: () => gql });
+  assert.equal(error, null);
+  assert.ok(states["FOC-904"] && states["FOC-906"]);
+  assert.equal(states["WORK-905"], undefined);
+  // The chunk splits until the miss is alone; each sibling resolves at its own
+  // size. The last entry is the pisi pass asking the unknown id again.
+  assert.deepEqual(calls, ["FOC-904,WORK-905,FOC-906", "FOC-904,WORK-905", "FOC-904", "WORK-905", "FOC-906", "WORK-905"]);
+});
+
+test("fetchLinearStates: a real failure is still an error (and a mixed batch stays honest)", async () => {
+  // Case 1: a plain outage — the banner is the right answer.
+  const { states, error } = await fetchLinearStates(["FOC-907"], {
+    graphqlFor: () => async () => {
+      throw new Error("GraphQL error: Rate limited");
+    },
+  });
+  assert.deepEqual(states, {});
+  assert.match(error, /Rate limited/);
+
+  // Case 2: one miss + one real error in one batch — the real error must
+  // survive to the caller even though the batch also mentions a miss.
+  const calls = [];
+  const gql = async (query) => {
+    const aliases = [...query.matchAll(/a(\d+): issue\(id: "([^"]+)"\)/g)];
+    calls.push(aliases.map(([, , id]) => id).join(","));
+    const bad = aliases.find(([, , id]) => id === "WORK-909");
+    const sick = aliases.find(([, , id]) => id === "FOC-908");
+    if (bad || sick) {
+      const messages = [];
+      const graphqlErrors = [];
+      if (bad) {
+        messages.push("Entity not found: Issue");
+        graphqlErrors.push({ message: "Entity not found: Issue", path: [`a${bad[1]}`] });
+      }
+      if (sick) {
+        messages.push("Rate limited");
+        graphqlErrors.push({ message: "Rate limited", path: [`a${sick[1]}`] });
+      }
+      const err = new Error(`GraphQL error: ${messages.join("; ")}`);
+      err.graphqlErrors = graphqlErrors;
+      throw err;
+    }
+    return Object.fromEntries(aliases.map(([, n, id]) => [`a${n}`, { title: `T ${id}`, state: { name: "Todo", type: "unstarted" } }]));
+  };
+  const mixed = await fetchLinearStates(["WORK-909", "FOC-908"], { graphqlFor: () => gql });
+  assert.match(mixed.error, /Rate limited/); // the outage is reported…
+  assert.match(mixed.error, /jointhubs/);
+  assert.deepEqual(mixed.states, {}); // …and nothing was silently resolved
+});
+
+test("fetchLinearStates: a miss is cached — no re-query per board paint", async () => {
+  let requests = 0;
+  const gql = async (query) => {
+    requests += 1;
+    const aliases = [...query.matchAll(/a(\d+): issue\(id: "([^"]+)"\)/g)];
+    if (aliases.some(([, , id]) => id === "WORK-910")) {
+      const err = new Error("GraphQL error: Entity not found: Issue");
+      err.graphqlErrors = [{ message: "Entity not found: Issue", path: ["a0"] }];
+      throw err;
+    }
+    return Object.fromEntries(aliases.map(([, n, id]) => [`a${n}`, { title: `T ${id}`, state: { name: "Todo", type: "unstarted" } }]));
+  };
+  const first = await fetchLinearStates(["WORK-910"], { graphqlFor: () => gql });
+  assert.equal(first.error, null);
+  const afterFirst = requests;
+  const second = await fetchLinearStates(["WORK-910"], { graphqlFor: () => gql });
+  assert.equal(second.error, null);
+  assert.equal(requests, afterFirst); // "no state here" was an answer, and it was cached
 });
 
 // ── labels: fetch → normalization → payload → filter (the labels task) ───────
