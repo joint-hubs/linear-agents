@@ -3812,3 +3812,58 @@ zostaje rozliczenie osi kosztu). Tor B (M8) rusza, gdy tor A stanie: FOC-760+761
 
 #### Task workspace integration checkpoint (2026-10-14)
 P1–P4 code and wiring delivered in fenix-settings-keys (status consolidated in entry (31) above). API isolation regressions 48/48; host recovery on OS process identity 17/17; workspace claims + integration lock; UI history/isolation links; P2 tool profiles + all five real Thoughtmap tools; P3 runtime statistics (`/insights/runtime`) and P4 local task map (`/insights/map`); explicit stopped-history resume through queue/cap — 34 tests pass. Real-model probes: GLM Flash native-child OTLP trace attribution; local Ollama `embeddinggemma` map PASSED (digest `85462619ee721b466c5927d109d4cb765861907d5417b9109caebc4e614679f1`). Test lanes: 18 new backend suites registered, lane inventory + audit green; nav 24/24. Outstanding: runtime-hook producer integration, full Docker rebuild/redeploy + browser E2E acceptance, native worker MCP review/test, final ACCESS. Active Atlas jobs: hook `claude-606ac3`, watcher `claude-dd9312`. No commits made. See docs/plans/task-workspace-delivery.md.
+
+## 2026-10-15 — FOC-801 wylądował (`e0f8b40`) — nowa granica instrumentu — FOC-236 od zera jako pierwszy zliczony run arm A
+
+**Co było.** Attempt 5 arm A (FOC-236, 2026-10-12, run `…arma-05-foc236`) przeszedł całe
+`plan.gate1` i padł na re-entry: `mapVersion 1 is not the next persisted version (2)`.
+Przyczyna w źródle, nie w komunikacie — dwa błędy kontraktu w `plan-intent.mjs`:
+(1) `foldGateAnswers` walidował `about.option` o opcje **mapy** (nosi je tylko
+`source:'unknown'`), nie o options z **presented store** — 4 odpowiedzi Mateusza na pozycjach
+`'stated'` złożyły się STALE i jego decyzja bramkowa zniknęła z anchorów;
+(2) `runPlanIntentNode` nigdy nie podawał generatorowi alokacji `mapVersion`
+(`createDefaultGenerator` składa wiadomość wyłącznie z `step.reads` + ewentualnego bloku
+`revision`, więc hint na górze reads ginie przed wire) — na re-entry store trzymał v1, alokacja
+była 2, model znów wysłał 1, a odrzucenie było nieśmiertelne, bo `regenReads` odsyłał ten sam
+numer w `revision.previous`. Wszystkie wywołania [G] w attempt 5 zwróciły parsowalną treść
+(5 eventów `ok:true`) — to wada harness/kontraktu, nie jakość modelu; tally §5.1 nietknięty.
+
+**Fix i weryfikacja.** `scripts/plan-intent.mjs` + `plan-intent.test.mjs` (78/78): fold
+najpierw wobec presented store (lookup po `interpretationId`, fallback po idMap dla
+przenumerowanych; fallback do opcji mapy tylko gdy presented nie ma options; inaczej STALE
+z powodem wskazującym presented), `allocateMapVersion` przed wywołaniem, `nextMapVersion`
+na reads **obu** prób wewnątrz `revision` (jedno pole caller-composition, które [G] wysyła),
+`regenReads` nadpisuje tożsamość odrzuconej mapy (`previous.mapVersion = next`), komunikaty
+odrzucenia `persistMap` bajtowo identyczne. Test siatki: `createDefaultGenerator` + wstrzyknięty
+fetch — `nextMapVersion` w ciele requestu na **pierwszej** próbie re-entry i na retry, a świeże
+wywołanie zostaje bajtowo identyczne (bez sekcji `REVISION`). Zakres FOC-801 dochowany:
+`graph-runner.mjs` / `config/graph.json` / `decisions.json` / `models.json` nietknięte.
+Gałąź `foc-801-dev` już istniała z 12.10 (kompletna implementacja) — scalona z moim commitem
+`323d344` (dostarczenie hinta na wire), nic nie wyrzucone.
+
+**Lądowanie.** `main` = **`e0f8b40`** (merge `foc-801-dev`: `2d6cb6e` + `ab4483d` + `323d344`).
+Suity: plan-intent 78/78, plan-intent-gate 13/13, graph-runner 27/27, plan-ac 21/21,
+plan-dod 25/25, plan-intent-select 27/27, plan-ready 24/24, plan-render 15/15,
+supervisor-holds 36/36. **Push/PR nie zrobiony** — czeka na polecenie.
+
+**Nowa granica instrumentu = `e0f8b40`.** Obok fixu na tej samej granicy wsiadł runsDir seam
+z FOC-811 (blob `graph-runner.mjs` `b0db3eef` → `e7de39c8`) — plumbing ścieżek telemetrii
+przez `LA_STATE_ROOT`, zachowanie przepływu planu bajtowo bez zmian; nazwany w rekordzie
+granicy, żeby zapis był szczery. FOC-734 freeze re-arms przy `e0f8b40`.
+
+**Attempt 5 = `excluded (C1, przed granica FOC-801)`** wg reguły granicy instrumentu (sha
+fixu jest granicą; nic sprzed niej się nie liczy — tak jak attempt 4 sprzed FOC-758). Koszt
+**0.006823378 USD** (6 eventów, kompletne) w `excludedPricedCostUsd`, poza liczbą główną.
+Tekst issue FOC-801 („attempt 5 is the first counted arm-A run and it is a `failed`") był
+pisany przed decyzją o fixie w trakcie kampanii — to luźniejszy odczyt; jeśli Mateusz go
+przyjmie, wiersz flipuje na `countedInMainNumber: true` i koszt wchodzi do liczby głównej.
+Następny run jest ten sam w obu odczytach.
+
+**Rejestr** `docs/research/foc-477-runs.json`: wpis attempt 5 w `armARuns`, koszt w
+`excludedPricedCostUsd`, rekord `foc801Landing20261015` (granica, zakres fixu, klasyfikacja,
+FOC-811 na granicy).
+
+**Kolejka toru A:** uruchomić FOC-236 od zera na `e0f8b40` = **zliczony run 1 z 10**;
+bramki `plan.gate1` / `draft-approval` przekazywane jako osobne wiadomości z pełnym artefaktem.
+Śmierć harness/provider tam = stop i raport, nigdy cichy retry. Po 10 runach: raport FOC-477,
+go/no-go, potem FOC-712. Tor B (M8) rusza, gdy tor A stanie.
