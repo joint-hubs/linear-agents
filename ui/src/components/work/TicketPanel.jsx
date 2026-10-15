@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { getWorkTicket } from '../../api';
+import { getWorkTicket, getPublishPreview } from '../../api';
 import {
   STAGES,
   formatMoney,
@@ -18,6 +18,7 @@ import {
   ticketLabels,
 } from '../../workModel';
 import StartDialog from './StartDialog';
+import PublishDialog from './PublishDialog';
 import LabelChip from './LabelChip';
 
 // The payload's timeline is chronological; a defensive sort by `at` (missing
@@ -104,6 +105,8 @@ export default function TicketPanel({ id, taskKey, onClose, onAskSupervisor }) {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [startOpen, setStartOpen] = useState(false);
+  const [publishPreview, setPublishPreview] = useState(null);
+  const [publishAction, setPublishAction] = useState(null);
   const closeRef = useRef(null);
 
   // One fetch per opened ticket (the board refresh keeps the panel as is; a
@@ -127,21 +130,38 @@ export default function TicketPanel({ id, taskKey, onClose, onAskSupervisor }) {
     return () => ctrl.abort();
   }, [id]);
 
+  // The publish actions (FOC-788) render only when a checkout is discoverable
+  // for this ticket — publish-preview answers with one, and a 404
+  // no-checkout means there is nothing to click. Failures stay silent here:
+  // the panel is not the place to explain publishing, the confirm dialog is.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setPublishPreview(null);
+    getPublishPreview(id, 'push', ctrl.signal)
+      .then((p) => {
+        if (!ctrl.signal.aborted) setPublishPreview(p);
+      })
+      .catch(() => {
+        if (!ctrl.signal.aborted) setPublishPreview(null);
+      });
+    return () => ctrl.abort();
+  }, [id]);
+
   // On open (and on switching tickets) focus goes to the Close button, so
   // keyboard users land in the dialog instead of the page behind it.
   useEffect(() => {
     if (closeRef.current) closeRef.current.focus();
   }, [id]);
 
-  // Escape closes the panel — unless the Start dialog is open on top of it;
-  // the dialog's own Esc handler (Modal) closes that one first.
+  // Escape closes the panel — unless the Start or a publish dialog is open on
+  // top of it; the dialog's own Esc handler (Modal) closes that one first.
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === 'Escape' && !startOpen) onClose();
+      if (e.key === 'Escape' && !startOpen && !publishAction) onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose, startOpen]);
+  }, [onClose, startOpen, publishAction]);
 
   const ticket = detail?.ticket || null;
   const stage = ticket?.stage || null;
@@ -290,6 +310,19 @@ export default function TicketPanel({ id, taskKey, onClose, onAskSupervisor }) {
                 Start
               </button>
             )}
+            {/* Publish (FOC-788): only with a discoverable checkout — a ticket
+                without one offers nothing to click. Both open the confirm
+                dialog; nothing is ever published without it. */}
+            {publishPreview?.checkout && (
+              <>
+                <button type="button" className="btn-secondary" onClick={() => setPublishAction('push')}>
+                  Push branch
+                </button>
+                <button type="button" className="btn-secondary" onClick={() => setPublishAction('pr')}>
+                  Open PR
+                </button>
+              </>
+            )}
             {/* Task cockpit (task workspaces, PRD §3): only with a canonical
                 key from the payload — an identifier is never promoted into a
                 cockpit link. No key → the Start / resolve flow above covers
@@ -311,6 +344,9 @@ export default function TicketPanel({ id, taskKey, onClose, onAskSupervisor }) {
       )}
 
       {startOpen && <StartDialog id={id} onClose={() => setStartOpen(false)} />}
+      {publishAction && (
+        <PublishDialog id={id} action={publishAction} onClose={() => setPublishAction(null)} />
+      )}
     </aside>
   );
 }

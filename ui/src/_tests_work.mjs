@@ -26,6 +26,7 @@ import {
   filtersFromQuery,
   queryFromFilters,
   startDialogModel,
+  publishDialogModel,
   ticketLabels,
   labelNames,
 } from './workModel.js';
@@ -550,6 +551,125 @@ await test('startDialogModel no preview while loading -> "Loading…", not "No t
   eq(m.disabledReason, 'Loading…');
   eq(m.primaryLabel, '');
   eq(m.text, null);
+});
+
+// --- publishDialogModel (FOC-788: Push branch / Open PR confirm) -----------
+
+const publishPreviewPush = {
+  ticket: 'FOC-788',
+  action: 'push',
+  checkout: {
+    branch: 'foc-788-push-pr-from-dashboard-1a2b3c4d5e6f',
+    remote: 'origin',
+    remoteUrl: 'https://github.com/joint-hubs/linear-agents',
+    base: 'main',
+    head: '9f458fb0123456789012345678901234567890ab',
+  },
+  diff: { commits: 18, files: 12, insertions: 101, deletions: 2, commitSubjects: ['work'], dirty: false },
+  checks: { latest: 'PASS', failing: [], verdicts: [{ round: 1, verdict: 'PASS' }], children: [] },
+  confirmToken: 'a'.repeat(64),
+};
+
+// An error shaped like api.js throws it: message + .data carrying the
+// server's error name (and the scrubbed detail when there is one).
+function apiError(error, detail) {
+  const e = new Error(detail ? `${error}: ${detail}` : error);
+  e.data = detail ? { error, detail } : { error };
+  return e;
+}
+
+await test('publishDialogModel push preview -> Push branch to origin, diff summary, You', () => {
+  const m = publishDialogModel(publishPreviewPush, 'push', {});
+  eq(m.primaryLabel, 'Push branch');
+  eq(m.title, 'Push the task branch');
+  eq(m.branchText, 'foc-788-push-pr-from-dashboard-1a2b3c4d5e6f');
+  eq(m.targetText, 'origin');
+  eq(m.diffText, '18 commit(s), 12 file(s), +101/-2');
+  eq(m.checksFailed, false);
+  eq(m.actorText, 'You');
+  eq(m.disabled, false);
+});
+
+await test('publishDialogModel pr preview -> Open PR into main', () => {
+  const m = publishDialogModel(publishPreviewPush, 'pr', {});
+  eq(m.primaryLabel, 'Open PR');
+  eq(m.title, 'Open a pull request');
+  eq(m.targetText, 'main');
+});
+
+await test('publishDialogModel dirty worktree -> the diff line says the changes are not pushed', () => {
+  const m = publishDialogModel(
+    { ...publishPreviewPush, diff: { ...publishPreviewPush.diff, dirty: true } }, 'push', {},
+  );
+  eq(m.diffText.includes('uncommitted changes in the worktree (not pushed)'), true);
+});
+
+await test('publishDialogModel failing checks (AC-2) -> shown first and prominent, never blocking', () => {
+  const m = publishDialogModel({
+    ...publishPreviewPush,
+    checks: {
+      latest: 'FAIL',
+      failing: [{ round: 1, verdict: 'FAIL' }, { round: 2, verdict: 'FAIL' }],
+      verdicts: [],
+      children: [],
+    },
+  }, 'push', {});
+  eq(m.checksFailed, true);
+  eq(m.checksLines, ['round 1: FAIL', 'round 2: FAIL']);
+  eq(m.checksLatest, 'FAIL');
+  eq(m.disabled, false, 'a failing check is shown, not hard-blocking (the AC says shown)');
+});
+
+await test('publishDialogModel while sending -> disabled with the action word', () => {
+  eq(publishDialogModel(publishPreviewPush, 'push', { sending: true }).disabledReason, 'Pushing…');
+  eq(publishDialogModel(publishPreviewPush, 'pr', { sending: true }).disabledReason, 'Opening…');
+});
+
+await test('publishDialogModel pushed -> "Pushed <head7>", button stays off', () => {
+  const m = publishDialogModel(publishPreviewPush, 'push', {
+    result: { ok: true, action: 'push', actor: 'human', head: '9f458fb0123456789012345678901234567890ab' },
+  });
+  eq(m.resultText, 'Pushed 9f458fb');
+  eq(m.disabled, true);
+  eq(m.disabledReason, 'Already done.');
+});
+
+await test('publishDialogModel pr opened -> the PR URL is the result text', () => {
+  const m = publishDialogModel(publishPreviewPush, 'pr', {
+    result: { ok: true, action: 'pr', actor: 'human', head: 'x', prUrl: 'https://github.com/joint-hubs/linear-agents/pull/7' },
+  });
+  eq(m.resultText, 'PR opened: https://github.com/joint-hubs/linear-agents/pull/7');
+});
+
+await test('publishDialogModel stale-preview -> spelled out with a refresh offered', () => {
+  const m = publishDialogModel(publishPreviewPush, 'push', {
+    error: apiError('stale-preview', 'the confirm does not match the current checkout state — preview again'),
+  });
+  eq(m.resultText, 'The checkout changed since the preview — preview again.');
+  eq(m.stale, true);
+});
+
+await test('publishDialogModel push-refused / pr-failed -> named with the scrubbed detail', () => {
+  const refused = publishDialogModel(publishPreviewPush, 'push', {
+    error: apiError('push-refused', 'non-fast-forward'),
+  });
+  eq(refused.resultText, 'Push refused: non-fast-forward');
+  const prFailed = publishDialogModel(publishPreviewPush, 'pr', {
+    error: apiError('pr-failed', 'GitHub 422: Validation Failed'),
+  });
+  eq(prFailed.resultText, 'Could not open the PR: GitHub 422: Validation Failed');
+});
+
+await test('publishDialogModel no-checkout error -> nothing to publish', () => {
+  const m = publishDialogModel(publishPreviewPush, 'push', { error: apiError('no-checkout') });
+  eq(m.resultText, 'No checkout for this ticket — nothing to publish.');
+});
+
+await test('publishDialogModel no preview -> disabled; loading says Loading…, not the no-checkout text', () => {
+  eq(publishDialogModel(null, 'push', {}).disabledReason, 'No checkout — nothing to publish.');
+  const loading = publishDialogModel(null, 'push', { loading: true });
+  eq(loading.disabled, true);
+  eq(loading.disabledReason, 'Loading…');
 });
 
 // --- Summary ----------------------------------------------------------------

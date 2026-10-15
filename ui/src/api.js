@@ -656,6 +656,26 @@ export function postStartTicket(id, text) {
   return postJson('/api/work/tickets/' + encodeURIComponent(id) + '/start', { text });
 }
 
+// Publish (FOC-788) — Push branch / Open PR with an explicit confirm. The
+// preview carries the confirmToken bound to the state on screen; the POST
+// sends it back with actor "human" (the dashboard's only actor — an agent
+// calling the same endpoints sends "ai" with its own actorId). A checkout
+// that moved answers 409 stale-preview and the caller previews again.
+export function getPublishPreview(id, action, signal) {
+  return apiFetch(
+    '/api/work/tickets/' + encodeURIComponent(id) + '/publish-preview?action=' + encodeURIComponent(action),
+    signal,
+  );
+}
+
+export function postPublish(id, action, confirmToken) {
+  return postJson('/api/work/tickets/' + encodeURIComponent(id) + '/' + action, {
+    confirmToken,
+    actor: 'human',
+    actorId: 'dashboard',
+  });
+}
+
 // Costs & quality (FOC-785) — the Costs screen imports these two by name.
 export function getCosts(period, signal) {
   return apiFetch('/api/costs?period=' + encodeURIComponent(period ?? ''), signal);

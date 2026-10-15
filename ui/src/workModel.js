@@ -346,3 +346,78 @@ export function startDialogModel(preview, { sending, result, error, loading } = 
     resultText,
   };
 }
+
+// ===== Publish dialog (FOC-788: confirm before push / open PR) ==============
+
+// publishDialogModel(preview, action, { sending, result, error, loading }) ->
+// the Push branch / Open PR confirm dialog's view model. preview is the
+// publish-preview payload ({ ticket, action, checkout, diff, checks,
+// confirmToken }); result is the POST .../push|pr answer ({ ok, action, actor,
+// head, prUrl? }). AC-2 in view form: checksFailed drives the dialog to show
+// the checks state FIRST and prominently when anything failed — shown, never
+// hard-blocking (the AC says shown, not blocked; the human decides).
+// `error` is a message string or an Error carrying .data (the API's error
+// name/detail ride there) — every failure is spelled out by name, never a
+// bare failure, and stale-preview additionally offers a refresh.
+export function publishDialogModel(preview, action, { sending, result, error, loading } = {}) {
+  const p = preview || null;
+  const a = action === 'pr' ? 'pr' : 'push';
+  const checkout = (p && p.checkout) || null;
+  const diff = (p && p.diff) || null;
+  const checks = (p && p.checks) || null;
+  const failing = checks && Array.isArray(checks.failing) ? checks.failing : [];
+
+  let disabled = false;
+  let disabledReason = null;
+  if (!p) {
+    disabled = true;
+    disabledReason = loading ? 'Loading…' : 'No checkout — nothing to publish.';
+  } else if (sending) {
+    disabled = true;
+    disabledReason = a === 'pr' ? 'Opening…' : 'Pushing…';
+  } else if (result && result.ok) {
+    disabled = true;
+    disabledReason = 'Already done.';
+  }
+
+  let resultText = null;
+  if (error) resultText = publishErrorText(error);
+  else if (result && result.ok) {
+    resultText = a === 'pr'
+      ? 'PR opened' + (result.prUrl ? ': ' + result.prUrl : '')
+      : 'Pushed ' + String(result.head || '').slice(0, 7);
+  }
+
+  return {
+    title: a === 'pr' ? 'Open a pull request' : 'Push the task branch',
+    primaryLabel: a === 'pr' ? 'Open PR' : 'Push branch',
+    branchText: checkout ? checkout.branch : null,
+    // push goes to the remote, a PR to the base branch (decision 1: main).
+    targetText: !checkout ? null : a === 'pr' ? String(checkout.base || 'main') : String(checkout.remote || 'origin'),
+    diffText: diff
+      ? `${diff.commits ?? 0} commit(s), ${diff.files ?? 0} file(s), +${diff.insertions ?? 0}/-${diff.deletions ?? 0}`
+        + (diff.dirty ? ' · uncommitted changes in the worktree (not pushed)' : '')
+      : null,
+    checksFailed: failing.length > 0,
+    checksLines: failing.map((v) => `round ${v.round}: FAIL`),
+    checksLatest: checks ? checks.latest : null,
+    actorText: 'You',
+    disabled,
+    disabledReason,
+    resultText,
+    stale: Boolean(error && error.data && error.data.error === 'stale-preview'),
+  };
+}
+
+// Every publish failure is spelled out by its contract name (plan §5):
+// no-checkout, stale-preview, push-refused, pr-failed — with the scrubbed
+// detail when the server sent one.
+function publishErrorText(error) {
+  const name = (error && error.data && error.data.error) || null;
+  const detail = (error && error.data && error.data.detail) || null;
+  if (name === 'no-checkout') return 'No checkout for this ticket — nothing to publish.';
+  if (name === 'stale-preview') return 'The checkout changed since the preview — preview again.';
+  if (name === 'push-refused') return 'Push refused: ' + (detail || 'git did not accept the push.');
+  if (name === 'pr-failed') return 'Could not open the PR: ' + (detail || 'the API refused.');
+  return typeof error === 'string' ? error : ((error && error.message) || 'Publish failed.');
+}
