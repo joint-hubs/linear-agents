@@ -1469,6 +1469,13 @@ export function assertStageBudget(runId, squad, { graph, fail = failJson } = {})
 // (scripts/supervisor-cleanup.mjs). Same caveat as above — this is the
 // accidental `git worktree remove`, not the determined one; the identity check
 // in supervisor-cleanup.mjs is the control that actually holds.
+//
+// FOC-788 follow-up (2026-10-15): the dashboard's write routes (work push/PR,
+// the supervisor message forward, settings, gates, holds) are not a child's
+// either — a natively spawned child is a host process and can reach the
+// loopback the dashboard answers on. Both shells are denied because a child
+// may use either. Same caveat as every rule here: not a sandbox, only the
+// accidental curl.
 export const SUPERVISOR_DENY = [
   "Bash(git push:*)",
   "Bash(gh pr create:*)",
@@ -1489,6 +1496,22 @@ export const SUPERVISOR_DENY = [
   "Bash(node $LA_ROOT/scripts/linear-ops.mjs:*)",
   "Bash(node $LA_ROOT/scripts/publish-linear-comment.mjs:*)",
   "Bash(node $LA_ROOT/scripts/linear-query.mjs:*)",
+  // The dashboard's write routes (FOC-788 follow-up, see above). Middle
+  // wildcards like the `git -C *` allows above use.
+  "Bash(*127.0.0.1:7331*)",
+  "Bash(*localhost:7331*)",
+  "Bash(*/api/work/*)",
+  "Bash(*/api/supervisor/*)",
+  "Bash(*/api/settings/*)",
+  "Bash(*/api/gates/*)",
+  "Bash(*/api/holds/*)",
+  "PowerShell(*127.0.0.1:7331*)",
+  "PowerShell(*localhost:7331*)",
+  "PowerShell(*/api/work/*)",
+  "PowerShell(*/api/supervisor/*)",
+  "PowerShell(*/api/settings/*)",
+  "PowerShell(*/api/gates/*)",
+  "PowerShell(*/api/holds/*)",
 ];
 
 export const childSettingsPath = (runId, childId) =>
