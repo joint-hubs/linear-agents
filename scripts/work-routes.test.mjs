@@ -30,14 +30,21 @@
 //     Linear issue;
 //   - POST /api/work/tickets/:id/start: forwarded to the host /message
 //     verbatim, 400 for a mismatched/missing text, 403 foreign origin,
-//     503 docker-only natively.
+//     503 docker-only natively;
+//   - the publish trio (FOC-788): GET .../publish-preview (checkout, diff,
+//     checks, confirmToken), POST .../push|pr — the guards and body shape,
+//     the token binding (409 stale-preview, a moved head included) and 404
+//     no-checkout with no action offered; the in-process block below drives
+//     the same routes against a REAL git fixture (the push lands on a local
+//     bare remote, the PR posts through a fake fetch) and proves the audit
+//     trio, with the comment sink failing closed offline.
 //
 // The server children are ALWAYS killed in finally.
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -103,14 +110,49 @@ const T2 = "2026-10-13T09:00:00.000Z"; // dev-1 turn 1 end
 const T3 = "2026-10-13T10:00:00.000Z"; // dev-1 turn 2 start — the rework cutoff
 const T4 = "2026-10-13T11:00:00.000Z"; // dev-1 turn 2 end
 
+// ── the FOC-788 publish fixture: wt-work-1 is a REAL checkout ────────────────
+//
+// main ("seed") plus one work commit on the managed branch. Origin's FETCH
+// URL is GitHub-shaped (the PR path parses owner/repo from it and posts
+// through the test's fake fetch) while its PUSH URL is the local bare
+// origin.git — a real `git push` lands offline and can never reach a
+// network. The bare starts with main only; the publish tests assert the
+// branch appears there, at exactly the pushed head.
+const DEV_BRANCH = "work-1-dev-abc123def456"; // the spawn shape <teamKey>-<n>-<slug>-<hash12>
+const ORIGIN_BARE = join(dir, "origin.git");
+const git = (args, cwd) => {
+  const r = spawnSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  assert.equal(r.status, 0, `git ${args.join(" ")} failed: ${r.stderr}`);
+  return String(r.stdout ?? "").replace(/\r\n/g, "\n").trimEnd();
+};
+
+git(["init", "-b", "main", childWorktree]);
+git(["config", "user.name", "Fixture"], childWorktree);
+git(["config", "user.email", "fixture@example.invalid"], childWorktree);
+writeFileSync(join(childWorktree, "README.md"), "seed\n");
+git(["add", "README.md"], childWorktree);
+git(["commit", "-m", "seed"], childWorktree);
+git(["init", "--bare", ORIGIN_BARE]);
+git(["symbolic-ref", "HEAD", "refs/heads/main"], ORIGIN_BARE);
+git(["remote", "add", "origin", "https://github.com/joint-hubs/linear-agents"], childWorktree);
+git(["remote", "set-url", "--push", "origin", ORIGIN_BARE], childWorktree);
+git(["checkout", "-b", DEV_BRANCH], childWorktree);
+writeFileSync(join(childWorktree, "feature.txt"), "feature\n");
+git(["add", "feature.txt"], childWorktree);
+git(["commit", "-m", "dev work"], childWorktree);
+const DEV_HEAD = git(["rev-parse", "HEAD"], childWorktree);
+const BASE_SHA = git(["rev-parse", "main"], childWorktree);
+
 // run-a: WORK-1, one dev child whose transcript, telemetry run and registry
-// cost all exist — the clean reconciliation case.
+// cost all exist — the clean reconciliation case. Its child record carries
+// the branch/worktree/baseRevision the publish checkout discovery reads.
 writeFileSync(join(supState, "run-a", "children.json"), JSON.stringify({
   runId: "run-a",
   children: {
     "dev-1": {
       childId: "dev-1", squad: "dev", taskId: "WORK-1", status: "exited",
       sessionId: "sess-child-1", telemetryRunId: "tel-1", worktree: childWorktree,
+      branch: DEV_BRANCH, baseRevision: BASE_SHA,
       costUsd: 0.005, model: "m1", startedAt: T1, endedAt: T4,
       turns: [
         { startedAt: T1, endedAt: T2, exitCode: 0 },
@@ -236,6 +278,21 @@ writeFileSync(linearFixturePath, JSON.stringify({
     },
   },
 }), "utf8");
+
+// The publish paths are hermetic (FOC-788): the audit comment sink would
+// otherwise spawn linear-ops with a real key and post to LIVE Linear, and the
+// push executor reads a GitHub token before it touches git. Both are pinned
+// here — an empty key plus the no-.env seam make the sink fail closed
+// offline, and the secrets dir carries a fixture token (its remote is a local
+// path, so git never needs it). Set here, left set — like the LA_* seams.
+process.env.NODE_ENV = "test";
+process.env.FENIX_LINEAR_FAKE_FILE = linearFixturePath;
+process.env.LA_LINEAR_NO_ENV_FILE = "1";
+process.env.LINEAR_API_KEY = "";
+const fixtureSecrets = join(dir, "secrets-fixture");
+mkdirSync(fixtureSecrets, { recursive: true });
+writeFileSync(join(fixtureSecrets, "github_token"), "fixture-token\n");
+process.env.LA_SECRETS_DIR = fixtureSecrets;
 
 // ── the fake session host ────────────────────────────────────────────────────
 
@@ -535,6 +592,51 @@ try {
     check("start foreign origin -> 403", foreign.status === 403, `got ${foreign.status}`);
     check("start guards forward nothing to the host", hostCalls.length === 0, JSON.stringify(hostCalls));
 
+    // ── the publish trio mounts (FOC-788): the preview shape, the guards ──
+    // and body shape, the token binding, and no-checkout with no action
+    // offered. The refusals below all stop BEFORE an executor can run —
+    // asserted as no audit line and no branch on the bare remote.
+    const pp = await call(P, "GET", "/api/work/tickets/WORK-1/publish-preview?action=push");
+    check("publish-preview -> 200 with checkout, diff, checks, confirmToken",
+      pp.status === 200 && pp.body?.ticket === "WORK-1" && pp.body?.action === "push"
+        && pp.body?.checkout?.branch === DEV_BRANCH && pp.body?.checkout?.head === DEV_HEAD
+        && pp.body?.diff?.commits === 1 && pp.body?.diff?.dirty === false
+        && typeof pp.body?.confirmToken === "string" && /^[0-9a-f]{64}$/.test(pp.body.confirmToken),
+      JSON.stringify(pp.body).slice(0, 300));
+    check("publish-preview checks = local verdicts: latest PASS, the FAIL round shown (AC-2)",
+      pp.body?.checks?.latest === "PASS" && pp.body?.checks?.failing?.length === 1
+        && pp.body?.checks?.failing?.[0]?.round === 1,
+      JSON.stringify(pp.body?.checks).slice(0, 300));
+    const ppBadAction = await call(P, "GET", "/api/work/tickets/WORK-1/publish-preview?action=nope");
+    check("publish-preview bad action -> 400 bad-action",
+      ppBadAction.status === 400 && ppBadAction.body?.error === "bad-action", JSON.stringify(ppBadAction.body));
+    const ppNone = await call(P, "GET", "/api/work/tickets/WORK-3/publish-preview?action=push");
+    check("publish-preview untouched ticket -> 404 no-checkout, no action offered",
+      ppNone.status === 404 && ppNone.body?.error === "no-checkout" && ppNone.body?.reason === "no-children",
+      JSON.stringify(ppNone.body));
+
+    const pushPath = "/api/work/tickets/WORK-1/push";
+    const confirmBody = (token) => ({ confirmToken: token, actor: "human", actorId: "mateusz" });
+    const ppForeign = await call(P, "POST", pushPath, { origin: "https://evil.example", body: confirmBody("x") });
+    check("publish push foreign origin -> 403", ppForeign.status === 403, `got ${ppForeign.status}`);
+    const ppNoToken = await call(P, "POST", pushPath, { body: { actor: "human", actorId: "mateusz" } });
+    check("publish push without confirmToken -> 400",
+      ppNoToken.status === 400 && ppNoToken.body?.error === "confirmToken (string) is required",
+      JSON.stringify(ppNoToken.body));
+    const ppBadActor = await call(P, "POST", pushPath, { body: { confirmToken: "x", actor: "robot", actorId: "mateusz" } });
+    check("publish push non-human/ai actor -> 400",
+      ppBadActor.status === 400 && ppBadActor.body?.error === 'actor must be "human" or "ai"',
+      JSON.stringify(ppBadActor.body));
+    const ppStale = await call(P, "POST", pushPath, { body: confirmBody("f".repeat(64)) });
+    check("publish push wrong token -> 409 stale-preview",
+      ppStale.status === 409 && ppStale.body?.error === "stale-preview", JSON.stringify(ppStale.body));
+    const prStale = await call(P, "POST", "/api/work/tickets/WORK-1/pr", { body: confirmBody("f".repeat(64)) });
+    check("publish pr wrong token -> 409 before any API call",
+      prStale.status === 409 && prStale.body?.error === "stale-preview", JSON.stringify(prStale.body));
+    check("publish refusals ran no executor — no audit line, no branch on the bare",
+      !existsSync(join(dir, "state-root", "publish-actions.jsonl")) && git(["ls-remote", "--heads", ORIGIN_BARE], dir) === "",
+      git(["ls-remote", "--heads", ORIGIN_BARE], dir));
+
     child.kill();
   }
 
@@ -628,6 +730,135 @@ try {
     failures.push(`facts-cache unit block — ${err?.stack || err}`);
   } finally {
     delete process.env.FENIX_WORK_FACTS_TTL_MS;
+  }
+}
+
+// ── the publish routes end-to-end, in-process (FOC-788) ──────────────────────
+//
+// handleWorkRoute with fake req/res/ctx against the REAL git fixture: the
+// push lands on the local bare remote (offline by construction), the PR path
+// posts through a fake global fetch, and the audit trio lands in the temp
+// state root — with the comment sink failing closed offline (the empty key +
+// no-.env seam above), which is itself part of the proof.
+{
+  const { handleWorkRoute, resetWorkRoutesState } = await import("./work-routes.mjs");
+  const json = (res, status, body) => { res.__status = status; res.__body = body; };
+  const ctx = {
+    readJsonBody: async (req) => req.__body,
+    respondBodyError: (res, err) => { json(res, 400, { error: String(err?.message ?? err) }); return 400; },
+    json,
+    log: () => {},
+    isLocalOrigin: (addr) => addr === "127.0.0.1",
+    isAllowedOrigin: (origin) => origin === "http://localhost:5173",
+  };
+  const callRoute = async (method, path, { body, origin = "http://localhost:5173", addr = "127.0.0.1" } = {}) => {
+    const req = { method, headers: { origin }, socket: { remoteAddress: addr }, __body: body };
+    const res = {};
+    const handled = await handleWorkRoute(req, res, new URL(path, "http://localhost:5173"), ctx);
+    return { handled, status: res.__status, body: res.__body };
+  };
+  const jsonlPath = join(dir, "state-root", "publish-actions.jsonl");
+  const readJsonl = () => (existsSync(jsonlPath)
+    ? readFileSync(jsonlPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    : []);
+  try {
+    resetWorkRoutesState();
+
+    // stale-head 409: the confirm binds the head, so a commit between the
+    // preview and the confirm invalidates its token — and nothing runs.
+    const before = await callRoute("GET", "/api/work/tickets/WORK-1/publish-preview?action=push");
+    check("unit: publish-preview handled in-process",
+      before.handled === true && before.status === 200, JSON.stringify(before.body).slice(0, 200));
+    writeFileSync(join(childWorktree, "feature2.txt"), "more\n");
+    git(["add", "feature2.txt"], childWorktree);
+    git(["commit", "-m", "stale-head work"], childWorktree);
+    const moved = await callRoute("POST", "/api/work/tickets/WORK-1/push", {
+      body: { confirmToken: before.body.confirmToken, actor: "human", actorId: "mateusz" },
+    });
+    check("unit: publish push with a moved head -> 409 stale-preview",
+      moved.status === 409 && moved.body?.error === "stale-preview", JSON.stringify(moved.body));
+    check("unit: the stale confirm ran nothing", readJsonl().length === 0, `lines=${readJsonl().length}`);
+
+    // push success: the exact refspec lands the branch on the local bare at
+    // the pushed head, and the audit line says who confirmed it.
+    const fresh = await callRoute("GET", "/api/work/tickets/WORK-1/publish-preview?action=push");
+    const pushed = await callRoute("POST", "/api/work/tickets/WORK-1/push", {
+      body: { confirmToken: fresh.body.confirmToken, actor: "human", actorId: "mateusz" },
+    });
+    check("unit: publish push -> 200 ok with the published head",
+      pushed.status === 200 && pushed.body?.ok === true && pushed.body?.action === "push"
+        && pushed.body?.actor === "human" && pushed.body?.head === fresh.body?.checkout?.head,
+      JSON.stringify(pushed.body));
+    check("unit: the push really landed on the bare (branch at exactly the head)",
+      git(["ls-remote", "--heads", ORIGIN_BARE], dir)
+        .includes(`${fresh.body.checkout.head}\trefs/heads/${DEV_BRANCH}`),
+      git(["ls-remote", "--heads", ORIGIN_BARE], dir));
+    const afterPush = readJsonl();
+    check("unit: the push audit line names the branch, the actor and ok",
+      afterPush.length === 1 && afterPush[0].action === "push" && afterPush[0].branch === DEV_BRANCH
+        && afterPush[0].actor === "human" && afterPush[0].actorId === "mateusz" && afterPush[0].ok === true,
+      JSON.stringify(afterPush).slice(0, 300));
+
+    // pr success: the route posts through the fetch seam (the fixture's
+    // fetch URL is GitHub-shaped), and the PR URL lands in response + record.
+    const realFetch = globalThis.fetch;
+    const fetchCalls = [];
+    globalThis.fetch = async (url, opts) => {
+      fetchCalls.push({ url: String(url), opts });
+      return { status: 201, text: async () => JSON.stringify({ html_url: "https://github.com/joint-hubs/linear-agents/pull/7", number: 7 }) };
+    };
+    try {
+      const prPreview = await callRoute("GET", "/api/work/tickets/WORK-1/publish-preview?action=pr");
+      const pr = await callRoute("POST", "/api/work/tickets/WORK-1/pr", {
+        body: { confirmToken: prPreview.body.confirmToken, actor: "ai", actorId: "session-test" },
+      });
+      check("unit: publish pr -> 200 ok with the PR URL",
+        pr.status === 200 && pr.body?.ok === true && pr.body?.action === "pr"
+          && pr.body?.prUrl === "https://github.com/joint-hubs/linear-agents/pull/7",
+        JSON.stringify(pr.body));
+      const prPost = fetchCalls.length === 1 ? JSON.parse(fetchCalls[0].opts.body) : {};
+      check("unit: the PR POST is head=branch, base=main, titled from the issue",
+        fetchCalls.length === 1 && fetchCalls[0].url.endsWith("/repos/joint-hubs/linear-agents/pulls")
+          && prPost.head === DEV_BRANCH && prPost.base === "main" && prPost.title === "WORK-1: Fix the widget",
+        JSON.stringify({ urls: fetchCalls.map((c) => c.url), prPost }));
+      const afterPr = readJsonl();
+      check("unit: the pr audit line carries the PR URL and the ai actor",
+        afterPr.length === 2 && afterPr[1].action === "pr"
+          && afterPr[1].prUrl === "https://github.com/joint-hubs/linear-agents/pull/7"
+          && afterPr[1].actor === "ai" && afterPr[1].actorId === "session-test",
+        JSON.stringify(afterPr).slice(-300));
+
+      // pr-failed: the API refuses -> 502 pr-failed with the reason, and the
+      // failed attempt is audited too (ok:false, the error name recorded).
+      globalThis.fetch = async () => ({ status: 422, text: async () => JSON.stringify({ message: "Validation Failed" }) });
+      const prPreview2 = await callRoute("GET", "/api/work/tickets/WORK-1/publish-preview?action=pr");
+      const prFail = await callRoute("POST", "/api/work/tickets/WORK-1/pr", {
+        body: { confirmToken: prPreview2.body.confirmToken, actor: "human", actorId: "mateusz" },
+      });
+      check("unit: publish pr refused by the API -> 502 pr-failed with the reason",
+        prFail.status === 502 && prFail.body?.error === "pr-failed"
+          && String(prFail.body?.detail).includes("GitHub 422: Validation Failed"),
+        JSON.stringify(prFail.body));
+      const afterFail = readJsonl();
+      check("unit: the refused PR is audited too (ok:false, error named)",
+        afterFail.length === 3 && afterFail[2].ok === false && afterFail[2].error === "pr-failed",
+        JSON.stringify(afterFail.slice(-1)).slice(0, 300));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    // A child that recorded no branch has no checkout — the reason names
+    // which half is missing, and nothing is offered (WORK-2's plan child).
+    const noBranch = await callRoute("GET", "/api/work/tickets/WORK-2/publish-preview?action=push");
+    check("unit: publish-preview without a recorded branch -> 404 no-checkout",
+      noBranch.status === 404 && noBranch.body?.error === "no-checkout"
+        && noBranch.body?.reason === "branch-or-worktree-unrecorded",
+      JSON.stringify(noBranch.body));
+  } catch (err) {
+    failed++;
+    failures.push(`publish routes unit block — ${err?.stack || err}`);
+  } finally {
+    resetWorkRoutesState();
   }
 }
 

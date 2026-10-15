@@ -1,6 +1,7 @@
 // scripts/work-routes.mjs — the Work board and Costs & quality routes
 // (FOC-784/785, plan slice W5): GET /api/work/tickets, the ticket detail,
-// the Start preview/confirm pair, GET /api/costs and GET /api/quality.
+// the Start preview/confirm pair, the publish preview/act trio (FOC-788:
+// publish-preview, push, pr), GET /api/costs and GET /api/quality.
 //
 // This module is TRANSPORT ONLY, in the style of cockpit-routes.mjs: guard
 // order, body handling and the error shape mirror the Cockpit's routes
@@ -49,6 +50,15 @@ import {
 } from "./work-board.mjs";
 import { buildCostsPayload, buildQualityPayload } from "./cost-quality.mjs";
 import { forwardMessageToHost, writeGuards } from "./cockpit-routes.mjs";
+import { buildPublishPreview, verifyConfirmToken } from "./publish-actions.mjs";
+import {
+  buildPublishRecord,
+  composePrBody,
+  composePrTitle,
+  createPullRequest,
+  pushBranch,
+  recordPublishAction,
+} from "./publish-exec.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const COST_SNAPSHOT_SCRIPT = join(__dir, "cost-snapshot.mjs");
@@ -558,6 +568,169 @@ export async function handleWorkRoute(req, res, url, ctx) {
       return true;
     }
     await forwardMessageToHost(res, ctx, path, body.text);
+    return true;
+  }
+
+  // GET /api/work/tickets/:id/publish-preview?action=push|pr — what the Push
+  // branch / Open PR confirm dialog shows (FOC-788, plan §4.1): the discovered
+  // checkout, the diff summary, the local checks state (the run's verdicts —
+  // never GitHub checks, decision 2) and a confirmToken bound to all of it.
+  // Read-only and safe for the UI to poll. No checkout answers 404 no-checkout
+  // with the reason and NO action is offered — fail-closed is the design, not
+  // an error path.
+  m = path.match(/^\/api\/work\/tickets\/([^/]+)\/publish-preview$/);
+  if (method === "GET" && m) {
+    const id = decodeId(m[1]);
+    if (id === null) {
+      json(res, 400, { error: "bad-id" });
+      log(method, path, 400);
+      return true;
+    }
+    if (!TICKET_ID_RE.test(id)) {
+      json(res, 400, { error: `not a ticket id: ${id}` });
+      log(method, path, 400);
+      return true;
+    }
+    const preview = buildPublishPreview({
+      ticket: id,
+      action: url.searchParams.get("action") ?? "",
+      // ONE ticket's facts (children + verdicts), never the whole sweep —
+      // an untouched ticket carries none and honestly yields no-checkout.
+      facts: ticketFacts().find((f) => f.taskId === id) ?? { children: [] },
+    });
+    if (!preview.ok) {
+      const status = preview.error === "no-checkout" ? 404 : 400;
+      json(res, status, { error: preview.error, reason: preview.reason });
+      log(method, path, status);
+      return true;
+    }
+    json(res, 200, preview);
+    log(method, path, 200);
+    return true;
+  }
+
+  // POST /api/work/tickets/:id/push | .../pr { confirmToken, actor, actorId }
+  // — the confirm dialog's send for a publish (FOC-788, plan §4.2). The
+  // Cockpit's write guards and body cap first (the `start` route's shape),
+  // then the rule that makes the endpoint safe: the checkout is re-derived
+  // NOW and the body must carry the confirmToken for the CURRENT state — a
+  // stray or replayed body can never act, and a moved head answers 409
+  // stale-preview before any executor runs. `actor` (human | ai) is required
+  // and recorded verbatim (decision 3). The audit trio (JSONL, telemetry,
+  // Linear comment) is written before the response returns, failures included
+  // (plan §4.3) — never automatic, never merge.
+  m = path.match(/^\/api\/work\/tickets\/([^/]+)\/(push|pr)$/);
+  if (method === "POST" && m) {
+    if (!writeGuards(req, res, path, ctx)) return true;
+    const id = decodeId(m[1]);
+    if (id === null) {
+      json(res, 400, { error: "bad-id" });
+      log(method, path, 400);
+      return true;
+    }
+    if (!TICKET_ID_RE.test(id)) {
+      json(res, 400, { error: `not a ticket id: ${id}` });
+      log(method, path, 400);
+      return true;
+    }
+    const action = m[2];
+    let body;
+    try {
+      body = await readJsonBody(req, BODY_CAP);
+    } catch (err) {
+      log(method, path, respondBodyError(res, err));
+      return true;
+    }
+    if (typeof body.confirmToken !== "string" || !body.confirmToken) {
+      json(res, 400, { error: "confirmToken (string) is required" });
+      log(method, path, 400);
+      return true;
+    }
+    if (body.actor !== "human" && body.actor !== "ai") {
+      json(res, 400, { error: 'actor must be "human" or "ai"' });
+      log(method, path, 400);
+      return true;
+    }
+    if (typeof body.actorId !== "string" || !body.actorId.trim()) {
+      json(res, 400, { error: "actorId (string) is required" });
+      log(method, path, 400);
+      return true;
+    }
+    const preview = buildPublishPreview({
+      ticket: id,
+      action,
+      facts: ticketFacts().find((f) => f.taskId === id) ?? { children: [] },
+    });
+    if (!preview.ok) {
+      const status = preview.error === "no-checkout" ? 404 : 400;
+      json(res, status, { error: preview.error, reason: preview.reason });
+      log(method, path, status);
+      return true;
+    }
+    const verdict = verifyConfirmToken({ action, ticket: id, checkout: preview.checkout, token: body.confirmToken });
+    if (!verdict.ok) {
+      const status = verdict.error === "stale-preview" ? 409 : 400;
+      json(res, status, { error: verdict.error, reason: verdict.reason });
+      log(method, path, status);
+      return true;
+    }
+
+    const { checkout, diff } = preview;
+    const actor = body.actor;
+    const actorId = body.actorId.trim();
+    let outcome;
+    if (action === "push") {
+      outcome = pushBranch({ checkout });
+    } else {
+      // Best effort — Linear being down must never block a publish; the PR
+      // title falls back to the published head (composePrTitle).
+      let title = null;
+      try {
+        const issue = await fetchIssue(id, workspace);
+        title = typeof issue?.title === "string" ? issue.title : null;
+      } catch {
+        title = null;
+      }
+      outcome = await createPullRequest({
+        checkout,
+        title: composePrTitle({ ticket: id, title, head: checkout.head }),
+        body: composePrBody({ ticket: id, head: checkout.head, base: checkout.base, diff, actor, actorId }),
+      });
+    }
+    const ok = outcome.ok === true;
+    const record = buildPublishRecord({
+      ticket: id,
+      action,
+      checkout,
+      diff,
+      actor,
+      actorId,
+      confirmToken: body.confirmToken,
+      ok,
+      error: ok ? null : outcome.error,
+      prUrl: ok ? outcome.prUrl ?? null : null,
+    });
+    const { audit } = await recordPublishAction({ record });
+    for (const [sink, result] of Object.entries(audit)) {
+      if (result?.ok === false) console.error(`[work] publish ${action} ${id}: ${sink} sink refused: ${result.error}`);
+    }
+    if (!ok) {
+      // 502: the git/API side refused. The detail text is scrubbed of the
+      // token at the executor (scrubSecret); the error name is the contract.
+      json(res, 502, { error: outcome.error, detail: outcome.detail ?? null });
+      log(method, path, 502);
+      return true;
+    }
+    // head is the published SHA (the record's identity); the PR's `head`
+    // field already carries the branch name at GitHub.
+    json(res, 200, {
+      ok: true,
+      action,
+      actor,
+      head: checkout.head,
+      ...(outcome.prUrl ? { prUrl: outcome.prUrl } : {}),
+    });
+    log(method, path, 200);
     return true;
   }
 

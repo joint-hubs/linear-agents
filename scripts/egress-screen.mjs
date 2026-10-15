@@ -45,7 +45,8 @@
  *   env-assignment  KEY=value / KEY: value lines whose KEY name looks secret-bearing
  *   jwt             three dot-separated base64url segments with an eyJ… header
  *   high-entropy    long mixed-class runs with high Shannon entropy (hex/UUID/data-URI excluded;
- *                   Linear issue-URL slug segments exempt, FOC-733)
+ *                   Linear issue-URL slug segments exempt, FOC-733; managed spawn refs
+ *                   exempt, FOC-788)
  *
  * Usage (library): scanEgress(text) -> hits; assertEgressClean(text, label) throws.
  * Usage (CLI):     node scripts/egress-screen.mjs check (--body <text> | --body-file <path>)
@@ -235,6 +236,46 @@ function isLinearIssueSlug(segment) {
   return true;
 }
 
+// FOC-788 (Mateusz, 2026-10-15: "tak w komentarzu linear podaj tez nazwe
+// galezi"): posted text may name the managed spawn ref it published — the
+// publish audit comment carries the branch, not just the head sha. A managed
+// ref is machine-made, not hand-written: `buildBranchName` (dev-branch.mjs)
+// emits `<teamKey>-<number>-<slug>` — team key letters-lowercased, number
+// digits, slug sanitized to [a-z0-9] tokens joined by single hyphens — and
+// supervisor-spawn.mjs appends `-<hash12>`, a 12-hex slice of
+// sha256(runId:childId). The full shape is an identifier, not a secret.
+//
+// The exemption is deliberately narrower than "anything kebab-shaped", and the
+// narrowing is the interlock with Q2-B (2026-10-09): a Linear issue-TITLE slug
+// has NO trailing 12-hex attempt hash, so it does NOT match here and stays
+// screened in bare prose — the corpus pins in egress-screen.test.mjs §7 (which
+// are old-style `foc-N-slug` names) remain blocked exactly as Q2-B decided.
+// The attempt hash is what separates a machine-generated ref from a human
+// title; without it this gate would have re-opened what Q2-B closed.
+//
+// Reach: family E only (same as the FOC-733 spans) — key-prefix, pem,
+// env-assignment and jwt still fire on anything shaped like their families,
+// managed-ref-looking or not. Position-independent: the shape itself is the
+// anchor (unlike the FOC-733 slug, which needs its /issue/<KEY>/ position),
+// because `foc-123-…-<hash12>` is not a natural-language construct.
+//
+// ACCEPTED RESIDUAL, documented on purpose (same class as FOC-733's Q2-B
+// residual, and closed by the same non-option — Q2-C rejected any lookup-based
+// check): a passphrase spelled `<letters>-<digits>-<kebab…>-<12 hex>` sails
+// through this gate. A secret that starts with a team-key + issue-number and
+// ends with an exact 12-hex token is not a plausible token format — the
+// prefixed (ghp_, sk-, …) and env-name families cover the real ones — and a
+// gate for the spawn-managed shape is exactly the grant Mateusz gave, never a
+// general loosening. A ref that does NOT fit the shape (renamed branches,
+// legacy pre-attempt-hash names like `foc-143-r5-…-stack`) falls back to the
+// ordinary family E rules: it is refused, not silently waved through.
+const MANAGED_GIT_REF_RE = /^[a-z]{1,8}-[0-9]{1,8}(?:-[a-z0-9]{1,40}){1,32}-[0-9a-f]{12}$/;
+
+/** True when `run` has the shape of a spawn-managed ref (FOC-788). */
+function isManagedGitRef(run) {
+  return MANAGED_GIT_REF_RE.test(run);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -408,7 +449,7 @@ function detectJwt(text, spans) {
  * reported by families A–D are skipped (same secret, not a second shape).
  * Pure-hex runs, data-URI payloads, and low-class runs are excluded — see
  * HEX_RUN_RE above for the why. Linear issue-URL slug segments (FOC-733,
- * via extraSpans) are exempt.
+ * via extraSpans) are exempt, as are managed spawn refs (FOC-788).
  */
 function detectHighEntropy(text, spans, extraSpans = []) {
   const hits = [];
@@ -469,7 +510,7 @@ export function scanEgress(text) {
     ...detectPem(text, spans),
     ...detectEnvAssignments(text, spans),
     ...detectJwt(text, spans),
-    ...detectHighEntropy(text, spans, publicBlockSpans(text).concat(linearIssueSlugSpans(text))),
+    ...detectHighEntropy(text, spans, publicBlockSpans(text).concat(linearIssueSlugSpans(text), managedGitRefSpans(text))),
   ];
   return hits.sort((a, b) => a.line - b.line || a.column - b.column);
 }
@@ -504,6 +545,22 @@ function linearIssueSlugSpans(text) {
     if (!isLinearIssueSlug(segment)) continue;
     const start = m.index + m[0].length - segment.length;
     spans.push([start, start + segment.length]);
+  }
+  return spans;
+}
+
+/** Spans of managed spawn refs (FOC-788) — the exact candidate runs family E
+ * would consider (same ENTROPY_RUN_RE boundaries), kept only when the whole
+ * run has the managed-ref shape (isManagedGitRef). A run the shape does not
+ * fit — a renamed or legacy ref, or an unrelated token glued to one — is not
+ * spanned and falls back to the ordinary family E rules. */
+function managedGitRefSpans(text) {
+  const spans = [];
+  ENTROPY_RUN_RE.lastIndex = 0;
+  let m;
+  while ((m = ENTROPY_RUN_RE.exec(text)) !== null) {
+    if (!isManagedGitRef(m[0])) continue;
+    spans.push([m.index, m.index + m[0].length]);
   }
   return spans;
 }

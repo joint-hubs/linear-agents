@@ -277,6 +277,14 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "publish-actions.test.mjs",
+      "reason": "isolation audit FOC-788: local git fixtures only (a bare origin + clone + worktrees under one mkdtemp — never the network, never the repo's own checkout); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
+      "file": "publish-exec.test.mjs",
+      "reason": "isolation audit FOC-788: local git fixtures + temp secret files + a fake fetch and injected sinks (never a real GitHub call, never a Linear post, never the live telemetry DB); the only subprocess runs are local git (a bare origin fixture and one `git credential fill` wiring check)"
+    },
+    {
       "file": "publish-linear-comment.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
