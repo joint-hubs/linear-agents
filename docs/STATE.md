@@ -24,6 +24,39 @@ Kolejka — sekwencja z `docs/ROADMAP.md` (2026-10-08). **Tor A (krytyczna ście
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## 2026-10-15 (38) — FOC-815 FIXED: one unknown Linear id no longer poisons the work-board lookup
+
+Subtask **FOC-815** (child of FOC-788) — filed and fixed on Mateusz's „opcja 1" (2026-10-15). The banner
+„Linear unavailable: … Entity not found: Issue" on the Work board was the fixture `WORK-99` poisoning
+the batched Linear lookup, not Linear being down.
+
+- **Diagnoza (live probe w kontenerze, read-only):** batch aliasów `issue(id:)` z jednym nieznanym id
+  dostaje od Linear `errors[]` z `path:["aN"]` + **`data: null` dla całej operacji** — rodzeństwo w
+  batchu nie ma się z czego odzyskać na poziomie protokołu. `graphql()` rzucał na `errors[]`, gubiąc
+  wszystko poza stringiem, więc jeden miss kasował ≤50 id; oba workspacy padały tak samo → banner.
+  Missy nie trafiały do cache'a → lookup (batch + kara) leciał przy każdym odświeżeniu tablicy.
+  Drugi, utajony bug w tej samej pętli: spacer indeksowy mierzył `remaining`, które kurczyło się po
+  każdym chunku — przy 51+ id reszta nigdy nie była pytana w tym workspace (istniejący test 51-id
+  przechodził tylko dlatego, że jego mock ignorował workspace).
+- **Fix:** (1) `linear-client.mjs` dokleja surowe `errors[]` do rzuconego błędu jako `graphqlErrors`
+  (additive, tekst błędu bez zmian; impact `graphql` = 66 symboli, ale zero zmiany zachowania
+  dotychczasowych wywołań); (2) `fetchLinearStates` klasyfikuje „Entity/Issue not found" jako **cichy
+  miss** (brak stanu i brak błędu — jak null alias), atrybuje go po `path` i ponawia batch bez
+  brakujących id; bez zdatnych pathów — bisekcja do pojedynczych id; (3) realne awarie (auth, sieć,
+  rate limit) dalej dają banner z powodem — zmieszany batch (miss + awaria) też, bo bisekcja
+  atrybuje na singlach; (4) miss-y wpadają do cache'a 60 s; (5) spacer po snapshocie — 51. id pytane
+  w tym samym workspace. Nieznany id dalej płynie do przebiegu pisi (jak dotąd).
+- **Weryfikacja:** `work-board.test.mjs` **33/33** (4 nowe: atrybucja po path, bisekcja bez pathów,
+  realna awaria/mieszany batch, cache missów + wzmocniony test 51-id o workspace'ach),
+  `linear-client.test.mjs` **46/46** (15d: `graphqlErrors` na błędzie), sąsiedzi bez regresji:
+  `work-routes` 86/86, `task-map-routes` 50/50, `publish-actions` 11/11, `publish-exec` 13/13,
+  `linear-ops` 25/25. **Docker (rebuild+redeploy):** obraz `fenix:task-workspace-candidate`
+  przebudowany (log `.fenix/815-image-build.log`), stack `fenix-task-workspace` zredeployowany, oba
+  kontenery healthy. Żywy payload `GET /api/work/tickets`: `linear: {ok:true, error:null}` — **brak
+  bannera**, `WORK-99` = cichy miss (`title:null`, `stage:"dev"` z danych Fenix), wszystkie realne
+  tickety (FOC/PAR/PFM/JOI/ARC) w pełni wzbogacone.
+- **Lądowanie (2026-10-15, „commituj pr … i merge" Mateusza):** commity `205f846` (fix) + `092a226` (plan note) + ten wpis; cała gałąź `fenix-settings-keys` (strumień task-workspace FOC-773→788 + fix) w **PR #71 → main** i mergnięta. Push/PR/merge wykonany na wyraźne polecenie; gałąź pozostaje (bez delete-branch).
+
 ## 2026-10-15 (37) — FOC-788 DELIVERED: push / open PR from the dashboard, with explicit confirm
 
 Ostatnie ogniwo łańcucha lane-O (FOC-773 → 778 → 786 → **788**) — S1–S5 zamknięte, wszystko zweryfikowane. Cztery decyzje Mateusza (2026-10-15) w kontraktach: (1) push gałęzi taska + PR do `main`; (2) „checks state" = lokalny wynik weryfikacji (verdykty runów), nie checksy GitHuba; (3) audyt = telemetria + komentarz Linear (z nazwą gałęzi) + JSONL, rekord niesie `actor: "human"|"ai"`; (4) ten sam `GITHUB_TOKEN` (compose secret) dla pusha i PR-a.
