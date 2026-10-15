@@ -195,6 +195,11 @@ The Settings area in the left navigation covers what used to require a
   disk. Managing the policy stays with FOC-780.
 - **Squads & prompts** is the v1 Prompts screen as a tab (`/prompts`): role
   edits land on the `/data/agents` volume and take effect at the next spawn.
+- **Artifacts** (`/settings/artifacts`): the repo's generated artifacts (model
+  map, UI build, atlas config, diagram PNGs, the CodeGraph index) with state,
+  age and source revision; stale watched ones regenerate on start and within
+  60 s natively — `node scripts/artifact-registry.mjs status` shows the same
+  from the shell.
 
 The API behind it lives under `/api/settings/*` — the same write guards as the
 Cockpit, bodies capped at 8 KB, and no response ever carries a key value.
