@@ -34,7 +34,8 @@
 //
 // Briefing mode (FOC-609) is the SessionStart digest: one call at the start of
 // a turn that names everything the lead owes attention to — live and held
-// children, pending gates, un-acked wake rows, the last action per child. It is
+// children, pending gates, open holds (FOC-848), un-acked wake rows, the last
+// action per child. It is
 // read-only and deliberately tolerant of a run that does not exist yet: the
 // SessionStart hook fires before the first spawn too, and a hook that exits 1
 // would inject an error into the session context instead of a briefing.
@@ -46,6 +47,7 @@ import { atomicWriteJSON } from "./utils.mjs";
 import { readFocus } from "./supervisor-focus.mjs";
 import {
   TERMINAL_STATUSES,
+  openHolds,
   pollBaseMs,
   readHeld,
   readWakeAck,
@@ -152,6 +154,32 @@ function teeActivity(runId, childId) {
   if (!existsSync(path)) return { size: 0, mtimeMs: 0 };
   const s = statSync(path);
   return { size: s.size, mtimeMs: s.mtimeMs };
+}
+
+// FOC-848: the run's OPEN holds (FOC-612) beside the pending gates — an
+// ownership refusal (origin `ownership`) is a decision owed to Mateusz exactly
+// like a gate, and the briefing is where the lead looks first. Fail-soft by
+// design: readHolds throws on a store nobody can parse (one file, nothing
+// well-formed to keep visible), and a briefing that crashed on it would be a
+// briefing nobody gets — the error is surfaced as `holdsError` instead.
+function briefingHolds(runId) {
+  try {
+    const holds = openHolds(runId);
+    return {
+      holds: holds.map((h) => ({
+        id: h.id,
+        origin: h.origin,
+        impact: h.impact ?? null,
+        question: String(h.question).slice(0, 160),
+        recommendation: h.recommendation,
+        createdAt: h.createdAt,
+        presentedAt: h.presentedAt,
+      })),
+      holdsCount: holds.length,
+    };
+  } catch (err) {
+    return { holds: [], holdsCount: 0, holdsError: err.message };
+  }
 }
 
 function pendingGates(runId) {
@@ -301,6 +329,7 @@ if (args.briefing) {
   const unacked = rows.filter((r) => r.seq > ackedThrough);
   const entries = Object.values(registry.children);
   const briefingFocus = readFocus(runId).current;
+  const holdsView = briefingHolds(runId);
   console.log(
     JSON.stringify(
       {
@@ -326,6 +355,12 @@ if (args.briefing) {
           childId: g.childId ?? null,
           summary: g.summary,
         })),
+        // FOC-848: the open holds.json holds (count + the fields needed to
+        // present one), next to the gates. An unreadable store is an error
+        // field, never a crash and never a silent empty list.
+        holds: holdsView.holds,
+        holdsCount: holdsView.holdsCount,
+        ...(holdsView.holdsError ? { holdsError: holdsView.holdsError } : {}),
         wake: {
           ackedThrough,
           unackedCount: unacked.length,

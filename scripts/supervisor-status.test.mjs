@@ -79,6 +79,32 @@ const parse = (r) => {
   }
 };
 
+// A valid holds.json store, written directly — same shape the gate CLI writes
+// (validated by readHolds on the status side), without needing the pricing
+// fixture the CLI demands. `over` overrides fields on the first hold.
+function writeHoldsFixture(runId, holds = [holdFixture()]) {
+  writeFileSync(join(runDir(runId), "holds.json"), JSON.stringify({ version: 1, holds }));
+}
+function holdFixture(over = {}) {
+  return {
+    id: "hold-1",
+    origin: "ownership",
+    question: "FOC-999 belongs to another owner — take it anyway?",
+    options: [{ label: "skip to the next own ticket", model: "test/priced-model", costUsd: 0 }],
+    recommendation: "continue with the next ticket of your own projects",
+    impact: "medium",
+    resolution: null,
+    state: "open",
+    createdAt: "2026-10-15T00:00:00Z",
+    presentedAt: null,
+    until: null,
+    answer: null,
+    blocks: null,
+    history: [{ event: "created", at: "2026-10-15T00:00:00Z" }],
+    ...over,
+  };
+}
+
 // A child entry written by hand, so the test controls status and tee content
 // without needing a live process.
 function seedChild(runId, { childId = "dev-1", status: st = "running", costUsd = 0, lines = [], turnStartedAt = new Date().toISOString() } = {}) {
@@ -478,6 +504,48 @@ test("legacy-unverified children are named beside the total, not excluded from i
   if (!r.stderr.includes("cost includes 1 unverified legacy figure(s): dev-2")) {
     fail(`stderr did not name the unverified child: ${r.stderr}`);
   }
+});
+
+// ── briefing holds (FOC-848) ─────────────────────────────────────────────────
+console.log("\nbriefing holds");
+
+test("the briefing lists the run's open holds with id and origin", () => {
+  const runId = fixtureRun();
+  writeHoldsFixture(runId, [
+    holdFixture(),
+    holdFixture({ id: "hold-2", state: "answered" }), // answered → not open → not listed
+  ]);
+  const out = parse(status(runId, ["--briefing"]));
+  if (!Array.isArray(out.holds) || out.holds.length !== 1) {
+    fail(`holds was ${JSON.stringify(out.holds)}`);
+  }
+  const hold = out.holds[0];
+  if (hold.id !== "hold-1") fail(`hold id was ${hold.id}`);
+  if (hold.origin !== "ownership") fail(`hold origin was ${hold.origin}`);
+  if (hold.impact !== "medium") fail(`hold impact was ${hold.impact}`);
+  if (typeof hold.question !== "string" || !hold.question) fail(`question was ${JSON.stringify(hold.question)}`);
+  if (!("holdsCount" in out) || out.holdsCount !== 1) fail(`holdsCount was ${out.holdsCount}`);
+  if (out.holdsError) fail(`holdsError on a valid store: ${out.holdsError}`);
+});
+
+test("a run with no holds.json briefs an empty holds list", () => {
+  const runId = fixtureRun();
+  const out = parse(status(runId, ["--briefing"]));
+  if (JSON.stringify(out.holds) !== "[]") fail(`holds was ${JSON.stringify(out.holds)}`);
+  if (out.holdsCount !== 0) fail(`holdsCount was ${out.holdsCount}`);
+  if (out.holdsError) fail(`holdsError on a missing store: ${out.holdsError}`);
+});
+
+test("a corrupt holds store surfaces holdsError instead of crashing the briefing", () => {
+  const runId = fixtureRun();
+  writeFileSync(join(runDir(runId), "holds.json"), "{not json");
+  const out = parse(status(runId, ["--briefing"]));
+  if (out.ok !== true) fail(`the briefing did not survive: ok=${out.ok}`);
+  if (!out.holdsError || !/not readable JSON/.test(out.holdsError)) {
+    fail(`holdsError was ${JSON.stringify(out.holdsError)}`);
+  }
+  if (JSON.stringify(out.holds) !== "[]") fail(`holds was ${JSON.stringify(out.holds)}`);
+  if (out.holdsCount !== 0) fail(`holdsCount was ${out.holdsCount}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────
