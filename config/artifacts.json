@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "artifacts": [
+    {
+      "id": "models-map",
+      "title": "Model routing map",
+      "output": "config/models.map",
+      "sources": ["config/models.json"],
+      "generator": { "cmd": ["node", "scripts/gen-model-map.mjs"] },
+      "refresh": "watch",
+      "committed": false,
+      "inContainer": true,
+      "notes": "Flat KEY=VALUE lines consumed by bin/agent.bat. Not committed since FOC-779; bin/_lib.bat regenerates it when missing or older than models.json, and every start/watch refresh keeps it fresh."
+    },
+    {
+      "id": "ui-dist",
+      "title": "Dashboard UI build",
+      "output": "ui/dist",
+      "sources": ["ui/src/**", "ui/index.html", "ui/package-lock.json", "ui/vite.config.*"],
+      "generator": { "cmd": ["npm", "--prefix", "ui", "run", "build"] },
+      "refresh": "watch",
+      "committed": false,
+      "inContainer": false,
+      "notes": "Served by telemetry-server.mjs. The Docker image ships it prebuilt, so inside the container this entry is reported, never rebuilt."
+    },
+    {
+      "id": "atlas-mcp",
+      "title": "Atlas MCP config",
+      "output": "config/atlas-mcp.json",
+      "sources": ["config/atlas-mcp.json.template"],
+      "generator": null,
+      "refresh": "launcher",
+      "committed": false,
+      "inContainer": true,
+      "notes": "Rendered from the template by bin/_lib.bat on every launcher start (the regenerate-on-start precedent). Reported only — the launcher owns it."
+    },
+    {
+      "id": "diagrams-png",
+      "title": "Architecture diagrams (PNG)",
+      "output": "docs/diagrams/*.png",
+      "sources": ["docs/diagrams/*.puml"],
+      "generator": { "cmd": ["sh", "scripts/render-diagrams.sh"] },
+      "refresh": "external",
+      "committed": true,
+      "inContainer": false,
+      "notes": "The documented exception: the PNGs stay in git so GitHub readers see them, and the renderer needs Java. The registry only labels them stale."
+    },
+    {
+      "id": "codegraph-index",
+      "title": "CodeGraph index",
+      "output": ".codegraph",
+      "sources": [],
+      "generator": null,
+      "refresh": "external",
+      "committed": false,
+      "inContainer": true,
+      "notes": "Freshness is delegated to scripts/code-intel.mjs status (its own HEAD-sha proof); the verdict is reported here, never managed."
+    },
+    {
+      "id": "analysis-cache",
+      "title": "Telemetry analysis cache",
+      "output": null,
+      "sources": [],
+      "generator": null,
+      "refresh": "external",
+      "committed": false,
+      "inContainer": true,
+      "notes": "Lives outside the repo tree under the telemetry home; status is delegated to GET /api/analysis/cache and reported here, never managed."
+    }
+  ]
+}
