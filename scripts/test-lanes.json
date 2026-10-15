@@ -153,6 +153,10 @@
       "reason": "isolation audit FOC-477: mkdtemp/tmpdir fixtures only (corpus + children.json + fake worktree/.git-pointer trees synthesized under os.tmpdir and removed after each case); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
+      "file": "gh-screened.test.mjs",
+      "reason": "isolation audit (FOC-512): mkdtemp/tmpdir fixtures only; the fake gh is a temp Node script appended to a log file and spawned by the WRAPPER as a local child, never a real GitHub call; no network, no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "graph-runner.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
