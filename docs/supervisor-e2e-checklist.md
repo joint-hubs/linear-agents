@@ -1,6 +1,6 @@
 # Supervisor — manual e2e checklist (FOC-116, spec §8.12)
 
-The scripted suite (`node scripts/test-all.mjs`, 174 files) proves the parts against a mock
+The scripted suite (`node scripts/test-all.mjs`, 177 files) proves the parts against a mock
 `claude`. It cannot prove the one thing this epic is actually about: that **Mateusz never opens a
 child terminal**. That is a claim about a human session, so it gets walked by hand, once, on a
 throwaway issue, before first real use.
@@ -141,6 +141,15 @@ them. The human gate is the real control; the deny list removes the accidental p
 determined one. Verified empirically 2026-08-26: a real child under `--permission-mode
 bypassPermissions` was refused — deny outranks bypass.
 
+- (FOC-511) the Linear helper denies cover launcher, relative, absolute and PowerShell invocation
+  forms and include `linear-push.mjs`; a test child's committed settings deny `mcp__linear__*`;
+  proof: `node scripts/test-run.mjs supervisor-deny` (model of the documented matcher) and the P9
+  membership test.
+- (FOC-512) PR title and body leave the Supervisor only through
+  `node $LA_ROOT/scripts/gh-screened.mjs pr create …`; raw `gh pr create|edit|comment` and `gh api`
+  are deny-listed in `agents/supervisor/settings.json`; a refusal names the hit by shape and `gh` is
+  never started; proof: `node scripts/test-run.mjs gh-screened`.
+
 ### AC-8 — No secrets in Linear
 - [ ] Read every comment the run posted. No tokens, keys, passwords, connection strings.
 - [ ] Snippets the Supervisor showed you came from `supervisor-status.mjs` and are redacted.
@@ -205,7 +214,7 @@ All of it is **inert unless `LA_SUPERVISOR=1`**, which only `supervisor-spawn.mj
 what keeps AC-10 true while the squad prompts changed.
 
 ### Verification
-- `node scripts/test-all.mjs` → 174 files (the registered lane count: 139 parallel + 35 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
+- `node scripts/test-all.mjs` → 177 files (the registered lane count: 142 parallel + 35 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
   load-sensitive and has been observed red at base `e3dea40` as well — see §0 before reading a red
   security-scan as a regression.
 - This checklist, walked once on a throwaway issue (§8.12).
