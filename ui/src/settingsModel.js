@@ -8,6 +8,7 @@
 // the only signal).
 
 import { formatMoney } from './workModel.js';
+import { formatAge } from './cockpitModel.js';
 
 // ===== Keys ==================================================================
 
@@ -369,5 +370,68 @@ export function retentionView(payload) {
     note: 'read-only here — retention is managed by FOC-780',
     partialText: partial.length ? 'counts are partial: ' + partial.join(', ') : null,
     computedAt: r.computedAt || null,
+  };
+}
+
+// ===== Artifacts (FOC-779) ===================================================
+
+const ARTIFACT_STATES = {
+  fresh: { label: 'fresh', tone: 'ok' },
+  stale: { label: 'stale', tone: 'warn' },
+  missing: { label: 'missing', tone: 'danger' },
+  external: { label: 'external', tone: 'muted' },
+};
+
+const ARTIFACT_REFRESH = {
+  start: 'on start',
+  watch: 'watched, 60 s',
+  launcher: 'launcher',
+  external: 'external',
+};
+
+// artifactRow(a) -> one registry row's view model. stateLabel + tone follow the
+// plan's vocabulary (fresh ok / stale warn / missing danger / external muted);
+// an unrecognised state is shown as-is, muted — never dressed up as fresh.
+// ageText humanises the route's `age` (milliseconds, now - output mtime) with
+// the cockpit's formatAge rendering so ages read alike across screens.
+// revisionText is the source revision the row was checked against: head short +
+// " · " + the first 8 chars of the digest, or "—" when the row carries neither.
+// generatedAtText carries the manifest's ISO timestamp VERBATIM — the screen
+// does the locale rendering, exactly like the retention panel does with
+// computedAt (the plain-node tests stay locale-independent).
+export function artifactRow(a) {
+  const r = a || {};
+  const state = ARTIFACT_STATES[r.state] || { label: r.state || 'unknown', tone: 'muted' };
+  const manifest = r.manifest && typeof r.manifest === 'object' ? r.manifest : null;
+  return {
+    id: r.id || null,
+    title: r.title || r.id || 'artifact',
+    output: r.output || null,
+    stateLabel: state.label,
+    tone: state.tone,
+    ageText: formatAge(r.age),
+    revisionText:
+      typeof r.head === 'string' && r.head
+        ? r.head.slice(0, 7) +
+          (typeof r.digest === 'string' && r.digest ? ' · ' + r.digest.slice(0, 8) : '')
+        : '—',
+    generatedAtText: (manifest && manifest.generatedAt) || null,
+    refreshText: ARTIFACT_REFRESH[r.refresh] || r.refresh || 'unknown',
+    reason: r.reason || null,
+  };
+}
+
+// artifactsView(payload) -> the read-only artifacts panel's view model: the
+// rows in registry order, the computed-at stamp and repo head the footnote
+// shows, and the refresh note. Tolerant of an empty or malformed payload —
+// rows stay [] and the note still renders; nothing throws.
+export function artifactsView(payload) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  return {
+    computedAtText: p.computedAt || null,
+    headShort: typeof p.head === 'string' && p.head ? p.head.slice(0, 7) : null,
+    rows: (Array.isArray(p.artifacts) ? p.artifacts : []).map(artifactRow),
+    note:
+      'regenerated on `fenix up` / dashboard start; watched entries refresh within 60 s of a source change; external entries are reported only.',
   };
 }
