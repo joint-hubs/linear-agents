@@ -686,6 +686,20 @@ const REGEN_NOTE_NO_MAP = "One regeneration: the previous attempt produced no ma
   + "map against the same reads, with every problem resolved: the map is all-or-nothing and a partially "
   + "valid map is never kept.";
 
+// A RE-ENTRY (a new round after the gate answers) is not a retry. The frozen
+// transport's REVISION header still reads "the previous attempt was rejected",
+// so the note opens by saying that nothing was; "produce a different map"
+// under that header is still true for a re-entry (the new map differs from the
+// persisted one). The block exists for DELIVERY: `revision` is the only
+// caller-composition field the transport serializes into the model's message
+// (FOC-758 (a)), so it is what gets `nextMapVersion` to the actual model on
+// the FIRST attempt of a re-entry — a top-level read key the step does not
+// declare is dropped before the wire, the lesson the FOC-801 object-level
+// tests cannot see.
+const REGEN_NOTE_REENTRY = "No attempt was rejected. This call is a RE-ENTRY after the gate answers — a new "
+  + "round over a store that already holds an earlier map (immutable). Produce a DIFFERENT map than that "
+  + "earlier one, folding the answers below into it.";
+
 /**
  * FOC-758: the validator's concrete violations as regeneration problems — ONE
  * entry per violation the validator reported, each naming the field path, the
@@ -745,9 +759,12 @@ function stringLengthAt(output, instancePath) {
  * guess a number persistMap would reject, burning the single regeneration on
  * the same mismatch and failing the node. The reads carry the hint because
  * the production transport composes its message from the reads alone and may
- * drop unknown generator args. The store still owns identity: the hint
- * prevents the mismatch, a generator that ignores it is still rejected,
- * never silently renumbered.
+ * drop unknown generator args. A RE-ENTRY also rides a `revision` block on
+ * attempt 1 (reentryReads): the transport serializes only the DECLARED reads
+ * plus `revision`, so without the block the first attempt's hint is dropped
+ * before the wire and the known-bad call repeats (the FOC-758 class). The
+ * store still owns identity: the hint prevents the mismatch, a generator that
+ * ignores it is still rejected, never silently renumbered.
  *
  * Returns `{status:"done", output, mapVersion, maps, checks, fold, attempts}`
  * or `{status:"failed", error, checks?, fold}` — it never throws on data
@@ -826,12 +843,19 @@ export async function runPlanIntentNode({
       raw = await generator({
         stepId,
         step,
-        // FOC-801: the hint rides the READS on both attempts — the production
-        // transport composes the model's message from the reads alone and may
-        // drop unknown generator args, so attempt 1 carries it as a
-        // clearly-named field over the payload and the retry carries it
-        // inside the serialized revision (regenReads).
-        reads: attempt === 1 ? { ...payload, nextMapVersion: allocated } : regenReads(payload, previousMap, problems, allocated),
+        // FOC-801: the hint rides the READS on both attempts. A fresh call
+        // (allocation 1) carries it as a clearly-named field over the payload
+        // and nothing else — its message stays byte-identical. A RE-ENTRY
+        // (allocation > 1) additionally carries a `revision` block, because
+        // the production transport composes the model's message from the
+        // DECLARED reads alone plus the serialized revision: a top-level read
+        // key the step does not declare is dropped before the wire (FOC-758's
+        // lesson), so without the block the FIRST attempt never sees the
+        // number and burns itself on a guaranteed persistMap rejection. The
+        // retry carries it inside the serialized revision (regenReads).
+        reads: attempt === 1
+          ? (allocated > 1 ? reentryReads(payload, allocated) : { ...payload, nextMapVersion: allocated })
+          : regenReads(payload, previousMap, problems, allocated),
         nextMapVersion: allocated,
       });
     } catch (err) {
@@ -934,6 +958,29 @@ function regenReads(payload, previous, problems, nextMapVersion) {
       problems: [...problems],
       ...(Number.isInteger(nextMapVersion) ? { nextMapVersion } : {}),
       previous: previous === null ? null : { ...previous, mapVersion: nextMapVersion },
+    },
+  };
+}
+
+/**
+ * The FIRST attempt of a RE-ENTRY (allocation > 1 — the store already holds a
+ * map, so this call produces the next version, not version 1). The `revision`
+ * block here carries NO rejection: it exists so the hint reaches the model at
+ * all — the transport serializes only the declared reads plus `revision`, and
+ * `nextMapVersion` is not a declared read (config/decisions.json is fixed).
+ * `attempt: 1` and `previous: null` say so structurally; the note says so in
+ * words, because the transport's REVISION header is frozen rejection wording.
+ */
+function reentryReads(payload, nextMapVersion) {
+  return {
+    ...payload,
+    nextMapVersion,
+    revision: {
+      attempt: 1,
+      note: REGEN_NOTE_REENTRY,
+      problems: [],
+      ...(Number.isInteger(nextMapVersion) ? { nextMapVersion } : {}),
+      previous: null,
     },
   };
 }

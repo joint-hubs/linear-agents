@@ -1199,6 +1199,14 @@ async function main() {
     eq(seen.length, 1, "one call, no retry");
     eq(seen[0].nextMapVersion, 2, "the FIRST attempt already carries the hint");
     eq(seen[0].reads.nextMapVersion, 2, "and the hint rides the READS, the transport the production generator composes from");
+    // A re-entry's first attempt carries a `revision` block as well: the
+    // transport serializes only the declared reads plus `revision`, so the
+    // block is what gets the hint onto the actual WIRE (FOC-758's lesson —
+    // a top-level read key the step does not declare is dropped first).
+    eq(seen[0].reads.revision?.attempt, 1, "marked as the first attempt, not a retry");
+    eq(seen[0].reads.revision?.nextMapVersion, 2, "with the hint inside it — the field the model actually sees");
+    eq(seen[0].reads.revision?.previous, null, "no rejected map to carry");
+    eq(/No attempt was rejected/.test(seen[0].reads.revision?.note ?? ""), true, "the note says so in its first sentence — the frozen REVISION header cannot");
   });
 
   await test("a generator that ignores the hint is still rejected — the store owns identity (FOC-801)", async () => {
@@ -1239,6 +1247,98 @@ async function main() {
     eq(seen[1].reads.revision.nextMapVersion, 2, "the revision carries the allocation for transports that serialize it whole");
     eq(seen[1].reads.revision.previous.mapVersion, 2, "the rejected map's stale 7 is overwritten with the allocation");
     eq(bad.mapVersion, 7, "the caller's rejected map object is untouched — the copy is the revision's");
+  });
+
+  // ── the WIRE: the hint must reach the MODEL, not just the seam object ──────
+  //
+  // The FOC-758 lesson, restated for FOC-801: the object handed to the
+  // generator is not the wire. `createDefaultGenerator` composes the model's
+  // message from the DECLARED `step.reads` plus the optional serialized
+  // `revision` — a top-level read key the step does not declare (and
+  // `nextMapVersion` is not one of the five in config/decisions.json) is
+  // dropped before the wire, and an extra generator arg is ignored outright.
+  // These assertions pin the actual request body; without them the fix looks
+  // green while the model still never hears the number on a re-entry.
+
+  await test("FOC-801 wire: the allocation reaches the model on a re-entry's FIRST attempt — and a fresh call stays byte-identical", async () => {
+    const { createDefaultGenerator } = await import("./graph-runner.mjs");
+    const dir = mkdtempSync(join(tmpdir(), "foc-801-wire-"));
+    try {
+      const fetchCalls = [];
+      const serveQueue = []; // maps the stub returns in order; empty → CLEAN(2)
+      const fetchImpl = async (url, options) => {
+        fetchCalls.push({ options });
+        const content = serveQueue.length ? serveQueue.shift() : CLEAN(2);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: "resp-foc-801-wire",
+            model: "z-ai/glm-5.3-flash",
+            choices: [{ message: { content: JSON.stringify(content) }, finish_reason: "stop" }],
+            provider: "z-ai",
+            usage: { input_tokens: 1, output_tokens: 1, cost: 0 },
+          }),
+        };
+      };
+      const generate = createDefaultGenerator({ apiKey: "test-key", runId: "run-foc-801-wire", taskKey: "T1", shadowDir: dir, fetchImpl });
+      const wireMessage = (n) => JSON.parse(fetchCalls[n].options.body).messages[0].content;
+
+      // (1) RE-ENTRY (the store holds v1) — accepted on the FIRST attempt.
+      const { maps } = persistMap({}, CLEAN(1));
+      const reentry = await runPlanIntentNode({
+        step: STEP,
+        reads: RESUMED_READS,
+        generator: (args) => generate(args),
+        validate,
+        maps,
+        presented: RESUMED_PRESENTED,
+      });
+      eq(reentry.status, "done", `re-entry done through the real generator: ${JSON.stringify(reentry.error)}`);
+      eq(reentry.mapVersion, 2, "persisted as the next version");
+      eq(fetchCalls.length, 1, "accepted on the FIRST attempt — the hint removes the wasted rejection round-trip");
+      const first = wireMessage(0);
+      if (!first.includes("REVISION (the previous attempt was rejected")) fail("the REVISION section is on the wire — the transport's only composition channel");
+      if (!first.includes('"nextMapVersion":2')) fail(`the ALLOCATED VERSION reaches the model on the first attempt: …${first.slice(-400)}`);
+      if (!first.includes("No attempt was rejected")) fail("the re-entry note says so in its first sentence — the frozen header cannot");
+      if (first.indexOf('"nextMapVersion"') < first.indexOf("INPUTS (declared reads")) fail("the hint rides in REVISION (after the declared reads), never in place of them");
+
+      // (2) REGENERATION wire — the hint rides the revision as before.
+      fetchCalls.length = 0;
+      serveQueue.push(CLEAN(7)); // mis-numbered: rejected once, then CLEAN(2)
+      const regen = await runPlanIntentNode({
+        step: STEP,
+        reads: RESUMED_READS,
+        generator: (args) => generate(args),
+        validate,
+        maps,
+        presented: RESUMED_PRESENTED,
+      });
+      eq(regen.status, "done", `the regeneration recovered: ${JSON.stringify(regen.error)}`);
+      eq(fetchCalls.length, 2, "the mis-numbered map was rejected once, the regen accepted");
+      const retry = wireMessage(1);
+      if (!retry.includes('"nextMapVersion":2')) fail(`the hint rides the REGENERATION wire too: …${retry.slice(-400)}`);
+
+      // (3) FRESH call (allocation 1) — no re-entry: the message must carry NO
+      // REVISION section at all (the FOC-449 input-hash contract).
+      fetchCalls.length = 0;
+      serveQueue.push(CLEAN(1));
+      const fresh = await runPlanIntentNode({
+        step: STEP,
+        reads: RUN_READS,
+        generator: (args) => generate(args),
+        validate,
+        maps: {},
+        presented: {},
+      });
+      eq(fresh.status, "done", `fresh call done: ${JSON.stringify(fresh.error)}`);
+      eq(fetchCalls.length, 1, "one call");
+      const freshMessage = wireMessage(0);
+      if (/REVISION \(/.test(freshMessage)) fail("a fresh call carries NO REVISION section — its message is byte-identical to before");
+      if (!freshMessage.includes(`- inbox.entry: ${JSON.stringify(ENTRY)}`)) fail("the declared reads are still the inputs");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   await test("the node fails closed on malformed reads with zero generator calls", async () => {
