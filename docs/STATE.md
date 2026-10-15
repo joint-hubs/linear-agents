@@ -3867,3 +3867,18 @@ FOC-811 na granicy).
 bramki `plan.gate1` / `draft-approval` przekazywane jako osobne wiadomości z pełnym artefaktem.
 Śmierć harness/provider tam = stop i raport, nigdy cichy retry. Po 10 runach: raport FOC-477,
 go/no-go, potem FOC-712. Tor B (M8) rusza, gdy tor A stanie.
+
+### Dodatek — attempt 6 padł na bramce (błąd operatora), czeka na decyzję
+
+`2026-10-15-supervisor-foc477-arma-06-foc236` — pierwszy run na granicy `e0f8b40`.
+Przeszedł `plan.dor` (te same 3 luki) i `plan.intent` **jednym** wywołaniem [G] (mapa v1,
+11 interpretacji), `plan.intent.select` — i padł na emit bramki: `gate emit for "plan.gate1"
+needs LA_SUPERVISOR_RUN and LA_SUPERVISOR_CHILD`. Dwie lekcje: (1) **każdy** krok marszu,
+łącznie z resume po resolution frontmana, idzie przez `foc-477-armA-launch.mjs` (albo z
+wyeksportowanymi obiema zmiennymi) — bezpośrednie `graph-runner.mjs run` nie ma emiterra
+bramki; (2) `failed` jest terminalny (`TERMINAL_STATUSES`) — run nieodwracalnie martwy,
+sklejanie sklejanie store'a byłoby fałszowaniem instrumentu. Koszt 0.002400378 USD (3 eventy,
+kompletne) w `excludedPricedCostUsd`. Ścieżki fold/re-entry z FOC-801 **nie** zostały
+wykonane (śmierć przed odpowiedzią na bramkę). §5.1 nietknięte (harness, nie jakość modelu).
+**Czeka na Mateusza:** respawn od zera (attempt 7, ~$0.007, ~2 min do bramki) albo odstąpienie.
+Nigdy cichy retry — dlatego pytanie jest otwarte.
