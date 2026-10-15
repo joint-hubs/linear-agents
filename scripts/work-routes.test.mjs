@@ -88,6 +88,10 @@ process.env.LA_DATA_HOME = dataHome;
 process.env.LA_SQUAD_HOME = squadHome;
 process.env.LA_SUPERVISOR_STATE_HOME = supState;
 process.env.LA_STATE_ROOT = join(dir, "state-root");
+// The settings overlay the publish AI gate reads (absent at first —
+// `actor: "ai"` is off by default until the gate tests enable it).
+const settingsPath = join(dir, "settings.json");
+process.env.LA_SETTINGS_FILE = settingsPath;
 
 mkdirSync(join(dataHome, "supervisor"), { recursive: true });
 mkdirSync(join(dataHome, "run"), { recursive: true });
@@ -751,8 +755,8 @@ try {
     isLocalOrigin: (addr) => addr === "127.0.0.1",
     isAllowedOrigin: (origin) => origin === "http://localhost:5173",
   };
-  const callRoute = async (method, path, { body, origin = "http://localhost:5173", addr = "127.0.0.1" } = {}) => {
-    const req = { method, headers: { origin }, socket: { remoteAddress: addr }, __body: body };
+  const callRoute = async (method, path, { body, origin = "http://localhost:5173", addr = "127.0.0.1", headers = {} } = {}) => {
+    const req = { method, headers: { origin, ...headers }, socket: { remoteAddress: addr }, __body: body };
     const res = {};
     const handled = await handleWorkRoute(req, res, new URL(path, "http://localhost:5173"), ctx);
     return { handled, status: res.__status, body: res.__body };
@@ -778,6 +782,38 @@ try {
     check("unit: publish push with a moved head -> 409 stale-preview",
       moved.status === 409 && moved.body?.error === "stale-preview", JSON.stringify(moved.body));
     check("unit: the stale confirm ran nothing", readJsonl().length === 0, `lines=${readJsonl().length}`);
+
+    // ── the AI publish gate (FOC-788 follow-up) ──────────────────────────────
+    // Disabled by default: the 403 comes BEFORE the confirmToken is verified —
+    // a wrong token would otherwise answer 409, so a 403 here proves the gate
+    // fired first — and before any executor (no audit line, no branch on the
+    // bare). settings.json here carries no publish key at all.
+    const aiDisabled = await callRoute("POST", "/api/work/tickets/WORK-1/push", {
+      body: { confirmToken: "f".repeat(64), actor: "ai", actorId: "session-test" },
+      headers: { "x-fenix-publish-token": "work-routes-test-token" },
+    });
+    check("unit: ai actor disabled by default -> 403 ai-actor-disabled before any git op",
+      aiDisabled.status === 403 && aiDisabled.body?.error === "ai-actor-disabled"
+        && aiDisabled.body?.reason === "enable publish.aiActor in settings.json to let an agent push"
+        && readJsonl().length === 0 && git(["ls-remote", "--heads", ORIGIN_BARE], dir) === "",
+      JSON.stringify(aiDisabled.body));
+
+    // Enabled but unbound: without the host token header — or with a wrong
+    // one — the request is still refused before any executor runs.
+    writeFileSync(settingsPath, JSON.stringify({ publish: { aiActor: true } }), "utf8");
+    const aiNoToken = await callRoute("POST", "/api/work/tickets/WORK-1/push", {
+      body: { confirmToken: "f".repeat(64), actor: "ai", actorId: "session-test" },
+    });
+    check("unit: ai enabled without the host token -> 403 bad-publish-token",
+      aiNoToken.status === 403 && aiNoToken.body?.error === "bad-publish-token", JSON.stringify(aiNoToken.body));
+    const aiWrongToken = await callRoute("POST", "/api/work/tickets/WORK-1/push", {
+      body: { confirmToken: "f".repeat(64), actor: "ai", actorId: "session-test" },
+      headers: { "x-fenix-publish-token": "not-the-host-token" },
+    });
+    check("unit: ai enabled with a wrong host token -> 403 bad-publish-token",
+      aiWrongToken.status === 403 && aiWrongToken.body?.error === "bad-publish-token",
+      JSON.stringify(aiWrongToken.body));
+    check("unit: the ai refusals ran no executor", readJsonl().length === 0, `lines=${readJsonl().length}`);
 
     // push success: the exact refspec lands the branch on the local bare at
     // the pushed head, and the audit line says who confirmed it.
@@ -808,9 +844,14 @@ try {
       return { status: 201, text: async () => JSON.stringify({ html_url: "https://github.com/joint-hubs/linear-agents/pull/7", number: 7 }) };
     };
     try {
+      // The enabled + right-token case: settings carry publish.aiActor and the
+      // request carries the host token, so the ai actor reaches the same
+      // executor path the human cases use (assertions below are the human
+      // shape: 200, the PR URL, the audited record).
       const prPreview = await callRoute("GET", "/api/work/tickets/WORK-1/publish-preview?action=pr");
       const pr = await callRoute("POST", "/api/work/tickets/WORK-1/pr", {
         body: { confirmToken: prPreview.body.confirmToken, actor: "ai", actorId: "session-test" },
+        headers: { "x-fenix-publish-token": "work-routes-test-token" },
       });
       check("unit: publish pr -> 200 ok with the PR URL",
         pr.status === 200 && pr.body?.ok === true && pr.body?.action === "pr"
