@@ -1,6 +1,7 @@
 // scripts/work-routes.mjs — the Work board and Costs & quality routes
 // (FOC-784/785, plan slice W5): GET /api/work/tickets, the ticket detail,
-// the Start preview/confirm pair, GET /api/costs and GET /api/quality.
+// the Start preview/confirm pair, the publish preview/act trio (FOC-788:
+// publish-preview, push, pr), GET /api/costs and GET /api/quality.
 //
 // This module is TRANSPORT ONLY, in the style of cockpit-routes.mjs: guard
 // order, body handling and the error shape mirror the Cockpit's routes
@@ -32,21 +33,32 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { hostBase } from "./supervisor-host-client.mjs";
+import { hostBase, hostRequest, FAST_TIMEOUT_MS, SLOW_TIMEOUT_MS } from "./supervisor-host-client.mjs";
 import { graphql } from "./linear-client.mjs";
 import { readRegistry, supervisorStateHome } from "./supervisor-lib.mjs";
 import { squadConfigDir } from "./fenix-paths.mjs";
+import { resolveTaskKey } from "./task-sessions.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
 import {
   buildBoardPayload,
   buildTicketDetail,
   collectTicketFacts,
+  deriveStage,
   fetchLinearStates,
   startText,
   TICKET_ID_RE,
 } from "./work-board.mjs";
 import { buildCostsPayload, buildQualityPayload } from "./cost-quality.mjs";
 import { forwardMessageToHost, writeGuards } from "./cockpit-routes.mjs";
+import { buildPublishPreview, verifyConfirmToken } from "./publish-actions.mjs";
+import {
+  buildPublishRecord,
+  composePrBody,
+  composePrTitle,
+  createPullRequest,
+  pushBranch,
+  recordPublishAction,
+} from "./publish-exec.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const COST_SNAPSHOT_SCRIPT = join(__dir, "cost-snapshot.mjs");
@@ -405,6 +417,15 @@ const decodeId = (raw) => {
   }
 };
 
+/**
+ * The canonical taskKey for a Linear issue: `workspace:issueId` from the
+ * SERVER-side identity (resolveTaskKey). The workspace is this route's own
+ * (FENIX_WORK_WORKSPACE / jointhubs) and the issueId is the id the SERVER
+ * fetched from Linear — never a client-supplied taskKey and never derived
+ * from the title. Throws on a non-canonical id; callers map that to 400.
+ */
+const taskKeyOf = (issue) => resolveTaskKey({ workspace: workWorkspace(), issueId: issue.id ?? issue.identifier });
+
 // ── the routes ───────────────────────────────────────────────────────────────
 
 /** Spec §8 staleness, computed from the snapshot's computedAt. */
@@ -492,6 +513,18 @@ export async function handleWorkRoute(req, res, url, ctx) {
       issue: { identifier: issue.identifier, title: issue.title, url: issue.url },
       delivery: hostBase() ? "supervisor" : "cockpit",
     };
+    // The canonical identity, when the issue carries it (the taskKey the Start
+    // flow will bind): the preview tells the UI where the cockpit will live
+    // before anything is started. A fetchIssue without an id (older fixture)
+    // simply omits the block — the Start POST re-derives it.
+    if (issue.id && issue.identifier) {
+      payload.identity = {
+        workspace,
+        issueId: issue.identifier,
+        taskKey: taskKeyOf(issue),
+      };
+      payload.cockpitUrl = `/work/${encodeURIComponent(taskKeyOf(issue))}/cockpit`;
+    }
     json(res, 200, payload);
     log(method, path, 200);
     return true;
@@ -535,6 +568,169 @@ export async function handleWorkRoute(req, res, url, ctx) {
       return true;
     }
     await forwardMessageToHost(res, ctx, path, body.text);
+    return true;
+  }
+
+  // GET /api/work/tickets/:id/publish-preview?action=push|pr — what the Push
+  // branch / Open PR confirm dialog shows (FOC-788, plan §4.1): the discovered
+  // checkout, the diff summary, the local checks state (the run's verdicts —
+  // never GitHub checks, decision 2) and a confirmToken bound to all of it.
+  // Read-only and safe for the UI to poll. No checkout answers 404 no-checkout
+  // with the reason and NO action is offered — fail-closed is the design, not
+  // an error path.
+  m = path.match(/^\/api\/work\/tickets\/([^/]+)\/publish-preview$/);
+  if (method === "GET" && m) {
+    const id = decodeId(m[1]);
+    if (id === null) {
+      json(res, 400, { error: "bad-id" });
+      log(method, path, 400);
+      return true;
+    }
+    if (!TICKET_ID_RE.test(id)) {
+      json(res, 400, { error: `not a ticket id: ${id}` });
+      log(method, path, 400);
+      return true;
+    }
+    const preview = buildPublishPreview({
+      ticket: id,
+      action: url.searchParams.get("action") ?? "",
+      // ONE ticket's facts (children + verdicts), never the whole sweep —
+      // an untouched ticket carries none and honestly yields no-checkout.
+      facts: ticketFacts().find((f) => f.taskId === id) ?? { children: [] },
+    });
+    if (!preview.ok) {
+      const status = preview.error === "no-checkout" ? 404 : 400;
+      json(res, status, { error: preview.error, reason: preview.reason });
+      log(method, path, status);
+      return true;
+    }
+    json(res, 200, preview);
+    log(method, path, 200);
+    return true;
+  }
+
+  // POST /api/work/tickets/:id/push | .../pr { confirmToken, actor, actorId }
+  // — the confirm dialog's send for a publish (FOC-788, plan §4.2). The
+  // Cockpit's write guards and body cap first (the `start` route's shape),
+  // then the rule that makes the endpoint safe: the checkout is re-derived
+  // NOW and the body must carry the confirmToken for the CURRENT state — a
+  // stray or replayed body can never act, and a moved head answers 409
+  // stale-preview before any executor runs. `actor` (human | ai) is required
+  // and recorded verbatim (decision 3). The audit trio (JSONL, telemetry,
+  // Linear comment) is written before the response returns, failures included
+  // (plan §4.3) — never automatic, never merge.
+  m = path.match(/^\/api\/work\/tickets\/([^/]+)\/(push|pr)$/);
+  if (method === "POST" && m) {
+    if (!writeGuards(req, res, path, ctx)) return true;
+    const id = decodeId(m[1]);
+    if (id === null) {
+      json(res, 400, { error: "bad-id" });
+      log(method, path, 400);
+      return true;
+    }
+    if (!TICKET_ID_RE.test(id)) {
+      json(res, 400, { error: `not a ticket id: ${id}` });
+      log(method, path, 400);
+      return true;
+    }
+    const action = m[2];
+    let body;
+    try {
+      body = await readJsonBody(req, BODY_CAP);
+    } catch (err) {
+      log(method, path, respondBodyError(res, err));
+      return true;
+    }
+    if (typeof body.confirmToken !== "string" || !body.confirmToken) {
+      json(res, 400, { error: "confirmToken (string) is required" });
+      log(method, path, 400);
+      return true;
+    }
+    if (body.actor !== "human" && body.actor !== "ai") {
+      json(res, 400, { error: 'actor must be "human" or "ai"' });
+      log(method, path, 400);
+      return true;
+    }
+    if (typeof body.actorId !== "string" || !body.actorId.trim()) {
+      json(res, 400, { error: "actorId (string) is required" });
+      log(method, path, 400);
+      return true;
+    }
+    const preview = buildPublishPreview({
+      ticket: id,
+      action,
+      facts: ticketFacts().find((f) => f.taskId === id) ?? { children: [] },
+    });
+    if (!preview.ok) {
+      const status = preview.error === "no-checkout" ? 404 : 400;
+      json(res, status, { error: preview.error, reason: preview.reason });
+      log(method, path, status);
+      return true;
+    }
+    const verdict = verifyConfirmToken({ action, ticket: id, checkout: preview.checkout, token: body.confirmToken });
+    if (!verdict.ok) {
+      const status = verdict.error === "stale-preview" ? 409 : 400;
+      json(res, status, { error: verdict.error, reason: verdict.reason });
+      log(method, path, status);
+      return true;
+    }
+
+    const { checkout, diff } = preview;
+    const actor = body.actor;
+    const actorId = body.actorId.trim();
+    let outcome;
+    if (action === "push") {
+      outcome = pushBranch({ checkout });
+    } else {
+      // Best effort — Linear being down must never block a publish; the PR
+      // title falls back to the published head (composePrTitle).
+      let title = null;
+      try {
+        const issue = await fetchIssue(id, workspace);
+        title = typeof issue?.title === "string" ? issue.title : null;
+      } catch {
+        title = null;
+      }
+      outcome = await createPullRequest({
+        checkout,
+        title: composePrTitle({ ticket: id, title, head: checkout.head }),
+        body: composePrBody({ ticket: id, head: checkout.head, base: checkout.base, diff, actor, actorId }),
+      });
+    }
+    const ok = outcome.ok === true;
+    const record = buildPublishRecord({
+      ticket: id,
+      action,
+      checkout,
+      diff,
+      actor,
+      actorId,
+      confirmToken: body.confirmToken,
+      ok,
+      error: ok ? null : outcome.error,
+      prUrl: ok ? outcome.prUrl ?? null : null,
+    });
+    const { audit } = await recordPublishAction({ record });
+    for (const [sink, result] of Object.entries(audit)) {
+      if (result?.ok === false) console.error(`[work] publish ${action} ${id}: ${sink} sink refused: ${result.error}`);
+    }
+    if (!ok) {
+      // 502: the git/API side refused. The detail text is scrubbed of the
+      // token at the executor (scrubSecret); the error name is the contract.
+      json(res, 502, { error: outcome.error, detail: outcome.detail ?? null });
+      log(method, path, 502);
+      return true;
+    }
+    // head is the published SHA (the record's identity); the PR's `head`
+    // field already carries the branch name at GitHub.
+    json(res, 200, {
+      ok: true,
+      action,
+      actor,
+      head: checkout.head,
+      ...(outcome.prUrl ? { prUrl: outcome.prUrl } : {}),
+    });
+    log(method, path, 200);
     return true;
   }
 
@@ -630,4 +826,156 @@ export async function handleWorkRoute(req, res, url, ctx) {
   }
 
   return false;
+}
+
+// ── the task-map corpus (P4 slice) ───────────────────────────────────────────
+//
+// loadTaskMapCorpus assembles the semantic task map's input corpus from the
+// SAME sources the board serves: the tickets Fenix touched in the last 30
+// days (ticketFacts) plus the open Ready column of the Linear queue (the
+// shared linearQueue getter — the same cache the board reads). One task per
+// canonical identity; identity is resolveTaskKey (the Start flow's resolver)
+// over the SERVER-fetched issue — a failed fetch is counted "unavailable",
+// never faked from the display identifier.
+//
+// Read-only and bounded: one small GraphQL issue fetch per selected id
+// (title + description only — never transcripts, never Thoughtmap text),
+// capped at TASK_MAP_CORPUS_CAP ids with an explicit warning when the board
+// holds more. No Linear writes anywhere on this path. Cost and duration ride
+// along when known (the cost snapshot's all window, summed child turn time)
+// — unknown stays null, never a zero.
+
+export const TASK_MAP_CORPUS_CAP = 200;
+
+// The description cap handed to the embedder: the map needs the gist, not the
+// whole document (bounded input, bounded cache entries).
+const TASK_MAP_DESCRIPTION_CAP_CHARS = 8000;
+
+/** Summed agent time across a fact's completed child turns; null when none. */
+function corpusDurationMs(fact) {  let total = 0;
+  let any = false;
+  for (const child of Array.isArray(fact?.children) ? fact.children : []) {
+    for (const turn of Array.isArray(child?.turns) ? child.turns : []) {
+      const a = Date.parse(turn?.startedAt ?? "");
+      const b = Date.parse(turn?.endedAt ?? "");
+      if (Number.isFinite(a) && Number.isFinite(b) && b >= a) {
+        total += b - a;
+        any = true;
+      }
+    }
+  }
+  return any ? total : null;
+}
+
+/**
+ * The ticket's cost row from the snapshot's window — the same shape
+ * work-board.mjs's internal ticketCostOf reads ({ tickets: [{ taskId,
+ * totalUsd, … }] }); mirrored here because that helper is not exported and
+ * work-board is outside this slice. Unknown stays null, never a zero.
+ */
+function corpusCostOf(costReport, taskId) {
+  const row = costReport?.tickets?.find((t) => t.taskId === taskId);
+  if (!row) return null;
+  return { childrenUsd: row.childrenUsd ?? 0, supervisorUsd: row.supervisorUsd ?? 0, totalUsd: row.totalUsd ?? 0 };
+}
+
+/**
+ * The task-map corpus for one workspace: `{ workspace, tasks, unavailable,
+ * requested, cap, truncated, warning }`. `tasks` carries exactly the shape
+ * scripts/task-map.mjs validates (taskKey/taskId/title/description/stage/
+ * labels as NAMES/costUsd/durationMs). `unavailable` lists the ids that could
+ * not be honestly resolved, with a reason — the map never invents a point
+ * for them.
+ */
+export async function loadTaskMapCorpus({
+  workspace,
+  linearQueue,
+  cap = TASK_MAP_CORPUS_CAP,
+  issueFetch = null, // test seam; default is the module's fetchIssue (fake fixture in tests)
+  statesLookup = null, // test seam; default is the module's linearStatesFor
+  costReport = null, // test seam; default is the live cost snapshot's all window
+} = {}) {
+  if (typeof linearQueue !== "function") {
+    throw new Error("loadTaskMapCorpus needs a linearQueue getter");
+  }
+  const ws = workspace || workWorkspace();
+  const facts = ticketFacts();
+  const queuePayload = await linearQueue(ws);
+  const queue = Array.isArray(queuePayload?.tasks) ? queuePayload.tasks : [];
+
+  // The board's composition, in the board's order: touched tickets first
+  // (facts are lastActivity desc), then the open Ready items the board would
+  // show — completed/canceled queue rows are never Ready. A touched id the
+  // queue also holds is never duplicated.
+  const touched = new Set(facts.map((f) => f.taskId));
+  const ids = [...facts.map((f) => f.taskId)];
+  for (const item of queue) {
+    if (!item?.identifier || touched.has(item.identifier)) continue;
+    if (item.stateType === "completed" || item.stateType === "canceled") continue;
+    ids.push(item.identifier);
+  }
+
+  const requested = ids.length;
+  const truncated = requested > cap;
+  const selected = truncated ? ids.slice(0, cap) : ids;
+
+  const fetchOne = issueFetch ?? fetchIssue;
+  const { states } = await (statesLookup ? statesLookup(selected) : linearStatesFor(selected));
+  const costRows = costReport ?? getCostSnapshot().snapshot?.windows?.all ?? null;
+
+  const tasks = [];
+  const unavailable = [];
+  for (const id of selected) {
+    let issue = null;
+    try {
+      issue = await fetchOne(id, ws);
+    } catch {
+      issue = null; // a Linear failure for one id never breaks the corpus
+    }
+    if (!issue) {
+      unavailable.push({ taskId: id, reason: "linear_unavailable" });
+      continue;
+    }
+    // Identity ONLY from the server-fetched issue, through the Start flow's
+    // resolver — the display identifier alone never invents a taskKey.
+    let taskKey = null;
+    try {
+      taskKey = resolveTaskKey({ workspace: ws, issueId: issue.id ?? issue.identifier });
+    } catch {
+      taskKey = null;
+    }
+    if (!taskKey) {
+      unavailable.push({ taskId: id, reason: "no_canonical_identity" });
+      continue;
+    }
+    const state = states[id] ?? null;
+    const fact = facts.find((f) => f.taskId === id) ?? null;
+    const cost = corpusCostOf(costRows, id);
+    tasks.push({
+      taskKey,
+      taskId: id,
+      title: typeof issue.title === "string" ? issue.title : "",
+      description: typeof issue.description === "string"
+        ? issue.description.slice(0, TASK_MAP_DESCRIPTION_CAP_CHARS)
+        : "",
+      stage: fact ? deriveStage(fact, state) : "ready",
+      labels: (Array.isArray(state?.labels) ? state.labels : [])
+        .map((l) => (typeof l?.name === "string" ? l.name : ""))
+        .filter(Boolean),
+      costUsd: cost?.totalUsd ?? null,
+      durationMs: fact ? corpusDurationMs(fact) : null,
+    });
+  }
+
+  return {
+    workspace: ws,
+    tasks,
+    unavailable,
+    requested,
+    cap,
+    truncated,
+    warning: truncated
+      ? `the corpus is capped at ${cap} of ${requested} tickets — the map covers the most recently touched tickets and the first Ready items only`
+      : null,
+  };
 }

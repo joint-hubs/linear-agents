@@ -1,0 +1,49 @@
+{
+  "_doc": "Katalog narzędzi MCP dla warstwy tool-profiles. Tylko serwery read-only; każde narzędzie jest namespace'owane mcp__<server>__<tool> (dokładne nazwy, jakich wymaga --tools / allowedTools). getToolCatalog() scala ten plik z config/tools.json — ten plik NIE definiuje dostępności (available nie jest tu symulowane; weryfikację robi POST /api/tool-profiles/test).",
+  "servers": {
+    "thoughtmap": {
+      "transport": "stdio",
+      "script": "scripts/mcp/server-thoughtmap.py",
+      "readOnly": true,
+      "description": "Semantic search + clusters nad baza wiedzy ThoughtMap. REST do kontenera thoughtmap-app (THOUGHTMAP_API_URL), embeddingi przez Ollama (OLLAMA_BASE_URL) tylko dla cluster_distances/text_distance; clusters.json (THOUGHTMAP_CLUSTERS) dla narzedzi klastrowych. Bez zapisow, bez pipeline/rerun, bez Docker socket.",
+      "env": ["THOUGHTMAP_API_URL", "THOUGHTMAP_CLUSTERS", "OLLAMA_BASE_URL", "OLLAMA_EMBEDDING_MODEL"]
+    }
+  },
+  "tools": {
+    "mcp__thoughtmap__search_thoughts": {
+      "server": "thoughtmap",
+      "label": "search_thoughts",
+      "description": "Wyszukiwanie semantyczne w bazie wiedzy (notatki, dziennik, dokumenty).",
+      "risk": "safe",
+      "readOnly": true
+    },
+    "mcp__thoughtmap__list_clusters": {
+      "server": "thoughtmap",
+      "label": "list_clusters",
+      "description": "Lista wykrytych klastrów tematycznych, opcjonalny filtr po domenie.",
+      "risk": "safe",
+      "readOnly": true
+    },
+    "mcp__thoughtmap__get_cluster": {
+      "server": "thoughtmap",
+      "label": "get_cluster",
+      "description": "Szczegóły jednego klastra wraz z reprezentatywnymi tekstami.",
+      "risk": "safe",
+      "readOnly": true
+    },
+    "mcp__thoughtmap__cluster_distances": {
+      "server": "thoughtmap",
+      "label": "cluster_distances",
+      "description": "Odległości kosinusowe od jednego klastra do pozostałych (wymaga clusters.json + Ollama).",
+      "risk": "safe",
+      "readOnly": true
+    },
+    "mcp__thoughtmap__text_distance": {
+      "server": "thoughtmap",
+      "label": "text_distance",
+      "description": "Odległość semantyczna dwóch tekstów (wymaga Ollama).",
+      "risk": "safe",
+      "readOnly": true
+    }
+  }
+}

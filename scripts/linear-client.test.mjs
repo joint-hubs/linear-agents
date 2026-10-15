@@ -333,6 +333,28 @@ async function runTests() {
     f.restore();
   }
 
+  // ---- Test 15d: the raw per-error shapes ride the thrown error (FOC-815) ----
+  // A batched caller needs `path` to see WHICH alias failed: Linear answers a
+  // batch containing one unknown id with errors[] and data:null for the whole
+  // operation, so the message string alone cannot attribute the miss.
+  {
+    const raw = [{ message: "Entity not found: Issue", path: ["a0"], extensions: { code: "INPUT_ERROR" } }];
+    const f = stubFetch(() => httpResponse({ body: { errors: raw, data: null } }));
+    await withEnv({ LINEAR_API_KEY: "k" }, async () => {
+      let caught = null;
+      try {
+        await graphql("query { x }");
+      } catch (e) {
+        caught = e;
+      }
+      assert(caught !== null, "the errors array still throws");
+      assertEq(caught.message, "GraphQL error: Entity not found: Issue", "the message text is unchanged");
+      assert(caught.graphqlErrors === raw, "graphqlErrors carries the raw per-error shapes");
+      assertEq(caught.graphqlErrors[0].path[0], "a0", "…including the failing alias path");
+    });
+    f.restore();
+  }
+
   // ---- Test 16: resolveTeam matches case-insensitively ----
   {
     const f = stubFetch(() => httpResponse({ body: { data: TEAMS } }));

@@ -194,7 +194,7 @@ function readAgentTools(filePath) {
       return m[1]
         .split(",")
         .map((s) => s.trim())
-        .filter(Boolean);
+        .filter(t => Boolean(t) && t !== "[]");
     }
   }
   return [];
@@ -237,7 +237,7 @@ function readAgentConfigs(squadDir) {
         tools = tm[1]
           .split(",")
           .map((s) => s.trim())
-          .filter(Boolean);
+          .filter(t => Boolean(t) && t !== "[]");
       }
     }
     result[role] = { model, tools };
@@ -390,8 +390,8 @@ export function validateTools(tools, catalog) {
   const warnings = [];
   const unknown = [];
 
-  if (!Array.isArray(tools) || tools.length === 0 || tools.some((t) => typeof t !== "string" || t.trim() === "")) {
-    return { ok: false, unknown: [], warnings: ["Lista narzędzi musi być niepustą tablicą stringów."] };
+  if (!Array.isArray(tools) || tools.some((t) => typeof t !== "string" || t.trim() === "")) {
+    return { ok: false, unknown: [], warnings: ["Lista narzędzi musi być tablicą stringów."] };
   }
 
   const catalogNames = new Set(Object.keys(catalog.tools || {}));
@@ -649,7 +649,7 @@ function writeAgentTools(filePath, newTools) {
     return { changed: false, before: null, after: null };
   }
 
-  const toolsLine = newTools.join(", ");
+  const toolsLine = newTools.length ? newTools.join(", ") : "[]";
   let changed = false;
   let before = null;
   let toolsLineIdx = -1;
@@ -676,9 +676,12 @@ function writeAgentTools(filePath, newTools) {
     before = m[1]
       .split(",")
       .map((s) => s.trim())
-      .filter(Boolean);
+      .filter(t => Boolean(t) && t !== "[]");
     const beforeStr = before.join(", ");
-    if (beforeStr !== toolsLine) {
+    // An empty target must not rewrite a line that already holds no tools —
+    // "tools:" and "tools: []" both read as none (readAgentTools returns []),
+    // so rewriting them would report changed:true on every idempotent repeat.
+    if (beforeStr !== toolsLine && !(toolsLine === "[]" && before.length === 0)) {
       lines[toolsLineIdx] = `tools: ${toolsLine}`;
       changed = true;
     }

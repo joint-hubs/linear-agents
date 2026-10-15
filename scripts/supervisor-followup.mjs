@@ -13,12 +13,21 @@
 // would be a hole in the push gate, so those are read from the registry rather
 // than passed in again.
 
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { squadConfigDir } from "./fenix-paths.mjs";
+import { childProviderEnv } from "./child-model.mjs";
+import {
+  actorIdFor,
+  attemptIdFor,
+  launchDirFor,
+  prepareAgentLaunch,
+} from "./agent-launch-profile.mjs";
+import { isRuntimeToken } from "./runtime-events.mjs";
+import { approveGuardedCodegraphForProject } from "./mcp-enable.mjs";
 
 import {
   INIT_TIMEOUT_MS,
@@ -35,6 +44,7 @@ import {
   printBgWaitCeilingEnv,
   readRegistry,
   roundsFor,
+  runDir,
   teeAbsPath,
   teeRelPath,
   updateChild,
@@ -267,9 +277,95 @@ if (args["review-loop"]) {
   writeRegistry(runId, registry);
 }
 
-// ── new turn ─────────────────────────────────────────────────────────────────
+// ── provider env, rebuilt exactly like spawn (FOC-762/FOC-773) ────────────────
+// A resumed turn used to spread the Supervisor's own process.env — after a
+// provider switch in the settings overlay, the child's pinned model would run
+// on a DIFFERENT provider's endpoint than the turn that started it. Spawn
+// recorded the provider it resolved (`entry.provider`); the follow-up resolves
+// THAT name explicitly, which beats LA_PROVIDER env and the overlay. An older
+// entry without `provider` resolves with no explicit name — today's active
+// provider — which is the pre-FOC-773 resume behaviour. Failure refuses the
+// turn BEFORE any turn is appended (fail closed, same as spawn).
+const providerEnv = childProviderEnv({ provider: entry.provider ?? null });
+if (providerEnv.error) {
+  failJson(`provider resolution failed — refusing the turn: ${providerEnv.error}`, {
+    reason: "provider-resolution-failed",
+    childId,
+  });
+}
+
+// ── the launch: a fresh owned config dir for THIS turn ───────────────────────
+// A resumed turn is a new process, so it gets a new launch dir
+// (runDir/launch/<childId>/turn-<n>) assembled the same way spawn assembles
+// turn 0 — with the one follow-up-specific difference: the SAME child's
+// previous launch projects/ history is copied in, so --resume finds its own
+// transcripts. History confinement is the point:
+//   · entry.launchConfigDir (a launch-owned dir) → its whole projects/ tree is
+//     this child's own history by construction — copied as the tree;
+//   · a legacy entry (no launchConfigDir; the child ran against the SHARED
+//     squad dir) → ONLY the transcript file named after entry.sessionId is
+//     copied — never the shared dir's other children, never auth.
+// The provider env stays what it was before this change: resolved FRESH here
+// (pinned to entry.provider) and passed in env only — never persisted into the
+// launch dir. The OTel identity rides only when the supervisor session id is
+// present and a valid runtime token; legacy flows behave exactly as before.
 const turns = entry.turns || [];
 const turnIndex = turns.length;
+
+const prevLaunchDir = entry.launchConfigDir && existsSync(entry.launchConfigDir) ? entry.launchConfigDir : null;
+const historyMode = prevLaunchDir ? "tree" : entry.sessionId ? "session" : null;
+// The session id is preserved from the entry; a legacy entry picks the env's
+// up ONLY when it is a valid runtime token — an invalid env value is never
+// persisted into the registry (it would ride every later turn as a fact).
+const envSessionId = process.env.FENIX_SUPERVISOR_SESSION_ID || null;
+const supervisorSessionId =
+  entry.supervisorSessionId ?? (envSessionId && isRuntimeToken(envSessionId) ? envSessionId : null);
+const telemetryContext = (() => {
+  if (!supervisorSessionId || !isRuntimeToken(supervisorSessionId)) return null;
+  const wanted = {
+    taskKey: entry.taskKey ?? entry.taskId,
+    supervisorSessionId,
+    workflowRunId: runId,
+    attemptId: attemptIdFor(childId, turnIndex),
+    actorId: entry.actorId ?? actorIdFor(runId, childId),
+    role: "squadlead",
+  };
+  const valid = Object.values(wanted).every((value) => isRuntimeToken(value));
+  return valid ? wanted : null;
+})();
+const launch = prepareAgentLaunch({
+  squad: entry.squad,
+  role: "lead",
+  outputDir: launchDirFor(runDir(runId), childId, turnIndex),
+  previousConfigDir: prevLaunchDir ?? (historyMode === "session" ? squadConfigDir(entry.squad) : null),
+  historyMode,
+  previousSessionId: entry.sessionId ?? null,
+  env: process.env,
+  context: telemetryContext,
+});
+
+// The codegraph MCP approval used to be inherited from the SHARED squad dir
+// the follow-up pointed CLAUDE_CONFIG_DIR at; the launch dir is per turn now,
+// so the approval is re-stamped into it. Best effort, same degraded semantics
+// as spawn: a failure is reported, never fatal to the turn.
+const codegraphMcp = (() => {
+  if (process.env.LA_SUPERVISOR_NO_CODEGRAPH === "1") {
+    return { ok: false, written: false, reason: "skipped: LA_SUPERVISOR_NO_CODEGRAPH=1 (test/offline seam)" };
+  }
+  try {
+    return approveGuardedCodegraphForProject({
+      squad: entry.squad,
+      projectRoot: entry.worktree,
+      configDir: process.env.LA_SUPERVISOR_MCP_CONFIG_DIR ?? launch.configDir,
+    });
+  } catch (err) {
+    return { ok: false, written: false, reason: `mcp-approval-error: ${String(err?.message ?? err).split("\n")[0]}` };
+  }
+})();
+
+// ── new turn ─────────────────────────────────────────────────────────────────
+// (`turns`/`turnIndex` were read above — the launch dir and the attempt id are
+// built from them BEFORE the turn is appended.)
 
 updateChild(runId, childId, {
   status: "starting",
@@ -288,6 +384,33 @@ updateChild(runId, childId, {
       reviewLoop: Boolean(args["review-loop"]),
     },
   ],
+  // ── launch identity, preserved or derived ──────────────────────────────────
+  // taskKey/supervisorSessionId/actorId/toolProfileRevision/launchConfigDir
+  // survive the turn boundary; attemptId alone moves to THIS turn.
+  //
+  // pendingRuntimeReturn is deliberately NOT touched here. It used to be
+  // cleared to null in this same patch — BEFORE the watcher had even spawned
+  // claude — so a launch that died before the SessionStart hook fired took the
+  // causal return evidence with it: the retry turn saw
+  // FENIX_RUNTIME_RETURN="" and the return_to_dev event was never recorded.
+  // The pending now rides every turn until the hook records it; the hook keys
+  // the return_to_dev event id on the return's CONTENT (not the attempt), so
+  // re-delivery dedups to exactly one event (first write wins) and the
+  // consuming attempt is the one the event names.
+  taskKey: entry.taskKey ?? entry.taskId,
+  supervisorSessionId,
+  actorId: entry.actorId ?? actorIdFor(runId, childId),
+  attemptId: attemptIdFor(childId, turnIndex),
+  toolProfileRevision: launch.profile.revision,
+  launchConfigDir: launch.configDir,
+  launch: {
+    cliArgs: launch.cliArgs,
+    changes: launch.changes,
+    profileInitial: launch.profileInitial,
+    copied: launch.copied.length,
+    skipped: launch.skipped,
+    history: launch.history,
+  },
 });
 
 const promptDir = mkdtempSync(join(tmpdir(), "la-supervisor-"));
@@ -312,17 +435,39 @@ const watcherArgs = [
 if (entry.settings) watcherArgs.push("--settings", entry.settings);
 if (entry.model) watcherArgs.push("--model", entry.model);
 if (entry.telemetryRunId) watcherArgs.push("--telemetry-run", entry.telemetryRunId);
+// The launch profile's CLI args (--tools / --disallowedTools / --mcp-config),
+// JSON-encoded as one flag — the same channel spawn uses. The watcher owns the
+// claude command line; until it consumes this channel the args stay recorded
+// in the registry entry and the launch result.
+watcherArgs.push("--claude-args", JSON.stringify(launch.cliArgs));
 
 const watcher = spawn(process.execPath, watcherArgs, {
   cwd: entry.worktree,
   env: {
     ...process.env,
+    // FOC-762/FOC-773: the FRESH provider resolution, pinned to the provider
+    // recorded at spawn (`entry.provider`) — the same block spawn spreads, so
+    // base URL, auth vars and tiers match the first turn even after the active
+    // provider moved on. Spread BEFORE the overrides below, as spawn does.
+    ...providerEnv,
+    // FOC-762: the pinned model rides ANTHROPIC_MODEL here too — the watcher
+    // already replays entry.model as --model, but spawn sets both, so the two
+    // turn paths cannot drift on which channel carries the routing decision.
+    ...(entry.model ? { ANTHROPIC_MODEL: entry.model } : {}),
     // FOC-522: the same finite background-wait ceiling spawn sets. This env
     // block is NOT a copy of spawn's — it was written separately once and
     // drifted before (FOC-171, RUN_ID) — so the value comes from the shared
     // helper, and supervisor-followup.test.mjs proves this carrier sets it.
     ...printBgWaitCeilingEnv(),
-    CLAUDE_CONFIG_DIR: squadConfigDir(entry.squad),
+    // THIS turn's launch-owned config dir — this child's own squad sources,
+    // its own copied resume history and this turn's tool-profile snapshot.
+    CLAUDE_CONFIG_DIR: launch.configDir,
+    // The launch env: the thoughtmap MCP server env (URLs and paths only) plus,
+    // when a valid supervisor session id is present, the OTel identity.
+    ...launch.env,
+    FENIX_STAGE: entry.squad,
+    FENIX_DEPENDS_ON_ATTEMPTS: JSON.stringify([entry.attemptId,entry.pendingRuntimeReturn?.sourceAttemptId].filter(Boolean)),
+    FENIX_RUNTIME_RETURN: entry.pendingRuntimeReturn ? JSON.stringify(entry.pendingRuntimeReturn) : '',
     LA_SUPERVISOR: "1",
     LA_SUPERVISOR_RUN: runId,
     LA_SUPERVISOR_CHILD: childId,
@@ -455,6 +600,19 @@ console.log(
       // turn, if there was one.
       ...(focus ? { focus } : {}),
       ...(focusError ? { focusError } : {}),
+      // The launch record: this turn's config dir, the captured CLI args and
+      // tool-profile revision, the diff against the prior safe snapshot, and
+      // the codegraph MCP re-stamp. Metadata, not a gate — the Settings apply
+      // already authorized the next process.
+      launch: {
+        configDir: launch.configDir,
+        cliArgs: launch.cliArgs,
+        toolProfileRevision: launch.profile.revision,
+        changes: launch.changes,
+        profileInitial: launch.profileInitial,
+        history: launch.history,
+        codegraphMcp,
+      },
     },
     null,
     2,

@@ -1,0 +1,401 @@
+#!/usr/bin/env node
+// task-sessions.mjs — durable task/session coordinator (PRD: task-workspace-supervisors).
+//
+// One SQLite table maps a task (workspace:issueId) to at most one ACTIVE
+// session at a time, with a queue of waiting generations and a process-safe
+// active cap. Built on node:sqlite only — same pattern as telemetry-store.mjs
+// (WAL + busy_timeout + BEGIN IMMEDIATE), so independent processes each open
+// their own connection and races are settled by SQLite's write lock, not by
+// this module's bookkeeping.
+//
+// Exact semantics:
+//   - ensure() returns the existing nonterminal owner for taskKey (queued
+//     counts as an owner) or creates a new queued record. After the owner
+//     reaches a terminal status (stopped|completed|failed) a later ensure()
+//     creates a NEW generation row for the same taskKey.
+//   - claimNext() atomically promotes the oldest queued session to `starting`
+//     iff the count of active (starting|running|waiting) sessions is below
+//     maxActive; the cap is enforced inside one write transaction, so it holds
+//     across independent store connections/processes.
+//   - update() accepts ONLY status, runId, pid, processStartedAt, lastError,
+//     title. Identity (sessionId, taskKey, taskId, workspace, issueId,
+//     createdAt) is immutable — attempts are rejected, never silently ignored.
+//   - sessionId is strictly /^sup-[a-f0-9]{16,32}$/, generated randomly. It is
+//     the ONLY identifier safe for path composition; taskId/taskKey are opaque
+//     user data and must NEVER be used as (part of) a path.
+//   - No adoption/migration: a legacy or foreign database is not reconciled in
+//     any way; the schema is created IF NOT EXISTS and that is all.
+
+import { mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { dataHome } from "./fenix-paths.mjs";
+
+let DatabaseSync;
+try {
+  ({ DatabaseSync } = await import("node:sqlite"));
+} catch {
+  DatabaseSync = null;
+}
+
+/** Every legal session status, in lifecycle order. */
+export const STATUSES = ["queued", "starting", "running", "waiting", "stopped", "completed", "failed"];
+/** Statuses that own a task (an active owner includes queued). */
+export const OWNER_STATUSES = ["queued", "starting", "running", "waiting"];
+/** Statuses counted against the active cap. */
+export const CAP_STATUSES = ["starting", "running", "waiting"];
+/** Statuses that release both the ownership and the cap slot. */
+export const TERMINAL_STATUSES = ["stopped", "completed", "failed"];
+
+/** Strict session id shape: sup- + 16..32 lowercase hex, random — never derived from task data. */
+export const SESSION_ID_PATTERN = /^sup-[a-f0-9]{16,32}$/;
+
+const STATUS_SET = new Set(STATUSES);
+const OWNER_SQL = OWNER_STATUSES.map((s) => `'${s}'`).join(",");
+const CAP_SQL = CAP_STATUSES.map((s) => `'${s}'`).join(",");
+
+// Field budget for caller-supplied strings — wide enough for real Linear
+// workspace/issue identifiers and titles, tight enough to bound the table.
+const MAX_IDENTITY_LENGTH = 200;
+const MAX_TITLE_LENGTH = 300;
+const MAX_RUN_ID_LENGTH = 200;
+const MAX_LAST_ERROR_LENGTH = 4000;
+
+/** The default database path: dataHome()/supervisor/task-sessions.sqlite. */
+export function taskSessionsDbPath(env = process.env, platform = process.platform) {
+  return join(dataHome(env, platform), "supervisor", "task-sessions.sqlite");
+}
+
+export function sqliteAvailable() {
+  return DatabaseSync != null;
+}
+
+/**
+ * Stable task key: `workspace:issueId`. Deliberately NOT a display
+ * identifier — it is the coordination key every process must agree on.
+ * @returns {string}
+ */
+export function resolveTaskKey({ workspace, issueId } = {}) {
+  requireBoundedString(workspace, "workspace");
+  requireBoundedString(issueId, "issueId");
+  for (const [field, value] of Object.entries({ workspace, issueId })) {
+    if (!/^[A-Za-z0-9._-]+$/.test(value)) throw new TypeError(`${field} must be a canonical identifier without separators or whitespace`);
+  }
+  return `${workspace}:${issueId}`;
+}
+
+function requireBoundedString(value, field, maxLength = MAX_IDENTITY_LENGTH) {
+  if (typeof value !== "string" || value.length < 1 || value.length > maxLength) {
+    throw new TypeError(`${field} must be a non-empty string of at most ${maxLength} characters`);
+  }
+}
+
+function newSessionId() {
+  return `sup-${randomBytes(16).toString("hex")}`;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function sanitize(row) {
+  if (!row) return null;
+  return {
+    sessionId: row.session_id,
+    taskKey: row.task_key,
+    taskId: row.task_id,
+    workspace: row.workspace,
+    issueId: row.issue_id,
+    title: row.title ?? null,
+    status: row.status,
+    runId: row.run_id ?? null,
+    pid: row.pid ?? null,
+    processStartedAt: row.process_started_at ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastError: row.last_error ?? null,
+  };
+}
+
+function createSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_sessions (
+      session_id        TEXT PRIMARY KEY,
+      task_key          TEXT NOT NULL,
+      task_id           TEXT NOT NULL,
+      workspace         TEXT NOT NULL,
+      issue_id          TEXT NOT NULL,
+      title             TEXT,
+      status            TEXT NOT NULL CHECK (status IN ('queued','starting','running','waiting','stopped','completed','failed')),
+      run_id            TEXT,
+      pid               INTEGER,
+      process_started_at TEXT,
+      last_error        TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_sessions_task_key
+      ON task_sessions(task_key, created_at, session_id);
+    CREATE INDEX IF NOT EXISTS idx_task_sessions_queue
+      ON task_sessions(created_at, session_id) WHERE status = 'queued';
+    -- The ownership invariant itself: at most one ACTIVE row per task key.
+    -- A partial unique index is checked on every insert/update across ALL
+    -- connections, so a terminal row never blocks a new generation and two
+    -- processes cannot both own the same task.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_sessions_one_active_owner
+      ON task_sessions(task_key) WHERE status IN (${OWNER_SQL});
+  `);
+}
+
+/** Fields update() may write; everything else (identity) is rejected. */
+const MUTABLE_FIELDS = new Set(["status", "runId", "pid", "processStartedAt", "lastError", "title"]);
+
+/**
+ * Durable task/session store. Each instance holds one independent SQLite
+ * connection; the ownership invariant and the active cap are safe across
+ * instances and processes because both are enforced by SQLite inside a single
+ * write transaction (BEGIN IMMEDIATE) guarded additionally by the partial
+ * unique index above.
+ *
+ * @param {{dbPath?: string, maxActive?: number}} [options]
+ * @param {string} [options.dbPath] defaults to dataHome()/supervisor/task-sessions.sqlite
+ * @param {number} [options.maxActive=2] cap on concurrently active (starting|running|waiting) sessions
+ */
+export function createTaskSessionStore({ dbPath, maxActive = 2 } = {}) {
+  if (!sqliteAvailable()) {
+    throw new Error(`node:sqlite is required for task sessions (current: ${process.version})`);
+  }
+  if (!Number.isInteger(maxActive) || maxActive < 1) {
+    throw new TypeError("maxActive must be an integer >= 1");
+  }
+  const path = dbPath ?? taskSessionsDbPath();
+  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  const db = new DatabaseSync(path);
+  db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+
+  createSchema(db);
+
+  const statements = {
+    bySessionId: db.prepare("SELECT * FROM task_sessions WHERE session_id = ?"),
+    activeOwnerByTaskKey: db.prepare(
+      `SELECT * FROM task_sessions WHERE task_key = ? AND status IN (${OWNER_SQL})
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    ),
+    activeCapCount: db.prepare(`SELECT COUNT(*) AS n FROM task_sessions WHERE status IN (${CAP_SQL})`),
+    oldestQueued: db.prepare(
+      "SELECT * FROM task_sessions WHERE status = 'queued' ORDER BY created_at ASC, rowid ASC LIMIT 1",
+    ),
+    newestByTaskKey: db.prepare(
+      "SELECT * FROM task_sessions WHERE task_key = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    ),
+    insert: db.prepare(`
+      INSERT INTO task_sessions
+        (session_id, task_key, task_id, workspace, issue_id, title, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+    `),
+  };
+
+  /** Runs fn inside one write transaction; rolls back and rethrows on failure. */
+  function inWriteTransaction(fn) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = fn();
+      db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+  }
+
+  function requireSessionId(sessionId) {
+    if (typeof sessionId !== "string" || !SESSION_ID_PATTERN.test(sessionId)) {
+      throw new TypeError(`sessionId must match ${SESSION_ID_PATTERN}`);
+    }
+  }
+
+  const store = {
+    /** Resolved database path (exposed for diagnostics; tests pass dbPath explicitly). */
+    dbPath: path,
+
+    /**
+     * Return the existing nonterminal owner for taskKey (queued included), or
+     * create and return a new queued generation. Identity fields are immutable
+     * and never adopted from a previous generation.
+     */
+    ensure({ taskKey, taskId, workspace, issueId, title } = {}) {
+      requireBoundedString(taskKey, "taskKey");
+      requireBoundedString(taskId, "taskId");
+      requireBoundedString(workspace, "workspace");
+      requireBoundedString(issueId, "issueId");
+      if (taskKey !== resolveTaskKey({ workspace, issueId })) throw new TypeError("taskKey must match workspace and issueId");
+      if (title !== undefined && title !== null) {
+        requireBoundedString(title, "title", MAX_TITLE_LENGTH);
+      }
+      const titleValue = title ?? null;
+      return inWriteTransaction(() => {
+        const existing = statements.activeOwnerByTaskKey.get(taskKey);
+        if (existing) return sanitize(existing);
+        const sessionId = newSessionId();
+        const at = nowIso();
+        try {
+          statements.insert.run(sessionId, taskKey, taskId, workspace, issueId, titleValue, at, at);
+        } catch (error) {
+          // A racing process inserted the active owner between our SELECT and
+          // INSERT (the unique index fired). Re-read and return the winner —
+          // this process did not lose data, it lost the race.
+          if (!/UNIQUE constraint failed/i.test(String(error?.message))) throw error;
+          const winner = statements.activeOwnerByTaskKey.get(taskKey);
+          if (!winner) throw error;
+          return sanitize(winner);
+        }
+        return sanitize(statements.bySessionId.get(sessionId));
+      });
+    },
+
+    /** Explicit stopped-session resume, admitted through the normal queue/cap. */
+    resume(sessionId) {
+      requireSessionId(sessionId);
+      return inWriteTransaction(() => {
+        const row=statements.bySessionId.get(sessionId);
+        if(!row || row.status!=='stopped') throw Error('only a verified stopped session can resume');
+        if(statements.activeOwnerByTaskKey.get(row.task_key))throw Error('another generation owns this task');
+        db.prepare("UPDATE task_sessions SET status='queued', pid=NULL, process_started_at=NULL, last_error=NULL, updated_at=? WHERE session_id=?").run(nowIso(),sessionId);
+        return sanitize(statements.bySessionId.get(sessionId));
+      });
+    },
+
+    /** The session record, or null. */
+    get(sessionId) {
+      requireSessionId(sessionId);
+      return sanitize(statements.bySessionId.get(sessionId));
+    },
+
+    /** Newest record for taskKey regardless of status, or null. */
+    getByTask(taskKey) {
+      requireBoundedString(taskKey, "taskKey");
+      return sanitize(statements.newestByTaskKey.get(taskKey));
+    },
+
+    /**
+     * All records, newest first. With includeTerminal=false only active
+     * (queued|starting|running|waiting) records are returned.
+     */
+    list({ includeTerminal = true } = {}) {
+      const rows = includeTerminal
+        ? db.prepare("SELECT * FROM task_sessions ORDER BY created_at DESC, rowid DESC").all()
+        : db
+            .prepare(
+              `SELECT * FROM task_sessions WHERE status IN (${OWNER_SQL})
+               ORDER BY created_at DESC, rowid DESC`,
+            )
+            .all();
+      return rows.map(sanitize);
+    },
+
+    /**
+     * Atomically promote the oldest queued session to `starting` iff the count
+     * of active (starting|running|waiting) sessions is below maxActive.
+     * Returns the promoted record, or null when the cap is full or the queue
+     * is empty. Safe across independent store connections.
+     */
+    claimNext() {
+      return inWriteTransaction(() => {
+        const { n } = statements.activeCapCount.get();
+        if (n >= maxActive) return null;
+        const queued = statements.oldestQueued.get();
+        if (!queued) return null;
+        const at = nowIso();
+        db.prepare(
+          "UPDATE task_sessions SET status = 'starting', updated_at = ? WHERE session_id = ? AND status = 'queued'",
+        ).run(at, queued.session_id);
+        return sanitize(statements.bySessionId.get(queued.session_id));
+      });
+    },
+
+    /**
+     * Patch a session. ONLY status, runId, pid, processStartedAt, lastError and
+     * title are writable; identity and timestamps present in the patch are
+     * rejected outright. Unknown session ids throw.
+     */
+    update(sessionId, patch = {}) {
+      requireSessionId(sessionId);
+      if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+        throw new TypeError("patch must be an object");
+      }
+      for (const key of Object.keys(patch)) {
+        if (!MUTABLE_FIELDS.has(key)) {
+          throw new TypeError(`field '${key}' is not writable (immutable identity or unknown); allowed: ${[...MUTABLE_FIELDS].join(", ")}`);
+        }
+      }
+      const sets = [];
+      const values = [];
+      if ("status" in patch) {
+        if (typeof patch.status !== "string" || !STATUS_SET.has(patch.status)) {
+          throw new TypeError(`status must be one of: ${STATUSES.join(", ")}`);
+        }
+        sets.push("status = ?");
+        values.push(patch.status);
+      }
+      if ("runId" in patch) {
+        if (patch.runId !== null) requireBoundedString(patch.runId, "runId", MAX_RUN_ID_LENGTH);
+        sets.push("run_id = ?");
+        values.push(patch.runId);
+      }
+      if ("pid" in patch) {
+        if (patch.pid !== null && (!Number.isInteger(patch.pid) || patch.pid < 1)) {
+          throw new TypeError("pid must be a positive integer or null");
+        }
+        sets.push("pid = ?");
+        values.push(patch.pid);
+      }
+      if ("processStartedAt" in patch) {
+        if (patch.processStartedAt !== null) {
+          requireBoundedString(patch.processStartedAt, "processStartedAt", MAX_TITLE_LENGTH);
+        }
+        sets.push("process_started_at = ?");
+        values.push(patch.processStartedAt);
+      }
+      if ("lastError" in patch) {
+        if (patch.lastError !== null) {
+          requireBoundedString(patch.lastError, "lastError", MAX_LAST_ERROR_LENGTH);
+        }
+        sets.push("last_error = ?");
+        values.push(patch.lastError);
+      }
+      if ("title" in patch) {
+        if (patch.title !== null) requireBoundedString(patch.title, "title", MAX_TITLE_LENGTH);
+        sets.push("title = ?");
+        values.push(patch.title);
+      }
+      return inWriteTransaction(() => {
+        const row = statements.bySessionId.get(sessionId);
+        if (!row) throw new Error(`unknown sessionId: ${sessionId}`);
+        if (patch.status && patch.status !== row.status) {
+          const allowed = {
+            queued: ["stopped", "failed"],
+            starting: ["running", "waiting", "stopped", "completed", "failed"],
+            running: ["starting", "waiting", "stopped", "completed", "failed"],
+            waiting: ["starting", "running", "stopped", "completed", "failed"],
+          };
+          if (!allowed[row.status]?.includes(patch.status)) {
+            throw new Error(`invalid session transition ${row.status} -> ${patch.status}; queued admission requires claimNext()`);
+          }
+        }
+        if (sets.length > 0) {
+          values.push(nowIso(), sessionId);
+          db.prepare(`UPDATE task_sessions SET ${sets.join(", ")}, updated_at = ? WHERE session_id = ?`).run(...values);
+        }
+        return sanitize(statements.bySessionId.get(sessionId));
+      });
+    },
+
+    /** Close this store's connection. Other connections stay usable. */
+    close() {
+      db.close();
+    },
+  };
+
+  store.resolveTaskKey = resolveTaskKey;
+  return store;
+}

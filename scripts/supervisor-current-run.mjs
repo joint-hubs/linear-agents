@@ -12,6 +12,13 @@
 //   the newest recent run dir (recentRunIds, 14 days) → source "adopted"
 //   none of the above → a new id, source "new"
 //
+// SCOPED mode (env.FENIX_SUPERVISOR_SESSION_ID set — a managed task session's
+// pane): the pointer is the session-scoped file, adoption is OFF (a missing
+// scoped pointer is a NEW run, never another task's run), a pointer owned by
+// a different task/session throws, and the record carries
+// supervisorSessionId/taskKey/taskId. The legacy single-session behaviour is
+// unchanged.
+//
 // The launcher path (supervisor.bat, which DOES have an id) records it via
 // recordLauncherRun() — source "launcher". resolveCurrentRun() always creates
 // the run dir so the waker hook finds it from the first turn.
@@ -28,7 +35,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { supervisorCurrentRunPath } from "./fenix-paths.mjs";
+import { supervisorCurrentRunPath, SUPERVISOR_SESSION_ID_PATTERN } from "./fenix-paths.mjs";
 import { supervisorStateHome } from "./supervisor-lib.mjs";
 import { recentRunIds } from "./cockpit.mjs";
 
@@ -77,9 +84,46 @@ export function writeCurrentRun(record, { path = supervisorCurrentRunPath() } = 
 const defaultRecentRuns = (opts) => recentRunIds(opts);
 
 /**
+ * The scoped-resolution context (PRD task-workspace-supervisors §5): present
+ * only when the pane runs under a managed session id. The context is the
+ * ownership triple every scoped pointer must carry and match; anything less
+ * (a session id without LA_TASK_KEY/LA_TASK_ID, or an id that does not match
+ * the strict pattern) is a fail-closed error, never a silent start without an
+ * identity.
+ */
+function scopedContext(env) {
+  const sessionId = env?.FENIX_SUPERVISOR_SESSION_ID;
+  if (!sessionId) return null;
+  if (!SUPERVISOR_SESSION_ID_PATTERN.test(sessionId)) {
+    throw new Error(`FENIX_SUPERVISOR_SESSION_ID must match ${SUPERVISOR_SESSION_ID_PATTERN}`);
+  }
+  const taskKey = env.LA_TASK_KEY;
+  const taskId = env.LA_TASK_ID;
+  if (typeof taskKey !== "string" || !taskKey || typeof taskId !== "string" || !taskId) {
+    throw new Error("scoped current-run resolution requires LA_TASK_KEY and LA_TASK_ID");
+  }
+  return { supervisorSessionId: sessionId, taskKey, taskId };
+}
+
+const pointerOwnedByContext = (pointer, ctx) =>
+  pointer.supervisorSessionId === ctx.supervisorSessionId
+  && pointer.taskKey === ctx.taskKey
+  && pointer.taskId === ctx.taskId;
+
+/**
  * Resolve the current run and persist the pointer. Returns
  * { runId, model, startedAt, source, updatedAt }. Never leaves the caller
  * without a run: the pointer and the recent-runs pool are both best effort.
+ *
+ * SCOPED mode (env.FENIX_SUPERVISOR_SESSION_ID set, via `env`): the pointer is
+ * read from the SESSION-scoped path, the global adoption source is OFF — a
+ * missing scoped pointer starts a NEW run, never the newest recent run, which
+ * would cross-adopt another task's run — and a pointer that carries a
+ * different owner (task or session) is REFUSED (throws). The record is stamped
+ * with the ownership triple (supervisorSessionId/taskKey/taskId). Legacy mode
+ * (no session id) is byte-identical to before. Run ids keep the unique global
+ * format and run dirs stay global under the state home, so existing telemetry
+ * keeps finding them.
  */
 export function resolveCurrentRun({
   fresh = false,
@@ -88,13 +132,36 @@ export function resolveCurrentRun({
   path,
   stateHome,
   recentRuns = defaultRecentRuns,
+  env = process.env,
 } = {}) {
   const home = stateHome ?? supervisorStateHome();
+  const ctx = scopedContext(env);
+  const pointerPath = path ?? supervisorCurrentRunPath(env);
   let record;
-  if (fresh) {
+  if (ctx) {
+    const pointer = readCurrentRun({ path: pointerPath });
+    if (pointer) {
+      if (!pointerOwnedByContext(pointer, ctx)) {
+        throw new Error(
+          `scoped current-run pointer belongs to another owner (task ${pointer.taskKey ?? "?"} / session ${pointer.supervisorSessionId ?? "?"}) — refusing to resolve for ${ctx.taskKey}`,
+        );
+      }
+      record = { ...pointer, model: model ?? pointer.model ?? null, source: "pointer" };
+    } else {
+      record = {
+        runId: newRunId(now),
+        model,
+        startedAt: now.toISOString(),
+        source: "new",
+        supervisorSessionId: ctx.supervisorSessionId,
+        taskKey: ctx.taskKey,
+        taskId: ctx.taskId,
+      };
+    }
+  } else if (fresh) {
     record = { runId: newRunId(now), model, startedAt: now.toISOString(), source: "new" };
   } else {
-    const pointer = readCurrentRun({ path });
+    const pointer = readCurrentRun({ path: pointerPath });
     if (pointer) {
       record = { ...pointer, model: model ?? pointer.model ?? null, source: "pointer" };
     } else {
@@ -106,7 +173,7 @@ export function resolveCurrentRun({
   }
   mkdirSync(join(home, record.runId), { recursive: true });
   record.updatedAt = now.toISOString();
-  writeCurrentRun(record, { path });
+  writeCurrentRun(record, { path: pointerPath });
   return record;
 }
 

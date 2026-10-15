@@ -7,7 +7,7 @@ import { existsSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   resolveProvider,
   formatSetLines,
@@ -50,6 +50,28 @@ function writeConfig(providers) {
   writeFileSync(path, JSON.stringify({ providers }, null, 2), "utf8");
   return path;
 }
+
+// Settings overlay fixture (FOC-773). Content mirrors what fenix-settings.mjs
+// would persist — the resolver reads it through readSettings.
+function writeSettingsFile(content) {
+  const path = join(temp, "settings-" + Math.random().toString(36).slice(2) + ".json");
+  writeFileSync(path, JSON.stringify(content, null, 2), "utf8");
+  return path;
+}
+
+const CUSTOM_SETTINGS = writeSettingsFile({
+  provider: {
+    active: "custom",
+    custom: {
+      baseUrl: "http://127.0.0.1:9000",
+      authStyle: "apikey",
+      keyName: "MY_CUSTOM_KEY",
+      tiers: { opus: "custom-opus", sonnet: "custom-sonnet" },
+      defaultModel: "custom-default",
+    },
+  },
+  routing: {},
+});
 
 function writeEnv(lines) {
   const path = join(temp, "env-" + Math.random().toString(36).slice(2) + ".env");
@@ -143,7 +165,7 @@ test("parseEnvFile skips comments and blank lines", () => {
 // the fixture .env.
 function scrubEnv() {
   const env = { ...process.env };
-  for (const key of ["OPENROUTER_API_KEY", "ZAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "LA_PROVIDER", "LA_PROVIDER_CONFIG", "LA_PROVIDER_ENV_FILE"]) {
+  for (const key of ["OPENROUTER_API_KEY", "ZAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "PROVIDER_API_KEY", "LA_PROVIDER", "LA_PROVIDER_CONFIG", "LA_PROVIDER_ENV_FILE", "LA_SETTINGS_FILE"]) {
     delete env[key];
   }
   return env;
@@ -274,6 +296,208 @@ test("baseUrl env override normalizes non-alphanumeric provider name (zai_anthro
   });
   assert(r.baseUrl === "http://localhost:7777", `baseUrl=${r.baseUrl} (expected override for zai_anthropic)`);
   assert(r.baseUrlSource === "env", `baseUrlSource=${r.baseUrlSource}`);
+});
+
+// --- FOC-773: settings overlay drives provider selection --------------------
+
+test("settings.provider.active selects the provider when no arg and no env", () => {
+  const settingsPath = writeSettingsFile({ provider: { active: "zai_anthropic", custom: null }, routing: {} });
+  const r = resolveProvider(undefined, { configPath: CONFIG, envPath: ENV_FULL, env: {}, settingsPath });
+  assert(r.provider === "zai_anthropic", `provider=${r.provider}`);
+  assert(r.providerSource === "settings", `providerSource=${r.providerSource}`);
+  assert(r.authEnv === "ZAI_API_KEY", `authEnv=${r.authEnv}`);
+});
+
+test("settings without provider.active falls back to openrouter (providerSource=default)", () => {
+  const settingsPath = writeSettingsFile({ provider: { active: null, custom: null }, routing: {} });
+  const r = resolveProvider(undefined, { configPath: CONFIG, envPath: ENV_FULL, env: {}, settingsPath });
+  assert(r.provider === "openrouter", `provider=${r.provider}`);
+  assert(r.providerSource === "default", `providerSource=${r.providerSource}`);
+});
+
+test("env.LA_PROVIDER beats settings.provider.active", () => {
+  const settingsPath = writeSettingsFile({ provider: { active: "zai_anthropic", custom: null }, routing: {} });
+  const r = resolveProvider(undefined, { configPath: CONFIG, envPath: ENV_FULL, env: { LA_PROVIDER: "anthropic" }, settingsPath });
+  assert(r.provider === "anthropic", `provider=${r.provider}`);
+  assert(r.providerSource === "env", `providerSource=${r.providerSource}`);
+});
+
+test("explicit arg beats env and settings", () => {
+  const settingsPath = writeSettingsFile({ provider: { active: "zai_anthropic", custom: null }, routing: {} });
+  const r = resolveProvider("anthropic", { configPath: CONFIG, envPath: ENV_FULL, env: { LA_PROVIDER: "openrouter" }, settingsPath });
+  assert(r.provider === "anthropic", `provider=${r.provider}`);
+  assert(r.providerSource === "arg", `providerSource=${r.providerSource}`);
+});
+
+test("custom provider resolves entirely from settings.provider.custom", () => {
+  const r = resolveProvider(undefined, {
+    configPath: CONFIG,
+    envPath: ENV_FULL,
+    env: { MY_CUSTOM_KEY: "sk-custom-123" },
+    settingsPath: CUSTOM_SETTINGS,
+  });
+  assert(r.provider === "custom", `provider=${r.provider}`);
+  assert(r.providerSource === "settings", `providerSource=${r.providerSource}`);
+  assert(r.baseUrl === "http://127.0.0.1:9000", `baseUrl=${r.baseUrl}`);
+  assert(r.authEnv === "MY_CUSTOM_KEY", `authEnv=${r.authEnv}`);
+  assert(r.authVar === "ANTHROPIC_API_KEY", `apikey style must map to ANTHROPIC_API_KEY, got ${r.authVar}`);
+  assert(r.authValue === "sk-custom-123", "custom key must come from its own env var");
+  assert(r.authSource === "env", `authSource=${r.authSource}`);
+  assert(r.tiers.opus === "custom-opus", `tiers.opus=${r.tiers.opus}`);
+  assert(r.defaultModel === "custom-default", `defaultModel=${r.defaultModel}`);
+
+  const lines = formatSetLines(r);
+  assert(lines.some((l) => l === `set "LA_PROVIDER_DEFAULT_MODEL=custom-default"`), "default model line missing");
+  assert(lines.some((l) => l === `set "ANTHROPIC_DEFAULT_OPUS_MODEL=custom-opus"`), "custom opus tier line missing");
+  assert(lines.some((l) => l === `set "ANTHROPIC_DEFAULT_SONNET_MODEL=custom-sonnet"`), "custom sonnet tier line missing");
+});
+
+test("custom without keyName falls back to PROVIDER_API_KEY as its authEnv", () => {
+  const settingsPath = writeSettingsFile({
+    provider: { active: "custom", custom: { baseUrl: "http://127.0.0.1:9000", authStyle: "token", tiers: {} } },
+    routing: {},
+  });
+  const r = resolveProvider(undefined, {
+    configPath: CONFIG,
+    envPath: ENV_FULL,
+    env: { PROVIDER_API_KEY: "sk-generic-123" },
+    settingsPath,
+  });
+  assert(r.authEnv === "PROVIDER_API_KEY", `authEnv=${r.authEnv}`);
+  assert(r.authValue === "sk-generic-123", "generic secret must be picked up as the custom key");
+  assert(r.authSource === "env", `authSource=${r.authSource}`);
+});
+
+test("custom selected but settings has no provider.custom → named error", () => {
+  const settingsPath = writeSettingsFile({ provider: { active: "custom", custom: null }, routing: {} });
+  let threw = null;
+  try {
+    resolveProvider(undefined, { configPath: CONFIG, envPath: ENV_FULL, env: {}, settingsPath });
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw != null, "missing provider.custom must throw");
+  assert(
+    threw.message.includes("provider 'custom' selected but settings.json has no provider.custom"),
+    `message=${threw.message}`,
+  );
+});
+
+test("generic PROVIDER_API_KEY is used when the provider's authEnv is missing (authSource=generic)", () => {
+  const envMissing = writeEnv([`OPENROUTER_API_KEY=${OPENROUTER_KEY}`]); // no ZAI_API_KEY anywhere
+  const r = resolveProvider("zai_anthropic", {
+    configPath: CONFIG,
+    envPath: envMissing,
+    env: { PROVIDER_API_KEY: "sk-generic-canary" },
+  });
+  assert(r.present === true, "generic secret must satisfy the auth requirement");
+  assert(r.authSource === "generic", `authSource=${r.authSource}`);
+  assert(r.authValue === "sk-generic-canary", "the generic secret must become the auth value");
+});
+
+test("authSource=envfile when the key lives only in .env", () => {
+  const r = resolveProvider("zai_anthropic", { configPath: CONFIG, envPath: ENV_FULL, env: {} });
+  assert(r.authSource === "envfile", `authSource=${r.authSource}`);
+});
+
+test("invalid settings JSON → named error, never a silent default", () => {
+  const badPath = join(temp, "settings-broken.json");
+  writeFileSync(badPath, "{ not json", "utf8");
+  let threw = null;
+  try {
+    resolveProvider(undefined, { configPath: CONFIG, envPath: ENV_FULL, env: {}, settingsPath: badPath });
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw != null, "invalid settings must throw");
+  assert(/not valid JSON/.test(threw.message), `message=${threw.message}`);
+  assert(threw.message.includes(badPath), `message=${threw.message} must name the path`);
+});
+
+test("a built-in provider entry with defaultModel emits LA_PROVIDER_DEFAULT_MODEL", () => {
+  const path = join(temp, "models-default.json");
+  writeFileSync(path, JSON.stringify({
+    providers: {
+      openrouter: {
+        baseUrl: "https://openrouter.ai/api",
+        authEnv: "OPENROUTER_API_KEY",
+        authStyle: "token",
+        defaultModel: "xiaomi/mimo-v2.6-pro",
+      },
+    },
+  }, null, 2), "utf8");
+  const r = resolveProvider("openrouter", { configPath: path, envPath: ENV_FULL, env: {} });
+  assert(r.defaultModel === "xiaomi/mimo-v2.6-pro", `defaultModel=${r.defaultModel}`);
+  assert(
+    formatSetLines(r).some((l) => l === `set "LA_PROVIDER_DEFAULT_MODEL=xiaomi/mimo-v2.6-pro"`),
+    "default model set line missing",
+  );
+
+  // Entries without defaultModel emit nothing — launchers keep their own.
+  const other = resolveProvider("openrouter", { configPath: CONFIG, envPath: ENV_FULL, env: {} });
+  assert(
+    !formatSetLines(other).some((l) => l.includes("LA_PROVIDER_DEFAULT_MODEL")),
+    "no defaultModel configured must emit no line",
+  );
+});
+
+test("--check output (stdout and stderr) never contains the key value", () => {
+  const CANARY = "sk-or-canary-abcdef0123456789";
+  const env = scrubEnv();
+  env.LA_PROVIDER_CONFIG = CONFIG;
+  env.LA_PROVIDER_ENV_FILE = ENV_FULL;
+  env.LA_SETTINGS_FILE = writeSettingsFile({
+    provider: { active: "custom", custom: { baseUrl: "http://127.0.0.1:9000", authStyle: "token", tiers: {} } },
+    routing: {},
+  });
+  env.PROVIDER_API_KEY = CANARY;
+  const result = spawnSync(process.execPath, [RESOLVER_PATH, "--check"], { encoding: "utf8", env });
+  assert(result.status === 0, `exit=${result.status}, stderr=${result.stderr}`);
+  const combined = `${result.stdout || ""}${result.stderr || ""}`;
+  assert(!combined.includes(CANARY), "--check must never print the key value");
+  assert(combined.includes("authSource=env"), `expected authSource=env in:\n${combined}`);
+  assert(combined.includes("providerSource=settings"), `expected providerSource=settings in:\n${combined}`);
+});
+
+// A long-lived Supervisor must not pin a launcher-derived provider/key.
+test("a settings change reaches the next resolution with the launcher's inherited env", () => {
+  const settingsPath = writeSettingsFile({ provider: { active: "openrouter" }, routing: {} });
+  const options = { configPath: CONFIG, envPath: ENV_FULL, env: {}, settingsPath };
+  const initial = resolveProvider(undefined, options);
+  const inherited = {};
+  for (const line of formatSetLines(initial)) {
+    const match = /^set "([^=]+)=(.*)"$/.exec(line);
+    if (match) inherited[match[1]] = match[2];
+  }
+  writeFileSync(settingsPath, JSON.stringify({ provider: { active: "zai_anthropic" }, routing: {} }));
+  const next = resolveProvider(undefined, { ...options, env: inherited });
+  assert(next.provider === "zai_anthropic", "derived LA_PROVIDER must not hide changed Settings");
+  assert(next.providerSource === "settings", "must preserve the actual source");
+  const explicit = resolveProvider(undefined, { ...options, env: { ...inherited, LA_PROVIDER: "anthropic" } });
+  assert(explicit.provider === "anthropic", "an explicit changed env override still wins");
+  const pinned = resolveProvider("openrouter", { ...options, env: inherited });
+  assert(pinned.provider === "openrouter", "a resumed child's explicit provider stays pinned");
+});
+
+test("mounted key rotation is fresh despite stale process and env-file values", () => {
+  const dir = mkdtempSync(join(temp, "secrets-"));
+  const secret = join(dir, "openrouter_api_key");
+  const options = { configPath: CONFIG, envPath: ENV_FULL, env: { LA_SECRETS_DIR: dir, OPENROUTER_API_KEY: "old-parent-key" } };
+  writeFileSync(secret, "first-mounted-key");
+  assert(resolveProvider("openrouter", options).authValue === "first-mounted-key", "mounted key must win");
+  writeFileSync(secret, "rotated-mounted-key");
+  const rotated = resolveProvider("openrouter", options);
+  assert(rotated.authValue === "rotated-mounted-key", "must re-read the file without restart");
+  assert(rotated.authSource === "secret", "source must identify the mounted secret");
+  writeFileSync(secret, "");
+  assert(!resolveProvider("openrouter", options).present, "empty mounted secret must not revive stale env");
+});
+
+test("custom providers read the generic mounted key instead of stale inherited auth", () => {
+  const dir = mkdtempSync(join(temp, "generic-secrets-"));
+  writeFileSync(join(dir, "provider_api_key"), "fresh-generic-key");
+  const r = resolveProvider("custom", { configPath: CONFIG, envPath: ENV_FULL, settingsPath: CUSTOM_SETTINGS, env: { LA_SECRETS_DIR: dir, MY_CUSTOM_KEY: "stale-custom-key" } });
+  assert(r.authValue === "fresh-generic-key", "generic mounted key must be fresh");
 });
 
 // --- teardown --------------------------------------------------------------

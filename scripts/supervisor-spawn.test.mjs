@@ -18,6 +18,7 @@ import { delimiter, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  ensureWorktree,
   PRINT_BG_WAIT_CEILING_MS,
   PRINT_BG_WAIT_ENV,
   SUPERVISOR_DENY,
@@ -95,7 +96,7 @@ function runSpawn(runId, repo, extra = [], env = {}) {
     {
       encoding: "utf8",
       env: {
-        ...process.env,
+        ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key",
         LA_CLAUDE_BIN: MOCK,
         LA_SUPERVISOR_NO_TELEMETRY: "1",
         // The codegraph preflight has `initialize: true` and this machine has
@@ -155,7 +156,7 @@ test("rejects a task id that is not a Linear identifier", () => {
   const r = spawnSync(
     process.execPath,
     [SPAWN, "--run", runId, "--squad", "dev", "--task", "not-an-id", "--prompt", "x", "--repo", repo],
-    { encoding: "utf8", env: { ...process.env, LA_CLAUDE_BIN: MOCK, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1" } },
+    { encoding: "utf8", env: { ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key", LA_CLAUDE_BIN: MOCK, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1" } },
   );
   if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
   if (!parse(r).error.includes("TEAM-NUM")) fail("error did not explain the expected format");
@@ -208,7 +209,13 @@ test("creates a worktree and runs the child there, never in the repo root", () =
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
 });
 
-test("reuses an existing worktree and leaves the main tree's HEAD untouched", () => {
+// Branches are unique per attempt now: the managed branch carries a sha256
+// hash of `runId:childId`, so two children — even with the same slug, even in
+// two runs — never share a worktree, and the owner claim (ensureWorktree's
+// ownerId) vouches for it. Reuse survives only as a RETRY of the same
+// run:child. What must not regress is the original failure this test guarded:
+// the main tree's HEAD/branch moving while a run is live.
+test("a second child resolves to its OWN worktree and leaves the main tree's HEAD untouched", () => {
   const { repo } = fixtureRepo();
   const headBefore = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
   const branchBefore = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
@@ -220,8 +227,13 @@ test("reuses an existing worktree and leaves the main tree's HEAD untouched", ()
   const runB = fixtureRun();
   const second = parse(runSpawn(runB, repo));
 
-  if (second.worktreeCreated) fail("a second worktree was created for the same branch");
-  if (second.worktree !== first.worktree) fail("reuse resolved to a different path");
+  if (!second.worktreeCreated) fail("expected a fresh worktree — a new run:child never reuses another child's checkout");
+  if (second.worktree === first.worktree) fail("two run:child attempts shared one checkout");
+  // Same slug, same task → the same BASE branch name, but the per-child hash
+  // suffix must differ, or the second child would land on the first's branch.
+  if (!second.branch.startsWith("foc-123-dev-")) fail(`unexpected branch name: ${second.branch}`);
+  if (!/-[0-9a-f]{12}$/.test(second.branch)) fail(`branch carries no attempt hash: ${second.branch}`);
+  if (second.branch === first.branch) fail(`two children got one branch: ${second.branch}`);
 
   // This is the regression that shared-tree runs kept producing: a branch
   // switched under the main checkout while a run was live.
@@ -256,15 +268,33 @@ test("records allowedPaths as a declaration when given", () => {
 
 // Run a93f, 2026-09-12: four children spawned without --model ran on the
 // Supervisor's own deepseek-v4.1-flash (inherited ANTHROPIC_MODEL) while the
-// registry recorded `model: null`.
-test("without --model the registry records the model the child inherits, and says so", () => {
+// registry recorded `model: null`. FOC-762 closes the hole from the other
+// side: the Supervisor's ANTHROPIC_MODEL is never the answer — the child runs
+// on the routing table's pick, and the source is recorded.
+test("without --model the child runs on the routing table's pick, never the Supervisor's model", () => {
   const { repo } = fixtureRepo();
   const runId = fixtureRun();
-  const r = runSpawn(runId, repo, [], { ANTHROPIC_MODEL: "supervisor/own-model" });
+  const dir = mkdtempSync(join(tmpdir(), "la-sup-model-"));
+  cleanup.push(dir);
+  const configPath = join(dir, "models.json");
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      providers: {
+        openrouter: { baseUrl: "http://127.0.0.1:9/api", authEnv: "OPENROUTER_API_KEY", authStyle: "token" },
+      },
+      ids: { routed: "routed/from-fixture" },
+      routing: { dev: { worker: "routed" } },
+    }),
+  );
+  const r = runSpawn(runId, repo, [], {
+    ANTHROPIC_MODEL: "supervisor/own-model",
+    LA_PROVIDER_CONFIG: configPath,
+  });
   const out = parse(r);
   const entry = readRegistry(runId).children[out.childId];
-  if (entry.model !== "supervisor/own-model") fail(`registry model was ${entry.model}`);
-  if (entry.modelSource !== "inherited:ANTHROPIC_MODEL") fail(`modelSource was ${entry.modelSource}`);
+  if (entry.model !== "routed/from-fixture") fail(`registry model was ${entry.model}`);
+  if (entry.modelSource !== "routing:dev") fail(`modelSource was ${entry.modelSource}`);
   if (!/no --model/.test(r.stderr)) fail(`no warning on stderr: ${r.stderr}`);
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
 });
@@ -343,30 +373,61 @@ test("--candidate without a value is refused, not read as boolean true (FOC-406)
   if (!/needs a value/.test(out.error)) fail(`unhelpful error: ${out.error}`);
 });
 
-test("--candidate refuses a branch a recorded child already owns (FOC-406)", () => {
+// The per-child attempt hash made "a second child with the same slug" a NEW
+// branch, so the old collision refusal is not the second child's story anymore.
+// What must hold instead: the second --candidate child gets its OWN independent
+// workspace pinned at the candidate, the first child's tree is never reset,
+// and a duplicate explicit --child is still refused rather than overwritten.
+test("a second --candidate child gets its own workspace and never resets another child's (FOC-406)", () => {
   const { repo } = fixtureRepo();
+  const candidate = fixtureCandidate(repo);
   const runId = fixtureRun();
-  const first = parse(runSpawn(runId, repo)); // DEV child, branch foc-123-dev
+  const first = parse(runSpawn(runId, repo)); // DEV child, its own branch at the base commit
   if (!first.ok) fail(`first spawn failed: ${first.error}`);
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", first.childId], { encoding: "utf8" });
 
-  // Same slug → the same branch name; a candidate spawn must not land a second
-  // child on a branch another child of this run already owns.
-  const r = runSpawn(runId, repo, ["--slug", "dev", "--candidate", "main"]);
-  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
-  const out = parse(r);
-  if (!/candidate-branch-collision/.test(out.error)) fail(`no collision slug: ${out.error}`);
-  if (!/foc-123-dev/.test(out.error)) fail("error does not name the conflicting branch");
+  const second = parse(runSpawn(runId, repo, ["--slug", "dev", "--candidate", candidate]));
+  if (!second.ok) fail(`second spawn failed: ${second.error}`);
+  if (second.worktree === first.worktree) fail("the second child landed in the first child's worktree");
+  if (second.branch === first.branch) fail(`two children got one branch: ${second.branch}`);
+  if (second.baseRevision !== candidate) fail(`baseRevision was ${second.baseRevision}, not the candidate`);
+  if (shaOf("HEAD", second.worktree) !== candidate) fail("second worktree HEAD is not the candidate");
+  // "No other's reset": the first child's tree still stands where it did.
+  if (shaOf("HEAD", first.worktree) !== first.baseRevision) fail("the first child's worktree was reset");
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", second.childId], { encoding: "utf8" });
 });
 
-test("--candidate refuses to reuse a worktree standing at the wrong commit (FOC-406)", () => {
+test("a duplicate explicit --child is refused, never overwritten", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const first = parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_HANG_MS: "20000" }));
+  if (!first.ok) fail(`first spawn failed: ${first.error}`);
+
+  const r = runSpawn(runId, repo, ["--child", first.childId]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r);
+  if (out.reason !== "duplicate-child-id") fail(`no duplicate-child-id reason: ${out.error}`);
+  const children = readRegistry(runId).children;
+  if (Object.keys(children).length !== 1) fail(`the registry was touched: ${JSON.stringify(Object.keys(children))}`);
+  if (children[first.childId].sessionId !== first.sessionId) fail("the first child's session was orphaned");
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", first.childId], { encoding: "utf8" });
+});
+
+// With per-child branches there is no shared standing worktree a candidate
+// could mismatch against through the CLI anymore — a new run:child resolves to
+// its own branch, created fresh at the candidate. The mismatch REFUSAL that
+// guard still exists for (a branch that exists but does not stand at the
+// candidate) lives in ensureWorktree and is asserted at that level below.
+test("a --candidate spawn pins its OWN branch at the candidate and leaves the other run's worktree alone (FOC-406)", () => {
   const { repo } = fixtureRepo();
   const runA = fixtureRun();
-  const first = parse(runSpawn(runA, repo)); // creates the worktree on foc-123-dev at the base commit
+  const first = parse(runSpawn(runA, repo)); // its own worktree on its own branch at the base commit
+  if (!first.ok) fail(`first spawn failed: ${first.error}`);
   spawnSync(process.execPath, [STOP, "--run", runA, "--child", first.childId], { encoding: "utf8" });
 
-  // A commit the standing worktree does not have. The second run's registry is
-  // empty, so the collision guard cannot fire before the reuse check.
+  // A commit the standing worktree does not have.
   const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
   writeFileSync(join(repo, "candidate.txt"), "candidate\n");
   git("add", "-A");
@@ -374,10 +435,35 @@ test("--candidate refuses to reuse a worktree standing at the wrong commit (FOC-
   const candidate = shaOf("HEAD", repo);
 
   const runB = fixtureRun();
-  const r = runSpawn(runB, repo, ["--slug", "dev", "--candidate", candidate]);
-  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
-  const out = parse(r);
-  if (!/candidate-head-mismatch/.test(out.error)) fail(`no mismatch slug: ${out.error}`);
+  const out = parse(runSpawn(runB, repo, ["--slug", "dev", "--candidate", candidate]));
+  if (!out.ok) fail(`candidate spawn refused: ${out.error}`);
+  if (out.worktree === first.worktree) fail("the candidate spawn reused the other run's worktree");
+  if (out.baseRevision !== candidate) fail(`baseRevision was ${out.baseRevision}, not the candidate`);
+  if (shaOf("HEAD", out.worktree) !== candidate) fail("worktree HEAD is not the candidate");
+  if (shaOf("HEAD", first.worktree) !== first.baseRevision) fail("the other run's worktree was reset");
+
+  spawnSync(process.execPath, [STOP, "--run", runB, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("ensureWorktree refuses an existing branch that does not stand at the candidate (FOC-406 validation)", () => {
+  const { repo } = fixtureRepo();
+  const candidate = fixtureCandidate(repo);
+  // A branch that exists at main — NOT at the candidate.
+  execFileSync("git", ["branch", "stale-branch", "main"], { cwd: repo, stdio: "ignore" });
+
+  let refused = null;
+  try {
+    ensureWorktree(repo, "stale-branch", candidate, { ownerId: "test:candidate-validation" });
+  } catch (err) {
+    refused = err.message;
+  }
+  if (!refused || !/start point|not at the requested/.test(refused)) {
+    fail(`an existing branch at the wrong commit was not refused: ${refused ?? "no error"}`);
+  }
+
+  // And a branch standing AT the candidate starts without a refusal.
+  const okTree = ensureWorktree(repo, "candidate-branch", candidate, { ownerId: "test:candidate-validation" });
+  if (okTree.baseRevision !== candidate) fail(`a branch at the candidate was refused: ${okTree.baseRevision}`);
 });
 
 test("a held --candidate request records the flag for replay (FOC-406)", () => {
@@ -666,24 +752,31 @@ test("a degraded index is DEGRADED-UNKNOWN with sanctioned Read/Grep — the spa
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
 });
 
-test("a REUSED worktree is re-checked at launch — status only, same root, never a second init", () => {
+// Branches are per-child now, so the second spawn provisions the index of its
+// OWN new worktree — what must hold is the "once per MISSING index, own root
+// only" shape: init exactly once, at the second child's root, and no call
+// addressing the first child's tree (that would be a cross-child reset).
+test("a second child's OWN worktree is readied at launch — one init for its missing index, never another child's root", () => {
   const { repo } = fixtureRepo();
   const runId = fixtureRun();
   const first = fakeCodegraphEnv({ mode: "ready" });
   const out1 = parse(runSpawn(runId, repo, ["--child", "dev-1"], { ...first.env, MOCK_CLAUDE_HANG_MS: "0" }));
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out1.childId], { encoding: "utf8" });
 
-  const reuse = fakeCodegraphEnv({ mode: "ready" });
-  const out2 = parse(runSpawn(runId, repo, ["--child", "dev-2"], { ...reuse.env, MOCK_CLAUDE_HANG_MS: "0" }));
-  if (out2.worktreeCreated !== false) fail("the second spawn created a new worktree instead of reusing");
-  if (norm(out2.worktree) !== norm(out1.worktree)) fail("the second spawn used a different worktree");
+  const second = fakeCodegraphEnv({ mode: "ready" });
+  const out2 = parse(runSpawn(runId, repo, ["--child", "dev-2"], { ...second.env, MOCK_CLAUDE_HANG_MS: "0" }));
+  if (out2.worktreeCreated !== true) fail("the second child did not get its own worktree");
+  if (norm(out2.worktree) === norm(out1.worktree)) fail("the second child reused the first child's worktree");
   const cg = out2.codegraph;
-  if (cg.ok !== true) fail(`reused worktree not ready: ${JSON.stringify(cg)}`);
-  if (cg.synced !== false) fail("a settled worktree was synced for no reason");
+  if (cg.ok !== true) fail(`second child's worktree not ready: ${JSON.stringify(cg)}`);
+  if (cg.initialized !== true) fail("the second child's missing index was not provisioned");
 
-  const calls = reuse.readLog();
-  if (!calls.some((c) => c.cmd === "status")) fail("the reused worktree was not re-checked at launch");
-  if (calls.some((c) => c.cmd === "init")) fail(`once per MISSING index only — init ran again: ${JSON.stringify(calls)}`);
+  const calls = second.readLog();
+  const inits = calls.filter((c) => c.cmd === "init" && !c.args.includes("--help"));
+  if (inits.length !== 1) fail(`init did not run exactly once for the new index: ${JSON.stringify(calls)}`);
+  if (norm(inits[0].args[inits[0].args.length - 1]) !== norm(out2.worktree)) {
+    fail(`init addressed the wrong root: ${JSON.stringify(inits[0])}`);
+  }
   for (const c of calls) {
     const rootArg = c.args.find((a) => !a.startsWith("-"));
     if (rootArg && norm(rootArg) !== norm(out2.worktree)) fail(`a call addressed another root: ${JSON.stringify(c)}`);
@@ -866,6 +959,142 @@ test("a spawn that cannot attribute focus still succeeds", () => {
     if (out.focusError !== undefined) fail(`the skip was reported as an error: ${out.focusError}`);
     if (readFocus(runId, { stateHome: home }).history.length) fail("a focus line was written anyway");
   });
+});
+
+// ── child model + per-child provider env (FOC-762/FOC-773) ───────────────────
+console.log("\nchild model + provider env");
+
+test("a settings overlay routing.<squad>.lead picks the child's model and records the source", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const overlayDir = mkdtempSync(join(tmpdir(), "la-sup-overlay-"));
+  cleanup.push(overlayDir);
+  // Only the overlay file matters here; readSettings takes it via LA_SETTINGS_FILE.
+  const overlay = join(overlayDir, "settings.json");
+  writeFileSync(
+    overlay,
+    JSON.stringify({ provider: { active: null, custom: null }, routing: { dev: { lead: "overlay/lead-model" } } }),
+  );
+  const out = parse(runSpawn(runId, repo, [], { LA_SETTINGS_FILE: overlay, MOCK_CLAUDE_HANG_MS: "0" }));
+  if (out.ok !== true) fail(`spawn failed: ${out.error}`);
+  if (out.model !== "overlay/lead-model") fail(`spawn reported model ${out.model}`);
+  if (out.modelSource !== "settings:routing.dev") fail(`spawn reported modelSource ${out.modelSource}`);
+  const entry = readRegistry(runId).children[out.childId];
+  if (entry.model !== "overlay/lead-model") fail(`registry model: ${entry.model}`);
+  if (entry.modelSource !== "settings:routing.dev") fail(`registry modelSource: ${entry.modelSource}`);
+});
+
+test("the child env carries the overlay's provider — base URL, auth vars and tiers", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const dir = mkdtempSync(join(tmpdir(), "la-sup-prov-"));
+  cleanup.push(dir);
+  // A custom provider reachable only through the resolution inputs: config file,
+  // key file and the overlay naming it active (LA_PROVIDER keeps the test
+  // deterministic while provider-resolve gains overlay support).
+  const configPath = join(dir, "models.json");
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      providers: {
+        mockprov: {
+          baseUrl: "http://127.0.0.1:9443/api",
+          authEnv: "MOCKPROV_API_KEY",
+          authStyle: "token",
+          tiers: { opus: "prov/opus-model" },
+        },
+      },
+    }),
+  );
+  const envPath = join(dir, ".env");
+  writeFileSync(envPath, "MOCKPROV_API_KEY=dummy-key\n");
+  const overlay = join(dir, "settings.json");
+  writeFileSync(overlay, JSON.stringify({ provider: { active: "mockprov", custom: null }, routing: {} }));
+  const claudeEnvFile = join(dir, "claude-env.jsonl");
+
+  const out = parse(
+    runSpawn(runId, repo, [], {
+      LA_PROVIDER: "mockprov",
+      LA_PROVIDER_CONFIG: configPath,
+      LA_PROVIDER_ENV_FILE: envPath,
+      LA_SETTINGS_FILE: overlay,
+      MOCK_CLAUDE_ENV_FILE: claudeEnvFile,
+      MOCK_CLAUDE_HANG_MS: "0",
+    }),
+  );
+  if (out.ok !== true) fail(`spawn failed: ${out.error}`);
+
+  // The mock claude appends its env as one JSON object per line; the watcher
+  // passes the child env straight through, so what lands here is what the
+  // child actually ran with.
+  const deadline = Date.now() + 10_000;
+  let childEnv = null;
+  while (Date.now() < deadline) {
+    try {
+      const lines = readFileSync(claudeEnvFile, "utf8").split(/\r?\n/).filter(Boolean);
+      if (lines.length) {
+        childEnv = JSON.parse(lines[lines.length - 1]);
+        break;
+      }
+    } catch {
+      /* not written yet */
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 120);
+  }
+  if (!childEnv) fail(`mock claude never wrote its env to ${claudeEnvFile}`);
+  if (childEnv.ANTHROPIC_BASE_URL !== "http://127.0.0.1:9443/api") {
+    fail(`child base URL: ${childEnv.ANTHROPIC_BASE_URL}`);
+  }
+  if (childEnv.LA_PROVIDER !== "mockprov") fail(`child LA_PROVIDER: ${childEnv.LA_PROVIDER}`);
+  if (childEnv.ANTHROPIC_AUTH_TOKEN !== "dummy-key") fail(`child auth token: ${childEnv.ANTHROPIC_AUTH_TOKEN}`);
+  // The inactive auth var must be cleared, never left inherited.
+  if (childEnv.ANTHROPIC_API_KEY !== "") fail(`inactive auth var: "${childEnv.ANTHROPIC_API_KEY}"`);
+  if (childEnv.ANTHROPIC_DEFAULT_OPUS_MODEL !== "prov/opus-model") {
+    fail(`child opus tier: ${childEnv.ANTHROPIC_DEFAULT_OPUS_MODEL}`);
+  }
+  // FOC-762/FOC-773: the resolved provider is recorded in the registry entry,
+  // so a follow-up turn can pin the SAME provider after a switch in the
+  // settings overlay.
+  const entry = readRegistry(runId).children[out.childId];
+  if (entry.provider !== "mockprov") fail(`registry provider: ${entry.provider}`);
+});
+
+test("a provider resolution error refuses the spawn (fail closed)", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runSpawn(runId, repo, [], { LA_PROVIDER: "does-not-exist" });
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r);
+  if (out.ok !== false) fail(`expected ok:false, got ${JSON.stringify(out)}`);
+  if (out.reason !== "provider-resolution-failed") fail(`expected a named refusal, got: ${JSON.stringify(out)}`);
+  if (!/does-not-exist/.test(out.error)) fail(`error does not name the provider: ${out.error}`);
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered anyway");
+});
+
+
+test("an empty mounted key refuses spawn even when the Supervisor holds a stale key", () => {
+  const { base, repo } = fixtureRepo(); const runId = fixtureRun();
+  const secrets = join(base, "secrets"); mkdirSync(secrets);
+  writeFileSync(join(secrets, "openrouter_api_key"), "");
+  const r = runSpawn(runId, repo, [], {LA_PROVIDER: "openrouter", LA_SECRETS_DIR: secrets});
+  const out = parse(r);
+  if (r.status !== 1 || out.reason !== "provider-resolution-failed") fail("missing mounted key was not refused");
+  if (Object.keys(readRegistry(runId).children).length) fail("missing-key request registered a child");
+});
+
+test("the next spawn re-reads provider, mounted key and routing despite inherited launch values", () => {
+  const { base, repo } = fixtureRepo(); const runId = fixtureRun();
+  const secrets = join(base, "secrets"); mkdirSync(secrets);
+  writeFileSync(join(secrets, "provider_api_key"), "rotated-fixture-key");
+  const overlay = join(base, "settings.json");
+  writeFileSync(overlay, JSON.stringify({provider: {active: "custom", custom: {baseUrl: "http://127.0.0.1:9449", authStyle: "token", keyName: "PROVIDER_API_KEY", defaultModel: "custom/default", tiers: {}}}, routing: {dev: {lead: "custom/routed"}}}));
+  const envLog = join(base, "child-env.jsonl");
+  const out = parse(runSpawn(runId, repo, [], {LA_SETTINGS_FILE: overlay, LA_SECRETS_DIR: secrets, LA_PROVIDER: "openrouter", LA_PROVIDER_SOURCE: "settings", LA_PROVIDER_RESOLVED: "openrouter", PROVIDER_API_KEY: "stale-fixture-key", ANTHROPIC_DEFAULT_OPUS_MODEL: "stale/opus", MOCK_CLAUDE_ENV_FILE: envLog, MOCK_CLAUDE_HANG_MS: "0"}));
+  if (!out.ok || out.model !== "custom/routed") fail("new routing was not used");
+  const env = JSON.parse(readFileSync(envLog, "utf8").trim().split("\n").pop());
+  if (env.LA_PROVIDER !== "custom" || env.ANTHROPIC_BASE_URL !== "http://127.0.0.1:9449") fail("inherited provider masked overlay");
+  if (env.ANTHROPIC_AUTH_TOKEN !== "rotated-fixture-key") fail("mounted key rotation was not seen");
+  if (env.ANTHROPIC_DEFAULT_OPUS_MODEL !== "") fail("stale tier survived provider switch");
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

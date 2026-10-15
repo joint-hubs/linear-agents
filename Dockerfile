@@ -33,6 +33,10 @@ ENV PATH=/opt/venv/bin:$PATH
 # Global npm tools used by the agents.
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@colbymchenry/codegraph@${CODEGRAPH_VERSION}" && npm cache clean --force
 
+# Runtime dependencies for Thoughtmap and the local task-map projection.
+COPY docker/requirements-task-workspace.txt /tmp/task-workspace-requirements.txt
+RUN /opt/venv/bin/pip install --no-cache-dir -r /tmp/task-workspace-requirements.txt
+
 # App owned by `node` from the start, so no `chown -R` layer is needed
 # (a chown -R would copy the whole tree into a new layer).
 RUN mkdir -p /opt/fenix /data && chown node:node /opt/fenix /data
@@ -83,7 +87,6 @@ ENV LA_ROOT=/opt/fenix \
     LA_WORKTREE_HOME=/data/workspaces/la-wt \
     TELEMETRY_HOST=0.0.0.0 \
     TELEMETRY_PORT=7331 \
-    LA_PROVIDER=openrouter \
     FENIX_IN_CONTAINER=1
 
 EXPOSE 7331

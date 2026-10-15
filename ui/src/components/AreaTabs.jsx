@@ -13,7 +13,7 @@ export default function AreaTabs({ pathname }) {
   return (
     <div className="area-tabs" role="tablist" aria-label={`${area.label} pages`}>
       {area.pages.map((page) => {
-        const active = pathname === page.path || pathname.startsWith(page.path + '/');
+        const active = (pathname === '/' && page.path === '/work') || pathname === page.path || pathname.startsWith(page.path + '/');
         return (
           <Link
             key={page.path}

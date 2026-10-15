@@ -1,0 +1,292 @@
+/* Runtime statistics (/insights/runtime, P3). Scoped under .stats — theme.css
+   stays untouched. Visual CSS bars only, no external deps; every bar rides
+   with its text value (colour/shape is never the only signal, spec §7). */
+
+.stats {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.stats-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stats-title {
+  margin: 0;
+  font-size: 18px;
+}
+
+.stats-sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-fg, #6b7280);
+  max-width: 70ch;
+}
+
+.stats-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted-fg, #6b7280);
+}
+
+/* --- filters ---------------------------------------------------------------- */
+
+.stats-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.stats-timeframes {
+  display: flex;
+  gap: 6px;
+}
+
+.stats-chip {
+  border: 1px solid var(--border, #d5d9e0);
+  background: var(--surface-2, #eef0f4);
+  color: var(--fg, #1f2430);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.stats-chip-active {
+  background: var(--accent-bg, #e8efff);
+  border-color: var(--accent-fg, #1e40af);
+  color: var(--accent-fg, #1e40af);
+  font-weight: 600;
+}
+
+.stats-taskkey {
+  display: flex;
+  gap: 6px;
+  flex: 1 1 320px;
+  max-width: 460px;
+}
+
+.stats-taskkey input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border, #d5d9e0);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  background: var(--surface, #fff);
+  color: var(--fg, #1f2430);
+}
+
+.stats-taskkey button {
+  border: 1px solid var(--border, #d5d9e0);
+  background: var(--surface-2, #eef0f4);
+  color: var(--fg, #1f2430);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* --- banners ----------------------------------------------------------------- */
+
+.stats-banner {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.stats-banner-error {
+  background: var(--danger-bg, #fdecec);
+  color: var(--danger-fg, #991b1b);
+}
+
+.stats-banner-partial {
+  background: var(--waiting-bg, #fdf3e1);
+  color: var(--waiting-fg, #92400e);
+}
+
+/* --- panels ------------------------------------------------------------------ */
+
+.stats-panel {
+  background: var(--surface-2, #eef0f4);
+  border: 1px solid var(--border, #d5d9e0);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.stats-panel-title {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.stats-panel-note {
+  margin: 0 0 10px;
+  font-size: 11px;
+  color: var(--muted-fg, #6b7280);
+}
+
+.stats-subhead {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.stats-subhead:first-of-type {
+  margin-top: 2px;
+}
+
+.stats-denom {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--muted-fg, #6b7280);
+}
+
+.stats-empty {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--muted-fg, #6b7280);
+  font-style: italic;
+}
+
+/* --- tiles ------------------------------------------------------------------- */
+
+.stats-tiles {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.stats-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 130px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #d5d9e0);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.stats-tile-value {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.stats-tile-label {
+  font-size: 11px;
+  color: var(--muted-fg, #6b7280);
+}
+
+.stats-tile-sub {
+  font-size: 10px;
+  color: var(--muted-fg, #6b7280);
+}
+
+/* --- tables ------------------------------------------------------------------ */
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.stats-table th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--muted-fg, #6b7280);
+  border-bottom: 1px solid var(--border, #d5d9e0);
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.stats-table td {
+  border-bottom: 1px solid var(--border, #e3e6ec);
+  padding: 5px 8px;
+  white-space: nowrap;
+}
+
+.stats-mono {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+
+.stats-link {
+  color: var(--accent-fg, #1e40af);
+}
+
+/* --- bars -------------------------------------------------------------------- */
+
+.stats-bar {
+  display: inline-block;
+  width: 80px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #d5d9e0);
+  margin-left: 8px;
+  vertical-align: middle;
+  overflow: hidden;
+}
+
+.stats-bar-fill {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  background: var(--accent-fg, #1e40af);
+  border-radius: 3px;
+}
+
+/* A zero pct keeps the empty track visible (the text label carries the
+   value — the bar's emptiness is honest, not an error). */
+
+.stats-bars {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stats-bars-label {
+  display: inline-block;
+  min-width: 180px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+
+.stats-bars-value {
+  font-size: 11px;
+  color: var(--muted-fg, #6b7280);
+  margin-left: 8px;
+}
+
+/* --- misc -------------------------------------------------------------------- */
+
+.stats-plain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.stats-cols {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.stats-cols .stats-subhead {
+  margin-top: 0;
+}

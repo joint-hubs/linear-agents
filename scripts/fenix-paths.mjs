@@ -59,18 +59,51 @@ export function rewardsHome(env = process.env, platform = process.platform) {
   return env.LA_REWARDS_HOME || join(dataHome(env, platform), "rewards");
 }
 
+// The managed Supervisor session id shape (PRD task-workspace-supervisors §5):
+// opaque, random hex — the ONLY session identifier safe to compose a path
+// from. taskKey/taskId are opaque user data and must never reach a path.
+// Mirrors task-sessions.mjs SESSION_ID_PATTERN (kept here because
+// task-sessions.mjs imports this module — do not create a cycle).
+export const SUPERVISOR_SESSION_ID_PATTERN = /^sup-[a-f0-9]{16,32}$/;
+
+// Home for one Supervisor session's state. Without FENIX_SUPERVISOR_SESSION_ID
+// this is the legacy <dataHome>/supervisor directory (single-session compat:
+// session.json and current-run.json stay exactly where they always were). A
+// validated session id scopes it to <dataHome>/supervisor/sessions/<id>.
+// Anything set but NOT matching the pattern throws — never compose a path
+// from it.
+export function supervisorSessionHome(env = process.env, platform = process.platform) {
+  const sessionId = env.FENIX_SUPERVISOR_SESSION_ID;
+  if (!sessionId) return join(dataHome(env, platform), "supervisor");
+  if (!SUPERVISOR_SESSION_ID_PATTERN.test(sessionId)) {
+    throw new TypeError(
+      `FENIX_SUPERVISOR_SESSION_ID must match ${SUPERVISOR_SESSION_ID_PATTERN} — refusing to compose a path from '${sessionId}'`,
+    );
+  }
+  return join(dataHome(env, platform), "supervisor", "sessions", sessionId);
+}
+
 // The Supervisor session file — what the frontman's Claude Code session is
 // doing right now (state + last notification), written by the session hook
-// (FOC-783) so the dashboard can show it.
+// (FOC-783) so the dashboard can show it. Scoped to the session home.
 export function supervisorSessionPath(env = process.env, platform = process.platform) {
-  return join(dataHome(env, platform), "supervisor", "session.json");
+  return join(supervisorSessionHome(env, platform), "session.json");
 }
 
 // The Supervisor's current-run pointer (FOC-807) — the run id the live
 // supervisor session belongs to, written by supervisor-current-run.mjs next to
 // session.json so both containers read the same truth from the shared volume.
+// Scoped to the session home; the legacy (unscoped) pointer is untouched.
 export function supervisorCurrentRunPath(env = process.env, platform = process.platform) {
-  return join(dataHome(env, platform), "supervisor", "current-run.json");
+  return join(supervisorSessionHome(env, platform), "current-run.json");
+}
+
+// A managed session's isolated Claude config dir (<sessionHome>/claude) — the
+// entrypoint seeds prompt/settings/agents/skills into it and points
+// CLAUDE_CONFIG_DIR there, so `claude --continue` can never cross-resume
+// another task's native conversation history from the shared squad config.
+export function supervisorSessionClaudeDir(env = process.env, platform = process.platform) {
+  return join(supervisorSessionHome(env, platform), "claude");
 }
 
 // The host's bearer token — written by `supervisor-host.mjs serve` at start
@@ -95,6 +128,17 @@ export function squadConfigDir(squad, env = process.env) {
 export function projectsConfigPath(env = process.env, exists = existsSync) {
   if (env.LA_PROJECTS_FILE && exists(env.LA_PROJECTS_FILE)) return env.LA_PROJECTS_FILE;
   return join(REPO_ROOT, "config", "projects.json");
+}
+
+// The Settings overlay that survives `fenix update` (FOC-773/786). Precedence:
+// LA_SETTINGS_FILE (the container points it at the /data volume), then
+// settings.json next to wherever LA_PROJECTS_FILE puts projects.json (the
+// user-owned config dir), then the repo-local .fenix/config — the repo layer
+// is the image, so anything there is replaceable; the overlay must not be.
+export function settingsPath(env = process.env) {
+  if (env.LA_SETTINGS_FILE) return env.LA_SETTINGS_FILE;
+  if (env.LA_PROJECTS_FILE) return join(dirname(env.LA_PROJECTS_FILE), "settings.json");
+  return join(REPO_ROOT, ".fenix", "config", "settings.json");
 }
 
 // Child worktrees: siblings of the repo by default (../la-wt/<repo>/<branch>).

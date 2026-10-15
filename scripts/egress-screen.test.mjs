@@ -479,5 +479,46 @@ const issueUrl = (i) => `https://linear.app/joint-hubs/issue/${CORPUS[i][0]}/${C
 }
 
 // ---------------------------------------------------------------------------
+// 9. Managed spawn-ref exemption (FOC-788, Mateusz 2026-10-15: "tak w
+//    komentarzu linear podaj tez nazwe galezi"). Shape-gated on the spawn
+//    shape <teamKey>-<n>-<slug>-<hash12>, family-E-only, and deliberately
+//    NARROWER than Q2-B's slug gate: the trailing 12-hex attempt hash is what
+//    a Linear title slug never has. The interlock with Q2-B is asserted, not
+//    assumed — the corpus title slugs stay blocked in bare prose.
+// ---------------------------------------------------------------------------
+
+{
+  const REF = "foc-788-push-pr-from-dashboard-1a2b3c4d5e6f"; // <team>-<n>-<slug>-<hash12>
+  const REF_JOI = "joi-70-gantt-snapshot-cost-breakdown-0f1e2d3c4b5a"; // any team key, not just foc
+
+  console.log("managed-ref: spawn-shaped refs are exempt (the published branch may be named)");
+  assert(scanEgress(`- Branch: \`${REF}\``).length === 0, "managed ref in backticks is exempt");
+  assert(scanEgress(`pushed ${REF_JOI} to origin`).length === 0, "managed ref for another team key is exempt");
+  assert(scanEgress(`${REF}\nHead \`a1b2c3d4e5f6\` · base \`main\``).length === 0, "managed ref beside a hex sha and a short base is exempt");
+
+  console.log("managed-ref: the Q2-B interlock — a Linear TITLE slug has no attempt hash and stays blocked");
+  for (let i = 0; i < CORPUS.length; i++) {
+    const short = CORPUS[i][1].slice(0, 24);
+    assert(scanEgress(`prose ${CORPUS[i][1]} end`).length >= 1, `corpus title slug still blocked in prose (#${i + 1}, ${short}...)`);
+  }
+
+  console.log("managed-ref: anything not shaped like the spawn ref falls back to the ordinary rules");
+  assert(scanEgress(`prose ${REF.toUpperCase()} end`).length >= 1, "uppercase variant is not the managed shape - blocked");
+  assert(scanEgress(`prose foc-788-push-pr-from-dashboard-1a2b3c4d5e6 end`).length >= 1, "11-hex tail is not the managed shape - blocked");
+  assert(scanEgress(`prose foc-788-push-pr-from-dashboard-1a2b3c4d5e6f78 end`).length >= 1, "14-hex tail is not the managed shape - blocked");
+  assert(scanEgress(`prose foc-788-push-pr-from-dashboard-1a2b3c4d5e6fk end`).length >= 1, "non-hex tail is not the managed shape - blocked");
+  assert(scanEgress(`prose ${REF_JOI.toUpperCase()} end`).length >= 1, "the second fixture's uppercase variant is blocked (fixture proven live)");
+
+  console.log("managed-ref: family-E-only reach — the ref shields nothing else");
+  {
+    const mixed = `${REF} rotated with ${FAKE_ENTROPY}`;
+    const hits = scanEgress(mixed);
+    assert(hits.length === 1 && hits[0].family === "high-entropy", "managed ref does not shield a neighbouring high-entropy secret (1 hit)");
+    const prefixed = scanEgress(`${REF} ${FAKE_SK_OR}`);
+    assert(prefixed.some((h) => h.family === "key-prefix"), "key-prefix family still fires beside a managed ref (exemption is family-E-only)");
+  }
+}
+
+// ---------------------------------------------------------------------------
 console.log(`\n${passed}/${passed + failed} assertions passed.`);
 if (failed > 0) process.exit(1);

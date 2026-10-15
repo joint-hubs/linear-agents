@@ -57,6 +57,7 @@ import {
 import { autoLabel, pairDecisionEvents } from "./decision-log.mjs";
 import { integrationTreePath } from "./fenix-paths.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
+import { acquireIntegrationLock } from "./workspace-claims.mjs";
 
 const REPEATABLE = new Set(["child", "decision-event", "decision-run"]);
 const args = parseArgs(process.argv.slice(2), REPEATABLE);
@@ -309,6 +310,28 @@ function replay(child, tree) {
   }
 }
 
+// ── P1 resource ownership: one merge process per repo ────────────────────────
+//
+// Everything below is a repo-wide git mutation session (`git worktree add -B`
+// on the shared common dir, merges replayed onto it), so the whole workflow
+// runs under the repo's integration lock: acquired BEFORE the first mutation
+// and released in finally. Two `supervisor-merge` processes would fight over
+// the same `la-merge/<runId>` branch and integration tree — the second is
+// refused here, before touching git. A refusal inside the locked region
+// reaches failJson(), i.e. process.exit(), which skips finally blocks — the
+// release then happens through workspace-claims' process-exit hook. A hard
+// crash leaves the lock on disk for EXPLICIT recovery
+// (node scripts/workspace-claims.mjs recover --git-root <dir> --force);
+// there is no stale auto-delete.
+let integrationLock = null;
+try {
+  integrationLock = acquireIntegrationLock({ gitRoot, ownerId: `merge:${runId}` });
+} catch (err) {
+  failJson(`refusing to run the merge before any git mutation: ${err.message}`, err.conflict ?? {});
+}
+
+try {
+
 // ── run it ───────────────────────────────────────────────────────────────────
 
 const findings = [];
@@ -454,3 +477,7 @@ console.log(JSON.stringify(report, null, 2));
 // a rejected integration as a successful run. Exit 2 on a tool error for the
 // same reason in the other direction: an untested tree is not a verdict either.
 process.exit(accepted === null ? 2 : accepted ? 0 : 1);
+
+} finally {
+  integrationLock.release();
+}

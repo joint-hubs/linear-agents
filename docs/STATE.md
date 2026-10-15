@@ -24,6 +24,141 @@ Kolejka — sekwencja z `docs/ROADMAP.md` (2026-10-08). **Tor A (krytyczna ście
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## 2026-10-15 (38) — FOC-815 FIXED: one unknown Linear id no longer poisons the work-board lookup
+
+Subtask **FOC-815** (child of FOC-788) — filed and fixed on Mateusz's „opcja 1" (2026-10-15). The banner
+„Linear unavailable: … Entity not found: Issue" on the Work board was the fixture `WORK-99` poisoning
+the batched Linear lookup, not Linear being down.
+
+- **Diagnoza (live probe w kontenerze, read-only):** batch aliasów `issue(id:)` z jednym nieznanym id
+  dostaje od Linear `errors[]` z `path:["aN"]` + **`data: null` dla całej operacji** — rodzeństwo w
+  batchu nie ma się z czego odzyskać na poziomie protokołu. `graphql()` rzucał na `errors[]`, gubiąc
+  wszystko poza stringiem, więc jeden miss kasował ≤50 id; oba workspacy padały tak samo → banner.
+  Missy nie trafiały do cache'a → lookup (batch + kara) leciał przy każdym odświeżeniu tablicy.
+  Drugi, utajony bug w tej samej pętli: spacer indeksowy mierzył `remaining`, które kurczyło się po
+  każdym chunku — przy 51+ id reszta nigdy nie była pytana w tym workspace (istniejący test 51-id
+  przechodził tylko dlatego, że jego mock ignorował workspace).
+- **Fix:** (1) `linear-client.mjs` dokleja surowe `errors[]` do rzuconego błędu jako `graphqlErrors`
+  (additive, tekst błędu bez zmian; impact `graphql` = 66 symboli, ale zero zmiany zachowania
+  dotychczasowych wywołań); (2) `fetchLinearStates` klasyfikuje „Entity/Issue not found" jako **cichy
+  miss** (brak stanu i brak błędu — jak null alias), atrybuje go po `path` i ponawia batch bez
+  brakujących id; bez zdatnych pathów — bisekcja do pojedynczych id; (3) realne awarie (auth, sieć,
+  rate limit) dalej dają banner z powodem — zmieszany batch (miss + awaria) też, bo bisekcja
+  atrybuje na singlach; (4) miss-y wpadają do cache'a 60 s; (5) spacer po snapshocie — 51. id pytane
+  w tym samym workspace. Nieznany id dalej płynie do przebiegu pisi (jak dotąd).
+- **Weryfikacja:** `work-board.test.mjs` **33/33** (4 nowe: atrybucja po path, bisekcja bez pathów,
+  realna awaria/mieszany batch, cache missów + wzmocniony test 51-id o workspace'ach),
+  `linear-client.test.mjs` **46/46** (15d: `graphqlErrors` na błędzie), sąsiedzi bez regresji:
+  `work-routes` 86/86, `task-map-routes` 50/50, `publish-actions` 11/11, `publish-exec` 13/13,
+  `linear-ops` 25/25. **Docker (rebuild+redeploy):** obraz `fenix:task-workspace-candidate`
+  przebudowany (log `.fenix/815-image-build.log`), stack `fenix-task-workspace` zredeployowany, oba
+  kontenery healthy. Żywy payload `GET /api/work/tickets`: `linear: {ok:true, error:null}` — **brak
+  bannera**, `WORK-99` = cichy miss (`title:null`, `stage:"dev"` z danych Fenix), wszystkie realne
+  tickety (FOC/PAR/PFM/JOI/ARC) w pełni wzbogacone.
+- **Lądowanie (2026-10-15, „commituj pr … i merge" Mateusza):** commity `205f846` (fix) + `092a226` (plan note) + ten wpis; cała gałąź `fenix-settings-keys` (strumień task-workspace FOC-773→788 + fix) w **PR #71 → main** i mergnięta. Push/PR/merge wykonany na wyraźne polecenie; gałąź pozostaje (bez delete-branch).
+
+## 2026-10-15 (37) — FOC-788 DELIVERED: push / open PR from the dashboard, with explicit confirm
+
+Ostatnie ogniwo łańcucha lane-O (FOC-773 → 778 → 786 → **788**) — S1–S5 zamknięte, wszystko zweryfikowane. Cztery decyzje Mateusza (2026-10-15) w kontraktach: (1) push gałęzi taska + PR do `main`; (2) „checks state" = lokalny wynik weryfikacji (verdykty runów), nie checksy GitHuba; (3) audyt = telemetria + komentarz Linear (z nazwą gałęzi) + JSONL, rekord niesie `actor: "human"|"ai"`; (4) ten sam `GITHUB_TOKEN` (compose secret) dla pusha i PR-a.
+
+- **Kontrakt:** `GET /api/work/tickets/:id/publish-preview?action=push|pr` → checkout/diff/checks/`confirmToken`; `POST …/push|pr` `{confirmToken, actor, actorId}`. Token wiąże `[action, ticket, branch, head, base]` i jest przeliczany na teraz — ruszony head to **`409 stale-preview` jeszcze przed wykonawcą**; guardy (loopback + same-origin) i cap ciała jak `start`; audyt trio **przed** odpowiedzią, porażki inkluztywne (`502 push-refused|pr-failed`). `buildPublishPreview` bierze fakty **jednego** ticketa — nietknięty ticket = `404 no-checkout` z powodem i bez oferowanej akcji (fail-closed to design).
+- **Weryfikacja:** `work-routes.test.mjs` **86/86** (prawdziwy fixture git — pushurl trick: fetch-URL github-kształtny dla ścieżki PR, push-URL = lokalny bare, realny offline push; PR przez stub `fetch`; hermetyczne sinki — komentarz Linear fail-closed na pustym kluczu, nic nie poszło na żywo). Regresje `publish-actions`/`publish-exec` 0 fail (kanarek wycieku tokenu zielony). UI: `publishDialogModel` **64/64**, pełne `npm test` zielone, `vite build` ✓. Pełny suite **×2: 171/174** — trzy czerwone pliki odtwarzają się na **gołym HEAD bez diffu FOC-788** (probe worktree): `cockpit-routes.test.mjs` (4–5 FAIL — walidacja `sessionId` `^sup-[a-f0-9]{16,32}$` z lane-O vs fixture'y `sess-host-1`/`waker-sess`; „cockpit model" dodatkowo czerwone na env tej sesji `ANTHROPIC_MODEL`, potwierdzone też na czystym `main`), `supervisor-pinned-state.test.mjs` (1 FAIL „corrupt index" — spodziewane `exit 1`, dostaje `0`, testy z FOC-357), `workspace-claims.test.mjs` (wyścig o lock, 3/4 zielone). **Zero z tego z FOC-788** — powierzchnie feature'u zielone w obu przebiegach. Resztki odnotowane, niewypełnione (kolejność: Mateusz decyduje).
+- **Docker (rebuild+redeploy):** obraz `fenix:task-workspace-candidate` przebudowany z tego worktree (`sha256:b16d882c…`, log `.fenix/788-image-build.log`), stack `fenix-task-workspace` zredeployowany — oba kontenery healthy. Curl-walk po `127.0.0.1:4602` **9/9**: preview 200 z checkoutem/diffem/checks/`confirmToken` (fixture `WORK-99` w kontenerze: gałąź `work-99-dev-f0c788acce57`, **remote = lokalny bare w kontenerze** — nawet przypadkowy klik nie trafi w prawdziwy GitHub), `400` bad-action / not-a-ticket-id / confirmToken-required / bad-actor, `404` no-checkout, `409` stale-preview (push i pr), `403` obcy origin. Świadkowie: bare 0 refów, brak `publish-actions.jsonl`. Bundle serwowany przez stack niesie dialog („Push branch"/„Open PR"/„Preview again").
+- **Real-provider evidence = osobny ludzki run:** Mateusz klika push/PR na prawdziwym tickecie z dashboardu — ja nigdy nie puszczam sam; żaden POST z poprawnym `confirmToken` nie wyszedł poza fixture testowy. Browser-walk dialogu (AC-1/AC-2 widok) też po stronie Mateusza.
+- **Propozycja commitów (czeka na „commituj"):** (1) `feat(publish): confirm-bound push and PR from the work routes (FOC-788)` — `scripts/{publish-actions,publish-actions.test,publish-exec,publish-exec.test,git-credential-fenix,work-routes,work-routes.test,egress-screen,egress-screen.test}.mjs` + `scripts/test-lanes.json`; (2) `feat(ui): Push branch / Open PR confirm dialog on the ticket panel (FOC-788)` — `ui/src/api.js`, `ui/src/workModel.js`, `ui/src/components/work/{PublishDialog.jsx,TicketPanel.jsx}`, `ui/src/_tests_work.mjs`; (3) `docs: FOC-788 plan and delivery hygiene` — `docs/plans/foc-788-push-pr-from-dashboard.md`, `docs/plans/task-workspace-delivery.md`, `docs/supervisor-e2e-checklist.md`; (4) `docs(state): FOC-788 delivered (37)` — `docs/STATE.md`. Bez trailerów. `.task-prompt.tmp.md` nigdy nie wchodzi. Push zostaje u Mateusza.
+
+## 2026-10-14 (36) — Task-workspace stream DELIVERED end to end; docs hygiene; next = FOC-788 (proposed)
+
+Mateusz: „commituj i lecimy dalej". Both proposed batches landed; the stream has no open item but the push.
+
+- **Commits landed:** `9f458fb` `test(claims): pin the cap=2 spawn-vs-merge lock contention` + `5d6e6fc` `docs: P1b spike follow-ups closed — lock blast radius and cap=2 benchmark; state (35)`. No trailers. **18 commits unpushed** on `fenix-settings-keys` (tracks `origin/main`) — push stays with Mateusz.
+- **Stream status:** task-workspace PRD **DELIVERED** (P1–P4 + final verification), settings work (FOC-762/773/778/786) delivered on the same branch. Nothing unverified, nothing uncommitted except the two hygiene lines below.
+- **Docs hygiene (this turn, in the tree — proposed for commit):** `docs/plans/task-workspace-delivery.md` header no longer says "nothing delivered yet"; `docs/supervisor-e2e-checklist.md` prose 116 → 172 files (the registered lane count, 137 parallel + 35 serial; `docs-count-guard` green, 172 = 172).
+- **Next (proposed, awaiting Mateusz):** FOC-788 "Human push and open PR from the dashboard, with explicit confirm" — the last link of the lane-O chain this session executes (FOC-773 → 778 → 786 → **788**). Recon done: board `landed` = Linear `completed` (`deriveStage`, `scripts/work-board.mjs:372`); the ticket panel already carries `wk-actions` (`ui/src/components/work/TicketPanel.jsx:287`); the container reads `GITHUB_TOKEN` (`scripts/fenix-git-identity.mjs`, FOC-776) so push auth has a surface; **no "checks" tooling exists today** — that is a real design fork. Open questions were put to Mateusz as one list (branch/push model, what "checks state" means, audit + identity).
+
+## 2026-10-14 (35) — P1b spike follow-ups closed: integration-lock blast radius + cap=2 benchmark
+
+Mateusz: „commituj i lecimy dalej". Commits landed, then both leftovers from (34)'s "Still open" closed — the stream has nothing uncommitted and nothing unverified.
+
+- **Commits landed (from „commituj"):** `2c05bd9` `fix(sessions): carry the task binding in the session kickoff` + `f7ab451` `docs: plan and PRD checkboxes brought honest; state (34)`. No trailers. 16 commits unpushed on `fenix-settings-keys` — push stays with Mateusz.
+- **Integration-lock blast radius — analyzed and pinned.** The lock is repo-wide by design (`<commonGitDir>/workspace-claims/integration.lock`, atomic `O_EXCL`): sessions in different repos never meet, sessions in one repo share one lock. Holders and hold times: managed `ensureWorktree` (a spawn's worktree creation, seconds) and `supervisor-merge.mjs` (`merge:<runId>`, whole merge run — minutes). Contention is **fail-fast, never a queue**: the loser is refused immediately with the holder named, no worktree or claim written, the holder's lock untouched; per-process reentrancy (no self-deadlock on `claimWorkspace`); clean exit releases via the exit hook, hard kill leaves it for explicit `recover --force`. Nothing else in `supervisor-lib.mjs` is mutable across sessions — wake-queue append and `updateChild` are per-run single-writer, so the one-live-child caveat applies per run and is untouched by cap=2. Pinned by `workspace-claims.test.mjs` §11 (the cap=2 spawn-vs-merge case) — suite **11/11**. Recommendation recorded in the plan: keep fail-fast; a bounded wait in `acquireLockFile` only if spawn-under-merge refusals become noise — and the merge hold must not shrink (it is what makes landing atomic).
+- **Benchmark at cap=2** (both sessions live, 2026-10-14): idle `fenix-supervisor` 0.2–0.5% CPU / 324–329 MiB + `fenix-api` ~0% / 40 MiB; two concurrent light turns peaked 2.5% CPU / 389 MiB. Per-session processes ≈ claude 234–275 MB + launch 64 MB + tmux ~3.5 MB — RSS sums double-count shared node pages, the container working set is the honest total (≈ 330–390 MiB at cap=2). Disk ≈ 20 MB per session home (63 MB `/data` total). Turns were one-word probes without tools — tool-heavy turns cost more CPU; claude RSS grows with conversation length. Full table + caveats in the plan's "P1b spike follow-ups" section.
+- **CHECK-C recovered live** via the designed Stop → Resume (the (34) offer, taken up as instrumental to the benchmark); both sessions answered the probe and sit `idle`.
+- **Still open:** push (Mateusz). Nothing else in this stream.
+
+## 2026-10-14 (34) — Task binding in the session kickoff; plan/PRD checkboxes brought honest
+
+Mateusz: „super lecimy dalej". Closes the "Still open" in (33) and the walk's one observation.
+
+- **Commits landed (from „commituj"):** `2c51715` `fix(ui): task-cockpit snapshot join guard and session lastError banner` + `842fbb2` `docs: acceptance walk closed; blank-cockpit and lastError-banner notes`. No trailers. 14 commits now unpushed on `fenix-settings-keys` — push stays with Mateusz.
+- **Task binding in the session kickoff — FIXED and verified live.** The walk observation: a task session answering "jak tam status" pitched generic frontman intake ("podaj ID issue…") although its `taskKey` was bound to CHECK-B — the store and the env carried the identity all along, the model read neither. Fix: `prepareSupervisorLaunch` (`scripts/supervisor-launch.mjs`) now appends a `## Task binding` section to the session's `CLAUDE.md` naming `taskKey` + the Linear id. The Linear id is env-only and is included only when it passes `isRuntimeToken` (the identifier shape that "can never carry a prompt or credential") — a prompt is never a place for unvalidated text; a managed launch without a task key still refuses outright (telemetry identity is all-or-nothing), so a binding is never fabricated. 5 tests (suite 92/92; `agent-launch-profile` 14/14, `runtime-events` 3/3).
+- **Verified end-to-end (rebuild + redeploy rule):** image `fenix:task-workspace-candidate` rebuilt (`sha256:5d198623…`), `fenix-task-workspace` redeployed, both containers healthy. CHECK-B Stop → Resume → `running` (pid 374); its live `claude/CLAUDE.md` now reads `## Task binding` / "This Supervisor session is bound to task acceptance:acceptance-b-20261014 (Linear CHECK-B)…" followed by the unchanged `## Runtime workflow completion` section. CHECK-C left `waiting` (designed restart quarantine — the lastError banner shows the Stop→Resume path); CHECK-A `stopped`.
+- **Plan/PRD checkbox hygiene (rule 5):** ~20 delivered items in `docs/plans/task-workspace-delivery.md` (P1b, P1c, P1 events, P2, P3 spike, §6 browser E2E, docs count guard) were still `[ ]` — all marked done with pointers to the integration/acceptance logs. PRD implementation checklist and status flipped to DELIVERED. **Left open on purpose:** P1b spike follow-ups (shared integration-lock blast radius across `supervisor-lib.mjs`; resource benchmark at cap=2) — genuinely not done, not checkable.
+- **Still open:** the P1b spike follow-ups above; push (Mateusz); CHECK-C recovery is one Stop → Resume away if he wants it live.
+
+## 2026-10-14 (33) — Acceptance (server side) green on 4602; integration-review queue closed
+
+Mateusz: „lecimy 1 2 3" — (1) rebuild+acceptance, (2) native worker MCP, (3) integration leftovers. Uncommitted docs edits sit on top of the 11 commits; nothing pushed.
+
+- **(1) Rebuild + redeploy:** `fenix:task-workspace-candidate` rebuilt from HEAD `2abaa7e`, `fenix-task-workspace` healthy (both containers). The pre-rebuild supervisor `unhealthy` was a stale-image issue (`/healthz` fine on the new image).
+- **(1) P1 server-side acceptance — ALL GREEN** (full detail: acceptance log in `docs/plans/task-workspace-delivery.md`): restart reconciliation (unproven identity → capacity reserved, queued preserved), scoped stop A → B byte-identical + C claimed the slot, terminal generation rejects mutations (409 `session-terminal`), global ambiguity 409 `selection-required` vs scoped `taskKey` binding.
+- **(2) Manager/native MCP:** in-stack `POST /api/tool-profiles/test` ok (init+toolsList+search, 5 tools, 14.3 s). Native probe (host Ollama `qwen3-embedding:8b`, product stdio transport): init + all 5 tools with real payloads — `search_thoughts`, `list_clusters` (154 clusters), `get_cluster`, **`text_distance` 0.4203/0.5797**, **`cluster_distances`** (cluster 0 "SLAM Algorithms & Applications" → nearest: Sim-to-Real Transfer in DRL 0.4119, Physical AI Architecture 0.4417, Robotics and VLMs 0.4505; farthest: CD Projekt Stock Analysis 0.7396 — semantically sane neighborhoods). `cluster_distances` pays a one-time centroid grind over all 154 clusters (cached after the first call); that run was CPU-only (~16 min) — GPU was full (6.4/12.2 GB, foreign process). Suites green: `tool-profiles`, `worker-tool-profiles`, `agent-launch-profile`.
+- **(3) Integration-review queue closed** — all three open items were already landed (empty `--tools` = NONE not defaults; single inheritance store, launch-owned stamps only; serve CLI stays alive, pump claims proven live). Plan checkboxes updated.
+- **Blank task cockpit (browser walk blocker) — FIXED.** `/work/<taskKey>/cockpit` rendered nothing (both CHECK-B and CHECK-C). Root cause was a render-time TypeError in `TaskCockpit.jsx`: `snap.data?.sessionId === session?.sessionId ? snap.data.data : null` — with both sides absent on first paint `undefined === undefined` is true and the true-branch dereferences `null.data`, so React unmounted the whole tree (no top-level error boundary; `PanelBoundary` only wraps the inner panels). Every task-cockpit mount hit it — deterministic, not data-dependent. Fix: `snapDataFor(envelope, session)` in `taskCockpitModel.js` (null-guard both sides first) + 6 unit tests pinning it (suite 36/36; full `npm test` green). Rebuilt `fenix:task-workspace-candidate`, redeployed `fenix-task-workspace` (both healthy); the shipped bundle no longer carries the ternary and has the guard.
+- **Session `lastError` banner — FIXED** (the "Terminal disconnected" confusion on the walk). After the first redeploy, the P1 restart quarantine put CHECK-B/C into `waiting` with `lastError: "process identity unproven after restart…"` and refused the terminal WS with 409 — designed behavior, but the browser mapped the failed handshake to a generic 1006 overlay ("the connection was lost") and the task cockpit never rendered `session.lastError`, so a designed state looked like a dead terminal. Fix: `sessionErrorBanner(session)` in `taskCockpitModel.js` (verbatim `lastError` + a click-path hint only when the message names a recovery the UI can spell — never an invented way out), rendered as a banner in `TaskCockpit`, and `TerminalView` now takes a `hint` (the session's own error) under the close reason. 4 unit tests (suite 40/40; full `npm test` green). Rebuilt + redeployed (bundle `index-B4ttf8eq.js`, both containers healthy) — the recreate re-quarantined B/C by design, so the new banner is visible on both cockpits right now (Stop → Resume this history).
+- **Browser acceptance walk — DONE (Mateusz, 2026-10-14):** "ok wyglada ze wszystko dziala super". Isolation probe on CHECK-B (`FENIX_SESSION_B_OK`) + honest status reply; blank-page fix confirmed live; terminals recovered via Stop → Resume on both cockpits before the close.
+- **Still open:** commit proposal for the uncommitted batch (UI fix + banner + docs) awaiting Mateusz's "commituj" — push stays with him. Nothing else.
+- Host Ollama was started for the native probe (`ollama serve`) — left running; stop it if unwanted.
+
+## 2026-10-14 (32) — Commit batches landed on `fenix-settings-keys`; lane registry complete
+
+Eleven commits landed on the task branch (not pushed — push stays with Mateusz), in the approved order: docs(plan) PRD + delivery plan → feat(settings) (FOC-762, FOC-773, FOC-778, FOC-786) → feat(runtime) events/hooks/workflow → feat(sessions) P1a → feat(tools) P2 → feat(host) P1b → feat(insights) P3/P4 → feat(api) → feat(ui) → test lanes → docs. Working tree left clean except `.task-prompt.tmp.md` (deliberately not committed).
+
+- **Lane registry completed:** `runtime-hook.test.mjs` (parallel) and `runtime-workflow.test.mjs` (serial — spawns real `supervisor-spawn`/`supervisor-followup` children) registered in `scripts/test-lanes.json`; all 172 `scripts/*.test.mjs` accounted for, lane coverage gate green.
+- **Docs guards:** `docs/supervisor-e2e-checklist.md` count guard updated 152 → 172 (`docs-count-guard` green). ACCESS gained the task-workspace acceptance stack (4602).
+- **Correction to (31):** runtime-hook producer integration is CODED and committed — the 12:36–12:39 Atlas wave (`runtime-hook*`, `runtime-workflow*`) landed after (31) was written; its "still NOT delivered" note is superseded.
+- **Still open:** full Docker rebuild/redeploy + browser E2E acceptance (P1 acceptance condition), native worker MCP review/test.
+
+## 2026-10-14 (31) — Task workspaces P1–P4 code + wiring landed; acceptance pending (supersedes the in-progress snapshot in (30))
+
+Status consolidated here so no stale list conflicts with it. Plan checklist updated in place: `docs/plans/task-workspace-delivery.md` (integration + verification logs, 2026-10-14).
+
+- **Delivered (fenix-settings-keys, uncommitted):** P1 store/host/scoped API/UI — API isolation regressions 48/48; host recovery on OS process identity (Linux boot ID + start ticks, uncertain ownership reserves capacity) 17/17; workspace writer claims + common-git integration lock; UI history/isolation links (active owner wins, history generations read-only, board card cockpit links, `/` active tab; 30 helper tests + Vite build pass). P2 tool profiles (global/squad/role inheritance, revision CAS, launch snapshots) + all five real Thoughtmap tools verified. P3 runtime statistics — aggregation + routes + `/insights/runtime` screen, hand-calculated fixture tests. P4 local semantic task map — embedding cache + UMAP (seed 42) projection + routes + `/insights/map` screen. Explicit stopped-history resume through queue/cap: code + tests, **34 pass**.
+- **Real-model verifications:** GLM 5.3 Flash run in a native child process — OTLP interaction/model spans stored with task/session trace attribution, no prompt/tool content captured. Local task map on real Ollama `embeddinggemma`: cache digest `85462619ee721b466c5927d109d4cb765861907d5417b9109caebc4e614679f1`, UMAP seed 42 — 5 points fit, then a 6th transformed with the 5 old coordinates unchanged — **PASSED**.
+- **Test lanes:** 18 new backend `*.test.mjs` registered in `scripts/test-lanes.json` (task-workspace suites + `supervisor-watch`, `supervisor-launch`, `worker-tool-profiles`); 9 serial (sockets/process/env: `runtime-otel`, `task-cockpit-routes`, `task-map-routes`, `task-session-host`, `task-sessions`, `tool-profiles`, `tool-routes`, `workspace-claims`, `supervisor-watch`), 9 parallel. Lane coverage + static isolation audit green (`node scripts/test-run.mjs` inventory pass). Nav tests 24/24 — Insights pins `/insights/runtime` "Runtime statistics" and `/insights/map` "Task map".
+- **Docs count guards (reported, not changed — not owned):** `docs/supervisor-e2e-checklist.md` line 3 says **152 files**, actual **170** `scripts/*.test.mjs` (`scripts/docs-count-guard.test.mjs` fails until updated); the prose line near the end ("→ 116 files") reads stale too.
+- **Still NOT delivered:** runtime-hook producer integration (events/launch snapshots into supervisor/child/followup paths); full Docker rebuild/redeploy + browser E2E acceptance; native worker MCP review/test; final ACCESS.
+- **Active Atlas jobs:** hook `claude-606ac3`, watcher `claude-dd9312`. No commits made.
+
+## 2026-10-14 (30) — Task workspaces PRD APPROVED (P1–P4); delivery started (in progress)
+
+Mateusz approved the PRD (`docs/prd/task-workspace-supervisors-prd.md`, „zatwierdzam") — all phases P1–P4. PRD status updated to APPROVED 2026-10-14, implementation in progress; the planning-phase "awaiting approval" wording was removed (historical reference to the approval flow preserved). Execution plan with granular unchecked tasks and worker contracts: `docs/plans/task-workspace-delivery.md` (NEW).
+
+- [ ] P1 identity/coordinator (`scripts/task-sessions.mjs`: `createTaskSessionStore({dbPath,maxActive=2})` — ensure/get/getByTask/list/claimNext/update/close; fields `sessionId,taskKey,taskId,workspace,issueId,title,status,runId,pid,processStartedAt,createdAt,updatedAt,lastError`; safe `sup-` hex ids; default state `/data/supervisor/task-sessions.sqlite`; lifecycle `queued/starting/running/waiting/stopped/completed/failed`), task-scoped host, scoped API (`GET /api/supervisor/sessions`, `GET|POST /api/supervisor/sessions/:sessionId/{session,message,stop}`, `WS …/terminal`; host-mirrored routes under `/sessions/:id`; legacy global only when unambiguous), board home + labels, cockpit `/work/:taskKey/cockpit`, runtime events; task start binds immutable Linear issue identity.
+- [ ] P2 Manager/MCP/config snapshot; [ ] P3 metrics; [ ] P4 embedding projection/map; [ ] final Docker/build/browser verification — mocked first, real-provider separately.
+
+Worker policy: Flash only (`z-ai/glm-5.3-flash`) via Atlas; parent handles escalations. No production changes, no commits yet. Existing Settings diff preserved; CodeGraph stays UNKNOWN (direct bounded reads only). Lead will refine existing-route compatibility before the host worker starts.
+
+## 2026-10-14 (29) — Task workspaces / concurrent Supervisors PRD awaiting approval
+
+Planning checkpoint (docs only). PRD: `docs/prd/task-workspace-supervisors-prd.md` — status PLANNING, awaiting implementation approval. Recon checked against newer verified facts; three decisions confirmed with Mateusz: one active Supervisor per task (many tasks concurrently), the semantic task map stays in scope, and **Thoughtmap only** as the MCP integration — no second Jointhubs OS server, Google Workspace out of scope. Mock context recorded accurately (4601 = isolated Settings acceptance, not production). Phased delivery: P1 two-task runtime first, then P2 tool config, P3 metrics, P4 map. No implementation, no commits, no production changes — documentation only.
+
+Proposed doc checkpoint (not staged, not committed): `docs(plan): define task workspaces, concurrent supervisors and observability` — the new PRD plus only this (29) STATE hunk, separate from the existing uncommitted Settings changes.
+
+CodeGraph had no worktree index (UNKNOWN); direct source reads were used as fallback for recon.
+
+## 2026-10-14 (28) — Settings recovered and verified locally (FOC-773/778/786 + FOC-762)
+
+Worktree: `C:\Users\mateu\Documents\GitHub\la-wt-mateusz\fenix-settings-keys`, branch `fenix-settings-keys`. Changes are uncommitted; do not work in the older main checkout for this package. Delivery orchestration used Atlas GLM 5.3 Flash; the lead handled escalation and integration directly.
+
+- [x] Recovered all prior Claude worker output and completed integration fixes: fresh provider/key/model on spawn, fail-closed missing key, preserved project metadata and correct first user-map writes, transactional provider setup, correct UI selection and Supervisor priority, recorded benchmark data, honest leak-scan failures.
+- [x] Backend coverage: all 152 files verified across full Windows/Linux runs and focused reruns of corrected failures. Windows Supervisor group: 32/32; Settings API: 166 assertions; Settings UI: 38 tests plus full UI suite/build; lint clean. Exact run history is in `docs/plans/fenix-settings-keys.md`.
+- [x] Docker rebuild/redeploy on isolated `fenix-settings-acceptance`; 23/23 API scenarios, real mock-child spawn with fresh mounted key/endpoint/routing, six canaries clean including a positive leak-detection control.
+- [x] Browser coverage of every Settings tab, clone/unmap and unpriced routing apply/reset; no console errors. Preview: http://127.0.0.1:4601/settings/keys. Test credentials only; model calls disabled.
+- [x] ACCESS/QUICKSTART/plan updated; commit batches proposed. No commits, push or production VM changes.
+
+Resume cheaply: read the plan's Delivery status and `docs/ACCESS.md` (Settings acceptance stack). Local stack config/secrets/fixtures are ignored under `.fenix/acceptance/`; runtime data is the separate `fenix-settings-acceptance_fenix-data` volume. The full logs for this delivery are in the host temp directory as `settings-delivery-*.log`. CodeGraph had no worktree index (UNKNOWN); direct-source review was used.
+
 ## 2026-10-09 (27) — FOC-733 WYLĄDOWANY (`4bc5bc2`) · ACCEPT 115/115 + 116/116 · decyzja A (reguła wiąże) · granica przyrządu zapisana · run 2 (FOC-236) startuje na niej
 
 **Runda Q1-B + Q2-B na `foc-733-dev` (dwa commity).** `a37963e` kod: `>` w klasie terminatorów —
@@ -3674,3 +3809,6 @@ zostaje rozliczenie osi kosztu). Tor B (M8) rusza, gdy tor A stanie: FOC-760+761
 775, 777, 781 — osobna sesja, leci przez PR.
 
 **Push robi Mateusz.**
+
+#### Task workspace integration checkpoint (2026-10-14)
+P1–P4 code and wiring delivered in fenix-settings-keys (status consolidated in entry (31) above). API isolation regressions 48/48; host recovery on OS process identity 17/17; workspace claims + integration lock; UI history/isolation links; P2 tool profiles + all five real Thoughtmap tools; P3 runtime statistics (`/insights/runtime`) and P4 local task map (`/insights/map`); explicit stopped-history resume through queue/cap — 34 tests pass. Real-model probes: GLM Flash native-child OTLP trace attribution; local Ollama `embeddinggemma` map PASSED (digest `85462619ee721b466c5927d109d4cb765861907d5417b9109caebc4e614679f1`). Test lanes: 18 new backend suites registered, lane inventory + audit green; nav 24/24. Outstanding: runtime-hook producer integration, full Docker rebuild/redeploy + browser E2E acceptance, native worker MCP review/test, final ACCESS. Active Atlas jobs: hook `claude-606ac3`, watcher `claude-dd9312`. No commits made. See docs/plans/task-workspace-delivery.md.

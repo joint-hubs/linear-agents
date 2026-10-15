@@ -31,12 +31,23 @@
 //   · no system/init arrives within 30 s (a child with no session_id is not resumable)
 
 import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import {
+  actorIdFor,
+  attemptIdFor,
+  launchDirFor,
+  prepareAgentLaunch,
+} from "./agent-launch-profile.mjs";
+import { isRuntimeToken } from "./runtime-events.mjs";
+
 import { buildBranchName } from "./dev-branch.mjs";
-import { squadConfigDir } from "./fenix-paths.mjs";
+import { settingsPath, squadConfigDir } from "./fenix-paths.mjs";
+import { childModelFor, childProviderEnv } from "./child-model.mjs";
+import { readSettings } from "./fenix-settings.mjs";
 import { ensureCodegraphReady } from "./codegraph-runtime.mjs";
 import { approveGuardedCodegraphForProject } from "./mcp-enable.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
@@ -66,6 +77,7 @@ import {
   readJsonOr,
   readRegistry,
   resolveGitRoot,
+  runDir,
   teeAbsPath,
   teeRelPath,
   triagePath,
@@ -222,6 +234,29 @@ if (!existsSync(triagePath(runId))) {
 ensureRunDir(runId);
 const registry = readRegistry(runId);
 
+// ── the child id is decided BEFORE the branch name ───────────────────────────
+// The branch for this attempt is made unique per run:child (the attempt hash
+// below), so the id has to exist first. An EXPLICIT --child that already sits
+// in the registry is a refusal, never an overwrite — a duplicated child id
+// would silently orphan the first child's session, settings and worktree
+// claim. A bare `--child` without a value parses as boolean `true` and is
+// refused the same way every other value-taking flag here is.
+const explicitChild = args.child ?? null;
+if (explicitChild === true) {
+  failJson(`--child needs a value — a missing value is not a child id`);
+}
+if (explicitChild && registry.children[explicitChild]) {
+  failJson(
+    `child "${explicitChild}" already exists in run ${runId} — refusing to overwrite it: duplicate-child-id`,
+    {
+      reason: "duplicate-child-id",
+      childId: explicitChild,
+      existing: { squad: registry.children[explicitChild].squad, taskId: registry.children[explicitChild].taskId },
+    },
+  );
+}
+const childId = explicitChild || `${squad}-${Object.keys(registry.children).length + 1}`;
+
 // ── semaphore + backpressure (FOC-161) ───────────────────────────────────────
 // Replaces the one-live-child constant. Limits come from config/graph.json, and
 // a spawn that cannot start now is HELD rather than refused: the request is
@@ -359,7 +394,20 @@ if (!gitRoot) {
     },
   );
 }
-const branch = buildBranchName(taskId, args.slug || squad, undefined);
+// Every spawn is a NEW attempt and owns its branch: the managed branch name
+// carries a stable 12-hex hash of `runId:childId`, so two attempts of the same
+// task never share a branch — and therefore never share a worktree, which is
+// what the claims registry (the ownerId passed to ensureWorktree below) then
+// vouches for. The hash is stable, so a retry of the same child id in the same
+// run resolves to the SAME branch and reuses its own worktree; a new child id
+// (a new attempt) gets a new one. Shared-branch reuse ACROSS runs is gone by
+// design: the owner of `foc-123-dev` is now the attempt, not the task slug.
+const dependencyChildren = typeof args['after-child'] === 'string' ? args['after-child'].split(',').map(x=>x.trim()).filter(Boolean) : [];
+const dependencyAttempts = dependencyChildren.map(id => { const source=registry.children?.[id];if(!source?.attemptId)failJson('unknown dependency child or attempt: '+id);return source.attemptId; });
+
+const baseBranch = buildBranchName(taskId, args.slug || squad, undefined);
+const attemptHash = createHash("sha256").update(`${runId}:${childId}`).digest("hex").slice(0, 12);
+const branch = `${baseBranch}-${attemptHash}`;
 
 // ── --candidate (FOC-406): pin the worktree at the DEV candidate ─────────────
 // REVIEW/TEST verify a candidate DEV produced; without this flag their worktree
@@ -440,7 +488,10 @@ if (hasCandidate) {
 
 let worktree;
 try {
-  worktree = ensureWorktree(gitRoot, branch, candidateSha);
+  // P1 resource ownership: the workspace is claimed for THIS attempt, so no
+  // other run (or CLI operator) can receive the same branch workspace while
+  // this child holds it.
+  worktree = ensureWorktree(gitRoot, branch, candidateSha, { ownerId: `${runId}:${childId}` });
 } catch (err) {
   failJson(`could not prepare a worktree for ${branch}: ${err.message}`, { gitRoot });
 }
@@ -536,7 +587,7 @@ if (referencedFiles.length) {
 // index, never per question — and only for a worktree THIS spawn owns.
 const CODEGRAPH_LAUNCH_TIMEOUT_MS = 30_000;
 
-function prepareCodegraphLaunchReadiness(worktreeRoot, squad) {
+function prepareCodegraphLaunchReadiness(worktreeRoot, squad, configDir = null) {
   // Test/offline seam: the mock-children suites spawn against fixture repos,
   // and `initialize: true` would index them for real. The seam skips the
   // preflight entirely and reports itself as skipped — a skipped check is a
@@ -580,9 +631,11 @@ function prepareCodegraphLaunchReadiness(worktreeRoot, squad) {
     mcp = approveGuardedCodegraphForProject({
       squad,
       projectRoot: worktreeRoot,
-      ...(process.env.LA_SUPERVISOR_MCP_CONFIG_DIR
-        ? { configDir: process.env.LA_SUPERVISOR_MCP_CONFIG_DIR }
-        : {}),
+      // The child's CLAUDE_CONFIG_DIR is now THIS launch dir (agent-launch-
+      // profile), so the approval must land where the child will actually read
+      // it — not in the shared squad dir the child no longer points at. The
+      // explicit env override keeps its precedence for tests and the container.
+      configDir: process.env.LA_SUPERVISOR_MCP_CONFIG_DIR ?? configDir,
     });
   } catch (err) {
     mcp = { ok: false, written: false, reason: `mcp-approval-error: ${String(err?.message ?? err).split("\n")[0]}` };
@@ -627,13 +680,55 @@ function codegraphKickoffBlock(codegraph) {
   return lines.join("\n");
 }
 
-const codegraph = prepareCodegraphLaunchReadiness(worktree.worktree, squad);
+// ── the launch: an owned config dir per run/child/turn ───────────────────────
+// The child no longer points CLAUDE_CONFIG_DIR at the SHARED squad dir. Every
+// turn gets its own launch dir (runDir/launch/<child>/turn-<n>), assembled by
+// agent-launch-profile.mjs from bounded, known sources: the squad's CLAUDE.md,
+// settings.json, agents/ and skills/ — never the shared projects/ history and
+// never auth. The tool-profile snapshot (registry revision + resolved tools,
+// snapshot.json + mcp.json) lands in the same dir, and the lead's CLI args
+// (--tools builtins only, --disallowedTools for the unselected thoughtmap
+// tools, --mcp-config for the profile's servers) are recorded so the next
+// process runs on the profile that was captured, not whatever is on disk now.
+//
+// Provider keys are NOT part of this layer: they resolve FRESH per spawn below
+// (childProviderEnv) and travel in env only — never persisted into the launch
+// dir. The OTel resource identity is attached only when the SUPERVISOR session
+// id is present and a valid runtime token (FENIX_SUPERVISOR_SESSION_ID); a
+// legacy flow — no session id — gets no telemetry env and behaves exactly as
+// before. A half-valid identity is dropped to that same legacy shape, never
+// guessed into a valid one.
+const launchTurn = 0;
+const supervisorSessionId = process.env.FENIX_SUPERVISOR_SESSION_ID || null;
+const telemetryContext = (() => {
+  if (!supervisorSessionId || !isRuntimeToken(supervisorSessionId)) return null;
+  const wanted = {
+    taskKey: taskId,
+    supervisorSessionId,
+    workflowRunId: runId,
+    attemptId: attemptIdFor(childId, launchTurn),
+    actorId: actorIdFor(runId, childId),
+    role: "squadlead",
+  };
+  const valid = Object.values(wanted).every((value) => isRuntimeToken(value));
+  return valid ? wanted : null;
+})();
+const launch = prepareAgentLaunch({
+  squad,
+  role: "lead",
+  outputDir: launchDirFor(runDir(runId), childId, launchTurn),
+  env: process.env,
+  context: telemetryContext,
+});
+
+const codegraph = prepareCodegraphLaunchReadiness(worktree.worktree, squad, launch.configDir);
 codegraph.kickoff = codegraphKickoffBlock(codegraph);
 
 // ── registry entry, written BEFORE the watcher starts ────────────────────────
 // Single-writer discipline: spawn owns the entry until the watcher launches,
 // and the watcher owns it afterwards. Nothing writes it concurrently.
-const childId = args.child || `${squad}-${Object.keys(registry.children).length + 1}`;
+// (`childId` is decided up top, before the branch name — this attempt's branch
+// carries the run:child hash.)
 
 // allowedPaths is a DECLARATION, recorded for audit and for the merge node's
 // conflict detection (FOC-160). It is not enforced — nothing stops a child
@@ -663,22 +758,71 @@ const extraSettings = args.settings ? readJsonOr(args.settings, {}) : {};
 const childSettings = childSettingsPath(runId, childId);
 atomicWriteJSON(childSettings, buildChildSettings(squadSettings, extraSettings));
 
-// ── the model the child will actually run on ─────────────────────────────────
-// Without --model the child does not run on "no model": claude inherits
-// ANTHROPIC_MODEL from this process, and bin/supervisor.bat sets that to the
-// SUPERVISOR's own model. Run a93f (2026-09-12) put dev-1, dev-5, test-9 and
-// test-16 on deepseek-v4.1-flash that way while the registry said `model: null`
-// and the squads are routed to glm-5.3-flash. Recording the inherited id keeps
-// the registry truthful, and pins resumed turns to it — followup replays
-// entry.model, so a Supervisor restarted on a different model can no longer
-// silently switch a half-finished child.
-const inheritedModel = process.env.ANTHROPIC_MODEL || null;
-const childModel = args.model && args.model !== true ? String(args.model) : inheritedModel;
-const modelSource = args.model && args.model !== true ? "--model" : inheritedModel ? "inherited:ANTHROPIC_MODEL" : null;
+// ── the model the child will actually run on (FOC-762/FOC-773) ───────────────
+// The child's model is DECIDED here, never inherited: the old logic fell back
+// to this process's ANTHROPIC_MODEL — the Supervisor's own model — and run a93f
+// (2026-09-12) put dev-1, dev-5, test-9 and test-16 on deepseek-v4.1-flash that
+// way while the registry said `model: null`. The precedence lives in
+// child-model.mjs: --model > settings overlay routing.<squad>.lead > models.json
+// routing for the squad > the provider's defaultModel. A routing change made in
+// Settings (FOC-786 AC1) is therefore effective on the next spawn.
+//
+// The provider environment is resolved FRESH at spawn time for the same reason:
+// a provider switch in the overlay must reach the next child without a
+// Supervisor restart. Resolution failure refuses the spawn — fail closed, a
+// child on a half-resolved provider (right base URL, wrong key, or no key at
+// all) is worse than no child.
+const providerEnv = childProviderEnv();
+if (providerEnv.error) {
+  failJson(`provider resolution failed — refusing the spawn: ${providerEnv.error}`, {
+    reason: "provider-resolution-failed",
+  });
+}
+
+const settings = (() => {
+  try {
+    return readSettings({ path: settingsPath() });
+  } catch (err) {
+    failJson(`settings overlay is unreadable — refusing the spawn: ${err.message.split("\n")[0]}`, {
+      reason: "settings-unreadable",
+      settings: settingsPath(),
+    });
+  }
+})();
+
+// Parsed models.json: the routing table and the provider entries (for
+// defaultModel). A missing or unreadable file degrades to null — childModelFor
+// then falls through to the provider default, exactly as with no routing rows.
+const modelsConfig = (() => {
+  const path = process.env.LA_PROVIDER_CONFIG || join(ROOT, "config", "models.json");
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+})();
+
+const providerName = providerEnv.LA_PROVIDER ?? null;
+// The provider entry for defaultModel: models.json for built-in providers; the
+// overlay's custom block when the active provider is not one of them.
+const providerEntry =
+  modelsConfig?.providers?.[providerName] ??
+  (settings?.provider?.custom ? { defaultModel: settings.provider.custom.defaultModel ?? null } : null);
+
+const modelPick = childModelFor({
+  squad,
+  explicitModel: args.model && args.model !== true ? String(args.model) : null,
+  settings,
+  modelsConfig,
+  provider: providerName,
+  providerEntry,
+});
+const childModel = modelPick.model;
+const modelSource = modelPick.source;
 if (modelSource !== "--model") {
   console.error(
-    `[spawn] no --model: ${childId} inherits ANTHROPIC_MODEL=${inheritedModel ?? "(unset)"} from the Supervisor's ` +
-      `environment — pass --model to choose the squad's model explicitly`,
+    `[spawn] no --model: ${childId} runs on ${childModel ?? "(no model configured)"} ` +
+      `(source: ${modelSource ?? "none"}) — set routing.${squad}.lead in the settings overlay or pass --model`,
   );
 }
 
@@ -699,6 +843,11 @@ registry.children[childId] = {
   settings: childSettings,
   model: childModel,
   modelSource,
+  // FOC-762/FOC-773: the provider this child was resolved against, so a
+  // follow-up turn rebuilds the SAME provider env even after the active
+  // provider moved on in the settings overlay — the pinned model must not run
+  // on a different provider's endpoint than the turn that started it.
+  provider: providerName,
   worktree: worktree.worktree,
   branch: worktree.branch,
   baseRevision: worktree.baseRevision,
@@ -720,6 +869,29 @@ registry.children[childId] = {
   // a later reader can see what the child was told without the temp prompt
   // file, which does not survive the machine.
   codegraph,
+  // ── launch identity (task-workspace PRD §7) ────────────────────────────────
+  // taskKey/supervisorSessionId/actorId/attemptId/toolProfileRevision/
+  // launchConfigDir are the fields followup must PRESERVE (or derive in the
+  // same way). actorId is stable for the child's whole life; attemptId is
+  // per-turn (`childId:turn:<n>`); supervisorSessionId is null in legacy flows
+  // (no valid FENIX_SUPERVISOR_SESSION_ID) and stays null through follow-ups.
+  taskKey: taskId,
+  supervisorSessionId,
+  actorId: actorIdFor(runId, childId),
+  attemptId: attemptIdFor(childId, launchTurn),
+  toolProfileRevision: launch.profile.revision,
+  launchConfigDir: launch.configDir,
+  // What THIS launch captured: the CLI args and the profile diff against the
+  // prior safe snapshot. Recorded and reported — never an extra approval gate:
+  // the user's Settings apply already authorized the next process.
+  launch: {
+    cliArgs: launch.cliArgs,
+    changes: launch.changes,
+    profileInitial: launch.profileInitial,
+    copied: launch.copied.length,
+    skipped: launch.skipped,
+    history: launch.history,
+  },
 };
 writeRegistry(runId, registry);
 
@@ -819,15 +991,39 @@ const watcherArgs = [
 ];
 if (args.model) watcherArgs.push("--model", args.model);
 if (telemetryRunId) watcherArgs.push("--telemetry-run", telemetryRunId);
+// The launch profile's CLI args (--tools / --disallowedTools / --mcp-config),
+// JSON-encoded as one flag. The watcher owns the claude command line; until it
+// consumes this channel the args stay recorded in the registry entry and the
+// launch result, so the captured profile is never lost.
+watcherArgs.push("--claude-args", JSON.stringify(launch.cliArgs));
 
 const childEnv = {
   ...process.env,
+  // FOC-762/FOC-773: the FRESH provider resolution (base URL, auth var, the
+  // inactive auth var cleared, tier vars, LA_PROVIDER). Spread BEFORE the
+  // overrides below so a provider change in the settings overlay is effective
+  // on this very spawn, while RUN_ID/LA_SUPERVISOR_* keep the last word.
+  ...providerEnv,
+  // FOC-762: the model chosen above rides ANTHROPIC_MODEL — the same channel
+  // the old (removed) Supervisor inheritance used — so the child actually runs
+  // on the routing decision, not just records it. Followup already replays
+  // entry.model as --model, so resumed turns stay pinned to it.
+  ...(childModel ? { ANTHROPIC_MODEL: childModel } : {}),
   // FOC-522: the finite background-wait ceiling. The CLI default (600 s) sits
   // below our full suite, and turn teardown kills whatever is still running —
   // see the rationale at PRINT_BG_WAIT_CEILING_MS in supervisor-lib.mjs. Built
   // through the helper so the value has exactly one source.
   ...printBgWaitCeilingEnv(),
-  CLAUDE_CONFIG_DIR: squadConfigDir(squad),
+  // The launch-owned config dir assembled above — this child's own copy of the
+  // squad sources plus this turn's tool-profile snapshot — no longer the
+  // shared squad dir.
+  CLAUDE_CONFIG_DIR: launch.configDir,
+  // The launch env: the thoughtmap MCP server env (URLs and paths only) plus,
+  // when a valid supervisor session id was present, the OTel resource identity.
+  ...launch.env,
+  FENIX_STAGE: squad,
+  FENIX_DEPENDS_ON_ATTEMPTS: JSON.stringify(dependencyAttempts),
+  FENIX_RUNTIME_RETURN: "",
   LA_SUPERVISOR: "1",
   LA_SUPERVISOR_RUN: runId,
   LA_SUPERVISOR_CHILD: childId,
@@ -959,6 +1155,17 @@ console.log(
       // navigation path the child actually has — ready, degraded (Read/Grep
       // sanctioned) or skipped — instead of the child discovering it mid-turn.
       codegraph,
+      // The launch record: where this turn's config dir lives, what CLI args
+      // and tool-profile revision it captured, and the diff against the prior
+      // safe snapshot. Metadata for the log, not a gate — the user's Settings
+      // apply already authorized the next process.
+      launch: {
+        configDir: launch.configDir,
+        cliArgs: launch.cliArgs,
+        toolProfileRevision: launch.profile.revision,
+        changes: launch.changes,
+        profileInitial: launch.profileInitial,
+      },
       // FOC-769: the focus this spawn declared (absent when skipped as not a
       // ticket / not a run id), and the focus failure that did NOT fail the
       // spawn, if there was one.

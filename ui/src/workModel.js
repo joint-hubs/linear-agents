@@ -149,7 +149,8 @@ export function panelCostLabel(detail) {
 // cardModel(ticket, now) -> the board card's view model. cost is "no cost
 // yet" for Ready (nothing priced yet — no fake zero), "cost unknown" when the
 // payload carries children but no cost, money text otherwise (formatMoney,
-// = the CLI).
+// = the CLI). labels is the normalized Linear label list (empty when the
+// payload has none — never a placeholder chip).
 export function cardModel(ticket, now) {
   const t = ticket || {};
   const stage = STAGE_KEYS.includes(t.stage) ? t.stage : null;
@@ -170,6 +171,7 @@ export function cardModel(ticket, now) {
     id: t.taskId || null,
     title: t.title || '',
     stageLabel: stage ? STAGE_LABELS[stage] : null,
+    labels: ticketLabels(t.labels),
     rounds,
     cost,
     flags,
@@ -232,25 +234,74 @@ export function reconciliationText(rec) {
   return text;
 }
 
-// ===== Board filters (Ready column: milestone / priority, plan Q1) ==========
+// ===== Board filters (Ready column: milestone / priority / label, plan Q1) ==
 
-// filtersFromQuery(search) -> { milestone, priority } from the location
+// filtersFromQuery(search) -> { milestone, priority, label } from the location
 // search ("?" optional). Absent/empty values are null, not "".
 export function filtersFromQuery(search) {
   const p = new URLSearchParams(search || '');
-  return { milestone: p.get('milestone') || null, priority: p.get('priority') || null };
+  return {
+    milestone: p.get('milestone') || null,
+    priority: p.get('priority') || null,
+    label: p.get('label') || null,
+  };
 }
 
 // queryFromFilters(filters) -> the search string for the filters ("?"-prefixed,
-// stable order milestone then priority as the payload documents). No values ->
-// "" so the URL stays clean.
+// stable order milestone then priority then label). No values -> "" so the URL
+// stays clean.
 export function queryFromFilters(filters) {
   const f = filters || {};
   const p = new URLSearchParams();
   if (f.milestone) p.set('milestone', f.milestone);
   if (f.priority) p.set('priority', f.priority);
+  if (f.label) p.set('label', f.label);
   const s = p.toString();
   return s ? '?' + s : '';
+}
+
+// ===== Linear labels (task contract: { id, name, color } only) ==============
+
+// Only a hex form may style the chip's dot (#rgb/#rgba/#rrggbb/#rrggbbaa) —
+// the same rule the backend's normalizeLabel applies, re-checked client side
+// so the payload can never smuggle an arbitrary string into a style.
+const LABEL_COLOR_RE = /^#[0-9a-fA-F]{3,4}$|^#[0-9a-fA-F]{6}$|^#[0-9a-fA-F]{8}$/;
+
+// ticketLabels(labels) -> the card/panel's label list: { id, name, color }
+// entries, a label without a name dropped, color kept only when it validates,
+// id kept only when it is a non-empty string, capped at 20 (the payload's own
+// cap). Non-array input -> [] so an absent field renders as "no labels".
+export function ticketLabels(labels) {
+  if (!Array.isArray(labels)) return [];
+  const out = [];
+  for (const raw of labels) {
+    if (out.length >= 20) break;
+    if (typeof raw === 'string') {
+      const name = raw.trim();
+      if (name) out.push({ id: null, name, color: null });
+      continue;
+    }
+    if (!raw || typeof raw !== 'object') continue;
+    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+    if (!name) continue;
+    out.push({
+      id: typeof raw.id === 'string' && raw.id.trim() ? raw.id : null,
+      name,
+      color: typeof raw.color === 'string' && LABEL_COLOR_RE.test(raw.color) ? raw.color : null,
+    });
+  }
+  return out;
+}
+
+// labelNames(tickets) -> distinct, sorted label names across the board's
+// tickets — the values the label filter select offers (the board offers what
+// it can actually see, the same rule as the milestone/priority selects).
+export function labelNames(tickets) {
+  const out = new Set();
+  for (const t of tickets || []) {
+    for (const l of ticketLabels(t && t.labels)) out.add(l.name);
+  }
+  return [...out].sort();
 }
 
 // ===== Start dialog (plan FOC-784: confirm before the hand-off) =============
@@ -294,4 +345,79 @@ export function startDialogModel(preview, { sending, result, error, loading } = 
     disabledReason,
     resultText,
   };
+}
+
+// ===== Publish dialog (FOC-788: confirm before push / open PR) ==============
+
+// publishDialogModel(preview, action, { sending, result, error, loading }) ->
+// the Push branch / Open PR confirm dialog's view model. preview is the
+// publish-preview payload ({ ticket, action, checkout, diff, checks,
+// confirmToken }); result is the POST .../push|pr answer ({ ok, action, actor,
+// head, prUrl? }). AC-2 in view form: checksFailed drives the dialog to show
+// the checks state FIRST and prominently when anything failed — shown, never
+// hard-blocking (the AC says shown, not blocked; the human decides).
+// `error` is a message string or an Error carrying .data (the API's error
+// name/detail ride there) — every failure is spelled out by name, never a
+// bare failure, and stale-preview additionally offers a refresh.
+export function publishDialogModel(preview, action, { sending, result, error, loading } = {}) {
+  const p = preview || null;
+  const a = action === 'pr' ? 'pr' : 'push';
+  const checkout = (p && p.checkout) || null;
+  const diff = (p && p.diff) || null;
+  const checks = (p && p.checks) || null;
+  const failing = checks && Array.isArray(checks.failing) ? checks.failing : [];
+
+  let disabled = false;
+  let disabledReason = null;
+  if (!p) {
+    disabled = true;
+    disabledReason = loading ? 'Loading…' : 'No checkout — nothing to publish.';
+  } else if (sending) {
+    disabled = true;
+    disabledReason = a === 'pr' ? 'Opening…' : 'Pushing…';
+  } else if (result && result.ok) {
+    disabled = true;
+    disabledReason = 'Already done.';
+  }
+
+  let resultText = null;
+  if (error) resultText = publishErrorText(error);
+  else if (result && result.ok) {
+    resultText = a === 'pr'
+      ? 'PR opened' + (result.prUrl ? ': ' + result.prUrl : '')
+      : 'Pushed ' + String(result.head || '').slice(0, 7);
+  }
+
+  return {
+    title: a === 'pr' ? 'Open a pull request' : 'Push the task branch',
+    primaryLabel: a === 'pr' ? 'Open PR' : 'Push branch',
+    branchText: checkout ? checkout.branch : null,
+    // push goes to the remote, a PR to the base branch (decision 1: main).
+    targetText: !checkout ? null : a === 'pr' ? String(checkout.base || 'main') : String(checkout.remote || 'origin'),
+    diffText: diff
+      ? `${diff.commits ?? 0} commit(s), ${diff.files ?? 0} file(s), +${diff.insertions ?? 0}/-${diff.deletions ?? 0}`
+        + (diff.dirty ? ' · uncommitted changes in the worktree (not pushed)' : '')
+      : null,
+    checksFailed: failing.length > 0,
+    checksLines: failing.map((v) => `round ${v.round}: FAIL`),
+    checksLatest: checks ? checks.latest : null,
+    actorText: 'You',
+    disabled,
+    disabledReason,
+    resultText,
+    stale: Boolean(error && error.data && error.data.error === 'stale-preview'),
+  };
+}
+
+// Every publish failure is spelled out by its contract name (plan §5):
+// no-checkout, stale-preview, push-refused, pr-failed — with the scrubbed
+// detail when the server sent one.
+function publishErrorText(error) {
+  const name = (error && error.data && error.data.error) || null;
+  const detail = (error && error.data && error.data.detail) || null;
+  if (name === 'no-checkout') return 'No checkout for this ticket — nothing to publish.';
+  if (name === 'stale-preview') return 'The checkout changed since the preview — preview again.';
+  if (name === 'push-refused') return 'Push refused: ' + (detail || 'git did not accept the push.');
+  if (name === 'pr-failed') return 'Could not open the PR: ' + (detail || 'the API refused.');
+  return typeof error === 'string' ? error : ((error && error.message) || 'Publish failed.');
 }

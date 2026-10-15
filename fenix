@@ -24,7 +24,8 @@ Usage: fenix [command]
   down             stop and remove containers (the data volume is kept)
   logs [service]   follow logs (default: all services)
   doctor           host preflight plus in-container diagnostics
-  keys             run the key wizard (enter or replace API keys)
+  keys [name]      run the key wizard (no argument) or rotate one key:
+                   openrouter | provider | linear | github
   attach [--new]   open the Supervisor (Ctrl-b d detaches; it keeps running in the container)
   shell [service]  open a shell in a service (default: fenix-supervisor)
   repo add <url|owner/name> [--project <Linear project>]
@@ -158,27 +159,57 @@ read_secret() {
   REPLY_SECRET="$k"
 }
 
-validate_key() {
-  # $1 = kind, $2 = key; prints the HTTP status code. Key is passed as a
-  # header argument only, never in a URL, and is never printed.
-  case "$1" in
-    openrouter)
-      curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $2" https://openrouter.ai/api/v1/key
-      ;;
-    linear)
-      curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" -H "Authorization: $2" --data '{"query":"{ viewer { id } }"}' https://api.linear.app/graphql
-      ;;
-    github)
-      curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $2" https://api.github.com/user
-      ;;
-  esac
+in_container_node() {
+  # Run `node <script>` inside the fenix-api image (repo baked at /opt/fenix).
+  # stdin passes through, so keys travel ONLY via stdin — never argv/env of a
+  # docker command line. Builds the image first when it is missing.
+  script="$1"
+  shift
+  if ! docker image inspect fenix:dev >/dev/null 2>&1; then
+    printf 'Building the image first...\n'
+    docker compose build fenix-api
+  fi
+  docker compose run --rm --no-deps -T --entrypoint node fenix-api "/opt/fenix/$script" "$@"
+}
+
+check_key() {
+  # $1 = kind, $2 = key; remaining args are key-check.mjs flags. Pipes the key
+  # on stdin into the in-container check (the ONE validation implementation)
+  # and prints "ok" plus any scopes/warning lines, or "rejected: <reason>".
+  kind="$1"
+  keyval="$2"
+  shift 2
+  rc=0
+  line=$(printf '%s' "$keyval" | in_container_node scripts/key-check.mjs "$kind" "$@") || rc=$?
+  if [ "$rc" = "2" ]; then
+    printf 'rejected: key check usage error (see stderr)\n'
+    return 1
+  fi
+  okv=$(printf '%s' "$line" | sed -n 's/.*"ok"[[:space:]]*:[[:space:]]*\([a-z]*\).*/\1/p')
+  if [ "$okv" = "true" ]; then
+    printf 'ok\n'
+    scopes=$(printf '%s' "$line" | sed -n 's/.*"scopes"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' | sed 's/","/", /g')
+    if [ -n "$scopes" ]; then
+      printf 'Scopes: %s\n' "$scopes"
+    fi
+    warn=$(printf '%s' "$line" | sed -n 's/.*"warning"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    if [ -n "$warn" ]; then
+      printf 'WARN %s\n' "$warn"
+    fi
+    return 0
+  fi
+  reason=$(printf '%s' "$line" | sed -n 's/.*"reason"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  printf 'rejected: %s\n' "${reason:-unknown}"
+  return 1
 }
 
 get_one_key() {
-  # $1 = display name, $2 = kind, $3 = target file. Max 3 tries, then exit 5.
+  # $1 = display name, $2 = kind, $3 = target file, $4.. key-check flags.
+  # Max 3 tries, then exit 5.
   name="$1"
   kind="$2"
   target="$3"
+  shift 3
 
   if [ -f "$target" ] && [ -s "$target" ]; then
     printf '%s already exists (%s).\nOverwrite? [y/N] ' "$name" "$target"
@@ -187,8 +218,25 @@ get_one_key() {
     case "$ans" in
       y|Y|yes|Yes|YES) ;;
       *)
-        printf 'Keeping the existing %s.\n' "$name"
-        return 0
+        if [ "${VALIDATE_STORED:-0}" != "1" ]; then
+          printf 'Keeping the existing %s.\n' "$name"
+          return 0
+        fi
+        # The stored key must still work for the CURRENT candidate (the flags
+        # name the provider/endpoint) — not for whatever it was saved for.
+        storedkey=$(cat "$target" 2>/dev/null) || storedkey=""
+        out=$(check_key "$kind" "$storedkey" "$@") || true
+        case "$out" in
+          ok*)
+            printf '%s\n' "$out"
+            printf 'OK  the stored %s works for this choice.\n' "$name"
+            return 0
+            ;;
+          *)
+            printf 'FAIL the stored %s does not work with this choice: %s\n' "$name" "$out"
+            printf 'Enter a new key (Ctrl-C cancels).\n'
+            ;;
+        esac
         ;;
     esac
   fi
@@ -202,16 +250,17 @@ get_one_key() {
       printf 'FAIL %s key empty — try again.\n' "$name"
       continue
     fi
-    if command -v curl >/dev/null 2>&1; then
-      code=$(validate_key "$kind" "$k")
-      if [ "$code" != "200" ]; then
-        printf 'FAIL %s key rejected (HTTP %s)\n' "$name" "$code"
+    out=$(check_key "$kind" "$k" "$@") || true
+    case "$out" in
+      ok*)
+        printf '%s\n' "$out"
+        printf 'OK  %s key validated.\n' "$name"
+        ;;
+      *)
+        printf 'FAIL %s key %s\n' "$name" "$out"
         continue
-      fi
-      printf 'OK  %s key validated.\n' "$name"
-    else
-      printf 'WARN cannot validate (curl missing)\n'
-    fi
+        ;;
+    esac
     printf '%s' "$k" > "$target"
     chmod 600 "$target" 2>/dev/null || true
     unset k
@@ -239,17 +288,129 @@ write_env_line() {
   fi
 }
 
-key_wizard() {
-  mkdir -p "$SECRET_DIR"
-  umask 077
-  trap restore_tty EXIT
-  trap 'restore_tty; exit 130' INT
-  trap 'restore_tty; exit 143' TERM
+esc_json() {
+  # Escape a string for embedding inside a printf-built JSON literal.
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
 
-  get_one_key "OpenRouter API key" openrouter "$SECRET_DIR/openrouter_api_key"
-  get_one_key "Linear API key" linear "$SECRET_DIR/linear_api_key"
-  get_one_key "GitHub token" github "$SECRET_DIR/github_token"
+settings_get() {
+  # $1 = dotted path; prints the string value or nothing. The overlay lives at
+  # /fenix-config/settings.json in Docker (= host .fenix/config/settings.json).
+  in_container_node scripts/fenix-settings.mjs get "$1" 2>/dev/null || true
+}
 
+settings_set() {
+  # $1 = dotted path, $2 = JSON-encoded value; exits non-zero on rejection.
+  in_container_node scripts/fenix-settings.mjs set "$1" "$2"
+}
+
+commit_provider() {
+  # Validate the complete overlay before asking for or replacing any key.
+  provider_target="$1"
+  provider_patch="$2"
+  shift 2
+  in_container_node scripts/fenix-settings.mjs validate provider "$provider_patch"
+  provider_had_secret=0
+  provider_old_secret=""
+  if [ -f "$provider_target" ]; then
+    provider_had_secret=1
+    provider_old_secret=$(cat "$provider_target")
+  fi
+  provider_display="$1"
+  shift
+  get_one_key "$provider_display" provider "$provider_target" "$@"
+  if ! settings_set provider "$provider_patch"; then
+    if [ "$provider_had_secret" = "1" ]; then
+      printf '%s' "$provider_old_secret" > "$provider_target"
+      chmod 600 "$provider_target" 2>/dev/null || true
+    else
+      rm -f -- "$provider_target"
+    fi
+    unset provider_old_secret
+    printf 'FAIL settings were not saved; the previous provider key was restored.\n' >&2
+    exit 1
+  fi
+  unset provider_old_secret
+}
+
+provider_wizard() {
+  # Choose the provider (configured ones + custom) and store the matching
+  # key: OpenRouter keeps its own secret file, every other provider uses the
+  # shared provider_api_key. The choice is STAGED in memory and the overlay
+  # (provider.active, provider.custom) is written only AFTER the key passed
+  # its live check against the candidate — a failed or cancelled wizard
+  # leaves the previous settings and secrets untouched.
+  active=$(settings_get provider.active)
+  active="${active:-openrouter}"
+  list=$(in_container_node scripts/provider-resolve.mjs --list)
+  printf 'Available providers:\n%s\n  custom          — your own Anthropic-compatible endpoint\n' "$list"
+
+  provider=""
+  while :; do
+    printf 'Provider [%s]: ' "$active"
+    IFS= read -r provider || true
+    if [ -z "$provider" ]; then
+      provider="$active"
+    fi
+    if [ "$provider" = "custom" ]; then
+      break
+    fi
+    if printf '%s\n' "$list" | awk -v p="$provider" 'found { next } $1 == p { found = 1 } END { exit !found }'; then
+      break
+    fi
+    printf 'Unknown provider: %s\n' "$provider"
+    provider=""
+  done
+
+  # The stored key, when kept, must prove itself against the just-chosen
+  # provider — not against whatever it was saved for before.
+  VALIDATE_STORED=1
+  case "$provider" in
+    custom)
+      baseurl=""
+      while :; do
+        printf 'Base URL (e.g. https://llm.internal.example/api): '
+        IFS= read -r baseurl || true
+        if [ -n "$baseurl" ]; then break; fi
+        printf 'Base URL must not be empty.\n'
+      done
+      authstyle=""
+      while :; do
+        printf 'Auth style, token (Authorization: Bearer) or apikey (x-api-key) [token]: '
+        IFS= read -r authstyle || true
+        authstyle="${authstyle:-token}"
+        case "$authstyle" in
+          token|apikey) break ;;
+          *) printf 'Use "token" or "apikey".\n' ;;
+        esac
+      done
+      model=""
+      while :; do
+        printf 'Default model: '
+        IFS= read -r model || true
+        if [ -n "$model" ]; then break; fi
+        printf 'Default model must not be empty.\n'
+      done
+      json=$(printf '{"active":"custom","custom":{"baseUrl":"%s","authStyle":"%s","keyName":"PROVIDER_API_KEY","tiers":{},"defaultModel":"%s"}}' \
+        "$(esc_json "$baseurl")" "$authstyle" "$(esc_json "$model")")
+      commit_provider "$SECRET_DIR/provider_api_key" "$json" "Custom provider API key" \
+        --base-url "$baseurl" --auth-style "$authstyle" --model "$model"
+      ;;
+    openrouter)
+      commit_provider "$SECRET_DIR/openrouter_api_key" '{"active":"openrouter"}' "OpenRouter API key" --provider openrouter
+      ;;
+    *)
+      json=$(printf '{"active":"%s"}' "$(esc_json "$provider")")
+      commit_provider "$SECRET_DIR/provider_api_key" "$json" "$provider API key" --provider "$provider"
+      ;;
+  esac
+  unset VALIDATE_STORED
+}
+
+team_key_step() {
+  # The Linear team key (fenix.env LINEAR_TEAM_KEY) is validated against the
+  # stored Linear key with the same in-container check.
+  lkey=$(cat "$SECRET_DIR/linear_api_key" 2>/dev/null) || lkey=""
   team=""
   while :; do
     printf 'Enter the Linear team key (e.g. FOC): '
@@ -257,15 +418,76 @@ key_wizard() {
       printf '\nNo input — aborting.\n'
       exit 1
     fi
-    if [ -n "$team" ]; then
-      break
+    if [ -z "$team" ]; then
+      printf 'Team key must not be empty.\n'
+      continue
     fi
-    printf 'Team key must not be empty.\n'
+    out=$(check_key linear "$lkey" --team "$team") || true
+    case "$out" in
+      ok)
+        break
+        ;;
+      *)
+        printf 'FAIL %s\n' "$out"
+        ;;
+    esac
   done
   write_env_line "LINEAR_TEAM_KEY=$team"
+}
 
-  unset k REPLY_SECRET team ans
+key_wizard() {
+  ensure_secret_files
+  trap restore_tty EXIT
+  trap 'restore_tty; exit 130' INT
+  trap 'restore_tty; exit 143' TERM
+
+  provider_wizard
+  get_one_key "Linear API key" linear "$SECRET_DIR/linear_api_key"
+  get_one_key "GitHub token" github "$SECRET_DIR/github_token"
+  team_key_step
+
+  unset k REPLY_SECRET team ans lkey
   printf 'Keys saved in %s; config in %s.\n' "$SECRET_DIR" "$ENV_FILE"
+}
+
+rotate_key() {
+  # fenix keys <name> — rotate one key without re-running the whole wizard.
+  name="$1"
+  ensure_secret_files
+  trap restore_tty EXIT
+  trap 'restore_tty; exit 130' INT
+  trap 'restore_tty; exit 143' TERM
+  case "$name" in
+    openrouter)
+      get_one_key "OpenRouter API key" provider "$SECRET_DIR/openrouter_api_key" --provider openrouter
+      ;;
+    provider)
+      active=$(settings_get provider.active)
+      active="${active:-openrouter}"
+      case "$active" in
+        openrouter)
+          get_one_key "OpenRouter API key" provider "$SECRET_DIR/openrouter_api_key" --provider openrouter
+          ;;
+        custom)
+          get_one_key "Custom provider API key" provider "$SECRET_DIR/provider_api_key" --provider custom
+          ;;
+        *)
+          get_one_key "$active API key" provider "$SECRET_DIR/provider_api_key" --provider "$active"
+          ;;
+      esac
+      ;;
+    linear)
+      get_one_key "Linear API key" linear "$SECRET_DIR/linear_api_key"
+      ;;
+    github)
+      get_one_key "GitHub token" github "$SECRET_DIR/github_token"
+      ;;
+    *)
+      printf 'usage: fenix keys [openrouter|provider|linear|github]\n' >&2
+      exit 2
+      ;;
+  esac
+  unset k REPLY_SECRET ans
 }
 
 keys_ok() {
@@ -275,6 +497,22 @@ keys_ok() {
     fi
   done
   return 0
+}
+
+# Every Compose secret file must exist or `docker compose up` fails on the
+# missing file mount (FOC-786). Create missing ones empty, owner-only —
+# provider_api_key is optional (an empty file just means unauthenticated), and
+# keys_ok above keeps requiring only the three required keys.
+ensure_secret_files() {
+  mkdir -p "$SECRET_DIR"
+  chmod 700 "$SECRET_DIR" 2>/dev/null || true
+  umask 077
+  for f in openrouter_api_key linear_api_key github_token provider_api_key; do
+    if [ ! -e "$SECRET_DIR/$f" ]; then
+      : > "$SECRET_DIR/$f"
+      chmod 600 "$SECRET_DIR/$f" 2>/dev/null || true
+    fi
+  done
 }
 
 # --- commands ----------------------------------------------------------------
@@ -306,6 +544,8 @@ cmd_up() {
   # The project map lives in a host dir mounted at /fenix-config; create it
   # first so Docker does not create it root-owned.
   mkdir -p .fenix/config
+  # Compose mounts every secret file — missing ones must exist (empty).
+  ensure_secret_files
   printf 'Building and starting the stack...\n'
   docker compose up -d --build
 
@@ -382,7 +622,11 @@ case "$cmd" in
     fi
     ;;
   keys)
-    key_wizard
+    if [ $# -ge 1 ]; then
+      rotate_key "$1"
+    else
+      key_wizard
+    fi
     ;;
   doctor)
     cmd_doctor

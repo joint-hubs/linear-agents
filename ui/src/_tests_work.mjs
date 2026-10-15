@@ -26,6 +26,9 @@ import {
   filtersFromQuery,
   queryFromFilters,
   startDialogModel,
+  publishDialogModel,
+  ticketLabels,
+  labelNames,
 } from './workModel.js';
 
 // --- Minimal test harness (same shape as _tests_cockpit.mjs) ----------------
@@ -61,6 +64,10 @@ const ticketDev = {
   linearState: { name: 'In Progress', type: 'started' },
   priority: { value: 2, name: 'High' },
   milestone: 'Dashboard v2',
+  labels: [
+    { id: 'lab-1', name: 'bug', color: '#d4c5f9' },
+    { id: 'lab-2', name: 'dashboard-v2', color: null },
+  ],
   rounds: 2,
   lastVerdict: 'PASS',
   flags: [
@@ -80,6 +87,7 @@ const ticketReady = {
   linearState: null,
   priority: null,
   milestone: null,
+  labels: [],
   rounds: 0,
   lastVerdict: null,
   flags: [],
@@ -129,11 +137,15 @@ await test('groupByStage drops a ticket with a missing/unknown stage', () => {
 
 // --- cardModel ----------------------------------------------------------------
 
-await test('cardModel dev ticket -> id, title, stage label, rounds, money, age', () => {
+await test('cardModel dev ticket -> id, title, stage label, labels, rounds, money, age', () => {
   eq(cardModel(ticketDev, NOW), {
     id: 'FOC-403',
     title: 'Telemetry usage duplicates',
     stageLabel: 'Dev',
+    labels: [
+      { id: 'lab-1', name: 'bug', color: '#d4c5f9' },
+      { id: 'lab-2', name: 'dashboard-v2', color: null },
+    ],
     rounds: '2 rounds',
     cost: '$37.83',
     flags: [
@@ -236,11 +248,63 @@ await test('cardModel(null) -> empty id/title, no stage label, cost null', () =>
     id: null,
     title: '',
     stageLabel: null,
+    labels: [],
     rounds: null,
     cost: null,
     flags: [],
     age: null,
   });
+});
+
+// --- ticketLabels / cardModel labels --------------------------------------------
+
+await test('cardModel labels: absent/malformed -> [], nameless dropped, strings normalized', () => {
+  eq(cardModel({ stage: 'dev' }, NOW).labels, []);
+  eq(cardModel({ stage: 'dev', labels: null }, NOW).labels, []);
+  eq(cardModel({ stage: 'dev', labels: 'bug' }, NOW).labels, []);
+  eq(cardModel({ stage: 'dev', labels: [{ name: '  ' }, 42, { color: '#fff' }] }, NOW).labels, []);
+  eq(cardModel({ stage: 'dev', labels: ['queue-name', { id: 'l', name: ' x ', color: 'red' }] }, NOW).labels, [
+    { id: null, name: 'queue-name', color: null },
+    { id: 'l', name: 'x', color: null },
+  ]);
+});
+
+await test('cardModel labels: only hex colors survive client-side validation', () => {
+  const labels = [
+    { id: 'a', name: 'ok', color: '#00ccff' },
+    { id: 'b', name: 'short', color: '#ab' },
+    { id: 'c', name: 'word', color: 'rebeccapurple' },
+    { id: 'd', name: 'url', color: 'url(#x)' },
+  ];
+  eq(cardModel({ stage: 'dev', labels }, NOW).labels, [
+    { id: 'a', name: 'ok', color: '#00ccff' },
+    { id: 'b', name: 'short', color: null },
+    { id: 'c', name: 'word', color: null },
+    { id: 'd', name: 'url', color: null },
+  ]);
+});
+
+await test('ticketLabels caps at 20 (the payload\'s own cap)', () => {
+  const many = Array.from({ length: 30 }, (_, i) => ({ name: 'l' + i }));
+  eq(ticketLabels(many).length, 20);
+  eq(ticketLabels(many)[19].name, 'l19');
+});
+
+// --- labelNames ------------------------------------------------------------------
+
+await test('labelNames: distinct, sorted across the board; empty board -> []', () => {
+  const tickets = [
+    { labels: [{ name: 'tech' }, { name: 'bug' }] },
+    { labels: ['bug'] },
+    { labels: [] },
+    { labels: null },
+    {},
+    null,
+    { labels: [{ name: 'access' }] },
+  ];
+  eq(labelNames(tickets), ['access', 'bug', 'tech']);
+  eq(labelNames([]), []);
+  eq(labelNames(null), []);
 });
 
 // --- formatMoney (the scripts/ticket-cost.mjs usd() rule) ---------------------
@@ -391,28 +455,32 @@ await test('reconciliationText note -> appended after an em dash', () => {
 
 // --- filters round-trip --------------------------------------------------------------
 
-await test('filtersFromQuery reads milestone and priority', () => {
-  eq(filtersFromQuery('?milestone=Dashboard+v2&priority=high'), { milestone: 'Dashboard v2', priority: 'high' });
-  eq(filtersFromQuery('?milestone=Dashboard+v2&priority=high'), { milestone: 'Dashboard v2', priority: 'high' });
+await test('filtersFromQuery reads milestone, priority and label', () => {
+  eq(filtersFromQuery('?milestone=Dashboard+v2&priority=high&label=bug'), {
+    milestone: 'Dashboard v2',
+    priority: 'high',
+    label: 'bug',
+  });
 });
 
 await test('filtersFromQuery absent/empty values -> null', () => {
-  eq(filtersFromQuery(''), { milestone: null, priority: null });
-  eq(filtersFromQuery('?other=1'), { milestone: null, priority: null });
-  eq(filtersFromQuery('?milestone=&priority='), { milestone: null, priority: null });
-  eq(filtersFromQuery(null), { milestone: null, priority: null });
+  eq(filtersFromQuery(''), { milestone: null, priority: null, label: null });
+  eq(filtersFromQuery('?other=1'), { milestone: null, priority: null, label: null });
+  eq(filtersFromQuery('?milestone=&priority=&label='), { milestone: null, priority: null, label: null });
+  eq(filtersFromQuery(null), { milestone: null, priority: null, label: null });
 });
 
-await test('queryFromFilters writes milestone then priority, omits nulls', () => {
-  eq(queryFromFilters({ milestone: 'M1', priority: 'high' }), '?milestone=M1&priority=high');
+await test('queryFromFilters writes milestone then priority then label, omits nulls', () => {
+  eq(queryFromFilters({ milestone: 'M1', priority: 'high', label: 'bug' }), '?milestone=M1&priority=high&label=bug');
   eq(queryFromFilters({ milestone: 'M1', priority: null }), '?milestone=M1');
-  eq(queryFromFilters({ milestone: null, priority: 'high' }), '?priority=high');
+  eq(queryFromFilters({ priority: 'high', label: 'bug' }), '?priority=high&label=bug');
+  eq(queryFromFilters({ label: 'needs:answer' }), '?label=needs%3Aanswer');
   eq(queryFromFilters({}), '');
   eq(queryFromFilters(null), '');
 });
 
 await test('filters round-trip: queryFromFilters(filtersFromQuery(q)) -> q', () => {
-  for (const q of ['?milestone=M1&priority=high', '?priority=2', '?milestone=Sprint+1']) {
+  for (const q of ['?milestone=M1&priority=high', '?priority=2', '?milestone=Sprint+1', '?label=bug', '?milestone=M1&label=tech']) {
     eq(queryFromFilters(filtersFromQuery(q)), q);
   }
 });
@@ -483,6 +551,125 @@ await test('startDialogModel no preview while loading -> "Loading…", not "No t
   eq(m.disabledReason, 'Loading…');
   eq(m.primaryLabel, '');
   eq(m.text, null);
+});
+
+// --- publishDialogModel (FOC-788: Push branch / Open PR confirm) -----------
+
+const publishPreviewPush = {
+  ticket: 'FOC-788',
+  action: 'push',
+  checkout: {
+    branch: 'foc-788-push-pr-from-dashboard-1a2b3c4d5e6f',
+    remote: 'origin',
+    remoteUrl: 'https://github.com/joint-hubs/linear-agents',
+    base: 'main',
+    head: '9f458fb0123456789012345678901234567890ab',
+  },
+  diff: { commits: 18, files: 12, insertions: 101, deletions: 2, commitSubjects: ['work'], dirty: false },
+  checks: { latest: 'PASS', failing: [], verdicts: [{ round: 1, verdict: 'PASS' }], children: [] },
+  confirmToken: 'a'.repeat(64),
+};
+
+// An error shaped like api.js throws it: message + .data carrying the
+// server's error name (and the scrubbed detail when there is one).
+function apiError(error, detail) {
+  const e = new Error(detail ? `${error}: ${detail}` : error);
+  e.data = detail ? { error, detail } : { error };
+  return e;
+}
+
+await test('publishDialogModel push preview -> Push branch to origin, diff summary, You', () => {
+  const m = publishDialogModel(publishPreviewPush, 'push', {});
+  eq(m.primaryLabel, 'Push branch');
+  eq(m.title, 'Push the task branch');
+  eq(m.branchText, 'foc-788-push-pr-from-dashboard-1a2b3c4d5e6f');
+  eq(m.targetText, 'origin');
+  eq(m.diffText, '18 commit(s), 12 file(s), +101/-2');
+  eq(m.checksFailed, false);
+  eq(m.actorText, 'You');
+  eq(m.disabled, false);
+});
+
+await test('publishDialogModel pr preview -> Open PR into main', () => {
+  const m = publishDialogModel(publishPreviewPush, 'pr', {});
+  eq(m.primaryLabel, 'Open PR');
+  eq(m.title, 'Open a pull request');
+  eq(m.targetText, 'main');
+});
+
+await test('publishDialogModel dirty worktree -> the diff line says the changes are not pushed', () => {
+  const m = publishDialogModel(
+    { ...publishPreviewPush, diff: { ...publishPreviewPush.diff, dirty: true } }, 'push', {},
+  );
+  eq(m.diffText.includes('uncommitted changes in the worktree (not pushed)'), true);
+});
+
+await test('publishDialogModel failing checks (AC-2) -> shown first and prominent, never blocking', () => {
+  const m = publishDialogModel({
+    ...publishPreviewPush,
+    checks: {
+      latest: 'FAIL',
+      failing: [{ round: 1, verdict: 'FAIL' }, { round: 2, verdict: 'FAIL' }],
+      verdicts: [],
+      children: [],
+    },
+  }, 'push', {});
+  eq(m.checksFailed, true);
+  eq(m.checksLines, ['round 1: FAIL', 'round 2: FAIL']);
+  eq(m.checksLatest, 'FAIL');
+  eq(m.disabled, false, 'a failing check is shown, not hard-blocking (the AC says shown)');
+});
+
+await test('publishDialogModel while sending -> disabled with the action word', () => {
+  eq(publishDialogModel(publishPreviewPush, 'push', { sending: true }).disabledReason, 'Pushing…');
+  eq(publishDialogModel(publishPreviewPush, 'pr', { sending: true }).disabledReason, 'Opening…');
+});
+
+await test('publishDialogModel pushed -> "Pushed <head7>", button stays off', () => {
+  const m = publishDialogModel(publishPreviewPush, 'push', {
+    result: { ok: true, action: 'push', actor: 'human', head: '9f458fb0123456789012345678901234567890ab' },
+  });
+  eq(m.resultText, 'Pushed 9f458fb');
+  eq(m.disabled, true);
+  eq(m.disabledReason, 'Already done.');
+});
+
+await test('publishDialogModel pr opened -> the PR URL is the result text', () => {
+  const m = publishDialogModel(publishPreviewPush, 'pr', {
+    result: { ok: true, action: 'pr', actor: 'human', head: 'x', prUrl: 'https://github.com/joint-hubs/linear-agents/pull/7' },
+  });
+  eq(m.resultText, 'PR opened: https://github.com/joint-hubs/linear-agents/pull/7');
+});
+
+await test('publishDialogModel stale-preview -> spelled out with a refresh offered', () => {
+  const m = publishDialogModel(publishPreviewPush, 'push', {
+    error: apiError('stale-preview', 'the confirm does not match the current checkout state — preview again'),
+  });
+  eq(m.resultText, 'The checkout changed since the preview — preview again.');
+  eq(m.stale, true);
+});
+
+await test('publishDialogModel push-refused / pr-failed -> named with the scrubbed detail', () => {
+  const refused = publishDialogModel(publishPreviewPush, 'push', {
+    error: apiError('push-refused', 'non-fast-forward'),
+  });
+  eq(refused.resultText, 'Push refused: non-fast-forward');
+  const prFailed = publishDialogModel(publishPreviewPush, 'pr', {
+    error: apiError('pr-failed', 'GitHub 422: Validation Failed'),
+  });
+  eq(prFailed.resultText, 'Could not open the PR: GitHub 422: Validation Failed');
+});
+
+await test('publishDialogModel no-checkout error -> nothing to publish', () => {
+  const m = publishDialogModel(publishPreviewPush, 'push', { error: apiError('no-checkout') });
+  eq(m.resultText, 'No checkout for this ticket — nothing to publish.');
+});
+
+await test('publishDialogModel no preview -> disabled; loading says Loading…, not the no-checkout text', () => {
+  eq(publishDialogModel(null, 'push', {}).disabledReason, 'No checkout — nothing to publish.');
+  const loading = publishDialogModel(null, 'push', { loading: true });
+  eq(loading.disabled, true);
+  eq(loading.disabledReason, 'Loading…');
 });
 
 // --- Summary ----------------------------------------------------------------

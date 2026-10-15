@@ -1,0 +1,80 @@
+/* Linear label chips (Work board, task contract: labels ride the card and the
+   ticket panel). Colour is never the only signal: the dot may carry the
+   Linear label colour, but the name always travels as text, and a long name
+   overflows into an ellipsis whose full text stays accessible through the
+   title tooltip (and the visually-hidden span for assistive tech). */
+
+.wk-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.wk-label-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 1px 8px 1px 6px;
+  border-radius: 999px;
+  background: var(--ck-neutral-bg, #eef0f4);
+  color: var(--ck-neutral-fg, #4b5563);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.wk-label-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  /* No Linear colour -> a neutral dot; the chip text still says the name. */
+  background: var(--border-strong, #9aa2af);
+}
+
+.wk-label-name {
+  display: inline-block;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+/* The full label text for screen readers when the visual name is truncated —
+   the title tooltip alone is not reachable by keyboard or AT. */
+.wk-label-full {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* The card's stage chip: deliberately NOT a tone chip — the run-status flags
+   (ck-chip ck-tone-*) signal live state, the column position plus this muted
+   stage tag is the workflow stage. Same grey regardless of stage, so the two
+   vocabularies never share a look. */
+.wk-card-stage {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--text-2);
+  background: transparent;
+}
+
+.wk-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.wk-card-entry .wk-card { width: 100%; }
+.wk-card-cockpit { display: block; padding: 5px 9px 9px; font-size: 12px; }

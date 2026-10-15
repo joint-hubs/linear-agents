@@ -22,6 +22,10 @@ Python 3.11. The container runs as the non-root user `node`.
   running.
 - The API keys stay on the host in `.fenix/secrets/` and are mounted into the
   containers as Compose secrets — never baked into the image, never printed.
+- A **Settings** area in the dashboard: validate and rotate keys, switch the
+  provider and per-squad routing, add repositories, inspect retention — its
+  overlay (`.fenix/config/settings.json`) survives `fenix update`. See
+  "Settings" below.
 - All mutable state (telemetry, Supervisor state, workspaces) lives in the
   `fenix_fenix-data` volume, so the image itself is stateless and replaceable.
 
@@ -32,8 +36,9 @@ volume). If the supervisor container stops mid-turn, the interrupted child is
 marked `crashed` (reason `container-restart`) on the next start, so the
 Supervisor can resume it with a follow-up. CodeGraph MCP is approved for every
 squad on the volume. The Supervisor chat and terminal in the dashboard (the
-Cockpit) work in Docker. Known gaps: model-routing edits from the dashboard are
-not kept across `fenix update` (FOC-786).
+Cockpit) work in Docker. Known gap: the v1 SquadConfig screen edits repo files
+inside the image, which do not survive `fenix update` — provider, routing and
+keys now live in the Settings overlay instead, which does (see "Settings").
 
 ## Before you start
 
@@ -43,7 +48,8 @@ Host prerequisites:
 - Docker memory >= 4 GB (Docker Desktop: Settings > Resources)
 - >= 10 GB free disk
 - git
-- curl (used to validate keys live)
+- (curl is no longer needed: key validation runs inside the `fenix-api`
+  image through `scripts/key-check.mjs`)
 - Windows only: Git for Windows — the `fenix.cmd` / `fenix.ps1` shims run the
   `fenix` script with Git Bash. WSL users run `./fenix` inside WSL instead.
 
@@ -77,7 +83,16 @@ under `.fenix/secrets/`):
 
 The wizard validates each key against its provider (OpenRouter `/api/v1/key`,
 Linear `viewer` query, GitHub `/user`), so a wrong or mistyped key is caught
-at entry time, not at first use.
+at entry time, not at first use. The checks are the shared
+`scripts/key-check.mjs` run inside the `fenix-api` image — the key travels
+only through stdin, never a command line, environment variable or log.
+
+The wizard first asks for the **provider** (the configured ones plus
+`custom` — your own Anthropic-compatible endpoint, with base URL, auth style
+`token` (Bearer) or `apikey` (x-api-key) and a default model). OpenRouter
+keeps its own key file; every other provider shares `provider_api_key`. The
+choice is saved in the settings overlay `.fenix/config/settings.json` (see
+"Where things live"), not in the image.
 
 ## Start
 
@@ -142,6 +157,48 @@ maps a Linear issue's project to a repository through it:
 `${GITHUB_ROOT}` is the workspaces root inside the container
 (`/data/workspaces`).
 
+## Settings (the dashboard)
+
+The Settings area in the left navigation covers what used to require a
+`fenix` command or an image rebuild, and its overlay survives `fenix update`:
+
+- **Keys** (`/settings/keys`, the default tab): each key's presence and its
+  last live check — never the value. Rotating a key runs the same live check
+  as `fenix keys` first; a rejected key is refused with the reason and
+  nothing is written. A rotated key is used by new children at once; the
+  Supervisor picks it up on its next fresh session (`fenix attach --new`).
+  Mounted key files are re-read for each child; an empty mounted file refuses
+  the spawn even when the parent still holds an old key in memory.
+- **Provider & routing** (`/settings/provider`): switch the active provider —
+  OpenRouter, a configured one, or a custom Anthropic-compatible endpoint
+  (base URL, auth style, default model) — with a live test before saving.
+  The optional password field can supply the first key for a new provider;
+  leave it empty to use the stored key. A refused validation changes nothing,
+  and a failed settings save restores the previous key. Set the lead model
+  per squad in the routing table. Model candidates come
+  from the active provider's pricing scope; a model without a price row is
+  allowed and labelled "unpriced". The benchmark column uses the recorded AA
+  Intelligence Index snapshot in `config/model-benchmarks.json` (currently
+  2026-09-03); unknown models and other provider scopes show a dash.
+  A provider or routing change takes effect on the next spawn: each child
+  resolves the current overlay and mounted key, while a resumed turn pins the
+  provider name recorded at its first turn. An explicit `LA_PROVIDER` still
+  wins; launcher-derived values do not mask later Settings changes. The v1
+  SquadConfig screen stays as the "Advanced routing (v1)" tab (subagent
+  roles, tools, pricing editor).
+- **Repositories** (`/settings/repos`): repositories with origin, HEAD,
+  branch, CodeGraph index state, worktree count and mapped Linear project;
+  adding a repository by URL starts a background clone with progress (a local
+  bare repo URL works for tests); removing a project mapping keeps the files.
+- **Retention** (`/settings/retention`): read-only — the `cleanupPeriodDays`
+  policy in force, transcript / telemetry / workspace disk usage and free
+  disk. Managing the policy stays with FOC-780.
+- **Squads & prompts** is the v1 Prompts screen as a tab (`/prompts`): role
+  edits land on the `/data/agents` volume and take effect at the next spawn.
+
+The API behind it lives under `/api/settings/*` — the same write guards as the
+Cockpit, bodies capped at 8 KB, and no response ever carries a key value.
+
 ## Daily use
 
 | Command | What it does |
@@ -151,7 +208,8 @@ maps a Linear issue's project to a repository through it:
 | `fenix down` | stop and remove containers (the data volume is kept) |
 | `fenix logs [service]` | follow logs (default: all services) |
 | `fenix doctor` | host preflight plus in-container diagnostics |
-| `fenix keys` | key wizard: enter or replace keys |
+| `fenix keys` | key wizard: provider choice, enter or replace keys (validated live in the container through `scripts/key-check.mjs`) |
+| `fenix keys <openrouter\|provider\|linear\|github>` | rotate one key; `provider` means the active provider's key |
 | `fenix repo add <url\|owner/name> [--project <Linear project>]` | clone a repository into the workspaces volume (optionally map a Linear project) |
 | `fenix repo list` | repositories in the workspaces volume and the project map |
 | `fenix attach [--new]` | attach to the Supervisor (Claude Code) running in tmux in `fenix-supervisor`; Ctrl-b d detaches and the Supervisor keeps running, `--new` starts a fresh session (kills the current one) |
@@ -171,9 +229,17 @@ volume, so telemetry and Supervisor state survive a recreate; a later
 
 ## Where things live
 
-- Keys: `.fenix/secrets/{openrouter_api_key,linear_api_key,github_token}` —
+- Keys: `.fenix/secrets/{openrouter_api_key,provider_api_key,linear_api_key,github_token}` —
   gitignored, owner-only, never baked into the image, never printed; mounted
-  as Compose secrets under `/run/secrets/`.
+  as Compose secrets under `/run/secrets/` (read-only for the supervisor) and
+  read-write into `fenix-api` at `/fenix-secrets` (dashboard key rotation).
+- Settings overlay: `.fenix/config/settings.json` on the host (the
+  `.fenix/config/` directory is mounted at `/fenix-config`) — the active
+  provider (+ the custom provider's base URL, auth style, tiers, default
+  model) and the per-squad lead models. Survives `fenix update`;
+  `config/models.json` stays the shipped baseline. Never contains key values.
+- Last key checks: `/data/settings/key-checks.json` on the data volume
+  (timestamps and results only, no values).
 - Config: `.fenix/fenix.env` (contains `LINEAR_TEAM_KEY`).
 - Data volume `fenix_fenix-data`, mounted at `/data` in both containers:
   - telemetry DB: `/data/telemetry/telemetry.sqlite`
@@ -217,8 +283,10 @@ Common cases:
 - **Key rejected at entry** — HTTP 401 usually means a wrong key, HTTP 403 a
   missing scope. Fix the key (or its scopes) and re-enter it, or run
   `fenix keys` later.
-- **Key rotation** — `fenix keys`, then `fenix stop` and `fenix up` (secrets
-  are read at container start).
+- **Key rotation** — Settings → Keys in the dashboard, or `fenix keys <name>`.
+  A rotated key is used by new children at once and the Supervisor picks it up
+  on its next fresh session. Use `fenix attach --new` when the Supervisor
+  itself should adopt the new key; running children keep their existing turn.
 - **`fenix up` exits 4 / the supervisor is unhealthy after your uid changed** —
   the image was rebuilt for the new uid, but the data volume still belongs to
   the old one, so `/data` stays unwritable. Re-own the volume once (see

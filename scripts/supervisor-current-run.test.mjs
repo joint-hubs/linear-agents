@@ -37,6 +37,15 @@ import {
   recordLauncherRun,
 } from "./supervisor-current-run.mjs";
 
+// The managed-session identity used by the scoped tests below.
+const SESSION_ID = "sup-" + "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+const scopedEnv = (overrides = {}) => ({
+  FENIX_SUPERVISOR_SESSION_ID: SESSION_ID,
+  LA_TASK_KEY: "workspace:ISSUE-1",
+  LA_TASK_ID: "ISSUE-1",
+  ...overrides,
+});
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(ROOT, "scripts", "supervisor-current-run.mjs");
 
@@ -332,5 +341,169 @@ test("CLI show prints the record or 'none'; unknown verb exits 2", () => {
   } finally {
     cleanup(empty);
     cleanup(full);
+  }
+});
+
+// ── scoped resolution (managed task sessions) ────────────────────────────────
+
+const scopedPointerPath = (home) =>
+  join(home, "supervisor", "sessions", SESSION_ID, "current-run.json");
+
+test("scoped: a MISSING pointer never adopts the newest recent run — a new scoped run instead", () => {
+  const home = tempHome("scoped-adopt");
+  const state = tempHome("scoped-adopt-state");
+  try {
+    const rec = resolveCurrentRun({
+      now: NOW,
+      path: scopedPointerPath(home),
+      stateHome: state,
+      recentRuns: () => [OTHER_ID, VALID_ID],
+      env: scopedEnv(),
+    });
+    assert.equal(rec.source, "new", "the recent-runs pool is OFF in scoped mode");
+    assert.match(rec.runId, RUN_ID_RE, "the run id keeps the unique global format");
+    assert.deepEqual(
+      { supervisorSessionId: rec.supervisorSessionId, taskKey: rec.taskKey, taskId: rec.taskId },
+      { supervisorSessionId: SESSION_ID, taskKey: "workspace:ISSUE-1", taskId: "ISSUE-1" },
+      "the record carries the ownership triple",
+    );
+    assert.ok(existsSync(join(state, rec.runId)), "the run dir stays global under the state home");
+    assert.ok(!existsSync(pointerPath(home)), "the GLOBAL pointer was never written");
+    const stored = readCurrentRun({ path: scopedPointerPath(home) });
+    assert.equal(stored.runId, rec.runId);
+    assert.equal(stored.taskKey, "workspace:ISSUE-1");
+  } finally {
+    cleanup(home);
+    cleanup(state);
+  }
+});
+
+test("scoped: a pointer owned by THIS session+task is reused (source pointer)", () => {
+  const home = tempHome("scoped-ptr");
+  const state = tempHome("scoped-ptr-state");
+  const path = scopedPointerPath(home);
+  try {
+    resolveCurrentRun({ fresh: true, now: NOW, path, stateHome: state, env: scopedEnv() });
+    const rec = resolveCurrentRun({
+      now: new Date("2026-10-12T13:00:00.000Z"),
+      path,
+      stateHome: state,
+      recentRuns: () => [OTHER_ID],
+      env: scopedEnv(),
+    });
+    assert.equal(rec.source, "pointer");
+    assert.equal(rec.supervisorSessionId, SESSION_ID);
+  } finally {
+    cleanup(home);
+    cleanup(state);
+  }
+});
+
+test("scoped: a pointer owned by ANOTHER task/session is refused (fail closed), file untouched", () => {
+  const home = tempHome("scoped-x");
+  const state = tempHome("scoped-x-state");
+  const path = scopedPointerPath(home);
+  try {
+    const rec = resolveCurrentRun({ fresh: true, now: NOW, path, stateHome: state, env: scopedEnv() });
+    assert.throws(
+      () => resolveCurrentRun({
+        now: NOW,
+        path,
+        stateHome: state,
+        env: scopedEnv({ LA_TASK_KEY: "workspace:ISSUE-2", LA_TASK_ID: "ISSUE-2" }),
+      }),
+      /another owner/,
+    );
+    assert.equal(readCurrentRun({ path }).runId, rec.runId, "the pointer was not rewritten");
+  } finally {
+    cleanup(home);
+    cleanup(state);
+  }
+});
+
+test("scoped: a session id without LA_TASK_KEY/LA_TASK_ID, or a malformed id, fails closed", () => {
+  const home = tempHome("scoped-bad");
+  try {
+    assert.throws(
+      () => resolveCurrentRun({
+        now: NOW,
+        path: scopedPointerPath(home),
+        env: { FENIX_SUPERVISOR_SESSION_ID: SESSION_ID },
+      }),
+      /LA_TASK_KEY and LA_TASK_ID/,
+    );
+    assert.throws(
+      () => resolveCurrentRun({
+        now: NOW,
+        path: scopedPointerPath(home),
+        env: scopedEnv({ FENIX_SUPERVISOR_SESSION_ID: "../escape" }),
+      }),
+      /must match/,
+    );
+  } finally {
+    cleanup(home);
+  }
+});
+
+test("legacy resolve (no session env) still adopts — the scoped change does not leak", () => {
+  const home = tempHome("legacy-adopt");
+  const state = tempHome("legacy-adopt-state");
+  try {
+    const rec = resolveCurrentRun({
+      now: NOW,
+      path: pointerPath(home),
+      stateHome: state,
+      recentRuns: () => [VALID_ID],
+      env: {},
+    });
+    assert.equal(rec.source, "adopted");
+    assert.equal(rec.runId, VALID_ID);
+    assert.equal(rec.supervisorSessionId, undefined);
+  } finally {
+    cleanup(home);
+    cleanup(state);
+  }
+});
+
+test("CLI scoped resolve: writes the SCOPED pointer, stamps ownership, exits non-zero on refusal", () => {
+  const home = tempHome("cli-scoped");
+  const state = tempHome("cli-scoped-state");
+  try {
+    const fresh = spawnSync(process.execPath, [SCRIPT, "resolve", "--model", "m"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LA_DATA_HOME: home,
+        LA_SUPERVISOR_STATE_HOME: state,
+        FENIX_SUPERVISOR_SESSION_ID: SESSION_ID,
+        LA_TASK_KEY: "workspace:ISSUE-1",
+        LA_TASK_ID: "ISSUE-1",
+      },
+    });
+    assert.equal(fresh.status, 0, `exit code (stderr: ${fresh.stderr})`);
+    const [freshId, freshSource] = fresh.stdout.split(" ");
+    assert.match(freshId, RUN_ID_RE);
+    assert.equal(freshSource, "new\n");
+    assert.ok(existsSync(scopedPointerPath(home)), "scoped pointer written");
+    assert.ok(!existsSync(pointerPath(home)), "global pointer untouched");
+
+    // A pointer stamped for ANOTHER task makes the same CLI fail closed.
+    const refused = spawnSync(process.execPath, [SCRIPT, "resolve"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LA_DATA_HOME: home,
+        LA_SUPERVISOR_STATE_HOME: state,
+        FENIX_SUPERVISOR_SESSION_ID: SESSION_ID,
+        LA_TASK_KEY: "workspace:ISSUE-9",
+        LA_TASK_ID: "ISSUE-9",
+      },
+    });
+    assert.equal(refused.status, 1, "refusal exits non-zero");
+    assert.equal(refused.stdout, "");
+    assert.match(refused.stderr, /another owner/);
+  } finally {
+    cleanup(home);
+    cleanup(state);
   }
 });

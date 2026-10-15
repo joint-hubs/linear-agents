@@ -63,7 +63,7 @@ function Entry({ entry }) {
   );
 }
 
-export default function ChatView({ supervisor, draft, onDraftChange, onOpenTerminal }) {
+export default function ChatView({ supervisor, scope, readOnly = false, draft, onDraftChange, onOpenTerminal }) {
   const [entries, setEntries] = useState([]);
   const [convError, setConvError] = useState(null);
   const [loaded, setLoaded] = useState(false); // first page has arrived
@@ -76,7 +76,7 @@ export default function ChatView({ supervisor, draft, onDraftChange, onOpenTermi
   const loadedRef = useRef(false);
   const truncatedRef = useRef(false);
   const scrollRef = useRef(null);
-  const disabledReason = chatDisabledReason(supervisor);
+  const disabledReason = readOnly ? 'Historical session — read only' : chatDisabledReason(supervisor);
 
   // Transcript poll — 2 s while mounted, paused while the tab is hidden. The
   // offset lives in a ref so the interval callback always sends the freshest
@@ -102,11 +102,18 @@ export default function ChatView({ supervisor, draft, onDraftChange, onOpenTermi
         while (!signal.aborted) {
           const forward = loadedRef.current;
           const page = await getConversation(
-            buildConversationQuery({
-              started: forward,
-              offset: offsetRef.current,
-              limit: CONVERSATION_LIMIT,
-            }),
+            {
+              // Task scoping (task workspaces, PRD §3–5): sessionId routes the
+              // read to /api/supervisor/sessions/:sid/conversation, taskKey
+              // rides along as the routing context. No scope → the legacy
+              // global transcript, unchanged.
+              ...(scope?.sessionId ? { sessionId: scope.sessionId, taskKey: scope.taskKey } : {}),
+              ...buildConversationQuery({
+                started: forward,
+                offset: offsetRef.current,
+                limit: CONVERSATION_LIMIT,
+              }),
+            },
             signal,
           );
           // The request resolved, but the component unmounted meanwhile —
@@ -180,7 +187,7 @@ export default function ChatView({ supervisor, draft, onDraftChange, onOpenTermi
     // copy. Normal messages keep the transcript-confirmed flow.
     const isSlash = text.startsWith('/');
     try {
-      const res = await postSupervisorMessage(text);
+      const res = await postSupervisorMessage(text, scope);
       if (isSlash && res && (typeof res.output === 'string' || res.confirmed === true)) {
         const locals = [{
           uuid: 'local:' + id + ':user',

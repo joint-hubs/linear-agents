@@ -7,6 +7,15 @@
 - **Decision record:** `docs/adr/0010-provider-profiles.md`
 - **Implements (partially):** ADR-0001 roadmap item "Provider per squad" (per-role provider and fallback stay deferred)
 
+> **Update 2026-10-14 (FOC-773/778/786):** provider switching moved one level up. The active provider
+> and a custom provider (base URL, auth style, tiers, default model) now live in the Settings overlay
+> `.fenix/config/settings.json` — edited in the dashboard's `/settings/provider`, surviving
+> `fenix update`; keys are rotated in Settings → Keys or `fenix keys`, validated by the shared
+> `scripts/key-check.mjs`. This PRD remains the record of the v1 mechanics it describes:
+> `config/models.json::providers` is the shipped baseline, the v1 `/squad-config` screen is now the
+> "Advanced routing (v1)" tab of Settings, and per-provider pricing scoping is unchanged. Secrets still
+> never appear in `models.json`, the overlay, or any API response.
+
 ## 1. Problem
 
 All squads launch through one hard-coded provider (OpenRouter): `bin/_lib.bat` sets

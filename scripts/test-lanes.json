@@ -5,6 +5,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "agent-launch-profile.test.mjs",
+      "reason": "isolation audit (task workspace P1, launch-owned child config dir): pure unit tests over tmpdir fixtures per the file header — no child processes, no git, no network; no ports, no socket binds, no telemetry DB"
+    },
+    {
       "file": "agent-records.test.mjs",
       "reason": "isolation audit FOC-795: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir before import; record fixtures only; no ports, no socket binds, no telemetry DB"
     },
@@ -27,6 +31,14 @@
     {
       "file": "check.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "child-model.test.mjs",
+      "reason": "isolation audit FOC-762/773: pure unit fixtures over literal config objects; no fs, no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "cockpit.test.mjs",
+      "reason": "isolation audit FOC-783: mkdtemp/tmpdir fixtures only; cockpit state via the LA_SUPERVISOR_STATE_HOME seam pointed at temp paths (poll tuning via LA_SUPERVISOR_POLL_MS); the probe is an injected stub, no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
       "file": "code-intel.test.mjs",
@@ -53,16 +65,24 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
-      "file": "cockpit.test.mjs",
-      "reason": "isolation audit FOC-783: mkdtemp/tmpdir fixtures only; cockpit state via the LA_SUPERVISOR_STATE_HOME seam pointed at temp paths (poll tuning via LA_SUPERVISOR_POLL_MS); the probe is an injected stub, no ports, no socket binds, no real-repo-path writes; no telemetry DB"
-    },
-    {
       "file": "config-drift.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
       "file": "cost-guard.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "cost-quality.test.mjs",
+      "reason": "isolation audit FOC-785: pure functions over fixture objects; no fs, no ports, no telemetry DB"
+    },
+    {
+      "file": "cost-reconcile.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
+    },
+    {
+      "file": "cost-snapshot.test.mjs",
+      "reason": "isolation audit FOC-784/785: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME and LA_TELEMETRY_DB/HOME pointed at temp paths, never unset); no ports, no socket binds, no real-repo-path writes"
     },
     {
       "file": "decision-analytics.test.mjs",
@@ -101,12 +121,28 @@
       "reason": "isolation audit FOC-803: mkdtemp/tmpdir fixtures only (the chmod variants additionally forced through a fake fsImpl); no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
+      "file": "fenix-keys.test.mjs",
+      "reason": "isolation audit FOC-778: mkdtemp fixtures and fake docker shim on PATH; canned key-check answers, no network or ports; real settings scripts use only temp LA_SETTINGS_FILE"
+    },
+    {
       "file": "fenix-paths.test.mjs",
       "reason": "isolation audit FOC-770: pure path resolution with explicit env objects and a read-only scan of scripts/*.mjs; no fs writes, no ports, no socket binds, no telemetry DB"
     },
     {
+      "file": "fenix-repos.test.mjs",
+      "reason": "isolation audit FOC-786: mkdtemp/tmpdir fixtures only; git runs are real but local-only (bare sources and file:// URLs under temp dirs, spawnGit injected for the ceiling test); node CLI children touch only temp projects files via LA_PROJECTS_FILE; no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "fenix-retention.test.mjs",
+      "reason": "isolation audit FOC-786: mkdtemp/tmpdir fixtures only; the retention library is read-only; no ports, no socket binds, no telemetry DB"
+    },
+    {
       "file": "fenix-seed-agents.test.mjs",
       "reason": "isolation audit FOC-776: mkdtemp/tmpdir fixtures only (image and volume agent trees synthesized and removed); no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
+      "file": "fenix-settings.test.mjs",
+      "reason": "isolation audit FOC-773: mkdtemp/tmpdir fixtures only; CLI children read/write only temp settings files via the LA_SETTINGS_FILE seam; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
       "file": "flow-turns.test.mjs",
@@ -125,16 +161,16 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
-      "file": "plan-ready.test.mjs",
-      "reason": "isolation audit FOC-476: mkdtemp/tmpdir fixtures only; the seam caller is an in-process stub (no network, no provider spawn); label writes go to a temp decisionRunsDir; no ports, no socket binds, no real-repo-path writes"
-    },
-    {
-      "file": "linear-ops.test.mjs",
-      "reason": "isolation audit FOC-716/FOC-606: no filesystem writes at all, no ports, no socket binds; the parent-chain fetch is an injected fetchNode stub (no network, no Linear call) and every other input is a literal recorded-response shape; the FOC-606 group spawns the real CLI but only its refusal paths, which validate and exit before any network access (asserted: stdout empty); no telemetry DB"
+      "file": "key-leak-check.test.mjs",
+      "reason": "isolation audit FOC-778: the docker runner is an injected fake; the canary reaches grep only via stdin; canary file in a mkdtemp dir; no network, no ports, no socket binds, no telemetry DB"
     },
     {
       "file": "linear-client.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "linear-ops.test.mjs",
+      "reason": "isolation audit FOC-716/FOC-606: no filesystem writes at all, no ports, no socket binds; the parent-chain fetch is an injected fetchNode stub (no network, no Linear call) and every other input is a literal recorded-response shape; the FOC-606 group spawns the real CLI but only its refusal paths, which validate and exit before any network access (asserted: stdout empty); no telemetry DB"
     },
     {
       "file": "lint.test.mjs",
@@ -181,6 +217,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "model-benchmarks.test.mjs",
+      "reason": "Read-only snapshot plus temp JSON fixtures; no processes, ports or shared writes."
+    },
+    {
       "file": "plan-ac.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
@@ -197,16 +237,20 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
-      "file": "plan-intent.test.mjs",
-      "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
-    },
-    {
       "file": "plan-intent-gate.test.mjs",
       "reason": "isolation audit FOC-517: pure unit fixtures only (render/parse over literal selections and presented slices); no filesystem, no ports, no socket binds, no telemetry DB"
     },
     {
       "file": "plan-intent-select.test.mjs",
       "reason": "isolation audit FOC-516: mkdtemp/tmpdir fixtures only (policy mutations via temp copies, the wiring test's delta-label ledger in an injected temp runs dir); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
+      "file": "plan-intent.test.mjs",
+      "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "plan-ready.test.mjs",
+      "reason": "isolation audit FOC-476: mkdtemp/tmpdir fixtures only; the seam caller is an in-process stub (no network, no provider spawn); label writes go to a temp decisionRunsDir; no ports, no socket binds, no real-repo-path writes"
     },
     {
       "file": "plan-render.test.mjs",
@@ -233,8 +277,20 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "publish-actions.test.mjs",
+      "reason": "isolation audit FOC-788: local git fixtures only (a bare origin + clone + worktrees under one mkdtemp — never the network, never the repo's own checkout); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
+      "file": "publish-exec.test.mjs",
+      "reason": "isolation audit FOC-788: local git fixtures + temp secret files + a fake fetch and injected sinks (never a real GitHub call, never a Linear post, never the live telemetry DB); the only subprocess runs are local git (a bare origin fixture and one `git credential fill` wiring check)"
+    },
+    {
       "file": "publish-linear-comment.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "registry-cost-recompute.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
     },
     {
       "file": "reward-ingest.test.mjs",
@@ -243,6 +299,22 @@
     {
       "file": "reward-ledger.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "runtime-events.test.mjs",
+      "reason": "isolation audit (task workspace PRD §10): mkdtemp/tmpdir fixtures only; the runtime store always receives an explicit temp sqlite path; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
+      "file": "runtime-hook.test.mjs",
+      "reason": "isolation audit (task workspace P1 events): hook recording over an injected env and an explicit temp sqlite path only; no child processes, no ports, no socket binds, no telemetry DB — the word 'spawn' in the file is test-title text about FENIX_RUNTIME_RETURN"
+    },
+    {
+      "file": "runtime-statistics.test.mjs",
+      "reason": "isolation audit (task workspace PRD §10/AC-8): pure aggregation over literal hand-calculated event/span fixtures; no fs, no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "runtime-statistics-routes.test.mjs",
+      "reason": "isolation audit (task workspace PRD §10): the route handler runs on stub req/res with INJECTED loaders (no server child, no ports); the one integration block exercises the default loaders through the LA_TELEMETRY_DB seam set before the store import and never deleted, under one mkdtemp dir; no real-repo-path writes, no real network"
     },
     {
       "file": "security-scan.test.mjs",
@@ -285,16 +357,16 @@
       "reason": "isolation audit FOC-783: mkdtemp/tmpdir fixtures only (transcript fixtures under temp paths); a pure reader over literal JSONL shapes; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
-      "file": "supervisor-session-hook.test.mjs",
-      "reason": "isolation audit FOC-783: LA_DATA_HOME pointed at a mkdtemp dir; the hook runs as a child process over fixture payloads (same pattern as supervisor-edits-hook.test.mjs); no ports, no socket binds, no telemetry DB"
-    },
-    {
       "file": "supervisor-current-run.test.mjs",
       "reason": "isolation audit FOC-807: mkdtemp/tmpdir fixtures only; library paths passed explicitly and the CLI child inherits the LA_DATA_HOME / LA_SUPERVISOR_STATE_HOME seams pointed at temp dirs; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
       "file": "supervisor-edits-hook.test.mjs",
       "reason": "isolation audit FOC-795: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir; the hook runs as a child process over fixture run dirs; no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "supervisor-focus.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
     },
     {
       "file": "supervisor-gate-answer.test.mjs",
@@ -309,12 +381,24 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "supervisor-host-client.test.mjs",
+      "reason": "isolation audit (task workspace P1c): pure functions over literal inputs; sessionScopedEnv returns a copy so global process.env is never mutated; no fs, no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "supervisor-launch.test.mjs",
+      "reason": "isolation audit (task workspace, Supervisor launch wrapper): mkdtemp/tmpdir fixtures only — never real repo files; no child processes, no ports, no socket binds, no process.env mutation, no telemetry DB"
+    },
+    {
       "file": "supervisor-holds.test.mjs",
       "reason": "isolation audit FOC-612: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam set at module load (spawned gate processes inherit it); pricing via the LA_MODELS_ROOT seam pointed at a fixture table; graph-runner completion tests inject their graph and dependencies; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
       "file": "supervisor-orphans.test.mjs",
       "reason": "isolation audit FOC-799: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir before import; registry fixtures only; no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "supervisor-session-hook.test.mjs",
+      "reason": "isolation audit FOC-783: LA_DATA_HOME pointed at a mkdtemp dir; the hook runs as a child process over fixture payloads (same pattern as supervisor-edits-hook.test.mjs); no ports, no socket binds, no telemetry DB"
     },
     {
       "file": "supervisor-wait-budget.test.mjs",
@@ -329,8 +413,20 @@
       "reason": "isolation audit (waker): mkdtemp/tmpdir fixtures with every path derived through the LA_SUPERVISOR_STATE_HOME seam (set at module load, inherited by spawned waker/status processes); no ports, no socket binds, no real-repo-path writes; imports supervisor-lib only (no telemetry DB)"
     },
     {
+      "file": "supervisor-watch-cost.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
+    },
+    {
       "file": "supervisor-zombie.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "task-map.test.mjs",
+      "reason": "isolation audit (task workspace P4): embed/project fakes injected — no production network, no real model calls, no python spawn (the only 'spawn' hit is prose); mkdtemp/tmpdir cache dirs; no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "task-process-identity.test.mjs",
+      "reason": "isolation audit (task workspace P1): pure identity parsing with an injected readFile stub and literal platform fixtures; no fs writes, no ports, no child processes, no telemetry DB"
     },
     {
       "file": "telemetry-analysis.test.mjs",
@@ -381,12 +477,20 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "telemetry-resume.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
+    },
+    {
       "file": "telemetry-store-migration.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
       "file": "telemetry-store.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "telemetry-sweep.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
     },
     {
       "file": "telemetry-task-coverage.test.mjs",
@@ -421,8 +525,16 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "ticket-cost.test.mjs",
+      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
+    },
+    {
       "file": "tool-identity.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "transcript-cost.test.mjs",
+      "reason": "isolation audit FOC-760: pure pricing over mkdtemp transcript fixtures with injected prices; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
       "file": "utils.test.mjs",
@@ -433,52 +545,16 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
-      "file": "zz-suite-env-scrub.test.mjs",
-      "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
-    },
-    {
-      "file": "transcript-cost.test.mjs",
-      "reason": "isolation audit FOC-760: pure pricing over mkdtemp transcript fixtures with injected prices; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
-    },
-    {
-      "file": "supervisor-watch-cost.test.mjs",
-      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
-    },
-    {
-      "file": "registry-cost-recompute.test.mjs",
-      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
-    },
-    {
-      "file": "telemetry-resume.test.mjs",
-      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
-    },
-    {
-      "file": "telemetry-sweep.test.mjs",
-      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
-    },
-    {
-      "file": "supervisor-focus.test.mjs",
-      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
-    },
-    {
-      "file": "ticket-cost.test.mjs",
-      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
-    },
-    {
-      "file": "cost-reconcile.test.mjs",
-      "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
+      "file": "worker-tool-profiles.test.mjs",
+      "reason": "isolation audit (task workspace, worker markdown stamper): mkdtemp/tmpdir fixtures only — rewrites only the copies under a temp launch config dir; no child processes, no ports, no socket binds, no process.env mutation, no telemetry DB"
     },
     {
       "file": "work-board.test.mjs",
       "reason": "isolation audit FOC-784: pure derivations over a mkdtemp state home with an injected Linear fetcher; no network, no ports, no real-repo-path writes, no telemetry DB"
     },
     {
-      "file": "cost-quality.test.mjs",
-      "reason": "isolation audit FOC-785: pure functions over fixture objects; no fs, no ports, no telemetry DB"
-    },
-    {
-      "file": "cost-snapshot.test.mjs",
-      "reason": "isolation audit FOC-784/785: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME and LA_TELEMETRY_DB/HOME pointed at temp paths, never unset); no ports, no socket binds, no real-repo-path writes"
+      "file": "zz-suite-env-scrub.test.mjs",
+      "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     }
   ],
   "serial": [
@@ -573,6 +649,54 @@
     {
       "file": "work-routes.test.mjs",
       "reason": "spawns the real telemetry-server and fake hosts on ephemeral ports (createServer + .listen, raw net.connect sockets for the upgrade tests) (same harness as cockpit-routes, FOC-784/785)"
+    },
+    {
+      "file": "key-check.test.mjs",
+      "reason": "binds ephemeral ports via node:http createServer probes (the fake HTTP check hosts); spawned key-check children are real node processes over mkdtemp fixtures"
+    },
+    {
+      "file": "settings-routes.test.mjs",
+      "reason": "spawns the real telemetry-server and fake check hosts on ephemeral ports (createServer + .listen; work-routes style harness, FOC-786)"
+    },
+    {
+      "file": "runtime-otel.test.mjs",
+      "reason": "binds an ephemeral loopback port via the collector's node:http server (listen(0, '127.0.0.1')) and exercises it with real fetch — the static audit cannot clear it (task workspace PRD §10)"
+    },
+    {
+      "file": "runtime-workflow.test.mjs",
+      "reason": "end-to-end: spawns real supervisor-spawn and supervisor-followup children (spawnSync/execFileSync) against fixture git repos and writes run state; env seams are set globally and left set (task workspace P1 events)"
+    },
+    {
+      "file": "task-cockpit-routes.test.mjs",
+      "reason": "spawns the real telemetry-server plus a fake session host on 127.0.0.1:0 (createServer + .listen, raw WebSocket upgrade) — same harness family as cockpit-routes; all seams isolated under one tmp dir (task workspace P1c)"
+    },
+    {
+      "file": "task-map-routes.test.mjs",
+      "reason": "binds an ephemeral port via a node:http createServer harness (listen(0, '127.0.0.1')) that serves the route handlers; map instance and corpus loader injected; seams set and left set (task workspace P4)"
+    },
+    {
+      "file": "task-session-host.test.mjs",
+      "reason": "binds 127.0.0.1:0 servers and uses the real ws client over WebSocket upgrade; tmux/pty children via injected seams (spawnSync) — the file's own NOTE says serial, same as supervisor-host.test.mjs (task workspace PRD §5-6)"
+    },
+    {
+      "file": "task-sessions.test.mjs",
+      "reason": "cross-process invariants raced through independent node child processes (execFile) against one SQLite file in a mkdtemp dir — conservative serial for processes (task workspace P1)"
+    },
+    {
+      "file": "tool-profiles.test.mjs",
+      "reason": "env restore deletes previously-unset seams (FENIX_INTEGRATIONS_ROOT, LA_SQUAD_HOME) — the static audit cannot distinguish a restore from putting the live default path in play (same pattern as telemetry-settled; task workspace P2)"
+    },
+    {
+      "file": "tool-routes.test.mjs",
+      "reason": "env restore deletes LA_TOOL_PROFILES_FILE when it was never set — same env-restore pattern as telemetry-settled; conservative serial for env (task workspace P2)"
+    },
+    {
+      "file": "workspace-claims.test.mjs",
+      "reason": "real git fixture repos and child-process races (spawnSync children via the supervisor-test-fixtures harness) — conservative serial for processes/git (task workspace P1)"
+    },
+    {
+      "file": "supervisor-watch.test.mjs",
+      "reason": "end-to-end through the real supervisor-watch.mjs child (spawnSync, fake claude behind the LA_CLAUDE_BIN seam); LA_SUPERVISOR_STATE_HOME/LA_SQUAD_HOME seams set at module load and inherited by the child — conservative serial for processes (launch profile --claude-args)"
     }
   ]
 }

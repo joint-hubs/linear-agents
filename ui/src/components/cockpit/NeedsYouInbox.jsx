@@ -32,7 +32,7 @@ const STATE_TEXT = {
   open: 'open',
 };
 
-function AnswerResult({ result, item, onTold }) {
+function AnswerResult({ result, item, scope, onTold }) {
   const [telling, setTelling] = useState(false);
   const [tellError, setTellError] = useState(null);
   if (!result) return null;
@@ -40,7 +40,9 @@ function AnswerResult({ result, item, onTold }) {
     setTelling(true);
     setTellError(null);
     try {
-      await postGateNotify({ runId: item.runId, gateId: item.gateId, holdId: item.holdId });
+      // scope carries the task cockpit's { sessionId, taskKey } — merged into
+      // the body by the api helper so the host can verify the identity.
+      await postGateNotify({ runId: item.runId, gateId: item.gateId, holdId: item.holdId }, scope);
       onTold({ ...result, notified: true });
     } catch (e) {
       setTellError(e.data?.error || e.message || String(e));
@@ -63,7 +65,7 @@ function AnswerResult({ result, item, onTold }) {
   );
 }
 
-function NeedsYouItem({ item, onAskSupervisor, onRefresh }) {
+function NeedsYouItem({ item, scope, onAskSupervisor, onRefresh }) {
   const [answerText, setAnswerText] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
@@ -83,7 +85,7 @@ function NeedsYouItem({ item, onAskSupervisor, onRefresh }) {
   // the same cards and submit path the Supervisor panel uses — onRefresh
   // threaded through so an answer/409 refreshes the snapshot like the panel
   // does.
-  const answers = useSupervisorAnswers({ onRefresh, identity: answerIdentity });
+  const answers = useSupervisorAnswers({ onRefresh, identity: answerIdentity, scope });
   // The generic lists render plain strings only — ask items carry question
   // objects for AskCard (React error #31 when rendered raw), gate facts are an
   // object map (inboxFactLines renders "key: value").
@@ -99,7 +101,7 @@ function NeedsYouItem({ item, onAskSupervisor, onRefresh }) {
       const body = item.category === 'hold'
         ? { runId: item.runId, holdId: item.holdId, text }
         : { runId: item.runId, gateId: item.gateId, text, note: noteArg || undefined };
-      const res = item.category === 'hold' ? await postHoldAnswer(body) : await postGateAnswer(body);
+      const res = item.category === 'hold' ? await postHoldAnswer(body, scope) : await postGateAnswer(body, scope);
       setResult({ recorded: !!res.recorded, notified: !!res.notified });
       setAnswerText('');
       setNote('');
@@ -261,7 +263,7 @@ function NeedsYouItem({ item, onAskSupervisor, onRefresh }) {
 
       {action.kind === 'notify' && (
         <div className="ck-inbox-actions">
-          <NotifyButton item={item} onTold={setResult} existing={result} />
+          <NotifyButton item={item} scope={scope} onTold={setResult} existing={result} />
         </div>
       )}
 
@@ -269,7 +271,7 @@ function NeedsYouItem({ item, onAskSupervisor, onRefresh }) {
         <div className="muted" style={{ fontSize: 12 }}>Nothing to answer here — read-only.</div>
       )}
 
-      <AnswerResult result={result} item={item} onTold={setResult} />
+      <AnswerResult result={result} item={item} scope={scope} onTold={setResult} />
       {error && <div className="banner banner-warn" style={{ marginTop: 8 }}>Error: {error}</div>}
 
       {item.runId && (
@@ -283,7 +285,7 @@ function NeedsYouItem({ item, onAskSupervisor, onRefresh }) {
 
 // "Tell the Supervisor" for awaiting-delivery items — same notice re-send, but
 // these items have no recorded answer of their own on screen.
-function NotifyButton({ item, onTold, existing }) {
+function NotifyButton({ item, scope, onTold, existing }) {
   const [telling, setTelling] = useState(false);
   const [error, setError] = useState(null);
   const told = existing?.notified;
@@ -291,7 +293,7 @@ function NotifyButton({ item, onTold, existing }) {
     setTelling(true);
     setError(null);
     try {
-      await postGateNotify({ runId: item.runId, gateId: item.gateId, holdId: item.holdId });
+      await postGateNotify({ runId: item.runId, gateId: item.gateId, holdId: item.holdId }, scope);
       onTold({ recorded: true, notified: true });
     } catch (e) {
       setError(e.data?.error || e.message || String(e));
@@ -310,8 +312,10 @@ function NotifyButton({ item, onTold, existing }) {
   );
 }
 
-export default function NeedsYouInbox({ items, onAskSupervisor, onRefresh }) {
+export default function NeedsYouInbox({ items, scope, onAskSupervisor, onRefresh }) {
   // Newest first regardless of the order the API sent (createdAt desc).
+  // scope (task cockpit) rides down into every write so the answers carry the
+  // scoped { sessionId, taskKey } identity; the legacy overview passes none.
   const sorted = [...(items || [])].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
   );
@@ -323,7 +327,13 @@ export default function NeedsYouInbox({ items, onAskSupervisor, onRefresh }) {
       ) : (
         <div className="ck-inbox-list-wrap">
           {sorted.map((item) => (
-            <NeedsYouItem key={item.id} item={item} onAskSupervisor={onAskSupervisor} onRefresh={onRefresh} />
+            <NeedsYouItem
+              key={item.id}
+              item={item}
+              scope={scope}
+              onAskSupervisor={onAskSupervisor}
+              onRefresh={onRefresh}
+            />
           ))}
         </div>
       )}

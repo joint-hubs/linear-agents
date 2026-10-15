@@ -1,11 +1,16 @@
-// Work board (FOC-784, dashboard-v2-spec §4.2) — where is each ticket, what
-// did it cost. Handles both /work and /work/:ticket: the board polls
+// Work board (FOC-784 + task workspaces, PRD §3–4) — where is each ticket,
+// what did it cost. The board is home (/ and /work alias). The board polls
 // /api/work/tickets every 15 s (usePoll aborts in-flight requests and keeps
 // the last data on a failed fetch — a bad poll never blanks the board), the
-// ticket detail opens as a side panel (TicketPanel) when :ticket is set.
-// Filters (milestone / priority) live in the URL via filtersFromQuery /
-// queryFromFilters, so a refresh or a shared link keeps the view.
+// ticket detail opens as a side panel (TicketPanel) when :ticket is set, and
+// a task with a known canonical key opens its own cockpit at
+// /work/:taskKey/cockpit. Filters (milestone / priority / label) live in the
+// URL via filtersFromQuery / queryFromFilters, so a refresh or a shared link
+// keeps the view. A ticket without a canonical key never gets a cockpit link
+// invented from its identifier (PRD §3) — the detail's Start/resolve flow
+// covers it.
 
+import { useEffect, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import './work.css';
 import { getWorkTickets } from '../api';
@@ -13,12 +18,14 @@ import { usePoll } from '../hooks/usePoll';
 import {
   STAGES,
   groupByStage,
-  cardModel,
   staleLabel,
+  labelNames,
   filtersFromQuery,
   queryFromFilters,
 } from '../workModel';
+import { cockpitUrl } from '../taskCockpitModel';
 import PanelBoundary from '../components/cockpit/PanelBoundary';
+import TicketCard from '../components/work/TicketCard';
 import TicketPanel from '../components/work/TicketPanel';
 
 // Distinct, sorted filter values from the tickets on the board (the Ready
@@ -31,31 +38,6 @@ function distinctValues(tickets, pick) {
     if (v) out.add(v);
   }
   return [...out].sort();
-}
-
-function TicketCard({ ticket, now, onOpen }) {
-  const m = cardModel(ticket, now);
-  if (!m.id) return null;
-  return (
-    <button type="button" className="wk-card" onClick={() => onOpen(m.id)}>
-      <span className="wk-card-id">{m.id}</span>
-      {m.title && <span className="wk-card-title">{m.title}</span>}
-      {m.flags.length > 0 && (
-        <span className="wk-card-flags">
-          {m.flags.map((f, i) => (
-            <span key={i} className={`ck-chip ck-tone-${f.tone}`}>
-              {f.text}
-            </span>
-          ))}
-        </span>
-      )}
-      <span className="wk-card-meta">
-        {m.rounds && <span>{m.rounds}</span>}
-        {m.cost && <span>{m.cost}</span>}
-        {m.age && <span className="muted">{m.age}</span>}
-      </span>
-    </button>
-  );
 }
 
 export default function Work() {
@@ -79,6 +61,29 @@ export default function Work() {
   const milestones = distinctValues(tickets, (t) => t && t.milestone);
   const priorities = distinctValues(tickets, (t) => t && t.priority && t.priority.name);
 
+  // The label filter's options must not disappear once a label filter is
+  // applied — the filtered payload only carries the tickets (and labels) that
+  // matched. The catalog is a running union of every label name seen this
+  // screen life: it grows, it never shrinks (a stale option that no longer
+  // matches anything is harmless — the board just shows fewer tickets).
+  const [labelCatalog, setLabelCatalog] = useState([]);
+  useEffect(() => {
+    const names = labelNames(tickets);
+    if (names.length === 0) return;
+    setLabelCatalog((prev) => {
+      const set = new Set(prev);
+      let added = false;
+      for (const n of names) {
+        if (!set.has(n)) {
+          set.add(n);
+          added = true;
+        }
+      }
+      return added ? [...set].sort() : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
   // Filters navigate to /work + the query — a change while the detail panel is
   // open returns to the board with the filters kept in the URL.
   const setFilter = (key, value) => {
@@ -86,8 +91,21 @@ export default function Work() {
   };
   const closePanel = () => navigate('/work' + filtersKey);
   const openTicket = (id) => navigate('/work/' + encodeURIComponent(id));
-  const askSupervisor = (id) =>
-    navigate('/?prompt=' + encodeURIComponent('About ' + id + ': '));
+  // Ask about a ticket: with a known canonical key the question belongs to
+  // that task's cockpit — the global Supervisor is never prefilled with a
+  // task's business. Unknown identity stays in the ticket detail for resolution.
+  const askSupervisor = (id) => {
+    const t = tickets.find((x) => x && x.taskId === id);
+    if (t && t.taskKey) {
+      navigate(cockpitUrl(t.taskKey, 'About ' + id + ': '));
+      return;
+    }
+    openTicket(id);
+  };
+
+  // The detail panel's canonical key, when the board payload enriched the
+  // ticket with one (historical tickets may not carry it — PRD §3).
+  const panelTaskKey = (tickets.find((x) => x && x.taskId === ticketId) || {}).taskKey || null;
 
   return (
     <div className="work">
@@ -149,6 +167,19 @@ export default function Work() {
             </option>
           ))}
         </select>
+        <select
+          className="filter-sel"
+          value={filters.label || ''}
+          onChange={(e) => setFilter('label', e.target.value)}
+          aria-label="Filter by label"
+        >
+          <option value="">label: all</option>
+          {labelCatalog.map((l) => (
+            <option key={l} value={l}>
+              {l}
+            </option>
+          ))}
+        </select>
       </div>
 
       <PanelBoundary label="Work board">
@@ -179,7 +210,12 @@ export default function Work() {
 
       {ticketId && (
         <PanelBoundary label="Ticket detail">
-          <TicketPanel id={ticketId} onClose={closePanel} onAskSupervisor={askSupervisor} />
+          <TicketPanel
+            id={ticketId}
+            taskKey={panelTaskKey}
+            onClose={closePanel}
+            onAskSupervisor={askSupervisor}
+          />
         </PanelBoundary>
       )}
     </div>

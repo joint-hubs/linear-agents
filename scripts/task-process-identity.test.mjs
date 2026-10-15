@@ -1,0 +1,12 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readProcessIdentity, matchesProcess } from './task-process-identity.mjs';
+const boot = '12345678-1234-1234-1234-123456789abc';
+const observe = (start, state='S') => readProcessIdentity(42, {platform:'linux',readFile:p=>p.endsWith('/stat')?'42 (name with ) parentheses) '+[state,...Array(18).fill('0'),String(start)].join(' '):boot});
+test('identity uses boot and kernel start ticks, even with parentheses in comm',()=>assert.deepEqual(observe(777),{state:'alive',identity:'linux:'+boot+':777'}));
+test('reused PID is not the original process',()=>assert.equal(matchesProcess({processStartedAt:observe(777).identity},observe(778)),false));
+test('matching process proven by persisted identity',()=>assert.equal(matchesProcess({processStartedAt:observe(777).identity},observe(777)),true));
+test('zombies no longer consume a process slot',()=>assert.equal(observe(777,'Z').state,'absent'));
+test('permission failures are unknown, not absent',()=>assert.equal(readProcessIdentity(42,{platform:'linux',readFile:()=>{throw Object.assign(Error(),{code:'EACCES'})}}).state,'unknown'));
+test('missing process is absent',()=>assert.equal(readProcessIdentity(42,{platform:'linux',readFile:()=>{throw Object.assign(Error(),{code:'ENOENT'})}}).state,'absent'));
+test('invalid and unsupported identity are unknown',()=>{assert.equal(readProcessIdentity(-1).state,'unknown');assert.equal(readProcessIdentity(42,{platform:'win32'}).state,'unknown')});

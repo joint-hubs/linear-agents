@@ -296,6 +296,37 @@ async function runTests() {
     rmSync(root, { recursive: true, force: true });
   }
 
+  // ---- Test 4b: write tools [] is idempotent ----
+  {
+    const root = buildFixture();
+    // First write clears a populated line and reports the change once.
+    const first = writeSquadConfig(
+      { squads: { dev: { agents: { implementer: { tools: [] } } } } },
+      root
+    );
+    assert(first.changed.length === 1, "write tools []: clearing a populated line changes once");
+    const md = readFileSync(join(root, "agents", "dev", "agents", "implementer.md"), "utf8");
+    assert(md.includes("tools: []"), "write tools []: line reads tools: []");
+    // A repeat write must be a no-op — an empty target matches an empty line.
+    const second = writeSquadConfig(
+      { squads: { dev: { agents: { implementer: { tools: [] } } } } },
+      root
+    );
+    assertEq(second.changed.length, 0, "write tools []: repeat write changes nothing (idempotent)");
+    // A file already holding an explicit empty list is untouched from the start.
+    writeFileSync(
+      join(root, "agents", "dev", "agents", "none.md"),
+      "---\nname: none\nmodel: z-ai/glm-5.2\ntools: []\n---\nBody.\n",
+      "utf8"
+    );
+    const third = writeSquadConfig(
+      { squads: { dev: { agents: { none: { tools: [] } } } } },
+      root
+    );
+    assertEq(third.changed.length, 0, "write tools []: existing empty list changes nothing");
+    rmSync(root, { recursive: true, force: true });
+  }
+
   // ---- Test 5: write tools preserves CRLF ----
   {
     const root = buildFixture();
@@ -412,13 +443,13 @@ async function runTests() {
     rmSync(root, { recursive: true, force: true });
   }
 
-  // ---- Test 8: validateTools — empty/not-array → ok=false ----
+  // ---- Test 8: validateTools — [] is valid (explicit none); other invalid shapes stay ----
   {
     const root = buildFixture();
     const catalog = readToolCatalog(root);
 
     const r1 = validateTools([], catalog);
-    assertEq(r1.ok, false, "validateTools: empty array → ok=false");
+    assertEq(r1.ok, true, "validateTools: empty array → ok=true (explicit none)");
 
     const r2 = validateTools(null, catalog);
     assertEq(r2.ok, false, "validateTools: null → ok=false");
@@ -476,6 +507,73 @@ async function runTests() {
     assertEq(r.unknown.length, 0, "validateTools: no unknown tools");
     assertEq(r.warnings.length, 0, "validateTools: no warnings");
 
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 12: roundtrip — writing [] collapses to the literal tools: [] ----
+  // [] now means EXPLICIT none: the file carries the literal "tools: []" line,
+  // the value reads back as an empty array (never ["[]"]) and re-writing the
+  // same empty list is a no-op rather than a substituted inherited list.
+  {
+    const root = buildFixture();
+    writeSquadConfig(
+      { squads: { dev: { agents: { implementer: { tools: ["Read", "Bash"] } } } } },
+      root
+    );
+    const result = writeSquadConfig(
+      { squads: { dev: { agents: { implementer: { tools: [] } } } } },
+      root
+    );
+    assertEq(result.changed.length, 1, "roundtrip: list → [] reports one change");
+
+    const md = readFileSync(
+      join(root, "agents", "dev", "agents", "implementer.md"),
+      "utf8"
+    );
+    assert(md.includes("tools: []"), "roundtrip: file carries the literal tools: []");
+    assert(!md.includes("['[]']"), "roundtrip: no ['[]'] artifact in the file");
+
+    const config = readSquadConfig(root);
+    const tools = config.squads.dev.agents.implementer.tools;
+    assert(
+      Array.isArray(tools) && tools.length === 0,
+      "roundtrip: read-back of tools: [] is an empty array, not ['[]']"
+    );
+
+    const rerun = writeSquadConfig(
+      { squads: { dev: { agents: { implementer: { tools: [] } } } } },
+      root,
+      { dryRun: true }
+    );
+    assertEq(rerun.changed.length, 0, "roundtrip: re-writing [] is a no-op (no list substituted)");
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 13: roundtrip — a role without a tools line gets an explicit tools: [] ----
+  // The inserted line makes "explicit none" distinct from "never configured",
+  // so later inheritance logic (worker-tool-profiles) can tell them apart.
+  {
+    const root = buildFixture();
+    const result = writeSquadConfig(
+      { squads: { dev: { agents: { notool: { tools: [] } } } } },
+      root
+    );
+    assertEq(result.changed.length, 1, "notool → []: reports one change");
+
+    const md = readFileSync(join(root, "agents", "dev", "agents", "notool.md"), "utf8");
+    assert(md.includes("tools: []"), "notool → []: explicit tools: [] line inserted");
+    assert(!md.includes("['[]']"), "notool → []: no ['[]'] artifact");
+    const lines = md.split("\n");
+    const modelIdx = lines.findIndex((l) => l.startsWith("model:"));
+    const toolsIdx = lines.findIndex((l) => l.startsWith("tools:"));
+    assert(toolsIdx === modelIdx + 1, "notool → []: line inserted after model");
+
+    const config = readSquadConfig(root);
+    const tools = config.squads.dev.agents.notool.tools;
+    assert(
+      Array.isArray(tools) && tools.length === 0,
+      "notool → []: read-back is an empty array, not ['[]']"
+    );
     rmSync(root, { recursive: true, force: true });
   }
 }

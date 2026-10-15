@@ -1,3 +1,6 @@
+import { handleTaskMapRoute } from './task-map-routes.mjs';
+import { handleToolRoute } from './tool-routes.mjs';
+import { handleRuntimeStatisticsRoute } from './runtime-statistics-routes.mjs';
 // scripts/telemetry-server.mjs
 // Telemetry HTTP API — reads the central SQLite store (telemetry-store.mjs).
 // ledger.mjs is used only for /api/flow's overview + turn-log extraction, which
@@ -81,6 +84,11 @@ import { handleCockpitRoute, handleTerminalUpgrade } from './cockpit-routes.mjs'
 // dispatch beside the Cockpit, sharing the Linear-queue cache through
 // linearQueue() below.
 import { handleWorkRoute } from './work-routes.mjs';
+
+// Settings routes (FOC-786 slice G): keys (write-only via /fenix-secrets),
+// provider/routing overlay, repos, retention — transport-only, same guard +
+// body + send helper set as the Work board dispatch below.
+import { handleSettingsRoute } from './settings-routes.mjs';
 
 // FT control plane (FOC-359): datasets, training-run lifecycle, log tail.
 // Pure logic in scripts/ft.mjs; the server only does HTTP guards + dispatch.
@@ -542,7 +550,7 @@ const TEAM_ISSUES_QUERY = `
           estimate
           updatedAt
           assignee { id name displayName }
-          labels(first: 20) { nodes { id name } }
+          labels(first: 20) { nodes { id name color } }
           parent { id identifier title }
         }
       }
@@ -600,6 +608,15 @@ async function fetchLinearQueue(workspace) {
     for (const { team, nodes } of result) {
       for (const n of nodes) {
         const labels = (n.labels?.nodes || []).map((l) => l.name);
+        // labelDetails — the { id, name, color } triple beside the name array
+        // (task-workspace plan: the board colors chips; colors are validated
+        // to Linear's hex forms in work-board's normalizeLabel, so an odd
+        // string degrades to color:null there rather than being trusted here).
+        const labelDetails = (n.labels?.nodes || []).map((l) => ({
+          id: typeof l?.id === 'string' ? l.id : null,
+          name: typeof l?.name === 'string' ? l.name : null,
+          color: typeof l?.color === 'string' ? l.color : null,
+        })).filter((l) => l.name);
         const task = {
           id: n.id,
           identifier: n.identifier,
@@ -613,6 +630,7 @@ async function fetchLinearQueue(workspace) {
           updatedAt: n.updatedAt,
           assignee: n.assignee?.displayName || n.assignee?.name || null,
           labels,
+          labelDetails,
           parent: n.parent ? { identifier: n.parent.identifier, title: n.parent.title } : null,
         };
         task.suggestedSquad = suggestedSquad(task, handoffRules);
@@ -918,6 +936,17 @@ const server = createServer(async (req, res) => {
     // plus linearQueue() so the board's Ready column shares the
     // /api/linear/queue cache instead of fetching Linear on its own.
     if (await handleWorkRoute(req, res, url, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin, linearQueue })) return;
+
+    if (await handleToolRoute(req, res, url, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin })) return;
+    if (await handleTaskMapRoute(req, res, url, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin, linearQueue })) return;
+    if (await handleRuntimeStatisticsRoute(req, res, url, { json, log })) return;
+    if (method === 'GET' && path === '/api/environment') {
+      json(res, 200, { ...launchEnvironment(), mode: process.env.FENIX_ENVIRONMENT || (process.env.NODE_ENV === 'test' || process.env.FENIX_SUPERVISOR_CMD || process.env.LA_CLAUDE_BIN ? 'test' : 'live'), maxActive: Number(process.env.FENIX_MAX_ACTIVE_SUPERVISORS || 2) }); return;
+    }
+
+    // --- Settings routes (FOC-786 slice G) ---
+    // Same guard + body + send helpers; no linearQueue (no Linear reads).
+    if (await handleSettingsRoute(req, res, url, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin })) return;
 
     // --- POST /api/launch (L1b) ---
     // Spawns a local agent window. Bound to 127.0.0.1 + origin-checked (AC3),
@@ -2037,15 +2066,6 @@ const server = createServer(async (req, res) => {
 
     // --- Route matching ---
 
-    // GET /api/environment (FOC-804) — what this server could do natively.
-    // The dashboard reads it to pick between the native launch button and
-    // "Start in Cockpit"; launchSupported mirrors POST /api/launch's refusal.
-    if (path === '/api/environment') {
-      json(res, 200, launchEnvironment());
-      log(method, path, 200);
-      return;
-    }
-
     // GET /api/ft/datasets — list dataset JSONL files with pair counts + sample.
     if (path === '/api/ft/datasets') {
       json(res, 200, await listDatasets());
@@ -2644,14 +2664,21 @@ const server = createServer(async (req, res) => {
 });
 
 // The terminal WebSocket (FOC-783): an upgrade, not a route — validated and
-// TCP-proxied to the session host in cockpit-routes.mjs. Every other upgrade
-// path is destroyed outright; nothing else here speaks WebSocket.
+// TCP-proxied to the session host in cockpit-routes.mjs. Two shapes: the
+// legacy global /api/supervisor/terminal and the task-scoped
+// /api/supervisor/sessions/:sid/terminal (the sid is validated INSIDE
+// handleTerminalUpgrade before any upstream connect — a malformed or unknown
+// id is closed there). Every other upgrade path is destroyed outright; nothing
+// else here speaks WebSocket.
 server.on('upgrade', (req, socket, head) => {
   let pathname = null;
   try {
     pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
   } catch { /* destroyed below */ }
-  if (pathname === '/api/supervisor/terminal') {
+  const scopedTerminal = typeof pathname === 'string'
+    ? pathname.match(/^\/api\/supervisor\/sessions\/[^/]+\/terminal$/)
+    : null;
+  if (pathname === '/api/supervisor/terminal' || scopedTerminal) {
     handleTerminalUpgrade(req, socket, head, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin });
     return;
   }

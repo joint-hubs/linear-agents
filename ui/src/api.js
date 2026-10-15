@@ -1,5 +1,6 @@
 import { buildAnalysisQuery } from './screens/analysis/query.js';
 import { buildTerminalSocketUrl } from './cockpitModel';
+import { buildTaskSupervisorPath, buildTaskTerminalSocketUrl } from './taskCockpitModel';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
@@ -33,6 +34,40 @@ async function postJson(path, payload, signal) {
     body: JSON.stringify(payload ?? {}),
     signal,
   });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.status = r.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+// Shared PUT helper (Settings, FOC-786) — same contract as postJson: the body
+// is parsed even on failure so the thrown error carries .status and .data (the
+// 400 check reason / 503 secrets-not-writable must reach the UI verbatim).
+async function putJson(path, payload, signal) {
+  const r = await fetch(API_BASE + path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload ?? {}),
+    signal,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data?.error || ('API ' + r.status));
+    err.status = r.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+// Shared DELETE helper — no request body (the target is always in the path);
+// the error contract matches putJson.
+async function deleteJson(path, signal) {
+  const r = await fetch(API_BASE + path, { method: 'DELETE', signal });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     const err = new Error(data?.error || ('API ' + r.status));
@@ -438,32 +473,63 @@ export async function postAnalysisCacheRebuild() {
   return data;
 }
 
-// ===== Cockpit (FOC-783) =====
+// ===== Cockpit (FOC-783) + task scoping (task workspaces, PRD §3–5) ========
 // One snapshot of the Supervisor session, the needs-you inbox and the live
 // children. Poll every 5 s from the Cockpit, every 15 s from the nav badge.
 // Errors are { error, ... } with an HTTP status — postJson keeps .status and
 // the parsed body (err.data) so the UI can react to 409/400/503 specifically.
+//
+// Task scoping: every Supervisor endpoint takes an OPTIONAL trailing `scope`
+// ({ sessionId, taskKey }). With a scope the call goes to the task-scoped
+// route (/api/supervisor/sessions/:sid/…) with the taskKey carried along as
+// routing context; without one the legacy global route is used unchanged, so
+// old callers and tests behave exactly as before. There is deliberately no
+// global mutable context — the scope always travels with the call.
 
-export async function getCockpit(signal) {
+// Task sessions — GET /api/supervisor/sessions → { sessions: [{ sessionId,
+// taskKey, taskId, workspace, issueId, title, status, runId, pid,
+// processStartedAt, createdAt, updatedAt, lastError }], maxActive }.
+export async function getSupervisorSessions(signal) {
+  return apiFetch('/api/supervisor/sessions', signal);
+}
+
+export async function getCockpit(signal, scope) {
+  if (scope && scope.sessionId) {
+    const q = new URLSearchParams();
+    q.set('sessionId', scope.sessionId);
+    if (scope.taskKey) q.set('taskKey', scope.taskKey);
+    return apiFetch('/api/cockpit?' + q.toString(), signal);
+  }
   return apiFetch('/api/cockpit', signal);
 }
 
 // Transcript read since a byte offset — { sessionId, state, offset, entries,
 // reset, truncated }. Entries: { uuid, ts, role: user|assistant|tool,
-// text?, tool?: { name, summary } }.
-export async function getConversation({ after, limit } = {}, signal) {
+// text?, tool?: { name, summary } }. Scoped ({ sessionId, taskKey } in opts)
+// → /api/supervisor/sessions/:sid/conversation.
+export async function getConversation({ after, limit, sessionId, taskKey } = {}, signal) {
   const q = new URLSearchParams();
   if (after != null) q.set('after', String(after));
   if (limit != null) q.set('limit', String(limit));
+  let path = '/api/supervisor/conversation';
+  if (sessionId) {
+    path = buildTaskSupervisorPath(sessionId, 'conversation');
+    if (taskKey) q.set('taskKey', taskKey);
+  }
   const qs = q.toString();
-  return apiFetch('/api/supervisor/conversation' + (qs ? '?' + qs : ''), signal);
+  return apiFetch(path + (qs ? '?' + qs : ''), signal);
 }
 
 // 200 { sent, confirmed, queued } | 400 { error } | 409 { error, notification }
 // | 503 { error }. err.data carries the body on failure. On success the body
 // may carry `output` — the on-screen result of /context or /cost, shown in the
-// chat as a command bubble.
-export function postSupervisorMessage(text) {
+// chat as a command bubble. scope → POST /api/supervisor/sessions/:sid/message.
+export function postSupervisorMessage(text, scope) {
+  if (scope && scope.sessionId) {
+    const body = { text };
+    if (scope.taskKey) body.taskKey = scope.taskKey;
+    return postJson(buildTaskSupervisorPath(scope.sessionId, 'message'), body);
+  }
   return postJson('/api/supervisor/message', { text });
 }
 
@@ -471,41 +537,94 @@ export function postSupervisorMessage(text) {
 // question, { choices: [optionIndex…], text? }. 200 { answered: true } |
 // 409 { error: 'ask-changed' | 'dialog-changed', step? } | 503 { error } —
 // same write guards and error shape as postSupervisorMessage.
-export function postSupervisorAsk(body) {
+export function postSupervisorAsk(body, scope) {
+  if (scope && scope.sessionId) {
+    return postJson(buildTaskSupervisorPath(scope.sessionId, 'ask'), {
+      ...body,
+      ...(scope.taskKey ? { taskKey: scope.taskKey } : {}),
+    });
+  }
   return postJson('/api/supervisor/ask', body);
 }
 
 // Answer a TUI permission/select dialog (FOC-810): choice
 // 'allow-once' | 'allow-always' | 'deny' with an optional note (deny only).
 // 200 { sent, closed } | 409 { error: 'dialog-changed' } | 503 { error }.
-export function postSupervisorDialog(body) {
+export function postSupervisorDialog(body, scope) {
+  if (scope && scope.sessionId) {
+    return postJson(buildTaskSupervisorPath(scope.sessionId, 'dialog'), {
+      ...body,
+      ...(scope.taskKey ? { taskKey: scope.taskKey } : {}),
+    });
+  }
   return postJson('/api/supervisor/dialog', body);
 }
 
 // Start (or restart fresh) the Supervisor session inside the container.
-export function postSupervisorSession() {
+// scope → POST /api/supervisor/sessions/:sid/session (re)start-resume of that
+// task's session only.
+export function postSupervisorSession(scope) {
+  if (scope && scope.sessionId) {
+    return postJson(buildTaskSupervisorPath(scope.sessionId, 'session'), {
+      fresh: true,
+      confirm: 'new-session',
+      ...(scope.taskKey ? { taskKey: scope.taskKey } : {}),
+    });
+  }
   return postJson('/api/supervisor/session', { fresh: true, confirm: 'new-session' });
 }
 
 // Same shape as message — drains the wake backlog with the standard prompt.
-export function postSupervisorWake() {
+export function postSupervisorWake(scope) {
+  if (scope && scope.sessionId) {
+    return postJson(buildTaskSupervisorPath(scope.sessionId, 'wake'), {
+      ...(scope.taskKey ? { taskKey: scope.taskKey } : {}),
+    });
+  }
   return postJson('/api/supervisor/wake', {});
 }
 
+// Stop ONE task's Supervisor session (scoped cancel, PRD §6 — stopping task A
+// never touches task B). Only exists scoped: the legacy global route has no
+// unscoped stop to preserve. History and run ids are kept — this stops the
+// process, it does not delete anything.
+export function postSupervisorStop(scope) {
+  if (!scope || !scope.sessionId) {
+    return Promise.reject(new Error('postSupervisorStop needs a sessionId scope'));
+  }
+  return postJson(buildTaskSupervisorPath(scope.sessionId, 'stop'), {
+    ...(scope.taskKey ? { taskKey: scope.taskKey } : {}),
+  });
+}
+
 // Record a gate answer (verbatim text, answered once) and tell the Supervisor.
-export function postGateAnswer(body) {
-  return postJson('/api/gates/answer', body);
+// scope does NOT change the route (gates have no listed scoped verb) — the
+// scoped identity rides the body so the API worker can check task + session.
+export function postGateAnswer(body, scope) {
+  return postJson('/api/gates/answer', scopedBody(body, scope));
 }
 
 // Record a hold answer (option label or free text) and tell the Supervisor.
-export function postHoldAnswer(body) {
-  return postJson('/api/holds/answer', body);
+export function postHoldAnswer(body, scope) {
+  return postJson('/api/holds/answer', scopedBody(body, scope));
 }
 
 // Re-send the "[dashboard] … answered" notice for an answered-but-undelivered
 // gate/hold.
-export function postGateNotify(body) {
-  return postJson('/api/gates/notify', body);
+export function postGateNotify(body, scope) {
+  return postJson('/api/gates/notify', scopedBody(body, scope));
+}
+
+// scopedBody(body, scope) — merge the scoped identity { sessionId, taskKey }
+// into a request body without altering the original. No scope → the body
+// exactly as before (legacy callers).
+function scopedBody(body, scope) {
+  if (!(scope && scope.sessionId)) return body;
+  return {
+    ...(body || {}),
+    sessionId: scope.sessionId,
+    ...(scope.taskKey ? { taskKey: scope.taskKey } : {}),
+  };
 }
 
 // ===== Work board (FOC-784) =====
@@ -520,6 +639,7 @@ export async function getWorkTickets(filters, signal) {
   const q = new URLSearchParams();
   if (f.milestone) q.set('milestone', f.milestone);
   if (f.priority) q.set('priority', f.priority);
+  if (f.label) q.set('label', f.label);
   const qs = q.toString();
   return apiFetch('/api/work/tickets' + (qs ? '?' + qs : ''), signal);
 }
@@ -536,6 +656,26 @@ export function postStartTicket(id, text) {
   return postJson('/api/work/tickets/' + encodeURIComponent(id) + '/start', { text });
 }
 
+// Publish (FOC-788) — Push branch / Open PR with an explicit confirm. The
+// preview carries the confirmToken bound to the state on screen; the POST
+// sends it back with actor "human" (the dashboard's only actor — an agent
+// calling the same endpoints sends "ai" with its own actorId). A checkout
+// that moved answers 409 stale-preview and the caller previews again.
+export function getPublishPreview(id, action, signal) {
+  return apiFetch(
+    '/api/work/tickets/' + encodeURIComponent(id) + '/publish-preview?action=' + encodeURIComponent(action),
+    signal,
+  );
+}
+
+export function postPublish(id, action, confirmToken) {
+  return postJson('/api/work/tickets/' + encodeURIComponent(id) + '/' + action, {
+    confirmToken,
+    actor: 'human',
+    actorId: 'dashboard',
+  });
+}
+
 // Costs & quality (FOC-785) — the Costs screen imports these two by name.
 export function getCosts(period, signal) {
   return apiFetch('/api/costs?period=' + encodeURIComponent(period ?? ''), signal);
@@ -545,9 +685,89 @@ export function getQuality(period, signal) {
   return apiFetch('/api/quality?period=' + encodeURIComponent(period ?? ''), signal);
 }
 
+// ===== Settings (FOC-786) =====
+// Keys, provider & routing, repositories, retention. A key value travels only
+// in the PUT body — never the URL, never a GET — and never comes back: the
+// server answers with check results only, so err.data cannot carry one either.
+
+export async function getSettingsKeys(signal) {
+  return apiFetch('/api/settings/keys', signal);
+}
+
+// Checks the key already stored server-side (no value is sent).
+export async function validateSettingsKey(name) {
+  return postJson('/api/settings/keys/' + encodeURIComponent(name) + '/validate', {});
+}
+
+// `value` is dropped by the caller right after this promise settles (resolve
+// or reject) — it lives in the uncontrolled input until then, nowhere else.
+export function putSettingsKey(name, value, teamKey) {
+  const body = { value };
+  if (teamKey) body.teamKey = teamKey;
+  return putJson('/api/settings/keys/' + encodeURIComponent(name), body);
+}
+
+export async function getSettingsProvider(signal) {
+  return apiFetch('/api/settings/provider', signal);
+}
+
+// Body: { active, custom? } and optionally { key: { value } } — a key
+// candidate the server validates against the NEW provider and saves under its
+// key file before changing the overlay (the onboarding path; an empty field
+// saves with the stored key). As with the keys PUT, the value travels only in
+// this body — never the URL, never a GET, never a response.
+export function putSettingsProvider(body) {
+  return putJson('/api/settings/provider', body ?? {});
+}
+
+export function testSettingsProvider(body) {
+  return postJson('/api/settings/provider/test', body ?? {});
+}
+
+export async function getSettingsRouting(signal) {
+  return apiFetch('/api/settings/routing', signal);
+}
+
+// lead null = back to the models.json routing for the squad.
+export function putSettingsRouting(squad, lead) {
+  return putJson('/api/settings/routing', { squad, lead: lead || null });
+}
+
+export async function getSettingsRepos(signal) {
+  return apiFetch('/api/settings/repos', signal);
+}
+
+export function addSettingsRepo(url, project) {
+  const body = { url };
+  if (project) body.project = project;
+  return postJson('/api/settings/repos', body);
+}
+
+export function getRepoJob(id) {
+  return apiFetch('/api/settings/repos/jobs/' + encodeURIComponent(id));
+}
+
+// Removes the Linear project mapping only — the cloned files stay.
+export function unmapSettingsRepo(name) {
+  return deleteJson('/api/settings/repos/' + encodeURIComponent(name) + '/mapping');
+}
+
+export async function getSettingsRetention(signal) {
+  return apiFetch('/api/settings/retention', signal);
+}
+
 // Terminal WebSocket URL on the same origin (wss behind https). API_BASE as an
-// absolute URL switches the origin and keeps its path prefix. The pure builder
-// lives in cockpitModel.js so the node tests can pin it.
-export function terminalSocketUrl(cols, rows) {
+// absolute URL switches the origin and keeps its path prefix. The pure builders
+// live in cockpitModel.js / taskCockpitModel.js so the node tests can pin them.
+// With a scope ({ sessionId, taskKey }) the URL targets that task's session
+// stream (/api/supervisor/sessions/:sid/terminal); without one, the legacy
+// global socket — old callers unchanged.
+export function terminalSocketUrl(cols, rows, scope) {
+  if (scope && scope.sessionId) {
+    return buildTaskTerminalSocketUrl(API_BASE, window.location, scope, cols, rows);
+  }
   return buildTerminalSocketUrl(API_BASE, window.location, cols, rows);
 }
+
+export function getSupervisorProfilePreview(scope) { return apiFetch(buildTaskSupervisorPath(scope.sessionId,'profile-preview')); }
+export function postSupervisorResume(scope, expectedRevision) { return postJson(buildTaskSupervisorPath(scope.sessionId,'resume'),{confirm:'resume-session',expectedRevision,taskKey:scope.taskKey}); }
