@@ -1,6 +1,6 @@
 # Delivery Plan — Task Workspaces & Concurrent Supervisors (P1–P4)
 
-PRD: `docs/prd/task-workspace-supervisors-prd.md` — **APPROVED 2026-10-14** (all P1–P4 approved by Mateusz, "zatwierdzam"). Implementation **in progress**; nothing delivered yet.
+PRD: `docs/prd/task-workspace-supervisors-prd.md` — **APPROVED 2026-10-14** (all P1–P4 approved by Mateusz, "zatwierdzam"). Implementation **DELIVERED 2026-10-14** (P1–P4 + final verification; evidence in the integration / verification / acceptance logs at the end of this file).
 
 ## 0. Ground rules (binding for every worker)
 
