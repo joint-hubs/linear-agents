@@ -13,6 +13,10 @@ import { settingsPath } from "./fenix-paths.mjs";
 const PROVIDER_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
 const SQUAD_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const KEY_NAME_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
+// Owner ids for the `ownership` key (task ownership, FOC-848). Kept local —
+// scripts/task-ownership.mjs imports this module for readSettings, so the
+// constant cannot be shared without a cycle; the two regexes must not drift.
+const OWNER_ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const TIER_NAMES = ["opus", "sonnet", "haiku", "smallFast"];
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "host.docker.internal"]);
 // Anything shaped like a real credential — the settings file is shared and
@@ -96,7 +100,9 @@ export function validateSettings(obj) {
   if (!isPlainObject(obj)) return { ok: false, errors: ["settings: must be a JSON object"] };
 
   for (const key of Object.keys(obj)) {
-    if (key !== "provider" && key !== "routing") errors.push(`${key}: unknown top-level key`);
+    if (key !== "provider" && key !== "routing" && key !== "ownership") {
+      errors.push(`${key}: unknown top-level key`);
+    }
   }
 
   const provider = obj.provider;
@@ -137,6 +143,55 @@ export function validateSettings(obj) {
           }
           checkNonEmptyString(entry.lead, `routing.${squad}.lead`, 200, errors);
         }
+      }
+    }
+  }
+
+  // The `ownership` key (FOC-848): owners → Linear projects, plus the policy
+  // for unlisted projects. Same shape rules the task-ownership loader's schema
+  // enforces; validated here too so a malformed map never lands on disk.
+  const ownership = obj.ownership;
+  if (ownership !== undefined) {
+    if (!isPlainObject(ownership)) errors.push("ownership: must be an object");
+    else {
+      for (const key of Object.keys(ownership)) {
+        if (key !== "version" && key !== "owners" && key !== "unlisted") {
+          errors.push(`ownership.${key}: unknown key`);
+        }
+      }
+      if (ownership.version !== undefined && ownership.version !== 1) {
+        errors.push("ownership.version: must be 1");
+      }
+      const owners = ownership.owners;
+      if (!isPlainObject(owners)) errors.push("ownership.owners: must be an object");
+      else {
+        for (const [ownerId, entry] of Object.entries(owners)) {
+          if (!OWNER_ID_RE.test(ownerId)) {
+            errors.push(`ownership.owners.${ownerId}: owner id must match /^[a-z][a-z0-9-]{0,31}$/`);
+            continue;
+          }
+          if (!isPlainObject(entry)) errors.push(`ownership.owners.${ownerId}: must be an object`);
+          else {
+            for (const key of Object.keys(entry)) {
+              if (key !== "linearProjects") {
+                errors.push(`ownership.owners.${ownerId}.${key}: unknown key`);
+              }
+            }
+            const projects = entry.linearProjects;
+            if (!Array.isArray(projects) || projects.length === 0) {
+              errors.push(`ownership.owners.${ownerId}.linearProjects: must be a non-empty array`);
+            } else {
+              for (const [i, project] of projects.entries()) {
+                if (typeof project !== "string" || !project.trim()) {
+                  errors.push(`ownership.owners.${ownerId}.linearProjects[${i}]: must be a non-empty string`);
+                }
+              }
+            }
+          }
+        }
+      }
+      if (ownership.unlisted !== undefined && ownership.unlisted !== "allow" && ownership.unlisted !== "ask") {
+        errors.push('ownership.unlisted: must be "allow" or "ask"');
       }
     }
   }

@@ -169,6 +169,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "linear-query.test.mjs",
+      "reason": "isolation audit (fenix-task-ownership): globalThis.fetch is stubbed and cmdIssue is driven in-process with dry-run off (no .state/ fixtures); no ports, no socket binds, no fs writes, no telemetry DB"
+    },
+    {
       "file": "linear-ops.test.mjs",
       "reason": "isolation audit FOC-716/FOC-606: no filesystem writes at all, no ports, no socket binds; the parent-chain fetch is an injected fetchNode stub (no network, no Linear call) and every other input is a literal recorded-response shape; the FOC-606 group spawns the real CLI but only its refusal paths, which validate and exit before any network access (asserted: stdout empty); no telemetry DB"
     },
@@ -423,6 +427,10 @@
     {
       "file": "task-map.test.mjs",
       "reason": "isolation audit (task workspace P4): embed/project fakes injected — no production network, no real model calls, no python spawn (the only 'spawn' hit is prose); mkdtemp/tmpdir cache dirs; no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "task-ownership.test.mjs",
+      "reason": "isolation audit FOC-848: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam and ownership config via the LA_TASK_OWNERSHIP_CONFIG / LA_SETTINGS_FILE seams, all pointed at temp paths at module load; CLI children read fixture files only; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
       "file": "task-process-identity.test.mjs",
