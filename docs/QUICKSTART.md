@@ -6,6 +6,9 @@ inside the container).
 Everything needed at runtime is inside the image `fenix:dev` (~2 GB on disk):
 Node 22, git, Claude Code 2.1.296, CodeGraph 1.6.0, semgrep 1.172.0, uv,
 Python 3.11. The container runs as the non-root user `node`.
+Children spawned by the Supervisor run as a separate user (`fenix-child`) inside the container, so
+they cannot touch the Supervisor's settings, token or tmux socket; `FENIX_CHILD_ISOLATION=off` in
+the compose environment turns it off (debugging only).
 
 ## What you get
 

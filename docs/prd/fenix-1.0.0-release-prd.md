@@ -78,6 +78,9 @@ its turns can be charged to that ticket (§8, task P0.3).
 - Compose services:
   - `fenix-api` — dashboard (web + API), telemetry ingest, cost reconciliation;
   - `fenix-supervisor` — the Supervisor session + child spawner/watchers + worktrees.
+- Child isolation (FOC-802): children spawned by the Supervisor run under a dedicated `fenix-child`
+  user inside the container, so they cannot reach the Supervisor's settings, `host.token` or tmux
+  socket; proof `docker/test-isolation.sh`, escape hatch `FENIX_CHILD_ISOLATION=off`.
 - Volumes: `state` (`.state`, telemetry SQLite), `workspaces` (repo clones + worktrees),
   `claude` (per-squad `CLAUDE_CONFIG_DIR` incl. transcripts). **Retention: keep everything by
   default** (logs are training data); a limit is an opt-in in the wizard / Settings with the disk
