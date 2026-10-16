@@ -16,7 +16,7 @@
 // Run: node scripts/supervisor-wake.test.mjs
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,8 +29,11 @@ import {
   wakeQueuePath,
   wakerPath,
   wakerState,
+  wakerLeaseLockPath,
+  WAKER_LEASE_LOCK_WAIT_MS,
   registryPath,
   writeRegistry,
+  writeWakerLease,
 } from "./supervisor-lib.mjs";
 import { DEFAULT_MAX_LIFETIME_MS, formatEditsMessage, formatWakeMessage, freshRows } from "./supervisor-wake.mjs";
 
@@ -101,7 +104,10 @@ const exitRow = (childId = "dev-1", turn = 0) => ({
 });
 
 function seedLease(runId, lease) {
-  writeFileSync(wakerPath(runId), JSON.stringify(lease, null, 2) + "\n");
+  // The same writer the Supervisor's waker uses (writeWakerLease), so a seed
+  // takes the waker-lease lock like any real writer — the races these tests
+  // exercise are between THIS write and the waker's own (FOC-840).
+  writeWakerLease(runId, lease);
 }
 
 const payload = (session) => JSON.stringify({ session_id: session, hook_event_name: "Stop", stop_hook_active: false });
@@ -129,6 +135,17 @@ function startWaker(runId, { session = "sess-A", env = {} } = {}) {
     child.on("exit", (code) => resolve({ code, stderr, elapsedMs: Date.now() - t0, pid: child.pid })),
   );
   return { child, done };
+}
+
+// Deterministic wait for an async handoff: poll every `step` ms until `probe`
+// is truthy, capped, failing loudly on the cap. Replaces fixed sleeps, which
+// race under suite load (FOC-840).
+async function pollUntil(probe, { what, step = 10, cap = 5000 } = {}) {
+  const t0 = Date.now();
+  while (!probe()) {
+    if (Date.now() - t0 > cap) fail(`timed out after ${Date.now() - t0} ms waiting for ${what}`);
+    await sleep(step);
+  }
 }
 
 // ── pure helpers ─────────────────────────────────────────────────────────────
@@ -264,8 +281,14 @@ await test("a live lease of a DIFFERENT session (orphan of a closed session) is 
 await test("superseded mid-wait → exit 0 within ~1 s, the newer lease is left untouched", async () => {
   const runId = fixtureRun();
   seedChild(runId);
-  const { done } = startWaker(runId, { env: { LA_SUPERVISOR_WAKE_MAX_MS: "6000" } });
-  await sleep(500);
+  const { child, done } = startWaker(runId, { env: { LA_SUPERVISOR_WAKE_MAX_MS: "6000" } });
+  // The waker prints nothing on arm, so its armed lease is the only observable
+  // marker of the arm. A fixed sleep(500) raced under suite load: node startup
+  // outlasted the sleep, the newer lease landed first and the waker's own
+  // arm-write overwrote it — supersession never happened. Poll for the arm.
+  await pollUntil(() => readWakerLease(runId)?.pid === child.pid, {
+    what: `the waker's armed lease (pid ${child.pid})`,
+  });
   const newer = { pid: 1, sessionId: "sess-newer", heartbeatAt: new Date().toISOString(), firedThrough: 0 };
   seedLease(runId, newer);
   const t0 = Date.now();
@@ -274,6 +297,84 @@ await test("superseded mid-wait → exit 0 within ~1 s, the newer lease is left 
   if (Date.now() - t0 > 1500) fail(`stood down after ${Date.now() - t0} ms`);
   const lease = readWakerLease(runId);
   if (lease.pid !== 1 || lease.endedAt) fail(`superseded waker wrote the lease: ${JSON.stringify(lease)}`);
+});
+
+await test("a newer lease written after a heartbeat, before the next read, stands the waker down without a write (race B semantics)", async () => {
+  // Pins the guarded-write semantics at an arbitrary write time: with a wide
+  // poll, the first heartbeat is observed on disk, a newer lease is written
+  // into the (sleeping) waker's blind spot, and the next loop-top read must
+  // stand it down with exit 0 and leave the newer lease untouched. The
+  // read→write window itself is closed structurally by the lock in
+  // supervisor-lib.mjs (writeWakerLease / updateWakerLease hold
+  // waker.json.lock across the re-read and the write) and is exercised by the
+  // 30× loops in the PR, not deterministically by this case.
+  const runId = fixtureRun();
+  seedChild(runId);
+  const { child, done } = startWaker(runId, {
+    env: { LA_SUPERVISOR_WAKE_POLL_MS: "400", LA_SUPERVISOR_WAKE_MAX_MS: "8000" },
+  });
+  await pollUntil(() => readWakerLease(runId)?.pid === child.pid, {
+    what: `the waker's armed lease (pid ${child.pid})`,
+  });
+  const armedHeartbeatAt = readWakerLease(runId).heartbeatAt;
+  // The arm and the first loop iteration can land in the same millisecond, so
+  // the first heartbeat may share the armed lease's timestamp — poll until the
+  // timestamp MOVES; then the latest heartbeat write is on disk and the waker
+  // is between iterations.
+  await pollUntil(() => readWakerLease(runId)?.heartbeatAt !== armedHeartbeatAt, {
+    what: "the first heartbeat to move the armed timestamp",
+  });
+  seedLease(runId, { pid: 1, sessionId: "sess-newer", heartbeatAt: new Date().toISOString(), firedThrough: 0 });
+  const t0 = Date.now();
+  const r = await done;
+  if (r.code !== 0) fail(`expected exit 0, got ${r.code} (${r.stderr})`);
+  if (Date.now() - t0 > 2000) fail(`stood down after ${Date.now() - t0} ms`);
+  const lease = readWakerLease(runId);
+  if (lease.pid !== 1 || lease.sessionId !== "sess-newer") {
+    fail(`the newer lease was overwritten: ${JSON.stringify(lease)}`);
+  }
+  if (lease.endedAt) fail(`superseded waker ended the newer lease: ${JSON.stringify(lease)}`);
+});
+
+// ── waker-lease lock (FOC-840) ───────────────────────────────────────────────
+// The lock lives in supervisor-lib.mjs; these cases pin its recovery and its
+// bounded-wait behaviour through the exported writer.
+
+await test("a stale lock dir (mtime 10 s old) is removed and the write goes through", () => {
+  const runId = fixtureRun();
+  const lock = wakerLeaseLockPath(runId);
+  mkdirSync(lock);
+  const stale = new Date(Date.now() - 10_000); // > WAKER_LEASE_LOCK_STALE_MS (5 s)
+  utimesSync(lock, stale, stale);
+  const t0 = Date.now();
+  writeWakerLease(runId, { pid: 7, sessionId: "s", heartbeatAt: new Date().toISOString(), firedThrough: 0 });
+  const elapsedMs = Date.now() - t0;
+  if (elapsedMs >= 500) fail(`stale recovery took ${elapsedMs} ms — it should not wait out the poll`);
+  const lease = readWakerLease(runId);
+  if (!lease || lease.pid !== 7) fail(`lease not on disk: ${JSON.stringify(lease)}`);
+  if (existsSync(lock)) fail("the stale lock dir survived the acquire");
+});
+
+await test("a fresh foreign lock dir makes writeWakerLease throw 'waker lease lock busy' after the bounded wait", () => {
+  const runId = fixtureRun();
+  const lock = wakerLeaseLockPath(runId);
+  mkdirSync(lock); // mtime now — not stale, so stale recovery must not touch it
+  try {
+    const t0 = Date.now();
+    let err = null;
+    try {
+      writeWakerLease(runId, { pid: 7, sessionId: "s", heartbeatAt: new Date().toISOString() });
+    } catch (e) {
+      err = e;
+    }
+    const elapsedMs = Date.now() - t0;
+    if (!err) fail("writeWakerLease did not throw against a fresh foreign lock");
+    if (!err.message.includes("waker lease lock busy")) fail(`message: ${err.message}`);
+    if (elapsedMs < WAKER_LEASE_LOCK_WAIT_MS - 100) fail(`gave up early after ${elapsedMs} ms`);
+    if (elapsedMs >= 4000) fail(`waited ${elapsedMs} ms — past the bounded wait`);
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
 });
 
 // ── edit records (FOC-795) ───────────────────────────────────────────────────
