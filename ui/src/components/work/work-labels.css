@@ -83,7 +83,7 @@
   font-size: 10.5px;
   color: var(--text-2);
   background: transparent;
-  max-width: 12em;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -93,6 +93,10 @@
   display: flex;
   align-items: baseline;
   gap: 8px;
+  /* The id, the stage tag and the claim tag must all survive a ~190 px card:
+     wrap to a second row instead of pushing the claim past the edge. */
+  flex-wrap: wrap;
+  row-gap: 2px;
 }
 .wk-card-entry .wk-card { width: 100%; }
 .wk-card-cockpit { display: block; padding: 5px 9px 9px; font-size: 12px; }

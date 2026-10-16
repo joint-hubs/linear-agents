@@ -675,9 +675,9 @@ await test('publishDialogModel no preview -> disabled; loading says Loading…, 
 
 // --- claimTag (FOC-902 §E: the claimed-by tag) -------------------------------
 
-await test('claimTag: present -> 12-char short and the full hover title with the status', () => {
+await test('claimTag: present -> 6-hex short after the sup- prefix and the full hover title with the status', () => {
   const tag = claimTag({ claimedBy: { sessionId: 'sup-abcdef1234567890', status: 'running', live: true } });
-  eq(tag.short, 'sup-abcdef12');
+  eq(tag.short, 'abcdef');
   eq(tag.title, 'claimed by sup-abcdef1234567890 (running)');
 });
 
