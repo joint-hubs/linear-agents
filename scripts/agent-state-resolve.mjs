@@ -11,13 +11,21 @@
 // never a throw: a missing env var, git repo, fixture or API key just leaves
 // the key unresolved.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 
 import { AgentStateError, agentStatePath, listFacts, openAgentState, setFact } from "./agent-state.mjs";
 import { keysForRole, laRoot, loadRegistry, registryPath } from "./agent-state-registry.mjs";
-import { HOLDS_SCHEMA_VERSION, git, nextHoldId, readHolds, readRegistry, writeHolds } from "./supervisor-lib.mjs";
+import {
+  HOLDS_SCHEMA_VERSION,
+  git,
+  nextHoldId,
+  readHolds,
+  readRegistry,
+  runDir,
+  writeHolds,
+} from "./supervisor-lib.mjs";
 import { readCurrentRun } from "./supervisor-current-run.mjs";
 import { graphql } from "./linear-client.mjs";
 
@@ -435,49 +443,58 @@ export async function resolveRole(store, { registry, role, namespace, env = proc
   }
 
   let hold = null;
+  let holdSkipped = null;
   const nsRunId = runIdOfNamespace(namespace);
   const askMissing = missing.filter((m) => m.askIfMissing);
   if (nsRunId && askMissing.length > 0) {
-    const holdsStore = readHolds(nsRunId);
-    const origin = holdOrigin(namespace);
-    const matches = holdsStore.holds.filter((h) => h.origin === origin);
-    const asked = new Set(matches.flatMap((h) => askedKeysOf(h)));
-    // A dependency key is named in the question too — even when its own
-    // askIfMissing is false — so the answer can fix the root cause.
-    const askKeys = askMissing.map((m) => m.key);
-    for (const m of missing) {
-      const dep = /^depends on (.+)$/.exec(m.reason);
-      if (dep && !askKeys.includes(dep[1])) askKeys.push(dep[1]);
-    }
-    const neverAsked = askKeys.filter((key) => !asked.has(key));
-    if (neverAsked.length > 0) {
-      const id = nextHoldId(nsRunId);
-      const record = {
-        id,
-        origin,
-        question: `Working state (${role}, ${namespace}): no deterministic source for ` +
-          `${neverAsked.join(", ")}. Answer with one key=value per line.`,
-        options: [{ label: "Provide the values", model: "user", costUsd: 0 }],
-        recommendation: "Add the values to docs/STATE.md or answer here; agent keys stay unaffected.",
-        impact: "low",
-        resolution: null,
-        state: "open",
-        createdAt: at,
-        presentedAt: null,
-        until: null,
-        answer: null,
-        blocks: null,
-        history: [{ event: "created", at }],
-      };
-      writeHolds(nsRunId, { version: HOLDS_SCHEMA_VERSION, holds: [...holdsStore.holds, record] });
-      hold = { id, created: true };
+    // The hold store lives inside the run dir, and writeHolds would mkdir it
+    // from nothing — a run whose dir was never created (or is already gone)
+    // must not gain a phantom directory just because a resolver came up
+    // empty. Holds are written only into an existing run.
+    if (existsSync(runDir(nsRunId))) {
+      const holdsStore = readHolds(nsRunId);
+      const origin = holdOrigin(namespace);
+      const matches = holdsStore.holds.filter((h) => h.origin === origin);
+      const asked = new Set(matches.flatMap((h) => askedKeysOf(h)));
+      // A dependency key is named in the question too — even when its own
+      // askIfMissing is false — so the answer can fix the root cause.
+      const askKeys = askMissing.map((m) => m.key);
+      for (const m of missing) {
+        const dep = /^depends on (.+)$/.exec(m.reason);
+        if (dep && !askKeys.includes(dep[1])) askKeys.push(dep[1]);
+      }
+      const neverAsked = askKeys.filter((key) => !asked.has(key));
+      if (neverAsked.length > 0) {
+        const id = nextHoldId(nsRunId);
+        const record = {
+          id,
+          origin,
+          question: `Working state (${role}, ${namespace}): no deterministic source for ` +
+            `${neverAsked.join(", ")}. Answer with one key=value per line.`,
+          options: [{ label: "Provide the values", model: "user", costUsd: 0 }],
+          recommendation: "Add the values to docs/STATE.md or answer here; agent keys stay unaffected.",
+          impact: "low",
+          resolution: null,
+          state: "open",
+          createdAt: at,
+          presentedAt: null,
+          until: null,
+          answer: null,
+          blocks: null,
+          history: [{ event: "created", at }],
+        };
+        writeHolds(nsRunId, { version: HOLDS_SCHEMA_VERSION, holds: [...holdsStore.holds, record] });
+        hold = { id, created: true };
+      } else {
+        const newest = matches[matches.length - 1];
+        if (newest) hold = { id: newest.id, created: false, state: newest.state };
+      }
     } else {
-      const newest = matches[matches.length - 1];
-      if (newest) hold = { id: newest.id, created: false, state: newest.state };
+      holdSkipped = "no run dir";
     }
   }
 
-  return { resolved, missing, hold, applied, ignored };
+  return { resolved, missing, hold, holdSkipped, applied, ignored };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────

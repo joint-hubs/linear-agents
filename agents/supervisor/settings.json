@@ -164,6 +164,11 @@
           },
           {
             "type": "command",
+            "command": "node \"$LA_ROOT/scripts/agent-state-hook.mjs\" SessionStart",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "node \"$LA_ROOT/scripts/supervisor-session-hook.mjs\" SessionStart",
             "timeout": 5
           }

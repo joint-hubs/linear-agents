@@ -1504,15 +1504,27 @@ export const childSettingsPath = (runId, childId) =>
  *   · No `allow` list. Under merge semantics an allow entry can only ADD a
  *     permission, never remove one, and this file exists to remove. Writing one
  *     would make the file's intent readable two ways.
- *   · No `hooks`. The squad's SessionStart telemetry hook already loads from the
- *     config dir; repeating it here risks registering it twice and double-
- *     counting every child run.
+ *   · Exactly one hook: the SessionStart working-state re-injection (FOC-729).
+ *     The squad file's telemetry hook is NOT repeated here — it already loads
+ *     from the config dir, and repeating it would double-count every child run.
+ *     This command is unique to this layer, so it registers exactly once; its
+ *     namespace and role come from the child's inherited env.
  *
  * The squad's own denies are copied in anyway even though the merge would apply
  * them regardless — so one file answers "what is this child forbidden to do?"
  * without needing to know the merge rules. Order is stable (squad first, then
  * whatever the Supervisor adds) so regenerating produces a byte-identical file.
  */
+// One source for the hook the Supervisor settings and the child settings both
+// carry — tests compare both files against this object. The command relies on
+// $LA_ROOT in the child env (inherited from the Supervisor, like every other
+// hook command).
+export const WORKING_STATE_SESSION_START_HOOK = {
+  type: "command",
+  command: "node \"$LA_ROOT/scripts/agent-state-hook.mjs\" SessionStart",
+  timeout: 10,
+};
+
 export function buildChildSettings(...baseSettings) {
   const deny = [];
   for (const base of [...baseSettings, { permissions: { deny: SUPERVISOR_DENY } }]) {
@@ -1520,7 +1532,12 @@ export function buildChildSettings(...baseSettings) {
       if (!deny.includes(rule)) deny.push(rule);
     }
   }
-  return { permissions: { deny } };
+  // Key order is part of the contract: the file must stay byte-identical
+  // across regenerations.
+  return {
+    permissions: { deny },
+    hooks: { SessionStart: [{ hooks: [WORKING_STATE_SESSION_START_HOOK] }] },
+  };
 }
 
 // ── redaction (moved here from supervisor-status.mjs, FOC-783) ───────────────
