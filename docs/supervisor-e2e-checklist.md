@@ -71,6 +71,7 @@ Force the refusal once, to see fail-closed working:
 
 - [ ] `supervisor-spawn.mjs` on a run with no `triage.json` exits 1 and spawns nothing.
 - [ ] `record --verdict dev --confidence 50` is refused — under 70 the verdict must be `ask`.
+- [ ] triage refuses a ticket leased to another live session; `triage.json.lease` records the check.
 
 ### AC-5 — Gate relay (one GATE 1 answer)
 Triage a *planning* issue so a PLAN child runs and reaches GATE 1.
