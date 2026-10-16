@@ -100,6 +100,7 @@ WHY — retry without diagnosis re-runs the same failure and loses the diagnosti
 
 ### Loop-limit
 Shared with DEV: after threshold attempts → `escalated` + `needs:answer`, EXIT cleanly (no busy-wait). **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, keep `escalated`, drop `needs:answer`, emit a `question` gate before exiting.
+Working state: follow the `working-state` skill — get before searching, set what you need again, never write the store file directly.
 </test_loop>
 
 <test_hard_rules>

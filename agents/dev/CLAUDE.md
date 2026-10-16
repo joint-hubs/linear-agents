@@ -96,6 +96,7 @@ Do NOT include: step-by-step implementation instructions, chosen algorithms, inv
 **Standing reminder — put this in every code-writing brief:**
 - *Hygiene* — match the style of surrounding code; no dead code, no leftover debug output, no commented-out blocks, no unrelated drive-by edits; update or add tests next to the change.
 - *Security* — never hardcode or log secrets, tokens or credentials; validate and sanitize anything coming from outside (user input, API payloads, files); parameterize queries; no new dependency without flagging it in the return; least privilege for anything touching filesystem, network or shell.
+- *Working state* — follow the `working-state` skill — get before searching, set what you need again, never write the store file directly.
 
 Incomplete brief → the subagent is instructed to return questions and stop. Expect that, and answer rather than guessing on its behalf.
 </brief_contract>

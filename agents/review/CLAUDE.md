@@ -108,6 +108,7 @@ Verify cheaply (ONE command — do NOT load the diff into your context):
 git rev-parse --verify <branch> && git diff --stat $base...<branch> | tail -3
 ```
 Branch not found locally → report "branch <name> not found locally — needs fetch" and stop. Do NOT `git push`, force, or `git fetch`. A candidate diff >400 LOC (`git diff --stat` from the verify step) → suggest a split in the round file instead of deep-reviewing a mega-diff. Risk-tier before briefing: `risk:high`, `type:tech` (security-relevant) and auth/payment paths get deeper rigor — brief `deep`/`security` accordingly.
+Working state: follow the `working-state` skill — get before searching, set what you need again, never write the store file directly.
 
 ### 3. Parallel review (3 subagents, concurrent)
 Run `first-pass` ∥ `security` ∥ `deep` via Task tool. **Brief = `<base>` + `<branch>` + issue AC — each pass runs `git diff $base...<branch>` ITSELF (they have Bash) and reads touched files in its own context.** You never paste diff content into briefs — the diff lives in the passes' cheap contexts, not yours. Each returns findings.

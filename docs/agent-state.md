@@ -16,12 +16,12 @@ storage because the rendered block is sent to model providers. The file lives at
 ## Synopsis
 
 ```
-node scripts/agent-state.mjs <get|set|list|retire|prune|render|history|resolve|missing|registry> [options]
+node scripts/agent-state.mjs <get|set|list|retire|prune|drop|render|history|resolve|missing|registry> [options]
 ```
 
 | Flag | Applies to | Meaning | Default |
 |---|---|---|---|
-| `--namespace`, `-n` | all, except `registry` | `supervisor:<id>` \| `child:<id>/<id>` \| `session:<id>` | required (resolve, missing) |
+| `--namespace`, `-n` | all, except `registry` | `supervisor:<id>` \| `child:<id>/<id>` \| `session:<id>` | required (resolve, missing); otherwise derived from the session env (FOC-730, see below — exit 2 when the env names no namespace) |
 | `--key`, `-k` | get, set, retire, history | `^[a-z][a-z0-9_]{0,63}$`; `history` filters to one key | required for get/set/retire |
 | `--value`, `-v` | set | the fact, ≤ 2048 UTF-8 bytes, secret-screened | required for set |
 | `--tier` | set | `base` \| `agent` | `agent` |
@@ -36,7 +36,8 @@ node scripts/agent-state.mjs <get|set|list|retire|prune|render|history|resolve|m
 | `--limit` | history | the most recent N rows, ascending by id | 100 |
 | `--role` | resolve, missing | `supervisor` \| `plan` \| `dev` \| `review` \| `test` | required |
 | `--cwd` | resolve | working directory for the git resolvers | process cwd |
-| `--actor` | set, retire, prune, resolve | attributed in `facts_history` (resolve: the resolver's writes) | `$LA_TASK_OWNER`, else `cli` |
+| `--actor` | set, retire, prune, resolve | attributed in `facts_history` (resolve: the resolver's writes) | `FENIX_STAGE` for a child, `supervisor` on a Supervisor run, else `$LA_TASK_OWNER` / `cli` |
+| `--yes` | drop | confirm the destructive delete | required for drop — without it drop prints one line and exits 2 |
 | `--db` | all, except `registry` | store path | `$LA_AGENT_STATE_DB`, else the default path above |
 | `--json` | all | machine-readable output | off |
 
@@ -96,6 +97,15 @@ $ node scripts/agent-state.mjs prune --namespace supervisor:run-42 --scope task
 pruned 1 key(s): current_focus
 ```
 
+**drop** — deletes every `facts` and `facts_history` row of exactly one namespace, inside one
+transaction — tier included: a base key in that namespace dies too, because the namespace itself is
+going away (run retention). Refuses without `--yes` (exit 2, one line, nothing deleted).
+
+```
+$ node scripts/agent-state.mjs drop --namespace supervisor:run-42 --yes
+dropped supervisor:run-42 (3 fact row(s), 5 history row(s))
+```
+
 **render** — the `=== WORKING STATE ===` block injected into context. `--json` prints
 `{ "ok": true, "verb": "render", "text": ..., "lines": ..., "omitted": ... }`.
 
@@ -128,6 +138,43 @@ $ node scripts/agent-state.mjs history --namespace supervisor:run-42
 | Agent key cap | 50 active per namespace (`AGENT_KEY_CAP`); guards new keys and re-activations, not updates of live rows |
 | `prune` retires | active agent keys with `expires_at <= now`, plus all active agent keys of `--scope` when given |
 | `render` guarantees | header line `=== WORKING STATE ===`; base keys first (alphabetical) and never cut; agent lines by `last_read_at` desc (unread last), then `updated_at` desc; `\n` and `\r` in values escaped as literal `\n` / `\r`; caps 60 lines / 6144 bytes with the `N more — use agent-state get` tail counted inside them; deterministic for the same store |
+
+## Agents: how to use it (FOC-730)
+
+The `=== WORKING STATE ===` block at SessionStart is this store, rendered. The `working-state` skill
+(`agents/_shared/skills/working-state/SKILL.md`, synced into every launch dir) is the how-to; the
+contract lines in each role's CLAUDE.md point at it: **get a known parameter before searching for it,
+set what you will need again, never write the store file directly.**
+
+**Namespace and actor come from the session env** — agents do not pass `--namespace`:
+
+| Session env | Namespace | Actor (`--actor` default) |
+|---|---|---|
+| `LA_SUPERVISOR_CHILD` + `LA_SUPERVISOR_RUN` | `child:<run>/<child>` | `FENIX_STAGE` (the squad role) |
+| `LA_SUPERVISOR_RUN` alone | `supervisor:<run>` | `supervisor` |
+| neither | the CLI exits 2 rather than guessing | `$LA_TASK_OWNER`, else `cli` |
+
+**Prune moments** — the store prunes itself at the boundaries a working state naturally ends at; the
+Supervisor and its scripts drive it, agents do nothing:
+
+| Moment | What happens | Where |
+|---|---|---|
+| Turn end (child exit) | `prune --scope turn` on the child namespace; recorded as `workingStatePruned.turn` | `supervisor-watch.mjs` |
+| Task close (`cleanup remove`) | the child namespace is exported to `<archive>/agent-state.json` (`{ namespace, exportedAt, facts, history }`), then `prune --scope task` + `--scope turn`; when the removed child was the run's last standing worktree, the supervisor namespace's task-scoped keys retire too; recorded as `workingStatePruned.task` | `supervisor-cleanup.mjs` |
+| Run retention (`cleanup prune`) | `drop` of `supervisor:<run>` and every `child:<run>/*` namespace | `supervisor-cleanup.mjs` |
+
+**drop** is the only destructive verb and the Supervisor's, not an agent's: it refuses without `--yes`
+(exit 2, one line) and deletes every row of the namespace — base keys included, because the namespace
+itself is going away.
+
+**The deny rules** — one writer, the CLI. `SUPERVISOR_DENY` (`scripts/supervisor-lib.mjs`) and the
+Supervisor's `agents/supervisor/settings.json` carry the same five rules, and `buildChildSettings`
+copies them into every child's generated settings: `Bash(sqlite3 *agent-state*)`,
+`Bash(node -e *agent-state*)`, `Bash(node --eval *agent-state*)`, `Edit(//**/agent-state.sqlite)`,
+`Write(//**/agent-state.sqlite)`. The `//` anchor makes the Edit/Write patterns filesystem-wide — a bare `**/`
+pattern only matches paths under the current directory, and the store lives in `LA_SUPERVISOR_STATE_HOME`.
+Prefix match, not a sandbox — the real control is that the CLI is the
+only code that knows the schema, and every change it makes lands in `facts_history`.
 
 ## Base keys and resolvers (FOC-728)
 
@@ -346,8 +393,9 @@ echo '{"hook_event_name":"SessionStart","source":"compact"}' | LA_SUPERVISOR_RUN
   `BASE_KEY_PROTECTED`, `AGENT_KEY_CAP`, `VALUE_TOO_LONG`, `VALUE_SECRET_SHAPED`, `NOT_FOUND`,
   `REGISTRY_INVALID` (the registry file failed validation — every verb, including `resolve`/`missing`/`registry`).
 - **2** — malformed caller request (usage): `NAMESPACE_INVALID`, `KEY_INVALID`, `FIELD_INVALID`, `USAGE`
-  (unknown verb/flag, missing `--namespace`/`--key`/`--value`, extra positional, invalid `--ttl`/`--limit`,
-  non-ISO `--expires-at` or `LA_AGENT_STATE_NOW`, dash-form value).
+  (unknown verb/flag, missing `--namespace`/`--key`/`--value` or a session env that names no namespace,
+  extra positional, invalid `--ttl`/`--limit`, non-ISO `--expires-at` or `LA_AGENT_STATE_NOW`,
+  dash-form value), and `drop` without `--yes` (one line, no usage text).
 
 With `--json`, errors go to stderr as `{ "ok": false, "code": "...", "message": "..." }`. Human errors go
 to stderr as `agent-state: <message> (<CODE>)`, followed by the usage text on exit 2. The
@@ -365,14 +413,17 @@ to stderr as `agent-state: <message> (<CODE>)`, followed by the usage text on ex
 | `LA_AGENT_STATE_LINEAR_FIXTURE` | `resolve`: JSON fixture replacing the Linear network in tests (`<identifier> → issue facts`) |
 | `LA_ROOT` | install root of the tooling checkout; anchors the registry, `config/projects.json` and `docs/STATE.md` |
 | `LA_SUPERVISOR_STATE_HOME` | Supervisor state home — `<home>/<runId>/children.json` and `<home>/<runId>/holds.json`; when set (and `LA_AGENT_STATE_DB` is not), also anchors the store at `<home>/agent-state/agent-state.sqlite` |
-| `LA_SUPERVISOR_RUN` / `LA_SUPERVISOR_CHILD` | env fallbacks for the run/child ids when the registry row is read |
+| `LA_SUPERVISOR_RUN` / `LA_SUPERVISOR_CHILD` | env fallbacks for the run/child ids when the registry row is read; on the non-delegated verbs they also derive the default `--namespace` (FOC-730) |
+| `FENIX_STAGE` | a child's squad role — the default `--actor` when `LA_SUPERVISOR_CHILD` is set |
 | `LA_TASK_ID` | seeded into the child `issue` key by the first resolver of its chain |
 
 ## What comes next
 
 - **FOC-728** — landed: the base keys, resolvers and hold round-trip above.
 - **FOC-729** — landed: the SessionStart injection above + spawn seeding from PINNED STATE.
-- **FOC-730** — skill + task-close `prune` + deny rules for raw DB writes.
+- **FOC-730** — landed: the `working-state` skill, the contract lines in each role's CLAUDE.md, env-derived
+  namespace/actor, `drop`, the task-close and turn-end prune, and the deny rules for raw DB writes ("Agents:
+  how to use it" above).
 
 Only this CLI writes the store; raw writes to the database file are denied in Supervisor and child
 permission lists.
