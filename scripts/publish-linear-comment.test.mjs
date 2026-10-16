@@ -14,6 +14,8 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { parseArgs } from "./publish-linear-comment.mjs";
@@ -91,6 +93,51 @@ test("without the pass flag no label step runs at all", () => {
   const r = run([]);
   assert.notEqual(r.status, 0);
   assert.doesNotMatch(r.stdout + r.stderr, /returned-by:review/);
+});
+
+console.log("\npisi integration switch (FOC-772)");
+
+// A pisi target is the env the linear-ops child inherits (LINEAR_WORKSPACE);
+// the integrations switch is read through LA_SETTINGS_FILE.
+const runWith = (extra, envPatch) =>
+  spawnSync(
+    process.execPath,
+    [CLI, "--issue", "ZZZ-999999", "--tag", "test:publish-cli", "--squad", "dev", "--what", "probe", "--summary", "s", ...extra],
+    { encoding: "utf8", env: { ...process.env, ...envPatch } },
+  );
+
+const settingsOverlay = (name, flag) => {
+  const path = join(tmpdir(), `publish-settings-${name}-${process.pid}-${Date.now()}.json`);
+  writeFileSync(path, JSON.stringify({ integrations: { pisi: flag } }));
+  return path;
+};
+
+test("a pisi target with the integration off exits 1 with the hint, before any network call", () => {
+  const off = settingsOverlay("off", false);
+  try {
+    const r = runWith([], { LINEAR_WORKSPACE: "pisi", LA_SETTINGS_FILE: off });
+    assert.equal(r.status, 1, `expected exit 1, got ${r.status}\n${r.stdout}\n${r.stderr}`);
+    assert.match(
+      r.stderr,
+      /the pisi workspace is off — enable it with: node scripts\/fenix-settings\.mjs set integrations/,
+      `no refusal hint in output\n${r.stdout}\n${r.stderr}`,
+    );
+    assert.doesNotMatch(r.stdout + r.stderr, /comment posted/i);
+  } finally {
+    rmSync(off, { force: true });
+  }
+});
+
+test("a pisi target with the integration on does not hit the refusal (dry-run proceeds)", () => {
+  const on = settingsOverlay("on", true);
+  try {
+    const r = runWith(["--dry-run"], { LINEAR_WORKSPACE: "pisi", LA_SETTINGS_FILE: on });
+    assert.equal(r.status, 0, `expected exit 0, got ${r.status}\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /dry-run/i);
+    assert.doesNotMatch(r.stdout + r.stderr, /pisi workspace is off/);
+  } finally {
+    rmSync(on, { force: true });
+  }
 });
 
 summary();
