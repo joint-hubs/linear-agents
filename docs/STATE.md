@@ -3,6 +3,11 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Fenix supervisor contract: `agents/supervisor/CLAUDE.md`. Squad model routing: `config/models.json`. Execution plan: `docs/BUILD-BACKLOG.md`. Atlas delegation is a separate mechanism.
 
+<!-- state-index:start -->
+## Task journals (generated)
+
+<!-- state-index:end -->
+
 ## Stałe zasady — od 2026-09-29 (dyrektywa Mateusza, „obowiązują od teraz")
 
 Nadrzędne wobec wcześniejszych notatek z 2026-09-28 tam, gdzie są węższe.
