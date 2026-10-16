@@ -199,6 +199,11 @@ const build = (opts = {}) => {
       readRegistry: (runId) => ({ runId, children: opts.registry?.[runId] ?? {} }),
       liveChildren: (registry) => Object.values(registry.children ?? {}).filter((c) => c.status === "running"),
     },
+    // FOC-902 §D: pickup seams forwarded verbatim (undefined keeps the
+    // overlay/real-timer defaults).
+    ...(opts.pickupDeps ?? {}),
+    autoPickup: opts.autoPickup,
+    listCandidates: opts.listCandidates,
   });
   return { host, store, fakes, fakeFor, legacyFake, tmp, stops };
 };
@@ -839,4 +844,141 @@ test('explicit resume starts through cap, preserves history and never replays in
  assert.equal((await request(port,'POST','/sessions/'+sid+'/resume',{body})).status,202);await host.settled();
  assert.equal(store.get(sid).status,'running');assert.deepEqual(fakeFor(sid).tmux.pastes,['initial prompt for resume']);
  }finally{host.close();store.close();}
+});
+
+// ── FOC-902 §D: autonomous pickup ────────────────────────────────────────────
+
+// Fake timer seams: nothing ever fires; tests read what was scheduled and call
+// host.pickupTick() directly.
+const fakeTimers = () => {
+  const timers = [];
+  const api = {
+    timers,
+    setTimeout: (fn, ms) => { const h = { kind: 'timeout', fn, ms, cleared: false }; timers.push(h); return h; },
+    setInterval: (fn, ms) => { const h = { kind: 'interval', fn, ms, cleared: false }; timers.push(h); return h; },
+    clearTimeout: (h) => { if (h) h.cleared = true; },
+    clearInterval: (h) => { if (h) h.cleared = true; },
+  };
+  return api;
+};
+
+const pickupIssue = (label, { priority = null, createdAt = '2026-01-01T00:00:00.000Z' } = {}) => ({
+  identifier: `ISSUE-${label}`,
+  title: `Ticket ${label}`,
+  priority,
+  createdAt,
+  project: { name: 'Fenix' },
+});
+
+test('auto-pickup is off by default: no timer scheduled, /pickup reports the documented defaults, tick is a no-op', async () => {
+  const timersApi = fakeTimers();
+  const { host, store } = build({ pickupDeps: { ...timersApi, now: () => 0 } });
+  const port = await listen(host);
+  try {
+    assert.equal(host.autoPickup.enabled, false);
+    assert.deepEqual(timersApi.timers, []);
+    const r = await request(port, 'GET', '/pickup');
+    assert.deepEqual(r.json, {
+      enabled: false, pollSeconds: 300, states: ['Backlog'], lastTickAt: null, lastError: null, lastEnqueued: [],
+    });
+    assert.equal(await host.pickupTick(), null);
+    assert.equal(r.json.lastTickAt, null); // the disabled tick wrote nothing
+  } finally { host.close(); store.close(); }
+});
+
+test('auto-pickup enabled: first tick scheduled 10 s out, repeats every pollSeconds; pickupStop clears both', () => {
+  const timersApi = fakeTimers();
+  const { host, store } = build({
+    autoPickup: { enabled: true, pollSeconds: 90, states: ['Todo', 'Backlog'], workspace: 'workspace' },
+    pickupDeps: { ...timersApi, now: () => 0 },
+  });
+  try {
+    assert.deepEqual(
+      timersApi.timers.map((h) => ({ kind: h.kind, ms: h.ms })),
+      [{ kind: 'timeout', ms: 10_000 }, { kind: 'interval', ms: 90_000 }],
+    );
+    assert.deepEqual(host.autoPickup.states, ['Todo', 'Backlog']);
+    host.pickupStop();
+    assert.ok(timersApi.timers.every((h) => h.cleared));
+  } finally { host.close(); store.close(); }
+});
+
+test('pickupTick enqueues by priority then age, skips candidates already in the store (terminal rows included) and stops at the cap', async () => {
+  const store = createTaskSessionStore({ dbPath: ':memory:', maxActive: 2 });
+  // A queued owner (active) and a terminal row: both must block their ticket.
+  const taken = store.ensure({ taskKey: 'workspace:ISSUE-TAKEN', taskId: 'ISSUE-TAKEN', workspace: 'workspace', issueId: 'ISSUE-TAKEN', title: 'taken' });
+  const done = store.ensure({ taskKey: 'workspace:ISSUE-DONE', taskId: 'ISSUE-DONE', workspace: 'workspace', issueId: 'ISSUE-DONE', title: 'done' });
+  store.update(done.sessionId, { status: 'stopped' });
+  const candidates = [
+    pickupIssue('DONE', { priority: 1, createdAt: '2026-01-01T00:00:00.000Z' }),
+    pickupIssue('TAKEN', { priority: 1, createdAt: '2026-01-01T00:00:00.000Z' }),
+    pickupIssue('A', { priority: 1, createdAt: '2026-01-02T00:00:00.000Z' }),
+    pickupIssue('C', { priority: 3 }),
+    pickupIssue('B', { priority: 1, createdAt: '2026-01-03T00:00:00.000Z' }),
+    pickupIssue('D'), // no priority — after every ranked one
+  ];
+  const { host } = build({
+    store,
+    maxActive: 2,
+    autoPickup: { enabled: true, workspace: 'workspace' },
+    pickupDeps: fakeTimers(),
+    listCandidates: async () => candidates,
+  });
+  try {
+    // DONE and TAKEN are skipped (in store); A wins over B and C on priority;
+    // the cap (2 minus the queued TAKEN row) stops the loop before B.
+    const result = await host.pickupTick();
+    assert.deepEqual(result, { candidates: 6, enqueued: ['workspace:ISSUE-A'], skipped: 2 });
+    assert.deepEqual(host.pickupState.lastEnqueued, ['workspace:ISSUE-A']);
+    assert.equal(host.pickupState.lastError, null);
+    // A won over B and C; the cap (2 minus the queued TAKEN row) stopped the
+    // loop before B.
+    assert.equal(store.getByTask('workspace:ISSUE-A').status, 'queued');
+    assert.equal(store.getByTask('workspace:ISSUE-B'), null);
+    assert.equal(store.getByTask('workspace:ISSUE-C'), null);
+    assert.equal(store.getByTask('workspace:ISSUE-D'), null);
+  } finally { host.close(); store.close(); }
+});
+
+test('a throwing listCandidates is logged as lastError and the next tick still runs', async () => {
+  let fail = true;
+  const { host, store } = build({
+    autoPickup: { enabled: true, workspace: 'workspace' },
+    pickupDeps: { ...fakeTimers(), now: () => 0 },
+    listCandidates: async () => {
+      if (fail) throw new Error('linear down');
+      return [pickupIssue('OK')];
+    },
+  });
+  try {
+    const first = await host.pickupTick();
+    assert.deepEqual(first, { error: 'linear down' });
+    assert.equal(host.pickupState.lastError, 'linear down');
+    assert.equal(host.pickupState.lastTickAt, new Date(0).toISOString());
+    fail = false;
+    const second = await host.pickupTick();
+    assert.deepEqual(second, { candidates: 1, enqueued: ['workspace:ISSUE-OK'], skipped: 0 });
+    assert.equal(host.pickupState.lastError, null);
+    assert.equal(store.getByTask('workspace:ISSUE-OK').status, 'queued');
+  } finally { host.close(); store.close(); }
+});
+
+test('GET /pickup with pickup enabled reports the configured shape and the last tick', async () => {
+  const { host, store } = build({
+    autoPickup: { enabled: true, pollSeconds: 120, workspace: 'workspace' },
+    pickupDeps: { ...fakeTimers(), now: () => 0 },
+    listCandidates: async () => [pickupIssue('P1')],
+  });
+  const port = await listen(host);
+  try {
+    await host.pickupTick();
+    const r = await request(port, 'GET', '/pickup');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.enabled, true);
+    assert.equal(r.json.pollSeconds, 120);
+    assert.deepEqual(r.json.states, ['Backlog']);
+    assert.equal(r.json.lastError, null);
+    assert.deepEqual(r.json.lastEnqueued, ['workspace:ISSUE-P1']);
+    assert.ok(typeof r.json.lastTickAt === 'string');
+  } finally { host.close(); store.close(); }
 });

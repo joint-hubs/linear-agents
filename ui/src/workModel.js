@@ -409,6 +409,19 @@ export function publishDialogModel(preview, action, { sending, result, error, lo
   };
 }
 
+// claimTag(ticket) -> the claimed-by tag's view model for the card head, or
+// null when the payload carries no claim (FOC-902 §E). short is the first 12
+// characters of the owning session id, title the full hover text — the
+// sessionId travels in full in the title, never truncated in the tooltip.
+export function claimTag(ticket) {
+  const c = ticket && ticket.claimedBy;
+  if (!c || typeof c.sessionId !== 'string' || !c.sessionId) return null;
+  return {
+    short: c.sessionId.slice(0, 12),
+    title: `claimed by ${c.sessionId}${c.status ? ` (${c.status})` : ''}`,
+  };
+}
+
 // Every publish failure is spelled out by its contract name (plan §5):
 // no-checkout, stale-preview, push-refused, pr-failed — with the scrubbed
 // detail when the server sent one.

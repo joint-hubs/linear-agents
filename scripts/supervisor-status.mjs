@@ -44,6 +44,8 @@ import { join } from "node:path";
 
 import { atomicWriteJSON } from "./utils.mjs";
 import { readFocus } from "./supervisor-focus.mjs";
+import { pidAlive } from "./supervisor-current-run.mjs";
+import { readActiveSessions, taskSessionsDbPath } from "./task-sessions.mjs";
 import {
   TERMINAL_STATUSES,
   pollBaseMs,
@@ -106,6 +108,44 @@ export function focusLine(focus) {
       : "";
   const label = focus.kind === "overhead" ? "overhead" : focus.taskId;
   return `Focus: ${label}${since}${focus.source ? ` (${focus.source})` : ""}`;
+}
+
+// ── task-session leases (FOC-902 §C) ─────────────────────────────────────────
+// The managed-session view of "which tickets are being worked right now",
+// read straight from the store the session host keeps. `mine` is the row
+// whose session id is this session's (`FENIX_SUPERVISOR_SESSION_ID`); every
+// other active row lands in `others` with `live` from the pid — a dead pid is
+// `stale` in the line, the same word the doctor uses. A missing or unreadable
+// store reads as `null`: the briefing must not turn a store problem into a
+// false "nobody is working".
+export function leasesOf(env = process.env) {
+  const dbPath = taskSessionsDbPath(env);
+  if (!existsSync(dbPath)) return null;
+  const { sessions, unknown } = readActiveSessions(dbPath);
+  if (unknown) return null;
+  const mineId = env.FENIX_SUPERVISOR_SESSION_ID || null;
+  const mineRow = mineId ? (sessions.find((s) => s.sessionId === mineId) ?? null) : null;
+  return {
+    mine: mineRow ? { taskKey: mineRow.taskKey, sessionId: mineRow.sessionId, status: mineRow.status } : null,
+    others: sessions
+      .filter((s) => s.sessionId !== mineId)
+      .map((s) => ({ sessionId: s.sessionId, taskKey: s.taskKey, status: s.status, live: pidAlive(s.pid) })),
+  };
+}
+
+/** The briefing's one `Leases:` line — the shapes the plan pins. */
+export function leasesLine(leases) {
+  if (!leases) return "Leases: no managed sessions";
+  const parts = [];
+  if (leases.mine) parts.push(`mine ${leases.mine.taskKey} (${leases.mine.sessionId}, ${leases.mine.status})`);
+  if (leases.others.length) {
+    parts.push(
+      `others: ${leases.others
+        .map((o) => `${o.taskKey} (${o.sessionId}, ${o.status}${o.live ? "" : ", stale"})`)
+        .join(", ")}`,
+    );
+  }
+  return parts.length ? `Leases: ${parts.join("; ")}` : "Leases: none";
 }
 
 function snippetOf(event) {
@@ -301,6 +341,9 @@ if (args.briefing) {
   const unacked = rows.filter((r) => r.seq > ackedThrough);
   const entries = Object.values(registry.children);
   const briefingFocus = readFocus(runId).current;
+  // FOC-902 §C: the managed-session leases, next to the focus — which ticket
+  // this session holds (if any) and which other live sessions hold the rest.
+  const leases = leasesOf(process.env);
   console.log(
     JSON.stringify(
       {
@@ -311,6 +354,8 @@ if (args.briefing) {
         // declared focus plus the one-line summary for the briefing text.
         focus: briefingFocus,
         focusLine: focusLine(briefingFocus),
+        leases,
+        leasesLine: leasesLine(leases),
         live: entries
           .filter((c) => !TERMINAL_STATUSES.includes(c.status))
           .map((c) => ({ childId: c.childId, squad: c.squad ?? null, status: c.status })),

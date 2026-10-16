@@ -16,6 +16,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runDir, teeAbsPath, writeRegistry } from "./supervisor-lib.mjs";
+import { createTaskSessionStore } from "./task-sessions.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -478,6 +479,99 @@ test("legacy-unverified children are named beside the total, not excluded from i
   if (!r.stderr.includes("cost includes 1 unverified legacy figure(s): dev-2")) {
     fail(`stderr did not name the unverified child: ${r.stderr}`);
   }
+});
+
+// ── task-session leases in the briefing (FOC-902) ────────────────────────────
+console.log("\nbriefing leases (FOC-902)");
+
+// The DEAD_PID fixture proven safe on this host (fenix-doctor.test.mjs): a pid
+// that never exists, so pidAlive reports it dead and the lease reads stale.
+const DEAD_PID = 2 ** 22 + 12345;
+
+// A private LA_DATA_HOME holding a seeded task-session store, so the dev
+// machine's real store never decides a test's verdict.
+function leaseHome() {
+  const home = mkdtempSync(join(tmpdir(), "la-sup-st-lease-"));
+  cleanup.push(home);
+  return home;
+}
+
+function seedHolder(home, taskKey, pid) {
+  const store = createTaskSessionStore({ dbPath: join(home, "supervisor", "task-sessions.sqlite") });
+  try {
+    const s = store.ensure({
+      taskKey,
+      taskId: taskKey.split(":")[1],
+      workspace: taskKey.split(":")[0],
+      issueId: taskKey.split(":")[1],
+    });
+    if (store.claimNext().sessionId !== s.sessionId) fail(`${taskKey}: claimNext must promote its only row`);
+    store.update(s.sessionId, { status: "running", pid });
+    return s.sessionId;
+  } finally {
+    store.close();
+  }
+}
+
+test("the briefing names the leases: mine, others, and the stale ones", () => {
+  const runId = fixtureRun();
+  const home = leaseHome();
+  const mine = seedHolder(home, "jointhubs:FOC-111", process.pid);
+  const other = seedHolder(home, "jointhubs:FOC-222", DEAD_PID);
+  const out = parse(status(runId, ["--briefing"], { LA_DATA_HOME: home, FENIX_SUPERVISOR_SESSION_ID: mine }));
+  if (JSON.stringify(out.leases.mine) !== JSON.stringify({ taskKey: "jointhubs:FOC-111", sessionId: mine, status: "running" })) {
+    fail(`leases.mine was ${JSON.stringify(out.leases.mine)}`);
+  }
+  if (JSON.stringify(out.leases.others) !== JSON.stringify([{ sessionId: other, taskKey: "jointhubs:FOC-222", status: "running", live: false }])) {
+    fail(`leases.others was ${JSON.stringify(out.leases.others)}`);
+  }
+  const line = `Leases: mine jointhubs:FOC-111 (${mine}, running); others: jointhubs:FOC-222 (${other}, running, stale)`;
+  if (out.leasesLine !== line) fail(`leasesLine was ${out.leasesLine}`);
+});
+
+test("others-only: without a session id the briefing claims nothing as mine", () => {
+  const runId = fixtureRun();
+  const home = leaseHome();
+  const other = seedHolder(home, "jointhubs:FOC-333", process.pid);
+  const out = parse(status(runId, ["--briefing"], { LA_DATA_HOME: home }));
+  if (out.leases.mine !== null) fail(`leases.mine was ${JSON.stringify(out.leases.mine)}`);
+  if (out.leases.others.length !== 1 || out.leases.others[0].sessionId !== other || out.leases.others[0].live !== true) {
+    fail(`leases.others was ${JSON.stringify(out.leases.others)}`);
+  }
+  if (out.leasesLine !== `Leases: others: jointhubs:FOC-333 (${other}, running)`) fail(`leasesLine was ${out.leasesLine}`);
+});
+
+test("a terminal-only store reads as no leases at all", () => {
+  const runId = fixtureRun();
+  const home = leaseHome();
+  const sid = seedHolder(home, "jointhubs:FOC-444", process.pid);
+  const store = createTaskSessionStore({ dbPath: join(home, "supervisor", "task-sessions.sqlite") });
+  try {
+    store.update(sid, { status: "completed" });
+  } finally {
+    store.close();
+  }
+  const out = parse(status(runId, ["--briefing"], { LA_DATA_HOME: home, FENIX_SUPERVISOR_SESSION_ID: sid }));
+  if (out.leases === null) fail("an existing store must never read as missing");
+  if (out.leases.mine !== null || out.leases.others.length !== 0) {
+    fail(`terminal rows leaked into leases: ${JSON.stringify(out.leases)}`);
+  }
+  if (out.leasesLine !== "Leases: none") fail(`leasesLine was ${out.leasesLine}`);
+});
+
+test("no store — or an unreadable one — reads as no managed sessions", () => {
+  const runId = fixtureRun();
+  const out = parse(status(runId, ["--briefing"], { LA_DATA_HOME: leaseHome() }));
+  if (out.leases !== null) fail(`missing store gave ${JSON.stringify(out.leases)}`);
+  if (out.leasesLine !== "Leases: no managed sessions") fail(`leasesLine was ${out.leasesLine}`);
+
+  // A corrupt store is "unknown", not "empty" — the briefing never guesses.
+  const home = leaseHome();
+  mkdirSync(join(home, "supervisor"), { recursive: true });
+  writeFileSync(join(home, "supervisor", "task-sessions.sqlite"), "not a sqlite database at all. ".repeat(8), "utf8");
+  const out2 = parse(status(runId, ["--briefing"], { LA_DATA_HOME: home }));
+  if (out2.leases !== null) fail(`corrupt store gave ${JSON.stringify(out2.leases)}`);
+  if (out2.leasesLine !== "Leases: no managed sessions") fail(`leasesLine was ${out2.leasesLine}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

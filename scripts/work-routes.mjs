@@ -28,7 +28,7 @@
 // env var alone can never redirect a production fetch.
 
 import { execFile } from "node:child_process";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,7 +37,8 @@ import { hostBase, hostRequest, FAST_TIMEOUT_MS, SLOW_TIMEOUT_MS } from "./super
 import { graphql } from "./linear-client.mjs";
 import { readRegistry, supervisorStateHome } from "./supervisor-lib.mjs";
 import { squadConfigDir } from "./fenix-paths.mjs";
-import { resolveTaskKey } from "./task-sessions.mjs";
+import { resolveTaskKey, issuePartOf, OWNER_STATUSES, taskSessionsDbPath } from "./task-sessions.mjs";
+import { pidAlive } from "./supervisor-current-run.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
 import {
   buildBoardPayload,
@@ -424,7 +425,76 @@ const decodeId = (raw) => {
  * fetched from Linear — never a client-supplied taskKey and never derived
  * from the title. Throws on a non-canonical id; callers map that to 400.
  */
-const taskKeyOf = (issue) => resolveTaskKey({ workspace: workWorkspace(), issueId: issue.id ?? issue.identifier });
+// issuePartOf: display identifier, never the uuid — the store is keyed this way everywhere.
+const taskKeyOf = (issue) => resolveTaskKey({ workspace: workWorkspace(), issueId: issuePartOf(issue) });
+
+// ── FOC-902 §E: the board's claimedBy tags ───────────────────────────────────
+// A read-only peek at the task-sessions store. Mirrors readActiveSessions'
+// rules: the file must already exist (a GET must never create the store),
+// node:sqlite may be missing in this Node build, and ANY failure degrades to
+// an empty map — the board renders without claim tags rather than failing
+// because the lease store is busy or unreadable. Only OWNER_STATUSES rows
+// count (one active owner per task key is the store's own unique index).
+let DatabaseSync;
+try {
+  ({ DatabaseSync } = await import("node:sqlite"));
+} catch {
+  DatabaseSync = null;
+}
+
+const readTaskClaims = (env = process.env) => {
+  const claims = new Map();
+  if (!DatabaseSync) return claims;
+  let dbPath;
+  try {
+    dbPath = taskSessionsDbPath(env);
+  } catch {
+    return claims;
+  }
+  if (!existsSync(dbPath)) return claims;
+  let db = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const rows = db
+      .prepare(
+        `SELECT task_key, session_id, status, pid FROM task_sessions WHERE status IN (${OWNER_STATUSES.map(() => "?").join(", ")})`,
+      )
+      .all(...OWNER_STATUSES);
+    for (const row of rows) {
+      if (!claims.has(row.task_key)) {
+        claims.set(row.task_key, { sessionId: row.session_id, status: row.status, pid: row.pid ?? null });
+      }
+    }
+  } catch {
+    return new Map(); // unreadable — no claim tags, never a partial answer
+  } finally {
+    try {
+      db?.close();
+    } catch {}
+  }
+  return claims;
+};
+
+// claimedBy for one board ticket: the active owner of the ticket's task key,
+// or null. `live` is the owning pid PROVABLY alive — pidAlive(null) is
+// conservatively true, so a queued row (pid still null) must be live:false
+// explicitly. A task key that does not resolve is "no claim we can prove",
+// never a guess.
+const claimFor = (taskId, ws, claims) => {
+  let taskKey = null;
+  try {
+    taskKey = resolveTaskKey({ workspace: ws, issueId: taskId });
+  } catch {
+    taskKey = null;
+  }
+  const row = taskKey ? claims.get(taskKey) : undefined;
+  if (!row) return null;
+  return {
+    sessionId: row.sessionId,
+    status: row.status,
+    live: row.pid != null && pidAlive(row.pid),
+  };
+};
 
 // ── the routes ───────────────────────────────────────────────────────────────
 
@@ -474,6 +544,12 @@ export async function handleWorkRoute(req, res, url, ctx) {
       filters,
       now,
     });
+    // FOC-902 §E: attach each ticket's lease (the task-sessions store's active
+    // owner) — read-only, degraded to null claims when the store is absent.
+    const claims = readTaskClaims();
+    for (const ticket of Array.isArray(payload?.tickets) ? payload.tickets : []) {
+      ticket.claimedBy = claimFor(ticket.taskId, workspace, claims);
+    }
     json(res, 200, payload);
     log(method, path, 200);
     return true;
@@ -937,10 +1013,11 @@ export async function loadTaskMapCorpus({
       continue;
     }
     // Identity ONLY from the server-fetched issue, through the Start flow's
-    // resolver — the display identifier alone never invents a taskKey.
+    // resolver — a client-supplied id never invents a taskKey.
+    // issuePartOf: display identifier, never the uuid — the store is keyed this way everywhere.
     let taskKey = null;
     try {
-      taskKey = resolveTaskKey({ workspace: ws, issueId: issue.id ?? issue.identifier });
+      taskKey = resolveTaskKey({ workspace: ws, issueId: issuePartOf(issue) });
     } catch {
       taskKey = null;
     }

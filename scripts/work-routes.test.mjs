@@ -50,6 +50,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { openTelemetryDb, makeEvent, applyEvent, pricingSnapshot } from "./telemetry-store.mjs";
+import { createTaskSessionStore } from "./task-sessions.mjs";
 import { ensureViews } from "./telemetry-canonical.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
 import { cwdToHashName } from "./ledger.mjs";
@@ -102,6 +103,18 @@ mkdirSync(runsDir, { recursive: true });
   const db = openTelemetryDb(dbPath);
   ensureViews(db);
   db.close();
+}
+
+// FOC-902 §E: a task-sessions store next to it with owners for WORK-1
+// (running, pid alive) and WORK-2 (queued, pid null) — the board's claimedBy
+// tags read this store per request.
+{
+  const store = createTaskSessionStore({ dbPath: join(dataHome, "supervisor", "task-sessions.sqlite") });
+  const w1 = store.ensure({ taskKey: "jointhubs:WORK-1", taskId: "WORK-1", workspace: "jointhubs", issueId: "WORK-1", title: "claimed running" });
+  store.claimNext(); // queued -> starting (admission goes through the scheduler)
+  store.update(w1.sessionId, { status: "running", pid: process.pid });
+  store.ensure({ taskKey: "jointhubs:WORK-2", taskId: "WORK-2", workspace: "jointhubs", issueId: "WORK-2", title: "claimed queued" });
+  store.close();
 }
 
 const NOW = "2026-10-13T12:00:00.000Z";
@@ -410,6 +423,21 @@ try {
       boardFirstWork1?.rounds === 2 && boardFirstWork1?.lastVerdict?.verdict === "PASS"
         && boardFirstWork1?.lastVerdict?.round === 2,
       JSON.stringify(boardFirstWork1?.lastVerdict));
+    // FOC-902 §E: claimedBy rides on the tickets — the task-sessions store's
+    // active owners, read-only per request.
+    check("board WORK-1 claimedBy: running owner, pid alive -> live true",
+      boardFirstWork1?.claimedBy?.sessionId?.startsWith("sup-") && boardFirstWork1?.claimedBy?.status === "running"
+        && boardFirstWork1?.claimedBy?.live === true,
+      JSON.stringify(boardFirstWork1?.claimedBy));
+    const boardFirstWork2 = (boardFirst.body?.tickets ?? []).find((t) => t.taskId === "WORK-2");
+    check("board WORK-2 claimedBy: queued owner, pid null -> live false",
+      boardFirstWork2?.claimedBy?.sessionId?.startsWith("sup-") && boardFirstWork2?.claimedBy?.status === "queued"
+        && boardFirstWork2?.claimedBy?.live === false,
+      JSON.stringify(boardFirstWork2?.claimedBy));
+    const boardFirstWork3 = (boardFirst.body?.tickets ?? []).find((t) => t.taskId === "WORK-3");
+    check("board WORK-3 has no claimedBy (no store row)",
+      boardFirstWork3?.claimedBy === null,
+      JSON.stringify(boardFirstWork3?.claimedBy));
 
     // The FIRST /api/costs request: the snapshot child has not run yet — the
     // route answers "computing" with null numbers immediately, never a

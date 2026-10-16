@@ -496,6 +496,34 @@ test("an invalid settings overlay is surfaced in the detail, not printed to stde
   }
 });
 
+test("the task sessions detail reports auto-pickup: off without the overlay", () => {
+  const dir = tempDir();
+  try {
+    const c = checkTaskSessions({ env: { LA_DATA_HOME: dir }, fsImpl: fs });
+    assert.equal(c.status, "ok");
+    assert.match(c.detail, /no managed sessions yet; auto-pickup: off$/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the task sessions detail reports the enabled pickup's pollSeconds and states (FOC-902)", () => {
+  const dir = tempDir();
+  const settings = path.join(dir, "settings.json");
+  fs.writeFileSync(
+    settings,
+    JSON.stringify({ taskSessions: { autoPickup: { enabled: true, pollSeconds: 120, states: ["Todo", "In Progress"] } } }),
+    "utf8",
+  );
+  try {
+    const c = checkTaskSessions({ env: { LA_DATA_HOME: dir, LA_SETTINGS_FILE: settings }, fsImpl: fs });
+    assert.equal(c.status, "ok");
+    assert.match(c.detail, /auto-pickup: on \(every 120s, states Todo,In Progress\)$/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runChecks includes the task sessions check", async () => {
   const dir = tempDir();
   try {

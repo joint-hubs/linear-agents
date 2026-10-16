@@ -110,6 +110,7 @@ const ISSUE_FRAGMENT = `
   url
   state { id name type }
   priority
+  project { name }
   estimate
   createdAt
   updatedAt
