@@ -13,6 +13,10 @@
       "reason": "isolation audit FOC-795: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir before import; record fixtures only; no ports, no socket binds, no telemetry DB"
     },
     {
+      "file": "agent-tools.test.mjs",
+      "reason": "isolation audit FOC-900: mkdtemp/tmpdir fixtures only (agents root, .mcp.json and the one local git diff fixture live under os.tmpdir); the docs test reads the real tree read-only and pins the committed docs/agent-tools.md; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "analysis-cache.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },

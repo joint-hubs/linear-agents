@@ -24,6 +24,7 @@ Usage: fenix [command]
   down             stop and remove containers (the data volume is kept)
   logs [service]   follow logs (default: all services)
   doctor           host preflight plus in-container diagnostics
+  agent-tools      inspect agent permission settings (show|diff|check|docs)
   keys [name]      run the key wizard (no argument) or rotate one key:
                    openrouter | provider | linear | github
   attach [--new]   open the Supervisor (Ctrl-b d detaches; it keeps running in the container)
@@ -630,6 +631,9 @@ case "$cmd" in
     ;;
   doctor)
     cmd_doctor
+    ;;
+  agent-tools)
+    exec docker compose exec -T fenix-api "$ENTRYPOINT" agent-tools "$@"
     ;;
   attach)
     exec docker compose exec fenix-supervisor "$ENTRYPOINT" attach "$@"
