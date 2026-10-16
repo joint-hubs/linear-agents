@@ -476,6 +476,48 @@ const OPTIONS = {
 };
 
 const VERBS = new Set(["get", "set", "list", "retire", "prune", "render", "history"]);
+// FOC-728: the base-key verbs live in agent-state-resolve.mjs (registry, holds
+// and the Linear client behind them). Delegated before parsing so their own
+// options (--role, --cwd, …) never trip this verb set's strict parser; argv is
+// passed through untouched.
+const DELEGATED_VERBS = new Set(["resolve", "missing", "registry"]);
+// String options of either CLI half: when one is written without '=' its value
+// must be skipped by the verb scan, or the value would be mistaken for the verb
+// (`-n session:x1 resolve` → "session:x1" is not a verb, "resolve" is).
+const VALUE_OPTIONS = new Set([
+  "--namespace",
+  "-n",
+  "--key",
+  "-k",
+  "--value",
+  "-v",
+  "--tier",
+  "--source",
+  "--evidence",
+  "--reason",
+  "--scope",
+  "--ttl",
+  "--expires-at",
+  "--status",
+  "--limit",
+  "--actor",
+  "--db",
+  "--role",
+  "--cwd",
+]);
+
+// First positional token, skipping the values of string options (= forms keep
+// the value inside one token, so they need no skip).
+function firstPositionalArg(argv) {
+  for (let i = 0; i < argv.length; i++) {
+    if (VALUE_OPTIONS.has(argv[i])) {
+      i += 1;
+      continue;
+    }
+    if (!argv[i].startsWith("-")) return argv[i];
+  }
+  return undefined;
+}
 const VERBS_NEEDING_KEY = new Set(["get", "set", "retire"]);
 const VERBS_NEEDING_VALUE = new Set(["set"]);
 const INTEGER = /^\d+$/;
@@ -483,6 +525,9 @@ const INTEGER = /^\d+$/;
 const USAGE_TEXT = `usage: node scripts/agent-state.mjs <verb> [options]
 
 verbs: get | set | list | retire | prune | render | history
+  resolve    resolve base keys for --role/--namespace; open a hold for missing askable keys
+  missing    read-only: base keys without an active stored value (+ newest hold)
+  registry   print the validated base-key registry per role set (--json)
 
 options:
   --namespace, -n <ns>     supervisor:<id> | child:<id>/<id> | session:<id>
@@ -529,6 +574,11 @@ function printJson(stdout, verb, result) {
 }
 
 export async function runCli(argv, { env = process.env, stdout = process.stdout, stderr = process.stderr } = {}) {
+  const firstPositional = firstPositionalArg(argv);
+  if (DELEGATED_VERBS.has(firstPositional)) {
+    const { runCli: delegated } = await import("./agent-state-resolve.mjs");
+    return delegated(argv, { env, stdout, stderr });
+  }
   let parsed;
   try {
     parsed = parseArgs({ args: argv, allowPositionals: true, strict: true, options: OPTIONS });
@@ -635,5 +685,16 @@ export async function runCli(argv, { env = process.env, stdout = process.stdout,
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  process.exitCode = await runCli(process.argv.slice(2));
+  // Not awaited on purpose: agent-state-resolve.mjs imports this module back,
+  // and a top-level await here would suspend this module's evaluation while
+  // the delegated module waits for it — a deadlock. Letting the body finish
+  // first lets the dynamic import resolve.
+  runCli(process.argv.slice(2))
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((error) => {
+      console.error(error?.stack || String(error));
+      process.exitCode = 1;
+    });
 }

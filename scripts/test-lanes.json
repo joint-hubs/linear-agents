@@ -17,6 +17,10 @@
       "reason": "isolation audit FOC-727: mkdtemp fixtures only; the store path comes from LA_AGENT_STATE_DB / openAgentState(path); no ports, no real-repo writes"
     },
     {
+      "file": "agent-state-resolve.test.mjs",
+      "reason": "isolation audit FOC-728: mkdtemp fixtures only (git repo, run dir, registry copy, Linear fixture JSON); store via LA_AGENT_STATE_DB; no ports, no network (LA_AGENT_STATE_LINEAR_FIXTURE), no real-repo writes"
+    },
+    {
       "file": "analysis-cache.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
