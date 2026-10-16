@@ -66,6 +66,7 @@ import {
   wakerState,
   writeWakeAck,
 } from "./supervisor-lib.mjs";
+import { readRunOwner } from "./run-owner.mjs";
 
 const BASE_POLL_MS = pollBaseMs();
 const STALL_SILENCE_MS = stallSilenceMs();
@@ -307,6 +308,9 @@ if (args.briefing) {
         ok: true,
         runId,
         mode: "briefing",
+        // FOC-905: who owns this run — the run dir's owner.json record, or
+        // null for a legacy run created before ownership was recorded.
+        owner: readRunOwner(runDir(runId)),
         // FOC-769: what the run's time is being charged to right now — the
         // declared focus plus the one-line summary for the briefing text.
         focus: briefingFocus,

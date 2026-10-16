@@ -20,6 +20,10 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { atomicWriteJSON } from "./utils.mjs";
+// FOC-905 run ownership: run-owner imports only node builtins, so this edge is
+// cycle-free. The owner.json of a run dir is written here (ensureRunDir) and
+// read by the orphan scan, the doctor and the briefing.
+import { currentOwner, writeRunOwnerIfMissing } from "./run-owner.mjs";
 // P1 resource ownership: the durable claim registry and the repo-wide
 // integration lock. workspace-claims imports nothing from this module (its git
 // helper is its own), so the edge is one-way.
@@ -118,6 +122,15 @@ export const teeAbsPath = (runId, childId) => join(runDir(runId), teeRelPath(chi
 export function ensureRunDir(runId) {
   mkdirSync(join(runDir(runId), "children"), { recursive: true });
   mkdirSync(gatesDir(runId), { recursive: true });
+  // FOC-905: stamp who created this run dir — the orphan scan marks only what
+  // this container owns, so the owner must be recorded at creation. Best
+  // effort: a failed owner write never breaks run creation (the scan treats a
+  // missing owner.json as a legacy run and falls back to the time rule).
+  try {
+    writeRunOwnerIfMissing(runDir(runId), currentOwner());
+  } catch {
+    /* metadata only — the run dir exists either way */
+  }
 }
 
 export function emptyRegistry(runId) {

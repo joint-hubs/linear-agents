@@ -17,12 +17,14 @@ import os from "node:os";
 import path from "node:path";
 import {
   checkProjectsDir,
+  checkRunOwners,
   checkSecretsReadable,
   checkTaskSessions,
   runChecks,
   summarize,
 } from "./fenix-doctor.mjs";
 import { pidAlive } from "./supervisor-current-run.mjs";
+import { currentOwner } from "./run-owner.mjs";
 
 let passed = 0;
 let skipped = 0;
@@ -506,6 +508,63 @@ test("runChecks includes the task sessions check", async () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+console.log("\nfenix-doctor: run owners (FOC-905)");
+
+// The current identity, computed the same way the check computes it — a "mine"
+// fixture built from it relates as mine on every platform (on a Windows host
+// containerStartMs is null on BOTH sides, in a container it is a number).
+const CURRENT_OWNER = currentOwner({});
+
+test("run owners: no runs yet → ok", () => {
+  const c = checkRunOwners({ env: {}, readOwners: () => [] });
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /no supervisor runs yet/);
+});
+
+test("run owners: ok line counts mine and legacy through the readOwners seam", () => {
+  const c = checkRunOwners({
+    env: {},
+    readOwners: () => [
+      { runId: "run-a", owner: { ...CURRENT_OWNER, recordedAt: "2026-10-16T09:00:00.000Z" } },
+      { runId: "run-b", owner: null }, // a legacy run without owner.json
+    ],
+  });
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /2 runs: mine 1, restarted 0, legacy 1/);
+});
+
+test("run owners: a restarted owner container counts as restarted", () => {
+  // Only provable when this process itself has a container start to compare
+  // against (Windows hosts cannot — the time-rule cases cover the rest).
+  if (CURRENT_OWNER.containerStartMs === null) {
+    skipped++;
+    console.log("  SKIP restarted-owner doctor line — no provable container start on this host");
+    return;
+  }
+  const c = checkRunOwners({
+    env: {},
+    readOwners: () => [
+      { runId: "run-c", owner: { ...CURRENT_OWNER, containerStartMs: CURRENT_OWNER.containerStartMs - 1000 } },
+    ],
+  });
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /1 runs: mine 0, restarted 1, legacy 0/);
+});
+
+test("run owners: foreign runs warn with the hostnames and never swept", () => {
+  const c = checkRunOwners({
+    env: {},
+    readOwners: () => [
+      { runId: "run-d", owner: { sessionId: null, hostname: "other-container", containerStartMs: 1000, pid: 1, recordedAt: "x" } },
+      { runId: "run-e", owner: { sessionId: null, hostname: "another-container", containerStartMs: 1000, pid: 1, recordedAt: "x" } },
+    ],
+  });
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /2 run\(s\) owned by another host\/container \(another-container, other-container\)/);
+  assert.match(c.detail, /never swept automatically/);
+  assert.match(c.fix, /--all --yes/);
 });
 
 test("summarize turns a uid-mismatch fail into ok: false", () => {

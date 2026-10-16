@@ -47,6 +47,7 @@ import { supervisorCurrentRunPath, SUPERVISOR_SESSION_ID_PATTERN } from "./fenix
 import { supervisorStateHome } from "./supervisor-lib.mjs";
 import { recentRunIds } from "./cockpit.mjs";
 import { readActiveSessions, taskSessionsDbPath } from "./task-sessions.mjs";
+import { currentOwner } from "./run-owner.mjs";
 
 // ── Library ──────────────────────────────────────────────────────────────────
 
@@ -241,6 +242,9 @@ export function resolveCurrentRun({
         supervisorSessionId: ctx.supervisorSessionId,
         taskKey: ctx.taskKey,
         taskId: ctx.taskId,
+        // FOC-905: a NEW run is stamped with the identity that created it —
+        // the orphan scan marks only what this container owns.
+        owner: currentOwner(env),
       };
     }
   } else {
@@ -254,7 +258,8 @@ export function resolveCurrentRun({
       throw new CurrentRunError("MANAGED_SESSIONS_ACTIVE", refusalMessage(managed.blocking, managed.unknown));
     }
     if (fresh) {
-      record = { runId: newRunId(now), model, startedAt: now.toISOString(), source: "new" };
+      // FOC-905: a NEW run carries its creator's identity (see the scoped branch).
+      record = { runId: newRunId(now), model, startedAt: now.toISOString(), source: "new", owner: currentOwner(env) };
     } else {
       const pointer = readCurrentRun({ path: pointerPath });
       if (pointer) {
@@ -295,7 +300,9 @@ export function recordLauncherRun({ runId, model = null, now = new Date(), path,
     }
   }
   const startedAt = now.toISOString();
-  const record = { runId, model, startedAt, updatedAt: startedAt, source: "launcher" };
+  // FOC-905: the launcher-recorded run is a NEW run — it carries the creator's
+  // identity like resolve's source "new" records.
+  const record = { runId, model, startedAt, updatedAt: startedAt, source: "launcher", owner: currentOwner(env) };
   if (managed.stale.length > 0) record.staleManagedSessions = managed.stale;
   // Same rule as resolve: the stamp marks an OVERRIDDEN refusal only.
   if (refused) record.legacyOverride = true;

@@ -132,6 +132,42 @@ export function readActiveSessions(dbPath) {
 }
 
 /**
+ * Read-only peek at EVERY row of a task-sessions store, terminal included
+ * (FOC-905): the orphan scan needs the owner session's status even after it
+ * stopped, which the ACTIVE-only readActiveSessions does not carry. Same
+ * read-only discipline as readActiveSessions (never creates the schema, never
+ * writes, works on the WAL store the host keeps open), but failures are
+ * swallowed as [] rather than surfaced: the scan must never block on the
+ * store, and an unreadable store simply means the terminal-owner rule does
+ * not apply (the time rule still governs).
+ */
+export function readSessionRows(dbPath) {
+  if (!existsSync(dbPath)) return [];
+  if (!sqliteAvailable()) return [];
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+  } catch {
+    return [];
+  }
+  try {
+    const rows = db
+      .prepare("SELECT session_id, status, pid, process_started_at FROM task_sessions")
+      .all();
+    return rows.map((row) => ({
+      sessionId: row.session_id,
+      status: row.status,
+      pid: row.pid ?? null,
+      processStartedAt: row.process_started_at ?? null,
+    }));
+  } catch {
+    return [];
+  } finally {
+    try { db.close(); } catch {}
+  }
+}
+
+/**
  * Stable task key: `workspace:issueId`. Deliberately NOT a display
  * identifier — it is the coordination key every process must agree on.
  * @returns {string}
