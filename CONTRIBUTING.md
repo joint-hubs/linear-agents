@@ -75,12 +75,12 @@ feat(dev): surface `gh pr checks` status in run detail
 
 - **JavaScript:** Node 22.5+ ESM (`.mjs`), no transpilation, no TypeScript. Prefer `node:` prefix for built-ins (`node:fs/promises`, `node:path`).
 - **Python:** 3.12, used only in `notebooks/` and a handful of Atlas tools. No framework.
-- **Batch:** `.bat` launchers, Windows-only. The underlying `.mjs` scripts are portable.
+- **Batch:** the squad launchers (`bin\<squad>.bat`) are two-line Windows wrappers around `scripts/squad-start.mjs`, the cross-platform entry point (`node scripts/squad-start.mjs <squad>`); the remaining `.bat` tooling (dashboard, all) is Windows-only.
 - **Markdown:** link-rich, one concept per section, no orphan files.
 
 ## Out of scope (for now)
 
-- **macOS/Linux launchers** — the `.bat` files are Windows-only by design. Porting to `.sh` is welcome but please coordinate in an issue first so we can agree on a parallel structure rather than a rewrite.
+- **macOS/Linux launchers** — the squads already run cross-platform via `node scripts/squad-start.mjs`; only the remaining `.bat` tooling (dashboard, all) is Windows-only. Porting that to `.sh` is welcome but please coordinate in an issue first so we can agree on a parallel structure rather than a rewrite.
 - **CI/CD** — the CI plan is in `docs/ops/ci-cd.md` but not yet implemented. PRs that wire up GitHub Actions are very welcome; please use a separate branch so they're easy to discuss independently.
 
 ## License

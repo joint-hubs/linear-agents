@@ -77,7 +77,7 @@ Zakładka **Prompty** (`localhost:7331/prompts`) — drzewo decyzyjne „co chce
 - Liść składu: prompt z podstawionym numerem zadania, *Kopiuj*, *Podgląd uruchomienia* (dry-run,
   nie otwiera okna), *Uruchom* (otwiera prawdziwe okno agenta), warunek wejścia, skład + modele,
   instrukcja leada, lista ostatnich przebiegów z odnośnikiem do konwersacji.
-- Liść roli: komenda `bin\agent.bat <squad> <rola>`, model, uprawnienia, pełna instrukcja roli.
+- Liść roli: komenda `bin\agent.bat <squad> <rola>`, model, uprawnienia, pełna instrukcja roli. `bin\agent.bat` still works (a two-line wrapper now); cross-platform form: `node scripts/squad-start.mjs --agent <squad> <rola>`.
 - Read-only (prompty edytuje się w plikach; edycja z UI to faza 2).
 - Konwersacje: `?includeUser=1&full=1` na `/api/flow/log` — tury użytkownika i pełny tekst bez ucinania.
 

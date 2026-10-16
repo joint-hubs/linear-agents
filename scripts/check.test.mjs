@@ -71,6 +71,30 @@ test("mutation: deleting '" + MUTATED_KEY + "' turns the run red, naming the orp
   if (!readFileSync(MAP).equals(original)) fail("config/models.map was not restored byte-identical");
 });
 
+// --- FOC-771: dry launchers are squad-start.mjs wrappers --------------------
+
+const DEV_DRY = join(ROOT, "bin", "dev-dry.bat");
+
+test("wrapper-form dry launcher passes (bin/dev-dry.bat node line carries --dry-run)", () => {
+  const { out } = runCheck();
+  if (!out.includes("PASS  bin/dev-dry.bat")) fail("no PASS line for bin/dev-dry.bat:\n" + out);
+});
+
+test("mutation: bin/dev-dry.bat node line without --dry-run turns the run red", () => {
+  const original = readFileSync(DEV_DRY);
+  const mutated = Buffer.from(original.toString("utf8").replace(" --dry-run", ""), "utf8");
+  if (mutated.equals(original)) fail("mutation did not apply — no ' --dry-run' in bin/dev-dry.bat");
+  try {
+    writeFileSync(DEV_DRY, mutated);
+    const { code, out } = runCheck();
+    if (code !== 1) fail("expected exit 1 with --dry-run dropped, got " + code + ":\n" + out);
+    if (!out.includes("bin/dev-dry.bat")) fail("violation does not name bin/dev-dry.bat:\n" + out);
+  } finally {
+    writeFileSync(DEV_DRY, original);
+  }
+  if (!readFileSync(DEV_DRY).equals(original)) fail("bin/dev-dry.bat was not restored byte-identical");
+});
+
 // --- FOC-350: Opus alias must be claude-opus-5 across all config surfaces --
 
 const MODELS_JSON = join(ROOT, "config", "models.json");

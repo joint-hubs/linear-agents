@@ -31,7 +31,7 @@ SUPERVISOR ──drives──▶ PLAN · DEV · REVIEW · TEST      (supervised 
 | 3 | REVIEW | `bin/review.bat` | task in `In Review` | first-pass + security + deep |
 | 4 | TEST | `bin/test.bat` | task in `stage:testing` | deploy → synthetic → Done |
 | — | SUPERVISOR | `bin/supervisor.bat` | manual, one Linear issue | frontman: triage → spawn children → relay every gate |
-| — | ORCHESTRATOR | `bin/orchestrate.bat` | manual | strategist (Atlas MCP), delegates to launchers — **withdrawn from active use** (FOC-272 gate decision; see [ADR-0011](docs/adr/0011-orch-ollama-withdrawal.md)) |
+| — | ORCHESTRATOR | — (launcher deleted in FOC-771) | manual | strategist (Atlas MCP), delegates to launchers — **withdrawn from active use** (FOC-272 gate decision; see [ADR-0011](docs/adr/0011-orch-ollama-withdrawal.md); the dead `bin/orchestrate.bat` guard launcher was removed) |
 
 ## Supervised mode
 
@@ -76,6 +76,12 @@ bin\supervisor.bat       :: or start the supervised pipeline instead
 The launchers read `.env` and `config/projects.json` at startup. The first run
 will auto-render `config/atlas-mcp.json` from `config/atlas-mcp.json.template`
 using the `ATLAS_VENV_PYTHON` and `ATLAS_ROOT` env vars you set in `.env`.
+
+Every `bin\<squad>.bat` is a two-line Windows wrapper around the cross-platform
+entry point `node scripts/squad-start.mjs <plan|dev|review|test|cadence|supervisor>`
+(`--dry-run` for the `*-dry.bat` variants, `--native` for the `*-native.bat` ones,
+`--agent <area> <role>` for `bin\agent.bat`) — use the Node form on macOS/Linux
+or in a container.
 
 ## Stack
 
