@@ -345,6 +345,14 @@
       "reason": "isolation audit FOC-626: mkdtemp/tmpdir fixtures only; the one process spawned is scripts/stability-load.mjs with a ~2.5 s budget and a test-only marker (foc-626-test-burst), asserted zero matching processes after it stops; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
+      "file": "state-index.test.mjs",
+      "reason": "isolation audit FOC-904: mkdtemp/tmpdir fixtures only; writes only under the temp root's docs/; no git, no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "state-journal.test.mjs",
+      "reason": "isolation audit FOC-904: mkdtemp/tmpdir fixtures only; writes only under the temp root's docs/state/; state-journal init runs `git rev-parse` read-only inside the temp root (never the real repo); no ports, no socket binds, no telemetry DB"
+    },
+    {
       "file": "supervisor-autonomy.test.mjs",
       "reason": "isolation audit FOC-613: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam set at module load (spawned cleanup processes inherit it); autonomy config via the LA_AUTONOMY_CONFIG seam pointed at temp files; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },

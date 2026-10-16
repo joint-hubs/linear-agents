@@ -40,7 +40,8 @@
 // would inject an error into the session context instead of a briefing.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { atomicWriteJSON } from "./utils.mjs";
 import { readFocus } from "./supervisor-focus.mjs";
@@ -279,6 +280,35 @@ function snapshot(runId, { childFilter, tail }) {
   };
 }
 
+// ── the task journal (FOC-904) ───────────────────────────────────────────────
+// The per-task journal for the task this session is charged to (LA_TASK_ID).
+// Read-only here: entries are written by state-journal.mjs, never by status.
+
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+function readTaskJournal(taskId) {
+  if (!taskId) return null;
+  const root = process.env.LA_ROOT ? resolve(process.env.LA_ROOT) : REPO_ROOT;
+  const rel = `docs/state/${taskId}.md`;
+  const path = join(root, "docs", "state", `${taskId}.md`);
+  if (!existsSync(path)) return null;
+  let text = "";
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  const entries = (text.match(/^## /gm) || []).length;
+  const stamps = [...text.matchAll(/^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) — /gm)].map((m) => m[1]);
+  return { path: rel, entries, lastAt: stamps.length ? stamps[stamps.length - 1] : null };
+}
+
+function journalLine(journal, taskId) {
+  if (!taskId) return null;
+  if (!journal) return "Journal: none yet — node scripts/state-journal.mjs init";
+  return `Journal: ${journal.path} (${journal.entries} entries, last ${journal.lastAt ?? "-"})`;
+}
+
 const args = parseArgs(process.argv.slice(2));
 const runId = args.run || process.env.LA_SUPERVISOR_RUN;
 const childFilter = args.child || null;
@@ -301,6 +331,7 @@ if (args.briefing) {
   const unacked = rows.filter((r) => r.seq > ackedThrough);
   const entries = Object.values(registry.children);
   const briefingFocus = readFocus(runId).current;
+  const briefingJournal = readTaskJournal(process.env.LA_TASK_ID);
   console.log(
     JSON.stringify(
       {
@@ -311,6 +342,12 @@ if (args.briefing) {
         // declared focus plus the one-line summary for the briefing text.
         focus: briefingFocus,
         focusLine: focusLine(briefingFocus),
+        // FOC-904: the task-scoped journal for this session's task, plus the
+        // one-line version for the briefing text. `journal: null` with
+        // LA_TASK_ID set means the journal was never inited — the line names
+        // the command that creates it. No LA_TASK_ID → both null.
+        journal: briefingJournal,
+        journalLine: journalLine(briefingJournal, process.env.LA_TASK_ID),
         live: entries
           .filter((c) => !TERMINAL_STATUSES.includes(c.status))
           .map((c) => ({ childId: c.childId, squad: c.squad ?? null, status: c.status })),

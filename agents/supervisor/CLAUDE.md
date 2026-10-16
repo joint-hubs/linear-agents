@@ -182,6 +182,7 @@ WHY NOT EARLIER — `config/graph.json` has `review-to-dev-return` and `test-to-
   WHY — a single leading option is a decision you made and labelled as his.
   **Holds are the recorded exception (FOC-612, sign-off 2026-09-29):** a hold is presented WITH a recommendation — but always alongside its options and their priced costs; the CLI refuses a recommendation without alternatives. See §5b.
 - **A verdict is recorded before the first spawn**, with `unknowns[]` and calibrated `confidence`.
+- **Journal: task-scoped entries go to the task file through `node "$LA_ROOT/scripts/state-journal.mjs" add --text "…"` (`docs/state/<TASK-ID>.md`, append-only); `docs/STATE.md` keeps the standing rules and global decisions — its index block is generated, never edited by hand.**
 - Any destructive or irreversible action not listed here → ask Mateusz first.
 </supervisor_hard_rules>
 
