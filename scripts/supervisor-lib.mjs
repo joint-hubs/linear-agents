@@ -92,16 +92,18 @@ export const TURN_END_CONTRACT = [
   "=== END TURN-END CONTRACT ===",
 ].join("\n");
 
-// FOC-608: the state root is a SEAM, in the same spirit as telemetry-store's
-// LA_TELEMETRY_HOME — one function derives every path below it, and the default
-// is never inlined anywhere else. `LA_SUPERVISOR_STATE_HOME` redirects the whole
-// supervisor state tree (runs, gates, tees, wake queues) to another directory,
-// which is what lets tests run against a temp dir instead of the repo's real
-// `.state/supervisor/`. Unset means the historical location, unchanged.
-export const supervisorStateHome = () =>
-  process.env.LA_SUPERVISOR_STATE_HOME || join(ROOT, ".state", "supervisor");
+// FOC-608: the state root is a SEAM — one function derives every path below it,
+// and the default is never inlined anywhere else. `LA_SUPERVISOR_STATE_HOME`
+// redirects the whole supervisor state tree (runs, gates, tees, wake queues) to
+// another directory, which is what lets tests run against a temp dir instead of
+// the repo's real `.state/supervisor/`. Unset means the historical location,
+// unchanged. Since FOC-903 the function (and runDir, RUN_ID_RE, the per-run
+// scratch helpers) live in utils.mjs — this module sits above it in the import
+// graph — and are re-exported here so every existing importer keeps working.
+import { collectRunScratch, runDir, RUN_ID_RE, scratchDir, supervisorStateHome } from "./utils.mjs";
 
-export const runDir = (runId) => join(supervisorStateHome(), runId);
+export { collectRunScratch, runDir, RUN_ID_RE, scratchDir, supervisorStateHome };
+
 export const registryPath = (runId) => join(runDir(runId), "children.json");
 export const triagePath = (runId) => join(runDir(runId), "triage.json");
 // FOC-451: the intake annotations live as triage.json's sibling, so a reviewer

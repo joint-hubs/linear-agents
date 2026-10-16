@@ -341,6 +341,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "state-isolation.test.mjs",
+      "reason": "isolation audit FOC-602: the fixtures module's own guard — every state path comes from the LA_SUPERVISOR_STATE_HOME seam pointed at a per-process mkdtemp root (set at module load, removed at drain); spawned node children import the fixtures module itself, no supervisor scripts, no ports, no socket binds; the only real-repo access is a READ of .state/supervisor names (snapshot comparison, never written)"
+    },
+    {
       "file": "stability-campaign.test.mjs",
       "reason": "isolation audit FOC-626: mkdtemp/tmpdir fixtures only; the one process spawned is scripts/stability-load.mjs with a ~2.5 s budget and a test-only marker (foc-626-test-burst), asserted zero matching processes after it stops; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
@@ -555,6 +559,14 @@
     {
       "file": "zz-suite-env-scrub.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "supervisor-migrate-scratch.test.mjs",
+      "reason": "isolation audit FOC-903: mkdtemp/tmpdir fixtures only, every CLI child pinned to an explicit --state-home under tmpdir; spawnSync node children like cost-guard (no servers, no ports, no socket binds); the real repo .state/ is never read or written"
+    },
+    {
+      "file": "review-round.test.mjs",
+      "reason": "isolation audit FOC-903: mkdtemp/tmpdir fixtures only; spawnSync children with LA_SUPERVISOR_STATE_HOME/LA_STATE_ROOT pinned to temp dirs (no servers, no ports, no socket binds, no real-repo-path writes)"
     }
   ],
   "serial": [
