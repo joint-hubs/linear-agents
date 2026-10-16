@@ -7,11 +7,17 @@
 // namespace, pruned by TTL/scope). Every change lands in facts_history.
 //
 // CLI:
-//   node scripts/agent-state.mjs <get|set|list|retire|prune|render|history>
-//     --namespace <ns> [--key k] [--value v] [--tier base|agent] [--source s]
+//   node scripts/agent-state.mjs <get|set|list|retire|prune|drop|render|history>
+//     [--namespace <ns>] [--key k] [--value v] [--tier base|agent] [--source s]
 //     [--evidence e] [--reason r] [--scope run|task|turn] [--ttl <seconds>]
 //     [--expires-at <iso>] [--include-retired] [--status active|retired|all]
-//     [--limit n] [--actor a] [--db <path>] [--json]
+//     [--limit n] [--actor a] [--yes] [--db <path>] [--json]
+//
+// FOC-730: --namespace is optional on every verb of this CLI half — when
+// omitted it is derived from the session env (namespaceFromEnv), and --actor
+// from the role the session runs under (actorFromEnv). `drop` is the
+// run-retention lifecycle: it deletes every row of the namespace, base keys
+// included, and refuses without --yes.
 
 import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -64,6 +70,31 @@ export function agentStatePath(env = process.env) {
     return join(resolve(env.LA_SUPERVISOR_STATE_HOME), "agent-state", "agent-state.sqlite");
   }
   return join(stateRoot(env), "agent-state", "agent-state.sqlite");
+}
+
+// ── namespace and actor from the environment (FOC-730) ──────────────────────
+// The same rule the SessionStart hook applies (agent-state-hook.mjs): a child
+// session addresses `child:<run>/<child>`, a Supervisor session
+// `supervisor:<run>`, and a session with neither has no namespace at all —
+// the CLI refuses with exit 2 rather than guessing. Exported so the hook
+// builds its two namespace strings through this one helper.
+export function namespaceFromEnv(env = process.env) {
+  if (env.LA_SUPERVISOR_CHILD) {
+    if (!env.LA_SUPERVISOR_RUN) return null;
+    return `child:${env.LA_SUPERVISOR_RUN}/${env.LA_SUPERVISOR_CHILD}`;
+  }
+  if (env.LA_SUPERVISOR_RUN) return `supervisor:${env.LA_SUPERVISOR_RUN}`;
+  return null;
+}
+
+// Actor attribution when --actor is not given: a child signs its writes with
+// its squad role (FENIX_STAGE), a Supervisor run without a child signs
+// `supervisor`, and an interactive/CLI session keeps the existing
+// $LA_TASK_OWNER / `cli` default.
+export function actorFromEnv(env = process.env) {
+  if (env.LA_SUPERVISOR_CHILD && env.FENIX_STAGE) return env.FENIX_STAGE;
+  if (env.LA_SUPERVISOR_RUN && !env.LA_SUPERVISOR_CHILD) return "supervisor";
+  return env.LA_TASK_OWNER || "cli";
 }
 
 const SCHEMA = `
@@ -398,6 +429,71 @@ export function historyFacts(store, params = {}) {
   return { rows };
 }
 
+// ── drop (FOC-730) ───────────────────────────────────────────────────────────
+// The run-retention lifecycle, not a retire: every row of the namespace goes,
+// base keys included, and the history rows with it. This is why it lives in
+// the cleanup code only (supervisor-cleanup.mjs) and why the CLI verb refuses
+// without --yes.
+
+/** Delete every `facts` and `facts_history` row of exactly one namespace. */
+export function dropNamespace(store, namespace) {
+  validateNamespace(namespace);
+  const db = store.db;
+  return withTransaction(db, () => {
+    // The reported namespace list is a UNION of both tables, so a namespace
+    // present only in `facts_history` is reported too.
+    const namespaces = db
+      .prepare(
+        "SELECT DISTINCT namespace FROM facts WHERE namespace = ? " +
+          "UNION SELECT DISTINCT namespace FROM facts_history WHERE namespace = ?",
+      )
+      .all(namespace, namespace)
+      .map((r) => r.namespace);
+    const facts = db.prepare("DELETE FROM facts WHERE namespace = ?").run(namespace).changes;
+    const history = db.prepare("DELETE FROM facts_history WHERE namespace = ?").run(namespace).changes;
+    return { namespace, namespaces, facts, history };
+  });
+}
+
+// Run ids are the `child:<run>/<child>` and `supervisor:<run>` middle segment,
+// so their grammar is the namespace id grammar.
+const RUN_ID = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * The run-wide counterpart `supervisor-cleanup.mjs cmdPrune` uses when
+ * retention drops a run: `supervisor:<runId>` and every `child:<runId>/*`,
+ * one SQL statement per table. `_` in the run id is escaped so the LIKE
+ * cannot over-match a sibling run id (`run_1` vs `runX1`).
+ */
+export function dropRunNamespaces(store, runId) {
+  if (typeof runId !== "string" || !RUN_ID.test(runId)) {
+    throw new AgentStateError(
+      "NAMESPACE_INVALID",
+      `run id must match ${RUN_ID.source}, got ${JSON.stringify(runId)}`,
+    );
+  }
+  const like = `child:${runId.replace(/([\\%_])/g, "\\$1")}/%`;
+  const db = store.db;
+  return withTransaction(db, () => {
+    // UNION across both tables — a namespace surviving only in `facts_history`
+    // is still reported.
+    const namespaces = db
+      .prepare(
+        "SELECT DISTINCT namespace FROM facts WHERE namespace = ? OR namespace LIKE ? ESCAPE '\\' " +
+          "UNION SELECT DISTINCT namespace FROM facts_history WHERE namespace = ? OR namespace LIKE ? ESCAPE '\\'",
+      )
+      .all(`supervisor:${runId}`, like, `supervisor:${runId}`, like)
+      .map((r) => r.namespace);
+    const facts = db
+      .prepare("DELETE FROM facts WHERE namespace = ? OR namespace LIKE ? ESCAPE '\\'")
+      .run(`supervisor:${runId}`, like).changes;
+    const history = db
+      .prepare("DELETE FROM facts_history WHERE namespace = ? OR namespace LIKE ? ESCAPE '\\'")
+      .run(`supervisor:${runId}`, like).changes;
+    return { runId, namespaces, facts, history };
+  });
+}
+
 // ── render ───────────────────────────────────────────────────────────────────
 
 function escapeNewlines(value) {
@@ -478,11 +574,12 @@ const OPTIONS = {
   status: { type: "string" },
   limit: { type: "string" },
   actor: { type: "string" },
+  yes: { type: "boolean" },
   db: { type: "string" },
   json: { type: "boolean" },
 };
 
-const VERBS = new Set(["get", "set", "list", "retire", "prune", "render", "history"]);
+const VERBS = new Set(["get", "set", "list", "retire", "prune", "drop", "render", "history"]);
 // FOC-728: the base-key verbs live in agent-state-resolve.mjs (registry, holds
 // and the Linear client behind them). Delegated before parsing so their own
 // options (--role, --cwd, …) never trip this verb set's strict parser; argv is
@@ -531,13 +628,16 @@ const INTEGER = /^\d+$/;
 
 const USAGE_TEXT = `usage: node scripts/agent-state.mjs <verb> [options]
 
-verbs: get | set | list | retire | prune | render | history
+verbs: get | set | list | retire | prune | drop | render | history
   resolve    resolve base keys for --role/--namespace; open a hold for missing askable keys
   missing    read-only: base keys without an active stored value (+ newest hold)
   registry   print the validated base-key registry per role set (--json)
 
 options:
   --namespace, -n <ns>     supervisor:<id> | child:<id>/<id> | session:<id>
+                           optional: derived from the session env when omitted
+                           (LA_SUPERVISOR_RUN / LA_SUPERVISOR_CHILD); exit 2 when
+                           neither is set and no --namespace is passed
   --key, -k <key>          ^[a-z][a-z0-9_]{0,63}$
   --value, -v <value>      <= 2048 UTF-8 bytes (set)
   --tier <base|agent>      default agent (set)
@@ -550,7 +650,10 @@ options:
   --include-retired        get: return a retired row too
   --status <s>             active | retired | all (list, default active)
   --limit <n>              history rows (default 100)
-  --actor <a>              history actor (default $LA_TASK_OWNER or cli)
+  --actor <a>              history actor (default: the session role — FENIX_STAGE on
+                           a child, supervisor on a Supervisor run — else
+                           $LA_TASK_OWNER or cli)
+  --yes                    drop only: confirm deleting every row of the namespace
   --db <path>              store path (default $LA_AGENT_STATE_DB or <state>/agent-state/agent-state.sqlite)
   --json                   machine-readable output
 
@@ -598,9 +701,19 @@ export async function runCli(argv, { env = process.env, stdout = process.stdout,
   if (parsed.positionals.length > 1) {
     return failUsage(stderr, `unexpected positional argument: ${parsed.positionals[1]}`);
   }
-  if (args.namespace == null) return failUsage(stderr, "missing --namespace");
+  if (args.namespace == null) {
+    // FOC-730: no --namespace means the session env names the namespace; a
+    // session with neither LA_SUPERVISOR_RUN nor LA_SUPERVISOR_CHILD has none.
+    if (namespaceFromEnv(env) == null) {
+      return failUsage(stderr, "namespace required: pass --namespace or run inside a Supervisor/child session");
+    }
+  }
   if (VERBS_NEEDING_KEY.has(verb) && args.key == null) return failUsage(stderr, `${verb} requires --key`);
   if (VERBS_NEEDING_VALUE.has(verb) && args.value == null) return failUsage(stderr, "set requires --value");
+  if (verb === "drop" && args.yes !== true) {
+    stderr.write("agent-state: drop deletes every facts and facts_history row of the namespace — pass --yes to confirm\n");
+    return 2;
+  }
 
   const json = args.json === true;
   // LA_AGENT_STATE_NOW pins the clock so tests can exercise expiry without
@@ -621,8 +734,8 @@ export async function runCli(argv, { env = process.env, stdout = process.stdout,
     limit = Number(args.limit);
   }
 
-  const actor = args.actor || env.LA_TASK_OWNER || "cli";
-  const namespace = args.namespace;
+  const actor = args.actor || actorFromEnv(env);
+  const namespace = args.namespace ?? namespaceFromEnv(env);
   const key = args.key;
 
   try {
@@ -669,6 +782,10 @@ export async function runCli(argv, { env = process.env, stdout = process.stdout,
         if (json) printJson(stdout, verb, result);
         else if (result.retired.length === 0) stdout.write("pruned 0 key(s)\n");
         else stdout.write(`pruned ${result.retired.length} key(s): ${result.retired.join(", ")}\n`);
+      } else if (verb === "drop") {
+        const result = dropNamespace(store, namespace);
+        if (json) printJson(stdout, verb, result);
+        else stdout.write(`dropped ${result.namespace} (${result.facts} fact row(s), ${result.history} history row(s))\n`);
       } else if (verb === "render") {
         const result = renderFacts(store, { namespace });
         if (json) printJson(stdout, verb, result);

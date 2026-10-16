@@ -140,7 +140,12 @@
       "Monitor",
       "mcp__claude_ai_Linear__*",
       "Bash(git worktree remove:*)",
-      "Bash(git worktree prune:*)"
+      "Bash(git worktree prune:*)",
+      "Bash(sqlite3 *agent-state*)",
+      "Bash(node -e *agent-state*)",
+      "Bash(node --eval *agent-state*)",
+      "Edit(//**/agent-state.sqlite)",
+      "Write(//**/agent-state.sqlite)"
     ],
     "defaultMode": "default",
     "additionalDirectories": [

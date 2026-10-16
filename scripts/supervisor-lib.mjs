@@ -1489,6 +1489,22 @@ export const SUPERVISOR_DENY = [
   "Bash(node $LA_ROOT/scripts/linear-ops.mjs:*)",
   "Bash(node $LA_ROOT/scripts/publish-linear-comment.mjs:*)",
   "Bash(node $LA_ROOT/scripts/linear-query.mjs:*)",
+  // FOC-730: the working-state store has ONE writer — the agent-state CLI.
+  // A sqlite3 one-liner or a node -e/--eval snippet naming the store would
+  // write rows without the validation, the history row and the secret screen
+  // the CLI applies; Edit/Write on the .sqlite file are worse (a hand-edited
+  // or deleted store). Same caveat as the rules above: a prefix/text match,
+  // not a sandbox — renaming the file or writing through another tool walks
+  // past it; this removes the accidental write. The Edit/Write rules are
+  // anchored with the filesystem-wide `//` form (`Edit(//**/agent-state.sqlite)`)
+  // because a bare `**/` pattern only reaches paths under the current directory,
+  // and the store lives outside it in LA_SUPERVISOR_STATE_HOME. Documented in
+  // docs/agent-state.md ("Agents: how to use it").
+  "Bash(sqlite3 *agent-state*)",
+  "Bash(node -e *agent-state*)",
+  "Bash(node --eval *agent-state*)",
+  "Edit(//**/agent-state.sqlite)",
+  "Write(//**/agent-state.sqlite)",
 ];
 
 export const childSettingsPath = (runId, childId) =>

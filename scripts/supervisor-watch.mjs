@@ -19,11 +19,12 @@
 // start it with { detached: true, stdio: 'ignore' } + unref.
 
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { calculateCost, priceThreshold, pricingSnapshot } from "./telemetry-store.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
 import { squadConfigDir } from "./fenix-paths.mjs";
+import { agentStatePath, openAgentState, pruneFacts } from "./agent-state.mjs";
 
 import {
   ROOT,
@@ -67,6 +68,28 @@ function endTelemetryRun(telemetryRunId, exitCode) {
     });
   } catch (err) {
     note({ subtype: "telemetry_end_failed", message: err.message });
+  }
+}
+
+// FOC-730: turn-scoped working state of this child's namespace is dead the
+// moment the turn is — every child exit is a turn boundary (gates included).
+// Task- and run-scoped keys stay: they close at task close
+// (supervisor-cleanup.mjs cmdRemove) and at run retention (cmdPrune). Returns
+// the retired key list, or null when there is no store to touch — a run that
+// predates the store is skipped silently, and creating one here would grow a
+// store for every legacy run.
+function pruneTurnWorkingState() {
+  const dbPath = agentStatePath(process.env);
+  if (!existsSync(dbPath)) return null;
+  const store = openAgentState(dbPath);
+  try {
+    return pruneFacts(store, {
+      namespace: `child:${runId}/${childId}`,
+      scope: "turn",
+      actor: "supervisor-watch",
+    }).retired;
+  } finally {
+    store.close();
   }
 }
 
@@ -443,6 +466,32 @@ child.on("exit", (code, signal) => {
     ...turnEndCostPatch({ entry, transcriptCost, results: resultCosts }),
     turns,
   });
+
+  // FOC-730: retire this turn's turn-scoped facts and record it on the child.
+  // Best effort on both counts: a store failure writes one stderr line plus a
+  // tee note and never blocks the wake; the registry write rides in its own
+  // try so a failed record cannot turn a clean exit into a crash.
+  try {
+    const retired = pruneTurnWorkingState();
+    if (retired != null) {
+      updateChild(runId, childId, {
+        workingStatePruned: {
+          ...(entry.workingStatePruned ?? {}),
+          turn: { at: endedAt, retired },
+        },
+      });
+    }
+  } catch (err) {
+    const reason = err?.message ?? String(err);
+    try {
+      // writeSync, not process.stderr.write: process.exit below would drop
+      // buffered pipe output on win32.
+      writeSync(2, `agent-state: turn prune skipped (${reason})\n`);
+    } catch {
+      /* stdio is 'ignore' on a detached watcher — the tee note carries it */
+    }
+    note({ subtype: "agent_state_prune_skipped", message: reason });
+  }
 
   if (!sawInit) {
     note({ subtype: "no_init", message: "child exited before emitting system/init — no session_id, not resumable" });

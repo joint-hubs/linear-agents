@@ -595,6 +595,24 @@ test("buildChildSettings unions squad denies with the Supervisor's, deduped", ()
   for (const rule of SUPERVISOR_DENY) if (!deny.includes(rule)) fail(`missing ${rule}`);
 });
 
+test("FOC-730: the raw working-state writes are denied for every child", () => {
+  // One writer — the agent-state CLI. A child that edits the store file (or
+  // shells into it through node -e / sqlite3) would walk past the reason,
+  // cap and history the CLI enforces, so the file and both eval routes are
+  // on the deny list the generated settings carry.
+  const rules = [
+    "Bash(sqlite3 *agent-state*)",
+    "Bash(node -e *agent-state*)",
+    "Bash(node --eval *agent-state*)",
+    "Edit(//**/agent-state.sqlite)",
+    "Write(//**/agent-state.sqlite)",
+  ];
+  for (const rule of rules) {
+    if (!SUPERVISOR_DENY.includes(rule)) fail(`SUPERVISOR_DENY lost ${rule}`);
+    if (!buildChildSettings({}).permissions.deny.includes(rule)) fail(`${rule} never reaches the generated child settings`);
+  }
+});
+
 test("the generated file carries the deny list and exactly the working-state SessionStart hook", () => {
   // `claude --settings` loads ADDITIONAL settings. An allow entry here could only
   // grant, never remove; the squad's own hooks block is NOT copied (double

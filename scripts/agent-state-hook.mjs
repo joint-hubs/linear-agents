@@ -12,7 +12,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { agentStatePath, openAgentState, renderFacts } from "./agent-state.mjs";
+import { agentStatePath, namespaceFromEnv, openAgentState, renderFacts } from "./agent-state.mjs";
 import { resolveRole, runIdOfNamespace } from "./agent-state-resolve.mjs";
 import { SQUAD_ROLES, loadRegistry, registryPath } from "./agent-state-registry.mjs";
 import { runDir } from "./supervisor-lib.mjs";
@@ -53,11 +53,14 @@ export async function runHook({ argv = [], env = process.env, stdin = "", now } 
     const source = typeof payload.source === "string" && payload.source ? payload.source : "startup";
 
     // ── namespace and role, from the env alone ───────────────────────────────
+    // FOC-730: the two namespace strings are built through the shared
+    // namespaceFromEnv helper (the CLI derives its default the same way); the
+    // hook keeps its own current-run-pointer fallback below.
     let namespace;
     let role;
     if (env.LA_SUPERVISOR_CHILD) {
       if (!env.LA_SUPERVISOR_RUN) return unavailable("no run id");
-      namespace = `child:${env.LA_SUPERVISOR_RUN}/${env.LA_SUPERVISOR_CHILD}`;
+      namespace = namespaceFromEnv(env);
       role = env.FENIX_STAGE;
       if (!SQUAD_ROLES.includes(role)) return unavailable(`unknown role "${role}"`);
     } else {
@@ -74,7 +77,7 @@ export async function runHook({ argv = [], env = process.env, stdin = "", now } 
         }
       }
       if (!runId) return unavailable("no run id");
-      namespace = `supervisor:${runId}`;
+      namespace = namespaceFromEnv({ ...env, LA_SUPERVISOR_RUN: runId });
       role = "supervisor";
     }
 
