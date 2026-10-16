@@ -8,10 +8,14 @@
 //   - static audit: a synthetic parallel-lane file containing a disqualifying marker
 //   - budget: --max-wall-ms stops admitting, kills in-flight, reports buckets
 //   - the FOC-295 env scrub still holds for every spawned child
+//   - FOC-840: a test file that leaves a spawned server alive fails the run,
+//     and a clean run reports no orphans
 //
-// Each case builds its own sandbox: a temp dir with a COPY of the runner, a
-// fixture test-lanes.json, and fixture *.test.mjs files. The real repo and the
-// real lane config are never touched.
+// Each case builds its own sandbox: a temp dir with a COPY of the runner (plus
+// the spawn helper and its library chain the runner imports), a fixture
+// test-lanes.json, and fixture *.test.mjs files. The sandbox node_modules is a
+// junction to the real one so the supervisor-lib import chain (ajv) resolves.
+// The real repo and the real lane config are never touched.
 //
 // Marker sources below are built by string concatenation so this file itself —
 // a parallel-lane file the real static audit regex-scans — does not contain a
@@ -20,13 +24,26 @@
 // Run: node scripts/test-run.test.mjs
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
+import { probePid } from "./test-spawn.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RUNNER_SRC = join(HERE, "test-run.mjs");
+
+// The runner imports scripts/test-spawn.mjs (FOC-840), which imports the
+// supervisor-lib tree — every file below must exist next to the copied runner.
+const RUNNER_DEPS = [
+  "test-spawn.mjs",
+  "supervisor-lib.mjs",
+  "utils.mjs",
+  "workspace-claims.mjs",
+  "autonomy-grants.mjs",
+  "fenix-paths.mjs",
+];
 
 const OK = 'console.log("ok");\n';
 const EXIT1 = 'console.error("boom");\nprocess.exit(1);\n';
@@ -34,6 +51,39 @@ const SLOW = "setTimeout(() => process.exit(0), 5000);\n";
 const MARKER_SERVER = `const srv = ${JSON.parse('"create"') + "Server"}();\n${OK}`;
 const MARKER_INERT = `if (false) { const srv = ${JSON.parse('"create"') + "Server"}(); }\n${OK}`;
 const MARKER_SEAM = `const env = { ...process.env };\n${"delete"} env.LA_TELEMETRY_DB;\n${OK}`;
+
+// The fake server the FOC-840 fixtures spawn through the real helper — bracket
+// access keeps the audit marker for createServer( out of this file's source.
+// It lives in fixture strings only; the SANDBOX is not scanned, but this file
+// (parallel lane) is.
+const FAKE_SERVER_SRC = `import http from "node:http";
+http[${JSON.stringify("create" + "Server")}]((req, res) => { res.statusCode = 200; res.end("ok"); })
+  .listen(Number(process.env.TELEMETRY_PORT), "127.0.0.1");
+`;
+
+// Imports the helper by absolute URL from the real scripts dir — the sandbox
+// runner has its own copy, but the fake test file may use either. Absolute
+// path imports in ESM must be file:// URLs (a bare Windows C:\... path throws
+// ERR_UNSUPPORTED_ESM_URL_SCHEME).
+const FAKE_FILE_PREAMBLE = `import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnTestServer } from ${JSON.stringify(pathToFileURL(join(HERE, "test-spawn.mjs")).href)};
+
+const dir = mkdtempSync(join(tmpdir(), "test-run-orphan-fixture-"));
+const serverPath = join(dir, "server.mjs");
+writeFileSync(serverPath, ${JSON.stringify(FAKE_SERVER_SRC)}, "utf8");
+`;
+
+const ORPHAN_BODY = FAKE_FILE_PREAMBLE + `const { child } = await spawnTestServer({ script: serverPath, timeoutMs: 15000 });
+console.log("spawned", child.pid);
+process.exit(0);
+`;
+
+const CLEAN_BODY = FAKE_FILE_PREAMBLE + `const { stop } = await spawnTestServer({ script: serverPath, timeoutMs: 15000 });
+await stop();
+console.log("ok");
+`;
 
 let passed = 0;
 const failures = [];
@@ -60,6 +110,10 @@ function sandbox(lanes, files) {
   const scripts = join(root, "scripts");
   mkdirSync(scripts);
   copyFileSync(RUNNER_SRC, join(scripts, "test-run.mjs"));
+  for (const dep of RUNNER_DEPS) copyFileSync(join(HERE, dep), join(scripts, dep));
+  // The supervisor-lib import chain pulls ajv from node_modules — junction the
+  // real one so module resolution walks from the sandbox and finds it.
+  symlinkSync(join(HERE, "..", "node_modules"), join(root, "node_modules"), "junction");
   writeFileSync(join(scripts, "test-lanes.json"), JSON.stringify(lanes, null, 2));
   for (const [name, body] of Object.entries(files)) writeFileSync(join(scripts, name), body);
   return root;
@@ -191,6 +245,30 @@ test("the runner strips LA_SUPERVISOR* from every spawned child (FOC-295)", () =
   };
   const r = run(root, [], poisoned);
   if (r.status !== 0) fail(`the probe saw a LA_SUPERVISOR* variable:\n${r.stderr}`);
+});
+
+// ── orphan sweep (FOC-840) ───────────────────────────────────────────────────
+
+test("a test file that never stops its spawned server fails the run with the sweep", () => {
+  const root = sandbox({ parallel: [lane("orphan.test.mjs")], serial: [] }, { "orphan.test.mjs": ORPHAN_BODY });
+  const r = run(root);
+  if (r.status !== 1) fail(`an orphan-leaving run must exit 1, got ${r.status}:\n${r.stdout}\n${r.stderr}`);
+  const line = r.stderr.match(/test orphans left running: .*orphan\.test\.mjs pid (\d+) port (\d+) \(killed\)/);
+  if (!line) fail(`no orphan line naming the file, pid and port:\n${r.stderr}`);
+  if (!r.stdout.includes("1 test orphan(s) killed")) fail(`the summary does not name the orphan count:\n${r.stdout}`);
+  // The sweep must have actually killed the survivor, not just listed it.
+  const pid = Number(line[1]);
+  if (probePid(pid)) fail(`orphan pid ${pid} is still alive after the run`);
+});
+
+test("a clean run reports no orphans and exits 0", () => {
+  const root = sandbox({ parallel: [lane("clean.test.mjs")], serial: [] }, { "clean.test.mjs": CLEAN_BODY });
+  const r = run(root);
+  if (r.status !== 0) fail(`clean run exited ${r.status}:\n${r.stdout}\n${r.stderr}`);
+  if (!r.stdout.includes("1/1 passed")) fail(`the file did not pass:\n${r.stdout}`);
+  if (r.stdout.includes("orphan") || r.stderr.includes("orphan")) {
+    fail("a clean run printed an orphan line:\n" + r.stdout + r.stderr);
+  }
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

@@ -53,7 +53,6 @@
 // The server children are ALWAYS killed in finally.
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import net from "node:net";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -65,6 +64,7 @@ import { openTelemetryDb } from "./telemetry-store.mjs";
 import { ensureViews } from "./telemetry-canonical.mjs";
 import { writeCurrentRun } from "./supervisor-current-run.mjs";
 import { hostTokenPath } from "./fenix-paths.mjs";
+import { spawnTestServer } from "./test-spawn.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -320,38 +320,13 @@ const baseEnv = {
 };
 delete baseEnv.LA_ANALYSIS_CACHE;
 
-function spawnServer(env) {
-  const freePortP = new Promise((resolve) => {
-    const probe = createServer();
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-  return freePortP.then((port) => new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(__dir, "telemetry-server.mjs")], {
-      env: { ...env, TELEMETRY_PORT: String(port) },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    child.stderrBuf = "";
-    child.stderr.on("data", (c) => { child.stderrBuf += c; });
-    child.on("exit", (code) => { if (code !== 0 && code !== null) child._exitCode = code; });
-    resolve({ child, port });
-  }));
-}
-
-async function waitForServer(port, child, ms = 20000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`server exited early (${child.exitCode})`);
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/telemetry/health`);
-      if (res.ok) return;
-    } catch { /* not up yet */ }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  throw new Error("server not ready");
-}
+// Shared spawn helper (FOC-840): free port + health poll + tree-kill stop().
+const spawnCockpitServer = (env) => spawnTestServer({
+  script: join(__dir, "telemetry-server.mjs"),
+  env,
+  inheritEnv: false, // baseEnv already spreads process.env (minus LA_ANALYSIS_CACHE)
+  label: "cockpit-routes",
+});
 
 async function call(port, method, path, { origin = "http://localhost:5173", body } = {}) {
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -407,10 +382,10 @@ let servers = [];
 try {
   // ── Docker mode, host reachable ──────────────────────────────────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnCockpitServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     // GET /api/cockpit — full shape, probe through the host, redaction.
     beatWaker("run-1", "waker-sess"); // fresh heartbeat — "alive" below must not depend on suite speed
@@ -821,15 +796,15 @@ try {
       const r = await call(P, "POST", p, { origin: "https://evil.example", body });
       check(`foreign origin 403 on ${p}`, r.status === 403, `got ${r.status}`);
     }
-    child.kill();
+    await spawned.stop();
   }
 
   // ── Docker mode, host down ───────────────────────────────────────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: `http://127.0.0.1:${deadPort}` });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnCockpitServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: `http://127.0.0.1:${deadPort}` });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     const snap = await call(P, "GET", "/api/cockpit");
     check("cockpit host-down -> unreachable", snap.status === 200 && snap.body?.supervisor?.host === "unreachable",
@@ -869,15 +844,15 @@ try {
       JSON.stringify(answer));
     const rows = readFileSync(join(supState, "run-2", "edits.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
     check("gate answer host-down row notified:false", rows.length === 1 && rows[0].notified === false, JSON.stringify(rows));
-    child.kill();
+    await spawned.stop();
   }
 
   // ── Native mode (no FENIX_SUPERVISOR_HOST) ───────────────────────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv, SUPERVISOR_MODEL: "test-model" });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnCockpitServer({ ...baseEnv, SUPERVISOR_MODEL: "test-model" });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     const msg = await call(P, "POST", "/api/supervisor/message", { body: { text: "hi" } });
     check("message native -> 503 docker-only", msg.status === 503 && msg.body?.error === "docker-only", JSON.stringify(msg));
@@ -921,15 +896,15 @@ try {
     const rej = await rawUpgrade(P, upgradeRequest({ host: `127.0.0.1:${P}`, origin: `http://127.0.0.1:${P}` }));
     check("terminal native -> 503", rej.head.startsWith("HTTP/1.1 503"), rej.head);
     rej.socket.destroy();
-    child.kill();
+    await spawned.stop();
   }
 
   // ── WS upgrade guards + proxy (Docker mode, host reachable) ──────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnCockpitServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     const noOrigin = await rawUpgrade(P, upgradeRequest({ host: `127.0.0.1:${P}`, origin: null }));
     check("terminal without Origin -> 403", noOrigin.head.startsWith("HTTP/1.1 403"), noOrigin.head);
@@ -979,7 +954,7 @@ try {
     });
     check("terminal pipes bytes both ways", echoed === true);
     ok.socket.destroy();
-    child.kill();
+    await spawned.stop();
   }
 
   // ── the current-run record (FOC-807) ─────────────────────────────────────
@@ -1002,10 +977,10 @@ try {
       pid: LIVE_PID, sessionId: "waker-cur", startedAt: NOW, heartbeatAt: NOW, firedThrough: 0,
     }), "utf8");
 
-    const { child, port } = await spawnServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL, SUPERVISOR_MODEL: "env-model" });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnCockpitServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL, SUPERVISOR_MODEL: "env-model" });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     // No record yet: the focus run (run-1) drives runId, runSource says so,
     // and the backlog counts the focus run only — the new run's un-acked rows
@@ -1095,16 +1070,14 @@ try {
       sup?.focus?.taskId === "FIX-42" && sup?.focus?.runId === "run-1" && sup?.focus?.declared === false,
       JSON.stringify(sup?.focus));
 
-    child.kill();
+    await spawned.stop();
   }
 } catch (err) {
   failed++;
   failures.push(`unexpected error — ${err?.stack || err}`);
-  for (const s of servers) if (s.stderrBuf) console.error(`[child stderr] ${s.stderrBuf}`);
+  for (const s of servers) if (s.child.stderrBuf) console.error(`[child stderr] ${s.child.stderrBuf}`);
 } finally {
-  for (const child of servers) {
-    if (child.exitCode === null) child.kill();
-  }
+  for (const s of servers) await s.stop();
   fakeHost.close();
 }
 

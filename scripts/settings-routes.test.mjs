@@ -20,7 +20,6 @@
 // ALWAYS killed in finally.
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import {
@@ -41,6 +40,7 @@ import { benchmarkFor as realBenchmarkFor } from "./model-benchmarks.mjs";
 import { writeSettings as realWriteSettings } from "./fenix-settings.mjs";
 import { openTelemetryDb } from "./telemetry-store.mjs";
 import { ensureViews } from "./telemetry-canonical.mjs";
+import { spawnTestServer } from "./test-spawn.mjs";
 
 const POSIX = process.platform !== "win32";
 
@@ -689,40 +689,6 @@ const childEnv = {
   FENIX_REPOS_ALLOW_LOCAL: "1",
 };
 
-function spawnServer(env) {
-  const freePortP = new Promise((resolve) => {
-    const probe = createServer();
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-  return freePortP.then((port) => new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(fileURLToPath(new URL(".", import.meta.url)), "telemetry-server.mjs")], {
-      env: { ...env, TELEMETRY_PORT: String(port) },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    child.stdoutBuf = "";
-    child.stderrBuf = "";
-    child.stdout.on("data", (c) => { child.stdoutBuf += c; });
-    child.stderr.on("data", (c) => { child.stderrBuf += c; });
-    resolve({ child, port });
-  }));
-}
-
-async function waitForServer(port, child, ms = 20000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`server exited early (${child.exitCode})`);
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/telemetry/health`);
-      if (res.ok) return;
-    } catch { /* not up yet */ }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  throw new Error("server not ready");
-}
-
 async function call(port, method, path, { origin = "http://localhost:5173", body } = {}) {
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
     method,
@@ -761,11 +727,15 @@ function readText(p) {
 // ── run the integration scenario ─────────────────────────────────────────────
 
 let child = null;
+let spawned = null;
 try {
-  const spawned = await spawnServer(childEnv);
+  spawned = await spawnTestServer({
+    script: join(fileURLToPath(new URL(".", import.meta.url)), "telemetry-server.mjs"),
+    env: childEnv,
+    label: "settings-routes",
+  });
   child = spawned.child;
   const P = spawned.port;
-  await waitForServer(P, child);
 
   // keys: shape, no canaries, guards
   {
@@ -991,7 +961,7 @@ try {
   failed++;
   failures.push(`integration crashed — ${err?.stack || err}`);
 } finally {
-  if (child) { try { child.kill(); } catch {} }
+  if (spawned) await spawned.stop();
   fakeChecks.close();
 }
 
