@@ -327,6 +327,43 @@ const child = isolated
     )
   : spawn(command, spawnArgs, spawnOpts);
 
+// The status a signal-terminated turn exits with (128+n), set by terminateTurn
+// below; null on a run that ends normally.
+let signalTerminated = null;
+
+// FOC-802: when the Supervisor kills the watcher, the turn must die with it —
+// not leave a claude child running orphaned, holding the worktree and burning
+// the budget. The child leads its own process group (spawnOpts.detached), so a
+// group signal reaches the sudo/helper AND everything claude spawned. On an
+// isolated run the env-file handlers above run first and re-raise, so this
+// handler also sees the signal a second time and acts exactly once; on an
+// unisolated POSIX run it IS the signal handler. The child's exit path gets a
+// bounded 2 s to run its normal bookkeeping (registry, tee, wake queue,
+// telemetry) — but the watcher exits with the signal's status (143 for SIGTERM)
+// regardless of what the child does. Windows has no external-signal handler
+// semantics; today's behaviour there is unchanged.
+if (process.platform !== "win32") {
+  const SIGNAL_EXIT = { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 };
+  const terminateTurn = (signal) => {
+    if (signalTerminated !== null) return; // the env-file handler's re-raise lands here too
+    signalTerminated = SIGNAL_EXIT[signal] ?? 143;
+    if (child.pid) {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        /* the group is already gone */
+      }
+      try {
+        process.kill(child.pid, signal);
+      } catch {
+        /* the pid is already gone */
+      }
+    }
+    setTimeout(() => process.exit(signalTerminated), 2000);
+  };
+  for (const signal of Object.keys(SIGNAL_EXIT)) process.on(signal, terminateTurn);
+}
+
 let sessionId = null;
 // FOC-760: the costFromResult outputs of this turn, kept in order and resolved
 // ONCE at exit. Each is a session-cumulative snapshot — they are never summed
@@ -625,5 +662,5 @@ child.on("exit", (code, signal) => {
   wake({ event: "exit", childId, turn: turnIndex, detail: { status, exitCode: code } });
 
   endTelemetryRun(args["telemetry-run"], code ?? 1);
-  process.exit(0);
+  process.exit(signalTerminated ?? 0);
 });

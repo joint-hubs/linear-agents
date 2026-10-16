@@ -35,14 +35,26 @@ const WATCH = join(ROOT, "scripts", "supervisor-watch.mjs");
 
 let passed = 0;
 const failures = [];
+const pending = [];
 function test(name, fn) {
+  // An async fn is supported for the tests that must wait on the event loop:
+  // a child-process object only learns of an exit on a loop tick, which a
+  // synchronous Atomics.wait spin never gives it (FOC-802).
+  const settle = (err) => {
+    if (err) {
+      failures.push(name);
+      console.log(`  FAIL ${name}\n       ${err.message}`);
+    } else {
+      passed++;
+      console.log(`  PASS ${name}`);
+    }
+  };
   try {
-    fn();
-    passed++;
-    console.log(`  PASS ${name}`);
+    const r = fn();
+    if (r instanceof Promise) pending.push(r.then(() => settle(), settle));
+    else settle();
   } catch (err) {
-    failures.push(name);
-    console.log(`  FAIL ${name}\n       ${err.message}`);
+    settle(err);
   }
 }
 
@@ -551,13 +563,20 @@ if (process.platform !== "win32") {
     assert.equal(watcher.exitCode, null, `the watcher exited on its own: ${watcher.exitCode}`);
   });
 
-  test("SIGTERM removes the env file and kills the watcher", () => {
+  test("SIGTERM removes the env file and kills the watcher", async () => {
     watcher.kill("SIGTERM");
+    // The wait MUST yield: exitCode/signalCode are set from the child's exit
+    // event, which only runs on an event-loop tick — a synchronous
+    // Atomics.wait spin never observes the death and would report a watcher
+    // that died instantly as a survivor (FOC-802). The watcher exits 143 once
+    // it has killed the child's process group, within its own 2 s bound.
     const deadline = Date.now() + 10_000;
-    while (watcher.exitCode === null && watcher.signalCode === null && Date.now() < deadline) sleepSync(50);
+    while (watcher.exitCode === null && watcher.signalCode === null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     assert.ok(
-      watcher.exitCode !== null || watcher.signalCode !== null,
-      "the watcher survived SIGTERM",
+      watcher.exitCode === 143 || watcher.signalCode !== null,
+      `the watcher survived SIGTERM or died wrongly: exit=${watcher.exitCode} signal=${watcher.signalCode}`,
     );
     assert.ok(!existsSync(envFilePath), "child.env outlived a SIGTERMed watcher");
     // The helper never ran to completion (the fake claude hangs forever), so
@@ -660,6 +679,7 @@ test("a missing helper in container warns and takes today's unisolated path", ()
 });
 
 console.log("");
+await Promise.all(pending);
 if (failures.length) {
   console.log(`${passed} passed, ${failures.length} FAILED`);
   process.exit(1);

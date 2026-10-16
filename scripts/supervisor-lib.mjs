@@ -15,7 +15,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -122,14 +122,21 @@ export const teeAbsPath = (runId, childId) => join(runDir(runId), teeRelPath(chi
 // therefore pinned here, at the source: the run dir 0755, the four shared
 // subdirs 02775 (setgid, group-writable — children DO write their tees, gates,
 // verdicts and launch state there), and the run-root JSON files 0644 via the
-// atomicWriteJSON `mode` below. mkdirSync ignores `mode` on Windows and no-ops
-// on an existing directory, so this is a no-op there and on reused runs, and
-// files under the subdirs keep today's default modes.
+// atomicWriteJSON `mode` below. mkdirSync ignores `mode` on Windows, and — the
+// part that bit — mkdir(2) itself ignores S_ISGID in `mode`: the setgid bit is
+// only ever inherited from the parent directory or set by chmod. So each shared
+// subdir is chmod'd 02775 after creation, which also re-pins a reused run that
+// drifted. chmod to setgid needs the caller's gid to match the dir's group —
+// true for the owner's primary group and for `fenix` when the node user is a
+// member of it; a mismatch is a real EPERM and is NOT swallowed. Windows has
+// no POSIX mode bits and may refuse the call outright, so it is skipped there.
 export function ensureRunDir(runId) {
   const base = runDir(runId);
   mkdirSync(base, { recursive: true, mode: 0o755 });
   for (const sub of ["children", "gates", "verdicts", "launch"]) {
-    mkdirSync(join(base, sub), { recursive: true, mode: 0o2775 });
+    const dir = join(base, sub);
+    mkdirSync(dir, { recursive: true, mode: 0o2775 });
+    if (process.platform !== "win32") chmodSync(dir, 0o2775);
   }
 }
 
