@@ -756,7 +756,9 @@ const knownQuirks = asArray(args["known-quirk"]);
 const squadSettings = readJsonOr(join(squadConfigDir(squad), "settings.json"), {});
 const extraSettings = args.settings ? readJsonOr(args.settings, {}) : {};
 const childSettings = childSettingsPath(runId, childId);
-atomicWriteJSON(childSettings, buildChildSettings(squadSettings, extraSettings));
+// 0644 (FOC-802 M3): a run-root file the child reads (`claude --settings`) but
+// must never rewrite — it carries the P9 deny list.
+atomicWriteJSON(childSettings, buildChildSettings(squadSettings, extraSettings), { mode: 0o644 });
 
 // ── the model the child will actually run on (FOC-762/FOC-773) ───────────────
 // The child's model is DECIDED here, never inherited: the old logic fell back

@@ -480,6 +480,82 @@ test("legacy-unverified children are named beside the total, not excluded from i
   }
 });
 
+// ── isolation surfaced (FOC-802) ─────────────────────────────────────────────
+console.log("\nisolation surfaced");
+
+// A child with hand-written turns, so the test controls the isolation flags
+// without any live spawn.
+function seedTurns(runId, turns, { childId = "dev-1" } = {}) {
+  const ended = new Date().toISOString();
+  writeRegistry(runId, {
+    runId,
+    children: {
+      [childId]: {
+        childId,
+        squad: "dev",
+        taskId: "FOC-123",
+        sessionId: "sess-1",
+        status: "exited",
+        tee: join("children", `${childId}.jsonl`),
+        turns: turns.map((isolated) => ({
+          pid: 999999,
+          startedAt: ended,
+          endedAt: ended,
+          exitCode: 0,
+          isolated,
+        })),
+        costUsd: 0,
+        worktree: ROOT,
+      },
+    },
+    rounds: {},
+  });
+  return childId;
+}
+
+test("the LATEST turn's isolated flag reaches the snapshot", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, [false, true]);
+  const out = parse(status(runId));
+  if (out.children[0].isolated !== true) fail(`isolated was ${out.children[0].isolated}`);
+});
+
+test("an earlier isolated turn does not mask a later unisolated one", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, [true, false]);
+  const out = parse(status(runId));
+  if (out.children[0].isolated !== false) fail(`isolated was ${out.children[0].isolated}`);
+});
+
+test("a child with no turns reports isolated: null", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, []);
+  const out = parse(status(runId));
+  if (out.children[0].isolated !== null) fail(`isolated was ${out.children[0].isolated}`);
+});
+
+test("in container, a child whose latest turn ran unisolated gets a human line", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, [false]);
+  const r = status(runId, [], { FENIX_IN_CONTAINER: "1" });
+  if (!r.stderr.includes("isolation: off (dev-1)")) fail(`stderr did not name it: ${r.stderr}`);
+  parse(r); // the human line rides stderr; stdout stays parseable JSON
+});
+
+test("in container, an isolated child gets no line", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, [true]);
+  const r = status(runId, [], { FENIX_IN_CONTAINER: "1" });
+  if (r.stderr.includes("isolation: off")) fail(`stderr: ${r.stderr}`);
+});
+
+test("outside the container the line is never printed", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, [false]);
+  const r = status(runId, [], { FENIX_IN_CONTAINER: "" });
+  if (r.stderr.includes("isolation: off")) fail(`stderr: ${r.stderr}`);
+});
+
 // ── summary ──────────────────────────────────────────────────────────────────
 for (const dir of cleanup) {
   try {

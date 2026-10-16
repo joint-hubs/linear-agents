@@ -217,7 +217,11 @@ function readEditRows(runId) {
 
 const nextEditSeq = (runId) => readEditRows(runId).reduce((max, r) => Math.max(max, r.seq), 0) + 1;
 
-const appendEditRow = (runId, row) => appendFileSync(editsPath(runId), JSON.stringify(row) + "\n");
+// 0664 on creation so a file created by a child stays writable by the
+// Supervisor's group and vice versa; `mode` only applies when the file does
+// not exist yet, so appends keep the existing file's mode.
+const appendEditRow = (runId, row) =>
+  appendFileSync(editsPath(runId), JSON.stringify(row) + "\n", { mode: 0o664 });
 
 // ── change description ───────────────────────────────────────────────────────
 

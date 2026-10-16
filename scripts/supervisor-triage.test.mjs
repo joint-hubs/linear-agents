@@ -21,7 +21,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -543,6 +543,18 @@ test("record writes triage.json with the §2.4 schema", () => {
   assert.deepEqual(rec.unknowns, ["no estimate", "no DoD"]);
 });
 
+test("triage.json is created 0644 (run-root: children may read, never write)", () => {
+  if (process.platform === "win32") return; // POSIX mode bits only; the Windows run asserts the write succeeds above
+  const runId = withRun();
+  const r = run([
+    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "AC present",
+    "--confidence", "85", "--proposal", "dev", "--run", runId,
+  ]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const mode = statSync(join(runDirOf(runId), "triage.json")).mode & 0o777;
+  assert.equal(mode, 0o644, `triage.json mode ${mode.toString(8)} !== 644`);
+});
+
 test("LA_SUPERVISOR_RUN stands in for --run", () => {
   const runId = withRun();
   const r = run(["record", "--issue", "FOC-1", "--verdict", "ask", "--rationale", "x", "--confidence", "40"], { LA_SUPERVISOR_RUN: runId });
@@ -771,6 +783,11 @@ test("intake with no API key fails closed, visibly, and still writes the sibling
   assert.equal(rec.issue, "FOC-999");
   assert.equal(rec.decisions["intake.triage_node"].code, "auth_missing");
   assert.ok(existsSync(join(ROOT, ".state", "runs", runId, "decisions.jsonl")), "the shadow events exist even for failed calls");
+  if (process.platform !== "win32") {
+    // POSIX mode bits only; the Windows run asserts the write succeeded above.
+    const mode = statSync(join(runDirOf(runId), "intake.json")).mode & 0o777;
+    assert.equal(mode, 0o644, `intake.json mode ${mode.toString(8)} !== 644 (run-root: Supervisor-owned)`);
+  }
 });
 
 test("record embeds the intake summary next to the verdict and displays the disagreement", () => {

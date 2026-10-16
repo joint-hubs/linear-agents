@@ -720,7 +720,8 @@ function cmdRecord(args) {
   };
 
   ensureRunDir(runId);
-  atomicWriteJSON(path, record);
+  // 0644: run-root files are Supervisor-owned; children may read, never write.
+  atomicWriteJSON(path, record, { mode: 0o644 });
 
   if (sizeFlow) { try { recordRuntimeChoice(sizeFlow); } catch { console.error('[runtime] workflow choice could not be recorded'); } }
 
@@ -790,7 +791,7 @@ async function cmdIntake(args) {
   const path = intakePath(runId);
   try {
     ensureRunDir(runId);
-    atomicWriteJSON(path, record);
+    atomicWriteJSON(path, record, { mode: 0o644 }); // run-root: Supervisor-owned
   } catch (err) {
     failJson(`could not write ${path}: ${err.message}`);
   }

@@ -115,9 +115,22 @@ export const verdictPath = (runId, taskId, round) =>
 export const teeRelPath = (childId) => join("children", `${childId}.jsonl`);
 export const teeAbsPath = (runId, childId) => join(runDir(runId), teeRelPath(childId));
 
+// FOC-802 (M3): the run root is Supervisor-owned state a child must be able to
+// READ but not rewrite, and the entrypoint's fix_permissions runs only at
+// container start — a run created afterwards inherits setgid + umask 0002 and
+// would be group-writable by every child until the next restart. The modes are
+// therefore pinned here, at the source: the run dir 0755, the four shared
+// subdirs 02775 (setgid, group-writable — children DO write their tees, gates,
+// verdicts and launch state there), and the run-root JSON files 0644 via the
+// atomicWriteJSON `mode` below. mkdirSync ignores `mode` on Windows and no-ops
+// on an existing directory, so this is a no-op there and on reused runs, and
+// files under the subdirs keep today's default modes.
 export function ensureRunDir(runId) {
-  mkdirSync(join(runDir(runId), "children"), { recursive: true });
-  mkdirSync(gatesDir(runId), { recursive: true });
+  const base = runDir(runId);
+  mkdirSync(base, { recursive: true, mode: 0o755 });
+  for (const sub of ["children", "gates", "verdicts", "launch"]) {
+    mkdirSync(join(base, sub), { recursive: true, mode: 0o2775 });
+  }
 }
 
 export function emptyRegistry(runId) {
@@ -139,7 +152,9 @@ export function readRegistry(runId) {
 
 export function writeRegistry(runId, registry) {
   ensureRunDir(runId);
-  atomicWriteJSON(registryPath(runId), registry);
+  // 0644 (FOC-802 M3): the registry is Supervisor-and-watcher state; children
+  // read it, they never write it.
+  atomicWriteJSON(registryPath(runId), registry, { mode: 0o644 });
 }
 
 // Read-modify-write. Single-writer by phase: supervisor-spawn writes the initial
@@ -154,6 +169,39 @@ export function updateChild(runId, childId, patch) {
   registry.children[childId] = { ...current, ...patch };
   writeRegistry(runId, registry);
   return registry.children[childId];
+}
+
+// ── signal-time file cleanup (FOC-802, M1) ───────────────────────────────────
+//
+// `process.on("exit")` does NOT run when a signal terminates the process, and
+// the Supervisor kills detached watchers hard (SIGTERM, sometimes SIGKILL).
+// Anything the watcher deletes only in its exit handler can outlive the turn —
+// the child env file with the provider keys inside is exactly that file. The
+// watcher installs these handlers alongside its exit handler so the file is
+// removed on every path that kills the process.
+//
+// The handlers re-raise the signal with themselves removed, so the process dies
+// exactly as it would have without them — same disposition, same exit status a
+// shell or supervisor observes; only the file removal is added.
+//
+// The injected `raise` is the unit-test seam: on Windows a signal from another
+// process terminates unconditionally without running Node handlers, so the
+// handler's behaviour is proven by emitting the signal in-process instead.
+export function installEnvFileSignalHandlers(remove, { raise = (signal) => process.kill(process.pid, signal) } = {}) {
+  const handlers = {};
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    handlers[signal] = () => {
+      try {
+        remove();
+      } catch {
+        /* best effort — the signal still kills the process */
+      }
+      process.removeListener(signal, handlers[signal]);
+      raise(signal);
+    };
+    process.on(signal, handlers[signal]);
+  }
+  return handlers; // returned so a test (or caller) can remove them again
 }
 
 // Does this child have an unanswered question outstanding? The watcher asks at
@@ -281,7 +329,7 @@ export function appendWakeEvent(runId, event) {
     ts: new Date().toISOString(),
   };
   ensureRunDir(runId);
-  appendFileSync(wakeQueuePath(runId), JSON.stringify(row) + "\n");
+  appendFileSync(wakeQueuePath(runId), JSON.stringify(row) + "\n", { mode: 0o644 });
   return row;
 }
 
@@ -333,7 +381,7 @@ export function writeWakeAck(runId, seq) {
     );
   }
   const ackedThrough = Math.max(readWakeAck(runId), seq);
-  atomicWriteJSON(wakeAckPath(runId), { ackedThrough, ackedAt: new Date().toISOString() });
+  atomicWriteJSON(wakeAckPath(runId), { ackedThrough, ackedAt: new Date().toISOString() }, { mode: 0o644 });
   return ackedThrough;
 }
 
@@ -592,7 +640,7 @@ export function readHolds(runId) {
 export function writeHolds(runId, store) {
   validateHoldStore(store, holdsPath(runId));
   ensureRunDir(runId);
-  atomicWriteJSON(holdsPath(runId), store);
+  atomicWriteJSON(holdsPath(runId), store, { mode: 0o644 });
   return store;
 }
 
@@ -1434,7 +1482,7 @@ export function assertStageBudget(runId, squad, { graph, fail = failJson } = {})
 
   if (budget.reserveExhausted) {
     const report = partialStatusReport(runId, { graph });
-    atomicWriteJSON(join(runDir(runId), "partial-status.json"), report);
+    atomicWriteJSON(join(runDir(runId), "partial-status.json"), report, { mode: 0o644 });
     return fail(
       `the reserve is exhausted ($${budget.reserve.toFixed(2)} allocated, $${budget.reserveDrawn.toFixed(4)} drawn) — ` +
         `graph expansion stops here`,
