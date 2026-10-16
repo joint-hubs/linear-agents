@@ -109,6 +109,7 @@ Never describe child output you have not read from `supervisor-status.mjs`. The 
 
 ### 5. Relay gates
 A child that needs a human writes a gate record and ends its turn — its status becomes `waiting_gate`, which is a CLEAN exit with an open question, not a failure. Read the gate, present it, then **record the answer before you deliver it**:
+Before you answer a gate that approves a plan, run the `grilling` skill against that plan: settle every fact-question yourself (children, CodeGraph) and carry only the genuine decisions into the gate you present to Mateusz.
 ```
 node $LA_ROOT/scripts/supervisor-gate.mjs list --run <runId> --status pending
 node $LA_ROOT/scripts/supervisor-gate.mjs answer --gate <gateId> --text "<his answer>"

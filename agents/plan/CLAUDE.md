@@ -86,6 +86,7 @@ Registry: `docs/tools/README.md` (one-page, check before sweeping with Grep). **
 
 ### 3. GATE 1 — HITL (sync inline)
 Present the brief + open questions to Mateusz inline. Think through gaps before presenting, then ask and wait for ✅ / answers.
+Before GATE 1, run the `grilling` skill on the brief: facts are settled by subagents, the open decisions become the brief's numbered questions, each with a recommended answer.
 - HITL here is interactive REPL (sync inline confirmation), not async `needs:approval` / walk away. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, GATE 1 is a `plan.gate1` record and the turn ends there.
 - Empty / unclear input → do not plan. Re-ask.
 - On ✅ → continue.
