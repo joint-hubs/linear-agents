@@ -121,6 +121,10 @@
       "reason": "isolation audit FOC-803: mkdtemp/tmpdir fixtures only (the chmod variants additionally forced through a fake fsImpl); no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
+      "file": "fenix-integrations.test.mjs",
+      "reason": "isolation audit FOC-772: mkdtemp/tmpdir fixtures only; CLI children read only temp settings files via the LA_SETTINGS_FILE seam; provider config/.env reads are pinned to repo read-only paths; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "fenix-keys.test.mjs",
       "reason": "isolation audit FOC-778: mkdtemp fixtures and fake docker shim on PATH; canned key-check answers, no network or ports; real settings scripts use only temp LA_SETTINGS_FILE"
     },

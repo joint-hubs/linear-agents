@@ -14,6 +14,10 @@ const PROVIDER_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
 const SQUAD_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const KEY_NAME_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
 const TIER_NAMES = ["opus", "sonnet", "haiku", "smallFast"];
+// FOC-772: the optional integrations switch — every flag defaults to false
+// (fenix-integrations.mjs owns the reading); nebul is deliberately absent here,
+// it stays derived from provider.active.
+const INTEGRATION_FLAGS = ["atlas", "pisi", "memory"];
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "host.docker.internal"]);
 // Anything shaped like a real credential — the settings file is shared and
 // diffed, so a pasted key must be caught before it lands on disk.
@@ -96,7 +100,9 @@ export function validateSettings(obj) {
   if (!isPlainObject(obj)) return { ok: false, errors: ["settings: must be a JSON object"] };
 
   for (const key of Object.keys(obj)) {
-    if (key !== "provider" && key !== "routing") errors.push(`${key}: unknown top-level key`);
+    if (key !== "provider" && key !== "routing" && key !== "integrations") {
+      errors.push(`${key}: unknown top-level key`);
+    }
   }
 
   const provider = obj.provider;
@@ -137,6 +143,17 @@ export function validateSettings(obj) {
           }
           checkNonEmptyString(entry.lead, `routing.${squad}.lead`, 200, errors);
         }
+      }
+    }
+  }
+
+  const integrations = obj.integrations;
+  if (integrations !== undefined) {
+    if (!isPlainObject(integrations)) errors.push("integrations: must be an object");
+    else {
+      for (const [key, value] of Object.entries(integrations)) {
+        if (!INTEGRATION_FLAGS.includes(key)) errors.push(`integrations.${key}: unknown key`);
+        else if (typeof value !== "boolean") errors.push(`integrations.${key}: must be a boolean`);
       }
     }
   }

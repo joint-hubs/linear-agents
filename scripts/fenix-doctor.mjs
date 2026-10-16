@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { squadConfigDir } from './fenix-paths.mjs';
+import { INTEGRATIONS, prerequisites, readIntegrations } from './fenix-integrations.mjs';
 
 const GIB = 1024 ** 3;
 const TOOL_FIX = 'rebuild the image: fenix update';
@@ -231,18 +232,56 @@ export function checkProjectsDir(env, fsImpl, projectsFile) {
   }
 }
 
+// FOC-772: the optional integrations are off by default, so absence is the
+// healthy state. An ENABLED integration whose prerequisite is missing is a
+// misconfiguration the doctor names — warn, never fail: every integration
+// degrades gracefully when its prerequisite is absent. Settings come in
+// through the runChecks seam so tests need no real overlay.
+function checkIntegrations(env, settings) {
+  let integrations;
+  try {
+    integrations = readIntegrations({ settings, env });
+  } catch (err) {
+    return {
+      name: 'integrations',
+      status: 'warn',
+      detail: `settings invalid (${String(err.message).split('\n')[0]})`,
+      fix: 'fix settings.json, then re-run fenix doctor',
+    };
+  }
+  const enabled = INTEGRATIONS.filter((name) => integrations[name]);
+  if (!enabled.length) return { name: 'integrations', status: 'ok', detail: 'none enabled' };
+
+  let anyMissing = false;
+  const parts = enabled.map((name) => {
+    const { ok, missing, required } = prerequisites(name, env);
+    if (ok) return required.length ? `${name} (${required.join(', ')})` : name;
+    anyMissing = true;
+    return `${name} enabled but missing ${missing.join(', ')}`;
+  });
+  return {
+    name: 'integrations',
+    status: anyMissing ? 'warn' : 'ok',
+    detail: parts.join('; '),
+    ...(anyMissing ? { fix: 'set the missing variables in .env, or run fenix keys for API keys' } : {}),
+  };
+}
+
 /**
  * Run every check in order. Dependencies are injectable so future tests can
  * pass fakes: spawn (spawnSync-shaped), fsImpl (mkdirSync/accessSync/
- * constants/statfsSync), fetchImpl (fetch-shaped), env, withApi.
+ * constants/statfsSync), fetchImpl (fetch-shaped), env, withApi, settings
+ * (the overlay object for the integrations check — default: the real one),
+ * secretsDir, projectsFile.
  * @returns {Promise<Array<{ name, status: 'ok'|'warn'|'fail', detail, fix? }>>}
  */
-export async function runChecks({ env = process.env, withApi = false, spawn = spawnSync, fsImpl = fs, fetchImpl = fetch, secretsDir, projectsFile } = {}) {
+export async function runChecks({ env = process.env, withApi = false, spawn = spawnSync, fsImpl = fs, fetchImpl = fetch, settings, secretsDir, projectsFile } = {}) {
   const checks = [
     checkNode(),
     ...REQUIRED_TOOLS.map(([name, args]) => checkTool(spawn, name, args, 'fail')),
     ...OPTIONAL_TOOLS.map(([name, args]) => checkTool(spawn, name, args, 'warn')),
     ...checkKeys(env),
+    checkIntegrations(env, settings),
     ...checkDirs(env, fsImpl),
     checkDisk(env, fsImpl),
     checkCockpitHooks(env, fsImpl),
