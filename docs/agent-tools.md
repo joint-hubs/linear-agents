@@ -14,6 +14,14 @@ MCP reachability here honours server-wildcard denies only (`mcp__<server>__*`,
 `mcp__*`, `*`); a tool-level deny (`mcp__linear__create_issue`) does not make the
 server unreachable in this view.
 
+Editing: `allow|ask|deny <agent> "<rule>"` append a rule to that list and
+`remove <agent> "<rule>"` deletes it from whichever list holds it — every edit
+is validated first and written atomically with the file's key order preserved
+(`--dry-run` prints without writing). Rules in SUPERVISOR_DENY, or with the same
+command prefix, are protected — edit supervisor-lib.mjs with a ticket instead.
+Nothing is committed by the tool; an edit to the repository tree regenerates
+this file in the same step.
+
 ## cadence
 
 ### Permissions

@@ -210,6 +210,9 @@ what keeps AC-10 true while the squad prompts changed.
   security-scan as a regression.
 - This checklist, walked once on a throwaway issue (§8.12).
 - `git diff -- agents/orchestrator` empty (AC-10).
+- Settings → Agent tools (FOC-906): the read-only panel renders `GET /api/settings/agent-tools` —
+  the effective root's permission lists, MCP reachability, skills and the `fenix agent-tools check`
+  summary; editing stays CLI-side (`fenix agent-tools allow|ask|deny|remove`).
 
 ### Rollback
 Revert the PR. `.state/supervisor/` is disposable. Existing squads are bitwise-unchanged in
