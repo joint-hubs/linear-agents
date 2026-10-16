@@ -19,6 +19,14 @@
 // supervisorSessionId/taskKey/taskId. The legacy single-session behaviour is
 // unchanged.
 //
+// SCOPED-ONLY autonomy (FOC-901): an UNSCOPED resolve (and record) refuses
+// while live managed task sessions exist in this data home — an unscoped
+// session never adopts a managed run, and never runs next to them without the
+// explicit FENIX_SUPERVISOR_LEGACY=1 override. Sessions whose pid is provably
+// dead on this host are stale and do not block (the record carries
+// staleManagedSessions). The refusal is a CurrentRunError with code
+// MANAGED_SESSIONS_ACTIVE; the CLI maps it to exit 3.
+//
 // The launcher path (supervisor.bat, which DOES have an id) records it via
 // recordLauncherRun() — source "launcher". resolveCurrentRun() always creates
 // the run dir so the waker hook finds it from the first turn.
@@ -38,6 +46,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { supervisorCurrentRunPath, SUPERVISOR_SESSION_ID_PATTERN } from "./fenix-paths.mjs";
 import { supervisorStateHome } from "./supervisor-lib.mjs";
 import { recentRunIds } from "./cockpit.mjs";
+import { readActiveSessions, taskSessionsDbPath } from "./task-sessions.mjs";
 
 // ── Library ──────────────────────────────────────────────────────────────────
 
@@ -51,6 +60,82 @@ export function newRunId(now = new Date(), rand = () => randomBytes(2).toString(
   const ts = now.toISOString().replace(/:/g, "-").replace(".", "-").replace(/Z$/, "");
   return `${ts}-supervisor-${rand()}`;
 }
+
+/**
+ * A refusal with a machine-readable code. The CLI maps
+ * MANAGED_SESSIONS_ACTIVE to exit 3 (distinct from the generic 1) so the
+ * Docker entrypoint's legacy branch can fail closed on exactly this case.
+ */
+export class CurrentRunError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "CurrentRunError";
+    this.code = code;
+  }
+}
+
+/**
+ * Is the process behind `pid` alive on THIS host? Conservative by design:
+ * anything that cannot be read as a positive integer counts as alive, and so
+ * does every error except ESRCH (no such process — provably dead). EPERM (a
+ * live process we may not signal) counts as alive. Signal 0 sends nothing.
+ */
+export function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code !== "ESRCH";
+  }
+}
+
+// The exact refusal text (FOC-901). Lists every blocking session with its own
+// scoped start command, then the one-line override.
+function refusalMessage(blocking, unknown) {
+  if (unknown) {
+    return [
+      `unscoped Supervisor run resolution refused: managed task sessions could not be verified (${unknown})`,
+      "Fix the task-sessions store, or set FENIX_SUPERVISOR_LEGACY=1 to adopt anyway (logged).",
+    ].join("\n");
+  }
+  const lines = blocking.map(
+    (s) =>
+      `  ${s.sessionId} (${s.taskKey}, ${s.status}) — scoped start: FENIX_SUPERVISOR_SESSION_ID=${s.sessionId} LA_TASK_KEY=${s.taskKey} fenix supervisor-run`,
+  );
+  return [
+    `unscoped Supervisor run resolution refused: ${blocking.length} active managed session(s) own this container:`,
+    ...lines,
+    "Start the Supervisor scoped with the command above, or set FENIX_SUPERVISOR_LEGACY=1 to adopt anyway (logged).",
+  ].join("\n");
+}
+
+/**
+ * The scoped-only guard (FOC-901): which managed task sessions block an
+ * UNSCOPED resolve/record in this data home. Reads the task-sessions store
+ * READ-ONLY (never creates the schema, never writes) via readActiveSessions,
+ * then partitions the active sessions by pid liveness: a session whose pid is
+ * provably dead on this host is STALE and does not block; a session with no
+ * pid (or a live one) blocks. `unknown` is non-null when the store could not
+ * be verified (locked, corrupt, no node:sqlite) — the caller treats it as
+ * blocking with the reason in the message, never as empty.
+ *
+ * @returns {{ blocking: Array, stale: string[], unknown: string | null }}
+ */
+export function managedSessionsBlocking({ env = process.env, dbPath } = {}) {
+  const { sessions, unknown } = readActiveSessions(dbPath ?? taskSessionsDbPath(env));
+  if (unknown) return { blocking: [], stale: [], unknown };
+  const blocking = [];
+  const stale = [];
+  for (const session of sessions) {
+    if (pidAlive(session.pid)) blocking.push(session);
+    else stale.push(session.sessionId);
+  }
+  return { blocking, stale, unknown: null };
+}
+
+/** True when this env explicitly opts back into the pre-FOC-901 behaviour. */
+const legacyOverride = (env) => env?.FENIX_SUPERVISOR_LEGACY === "1";
 
 /** The record or null — missing, unreadable, non-JSON or a bad runId shape all read as "no pointer". Never throws. */
 export function readCurrentRun({ path = supervisorCurrentRunPath() } = {}) {
@@ -158,18 +243,33 @@ export function resolveCurrentRun({
         taskId: ctx.taskId,
       };
     }
-  } else if (fresh) {
-    record = { runId: newRunId(now), model, startedAt: now.toISOString(), source: "new" };
   } else {
-    const pointer = readCurrentRun({ path: pointerPath });
-    if (pointer) {
-      record = { ...pointer, model: model ?? pointer.model ?? null, source: "pointer" };
-    } else {
-      const adopted = recentRuns({ stateHome: home, now: now.getTime() }).find((id) => RUN_ID_RE.test(id));
-      record = adopted
-        ? { runId: adopted, model, startedAt: now.toISOString(), source: "adopted" }
-        : { runId: newRunId(now), model, startedAt: now.toISOString(), source: "new" };
+    // FOC-901: before ANY unscoped branch touches the pointer or creates a run
+    // dir — an unscoped session never runs next to live managed task sessions,
+    // `--new` included. Nothing is written on refusal (no pointer, no run
+    // dir). The override runs the legacy path as today.
+    const managed = managedSessionsBlocking({ env });
+    const refused = managed.unknown !== null || managed.blocking.length > 0;
+    if (refused && !legacyOverride(env)) {
+      throw new CurrentRunError("MANAGED_SESSIONS_ACTIVE", refusalMessage(managed.blocking, managed.unknown));
     }
+    if (fresh) {
+      record = { runId: newRunId(now), model, startedAt: now.toISOString(), source: "new" };
+    } else {
+      const pointer = readCurrentRun({ path: pointerPath });
+      if (pointer) {
+        record = { ...pointer, model: model ?? pointer.model ?? null, source: "pointer" };
+      } else {
+        const adopted = recentRuns({ stateHome: home, now: now.getTime() }).find((id) => RUN_ID_RE.test(id));
+        record = adopted
+          ? { runId: adopted, model, startedAt: now.toISOString(), source: "adopted" }
+          : { runId: newRunId(now), model, startedAt: now.toISOString(), source: "new" };
+      }
+    }
+    if (managed.stale.length > 0) record.staleManagedSessions = managed.stale;
+    // The stamp marks an OVERRIDDEN refusal, not the env var alone: with
+    // nothing blocking, the legacy override changed nothing worth logging.
+    if (refused) record.legacyOverride = true;
   }
   mkdirSync(join(home, record.runId), { recursive: true });
   record.updatedAt = now.toISOString();
@@ -178,12 +278,27 @@ export function resolveCurrentRun({
 }
 
 /** The launcher's record path (supervisor.bat): the id is authoritative, so a bad shape throws. */
-export function recordLauncherRun({ runId, model = null, now = new Date(), path } = {}) {
+export function recordLauncherRun({ runId, model = null, now = new Date(), path, env = process.env } = {}) {
   if (typeof runId !== "string" || !RUN_ID_RE.test(runId)) {
     throw new Error(`invalid run id: ${runId}`);
   }
+  // FOC-901: the same scoped-only guard as resolve — the native launcher
+  // (bin/supervisor.bat, always unscoped) refuses too. A scoped env skips the
+  // check: a managed pane's record is its own.
+  let managed = { blocking: [], stale: [], unknown: null };
+  let refused = false;
+  if (!env?.FENIX_SUPERVISOR_SESSION_ID) {
+    managed = managedSessionsBlocking({ env });
+    refused = managed.unknown !== null || managed.blocking.length > 0;
+    if (refused && !legacyOverride(env)) {
+      throw new CurrentRunError("MANAGED_SESSIONS_ACTIVE", refusalMessage(managed.blocking, managed.unknown));
+    }
+  }
   const startedAt = now.toISOString();
   const record = { runId, model, startedAt, updatedAt: startedAt, source: "launcher" };
+  if (managed.stale.length > 0) record.staleManagedSessions = managed.stale;
+  // Same rule as resolve: the stamp marks an OVERRIDDEN refusal only.
+  if (refused) record.legacyOverride = true;
   writeCurrentRun(record, { path });
   return record;
 }
@@ -247,6 +362,9 @@ if (isMain) {
     process.exit(main(process.argv.slice(2)));
   } catch (err) {
     console.error(`current-run: ${err.message}`);
-    process.exit(1);
+    // FOC-901: the managed-sessions refusal is its own exit code (3) so the
+    // Docker entrypoint's legacy branch can fail closed on exactly this case;
+    // every other failure keeps the generic 1.
+    process.exit(err?.code === "MANAGED_SESSIONS_ACTIVE" ? 3 : 1);
   }
 }

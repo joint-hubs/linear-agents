@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { readSettings, validateSettings, writeSettings } from "./fenix-settings.mjs";
+import { readSettings, readTaskSessionsSettings, validateSettings, writeSettings } from "./fenix-settings.mjs";
 
 const execFileP = promisify(execFile);
 const CLI = fileURLToPath(new URL("./fenix-settings.mjs", import.meta.url));
@@ -381,6 +381,123 @@ test("CLI set: wrong argument count → usage on stderr, exit 2", async () => {
   }
 });
 
+
+// --- taskSessions (FOC-901) -------------------------------------------------
+
+test("validateSettings: taskSessions.maxActive 1 and 8 accepted, empty object too", () => {
+  assert.deepEqual(validateSettings({ taskSessions: { maxActive: 1 } }), { ok: true, errors: [] });
+  assert.deepEqual(validateSettings({ taskSessions: { maxActive: 8 } }), { ok: true, errors: [] });
+  assert.deepEqual(validateSettings({ taskSessions: {} }), { ok: true, errors: [] });
+  assert.deepEqual(validateSettings({ ...VALID, taskSessions: { maxActive: 4 } }), { ok: true, errors: [] });
+});
+
+test("validateSettings: taskSessions.maxActive 0 / 9 / \"2\" refused with the documented message", () => {
+  const bad = [0, 9, "2", 2.5, null, true];
+  for (const maxActive of bad) {
+    const { ok, errors } = validateSettings({ taskSessions: { maxActive } });
+    assert.equal(ok, false, `${JSON.stringify(maxActive)} must be refused`);
+    assert.ok(errors.includes("taskSessions.maxActive: must be an integer between 1 and 8"));
+  }
+});
+
+test("validateSettings: taskSessions must be an object and only knows maxActive", () => {
+  const notObject = validateSettings({ taskSessions: "2" });
+  assert.equal(notObject.ok, false);
+  assert.ok(notObject.errors.includes("taskSessions: must be an object"));
+  const extra = validateSettings({ taskSessions: { maxActive: 2, extra: 1 } });
+  assert.equal(extra.ok, false);
+  assert.ok(extra.errors.some((e) => e.includes("taskSessions.extra") && e.includes("unknown key")));
+  const unknownTop = validateSettings({ ...VALID, taskSessions: { maxActive: 2 } });
+  assert.equal(unknownTop.ok, true, "taskSessions is a known top-level key");
+  assert.equal(validateSettings({ ...VALID, taskSessionsCap: 2 }).ok, false, "other new keys stay refused");
+});
+
+test("writeSettings round-trips taskSessions.maxActive and the set CLI works", async () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    await runSet(path, "taskSessions.maxActive", "4");
+    assert.deepEqual(readSettings({ path }).taskSessions, { maxActive: 4 });
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), { maxActive: 4 });
+    await assert.rejects(runSet(path, "taskSessions.maxActive", "9"), (err) => {
+      assert.equal(err.code, 1);
+      assert.ok(err.stderr.includes("taskSessions.maxActive: must be an integer between 1 and 8"));
+      return true;
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readTaskSessionsSettings: missing or invalid overlay → null (with one stderr line when invalid)", () => {
+  const dir = tempDir();
+  try {
+    // Missing file.
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: settingsFile(dir) }), { maxActive: null });
+    // Invalid JSON.
+    const bad = settingsFile(dir);
+    writeFileSync(bad, "{ not json", "utf8");
+    const errs = [];
+    const orig = console.error;
+    console.error = (msg) => errs.push(String(msg));
+    try {
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: bad }), { maxActive: null });
+      assert.equal(errs.length, 1);
+      assert.match(errs[0], /taskSessions\.maxActive ignored/);
+    } finally {
+      console.error = orig;
+    }
+    // Invalid value in an otherwise valid file.
+    const wrong = join(dir, "wrong.json");
+    writeFileSync(wrong, JSON.stringify({ taskSessions: { maxActive: 9 } }), "utf8");
+    const errs2 = [];
+    console.error = (msg) => errs2.push(String(msg));
+    try {
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: wrong }), { maxActive: null });
+      assert.equal(errs2.length, 1);
+      assert.match(errs2[0], /must be an integer between 1 and 8/);
+    } finally {
+      console.error = orig;
+    }
+    // A file without the key reads as null without noise.
+    const quiet = join(dir, "quiet.json");
+    writeFileSync(quiet, JSON.stringify({ routing: {} }), "utf8");
+    const errs3 = [];
+    console.error = (msg) => errs3.push(String(msg));
+    try {
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: quiet }), { maxActive: null });
+      assert.equal(errs3.length, 0);
+    } finally {
+      console.error = orig;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readTaskSessionsSettings: quiet swallows the stderr line and returns the reason as error", () => {
+  const dir = tempDir();
+  try {
+    const bad = settingsFile(dir);
+    writeFileSync(bad, "{ not json", "utf8");
+    const errs = [];
+    const orig = console.error;
+    console.error = (msg) => errs.push(String(msg));
+    try {
+      const r = readTaskSessionsSettings({ LA_SETTINGS_FILE: bad }, { quiet: true });
+      assert.equal(r.maxActive, null);
+      assert.match(r.error, /taskSessions\.maxActive ignored/);
+      assert.equal(errs.length, 0, "quiet must not print to stderr");
+      // A missing overlay is not an error — quiet or not, no reason attached.
+      const missing = readTaskSessionsSettings({ LA_SETTINGS_FILE: join(dir, "nope.json") }, { quiet: true });
+      assert.deepEqual(missing, { maxActive: null });
+    } finally {
+      console.error = orig;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("custom remains valid when patches delete its configuration; dry-run writes nothing", () => {
   const dir = mkdtempSync(join(tmpdir(), "settings-transaction-"));

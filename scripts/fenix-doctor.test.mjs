@@ -18,9 +18,11 @@ import path from "node:path";
 import {
   checkProjectsDir,
   checkSecretsReadable,
+  checkTaskSessions,
   runChecks,
   summarize,
 } from "./fenix-doctor.mjs";
+import { pidAlive } from "./supervisor-current-run.mjs";
 
 let passed = 0;
 let skipped = 0;
@@ -286,6 +288,221 @@ test("without FENIX_IN_CONTAINER the re-own fix never appears", async () => {
     const c = checks.find((c) => c.name === "dir LA_TELEMETRY_HOME");
     assert.equal(c.status, "fail");
     assert.equal(c.fix, VOLUME_FIX);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+console.log("\nfenix-doctor: task sessions line (FOC-901)");
+
+// fsImpl that pretends the task-sessions store exists (the readSessions seam
+// below fakes its content) while everything else is real.
+function fsWithStoreFile(dbPath) {
+  return {
+    ...fs,
+    existsSync: (p) => (p === dbPath ? true : fs.existsSync(p)),
+  };
+}
+
+const fakeSessions = (sessions, unknown = null) => () => ({ sessions, unknown });
+
+test("no store file → ok 'no managed sessions yet'", () => {
+  const dir = tempDir();
+  try {
+    const c = checkTaskSessions({ env: { LA_DATA_HOME: dir }, fsImpl: fs });
+    assert.equal(c.status, "ok");
+    assert.match(c.detail, /no managed sessions yet/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("2 active / cap 2 → warn 'cap reached' with the ids and the key fix", () => {
+  const dir = tempDir();
+  const dbPath = path.join(dir, "supervisor", "task-sessions.sqlite");
+  const sessions = [
+    { sessionId: "sup-" + "a".repeat(32), taskKey: "workspace:ISSUE-1", status: "running", pid: process.pid },
+    { sessionId: "sup-" + "b".repeat(32), taskKey: "workspace:ISSUE-2", status: "waiting", pid: null },
+  ];
+  try {
+    const c = checkTaskSessions({
+      env: { LA_DATA_HOME: dir },
+      fsImpl: fsWithStoreFile(dbPath),
+      readSessions: fakeSessions(sessions),
+    });
+    assert.equal(c.status, "warn");
+    assert.match(c.detail, /cap reached/);
+    assert.match(c.detail, /2 active \/ cap 2/);
+    assert.ok(c.detail.includes("sup-" + "a".repeat(32)));
+    assert.match(c.fix, /taskSessions\.maxActive/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("1 active + a live unscoped session.json → warn 'unscoped'", () => {
+  const dir = tempDir();
+  const dbPath = path.join(dir, "supervisor", "task-sessions.sqlite");
+  const sessionFile = path.join(dir, "supervisor", "session.json");
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  fs.writeFileSync(sessionFile, JSON.stringify({ state: "idle", pid: process.pid, updatedAt: "2026-10-16T10:00:00.000Z" }));
+  const sessions = [
+    { sessionId: "sup-" + "c".repeat(32), taskKey: "workspace:ISSUE-3", status: "running", pid: process.pid },
+  ];
+  try {
+    const c = checkTaskSessions({
+      env: { LA_DATA_HOME: dir },
+      fsImpl: fsWithStoreFile(dbPath),
+      readSessions: fakeSessions(sessions),
+    });
+    assert.equal(c.status, "warn");
+    assert.match(c.detail, /unscoped Supervisor runs next to/);
+    assert.match(c.detail, /stop it or start it scoped/);
+    assert.match(c.fix, /FENIX_SUPERVISOR_SESSION_ID/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a session.json whose pid is provably dead does not count as live", () => {
+  const dir = tempDir();
+  const dbPath = path.join(dir, "supervisor", "task-sessions.sqlite");
+  const sessionFile = path.join(dir, "supervisor", "session.json");
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  const deadPid = 2 ** 22 + 12345; // above Linux's default pid_max and odd — cannot exist
+  assert.equal(pidAlive(deadPid), false, "fixture must read as dead on this host");
+  fs.writeFileSync(sessionFile, JSON.stringify({ state: "idle", pid: deadPid }));
+  const sessions = [
+    { sessionId: "sup-" + "d".repeat(32), taskKey: "workspace:ISSUE-4", status: "running", pid: process.pid },
+  ];
+  try {
+    const c = checkTaskSessions({
+      env: { LA_DATA_HOME: dir },
+      fsImpl: fsWithStoreFile(dbPath),
+      readSessions: fakeSessions(sessions),
+    });
+    assert.equal(c.status, "ok");
+    assert.match(c.detail, /1 active \/ cap 2/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable store warns with the reason, never pretends it is empty", () => {
+  const dir = tempDir();
+  const dbPath = path.join(dir, "supervisor", "task-sessions.sqlite");
+  try {
+    const c = checkTaskSessions({
+      env: { LA_DATA_HOME: dir },
+      fsImpl: fsWithStoreFile(dbPath),
+      readSessions: fakeSessions([], "cannot open read-only (boom)"),
+    });
+    assert.equal(c.status, "warn");
+    assert.match(c.detail, /could not be read/);
+    assert.match(c.detail, /boom/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a wal-recovery-needed store read gets the hot-WAL fix", () => {
+  const dir = tempDir();
+  const dbPath = path.join(dir, "supervisor", "task-sessions.sqlite");
+  try {
+    const c = checkTaskSessions({
+      env: { LA_DATA_HOME: dir },
+      fsImpl: fsWithStoreFile(dbPath),
+      readSessions: fakeSessions([], "wal-recovery-needed: needs WAL recovery — a session host died mid-write (boom)"),
+    });
+    assert.equal(c.status, "warn");
+    assert.match(c.fix, /hot WAL — start the host once or set FENIX_SUPERVISOR_LEGACY=1/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a stale (provably dead) session does not count against the cap and is named as stale", () => {
+  const dir = tempDir();
+  const dbPath = path.join(dir, "supervisor", "task-sessions.sqlite");
+  const deadPid = 2 ** 22 + 12345;
+  const sessions = [
+    { sessionId: "sup-" + "e".repeat(32), taskKey: "workspace:ISSUE-5", status: "running", pid: process.pid },
+    { sessionId: "sup-" + "f".repeat(32), taskKey: "workspace:ISSUE-6", status: "running", pid: deadPid },
+  ];
+  try {
+    const c = checkTaskSessions({
+      env: { LA_DATA_HOME: dir },
+      fsImpl: fsWithStoreFile(dbPath),
+      readSessions: fakeSessions(sessions),
+    });
+    assert.equal(c.status, "ok", "1 live at cap 2 is not cap reached");
+    assert.match(c.detail, /1 live \/ cap 2 \(1 stale: /);
+    assert.ok(c.detail.includes("sup-" + "f".repeat(32)), "the stale id is named");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cap reached AND a live unscoped neighbour → ONE warn line mentions both", () => {
+  const dir = tempDir();
+  const dbPath = path.join(dir, "supervisor", "task-sessions.sqlite");
+  const sessionFile = path.join(dir, "supervisor", "session.json");
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  fs.writeFileSync(sessionFile, JSON.stringify({ state: "idle", pid: process.pid }));
+  const sessions = [
+    { sessionId: "sup-" + "1".repeat(32), taskKey: "workspace:ISSUE-7", status: "running", pid: process.pid },
+    { sessionId: "sup-" + "2".repeat(32), taskKey: "workspace:ISSUE-8", status: "waiting", pid: process.pid },
+  ];
+  try {
+    const c = checkTaskSessions({
+      env: { LA_DATA_HOME: dir },
+      fsImpl: fsWithStoreFile(dbPath),
+      readSessions: fakeSessions(sessions),
+    });
+    assert.equal(c.status, "warn");
+    assert.match(c.detail, /cap reached/);
+    assert.match(c.detail, /unscoped Supervisor runs next to/);
+    assert.match(c.fix, /taskSessions\.maxActive/);
+    assert.match(c.fix, /FENIX_SUPERVISOR_SESSION_ID/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an invalid settings overlay is surfaced in the detail, not printed to stderr", () => {
+  const dir = tempDir();
+  const dbPath = path.join(dir, "supervisor", "task-sessions.sqlite");
+  const settings = path.join(dir, "settings.json");
+  fs.writeFileSync(settings, JSON.stringify({ taskSessions: { maxActive: 9 } }), "utf8");
+  const sessions = [
+    { sessionId: "sup-" + "3".repeat(32), taskKey: "workspace:ISSUE-9", status: "running", pid: process.pid },
+  ];
+  const errs = [];
+  const orig = console.error;
+  console.error = (msg) => errs.push(String(msg));
+  try {
+    const c = checkTaskSessions({
+      env: { LA_DATA_HOME: dir, LA_SETTINGS_FILE: settings },
+      fsImpl: fsWithStoreFile(dbPath),
+      readSessions: fakeSessions(sessions),
+    });
+    assert.equal(c.status, "ok");
+    assert.match(c.detail, /cap 2/, "the invalid overlay falls back to the default cap");
+    assert.match(c.detail, /settings overlay ignored/);
+    assert.equal(errs.length, 0, "quiet — the doctor must not print to stderr mid-run");
+  } finally {
+    console.error = orig;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runChecks includes the task sessions check", async () => {
+  const dir = tempDir();
+  try {
+    const checks = await runChecks({ env: { LA_DATA_HOME: dir }, spawn: fakeSpawn, fsImpl: fs });
+    const c = checks.find((c) => c.name === "task sessions");
+    assert.ok(c, "task sessions check missing");
+    assert.equal(c.status, "ok");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

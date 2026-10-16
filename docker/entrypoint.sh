@@ -197,7 +197,14 @@ case "${1:-api}" in
         # today's behaviour: start without the id, the Cockpit shows no waker.
         run_new_arg=""
         if [ "$new_session" -eq 1 ]; then run_new_arg="--new"; fi
-        if run_out="$(node "$LA_ROOT/scripts/supervisor-current-run.mjs" resolve $run_new_arg --model "$ANTHROPIC_MODEL")"; then
+        # The resolve exit code decides the legacy branch's behaviour: 0 → run
+        # id exported; 3 → FOC-901 scoped-only refusal (live managed task
+        # sessions) — fail closed like the managed branch, with the CLI's
+        # refusal message already on stderr; anything else → today's
+        # warn-and-continue (the pane starts without a run id).
+        run_rc=0
+        run_out="$(node "$LA_ROOT/scripts/supervisor-current-run.mjs" resolve $run_new_arg --model "$ANTHROPIC_MODEL")" || run_rc=$?
+        if [ "$run_rc" -eq 0 ]; then
             run_id="${run_out%% *}"
             run_source="${run_out#* }"
             export LA_SUPERVISOR_RUN="$run_id" RUN_ID="$run_id" LA_RUN_ID="$run_id"
@@ -214,6 +221,12 @@ case "${1:-api}" in
             # mismatch) — fail closed: a managed pane NEVER starts without its
             # own run id, and never silently adopts another task's run.
             printf '%s\n' 'fenix: scoped run resolution failed - refusing to start a managed Supervisor without its own run id' >&2
+            exit 2
+        elif [ "$run_rc" -eq 3 ]; then
+            # FOC-901: an unscoped session may not adopt or run next to live
+            # managed task sessions. The refusal message (each session, its
+            # scoped command and the override) was printed to stderr by the CLI.
+            printf '%s\n' 'fenix: live managed task sessions own this container - refusing to start an unscoped Supervisor (start it scoped, or set FENIX_SUPERVISOR_LEGACY=1)' >&2
             exit 2
         else
             printf '%s\n' 'fenix: no Supervisor run id - waker, guard and briefing stay off' >&2

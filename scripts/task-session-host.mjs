@@ -74,6 +74,7 @@ import {
 } from "./task-sessions.mjs";
 import { readProcessIdentity, matchesProcess } from "./task-process-identity.mjs";
 import { readCurrentRun } from "./supervisor-current-run.mjs";
+import { readTaskSessionsSettings } from "./fenix-settings.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const platform = process.platform;
@@ -143,7 +144,34 @@ const STATUS_TEXT = { 400: "Bad Request", 404: "Not Found", 409: "Conflict", 500
  */
 export function createTaskSessionHost(deps = {}) {
   const baseEnv = deps.env ?? process.env;
-  const maxActive = deps.maxActive ?? Number(baseEnv.FENIX_MAX_ACTIVE_SUPERVISORS || 2);
+  // FOC-901: where the cap comes from — deps.maxActive (tests / embedders) →
+  // env FENIX_MAX_ACTIVE_SUPERVISORS (the operational override, integer >= 1)
+  // → overlay taskSessions.maxActive (survives `fenix update`) → 2. The
+  // chosen source is exposed (and logged once at serve start) so an operator
+  // can see which layer decided.
+  const envRaw = baseEnv.FENIX_MAX_ACTIVE_SUPERVISORS;
+  const envNumber = Number.parseInt(envRaw ?? "", 10);
+  const envMaxActive = Number.isInteger(envNumber) && envNumber >= 1 ? envNumber : null;
+  // An empty value reads as unset (no warning); only a non-empty invalid one warns.
+  if (envRaw != null && envRaw !== "" && envMaxActive === null) {
+    console.error("task-session-host: FENIX_MAX_ACTIVE_SUPERVISORS must be an integer >= 1 — ignoring it");
+  }
+  const overlayMaxActive = readTaskSessionsSettings(baseEnv).maxActive;
+  let maxActive;
+  let maxActiveSource;
+  if (deps.maxActive != null) {
+    maxActive = deps.maxActive;
+    maxActiveSource = "deps.maxActive";
+  } else if (envMaxActive !== null) {
+    maxActive = envMaxActive;
+    maxActiveSource = "env FENIX_MAX_ACTIVE_SUPERVISORS";
+  } else if (overlayMaxActive !== null) {
+    maxActive = overlayMaxActive;
+    maxActiveSource = "settings taskSessions.maxActive";
+  } else {
+    maxActive = 2;
+    maxActiveSource = "default";
+  }
   const processIdentity = deps.processIdentity ?? readProcessIdentity;
   const stopping = new Set();
   const uncertain = new Set();
@@ -780,6 +808,7 @@ export function createTaskSessionHost(deps = {}) {
     store,
     gate,
     maxActive,
+    maxActiveSource,
     legacy,
     controllerFor,
     pump,
@@ -881,6 +910,7 @@ async function main(argv) {
     const collector = createRuntimeCollector();
     await new Promise((resolve, reject) => {collector.server.once('error',reject);collector.server.listen(4318,'127.0.0.1',resolve);});
     const host = createTaskSessionHost();
+    console.log(`task-session-host: maxActive=${host.maxActive} (${host.maxActiveSource})`);
     const failed = await host.reconcile();
     if (failed > 0) {
       console.error(`task-session-host: reconciled ${failed} active session(s) after restart — none re-adopted automatically`);

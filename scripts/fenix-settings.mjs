@@ -91,13 +91,31 @@ function checkProviderCustom(custom, errors) {
   checkNonEmptyString(custom.defaultModel, "provider.custom.defaultModel", 200, errors);
 }
 
+// FOC-901: the managed-task-session cap lives in the overlay so it survives
+// `fenix update`. Kept in its own function so the open branches that edit the
+// same validate loop keep merging trivially.
+function checkTaskSessions(value, errors) {
+  if (!isPlainObject(value)) {
+    errors.push("taskSessions: must be an object");
+    return;
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== "maxActive") errors.push(`taskSessions.${key}: unknown key`);
+  }
+  if (value.maxActive !== undefined && (!Number.isInteger(value.maxActive) || value.maxActive < 1 || value.maxActive > 8)) {
+    errors.push("taskSessions.maxActive: must be an integer between 1 and 8");
+  }
+}
+
 export function validateSettings(obj) {
   const errors = [];
   if (!isPlainObject(obj)) return { ok: false, errors: ["settings: must be a JSON object"] };
 
   for (const key of Object.keys(obj)) {
-    if (key !== "provider" && key !== "routing") errors.push(`${key}: unknown top-level key`);
+    if (key !== "provider" && key !== "routing" && key !== "taskSessions") errors.push(`${key}: unknown top-level key`);
   }
+
+  if (obj.taskSessions !== undefined) checkTaskSessions(obj.taskSessions, errors);
 
   const provider = obj.provider;
   if (provider !== undefined) {
@@ -143,6 +161,35 @@ export function validateSettings(obj) {
 
   checkSecrets(obj, "settings", errors);
   return { ok: errors.length === 0, errors };
+}
+
+// ---------------------------------------------------------------------------
+// Read side for non-CLI callers (task-session-host, fenix-doctor): the
+// task-session cap from the overlay. Never throws — a missing, unreadable or
+// invalid overlay reads as { maxActive: null } and the caller falls back to
+// its default. Exactly one stderr line names what was ignored and why —
+// unless opts.quiet is set (UI/doctor contexts that must not print mid-run):
+// then the line is suppressed and returned as `error` for the caller to
+// surface where it fits.
+// ---------------------------------------------------------------------------
+
+export function readTaskSessionsSettings(env = process.env, { quiet = false } = {}) {
+  const fail = (message) => {
+    if (!quiet) console.error(message);
+    return quiet ? { maxActive: null, error: message } : { maxActive: null };
+  };
+  let settings;
+  try {
+    settings = readSettings({ path: settingsPath(env) });
+  } catch (err) {
+    return fail(`settings: ${err?.message ?? err} — taskSessions.maxActive ignored`);
+  }
+  const value = isPlainObject(settings) ? settings.taskSessions : undefined;
+  if (value === undefined) return { maxActive: null };
+  if (!isPlainObject(value) || !Number.isInteger(value.maxActive) || value.maxActive < 1 || value.maxActive > 8) {
+    return fail("settings taskSessions.maxActive: must be an integer between 1 and 8 — ignoring");
+  }
+  return { maxActive: value.maxActive };
 }
 
 // Deep merge where a `null` patch value deletes the key from the result —

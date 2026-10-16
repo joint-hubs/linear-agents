@@ -30,12 +30,16 @@ import assert from "node:assert/strict";
 
 import {
   RUN_ID_RE,
+  CurrentRunError,
   newRunId,
+  pidAlive,
   readCurrentRun,
   writeCurrentRun,
   resolveCurrentRun,
   recordLauncherRun,
+  managedSessionsBlocking,
 } from "./supervisor-current-run.mjs";
+import { createTaskSessionStore } from "./task-sessions.mjs";
 
 // The managed-session identity used by the scoped tests below.
 const SESSION_ID = "sup-" + "a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -114,7 +118,14 @@ test("fresh → a new id, the run dir created under the temp stateHome", () => {
   const home = tempHome("fresh");
   const state = tempHome("fresh-state");
   try {
-    const rec = resolveCurrentRun({ fresh: true, now: NOW, path: pointerPath(home), stateHome: state });
+    // env pointed at the temp home: the unscoped guard reads the store too.
+    const rec = resolveCurrentRun({
+      fresh: true,
+      now: NOW,
+      path: pointerPath(home),
+      stateHome: state,
+      env: { LA_DATA_HOME: home },
+    });
     assert.match(rec.runId, RUN_ID_RE);
     assert.equal(rec.source, "new");
     assert.equal(rec.startedAt, NOW.toISOString());
@@ -214,7 +225,15 @@ test("recordLauncherRun writes source launcher and rejects a bad id", () => {
   const home = tempHome("launcher");
   const path = pointerPath(home);
   try {
-    const rec = recordLauncherRun({ runId: VALID_ID, model: "claude-x", now: NOW, path });
+    // LEGACY=1 with NO blocking sessions must not stamp the record — the
+    // deepEqual below proves the env var alone changed nothing.
+    const rec = recordLauncherRun({
+      runId: VALID_ID,
+      model: "claude-x",
+      now: NOW,
+      path,
+      env: { LA_DATA_HOME: home, FENIX_SUPERVISOR_LEGACY: "1" },
+    });
     assert.deepEqual(rec, {
       runId: VALID_ID,
       model: "claude-x",
@@ -223,7 +242,7 @@ test("recordLauncherRun writes source launcher and rejects a bad id", () => {
       source: "launcher",
     });
     assert.equal(readCurrentRun({ path }).source, "launcher");
-    assert.throws(() => recordLauncherRun({ runId: "../escape", now: NOW, path }), /invalid run id/);
+    assert.throws(() => recordLauncherRun({ runId: "../escape", now: NOW, path, env: { LA_DATA_HOME: home } }), /invalid run id/);
     assert.equal(readCurrentRun({ path }).runId, VALID_ID, "the failed write left the record intact");
   } finally {
     cleanup(home);
@@ -454,7 +473,7 @@ test("legacy resolve (no session env) still adopts — the scoped change does no
       path: pointerPath(home),
       stateHome: state,
       recentRuns: () => [VALID_ID],
-      env: {},
+      env: { LA_DATA_HOME: home },
     });
     assert.equal(rec.source, "adopted");
     assert.equal(rec.runId, VALID_ID);
@@ -505,5 +524,269 @@ test("CLI scoped resolve: writes the SCOPED pointer, stamps ownership, exits non
   } finally {
     cleanup(home);
     cleanup(state);
+  }
+});
+
+// ── scoped-only autonomy (FOC-901) ───────────────────────────────────────────
+
+// A pid that cannot exist on any supported platform: above Linux's default
+// pid_max (2^22) and odd (Windows pids are multiples of 4).
+const DEAD_PID = 2 ** 22 + 12345;
+
+/** One managed session in a temp store, claimed and driven to `status` with the given pid. */
+function startManagedSession(home, { status = "running", pid = process.pid, issueId = "ISSUE-1" } = {}) {
+  const dbPath = join(home, "supervisor", "task-sessions.sqlite");
+  const store = createTaskSessionStore({ dbPath });
+  const taskKey = `workspace:${issueId}`;
+  const created = store.ensure({ taskKey, taskId: issueId, workspace: "workspace", issueId });
+  const claimed = store.claimNext(); // queued admission requires claimNext()
+  if (!claimed || claimed.sessionId !== created.sessionId) {
+    throw new Error(`fixture: ${issueId} could not be claimed (claimed ${claimed?.sessionId ?? "none"})`);
+  }
+  store.update(created.sessionId, { status, pid });
+  return { store, dbPath, sessionId: created.sessionId, taskKey };
+}
+
+test("pidAlive: this process is alive, an impossible pid is dead, a garbage pid is conservatively alive", () => {
+  assert.equal(pidAlive(process.pid), true);
+  assert.equal(pidAlive(DEAD_PID), false, "the dead-pid fixture must read as dead on this host");
+  assert.equal(pidAlive(null), true, "no pid — conservative");
+  assert.equal(pidAlive(undefined), true);
+  assert.equal(pidAlive(0), true);
+  assert.equal(pidAlive(-1), true);
+  assert.equal(pidAlive(1.5), true);
+  assert.equal(pidAlive("123"), true);
+});
+
+test("managedSessionsBlocking partitions by pid liveness; a missing store reads as nothing", () => {
+  const home = tempHome("blocking-empty");
+  try {
+    assert.deepEqual(managedSessionsBlocking({ env: { LA_DATA_HOME: home } }), {
+      blocking: [],
+      stale: [],
+      unknown: null,
+    });
+  } finally {
+    cleanup(home);
+  }
+  const home2 = tempHome("blocking-mix");
+  const { store, dbPath, sessionId, taskKey } = startManagedSession(home2, { pid: process.pid });
+  // A second, provably dead session for another task.
+  const dead = startManagedSession(home2, { pid: DEAD_PID, issueId: "ISSUE-2" });
+  try {
+    const r = managedSessionsBlocking({ env: { LA_DATA_HOME: home2 } });
+    assert.equal(r.unknown, null);
+    assert.deepEqual(
+      r.blocking.map((s) => [s.sessionId, s.taskKey, s.status]),
+      [[sessionId, taskKey, "running"]],
+    );
+    assert.deepEqual(r.stale, [dead.sessionId]);
+    assert.ok(existsSync(dbPath));
+  } finally {
+    store.close();
+    dead.store.close();
+    cleanup(home2);
+  }
+});
+
+test("unscoped resolve refuses while a live managed session exists — nothing is written", () => {
+  const home = tempHome("refuse");
+  const state = tempHome("refuse-state");
+  const { store, sessionId, taskKey } = startManagedSession(home, { pid: process.pid });
+  try {
+    assert.throws(
+      () =>
+        resolveCurrentRun({
+          now: NOW,
+          path: pointerPath(home),
+          stateHome: state,
+          recentRuns: () => [VALID_ID],
+          env: { LA_DATA_HOME: home },
+        }),
+      (err) =>
+        err instanceof CurrentRunError
+        && err.code === "MANAGED_SESSIONS_ACTIVE"
+        && err.message.includes(sessionId)
+        && err.message.includes(`(${taskKey}, running)`)
+        && err.message.includes(`FENIX_SUPERVISOR_SESSION_ID=${sessionId} LA_TASK_KEY=${taskKey} fenix supervisor-run`)
+        && err.message.includes("FENIX_SUPERVISOR_LEGACY=1 to adopt anyway (logged)"),
+    );
+    assert.equal(readCurrentRun({ path: pointerPath(home) }), null, "no pointer written");
+    assert.ok(!existsSync(join(state, VALID_ID)), "no run dir created");
+    assert.equal(store.get(sessionId).status, "running", "the managed session is untouched");
+  } finally {
+    store.close();
+    cleanup(home);
+    cleanup(state);
+  }
+});
+
+test("FENIX_SUPERVISOR_LEGACY=1 overrides the refusal and stamps legacyOverride on the record", () => {
+  const home = tempHome("override");
+  const state = tempHome("override-state");
+  const { store } = startManagedSession(home, { pid: process.pid });
+  try {
+    const rec = resolveCurrentRun({
+      now: NOW,
+      path: pointerPath(home),
+      stateHome: state,
+      recentRuns: () => [VALID_ID],
+      env: { LA_DATA_HOME: home, FENIX_SUPERVISOR_LEGACY: "1" },
+    });
+    assert.equal(rec.source, "adopted");
+    assert.equal(rec.runId, VALID_ID);
+    assert.equal(rec.legacyOverride, true);
+  } finally {
+    store.close();
+    cleanup(home);
+    cleanup(state);
+  }
+});
+
+test("only stale sessions (provably dead pids) do not block — the record lists them", () => {
+  const home = tempHome("stale");
+  const state = tempHome("stale-state");
+  const { store, sessionId } = startManagedSession(home, { pid: DEAD_PID });
+  try {
+    const rec = resolveCurrentRun({
+      now: NOW,
+      path: pointerPath(home),
+      stateHome: state,
+      recentRuns: () => [VALID_ID],
+      env: { LA_DATA_HOME: home },
+    });
+    assert.equal(rec.source, "adopted");
+    assert.deepEqual(rec.staleManagedSessions, [sessionId]);
+    assert.equal(rec.legacyOverride, undefined);
+  } finally {
+    store.close();
+    cleanup(home);
+    cleanup(state);
+  }
+});
+
+test("no store file → unscoped resolve behaves exactly as before — LEGACY=1 alone stamps nothing", () => {
+  const home = tempHome("no-store");
+  const state = tempHome("no-store-state");
+  try {
+    const rec = resolveCurrentRun({
+      now: NOW,
+      path: pointerPath(home),
+      stateHome: state,
+      recentRuns: () => [VALID_ID],
+      env: { LA_DATA_HOME: home },
+    });
+    assert.equal(rec.source, "adopted");
+    assert.equal(rec.runId, VALID_ID);
+    assert.equal(rec.staleManagedSessions, undefined);
+    assert.equal(rec.legacyOverride, undefined);
+    // The stamp marks an overridden REFUSAL, not the env var: with nothing
+    // blocking, LEGACY=1 changes nothing worth logging.
+    const overridden = resolveCurrentRun({
+      now: NOW,
+      path: pointerPath(home),
+      stateHome: state,
+      recentRuns: () => [VALID_ID],
+      env: { LA_DATA_HOME: home, FENIX_SUPERVISOR_LEGACY: "1" },
+    });
+    assert.equal(overridden.source, "pointer");
+    assert.equal(overridden.legacyOverride, undefined);
+  } finally {
+    cleanup(home);
+    cleanup(state);
+  }
+});
+
+test("unscoped resolve --new refuses too — no pointer, no run dir (the guard covers EVERY unscoped branch)", () => {
+  const home = tempHome("refuse-new");
+  const state = tempHome("refuse-new-state");
+  const { store, sessionId } = startManagedSession(home, { pid: process.pid });
+  try {
+    assert.throws(
+      () =>
+        resolveCurrentRun({
+          fresh: true,
+          now: NOW,
+          path: pointerPath(home),
+          stateHome: state,
+          env: { LA_DATA_HOME: home },
+        }),
+      (err) => err instanceof CurrentRunError && err.code === "MANAGED_SESSIONS_ACTIVE" && err.message.includes(sessionId),
+    );
+    assert.equal(readCurrentRun({ path: pointerPath(home) }), null, "no pointer written");
+    assert.equal(readdirSync(state).length, 0, "no run dir created");
+  } finally {
+    store.close();
+    cleanup(home);
+    cleanup(state);
+  }
+});
+
+test("FENIX_SUPERVISOR_LEGACY=1 lets unscoped resolve --new create the run, stamped legacyOverride", () => {
+  const home = tempHome("override-new");
+  const state = tempHome("override-new-state");
+  const { store } = startManagedSession(home, { pid: process.pid });
+  try {
+    const rec = resolveCurrentRun({
+      fresh: true,
+      now: NOW,
+      path: pointerPath(home),
+      stateHome: state,
+      env: { LA_DATA_HOME: home, FENIX_SUPERVISOR_LEGACY: "1" },
+    });
+    assert.equal(rec.source, "new");
+    assert.match(rec.runId, RUN_ID_RE);
+    assert.equal(rec.legacyOverride, true, "the overridden refusal is stamped");
+    assert.ok(existsSync(join(state, rec.runId)), "the run dir was created");
+  } finally {
+    store.close();
+    cleanup(home);
+    cleanup(state);
+  }
+});
+
+test("CLI resolve exits 3 with the refusal on stderr while a live managed session exists", () => {
+  const home = tempHome("cli-refuse");
+  const state = tempHome("cli-refuse-state");
+  const { store, sessionId } = startManagedSession(home, { pid: process.pid });
+  try {
+    const r = spawnSync(process.execPath, [SCRIPT, "resolve"], {
+      encoding: "utf8",
+      env: { ...process.env, LA_DATA_HOME: home, LA_SUPERVISOR_STATE_HOME: state },
+    });
+    assert.equal(r.status, 3, `exit code (stderr: ${r.stderr})`);
+    assert.equal(r.stdout, "", "nothing on stdout");
+    assert.match(r.stderr, /^current-run: unscoped Supervisor run resolution refused/);
+    assert.match(r.stderr, new RegExp(sessionId));
+    assert.match(r.stderr, /FENIX_SUPERVISOR_LEGACY=1/);
+    assert.equal(readCurrentRun({ path: pointerPath(home) }), null, "no pointer written");
+  } finally {
+    store.close();
+    cleanup(home);
+    cleanup(state);
+  }
+});
+
+test("recordLauncherRun runs the same guard: refuses natively, overrides with the stamp", () => {
+  const home = tempHome("record-guard");
+  const path = pointerPath(home);
+  const { store, sessionId } = startManagedSession(home, { pid: process.pid });
+  try {
+    assert.throws(
+      () => recordLauncherRun({ runId: VALID_ID, now: NOW, path, env: { LA_DATA_HOME: home } }),
+      (err) => err.code === "MANAGED_SESSIONS_ACTIVE" && err.message.includes(sessionId),
+    );
+    assert.equal(readCurrentRun({ path }), null, "the refused record wrote nothing");
+    const rec = recordLauncherRun({
+      runId: VALID_ID,
+      now: NOW,
+      path,
+      env: { LA_DATA_HOME: home, FENIX_SUPERVISOR_LEGACY: "1" },
+    });
+    assert.equal(rec.source, "launcher");
+    assert.equal(rec.legacyOverride, true);
+  } finally {
+    store.close();
+    cleanup(home);
   }
 });

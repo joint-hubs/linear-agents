@@ -11,7 +11,10 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { squadConfigDir } from './fenix-paths.mjs';
+import { dataHome, squadConfigDir } from './fenix-paths.mjs';
+import { pidAlive } from './supervisor-current-run.mjs';
+import { readActiveSessions, taskSessionsDbPath } from './task-sessions.mjs';
+import { readTaskSessionsSettings } from './fenix-settings.mjs';
 
 const GIB = 1024 ** 3;
 const TOOL_FIX = 'rebuild the image: fenix update';
@@ -176,6 +179,85 @@ function checkCockpitHooks(env, fsImpl) {
   return { name: 'cockpit hooks', status: 'ok', detail: 'session + edits hooks present' };
 }
 
+// FOC-901: one line about the managed task sessions. The store read is a
+// small injectable seam (readSessions) so tests can fake it; existence uses
+// the injected fsImpl. Best-effort liveness for the unscoped neighbour: the
+// global session.json carries no pid today, so a present file whose state is
+// not "ended" counts as live unless it names a pid that is provably dead.
+export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions = readActiveSessions } = {}) {
+  const dbPath = taskSessionsDbPath(env);
+  // The overlay is read quiet: the doctor prints its own lines, so a stray
+  // stderr write mid-run would land between them — an invalid overlay is
+  // surfaced in this check's detail instead.
+  const settings = readTaskSessionsSettings(env, { quiet: true });
+  const cap = settings.maxActive ?? 2;
+  const overlayNote = settings.error ? ` — settings overlay ignored (${settings.error})` : "";
+  let exists = false;
+  try {
+    exists = fsImpl.existsSync(dbPath);
+  } catch {}
+  if (!exists) return { name: 'task sessions', status: 'ok', detail: 'no managed sessions yet' };
+
+  const { sessions, unknown } = readSessions(dbPath);
+  if (unknown) {
+    const hotWal = /wal-recovery-needed/.test(unknown);
+    return {
+      name: 'task sessions',
+      status: 'warn',
+      detail: `the task-sessions store could not be read (${unknown})`,
+      fix: hotWal
+        ? 'a session host died with a hot WAL — start the host once or set FENIX_SUPERVISOR_LEGACY=1'
+        : `check ${dbPath}`,
+    };
+  }
+  // Partition by pid liveness like the resolve guard: a provably dead session
+  // is stale — it does not count against the cap and cannot block anything.
+  const live = sessions.filter((s) => pidAlive(s.pid));
+  const stale = sessions.filter((s) => !pidAlive(s.pid));
+  const ids = live.map((s) => s.sessionId).join(', ');
+  const counts = stale.length > 0
+    ? `${live.length} live / cap ${cap} (${stale.length} stale: ${stale.map((s) => s.sessionId).join(', ')})`
+    : `${live.length} active / cap ${cap} (ids: ${ids || 'none'})`;
+
+  let unscoped = null;
+  let sessionFile = null;
+  try {
+    sessionFile = path.join(dataHome(env), 'supervisor', 'session.json');
+  } catch {
+    sessionFile = null;
+  }
+  if (sessionFile && live.length > 0 && fsImpl.existsSync(sessionFile)) {
+    let record = null;
+    try {
+      record = JSON.parse(fsImpl.readFileSync(sessionFile, 'utf8'));
+    } catch {}
+    if (record && record.state !== 'ended' && pidAlive(record?.pid)) unscoped = record;
+  }
+
+  const capReached = live.length >= cap;
+  if (!capReached && !unscoped) {
+    return { name: 'task sessions', status: 'ok', detail: counts + overlayNote };
+  }
+  // Both warns land on ONE line when they apply together — never two lines
+  // for the same check.
+  const parts = [];
+  const fixes = [];
+  if (capReached) {
+    parts.push('cap reached, the next ticket waits');
+    fixes.push('raise the cap: fenix settings set taskSessions.maxActive <n>');
+  }
+  if (unscoped) {
+    parts.push(`an unscoped Supervisor runs next to them (session.json${unscoped.updatedAt ? ` updated ${unscoped.updatedAt}` : ''}) — stop it or start it scoped`);
+    fixes.push('start scoped: FENIX_SUPERVISOR_SESSION_ID=<id> LA_TASK_KEY=<key> fenix supervisor-run');
+  }
+  return {
+    name: 'task sessions',
+    status: 'warn',
+    detail: `${counts} — ${parts.join('; ')}` + overlayNote,
+    fix: fixes.join('; '),
+  };
+}
+
 // FOC-803: the image must be built for the host user's uid/gid. When it was
 // not, the bind-mounted host files keep their host ownership and stay
 // unreadable/unwritable inside the container: the Compose secrets (written
@@ -246,6 +328,7 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     ...checkDirs(env, fsImpl),
     checkDisk(env, fsImpl),
     checkCockpitHooks(env, fsImpl),
+    checkTaskSessions({ env, fsImpl }),
   ];
   // FOC-803 uid checks: only meaningful in the container, where the process
   // runs as the image's user against host-owned bind mounts.

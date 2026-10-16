@@ -26,7 +26,7 @@
 //   - No adoption/migration: a legacy or foreign database is not reconciled in
 //     any way; the schema is created IF NOT EXISTS and that is all.
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { dataHome } from "./fenix-paths.mjs";
@@ -68,6 +68,67 @@ export function taskSessionsDbPath(env = process.env, platform = process.platfor
 
 export function sqliteAvailable() {
   return DatabaseSync != null;
+}
+
+/**
+ * A read-only open that SQLite cannot satisfy because the WAL needs recovery
+ * (a session host died mid-write) reports SQLITE_READONLY_RECOVERY; the
+ * sidecar files themselves may be unopenable (SQLITE_CANTOPEN). Both get a
+ * distinct reason so callers can name the fix instead of a generic "locked".
+ */
+const HOT_WAL_RE = /SQLITE_READONLY_RECOVERY|SQLITE_CANTOPEN/;
+const hotWal = (err) =>
+  HOT_WAL_RE.test(`${err?.code ?? ""} ${err?.errstr ?? ""} ${err?.message ?? ""}`) ||
+  err?.errcode === 264 /* SQLITE_READONLY_RECOVERY */ ||
+  err?.errcode === 14 /* SQLITE_CANTOPEN */;
+
+function readOnlyOpenReason(dbPath, err) {
+  if (hotWal(err)) {
+    return `wal-recovery-needed: ${dbPath} needs WAL recovery — a session host died mid-write (${err?.message ?? err})`;
+  }
+  return `cannot open ${dbPath} read-only (${err?.message ?? err})`;
+}
+
+/**
+ * Read-only peek at the active (CAP_STATUSES) sessions of a task-sessions
+ * store (FOC-901). Never creates the schema and never writes: callers use it
+ * to decide whether an unscoped Supervisor may adopt a run, so the store file
+ * must be left byte-identical. Missing file → `{ sessions: [], unknown: null }`
+ * ("nothing there"); a locked or corrupt file → `unknown` carries the reason
+ * and the caller refuses rather than silently proceeding — a read-only open
+ * failing on a hot WAL reports the distinct `wal-recovery-needed` reason.
+ * Works on the same WAL store the host keeps open: the read-only connection
+ * never needs the write lock.
+ */
+export function readActiveSessions(dbPath) {
+  if (!existsSync(dbPath)) return { sessions: [], unknown: null };
+  if (!sqliteAvailable()) {
+    return { sessions: [], unknown: `node:sqlite is not available in this Node build (${process.version})` };
+  }
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+  } catch (err) {
+    return { sessions: [], unknown: readOnlyOpenReason(dbPath, err) };
+  }
+  try {
+    const rows = db
+      .prepare(`SELECT session_id, task_key, status, pid FROM task_sessions WHERE status IN (${CAP_SQL})`)
+      .all();
+    return {
+      sessions: rows.map((row) => ({
+        sessionId: row.session_id,
+        taskKey: row.task_key,
+        status: row.status,
+        pid: row.pid ?? null,
+      })),
+      unknown: null,
+    };
+  } catch (err) {
+    return { sessions: [], unknown: `cannot read ${dbPath} (${err.message})` };
+  } finally {
+    try { db.close(); } catch {}
+  }
 }
 
 /**
