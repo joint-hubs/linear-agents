@@ -117,6 +117,7 @@ LA-1234 · Fix provider key rotation      Supervisor sup-a · healthy
 - Recovery reconciles PID + start identity + state — never PID alone.
 - Cancel/stop is scoped to `task + generation`; claim release is atomic; stopping task A never kills task B.
 - SSE/WS streams are scoped per task/session.
+- Scoped-only autonomy (FOC-901): an unscoped Supervisor never adopts a managed run while live task sessions exist — the refusal, the `FENIX_SUPERVISOR_LEGACY=1` override and the `taskSessions.maxActive` cap are documented in [docs/task-sessions.md](../task-sessions.md).
 - Worktrees: concurrent write owners are separated. Each **new child attempt** gets a unique owned worktree; **follow-up/retry of the same child reuses its own worktree and history** — a retry is not a new worktree. A repository integration lock / claims registry prevents other writers from writing to the same workspace or branch. No broad git permissions are introduced; no unrequested `git commit`/`push`.
 - Prior documentation (FOC-477) defines a special **one-live-child experiment policy**. This PRD changes **product capability only**; it does not rewrite that historical experiment's safety/STOP/gate rules and does not by itself enable any global permission broadening.
 
