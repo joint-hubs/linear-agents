@@ -325,10 +325,6 @@
       "reason": "isolation audit FOC-810: pure parsers over checked-in fixture text (scripts/fixtures/session-dialogs read read-only); the only writes are the mkdtemp transcript for the tail-read test; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
-      "file": "squad-config-indirect.test.mjs",
-      "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
-    },
-    {
       "file": "squad-config-read.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
@@ -339,6 +335,10 @@
     {
       "file": "squad-config-write.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "squad-start.test.mjs",
+      "reason": "isolation audit FOC-771: mkdtemp/tmpdir fixtures only (fixture root carries the fake .env/config/agents tree); every runLaunch subprocess is an injected spawn recording argv/env — the real claude is never started; the only real children are CLI usage-error spawns that exit 2 before any side effect; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
       "file": "stability-campaign.test.mjs",
