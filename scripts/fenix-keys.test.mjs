@@ -62,6 +62,16 @@ shift \$((idx + 1))
 case "\$script" in
   *fenix-settings.mjs)
     if [ "\$1" = "set" ] && [ "\$FENIX_FAKE_SETTINGS_FAIL" = "1" ]; then exit 1; fi
+    if [ "\$1" = "set" ] && [ -n "\${FENIX_FAKE_SETTINGS_RC:-}" ]; then
+      printf 'settings saved (canned)\\n'
+      exit "\$FENIX_FAKE_SETTINGS_RC"
+    fi
+    ;;
+  *fenix-integrations.mjs)
+    if [ -n "\${FENIX_FAKE_INTEGRATIONS_RC:-}" ]; then
+      printf 'atlas=on\\npisi=off\\nmemory=off\\nsource=default\\n'
+      exit "\$FENIX_FAKE_INTEGRATIONS_RC"
+    fi
     ;;
   *key-check.mjs)
     key=\$(cat 2>/dev/null) || key=""
@@ -140,6 +150,30 @@ function runKeysWizard({ home, bin, settingsPath, input, fakeCheck, rejectKey, f
 
 const OPENROUTER_SETTINGS = { provider: { active: "openrouter", custom: null }, routing: {} };
 const CANDIDATE_URL = "https://candidate.example/api";
+
+/**
+ * Runs the real fenix launcher with the given arguments in the temp home with
+ * the fake docker shim (no stdin — used by non-interactive commands like
+ * `fenix integrations`).
+ */
+function runFenix({ home, bin, args, settingsPath, extraEnv = {} }) {
+  const shimLog = join(home, "shim.log");
+  writeFileSync(shimLog, "", "utf8");
+  const env = {
+    ...process.env,
+    PATH: `${shPath(bin)}${process.platform === "win32" ? ";" : ":"}${process.env.PATH}`,
+    FENIX_REPO_ROOT: shPath(REPO_ROOT),
+    FENIX_SHIM_LOG: shPath(shimLog),
+    ...(settingsPath ? { LA_SETTINGS_FILE: shPath(settingsPath) } : {}),
+    ...extraEnv,
+  };
+  return spawnSync(findSh(), [shPath(join(home, "fenix")), ...args], {
+    env,
+    encoding: "utf8",
+    timeout: 120000,
+    windowsHide: true,
+  });
+}
 
 test("fenix launcher passes `sh -n` (syntax check)", () => {
   const res = spawnSync(findSh(), ["-n", FENIX_SRC], { encoding: "utf8", windowsHide: true });
@@ -337,4 +371,119 @@ test("provider wizard restores the old key when the overlay cannot be saved", ()
     assert.match(res.stderr, /restored/i);
     assert.equal((res.stdout + res.stderr).includes("candidate-key"), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// --- fenix integrations (FOC-772) -------------------------------------------
+
+function dockerCalls(dir) {
+  // The shim also logs the launcher's `docker image inspect` pre-check —
+  // only the actual in-container node invocations matter here.
+  return readFileSync(join(dir, "shim.log"), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .filter((l) => !l.includes(" image inspect "));
+}
+
+test("fenix integrations (show) forwards to the node CLI and passes the exit code through", () => {
+  const { dir, bin } = makeHome("integrations-show");
+  try {
+    const res = runFenix({
+      home: dir,
+      bin,
+      args: ["integrations"],
+      extraEnv: { FENIX_FAKE_INTEGRATIONS_RC: "0" },
+    });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    const calls = dockerCalls(dir);
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].includes("/opt/fenix/scripts/fenix-integrations.mjs show"), calls[0]);
+    assert.match(res.stdout, /atlas=on/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("fenix integrations enable atlas forwards the settings set with the right JSON", () => {
+  const { dir, bin } = makeHome("integrations-enable");
+  try {
+    const res = runFenix({
+      home: dir,
+      bin,
+      args: ["integrations", "enable", "atlas"],
+      extraEnv: { FENIX_FAKE_SETTINGS_RC: "0" },
+    });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    const calls = dockerCalls(dir);
+    assert.equal(calls.length, 1);
+    assert.ok(
+      calls[0].includes('/opt/fenix/scripts/fenix-settings.mjs set integrations {"atlas":true}'),
+      calls[0],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("fenix integrations enable nebul exits 2 with the hint and runs nothing", () => {
+  const { dir, bin } = makeHome("integrations-nebul");
+  try {
+    const res = runFenix({ home: dir, bin, args: ["integrations", "enable", "nebul"] });
+    assert.equal(res.status, 2, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.match(res.stderr, /nebul/i);
+    assert.match(res.stderr, /provider/i);
+    assert.deepEqual(dockerCalls(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("fenix integrations disable bogus exits 2 and runs nothing", () => {
+  const { dir, bin } = makeHome("integrations-bogus");
+  try {
+    const res = runFenix({ home: dir, bin, args: ["integrations", "disable", "bogus"] });
+    assert.equal(res.status, 2, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.match(res.stderr, /unknown integration: bogus/);
+    assert.deepEqual(dockerCalls(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("provider wizard hides nebul from the listing unless it is already active", () => {
+  // Fresh install (active=openrouter): the menu lists no nebul, but typing it
+  // still validates and switches.
+  const fresh = makeHome("wizard-nebul-hidden");
+  try {
+    const settingsPath = writeSettingsFile(fresh.dir, OPENROUTER_SETTINGS);
+    const res = runKeysWizard({
+      home: fresh.dir,
+      bin: fresh.bin,
+      settingsPath,
+      input: ["", "fixture-provider-key", "fixture-linear-key", "fixture-github-token", "FOC"],
+    });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.ok(!/^nebul\b/m.test(res.stdout), `nebul listed:\n${res.stdout}`);
+    assert.match(res.stdout, /Available providers:/);
+    assert.match(res.stdout, /openrouter/);
+  } finally {
+    rmSync(fresh.dir, { recursive: true, force: true });
+  }
+  // Active=nebul: the parked provider is back in the menu.
+  const parked = makeHome("wizard-nebul-active");
+  try {
+    const settingsPath = writeSettingsFile(parked.dir, {
+      provider: { active: "nebul", custom: null },
+      routing: {},
+    });
+    const res = runKeysWizard({
+      home: parked.dir,
+      bin: parked.bin,
+      settingsPath,
+      input: ["", "fixture-provider-key", "fixture-linear-key", "fixture-github-token", "FOC"],
+    });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.match(res.stdout, /^nebul\b/m);
+  } finally {
+    rmSync(parked.dir, { recursive: true, force: true });
+  }
 });
