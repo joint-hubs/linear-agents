@@ -371,3 +371,97 @@ export function retentionView(payload) {
     computedAt: r.computedAt || null,
   };
 }
+
+// ===== Agent tools (FOC-906) =================================================
+
+// Findings sort error > warning > info; an unknown level ranks last.
+const AGENT_LEVEL_RANK = { error: 0, warning: 1, info: 2 };
+
+function agentLevelRank(level) {
+  return AGENT_LEVEL_RANK[level] ?? AGENT_LEVEL_RANK.info + 1;
+}
+
+// findingCounts(findings) -> { error, warning, info } tallies for one agent's
+// findings (the card header shows one chip per level with a count instead of a
+// chip per finding). A finding whose level is unknown or missing counts
+// nowhere — inventing a bucket would make the header disagree with the
+// findings list, which labels such a level with the info colours but its own
+// text. A non-array reads as no findings, never a throw.
+export function findingCounts(findings) {
+  const counts = { error: 0, warning: 0, info: 0 };
+  for (const f of Array.isArray(findings) ? findings : []) {
+    if (f && typeof f === 'object' && f.level in counts) counts[f.level] += 1;
+  }
+  return counts;
+}
+
+// summaryText(summary) -> "2 errors, 1 warning, 3 infos" / a verbatim string /
+// null. Tolerant: the server's summary is { errors, warnings, infos } numbers,
+// but a malformed payload must not break the panel.
+export function agentToolsSummaryText(summary) {
+  if (summary && typeof summary === 'string') return summary;
+  if (summary && typeof summary === 'object') {
+    const { errors, warnings, infos } = summary;
+    if ([errors, warnings, infos].every((n) => typeof n === 'number' && Number.isFinite(n))) {
+      const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+      return `${plural(errors, 'error')}, ${plural(warnings, 'warning')}, ${plural(infos, 'info')}`;
+    }
+  }
+  return null;
+}
+
+// agentToolsView(payload) -> the read-only Agent tools panel's view model:
+// root path, check summary text, and one row per agent — permission counts and
+// lists, findings grouped by agent (levels sorted error > warning > info),
+// MCP servers, skills, hooks. A row whose file could not be read keeps
+// `{ agent, error }` from the payload; a null/empty payload yields empty
+// everything, never a throw.
+export function agentToolsView(payload) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const byAgent = new Map();
+  const findings = Array.isArray(p.check?.findings) ? p.check.findings : [];
+  for (const f of findings) {
+    if (!f || typeof f !== 'object') continue;
+    const key = f.agent ?? '(unknown)';
+    if (!byAgent.has(key)) byAgent.set(key, []);
+    byAgent.get(key).push({ level: f.level, list: f.list, rule: f.rule, message: f.message });
+  }
+  const rows = Array.isArray(p.agents) ? p.agents : [];
+  const agents = rows.map((a) => {
+    if (!a || typeof a !== 'object') return { agent: '(unknown)', error: 'malformed row' };
+    const lists = a.permissions && typeof a.permissions === 'object' ? a.permissions : {};
+    const hooks = Object.entries(a.hooks && typeof a.hooks === 'object' ? a.hooks : {})
+      .filter(([, n]) => typeof n === 'number' && Number.isFinite(n))
+      .map(([event, count]) => ({ event, count }))
+      .sort((x, y) => (x.event < y.event ? -1 : x.event > y.event ? 1 : 0));
+    const agentFindings = (byAgent.get(a.agent) || []).sort(
+      (x, y) => agentLevelRank(x.level) - agentLevelRank(y.level),
+    );
+    return {
+      agent: a.agent,
+      error: typeof a.error === 'string' ? a.error : null,
+      settingsPath: typeof a.settingsPath === 'string' ? a.settingsPath : null,
+      counts: {
+        allow: Array.isArray(lists.allow) ? lists.allow.length : 0,
+        ask: Array.isArray(lists.ask) ? lists.ask.length : 0,
+        deny: Array.isArray(lists.deny) ? lists.deny.length : 0,
+      },
+      lists: {
+        allow: Array.isArray(lists.allow) ? lists.allow : [],
+        ask: Array.isArray(lists.ask) ? lists.ask : [],
+        deny: Array.isArray(lists.deny) ? lists.deny : [],
+      },
+      additionalDirectories: Array.isArray(a.additionalDirectories) ? a.additionalDirectories : [],
+      defaultMode: typeof a.defaultMode === 'string' ? a.defaultMode : null,
+      mcp: Array.isArray(a.mcp) ? a.mcp : [],
+      skills: Array.isArray(a.skills) ? a.skills : [],
+      hooks,
+      findings: agentFindings,
+    };
+  });
+  return {
+    root: typeof p.root === 'string' ? p.root : null,
+    summaryText: agentToolsSummaryText(p.check?.summary),
+    agents,
+  };
+}

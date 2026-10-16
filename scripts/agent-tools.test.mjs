@@ -1,4 +1,5 @@
-// scripts/agent-tools.test.mjs — FOC-900: the read-only agent permission tool.
+// scripts/agent-tools.test.mjs — FOC-900: the read-only agent permission tool;
+// FOC-906: the validated edit verbs (allow/ask/deny/remove).
 //
 // Everything runs against mkdtemp fixtures: a synthetic agents root, a
 // synthetic .mcp.json, and (for `diff`) one local git fixture repo that never
@@ -22,6 +23,7 @@ import {
   diffLists,
   hookCounts,
   parseRule,
+  protectedDeny,
   renderDocs,
   rulePrefix,
   runCli,
@@ -445,6 +447,253 @@ test("the committed docs/agent-tools.md is current (render with the real root)",
   assert.equal(renderDocs() + "\n", committed);
 });
 
+// ── edit (FOC-906) ───────────────────────────────────────────────────────────
+
+const readRaw = (p) => fs.readFileSync(p, "utf8");
+
+function editFixture(settings) {
+  const dir = makeTemp("agent-tools-edit-");
+  const agentsDir = mkdirp(path.join(dir, "agents"));
+  writeAgent(agentsDir, "squad", settings);
+  return { dir, agentsDir, settingsPath: path.join(agentsDir, "squad", "settings.json") };
+}
+
+/** runCli with the FOC-906 test seams (repoAgentsDir); --docs-out goes via argv. */
+const runEdit = (argv, { repoAgentsDir } = {}) => {
+  const io = capture();
+  const code = runCli(argv, { stdout: io.stdout, stderr: io.stderr, env: process.env, repoAgentsDir });
+  return { code, text: io.out.join(""), errText: io.err.join(""), json: () => JSON.parse(io.out.join("")) };
+};
+
+test("edit: allow/ask/deny append to the end of the target list, key order and file format preserved", () => {
+  const fx = editFixture({
+    permissions: { allow: ["Read"], deny: ["Artifact"], defaultMode: "acceptEdits" },
+    hooks: { Stop: [{ hooks: [{ type: "command", command: "echo hi" }] }] },
+  });
+  // ask does not exist yet — created in the canonical position (after deny)
+  const ask = runEdit(["ask", "squad", "Bash(git fetch:*)", "--root", fx.agentsDir]);
+  assert.equal(ask.code, 0);
+  assert.match(ask.text, /settings: .*settings\.json/);
+  assert.match(ask.text, /\+ ask Bash\(git fetch:\*\)/);
+  assert.match(ask.text, /docs: not regenerated \(effective root is not the repository tree\)/);
+  assert.match(ask.text, /summary: 0 errors, 0 warnings, 0 infos/);
+  const afterAsk = JSON.parse(readRaw(fx.settingsPath));
+  assert.deepEqual(Object.keys(afterAsk.permissions), ["allow", "deny", "ask", "defaultMode"]);
+  assert.deepEqual(afterAsk.permissions.ask, ["Bash(git fetch:*)"]);
+  assert.deepEqual(afterAsk.permissions.allow, ["Read"]);
+  assert.deepEqual(afterAsk.permissions.deny, ["Artifact"]);
+  assert.deepEqual(afterAsk.hooks, { Stop: [{ hooks: [{ type: "command", command: "echo hi" }] }] });
+  // atomicWriteJSON format: 2-space indent + trailing LF
+  assert.equal(readRaw(fx.settingsPath), JSON.stringify(afterAsk, null, 2) + "\n");
+
+  // an allow append lands at the END of the existing list (no re-sorting)
+  const allow = runEdit(["allow", "squad", "Grep", "--root", fx.agentsDir]);
+  assert.equal(allow.code, 0);
+  assert.deepEqual(JSON.parse(readRaw(fx.settingsPath)).permissions.allow, ["Read", "Grep"]);
+
+  // adding to deny is always allowed — even a protected rule
+  const deny = runEdit(["deny", "squad", "Bash(git push:*)", "--root", fx.agentsDir]);
+  assert.equal(deny.code, 0);
+  assert.match(deny.text, /\+ deny Bash\(git push:\*\)/);
+});
+
+test("edit: duplicate in the same list is a no-op (exit 0), in another list is refused naming the list", () => {
+  const fx = editFixture({ permissions: { allow: ["Read"], ask: ["WebFetch"] } });
+  const before = readRaw(fx.settingsPath);
+  const noop = runEdit(["allow", "squad", "Read", "--root", fx.agentsDir]);
+  assert.equal(noop.code, 0);
+  assert.match(noop.text, /= allow Read \(already present — no-op\)/);
+  assert.equal(readRaw(fx.settingsPath), before);
+
+  const across = runEdit(["deny", "squad", "WebFetch", "--root", fx.agentsDir]);
+  assert.equal(across.code, 1);
+  assert.match(across.errText, /duplicate rule: WebFetch is already in ask/);
+  assert.equal(readRaw(fx.settingsPath), before);
+});
+
+test("edit: an invalid rule is refused with the parse reason, nothing written", () => {
+  const fx = editFixture({ permissions: { allow: ["Read"] } });
+  const before = readRaw(fx.settingsPath);
+  for (const [rule, reason] of [
+    ["Bash(command:ls)", "primary-field"],
+    ["Bash(git status", "shape"],
+    ["   ", "empty"],
+  ]) {
+    const bad = runEdit(["allow", "squad", rule, "--root", fx.agentsDir]);
+    assert.equal(bad.code, 1, rule);
+    assert.match(bad.errText, new RegExp(`invalid rule \\(${reason}\\)`));
+    assert.equal(readRaw(fx.settingsPath), before, rule);
+  }
+});
+
+test("edit: an edit is refused when the would-be settings would fail the check", () => {
+  // a pre-existing broken rule poisons every edit: the would-be file would
+  // still fail the check, so the edit is refused and nothing is written
+  const fx = editFixture({ permissions: { allow: ["Bash(git (status)"] } });
+  const before = readRaw(fx.settingsPath);
+  const refused = runEdit(["allow", "squad", "Grep", "--root", fx.agentsDir]);
+  assert.equal(refused.code, 1);
+  assert.match(refused.errText, /allow Bash\(git \(status\): invalid rule shape/);
+  assert.equal(readRaw(fx.settingsPath), before);
+});
+
+test("edit: a permissions list that is defined but not an array is refused, nothing written", () => {
+  const fx = editFixture({ permissions: { allow: "Read", deny: ["Artifact"] } });
+  const before = readRaw(fx.settingsPath);
+  const bad = runEdit(["allow", "squad", "Grep", "--root", fx.agentsDir]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.errText, /error: permissions\.allow is not an array/);
+  assert.equal(readRaw(fx.settingsPath), before);
+});
+
+test("edit: remove keeps the first holder and warns about the other holder(s)", () => {
+  const fx = editFixture({ permissions: { allow: ["WebFetch"], deny: ["WebFetch"] } });
+  const rm = runEdit(["remove", "squad", "WebFetch", "--root", fx.agentsDir]);
+  assert.equal(rm.code, 0);
+  assert.match(rm.text, /- allow WebFetch/);
+  assert.match(rm.text, /warning: WebFetch also present in deny — run check/);
+  const after = JSON.parse(readRaw(fx.settingsPath));
+  assert.deepEqual(after.permissions.allow, []);
+  assert.deepEqual(after.permissions.deny, ["WebFetch"]);
+});
+
+test("edit: remove of a protected deny rule is refused (exact and prefix forms), nothing written", () => {
+  const fx = editFixture({
+    permissions: { allow: [], deny: ["Bash(git push:*)", "Bash(git push -f:*)"] },
+  });
+  const before = readRaw(fx.settingsPath);
+  const exact = runEdit(["remove", "squad", "Bash(git push:*)", "--root", fx.agentsDir]);
+  assert.equal(exact.code, 1);
+  assert.match(
+    exact.errText,
+    /protected deny rule — edit SUPERVISOR_DENY in supervisor-lib\.mjs with a ticket/,
+  );
+  // prefix form: rulePrefix("Bash(git push *)") === rulePrefix("Bash(git push:*)")
+  const prefix = runEdit(["remove", "squad", "Bash(git push *)", "--root", fx.agentsDir]);
+  assert.equal(prefix.code, 1);
+  assert.match(prefix.errText, /protected deny rule/);
+  // a deny rule that merely EXTENDS a protected prefix is removable — only
+  // equality is protected
+  const extension = runEdit(["remove", "squad", "Bash(git push -f:*)", "--root", fx.agentsDir]);
+  assert.equal(extension.code, 0);
+  assert.match(extension.text, /- deny Bash\(git push -f:\*\)/);
+  assert.equal(readRaw(fx.settingsPath), JSON.stringify(JSON.parse(readRaw(fx.settingsPath)), null, 2) + "\n");
+});
+
+test("edit: remove of a plain rule deletes it from the list that holds it", () => {
+  const fx = editFixture({ permissions: { allow: ["Read", "Grep"], ask: ["WebFetch"], deny: ["Artifact"] } });
+  const rm = runEdit(["remove", "squad", "WebFetch", "--root", fx.agentsDir]);
+  assert.equal(rm.code, 0);
+  assert.match(rm.text, /- ask WebFetch/);
+  const after = JSON.parse(readRaw(fx.settingsPath));
+  assert.deepEqual(after.permissions.ask, []);
+  assert.deepEqual(Object.keys(after.permissions), ["allow", "ask", "deny"]);
+  assert.deepEqual(after.permissions.allow, ["Read", "Grep"]);
+  assert.deepEqual(after.permissions.deny, ["Artifact"]);
+
+  const missing = runEdit(["remove", "squad", "WebFetch", "--root", fx.agentsDir]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.errText, /rule not found in any list of squad: WebFetch/);
+});
+
+test("edit: --dry-run prints the edit and writes nothing", () => {
+  const fx = editFixture({ permissions: { allow: ["Read"] } });
+  const before = readRaw(fx.settingsPath);
+  const dry = runEdit(["allow", "squad", "Grep", "--root", fx.agentsDir, "--dry-run"]);
+  assert.equal(dry.code, 0);
+  assert.match(dry.text, /\+ allow Grep/);
+  assert.match(dry.text, /dry-run: nothing written/);
+  assert.equal(readRaw(fx.settingsPath), before);
+  const dryRm = runEdit(["remove", "squad", "Read", "--root", fx.agentsDir, "--dry-run"]);
+  assert.equal(dryRm.code, 0);
+  assert.match(dryRm.text, /- allow Read/);
+  assert.equal(readRaw(fx.settingsPath), before);
+});
+
+test("edit: docs regenerate only for the repository tree (repoAgentsDir + --docs-out seams)", () => {
+  // A temp root that IS the (seamed) repository tree: docs written to --docs-out
+  const fx = editFixture({ permissions: { allow: ["Read"] } });
+  const docsOut = path.join(fx.dir, "docs", "agent-tools.md");
+  fs.mkdirSync(path.dirname(docsOut), { recursive: true }); // --docs-out does not create parents
+  const inTree = runEdit(
+    ["allow", "squad", "Grep", "--root", fx.agentsDir, "--docs-out", docsOut],
+    { repoAgentsDir: fx.agentsDir },
+  );
+  assert.equal(inTree.code, 0);
+  assert.match(inTree.text, /docs: regenerated /);
+  const docs = readRaw(docsOut);
+  assert.match(docs, /^# Agent settings — generated reference/);
+  assert.match(docs, /Editing: `allow\|ask\|deny/);
+  assert.match(docs, /`Grep`/);
+
+  // dry-run against the same seamed repo tree: no settings write, no docs write
+  const fx2 = editFixture({ permissions: { allow: ["Read"] } });
+  const docsOut2 = path.join(fx2.dir, "docs", "agent-tools.md");
+  const dry = runEdit(
+    ["allow", "squad", "Grep", "--root", fx2.agentsDir, "--docs-out", docsOut2, "--dry-run"],
+    { repoAgentsDir: fx2.agentsDir },
+  );
+  assert.equal(dry.code, 0);
+  assert.match(dry.text, /docs: would be regenerated \(dry-run — nothing written\)/);
+  assert.equal(fs.existsSync(docsOut2), false);
+  assert.deepEqual(JSON.parse(readRaw(fx2.settingsPath)).permissions.allow, ["Read"]);
+
+  // a plain temp root (the real repo tree is NOT seamed): message, no docs write
+  const fx3 = editFixture({ permissions: { allow: ["Read"] } });
+  const out3 = runEdit([
+    "allow", "squad", "Grep", "--root", fx3.agentsDir, "--docs-out", path.join(fx3.dir, "docs.md"),
+  ]);
+  assert.equal(out3.code, 0);
+  assert.match(out3.text, /docs: not regenerated \(effective root is not the repository tree\)/);
+  assert.equal(fs.existsSync(path.join(fx3.dir, "docs.md")), false);
+});
+
+test("edit: --json shape of a successful edit; a refusal stays on stderr", () => {
+  const fx = editFixture({ permissions: { allow: ["Read"] } });
+  const ok = runEdit(["allow", "squad", "Grep", "--root", fx.agentsDir, "--json"]);
+  assert.equal(ok.code, 0);
+  const parsed = ok.json();
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.agent, "squad");
+  assert.equal(parsed.verb, "allow");
+  assert.equal(parsed.rule, "Grep");
+  assert.equal(parsed.list, "allow");
+  assert.equal(parsed.noop, false);
+  assert.equal(parsed.dryRun, false);
+  assert.deepEqual(parsed.docs, null);
+  assert.deepEqual(parsed.check.summary, { errors: 0, warnings: 0, infos: 0 });
+  assert.deepEqual(parsed.check.findings, []);
+
+  const refused = runEdit(["remove", "squad", "Bash(git push:*)", "--root", fx.agentsDir, "--json"]);
+  assert.equal(refused.code, 1);
+  assert.match(refused.errText, /protected deny rule/);
+});
+
+test("protectedDeny: baseline ∪ live export, matched exact and by prefix", () => {
+  const live = protectedDeny({ supervisorDeny: [...SUPERVISOR_DENY, "Bash(custom-tool:*)"] });
+  assert.equal(live.rules.has("Bash(git push:*)"), true);
+  assert.equal(live.rules.has("Bash(custom-tool:*)"), true);
+  assert.equal(live.prefixes.has("git push "), true);
+  assert.equal(DENY_BASELINE.every((r) => live.rules.has(r)), true);
+});
+
+test("edit: add+remove round-trip on a temp copy of the repo agents tree is byte-identical", () => {
+  const dir = makeTemp("agent-tools-roundtrip-");
+  const agentsDir = path.join(dir, "agents");
+  fs.cpSync(path.join(REPO_ROOT, "agents"), agentsDir, { recursive: true });
+  const target = path.join(agentsDir, "cadence", "settings.json");
+  // A fresh Windows checkout has CRLF on disk (the blob is LF); the writer
+  // emits LF, so compare normalized.
+  const norm = (s) => s.replace(/\r\n/g, "\n");
+  const before = readRaw(target);
+  const add = runEdit(["allow", "cadence", "Bash(foc906-probe:*)", "--root", agentsDir, "--json"]);
+  assert.equal(add.code, 0);
+  assert.notEqual(norm(readRaw(target)), norm(before));
+  const rm = runEdit(["remove", "cadence", "Bash(foc906-probe:*)", "--root", agentsDir, "--json"]);
+  assert.equal(rm.code, 0);
+  assert.equal(norm(readRaw(target)), norm(before));
+});
+
 // ── CLI usage ────────────────────────────────────────────────────────────────
 
 test("usage exits: no args, unknown command, missing values, unknown option", () => {
@@ -454,4 +703,8 @@ test("usage exits: no args, unknown command, missing values, unknown option", ()
   assert.equal(run(["show", "alpha", "--root"]).code, 2);
   assert.equal(run(["show", "alpha", "--nope"]).code, 2);
   assert.equal(run(["--help"]).code, 0);
+  // FOC-906 edit verbs
+  assert.equal(run(["allow", "squad"]).code, 2);
+  assert.equal(run(["remove", "squad", "Read", "extra"]).code, 2);
+  assert.equal(run(["allow", "squad", "Read", "--docs-out"]).code, 2);
 });

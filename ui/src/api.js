@@ -756,6 +756,12 @@ export async function getSettingsRetention(signal) {
   return apiFetch('/api/settings/retention', signal);
 }
 
+// Agent tools (FOC-906) — read-only: every agent's permission lists, MCP
+// servers and skills, plus the check summary. Editing stays in the CLI.
+export async function getAgentTools(signal) {
+  return apiFetch('/api/settings/agent-tools', signal);
+}
+
 // Terminal WebSocket URL on the same origin (wss behind https). API_BASE as an
 // absolute URL switches the origin and keeps its path prefix. The pure builders
 // live in cockpitModel.js / taskCockpitModel.js so the node tests can pin them.
