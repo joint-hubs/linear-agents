@@ -547,6 +547,8 @@ test("a child with no turns has no initModel and no drift", () => {
   const out = parse(status(runId));
   if (out.children[0].initModel !== null) fail(`initModel was ${JSON.stringify(out.children[0].initModel)}`);
   if (out.children[0].modelDrift !== false) fail(`modelDrift was ${out.children[0].modelDrift}`);
+});
+
 // ── briefing holds (FOC-848) ─────────────────────────────────────────────────
 console.log("\nbriefing holds");
 
