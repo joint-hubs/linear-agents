@@ -528,6 +528,13 @@ test("the resumed turn's env carries the same ceiling — the second carrier (FO
     if (env[PRINT_BG_WAIT_ENV] !== String(PRINT_BG_WAIT_CEILING_MS)) {
       fail(`turn ${turn} env carried ${PRINT_BG_WAIT_ENV}=${JSON.stringify(env[PRINT_BG_WAIT_ENV])}`);
     }
+    // FOC-848: the resumed turn declares its acting owner the way spawn does —
+    // the child's ownership gates attribute its work to this owner, and a
+    // resume that dropped it would let the two turn paths drift (the FOC-171
+    // shape this suite exists to catch).
+    if (env.LA_TASK_OWNER !== "supervisor") {
+      fail(`turn ${turn} env carried LA_TASK_OWNER=${JSON.stringify(env.LA_TASK_OWNER)}`);
+    }
   }
 });
 

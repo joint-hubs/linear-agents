@@ -15,6 +15,11 @@
 // empty or malformed payload) — and the leak guard: no model output ever
 // contains a canary value passed in by mistake. Fixtures shaped like the
 // plan's Settings API contracts — no network, no DOM.
+// retentionView (policy texts, humanBytes, free disk, resolved / prunable /
+// applied) + retentionFormState / validateRetentionForm (the FOC-780 form's
+// keep-all vs days rule, the 1..36500 and 0.5 GiB bounds) — and the leak guard:
+// no model output ever contains a canary value passed in by mistake. Fixtures
+// shaped like the plan's Settings API contracts — no network, no DOM.
 
 import assert from 'node:assert/strict';
 
@@ -36,6 +41,8 @@ import {
   retentionView,
   artifactsView,
   artifactRow,
+  retentionFormState,
+  validateRetentionForm,
 } from './settingsModel.js';
 
 // --- Minimal test harness (same shape as _tests_work.mjs) --------------------
@@ -281,6 +288,13 @@ const artifactsPayload = {
       committed: true,
     },
   ],
+};
+// The FOC-780 GET adds the resolved policy and the dry-run prune estimate on
+// top of the shape above.
+const retentionPayloadApplied = {
+  ...retentionPayload,
+  resolved: { keepDays: 30, cleanupPeriodDays: 30, minFreeGiB: 5 },
+  prunable: { runs: 3, bytes: 4_194_304 },
 };
 
 // --- keyRows -----------------------------------------------------------------
@@ -618,7 +632,7 @@ await test('retentionView: policy texts (keep-all / days / mixed / unknown)', ()
   eq(retentionView({}).policyText, 'unknown');
 });
 
-await test('retentionView: usage rows humanised, free disk, FOC-780 note', () => {
+await test('retentionView: usage rows humanised, free disk, save note', () => {
   const v = retentionView(retentionPayload);
   eq(v.usageRows, [
     { label: 'Transcripts', text: '2.3 GB' },
@@ -627,7 +641,7 @@ await test('retentionView: usage rows humanised, free disk, FOC-780 note', () =>
     { label: 'Run state', text: '0 B' },
   ]);
   eq(v.freeDiskText, 'free disk: 109.9 GB');
-  eq(v.note, 'read-only here — retention is managed by FOC-780');
+  eq(v.note, 'a saved limit applies to the squads at once; nothing is deleted until the CLI prune runs');
   eq(v.partialText, null);
 });
 
@@ -635,6 +649,91 @@ await test('retentionView: partial walk carries its warning; missing disk reads 
   const v = retentionView({ policy: 'keep-all', usage: {}, partial: ['transcripts'] });
   eq(v.partialText, 'counts are partial: transcripts');
   eq(v.freeDiskText, 'free disk: unknown');
+});
+
+// --- retentionView: resolved / prunable / applied ------------------------------
+
+await test('retentionView: resolved policy, applied line, prunable estimate', () => {
+  const v = retentionView(retentionPayloadApplied);
+  eq(v.resolved, { keepAll: false, keepDays: 30, minFreeGiB: 5 });
+  eq(v.appliedText, 'Claude Code cleanupPeriodDays: 30, applied to 2 squads');
+  eq(v.prunable, { runs: 3, bytes: 4_194_304, bytesText: '4.0 MB', refused: null });
+});
+
+await test('retentionView: keep-all resolves keepAll true, refused prune carried', () => {
+  const v = retentionView({
+    policy: 'keep-all',
+    cleanupPeriodDays: { fenix: 36500 },
+    resolved: { keepDays: null, cleanupPeriodDays: 36500, minFreeGiB: 5 },
+    prunable: { runs: 0, bytes: 0, refused: 'nothing to prune: retention keeps everything' },
+  });
+  eq(v.resolved, { keepAll: true, keepDays: null, minFreeGiB: 5 });
+  eq(v.appliedText, 'Claude Code cleanupPeriodDays: 36500, applied to 1 squad');
+  eq(v.prunable.runs, 0);
+  eq(v.prunable.bytesText, '0 B');
+  eq(v.prunable.refused, 'nothing to prune: retention keeps everything');
+});
+
+await test('retentionView: an older server without resolved/prunable defaults to keep-all, no estimate', () => {
+  const v = retentionView(retentionPayload);
+  eq(v.resolved, { keepAll: true, keepDays: null, minFreeGiB: null });
+  eq(v.prunable, null);
+  eq(v.appliedText, null);
+});
+
+// --- retentionFormState ---------------------------------------------------------
+
+await test('retentionFormState: the resolved policy seeds the form, absent fields stay empty', () => {
+  eq(retentionFormState(retentionView(retentionPayloadApplied)), {
+    keepAll: false,
+    keepDays: '30',
+    minFreeGiB: '5',
+  });
+  eq(retentionFormState(retentionView(retentionPayload)), {
+    keepAll: true,
+    keepDays: '',
+    minFreeGiB: '',
+  });
+  eq(retentionFormState(null), { keepAll: true, keepDays: '', minFreeGiB: '' });
+});
+
+// --- validateRetentionForm ------------------------------------------------------
+
+await test('validateRetentionForm: valid keep-all ignores a stale days value', () => {
+  eq(validateRetentionForm({ keepAll: true, keepDays: '7', minFreeGiB: '5' }), {
+    ok: true,
+    errors: [],
+    payload: { keepDays: null, minFreeGiB: 5 },
+  });
+});
+
+await test('validateRetentionForm: valid days and threshold', () => {
+  eq(validateRetentionForm({ keepAll: false, keepDays: '30', minFreeGiB: '2.5' }), {
+    ok: true,
+    errors: [],
+    payload: { keepDays: 30, minFreeGiB: 2.5 },
+  });
+  eq(validateRetentionForm({ keepAll: false, keepDays: 36500, minFreeGiB: 0.5 }).ok, true);
+});
+
+await test('validateRetentionForm: days out of range, non-integer, empty', () => {
+  const msg = 'keep days: a whole number between 1 and 36500';
+  eq(validateRetentionForm({ keepAll: false, keepDays: '0', minFreeGiB: '5' }).errors, [msg]);
+  eq(validateRetentionForm({ keepAll: false, keepDays: '36501', minFreeGiB: '5' }).errors, [msg]);
+  eq(validateRetentionForm({ keepAll: false, keepDays: '7.5', minFreeGiB: '5' }).errors, [msg]);
+  eq(
+    validateRetentionForm({ keepAll: false, keepDays: '', minFreeGiB: '5' }).errors,
+    ['keep days: enter a whole number between 1 and 36500'],
+  );
+});
+
+await test('validateRetentionForm: minFreeGiB too small or missing', () => {
+  const small = validateRetentionForm({ keepAll: true, keepDays: '', minFreeGiB: '0.2' });
+  eq(small.ok, false);
+  eq(small.errors, ['warn below: at least 0.5 GiB']);
+  const missing = validateRetentionForm({ keepAll: false, keepDays: '30', minFreeGiB: '' });
+  eq(missing.ok, false);
+  eq(missing.errors, ['warn below: enter the GiB threshold (0.5 or more)']);
 });
 
 await test('humanBytes: the band of shapes', () => {
@@ -767,6 +866,8 @@ await test('no model output contains a canary value passed in by mistake', () =>
         { ...artifactsPayload.artifacts[0], manifest: { digest: CANARY, generatedAt: null } },
       ],
     }),
+    retentionFormState({ resolved: { keepAll: true, keepDays: CANARY, minFreeGiB: CANARY } }),
+    validateRetentionForm({ keepAll: false, keepDays: CANARY, minFreeGiB: CANARY }),
     checkText({ ok: false, reason: 'failed', details: { key: CANARY } }),
   ];
   const dumped = JSON.stringify(poisoned);

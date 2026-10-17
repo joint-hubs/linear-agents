@@ -763,6 +763,13 @@ export async function getSettingsRetention(signal) {
 export async function getArtifacts(signal) {
   return apiFetch('/api/artifacts', signal);
 }
+// Body: { keepDays, minFreeGiB } — keepDays null = keep everything (the
+// default). The server validates, writes the overlay and applies
+// cleanupPeriodDays to every squad, then answers with the same shape as GET
+// plus the dry-run prune estimate. Errors are { error, detail } with 400.
+export function putSettingsRetention(body) {
+  return putJson('/api/settings/retention', body ?? {});
+}
 
 // Terminal WebSocket URL on the same origin (wss behind https). API_BASE as an
 // absolute URL switches the origin and keeps its path prefix. The pure builders

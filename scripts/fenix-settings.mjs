@@ -10,9 +10,20 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { settingsPath } from "./fenix-paths.mjs";
 
+// Retention (FOC-780): keepDays null (or absent) means keep everything —
+// logs are training data, deletion is always opt-in. cleanupPeriodDays is
+// capped at 36500 ("keep everything" for Claude Code), so keepDays is too.
+const RETENTION_KEYS = ["keepDays", "minFreeGiB"];
+const RETENTION_MAX_DAYS = 36500;
+const RETENTION_MIN_FREE_GIB = 0.5;
+
 const PROVIDER_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
 const SQUAD_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const KEY_NAME_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
+// Owner ids for the `ownership` key (task ownership, FOC-848). Kept local —
+// scripts/task-ownership.mjs imports this module for readSettings, so the
+// constant cannot be shared without a cycle; the two regexes must not drift.
+const OWNER_ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const TIER_NAMES = ["opus", "sonnet", "haiku", "smallFast"];
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "host.docker.internal"]);
 // Anything shaped like a real credential — the settings file is shared and
@@ -91,12 +102,52 @@ function checkProviderCustom(custom, errors) {
   checkNonEmptyString(custom.defaultModel, "provider.custom.defaultModel", 200, errors);
 }
 
+function checkRetention(retention, errors) {
+  if (retention === null) return; // explicit null = the default policy
+  if (!isPlainObject(retention)) {
+    errors.push("retention: must be an object or null");
+    return;
+  }
+  for (const key of Object.keys(retention)) {
+    if (!RETENTION_KEYS.includes(key)) errors.push(`retention.${key}: unknown key`);
+  }
+  if (retention.keepDays !== undefined && retention.keepDays !== null) {
+    const v = retention.keepDays;
+    if (!Number.isInteger(v) || v < 1 || v > RETENTION_MAX_DAYS) {
+      errors.push(`retention.keepDays: must be null or an integer between 1 and ${RETENTION_MAX_DAYS}`);
+    }
+  }
+  if (retention.minFreeGiB !== undefined && retention.minFreeGiB !== null) {
+    const v = retention.minFreeGiB;
+    if (typeof v !== "number" || !Number.isFinite(v) || v < RETENTION_MIN_FREE_GIB) {
+      errors.push(`retention.minFreeGiB: must be a number >= ${RETENTION_MIN_FREE_GIB}`);
+    }
+  }
+}
+
 export function validateSettings(obj) {
   const errors = [];
   if (!isPlainObject(obj)) return { ok: false, errors: ["settings: must be a JSON object"] };
 
   for (const key of Object.keys(obj)) {
-    if (key !== "provider" && key !== "routing") errors.push(`${key}: unknown top-level key`);
+    if (key !== "provider" && key !== "routing" && key !== "publish" && key !== "ownership" && key !== "retention") errors.push(`${key}: unknown top-level key`);
+  }
+
+  // The publish overlay (FOC-788 follow-up): the dashboard's push/PR act as a
+  // human by default; letting an AI actor through is an explicit operator
+  // decision, so the only key here is the boolean aiActor and it defaults to
+  // off by its absence.
+  const publish = obj.publish;
+  if (publish !== undefined) {
+    if (!isPlainObject(publish)) errors.push("publish: must be an object");
+    else {
+      for (const key of Object.keys(publish)) {
+        if (key !== "aiActor") errors.push(`publish.${key}: unknown key`);
+      }
+      if (publish.aiActor !== undefined && typeof publish.aiActor !== "boolean") {
+        errors.push("publish.aiActor: must be a boolean");
+      }
+    }
   }
 
   const provider = obj.provider;
@@ -137,6 +188,56 @@ export function validateSettings(obj) {
           }
           checkNonEmptyString(entry.lead, `routing.${squad}.lead`, 200, errors);
         }
+      }
+    }
+  }
+
+  if (obj.retention !== undefined) checkRetention(obj.retention, errors);
+  // The `ownership` key (FOC-848): owners → Linear projects, plus the policy
+  // for unlisted projects. Same shape rules the task-ownership loader's schema
+  // enforces; validated here too so a malformed map never lands on disk.
+  const ownership = obj.ownership;
+  if (ownership !== undefined) {
+    if (!isPlainObject(ownership)) errors.push("ownership: must be an object");
+    else {
+      for (const key of Object.keys(ownership)) {
+        if (key !== "version" && key !== "owners" && key !== "unlisted") {
+          errors.push(`ownership.${key}: unknown key`);
+        }
+      }
+      if (ownership.version !== undefined && ownership.version !== 1) {
+        errors.push("ownership.version: must be 1");
+      }
+      const owners = ownership.owners;
+      if (!isPlainObject(owners)) errors.push("ownership.owners: must be an object");
+      else {
+        for (const [ownerId, entry] of Object.entries(owners)) {
+          if (!OWNER_ID_RE.test(ownerId)) {
+            errors.push(`ownership.owners.${ownerId}: owner id must match /^[a-z][a-z0-9-]{0,31}$/`);
+            continue;
+          }
+          if (!isPlainObject(entry)) errors.push(`ownership.owners.${ownerId}: must be an object`);
+          else {
+            for (const key of Object.keys(entry)) {
+              if (key !== "linearProjects") {
+                errors.push(`ownership.owners.${ownerId}.${key}: unknown key`);
+              }
+            }
+            const projects = entry.linearProjects;
+            if (!Array.isArray(projects) || projects.length === 0) {
+              errors.push(`ownership.owners.${ownerId}.linearProjects: must be a non-empty array`);
+            } else {
+              for (const [i, project] of projects.entries()) {
+                if (typeof project !== "string" || !project.trim()) {
+                  errors.push(`ownership.owners.${ownerId}.linearProjects[${i}]: must be a non-empty string`);
+                }
+              }
+            }
+          }
+        }
+      }
+      if (ownership.unlisted !== undefined && ownership.unlisted !== "allow" && ownership.unlisted !== "ask") {
+        errors.push('ownership.unlisted: must be "allow" or "ask"');
       }
     }
   }
@@ -189,11 +290,15 @@ export function writeSettings(patch, { path = settingsPath(), dryRun = false } =
 
 // ---------------------------------------------------------------------------
 // CLI — `get <dotted.path>` and `set <dotted.path> <value>` for shell callers
-// (the entrypoint's Supervisor model chain, the fenix key wizard). `get`
-// prints the string at the path, or nothing when it is missing; `set` parses
-// the value as JSON when it parses (so `null` deletes, objects replace) and
-// falls back to the raw string. Both fail loudly on stderr so the caller can
-// react: exit 1 on settings/validation errors, 2 on usage.
+// (the entrypoint's Supervisor model chain, the fenix key wizard, the
+// launcher's first-run retention question). `get` prints the value at the
+// path: strings bare (backwards compatible), every other value — null,
+// numbers, booleans, objects, arrays — as single-line JSON, so an object key
+// like `retention` is distinguishable from an unset one; an absent path
+// prints nothing and exits 0. `set` parses the value as JSON when it parses
+// (so `null` deletes, objects replace) and falls back to the raw string.
+// Both fail loudly on stderr so the caller can react: exit 1 on
+// settings/validation errors, 2 on usage.
 // ---------------------------------------------------------------------------
 
 function getValue(obj, dotted) {
@@ -239,7 +344,9 @@ function main() {
       process.exit(1);
     }
     const value = getValue(settings, rest[0]);
+    if (value === undefined) return; // absent key: empty output, exit 0
     if (typeof value === "string") console.log(value);
+    else console.log(JSON.stringify(value)); // null, numbers, booleans, objects, arrays
     return;
   }
   if ((cmd === "set" || cmd === "validate") && rest.length === 2) {
@@ -253,8 +360,9 @@ function main() {
   }
   console.error("Usage: node scripts/fenix-settings.mjs get <dotted.path>");
   console.error("       node scripts/fenix-settings.mjs set|validate <dotted.path> <value>");
-  console.error("  The value is parsed as JSON when it parses (null deletes the key),");
-  console.error("  otherwise stored as a plain string.");
+  console.error("  get prints the value: strings bare, everything else as single-line JSON;");
+  console.error("  a missing path prints nothing and exits 0. The set value is parsed as");
+  console.error("  JSON when it parses (null deletes the key), otherwise stored as a string.");
   process.exit(2);
 }
 

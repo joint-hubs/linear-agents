@@ -338,9 +338,13 @@ const POLICY_LABELS = {
   unknown: 'unknown',
 };
 
-// retentionView(payload) -> the read-only retention panel's view model: the
-// policy in force ("keep everything (default)" / "N days" / "mixed per
-// squad"), the usage rows humanised, free disk, the FOC-780 note, and the
+// retentionView(payload) -> the retention panel's view model: the policy in
+// force ("keep everything (default)" / "N days" / "mixed per squad"), the
+// usage rows humanised, free disk, the resolved policy (FOC-780: keep-all
+// boolean + keepDays + minFreeGiB — absent on an older server -> keep-all),
+// the dry-run prune estimate (runs + humanised bytes + the server's refusal
+// note, null when the response carries none), the applied-policy line
+// (cleanupPeriodDays value + the squads it was written to) and the
 // partial-counts warning when the walk hit its entry budget.
 export function retentionView(payload) {
   const r = payload || {};
@@ -360,6 +364,50 @@ export function retentionView(payload) {
   ];
   const disk = r.disk || null;
   const partial = Array.isArray(r.partial) ? r.partial : [];
+
+  // resolved — only the FOC-780 GET carries it; without it the form opens on
+  // the default (keep everything) instead of guessing a limit.
+  const res = r.resolved && typeof r.resolved === 'object' ? r.resolved : {};
+  const keepDays =
+    typeof res.keepDays === 'number' && Number.isFinite(res.keepDays) ? res.keepDays : null;
+  const resolved = {
+    keepAll: keepDays === null,
+    keepDays,
+    minFreeGiB:
+      typeof res.minFreeGiB === 'number' && Number.isFinite(res.minFreeGiB) ? res.minFreeGiB : null,
+  };
+
+  // Applied policy — the cleanupPeriodDays value the server wrote into every
+  // squad file; the squad count comes from the GET's own per-squad map.
+  const appliedDays =
+    typeof res.cleanupPeriodDays === 'number' && Number.isFinite(res.cleanupPeriodDays)
+      ? res.cleanupPeriodDays
+      : null;
+  const squads =
+    r.cleanupPeriodDays && typeof r.cleanupPeriodDays === 'object'
+      ? Object.keys(r.cleanupPeriodDays).length
+      : 0;
+  const appliedText =
+    appliedDays !== null
+      ? 'Claude Code cleanupPeriodDays: ' +
+        appliedDays +
+        (squads > 0 ? ', applied to ' + squads + (squads === 1 ? ' squad' : ' squads') : '')
+      : null;
+
+  // prunable — the dry-run prune totals behind the CLI hint; refused is the
+  // server's reason (keepDays null → nothing to prune).
+  let prunable = null;
+  const p = r.prunable;
+  if (p && typeof p === 'object') {
+    const bytes = typeof p.bytes === 'number' && Number.isFinite(p.bytes) ? p.bytes : -1;
+    prunable = {
+      runs: typeof p.runs === 'number' && Number.isFinite(p.runs) ? p.runs : 0,
+      bytes: bytes >= 0 ? bytes : 0,
+      bytesText: humanBytes(bytes),
+      refused: typeof p.refused === 'string' ? p.refused : null,
+    };
+  }
+
   return {
     policyText,
     usageRows,
@@ -367,7 +415,10 @@ export function retentionView(payload) {
       disk && typeof disk.freeBytes === 'number'
         ? 'free disk: ' + humanBytes(disk.freeBytes)
         : 'free disk: unknown',
-    note: 'read-only here — retention is managed by FOC-780',
+    resolved,
+    prunable,
+    appliedText,
+    note: 'a saved limit applies to the squads at once; nothing is deleted until the CLI prune runs',
     partialText: partial.length ? 'counts are partial: ' + partial.join(', ') : null,
     computedAt: r.computedAt || null,
   };
@@ -434,4 +485,51 @@ export function artifactsView(payload) {
     note:
       'regenerated on `fenix up` / dashboard start; watched entries refresh within 60 s of a source change; external entries are reported only.',
   };
+}
+// retentionFormState(view) -> the retention form's initial values: number
+// inputs read as strings so a missing value stays visibly empty instead of
+// the browser coercing null into 0.
+export function retentionFormState(view) {
+  const res = view && view.resolved ? view.resolved : {};
+  return {
+    keepAll: res.keepAll !== false,
+    keepDays:
+      typeof res.keepDays === 'number' && Number.isFinite(res.keepDays) ? String(res.keepDays) : '',
+    minFreeGiB:
+      typeof res.minFreeGiB === 'number' && Number.isFinite(res.minFreeGiB)
+        ? String(res.minFreeGiB)
+        : '',
+  };
+}
+
+// validateRetentionForm({ keepAll, keepDays, minFreeGiB }) -> the server's
+// rules mirrored: keepDays null (keepAll) or an integer 1..36500, minFreeGiB
+// a number >= 0.5. keepAll true ignores a stale keepDays — the payload always
+// sends null then. Errors are user-ready lines; payload is PUT-ready or null
+// fields when invalid.
+export function validateRetentionForm({ keepAll, keepDays, minFreeGiB }) {
+  const errors = [];
+  let payloadKeepDays = null;
+  if (!keepAll) {
+    const raw = typeof keepDays === 'string' ? keepDays.trim() : keepDays;
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    if (raw === '' || raw === null || raw === undefined || Number.isNaN(n)) {
+      errors.push('keep days: enter a whole number between 1 and 36500');
+    } else if (!Number.isInteger(n) || n < 1 || n > 36500) {
+      errors.push('keep days: a whole number between 1 and 36500');
+    } else {
+      payloadKeepDays = n;
+    }
+  }
+  const rawGiB = typeof minFreeGiB === 'string' ? minFreeGiB.trim() : minFreeGiB;
+  const g = typeof rawGiB === 'number' ? rawGiB : Number(rawGiB);
+  let payloadGiB = null;
+  if (rawGiB === '' || rawGiB === null || rawGiB === undefined || Number.isNaN(g)) {
+    errors.push('warn below: enter the GiB threshold (0.5 or more)');
+  } else if (g < 0.5) {
+    errors.push('warn below: at least 0.5 GiB');
+  } else {
+    payloadGiB = g;
+  }
+  return { ok: errors.length === 0, errors, payload: { keepDays: payloadKeepDays, minFreeGiB: payloadGiB } };
 }

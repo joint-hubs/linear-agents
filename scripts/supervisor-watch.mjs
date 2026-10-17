@@ -146,6 +146,11 @@ const { command, args: spawnArgs } = claudeCommand(claudeArgs);
 
 const turnIndex = Number(args.turn ?? 0);
 
+// FOC-607: what this turn was PINNED to, as opposed to what the child reports
+// serving with (initModel, read from system/init below). Both land on the turn
+// record so a divergence between the two stays visible in the registry.
+const requestedModel = typeof args.model === "string" ? args.model : null;
+
 // FOC-760: the session id the registry carried BEFORE this turn. A resumed turn
 // can fork a NEW session id (init's session_id ≠ the registered one) — the init
 // handler below overwrites the registry field, so the old id is captured here,
@@ -347,6 +352,10 @@ child.stdout.on("data", (chunk) => {
       // This write is what unblocks supervisor-spawn.mjs, which is polling the
       // registry for exactly this field.
       updateChild(runId, childId, { sessionId, status: "running", pid: child.pid });
+      // FOC-607: persist the served model as soon as it is known, so a turn that
+      // crashes after init still shows what it started on. The local stays the
+      // pricing source; this is the durable copy.
+      patchTurn({ initModel });
     }
     if (event.type === "result") {
       // Priced from token counts, NOT from the stream's total_cost_usd — that
@@ -407,7 +416,15 @@ child.on("exit", (code, signal) => {
   if (status === "exited" && hasPendingGate(runId, childId)) status = "waiting_gate";
 
   const turns = entry.turns || [];
-  turns[turnIndex] = { ...(turns[turnIndex] || {}), endedAt, exitCode: code };
+  // FOC-607: the turn closes with what was requested vs what actually served —
+  // initModel is null when the child never emitted system/init.
+  turns[turnIndex] = {
+    ...(turns[turnIndex] || {}),
+    endedAt,
+    exitCode: code,
+    requestedModel,
+    initModel,
+  };
 
   // FOC-760: the child's cost is SET from its own transcripts — whole-session
   // truth, one row per assistant message — not added to what the entry already
