@@ -8,13 +8,19 @@
 //   validateSlug(slug, provider?) → { ok, warning }
 //   validateTools(tools, cat) → { ok, unknown, warnings }
 //   validateProvidersPatch(patch, current) → { ok, errors, warnings }
-//   writeSquadConfig(patch, root?, {dryRun}) → { changed, warnings }
+//   writeSquadConfig(patch, root?, {dryRun}) → { changed, warnings, refused }
 //
-// Provider representation in squad .bat files (PRD docs/ui/provider-config.md):
-// the `set "LA_PROVIDER=<name>"` line sits immediately BEFORE the
-// `call "%~dp0_lib.bat"` line. `openrouter` is the default provider and is
-// represented by the ABSENCE of the line (line removed), so squads that never
-// opted into a custom provider stay byte-identical to their original files.
+// FOC-771: the .bat launchers are two-line wrappers around
+// scripts/squad-start.mjs and carry no ANTHROPIC_MODEL lines, so the lead is
+// read and written through the SAME sources the launcher resolves at start
+// (scripts/child-model.mjs childModelFor): the settings overlay's
+// routing.<squad>.lead first, then config/models.json routing.<squad>
+// (lead ?? default ?? worker, through the `ids` aliases), then the active
+// provider's defaultModel. The provider is the ONE active provider
+// (resolveProvider) — a per-squad LA_PROVIDER line no longer exists. A lead
+// write goes through fenix-settings.writeSettings (validated, atomic) and is
+// REFUSED for an id without a pricing row (supervisor-lib hasPriceRow, FOC-165:
+// the cost must be a priced number, code "model-unpriced").
 
 import {
   readFileSync,
@@ -24,10 +30,14 @@ import {
   renameSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { join, dirname } from "node:path";
+import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { atomicWriteJSON } from "./utils.mjs";
-import { squadConfigRoot } from "./fenix-paths.mjs";
+import { squadConfigRoot, settingsPath } from "./fenix-paths.mjs";
+import { readSettings, writeSettings } from "./fenix-settings.mjs";
+import { childModelFor } from "./child-model.mjs";
+import { resolveProvider } from "./provider-resolve.mjs";
+import { hasPriceRow } from "./supervisor-lib.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -64,100 +74,141 @@ function atomicWriteText(filePath, content, eol) {
 }
 
 // ---------------------------------------------------------------------------
-// Read: lead model from .bat file
+// Read: the lead model from the routing sources, the provider from resolveProvider
 // ---------------------------------------------------------------------------
 
-const LEAD_LINE_RE = /^\s*set\s+"ANTHROPIC_MODEL=(.+)"\s*$/i;
-// A squad launcher that routes its model through its own variable, e.g.
-// bin/supervisor.bat's
-//     if not defined SUPERVISOR_MODEL set "SUPERVISOR_MODEL=z-ai/glm-5.2"
-//
-// The `if not defined <VAR> ` prefix is why the first version of this matched
-// nothing: `^\s*set` does not survive it, and the Supervisor's lead kept
-// reading null. Optional, because a launcher may also set it unconditionally.
-//
-// Deliberately NOT matching ANTHROPIC_DEFAULT_* / SMALL_FAST — those are the
-// per-tier fallbacks, not the lead.
-const INDIRECT_LEAD_RE =
-  /^\s*(?:if\s+not\s+defined\s+[A-Z][A-Z0-9_]*\s+)?set\s+"(?!ANTHROPIC_DEFAULT_|ANTHROPIC_SMALL_FAST)([A-Z][A-Z0-9_]*_MODEL)=([^"%]*)"\s*$/i;
+// The Supervisor's model when nothing else decides it — the same built-in
+// fallback the Node entry point uses (SUPERVISOR_MODEL env > the settings
+// overlay's routing.supervisor.lead > this).
+const SUPERVISOR_FALLBACK_MODEL = "xiaomi/mimo-v2.6-pro";
 
-/**
- * Extract the lead model from a .bat file.
- * For plan.bat (which has a NATIVE branch), returns the OpenRouter model
- * (the one in the `else` branch, containing a "/").
- */
-function readLeadFromBat(filePath) {
-  if (!existsSync(filePath)) return null;
-  const content = readFileSync(filePath, "utf8");
-  const lines = content.split(/\r?\n/);
+// fenix-settings' routing-key rule (provider side). A squad name that cannot
+// live in settings.json cannot have its lead written there — refuse up front
+// instead of letting writeSettings throw mid-write.
+const OVERLAY_SQUAD_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
 
-  // Check if this file has a NATIVE/else split
-  const hasNativeBranch =
-    lines.some((l) => /^\s*if\s+defined\s+NATIVE\s/i.test(l)) &&
-    lines.some((l) => /^\s*\)\s*else\s*\(\s*$/i.test(l));
-
-  if (hasNativeBranch) {
-    // Find the ANTHROPIC_MODEL line in the else branch (contains "/")
-    let inElse = false;
-    for (const line of lines) {
-      if (/^\s*\)\s*else\s*\(\s*$/i.test(line)) {
-        inElse = true;
-        continue;
-      }
-      if (inElse && /^\s*\)\s*$/i.test(line.trim())) {
-        inElse = false;
-        continue;
-      }
-      if (inElse) {
-        const m = line.match(LEAD_LINE_RE);
-        if (m) return m[1].trim();
-        // FALLBACK, tried only when the else branch names no ANTHROPIC_MODEL.
-        //
-        // bin/supervisor.bat sets `SUPERVISOR_MODEL` in the branch and assigns
-        // `ANTHROPIC_MODEL=%SUPERVISOR_MODEL%` OUTSIDE it — deliberately, per the
-        // comment there: inside a parenthesised block cmd expands the variable
-        // when it parses the whole block, before the `set` on the previous line
-        // has run, so the assignment read empty. Reading only ANTHROPIC_MODEL
-        // therefore reported the Supervisor's lead as null (FOC-170), and the
-        // Konfiguracja screen would have shown it blank and unsettable.
-        //
-        // Ordered after the direct match so no existing .bat changes meaning.
-        // The `/` requirement is what keeps `%SUPERVISOR_MODEL%` out.
-        const indirect = line.match(INDIRECT_LEAD_RE);
-        if (indirect && indirect[2].includes("/")) return indirect[2].trim();
-      }
-    }
-    return null;
+/** Parse config/models.json once for routing + ids + providers + pricing. */
+function readModelsConfig(root) {
+  try {
+    return JSON.parse(readFileSync(join(root, "config", "models.json"), "utf8"));
+  } catch {
+    return {};
   }
-
-  // Simple .bat: first ANTHROPIC_MODEL line
-  for (const line of lines) {
-    const m = line.match(LEAD_LINE_RE);
-    if (m) return m[1].trim();
-  }
-  return null;
 }
 
-// ---------------------------------------------------------------------------
-// Read: provider from .bat file
-// ---------------------------------------------------------------------------
+// The settings overlay for a root: LA_SETTINGS_FILE is the documented seam and
+// wins for any root (tests and the container pin their file through it); the
+// default repo root keeps fenix-paths.settingsPath()'s full precedence
+// (LA_PROJECTS_FILE, repo .fenix/config); a custom library root gets its own
+// .fenix/config next to the fixture, never the real install's overlay.
+function settingsPathFor(root, env = process.env) {
+  if (env.LA_SETTINGS_FILE) return env.LA_SETTINGS_FILE;
+  if (root === repoRoot()) return settingsPath(env);
+  return join(root, ".fenix", "config", "settings.json");
+}
 
-const PROVIDER_LINE_RE = /^\s*set\s+"LA_PROVIDER=([^"]*)"\s*$/i;
-const LIB_CALL_RE = /^\s*call\s+"%~dp0_lib\.bat"/i;
+/** Read the overlay. A broken file degrades to empty instead of killing the
+ *  whole dashboard read — but loudly, on stderr, the readToolCatalog way. */
+function readOverlay(path) {
+  try {
+    return readSettings({ path });
+  } catch (err) {
+    console.error(`readSquadConfig: ${err.message} — ignoring the overlay for this read`);
+    return {};
+  }
+}
 
 /**
- * Extract the provider name from a .bat file's `set "LA_PROVIDER=..."` line.
- * Absence of the line (or an empty value) = the default 'openrouter'.
+ * Everything the lead/provider resolution needs for one root, computed once.
+ * The provider comes through resolveProvider — the same resolution the entry
+ * point performs at start — but as a READ it degrades to the openrouter
+ * default when the active provider is unknown or the overlay is broken: the
+ * launcher side stays fail-closed (resolveProvider throws there); a dashboard
+ * read becoming unreadable over a misconfigured provider would hide every
+ * other field on the screen.
  */
-function readProviderFromBat(filePath) {
-  if (!existsSync(filePath)) return 'openrouter';
-  const content = readFileSync(filePath, "utf8");
-  const lines = content.split(/\r?\n/);
-  for (const line of lines) {
-    const m = line.match(PROVIDER_LINE_RE);
-    if (m) return m[1].trim() || 'openrouter';
+function resolutionContext(root) {
+  const modelsConfig = readModelsConfig(root);
+  const settingsFile = settingsPathFor(root);
+  const overlay = readOverlay(settingsFile);
+  let provider = "openrouter";
+  let defaultModel = null;
+  try {
+    const resolved = resolveProvider(undefined, {
+      configPath: join(root, "config", "models.json"),
+      envPath: join(root, ".env"),
+      settingsPath: settingsFile,
+    });
+    provider = resolved.provider;
+    defaultModel = resolved.defaultModel;
+  } catch (err) {
+    console.error(
+      `readSquadConfig: provider resolution failed (${String(err?.message ?? err).split("\n")[0]}) — reading leads against the openrouter default`,
+    );
   }
-  return 'openrouter';
+  // childModelFor only reads providerEntry.defaultModel; resolveProvider
+  // already resolved it (including the settings-only "custom" provider, which
+  // has no models.json entry at all).
+  const providerEntry = defaultModel ? { defaultModel } : null;
+  return { modelsConfig, overlay, settingsFile, provider, providerEntry };
+}
+
+function relativeLabel(root, filePath) {
+  const rel = relative(root, filePath);
+  return rel.startsWith("..") ? filePath : rel;
+}
+
+function leadSourceOf(source) {
+  // childModelFor calls the provider's fallback "provider-default"; the
+  // dashboard vocabulary here is "default" (settings / routing names match
+  // its sources verbatim).
+  return source === "provider-default" ? "default" : source;
+}
+
+/**
+ * The lead one squad runs on — the same resolution scripts/squad-start.mjs
+ * and supervisor-spawn's childModelFor perform at start, so the dashboard
+ * can no longer name a model the launcher would not pick. First hit wins:
+ *   supervisor: SUPERVISOR_MODEL env → the settings overlay's
+ *               routing.supervisor.lead → the built-in fallback
+ *               (xiaomi/mimo-v2.6-pro). The routing table's
+ *               routing.supervisor.default is the CHILDREN's alias
+ *               (supervisor-spawn resolves through it) and was never the
+ *               frontman's model — it is deliberately not consulted here.
+ *   others:     overlay routing.<squad>.lead → routing.<squad>
+ *               (lead ?? default ?? worker) → the provider's defaultModel
+ *
+ * The NATIVE branch of the old launchers had no dashboard representation and
+ * needs none here: NATIVE mode is a launcher flag, its opus ids live in
+ * config/native-models.json (data), not in a squad's lead field.
+ */
+function resolveSquadLead(squad, { overlay, modelsConfig, provider, providerEntry }) {
+  if (squad === "supervisor") {
+    const envModel =
+      typeof process.env.SUPERVISOR_MODEL === "string" ? process.env.SUPERVISOR_MODEL.trim() : "";
+    if (envModel) return { lead: envModel, source: "env:SUPERVISOR_MODEL" };
+    const overlayLead = overlay?.routing?.supervisor?.lead;
+    if (typeof overlayLead === "string" && overlayLead.trim()) {
+      return { lead: overlayLead.trim(), source: "settings:routing.supervisor" };
+    }
+    // No env, no overlay lead — the built-in fallback is the answer.
+    return { lead: SUPERVISOR_FALLBACK_MODEL, source: "fallback" };
+  }
+  const resolved = childModelFor({ squad, settings: overlay, modelsConfig, provider, providerEntry });
+  if (!resolved.model) return { lead: null, source: null };
+  return { lead: resolved.model, source: leadSourceOf(resolved.source) };
+}
+
+/** Files a lead edit is allowed to land in, labelled the way the resolver
+ *  reads them. Empty when nothing on disk decides the lead (env / fallback). */
+function leadFilesFor(squad, source, settingsFile, root) {
+  if (typeof source === "string" && source.startsWith("settings:")) {
+    return [relativeLabel(root, settingsFile)];
+  }
+  if (source === "default" || (typeof source === "string" && source.startsWith("routing:"))) {
+    return ["config/models.json"];
+  }
+  return [];
 }
 
 // ---------------------------------------------------------------------------
@@ -329,22 +380,20 @@ function squadNames(root) {
 export function readSquadConfig(root) {
   const r = root ? root : repoRoot();
   const squads = {};
+  const ctx = resolutionContext(r);
 
   for (const squad of squadNames(r)) {
-    const leadFiles = [];
-    const mainBat = join(r, "bin", `${squad}.bat`);
-    const dryBat = join(r, "bin", `${squad}-dry.bat`);
-
-    if (existsSync(mainBat)) leadFiles.push(`bin/${squad}.bat`);
-    if (existsSync(dryBat)) leadFiles.push(`bin/${squad}-dry.bat`);
-
-    const lead = readLeadFromBat(mainBat);
-    const provider = readProviderFromBat(mainBat);
-
+    const lead = resolveSquadLead(squad, ctx);
     const squadDir = join(agentsRootFor(r), squad);
     const agents = readAgentConfigs(squadDir);
 
-    squads[squad] = { lead, provider, leadFiles, agents };
+    squads[squad] = {
+      lead: lead.lead,
+      leadSource: lead.source,
+      leadFiles: leadFilesFor(squad, lead.source, ctx.settingsFile, r),
+      provider: ctx.provider,
+      agents,
+    };
   }
 
   const pricing = readPricing(r);
@@ -445,155 +494,6 @@ export function validateSlug(slug, provider = DEFAULT_PROVIDER) {
     };
   }
   return { ok: true, warning: null };
-}
-
-// ---------------------------------------------------------------------------
-// Write: lead model to .bat file
-// ---------------------------------------------------------------------------
-
-function writeLeadToBat(filePath, newModel) {
-  const content = readFileSync(filePath, "utf8");
-  const eol = detectEOL(content);
-  const lines = content.split(/\r?\n/);
-
-  // Check if this file has a NATIVE/else split
-  const hasNativeBranch =
-    lines.some((l) => /^\s*if\s+defined\s+NATIVE\s/i.test(l)) &&
-    lines.some((l) => /^\s*\)\s*else\s*\(\s*$/i.test(l));
-
-  let changed = false;
-  let before = null;
-
-  if (hasNativeBranch) {
-    // Only modify the else branch (the one with "/")
-    let inElse = false;
-    for (let i = 0; i < lines.length; i++) {
-      if (/^\s*\)\s*else\s*\(\s*$/i.test(lines[i])) {
-        inElse = true;
-        continue;
-      }
-      if (inElse && /^\s*\)\s*$/i.test(lines[i].trim())) {
-        inElse = false;
-        continue;
-      }
-      if (inElse) {
-        const m = lines[i].match(LEAD_LINE_RE);
-        if (m) {
-          before = m[1].trim();
-          if (before !== newModel) {
-            lines[i] = lines[i].replace(
-              /(set\s+"ANTHROPIC_MODEL=).+(")/i,
-              `$1${newModel}$2`
-            );
-            changed = true;
-          }
-          break;
-        }
-        // The indirect form the reader also handles (bin/supervisor.bat sets
-        // SUPERVISOR_MODEL here and assigns ANTHROPIC_MODEL outside the block).
-        //
-        // Without this the write found no ANTHROPIC_MODEL line, changed nothing,
-        // and STILL reported `changed` with a before/after pair — the dashboard
-        // said saved and the launcher kept its old model. A silent no-op that
-        // reports success is worse than a refusal (FOC-170).
-        const ind = lines[i].match(INDIRECT_LEAD_RE);
-        if (ind && ind[2].includes("/")) {
-          before = ind[2].trim();
-          if (before !== newModel) {
-            lines[i] = lines[i].replace(
-              new RegExp(`(set\\s+"${ind[1]}=)[^"]+(")`, "i"),
-              `$1${newModel}$2`
-            );
-            changed = true;
-          }
-          break;
-        }
-      }
-    }
-  } else {
-    // Simple .bat: first ANTHROPIC_MODEL line
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(LEAD_LINE_RE);
-      if (m) {
-        before = m[1].trim();
-        if (before !== newModel) {
-          lines[i] = lines[i].replace(
-            /(set\s+"ANTHROPIC_MODEL=).+(")/i,
-            `$1${newModel}$2`
-          );
-          changed = true;
-        }
-        break;
-      }
-    }
-  }
-
-  if (changed) {
-    const newContent = lines.join(eol);
-    atomicWriteText(filePath, newContent, eol);
-  }
-
-  return { changed, before, after: changed ? newModel : before };
-}
-
-// ---------------------------------------------------------------------------
-// Write: provider to .bat file
-// ---------------------------------------------------------------------------
-
-/**
- * Insert/update/remove the `set "LA_PROVIDER=..."` line in a squad .bat file.
- *
- * Representation (see module docstring): 'openrouter' = line removed (absence
- * of the line); any other provider = the line sits immediately before the
- * `call "%~dp0_lib.bat"` line.
- */
-function writeProviderToBat(filePath, provider) {
-  const content = readFileSync(filePath, "utf8");
-  const eol = detectEOL(content);
-  const lines = content.split(/\r?\n/);
-
-  let providerLineIdx = -1;
-  let libCallIdx = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (PROVIDER_LINE_RE.test(lines[i])) providerLineIdx = i;
-    if (LIB_CALL_RE.test(lines[i]) && libCallIdx < 0) libCallIdx = i;
-  }
-
-  const before = readProviderFromBat(filePath);
-
-  if (provider === DEFAULT_PROVIDER) {
-    // Default = no line. Remove an existing one so untouched squads stay
-    // byte-identical to their original files.
-    if (providerLineIdx >= 0) {
-      lines.splice(providerLineIdx, 1);
-      const newContent = lines.join(eol);
-      atomicWriteText(filePath, newContent, eol);
-      return { changed: true, before, after: DEFAULT_PROVIDER };
-    }
-    return { changed: false, before: DEFAULT_PROVIDER, after: DEFAULT_PROVIDER };
-  }
-
-  const providerLine = `set "LA_PROVIDER=${provider}"`;
-
-  if (providerLineIdx >= 0) {
-    const existing = lines[providerLineIdx].match(PROVIDER_LINE_RE);
-    if (existing && existing[1].trim() === provider) {
-      return { changed: false, before, after: provider };
-    }
-    lines[providerLineIdx] = providerLine;
-    const newContent = lines.join(eol);
-    atomicWriteText(filePath, newContent, eol);
-    return { changed: true, before, after: provider };
-  }
-
-  // No existing line — insert immediately before the _lib.bat call.
-  if (libCallIdx < 0) {
-    return { changed: false, before: null, after: null, skipped: true };
-  }
-  lines.splice(libCallIdx, 0, providerLine);
-  const newContent = lines.join(eol);
-  atomicWriteText(filePath, newContent, eol);
-  return { changed: true, before, after: provider };
 }
 
 // ---------------------------------------------------------------------------
@@ -925,82 +825,61 @@ export function writeSquadConfig(patch, root, { dryRun = false } = {}) {
   const r = root ? root : repoRoot();
   const changed = [];
   const warnings = [];
+  const refused = [];
+  const ctx = resolutionContext(r);
+  const settingsLabel = relativeLabel(r, ctx.settingsFile);
 
-  // 1. Lead models
+  // 1. Lead models — through the settings overlay (routing.<squad>.lead),
+  //    the key the dashboard's Provider & routing screen edits too, so both
+  //    surfaces own one writer: fenix-settings.writeSettings.
   if (patch.squads) {
+    const routingPatch = {}; // squad -> lead value that actually changes something
+    const leadChanges = []; // { squad, before, after } in patch order
+    const providerAssignments = {}; // squad -> provider value from this patch
+
     for (const [squad, squadPatch] of Object.entries(patch.squads)) {
       if (squadPatch.lead !== undefined) {
-        const mainBat = join(r, "bin", `${squad}.bat`);
-        const dryBat = join(r, "bin", `${squad}-dry.bat`);
-
-        for (const batPath of [mainBat, dryBat]) {
-          if (!existsSync(batPath)) {
+        if (!OVERLAY_SQUAD_NAME_RE.test(squad)) {
+          warnings.push(
+            `squads.${squad}.lead: "${squad}" nie jest poprawną nazwą składu dla settings.json — odmówiono zapisu.`,
+          );
+          refused.push({ squad, field: "lead", value: squadPatch.lead, code: "invalid-squad-name" });
+        } else {
+          // The launcher side refuses an unpriced model (supervisor-gate's
+          // hold options, FOC-165) — the dashboard must not write one either,
+          // or the next run bills at zero. Refusal, not warning-only: the
+          // lead stays untouched and `refused` names the code.
+          const priced = hasPriceRow(squadPatch.lead, r);
+          if (priced.error || !priced.priced) {
+            const detail =
+              priced.error ||
+              `config/models.json nie ma wiersza cenowego dla "${squadPatch.lead}"`;
             warnings.push(
-              `Plik ${batPath} nie istnieje — pominięto aktualizację leada.`
+              `squads.${squad}.lead: odmówiono zapisu — ${detail}. Dodaj cenę w Cenniku (model-unpriced).`,
             );
-            continue;
-          }
-          if (dryRun) {
-            // Compute what WOULD change without writing
-            const before = readLeadFromBat(batPath);
-            if (before !== squadPatch.lead) {
-              changed.push({
-                file: batPath,
-                before,
-                after: squadPatch.lead,
-              });
-            }
+            refused.push({ squad, field: "lead", value: squadPatch.lead, code: "model-unpriced" });
           } else {
-            const result = writeLeadToBat(batPath, squadPatch.lead);
-            if (result.changed) {
-              changed.push({
-                file: batPath,
-                before: result.before,
-                after: result.after,
-              });
+            // Writing the value that already resolves is a deliberate no-op:
+            // it must not pin the table's (or the provider's) answer into the
+            // overlay, where it would silently outrank future models.json edits.
+            const current = resolveSquadLead(squad, ctx);
+            if (current.lead === squadPatch.lead) {
+              // no-op
+            } else {
+              routingPatch[squad] = { lead: squadPatch.lead };
+              leadChanges.push({ squad, before: current.lead, after: squadPatch.lead });
             }
           }
         }
       }
 
-      // 1b. Provider (per squad) — LA_PROVIDER line in both bats
+      // 1b. Provider (per squad) — there are no per-squad providers anymore:
+      //     resolveProvider resolves ONE active provider (env > overlay
+      //     provider.active > openrouter) and every launcher runs on it. A
+      //     uniform assignment across the patch writes provider.active; a
+      //     divergent one is refused rather than silently picking a winner.
       if (squadPatch.provider !== undefined) {
-        const mainBat = join(r, "bin", `${squad}.bat`);
-        const dryBat = join(r, "bin", `${squad}-dry.bat`);
-
-        for (const batPath of [mainBat, dryBat]) {
-          if (!existsSync(batPath)) {
-            warnings.push(
-              `Plik ${batPath} nie istnieje — pominięto aktualizację providera.`
-            );
-            continue;
-          }
-          if (dryRun) {
-            const before = readProviderFromBat(batPath);
-            if (before !== squadPatch.provider) {
-              changed.push({
-                file: batPath,
-                field: "provider",
-                before,
-                after: squadPatch.provider,
-              });
-            }
-          } else {
-            const result = writeProviderToBat(batPath, squadPatch.provider);
-            if (result.skipped) {
-              warnings.push(
-                `Plik ${batPath} nie ma linii 'call "%~dp0_lib.bat"' — pominięto providera.`
-              );
-            } else if (result.changed) {
-              changed.push({
-                file: batPath,
-                field: "provider",
-                before: result.before,
-                after: result.after,
-              });
-            }
-          }
-        }
+        providerAssignments[squad] = squadPatch.provider || DEFAULT_PROVIDER;
       }
 
       // 2. Agent config (model + tools)
@@ -1102,6 +981,88 @@ export function writeSquadConfig(patch, root, { dryRun = false } = {}) {
         }
       }
     }
+
+    // One atomic settings write for the whole batch of lead changes — a
+    // multi-squad save either lands whole in the overlay or not at all.
+    if (leadChanges.length > 0) {
+      let leadWriteOk = dryRun; // dry-run previews the change without writing
+      if (!dryRun) {
+        try {
+          writeSettings({ routing: routingPatch }, { path: ctx.settingsFile });
+          leadWriteOk = true;
+        } catch (err) {
+          // writeSettings validates the MERGED file before it writes anything,
+          // so a refusal here leaves the overlay untouched — name why it said no.
+          const detail = String(err?.message ?? err).split("\n")[0];
+          warnings.push(
+            `squads.*.lead: odmówiono zapisu settings.json — ${detail}`,
+          );
+          for (const c of leadChanges) {
+            refused.push({ squad: c.squad, field: "lead", value: c.after, code: "settings-invalid" });
+          }
+        }
+      }
+      if (leadWriteOk) {
+        for (const c of leadChanges) {
+          changed.push({
+            file: settingsLabel,
+            field: "lead",
+            before: c.before,
+            after: c.after,
+          });
+        }
+      }
+    }
+
+    if (Object.keys(providerAssignments).length > 0) {
+      const values = new Set(Object.values(providerAssignments));
+      if (values.size > 1) {
+        warnings.push(
+          `squads.*.provider: wszystkie składy uruchamiają się teraz na jednym providerze (provider.active w Settings) — zapis różnych wartości (${[...values].join(", ")}) odmówiono.`,
+        );
+        for (const [squad, value] of Object.entries(providerAssignments)) {
+          refused.push({ squad, field: "provider", value, code: "divergent-provider" });
+        }
+      } else {
+        const target = [...values][0];
+        const known = ctx.modelsConfig?.providers || {};
+        if (!known[target] && target !== DEFAULT_PROVIDER) {
+          warnings.push(
+            `squads.*.provider: provider "${target}" nie istnieje w config/models.json — odmówiono zapisu.`,
+          );
+          for (const [squad, value] of Object.entries(providerAssignments)) {
+            refused.push({ squad, field: "provider", value, code: "unknown-provider" });
+          }
+        } else if (ctx.provider !== target) {
+          // "openrouter" means provider.active = null (the built-in default) —
+          // an explicit "openrouter" entry is not created.
+          const activePatch = target === DEFAULT_PROVIDER ? { active: null } : { active: target };
+          let wrote = dryRun; // dry-run previews the change without writing
+          if (!dryRun) {
+            try {
+              writeSettings({ provider: activePatch }, { path: ctx.settingsFile });
+              wrote = true;
+            } catch (err) {
+              const detail = String(err?.message ?? err).split("\n")[0];
+              warnings.push(
+                `squads.*.provider: odmówiono zapisu settings.json — ${detail}`,
+              );
+              for (const [squad, value] of Object.entries(providerAssignments)) {
+                refused.push({ squad, field: "provider", value, code: "settings-invalid" });
+              }
+            }
+          }
+          if (wrote) {
+            changed.push({
+              file: settingsLabel,
+              field: "provider",
+              before: ctx.provider,
+              after: target,
+            });
+          }
+        }
+      }
+    }
   }
 
   // 3. Pricing
@@ -1172,5 +1133,5 @@ export function writeSquadConfig(patch, root, { dryRun = false } = {}) {
     }
   }
 
-  return { changed, warnings };
+  return { changed, warnings, refused };
 }

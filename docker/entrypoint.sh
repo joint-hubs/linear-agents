@@ -131,6 +131,11 @@ case "${1:-api}" in
         fix_permissions
         seed_agents
         init_claude_configs
+        # FOC-779: regenerate the registered start/watch artifacts before the
+        # API takes over (ui/dist is skipped here — the image ships it). A
+        # failing generator never blocks the start; the 60 s server tick and
+        # Settings > Artifacts report what stayed stale.
+        node "$LA_ROOT/scripts/artifact-registry.mjs" refresh --in-container || echo "artifacts: refresh reported failures (see above)"
         cd "$LA_ROOT"
         exec node scripts/telemetry-server.mjs
         ;;
