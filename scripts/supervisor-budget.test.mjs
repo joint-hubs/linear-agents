@@ -12,7 +12,7 @@
 // Run: node scripts/supervisor-budget.test.mjs
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -279,11 +279,23 @@ test("re-allocating mid-run takes --force", () => {
   assert.equal(forced.total, 20);
 });
 
+test("budget.json is created 0644 (run-root: children may read, never write)", () => {
+  if (process.platform === "win32") return; // POSIX mode bits only; the Windows runs assert the writes succeed above
+  const { runId } = scenario({ total: 10 });
+  const mode = statSync(budgetPath(runId)).mode & 0o777;
+  assert.equal(mode, 0o644, `budget.json mode ${mode.toString(8)} !== 644`);
+});
+
 test("authorisations survive a forced re-allocation", () => {
   // They record decisions Mateusz already made; a bigger budget does not un-make
   // them.
   const { runId } = scenario({ total: 10 });
   parse(budget(runId, ["authorise", "--stage", "synthesis", "--reason", "retry"]), fail);
+  if (process.platform !== "win32") {
+    // POSIX mode bits only; the Windows run asserts the write succeeded above.
+    const mode = statSync(budgetPath(runId)).mode & 0o777;
+    assert.equal(mode, 0o644, `authorise rewrite: budget.json mode ${mode.toString(8)} !== 644`);
+  }
   const forced = parse(budget(runId, ["allocate", "--total", "20", "--force"]), fail);
   assert.equal(forced.authorisations.length, 1);
   assert.equal(forced.authorisations[0].reason, "retry");

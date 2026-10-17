@@ -176,6 +176,9 @@ deny:
 | name | source |
 |---|---|
 | codegraph-expert | shared |
+| grill-me | shared |
+| grilling | shared |
+| working-state | shared |
 
 ## dev
 
@@ -359,6 +362,9 @@ deny:
 | name | source |
 |---|---|
 | codegraph-expert | shared |
+| grill-me | shared |
+| grilling | shared |
+| working-state | shared |
 
 ## orchestrator
 
@@ -403,9 +409,12 @@ deny:
 | feature-planning | own |
 | git-checkpoint | own |
 | graphify | own |
+| grill-me | shared |
+| grilling | shared |
 | memory-nav | own |
 | python-tutor | own |
 | refine | own |
+| working-state | shared |
 
 ## plan
 
@@ -563,6 +572,9 @@ deny:
 | name | source |
 |---|---|
 | codegraph-expert | shared |
+| grill-me | shared |
+| grilling | shared |
+| working-state | shared |
 
 ## review
 
@@ -739,6 +751,9 @@ deny:
 | name | source |
 |---|---|
 | codegraph-expert | shared |
+| grill-me | shared |
+| grilling | shared |
+| working-state | shared |
 
 ## supervisor
 
@@ -754,6 +769,7 @@ allow:
 | `Write` |  |
 | `Bash(node:*)` | interpreter |
 | `Bash(node *linear-ops.mjs*)` |  |
+| `Bash(node *gh-screened.mjs*)` |  |
 | `Bash(node *publish-linear-comment.mjs*)` |  |
 | `Bash(git add:*)` |  |
 | `Bash(git commit:*)` |  |
@@ -856,6 +872,7 @@ allow:
 | `Bash(*/Scripts/python.exe*)` | interpreter |
 | `Bash(C:/Python*/python.exe*)` | interpreter |
 | `PowerShell(node *)` | interpreter |
+| `PowerShell(node *gh-screened.mjs*)` |  |
 | `PowerShell(python *)` | interpreter |
 | `PowerShell(git status*)` |  |
 | `PowerShell(git log*)` |  |
@@ -873,7 +890,6 @@ ask:
 | rule | note |
 |---|---|
 | `Bash(git push:*)` |  |
-| `Bash(gh pr create:*)` |  |
 | `Bash(gh pr merge:*)` |  |
 | `Bash(git reset --hard:*)` |  |
 | `Bash(git clean:*)` |  |
@@ -893,6 +909,19 @@ deny:
 | `mcp__claude_ai_Linear__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
+| `Bash(sqlite3 *agent-state*)` |  |
+| `Bash(node -e *agent-state*)` | overlap |
+| `Bash(node --eval *agent-state*)` | overlap |
+| `Edit(//**/agent-state.sqlite)` |  |
+| `Write(//**/agent-state.sqlite)` |  |
+| `Bash(gh pr create*)` |  |
+| `Bash(gh pr edit*)` |  |
+| `Bash(gh pr comment*)` |  |
+| `Bash(gh api*)` |  |
+| `PowerShell(gh pr create*)` |  |
+| `PowerShell(gh pr edit*)` |  |
+| `PowerShell(gh pr comment*)` |  |
+| `PowerShell(gh api*)` |  |
 
 ### Other settings
 
@@ -903,7 +932,7 @@ deny:
 
 | event | command hooks |
 |---|---|
-| SessionStart | 3 |
+| SessionStart | 4 |
 | Stop | 3 |
 | UserPromptSubmit | 2 |
 | Notification | 1 |
@@ -922,7 +951,10 @@ deny:
 
 | name | source |
 |---|---|
-| codegraph-expert | shared |
+| codegraph-expert | both |
+| grill-me | both |
+| grilling | both |
+| working-state | both |
 
 ## test
 
@@ -952,7 +984,6 @@ allow:
 | `Bash(k6:*)` |  |
 | `Bash(make:*)` |  |
 | `Bash(npm run:*)` |  |
-| `mcp__linear__*` |  |
 | `mcp__codegraph__*` |  |
 | `mcp__fenix-decision-extraction__*` |  |
 | `mcp__fenix-decision-prompt-refinement__*` |  |
@@ -1073,6 +1104,7 @@ deny:
 | `ListAgents` |  |
 | `Monitor` |  |
 | `mcp__claude_ai_Linear__*` |  |
+| `mcp__linear__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
 
@@ -1100,4 +1132,7 @@ deny:
 | name | source |
 |---|---|
 | codegraph-expert | shared |
+| grill-me | shared |
+| grilling | shared |
+| working-state | shared |
 

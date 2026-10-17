@@ -1,6 +1,7 @@
 // Settings (FOC-786, dashboard-v2-spec §4.6) — /settings/:section with the
-// sections keys, provider (provider + the lead-model routing table), repos and
-// retention. Each section renders inside its own PanelBoundary — a render
+// sections keys, provider (provider + the lead-model routing table), repos,
+// retention and artifacts (FOC-779). Each section renders inside its own
+// PanelBoundary — a render
 // error costs the section, not the page. The v1 SquadConfig (/squad-config)
 // and Prompts (/prompts) screens stay as the area's "Advanced routing" and
 // "Squads & prompts" tabs; an unknown section falls back to Keys.
@@ -8,6 +9,7 @@
 import { useParams, Navigate } from 'react-router-dom';
 import './settings.css';
 import PanelBoundary from '../components/cockpit/PanelBoundary';
+import ArtifactsPanel from '../components/settings/ArtifactsPanel';
 import KeysPanel from '../components/settings/KeysPanel';
 import ProviderPanel from '../components/settings/ProviderPanel';
 import RoutingPanel from '../components/settings/RoutingPanel';
@@ -21,6 +23,7 @@ const SECTIONS = {
   repos: { label: 'Repositories', panels: [ReposPanel] },
   retention: { label: 'Retention', panels: [RetentionPanel] },
   'agent-tools': { label: 'Agent tools', panels: [AgentToolsPanel] },
+  artifacts: { label: 'Artifacts', panels: [ArtifactsPanel] },
 };
 
 export default function Settings() {

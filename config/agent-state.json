@@ -1,0 +1,150 @@
+{
+  "_doc": "Agent working state — base keys per role, with their deterministic resolver chains (FOC-728).\nOwned by Mateusz: entries here are the only source of base keys, and removing a key from this file is the only way a base key disappears.",
+  "version": 1,
+  "roles": {
+    "all": {
+      "repo": {
+        "description": "Repository name — basename of the git root",
+        "resolvers": [{ "kind": "git-basename" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "la_root": {
+        "description": "Install root of the Fenix tooling checkout",
+        "resolvers": [{ "kind": "env", "name": "LA_ROOT" }, { "kind": "git", "fact": "root" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "run_id": {
+        "description": "Supervisor run id this namespace belongs to",
+        "resolvers": [{ "kind": "env", "name": "LA_SUPERVISOR_RUN" }, { "kind": "current-run" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "role": {
+        "description": "Squad role of the consumer (supervisor | plan | dev | review | test)",
+        "resolvers": [{ "kind": "arg", "name": "role" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "linear_team": {
+        "description": "Linear team key for the resolved repo",
+        "resolvers": [{ "kind": "projects-config", "field": "teamKey" }, { "kind": "env", "name": "LINEAR_TEAM_KEY_FEN" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "linear_project": {
+        "description": "Linear project name for the resolved repo",
+        "resolvers": [{ "kind": "projects-config", "field": "linearProject" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      }
+    },
+    "supervisor": {
+      "active_issue": {
+        "description": "Issue the Supervisor is currently driving",
+        "resolvers": [{ "kind": "state-md", "label": "Active issue" }],
+        "askIfMissing": true,
+        "refresh": "once"
+      },
+      "active_milestone": {
+        "description": "Project milestone of the active issue (from Linear)",
+        "resolvers": [{ "kind": "linear", "issueKey": "active_issue", "field": "projectMilestone" }],
+        "askIfMissing": true,
+        "refresh": "once"
+      },
+      "active_epic": {
+        "description": "Parent epic of the active issue (from Linear)",
+        "resolvers": [{ "kind": "linear", "issueKey": "active_issue", "field": "parent" }],
+        "askIfMissing": true,
+        "refresh": "once"
+      },
+      "queue_head": {
+        "description": "Head of the work queue",
+        "resolvers": [{ "kind": "state-md", "label": "Queue head" }],
+        "askIfMissing": true,
+        "refresh": "once"
+      },
+      "landing_flow": {
+        "description": "How candidate code lands",
+        "resolvers": [{ "kind": "const", "value": "branch → PR → Mateusz merges on GitHub" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "push_policy": {
+        "description": "Rules for pushing",
+        "resolvers": [{ "kind": "const", "value": "feature branches only; never main; no force" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "cost_basis": {
+        "description": "Cost accounting basis",
+        "resolvers": [{ "kind": "const", "value": "priced" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "known_reds": {
+        "description": "Known failing checks / reds",
+        "resolvers": [{ "kind": "state-md", "label": "Known reds" }],
+        "askIfMissing": true,
+        "refresh": "once"
+      }
+    },
+    "child": {
+      "issue": {
+        "description": "Linear issue identifier the child works on",
+        "resolvers": [{ "kind": "env", "name": "LA_TASK_ID" }, { "kind": "registry", "field": "taskId" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "issue_title": {
+        "description": "Title of the child's issue (from Linear)",
+        "resolvers": [{ "kind": "linear", "issueKey": "issue", "field": "title" }],
+        "askIfMissing": true,
+        "refresh": "once"
+      },
+      "milestone": {
+        "description": "Project milestone of the child's issue (from Linear)",
+        "resolvers": [{ "kind": "linear", "issueKey": "issue", "field": "projectMilestone" }],
+        "askIfMissing": true,
+        "refresh": "once"
+      },
+      "epic": {
+        "description": "Parent epic of the child's issue (from Linear)",
+        "resolvers": [{ "kind": "linear", "issueKey": "issue", "field": "parent" }],
+        "askIfMissing": true,
+        "refresh": "once"
+      },
+      "worktree": {
+        "description": "Absolute path of the child's worktree",
+        "resolvers": [{ "kind": "registry", "field": "worktree" }, { "kind": "git", "fact": "root" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "branch": {
+        "description": "Git branch the child works on",
+        "resolvers": [{ "kind": "git", "fact": "branch" }, { "kind": "registry", "field": "branch" }],
+        "askIfMissing": false,
+        "refresh": "always"
+      },
+      "base_revision": {
+        "description": "Revision the child started from",
+        "resolvers": [{ "kind": "registry", "field": "baseRevision" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "candidate": {
+        "description": "Candidate marker written at spawn (not produced by spawn yet)",
+        "resolvers": [{ "kind": "registry", "field": "candidate" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      },
+      "acceptance_criteria_ref": {
+        "description": "Where the issue's acceptance criteria live",
+        "resolvers": [{ "kind": "template", "value": "linear issue {issue} § Acceptance criteria" }],
+        "askIfMissing": false,
+        "refresh": "once"
+      }
+    }
+  }
+}

@@ -26,6 +26,9 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { readSettings } from "./fenix-settings.mjs";
+import { childModelFor } from "./child-model.mjs";
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // `supervisor` joined on 2026-08-25 (FOC-124). It has no agents/supervisor/agents/
 // roles — children are OS processes, not Task-tool subagents — so the model/price
@@ -297,7 +300,6 @@ test("supervisor ask/deny match the pinned child baseline (FOC-900)", () => {
   const perms = readJson("agents/supervisor/settings.json").permissions || {};
   const expectedAsk = [
     "Bash(git push:*)",
-    "Bash(gh pr create:*)",
     "Bash(gh pr merge:*)",
     "Bash(git reset --hard:*)",
     "Bash(git clean:*)",
@@ -346,22 +348,60 @@ test("każdy model użyty przez rolę ma cenę w models.json", () => {
   if (unpriced.length) fail(`rola z modelem bez ceny:\n       ${unpriced.join("\n       ")}`);
 });
 
-test("model leada z bin/<squad>.bat ma cenę", () => {
-  // Leads invoke OpenRouter, so the row must live under pricing.openrouter.
-  const openrouter = readJson("config/models.json").pricing?.openrouter || {};
+test("lead model każdego składu z routingu ma cenę", () => {
+  // FOC-771: the .bat launchers carry no ANTHROPIC_MODEL lines anymore, so the
+  // lead a squad will actually run comes from the routing chain — the settings
+  // overlay, then config/models.json routing.<squad> (roles through ids), then
+  // the provider's defaultModel — the same childModelFor the Node entry point
+  // and the Supervisor resolve at start. Every lead those sources can hand a
+  // launcher must have a price row, or the cost check bills it as zero.
+  const models = readJson("config/models.json");
+  let settings = {};
+  try {
+    settings = readSettings();
+  } catch {
+    // A broken overlay cannot forbid the check: the table still must price its
+    // leads, and dashboard writes are what put leads in the overlay anyway.
+  }
+  const providerEntry = models.providers?.openrouter?.defaultModel
+    ? { defaultModel: models.providers.openrouter.defaultModel }
+    : null;
+  // Every squad the sources can name: the fixed floor, the routing table's
+  // keys, and whatever the dashboard has pinned in the overlay.
+  const squads = new Set(SQUADS);
+  for (const k of Object.keys(models.routing ?? {})) if (!k.startsWith("_")) squads.add(k);
+  for (const k of Object.keys(settings.routing ?? {})) if (!k.startsWith("_")) squads.add(k);
+  const openrouter = models.pricing?.openrouter || {};
   const keys = Object.keys(openrouter);
   const shortOf = (s) => s.split("/").pop().replace(/\./g, "-");
+  const resolves = (model) =>
+    openrouter[model] != null || keys.some((k) => shortOf(k) === shortOf(model));
   const bad = [];
-  for (const squad of SQUADS) {
-    const bat = `bin/${squad}.bat`;
-    if (!existsSync(join(ROOT, bat))) continue;
-    for (const m of read(bat).matchAll(/set "ANTHROPIC_MODEL=([^"]+)"/g)) {
-      const model = m[1].trim();
-      if (!model || model.includes("%")) continue; // env indirection, not a literal
-      if (openrouter[model] == null && !keys.some((k) => shortOf(k) === shortOf(model))) {
-        bad.push(`${bat} → ${model}`);
-      }
-    }
+  // The Supervisor's hard floor when the sources resolve nothing for it —
+  // duplicated in scripts/squad-start.mjs and scripts/squad-config.mjs; if the
+  // id changes there, change it here too.
+  const SUPERVISOR_FALLBACK_MODEL = "xiaomi/mimo-v2.6-pro";
+  for (const squad of squads) {
+    // routing.supervisor.default is the CHILDREN's alias, not the frontman's
+    // model (FOC-771): the supervisor runs on the overlay's
+    // routing.supervisor.lead or the built-in fallback — never the table's
+    // default. Every other squad resolves through the routing chain.
+    const model =
+      squad === "supervisor"
+        ? typeof settings.routing?.supervisor?.lead === "string" && settings.routing.supervisor.lead.trim()
+          ? settings.routing.supervisor.lead.trim()
+          : SUPERVISOR_FALLBACK_MODEL
+        : childModelFor({
+            squad,
+            settings,
+            modelsConfig: models,
+            provider: "openrouter",
+            providerEntry,
+          }).model;
+    if (model && !resolves(model)) bad.push(`routing ${squad} → ${model}`);
+  }
+  if (!resolves(SUPERVISOR_FALLBACK_MODEL)) {
+    bad.push(`supervisor fallback → ${SUPERVISOR_FALLBACK_MODEL}`);
   }
   if (bad.length) fail(`lead bez ceny (koszt policzy się jako 0):\n       ${bad.join("\n       ")}`);
 });
