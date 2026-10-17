@@ -46,7 +46,7 @@ Delivered 2026-10-14 — evidence in the integration / acceptance logs below.
 - [x] Task start binds **immutable Linear issue identity** (workspace + issueId) at `ensure` time; display identifiers resolve only within the matching workspace (AC-2, AC-5).
 - [x] Cancel/stop scoped to `task + generation`; stopping A never touches B (AC-1). (Acceptance: stop A → B byte-identical, C claimed the slot.)
 - [x] SSE/WS streams scoped per task/session; routing validated server-side (AC-4).
-- [x] Migration: known existing owner attached once; unknown legacy runs read-only and unassigned; nothing auto-adopted. (`ensure` is the one attach; `supervisor-current-run` scoped mode has adoption OFF and throws on an owner mismatch; legacy stays readable and unassigned.)
+- [x] Migration: known existing owner attached once; unknown legacy runs read-only and unassigned; nothing auto-adopted. (`ensure` is the one attach; `supervisor-current-run` scoped mode has adoption OFF and throws on an owner mismatch; legacy stays readable and unassigned.) Since FOC-901 an unscoped session never adopts a managed run at all — the refusal, the `FENIX_SUPERVISOR_LEGACY=1` override and the `taskSessions.maxActive` cap are documented in [docs/task-sessions.md](../task-sessions.md).
 - [x] Spike follow-ups (owned here): shared integration-lock blast radius across `supervisor-lib.mjs`; resource benchmark at cap=2. Closed 2026-10-14 — both write-ups below.
 
 #### P1b spike follow-ups — closed 2026-10-14

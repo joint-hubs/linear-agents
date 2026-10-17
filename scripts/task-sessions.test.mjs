@@ -8,7 +8,7 @@
 // Run: node --test scripts/task-sessions.test.mjs
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -20,6 +20,7 @@ import {
   STATUSES,
   TERMINAL_STATUSES,
   createTaskSessionStore,
+  readActiveSessions,
   resolveTaskKey,
 } from "./task-sessions.mjs";
 
@@ -274,6 +275,24 @@ test("exported status groups and pattern are coherent", () => {
   assert.ok(CAP_STATUSES.every((s) => OWNER_STATUSES.includes(s)));
   assert.match(`sup-${"a".repeat(16)}`, SESSION_ID_PATTERN);
   assert.match(`sup-${"a".repeat(32)}`, SESSION_ID_PATTERN);
+});
+
+test("readActiveSessions: a garbage store file reads as unknown and leaves no sibling files behind", () => {
+  const dir = tempDir();
+  try {
+    const dbPath = dbFile(dir);
+    writeFileSync(dbPath, "this is not a sqlite database at all — just bytes. ".repeat(16), "utf8");
+    const r = readActiveSessions(dbPath);
+    assert.equal(r.sessions.length, 0);
+    assert.ok(r.unknown, "garbage reads as unknown, never as 'nothing there'");
+    assert.deepEqual(
+      readdirSync(dir).filter((name) => name !== "task-sessions.sqlite"),
+      [],
+      "the read-only open must not create -wal/-shm/recovery siblings",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // --- Cross-process invariants (independent node processes, one SQLite file) ---

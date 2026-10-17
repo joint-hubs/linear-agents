@@ -127,11 +127,15 @@ const fakePty = () => {
 };
 
 // build() — a host over an in-memory store with per-session fakes.
+// opts.resolveMaxActive: let the HOST resolve the cap (deps.maxActive unset,
+// no injected store — FOC-901 precedence tests); the store then lives on disk
+// under the temp data home at the cap the host chose.
 const build = (opts = {}) => {
   const stops = [];
   const tmp = mkdtempSync(join(tmpdir(), "task-session-host-"));
   const env = { LA_DATA_HOME: tmp, ...(opts.env ?? {}) };
-  const store = opts.store ?? createTaskSessionStore({ dbPath: ":memory:", maxActive: opts.maxActive ?? 2 });
+  const store = opts.store ?? (opts.resolveMaxActive ? undefined : createTaskSessionStore({ dbPath: ":memory:", maxActive: opts.maxActive ?? 2 }));
+  const resolveDbPath = opts.resolveMaxActive ? join(tmp, "supervisor", "task-sessions.sqlite") : undefined;
   const fakes = new Map(); // sessionId → { tmux, pty, ptyArgs, clock }
   const fakeFor = (sessionId) => {
     if (!fakes.has(sessionId)) {
@@ -164,7 +168,8 @@ const build = (opts = {}) => {
   const host = createTaskSessionHost({
     env,
     store,
-    maxActive: opts.maxActive ?? 2,
+    dbPath: resolveDbPath,
+    maxActive: opts.resolveMaxActive ? undefined : (opts.maxActive ?? 2),
     processIdentity: opts.processIdentity ?? (() => ({ state: "alive", identity: "test-boot:4242" })),
     controllerDeps,
     readToken: () => TOKEN,
@@ -278,6 +283,112 @@ test("cap=2: two tasks start, the third queues, and each session is isolated", a
   } finally {
     host.close();
     store.close();
+  }
+});
+
+// ── cap source precedence (FOC-901): deps → env → overlay → default ─────────
+
+const capSettings = (dir, value) => {
+  const p = join(dir, "settings.json");
+  writeFileSync(p, JSON.stringify({ taskSessions: { maxActive: value } }), "utf8");
+  return p;
+};
+
+test("overlay taskSessions.maxActive=4 → the third claim succeeds", async () => {
+  const dir = tempDir("cap4");
+  const settings = capSettings(dir, 4);
+  const { host } = build({ resolveMaxActive: true, env: { LA_SETTINGS_FILE: settings } });
+  const port = await listen(host);
+  try {
+    assert.equal(host.maxActive, 4);
+    assert.equal(host.maxActiveSource, "settings taskSessions.maxActive");
+    const a = await request(port, "POST", "/sessions", { body: startBody("A") });
+    const b = await request(port, "POST", "/sessions", { body: startBody("B") });
+    const c = await request(port, "POST", "/sessions", { body: startBody("C") });
+    assert.equal(a.json.delivery, "starting");
+    assert.equal(b.json.delivery, "starting");
+    assert.equal(c.json.delivery, "starting", "the third claim succeeds at cap 4");
+    await host.settled();
+    assert.equal((await request(port, "GET", "/sessions")).json.maxActive, 4);
+  } finally {
+    host.close();
+    host.store.close();
+  }
+});
+
+test("overlay taskSessions.maxActive=2 → the third claim stays queued", async () => {
+  const dir = tempDir("cap2-overlay");
+  const settings = capSettings(dir, 2);
+  const { host } = build({ resolveMaxActive: true, env: { LA_SETTINGS_FILE: settings } });
+  const port = await listen(host);
+  try {
+    assert.equal(host.maxActive, 2);
+    assert.equal(host.maxActiveSource, "settings taskSessions.maxActive");
+    await request(port, "POST", "/sessions", { body: startBody("A") });
+    await request(port, "POST", "/sessions", { body: startBody("B") });
+    const c = await request(port, "POST", "/sessions", { body: startBody("C") });
+    assert.equal(c.json.delivery, "queued", "the cap from the overlay is enforced by the store");
+  } finally {
+    host.close();
+    host.store.close();
+  }
+});
+
+test("FENIX_MAX_ACTIVE_SUPERVISORS=1 beats the overlay's 4", async () => {
+  const dir = tempDir("cap-env");
+  const settings = capSettings(dir, 4);
+  const { host } = build({
+    resolveMaxActive: true,
+    env: { LA_SETTINGS_FILE: settings, FENIX_MAX_ACTIVE_SUPERVISORS: "1" },
+  });
+  const port = await listen(host);
+  try {
+    assert.equal(host.maxActive, 1);
+    assert.equal(host.maxActiveSource, "env FENIX_MAX_ACTIVE_SUPERVISORS");
+    await request(port, "POST", "/sessions", { body: startBody("A") });
+    const b = await request(port, "POST", "/sessions", { body: startBody("B") });
+    assert.equal(b.json.delivery, "queued", "the env override holds the cap at 1");
+  } finally {
+    host.close();
+    host.store.close();
+  }
+});
+
+test("no deps, no env, no overlay → the default cap of 2", async () => {
+  const { host } = build({ resolveMaxActive: true });
+  try {
+    assert.equal(host.maxActive, 2);
+    assert.equal(host.maxActiveSource, "default");
+  } finally {
+    host.close();
+    host.store.close();
+  }
+});
+
+test("an empty FENIX_MAX_ACTIVE_SUPERVISORS is unset — no warning; a non-empty invalid value warns", async () => {
+  const errs = [];
+  const orig = console.error;
+  console.error = (msg) => errs.push(String(msg));
+  const withEmpty = build({ resolveMaxActive: true, env: { FENIX_MAX_ACTIVE_SUPERVISORS: "" } });
+  try {
+    assert.equal(withEmpty.host.maxActive, 2);
+    assert.equal(withEmpty.host.maxActiveSource, "default");
+    assert.equal(errs.length, 0, "an empty value must read as unset, silently");
+  } finally {
+    withEmpty.host.close();
+    withEmpty.host.store.close();
+  }
+  errs.length = 0;
+  const withBad = build({ resolveMaxActive: true, env: { FENIX_MAX_ACTIVE_SUPERVISORS: "zero" } });
+  try {
+    assert.equal(withBad.host.maxActive, 2);
+    assert.equal(withBad.host.maxActiveSource, "default");
+    assert.equal(errs.length, 1, "a non-empty invalid value warns once");
+    assert.match(errs[0], /FENIX_MAX_ACTIVE_SUPERVISORS/);
+  } finally {
+    console.error = orig;
+    withBad.host.close();
+    withBad.host.store.close();
   }
 });
 

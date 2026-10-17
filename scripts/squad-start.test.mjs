@@ -357,6 +357,57 @@ test("runLaunch supervisor — LA_SUPERVISOR_RUN defaults to the run id, record 
   }
 });
 
+test("runLaunch supervisor — record exit 3 (MANAGED_SESSIONS_ACTIVE) stops the launch with code 2, claude never spawned", async () => {
+  const root = makeRoot();
+  try {
+    const plan = planLaunch({ squad: "supervisor", task: "FOC-901", env: baseEnv(root), cwd: join(root, "cwd"), root });
+    const calls = [];
+    const spawn = (command, args) => {
+      calls.push({ command, args });
+      if (args[1] === "gen-id") return { status: 0, stdout: "RUN-REF\n" };
+      if (args[1] === "record") return { status: 3, stderr: "[refusal] 2 managed session(s) live; scoped command: fenix supervisor --task FOC-x" };
+      return { status: 0, stdout: "" };
+    };
+    const spawnAsync = (command, args) => {
+      calls.push({ command, args });
+      return fakeChild(0);
+    };
+    const logs = [];
+    const code = await runLaunch(plan, { spawn, spawnAsync, log: (line) => logs.push(line) });
+    assert.equal(code, 2);
+    assert.ok(!calls.some((c) => isClaude(c.command)), "claude never spawned");
+    assert.ok(logs.some((l) => l.includes("[refusal] 2 managed session(s) live")), "the child's stderr is printed");
+    assert.ok(logs.some((l) => l.includes("[supervisor] refused: managed sessions are active — see the message above, or set FENIX_SUPERVISOR_LEGACY=1 to adopt anyway")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runLaunch supervisor — record exit 1 stays warn-and-soft, the launch continues to claude", async () => {
+  const root = makeRoot();
+  try {
+    const plan = planLaunch({ squad: "supervisor", task: "FOC-901", env: baseEnv(root), cwd: join(root, "cwd"), root });
+    const calls = [];
+    const spawn = (command, args) => {
+      calls.push({ command, args });
+      if (args[1] === "gen-id") return { status: 0, stdout: "RUN-WARN\n" };
+      if (args[1] === "record") return { status: 1, stderr: "db busy" };
+      return { status: 0, stdout: "" };
+    };
+    const spawnAsync = (command, args) => {
+      calls.push({ command, args });
+      return fakeChild(0);
+    };
+    const logs = [];
+    const code = await runLaunch(plan, { spawn, spawnAsync, log: (line) => logs.push(line) });
+    assert.equal(code, 0);
+    assert.ok(calls.some((c) => isClaude(c.command)), "the launch continues to claude");
+    assert.ok(logs.some((l) => l.includes("could not record the current run")), "the warning is logged");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("printablePlan masks secret-looking env values", () => {
   const masked = printablePlan({ env: { LINEAR_API_KEY: "lin_api_x", GH_TOKEN: "t", MY_SECRET: "s", ANTHROPIC_AUTH_TOKEN: "tok", PLAIN: "value", EMPTY_KEY: "" } });
   assert.equal(masked.env.LINEAR_API_KEY, "<set>");

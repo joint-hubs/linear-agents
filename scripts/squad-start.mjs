@@ -710,6 +710,14 @@ export async function runLaunch(plan, {
         }
         case "record-current-run": {
           const result = execNode(step);
+          // FOC-901: exit 3 = MANAGED_SESSIONS_ACTIVE — an unscoped start
+          // refuses while managed sessions are live. Surface the refusal and
+          // stop before claude spawns; any other failure stays warn-and-soft.
+          if (result.status === 3) {
+            if (result.stderr) log(String(result.stderr).trimEnd());
+            log("[supervisor] refused: managed sessions are active — see the message above, or set FENIX_SUPERVISOR_LEGACY=1 to adopt anyway");
+            return 2;
+          }
           if (result.status !== 0) {
             log("[supervisor] could not record the current run for the dashboard (supervisor-current-run.mjs record)");
           }
