@@ -190,9 +190,13 @@ The Settings area in the left navigation covers what used to require a
   branch, CodeGraph index state, worktree count and mapped Linear project;
   adding a repository by URL starts a background clone with progress (a local
   bare repo URL works for tests); removing a project mapping keeps the files.
-- **Retention** (`/settings/retention`): read-only — the `cleanupPeriodDays`
-  policy in force, transcript / telemetry / workspace disk usage and free
-  disk. Managing the policy stays with FOC-780.
+- **Retention** (`/settings/retention`): the panel sets the policy — keep
+  everything by default, or apply a limit to every squad's
+  `cleanupPeriodDays` at once — and shows the transcript / telemetry /
+  workspace disk usage, free disk and the prunable estimate. Nothing is
+  deleted until `fenix retention prune` runs; the CLI still does the apply
+  and prune: `fenix retention show|apply|prune [--dry-run]` (prune is
+  refused while retention keeps everything).
 - **Squads & prompts** is the v1 Prompts screen as a tab (`/prompts`): role
   edits land on the `/data/agents` volume and take effect at the next spawn.
 
@@ -251,8 +255,9 @@ volume, so telemetry and Supervisor state survive a recreate; a later
     `/data/workspaces/la-wt/<repo>/<branch>`
 - Project map: `.fenix/config/projects.json` on the host, mounted at
   `/fenix-config` (see "Your repositories").
-- Logs and transcripts are kept by default (retention is configurable later,
-  FOC-780).
+- Logs and transcripts are kept by default: retention is asked once on the
+  first `fenix up` (keeping everything is the default) and can be changed
+  later in Settings → Retention or with `fenix retention`.
 
 ## Troubleshooting
 
