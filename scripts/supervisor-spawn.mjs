@@ -46,7 +46,7 @@ import { isRuntimeToken } from "./runtime-events.mjs";
 
 import { buildBranchName } from "./dev-branch.mjs";
 import { settingsPath, squadConfigDir } from "./fenix-paths.mjs";
-import { childModelFor, childProviderEnv } from "./child-model.mjs";
+import { assertModelPolicy, childModelFor, childProviderEnv } from "./child-model.mjs";
 import { readSettings } from "./fenix-settings.mjs";
 import { ensureCodegraphReady } from "./codegraph-runtime.mjs";
 import { approveGuardedCodegraphForProject } from "./mcp-enable.mjs";
@@ -72,6 +72,7 @@ import {
   listWorktrees,
   printBgWaitCeilingEnv,
   readHeld,
+  hasPriceRow,
   parseArgs,
   pinnedStatePrologue,
   readJsonOr,
@@ -221,6 +222,25 @@ if (hasCandidate) {
   if (!String(args.candidate).trim()) {
     failJson(`--candidate value is empty — name the commit or branch to pin the worktree at`);
   }
+}
+
+// ── FOC-607: the --model policy, judged before anything is created ───────────
+// Sits with the other argument checks, ABOVE the admission/hold branch below:
+// a banned or unpriced --model must be refused whether the node is at capacity
+// or not. Left after admission, a refused request consumed a hold record (with
+// the original argv) and was then rejected on replay — the request was lost.
+// This judges only the explicit --model request; the child's model itself is
+// still resolved by childModelFor below (precedence unchanged, FOC-762).
+// hasPriceRow honours the LA_MODELS_ROOT test seam. The first side effects
+// below are the run dir (ensureRunDir), the held-request record and the
+// workspace claim — none of which a refused spawn reaches.
+const requestedModel = args.model && args.model !== true ? String(args.model) : null;
+const policyRefusal = assertModelPolicy({ squad, requestedModel, hasPriceRow });
+if (policyRefusal) {
+  failJson(`model policy refused the spawn: ${policyRefusal.message}`, {
+    error: policyRefusal.error,
+    message: policyRefusal.message,
+  });
 }
 
 // ── fail-closed: the verdict comes before the spawn ──────────────────────────
@@ -868,7 +888,8 @@ const providerEntry =
 
 const modelPick = childModelFor({
   squad,
-  explicitModel: args.model && args.model !== true ? String(args.model) : null,
+  // Already policy-checked above (FOC-607) — this is the same value, reused.
+  explicitModel: requestedModel,
   settings,
   modelsConfig,
   provider: providerName,

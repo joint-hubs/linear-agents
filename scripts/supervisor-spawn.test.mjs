@@ -12,7 +12,7 @@
 // Run: node scripts/supervisor-spawn.test.mjs
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,7 @@ import {
   TURN_END_CONTRACT,
   buildChildSettings,
   childSettingsPath,
+  heldDir,
   printBgWaitCeilingEnv,
   readHeld,
   readHolds,
@@ -303,7 +304,12 @@ test("without --model the child runs on the routing table's pick, never the Supe
 test("an explicit --model wins over the inherited one and draws no warning", () => {
   const { repo } = fixtureRepo();
   const runId = fixtureRun();
-  const r = runSpawn(runId, repo, ["--model", "z-ai/glm-5.3-flash"], { ANTHROPIC_MODEL: "supervisor/own-model" });
+  // FOC-607: a dev squad may not take --model at all, so the explicit-id path
+  // is pinned on a squad that accepts it (plan) with a PRICED id from the
+  // repo's own config/models.json (LA_MODELS_ROOT unset → the repo's config).
+  const r = runSpawn(runId, repo, ["--squad", "plan", "--model", "z-ai/glm-5.3-flash"], {
+    ANTHROPIC_MODEL: "supervisor/own-model",
+  });
   const out = parse(r);
   const entry = readRegistry(runId).children[out.childId];
   if (entry.model !== "z-ai/glm-5.3-flash") fail(`registry model was ${entry.model}`);
@@ -1136,6 +1142,75 @@ test("a provider resolution error refuses the spawn (fail closed)", () => {
   if (Object.keys(readRegistry(runId).children).length) fail("a child was registered anyway");
 });
 
+// ── FOC-607: the --model policy, fail closed before anything starts ──────────
+// The gate sits with the argument checks in supervisor-spawn.mjs, above the
+// admission/hold branch and the worktree claim, so a refused spawn must leave
+// NOTHING behind — asserted the same way the provider refusal tests do (empty
+// registry), plus no worktree directory on disk.
+test("FOC-607: --model on a dev squad is refused before anything starts", () => {
+  const { base, repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runSpawn(runId, repo, ["--model", "z-ai/glm-5.3"]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r);
+  if (out.ok !== false) fail(`expected ok:false, got ${JSON.stringify(out)}`);
+  if (out.error !== "model-override-banned") fail(`error was ${JSON.stringify(out.error)}`);
+  if (!/routing table/.test(out.message) || !/drop --model/.test(out.message)) {
+    fail(`message does not point at the fix: ${out.message}`);
+  }
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered anyway");
+  if (existsSync(join(base, "la-wt"))) fail("a worktree was created for a refused spawn");
+});
+
+test("FOC-607: an unpriced --model on a non-dev squad is refused before anything starts", () => {
+  const { base, repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const r = runSpawn(runId, repo, ["--squad", "plan", "--model", "totally/unpriced-id"]);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r);
+  if (out.ok !== false) fail(`expected ok:false, got ${JSON.stringify(out)}`);
+  if (out.error !== "model-unpriced") fail(`error was ${JSON.stringify(out.error)}`);
+  if (!/totally\/unpriced-id/.test(out.message) || !/config\/models\.json/.test(out.message)) {
+    fail(`message does not name the id and the config: ${out.message}`);
+  }
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered anyway");
+  if (existsSync(join(base, "la-wt"))) fail("a worktree was created for a refused spawn");
+});
+
+// The gate sits ABOVE the admission/hold branch: a banned --model is refused
+// at capacity too, and never consumes a hold record it would then fail on
+// replay (the request would otherwise be lost).
+test("FOC-607: a banned --model at capacity is refused, not held", () => {
+  const { base, repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const first = parse(runSpawn(runId, repo));
+  if (!first.ok) fail("first spawn failed");
+  // The capacity-setup spawn already created its own worktree, so the refused
+  // spawn is pinned by the COUNT of worktrees staying flat, not by absence.
+  const laWt = join(base, "la-wt");
+  const worktreesBefore = existsSync(laWt) ? readdirSync(laWt).length : 0;
+
+  const r = runSpawn(runId, repo, ["--task", "FOC-124", "--child", "dev-2", "--model", "z-ai/glm-5.3"]);
+  if (r.status !== 1) fail(`expected exit 1 for a banned --model even at capacity, got ${r.status}`);
+  const out = parse(r);
+  if (out.ok !== false) fail(`expected ok:false, got ${JSON.stringify(out)}`);
+  if (out.error !== "model-override-banned") fail(`error was ${JSON.stringify(out.error)}`);
+  // Refused above the hold branch: no held-request record was written for a
+  // request that can never start.
+  if (existsSync(heldDir(runId))) fail("a held-request record was written for a refused spawn");
+  if (readHeld(runId).length) fail("held records remain for a refused spawn");
+  // Only the first child was registered; the refused request started nothing.
+  if (Object.keys(readRegistry(runId).children).length !== 1) fail("a child was registered for the refused spawn");
+  if (existsSync(laWt) && readdirSync(laWt).length !== worktreesBefore) {
+    fail("a worktree was created for a refused spawn");
+  }
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", first.childId], { encoding: "utf8" });
+});
+// A priced explicit id on a non-dev squad still spawning is pinned by the
+// updated "an explicit --model wins over the inherited one" test above
+// (plan + z-ai/glm-5.3-flash), and dev WITHOUT --model by the routing-table
+// test — both kept green rather than duplicated here.
 
 test("an empty mounted key refuses spawn even when the Supervisor holds a stale key", () => {
   const { base, repo } = fixtureRepo(); const runId = fixtureRun();
