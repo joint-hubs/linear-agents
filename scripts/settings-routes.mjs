@@ -4,7 +4,8 @@
 // Transport only — the logic lives in the slice libraries this module wires
 // together: fenix-settings (the overlay), key-check (live key validation),
 // provider-resolve (provider entries), child-model + squad-config (routing
-// rows and pricing), fenix-repos (the clone inventory), fenix-retention.
+// rows and pricing), fenix-repos (the clone inventory), fenix-retention,
+// agent-tools (the read-only Agent tools view, FOC-906).
 // The binding payload contracts are in docs/plans/fenix-settings-keys.md
 // ("Settings API contracts").
 //
@@ -25,7 +26,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readSettings, validateSettings, writeSettings } from "./fenix-settings.mjs";
-import { dataHome } from "./fenix-paths.mjs";
+import { dataHome, squadConfigRoot } from "./fenix-paths.mjs";
+import { checkFindings, listAgents, showAgent } from "./agent-tools.mjs";
 import { resolveProvider, loadProviders, providerEnvOverride } from "./provider-resolve.mjs";
 import { checkProviderKey, checkLinearKey, checkGithubToken } from "./key-check.mjs";
 import { listRepos, startClone, getCloneJob, listCloneJobs, unmapRepo, reposRoot } from "./fenix-repos.mjs";
@@ -749,6 +751,27 @@ export async function handleSettingsRoute(req, res, url, ctx) {
       }
       if (method !== "PUT") return methodMismatch(res, method, path, ctx);
       return await retentionPut(req, res, url, ctx);
+    }
+
+    // --- GET /api/settings/agent-tools --------------------------------------
+    // Read-only view of the effective root's agent permission settings
+    // (FOC-906): one showAgent row per agent, the same checkFindings summary
+    // `fenix agent-tools check` reports. A broken settings.json becomes an
+    // { agent, error } row — never a 500.
+    if (path === "/api/settings/agent-tools") {
+      if (method !== "GET") return methodMismatch(res, method, path, ctx);
+      const root = squadConfigRoot();
+      const agents = listAgents(root).map((agent) => {
+        try {
+          return showAgent(agent, { agentsDir: root });
+        } catch (err) {
+          return { agent, error: String(err?.message || err).split("\n")[0] };
+        }
+      });
+      const { summary, findings } = checkFindings({ agentsDir: root });
+      json(res, 200, { root, agents, check: { summary, findings } });
+      log(method, path, 200);
+      return true;
     }
 
     // A /api/settings/* path with no route — the server's fall-through 404

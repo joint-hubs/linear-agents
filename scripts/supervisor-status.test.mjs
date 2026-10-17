@@ -508,6 +508,52 @@ test("legacy-unverified children are named beside the total, not excluded from i
   }
 });
 
+// ── the task journal in the briefing (FOC-904) ───────────────────────────────
+console.log("\nbriefing: task journal");
+
+test("the briefing carries the task journal when LA_TASK_ID is set and the file exists", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  const root = mkdtempSync(join(tmpdir(), "la-journal-br-"));
+  cleanup.push(root);
+  mkdirSync(join(root, "docs", "state"), { recursive: true });
+  writeFileSync(
+    join(root, "docs", "state", "FOC-904.md"),
+    "# FOC-904 — journal\n\nTask: FOC-904\nSession: -\nRun: -\nBranch: -\nPR: -\nStatus: in progress\n\n## 2026-10-16 10:00 — first\n\nbody\n\n## 2026-10-16 11:00 — second\n\nbody\n",
+    "utf8",
+  );
+  const out = parse(status(runId, ["--briefing"], { LA_ROOT: root, LA_TASK_ID: "FOC-904" }));
+  if (
+    !out.journal ||
+    out.journal.path !== "docs/state/FOC-904.md" ||
+    out.journal.entries !== 2 ||
+    out.journal.lastAt !== "2026-10-16 11:00"
+  ) {
+    fail(`journal was ${JSON.stringify(out.journal)}`);
+  }
+  if (!/^Journal: docs\/state\/FOC-904\.md \(2 entries, last 2026-10-16 11:00\)$/.test(out.journalLine)) {
+    fail(`journalLine was ${out.journalLine}`);
+  }
+});
+
+test("LA_TASK_ID set but no journal yet — the line names the init command", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  const out = parse(status(runId, ["--briefing"], { LA_TASK_ID: "FOC-904" }));
+  if (out.journal !== null) fail(`journal was ${JSON.stringify(out.journal)}`);
+  if (!out.journalLine.includes("none yet") || !out.journalLine.includes("state-journal.mjs init")) {
+    fail(`journalLine was ${out.journalLine}`);
+  }
+});
+
+test("no LA_TASK_ID — no journal and no line; existing fields untouched", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  const out = parse(status(runId, ["--briefing"]));
+  if (out.journal !== null) fail(`journal was ${JSON.stringify(out.journal)}`);
+  if (out.journalLine !== null) fail(`journalLine was ${out.journalLine}`);
+  if (!out.focusLine) fail("the focus fields disappeared");
+});
 // ── isolation surfaced (FOC-802) ─────────────────────────────────────────────
 console.log("\nisolation surfaced");
 

@@ -756,6 +756,11 @@ export async function getSettingsRetention(signal) {
   return apiFetch('/api/settings/retention', signal);
 }
 
+// Agent tools (FOC-906) — read-only: every agent's permission lists, MCP
+// servers and skills, plus the check summary. Editing stays in the CLI.
+export async function getAgentTools(signal) {
+  return apiFetch('/api/settings/agent-tools', signal);
+}
 // Generated artifacts (FOC-779) — the read-only registry status: { computedAt,
 // head, artifacts: [{ id, title, output, exists, outputMtime, age, head,
 // digest, manifest: { head, digest, generatedAt } | null, state, reason,
