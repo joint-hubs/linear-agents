@@ -33,10 +33,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createHash, timingSafeEqual } from "node:crypto";
+import { readSettings } from "./fenix-settings.mjs";
 import { hostBase, hostRequest, FAST_TIMEOUT_MS, SLOW_TIMEOUT_MS } from "./supervisor-host-client.mjs";
-import { graphql } from "./linear-client.mjs";
+import { graphql, workspaceEnabled, integrationOffMessage } from "./linear-client.mjs";
 import { readRegistry, supervisorStateHome } from "./supervisor-lib.mjs";
-import { squadConfigDir } from "./fenix-paths.mjs";
+import { hostTokenPath, squadConfigDir } from "./fenix-paths.mjs";
 import { resolveTaskKey } from "./task-sessions.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
 import {
@@ -71,8 +73,23 @@ const BODY_CAP = 16 * 1024;
 // the board library's shape, imported so route and library can never drift.
 
 // The board's workspace (the /api/linear/queue default); FENIX_WORK_WORKSPACE
-// overrides it for tests.
-const workWorkspace = () => process.env.FENIX_WORK_WORKSPACE || "jointhubs";
+// overrides it for tests. LINEAR_WORKSPACE is deliberately NOT consulted here
+// — chooseApiKey falls back to it for the KEY only, so the queue default can
+// only become pisi through FENIX_WORK_WORKSPACE. FOC-772: even then, a pisi
+// value with the integration off falls back to jointhubs, warned once (a
+// misconfiguration the operator sees, not a silent swap on every request).
+let pisiWorkspaceWarned = false;
+export const workWorkspace = () => {
+  const ws = process.env.FENIX_WORK_WORKSPACE || "jointhubs";
+  if (ws === "pisi" && !workspaceEnabled("pisi")) {
+    if (!pisiWorkspaceWarned) {
+      pisiWorkspaceWarned = true;
+      console.warn(`[work] ${integrationOffMessage("pisi")} — the queue falls back to jointhubs`);
+    }
+    return "jointhubs";
+  }
+  return ws;
+};
 
 // The hand-off text cap passed to startText: the confirm dialog shows the
 // whole text and the Start POST forwards it inside a 16 KB body, so the issue
@@ -240,6 +257,7 @@ export function resetWorkRoutesState({ now, ttlMs } = {}) {
   costRefresh = null;
   factsCache = null;
   reconciliationMemo.clear();
+  pisiWorkspaceWarned = false; // FOC-772: the one-time fallback warn re-arms for the next test
 }
 
 // ── the TEST-ONLY Linear fixture ─────────────────────────────────────────────
@@ -609,6 +627,41 @@ export async function handleWorkRoute(req, res, url, ctx) {
     return true;
   }
 
+  // ── the AI publish gate (FOC-788 follow-up) ─────────────────────────────────
+  //
+  // A natively spawned child is a host process and can reach the dashboard's
+  // own loopback (curl 127.0.0.1:7331), and the confirmToken is handed out by
+  // the read-only publish-preview — so the Supervisor contract that push/PR
+  // are never a child's needs more than the loopback guards. Two layers here:
+  // `actor: "ai"` is opt-in (publish.aiActor in settings.json, off by its
+  // absence) and, once enabled, the request must also carry the host token
+  // the API already uses toward the session host. Children are deny-listed
+  // for these routes in supervisor-lib.mjs as defense in depth. The human
+  // path is unchanged.
+
+  // The host token, re-read per request exactly the way
+  // supervisor-host-client.mjs reads it: a supervisor restart rotates
+  // /data/run/host.token, so nothing may cache it. Unreadable → null — fail
+  // closed, an ai request can then never match.
+  function hostPublishToken() {
+    try {
+      return readFileSync(hostTokenPath(), "utf8").trim();
+    } catch {
+      return null;
+    }
+  }
+
+  // Constant-time comparison over SHA-256 digests: the inputs are always
+  // digest-length, so neither the token's value nor its length leaks through
+  // timing.
+  function publishTokenMatches(headerValue, expected) {
+    if (typeof headerValue !== "string" || expected === null) return false;
+    return timingSafeEqual(
+      createHash("sha256").update(headerValue, "utf8").digest(),
+      createHash("sha256").update(expected, "utf8").digest(),
+    );
+  }
+
   // POST /api/work/tickets/:id/push | .../pr { confirmToken, actor, actorId }
   // — the confirm dialog's send for a publish (FOC-788, plan §4.2). The
   // Cockpit's write guards and body cap first (the `start` route's shape),
@@ -616,9 +669,10 @@ export async function handleWorkRoute(req, res, url, ctx) {
   // NOW and the body must carry the confirmToken for the CURRENT state — a
   // stray or replayed body can never act, and a moved head answers 409
   // stale-preview before any executor runs. `actor` (human | ai) is required
-  // and recorded verbatim (decision 3). The audit trio (JSONL, telemetry,
-  // Linear comment) is written before the response returns, failures included
-  // (plan §4.3) — never automatic, never merge.
+  // and recorded verbatim (decision 3); an `ai` actor additionally passes the
+  // opt-in, token-bound publish gate below (FOC-788 follow-up). The audit
+  // trio (JSONL, telemetry, Linear comment) is written before the response
+  // returns, failures included (plan §4.3) — never automatic, never merge.
   m = path.match(/^\/api\/work\/tickets\/([^/]+)\/(push|pr)$/);
   if (method === "POST" && m) {
     if (!writeGuards(req, res, path, ctx)) return true;
@@ -655,6 +709,24 @@ export async function handleWorkRoute(req, res, url, ctx) {
       json(res, 400, { error: "actorId (string) is required" });
       log(method, path, 400);
       return true;
+    }
+    // The AI transport is opt-in and token-bound (FOC-788 follow-up): both
+    // layers are checked BEFORE the confirmToken is verified and before any
+    // executor runs, so even a stolen confirmToken cannot act as an agent.
+    if (body.actor === "ai") {
+      if (readSettings().publish?.aiActor !== true) {
+        json(res, 403, {
+          error: "ai-actor-disabled",
+          reason: "enable publish.aiActor in settings.json to let an agent push",
+        });
+        log(method, path, 403);
+        return true;
+      }
+      if (!publishTokenMatches(req.headers["x-fenix-publish-token"], hostPublishToken())) {
+        json(res, 403, { error: "bad-publish-token" });
+        log(method, path, 403);
+        return true;
+      }
     }
     const preview = buildPublishPreview({
       ticket: id,

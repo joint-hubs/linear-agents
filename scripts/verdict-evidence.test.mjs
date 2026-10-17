@@ -722,6 +722,7 @@ function rebuildReport(r) {
       source: w.source,
       attempt: w.attempt,
       round: w.round,
+      runId: w.runId, // FOC-903 provenance — part of the serialized schema
       verdict: w.verdict,
       rawVerdict: w.rawVerdict,
       unknownReasons: w.unknownReasons,
@@ -819,6 +820,7 @@ console.log("\n# FOC-257 exact key-set guard\n");
       "issue", "stage", "source", "attempt", "round", "verdict", "rawVerdict",
       "unknownReasons", "qualityFlags", "childId", "work", "artifacts",
       "recordedAt", "findings", "acMapping", "evidenceLine", "conflictingEvidence",
+      "runId", // FOC-903: the supervisor run a legacy/scratch row came from (null = the legacy dir)
     ]);
     assertKeys("evidenceRow.work", w.work, [
       "workId", "fingerprint", "baseRevision", "reviewRunId", "workTurns",
@@ -1043,6 +1045,121 @@ const BASELINE = {
   check("real-corpus: read-only A/B leaves no artifacts (sha12 digests only, paths .state-relative)",
     rep.evidenceRows.every((r) => r.artifacts.every((a) => isSha12(a.sha256)))
       && rep.evidenceRows.every((r) => r.artifacts.every((a) => !a.path.includes("\\") && (a.path.startsWith("supervisor/") || a.path.startsWith("reviews/")))));
+}
+
+console.log("\n# per-run scratch inputs (FOC-903)\n");
+
+{
+  const dir = join(root, "foc903-per-run");
+  const c = mkCorpus(dir);
+  const RUN_OLD = "2026-09-01T10-00-00-000-supervisor-aaaa";
+  const RUN_NEW = "2026-09-02T10-00-00-000-supervisor-bbbb";
+
+  // Newest run: its counter (3) and its round-2 file win the (T-1, 2) cell.
+  mkdirSync(join(c.sup, RUN_NEW, "scratch", "reviews"), { recursive: true });
+  writeFileSync(join(c.sup, RUN_NEW, "review-rounds.json"), JSON.stringify({ "T-1": 3 }), "utf8");
+  writeFileSync(join(c.sup, RUN_NEW, "scratch", "reviews", "T-1-round2.md"),
+    `# REVIEW — T-1 — round 2 — VERDICT: FAIL\n\n${FAIL_BODY}\n`, "utf8");
+  // Older run: contributes the round-1 cell and a T-2 counter with no files.
+  mkdirSync(join(c.sup, RUN_OLD, "scratch", "reviews"), { recursive: true });
+  writeFileSync(join(c.sup, RUN_OLD, "review-rounds.json"), JSON.stringify({ "T-1": 1, "T-2": 1 }), "utf8");
+  writeFileSync(join(c.sup, RUN_OLD, "scratch", "reviews", "T-1-round1.md"),
+    `# REVIEW — T-1 — round 1 — VERDICT: PASS\n\n${PASS_BODY}\n`, "utf8");
+  // Legacy dir: a task no run claims, plus a colliding (T-1, 2) cell the
+  // per-run side must beat.
+  writeReview(c.reviews, "LEG-1", 1, "PASS", PASS_BODY);
+  writeReview(c.reviews, "T-1", 2, "PASS", PASS_BODY);
+  // Legacy counter under the state home's parent (the production shape).
+  writeFileSync(join(dir, "review-rounds.json"), JSON.stringify({ "T-1": 1, "LEG-1": 1 }), "utf8");
+
+  const rep = project({ sup: c.sup, reviews: c.reviews });
+
+  const r2 = rep.evidenceRows.find((r) => r.issue === "T-1" && r.round === 2);
+  check("per-run: the newest run's round file wins the (task, round) cell over the legacy dir",
+    r2?.verdict === "FAIL" && r2?.runId === RUN_NEW,
+    JSON.stringify(r2));
+  check("per-run: the winning row's artifact is the supervisor-relative scratch path with a digest",
+    r2?.artifacts?.[0]?.path === `supervisor/${RUN_NEW}/scratch/reviews/T-1-round2.md` && isSha12(r2?.artifacts?.[0]?.sha256),
+    JSON.stringify(r2?.artifacts));
+  check("per-run: the older run's unique round survives the union",
+    rep.evidenceRows.some((r) => r.issue === "T-1" && r.round === 1 && r.runId === RUN_OLD && r.verdict === "PASS"),
+    JSON.stringify(rep.evidenceRows.filter((r) => r.issue === "T-1")));
+  check("per-run: legacy-dir-only task is still read",
+    rep.evidenceRows.some((r) => r.issue === "LEG-1" && r.round === 1 && r.runId === null && r.verdict === "PASS"));
+  check("per-run: merged cell appears once (dedupe by task+round, per-run wins)",
+    rep.evidenceRows.filter((r) => r.issue === "T-1" && r.round === 2).length === 1,
+    JSON.stringify(rep.evidenceRows.filter((r) => r.issue === "T-1")));
+
+  const outcomes = new Map(rep.legacyTaskOutcomes.map((t) => [t.taskId, t]));
+  check("per-run: round counter — newest run wins per task (3, not the legacy 1 or older run's 1)",
+    outcomes.get("T-1")?.rounds === 3, JSON.stringify(outcomes.get("T-1")));
+  check("per-run: round counter — an older run's entry survives when the newest is silent",
+    outcomes.get("T-2")?.rounds === 1, JSON.stringify(outcomes.get("T-2")));
+  check("per-run: round counter — legacy fallback when no run claims the task",
+    outcomes.get("LEG-1")?.rounds === 1, JSON.stringify(outcomes.get("LEG-1")));
+
+  const l2 = logicalOf(rep, "T-1", "review", 2);
+  check("per-run: logical cell T-1 r2 resolved FAIL from the per-run file",
+    l2?.resolvedVerdict === "FAIL" && l2?.coverageClass === "unmatched",
+    JSON.stringify(l2));
+}
+
+console.log("\n# the state-home seam (FOC-903 review)\n");
+
+{
+  // LA_SUPERVISOR_STATE_HOME pointing at a temp root: the UNOPTIONED
+  // projectVerdictEvidence() (and the CLI, which passes no options) must scan
+  // that root — the state home itself for the per-run scratch, its parent for
+  // the legacy inputs — never the repo's .state/. supervisorStateHome() reads
+  // the env at call time, so setting it here is enough.
+  const seamRoot = mkdtempSync(join(tmpdir(), "foc903-seam-"));
+  const supHome = join(seamRoot, "supervisor");
+  const RUN_SEAM = "2026-09-03T10-00-00-000-supervisor-cc11";
+  mkdirSync(join(supHome, RUN_SEAM, "scratch", "reviews"), { recursive: true });
+  writeFileSync(join(supHome, RUN_SEAM, "review-rounds.json"), JSON.stringify({ "FXT-77": 1 }), "utf8");
+  writeFileSync(join(supHome, RUN_SEAM, "scratch", "reviews", "FXT-77-round1.md"),
+    `# REVIEW — FXT-77 — round 1 — VERDICT: PASS\n\n${PASS_BODY}\n`, "utf8");
+  // Legacy inputs next to the state home (the production shape).
+  mkdirSync(join(seamRoot, "reviews"), { recursive: true });
+  writeReview(join(seamRoot, "reviews"), "FXT-88", 1, "PASS", PASS_BODY);
+  writeFileSync(join(seamRoot, "review-rounds.json"), JSON.stringify({ "FXT-88": 1 }), "utf8");
+
+  const prevSeam = process.env.LA_SUPERVISOR_STATE_HOME;
+  process.env.LA_SUPERVISOR_STATE_HOME = supHome;
+  try {
+    // dbPath pinned: the seam decides the supervisor/legacy paths, never the
+    // machine's telemetry DB.
+    const rep = projectVerdictEvidence({ dbPath: null });
+    const r77 = rowOf(rep, "FXT-77", "legacy", 1);
+    check("seam: unoptioned projection reads the per-run scratch under LA_SUPERVISOR_STATE_HOME",
+      r77?.verdict === "PASS" && r77?.runId === RUN_SEAM, JSON.stringify(r77));
+    const outcomes = new Map(rep.legacyTaskOutcomes.map((t) => [t.taskId, t]));
+    check("seam: unoptioned projection reads the legacy inputs next to the state home",
+      rowOf(rep, "FXT-88", "legacy", 1)?.verdict === "PASS"
+        && outcomes.get("FXT-77")?.rounds === 1 && outcomes.get("FXT-88")?.rounds === 1,
+      JSON.stringify(rep.legacyTaskOutcomes.filter((t) => t.taskId.startsWith("FXT-"))));
+
+    // The CLI passes no options either — the same defaults through main().
+    const cli = spawnSync(process.execPath, [CLI, "--json"], {
+      env: { ...process.env, LA_SUPERVISOR_STATE_HOME: supHome, LA_TELEMETRY_DB: join(seamRoot, "no-such-db.sqlite") },
+      encoding: "utf8",
+    });
+    check("seam: unoptioned CLI scans the state home, not the repo",
+      cli.status === 0 && (() => {
+        const report = JSON.parse(cli.stdout);
+        return report.evidenceRows.some((r) => r.issue === "FXT-77" && r.round === 1 && r.runId === RUN_SEAM)
+          && report.evidenceRows.some((r) => r.issue === "FXT-88" && r.round === 1);
+      })(),
+      (cli.stderr || "").slice(0, 400));
+  } finally {
+    if (prevSeam === undefined) delete process.env.LA_SUPERVISOR_STATE_HOME;
+    else process.env.LA_SUPERVISOR_STATE_HOME = prevSeam;
+  }
+  try {
+    rmSync(seamRoot, { recursive: true, force: true });
+  } catch (error) {
+    console.error(`note: seam temp dir left behind (${seamRoot}): ${error?.message || error}`);
+  }
 }
 
 // ── wrap up ───────────────────────────────────────────────────────────────────

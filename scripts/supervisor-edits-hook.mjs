@@ -67,7 +67,7 @@ const describeEdit = (runId, row) =>
 
 function writeSeenThrough(dir, seq) {
   try {
-    atomicWriteJSON(editsSeenPath(dir), { seenThrough: seq, seenAt: new Date().toISOString() });
+    atomicWriteJSON(editsSeenPath(dir), { seenThrough: seq, seenAt: new Date().toISOString() }, { mode: 0o644 });
     return true;
   } catch {
     return false;

@@ -18,7 +18,7 @@ The contract is this file; the specs are reference depth. Read only what the tas
 
 <plan_linear_tools>
 ## Linear tools
-Access Linear via `node $LA_ROOT/scripts/linear-query.mjs` (read) and `node $LA_ROOT/scripts/linear-ops.mjs` (write). `mcp__linear__*` is not available headless in this environment — use the scripts.
+Access Linear via `node $LA_ROOT/scripts/linear-query.mjs` (read) and `node $LA_ROOT/scripts/linear-ops.mjs` (write). `mcp__linear__*` is not available headless in this environment — use the scripts. Under a Supervisor the harness denies every invocation form of these scripts (FOC-511, `SUPERVISOR_DENY`) — put the Linear write into your turn report and the Supervisor relays it; the push role's `linear-push.mjs` is denied the same way, so the Supervisor publishes the brief, while standalone PLAN runs keep using it.
 </plan_linear_tools>
 
 <plan_squad>

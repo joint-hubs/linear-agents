@@ -8,6 +8,7 @@
       "Write",
       "Bash(node:*)",
       "Bash(node *linear-ops.mjs*)",
+      "Bash(node *gh-screened.mjs*)",
       "Bash(node *publish-linear-comment.mjs*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
@@ -110,6 +111,7 @@
       "Bash(*/Scripts/python.exe*)",
       "Bash(C:/Python*/python.exe*)",
       "PowerShell(node *)",
+      "PowerShell(node *gh-screened.mjs*)",
       "PowerShell(python *)",
       "PowerShell(git status*)",
       "PowerShell(git log*)",
@@ -124,7 +126,6 @@
     ],
     "ask": [
       "Bash(git push:*)",
-      "Bash(gh pr create:*)",
       "Bash(gh pr merge:*)",
       "Bash(git reset --hard:*)",
       "Bash(git clean:*)",
@@ -140,7 +141,15 @@
       "Monitor",
       "mcp__claude_ai_Linear__*",
       "Bash(git worktree remove:*)",
-      "Bash(git worktree prune:*)"
+      "Bash(git worktree prune:*)",
+      "Bash(gh pr create*)",
+      "Bash(gh pr edit*)",
+      "Bash(gh pr comment*)",
+      "Bash(gh api*)",
+      "PowerShell(gh pr create*)",
+      "PowerShell(gh pr edit*)",
+      "PowerShell(gh pr comment*)",
+      "PowerShell(gh api*)"
     ],
     "defaultMode": "default",
     "additionalDirectories": [
@@ -160,6 +169,11 @@
           {
             "type": "command",
             "command": "node \"$LA_ROOT/scripts/supervisor-status.mjs\" --briefing",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node \"$LA_ROOT/scripts/agent-state-hook.mjs\" SessionStart",
             "timeout": 10
           },
           {

@@ -43,7 +43,6 @@
 // The server child, the fake host and every socket are closed in finally; all
 // waits are bounded; no external network. Run: node scripts/task-cockpit-routes.test.mjs
 
-import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import net from "node:net";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -54,6 +53,7 @@ import { fileURLToPath } from "node:url";
 import { openTelemetryDb } from "./telemetry-store.mjs";
 import { ensureViews } from "./telemetry-canonical.mjs";
 import { hostTokenPath } from "./fenix-paths.mjs";
+import { spawnTestServer } from "./test-spawn.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -282,49 +282,28 @@ const HOST_URL = `http://127.0.0.1:${hostPort}`;
 const servers = [];
 let sockets = [];
 
-const { child, port } = await (new Promise((resolve) => {
-  const probe = createServer();
-  probe.listen(0, "127.0.0.1", () => {
-    const { port: freePort } = probe.address();
-    probe.close(() => {
-      const env = {
-        ...process.env,
-        LA_TELEMETRY_DB: dbPath,
-        LA_TELEMETRY_HOME: join(dir, "telemetry-home"),
-        LA_DATA_HOME: dataHome,
-        LA_SQUAD_HOME: squadHome,
-        LA_SUPERVISOR_STATE_HOME: supState,
-        LA_STATE_ROOT: join(dir, "state-root"),
-        LA_DECISION_RUNS_DIR: runsDir,
-        FENIX_SUPERVISOR_HOST: HOST_URL,
-      };
-      delete env.LA_ANALYSIS_CACHE;
-      delete env.FENIX_SUPERVISOR_SESSION_ID; // scoping must come from the ROUTE, never the process env
-      const c = spawn(process.execPath, [join(__dir, "telemetry-server.mjs")], {
-        env: { ...env, TELEMETRY_PORT: String(freePort) },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      c.stderrBuf = "";
-      c.stderr.on("data", (chunk) => { c.stderrBuf += chunk; });
-      servers.push(c);
-      resolve({ child: c, port: freePort });
-    });
-  });
-}));
-const P = port;
+const env = {
+  ...process.env,
+  LA_TELEMETRY_DB: dbPath,
+  LA_TELEMETRY_HOME: join(dir, "telemetry-home"),
+  LA_DATA_HOME: dataHome,
+  LA_SQUAD_HOME: squadHome,
+  LA_SUPERVISOR_STATE_HOME: supState,
+  LA_STATE_ROOT: join(dir, "state-root"),
+  LA_DECISION_RUNS_DIR: runsDir,
+  FENIX_SUPERVISOR_HOST: HOST_URL,
+};
+delete env.LA_ANALYSIS_CACHE;
+delete env.FENIX_SUPERVISOR_SESSION_ID; // scoping must come from the ROUTE, never the process env
 
-await (async function waitForServer(ms = 20000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`server exited early (${child.exitCode})`);
-    try {
-      const res = await fetch(`http://127.0.0.1:${P}/api/telemetry/health`);
-      if (res.ok) return;
-    } catch { /* not up yet */ }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  throw new Error("server not ready");
-})();
+const spawned = await spawnTestServer({
+  script: join(__dir, "telemetry-server.mjs"),
+  env,
+  inheritEnv: false, // env already spreads process.env (minus the deleted keys)
+  label: "task-cockpit-routes",
+});
+servers.push(spawned);
+const P = spawned.port;
 
 async function call(method, path, { origin = "http://localhost:5173", body } = {}) {
   const res = await fetch(`http://127.0.0.1:${P}${path}`, {
@@ -678,12 +657,10 @@ try {
 } catch (err) {
   failed++;
   failures.push(`unexpected error — ${err?.stack || err}`);
-  for (const s of servers) if (s.stderrBuf) console.error(`[child stderr] ${s.stderrBuf}`);
+  for (const s of servers) if (s.child.stderrBuf) console.error(`[child stderr] ${s.child.stderrBuf}`);
 } finally {
   for (const socket of sockets) { try { socket.destroy(); } catch { /* gone */ } }
-  for (const c of servers) {
-    if (c.exitCode === null) c.kill();
-  }
+  for (const s of servers) await s.stop();
   await new Promise((resolve) => fakeHost.close(resolve));
 }
 

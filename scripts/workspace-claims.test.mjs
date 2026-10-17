@@ -55,7 +55,8 @@ console.log("\ntwo processes race on one branch: exactly one wins");
     [
       `import { spawn } from "node:child_process";`,
       `const [claims, gitRoot, branch, wa, wb, oa, ob] = process.argv.slice(2);`,
-      `const one = (worktree, owner) => new Promise((res) => {`,
+      `const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);`,
+      `const attempt = (worktree, owner) => new Promise((res) => {`,
       `  const c = spawn(process.execPath, [claims, "claim", "--git-root", gitRoot, "--branch", branch,`,
       `    "--worktree", worktree, "--owner", owner], { stdio: ["ignore", "pipe", "pipe"] });`,
       `  let out = "", err = "";`,
@@ -63,8 +64,26 @@ console.log("\ntwo processes race on one branch: exactly one wins");
       `  c.stderr.on("data", (d) => (err += d));`,
       `  c.on("close", (code) => res({ code, out, err }));`,
       `});`,
+      // Both contenders are still spawned CONCURRENTLY — that is what races the
+      // O_EXCL acquisition. Per attempt the CLI is fail-fast, so a contender
+      // whose openSync lands INSIDE the winner's locked region is refused at
+      // the LOCK layer ("the integration lock ... is held by ..."), which says
+      // nothing about the claim. The verdict this suite proves is the
+      // claim-level one — exactly one winner, the loser refused naming the
+      // winning owner — so ONLY a lock refusal is retried (the holder is alive
+      // and will release); any other verdict is final.
+      `const one = async (worktree, owner) => {`,
+      `  for (let i = 0; i < 40; i++) {`,
+      `    const r = await attempt(worktree, owner);`,
+      `    let body;`,
+      `    try { body = JSON.parse(r.out); } catch { body = { ok: false, error: r.err || "no output" }; }`,
+      `    if (body.ok !== false || !/is held by/.test(body.error ?? "")) return { ...r, body };`,
+      `    sleep(50);`,
+      `  }`,
+      `  return { code: 1, out: "", err: "the lock never freed within the retry bound" };`,
+      `};`,
       `const [a, b] = await Promise.all([one(wa, oa), one(wb, ob)]);`,
-      `console.log(JSON.stringify({ a: { code: a.code, body: a.out }, b: { code: b.code, body: b.out } }));`,
+      `console.log(JSON.stringify({ a: { code: a.code, body: a.body, err: a.err }, b: { code: b.code, body: b.body, err: b.err } }));`,
     ].join("\n"),
   );
   const res = spawnSync(
@@ -74,10 +93,7 @@ console.log("\ntwo processes race on one branch: exactly one wins");
   );
   if (res.status !== 0) fail(`race runner failed: ${res.stderr}`);
   const verdict = JSON.parse(res.stdout);
-  const results = [verdict.a, verdict.b].map((r) => {
-    const body = JSON.parse(r.body);
-    return { ...body, code: r.code };
-  });
+  const results = [verdict.a, verdict.b].map((r) => ({ ...r.body, code: r.code, stderr: r.err }));
   const winners = results.filter((r) => r.ok === true);
   const losers = results.filter((r) => r.ok === false);
   if (winners.length !== 1 || losers.length !== 1) {
@@ -241,8 +257,14 @@ console.log("\nlock held by another process refuses; a crash leaves explicit rec
       `import { claimWorkspace } from "${CLAIMS_URL}";`,
       `const [gitRoot, holderScript] = process.argv.slice(2);`,
       `const holder = spawn(process.execPath, [holderScript, gitRoot], { stdio: ["ignore", "pipe", "pipe"] });`,
+      // Wait until the lock record is COMPLETE and names the holder — not merely
+      // until the file exists. The holder's acquire creates the file (O_EXCL)
+      // BEFORE writing the record; in that window readIntegrationLock returns a
+      // truthy { unreadable: true }, and a contender proceeding then would be
+      // refused with "a holder whose record could not be read" instead of the
+      // holder's name. A record naming this holder proves the write is done.
       `const deadline = Date.now() + 15_000;`,
-      `while (!readIntegrationLock({ gitRoot })) {`,
+      `while (readIntegrationLock({ gitRoot })?.ownerId !== "run-crash:dev-1") {`,
       `  if (Date.now() > deadline) { console.log(JSON.stringify({ ok: false, error: "holder never took the lock" })); process.exit(1); }`,
       `  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);`,
       `}`,
@@ -320,8 +342,11 @@ console.log("managed ensureWorktree is refused while the lock is held, and succe
       `import { ensureWorktree } from "${SUP_LIB_URL}";`,
       `const [gitRoot, holderScript, releaseFlag] = process.argv.slice(2);`,
       `const holder = spawn(process.execPath, [holderScript, gitRoot, releaseFlag], { stdio: ["ignore", "ignore", "pipe"] });`,
+      // Same as the crash suite: wait for a COMPLETE record naming the holder,
+      // not for file existence — the O_EXCL→writeSync window would otherwise
+      // produce a refusal that cannot name "merge:run-x".
       `const deadline = Date.now() + 15_000;`,
-      `while (!readIntegrationLock({ gitRoot })) {`,
+      `while (readIntegrationLock({ gitRoot })?.ownerId !== "merge:run-x") {`,
       `  if (Date.now() > deadline) { console.log(JSON.stringify({ ok: false, error: "holder never took the lock" })); process.exit(1); }`,
       `  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);`,
       `}`,
