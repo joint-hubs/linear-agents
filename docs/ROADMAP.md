@@ -3,7 +3,7 @@ type: roadmap
 status: active
 audience: Mateusz (decision) → delivery owner (orchestrator session, since 2026-10-15); the Supervisor is the frontman for other products only
 created: 2026-07-03
-updated: 2026-10-15
+updated: 2026-10-17
 principle: pull-based — the platform is good enough to WORK WITH; every next feature must be justified by friction observed while running real tasks, not invented ahead of need.
 ---
 
@@ -16,8 +16,9 @@ principle: pull-based — the platform is good enough to WORK WITH; every next f
 Source of truth: Linear project **FENIX** (team Focus). Order = `blocked by` relations; every scheduled task
 carries a due date. **One delivery owner** since 2026-10-15 (Mateusz: "chcę żebyś Ty był odpowiedzialny za
 delivery"): the orchestrator session plans, delegates to Flash workers, opens PRs and keeps Linear and this file in
-sync; Mateusz merges and answers gates. The Supervisor is the frontman for other products (jawnosc-wynagrodzen,
-WSKM) and takes **no Fenix task** from this point; lane B is folded into lane O.
+sync; since 2026-10-17 it also merges to `main` (Mateusz: "masz zgodę na mergowanie") — Mateusz answers gates. The
+Supervisor is the frontman for other products (jawnosc-wynagrodzen, WSKM) and takes **no Fenix task** from this
+point; lane B is folded into lane O.
 
 **Priority: Fenix 1.0.0 with task workspaces as a pillar** (Mateusz, 2026-10-15, option b). PR #71 delivered the
 task-workspace stream (FOC-816: one Supervisor per task, task cockpits, tool profiles, statistics, semantic map)
@@ -26,26 +27,27 @@ Supervisor and two task sessions side by side), and the tag moves from 11-19 to 
 
 | Milestone | Epic | Target | What decides it |
 |---|---|---|---|
-| M1 Foundations | FOC-466 | 2026-11-15 | cost truth done (FOC-760/761/769); egress PR path (FOC-512), deny gaps (FOC-511), model overrides (FOC-607) — lane O, by 10-21 |
+| M1 Foundations | FOC-466 | 2026-11-15 | cost truth done (FOC-760/761/769); egress PR path (FOC-512), deny gaps (FOC-511), model overrides (FOC-607) — merged 2026-10-17 (PRs #77, #78) |
 | M2 Graph engine + PLAN graph | FOC-467 | 2026-11-20 | FOC-801 landed (PR #72) → arm-A attempt 7 on boundary `e0f8b40` → 10 counted runs (Mateusz at the gates) → FOC-759 → FOC-477 report + go/no-go → FOC-712 |
 | M3 Jev at the gates | FOC-468 | 2027-01-16 | after FOC-724, by the FOC-477 verdict |
 | M4 Delivery loop as a graph | FOC-469 | 2027-03-31 | after FOC-724, by the FOC-477 verdict |
-| M5 Slim DEV and Supervisor | FOC-470 | 2027-05-31 | FOC-762 done; agent working state FOC-727–730 after the tag |
+| M5 Slim DEV and Supervisor | FOC-470 | 2027-05-31 | FOC-762 done; agent working state FOC-727–730 merged 2026-10-17 (PRs #85–#87, #91), ahead of the tag; FOC-731 (5/5, measurement) after the tag |
 | M6 Optimization and learning | FOC-471 | 2027-10-31 | data first; no scheduled work |
 | M7 Release discipline and living docs | FOC-714 | 2027-01-15 | after the tag: FOC-715 → … → FOC-723 → FOC-724 (the 1.1 dossier); dates re-planned in December |
 | **M8 Fenix 1.0.0 — portable release** | FOC-768 | **2026-12-03** | lane O → FOC-789 (both modes) → FOC-781 → FOC-790 (tag) |
 
-### Lane O — Fenix 1.0.0 build (delivery owner; Flash workers; Mateusz merges)
+### Lane O — Fenix 1.0.0 build (delivery owner; Flash workers; the delivery owner merges since 10-17)
 
 | Due | Task |
 |---|---|
-| 10-16 | PR #72 FOC-801 landing merged; `main` green again (gate-answer regression from #71, pinned-state test, claims flake); push from the dashboard hardened (`actor: ai` opt-in + token, child deny list) |
-| 10-19 → 10-20 | FOC-512 egress PR path (Urgent) → FOC-511 deny-list gaps (Urgent) |
-| 10-21 | FOC-607 `--model` overrides fail closed |
-| 10-22 → 10-23 | FOC-779 generated artifacts → FOC-780 retention |
-| 10-26 | FOC-772 optional integrations off by default |
-| 10-27 → 10-28 | FOC-771 Node entry points replace the .bat launchers |
-| 10-29 → 10-30 | FOC-802 child isolation in the container |
+| ~~10-16~~ done 10-17 | PR #72 FOC-801 landing merged; `main` green again (gate-answer regression from #71, pinned-state test, claims flake); push from the dashboard hardened (`actor: ai` opt-in + token, child deny list) |
+| ~~10-19 → 10-20~~ done 10-17 | FOC-512 egress PR path → FOC-511 deny-list gaps (PR #77) |
+| ~~10-21~~ done 10-17 | FOC-607 `--model` overrides fail closed (PR #78) |
+| ~~10-22 → 10-23~~ done 10-17 | FOC-779 generated artifacts (PR #80) → FOC-780 retention (PR #79) |
+| ~~10-26~~ done 10-17 | FOC-772 optional integrations off by default (PR #81) |
+| ~~10-27 → 10-28~~ done 10-17 | FOC-771 Node entry points replace the .bat launchers (PR #82; `bin\*.bat` are two-line wrappers) |
+| ~~10-29 → 10-30~~ done 10-17 | FOC-802 child isolation in the container (PR #83) |
+| done 10-17 | Not on the 10-15 plan, landed in the same merge round: FOC-848 task ownership (#76), FOC-840 flaky tests (#84), the FOC-898 multi-Supervisor isolation epic — FOC-899–906 + FOC-602 (#88–#97), M5 FOC-727–730 (#85–#87, #91); post-merge fix #98 (`test-run` sandbox), FOC-913 filed (watch-cost flake under load) |
 | 11-02 → 11-04 | FOC-791 Team → FOC-787 Insights |
 | 11-05 → 11-06 | FOC-808 VM resource hygiene |
 | 11-09 → 11-10 | FOC-839 task workspaces 1.0 hardening (legacy single-session compatibility suite, migration, QUICKSTART for task cockpits, FOC-816 residue) |
@@ -65,12 +67,28 @@ go/no-go (target 11-20) → FOC-712 → M2 done.
 
 ### After the tag
 
-1. **M5 agent working state:** FOC-727 → FOC-728 → FOC-729 → FOC-730 + FOC-621 rest.
+1. **M5 agent working state:** ~~FOC-727 → FOC-728 → FOC-729 → FOC-730~~ (merged 2026-10-17) → FOC-731 (5/5) + FOC-621 rest.
 2. **M7:** FOC-715 → FOC-717 → FOC-718 → FOC-719 → FOC-720 → FOC-721 → FOC-722 → FOC-723 → FOC-724 (1.1 dossier).
    Then by the FOC-477 verdict: M4 (FOC-478 → 382 → 390 → 617 → 622 → 456 → 393 → 453) or M3
    (FOC-391 → 387 → 410 → 384 → 392); both chains are in Linear without dates.
 
-**Fillers (no dates):** FOC-602, FOC-642, FOC-604, FOC-615, FOC-616, FOC-626, FOC-647, FOC-635, FOC-731.
+**Fillers (no dates):** FOC-642, FOC-604, FOC-615, FOC-616, FOC-626, FOC-647, FOC-635, FOC-731, FOC-913 (FOC-602 folded into FOC-903, done).
+
+### Changes on 2026-10-17
+
+- **Merge round:** Mateusz authorised the delivery owner to merge ("masz zgodę na mergowanie, trzeba to ustabilizować");
+  PRs #72–#97 (26) landed on `main` in dependency order, each after `origin/main` was merged into its branch with the
+  affected tests green; then #98 (the `test-run.test.mjs` sandbox list, red on `main` after FOC-905) and #99 (the
+  operator checkout's `modelSettings` for `agents/supervisor/settings.json`). Final gate: full Windows suite 193/195
+  (the two reds = #98 and FOC-913), the Linux lane (CI) green on the #98 tree.
+- **Lane O ahead of plan:** everything scheduled 10-16 → 10-30 is on `main` on 10-17, plus the FOC-898 epic
+  (multi-Supervisor isolation: shared skills, `fenix agent-tools`, scoped-only autonomy, ticket lease, scratch under
+  run dirs, per-task journals, run ownership, Settings → Agent tools) and M5 FOC-727–730. Next dated item stays
+  FOC-791 → FOC-787 (11-02 → 11-04); FOC-839 (11-09) is the next planning item.
+- **Operations:** the native Supervisor was stopped and restarted on the new code at Mateusz's request; the operator
+  checkout is on `main`; the FOC-903 scratch migration and fixture sweep were applied on its state home.
+- **Linear:** FOC-848, 511, 512, 607, 780, 779, 772, 771, 802, 840, 903 (+602), 727–730, 899–906 and the epic
+  FOC-898 are Done with merge notes; FOC-913 (watch-cost flake under suite load) filed under FOC-472.
 
 ### Changes on 2026-10-15
 
