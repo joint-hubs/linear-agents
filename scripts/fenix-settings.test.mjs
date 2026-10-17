@@ -161,6 +161,20 @@ test("validateSettings: routing squad names, entries and lead limits", () => {
   assert.equal(validateSettings({ routing: { web: { lead: "Claude" } } }).ok, true);
 });
 
+// FOC-772: the optional-integrations overlay key — same strictness as routing.
+test("validateSettings: integrations flags, unknown sub-keys and non-booleans", () => {
+  assert.deepEqual(validateSettings({ integrations: {} }), { ok: true, errors: [] });
+  assert.equal(validateSettings({ integrations: { atlas: true, pisi: false, memory: true } }).ok, true);
+  assert.equal(validateSettings({ integrations: { atlas: "yes" } }).ok, false);
+  assert.equal(validateSettings({ integrations: { pisi: 1 } }).ok, false);
+  const unknown = validateSettings({ integrations: { atlas: true, bogus: true } });
+  assert.equal(unknown.ok, false);
+  assert.ok(unknown.errors.some((e) => e.includes("integrations.bogus") && e.includes("unknown key")));
+  // nebul is derived from provider.active — never an overlay flag.
+  assert.equal(validateSettings({ integrations: { nebul: true } }).ok, false);
+  assert.equal(validateSettings({ integrations: "on" }).ok, false);
+  assert.equal(validateSettings({ integrations: null }).ok, false);
+});
 test("validateSettings: retention valid shapes accepted (FOC-780)", () => {
   assert.deepEqual(validateSettings({ ...VALID, retention: {} }), { ok: true, errors: [] });
   assert.equal(validateSettings({ retention: { keepDays: 30 } }).ok, true);
@@ -395,6 +409,25 @@ test("writeSettings: atomic write leaves only settings.json behind", () => {
     const path = settingsFile(dir);
     writeSettings({ provider: { active: "openrouter" } }, { path });
     assert.deepEqual(readdirSync(dir), ["settings.json"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// FOC-772: integrations joins the overlay — merge persists it, an invalid
+// patch is refused with the file untouched (same rules as routing).
+test("writeSettings: integrations merge persists; invalid flag refused untouched", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    writeSettings({ integrations: { atlas: true } }, { path });
+    assert.deepEqual(readSettings({ path }).integrations, { atlas: true });
+    const before = readFileSync(path, "utf8");
+    assert.throws(
+      () => writeSettings({ integrations: { atlas: "yes" } }, { path }),
+      (err) => err.message.includes("validation failed") && err.message.includes("integrations.atlas"),
+    );
+    assert.equal(readFileSync(path, "utf8"), before);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

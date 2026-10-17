@@ -73,9 +73,12 @@ bin\plan.bat             :: start the planning agent (standalone)
 bin\supervisor.bat       :: or start the supervised pipeline instead
 ```
 
-The launchers read `.env` and `config/projects.json` at startup. The first run
-will auto-render `config/atlas-mcp.json` from `config/atlas-mcp.json.template`
-using the `ATLAS_VENV_PYTHON` and `ATLAS_ROOT` env vars you set in `.env`.
+The launchers read `.env` and `config/projects.json` at startup. Atlas is an
+optional integration and is **off by default**: no `config/atlas-mcp.json` is
+rendered and no launcher passes `--mcp-config`. To enable it, run
+`node scripts/fenix-settings.mjs set integrations '{"atlas":true}'` and put the
+`ATLAS_VENV_PYTHON` and `ATLAS_ROOT` env vars in `.env` — the first run then
+auto-renders `config/atlas-mcp.json` from `config/atlas-mcp.json.template`.
 
 ## Stack
 

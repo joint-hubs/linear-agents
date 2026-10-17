@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readSettings } from "./fenix-settings.mjs";
 import { hostBase, hostRequest, FAST_TIMEOUT_MS, SLOW_TIMEOUT_MS } from "./supervisor-host-client.mjs";
-import { graphql } from "./linear-client.mjs";
+import { graphql, workspaceEnabled, integrationOffMessage } from "./linear-client.mjs";
 import { readRegistry, supervisorStateHome } from "./supervisor-lib.mjs";
 import { hostTokenPath, squadConfigDir } from "./fenix-paths.mjs";
 import { resolveTaskKey } from "./task-sessions.mjs";
@@ -73,8 +73,23 @@ const BODY_CAP = 16 * 1024;
 // the board library's shape, imported so route and library can never drift.
 
 // The board's workspace (the /api/linear/queue default); FENIX_WORK_WORKSPACE
-// overrides it for tests.
-const workWorkspace = () => process.env.FENIX_WORK_WORKSPACE || "jointhubs";
+// overrides it for tests. LINEAR_WORKSPACE is deliberately NOT consulted here
+// — chooseApiKey falls back to it for the KEY only, so the queue default can
+// only become pisi through FENIX_WORK_WORKSPACE. FOC-772: even then, a pisi
+// value with the integration off falls back to jointhubs, warned once (a
+// misconfiguration the operator sees, not a silent swap on every request).
+let pisiWorkspaceWarned = false;
+export const workWorkspace = () => {
+  const ws = process.env.FENIX_WORK_WORKSPACE || "jointhubs";
+  if (ws === "pisi" && !workspaceEnabled("pisi")) {
+    if (!pisiWorkspaceWarned) {
+      pisiWorkspaceWarned = true;
+      console.warn(`[work] ${integrationOffMessage("pisi")} — the queue falls back to jointhubs`);
+    }
+    return "jointhubs";
+  }
+  return ws;
+};
 
 // The hand-off text cap passed to startText: the confirm dialog shows the
 // whole text and the Start POST forwards it inside a 16 KB body, so the issue
@@ -242,6 +257,7 @@ export function resetWorkRoutesState({ now, ttlMs } = {}) {
   costRefresh = null;
   factsCache = null;
   reconciliationMemo.clear();
+  pisiWorkspaceWarned = false; // FOC-772: the one-time fallback warn re-arms for the next test
 }
 
 // ── the TEST-ONLY Linear fixture ─────────────────────────────────────────────

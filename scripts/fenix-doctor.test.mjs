@@ -214,6 +214,7 @@ console.log("\nfenix-doctor: FOC-803 checks only run in the container");
 test("without FENIX_IN_CONTAINER the uid checks are absent", async () => {
   const checks = await runChecks({
     env: {},
+    settings: {},
     spawn: () => ({ status: 0, stdout: "fake 1.0\n" }),
     fsImpl: fs,
     retention: async () => null,
@@ -227,6 +228,7 @@ test("with FENIX_IN_CONTAINER=1 both uid checks run, with injected paths", async
   try {
     const checks = await runChecks({
       env: { ...IN_CONTAINER, LA_PROJECTS_FILE: path.join(dir, "projects.json") },
+      settings: {},
       spawn: fakeSpawn,
       fsImpl: fs,
       secretsDir: dir,
@@ -251,6 +253,7 @@ console.log("\nfenix-doctor: /data volume uid fix (FOC-803 re-own)");
 test("a failing /data dir check in the container names the one-time re-own fix", async () => {
   const checks = await runChecks({
     env: { ...IN_CONTAINER, LA_TELEMETRY_HOME: "/data/telemetry" },
+    settings: {},
     spawn: fakeSpawn,
     fsImpl: fsWithDeniedDir("/data/telemetry"),
     retention: async () => null,
@@ -267,6 +270,7 @@ test("a failing dir OUTSIDE /data keeps the generic volume fix", async () => {
   try {
     const checks = await runChecks({
       env: { ...IN_CONTAINER, LA_TELEMETRY_HOME: dir },
+      settings: {},
       spawn: fakeSpawn,
       fsImpl: fsWithDeniedDir(dir),
       retention: async () => null,
@@ -284,6 +288,7 @@ test("without FENIX_IN_CONTAINER the re-own fix never appears", async () => {
   try {
     const checks = await runChecks({
       env: { LA_TELEMETRY_HOME: dir },
+      settings: {},
       spawn: fakeSpawn,
       fsImpl: fsWithDeniedDir(dir),
       retention: async () => null,
@@ -303,6 +308,72 @@ test("summarize turns a uid-mismatch fail into ok: false", () => {
     { name: "keys", status: "warn", detail: "present" },
   ]);
   assert.equal(ok, false);
+});
+
+console.log("\nfenix-doctor: optional integrations (FOC-772)");
+
+test("all integrations off → ok 'none enabled'", async () => {
+  const checks = await runChecks({ env: {}, settings: {}, spawn: fakeSpawn, fsImpl: fs });
+  const c = checks.find((c) => c.name === "integrations");
+  assert.ok(c, "integrations check missing");
+  assert.equal(c.status, "ok");
+  assert.equal(c.detail, "none enabled");
+});
+
+test("the integrations check sits directly after the key checks", async () => {
+  const checks = await runChecks({ env: {}, settings: {}, spawn: fakeSpawn, fsImpl: fs });
+  const lastIndex = checks.map((c) => c.name).lastIndexOf("GITHUB_TOKEN") + 1;
+  assert.equal(checks[lastIndex].name, "integrations");
+});
+
+test("atlas enabled without its env → warn naming both variables and the fix", async () => {
+  const checks = await runChecks({
+    env: {},
+    settings: { integrations: { atlas: true } },
+    spawn: fakeSpawn,
+    fsImpl: fs,
+  });
+  const c = checks.find((c) => c.name === "integrations");
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /ATLAS_ROOT/);
+  assert.match(c.detail, /ATLAS_VENV_PYTHON/);
+  assert.match(c.fix, /\.env|fenix keys/);
+});
+
+test("pisi enabled with the key present → ok listing the prerequisite", async () => {
+  const checks = await runChecks({
+    env: { LINEAR_API_KEY_PISI: "lin_api_x" },
+    settings: { integrations: { pisi: true } },
+    spawn: fakeSpawn,
+    fsImpl: fs,
+  });
+  const c = checks.find((c) => c.name === "integrations");
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /pisi \(LINEAR_API_KEY_PISI\)/);
+});
+
+test("memory enabled → ok with no prerequisite named", async () => {
+  const checks = await runChecks({
+    env: {},
+    settings: { integrations: { memory: true } },
+    spawn: fakeSpawn,
+    fsImpl: fs,
+  });
+  const c = checks.find((c) => c.name === "integrations");
+  assert.equal(c.status, "ok");
+  assert.equal(c.detail, "memory");
+});
+
+test("an invalid settings object warns and never throws", async () => {
+  const checks = await runChecks({
+    env: {},
+    settings: { integrations: { atlas: "yes" } },
+    spawn: fakeSpawn,
+    fsImpl: fs,
+  });
+  const c = checks.find((c) => c.name === "integrations");
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /settings invalid/);
 });
 
 // tmpdir() itself, so the "no-such-dir" paths stay inside a writable parent.

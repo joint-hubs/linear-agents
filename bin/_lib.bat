@@ -26,20 +26,39 @@ set "_PRE_LINEAR_WORKSPACE=%LINEAR_WORKSPACE%"
 REM load .env (eol=# skips comments, blank lines ignored)
 if exist "%ROOT%\.env" for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%ROOT%\.env") do set "%%A=%%B"
 
-REM Render config/atlas-mcp.json from config/atlas-mcp.json.template using ATLAS_VENV_PYTHON
-REM and ATLAS_ROOT from .env. The generated file is gitignored; the template is portable.
-REM Unresolved placeholders are left as-is so a missing env var surfaces immediately.
+REM Atlas is an optional integration (FOC-772): render config/atlas-mcp.json
+REM from config/atlas-mcp.json.template using ATLAS_VENV_PYTHON and ATLAS_ROOT
+REM from .env ONLY when scripts/fenix-integrations.mjs says the integration is
+REM on. When it is off, a rendered file left over from an earlier run is deleted
+REM (the file is gitignored, generated) so no launcher passes --mcp-config at a
+REM server that is absent. The generated file is gitignored; the template is
+REM portable. Unresolved placeholders are left as-is so a missing env var
+REM surfaces immediately.
 REM We delegate to node here because cmd.exe's set STR:OLD=NEW substitution mangles
 REM backslashes in env-var values (single-pass escape semantics), and substituting
 REM within double quotes inside a JSON file is fragile. Node is already on PATH and
 REM the cost is ~30ms — cheaper than debugging the alternative.
 REM Backslashes in substituted values are normalized to JSON-escaped form (\\)
 REM so users can paste Windows paths in .env without thinking about JSON syntax.
-if exist "%ROOT%\config\atlas-mcp.json.template" (
-    if not exist "%ROOT%\config\atlas-mcp.json" (
-        node -e "const fs=require('fs'),p=require('path');const t=fs.readFileSync(p.join(process.cwd(),'config','atlas-mcp.json.template'),'utf8');const r=t.replace(/\{\{([A-Z_][A-Z0-9_]*)\}\}/g,(m,n)=>{const v=Object.prototype.hasOwnProperty.call(process.env,n)?process.env[n]:m;return typeof v==='string'?v.replace(/\\/g,'\\\\'):v;});try{JSON.parse(r);}catch(e){process.stderr.write('atlas-mcp.json template render produced invalid JSON: '+e.message+'\n');process.exit(1);}fs.writeFileSync(p.join(process.cwd(),'config','atlas-mcp.json'),r);" 2>nul
-        if errorlevel 1 (
-            echo [WARN] Nie udalo sie wyrenderowac config\atlas-mcp.json z template. Sprawdz ATLAS_VENV_PYTHON i ATLAS_ROOT w .env.
+node "%ROOT%\scripts\fenix-integrations.mjs" enabled atlas >nul 2>nul
+if errorlevel 1 (
+    REM exit 1 = integration off; exit 2 = the check itself failed (settings
+    REM error or node missing) — a corrupt overlay reads as source "invalid"
+    REM and exits 2, never as a plain off. Both mean Atlas off, never abort
+    REM the launcher.
+    if errorlevel 2 (
+        echo [WARN] Atlas integration check failed - treating Atlas as off.
+    ) else (
+        echo [info] Atlas integration off - config\atlas-mcp.json not rendered
+    )
+    if exist "%ROOT%\config\atlas-mcp.json" del "%ROOT%\config\atlas-mcp.json" >nul 2>nul
+) else (
+    if exist "%ROOT%\config\atlas-mcp.json.template" (
+        if not exist "%ROOT%\config\atlas-mcp.json" (
+            node -e "const fs=require('fs'),p=require('path');const t=fs.readFileSync(p.join(process.cwd(),'config','atlas-mcp.json.template'),'utf8');const r=t.replace(/\{\{([A-Z_][A-Z0-9_]*)\}\}/g,(m,n)=>{const v=Object.prototype.hasOwnProperty.call(process.env,n)?process.env[n]:m;return typeof v==='string'?v.replace(/\\/g,'\\\\'):v;});try{JSON.parse(r);}catch(e){process.stderr.write('atlas-mcp.json template render produced invalid JSON: '+e.message+'\n');process.exit(1);}fs.writeFileSync(p.join(process.cwd(),'config','atlas-mcp.json'),r);" 2>nul
+            if errorlevel 1 (
+                echo [WARN] Nie udalo sie wyrenderowac config\atlas-mcp.json z template. Sprawdz ATLAS_VENV_PYTHON i ATLAS_ROOT w .env.
+            )
         )
     )
 )

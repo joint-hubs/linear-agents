@@ -737,6 +737,38 @@ try {
   }
 }
 
+// ── the queue's workspace default vs the pisi switch (FOC-772) ───────────────
+
+{
+  const { workWorkspace, resetWorkRoutesState } = await import("./work-routes.mjs");
+  const settingsOn = join(dir, "settings-on.json");
+  const settingsOff = join(dir, "settings-off.json");
+  writeFileSync(settingsOn, JSON.stringify({ integrations: { pisi: true } }));
+  writeFileSync(settingsOff, JSON.stringify({ integrations: { pisi: false } }));
+  const saved = { ws: process.env.FENIX_WORK_WORKSPACE, settings: process.env.LA_SETTINGS_FILE };
+  try {
+    process.env.FENIX_WORK_WORKSPACE = "pisi";
+    process.env.LA_SETTINGS_FILE = settingsOff;
+    check("unit: queue default with pisi off falls back to jointhubs",
+      workWorkspace() === "jointhubs", `got ${workWorkspace()}`);
+    process.env.LA_SETTINGS_FILE = settingsOn;
+    check("unit: queue default stays pisi when the integration is on",
+      workWorkspace() === "pisi", `got ${workWorkspace()}`);
+    delete process.env.FENIX_WORK_WORKSPACE;
+    check("unit: without FENIX_WORK_WORKSPACE the default is jointhubs",
+      workWorkspace() === "jointhubs", `got ${workWorkspace()}`);
+  } catch (err) {
+    failed++;
+    failures.push(`workspace-default unit block — ${err?.stack || err}`);
+  } finally {
+    if (saved.ws === undefined) delete process.env.FENIX_WORK_WORKSPACE;
+    else process.env.FENIX_WORK_WORKSPACE = saved.ws;
+    if (saved.settings === undefined) delete process.env.LA_SETTINGS_FILE;
+    else process.env.LA_SETTINGS_FILE = saved.settings;
+    resetWorkRoutesState(); // re-arms the one-time fallback warn
+  }
+}
+
 // ── the publish routes end-to-end, in-process (FOC-788) ──────────────────────
 //
 // handleWorkRoute with fake req/res/ctx against the REAL git fixture: the

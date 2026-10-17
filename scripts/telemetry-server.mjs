@@ -19,7 +19,7 @@ import { dirname, join, extname } from 'node:path';
 // expressible via the team-scoped linear-query CLI, so we call graphql()
 // directly. No MCP, no new client (control-plane-plan §3.1, DoD "reuse
 // scripts/linear-query.mjs" = reuse the Linear query layer).
-import { loadEnv, graphql, chooseApiKey } from './linear-client.mjs';
+import { loadEnv, graphql, chooseApiKey, workspaceEnabled, integrationOffMessage, issueLookupLegs, queueTargetsPisi } from './linear-client.mjs';
 import { projectsConfigPath } from './fenix-paths.mjs';
 import * as telemetryStore from './telemetry-store.mjs';
 import { backfill, ingestKnownRuns, sweepSettledGrowth } from './telemetry-ingest.mjs';
@@ -575,6 +575,21 @@ let queueCache = null; // { workspace, ts, payload }
 // returns a 200-grade degrade payload (tasks:[], error note) so the dashboard
 // stays up and --smoke passes without network.
 async function fetchLinearQueue(workspace) {
+  // FOC-772: the integration switch gates pisi before any key lookup — a
+  // pisi-targeted queue (explicit ?workspace=pisi or the LINEAR_WORKSPACE env
+  // default when the arg is absent) with the flag off degrades with the
+  // operator hint (same 200/tasks:[] shape as a missing key), never a 5xx.
+  // The default jointhubs queue is never gated: chooseApiKey would otherwise
+  // refuse an inherited pisi env default and throw past this "never throws"
+  // function, so the env case degrades exactly like the explicit one.
+  if (queueTargetsPisi(workspace) && !workspaceEnabled('pisi')) {
+    return {
+      workspace,
+      tasks: [],
+      error: integrationOffMessage('pisi'),
+      fetchedAt: null,
+    };
+  }
   // Pass the workspace through to graphql() so the request authenticates
   // against the RIGHT workspace key (?workspace=pisi → PISI key → pisi teams),
   // not the LINEAR_WORKSPACE env default. JOI-68 review round 1: the env-only
@@ -771,14 +786,39 @@ function loadProjectsConfig() {
   }
 }
 
+// Warn once per process: LINEAR_WORKSPACE=pisi with the pisi integration off
+// is a misconfiguration the operator must see once, not on every launch.
+let pisiEnvIgnoredWarned = false;
+
 // taskId's workspace isn't derivable from the identifier alone (unlike
 // /api/linear/queue, which takes workspace as an explicit caller param) — try
 // jointhubs first (the common case), then pisi. A cross-workspace lookup just
 // returns issue:null (not an error), so this is one harmless extra call, not
-// a failure path.
+// a failure path. FOC-772: leg selection lives in linear-client's
+// issueLookupLegs (unit-tested there — this server has no test seam for this
+// function): the pisi leg only while the integration switch is on, and with
+// it off a LINEAR_WORKSPACE=pisi env default is bypassed (the leg runs as
+// jointhubs explicitly, warned once) instead of poisoning the whole lookup
+// with an IntegrationOffError. A pisi-only id resolves as "not found"
+// (undefined), never an error row.
 async function findIssueProject(taskId) {
-  for (const workspace of [undefined, 'pisi']) {
-    const apiKey = chooseApiKey(workspace);
+  const { legs, warnPisiEnvIgnored } = issueLookupLegs();
+  if (warnPisiEnvIgnored && !pisiEnvIgnoredWarned) {
+    pisiEnvIgnoredWarned = true;
+    console.warn('[launch] LINEAR_WORKSPACE=pisi is ignored — the pisi integration is off (FOC-772)');
+  }
+  for (const workspace of legs) {
+    let apiKey;
+    try {
+      apiKey = chooseApiKey(workspace);
+    } catch (err) {
+      // Defense in depth: issueLookupLegs never returns a leg chooseApiKey
+      // would refuse, so this should not fire — logged, and the lookup
+      // resolves as not-found (resolveTaskRepo's warning), never a thrown
+      // error and never a silent jointhubs fallback.
+      console.error('[launch] linear workspace lookup:', err.message);
+      return undefined;
+    }
     if (!apiKey) continue;
     try {
       const timeout = new Promise((_, reject) =>

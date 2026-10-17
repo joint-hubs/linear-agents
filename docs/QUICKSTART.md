@@ -197,6 +197,13 @@ The Settings area in the left navigation covers what used to require a
   deleted until `fenix retention prune` runs; the CLI still does the apply
   and prune: `fenix retention show|apply|prune [--dry-run]` (prune is
   refused while retention keeps everything).
+- **Optional integrations** (FOC-772, no dashboard tab): Atlas, the second
+  (pisi) Linear workspace and the personal memory index are **off by
+  default** — a stock install has none of them. Turn one on with
+  `fenix integrations enable <name>` (`atlas` | `pisi` | `memory`) or the
+  overlay key `integrations`; plain `fenix integrations` shows what is on
+  and what each enabled one still needs. Nebul is not a flag — it is chosen
+  through the provider (see **Provider & routing** above).
 - **Squads & prompts** is the v1 Prompts screen as a tab (`/prompts`): role
   edits land on the `/data/agents` volume and take effect at the next spawn.
 - **Artifacts** (`/settings/artifacts`): the repo's generated artifacts (model
