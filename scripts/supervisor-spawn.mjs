@@ -34,7 +34,7 @@ import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 import {
   actorIdFor,
@@ -46,7 +46,7 @@ import { isRuntimeToken } from "./runtime-events.mjs";
 
 import { buildBranchName } from "./dev-branch.mjs";
 import { settingsPath, squadConfigDir } from "./fenix-paths.mjs";
-import { childModelFor, childProviderEnv } from "./child-model.mjs";
+import { assertModelPolicy, childModelFor, childProviderEnv } from "./child-model.mjs";
 import { readSettings } from "./fenix-settings.mjs";
 import { ensureCodegraphReady } from "./codegraph-runtime.mjs";
 import { approveGuardedCodegraphForProject } from "./mcp-enable.mjs";
@@ -72,6 +72,7 @@ import {
   listWorktrees,
   printBgWaitCeilingEnv,
   readHeld,
+  hasPriceRow,
   parseArgs,
   pinnedStatePrologue,
   readJsonOr,
@@ -88,6 +89,10 @@ import {
 import { loadGraph } from "./graph-validate.mjs";
 import { normalizeFocus, setFocus } from "./supervisor-focus.mjs";
 import { RUN_ID_RE } from "./supervisor-current-run.mjs";
+import { agentStatePath, openAgentState } from "./agent-state.mjs";
+import { loadRegistry, registryPath } from "./agent-state-registry.mjs";
+import { seedPinnedState } from "./agent-state-seed.mjs";
+import { currentOwner, loadOwnership, recordOwnershipHold } from "./task-ownership.mjs";
 
 // A graph we cannot read means no topology: no per-node limit and no consumer to
 // apply backpressure from. Triage would already have refused a broken graph, so
@@ -222,6 +227,25 @@ if (hasCandidate) {
   }
 }
 
+// ── FOC-607: the --model policy, judged before anything is created ───────────
+// Sits with the other argument checks, ABOVE the admission/hold branch below:
+// a banned or unpriced --model must be refused whether the node is at capacity
+// or not. Left after admission, a refused request consumed a hold record (with
+// the original argv) and was then rejected on replay — the request was lost.
+// This judges only the explicit --model request; the child's model itself is
+// still resolved by childModelFor below (precedence unchanged, FOC-762).
+// hasPriceRow honours the LA_MODELS_ROOT test seam. The first side effects
+// below are the run dir (ensureRunDir), the held-request record and the
+// workspace claim — none of which a refused spawn reaches.
+const requestedModel = args.model && args.model !== true ? String(args.model) : null;
+const policyRefusal = assertModelPolicy({ squad, requestedModel, hasPriceRow });
+if (policyRefusal) {
+  failJson(`model policy refused the spawn: ${policyRefusal.message}`, {
+    error: policyRefusal.error,
+    message: policyRefusal.message,
+  });
+}
+
 // ── fail-closed: the verdict comes before the spawn ──────────────────────────
 // AC-2. Spawning without a recorded triage verdict is how a Supervisor ends up
 // running a squad nobody chose, with no record of why.
@@ -229,6 +253,62 @@ if (!existsSync(triagePath(runId))) {
   failJson(`no triage verdict recorded for run ${runId} — run supervisor-triage.mjs record first`, {
     expected: triagePath(runId),
   });
+}
+
+// ── ownership gate (FOC-848) ─────────────────────────────────────────────────
+// On a restricted install, a triage verdict is only a spawn licence when it
+// was recorded BY THIS OWNER FOR THIS TASK and carries an allowed stamp —
+// otherwise two actors end up on one branch and one Linear issue. The acting
+// owner is resolved once here and rides the child env below, so every child
+// knows its owner explicitly. A broken config is fail-closed, and there is no
+// flag that bypasses this gate.
+const taskOwner = (() => {
+  try {
+    return currentOwner();
+  } catch (err) {
+    failJson(err.message, { code: "ownership-config" });
+  }
+})();
+const ownershipConfig = (() => {
+  try {
+    return loadOwnership();
+  } catch (err) {
+    failJson(err.message, { code: "ownership-config" });
+  }
+})();
+if (ownershipConfig.restricted) {
+  const triage = (() => {
+    try {
+      return JSON.parse(readFileSync(triagePath(runId), "utf8"));
+    } catch (err) {
+      failJson(`${triagePath(runId)} exists but is not readable JSON: ${err.message.split("\n")[0]}`);
+    }
+  })();
+  const stamped =
+    String(triage?.issue ?? "").toLowerCase() === String(taskId).toLowerCase() &&
+    triage?.ownership?.allowed === true &&
+    triage?.ownership?.owner === taskOwner;
+  if (!stamped) {
+    // Hold and refuse BEFORE anything is written — no child, no registry
+    // entry, no worktree. The hold is idempotent per run+issue, so a retried
+    // spawn does not pile up duplicates.
+    const hold = runId
+      ? recordOwnershipHold({
+          runId,
+          issueId: taskId,
+          result: { verdict: "unverified", allowed: false, owner: taskOwner, project: null },
+        })
+      : null;
+    failJson(
+      `no ownership stamp for ${taskId} in ${triagePath(runId)} — triage was not recorded by owner "${taskOwner}", or carries no allowed stamp`,
+      {
+        code: "ownership-unverified",
+        hint: `record triage for ${taskId} as owner ${taskOwner} first`,
+        ownership: { verdict: "unverified", allowed: false, owner: taskOwner, project: null },
+        hold: hold?.id ?? null,
+      },
+    );
+  }
 }
 
 ensureRunDir(runId);
@@ -756,7 +836,9 @@ const knownQuirks = asArray(args["known-quirk"]);
 const squadSettings = readJsonOr(join(squadConfigDir(squad), "settings.json"), {});
 const extraSettings = args.settings ? readJsonOr(args.settings, {}) : {};
 const childSettings = childSettingsPath(runId, childId);
-atomicWriteJSON(childSettings, buildChildSettings(squadSettings, extraSettings));
+// 0644 (FOC-802 M3): a run-root file the child reads (`claude --settings`) but
+// must never rewrite — it carries the P9 deny list.
+atomicWriteJSON(childSettings, buildChildSettings(squadSettings, extraSettings), { mode: 0o644 });
 
 // ── the model the child will actually run on (FOC-762/FOC-773) ───────────────
 // The child's model is DECIDED here, never inherited: the old logic fell back
@@ -811,7 +893,8 @@ const providerEntry =
 
 const modelPick = childModelFor({
   squad,
-  explicitModel: args.model && args.model !== true ? String(args.model) : null,
+  // Already policy-checked above (FOC-607) — this is the same value, reused.
+  explicitModel: requestedModel,
   settings,
   modelsConfig,
   provider: providerName,
@@ -904,7 +987,7 @@ writeRegistry(runId, registry);
 let telemetryRunId = null;
 try {
   if (process.env.LA_SUPERVISOR_NO_TELEMETRY === "1") throw new Error("telemetry disabled");
-  const env = { ...process.env, LA_TASK_ID: taskId, CLAUDE_CONFIG_DIR: squadConfigDir(squad) };
+  const env = { ...process.env, LA_TASK_ID: taskId, LA_TASK_OWNER: taskOwner, CLAUDE_CONFIG_DIR: squadConfigDir(squad) };
   telemetryRunId = execFileSync(
     process.execPath,
     [join(ROOT, "scripts", "run-manifest.mjs"), "gen-id", squad],
@@ -966,6 +1049,38 @@ const prologue = pinnedStatePrologue({
   knownQuirks,
   referencedFiles,
 });
+// FOC-729: the same spawn facts the prologue carries are seeded into the
+// working-state store, so a SessionStart hook can re-inject them after a
+// compaction. A store problem never blocks a spawn — it is reported and
+// recorded, nothing more.
+let workingStateSeeded = null;
+try {
+  const store = openAgentState(agentStatePath(process.env));
+  try {
+    const { seeded } = seedPinnedState(store, {
+      namespace: `child:${runId}/${childId}`,
+      registry: loadRegistry(registryPath(process.env)),
+      values: {
+        repo: basename(gitRoot),
+        // LA_ROOT only, like the prologue: an unset LA_ROOT seeds nothing here
+        // and the registry's la_root chain fills the key at hook time.
+        la_root: process.env.LA_ROOT || null,
+        run_id: runId,
+        role: squad,
+        issue: taskId,
+        worktree: worktree.worktree,
+        branch: worktree.branch,
+        base_revision: worktree.baseRevision,
+      },
+    });
+    workingStateSeeded = { at: new Date().toISOString(), keys: seeded };
+  } finally {
+    store.close();
+  }
+} catch (err) {
+  process.stderr.write(`agent-state: seeding skipped (${err.message})\n`);
+  workingStateSeeded = { at: new Date().toISOString(), keys: null, error: err.message };
+}
 // The CodeGraph block rides the same prompt file, AFTER the pinned-state
 // prologue — a separate section, so the FOC-286 ten-field shape stays fixed.
 // The turn-end contract (FOC-522) rides the same way: one more separate
@@ -975,7 +1090,7 @@ writeFileSync(promptFile, `${prologue}\n\n${codegraph.kickoff}\n\n${TURN_END_CON
 // The registry entry recorded what was verified; now it can also say WHAT THE
 // CHILD WAS TOLD — the prologue verbatim. Patched while spawn still owns the
 // entry (the watcher has not launched), so the single-writer discipline holds.
-updateChild(runId, childId, { pinnedStateVerification: { ...pinnedVerification, prologue } });
+updateChild(runId, childId, { pinnedStateVerification: { ...pinnedVerification, prologue }, workingStateSeeded });
 
 const watcherArgs = [
   join(ROOT, "scripts", "supervisor-watch.mjs"),
@@ -1028,6 +1143,9 @@ const childEnv = {
   LA_SUPERVISOR_RUN: runId,
   LA_SUPERVISOR_CHILD: childId,
   LA_TASK_ID: taskId,
+  // FOC-848: the child knows its owner explicitly, not by inference — the
+  // same value the ownership gate above verified the triage stamp against.
+  LA_TASK_OWNER: taskOwner,
   // The child inherits the Supervisor's environment, and bin/supervisor.bat sets
   // RUN_ID/LA_RUN_ID to the SUPERVISOR's telemetry run. telemetry-hook.mjs reads
   // exactly those on SessionStart, so without this override the child's session,

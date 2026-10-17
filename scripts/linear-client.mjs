@@ -19,6 +19,13 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
+// FOC-772: the optional-integrations switch gates the pisi workspace before
+// any key lookup — the reading lives in fenix-integrations.mjs, the overlay
+// path in fenix-paths/fenix-settings (no import cycles: none of them imports
+// back into linear-client).
+import { settingsPath } from "./fenix-paths.mjs";
+import { readSettings } from "./fenix-settings.mjs";
+import { integrationEnabled } from "./fenix-integrations.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -55,6 +62,64 @@ export function loadEnv() {
 
 export const ENDPOINT = "https://api.linear.app/graphql";
 
+// ---------------------------------------------------------------------------
+// Workspace availability (FOC-772)
+// ---------------------------------------------------------------------------
+
+/**
+ * The operator-facing refusal for a disabled workspace. One definition — the
+ * board error rows, the queue degrade payload and the publisher's exit all
+ * surface this string verbatim, so the fix is stated the same way everywhere.
+ * @param {string} workspace
+ * @returns {string}
+ */
+export function integrationOffMessage(workspace) {
+  return workspace === "pisi"
+    ? `the pisi workspace is off — enable it with: node scripts/fenix-settings.mjs set integrations '{"pisi":true}'`
+    : `the ${workspace} workspace is off`;
+}
+
+/**
+ * Typed refusal for a request that names a workspace whose integration switch
+ * is off. Callers match on `code` (never on the message text); `workspace`
+ * says which switch to turn on. Thrown BEFORE any key lookup or network call.
+ */
+export class IntegrationOffError extends Error {
+  constructor(workspace) {
+    super(integrationOffMessage(workspace));
+    this.name = "IntegrationOffError";
+    this.code = "integration-off";
+    this.workspace = workspace;
+  }
+}
+
+/**
+ * Whether a workspace may be talked to at all (FOC-772). The default
+ * workspace (jointhubs) is always on — it is core, not an integration. pisi
+ * reads the `integrations.pisi` overlay flag, which defaults to false.
+ * Fail-closed: an invalid overlay reads as off (readIntegrationsSafe, one
+ * warn per process) — this never throws for a corrupt settings file, so the
+ * per-request callers (work routes, board, findIssueProject) cannot be taken
+ * down by a bad overlay.
+ *
+ * @param {string} workspace  "jointhubs" | "pisi" (unknown names follow the
+ *   default-workspace rule: always on, key selection stays chooseApiKey's job).
+ * @param {object} [opts]
+ * @param {object} [opts.env] - environment map (default: process.env); its
+ *   LA_SETTINGS_FILE / LA_PROJECTS_FILE pick the overlay path.
+ * @param {object} [opts.settings] - pre-read settings overlay; when omitted
+ *   the overlay is read through the memoized cachedIntegrations read (5 s TTL
+ *   keyed by the settings path + mtime).
+ * @returns {boolean}
+ */
+export function workspaceEnabled(workspace, { env = process.env, settings } = {}) {
+  if (workspace !== "pisi") return true;
+  return integrationEnabled("pisi", {
+    env,
+    settings: settings !== undefined ? settings : readSettings({ path: settingsPath(env) }),
+  });
+}
+
 /**
  * Choose the Linear API key based on workspace.
  * @param {string} [workspace]  Explicit workspace ("jointhubs" | "pisi").
@@ -64,14 +129,63 @@ export const ENDPOINT = "https://api.linear.app/graphql";
  *   the env-only path silently returned jointhubs data for ?workspace=pisi).
  *   When omitted/undefined, falls back to LINEAR_WORKSPACE env (jointhubs by
  *   default) — preserves the behavior linear-query.mjs / linear-ops.mjs rely on.
+ * @param {object} [opts] - forwarded to workspaceEnabled ({ env, settings })
+ *   so callers with a pre-read overlay can skip the file read.
  * @returns {string|undefined}
+ * @throws {IntegrationOffError} when the resolved workspace is pisi and the
+ *   integration is off (FOC-772) — a misconfiguration the operator must see,
+ *   thrown BEFORE the key is looked at, never a silent jointhubs fallback.
  */
-export function chooseApiKey(workspace) {
+export function chooseApiKey(workspace, opts = {}) {
   const ws = workspace || process.env.LINEAR_WORKSPACE;
   if (ws === "pisi") {
+    if (!workspaceEnabled("pisi", opts)) throw new IntegrationOffError("pisi");
     return process.env.LINEAR_API_KEY_PISI;
   }
   return process.env.LINEAR_API_KEY;
+}
+
+/**
+ * The workspaces an issue lookup may query, in order. A taskId's workspace is
+ * not derivable from the identifier (unlike an explicit ?workspace= param),
+ * so the lookup tries the default workspace first, then pisi.
+ *
+ * FOC-772: the pisi leg exists only while the integration switch is on. With
+ * it off the lookup is default-workspace-only — and the default leg must NOT
+ * inherit a LINEAR_WORKSPACE=pisi value: chooseApiKey would refuse it and,
+ * caught by the caller, poison the WHOLE lookup (the jointhubs leg never
+ * ran). The leg then runs as jointhubs explicitly and `warnPisiEnvIgnored`
+ * tells the caller to warn once that LINEAR_WORKSPACE=pisi is ignored.
+ *
+ * Exported (and unit-tested in linear-client.test.mjs) because the telemetry
+ * server's findIssueProject has no test seam of its own.
+ *
+ * @param {object} [opts] - forwarded to workspaceEnabled ({ env, settings })
+ * @returns {{ legs: Array<string|undefined>, warnPisiEnvIgnored: boolean }}
+ *   legs entries are graphql()/chooseApiKey workspace args: undefined follows
+ *   the LINEAR_WORKSPACE env default.
+ */
+export function issueLookupLegs({ env = process.env, settings } = {}) {
+  if (workspaceEnabled("pisi", { env, settings })) {
+    return { legs: [undefined, "pisi"], warnPisiEnvIgnored: false };
+  }
+  return env.LINEAR_WORKSPACE === "pisi"
+    ? { legs: ["jointhubs"], warnPisiEnvIgnored: true }
+    : { legs: [undefined], warnPisiEnvIgnored: false };
+}
+
+/**
+ * Whether a queue request targets the pisi workspace: an explicit `pisi`
+ * workspace arg, or the LINEAR_WORKSPACE env default when the arg is absent.
+ * Exported for the same reason as issueLookupLegs — fetchLinearQueue's
+ * pre-check has no test seam in the telemetry server.
+ *
+ * @param {string|undefined} workspace - the caller's explicit workspace
+ * @param {object} [env] - environment map (default: process.env)
+ * @returns {boolean}
+ */
+export function queueTargetsPisi(workspace, env = process.env) {
+  return (workspace || env.LINEAR_WORKSPACE) === "pisi";
 }
 
 /**
@@ -184,7 +298,7 @@ export async function resolveTeam(teamKey, workspace) {
  *    on identifier (case-insensitive). Never use search as primary.
  *
  * @param {string} identifier  Issue identifier, e.g. "FEN-12".
- * @returns {Promise<{id:string, identifier:string, title:string, url:string, state:{id:string,name:string,type:string}}>}
+ * @returns {Promise<{id:string, identifier:string, title:string, url:string, state:{id:string,name:string,type:string}, project:{id:string,name:string}|null}>}
  * @throws {Error} If issue not found.
  */
 export async function resolveIssue(identifier) {
@@ -201,6 +315,10 @@ export async function resolveIssue(identifier) {
             id
             name
             type
+          }
+          project {
+            id
+            name
           }
         }
       }`,
@@ -227,6 +345,10 @@ export async function resolveIssue(identifier) {
             id
             name
             type
+          }
+          project {
+            id
+            name
           }
           team {
             id

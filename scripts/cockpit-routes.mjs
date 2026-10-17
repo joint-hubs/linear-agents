@@ -243,6 +243,20 @@ export async function forwardMessageToHost(res, ctx, routePath, text) {
 const validSessionId = (raw) =>
   typeof raw === "string" && SUPERVISOR_SESSION_ID_PATTERN.test(raw) ? raw : null;
 
+/**
+ * The sessionId guard the gate/hold answer + notify routes apply at the TOP,
+ * BEFORE any write: absent/null/"" → null — the legacy single-session
+ * dashboard sends no sessionId, and its session id is a Claude UUID that must
+ * never reach hostSessionPath (which throws on anything not matching the
+ * sup- pattern); a string matching SUPERVISOR_SESSION_ID_PATTERN → that id
+ * (task-scoped mode); anything else → false (the caller answers 400
+ * bad-session-id, nothing was written).
+ */
+function answerSessionId(raw) {
+  if (raw === undefined || raw === null || raw === "") return null; // legacy
+  return validSessionId(raw) ?? false; // false = malformed
+}
+
 /** GET the host's session record — { status, body } or { status: 0, error }. */
 const fetchHostSession = (sid) => hostRequest("GET", hostSessionPath(sid), null, { timeoutMs: FAST_TIMEOUT_MS });
 
@@ -1439,6 +1453,16 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       log(method, path, respondBodyError(res, err));
       return true;
     }
+    // The sessionId decides legacy vs task-scoped BEFORE any write (see
+    // answerSessionId): the legacy dashboard sends none — its session id is a
+    // Claude UUID that must never reach hostSessionPath — and a malformed
+    // string is a 400 with nothing written.
+    const answerSid = answerSessionId(body.sessionId);
+    if (answerSid === false) {
+      json(res, 400, { error: "bad-session-id" });
+      log(method, path, 400);
+      return true;
+    }
     if (!body.sessionId && await managedSessionsExist()) {
       selectionRequired(res, path, json, log, method);
       return true;
@@ -1452,8 +1476,8 @@ export async function handleCockpitRoute(req, res, url, ctx) {
     // Cross-session guard: in a managed context a scoped UI must not be able
     // to answer a run it does not own. When the caller names a sessionId, the
     // gate's run must be that session's own current run.
-    if (typeof body.sessionId === "string" && body.sessionId) {
-      const ownership = await verifyRunOwnership(body.sessionId, runId, body.taskKey);
+    if (answerSid) {
+      const ownership = await verifyRunOwnership(answerSid, runId, body.taskKey);
       if (ownership !== true) {
         json(res, ownership.status, ownership.body);
         log(method, path, ownership.status);
@@ -1498,10 +1522,10 @@ export async function handleCockpitRoute(req, res, url, ctx) {
     } catch (err) {
       console.error("[gates/answer] decision label failed:", err?.message ?? err);
     }
-    const notified = await notifyGateAnswered(gate, gateId, body.sessionId);
+    const notify = await notifyGateAnswered(gate, gateId, answerSid);
     let rowError = null;
     try {
-      recordAnswerRow({ runId, kind: "gate-answer", id: gateId, text, who: "dashboard", notified });
+      recordAnswerRow({ runId, kind: "gate-answer", id: gateId, text, who: "dashboard", notified: notify.notified });
     } catch (err) {
       // The answer IS recorded; the audit row is the only thing that failed.
       // The response still says recorded:true — a 500 would make the UI hide
@@ -1509,7 +1533,13 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       rowError = err?.message ?? String(err);
       console.error("[gates/answer] edit row failed:", rowError);
     }
-    json(res, 200, { recorded: true, notified, gate, ...(rowError ? { rowError } : {}) });
+    json(res, 200, {
+      recorded: true,
+      notified: notify.notified,
+      gate,
+      ...(notify.notifyError ? { notifyError: notify.notifyError } : {}),
+      ...(rowError ? { rowError } : {}),
+    });
     log(method, path, 200);
     return true;
   }
@@ -1526,6 +1556,14 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       log(method, path, respondBodyError(res, err));
       return true;
     }
+    // The sessionId decides legacy vs task-scoped BEFORE any write — same
+    // guard as the gate answer (answerSessionId).
+    const answerSid = answerSessionId(body.sessionId);
+    if (answerSid === false) {
+      json(res, 400, { error: "bad-session-id" });
+      log(method, path, 400);
+      return true;
+    }
     if (!body.sessionId && await managedSessionsExist()) {
       selectionRequired(res, path, json, log, method);
       return true;
@@ -1537,8 +1575,8 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       return true;
     }
     // Cross-session guard: same ownership rule as the gate answer.
-    if (typeof body.sessionId === "string" && body.sessionId) {
-      const ownership = await verifyRunOwnership(body.sessionId, runId, body.taskKey);
+    if (answerSid) {
+      const ownership = await verifyRunOwnership(answerSid, runId, body.taskKey);
       if (ownership !== true) {
         json(res, ownership.status, ownership.body);
         log(method, path, ownership.status);
@@ -1556,24 +1594,24 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       return true;
     }
     const taskId = hold?.taskId ?? null;
-    let notified = false;
-    if (hostBase()) {
-      const r = await hostRequest(
-        "POST",
-        hostSessionPath(body.sessionId, "/message"),
-        { text: `[dashboard] Mateusz answered hold ${holdId} (${taskId ?? "no task"}) in the Cockpit; the answer is recorded — act on it now.` },
-        { timeoutMs: SLOW_TIMEOUT_MS },
-      );
-      notified = r.status === 200 && r.body?.sent === true;
-    }
+    const notify = await notifyAnswerText(
+      answerSid,
+      `[dashboard] Mateusz answered hold ${holdId} (${taskId ?? "no task"}) in the Cockpit; the answer is recorded — act on it now.`,
+    );
     let rowError = null;
     try {
-      recordAnswerRow({ runId, kind: "hold-answer", id: holdId, text, who: "dashboard", notified });
+      recordAnswerRow({ runId, kind: "hold-answer", id: holdId, text, who: "dashboard", notified: notify.notified });
     } catch (err) {
       rowError = err?.message ?? String(err);
       console.error("[holds/answer] edit row failed:", rowError);
     }
-    json(res, 200, { recorded: true, notified, hold, ...(rowError ? { rowError } : {}) });
+    json(res, 200, {
+      recorded: true,
+      notified: notify.notified,
+      hold,
+      ...(notify.notifyError ? { notifyError: notify.notifyError } : {}),
+      ...(rowError ? { rowError } : {}),
+    });
     log(method, path, 200);
     return true;
   }
@@ -1594,6 +1632,14 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       log(method, path, respondBodyError(res, err));
       return true;
     }
+    // The sessionId decides legacy vs task-scoped BEFORE any write — same
+    // guard as the gate answer (answerSessionId).
+    const answerSid = answerSessionId(body.sessionId);
+    if (answerSid === false) {
+      json(res, 400, { error: "bad-session-id" });
+      log(method, path, 400);
+      return true;
+    }
     if (!body.sessionId && await managedSessionsExist()) {
       selectionRequired(res, path, json, log, method);
       return true;
@@ -1605,8 +1651,8 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       return true;
     }
     // Cross-session guard: same ownership rule as the gate answer.
-    if (typeof body.sessionId === "string" && body.sessionId) {
-      const ownership = await verifyRunOwnership(body.sessionId, runId, body.taskKey);
+    if (answerSid) {
+      const ownership = await verifyRunOwnership(answerSid, runId, body.taskKey);
       if (ownership !== true) {
         json(res, ownership.status, ownership.body);
         log(method, path, ownership.status);
@@ -1625,8 +1671,8 @@ export async function handleCockpitRoute(req, res, url, ctx) {
         log(method, path, 409);
         return true;
       }
-      const notified = await notifyGateAnswered(gate, gateId, body.sessionId);
-      json(res, 200, { notified });
+      const notify = await notifyGateAnswered(gate, gateId, answerSid);
+      json(res, 200, { notified: notify.notified, ...(notify.notifyError ? { notifyError: notify.notifyError } : {}) });
       log(method, path, 200);
       return true;
     }
@@ -1643,17 +1689,11 @@ export async function handleCockpitRoute(req, res, url, ctx) {
     }
     // Same wording as /api/holds/answer's notice — this re-sends exactly that.
     const taskId = hold?.taskId ?? null;
-    let notified = false;
-    if (hostBase()) {
-      const r = await hostRequest(
-        "POST",
-        hostSessionPath(body.sessionId, "/message"),
-        { text: `[dashboard] Mateusz answered hold ${holdId} (${taskId ?? "no task"}) in the Cockpit; the answer is recorded — act on it now.` },
-        { timeoutMs: SLOW_TIMEOUT_MS },
-      );
-      notified = r.status === 200 && r.body?.sent === true;
-    }
-    json(res, 200, { notified });
+    const notify = await notifyAnswerText(
+      answerSid,
+      `[dashboard] Mateusz answered hold ${holdId} (${taskId ?? "no task"}) in the Cockpit; the answer is recorded — act on it now.`,
+    );
+    json(res, 200, { notified: notify.notified, ...(notify.notifyError ? { notifyError: notify.notifyError } : {}) });
     log(method, path, 200);
     return true;
   }
@@ -1661,25 +1701,39 @@ export async function handleCockpitRoute(req, res, url, ctx) {
   return false;
 }
 
+/**
+ * One notice POST to the Supervisor's session, for a gate/hold answer. A NULL
+ * sessionId is the LEGACY single-session dashboard: the notice goes to the
+ * global host /message exactly as before the task-workspace stream (the same
+ * path forwardMessageToHost forwards chat through); a session id (validated by
+ * answerSessionId before any write) goes to /sessions/<sid>/message. Never
+ * throws — a failed notify reads as notified:false (+ notifyError) and the
+ * caller keeps its recorded answer: the gate/hold record is the primary flow.
+ */
+async function notifyAnswerText(sessionId, text) {
+  if (!hostBase()) return { notified: false };
+  try {
+    const r = await hostRequest(
+      "POST",
+      sessionId ? hostSessionPath(sessionId, "/message") : "/message",
+      { text },
+      { timeoutMs: SLOW_TIMEOUT_MS },
+    );
+    return { notified: r.status === 200 && r.body?.sent === true };
+  } catch (err) {
+    return { notified: false, notifyError: err?.message ?? String(err) };
+  }
+}
+
 /** Re-send the "answer recorded — deliver it now" notice for an answered gate. */
 async function notifyGateAnswered(gate, gateId, sessionId) {
   const childId = gate?.childId ?? null;
   const taskId = gate?.taskId ?? null;
-  let notified = false;
-  if (hostBase()) {
-    const r = await hostRequest(
-      "POST",
-      hostSessionPath(sessionId, "/message"),
-      {
-        text:
-          `[dashboard] Mateusz answered ${gateId} for ${childId ?? "?"} (${taskId ?? "no task"}) in the Cockpit; ` +
-          "the answer is recorded in the gate — deliver it now.",
-      },
-      { timeoutMs: SLOW_TIMEOUT_MS },
-    );
-    notified = r.status === 200 && r.body?.sent === true;
-  }
-  return notified;
+  return notifyAnswerText(
+    sessionId,
+    `[dashboard] Mateusz answered ${gateId} for ${childId ?? "?"} (${taskId ?? "no task"}) in the Cockpit; ` +
+    "the answer is recorded in the gate — deliver it now.",
+  );
 }
 
 /** One gate record, or null when it does not exist / cannot be read. Never throws. */

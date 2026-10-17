@@ -29,6 +29,19 @@ Kolejka — sekwencja z `docs/ROADMAP.md` (2026-10-08). **Tor A (krytyczna ście
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## Delivery owner (sesja orkiestratora) — od 2026-10-15
+
+Mateusz (2026-10-15): „chcę żebyś Ty był odpowiedzialny za delivery". Od tej pory kolejkę Fenixa (Linear, `docs/ROADMAP.md`, PR-y) prowadzi sesja orkiestratora; Supervisor zostaje frontmanem wyłącznie dla innych produktów (JW, WSKM) i **nie bierze ticketów Fenix**. Wpisy Supervisora poniżej pozostają jego dziennikiem — nie są przepisywane; ta sekcja rośnie wpisami orkiestratora po każdym zamkniętym tasku.
+
+### 2026-10-15 (O-1) — przejęcie: decyzje, porządek po PR #71, lądowanie FOC-801
+
+- **Decyzje Mateusza:** (b) task workspaces filarem 1.0, tag 11-19 → **12-03**; attempt 7 toru A rusza dopiero przy jego obecności na `plan.gate1`; sesja Supervisora na linear-agents to ta sama, która prowadzi dzieci JW (`dev-11`/FOC-699 żyje) — nie jest zabijana, po FOC-699 ma nie brać nic z kolejki Fenix; zgody: sprzątanie stacków/obrazów, drop stasha `foc-801-parallel-impl` + usunięcie śmieci z checkoutu `main`, utwardzenie pusha z dashboardu, własne wpisy w tym pliku.
+- **Weryfikacja #71 na czystym `origin/main`:** Windows 171/174, Linux 171/174, lint 0. Regresja produkcyjna: `POST /api/gates/answer` w trybie legacy (bez `sessionId`, id sesji = UUID Claude) → 500 z `hostSessionPath`, odpowiedź zapisana, Supervisor niepowiadomiony, brak wiersza audytu; uderzyłoby w VM po `fenix update`. `supervisor-pinned-state` — nieaktualna przesłanka (gałąź z sufiksem attempt-hash); `workspace-claims` — wyścig o lock. Poprawki w osobnym PR (gałąź `fix-main-red`).
+- **Luka:** push/PR z dashboardu przyjmował `actor: "ai"` za guardami przepuszczającymi wywołanie bez `Origin`; natywnie dziecko = proces hosta. Utwardzenie: `publish.aiActor` domyślnie off + nagłówek z tokenem hosta; trasy zapisu dashboardu na deny-liście dzieci (gałąź `fenix-publish-hardening`).
+- **Linear:** FOC-762/773/778/786 → Done (#71); FOC-816 zapisuje strumień task-workspace wstecznie; M8 target 12-03, FOC-789 11-27, FOC-781 12-01, FOC-790 12-03; FOC-801 Done (Supervisor). **PR #72** = 8 lokalnych commitów Supervisora (merge `foc-801-dev` + rejestr arm A + wpisy 39–40) wypchniętych jako gałąź `foc-801-landing`, nic nie przepisane.
+- **Sprzątanie hosta:** stacki `fenix-settings-acceptance`, `fenix-task-workspace`, `fenix-task-probe` zatrzymane i usunięte (żywych dzieci 0), 7 obrazów `fenix:*` usuniętych (zostały `fenix:dev`, `fenix:task-workspace-candidate`), stash `foc-801-parallel-impl` dropnięty, `functions/` (60 KB, pliki `sprint-*.ts` nieznanego pochodzenia) i `status-tail-76.*` usunięte z checkoutu `main`.
+- **Tor A:** attempt 6 wykluczony (błąd operacyjny: resume bez `LA_SUPERVISOR_*`); każdy krok marszu przez `foc-477-armA-launch.mjs`. Attempt 7 czeka na sygnał Mateusza.
+
 ## 2026-10-15 (38) — FOC-815 FIXED: one unknown Linear id no longer poisons the work-board lookup
 
 Subtask **FOC-815** (child of FOC-788) — filed and fixed on Mateusz's „opcja 1" (2026-10-15). The banner
@@ -3817,3 +3830,73 @@ zostaje rozliczenie osi kosztu). Tor B (M8) rusza, gdy tor A stanie: FOC-760+761
 
 #### Task workspace integration checkpoint (2026-10-14)
 P1–P4 code and wiring delivered in fenix-settings-keys (status consolidated in entry (31) above). API isolation regressions 48/48; host recovery on OS process identity 17/17; workspace claims + integration lock; UI history/isolation links; P2 tool profiles + all five real Thoughtmap tools; P3 runtime statistics (`/insights/runtime`) and P4 local task map (`/insights/map`); explicit stopped-history resume through queue/cap — 34 tests pass. Real-model probes: GLM Flash native-child OTLP trace attribution; local Ollama `embeddinggemma` map PASSED (digest `85462619ee721b466c5927d109d4cb765861907d5417b9109caebc4e614679f1`). Test lanes: 18 new backend suites registered, lane inventory + audit green; nav 24/24. Outstanding: runtime-hook producer integration, full Docker rebuild/redeploy + browser E2E acceptance, native worker MCP review/test, final ACCESS. Active Atlas jobs: hook `claude-606ac3`, watcher `claude-dd9312`. No commits made. See docs/plans/task-workspace-delivery.md.
+
+## 2026-10-15 — FOC-801 wylądował (`e0f8b40`) — nowa granica instrumentu — FOC-236 od zera jako pierwszy zliczony run arm A
+
+**Co było.** Attempt 5 arm A (FOC-236, 2026-10-12, run `…arma-05-foc236`) przeszedł całe
+`plan.gate1` i padł na re-entry: `mapVersion 1 is not the next persisted version (2)`.
+Przyczyna w źródle, nie w komunikacie — dwa błędy kontraktu w `plan-intent.mjs`:
+(1) `foldGateAnswers` walidował `about.option` o opcje **mapy** (nosi je tylko
+`source:'unknown'`), nie o options z **presented store** — 4 odpowiedzi Mateusza na pozycjach
+`'stated'` złożyły się STALE i jego decyzja bramkowa zniknęła z anchorów;
+(2) `runPlanIntentNode` nigdy nie podawał generatorowi alokacji `mapVersion`
+(`createDefaultGenerator` składa wiadomość wyłącznie z `step.reads` + ewentualnego bloku
+`revision`, więc hint na górze reads ginie przed wire) — na re-entry store trzymał v1, alokacja
+była 2, model znów wysłał 1, a odrzucenie było nieśmiertelne, bo `regenReads` odsyłał ten sam
+numer w `revision.previous`. Wszystkie wywołania [G] w attempt 5 zwróciły parsowalną treść
+(5 eventów `ok:true`) — to wada harness/kontraktu, nie jakość modelu; tally §5.1 nietknięty.
+
+**Fix i weryfikacja.** `scripts/plan-intent.mjs` + `plan-intent.test.mjs` (78/78): fold
+najpierw wobec presented store (lookup po `interpretationId`, fallback po idMap dla
+przenumerowanych; fallback do opcji mapy tylko gdy presented nie ma options; inaczej STALE
+z powodem wskazującym presented), `allocateMapVersion` przed wywołaniem, `nextMapVersion`
+na reads **obu** prób wewnątrz `revision` (jedno pole caller-composition, które [G] wysyła),
+`regenReads` nadpisuje tożsamość odrzuconej mapy (`previous.mapVersion = next`), komunikaty
+odrzucenia `persistMap` bajtowo identyczne. Test siatki: `createDefaultGenerator` + wstrzyknięty
+fetch — `nextMapVersion` w ciele requestu na **pierwszej** próbie re-entry i na retry, a świeże
+wywołanie zostaje bajtowo identyczne (bez sekcji `REVISION`). Zakres FOC-801 dochowany:
+`graph-runner.mjs` / `config/graph.json` / `decisions.json` / `models.json` nietknięte.
+Gałąź `foc-801-dev` już istniała z 12.10 (kompletna implementacja) — scalona z moim commitem
+`323d344` (dostarczenie hinta na wire), nic nie wyrzucone.
+
+**Lądowanie.** `main` = **`e0f8b40`** (merge `foc-801-dev`: `2d6cb6e` + `ab4483d` + `323d344`).
+Suity: plan-intent 78/78, plan-intent-gate 13/13, graph-runner 27/27, plan-ac 21/21,
+plan-dod 25/25, plan-intent-select 27/27, plan-ready 24/24, plan-render 15/15,
+supervisor-holds 36/36. **Push/PR nie zrobiony** — czeka na polecenie.
+
+**Nowa granica instrumentu = `e0f8b40`.** Obok fixu na tej samej granicy wsiadł runsDir seam
+z FOC-811 (blob `graph-runner.mjs` `b0db3eef` → `e7de39c8`) — plumbing ścieżek telemetrii
+przez `LA_STATE_ROOT`, zachowanie przepływu planu bajtowo bez zmian; nazwany w rekordzie
+granicy, żeby zapis był szczery. FOC-734 freeze re-arms przy `e0f8b40`.
+
+**Attempt 5 = `excluded (C1, przed granica FOC-801)`** wg reguły granicy instrumentu (sha
+fixu jest granicą; nic sprzed niej się nie liczy — tak jak attempt 4 sprzed FOC-758). Koszt
+**0.006823378 USD** (6 eventów, kompletne) w `excludedPricedCostUsd`, poza liczbą główną.
+Tekst issue FOC-801 („attempt 5 is the first counted arm-A run and it is a `failed`") był
+pisany przed decyzją o fixie w trakcie kampanii — to luźniejszy odczyt; jeśli Mateusz go
+przyjmie, wiersz flipuje na `countedInMainNumber: true` i koszt wchodzi do liczby głównej.
+Następny run jest ten sam w obu odczytach.
+
+**Rejestr** `docs/research/foc-477-runs.json`: wpis attempt 5 w `armARuns`, koszt w
+`excludedPricedCostUsd`, rekord `foc801Landing20261015` (granica, zakres fixu, klasyfikacja,
+FOC-811 na granicy).
+
+**Kolejka toru A:** uruchomić FOC-236 od zera na `e0f8b40` = **zliczony run 1 z 10**;
+bramki `plan.gate1` / `draft-approval` przekazywane jako osobne wiadomości z pełnym artefaktem.
+Śmierć harness/provider tam = stop i raport, nigdy cichy retry. Po 10 runach: raport FOC-477,
+go/no-go, potem FOC-712. Tor B (M8) rusza, gdy tor A stanie.
+
+### Dodatek — attempt 6 padł na bramce (błąd operatora), czeka na decyzję
+
+`2026-10-15-supervisor-foc477-arma-06-foc236` — pierwszy run na granicy `e0f8b40`.
+Przeszedł `plan.dor` (te same 3 luki) i `plan.intent` **jednym** wywołaniem [G] (mapa v1,
+11 interpretacji), `plan.intent.select` — i padł na emit bramki: `gate emit for "plan.gate1"
+needs LA_SUPERVISOR_RUN and LA_SUPERVISOR_CHILD`. Dwie lekcje: (1) **każdy** krok marszu,
+łącznie z resume po resolution frontmana, idzie przez `foc-477-armA-launch.mjs` (albo z
+wyeksportowanymi obiema zmiennymi) — bezpośrednie `graph-runner.mjs run` nie ma emiterra
+bramki; (2) `failed` jest terminalny (`TERMINAL_STATUSES`) — run nieodwracalnie martwy,
+sklejanie sklejanie store'a byłoby fałszowaniem instrumentu. Koszt 0.002400378 USD (3 eventy,
+kompletne) w `excludedPricedCostUsd`. Ścieżki fold/re-entry z FOC-801 **nie** zostały
+wykonane (śmierć przed odpowiedzią na bramkę). §5.1 nietknięte (harness, nie jakość modelu).
+**Czeka na Mateusza:** respawn od zera (attempt 7, ~$0.007, ~2 min do bramki) albo odstąpienie.
+Nigdy cichy retry — dlatego pytanie jest otwarte.

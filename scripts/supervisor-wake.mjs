@@ -26,7 +26,10 @@
 //   · 2 — its lifetime ran out while children are still live (stderr says it
 //         only re-arms: draining and ending the turn starts a fresh waker);
 //   · 0 — nothing is live any more, the run is not there, another waker of
-//         this session is already on duty, or a newer waker superseded it.
+//         this session is already on duty, or a newer waker superseded it;
+//   · 1 — lease writes kept failing (WRITE_FAILURE_CAP consecutive polls):
+//         the lease on disk is still ours, so this is not a stand-down; the
+//         lease goes stale and the next turn end starts a fresh waker.
 //
 // Lease (waker.json, see supervisor-lib.mjs): every turn end fires this hook and
 // the harness does not deduplicate, so a fresh lease of the SAME session id
@@ -36,6 +39,15 @@
 // and exits without writing. Liveness is the heartbeat only — no process is
 // ever probed. Every exit this waker owns stamps `endedAt`, so the next turn
 // end starts a new one at once instead of waiting out a stale heartbeat.
+//
+// FOC-840: every lease write goes through the shared writers in
+// supervisor-lib.mjs (writeWakerLease / updateWakerLease), which take a
+// directory-create lock (waker.json.lock) around each read→write pair. A
+// compare-and-swap alone cannot: its re-read and its write are two filesystem
+// operations, and a newer lease landing inside that gap was clobbered by the
+// stale heartbeat and never re-surfaced, so the old waker ran to its lifetime.
+// With the lock the re-read and the write are atomic against every other
+// writer — the waker's own, the Supervisor-side seeding, and the tests'.
 //
 // At most one wake per row: `firedThrough` survives takeovers. A row the lead
 // drained but left unacked on purpose (a gate waiting for Mateusz) cannot wake
@@ -65,13 +77,16 @@ import {
   readWakeQueue,
   readWakerLease,
   runDir,
-  wakerPath,
+  updateWakerLease,
   wakerState,
+  writeWakerLease,
 } from "./supervisor-lib.mjs";
-import { atomicWriteJSON } from "./utils.mjs";
 
 export const DEFAULT_MAX_LIFETIME_MS = 19_800_000; // 5.5 h
 const LISTED_ROWS = 5;
+// Consecutive failed lease writes before the waker gives up with exit 1 — a
+// wedged lock or a full disk must not spin a waker forever.
+const WRITE_FAILURE_CAP = 5;
 
 const envMs = (name, fallback) => {
   const n = Number(process.env[name]);
@@ -184,10 +199,13 @@ function readPayload() {
 const seqOr0 = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Every lease write takes the lock (supervisor-lib.mjs, FOC-840). The arm
+// write and the release below are the only unguarded-by-ownership writes; the
+// loop's own writes go through writeOwnLease, whose ownership check runs
+// INSIDE the lock.
 function writeLease(runId, lease) {
   try {
-    atomicWriteJSON(wakerPath(runId), lease);
-    return true;
+return writeWakerLease(runId, lease);
   } catch {
     return false;
   }
@@ -230,10 +248,18 @@ async function main() {
   if (!writeLease(runId, lease)) return 0;
 
   // Release on the harness's kill (hook timeout) or an interrupt: the next turn
-  // end must be able to start a new waker at once.
+  // end must be able to start a new waker at once. The read and the stamp run
+  // under the lease lock, so a newer waker's arm cannot land between them.
   const release = () => {
-    const current = readWakerLease(runId);
-    if (current?.pid === process.pid) writeLease(runId, { ...current, endedAt: new Date().toISOString() });
+    try {
+      updateWakerLease(runId, (current) =>
+        current?.pid === process.pid && (current.sessionId ?? null) === sessionId
+          ? { ...current, endedAt: new Date().toISOString() }
+          : null,
+      );
+    } catch {
+      // Lock busy at exit: leave the lease to go stale, same as the crash path.
+    }
     process.exit(0);
   };
   process.on("SIGTERM", release);
@@ -241,10 +267,83 @@ async function main() {
 
   const deadline = Date.now() + maxMs;
   let nothingLiveSince = null;
+  let writeFailures = 0; // consecutive failed lease writes; reset on any successful call
+
+  // ── lease compare-and-swap (FOC-840) ───────────────────────────────────────
+  // A superseded waker must not resurrect its lease. Observed race: the
+  // heartbeat was written from the lease copy read at the top of the loop, so
+  // a newer lease written inside that read→write window was clobbered — the
+  // stale waker then saw its own pid again and ran to its lifetime, exiting 2
+  // and waking a session a newer waker already owns. Two layers close it:
+  //
+  //   · the lock (supervisor-lib.mjs): every lease write takes
+  //     waker.json.lock, and writeOwnLease's ownership check runs INSIDE it —
+  //     between the re-read and the write no other writer can interleave, so
+  //     the gap the CAS alone left open is gone;
+  //   · the loop-top re-read below, so a superseded waker stands down (exit 0,
+  //     no write) on its next poll even if something reached past the lock —
+  //     at lifetime expiry too, where it must exit 0, never the re-arm 2.
+  //
+  // writeOwnLease has three outcomes in one sentence: "written" (the lease is
+  // ours and the write landed), "lost" (the lease on disk is not ours any
+  // more — stand down, exit 0, no write) and "failed" (the write THREW —
+  // transient: lock busy after the bounded wait, EPERM, ENOSPC — the lease is
+  // still ours, so retry on the next poll and exit 1 only after
+  // WRITE_FAILURE_CAP consecutive failures).
+  //
+  // The arm write above stays the one ownership-unguarded write (takeover
+  // semantics: a restarted Supervisor's session takes the lease over). If it
+  // lands over a live waker's lease, that waker's next loop-top read stands it
+  // down before it writes anything.
+  const oursOrSuperseded = () => {
+    const current = readWakerLease(runId);
+    if (current?.pid !== process.pid || (current.sessionId ?? null) !== sessionId) return null;
+    return current;
+  };
+  const superseded = () => {
+    process.stderr.write(
+      `supervisor-wake: superseded in run ${runId} — a newer waker holds the lease; standing down.\n`,
+    );
+    return 0;
+  };
+  const writeOwnLease = (next) => {
+    try {
+      const wrote = updateWakerLease(runId, (current) =>
+        current?.pid === process.pid && (current.sessionId ?? null) === sessionId ? next : null,
+      );
+      writeFailures = 0;
+      return wrote !== null ? "written" : "lost";
+    } catch (err) {
+      // A thrown write (lock busy after the bounded wait, EPERM, ENOSPC) is a
+      // transient failure, not a lost ownership: the lease is still ours, so
+      // unlike "lost" this must not look like "superseded". Before FOC-840 a
+      // failed heartbeat was simply retried on the next poll — keep that, but
+      // bound it at WRITE_FAILURE_CAP consecutive failures.
+      writeFailures++;
+      process.stderr.write(
+        `supervisor-wake: lease write failed (${err.code ?? err.message}) in run ${runId} — ${writeFailures}/${WRITE_FAILURE_CAP} consecutive, retrying next poll\n`,
+      );
+      return "failed";
+    }
+  };
+  // Shared handling at every writeOwnLease call site: "lost" stands down;
+  // "failed" gives up with exit 1 at the cap, otherwise skips the rest of the
+  // iteration and retries on the next poll. Returns the exit code, or null to
+  // proceed with this iteration.
+  const onWriteNotWritten = async (outcome) => {
+    if (outcome === "lost") return superseded();
+    const gaveUp = writeFailures >= WRITE_FAILURE_CAP;
+    if (gaveUp) {
+      process.stderr.write(`supervisor-wake: lease writes keep failing in run ${runId}; giving up\n`);
+      return 1;
+    }
+    await sleep(pollMs);
+    return null;
+  };
 
   for (;;) {
-    const current = readWakerLease(runId);
-    if (current?.pid !== process.pid) return 0; // superseded: the lease is not ours to write
+    const current = oursOrSuperseded();
+    if (!current) return superseded(); // superseded: the lease is not ours to write
     lease = current;
 
     const fresh = freshRows({
@@ -262,13 +361,21 @@ async function main() {
       // fresh edit must never retire an unfired queue row, or the reverse.
       // editsSeenUpTo passes notified rows too: they were seen, they just do
       // not wake.
-      writeLease(runId, {
+      // A "failed" watermark write holds the wake back: the message and the
+      // exit 2 go out only once the write lands, and the loop-top re-read
+      // re-derives the same fresh rows for the retry.
+      const outcome = writeOwnLease({
         ...lease,
         heartbeatAt: now,
         endedAt: now,
         firedThrough: fresh.length ? fresh[fresh.length - 1].seq : seqOr0(lease.firedThrough),
         editsFiredThrough: editsSeenUpTo,
       });
+      if (outcome !== "written") {
+        const exit = await onWriteNotWritten(outcome);
+        if (exit !== null) return exit;
+        continue;
+      }
       if (fresh.length) process.stderr.write(formatWakeMessage(runId, fresh) + "\n");
       if (freshEditsRows.length) process.stderr.write(formatEditsMessage(runId, freshEditsRows) + "\n");
       return 2;
@@ -279,14 +386,24 @@ async function main() {
       // lease is updated too — the loop's heartbeat write would otherwise
       // clobber the advance with the stale watermark.
       lease = { ...lease, heartbeatAt: now, editsFiredThrough: editsSeenUpTo };
-      writeLease(runId, lease);
+      const advanceOutcome = writeOwnLease(lease);
+      if (advanceOutcome !== "written") {
+        const exit = await onWriteNotWritten(advanceOutcome);
+        if (exit !== null) return exit;
+        continue; // the loop-top re-read overwrites the local lease anyway
+      }
     }
 
     const live = liveCount(runId);
     if (live === 0) {
       nothingLiveSince ??= Date.now();
       if (Date.now() - nothingLiveSince >= graceMs) {
-        writeLease(runId, { ...lease, heartbeatAt: now, endedAt: now });
+        const outcome = writeOwnLease({ ...lease, heartbeatAt: now, endedAt: now });
+        if (outcome !== "written") {
+          const exit = await onWriteNotWritten(outcome);
+          if (exit !== null) return exit;
+          continue; // the endedAt stamp is retried on the next poll
+        }
         return 0;
       }
     } else {
@@ -294,7 +411,14 @@ async function main() {
     }
 
     if (Date.now() >= deadline) {
-      writeLease(runId, { ...lease, heartbeatAt: now, endedAt: now });
+      // A superseded waker is expiry-passive: it stands down with exit 0 and
+      // never fires the re-arm wake (2) for someone else's session.
+      const outcome = writeOwnLease({ ...lease, heartbeatAt: now, endedAt: now });
+      if (outcome !== "written") {
+        const exit = await onWriteNotWritten(outcome);
+        if (exit !== null) return exit;
+        continue; // the endedAt stamp is retried on the next poll
+      }
       const hours = (maxMs / 3_600_000).toFixed(1);
       const what = live === null ? "an unreadable registry" : `${live} live child(ren)`;
       process.stderr.write(
@@ -304,7 +428,12 @@ async function main() {
       return 2;
     }
 
-    writeLease(runId, { ...lease, heartbeatAt: now });
+    const heartbeatOutcome = writeOwnLease({ ...lease, heartbeatAt: now });
+    if (heartbeatOutcome !== "written") {
+      const exit = await onWriteNotWritten(heartbeatOutcome);
+      if (exit !== null) return exit;
+      continue; // onWriteNotWritten already slept one poll
+    }
     await sleep(pollMs);
   }
 }

@@ -1,11 +1,17 @@
-// Tests for squad-config.mjs — writeSquadConfig — lead/model/pricing writes, validateSlug, CRLF, dry-run, backward compat, formatting preservation.
-// Split from squad-config.test.mjs (code-audit-2026-07-30 §5: 1138 lines /
-// 7 exported symbols was the largest test file in the repo, by a wide margin).
+// Tests for squad-config.mjs — writeSquadConfig — lead writes land in the
+// settings overlay (routing.<squad>.lead through fenix-settings), unpriced
+// models are refused, provider assignment maps onto provider.active, plus
+// agent/pricing/provider-CRUD writes, validateSlug, dry-run and formatting
+// preservation. Split from squad-config.test.mjs (code-audit-2026-07-30 §5).
+//
+// FOC-771: the launchers are two-line Node wrappers with no ANTHROPIC_MODEL
+// lines, so nothing here touches bin/*.bat — a lead written into a wrapper
+// would be a lie by construction.
 //
 // All tests operate on fixtures in a temp directory, NEVER on real repo files.
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
-import { join, sep } from "node:path";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname } from "node:path";
@@ -13,6 +19,8 @@ import { dirname } from "node:path";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const MODULE_PATH = pathToFileURL(join(__dirname, "squad-config.mjs")).href;
+const CHILD_MODEL_PATH = pathToFileURL(join(__dirname, "child-model.mjs")).href;
+const SETTINGS_PATH = pathToFileURL(join(__dirname, "fenix-settings.mjs")).href;
 
 // ---------------------------------------------------------------------------
 // Test harness
@@ -32,7 +40,10 @@ function assert(cond, label) {
 }
 
 function assertEq(actual, expected, label) {
-  if (actual === expected) {
+  // Deep-compare non-strings (arrays/objects), strict-compare primitives.
+  if (typeof actual === "string" || typeof expected === "string"
+    ? actual === expected
+    : JSON.stringify(actual) === JSON.stringify(expected)) {
     console.log(`  PASS: ${label}`);
     passed++;
   } else {
@@ -47,39 +58,24 @@ function assertEq(actual, expected, label) {
 // Fixture builder
 // ---------------------------------------------------------------------------
 
+// Env keys the resolver chain depends on — snapshotted and restored so a host
+// shell's LA_PROVIDER / SUPERVISOR_MODEL cannot decide a fixture's answer.
+const ENV_KEYS = ["LA_SETTINGS_FILE", "LA_PROVIDER", "LA_PROVIDER_RESOLVED", "LA_PROVIDER_SOURCE", "SUPERVISOR_MODEL"];
+const envBackup = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
+for (const k of ENV_KEYS) delete process.env[k];
+
+// The overlay lives at <root>/.fenix/config/settings.json for a fixture root
+// (unless LA_SETTINGS_FILE is set — the explicit seam is tested separately).
+const overlayPath = (root) => join(root, ".fenix", "config", "settings.json");
+
+function writeOverlay(root, obj) {
+  const p = overlayPath(root);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(obj, null, 2) + "\n", "utf8");
+}
+
 function buildFixture() {
   const root = mkdtempSync(join(tmpdir(), "squad-config-test-"));
-
-  // bin/
-  mkdirSync(join(root, "bin"), { recursive: true });
-
-  // bin/dev.bat (CRLF, simple — no NATIVE branch)
-  writeFileSync(
-    join(root, "bin", "dev.bat"),
-    '@echo off\r\nsetlocal\r\ncall "%~dp0_lib.bat" || exit /b 1\r\nset "ANTHROPIC_MODEL=z-ai/glm-5.2"\r\nset "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"\r\nclaude %*\r\nendlocal\r\n',
-    "utf8"
-  );
-
-  // bin/dev-dry.bat (CRLF)
-  writeFileSync(
-    join(root, "bin", "dev-dry.bat"),
-    '@echo off\r\nsetlocal\r\ncall "%~dp0_lib.bat" || exit /b 1\r\nset "ANTHROPIC_MODEL=z-ai/glm-5.2"\r\nset "DEV_DRY_RUN=1"\r\nclaude -p "dry" %*\r\nendlocal\r\n',
-    "utf8"
-  );
-
-  // bin/plan.bat (CRLF, with NATIVE/else split)
-  writeFileSync(
-    join(root, "bin", "plan.bat"),
-    '@echo off\r\nsetlocal\r\ncall "%~dp0_lib.bat" || exit /b 1\r\nif defined NATIVE (\r\n    set "ANTHROPIC_MODEL=claude-opus-4-8"\r\n) else (\r\n    set "ANTHROPIC_MODEL=anthropic/claude-opus-4.8"\r\n)\r\nclaude %*\r\nendlocal\r\n',
-    "utf8"
-  );
-
-  // bin/plan-dry.bat (CRLF, no NATIVE split — just the OpenRouter model)
-  writeFileSync(
-    join(root, "bin", "plan-dry.bat"),
-    '@echo off\r\nsetlocal\r\ncall "%~dp0_lib.bat" || exit /b 1\r\nset "ANTHROPIC_MODEL=anthropic/claude-opus-4.8"\r\nset "PLAN_DRY_RUN=1"\r\nclaude -p "dry" %*\r\nendlocal\r\n',
-    "utf8"
-  );
 
   // agents/dev/agents/implementer.md (LF)
   mkdirSync(join(root, "agents", "dev", "agents"), { recursive: true });
@@ -146,6 +142,7 @@ function buildFixture() {
 
   // config/models.json (CRLF) — includes _doc metadata in pricing and
   // top-level keys (ids, routing, providers, fallback) that must survive writes.
+  // The lead-relevant entries (deepseek) are priced like the launcher requires.
   writeFileSync(
     join(root, "config", "models.json"),
     '{\r\n' +
@@ -154,6 +151,11 @@ function buildFixture() {
     '    "openrouter": {\r\n' +
     '      "baseUrl": "https://openrouter.ai/api",\r\n' +
     '      "authEnv": "OPENROUTER_API_KEY",\r\n' +
+    '      "authStyle": "token"\r\n' +
+    '    },\r\n' +
+    '    "zai_anthropic": {\r\n' +
+    '      "baseUrl": "https://api.z.ai/api/anthropic",\r\n' +
+    '      "authEnv": "ZAI_API_KEY",\r\n' +
     '      "authStyle": "token"\r\n' +
     '    }\r\n' +
     '  },\r\n' +
@@ -168,7 +170,8 @@ function buildFixture() {
     '    "_doc": "USD per 1M tokens (input/output)",\r\n' +
     '    "openrouter": {\r\n' +
     '      "z-ai/glm-5.2": { "input": 1.40, "output": 4.40 },\r\n' +
-    '      "minimax/minimax-m3": { "input": 0.30, "output": 1.20 }\r\n' +
+    '      "minimax/minimax-m3": { "input": 0.30, "output": 1.20 },\r\n' +
+    '      "deepseek/deepseek-v4-pro": { "input": 1.60, "output": 3.20 }\r\n' +
     '    }\r\n' +
     '  },\r\n' +
     '  "fallback": {\r\n' +
@@ -190,8 +193,10 @@ async function runTests() {
   const { readSquadConfig, readToolCatalog, validateSlug, validateTools, validateProvidersPatch, writeSquadConfig } = await import(
     MODULE_PATH
   );
+  const { childModelFor } = await import(CHILD_MODEL_PATH);
+  const { readSettings } = await import(SETTINGS_PATH);
 
-  // ---- Test 1: write lead updates BOTH .bat files ----
+  // ---- Test 1: write lead lands in the settings overlay, not in a .bat ----
   {
     const root = buildFixture();
     const result = writeSquadConfig(
@@ -199,105 +204,99 @@ async function runTests() {
       root
     );
     assert(
-      result.changed.length === 2,
-      "write lead changes 2 files (dev.bat + dev-dry.bat)"
-    );
-
-    // Verify dev.bat
-    const devBat = readFileSync(join(root, "bin", "dev.bat"), "utf8");
-    assert(
-      devBat.includes('set "ANTHROPIC_MODEL=deepseek/deepseek-v4-pro"'),
-      "dev.bat has new lead model"
-    );
-    assert(
-      devBat.includes('set "ANTHROPIC_SMALL_FAST_MODEL=minimax/minimax-m3"'),
-      "dev.bat SMALL_FAST_MODEL untouched"
-    );
-
-    // Verify dev-dry.bat
-    const dryBat = readFileSync(join(root, "bin", "dev-dry.bat"), "utf8");
-    assert(
-      dryBat.includes('set "ANTHROPIC_MODEL=deepseek/deepseek-v4-pro"'),
-      "dev-dry.bat has new lead model"
-    );
-
-    rmSync(root, { recursive: true, force: true });
-  }
-
-  // ---- Test 2: write lead for plan does NOT touch NATIVE branch ----
-  {
-    const root = buildFixture();
-    const result = writeSquadConfig(
-      { squads: { plan: { lead: "z-ai/glm-5.2" } } },
-      root
-    );
-    assert(
-      result.changed.length >= 1,
-      "write plan lead changes at least 1 file"
-    );
-
-    const planBat = readFileSync(join(root, "bin", "plan.bat"), "utf8");
-    // NATIVE branch must stay unchanged
-    assert(
-      planBat.includes('set "ANTHROPIC_MODEL=claude-opus-4-8"'),
-      "plan.bat NATIVE branch untouched"
-    );
-    // else branch must be updated
-    assert(
-      planBat.includes('set "ANTHROPIC_MODEL=z-ai/glm-5.2"'),
-      "plan.bat else branch updated"
-    );
-
-    rmSync(root, { recursive: true, force: true });
-  }
-
-  // ---- Test 3: write agent model (string patch) preserves rest of frontmatter ----
-  {
-    const root = buildFixture();
-    const result = writeSquadConfig(
-      { squads: { dev: { agents: { implementer: "deepseek/deepseek-v4-pro" } } } },
-      root
-    );
-    assert(
       result.changed.length === 1,
-      "write agent model changes 1 file"
+      "write lead produces exactly 1 changed entry (the overlay)"
     );
+    assertEq(result.changed[0]?.field, "lead", "changed entry field=lead");
+    assertEq(result.changed[0]?.before, null, "no prior resolved lead → before=null");
+    assertEq(result.changed[0]?.after, "deepseek/deepseek-v4-pro", "changed entry after=new lead");
+
+    // The overlay now carries routing.dev.lead
+    const overlay = readSettings({ path: overlayPath(root) });
+    assertEq(overlay.routing?.dev?.lead, "deepseek/deepseek-v4-pro", "overlay routing.dev.lead written");
+
+    // And the launcher-side resolver (childModelFor) picks it up from there
+    const modelsConfig = JSON.parse(readFileSync(join(root, "config", "models.json"), "utf8"));
+    const resolved = childModelFor({ squad: "dev", settings: overlay, modelsConfig });
+    assertEq(resolved.model, "deepseek/deepseek-v4-pro", "childModelFor returns the written lead");
+    assertEq(resolved.source, "settings:routing.dev", "childModelFor names the settings source");
+
+    // No .bat file was created or needed
+    assert(!existsSync(join(root, "bin")), "no bin/ directory in the write path");
+    assertEq(result.refused.length, 0, "nothing refused");
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 2: writing the already-resolving lead is a no-op (no overlay pin) ----
+  {
+    const root = buildFixture();
+    // The routing table resolves dev → nothing here (implement only, no
+    // defaultModel on the provider), so lead=null; writing null changes nothing.
+    let result = writeSquadConfig({ squads: { dev: { lead: null } } }, root);
+    assertEq(result.changed.length, 0, "no-op: null lead over a non-resolving squad changes nothing");
+    assert(!existsSync(overlayPath(root)), "no-op does not create the overlay");
+
+    // Now make the table resolve z-ai/glm-5.2 for dev and write exactly that —
+    // it must NOT pin the table's answer into the overlay.
+    const modelsPath = join(root, "config", "models.json");
+    const models = JSON.parse(readFileSync(modelsPath, "utf8"));
+    models.routing.dev = { worker: "glm" };
+    writeFileSync(modelsPath, JSON.stringify(models, null, 2) + "\n", "utf8");
+
+    result = writeSquadConfig({ squads: { dev: { lead: "z-ai/glm-5.2" } } }, root);
+    assertEq(result.changed.length, 0, "no-op: writing the table's own answer changes nothing");
+    assert(!existsSync(overlayPath(root)), "no-op does not pin routing.dev.lead into the overlay");
+
+    // A genuine change still writes after a no-op
+    result = writeSquadConfig({ squads: { dev: { lead: "minimax/minimax-m3" } } }, root);
     assertEq(
-      result.changed[0].field,
-      "model",
-      "changed entry has field=model"
+      result.changed[0]?.after,
+      "minimax/minimax-m3",
+      "a different lead still writes"
     );
+    const overlay = readSettings({ path: overlayPath(root) });
+    assertEq(overlay.routing?.dev?.lead, "minimax/minimax-m3", "second write lands in the overlay");
+    rmSync(root, { recursive: true, force: true });
+  }
 
-    const md = readFileSync(
-      join(root, "agents", "dev", "agents", "implementer.md"),
-      "utf8"
+  // ---- Test 3: an unpriced lead is refused like the launcher refuses ----
+  {
+    const root = buildFixture();
+    const result = writeSquadConfig(
+      { squads: { dev: { lead: "openai/gpt-unpriced" } } },
+      root
     );
+    assertEq(result.changed.length, 0, "unpriced lead: nothing changed");
     assert(
-      md.includes("model: deepseek/deepseek-v4-pro"),
-      "implementer.md has new model"
+      result.refused.some((r) => r.squad === "dev" && r.field === "lead" && r.code === "model-unpriced"),
+      "refused names code model-unpriced for dev"
     );
-    assert(
-      md.includes("name: implementer"),
-      "implementer.md name field preserved"
-    );
-    assert(
-      md.includes("description: DEV squad — implementacja"),
-      "implementer.md description preserved"
-    );
-    assert(
-      md.includes("tools: Read, Grep, Glob, Edit, Write, Bash"),
-      "implementer.md tools preserved"
-    );
-    assert(
-      md.includes("Jesteś sub-agentem IMPLEMENTER."),
-      "implementer.md body preserved"
-    );
-    // LF preserved (no CR)
-    assert(
-      !md.includes("\r"),
-      "implementer.md line endings are LF (not CRLF)"
-    );
+    assert(result.warnings.length >= 1, "unpriced refusal produces a user-facing warning");
+    assert(!existsSync(overlayPath(root)), "refused write leaves the overlay untouched");
 
+    // A priced lead in the same patch still goes through
+    const result2 = writeSquadConfig(
+      { squads: { dev: { lead: "deepseek/deepseek-v4-pro" } } },
+      root
+    );
+    assertEq(result2.refused.length, 0, "priced lead after the refusal is accepted");
+    assertEq(result2.changed.length, 1, "priced lead writes");
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 3b: an invalid squad name is refused before any write ----
+  {
+    const root = buildFixture();
+    const result = writeSquadConfig(
+      { squads: { "Bad Name!": { lead: "z-ai/glm-5.2" } } },
+      root
+    );
+    assertEq(result.changed.length, 0, "invalid squad name: nothing changed");
+    assert(
+      result.refused.some((r) => r.code === "invalid-squad-name"),
+      "refused names code invalid-squad-name"
+    );
+    assert(!existsSync(overlayPath(root)), "invalid squad name never reaches settings.json");
     rmSync(root, { recursive: true, force: true });
   }
 
@@ -372,18 +371,21 @@ async function runTests() {
     );
   }
 
-  // ---- Test 6: CRLF preserved in .bat files ----
+  // ---- Test 6: a multi-squad lead write lands whole in one settings write ----
   {
     const root = buildFixture();
-    writeSquadConfig(
-      { squads: { dev: { lead: "test/model-123" } } },
+    const result = writeSquadConfig(
+      { squads: { dev: { lead: "minimax/minimax-m3" }, plan: { lead: "z-ai/glm-5.2" } } },
       root
     );
-    const devBat = readFileSync(join(root, "bin", "dev.bat"), "utf8");
+    assertEq(result.changed.length, 2, "two squads → two changed entries");
     assert(
-      devBat.includes("\r\n"),
-      "dev.bat preserves CRLF after write"
+      result.changed.every((c) => c.field === "lead" && c.file.endsWith(join(".fenix", "config", "settings.json"))),
+      "both entries name the overlay file with field=lead"
     );
+    const overlay = readSettings({ path: overlayPath(root) });
+    assertEq(overlay.routing?.dev?.lead, "minimax/minimax-m3", "overlay dev lead");
+    assertEq(overlay.routing?.plan?.lead, "z-ai/glm-5.2", "overlay plan lead");
     rmSync(root, { recursive: true, force: true });
   }
 
@@ -403,13 +405,17 @@ async function runTests() {
       result.warnings.length >= 1,
       "warnings generated for missing role/file"
     );
+    assert(
+      result.refused.some((r) => r.squad === "test" && r.code === "model-unpriced"),
+      "unpriced lead in the same patch is refused (not silently written)"
+    );
     rmSync(root, { recursive: true, force: true });
   }
 
   // ---- Test 8: dryRun does NOT modify files on disk ----
   {
     const root = buildFixture();
-    const devBatBefore = readFileSync(join(root, "bin", "dev.bat"), "utf8");
+    const overlayBefore = existsSync(overlayPath(root)) ? readFileSync(overlayPath(root), "utf8") : null;
     const agentBefore = readFileSync(
       join(root, "agents", "dev", "agents", "implementer.md"),
       "utf8"
@@ -430,12 +436,12 @@ async function runTests() {
     );
 
     // Files must be unchanged
-    const devBatAfter = readFileSync(join(root, "bin", "dev.bat"), "utf8");
+    const overlayAfter = existsSync(overlayPath(root)) ? readFileSync(overlayPath(root), "utf8") : null;
     const agentAfter = readFileSync(
       join(root, "agents", "dev", "agents", "implementer.md"),
       "utf8"
     );
-    assertEq(devBatAfter, devBatBefore, "dryRun: dev.bat unchanged on disk");
+    assertEq(overlayAfter, overlayBefore, "dryRun: overlay unchanged on disk");
     assertEq(agentAfter, agentBefore, "dryRun: implementer.md unchanged on disk");
 
     // But changed array should reflect what WOULD change
@@ -444,8 +450,8 @@ async function runTests() {
       "dryRun: changed array has expected entries"
     );
     assert(
-      result.changed.some((c) => c.file.endsWith("dev.bat")),
-      "dryRun: dev.bat in changed"
+      result.changed.some((c) => c.file.endsWith(join(".fenix", "config", "settings.json")) && c.field === "lead"),
+      "dryRun: the overlay lead change is in changed"
     );
     assert(
       result.changed.some((c) => c.file.endsWith("implementer.md")),
@@ -505,18 +511,37 @@ async function runTests() {
   {
     const root = buildFixture();
     const result = writeSquadConfig(
-      { squads: { dev: { lead: "test/model-xyz" } } },
+      { squads: { dev: { lead: "z-ai/glm-5.2" } } },
       root
     );
     assert(
       result.changed.length >= 1,
       "2-arg call: changes detected"
     );
-    const devBat = readFileSync(join(root, "bin", "dev.bat"), "utf8");
-    assert(
-      devBat.includes('set "ANTHROPIC_MODEL=test/model-xyz"'),
-      "2-arg call: dev.bat actually written"
+    const overlay = readSettings({ path: overlayPath(root) });
+    assertEq(
+      overlay.routing?.dev?.lead,
+      "z-ai/glm-5.2",
+      "2-arg call: the overlay actually written"
     );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 10b: LA_SETTINGS_FILE wins over the root-derived overlay ----
+  {
+    const root = buildFixture();
+    const seamPath = join(root, "seam-settings.json");
+    try {
+      process.env.LA_SETTINGS_FILE = seamPath;
+      const result = writeSquadConfig({ squads: { dev: { lead: "minimax/minimax-m3" } } }, root);
+      assertEq(result.changed.length, 1, "seam write reported");
+      assertEq(result.changed[0]?.field, "lead", "seam entry field=lead");
+      const overlay = readSettings({ path: seamPath });
+      assertEq(overlay.routing?.dev?.lead, "minimax/minimax-m3", "LA_SETTINGS_FILE received the write");
+      assert(!existsSync(overlayPath(root)), "root-derived overlay not created when the seam is set");
+    } finally {
+      delete process.env.LA_SETTINGS_FILE;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 
@@ -645,7 +670,7 @@ async function runTests() {
     );
     assertEq(
       Object.keys(data.pricing.openrouter).length,
-      3,
+      4,
       "writeSquadConfig: pre-existing pricing rows preserved under pricing.openrouter"
     );
     rmSync(root, { recursive: true, force: true });
@@ -740,85 +765,66 @@ async function runTests() {
     rmSync(root, { recursive: true, force: true });
   }
 
-  // ---- Test 16: LA_PROVIDER line round-trip (insert/update/remove) ----
+  // ---- Test 16: a uniform provider assignment writes provider.active ----
   {
     const root = buildFixture();
 
-    // Insert: assign dev to a custom provider
+    // Assign: dev → zai_anthropic
     const r1 = writeSquadConfig({ squads: { dev: { provider: "zai_anthropic" } } }, root);
-    assert(
-      r1.changed.length === 2,
-      "provider insert changes 2 files (dev.bat + dev-dry.bat)"
-    );
-
-    const devBat = readFileSync(join(root, "bin", "dev.bat"), "utf8");
-    assert(
-      devBat.includes('set "LA_PROVIDER=zai_anthropic"'),
-      "dev.bat has LA_PROVIDER line"
-    );
-    assert(
-      devBat.includes("\r\n"),
-      "dev.bat preserves CRLF after provider insert"
-    );
-    // Line must sit immediately before the _lib.bat call
-    const devLines = devBat.split("\r\n");
-    const callIdx = devLines.findIndex((l) => l.includes('call "%~dp0_lib.bat"'));
-    assert(
-      callIdx > 0 && devLines[callIdx - 1].includes('set "LA_PROVIDER=zai_anthropic"'),
-      "LA_PROVIDER line is immediately before the _lib.bat call"
-    );
-
-    const devDryBat = readFileSync(join(root, "bin", "dev-dry.bat"), "utf8");
-    assert(
-      devDryBat.includes('set "LA_PROVIDER=zai_anthropic"'),
-      "dev-dry.bat has LA_PROVIDER line"
-    );
-
-    // Update: switch to a different custom provider
-    writeSquadConfig({ squads: { dev: { provider: "anthropic" } } }, root);
-    const devBat2 = readFileSync(join(root, "bin", "dev.bat"), "utf8");
-    assert(
-      devBat2.includes('set "LA_PROVIDER=anthropic"'),
-      "dev.bat LA_PROVIDER updated to anthropic"
-    );
-    assert(
-      !devBat2.includes('set "LA_PROVIDER=zai_anthropic"'),
-      "old LA_PROVIDER value removed"
-    );
-
-    // Remove: back to openrouter = line removed
-    writeSquadConfig({ squads: { dev: { provider: "openrouter" } } }, root);
-    const devBat3 = readFileSync(join(root, "bin", "dev.bat"), "utf8");
-    assert(
-      !devBat3.includes("LA_PROVIDER"),
-      "openrouter = no LA_PROVIDER line (removed)"
-    );
-    const configAfter = readSquadConfig(root);
     assertEq(
-      configAfter.squads.dev.provider,
-      "openrouter",
-      "readSquadConfig reports openrouter after line removal"
+      r1.changed.length,
+      1,
+      "provider assign produces 1 changed entry (provider.active)"
     );
+    assertEq(r1.changed[0]?.field, "provider", "provider entry field=provider");
+    assertEq(r1.changed[0]?.before, "openrouter", "provider entry before=openrouter");
+    assertEq(r1.changed[0]?.after, "zai_anthropic", "provider entry after=zai_anthropic");
+    const overlay1 = readSettings({ path: overlayPath(root) });
+    assertEq(overlay1.provider?.active, "zai_anthropic", "overlay provider.active written");
 
+    // The read now reports it for every squad
+    let config = readSquadConfig(root);
+    assertEq(config.squads.dev.provider, "zai_anthropic", "read reports zai_anthropic for dev");
+    assertEq(config.squads.plan.provider, "zai_anthropic", "read reports zai_anthropic for plan");
+
+    // Writing the already-active provider again is a no-op
+    const r2 = writeSquadConfig({ squads: { dev: { provider: "zai_anthropic" } } }, root);
+    assertEq(r2.changed.length, 0, "re-writing the active provider is a no-op");
+
+    // Back to openrouter → provider.active is removed, not set to a literal
+    const r3 = writeSquadConfig({ squads: { dev: { provider: "openrouter" } } }, root);
+    assertEq(r3.changed.length, 1, "switching back to openrouter is a change");
+    const overlay3 = readSettings({ path: overlayPath(root) });
+    assertEq(overlay3.provider?.active, undefined, "openrouter → provider.active removed");
+    config = readSquadConfig(root);
+    assertEq(config.squads.dev.provider, "openrouter", "read reports openrouter after the reset");
     rmSync(root, { recursive: true, force: true });
   }
 
-  // ---- Test 17: openrouter provider write leaves untouched bats byte-identical ----
+  // ---- Test 16b: divergent or unknown provider assignments are refused ----
   {
     const root = buildFixture();
-    const devBefore = readFileSync(join(root, "bin", "dev.bat"), "utf8");
-    const dryBefore = readFileSync(join(root, "bin", "dev-dry.bat"), "utf8");
-
-    const r = writeSquadConfig({ squads: { dev: { provider: "openrouter" } } }, root);
+    const result = writeSquadConfig(
+      { squads: { dev: { provider: "zai_anthropic" }, plan: { provider: "openrouter" } } },
+      root
+    );
+    assertEq(result.changed.length, 0, "divergent assignments change nothing");
+    assertEq(result.refused.length, 2, "both squads refused");
     assert(
-      r.changed.length === 0,
-      "openrouter write reports no changes"
+      result.refused.every((r) => r.field === "provider" && r.code === "divergent-provider"),
+      "refusals name code divergent-provider for every squad in the patch"
     );
 
-    const devAfter = readFileSync(join(root, "bin", "dev.bat"), "utf8");
-    const dryAfter = readFileSync(join(root, "bin", "dev-dry.bat"), "utf8");
-    assertEq(devAfter, devBefore, "dev.bat byte-identical (openrouter = no line)");
-    assertEq(dryAfter, dryBefore, "dev-dry.bat byte-identical (openrouter = no line)");
+    const result2 = writeSquadConfig(
+      { squads: { dev: { provider: "no_such_provider" } } },
+      root
+    );
+    assertEq(result2.changed.length, 0, "unknown provider changes nothing");
+    assert(
+      result2.refused.some((r) => r.code === "unknown-provider" && r.squad === "dev"),
+      "unknown provider refused (code unknown-provider)"
+    );
+    assert(!existsSync(overlayPath(root)), "no provider refusal ever touches the overlay");
     rmSync(root, { recursive: true, force: true });
   }
 
@@ -865,7 +871,9 @@ async function runTests() {
   // ---- Test 19: referenced-provider deletion rejected ----
   {
     const root = buildFixture();
-    // Create a custom provider, assign dev to it, then try to delete it.
+    // Create a custom provider, assign dev to it (→ provider.active), then try
+    // to delete it. The read must report the assignment so the validator sees
+    // the reference.
     writeSquadConfig(
       { providers: { zai_anthropic: { baseUrl: "https://api.z.ai/api/anthropic", authEnv: "ZAI_API_KEY", authStyle: "token" } } },
       root
@@ -873,6 +881,11 @@ async function runTests() {
     writeSquadConfig({ squads: { dev: { provider: "zai_anthropic" } } }, root);
 
     const current = readSquadConfig(root);
+    assertEq(
+      current.squads.dev.provider,
+      "zai_anthropic",
+      "assignment visible to the validator through the read"
+    );
     const pv = validateProvidersPatch({ providers: { zai_anthropic: null } }, current);
     assertEq(pv.ok, false, "referenced provider deletion rejected");
     assert(
@@ -1008,7 +1021,14 @@ async function runTests() {
 
 (async () => {
   console.log("squad-config-write tests\n");
-  await runTests();
+  try {
+    await runTests();
+  } finally {
+    for (const [k, v] of envBackup) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);
 })();
