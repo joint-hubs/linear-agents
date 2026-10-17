@@ -54,8 +54,15 @@ export class AgentStateError extends Error {
   }
 }
 
+// The Supervisor's state home is the one directory that follows the deployment —
+// the `/data` volume in Docker, a temp dir in every test that redirects the
+// Supervisor — so the working-state store must live next to it; the repo's
+// `.state/` stays the default only when nothing is redirected.
 export function agentStatePath(env = process.env) {
   if (env.LA_AGENT_STATE_DB) return resolve(env.LA_AGENT_STATE_DB);
+  if (env.LA_SUPERVISOR_STATE_HOME) {
+    return join(resolve(env.LA_SUPERVISOR_STATE_HOME), "agent-state", "agent-state.sqlite");
+  }
   return join(stateRoot(env), "agent-state", "agent-state.sqlite");
 }
 

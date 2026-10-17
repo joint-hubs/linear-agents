@@ -645,6 +645,31 @@ test("without the Linear fixture the ask-keys hold: exactly one hold, a second r
   }
 });
 
+test("a namespace whose run dir does not exist gets no hold and no phantom directory", async () => {
+  const fixture = makeFixture();
+  try {
+    const env = envWithoutLinear(fixture.env);
+    // A run id no fixture directory was created for: askable keys ARE missing
+    // (no Linear fixture), but there is no run to hold against.
+    const missingRun = "missing-run-foc729";
+    const ns = `child:${missingRun}/c1`;
+    const res = runCliSync(
+      ["resolve", "--role", "dev", "--namespace", ns, "--cwd", fixture.repo, "--json"],
+      env,
+    );
+    assert.equal(res.status, 0, `stderr: ${res.stderr}`); // missing is a state, not an error
+    const json = JSON.parse(res.stdout);
+    assert.ok(missingMap(json).issue_title?.askIfMissing, "askable keys are missing");
+    assert.equal(json.hold ?? null, null, "no hold without a run dir");
+    assert.equal(json.holdSkipped, "no run dir");
+    // writeHolds would have mkdir'd the run dir from nothing — the fix is that
+    // it never happens: no dir, so no holds.json either.
+    assert.equal(existsSync(join(fixture.stateHome, missingRun)), false, "no run dir was created");
+  } finally {
+    cleanup(fixture);
+  }
+});
+
 test("answering the hold stores user values, ignores unknown keys, and re-resolving is idempotent", async () => {
   const fixture = makeFixture();
   const saved = applySeams(fixture.env);

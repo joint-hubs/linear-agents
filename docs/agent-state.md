@@ -8,9 +8,10 @@ state: each write needs a reason plus a scope or TTL, at most 50 active per name
 expired or scope-ended keys. Every change lands in the append-only `facts_history`.
 
 Values are strings of at most 2048 UTF-8 bytes, screened by the local egress secret screen (FOC-450) before
-storage because the rendered block is sent to model providers. The file lives at
-`<stateRoot>/agent-state/agent-state.sqlite` (WAL, gitignored, never inside a task worktree), where
-`<stateRoot>` is `$LA_STATE_ROOT` or `<repo>/.state`; `LA_AGENT_STATE_DB` overrides the path.
+storage because the rendered block is sent to model providers. The file lives at `agent-state/agent-state.sqlite`
+(WAL, gitignored, never inside a task worktree) under the first of: `LA_AGENT_STATE_DB` (the whole path),
+`LA_SUPERVISOR_STATE_HOME` (the Supervisor state home — the one directory that follows the deployment, e.g. the
+`/data` volume in Docker), or `<stateRoot>`, where `<stateRoot>` is `$LA_STATE_ROOT` or `<repo>/.state`.
 
 ## Synopsis
 
@@ -244,7 +245,9 @@ missing askable keys the final line is `hold hold-1 created` when a new hold is 
 `hold hold-1 <state>` for the newest hold with that origin (`open`, or `answered` after an answer).
 `missing` prints the same `missing:` line plus `hold <id> <state>`; `registry` prints
 `registry <path>` and the key table per role set. `--json` prints the full shapes:
-`{ ok, verb, role, namespace, resolved, missing, hold, applied, ignored }`.
+`{ ok, verb, role, namespace, resolved, missing, hold, holdSkipped, applied, ignored }` — `holdSkipped` is
+`"no run dir"` when the namespace's run directory does not exist (no hold is written, nothing is created),
+else absent.
 
 ### The hold round-trip
 
@@ -271,6 +274,71 @@ write the string with a real newline inside double quotes (backtick-n).
 The next `resolve` stores the answers (as `source: user`) before resolving, so answered values land ahead
 of any resolver.
 
+## SessionStart injection (FOC-729)
+
+Claude Code fires `SessionStart` on startup, resume, clear and compact — exactly the moments a context
+loss would otherwise erase the working state. The hook `node "$LA_ROOT/scripts/agent-state-hook.mjs" SessionStart`
+(`scripts/agent-state-hook.mjs`) re-renders and re-injects the block at each of them, for the Supervisor and
+every squad child. The stdin payload is read tolerantly (unparsable or missing → `{}`); `source` defaults
+to `startup` and passed through verbatim into the record; `LA_AGENT_STATE_NOW` pins the clock like in the CLIs.
+
+**Namespace and role come from the env alone.** `LA_SUPERVISOR_CHILD` set → namespace
+`child:<LA_SUPERVISOR_RUN>/<child>`, role `FENIX_STAGE` (must be a squad role, else `unknown role "<x>"`).
+Otherwise the Supervisor: run id = `LA_SUPERVISOR_RUN`, else the current-run pointer (`readCurrentRun()`) —
+a missing or unreadable pointer is "no run id", not a crash; with neither there is no namespace at all. The
+pointer is adopted only when that run's directory still exists, and `resolve` never creates a run directory
+(a hold is written only into an existing run).
+
+Three steps, then the block on stdout:
+
+1. **Resolve offline.** The env handed to the resolvers has `LINEAR_API_KEY`, `LINEAR_API_KEY_PISI`,
+   `LINEAR_WORKSPACE` and `LA_AGENT_STATE_LINEAR_FIXTURE` deleted, so the hook never touches the network —
+   a context-loss moment must never wait on one. Linear facts arrive only through spawn seeding, an explicit
+   `resolve`, or a hold answer (holds follow the FOC-728 dedup rule); the resolve still refreshes
+   `refresh: always` keys and fills newly resolvable ones.
+2. **Render** `renderFacts` (default caps) — a namespace with no facts still prints the header-only block,
+   so the agent learns the store exists.
+3. **Record** the row below.
+
+**Failure rule:** any failure — no run id, unknown role, an unparsable `LA_AGENT_STATE_NOW`, a store or
+registry error — prints exactly one line `WORKING STATE unavailable: <reason>` to stdout and exits 0; a hook
+that fails must never fail the session it hooks into. Errors carrying a code render as `<message> (<CODE>)`
+(e.g. `REGISTRY_INVALID` for a registry that failed validation). The hook itself writes nothing to stderr
+(the `node:sqlite` ExperimentalWarning from opening the store is the same expected noise the CLIs produce).
+
+**The record.** One row per render, appended to `<runDir>/agent-state-renders.jsonl` (the run dir of the
+namespace's run) — the measurement input for FOC-731:
+
+```json
+{"at":"2026-10-16T09:00:00.000Z","namespace":"child:r1a2b3/dev-3","role":"dev","source":"compact","lines":12,"omitted":0,"bytes":734,"resolved":8,"missing":0}
+```
+
+`resolved`/`missing` are counts from the resolve. There is no row for `session:` namespaces or when the
+namespace's run dir does not exist; a failed append never costs the block (record dropped, block printed).
+
+**Where the hook is wired.** The Supervisor's `agents/supervisor/settings.json` carries it as the third
+SessionStart command, right after the briefing (`supervisor-status.mjs --briefing`) and before
+`supervisor-session-hook.mjs`. The generated per-child deny-only settings from `buildChildSettings`
+(`scripts/supervisor-lib.mjs`) add `hooks.SessionStart: [{ hooks: [WORKING_STATE_SESSION_START_HOOK] }]` —
+the same shared object as the Supervisor file (`timeout: 10`); the squad file's telemetry hook is not
+repeated there and the command is unique to this layer, so it registers exactly once — namespace and role
+come from the child's inherited env, not the command line.
+
+**Spawn seeding.** Before the hook can fire, spawn writes the facts it already renders into the prologue:
+`seedPinnedState` (`scripts/agent-state-seed.mjs`) stores tier-base facts with `source: "spawn"`, evidence
+`supervisor-spawn PINNED STATE`, for eight keys — `repo`, `la_root`, `run_id`, `role`, `issue`, `worktree`,
+`branch`, `base_revision`. Null/empty values are ignored; undeclared keys are reported as skipped, never
+invented; an already-stored identical row is left alone (no version churn). `supervisor-spawn.mjs` runs it
+right after the prologue is built and records `workingStateSeeded: { at, keys }` on the registry child record —
+or `{ at, keys: null, error }` with one stderr line `agent-state: seeding skipped (<reason>)`; a store problem
+never blocks a spawn.
+
+**Try it** (as a child in a run):
+
+```bash
+echo '{"hook_event_name":"SessionStart","source":"compact"}' | LA_SUPERVISOR_RUN=<run> LA_SUPERVISOR_CHILD=<child> FENIX_STAGE=dev node scripts/agent-state-hook.mjs SessionStart
+```
+
 ## Exit codes and error codes
 
 - **0** — success.
@@ -289,21 +357,21 @@ to stderr as `agent-state: <message> (<CODE>)`, followed by the usage text on ex
 
 | Variable | Meaning |
 |---|---|
-| `LA_AGENT_STATE_DB` | store path override (the `--db` flag wins over it) |
+| `LA_AGENT_STATE_DB` | store path override — wins over `LA_SUPERVISOR_STATE_HOME` and `LA_STATE_ROOT` (the `--db` flag wins over it) |
 | `LA_AGENT_STATE_NOW` | pins the clock (ISO date; anything else exits 2) so expiry and ordering are testable without sleeping |
 | `LA_TASK_OWNER` | default `--actor` attributed in `facts_history` |
-| `LA_STATE_ROOT` | state root override; the default store path is `<LA_STATE_ROOT>/agent-state/agent-state.sqlite` |
+| `LA_STATE_ROOT` | state root override; the last-resort store path is `<LA_STATE_ROOT>/agent-state/agent-state.sqlite` |
 | `LA_AGENT_STATE_REGISTRY` | registry file override; default `<LA_ROOT>/config/agent-state.json` |
 | `LA_AGENT_STATE_LINEAR_FIXTURE` | `resolve`: JSON fixture replacing the Linear network in tests (`<identifier> → issue facts`) |
 | `LA_ROOT` | install root of the tooling checkout; anchors the registry, `config/projects.json` and `docs/STATE.md` |
-| `LA_SUPERVISOR_STATE_HOME` | Supervisor state home — `<home>/<runId>/children.json` and `<home>/<runId>/holds.json` |
+| `LA_SUPERVISOR_STATE_HOME` | Supervisor state home — `<home>/<runId>/children.json` and `<home>/<runId>/holds.json`; when set (and `LA_AGENT_STATE_DB` is not), also anchors the store at `<home>/agent-state/agent-state.sqlite` |
 | `LA_SUPERVISOR_RUN` / `LA_SUPERVISOR_CHILD` | env fallbacks for the run/child ids when the registry row is read |
 | `LA_TASK_ID` | seeded into the child `issue` key by the first resolver of its chain |
 
 ## What comes next
 
 - **FOC-728** — landed: the base keys, resolvers and hold round-trip above.
-- **FOC-729** — SessionStart injection of the `render` block + spawn seeding from PINNED STATE.
+- **FOC-729** — landed: the SessionStart injection above + spawn seeding from PINNED STATE.
 - **FOC-730** — skill + task-close `prune` + deny rules for raw DB writes.
 
 Only this CLI writes the store; raw writes to the database file are denied in Supervisor and child

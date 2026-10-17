@@ -23,6 +23,7 @@ import {
   PRINT_BG_WAIT_ENV,
   SUPERVISOR_DENY,
   TURN_END_CONTRACT,
+  WORKING_STATE_SESSION_START_HOOK,
   buildChildSettings,
   childSettingsPath,
   heldDir,
@@ -33,6 +34,7 @@ import {
   registryPath,
   runDir,
 } from "./supervisor-lib.mjs";
+import { openAgentState } from "./agent-state.mjs";
 import { makeFakeCodegraphCli } from "./fixtures/codegraph-fake-cli.mjs";
 import { readFocus } from "./supervisor-focus.mjs";
 
@@ -40,6 +42,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
 const STOP = join(ROOT, "scripts", "supervisor-stop.mjs");
 const MOCK = join(ROOT, "scripts", "mock-claude.mjs");
+const REAL_REGISTRY = join(ROOT, "config", "agent-state.json");
 
 // FOC-802 M3: the run-dir mode assertions below pin 02775 (setgid + group
 // write) and 0644 — under a default umask of 022 the group-write bit would be
@@ -63,6 +66,13 @@ function test(name, fn) {
   }
 }
 const fail = (msg) => { throw new Error(msg); };
+
+// FOC-729: spawn seeds the working-state store — point LA_AGENT_STATE_DB at a
+// temp dir so no case writes the repo's real .state/agent-state/. Cases that
+// need a specific store (the seeding assertion, the broken store) override it
+// in their own env.
+const AGENT_STATE_DB_DIR = mkdtempSync(join(tmpdir(), "la-sup-agent-state-"));
+cleanup.push(AGENT_STATE_DB_DIR);
 
 function fixtureRepo() {
   const base = mkdtempSync(join(tmpdir(), "la-sup-"));
@@ -111,6 +121,7 @@ function runSpawn(runId, repo, extra = [], env = {}) {
       env: {
         ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key",
         LA_CLAUDE_BIN: MOCK,
+        LA_AGENT_STATE_DB: join(AGENT_STATE_DB_DIR, "agent-state.sqlite"),
         LA_SUPERVISOR_NO_TELEMETRY: "1",
         // The codegraph preflight has `initialize: true` and this machine has
         // the real CLI on PATH — without this seam every mock test below would
@@ -628,17 +639,25 @@ test("the dashboard write routes are denied from a child shell (FOC-788 follow-u
   }
 });
 
-test("the generated file is deny-only — no allow, no hooks", () => {
+test("the generated file carries the deny list and exactly the working-state SessionStart hook", () => {
   // `claude --settings` loads ADDITIONAL settings. An allow entry here could only
-  // grant, never remove; a repeated hooks block risks the SessionStart telemetry
-  // hook firing twice and double-counting the run.
+  // grant, never remove; the squad's own hooks block is NOT copied (double
+  // registration) — the one hook this file carries is the working-state
+  // SessionStart re-injection (FOC-729), unique to this settings layer.
   const out = buildChildSettings({
     permissions: { allow: ["Bash(node:*)"], deny: [] },
     hooks: { SessionStart: [{ hooks: [{ type: "command", command: "x" }] }] },
     theme: "dark",
   });
-  if (JSON.stringify(Object.keys(out)) !== '["permissions"]') fail(`extra keys: ${Object.keys(out)}`);
+  if (JSON.stringify([...Object.keys(out)].sort()) !== '["hooks","permissions"]') {
+    fail(`extra keys: ${Object.keys(out)}`);
+  }
   if (JSON.stringify(Object.keys(out.permissions)) !== '["deny"]') fail(`not deny-only: ${Object.keys(out.permissions)}`);
+  const entries = out.hooks?.SessionStart ?? [];
+  if (entries.length !== 1) fail(`expected exactly one SessionStart entry: ${JSON.stringify(out.hooks)}`);
+  if (JSON.stringify(entries[0].hooks) !== JSON.stringify([WORKING_STATE_SESSION_START_HOOK])) {
+    fail(`SessionStart hooks drifted: ${JSON.stringify(entries[0].hooks)}`);
+  }
 });
 
 test("the Supervisor's denies survive a squad file that is missing or corrupt", () => {
@@ -683,6 +702,111 @@ test("spawn writes the file and points claude at it", () => {
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
 });
 
+test("spawn seeds the child's base keys from PINNED STATE", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  // A store of this case's own, so the assertions see exactly what THIS spawn
+  // seeded (runSpawn's default LA_AGENT_STATE_DB is shared by the whole file).
+  const dbDir = mkdtempSync(join(tmpdir(), "la-sup-seed-"));
+  cleanup.push(dbDir);
+  const laRoot = join(dbDir, "la-root");
+  const out = parse(runSpawn(runId, repo, [], {
+    MOCK_CLAUDE_HANG_MS: "0",
+    LA_AGENT_STATE_DB: join(dbDir, "agent-state.sqlite"),
+    LA_AGENT_STATE_REGISTRY: REAL_REGISTRY,
+    LA_ROOT: laRoot,
+  }));
+  if (!out.ok) fail(`spawn failed: ${out.error}`);
+
+  // The PINNED STATE facts, as tier-base rows in the child's namespace.
+  const namespace = `child:${runId}/${out.childId}`;
+  const store = openAgentState(join(dbDir, "agent-state.sqlite"));
+  try {
+    const expected = {
+      repo: "repo",
+      // The prologue and the store agree by construction: both read LA_ROOT
+      // and nothing else.
+      la_root: laRoot,
+      run_id: runId,
+      role: "dev",
+      issue: "FOC-123",
+      worktree: out.worktree,
+      branch: out.branch,
+      base_revision: out.baseRevision,
+    };
+    for (const [key, value] of Object.entries(expected)) {
+      const row = store.db
+        .prepare("SELECT value, tier, source, evidence FROM facts WHERE namespace = ? AND key = ?")
+        .get(namespace, key);
+      if (!row) fail(`no seeded fact for ${key}`);
+      if (row.tier !== "base") fail(`${key} is not base tier`);
+      if (row.source !== "spawn") fail(`${key} source was ${row.source}`);
+      if (row.evidence !== "supervisor-spawn PINNED STATE") fail(`${key} evidence was ${row.evidence}`);
+      if (row.value !== value) fail(`${key} was ${row.value}, expected ${value}`);
+    }
+  } finally {
+    store.close();
+  }
+
+  // The registry record says WHAT was seeded.
+  const entry = readRegistry(runId).children[out.childId];
+  if (!entry.workingStateSeeded?.keys?.includes("issue")) {
+    fail(`registry has no workingStateSeeded.keys with issue: ${JSON.stringify(entry.workingStateSeeded)}`);
+  }
+
+  // Without LA_ROOT the la_root row is absent — no gitRoot fallback at spawn;
+  // the registry's la_root chain fills the key at hook time instead.
+  // spawnSync drops undefined env values, so a host LA_ROOT cannot leak in.
+  const runId2 = fixtureRun();
+  const out2 = parse(runSpawn(runId2, repo, [], {
+    MOCK_CLAUDE_HANG_MS: "0",
+    LA_AGENT_STATE_DB: join(dbDir, "agent-state-2.sqlite"),
+    LA_AGENT_STATE_REGISTRY: REAL_REGISTRY,
+    LA_ROOT: undefined,
+  }));
+  if (!out2.ok) fail(`spawn failed: ${out2.error}`);
+  const store2 = openAgentState(join(dbDir, "agent-state-2.sqlite"));
+  try {
+    const row = store2.db
+      .prepare("SELECT value FROM facts WHERE namespace = ? AND key = 'la_root'")
+      .get(`child:${runId2}/${out2.childId}`);
+    if (row) fail(`la_root was seeded without LA_ROOT: ${row.value}`);
+  } finally {
+    store2.close();
+  }
+  const entry2 = readRegistry(runId2).children[out2.childId];
+  if (entry2.workingStateSeeded?.keys?.includes("la_root")) {
+    fail(`workingStateSeeded.keys has la_root without LA_ROOT: ${JSON.stringify(entry2.workingStateSeeded)}`);
+  }
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+  spawnSync(process.execPath, [STOP, "--run", runId2, "--child", out2.childId], { encoding: "utf8" });
+});
+
+test("a broken store never blocks a spawn", () => {
+  const { base, repo } = fixtureRepo();
+  const runId = fixtureRun();
+  // LA_AGENT_STATE_DB INSIDE a path that is an existing file: opening the store
+  // cannot even create its parent directory.
+  const blocker = join(base, "blocker");
+  writeFileSync(blocker, "not a directory\n");
+  const r = runSpawn(runId, repo, [], {
+    MOCK_CLAUDE_HANG_MS: "0",
+    LA_AGENT_STATE_DB: join(blocker, "x.sqlite"),
+    LA_AGENT_STATE_REGISTRY: REAL_REGISTRY,
+  });
+  if (r.status !== 0) {
+    fail(`spawn failed with a broken store (exit ${r.status}):\n       ${r.stdout}\n       ${r.stderr}`);
+  }
+  const seeded = readRegistry(runId).children[parse(r).childId].workingStateSeeded;
+  if (seeded === null || typeof seeded !== "object") {
+    fail(`expected a workingStateSeeded object with keys null, got ${JSON.stringify(seeded)}`);
+  }
+  if (seeded.keys !== null) fail(`expected keys null, got ${JSON.stringify(seeded.keys)}`);
+  if (typeof seeded.error !== "string" || seeded.error.length === 0) {
+    fail(`expected a non-empty error, got ${JSON.stringify(seeded.error)}`);
+  }
+});
 // FOC-802 M3: the entrypoint's fix_permissions runs only at container start, so
 // the modes of a run created afterwards must come from the writers themselves.
 // The fixture run dir is created WITHOUT pre-made subdirs (see fixtureRun), so

@@ -290,14 +290,26 @@ export const fixtureChild = (over = {}) => ({
  * index on a machine that has the CLI on PATH (supervisor-spawn.test.mjs's
  * readiness section opts back in against the fake CLI).
  */
-export const baseEnv = (extra = {}) => ({
-  ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key",
-  LA_CLAUDE_BIN: MOCK,
-  LA_SUPERVISOR_NO_TELEMETRY: "1",
-  LA_SUPERVISOR_NO_CODEGRAPH: "1",
-  MOCK_CLAUDE_HANG_MS: "0",
-  ...extra,
-});
+export const baseEnv = (extra = {}) => {
+  // FOC-729: spawn seeds the working-state store at $LA_AGENT_STATE_DB. Point
+  // it at the fixture's temp tree — the parent of the same state home the
+  // suite already redirects (its parent when set at module load, its own
+  // otherwise) — so no test ever writes <repo>/.state/agent-state/. `extra`
+  // still wins, so a test can point it at a broken path on purpose.
+  const stateHome = process.env.LA_SUPERVISOR_STATE_HOME || extra.LA_SUPERVISOR_STATE_HOME;
+  const agentStateDb = stateHome
+    ? join(dirname(stateHome), "agent-state.sqlite")
+    : join(tmpdir(), `la-agent-state-${process.pid}`, "agent-state.sqlite");
+  return {
+    ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key",
+    LA_CLAUDE_BIN: MOCK,
+    LA_SUPERVISOR_NO_TELEMETRY: "1",
+    LA_SUPERVISOR_NO_CODEGRAPH: "1",
+    MOCK_CLAUDE_HANG_MS: "0",
+    LA_AGENT_STATE_DB: agentStateDb,
+    ...extra,
+  };
+};
 
 export const runScript = (script, args, env = {}) =>
   spawnSync(process.execPath, [script, ...args], {

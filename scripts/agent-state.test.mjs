@@ -136,6 +136,27 @@ test("agentStatePath honours LA_AGENT_STATE_DB over the state root", () => {
       agentStatePath({ LA_AGENT_STATE_DB: custom, LA_STATE_ROOT: join(dir, "state") }),
       resolve(custom)
     );
+    // the Supervisor state home anchors the store when no explicit db is set
+    const supHome = join(dir, "sup");
+    assert.equal(
+      agentStatePath({ LA_SUPERVISOR_STATE_HOME: supHome }),
+      resolve(join(supHome, "agent-state", "agent-state.sqlite"))
+    );
+    // a relative state home resolves against cwd
+    assert.equal(
+      agentStatePath({ LA_SUPERVISOR_STATE_HOME: "rel/sup" }),
+      resolve(join("rel/sup", "agent-state", "agent-state.sqlite"))
+    );
+    // the explicit db also wins over the state home
+    assert.equal(
+      agentStatePath({ LA_AGENT_STATE_DB: custom, LA_SUPERVISOR_STATE_HOME: supHome }),
+      resolve(custom)
+    );
+    // with neither redirect, the LA_STATE_ROOT default is unchanged
+    assert.equal(
+      agentStatePath({ LA_STATE_ROOT: join(dir, "state"), LA_SUPERVISOR_STATE_HOME: "" }),
+      resolve(join(dir, "state", "agent-state", "agent-state.sqlite"))
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -34,7 +34,7 @@ import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 import {
   actorIdFor,
@@ -89,6 +89,9 @@ import {
 import { loadGraph } from "./graph-validate.mjs";
 import { normalizeFocus, setFocus } from "./supervisor-focus.mjs";
 import { RUN_ID_RE } from "./supervisor-current-run.mjs";
+import { agentStatePath, openAgentState } from "./agent-state.mjs";
+import { loadRegistry, registryPath } from "./agent-state-registry.mjs";
+import { seedPinnedState } from "./agent-state-seed.mjs";
 import { currentOwner, loadOwnership, recordOwnershipHold } from "./task-ownership.mjs";
 
 // A graph we cannot read means no topology: no per-node limit and no consumer to
@@ -1046,6 +1049,38 @@ const prologue = pinnedStatePrologue({
   knownQuirks,
   referencedFiles,
 });
+// FOC-729: the same spawn facts the prologue carries are seeded into the
+// working-state store, so a SessionStart hook can re-inject them after a
+// compaction. A store problem never blocks a spawn — it is reported and
+// recorded, nothing more.
+let workingStateSeeded = null;
+try {
+  const store = openAgentState(agentStatePath(process.env));
+  try {
+    const { seeded } = seedPinnedState(store, {
+      namespace: `child:${runId}/${childId}`,
+      registry: loadRegistry(registryPath(process.env)),
+      values: {
+        repo: basename(gitRoot),
+        // LA_ROOT only, like the prologue: an unset LA_ROOT seeds nothing here
+        // and the registry's la_root chain fills the key at hook time.
+        la_root: process.env.LA_ROOT || null,
+        run_id: runId,
+        role: squad,
+        issue: taskId,
+        worktree: worktree.worktree,
+        branch: worktree.branch,
+        base_revision: worktree.baseRevision,
+      },
+    });
+    workingStateSeeded = { at: new Date().toISOString(), keys: seeded };
+  } finally {
+    store.close();
+  }
+} catch (err) {
+  process.stderr.write(`agent-state: seeding skipped (${err.message})\n`);
+  workingStateSeeded = { at: new Date().toISOString(), keys: null, error: err.message };
+}
 // The CodeGraph block rides the same prompt file, AFTER the pinned-state
 // prologue — a separate section, so the FOC-286 ten-field shape stays fixed.
 // The turn-end contract (FOC-522) rides the same way: one more separate
@@ -1055,7 +1090,7 @@ writeFileSync(promptFile, `${prologue}\n\n${codegraph.kickoff}\n\n${TURN_END_CON
 // The registry entry recorded what was verified; now it can also say WHAT THE
 // CHILD WAS TOLD — the prologue verbatim. Patched while spawn still owns the
 // entry (the watcher has not launched), so the single-writer discipline holds.
-updateChild(runId, childId, { pinnedStateVerification: { ...pinnedVerification, prologue } });
+updateChild(runId, childId, { pinnedStateVerification: { ...pinnedVerification, prologue }, workingStateSeeded });
 
 const watcherArgs = [
   join(ROOT, "scripts", "supervisor-watch.mjs"),
