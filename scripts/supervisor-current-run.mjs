@@ -36,6 +36,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { supervisorCurrentRunPath, SUPERVISOR_SESSION_ID_PATTERN } from "./fenix-paths.mjs";
+import { RUN_ID_RE } from "./utils.mjs";
 import { supervisorStateHome } from "./supervisor-lib.mjs";
 import { recentRunIds } from "./cockpit.mjs";
 
@@ -43,8 +44,10 @@ import { recentRunIds } from "./cockpit.mjs";
 
 // The id shape `run-manifest.mjs gen-id supervisor` produces
 // (e.g. 2026-10-06T15-09-19-713-supervisor-26c7) — the guard against adopting
-// a stray directory name as a run id.
-export const RUN_ID_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}-supervisor-[0-9a-f]{4}$/;
+// a stray directory name as a run id. Canonical home is utils.mjs since FOC-903
+// (the per-run scratch layer validates against it); re-exported here so every
+// existing importer keeps working.
+export { RUN_ID_RE };
 
 /** Same format as cmdGenId in run-manifest.mjs, with squad "supervisor". */
 export function newRunId(now = new Date(), rand = () => randomBytes(2).toString("hex")) {

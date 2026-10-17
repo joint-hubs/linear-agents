@@ -11,7 +11,8 @@ REM      The original copied CLAUDE.md there and mirrored skills on EVERY start
 REM      (copy /y + robocopy /MIR), so any edit made in .claude-or was silently
 REM      overwritten. The context now lives in the repo and nothing rewrites it.
 REM   2. --mcp-config points at config\atlas-mcp.json in this repo (was: the
-REM      separate atlas repo)
+REM      separate atlas repo); passed only when the file was rendered — Atlas
+REM      off = the flag absent (FOC-772)
 REM   3. OPENROUTER_API_KEY is read from this repo's .env (was: hermes .env)
 REM   4. run registered in telemetry (run-manifest), fail-soft
 REM
@@ -74,8 +75,12 @@ echo [orchestrate-openrouter] working dir = %CD%
 echo [orchestrate-openrouter] CLAUDE_CONFIG_DIR = %CLAUDE_CONFIG_DIR%
 if defined RUN_ID echo [orchestrate-openrouter] run = %RUN_ID%
 echo.
+REM Atlas is optional (FOC-772): pass --mcp-config only when _lib.bat actually
+REM rendered the file (integration on). Off = the file is absent = no flag.
+set "MCP_ARGS="
+if exist "%ROOT%\config\atlas-mcp.json" set "MCP_ARGS=--mcp-config "%ROOT%\config\atlas-mcp.json""
 
-claude --model xiaomi/mimo-v2.6-pro --mcp-config "%ROOT%\config\atlas-mcp.json" --append-system-prompt "ORCHESTRATION MODE: you PLAN, delegate, and approve. You do NOT read or write code yourself - your context is only for planning and integration. FIRST for ANY task: spawn a DeepSeek Flash worker (agent_spawn model=flash, cwd=repo) to explore the code and return a COMPACT summary (key files, signatures, where things live; max ~200 lines, no changes) - NEVER open large files yourself. Plan from that summary; ASK the user when unclear before delegating. Delegate ALL code to Flash, even tiny changes - never write feature code yourself; cut into the SMALLEST chunks, run on PARALLEL Flash workers (agent_spawn xN). Every worker instruction must be complete, precise, token-dense (min tokens, max info). Pro reviews Flash; escalate Flash->Pro->Sonnet->Opus. FINAL APPROVAL IS ALWAYS YOURS: integrate and test the whole before done. Atlas bridge sonnet/opus route to real Anthropic. Reason by Descartes' 4 rules: evidence (no guessing/haste), divide, order by dependency, full review. Read memory/orchestration.md first."
+claude --model xiaomi/mimo-v2.6-pro %MCP_ARGS% --append-system-prompt "ORCHESTRATION MODE: you PLAN, delegate, and approve. You do NOT read or write code yourself - your context is only for planning and integration. FIRST for ANY task: spawn a DeepSeek Flash worker (agent_spawn model=flash, cwd=repo) to explore the code and return a COMPACT summary (key files, signatures, where things live; max ~200 lines, no changes) - NEVER open large files yourself. Plan from that summary; ASK the user when unclear before delegating. Delegate ALL code to Flash, even tiny changes - never write feature code yourself; cut into the SMALLEST chunks, run on PARALLEL Flash workers (agent_spawn xN). Every worker instruction must be complete, precise, token-dense (min tokens, max info). Pro reviews Flash; escalate Flash->Pro->Sonnet->Opus. FINAL APPROVAL IS ALWAYS YOURS: integrate and test the whole before done. Atlas bridge sonnet/opus route to real Anthropic. Reason by Descartes' 4 rules: evidence (no guessing/haste), divide, order by dependency, full review. Read memory/orchestration.md first."
 
 set "EXIT_CODE=%errorlevel%"
 if defined RUN_ID node "%ROOT%\scripts\run-manifest.mjs" end "%RUN_ID%" %EXIT_CODE% >nul 2>&1

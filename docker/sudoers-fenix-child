@@ -1,0 +1,4 @@
+# FOC-802: node (the Supervisor's user) may run exactly one root command —
+# the child-spawn helper. No tty required (spawns come from detached watchers).
+node ALL=(root) NOPASSWD: /usr/local/sbin/fenix-spawn-as-child
+Defaults!/usr/local/sbin/fenix-spawn-as-child !requiretty
