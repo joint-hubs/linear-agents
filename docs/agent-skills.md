@@ -24,6 +24,7 @@ copy, because its `CLAUDE_CONFIG_DIR` is the repo's own `agents/supervisor`.
 | `grilling`        | https://github.com/mattpocock/skills               | `skills/productivity/grilling` | `49dd158` | MIT     | Supervisor before answering a plan-approval gate; `plan` before GATE 1 |
 | `grill-me`        | https://github.com/mattpocock/skills               | `skills/productivity/grill-me` | `49dd158` | MIT     | User-invoked only (`disable-model-invocation: true`) — the model cannot self-trigger it |
 | `codegraph-expert`| — (own skill, no upstream)                         | —                              | —         | —       | Recon/review/planning roles |
+| `working-state`   | — (own skill, no upstream)                         | —                              | —         | —       | Every Supervisor child + the Supervisor (contract lines in each role's CLAUDE.md) |
 
 Each vendored `SKILL.md` carries a provenance comment right after its
 frontmatter; the MIT license text sits next to it (`../grilling` for `grill-me`).

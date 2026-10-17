@@ -12,12 +12,14 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   ROOT,
   baseEnv,
+  cleanupLater,
   fixtureRepo,
   fixtureRun,
   fixtureWorktree,
@@ -26,7 +28,15 @@ import {
   parse,
   runScript,
 } from "./supervisor-test-fixtures.mjs";
-import { SUPERVISOR_DENY, buildChildSettings, gatePath, readRegistry, writeRegistry } from "./supervisor-lib.mjs";
+import {
+  SUPERVISOR_DENY,
+  buildChildSettings,
+  gatePath,
+  readRegistry,
+  supervisorStateHome,
+  writeRegistry,
+} from "./supervisor-lib.mjs";
+import { openAgentState, setFact } from "./agent-state.mjs";
 
 const { test, fail, summary } = harness();
 
@@ -503,6 +513,148 @@ test("supervisor-cleanup.mjs is the only script that runs `git worktree remove`"
       `${file} looks like it removes a worktree — that belongs behind the two keys in supervisor-cleanup.mjs`,
     );
   }
+});
+
+// ── 10. FOC-730: the working-state store closes with the task ────────────────
+console.log("\nstan roboczy — archiwum i przycięcie przy zamknięciu zadania");
+
+const seedStore = (dbPath, rows) => {
+  const store = openAgentState(dbPath);
+  try {
+    for (const row of rows) setFact(store, row);
+  } finally {
+    store.close();
+  }
+};
+const factStatus = (dbPath, namespace, key) => {
+  const store = openAgentState(dbPath);
+  try {
+    return store.db.prepare("SELECT status FROM facts WHERE namespace = ? AND key = ?").get(namespace, key)?.status;
+  } finally {
+    store.close();
+  }
+};
+
+test("task close archives the namespace, retires task+turn keys, keeps base and run keys", () => {
+  const s = scenario();
+  const dbPath = join(s.base, "agent-state.sqlite");
+  const childNs = `child:${s.runId}/dev-1`;
+  const supNs = `supervisor:${s.runId}`;
+  seedStore(dbPath, [
+    { namespace: childNs, key: "task_key", value: "v", reason: "task fact" },
+    { namespace: childNs, key: "turn_key", value: "v", reason: "turn fact", scope: "turn" },
+    { namespace: childNs, key: "anchor", value: "doc", tier: "base", source: "config", evidence: "docs/anchor.md", reason: "seed" },
+    { namespace: supNs, key: "sup_task", value: "v", reason: "supervisor task fact" },
+    { namespace: supNs, key: "sup_run", value: "v", reason: "supervisor run fact", scope: "run" },
+    { namespace: "child:other-run/dev-9", key: "keep_key", value: "v", reason: "other run" },
+  ]);
+
+  approved(s);
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done], { LA_AGENT_STATE_DB: dbPath }), fail);
+  assert.equal(out.ok, true, out.error);
+
+  // the archive sits next to the rest of the child's work product
+  const archivePath = join(supervisorStateHome(), s.runId, "test-artifacts", "dev-1", "agent-state.json");
+  assert.ok(existsSync(archivePath), "no agent-state.json next to the work product");
+  const archive = JSON.parse(readFileSync(archivePath, "utf8"));
+  assert.equal(archive.namespace, childNs);
+  assert.ok(archive.exportedAt);
+  assert.deepEqual(
+    archive.facts.map((f) => f.key).sort(),
+    ["anchor", "task_key", "turn_key"],
+    "the archive carries every active AND retired row, base included",
+  );
+  assert.equal(archive.history.length, 3, "the archive carries the child namespace's op history");
+
+  // task- and turn-scoped agent keys retire; base and run-scoped survive
+  assert.equal(factStatus(dbPath, childNs, "task_key"), "retired");
+  assert.equal(factStatus(dbPath, childNs, "turn_key"), "retired");
+  assert.equal(factStatus(dbPath, childNs, "anchor"), "active");
+  // this was the run's last standing child → the supervisor namespace's
+  // task-scoped keys retire too, its run-scoped ones stay
+  assert.equal(factStatus(dbPath, supNs, "sup_task"), "retired");
+  assert.equal(factStatus(dbPath, supNs, "sup_run"), "active");
+  assert.equal(factStatus(dbPath, "child:other-run/dev-9", "keep_key"), "active");
+
+  const entry = readRegistry(s.runId).children["dev-1"];
+  assert.ok(entry.workingStatePruned?.task, "no workingStatePruned.task on the child entry");
+  assert.deepEqual([...entry.workingStatePruned.task.retired].sort(), ["task_key", "turn_key"]);
+});
+
+test("the supervisor namespace keeps its task keys while another child's worktree stands", () => {
+  const s = scenario();
+  const dbPath = join(s.base, "agent-state.sqlite");
+  const supNs = `supervisor:${s.runId}`;
+  // a second child whose worktree was never removed — dev-1 is not the last
+  writeRegistry(s.runId, {
+    runId: s.runId,
+    children: {
+      ...readRegistry(s.runId).children,
+      "dev-2": {
+        childId: "dev-2",
+        squad: "dev",
+        taskId: "FOC-123",
+        status: "exited",
+        turns: [],
+        worktree: join(s.base, "elsewhere"),
+        allowedPaths: [],
+      },
+    },
+    rounds: {},
+  });
+  seedStore(dbPath, [
+    { namespace: supNs, key: "sup_task", value: "v", reason: "supervisor task fact" },
+  ]);
+
+  approved(s);
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done], { LA_AGENT_STATE_DB: dbPath }), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(factStatus(dbPath, supNs, "sup_task"), "active", "supervisor task facts died while dev-2's tree stands");
+});
+
+test("run retention drops the run's namespaces and reports them in the summary", () => {
+  // A temp state home with one ancient run: the prune lane's fixture shape,
+  // pinned with utimesSync so the retention window decides, not the clock.
+  const home = mkdtempSync(join(tmpdir(), "la-sup-state-"));
+  cleanupLater(home);
+  const runId = "run-old";
+  const art = join(home, runId, "test-artifacts", "dev-1");
+  mkdirSync(art, { recursive: true });
+  writeFileSync(join(art, "out.txt"), "x");
+  const old = (Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000;
+  utimesSync(join(home, runId), old, old);
+  // A second ancient run with nothing archived: retention selects it, the
+  // deletion loop skips it — its working state must survive untouched.
+  const skippedId = "run-bare";
+  mkdirSync(join(home, skippedId), { recursive: true });
+  utimesSync(join(home, skippedId), old, old);
+
+  const dbPath = join(home, "agent-state.sqlite");
+  seedStore(dbPath, [
+    { namespace: `supervisor:${runId}`, key: "focus", value: "FOC-1", reason: "r" },
+    { namespace: `child:${runId}/dev-1`, key: "branch", value: "b", reason: "r" },
+    { namespace: `supervisor:${skippedId}`, key: "focus", value: "FOC-2", reason: "r" },
+    { namespace: "child:run-new/dev-1", key: "branch", value: "b2", reason: "r" }, // a live run's namespace
+  ]);
+
+  const e = baseEnv({ LA_SUPERVISOR_STATE_HOME: home, LA_AGENT_STATE_DB: dbPath });
+  delete e.LA_SUPERVISOR_CHILD;
+  const res = spawnSync(process.execPath, [CLEANUP, "prune"], { cwd: ROOT, encoding: "utf8", env: e });
+  const out = parse(res, fail);
+  assert.equal(out.ok, true, out.error);
+  assert.deepEqual(
+    (out.agentState?.namespaces ?? []).sort(),
+    [`child:${runId}/dev-1`, `supervisor:${runId}`],
+    `the summary does not name the dropped namespaces: ${JSON.stringify(out.agentState)}`,
+  );
+  assert.equal(factStatus(dbPath, `supervisor:${runId}`, "focus"), undefined);
+  assert.equal(factStatus(dbPath, `child:${runId}/dev-1`, "branch"), undefined);
+  assert.equal(factStatus(dbPath, "child:run-new/dev-1", "branch"), "active", "a live run's namespace was dropped");
+  assert.equal(
+    factStatus(dbPath, `supervisor:${skippedId}`, "focus"),
+    "active",
+    "a selected-but-skipped run (no artifacts) had its namespaces dropped",
+  );
 });
 
 summary();

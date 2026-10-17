@@ -29,6 +29,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ensureRunDir, installEnvFileSignalHandlers, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
+import { openAgentState, setFact } from "./agent-state.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WATCH = join(ROOT, "scripts", "supervisor-watch.mjs");
@@ -334,6 +335,76 @@ test("no --claude-args flag: the watcher behaves exactly as before", () => {
   assert.equal(argv.indexOf("--tools"), -1, "a phantom --tools appeared with no profile");
 });
 
+// ── FOC-730: the turn-end working-state prune ────────────────────────────────
+console.log("\nturn-end prune: turn-scoped facts retire at child exit");
+
+// The store must exist BEFORE the watcher runs — a missing store is skipped
+// silently (legacy runs never grow one), so the prune test seeds it up front.
+const pruneDb = join(base, "agent-state.sqlite");
+const runIdC = `test-watch-prune-${process.pid}`;
+fixtureChild(runIdC);
+{
+  const store = openAgentState(pruneDb);
+  try {
+    setFact(store, { namespace: `child:${runIdC}/dev-1`, key: "turn_key", value: "t", reason: "turn fact", scope: "turn" });
+    setFact(store, { namespace: `child:${runIdC}/dev-1`, key: "task_key", value: "k", reason: "task fact" });
+    setFact(store, {
+      namespace: `child:${runIdC}/dev-1`, key: "anchor", value: "doc",
+      tier: "base", source: "config", evidence: "docs/anchor.md", reason: "seed",
+    });
+    setFact(store, { namespace: "child:other-run/dev-1", key: "keep_key", value: "v", reason: "other child" });
+  } finally {
+    store.close();
+  }
+}
+const dumpC = join(base, "argv-prune.json");
+const resultC = runWatcher(
+  runIdC,
+  [],
+  { FAKE_ARGV_PATH: dumpC, FAKE_SESSION_ID: `watch-prune-${process.pid}`, LA_AGENT_STATE_DB: pruneDb },
+);
+
+test("the child exit retired turn-scoped facts only, and recorded it", () => {
+  assert.equal(resultC.status, 0, `watcher exit ${resultC.status}: ${resultC.stderr}`);
+  assert.equal(readRegistry(runIdC).children["dev-1"].status, "exited");
+  const entry = readRegistry(runIdC).children["dev-1"];
+  assert.ok(entry.workingStatePruned, "no workingStatePruned on the child entry");
+  assert.deepEqual(entry.workingStatePruned.turn.retired, ["turn_key"]);
+  const store = openAgentState(pruneDb);
+  try {
+    const status = (key, ns) =>
+      store.db
+        .prepare("SELECT status FROM facts WHERE namespace = ? AND key = ?")
+        .get(ns, key)?.status;
+    const ns = `child:${runIdC}/dev-1`;
+    assert.equal(status("turn_key", ns), "retired");
+    assert.equal(status("task_key", ns), "active");
+    assert.equal(status("anchor", ns), "active"); // base keys are never pruned
+    assert.equal(status("keep_key", "child:other-run/dev-1"), "active"); // other namespaces untouched
+  } finally {
+    store.close();
+  }
+});
+
+test("an unopenable store skips the prune with one stderr line, exit still recorded", () => {
+  // existsSync(dir) is true, so the watcher proceeds and openAgentState throws
+  const notADb = join(base, "not-a-db");
+  mkdirSync(notADb, { recursive: true });
+  const runIdD = `test-watch-prune-fail-${process.pid}`;
+  fixtureChild(runIdD);
+  const dumpD = join(base, "argv-prune-fail.json");
+  const r = runWatcher(
+    runIdD,
+    [],
+    { FAKE_ARGV_PATH: dumpD, FAKE_SESSION_ID: `watch-prune-fail-${process.pid}`, LA_AGENT_STATE_DB: notADb },
+  );
+  assert.equal(r.status, 0, `watcher exit ${r.status}: ${r.stderr}`);
+  const entry = readRegistry(runIdD).children["dev-1"];
+  assert.equal(entry.status, "exited", "a failed prune must not change the exit status");
+  assert.equal(entry.workingStatePruned, undefined);
+  const lines = r.stderr.split("\n").filter((l) => l.includes("agent-state: turn prune skipped ("));
+  assert.equal(lines.length, 1, `expected exactly one skip line, got: ${JSON.stringify(lines)}`);
+});
 // ── child isolation (FOC-802) ────────────────────────────────────────────────
 console.log("\nchild isolation: the claude spawn goes through the drop-privilege helper");
 

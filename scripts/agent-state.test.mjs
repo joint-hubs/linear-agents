@@ -23,10 +23,14 @@ import {
   RENDER_MAX_LINES,
   VALUE_MAX_BYTES,
   AgentStateError,
+  actorFromEnv,
   agentStatePath,
+  dropNamespace,
+  dropRunNamespaces,
   getFact,
   historyFacts,
   listFacts,
+  namespaceFromEnv,
   openAgentState,
   pruneFacts,
   renderFacts,
@@ -1413,6 +1417,191 @@ store.close();
       assert.equal(raceStore.db.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
     } finally {
       raceStore.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── FOC-730: env-derived namespace/actor, drop, dropRunNamespaces ───────────
+
+test("namespaceFromEnv and actorFromEnv derive from the session env", () => {
+  // child: run + child id → child:<run>/<child>, actor from FENIX_STAGE
+  assert.equal(
+    namespaceFromEnv({ LA_SUPERVISOR_RUN: "run_1", LA_SUPERVISOR_CHILD: "dev-1" }),
+    "child:run_1/dev-1"
+  );
+  assert.equal(actorFromEnv({ LA_SUPERVISOR_RUN: "run_1", LA_SUPERVISOR_CHILD: "dev-1", FENIX_STAGE: "dev" }), "dev");
+  // a child without a run id has no namespace
+  assert.equal(namespaceFromEnv({ LA_SUPERVISOR_CHILD: "dev-1" }), null);
+  // supervisor: run id alone → supervisor:<run>, actor "supervisor"
+  assert.equal(namespaceFromEnv({ LA_SUPERVISOR_RUN: "run_1" }), "supervisor:run_1");
+  assert.equal(actorFromEnv({ LA_SUPERVISOR_RUN: "run_1" }), "supervisor");
+  // neither var → no namespace; actor falls back to LA_TASK_OWNER, then "cli"
+  assert.equal(namespaceFromEnv({}), null);
+  assert.equal(actorFromEnv({}), "cli");
+  assert.equal(actorFromEnv({ LA_TASK_OWNER: "reviewer" }), "reviewer");
+  // a child without FENIX_STAGE falls through to LA_TASK_OWNER
+  assert.equal(
+    actorFromEnv({ LA_SUPERVISOR_RUN: "run_1", LA_SUPERVISOR_CHILD: "dev-1", LA_TASK_OWNER: "owner" }),
+    "owner"
+  );
+});
+
+test("cli: namespace and actor derive from the session env", () => {
+  const dir = tempRoot();
+  const dbPath = join(dir, "agent-state.sqlite");
+  try {
+    // child session: no --namespace, no --actor
+    const childEnv = cliEnv(dbPath, {
+      LA_SUPERVISOR_RUN: "run_1",
+      LA_SUPERVISOR_CHILD: "dev-1",
+      FENIX_STAGE: "dev",
+    });
+    const set1 = runCliSync(["set", "--key", "branch", "--value", "foc-730", "--reason", "resolved", "--json"], childEnv);
+    assert.equal(set1.status, 0, `stderr: ${set1.stderr}`);
+    const setJson = JSON.parse(set1.stdout);
+    assert.equal(setJson.row.namespace, "child:run_1/dev-1");
+    const hist1 = runCliSync(["history", "--key", "branch", "--json"], childEnv);
+    assert.equal(hist1.status, 0, `stderr: ${hist1.stderr}`);
+    assert.equal(JSON.parse(hist1.stdout).rows[0].actor, "dev");
+
+    // supervisor session: run id alone → supervisor:<run>, actor "supervisor"
+    const supEnv = cliEnv(dbPath, { LA_SUPERVISOR_RUN: "run_1" });
+    const set2 = runCliSync(["set", "--key", "focus", "--value", "FOC-730", "--reason", "intake", "--json"], supEnv);
+    assert.equal(set2.status, 0, `stderr: ${set2.stderr}`);
+    assert.equal(JSON.parse(set2.stdout).row.namespace, "supervisor:run_1");
+    const hist2 = runCliSync(["history", "--key", "focus", "--json"], supEnv);
+    assert.equal(JSON.parse(hist2.stdout).rows[0].actor, "supervisor");
+
+    // neither var → exit 2 with the one-line reason
+    const bare = runCliSync(["set", "--key", "k", "--value", "v", "--reason", "r", "--json"], cliEnv(dbPath));
+    assert.equal(bare.status, 2);
+    assert.ok(
+      bare.stderr.includes("namespace required: pass --namespace or run inside a Supervisor/child session"),
+      `stderr: ${bare.stderr}`
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("drop: refuses without --yes, then deletes exactly one namespace", () => {
+  const dir = tempRoot();
+  const dbPath = join(dir, "agent-state.sqlite");
+  try {
+    const store = openAgentState(dbPath);
+    try {
+      // victim namespace carries a base key, an agent key, and history
+      setFact(store, {
+        namespace: "child:run_1/dev-1", key: "anchor", value: "doc",
+        tier: "base", source: "config", evidence: "docs/anchor.md", reason: "seed", now: NOW,
+      });
+      setFact(store, { namespace: "child:run_1/dev-1", key: "branch", value: "b", reason: "r", now: NOW });
+      // neighbours that must survive
+      setFact(store, { namespace: "child:run_1/dev-2", key: "branch", value: "b2", reason: "r", now: NOW });
+      setFact(store, { namespace: "supervisor:run_1", key: "focus", value: "FOC-730", reason: "r", now: NOW });
+    } finally {
+      store.close();
+    }
+
+    const env = cliEnv(dbPath);
+    // without --yes: exit 2, one stderr line, nothing deleted
+    const refused = runCliSync(["drop", "--namespace", "child:run_1/dev-1"], env);
+    assert.equal(refused.status, 2);
+    // the child prints a node:sqlite ExperimentalWarning after the payload —
+    // assert the refusal line itself, never the whole stderr
+    assert.ok(
+      refused.stderr.startsWith(
+        "agent-state: drop deletes every facts and facts_history row of the namespace — pass --yes to confirm\n"
+      ),
+      `stderr: ${refused.stderr}`
+    );
+    const intact = openAgentState(dbPath);
+    try {
+      assert.equal(dbCount(intact, "facts"), 4);
+      assert.equal(dbCount(intact, "facts_history"), 4);
+    } finally {
+      intact.close();
+    }
+
+    const dropped = runCliSync(["drop", "--namespace", "child:run_1/dev-1", "--yes", "--json"], env);
+    assert.equal(dropped.status, 0, `stderr: ${dropped.stderr}`);
+    const dropJson = JSON.parse(dropped.stdout);
+    assert.equal(dropJson.ok, true);
+    assert.equal(dropJson.verb, "drop");
+    assert.equal(dropJson.namespace, "child:run_1/dev-1");
+    assert.equal(dropJson.facts, 2);
+    assert.equal(dropJson.history, 2);
+
+    const after = openAgentState(dbPath);
+    try {
+      assert.equal(
+        after.db.prepare("SELECT count(*) AS n FROM facts WHERE namespace = 'child:run_1/dev-1'").get().n,
+        0
+      );
+      assert.equal(
+        after.db.prepare("SELECT count(*) AS n FROM facts_history WHERE namespace = 'child:run_1/dev-1'").get().n,
+        0
+      );
+      // the neighbours keep every row, base and agent
+      assert.equal(
+        after.db.prepare("SELECT count(*) AS n FROM facts WHERE namespace IN ('child:run_1/dev-2','supervisor:run_1')").get().n,
+        2
+      );
+      assert.equal(dbCount(after, "facts_history"), 2);
+    } finally {
+      after.close();
+    }
+
+    // the API wrapper refuses an invalid namespace outright
+    const probe = openAgentState(dbPath);
+    try {
+      assert.throws(() => dropNamespace(probe, "bogus"), AgentStateError);
+    } finally {
+      probe.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dropRunNamespaces drops supervisor:<run> and child:<run>/* without over-matching", () => {
+  const dir = tempRoot();
+  const dbPath = join(dir, "agent-state.sqlite");
+  try {
+    const store = openAgentState(dbPath);
+    const namespaces = [
+      "supervisor:run_1",
+      "child:run_1/dev-1",
+      "child:run_1/dev-2",
+      "child:runX1/dev-1", // LIKE would match without the escaped underscore
+      "child:run_10/dev-1", // longer sibling run id
+      "child:run_1_x/dev-1", // underscore continuation, not a child of run_1
+      "supervisor:run_2",
+    ];
+    try {
+      for (const ns of namespaces) {
+        setFact(store, { namespace: ns, key: "k", value: "v", reason: "r", now: NOW });
+      }
+    } finally {
+      store.close();
+    }
+
+    const fresh = openAgentState(dbPath);
+    try {
+      const dropped = dropRunNamespaces(fresh, "run_1");
+      assert.equal(dropped.runId, "run_1");
+      assert.deepEqual([...dropped.namespaces].sort(), ["child:run_1/dev-1", "child:run_1/dev-2", "supervisor:run_1"]);
+      assert.equal(dropped.facts, 3);
+      assert.equal(dropped.history, 3);
+      const survivors = fresh.db
+        .prepare("SELECT namespace FROM facts ORDER BY namespace")
+        .all()
+        .map((r) => r.namespace);
+      assert.deepEqual(survivors, ["child:runX1/dev-1", "child:run_10/dev-1", "child:run_1_x/dev-1", "supervisor:run_2"]);
+    } finally {
+      fresh.close();
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
