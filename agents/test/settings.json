@@ -22,7 +22,6 @@
       "Bash(k6:*)",
       "Bash(make:*)",
       "Bash(npm run:*)",
-      "mcp__linear__*",
       "mcp__codegraph__*",
       "mcp__fenix-decision-extraction__*",
       "mcp__fenix-decision-prompt-refinement__*",
@@ -136,6 +135,7 @@
       "ListAgents",
       "Monitor",
       "mcp__claude_ai_Linear__*",
+      "mcp__linear__*",
       "Bash(git worktree remove:*)",
       "Bash(git worktree prune:*)"
     ],
