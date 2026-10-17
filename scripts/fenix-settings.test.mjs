@@ -161,6 +161,48 @@ test("validateSettings: routing squad names, entries and lead limits", () => {
   assert.equal(validateSettings({ routing: { web: { lead: "Claude" } } }).ok, true);
 });
 
+// --- the `ownership` top-level key (FOC-848) ---------------------------------
+
+test("validateSettings: a valid ownership map passes, with or without version/unlisted", () => {
+  const full = validateSettings({
+    ownership: {
+      version: 1,
+      owners: {
+        orchestrator: { linearProjects: ["proj-id", "Fenix — wydanie 1.0"] },
+        supervisor: { linearProjects: ["JW", "WSKM"] },
+      },
+      unlisted: "ask",
+    },
+  });
+  assert.deepEqual(full, { ok: true, errors: [] });
+  // version and unlisted are optional; owners is required.
+  assert.deepEqual(
+    validateSettings({ ownership: { owners: { supervisor: { linearProjects: ["x"] } } } }),
+    { ok: true, errors: [] },
+  );
+});
+
+test("validateSettings: malformed ownership maps are refused", () => {
+  const cases = [
+    { ownership: { owners: { "Bad Owner!": { linearProjects: ["x"] } } }, hit: "owner id must match" },
+    { ownership: { owners: { supervisor: { linearProjects: [] } } }, hit: "non-empty array" },
+    { ownership: { owners: { supervisor: { linearProjects: [""] } } }, hit: "non-empty string" },
+    { ownership: { owners: { supervisor: { linearProjects: "x" } } }, hit: "non-empty array" },
+    { ownership: { owners: { supervisor: { projects: ["x"] } } }, hit: "unknown key" },
+    { ownership: { owners: { supervisor: { linearProjects: ["x"] }, extra: 1 } }, hit: "must be an object" },
+    { ownership: { owners: {}, unlisted: "maybe" }, hit: 'must be "allow" or "ask"' },
+    { ownership: { owners: {}, version: 2 }, hit: "must be 1" },
+    { ownership: "nope", hit: "must be an object" },
+    { ownership: { nope: 1 }, hit: "unknown key" },
+  ];
+  for (const { ownership, hit } of cases) {
+    const { ok, errors } = validateSettings({ ownership });
+    assert.equal(ok, false, JSON.stringify(ownership));
+    assert.ok(errors.some((e) => e.includes(hit)), `${hit} missing from ${JSON.stringify(errors)}`);
+  }
+});
+
+
 test("validateSettings: publish.aiActor is the only publish key and must be boolean", () => {
   assert.deepEqual(validateSettings({ publish: { aiActor: true } }), { ok: true, errors: [] });
   assert.equal(validateSettings({ publish: { aiActor: false } }).ok, true);
