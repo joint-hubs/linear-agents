@@ -53,6 +53,7 @@ import {
 import { loadGraph } from "./graph-validate.mjs";
 import { normalizeFocus, setFocus } from "./supervisor-focus.mjs";
 import { RUN_ID_RE } from "./supervisor-current-run.mjs";
+import { currentOwner } from "./task-ownership.mjs";
 
 // FOC-163 removed the dev↔review round cap. It was `LA_SUPERVISOR_MAX_LOOPS`,
 // default 2, and it counted: it stopped a run that was converging at the same
@@ -441,6 +442,18 @@ if (entry.telemetryRunId) watcherArgs.push("--telemetry-run", entry.telemetryRun
 // in the registry entry and the launch result.
 watcherArgs.push("--claude-args", JSON.stringify(launch.cliArgs));
 
+// FOC-848: the resumed turn declares its acting owner the way spawn does —
+// the child's triage/spawn gates attribute its work to LA_TASK_OWNER, and a
+// resume path that dropped it would let the two turn paths drift on who is
+// acting. Fail-closed, same shape as the rest of this file's refusals.
+const taskOwner = (() => {
+  try {
+    return currentOwner();
+  } catch (err) {
+    failJson(err.message, { code: "ownership-config" });
+  }
+})();
+
 const watcher = spawn(process.execPath, watcherArgs, {
   cwd: entry.worktree,
   env: {
@@ -472,6 +485,9 @@ const watcher = spawn(process.execPath, watcherArgs, {
     LA_SUPERVISOR_RUN: runId,
     LA_SUPERVISOR_CHILD: childId,
     LA_TASK_ID: entry.taskId,
+    // FOC-848: same carrier spawn sets — the child's ownership gates (triage,
+    // spawn) must attribute its work to the owner this follow-up acts for.
+    LA_TASK_OWNER: taskOwner,
     // Same override spawn does, and for the same reason — it was missing here,
     // which is the whole of FOC-171. `claude --resume` fires SessionStart like
     // any other start, telemetry-hook.mjs reads LA_RUN_ID/RUN_ID, and without

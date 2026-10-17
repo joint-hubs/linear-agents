@@ -184,7 +184,7 @@ export async function resolveTeam(teamKey, workspace) {
  *    on identifier (case-insensitive). Never use search as primary.
  *
  * @param {string} identifier  Issue identifier, e.g. "FEN-12".
- * @returns {Promise<{id:string, identifier:string, title:string, url:string, state:{id:string,name:string,type:string}}>}
+ * @returns {Promise<{id:string, identifier:string, title:string, url:string, state:{id:string,name:string,type:string}, project:{id:string,name:string}|null}>}
  * @throws {Error} If issue not found.
  */
 export async function resolveIssue(identifier) {
@@ -201,6 +201,10 @@ export async function resolveIssue(identifier) {
             id
             name
             type
+          }
+          project {
+            id
+            name
           }
         }
       }`,
@@ -227,6 +231,10 @@ export async function resolveIssue(identifier) {
             id
             name
             type
+          }
+          project {
+            id
+            name
           }
           team {
             id

@@ -161,6 +161,59 @@ test("validateSettings: routing squad names, entries and lead limits", () => {
   assert.equal(validateSettings({ routing: { web: { lead: "Claude" } } }).ok, true);
 });
 
+// --- the `ownership` top-level key (FOC-848) ---------------------------------
+
+test("validateSettings: a valid ownership map passes, with or without version/unlisted", () => {
+  const full = validateSettings({
+    ownership: {
+      version: 1,
+      owners: {
+        orchestrator: { linearProjects: ["proj-id", "Fenix — wydanie 1.0"] },
+        supervisor: { linearProjects: ["JW", "WSKM"] },
+      },
+      unlisted: "ask",
+    },
+  });
+  assert.deepEqual(full, { ok: true, errors: [] });
+  // version and unlisted are optional; owners is required.
+  assert.deepEqual(
+    validateSettings({ ownership: { owners: { supervisor: { linearProjects: ["x"] } } } }),
+    { ok: true, errors: [] },
+  );
+});
+
+test("validateSettings: malformed ownership maps are refused", () => {
+  const cases = [
+    { ownership: { owners: { "Bad Owner!": { linearProjects: ["x"] } } }, hit: "owner id must match" },
+    { ownership: { owners: { supervisor: { linearProjects: [] } } }, hit: "non-empty array" },
+    { ownership: { owners: { supervisor: { linearProjects: [""] } } }, hit: "non-empty string" },
+    { ownership: { owners: { supervisor: { linearProjects: "x" } } }, hit: "non-empty array" },
+    { ownership: { owners: { supervisor: { projects: ["x"] } } }, hit: "unknown key" },
+    { ownership: { owners: { supervisor: { linearProjects: ["x"] }, extra: 1 } }, hit: "must be an object" },
+    { ownership: { owners: {}, unlisted: "maybe" }, hit: 'must be "allow" or "ask"' },
+    { ownership: { owners: {}, version: 2 }, hit: "must be 1" },
+    { ownership: "nope", hit: "must be an object" },
+    { ownership: { nope: 1 }, hit: "unknown key" },
+  ];
+  for (const { ownership, hit } of cases) {
+    const { ok, errors } = validateSettings({ ownership });
+    assert.equal(ok, false, JSON.stringify(ownership));
+    assert.ok(errors.some((e) => e.includes(hit)), `${hit} missing from ${JSON.stringify(errors)}`);
+  }
+});
+
+
+test("validateSettings: publish.aiActor is the only publish key and must be boolean", () => {
+  assert.deepEqual(validateSettings({ publish: { aiActor: true } }), { ok: true, errors: [] });
+  assert.equal(validateSettings({ publish: { aiActor: false } }).ok, true);
+  assert.equal(validateSettings({ publish: {} }).ok, true);
+  assert.equal(validateSettings({ publish: { other: true } }).ok, false);
+  const bad = validateSettings({ publish: { aiActor: "yes" } });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.some((e) => e.includes("publish.aiActor") && e.includes("boolean")));
+  assert.equal(validateSettings({ publish: "yes" }).ok, false);
+});
+
 test("validateSettings: secret-looking values refused anywhere", () => {
   const secrets = [
     "sk-or-v1-0123456789abcdef",
@@ -175,6 +228,24 @@ test("validateSettings: secret-looking values refused anywhere", () => {
     assert.ok(top.errors.some((e) => e.includes("settings must not contain secrets")));
     const nested = validateSettings({ routing: { web: { lead: secret } } });
     assert.equal(nested.ok, false, `${secret} must be refused when nested`);
+  }
+});
+
+test("writeSettings: publish.aiActor round-trips; a non-boolean is refused untouched", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    const merged = writeSettings({ publish: { aiActor: true } }, { path });
+    assert.equal(merged.publish.aiActor, true);
+    assert.equal(readSettings({ path }).publish.aiActor, true);
+    const before = readFileSync(path, "utf8");
+    assert.throws(
+      () => writeSettings({ publish: { aiActor: "true" } }, { path }),
+      (err) => err.message.includes("publish.aiActor"),
+    );
+    assert.equal(readFileSync(path, "utf8"), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

@@ -28,6 +28,7 @@ import {
   heldDir,
   printBgWaitCeilingEnv,
   readHeld,
+  readHolds,
   readRegistry,
   runDir,
 } from "./supervisor-lib.mjs";
@@ -590,6 +591,32 @@ test("buildChildSettings unions squad denies with the Supervisor's, deduped", ()
   for (const rule of SUPERVISOR_DENY) if (!deny.includes(rule)) fail(`missing ${rule}`);
 });
 
+test("the dashboard write routes are denied from a child shell (FOC-788 follow-up)", () => {
+  // A natively spawned child is a host process and could curl the dashboard's
+  // loopback — push/PR, the supervisor message forward, settings, gates and
+  // holds are denied in both shells. The generated file must carry them too.
+  const expected = [
+    "Bash(*127.0.0.1:7331*)",
+    "Bash(*localhost:7331*)",
+    "Bash(*/api/work/*)",
+    "Bash(*/api/supervisor/*)",
+    "Bash(*/api/settings/*)",
+    "Bash(*/api/gates/*)",
+    "Bash(*/api/holds/*)",
+    "PowerShell(*127.0.0.1:7331*)",
+    "PowerShell(*localhost:7331*)",
+    "PowerShell(*/api/work/*)",
+    "PowerShell(*/api/supervisor/*)",
+    "PowerShell(*/api/settings/*)",
+    "PowerShell(*/api/gates/*)",
+    "PowerShell(*/api/holds/*)",
+  ];
+  for (const rule of expected) {
+    if (!SUPERVISOR_DENY.includes(rule)) fail(`SUPERVISOR_DENY is missing ${rule}`);
+    if (!buildChildSettings({}).permissions.deny.includes(rule)) fail(`generated settings are missing ${rule}`);
+  }
+});
+
 test("the generated file is deny-only — no allow, no hooks", () => {
   // `claude --settings` loads ADDITIONAL settings. An allow entry here could only
   // grant, never remove; a repeated hooks block risks the SessionStart telemetry
@@ -670,6 +697,44 @@ test("every squad's committed settings.json already denies git push", () => {
     const deny = JSON.parse(readFileSync(join(ROOT, "agents", squad, "settings.json"), "utf8")).permissions?.deny ?? [];
     if (!deny.includes("Bash(git push:*)")) fail(`agents/${squad}/settings.json no longer denies git push`);
   }
+});
+
+test("the deny list covers relative, absolute and PowerShell forms of every Linear helper and the gh wrapper", () => {
+  // FOC-511: the launcher-form rules cut only `node $LA_ROOT/scripts/<x>.mjs …`.
+  // Each helper also gets the wildcard form, which matches the whole command
+  // text — relative, absolute and PowerShell invocations fall under the same
+  // deny. Membership here pins the list itself; scripts/supervisor-deny.test.mjs
+  // (written against the documented matcher) proves the matching semantics.
+  const forms = [
+    "Bash(node *linear-ops.mjs*)",
+    "PowerShell(node *linear-ops.mjs*)",
+    "Bash(node *publish-linear-comment.mjs*)",
+    "PowerShell(node *publish-linear-comment.mjs*)",
+    "Bash(node *linear-query.mjs*)",
+    "PowerShell(node *linear-query.mjs*)",
+    "Bash(node *linear-push.mjs*)",
+    "PowerShell(node *linear-push.mjs*)",
+    "Bash(node *gh-screened.mjs*)",
+    "PowerShell(node *gh-screened.mjs*)",
+  ];
+  for (const rule of forms) {
+    if (!SUPERVISOR_DENY.includes(rule)) fail(`SUPERVISOR_DENY is missing ${rule}`);
+    const deny = buildChildSettings({ permissions: { deny: [] } }).permissions.deny;
+    if (!deny.includes(rule)) fail(`generated child settings are missing ${rule}`);
+  }
+});
+
+test("dev, review and test committed settings.json deny mcp__linear__* and only plan allows it", () => {
+  // FOC-511: a test child made live Linear mutations on FOC-450 through the MCP
+  // server the squad still allowed. TEST never talks to Linear — the Supervisor
+  // relays — so the allow goes and a deny comes. PLAN keeps its allow; cutting
+  // PLAN's MCP reads is a separate decision.
+  for (const squad of ["dev", "review", "test"]) {
+    const perms = JSON.parse(readFileSync(join(ROOT, "agents", squad, "settings.json"), "utf8")).permissions;
+    if (!(perms?.deny ?? []).includes("mcp__linear__*")) fail(`agents/${squad}/settings.json no longer denies mcp__linear__*`);
+    if ((perms?.allow ?? []).includes("mcp__linear__*")) fail(`agents/${squad}/settings.json still allows mcp__linear__*`);
+  }
+  JSON.parse(readFileSync(join(ROOT, "agents", "plan", "settings.json"), "utf8"));
 });
 
 // ── CodeGraph launch readiness (plan §4) ─────────────────────────────────────
@@ -1170,6 +1235,113 @@ test("the next spawn re-reads provider, mounted key and routing despite inherite
   if (env.LA_PROVIDER !== "custom" || env.ANTHROPIC_BASE_URL !== "http://127.0.0.1:9449") fail("inherited provider masked overlay");
   if (env.ANTHROPIC_AUTH_TOKEN !== "rotated-fixture-key") fail("mounted key rotation was not seen");
   if (env.ANTHROPIC_DEFAULT_OPUS_MODEL !== "") fail("stale tier survived provider switch");
+});
+
+// ── ownership (FOC-848) ──────────────────────────────────────────────────────
+console.log("\nownership (FOC-848)");
+
+// Every spawn below must see a KNOWN ownership config — a developer's real
+// settings overlay (which may carry a restricted `ownership` key) must never
+// leak in. The env-file rung short-circuits the loader before the overlay is
+// read, so pinning LA_TASK_OWNERSHIP_CONFIG at module load makes every test
+// unrestricted by default; the restricted tests override it per spawn.
+const OWNERSHIP_TMP = mkdtempSync(join(tmpdir(), "la-spawn-own-"));
+cleanup.push(OWNERSHIP_TMP);
+const UNRESTRICTED_OWNERSHIP = join(OWNERSHIP_TMP, "ownership-unrestricted.json");
+writeFileSync(UNRESTRICTED_OWNERSHIP, JSON.stringify({ version: 1, owners: {}, unlisted: "allow" }), "utf8");
+process.env.LA_TASK_OWNERSHIP_CONFIG = UNRESTRICTED_OWNERSHIP;
+
+const RESTRICTED_OWNERSHIP = join(OWNERSHIP_TMP, "ownership-restricted.json");
+writeFileSync(
+  RESTRICTED_OWNERSHIP,
+  JSON.stringify({
+    version: 1,
+    owners: {
+      orchestrator: { linearProjects: ["Fenix — wydanie 1.0 i kontrola kosztów"] },
+      supervisor: { linearProjects: ["proj-jw-id"] },
+    },
+    unlisted: "ask",
+  }),
+  "utf8",
+);
+// The stamp triage.json carries on a restricted install after an allowed record.
+const OWNED_STAMP = (owner = "supervisor") => ({
+  owner,
+  verdict: "owned",
+  allowed: true,
+  project: { id: "proj-jw-id", name: "JW" },
+});
+// A run whose triage.json the test controls (fixtureRun writes a bare one).
+function restrictedRun(triage) {
+  const runId = fixtureRun({ triage: false });
+  writeFileSync(join(runDir(runId), "triage.json"), JSON.stringify(triage));
+  return runId;
+}
+const restrictedSpawn = (runId, repo, extra = [], env = {}) =>
+  runSpawn(runId, repo, extra, { LA_TASK_OWNERSHIP_CONFIG: RESTRICTED_OWNERSHIP, LA_TASK_OWNER: "supervisor", ...env });
+
+test("restricted install + a triage.json without a stamp → ownership-unverified, no child, hold written", () => {
+  const { repo } = fixtureRepo();
+  const runId = restrictedRun({ issue: "FOC-123", verdict: "dev" }); // no ownership stamp
+  const r = restrictedSpawn(runId, repo);
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  const out = parse(r);
+  if (out.code !== "ownership-unverified") fail(`expected ownership-unverified, got ${out.code}`);
+  if (!/record triage for FOC-123 as owner supervisor first/.test(out.hint ?? "")) fail(`hint does not name the fix: ${out.hint}`);
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered despite the refusal");
+  const holds = readHolds(runId).holds;
+  if (holds.length !== 1) fail(`expected exactly one hold, got ${holds.length}`);
+  if (holds[0].origin !== "ownership" || holds[0].state !== "open") fail(`wrong hold: ${JSON.stringify(holds[0])}`);
+  if (out.hold !== holds[0].id) fail("the refusal does not name the hold it recorded");
+  // Idempotent: a retried spawn does not pile up a second hold.
+  const r2 = restrictedSpawn(runId, repo);
+  if (r2.status !== 1) fail(`retry changed the exit: ${r2.status}`);
+  if (readHolds(runId).holds.length !== 1) fail("the retried refusal wrote a second hold");
+});
+
+test("a stamp for ANOTHER task is refused", () => {
+  const { repo } = fixtureRepo();
+  const runId = restrictedRun({ issue: "FOC-999", verdict: "dev", ownership: OWNED_STAMP() });
+  const r = restrictedSpawn(runId, repo); // --task FOC-123
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  if (parse(r).code !== "ownership-unverified") fail("the mismatch was not an ownership refusal");
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered despite the refusal");
+});
+
+test("a stamp recorded by ANOTHER owner is refused", () => {
+  const { repo } = fixtureRepo();
+  const runId = restrictedRun({ issue: "FOC-123", verdict: "dev", ownership: OWNED_STAMP("orchestrator") });
+  const r = restrictedSpawn(runId, repo, [], { LA_TASK_OWNER: "supervisor" });
+  if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
+  if (parse(r).code !== "ownership-unverified") fail("the owner mismatch was not an ownership refusal");
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered despite the refusal");
+});
+
+test("a proper stamp lets the spawn proceed — the happy path, unchanged (issue matched case-insensitively)", () => {
+  const { repo } = fixtureRepo();
+  const runId = restrictedRun({ issue: "foc-123", verdict: "dev", ownership: OWNED_STAMP() });
+  const out = parse(restrictedSpawn(runId, repo));
+  if (!out.ok) fail(`spawn failed: ${out.error}`);
+  if (!out.worktreeCreated) fail("expected a fresh worktree");
+  if (!out.branch.startsWith("foc-123-")) fail(`unexpected branch name: ${out.branch}`);
+  const entry = readRegistry(runId).children[out.childId];
+  for (const field of ["worktree", "branch", "baseRevision"]) {
+    if (entry[field] === undefined) fail(`registry entry is missing "${field}"`);
+  }
+  if (readHolds(runId).holds.length) fail("a successful spawn wrote a hold");
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+test("the child env carries LA_TASK_OWNER explicitly (FOC-848)", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const envFile = join(runDir(runId), "owner-env.log");
+  // LA_TASK_OWNER="" in the parent means "the default owner" — the child must
+  // still receive the explicit "supervisor", not the inherited blank.
+  parse(runSpawn(runId, repo, [], { LA_TASK_OWNER: "", MOCK_CLAUDE_ENV_FILE: envFile, MOCK_CLAUDE_HANG_MS: "0" }));
+  if (!existsSync(envFile)) fail("the mock never recorded an env — claude was not invoked");
+  const env = JSON.parse(readFileSync(envFile, "utf8"));
+  if (env.LA_TASK_OWNER !== "supervisor") fail(`LA_TASK_OWNER was ${JSON.stringify(env.LA_TASK_OWNER)} in the child env`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────
