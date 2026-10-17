@@ -585,6 +585,32 @@ test("buildChildSettings unions squad denies with the Supervisor's, deduped", ()
   for (const rule of SUPERVISOR_DENY) if (!deny.includes(rule)) fail(`missing ${rule}`);
 });
 
+test("the dashboard write routes are denied from a child shell (FOC-788 follow-up)", () => {
+  // A natively spawned child is a host process and could curl the dashboard's
+  // loopback — push/PR, the supervisor message forward, settings, gates and
+  // holds are denied in both shells. The generated file must carry them too.
+  const expected = [
+    "Bash(*127.0.0.1:7331*)",
+    "Bash(*localhost:7331*)",
+    "Bash(*/api/work/*)",
+    "Bash(*/api/supervisor/*)",
+    "Bash(*/api/settings/*)",
+    "Bash(*/api/gates/*)",
+    "Bash(*/api/holds/*)",
+    "PowerShell(*127.0.0.1:7331*)",
+    "PowerShell(*localhost:7331*)",
+    "PowerShell(*/api/work/*)",
+    "PowerShell(*/api/supervisor/*)",
+    "PowerShell(*/api/settings/*)",
+    "PowerShell(*/api/gates/*)",
+    "PowerShell(*/api/holds/*)",
+  ];
+  for (const rule of expected) {
+    if (!SUPERVISOR_DENY.includes(rule)) fail(`SUPERVISOR_DENY is missing ${rule}`);
+    if (!buildChildSettings({}).permissions.deny.includes(rule)) fail(`generated settings are missing ${rule}`);
+  }
+});
+
 test("the generated file is deny-only — no allow, no hooks", () => {
   // `claude --settings` loads ADDITIONAL settings. An allow entry here could only
   // grant, never remove; a repeated hooks block risks the SessionStart telemetry

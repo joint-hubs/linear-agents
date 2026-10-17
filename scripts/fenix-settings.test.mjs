@@ -203,6 +203,17 @@ test("validateSettings: malformed ownership maps are refused", () => {
 });
 
 
+test("validateSettings: publish.aiActor is the only publish key and must be boolean", () => {
+  assert.deepEqual(validateSettings({ publish: { aiActor: true } }), { ok: true, errors: [] });
+  assert.equal(validateSettings({ publish: { aiActor: false } }).ok, true);
+  assert.equal(validateSettings({ publish: {} }).ok, true);
+  assert.equal(validateSettings({ publish: { other: true } }).ok, false);
+  const bad = validateSettings({ publish: { aiActor: "yes" } });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.some((e) => e.includes("publish.aiActor") && e.includes("boolean")));
+  assert.equal(validateSettings({ publish: "yes" }).ok, false);
+});
+
 test("validateSettings: secret-looking values refused anywhere", () => {
   const secrets = [
     "sk-or-v1-0123456789abcdef",
@@ -217,6 +228,24 @@ test("validateSettings: secret-looking values refused anywhere", () => {
     assert.ok(top.errors.some((e) => e.includes("settings must not contain secrets")));
     const nested = validateSettings({ routing: { web: { lead: secret } } });
     assert.equal(nested.ok, false, `${secret} must be refused when nested`);
+  }
+});
+
+test("writeSettings: publish.aiActor round-trips; a non-boolean is refused untouched", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    const merged = writeSettings({ publish: { aiActor: true } }, { path });
+    assert.equal(merged.publish.aiActor, true);
+    assert.equal(readSettings({ path }).publish.aiActor, true);
+    const before = readFileSync(path, "utf8");
+    assert.throws(
+      () => writeSettings({ publish: { aiActor: "true" } }, { path }),
+      (err) => err.message.includes("publish.aiActor"),
+    );
+    assert.equal(readFileSync(path, "utf8"), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

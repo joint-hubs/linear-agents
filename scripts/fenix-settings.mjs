@@ -100,8 +100,23 @@ export function validateSettings(obj) {
   if (!isPlainObject(obj)) return { ok: false, errors: ["settings: must be a JSON object"] };
 
   for (const key of Object.keys(obj)) {
-    if (key !== "provider" && key !== "routing" && key !== "ownership") {
-      errors.push(`${key}: unknown top-level key`);
+    if (key !== "provider" && key !== "routing" && key !== "publish" && key !== "ownership") errors.push(`${key}: unknown top-level key`);
+  }
+
+  // The publish overlay (FOC-788 follow-up): the dashboard's push/PR act as a
+  // human by default; letting an AI actor through is an explicit operator
+  // decision, so the only key here is the boolean aiActor and it defaults to
+  // off by its absence.
+  const publish = obj.publish;
+  if (publish !== undefined) {
+    if (!isPlainObject(publish)) errors.push("publish: must be an object");
+    else {
+      for (const key of Object.keys(publish)) {
+        if (key !== "aiActor") errors.push(`publish.${key}: unknown key`);
+      }
+      if (publish.aiActor !== undefined && typeof publish.aiActor !== "boolean") {
+        errors.push("publish.aiActor: must be a boolean");
+      }
     }
   }
 
