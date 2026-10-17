@@ -63,7 +63,7 @@
  * Exit: 0 all PASS/SKIP, 1 any FAIL, 2 usage.
  */
 
-import { spawn, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import {
   mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
@@ -74,6 +74,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 import { scrubSecret } from "./key-check.mjs";
 import { scanDirForCanaries } from "./key-leak-check.mjs";
+import { spawnTestServer } from "./test-spawn.mjs";
 
 const POSIX = process.platform !== "win32";
 
@@ -132,17 +133,6 @@ function readText(p) {
 
 function exists(p) {
   try { statSync(p); return true; } catch { return false; }
-}
-
-/** Free localhost port (bound and released before the real listener takes it). */
-function freePort() {
-  return new Promise((res) => {
-    const probe = createServer();
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => res(port));
-    });
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -743,28 +733,15 @@ function createBareFixture(dir) {
   return { url: pathToFileURL(bare).href, name: "seedrepo" };
 }
 
+// Thin wrapper over the shared spawn helper (FOC-840): free port, health poll
+// on /api/telemetry/health, tree-kill via stop(). Callers keep the
+// { child, port } shape and gain stop().
 async function spawnIsolatedServer(env) {
-  const port = await freePort();
-  const child = spawn(process.execPath, [join(SCRIPTS_DIR, "telemetry-server.mjs")], {
-    env: { ...env, TELEMETRY_PORT: String(port) },
-    stdio: ["ignore", "pipe", "pipe"],
+  return spawnTestServer({
+    script: join(SCRIPTS_DIR, "telemetry-server.mjs"),
+    env, // modeLocal's childEnv already spreads process.env over its overrides
+    label: "settings-acceptance",
   });
-  child.stdoutBuf = "";
-  child.stderrBuf = "";
-  child.stdout.on("data", (c) => { child.stdoutBuf += c; });
-  child.stderr.on("data", (c) => { child.stderrBuf += c; });
-  const deadline = Date.now() + 20000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) {
-      throw new Error(`telemetry-server exited early (${child.exitCode}):\n${child.stderrBuf.slice(-800)}`);
-    }
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/api/telemetry/health`);
-      if (r.ok) return { child, port };
-    } catch { /* not up yet */ }
-    await sleepMs(150);
-  }
-  throw new Error("telemetry-server not ready in 20s");
 }
 
 async function modeLocal(flags) {
@@ -816,10 +793,9 @@ async function modeLocal(flags) {
     FENIX_REPOS_ALLOW_LOCAL: "1",
   };
 
-  let child = null;
+  let spawned = null;
   try {
-    const spawned = await spawnIsolatedServer(childEnv);
-    child = spawned.child;
+    spawned = await spawnIsolatedServer(childEnv);
     const client = makeClient(`http://127.0.0.1:${spawned.port}`);
     await runChecks({
       call: client.call,
@@ -831,11 +807,11 @@ async function modeLocal(flags) {
       fixtureName: fixture.name,
       project: String(flags.project || "FEN"),
       scanDirs: [].concat(flags["scan-dir"] || []),
-      child,
+      child: spawned.child,
       mockLog: async () => mock.state.requests,
     });
   } finally {
-    if (child) { try { child.kill(); } catch { /* already gone */ } }
+    if (spawned) await spawned.stop();
     await sleepMs(300); // let the child release the sqlite file (Windows)
     await mock.close();
     if (flags.keep === true) {

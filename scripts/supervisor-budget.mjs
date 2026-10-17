@@ -90,7 +90,7 @@ function cmdAllocate(args) {
   };
 
   ensureRunDir(runId);
-  atomicWriteJSON(path, record);
+  atomicWriteJSON(path, record, { mode: 0o644 }); // run-root: Supervisor-owned
   console.log(JSON.stringify({ ok: true, path, ...record }, null, 2));
 }
 
@@ -118,7 +118,7 @@ function cmdAuthorise(args) {
     ...(plan.authorisations ?? []),
     { stage, reason, authorisedAt: new Date().toISOString() },
   ];
-  atomicWriteJSON(path, plan);
+  atomicWriteJSON(path, plan, { mode: 0o644 }); // run-root: Supervisor-owned
 
   const budget = stageBudgetStatus(runId, { graph: loadGraphOrFail() });
   console.log(

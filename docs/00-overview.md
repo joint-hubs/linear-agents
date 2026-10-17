@@ -135,7 +135,7 @@ linear-workflow/
     review/
     test/
   bin/
-    cadence.bat  plan.bat  dev.bat  review.bat  test.bat
+    cadence.bat  plan.bat  dev.bat  review.bat  test.bat   (two-line wrappers -> scripts/squad-start.mjs)
   config/
     projects.json   (Linear project → repo path, deploy target GCP VM / Lambda)
 ```

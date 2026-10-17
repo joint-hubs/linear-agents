@@ -51,9 +51,17 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, isAbsolute } from "node:path";
 
+import {
+  agentStatePath,
+  dropRunNamespaces,
+  historyFacts,
+  listFacts,
+  openAgentState,
+  pruneFacts,
+} from "./agent-state.mjs";
 import { allGates } from "./supervisor-gate.mjs";
 import { globMatch, grantIsActive, loadAutonomyGrants } from "./autonomy-grants.mjs";
 import {
@@ -706,6 +714,76 @@ function refuseUnlandedForeignHead(entry, repo, state) {
 
 // ── remove ───────────────────────────────────────────────────────────────────
 
+// FOC-730: the archive's history export is a safety net, not a display — the
+// cap sits far above any real namespace's history so the round-trip is
+// lossless in practice.
+const ARCHIVE_HISTORY_LIMIT = 100_000;
+
+/**
+ * The working-state lifecycle at task close (FOC-730), run right after
+ * `performRemoval` returned on either removal path:
+ *
+ *   1. export the child namespace — every facts row (active and retired) plus
+ *      the history — to `<archiveDir>/agent-state.json`, next to the FOC-649
+ *      work product;
+ *   2. retire the child's task- and turn-scoped keys (base keys are the
+ *      registry — they stay);
+ *   3. when no child of the run has a worktree left standing, retire the
+ *      supervisor namespace's task-scoped keys too.
+ *
+ * Best effort in both directions: an absent store (the run predates
+ * agent-state) skips silently, any other failure writes one stderr line and
+ * the removal report stays exactly what performRemoval printed. Records
+ * `workingStatePruned.task` on the child when anything was done.
+ */
+function closeChildWorkingState({ runId, childId, entry }) {
+  const dbPath = agentStatePath();
+  if (!existsSync(dbPath)) return null; // old runs predate the store
+  const namespace = `child:${runId}/${childId}`;
+  const at = new Date().toISOString();
+  try {
+    const store = openAgentState(dbPath);
+    let result;
+    try {
+      const exportPath = join(archiveDirFor(runId, childId), "agent-state.json");
+      mkdirSync(dirname(exportPath), { recursive: true });
+      const rows = (status) => listFacts(store, { namespace, status }).rows;
+      const payload = {
+        namespace,
+        exportedAt: at,
+        facts: [...rows("active"), ...rows("retired")],
+        history: historyFacts(store, { namespace, limit: ARCHIVE_HISTORY_LIMIT }).rows,
+      };
+      writeFileSync(exportPath, JSON.stringify(payload, null, 2));
+      const retired = [
+        ...pruneFacts(store, { namespace, scope: "task", actor: "supervisor-cleanup", now: at }).retired,
+        ...pruneFacts(store, { namespace, scope: "turn", actor: "supervisor-cleanup", now: at }).retired,
+      ];
+      let supervisorRetired = null;
+      const registry = readRegistry(runId);
+      const lastChildStanding = !Object.values(registry.children).some((c) => !c.worktreeRemovedAt);
+      if (lastChildStanding) {
+        supervisorRetired = pruneFacts(store, {
+          namespace: `supervisor:${runId}`,
+          scope: "task",
+          actor: "supervisor-cleanup",
+          now: at,
+        }).retired;
+      }
+      result = { exportPath, retired, supervisorRetired };
+    } finally {
+      store.close();
+    }
+    updateChild(runId, childId, {
+      workingStatePruned: { ...(entry.workingStatePruned ?? {}), task: { at, retired: result.retired } },
+    });
+    return result;
+  } catch (err) {
+    process.stderr.write(`agent-state: task-close prune skipped (${err?.message ?? err})\n`);
+    return null;
+  }
+}
+
 function cmdRemove(args) {
   const runId = requireRun(args);
   const childId = args.child;
@@ -804,6 +882,7 @@ function cmdRemove(args) {
       archive: { ...archived, skippedCache: inventory.skippedCache },
       registryExtra: { cleanupGrant: grantVerdict.grantId },
     });
+    closeChildWorkingState({ runId, childId, entry });
     return;
   }
   // Also on the human log: a grant that quietly would not fire is how the grant
@@ -886,6 +965,7 @@ function cmdRemove(args) {
     },
     archive: { ...archived, skippedCache: inventory.skippedCache },
   });
+  closeChildWorkingState({ runId, childId, entry });
 }
 
 /**
@@ -1036,12 +1116,46 @@ function cmdPrune(args) {
 
   const selected = target ? prunable.filter((r) => r.runId === target) : prunable;
   const pruned = [];
-  for (const r of selected) {
-    const artifacts = join(r.dir, "test-artifacts");
-    const stats = treeStats(artifacts);
-    if (!stats || stats.files === 0) continue; // nothing archived here — nothing to report
-    pruned.push({ run: r.runId, rank: r.rank, ageDays: Math.round(r.ageMs / 86_400_000), ...stats });
-    if (!dryRun) rmSync(artifacts, { recursive: true, force: true });
+  // FOC-730: retention dropping a run drops its working state too — the
+  // `supervisor:<run>` namespace and every `child:<run>/*`, history included
+  // (this is the lifecycle, not a retire; dropRunNamespaces does both tables
+  // in one transaction per run). Reported as `agentState` in the summary.
+  // Only runs whose artifacts were actually removed are dropped — a run the
+  // loop skipped (nothing archived, `treeStats` empty) keeps its namespaces.
+  // Best effort per run: one stderr line and the retention flow continues;
+  // a store that does not exist (every run predating agent-state) skips
+  // silently.
+  const droppedNamespaces = [];
+  let agentStore = null;
+  if (!dryRun) {
+    try {
+      const dbPath = agentStatePath();
+      if (existsSync(dbPath)) agentStore = openAgentState(dbPath);
+    } catch (err) {
+      agentStore = null;
+      process.stderr.write(`agent-state: namespace drop skipped (${err?.message ?? err})\n`);
+    }
+  }
+  try {
+    for (const r of selected) {
+      const artifacts = join(r.dir, "test-artifacts");
+      const stats = treeStats(artifacts);
+      if (!stats || stats.files === 0) continue; // nothing archived here — nothing to report
+      pruned.push({ run: r.runId, rank: r.rank, ageDays: Math.round(r.ageMs / 86_400_000), ...stats });
+      if (!dryRun) {
+        rmSync(artifacts, { recursive: true, force: true });
+        if (agentStore) {
+          try {
+            const { namespaces } = dropRunNamespaces(agentStore, r.runId);
+            droppedNamespaces.push(...namespaces);
+          } catch (err) {
+            process.stderr.write(`agent-state: namespace drop skipped for ${r.runId} (${err?.message ?? err})\n`);
+          }
+        }
+      }
+    }
+  } finally {
+    agentStore?.close();
   }
 
   console.log(
@@ -1053,6 +1167,7 @@ function cmdPrune(args) {
         retention: retentionNote,
         pruned: pruned.map(({ run, rank, ageDays, files, bytes }) => ({ run, rank, ageDays, files, bytes })),
         bytes: pruned.reduce((a, p) => a + p.bytes, 0),
+        agentState: { namespaces: droppedNamespaces },
         note: dryRun
           ? "dry run — nothing was deleted"
           : "deleted only each listed run's test-artifacts/ subtree; registry, gates, wake queue, triage and merge records are never touched",

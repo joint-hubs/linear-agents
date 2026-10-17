@@ -29,8 +29,6 @@
 // The server child is ALWAYS killed in finally.
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { createServer } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -39,6 +37,7 @@ import { fileURLToPath } from "node:url";
 import { openTelemetryDb } from "./telemetry-store.mjs";
 import { ensureViews } from "./telemetry-canonical.mjs";
 import { buildCache } from "./analysis-cache.mjs";
+import { spawnTestServer } from "./test-spawn.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -154,52 +153,31 @@ writeFileSync(
 const cacheFile = join(dir, "analysis-cache.sqlite");
 await buildCache({ storePath: dbPath, cachePath: cacheFile });
 
-// ── server spawn (free random port) ──────────────────────────────────────────
+// ── server spawn (free random port via the shared helper) ────────────────────
 
-// Grab a free port by binding an ephemeral listener and closing it. Small
-// race window, but the port comes from the OS free set and nothing else in
-// the test run is listening on it.
-const freePort = await new Promise((resolve, reject) => {
-  const probe = createServer();
-  probe.once("error", reject);
-  probe.listen(0, "127.0.0.1", () => {
-    const { port } = probe.address();
-    probe.close(() => resolve(port));
+// spawnTestServer probes a free port, spawns the server and waits for
+// /api/telemetry/health — the old inline freePort probe + waitForServer copy.
+let spawned = null;
+let serverUp = false;
+try {
+  spawned = await spawnTestServer({
+    script: join(__dir, "telemetry-server.mjs"),
+    env: {
+      LA_TELEMETRY_DB: dbPath,
+      LA_TELEMETRY_HOME: join(dir, "telemetry-home"),
+      LA_STATE_ROOT: join(dir, "state-root"),
+      LA_DECISION_RUNS_DIR: runsDir,
+      LA_ANALYSIS_CACHE: cacheFile,
+    },
+    label: "telemetry-analysis-api",
   });
-});
-const BASE = `http://127.0.0.1:${freePort}`;
-
-const child = spawn(process.execPath, [join(__dir, "telemetry-server.mjs")], {
-  env: {
-    ...process.env,
-    TELEMETRY_PORT: String(freePort),
-    LA_TELEMETRY_DB: dbPath,
-    LA_TELEMETRY_HOME: join(dir, "telemetry-home"),
-    LA_STATE_ROOT: join(dir, "state-root"),
-    LA_DECISION_RUNS_DIR: runsDir,
-    LA_ANALYSIS_CACHE: cacheFile,
-  },
-  stdio: ["ignore", "pipe", "pipe"],
-});
-let childStderr = "";
-child.stderr.on("data", (chunk) => { childStderr += chunk; });
-let childStdout = "";
-child.stdout.on("data", (chunk) => { childStdout += chunk; });
-
-async function waitForServer(ms = 20000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) {
-      throw new Error(`server exited early (${child.exitCode}): ${childStderr.slice(-600)}`);
-    }
-    try {
-      const res = await fetch(`${BASE}/api/telemetry/health`);
-      if (res.ok) return;
-    } catch { /* not up yet */ }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error(`server not ready in ${ms}ms: ${childStderr.slice(-600)}`);
+  serverUp = true;
+} catch (err) {
+  failed++;
+  failures.push(`server setup — ${err.message}`);
 }
+const child = spawned?.child ?? null;
+const BASE = `http://127.0.0.1:${spawned?.port ?? 0}`;
 
 async function getJsonFrom(base, path) {
   const res = await fetch(`${base}${path}`);
@@ -212,17 +190,7 @@ async function getJson(path) {
   return getJsonFrom(BASE, path);
 }
 
-let serverUp = false;
-
 try {
-  try {
-    await waitForServer();
-    serverUp = true;
-  } catch (err) {
-    failed++;
-    failures.push(`server setup — ${err.message}`);
-  }
-
   if (serverUp) {
     // ── GET panels: 200 + envelope shape ─────────────────────────────────
 
@@ -546,45 +514,35 @@ try {
     // `node -e "setTimeout(() => {}, 3000)"` so even a broken watchdog leaves
     // no stray process behind — it self-exits after 3 s.
     {
-      const wPort = await new Promise((resolve, reject) => {
-        const probe = createServer();
-        probe.once("error", reject);
-        probe.listen(0, "127.0.0.1", () => {
-          const { port } = probe.address();
-          probe.close(() => resolve(port));
-        });
-      });
-      const WBASE = `http://127.0.0.1:${wPort}`;
-      const wChild = spawn(process.execPath, [join(__dir, "telemetry-server.mjs")], {
-        env: {
-          ...process.env,
-          NODE_ENV: "test",
-          TELEMETRY_PORT: String(wPort),
-          LA_TELEMETRY_DB: dbPath,
-          LA_TELEMETRY_HOME: join(dir, "telemetry-home-w"),
-          LA_STATE_ROOT: join(dir, "state-root-w"),
-          LA_DECISION_RUNS_DIR: runsDir,
-          LA_ANALYSIS_CACHE: join(dir, "watchdog-cache.sqlite"),
-          LA_ANALYSIS_BUILD_TIMEOUT_MS: "400",
-          LA_ANALYSIS_BUILD_CMD_TEST: JSON.stringify(["-e", "setTimeout(() => {}, 3000)"]),
-        },
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-      let wStderr = "";
-      wChild.stderr.on("data", (chunk) => { wStderr += chunk; });
+      // spawnTestServer throws when the server never comes up; the old inline
+      // copy turned that into a failed check and skipped the block — keep that.
+      let wSpawned = null;
+      let wErr = null;
       try {
-        let up = false;
-        const wDeadline = Date.now() + 20_000;
-        while (Date.now() < wDeadline) {
-          if (wChild.exitCode !== null) throw new Error(`watchdog server exited early: ${wStderr.slice(-400)}`);
-          try {
-            const res = await fetch(`${WBASE}/api/telemetry/health`);
-            if (res.ok) { up = true; break; }
-          } catch { /* not up yet */ }
-          await new Promise((r) => setTimeout(r, 200));
-        }
-        check("watchdog server starts", up, wStderr.slice(-400));
-        if (up) {
+        wSpawned = await spawnTestServer({
+          script: join(__dir, "telemetry-server.mjs"),
+          env: {
+            NODE_ENV: "test",
+            LA_TELEMETRY_DB: dbPath,
+            LA_TELEMETRY_HOME: join(dir, "telemetry-home-w"),
+            LA_STATE_ROOT: join(dir, "state-root-w"),
+            LA_DECISION_RUNS_DIR: runsDir,
+            LA_ANALYSIS_CACHE: join(dir, "watchdog-cache.sqlite"),
+            LA_ANALYSIS_BUILD_TIMEOUT_MS: "400",
+            LA_ANALYSIS_BUILD_CMD_TEST: JSON.stringify(["-e", "setTimeout(() => {}, 3000)"]),
+          },
+          label: "telemetry-analysis-api-watchdog",
+        });
+      } catch (err) {
+        wErr = err;
+      }
+      const wDetail = wSpawned
+        ? wSpawned.child.stderrBuf.slice(-400)
+        : String(wErr?.message ?? wErr).slice(-400);
+      check("watchdog server starts", wSpawned !== null, wDetail);
+      try {
+        if (wSpawned) {
+          const WBASE = `http://127.0.0.1:${wSpawned.port}`;
           const rb = await fetch(`${WBASE}/api/analysis/cache/rebuild`, { method: "POST" });
           check("rebuild on the watchdog server -> 202", rb.status === 202, `got ${rb.status}`);
 
@@ -612,26 +570,18 @@ try {
             again.status === 202, `got ${again.status}`);
         }
       } finally {
-        if (wChild.exitCode === null) wChild.kill();
-        await Promise.race([
-          new Promise((r) => wChild.once("exit", r)),
-          new Promise((r) => setTimeout(r, 5000)),
-        ]);
+        if (wSpawned) await wSpawned.stop();
       }
     }
   }
 } finally {
-  if (child.exitCode === null) child.kill();
-  await Promise.race([
-    new Promise((r) => child.once("exit", r)),
-    new Promise((r) => setTimeout(r, 5000)),
-  ]);
+  if (spawned) await spawned.stop();
   rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
 console.log(`${passed} passed, ${failed} failed`);
 if (failures.length) {
   console.log(failures.map((f) => `  FAIL: ${f}`).join("\n"));
-  if (childStderr.trim()) console.log(`  server stderr (tail): ${childStderr.slice(-400)}`);
+  if (child && child.stderrBuf.trim()) console.log(`  server stderr (tail): ${child.stderrBuf.slice(-400)}`);
   process.exit(1);
 }

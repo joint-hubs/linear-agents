@@ -1,5 +1,6 @@
 // scripts/utils.test.mjs — FOC-600: atomicWriteJSON survives transient
-// Windows EPERM/EACCES on rename.
+// Windows EPERM/EACCES on rename. FOC-903: the per-run scratch layer —
+// reviewRound/resetReviewRounds per-run counters, scratchDir, collectRunScratch.
 //
 // On Windows, renameSync over an existing destination fails transiently with
 // EPERM/EACCES while another process (AV scan, indexer, parallel run) holds
@@ -12,10 +13,12 @@
 //
 // Run: node scripts/utils.test.mjs
 
-import { readFileSync, writeFileSync, rmSync, mkdtempSync, readdirSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync, mkdtempSync, readdirSync, renameSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { atomicWriteJSON } from "./utils.mjs";
+import {
+  atomicWriteJSON, collectRunScratch, resetReviewRounds, reviewRound, RUN_ID_RE, scratchDir,
+} from "./utils.mjs";
 
 let passed = 0;
 const failures = [];
@@ -149,6 +152,181 @@ test("plain success round-trips the exact JSON formatting", () => {
   const data = { nested: { b: 2, a: 1 }, list: [1, 2, 3] };
   atomicWriteJSON(dest, data);
   eq(readFileSync(dest, "utf8"), JSON.stringify(data, null, 2) + "\n", "byte-identical formatting");
+  onlyFile(dir, "target.json");
+});
+
+// ── FOC-903: per-run scratch ──────────────────────────────────────────────────
+// utils.mjs reads the seams at CALL time, so pointing them at temp dirs here
+// is enough — no import-order trap. The env keys are set once and never
+// deleted (restoring a previously-unset key is what forces the serial lane).
+
+const STATE_HOME = mkdtempSync(join(tmpdir(), "utils-test-sup-home-"));
+const STATE_ROOT = mkdtempSync(join(tmpdir(), "utils-test-state-root-"));
+dirs.push(STATE_HOME, STATE_ROOT);
+process.env.LA_SUPERVISOR_STATE_HOME = STATE_HOME;
+process.env.LA_STATE_ROOT = STATE_ROOT;
+
+const RUN_A = "2026-09-01T10-00-00-000-supervisor-aaaa";
+const RUN_B = "2026-09-02T10-00-00-000-supervisor-bbbb";
+const runFile = (runId) => join(STATE_HOME, runId, "review-rounds.json");
+const readJSON = (path) => JSON.parse(readFileSync(path, "utf8"));
+
+console.log("\nutils: reviewRound per-run counters (FOC-903)");
+
+test("reviewRound with an explicit runId writes <runDir>/review-rounds.json, not the legacy file", () => {
+  const r1 = reviewRound({ taskId: "FOC-1", runId: RUN_A });
+  const r2 = reviewRound({ taskId: "FOC-1", runId: RUN_A });
+  deepEq(r1, { round: 1, status: "review" }, "first increment");
+  deepEq(r2, { round: 2, status: "review" }, "second increment");
+  deepEq(readJSON(runFile(RUN_A)), { "FOC-1": 2 }, "per-run counter file");
+  eq(existsSync(join(STATE_ROOT, "review-rounds.json")), false, "legacy file not created");
+});
+
+test("without a run id the legacy global .state file is used, exactly as before", () => {
+  deepEq(reviewRound({ taskId: "FOC-2" }), { round: 1, status: "review" }, "legacy increment");
+  deepEq(readJSON(join(STATE_ROOT, "review-rounds.json")), { "FOC-2": 1 }, "legacy counter file");
+});
+
+test("LA_SUPERVISOR_RUN is the fallback source; an empty value means no run", () => {
+  process.env.LA_SUPERVISOR_RUN = RUN_B;
+  deepEq(reviewRound({ taskId: "FOC-3" }), { round: 1, status: "review" }, "env-resolved run");
+  deepEq(readJSON(runFile(RUN_B)), { "FOC-3": 1 }, "counter landed in the env's run dir");
+  process.env.LA_SUPERVISOR_RUN = "";
+  deepEq(reviewRound({ taskId: "FOC-2" }), { round: 2, status: "review" }, "empty env → legacy again");
+  deepEq(readJSON(join(STATE_ROOT, "review-rounds.json")), { "FOC-2": 2 }, "legacy file advanced");
+  delete process.env.LA_SUPERVISOR_RUN;
+});
+
+test("an invalid run id throws instead of silently falling back to the shared file", () => {
+  let thrown = null;
+  try {
+    reviewRound({ taskId: "FOC-1", runId: "test-123-456-789" });
+  } catch (err) {
+    thrown = err;
+  }
+  if (!thrown || !String(thrown.message).includes("invalid supervisor run id")) {
+    fail(`expected an invalid-run-id throw, got: ${thrown}`);
+  }
+});
+
+test("two runs incrementing the same task never share a file", () => {
+  deepEq(reviewRound({ taskId: "FOC-4", runId: RUN_A }), { round: 1, status: "review" }, "run A");
+  deepEq(reviewRound({ taskId: "FOC-4", runId: RUN_B }), { round: 1, status: "review" }, "run B");
+  deepEq(readJSON(runFile(RUN_A))["FOC-4"], 1, "run A saw only its own increment");
+  deepEq(readJSON(runFile(RUN_B))["FOC-4"], 1, "run B saw only its own increment");
+});
+
+test("resetReviewRounds clears only the addressed run's counter", () => {
+  resetReviewRounds({ runId: RUN_A });
+  deepEq(readJSON(runFile(RUN_A)), {}, "run A cleared");
+  deepEq(readJSON(runFile(RUN_B))["FOC-4"], 1, "run B untouched");
+  deepEq(readJSON(join(STATE_ROOT, "review-rounds.json"))["FOC-2"], 2, "legacy untouched");
+});
+
+test("escalation still fires past maxRounds, per run", () => {
+  deepEq(reviewRound({ taskId: "FOC-5", runId: RUN_A, maxRounds: 1 }), { round: 1, status: "review" }, "at the limit");
+  deepEq(reviewRound({ taskId: "FOC-5", runId: RUN_A, maxRounds: 1 }), { round: 2, status: "escalated" }, "past the limit");
+  deepEq(reviewRound({ taskId: "FOC-5", runId: RUN_A, maxRounds: 1 }), { round: 2, status: "escalated" }, "no further increment");
+});
+
+console.log("\nutils: scratchDir");
+
+test("scratchDir creates <runDir>/scratch/<kind> on demand and returns it", () => {
+  const dir = scratchDir(RUN_A, "krok0");
+  eq(dir, join(STATE_HOME, RUN_A, "scratch", "krok0"), "path shape");
+  eq(existsSync(dir), true, "created on demand");
+  eq(scratchDir(RUN_A, "reviews"), join(STATE_HOME, RUN_A, "scratch", "reviews"), "second kind, same run");
+});
+
+test("scratchDir rejects a missing run id and a path-bearing kind", () => {
+  let thrown = null;
+  try { scratchDir(undefined, "reviews"); } catch (err) { thrown = err; }
+  if (!thrown || !String(thrown.message).includes("run id is required")) fail(`expected a run-id throw: ${thrown}`);
+  thrown = null;
+  try { scratchDir(RUN_A, "../evil"); } catch (err) { thrown = err; }
+  if (!thrown || !String(thrown.message).includes("invalid scratch kind")) fail(`expected a kind throw: ${thrown}`);
+});
+
+console.log("\nutils: collectRunScratch");
+
+test("collectRunScratch unions every run's inputs, the newest run winning per task", () => {
+  const home = mkdtempSync(join(tmpdir(), "utils-test-collect-"));
+  dirs.push(home);
+  // Newest run first in fact; the scan must pick it per task.
+  mkdirSync(join(home, RUN_B, "scratch", "reviews"), { recursive: true });
+  writeFileSync(join(home, RUN_B, "review-rounds.json"), JSON.stringify({ "FOC-1": 7, "FOC-7": 1 }));
+  writeFileSync(join(home, RUN_B, "scratch", "reviews", "FOC-1-round2.md"), "newest\n");
+  mkdirSync(join(home, RUN_A, "scratch", "reviews"), { recursive: true });
+  writeFileSync(join(home, RUN_A, "review-rounds.json"), JSON.stringify({ "FOC-1": 2 }));
+  writeFileSync(join(home, RUN_A, "scratch", "reviews", "FOC-1-round1.md"), "older\n");
+  writeFileSync(join(home, RUN_A, "scratch", "reviews", "FOC-1-round2.md"), "older r2\n");
+  // Noise that must never be read as a run: a fixture dir and a stray file.
+  mkdirSync(join(home, "test-123-456-789"), { recursive: true });
+  writeFileSync(join(home, "test-123-456-789", "review-rounds.json"), JSON.stringify({ "FOC-1": 99 }));
+  writeFileSync(join(home, "not-a-run"), "x");
+
+  const { rounds, reviews } = collectRunScratch({ stateHome: home });
+  deepEq(rounds.get("FOC-1"), { round: 7, runId: RUN_B }, "newest run wins the counter");
+  deepEq(rounds.get("FOC-7"), { round: 1, runId: RUN_B }, "task only the newest run knows");
+  deepEq(
+    reviews.filter((r) => r.taskId === "FOC-1" && r.round === 2),
+    [{ taskId: "FOC-1", round: 2, file: join(home, RUN_B, "scratch", "reviews", "FOC-1-round2.md"), runId: RUN_B }],
+    "newest run wins the (task, round) cell",
+  );
+  eq(
+    reviews.some((r) => r.taskId === "FOC-1" && r.round === 1),
+    true,
+    "older run's unique round survives",
+  );
+  eq(reviews.every((r) => r.runId !== undefined && RUN_ID_RE.test(r.runId)), true, "every review carries a run id");
+});
+
+test("collectRunScratch on a missing state home is empty, not a throw", () => {
+  const { rounds, reviews } = collectRunScratch({ stateHome: join(STATE_HOME, "definitely-missing") });
+  eq(rounds.size, 0, "no rounds");
+  eq(reviews.length, 0, "no reviews");
+});
+// ── FOC-802 M3: the optional POSIX `mode` ─────────────────────────────────────
+// The run-level writers pin 0644 so state a child must read but not rewrite
+// stays so even between fix_permissions passes. Mode bits exist only on POSIX;
+// on Windows these tests assert nothing (the default-path tests above already
+// prove the writes succeed there).
+console.log("\nutils: atomicWriteJSON honours an explicit mode");
+
+test("the destination carries the requested mode (FOC-802 M3)", () => {
+  if (process.platform === "win32") return;
+  const dir = tmpDir("utils-test-mode-");
+  const dest = join(dir, "target.json");
+  const prevUmask = process.umask(0o022); // deterministic masking for the assertion
+  try {
+    atomicWriteJSON(dest, { pinned: true }, { mode: 0o644 });
+  } finally {
+    process.umask(prevUmask);
+  }
+  eq(statSync(dest).mode & 0o777, 0o644, "mode on first write");
+  eq(readFileSync(dest, "utf8"), JSON.stringify({ pinned: true }, null, 2) + "\n", "content intact");
+  onlyFile(dir, "target.json");
+});
+
+test("a rewrite re-pins the mode over a pre-existing looser file (rename swaps the inode)", () => {
+  if (process.platform === "win32") return;
+  const dir = tmpDir("utils-test-mode-rewrite-");
+  const dest = join(dir, "target.json");
+  const prevUmask = process.umask(0o000); // the fixture must actually be 0666
+  try {
+    writeFileSync(dest, '{"loose":true}\n', { mode: 0o666 });
+  } finally {
+    process.umask(prevUmask);
+  }
+  eq(statSync(dest).mode & 0o777, 0o666, "fixture file was loose");
+  const prevUmask2 = process.umask(0o022);
+  try {
+    atomicWriteJSON(dest, { pinned: true }, { mode: 0o644 });
+  } finally {
+    process.umask(prevUmask2);
+  }
+  eq(readFileSync(dest, "utf8"), JSON.stringify({ pinned: true }, null, 2) + "\n", "content replaced");
+  eq(statSync(dest).mode & 0o777, 0o644, "the old loose mode survived the rewrite");
   onlyFile(dir, "target.json");
 });
 
