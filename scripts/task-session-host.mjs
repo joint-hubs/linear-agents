@@ -48,7 +48,7 @@ import { createRuntimeCollector } from './runtime-otel.mjs';
 //
 // ESM, zero runtime deps beyond node + ws (via supervisor-host).
 
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -65,19 +65,37 @@ import {
   tmuxIdentity,
   writeHostToken,
 } from "./supervisor-host.mjs";
-import { SUPERVISOR_SESSION_ID_PATTERN, dataHome } from "./fenix-paths.mjs";
+import { SUPERVISOR_SESSION_ID_PATTERN, dataHome, projectsConfigPath } from "./fenix-paths.mjs";
 import {
   OWNER_STATUSES,
   TERMINAL_STATUSES,
   createTaskSessionStore,
+  issuePartOf,
   resolveTaskKey,
 } from "./task-sessions.mjs";
 import { readProcessIdentity, matchesProcess } from "./task-process-identity.mjs";
 import { readCurrentRun } from "./supervisor-current-run.mjs";
-import { readTaskSessionsSettings } from "./fenix-settings.mjs";
+import { readTaskSessionsSettings, normalizeAutoPickup } from "./fenix-settings.mjs";
+import { repoRefName } from "./fenix-projects.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const platform = process.platform;
+
+// FOC-902 §D: when the task-ownership helper exists (branch
+// fenix-task-ownership), its checkOwnership decides the pickup owner scope;
+// until it lands, the projects.json rule in createTaskSessionHost applies.
+// One try import, resolved once at module load — a missing module is the
+// normal case here, never an error.
+let taskOwnership = null;
+try {
+  taskOwnership = await import("./task-ownership.mjs");
+} catch {
+  taskOwnership = null;
+}
+
+// The first pickup tick fires 10 s after start — the host has reconciled by
+// then and the store reflects the restart — then every pollSeconds.
+const PICKUP_FIRST_TICK_MS = 10_000;
 
 // The session id is the ONLY identifier composed into paths or tmux names;
 // everything else (taskKey/taskId) is opaque user data.
@@ -225,6 +243,221 @@ export function createTaskSessionHost(deps = {}) {
   }
 
   const managedSessionCount = () => store.list().length;
+
+  // ── FOC-902 §D: autonomous pickup (opt-in) ────────────────────────────────
+  // The overlay's taskSessions.autoPickup (deps.autoPickup wins, for tests
+  // and embedders). When enabled, a timer ticks every pollSeconds (first tick
+  // 10 s after start): candidates come from linear-query per configured
+  // state, filtered to the owner scope, and every candidate whose task key
+  // has NO row in the store is enqueued until queued + active >= maxActive —
+  // the existing scheduler (claimNext) promotes as today. The host never
+  // writes to Linear; the claim comment stays in triage.
+  const autoPickup = normalizeAutoPickup(
+    deps.autoPickup ?? readTaskSessionsSettings(baseEnv).autoPickup ?? {},
+  );
+  const pickupClock = {
+    now: deps.now ?? (() => Date.now()),
+    setInterval:
+      deps.setInterval ??
+      ((fn, ms) => {
+        const t = setInterval(fn, ms);
+        if (typeof t?.unref === "function") t.unref();
+        return t;
+      }),
+    clearInterval: deps.clearInterval ?? ((t) => clearInterval(t)),
+    setTimeout:
+      deps.setTimeout ??
+      ((fn, ms) => {
+        const t = setTimeout(fn, ms);
+        if (typeof t?.unref === "function") t.unref();
+        return t;
+      }),
+    clearTimeout: deps.clearTimeout ?? ((t) => clearTimeout(t)),
+  };
+  const pickup = { lastTickAt: null, lastError: null, lastEnqueued: [] };
+  let pickupInterval = null;
+  let pickupKick = null;
+
+  // The task-key workspace: same rule as work-routes workWorkspace /
+  // task-sessions workspaceNameFor (a deliberate 3-line copy until the shared
+  // helper export merges — see the FOC-902 plan §D note), overridable per
+  // autoPickup.workspace.
+  const pickupWorkspace = () => autoPickup.workspace || baseEnv.FENIX_WORK_WORKSPACE || "jointhubs";
+
+  // The owner scope's Linear project: the projects.json entry whose repo name
+  // (the `repo` value's basename — the same rule fenix-projects repoRefName
+  // applies to `${GITHUB_ROOT}/<name>` templates) matches the workspace, when
+  // exactly one distinct project matches. No mapping or an ambiguous one →
+  // null: auto-pickup never picks tickets outside a proven owner scope.
+  const linearProjectForWorkspace = (workspace) => {
+    let entries;
+    try {
+      const parsed = JSON.parse(readFileSync(projectsConfigPath(baseEnv), "utf8"));
+      entries = Array.isArray(parsed?.projects) ? parsed.projects : [];
+    } catch {
+      return null;
+    }
+    const matched = new Set();
+    for (const entry of entries) {
+      if (repoRefName(entry?.repo) === workspace && typeof entry?.linearProject === "string") {
+        matched.add(entry.linearProject);
+      }
+    }
+    return matched.size === 1 ? [...matched][0] : null;
+  };
+
+  // listCandidates: one `node linear-query.mjs issues --status <state>
+  // [--label <l>] --json` per configured state (the offline env rules —
+  // LA_LINEAR_NO_ENV_FILE — ride in via the inherited env), deduped, then
+  // filtered to the owner scope. One failed state fails the whole tick: a
+  // partial candidate list could silently skip tickets living in the state
+  // that failed. When task-ownership's checkOwnership exists it replaces the
+  // projects.json rule, one call per candidate.
+  const listCandidates = deps.listCandidates ?? (async () => {
+    const script = join(HERE, "linear-query.mjs");
+    const runOne = (state) =>
+      new Promise((resolve) => {
+        const argv = [
+          script,
+          "issues",
+          "--status",
+          state,
+          ...(autoPickup.label ? ["--label", autoPickup.label] : []),
+          "--json",
+        ];
+        execFile(
+          process.execPath,
+          argv,
+          { env: baseEnv, encoding: "utf8", timeout: 120_000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+          (err, stdout) => {
+            if (err) {
+              resolve({ state, error: String(err?.message ?? err), issues: [] });
+              return;
+            }
+            try {
+              resolve({ state, error: null, issues: JSON.parse(stdout) });
+            } catch (parseErr) {
+              resolve({ state, error: `unparsable linear-query output: ${parseErr.message}`, issues: [] });
+            }
+          },
+        );
+      });
+    const results = await Promise.all(autoPickup.states.map(runOne));
+    const failed = results.find((r) => r?.error);
+    if (failed) throw new Error(`linear-query issues --status ${failed.state}: ${failed.error}`);
+    const seen = new Set();
+    const issues = [];
+    for (const r of results) {
+      for (const issue of Array.isArray(r.issues) ? r.issues : []) {
+        const key = issue?.identifier ?? issue?.id;
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        issues.push(issue);
+      }
+    }
+    if (typeof taskOwnership?.checkOwnership === "function") {
+      const workspace = pickupWorkspace();
+      const kept = [];
+      for (const issue of issues) {
+        try {
+          if ((await taskOwnership.checkOwnership({ issue, workspace, env: baseEnv })) === true) kept.push(issue);
+        } catch {
+          /* a throwing check excludes the candidate — never a guessed scope */
+        }
+      }
+      return kept;
+    }
+    const ownerProject = linearProjectForWorkspace(pickupWorkspace());
+    if (!ownerProject) {
+      throw new Error(
+        `no owner scope for workspace '${pickupWorkspace()}' — no projects.json entry maps exactly one Linear project to a repo of that name`,
+      );
+    }
+    return issues.filter((issue) => issue?.project?.name === ownerProject);
+  });
+
+  const pickupTick = async () => {
+    if (!autoPickup.enabled) return null;
+    pickup.lastTickAt = new Date(pickupClock.now()).toISOString();
+    try {
+      const candidates = (await listCandidates()) ?? [];
+      // Priority first (urgent = 1 … low = 4, none/unknown last), then the
+      // oldest candidate first — the order the queue would serve them in.
+      const rank = (p) => (Number.isInteger(p) && p >= 1 && p <= 4 ? p : 1_000_000);
+      const ordered = [...candidates].sort(
+        (a, b) =>
+          rank(a?.priority) - rank(b?.priority) ||
+          String(a?.createdAt ?? "").localeCompare(String(b?.createdAt ?? "")),
+      );
+      const workspace = pickupWorkspace();
+      const enqueued = [];
+      let skipped = 0;
+      let active = store.list({ includeTerminal: false }).length;
+      for (const issue of ordered) {
+        if (active >= maxActive) break;
+        // The task key's issue part is the display identifier — the value
+        // every other store writer uses, keyed through the shared helper
+        // `issuePartOf` (work-routes' taskKeyOf applies it to fetchIssue
+        // results too). Preferring a uuid `id` would fork the key space and
+        // the skip rule below would never see dashboard-started tickets.
+        const issueId = issuePartOf(issue);
+        let taskKey = null;
+        try {
+          taskKey = resolveTaskKey({ workspace, issueId });
+        } catch {
+          taskKey = null;
+        }
+        if (!taskKey) continue;
+        // ANY row counts — queued, active and terminal alike. A completed or
+        // failed ticket is never re-picked automatically.
+        if (store.getByTask(taskKey)) {
+          skipped++;
+          continue;
+        }
+        const record = store.ensure({
+          taskKey,
+          taskId: issueId,
+          workspace,
+          issueId,
+          title: typeof issue?.title === "string" ? issue.title.slice(0, 300) : undefined,
+        });
+        enqueued.push(record.taskKey);
+        active++;
+      }
+      pickup.lastEnqueued = enqueued;
+      pickup.lastError = null;
+      console.log(
+        `auto-pickup: ${ordered.length} candidates, ${enqueued.length} enqueued` +
+          (skipped > 0 ? `, skipped ${skipped} (in store)` : ""),
+      );
+      return { candidates: ordered.length, enqueued, skipped };
+    } catch (err) {
+      const reason = String(err?.message ?? err);
+      pickup.lastError = reason;
+      console.error(`auto-pickup: tick failed (${reason})`);
+      return { error: reason };
+    }
+  };
+
+  const startPickupTimer = () => {
+    if (!autoPickup.enabled || pickupInterval || pickupKick) return;
+    pickupKick = pickupClock.setTimeout(() => {
+      pickupKick = null;
+      void pickupTick();
+    }, PICKUP_FIRST_TICK_MS);
+    pickupInterval = pickupClock.setInterval(() => void pickupTick(), autoPickup.pollSeconds * 1000);
+  };
+  const stopPickupTimer = () => {
+    if (pickupKick) {
+      pickupClock.clearTimeout(pickupKick);
+      pickupKick = null;
+    }
+    if (pickupInterval) {
+      pickupClock.clearInterval(pickupInterval);
+      pickupInterval = null;
+    }
+  };
+  if (autoPickup.enabled) startPickupTimer();
 
   // ── the queue pump ────────────────────────────────────────────────────────
   // Single-flight: claimNext() promotes the oldest queued session iff the cap
@@ -619,6 +852,17 @@ export function createTaskSessionHost(deps = {}) {
       sendJSON(res, 200, { sessions: store.list(), maxActive });
       return;
     }
+    if (path === "/pickup" && method === "GET") {
+      sendJSON(res, 200, {
+        enabled: autoPickup.enabled,
+        pollSeconds: autoPickup.pollSeconds,
+        states: autoPickup.states,
+        lastTickAt: pickup.lastTickAt,
+        lastError: pickup.lastError,
+        lastEnqueued: pickup.lastEnqueued,
+      });
+      return;
+    }
     if (path === "/sessions" && method === "POST") {
       await handleSessionStart(req, res);
       return;
@@ -815,6 +1059,11 @@ export function createTaskSessionHost(deps = {}) {
     reconcile,
     stopSession,
     settled,
+    // FOC-902 §D: pickup surface for tests and embedders.
+    pickupTick,
+    pickupState: pickup,
+    pickupStop: stopPickupTimer,
+    autoPickup,
   };
 }
 
@@ -911,6 +1160,11 @@ async function main(argv) {
     await new Promise((resolve, reject) => {collector.server.once('error',reject);collector.server.listen(4318,'127.0.0.1',resolve);});
     const host = createTaskSessionHost();
     console.log(`task-session-host: maxActive=${host.maxActive} (${host.maxActiveSource})`);
+    if (host.autoPickup.enabled) {
+      console.log(
+        `task-session-host: auto-pickup on (every ${host.autoPickup.pollSeconds}s, states ${host.autoPickup.states.join(",")})`,
+      );
+    }
     const failed = await host.reconcile();
     if (failed > 0) {
       console.error(`task-session-host: reconciled ${failed} active session(s) after restart — none re-adopted automatically`);

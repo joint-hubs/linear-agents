@@ -71,6 +71,7 @@ Force the refusal once, to see fail-closed working:
 
 - [ ] `supervisor-spawn.mjs` on a run with no `triage.json` exits 1 and spawns nothing.
 - [ ] `record --verdict dev --confidence 50` is refused — under 70 the verdict must be `ask`.
+- [ ] triage refuses a ticket leased to another live session; `triage.json.lease` records the check.
 - [ ] (FOC-607) `supervisor-spawn.mjs --squad dev --model <any id>` exits 1 with `error: model-override-banned` and spawns nothing; `--squad plan --model <id with no pricing row>` exits 1 with `model-unpriced`. Proof: `node scripts/test-run.mjs child-model`, `node scripts/test-run.mjs supervisor-spawn`, `node scripts/test-run.mjs supervisor-watch`, `node scripts/test-run.mjs supervisor-status` (the runner filters by filename substring, so each lane is named).
 - [ ] (FOC-607) `supervisor-status.mjs` shows each child's `model`, `modelSource` and the `initModel` the child reported; a difference is printed as `model drift: …`.
 

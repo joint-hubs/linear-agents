@@ -656,7 +656,7 @@ test("writeSettings round-trips taskSessions.maxActive and the set CLI works", a
     const path = settingsFile(dir);
     await runSet(path, "taskSessions.maxActive", "4");
     assert.deepEqual(readSettings({ path }).taskSessions, { maxActive: 4 });
-    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), { maxActive: 4 });
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), { maxActive: 4, autoPickup: null });
     await assert.rejects(runSet(path, "taskSessions.maxActive", "9"), (err) => {
       assert.equal(err.code, 1);
       assert.ok(err.stderr.includes("taskSessions.maxActive: must be an integer between 1 and 8"));
@@ -671,7 +671,7 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
   const dir = tempDir();
   try {
     // Missing file.
-    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: settingsFile(dir) }), { maxActive: null });
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: settingsFile(dir) }), { maxActive: null, autoPickup: null });
     // Invalid JSON.
     const bad = settingsFile(dir);
     writeFileSync(bad, "{ not json", "utf8");
@@ -679,9 +679,9 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
     const orig = console.error;
     console.error = (msg) => errs.push(String(msg));
     try {
-      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: bad }), { maxActive: null });
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: bad }), { maxActive: null, autoPickup: null });
       assert.equal(errs.length, 1);
-      assert.match(errs[0], /taskSessions\.maxActive ignored/);
+      assert.match(errs[0], /taskSessions settings ignored/);
     } finally {
       console.error = orig;
     }
@@ -691,7 +691,7 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
     const errs2 = [];
     console.error = (msg) => errs2.push(String(msg));
     try {
-      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: wrong }), { maxActive: null });
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: wrong }), { maxActive: null, autoPickup: null });
       assert.equal(errs2.length, 1);
       assert.match(errs2[0], /must be an integer between 1 and 8/);
     } finally {
@@ -703,7 +703,7 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
     const errs3 = [];
     console.error = (msg) => errs3.push(String(msg));
     try {
-      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: quiet }), { maxActive: null });
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: quiet }), { maxActive: null, autoPickup: null });
       assert.equal(errs3.length, 0);
     } finally {
       console.error = orig;
@@ -724,11 +724,93 @@ test("readTaskSessionsSettings: quiet swallows the stderr line and returns the r
     try {
       const r = readTaskSessionsSettings({ LA_SETTINGS_FILE: bad }, { quiet: true });
       assert.equal(r.maxActive, null);
-      assert.match(r.error, /taskSessions\.maxActive ignored/);
+      assert.match(r.error, /taskSessions settings ignored/);
       assert.equal(errs.length, 0, "quiet must not print to stderr");
       // A missing overlay is not an error — quiet or not, no reason attached.
       const missing = readTaskSessionsSettings({ LA_SETTINGS_FILE: join(dir, "nope.json") }, { quiet: true });
-      assert.deepEqual(missing, { maxActive: null });
+      assert.deepEqual(missing, { maxActive: null, autoPickup: null });
+    } finally {
+      console.error = orig;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- taskSessions.autoPickup (FOC-902) ---------------------------------------
+
+test("validateSettings: taskSessions.autoPickup accepts the documented shapes", () => {
+  assert.deepEqual(validateSettings({ taskSessions: { autoPickup: {} } }), { ok: true, errors: [] });
+  assert.deepEqual(
+    validateSettings({
+      taskSessions: {
+        autoPickup: { enabled: true, pollSeconds: 60, states: ["Backlog", "Todo"], label: null, workspace: null },
+      },
+    }),
+    { ok: true, errors: [] },
+  );
+  assert.equal(
+    validateSettings({
+      taskSessions: { autoPickup: { enabled: true, pollSeconds: 3600, states: ["Triage"], label: "take", workspace: "jointhubs" } },
+    }).ok,
+    true,
+  );
+});
+
+test("validateSettings: taskSessions.autoPickup unknown keys and bad values refused with the documented messages", () => {
+  const cases = [
+    [{ nope: 1 }, "taskSessions.autoPickup.nope: unknown key"],
+    [{ enabled: "yes" }, "taskSessions.autoPickup.enabled: must be a boolean"],
+    [{ pollSeconds: 59 }, "taskSessions.autoPickup.pollSeconds: must be an integer between 60 and 3600"],
+    [{ pollSeconds: 3601 }, "taskSessions.autoPickup.pollSeconds: must be an integer between 60 and 3600"],
+    [{ pollSeconds: "300" }, "taskSessions.autoPickup.pollSeconds: must be an integer between 60 and 3600"],
+    [{ states: [] }, "taskSessions.autoPickup.states: must be an array"],
+    [{ states: "Backlog" }, "taskSessions.autoPickup.states: must be an array"],
+    [{ states: ["Backlog", ""] }, "taskSessions.autoPickup.states: must be an array"],
+    [{ label: "" }, "taskSessions.autoPickup.label: must be null or a non-empty string"],
+    [{ workspace: "bad space" }, "taskSessions.autoPickup.workspace: must be null or a canonical workspace identifier"],
+  ];
+  for (const [patch, message] of cases) {
+    const { ok, errors } = validateSettings({ taskSessions: { autoPickup: patch } });
+    assert.equal(ok, false, `${JSON.stringify(patch)} must be refused`);
+    assert.ok(errors.some((e) => e.startsWith(message)), `${JSON.stringify(patch)}: ${JSON.stringify(errors)}`);
+  }
+  // Non-object autoPickup is refused as a whole.
+  const notObject = validateSettings({ taskSessions: { autoPickup: true } });
+  assert.equal(notObject.ok, false);
+  assert.ok(notObject.errors.includes("taskSessions.autoPickup: must be an object"));
+});
+
+test("readTaskSessionsSettings: autoPickup is normalized with the documented defaults", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    writeFileSync(
+      path,
+      JSON.stringify({ taskSessions: { maxActive: 3, autoPickup: { enabled: true } } }),
+      "utf8",
+    );
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), {
+      maxActive: 3,
+      autoPickup: { enabled: true, pollSeconds: 300, states: ["Backlog"], label: null, workspace: null },
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readTaskSessionsSettings: an invalid autoPickup discards the whole taskSessions section", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    writeFileSync(path, JSON.stringify({ taskSessions: { maxActive: 2, autoPickup: { pollSeconds: 5 } } }), "utf8");
+    const errs = [];
+    const orig = console.error;
+    console.error = (msg) => errs.push(String(msg));
+    try {
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), { maxActive: null, autoPickup: null });
+      assert.equal(errs.length, 1);
+      assert.match(errs[0], /taskSessions\.autoPickup\.pollSeconds/);
     } finally {
       console.error = orig;
     }

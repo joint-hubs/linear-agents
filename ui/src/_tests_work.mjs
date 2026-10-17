@@ -27,6 +27,7 @@ import {
   queryFromFilters,
   startDialogModel,
   publishDialogModel,
+  claimTag,
   ticketLabels,
   labelNames,
 } from './workModel.js';
@@ -670,6 +671,22 @@ await test('publishDialogModel no preview -> disabled; loading says Loading…, 
   const loading = publishDialogModel(null, 'push', { loading: true });
   eq(loading.disabled, true);
   eq(loading.disabledReason, 'Loading…');
+});
+
+// --- claimTag (FOC-902 §E: the claimed-by tag) -------------------------------
+
+await test('claimTag: present -> 6-hex short after the sup- prefix and the full hover title with the status', () => {
+  const tag = claimTag({ claimedBy: { sessionId: 'sup-abcdef1234567890', status: 'running', live: true } });
+  eq(tag.short, 'abcdef');
+  eq(tag.title, 'claimed by sup-abcdef1234567890 (running)');
+});
+
+await test('claimTag: missing status still names the session; malformed or absent -> null', () => {
+  eq(claimTag({ claimedBy: { sessionId: 'sup-abcdef1234567890' } }).title, 'claimed by sup-abcdef1234567890');
+  eq(claimTag({ claimedBy: { sessionId: '', status: 'running' } }), null);
+  eq(claimTag({ claimedBy: null }), null);
+  eq(claimTag({}), null);
+  eq(claimTag(null), null);
 });
 
 // --- Summary ----------------------------------------------------------------

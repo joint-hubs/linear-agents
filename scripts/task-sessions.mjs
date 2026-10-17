@@ -132,6 +132,19 @@ export function readActiveSessions(dbPath) {
 }
 
 /**
+ * The workspace half of the canonical task key for this repo (FOC-902). ONE
+ * rule, shared by every process that builds a task key: `FENIX_WORK_WORKSPACE`
+ * overrides it (tests and deployments), `jointhubs` is the default — the exact
+ * rule work-routes.mjs' `workWorkspace()` applies. The other call sites
+ * (the triage lease check, the cockpit's claimedBy) go through this helper so
+ * the store, the routes and the triage can never disagree about the key.
+ * @returns {string}
+ */
+export function workspaceNameFor(env = process.env) {
+  return env.FENIX_WORK_WORKSPACE || "jointhubs";
+}
+
+/**
  * Stable task key: `workspace:issueId`. Deliberately NOT a display
  * identifier — it is the coordination key every process must agree on.
  * @returns {string}
@@ -143,6 +156,18 @@ export function resolveTaskKey({ workspace, issueId } = {}) {
     if (!/^[A-Za-z0-9._-]+$/.test(value)) throw new TypeError(`${field} must be a canonical identifier without separators or whitespace`);
   }
   return `${workspace}:${issueId}`;
+}
+
+/**
+ * The issue part of a task key: the display identifier (`FOC-123`) when the
+ * payload carries one, never the Linear uuid. The store, the host's pickup
+ * and the board are all keyed by the identifier — callers must pass this
+ * helper's result to `resolveTaskKey`, never re-derive it locally.
+ * @param {{ identifier?: string, id?: string }} issue a Linear issue payload
+ * @returns {string | undefined} the display identifier (uuid `id` only as fallback)
+ */
+export function issuePartOf(issue) {
+  return issue?.identifier ?? issue?.id;
 }
 
 function requireBoundedString(value, field, maxLength = MAX_IDENTITY_LENGTH) {

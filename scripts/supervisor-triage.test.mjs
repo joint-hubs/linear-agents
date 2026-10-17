@@ -29,8 +29,9 @@ import { fileURLToPath } from "node:url";
 import { loadGraph } from "./graph-validate.mjs";
 import { getRegistryEntry } from "./decision-registry.mjs";
 import {
-  buildIntake, extractSignals, labelRecordedIntake, propose, resolveNode, resolveSizeFlow, stateOf, verdictForNode,
+  buildIntake, claimFailureReason, extractSignals, labelRecordedIntake, propose, resolveNode, resolveSizeFlow, stateOf, verdictForNode,
 } from "./supervisor-triage.mjs";
+import { createTaskSessionStore } from "./task-sessions.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = join(ROOT, "scripts", "supervisor-triage.mjs");
@@ -500,13 +501,42 @@ function fixture(opts) {
   writeFileSync(path, JSON.stringify(issue(opts)), "utf8");
   return path;
 }
+
+// FOC-902 review: what `linear-query issue --json` really returns carries BOTH
+// a Linear uuid `id` and the display `identifier`. The lease key must come
+// from the identifier — a uuid key never matches the store every other
+// writer keys by.
+const UUID_ID = "3f2a7c8e-9b1d-4e6f-8a2c-5d7b9f0e1a3b";
+const uuidIssueFile = (identifier) => {
+  const path = join(tmp, `issue-${fixtureN++}.json`);
+  writeFileSync(path, JSON.stringify({ ...issue({ id: identifier }), id: UUID_ID }), "utf8");
+  return path;
+};
 const run = (args, env = {}) => {
-  const childEnv = { ...process.env, ...env };
+  const childEnv = { ...process.env, LA_DATA_HOME: storeHome, ...env };
   // Tests below read the repo-root .state/runs and .state/supervisor paths —
   // an exported dev LA_STATE_ROOT would redirect the child elsewhere.
   delete childEnv.LA_STATE_ROOT;
   return spawnSync(process.execPath, [CLI, ...args], { cwd: ROOT, encoding: "utf8", env: childEnv });
 };
+
+// FOC-902: the lease check reads the task-session store through LA_DATA_HOME
+// (the FOC-901 seam). A per-suite empty dir keeps every CLI test hermetic —
+// the dev machine's real store must never decide a test's verdict. Lease
+// tests below point LA_DATA_HOME at their own seeded dir.
+const storeHome = mkdtempSync(join(tmpdir(), "la-triage-store-"));
+process.on("exit", () => { try { rmSync(storeHome, { recursive: true, force: true }); } catch {} });
+
+// Issue fixtures feed --issue-file (argparse, propose and intake): the lease
+// check does NOT consult the loaded payload in `record` — its key comes from
+// the `--issue` argument — and `intake` keys through `issuePartOf`, so a
+// payload with a Linear uuid `id` keys by the identifier, never the uuid.
+const FIX = {
+  "FOC-1": fixture({ id: "FOC-1" }),
+  "FOC-2": fixture({ id: "FOC-2" }),
+  "FOC-999": fixture({}),
+};
+const issueFile = (id) => ["--issue-file", FIX[id] ?? (FIX[id] = fixture({ id }))];
 
 test("propose --issue-file prints JSON on stdout and exits 0", () => {
   const r = run(["propose", "--issue", "FOC-999", "--issue-file", fixture({ body: "" })]);
@@ -557,16 +587,16 @@ function withRun() {
 test("record writes triage.json with the §2.4 schema", () => {
   const runId = withRun();
   const r = run([
-    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "AC present",
+    "record", "--issue", "FOC-999", ...issueFile("FOC-999"), "--verdict", "dev", "--rationale", "AC present",
     "--confidence", "85", "--proposal", "dev", "--unknown", "no estimate", "--unknown", "no DoD",
     "--run", runId,
-  ]);
+  ], { FENIX_WORK_WORKSPACE: "jointhubs" });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const path = join(runDirOf(runId), "triage.json");
   assert.ok(existsSync(path), "triage.json is where supervisor-spawn.mjs looks for it");
   const rec = JSON.parse(readFileSync(path, "utf8"));
   assert.deepEqual(Object.keys(rec).sort(), [
-    "autonomy", "confidence", "createdAt", "decidedBy", "issue", "node", "proposal", "rationale", "unknowns", "verdict",
+    "autonomy", "claimComment", "confidence", "createdAt", "decidedBy", "issue", "lease", "node", "proposal", "rationale", "unknowns", "verdict",
   ]);
   assert.equal(rec.verdict, "dev");
   assert.equal(rec.node, "dev");
@@ -589,7 +619,7 @@ test("triage.json is created 0644 (run-root: children may read, never write)", (
 
 test("LA_SUPERVISOR_RUN stands in for --run", () => {
   const runId = withRun();
-  const r = run(["record", "--issue", "FOC-1", "--verdict", "ask", "--rationale", "x", "--confidence", "40"], { LA_SUPERVISOR_RUN: runId });
+  const r = run(["record", "--issue", "FOC-1", ...issueFile("FOC-1"), "--verdict", "ask", "--rationale", "x", "--confidence", "40"], { LA_SUPERVISOR_RUN: runId });
   assert.equal(r.status, 0, r.stdout);
   assert.ok(existsSync(join(runDirOf(runId), "triage.json")));
 });
@@ -604,7 +634,7 @@ test("confidence below 70 with a non-ask verdict is refused", () => {
 
 test("confidence below 70 with ask is allowed — that is the whole point", () => {
   const runId = withRun();
-  const r = run(["record", "--issue", "FOC-1", "--verdict", "ask", "--rationale", "unclear", "--confidence", "50", "--run", runId]);
+  const r = run(["record", "--issue", "FOC-1", ...issueFile("FOC-1"), "--verdict", "ask", "--rationale", "unclear", "--confidence", "50", "--run", runId]);
   assert.equal(r.status, 0, r.stdout);
   assert.equal(JSON.parse(r.stdout).node, "human");
 });
@@ -635,15 +665,15 @@ test("an unknown verdict is refused", () => {
 test("re-recording the SAME issue is allowed; a different issue takes --force", () => {
   const runId = withRun();
   const base = ["record", "--verdict", "ask", "--rationale", "x", "--confidence", "90", "--run", runId];
-  assert.equal(run([...base, "--issue", "FOC-1"]).status, 0);
+  assert.equal(run([...base, "--issue", "FOC-1", ...issueFile("FOC-1")]).status, 0);
   // New information legitimately changes a verdict for the same issue.
-  assert.equal(run([...base, "--issue", "FOC-1"]).status, 0, "re-triage of the same issue must not be blocked");
+  assert.equal(run([...base, "--issue", "FOC-1", ...issueFile("FOC-1")]).status, 0, "re-triage of the same issue must not be blocked");
 
-  const other = run([...base, "--issue", "FOC-2"]);
+  const other = run([...base, "--issue", "FOC-2", ...issueFile("FOC-2")]);
   assert.equal(other.status, 1, "a second issue would retarget every spawn in the run");
   assert.match(JSON.parse(other.stdout).error, /already has a verdict for FOC-1/);
 
-  assert.equal(run([...base, "--issue", "FOC-2", "--force"]).status, 0, "--force is the deliberate override");
+  assert.equal(run([...base, "--issue", "FOC-2", ...issueFile("FOC-2"), "--force"]).status, 0, "--force is the deliberate override");
   assert.equal(JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8")).issue, "FOC-2");
 });
 
@@ -667,7 +697,7 @@ test("a recorded verdict opens the gate — the next refusal is about something 
   // is not a repo, so it fails on the next check instead of starting a child.
   const runId = withRun();
   assert.equal(
-    run(["record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "AC present", "--confidence", "85", "--run", runId]).status,
+    run(["record", "--issue", "FOC-999", ...issueFile("FOC-999"), "--verdict", "dev", "--rationale", "AC present", "--confidence", "85", "--run", runId]).status,
     0,
   );
   const notARepo = mkdtempSync(join(tmpdir(), "la-not-a-repo-"));
@@ -841,7 +871,7 @@ test("record embeds the intake summary next to the verdict and displays the disa
     }),
     "utf8",
   );
-  const r = run(["record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "AC present", "--confidence", "85", "--run", runId]);
+  const r = run(["record", "--issue", "FOC-999", ...issueFile("FOC-999"), "--verdict", "dev", "--rationale", "AC present", "--confidence", "85", "--run", runId]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const rec = JSON.parse(readFileSync(join(dir, "triage.json"), "utf8"));
   assert.equal(rec.verdict, "dev");
@@ -894,7 +924,7 @@ test("record --size embeds the final size, the suggested flow and the size disag
     "utf8",
   );
   const r = run([
-    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85",
+    "record", "--issue", "FOC-999", ...issueFile("FOC-999"), "--verdict", "dev", "--rationale", "x", "--confidence", "85",
     "--size", "large", "--run", runId,
   ]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -969,7 +999,7 @@ test("record labels the final verdict against the offline intake's eventId (end 
   const evtT = intakeRec.decisions["intake.triage_node"].eventId;
   assert.ok(evtT, "a failed call still carries its event id");
   // record the verdict → the label lands in the run log that holds the event.
-  const r = run(["record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--run", runId]);
+  const r = run(["record", "--issue", "FOC-999", ...issueFile("FOC-999"), "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--run", runId]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const lines = readFileSync(join(runsDir, runId, "decisions.jsonl"), "utf8")
     .trim().split("\n").map((l) => JSON.parse(l));
@@ -1036,7 +1066,7 @@ test("--force records the new verdict but DROPS the foreign intake data instead 
   const runId = withRun();
   const { dir, logDir } = foreignIntake(runId);
   const r = run([
-    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--force", "--run", runId,
+    "record", "--issue", "FOC-999", ...issueFile("FOC-999"), "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--force", "--run", runId,
   ]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const rec = JSON.parse(readFileSync(join(dir, "triage.json"), "utf8"));
@@ -1124,7 +1154,7 @@ test("the A0 disagreement line states the RECORDED verdict, not the deterministi
   );
   // The frontman proposed dev, the seam said plan — the verdict recorded is
   // review, and the display must say review.
-  const r = run(["record", "--issue", "FOC-999", "--verdict", "review", "--rationale", "x", "--confidence", "90", "--run", runId]);
+  const r = run(["record", "--issue", "FOC-999", ...issueFile("FOC-999"), "--verdict", "review", "--rationale", "x", "--confidence", "90", "--run", runId]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stderr, /seam intake\.triage_node says "plan"/);
   assert.match(r.stderr, /the recorded verdict is "review"/, "the recorded verdict, not the frontman proposal");
@@ -1254,7 +1284,7 @@ test("record's A0 lines read the unwrapped typed seam answers — [object Object
     "utf8",
   );
   const r = run([
-    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85",
+    "record", "--issue", "FOC-999", ...issueFile("FOC-999"), "--verdict", "dev", "--rationale", "x", "--confidence", "85",
     "--size", "large", "--run", runId,
   ]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -1290,7 +1320,7 @@ test("the A0 triage line omits a null seam confidence rather than printing (null
     }),
     "utf8",
   );
-  const r = run(["record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--run", runId]);
+  const r = run(["record", "--issue", "FOC-999", ...issueFile("FOC-999"), "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--run", runId]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stderr, /seam intake\.triage_node says "plan", the recorded verdict is "dev"/);
   assert.ok(!/\(null\)/.test(r.stderr), r.stderr);
@@ -1318,7 +1348,7 @@ test("seam-vs-recorded agreement fires no A0 line, even with a stored disagreeme
     "utf8",
   );
   const r = run([
-    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "x", "--confidence", "85",
+    "record", "--issue", "FOC-999", ...issueFile("FOC-999"), "--verdict", "dev", "--rationale", "x", "--confidence", "85",
     "--size", "medium", "--run", runId,
   ]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -1326,6 +1356,314 @@ test("seam-vs-recorded agreement fires no A0 line, even with a stored disagreeme
   const rec = JSON.parse(readFileSync(join(dir, "triage.json"), "utf8"));
   assert.equal(rec.intake.sizeDisagreement, undefined, "equal sizes → no sizeDisagreement invented");
   assert.deepEqual(rec.intake.disagreement, { decisionId: "intake.triage_node", seam: "dev", frontman: "plan" }, "the stored seam-vs-frontman view rides untouched");
+});
+
+// ── 10. the ticket lease (FOC-902) ────────────────────────────────────────────
+console.log("\nticket lease (FOC-902)");
+
+// A live pid the lease check must see as alive — this very process.
+const LIVE_PID = process.pid;
+// The DEAD_PID fixture proven safe on this host (fenix-doctor.test.mjs,
+// supervisor-current-run.test.mjs): pidAlive reports it dead.
+const DEAD_PID = 2 ** 22 + 12345;
+const SID = `sup-${"a".repeat(32)}`;
+
+// A private LA_DATA_HOME whose supervisor/ dir the lease check reads. The
+// default storeHome stays empty — every lease test that needs a holder seeds
+// its own.
+const leaseHomes = [];
+const leaseHome = () => {
+  const dir = mkdtempSync(join(tmpdir(), "la-triage-lease-"));
+  leaseHomes.push(dir);
+  return dir;
+};
+process.on("exit", () => {
+  for (const dir of leaseHomes) { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
+// Seed one live-or-dead holder for a task key in dbHome's store and return
+// its sessionId (the refusal must name it).
+function seedHolder(dbHome, pid, taskKey = "jointhubs:FOC-999", taskId = "FOC-999") {
+  const dbPath = join(dbHome, "supervisor", "task-sessions.sqlite");
+  const store = createTaskSessionStore({ dbPath });
+  try {
+    const s = store.ensure({ taskKey, taskId, workspace: "jointhubs", issueId: taskId });
+    assert.equal(store.claimNext().sessionId, s.sessionId);
+    store.update(s.sessionId, { status: "running", pid });
+    return s.sessionId;
+  } finally {
+    store.close();
+  }
+}
+
+const leaseRecordArgs = (runId, extra = []) => [
+  "record", "--issue", "FOC-999", ...issueFile("FOC-999"),
+  "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--run", runId, ...extra,
+];
+
+test("scoped: a session may only triage the ticket its lease names — LEASE_MISMATCH, nothing written", () => {
+  const runId = withRun();
+  const r = run(leaseRecordArgs(runId), {
+    FENIX_SUPERVISOR_SESSION_ID: SID,
+    LA_TASK_ID: "FOC-888",
+    FENIX_WORK_WORKSPACE: "jointhubs",
+  });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const err = JSON.parse(r.stdout);
+  assert.equal(err.code, "LEASE_MISMATCH");
+  assert.match(err.error, /this session holds the lease for FOC-888; it cannot triage FOC-999/);
+  assert.ok(!existsSync(join(runDirOf(runId), "triage.json")), "the refusal precedes any write");
+});
+
+test("scoped: a lease whose task key disagrees with the loaded issue is refused too", () => {
+  const runId = withRun();
+  const r = run(leaseRecordArgs(runId), {
+    FENIX_SUPERVISOR_SESSION_ID: SID,
+    LA_TASK_ID: "FOC-999",
+    LA_TASK_KEY: "jointhubs:FOC-1",
+    FENIX_WORK_WORKSPACE: "jointhubs",
+  });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const err = JSON.parse(r.stdout);
+  assert.equal(err.code, "LEASE_MISMATCH");
+  assert.equal(err.lease.taskKey, "jointhubs:FOC-1");
+  assert.equal(err.lease.issueTaskKey, "jointhubs:FOC-999");
+  assert.ok(!existsSync(join(runDirOf(runId), "triage.json")));
+});
+
+test("scoped: a matching lease records with lease.sessionId set", () => {
+  const runId = withRun();
+  const r = run(leaseRecordArgs(runId), {
+    FENIX_SUPERVISOR_SESSION_ID: SID,
+    LA_TASK_ID: "FOC-999",
+    LA_TASK_KEY: "jointhubs:FOC-999",
+    FENIX_WORK_WORKSPACE: "jointhubs",
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.equal(rec.lease.sessionId, SID);
+  assert.equal(rec.lease.taskKey, "jointhubs:FOC-999");
+  assert.equal(rec.lease.workspace, "jointhubs");
+  assert.ok(!("override" in rec.lease), "a scoped triage never overrides");
+});
+
+test("unscoped: a live owner holds the ticket — TICKET_LEASED, nothing written", () => {
+  const runId = withRun();
+  const home = leaseHome();
+  const holder = seedHolder(home, LIVE_PID);
+  const r = run(leaseRecordArgs(runId), { LA_DATA_HOME: home, FENIX_WORK_WORKSPACE: "jointhubs" });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const err = JSON.parse(r.stdout);
+  assert.equal(err.code, "TICKET_LEASED");
+  assert.match(err.error, new RegExp(`leased to session ${holder} \\(running\\)`));
+  assert.match(err.error, /live on this host/);
+  assert.equal(err.lease.sessionId, holder);
+  assert.equal(err.lease.status, "running");
+  assert.equal(err.lease.taskKey, "jointhubs:FOC-999");
+  assert.ok(!existsSync(join(runDirOf(runId), "triage.json")));
+});
+
+test("unscoped: a dead-pid owner does not hold the ticket — triage records", () => {
+  const runId = withRun();
+  const home = leaseHome();
+  seedHolder(home, DEAD_PID);
+  const r = run(leaseRecordArgs(runId), { LA_DATA_HOME: home, FENIX_WORK_WORKSPACE: "jointhubs" });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.equal(rec.lease.sessionId, null, "a stale row is not a holder");
+  assert.equal(rec.lease.taskKey, "jointhubs:FOC-999");
+});
+
+test("unscoped: FENIX_SUPERVISOR_LEGACY=1 overrides a live owner and records it", () => {
+  const runId = withRun();
+  const home = leaseHome();
+  seedHolder(home, LIVE_PID);
+  const r = run(leaseRecordArgs(runId), {
+    LA_DATA_HOME: home,
+    FENIX_WORK_WORKSPACE: "jointhubs",
+    FENIX_SUPERVISOR_LEGACY: "1",
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.equal(rec.lease.override, true, "the override is on the record, not silent");
+});
+
+test("triage.json.lease shape: store missing is recorded, checkedAt is an ISO instant", () => {
+  const runId = withRun();
+  const r = run(leaseRecordArgs(runId), { FENIX_WORK_WORKSPACE: "jointhubs" });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.deepEqual(
+    Object.keys(rec.lease).sort(),
+    ["checkedAt", "sessionId", "store", "taskKey", "workspace"],
+  );
+  assert.equal(rec.lease.sessionId, null);
+  assert.equal(rec.lease.store, "missing");
+  assert.ok(!Number.isNaN(Date.parse(rec.lease.checkedAt)), rec.lease.checkedAt);
+});
+
+// The claim comment (§B) — the seam intercepts the exact command instead of
+// posting it, so the tests stay offline while pinning body and dedup tag.
+test("claim comment: the exact linear-ops command is logged, scoped flavour", () => {
+  const runId = withRun();
+  const home = leaseHome();
+  const logPath = join(home, "claim-cmd.log");
+  const r = run(leaseRecordArgs(runId, ["--claim-comment"]), {
+    FENIX_SUPERVISOR_SESSION_ID: SID,
+    LA_TASK_ID: "FOC-999",
+    LA_TASK_KEY: "jointhubs:FOC-999",
+    FENIX_WORK_WORKSPACE: "jointhubs",
+    LA_TRIAGE_CLAIM_CMD_LOG: logPath,
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const lines = readFileSync(logPath, "utf8").trim().split("\n");
+  assert.equal(lines.length, 1, "exactly one command was issued");
+  const argv = JSON.parse(lines[0]);
+  assert.equal(argv[0], process.execPath);
+  assert.match(argv[1], /linear-ops\.mjs$/);
+  assert.equal(argv[2], "comment");
+  assert.equal(argv[3], "FOC-999");
+  assert.equal(argv[4], "--body");
+  const m = argv[5].match(/^claimed by `sup-[^`]+` \(run (test-triage-\d+-\d+)\) at (\S+) — fenix$/);
+  assert.ok(m, `body shape: ${argv[5]}`);
+  assert.equal(m[1], runId, "the body names THIS run");
+  assert.ok(!Number.isNaN(Date.parse(m[2])), "the body carries an ISO instant");
+  assert.equal(argv[6], "--dedup-tag");
+  assert.equal(argv[7], `claim:${SID}`);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.deepEqual(rec.claimComment, {
+    posted: false,
+    reason: "claim command logged to LA_TRIAGE_CLAIM_CMD_LOG instead of being executed",
+  });
+});
+
+test("claim comment: the unscoped flavour addresses run <runId> with tag claim:<runId>", () => {
+  const runId = withRun();
+  const home = leaseHome();
+  const logPath = join(home, "claim-cmd.log");
+  const r = run(leaseRecordArgs(runId, ["--claim-comment"]), {
+    FENIX_WORK_WORKSPACE: "jointhubs",
+    LA_TRIAGE_CLAIM_CMD_LOG: logPath,
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const argv = JSON.parse(readFileSync(logPath, "utf8").trim());
+  assert.match(argv[5], new RegExp(`^claimed by run ${runId} at \\S+ — fenix$`));
+  assert.equal(argv[7], `claim:${runId}`);
+});
+
+test("claim comment: --no-claim-comment skips with its reason and issues nothing", () => {
+  const runId = withRun();
+  const home = leaseHome();
+  const logPath = join(home, "claim-cmd.log");
+  const r = run(leaseRecordArgs(runId, ["--no-claim-comment"]), {
+    FENIX_WORK_WORKSPACE: "jointhubs",
+    LA_TRIAGE_CLAIM_CMD_LOG: logPath,
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.deepEqual(rec.claimComment, { posted: false, reason: "--no-claim-comment was given" });
+  assert.ok(!existsSync(logPath), "no command was issued");
+});
+
+test("claim comment: an offline intake skips with its reason", () => {
+  const runId = withRun();
+  const r = run(leaseRecordArgs(runId), { FENIX_WORK_WORKSPACE: "jointhubs" });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.deepEqual(rec.claimComment, {
+    posted: false,
+    reason: "the issue came from --issue-file and --claim-comment was not given",
+  });
+});
+
+test("claim comment: no LINEAR_API_KEY skips with its reason", () => {
+  const runId = withRun();
+  const r = run(leaseRecordArgs(runId, ["--claim-comment"]), { FENIX_WORK_WORKSPACE: "jointhubs", LINEAR_API_KEY: "" });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.deepEqual(rec.claimComment, { posted: false, reason: "LINEAR_API_KEY is not set" });
+});
+
+test("intake runs the lease check too: a live unscoped owner refuses the intake", () => {
+  const runId = withRun();
+  const home = leaseHome();
+  seedHolder(home, LIVE_PID);
+  const r = run(["intake", "--issue", "FOC-999", "--issue-file", fixture({ body: AC_BODY }), "--run", runId], {
+    LA_DATA_HOME: home,
+    FENIX_WORK_WORKSPACE: "jointhubs",
+  });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const err = JSON.parse(r.stdout);
+  assert.equal(err.code, "TICKET_LEASED");
+  assert.ok(!existsSync(join(runDirOf(runId), "intake.json")), "the refusal precedes any write");
+});
+
+// One canonical task key = `<workspace>:<display identifier>`, never the
+// Linear uuid — a payload carrying both must key by the identifier.
+test("unscoped: the lease key is the display identifier, never the payload uuid (record)", () => {
+  const runId = withRun();
+  const home = leaseHome();
+  const holder = seedHolder(home, LIVE_PID, "jointhubs:FOC-123", "FOC-123");
+  const r = run(["record", "--issue", "FOC-123", "--issue-file", uuidIssueFile("FOC-123"), "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--run", runId], {
+    LA_DATA_HOME: home,
+    FENIX_WORK_WORKSPACE: "jointhubs",
+  });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const err = JSON.parse(r.stdout);
+  assert.equal(err.code, "TICKET_LEASED");
+  assert.equal(err.lease.taskKey, "jointhubs:FOC-123");
+  assert.equal(err.lease.sessionId, holder);
+  assert.ok(!existsSync(join(runDirOf(runId), "triage.json")), "the refusal precedes any write");
+});
+
+test("unscoped: the lease key is the display identifier, never the payload uuid (intake)", () => {
+  const runId = withRun();
+  const home = leaseHome();
+  const holder = seedHolder(home, LIVE_PID, "jointhubs:FOC-123", "FOC-123");
+  const r = run(["intake", "--issue", "FOC-123", "--issue-file", uuidIssueFile("FOC-123"), "--run", runId], {
+    LA_DATA_HOME: home,
+    FENIX_WORK_WORKSPACE: "jointhubs",
+  });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const err = JSON.parse(r.stdout);
+  assert.equal(err.code, "TICKET_LEASED");
+  assert.equal(err.lease.taskKey, "jointhubs:FOC-123");
+  assert.equal(err.lease.sessionId, holder);
+  assert.ok(!existsSync(join(runDirOf(runId), "intake.json")), "the refusal precedes any write");
+});
+
+test("scoped: LA_TASK_ID/LA_TASK_KEY naming the display identifier accept a uuid payload", () => {
+  const runId = withRun();
+  const r = run(["intake", "--issue", "FOC-123", "--issue-file", uuidIssueFile("FOC-123"), "--run", runId], {
+    OPENROUTER_API_KEY: "",
+    FENIX_SUPERVISOR_SESSION_ID: SID,
+    LA_TASK_ID: "FOC-123",
+    LA_TASK_KEY: "jointhubs:FOC-123",
+    FENIX_WORK_WORKSPACE: "jointhubs",
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.ok, true);
+  assert.equal(out.issue, "FOC-123");
+  assert.ok(existsSync(join(runDirOf(runId), "intake.json")), "the payload uuid id never becomes part of the key");
+});
+
+test("claim comment failure mapping: a spawnSync timeout is reason \"timeout\", the rest keeps its shape", () => {
+  assert.equal(claimFailureReason({ error: Object.assign(new Error("spawn ETIMEDOUT"), { code: "ETIMEDOUT" }), status: null }), "timeout");
+  assert.equal(claimFailureReason({ error: new Error("ENOENT"), status: null }), "ENOENT");
+  assert.equal(claimFailureReason({ stderr: "l1\nl2\nl3\nl4\n", status: 1 }), "l2; l3; l4", "the stderr tail is the reason");
+  assert.equal(claimFailureReason({ status: 3 }), "exit 3");
+});
+
+test("a non-canonical issue identity refuses the lease check before anything else", () => {
+  const runId = withRun();
+  const r = run(["record", "--issue", "FOC:1", ...issueFile("FOC:1"), "--verdict", "dev", "--rationale", "x", "--confidence", "85", "--run", runId], {
+    FENIX_WORK_WORKSPACE: "jointhubs",
+  });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const err = JSON.parse(r.stdout);
+  assert.match(err.error, /does not yield a canonical task key/);
+  assert.ok(!existsSync(join(runDirOf(runId), "triage.json")));
 });
 
 // ── 10. ownership — the gate at record/propose (FOC-848) ──────────────────────

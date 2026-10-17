@@ -107,19 +107,80 @@ function checkProviderCustom(custom, errors) {
 }
 
 // FOC-901: the managed-task-session cap lives in the overlay so it survives
-// `fenix update`. Kept in its own function so the open branches that edit the
-// same validate loop keep merging trivially.
-function checkTaskSessions(value, errors) {
+// `fenix update`. FOC-902 adds the opt-in autonomous pickup block. Kept in
+// its own function so the open branches that edit the same validate loop
+// keep merging trivially.
+const AUTO_PICKUP_KEYS = new Set(["enabled", "pollSeconds", "states", "label", "workspace"]);
+const AUTO_PICKUP_MAX_STATES = 10;
+const AUTO_PICKUP_MAX_STRING = 100;
+
+function autoPickupErrors(value, errors) {
+  for (const key of Object.keys(value)) {
+    if (!AUTO_PICKUP_KEYS.has(key)) errors.push(`taskSessions.autoPickup.${key}: unknown key`);
+  }
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") {
+    errors.push("taskSessions.autoPickup.enabled: must be a boolean");
+  }
+  if (
+    value.pollSeconds !== undefined &&
+    (!Number.isInteger(value.pollSeconds) || value.pollSeconds < 60 || value.pollSeconds > 3600)
+  ) {
+    errors.push("taskSessions.autoPickup.pollSeconds: must be an integer between 60 and 3600");
+  }
+  if (value.states !== undefined) {
+    const states = value.states;
+    const ok =
+      Array.isArray(states) &&
+      states.length >= 1 &&
+      states.length <= AUTO_PICKUP_MAX_STATES &&
+      states.every((s) => typeof s === "string" && s.trim() !== "" && s.length <= AUTO_PICKUP_MAX_STRING);
+    if (!ok) {
+      errors.push(
+        `taskSessions.autoPickup.states: must be an array of 1 to ${AUTO_PICKUP_MAX_STATES} non-empty state names of at most ${AUTO_PICKUP_MAX_STRING} characters`,
+      );
+    }
+  }
+  if (
+    value.label !== undefined &&
+    value.label !== null &&
+    (typeof value.label !== "string" || value.label.trim() === "" || value.label.length > AUTO_PICKUP_MAX_STRING)
+  ) {
+    errors.push(
+      `taskSessions.autoPickup.label: must be null or a non-empty string of at most ${AUTO_PICKUP_MAX_STRING} characters`,
+    );
+  }
+  if (
+    value.workspace !== undefined &&
+    value.workspace !== null &&
+    (typeof value.workspace !== "string" || !/^[A-Za-z0-9._-]+$/.test(value.workspace) || value.workspace.length > 200)
+  ) {
+    errors.push(
+      "taskSessions.autoPickup.workspace: must be null or a canonical workspace identifier matching /^[A-Za-z0-9._-]+$/ of at most 200 characters",
+    );
+  }
+}
+
+function taskSessionsErrors(value) {
+  const errors = [];
   if (!isPlainObject(value)) {
     errors.push("taskSessions: must be an object");
-    return;
+    return errors;
   }
   for (const key of Object.keys(value)) {
-    if (key !== "maxActive") errors.push(`taskSessions.${key}: unknown key`);
+    if (key !== "maxActive" && key !== "autoPickup") errors.push(`taskSessions.${key}: unknown key`);
   }
   if (value.maxActive !== undefined && (!Number.isInteger(value.maxActive) || value.maxActive < 1 || value.maxActive > 8)) {
     errors.push("taskSessions.maxActive: must be an integer between 1 and 8");
   }
+  if (value.autoPickup !== undefined) {
+    if (!isPlainObject(value.autoPickup)) errors.push("taskSessions.autoPickup: must be an object");
+    else autoPickupErrors(value.autoPickup, errors);
+  }
+  return errors;
+}
+
+function checkTaskSessions(value, errors) {
+  errors.push(...taskSessionsErrors(value));
 }
 
 function checkRetention(retention, errors) {
@@ -280,31 +341,52 @@ export function validateSettings(obj) {
 
 // ---------------------------------------------------------------------------
 // Read side for non-CLI callers (task-session-host, fenix-doctor): the
-// task-session cap from the overlay. Never throws — a missing, unreadable or
-// invalid overlay reads as { maxActive: null } and the caller falls back to
-// its default. Exactly one stderr line names what was ignored and why —
+// task-session cap and the FOC-902 auto-pickup config from the overlay.
+// Never throws — a missing, unreadable or invalid overlay reads as
+// { maxActive: null, autoPickup: null } and the caller falls back to its
+// default. Exactly one stderr line names what was ignored and why —
 // unless opts.quiet is set (UI/doctor contexts that must not print mid-run):
 // then the line is suppressed and returned as `error` for the caller to
 // surface where it fits.
+// autoPickup, when configured, is returned NORMALIZED with the documented
+// defaults filled in: { enabled: false, pollSeconds: 300, states: ["Backlog"],
+// label: null, workspace: null }. An invalid overlay discards the whole
+// taskSessions section — never half a config.
 // ---------------------------------------------------------------------------
+
+const AUTO_PICKUP_DEFAULTS = { enabled: false, pollSeconds: 300, states: ["Backlog"], label: null, workspace: null };
+
+export function normalizeAutoPickup(raw) {
+  return {
+    enabled: raw.enabled ?? AUTO_PICKUP_DEFAULTS.enabled,
+    pollSeconds: raw.pollSeconds ?? AUTO_PICKUP_DEFAULTS.pollSeconds,
+    states: Array.isArray(raw.states) && raw.states.length > 0 ? [...raw.states] : [...AUTO_PICKUP_DEFAULTS.states],
+    label: typeof raw.label === "string" ? raw.label : AUTO_PICKUP_DEFAULTS.label,
+    workspace: typeof raw.workspace === "string" ? raw.workspace : AUTO_PICKUP_DEFAULTS.workspace,
+  };
+}
 
 export function readTaskSessionsSettings(env = process.env, { quiet = false } = {}) {
   const fail = (message) => {
     if (!quiet) console.error(message);
-    return quiet ? { maxActive: null, error: message } : { maxActive: null };
+    return quiet ? { maxActive: null, autoPickup: null, error: message } : { maxActive: null, autoPickup: null };
   };
   let settings;
   try {
     settings = readSettings({ path: settingsPath(env) });
   } catch (err) {
-    return fail(`settings: ${err?.message ?? err} — taskSessions.maxActive ignored`);
+    return fail(`settings: ${err?.message ?? err} — taskSessions settings ignored`);
   }
   const value = isPlainObject(settings) ? settings.taskSessions : undefined;
-  if (value === undefined) return { maxActive: null };
-  if (!isPlainObject(value) || !Number.isInteger(value.maxActive) || value.maxActive < 1 || value.maxActive > 8) {
-    return fail("settings taskSessions.maxActive: must be an integer between 1 and 8 — ignoring");
+  if (value === undefined) return { maxActive: null, autoPickup: null };
+  const errors = taskSessionsErrors(value);
+  if (errors.length > 0) {
+    return fail(`settings ${errors[0]} — ignoring the taskSessions section`);
   }
-  return { maxActive: value.maxActive };
+  return {
+    maxActive: value.maxActive ?? null,
+    autoPickup: value.autoPickup !== undefined ? normalizeAutoPickup(value.autoPickup) : null,
+  };
 }
 
 // Deep merge where a `null` patch value deletes the key from the result —

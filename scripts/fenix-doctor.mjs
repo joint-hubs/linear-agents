@@ -264,11 +264,17 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   const settings = readTaskSessionsSettings(env, { quiet: true });
   const cap = settings.maxActive ?? 2;
   const overlayNote = settings.error ? ` — settings overlay ignored (${settings.error})` : "";
+  // FOC-902: the autonomous-pickup note rides on every detail branch — the
+  // doctor line answers both "how full is the cap" and "is pickup on" in one
+  // place. A settings.error (overlay ignored) reads autoPickup as null → off.
+  const autoNote = settings.autoPickup?.enabled
+    ? `; auto-pickup: on (every ${settings.autoPickup.pollSeconds}s, states ${settings.autoPickup.states.join(",")})`
+    : "; auto-pickup: off";
   let exists = false;
   try {
     exists = fsImpl.existsSync(dbPath);
   } catch {}
-  if (!exists) return { name: 'task sessions', status: 'ok', detail: 'no managed sessions yet' };
+  if (!exists) return { name: 'task sessions', status: 'ok', detail: 'no managed sessions yet' + autoNote };
 
   const { sessions, unknown } = readSessions(dbPath);
   if (unknown) {
@@ -276,7 +282,7 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
     return {
       name: 'task sessions',
       status: 'warn',
-      detail: `the task-sessions store could not be read (${unknown})`,
+      detail: `the task-sessions store could not be read (${unknown})` + autoNote,
       fix: hotWal
         ? 'a session host died with a hot WAL — start the host once or set FENIX_SUPERVISOR_LEGACY=1'
         : `check ${dbPath}`,
@@ -308,7 +314,7 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
 
   const capReached = live.length >= cap;
   if (!capReached && !unscoped) {
-    return { name: 'task sessions', status: 'ok', detail: counts + overlayNote };
+    return { name: 'task sessions', status: 'ok', detail: counts + overlayNote + autoNote };
   }
   // Both warns land on ONE line when they apply together — never two lines
   // for the same check.
@@ -325,7 +331,7 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   return {
     name: 'task sessions',
     status: 'warn',
-    detail: `${counts} — ${parts.join('; ')}` + overlayNote,
+    detail: `${counts} — ${parts.join('; ')}` + overlayNote + autoNote,
     fix: fixes.join('; '),
   };
 }
