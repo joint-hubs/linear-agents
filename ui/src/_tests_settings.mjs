@@ -39,6 +39,8 @@ import {
   jobActive,
   humanBytes,
   retentionView,
+  agentToolsView,
+  findingCounts,
   artifactsView,
   artifactRow,
   retentionFormState,
@@ -746,6 +748,144 @@ await test('humanBytes: the band of shapes', () => {
   eq(humanBytes(-4), '—');
 });
 
+// --- Agent tools (FOC-906) ---------------------------------------------------
+
+// Shaped like GET /api/settings/agent-tools: showAgent rows + check findings.
+const agentToolsPayload = {
+  root: '/repo/agents',
+  agents: [
+    {
+      agent: 'supervisor',
+      settingsPath: '/repo/agents/supervisor/settings.json',
+      permissions: { allow: ['Bash(git *)', 'Read'], ask: ['Bash(git push *)'], deny: ['Danger'] },
+      additionalDirectories: ['/repo/docs'],
+      defaultMode: 'acceptEdits',
+      hooks: { SessionStart: 2, Stop: 1 },
+      mcp: [
+        { server: 'atlas', reachable: true, via: '.mcp.json' },
+        { server: 'stub', reachable: false, via: null, deniedBy: 'deny rule' },
+      ],
+      skills: [{ name: 'dev', source: 'repo' }],
+    },
+    {
+      agent: 'flash',
+      settingsPath: '/repo/agents/flash/settings.json',
+      permissions: { allow: ['Read'], ask: [], deny: [] },
+      hooks: {},
+      mcp: [],
+      skills: [],
+    },
+    { agent: 'broken', error: 'settings.json: invalid JSON' },
+  ],
+  check: {
+    summary: { errors: 1, warnings: 0, infos: 2 },
+    findings: [
+      { level: 'info', agent: 'supervisor', list: 'allow', rule: 'Read', message: 'overlapping' },
+      { level: 'error', agent: 'supervisor', list: 'deny', rule: 'Danger', message: 'too broad' },
+      { level: 'warning', agent: 'flash', list: 'allow', rule: 'Read', message: 'unused' },
+      { level: 'info', agent: 'supervisor', list: 'ask', rule: 'Bash(git push *)', message: 'ask covers it' },
+    ],
+  },
+};
+
+await test('agentToolsView: counts, lists, mcp/skills/hooks per agent', () => {
+  const v = agentToolsView(agentToolsPayload);
+  eq(v.root, '/repo/agents');
+  eq(v.summaryText, '1 error, 0 warnings, 2 infos');
+  eq(v.agents.length, 3);
+  const sup = v.agents[0];
+  eq(sup.agent, 'supervisor');
+  eq(sup.counts, { allow: 2, ask: 1, deny: 1 });
+  eq(sup.lists.deny, ['Danger']);
+  eq(sup.defaultMode, 'acceptEdits');
+  eq(sup.additionalDirectories, ['/repo/docs']);
+  eq(sup.hooks, [
+    { event: 'SessionStart', count: 2 },
+    { event: 'Stop', count: 1 },
+  ]);
+  eq(sup.mcp, agentToolsPayload.agents[0].mcp);
+  eq(sup.skills, [{ name: 'dev', source: 'repo' }]);
+  eq(sup.error, null);
+  const flash = v.agents[1];
+  eq(flash.counts, { allow: 1, ask: 0, deny: 0 });
+  eq(flash.hooks, []);
+});
+
+await test('agentToolsView: findings grouped per agent, levels ordered error > warning > info', () => {
+  const v = agentToolsView(agentToolsPayload);
+  eq(
+    v.agents[0].findings.map((f) => f.level),
+    ['error', 'info', 'info'],
+  );
+  eq(v.agents[0].findings[0], {
+    level: 'error',
+    list: 'deny',
+    rule: 'Danger',
+    message: 'too broad',
+  });
+  eq(
+    v.agents[1].findings.map((f) => f.level),
+    ['warning'],
+  );
+  eq(v.agents[2].findings, []); // the broken agent has no findings of its own
+});
+
+await test('agentToolsView: an unreadable agent file stays an error row', () => {
+  const v = agentToolsView(agentToolsPayload);
+  const broken = v.agents[2];
+  eq(broken.agent, 'broken');
+  eq(broken.error, 'settings.json: invalid JSON');
+  eq(broken.counts, { allow: 0, ask: 0, deny: 0 });
+  eq(broken.lists, { allow: [], ask: [], deny: [] });
+  eq(broken.mcp, []);
+  eq(broken.skills, []);
+});
+
+await test('agentToolsView: a null / empty payload yields empty everything', () => {
+  for (const payload of [null, {}, { agents: null, check: null }]) {
+    const v = agentToolsView(payload);
+    eq(v.root, null);
+    eq(v.summaryText, null);
+    eq(v.agents, []);
+  }
+  // A check with a bare-string summary is tolerated (shown verbatim); a
+  // summary of any other shape reads as unknown.
+  const v = agentToolsView({ root: '/x', agents: [], check: { summary: 'weird' } });
+  eq(v.summaryText, 'weird');
+  eq(v.root, '/x');
+  eq(agentToolsView({ root: '/x', agents: [], check: { summary: { errors: 'x' } } }).summaryText, null);
+});
+
+await test('agentToolsView: a malformed agent row and unknown finding level do not throw', () => {
+  const v = agentToolsView({
+    agents: [null, 'junk', { agent: 'a', permissions: { allow: 'not-an-array' } }],
+    check: { summary: { errors: 0, warnings: 0, infos: 1 }, findings: [{ level: 'odd', agent: 'a' }] },
+  });
+  eq(v.agents[0], { agent: '(unknown)', error: 'malformed row' });
+  eq(v.agents[2].counts, { allow: 0, ask: 0, deny: 0 }); // not-an-array -> 0
+  eq(v.agents[2].findings, [{ level: 'odd', list: undefined, rule: undefined, message: undefined }]);
+});
+
+await test('findingCounts: tallies per level, zeros kept, non-array reads as none', () => {
+  eq(
+    findingCounts([
+      { level: 'info', agent: 'a' },
+      { level: 'info', agent: 'a' },
+      { level: 'warning', agent: 'a' },
+      { level: 'error', agent: 'a' },
+    ]),
+    { error: 1, warning: 1, info: 2 },
+  );
+  eq(findingCounts([]), { error: 0, warning: 0, info: 0 });
+  eq(findingCounts(null), { error: 0, warning: 0, info: 0 });
+});
+
+await test('findingCounts: unknown or missing levels are ignored', () => {
+  eq(
+    findingCounts([{ level: 'odd', agent: 'a' }, { level: 'info' }, {}, 'junk', null]),
+    { error: 0, warning: 0, info: 1 },
+  );
+});
 // --- artifactsView (FOC-779) ---------------------------------------------------
 
 await test('artifactsView: one row per state — labels, tones, refresh texts', () => {
@@ -855,6 +995,7 @@ await test('no model output contains a canary value passed in by mistake', () =>
     repoRows([{ name: 'fenix', branch: 'main', head: 'fd659fb', value: CANARY }]),
     jobProgressText({ name: 'fenix', status: 'cloning', progress: '40%', value: CANARY }),
     retentionView({ ...retentionPayload, value: CANARY }),
+    agentToolsView({ ...agentToolsPayload, value: CANARY }),
     artifactsView({
       ...artifactsPayload,
       artifacts: [

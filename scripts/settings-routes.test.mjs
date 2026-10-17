@@ -594,6 +594,39 @@ setSettingsDeps({
   check("unit wrong method -> 405", wrongMethod.status === 405);
 }
 
+// ── agent-tools: read-only GET over the effective root (FOC-906) ─────────────
+
+{
+  const prevSquad = process.env.LA_SQUAD_HOME;
+  const squadDir = join(unitDir, "agents");
+  mkdirSync(join(squadDir, "alpha"), { recursive: true });
+  writeFileSync(join(squadDir, "alpha", "settings.json"), JSON.stringify({
+    permissions: { allow: ["Read"], ask: ["Bash(git push:*)"], deny: [] },
+  }, null, 2), "utf8");
+  mkdirSync(join(squadDir, "broken"), { recursive: true });
+  writeFileSync(join(squadDir, "broken", "settings.json"), "{not json", "utf8");
+  process.env.LA_SQUAD_HOME = squadDir;
+  try {
+    const r = await unit("GET", "/api/settings/agent-tools");
+    check("unit agent-tools GET -> 200", r.status === 200, JSON.stringify(r.body).slice(0, 200));
+    check("unit agent-tools GET root is the effective root", r.body?.root === squadDir);
+    const alpha = (r.body?.agents || []).find((a) => a.agent === "alpha");
+    check("unit agent-tools GET healthy row", alpha?.permissions?.allow?.[0] === "Read"
+      && alpha?.permissions?.ask?.[0] === "Bash(git push:*)"
+      && Array.isArray(alpha?.mcp) && Array.isArray(alpha?.skills), JSON.stringify(alpha).slice(0, 200));
+    const broken = (r.body?.agents || []).find((a) => a.agent === "broken");
+    check("unit agent-tools GET broken row is an error row, not a 500",
+      typeof broken?.error === "string" && /not valid JSON/.test(broken.error), JSON.stringify(broken));
+    check("unit agent-tools GET check block", typeof r.body?.check?.summary?.errors === "number"
+      && Array.isArray(r.body?.check?.findings));
+    const wrong = await unit("PUT", "/api/settings/agent-tools");
+    check("unit agent-tools PUT -> 405", wrong.status === 405);
+  } finally {
+    if (prevSquad === undefined) delete process.env.LA_SQUAD_HOME;
+    else process.env.LA_SQUAD_HOME = prevSquad;
+  }
+}
+
 // ── retention PUT (FOC-780) ──────────────────────────────────────────────────
 
 {
@@ -710,6 +743,14 @@ const dbPath = join(dir, "telemetry.sqlite");
 mkdirSync(secrets, { recursive: true });
 mkdirSync(join(dir, "agents"), { recursive: true });
 mkdirSync(join(dir, "workspaces"), { recursive: true });
+
+// FOC-906: agents for the read-only agent-tools GET (one healthy, one broken).
+mkdirSync(join(dir, "agents", "agent-a"), { recursive: true });
+writeFileSync(join(dir, "agents", "agent-a", "settings.json"), JSON.stringify({
+  permissions: { allow: ["Read", "Bash(ls:*)"], ask: [], deny: ["Bash(git push:*)"] },
+}, null, 2), "utf8");
+mkdirSync(join(dir, "agents", "agent-broken"), { recursive: true });
+writeFileSync(join(dir, "agents", "agent-broken", "settings.json"), "{not json", "utf8");
 
 {
   const db = openTelemetryDb(dbPath);
@@ -1069,6 +1110,26 @@ try {
       && typeof r.body?.usage?.workspacesBytes === "number"
       && typeof r.body?.usage?.stateBytes === "number"
       && Array.isArray(r.body?.partial), r.raw.slice(0, 300));
+  }
+
+  // agent-tools: read-only GET over the effective root (FOC-906)
+  {
+    const r = await call(P, "GET", "/api/settings/agent-tools");
+    check("int agent-tools GET -> 200 with the effective root",
+      r.status === 200 && r.body?.root === join(dir, "agents"), r.raw.slice(0, 200));
+    const a = (r.body?.agents || []).find((x) => x.agent === "agent-a");
+    check("int agent-tools GET healthy row",
+      a?.permissions?.allow?.includes("Read") && a?.permissions?.deny?.includes("Bash(git push:*)")
+      && Array.isArray(a?.mcp) && Array.isArray(a?.skills) && typeof a?.settingsPath === "string",
+      JSON.stringify(a).slice(0, 200));
+    const broken = (r.body?.agents || []).find((x) => x.agent === "agent-broken");
+    check("int agent-tools GET broken row -> error, still 200",
+      r.status === 200 && typeof broken?.error === "string" && broken?.permissions === undefined,
+      JSON.stringify(broken));
+    check("int agent-tools GET check summary", typeof r.body?.check?.summary?.errors === "number"
+      && Array.isArray(r.body?.check?.findings));
+    const wrong = await call(P, "PUT", "/api/settings/agent-tools");
+    check("int agent-tools PUT -> 405", wrong.status === 405);
   }
 
   // retention PUT round-trip (FOC-780): validate, write, apply, estimate.

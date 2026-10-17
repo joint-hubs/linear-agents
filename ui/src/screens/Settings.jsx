@@ -15,12 +15,14 @@ import ProviderPanel from '../components/settings/ProviderPanel';
 import RoutingPanel from '../components/settings/RoutingPanel';
 import ReposPanel from '../components/settings/ReposPanel';
 import RetentionPanel from '../components/settings/RetentionPanel';
+import AgentToolsPanel from '../components/settings/AgentToolsPanel';
 
 const SECTIONS = {
   keys: { label: 'Keys', panels: [KeysPanel] },
   provider: { label: 'Provider & routing', panels: [ProviderPanel, RoutingPanel] },
   repos: { label: 'Repositories', panels: [ReposPanel] },
   retention: { label: 'Retention', panels: [RetentionPanel] },
+  'agent-tools': { label: 'Agent tools', panels: [AgentToolsPanel] },
   artifacts: { label: 'Artifacts', panels: [ArtifactsPanel] },
 };
 

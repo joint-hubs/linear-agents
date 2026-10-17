@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// scripts/agent-tools.mjs — read-only visibility into agent permission settings
-// (FOC-900, P1-B of FOC-898). Four verbs over <agent>/settings.json plus the
-// repo's .mcp.json. The agents root is the effective config root by default
-// ($LA_SQUAD_HOME when set, else <repo>/agents); `docs` always renders the
-// repository tree so the committed file documents the image baseline.
+// scripts/agent-tools.mjs — visibility into and validated edits of agent
+// permission settings (FOC-900, P1-B of FOC-898; FOC-906 for the edit verbs).
+// Verbs over <agent>/settings.json plus the repo's .mcp.json. The agents root
+// is the effective config root by default ($LA_SQUAD_HOME when set, else
+// <repo>/agents); `docs` always renders the repository tree so the committed
+// file documents the image baseline.
 //
 //   show   <agent>                  one agent's effective settings (permissions,
 //                                   MCP reachability, skills) — JSON with --json
@@ -11,9 +12,14 @@
 //   check                           validate every settings.json against the
 //                                   Claude Code permission-rule shapes
 //   docs   [--write] [--out <p>]    render the generated reference doc
+//   allow|ask|deny <agent> "<rule>" append the rule to that list (validated
+//                                   first; --dry-run prints without writing)
+//   remove <agent> "<rule>"         delete the rule from whichever list holds it
 //
-// The tool never writes settings — the editing verbs live elsewhere (out of
-// scope here). The `check` rule-shape facts come from the Claude Code permission
+// show/diff/check/docs never write. The edit verbs DO write the agent's
+// settings.json — validated before the write, atomic, key order preserved —
+// and an edit to the repository tree regenerates docs/agent-tools.md in the
+// same step. Nothing is staged or committed by the tool. The `check` rule-shape facts come from the Claude Code permission
 // docs (2026-10-16):
 //   1. precedence is deny > ask > allow: a matching ask rule prompts even when a
 //      more specific allow rule also matches the same call;
@@ -29,7 +35,7 @@
 //      `mcp__<server>__*` wildcard; `Tool(param:value)` is NOT valid for the
 //      primary content field.
 //
-// Run: node scripts/agent-tools.mjs <show|diff|check|docs> [...]
+// Run: node scripts/agent-tools.mjs <show|diff|check|docs|allow|ask|deny|remove> [...]
 
 import {
   existsSync,
@@ -43,6 +49,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { SUPERVISOR_DENY } from "./supervisor-lib.mjs";
 import { squadConfigRoot } from "./fenix-paths.mjs";
+import { atomicWriteJSON } from "./utils.mjs";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // The repository's own agents/ tree — what the committed docs/agent-tools.md
@@ -402,6 +409,144 @@ function diffText(data) {
 // ── check ────────────────────────────────────────────────────────────────────
 
 /**
+ * Findings for ONE agent from an ALREADY-PARSED settings object — the shared
+ * core of `check` and of the FOC-906 edit validation (a would-be settings
+ * object is validated with exactly the rules `check` applies to the file).
+ */
+function agentFindings(agent, settings) {
+  const findings = [];
+  const perms =
+    settings?.permissions && typeof settings.permissions === "object"
+      ? settings.permissions
+      : {};
+  const lists = {};
+  for (const list of LISTS) {
+    const value = perms[list];
+    if (value === undefined) {
+      lists[list] = [];
+      continue;
+    }
+    if (!Array.isArray(value)) {
+      findings.push({
+        level: "error",
+        agent,
+        list,
+        rule: "",
+        message: `permissions.${list} is not an array`,
+      });
+      lists[list] = [];
+      continue;
+    }
+    lists[list] = value;
+  }
+  // shape errors, per rule in file order
+  for (const list of LISTS) {
+    for (const rule of lists[list]) {
+      const parsed = parseRule(rule);
+      if (parsed.ok) continue;
+      const message =
+        parsed.reason === "not-a-string"
+          ? "rule is not a string"
+          : parsed.reason === "empty"
+            ? "rule is empty"
+            : parsed.reason === "empty-pattern"
+              ? "invalid rule shape: empty pattern — Tool() matches nothing"
+              : parsed.reason === "primary-field"
+                ? "invalid rule shape: Tool(param:value) is not valid for the primary content field (e.g. Bash(command:...))"
+                : "invalid rule shape: expected Tool or Tool(pattern) with balanced parentheses";
+      findings.push({ level: "error", agent, list, rule: String(rule), message });
+    }
+  }
+  // duplicates: within one list, then across allow/ask/deny
+  for (const list of LISTS) {
+    const seen = new Map();
+    lists[list].forEach((rule, index) => {
+      if (typeof rule !== "string") return;
+      if (seen.has(rule)) {
+        findings.push({
+          level: "error",
+          agent,
+          list,
+          rule,
+          message: `duplicate rule in ${list} (same rule at position ${seen.get(rule)})`,
+        });
+      } else {
+        seen.set(rule, index);
+      }
+    });
+  }
+  // duplicates across lists: each list against the union of all earlier
+  // lists (allow, ask, deny in order) — comparing adjacent pairs only would
+  // never flag a rule present in both allow and deny.
+  const crossDups = new Set(); // `${list}\u0000${rule}` already reported as an error
+  for (let i = 1; i < LISTS.length; i++) {
+    const earlierLists = LISTS.slice(0, i);
+    const earlier = new Set(
+      earlierLists.flatMap((l) => lists[l]).filter((r) => typeof r === "string"),
+    );
+    for (const rule of lists[LISTS[i]]) {
+      if (typeof rule !== "string" || !earlier.has(rule)) continue;
+      const firstList = earlierLists.find((l) => lists[l].includes(rule));
+      crossDups.add(`${LISTS[i]}\u0000${rule}`);
+      findings.push({
+        level: "error",
+        agent,
+        list: LISTS[i],
+        rule,
+        message: `duplicate rule: also in ${firstList} — the same rule in allow and ask/deny is contradictory`,
+      });
+    }
+  }
+  // overlap: an ask/deny prefix extending an allow prefix (warning only)
+  const allowPrefixes = [];
+  for (const rule of lists.allow) {
+    const prefix = rulePrefix(rule);
+    if (prefix !== null && prefix.trim() !== "") allowPrefixes.push({ rule, prefix });
+  }
+  for (const list of ["ask", "deny"]) {
+    for (const rule of lists[list]) {
+      const prefix = rulePrefix(rule);
+      if (prefix === null || prefix.trim() === "") continue;
+      if (crossDups.has(`${list}\u0000${rule}`)) continue; // exact duplicate → already an error
+      const hit = allowPrefixes.find((a) => prefix.startsWith(a.prefix));
+      if (hit) {
+        findings.push({
+          level: "warning",
+          agent,
+          list,
+          rule,
+          message: `overlap with allow rule ${hit.rule}: Claude Code applies deny > ask > allow, the ask/deny rule wins`,
+        });
+      }
+    }
+  }
+  // documented blind spots in the allow list (info)
+  for (const rule of lists.allow) {
+    if (typeof rule !== "string") continue;
+    if (isInterpreterRule(rule)) {
+      findings.push({
+        level: "info",
+        agent,
+        list: "allow",
+        rule,
+        message:
+          "interpreter rule: ask/deny rules match command text only, code run through this interpreter is not covered",
+      });
+    } else if (isCompoundHelper(rule)) {
+      findings.push({
+        level: "info",
+        agent,
+        list: "allow",
+        rule,
+        message:
+          "compound helper: Claude Code splits compound commands, every subcommand must match an allow rule on its own",
+      });
+    }
+  }
+  return findings;
+}
+
+/**
  * Validate every agent dir with a settings.json. Findings are
  * { level, agent, list, rule, message }; levels:
  *   error   — unusable rule (not a string / empty / invalid shape / empty
@@ -430,134 +575,7 @@ export function checkFindings({ agentsDir = squadConfigRoot(), supervisorDeny = 
       });
       continue;
     }
-    const perms =
-      settings?.permissions && typeof settings.permissions === "object"
-        ? settings.permissions
-        : {};
-    const lists = {};
-    for (const list of LISTS) {
-      const value = perms[list];
-      if (value === undefined) {
-        lists[list] = [];
-        continue;
-      }
-      if (!Array.isArray(value)) {
-        findings.push({
-          level: "error",
-          agent,
-          list,
-          rule: "",
-          message: `permissions.${list} is not an array`,
-        });
-        lists[list] = [];
-        continue;
-      }
-      lists[list] = value;
-    }
-    // shape errors, per rule in file order
-    for (const list of LISTS) {
-      for (const rule of lists[list]) {
-        const parsed = parseRule(rule);
-        if (parsed.ok) continue;
-        const message =
-          parsed.reason === "not-a-string"
-            ? "rule is not a string"
-            : parsed.reason === "empty"
-              ? "rule is empty"
-              : parsed.reason === "empty-pattern"
-                ? "invalid rule shape: empty pattern — Tool() matches nothing"
-                : parsed.reason === "primary-field"
-                  ? "invalid rule shape: Tool(param:value) is not valid for the primary content field (e.g. Bash(command:...))"
-                  : "invalid rule shape: expected Tool or Tool(pattern) with balanced parentheses";
-        findings.push({ level: "error", agent, list, rule: String(rule), message });
-      }
-    }
-    // duplicates: within one list, then across allow/ask/deny
-    for (const list of LISTS) {
-      const seen = new Map();
-      lists[list].forEach((rule, index) => {
-        if (typeof rule !== "string") return;
-        if (seen.has(rule)) {
-          findings.push({
-            level: "error",
-            agent,
-            list,
-            rule,
-            message: `duplicate rule in ${list} (same rule at position ${seen.get(rule)})`,
-          });
-        } else {
-          seen.set(rule, index);
-        }
-      });
-    }
-    // duplicates across lists: each list against the union of all earlier
-    // lists (allow, ask, deny in order) — comparing adjacent pairs only would
-    // never flag a rule present in both allow and deny.
-    const crossDups = new Set(); // `${list}\u0000${rule}` already reported as an error
-    for (let i = 1; i < LISTS.length; i++) {
-      const earlierLists = LISTS.slice(0, i);
-      const earlier = new Set(
-        earlierLists.flatMap((l) => lists[l]).filter((r) => typeof r === "string"),
-      );
-      for (const rule of lists[LISTS[i]]) {
-        if (typeof rule !== "string" || !earlier.has(rule)) continue;
-        const firstList = earlierLists.find((l) => lists[l].includes(rule));
-        crossDups.add(`${LISTS[i]}\u0000${rule}`);
-        findings.push({
-          level: "error",
-          agent,
-          list: LISTS[i],
-          rule,
-          message: `duplicate rule: also in ${firstList} — the same rule in allow and ask/deny is contradictory`,
-        });
-      }
-    }
-    // overlap: an ask/deny prefix extending an allow prefix (warning only)
-    const allowPrefixes = [];
-    for (const rule of lists.allow) {
-      const prefix = rulePrefix(rule);
-      if (prefix !== null && prefix.trim() !== "") allowPrefixes.push({ rule, prefix });
-    }
-    for (const list of ["ask", "deny"]) {
-      for (const rule of lists[list]) {
-        const prefix = rulePrefix(rule);
-        if (prefix === null || prefix.trim() === "") continue;
-        if (crossDups.has(`${list}\u0000${rule}`)) continue; // exact duplicate → already an error
-        const hit = allowPrefixes.find((a) => prefix.startsWith(a.prefix));
-        if (hit) {
-          findings.push({
-            level: "warning",
-            agent,
-            list,
-            rule,
-            message: `overlap with allow rule ${hit.rule}: Claude Code applies deny > ask > allow, the ask/deny rule wins`,
-          });
-        }
-      }
-    }
-    // documented blind spots in the allow list (info)
-    for (const rule of lists.allow) {
-      if (typeof rule !== "string") continue;
-      if (isInterpreterRule(rule)) {
-        findings.push({
-          level: "info",
-          agent,
-          list: "allow",
-          rule,
-          message:
-            "interpreter rule: ask/deny rules match command text only, code run through this interpreter is not covered",
-        });
-      } else if (isCompoundHelper(rule)) {
-        findings.push({
-          level: "info",
-          agent,
-          list: "allow",
-          rule,
-          message:
-            "compound helper: Claude Code splits compound commands, every subcommand must match an allow rule on its own",
-        });
-      }
-    }
+    findings.push(...agentFindings(agent, settings));
   }
   // child deny baseline: the live SUPERVISOR_DENY must still contain every
   // pinned entry — a shrink silently loosens every child spawned afterwards.
@@ -580,6 +598,224 @@ export function checkFindings({ agentsDir = squadConfigRoot(), supervisorDeny = 
     infos: findings.filter((f) => f.level === "info").length,
   };
   return { findings, summary, ok: summary.errors === 0 };
+}
+
+// ── edit (FOC-906) ───────────────────────────────────────────────────────────
+
+const PROTECTED_DENY_MESSAGE =
+  "protected deny rule — edit SUPERVISOR_DENY in supervisor-lib.mjs with a ticket";
+
+// Canonical key order of the permissions object (mirrors the committed
+// supervisor file): allow → deny → ask. A missing list is created in this
+// position; existing keys keep their original file order.
+const PERMISSION_KEY_ORDER = ["allow", "deny", "ask"];
+
+/**
+ * The protected deny rules: DENY_BASELINE ∪ the live SUPERVISOR_DENY, matched
+ * by exact string and by rulePrefix equality. `supervisorDeny` is a test seam;
+ * production uses the SUPERVISOR_DENY import.
+ */
+export function protectedDeny({ supervisorDeny = SUPERVISOR_DENY } = {}) {
+  const rules = new Set([...DENY_BASELINE, ...(supervisorDeny ?? [])]);
+  const prefixes = new Set(
+    [...rules].map(rulePrefix).filter((p) => p !== null && p.trim() !== ""),
+  );
+  return { rules, prefixes };
+}
+
+function isProtectedDeny(rule, { rules, prefixes }) {
+  if (rules.has(rule)) return true;
+  const prefix = rulePrefix(rule);
+  return prefix !== null && prefix.trim() !== "" && prefixes.has(prefix);
+}
+
+/**
+ * Insert a missing permissions list in its canonical position (after `allow`,
+ * then after `deny`), keeping every existing key in its original order.
+ */
+function insertPermissionList(perms, list, value) {
+  const entries = Object.entries(perms);
+  const predecessors = PERMISSION_KEY_ORDER.slice(0, PERMISSION_KEY_ORDER.indexOf(list));
+  let at = -1;
+  entries.forEach(([key], i) => {
+    if (predecessors.includes(key)) at = i;
+  });
+  entries.splice(at + 1, 0, [list, value]);
+  return Object.fromEntries(entries);
+}
+
+/**
+ * Edit one agent's permission lists. verb: "allow" | "ask" | "deny" (append
+ * the rule to that list) or "remove" (delete the exact string from whichever
+ * list holds it).
+ *
+ * Validates the WOULD-BE settings BEFORE writing anything — rule shape,
+ * duplicates (already in the same list → no-op, in another list → refusal),
+ * the full `check` finding set on the edited agent, and, for `remove`, the
+ * protected deny rules (DENY_BASELINE ∪ live SUPERVISOR_DENY, exact string or
+ * rulePrefix). Any error refuses the edit and writes nothing. The write itself
+ * is atomic (atomicWriteJSON), appends without re-sorting, and preserves the
+ * file's key order.
+ *
+ * After a successful write to the REPOSITORY tree (`agentsDir ===
+ * repoAgentsDir`; production REPO_AGENTS_DIR, a test seam otherwise) the
+ * generated reference doc is regenerated into `docsOut`.
+ *
+ * Returns { ok, agent, verb, rule, list, settingsPath, noop, dryRun, docs,
+ * check: { summary, findings } } on success (noop: the rule was already in
+ * that list), or { ok: false, errors: [...] } on a refusal.
+ */
+export function editAgent(agent, verb, rule, {
+  agentsDir = squadConfigRoot(),
+  dryRun = false,
+  docsOut = join(REPO_ROOT, "docs", "agent-tools.md"),
+  repoAgentsDir = REPO_AGENTS_DIR,
+  supervisorDeny = SUPERVISOR_DENY,
+} = {}) {
+  const parsed = parseRule(rule);
+  if (!parsed.ok) {
+    return { ok: false, errors: [`invalid rule (${parsed.reason}): ${JSON.stringify(rule)}`] };
+  }
+  const settingsPath = join(agentsDir, agent, "settings.json");
+  if (!existsSync(settingsPath)) {
+    return {
+      ok: false,
+      errors: [`no settings.json for ${agent} under ${agentsDir} — known agents: ${listAgents(agentsDir).join(", ") || "(none)"}`],
+    };
+  }
+  let settings;
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  } catch (err) {
+    return { ok: false, errors: [`${settingsPath} is not valid JSON: ${err.message}`] };
+  }
+  const perms =
+    settings?.permissions && typeof settings.permissions === "object"
+      ? settings.permissions
+      : {};
+  // A list that is defined but not an array refuses the edit — it must not be
+  // silently replaced (the file is broken; fixing it is a separate decision).
+  for (const list of LISTS) {
+    if (perms[list] !== undefined && !Array.isArray(perms[list])) {
+      return { ok: false, errors: [`permissions.${list} is not an array`] };
+    }
+  }
+  const current = {};
+  for (const list of LISTS) current[list] = Array.isArray(perms[list]) ? perms[list] : [];
+
+  const result = { agent, verb, rule, settingsPath, noop: false, dryRun, docs: null, warnings: [] };
+  let list;
+  if (verb === "remove") {
+    if (isProtectedDeny(rule, protectedDeny({ supervisorDeny }))) {
+      return { ok: false, errors: [`${rule}: ${PROTECTED_DENY_MESSAGE}`] };
+    }
+    const holders = LISTS.filter((l) => current[l].includes(rule));
+    if (!holders.length) {
+      return { ok: false, errors: [`rule not found in any list of ${agent}: ${rule}`] };
+    }
+    // keep removing from the FIRST holder (allow → ask → deny file order) …
+    list = holders[0];
+    // …and name the others so the caller knows the rule still exists there.
+    result.warnings = holders.slice(1).map((l) => `${rule} also present in ${l} — run check`);
+  } else {
+    list = verb;
+    const holder = LISTS.find((l) => current[l].includes(rule));
+    if (holder === list) {
+      // already in the target list — nothing to change, nothing to write
+      return {
+        ...result,
+        ok: true,
+        list,
+        noop: true,
+        check: checkOf(agent, settings),
+      };
+    }
+    if (holder) {
+      return { ok: false, errors: [`duplicate rule: ${rule} is already in ${holder}`] };
+    }
+  }
+
+  // The would-be settings: existing arrays spliced in place (no re-sorting),
+  // a missing list created in the canonical position, key order preserved.
+  const nextList = verb === "remove"
+    ? current[list].filter((r) => r !== rule)
+    : [...current[list], rule];
+  const nextPerms = perms[list] !== undefined
+    ? { ...perms, [list]: nextList }
+    : insertPermissionList(perms, list, nextList);
+  const wouldBe = { ...settings, permissions: nextPerms };
+
+  // Validate BEFORE writing: the same findings `check` would report on the
+  // file after the write. Any error refuses the edit — nothing is written.
+  const { summary, findings } = checkOf(agent, wouldBe);
+  const errors = findings.filter((f) => f.level === "error");
+  if (errors.length) {
+    return {
+      ok: false,
+      errors: errors.map((f) => `${f.list} ${f.rule}: ${f.message}`),
+    };
+  }
+
+  if (dryRun) {
+    return {
+      ...result,
+      ok: true,
+      list,
+      docs: { regenerated: false, path: docsOut, wouldRegenerate: inRepoTree(agentsDir, repoAgentsDir) },
+      check: { summary, findings },
+    };
+  }
+  atomicWriteJSON(settingsPath, wouldBe);
+  const docs = inRepoTree(agentsDir, repoAgentsDir)
+    ? { regenerated: true, path: docsOut }
+    : null;
+  // Default .mcp.json on purpose — the docs pin test renders the repo tree with it, so the regenerated file must match.
+  if (docs) writeFileSync(docs.path, renderDocs({ agentsDir, mcpPath: DEFAULT_MCP_PATH }) + "\n");
+  return { ...result, ok: true, list, docs, check: { summary, findings } };
+}
+
+function inRepoTree(agentsDir, repoAgentsDir) {
+  return resolve(agentsDir) === resolve(repoAgentsDir);
+}
+
+/** agentFindings + summary for one agent's settings object. */
+function checkOf(agent, settings) {
+  const findings = agentFindings(agent, settings);
+  const summary = {
+    errors: findings.filter((f) => f.level === "error").length,
+    warnings: findings.filter((f) => f.level === "warning").length,
+    infos: findings.filter((f) => f.level === "info").length,
+  };
+  return { summary, findings };
+}
+
+function editText(result) {
+  const out = [];
+  out.push(`agent: ${result.agent}`);
+  out.push(`settings: ${result.settingsPath}`);
+  if (result.noop) {
+    out.push(`= ${result.list} ${result.rule} (already present — no-op)`);
+  } else {
+    out.push(`${result.verb === "remove" ? "-" : "+"} ${result.list} ${result.rule}`);
+  }
+  for (const warning of result.warnings) out.push(`warning: ${warning}`);
+  if (result.dryRun) {
+    out.push(
+      result.docs?.wouldRegenerate
+        ? "docs: would be regenerated (dry-run — nothing written)"
+        : "docs: not regenerated (effective root is not the repository tree)",
+    );
+    out.push("dry-run: nothing written");
+  } else if (result.docs?.regenerated) {
+    out.push(`docs: regenerated ${result.docs.path}`);
+  } else if (!result.noop) {
+    out.push("docs: not regenerated (effective root is not the repository tree)");
+  }
+  const { summary } = result.check;
+  out.push(
+    `summary: ${plural(summary.errors, "error")}, ${plural(summary.warnings, "warning")}, ${plural(summary.infos, "info")}`,
+  );
+  return out.join("\n") + "\n";
 }
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -628,6 +864,26 @@ export function renderDocs({ agentsDir = REPO_AGENTS_DIR, mcpPath = DEFAULT_MCP_
     "`mcp__*`, `*`); a tool-level deny (`mcp__linear__create_issue`) does not make the",
   );
   out.push("server unreachable in this view.");
+  out.push("");
+  out.push(
+    'Editing: `allow|ask|deny <agent> "<rule>"` append a rule to that list and',
+  );
+  out.push(
+    '`remove <agent> "<rule>"` deletes it from whichever list holds it — every edit',
+  );
+  out.push(
+    "is validated first and written atomically with the file's key order preserved",
+  );
+  out.push(
+    "(`--dry-run` prints without writing). Rules in SUPERVISOR_DENY, or with the same",
+  );
+  out.push(
+    "command prefix, are protected — edit supervisor-lib.mjs with a ticket instead.",
+  );
+  out.push(
+    "Nothing is committed by the tool; an edit to the repository tree regenerates",
+  );
+  out.push("this file in the same step.");
   out.push("");
   for (const agent of listAgents(agentsDir)) {
     const data = showAgent(agent, { agentsDir, mcpPath });
@@ -729,17 +985,27 @@ Commands:
   docs [--write] [--out <path>]
                           render the generated reference (docs/agent-tools.md
                           by default; stdout without --write)
+  allow|ask|deny <agent> "<rule>"
+                          append the rule to that list — validated first,
+                          written atomically, key order preserved
+  remove <agent> "<rule>"
+                          remove the rule from whichever list holds it
+                          (protected deny rules (DENY_BASELINE ∪
+                          SUPERVISOR_DENY) refuse)
 
 Options:
   --root <agentsDir>      agents directory (default: $LA_SQUAD_HOME when set,
                           else <repo>/agents)
   --mcp <path>            .mcp.json path (default: <repo>/.mcp.json)
   --json                  machine-readable output
+  --dry-run               print the edit without writing anything
+  --docs-out <path>       where an edit to the repository tree regenerates the
+                          generated reference (default docs/agent-tools.md)
 
 Exit codes: 0 ok | 1 errors | 2 usage
 `;
 
-export function runCli(argv, { stdout = process.stdout, stderr = process.stderr, cwd = process.cwd(), env = process.env } = {}) {
+export function runCli(argv, { stdout = process.stdout, stderr = process.stderr, cwd = process.cwd(), env = process.env, repoAgentsDir = REPO_AGENTS_DIR } = {}) {
   const usageError = (message) => {
     if (message) stderr.write(`${message}\n`);
     stderr.write(USAGE);
@@ -754,10 +1020,10 @@ export function runCli(argv, { stdout = process.stdout, stderr = process.stderr,
     return 0;
   }
   const verb = argv[0];
-  const opts = { positional: [], root: null, mcp: null, json: false, against: null, write: false, out: null };
+  const opts = { positional: [], root: null, mcp: null, json: false, against: null, write: false, out: null, dryRun: false, docsOut: null };
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
-    const needsValue = ["--root", "--mcp", "--against", "--out"];
+    const needsValue = ["--root", "--mcp", "--against", "--out", "--docs-out"];
     if (needsValue.includes(arg)) {
       const value = argv[++i];
       if (value === undefined) return usageError(`${arg} needs a value`);
@@ -766,6 +1032,8 @@ export function runCli(argv, { stdout = process.stdout, stderr = process.stderr,
       opts.json = true;
     } else if (arg === "--write") {
       opts.write = true;
+    } else if (arg === "--dry-run") {
+      opts.dryRun = true;
     } else if (arg === "--help" || arg === "-h") {
       stdout.write(USAGE);
       return 0;
@@ -819,6 +1087,25 @@ export function runCli(argv, { stdout = process.stdout, stderr = process.stderr,
       } else {
         stdout.write(markdown);
       }
+      return 0;
+    }
+    if (verb === "allow" || verb === "ask" || verb === "deny" || verb === "remove") {
+      const [agent, rule] = opts.positional;
+      if (!agent || rule === undefined) {
+        return usageError(`${verb} needs an agent and a "rule"`);
+      }
+      if (opts.positional.length > 2) return usageError(`${verb} takes an agent and a "rule"`);
+      const result = editAgent(agent, verb, rule, {
+        agentsDir,
+        dryRun: opts.dryRun,
+        docsOut: opts["docs-out"] ? resolve(cwd, opts["docs-out"]) : undefined,
+        repoAgentsDir,
+      });
+      if (!result.ok) {
+        for (const message of result.errors) stderr.write(`error: ${message}\n`);
+        return 1;
+      }
+      stdout.write(opts.json ? JSON.stringify(result, null, 2) + "\n" : editText(result));
       return 0;
     }
     return usageError(`unknown command: ${verb}`);

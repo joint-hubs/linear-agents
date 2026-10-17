@@ -250,6 +250,9 @@ into their per-run homes: `node scripts/supervisor-migrate-scratch.mjs` (dry run
 - The runner sweeps its spawn registry after both lanes (FOC-840): a server a test file left alive is tree-killed and reported as `test orphans left running: <file> pid N port P (killed)`, and the run fails even when every file passed.
 - This checklist, walked once on a throwaway issue (§8.12).
 - `git diff -- agents/orchestrator` empty (AC-10).
+- Settings → Agent tools (FOC-906): the read-only panel renders `GET /api/settings/agent-tools` —
+  the effective root's permission lists, MCP reachability, skills and the `fenix agent-tools check`
+  summary; editing stays CLI-side (`fenix agent-tools allow|ask|deny|remove`).
 
 ### Rollback
 Revert the PR. `.state/supervisor/` is disposable. Existing squads are bitwise-unchanged in
