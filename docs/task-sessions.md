@@ -31,10 +31,10 @@ Start the Supervisor scoped with the command above, or set FENIX_SUPERVISOR_LEGA
 ```
 
 - **Scoped start** is the normal answer; the entrypoint fails closed with
-  exit 2 on the refusal. `bin/supervisor.bat` does the same: it runs
-  `record` with stderr visible and, on the refusal (exit 3), prints its own
-  hint and exits 2 without starting `claude` — any other record failure only
-  warns and the launch proceeds.
+  exit 2 on the refusal. `bin/supervisor.bat` delegates to the node launcher
+  (`scripts/squad-start.mjs`), which stops on the `record` step's exit 3: it
+  prints the refusal and exits 2 without starting `claude` — any other record
+  failure only warns and the launch proceeds.
 - **`FENIX_SUPERVISOR_LEGACY=1`** is the explicit override: the pre-901
   behaviour runs and the record carries `legacyOverride: true`.
 - Sessions whose `pid` is provably dead on this host are stale: they never
