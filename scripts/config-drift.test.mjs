@@ -291,6 +291,36 @@ test("kazdy serwer z .mcp.json jest dozwolony w allow-liscie skladow", () => {
   if (missing.length) fail(`serwer bez uprawnienia:\n       ${missing.join("\n       ")}`);
 });
 
+test("supervisor ask/deny match the pinned child baseline (FOC-900)", () => {
+  // The Supervisor's ask list is the exact human-gate set (push, PR, history
+  // rewrite) and its deny carries the Linear-MCP + worktree-reclaim rules.
+  // agent-tools check re-derives the deny baseline from SUPERVISOR_DENY; this
+  // pins the Supervisor's own settings.json against silent edits from either
+  // side.
+  const perms = readJson("agents/supervisor/settings.json").permissions || {};
+  const expectedAsk = [
+    "Bash(git push:*)",
+    "Bash(gh pr merge:*)",
+    "Bash(git reset --hard:*)",
+    "Bash(git clean:*)",
+    "Bash(git branch -D:*)",
+    "Bash(rm -rf:*)",
+    "WebFetch",
+  ];
+  if (JSON.stringify(perms.ask || []) !== JSON.stringify(expectedAsk)) {
+    fail(`supervisor permissions.ask drifted from the pinned list: ${JSON.stringify(perms.ask)}`);
+  }
+  const deny = perms.deny || [];
+  const requiredDeny = [
+    "mcp__linear__*",
+    "mcp__claude_ai_Linear__*",
+    "Bash(git worktree remove:*)",
+    "Bash(git worktree prune:*)",
+  ];
+  const missingDeny = requiredDeny.filter((rule) => !deny.includes(rule));
+  if (missingDeny.length) fail(`supervisor permissions.deny is missing: ${missingDeny.join(", ")}`);
+});
+
 // ── 4. Model routing must be internally consistent ────────────────────────────
 console.log("\nmodele i cennik");
 

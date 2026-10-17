@@ -1,7 +1,8 @@
 #!/bin/sh
 # Fenix container entrypoint: boots the telemetry API, the Supervisor session
 # host (one Supervisor process in tmux, served on :7332 — FOC-783), an attach
-# client for the Supervisor's tmux session, the doctor, a shell, a passthrough
+# client for the Supervisor's tmux session, the doctor, the agent permission
+# inspector (agent-tools), a shell, a passthrough
 # command, or manages shared repos (repo-add clones into the workspaces root,
 # repo-list shows them). The Supervisor resumes its last session for the repo
 # directory unless started with --new.
@@ -306,6 +307,11 @@ case "${1:-api}" in
         shift
         cd "$LA_ROOT"
         exec node scripts/fenix-doctor.mjs "$@"
+        ;;
+    agent-tools)
+        shift
+        cd "$LA_ROOT"
+        exec node scripts/agent-tools.mjs "$@"
         ;;
     fix-permissions)
         # Test/ops entry to the FOC-802 surface applier without starting any

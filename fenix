@@ -24,6 +24,7 @@ Usage: fenix [command]
   down             stop and remove containers (the data volume is kept)
   logs [service]   follow logs (default: all services)
   doctor           host preflight plus in-container diagnostics
+  agent-tools      inspect agent permission settings (show|diff|check|docs)
   integrations [show|enable <name>|disable <name>]
                    optional integrations (atlas | pisi | memory), off by
                    default; nebul is chosen through the provider (fenix keys)
@@ -751,6 +752,9 @@ case "$cmd" in
     ;;
   doctor)
     cmd_doctor
+    ;;
+  agent-tools)
+    exec docker compose exec -T fenix-api "$ENTRYPOINT" agent-tools "$@"
     ;;
   integrations)
     cmd_integrations "$@"
