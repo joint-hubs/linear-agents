@@ -204,6 +204,9 @@ const build = (opts = {}) => {
     ...(opts.pickupDeps ?? {}),
     autoPickup: opts.autoPickup,
     listCandidates: opts.listCandidates,
+    // FOC-839: the legacy-migration hook is injectable; null (the default
+    // here) skips it so existing tests are unaffected.
+    ...(opts.migrateLegacy !== undefined ? { migrateLegacy: opts.migrateLegacy } : { migrateLegacy: null }),
   });
   return { host, store, fakes, fakeFor, legacyFake, tmp, stops };
 };
@@ -981,4 +984,61 @@ test('GET /pickup with pickup enabled reports the configured shape and the last 
     assert.deepEqual(r.json.lastEnqueued, ['workspace:ISSUE-P1']);
     assert.ok(typeof r.json.lastTickAt === 'string');
   } finally { host.close(); store.close(); }
+});
+
+// ── FOC-839: legacy migration hook at serve start ────────────────────────────
+
+test('serve start runs the legacy migration once with apply:true and logs its counts', async () => {
+  const calls = [];
+  let release;
+  const done = new Promise((resolve) => { release = resolve; });
+  const migrateLegacy = async (args) => {
+    calls.push(args);
+    release();
+    return { attached: [{ runId: 'r1', sessionId: SESSION_A }], readOnly: [{ runId: 'r2', reason: 'no-session-for-task' }], skipped: [], dryRun: false };
+  };
+  const { host, store } = build({ migrateLegacy });
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (...args) => logs.push(args.join(' '));
+  try {
+    const port = await listen(host);
+    await done;
+    await new Promise((r) => setTimeout(r, 10));
+    // A second listen (close, then listen again — a server cannot listen
+    // twice without closing) must NOT re-run the migration — the hook is a
+    // one-shot latch per host.
+    await new Promise((resolve) => host.server.close(() => resolve()));
+    await listen(host);
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(calls.length, 1, "migrateLegacy runs exactly once across two listens");
+    assert.equal(calls[0].apply, true);
+    assert.ok(calls[0].env?.LA_DATA_HOME, "env is the host's baseEnv");
+    assert.ok(logs.some((l) => l === 'legacy migration: attached 1, read-only 1, skipped 0'),
+      `expected counts log, got: ${JSON.stringify(logs)}`);
+  } finally {
+    console.log = originalLog;
+    host.close();
+    store.close();
+  }
+});
+
+test('a throwing legacy migration never blocks serving', async () => {
+  const migrateLegacy = async () => { throw new Error('boom'); };
+  const { host, store } = build({ migrateLegacy });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+  try {
+    const port = await listen(host);
+    const r = await request(port, 'POST', '/alive', { body: { pids: [1] } });
+    assert.equal(r.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(errors.some((l) => l === 'legacy migration: failed (boom)'),
+      `expected failure log, got: ${JSON.stringify(errors)}`);
+  } finally {
+    console.error = originalError;
+    host.close();
+    store.close();
+  }
 });

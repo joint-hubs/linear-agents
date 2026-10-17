@@ -66,6 +66,7 @@ import {
   writeHostToken,
 } from "./supervisor-host.mjs";
 import { SUPERVISOR_SESSION_ID_PATTERN, dataHome, projectsConfigPath } from "./fenix-paths.mjs";
+import { migrateLegacy as realMigrateLegacy } from "./supervisor-migrate-legacy.mjs";
 import {
   OWNER_STATUSES,
   TERMINAL_STATUSES,
@@ -988,6 +989,32 @@ export function createTaskSessionHost(deps = {}) {
   const connections = new Set();
   server.on('connection', socket => { connections.add(socket); socket.once('close', () => connections.delete(socket)); });
   const close = () => { for (const socket of connections) socket.destroy(); server.close(); };
+
+  // ── FOC-839: one-shot legacy run migration at serve start ─────────────────
+  // Fires once, at the first server.listen — in the CLI serve path that is
+  // after the store exists and restart reconciliation has run. Injectable via
+  // deps.migrateLegacy for tests; `null` skips it entirely so existing host
+  // tests are unaffected. Fire-and-forget: serving is never blocked by it
+  // (per-run problems land in `skipped`, an outright failure only logs).
+  const migrateLegacy = deps.migrateLegacy === undefined ? realMigrateLegacy : deps.migrateLegacy;
+  if (migrateLegacy) {
+    let legacyMigrated = false;
+    const rawListen = server.listen.bind(server);
+    server.listen = (...args) => {
+      if (!legacyMigrated) {
+        legacyMigrated = true;
+        void (async () => {
+          try {
+            const result = await migrateLegacy({ env: baseEnv, apply: true });
+            console.log(`legacy migration: attached ${result.attached.length}, read-only ${result.readOnly.length}, skipped ${result.skipped.length}`);
+          } catch (err) {
+            console.error(`legacy migration: failed (${err?.message ?? err})`);
+          }
+        })();
+      }
+      return rawListen(...args);
+    };
+  }
 
   // ── WebSocket terminal ────────────────────────────────────────────────────
   server.on("upgrade", (req, socket, head) => {

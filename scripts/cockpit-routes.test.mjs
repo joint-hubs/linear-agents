@@ -44,6 +44,8 @@
 //     409 of answering twice, and a held answer lock → 503 busy (lockWaitMs 0);
 //   - POST /api/gates/notify: 404 missing, 409 still pending/open, 200
 //     answered — for gates (gateId) and holds (holdId); both or neither id → 400;
+//   - FOC-839: a run marked read-only by the legacy migration (legacy-readonly.json)
+//     409s every run-targeted write before any write, and un-marking restores it;
 //   - foreign Origin → 403 on every POST route;
 //   - WS /api/supervisor/terminal upgrade: rejected without Origin, with an
 //     Origin on another local port, with a non-loopback Host; the accepted one
@@ -614,6 +616,36 @@ try {
     check("notify both ids -> 400", notifyBoth.status === 400, JSON.stringify(notifyBoth));
     const notifyNeither = await call(P, "POST", "/api/gates/notify", { body: { runId: "run-1" } });
     check("notify neither id -> 400", notifyNeither.status === 400, JSON.stringify(notifyNeither));
+
+    // ── FOC-839: the legacy-readonly 409 guard on the run-targeted writes ───
+    // A run dir carrying legacy-readonly.json (the one-shot legacy migration's
+    // marker) refuses every run-targeted global write with 409 BEFORE any
+    // write; removing the marker restores the route.
+    mkdirSync(join(supState, "run-legacy", "gates"), { recursive: true });
+    writeFileSync(join(supState, "run-legacy", "gates", "gate-l.json"), JSON.stringify({
+      gateId: "gate-l", runId: "run-legacy", childId: "child-l", taskId: "FIX-45",
+      kind: "question", status: "pending", createdAt: NOW, summary: "legacy gate",
+      questions: ["legacy?"],
+    }), "utf8");
+    writeFileSync(join(supState, "run-legacy", "legacy-readonly.json"), JSON.stringify({
+      markedAt: NOW, reason: "no-session-for-task",
+    }), "utf8");
+    const roAnswer = await call(P, "POST", "/api/gates/answer", { body: { runId: "run-legacy", gateId: "gate-l", text: "x" } });
+    const roHold = await call(P, "POST", "/api/holds/answer", { body: { runId: "run-legacy", holdId: "hold-l", text: "x" } });
+    const roNotify = await call(P, "POST", "/api/gates/notify", { body: { runId: "run-legacy", gateId: "gate-l" } });
+    check("legacy-readonly gate answer -> 409",
+      roAnswer.status === 409 && roAnswer.body?.error === "legacy-readonly", JSON.stringify(roAnswer));
+    check("legacy-readonly hold answer -> 409",
+      roHold.status === 409 && roHold.body?.error === "legacy-readonly", JSON.stringify(roHold));
+    check("legacy-readonly notify -> 409",
+      roNotify.status === 409 && roNotify.body?.error === "legacy-readonly", JSON.stringify(roNotify));
+    check("legacy-readonly guard wrote nothing (gate still pending, no edits row)",
+      JSON.parse(readFileSync(join(supState, "run-legacy", "gates", "gate-l.json"), "utf8")).status === "pending"
+      && !existsSync(join(supState, "run-legacy", "edits.jsonl")));
+    rmSync(join(supState, "run-legacy", "legacy-readonly.json"));
+    const unroAnswer = await call(P, "POST", "/api/gates/answer", { body: { runId: "run-legacy", gateId: "gate-l", text: "postgres" } });
+    check("removing the marker restores the gate answer -> 200",
+      unroAnswer.status === 200 && unroAnswer.body?.recorded === true, JSON.stringify(unroAnswer).slice(0, 300));
 
     // ── legacy vs task-scoped sessionId on the gate/hold routes ─────────────
     // A malformed sessionId is a 400 BEFORE any write (the gate file and the
