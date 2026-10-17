@@ -90,6 +90,12 @@ import { handleWorkRoute } from './work-routes.mjs';
 // body + send helper set as the Work board dispatch below.
 import { handleSettingsRoute } from './settings-routes.mjs';
 
+// Artifacts route (FOC-779): read-only GET /api/artifacts over the cached
+// freshness table of config/artifacts.json; tick() refreshes stale watch
+// entries natively (never inside the container). Self-contained handler —
+// only the shared json/log helpers are passed in.
+import { createArtifactsRoutes } from './artifacts-routes.mjs';
+
 // FT control plane (FOC-359): datasets, training-run lifecycle, log tail.
 // Pure logic in scripts/ft.mjs; the server only does HTTP guards + dispatch.
 import { listDatasets, listRuns, getRun, launchTrain, stopRun } from './ft.mjs';
@@ -951,6 +957,16 @@ function openAnalysisCache(res, method, path) {
 // Server
 // ---------------------------------------------------------------------------
 
+// Artifacts route (FOC-779): the route object is created once at startup and
+// holds the status cache tick() recomputes. inContainer comes from the image's
+// FENIX_IN_CONTAINER=1 (Dockerfile ENV) — inside, inContainer:false entries
+// (ui/dist) are reported, never rebuilt.
+const artifactsRoutes = createArtifactsRoutes({
+  inContainer: process.env.FENIX_IN_CONTAINER === '1',
+  json,
+  log,
+});
+
 const server = createServer(async (req, res) => {
   const method = req.method;
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -987,6 +1003,12 @@ const server = createServer(async (req, res) => {
     // --- Settings routes (FOC-786 slice G) ---
     // Same guard + body + send helpers; no linearQueue (no Linear reads).
     if (await handleSettingsRoute(req, res, url, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin })) return;
+
+    // --- Artifacts route (FOC-779) ---
+    // Read-only GET /api/artifacts; self-contained handler (own 405 + JSON),
+    // serving the cache tick() keeps warm. Dispatched right beside the
+    // settings routes, before the write routes below.
+    if (await artifactsRoutes.handle(req, res)) return;
 
     // --- POST /api/launch (L1b) ---
     // Spawns a local agent window. Bound to 127.0.0.1 + origin-checked (AC3),
@@ -2742,6 +2764,22 @@ server.listen(PORT, HOST, () => {
   ingestTimer?.unref();
   const sweepTimer = isSmoke ? null : setInterval(() => sweepTelemetry({ maxAgeDays: 14 }), SWEEP_INTERVAL_MS);
   sweepTimer?.unref();
+
+  // Artifacts (FOC-779): on its own 60 s interval, decoupled from the 15 s ingest timer, the route's tick()
+  // recomputes the status cache and, outside the container, refreshes stale
+  // watch entries under its in-memory lock. One warm-up tick shortly after
+  // listen so the first dashboard visit is served from the cache, not a
+  // compute (a status pass spawns git + code-intel). In smoke mode skipped
+  // like the other timers — the registry status is real child-process work.
+  const artifactsTimer = isSmoke ? null : setInterval(() => {
+    void artifactsRoutes.tick().catch((error) => console.error(`[artifacts] tick failed: ${error.message}`));
+  }, 60_000);
+  artifactsTimer?.unref();
+  if (!isSmoke) {
+    setTimeout(() => {
+      void artifactsRoutes.tick().catch((error) => console.error(`[artifacts] warm-up tick failed: ${error.message}`));
+    }, 2_000).unref();
+  }
 
   if (isSmoke) {
     console.log('Smoke mode — will self-check endpoints then shut down');

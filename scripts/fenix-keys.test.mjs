@@ -44,6 +44,9 @@ const FAKE_DOCKER = `#!/bin/sh
 printf '%s\\n' "docker $*" >> "\$FENIX_SHIM_LOG"
 case " \$* " in
   *" image inspect "*) exit 0 ;;
+  *" info "*) exit 0 ;;
+  *" compose version "*) exit 0 ;;
+  *" up "*) printf 'fake docker: refusing to start the stack\\n' >&2; exit 1 ;;
 esac
 script=""
 idx=0
@@ -73,6 +76,11 @@ case "\$script" in
       exit "\$FENIX_FAKE_INTEGRATIONS_RC"
     fi
     ;;
+  *fenix-retention.mjs)
+    # Canned: the launcher tests assert the FORWARDING and the exit-code
+    # pass-through, not the node CLI itself (owned by the FOC-780 node work).
+    printf '{"canned": true}\\n'
+    exit "\${FENIX_FAKE_RETENTION_EXIT:-0}" ;;
   *key-check.mjs)
     key=\$(cat 2>/dev/null) || key=""
     if [ -n "\${FENIX_FAKE_REJECT_KEY:-}" ] && [ "\$key" = "\$FENIX_FAKE_REJECT_KEY" ]; then
@@ -152,11 +160,13 @@ const OPENROUTER_SETTINGS = { provider: { active: "openrouter", custom: null }, 
 const CANDIDATE_URL = "https://candidate.example/api";
 
 /**
- * Runs the real fenix launcher with the given arguments in the temp home with
- * the fake docker shim (no stdin — used by non-interactive commands like
- * `fenix integrations`).
+ * Runs the real fenix launcher with arbitrary arguments (non-interactive
+ * commands like `fenix integrations`, retention forwarding, the `up`
+ * first-run flow) in the temp home with the fake docker shim. `input` is
+ * forwarded on stdin (piped stdin = the non-interactive flows);
+ * `LA_SETTINGS_FILE` is set only when `settingsPath` is given.
  */
-function runFenix({ home, bin, args, settingsPath, extraEnv = {} }) {
+function runFenix({ home, bin, args, settingsPath, input = "", extraEnv = {} }) {
   const shimLog = join(home, "shim.log");
   writeFileSync(shimLog, "", "utf8");
   const env = {
@@ -169,12 +179,19 @@ function runFenix({ home, bin, args, settingsPath, extraEnv = {} }) {
   };
   return spawnSync(findSh(), [shPath(join(home, "fenix")), ...args], {
     env,
+    input,
     encoding: "utf8",
     timeout: 120000,
     windowsHide: true,
   });
 }
 
+/** `docker compose run ...` lines for one script, from the shim log. */
+function forwardCalls(dir, scriptName) {
+  return readFileSync(join(dir, "shim.log"), "utf8")
+    .split("\n")
+    .filter((l) => l.includes(scriptName));
+}
 test("fenix launcher passes `sh -n` (syntax check)", () => {
   const res = spawnSync(findSh(), ["-n", FENIX_SRC], { encoding: "utf8", windowsHide: true });
   assert.equal(res.status, 0, `sh -n fenix failed: ${res.stderr}`);
@@ -486,4 +503,70 @@ test("provider wizard hides nebul from the listing unless it is already active",
   } finally {
     rmSync(parked.dir, { recursive: true, force: true });
   }
+});
+
+test("FOC-780: `fenix retention` with no verb forwards `show` to the in-container node CLI", () => {
+  const { dir, bin } = makeHome("retention-default");
+  try {
+    const res = runFenix({ home: dir, bin, settingsPath: writeSettingsFile(dir, {}), args: ["retention"] });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    const calls = forwardCalls(dir, "fenix-retention.mjs");
+    assert.equal(calls.length, 1, calls.join("\n"));
+    assert.match(
+      calls[0],
+      /compose run --rm --no-deps -T --entrypoint node fenix-api \/opt\/fenix\/scripts\/fenix-retention\.mjs show$/,
+      calls[0],
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("FOC-780: `fenix retention prune --dry-run` forwards the args and passes the exit code through", () => {
+  const { dir, bin } = makeHome("retention-refused");
+  try {
+    const res = runFenix({
+      home: dir,
+      bin,
+      settingsPath: writeSettingsFile(dir, {}),
+      args: ["retention", "prune", "--dry-run"],
+      // The canned node CLI refuses (exit 1 = keep-everything refusal).
+      extraEnv: { FENIX_FAKE_RETENTION_EXIT: "1" },
+    });
+    assert.equal(res.status, 1, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    const calls = forwardCalls(dir, "fenix-retention.mjs");
+    assert.equal(calls.length, 1, calls.join("\n"));
+    assert.match(
+      calls[0],
+      /fenix-retention\.mjs prune --dry-run$/,
+      calls[0],
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("FOC-780: `fenix up` skips the retention question when stdin is not a TTY", () => {
+  const { dir, bin } = makeHome("retention-skip");
+  try {
+    // Keys present, so the key wizard does not run and cannot muddy the log.
+    const secretsDir = join(dir, ".fenix", "secrets");
+    mkdirSync(secretsDir, { recursive: true });
+    for (const f of ["openrouter_api_key", "linear_api_key", "github_token"]) {
+      writeFileSync(join(secretsDir, f), "fixture\n", "utf8");
+    }
+    const res = runFenix({
+      home: dir,
+      bin,
+      settingsPath: writeSettingsFile(dir, {}),
+      args: ["up"],
+      input: "", // piped stdin: non-interactive, keep-all stays the default
+    });
+    // The fake docker refuses `compose up`, so cmd_up aborts right after the
+    // question point — before the health wait or any browser open.
+    assert.equal(res.status, 1, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.match(res.stderr, /refusing to start the stack/);
+    const log = readFileSync(join(dir, "shim.log"), "utf8");
+    // The stack start was reached, i.e. the flow got past the question point…
+    assert.ok(log.includes("compose up -d --build"), log);
+    // …and the retention question never touched the settings overlay.
+    assert.equal(forwardCalls(dir, "fenix-settings.mjs").length, 0, log);
+    assert.equal(forwardCalls(dir, "fenix-retention.mjs").length, 0, log);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

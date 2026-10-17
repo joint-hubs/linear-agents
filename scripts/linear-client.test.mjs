@@ -646,6 +646,80 @@ async function runTests() {
     f.restore();
   }
 
+  // ---- Test 23b: both resolveIssue queries ask for project ----
+  // Task ownership checks read issue.project off every resolution path, so
+  // both the direct lookup and the search fallback must select it.
+  const normalized = (s) => s.replace(/\s+/g, " ");
+  {
+    const f = stubFetch((i) =>
+      i === 0
+        ? httpResponse({ body: { data: { issue: null } } })
+        : httpResponse({ body: { data: { searchIssues: { nodes: [ISSUE] } } } }),
+    );
+    await withEnv({ LINEAR_API_KEY: "k" }, () => resolveIssue("JOI-12"));
+    const direct = normalized(f.calls[0].body.query);
+    const search = normalized(f.calls[1].body.query);
+    assert(direct.includes("project { id name }"), "direct lookup selects project { id name }");
+    assert(search.includes("project { id name }"), "search fallback selects project { id name }");
+    f.restore();
+  }
+
+  // ---- Test 23c: a project on the response rides through unchanged ----
+  {
+    const withProject = { ...ISSUE, project: { id: "p1", name: "Fenix" } };
+    const f = stubFetch(() => httpResponse({ body: { data: { issue: withProject } } }));
+    const issue = await withEnv({ LINEAR_API_KEY: "k" }, () => resolveIssue("JOI-12"));
+    assertEq(issue.project.id, "p1", "project id passes through");
+    assertEq(issue.project.name, "Fenix", "project name passes through");
+    f.restore();
+  }
+
+  // ---- Test 23d: project: null is null, not undefined ----
+  // Linear returns project: null for an issue with no project; dropping the
+  // key (or undefined) would break the ownership check's null handling.
+  {
+    const f = stubFetch(() =>
+      httpResponse({ body: { data: { issue: { ...ISSUE, project: null } } } }),
+    );
+    const issue = await withEnv({ LINEAR_API_KEY: "k" }, () => resolveIssue("JOI-12"));
+    assert(Object.hasOwn(issue, "project"), "the project key is present on the result");
+    assertEq(issue.project, null, "a null project passes through as null");
+    f.restore();
+  }
+
+  // ---- Test 23e: the search fallback passes project through too ----
+  {
+    const f = stubFetch((i) =>
+      i === 0
+        ? httpResponse({ body: { data: { issue: null } } })
+        : httpResponse({
+            body: {
+              data: {
+                searchIssues: { nodes: [{ ...ISSUE, project: { id: "p2", name: "Pisi" } }] },
+              },
+            },
+          }),
+    );
+    const issue = await withEnv({ LINEAR_API_KEY: "k" }, () => resolveIssue("JOI-12"));
+    assertEq(issue.project.name, "Pisi", "search fallback returns the project");
+    f.restore();
+  }
+
+  // ---- Test 23f: a null project through the fallback stays null ----
+  {
+    const f = stubFetch((i) =>
+      i === 0
+        ? httpResponse({ body: { data: { issue: null } } })
+        : httpResponse({
+            body: { data: { searchIssues: { nodes: [{ ...ISSUE, project: null }] } } },
+          }),
+    );
+    const issue = await withEnv({ LINEAR_API_KEY: "k" }, () => resolveIssue("JOI-12"));
+    assert(Object.hasOwn(issue, "project"), "the project key survives the fallback");
+    assertEq(issue.project, null, "a null project through search stays null");
+    f.restore();
+  }
+
   // ---- Test 24: loadEnv never overwrites an already-set variable ----
   // The repo's .env defines LINEAR_API_KEY, so this exercises the real guard.
   {
