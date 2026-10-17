@@ -134,9 +134,13 @@ test("the launcher captures its start directory before anything can cd", () => {
   const bat = readFileSync(join(ROOT, "bin", "supervisor.bat"), "utf8");
   assert.match(bat, /set "LA_SUPERVISOR_REPO=%CD%"/, "supervisor.bat no longer captures its launch directory");
 
+  // FOC-771: the wrapper no longer calls _lib.bat; the node entry point is the
+  // first thing in the file that could change the directory, so the capture
+  // must precede it.
   const capture = bat.indexOf("LA_SUPERVISOR_REPO=%CD%");
-  const lib = bat.indexOf('call "%~dp0_lib.bat"');
-  assert.ok(capture < lib, "LA_SUPERVISOR_REPO must be captured BEFORE _lib.bat runs");
+  const node = bat.indexOf('node "%~dp0..\\scripts\\squad-start.mjs"');
+  assert.ok(node !== -1, "supervisor.bat no longer calls squad-start.mjs");
+  assert.ok(capture !== -1 && capture < node, "LA_SUPERVISOR_REPO must be captured BEFORE the node entry point runs");
 });
 
 test("spawn reports which repo it chose and where that came from", () => {

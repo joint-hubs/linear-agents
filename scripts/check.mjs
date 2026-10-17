@@ -440,9 +440,15 @@ if (nativeMapRaw === null) {
   }
 }
 
-// ── 8. Check 6: dry-run launcher sets its env flag ──────────────────
+// ── 8. Check 6: dry-run launcher actually runs dry ──────────────────
 //
-// For every bin/*-dry.bat, assert it sets a *_DRY_RUN=1 env var.
+// Two accepted forms for bin/<squad>-dry.bat:
+//   1. Wrapper form (FOC-771): a node line running squad-start.mjs for the
+//      squad with --dry-run — the Node side sets <SQUAD>_DRY_RUN=1.
+//   2. Legacy _lib.bat form: an explicit `set "<SQUAD>_DRY_RUN=1"` line
+//      (fallback only; no launcher should still call _lib.bat).
+// Anything else is drift — a dry wrapper naming the squad without --dry-run
+// launches the real pipeline.
 
 const dryBatFiles = glob('bin/*-dry.bat');
 for (const abs of dryBatFiles) {
@@ -452,12 +458,34 @@ for (const abs of dryBatFiles) {
     report(rel, 'MISSING — cannot read');
     continue;
   }
-  const m = content.match(/set\s+"?([A-Z]+_DRY_RUN)=1"?/);
-  if (!m) {
-    report(rel, 'missing `set "<VAR>_DRY_RUN=1"` line');
-  } else {
-    console.log(`  PASS  ${rel}  →  ${m[1]}=1`);
+  const squad = path.basename(rel).replace(/-dry\.bat$/, '');
+  const envVar = `${squad.toUpperCase()}_DRY_RUN`;
+
+  if (/call\s+"%~dp0_lib\.bat"/.test(content)) {
+    // Legacy form: keep the original env-flag rule.
+    const m = content.match(new RegExp(`set\\s+"?${envVar}=1"?`));
+    if (!m) {
+      report(rel, `missing \`set "${envVar}=1"\` line`);
+    } else {
+      console.log(`  PASS  ${rel}  →  ${envVar}=1`);
+    }
+    continue;
   }
+
+  const nodeLine = content
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.startsWith('node '));
+  const prefix = `node "%~dp0..\\scripts\\squad-start.mjs" ${squad}`;
+  if (!nodeLine || !(nodeLine === prefix || nodeLine.startsWith(prefix + ' '))) {
+    report(rel, `not a squad-start.mjs wrapper for '${squad}' and no \`set "${envVar}=1"\` line`);
+    continue;
+  }
+  if (!/--dry-run\b/.test(nodeLine)) {
+    report(rel, `dry wrapper runs '${squad}' without --dry-run`);
+    continue;
+  }
+  console.log(`  PASS  ${rel}  →  node wrapper ${squad} --dry-run`);
 }
 
 // ── 9. Check 7: linear scripts CLI surface intact ───────────────────

@@ -243,6 +243,10 @@ resumed session or a container restart keeps the current run, recorded in
 volume, so telemetry and Supervisor state survive a recreate; a later
 `fenix up` reattaches them.
 
+Outside Docker (native), standalone squads launch on any OS with
+`node scripts/squad-start.mjs <plan|dev|review|test|cadence|supervisor>` — on
+Windows `bin\<squad>.bat` is a thin wrapper for the same.
+
 ## Where things live
 
 - Keys: `.fenix/secrets/{openrouter_api_key,provider_api_key,linear_api_key,github_token}` —

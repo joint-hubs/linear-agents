@@ -1,6 +1,6 @@
 # Supervisor — manual e2e checklist (FOC-116, spec §8.12)
 
-The scripted suite (`node scripts/test-all.mjs`, 182 files) proves the parts against a mock
+The scripted suite (`node scripts/test-all.mjs`, 183 files) proves the parts against a mock
 `claude`. It cannot prove the one thing this epic is actually about: that **Mateusz never opens a
 child terminal**. That is a claim about a human session, so it gets walked by hand, once, on a
 throwaway issue, before first real use.
@@ -19,7 +19,7 @@ order they are numbered.
 
 ```bash
 node scripts/linear-query.mjs team FOC          # confirm the workspace answers
-node scripts/test-all.mjs                       # 116 test files before you start; a red file invalidates the walk,
+node scripts/test-all.mjs                       # 176 test files before you start; a red file invalidates the walk,
                                                 # except security-scan.test.mjs — load-sensitive, seen red (13 probe
                                                 # misses) at base e3dea40 too, so its red alone is not a regression signal
 git diff --stat -- agents/orchestrator          # AC-10, see below
@@ -51,7 +51,7 @@ git diff --stat origin/main..HEAD -- agents/orchestrator
 ```
 
 - [ ] Output is empty.
-- [ ] `bin\orchestrate.bat` no longer starts a session — an ASCII guard added in FOC-288 exits before any session starts; withdrawn from active use per the FOC-272 gate decision. See [ADR-0011](adr/0011-orch-ollama-withdrawal.md).
+- [ ] `bin\orchestrate.bat` is gone (deleted in FOC-771; it had been withdrawn from active use per the FOC-272 gate decision and guarded since FOC-288) — `dir bin\orchestrate.bat` reports no such file. See [ADR-0011](adr/0011-orch-ollama-withdrawal.md).
 
 *Measured 2026-08-26 on this branch: 0 files. The squads' own CLAUDE.md files DID change — that is
 §1.6 and it is AC-10-compatible, because those changes are inert unless `LA_SUPERVISOR=1`, which
@@ -216,7 +216,7 @@ All of it is **inert unless `LA_SUPERVISOR=1`**, which only `supervisor-spawn.mj
 what keeps AC-10 true while the squad prompts changed.
 
 ### Verification
-- `node scripts/test-all.mjs` → 182 files (the registered lane count: 147 parallel + 35 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
+- `node scripts/test-all.mjs` → 183 files (the registered lane count: 148 parallel + 35 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
   load-sensitive and has been observed red at base `e3dea40` as well — see §0 before reading a red
   security-scan as a regression.
 - This checklist, walked once on a throwaway issue (§8.12).
