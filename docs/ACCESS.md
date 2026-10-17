@@ -155,6 +155,30 @@ Sekrety nie edytowane w `models.json` ani w UI poza polem hasła (czyszczone po 
 - **Zmienne środowiskowe w obrazie:** `LA_DATA_HOME=/data`, `LA_SQUAD_HOME=/data/agents`, `GITHUB_ROOT=/data/workspaces`, `LA_WORKTREE_HOME=/data/workspaces/la-wt`, `LA_TELEMETRY_HOME=/data/telemetry`, `LA_STATE_ROOT=/data/state`, `LA_SUPERVISOR_STATE_HOME=/data/state/supervisor`; compose ustawia `LA_PROJECTS_FILE=/fenix-config/projects.json`.
 - **Integracje opcjonalne (FOC-772):** domyślnie wszystkie off; overlay Mateusza ustawia `integrations: { atlas: true, pisi: true, memory: true }` po zmergowaniu FOC-772 — `node scripts/fenix-settings.mjs set integrations '{"atlas":true,"pisi":true,"memory":true}'` (albo `./fenix integrations enable <name>`); Nebul nie jest flagą — wybiera się go przez providera (`fenix keys`).
 
+#### Legacy session migration (FOC-839)
+
+The operator step after `fenix update` on a volume that already carried a
+legacy single-session Supervisor. Run it by hand first —
+`node scripts/supervisor-migrate-legacy.mjs` is a **dry run by default**
+(prints what would happen), `--apply` writes:
+
+- a legacy run whose triage/focus names a task that has exactly one
+  non-terminal managed session is **attached once** to that session;
+- every other legacy run is marked **read-only** (writes refused);
+- a run is **never adopted** into a task it does not name.
+
+The session host runs the same migration idempotently at serve start.
+Acceptance: `sh scripts/supervisor-migrate-legacy-acceptance.sh <copy-of-volume> [<workspace>]`
+— always on a COPY of the VM volume, never the volume itself (the script refuses
+`/data`); the optional second argument sets `FENIX_WORK_WORKSPACE` so the task
+keys resolve like the container's (default `jointhubs`). Two safety rules worth
+knowing: the run named by the global current-run pointer is skipped
+(`current-pointer`) unless its pid is known AND dead — a pre-FOC-905 pointer
+carries no pid, so stop the legacy Supervisor and re-record its pointer before
+expecting that run to be attached; and a run whose `triage.json.issue` is a
+Linear uuid (pre-#71 payload fallback) matches no store row and is marked
+`no-session-for-task` — re-triage the ticket instead of hand-editing markers.
+
 ### Fenix na VM w GCP (`fenix-vm`, od 2026-10-12)
 
 - **Maszyna:** projekt GCP `dochubs`, VM `fenix-vm`, strefa `europe-central2-a` (Warszawa), `e2-standard-4` (4 vCPU / 16 GB), Debian 12, dysk 100 GB `pd-balanced`. Zewnętrzny IP efemeryczny (zmienia się po stop/start) — z zewnątrz otwarty tylko SSH (reguła `default-allow-ssh`).
