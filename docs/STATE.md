@@ -24,6 +24,19 @@ Kolejka — sekwencja z `docs/ROADMAP.md` (2026-10-08). **Tor A (krytyczna ście
 
 **Rozmiar FOC-649 = `medium` → flow `[dev, test]`** (bez węzła REVIEW). Uzasadnienie: zmiana jest zamknięta w `supervisor-cleanup.mjs` + współdzielona enumeracja w `supervisor-lib.mjs` + testy; niezależne TEST jest skutecznym weryfikatorem (35/35 black-box przy FOC-613); jedyna destrukcyjna powierzchnia (prune) jest z założenia suchym-raportem i dostaje przypadki brzegowe w kickoffie TEST. Gdyby zakres urósł poza te dwa pliki, podnieść do `large` i wziąć REVIEW.
 
+## Delivery owner (sesja orkiestratora) — od 2026-10-15
+
+Mateusz (2026-10-15): „chcę żebyś Ty był odpowiedzialny za delivery". Od tej pory kolejkę Fenixa (Linear, `docs/ROADMAP.md`, PR-y) prowadzi sesja orkiestratora; Supervisor zostaje frontmanem wyłącznie dla innych produktów (JW, WSKM) i **nie bierze ticketów Fenix**. Wpisy Supervisora poniżej pozostają jego dziennikiem — nie są przepisywane; ta sekcja rośnie wpisami orkiestratora po każdym zamkniętym tasku.
+
+### 2026-10-15 (O-1) — przejęcie: decyzje, porządek po PR #71, lądowanie FOC-801
+
+- **Decyzje Mateusza:** (b) task workspaces filarem 1.0, tag 11-19 → **12-03**; attempt 7 toru A rusza dopiero przy jego obecności na `plan.gate1`; sesja Supervisora na linear-agents to ta sama, która prowadzi dzieci JW (`dev-11`/FOC-699 żyje) — nie jest zabijana, po FOC-699 ma nie brać nic z kolejki Fenix; zgody: sprzątanie stacków/obrazów, drop stasha `foc-801-parallel-impl` + usunięcie śmieci z checkoutu `main`, utwardzenie pusha z dashboardu, własne wpisy w tym pliku.
+- **Weryfikacja #71 na czystym `origin/main`:** Windows 171/174, Linux 171/174, lint 0. Regresja produkcyjna: `POST /api/gates/answer` w trybie legacy (bez `sessionId`, id sesji = UUID Claude) → 500 z `hostSessionPath`, odpowiedź zapisana, Supervisor niepowiadomiony, brak wiersza audytu; uderzyłoby w VM po `fenix update`. `supervisor-pinned-state` — nieaktualna przesłanka (gałąź z sufiksem attempt-hash); `workspace-claims` — wyścig o lock. Poprawki w osobnym PR (gałąź `fix-main-red`).
+- **Luka:** push/PR z dashboardu przyjmował `actor: "ai"` za guardami przepuszczającymi wywołanie bez `Origin`; natywnie dziecko = proces hosta. Utwardzenie: `publish.aiActor` domyślnie off + nagłówek z tokenem hosta; trasy zapisu dashboardu na deny-liście dzieci (gałąź `fenix-publish-hardening`).
+- **Linear:** FOC-762/773/778/786 → Done (#71); FOC-816 zapisuje strumień task-workspace wstecznie; M8 target 12-03, FOC-789 11-27, FOC-781 12-01, FOC-790 12-03; FOC-801 Done (Supervisor). **PR #72** = 8 lokalnych commitów Supervisora (merge `foc-801-dev` + rejestr arm A + wpisy 39–40) wypchniętych jako gałąź `foc-801-landing`, nic nie przepisane.
+- **Sprzątanie hosta:** stacki `fenix-settings-acceptance`, `fenix-task-workspace`, `fenix-task-probe` zatrzymane i usunięte (żywych dzieci 0), 7 obrazów `fenix:*` usuniętych (zostały `fenix:dev`, `fenix:task-workspace-candidate`), stash `foc-801-parallel-impl` dropnięty, `functions/` (60 KB, pliki `sprint-*.ts` nieznanego pochodzenia) i `status-tail-76.*` usunięte z checkoutu `main`.
+- **Tor A:** attempt 6 wykluczony (błąd operacyjny: resume bez `LA_SUPERVISOR_*`); każdy krok marszu przez `foc-477-armA-launch.mjs`. Attempt 7 czeka na sygnał Mateusza.
+
 ## 2026-10-15 (38) — FOC-815 FIXED: one unknown Linear id no longer poisons the work-board lookup
 
 Subtask **FOC-815** (child of FOC-788) — filed and fixed on Mateusz's „opcja 1" (2026-10-15). The banner
