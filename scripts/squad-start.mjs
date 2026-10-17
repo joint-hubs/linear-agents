@@ -18,7 +18,8 @@
 // planLaunch() is pure: it computes the full child env, the claude args and the
 // ordered step list exactly as bin/_lib.bat + the launcher did — cost-guard
 // check, .env merge (window-level LINEAR_TEAM_KEY/LINEAR_WORKSPACE win), atlas
-// render when the template exists and the output is missing, the provisioning
+// render gated on the FOC-772 integrations switch (off/invalid → an atlas-off
+// step that mirrors the bat's message and deletes a stale output), the provisioning
 // marker, NATIVE clearing every ANTHROPIC_* (ids from config/native-models.json)
 // vs provider-resolve fail-closed, CLAUDE_CODE_SUBAGENT_MODEL cleared,
 // API_TIMEOUT_MS, the run-manifest sequence, and the supervisor extras
@@ -35,13 +36,14 @@
 // env values masked) and exits 0 without running anything.
 
 import { spawn as nodeSpawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseEnvFile, resolveProvider, formatSetLines } from "./provider-resolve.mjs";
 import { readSettings } from "./fenix-settings.mjs";
 import { settingsPath, squadConfigDir } from "./fenix-paths.mjs";
+import { readIntegrationsSafe } from "./fenix-integrations.mjs";
 import { childModelFor } from "./child-model.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -166,6 +168,10 @@ function agentModelFromMap(root, area, role) {
  * @param {string} params.root - the repo root (config/, scripts/, agents/, .env)
  * @param {boolean} params.tty - whether the provisioning prompt may be asked
  * @param {string[]} [params.claudeArgs] - args after `--`
+ * @param {object|null} [params.integrations] - pre-read FOC-772 integrations
+ *   switch (readIntegrationsSafe's result: { atlas, …, source, error? });
+ *   tests inject it to keep planLaunch pure. Default: read fresh through the
+ *   MERGED env (LA_SETTINGS_FILE from .env honoured, as for routing).
  * @returns {{ squad, mode, env, configDir, model, claudeArgs, manifest, steps,
  *   echo, native, provider?, providerError? }}
  */
@@ -181,6 +187,7 @@ export function planLaunch({
   root = REPO_ROOT,
   tty = false,
   claudeArgs = [],
+  integrations = null,
 }) {
   const isAgent = Boolean(agent);
   const label = isAgent ? agent.area : squad;
@@ -226,8 +233,46 @@ export function planLaunch({
   }
   const atlasTemplate = join(root, "config", "atlas-mcp.json.template");
   const atlasOutput = join(root, "config", "atlas-mcp.json");
-  if (existsSync(atlasTemplate) && !existsSync(atlasOutput)) {
-    steps.push({ kind: "atlas-render", templatePath: atlasTemplate, outputPath: atlasOutput });
+  if (existsSync(atlasTemplate)) {
+    // FOC-772: the integrations switch gates the render. bin/_lib.bat ran
+    // `fenix-integrations.mjs enabled atlas` — exit 1 = off, exit 2 = the check
+    // itself failed (a corrupt overlay); both mean Atlas off, never abort the
+    // launcher, and a stale rendered config is deleted. The safe read
+    // distinguishes the two (source "invalid"), so the executor can mirror the
+    // bat's exact info/WARN lines. The overlay path resolves through the MERGED
+    // env (LA_SETTINGS_FILE from .env honoured, as for routing) —
+    // readIntegrationsSafe's env param alone does not drive the settings path.
+    // A file readSettings cannot even parse throws before the safe read's own
+    // catch, so it fails closed here to the same "check failed" signal.
+    let integrationsRead = integrations;
+    if (!integrationsRead) {
+      try {
+        integrationsRead = readIntegrationsSafe({
+          settings: readSettings({ path: settingsPath(childEnv) }),
+          env: childEnv,
+        });
+      } catch (err) {
+        integrationsRead = {
+          atlas: false,
+          pisi: false,
+          memory: false,
+          nebul: false,
+          source: "invalid",
+          error: String(err?.message ?? err),
+        };
+      }
+    }
+    if (integrationsRead.atlas) {
+      if (!existsSync(atlasOutput)) {
+        steps.push({ kind: "atlas-render", templatePath: atlasTemplate, outputPath: atlasOutput });
+      }
+    } else {
+      steps.push({
+        kind: "atlas-off",
+        outputPath: atlasOutput,
+        reason: integrationsRead.source === "invalid" ? "check-failed" : "off",
+      });
+    }
   }
   // New-workspace provisioning: marker .state/teams/<KEY>.provisioned (as
   // _lib.bat: rooted at the launch root). Ask only on a TTY; non-TTY gets one
@@ -611,6 +656,22 @@ export async function runLaunch(plan, {
             renderAtlasMcp({ ...step, env });
           } catch (err) {
             log(`[!] ${err.message} (check ATLAS_VENV_PYTHON and ATLAS_ROOT in .env)`);
+          }
+          break;
+        }
+        case "atlas-off": {
+          // FOC-772 parity with _lib.bat: Atlas off (or the check failed) —
+          // the bat's exact line, then a stale rendered config is removed.
+          // Never fatal: a deletion failure is logged and the run continues.
+          if (step.reason === "check-failed") {
+            log("[WARN] Atlas integration check failed - treating Atlas as off.");
+          } else {
+            log("[info] Atlas integration off - config/atlas-mcp.json not rendered");
+          }
+          try {
+            if (existsSync(step.outputPath)) unlinkSync(step.outputPath);
+          } catch (err) {
+            log(`[!] could not delete ${step.outputPath}: ${err?.message ?? err}`);
           }
           break;
         }

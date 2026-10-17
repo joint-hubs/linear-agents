@@ -519,6 +519,11 @@ test("LA_ROOT and ROOT are exported into the child env (telemetry-hook MCP, CLAU
   }
 });
 
+// FOC-772: the integrations switch is ON here — the render path is unchanged
+// when the overlay enables Atlas. The injected read is readIntegrationsSafe's
+// exact result shape, so planLaunch stays pure.
+const INTEGRATIONS_ON = { atlas: true, pisi: false, memory: false, nebul: false, source: "overlay" };
+
 test("atlas-render — template present + json absent → written with placeholders expanded from env", async () => {
   const root = makeRoot();
   try {
@@ -528,7 +533,7 @@ test("atlas-render — template present + json absent → written with placehold
       "utf8",
     );
     const env = { ...baseEnv(root), SQUAD_ATLAS_TEST_VAR: "C:\\atlas\\venv\\python.exe" };
-    const plan = planLaunch({ squad: "dev", env, cwd: join(root, "cwd"), root });
+    const plan = planLaunch({ squad: "dev", env, cwd: join(root, "cwd"), root, integrations: INTEGRATIONS_ON });
     const step = plan.steps.find((s) => s.kind === "atlas-render");
     assert.ok(step, "atlas-render step planned");
 
@@ -550,7 +555,7 @@ test("atlas-render — invalid template JSON warns and the run continues, no fil
   try {
     writeFileSync(join(root, "config", "atlas-mcp.json.template"), "{ not json {{SQUAD_ATLAS_TEST_VAR}} }", "utf8");
     const env = { ...baseEnv(root), SQUAD_ATLAS_TEST_VAR: "x" };
-    const plan = planLaunch({ squad: "dev", env, cwd: join(root, "cwd"), root });
+    const plan = planLaunch({ squad: "dev", env, cwd: join(root, "cwd"), root, integrations: INTEGRATIONS_ON });
     const calls = [];
     const spawn = (command, args, opts) => { calls.push({ command, args, opts }); return { status: 0, stdout: "RUN-B\n" }; };
     const spawnAsync = (command, args, opts) => { calls.push({ command, args, opts }); return fakeChild(0); };
@@ -561,6 +566,83 @@ test("atlas-render — invalid template JSON warns and the run continues, no fil
     assert.ok(logs.some((l) => l.includes("invalid JSON")), "the failure was logged");
     assert.ok(calls.some((c) => isClaude(c.command)), "the run continued past the render");
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("atlas-off (FOC-772) — no settings overlay: off by default, atlas-off planned, stale output deleted, no render", async () => {
+  const root = makeRoot();
+  try {
+    writeFileSync(join(root, "config", "atlas-mcp.json.template"), "{}", "utf8");
+    // A stale rendered config from before the switch was flipped off.
+    writeFileSync(join(root, "config", "atlas-mcp.json"), '{"stale":true}', "utf8");
+    const plan = planLaunch({ squad: "dev", env: baseEnv(root), cwd: join(root, "cwd"), root });
+    const step = plan.steps.find((s) => s.kind === "atlas-off");
+    assert.ok(step, "atlas-off step planned");
+    assert.equal(step.reason, "off");
+    assert.equal(step.outputPath, join(root, "config", "atlas-mcp.json"));
+    assert.ok(!plan.steps.some((s) => s.kind === "atlas-render"), "no render step when off");
+    // --print-plan lists the step like the others.
+    assert.ok(printablePlan(plan).steps.some((s) => s.kind === "atlas-off"), "atlas-off in the printed plan");
+
+    const calls = [];
+    const spawn = (command, args, opts) => { calls.push({ command, args, opts }); return { status: 0, stdout: "RUN-OFF\n" }; };
+    const spawnAsync = (command, args, opts) => { calls.push({ command, args, opts }); return fakeChild(0); };
+    const logs = [];
+    const code = await runLaunch(plan, { spawn, spawnAsync, log: (l) => logs.push(l) });
+    assert.equal(code, 0, "Atlas off is never fatal");
+    assert.ok(logs.some((l) => l === "[info] Atlas integration off - config/atlas-mcp.json not rendered"), `logs: ${JSON.stringify(logs)}`);
+    assert.ok(!existsSync(step.outputPath), "the stale output was deleted");
+    assert.ok(!existsSync(join(root, "config", "atlas-mcp.json")), "nothing was rendered");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("atlas-off (FOC-772) — enabled overlay: the real safe read plans the render, no atlas-off step", () => {
+  const root = makeRoot();
+  try {
+    writeFileSync(join(root, "config", "atlas-mcp.json.template"), "{}", "utf8");
+    // No injection here: the overlay file drives readIntegrationsSafe.
+    writeFileSync(join(root, "settings.json"), JSON.stringify({ integrations: { atlas: true } }), "utf8");
+    const plan = planLaunch({ squad: "dev", env: baseEnv(root), cwd: join(root, "cwd"), root });
+    const step = plan.steps.find((s) => s.kind === "atlas-render");
+    assert.ok(step, "atlas-render step planned when the overlay enables atlas");
+    assert.ok(!plan.steps.some((s) => s.kind === "atlas-off"), "no atlas-off step when enabled");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("atlas-off (FOC-772) — corrupt overlay: check-failed reason, the WARN line, stale output deleted", async () => {
+  const root = makeRoot();
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  const errors = [];
+  const warns = [];
+  console.error = (...args) => errors.push(args.join(" "));
+  console.warn = (...args) => warns.push(args.join(" "));
+  try {
+    writeFileSync(join(root, "config", "atlas-mcp.json.template"), "{}", "utf8");
+    writeFileSync(join(root, "config", "atlas-mcp.json"), '{"stale":true}', "utf8");
+    writeFileSync(join(root, "settings.json"), "{ not json", "utf8");
+    const plan = planLaunch({ squad: "dev", env: baseEnv(root), cwd: join(root, "cwd"), root });
+    const step = plan.steps.find((s) => s.kind === "atlas-off");
+    assert.ok(step, "atlas-off step planned");
+    assert.equal(step.reason, "check-failed", "a corrupt overlay is check-failed, not a plain off");
+    assert.ok(!plan.steps.some((s) => s.kind === "atlas-render"), "no render on a failed check");
+
+    const calls = [];
+    const spawn = (command, args, opts) => { calls.push({ command, args, opts }); return { status: 0, stdout: "RUN-CHK\n" }; };
+    const spawnAsync = (command, args, opts) => { calls.push({ command, args, opts }); return fakeChild(0); };
+    const logs = [];
+    const code = await runLaunch(plan, { spawn, spawnAsync, log: (l) => logs.push(l) });
+    assert.equal(code, 0, "a failed check still launches");
+    assert.ok(logs.some((l) => l === "[WARN] Atlas integration check failed - treating Atlas as off."), `logs: ${JSON.stringify(logs)}`);
+    assert.ok(!existsSync(step.outputPath), "the stale output was deleted");
+  } finally {
+    console.error = originalError;
+    console.warn = originalWarn;
     rmSync(root, { recursive: true, force: true });
   }
 });
