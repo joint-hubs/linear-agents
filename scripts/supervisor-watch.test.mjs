@@ -135,6 +135,32 @@ writeFileSync(
   ].join("\n"),
 );
 
+// FOC-913: a claude that spawns a grandchild in its OWN process group holding
+// the inherited stdout pipe, then stays alive itself until a signal lands. The
+// watcher's group kill reaches the child but not the holder, so `close` is
+// delayed ~3 s past the child's exit — the exact case the TAIL_DRAIN_MS bound
+// exists for, and the one where the old signal terminator raced the finalizer.
+const FAKE_CLAUDE_PIPE_HOLDER = join(base, "fake-claude-pipe-holder.mjs");
+writeFileSync(
+  FAKE_CLAUDE_PIPE_HOLDER,
+  [
+    `import { spawn } from "node:child_process";`,
+    `import { writeFileSync } from "node:fs";`,
+    `const out = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");`,
+    `out({ type: "system", subtype: "init", session_id: process.env.FAKE_SESSION_ID, tools: [], model: "fake/model" });`,
+    `out({ type: "result", subtype: "success", session_id: process.env.FAKE_SESSION_ID, total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0 } });`,
+    `const holder = spawn(process.execPath,`,
+    `  ["-e", "setTimeout(() => process.exit(0), 3000)"],`,
+    `  { detached: true, stdio: ["ignore", "inherit", "ignore"] });`,
+    `holder.unref();`,
+    `// Written AFTER the holder exists, so the test's readiness poll can never`,
+    `// signal before the pipe is actually held.`,
+    `writeFileSync(process.env.FAKE_ARGV_PATH, "holder-spawned");`,
+    `setInterval(() => {}, 1000); // the child itself waits for the watcher's signal`,
+    ``,
+  ].join("\n"),
+);
+
 const promptFile = join(base, "prompt.txt");
 writeFileSync(promptFile, "kickoff", "utf8");
 const settingsFile = join(base, "child-settings.json");
@@ -675,6 +701,94 @@ if (process.platform !== "win32") {
       try { process.kill(pid, "SIGKILL"); } catch {}
     }
   });
+}
+
+// ── FOC-913: SIGTERM while a grandchild holds the stdout pipe ────────────────
+// The old terminator fired 2 s after the SIGNAL, but the finalizer's
+// TAIL_DRAIN_MS window only starts when the child's 'exit' lands — strictly
+// later. With a grandchild in its own process group keeping the pipe open
+// past that bound, the terminator fired first and the whole finalization was
+// lost: registry left "running", no turn-end cost patch, no wake row. POSIX
+// only, for the same reason as the SIGTERM block above: on win32 an external
+// signal terminates the process unconditionally without running Node
+// handlers, so the race has nothing end-to-end to exercise there.
+if (process.platform !== "win32") {
+  console.log("\nSIGTERM race: a pipe-holding grandchild must not beat the finalizer");
+
+  const runIdRace = `test-watch-sigterm-race-${process.pid}`;
+  fixtureChild(runIdRace);
+  const dumpRace = join(base, "argv-sigterm-race.txt");
+  // Mirrors the watcher's terminator deadline (TAIL_DRAIN_MS + 1500) — the
+  // constant lives in the watcher, not in anything this test can import.
+  const TAIL_DRAIN_BOUND_MS = 2000 + 1500;
+  const watcher = spawn(
+    process.execPath,
+    [WATCH, "--run", runIdRace, "--child", "dev-1", "--cwd", cwd, "--prompt-file", promptFile, "--turn", "0"],
+    {
+      cwd: ROOT,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        // Unisolated on purpose: the drop-privilege helper sits between the
+        // watcher and claude, and the holder would then inherit the pipe INTO
+        // the helper — the helper's own exit would close the watcher's pipe
+        // and the delay would never reach it. The direct spawn is the path
+        // where the holder genuinely holds the watcher's stdout.
+        FENIX_IN_CONTAINER: "",
+        FENIX_CHILD_ISOLATION: "",
+        LA_SUPERVISOR_STATE_HOME: stateHome,
+        LA_SQUAD_HOME: squadHome,
+        CLAUDE_CONFIG_DIR: configDir,
+        LA_SUPERVISOR_NO_TELEMETRY: "1",
+        LA_SUPERVISOR_NO_CODEGRAPH: "1",
+        LA_CLAUDE_BIN: FAKE_CLAUDE_PIPE_HOLDER,
+        FAKE_ARGV_PATH: dumpRace,
+        FAKE_SESSION_ID: `watch-sig-race-${process.pid}`,
+      },
+    },
+  );
+
+  test("SIGTERM with the pipe held: the turn is finalized and the watcher exits within its bound", async () => {
+    // Ready when the child has spawned the holder — the dump is written right
+    // after the spawn, so dumping earlier would risk the kill landing before
+    // the pipe was held and the race never exercised.
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(dumpRace) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(existsSync(dumpRace), "the watcher never got the child and its pipe holder running");
+    assert.equal(watcher.exitCode, null, `the watcher exited on its own: ${watcher.exitCode}`);
+
+    watcher.kill("SIGTERM");
+    const sentAt = Date.now();
+    const killDeadline = sentAt + 15_000;
+    while (watcher.exitCode === null && watcher.signalCode === null && Date.now() < killDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(
+      watcher.exitCode === 143 || watcher.signalCode !== null,
+      `the watcher survived SIGTERM: exit=${watcher.exitCode} signal=${watcher.signalCode}`,
+    );
+    // The finalizer runs at child-exit + TAIL_DRAIN_MS; the terminator's
+    // deadline (TAIL_DRAIN_MS + 1500 from the signal) must stay strictly
+    // beyond it — the watcher settles inside that bound, never past it.
+    const elapsed = Date.now() - sentAt;
+    assert.ok(elapsed < TAIL_DRAIN_BOUND_MS + 2500, `the watcher took ${elapsed} ms to settle — the bound leaked`);
+
+    const entry = readRegistry(runIdRace).children["dev-1"];
+    assert.ok(
+      ["exited", "crashed", "stopped", "waiting_gate"].includes(entry.status),
+      `the registry was left non-terminal ("${entry.status}") — the terminator fired before finalizeTurn`,
+    );
+    const turn = entry.turns?.[0] ?? {};
+    assert.notEqual(turn.endedAt, null, "the turn record was never closed — finalizeTurn never ran");
+    assert.equal(entry.signal, "SIGTERM", "the terminal signal was not recorded on the entry");
+    assert.equal(entry.costSource, "result-max", "no turn-end cost patch — the finalization was lost");
+  });
+} else {
+  console.log(
+    "SKIP SIGTERM race test — win32 has no external-signal handler semantics, so the race cannot be exercised end-to-end",
+  );
 }
 
 // ── unit: the signal handler removes the file, then re-raises exactly once ───
