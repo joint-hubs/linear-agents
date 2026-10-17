@@ -13,6 +13,14 @@
       "reason": "isolation audit FOC-795: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir before import; record fixtures only; no ports, no socket binds, no telemetry DB"
     },
     {
+      "file": "artifact-registry.test.mjs",
+      "reason": "isolation audit FOC-779: mkdtemp git fixtures (git init + one local commit, no network); the registry reads the committed config read-only and every CLI child is pointed at a temp root via --root with LA_ARTIFACTS_MANIFEST on a temp path; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
+      "file": "artifacts-routes.test.mjs",
+      "reason": "isolation audit FOC-779: stub req/res with injected statuses/refresh fakes and an injectable clock — no fs, no git, no child processes, no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "analysis-cache.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
@@ -121,6 +129,10 @@
       "reason": "isolation audit FOC-803: mkdtemp/tmpdir fixtures only (the chmod variants additionally forced through a fake fsImpl); no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
+      "file": "fenix-integrations.test.mjs",
+      "reason": "isolation audit FOC-772: mkdtemp/tmpdir fixtures only; CLI children read only temp settings files via the LA_SETTINGS_FILE seam; provider config/.env reads are pinned to repo read-only paths; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "fenix-keys.test.mjs",
       "reason": "isolation audit FOC-778: mkdtemp fixtures and fake docker shim on PATH; canned key-check answers, no network or ports; real settings scripts use only temp LA_SETTINGS_FILE"
     },
@@ -134,7 +146,7 @@
     },
     {
       "file": "fenix-retention.test.mjs",
-      "reason": "isolation audit FOC-786: mkdtemp/tmpdir fixtures only; the retention library is read-only; no ports, no socket binds, no telemetry DB"
+      "reason": "isolation audit FOC-786/FOC-780: mkdtemp/tmpdir fixtures only; the apply/prune tests and the CLI children write and delete ONLY inside those temp roots via the LA_SETTINGS_FILE / LA_SQUAD_HOME / LA_STATE_ROOT / LA_SUPERVISOR_STATE_HOME / LA_DATA_HOME / LA_TELEMETRY_HOME seams; no ports, no socket binds, no telemetry DB"
     },
     {
       "file": "fenix-seed-agents.test.mjs",
@@ -153,6 +165,10 @@
       "reason": "isolation audit FOC-477: mkdtemp/tmpdir fixtures only (corpus + children.json + fake worktree/.git-pointer trees synthesized under os.tmpdir and removed after each case); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
+      "file": "gh-screened.test.mjs",
+      "reason": "isolation audit (FOC-512): mkdtemp/tmpdir fixtures only; the fake gh is a temp Node script appended to a log file and spawned by the WRAPPER as a local child, never a real GitHub call; no network, no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "graph-runner.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
@@ -165,8 +181,16 @@
       "reason": "isolation audit FOC-778: the docker runner is an injected fake; the canary reaches grep only via stdin; canary file in a mkdtemp dir; no network, no ports, no socket binds, no telemetry DB"
     },
     {
+      "file": "launcher-wrappers.test.mjs",
+      "reason": "isolation audit FOC-771: reads bin/*.bat only; the one spawn runs the pure --print-plan path of scripts/squad-start.mjs (guarded by existsSync — prints JSON and exits before any manifest/env side effect), no network, no ports, no socket binds, no telemetry DB"
+    },
+    {
       "file": "linear-client.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "linear-query.test.mjs",
+      "reason": "isolation audit (fenix-task-ownership): globalThis.fetch is stubbed and cmdIssue is driven in-process with dry-run off (no .state/ fixtures); no ports, no socket binds, no fs writes, no telemetry DB"
     },
     {
       "file": "linear-ops.test.mjs",
@@ -257,6 +281,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "permission-rules.test.mjs",
+      "reason": "isolation audit (FOC-511): pure unit tests over literal rule strings (a model of the documented Claude Code permission matcher); no fs, no ports, no socket binds, no telemetry DB"
+    },
+    {
       "file": "prompt-external.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
@@ -325,10 +353,6 @@
       "reason": "isolation audit FOC-810: pure parsers over checked-in fixture text (scripts/fixtures/session-dialogs read read-only); the only writes are the mkdtemp transcript for the tail-read test; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
-      "file": "squad-config-indirect.test.mjs",
-      "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
-    },
-    {
       "file": "squad-config-read.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
@@ -339,6 +363,10 @@
     {
       "file": "squad-config-write.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "squad-start.test.mjs",
+      "reason": "isolation audit FOC-771: mkdtemp/tmpdir fixtures only (fixture root carries the fake .env/config/agents tree); every runLaunch subprocess is an injected spawn recording argv/env — the real claude is never started; the only real children are CLI usage-error spawns that exit 2 before any side effect; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
       "file": "stability-campaign.test.mjs",
@@ -359,6 +387,10 @@
     {
       "file": "supervisor-current-run.test.mjs",
       "reason": "isolation audit FOC-807: mkdtemp/tmpdir fixtures only; library paths passed explicitly and the CLI child inherits the LA_DATA_HOME / LA_SUPERVISOR_STATE_HOME seams pointed at temp dirs; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
+      "file": "supervisor-deny.test.mjs",
+      "reason": "isolation audit (FOC-511): pure unit test — SUPERVISOR_DENY run through the permission-rules model over literal command strings; no fs, no ports, no socket binds, no telemetry DB"
     },
     {
       "file": "supervisor-edits-hook.test.mjs",
@@ -423,6 +455,10 @@
     {
       "file": "task-map.test.mjs",
       "reason": "isolation audit (task workspace P4): embed/project fakes injected — no production network, no real model calls, no python spawn (the only 'spawn' hit is prose); mkdtemp/tmpdir cache dirs; no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "task-ownership.test.mjs",
+      "reason": "isolation audit FOC-848: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam and ownership config via the LA_TASK_OWNERSHIP_CONFIG / LA_SETTINGS_FILE seams, all pointed at temp paths at module load; CLI children read fixture files only; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
     {
       "file": "task-process-identity.test.mjs",

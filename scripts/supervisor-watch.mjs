@@ -19,7 +19,16 @@
 // start it with { detached: true, stdio: 'ignore' } + unref.
 
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { calculateCost, priceThreshold, pricingSnapshot } from "./telemetry-store.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
@@ -32,6 +41,7 @@ import {
   costFromResult,
   gatesDir,
   hasPendingGate,
+  installEnvFileSignalHandlers,
   parseArgs,
   readRegistry,
   stallSilenceMs,
@@ -144,7 +154,112 @@ claudeArgs.push(...profileArgs);
 
 const { command, args: spawnArgs } = claudeCommand(claudeArgs);
 
+// ── child isolation (FOC-802) ────────────────────────────────────────────────
+// Inside the container the claude child must NOT run as the Supervisor's uid:
+// a same-uid child can edit the Supervisor's settings and records on /data,
+// read /data/run/host.token and reach the Supervisor's tmux socket (FOC-783).
+// When the root-owned drop-privilege helper is available, the claude spawn goes
+// through
+//
+//   sudo -n <helper> <env-file> <worktree> <config-dir> -- <claude argv…>
+//
+// The helper validates the paths, hands the worktree/config dir to
+// fenix-child:fenix and re-execs argv as fenix-child with the env from the
+// file (KEY=VALUE lines, values verbatim, no quoting) plus HOME/TMPDIR/umask.
+//
+// The env file carries EXACTLY the env the child would have received directly —
+// the watcher's own process env, which supervisor-spawn.mjs builds explicitly
+// and passes through — minus LA_CHILD_SPAWN_HELPER, which is a test seam and
+// must never reach a child. Written 0640 and removed as soon as the child is
+// gone: the watcher is the only writer and the only remover.
+//
+// Lifetime in the normal path is MILLISECONDS: the helper sources the file and
+// unlinks it immediately after, before exec'ing claude. The watcher's removals
+// (child exit, spawn error, process exit, signals) only cover the paths where
+// the helper never ran — a refusal, a crash before the helper got to it, or the
+// watcher itself being killed. `process.on("exit")` does NOT run on
+// SIGTERM/SIGINT/SIGHUP, so the signal handlers below are what keep a hard-killed
+// watcher from leaving the keys on disk readable by every child (group fenix).
+//
+// Fail closed: a helper that REFUSES (exit 97) fails the turn with an
+// isolationError — there is no fallback to an unisolated spawn, because the
+// child that would then launch is exactly the one the isolation exists to
+// contain. A claude that itself exits 2 under isolation is a NORMAL child exit
+// of code 2 (crashed), never an isolation error — that is exactly why the
+// helper's refusals do not use an exit code a child could produce. Outside the
+// container (Windows/native), with FENIX_CHILD_ISOLATION=off, or without the
+// helper, today's spawn runs unchanged.
+const HELPER = process.env.LA_CHILD_SPAWN_HELPER || "/usr/local/sbin/fenix-spawn-as-child";
+const isolationWanted =
+  process.env.FENIX_IN_CONTAINER === "1" && process.env.FENIX_CHILD_ISOLATION !== "off";
+// No CLAUDE_CONFIG_DIR means nowhere to put the env file, so nothing to hand
+// the helper — the unisolated spawn is the only thing left either way.
+const isolated = isolationWanted && !!process.env.CLAUDE_CONFIG_DIR && existsSync(HELPER);
+
+const childEnvFile = isolated ? join(process.env.CLAUDE_CONFIG_DIR, "child.env") : null;
+const removeEnvFile = () => {
+  if (!childEnvFile) return;
+  try {
+    rmSync(childEnvFile, { force: true });
+  } catch {
+    /* best effort — the file is 0640 inside the child's own config dir */
+  }
+};
+
+if (isolationWanted && !isolated) {
+  // stdio is 'ignore'; the tee is the operator's channel. The two ways isolation
+  // can be off despite being wanted are named separately.
+  note({
+    subtype: "isolation_helper_missing",
+    message: !process.env.CLAUDE_CONFIG_DIR
+      ? "child isolation wanted (FENIX_IN_CONTAINER=1) but no CLAUDE_CONFIG_DIR — spawning unisolated"
+      : `child isolation wanted (FENIX_IN_CONTAINER=1) but helper not found at ${HELPER} — spawning unisolated`,
+  });
+}
+
+if (isolated) {
+  // Unlink before every write (FOC-802 M1): writeFileSync must never reuse the
+  // inode of a file a previous watcher left behind — a stale owner or mode
+  // would survive any content fix. With `wx` the create fails loudly if the
+  // unlink did not take, so a leftover file can never be silently rewritten in
+  // place.
+  try {
+    unlinkSync(childEnvFile);
+  } catch {
+    /* not there — the normal case */
+  }
+  writeFileSync(
+    childEnvFile,
+    Object.entries(process.env)
+      .filter(([k]) => k !== "LA_CHILD_SPAWN_HELPER")
+      .map(([k, v]) => `${k}=${v ?? ""}`)
+      .join("\n") + "\n",
+    { mode: 0o640, flag: "wx" },
+  );
+  // The child handlers below cover every path after the spawn, but the file
+  // must not outlive the turn even if this process dies some other way. The
+  // signal handlers are the ones that matter when the Supervisor kills this
+  // detached watcher hard: `exit` does not run on SIGTERM/SIGINT/SIGHUP.
+  process.on("exit", removeEnvFile);
+  installEnvFileSignalHandlers(removeEnvFile);
+}
+
+// LA_SUDO_BIN is a TEST SEAM, shaped like LA_CLAUDE_BIN: the suite points it at
+// a node script, which cannot be execed directly, so it rides node with the
+// production sudo argv appended verbatim — what follows the fake sudo is exactly
+// the argv a real `sudo -n …` would carry. Production leaves it unset.
+const sudoBin = process.env.LA_SUDO_BIN || "sudo";
+const sudo =
+  sudoBin.endsWith(".mjs") || sudoBin.endsWith(".js")
+    ? { command: process.execPath, prefixArgs: [sudoBin] }
+    : { command: sudoBin, prefixArgs: [] };
+
 const turnIndex = Number(args.turn ?? 0);
+
+// FOC-607: what this turn was PINNED to, as opposed to what the child reports
+// serving with (initModel, read from system/init below). Both land on the turn
+// record so a divergence between the two stays visible in the registry.
+const requestedModel = typeof args.model === "string" ? args.model : null;
 
 // FOC-760: the session id the registry carried BEFORE this turn. A resumed turn
 // can fork a NEW session id (init's session_id ≠ the registered one) — the init
@@ -179,7 +294,7 @@ function reopenTelemetryRun(telemetryRunId, turn) {
 }
 if (turnIndex > 0) reopenTelemetryRun(args["telemetry-run"], turnIndex);
 
-const child = spawn(command, spawnArgs, {
+const spawnOpts = {
   cwd,
   env: process.env,
   stdio: ["ignore", "pipe", "pipe"],
@@ -194,7 +309,65 @@ const child = spawn(command, spawnArgs, {
   // reaches the bash and test processes claude spawns. Never on win32: there
   // detached means a fresh console, and taskkill /T already walks the tree.
   detached: process.platform !== "win32",
-});
+};
+
+// FOC-802: when isolated, the EXACT argv claude would get today rides after
+// `--` on the helper's command line; nothing about the child's command line or
+// this watcher's pipe handling changes. Unisolated is today's spawn verbatim.
+const child = isolated
+  ? spawn(
+      sudo.command,
+      [
+        ...sudo.prefixArgs,
+        "-n",
+        HELPER,
+        childEnvFile,
+        cwd,
+        process.env.CLAUDE_CONFIG_DIR,
+        "--",
+        command,
+        ...spawnArgs,
+      ],
+      spawnOpts,
+    )
+  : spawn(command, spawnArgs, spawnOpts);
+
+// The status a signal-terminated turn exits with (128+n), set by terminateTurn
+// below; null on a run that ends normally.
+let signalTerminated = null;
+
+// FOC-802: when the Supervisor kills the watcher, the turn must die with it —
+// not leave a claude child running orphaned, holding the worktree and burning
+// the budget. The child leads its own process group (spawnOpts.detached), so a
+// group signal reaches the sudo/helper AND everything claude spawned. On an
+// isolated run the env-file handlers above run first and re-raise, so this
+// handler also sees the signal a second time and acts exactly once; on an
+// unisolated POSIX run it IS the signal handler. The child's exit path gets a
+// bounded 2 s to run its normal bookkeeping (registry, tee, wake queue,
+// telemetry) — but the watcher exits with the signal's status (143 for SIGTERM)
+// regardless of what the child does. Windows has no external-signal handler
+// semantics; today's behaviour there is unchanged.
+if (process.platform !== "win32") {
+  const SIGNAL_EXIT = { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 };
+  const terminateTurn = (signal) => {
+    if (signalTerminated !== null) return; // the env-file handler's re-raise lands here too
+    signalTerminated = SIGNAL_EXIT[signal] ?? 143;
+    if (child.pid) {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        /* the group is already gone */
+      }
+      try {
+        process.kill(child.pid, signal);
+      } catch {
+        /* the pid is already gone */
+      }
+    }
+    setTimeout(() => process.exit(signalTerminated), 2000);
+  };
+  for (const signal of Object.keys(SIGNAL_EXIT)) process.on(signal, terminateTurn);
+}
 
 let sessionId = null;
 // FOC-760: the costFromResult outputs of this turn, kept in order and resolved
@@ -235,7 +408,16 @@ function patchTurn(patch) {
   updateChild(runId, childId, { turns });
 }
 
-patchTurn({ pid: child.pid, startedAt: new Date().toISOString(), endedAt: null, exitCode: null });
+// `isolated` records whether THIS turn's claude spawn went through the
+// drop-privilege helper (FOC-802) — supervisor-status surfaces the latest
+// turn's value per child.
+patchTurn({
+  pid: child.pid,
+  startedAt: new Date().toISOString(),
+  endedAt: null,
+  exitCode: null,
+  isolated,
+});
 
 // ── durable wake queue (FOC-608) ─────────────────────────────────────────────
 // This watcher is the SINGLE writer of <runDir>/wake-queue.jsonl. It classifies
@@ -347,6 +529,10 @@ child.stdout.on("data", (chunk) => {
       // This write is what unblocks supervisor-spawn.mjs, which is polling the
       // registry for exactly this field.
       updateChild(runId, childId, { sessionId, status: "running", pid: child.pid });
+      // FOC-607: persist the served model as soon as it is known, so a turn that
+      // crashes after init still shows what it started on. The local stays the
+      // pricing source; this is the durable copy.
+      patchTurn({ initModel });
     }
     if (event.type === "result") {
       // Priced from token counts, NOT from the stream's total_cost_usd — that
@@ -367,6 +553,7 @@ child.stderr.on("data", (chunk) => {
 });
 
 child.on("error", (err) => {
+  removeEnvFile();
   note({ subtype: "spawn_failed", message: err.message });
   clearInterval(scanner);
   scanGates();
@@ -406,8 +593,35 @@ child.on("exit", (code, signal) => {
   let status = entry.status === "stopped" ? "stopped" : code === 0 ? "exited" : "crashed";
   if (status === "exited" && hasPendingGate(runId, childId)) status = "waiting_gate";
 
+  // FOC-802, fail closed: the helper refused the launch (exit 97). The turn is
+  // a crash no matter what else the exit code might otherwise read as — there
+  // is no fallback spawn, so this turn produced no child work at all, and the
+  // refusal must not be dressed up as anything else. 97 is deliberately NOT a
+  // code a child can produce through this path: a claude exiting 2 under
+  // isolation stays a normal exit 2 (crashed), without an isolationError.
+  const isolationRefused = isolated && code === 97;
+  if (isolationRefused) status = "crashed";
+
   const turns = entry.turns || [];
-  turns[turnIndex] = { ...(turns[turnIndex] || {}), endedAt, exitCode: code };
+  // FOC-607: the turn closes with what was requested vs what actually served —
+  // initModel is null when the child never emitted system/init.
+  turns[turnIndex] = {
+    ...(turns[turnIndex] || {}),
+    endedAt,
+    exitCode: code,
+    requestedModel,
+    initModel,
+    ...(isolationRefused
+      ? { isolationError: "spawn refused by the isolation helper (exit 97) — no unisolated fallback" }
+      : {}),
+  };
+  removeEnvFile();
+  if (isolationRefused) {
+    note({
+      subtype: "isolation_refused",
+      message: "fenix-spawn-as-child refused the launch (exit 97) — failing closed, no unisolated spawn",
+    });
+  }
 
   // FOC-760: the child's cost is SET from its own transcripts — whole-session
   // truth, one row per assistant message — not added to what the entry already
@@ -440,6 +654,11 @@ child.on("exit", (code, signal) => {
     exitCode: code,
     signal: signal || null,
     endedAt,
+    // FOC-802: the refusal is a clear error at entry level too, so a reader
+    // that never opens `turns` still sees why the child crashed.
+    ...(isolationRefused
+      ? { error: "isolated spawn refused by fenix-spawn-as-child (exit 97) — child not launched, no unisolated fallback" }
+      : {}),
     ...turnEndCostPatch({ entry, transcriptCost, results: resultCosts }),
     turns,
   });
@@ -456,5 +675,5 @@ child.on("exit", (code, signal) => {
   wake({ event: "exit", childId, turn: turnIndex, detail: { status, exitCode: code } });
 
   endTelemetryRun(args["telemetry-run"], code ?? 1);
-  process.exit(0);
+  process.exit(signalTerminated ?? 0);
 });

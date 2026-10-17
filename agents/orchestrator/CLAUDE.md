@@ -31,6 +31,7 @@ Zanim zaczniesz orkiestrować, przeczytaj **`$LA_ROOT/agents/orchestrator/memory
 </working_mode>
 
 <knowledge_base>
+Atlas is an optional integration (`integrations.atlas` in `.fenix/config/settings.json`, off by default). When it is off the `mcp__atlas__*` tools do not exist: plan and implement with the Agent tool and the repo's own scripts; never wait for or retry the bridge.
 Masz podłączony serwer MCP **atlas** z narzędziami `mcp__atlas__search / read / run / remember / map` (wiedza) oraz `agent_start / agent_reply / agent_sessions` (delegacja blokująca) i `agent_spawn / agent_collect / agent_jobs` (delegacja równoległa). To są NARZĘDZIA (tools), nie zasoby — `listMcpResources` zwróci pustkę i to jest normalne; nie wnioskuj z tego, że MCP nie istnieje.
 - Pytanie o wiedzę/projekty/Linear/ludzi/toole → `mcp__atlas__search("...")`, potem `read(node_id)` i schodź po linkach.
 - Taski Linear (oba workspace'y, też **pisi**) → `search("linear workspaces")` → `read` → `run("tools/linear-tasks", args="-w pisi list")`. `run` odmówi, dopóki nie przeczytasz jego `requires` — przeczytaj wskazany węzeł i ponów.
@@ -39,6 +40,7 @@ Masz podłączony serwer MCP **atlas** z narzędziami `mcp__atlas__search / read
 
 
 <state_memory>
+The memory index (`agents/orchestrator/memory/`) is optional (`integrations.memory`, off by default); when it is absent, read `docs/STATE.md` and the plan docs instead.
 Index: `$LA_ROOT/agents/orchestrator/memory/MEMORY.md`
 styl pracy (`workflow.md`)
 projekty: 

@@ -24,6 +24,11 @@ Usage: fenix [command]
   down             stop and remove containers (the data volume is kept)
   logs [service]   follow logs (default: all services)
   doctor           host preflight plus in-container diagnostics
+  integrations [show|enable <name>|disable <name>]
+                   optional integrations (atlas | pisi | memory), off by
+                   default; nebul is chosen through the provider (fenix keys)
+  retention [show|apply|prune] [--dry-run]
+                   inspect or change log retention (default: show)
   keys [name]      run the key wizard (no argument) or rotate one key:
                    openrouter | provider | linear | github
   attach [--new]   open the Supervisor (Ctrl-b d detaches; it keeps running in the container)
@@ -304,6 +309,47 @@ settings_set() {
   in_container_node scripts/fenix-settings.mjs set "$1" "$2"
 }
 
+cmd_integrations() {
+  # fenix integrations [show|enable <name>|disable <name>] — the optional
+  # integrations switch (FOC-772). `show` forwards to the node CLI (exit codes
+  # pass through); enable/disable write the overlay flag via fenix-settings.
+  # `nebul` is NOT a flag: it is selected through the provider.
+  sub="${1:-show}"
+  case "$sub" in
+    show)
+      if [ $# -ge 1 ]; then shift; fi
+      in_container_node scripts/fenix-integrations.mjs show "$@"
+      ;;
+    enable|disable)
+      if [ $# -lt 2 ]; then
+        printf 'usage: fenix integrations %s <atlas|pisi|memory>\n' "$sub" >&2
+        exit 2
+      fi
+      name="$2"
+      case "$name" in
+        atlas|pisi|memory) ;;
+        nebul)
+          printf 'Nebul is not an integration flag — it is selected through the provider: fenix keys (provider.active).\n' >&2
+          exit 2
+          ;;
+        *)
+          printf 'unknown integration: %s (valid: atlas, pisi, memory)\n' "$name" >&2
+          exit 2
+          ;;
+      esac
+      if [ "$sub" = "enable" ]; then
+        settings_set integrations "{\"$name\":true}"
+      else
+        settings_set integrations "{\"$name\":false}"
+      fi
+      ;;
+    *)
+      printf 'usage: fenix integrations [show|enable <name>|disable <name>]\n' >&2
+      exit 2
+      ;;
+  esac
+}
+
 commit_provider() {
   # Validate the complete overlay before asking for or replacing any key.
   provider_target="$1"
@@ -343,7 +389,14 @@ provider_wizard() {
   active=$(settings_get provider.active)
   active="${active:-openrouter}"
   list=$(in_container_node scripts/provider-resolve.mjs --list)
-  printf 'Available providers:\n%s\n  custom          — your own Anthropic-compatible endpoint\n' "$list"
+  # FOC-772: nebul is parked — list it only when it is already the active
+  # provider, so a fresh install never sees it in the menu (typing it still
+  # validates against the unfiltered list below).
+  shown_list="$list"
+  if [ "$active" != "nebul" ]; then
+    shown_list=$(printf '%s\n' "$list" | awk '$1 != "nebul"')
+  fi
+  printf 'Available providers:\n%s\n  custom          — your own Anthropic-compatible endpoint\n' "$shown_list"
 
   provider=""
   while :; do
@@ -450,6 +503,69 @@ key_wizard() {
   printf 'Keys saved in %s; config in %s.\n' "$SECRET_DIR" "$ENV_FILE"
 }
 
+retention_step() {
+  # First-run retention question, asked once in the same flow as the key
+  # wizard (fenix up). Keep-all is the default and this step NEVER deletes
+  # anything — it only records the policy in the settings overlay; the actual
+  # apply/prune lives in `fenix retention` and the node CLI.
+  case "${FENIX_NONINTERACTIVE:-}" in
+    1|[Tt]|[Tt][Rr][Uu][Ee]|[Yy]|[Yy][Ee][Ss]) return 0 ;;
+  esac
+  if [ ! -t 0 ]; then
+    # No TTY (CI, piped stdin): skip silently, keep-all stays the default.
+    return 0
+  fi
+  # `get retention` prints the stored value; an unset key reports as empty,
+  # `null` or an error — all three mean "not answered yet".
+  current=$(settings_get retention) || true
+  case "$(printf '%s' "$current" | tr -d '[:space:]')" in
+    ""|null|undefined) ;;
+    *) return 0 ;;
+  esac
+
+  printf 'Keep all logs and transcripts? [Y/n] '
+  ans=""
+  IFS= read -r ans || true
+  case "$ans" in
+    n|N|no|No|NO)
+      while :; do
+        printf 'Keep logs for how many days? [90] '
+        days=""
+        IFS= read -r days || true
+        days="${days:-90}"
+        case "$days" in
+          *[!0-9]*)
+            printf 'Enter a whole number of days (1..36500).\n'
+            continue
+            ;;
+        esac
+        # Strip leading zeros so the written JSON stays valid (07 is not).
+        days=$(printf '%s' "$days" | sed 's/^0*//')
+        [ -n "$days" ] || days=0
+        if [ "$days" -lt 1 ] || [ "$days" -gt 36500 ]; then
+          printf 'Enter a whole number of days (1..36500).\n'
+          continue
+        fi
+        break
+      done
+      if settings_set retention "{\"keepDays\": $days}"; then
+        printf 'OK  logs older than %s days can be pruned with `fenix retention prune`.\n' "$days"
+      else
+        printf 'WARN retention was not saved — the keep-all default stays.\n'
+      fi
+      ;;
+    *)
+      # Default Y: record keep-all explicitly so the question is not asked
+      # again on the next `fenix up`.
+      if settings_set retention '{"keepDays": null, "minFreeGiB": 5}'; then
+        printf 'OK  keeping all logs and transcripts (nothing is pruned).\n'
+      else
+        printf 'WARN retention was not saved — the keep-all default stays.\n'
+      fi
+      ;;
+  esac
+}
+
 rotate_key() {
   # fenix keys <name> — rotate one key without re-running the whole wizard.
   name="$1"
@@ -536,16 +652,21 @@ wait_healthy() {
 cmd_up() {
   preflight strict
 
+  # The project map lives in a host dir mounted at /fenix-config; create it
+  # first so Docker does not create it root-owned. This must precede every
+  # compose invocation below — including the key wizard and the retention
+  # step, which go through `docker compose run` (FOC-780).
+  mkdir -p .fenix/config
+  # Compose mounts every secret file — missing ones must exist (empty).
+  ensure_secret_files
+
   if ! keys_ok; then
     printf 'Some keys are missing or empty — running the key wizard.\n'
     key_wizard
   fi
 
-  # The project map lives in a host dir mounted at /fenix-config; create it
-  # first so Docker does not create it root-owned.
-  mkdir -p .fenix/config
-  # Compose mounts every secret file — missing ones must exist (empty).
-  ensure_secret_files
+  retention_step
+
   printf 'Building and starting the stack...\n'
   docker compose up -d --build
 
@@ -630,6 +751,21 @@ case "$cmd" in
     ;;
   doctor)
     cmd_doctor
+    ;;
+  integrations)
+    cmd_integrations "$@"
+    ;;
+  retention)
+    # Forward to the retention CLI in the container (the same in-container
+    # node pattern as the settings wizard). The node script owns usage errors
+    # (exit 2) and a refused prune (exit 1); the exit code passes through.
+    if [ $# -ge 1 ]; then
+      verb="$1"
+      shift
+    else
+      verb="show"
+    fi
+    in_container_node scripts/fenix-retention.mjs "$verb" "$@"
     ;;
   attach)
     exec docker compose exec fenix-supervisor "$ENTRYPOINT" attach "$@"

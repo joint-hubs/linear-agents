@@ -85,6 +85,23 @@ await stop();
 console.log("ok");
 `;
 
+// Settings-seam probes: the runner must pin LA_SETTINGS_FILE to a nonexistent
+// per-run temp path (empty settings overlay) unless the caller set it.
+const SETTINGS_PIN_PROBE = [
+  'import { existsSync } from "node:fs";',
+  'const p = process.env.LA_SETTINGS_FILE;',
+  'if (!p) { console.error("LA_SETTINGS_FILE not set"); process.exit(1); }',
+  'if (existsSync(p)) { console.error("LA_SETTINGS_FILE exists: " + p); process.exit(2); }',
+  OK,
+].join("\n");
+const SETTINGS_CALLER_PROBE = [
+  'if (process.env.LA_SETTINGS_FILE !== "caller-pinned-settings.json") {',
+  '  console.error("caller LA_SETTINGS_FILE lost: " + process.env.LA_SETTINGS_FILE);',
+  '  process.exit(1);',
+  '}',
+  OK,
+].join("\n");
+
 let passed = 0;
 const failures = [];
 
@@ -269,6 +286,41 @@ test("a clean run reports no orphans and exits 0", () => {
   if (r.stdout.includes("orphan") || r.stderr.includes("orphan")) {
     fail("a clean run printed an orphan line:\n" + r.stdout + r.stderr);
   }
+});
+
+test("the runner strips the task-ownership seams from every spawned child", () => {
+  const PROBE = [
+    'if ("LA_TASK_OWNERSHIP_CONFIG" in process.env) {',
+    '  console.error("LA_TASK_OWNERSHIP_CONFIG leaked");',
+    '  process.exit(1);',
+    '}',
+    'if ("LA_TASK_OWNER" in process.env) {',
+    '  console.error("LA_TASK_OWNER leaked");',
+    '  process.exit(1);',
+    '}',
+    OK,
+  ].join("\n");
+  const root = sandbox({ parallel: [lane("a.test.mjs")], serial: [] }, { "a.test.mjs": PROBE });
+  const poisoned = {
+    ...process.env,
+    LA_TASK_OWNERSHIP_CONFIG: "/nope",
+    LA_TASK_OWNER: "zzz",
+  };
+  const r = run(root, [], poisoned);
+  if (r.status !== 0) fail(`the probe saw a task-ownership seam:\n${r.stderr}`);
+});
+
+test("the runner pins LA_SETTINGS_FILE to a nonexistent path for every spawned child", () => {
+  const root = sandbox({ parallel: [lane("a.test.mjs")], serial: [] }, { "a.test.mjs": SETTINGS_PIN_PROBE });
+  const r = run(root);
+  if (r.status !== 0) fail(`the settings pin did not hold:\n${r.stderr || r.stdout}`);
+});
+
+test("the runner preserves a caller-provided LA_SETTINGS_FILE", () => {
+  const root = sandbox({ parallel: [lane("a.test.mjs")], serial: [] }, { "a.test.mjs": SETTINGS_CALLER_PROBE });
+  const caller = { ...process.env, LA_SETTINGS_FILE: "caller-pinned-settings.json" };
+  const r = run(root, [], caller);
+  if (r.status !== 0) fail(`the caller-provided LA_SETTINGS_FILE was overwritten:\n${r.stderr || r.stdout}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

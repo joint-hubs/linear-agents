@@ -479,6 +479,50 @@ const issueUrl = (i) => `https://linear.app/joint-hubs/issue/${CORPUS[i][0]}/${C
 }
 
 // ---------------------------------------------------------------------------
+// 8b. FOC-512: terminator class extended — a slug closed by end of line or a
+//     trailing `,`, `.`, `:`, `;` (and `)`/`]`, already in the class) is now
+//     exempt. Still fail-closed: the full linear.app/<ws>/issue/<KEY>/ prefix
+//     must sit on the SAME line's segment, whitespace is still not a
+//     terminator, and a non-slug-shaped segment still falls back to family E.
+// ---------------------------------------------------------------------------
+
+{
+  const SLUG = CORPUS[0][1];
+  const url = (seg) => `https://linear.app/joint-hubs/issue/FOC-143/${seg}`;
+  // Fake 48-char base62 token on the sk-or- prefix (matches the KEY_PREFIX_RE
+  // shape example), assembled from split literals like every fixture here.
+  const SK62 = "sk-or-".concat("Zx2Kp9Qw", "Lm4Rt7Ye", "Vb6Nc1Hd", "Gs3Ja5Fk", "Ue8Iy0Oq", "Tg2Wv5Pb");
+  // Uppercase/base64-shaped 40-char run — not slug-shaped (SLUG_TOKEN_RE is
+  // lowercase-only), so the exemption must not fire.
+  const B64SEG = "QlUjD8Rx".concat("Ne2Gm5Zs", "Kw7Pv3Yb", "Tf6Hc1Lq", "Xe9Ao4Md");
+
+  console.log("foc-512: the new terminators close the slug exemption");
+  assert(scanEgress(`${url(SLUG)}\n`).length === 0, "slug at end of line (\\n) is exempt");
+  assert(scanEgress(`${url(SLUG)}\r\n`).length === 0, "slug at end of line (\\r\\n) is exempt");
+  assert(scanEgress(`${url(SLUG)}\nnext prose line here`).length === 0, "slug closed by end of line followed by prose is exempt");
+  assert(scanEgress(`see ${url(SLUG)}, then continue`).length === 0, "slug closed by `,` in prose is exempt");
+  assert(scanEgress(`see ${url(SLUG)}. more prose`).length === 0, "slug closed by `.` in prose is exempt");
+  assert(scanEgress(`(${url(SLUG)}) end of aside`).length === 0, "slug closed by `)` in prose is exempt");
+  assert(scanEgress(`${url(SLUG)}:`.concat(" details")).length === 0, "slug closed by `:` is exempt");
+  assert(scanEgress(`ticket ${url(SLUG)}; nothing after`).length === 0, "slug closed by `;` is exempt");
+  assert(scanEgress(`list [${url(SLUG)}] done`).length === 0, "slug closed by `]` is exempt");
+
+  console.log("foc-512: fail-closed — whitespace still not a terminator, non-slug shapes still blocked");
+  {
+    // The space after the URL is not a terminator, so the slug itself stays
+    // screened and keeps its own family-E hit; the invariant here is that the
+    // key-prefix family names the secret by shape on top of that.
+    const hits = scanEgress(`${url(SLUG)} ${SK62}`);
+    assert(hits.some((h) => h.family === "key-prefix"), "a secret right after the URL (space-separated) is still a key-prefix hit, named by shape");
+    // Mirrors the FOC-733 family-E identification: the space closes nothing,
+    // so the slug segment itself keeps its own family-E hit — asserted at its
+    // exact 1-based position (slug starts right after the trailing `/`).
+    assert(hits.some((h) => h.family === "high-entropy" && h.column === url(SLUG).length - SLUG.length + 1), "the slug segment itself is not exempted — it keeps its own family-E hit at the slug's position");
+  }
+  assert(scanEgress(`${url(B64SEG)} prose`).length >= 1, "an uppercase/base64-shaped slug segment is still blocked");
+}
+
+// ---------------------------------------------------------------------------
 // 9. Managed spawn-ref exemption (FOC-788, Mateusz 2026-10-15: "tak w
 //    komentarzu linear podaj tez nazwe galezi"). Shape-gated on the spawn
 //    shape <teamKey>-<n>-<slug>-<hash12>, family-E-only, and deliberately
