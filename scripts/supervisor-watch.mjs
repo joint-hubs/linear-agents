@@ -592,7 +592,20 @@ child.on("error", (err) => {
   process.exit(1);
 });
 
-child.on("exit", (code, signal) => {
+// FOC-913: the turn is finalized only after the child's stdout is fully
+// drained. 'exit' can beat the tail of the pipe — a claude that writes its last
+// result events and exits in one burst leaves them in transit, and a finalizer
+// that ran on 'exit' froze resultCosts empty (costUsdReported undefined under
+// test-suite load). 'close' fires only once every stdio stream is closed, so
+// the last 'data' events have landed by then. The bound is for a grandchild
+// that inherited the pipe and outlives claude: the registry write cannot wait
+// on it forever.
+const TAIL_DRAIN_MS = 2000;
+let finalized = false;
+function finalizeTurn(code, signal) {
+  if (finalized) return;
+  finalized = true;
+  {
   if (buffer.trim()) {
     try {
       appendFileSync(tee, buffer + "\n");
@@ -726,4 +739,12 @@ child.on("exit", (code, signal) => {
 
   endTelemetryRun(args["telemetry-run"], code ?? 1);
   process.exit(signalTerminated ?? 0);
+  }
+}
+
+child.on("exit", (code, signal) => {
+  // The stream tail gets a bounded window to land; 'close' below normally
+  // finalizes within milliseconds of 'exit'.
+  setTimeout(() => finalizeTurn(code, signal), TAIL_DRAIN_MS);
 });
+child.on("close", (code, signal) => finalizeTurn(code, signal));

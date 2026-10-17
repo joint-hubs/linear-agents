@@ -354,6 +354,110 @@ test("a resume that forked a new session id prices BOTH transcripts", () => {
   assert.ok(entry.costUsd > newOnly.costUsd, "the pre-fork transcript is included, not just the new one");
 });
 
+// ── FOC-913: the turn is reported done only after the stdout tail drained ────
+console.log("\nturn-end czeka na ogon stdout (FOC-913)");
+
+// The flake's shape, loaded: ~5 MB of non-JSON pad lines push the three
+// cumulative result events to the very tail of the stream, and claude exits
+// right after they flush. The parent must pump ~80 read events before EOF;
+// the old finalizer (running on 'exit') froze resultCosts mid-drain and the
+// registry came up without costUsdReported — exactly the FOC-913 failure under
+// test-suite load, where 'exit' beats the in-transit pipe data. The finalizer
+// now runs on 'close', which fires only after every stream byte is delivered.
+const FAKE_CLAUDE_BUSY = join(base, "fake-claude-busy.mjs");
+writeFileSync(
+  FAKE_CLAUDE_BUSY,
+  [
+    `import { mkdirSync, writeFileSync } from "node:fs";`,
+    `import { dirname } from "node:path";`,
+    `const out = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");`,
+    `const result = (mult) => ({`,
+    `  type: "result",`,
+    `  subtype: "success",`,
+    `  total_cost_usd: Number((0.21 * mult).toFixed(4)),`,
+    `  usage: { input_tokens: 300000 * mult, output_tokens: 10000 * mult, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },`,
+    `  modelUsage: { ${JSON.stringify(MODEL)}: { inputTokens: 300000 * mult, outputTokens: 10000 * mult, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },`,
+    `});`,
+    `out({ type: "system", subtype: "init", session_id: process.env.FAKE_SESSION_ID, tools: [], model: ${JSON.stringify(MODEL)} });`,
+    `const path = process.env.FAKE_TRANSCRIPT_PATH;`,
+    `mkdirSync(dirname(path), { recursive: true });`,
+    `const line = (id, input, output) => JSON.stringify({`,
+    `  type: "assistant",`,
+    `  message: { id, model: ${JSON.stringify(MODEL)}, usage: { input_tokens: input, output_tokens: output, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },`,
+    `});`,
+    `writeFileSync(path, [line("msg-a", 200000, 5000), line("msg-b", 100000, 3000)].join("\\n") + "\\n");`,
+    // 200 pad lines (~5 MB), backpressure-aware, so the results land at the
+    // very tail of the stream just before the process exits.
+    `const PAD = ${JSON.stringify(`pad ${"x".repeat(25_000)}\n`)};`,
+    `let pads = 0;`,
+    `function pump() {`,
+    `  while (pads < 200) {`,
+    `    pads++;`,
+    `    if (!process.stdout.write(PAD)) { process.stdout.once("drain", pump); return; }`,
+    `  }`,
+    `  out(result(1)); out(result(2)); out(result(3));`,
+    `  if (process.stdout.writableLength) process.stdout.once("drain", () => process.exit(0));`,
+    `  else process.exit(0);`,
+    `}`,
+    `pump();`,
+    ``,
+  ].join("\n"),
+);
+
+const runId4 = `test-watch-tail-${process.pid}`;
+ensureRunDir(runId4);
+writeRegistry(runId4, {
+  runId: runId4,
+  children: {
+    "dev-1": {
+      childId: "dev-1",
+      squad: "dev",
+      taskId: "FOC-999",
+      status: "starting",
+      sessionId: null,
+      costUsd: 0,
+      turns: [],
+      worktree: cwd,
+      permissionMode: "bypassPermissions",
+    },
+  },
+  rounds: {},
+});
+const sessionId4 = `watch-tail-${process.pid}`;
+const transcriptPath4 = join(configDir, "projects", cwdToHashName(cwd), `${sessionId4}.jsonl`);
+
+const result4 = spawnSync(
+  process.execPath,
+  [WATCH, "--run", runId4, "--child", "dev-1", "--cwd", cwd, "--prompt-file", promptFile, "--turn", "0"],
+  {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      LA_SUPERVISOR_STATE_HOME: stateHome,
+      LA_SQUAD_HOME: squadHome,
+      CLAUDE_CONFIG_DIR: configDir,
+      LA_SUPERVISOR_NO_TELEMETRY: "1",
+      LA_SUPERVISOR_NO_CODEGRAPH: "1",
+      LA_CLAUDE_BIN: FAKE_CLAUDE_BUSY,
+      FAKE_SESSION_ID: sessionId4,
+      FAKE_TRANSCRIPT_PATH: transcriptPath4,
+    },
+  },
+);
+
+test("the stdout tail (results behind a busy stream) reached the registry", () => {
+  assert.equal(result4.status, 0, `watcher exit ${result4.status}: ${result4.stderr}`);
+  const entry = readRegistry(runId4).children["dev-1"];
+  assert.equal(entry.status, "exited", "the turn is still reported done");
+  assert.equal(entry.costSource, "transcript");
+  assert.equal(
+    entry.costUsdReported,
+    0.63,
+    "the tail drained before the exit was recorded — MAX(0.21, 0.42, 0.63)",
+  );
+});
+
 console.log("");
 if (failures.length) {
   console.log(`${passed} passed, ${failures.length} FAILED`);
