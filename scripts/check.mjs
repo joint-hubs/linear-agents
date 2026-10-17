@@ -18,8 +18,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -127,12 +127,73 @@ function parseFrontmatter(content) {
   return fm;
 }
 
+// ── 0. config/models.map: regenerate when missing or older than its source ──
+
+/**
+ * config/models.map is generated (scripts/gen-model-map.mjs) and gitignored
+ * since FOC-779, so a fresh clone starts WITHOUT it — the old behaviour
+ * reported MISSING and ran no model checks. Instead, regenerate it here from
+ * config/models.json (the committed source of truth) whenever the map is
+ * missing or older than that file, then validate as below.
+ *
+ * Exported so the test suite runs the same regeneration through this seam.
+ * Never throws: a failed regeneration is reported to the caller, which logs
+ * it and lets the model checks below report MISSING.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.root] repo root (default: this checkout)
+ * @param {Function} [opts.spawnFn] injectable spawn of gen-model-map (tests); default spawnSync node <script>, shell:false
+ * @returns {{ status: 'ok'|'regenerated'|'failed', reason: string|null }}
+ */
+export function ensureModelsMap({ root = ROOT, spawnFn } = {}) {
+  const src = path.join(root, 'config', 'models.json');
+  const dst = path.join(root, 'config', 'models.map');
+  const script = path.join(root, 'scripts', 'gen-model-map.mjs');
+
+  const mtime = (p) => {
+    try { return fs.statSync(p).mtimeMs; } catch { return null; }
+  };
+  const mapM = mtime(dst);
+  const srcM = mtime(src);
+  const reason =
+    mapM === null ? 'missing' :
+    srcM !== null && mapM < srcM ? 'older than config/models.json' :
+    null;
+  if (!reason) return { status: 'ok', reason: null };
+
+  if (!fs.existsSync(script)) {
+    return { status: 'failed', reason: `${reason}, and scripts/gen-model-map.mjs not found to regenerate it` };
+  }
+  const run = spawnFn ||
+    ((args, opts) => spawnSync(process.execPath, args, { ...opts, shell: false }));
+  const res = run([script], { cwd: root, encoding: 'utf-8' });
+  if ((res && res.error) || (res && res.status !== 0)) {
+    const tail = (((res && res.stderr) || '') + '').trim().split('\n').pop() || 'unknown error';
+    return { status: 'failed', reason: `${reason} — regeneration failed: ${tail}` };
+  }
+  return { status: 'regenerated', reason };
+}
+
+// The module is also imported for its exported helper (check.test.mjs runs the
+// regeneration through this seam); everything from the State block on only
+// runs when invoked as a script — an import must not check anything or exit.
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMain) {
+
 // ── State ───────────────────────────────────────────────────────────
 
 const violations = [];
 
 function report(file, reason) {
   violations.push(`${file}: ${reason}`);
+}
+
+const ensured = ensureModelsMap();
+if (ensured.status === 'regenerated') {
+  console.log(`  PASS  config/models.map  →  regenerated (${ensured.reason})`);
+} else if (ensured.status === 'failed') {
+  report('config/models.map', `${ensured.reason} — the model checks below run against nothing`);
 }
 
 // ── 1. Read models.map ───────────────────────────────────────────────
@@ -490,3 +551,5 @@ if (count === 0) {
   console.log(`DRIFT: ${count} violations`);
   process.exit(1);
 }
+
+} // end isMain
