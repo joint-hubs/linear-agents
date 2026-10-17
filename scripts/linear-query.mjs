@@ -171,6 +171,8 @@ const ISSUE_DETAIL_QUERY = `
       state { id name type }
       priority
       estimate
+      project { id name }
+      team { id key name }
       createdAt
       updatedAt
       startedAt
@@ -287,7 +289,10 @@ async function cmdIssues(args, dryRun) {
   }
 }
 
-async function cmdIssue(args, dryRun) {
+// Exported (not part of the CLI surface) so the test suite can drive the
+// detail path in-process with a stubbed fetch — the dry-run fixture route
+// lives under .state/ and is not usable from tests.
+export async function cmdIssue(args, dryRun) {
   const identifier = args._[0];
   if (!identifier) {
     console.error("Usage: node scripts/linear-query.mjs issue <id|identifier>");
@@ -326,6 +331,7 @@ async function cmdIssue(args, dryRun) {
 
   console.log(`${issue.identifier}: ${issue.title}`);
   console.log(`State: ${issue.state?.name || "?"} (${issue.state?.type || "?"})`);
+  console.log(`Project: ${issue.project?.name || "(none)"}`);
   console.log(`Labels: ${labels || "(none)"}`);
   console.log(`Comments: ${comments.length}`);
   console.log(`Children: ${children.length}`);

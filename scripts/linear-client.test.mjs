@@ -7,10 +7,42 @@
 
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const MODULE_PATH = pathToFileURL(join(__dirname, "linear-client.mjs")).href;
+
+// ---------------------------------------------------------------------------
+// FOC-772 fixtures: the integrations switch is read through the Settings
+// overlay, so the tests pin it explicitly (LA_SETTINGS_FILE at temp files) —
+// a real overlay on the checkout can never flip these cases. The flag-on
+// overlay is the default for the whole file (today's behaviour); the flag-off
+// cases swap to their own overlay and restore.
+// ---------------------------------------------------------------------------
+const SETTINGS_DIR = mkdtempSync(join(tmpdir(), "linear-client-test-"));
+const SETTINGS_ON = join(SETTINGS_DIR, "settings-on.json");
+const SETTINGS_OFF = join(SETTINGS_DIR, "settings-off.json");
+// A corrupt overlay (FOC-772 hot-path fix): a non-boolean flag is a
+// validation error — workspaceEnabled must fail closed to off, not throw.
+const SETTINGS_BAD = join(SETTINGS_DIR, "settings-bad.json");
+writeFileSync(SETTINGS_ON, JSON.stringify({ integrations: { pisi: true } }));
+writeFileSync(SETTINGS_OFF, JSON.stringify({ integrations: { pisi: false } }));
+writeFileSync(SETTINGS_BAD, JSON.stringify({ integrations: { atlas: "yes" } }));
+process.env.LA_SETTINGS_FILE = SETTINGS_ON;
+
+/** Run `fn` with LA_SETTINGS_FILE pointed at `path`, then restore. */
+async function withSettings(path, fn) {
+  const saved = process.env.LA_SETTINGS_FILE;
+  process.env.LA_SETTINGS_FILE = path;
+  try {
+    return await fn();
+  } finally {
+    if (saved === undefined) delete process.env.LA_SETTINGS_FILE;
+    else process.env.LA_SETTINGS_FILE = saved;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Test harness
@@ -132,7 +164,7 @@ const ISSUE = {
 
 async function runTests() {
   const mod = await import(MODULE_PATH);
-  const { loadEnv, ENDPOINT, chooseApiKey, graphql, resolveTeam, resolveIssue } = mod;
+  const { loadEnv, ENDPOINT, chooseApiKey, graphql, resolveTeam, resolveIssue, workspaceEnabled, IntegrationOffError, integrationOffMessage, issueLookupLegs, queueTargetsPisi } = mod;
 
   // ---- Test 1: ENDPOINT is the Linear GraphQL URL ----
   assertEq(ENDPOINT, "https://api.linear.app/graphql", "ENDPOINT points at Linear");
@@ -194,6 +226,122 @@ async function runTests() {
     assertEq(f.calls.length, 0, "no HTTP request for a missing workspace key");
     f.restore();
   }
+
+  // ---- Test 7b: workspaceEnabled follows the integration switch (FOC-772) ----
+  assertEq(workspaceEnabled("jointhubs"), true, "the default workspace is always on");
+  assertEq(workspaceEnabled("pisi"), true, "pisi reads true with the flag on");
+  await withSettings(SETTINGS_OFF, () => {
+    assertEq(workspaceEnabled("pisi"), false, "pisi reads false with the flag off");
+  });
+  assertEq(integrationOffMessage("pisi"), `the pisi workspace is off — enable it with: node scripts/fenix-settings.mjs set integrations '{"pisi":true}'`,
+    "the refusal message states the exact fix");
+
+  // ---- Test 7c: chooseApiKey refuses a pisi request with the flag off (FOC-772) ----
+  {
+    let err = null;
+    await withSettings(SETTINGS_OFF, async () => {
+      try {
+        chooseApiKey("pisi");
+      } catch (e) {
+        err = e;
+      }
+    });
+    assert(err !== null, "chooseApiKey('pisi') with the flag off throws");
+    assert(err instanceof IntegrationOffError, "the refusal is the typed error");
+    assertEq(err?.code, "integration-off", "the refusal carries code 'integration-off'");
+    assertEq(err?.workspace, "pisi", "the refusal names the workspace");
+    assertEq(err?.message, integrationOffMessage("pisi"), "the refusal message matches the shared text");
+  }
+
+  // ---- Test 7d: LINEAR_WORKSPACE=pisi with the flag off is the same refusal ----
+  await withSettings(SETTINGS_OFF, async () => {
+    await withEnv({ LINEAR_API_KEY: "joi-key", LINEAR_WORKSPACE: "pisi" }, async () => {
+      let err = null;
+      try {
+        chooseApiKey();
+      } catch (e) {
+        err = e;
+      }
+      assert(err?.code === "integration-off", "the env default of pisi is a misconfiguration, not a silent jointhubs key");
+      assertEq(err?.workspace, "pisi", "the env-path refusal names pisi too");
+    });
+  });
+
+  // ---- Test 7e: graphql refuses a pisi request with the flag off before any call ----
+  {
+    const f = stubFetch(() => httpResponse({ body: { data: {} } }));
+    await withSettings(SETTINGS_OFF, async () => {
+      await assertRejects(
+        () => graphql("query { x }", {}, "pisi"),
+        (m) => m.includes("the pisi workspace is off"),
+        "graphql refuses a pisi request with the flag off",
+      );
+    });
+    assertEq(f.calls.length, 0, "no HTTP request for a pisi-off refusal");
+    f.restore();
+  }
+
+  // ---- Test 7f: a corrupt overlay fails closed to off, never throws (FOC-772) ----
+  // The hot paths (work routes, board, findIssueProject) sit on workspaceEnabled;
+  // a bad settings file must read as off with a warn, not take the route down.
+  await withSettings(SETTINGS_BAD, () => {
+    let result;
+    try {
+      result = workspaceEnabled("pisi");
+    } catch (e) {
+      result = `threw: ${e.message}`;
+    }
+    assertEq(result, false, "workspaceEnabled('pisi') reads false on a corrupt overlay, no throw");
+    assertEq(workspaceEnabled("jointhubs"), true, "the default workspace stays on on a corrupt overlay");
+  });
+
+  // ---- Test 7g: issueLookupLegs — the findIssueProject leg selection (FOC-772) ----
+  // Flag on: the default leg (undefined → LINEAR_WORKSPACE) then pisi.
+  await withSettings(SETTINGS_ON, async () => {
+    await withEnv({ LINEAR_WORKSPACE: undefined }, () => {
+      assertEq(
+        JSON.stringify(issueLookupLegs()),
+        JSON.stringify({ legs: [undefined, "pisi"], warnPisiEnvIgnored: false }),
+        "flag on → default leg then pisi",
+      );
+    });
+  });
+  // Flag off, default env: the default leg only, no warn needed.
+  await withSettings(SETTINGS_OFF, async () => {
+    await withEnv({ LINEAR_WORKSPACE: undefined }, () => {
+      assertEq(
+        JSON.stringify(issueLookupLegs()),
+        JSON.stringify({ legs: [undefined], warnPisiEnvIgnored: false }),
+        "flag off, plain env → the default leg only",
+      );
+    });
+    // Flag off + LINEAR_WORKSPACE=pisi: the env default is bypassed — the leg
+    // runs as jointhubs explicitly so chooseApiKey never refuses it, and the
+    // caller warns once.
+    await withEnv({ LINEAR_WORKSPACE: "pisi" }, () => {
+      assertEq(
+        JSON.stringify(issueLookupLegs()),
+        JSON.stringify({ legs: ["jointhubs"], warnPisiEnvIgnored: true }),
+        "flag off + env pisi → jointhubs explicitly, warn flagged",
+      );
+    });
+    // Flag on + LINEAR_WORKSPACE=pisi stays the normal shape.
+    await withSettings(SETTINGS_ON, async () => {
+      await withEnv({ LINEAR_WORKSPACE: "pisi" }, () => {
+        assertEq(issueLookupLegs().warnPisiEnvIgnored, false, "flag on + env pisi needs no warn");
+      });
+    });
+  });
+
+  // ---- Test 7h: queueTargetsPisi — explicit arg wins, env default otherwise ----
+  await withEnv({ LINEAR_WORKSPACE: "pisi" }, () => {
+    assertEq(queueTargetsPisi("pisi"), true, "explicit 'pisi' targets pisi");
+    assertEq(queueTargetsPisi(undefined), true, "no arg + LINEAR_WORKSPACE=pisi targets pisi");
+    assertEq(queueTargetsPisi("jointhubs"), false, "explicit 'jointhubs' beats the env default");
+  });
+  await withEnv({ LINEAR_WORKSPACE: "jointhubs" }, () => {
+    assertEq(queueTargetsPisi(undefined), false, "no arg + jointhubs env targets the default queue");
+  });
 
   // ---- Test 8: request shape — endpoint, method, auth header, body ----
   {
@@ -495,6 +643,80 @@ async function runTests() {
         "an unresolvable identifier throws",
       );
     });
+    f.restore();
+  }
+
+  // ---- Test 23b: both resolveIssue queries ask for project ----
+  // Task ownership checks read issue.project off every resolution path, so
+  // both the direct lookup and the search fallback must select it.
+  const normalized = (s) => s.replace(/\s+/g, " ");
+  {
+    const f = stubFetch((i) =>
+      i === 0
+        ? httpResponse({ body: { data: { issue: null } } })
+        : httpResponse({ body: { data: { searchIssues: { nodes: [ISSUE] } } } }),
+    );
+    await withEnv({ LINEAR_API_KEY: "k" }, () => resolveIssue("JOI-12"));
+    const direct = normalized(f.calls[0].body.query);
+    const search = normalized(f.calls[1].body.query);
+    assert(direct.includes("project { id name }"), "direct lookup selects project { id name }");
+    assert(search.includes("project { id name }"), "search fallback selects project { id name }");
+    f.restore();
+  }
+
+  // ---- Test 23c: a project on the response rides through unchanged ----
+  {
+    const withProject = { ...ISSUE, project: { id: "p1", name: "Fenix" } };
+    const f = stubFetch(() => httpResponse({ body: { data: { issue: withProject } } }));
+    const issue = await withEnv({ LINEAR_API_KEY: "k" }, () => resolveIssue("JOI-12"));
+    assertEq(issue.project.id, "p1", "project id passes through");
+    assertEq(issue.project.name, "Fenix", "project name passes through");
+    f.restore();
+  }
+
+  // ---- Test 23d: project: null is null, not undefined ----
+  // Linear returns project: null for an issue with no project; dropping the
+  // key (or undefined) would break the ownership check's null handling.
+  {
+    const f = stubFetch(() =>
+      httpResponse({ body: { data: { issue: { ...ISSUE, project: null } } } }),
+    );
+    const issue = await withEnv({ LINEAR_API_KEY: "k" }, () => resolveIssue("JOI-12"));
+    assert(Object.hasOwn(issue, "project"), "the project key is present on the result");
+    assertEq(issue.project, null, "a null project passes through as null");
+    f.restore();
+  }
+
+  // ---- Test 23e: the search fallback passes project through too ----
+  {
+    const f = stubFetch((i) =>
+      i === 0
+        ? httpResponse({ body: { data: { issue: null } } })
+        : httpResponse({
+            body: {
+              data: {
+                searchIssues: { nodes: [{ ...ISSUE, project: { id: "p2", name: "Pisi" } }] },
+              },
+            },
+          }),
+    );
+    const issue = await withEnv({ LINEAR_API_KEY: "k" }, () => resolveIssue("JOI-12"));
+    assertEq(issue.project.name, "Pisi", "search fallback returns the project");
+    f.restore();
+  }
+
+  // ---- Test 23f: a null project through the fallback stays null ----
+  {
+    const f = stubFetch((i) =>
+      i === 0
+        ? httpResponse({ body: { data: { issue: null } } })
+        : httpResponse({
+            body: { data: { searchIssues: { nodes: [{ ...ISSUE, project: null }] } } },
+          }),
+    );
+    const issue = await withEnv({ LINEAR_API_KEY: "k" }, () => resolveIssue("JOI-12"));
+    assert(Object.hasOwn(issue, "project"), "the project key survives the fallback");
+    assertEq(issue.project, null, "a null project through search stays null");
     f.restore();
   }
 

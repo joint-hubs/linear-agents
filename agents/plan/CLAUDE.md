@@ -18,7 +18,7 @@ The contract is this file; the specs are reference depth. Read only what the tas
 
 <plan_linear_tools>
 ## Linear tools
-Access Linear via `node $LA_ROOT/scripts/linear-query.mjs` (read) and `node $LA_ROOT/scripts/linear-ops.mjs` (write). `mcp__linear__*` is not available headless in this environment — use the scripts.
+Access Linear via `node $LA_ROOT/scripts/linear-query.mjs` (read) and `node $LA_ROOT/scripts/linear-ops.mjs` (write). `mcp__linear__*` is not available headless in this environment — use the scripts. Under a Supervisor the harness denies every invocation form of these scripts (FOC-511, `SUPERVISOR_DENY`) — put the Linear write into your turn report and the Supervisor relays it; the push role's `linear-push.mjs` is denied the same way, so the Supervisor publishes the brief, while standalone PLAN runs keep using it.
 </plan_linear_tools>
 
 <plan_squad>
@@ -73,6 +73,7 @@ Context budget: when your turn approaches ~70% of the context window, write `.st
 <plan_tools>
 ## Tools
 Registry: `docs/tools/README.md` (one-page, check before sweeping with Grep). **code-intel** — graph first for structural navigation: `mcp__codegraph__codegraph_explore` (one call: source + call paths + blast radius). Target-worktree index is provisioned once at launch; every query is freshness-guarded — pending changes synced incrementally, never answered from a stale graph. Guarded MCP exists only where that repo's `.mcp.json` routes codegraph through `scripts/mcp/server-codegraph.mjs` (this repo); in an external repo MCP is unguarded or absent — use the guarded CLI there and never inject the adapter into a foreign `.mcp.json`. Missing/stale/unprovable → UNKNOWN: fall back to direct file reads and say so — a graph "not found" is never proof of absence. Impact before editing a shared symbol; `affected` before committing, then run the tests it names. Guarded CLI: `node $LA_ROOT/scripts/code-intel.mjs <explore|symbol|impact|callers|callees|find|files|affected> ... --project-root <task-worktree>` — `$LA_ROOT` is the tooling checkout; `--project-root` names the graph target (new code defaults it to the caller's repo). **graphify** whole-corpus → knowledge graph (see `docs/tools/graphify.md`). Propose a missing tool in the hand-off per `docs/tools/AUTHORING.md` — never mid-run, never edit your own instructions (changes under `agents/**` go to Mateusz).
+Working state: follow the `working-state` skill — get before searching, set what you need again, never write the store file directly.
 </plan_tools>
 
 <plan_loop>
@@ -86,6 +87,7 @@ Registry: `docs/tools/README.md` (one-page, check before sweeping with Grep). **
 
 ### 3. GATE 1 — HITL (sync inline)
 Present the brief + open questions to Mateusz inline. Think through gaps before presenting, then ask and wait for ✅ / answers.
+Before GATE 1, run the `grilling` skill on the brief: facts are settled by subagents, the open decisions become the brief's numbered questions, each with a recommended answer.
 - HITL here is interactive REPL (sync inline confirmation), not async `needs:approval` / walk away. **Unless `LA_SUPERVISOR=1`** — see *Supervised mode*. Supervised, GATE 1 is a `plan.gate1` record and the turn ends there.
 - Empty / unclear input → do not plan. Re-ask.
 - On ✅ → continue.

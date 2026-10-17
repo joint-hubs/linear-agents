@@ -686,7 +686,7 @@ export function getQuality(period, signal) {
 }
 
 // ===== Settings (FOC-786) =====
-// Keys, provider & routing, repositories, retention. A key value travels only
+// Keys, provider & routing, repositories, retention, artifacts (FOC-779). A key value travels only
 // in the PUT body — never the URL, never a GET — and never comes back: the
 // server answers with check results only, so err.data cannot carry one either.
 
@@ -754,6 +754,26 @@ export function unmapSettingsRepo(name) {
 
 export async function getSettingsRetention(signal) {
   return apiFetch('/api/settings/retention', signal);
+}
+
+// Agent tools (FOC-906) — read-only: every agent's permission lists, MCP
+// servers and skills, plus the check summary. Editing stays in the CLI.
+export async function getAgentTools(signal) {
+  return apiFetch('/api/settings/agent-tools', signal);
+}
+// Generated artifacts (FOC-779) — the read-only registry status: { computedAt,
+// head, artifacts: [{ id, title, output, exists, outputMtime, age, head,
+// digest, manifest: { head, digest, generatedAt } | null, state, reason,
+// refresh, committed }] } from the server's tick cache.
+export async function getArtifacts(signal) {
+  return apiFetch('/api/artifacts', signal);
+}
+// Body: { keepDays, minFreeGiB } — keepDays null = keep everything (the
+// default). The server validates, writes the overlay and applies
+// cleanupPeriodDays to every squad, then answers with the same shape as GET
+// plus the dry-run prune estimate. Errors are { error, detail } with 400.
+export function putSettingsRetention(body) {
+  return putJson('/api/settings/retention', body ?? {});
 }
 
 // Terminal WebSocket URL on the same origin (wss behind https). API_BASE as an

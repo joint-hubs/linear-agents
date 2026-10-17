@@ -233,6 +233,25 @@ function safeReadJson(path) {
   }
 }
 
+// The winner creates the lock file (O_EXCL) a moment BEFORE it writes the
+// record, so a loser can hit EEXIST while the file is still empty and would
+// otherwise report "a holder whose record could not be read" for a holder that
+// is alive and well. Poll briefly for the record to appear; a holder that
+// crashed mid-write leaves the file unreadable for good, and after the bound
+// the refusal still fires — naming an unknown holder. Fail-closed either way:
+// this only improves the MESSAGE, never the decision.
+const LOCK_RECORD_GRACE_MS = 2_000;
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+function readHolderRecord(path) {
+  for (let waited = 0; ; waited += 10) {
+    const record = safeReadJson(path);
+    if (record) return record;
+    if (waited >= LOCK_RECORD_GRACE_MS) return null;
+    sleepSync(10);
+  }
+}
+
 /** The refusal for "someone else holds the lock". Names the holder, never steals. */
 function lockHeldError(path, record) {
   const holder = record
@@ -263,7 +282,7 @@ function acquireLockFile(commonDir, ownerId) {
     fd = openSync(path, "wx"); // atomic exclusive create — the whole race decision
   } catch (err) {
     if (err.code !== "EEXIST") throw err;
-    throw lockHeldError(path, safeReadJson(path));
+    throw lockHeldError(path, readHolderRecord(path));
   }
   try {
     writeSync(fd, JSON.stringify({ ownerId, token: PROCESS_TOKEN, pid: process.pid, acquiredAt: new Date().toISOString() }, null, 2) + "\n", null, "utf8");

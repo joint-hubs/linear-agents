@@ -54,6 +54,14 @@ import { pidAlive } from "./supervisor-current-run.mjs";
 import { ROOT, ensureRunDir, failJson, intakePath, parseArgs, triagePath } from "./supervisor-lib.mjs";
 import { issuePartOf, readActiveSessions, resolveTaskKey, taskSessionsDbPath, workspaceNameFor } from "./task-sessions.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
+import {
+  OwnershipConfigError,
+  checkOwnership,
+  currentOwner,
+  loadOwnership,
+  ownershipRefusal,
+  recordOwnershipHold,
+} from "./task-ownership.mjs";
 
 const VERDICTS = ["plan", "dev", "review", "test", "ask"];
 
@@ -728,6 +736,27 @@ function cmdPropose(args) {
   const issue = loadIssue(args);
   const signals = extractSignals(issue);
 
+  // Ownership (FOC-848): the proposal is advisory, but a ticket this
+  // installation may not take is refused here too — the Supervisor should
+  // learn it before `record`, not after. A broken config is fail-closed.
+  let ownership;
+  try {
+    ownership = checkOwnership(issue, { owner: currentOwner(), config: loadOwnership() });
+  } catch (err) {
+    if (err instanceof OwnershipConfigError) failJson(err.message, { code: "ownership-config" });
+    throw err;
+  }
+  // The hold's idempotency key: the payload identifier when the payload carries
+  // one, the invoked id otherwise — the SAME key `record` uses, so a
+  // propose-then-record on one refused ticket is one hold, not two.
+  const canonicalIssue = issue.identifier || args.issue;
+  if (!ownership.allowed) {
+    const refusal = ownershipRefusal(ownership, canonicalIssue);
+    const runId = args.run || process.env.LA_SUPERVISOR_RUN;
+    const hold = recordOwnershipHold({ runId, issueId: canonicalIssue, result: ownership });
+    failJson(refusal.message, { code: refusal.code, ownership, hold: hold?.id ?? null });
+  }
+
   let result;
   try {
     result = propose(signals, graph);
@@ -736,7 +765,20 @@ function cmdPropose(args) {
   }
 
   console.log(
-    JSON.stringify({ ok: true, issue: signals.identifier || args.issue, ...result, signals }, null, 2),
+    JSON.stringify(
+      {
+        ok: true,
+        issue: signals.identifier || args.issue,
+        ...result,
+        signals,
+        // AC3: on the shipped default (unrestricted) the output is what it was
+        // before the gate existed — no ownership key. A restricted install
+        // carries the verdict on the proposal.
+        ...(ownership.verdict === "unrestricted" ? {} : { ownership }),
+      },
+      null,
+      2,
+    ),
   );
 }
 
@@ -776,6 +818,75 @@ function cmdRecord(args) {
 
   const runId = args.run || process.env.LA_SUPERVISOR_RUN;
   if (!runId) failJson("--run <supervisorRunId> is required (or set LA_SUPERVISOR_RUN)");
+
+  // Ownership gate (FOC-848), before anything is written: on a restricted
+  // install the issue is loaded (honouring --issue-file, the offline seam) and
+  // checked against the acting owner. A refused ticket records an idempotent
+  // hold and writes NO triage.json — --force does not bypass it, because a
+  // forced verdict for a foreign ticket would still retarget every spawn in
+  // the run. An unrestricted install loads no issue and stamps nothing:
+  // byte-for-byte the behaviour this file had before the gate existed.
+  const ownershipConfig = (() => {
+    try {
+      return loadOwnership();
+    } catch (err) {
+      if (err instanceof OwnershipConfigError) failJson(err.message, { code: "ownership-config" });
+      throw err;
+    }
+  })();
+  let ownershipStamp = null;
+  if (ownershipConfig.restricted) {
+    const owner = (() => {
+      try {
+        return currentOwner();
+      } catch (err) {
+        if (err instanceof OwnershipConfigError) failJson(err.message, { code: "ownership-config" });
+        throw err;
+      }
+    })();
+    const issue = loadIssue(args);
+    // The hold's idempotency key: the payload identifier when the payload
+    // carries one, the invoked id otherwise. `propose` keys its hold the same
+    // way, so a propose-then-record on one refused ticket is one hold, not two.
+    const canonicalIssue = issue.identifier || args.issue;
+    let ownership;
+    try {
+      ownership = checkOwnership(issue, { owner, config: ownershipConfig });
+    } catch (err) {
+      if (err instanceof OwnershipConfigError) failJson(err.message, { code: "ownership-config" });
+      throw err;
+    }
+    if (!ownership.allowed) {
+      const refusal = ownershipRefusal(ownership, canonicalIssue);
+      const hold = recordOwnershipHold({ runId, issueId: canonicalIssue, result: ownership });
+      // A refused re-record must not leave the previous verdict's spawn licence
+      // behind: triage.json may still carry `ownership.allowed: true` recorded
+      // before the config flipped (project reassigned, unlisted → ask), and
+      // supervisor-spawn honours that stale stamp. Strip the stamp — the
+      // verdict stays on record, the licence to spawn does not.
+      const priorPath = triagePath(runId);
+      if (existsSync(priorPath)) {
+        try {
+          const prior = JSON.parse(readFileSync(priorPath, "utf8"));
+          if (
+            typeof prior?.issue === "string" &&
+            prior.issue.toLowerCase() === args.issue.toLowerCase() &&
+            prior.ownership !== undefined
+          ) {
+            const stripped = { ...prior };
+            delete stripped.ownership;
+            ensureRunDir(runId);
+            atomicWriteJSON(priorPath, stripped);
+          }
+        } catch {
+          // An unreadable triage.json is already unusable to spawn; the
+          // refusal below stands on its own.
+        }
+      }
+      failJson(refusal.message, { code: refusal.code, ownership, hold: hold?.id ?? null });
+    }
+    ownershipStamp = { owner: ownership.owner, verdict: ownership.verdict, allowed: true, project: ownership.project };
+  }
 
   const graph = loadGraphOrFail();
   let node;
@@ -876,10 +987,12 @@ function cmdRecord(args) {
     ...(size ? { size, suggestedFlow: sizeFlow } : {}),
     ...(intakeView ? { intake: intakeView } : {}),
     lease,
+    ...(ownershipStamp ? { ownership: ownershipStamp } : {}),
   };
 
   ensureRunDir(runId);
-  atomicWriteJSON(path, record);
+  // 0644: run-root files are Supervisor-owned; children may read, never write.
+  atomicWriteJSON(path, record, { mode: 0o644 });
 
   if (sizeFlow) { try { recordRuntimeChoice(sizeFlow); } catch { console.error('[runtime] workflow choice could not be recorded'); } }
 
@@ -960,7 +1073,7 @@ async function cmdIntake(args) {
   const path = intakePath(runId);
   try {
     ensureRunDir(runId);
-    atomicWriteJSON(path, record);
+    atomicWriteJSON(path, record, { mode: 0o644 }); // run-root: Supervisor-owned
   } catch (err) {
     failJson(`could not write ${path}: ${err.message}`);
   }

@@ -34,13 +34,15 @@
 //
 // Briefing mode (FOC-609) is the SessionStart digest: one call at the start of
 // a turn that names everything the lead owes attention to — live and held
-// children, pending gates, un-acked wake rows, the last action per child. It is
+// children, pending gates, open holds (FOC-848), un-acked wake rows, the last
+// action per child. It is
 // read-only and deliberately tolerant of a run that does not exist yet: the
 // SessionStart hook fires before the first spawn too, and a hook that exits 1
 // would inject an error into the session context instead of a briefing.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { atomicWriteJSON } from "./utils.mjs";
 import { readFocus } from "./supervisor-focus.mjs";
@@ -48,6 +50,7 @@ import { pidAlive } from "./supervisor-current-run.mjs";
 import { readActiveSessions, taskSessionsDbPath } from "./task-sessions.mjs";
 import {
   TERMINAL_STATUSES,
+  openHolds,
   pollBaseMs,
   readHeld,
   readWakeAck,
@@ -194,6 +197,32 @@ function teeActivity(runId, childId) {
   return { size: s.size, mtimeMs: s.mtimeMs };
 }
 
+// FOC-848: the run's OPEN holds (FOC-612) beside the pending gates — an
+// ownership refusal (origin `ownership`) is a decision owed to Mateusz exactly
+// like a gate, and the briefing is where the lead looks first. Fail-soft by
+// design: readHolds throws on a store nobody can parse (one file, nothing
+// well-formed to keep visible), and a briefing that crashed on it would be a
+// briefing nobody gets — the error is surfaced as `holdsError` instead.
+function briefingHolds(runId) {
+  try {
+    const holds = openHolds(runId);
+    return {
+      holds: holds.map((h) => ({
+        id: h.id,
+        origin: h.origin,
+        impact: h.impact ?? null,
+        question: String(h.question).slice(0, 160),
+        recommendation: h.recommendation,
+        createdAt: h.createdAt,
+        presentedAt: h.presentedAt,
+      })),
+      holdsCount: holds.length,
+    };
+  } catch (err) {
+    return { holds: [], holdsCount: 0, holdsError: err.message };
+  }
+}
+
 function pendingGates(runId) {
   const dir = gatesDir(runId);
   if (!existsSync(dir)) return [];
@@ -227,6 +256,41 @@ function noteUnverifiedCost(snap) {
   console.error(`cost includes ${ids.length} unverified legacy figure(s): ${ids.join(", ")}`);
 }
 
+// FOC-802: the human counterpart of the `isolated` snapshot field. Only
+// meaningful inside the container — on a native host nothing was ever isolated,
+// so one line per unisolated child would be pure noise. Same channel as the
+// note above: stderr, because stdout is the JSON the Supervisor parses and a
+// note it cannot read is a note it cannot act on.
+function noteIsolation(snap) {
+  if (process.env.FENIX_IN_CONTAINER !== "1") return;
+  for (const c of snap.children) {
+    if (c.isolated === false) console.error(`isolation: off (${c.childId})`);
+  }
+}
+
+// FOC-607: requested vs served, per child. `model`/`modelSource` are the
+// registry pin spawn wrote; `initModel` is what the child's system/init
+// reported — taken from the latest turn that has one, else null (the event
+// never came). Drift means both are known and differ: the run did not happen
+// on the model the registry names.
+function modelFields(entry) {
+  const turns = Array.isArray(entry.turns) ? entry.turns : [];
+  const initModel = [...turns].reverse().find((t) => t && t.initModel != null)?.initModel ?? null;
+  const modelDrift =
+    typeof entry.model === "string" && typeof initModel === "string" && entry.model !== initModel;
+  return { model: entry.model ?? null, modelSource: entry.modelSource ?? null, initModel, modelDrift };
+}
+
+// FOC-607: one line per drifted child, on stderr beside the unverified-cost
+// note — same reasoning, the parsed channel stays unpolluted.
+function noteModelDrift(children) {
+  for (const c of children) {
+    if (c.modelDrift) {
+      console.error(`model drift: ${c.childId} requested ${c.model}, served ${c.initModel}`);
+    }
+  }
+}
+
 function snapshot(runId, { childFilter, tail }) {
   const registry = readRegistry(runId);
   const now = Date.now();
@@ -247,8 +311,16 @@ function snapshot(runId, { childFilter, tail }) {
     const turnStart = liveTurn?.startedAt ? Date.parse(liveTurn.startedAt) : NaN;
     const activityMs = Math.max(activity.mtimeMs || 0, Number.isFinite(turnStart) ? turnStart : 0);
     const silentMs = activityMs ? now - activityMs : null;
+    // FOC-802: the LATEST turn's isolation. `true` — that turn's claude spawn
+    // went through the drop-privilege helper; `false` — it did not; `null` —
+    // the child has no recorded turn yet.
+    const lastTurn = turns.length ? turns[turns.length - 1] : null;
+    const isolated = lastTurn ? (lastTurn.isolated ?? null) : null;
     return {
       ...entry,
+      isolated,
+      // FOC-607: what was requested vs what actually served, per child.
+      ...modelFields(entry),
       events: tailEvents(runId, entry.childId, tail),
       silentMs,
       // Stalled is only meaningful for a child that is supposed to be producing
@@ -319,6 +391,35 @@ function snapshot(runId, { childFilter, tail }) {
   };
 }
 
+// ── the task journal (FOC-904) ───────────────────────────────────────────────
+// The per-task journal for the task this session is charged to (LA_TASK_ID).
+// Read-only here: entries are written by state-journal.mjs, never by status.
+
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+function readTaskJournal(taskId) {
+  if (!taskId) return null;
+  const root = process.env.LA_ROOT ? resolve(process.env.LA_ROOT) : REPO_ROOT;
+  const rel = `docs/state/${taskId}.md`;
+  const path = join(root, "docs", "state", `${taskId}.md`);
+  if (!existsSync(path)) return null;
+  let text = "";
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  const entries = (text.match(/^## /gm) || []).length;
+  const stamps = [...text.matchAll(/^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) — /gm)].map((m) => m[1]);
+  return { path: rel, entries, lastAt: stamps.length ? stamps[stamps.length - 1] : null };
+}
+
+function journalLine(journal, taskId) {
+  if (!taskId) return null;
+  if (!journal) return "Journal: none yet — node scripts/state-journal.mjs init";
+  return `Journal: ${journal.path} (${journal.entries} entries, last ${journal.lastAt ?? "-"})`;
+}
+
 const args = parseArgs(process.argv.slice(2));
 const runId = args.run || process.env.LA_SUPERVISOR_RUN;
 const childFilter = args.child || null;
@@ -344,6 +445,14 @@ if (args.briefing) {
   // FOC-902 §C: the managed-session leases, next to the focus — which ticket
   // this session holds (if any) and which other live sessions hold the rest.
   const leases = leasesOf(process.env);
+  const briefingJournal = readTaskJournal(process.env.LA_TASK_ID);
+  // FOC-607: a served model diverging from the pin is attention the lead owes;
+  // stderr keeps the briefing's stdout parseable.
+  for (const c of entries) {
+    const { model, initModel, modelDrift } = modelFields(c);
+    if (modelDrift) console.error(`model drift: ${c.childId} requested ${model}, served ${initModel}`);
+  }
+  const holdsView = briefingHolds(runId);
   console.log(
     JSON.stringify(
       {
@@ -356,6 +465,12 @@ if (args.briefing) {
         focusLine: focusLine(briefingFocus),
         leases,
         leasesLine: leasesLine(leases),
+        // FOC-904: the task-scoped journal for this session's task, plus the
+        // one-line version for the briefing text. `journal: null` with
+        // LA_TASK_ID set means the journal was never inited — the line names
+        // the command that creates it. No LA_TASK_ID → both null.
+        journal: briefingJournal,
+        journalLine: journalLine(briefingJournal, process.env.LA_TASK_ID),
         live: entries
           .filter((c) => !TERMINAL_STATUSES.includes(c.status))
           .map((c) => ({ childId: c.childId, squad: c.squad ?? null, status: c.status })),
@@ -371,6 +486,12 @@ if (args.briefing) {
           childId: g.childId ?? null,
           summary: g.summary,
         })),
+        // FOC-848: the open holds.json holds (count + the fields needed to
+        // present one), next to the gates. An unreadable store is an error
+        // field, never a crash and never a silent empty list.
+        holds: holdsView.holds,
+        holdsCount: holdsView.holdsCount,
+        ...(holdsView.holdsError ? { holdsError: holdsView.holdsError } : {}),
         wake: {
           ackedThrough,
           unackedCount: unacked.length,
@@ -470,6 +591,8 @@ if (args.ack !== undefined) {
 if (!args.wait) {
   const snap = { ...snapshot(runId, { childFilter, tail }), mode: "snapshot" };
   noteUnverifiedCost(snap);
+  noteIsolation(snap);
+  noteModelDrift(snap.children);
   console.log(JSON.stringify(snap, null, 2));
   process.exit(0);
 }
@@ -489,7 +612,7 @@ mkdirSync(runDir(runId), { recursive: true });
 atomicWriteJSON(waitArmedPath(runId), {
   armedAt,
   expiresAt: deadline + ARMED_GRACE_MS,
-});
+}, { mode: 0o644 });
 
 const before = snapshot(runId, { childFilter, tail: 0 });
 const gatesBefore = new Set(before.pendingGates.map((g) => g.gateId));
@@ -551,12 +674,14 @@ try {
     spentAt: new Date().toISOString(),
     outcome: reason,
     expiresAt: Date.now() + SPENT_GRACE_MS,
-  });
+  }, { mode: 0o644 });
 }
 
 const final = snapshot(runId, { childFilter, tail });
 
 noteUnverifiedCost(final);
+noteIsolation(final);
+noteModelDrift(final.children);
 
 console.log(
   JSON.stringify(

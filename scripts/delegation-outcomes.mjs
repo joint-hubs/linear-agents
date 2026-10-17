@@ -35,24 +35,43 @@
  */
 
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { telemetryDbPath } from "./fenix-paths.mjs";
+import { stateRoot, telemetryDbPath } from "./fenix-paths.mjs";
+import { collectRunScratch } from "./supervisor-lib.mjs";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const REVIEWS = join(ROOT, ".state", "reviews");
-const ROUNDS = join(ROOT, ".state", "review-rounds.json");
 const DB_PATH = telemetryDbPath();
 
-const args = process.argv.slice(2);
-const AS_JSON = args.includes("--json");
-const BY_TASK = args.includes("--by-task");
-const CSV_DIR = (() => {
-  const i = args.indexOf("--csv");
-  return i >= 0 ? args[i + 1] : null;
-})();
+// FOC-903 review: the legacy inputs are derived from the SAME state root the
+// writer (utils.mjs reviewRound, via ensureStateDir → stateRoot()) resolves, so
+// reader and writer agree wherever LA_STATE_ROOT points — in the container and
+// anywhere else. Resolved at CALL time: the seam is honoured however late the
+// env is set (telemetry-server imports this module without any argv).
+const legacyReviewsDir = () => join(stateRoot(), "reviews");
+const legacyRoundsPath = () => join(stateRoot(), "review-rounds.json");
+
+/**
+ * The CLI options, parsed ONLY in main() — importing this module (telemetry-server
+ * does, for computeOutcomes) never reads process.argv.
+ */
+function parseCliArgs(argv) {
+  const opt = (name) => {
+    const i = argv.indexOf(name);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
+  return {
+    asJson: argv.includes("--json"),
+    byTask: argv.includes("--by-task"),
+    csvDir: opt("--csv") ?? null,
+    // FOC-903: the legacy inputs stay overridable (the per-run scan defaults to
+    // the real state home, like every other supervisor tool).
+    reviewsDir: opt("--reviews-dir"),
+    roundsPath: opt("--rounds-path"),
+    stateHome: opt("--state-home"),
+  };
+}
 
 // ── read the verdicts REVIEW already wrote ────────────────────────────────────
 //
@@ -257,20 +276,25 @@ export function parseReview(text, taskId, round) {
 // Exported for verdict-evidence.mjs (FOC-219): the projection reuses this loader
 // verbatim instead of re-parsing round files. Additive keyword only — F1 semantics
 // and its 123-check suite are untouched.
-export function loadReviews(reviewsDir = REVIEWS) {
+//
+// Each record carries `file` (basename), `filePath` (absolute) and `runId`
+// (null here — legacy dir); the per-run loader (FOC-903) fills runId in and
+// legacyRow in verdict-evidence.mjs uses the paths for the artifact digest.
+export function loadReviews(reviewsDir = legacyReviewsDir()) {
   if (!existsSync(reviewsDir)) return { reviews: [], readErrors: [] };
   const reviews = [];
   const readErrors = [];
   for (const file of readdirSync(reviewsDir)) {
     const m = file.match(/^(.+)-round(\d+)\.md$/);
     if (!m) continue; // helpers (_prompt-*.txt, _run-pass.sh) and non-round files never match
+    const filePath = join(reviewsDir, file);
     try {
-      reviews.push(parseReview(readFileSync(join(reviewsDir, file), "utf8"), m[1], Number(m[2])));
+      reviews.push({ ...parseReview(readFileSync(filePath, "utf8"), m[1], Number(m[2])), file, filePath, runId: null });
     } catch (error) {
       // FOC-218 §4.1.9: a read failure is evidence, not something to swallow.
       // The round counts as UNKNOWN and the error surfaces in parseAnomalies.
       readErrors.push({
-        file: join(reviewsDir, file),
+        file: filePath,
         taskId: m[1],
         round: Number(m[2]),
         reason: "read-error",
@@ -281,11 +305,81 @@ export function loadReviews(reviewsDir = REVIEWS) {
         verdict: "UNKNOWN", evidence: null, unknownReasons: ["read-error"],
         returned: false, blocker: false,
         issues: 0, nitpicks: 0, suggestions: 0, reviewRunId: null,
+        file, filePath, runId: null,
       });
     }
   }
   reviews.sort((a, b) => a.taskId.localeCompare(b.taskId) || a.round - b.round);
   return { reviews, readErrors };
+}
+
+// ── per-run scratch inputs (FOC-903) ──────────────────────────────────────────
+//
+// In a supervised run REVIEW children write round files under
+// `<runDir>/scratch/reviews/` and the counter into `<runDir>/review-rounds.json`;
+// standalone squads still use the legacy `.state/` locations. Readers take the
+// UNION: every run's inputs (newest run wins per task / per (task, round)) with
+// the legacy locations merged in at LOWER precedence.
+
+/**
+ * Parse the per-run round files a `collectRunScratch()` scan found. Same record
+ * shape and read-error contract as loadReviews(), plus `runId` on every record.
+ *
+ * @param {object} collected - the result of collectRunScratch() (utils.mjs).
+ */
+export function loadRunReviews(collected = collectRunScratch()) {
+  const reviews = [];
+  const readErrors = [];
+  for (const { taskId, round, file, runId } of collected.reviews) {
+    try {
+      reviews.push({ ...parseReview(readFileSync(file, "utf8"), taskId, round), file: basename(file), filePath: file, runId });
+    } catch (error) {
+      readErrors.push({
+        file,
+        taskId,
+        round,
+        reason: "read-error",
+        detail: String(error?.message || error),
+      });
+      reviews.push({
+        taskId, round,
+        verdict: "UNKNOWN", evidence: null, unknownReasons: ["read-error"],
+        returned: false, blocker: false,
+        issues: 0, nitpicks: 0, suggestions: 0, reviewRunId: null,
+        file: basename(file), filePath: file, runId,
+      });
+    }
+  }
+  return { reviews, readErrors };
+}
+
+/**
+ * Merge legacy and per-run review records: one record per (taskId, round), the
+ * per-run side winning (newest run already won inside collectRunScratch), the
+ * legacy record surviving only where no run claims the cell.
+ */
+export function mergeReviews(legacyReviews, runReviews) {
+  const byKey = new Map();
+  for (const r of runReviews) byKey.set(`${r.taskId}|${r.round}`, r);
+  for (const r of legacyReviews) {
+    const key = `${r.taskId}|${r.round}`;
+    if (!byKey.has(key)) byKey.set(key, r);
+  }
+  return [...byKey.values()].sort((a, b) => a.taskId.localeCompare(b.taskId) || a.round - b.round);
+}
+
+/**
+ * Fold per-run counters over the legacy counter object: the per-run value wins
+ * per task (newest run already won inside collectRunScratch); a task only the
+ * legacy file knows keeps its legacy value. The shape aggregateOutcomes()
+ * reads — plain numbers — is preserved.
+ */
+export function withPerRunRounds(legacyCounter, runRounds) {
+  const counter = { ...legacyCounter };
+  for (const [taskId, entry] of runRounds) {
+    counter[taskId] = Number(entry?.round) || 0;
+  }
+  return counter;
 }
 
 /**
@@ -455,15 +549,24 @@ function bareModel(model) {
  * shelling out to this CLI. Returns null when there is nothing to read, rather
  * than throwing — a dashboard panel must degrade, not take the page down.
  */
-export function computeOutcomes({ dbPath = DB_PATH, reviewsDir = REVIEWS, roundsPath = ROUNDS } = {}) {
-  const { reviews, readErrors } = loadReviews(reviewsDir);
+export function computeOutcomes({ dbPath = DB_PATH, reviewsDir = legacyReviewsDir(), roundsPath = legacyRoundsPath(), stateHome } = {}) {
+  // FOC-903: reviews = every run's `<runDir>/scratch/reviews/*.md` plus the
+  // legacy dir; per-run wins per (taskId, round), the legacy record surviving
+  // only where no run claims the cell. `--reviews-dir`/`--rounds-path` keep
+  // working — they remain the legacy inputs.
+  const legacy = loadReviews(reviewsDir);
+  const collected = collectRunScratch({ stateHome });
+  const run = loadRunReviews(collected);
+  const reviews = mergeReviews(legacy.reviews, run.reviews);
+  const readErrors = [...legacy.readErrors, ...run.readErrors];
   if (!reviews.length) return null;
 
   // The round counter is REVIEW's own state; it may know about tasks whose round
   // files were cleaned up. aggregateOutcomes() folds it in without ever letting a
   // counter value fabricate a verdict (FOC-218 §4.3). A malformed counter degrades
   // to {} — same contract as a read-error: the dashboard keeps working and the
-  // evidence surfaces in parseAnomalies.
+  // evidence surfaces in parseAnomalies. Per-run counters (FOC-903) fold in over
+  // it, the newest run winning per task.
   let counter = {};
   let counterAnomaly = null;
   if (existsSync(roundsPath)) {
@@ -476,6 +579,7 @@ export function computeOutcomes({ dbPath = DB_PATH, reviewsDir = REVIEWS, rounds
       };
     }
   }
+  counter = withPerRunRounds(counter, collected.rounds);
   const { byTask: taskOutcomes, anomalies: aggregateAnomalies } = aggregateOutcomes(reviews, counter);
 
   const db = new DatabaseSync(dbPath, { readOnly: true });
@@ -710,10 +814,14 @@ function writeCsv(path, columns, rows) {
  * computeOutcomes()'s internals, so the function telemetry-server imports stays untouched —
  * this is purely additive.
  */
-function buildCsvExports(dir) {
+function buildCsvExports(dir, { reviewsDir, roundsPath, stateHome }) {
   mkdirSync(dir, { recursive: true });
 
-  const result = computeOutcomes();
+  const result = computeOutcomes({
+    reviewsDir,
+    roundsPath,
+    stateHome,
+  });
   const db = new DatabaseSync(DB_PATH, { readOnly: true });
   const delegations = delegationsByTask(db);
 
@@ -794,9 +902,10 @@ function buildCsvExports(dir) {
 }
 
 function main() {
-  if (CSV_DIR) {
-    const outDir = resolve(CSV_DIR);
-    const summary = buildCsvExports(outDir);
+  const cli = parseCliArgs(process.argv.slice(2));
+  if (cli.csvDir) {
+    const outDir = resolve(cli.csvDir);
+    const summary = buildCsvExports(outDir, cli);
     console.log(`\n[delegation-outcomes] CSV -> ${summary.dir}`);
     console.log(`  outcomes_by_task.csv    (${summary.outcomesByTask} wierszy)`);
     console.log(`  outcomes_by_pair.csv    (${summary.outcomesByPair} wierszy)`);
@@ -805,7 +914,11 @@ function main() {
     return;
   }
 
-  const result = computeOutcomes();
+  const result = computeOutcomes({
+    reviewsDir: cli.reviewsDir,
+    roundsPath: cli.roundsPath,
+    stateHome: cli.stateHome,
+  });
   if (!result) {
     console.error("[delegation-outcomes] brak plików w .state/reviews/ — nie ma z czego liczyć");
     process.exit(1);
@@ -814,14 +927,14 @@ function main() {
   const taskOutcomes = new Map(byTask.map((t) => [t.taskId, t]));
   const pair = new Map(byPair.map((p) => [`${p.agent}|${p.model}`, p]));
 
-  if (AS_JSON) {
+  if (cli.asJson) {
     console.log(JSON.stringify(result, null, 2));
     return;
   }
 
   console.log(`\n  Zadania z werdyktem REVIEW: ${taskOutcomes.size}  ·  dopasowane do delegacji: ${matched}  ·  bez delegacji w telemetrii: ${unmatched}\n`);
 
-  if (BY_TASK) {
+  if (cli.byTask) {
     console.log("  zadanie      rund  zwrotów  blokerów  issues  czysto?  werdykt");
     console.log("  " + "─".repeat(74));
     for (const t of [...taskOutcomes.values()].sort((a, b) => b.rounds - a.rounds || a.taskId.localeCompare(b.taskId))) {

@@ -1,6 +1,6 @@
 # Supervisor — manual e2e checklist (FOC-116, spec §8.12)
 
-The scripted suite (`node scripts/test-all.mjs`, 174 files) proves the parts against a mock
+The scripted suite (`node scripts/test-all.mjs`, 194 files) proves the parts against a mock
 `claude`. It cannot prove the one thing this epic is actually about: that **Mateusz never opens a
 child terminal**. That is a claim about a human session, so it gets walked by hand, once, on a
 throwaway issue, before first real use.
@@ -19,7 +19,7 @@ order they are numbered.
 
 ```bash
 node scripts/linear-query.mjs team FOC          # confirm the workspace answers
-node scripts/test-all.mjs                       # 116 test files before you start; a red file invalidates the walk,
+node scripts/test-all.mjs                       # 176 test files before you start; a red file invalidates the walk,
                                                 # except security-scan.test.mjs — load-sensitive, seen red (13 probe
                                                 # misses) at base e3dea40 too, so its red alone is not a regression signal
 git diff --stat -- agents/orchestrator          # AC-10, see below
@@ -51,7 +51,7 @@ git diff --stat origin/main..HEAD -- agents/orchestrator
 ```
 
 - [ ] Output is empty.
-- [ ] `bin\orchestrate.bat` no longer starts a session — an ASCII guard added in FOC-288 exits before any session starts; withdrawn from active use per the FOC-272 gate decision. See [ADR-0011](adr/0011-orch-ollama-withdrawal.md).
+- [ ] `bin\orchestrate.bat` is gone (deleted in FOC-771; it had been withdrawn from active use per the FOC-272 gate decision and guarded since FOC-288) — `dir bin\orchestrate.bat` reports no such file. See [ADR-0011](adr/0011-orch-ollama-withdrawal.md).
 
 *Measured 2026-08-26 on this branch: 0 files. The squads' own CLAUDE.md files DID change — that is
 §1.6 and it is AC-10-compatible, because those changes are inert unless `LA_SUPERVISOR=1`, which
@@ -72,6 +72,8 @@ Force the refusal once, to see fail-closed working:
 - [ ] `supervisor-spawn.mjs` on a run with no `triage.json` exits 1 and spawns nothing.
 - [ ] `record --verdict dev --confidence 50` is refused — under 70 the verdict must be `ask`.
 - [ ] triage refuses a ticket leased to another live session; `triage.json.lease` records the check.
+- [ ] (FOC-607) `supervisor-spawn.mjs --squad dev --model <any id>` exits 1 with `error: model-override-banned` and spawns nothing; `--squad plan --model <id with no pricing row>` exits 1 with `model-unpriced`. Proof: `node scripts/test-run.mjs child-model`, `node scripts/test-run.mjs supervisor-spawn`, `node scripts/test-run.mjs supervisor-watch`, `node scripts/test-run.mjs supervisor-status` (the runner filters by filename substring, so each lane is named).
+- [ ] (FOC-607) `supervisor-status.mjs` shows each child's `model`, `modelSource` and the `initModel` the child reported; a difference is printed as `model drift: …`.
 
 ### AC-5 — Gate relay (one GATE 1 answer)
 Triage a *planning* issue so a PLAN child runs and reaches GATE 1.
@@ -142,11 +144,31 @@ them. The human gate is the real control; the deny list removes the accidental p
 determined one. Verified empirically 2026-08-26: a real child under `--permission-mode
 bypassPermissions` was refused — deny outranks bypass.
 
+- (FOC-511) the Linear helper denies cover launcher, relative, absolute and PowerShell invocation
+  forms and include `linear-push.mjs`; a test child's committed settings deny `mcp__linear__*`;
+  proof: `node scripts/test-run.mjs supervisor-deny` (model of the documented matcher) and the P9
+  membership test.
+- (FOC-512) PR title and body leave the Supervisor only through
+  `node $LA_ROOT/scripts/gh-screened.mjs pr create …`; raw `gh pr create|edit|comment` and `gh api`
+  are deny-listed in `agents/supervisor/settings.json`; a refusal names the hit by shape and `gh` is
+  never started; proof: `node scripts/test-run.mjs gh-screened`.
+
 ### AC-8 — No secrets in Linear
 - [ ] Read every comment the run posted. No tokens, keys, passwords, connection strings.
 - [ ] Snippets the Supervisor showed you came from `supervisor-status.mjs` and are redacted.
       (Gate text is **not** redacted, deliberately — a relay through a redactor is not a relay.
       The control there is "never put secrets in Linear comments", not filtering.)
+
+### AC-11 — Child isolation in the container (FOC-802)
+
+Docker lane only — on native (Windows) runs children keep the Supervisor's user and the
+deny-list-only posture (ADR-0009).
+
+- [ ] A child cannot write `agents/supervisor/settings.json`, read `/data/run/host.token`, or list
+      the Supervisor's tmux socket — proof `docker/test-isolation.sh`.
+- [ ] Gates, verdicts and edits still work from a child — same script.
+- [ ] `supervisor-status` shows `isolation: off` only when `FENIX_CHILD_ISOLATION=off` or the
+      helper is missing.
 
 ---
 
@@ -205,12 +227,36 @@ The rules touched fall into four groups:
 All of it is **inert unless `LA_SUPERVISOR=1`**, which only `supervisor-spawn.mjs` sets. That is
 what keeps AC-10 true while the squad prompts changed.
 
+### Where reviews, review rounds and kickoff drafts live (FOC-903)
+
+In a supervised run (`LA_SUPERVISOR_RUN` set) the scratch a run produces lives under its own run
+dir — `<stateHome>/<runId>/` — not in the shared `.state/`:
+
+| What | Per-run location | Legacy location (standalone squads, pre-FOC-903 runs) |
+|---|---|---|
+| Review round files | `<stateHome>/<runId>/scratch/reviews/<taskId>-round<N>.md` | `.state/reviews/<taskId>-round<N>.md` |
+| Review-round counter | `<stateHome>/<runId>/review-rounds.json` | `.state/review-rounds.json` |
+| Kickoff drafts | `<stateHome>/<runId>/scratch/krok0/` | `.state/krok0-<date>/` |
+
+The readers (`delegation-outcomes.mjs`, `verdict-evidence.mjs`, `review-round.mjs`) take the **union**
+of every run dir's inputs with the legacy locations at lower precedence — the newest run wins per
+task (run ids are zero-padded timestamps, so name order is chronological). Migrating legacy leftovers
+into their per-run homes: `node scripts/supervisor-migrate-scratch.mjs` (dry run by default; see
+`docs/scratch-and-fixtures.md`).
+
 ### Verification
-- `node scripts/test-all.mjs` → 174 files (the registered lane count: 139 parallel + 35 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
+- `node scripts/test-all.mjs` → 194 files (the registered lane count: 158 parallel + 36 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
   load-sensitive and has been observed red at base `e3dea40` as well — see §0 before reading a red
   security-scan as a regression.
+- The runner sweeps its spawn registry after both lanes (FOC-840): a server a test file left alive is tree-killed and reported as `test orphans left running: <file> pid N port P (killed)`, and the run fails even when every file passed.
 - This checklist, walked once on a throwaway issue (§8.12).
+- Task journals (FOC-904): `docs/state/<TASK-ID>.md` written only through `node scripts/state-journal.mjs`,
+  the index block in `docs/STATE.md` regenerated by `supervisor-merge` — `node scripts/state-index.mjs --check`
+  green; `docs/task-journals.md` describes the format and the merge rule.
 - `git diff -- agents/orchestrator` empty (AC-10).
+- Settings → Agent tools (FOC-906): the read-only panel renders `GET /api/settings/agent-tools` —
+  the effective root's permission lists, MCP reachability, skills and the `fenix agent-tools check`
+  summary; editing stays CLI-side (`fenix agent-tools allow|ask|deny|remove`).
 
 ### Rollback
 Revert the PR. `.state/supervisor/` is disposable. Existing squads are bitwise-unchanged in

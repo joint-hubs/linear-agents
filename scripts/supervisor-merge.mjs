@@ -40,8 +40,9 @@
 // at, with its path named in the verdict.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   LIVE_STATUSES,
@@ -253,6 +254,82 @@ function removeIntegrationTree({ force = false } = {}) {
   }
 }
 
+// ── the generated task-journal index (FOC-904) ───────────────────────────────
+//
+// Journals are per task (docs/state/<TASK-ID>.md), so two sessions never edit
+// the same journal file. The ONE thing they can still collide on is the
+// generated index block in docs/STATE.md — machine-owned, fully derived from
+// docs/state/, and therefore re-derivable instead of conflict-worthy:
+//
+//   · after every successful replay the block is regenerated in the scratch
+//     tree and committed when it changed;
+//   · when a replay fails and the ONLY conflicted file is docs/STATE.md and
+//     every conflict hunk lies INSIDE the index markers, the conflict is ours
+//     by construction: take ours, regenerate, complete the merge;
+//   · any hunk outside the markers is a real textual conflict and keeps
+//     today's behaviour — abort, report, reject.
+
+const STATE_FILE = "docs/STATE.md";
+const INDEX_START = "<!-- state-index:start -->";
+const INDEX_END = "<!-- state-index:end -->";
+const STATE_INDEX_SCRIPT = fileURLToPath(new URL("./state-index.mjs", import.meta.url));
+
+/**
+ * Regenerate the index block in `tree`. The script is run from THIS checkout
+ * (its own directory), pointed at the scratch tree through LA_ROOT — the tree
+ * itself never needs the tool present.
+ */
+function regenerateStateIndex(tree) {
+  const res = spawnSync(process.execPath, [STATE_INDEX_SCRIPT, "--write"], {
+    cwd: tree,
+    encoding: "utf8",
+    env: { ...process.env, LA_ROOT: tree },
+  });
+  if (res.status === 0) return { ok: true, error: null };
+  const detail = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim().split("\n")[0] || `exit ${res.status}`;
+  return { ok: false, error: detail };
+}
+
+/**
+ * Regenerate + commit the block when it changed. A tree with neither journal
+ * files nor an existing block is skipped untouched — a repo that never opted
+ * into journals must not gain a generated section as a side effect of a merge.
+ */
+function commitRegeneratedIndex(tree) {
+  const journalsDir = join(tree, "docs", "state");
+  const hasJournals = existsSync(journalsDir) && readdirSync(journalsDir).some((f) => f.endsWith(".md"));
+  const statePath = join(tree, STATE_FILE);
+  const hasBlock =
+    existsSync(statePath) && readFileSync(statePath, "utf8").includes(INDEX_START);
+  if (!hasJournals && !hasBlock) return { committed: false, error: null, skipped: true };
+
+  const regen = regenerateStateIndex(tree);
+  if (!regen.ok) return { committed: false, error: regen.error };
+  const dirty = git(["status", "--porcelain", "--", STATE_FILE], tree);
+  if (!dirty) return { committed: false, error: null };
+  git(["add", "--", STATE_FILE], tree);
+  git(["commit", "-m", "docs(state): regenerate task journal index", "--", STATE_FILE], tree);
+  return { committed: true, error: null };
+}
+
+/**
+ * True when every conflict marker in the conflicted docs/STATE.md lies inside
+ * the index markers — i.e. the merge collision is purely the generated block.
+ */
+function conflictsInsideIndexBlock(tree) {
+  let text;
+  try {
+    text = readFileSync(join(tree, STATE_FILE), "utf8");
+  } catch {
+    return false;
+  }
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => l.includes(INDEX_START));
+  const end = lines.findIndex((l) => l.includes(INDEX_END));
+  if (start === -1 || end === -1 || end <= start) return false;
+  return lines.every((l, i) => !/^(<{7}|>{7})( |$)/.test(l) || (i > start && i < end));
+}
+
 /**
  * Replay one candidate onto the integration tree by MERGING its branch.
  *
@@ -282,7 +359,8 @@ function replay(child, tree) {
 
   try {
     git(["merge", "--no-ff", "--no-edit", child.branch], tree);
-    return { childId: child.childId, ok: true, conflicts: [], commits, error: null };
+    const index = commitRegeneratedIndex(tree);
+    return { childId: child.childId, ok: true, conflicts: [], commits, error: null, index };
   } catch (err) {
     // The files git could not merge ARE the textual conflict. Any other refusal
     // — unrelated histories, an unreadable rev, git failing outright — is this
@@ -294,6 +372,29 @@ function replay(child, tree) {
       conflicts = out ? out.split(/\r?\n/).filter(Boolean) : [];
     } catch {
       /* the conflict list is best effort; the failure itself is the finding */
+    }
+    // FOC-904: a collision confined to the generated index block is not a
+    // candidate contradiction — the block is derived state. Regenerate it over
+    // ours and complete the merge; anything broader stays a hard conflict.
+    if (conflicts.length === 1 && conflicts[0] === STATE_FILE && conflictsInsideIndexBlock(tree)) {
+      try {
+        git(["checkout", "--ours", "--", STATE_FILE], tree);
+        const regen = regenerateStateIndex(tree);
+        if (!regen.ok) throw new Error(`state-index --write failed: ${regen.error}`);
+        git(["add", "--", STATE_FILE], tree);
+        git(["commit", "--no-edit"], tree);
+        return {
+          childId: child.childId,
+          ok: true,
+          conflicts: [],
+          commits,
+          error: null,
+          note: "docs/STATE.md conflict was inside the generated index block — resolved by regenerating it",
+        };
+      } catch (resolveErr) {
+        /* resolution failed — fall through to the abort + report below */
+        err.message = `${err.message}; index-block resolution also failed: ${resolveErr.message}`;
+      }
     }
     try {
       git(["merge", "--abort"], tree);
@@ -335,6 +436,11 @@ try {
 // ── run it ───────────────────────────────────────────────────────────────────
 
 const findings = [];
+// Observations that are NOT verification results: they must not move the
+// verdict. The index regen failing on an otherwise-successful replay leaves
+// the integration exactly as the real checks judged it — the stale block is
+// recorded here for the human, not counted against the candidates.
+const notes = [];
 const isolation = [];
 const drift = [];
 
@@ -371,6 +477,11 @@ const replays = [];
 for (const child of candidates) {
   const r = replay(child, tree);
   replays.push(r);
+  if (r.index?.error) {
+    // A failed index regen after a SUCCESSFUL replay is bookkeeping, not a
+    // verification failure — `accepted` stays as the real checks computed it.
+    notes.push(`${child.childId}: the task journal index was not regenerated after the replay (${r.index.error})`);
+  }
   if (!r.ok) {
     findings.push(
       r.conflicts.length
@@ -438,6 +549,9 @@ const report = {
   replays,
   combined,
   findings,
+  // Non-verdict observations (FOC-904): a failed index regen on an otherwise
+  // accepted integration is reported here, not as a finding.
+  notes,
   // FOC-449: the provenance this merge labelled — absent when none was given.
   ...(decisionEvents.length ? { decisionEvents } : {}),
   integration: {
