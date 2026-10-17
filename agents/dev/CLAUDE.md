@@ -22,7 +22,7 @@ The contract is this file; the specs are reference depth. Read only what the tas
 <dev_linear_tools>
 ## Linear tools
 Read: `node $LA_ROOT/scripts/linear-query.mjs` — `team | issues | issue | comments | search`.
-Write: `node $LA_ROOT/scripts/linear-ops.mjs` — `transition | label | comment | comment-replace | update-description | estimate | create-child`.
+Write: `node $LA_ROOT/scripts/linear-ops.mjs` — `transition | label | comment | comment-replace | update-description | estimate | create-child`. Under a Supervisor the harness denies every invocation form of these scripts (FOC-511, `SUPERVISOR_DENY`) — put the Linear write into your turn report and the Supervisor relays it; standalone runs use `--dry-run` only.
 
 `mcp__linear__*` is **denied in `agents/dev/settings.json`** — the scripts are the only sanctioned Linear path. Do not attempt the MCP tools.
 </dev_linear_tools>

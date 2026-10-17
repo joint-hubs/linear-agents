@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import {
-  chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync, readFileSync,
+  chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync, readFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +38,7 @@ import {
 import { readSquadConfig as realReadSquadConfig } from "./squad-config.mjs";
 import { benchmarkFor as realBenchmarkFor } from "./model-benchmarks.mjs";
 import { writeSettings as realWriteSettings } from "./fenix-settings.mjs";
+import { cachedPrunable as realCachedPrunable, pruneRuns as realPruneRuns } from "./fenix-retention.mjs";
 import { openTelemetryDb } from "./telemetry-store.mjs";
 import { ensureViews } from "./telemetry-canonical.mjs";
 import { spawnTestServer } from "./test-spawn.mjs";
@@ -91,6 +92,13 @@ process.env.LA_SETTINGS_FILE = join(unitConfig, "settings.json");
 process.env.LA_DATA_HOME = unitData;
 process.env.LA_PROVIDER_ENV_FILE = join(unitDir, "missing.env");
 process.env.LA_PROVIDER = "";
+// Retention seams (FOC-780): the PUT's apply/prune/read run against temp
+// homes, never the repo's real .state or agents trees. The integration child
+// overrides every one of these explicitly.
+process.env.LA_SQUAD_HOME = join(unitDir, "agents");
+process.env.LA_STATE_ROOT = join(unitDir, "state-root");
+process.env.LA_SUPERVISOR_STATE_HOME = join(unitDir, "sup-state");
+process.env.LA_TELEMETRY_HOME = join(unitDir, "telemetry-home");
 // The Supervisor routing row's chain starts at SUPERVISOR_MODEL — pin its
 // absence so the row resolves down the chain deterministically (restored
 // before the integration block; the child pins its own value anyway).
@@ -553,6 +561,25 @@ async function unit(method, path, { body, origin = "http://localhost:5173" } = {
 
 // ── repos + retention stubs ──────────────────────────────────────────────────
 
+// Retention estimate spy (FOC-780): count the ACTUAL dry-run walks behind the
+// GET's cachedPrunable and the PUT's fresh pruneRuns — a timing-independent
+// way to prove two GETs share one walk and a PUT always runs fresh.
+const dryWalks = { n: 0 };
+setSettingsDeps({
+  cachedPrunable: (opts, o = {}) =>
+    realCachedPrunable(opts, {
+      ...o,
+      pruneImpl: async (po) => {
+        dryWalks.n += 1;
+        return realPruneRuns(po);
+      },
+    }),
+  pruneRuns: async (opts) => {
+    dryWalks.n += 1;
+    return realPruneRuns(opts);
+  },
+});
+
 {
   const ok = await unit("POST", "/api/settings/repos", { body: { url: "owner/name" } });
   check("unit repos POST -> 202 jobId", ok.status === 202 && ok.body?.jobId === "stub-job-1", JSON.stringify(ok.body));
@@ -567,9 +594,107 @@ async function unit(method, path, { body, origin = "http://localhost:5173" } = {
   check("unit wrong method -> 405", wrongMethod.status === 405);
 }
 
+// ── retention PUT (FOC-780) ──────────────────────────────────────────────────
+
+{
+  // A squad whose settings.json receives the applied cleanupPeriodDays, and a
+  // 10-day-old run directory a prune WOULD take — the PUT itself must not.
+  const squadDir = join(process.env.LA_SQUAD_HOME, "dev");
+  mkdirSync(squadDir, { recursive: true });
+  writeFileSync(join(squadDir, "settings.json"), JSON.stringify({ cleanupPeriodDays: 36500 }), "utf8");
+  const oldRun = join(process.env.LA_SUPERVISOR_STATE_HOME, "run-old");
+  mkdirSync(oldRun, { recursive: true });
+  writeFileSync(join(oldRun, "tee.log"), "x".repeat(2048), "utf8");
+  const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+  utimesSync(oldRun, tenDaysAgo, tenDaysAgo);
+  utimesSync(join(oldRun, "tee.log"), tenDaysAgo, tenDaysAgo);
+
+  const settingsFile = process.env.LA_SETTINGS_FILE;
+  const overlay = () => JSON.parse(readText(settingsFile));
+
+  const put = await unit("PUT", "/api/settings/retention", { body: { keepDays: 30 } });
+  check("unit retention PUT valid -> 200 with resolved", put.status === 200
+    && put.body?.resolved?.keepDays === 30 && put.body?.resolved?.cleanupPeriodDays === 30
+    && typeof put.body?.resolved?.minFreeGiB === "number", JSON.stringify(put.body?.resolved));
+  check("unit retention PUT applied shape", put.body?.applied?.cleanupPeriodDays === 30
+    && Array.isArray(put.body?.applied?.changed) && Array.isArray(put.body?.applied?.skipped)
+    && put.body?.applied?.changed?.some((c) => c.squad === "dev" && c.to === 30), JSON.stringify(put.body?.applied));
+  check("unit retention PUT applied to the squad settings.json",
+    JSON.parse(readText(join(squadDir, "settings.json")))?.cleanupPeriodDays === 30);
+  check("unit retention PUT persisted in the overlay", overlay()?.retention?.keepDays === 30);
+  check("unit retention PUT prunable shape", typeof put.body?.prunable?.runs === "number"
+    && typeof put.body?.prunable?.bytes === "number", JSON.stringify(put.body?.prunable));
+  check("unit retention PUT response carries the usage snapshot",
+    typeof put.body?.usage?.transcriptsBytes === "number" && typeof put.body?.computedAt === "string");
+
+  // Invalid input: 400 invalid-retention, the overlay untouched.
+  const before = readText(settingsFile);
+  const bad0 = await unit("PUT", "/api/settings/retention", { body: { keepDays: 0 } });
+  check("unit retention PUT keepDays 0 -> 400 invalid-retention",
+    bad0.status === 400 && bad0.body?.error === "invalid-retention" && typeof bad0.body?.detail === "string",
+    JSON.stringify(bad0.body));
+  const badStr = await unit("PUT", "/api/settings/retention", { body: { keepDays: "30" } });
+  check("unit retention PUT keepDays string -> 400", badStr.status === 400 && badStr.body?.error === "invalid-retention");
+  const badField = await unit("PUT", "/api/settings/retention", { body: { keepDays: 30, evil: 1 } });
+  check("unit retention PUT unknown field -> 400", badField.status === 400
+    && badField.body?.error === "invalid-retention" && /unknown/.test(badField.body?.detail || ""));
+  const badMissing = await unit("PUT", "/api/settings/retention", { body: {} });
+  check("unit retention PUT without keepDays -> 400", badMissing.status === 400
+    && badMissing.body?.error === "invalid-retention");
+  check("unit retention PUT refusals left the overlay untouched", readText(settingsFile) === before);
+  check("unit retention PUT refusals left the squad settings.json untouched",
+    JSON.parse(readText(join(squadDir, "settings.json")))?.cleanupPeriodDays === 30);
+
+  // The write never prunes: a 10-day-old run is reported prunable under
+  // keepDays 1 but still exists after the PUT. The PUT's estimate is a FRESH
+  // dry-run, never the GET's cached one.
+  const walksBeforePrunePut = dryWalks.n;
+  const prune = await unit("PUT", "/api/settings/retention", { body: { keepDays: 1 } });
+  check("unit retention PUT keepDays 1 -> old run prunable", prune.status === 200
+    && prune.body?.prunable?.runs >= 1 && prune.body?.prunable?.bytes >= 2048, JSON.stringify(prune.body?.prunable));
+  check("unit retention PUT runs a fresh dry-run (not cached)", dryWalks.n === walksBeforePrunePut + 1,
+    JSON.stringify({ before: walksBeforePrunePut, after: dryWalks.n }));
+  check("unit retention PUT never prunes", exists(oldRun) && exists(join(oldRun, "tee.log")));
+  check("unit retention PUT keepDays 1 applied", JSON.parse(readText(join(squadDir, "settings.json")))?.cleanupPeriodDays === 1);
+
+  // keep-all: null rides the merge semantics and really clears the limit.
+  const keepAll = await unit("PUT", "/api/settings/retention", { body: { keepDays: null } });
+  check("unit retention PUT keep-all -> 36500", keepAll.status === 200
+    && keepAll.body?.resolved?.keepDays === null && keepAll.body?.resolved?.cleanupPeriodDays === 36500,
+    JSON.stringify(keepAll.body?.resolved));
+  check("unit retention PUT keep-all cleared the overlay limit", overlay()?.retention?.keepDays === undefined);
+  check("unit retention PUT keep-all refused the prune", typeof keepAll.body?.prunable?.refused === "string",
+    JSON.stringify(keepAll.body?.prunable));
+  check("unit retention PUT keep-all restored the squad settings.json",
+    JSON.parse(readText(join(squadDir, "settings.json")))?.cleanupPeriodDays === 36500);
+
+  // GET carries the same resolved + prunable extensions — served from the
+  // cached dry-run: two GETs share one walk.
+  const walksBeforeGetPair = dryWalks.n;
+  const get = await unit("GET", "/api/settings/retention");
+  const getCached = await unit("GET", "/api/settings/retention");
+  check("unit retention GET resolved + prunable", get.status === 200
+    && get.body?.resolved?.keepDays === null && get.body?.resolved?.cleanupPeriodDays === 36500
+    && typeof get.body?.prunable?.refused === "string", JSON.stringify(get.body?.resolved));
+  check("unit retention GET: two GETs, one walk (cached dry-run)", dryWalks.n === walksBeforeGetPair,
+    JSON.stringify({ before: walksBeforeGetPair, after: dryWalks.n }));
+  check("unit retention GET: the second GET serves the same cached estimate",
+    get.status === 200 && JSON.stringify(get.body?.prunable) === JSON.stringify(getCached.body?.prunable)
+      && typeof getCached.body?.prunable?.refused === "string",
+    JSON.stringify(get.body?.prunable));
+
+  // Cleanup: remove the prune bait so nothing else can act on it.
+  rmSync(oldRun, { recursive: true, force: true });
+}
+
 // Restore the real deps (the integration child is a fresh process anyway,
 // but keep this process honest).
-setSettingsDeps({ checks: REAL_CHECKS, readSquadConfig: (root) => realReadSquadConfig(root) });
+setSettingsDeps({
+  checks: REAL_CHECKS,
+  readSquadConfig: (root) => realReadSquadConfig(root),
+  cachedPrunable: realCachedPrunable,
+  pruneRuns: realPruneRuns,
+});
 if (PREV_SUPERVISOR_MODEL === undefined) delete process.env.SUPERVISOR_MODEL;
 else process.env.SUPERVISOR_MODEL = PREV_SUPERVISOR_MODEL;
 
@@ -944,6 +1069,29 @@ try {
       && typeof r.body?.usage?.workspacesBytes === "number"
       && typeof r.body?.usage?.stateBytes === "number"
       && Array.isArray(r.body?.partial), r.raw.slice(0, 300));
+  }
+
+  // retention PUT round-trip (FOC-780): validate, write, apply, estimate.
+  {
+    const put = await call(P, "PUT", "/api/settings/retention", { body: { keepDays: 7, minFreeGiB: 2 } });
+    check("int retention PUT -> 200 resolved", put.status === 200 && put.body?.resolved?.keepDays === 7
+      && put.body?.resolved?.minFreeGiB === 2 && put.body?.resolved?.cleanupPeriodDays === 7, put.raw.slice(0, 300));
+    check("int retention PUT applied + prunable shape", put.body?.applied?.cleanupPeriodDays === 7
+      && Array.isArray(put.body?.applied?.changed) && typeof put.body?.prunable?.runs === "number"
+      && typeof put.body?.prunable?.bytes === "number", put.raw.slice(0, 300));
+    check("int retention PUT persisted", JSON.parse(readText(join(dir, "config", "settings.json")))?.retention?.keepDays === 7);
+    const back = await call(P, "PUT", "/api/settings/retention", { body: { keepDays: null } });
+    check("int retention PUT keep-all -> 36500 + refused prune", back.status === 200
+      && back.body?.resolved?.cleanupPeriodDays === 36500 && typeof back.body?.prunable?.refused === "string",
+      back.raw.slice(0, 300));
+    check("int retention PUT keep-all cleared the overlay limit",
+      JSON.parse(readText(join(dir, "config", "settings.json")))?.retention?.keepDays === undefined);
+    const bad = await call(P, "PUT", "/api/settings/retention", { body: { keepDays: 0 } });
+    check("int retention PUT invalid -> 400 invalid-retention", bad.status === 400 && bad.body?.error === "invalid-retention",
+      bad.raw.slice(0, 200));
+    const g = await call(P, "GET", "/api/settings/retention");
+    check("int retention GET resolved + prunable", g.status === 200
+      && typeof g.body?.resolved?.minFreeGiB === "number" && typeof g.body?.prunable === "object", g.raw.slice(0, 300));
   }
 
   {

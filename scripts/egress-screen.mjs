@@ -195,19 +195,15 @@ const ISO_DATE_LIKE_RE = /\d{4}-\d{2}-\d{2}/;
 // key-shaped run in any other position — query values, other hosts, bare prose
 // — stays screened.
 //
-// Terminators (Q1-B): a segment ends at exactly these ELEVEN characters and
-// nothing else — end of string, `/`, `?`, `#`, `)`, `]`, `}`, `>`, `"`, `'`,
-// backtick. Four are URL-structural, seven are closing delimiters. `>` is
-// here because of Q1-B: the round-1 declaration listed all seven closing
-// delimiters (`gt` among them) while the code carried six, so the class below
-// is now the declaration — no separate list to drift. A JSON quote closes the
-// one-line-serialized corpus states.
-//
-// Deliberately NOT terminators, and not being added here: end of line (a URL at
-// the end of a prose line — deferred to FOC-512, whose input is PR prose) and a
-// trailing `,`, `:` or `;`. Those keep the original false positive; they are
-// under-fixes in the fail-closed direction, not leaks.
-const LINEAR_ISSUE_SLUG_RE = /https:\/\/linear\.app\/[A-Za-z0-9][A-Za-z0-9_-]*\/issue\/[A-Z][A-Z0-9]*-[0-9]+\/([A-Za-z0-9_-]+)(?=$|[/?#)}>\]"'\x60])/g;
+// Terminators (Q1-B, extended by FOC-512): a segment ends at end of input, a
+// URL-structural character (`/`, `?`, `#`), or a closing/punctuating character
+// (`)`, `]`, `}`, `>`, `"`, `'`, backtick — Q1-B's seven closing delimiters —
+// plus, from FOC-512 (PR prose, not just one-line JSON): end of line (`\r` and
+// `\n` — `\r\n` closes via the `\r`) and the trailing punctuation `,`, `.`,
+// `:`, `;`. Whitespace is deliberately NOT a terminator: a slug followed by
+// unescaped whitespace is not a complete path segment, so the narrow exemption
+// does not apply there and the segment stays screened (asserted in the tests).
+const LINEAR_ISSUE_SLUG_RE = /https:\/\/linear\.app\/[A-Za-z0-9][A-Za-z0-9_-]*\/issue\/[A-Z][A-Z0-9]*-[0-9]+\/([A-Za-z0-9_-]+)(?=$|[\r\n/?#,.:;)}>\]"'\x60])/g;
 
 // Q2-B (Mateusz, 2026-10-09): the exemption fires ONLY for a segment that has
 // the shape of a Linear issue-title slug — tokens of [a-z0-9] joined by SINGLE

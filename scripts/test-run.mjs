@@ -8,6 +8,10 @@
 //   serial   — files with shared resources (fixed ports, socket binds, real
 //     repo-path writes, live telemetry DB seams). Run one at a time.
 //
+// Every spawned child also gets LA_SETTINGS_FILE pointed at a nonexistent path
+// in a per-run temp dir (unless the caller set it) — tests never read the
+// developer's real settings overlay.
+//
 // The split is not implicit: a coverage check (always on) fails the run when a
 // discovered test file is in zero lanes or both lanes, or when a lane entry
 // names a file that no longer exists. A static audit fails the run when a
@@ -223,19 +227,39 @@ if (!process.env.LA_SUPERVISOR_STATE_HOME) {
   }
 }
 
-// ── child env: strip LA_SUPERVISOR* (FOC-295) ────────────────────────────────
+// ── child env: strip LA_SUPERVISOR* and task-ownership seams (FOC-295) ───────
 
 // Suite files are hermetic: they assume a clean environment, and supervisor-cleanup
 // in particular refuses inside a spawned child (the FOC-167 identity guard). This
 // runner usually runs inside one, so the supervisor's LA_SUPERVISOR* variables would
-// leak into every child. Strip the prefix for the suite subprocesses — the guard
-// itself is untouched. Nothing LA_SUPERVISOR* is added back — zz-suite-env-scrub.test.mjs
-// holds that line. Suites that spawn mock children set the offline codegraph seam
+// leak into every child — and so would the task-ownership seams (LA_TASK_OWNERSHIP_CONFIG,
+// LA_TASK_OWNER): a Supervisor injects exactly those into its children, so a
+// restricted config would gate every suite's CLI runs. Strip all of them for the suite
+// subprocesses — the guards themselves are untouched. Nothing LA_SUPERVISOR* is added
+// back — zz-suite-env-scrub.test.mjs holds that line. Suites that spawn mock children
+// set the offline codegraph seam
 // (LA_SUPERVISOR_NO_CODEGRAPH=1) in their own env builders — see baseEnv in
 // supervisor-test-fixtures.mjs.
 const suiteEnv = { ...process.env };
 for (const key of Object.keys(suiteEnv)) {
   if (key.startsWith('LA_SUPERVISOR')) delete suiteEnv[key];
+}
+// Task-ownership seams: a caller who wants them sets them inside the test's own
+// child env — never ambiently through the runner.
+delete suiteEnv.LA_TASK_OWNERSHIP_CONFIG;
+delete suiteEnv.LA_TASK_OWNER;
+
+// ── child env: pin the settings overlay seam ─────────────────────────────────
+
+// Tests must never see the developer's real settings overlay: point the
+// LA_SETTINGS_FILE seam (fenix-paths.settingsPath's top rung) at a nonexistent
+// path in a per-run temp dir, so readSettings() yields the empty overlay.
+// Only when the caller did not already set it — a deliberate value wins.
+// LA_PROJECTS_FILE handling is untouched.
+let settingsTmp;
+if (!suiteEnv.LA_SETTINGS_FILE) {
+  settingsTmp = mkdtempSync(join(tmpdir(), 'test-run-settings-'));
+  suiteEnv.LA_SETTINGS_FILE = join(settingsTmp, 'settings.json');
 }
 
 // ── orphan registry (FOC-840) ────────────────────────────────────────────────
@@ -247,9 +271,24 @@ for (const key of Object.keys(suiteEnv)) {
 // per-run temp dir exists even when the runner runs under a caller that
 // manages its own settings, so the registry always has a home.
 const runTmp = mkdtempSync(join(tmpdir(), 'test-run-'));
-// Every early exit path (no-match exit(1), a crash) must not leak the temp dir.
-process.on('exit', () => { try { rmSync(runTmp, { recursive: true, force: true }); } catch { /* best effort */ } });
 suiteEnv.LA_TEST_SPAWN_REGISTRY = join(runTmp, 'spawns.jsonl');
+// Best effort: a cleanup failure must never change the exit code. Both the
+// settings-pin dir (only when the seam was pinned here) and the registry dir
+// go on every early exit path (no-match exit(1), a crash).
+process.on('exit', () => {
+  if (settingsTmp) {
+    try {
+      rmSync(settingsTmp, { recursive: true, force: true });
+    } catch {
+      /* leftover temp dir is harmless */
+    }
+  }
+  try {
+    rmSync(runTmp, { recursive: true, force: true });
+  } catch {
+    /* leftover temp dir is harmless */
+  }
+});
 
 // Read the run's spawn registry and tree-kill any server still alive. Rows
 // whose pid is already gone were stopped (or died) cleanly; survivors are

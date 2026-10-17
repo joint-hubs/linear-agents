@@ -205,7 +205,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // INSIDE the lock.
 function writeLease(runId, lease) {
   try {
-    return writeWakerLease(runId, lease);
+return writeWakerLease(runId, lease);
   } catch {
     return false;
   }

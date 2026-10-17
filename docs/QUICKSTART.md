@@ -6,6 +6,9 @@ inside the container).
 Everything needed at runtime is inside the image `fenix:dev` (~2 GB on disk):
 Node 22, git, Claude Code 2.1.296, CodeGraph 1.6.0, semgrep 1.172.0, uv,
 Python 3.11. The container runs as the non-root user `node`.
+Children spawned by the Supervisor run as a separate user (`fenix-child`) inside the container, so
+they cannot touch the Supervisor's settings, token or tmux socket; `FENIX_CHILD_ISOLATION=off` in
+the compose environment turns it off (debugging only).
 
 ## What you get
 
@@ -190,11 +193,27 @@ The Settings area in the left navigation covers what used to require a
   branch, CodeGraph index state, worktree count and mapped Linear project;
   adding a repository by URL starts a background clone with progress (a local
   bare repo URL works for tests); removing a project mapping keeps the files.
-- **Retention** (`/settings/retention`): read-only — the `cleanupPeriodDays`
-  policy in force, transcript / telemetry / workspace disk usage and free
-  disk. Managing the policy stays with FOC-780.
+- **Retention** (`/settings/retention`): the panel sets the policy — keep
+  everything by default, or apply a limit to every squad's
+  `cleanupPeriodDays` at once — and shows the transcript / telemetry /
+  workspace disk usage, free disk and the prunable estimate. Nothing is
+  deleted until `fenix retention prune` runs; the CLI still does the apply
+  and prune: `fenix retention show|apply|prune [--dry-run]` (prune is
+  refused while retention keeps everything).
+- **Optional integrations** (FOC-772, no dashboard tab): Atlas, the second
+  (pisi) Linear workspace and the personal memory index are **off by
+  default** — a stock install has none of them. Turn one on with
+  `fenix integrations enable <name>` (`atlas` | `pisi` | `memory`) or the
+  overlay key `integrations`; plain `fenix integrations` shows what is on
+  and what each enabled one still needs. Nebul is not a flag — it is chosen
+  through the provider (see **Provider & routing** above).
 - **Squads & prompts** is the v1 Prompts screen as a tab (`/prompts`): role
   edits land on the `/data/agents` volume and take effect at the next spawn.
+- **Artifacts** (`/settings/artifacts`): the repo's generated artifacts (model
+  map, UI build, atlas config, diagram PNGs, the CodeGraph index) with state,
+  age and source revision; stale watched ones regenerate on start and within
+  60 s natively — `node scripts/artifact-registry.mjs status` shows the same
+  from the shell.
 
 The API behind it lives under `/api/settings/*` — the same write guards as the
 Cockpit, bodies capped at 8 KB, and no response ever carries a key value.
@@ -227,6 +246,10 @@ resumed session or a container restart keeps the current run, recorded in
 volume, so telemetry and Supervisor state survive a recreate; a later
 `fenix up` reattaches them.
 
+Outside Docker (native), standalone squads launch on any OS with
+`node scripts/squad-start.mjs <plan|dev|review|test|cadence|supervisor>` — on
+Windows `bin\<squad>.bat` is a thin wrapper for the same.
+
 ## Where things live
 
 - Keys: `.fenix/secrets/{openrouter_api_key,provider_api_key,linear_api_key,github_token}` —
@@ -251,8 +274,9 @@ volume, so telemetry and Supervisor state survive a recreate; a later
     `/data/workspaces/la-wt/<repo>/<branch>`
 - Project map: `.fenix/config/projects.json` on the host, mounted at
   `/fenix-config` (see "Your repositories").
-- Logs and transcripts are kept by default (retention is configurable later,
-  FOC-780).
+- Logs and transcripts are kept by default: retention is asked once on the
+  first `fenix up` (keeping everything is the default) and can be changed
+  later in Settings → Retention or with `fenix retention`.
 
 ## Troubleshooting
 

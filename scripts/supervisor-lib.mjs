@@ -15,7 +15,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -117,9 +117,29 @@ export const verdictPath = (runId, taskId, round) =>
 export const teeRelPath = (childId) => join("children", `${childId}.jsonl`);
 export const teeAbsPath = (runId, childId) => join(runDir(runId), teeRelPath(childId));
 
+// FOC-802 (M3): the run root is Supervisor-owned state a child must be able to
+// READ but not rewrite, and the entrypoint's fix_permissions runs only at
+// container start — a run created afterwards inherits setgid + umask 0002 and
+// would be group-writable by every child until the next restart. The modes are
+// therefore pinned here, at the source: the run dir 0755, the four shared
+// subdirs 02775 (setgid, group-writable — children DO write their tees, gates,
+// verdicts and launch state there), and the run-root JSON files 0644 via the
+// atomicWriteJSON `mode` below. mkdirSync ignores `mode` on Windows, and — the
+// part that bit — mkdir(2) itself ignores S_ISGID in `mode`: the setgid bit is
+// only ever inherited from the parent directory or set by chmod. So each shared
+// subdir is chmod'd 02775 after creation, which also re-pins a reused run that
+// drifted. chmod to setgid needs the caller's gid to match the dir's group —
+// true for the owner's primary group and for `fenix` when the node user is a
+// member of it; a mismatch is a real EPERM and is NOT swallowed. Windows has
+// no POSIX mode bits and may refuse the call outright, so it is skipped there.
 export function ensureRunDir(runId) {
-  mkdirSync(join(runDir(runId), "children"), { recursive: true });
-  mkdirSync(gatesDir(runId), { recursive: true });
+  const base = runDir(runId);
+  mkdirSync(base, { recursive: true, mode: 0o755 });
+  for (const sub of ["children", "gates", "verdicts", "launch"]) {
+    const dir = join(base, sub);
+    mkdirSync(dir, { recursive: true, mode: 0o2775 });
+    if (process.platform !== "win32") chmodSync(dir, 0o2775);
+  }
 }
 
 export function emptyRegistry(runId) {
@@ -141,7 +161,9 @@ export function readRegistry(runId) {
 
 export function writeRegistry(runId, registry) {
   ensureRunDir(runId);
-  atomicWriteJSON(registryPath(runId), registry);
+  // 0644 (FOC-802 M3): the registry is Supervisor-and-watcher state; children
+  // read it, they never write it.
+  atomicWriteJSON(registryPath(runId), registry, { mode: 0o644 });
 }
 
 // Read-modify-write. Single-writer by phase: supervisor-spawn writes the initial
@@ -156,6 +178,39 @@ export function updateChild(runId, childId, patch) {
   registry.children[childId] = { ...current, ...patch };
   writeRegistry(runId, registry);
   return registry.children[childId];
+}
+
+// ── signal-time file cleanup (FOC-802, M1) ───────────────────────────────────
+//
+// `process.on("exit")` does NOT run when a signal terminates the process, and
+// the Supervisor kills detached watchers hard (SIGTERM, sometimes SIGKILL).
+// Anything the watcher deletes only in its exit handler can outlive the turn —
+// the child env file with the provider keys inside is exactly that file. The
+// watcher installs these handlers alongside its exit handler so the file is
+// removed on every path that kills the process.
+//
+// The handlers re-raise the signal with themselves removed, so the process dies
+// exactly as it would have without them — same disposition, same exit status a
+// shell or supervisor observes; only the file removal is added.
+//
+// The injected `raise` is the unit-test seam: on Windows a signal from another
+// process terminates unconditionally without running Node handlers, so the
+// handler's behaviour is proven by emitting the signal in-process instead.
+export function installEnvFileSignalHandlers(remove, { raise = (signal) => process.kill(process.pid, signal) } = {}) {
+  const handlers = {};
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    handlers[signal] = () => {
+      try {
+        remove();
+      } catch {
+        /* best effort — the signal still kills the process */
+      }
+      process.removeListener(signal, handlers[signal]);
+      raise(signal);
+    };
+    process.on(signal, handlers[signal]);
+  }
+  return handlers; // returned so a test (or caller) can remove them again
 }
 
 // Does this child have an unanswered question outstanding? The watcher asks at
@@ -283,7 +338,7 @@ export function appendWakeEvent(runId, event) {
     ts: new Date().toISOString(),
   };
   ensureRunDir(runId);
-  appendFileSync(wakeQueuePath(runId), JSON.stringify(row) + "\n");
+  appendFileSync(wakeQueuePath(runId), JSON.stringify(row) + "\n", { mode: 0o644 });
   return row;
 }
 
@@ -335,7 +390,7 @@ export function writeWakeAck(runId, seq) {
     );
   }
   const ackedThrough = Math.max(readWakeAck(runId), seq);
-  atomicWriteJSON(wakeAckPath(runId), { ackedThrough, ackedAt: new Date().toISOString() });
+  atomicWriteJSON(wakeAckPath(runId), { ackedThrough, ackedAt: new Date().toISOString() }, { mode: 0o644 });
   return ackedThrough;
 }
 
@@ -737,7 +792,7 @@ export function readHolds(runId) {
 export function writeHolds(runId, store) {
   validateHoldStore(store, holdsPath(runId));
   ensureRunDir(runId);
-  atomicWriteJSON(holdsPath(runId), store);
+  atomicWriteJSON(holdsPath(runId), store, { mode: 0o644 });
   return store;
 }
 
@@ -1579,7 +1634,7 @@ export function assertStageBudget(runId, squad, { graph, fail = failJson } = {})
 
   if (budget.reserveExhausted) {
     const report = partialStatusReport(runId, { graph });
-    atomicWriteJSON(join(runDir(runId), "partial-status.json"), report);
+    atomicWriteJSON(join(runDir(runId), "partial-status.json"), report, { mode: 0o644 });
     return fail(
       `the reserve is exhausted ($${budget.reserve.toFixed(2)} allocated, $${budget.reserveDrawn.toFixed(4)} drawn) — ` +
         `graph expansion stops here`,
@@ -1614,6 +1669,13 @@ export function assertStageBudget(runId, squad, { graph, fail = failJson } = {})
 // (scripts/supervisor-cleanup.mjs). Same caveat as above — this is the
 // accidental `git worktree remove`, not the determined one; the identity check
 // in supervisor-cleanup.mjs is the control that actually holds.
+//
+// FOC-788 follow-up (2026-10-15): the dashboard's write routes (work push/PR,
+// the supervisor message forward, settings, gates, holds) are not a child's
+// either — a natively spawned child is a host process and can reach the
+// loopback the dashboard answers on. Both shells are denied because a child
+// may use either. Same caveat as every rule here: not a sandbox, only the
+// accidental curl.
 export const SUPERVISOR_DENY = [
   "Bash(git push:*)",
   "Bash(gh pr create:*)",
@@ -1622,18 +1684,49 @@ export const SUPERVISOR_DENY = [
   "Bash(gh api:*)",
   "Bash(git worktree remove:*)",
   "Bash(git worktree prune:*)",
-  // Linear writes go through the frontman, never a child. FOC-213 (2026-09-05):
-  // a dev child found the script path and posted a Linear comment + state
-  // transition behind the mcp__linear__* deny, because the deny-list covers the
-  // MCP server, not the CLI scripts that wrap the same API. The rules below cut
-  // the launcher-documented invocation (`node $LA_ROOT/scripts/...`). Same
-  // caveat as the push rules above — a child that rewrites the path (`node
-  // C:/.../linear-ops.mjs`, `cmd /c`, cd + relative) walks past the prefix
-  // match; this removes the accidental write, and the frontman relay remains
-  // the real control.
+  // Linear writes go through the frontman, never a child. FOC-213 (2026-09-05)
+  // found the launcher-form gap; FOC-511 closes the invocation-form gaps.
+  // Claude Code matches a Bash/PowerShell rule against the whole command text
+  // with `*` matching any text, and a deny applies when any subcommand of a
+  // compound command matches (`cd x && node scripts/linear-ops.mjs …` is
+  // caught). These wildcard forms cover the launcher, relative and absolute
+  // invocations and the PowerShell tool, which every squad allow-lists as
+  // `PowerShell(node *)`. `linear-push.mjs` (the createIssue funnel) and
+  // `gh-screened.mjs` (the Supervisor's screened PR path, FOC-512) join the
+  // list. The `node ` prefix keeps `cat`, `git diff` and
+  // `node --test scripts/<x>.test.mjs` outside the rule.
+  // Residual, documented by Claude Code: a different invocation form
+  // (`sh -c '…'`, `cmd /c`, `node.exe`, wrapper scripts) is not matched —
+  // sandboxing or a PreToolUse hook is the boundary there.
   "Bash(node $LA_ROOT/scripts/linear-ops.mjs:*)",
   "Bash(node $LA_ROOT/scripts/publish-linear-comment.mjs:*)",
   "Bash(node $LA_ROOT/scripts/linear-query.mjs:*)",
+  "Bash(node *linear-ops.mjs*)",
+  "PowerShell(node *linear-ops.mjs*)",
+  "Bash(node *publish-linear-comment.mjs*)",
+  "PowerShell(node *publish-linear-comment.mjs*)",
+  "Bash(node *linear-query.mjs*)",
+  "PowerShell(node *linear-query.mjs*)",
+  "Bash(node *linear-push.mjs*)",
+  "PowerShell(node *linear-push.mjs*)",
+  "Bash(node *gh-screened.mjs*)",
+  "PowerShell(node *gh-screened.mjs*)",
+  // The dashboard's write routes (FOC-788 follow-up, see above). Middle
+  // wildcards like the `git -C *` allows above use.
+  "Bash(*127.0.0.1:7331*)",
+  "Bash(*localhost:7331*)",
+  "Bash(*/api/work/*)",
+  "Bash(*/api/supervisor/*)",
+  "Bash(*/api/settings/*)",
+  "Bash(*/api/gates/*)",
+  "Bash(*/api/holds/*)",
+  "PowerShell(*127.0.0.1:7331*)",
+  "PowerShell(*localhost:7331*)",
+  "PowerShell(*/api/work/*)",
+  "PowerShell(*/api/supervisor/*)",
+  "PowerShell(*/api/settings/*)",
+  "PowerShell(*/api/gates/*)",
+  "PowerShell(*/api/holds/*)",
 ];
 
 export const childSettingsPath = (runId, childId) =>

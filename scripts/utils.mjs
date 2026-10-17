@@ -67,14 +67,27 @@ const renameBackoffMs = (attempt) => Math.min(25 * 2 ** (attempt - 1), 100);
  * @param {string} filePath - Destination path.
  * @param {unknown} data    - JSON-serializable payload (written as
  *                            `JSON.stringify(data, null, 2) + "\n"`).
- * @param {object}  [opts]  - Test-only seams; production callers never pass
- *                            them and get today's behaviour byte-for-byte.
+ * @param {object}  [opts]  - Seams and knobs. Without them callers get
+ *                            today's behaviour byte-for-byte.
  * @param {Function} [opts.rename] - rename(tmp, dest) override (tests).
  * @param {Function} [opts.sleep]  - Synchronous backoff override (tests).
+ * @param {number}  [opts.mode]   - POSIX mode for the created file (e.g.
+ *                            0o644). Applied to the TEMP file's write, so the
+ *                            renamed destination carries it exactly — a rename
+ *                            replaces the old inode, which is what makes the
+ *                            mode stick on every rewrite, not just the first.
+ *                            Default unchanged (0o666 & ~umask); ignored on
+ *                            Windows. Run-level writers pass 0o644 so state a
+ *                            child must read but not rewrite stays so even
+ *                            between fix_permissions passes (FOC-802 M3).
  */
-export function atomicWriteJSON(filePath, data, { rename = renameSync, sleep = sleepSync } = {}) {
+export function atomicWriteJSON(filePath, data, { rename = renameSync, sleep = sleepSync, mode } = {}) {
   const tmp = filePath + "." + randomBytes(4).readUInt32BE(0).toString(36);
-  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
+  writeFileSync(
+    tmp,
+    JSON.stringify(data, null, 2) + "\n",
+    mode === undefined ? "utf8" : { encoding: "utf8", mode },
+  );
   for (let attempt = 1; ; attempt++) {
     try {
       rename(tmp, filePath);

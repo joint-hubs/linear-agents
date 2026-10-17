@@ -55,7 +55,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import net from "node:net";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -181,6 +181,12 @@ writeFileSync(join(supState, "run-2", "children.json"), JSON.stringify({
 }), "utf8");
 writeFileSync(join(supState, "run-2", "children", "child-2.jsonl"), "", "utf8");
 
+// The task-scoped session's constants (plan P1c); the run dir + its
+// current-run pointer are created later, inside the first scenario, so the
+// snapshot-count assertions above are not perturbed by another pending gate.
+const SCOPED_SID = "sup-0a1b2c3d4e5f6071";
+const SCOPED_RUN_ID = "2026-10-12T12-00-00-000-supervisor-beef";
+
 // The Supervisor's session record + a real-shape transcript inside the
 // confinement root, plus an outside file for the refusal case.
 const transcriptPath = join(squadHome, "supervisor", "projects", "sess-1.jsonl");
@@ -272,6 +278,21 @@ const fakeHost = createServer(async (req, res) => {
   }
   if (req.url === "/dialog/ask") {
     const b = fakeHostBehavior.dialogAsk ?? { status: 200, body: { answered: true } };
+    res.writeHead(b.status, { "content-type": "application/json" });
+    res.end(JSON.stringify(b.body));
+    return;
+  }
+  // Task-scoped mirrors (the routes compose /sessions/<sid>/…): a managed
+  // session's record for the ownership check, and its message route for the
+  // scoped gate/hold notices.
+  const scopedRecordMatch = /^\/sessions\/(sup-[a-f0-9]+)$/.exec(req.url);
+  if (scopedRecordMatch) {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ taskSession: { sessionId: scopedRecordMatch[1], status: "running" } }));
+    return;
+  }
+  if (/^\/sessions\/sup-[a-f0-9]+\/message$/.test(req.url)) {
+    const b = fakeHostBehavior.message ?? { status: 200, body: { sent: true, confirmed: true, queued: false } };
     res.writeHead(b.status, { "content-type": "application/json" });
     res.end(JSON.stringify(b.body));
     return;
@@ -521,6 +542,12 @@ try {
     check("gate answer audit row notified:true",
       gateRow?.who === "dashboard" && gateRow?.notified === true && gateRow?.path === "gates/gate-1.json",
       JSON.stringify(gateRow));
+    // Legacy mode: no sessionId was sent, so the notice hit the global
+    // /message and no session-scoped route at all (the GET /sessions of the
+    // managed-sessions probe has no trailing slash — not a session route).
+    check("gate answer (legacy, no sessionId) notified via the global /message only",
+      hostCalls.some((c) => c.url === "/message") && !hostCalls.some((c) => c.url.startsWith("/sessions/")),
+      JSON.stringify(hostCalls.map((c) => c.url)));
 
     // FOC-449 provenance: the dashboard answer labels the gate's decision
     // event exactly like the CLI's answer does (outcome = the answer,
@@ -587,6 +614,65 @@ try {
     check("notify both ids -> 400", notifyBoth.status === 400, JSON.stringify(notifyBoth));
     const notifyNeither = await call(P, "POST", "/api/gates/notify", { body: { runId: "run-1" } });
     check("notify neither id -> 400", notifyNeither.status === 400, JSON.stringify(notifyNeither));
+
+    // ── legacy vs task-scoped sessionId on the gate/hold routes ─────────────
+    // A malformed sessionId is a 400 BEFORE any write (the gate file and the
+    // edits audit stay untouched); a well-formed sup- id scopes the notice to
+    // /sessions/<sid>/message; the legacy requests above kept the global
+    // /message.
+    // The scoped fixture arrives HERE — after the counts snapshots above — so
+    // its pending gate never perturbs them: one dedicated run with a pending
+    // gate and the session's own current-run pointer naming it.
+    mkdirSync(join(supState, SCOPED_RUN_ID, "gates"), { recursive: true });
+    writeFileSync(join(supState, SCOPED_RUN_ID, "gates", "gate-s.json"), JSON.stringify({
+      gateId: "gate-s", runId: SCOPED_RUN_ID, childId: "child-s", taskId: "FIX-44",
+      kind: "question", status: "pending", createdAt: NOW, summary: "scoped gate",
+      questions: ["scoped?"],
+    }), "utf8");
+    writeCurrentRun(
+      { runId: SCOPED_RUN_ID, model: "m1", startedAt: NOW, updatedAt: NOW, source: "pointer" },
+      { path: join(dataHome, "supervisor", "sessions", SCOPED_SID, "current-run.json") },
+    );
+    const gateSBefore = readFileSync(join(supState, SCOPED_RUN_ID, "gates", "gate-s.json"), "utf8");
+    const malformed = await call(P, "POST", "/api/gates/answer", {
+      body: { runId: SCOPED_RUN_ID, gateId: "gate-s", text: "x", sessionId: "not-a-sup-id" },
+    });
+    check("gate answer malformed sessionId -> 400 bad-session-id",
+      malformed.status === 400 && malformed.body?.error === "bad-session-id", JSON.stringify(malformed));
+    check("gate answer malformed sessionId wrote nothing",
+      readFileSync(join(supState, SCOPED_RUN_ID, "gates", "gate-s.json"), "utf8") === gateSBefore
+      && !existsSync(join(supState, SCOPED_RUN_ID, "edits.jsonl")),
+      "gate file or edits row changed");
+    const malformedHold = await call(P, "POST", "/api/holds/answer", {
+      body: { runId: SCOPED_RUN_ID, holdId: "hold-x", text: "x", sessionId: "12345" },
+    });
+    check("hold answer malformed sessionId -> 400 bad-session-id",
+      malformedHold.status === 400 && malformedHold.body?.error === "bad-session-id", JSON.stringify(malformedHold));
+    const malformedNotify = await call(P, "POST", "/api/gates/notify", {
+      body: { runId: SCOPED_RUN_ID, gateId: "gate-s", sessionId: "short" },
+    });
+    check("gate notify malformed sessionId -> 400 bad-session-id",
+      malformedNotify.status === 400 && malformedNotify.body?.error === "bad-session-id", JSON.stringify(malformedNotify));
+
+    // The scoped answer: the notice goes to /sessions/<sid>/message — never
+    // the global /message — and the audit row is notified.
+    hostCalls.length = 0;
+    const scopedAnswer = await call(P, "POST", "/api/gates/answer", {
+      body: { runId: SCOPED_RUN_ID, gateId: "gate-s", text: "scoped answer", sessionId: SCOPED_SID },
+    });
+    check("scoped gate answer -> 200 recorded+notified",
+      scopedAnswer.status === 200 && scopedAnswer.body?.recorded === true && scopedAnswer.body?.notified === true,
+      JSON.stringify(scopedAnswer).slice(0, 300));
+    const scopedNotice = hostCalls.find((c) => c.url === `/sessions/${SCOPED_SID}/message`);
+    check("scoped gate answer notified through /sessions/<sid>/message",
+      typeof scopedNotice?.body?.text === "string" && scopedNotice.body.text.includes("gate-s"),
+      JSON.stringify(hostCalls.map((c) => c.url)));
+    check("scoped gate answer did NOT hit the global /message",
+      !hostCalls.some((c) => c.url === "/message"), JSON.stringify(hostCalls.map((c) => c.url)));
+    const scopedRow = readFileSync(join(supState, SCOPED_RUN_ID, "edits.jsonl"), "utf8")
+      .split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      .find((r) => r.type === "gate-answer");
+    check("scoped gate answer audit row notified:true", scopedRow?.notified === true, JSON.stringify(scopedRow));
 
     // ── FOC-810: the Supervisor's dialogs in the snapshot and the answer routes ──
     const hostStateBehavior = (state, transcriptPath) => ({

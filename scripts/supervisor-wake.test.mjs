@@ -16,7 +16,7 @@
 // Run: node scripts/supervisor-wake.test.mjs
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -188,6 +188,11 @@ await test("nothing live and no fresh row → exit 0 after the grace window, lea
   const lease = readWakerLease(runId);
   if (!lease?.endedAt) fail(`lease not ended: ${JSON.stringify(lease)}`);
   if (wakerState(lease) !== "ended") fail(`state ${wakerState(lease)}`);
+  if (process.platform !== "win32") {
+    // POSIX mode bits only; the Windows run asserts the write succeeded above.
+    const mode = statSync(wakerPath(runId)).mode & 0o777;
+    if (mode !== 0o644) fail(`waker.json mode ${mode.toString(8)} !== 644 (run-root: Supervisor-owned)`);
+  }
 });
 
 await test("a row already woken for is not woken for again (firedThrough survives takeover)", () => {

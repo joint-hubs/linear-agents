@@ -13,7 +13,7 @@
 //
 // Run: node scripts/utils.test.mjs
 
-import { readFileSync, writeFileSync, rmSync, mkdtempSync, readdirSync, renameSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync, mkdtempSync, readdirSync, renameSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -285,6 +285,49 @@ test("collectRunScratch on a missing state home is empty, not a throw", () => {
   const { rounds, reviews } = collectRunScratch({ stateHome: join(STATE_HOME, "definitely-missing") });
   eq(rounds.size, 0, "no rounds");
   eq(reviews.length, 0, "no reviews");
+});
+// ── FOC-802 M3: the optional POSIX `mode` ─────────────────────────────────────
+// The run-level writers pin 0644 so state a child must read but not rewrite
+// stays so even between fix_permissions passes. Mode bits exist only on POSIX;
+// on Windows these tests assert nothing (the default-path tests above already
+// prove the writes succeed there).
+console.log("\nutils: atomicWriteJSON honours an explicit mode");
+
+test("the destination carries the requested mode (FOC-802 M3)", () => {
+  if (process.platform === "win32") return;
+  const dir = tmpDir("utils-test-mode-");
+  const dest = join(dir, "target.json");
+  const prevUmask = process.umask(0o022); // deterministic masking for the assertion
+  try {
+    atomicWriteJSON(dest, { pinned: true }, { mode: 0o644 });
+  } finally {
+    process.umask(prevUmask);
+  }
+  eq(statSync(dest).mode & 0o777, 0o644, "mode on first write");
+  eq(readFileSync(dest, "utf8"), JSON.stringify({ pinned: true }, null, 2) + "\n", "content intact");
+  onlyFile(dir, "target.json");
+});
+
+test("a rewrite re-pins the mode over a pre-existing looser file (rename swaps the inode)", () => {
+  if (process.platform === "win32") return;
+  const dir = tmpDir("utils-test-mode-rewrite-");
+  const dest = join(dir, "target.json");
+  const prevUmask = process.umask(0o000); // the fixture must actually be 0666
+  try {
+    writeFileSync(dest, '{"loose":true}\n', { mode: 0o666 });
+  } finally {
+    process.umask(prevUmask);
+  }
+  eq(statSync(dest).mode & 0o777, 0o666, "fixture file was loose");
+  const prevUmask2 = process.umask(0o022);
+  try {
+    atomicWriteJSON(dest, { pinned: true }, { mode: 0o644 });
+  } finally {
+    process.umask(prevUmask2);
+  }
+  eq(readFileSync(dest, "utf8"), JSON.stringify({ pinned: true }, null, 2) + "\n", "content replaced");
+  eq(statSync(dest).mode & 0o777, 0o644, "the old loose mode survived the rewrite");
+  onlyFile(dir, "target.json");
 });
 
 for (const d of dirs) rmSync(d, { recursive: true, force: true });

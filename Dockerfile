@@ -22,9 +22,9 @@ ARG CLAUDE_CODE_VERSION=2.1.296
 ARG CODEGRAPH_VERSION=1.6.0
 ARG SEMGREP_VERSION=1.172.0
 
-# System deps: git/gh/curl for tooling (squads call `gh`), procps for `ps` (stability tests), tini as init, python3 for semgrep, tmux for the Supervisor session host (FOC-783), passwd for usermod/groupmod (FOC-803 uid match) — not in bookworm-slim.
+# System deps: git/gh/curl for tooling (squads call `gh`), procps for `ps` (stability tests), tini as init, python3 for semgrep, tmux for the Supervisor session host (FOC-783), passwd for usermod/groupmod (FOC-803 uid match), sudo for the child-spawn helper (FOC-802), util-linux for setpriv (FOC-802 — present in Debian's required set, kept explicit) — not in bookworm-slim.
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends git gh ca-certificates curl tini procps tmux passwd python3 python3-venv python3-pip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git gh ca-certificates curl tini procps tmux passwd sudo util-linux python3 python3-venv python3-pip && rm -rf /var/lib/apt/lists/*
 
 # Python tools (semgrep, uv) in an isolated venv, on PATH ahead of system python.
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" uv
@@ -62,6 +62,55 @@ RUN if [ "${FENIX_UID}:${FENIX_GID}" != "$(id -u node):$(id -g node)" ]; then \
       && usermod -o -u "$FENIX_UID" -g "$FENIX_GID" node \
       && chown -R node:node /home/node /opt/fenix /data; \
     fi
+
+# FOC-802: an unprivileged child identity so spawned agents do not run as the
+# Supervisor's user. `fenix` is the shared group: children and the Supervisor
+# (node joins as a supplementary member) cooperate through setgid + g+rwX on
+# the shared /data trees only. Group `fenix` gets gid $FENIX_GID when that gid
+# is free — normally it is NOT, because FOC-803 already gave it to node's
+# primary group, so groupadd assigns the next free gid; that is fine, nothing
+# keys on the fenix gid itself. Children keep a supplementary-group-free
+# identity of their own.
+ARG FENIX_CHILD_UID
+RUN set -eu; \
+    CHILD_UID="${FENIX_CHILD_UID:-$((FENIX_UID + 1000))}"; \
+    if [ "$CHILD_UID" = "0" ] || [ "$CHILD_UID" = "$FENIX_UID" ]; then \
+      echo "FENIX_CHILD_UID=$CHILD_UID refused — the child uid must differ from node's and never be root" >&2; \
+      exit 1; \
+    fi; \
+    if getent passwd "$CHILD_UID" >/dev/null; then \
+      echo "FENIX_CHILD_UID=$CHILD_UID is already taken by $(getent passwd "$CHILD_UID" | cut -d: -f1)" >&2; \
+      exit 1; \
+    fi; \
+    if ! getent group fenix >/dev/null; then \
+      if getent group "$FENIX_GID" >/dev/null; then \
+        groupadd fenix; \
+      else \
+        groupadd -g "$FENIX_GID" fenix; \
+      fi; \
+    fi; \
+    useradd -u "$CHILD_UID" -g fenix -d /home/fenix-child -m -s /usr/sbin/nologin fenix-child \
+    && chmod 0700 /home/fenix-child \
+    && usermod -aG fenix node \
+    && printf '[safe]\n\tdirectory = *\n' > /home/fenix-child/.gitconfig \
+    && chown fenix-child:fenix /home/fenix-child/.gitconfig
+# The child commits through gitdirs inside the node-owned main clones
+# (.git/worktrees/<name>), so git's dubious-ownership check needs the child's
+# own global safe.directory; the handover already scopes what it may touch.
+# Children run `claude` with CLAUDE_CONFIG_DIR pointing at their launch dir on
+# the volume, so `.claude.json` is created inside that config dir by the first
+# run (same as the Supervisor's squads) — nothing to pre-create in the child
+# HOME (see entrypoint.sh init_claude_configs, which is a CLI call, not a copy).
+
+# FOC-802: the single privileged path. Installed AFTER the `chown -R` above so
+# the helper and the sudoers drop-in are never node-writable; the sudoers file
+# is syntax-checked at build time (visudo -cf) so a typo cannot break boot.
+COPY docker/fenix-spawn-as-child.sh /usr/local/sbin/fenix-spawn-as-child
+COPY docker/sudoers-fenix-child /etc/sudoers.d/fenix-child
+RUN chown root:root /usr/local/sbin/fenix-spawn-as-child /etc/sudoers.d/fenix-child \
+    && chmod 0755 /usr/local/sbin/fenix-spawn-as-child \
+    && chmod 0440 /etc/sudoers.d/fenix-child \
+    && visudo -cf /etc/sudoers.d/fenix-child
 
 WORKDIR /opt/fenix
 USER node
