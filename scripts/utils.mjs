@@ -1,14 +1,19 @@
-// Shared utilities for Linear Agents — idempotent creation, review-round tracking.
+// Shared utilities for Linear Agents — idempotent creation, review-round
+// tracking, the supervisor state-home seam and per-run scratch (FOC-903).
 //
-// Zero runtime deps (Node 18+). ESM (.mjs).
+// Zero runtime deps (Node 18+). ESM (.mjs). This module sits at the BOTTOM of
+// the scripts import graph: supervisor-lib.mjs re-exports the seam functions
+// from here, so nothing may import supervisor-lib from this file (that edge
+// would be a cycle).
 //
 // Usage:
-//   import { idempotentCreate, reviewRound } from "./utils.mjs";
+//   import { idempotentCreate, reviewRound, collectRunScratch } from "./utils.mjs";
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, readdirSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stateRoot } from "./fenix-paths.mjs";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -17,9 +22,13 @@ import { fileURLToPath } from "node:url";
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, "..");
 
-/** Lazy-ensure `.state/` dir exists under project root. */
+/**
+ * Lazy-ensure the app-state dir exists (`.state/` under the repo root, or
+ * `$LA_STATE_ROOT` — the shared seam from fenix-paths, FOC-811; the default is
+ * byte-identical to the pre-seam location).
+ */
 function ensureStateDir() {
-  const d = join(root, ".state");
+  const d = stateRoot();
   if (!existsSync(d)) mkdirSync(d, { recursive: true });
   return d;
 }
@@ -118,21 +127,154 @@ function writeCreatedStore(store) {
 }
 
 // ---------------------------------------------------------------------------
+// Supervisor state-home seam (FOC-608) + per-run scratch (FOC-903)
+// ---------------------------------------------------------------------------
+
+// The state root is a SEAM, in the same spirit as telemetry-store's
+// LA_TELEMETRY_HOME — one function derives every path below it, and the default
+// is never inlined anywhere else. `LA_SUPERVISOR_STATE_HOME` redirects the whole
+// supervisor state tree (runs, gates, tees, wake queues) to another directory,
+// which is what lets tests run against a temp dir instead of the repo's real
+// `.state/supervisor/`. Unset means the historical location, unchanged.
+// Defined here (not in supervisor-lib.mjs) because reviewRound/collectRunScratch
+// below need it and this module must stay at the bottom of the import graph;
+// supervisor-lib.mjs re-exports it.
+export const supervisorStateHome = () =>
+  process.env.LA_SUPERVISOR_STATE_HOME || join(root, ".state", "supervisor");
+
+export const runDir = (runId) => join(supervisorStateHome(), runId);
+
+// The supervisor run id shape `run-manifest.mjs gen-id supervisor` produces
+// (e.g. 2026-10-06T15-09-19-713-supervisor-26c7) — the guard against treating a
+// stray directory name (or a `test-*` fixture dir) as a run. Canonical home:
+// supervisor-current-run.mjs re-exports it for its existing importers.
+export const RUN_ID_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}-supervisor-[0-9a-f]{4}$/;
+
+/**
+ * Resolve the run id behind a per-run store: the explicit option wins, else
+ * `LA_SUPERVISOR_RUN`. Returns null when neither is set — the caller then uses
+ * the legacy global store (standalone squads). A present-but-invalid id throws:
+ * silently falling back to the shared legacy file would recreate exactly the
+ * cross-session lost update the per-run layout removes.
+ */
+function resolveRunId(runId) {
+  const id = runId ?? process.env.LA_SUPERVISOR_RUN;
+  if (id == null || id === "") return null;
+  if (typeof id !== "string" || !RUN_ID_RE.test(id)) {
+    throw new Error(`invalid supervisor run id: ${id} (expected the run-manifest gen-id shape, e.g. 2026-10-06T15-09-19-713-supervisor-26c7)`);
+  }
+  return id;
+}
+
+// Scratch kinds are path segments under <runDir>/scratch/ — one whitelist, so a
+// kind can never carry a separator or traversal.
+const SCRATCH_KIND_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * `<runDir>/scratch/<kind>/` — the per-run scratch area (FOC-903). Kinds in use:
+ * `reviews` (review round files) and `krok0` (kickoff drafts). Created on demand.
+ */
+export function scratchDir(runId, kind) {
+  const id = resolveRunId(runId);
+  if (!id) throw new Error("scratchDir: a run id is required (option or LA_SUPERVISOR_RUN)");
+  if (typeof kind !== "string" || !SCRATCH_KIND_RE.test(kind)) {
+    throw new Error(`scratchDir: invalid scratch kind: ${kind}`);
+  }
+  const dir = join(runDir(id), "scratch", kind);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * Scan every run dir under `stateHome` for per-run scratch inputs (FOC-903).
+ * Only dirs matching RUN_ID_RE are runs — legacy `test-*` fixture dirs and
+ * anything else is never read.
+ *
+ * Returns:
+ *   rounds  — Map<taskId, { round, runId }>: the union of every run's
+ *             review-rounds.json, the NEWEST run winning per task (run ids are
+ *             zero-padded timestamps, so descending name order is chronological);
+ *   reviews — [{ taskId, round, file (absolute path), runId }]: every
+ *             `<runDir>/scratch/reviews/<taskId>-round<N>.md`, deduplicated per
+ *             (taskId, round) with the newest run winning, same rule.
+ *
+ * Legacy inputs (.state/review-rounds.json, .state/reviews/) are NOT included —
+ * callers merge them in at LOWER precedence (see delegation-outcomes.mjs).
+ */
+export function collectRunScratch({ stateHome = supervisorStateHome() } = {}) {
+  const rounds = new Map();
+  const reviews = [];
+  let entries;
+  try {
+    entries = readdirSync(stateHome, { withFileTypes: true });
+  } catch {
+    return { rounds, reviews }; // no state home — nothing per-run anywhere
+  }
+  const runs = entries
+    .filter((e) => e.isDirectory() && RUN_ID_RE.test(e.name))
+    .map((e) => e.name)
+    .sort()
+    .reverse(); // newest first — the first run to claim a task wins
+
+  const claimedReviews = new Set(); // `${taskId}|${round}` — first (newest) run wins
+  for (const runId of runs) {
+    const rDir = join(stateHome, runId);
+    let store = null;
+    try {
+      store = JSON.parse(readFileSync(join(rDir, "review-rounds.json"), "utf8"));
+    } catch {
+      // absent or corrupt — this run contributes no counter
+    }
+    if (store && typeof store === "object" && !Array.isArray(store)) {
+      for (const [taskId, value] of Object.entries(store)) {
+        const round = Number(value);
+        if (!Number.isFinite(round) || round < 0) continue;
+        if (!rounds.has(taskId)) rounds.set(taskId, { round, runId });
+      }
+    }
+    const revDir = join(rDir, "scratch", "reviews");
+    let files;
+    try {
+      files = readdirSync(revDir);
+    } catch {
+      continue; // no scratch/reviews in this run
+    }
+    for (const file of files) {
+      const m = file.match(/^(.+)-round(\d+)\.md$/);
+      if (!m) continue;
+      const key = `${m[1]}|${m[2]}`;
+      if (claimedReviews.has(key)) continue;
+      claimedReviews.add(key);
+      reviews.push({ taskId: m[1], round: Number(m[2]), file: join(revDir, file), runId });
+    }
+  }
+  return { rounds, reviews };
+}
+
+// ---------------------------------------------------------------------------
 // Review-rounds store
 // ---------------------------------------------------------------------------
 
 const REVIEW_ROUNDS_PATH = () => join(ensureStateDir(), "review-rounds.json");
 
-function readReviewStore() {
+/** The counter file for a resolved run id: per-run when known, legacy otherwise. */
+function reviewRoundsPath(id) {
+  if (!id) return REVIEW_ROUNDS_PATH();
+  const dir = runDir(id);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return join(dir, "review-rounds.json");
+}
+
+function readReviewStore(path) {
   try {
-    return JSON.parse(readFileSync(REVIEW_ROUNDS_PATH(), "utf8"));
+    return JSON.parse(readFileSync(path, "utf8"));
   } catch {
     return {};
   }
 }
 
-function writeReviewStore(store) {
-  atomicWriteJSON(REVIEW_ROUNDS_PATH(), store);
+function writeReviewStore(path, store) {
+  atomicWriteJSON(path, store);
 }
 
 // ---------------------------------------------------------------------------
@@ -218,15 +360,25 @@ export function resetCreatedStore() {
  * exceeds `maxRounds`, the status flips to `"escalated"` and no further
  * increments occur.
  *
+ * The counter file follows the run (FOC-903): when a run id is known (the
+ * `runId` option, else `LA_SUPERVISOR_RUN`), the counter lives at
+ * `<runDir>/review-rounds.json` — one writer per task, so two supervised
+ * sessions can no longer lose each other's increments on the single global
+ * file. Without a run id the legacy global `.state/review-rounds.json` is used,
+ * exactly as before (standalone squads).
+ *
  * @param {object} opts
  * @param {string} opts.taskId    - Unique task identifier (e.g. Linear issue ID).
  * @param {number} [opts.maxRounds=2] - Maximum review rounds before escalation.
+ * @param {string} [opts.runId]   - Supervisor run id (defaults to
+ *                                  `LA_SUPERVISOR_RUN`); an invalid id throws.
  * @returns {{ round: number, status: "review" | "escalated" }}
  *   - `round`: the current (1-based) round number.
  *   - `status`: `"review"` while round <= maxRounds, `"escalated"` once exceeded.
  */
-export function reviewRound({ taskId, maxRounds = 2 }) {
-  const store = readReviewStore();
+export function reviewRound({ taskId, maxRounds = 2, runId } = {}) {
+  const path = reviewRoundsPath(resolveRunId(runId));
+  const store = readReviewStore(path);
   const current = store[taskId] ?? 0;
 
   // If already past the limit, don't increment further
@@ -236,7 +388,7 @@ export function reviewRound({ taskId, maxRounds = 2 }) {
 
   const next = current + 1;
   store[taskId] = next;
-  writeReviewStore(store);
+  writeReviewStore(path, store);
 
   return {
     round: next,
@@ -246,7 +398,10 @@ export function reviewRound({ taskId, maxRounds = 2 }) {
 
 /**
  * Reset the review-rounds store. Useful in tests to start with a clean slate.
+ * Follows the same run-id rule as `reviewRound`: with a run id (option or
+ * `LA_SUPERVISOR_RUN`) the per-run counter is cleared, without one the legacy
+ * global file.
  */
-export function resetReviewRounds() {
-  writeReviewStore({});
+export function resetReviewRounds({ runId } = {}) {
+  writeReviewStore(reviewRoundsPath(resolveRunId(runId)), {});
 }

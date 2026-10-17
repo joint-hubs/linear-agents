@@ -208,6 +208,25 @@ if (auditProblems.length) {
   process.exit(1);
 }
 
+// ── legacy fixture run dirs in the real supervisor state (FOC-602) ───────────
+
+// Since FOC-602 the fixtures module redirects every run dir to a temp home, but
+// older runs left `test-*` dirs in the repo's real .state/supervisor/. The
+// runner counts them once at startup and points at the migration sweep — it
+// NEVER deletes: the sweep is a deliberate, reported step (dry run first), and
+// a runner that removes state as a side effect of running tests is exactly the
+// accident this ticket exists to prevent.
+if (!process.env.LA_SUPERVISOR_STATE_HOME) {
+  let legacyFixtureDirs = 0;
+  try {
+    legacyFixtureDirs = readdirSync(join(SCRIPTS_DIR, '..', '.state', 'supervisor'))
+      .filter((f) => f.startsWith('test-')).length;
+  } catch { /* no real state dir — nothing legacy to report */ }
+  if (legacyFixtureDirs > 0) {
+    console.log(`legacy fixture run dirs under .state/supervisor: ${legacyFixtureDirs} — sweep with node scripts/supervisor-migrate-scratch.mjs --sweep-fixtures --apply`);
+  }
+}
+
 // ── child env: strip LA_SUPERVISOR* and task-ownership seams (FOC-295) ───────
 
 // Suite files are hermetic: they assume a clean environment, and supervisor-cleanup

@@ -1,6 +1,6 @@
 # Supervisor — manual e2e checklist (FOC-116, spec §8.12)
 
-The scripted suite (`node scripts/test-all.mjs`, 184 files) proves the parts against a mock
+The scripted suite (`node scripts/test-all.mjs`, 187 files) proves the parts against a mock
 `claude`. It cannot prove the one thing this epic is actually about: that **Mateusz never opens a
 child terminal**. That is a claim about a human session, so it gets walked by hand, once, on a
 throwaway issue, before first real use.
@@ -226,8 +226,25 @@ The rules touched fall into four groups:
 All of it is **inert unless `LA_SUPERVISOR=1`**, which only `supervisor-spawn.mjs` sets. That is
 what keeps AC-10 true while the squad prompts changed.
 
+### Where reviews, review rounds and kickoff drafts live (FOC-903)
+
+In a supervised run (`LA_SUPERVISOR_RUN` set) the scratch a run produces lives under its own run
+dir — `<stateHome>/<runId>/` — not in the shared `.state/`:
+
+| What | Per-run location | Legacy location (standalone squads, pre-FOC-903 runs) |
+|---|---|---|
+| Review round files | `<stateHome>/<runId>/scratch/reviews/<taskId>-round<N>.md` | `.state/reviews/<taskId>-round<N>.md` |
+| Review-round counter | `<stateHome>/<runId>/review-rounds.json` | `.state/review-rounds.json` |
+| Kickoff drafts | `<stateHome>/<runId>/scratch/krok0/` | `.state/krok0-<date>/` |
+
+The readers (`delegation-outcomes.mjs`, `verdict-evidence.mjs`, `review-round.mjs`) take the **union**
+of every run dir's inputs with the legacy locations at lower precedence — the newest run wins per
+task (run ids are zero-padded timestamps, so name order is chronological). Migrating legacy leftovers
+into their per-run homes: `node scripts/supervisor-migrate-scratch.mjs` (dry run by default; see
+`docs/scratch-and-fixtures.md`).
+
 ### Verification
-- `node scripts/test-all.mjs` → 184 files (the registered lane count: 148 parallel + 36 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
+- `node scripts/test-all.mjs` → 187 files (the registered lane count: 151 parallel + 36 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
   load-sensitive and has been observed red at base `e3dea40` as well — see §0 before reading a red
   security-scan as a regression.
 - The runner sweeps its spawn registry after both lanes (FOC-840): a server a test file left alive is tree-killed and reported as `test orphans left running: <file> pid N port P (killed)`, and the run fails even when every file passed.

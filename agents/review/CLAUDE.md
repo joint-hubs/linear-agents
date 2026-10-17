@@ -119,6 +119,7 @@ Combine the 3 passes into one Conventional Comments review (`issue:`/`nitpick:`/
 Merge: deduplicate by file+line (one entry per location); keep HIGHEST severity on overlap; on disagreement apply merge-authority order (`deep`>correctness/arch, `security`>auth/secrets, `first-pass`>lint/style); drop praise-only duplicates.
 Think through conflicts per merge-authority order before writing the round file.
 Write to `.state/reviews/<identifier>-round<N>.md`.
+When `LA_SUPERVISOR_RUN` is set, write it to `$LA_SUPERVISOR_STATE_HOME/<run>/scratch/reviews/<taskId>-round<N>.md` instead (the Supervisor reads both).
 Compute round:
 ```bash
 node $LA_ROOT/scripts/review-round.mjs next <identifier> --max 2
