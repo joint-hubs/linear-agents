@@ -108,6 +108,46 @@ with `auto-pickup: off` or `auto-pickup: on (every <n>s, states <a,b>)`.
 Each board ticket carries a muted `claimed · <session id, first 12 chars>` tag next to its stage tag (hover shows
 the full session id and status). The claim comes from the task-sessions store's active owner for the ticket — the
 board only reads the store, never creates it; a dead owner's tag stays but is not marked live.
+## Run ownership and the orphan scan (FOC-905)
+
+Every run dir carries `owner.json`, written once when the run dir is created
+(`ensureRunDir` in `supervisor-lib.mjs`) and never overwritten:
+
+```json
+{
+  "sessionId": "sup-<32hex> or null",
+  "hostname": "the container or host that created the run",
+  "containerStartMs": 1729068000000,
+  "pid": 1234,
+  "recordedAt": "2026-10-16T09:00:00.000Z"
+}
+```
+
+`containerStartMs` is the creating container's PID 1 start in epoch ms, or null
+when it cannot be proven (host-run supervisors, macOS). A NEW run's
+current-run record (`supervisor-current-run.mjs` `resolve --new`, `record`)
+carries the same object under `owner`; `supervisor-status --briefing` reports
+the run dir's record under `owner` (null for legacy runs).
+
+The orphan scan (`scripts/supervisor-orphans.mjs`, run at container start)
+relates each run's owner to the current container before touching anything:
+
+| relation | action |
+|---|---|
+| `mine` (same hostname, same container start) | the time rule: a live child whose turn started before this container → `crashed`; when the owner's task-session row is terminal (`stopped`/`completed`/`failed`) the run is finished work → marked regardless of the turn time |
+| `restarted` (same hostname, an older container start) | marked — that container instance is gone |
+| `unknown` (no `owner.json`, legacy runs; or the starts do not line up) | the time rule, exactly as before FOC-905 |
+| `foreign` (a different hostname) | listed only — its children are never swept. `--all --yes` overrides and applies the time rule |
+
+- `node scripts/supervisor-orphans.mjs --container [--json]` always exits 0 —
+  the container start is never blocked. `--json` reports
+  `{ containerStart, marked: [{ runId, childId, relation }], skipped: [{ runId, relation, reason }], unknown }`.
+- `--all` without `--yes` prints the foreign list and exits 2. N containers
+  over one `/data` is unsupported but must not be destructive: the override is
+  two flags on purpose, and foreign runs are never swept automatically.
+- `fenix doctor` prints a `run owners` line: `N runs: mine M, restarted R,
+  legacy L`. It warns when foreign runs share this state home, naming their
+  hostnames and pointing at the override.
 
 ## Out of scope
 

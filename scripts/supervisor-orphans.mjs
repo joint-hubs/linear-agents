@@ -1,4 +1,5 @@
-// scripts/supervisor-orphans.mjs — FOC-799: orphaned children after a container restart.
+// scripts/supervisor-orphans.mjs — FOC-799: orphaned children after a container
+// restart; owner-aware since FOC-905.
 //
 // A child turn runs under a detached watcher in the supervisor container. If the
 // container is killed mid-turn, the watcher and the child die with it, nothing
@@ -7,89 +8,71 @@
 // a new PID namespace, so the recorded pid may even belong to an unrelated
 // process — probing it would be worse than not probing it.
 //
-// The rule this script enforces: a turn that started BEFORE the current
-// container's PID 1 started cannot be alive in this container. Such children are
-// marked exactly the way supervisor-watch.mjs marks a crash (status "crashed",
-// exitCode/signal null, endedAt set, the last turn closed) plus an orphanedBy
-// field naming the cause.
+// The rule this script enforces, per RUN (FOC-905): first relate the run's
+// owner.json to this container (run-owner.mjs ownerRelation), then
+//
+//   mine       a turn that started BEFORE the current container's PID 1 started
+//              cannot be alive in this container → mark; when the owner's
+//              task-session row is terminal (stopped/completed/failed) the run
+//              is finished work → mark regardless of the turn time
+//   restarted  the owner's container instance is older than this one — it is
+//              gone → mark regardless of the turn time
+//   unknown    no owner.json (legacy runs) or an unprovable relation → the old
+//              time rule
+//   foreign    a different hostname wrote this run → LIST ONLY, never mark;
+//              `--all --yes` overrides and applies the old time rule
+//
+// Marking is exactly the way supervisor-watch.mjs marks a crash (status
+// "crashed", exitCode/signal null, endedAt set, the last turn closed) plus an
+// orphanedBy field naming the cause.
 //
 // Runs at container start; it must never block the start, so the CLI exits 0
-// even when individual runs could not be read (WARN lines instead).
+// even when individual runs could not be read (WARN lines instead). `--all`
+// without `--yes` is the one non-zero exit (2): the override is two flags on
+// purpose, and the foreign list is printed before refusing.
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { LIVE_STATUSES, readRegistry, supervisorStateHome, updateChild } from "./supervisor-lib.mjs";
+import { readSessionRows, taskSessionsDbPath } from "./task-sessions.mjs";
+import { containerStartMs, currentOwner, ownerRelation, readRunOwner } from "./run-owner.mjs";
+
+// FOC-905: containerStartMs moved to run-owner.mjs (builtin-only, so
+// supervisor-lib can import it); re-exported so existing tests and callers
+// keep their import path.
+export { containerStartMs };
 
 export const ORPHAN_ERROR =
   "orphaned: the supervisor container restarted while this turn was running — its process is gone";
 
 /**
- * When did this container's PID 1 start, in epoch ms?
- *
- * /proc/stat carries the kernel boot time (`btime <secs>`) and /proc/1/stat's
- * field 22 the PID 1 start time in clock ticks since boot, so the sum — ticks
- * converted through CLK_TCK (getconf, default 100) — is PID 1's absolute start.
- * `clkTck` is injectable for tests; `readFile` likewise, so the /proc shapes are
- * testable off Linux.
- *
- * Returns null whenever the answer cannot be PROVEN (no /proc on Windows/macOS,
- * unreadable or malformed files) — a caller that cannot tell when the container
- * started must not guess, so null means "do nothing", never "mark everything".
- */
-export function containerStartMs({ readFile = readFileSync, clkTck } = {}) {
-  try {
-    const ticks = clkTck ?? defaultClkTck();
-    if (!(ticks > 0)) return null;
-    const boot = readFile("/proc/stat", "utf8");
-    const btimeLine = boot.split("\n").find((line) => line.startsWith("btime "));
-    if (!btimeLine) return null;
-    const btime = Number(btimeLine.slice("btime ".length).trim());
-    if (!Number.isFinite(btime)) return null;
-    const one = readFile("/proc/1/stat", "utf8");
-    // Field 2 (comm) is parenthesised and may contain spaces and parentheses of
-    // its own, so everything after the LAST ")" is fields 3..n. Token 0 there is
-    // field 3 (state), which puts field 22 (starttime) at index 19.
-    const fields = one.slice(one.lastIndexOf(")") + 1).trim().split(/\s+/);
-    const starttime = Number(fields[19]);
-    if (!Number.isFinite(starttime)) return null;
-    return (btime + starttime / ticks) * 1000;
-  } catch {
-    return null; // no /proc (Windows, macOS), or a file nobody could parse
-  }
-}
-
-function defaultClkTck() {
-  try {
-    const conf = spawnSync("getconf", ["CLK_TCK"], { encoding: "utf8" });
-    const n = Number((conf.stdout || "").trim());
-    if (conf.status === 0 && Number.isFinite(n) && n > 0) return n;
-  } catch {
-    /* getconf missing — fall through to the default */
-  }
-  return 100;
-}
-
-/**
- * Mark every live child whose turn predates the container as crashed.
+ * Mark the orphaned children of every run THIS container owns.
  *
  * Scans every directory under `stateRoot` that holds a children.json. One bad
  * run (corrupt registry, unreadable dir) is collected as an `errors` entry and
  * never aborts the scan — the other runs' orphans must not hide behind it.
  * Children whose startedAt is missing or unparseable are LEFT ALONE and
- * reported as `unknown`: the rule judges by start time, so a child without a
- * provable start time cannot be condemned by it.
+ * reported as `unknown`: the time rule judges by start time, so a child without
+ * a provable start time cannot be condemned by it. (The two owner rules that do
+ * not consult time — a terminal owner session, a restarted owner container —
+ * are stronger evidence than the timestamp and mark such children too.)
+ *
+ * `current` (default currentOwner()) is this container's identity; `sessions`
+ * (default null) are the task-sessions rows for the terminal-owner check;
+ * `all` sweeps foreign runs with the old time rule instead of listing them.
  *
  * Writes go through supervisor-lib's updateChild, so locking/atomic-write
  * discipline is the watcher's own. Returns
- * { marked: [{runId, childId, turn, startedAt}], unknown, errors, runsScanned }.
+ * { marked: [{runId, childId, turn, startedAt, relation}], unknown, errors,
+ *   skipped: [{runId, relation, reason}], runsScanned }.
  */
-export function markOrphans({ stateRoot, containerStart, now = new Date() }) {
+export function markOrphans({ stateRoot, containerStart, now = new Date(), current = currentOwner(), sessions = null, all = false }) {
   const marked = [];
   const unknown = [];
   const errors = [];
+  const skipped = [];
   let runsScanned = 0;
 
   let entries;
@@ -97,7 +80,7 @@ export function markOrphans({ stateRoot, containerStart, now = new Date() }) {
     entries = readdirSync(stateRoot, { withFileTypes: true });
   } catch (err) {
     errors.push({ runId: null, error: `state root ${stateRoot} could not be read: ${err.message}` });
-    return { marked, unknown, errors, runsScanned };
+    return { marked, unknown, errors, skipped, runsScanned };
   }
 
   for (const entry of entries) {
@@ -114,16 +97,44 @@ export function markOrphans({ stateRoot, containerStart, now = new Date() }) {
       continue;
     }
 
-    for (const [childId, child] of Object.entries(registry.children || {})) {
-      if (!LIVE_STATUSES.includes(child.status)) continue;
+    // The owner relation is judged only for runs with something to judge — a
+    // run whose children are all terminal has nothing an orphan scan could
+    // touch, so it is neither marked nor reported as skipped.
+    const liveChildren = Object.entries(registry.children || {}).filter(([, c]) =>
+      LIVE_STATUSES.includes(c.status),
+    );
+    if (liveChildren.length === 0) continue;
+
+    const owner = readRunOwner(join(stateRoot, runId));
+    const session =
+      owner?.sessionId && Array.isArray(sessions)
+        ? sessions.find((s) => s.sessionId === owner.sessionId) ?? null
+        : null;
+    const { relation, terminal } = ownerRelation(owner, current, { session });
+
+    if (relation === "foreign" && !all) {
+      skipped.push({ runId, relation, reason: "owned by another host/container" });
+      continue;
+    }
+
+    // A terminal owner session proves the run's work is over, and a restarted
+    // owner container is gone — both mark without consulting the turn start.
+    const unconditional = (relation === "mine" && terminal) || relation === "restarted";
+
+    for (const [childId, child] of liveChildren) {
       const turn = child.turns?.at(-1);
       const startedAt = turn?.startedAt || child.startedAt;
-      const startedMs = Date.parse(startedAt);
-      if (!Number.isFinite(startedMs)) {
-        unknown.push({ runId, childId, startedAt: startedAt ?? null });
-        continue;
+      if (!unconditional) {
+        const startedMs = Date.parse(startedAt);
+        if (!Number.isFinite(startedMs)) {
+          unknown.push({ runId, childId, startedAt: startedAt ?? null });
+          continue;
+        }
+        // A null containerStart means the time rule cannot judge — it must not
+        // guess, so nothing is marked by time alone (same contract as
+        // containerStartMs itself).
+        if (containerStart === null || containerStart === undefined || startedMs >= containerStart) continue;
       }
-      if (startedMs >= containerStart) continue;
 
       const endedAt = now.toISOString();
       const turns = (child.turns || []).map((t, i) =>
@@ -140,30 +151,74 @@ export function markOrphans({ stateRoot, containerStart, now = new Date() }) {
         orphanedBy: "container-restart",
         turns,
       });
-      marked.push({ runId, childId, turn: (child.turns || []).length ? (child.turns || []).length - 1 : 0, startedAt });
+      marked.push({
+        runId,
+        childId,
+        turn: (child.turns || []).length ? (child.turns || []).length - 1 : 0,
+        startedAt: startedAt ?? null,
+        relation,
+      });
     }
   }
 
-  return { marked, unknown, errors, runsScanned };
+  return { marked, unknown, errors, skipped, runsScanned };
 }
 
-function main() {
-  const argv = process.argv.slice(2);
+/**
+ * The CLI body, injectable for tests (containerStart, stateRoot) — on Windows
+ * hosts the /proc probe returns null, so tests pass the value they need.
+ * Returns the process exit code: 0 always (the container start is never
+ * blocked), 2 for `--all` without `--yes` and for a missing `--container`.
+ */
+export function runOrphansCli({ argv = process.argv.slice(2), containerStart, stateRoot } = {}) {
   if (!argv.includes("--container")) {
-    console.error("usage: node scripts/supervisor-orphans.mjs --container");
-    process.exit(2);
+    console.error("usage: node scripts/supervisor-orphans.mjs --container [--json] [--all] [--yes]");
+    return 2;
   }
-  const containerStart = containerStartMs();
-  if (containerStart === null) {
+  const all = argv.includes("--all");
+  const yes = argv.includes("--yes");
+  const json = argv.includes("--json");
+  const start = containerStart !== undefined ? containerStart : containerStartMs();
+  if (start === null) {
     console.log("orphans: not in a Linux container — nothing to do");
-    process.exit(0);
+    return 0;
   }
-  const { marked, unknown, errors, runsScanned } = markOrphans({
-    stateRoot: supervisorStateHome(),
-    containerStart,
+  // An injected start (tests, off-Linux hosts without /proc) simulates a
+  // container, so the current identity carries it too — the relation logic
+  // ("mine" = same container start) must see the same value the time rule does.
+  const current = containerStart !== undefined ? { ...currentOwner(), containerStartMs: start } : undefined;
+  const { marked, unknown, errors, skipped, runsScanned } = markOrphans({
+    stateRoot: stateRoot ?? supervisorStateHome(),
+    containerStart: start,
+    ...(current ? { current } : {}),
+    // The owner's task-session rows: a terminal session marks its run
+    // regardless of turn times. A missing or unreadable store reads as [] —
+    // the scan then falls back to the time rule, never blocks on the store.
+    sessions: readSessionRows(taskSessionsDbPath()),
+    all: all && yes,
   });
+
+  if (json) {
+    console.log(
+      JSON.stringify(
+        {
+          containerStart: start,
+          marked: marked.map(({ runId, childId, relation }) => ({ runId, childId, relation })),
+          skipped,
+          unknown: unknown.length,
+        },
+        null,
+        2,
+      ),
+    );
+    return all && !yes ? 2 : 0;
+  }
+
   for (const m of marked) {
-    console.log(`orphan ${m.runId}/${m.childId} turn ${m.turn} started ${m.startedAt} → crashed`);
+    console.log(`orphan ${m.runId}/${m.childId} turn ${m.turn} started ${m.startedAt} → crashed [${m.relation}]`);
+  }
+  for (const s of skipped) {
+    console.log(`skip ${s.runId}: ${s.reason} (foreign) — left untouched (override: --all --yes)`);
   }
   for (const u of unknown) {
     console.log(`WARN ${u.runId}/${u.childId}: startedAt missing or unparseable (${JSON.stringify(u.startedAt)}) — left untouched`);
@@ -171,8 +226,14 @@ function main() {
   for (const e of errors) {
     console.log(`WARN ${e.runId ?? "(state root)"}: ${e.error}`);
   }
-  console.log(`orphans: ${marked.length} marked in ${runsScanned} run(s)`);
-  process.exit(0); // runs at container start — errors are WARN, never a blocked start
+  console.log(`orphans: ${marked.length} marked, ${skipped.length} skipped in ${runsScanned} run(s)`);
+  if (all && !yes) {
+    console.error(`refusing to sweep ${skipped.length} foreign run(s) without --yes — listed above`);
+    return 2;
+  }
+  return 0;
 }
 
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) main();
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  process.exit(runOrphansCli());
+}

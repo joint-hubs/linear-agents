@@ -22,7 +22,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, hostname } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -234,13 +234,21 @@ test("recordLauncherRun writes source launcher and rejects a bad id", () => {
       path,
       env: { LA_DATA_HOME: home, FENIX_SUPERVISOR_LEGACY: "1" },
     });
-    assert.deepEqual(rec, {
+    // FOC-905: a NEW run record carries the creator's owner identity —
+    // hostname/pid are process-local, so the rest is deepEqualed without it.
+    const { owner, ...recordRest } = rec;
+    assert.deepEqual(recordRest, {
       runId: VALID_ID,
       model: "claude-x",
       startedAt: NOW.toISOString(),
       updatedAt: NOW.toISOString(),
       source: "launcher",
     });
+    assert.ok(owner && typeof owner === "object", "the record carries an owner");
+    assert.equal(owner.sessionId, null, "unscoped launcher → no session id");
+    assert.equal(owner.hostname, hostname());
+    assert.equal(owner.pid, process.pid);
+    assert.ok(!Number.isNaN(Date.parse(owner.recordedAt)), "recordedAt is an ISO timestamp");
     assert.equal(readCurrentRun({ path }).source, "launcher");
     assert.throws(() => recordLauncherRun({ runId: "../escape", now: NOW, path, env: { LA_DATA_HOME: home } }), /invalid run id/);
     assert.equal(readCurrentRun({ path }).runId, VALID_ID, "the failed write left the record intact");
@@ -342,13 +350,17 @@ test("CLI show prints the record or 'none'; unknown verb exits 2", () => {
       env: { ...process.env, LA_DATA_HOME: full },
     });
     assert.equal(shown.status, 0);
-    assert.deepEqual(JSON.parse(shown.stdout), {
+    // FOC-905: the stored record carries owner — process-local values, so it
+    // is checked by shape and the rest deepEqualed.
+    const { owner, ...recordRest } = JSON.parse(shown.stdout);
+    assert.deepEqual(recordRest, {
       runId: VALID_ID,
       model: null,
       startedAt: NOW.toISOString(),
       updatedAt: NOW.toISOString(),
       source: "launcher",
     });
+    assert.ok(owner && typeof owner.hostname === "string", "the record carries an owner");
 
     const unknown = spawnSync(process.execPath, [SCRIPT, "frobnicate"], {
       encoding: "utf8",

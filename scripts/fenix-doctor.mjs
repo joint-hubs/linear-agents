@@ -17,6 +17,7 @@ import { readActiveSessions, taskSessionsDbPath } from './task-sessions.mjs';
 import { readSettings, readTaskSessionsSettings } from './fenix-settings.mjs';
 import { INTEGRATIONS, prerequisites, readIntegrations } from './fenix-integrations.mjs';
 import { cachedRetention, resolveRetention } from './fenix-retention.mjs';
+import { currentOwner, listRunOwners, ownerRelation, supervisorStateRoot } from './run-owner.mjs';
 
 const GIB = 1024 ** 3;
 // FOC-780: the disk check's warn threshold comes from the overlay's
@@ -336,6 +337,43 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   };
 }
 
+// FOC-905: one line about who owns the runs in this state home. The read is a
+// small injectable seam (readOwners) so tests can fake it — like
+// checkTaskSessions's readSessions — and the default walks the run dirs of
+// supervisorStateRoot(env) through listRunOwners. Foreign runs (another
+// host/container wrote them into the same state home) are a warn, never a
+// fail: they are unsupported but must not be destructive, and the scan never
+// sweeps them without the explicit override.
+export function checkRunOwners({ env = process.env, readOwners } = {}) {
+  const stateRoot = supervisorStateRoot(env);
+  const entries = (readOwners ?? (() => listRunOwners(stateRoot)))(stateRoot);
+  if (entries.length === 0) return { name: 'run owners', status: 'ok', detail: 'no supervisor runs yet' };
+  const current = currentOwner(env);
+  const counts = { mine: 0, restarted: 0, foreign: 0, unknown: 0 };
+  const foreignHostnames = new Set();
+  for (const { owner } of entries) {
+    const { relation } = ownerRelation(owner, current);
+    counts[relation]++;
+    if (relation === 'foreign' && owner?.hostname) foreignHostnames.add(owner.hostname);
+  }
+  if (counts.foreign > 0) {
+    return {
+      name: 'run owners',
+      status: 'warn',
+      detail:
+        `${counts.foreign} run(s) owned by another host/container (${[...foreignHostnames].sort().join(', ')}) ` +
+        'share this state home — N containers over one /data is unsupported; they are never swept automatically ' +
+        '(supervisor-orphans --all --yes)',
+      fix: 'sweep them anyway: node scripts/supervisor-orphans.mjs --container --all --yes',
+    };
+  }
+  return {
+    name: 'run owners',
+    status: 'ok',
+    detail: `${entries.length} runs: mine ${counts.mine}, restarted ${counts.restarted}, legacy ${counts.unknown}`,
+  };
+}
+
 // FOC-803: the image must be built for the host user's uid/gid. When it was
 // not, the bind-mounted host files keep their host ownership and stay
 // unreadable/unwritable inside the container: the Compose secrets (written
@@ -449,6 +487,7 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     await checkLogsUsage(retention),
     checkCockpitHooks(env, fsImpl),
     checkTaskSessions({ env, fsImpl }),
+    checkRunOwners({ env }),
   ];
   // FOC-803 uid checks: only meaningful in the container, where the process
   // runs as the image's user against host-owned bind mounts.

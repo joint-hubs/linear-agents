@@ -22,6 +22,7 @@ import {
   createTaskSessionStore,
   issuePartOf,
   readActiveSessions,
+  readSessionRows,
   resolveTaskKey,
   workspaceNameFor,
 } from "./task-sessions.mjs";
@@ -321,6 +322,26 @@ test("readActiveSessions: a garbage store file reads as unknown and leaves no si
 
 // --- Cross-process invariants (independent node processes, one SQLite file) ---
 
+/**
+ * Cleanup for the cross-process races. On Windows a child process's last
+ * SQLite handle can outlive the process's exit event by a beat, and the
+ * resulting rmSync EBUSY would fail the test on cleanup alone (observed
+ * flakily against freshly-modified module files — Smart App Control adds
+ * scan latency). A bounded retry turns that into nothing; the directory is
+ * test garbage either way.
+ */
+function rmDirEventually(dir) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (attempt >= 4 || !/EBUSY|ENOTEMPTY|EPERM/.test(String(err?.code ?? err))) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    }
+  }
+}
+
 test("processes: concurrent duplicate ensure yields ONE owner for the task", async () => {
   const dir = tempDir();
   try {
@@ -340,7 +361,7 @@ test("processes: concurrent duplicate ensure yields ONE owner for the task", asy
     assert.equal(rows[0].status, "queued");
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmDirEventually(dir);
   }
 });
 
@@ -367,7 +388,7 @@ test("processes: the active cap of 2 holds when 6 processes race claimNext", asy
     assert.equal(rows.filter((r) => r.status === "queued").length, 4);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmDirEventually(dir);
   }
 });
 
@@ -441,4 +462,34 @@ test('explicit resume retains identity but respects task ownership and queue cap
  assert.equal(s.resume(a.sessionId).status,'queued');assert.equal(s.claimNext(),null);assert.equal(s.get(a.sessionId).runId,'run-a');
  s.update(a.sessionId,{status:'stopped'});const fresh=s.ensure(ensureArgs());assert.notEqual(fresh.sessionId,a.sessionId);assert.throws(()=>s.resume(a.sessionId),/another generation/);
  }finally{s.close();}
+});
+
+// FOC-905: the read-only all-rows peek the orphan scan uses. Placed after the
+// cross-process races on purpose — an opened-and-closed WAL store right before
+// those races perturbs Windows file locking enough to flake their cleanup.
+test("readSessionRows: every row with terminal status visible; missing store → []", () => {
+  const dir = tempDir();
+  try {
+    assert.deepEqual(readSessionRows(dbFile(dir)), [], "no store file yet → [] (never creates one)");
+    const store = createTaskSessionStore({ dbPath: dbFile(dir) });
+    try {
+      const rec = store.ensure(ensureArgs());
+      let rows = readSessionRows(dbFile(dir));
+      assert.equal(rows.length, 1);
+      assert.deepEqual(Object.keys(rows[0]).sort(), ["pid", "processStartedAt", "sessionId", "status"]);
+      assert.equal(rows[0].sessionId, rec.sessionId);
+      assert.equal(rows[0].status, "queued", "queued rows are returned too (readActiveSessions hides them)");
+      store.update(rec.sessionId, { pid: process.pid, processStartedAt: "2026-10-16T09:00:00Z" });
+      store.update(rec.sessionId, { status: "stopped" });
+      rows = readSessionRows(dbFile(dir));
+      assert.equal(rows.length, 1, "the terminal row is still there");
+      assert.equal(rows[0].status, "stopped", "terminal status visible — what the orphan scan needs");
+      assert.equal(rows[0].pid, process.pid);
+      assert.equal(rows[0].processStartedAt, "2026-10-16T09:00:00Z");
+    } finally {
+      store.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

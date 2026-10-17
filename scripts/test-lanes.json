@@ -349,6 +349,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "run-owner.test.mjs",
+      "reason": "FOC-905: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir before the supervisor-lib import; owner fixtures over temp run dirs); one single-process temp task-sessions SQLite store for the terminal-session case (no cross-process racing); no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "runtime-events.test.mjs",
       "reason": "isolation audit (task workspace PRD §10): mkdtemp/tmpdir fixtures only; the runtime store always receives an explicit temp sqlite path; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
@@ -466,7 +470,7 @@
     },
     {
       "file": "supervisor-orphans.test.mjs",
-      "reason": "isolation audit FOC-799: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir before import; registry fixtures only; no ports, no socket binds, no telemetry DB"
+      "reason": "isolation audit FOC-799: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir before import; registry fixtures only; no ports, no socket binds, no telemetry DB; FOC-905 adds one single-process temp task-sessions SQLite store for the terminal-session case (read-only seam, no cross-process racing)"
     },
     {
       "file": "supervisor-session-hook.test.mjs",
