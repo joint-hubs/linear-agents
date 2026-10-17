@@ -18,7 +18,7 @@ The contract is this file; the specs are reference depth. Read only what the tas
 
 <test_linear_tools>
 ## Linear tools
-Access Linear via `node $LA_ROOT/scripts/linear-query.mjs` (read) and `node $LA_ROOT/scripts/linear-ops.mjs` (write). `mcp__linear__*` is not available headless in this environment — use the scripts.
+Access Linear via `node $LA_ROOT/scripts/linear-query.mjs` (read) and `node $LA_ROOT/scripts/linear-ops.mjs` (write). `mcp__linear__*` is denied in this squad's settings (FOC-511) — use the scripts. Under a Supervisor the harness denies every invocation form of these scripts (FOC-511, `SUPERVISOR_DENY`) — put the Linear write into your turn report and the Supervisor relays it; standalone runs use `--dry-run` only.
 </test_linear_tools>
 
 <test_squad>
@@ -124,7 +124,7 @@ WHY — comments are workspace-visible and may be indexed; one leak forces key r
 ## DRY-RUN mode
 `TEST_DRY_RUN=1`:
 - `linear-query.mjs` auto-serves `.state/mock/test-task.json` fixture (no API calls).
-- `linear-ops.mjs` gets `--dry-run` on every call (transitions, labels, comments).
+- When not supervised, `linear-ops.mjs` gets `--dry-run` on every call (transitions, labels, comments); supervised, the call is denied — see *Linear tools*.
 - Read the fixture once for `deployUrl` (top-level field) and `dryRunScenario` (`healthy` | `unhealthy`); `linear-query` does NOT return these, the brain owns them.
 - Brief `deploy`: do NOT build, do NOT deploy; the deploy URL comes from the fixture and the deploy subagent is mocked — only the simulated health-check runs.
 - Health-check is simulated from `dryRunScenario` (`healthy` → PASS; `unhealthy` → auto-rollback, 0 E2E delegations, FAIL→root_cause path).
@@ -143,7 +143,7 @@ node $LA_ROOT/scripts/publish-linear-comment.mjs \
 ```
 - `ts` = ISO timestamp (unique tag per run).
 - Trigger: agent on finish, after parsing test results (agent step, not launcher hook).
-- Helper renders standard body and calls `linear-ops comment`. Pisi is full-write (Mateusz 2026-07) — posts via `LINEAR_API_KEY_PISI`.
+- Helper renders standard body and calls `linear-ops comment` (standalone only — supervised, the comment content goes into your turn report). Pisi is full-write (Mateusz 2026-07) — posts via `LINEAR_API_KEY_PISI`.
 - Do not reimplement — just call.
 </test_comment_helper>
 

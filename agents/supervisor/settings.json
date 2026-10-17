@@ -8,6 +8,7 @@
       "Write",
       "Bash(node:*)",
       "Bash(node *linear-ops.mjs*)",
+      "Bash(node *gh-screened.mjs*)",
       "Bash(node *publish-linear-comment.mjs*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
@@ -110,6 +111,7 @@
       "Bash(*/Scripts/python.exe*)",
       "Bash(C:/Python*/python.exe*)",
       "PowerShell(node *)",
+      "PowerShell(node *gh-screened.mjs*)",
       "PowerShell(python *)",
       "PowerShell(git status*)",
       "PowerShell(git log*)",
@@ -124,7 +126,6 @@
     ],
     "ask": [
       "Bash(git push:*)",
-      "Bash(gh pr create:*)",
       "Bash(gh pr merge:*)",
       "Bash(git reset --hard:*)",
       "Bash(git clean:*)",
@@ -145,7 +146,15 @@
       "Bash(node -e *agent-state*)",
       "Bash(node --eval *agent-state*)",
       "Edit(//**/agent-state.sqlite)",
-      "Write(//**/agent-state.sqlite)"
+      "Write(//**/agent-state.sqlite)",
+      "Bash(gh pr create*)",
+      "Bash(gh pr edit*)",
+      "Bash(gh pr comment*)",
+      "Bash(gh api*)",
+      "PowerShell(gh pr create*)",
+      "PowerShell(gh pr edit*)",
+      "PowerShell(gh pr comment*)",
+      "PowerShell(gh api*)"
     ],
     "defaultMode": "default",
     "additionalDirectories": [

@@ -38,6 +38,10 @@ if "%START_UI%"=="0" (
     )
 )
 
+REM --- Refresh registered generated artifacts (FOC-779): on a fresh clone every start/watch artifact is generated before the server comes up. A failing generator must not abort the dashboard start — the server tick and Settings > Artifacts report what stayed stale. ---
+node "%ROOT%\scripts\artifact-registry.mjs" refresh
+if errorlevel 1 echo [WARN] Refresh artefaktow zglosil bledy (wyzej) - kontynuuje start; stan: Settings - Artifacts.
+
 REM --- Sprawdz czy API zyje ---
 node -e "fetch('http://localhost:%API_PORT%/api/summary').then(function(){process.exit(0)}).catch(function(){process.exit(1)})" 2>nul
 if errorlevel 1 (

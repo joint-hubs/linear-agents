@@ -53,10 +53,9 @@
 // The server children are ALWAYS killed in finally.
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import net from "node:net";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,6 +64,7 @@ import { openTelemetryDb } from "./telemetry-store.mjs";
 import { ensureViews } from "./telemetry-canonical.mjs";
 import { writeCurrentRun } from "./supervisor-current-run.mjs";
 import { hostTokenPath } from "./fenix-paths.mjs";
+import { spawnTestServer } from "./test-spawn.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -181,6 +181,12 @@ writeFileSync(join(supState, "run-2", "children.json"), JSON.stringify({
 }), "utf8");
 writeFileSync(join(supState, "run-2", "children", "child-2.jsonl"), "", "utf8");
 
+// The task-scoped session's constants (plan P1c); the run dir + its
+// current-run pointer are created later, inside the first scenario, so the
+// snapshot-count assertions above are not perturbed by another pending gate.
+const SCOPED_SID = "sup-0a1b2c3d4e5f6071";
+const SCOPED_RUN_ID = "2026-10-12T12-00-00-000-supervisor-beef";
+
 // The Supervisor's session record + a real-shape transcript inside the
 // confinement root, plus an outside file for the refusal case.
 const transcriptPath = join(squadHome, "supervisor", "projects", "sess-1.jsonl");
@@ -276,6 +282,21 @@ const fakeHost = createServer(async (req, res) => {
     res.end(JSON.stringify(b.body));
     return;
   }
+  // Task-scoped mirrors (the routes compose /sessions/<sid>/…): a managed
+  // session's record for the ownership check, and its message route for the
+  // scoped gate/hold notices.
+  const scopedRecordMatch = /^\/sessions\/(sup-[a-f0-9]+)$/.exec(req.url);
+  if (scopedRecordMatch) {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ taskSession: { sessionId: scopedRecordMatch[1], status: "running" } }));
+    return;
+  }
+  if (/^\/sessions\/sup-[a-f0-9]+\/message$/.test(req.url)) {
+    const b = fakeHostBehavior.message ?? { status: 200, body: { sent: true, confirmed: true, queued: false } };
+    res.writeHead(b.status, { "content-type": "application/json" });
+    res.end(JSON.stringify(b.body));
+    return;
+  }
   res.writeHead(404, { "content-type": "application/json" });
   res.end(JSON.stringify({ error: "not found" }));
 });
@@ -320,38 +341,13 @@ const baseEnv = {
 };
 delete baseEnv.LA_ANALYSIS_CACHE;
 
-function spawnServer(env) {
-  const freePortP = new Promise((resolve) => {
-    const probe = createServer();
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-  return freePortP.then((port) => new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(__dir, "telemetry-server.mjs")], {
-      env: { ...env, TELEMETRY_PORT: String(port) },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    child.stderrBuf = "";
-    child.stderr.on("data", (c) => { child.stderrBuf += c; });
-    child.on("exit", (code) => { if (code !== 0 && code !== null) child._exitCode = code; });
-    resolve({ child, port });
-  }));
-}
-
-async function waitForServer(port, child, ms = 20000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`server exited early (${child.exitCode})`);
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/telemetry/health`);
-      if (res.ok) return;
-    } catch { /* not up yet */ }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  throw new Error("server not ready");
-}
+// Shared spawn helper (FOC-840): free port + health poll + tree-kill stop().
+const spawnCockpitServer = (env) => spawnTestServer({
+  script: join(__dir, "telemetry-server.mjs"),
+  env,
+  inheritEnv: false, // baseEnv already spreads process.env (minus LA_ANALYSIS_CACHE)
+  label: "cockpit-routes",
+});
 
 async function call(port, method, path, { origin = "http://localhost:5173", body } = {}) {
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -407,10 +403,10 @@ let servers = [];
 try {
   // ── Docker mode, host reachable ──────────────────────────────────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnCockpitServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     // GET /api/cockpit — full shape, probe through the host, redaction.
     beatWaker("run-1", "waker-sess"); // fresh heartbeat — "alive" below must not depend on suite speed
@@ -546,6 +542,12 @@ try {
     check("gate answer audit row notified:true",
       gateRow?.who === "dashboard" && gateRow?.notified === true && gateRow?.path === "gates/gate-1.json",
       JSON.stringify(gateRow));
+    // Legacy mode: no sessionId was sent, so the notice hit the global
+    // /message and no session-scoped route at all (the GET /sessions of the
+    // managed-sessions probe has no trailing slash — not a session route).
+    check("gate answer (legacy, no sessionId) notified via the global /message only",
+      hostCalls.some((c) => c.url === "/message") && !hostCalls.some((c) => c.url.startsWith("/sessions/")),
+      JSON.stringify(hostCalls.map((c) => c.url)));
 
     // FOC-449 provenance: the dashboard answer labels the gate's decision
     // event exactly like the CLI's answer does (outcome = the answer,
@@ -612,6 +614,65 @@ try {
     check("notify both ids -> 400", notifyBoth.status === 400, JSON.stringify(notifyBoth));
     const notifyNeither = await call(P, "POST", "/api/gates/notify", { body: { runId: "run-1" } });
     check("notify neither id -> 400", notifyNeither.status === 400, JSON.stringify(notifyNeither));
+
+    // ── legacy vs task-scoped sessionId on the gate/hold routes ─────────────
+    // A malformed sessionId is a 400 BEFORE any write (the gate file and the
+    // edits audit stay untouched); a well-formed sup- id scopes the notice to
+    // /sessions/<sid>/message; the legacy requests above kept the global
+    // /message.
+    // The scoped fixture arrives HERE — after the counts snapshots above — so
+    // its pending gate never perturbs them: one dedicated run with a pending
+    // gate and the session's own current-run pointer naming it.
+    mkdirSync(join(supState, SCOPED_RUN_ID, "gates"), { recursive: true });
+    writeFileSync(join(supState, SCOPED_RUN_ID, "gates", "gate-s.json"), JSON.stringify({
+      gateId: "gate-s", runId: SCOPED_RUN_ID, childId: "child-s", taskId: "FIX-44",
+      kind: "question", status: "pending", createdAt: NOW, summary: "scoped gate",
+      questions: ["scoped?"],
+    }), "utf8");
+    writeCurrentRun(
+      { runId: SCOPED_RUN_ID, model: "m1", startedAt: NOW, updatedAt: NOW, source: "pointer" },
+      { path: join(dataHome, "supervisor", "sessions", SCOPED_SID, "current-run.json") },
+    );
+    const gateSBefore = readFileSync(join(supState, SCOPED_RUN_ID, "gates", "gate-s.json"), "utf8");
+    const malformed = await call(P, "POST", "/api/gates/answer", {
+      body: { runId: SCOPED_RUN_ID, gateId: "gate-s", text: "x", sessionId: "not-a-sup-id" },
+    });
+    check("gate answer malformed sessionId -> 400 bad-session-id",
+      malformed.status === 400 && malformed.body?.error === "bad-session-id", JSON.stringify(malformed));
+    check("gate answer malformed sessionId wrote nothing",
+      readFileSync(join(supState, SCOPED_RUN_ID, "gates", "gate-s.json"), "utf8") === gateSBefore
+      && !existsSync(join(supState, SCOPED_RUN_ID, "edits.jsonl")),
+      "gate file or edits row changed");
+    const malformedHold = await call(P, "POST", "/api/holds/answer", {
+      body: { runId: SCOPED_RUN_ID, holdId: "hold-x", text: "x", sessionId: "12345" },
+    });
+    check("hold answer malformed sessionId -> 400 bad-session-id",
+      malformedHold.status === 400 && malformedHold.body?.error === "bad-session-id", JSON.stringify(malformedHold));
+    const malformedNotify = await call(P, "POST", "/api/gates/notify", {
+      body: { runId: SCOPED_RUN_ID, gateId: "gate-s", sessionId: "short" },
+    });
+    check("gate notify malformed sessionId -> 400 bad-session-id",
+      malformedNotify.status === 400 && malformedNotify.body?.error === "bad-session-id", JSON.stringify(malformedNotify));
+
+    // The scoped answer: the notice goes to /sessions/<sid>/message — never
+    // the global /message — and the audit row is notified.
+    hostCalls.length = 0;
+    const scopedAnswer = await call(P, "POST", "/api/gates/answer", {
+      body: { runId: SCOPED_RUN_ID, gateId: "gate-s", text: "scoped answer", sessionId: SCOPED_SID },
+    });
+    check("scoped gate answer -> 200 recorded+notified",
+      scopedAnswer.status === 200 && scopedAnswer.body?.recorded === true && scopedAnswer.body?.notified === true,
+      JSON.stringify(scopedAnswer).slice(0, 300));
+    const scopedNotice = hostCalls.find((c) => c.url === `/sessions/${SCOPED_SID}/message`);
+    check("scoped gate answer notified through /sessions/<sid>/message",
+      typeof scopedNotice?.body?.text === "string" && scopedNotice.body.text.includes("gate-s"),
+      JSON.stringify(hostCalls.map((c) => c.url)));
+    check("scoped gate answer did NOT hit the global /message",
+      !hostCalls.some((c) => c.url === "/message"), JSON.stringify(hostCalls.map((c) => c.url)));
+    const scopedRow = readFileSync(join(supState, SCOPED_RUN_ID, "edits.jsonl"), "utf8")
+      .split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      .find((r) => r.type === "gate-answer");
+    check("scoped gate answer audit row notified:true", scopedRow?.notified === true, JSON.stringify(scopedRow));
 
     // ── FOC-810: the Supervisor's dialogs in the snapshot and the answer routes ──
     const hostStateBehavior = (state, transcriptPath) => ({
@@ -821,15 +882,15 @@ try {
       const r = await call(P, "POST", p, { origin: "https://evil.example", body });
       check(`foreign origin 403 on ${p}`, r.status === 403, `got ${r.status}`);
     }
-    child.kill();
+    await spawned.stop();
   }
 
   // ── Docker mode, host down ───────────────────────────────────────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: `http://127.0.0.1:${deadPort}` });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnCockpitServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: `http://127.0.0.1:${deadPort}` });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     const snap = await call(P, "GET", "/api/cockpit");
     check("cockpit host-down -> unreachable", snap.status === 200 && snap.body?.supervisor?.host === "unreachable",
@@ -869,15 +930,15 @@ try {
       JSON.stringify(answer));
     const rows = readFileSync(join(supState, "run-2", "edits.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
     check("gate answer host-down row notified:false", rows.length === 1 && rows[0].notified === false, JSON.stringify(rows));
-    child.kill();
+    await spawned.stop();
   }
 
   // ── Native mode (no FENIX_SUPERVISOR_HOST) ───────────────────────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv, SUPERVISOR_MODEL: "test-model" });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnCockpitServer({ ...baseEnv, SUPERVISOR_MODEL: "test-model" });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     const msg = await call(P, "POST", "/api/supervisor/message", { body: { text: "hi" } });
     check("message native -> 503 docker-only", msg.status === 503 && msg.body?.error === "docker-only", JSON.stringify(msg));
@@ -921,15 +982,15 @@ try {
     const rej = await rawUpgrade(P, upgradeRequest({ host: `127.0.0.1:${P}`, origin: `http://127.0.0.1:${P}` }));
     check("terminal native -> 503", rej.head.startsWith("HTTP/1.1 503"), rej.head);
     rej.socket.destroy();
-    child.kill();
+    await spawned.stop();
   }
 
   // ── WS upgrade guards + proxy (Docker mode, host reachable) ──────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnCockpitServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     const noOrigin = await rawUpgrade(P, upgradeRequest({ host: `127.0.0.1:${P}`, origin: null }));
     check("terminal without Origin -> 403", noOrigin.head.startsWith("HTTP/1.1 403"), noOrigin.head);
@@ -979,7 +1040,7 @@ try {
     });
     check("terminal pipes bytes both ways", echoed === true);
     ok.socket.destroy();
-    child.kill();
+    await spawned.stop();
   }
 
   // ── the current-run record (FOC-807) ─────────────────────────────────────
@@ -1002,10 +1063,10 @@ try {
       pid: LIVE_PID, sessionId: "waker-cur", startedAt: NOW, heartbeatAt: NOW, firedThrough: 0,
     }), "utf8");
 
-    const { child, port } = await spawnServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL, SUPERVISOR_MODEL: "env-model" });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnCockpitServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL, SUPERVISOR_MODEL: "env-model" });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     // No record yet: the focus run (run-1) drives runId, runSource says so,
     // and the backlog counts the focus run only — the new run's un-acked rows
@@ -1095,16 +1156,14 @@ try {
       sup?.focus?.taskId === "FIX-42" && sup?.focus?.runId === "run-1" && sup?.focus?.declared === false,
       JSON.stringify(sup?.focus));
 
-    child.kill();
+    await spawned.stop();
   }
 } catch (err) {
   failed++;
   failures.push(`unexpected error — ${err?.stack || err}`);
-  for (const s of servers) if (s.stderrBuf) console.error(`[child stderr] ${s.stderrBuf}`);
+  for (const s of servers) if (s.child.stderrBuf) console.error(`[child stderr] ${s.child.stderrBuf}`);
 } finally {
-  for (const child of servers) {
-    if (child.exitCode === null) child.kill();
-  }
+  for (const s of servers) await s.stop();
   fakeHost.close();
 }
 

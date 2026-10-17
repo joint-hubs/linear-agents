@@ -26,7 +26,7 @@ import {
   parse,
   runScript,
 } from "./supervisor-test-fixtures.mjs";
-import { progressFingerprint, readRegistry, verdictPath, writeRegistry } from "./supervisor-lib.mjs";
+import { gatesDir, progressFingerprint, readRegistry, verdictPath, verdictsDir, writeRegistry } from "./supervisor-lib.mjs";
 import { returnGateQuestion } from "./supervisor-verdict.mjs";
 
 const { test, fail, summary } = harness();
@@ -532,7 +532,7 @@ test("a review fail stamps the return flag and transitions In Progress (offline 
 test("the verdict file carries the same audit block the CLI printed", () => {
   const s = scenario();
   record(s, ["--verdict", "fail", "--finding", CITED, "--failing-test", "suite/a"]);
-  const onDisk = JSON.parse(readFileSync(join(ROOT, ".state", "supervisor", s.runId, "verdicts", "foc-123-round1.json"), "utf8"));
+  const onDisk = JSON.parse(readFileSync(verdictPath(s.runId, "FOC-123", 1), "utf8"));
   assert.equal(onDisk.linearEffects.label.status, "applied");
   assert.equal(onDisk.linearEffects.transition.status, "applied");
   assert.equal(onDisk.linearEffects.dryRun, true);
@@ -600,7 +600,7 @@ test("inside a spawned child the writes are skipped — and the verdict still la
   assert.match(out.linearEffects.label.detail, /FOC-167/);
   assert.ok(out.warnings.some((w) => /skipped inside child/.test(w)), JSON.stringify(out.warnings));
   // The point of warnings-only: the verdict file exists anyway.
-  assert.ok(existsSync(join(ROOT, ".state", "supervisor", s.runId, "verdicts", "foc-123-round1.json")));
+  assert.ok(existsSync(verdictPath(s.runId, "FOC-123", 1)));
   // The child guard is the real run's job, not a failed return — no gate (F3).
   assert.equal(out.linearEffects.gate, undefined);
 });
@@ -616,7 +616,7 @@ test("a linear-ops failure degrades to a warning; the verdict is still written",
   assert.equal(out.linearEffects.transition.status, "failed");
   assert.ok(out.warnings.some((w) => /return label failed/.test(w)), JSON.stringify(out.warnings));
   assert.ok(out.warnings.some((w) => /return transition failed/.test(w)), JSON.stringify(out.warnings));
-  assert.ok(existsSync(join(ROOT, ".state", "supervisor", s.runId, "verdicts", "foc-777-round1.json")));
+  assert.ok(existsSync(verdictPath(s.runId, "FOC-777", 1)));
   // A dry-run failure is exercise, not enforcement — no gate (F3).
   assert.equal(out.linearEffects.gate, undefined);
 });
@@ -655,7 +655,7 @@ test("a REAL failed apply raises a pending Supervisor gate naming the manual fix
   assert.ok(gate?.emitted, JSON.stringify(out.linearEffects));
   assert.match(gate.gateId, /^gate-dev-1-\d+$/);
   const onDisk = JSON.parse(
-    readFileSync(join(ROOT, ".state", "supervisor", s.runId, "gates", `${gate.gateId}.json`), "utf8"),
+    readFileSync(join(gatesDir(s.runId), `${gate.gateId}.json`), "utf8"),
   );
   assert.equal(onDisk.kind, "question");
   assert.equal(onDisk.childId, "dev-1");
@@ -685,10 +685,10 @@ test("a garbage taskId is refused at entry — no record, no ops, no gate (R2-2)
   assert.match(out.error, /neither an issue identifier/);
   assert.match(out.error, /\.\.\/evil --status Done/, "the refusal must name the value");
   // Nothing on disk may derive from it: no verdict file, no gate.
-  const vDir = join(ROOT, ".state", "supervisor", s.runId, "verdicts");
+  const vDir = verdictsDir(s.runId);
   const verdicts = existsSync(vDir) ? readdirSync(vDir) : [];
   assert.deepEqual(verdicts, [], `no verdict file may exist for a garbage id, got ${JSON.stringify(verdicts)}`);
-  const gDir = join(ROOT, ".state", "supervisor", s.runId, "gates");
+  const gDir = gatesDir(s.runId);
   const gates = existsSync(gDir) ? readdirSync(gDir) : [];
   assert.deepEqual(gates, [], `no gate may fire for a garbage id, got ${JSON.stringify(gates)}`);
 });

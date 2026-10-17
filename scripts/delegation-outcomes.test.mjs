@@ -24,6 +24,11 @@ function check(name, condition, detail = "") {
 }
 
 const temp = mkdtempSync(join(tmpdir(), "delegation-outcomes-test-"));
+// FOC-903: the per-run scan defaults to the supervisor state home — pin it to
+// a temp dir so these tests never read the real .state/supervisor (call-time
+// env read, so setting it here is enough).
+const supHome = mkdtempSync(join(tmpdir(), "delegation-outcomes-sup-home-"));
+process.env.LA_SUPERVISOR_STATE_HOME = supHome;
 const FENCE = "```";
 
 // --- parseReview: anchored verdict shapes (§5 fixture table) ---------------
@@ -426,6 +431,88 @@ check("helper and non-round files never parsed",
 // nothing to read degrades to null (dashboard empty state)
 check("computeOutcomes returns null with no reviews dir",
   computeOutcomes({ dbPath, reviewsDir: join(temp, "no-such-dir") }) === null);
+
+// --- per-run scratch inputs, legacy fallback, newest run wins (FOC-903) -----
+
+{
+  // Two runs: RUN_NEW is newer, so it wins every (taskId, round) cell it
+  // claims; RUN_OLD contributes the cell RUN_NEW does not have. The legacy
+  // dir contributes the task no run claims. The legacy counter knows LEG-1;
+  // RUN_NEW's counter overrides it (per-run wins per task).
+  const RUN_OLD = "2026-09-01T10-00-00-000-supervisor-aaaa";
+  const RUN_NEW = "2026-09-02T10-00-00-000-supervisor-bbbb";
+  const perRunHome = join(supHome, "scan"); // keeps the env default itself clean
+  const legacyReviews = join(perRunHome, "legacy-reviews");
+  mkdirSync(join(perRunHome, RUN_OLD, "scratch", "reviews"), { recursive: true });
+  mkdirSync(join(perRunHome, RUN_NEW, "scratch", "reviews"), { recursive: true });
+  mkdirSync(legacyReviews, { recursive: true });
+  writeFileSync(join(perRunHome, RUN_OLD, "review-rounds.json"), JSON.stringify({ "T-1": 2, "T-2": 1 }), "utf8");
+  writeFileSync(join(perRunHome, RUN_NEW, "review-rounds.json"), JSON.stringify({ "T-1": 3 }), "utf8");
+  writeFileSync(join(perRunHome, RUN_OLD, "scratch", "reviews", "T-1-round1.md"), "**Verdict:** clean\n", "utf8");
+  writeFileSync(join(perRunHome, RUN_OLD, "scratch", "reviews", "T-1-round2.md"), "**Verdict:** clean\n", "utf8");
+  writeFileSync(join(perRunHome, RUN_NEW, "scratch", "reviews", "T-1-round2.md"), "**Verdict:** 🔴 blocker → RETURN to DEV\n", "utf8");
+  writeFileSync(join(perRunHome, RUN_NEW, "scratch", "reviews", "T-3-round1.md"), "**Verdict:** clean\n", "utf8");
+  writeFileSync(join(legacyReviews, "LEG-1-round1.md"), "**Verdict:** clean\n", "utf8");
+  writeFileSync(join(perRunHome, "legacy-rounds.json"), JSON.stringify({ "T-1": 1, "LEG-1": 1 }), "utf8");
+
+  const r = computeOutcomes({
+    dbPath,
+    reviewsDir: legacyReviews,
+    roundsPath: join(perRunHome, "legacy-rounds.json"),
+    stateHome: perRunHome,
+  });
+  const byTask = new Map(r.byTask.map((t) => [t.taskId, t]));
+  check("per-run review file beats the legacy dir at the same (task, round)",
+    byTask.get("T-1")?.roundVerdicts?.find((v) => v.round === 2)?.verdict === "FAIL",
+    JSON.stringify(byTask.get("T-1")));
+  check("per-run cell the newest run does not claim falls back to the older run",
+    byTask.get("T-1")?.roundVerdicts?.find((v) => v.round === 1)?.verdict === "PASS",
+    JSON.stringify(byTask.get("T-1")?.roundVerdicts));
+  check("legacy-dir-only task is still read (union, not replacement)",
+    byTask.get("LEG-1")?.outcome === "PASS", JSON.stringify(byTask.get("LEG-1")));
+  check("per-run-only task is read", byTask.get("T-3")?.outcome === "PASS", JSON.stringify(byTask.get("T-3")));
+  // Rounds: RUN_NEW's counter (3) wins over RUN_OLD's (2) and the legacy (1);
+  // T-2 has no per-run claim in RUN_NEW, so RUN_OLD's 1 wins over nothing.
+  check("round counter: newest run wins per task", byTask.get("T-1")?.rounds === 3, String(byTask.get("T-1")?.rounds));
+  check("round counter: older run wins when the newest is silent", byTask.get("T-2")?.rounds === 1, String(byTask.get("T-2")?.rounds));
+  check("round counter: legacy fallback when no run claims the task", byTask.get("LEG-1")?.rounds === 1, String(byTask.get("LEG-1")?.rounds));
+
+  // Read errors from BOTH sources surface.
+  writeFileSync(join(legacyReviews, "T-9-round1.md"), "", "utf8"); // empty file → UNKNOWN reasons, not read-error
+  const rBad = computeOutcomes({
+    dbPath,
+    reviewsDir: legacyReviews,
+    roundsPath: join(perRunHome, "legacy-rounds.json"),
+    stateHome: perRunHome,
+  });
+  check("computeOutcomes still returns a report when a source has an unreadable file", rBad !== null);
+}
+
+// --- the state-root seam (FOC-903 review): reader and writer agree ----------
+
+{
+  // The legacy defaults derive from stateRoot() at CALL time, so setting
+  // LA_STATE_ROOT here is enough — the unoptioned computeOutcomes() must read
+  // <LA_STATE_ROOT>/reviews, not the repo's .state/reviews.
+  const seamRoot = join(temp, "state-root-seam");
+  mkdirSync(join(seamRoot, "reviews"), { recursive: true });
+  writeFileSync(join(seamRoot, "reviews", "SR-1-round1.md"), "**Verdict:** clean\n", "utf8");
+  writeFileSync(join(seamRoot, "review-rounds.json"), JSON.stringify({ "SR-1": 1 }), "utf8");
+  const prev = process.env.LA_STATE_ROOT;
+  process.env.LA_STATE_ROOT = seamRoot;
+  try {
+    const r = computeOutcomes({ dbPath });
+    const row = r?.byTask.find((x) => x.taskId === "SR-1");
+    check("LA_STATE_ROOT: unoptioned computeOutcomes reads the seam's legacy inputs",
+      row?.outcome === "PASS" && row?.rounds === 1, JSON.stringify(row));
+    check("LA_STATE_ROOT: ONLY the seam is scanned (no legacy dir besides it)",
+      r !== null && r.byTask.map((x) => x.taskId).join(",") === "SR-1",
+      JSON.stringify(r?.byTask?.map((x) => x.taskId)));
+  } finally {
+    if (prev === undefined) delete process.env.LA_STATE_ROOT;
+    else process.env.LA_STATE_ROOT = prev;
+  }
+}
 
 // --- legacy CSV value contract ----------------------------------------------
 
