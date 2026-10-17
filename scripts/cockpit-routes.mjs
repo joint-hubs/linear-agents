@@ -34,7 +34,8 @@ import net from "node:net";
 import { hostBase, hostRequest, hostSessionPath, sessionScopedEnv, redactSessionRecord, FAST_TIMEOUT_MS, SLOW_TIMEOUT_MS } from "./supervisor-host-client.mjs";
 import { collectNeedsYou, collectChildren, cockpitCounts, focusTicket, recentRunIds } from "./cockpit.mjs";
 import { readConversation } from "./supervisor-conversation.mjs";
-import { gatePath, processAlive, readHolds, readWakeAck, readWakeQueue, readWakerLease, redactDeep, wakerState } from "./supervisor-lib.mjs";
+import { gatePath, processAlive, readHolds, readWakeAck, readWakeQueue, readWakerLease, redactDeep, runDir, wakerState } from "./supervisor-lib.mjs";
+import { isLegacyReadOnly } from "./supervisor-migrate-legacy.mjs";
 import { freshRows, formatWakeMessage } from "./supervisor-wake.mjs";
 import { answerGate, answerHold } from "./supervisor-gate.mjs";
 import { autoLabel } from "./decision-log.mjs";
@@ -793,6 +794,23 @@ export async function handleCockpitRoute(req, res, url, ctx) {
   const path = url.pathname;
   const { readJsonBody, respondBodyError, json, log } = ctx;
 
+  // FOC-839: the run-targeted global write routes refuse any run that the
+  // legacy migration marked read-only. Returns true when the 409 was sent.
+  // The runId reaches the filesystem probe unvalidated from the URL, so gate
+  // on a coarse shape first (non-empty, no path separators, no `..`) — the
+  // strict RUN_ID_RE would exclude the existing `run-*` fixture ids. Malformed
+  // ids keep the routes' existing status codes; they just never probe the fs.
+  const denyIfLegacyReadOnly = (res, runId, method, path) => {
+    if (typeof runId !== "string" || runId.length === 0 || /[\\/]/.test(runId) || runId.includes("..")) return false;
+    if (!isLegacyReadOnly(runDir(runId))) return false;
+    json(res, 409, {
+      error: "legacy-readonly",
+      reason: "this run was marked read-only by the legacy session migration (FOC-839); its history stays readable",
+    });
+    log(method, path, 409);
+    return true;
+  };
+
   // ── task-scoped session routes (plan P1c) ────────────────────────────────
   // Dispatched BEFORE the global routes. The :sid is validated against the
   // strict pattern first — a malformed id is a 404 that never touched the
@@ -1473,6 +1491,8 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       log(method, path, 400);
       return true;
     }
+    // FOC-839: refuse runs marked read-only by the legacy migration.
+    if (denyIfLegacyReadOnly(res, runId, method, path)) return true;
     // Cross-session guard: in a managed context a scoped UI must not be able
     // to answer a run it does not own. When the caller names a sessionId, the
     // gate's run must be that session's own current run.
@@ -1574,6 +1594,8 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       log(method, path, 400);
       return true;
     }
+    // FOC-839: refuse runs marked read-only by the legacy migration.
+    if (denyIfLegacyReadOnly(res, runId, method, path)) return true;
     // Cross-session guard: same ownership rule as the gate answer.
     if (answerSid) {
       const ownership = await verifyRunOwnership(answerSid, runId, body.taskKey);
@@ -1650,6 +1672,8 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       log(method, path, 400);
       return true;
     }
+    // FOC-839: refuse runs marked read-only by the legacy migration.
+    if (denyIfLegacyReadOnly(res, runId, method, path)) return true;
     // Cross-session guard: same ownership rule as the gate answer.
     if (answerSid) {
       const ownership = await verifyRunOwnership(answerSid, runId, body.taskKey);

@@ -465,6 +465,10 @@
       "reason": "isolation audit (task workspace, Supervisor launch wrapper): mkdtemp/tmpdir fixtures only — never real repo files; no child processes, no ports, no socket binds, no process.env mutation, no telemetry DB"
     },
     {
+      "file": "supervisor-migrate-legacy.test.mjs",
+      "reason": "mkdtemp fixtures only (run dirs, owner.json, a private task-sessions store under a temp LA_DATA_HOME); stateHome/dbPath explicit; no ports, no real-repo writes, no telemetry DB (FOC-839)"
+    },
+    {
       "file": "supervisor-migrate-scratch.test.mjs",
       "reason": "isolation audit FOC-903: mkdtemp/tmpdir fixtures only, every CLI child pinned to an explicit --state-home under tmpdir; spawnSync node children like cost-guard (no servers, no ports, no socket binds); the real repo .state/ is never read or written"
     },
@@ -638,6 +642,10 @@
     }
   ],
   "serial": [
+    {
+      "file": "cockpit-legacy-mode.test.mjs",
+      "reason": "spawns the real telemetry-server (native mode and docker mode against a fake session host) on ephemeral ports — createServer + .listen (FOC-839 legacy compatibility suite)"
+    },
     {
       "file": "cockpit-routes.test.mjs",
       "reason": "spawns the real telemetry-server and fake hosts on ephemeral ports (createServer + .listen, raw net.connect sockets for the upgrade tests)"

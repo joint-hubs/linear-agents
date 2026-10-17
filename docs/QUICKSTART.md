@@ -12,10 +12,11 @@ the compose environment turns it off (debugging only).
 
 ## What you get
 
-- A dashboard at http://localhost:4600 — the home page is the **Cockpit**
-  (FOC-783): the Supervisor panel with **Chat** (default) and **Terminal** on
-  the same tmux session, the Needs-you inbox (pending gates, approvals, holds,
-  problems) and the live children. Chat refuses slash commands (send them
+- A dashboard at http://localhost:4600 — the home page is the **Work board**
+  (the tickets); the global Cockpit (FOC-783) stays at `/cockpit`: the
+  Supervisor panel with **Chat** (default) and **Terminal** on the same tmux
+  session, the Needs-you inbox (pending gates, approvals, holds, problems) and
+  the live children. Chat refuses slash commands (send them
   through the Terminal) and refuses while the Supervisor shows a dialog —
   answer the dialog in the Terminal. Chat and Terminal are Docker-only;
   natively (without Docker) the Cockpit shows the inbox and children only.
@@ -249,6 +250,45 @@ volume, so telemetry and Supervisor state survive a recreate; a later
 Outside Docker (native), standalone squads launch on any OS with
 `node scripts/squad-start.mjs <plan|dev|review|test|cadence|supervisor>` — on
 Windows `bin\<squad>.bat` is a thin wrapper for the same.
+
+## Task cockpits
+
+The board is home (`/work` aliases to it). A ticket card opens the task
+cockpit at `/work/<taskKey>/cockpit` — that task's own Supervisor session,
+scoped end to end: chat, terminal, needs-you inbox and live children, every
+call bound to the session (`{ sessionId, taskKey }`). A session is started
+from the ticket detail's **Start** (Ready stage; the exact prompt is shown
+before anything is sent) — opening the cockpit URL never starts anything.
+One active Supervisor per task: a duplicate start lands on the same cockpit,
+not a second session.
+
+At most `taskSessions.maxActive` sessions are active at once (`starting`,
+`running` or `waiting`) — 2 by default. Raise it in the settings overlay,
+`fenix settings set taskSessions.maxActive 4` (survives `fenix update`), or
+per-process with the env override `FENIX_MAX_ACTIVE_SUPERVISORS`. Excess
+tickets queue — visible in the cockpit's Tasks switcher; a queued start or
+resume answers 409 `queued`. The store, the `fenix doctor` line and
+auto-pickup are documented in `docs/task-sessions.md`.
+
+**Stop → Resume.** Stop ends the session's process only — history and run
+IDs are kept; the session reaches a terminal state (`stopped`, `completed`,
+`failed`) and its mutations answer 409 `session-terminal`. A historical
+session is read-only in the cockpit. Resume is an explicit new generation:
+"Resume this history" previews the tool profile, then starts the session
+again through the queue and the cap (refused unless the session is
+`stopped`).
+
+**409 `selection-required`.** The global Cockpit (`/cockpit`) and the global
+`/api/supervisor/*` routes are unambiguous only while no task session exists.
+Once managed sessions do, they answer 409 `selection-required` — address one
+session instead: `/api/supervisor/sessions/:sid/…` or
+`/api/cockpit?sessionId=`.
+
+**Legacy mode.** While no task session exists, the global Cockpit keeps
+working as the single Supervisor, exactly as before. A native (non-Docker)
+install is always legacy — it runs no session host. Auto-pickup of Linear
+tickets is off by default (`taskSessions.autoPickup` — see
+`docs/task-sessions.md`).
 
 ## Where things live
 
