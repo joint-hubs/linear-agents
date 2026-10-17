@@ -139,6 +139,91 @@ test("an explicit tool list becomes --tools with the builtins only", () => {
   if (out.profile.revision !== 2) fail(`profile revision was ${out.profile.revision}`);
 });
 
+// ── the vendored shared skills ───────────────────────────────────────────────
+console.log("\nshared skills travel with every launch, the squad wins on a clash");
+
+test("a squad's own skill overwrites the shared copy at the same relative path", () => {
+  const dir = base("shared-skills");
+  fixtureSquad(dir);
+  // The shared tree sits next to the squad dirs, under the same LA_SQUAD_HOME.
+  const shared = join(dir, "squads", "_shared", "skills");
+  mkdirSync(join(shared, "grilling"), { recursive: true });
+  mkdirSync(join(shared, "other"), { recursive: true });
+  writeFileSync(join(shared, "grilling", "SKILL.md"), "shared\n");
+  writeFileSync(join(shared, "other", "SKILL.md"), "other\n");
+  // The squad ships its own copy of grilling — it must win.
+  mkdirSync(join(dir, "squads", "dev", "skills", "grilling"), { recursive: true });
+  writeFileSync(join(dir, "squads", "dev", "skills", "grilling", "SKILL.md"), "squad\n");
+
+  const outputDir = join(dir, "launch");
+  const out = prepareAgentLaunch({ squad: "dev", outputDir, env: launchEnv(dir) });
+
+  if (readFileSync(join(outputDir, "skills", "grilling", "SKILL.md"), "utf8") !== "squad\n") {
+    fail("the squad's own grilling skill did not win over the shared copy");
+  }
+  if (readFileSync(join(outputDir, "skills", "other", "SKILL.md"), "utf8") !== "other\n") {
+    fail("the shared-only skill was not copied into the launch dir");
+  }
+  if (!out.copied.some((p) => p.replaceAll("\\", "/").includes("_shared/skills"))) {
+    fail(`the shared skills were not reported as copied: ${JSON.stringify(out.copied)}`);
+  }
+});
+
+test("a squad home without _shared launches unchanged", () => {
+  const dir = base("no-shared");
+  fixtureSquad(dir); // no _shared/skills anywhere under dir/squads
+  const outputDir = join(dir, "launch");
+  const out = prepareAgentLaunch({ squad: "dev", outputDir, env: launchEnv(dir) });
+  if (!existsSync(join(outputDir, "skills", "run.md"))) fail("the squad's own skills were not copied");
+  if (existsSync(join(outputDir, "skills", "grilling"))) fail("a shared-only skill appeared without a shared dir");
+});
+
+test("the shared copy runs under the same guards as the squad copy", () => {
+  const dir = base("shared-guards");
+  fixtureSquad(dir);
+  const shared = join(dir, "squads", "_shared", "skills");
+
+  // Over the 1 MB per-file cap: skipped, the launch still succeeds.
+  mkdirSync(join(shared, "big"), { recursive: true });
+  writeFileSync(join(shared, "big", "blob.bin"), Buffer.alloc(1_100_000, 0));
+  let out = prepareAgentLaunch({ squad: "dev", outputDir: join(dir, "l1"), env: launchEnv(dir) });
+  if (existsSync(join(dir, "l1", "skills", "big", "blob.bin"))) fail("an over-cap shared file was copied");
+  if (!out.skipped.some((s) => s.why === "file-exceeds-size-cap" && s.path.replaceAll("\\", "/").includes("_shared/skills/big/blob.bin"))) {
+    fail(`the over-cap skip was not reported: ${JSON.stringify(out.skipped)}`);
+  }
+
+  // A credential shape in a shared file refuses the launch, like a squad file.
+  mkdirSync(join(shared, "leak"), { recursive: true });
+  writeFileSync(join(shared, "leak", "SKILL.md"), '{"note":"sk-or-v1-abcdefghijklmnop"}');
+  let threw = null;
+  try {
+    prepareAgentLaunch({ squad: "dev", outputDir: join(dir, "l2"), env: launchEnv(dir) });
+  } catch (err) {
+    threw = err;
+  }
+  if (!threw) fail("a credential-shaped shared file did not refuse the launch");
+  if (!/credential/.test(threw.message)) fail(`the refusal does not name the reason: ${threw.message}`);
+  if (existsSync(join(dir, "l2", "skills", "leak", "SKILL.md"))) fail("the offending shared file was copied anyway");
+  if (existsSync(join(dir, "l2", "snapshot.json"))) fail("a refused launch still wrote its snapshot");
+  if (existsSync(join(dir, "l2", "mcp.json"))) fail("a refused launch still wrote mcp.json");
+  rmSync(join(shared, "leak"), { recursive: true, force: true });
+
+  // The shared files count toward the same 800-file cap as the squad's own.
+  mkdirSync(join(shared, "many"), { recursive: true });
+  const many2 = join(dir, "squads", "dev", "skills", "many2");
+  mkdirSync(many2, { recursive: true });
+  for (let i = 0; i < 401; i++) writeFileSync(join(shared, "many", `f${i}.md`), "x\n");
+  for (let i = 0; i < 400; i++) writeFileSync(join(many2, `g${i}.md`), "x\n");
+  threw = null;
+  try {
+    prepareAgentLaunch({ squad: "dev", outputDir: join(dir, "l3"), env: launchEnv(dir) });
+  } catch (err) {
+    threw = err;
+  }
+  if (!threw) fail("801+ copied files did not hit the file-count cap");
+  if (!/exceeded its bounds/.test(threw.message)) fail(`the cap refusal does not name the bounds: ${threw.message}`);
+});
+
 // ── the snapshot diff (restart previews the profile diff — PRD §7) ──────────
 console.log("\nsnapshot changes vs the prior safe snapshot");
 

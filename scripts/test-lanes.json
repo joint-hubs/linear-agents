@@ -1,6 +1,10 @@
 {
   "parallel": [
     {
+      "file": "shared-skills.test.mjs",
+      "reason": "vendored-skills drift check: temp-root compare/sync fixtures only; the one real-tree case is read-only (no ports, no socket binds, no repo-path writes)"
+    },
+    {
       "file": "agent-behavior.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
