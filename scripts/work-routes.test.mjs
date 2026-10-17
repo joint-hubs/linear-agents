@@ -42,7 +42,7 @@
 // The server children are ALWAYS killed in finally.
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -53,6 +53,7 @@ import { openTelemetryDb, makeEvent, applyEvent, pricingSnapshot } from "./telem
 import { ensureViews } from "./telemetry-canonical.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
 import { cwdToHashName } from "./ledger.mjs";
+import { spawnTestServer } from "./test-spawn.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -88,6 +89,10 @@ process.env.LA_DATA_HOME = dataHome;
 process.env.LA_SQUAD_HOME = squadHome;
 process.env.LA_SUPERVISOR_STATE_HOME = supState;
 process.env.LA_STATE_ROOT = join(dir, "state-root");
+// The settings overlay the publish AI gate reads (absent at first —
+// `actor: "ai"` is off by default until the gate tests enable it).
+const settingsPath = join(dir, "settings.json");
+process.env.LA_SETTINGS_FILE = settingsPath;
 
 mkdirSync(join(dataHome, "supervisor"), { recursive: true });
 mkdirSync(join(dataHome, "run"), { recursive: true });
@@ -326,37 +331,12 @@ const baseEnv = {
   FENIX_COST_SNAPSHOT_TTL_MS: "60000",
 };
 
-function spawnServer(env) {
-  const freePortP = new Promise((resolve) => {
-    const probe = createServer();
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-  return freePortP.then((port) => new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(__dir, "telemetry-server.mjs")], {
-      env: { ...env, TELEMETRY_PORT: String(port) },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    child.stderrBuf = "";
-    child.stderr.on("data", (c) => { child.stderrBuf += c; });
-    resolve({ child, port });
-  }));
-}
-
-async function waitForServer(port, child, ms = 20000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`server exited early (${child.exitCode})`);
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/telemetry/health`);
-      if (res.ok) return;
-    } catch { /* not up yet */ }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  throw new Error("server not ready");
-}
+// Shared spawn helper (FOC-840): free port + health poll + tree-kill stop().
+const spawnWorkServer = (env) => spawnTestServer({
+  script: join(__dir, "telemetry-server.mjs"),
+  env,
+  label: "work-routes",
+});
 
 async function call(port, method, path, { origin = "http://localhost:5173", body } = {}) {
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -392,10 +372,10 @@ let servers = [];
 try {
   // ── Docker mode: fake host + fake Linear ─────────────────────────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnWorkServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     // The FIRST board request, before any cost snapshot exists: the cost meta
     // says "computing" and stale must be false with it (consistent with
@@ -637,15 +617,15 @@ try {
       !existsSync(join(dir, "state-root", "publish-actions.jsonl")) && git(["ls-remote", "--heads", ORIGIN_BARE], dir) === "",
       git(["ls-remote", "--heads", ORIGIN_BARE], dir));
 
-    child.kill();
+    await spawned.stop();
   }
 
   // ── Native mode (no FENIX_SUPERVISOR_HOST) ───────────────────────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnWorkServer({ ...baseEnv });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     const preview = await call(P, "GET", "/api/work/tickets/WORK-1/start-preview");
     check("preview native -> delivery cockpit",
@@ -660,16 +640,14 @@ try {
     const board = await call(P, "GET", "/api/work/tickets");
     check("board native -> 200 (same seams)", board.status === 200 && Array.isArray(board.body?.tickets),
       JSON.stringify(board.body).slice(0, 200));
-    child.kill();
+    await spawned.stop();
   }
 } catch (err) {
   failed++;
   failures.push(`unexpected error — ${err?.stack || err}`);
-  for (const s of servers) if (s.stderrBuf) console.error(`[child stderr] ${s.stderrBuf}`);
+  for (const s of servers) if (s.child.stderrBuf) console.error(`[child stderr] ${s.child.stderrBuf}`);
 } finally {
-  for (const child of servers) {
-    if (child.exitCode === null) child.kill();
-  }
+  for (const s of servers) await s.stop();
   fakeHost.close();
 }
 
@@ -733,6 +711,38 @@ try {
   }
 }
 
+// ── the queue's workspace default vs the pisi switch (FOC-772) ───────────────
+
+{
+  const { workWorkspace, resetWorkRoutesState } = await import("./work-routes.mjs");
+  const settingsOn = join(dir, "settings-on.json");
+  const settingsOff = join(dir, "settings-off.json");
+  writeFileSync(settingsOn, JSON.stringify({ integrations: { pisi: true } }));
+  writeFileSync(settingsOff, JSON.stringify({ integrations: { pisi: false } }));
+  const saved = { ws: process.env.FENIX_WORK_WORKSPACE, settings: process.env.LA_SETTINGS_FILE };
+  try {
+    process.env.FENIX_WORK_WORKSPACE = "pisi";
+    process.env.LA_SETTINGS_FILE = settingsOff;
+    check("unit: queue default with pisi off falls back to jointhubs",
+      workWorkspace() === "jointhubs", `got ${workWorkspace()}`);
+    process.env.LA_SETTINGS_FILE = settingsOn;
+    check("unit: queue default stays pisi when the integration is on",
+      workWorkspace() === "pisi", `got ${workWorkspace()}`);
+    delete process.env.FENIX_WORK_WORKSPACE;
+    check("unit: without FENIX_WORK_WORKSPACE the default is jointhubs",
+      workWorkspace() === "jointhubs", `got ${workWorkspace()}`);
+  } catch (err) {
+    failed++;
+    failures.push(`workspace-default unit block — ${err?.stack || err}`);
+  } finally {
+    if (saved.ws === undefined) delete process.env.FENIX_WORK_WORKSPACE;
+    else process.env.FENIX_WORK_WORKSPACE = saved.ws;
+    if (saved.settings === undefined) delete process.env.LA_SETTINGS_FILE;
+    else process.env.LA_SETTINGS_FILE = saved.settings;
+    resetWorkRoutesState(); // re-arms the one-time fallback warn
+  }
+}
+
 // ── the publish routes end-to-end, in-process (FOC-788) ──────────────────────
 //
 // handleWorkRoute with fake req/res/ctx against the REAL git fixture: the
@@ -751,8 +761,8 @@ try {
     isLocalOrigin: (addr) => addr === "127.0.0.1",
     isAllowedOrigin: (origin) => origin === "http://localhost:5173",
   };
-  const callRoute = async (method, path, { body, origin = "http://localhost:5173", addr = "127.0.0.1" } = {}) => {
-    const req = { method, headers: { origin }, socket: { remoteAddress: addr }, __body: body };
+  const callRoute = async (method, path, { body, origin = "http://localhost:5173", addr = "127.0.0.1", headers = {} } = {}) => {
+    const req = { method, headers: { origin, ...headers }, socket: { remoteAddress: addr }, __body: body };
     const res = {};
     const handled = await handleWorkRoute(req, res, new URL(path, "http://localhost:5173"), ctx);
     return { handled, status: res.__status, body: res.__body };
@@ -778,6 +788,38 @@ try {
     check("unit: publish push with a moved head -> 409 stale-preview",
       moved.status === 409 && moved.body?.error === "stale-preview", JSON.stringify(moved.body));
     check("unit: the stale confirm ran nothing", readJsonl().length === 0, `lines=${readJsonl().length}`);
+
+    // ── the AI publish gate (FOC-788 follow-up) ──────────────────────────────
+    // Disabled by default: the 403 comes BEFORE the confirmToken is verified —
+    // a wrong token would otherwise answer 409, so a 403 here proves the gate
+    // fired first — and before any executor (no audit line, no branch on the
+    // bare). settings.json here carries no publish key at all.
+    const aiDisabled = await callRoute("POST", "/api/work/tickets/WORK-1/push", {
+      body: { confirmToken: "f".repeat(64), actor: "ai", actorId: "session-test" },
+      headers: { "x-fenix-publish-token": "work-routes-test-token" },
+    });
+    check("unit: ai actor disabled by default -> 403 ai-actor-disabled before any git op",
+      aiDisabled.status === 403 && aiDisabled.body?.error === "ai-actor-disabled"
+        && aiDisabled.body?.reason === "enable publish.aiActor in settings.json to let an agent push"
+        && readJsonl().length === 0 && git(["ls-remote", "--heads", ORIGIN_BARE], dir) === "",
+      JSON.stringify(aiDisabled.body));
+
+    // Enabled but unbound: without the host token header — or with a wrong
+    // one — the request is still refused before any executor runs.
+    writeFileSync(settingsPath, JSON.stringify({ publish: { aiActor: true } }), "utf8");
+    const aiNoToken = await callRoute("POST", "/api/work/tickets/WORK-1/push", {
+      body: { confirmToken: "f".repeat(64), actor: "ai", actorId: "session-test" },
+    });
+    check("unit: ai enabled without the host token -> 403 bad-publish-token",
+      aiNoToken.status === 403 && aiNoToken.body?.error === "bad-publish-token", JSON.stringify(aiNoToken.body));
+    const aiWrongToken = await callRoute("POST", "/api/work/tickets/WORK-1/push", {
+      body: { confirmToken: "f".repeat(64), actor: "ai", actorId: "session-test" },
+      headers: { "x-fenix-publish-token": "not-the-host-token" },
+    });
+    check("unit: ai enabled with a wrong host token -> 403 bad-publish-token",
+      aiWrongToken.status === 403 && aiWrongToken.body?.error === "bad-publish-token",
+      JSON.stringify(aiWrongToken.body));
+    check("unit: the ai refusals ran no executor", readJsonl().length === 0, `lines=${readJsonl().length}`);
 
     // push success: the exact refspec lands the branch on the local bare at
     // the pushed head, and the audit line says who confirmed it.
@@ -808,9 +850,14 @@ try {
       return { status: 201, text: async () => JSON.stringify({ html_url: "https://github.com/joint-hubs/linear-agents/pull/7", number: 7 }) };
     };
     try {
+      // The enabled + right-token case: settings carry publish.aiActor and the
+      // request carries the host token, so the ai actor reaches the same
+      // executor path the human cases use (assertions below are the human
+      // shape: 200, the PR URL, the audited record).
       const prPreview = await callRoute("GET", "/api/work/tickets/WORK-1/publish-preview?action=pr");
       const pr = await callRoute("POST", "/api/work/tickets/WORK-1/pr", {
         body: { confirmToken: prPreview.body.confirmToken, actor: "ai", actorId: "session-test" },
+        headers: { "x-fenix-publish-token": "work-routes-test-token" },
       });
       check("unit: publish pr -> 200 ok with the PR URL",
         pr.status === 200 && pr.body?.ok === true && pr.body?.action === "pr"

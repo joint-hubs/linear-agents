@@ -250,6 +250,27 @@ await test("the parser needs the presented slice — and stamps ITS mapVersion, 
   eq(other.answers[0].mapVersion, 7, "the stamp follows the presented slice");
 });
 
+await test("the producer contract the fold validates against: every parsed record's about rides the PRESENTED slice (FOC-801)", () => {
+  // acceptAllAnswers (the whole-"ok" path) and the pick path stamp the
+  // reference triple, the about claim and the about option from the presented
+  // question — exactly the store foldGateAnswers (FOC-801) now validates
+  // against, so producer and validator read the same ground truth. A record
+  // whose about.option named anything else would fold STALE, and that would
+  // be a parser bug, not a fold bug.
+  for (const raw of ["ok", "1a", "2b"]) {
+    const parsed = parseGate1Answer(raw, ROUND, PRESENTED);
+    eq(parsed.kind, "structured", `${raw} parses structured`);
+    eq(parsed.corrections.length, 0, `${raw}: no corrections`);
+    for (const rec of parsed.answers) {
+      const q = PRESENTED.questions.find((x) => x.id === rec.interpretationId);
+      eq(Boolean(q), true, `${raw}: the record names a presented question (${rec.interpretationId})`);
+      eq(q.claim, rec.about.claim, `${raw}: the about claim is the presented claim`);
+      eq(q.options.some((o) => o.text === rec.about.option), true, `${raw}: about.option is one of the PRESENTED option texts`);
+      eq(rec.answer, rec.about.option, `${raw}: the answer text is the option text`);
+    }
+  }
+});
+
 console.log(`\nplan-intent-gate: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   for (const f of failures) console.log("  FAILED: " + f);

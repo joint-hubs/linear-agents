@@ -19,6 +19,7 @@
 // Run: node scripts/supervisor-pinned-state.test.mjs
 
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,10 +38,12 @@ import {
 } from "./supervisor-test-fixtures.mjs";
 import {
   childSettingsPath,
+  ensureWorktree,
   pinnedStatePrologue,
   readRegistry,
   verifyPinnedState,
 } from "./supervisor-lib.mjs";
+import { buildBranchName } from "./dev-branch.mjs";
 
 const { test, fail, summary } = harness();
 
@@ -494,22 +497,35 @@ test("a worktree whose state cannot be read refuses the spawn (corrupt index)", 
   // notice. (A stale index.lock does NOT work here, measured: `git status`
   // only wants the lock to write its stat-cache back, and without it still
   // answers — the corrupt file is what actually fails.)
+  //
+  // WHY NOT two runs anymore: since the task-workspace stream the spawn branch
+  // carries an attempt hash — `${baseBranch}-${sha256(`${runId}:${childId}`).slice(0,12)}`
+  // (supervisor-spawn.mjs) — so run B computed a DIFFERENT branch and got a
+  // fresh worktree; the corrupt index of run A's tree was never read and the
+  // old premise died. The reuse path that survives is a retry of the SAME
+  // attempt: same runId + childId → same hash → same branch, claimed for owner
+  // `${runId}:${childId}`. So the test pre-creates exactly the worktree the
+  // spawn will compute (ensureWorktree with that owner), corrupts its index,
+  // and expects the spawn to reuse it and refuse.
   const { repo } = fixtureRepo();
-  const runA = fixtureRun();
-  const first = parse(runSpawn(runA, repo), fail);
-  spawnSync(process.execPath, [STOP, "--run", runA, "--child", first.childId], { encoding: "utf8" });
+  const runId = fixtureRun();
+  const childId = "dev-1"; // runSpawn always spawns dev-1
+  const baseBranch = buildBranchName("FOC-123", "dev", undefined); // runSpawn's --task/--squad
+  const attemptHash = createHash("sha256").update(`${runId}:${childId}`).digest("hex").slice(0, 12);
+  const pre = ensureWorktree(repo, `${baseBranch}-${attemptHash}`, null, {
+    ownerId: `${runId}:${childId}`,
+  });
 
-  const gitDir = readFileSync(join(first.worktree, ".git"), "utf8").trim().replace(/^gitdir:\s*/, "");
+  const gitDir = readFileSync(join(pre.worktree, ".git"), "utf8").trim().replace(/^gitdir:\s*/, "");
   writeFileSync(join(gitDir, "index"), "garbage — not an index\n");
 
-  const runB = fixtureRun();
-  const r = runSpawn(runB, repo);
+  const r = runSpawn(runId, repo);
   if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
   const out = parse(r, fail);
   if (out.ok !== false) fail("the refusal reported ok");
   if (!out.error.includes("tree-state-unreadable")) fail(`refusal does not name the reason: ${out.error}`);
-  if (Object.keys(readRegistry(runB).children).length) fail("a child was registered despite the refusal");
-  if (existsSync(childSettingsPath(runB, "dev-1"))) fail("a settings file was generated despite the refusal");
+  if (Object.keys(readRegistry(runId).children).length) fail("a child was registered despite the refusal");
+  if (existsSync(childSettingsPath(runId, "dev-1"))) fail("a settings file was generated despite the refusal");
 });
 
 // FOC-296: a declaration field that would render "true" or a second line into

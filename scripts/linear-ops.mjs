@@ -35,6 +35,14 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { loadEnv, graphql, resolveTeam, resolveIssue } from "./linear-client.mjs";
 import { assertEgressClean } from "./egress-screen.mjs";
+import { failJson } from "./supervisor-lib.mjs";
+import {
+  checkOwnership,
+  currentOwner,
+  loadOwnership,
+  ownershipRefusal,
+  OwnershipConfigError,
+} from "./task-ownership.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -171,6 +179,55 @@ async function resolveIssueWithTeam(identifier) {
 }
 
 // ---------------------------------------------------------------------------
+// Task-ownership gate (FOC-848)
+// ---------------------------------------------------------------------------
+
+/**
+ * The one gate every write verb passes right after its issue is resolved and
+ * BEFORE the first mutation request. On an unrestricted install (no owners
+ * configured) it is a no-op: no extra Linear calls, no output change — today's
+ * output shape is preserved byte for byte.
+ *
+ * A refused verdict exits 1 in the failJson contract (the JSON carries the
+ * refusal `code`, the `verb` and the full `ownership` verdict); the only bypass
+ * is `--owner-override`, which is printed plainly in both the JSON result and
+ * on stderr so an overridden write is never silent. `OwnershipConfigError` — a
+ * broken or unreadable config, or a malformed acting owner — fails closed with
+ * the single `ownership-config` code: a broken config must never widen what a
+ * write may touch, and must never fall back silently to the shipped default.
+ */
+function assertOwnershipForWrite(issue, { verb, args }) {
+  let result;
+  try {
+    result = checkOwnership(issue, { owner: currentOwner(), config: loadOwnership() });
+  } catch (err) {
+    if (err instanceof OwnershipConfigError) {
+      failJson(err.message, { code: "ownership-config", verb });
+    }
+    throw err;
+  }
+  if (result.allowed) return;
+  const issueId = issue.identifier || issue.id;
+  if (args.ownerOverride) {
+    console.error(`[linear-ops] ownership override by ${result.owner} on ${issueId}`);
+    console.log(JSON.stringify({ verb, issue: issueId, ownershipOverride: true }));
+    return;
+  }
+  const refusal = ownershipRefusal(result, issueId);
+  failJson(refusal.message, {
+    code: refusal.code,
+    verb,
+    ownership: {
+      verdict: result.verdict,
+      owner: result.owner,
+      project: result.project,
+      ...(result.ownedBy ? { ownedBy: result.ownedBy } : {}),
+      ...(result.policy ? { policy: result.policy } : {}),
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // CLI argument parser
 // ---------------------------------------------------------------------------
 
@@ -208,6 +265,8 @@ function parseArgs(argv) {
       args.date = argv[++i];
     } else if (a === "--clear") {
       args.clear = true;
+    } else if (a === "--owner-override") {
+      args.ownerOverride = true;
     } else if (a === "--title" && i + 1 < argv.length) {
       args.title = argv[++i];
     } else if (a === "--type" && i + 1 < argv.length) {
@@ -262,6 +321,7 @@ async function handleTransition(identifier, args, dryRunCtx) {
   }
 
   const { issue, teamId } = await resolveIssueWithTeam(identifier);
+  assertOwnershipForWrite(issue, { verb: "transition", args });
   const oldState = issue.state?.name || "(unknown)";
 
   if (!args.status) {
@@ -355,6 +415,7 @@ async function handleLabel(identifier, args, dryRunCtx) {
   }
 
   const { issue, teamId } = await resolveIssueWithTeam(identifier);
+  assertOwnershipForWrite(issue, { verb: "label", args });
 
   // BUG 1.4: require at least one of --add or --remove
   if (!args.add && !args.remove) {
@@ -559,6 +620,7 @@ async function handleComment(identifier, args, dryRunCtx) {
   assertEgressClean(body, "comment body");
 
   const { issue } = await resolveIssueWithTeam(identifier);
+  assertOwnershipForWrite(issue, { verb: "comment", args });
 
   // Dedup check
   if (args.dedupTag) {
@@ -668,6 +730,7 @@ async function handleCommentReplace(identifier, args, dryRunCtx) {
   }
 
   const { issue } = await resolveIssueWithTeam(identifier);
+  assertOwnershipForWrite(issue, { verb: "comment-replace", args });
 
   if (args.dryRun) {
     console.log(`[dry-run] ${issue.identifier}: would replace comment (tag=${args.dedupTag}):`);
@@ -731,6 +794,7 @@ async function handleUpdateDescription(identifier, args, dryRunCtx) {
   }
 
   const { issue } = await resolveIssueWithTeam(identifier);
+  assertOwnershipForWrite(issue, { verb: "update-description", args });
 
   if (args.dryRun) {
     console.log(`[dry-run] ${issue.identifier}: would update description (${body.length} chars):`);
@@ -776,6 +840,7 @@ async function handleEstimate(identifier, args, dryRunCtx) {
   }
 
   const { issue } = await resolveIssueWithTeam(identifier);
+  assertOwnershipForWrite(issue, { verb: "estimate", args });
 
   if (!args.estimate) {
     console.error("Error: --estimate <XS|S|M|L|XL> is required for estimate");
@@ -860,6 +925,7 @@ async function handlePriority(identifier, args, dryRunCtx) {
   }
 
   const { issue } = await resolveIssueWithTeam(identifier);
+  assertOwnershipForWrite(issue, { verb: "priority", args });
 
   if (args.dryRun) {
     console.log(`[dry-run] ${issue.identifier}: priority → ${upper} (${value})`);
@@ -919,6 +985,7 @@ async function handleDueDate(identifier, args, dryRunCtx) {
   }
 
   const { issue } = await resolveIssueWithTeam(identifier);
+  assertOwnershipForWrite(issue, { verb: "due-date", args });
 
   if (args.dryRun) {
     console.log(`[dry-run] ${issue.identifier}: dueDate → ${shown}`);
@@ -1140,6 +1207,9 @@ async function handleCreateChild(identifier, args, dryRunCtx) {
   const body = readBodyArg(args, "create-child");
 
   const { issue: parent, teamId } = await resolveIssueWithTeam(identifier);
+  // FOC-848: the parent (and, when `--project` re-places the child, the
+  // placement project itself) is ownership-gated like any other write target.
+  assertOwnershipForWrite(parent, { verb: "create-child", args });
 
   // Placement (FOC-716): inherit project + milestone from the parent chain,
   // then let the flags override. Fail closed BEFORE any write.
@@ -1165,6 +1235,12 @@ async function handleCreateChild(identifier, args, dryRunCtx) {
     );
     process.exit(1);
   }
+  // FOC-848: placement ownership — a `--project` override can land the child in
+  // a project the parent's gate never saw, so the FINAL placement is gated too.
+  assertOwnershipForWrite(
+    { identifier: parent.identifier, id: parent.id, project: placement.project },
+    { verb: "create-child", args },
+  );
   if (placement.droppedMilestone) {
     console.error(
       `Note: inherited milestone "${placement.droppedMilestone.name}" was dropped — a projectMilestone ` +

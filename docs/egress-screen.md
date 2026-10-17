@@ -26,17 +26,19 @@ anything that posts a comment or a child issue through `linear-ops.mjs` —
 including `supervisor-verdict.mjs runLinearOps`, which spawns it as a child —
 is screened transitively.
 
-**GitHub PR bodies — design answer.** There is no scripted PR-body poster to
-hook: `gh pr create` is allow-listed for the Supervisor *agent* (`agents/
-supervisor/CLAUDE.md`), which composes the body itself. A code-level chokepoint
-does not exist there. The honest design is the reusable local guard:
+**GitHub PR bodies — enforced chokepoint (FOC-512).** The code-level
+chokepoint now exists: `scripts/gh-screened.mjs` screens the PR title and
+body with `assertEgressClean` before `gh` is ever started (for `pr create`,
+`pr edit`, `pr comment`), and the Supervisor role's settings deny the raw
+verbs (`gh pr create|edit|comment`, `gh api`) so the wrapper is the only
+path (`agents/supervisor/settings.json`, `agents/supervisor/CLAUDE.md`).
+The CLI check remains for ad-hoc use:
 
 ```bash
 node scripts/egress-screen.mjs check --body-file <path>   # exit 0 clean · 1 blocked · 2 usage
 ```
 
-The Supervisor's pre-PR step runs this on the composed PR body before
-`gh pr create`. It is the same detector, same fail-closed semantics.
+It is the same detector, same fail-closed semantics.
 
 ## Detection families — secretlint vs local detector
 
@@ -99,10 +101,10 @@ Two accepted residuals sit on top of the exception:
   this position. Closing it would need a lookup against Linear, which would break
   the screen's contract as a pure text function; that option was weighed and
   rejected (Q2-C).
-- **The terminator class contains neither end of line nor a trailing `,`, `:` or
-  `;`.** A slug closed by one of those keeps its false positive. Both under-fix in
-  the fail-closed direction; end-of-line closing (end of a URL in prose) is
-  deferred to FOC-512.
+- **Closed by FOC-512:** the terminator class now also contains end of line
+  (`\r`, `\n`) and the trailing `,`, `.`, `:`, `;` (plus `)`, `]`, which were
+  already there), so a URL at the end of a prose line no longer keeps its false
+  positive.
 
 One more boundary, measured rather than assumed: a test list can ask for more than
 family (e) can reach. In the slug position a 40-char pure hex run and a 40-char

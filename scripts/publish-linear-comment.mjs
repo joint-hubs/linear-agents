@@ -27,6 +27,10 @@ import { join, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { assertEgressClean, EgressBlockedError } from "./egress-screen.mjs";
+// FOC-772: the integration switch gates a pisi target before anything leaves
+// the process — workspaceEnabled reads the overlay, integrationOffMessage is
+// the exact refusal the operator sees.
+import { workspaceEnabled, integrationOffMessage } from "./linear-client.mjs";
 
 // Resolve sibling scripts against this file's own location, not process.cwd() —
 // callers may invoke this script from any directory (see FOC-153).
@@ -268,6 +272,15 @@ function main() {
   // pisi guard — dry-run only, no write
   if (pisiGuard(body)) {
     process.exit(0);
+  }
+
+  // FOC-772: the post's target workspace is the env the linear-ops child
+  // inherits (LINEAR_WORKSPACE — this script passes no --workspace flag).
+  // A pisi target with the integration off stops HERE: exit 1 with the hint,
+  // before any network call, and the comment never goes anywhere else.
+  if (process.env.LINEAR_WORKSPACE === "pisi" && !workspaceEnabled("pisi", { env: process.env })) {
+    console.error(integrationOffMessage("pisi"));
+    process.exit(1);
   }
 
   // Write body to temp file

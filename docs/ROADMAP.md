@@ -1,74 +1,93 @@
 ---
 type: roadmap
 status: active
-audience: Mateusz (decision) → Supervisor (execution order)
+audience: Mateusz (decision) → delivery owner (orchestrator session, since 2026-10-15); the Supervisor is the frontman for other products only
 created: 2026-07-03
-updated: 2026-10-12
+updated: 2026-10-15
 principle: pull-based — the platform is good enough to WORK WITH; every next feature must be justified by friction observed while running real tasks, not invented ahead of need.
 ---
 
 # linear-agents — roadmap
 
-<!-- roadmap:current:start — hand-written 2026-10-12; FOC-718 replaces this block with a render from Linear -->
+<!-- roadmap:current:start — hand-written 2026-10-15; FOC-718 replaces this block with a render from Linear -->
 
-## Current roadmap (2026-10-12, evening revision — 1.0.0 first)
+## Current roadmap (2026-10-15 revision — one owner, task workspaces in 1.0, tag 2026-12-03)
 
 Source of truth: Linear project **FENIX** (team Focus). Order = `blocked by` relations; every scheduled task
-carries a due date. Three lanes run at once; each lane is a chain, cross-lane links are named below.
+carries a due date. **One delivery owner** since 2026-10-15 (Mateusz: "chcę żebyś Ty był odpowiedzialny za
+delivery"): the orchestrator session plans, delegates to Flash workers, opens PRs and keeps Linear and this file in
+sync; Mateusz merges and answers gates. The Supervisor is the frontman for other products (jawnosc-wynagrodzen,
+WSKM) and takes **no Fenix task** from this point; lane B is folded into lane O.
 
-**Priority: Fenix 1.0.0** (Mateusz, 2026-10-12). M7 comes after the release: the 1.0.0 dossier is written by hand
-in FOC-790, and the M7 tooling cuts the next release (1.1, FOC-724) with 1.0.0 as its baseline.
+**Priority: Fenix 1.0.0 with task workspaces as a pillar** (Mateusz, 2026-10-15, option b). PR #71 delivered the
+task-workspace stream (FOC-816: one Supervisor per task, task cockpits, tool profiles, statistics, semantic map)
+outside the 2026-10-12 plan; it stays in 1.0, the fresh-machine acceptance covers both modes (legacy single
+Supervisor and two task sessions side by side), and the tag moves from 11-19 to **12-03**. M7 comes after the tag.
 
 | Milestone | Epic | Target | What decides it |
 |---|---|---|---|
-| M1 Foundations | FOC-466 | 2026-11-15 | cost truth (FOC-760/761, lane O), egress PR path (FOC-512), deny gaps (FOC-511), model overrides (FOC-607) — all by 10-21 |
-| M2 Graph engine + PLAN graph | FOC-467 | 2026-11-13 | FOC-801 fix → FOC-477 (10 arm-A runs, report, go/no-go) → FOC-712 |
-| M3 Jev at the gates | FOC-468 | 2027-01-16 | starts after FOC-724, by the FOC-477 verdict |
-| M4 Delivery loop as a graph | FOC-469 | 2027-03-31 | starts after FOC-724, by the FOC-477 verdict |
-| M5 Slim DEV and Supervisor | FOC-470 | 2027-05-31 | agent working state FOC-727–730 in lane B before the tag |
+| M1 Foundations | FOC-466 | 2026-11-15 | cost truth done (FOC-760/761/769); egress PR path (FOC-512), deny gaps (FOC-511), model overrides (FOC-607) — lane O, by 10-21 |
+| M2 Graph engine + PLAN graph | FOC-467 | 2026-11-20 | FOC-801 landed (PR #72) → arm-A attempt 7 on boundary `e0f8b40` → 10 counted runs (Mateusz at the gates) → FOC-759 → FOC-477 report + go/no-go → FOC-712 |
+| M3 Jev at the gates | FOC-468 | 2027-01-16 | after FOC-724, by the FOC-477 verdict |
+| M4 Delivery loop as a graph | FOC-469 | 2027-03-31 | after FOC-724, by the FOC-477 verdict |
+| M5 Slim DEV and Supervisor | FOC-470 | 2027-05-31 | FOC-762 done; agent working state FOC-727–730 after the tag |
 | M6 Optimization and learning | FOC-471 | 2027-10-31 | data first; no scheduled work |
-| M7 Release discipline and living docs | FOC-714 | 2026-12-15 | after the tag: FOC-715 → … → FOC-723 → FOC-724 (the 1.1 dossier) |
-| **M8 Fenix 1.0.0 — portable release** | FOC-768 | **2026-11-19** | lane O + lane B's 1.0 slice (FOC-762/779/780/772/808) → FOC-789 → FOC-790 (tag) |
+| M7 Release discipline and living docs | FOC-714 | 2027-01-15 | after the tag: FOC-715 → … → FOC-723 → FOC-724 (the 1.1 dossier); dates re-planned in December |
+| **M8 Fenix 1.0.0 — portable release** | FOC-768 | **2026-12-03** | lane O → FOC-789 (both modes) → FOC-781 → FOC-790 (tag) |
 
-### Lane O — Fenix 1.0.0 build (orchestrator session with Mateusz)
+### Lane O — Fenix 1.0.0 build (delivery owner; Flash workers; Mateusz merges)
 
 | Due | Task |
 |---|---|
-| 10-13 | FOC-807 Docker Supervisor run id (waker, guard, briefing) |
-| 10-14 → 10-15 | FOC-810 Cockpit without the terminal: questions and permission prompts in the dashboard, safe slash commands |
-| 10-16 | FOC-803 Linux hosts with uid ≠ 1000 |
-| 10-19 → 10-20 | FOC-784 Work board |
-| 10-21 → 10-23 | FOC-760 registry cost from transcripts → FOC-761 resumed turns in telemetry (+ FOC-759 arm-B baseline) → FOC-769 Supervisor focus ticket |
-| 10-26 → 10-27 | FOC-785 Costs & quality |
-| 10-28 → 11-03 | FOC-773 pluggable provider → FOC-778 key wizard → FOC-786 Settings → FOC-788 human push / PR |
-| 11-04 | FOC-771 Node entry points |
-| 11-05 → 11-10 | FOC-802 child isolation → FOC-791 Team → FOC-787 Insights |
-| 11-11 | FOC-809 sizing on a dev-squad run |
-| 11-12 → 11-13 | FOC-775 image on GHCR (release candidate) → FOC-777 `update` pulls the pinned image |
-| 11-16 → 11-17 | FOC-789 fresh-machine acceptance on the published image → FOC-781 docs |
-| 11-18 | buffer for acceptance snags |
-| 11-19 | FOC-790 release notes, hand-written dossier, tag `v1.0.0` |
+| 10-16 | PR #72 FOC-801 landing merged; `main` green again (gate-answer regression from #71, pinned-state test, claims flake); push from the dashboard hardened (`actor: ai` opt-in + token, child deny list) |
+| 10-19 → 10-20 | FOC-512 egress PR path (Urgent) → FOC-511 deny-list gaps (Urgent) |
+| 10-21 | FOC-607 `--model` overrides fail closed |
+| 10-22 → 10-23 | FOC-779 generated artifacts → FOC-780 retention |
+| 10-26 | FOC-772 optional integrations off by default |
+| 10-27 → 10-28 | FOC-771 Node entry points replace the .bat launchers |
+| 10-29 → 10-30 | FOC-802 child isolation in the container |
+| 11-02 → 11-04 | FOC-791 Team → FOC-787 Insights |
+| 11-05 → 11-06 | FOC-808 VM resource hygiene |
+| 11-09 → 11-10 | FOC-839 task workspaces 1.0 hardening (legacy single-session compatibility suite, migration, QUICKSTART for task cockpits, FOC-816 residue) |
+| 11-12 | FOC-809 sizing on a dev-squad run (needs the VM and Mateusz's consent for the sampler) |
+| 11-13 → 11-16 | FOC-775 image on GHCR (release candidate) → FOC-777 `update` pulls the pinned image |
+| 11-17 → 11-27 | FOC-789 fresh-machine acceptance on the published image, both modes (snags become tasks) |
+| 11-30 → 12-01 | FOC-781 docs; buffer for acceptance snags |
+| 12-03 | FOC-790 release notes, hand-written dossier, tag `v1.0.0` |
 
-### Lane A — FOC-477 measurement (Supervisor as frontman, Mateusz at the gates)
+### Lane A — FOC-477 measurement (delivery owner runs the harness, Mateusz at the gates)
 
-FOC-801 (10-14; it killed arm-A attempt 5, the first counted run) → 10 arm-A runs, one at a time → FOC-759
-baseline (10-22, needs FOC-760) → FOC-477 report + go/no-go (10-30) → FOC-712 (11-06) → M2 done.
+Attempts 1–6 excluded (registry `docs/research/foc-477-runs.json`; 5 = before the FOC-801 boundary, 6 = harness
+error at the gate emitter). **Attempt 7** starts only when Mateusz can sit at `plan.gate1` (~2 min to the gate,
+~$0.007); every step, including a resume after a resolution, goes through `scripts/foc-477-armA-launch.mjs`. Then
+one run per sitting until 10 counted runs → FOC-759 baseline from transcripts (FOC-760 is in) → FOC-477 report +
+go/no-go (target 11-20) → FOC-712 → M2 done.
 
-### Lane B — Supervisor queue (one live child at a time)
+### After the tag
 
-1. **Before the tag, 1.0 first:** FOC-512 (10-15) → FOC-511 (10-19) → FOC-607 (10-21) → FOC-762 (10-23) →
-   FOC-779 (10-27) → FOC-780 (10-29) → FOC-772 (11-02) → FOC-808 (11-04; blocks FOC-789). FOC-762/779/780/772/808
-   moved here from lane O: self-contained, no dashboard work; they make room for FOC-810 without moving the tag. If lane B is more than a week late on them, lane O
-   takes them back.
-2. **Then M5 agent working state:** FOC-727 (11-06) → FOC-728 (11-10) → FOC-729 (11-12) → FOC-730 + FOC-621
-   rest (11-16).
-3. **After the tag, M7:** FOC-715 (11-23) → FOC-717 (11-25) → FOC-718 (11-27) → FOC-719 (12-01) →
-   FOC-720 (12-03) → FOC-721 (12-07) → FOC-722 (12-09) → FOC-723 (12-11) → FOC-724 1.1 dossier (12-15).
+1. **M5 agent working state:** FOC-727 → FOC-728 → FOC-729 → FOC-730 + FOC-621 rest.
+2. **M7:** FOC-715 → FOC-717 → FOC-718 → FOC-719 → FOC-720 → FOC-721 → FOC-722 → FOC-723 → FOC-724 (1.1 dossier).
    Then by the FOC-477 verdict: M4 (FOC-478 → 382 → 390 → 617 → 622 → 456 → 393 → 453) or M3
    (FOC-391 → 387 → 410 → 384 → 392); both chains are in Linear without dates.
 
-**Idle-lane fillers (no dates; 11-16 → 11-23 in lane B):** FOC-602, FOC-642, FOC-604, FOC-615, FOC-616,
-FOC-626, FOC-647, FOC-635, FOC-731.
+**Fillers (no dates):** FOC-602, FOC-642, FOC-604, FOC-615, FOC-616, FOC-626, FOC-647, FOC-635, FOC-731.
+
+### Changes on 2026-10-15
+
+* **Owner change.** The orchestrator session owns delivery (Linear, this file, PRs). The Supervisor's lane B
+  dissolves into lane O; it keeps serving jawnosc-wynagrodzen and WSKM and must not take Fenix tickets.
+* **PR #71** (25 commits, 164 files, +41k lines) landed the Settings stream (FOC-762/773/778/786), FOC-788,
+  FOC-815 and the unplanned task-workspace stream, recorded after the fact as **FOC-816**. Decision (b): it is a 1.0
+  pillar; M8 2026-11-19 → **2026-12-03**, FOC-789 11-16 → 11-27, FOC-781 → 12-01, FOC-790 → 12-03; M7 12-15 →
+  2027-01-15. New **FOC-839** for the 1.0 hardening of that stream.
+* **`main` was red after #71** (171/174 on Windows and Linux): a real regression — the legacy single-session
+  dashboard's gate answer returned 500 from the managed-session id validation (would have hit the VM at the next
+  `fenix update`) — plus a stale pinned-state test and a flaky claims lock test. Fixed in the next PR.
+* **Security:** the dashboard publish route accepted `actor: "ai"` behind guards that let a host process through;
+  now opt-in (`publish.aiActor`) and token-bound, with the dashboard's write routes on the child deny list.
+* **FOC-801 landed** (PR #72, boundary `e0f8b40`); arm-A attempts 5 and 6 excluded; attempt 7 waits for Mateusz.
+* Linear hygiene: FOC-762/773/778/786 closed with #71; FOC-801 Done; the three acceptance stacks and seven stale
+  images removed from the Windows host.
 
 ### Changes on 2026-10-12
 

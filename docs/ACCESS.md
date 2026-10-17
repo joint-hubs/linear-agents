@@ -77,7 +77,7 @@ Zakładka **Prompty** (`localhost:7331/prompts`) — drzewo decyzyjne „co chce
 - Liść składu: prompt z podstawionym numerem zadania, *Kopiuj*, *Podgląd uruchomienia* (dry-run,
   nie otwiera okna), *Uruchom* (otwiera prawdziwe okno agenta), warunek wejścia, skład + modele,
   instrukcja leada, lista ostatnich przebiegów z odnośnikiem do konwersacji.
-- Liść roli: komenda `bin\agent.bat <squad> <rola>`, model, uprawnienia, pełna instrukcja roli.
+- Liść roli: komenda `bin\agent.bat <squad> <rola>`, model, uprawnienia, pełna instrukcja roli. `bin\agent.bat` still works (a two-line wrapper now); cross-platform form: `node scripts/squad-start.mjs --agent <squad> <rola>`.
 - Read-only (prompty edytuje się w plikach; edycja z UI to faza 2).
 - Konwersacje: `?includeUser=1&full=1` na `/api/flow/log` — tury użytkownika i pełny tekst bez ucinania.
 
@@ -153,6 +153,7 @@ Sekrety nie edytowane w `models.json` ani w UI poza polem hasła (czyszczone po 
 - **`/data/agents`** (wolumen): konfiguracja squadów (CLAUDE.md, settings.json, definicje ról, skills, memory) + transkrypty Claude Code + zgody (approvals). Przy każdym starcie API seeduje konfigurację z obrazu regułą dpkg: plik nieedytowany → podąża za obrazem, edytowany → zostaje, a nowa wersja z obrazu ląduje obok jako `<plik>.fenix-new`. Transkrypty przeżywają `fenix down` i `fenix update`.
 - **`/data/workspaces`** (wolumen): repozytoria klonowane przez `fenix repo add`; worktree dzieci: `/data/workspaces/la-wt/<repo>/<branch>`.
 - **Zmienne środowiskowe w obrazie:** `LA_DATA_HOME=/data`, `LA_SQUAD_HOME=/data/agents`, `GITHUB_ROOT=/data/workspaces`, `LA_WORKTREE_HOME=/data/workspaces/la-wt`, `LA_TELEMETRY_HOME=/data/telemetry`, `LA_STATE_ROOT=/data/state`, `LA_SUPERVISOR_STATE_HOME=/data/state/supervisor`; compose ustawia `LA_PROJECTS_FILE=/fenix-config/projects.json`.
+- **Integracje opcjonalne (FOC-772):** domyślnie wszystkie off; overlay Mateusza ustawia `integrations: { atlas: true, pisi: true, memory: true }` po zmergowaniu FOC-772 — `node scripts/fenix-settings.mjs set integrations '{"atlas":true,"pisi":true,"memory":true}'` (albo `./fenix integrations enable <name>`); Nebul nie jest flagą — wybiera się go przez providera (`fenix keys`).
 
 ### Fenix na VM w GCP (`fenix-vm`, od 2026-10-12)
 

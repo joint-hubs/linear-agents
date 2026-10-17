@@ -22,10 +22,10 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ensureRunDir, readRegistry, runDir, teeAbsPath, worktreePathFor, writeRegistry } from "./supervisor-lib.mjs";
+import { ensureRunDir, readRegistry, runDir, supervisorStateHome, teeAbsPath, worktreePathFor, writeRegistry } from "./supervisor-lib.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -36,6 +36,45 @@ export const FOLLOWUP = join(ROOT, "scripts", "supervisor-followup.mjs");
 export const GATE = join(ROOT, "scripts", "supervisor-gate.mjs");
 export const TRIAGE = join(ROOT, "scripts", "supervisor-triage.mjs");
 export const MOCK = join(ROOT, "scripts", "mock-claude.mjs");
+
+// ── fixture state isolation (FOC-602) ────────────────────────────────────────
+//
+// Every run dir a fixture creates must land OUTSIDE the repo's real
+// .state/supervisor/ — a test that touches the live corpus is a bug. The module
+// enforces that by pointing the LA_SUPERVISOR_STATE_HOME seam at a per-process
+// temp root, created here at load, before any test body runs. supervisorStateHome()
+// reads the env at CALL time (supervisor-lib.mjs), so setting it at module load
+// is enough: ensureRunDir, every supervisorStateHome() call in this process and
+// every spawned child (through baseEnv) all resolve to the same root.
+//
+// The seam is only taken over when it is unset or already points INSIDE the
+// repo's .state/ — the one value that would touch the live corpus. A caller
+// that legitimately pre-set it to some other tree keeps its value.
+
+const testFileStem = basename(process.argv[1] ?? "").replace(/\.test\.mjs$/, "") || "unknown";
+
+const REPO_STATE_DIR = join(ROOT, ".state");
+
+/** True when `p` resolves to the repo's real .state/ tree (or inside it). */
+const insideRepoState = (p) => {
+  if (!p) return false;
+  const rel = relative(REPO_STATE_DIR, resolve(p));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+};
+
+const ownsFixtureHome =
+  !process.env.LA_SUPERVISOR_STATE_HOME ||
+  insideRepoState(process.env.LA_SUPERVISOR_STATE_HOME);
+if (ownsFixtureHome) {
+  process.env.LA_SUPERVISOR_STATE_HOME = mkdtempSync(join(tmpdir(), `la-fixtures-${testFileStem}-`));
+}
+// Captured once, at creation: a test that later overrides the seam keeps its own
+// dir (and its own cleanup); this root is still ours to remove at drain time.
+const fixtureHomeRoot = ownsFixtureHome ? process.env.LA_SUPERVISOR_STATE_HOME : null;
+
+/** The state home the fixtures resolve to right now — the same value baseEnv
+ * carries and supervisorStateHome() returns in this process. */
+export const fixtureStateHome = () => resolve(supervisorStateHome());
 
 // ── the PASS/FAIL harness every suite in this repo uses ──────────────────────
 
@@ -72,19 +111,79 @@ export function harness() {
 // ── cleanup ──────────────────────────────────────────────────────────────────
 // Registered once. Temp dirs and worktrees can hold locks briefly on win32, so
 // every removal is best-effort — a failed cleanup must not fail a green suite.
+//
+// FOC-602: the drain runs on more than `exit`. SIGINT/SIGTERM/SIGHUP drain
+// first (a mirror of installTestSpawnHandlers in test-spawn.mjs) and then
+// re-raise with the same signal so the default disposition still ends the
+// process the way the caller expects; an uncaughtException drains and then
+// hands the error to whatever would have handled it (the default crash when
+// this listener is the only one). Installed through a guard: ESM loads this
+// module once per resolved URL, so double registration can only come from an
+// exotic re-import — and even then the handlers stay single.
 
 const cleanup = [];
 export const cleanupLater = (path) => cleanup.push(path);
 
-process.on("exit", () => {
-  for (const path of cleanup) {
+const drain = () => {
+  for (const path of cleanup.splice(0)) {
     try {
       rmSync(path, { recursive: true, force: true });
     } catch {
       /* best effort */
     }
   }
-});
+  // The temp root last — some of the run dirs above may live inside it.
+  if (fixtureHomeRoot) {
+    try {
+      rmSync(fixtureHomeRoot, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+  }
+};
+
+let fixtureCleanupInstalled = false;
+
+const installFixtureCleanup = () => {
+  if (fixtureCleanupInstalled) return;
+  fixtureCleanupInstalled = true;
+
+  process.on("exit", drain);
+
+  const signalNumbers = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 };
+  const onSignal = (signal) => {
+    drain();
+    // Re-raise with the default disposition: drop our own listener first, so
+    // the re-raised signal is not caught by this handler again.
+    try {
+      process.removeListener(signal, onSignal);
+      process.kill(process.pid, signal);
+    } catch {
+      process.exit(128 + (signalNumbers[signal] || 1));
+    }
+  };
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    try {
+      process.on(signal, onSignal);
+    } catch {
+      /* a platform may not implement the signal */
+    }
+  }
+
+  const onUncaught = (err) => {
+    drain();
+    const others = process.listeners("uncaughtException").filter((l) => l !== onUncaught);
+    if (others.length === 0) {
+      // No other handler: reproduce the default crash (stack to stderr, exit 1).
+      console.error(err?.stack ?? err);
+      process.exit(1);
+    }
+    for (const other of others) other(err);
+  };
+  process.on("uncaughtException", onUncaught);
+};
+
+installFixtureCleanup();
 
 // ── a throwaway git repo ─────────────────────────────────────────────────────
 
@@ -143,11 +242,18 @@ export function fixtureWorktree(repo, branch = "foc-123-dev") {
 let runCounter = 0;
 
 /**
- * A run dir under .state/supervisor/, with a triage verdict already recorded
- * unless the test is specifically about spawn's fail-closed behaviour.
+ * A run dir under the fixture state home (never the repo's real
+ * .state/supervisor — see the FOC-602 block at the top), with a triage verdict
+ * already recorded unless the test is specifically about spawn's fail-closed
+ * behaviour.
+ *
+ * The id carries the calling test file, so a dir that ever escapes cleanup
+ * names where it came from. The only run-id validation in the repo
+ * (agent-records.mjs's RUN_ID_RE) allows letters, and the focus declaration's
+ * RUN_ID_RE run ids are an opt-in shape the counter ids deliberately skip.
  */
 export function fixtureRun({ triage = true, children = null } = {}) {
-  const runId = `test-${process.pid}-${Date.now()}-${runCounter++}`;
+  const runId = `test-${testFileStem}-${process.pid}-${Date.now()}-${runCounter++}`;
   ensureRunDir(runId);
   if (triage) {
     writeFileSync(

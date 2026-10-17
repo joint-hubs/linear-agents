@@ -50,12 +50,18 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { telemetryDbPath } from "./fenix-paths.mjs";
-import { loadReviews, aggregateOutcomes, delegationsByTask } from "./delegation-outcomes.mjs";
+import { loadReviews, loadRunReviews, mergeReviews, withPerRunRounds, aggregateOutcomes, delegationsByTask } from "./delegation-outcomes.mjs";
+import { collectRunScratch, supervisorStateHome } from "./supervisor-lib.mjs";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const DEFAULT_SUPERVISOR_ROOT = join(ROOT, ".state", "supervisor");
-const DEFAULT_REVIEWS = join(ROOT, ".state", "reviews");
-const DEFAULT_ROUNDS = join(ROOT, ".state", "review-rounds.json");
+// FOC-903 review: the defaults honour the supervisor state-home seam
+// (LA_SUPERVISOR_STATE_HOME) — resolved at CALL time, so an env set after import
+// counts and the unoptioned CLI / telemetry-server's projectVerdictEvidence()
+// scan the seam instead of the repo. The legacy inputs sit next to the state
+// home (<stateRoot>/reviews, <stateRoot>/review-rounds.json — the layout the
+// FOC-903 migration preserves), so they follow it.
+const defaultSupervisorRoot = () => supervisorStateHome();
+const defaultReviewsDir = () => join(dirname(supervisorStateHome()), "reviews");
+const defaultRoundsPath = () => join(dirname(supervisorStateHome()), "review-rounds.json");
 // Same resolution as delegation-outcomes.mjs (LA_TELEMETRY_DB env seam) so both
 // surfaces read the same telemetry store.
 const DEFAULT_DB = telemetryDbPath();
@@ -257,6 +263,7 @@ function structuredRow(rec, runId, file, content, children) {
     source: "structured",
     attempt: rec.runId != null && rec.runId !== "" ? String(rec.runId) : runId,
     round: Number.isInteger(rec.round) ? rec.round : null,
+    runId, // FOC-903 provenance: the supervisor run the verdict was recorded under (null only for legacy rows)
     verdict,
     rawVerdict,
     unknownReasons,
@@ -282,23 +289,32 @@ function legacyRow(r, reviewsDir, telemetryIndex) {
   const joined = r.reviewRunId ? telemetryIndex.get(r.reviewRunId) : undefined;
   // loadReviews() owns parsing; this re-read exists only for the artifact
   // digest (12-hex content hash — every retained artifact carries one).
+  // FOC-903: per-run records carry filePath (and runId); legacy records fall
+  // back to the reviews dir they were loaded from.
+  const filePath = r.filePath || join(reviewsDir, `${r.taskId}-round${r.round}.md`);
   let sha = null;
   try {
-    sha = sha12(readFileSync(join(reviewsDir, `${r.taskId}-round${r.round}.md`), "utf8"));
+    sha = sha12(readFileSync(filePath, "utf8"));
   } catch { sha = null; } // loadReviews already surfaced read errors as anomalies
+  // FOC-903: a per-run round file is reported under its supervisor run, not the
+  // legacy reviews/ corpus path.
+  const artifactPath = r.runId
+    ? `supervisor/${r.runId}/scratch/reviews/${r.file}`
+    : `reviews/${r.taskId}-round${r.round}.md`;
   return {
     issue: r.taskId,
     stage: "review", // corpus contract: reviews/ holds review-round files only
     source: "legacy",
     attempt: joined || `unsupervised:${r.taskId}`,
     round: r.round,
+    runId: r.runId ?? null, // FOC-903 provenance: the supervisor run the file came from (null = legacy dir)
     verdict: r.verdict,
     rawVerdict: r.verdict,
     unknownReasons: [...(r.unknownReasons || [])],
     qualityFlags: LINEAR_ID_RE.test(r.taskId) ? [] : ["non-linear-id"],
     childId: null,
     work: { workId: null, fingerprint: null, baseRevision: null, reviewRunId: r.reviewRunId || null, workTurns: null },
-    artifacts: [{ kind: "review-md", path: `reviews/${r.taskId}-round${r.round}.md`, sha256: sha }],
+    artifacts: [{ kind: "review-md", path: artifactPath, sha256: sha }],
     recordedAt: null,
     findings: [],
     acMapping: [],
@@ -410,9 +426,9 @@ export function emptyVerdictEvidence() {
  * independently and the report stays a valid shape (server-route contract).
  */
 export function projectVerdictEvidence({
-  supervisorRoot = DEFAULT_SUPERVISOR_ROOT,
-  reviewsDir = DEFAULT_REVIEWS,
-  roundsPath = DEFAULT_ROUNDS,
+  supervisorRoot = defaultSupervisorRoot(),
+  reviewsDir = defaultReviewsDir(),
+  roundsPath = defaultRoundsPath(),
   dbPath = DEFAULT_DB,
 } = {}) {
   const anomalies = [];
@@ -540,12 +556,20 @@ export function projectVerdictEvidence({
   }
 
   // ── legacy store (F1's loader + classifier, verbatim) ───────────────────────
-  const { reviews, readErrors } = loadReviews(reviewsDir);
-  anomalies.push(...readErrors);
+  // FOC-903: merged with the per-run scratch inputs — every run's
+  // `<runDir>/scratch/reviews/*.md` and `<runDir>/review-rounds.json`, the
+  // newest run winning per (taskId, round) / per task, the legacy inputs at
+  // LOWER precedence. `--supervisor-root` stays the state home it already is.
+  const legacy = loadReviews(reviewsDir);
+  const collected = collectRunScratch({ stateHome: supervisorRoot });
+  const run = loadRunReviews(collected);
+  const reviews = mergeReviews(legacy.reviews, run.reviews);
+  anomalies.push(...legacy.readErrors, ...run.readErrors);
   for (const r of reviews) evidenceRows.push(legacyRow(r, reviewsDir, telemetryIndex));
 
   // Round counter — REVIEW's own state; malformed counter degrades to {}
-  // (same contract as F1's computeOutcomes).
+  // (same contract as F1's computeOutcomes). Per-run counters fold in over it,
+  // the newest run winning per task.
   let counter = {};
   if (existsSync(roundsPath)) {
     try {
@@ -556,6 +580,7 @@ export function projectVerdictEvidence({
       counter = {};
     }
   }
+  counter = withPerRunRounds(counter, collected.rounds);
   const { byTask: taskOutcomes, anomalies: aggregateAnomalies } = aggregateOutcomes(reviews, counter);
   const legacyTaskOutcomes = [...taskOutcomes.values()]
     .map((t) => ({
