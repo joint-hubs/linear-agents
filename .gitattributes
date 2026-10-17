@@ -12,3 +12,4 @@ docs/benchmark/evidence/** -text
 Dockerfile text eol=lf
 compose.yaml text eol=lf
 docker/** text eol=lf
+docs/agent-tools.md text eol=lf

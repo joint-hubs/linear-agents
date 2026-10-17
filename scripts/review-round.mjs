@@ -1,13 +1,17 @@
 // REVIEW squad round counter — wraps utils.reviewRound.
 // `next` increments (escalated at max), `peek` reads without mutating, `reset` clears all.
+//
+// FOC-903: in a supervised run (`LA_SUPERVISOR_RUN`) the counter lives per run
+// (`<runDir>/review-rounds.json`) and round files under `<runDir>/scratch/reviews/`;
+// standalone squads keep the legacy `.state/` locations. `peek` therefore reads
+// the union of every run's counter (newest run wins per task) with the legacy
+// global file as the fallback.
 
 import { readFileSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { reviewRound, resetReviewRounds } from "./utils.mjs";
-
-const __dir = dirname(fileURLToPath(import.meta.url));
-const root = join(__dir, "..");
+import { collectRunScratch } from "./supervisor-lib.mjs";
+import { stateRoot } from "./fenix-paths.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,18 +39,22 @@ function stripMaxArg(args) {
 }
 
 // ---------------------------------------------------------------------------
-// Peek — read .state/review-rounds.json directly, no mutation
+// Peek — the union of every run's counter, legacy file as fallback, no mutation
 // ---------------------------------------------------------------------------
 
 function peek(taskId, maxRounds) {
-  const storePath = join(root, ".state", "review-rounds.json");
-  let round = 0;
-  if (existsSync(storePath)) {
-    try {
-      const data = JSON.parse(readFileSync(storePath, "utf8"));
-      round = typeof data[taskId] === "number" ? data[taskId] : 0;
-    } catch {
-      // corrupt or unparseable — treat as empty
+  let round = collectRunScratch().rounds.get(taskId)?.round ?? 0;
+  if (!round) {
+    // Legacy fallback: the task carries no per-run counter — read the global
+    // file exactly as before (the state-root seam, LA_STATE_ROOT aware).
+    const storePath = join(stateRoot(), "review-rounds.json");
+    if (existsSync(storePath)) {
+      try {
+        const data = JSON.parse(readFileSync(storePath, "utf8"));
+        round = typeof data[taskId] === "number" ? data[taskId] : 0;
+      } catch {
+        // corrupt or unparseable — treat as empty
+      }
     }
   }
   const status = round >= maxRounds ? "escalated" : "review";

@@ -29,7 +29,7 @@ import { dataHome } from "./fenix-paths.mjs";
 import { resolveProvider, loadProviders, providerEnvOverride } from "./provider-resolve.mjs";
 import { checkProviderKey, checkLinearKey, checkGithubToken } from "./key-check.mjs";
 import { listRepos, startClone, getCloneJob, listCloneJobs, unmapRepo, reposRoot } from "./fenix-repos.mjs";
-import { cachedRetention } from "./fenix-retention.mjs";
+import { cachedPrunable, cachedRetention, readRetention, resolveRetention, applyRetention, pruneRuns } from "./fenix-retention.mjs";
 import { readSquadConfig } from "./squad-config.mjs";
 import { benchmarkFor } from "./model-benchmarks.mjs";
 import { childModelFor } from "./child-model.mjs";
@@ -77,6 +77,11 @@ const deps = {
   unmapRepo,
   reposRoot,
   cachedRetention,
+  cachedPrunable,
+  readRetention,
+  resolveRetention,
+  applyRetention,
+  pruneRuns,
 };
 
 /**
@@ -516,6 +521,30 @@ function routingPayload() {
 // Route handlers (one flat dispatcher, work-routes style)
 // ---------------------------------------------------------------------------
 
+/** pruneRuns dry-run totals reduced to what the UI shows: the estimate, or
+ *  the refusal reason when retention keeps everything. `partial` rides along
+ *  when the estimate's walk hit its entry cap (a lower bound, not a total). */
+function prunablePayload(dry) {
+  if (dry?.refused) return { refused: dry.refused };
+  return {
+    runs: dry?.pruned?.length ?? 0,
+    bytes: dry?.bytes ?? 0,
+    ...(dry?.partial ? { partial: true } : {}),
+  };
+}
+
+/** The retention GET/PUT response shape: the usage snapshot plus the resolved
+ *  policy and the prunable estimate (GET: the cached dry-run; PUT: a fresh
+ *  one, since the policy it estimates may just have changed). */
+async function retentionPayload() {
+  const snapshot = await deps.cachedRetention();
+  return {
+    ...snapshot,
+    resolved: deps.resolveRetention(),
+    prunable: prunablePayload(await deps.cachedPrunable()),
+  };
+}
+
 export async function handleSettingsRoute(req, res, url, ctx) {
   const { readJsonBody, respondBodyError, json, log } = ctx;
   const method = req.method;
@@ -706,18 +735,20 @@ export async function handleSettingsRoute(req, res, url, ctx) {
       return true;
     }
 
-    // --- GET /api/settings/retention ----------------------------------------
+    // --- GET/PUT /api/settings/retention ------------------------------------
     if (path === "/api/settings/retention") {
-      if (method !== "GET") return methodMismatch(res, method, path, ctx);
-      try {
-        const payload = await deps.cachedRetention();
-        json(res, 200, payload);
-        log(method, path, 200);
-      } catch (err) {
-        json(res, 500, { error: String(err?.message || err).split("\n")[0] });
-        log(method, path, 500);
+      if (method === "GET") {
+        try {
+          json(res, 200, await retentionPayload());
+          log(method, path, 200);
+        } catch (err) {
+          json(res, 500, { error: String(err?.message || err).split("\n")[0] });
+          log(method, path, 500);
+        }
+        return true;
       }
-      return true;
+      if (method !== "PUT") return methodMismatch(res, method, path, ctx);
+      return await retentionPut(req, res, url, ctx);
     }
 
     // A /api/settings/* path with no route — the server's fall-through 404
@@ -854,6 +885,60 @@ async function providerPut(req, res, url, ctx) {
   candidate = null;
   body = null;
   json(res, 200, { ...providerPayload(), check });
+  log(req.method, path, 200);
+  return true;
+}
+
+/**
+ * PUT /api/settings/retention (FOC-780) — the single writer of the overlay's
+ * `retention` key. Validates through the same overlay validation
+ * (fenix-settings), writes, then applies the cleanupPeriodDays to every squad
+ * settings.json — never a prune here; deletion stays the explicit
+ * `fenix retention prune` CLI. The response is the GET shape plus `applied`
+ * and a fresh snapshot: the estimate must reflect the policy AS JUST WRITTEN,
+ * so both reads run fresh — readRetention() instead of the 60 s
+ * cachedRetention, pruneRuns() instead of the 60 s cachedPrunable.
+ */
+async function retentionPut(req, res, url, ctx) {
+  const { readJsonBody, respondBodyError, json, log } = ctx;
+  const path = url.pathname;
+  let body;
+  try {
+    body = await readJsonBody(req, BODY_CAP);
+  } catch (err) {
+    log(req.method, path, respondBodyError(res, err));
+    return true;
+  }
+  const refuse = (detail) => {
+    json(res, 400, { error: "invalid-retention", detail });
+    log(req.method, path, 400);
+    return true;
+  };
+  if (!body || typeof body !== "object" || Array.isArray(body)) return refuse("body must be a JSON object");
+  const unknown = Object.keys(body).filter((k) => k !== "keepDays" && k !== "minFreeGiB");
+  if (unknown.length) return refuse(`unknown field(s): ${unknown.join(", ")}`);
+  if (body.keepDays === undefined) {
+    return refuse("keepDays is required (an integer 1..36500, or null to keep everything)");
+  }
+  const patch = { retention: { keepDays: body.keepDays } };
+  if (body.minFreeGiB !== undefined) patch.retention.minFreeGiB = body.minFreeGiB;
+  const { ok, errors } = deps.validateSettings({ retention: patch.retention });
+  if (!ok) return refuse(errors.join("; "));
+  try {
+    // keepDays null rides the overlay's merge semantics: a null patch value
+    // deletes the key, so switching back to keep-all really clears the limit.
+    deps.writeSettings(patch);
+  } catch (err) {
+    return refuse(String(err?.message || err).split("\n").join("; "));
+  }
+  const applied = await deps.applyRetention({});
+  const snapshot = await deps.readRetention();
+  json(res, 200, {
+    ...snapshot,
+    resolved: deps.resolveRetention(),
+    applied: { cleanupPeriodDays: applied.cleanupPeriodDays, changed: applied.changed, skipped: applied.skipped },
+    prunable: prunablePayload(await deps.pruneRuns({ dryRun: true })),
+  });
   log(req.method, path, 200);
   return true;
 }

@@ -9,6 +9,9 @@ import { installRuntimeHooks } from './runtime-hook-config.mjs';
 //   · the squad's CLAUDE.md, settings.json, agents/ and skills/ (the only
 //     files copied out of the shared squad dir — never its projects/ history
 //     and never any auth state);
+//   · the vendored shared skills (<squadRoot>/_shared/skills — every child
+//     gets them per turn; the squad's own file at the same relative path
+//     wins, and a missing shared dir is silently fine);
 //   · the tool-profile snapshot (snapshot.json + mcp.json, written by
 //     tool-profiles.snapshotToolProfile — the registry revision and resolved
 //     tools this process starts with);
@@ -160,11 +163,28 @@ function copyEntry(srcEntry, destEntry, state) {
 }
 
 /**
- * The bounded squad-source copy: allowlisted names only, out of `sourceDir`
- * into `destDir`. Returns the mutable state the caller reports on.
+ * The vendored skills every squad shares live in `<squadRoot>/_shared/skills/`
+ * — next to the squad dirs, so it exists in the same root natively and under
+ * LA_SQUAD_HOME in Docker. A missing shared dir is silently fine (a squad that
+ * ships none of them launches unchanged).
  */
-function copySquadSources(sourceDir, destDir) {
+export function sharedSkillsDir(squad, env = process.env) {
+  return join(dirname(squadConfigDir(squad, env)), "_shared", "skills");
+}
+
+/**
+ * The bounded squad-source copy: allowlisted names only, out of `sourceDir`
+ * into `destDir`. `sharedSkills` (when it exists) is copied into
+ * `<destDir>/skills/` FIRST, so the squad's own dir copied after it overwrites
+ * a shared file at the same relative path — a squad always wins on a clash.
+ * Shared files count toward the same caps and secret scan as squad files.
+ * Returns the mutable state the caller reports on.
+ */
+function copySquadSources(sourceDir, destDir, sharedSkills) {
   const state = { copied: [], skipped: [], files: 0, totalBytes: 0 };
+  if (sharedSkills && existsSync(sharedSkills)) {
+    copyEntry(sharedSkills, join(destDir, "skills"), state);
+  }
   for (const name of LAUNCH_COPY_FILES) {
     const src = join(sourceDir, name);
     if (!existsSync(src)) continue;
@@ -280,8 +300,9 @@ export function prepareAgentLaunch({
   const configDir = resolve(outputDir);
   mkdirSync(configDir, { recursive: true });
 
-  // 1. The bounded squad sources (never the shared projects/ or auth).
-  const copied = copySquadSources(squadConfigDir(squad, env), configDir);
+  // 1. The bounded squad sources (never the shared projects/ or auth), with
+  // the vendored shared skills laid down first so a squad's own copy wins.
+  const copied = copySquadSources(squadConfigDir(squad, env), configDir, sharedSkillsDir(squad, env));
 
   // 2. Resume history — the same child's own prior turn only (follow-ups).
   let history = { copied: [], skipped: [] };

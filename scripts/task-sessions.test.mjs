@@ -347,6 +347,39 @@ test("processes: the active cap of 2 holds when 6 processes race claimNext", asy
   }
 });
 
+test("processes: 6 concurrent first opens of a fresh db all survive the WAL switch, 5 rounds", async () => {
+  // journal_mode = WAL takes an exclusive lock and ignores busy_timeout, so
+  // first-ever concurrent opens of a fresh file used to race with
+  // "database is locked". Every child must now get through the open path and
+  // see the file in WAL mode.
+  for (let round = 0; round < 5; round++) {
+    const dir = tempDir();
+    try {
+      const dbPath = dbFile(dir);
+      const startAt = Date.now() + 700;
+      const children = await Promise.all(
+        Array.from({ length: 6 }, () =>
+          runChild(
+            dbPath,
+            `const { DatabaseSync } = await import("node:sqlite");
+             const probe = new DatabaseSync(dbPath);
+             const mode = probe.prepare("PRAGMA journal_mode").get().journal_mode;
+             probe.close();
+             return { mode };`,
+            startAt,
+          ),
+        ),
+      );
+      assert.equal(children.length, 6);
+      for (const child of children) {
+        assert.equal(child.mode, "wal", `round ${round}: every child must see wal`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("update cannot bypass capacity or reactivate a terminal owner", () => {
   const dir = tempDir();
   const store = createTaskSessionStore({ dbPath: dbFile(dir), maxActive: 1 });

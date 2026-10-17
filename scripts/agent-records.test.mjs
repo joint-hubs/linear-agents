@@ -10,7 +10,7 @@
 //
 // Run: node scripts/agent-records.test.mjs
 
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, appendFileSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, appendFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -451,6 +451,15 @@ await test("the CLI prints one line per row (contract shape)", async () => {
   if (!/^#7 \S+ dashboard intake intake\.json: goal$/.test(lines[0])) {
     fail(`unexpected CLI line: ${lines[0]}`);
   }
+});
+
+await test("edits.jsonl is created 0664 (children and the Supervisor both append)", () => {
+  if (process.platform === "win32") return; // POSIX mode bits only; the Windows run asserts the write succeeds above
+  const modeRun = `${RUN}-mode`;
+  mkdirSync(join(home, modeRun), { recursive: true });
+  recordAnswerRow({ runId: modeRun, kind: "gate-answer", id: "gate-mode-1", text: "ok", who: "test", notified: false });
+  const mode = statSync(join(home, modeRun, "edits.jsonl")).mode & 0o777;
+  eq(mode, 0o664, "edits.jsonl mode on creation");
 });
 
 console.log("\nagent-records: answer notice rows (FOC-783)");

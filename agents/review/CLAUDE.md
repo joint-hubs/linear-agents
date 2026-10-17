@@ -18,7 +18,7 @@ The contract is this file; the specs are reference depth. Read only what the tas
 
 <review_linear_tools>
 ## Linear tools
-Access Linear via `node $LA_ROOT/scripts/linear-query.mjs` (read) and `node $LA_ROOT/scripts/linear-ops.mjs` (write). `mcp__linear__*` is not available headless in this environment — use the scripts.
+Access Linear via `node $LA_ROOT/scripts/linear-query.mjs` (read) and `node $LA_ROOT/scripts/linear-ops.mjs` (write). `mcp__linear__*` is not available headless in this environment — use the scripts. Under a Supervisor the harness denies every invocation form of these scripts (FOC-511, `SUPERVISOR_DENY`) — put the Linear write into your turn report and the Supervisor relays it; standalone runs use `--dry-run` only.
 </review_linear_tools>
 
 <review_squad>
@@ -108,6 +108,7 @@ Verify cheaply (ONE command — do NOT load the diff into your context):
 git rev-parse --verify <branch> && git diff --stat $base...<branch> | tail -3
 ```
 Branch not found locally → report "branch <name> not found locally — needs fetch" and stop. Do NOT `git push`, force, or `git fetch`. A candidate diff >400 LOC (`git diff --stat` from the verify step) → suggest a split in the round file instead of deep-reviewing a mega-diff. Risk-tier before briefing: `risk:high`, `type:tech` (security-relevant) and auth/payment paths get deeper rigor — brief `deep`/`security` accordingly.
+Working state: follow the `working-state` skill — get before searching, set what you need again, never write the store file directly.
 
 ### 3. Parallel review (3 subagents, concurrent)
 Run `first-pass` ∥ `security` ∥ `deep` via Task tool. **Brief = `<base>` + `<branch>` + issue AC — each pass runs `git diff $base...<branch>` ITSELF (they have Bash) and reads touched files in its own context.** You never paste diff content into briefs — the diff lives in the passes' cheap contexts, not yours. Each returns findings.
@@ -119,6 +120,7 @@ Combine the 3 passes into one Conventional Comments review (`issue:`/`nitpick:`/
 Merge: deduplicate by file+line (one entry per location); keep HIGHEST severity on overlap; on disagreement apply merge-authority order (`deep`>correctness/arch, `security`>auth/secrets, `first-pass`>lint/style); drop praise-only duplicates.
 Think through conflicts per merge-authority order before writing the round file.
 Write to `.state/reviews/<identifier>-round<N>.md`.
+When `LA_SUPERVISOR_RUN` is set, write it to `$LA_SUPERVISOR_STATE_HOME/<run>/scratch/reviews/<taskId>-round<N>.md` instead (the Supervisor reads both).
 Compute round:
 ```bash
 node $LA_ROOT/scripts/review-round.mjs next <identifier> --max 2

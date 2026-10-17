@@ -18,6 +18,19 @@
 // (FOC-773): a provider change in the settings overlay must be effective on the
 // next spawn, so the child env is re-resolved at spawn time rather than
 // inherited from the Supervisor's shell.
+//
+// FOC-607 adds the per-spawn model policy (assertModelPolicy). A named DEV
+// role may not be --model'ed at all: a dev child's report is only as
+// trustworthy as its model, and three recorded incidents started with a weaker
+// --model slipping past the routing table — so the table (models.json
+// routing.dev, or the settings overlay's routing.dev.lead) is the DEV model's
+// ONLY source. The overlay stays allowed: routing.dev.lead is configuration
+// reviewed in Settings, not a per-spawn flag slipped past the policy. Other
+// squads may pass --model, but only for a model with a pricing row in
+// config/models.json — an unpriced id costs UNKNOWN and silently diverges the
+// record from the run. Routed ids (table or overlay) are deliberately NOT
+// price-checked here: local/ollama providers route models that legitimately
+// have no pricing row, and they keep surfacing in unpricedModels as before.
 
 import { resolveProvider, formatSetLines } from "./provider-resolve.mjs";
 
@@ -71,6 +84,47 @@ export function childModelFor({ squad, explicitModel, settings, modelsConfig, pr
   if (isModelId(defaultModel)) return { model: defaultModel.trim(), source: "provider-default" };
 
   return { model: null, source: null };
+}
+
+/**
+ * The per-spawn model policy (FOC-607). Judges ONLY the explicit `--model`
+ * request — routed ids (table or overlay) and a missing request pass untouched.
+ * Pure over injected inputs: `hasPriceRow` is the supervisor-lib check of the
+ * same name, injected so callers (and tests) need no models file on disk; it
+ * returns `{ priced: boolean }` like the real one.
+ *
+ * @param {object} params
+ * @param {string} params.squad - squad name ("plan" | "dev" | "review" | "test")
+ * @param {string|null} params.requestedModel - the --model flag value, if given
+ * @param {Function} params.hasPriceRow - (modelId) => { priced: boolean }
+ * @returns {{ error: string, message: string }|null} a typed refusal, or null
+ *   when the request is allowed
+ */
+export function assertModelPolicy({ squad, requestedModel, hasPriceRow }) {
+  // Trimmed so `--model " z-ai/glm-5.3-flash"` is priced on the trimmed id,
+  // consistent with childModelFor (which trims before returning). A
+  // whitespace-only value counts as no request.
+  const wanted = isModelId(requestedModel) ? requestedModel.trim() : null;
+  if (wanted) {
+    if (squad === "dev") {
+      return {
+        error: "model-override-banned",
+        message:
+          "named DEV roles take their model from the routing table " +
+          "(config/models.json routing.dev, or the settings overlay routing.dev.lead) — " +
+          "drop --model; FOC-607",
+      };
+    }
+    if (hasPriceRow(wanted)?.priced !== true) {
+      return {
+        error: "model-unpriced",
+        message:
+          `--model ${wanted} has no pricing row in config/models.json — ` +
+          "add the row or use a routed model; FOC-607",
+      };
+    }
+  }
+  return null;
 }
 
 /**

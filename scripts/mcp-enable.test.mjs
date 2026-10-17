@@ -15,7 +15,14 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { approveGuardedCodegraphForProject, approveServersForProject, enableServersInProjectSettings, guardedCodegraphServersOf } from "./mcp-enable.mjs";
+import {
+  approveGuardedCodegraphForProject,
+  approveServersForProject,
+  cliProjectKey,
+  enableServersInProjectSettings,
+  guardedCodegraphServersOf,
+  sameDir,
+} from "./mcp-enable.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const MODULE = join(__dir, "mcp-enable.mjs");
@@ -171,17 +178,40 @@ test("a backslash-spelled existing key is MIGRATED to the CLI-canonical key — 
   if (JSON.stringify(entry.enabledMcpjsonServers) !== JSON.stringify(["codegraph"])) fail("approval missing");
 }, "backslash-spelled project keys exist only on Windows (path.resolve has no backslashes on POSIX)");
 
+// A case variant of `key` that is guaranteed to differ: lowercased when the
+// canonical key carries any uppercase (the measured case), otherwise one
+// letter flipped to uppercase — an all-lowercase mkdtemp suffix is possible.
+const caseVariantKey = (key) => {
+  if (key !== key.toLowerCase()) return key.toLowerCase();
+  const i = [...key].findIndex((c) => /[a-z]/.test(c));
+  if (i < 0) fail(`no letter in the fixture path to flip: ${key}`);
+  return key.slice(0, i) + key[i].toUpperCase() + key.slice(i + 1);
+};
+
 test("a case-variant existing key is migrated too — the CLI key is case-sensitive", () => {
   // Also measured: a lowercased key is invisible; nothing lowercases the key
-  // the CLI computes. One visible entry must remain.
+  // the CLI computes. One visible entry must remain. The seeded variant and
+  // the expectation derive from ONE realpath — cliProjectKey, the same helper
+  // the CLI approves with — so a fixture whose mkdtemp path resolves
+  // differently inside vs outside the module (8.3 short names under load)
+  // cannot make the seeded "variant" accidentally BE the canonical key and
+  // flip this test's meaning.
   const dir = tempDir("la-mcp-cfg-");
   const configPath = join(dir, ".claude.json");
-  const lowerKey = realpathSync(dir).replace(/\\/g, "/").toLowerCase();
-  seedConfig(configPath, { [lowerKey]: { hasTrustDialogAccepted: false, onboarding: { done: true } } });
+  const canonical = cliProjectKey(dir);
+  const variantKey = caseVariantKey(canonical);
+  seedConfig(configPath, { [variantKey]: { hasTrustDialogAccepted: false, onboarding: { done: true } } });
   const r = approveServersForProject({ configPath, projectRoot: dir, servers: ["codegraph"] });
   const cfg = readJson(configPath);
-  if (cfg.projects[lowerKey]) fail("the case-variant key survived");
-  const entry = cfg.projects[r.projectKey];
+  // Survival is compared with sameDir (case/separator-insensitive — both
+  // spellings name the same directory); the surviving key itself must be the
+  // canonical spelling, since nothing lowercases the CLI's key.
+  const survivors = Object.keys(cfg.projects).filter((k) => sameDir(k, canonical));
+  if (r.projectKey !== canonical) fail(`projectKey not canonical: ${r.projectKey} vs ${canonical}`);
+  if (survivors.length !== 1 || survivors[0] !== canonical) {
+    fail(`expected exactly the canonical key to survive: ${JSON.stringify(Object.keys(cfg.projects))}`);
+  }
+  const entry = cfg.projects[canonical];
   if (entry.onboarding?.done !== true) fail("carried fields were lost");
   if (entry.hasTrustDialogAccepted !== true) fail("approval missing");
 });

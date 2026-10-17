@@ -20,6 +20,13 @@
 // CLI:
 //   node scripts/fenix-seed-agents.mjs --from <imageAgentsDir> --to <volumeAgentsDir> [--json]
 //
+// FOC-772: the personal memory is an optional integration. When
+// integrations.memory is off, <squad>/memory/ directories are not seeded and
+// previously seeded memory files are retired from the volume by the orphan
+// rule below; the manifest never lists them. Tests can inject the
+// readIntegrations shape via the `integrations` option; the CLI resolves it
+// from the real settings overlay.
+//
 // Run: node scripts/fenix-seed-agents.test.mjs
 
 import {
@@ -34,6 +41,7 @@ import {
 import { createHash } from "node:crypto";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { integrationEnabled } from "./fenix-integrations.mjs";
 
 const MANIFEST_NAME = ".fenix-seed.json";
 const NEW_SUFFIX = ".fenix-new";
@@ -57,13 +65,14 @@ const COUNT_KEYS = {
 // everything under <squad>/{agents,skills,memory}/. The squad is the first
 // path segment (including "_shared"). Anything else under --from — projects,
 // .claude.json, history, ... — is image-shipped runtime data, never copied.
-function isConfigFile(rel) {
+// memory/ is whitelisted only when the memory integration is on (FOC-772).
+function isConfigFile(rel, includeMemory) {
   const parts = rel.split("/");
   if (parts.length < 2) return false;
   if (parts.length === 2) {
     return parts[1] === "CLAUDE.md" || parts[1] === "settings.json";
   }
-  return parts[1] === "agents" || parts[1] === "skills" || parts[1] === "memory";
+  return parts[1] === "agents" || parts[1] === "skills" || (includeMemory && parts[1] === "memory");
 }
 
 function walkFiles(dir) {
@@ -78,10 +87,10 @@ function walkFiles(dir) {
 
 // Whitelisted image files as { abs, rel }; rel in "/" form, sorted so the
 // output and the manifest are deterministic.
-function listImageFiles(from) {
+function listImageFiles(from, includeMemory) {
   return walkFiles(from)
     .map((abs) => ({ abs, rel: relative(from, abs).split(sep).join("/") }))
-    .filter((f) => isConfigFile(f.rel))
+    .filter((f) => isConfigFile(f.rel, includeMemory))
     .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
 }
 
@@ -128,9 +137,19 @@ function placeFile(to, rel, fromAbs) {
   copyFileSync(fromAbs, dest);
 }
 
-export function seedAgents({ from, to }) {
+// The optional integrations switch: injectable for tests (the readIntegrations
+// shape, { memory: boolean, ... }); when absent the CLI path resolves it from
+// the real settings overlay. A corrupt overlay must fail loudly, per
+// fenix-integrations.mjs — an invalid settings file never reads as "off".
+function memorySeedingOn(integrations) {
+  if (integrations !== undefined) return Boolean(integrations.memory);
+  return integrationEnabled("memory");
+}
+
+export function seedAgents({ from, to, integrations }) {
+  const includeMemory = memorySeedingOn(integrations);
   mkdirSync(to, { recursive: true });
-  const imageFiles = listImageFiles(from);
+  const imageFiles = listImageFiles(from, includeMemory);
   const imageRels = new Set(imageFiles.map((f) => f.rel));
   const loaded = loadManifest(to);
   const files = { ...loaded.files };
