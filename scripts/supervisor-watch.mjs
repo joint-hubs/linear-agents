@@ -360,6 +360,15 @@ const child = isolated
 // below; null on a run that ends normally.
 let signalTerminated = null;
 
+// FOC-913: how long the child's stream tail may keep landing after 'exit'
+// before the turn is finalized without it. Declared here, before the signal
+// handlers, because terminateTurn measures its own deadline against this
+// window — the terminator must never fire before the finalizer can.
+const TAIL_DRAIN_MS = 2000;
+// The handle to the terminator's own timer: finalizeTurn clears it the moment
+// it starts, so a finalization in progress can never be pre-empted.
+let terminatorTimer = null;
+
 // FOC-802: when the Supervisor kills the watcher, the turn must die with it —
 // not leave a claude child running orphaned, holding the worktree and burning
 // the budget. The child leads its own process group (spawnOpts.detached), so a
@@ -367,10 +376,12 @@ let signalTerminated = null;
 // isolated run the env-file handlers above run first and re-raise, so this
 // handler also sees the signal a second time and acts exactly once; on an
 // unisolated POSIX run it IS the signal handler. The child's exit path gets a
-// bounded 2 s to run its normal bookkeeping (registry, tee, wake queue,
-// telemetry) — but the watcher exits with the signal's status (143 for SIGTERM)
-// regardless of what the child does. Windows has no external-signal handler
-// semantics; today's behaviour there is unchanged.
+// bounded window (TAIL_DRAIN_MS + 1500 from the signal — strictly beyond the
+// finalizer's own TAIL_DRAIN_MS drain, measured from the later 'exit' anchor)
+// to run its normal bookkeeping (registry, tee, wake queue, telemetry) — but
+// the watcher exits with the signal's status (143 for SIGTERM) regardless of
+// what the child does. Windows has no external-signal handler semantics;
+// today's behaviour there is unchanged.
 if (process.platform !== "win32") {
   const SIGNAL_EXIT = { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 };
   const terminateTurn = (signal) => {
@@ -388,7 +399,16 @@ if (process.platform !== "win32") {
         /* the pid is already gone */
       }
     }
-    setTimeout(() => process.exit(signalTerminated), 2000);
+    // The finalizer is armed only when the child's 'exit' lands — S+δ, not S —
+    // and its TAIL_DRAIN_MS fallback then ends at S+δ+TAIL_DRAIN_MS. A deadline
+    // measured from S must sit strictly beyond that window, or exactly the case
+    // the drain bound exists for (a grandchild holding the inherited stdout
+    // pipe, delaying `close` past S+TAIL_DRAIN_MS) has the terminator fire
+    // first and discard the whole finalization — registry left "running", no
+    // cost patch, no wake row, no endTelemetryRun. TAIL_DRAIN_MS + 1500 keeps
+    // the terminator strictly last while still bounding the watcher's life;
+    // a finalization that starts clears the timer outright.
+    terminatorTimer = setTimeout(() => process.exit(signalTerminated), TAIL_DRAIN_MS + 1500);
   };
   for (const signal of Object.keys(SIGNAL_EXIT)) process.on(signal, terminateTurn);
 }
@@ -599,12 +619,17 @@ child.on("error", (err) => {
 // test-suite load). 'close' fires only once every stdio stream is closed, so
 // the last 'data' events have landed by then. The bound is for a grandchild
 // that inherited the pipe and outlives claude: the registry write cannot wait
-// on it forever.
-const TAIL_DRAIN_MS = 2000;
+// on it forever. TAIL_DRAIN_MS itself is declared beside signalTerminated,
+// where terminateTurn can measure against it.
 let finalized = false;
 function finalizeTurn(code, signal) {
   if (finalized) return;
   finalized = true;
+  // A finalization in progress is never pre-empted by the terminator: from
+  // here to the process.exit at the end, the registry writes and the wake row
+  // must be allowed to land (FOC-913 — the old 2 s-from-signal terminator
+  // fired first whenever the tail drain was what delayed `close`).
+  if (terminatorTimer) clearTimeout(terminatorTimer);
   {
   if (buffer.trim()) {
     try {
