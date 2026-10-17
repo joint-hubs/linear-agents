@@ -733,6 +733,10 @@
     {
       "file": "supervisor-watch.test.mjs",
       "reason": "end-to-end through the real supervisor-watch.mjs child (spawnSync, fake claude behind the LA_CLAUDE_BIN seam); LA_SUPERVISOR_STATE_HOME/LA_SQUAD_HOME seams set at module load and inherited by the child — conservative serial for processes (launch profile --claude-args)"
+    },
+    {
+      "file": "test-spawn.test.mjs",
+      "reason": "exercises scripts/test-spawn.mjs end to end: a real node HTTP server child binds an ephemeral 127.0.0.1 port (probed free, no fixed ports) and is health-polled with fetch (FOC-840) — exactly what the parallel-lane static audit refuses, so conservative serial for socket binds and child processes"
     }
   ]
 }

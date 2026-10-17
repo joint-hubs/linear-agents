@@ -42,7 +42,7 @@
 // The server children are ALWAYS killed in finally.
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -53,6 +53,7 @@ import { openTelemetryDb, makeEvent, applyEvent, pricingSnapshot } from "./telem
 import { ensureViews } from "./telemetry-canonical.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
 import { cwdToHashName } from "./ledger.mjs";
+import { spawnTestServer } from "./test-spawn.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -330,37 +331,12 @@ const baseEnv = {
   FENIX_COST_SNAPSHOT_TTL_MS: "60000",
 };
 
-function spawnServer(env) {
-  const freePortP = new Promise((resolve) => {
-    const probe = createServer();
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-  return freePortP.then((port) => new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(__dir, "telemetry-server.mjs")], {
-      env: { ...env, TELEMETRY_PORT: String(port) },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    child.stderrBuf = "";
-    child.stderr.on("data", (c) => { child.stderrBuf += c; });
-    resolve({ child, port });
-  }));
-}
-
-async function waitForServer(port, child, ms = 20000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`server exited early (${child.exitCode})`);
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/telemetry/health`);
-      if (res.ok) return;
-    } catch { /* not up yet */ }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  throw new Error("server not ready");
-}
+// Shared spawn helper (FOC-840): free port + health poll + tree-kill stop().
+const spawnWorkServer = (env) => spawnTestServer({
+  script: join(__dir, "telemetry-server.mjs"),
+  env,
+  label: "work-routes",
+});
 
 async function call(port, method, path, { origin = "http://localhost:5173", body } = {}) {
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -396,10 +372,10 @@ let servers = [];
 try {
   // ── Docker mode: fake host + fake Linear ─────────────────────────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnWorkServer({ ...baseEnv, FENIX_SUPERVISOR_HOST: HOST_URL });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     // The FIRST board request, before any cost snapshot exists: the cost meta
     // says "computing" and stale must be false with it (consistent with
@@ -641,15 +617,15 @@ try {
       !existsSync(join(dir, "state-root", "publish-actions.jsonl")) && git(["ls-remote", "--heads", ORIGIN_BARE], dir) === "",
       git(["ls-remote", "--heads", ORIGIN_BARE], dir));
 
-    child.kill();
+    await spawned.stop();
   }
 
   // ── Native mode (no FENIX_SUPERVISOR_HOST) ───────────────────────────────
   {
-    const { child, port } = await spawnServer({ ...baseEnv });
-    servers.push(child);
-    await waitForServer(port, child);
-    const P = port;
+    const spawned = await spawnWorkServer({ ...baseEnv });
+    servers.push(spawned);
+    const child = spawned.child;
+    const P = spawned.port;
 
     const preview = await call(P, "GET", "/api/work/tickets/WORK-1/start-preview");
     check("preview native -> delivery cockpit",
@@ -664,16 +640,14 @@ try {
     const board = await call(P, "GET", "/api/work/tickets");
     check("board native -> 200 (same seams)", board.status === 200 && Array.isArray(board.body?.tickets),
       JSON.stringify(board.body).slice(0, 200));
-    child.kill();
+    await spawned.stop();
   }
 } catch (err) {
   failed++;
   failures.push(`unexpected error — ${err?.stack || err}`);
-  for (const s of servers) if (s.stderrBuf) console.error(`[child stderr] ${s.stderrBuf}`);
+  for (const s of servers) if (s.child.stderrBuf) console.error(`[child stderr] ${s.child.stderrBuf}`);
 } finally {
-  for (const child of servers) {
-    if (child.exitCode === null) child.kill();
-  }
+  for (const s of servers) await s.stop();
   fakeHost.close();
 }
 

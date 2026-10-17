@@ -15,7 +15,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -409,7 +409,9 @@ export function writeWakeAck(runId, seq) {
 // the highest seq any waker has woken the session for; it survives takeovers so
 // one row never wakes twice.
 //
-// Writer discipline: waker.json is written ONLY by supervisor-wake.mjs.
+// Writer discipline: waker.json is written ONLY through writeWakerLease /
+// updateWakerLease below — supervisor-wake.mjs's arm, heartbeat and end writes,
+// and the test-side seeding, all take the same lock (FOC-840).
 export const wakerPath = (runId) => join(runDir(runId), "waker.json");
 
 // A waker writes its heartbeat once per poll (1 s by default); 15 s of silence
@@ -432,6 +434,147 @@ export function wakerState(lease, now = Date.now(), staleMs = WAKER_LEASE_STALE_
   if (lease.endedAt) return "ended";
   const beat = Date.parse(lease.heartbeatAt ?? "");
   return Number.isFinite(beat) && now - beat <= staleMs ? "alive" : "stale";
+}
+
+// ── waker lease locking (FOC-840) ────────────────────────────────────────────
+//
+// The waker's compare-and-swap (supervisor-wake.mjs) re-reads the lease
+// immediately before writing, but a re-read and an atomic write are two
+// filesystem operations: a newer lease that lands inside that gap is clobbered
+// by the stale heartbeat, and its owner never re-surfaces it — the stale waker
+// runs to its lifetime and wakes a session a newer waker already owns. The CAS
+// closed the gap per WRITER; this lock closes it BETWEEN writers: every lease
+// write takes the lock, so "re-read, then write" happens while no other writer
+// can interleave, on either side.
+//
+// The lock is a DIRECTORY (waker.json.lock), created with mkdirSync —
+// directory creation is atomic on every platform, which a lock file is not
+// (two creators can both "succeed"). The rules:
+//
+//   · a writer holds it only across one read→write pair (well under a
+//     second), so an acquire that outlasts WAKER_LEASE_LOCK_WAIT_MS means the
+//     holder is wedged or gone — give up rather than block the waker's poll;
+//   · a lock directory older than WAKER_LEASE_LOCK_STALE_MS was left behind by
+//     a killed writer (no cleanup runs on SIGKILL) and is removed by the next
+//     acquirer; the directory's own mtime is the stamp;
+//   · every acquire releases in a finally, so a thrown write cannot wedge the
+//     next one.
+//
+// Deliberately best-effort: a remover can, in principle, stat a stale lock,
+// watch the holder release, and rmdir the FRESH lock a new acquirer just
+// created. The window is microseconds against a file written ~1×/s by at most
+// two processes — a pid-file protocol was not worth its own failure modes
+// here.
+export const wakerLeaseLockPath = (runId) => `${wakerPath(runId)}.lock`;
+export const WAKER_LEASE_LOCK_WAIT_MS = 2_000;
+export const WAKER_LEASE_LOCK_STALE_MS = 5_000;
+const WAKER_LEASE_LOCK_POLL_MS = 5;
+const WAKER_LEASE_RELEASE_ATTEMPTS = 5;
+// Codes that mean "the lock dir is held, or a holder is racing it right now".
+// EEXIST is the ordinary held answer; on Windows a waiter's mkdir can also
+// fail while it races the holder's rmSync (create-vs-delete: EPERM/EACCES) or
+// while AV/Defender still holds a handle on a just-created dir
+// (ENOTEMPTY/EBUSY) — all of these go through the stale check and the poll.
+const LOCK_HELD_CODES = new Set(["EEXIST", "EPERM", "EACCES", "ENOTEMPTY", "EBUSY"]);
+
+// A SYNCHRONOUS wait: the lease writers are synchronous (atomicWriteJSON has
+// no async form), so a setTimeout poll cannot sit inside the acquire loop.
+// Atomics.wait parks the thread for the interval without spinning the CPU;
+// where it is unavailable it falls back to a bounded busy-wait.
+const waitSync = (ms) => {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* spin */ }
+  }
+};
+
+/**
+ * Run `fn` while holding the run's waker-lease lock. `fn` runs synchronously
+ * and its return value is passed through; a failed acquire THROWS (callers
+ * decide what a lost lease write means — the waker stands down, a test fails
+ * loudly).
+ */
+export function withWakerLeaseLock(runId, fn) {
+  const lock = wakerLeaseLockPath(runId);
+  const deadline = Date.now() + WAKER_LEASE_LOCK_WAIT_MS;
+  let lastCode = null;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (err) {
+      // See LOCK_HELD_CODES: EEXIST plus the Windows create-vs-delete and
+      // AV-handle races all mean "held or racing" — they go through the stale
+      // check, the deadline check and the poll below, exactly like EEXIST.
+      if (!LOCK_HELD_CODES.has(err.code)) throw err;
+      lastCode = err.code;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > WAKER_LEASE_LOCK_STALE_MS) {
+          rmSync(lock, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        // Raced with the holder's release — retry the mkdir against the
+        // whatever is on disk now.
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `waker lease lock busy after ${WAKER_LEASE_LOCK_WAIT_MS} ms (last ${lastCode}): ${lock}`,
+        );
+      }
+      waitSync(WAKER_LEASE_LOCK_POLL_MS);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    // A release can fail on Windows exactly like an acquire (EPERM/EACCES
+    // racing another waiter's mkdir, ENOTEMPTY/EBUSY under an AV handle).
+    // Retry a bounded few times; ENOENT means the lock is already gone —
+    // success. After the last attempt give up silently: stale recovery above
+    // is the fallback for a lock left behind, not this handler.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rmSync(lock, { recursive: true, force: true });
+        break;
+      } catch (err) {
+        if (err.code === "ENOENT") break;
+        if (attempt >= WAKER_LEASE_RELEASE_ATTEMPTS - 1 || !LOCK_HELD_CODES.has(err.code)) break;
+        waitSync(5);
+      }
+    }
+  }
+}
+
+/**
+ * The one plain writer of waker.json, used by the Supervisor side and by the
+ * tests to seed a lease. Taking the lock here is what makes a test's seedLease
+ * a real competing writer — the race this exists for is between THIS write and
+ * the waker's own.
+ */
+export function writeWakerLease(runId, lease) {
+  return withWakerLeaseLock(runId, () => {
+    atomicWriteJSON(wakerPath(runId), lease);
+    return true;
+  });
+}
+
+/**
+ * Read-modify-write under the lease lock. `update` sees the on-disk lease
+ * INSIDE the lock and returns the lease to write, or null to write nothing —
+ * the waker's guarded writes use the null path to stand down when the lease on
+ * disk is no longer theirs. The re-read→write pair the waker's CAS could not
+ * make atomic is atomic here, because the lock is held across both.
+ */
+export function updateWakerLease(runId, update) {
+  return withWakerLeaseLock(runId, () => {
+    const next = update(readWakerLease(runId));
+    if (next === null || next === undefined) return null;
+    atomicWriteJSON(wakerPath(runId), next);
+    return next;
+  });
 }
 
 // ── stop-hook turn-end guard (FOC-609) ───────────────────────────────────────

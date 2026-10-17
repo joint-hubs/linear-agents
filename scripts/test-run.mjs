@@ -45,6 +45,8 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { killTree } from './supervisor-lib.mjs';
+import { probePid, openRegistryRows } from './test-spawn.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const LANES_FILE = join(SCRIPTS_DIR, 'test-lanes.json');
@@ -235,20 +237,62 @@ delete suiteEnv.LA_TASK_OWNER;
 // path in a per-run temp dir, so readSettings() yields the empty overlay.
 // Only when the caller did not already set it — a deliberate value wins.
 // LA_PROJECTS_FILE handling is untouched.
-let runTmp;
+let settingsTmp;
 if (!suiteEnv.LA_SETTINGS_FILE) {
-  runTmp = mkdtempSync(join(tmpdir(), 'test-run-settings-'));
-  suiteEnv.LA_SETTINGS_FILE = join(runTmp, 'settings.json');
+  settingsTmp = mkdtempSync(join(tmpdir(), 'test-run-settings-'));
+  suiteEnv.LA_SETTINGS_FILE = join(settingsTmp, 'settings.json');
 }
-// Best effort: a cleanup failure must never change the exit code.
+
+// ── orphan registry (FOC-840) ────────────────────────────────────────────────
+
+// Every test-file child gets LA_TEST_SPAWN_REGISTRY pointing at one JSONL file
+// for the whole run. scripts/test-spawn.mjs appends a row per spawned server
+// and removes the row on a clean stop(); whatever is still in the file when
+// the lanes finish is an orphan the sweep below must kill and report. The
+// per-run temp dir exists even when the runner runs under a caller that
+// manages its own settings, so the registry always has a home.
+const runTmp = mkdtempSync(join(tmpdir(), 'test-run-'));
+suiteEnv.LA_TEST_SPAWN_REGISTRY = join(runTmp, 'spawns.jsonl');
+// Best effort: a cleanup failure must never change the exit code. Both the
+// settings-pin dir (only when the seam was pinned here) and the registry dir
+// go on every early exit path (no-match exit(1), a crash).
 process.on('exit', () => {
-  if (!runTmp) return;
+  if (settingsTmp) {
+    try {
+      rmSync(settingsTmp, { recursive: true, force: true });
+    } catch {
+      /* leftover temp dir is harmless */
+    }
+  }
   try {
     rmSync(runTmp, { recursive: true, force: true });
   } catch {
     /* leftover temp dir is harmless */
   }
 });
+
+// Read the run's spawn registry and tree-kill any server still alive. Rows
+// whose pid is already gone were stopped (or died) cleanly; survivors are
+// orphans — killed here, and reported when `report` is set.
+//
+// The probe is pid-only: a pid reused by an unrelated process inside one run
+// would be tree-killed. The window is one suite run; rows carry `startedAt`
+// if a start-time comparison is ever needed.
+const sweepOrphans = (report = false) => {
+  const survivors = [];
+  for (const row of openRegistryRows(suiteEnv.LA_TEST_SPAWN_REGISTRY)) {
+    if (probePid(row.pid)) {
+      survivors.push(row);
+      killTree(row.pid, 'force');
+    }
+  }
+  if (report) {
+    for (const row of survivors) {
+      console.error(`  test orphans left running: ${row.file} pid ${row.pid} port ${row.port} (killed)`);
+    }
+  }
+  return survivors;
+};
 
 // ── execution ────────────────────────────────────────────────────────────────
 
@@ -284,8 +328,17 @@ const runFiles = (files, concurrency, budget) =>
       killed = true;
       for (const record of running.values()) {
         record.killed = true;
-        record.child.kill();
+        // Tree-kill, not a bare stop: a test file mid-run may own spawned
+        // servers, and killing only the file would orphan them (FOC-840).
+        killTree(record.child.pid, 'force');
       }
+      // The runner spawns test files non-detached, so on POSIX a test file is
+      // not a process-group leader and killTree reaches only the file itself;
+      // servers the file spawned through the helper are detached (their own
+      // groups) — the sweep is what reaches them. Sweep silently: the dying
+      // trees may not have been reaped yet, and the final sweep after both
+      // lanes is the one that reports what is STILL alive.
+      sweepOrphans(false);
     };
     budget.onKill(killInFlight);
 
@@ -367,6 +420,14 @@ const [parallelRun, serialRun] = await Promise.all([
 ]);
 const wallMs = Date.now() - t0;
 
+// Every lane has resolved: whatever the spawn registry still holds is an
+// orphaned server. Kill it and fail the run for it, even when every file
+// passed — a green suite that leaks a live server is not green (FOC-840).
+const orphanSurvivors = sweepOrphans(true);
+try {
+  rmSync(runTmp, { recursive: true, force: true });
+} catch { /* temp dir, best effort */ }
+
 const finished = [...parallelRun.finished, ...serialRun.finished].sort((a, b) => a.file.localeCompare(b.file));
 const neverStarted = [...parallelRun.neverStarted, ...serialRun.neverStarted].sort();
 
@@ -429,7 +490,7 @@ if (slowest.length) {
 }
 
 const ranCount = finished.filter((r) => !r.killed).length;
-console.log(`\n${passed}/${ranCount} passed in ${wallMs}ms.`);
+console.log(`\n${passed}/${ranCount} passed in ${wallMs}ms${orphanSurvivors.length ? `, ${orphanSurvivors.length} test orphan(s) killed` : ''}.`);
 
 // FOC-667: repeat the degraded states next to the final summary so the last
 // line a reader sees is never an unqualified pass count.
@@ -443,6 +504,7 @@ const problems = [];
 if (failedFiles.length) problems.push(`${failedFiles.length} test file(s) failed`);
 if (killedCount) problems.push(`${killedCount} test file(s) cut short at the wall-clock budget`);
 if (neverStarted.length) problems.push(`${neverStarted.length} test file(s) never started`);
+if (orphanSurvivors.length) problems.push(`${orphanSurvivors.length} orphaned server(s) left running (killed)`);
 if (problems.length) {
   console.error(`\n${problems.join('; ')}.`);
   process.exit(1);

@@ -82,7 +82,9 @@ const SQUADS = ["plan", "dev", "review", "test", "cadence", "supervisor"];
 // project server stays ⏸ Pending approval even with hasTrustDialogAccepted
 // and enabledMcpjsonServers sitting under that key. So the approval must land
 // on the CLI's own spelling of the path, computed the same way.
-const cliProjectKey = (projectRoot) => {
+// Exported for tests: the case-variant test seeds and asserts through THIS
+// helper so its fixture and expectation can never disagree on the realpath.
+export const cliProjectKey = (projectRoot) => {
   let abs = resolve(projectRoot);
   try {
     if (existsSync(abs)) abs = realpathSync(abs);
@@ -94,8 +96,9 @@ const cliProjectKey = (projectRoot) => {
 
 // Same-directory detection for MIGRATING dead-spelled entries — see
 // cliProjectKey. Comparison is case/separator-insensitive because Windows
-// paths have two spellings; the canonical WRITE is cliProjectKey's.
-const sameDir = (a, b) => a.replace(/\\/g, "/").toLowerCase() === b.replace(/\\/g, "/").toLowerCase();
+// paths have two spellings; the canonical WRITE is cliProjectKey's. Exported
+// for tests that must recognize the same directory without matching spellings.
+export const sameDir = (a, b) => a.replace(/\\/g, "/").toLowerCase() === b.replace(/\\/g, "/").toLowerCase();
 
 // ── importable helpers (supervisor-spawn.mjs uses them for worktree approval) ──
 
