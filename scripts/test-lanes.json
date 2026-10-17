@@ -13,6 +13,14 @@
       "reason": "isolation audit FOC-795: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir before import; record fixtures only; no ports, no socket binds, no telemetry DB"
     },
     {
+      "file": "artifact-registry.test.mjs",
+      "reason": "isolation audit FOC-779: mkdtemp git fixtures (git init + one local commit, no network); the registry reads the committed config read-only and every CLI child is pointed at a temp root via --root with LA_ARTIFACTS_MANIFEST on a temp path; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
+      "file": "artifacts-routes.test.mjs",
+      "reason": "isolation audit FOC-779: stub req/res with injected statuses/refresh fakes and an injectable clock — no fs, no git, no child processes, no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "analysis-cache.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },

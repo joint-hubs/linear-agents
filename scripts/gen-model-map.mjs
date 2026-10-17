@@ -47,6 +47,16 @@ const ROLE_MAP = {
 };
 
 // ---------------------------------------------------------------------------
+// The shared flash/worker routing roles (FOC-217): one pair per area with
+// agent role files. A flat pair list — an object literal cannot repeat the
+// CLI name `flash` five times.
+// ---------------------------------------------------------------------------
+const SHARED_ROLES = ["plan", "dev", "review", "test", "cadence"].flatMap((area) => [
+  { role: "flash", area, key: "flash" },
+  { role: "worker", area, key: "worker" },
+]);
+
+// ---------------------------------------------------------------------------
 // Read source of truth
 // ---------------------------------------------------------------------------
 const cfg = JSON.parse(readFileSync(SRC, "utf8"));
@@ -78,6 +88,20 @@ for (const [role, { area, key }] of Object.entries(ROLE_MAP)) {
   }
   const modelId = resolve(modelKey);
   lines.push(`${area}.${role}=${modelId}`);
+}
+
+for (const { role, area, key } of SHARED_ROLES) {
+  const areaRouting = routing[area];
+  if (!areaRouting) {
+    console.error(`[warn] No routing section for area "${area}" (role "${role}") — skipping`);
+    continue;
+  }
+  const modelKey = areaRouting[key];
+  if (!modelKey) {
+    console.error(`[warn] No routing entry for ${area}.${key} (CLI role "${role}") — skipping`);
+    continue;
+  }
+  lines.push(`${area}.${role}=${resolve(modelKey)}`);
 }
 
 // Also emit the default model ids (opus, sonnet, etc.) for other .bat files

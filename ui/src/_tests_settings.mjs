@@ -10,6 +10,11 @@
 // validateCustomProvider (the server's rules mirrored), priceText (the
 // workModel.formatMoney rule) + routingRows (source labels, unpriced),
 // repoRows (branch@head, dirty, index, worktrees, project), jobProgressText,
+// retentionView (policy texts, humanBytes, free disk), artifactsView (FOC-779:
+// one row per state — labels, tones, revision/refresh texts, tolerant of an
+// empty or malformed payload) — and the leak guard: no model output ever
+// contains a canary value passed in by mistake. Fixtures shaped like the
+// plan's Settings API contracts — no network, no DOM.
 // retentionView (policy texts, humanBytes, free disk, resolved / prunable /
 // applied) + retentionFormState / validateRetentionForm (the FOC-780 form's
 // keep-all vs days rule, the 1..36500 and 0.5 GiB bounds) — and the leak guard:
@@ -34,6 +39,8 @@ import {
   jobActive,
   humanBytes,
   retentionView,
+  artifactsView,
+  artifactRow,
   retentionFormState,
   validateRetentionForm,
 } from './settingsModel.js';
@@ -204,6 +211,84 @@ const retentionPayload = {
   unreadable: { transcripts: 0, telemetry: 0, workspaces: 0, state: 0 },
 };
 
+// GET /api/artifacts (FOC-779) — one row per state, shaped like the contract:
+// { computedAt, head, artifacts: [{ id, title, output, exists, outputMtime,
+// age, head, digest, manifest: { head, digest, generatedAt } | null, state,
+// reason, refresh, committed }] }. `age` is milliseconds (now - output mtime).
+const artifactsPayload = {
+  computedAt: '2026-10-15T12:00:00.000Z',
+  head: 'fd659fbc1234567890abcdef',
+  artifacts: [
+    {
+      id: 'models-map',
+      title: 'Models map',
+      output: 'config/models.map',
+      exists: true,
+      outputMtime: '2026-10-15T11:59:00.000Z',
+      age: 3_660_000, // 1h 01m
+      head: 'fd659fbc1234567890abcdef',
+      digest: 'a1b2c3d4e5f60718',
+      manifest: {
+        head: 'fd659fbc1234567890abcdef',
+        digest: 'a1b2c3d4e5f60718',
+        generatedAt: '2026-10-15T11:59:00.000Z',
+      },
+      state: 'fresh',
+      reason: null,
+      refresh: 'watch',
+      committed: false,
+    },
+    {
+      id: 'ui-dist',
+      title: 'Dashboard UI',
+      output: 'ui/dist',
+      exists: true,
+      outputMtime: '2026-10-10T08:00:00.000Z',
+      age: 5 * 86_400_000 + 3 * 3_600_000, // 5d 03h
+      head: 'fd659fbc1234567890abcdef',
+      digest: '9f8e7d6c5b4a3210',
+      manifest: {
+        head: 'aa0000000000000000000000',
+        digest: '9f8e7d6c5b4a3210',
+        generatedAt: '2026-10-10T08:00:00.000Z',
+      },
+      state: 'stale',
+      reason: 'sources changed after the last generation',
+      refresh: 'watch',
+      committed: false,
+    },
+    {
+      id: 'atlas-mcp',
+      title: 'Atlas MCP config',
+      output: 'config/atlas-mcp.json',
+      exists: false,
+      outputMtime: null,
+      age: null,
+      head: null,
+      digest: null,
+      manifest: null,
+      state: 'missing',
+      reason: 'the output file does not exist yet',
+      refresh: 'launcher',
+      committed: false,
+    },
+    {
+      id: 'diagrams-png',
+      title: 'Diagram PNGs',
+      output: 'docs/diagrams/*.png',
+      exists: true,
+      outputMtime: '2026-09-30T10:00:00.000Z',
+      age: null,
+      head: null,
+      digest: null,
+      manifest: null,
+      state: 'external',
+      reason: null,
+      refresh: 'external',
+      committed: true,
+    },
+  ],
+};
 // The FOC-780 GET adds the resolved policy and the dry-run prune estimate on
 // top of the shape above.
 const retentionPayloadApplied = {
@@ -661,6 +746,86 @@ await test('humanBytes: the band of shapes', () => {
   eq(humanBytes(-4), '—');
 });
 
+// --- artifactsView (FOC-779) ---------------------------------------------------
+
+await test('artifactsView: one row per state — labels, tones, refresh texts', () => {
+  const rows = artifactsView(artifactsPayload).rows;
+  eq(rows[0].id, 'models-map');
+  eq(rows[0].stateLabel, 'fresh');
+  eq(rows[0].tone, 'ok');
+  eq(rows[0].refreshText, 'watched, 60 s');
+  eq(rows[1].stateLabel, 'stale');
+  eq(rows[1].tone, 'warn');
+  eq(rows[1].refreshText, 'watched, 60 s');
+  eq(rows[2].stateLabel, 'missing');
+  eq(rows[2].tone, 'danger');
+  eq(rows[2].refreshText, 'launcher');
+  eq(rows[3].stateLabel, 'external');
+  eq(rows[3].tone, 'muted');
+  eq(rows[3].refreshText, 'external');
+});
+
+await test('artifactsView: revision text is head short · digest8, "—" without a head', () => {
+  const rows = artifactsView(artifactsPayload).rows;
+  eq(rows[0].revisionText, 'fd659fb · a1b2c3d4');
+  eq(rows[1].revisionText, 'fd659fb · 9f8e7d6c');
+  eq(rows[2].revisionText, '—');
+  eq(rows[3].revisionText, '—');
+});
+
+await test('artifactsView: age text follows the cockpit formatAge rendering, "—" without an age', () => {
+  const rows = artifactsView(artifactsPayload).rows;
+  eq(rows[0].ageText, '1h 01m');
+  eq(rows[1].ageText, '5d 03h');
+  eq(rows[2].ageText, '—');
+  eq(rows[3].ageText, '—');
+});
+
+await test('artifactsView: generatedAt passes the manifest timestamp through, null without one', () => {
+  const rows = artifactsView(artifactsPayload).rows;
+  eq(rows[0].generatedAtText, '2026-10-15T11:59:00.000Z');
+  eq(rows[1].generatedAtText, '2026-10-10T08:00:00.000Z');
+  eq(rows[2].generatedAtText, null);
+  eq(rows[3].generatedAtText, null);
+});
+
+await test('artifactsView: reason rides along, output and title carried, footnote fields set', () => {
+  const v = artifactsView(artifactsPayload);
+  eq(v.computedAtText, '2026-10-15T12:00:00.000Z');
+  eq(v.headShort, 'fd659fb');
+  eq(v.rows[0].output, 'config/models.map');
+  eq(v.rows[0].title, 'Models map');
+  eq(v.rows[1].reason, 'sources changed after the last generation');
+  eq(v.rows[3].reason, null);
+  assert.ok(v.note.includes('regenerated on `fenix up`'));
+  assert.ok(v.note.includes('within 60 s'));
+  assert.ok(v.note.includes('external entries are reported only'));
+});
+
+await test('artifactsView: empty payload still yields a usable view', () => {
+  const v = artifactsView({});
+  eq(v.rows, []);
+  eq(v.headShort, null);
+  eq(v.computedAtText, null);
+  assert.ok(typeof v.note === 'string' && v.note.length > 0);
+});
+
+await test('artifactsView: malformed payloads never throw, rows stay empty', () => {
+  eq(artifactsView(null).rows, []);
+  eq(artifactsView(undefined).rows, []);
+  eq(artifactsView('garbage').rows, []);
+  eq(artifactsView({ artifacts: 'not-a-list' }).rows, []);
+  // A null member in the list becomes an empty-ish row, not a crash.
+  eq(artifactRow(null).stateLabel, 'unknown');
+  eq(artifactRow(null).tone, 'muted');
+});
+
+await test('artifactRow: an unknown state word shows as-is, muted — never dressed as fresh', () => {
+  const row = artifactRow({ id: 'x', title: 'X', state: 'weird', refresh: 'watch' });
+  eq(row.stateLabel, 'weird');
+  eq(row.tone, 'muted');
+});
+
 // --- Leak guard: a canary value passed in by mistake never surfaces ----------
 
 await test('no model output contains a canary value passed in by mistake', () => {
@@ -690,6 +855,17 @@ await test('no model output contains a canary value passed in by mistake', () =>
     repoRows([{ name: 'fenix', branch: 'main', head: 'fd659fb', value: CANARY }]),
     jobProgressText({ name: 'fenix', status: 'cloning', progress: '40%', value: CANARY }),
     retentionView({ ...retentionPayload, value: CANARY }),
+    artifactsView({
+      ...artifactsPayload,
+      artifacts: [
+        // The registry rows carry no key-like values — a caller's mistake here
+        // must not surface either. (generatedAt/computedAt are designed
+        // pass-through timestamps, like retention's — canaries go into
+        // fields the model is not supposed to read.)
+        { ...artifactsPayload.artifacts[0], value: CANARY },
+        { ...artifactsPayload.artifacts[0], manifest: { digest: CANARY, generatedAt: null } },
+      ],
+    }),
     retentionFormState({ resolved: { keepAll: true, keepDays: CANARY, minFreeGiB: CANARY } }),
     validateRetentionForm({ keepAll: false, keepDays: CANARY, minFreeGiB: CANARY }),
     checkText({ ok: false, reason: 'failed', details: { key: CANARY } }),

@@ -77,6 +77,7 @@ await test('Team, Costs, Insights, Settings sub-pages match the spec', () => {
     { path: '/settings/provider', label: 'Provider & routing' },
     { path: '/settings/repos', label: 'Repositories' },
     { path: '/settings/retention', label: 'Retention' },
+    { path: '/settings/artifacts', label: 'Artifacts' },
     { path: '/squad-config', label: 'Advanced routing (v1)' },
     { path: '/prompts', label: 'Squads & prompts (v1)' },
   ]);

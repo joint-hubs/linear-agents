@@ -39,8 +39,21 @@ if exist "%ROOT%\config\atlas-mcp.json.template" (
     if not exist "%ROOT%\config\atlas-mcp.json" (
         node -e "const fs=require('fs'),p=require('path');const t=fs.readFileSync(p.join(process.cwd(),'config','atlas-mcp.json.template'),'utf8');const r=t.replace(/\{\{([A-Z_][A-Z0-9_]*)\}\}/g,(m,n)=>{const v=Object.prototype.hasOwnProperty.call(process.env,n)?process.env[n]:m;return typeof v==='string'?v.replace(/\\/g,'\\\\'):v;});try{JSON.parse(r);}catch(e){process.stderr.write('atlas-mcp.json template render produced invalid JSON: '+e.message+'\n');process.exit(1);}fs.writeFileSync(p.join(process.cwd(),'config','atlas-mcp.json'),r);" 2>nul
         if errorlevel 1 (
-            echo [!] Nie udalo sie wyrenderowac config\atlas-mcp.json z template. Sprawdz ATLAS_VENV_PYTHON i ATLAS_ROOT w .env.
+            echo [WARN] Nie udalo sie wyrenderowac config\atlas-mcp.json z template. Sprawdz ATLAS_VENV_PYTHON i ATLAS_ROOT w .env.
         )
+    )
+)
+
+REM Regenerate config/models.map when missing or older than config/models.json
+REM (FOC-779: models.map is no longer committed; gen-model-map.mjs owns it).
+REM cmd.exe has no mtime comparison, so node -e does the check (exit 1 = stale
+REM or missing) and the generator runs only then. %ROOT% is passed as argv[1]
+REM — percent-expanding it inside the quoted JS would mangle the backslashes.
+if exist "%ROOT%\config\models.json" (
+    node -e "const fs=require('fs'),p=require('path');const root=process.argv[1];const src=p.join(root,'config','models.json');const out=p.join(root,'config','models.map');const sm=fs.statSync(src).mtimeMs;const om=fs.existsSync(out)?fs.statSync(out).mtimeMs:-1;process.exit(om>=sm?0:1);" "%ROOT%"
+    if errorlevel 1 (
+        node "%ROOT%\scripts\gen-model-map.mjs"
+        if errorlevel 1 echo [WARN] Nie udalo sie odswiezyc config\models.map z config\models.json. Uruchom recznie: node scripts\gen-model-map.mjs
     )
 )
 
