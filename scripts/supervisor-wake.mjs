@@ -186,7 +186,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function writeLease(runId, lease) {
   try {
-    atomicWriteJSON(wakerPath(runId), lease);
+    atomicWriteJSON(wakerPath(runId), lease, { mode: 0o644 }); // run-root: Supervisor-owned
     return true;
   } catch {
     return false;

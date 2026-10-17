@@ -215,6 +215,18 @@ function noteUnverifiedCost(snap) {
   console.error(`cost includes ${ids.length} unverified legacy figure(s): ${ids.join(", ")}`);
 }
 
+// FOC-802: the human counterpart of the `isolated` snapshot field. Only
+// meaningful inside the container — on a native host nothing was ever isolated,
+// so one line per unisolated child would be pure noise. Same channel as the
+// note above: stderr, because stdout is the JSON the Supervisor parses and a
+// note it cannot read is a note it cannot act on.
+function noteIsolation(snap) {
+  if (process.env.FENIX_IN_CONTAINER !== "1") return;
+  for (const c of snap.children) {
+    if (c.isolated === false) console.error(`isolation: off (${c.childId})`);
+  }
+}
+
 // FOC-607: requested vs served, per child. `model`/`modelSource` are the
 // registry pin spawn wrote; `initModel` is what the child's system/init
 // reported — taken from the latest turn that has one, else null (the event
@@ -258,8 +270,14 @@ function snapshot(runId, { childFilter, tail }) {
     const turnStart = liveTurn?.startedAt ? Date.parse(liveTurn.startedAt) : NaN;
     const activityMs = Math.max(activity.mtimeMs || 0, Number.isFinite(turnStart) ? turnStart : 0);
     const silentMs = activityMs ? now - activityMs : null;
+    // FOC-802: the LATEST turn's isolation. `true` — that turn's claude spawn
+    // went through the drop-privilege helper; `false` — it did not; `null` —
+    // the child has no recorded turn yet.
+    const lastTurn = turns.length ? turns[turns.length - 1] : null;
+    const isolated = lastTurn ? (lastTurn.isolated ?? null) : null;
     return {
       ...entry,
+      isolated,
       // FOC-607: what was requested vs what actually served, per child.
       ...modelFields(entry),
       events: tailEvents(runId, entry.childId, tail),
@@ -491,6 +509,7 @@ if (args.ack !== undefined) {
 if (!args.wait) {
   const snap = { ...snapshot(runId, { childFilter, tail }), mode: "snapshot" };
   noteUnverifiedCost(snap);
+  noteIsolation(snap);
   noteModelDrift(snap.children);
   console.log(JSON.stringify(snap, null, 2));
   process.exit(0);
@@ -511,7 +530,7 @@ mkdirSync(runDir(runId), { recursive: true });
 atomicWriteJSON(waitArmedPath(runId), {
   armedAt,
   expiresAt: deadline + ARMED_GRACE_MS,
-});
+}, { mode: 0o644 });
 
 const before = snapshot(runId, { childFilter, tail: 0 });
 const gatesBefore = new Set(before.pendingGates.map((g) => g.gateId));
@@ -573,12 +592,13 @@ try {
     spentAt: new Date().toISOString(),
     outcome: reason,
     expiresAt: Date.now() + SPENT_GRACE_MS,
-  });
+  }, { mode: 0o644 });
 }
 
 const final = snapshot(runId, { childFilter, tail });
 
 noteUnverifiedCost(final);
+noteIsolation(final);
 noteModelDrift(final.children);
 
 console.log(

@@ -12,7 +12,7 @@
 // Run: node scripts/supervisor-spawn.test.mjs
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,7 @@ import {
   readHeld,
   readHolds,
   readRegistry,
+  registryPath,
   runDir,
 } from "./supervisor-lib.mjs";
 import { makeFakeCodegraphCli } from "./fixtures/codegraph-fake-cli.mjs";
@@ -39,6 +40,13 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
 const STOP = join(ROOT, "scripts", "supervisor-stop.mjs");
 const MOCK = join(ROOT, "scripts", "mock-claude.mjs");
+
+// FOC-802 M3: the run-dir mode assertions below pin 02775 (setgid + group
+// write) and 0644 — under a default umask of 022 the group-write bit would be
+// stripped at creation and the pinned shape unreadable. The container runs
+// umask 0002; the test process's umask is inherited by every spawned child, so
+// setting it here reproduces that exactly. POSIX only — Windows ignores modes.
+if (process.platform !== "win32") process.umask(0o002);
 
 let passed = 0;
 const failures = [];
@@ -78,8 +86,11 @@ function fixtureRun({ triage = true, runId } = {}) {
   // below deliberately do not have.
   const id = runId ?? `test-${process.pid}-${Date.now()}-${runCounter++}`;
   const dir = runDir(id);
-  mkdirSync(join(dir, "children"), { recursive: true });
-  mkdirSync(join(dir, "gates"), { recursive: true });
+  // The run DIR only. The shared subdirs (children/gates/verdicts/launch) are
+  // left to ensureRunDir — spawn's first write — because the FOC-802 M3 mode
+  // test pins the modes THAT function creates them with; pre-creating them
+  // here would mask those modes behind this process's mkdir.
+  mkdirSync(dir, { recursive: true });
   if (triage) {
     writeFileSync(join(dir, "triage.json"), JSON.stringify({ issue: "FOC-123", verdict: "dev" }));
   }
@@ -668,6 +679,40 @@ test("spawn writes the file and points claude at it", () => {
   const at = argv.indexOf("--settings");
   if (at === -1) fail(`claude was invoked without --settings: ${JSON.stringify(argv)}`);
   if (argv[at + 1] !== path) fail(`--settings pointed at ${argv[at + 1]}`);
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+// FOC-802 M3: the entrypoint's fix_permissions runs only at container start, so
+// the modes of a run created afterwards must come from the writers themselves.
+// The fixture run dir is created WITHOUT pre-made subdirs (see fixtureRun), so
+// what is asserted here is exactly what ensureRunDir and the run-root writers
+// produce under the container's umask (0002, set at the top of this file).
+test("run-root state is pinned: 0644 files, 02775 shared subdirs (FOC-802 M3)", () => {
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const out = parse(runSpawn(runId, repo, [], { MOCK_CLAUDE_HANG_MS: "0" }));
+  if (!out.ok) fail(`spawn failed: ${out.error}`);
+
+  if (process.platform === "win32") {
+    // No POSIX mode bits on NTFS — assert only that the writes happened.
+    if (!existsSync(registryPath(runId))) fail("children.json was not written");
+    if (!existsSync(childSettingsPath(runId, out.childId))) fail("the generated settings were not written");
+    spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+    return;
+  }
+
+  const modeOf = (p) => statSync(p).mode & 0o7777;
+  const jsonMode = (p, name) => {
+    const m = modeOf(p) & 0o777;
+    if (m !== 0o644) fail(`${name} was ${m.toString(8)}, expected 644`);
+  };
+  jsonMode(registryPath(runId), "children.json");
+  jsonMode(childSettingsPath(runId, out.childId), "child-settings");
+  for (const sub of ["children", "gates", "verdicts", "launch"]) {
+    const m = modeOf(join(runDir(runId), sub));
+    if (m !== 0o2775) fail(`${sub}/ was ${m.toString(8)}, expected 2775 (setgid + group write)`);
+  }
 
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
 });

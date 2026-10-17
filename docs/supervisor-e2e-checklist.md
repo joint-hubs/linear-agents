@@ -158,6 +158,17 @@ bypassPermissions` was refused — deny outranks bypass.
       (Gate text is **not** redacted, deliberately — a relay through a redactor is not a relay.
       The control there is "never put secrets in Linear comments", not filtering.)
 
+### AC-11 — Child isolation in the container (FOC-802)
+
+Docker lane only — on native (Windows) runs children keep the Supervisor's user and the
+deny-list-only posture (ADR-0009).
+
+- [ ] A child cannot write `agents/supervisor/settings.json`, read `/data/run/host.token`, or list
+      the Supervisor's tmux socket — proof `docker/test-isolation.sh`.
+- [ ] Gates, verdicts and edits still work from a child — same script.
+- [ ] `supervisor-status` shows `isolation: off` only when `FENIX_CHILD_ISOLATION=off` or the
+      helper is missing.
+
 ---
 
 ## Worktree cleanup (FOC-167) — walk it at the end
