@@ -24,7 +24,7 @@
 // Run: node scripts/test-run.test.mjs
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -35,15 +35,27 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const RUNNER_SRC = join(HERE, "test-run.mjs");
 
 // The runner imports scripts/test-spawn.mjs (FOC-840), which imports the
-// supervisor-lib tree — every file below must exist next to the copied runner.
-const RUNNER_DEPS = [
-  "test-spawn.mjs",
-  "supervisor-lib.mjs",
-  "utils.mjs",
-  "workspace-claims.mjs",
-  "autonomy-grants.mjs",
-  "fenix-paths.mjs",
-];
+// supervisor-lib tree — every file the runner reaches through a relative
+// import must exist next to the copied runner. The list is the transitive
+// closure of `./x.mjs` imports read from the real tree: the hand-written list
+// went stale when FOC-905 added run-owner.mjs to supervisor-lib.mjs and every
+// sandbox died with ERR_MODULE_NOT_FOUND, so a new import in that tree must
+// never require a matching edit here again.
+function localImportClosure(entry) {
+  const seen = new Set();
+  const queue = [entry];
+  while (queue.length) {
+    const file = queue.shift();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const src = readFileSync(join(HERE, file), "utf8");
+    for (const m of src.matchAll(/from\s+["']\.\/([^"']+\.mjs)["']/g)) queue.push(m[1]);
+    for (const m of src.matchAll(/import\(\s*["']\.\/([^"']+\.mjs)["']\s*\)/g)) queue.push(m[1]);
+  }
+  seen.delete(entry);
+  return [...seen].sort();
+}
+const RUNNER_DEPS = localImportClosure("test-run.mjs");
 
 const OK = 'console.log("ok");\n';
 const EXIT1 = 'console.error("boom");\nprocess.exit(1);\n';
