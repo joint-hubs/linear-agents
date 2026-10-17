@@ -186,6 +186,7 @@ WHY NOT EARLIER — `config/graph.json` has `review-to-dev-return` and `test-to-
   WHY — a single leading option is a decision you made and labelled as his.
   **Holds are the recorded exception (FOC-612, sign-off 2026-09-29):** a hold is presented WITH a recommendation — but always alongside its options and their priced costs; the CLI refuses a recommendation without alternatives. See §5b.
 - **A verdict is recorded before the first spawn**, with `unknowns[]` and calibrated `confidence`.
+- **Journal: task-scoped entries go to the task file through `node "$LA_ROOT/scripts/state-journal.mjs" add --text "…"` (`docs/state/<TASK-ID>.md`, append-only); `docs/STATE.md` keeps the standing rules and global decisions — its index block is generated, never edited by hand.**
 - Working state: the WORKING STATE block at session start is the agent-state store; follow the `working-state` skill — `get` a known parameter before searching for it, `set` what you will need again in this task, never write the store file directly.
 - **Kickoff drafts and other scratch go to `<run dir>/scratch/krok0/` (never `.state/krok0-*`).**
 - Any destructive or irreversible action not listed here → ask Mateusz first.

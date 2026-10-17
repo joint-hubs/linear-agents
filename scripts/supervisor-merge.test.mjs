@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { ROOT, fixtureRepo, fixtureRun, harness, parse, runScript } from "./supervisor-test-fixtures.mjs";
@@ -388,6 +388,234 @@ test("a merge refusal without conflicts is a tool error, not a verification reje
   assert.ok(out.integration.worktree && existsSync(out.integration.worktree));
   assert.ok(existsSync(worktree), "the child's worktree was touched by a tool failure");
   assert.match(out.next, /not a verification result/i);
+});
+
+// ── 7. the generated task-journal index (FOC-904) ────────────────────────────
+console.log("\nthe generated task-journal index");
+
+// A base STATE.md that already carries the generated block, the shape after
+// FOC-904 lands: the index is machine-owned, the rest is hand-written.
+const STATE_WITH_BLOCK = [
+  "# STATE — fixture",
+  "",
+  "> header line.",
+  "",
+  "<!-- state-index:start -->",
+  "## Task journals (generated)",
+  "",
+  "<!-- state-index:end -->",
+  "",
+  "## 2026-10-01 10:00 — base entry",
+  "",
+  "body.",
+  "",
+].join("\n");
+
+/** A journal file as a child session would create it through state-journal.mjs. */
+const journalFile = (id, stamp) =>
+  [
+    `# ${id} — journal`,
+    "",
+    `Task: ${id}`,
+    "Session: sess-1",
+    "Run: run-1",
+    `Branch: b-${id}`,
+    "PR: -",
+    "Status: in progress",
+    "",
+    `## ${stamp} — first entry`,
+    "",
+    "work.",
+    "",
+  ].join("\n");
+
+/** Two children that each add their own journal file AND append their own line to the index block. */
+function journalFixture() {
+  const { base, repo } = fixtureRepo();
+  writeFileSync(join(repo, "value.txt"), "ok\n");
+  mkdirSync(join(repo, "docs"), { recursive: true });
+  writeFileSync(join(repo, "docs", "STATE.md"), STATE_WITH_BLOCK);
+  gitIn(repo, "add", "-A");
+  gitIn(repo, "commit", "-m", "base: value is ok, index block present");
+  const baseRevision = gitIn(repo, "rev-parse", "HEAD");
+
+  const children = {};
+  for (const [i, id] of [["FOC-100", "2026-10-16 10:00"], ["FOC-101", "2026-10-16 11:00"]].entries()) {
+    const [taskId, stamp] = id;
+    const branch = `foc-${100 + i}-dev`;
+    const worktree = resolve(join(repo, "..", "la-wt", branch));
+    gitIn(repo, "worktree", "add", "-b", branch, worktree, baseRevision);
+    mkdirSync(join(worktree, "docs", "state"), { recursive: true });
+    writeFileSync(join(worktree, "docs", "state", `${taskId}.md`), journalFile(taskId, stamp));
+    // The child also commits ITS OWN rendering of the index block (what a
+    // diligent session running state-index --write produces): a whole-span
+    // rewrite listing only its own journal. Two children therefore rewritten
+    // the same span differently — the merge cannot dodge that conflict.
+    const block = readFileSync(join(worktree, "docs", "STATE.md"), "utf8");
+    const rewritten = block.replace(
+      /<!-- state-index:start -->[\s\S]*<!-- state-index:end -->/,
+      [
+        "<!-- state-index:start -->",
+        "## Task journals (generated)",
+        "",
+        `- ${taskId} — in progress — last entry ${stamp} — b-${taskId} — -`,
+        "<!-- state-index:end -->",
+      ].join("\n"),
+    );
+    writeFileSync(join(worktree, "docs", "STATE.md"), rewritten);
+    gitIn(worktree, "add", "-A");
+    gitIn(worktree, "commit", "-m", `${branch}: own journal + index line`);
+    children[`dev-${i + 1}`] = {
+      childId: `dev-${i + 1}`,
+      squad: "dev",
+      taskId,
+      status: "exited",
+      turns: [{ pid: 1 }],
+      costUsd: 0,
+      worktree,
+      branch,
+      baseRevision,
+      allowedPaths: [],
+    };
+  }
+
+  const runId = fixtureRun();
+  writeRegistry(runId, { runId, children, rounds: {} });
+  return { base, repo, runId, baseRevision };
+}
+
+test("an index-block-only STATE.md conflict is regenerated, not rejected", () => {
+  // Journals are per task, so the only STATE.md overlap two candidates can
+  // produce is the generated block — machine-owned, fully derived from
+  // docs/state/. The merge node resolves it by regenerating, and the block
+  // must then list BOTH journals.
+  const f = journalFixture();
+  const r = merge(f.runId);
+  const out = parse(r, fail);
+
+  assert.equal(out.accepted, true, JSON.stringify(out.findings));
+  assert.equal(r.status, 0);
+  assert.ok(out.replays.every((x) => x.ok), JSON.stringify(out.replays));
+  assert.ok(
+    out.replays.some((x) => /inside the generated index block/.test(x.note ?? "")),
+    JSON.stringify(out.replays),
+  );
+  const state = gitIn(f.repo, "show", `la-merge/${f.runId}:docs/STATE.md`);
+  assert.match(state, /- FOC-101 — in progress — last entry 2026-10-16 11:00 — b-FOC-101 — -/);
+  assert.match(state, /- FOC-100 — in progress — last entry 2026-10-16 10:00 — b-FOC-100 — -/);
+  // Newest first, as the generator renders it.
+  assert.ok(state.indexOf("- FOC-101") < state.indexOf("- FOC-100"));
+  // The hand-written part survived the resolution untouched.
+  assert.match(state, /^## 2026-10-01 10:00 — base entry$/m);
+});
+
+test("a STATE.md conflict outside the index block is still a hard reject", () => {
+  const { base, repo } = fixtureRepo();
+  writeFileSync(join(repo, "value.txt"), "ok\n");
+  mkdirSync(join(repo, "docs"), { recursive: true });
+  writeFileSync(join(repo, "docs", "STATE.md"), STATE_WITH_BLOCK);
+  gitIn(repo, "add", "-A");
+  gitIn(repo, "commit", "-m", "base: index block present");
+  const baseRevision = gitIn(repo, "rev-parse", "HEAD");
+
+  const children = {};
+  for (const [i, text] of [["one", "rewritten by one"], ["two", "rewritten by two"]].entries()) {
+    const branch = `foc-${200 + i}-dev`;
+    const worktree = resolve(join(repo, "..", "la-wt", branch));
+    gitIn(repo, "worktree", "add", "-b", branch, worktree, baseRevision);
+    // The collision is in the HAND-WRITTEN region — outside the markers.
+    writeFileSync(
+      join(worktree, "docs", "STATE.md"),
+      readFileSync(join(worktree, "docs", "STATE.md"), "utf8").replace("base entry", text),
+    );
+    gitIn(worktree, "add", "-A");
+    gitIn(worktree, "commit", "-m", `${branch}: edit outside the block`);
+    children[`dev-${i + 1}`] = {
+      childId: `dev-${i + 1}`,
+      squad: "dev",
+      taskId: `FOC-${200 + i}`,
+      status: "exited",
+      turns: [{ pid: 1 }],
+      costUsd: 0,
+      worktree,
+      branch,
+      baseRevision,
+      allowedPaths: [],
+    };
+  }
+  const runId = fixtureRun();
+  writeRegistry(runId, { runId, children, rounds: {} });
+
+  const r = merge(runId);
+  const out = parse(r, fail);
+  assert.equal(out.accepted, false);
+  assert.equal(r.status, 1);
+  assert.ok(out.replays.some((x) => (x.conflicts ?? []).includes("docs/STATE.md")), JSON.stringify(out.replays));
+  assert.ok(out.findings.some((x) => /textual conflict/.test(x)), JSON.stringify(out.findings));
+  // The merged child's journal file did not sneak into a rejected integration's verdict.
+  assert.equal(out.combined, null);
+});
+
+test("an index regen failure on an accepted integration is a note, not a rejection", () => {
+  // A dangling start marker makes `state-index --write` REFUSE (exit 2). The
+  // replays themselves are clean, so the regen failure is bookkeeping, not a
+  // verification result — the verdict stays what the real checks computed.
+  const STATE_DANGLING_MARKER = [
+    "# STATE — fixture",
+    "",
+    "> header line.",
+    "",
+    "<!-- state-index:start -->",
+    "## Task journals (generated)",
+    "",
+    "body under a dangling marker.",
+    "",
+  ].join("\n");
+
+  const { base, repo } = fixtureRepo();
+  writeFileSync(join(repo, "value.txt"), "ok\n");
+  mkdirSync(join(repo, "docs"), { recursive: true });
+  writeFileSync(join(repo, "docs", "STATE.md"), STATE_DANGLING_MARKER);
+  gitIn(repo, "add", "-A");
+  gitIn(repo, "commit", "-m", "base: value is ok, dangling index start marker");
+  const baseRevision = gitIn(repo, "rev-parse", "HEAD");
+
+  const children = {};
+  for (const [i, id] of [["FOC-300", "2026-10-16 10:00"], ["FOC-301", "2026-10-16 11:00"]].entries()) {
+    const [taskId, stamp] = id;
+    const branch = `foc-${300 + i}-dev`;
+    const worktree = resolve(join(repo, "..", "la-wt", branch));
+    gitIn(repo, "worktree", "add", "-b", branch, worktree, baseRevision);
+    mkdirSync(join(worktree, "docs", "state"), { recursive: true });
+    writeFileSync(join(worktree, "docs", "state", `${taskId}.md`), journalFile(taskId, stamp));
+    gitIn(worktree, "add", "-A");
+    gitIn(worktree, "commit", "-m", `${branch}: own journal`);
+    children[`dev-${i + 1}`] = {
+      childId: `dev-${i + 1}`,
+      squad: "dev",
+      taskId,
+      status: "exited",
+      turns: [{ pid: 1 }],
+      costUsd: 0,
+      worktree,
+      branch,
+      baseRevision,
+      allowedPaths: [],
+    };
+  }
+  const runId = fixtureRun();
+  writeRegistry(runId, { runId, children, rounds: {} });
+
+  const r = merge(runId);
+  const out = parse(r, fail);
+  assert.equal(out.accepted, true, JSON.stringify({ findings: out.findings, notes: out.notes }));
+  assert.equal(r.status, 0);
+  assert.ok(out.replays.every((x) => x.ok), JSON.stringify(out.replays));
+  assert.ok(
+    out.notes.some((x) => /task journal index was not regenerated/.test(x)),
+    JSON.stringify(out.notes),
+  );
+  assert.ok(out.findings.length === 0, JSON.stringify(out.findings));
 });
 
 summary();
