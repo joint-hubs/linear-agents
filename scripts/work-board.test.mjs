@@ -23,6 +23,17 @@ import {
 const HOME = mkdtempSync(join(tmpdir(), "work-board-test-"));
 const NOW = Date.parse("2026-10-13T12:00:00.000Z");
 
+// FOC-772: fetchLinearStates consults the integrations switch before opening
+// the pisi pass. The flag-on cases (today's behaviour, including the graceful
+// missing-key stop) get an overlay with pisi:true as the file default; the
+// flag-off case swaps to its own overlay and restores. Temp files, so a real
+// overlay on the checkout can never flip these cases.
+const SETTINGS_ON = join(HOME, "settings-on.json");
+const SETTINGS_OFF = join(HOME, "settings-off.json");
+writeFileSync(SETTINGS_ON, JSON.stringify({ integrations: { pisi: true } }));
+writeFileSync(SETTINGS_OFF, JSON.stringify({ integrations: { pisi: false } }));
+process.env.LA_SETTINGS_FILE = SETTINGS_ON;
+
 const iso = (offsetMinutes) => new Date(NOW - offsetMinutes * 60_000).toISOString();
 
 function fixtureRun(prefix) {
@@ -479,6 +490,33 @@ test("fetchLinearStates: a missing pisi API key skips the pass instead of failin
   assert.equal(second.error, null);
   assert.ok(second.states["FOC-500"]);
   assert.equal(second.states["PISI-8"], undefined);
+});
+
+test("fetchLinearStates: pisi off — the pisi pass is skipped entirely (no lookup, no stop row)", async () => {
+  // FOC-772: with the integration switch off the loop never opens the pisi
+  // leg — the spy sees only the jointhubs workspace, a pisi-only id resolves
+  // as an ordinary miss and the lookup stays error-free.
+  const seen = [];
+  const gql = (workspace) => async (query) => {
+    const ws = workspace ?? "jointhubs";
+    seen.push(ws);
+    const aliases = [...query.matchAll(/a(\d+): issue\(id: "([^"]+)"\)/g)];
+    // jointhubs knows only its own ids; pisi would know the PISI-* ones.
+    const known = (id) => (ws === "jointhubs" ? !id.startsWith("PISI-") : true);
+    return Object.fromEntries(aliases.filter(([, , id]) => known(id)).map(([, n, id]) => [`a${n}`, { identifier: id, title: `T ${id}`, url: `https://linear.app/${id}`, priority: 0, priorityLabel: "No priority", state: { name: "Todo", type: "unstarted" } }]));
+  };
+  const saved = process.env.LA_SETTINGS_FILE;
+  process.env.LA_SETTINGS_FILE = SETTINGS_OFF;
+  try {
+    const { states, error } = await fetchLinearStates(["PISI-77", "FOC-772"], { graphqlFor: gql });
+    assert.deepEqual(seen, ["jointhubs"], "only the default workspace is asked");
+    assert.equal(error, null);
+    assert.ok(states["FOC-772"], "jointhubs ids still resolve");
+    assert.equal(states["PISI-77"], undefined, "a pisi-only id is an unresolved miss, not an error");
+  } finally {
+    if (saved === undefined) delete process.env.LA_SETTINGS_FILE;
+    else process.env.LA_SETTINGS_FILE = saved;
+  }
 });
 
 // ── FOC-815: one unknown id must not poison the batch ────────────────────────

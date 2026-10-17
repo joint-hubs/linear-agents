@@ -21,7 +21,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,8 +64,39 @@ const clone = () => JSON.parse(JSON.stringify(GRAPH));
 const tmp = mkdtempSync(join(tmpdir(), "la-triage-test-"));
 process.on("exit", () => { try { rmSync(tmp, { recursive: true, force: true }); } catch {} });
 
+// ── ownership isolation (FOC-848) ─────────────────────────────────────────────
+// Every CLI child below must see a KNOWN ownership config: a developer's real
+// settings overlay (which may carry a restricted `ownership` key) must never
+// leak in. The env-file rung short-circuits the loader before the overlay is
+// read, so pinning LA_TASK_OWNERSHIP_CONFIG at module load makes every test
+// unrestricted by default; the restricted tests override it per run.
+const UNRESTRICTED_OWNERSHIP = join(tmp, "ownership-unrestricted.json");
+writeFileSync(UNRESTRICTED_OWNERSHIP, JSON.stringify({ version: 1, owners: {}, unlisted: "allow" }), "utf8");
+process.env.LA_TASK_OWNERSHIP_CONFIG = UNRESTRICTED_OWNERSHIP;
+
+// The restricted install the ownership tests run against: Fenix belongs to the
+// orchestrator, JW to the supervisor, everything else asks.
+const RESTRICTED_OWNERSHIP = {
+  version: 1,
+  owners: {
+    orchestrator: { linearProjects: ["Fenix — wydanie 1.0 i kontrola kosztów"] },
+    supervisor: { linearProjects: ["proj-jw-id"] },
+  },
+  unlisted: "ask",
+};
+const RESTRICTED_ALLOW = { ...RESTRICTED_OWNERSHIP, unlisted: "allow" };
+const ownershipFile = (name, data) => {
+  const path = join(tmp, name);
+  writeFileSync(path, JSON.stringify(data), "utf8");
+  return path;
+};
+const restrictedEnv = (data = RESTRICTED_OWNERSHIP, owner = "supervisor") => ({
+  LA_TASK_OWNERSHIP_CONFIG: ownershipFile(`ownership-${owner}-${data.unlisted}.json`, data),
+  LA_TASK_OWNER: owner,
+});
+
 // A Linear issue as `linear-query.mjs issue <id> --json` returns it.
-function issue({ id = "FOC-999", state = "Backlog", stateType = "backlog", labels = [], body = "", comments = [], estimate = null } = {}) {
+function issue({ id = "FOC-999", state = "Backlog", stateType = "backlog", labels = [], body = "", comments = [], estimate = null, project } = {}) {
   return {
     identifier: id,
     description: body,
@@ -74,6 +105,7 @@ function issue({ id = "FOC-999", state = "Backlog", stateType = "backlog", label
     comments: { nodes: comments.map((b) => ({ body: b })) },
     estimate,
     children: { nodes: [] },
+    ...(project !== undefined ? { project } : {}),
   };
 }
 
@@ -543,6 +575,18 @@ test("record writes triage.json with the §2.4 schema", () => {
   assert.deepEqual(rec.unknowns, ["no estimate", "no DoD"]);
 });
 
+test("triage.json is created 0644 (run-root: children may read, never write)", () => {
+  if (process.platform === "win32") return; // POSIX mode bits only; the Windows run asserts the write succeeds above
+  const runId = withRun();
+  const r = run([
+    "record", "--issue", "FOC-999", "--verdict", "dev", "--rationale", "AC present",
+    "--confidence", "85", "--proposal", "dev", "--run", runId,
+  ]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const mode = statSync(join(runDirOf(runId), "triage.json")).mode & 0o777;
+  assert.equal(mode, 0o644, `triage.json mode ${mode.toString(8)} !== 644`);
+});
+
 test("LA_SUPERVISOR_RUN stands in for --run", () => {
   const runId = withRun();
   const r = run(["record", "--issue", "FOC-1", "--verdict", "ask", "--rationale", "x", "--confidence", "40"], { LA_SUPERVISOR_RUN: runId });
@@ -771,6 +815,11 @@ test("intake with no API key fails closed, visibly, and still writes the sibling
   assert.equal(rec.issue, "FOC-999");
   assert.equal(rec.decisions["intake.triage_node"].code, "auth_missing");
   assert.ok(existsSync(join(ROOT, ".state", "runs", runId, "decisions.jsonl")), "the shadow events exist even for failed calls");
+  if (process.platform !== "win32") {
+    // POSIX mode bits only; the Windows run asserts the write succeeded above.
+    const mode = statSync(join(runDirOf(runId), "intake.json")).mode & 0o777;
+    assert.equal(mode, 0o644, `intake.json mode ${mode.toString(8)} !== 644 (run-root: Supervisor-owned)`);
+  }
 });
 
 test("record embeds the intake summary next to the verdict and displays the disagreement", () => {
@@ -1277,6 +1326,224 @@ test("seam-vs-recorded agreement fires no A0 line, even with a stored disagreeme
   const rec = JSON.parse(readFileSync(join(dir, "triage.json"), "utf8"));
   assert.equal(rec.intake.sizeDisagreement, undefined, "equal sizes → no sizeDisagreement invented");
   assert.deepEqual(rec.intake.disagreement, { decisionId: "intake.triage_node", seam: "dev", frontman: "plan" }, "the stored seam-vs-frontman view rides untouched");
+});
+
+// ── 10. ownership — the gate at record/propose (FOC-848) ──────────────────────
+console.log("\nownership (FOC-848)");
+
+// The project shapes the gate must tell apart: Fenix (the orchestrator's, by
+// exact name), JW (the supervisor's, by id), an unlisted project, and a
+// payload with no project at all.
+const FENIX = { id: "proj-fenix-id", name: "Fenix — wydanie 1.0 i kontrola kosztów" };
+const JW = { id: "proj-jw-id", name: "JW" };
+const UNLISTED = { id: "proj-unknown", name: "Something Else" };
+const recordArgs = (extra = []) => [
+  "record", "--verdict", "dev", "--rationale", "AC present", "--confidence", "85", ...extra,
+];
+const holdsOf = (runId) => {
+  const path = join(runDirOf(runId), "holds.json");
+  if (!existsSync(path)) return [];
+  return JSON.parse(readFileSync(path, "utf8")).holds;
+};
+
+test("a Fenix ticket as supervisor is FOREIGN: record refuses, holds once, writes no triage.json", () => {
+  const runId = withRun();
+  const args = [...recordArgs(["--issue", "FOC-999", "--run", runId]), "--issue-file", fixture({ project: FENIX })];
+  const r = run(args, restrictedEnv());
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.code, "ownership-foreign");
+  assert.match(out.error, /owned by orchestrator/);
+  assert.ok(!existsSync(join(runDirOf(runId), "triage.json")), "a refused record writes no triage.json");
+  const holds = holdsOf(runId).filter((h) => h.state === "open" && h.origin === "ownership");
+  assert.equal(holds.length, 1, "exactly one open ownership hold");
+  assert.equal(out.hold, holds[0].id, "the refusal names the hold it recorded");
+  // Idempotent: a retried record does not pile up a second hold.
+  const r2 = run(args, restrictedEnv());
+  assert.equal(r2.status, 1);
+  assert.equal(JSON.parse(r2.stdout).hold, holds[0].id, "the retried refusal reuses the same hold");
+  assert.equal(holdsOf(runId).filter((h) => h.state === "open" && h.origin === "ownership").length, 1);
+});
+
+test("propose refuses the same ticket and names the hold", () => {
+  const runId = withRun();
+  const r = run(
+    ["propose", "--issue", "FOC-999", "--issue-file", fixture({ project: FENIX }), "--run", runId],
+    restrictedEnv(),
+  );
+  assert.equal(r.status, 1);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.code, "ownership-foreign");
+  assert.match(out.hold, /^hold-\d+$/, "the hold id rides the refusal");
+  assert.match(out.error, /owned by orchestrator/);
+});
+
+test("a JW ticket as supervisor is OWNED: recorded, with the stamp on triage.json", () => {
+  const runId = withRun();
+  const r = run(
+    [...recordArgs(["--issue", "FOC-999", "--run", runId]), "--issue-file", fixture({ project: JW })],
+    restrictedEnv(),
+  );
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.deepEqual(rec.ownership, { owner: "supervisor", verdict: "owned", allowed: true, project: JW });
+});
+
+test("an unlisted project under `ask` is refused with a hold; under `allow` it is stamped `unlisted`", () => {
+  const askRun = withRun();
+  const r = run(
+    [...recordArgs(["--issue", "FOC-999", "--run", askRun]), "--issue-file", fixture({ project: UNLISTED })],
+    restrictedEnv(),
+  );
+  assert.equal(r.status, 1);
+  assert.equal(JSON.parse(r.stdout).code, "ownership-unlisted");
+  assert.ok(!existsSync(join(runDirOf(askRun), "triage.json")));
+  assert.equal(holdsOf(askRun).filter((h) => h.state === "open" && h.origin === "ownership").length, 1);
+
+  const allowRun = withRun();
+  const ok = run(
+    [...recordArgs(["--issue", "FOC-999", "--run", allowRun]), "--issue-file", fixture({ project: UNLISTED })],
+    restrictedEnv(RESTRICTED_ALLOW),
+  );
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(allowRun), "triage.json"), "utf8"));
+  assert.deepEqual(rec.ownership, { owner: "supervisor", verdict: "unlisted", allowed: true, project: UNLISTED });
+  assert.equal(holdsOf(allowRun).length, 0, "an allowed unlisted ticket records no hold");
+});
+
+test("a payload with no project on a restricted install is treated as unlisted", () => {
+  const runId = withRun();
+  const r = run(
+    [...recordArgs(["--issue", "FOC-999", "--run", runId]), "--issue-file", fixture({})],
+    restrictedEnv(),
+  );
+  assert.equal(r.status, 1);
+  assert.equal(JSON.parse(r.stdout).code, "ownership-unlisted");
+  assert.ok(!existsSync(join(runDirOf(runId), "triage.json")));
+});
+
+test("--force does NOT bypass the ownership gate", () => {
+  const runId = withRun();
+  const r = run(
+    [...recordArgs(["--issue", "FOC-999", "--run", runId, "--force"]), "--issue-file", fixture({ project: FENIX })],
+    restrictedEnv(),
+  );
+  assert.equal(r.status, 1);
+  assert.equal(JSON.parse(r.stdout).code, "ownership-foreign");
+  assert.ok(!existsSync(join(runDirOf(runId), "triage.json")));
+});
+
+test("a broken ownership config fails closed with ownership-config", () => {
+  const runId = withRun();
+  const broken = join(tmp, "ownership-broken-triage.json");
+  writeFileSync(broken, "{ not json", "utf8");
+  const r = run(
+    [...recordArgs(["--issue", "FOC-999", "--run", runId]), "--issue-file", fixture({ project: JW })],
+    { LA_TASK_OWNERSHIP_CONFIG: broken, LA_TASK_OWNER: "supervisor" },
+  );
+  assert.equal(r.status, 1);
+  assert.equal(JSON.parse(r.stdout).code, "ownership-config");
+  assert.ok(!existsSync(join(runDirOf(runId), "triage.json")), "fail-closed: no verdict is written either");
+});
+
+test("the shipped default stays unrestricted: recorded with NO stamp (AC3)", () => {
+  const runId = withRun();
+  const r = run(
+    [...recordArgs(["--issue", "FOC-999", "--run", runId]), "--issue-file", fixture({ project: FENIX })],
+    { LA_TASK_OWNER: "supervisor" },
+  );
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.equal(rec.ownership, undefined, "no owners configured → no stamp, byte-for-byte as before");
+  assert.equal(holdsOf(runId).length, 0);
+});
+
+test("propose omits the ownership key on the shipped default, carries it on a restricted install (AC3)", () => {
+  const unrestricted = run(["propose", "--issue", "FOC-999", "--issue-file", fixture({ project: JW })]);
+  assert.equal(unrestricted.status, 0, unrestricted.stdout + unrestricted.stderr);
+  assert.equal(
+    JSON.parse(unrestricted.stdout).ownership,
+    undefined,
+    "unrestricted output is what it was before the gate existed",
+  );
+
+  const runId = withRun();
+  const restricted = run(
+    ["propose", "--issue", "FOC-999", "--issue-file", fixture({ project: JW }), "--run", runId],
+    restrictedEnv(),
+  );
+  assert.equal(restricted.status, 0, restricted.stdout + restricted.stderr);
+  assert.deepEqual(
+    JSON.parse(restricted.stdout).ownership,
+    { owner: "supervisor", verdict: "owned", allowed: true, project: JW },
+    "a restricted install stamps the verdict on the proposal",
+  );
+});
+
+test("propose and record share one hold — the canonical issue id at both sites", () => {
+  // The drift the fix closes: propose keyed its hold by the payload identifier,
+  // record by --issue. A payload whose identifier differs from the invoked id
+  // used to buy two holds for one refused ticket.
+  const runId = withRun();
+  const payload = fixture({ id: "FOC-777", project: FENIX });
+  const pr = run(["propose", "--issue", "FOC-123", "--run", runId, "--issue-file", payload], restrictedEnv());
+  assert.equal(pr.status, 1, pr.stdout + pr.stderr);
+  const rr = run(
+    [...recordArgs(["--issue", "FOC-123", "--run", runId]), "--issue-file", payload],
+    restrictedEnv(),
+  );
+  assert.equal(rr.status, 1, rr.stdout + rr.stderr);
+  const holds = holdsOf(runId).filter((h) => h.state === "open" && h.origin === "ownership");
+  assert.equal(holds.length, 1, "propose-then-record on one refused ticket is one hold");
+  assert.equal(holds[0].issueId, "FOC-777", "the payload identifier is the canonical key");
+  assert.equal(JSON.parse(rr.stdout).hold, JSON.parse(pr.stdout).hold, "the retried refusal reuses the hold");
+});
+
+test("a refused re-record strips the stale spawn licence from triage.json", () => {
+  const runId = withRun();
+  const recordJw = [...recordArgs(["--issue", "FOC-999", "--run", runId]), "--issue-file", fixture({ project: JW })];
+  const ok = run(recordJw, restrictedEnv());
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  let rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.equal(rec.ownership?.allowed, true, "precondition: the stamp is on the file");
+
+  // The config flips: the project the supervisor just recorded now belongs to
+  // the orchestrator, and the forced re-record is refused by the gate.
+  const flippedPath = join(tmp, "ownership-flipped-jw.json");
+  writeFileSync(
+    flippedPath,
+    JSON.stringify({ version: 1, owners: { orchestrator: { linearProjects: ["proj-jw-id"] } }, unlisted: "ask" }),
+    "utf8",
+  );
+  const flippedEnv = { LA_TASK_OWNERSHIP_CONFIG: flippedPath, LA_TASK_OWNER: "supervisor" };
+  const refused = run(
+    [...recordArgs(["--issue", "FOC-999", "--run", runId, "--force"]), "--issue-file", fixture({ project: JW })],
+    flippedEnv,
+  );
+  assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+  assert.equal(JSON.parse(refused.stdout).code, "ownership-foreign");
+
+  rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.equal(rec.ownership, undefined, "the stale spawn licence is gone");
+  assert.equal(rec.verdict, "dev", "the earlier verdict stays on record");
+  assert.equal(rec.issue, "FOC-999", "the same issue's record was rewritten, not another's");
+  assert.equal(holdsOf(runId).filter((h) => h.state === "open" && h.origin === "ownership").length, 1);
+});
+
+test("a refused record for a DIFFERENT issue does not touch the existing triage.json", () => {
+  const runId = withRun();
+  const recordJw = [...recordArgs(["--issue", "FOC-999", "--run", runId]), "--issue-file", fixture({ project: JW })];
+  const ok = run(recordJw, restrictedEnv());
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+
+  const refused = run(
+    [...recordArgs(["--issue", "FOC-888", "--run", runId, "--force"]), "--issue-file", fixture({ id: "FOC-888", project: FENIX })],
+    restrictedEnv(),
+  );
+  assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+  const rec = JSON.parse(readFileSync(join(runDirOf(runId), "triage.json"), "utf8"));
+  assert.equal(rec.issue, "FOC-999", "the other issue's record is untouched");
+  assert.equal(rec.ownership?.allowed, true, "its spawn licence survives a refusal aimed elsewhere");
 });
 
 // ── summary ───────────────────────────────────────────────────────────────────
