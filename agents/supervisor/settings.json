@@ -263,5 +263,10 @@
     ]
   },
   "theme": "dark",
-  "tui": "fullscreen"
+  "tui": "fullscreen",
+  "modelSettings": {
+    "xiaomi/mimo-v2.6-pro": {
+      "autoCompactWindow": 500000
+    }
+  }
 }
