@@ -12,7 +12,7 @@
 // - cost / flags / age behave exactly as cardModel dictates; the Start flow
 //   stays where it was (the Ready panel's Start button + StartDialog).
 
-import { cardModel } from '../../workModel';
+import { cardModel, claimTag } from '../../workModel';
 import LabelChip from './LabelChip';
 import { Link } from 'react-router-dom';
 import { cockpitUrl } from '../../taskCockpitModel';
@@ -21,6 +21,9 @@ import './work-labels.css';
 export default function TicketCard({ ticket, now, onOpen }) {
   const m = cardModel(ticket, now);
   if (!m.id) return null;
+  // FOC-902 §E: the lease tag rides the head next to the stage tag — muted
+  // like the stage, never a tone chip, with the full session id in the hover.
+  const claim = claimTag(ticket);
   return (
     <div className="wk-card-entry">
     <button type="button" className="wk-card" onClick={() => onOpen(m.id)}>
@@ -29,6 +32,11 @@ export default function TicketCard({ ticket, now, onOpen }) {
         {m.stageLabel && (
           <span className="wk-card-stage" title={`Stage: ${m.stageLabel}`}>
             {m.stageLabel}
+          </span>
+        )}
+        {claim && (
+          <span className="wk-card-claim" title={claim.title}>
+            {`claimed · ${claim.short}`}
           </span>
         )}
       </span>

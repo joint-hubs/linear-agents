@@ -19,7 +19,6 @@
 // stop it first (or the file skips itself).
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { connect } from "node:net";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,6 +27,7 @@ import { fileURLToPath } from "node:url";
 
 import { readSquadConfig } from "./squad-config.mjs";
 import { openRewardsDb, insertAward, XP_RULES } from "./reward-ledger.mjs";
+import { spawnTestServer } from "./test-spawn.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const PORT = 7391;
@@ -92,9 +92,10 @@ insertAward(seeded, {
 });
 seeded.close();
 
-const child = spawn(process.execPath, [join(__dir, "telemetry-server.mjs")], { env, stdio: ["ignore", "pipe", "pipe"] });
-let childStderr = "";
-child.stderr.on("data", (chunk) => { childStderr += chunk; });
+// The shared helper (FOC-840) spawns the server; it must NOT override the
+// fixed port, so env keeps TELEMETRY_PORT=PORT and the helper's own portEnv
+// points at a throwaway variable — the skip-if-busy contract stays intact.
+let spawned = null;
 
 async function fetchJson(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, options);
@@ -103,25 +104,8 @@ async function fetchJson(path, options = {}) {
   return { status: res.status, body };
 }
 
-async function waitForServer(ms = 20000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`server exited early (${child.exitCode}): ${childStderr.slice(-400)}`);
-    try {
-      const res = await fetch(`${BASE}/api/telemetry/health`);
-      if (res.ok) return;
-    } catch { /* not up yet */ }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  throw new Error(`server not ready in ${ms}ms: ${childStderr.slice(-400)}`);
-}
-
 async function teardown() {
-  if (child.exitCode === null) child.kill();
-  await Promise.race([
-    new Promise((r) => child.once("exit", r)),
-    new Promise((r) => setTimeout(r, 5000)),
-  ]);
+  if (spawned) await spawned.stop();
   rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
@@ -137,11 +121,16 @@ try {
     throw new TestSkip(`port ${PORT} is busy — stop the fixture backend first`);
   }
   const bootStartedAt = Date.now();
-  await waitForServer();
+  spawned = await spawnTestServer({
+    script: join(__dir, "telemetry-server.mjs"),
+    env,
+    port: PORT,
+    healthUrl: `${BASE}/api/telemetry/health`,
+    label: "rewards-routes",
+  });
   bootMs = Date.now() - bootStartedAt;
 } catch (err) {
-  if (err instanceof TestSkip) setupError = err;
-  else setupError = err;
+  setupError = err;
 }
 
 // ── scenarios ────────────────────────────────────────────────────────────────
@@ -318,51 +307,40 @@ test("control routes map an over-limit body to 413 too (representative: POST /ap
 
 test("C6f: an unavailable rewards db must not take /api/manager/snapshot down", async () => {
   if (setupError) throw setupError;
-  // Second server on its own port whose rewards db path is unopenable — its
+  // Second server whose rewards db path is unopenable — its
   // parent dir is a regular FILE, so openRewardsDb's mkdir throws. The
   // snapshot reads only the telemetry store and sits ahead of the ledger
   // gate, so it must still 200 while the rewards route honestly 500s.
   const dir2 = mkdtempSync(join(tmpdir(), "rewards-routes-norew-"));
   const blocker = join(dir2, "blocker.txt");
   writeFileSync(blocker, "not a directory", "utf8");
-  const PORT2 = 7392;
-  const child2 = spawn(process.execPath, [join(__dir, "telemetry-server.mjs")], {
-    env: {
-      ...process.env,
-      TELEMETRY_PORT: String(PORT2),
-      LA_TELEMETRY_DB: join(dir2, "telemetry.sqlite"),
-      LA_TELEMETRY_HOME: join(dir2, "telemetry-home"),
-      LA_REWARDS_DB: join(blocker, "rewards.sqlite"),
-      LA_STATE_ROOT: join(dir2, "state-root"),
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stderr2 = "";
-  child2.stderr.on("data", (chunk) => { stderr2 += chunk; });
+  let spawned2 = null;
+  let upErr = null;
   try {
-    const deadline = Date.now() + 20000;
-    let up = false;
-    while (Date.now() < deadline) {
-      if (child2.exitCode !== null) throw new Error(`second server exited early (${child2.exitCode}): ${stderr2.slice(-400)}`);
-      try {
-        const probe = await fetch(`http://127.0.0.1:${PORT2}/api/telemetry/health`);
-        if (probe.ok) { up = true; break; }
-      } catch { /* not up yet */ }
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    if (!up) throw new Error(`second server not ready: ${stderr2.slice(-400)}`);
-    const snap = await fetch(`http://127.0.0.1:${PORT2}/api/manager/snapshot`);
+    spawned2 = await spawnTestServer({
+      script: join(__dir, "telemetry-server.mjs"),
+      env: {
+        LA_TELEMETRY_DB: join(dir2, "telemetry.sqlite"),
+        LA_TELEMETRY_HOME: join(dir2, "telemetry-home"),
+        LA_REWARDS_DB: join(blocker, "rewards.sqlite"),
+        LA_STATE_ROOT: join(dir2, "state-root"),
+      },
+      label: "rewards-routes-c6f",
+    });
+  } catch (err) {
+    upErr = err;
+  }
+  try {
+    if (!spawned2) throw upErr;
+    const BASE2 = `http://127.0.0.1:${spawned2.port}`;
+    const snap = await fetch(`${BASE2}/api/manager/snapshot`);
     assert.equal(snap.status, 200, `snapshot must work without the rewards db: ${snap.status}`);
     const snapBody = await snap.json();
     assert.ok(snapBody.generatedAt && Array.isArray(snapBody.missing), "snapshot payload must be well-formed");
-    const rewards = await fetch(`http://127.0.0.1:${PORT2}/api/manager/rewards`);
+    const rewards = await fetch(`${BASE2}/api/manager/rewards`);
     assert.equal(rewards.status, 500, "rewards route must honestly 500 while its db is unopenable");
   } finally {
-    if (child2.exitCode === null) child2.kill();
-    await Promise.race([
-      new Promise((r) => child2.once("exit", r)),
-      new Promise((r) => setTimeout(r, 5000)),
-    ]);
+    if (spawned2) await spawned2.stop();
     rmSync(dir2, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
@@ -381,27 +359,32 @@ test("ratings POST: foreign origin is rejected, GET only is enforced", async () 
 
 // ── teardown + runner ────────────────────────────────────────────────────────
 
-for (const { name, fn } of testQueue) {
-  try {
-    await fn();
-    passed++;
-    console.log(`√ ${name}`);
-  } catch (err) {
-    if (err instanceof TestSkip) {
-      skipped++;
-      console.log(`- ${name} — ${err.message}`);
-    } else {
-      failed++;
-      console.log(`× ${name}`);
-      console.log(`  ${err && err.stack ? err.stack.split("\n").slice(0, 4).join("\n  ") : err}`);
+try {
+  for (const { name, fn } of testQueue) {
+    try {
+      await fn();
+      passed++;
+      console.log(`√ ${name}`);
+    } catch (err) {
+      if (err instanceof TestSkip) {
+        skipped++;
+        console.log(`- ${name} — ${err.message}`);
+      } else {
+        failed++;
+        console.log(`× ${name}`);
+        console.log(`  ${err && err.stack ? err.stack.split("\n").slice(0, 4).join("\n  ") : err}`);
+      }
     }
   }
-}
 
-await teardown();
+  await teardown();
 
-console.log(`\n${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
-if (setupError instanceof TestSkip && testQueue.every((t) => true) && failed === 0 && passed === 0) {
-  console.log(`(all skipped: ${setupError.message})`);
+  console.log(`\n${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
+  if (setupError instanceof TestSkip && testQueue.every((t) => true) && failed === 0 && passed === 0) {
+    console.log(`(all skipped: ${setupError.message})`);
+  }
+  process.exit(failed > 0 ? 1 : 0);
+} finally {
+  // Any throw before teardown() must still stop the module-level server.
+  if (spawned) await spawned.stop();
 }
-process.exit(failed > 0 ? 1 : 0);

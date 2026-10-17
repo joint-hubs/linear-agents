@@ -168,6 +168,19 @@ export function readSessionRows(dbPath) {
 }
 
 /**
+ * The workspace half of the canonical task key for this repo (FOC-902). ONE
+ * rule, shared by every process that builds a task key: `FENIX_WORK_WORKSPACE`
+ * overrides it (tests and deployments), `jointhubs` is the default — the exact
+ * rule work-routes.mjs' `workWorkspace()` applies. The other call sites
+ * (the triage lease check, the cockpit's claimedBy) go through this helper so
+ * the store, the routes and the triage can never disagree about the key.
+ * @returns {string}
+ */
+export function workspaceNameFor(env = process.env) {
+  return env.FENIX_WORK_WORKSPACE || "jointhubs";
+}
+
+/**
  * Stable task key: `workspace:issueId`. Deliberately NOT a display
  * identifier — it is the coordination key every process must agree on.
  * @returns {string}
@@ -179,6 +192,18 @@ export function resolveTaskKey({ workspace, issueId } = {}) {
     if (!/^[A-Za-z0-9._-]+$/.test(value)) throw new TypeError(`${field} must be a canonical identifier without separators or whitespace`);
   }
   return `${workspace}:${issueId}`;
+}
+
+/**
+ * The issue part of a task key: the display identifier (`FOC-123`) when the
+ * payload carries one, never the Linear uuid. The store, the host's pickup
+ * and the board are all keyed by the identifier — callers must pass this
+ * helper's result to `resolveTaskKey`, never re-derive it locally.
+ * @param {{ identifier?: string, id?: string }} issue a Linear issue payload
+ * @returns {string | undefined} the display identifier (uuid `id` only as fallback)
+ */
+export function issuePartOf(issue) {
+  return issue?.identifier ?? issue?.id;
 }
 
 function requireBoundedString(value, field, maxLength = MAX_IDENTITY_LENGTH) {
@@ -268,7 +293,32 @@ export function createTaskSessionStore({ dbPath, maxActive = 2 } = {}) {
   const path = dbPath ?? taskSessionsDbPath();
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+  // busy_timeout first, in its own exec: the WAL switch below ignores it.
+  db.exec("PRAGMA busy_timeout = 10000;");
+  // Switching journal_mode to WAL takes an exclusive lock and does NOT invoke
+  // the busy handler, so busy_timeout does not cover it — first-ever concurrent
+  // opens of a fresh file race here with SQLITE_BUSY (errcode 5) instead of
+  // waiting. Retry the switch on a bounded budget, re-reading journal_mode and
+  // accepting `wal` already set by a racing connection; after the bound,
+  // rethrow the original error (fail closed).
+  const walDeadline = Date.now() + 10_000;
+  const walWait = new Int32Array(new SharedArrayBuffer(4));
+  let walError;
+  for (;;) {
+    try {
+      if (db.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
+        db.exec("PRAGMA journal_mode = WAL;");
+      }
+      walError = undefined;
+      break;
+    } catch (error) {
+      walError = error;
+      const locked = error?.errcode === 5 || /database is locked/i.test(String(error?.message));
+      if (!locked || Date.now() >= walDeadline) break;
+      Atomics.wait(walWait, 0, 0, 25); // synchronous 25 ms sleep
+    }
+  }
+  if (walError !== undefined) throw walError;
 
   createSchema(db);
 

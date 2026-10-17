@@ -71,10 +71,32 @@
   background: transparent;
 }
 
+/* The claimed-by tag (FOC-902 §E): the same muted vocabulary as the stage tag
+   — never a tone chip, so a lease cannot be confused with a run status. A long
+   session id truncates with an ellipsis; the full id lives in the hover text. */
+.wk-card-claim {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--text-2);
+  background: transparent;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .wk-card-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  /* The id, the stage tag and the claim tag must all survive a ~190 px card:
+     wrap to a second row instead of pushing the claim past the edge. */
+  flex-wrap: wrap;
+  row-gap: 2px;
 }
 .wk-card-entry .wk-card { width: 100%; }
 .wk-card-cockpit { display: block; padding: 5px 9px 9px; font-size: 12px; }

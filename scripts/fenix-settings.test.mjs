@@ -161,6 +161,152 @@ test("validateSettings: routing squad names, entries and lead limits", () => {
   assert.equal(validateSettings({ routing: { web: { lead: "Claude" } } }).ok, true);
 });
 
+// FOC-772: the optional-integrations overlay key — same strictness as routing.
+test("validateSettings: integrations flags, unknown sub-keys and non-booleans", () => {
+  assert.deepEqual(validateSettings({ integrations: {} }), { ok: true, errors: [] });
+  assert.equal(validateSettings({ integrations: { atlas: true, pisi: false, memory: true } }).ok, true);
+  assert.equal(validateSettings({ integrations: { atlas: "yes" } }).ok, false);
+  assert.equal(validateSettings({ integrations: { pisi: 1 } }).ok, false);
+  const unknown = validateSettings({ integrations: { atlas: true, bogus: true } });
+  assert.equal(unknown.ok, false);
+  assert.ok(unknown.errors.some((e) => e.includes("integrations.bogus") && e.includes("unknown key")));
+  // nebul is derived from provider.active — never an overlay flag.
+  assert.equal(validateSettings({ integrations: { nebul: true } }).ok, false);
+  assert.equal(validateSettings({ integrations: "on" }).ok, false);
+  assert.equal(validateSettings({ integrations: null }).ok, false);
+});
+test("validateSettings: retention valid shapes accepted (FOC-780)", () => {
+  assert.deepEqual(validateSettings({ ...VALID, retention: {} }), { ok: true, errors: [] });
+  assert.equal(validateSettings({ retention: { keepDays: 30 } }).ok, true);
+  assert.equal(validateSettings({ retention: { keepDays: 30, minFreeGiB: 2 } }).ok, true);
+  assert.equal(validateSettings({ retention: { minFreeGiB: 0.5 } }).ok, true);
+  // null keepDays is explicit "keep everything", not a type error
+  assert.equal(validateSettings({ retention: { keepDays: null } }).ok, true);
+  // null retention itself is the default policy
+  assert.equal(validateSettings({ retention: null }).ok, true);
+  assert.equal(validateSettings({ retention: { keepDays: 36500 } }).ok, true);
+});
+
+test("validateSettings: retention invalid types and ranges refused", () => {
+  for (const bad of ["30", true, 0, -1, 36501, 1.5]) {
+    const r = validateSettings({ retention: { keepDays: bad } });
+    assert.equal(r.ok, false, `keepDays ${JSON.stringify(bad)} must be refused`);
+    assert.ok(r.errors.some((e) => e.includes("retention.keepDays")));
+  }
+  for (const bad of ["5", true, 0, 0.4, -1]) {
+    const r = validateSettings({ retention: { minFreeGiB: bad } });
+    assert.equal(r.ok, false, `minFreeGiB ${JSON.stringify(bad)} must be refused`);
+    assert.ok(r.errors.some((e) => e.includes("retention.minFreeGiB")));
+  }
+  assert.equal(validateSettings({ retention: "30 days" }).ok, false);
+  assert.equal(validateSettings({ retention: [30] }).ok, false);
+});
+
+test("validateSettings: retention unknown sub-keys refused", () => {
+  const { ok, errors } = validateSettings({ retention: { keepDays: 30, maxRuns: 5 } });
+  assert.equal(ok, false);
+  assert.ok(errors.some((e) => e.includes("retention.maxRuns") && e.includes("unknown key")));
+});
+
+test("writeSettings: retention merges and persists; null deletes back to the default", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    const merged = writeSettings({ retention: { keepDays: 14, minFreeGiB: 2 } }, { path });
+    assert.deepEqual(merged.retention, { keepDays: 14, minFreeGiB: 2 });
+    assert.deepEqual(readSettings({ path }).retention, { keepDays: 14, minFreeGiB: 2 });
+    // The overlay's null-deletes merge means "null" removes keepDays rather
+    // than storing it — absence IS keep-everything for the resolver.
+    const after = writeSettings({ retention: { keepDays: null } }, { path });
+    assert.deepEqual(after.retention, { minFreeGiB: 2 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeSettings: invalid retention refused, file untouched", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    writeSettings({ retention: { keepDays: 30 } }, { path });
+    const before = readFileSync(path, "utf8");
+    assert.throws(
+      () => writeSettings({ retention: { keepDays: 0 } }, { path }),
+      (err) => err.message.includes("validation failed") && err.message.includes("retention.keepDays"),
+    );
+    assert.equal(readFileSync(path, "utf8"), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI set: retention round-trips through the overlay seam", async () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    await runSet(path, "retention.keepDays", "30");
+    // Numbers print as their JSON (see the `get` tests below); the persisted
+    // value is asserted directly too.
+    const got = await runGet(path, "retention.keepDays");
+    assert.equal(got.stdout, "30\n");
+    assert.equal(readSettings({ path }).retention.keepDays, 30);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// --- the `ownership` top-level key (FOC-848) ---------------------------------
+
+test("validateSettings: a valid ownership map passes, with or without version/unlisted", () => {
+  const full = validateSettings({
+    ownership: {
+      version: 1,
+      owners: {
+        orchestrator: { linearProjects: ["proj-id", "Fenix — wydanie 1.0"] },
+        supervisor: { linearProjects: ["JW", "WSKM"] },
+      },
+      unlisted: "ask",
+    },
+  });
+  assert.deepEqual(full, { ok: true, errors: [] });
+  // version and unlisted are optional; owners is required.
+  assert.deepEqual(
+    validateSettings({ ownership: { owners: { supervisor: { linearProjects: ["x"] } } } }),
+    { ok: true, errors: [] },
+  );
+});
+
+test("validateSettings: malformed ownership maps are refused", () => {
+  const cases = [
+    { ownership: { owners: { "Bad Owner!": { linearProjects: ["x"] } } }, hit: "owner id must match" },
+    { ownership: { owners: { supervisor: { linearProjects: [] } } }, hit: "non-empty array" },
+    { ownership: { owners: { supervisor: { linearProjects: [""] } } }, hit: "non-empty string" },
+    { ownership: { owners: { supervisor: { linearProjects: "x" } } }, hit: "non-empty array" },
+    { ownership: { owners: { supervisor: { projects: ["x"] } } }, hit: "unknown key" },
+    { ownership: { owners: { supervisor: { linearProjects: ["x"] }, extra: 1 } }, hit: "must be an object" },
+    { ownership: { owners: {}, unlisted: "maybe" }, hit: 'must be "allow" or "ask"' },
+    { ownership: { owners: {}, version: 2 }, hit: "must be 1" },
+    { ownership: "nope", hit: "must be an object" },
+    { ownership: { nope: 1 }, hit: "unknown key" },
+  ];
+  for (const { ownership, hit } of cases) {
+    const { ok, errors } = validateSettings({ ownership });
+    assert.equal(ok, false, JSON.stringify(ownership));
+    assert.ok(errors.some((e) => e.includes(hit)), `${hit} missing from ${JSON.stringify(errors)}`);
+  }
+});
+
+
+test("validateSettings: publish.aiActor is the only publish key and must be boolean", () => {
+  assert.deepEqual(validateSettings({ publish: { aiActor: true } }), { ok: true, errors: [] });
+  assert.equal(validateSettings({ publish: { aiActor: false } }).ok, true);
+  assert.equal(validateSettings({ publish: {} }).ok, true);
+  assert.equal(validateSettings({ publish: { other: true } }).ok, false);
+  const bad = validateSettings({ publish: { aiActor: "yes" } });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.some((e) => e.includes("publish.aiActor") && e.includes("boolean")));
+  assert.equal(validateSettings({ publish: "yes" }).ok, false);
+});
+
 test("validateSettings: secret-looking values refused anywhere", () => {
   const secrets = [
     "sk-or-v1-0123456789abcdef",
@@ -175,6 +321,24 @@ test("validateSettings: secret-looking values refused anywhere", () => {
     assert.ok(top.errors.some((e) => e.includes("settings must not contain secrets")));
     const nested = validateSettings({ routing: { web: { lead: secret } } });
     assert.equal(nested.ok, false, `${secret} must be refused when nested`);
+  }
+});
+
+test("writeSettings: publish.aiActor round-trips; a non-boolean is refused untouched", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    const merged = writeSettings({ publish: { aiActor: true } }, { path });
+    assert.equal(merged.publish.aiActor, true);
+    assert.equal(readSettings({ path }).publish.aiActor, true);
+    const before = readFileSync(path, "utf8");
+    assert.throws(
+      () => writeSettings({ publish: { aiActor: "true" } }, { path }),
+      (err) => err.message.includes("publish.aiActor"),
+    );
+    assert.equal(readFileSync(path, "utf8"), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -250,6 +414,25 @@ test("writeSettings: atomic write leaves only settings.json behind", () => {
   }
 });
 
+// FOC-772: integrations joins the overlay — merge persists it, an invalid
+// patch is refused with the file untouched (same rules as routing).
+test("writeSettings: integrations merge persists; invalid flag refused untouched", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    writeSettings({ integrations: { atlas: true } }, { path });
+    assert.deepEqual(readSettings({ path }).integrations, { atlas: true });
+    const before = readFileSync(path, "utf8");
+    assert.throws(
+      () => writeSettings({ integrations: { atlas: "yes" } }, { path }),
+      (err) => err.message.includes("validation failed") && err.message.includes("integrations.atlas"),
+    );
+    assert.equal(readFileSync(path, "utf8"), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // --- CLI: `get <dotted.path>` ----------------------------------------------
 
 test("CLI get: prints the string at the dotted path", async () => {
@@ -301,6 +484,61 @@ test("CLI get: settings that fail validation → stderr, exit 1", async () => {
       assert.ok(err.stderr.includes("routing.supervisor.lead"));
       return true;
     });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI get: retention set through the CLI prints as single-line JSON", async () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    await runSet(path, "retention", '{"keepDays": 30, "minFreeGiB": 2}');
+    const { stdout } = await runGet(path, "retention");
+    assert.equal(stdout, '{"keepDays":30,"minFreeGiB":2}\n');
+    const days = await runGet(path, "retention.keepDays");
+    assert.equal(days.stdout, "30\n");
+    // A null keepDays cannot be stored — the overlay's null-deletes merge
+    // erases it (verified by the writeSettings test above) — so `set
+    // retention '{"keepDays": null}'` keeps the sibling minFreeGiB and
+    // drops keepDays. `get` still prints JSON (non-empty), which is what
+    // the launcher's first-run retention question keys on.
+    await runSet(path, "retention", '{"keepDays": null}');
+    const afterNull = await runGet(path, "retention");
+    assert.equal(afterNull.stdout, '{"minFreeGiB":2}\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI get: a stored-null keepDays prints as JSON (direct overlay write)", async () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    writeFileSync(
+      path,
+      JSON.stringify({ ...VALID, retention: { keepDays: null } }),
+      "utf8",
+    );
+    const { stdout } = await runGet(path, "retention");
+    assert.equal(stdout, '{"keepDays":null}\n');
+    const days = await runGet(path, "retention.keepDays");
+    assert.equal(days.stdout, "null\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI get: strings stay bare and absent keys stay silent with exit 0", async () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    await runSet(path, "routing.dev.lead", "z-ai/glm-5.3");
+    const string = await runGet(path, "routing.dev.lead");
+    assert.equal(string.stdout, "z-ai/glm-5.3\n");
+    // An absent sub-key of an existing object behaves like a missing path.
+    const absent = await runGet(path, "retention.minFreeGiB");
+    assert.equal(absent.stdout, "");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -418,7 +656,7 @@ test("writeSettings round-trips taskSessions.maxActive and the set CLI works", a
     const path = settingsFile(dir);
     await runSet(path, "taskSessions.maxActive", "4");
     assert.deepEqual(readSettings({ path }).taskSessions, { maxActive: 4 });
-    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), { maxActive: 4 });
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), { maxActive: 4, autoPickup: null });
     await assert.rejects(runSet(path, "taskSessions.maxActive", "9"), (err) => {
       assert.equal(err.code, 1);
       assert.ok(err.stderr.includes("taskSessions.maxActive: must be an integer between 1 and 8"));
@@ -433,7 +671,7 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
   const dir = tempDir();
   try {
     // Missing file.
-    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: settingsFile(dir) }), { maxActive: null });
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: settingsFile(dir) }), { maxActive: null, autoPickup: null });
     // Invalid JSON.
     const bad = settingsFile(dir);
     writeFileSync(bad, "{ not json", "utf8");
@@ -441,9 +679,9 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
     const orig = console.error;
     console.error = (msg) => errs.push(String(msg));
     try {
-      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: bad }), { maxActive: null });
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: bad }), { maxActive: null, autoPickup: null });
       assert.equal(errs.length, 1);
-      assert.match(errs[0], /taskSessions\.maxActive ignored/);
+      assert.match(errs[0], /taskSessions settings ignored/);
     } finally {
       console.error = orig;
     }
@@ -453,7 +691,7 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
     const errs2 = [];
     console.error = (msg) => errs2.push(String(msg));
     try {
-      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: wrong }), { maxActive: null });
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: wrong }), { maxActive: null, autoPickup: null });
       assert.equal(errs2.length, 1);
       assert.match(errs2[0], /must be an integer between 1 and 8/);
     } finally {
@@ -465,7 +703,7 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
     const errs3 = [];
     console.error = (msg) => errs3.push(String(msg));
     try {
-      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: quiet }), { maxActive: null });
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: quiet }), { maxActive: null, autoPickup: null });
       assert.equal(errs3.length, 0);
     } finally {
       console.error = orig;
@@ -486,11 +724,93 @@ test("readTaskSessionsSettings: quiet swallows the stderr line and returns the r
     try {
       const r = readTaskSessionsSettings({ LA_SETTINGS_FILE: bad }, { quiet: true });
       assert.equal(r.maxActive, null);
-      assert.match(r.error, /taskSessions\.maxActive ignored/);
+      assert.match(r.error, /taskSessions settings ignored/);
       assert.equal(errs.length, 0, "quiet must not print to stderr");
       // A missing overlay is not an error — quiet or not, no reason attached.
       const missing = readTaskSessionsSettings({ LA_SETTINGS_FILE: join(dir, "nope.json") }, { quiet: true });
-      assert.deepEqual(missing, { maxActive: null });
+      assert.deepEqual(missing, { maxActive: null, autoPickup: null });
+    } finally {
+      console.error = orig;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- taskSessions.autoPickup (FOC-902) ---------------------------------------
+
+test("validateSettings: taskSessions.autoPickup accepts the documented shapes", () => {
+  assert.deepEqual(validateSettings({ taskSessions: { autoPickup: {} } }), { ok: true, errors: [] });
+  assert.deepEqual(
+    validateSettings({
+      taskSessions: {
+        autoPickup: { enabled: true, pollSeconds: 60, states: ["Backlog", "Todo"], label: null, workspace: null },
+      },
+    }),
+    { ok: true, errors: [] },
+  );
+  assert.equal(
+    validateSettings({
+      taskSessions: { autoPickup: { enabled: true, pollSeconds: 3600, states: ["Triage"], label: "take", workspace: "jointhubs" } },
+    }).ok,
+    true,
+  );
+});
+
+test("validateSettings: taskSessions.autoPickup unknown keys and bad values refused with the documented messages", () => {
+  const cases = [
+    [{ nope: 1 }, "taskSessions.autoPickup.nope: unknown key"],
+    [{ enabled: "yes" }, "taskSessions.autoPickup.enabled: must be a boolean"],
+    [{ pollSeconds: 59 }, "taskSessions.autoPickup.pollSeconds: must be an integer between 60 and 3600"],
+    [{ pollSeconds: 3601 }, "taskSessions.autoPickup.pollSeconds: must be an integer between 60 and 3600"],
+    [{ pollSeconds: "300" }, "taskSessions.autoPickup.pollSeconds: must be an integer between 60 and 3600"],
+    [{ states: [] }, "taskSessions.autoPickup.states: must be an array"],
+    [{ states: "Backlog" }, "taskSessions.autoPickup.states: must be an array"],
+    [{ states: ["Backlog", ""] }, "taskSessions.autoPickup.states: must be an array"],
+    [{ label: "" }, "taskSessions.autoPickup.label: must be null or a non-empty string"],
+    [{ workspace: "bad space" }, "taskSessions.autoPickup.workspace: must be null or a canonical workspace identifier"],
+  ];
+  for (const [patch, message] of cases) {
+    const { ok, errors } = validateSettings({ taskSessions: { autoPickup: patch } });
+    assert.equal(ok, false, `${JSON.stringify(patch)} must be refused`);
+    assert.ok(errors.some((e) => e.startsWith(message)), `${JSON.stringify(patch)}: ${JSON.stringify(errors)}`);
+  }
+  // Non-object autoPickup is refused as a whole.
+  const notObject = validateSettings({ taskSessions: { autoPickup: true } });
+  assert.equal(notObject.ok, false);
+  assert.ok(notObject.errors.includes("taskSessions.autoPickup: must be an object"));
+});
+
+test("readTaskSessionsSettings: autoPickup is normalized with the documented defaults", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    writeFileSync(
+      path,
+      JSON.stringify({ taskSessions: { maxActive: 3, autoPickup: { enabled: true } } }),
+      "utf8",
+    );
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), {
+      maxActive: 3,
+      autoPickup: { enabled: true, pollSeconds: 300, states: ["Backlog"], label: null, workspace: null },
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readTaskSessionsSettings: an invalid autoPickup discards the whole taskSessions section", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    writeFileSync(path, JSON.stringify({ taskSessions: { maxActive: 2, autoPickup: { pollSeconds: 5 } } }), "utf8");
+    const errs = [];
+    const orig = console.error;
+    console.error = (msg) => errs.push(String(msg));
+    try {
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), { maxActive: null, autoPickup: null });
+      assert.equal(errs.length, 1);
+      assert.match(errs[0], /taskSessions\.autoPickup\.pollSeconds/);
     } finally {
       console.error = orig;
     }

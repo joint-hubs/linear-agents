@@ -22,7 +22,7 @@ The contract is this file; the specs are reference depth. Read only what the tas
 <dev_linear_tools>
 ## Linear tools
 Read: `node $LA_ROOT/scripts/linear-query.mjs` — `team | issues | issue | comments | search`.
-Write: `node $LA_ROOT/scripts/linear-ops.mjs` — `transition | label | comment | comment-replace | update-description | estimate | create-child`.
+Write: `node $LA_ROOT/scripts/linear-ops.mjs` — `transition | label | comment | comment-replace | update-description | estimate | create-child`. Under a Supervisor the harness denies every invocation form of these scripts (FOC-511, `SUPERVISOR_DENY`) — put the Linear write into your turn report and the Supervisor relays it; standalone runs use `--dry-run` only.
 
 `mcp__linear__*` is **denied in `agents/dev/settings.json`** — the scripts are the only sanctioned Linear path. Do not attempt the MCP tools.
 </dev_linear_tools>
@@ -96,6 +96,7 @@ Do NOT include: step-by-step implementation instructions, chosen algorithms, inv
 **Standing reminder — put this in every code-writing brief:**
 - *Hygiene* — match the style of surrounding code; no dead code, no leftover debug output, no commented-out blocks, no unrelated drive-by edits; update or add tests next to the change.
 - *Security* — never hardcode or log secrets, tokens or credentials; validate and sanitize anything coming from outside (user input, API payloads, files); parameterize queries; no new dependency without flagging it in the return; least privilege for anything touching filesystem, network or shell.
+- *Working state* — follow the `working-state` skill — get before searching, set what you need again, never write the store file directly.
 
 Incomplete brief → the subagent is instructed to return questions and stop. Expect that, and answer rather than guessing on its behalf.
 </brief_contract>

@@ -27,7 +27,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { readRegistry, roundsFor, supervisorStateHome, verdictPath } from "./supervisor-lib.mjs";
-import { graphql } from "./linear-client.mjs";
+import { graphql, workspaceEnabled } from "./linear-client.mjs";
 
 const DAY_MS = 86_400_000;
 
@@ -498,7 +498,8 @@ export function issueMissesOf(err, chunk) {
 /**
  * Linear state (name/type/title/url/priority/milestone/labels) per identifier, one
  * batched alias request per chunk of ≤ 50 ids per workspace: jointhubs first,
- * then pisi for whatever jointhubs did not know (findIssueProject's order).
+ * then pisi for whatever jointhubs did not know (findIssueProject's order) —
+ * the pisi pass only while the integration switch is on (FOC-772).
  * A request that fails with per-issue misses is retried without the missing
  * ids (attributed by error path) or bisected down to single ids when no paths
  * are usable — Linear nulls `data` for a whole batch over one unknown id, so
@@ -526,7 +527,10 @@ export async function fetchLinearStates(identifiers, { graphqlFor = defaultGraph
     if (fetchedAt === null) fetchedAt = new Date().toISOString();
   };
 
-  for (const workspace of [undefined, "pisi"]) {
+  // FOC-772: the pisi leg exists only while the integration is on — with the
+  // flag off the lookup is jointhubs-only (pisi-only ids resolve as misses,
+  // like any unknown id; no lookup, no stop, no error row).
+  for (const workspace of workspaceEnabled("pisi") ? [undefined, "pisi"] : [undefined]) {
     if (!remaining.length) break;
     const gql = graphqlFor(workspace);
     const label = workspace ?? "jointhubs";

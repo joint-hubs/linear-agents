@@ -1,7 +1,8 @@
 #!/bin/sh
 # Fenix container entrypoint: boots the telemetry API, the Supervisor session
 # host (one Supervisor process in tmux, served on :7332 — FOC-783), an attach
-# client for the Supervisor's tmux session, the doctor, a shell, a passthrough
+# client for the Supervisor's tmux session, the doctor, the agent permission
+# inspector (agent-tools), a shell, a passthrough
 # command, or manages shared repos (repo-add clones into the workspaces root,
 # repo-list shows them). The Supervisor resumes its last session for the repo
 # directory unless started with --new.
@@ -85,13 +86,57 @@ mark_orphans() {
     node "$LA_ROOT/scripts/supervisor-orphans.mjs" --container || true
 }
 
+# FOC-802: children spawned by the Supervisor run as `fenix-child` (own uid,
+# group `fenix`), not as `node`. Apply the shared-write surface idempotently on
+# every start: the trees children must write get group `fenix`, setgid dirs and
+# g+rwX; the Supervisor-only paths get 0700. Runs as node (the owner of /data,
+# and a member of fenix, so chgrp needs no root). Best effort — a chmod failure
+# warns but never aborts the container; a fresh volume gets fixed as it fills.
+# `FENIX_CHILD_ISOLATION` (default on) does NOT gate this: the entrypoint
+# prepares the surface regardless, only the watcher decides whether to use it.
+fix_permissions() {
+    try() {
+        "$@" || printf 'fenix: fix_permissions: failed: %s\n' "$*" >&2
+    }
+    try mkdir -p /data/run
+    try chmod 0700 /data/run
+    for node_only in /data/agents/supervisor /data/supervisor; do
+        if [ -d "$node_only" ]; then
+            try chmod 0700 "$node_only"
+        fi
+    done
+    for shared_tree in /data/state/supervisor /data/telemetry /data/workspaces /data/state/runs; do
+        if [ -d "$shared_tree" ]; then
+            try chgrp -R fenix "$shared_tree"
+            try chmod -R g+rwX "$shared_tree"
+            try find "$shared_tree" -type d -exec chmod g+s {} +
+        fi
+    done
+    # The run dirs' own JSON state (children.json, triage.json, intake.json,
+    # holds, budget, waker) stays node-owned and NOT group-writable — children
+    # must read it, never write it. Depth 2 from the state home is exactly the
+    # top level of each run dir; gates/verdicts files live one level deeper and
+    # keep their group write.
+    if [ -d /data/state/supervisor ]; then
+        try find /data/state/supervisor -mindepth 2 -maxdepth 2 -type f -name '*.json' -exec chmod g-w {} +
+    fi
+    umask 0002
+    printf 'fenix: child isolation surface applied (group fenix, setgid + g+rwX on the shared /data trees; FENIX_CHILD_ISOLATION=%s)\n' "${FENIX_CHILD_ISOLATION:-on}" >&2
+}
+
 load_secrets
 mkdir -p "$LA_TELEMETRY_HOME" "$LA_SUPERVISOR_STATE_HOME" "$LA_SQUAD_HOME" "$GITHUB_ROOT" "$LA_WORKTREE_HOME"
 
 case "${1:-api}" in
     api)
+        fix_permissions
         seed_agents
         init_claude_configs
+        # FOC-779: regenerate the registered start/watch artifacts before the
+        # API takes over (ui/dist is skipped here — the image ships it). A
+        # failing generator never blocks the start; the 60 s server tick and
+        # Settings > Artifacts report what stayed stale.
+        node "$LA_ROOT/scripts/artifact-registry.mjs" refresh --in-container || echo "artifacts: refresh reported failures (see above)"
         cd "$LA_ROOT"
         exec node scripts/telemetry-server.mjs
         ;;
@@ -101,6 +146,7 @@ case "${1:-api}" in
         # fronts the legacy global supervisor (while no task session exists)
         # and one isolated controller per managed task session. Same startup
         # work the old idle/supervisor cases ran before holding the container up.
+        fix_permissions
         resolve_provider
         configure_git
         mark_orphans
@@ -274,6 +320,16 @@ case "${1:-api}" in
         shift
         cd "$LA_ROOT"
         exec node scripts/fenix-doctor.mjs "$@"
+        ;;
+    agent-tools)
+        shift
+        cd "$LA_ROOT"
+        exec node scripts/agent-tools.mjs "$@"
+        ;;
+    fix-permissions)
+        # Test/ops entry to the FOC-802 surface applier without starting any
+        # service: `docker/entrypoint.sh fix-permissions` applies it and exits.
+        fix_permissions
         ;;
     shell)
         exec /bin/bash

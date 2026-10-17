@@ -20,9 +20,11 @@ import {
   STATUSES,
   TERMINAL_STATUSES,
   createTaskSessionStore,
+  issuePartOf,
   readActiveSessions,
   readSessionRows,
   resolveTaskKey,
+  workspaceNameFor,
 } from "./task-sessions.mjs";
 
 const execFileP = promisify(execFile);
@@ -67,6 +69,16 @@ async function runChild(dbPath, body, startAt = null) {
   );
   return JSON.parse(stdout.trim());
 }
+
+// FOC-902: the workspace rule is ONE shared rule — work-routes.mjs'
+// workWorkspace() is the same expression. Pinned here so the triage lease
+// check (and any future caller of the helper) can never drift from the
+// board's task keys.
+test("workspaceNameFor: FENIX_WORK_WORKSPACE overrides, jointhubs is the default", () => {
+  assert.equal(workspaceNameFor({}), "jointhubs");
+  assert.equal(workspaceNameFor({ FENIX_WORK_WORKSPACE: "pisi" }), "pisi");
+  assert.equal(workspaceNameFor({ FENIX_WORK_WORKSPACE: "" }), "jointhubs", "an empty override is not an override");
+});
 
 test("ensure: creates a queued record and a duplicate ensure returns the same owner", () => {
   const dir = tempDir();
@@ -253,6 +265,18 @@ test("resolveTaskKey: stable coordination string, validated", () => {
   assert.throws(() => resolveTaskKey({ workspace: "acme", issueId: 7 }), /issueId/);
 });
 
+test("issuePartOf: the display identifier wins, never the Linear uuid (FOC-902 review)", () => {
+  // `linear-query issue --json` payloads carry BOTH: the key part is the identifier.
+  assert.equal(issuePartOf({ id: "3f2a7c8e-9b1d-4e6f-8a2c-5d7b9f0e1a3b", identifier: "FOC-123" }), "FOC-123");
+  // No identifier (older fixture, host tables): the uuid payload id is the only fallback.
+  assert.equal(issuePartOf({ id: "3f2a7c8e-9b1d-4e6f-8a2c-5d7b9f0e1a3b" }), "3f2a7c8e-9b1d-4e6f-8a2c-5d7b9f0e1a3b");
+  assert.equal(issuePartOf({ identifier: "FOC-123" }), "FOC-123");
+  assert.equal(issuePartOf({}), undefined);
+  assert.equal(issuePartOf(null), undefined);
+  // The round trip that must never fork the key space:
+  assert.equal(resolveTaskKey({ workspace: "jointhubs", issueId: issuePartOf({ id: "uuid-1", identifier: "FOC-1" }) }), "jointhubs:FOC-1");
+});
+
 test("list: includeTerminal=false filters to active records", () => {
   const dir = tempDir();
   try {
@@ -365,6 +389,39 @@ test("processes: the active cap of 2 holds when 6 processes race claimNext", asy
     store.close();
   } finally {
     rmDirEventually(dir);
+  }
+});
+
+test("processes: 6 concurrent first opens of a fresh db all survive the WAL switch, 5 rounds", async () => {
+  // journal_mode = WAL takes an exclusive lock and ignores busy_timeout, so
+  // first-ever concurrent opens of a fresh file used to race with
+  // "database is locked". Every child must now get through the open path and
+  // see the file in WAL mode.
+  for (let round = 0; round < 5; round++) {
+    const dir = tempDir();
+    try {
+      const dbPath = dbFile(dir);
+      const startAt = Date.now() + 700;
+      const children = await Promise.all(
+        Array.from({ length: 6 }, () =>
+          runChild(
+            dbPath,
+            `const { DatabaseSync } = await import("node:sqlite");
+             const probe = new DatabaseSync(dbPath);
+             const mode = probe.prepare("PRAGMA journal_mode").get().journal_mode;
+             probe.close();
+             return { mode };`,
+            startAt,
+          ),
+        ),
+      );
+      assert.equal(children.length, 6);
+      for (const child of children) {
+        assert.equal(child.mode, "wal", `round ${round}: every child must see wal`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

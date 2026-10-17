@@ -18,6 +18,10 @@ x-fenix: &fenix
       # (macOS/Windows) maps file ownership itself.
       FENIX_UID: ${FENIX_UID:-1000}
       FENIX_GID: ${FENIX_GID:-1000}
+      # FOC-802: the child identity spawned agents run as (own uid, group
+      # fenix). Defaults to FENIX_UID + 1000, computed in the Dockerfile;
+      # override only to dodge a uid collision with FENIX_CHILD_UID on the host.
+      FENIX_CHILD_UID: ${FENIX_CHILD_UID:-}
   env_file:
     - path: ./.fenix/fenix.env
       required: false
@@ -70,8 +74,10 @@ services:
     command: ["host"]
     environment:
       LA_PROJECTS_FILE: /fenix-config/projects.json
-      # The host HTTP server accepts requests only from this peer container
-      # (children run in the supervisor container as the same user).
+      # The host HTTP server accepts requests only from this peer container.
+      # Children spawned by the Supervisor run as `fenix-child` (own uid) since
+      # FOC-802 — not as this container's user; `FENIX_CHILD_ISOLATION=off`
+      # disables the drop (children then run as node again, unisolated).
       FENIX_HOST_PEER: fenix-api
     stdin_open: true
     tty: true

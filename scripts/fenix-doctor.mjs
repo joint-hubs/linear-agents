@@ -14,10 +14,15 @@ import { fileURLToPath } from 'node:url';
 import { dataHome, squadConfigDir } from './fenix-paths.mjs';
 import { pidAlive } from './supervisor-current-run.mjs';
 import { readActiveSessions, taskSessionsDbPath } from './task-sessions.mjs';
-import { readTaskSessionsSettings } from './fenix-settings.mjs';
+import { readSettings, readTaskSessionsSettings } from './fenix-settings.mjs';
+import { INTEGRATIONS, prerequisites, readIntegrations } from './fenix-integrations.mjs';
+import { cachedRetention, resolveRetention } from './fenix-retention.mjs';
 import { currentOwner, listRunOwners, ownerRelation, supervisorStateRoot } from './run-owner.mjs';
 
 const GIB = 1024 ** 3;
+// FOC-780: the disk check's warn threshold comes from the overlay's
+// retention.minFreeGiB; this is the fallback when it is unset or unreadable.
+const MIN_FREE_GIB_DEFAULT = 5;
 const TOOL_FIX = 'rebuild the image: fenix update';
 const VOLUME_FIX = 'check the fenix-data volume';
 const UID_FIX = 'rebuild the image for your user: ./fenix up (sets FENIX_UID/FENIX_GID from id -u/-g)';
@@ -120,7 +125,22 @@ function checkDirs(env, fsImpl) {
   });
 }
 
-function checkDisk(env, fsImpl) {
+/**
+ * The disk check's warn threshold: the overlay's retention.minFreeGiB, the
+ * 5 GiB default when the key is absent. A settings read or validation failure
+ * falls back to 5 and is reported to the caller (it lands in the check's
+ * detail) instead of thrown — the disk check must still answer (FOC-780).
+ */
+function resolveRetentionSafe(settings) {
+  try {
+    const resolved = resolveRetention(settings ?? readSettings());
+    return { minFreeGiB: resolved.minFreeGiB, settingsError: null };
+  } catch (err) {
+    return { minFreeGiB: MIN_FREE_GIB_DEFAULT, settingsError: String(err?.message || err).split('\n')[0] };
+  }
+}
+
+function checkDisk(env, fsImpl, { minFreeGiB, settingsError }) {
   // Free space of the volume holding the telemetry store — its parent, or
   // cwd when that path does not exist yet (fresh dev checkout).
   let target = path.dirname(env.LA_TELEMETRY_HOME || '/data/telemetry');
@@ -137,9 +157,61 @@ function checkDisk(env, fsImpl) {
   }
   const freeGiB = (st.bavail * st.bsize) / GIB;
   const detail = `${freeGiB.toFixed(1)} GiB free`;
-  if (freeGiB < 1) return { name: 'disk', status: 'fail', detail: `${detail} (< 1 GiB)`, fix: VOLUME_FIX };
-  if (freeGiB < 5) return { name: 'disk', status: 'warn', detail: `${detail} (< 5 GiB)`, fix: VOLUME_FIX };
-  return { name: 'disk', status: 'ok', detail };
+  const fallbackNote = settingsError
+    ? ` — retention settings unreadable (${settingsError}); warn threshold falls back to ${minFreeGiB} GiB`
+    : '';
+  if (freeGiB < 1) return { name: 'disk', status: 'fail', detail: `${detail} (< 1 GiB)${fallbackNote}`, fix: VOLUME_FIX };
+  if (freeGiB < minFreeGiB) return { name: 'disk', status: 'warn', detail: `${detail} (< ${minFreeGiB} GiB)${fallbackNote}`, fix: VOLUME_FIX };
+  return { name: 'disk', status: 'ok', detail: `${detail} (warn < ${minFreeGiB} GiB)${fallbackNote}` };
+}
+
+// 1099511627776 -> "1.0 TiB", 230 MiB -> "230.0 MiB", 512 -> "512 B".
+function humanBytes(n) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let value = Number(n) || 0;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+/**
+ * The logs-usage line: one snapshot of how much disk the transcripts /
+ * telemetry / workspaces / run-state trees take plus the free space, so the
+ * numbers are visible without the dashboard. The snapshot comes through
+ * cachedRetention (60 s TTL, shared with the settings route) to keep the
+ * doctor cheap. A partial walk, unreadable entries or a failed snapshot are
+ * said so on the line and warn — they degrade the number, not the box.
+ */
+async function checkLogsUsage(retentionReader) {
+  let snap;
+  try {
+    snap = await retentionReader();
+  } catch (err) {
+    return { name: 'logs usage', status: 'warn', detail: `retention snapshot failed: ${String(err?.message || err).split('\n')[0]}` };
+  }
+  if (!snap || typeof snap.usage !== 'object' || snap.usage === null) {
+    return { name: 'logs usage', status: 'warn', detail: 'retention snapshot unavailable' };
+  }
+  const usage = snap.usage;
+  const parts = [
+    `transcripts ${humanBytes(usage.transcriptsBytes)}`,
+    `telemetry ${humanBytes(usage.telemetryBytes)}`,
+    `workspaces ${humanBytes(usage.workspacesBytes)}`,
+    `state ${humanBytes(usage.stateBytes)}`,
+    `free ${snap.disk ? humanBytes(snap.disk.freeBytes) : 'unknown'}`,
+  ];
+  const notes = [];
+  if (Array.isArray(snap.partial) && snap.partial.length) notes.push(`partial walk: ${snap.partial.join(', ')}`);
+  const unreadable = Object.values(snap.unreadable || {}).reduce((sum, n) => sum + (Number(n) || 0), 0);
+  if (unreadable > 0) notes.push(`${unreadable} unreadable ${unreadable === 1 ? 'entry' : 'entries'}`);
+  return {
+    name: 'logs usage',
+    status: notes.length ? 'warn' : 'ok',
+    detail: `${parts.join(' · ')}${notes.length ? ` — ${notes.join('; ')}` : ''}`,
+  };
 }
 
 async function checkApi(fetchImpl, env) {
@@ -193,11 +265,17 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   const settings = readTaskSessionsSettings(env, { quiet: true });
   const cap = settings.maxActive ?? 2;
   const overlayNote = settings.error ? ` — settings overlay ignored (${settings.error})` : "";
+  // FOC-902: the autonomous-pickup note rides on every detail branch — the
+  // doctor line answers both "how full is the cap" and "is pickup on" in one
+  // place. A settings.error (overlay ignored) reads autoPickup as null → off.
+  const autoNote = settings.autoPickup?.enabled
+    ? `; auto-pickup: on (every ${settings.autoPickup.pollSeconds}s, states ${settings.autoPickup.states.join(",")})`
+    : "; auto-pickup: off";
   let exists = false;
   try {
     exists = fsImpl.existsSync(dbPath);
   } catch {}
-  if (!exists) return { name: 'task sessions', status: 'ok', detail: 'no managed sessions yet' };
+  if (!exists) return { name: 'task sessions', status: 'ok', detail: 'no managed sessions yet' + autoNote };
 
   const { sessions, unknown } = readSessions(dbPath);
   if (unknown) {
@@ -205,7 +283,7 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
     return {
       name: 'task sessions',
       status: 'warn',
-      detail: `the task-sessions store could not be read (${unknown})`,
+      detail: `the task-sessions store could not be read (${unknown})` + autoNote,
       fix: hotWal
         ? 'a session host died with a hot WAL — start the host once or set FENIX_SUPERVISOR_LEGACY=1'
         : `check ${dbPath}`,
@@ -237,7 +315,7 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
 
   const capReached = live.length >= cap;
   if (!capReached && !unscoped) {
-    return { name: 'task sessions', status: 'ok', detail: counts + overlayNote };
+    return { name: 'task sessions', status: 'ok', detail: counts + overlayNote + autoNote };
   }
   // Both warns land on ONE line when they apply together — never two lines
   // for the same check.
@@ -254,7 +332,7 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   return {
     name: 'task sessions',
     status: 'warn',
-    detail: `${counts} — ${parts.join('; ')}` + overlayNote,
+    detail: `${counts} — ${parts.join('; ')}` + overlayNote + autoNote,
     fix: fixes.join('; '),
   };
 }
@@ -351,20 +429,62 @@ export function checkProjectsDir(env, fsImpl, projectsFile) {
   }
 }
 
+// FOC-772: the optional integrations are off by default, so absence is the
+// healthy state. An ENABLED integration whose prerequisite is missing is a
+// misconfiguration the doctor names — warn, never fail: every integration
+// degrades gracefully when its prerequisite is absent. Settings come in
+// through the runChecks seam so tests need no real overlay.
+function checkIntegrations(env, settings) {
+  let integrations;
+  try {
+    integrations = readIntegrations({ settings, env });
+  } catch (err) {
+    return {
+      name: 'integrations',
+      status: 'warn',
+      detail: `settings invalid (${String(err.message).split('\n')[0]})`,
+      fix: 'fix settings.json, then re-run fenix doctor',
+    };
+  }
+  const enabled = INTEGRATIONS.filter((name) => integrations[name]);
+  if (!enabled.length) return { name: 'integrations', status: 'ok', detail: 'none enabled' };
+
+  let anyMissing = false;
+  const parts = enabled.map((name) => {
+    const { ok, missing, required } = prerequisites(name, env);
+    if (ok) return required.length ? `${name} (${required.join(', ')})` : name;
+    anyMissing = true;
+    return `${name} enabled but missing ${missing.join(', ')}`;
+  });
+  return {
+    name: 'integrations',
+    status: anyMissing ? 'warn' : 'ok',
+    detail: parts.join('; '),
+    ...(anyMissing ? { fix: 'set the missing variables in .env, or run fenix keys for API keys' } : {}),
+  };
+}
+
 /**
  * Run every check in order. Dependencies are injectable so future tests can
  * pass fakes: spawn (spawnSync-shaped), fsImpl (mkdirSync/accessSync/
- * constants/statfsSync), fetchImpl (fetch-shaped), env, withApi.
+ * constants/statfsSync), fetchImpl (fetch-shaped), env, withApi, settings
+ * (the overlay object — the integrations check and the disk check's warn
+ * threshold; default: the real one), FOC-780: `retention` is the async
+ * logs-usage snapshot reader (default: cachedRetention), secretsDir,
+ * projectsFile.
  * @returns {Promise<Array<{ name, status: 'ok'|'warn'|'fail', detail, fix? }>>}
  */
-export async function runChecks({ env = process.env, withApi = false, spawn = spawnSync, fsImpl = fs, fetchImpl = fetch, secretsDir, projectsFile } = {}) {
+export async function runChecks({ env = process.env, withApi = false, spawn = spawnSync, fsImpl = fs, fetchImpl = fetch, settings, secretsDir, projectsFile, retention = () => cachedRetention() } = {}) {
+  const policy = resolveRetentionSafe(settings);
   const checks = [
     checkNode(),
     ...REQUIRED_TOOLS.map(([name, args]) => checkTool(spawn, name, args, 'fail')),
     ...OPTIONAL_TOOLS.map(([name, args]) => checkTool(spawn, name, args, 'warn')),
     ...checkKeys(env),
+    checkIntegrations(env, settings),
     ...checkDirs(env, fsImpl),
-    checkDisk(env, fsImpl),
+    checkDisk(env, fsImpl, policy),
+    await checkLogsUsage(retention),
     checkCockpitHooks(env, fsImpl),
     checkTaskSessions({ env, fsImpl }),
     checkRunOwners({ env }),

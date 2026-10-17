@@ -31,10 +31,10 @@ Start the Supervisor scoped with the command above, or set FENIX_SUPERVISOR_LEGA
 ```
 
 - **Scoped start** is the normal answer; the entrypoint fails closed with
-  exit 2 on the refusal. `bin/supervisor.bat` does the same: it runs
-  `record` with stderr visible and, on the refusal (exit 3), prints its own
-  hint and exits 2 without starting `claude` — any other record failure only
-  warns and the launch proceeds.
+  exit 2 on the refusal. `bin/supervisor.bat` delegates to the node launcher
+  (`scripts/squad-start.mjs`), which stops on the `record` step's exit 3: it
+  prints the refusal and exits 2 without starting `claude` — any other record
+  failure only warns and the launch proceeds.
 - **`FENIX_SUPERVISOR_LEGACY=1`** is the explicit override: the pre-901
   behaviour runs and the record carries `legacyOverride: true`.
 - Sessions whose `pid` is provably dead on this host are stale: they never
@@ -68,6 +68,46 @@ ticket waits) and when an unscoped Supervisor is live next to managed sessions
 (global `session.json`, best-effort liveness) — one line when both apply. The
 doctor never mutates the store.
 
+## Ticket lease (triage)
+
+Before `triage record`/`triage intake` write anything, the CLI checks the store:
+a scoped session may only triage the ticket its lease names (`LA_TASK_ID`,
+refusal `LEASE_MISMATCH`); an unscoped triage refuses a ticket whose task key
+(`workspaceNameFor(env):issue`) is held by a live session (`TICKET_LEASED`) —
+dead-pid rows do not hold, and `FENIX_SUPERVISOR_LEGACY=1` overrides with
+`lease.override: true` on the record. The check is recorded in
+`triage.json.lease` (`sessionId`, `taskKey`, `workspace`, `store`, `checkedAt`).
+After the verdict is on disk, `record` posts a `claimed by …` comment via
+`linear-ops.mjs comment --dedup-tag claim:<sessionId|runId>` (failure never
+fails the record; `--no-claim-comment` skips).
+
+## What the briefing shows
+
+`supervisor-status.mjs --briefing` carries `leases` (`mine` — the session's own
+row, `others` — every other active row with `live` liveness) and a one-line
+`leasesLine`, e.g. `Leases: mine jointhubs:FOC-1 (sup-…, running); others:
+jointhubs:FOC-2 (sup-…, waiting, stale)`. A missing or unreadable store reads
+`Leases: no managed sessions`; an empty one reads `Leases: none`.
+
+## Autonomous pickup (opt-in)
+
+The host can fill its queue by itself. Off by default; turn it on in the settings overlay
+(`fenix settings set taskSessions.autoPickup.enabled true`, plus optionally `pollSeconds` 60–3600, default 300;
+`states`, default `["Backlog"]`; `label`; `workspace`). When enabled, `task-session-host serve` polls Linear every
+`pollSeconds` (first tick 10 s after start): it queries each configured state
+(`node linear-query.mjs issues --status <state> [--label <l>] --json`), keeps only the owner scope's project, orders
+by priority (urgent first) then age, and enqueues every candidate that has NO row in the task-sessions store —
+queued, active and terminal rows alike, so a completed or failed ticket is never re-picked. Enqueuing stops at
+`taskSessions.maxActive`; the ordinary scheduler (`claimNext`) starts sessions from the queue as usual. The host
+never writes to Linear — the claim comment stays with the Supervisor's triage. `GET /pickup` on the host reports
+`{ enabled, pollSeconds, states, lastTickAt, lastError, lastEnqueued }`, and the doctor's `task sessions` line ends
+with `auto-pickup: off` or `auto-pickup: on (every <n>s, states <a,b>)`.
+
+## What the cockpit shows
+
+Each board ticket carries a muted `claimed · <session id, first 12 chars>` tag next to its stage tag (hover shows
+the full session id and status). The claim comes from the task-sessions store's active owner for the ticket — the
+board only reads the store, never creates it; a dead owner's tag stays but is not marked live.
 ## Run ownership and the orphan scan (FOC-905)
 
 Every run dir carries `owner.json`, written once when the run dir is created
@@ -111,6 +151,6 @@ relates each run's owner to the current container before touching anything:
 
 ## Out of scope
 
-N containers over one `/data` volume, the ticket lease (FOC-902), and the
-resource spike itself. Scoped-only autonomy assumes the single-container
-multiplexer: sessions coordinate through the shared store, not containers.
+N containers over one `/data` volume and the resource spike itself.
+Scoped-only autonomy assumes the single-container multiplexer: sessions
+coordinate through the shared store, not containers.

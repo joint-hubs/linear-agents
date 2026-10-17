@@ -10,7 +10,7 @@
 // Run: node --test scripts/child-model.test.mjs
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { childModelFor, childProviderEnv } from "./child-model.mjs";
+import { assertModelPolicy, childModelFor, childProviderEnv } from "./child-model.mjs";
 
 const MODELS = {
   providers: {
@@ -151,6 +151,69 @@ test("the Supervisor's ANTHROPIC_MODEL is never the answer", () => {
     if (prev === undefined) delete process.env.ANTHROPIC_MODEL;
     else process.env.ANTHROPIC_MODEL = prev;
   }
+});
+
+// ── assertModelPolicy (FOC-607): the per-spawn --model policy ────────────────
+
+test("assertModelPolicy refuses an explicit --model on a dev squad", () => {
+  const refusal = assertModelPolicy({
+    squad: "dev",
+    requestedModel: "z-ai/glm-5.3",
+    hasPriceRow: () => ({ priced: true }),
+  });
+  assert.equal(refusal.error, "model-override-banned");
+  assert.match(refusal.message, /routing table/);
+  assert.match(refusal.message, /drop --model/);
+});
+
+test("assertModelPolicy refuses an unpriced --model on a non-dev squad", () => {
+  const refusal = assertModelPolicy({
+    squad: "plan",
+    requestedModel: "totally/unpriced-id",
+    hasPriceRow: () => ({ priced: false }),
+  });
+  assert.equal(refusal.error, "model-unpriced");
+  assert.match(refusal.message, /totally\/unpriced-id/);
+  assert.match(refusal.message, /config\/models\.json/);
+});
+
+test("assertModelPolicy allows a priced --model on a non-dev squad", () => {
+  const seen = [];
+  const refusal = assertModelPolicy({
+    squad: "plan",
+    requestedModel: "z-ai/glm-5.3-flash",
+    hasPriceRow: (id) => {
+      seen.push(id);
+      return { priced: true };
+    },
+  });
+  assert.equal(refusal, null);
+  assert.deepEqual(seen, ["z-ai/glm-5.3-flash"], "hasPriceRow runs against the requested id");
+});
+
+test("assertModelPolicy allows a dev squad without --model", () => {
+  const refusal = assertModelPolicy({
+    squad: "dev",
+    requestedModel: null,
+    hasPriceRow: () => {
+      throw new Error("hasPriceRow must not be consulted without a requestedModel");
+    },
+  });
+  assert.equal(refusal, null);
+});
+
+test("assertModelPolicy allows a non-dev squad without --model; hasPriceRow is never called", () => {
+  let calls = 0;
+  const refusal = assertModelPolicy({
+    squad: "plan",
+    requestedModel: null,
+    hasPriceRow: () => {
+      calls++;
+      return { priced: true };
+    },
+  });
+  assert.equal(refusal, null);
+  assert.equal(calls, 0);
 });
 
 test("childProviderEnv parses the set lines provider-resolve prints", () => {

@@ -16,6 +16,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runDir, teeAbsPath, writeRegistry } from "./supervisor-lib.mjs";
+import { createTaskSessionStore } from "./task-sessions.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -79,9 +80,35 @@ const parse = (r) => {
   }
 };
 
+// A valid holds.json store, written directly — same shape the gate CLI writes
+// (validated by readHolds on the status side), without needing the pricing
+// fixture the CLI demands. `over` overrides fields on the first hold.
+function writeHoldsFixture(runId, holds = [holdFixture()]) {
+  writeFileSync(join(runDir(runId), "holds.json"), JSON.stringify({ version: 1, holds }));
+}
+function holdFixture(over = {}) {
+  return {
+    id: "hold-1",
+    origin: "ownership",
+    question: "FOC-999 belongs to another owner — take it anyway?",
+    options: [{ label: "skip to the next own ticket", model: "test/priced-model", costUsd: 0 }],
+    recommendation: "continue with the next ticket of your own projects",
+    impact: "medium",
+    resolution: null,
+    state: "open",
+    createdAt: "2026-10-15T00:00:00Z",
+    presentedAt: null,
+    until: null,
+    answer: null,
+    blocks: null,
+    history: [{ event: "created", at: "2026-10-15T00:00:00Z" }],
+    ...over,
+  };
+}
+
 // A child entry written by hand, so the test controls status and tee content
 // without needing a live process.
-function seedChild(runId, { childId = "dev-1", status: st = "running", costUsd = 0, lines = [], turnStartedAt = new Date().toISOString() } = {}) {
+function seedChild(runId, { childId = "dev-1", status: st = "running", costUsd = 0, lines = [], turnStartedAt = new Date().toISOString(), turns, model, modelSource } = {}) {
   writeRegistry(runId, {
     runId,
     children: {
@@ -92,9 +119,11 @@ function seedChild(runId, { childId = "dev-1", status: st = "running", costUsd =
         sessionId: "sess-1",
         status: st,
         tee: join("children", `${childId}.jsonl`),
-        turns: [{ pid: 999999, startedAt: turnStartedAt, endedAt: null, exitCode: null }],
+        turns: turns ?? [{ pid: 999999, startedAt: turnStartedAt, endedAt: null, exitCode: null }],
         costUsd,
         worktree: ROOT,
+        ...(model !== undefined ? { model } : {}),
+        ...(modelSource !== undefined ? { modelSource } : {}),
       },
     },
     rounds: {},
@@ -478,6 +507,304 @@ test("legacy-unverified children are named beside the total, not excluded from i
   if (!r.stderr.includes("cost includes 1 unverified legacy figure(s): dev-2")) {
     fail(`stderr did not name the unverified child: ${r.stderr}`);
   }
+});
+
+// ── task-session leases in the briefing (FOC-902) ────────────────────────────
+console.log("\nbriefing leases (FOC-902)");
+
+// The DEAD_PID fixture proven safe on this host (fenix-doctor.test.mjs): a pid
+// that never exists, so pidAlive reports it dead and the lease reads stale.
+const DEAD_PID = 2 ** 22 + 12345;
+
+// A private LA_DATA_HOME holding a seeded task-session store, so the dev
+// machine's real store never decides a test's verdict.
+function leaseHome() {
+  const home = mkdtempSync(join(tmpdir(), "la-sup-st-lease-"));
+  cleanup.push(home);
+  return home;
+}
+
+function seedHolder(home, taskKey, pid) {
+  const store = createTaskSessionStore({ dbPath: join(home, "supervisor", "task-sessions.sqlite") });
+  try {
+    const s = store.ensure({
+      taskKey,
+      taskId: taskKey.split(":")[1],
+      workspace: taskKey.split(":")[0],
+      issueId: taskKey.split(":")[1],
+    });
+    if (store.claimNext().sessionId !== s.sessionId) fail(`${taskKey}: claimNext must promote its only row`);
+    store.update(s.sessionId, { status: "running", pid });
+    return s.sessionId;
+  } finally {
+    store.close();
+  }
+}
+
+test("the briefing names the leases: mine, others, and the stale ones", () => {
+  const runId = fixtureRun();
+  const home = leaseHome();
+  const mine = seedHolder(home, "jointhubs:FOC-111", process.pid);
+  const other = seedHolder(home, "jointhubs:FOC-222", DEAD_PID);
+  const out = parse(status(runId, ["--briefing"], { LA_DATA_HOME: home, FENIX_SUPERVISOR_SESSION_ID: mine }));
+  if (JSON.stringify(out.leases.mine) !== JSON.stringify({ taskKey: "jointhubs:FOC-111", sessionId: mine, status: "running" })) {
+    fail(`leases.mine was ${JSON.stringify(out.leases.mine)}`);
+  }
+  if (JSON.stringify(out.leases.others) !== JSON.stringify([{ sessionId: other, taskKey: "jointhubs:FOC-222", status: "running", live: false }])) {
+    fail(`leases.others was ${JSON.stringify(out.leases.others)}`);
+  }
+  const line = `Leases: mine jointhubs:FOC-111 (${mine}, running); others: jointhubs:FOC-222 (${other}, running, stale)`;
+  if (out.leasesLine !== line) fail(`leasesLine was ${out.leasesLine}`);
+});
+
+test("others-only: without a session id the briefing claims nothing as mine", () => {
+  const runId = fixtureRun();
+  const home = leaseHome();
+  const other = seedHolder(home, "jointhubs:FOC-333", process.pid);
+  const out = parse(status(runId, ["--briefing"], { LA_DATA_HOME: home }));
+  if (out.leases.mine !== null) fail(`leases.mine was ${JSON.stringify(out.leases.mine)}`);
+  if (out.leases.others.length !== 1 || out.leases.others[0].sessionId !== other || out.leases.others[0].live !== true) {
+    fail(`leases.others was ${JSON.stringify(out.leases.others)}`);
+  }
+  if (out.leasesLine !== `Leases: others: jointhubs:FOC-333 (${other}, running)`) fail(`leasesLine was ${out.leasesLine}`);
+});
+
+test("a terminal-only store reads as no leases at all", () => {
+  const runId = fixtureRun();
+  const home = leaseHome();
+  const sid = seedHolder(home, "jointhubs:FOC-444", process.pid);
+  const store = createTaskSessionStore({ dbPath: join(home, "supervisor", "task-sessions.sqlite") });
+  try {
+    store.update(sid, { status: "completed" });
+  } finally {
+    store.close();
+  }
+  const out = parse(status(runId, ["--briefing"], { LA_DATA_HOME: home, FENIX_SUPERVISOR_SESSION_ID: sid }));
+  if (out.leases === null) fail("an existing store must never read as missing");
+  if (out.leases.mine !== null || out.leases.others.length !== 0) {
+    fail(`terminal rows leaked into leases: ${JSON.stringify(out.leases)}`);
+  }
+  if (out.leasesLine !== "Leases: none") fail(`leasesLine was ${out.leasesLine}`);
+});
+
+test("no store — or an unreadable one — reads as no managed sessions", () => {
+  const runId = fixtureRun();
+  const out = parse(status(runId, ["--briefing"], { LA_DATA_HOME: leaseHome() }));
+  if (out.leases !== null) fail(`missing store gave ${JSON.stringify(out.leases)}`);
+  if (out.leasesLine !== "Leases: no managed sessions") fail(`leasesLine was ${out.leasesLine}`);
+
+  // A corrupt store is "unknown", not "empty" — the briefing never guesses.
+  const home = leaseHome();
+  mkdirSync(join(home, "supervisor"), { recursive: true });
+  writeFileSync(join(home, "supervisor", "task-sessions.sqlite"), "not a sqlite database at all. ".repeat(8), "utf8");
+  const out2 = parse(status(runId, ["--briefing"], { LA_DATA_HOME: home }));
+  if (out2.leases !== null) fail(`corrupt store gave ${JSON.stringify(out2.leases)}`);
+  if (out2.leasesLine !== "Leases: no managed sessions") fail(`leasesLine was ${out2.leasesLine}`);
+});
+
+// ── the task journal in the briefing (FOC-904) ───────────────────────────────
+console.log("\nbriefing: task journal");
+
+test("the briefing carries the task journal when LA_TASK_ID is set and the file exists", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  const root = mkdtempSync(join(tmpdir(), "la-journal-br-"));
+  cleanup.push(root);
+  mkdirSync(join(root, "docs", "state"), { recursive: true });
+  writeFileSync(
+    join(root, "docs", "state", "FOC-904.md"),
+    "# FOC-904 — journal\n\nTask: FOC-904\nSession: -\nRun: -\nBranch: -\nPR: -\nStatus: in progress\n\n## 2026-10-16 10:00 — first\n\nbody\n\n## 2026-10-16 11:00 — second\n\nbody\n",
+    "utf8",
+  );
+  const out = parse(status(runId, ["--briefing"], { LA_ROOT: root, LA_TASK_ID: "FOC-904" }));
+  if (
+    !out.journal ||
+    out.journal.path !== "docs/state/FOC-904.md" ||
+    out.journal.entries !== 2 ||
+    out.journal.lastAt !== "2026-10-16 11:00"
+  ) {
+    fail(`journal was ${JSON.stringify(out.journal)}`);
+  }
+  if (!/^Journal: docs\/state\/FOC-904\.md \(2 entries, last 2026-10-16 11:00\)$/.test(out.journalLine)) {
+    fail(`journalLine was ${out.journalLine}`);
+  }
+});
+
+test("LA_TASK_ID set but no journal yet — the line names the init command", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  const out = parse(status(runId, ["--briefing"], { LA_TASK_ID: "FOC-904" }));
+  if (out.journal !== null) fail(`journal was ${JSON.stringify(out.journal)}`);
+  if (!out.journalLine.includes("none yet") || !out.journalLine.includes("state-journal.mjs init")) {
+    fail(`journalLine was ${out.journalLine}`);
+  }
+});
+
+test("no LA_TASK_ID — no journal and no line; existing fields untouched", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { status: "exited" });
+  const out = parse(status(runId, ["--briefing"]));
+  if (out.journal !== null) fail(`journal was ${JSON.stringify(out.journal)}`);
+  if (out.journalLine !== null) fail(`journalLine was ${out.journalLine}`);
+  if (!out.focusLine) fail("the focus fields disappeared");
+});
+// ── isolation surfaced (FOC-802) ─────────────────────────────────────────────
+console.log("\nisolation surfaced");
+
+// A child with hand-written turns, so the test controls the isolation flags
+// without any live spawn.
+function seedTurns(runId, turns, { childId = "dev-1" } = {}) {
+  const ended = new Date().toISOString();
+  writeRegistry(runId, {
+    runId,
+    children: {
+      [childId]: {
+        childId,
+        squad: "dev",
+        taskId: "FOC-123",
+        sessionId: "sess-1",
+        status: "exited",
+        tee: join("children", `${childId}.jsonl`),
+        turns: turns.map((isolated) => ({
+          pid: 999999,
+          startedAt: ended,
+          endedAt: ended,
+          exitCode: 0,
+          isolated,
+        })),
+        costUsd: 0,
+        worktree: ROOT,
+      },
+    },
+    rounds: {},
+  });
+  return childId;
+}
+
+test("the LATEST turn's isolated flag reaches the snapshot", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, [false, true]);
+  const out = parse(status(runId));
+  if (out.children[0].isolated !== true) fail(`isolated was ${out.children[0].isolated}`);
+});
+
+test("an earlier isolated turn does not mask a later unisolated one", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, [true, false]);
+  const out = parse(status(runId));
+  if (out.children[0].isolated !== false) fail(`isolated was ${out.children[0].isolated}`);
+});
+
+test("a child with no turns reports isolated: null", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, []);
+  const out = parse(status(runId));
+  if (out.children[0].isolated !== null) fail(`isolated was ${out.children[0].isolated}`);
+});
+
+test("in container, a child whose latest turn ran unisolated gets a human line", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, [false]);
+  const r = status(runId, [], { FENIX_IN_CONTAINER: "1" });
+  if (!r.stderr.includes("isolation: off (dev-1)")) fail(`stderr did not name it: ${r.stderr}`);
+  parse(r); // the human line rides stderr; stdout stays parseable JSON
+});
+
+test("in container, an isolated child gets no line", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, [true]);
+  const r = status(runId, [], { FENIX_IN_CONTAINER: "1" });
+  if (r.stderr.includes("isolation: off")) fail(`stderr: ${r.stderr}`);
+});
+
+test("outside the container the line is never printed", () => {
+  const runId = fixtureRun();
+  seedTurns(runId, [false]);
+  const r = status(runId, [], { FENIX_IN_CONTAINER: "" });
+  if (r.stderr.includes("isolation: off")) fail(`stderr: ${r.stderr}`);
+});
+
+// ── model drift (FOC-607) ────────────────────────────────────────────────────
+console.log("\nmodel drift");
+
+test("a served model that differs from the pin is flagged in JSON and on stderr", () => {
+  const runId = fixtureRun();
+  seedChild(runId, {
+    model: "a",
+    modelSource: "flag",
+    turns: [{ startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), exitCode: 0, initModel: "b" }],
+  });
+  const r = status(runId);
+  const out = parse(r);
+  const c = out.children[0];
+  if (c.model !== "a") fail(`model was ${JSON.stringify(c.model)}`);
+  if (c.modelSource !== "flag") fail(`modelSource was ${JSON.stringify(c.modelSource)}`);
+  if (c.initModel !== "b") fail(`initModel was ${JSON.stringify(c.initModel)}`);
+  if (c.modelDrift !== true) fail(`modelDrift was ${c.modelDrift}`);
+  if (!r.stderr.includes("model drift: dev-1 requested a, served b")) {
+    fail(`stderr did not name the drift: ${r.stderr}`);
+  }
+});
+
+test("equal requested and served models do not drift", () => {
+  const runId = fixtureRun();
+  seedChild(runId, {
+    model: "a",
+    turns: [{ startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), exitCode: 0, initModel: "a" }],
+  });
+  const out = parse(status(runId));
+  if (out.children[0].modelDrift !== false) fail(`modelDrift was ${out.children[0].modelDrift}`);
+  if (out.children[0].initModel !== "a") fail(`initModel was ${JSON.stringify(out.children[0].initModel)}`);
+});
+
+test("a child with no turns has no initModel and no drift", () => {
+  const runId = fixtureRun();
+  seedChild(runId, { model: "a", turns: [] });
+  const out = parse(status(runId));
+  if (out.children[0].initModel !== null) fail(`initModel was ${JSON.stringify(out.children[0].initModel)}`);
+  if (out.children[0].modelDrift !== false) fail(`modelDrift was ${out.children[0].modelDrift}`);
+});
+
+// ── briefing holds (FOC-848) ─────────────────────────────────────────────────
+console.log("\nbriefing holds");
+
+test("the briefing lists the run's open holds with id and origin", () => {
+  const runId = fixtureRun();
+  writeHoldsFixture(runId, [
+    holdFixture(),
+    holdFixture({ id: "hold-2", state: "answered" }), // answered → not open → not listed
+  ]);
+  const out = parse(status(runId, ["--briefing"]));
+  if (!Array.isArray(out.holds) || out.holds.length !== 1) {
+    fail(`holds was ${JSON.stringify(out.holds)}`);
+  }
+  const hold = out.holds[0];
+  if (hold.id !== "hold-1") fail(`hold id was ${hold.id}`);
+  if (hold.origin !== "ownership") fail(`hold origin was ${hold.origin}`);
+  if (hold.impact !== "medium") fail(`hold impact was ${hold.impact}`);
+  if (typeof hold.question !== "string" || !hold.question) fail(`question was ${JSON.stringify(hold.question)}`);
+  if (!("holdsCount" in out) || out.holdsCount !== 1) fail(`holdsCount was ${out.holdsCount}`);
+  if (out.holdsError) fail(`holdsError on a valid store: ${out.holdsError}`);
+});
+
+test("a run with no holds.json briefs an empty holds list", () => {
+  const runId = fixtureRun();
+  const out = parse(status(runId, ["--briefing"]));
+  if (JSON.stringify(out.holds) !== "[]") fail(`holds was ${JSON.stringify(out.holds)}`);
+  if (out.holdsCount !== 0) fail(`holdsCount was ${out.holdsCount}`);
+  if (out.holdsError) fail(`holdsError on a missing store: ${out.holdsError}`);
+});
+
+test("a corrupt holds store surfaces holdsError instead of crashing the briefing", () => {
+  const runId = fixtureRun();
+  writeFileSync(join(runDir(runId), "holds.json"), "{not json");
+  const out = parse(status(runId, ["--briefing"]));
+  if (out.ok !== true) fail(`the briefing did not survive: ok=${out.ok}`);
+  if (!out.holdsError || !/not readable JSON/.test(out.holdsError)) {
+    fail(`holdsError was ${JSON.stringify(out.holdsError)}`);
+  }
+  if (JSON.stringify(out.holds) !== "[]") fail(`holds was ${JSON.stringify(out.holds)}`);
+  if (out.holdsCount !== 0) fail(`holdsCount was ${out.holdsCount}`);
 });
 
 // ── summary ──────────────────────────────────────────────────────────────────

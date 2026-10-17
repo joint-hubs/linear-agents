@@ -32,21 +32,36 @@
 // (auth_missing, visible in the record) and triage stays possible on the
 // deterministic signals alone.
 //
+// FOC-902 adds the ticket lease: `record` and `intake` check the issue
+// against the lease this session holds (scoped) or the task-session store's
+// active owners (unscoped) BEFORE anything is written, and `record` posts the
+// "claimed by" comment after the verdict is on disk — recorded either way.
+//
 // Vocabulary warning: "entry node" here means "the node where THIS issue enters
 // the graph" (which may be dev, review or test). It is NOT graph.json's
 // `entryNodes`, which is a topology property — nodes legitimately reachable with
 // no inbound edge. The two share a word and mean different things.
 
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { SHADOW_EVENT_TYPE, createDecisionCaller } from "./decision-call.mjs";
 import { autoLabel, findEventFile } from "./decision-log.mjs";
 import { loadGraph, emitHandoffRules } from "./graph-validate.mjs";
 import { handoffTargetFrom, matchRule } from "./graph-route.mjs";
+import { pidAlive } from "./supervisor-current-run.mjs";
 import { ROOT, ensureRunDir, failJson, intakePath, parseArgs, triagePath } from "./supervisor-lib.mjs";
+import { issuePartOf, readActiveSessions, resolveTaskKey, taskSessionsDbPath, workspaceNameFor } from "./task-sessions.mjs";
 import { atomicWriteJSON } from "./utils.mjs";
+import {
+  OwnershipConfigError,
+  checkOwnership,
+  currentOwner,
+  loadOwnership,
+  ownershipRefusal,
+  recordOwnershipHold,
+} from "./task-ownership.mjs";
 
 const VERDICTS = ["plan", "dev", "review", "test", "ask"];
 
@@ -534,6 +549,149 @@ export function labelRecordedIntake({ intake, verdict, size, runsDir, issue } = 
   return { labelled, warnings };
 }
 
+// ── the ticket lease (FOC-902 §A) ────────────────────────────────────────────
+//
+// One ticket, one live session. Before `record` or `intake` writes anything,
+// the issue identity is checked against the lease this session holds (scoped)
+// or against the task-session store's active owners (unscoped) — `record`
+// tests the `--issue` argument itself (its value, TEAM-NUM, IS the issue's
+// display identifier), `intake` the loaded issue. A refused check writes
+// NOTHING — no triage.json, no intake.json, no claim comment.
+//
+// The task key's issue part is the display identifier (`FOC-123`), never the
+// Linear uuid — the store, the host and the board all key by it, so the key
+// comes from the shared helpers (`issuePartOf` in task-sessions.mjs,
+// work-routes.mjs `taskKeyOf` uses it too), never from a local re-derivation.
+function checkLease({ args, issue }) {
+  const env = process.env;
+  const workspace = workspaceNameFor(env);
+  // Issue part of the key via `issuePartOf` — the display identifier (`FOC-123`),
+  // never the uuid, exactly as work-routes.mjs keys the task the Start flow binds.
+  const issueId = issuePartOf(issue);
+  let taskKey;
+  try {
+    taskKey = resolveTaskKey({ workspace, issueId });
+  } catch (err) {
+    failJson(`the issue identity does not yield a canonical task key: ${err.message}`, {
+      issueId,
+      hint: "the task key must match ^[A-Za-z0-9._-]+$ on both halves — check the issue payload",
+    });
+  }
+  const lease = { sessionId: null, taskKey, workspace, checkedAt: new Date().toISOString() };
+
+  // Scoped: this pane already holds a lease. Triaging anything else would
+  // quietly retarget the session's whole run — refused, nothing written.
+  if (env.FENIX_SUPERVISOR_SESSION_ID) {
+    lease.sessionId = env.FENIX_SUPERVISOR_SESSION_ID;
+    const heldId = env.LA_TASK_ID ?? null;
+    if (heldId === null || (issue.identifier ?? args.issue) !== heldId) {
+      failJson(`this session holds the lease for ${heldId ?? "no task"}; it cannot triage ${args.issue}`, {
+        code: "LEASE_MISMATCH",
+        lease,
+      });
+    }
+    if (env.LA_TASK_KEY && env.LA_TASK_KEY !== taskKey) {
+      failJson(`this session holds the lease for ${heldId}; it cannot triage ${args.issue}`, {
+        code: "LEASE_MISMATCH",
+        lease: { ...lease, taskKey: env.LA_TASK_KEY, issueTaskKey: taskKey },
+      });
+    }
+    return lease;
+  }
+
+  // Unscoped: another session may already own this ticket. A live holder is
+  // refused; FENIX_SUPERVISOR_LEGACY=1 records anyway, visibly. A store that
+  // cannot be verified does not block here — the FOC-901 guard already refuses
+  // the unknown-store case at run start — it is just recorded honestly.
+  const dbPath = taskSessionsDbPath(env);
+  const storeExists = existsSync(dbPath);
+  const { sessions, unknown } = readActiveSessions(dbPath);
+  if (unknown) lease.store = "unknown";
+  else if (!storeExists) lease.store = "missing";
+  const holder = sessions.find((s) => s.taskKey === taskKey && pidAlive(s.pid));
+  if (holder) {
+    if (env.FENIX_SUPERVISOR_LEGACY === "1") {
+      lease.override = true;
+      console.error(
+        `[triage] TICKET_LEASED overridden by FENIX_SUPERVISOR_LEGACY=1 — session ${holder.sessionId} (${holder.status}) holds ${taskKey}`,
+      );
+      return lease;
+    }
+    failJson(
+      `ticket ${args.issue} is leased to session ${holder.sessionId} (${holder.status}), which is live on this host — this unscoped triage cannot take it`,
+      { code: "TICKET_LEASED", lease: { ...lease, sessionId: holder.sessionId, status: holder.status } },
+    );
+  }
+  return lease;
+}
+
+// ── the "claimed by" comment (FOC-902 §B) ────────────────────────────────────
+//
+// Posted AFTER triage.json is on disk: a failed or hanging comment must never
+// cost the verdict — the write already happened. Recorded either way, so the
+// record says what happened to the claim. Skips (recorded as
+// `posted: false, reason`) when --no-claim-comment is given, when the issue
+// came from --issue-file and --claim-comment was not given (a fixture is not
+// proof the Supervisor owns the ticket), or when LINEAR_API_KEY is absent.
+// LA_TRIAGE_CLAIM_CMD_LOG replaces execution with one JSON argv line — the
+// test seam.
+function postClaimComment({ args, lease, runId }) {
+  const skipped = (reason) => ({ posted: false, reason });
+  if (args["no-claim-comment"]) return skipped("--no-claim-comment was given");
+  if (args["issue-file"] && !args["claim-comment"]) {
+    return skipped("the issue came from --issue-file and --claim-comment was not given");
+  }
+
+  const at = new Date().toISOString();
+  const who = lease.sessionId ? `\`sup-${lease.sessionId}\` (run ${runId})` : `run ${runId}`;
+  const body = `claimed by ${who} at ${at} — fenix`;
+  const tag = `claim:${lease.sessionId ?? runId}`;
+  const argv = [
+    process.execPath,
+    join(ROOT, "scripts", "linear-ops.mjs"),
+    "comment",
+    args.issue,
+    "--body",
+    body,
+    "--dedup-tag",
+    tag,
+  ];
+
+  const cmdLog = process.env.LA_TRIAGE_CLAIM_CMD_LOG;
+  if (cmdLog) {
+    appendFileSync(cmdLog, JSON.stringify(argv) + "\n");
+    return skipped("claim command logged to LA_TRIAGE_CLAIM_CMD_LOG instead of being executed");
+  }
+  if (!process.env.LINEAR_API_KEY) return skipped("LINEAR_API_KEY is not set");
+
+  const res = spawnSync(argv[0], argv.slice(1), { env: process.env, encoding: "utf8", timeout: 30_000 });
+  if (res.error || res.status !== 0) {
+    const reason = claimFailureReason(res);
+    console.error(`[triage] the claim comment was not posted: ${reason}`);
+    return skipped(reason);
+  }
+  return { posted: true };
+}
+
+/**
+ * The failure reason a `spawnSync` linear-ops result maps to. Exported
+ * because the mapping is contract (FOC-902 §B: a 30 s timeout degrades to
+ * reason "timeout", a failed post to the stderr tail) and the CLI seam
+ * (`LA_TRIAGE_CLAIM_CMD_LOG`) intercepts execution entirely, so the mapping
+ * itself is only reachable from a unit test.
+ * @param {import("node:child_process").SpawnSyncReturns} res
+ * @returns {string}
+ */
+export function claimFailureReason(res) {
+  if (res.error?.code === "ETIMEDOUT") return "timeout";
+  const tail = String(res.error?.message ?? res.stderr ?? "")
+    .split("\n")
+    .filter(Boolean)
+    .slice(-3)
+    .join("; ");
+  return tail || `exit ${res.status}`;
+}
+
 // ── issue loading ────────────────────────────────────────────────────────────
 // --issue-file is the offline seam: the test suite feeds fixtures through it,
 // and it is also how you triage from a saved payload when Linear is down.
@@ -578,6 +736,27 @@ function cmdPropose(args) {
   const issue = loadIssue(args);
   const signals = extractSignals(issue);
 
+  // Ownership (FOC-848): the proposal is advisory, but a ticket this
+  // installation may not take is refused here too — the Supervisor should
+  // learn it before `record`, not after. A broken config is fail-closed.
+  let ownership;
+  try {
+    ownership = checkOwnership(issue, { owner: currentOwner(), config: loadOwnership() });
+  } catch (err) {
+    if (err instanceof OwnershipConfigError) failJson(err.message, { code: "ownership-config" });
+    throw err;
+  }
+  // The hold's idempotency key: the payload identifier when the payload carries
+  // one, the invoked id otherwise — the SAME key `record` uses, so a
+  // propose-then-record on one refused ticket is one hold, not two.
+  const canonicalIssue = issue.identifier || args.issue;
+  if (!ownership.allowed) {
+    const refusal = ownershipRefusal(ownership, canonicalIssue);
+    const runId = args.run || process.env.LA_SUPERVISOR_RUN;
+    const hold = recordOwnershipHold({ runId, issueId: canonicalIssue, result: ownership });
+    failJson(refusal.message, { code: refusal.code, ownership, hold: hold?.id ?? null });
+  }
+
   let result;
   try {
     result = propose(signals, graph);
@@ -586,7 +765,20 @@ function cmdPropose(args) {
   }
 
   console.log(
-    JSON.stringify({ ok: true, issue: signals.identifier || args.issue, ...result, signals }, null, 2),
+    JSON.stringify(
+      {
+        ok: true,
+        issue: signals.identifier || args.issue,
+        ...result,
+        signals,
+        // AC3: on the shipped default (unrestricted) the output is what it was
+        // before the gate existed — no ownership key. A restricted install
+        // carries the verdict on the proposal.
+        ...(ownership.verdict === "unrestricted" ? {} : { ownership }),
+      },
+      null,
+      2,
+    ),
   );
 }
 
@@ -626,6 +818,75 @@ function cmdRecord(args) {
 
   const runId = args.run || process.env.LA_SUPERVISOR_RUN;
   if (!runId) failJson("--run <supervisorRunId> is required (or set LA_SUPERVISOR_RUN)");
+
+  // Ownership gate (FOC-848), before anything is written: on a restricted
+  // install the issue is loaded (honouring --issue-file, the offline seam) and
+  // checked against the acting owner. A refused ticket records an idempotent
+  // hold and writes NO triage.json — --force does not bypass it, because a
+  // forced verdict for a foreign ticket would still retarget every spawn in
+  // the run. An unrestricted install loads no issue and stamps nothing:
+  // byte-for-byte the behaviour this file had before the gate existed.
+  const ownershipConfig = (() => {
+    try {
+      return loadOwnership();
+    } catch (err) {
+      if (err instanceof OwnershipConfigError) failJson(err.message, { code: "ownership-config" });
+      throw err;
+    }
+  })();
+  let ownershipStamp = null;
+  if (ownershipConfig.restricted) {
+    const owner = (() => {
+      try {
+        return currentOwner();
+      } catch (err) {
+        if (err instanceof OwnershipConfigError) failJson(err.message, { code: "ownership-config" });
+        throw err;
+      }
+    })();
+    const issue = loadIssue(args);
+    // The hold's idempotency key: the payload identifier when the payload
+    // carries one, the invoked id otherwise. `propose` keys its hold the same
+    // way, so a propose-then-record on one refused ticket is one hold, not two.
+    const canonicalIssue = issue.identifier || args.issue;
+    let ownership;
+    try {
+      ownership = checkOwnership(issue, { owner, config: ownershipConfig });
+    } catch (err) {
+      if (err instanceof OwnershipConfigError) failJson(err.message, { code: "ownership-config" });
+      throw err;
+    }
+    if (!ownership.allowed) {
+      const refusal = ownershipRefusal(ownership, canonicalIssue);
+      const hold = recordOwnershipHold({ runId, issueId: canonicalIssue, result: ownership });
+      // A refused re-record must not leave the previous verdict's spawn licence
+      // behind: triage.json may still carry `ownership.allowed: true` recorded
+      // before the config flipped (project reassigned, unlisted → ask), and
+      // supervisor-spawn honours that stale stamp. Strip the stamp — the
+      // verdict stays on record, the licence to spawn does not.
+      const priorPath = triagePath(runId);
+      if (existsSync(priorPath)) {
+        try {
+          const prior = JSON.parse(readFileSync(priorPath, "utf8"));
+          if (
+            typeof prior?.issue === "string" &&
+            prior.issue.toLowerCase() === args.issue.toLowerCase() &&
+            prior.ownership !== undefined
+          ) {
+            const stripped = { ...prior };
+            delete stripped.ownership;
+            ensureRunDir(runId);
+            atomicWriteJSON(priorPath, stripped);
+          }
+        } catch {
+          // An unreadable triage.json is already unusable to spawn; the
+          // refusal below stands on its own.
+        }
+      }
+      failJson(refusal.message, { code: refusal.code, ownership, hold: hold?.id ?? null });
+    }
+    ownershipStamp = { owner: ownership.owner, verdict: ownership.verdict, allowed: true, project: ownership.project };
+  }
 
   const graph = loadGraphOrFail();
   let node;
@@ -702,6 +963,14 @@ function cmdRecord(args) {
     intake = null;
   }
 
+  // The lease check (FOC-902 §A) runs BEFORE any write — a refused triage must
+  // leave nothing on disk — but it must NOT reach Linear first: the key's issue
+  // part is the display identifier, and the `--issue` argument IS that
+  // identifier (TEAM-NUM), so a loaded payload would only echo it back. The
+  // claim comment posts against the same `args.issue`, so `record` never loads
+  // the issue at all (`loadIssue` stays with `propose`/`intake`).
+  const lease = checkLease({ args, issue: { identifier: args.issue } });
+
   const size = args.size !== undefined ? String(args.size) : null;
   const intakeView = intake ? intakeSummaryOf(intake, size) : null;
   const record = {
@@ -717,10 +986,13 @@ function cmdRecord(args) {
     createdAt: new Date().toISOString(),
     ...(size ? { size, suggestedFlow: sizeFlow } : {}),
     ...(intakeView ? { intake: intakeView } : {}),
+    lease,
+    ...(ownershipStamp ? { ownership: ownershipStamp } : {}),
   };
 
   ensureRunDir(runId);
-  atomicWriteJSON(path, record);
+  // 0644: run-root files are Supervisor-owned; children may read, never write.
+  atomicWriteJSON(path, record, { mode: 0o644 });
 
   if (sizeFlow) { try { recordRuntimeChoice(sizeFlow); } catch { console.error('[runtime] workflow choice could not be recorded'); } }
 
@@ -755,6 +1027,12 @@ function cmdRecord(args) {
   const { warnings: labelWarnings } = labelRecordedIntake({ intake, verdict: args.verdict, size, issue: args.issue });
   for (const w of labelWarnings) console.error(`[triage] ${w}`);
 
+  // The claim comment goes out AFTER the verdict is on disk (FOC-902 §B): a
+  // failed or hanging post must never cost the recorded verdict. The outcome
+  // is merged back into triage.json so the record says what happened.
+  record.claimComment = postClaimComment({ args, lease, runId });
+  atomicWriteJSON(path, record);
+
   console.log(JSON.stringify({ ok: true, path, ...record }, null, 2));
 }
 
@@ -766,6 +1044,11 @@ async function cmdIntake(args) {
   if (!runId) failJson("--run <supervisorRunId> is required (or set LA_SUPERVISOR_RUN)");
   const graph = loadGraphOrFail();
   const issue = loadIssue(args);
+
+  // The lease check before anything is written (FOC-902 §A): intake.json is
+  // this run's annotation record for THIS issue, and a refused lease must
+  // leave nothing behind — same rule, same refusals as `record`.
+  checkLease({ args, issue });
 
   // A0 annotations via the seam's decisionId channel — the registry owns the
   // question text, never inline questions. No OPENROUTER_API_KEY → every call
@@ -790,7 +1073,7 @@ async function cmdIntake(args) {
   const path = intakePath(runId);
   try {
     ensureRunDir(runId);
-    atomicWriteJSON(path, record);
+    atomicWriteJSON(path, record, { mode: 0o644 }); // run-root: Supervisor-owned
   } catch (err) {
     failJson(`could not write ${path}: ${err.message}`);
   }

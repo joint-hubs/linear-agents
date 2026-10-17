@@ -48,42 +48,6 @@ function assertEq(actual, expected, label) {
 function buildFixture() {
   const root = mkdtempSync(join(tmpdir(), "prompt-library-test-"));
 
-  // bin/dev.bat (needed by squad-config)
-  mkdirSync(join(root, "bin"), { recursive: true });
-  writeFileSync(
-    join(root, "bin", "dev.bat"),
-    '@echo off\r\nsetlocal\r\nset "ANTHROPIC_MODEL=z-ai/glm-5.2"\r\nclaude %*\r\nendlocal\r\n',
-    "utf8"
-  );
-
-  // bin/plan.bat
-  writeFileSync(
-    join(root, "bin", "plan.bat"),
-    '@echo off\r\nsetlocal\r\nif defined NATIVE (\r\n    set "ANTHROPIC_MODEL=claude-opus-4-8"\r\n) else (\r\n    set "ANTHROPIC_MODEL=anthropic/claude-opus-4.8"\r\n)\r\nclaude %*\r\nendlocal\r\n',
-    "utf8"
-  );
-
-  // bin/review.bat
-  writeFileSync(
-    join(root, "bin", "review.bat"),
-    '@echo off\r\nsetlocal\r\nset "ANTHROPIC_MODEL=z-ai/glm-5.2"\r\nclaude %*\r\nendlocal\r\n',
-    "utf8"
-  );
-
-  // bin/test.bat
-  writeFileSync(
-    join(root, "bin", "test.bat"),
-    '@echo off\r\nsetlocal\r\nset "ANTHROPIC_MODEL=minimax/minimax-m3"\r\nclaude %*\r\nendlocal\r\n',
-    "utf8"
-  );
-
-  // bin/cadence.bat
-  writeFileSync(
-    join(root, "bin", "cadence.bat"),
-    '@echo off\r\nsetlocal\r\nset "ANTHROPIC_MODEL=minimax/minimax-m3"\r\nclaude %*\r\nendlocal\r\n',
-    "utf8"
-  );
-
   // agents/dev/agents/implementer.md
   mkdirSync(join(root, "agents", "dev", "agents"), { recursive: true });
   writeFileSync(
@@ -131,11 +95,20 @@ function buildFixture() {
     "utf8"
   );
 
-  // config/models.json (needed by squad-config)
+  // config/models.json (needed by squad-config) — the dev lead is seeded the
+  // way squad-config resolves it: routing.dev.lead names an `ids` alias that
+  // maps to the full model id. No bin/*.bat ANTHROPIC_MODEL seeding —
+  // squad-config no longer reads launchers for the lead model.
   mkdirSync(join(root, "config"), { recursive: true });
   writeFileSync(
     join(root, "config", "models.json"),
     JSON.stringify({
+      ids: {
+        "dev-lead": "z-ai/glm-5.2",
+      },
+      routing: {
+        dev: { lead: "dev-lead" },
+      },
       pricing: {
         "z-ai/glm-5.2": { input: 1.40, output: 4.40 },
         "minimax/minimax-m3": { input: 0.30, output: 1.20 },

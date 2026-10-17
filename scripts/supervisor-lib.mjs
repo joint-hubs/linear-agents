@@ -15,7 +15,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -96,16 +96,18 @@ export const TURN_END_CONTRACT = [
   "=== END TURN-END CONTRACT ===",
 ].join("\n");
 
-// FOC-608: the state root is a SEAM, in the same spirit as telemetry-store's
-// LA_TELEMETRY_HOME — one function derives every path below it, and the default
-// is never inlined anywhere else. `LA_SUPERVISOR_STATE_HOME` redirects the whole
-// supervisor state tree (runs, gates, tees, wake queues) to another directory,
-// which is what lets tests run against a temp dir instead of the repo's real
-// `.state/supervisor/`. Unset means the historical location, unchanged.
-export const supervisorStateHome = () =>
-  process.env.LA_SUPERVISOR_STATE_HOME || join(ROOT, ".state", "supervisor");
+// FOC-608: the state root is a SEAM — one function derives every path below it,
+// and the default is never inlined anywhere else. `LA_SUPERVISOR_STATE_HOME`
+// redirects the whole supervisor state tree (runs, gates, tees, wake queues) to
+// another directory, which is what lets tests run against a temp dir instead of
+// the repo's real `.state/supervisor/`. Unset means the historical location,
+// unchanged. Since FOC-903 the function (and runDir, RUN_ID_RE, the per-run
+// scratch helpers) live in utils.mjs — this module sits above it in the import
+// graph — and are re-exported here so every existing importer keeps working.
+import { collectRunScratch, runDir, RUN_ID_RE, scratchDir, supervisorStateHome } from "./utils.mjs";
 
-export const runDir = (runId) => join(supervisorStateHome(), runId);
+export { collectRunScratch, runDir, RUN_ID_RE, scratchDir, supervisorStateHome };
+
 export const registryPath = (runId) => join(runDir(runId), "children.json");
 export const triagePath = (runId) => join(runDir(runId), "triage.json");
 // FOC-451: the intake annotations live as triage.json's sibling, so a reviewer
@@ -119,9 +121,29 @@ export const verdictPath = (runId, taskId, round) =>
 export const teeRelPath = (childId) => join("children", `${childId}.jsonl`);
 export const teeAbsPath = (runId, childId) => join(runDir(runId), teeRelPath(childId));
 
+// FOC-802 (M3): the run root is Supervisor-owned state a child must be able to
+// READ but not rewrite, and the entrypoint's fix_permissions runs only at
+// container start — a run created afterwards inherits setgid + umask 0002 and
+// would be group-writable by every child until the next restart. The modes are
+// therefore pinned here, at the source: the run dir 0755, the four shared
+// subdirs 02775 (setgid, group-writable — children DO write their tees, gates,
+// verdicts and launch state there), and the run-root JSON files 0644 via the
+// atomicWriteJSON `mode` below. mkdirSync ignores `mode` on Windows, and — the
+// part that bit — mkdir(2) itself ignores S_ISGID in `mode`: the setgid bit is
+// only ever inherited from the parent directory or set by chmod. So each shared
+// subdir is chmod'd 02775 after creation, which also re-pins a reused run that
+// drifted. chmod to setgid needs the caller's gid to match the dir's group —
+// true for the owner's primary group and for `fenix` when the node user is a
+// member of it; a mismatch is a real EPERM and is NOT swallowed. Windows has
+// no POSIX mode bits and may refuse the call outright, so it is skipped there.
 export function ensureRunDir(runId) {
-  mkdirSync(join(runDir(runId), "children"), { recursive: true });
-  mkdirSync(gatesDir(runId), { recursive: true });
+  const base = runDir(runId);
+  mkdirSync(base, { recursive: true, mode: 0o755 });
+  for (const sub of ["children", "gates", "verdicts", "launch"]) {
+    const dir = join(base, sub);
+    mkdirSync(dir, { recursive: true, mode: 0o2775 });
+    if (process.platform !== "win32") chmodSync(dir, 0o2775);
+  }
   // FOC-905: stamp who created this run dir — the orphan scan marks only what
   // this container owns, so the owner must be recorded at creation. Best
   // effort: a failed owner write never breaks run creation (the scan treats a
@@ -152,7 +174,9 @@ export function readRegistry(runId) {
 
 export function writeRegistry(runId, registry) {
   ensureRunDir(runId);
-  atomicWriteJSON(registryPath(runId), registry);
+  // 0644 (FOC-802 M3): the registry is Supervisor-and-watcher state; children
+  // read it, they never write it.
+  atomicWriteJSON(registryPath(runId), registry, { mode: 0o644 });
 }
 
 // Read-modify-write. Single-writer by phase: supervisor-spawn writes the initial
@@ -167,6 +191,39 @@ export function updateChild(runId, childId, patch) {
   registry.children[childId] = { ...current, ...patch };
   writeRegistry(runId, registry);
   return registry.children[childId];
+}
+
+// ── signal-time file cleanup (FOC-802, M1) ───────────────────────────────────
+//
+// `process.on("exit")` does NOT run when a signal terminates the process, and
+// the Supervisor kills detached watchers hard (SIGTERM, sometimes SIGKILL).
+// Anything the watcher deletes only in its exit handler can outlive the turn —
+// the child env file with the provider keys inside is exactly that file. The
+// watcher installs these handlers alongside its exit handler so the file is
+// removed on every path that kills the process.
+//
+// The handlers re-raise the signal with themselves removed, so the process dies
+// exactly as it would have without them — same disposition, same exit status a
+// shell or supervisor observes; only the file removal is added.
+//
+// The injected `raise` is the unit-test seam: on Windows a signal from another
+// process terminates unconditionally without running Node handlers, so the
+// handler's behaviour is proven by emitting the signal in-process instead.
+export function installEnvFileSignalHandlers(remove, { raise = (signal) => process.kill(process.pid, signal) } = {}) {
+  const handlers = {};
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    handlers[signal] = () => {
+      try {
+        remove();
+      } catch {
+        /* best effort — the signal still kills the process */
+      }
+      process.removeListener(signal, handlers[signal]);
+      raise(signal);
+    };
+    process.on(signal, handlers[signal]);
+  }
+  return handlers; // returned so a test (or caller) can remove them again
 }
 
 // Does this child have an unanswered question outstanding? The watcher asks at
@@ -294,7 +351,7 @@ export function appendWakeEvent(runId, event) {
     ts: new Date().toISOString(),
   };
   ensureRunDir(runId);
-  appendFileSync(wakeQueuePath(runId), JSON.stringify(row) + "\n");
+  appendFileSync(wakeQueuePath(runId), JSON.stringify(row) + "\n", { mode: 0o644 });
   return row;
 }
 
@@ -346,7 +403,7 @@ export function writeWakeAck(runId, seq) {
     );
   }
   const ackedThrough = Math.max(readWakeAck(runId), seq);
-  atomicWriteJSON(wakeAckPath(runId), { ackedThrough, ackedAt: new Date().toISOString() });
+  atomicWriteJSON(wakeAckPath(runId), { ackedThrough, ackedAt: new Date().toISOString() }, { mode: 0o644 });
   return ackedThrough;
 }
 
@@ -367,7 +424,9 @@ export function writeWakeAck(runId, seq) {
 // the highest seq any waker has woken the session for; it survives takeovers so
 // one row never wakes twice.
 //
-// Writer discipline: waker.json is written ONLY by supervisor-wake.mjs.
+// Writer discipline: waker.json is written ONLY through writeWakerLease /
+// updateWakerLease below — supervisor-wake.mjs's arm, heartbeat and end writes,
+// and the test-side seeding, all take the same lock (FOC-840).
 export const wakerPath = (runId) => join(runDir(runId), "waker.json");
 
 // A waker writes its heartbeat once per poll (1 s by default); 15 s of silence
@@ -390,6 +449,147 @@ export function wakerState(lease, now = Date.now(), staleMs = WAKER_LEASE_STALE_
   if (lease.endedAt) return "ended";
   const beat = Date.parse(lease.heartbeatAt ?? "");
   return Number.isFinite(beat) && now - beat <= staleMs ? "alive" : "stale";
+}
+
+// ── waker lease locking (FOC-840) ────────────────────────────────────────────
+//
+// The waker's compare-and-swap (supervisor-wake.mjs) re-reads the lease
+// immediately before writing, but a re-read and an atomic write are two
+// filesystem operations: a newer lease that lands inside that gap is clobbered
+// by the stale heartbeat, and its owner never re-surfaces it — the stale waker
+// runs to its lifetime and wakes a session a newer waker already owns. The CAS
+// closed the gap per WRITER; this lock closes it BETWEEN writers: every lease
+// write takes the lock, so "re-read, then write" happens while no other writer
+// can interleave, on either side.
+//
+// The lock is a DIRECTORY (waker.json.lock), created with mkdirSync —
+// directory creation is atomic on every platform, which a lock file is not
+// (two creators can both "succeed"). The rules:
+//
+//   · a writer holds it only across one read→write pair (well under a
+//     second), so an acquire that outlasts WAKER_LEASE_LOCK_WAIT_MS means the
+//     holder is wedged or gone — give up rather than block the waker's poll;
+//   · a lock directory older than WAKER_LEASE_LOCK_STALE_MS was left behind by
+//     a killed writer (no cleanup runs on SIGKILL) and is removed by the next
+//     acquirer; the directory's own mtime is the stamp;
+//   · every acquire releases in a finally, so a thrown write cannot wedge the
+//     next one.
+//
+// Deliberately best-effort: a remover can, in principle, stat a stale lock,
+// watch the holder release, and rmdir the FRESH lock a new acquirer just
+// created. The window is microseconds against a file written ~1×/s by at most
+// two processes — a pid-file protocol was not worth its own failure modes
+// here.
+export const wakerLeaseLockPath = (runId) => `${wakerPath(runId)}.lock`;
+export const WAKER_LEASE_LOCK_WAIT_MS = 2_000;
+export const WAKER_LEASE_LOCK_STALE_MS = 5_000;
+const WAKER_LEASE_LOCK_POLL_MS = 5;
+const WAKER_LEASE_RELEASE_ATTEMPTS = 5;
+// Codes that mean "the lock dir is held, or a holder is racing it right now".
+// EEXIST is the ordinary held answer; on Windows a waiter's mkdir can also
+// fail while it races the holder's rmSync (create-vs-delete: EPERM/EACCES) or
+// while AV/Defender still holds a handle on a just-created dir
+// (ENOTEMPTY/EBUSY) — all of these go through the stale check and the poll.
+const LOCK_HELD_CODES = new Set(["EEXIST", "EPERM", "EACCES", "ENOTEMPTY", "EBUSY"]);
+
+// A SYNCHRONOUS wait: the lease writers are synchronous (atomicWriteJSON has
+// no async form), so a setTimeout poll cannot sit inside the acquire loop.
+// Atomics.wait parks the thread for the interval without spinning the CPU;
+// where it is unavailable it falls back to a bounded busy-wait.
+const waitSync = (ms) => {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* spin */ }
+  }
+};
+
+/**
+ * Run `fn` while holding the run's waker-lease lock. `fn` runs synchronously
+ * and its return value is passed through; a failed acquire THROWS (callers
+ * decide what a lost lease write means — the waker stands down, a test fails
+ * loudly).
+ */
+export function withWakerLeaseLock(runId, fn) {
+  const lock = wakerLeaseLockPath(runId);
+  const deadline = Date.now() + WAKER_LEASE_LOCK_WAIT_MS;
+  let lastCode = null;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (err) {
+      // See LOCK_HELD_CODES: EEXIST plus the Windows create-vs-delete and
+      // AV-handle races all mean "held or racing" — they go through the stale
+      // check, the deadline check and the poll below, exactly like EEXIST.
+      if (!LOCK_HELD_CODES.has(err.code)) throw err;
+      lastCode = err.code;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > WAKER_LEASE_LOCK_STALE_MS) {
+          rmSync(lock, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        // Raced with the holder's release — retry the mkdir against the
+        // whatever is on disk now.
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `waker lease lock busy after ${WAKER_LEASE_LOCK_WAIT_MS} ms (last ${lastCode}): ${lock}`,
+        );
+      }
+      waitSync(WAKER_LEASE_LOCK_POLL_MS);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    // A release can fail on Windows exactly like an acquire (EPERM/EACCES
+    // racing another waiter's mkdir, ENOTEMPTY/EBUSY under an AV handle).
+    // Retry a bounded few times; ENOENT means the lock is already gone —
+    // success. After the last attempt give up silently: stale recovery above
+    // is the fallback for a lock left behind, not this handler.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rmSync(lock, { recursive: true, force: true });
+        break;
+      } catch (err) {
+        if (err.code === "ENOENT") break;
+        if (attempt >= WAKER_LEASE_RELEASE_ATTEMPTS - 1 || !LOCK_HELD_CODES.has(err.code)) break;
+        waitSync(5);
+      }
+    }
+  }
+}
+
+/**
+ * The one plain writer of waker.json, used by the Supervisor side and by the
+ * tests to seed a lease. Taking the lock here is what makes a test's seedLease
+ * a real competing writer — the race this exists for is between THIS write and
+ * the waker's own.
+ */
+export function writeWakerLease(runId, lease) {
+  return withWakerLeaseLock(runId, () => {
+    atomicWriteJSON(wakerPath(runId), lease);
+    return true;
+  });
+}
+
+/**
+ * Read-modify-write under the lease lock. `update` sees the on-disk lease
+ * INSIDE the lock and returns the lease to write, or null to write nothing —
+ * the waker's guarded writes use the null path to stand down when the lease on
+ * disk is no longer theirs. The re-read→write pair the waker's CAS could not
+ * make atomic is atomic here, because the lock is held across both.
+ */
+export function updateWakerLease(runId, update) {
+  return withWakerLeaseLock(runId, () => {
+    const next = update(readWakerLease(runId));
+    if (next === null || next === undefined) return null;
+    atomicWriteJSON(wakerPath(runId), next);
+    return next;
+  });
 }
 
 // ── stop-hook turn-end guard (FOC-609) ───────────────────────────────────────
@@ -605,7 +805,7 @@ export function readHolds(runId) {
 export function writeHolds(runId, store) {
   validateHoldStore(store, holdsPath(runId));
   ensureRunDir(runId);
-  atomicWriteJSON(holdsPath(runId), store);
+  atomicWriteJSON(holdsPath(runId), store, { mode: 0o644 });
   return store;
 }
 
@@ -1447,7 +1647,7 @@ export function assertStageBudget(runId, squad, { graph, fail = failJson } = {})
 
   if (budget.reserveExhausted) {
     const report = partialStatusReport(runId, { graph });
-    atomicWriteJSON(join(runDir(runId), "partial-status.json"), report);
+    atomicWriteJSON(join(runDir(runId), "partial-status.json"), report, { mode: 0o644 });
     return fail(
       `the reserve is exhausted ($${budget.reserve.toFixed(2)} allocated, $${budget.reserveDrawn.toFixed(4)} drawn) — ` +
         `graph expansion stops here`,
@@ -1482,6 +1682,13 @@ export function assertStageBudget(runId, squad, { graph, fail = failJson } = {})
 // (scripts/supervisor-cleanup.mjs). Same caveat as above — this is the
 // accidental `git worktree remove`, not the determined one; the identity check
 // in supervisor-cleanup.mjs is the control that actually holds.
+//
+// FOC-788 follow-up (2026-10-15): the dashboard's write routes (work push/PR,
+// the supervisor message forward, settings, gates, holds) are not a child's
+// either — a natively spawned child is a host process and can reach the
+// loopback the dashboard answers on. Both shells are denied because a child
+// may use either. Same caveat as every rule here: not a sandbox, only the
+// accidental curl.
 export const SUPERVISOR_DENY = [
   "Bash(git push:*)",
   "Bash(gh pr create:*)",
@@ -1490,18 +1697,65 @@ export const SUPERVISOR_DENY = [
   "Bash(gh api:*)",
   "Bash(git worktree remove:*)",
   "Bash(git worktree prune:*)",
-  // Linear writes go through the frontman, never a child. FOC-213 (2026-09-05):
-  // a dev child found the script path and posted a Linear comment + state
-  // transition behind the mcp__linear__* deny, because the deny-list covers the
-  // MCP server, not the CLI scripts that wrap the same API. The rules below cut
-  // the launcher-documented invocation (`node $LA_ROOT/scripts/...`). Same
-  // caveat as the push rules above — a child that rewrites the path (`node
-  // C:/.../linear-ops.mjs`, `cmd /c`, cd + relative) walks past the prefix
-  // match; this removes the accidental write, and the frontman relay remains
-  // the real control.
+  // Linear writes go through the frontman, never a child. FOC-213 (2026-09-05)
+  // found the launcher-form gap; FOC-511 closes the invocation-form gaps.
+  // Claude Code matches a Bash/PowerShell rule against the whole command text
+  // with `*` matching any text, and a deny applies when any subcommand of a
+  // compound command matches (`cd x && node scripts/linear-ops.mjs …` is
+  // caught). These wildcard forms cover the launcher, relative and absolute
+  // invocations and the PowerShell tool, which every squad allow-lists as
+  // `PowerShell(node *)`. `linear-push.mjs` (the createIssue funnel) and
+  // `gh-screened.mjs` (the Supervisor's screened PR path, FOC-512) join the
+  // list. The `node ` prefix keeps `cat`, `git diff` and
+  // `node --test scripts/<x>.test.mjs` outside the rule.
+  // Residual, documented by Claude Code: a different invocation form
+  // (`sh -c '…'`, `cmd /c`, `node.exe`, wrapper scripts) is not matched —
+  // sandboxing or a PreToolUse hook is the boundary there.
   "Bash(node $LA_ROOT/scripts/linear-ops.mjs:*)",
   "Bash(node $LA_ROOT/scripts/publish-linear-comment.mjs:*)",
   "Bash(node $LA_ROOT/scripts/linear-query.mjs:*)",
+  // FOC-730: the working-state store has ONE writer — the agent-state CLI.
+  // A sqlite3 one-liner or a node -e/--eval snippet naming the store would
+  // write rows without the validation, the history row and the secret screen
+  // the CLI applies; Edit/Write on the .sqlite file are worse (a hand-edited
+  // or deleted store). Same caveat as the rules above: a prefix/text match,
+  // not a sandbox — renaming the file or writing through another tool walks
+  // past it; this removes the accidental write. The Edit/Write rules are
+  // anchored with the filesystem-wide `//` form (`Edit(//**/agent-state.sqlite)`)
+  // because a bare `**/` pattern only reaches paths under the current directory,
+  // and the store lives outside it in LA_SUPERVISOR_STATE_HOME. Documented in
+  // docs/agent-state.md ("Agents: how to use it").
+  "Bash(sqlite3 *agent-state*)",
+  "Bash(node -e *agent-state*)",
+  "Bash(node --eval *agent-state*)",
+  "Edit(//**/agent-state.sqlite)",
+  "Write(//**/agent-state.sqlite)",
+  "Bash(node *linear-ops.mjs*)",
+  "PowerShell(node *linear-ops.mjs*)",
+  "Bash(node *publish-linear-comment.mjs*)",
+  "PowerShell(node *publish-linear-comment.mjs*)",
+  "Bash(node *linear-query.mjs*)",
+  "PowerShell(node *linear-query.mjs*)",
+  "Bash(node *linear-push.mjs*)",
+  "PowerShell(node *linear-push.mjs*)",
+  "Bash(node *gh-screened.mjs*)",
+  "PowerShell(node *gh-screened.mjs*)",
+  // The dashboard's write routes (FOC-788 follow-up, see above). Middle
+  // wildcards like the `git -C *` allows above use.
+  "Bash(*127.0.0.1:7331*)",
+  "Bash(*localhost:7331*)",
+  "Bash(*/api/work/*)",
+  "Bash(*/api/supervisor/*)",
+  "Bash(*/api/settings/*)",
+  "Bash(*/api/gates/*)",
+  "Bash(*/api/holds/*)",
+  "PowerShell(*127.0.0.1:7331*)",
+  "PowerShell(*localhost:7331*)",
+  "PowerShell(*/api/work/*)",
+  "PowerShell(*/api/supervisor/*)",
+  "PowerShell(*/api/settings/*)",
+  "PowerShell(*/api/gates/*)",
+  "PowerShell(*/api/holds/*)",
 ];
 
 export const childSettingsPath = (runId, childId) =>
@@ -1517,15 +1771,27 @@ export const childSettingsPath = (runId, childId) =>
  *   · No `allow` list. Under merge semantics an allow entry can only ADD a
  *     permission, never remove one, and this file exists to remove. Writing one
  *     would make the file's intent readable two ways.
- *   · No `hooks`. The squad's SessionStart telemetry hook already loads from the
- *     config dir; repeating it here risks registering it twice and double-
- *     counting every child run.
+ *   · Exactly one hook: the SessionStart working-state re-injection (FOC-729).
+ *     The squad file's telemetry hook is NOT repeated here — it already loads
+ *     from the config dir, and repeating it would double-count every child run.
+ *     This command is unique to this layer, so it registers exactly once; its
+ *     namespace and role come from the child's inherited env.
  *
  * The squad's own denies are copied in anyway even though the merge would apply
  * them regardless — so one file answers "what is this child forbidden to do?"
  * without needing to know the merge rules. Order is stable (squad first, then
  * whatever the Supervisor adds) so regenerating produces a byte-identical file.
  */
+// One source for the hook the Supervisor settings and the child settings both
+// carry — tests compare both files against this object. The command relies on
+// $LA_ROOT in the child env (inherited from the Supervisor, like every other
+// hook command).
+export const WORKING_STATE_SESSION_START_HOOK = {
+  type: "command",
+  command: "node \"$LA_ROOT/scripts/agent-state-hook.mjs\" SessionStart",
+  timeout: 10,
+};
+
 export function buildChildSettings(...baseSettings) {
   const deny = [];
   for (const base of [...baseSettings, { permissions: { deny: SUPERVISOR_DENY } }]) {
@@ -1533,7 +1799,12 @@ export function buildChildSettings(...baseSettings) {
       if (!deny.includes(rule)) deny.push(rule);
     }
   }
-  return { permissions: { deny } };
+  // Key order is part of the contract: the file must stay byte-identical
+  // across regenerations.
+  return {
+    permissions: { deny },
+    hooks: { SessionStart: [{ hooks: [WORKING_STATE_SESSION_START_HOOK] }] },
+  };
 }
 
 // ── redaction (moved here from supervisor-status.mjs, FOC-783) ───────────────
