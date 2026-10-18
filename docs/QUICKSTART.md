@@ -251,6 +251,16 @@ Outside Docker (native), standalone squads launch on any OS with
 `node scripts/squad-start.mjs <plan|dev|review|test|cadence|supervisor>` — on
 Windows `bin\<squad>.bat` is a thin wrapper for the same.
 
+**Team** (`/team`, FOC-791) is the picture of who delegates to whom: You →
+Supervisor → the four squad leads with their models → each lead's line-up (the
+roles it picks at least 5 % of the time, with share bars) and bench. Three
+scopes: *Overall* for a period (7d/30d/90d/all), *Group* filtered by repository
+(milestone, type, epic and size are disabled until FOC-914), and *Ticket* — the
+team that worked on one ticket, child ids and statuses from the Supervisor
+registry, refreshed every 5 s. The numbers are the per-message priced telemetry
+the cost screens use (`GET /api/team`); a ticket's detail on the Work board
+shows the same team compactly with a link here.
+
 ## Task cockpits
 
 The board is home (`/work` aliases to it). A ticket card opens the task

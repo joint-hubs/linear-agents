@@ -100,3 +100,26 @@
 }
 .wk-card-entry .wk-card { width: 100%; }
 .wk-card-cockpit { display: block; padding: 5px 9px 9px; font-size: 12px; }
+
+/* "Team on this ticket" (FOC-791 slice C): compact per-squad rows inside the
+   ticket panel — squad label, lead model (or greyed "not run"), cost, top
+   pick, children chips. Greyed is backed by the "not run" text (colour is
+   never the only signal). */
+.wk-team { margin-top: 14px; }
+.wk-team-line { font-size: 12px; }
+.wk-team-rows { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+.wk-team-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+}
+.wk-team-squad { font-weight: 600; min-width: 52px; }
+.wk-team-lead { color: var(--text-1, inherit); }
+.wk-team-cost { color: var(--text-2, inherit); }
+.wk-team-pick { color: var(--text-2, inherit); }
+.wk-team-children { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.wk-team-off .wk-team-lead,
+.wk-team-off .wk-team-cost,
+.wk-team-off .wk-team-pick { color: var(--text-3, var(--text-2, #9aa2af)); }

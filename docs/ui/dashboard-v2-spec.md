@@ -98,6 +98,13 @@ block (Supervisor, provider, telemetry freshness) at the bottom of the navigatio
   2026-10-11, telemetry): DEV lead picks implementer 50 % and recon 33 %, refactorer never; REVIEW's
   `general-purpose` is 4 % of picks but $7.61 (more than security + first-pass); leads spend 50–91 %
   of their squad's cost themselves.
+- **Status (2026-10-18, FOC-791):** delivered — `/team` (nav "Team", the v1 Manager stays at
+  `/manager`), `GET /api/team` on the per-message priced `canonical_usage` turns, the three scopes,
+  the Work ticket detail block, plan `docs/plans/foc-791-team-lineups.md`. Group filters today: period
+  and repository (`config/projects.json` `ticketPrefix`); milestone, type, epic and size answer
+  `filters.unsupported` until FOC-914 wires the Linear state. The ticket scope polls every 5 s (no
+  server push); children come from the Supervisor registry (recent runs), costs from the telemetry
+  task links.
 
 ### 4.4 Costs & quality
 - Period toggle 7d / 30d / All. KPI tiles: children cost per ticket p50 with p20–p80, all-in average

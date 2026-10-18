@@ -4,6 +4,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import Cockpit from './screens/Cockpit.jsx';
 import Manager from './screens/Manager.jsx';
+import Team from './screens/Team.jsx';
 import Live from './screens/Live.jsx';
 import Timeline from './screens/Timeline.jsx';
 import Runs from './screens/Runs.jsx';
@@ -178,7 +179,7 @@ function Shell() {
             {/* Area shortcuts (FOC-804): land on the area's default route.
                 /work is a real route now (the board) — no shortcut needed. */}
             <Route path="/tasks" element={<Navigate to="/work" replace />} />
-            <Route path="/team" element={<Navigate to="/manager" replace />} />
+            <Route path="/team" element={<Team />} />
             <Route path="/insights" element={<Navigate to="/analysis" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

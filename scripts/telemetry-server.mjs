@@ -1,6 +1,7 @@
 import { handleTaskMapRoute } from './task-map-routes.mjs';
 import { handleToolRoute } from './tool-routes.mjs';
 import { handleRuntimeStatisticsRoute } from './runtime-statistics-routes.mjs';
+import { handleTeamRoute } from './team-routes.mjs';
 // scripts/telemetry-server.mjs
 // Telemetry HTTP API — reads the central SQLite store (telemetry-store.mjs).
 // ledger.mjs is used only for /api/flow's overview + turn-log extraction, which
@@ -996,6 +997,8 @@ const server = createServer(async (req, res) => {
     if (await handleToolRoute(req, res, url, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin })) return;
     if (await handleTaskMapRoute(req, res, url, { readJsonBody, respondBodyError, json, log, isLocalOrigin, isAllowedOrigin, linearQueue })) return;
     if (await handleRuntimeStatisticsRoute(req, res, url, { json, log })) return;
+    // --- Team line-ups (FOC-791 slice A): read-only, next to the other read routes ---
+    if (await handleTeamRoute(req, res, url, { json, log })) return;
     if (method === 'GET' && path === '/api/environment') {
       json(res, 200, { ...launchEnvironment(), mode: process.env.FENIX_ENVIRONMENT || (process.env.NODE_ENV === 'test' || process.env.FENIX_SUPERVISOR_CMD || process.env.LA_CLAUDE_BIN ? 'test' : 'live'), maxActive: Number(process.env.FENIX_MAX_ACTIVE_SUPERVISORS || 2) }); return;
     }

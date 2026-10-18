@@ -64,7 +64,10 @@ await test('Work sub-pages: Board, Runs (v1 Tickets and Timeline left the nav, F
 });
 
 await test('Team, Costs, Insights, Settings sub-pages match the spec', () => {
-  eq(NAV_AREAS.find((a) => a.id === 'team').pages, [{ path: '/manager', label: 'Manager (v1)' }]);
+  eq(NAV_AREAS.find((a) => a.id === 'team').pages, [
+    { path: '/team', label: 'Team' },
+    { path: '/manager', label: 'Manager (v1)' },
+  ]);
   eq(NAV_AREAS.find((a) => a.id === 'costs').pages, [{ path: '/costs', label: 'Costs & quality' }]);
   eq(NAV_AREAS.find((a) => a.id === 'insights').pages, [
     { path: '/insights/runtime', label: 'Runtime statistics' },
@@ -166,10 +169,11 @@ await test('areaForPath unknown path -> null', () => {
 });
 
 await test('areaForPath area shortcuts are not themselves areas', () => {
-  // /team, /insights, /settings redirect to their area's default route;
-  // nothing should light up for them until the redirect lands. (/work is a
-  // real route now — the board — so it lights up Work.)
-  eq(areaForPath('/team'), null);
+  // /insights and /settings redirect to their area's default route; nothing
+  // should light up for them until the redirect lands. (/work is a real route
+  // now — the board — so it lights up Work; /team is a real route too since
+  // FOC-791 replaced its redirect, so it lights up Team.)
+  eq(areaForPath('/team'), 'team');
   eq(areaForPath('/insights'), null);
   eq(areaForPath('/settings'), null);
 });

@@ -7,7 +7,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { getWorkTicket, getPublishPreview } from '../../api';
+import { getWorkTicket, getPublishPreview, getTeam } from '../../api';
+import { usePoll } from '../../hooks/usePoll';
 import {
   STAGES,
   formatMoney,
@@ -16,7 +17,9 @@ import {
   reconciliationText,
   panelCostLabel,
   ticketLabels,
+  ticketTeamSummary,
 } from '../../workModel';
+import { fmtUsd, fmtPct, teamQueryString } from '../../teamModel';
 import StartDialog from './StartDialog';
 import PublishDialog from './PublishDialog';
 import LabelChip from './LabelChip';
@@ -97,6 +100,55 @@ function EvidenceRow({ row }) {
     <li className="wk-ev-row">
       <span className="wk-ev-label">{row.label}</span>
     </li>
+  );
+}
+
+// The compact "Team on this ticket" block (FOC-791 slice C): one row per squad
+// (ran / lead model / cost / top pick / children chips), polled every 5 s from
+// the ticket scope. The panel must never block on it — a failure is a one-line
+// muted note, the last payload stays mounted on a later failure (usePoll keeps
+// data), and the "…" shows only before the first answer.
+function TeamOnTicket({ id }) {
+  const { data, error, loading } = usePoll(
+    (signal) => getTeam({ scope: 'ticket', ticket: id }, signal),
+    5000,
+    [id],
+  );
+  const rows = ticketTeamSummary(data);
+  const teamHref = '/team?' + teamQueryString({ scope: 'ticket', ticket: id });
+  return (
+    <div className="wk-section wk-team">
+      <div className="wk-section-h">
+        Team on this ticket{' '}
+        <Link className="link wk-team-link" to={teamHref}>Team ›</Link>
+      </div>
+      {!data && loading && <div className="muted wk-team-line">…</div>}
+      {!data && !loading && (
+        <div className="muted wk-team-line">{error ? 'team unavailable' : 'no team data yet'}</div>
+      )}
+      {data && rows.length > 0 && (
+        <div className="wk-team-rows">
+          {rows.map((r) => (
+            <div key={r.key} className={'wk-team-row' + (r.ran ? '' : ' wk-team-off')}>
+              <span className="wk-team-squad">{r.label}</span>
+              <span className="wk-team-lead">{r.ran ? r.leadModel || '—' : 'not run'}</span>
+              <span className="wk-team-cost">{fmtUsd(r.costUsd)}</span>
+              <span className="wk-team-pick">
+                {r.topPick ? `${r.topPick.role} ${fmtPct(r.topPick.pickShare)}` : ''}
+              </span>
+              {r.children.length > 0 && (
+                <span className="wk-team-children">
+                  {r.children.map((c) => (
+                    <span key={c} className="ck-chip ck-tone-neutral">{c}</span>
+                  ))}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {data && rows.length === 0 && <div className="muted wk-team-line">no team data yet</div>}
+    </div>
   );
 }
 
@@ -206,6 +258,10 @@ export default function TicketPanel({ id, taskKey, onClose, onAskSupervisor }) {
           Open in Linear
         </a>
       )}
+
+      {/* Team on this ticket (FOC-791 slice C) — before the long sections, its
+          own poll; a failure never blocks or banners the panel. */}
+      <TeamOnTicket id={id} />
 
       {loading && <div className="muted" style={{ marginTop: 14 }}>Loading ticket…</div>}
 

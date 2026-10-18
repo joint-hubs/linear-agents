@@ -27,14 +27,16 @@
       "workspace": "joi",
       "repo": "${GITHUB_ROOT}/linear-agents",
       "deploy": { "type": "none", "note": "pilot test project — no deploy target" },
-      "note": "Linear project used by team FOC (e.g. FOC-104) — tracks this repo's own tooling work."
+      "note": "Linear project used by team FOC (e.g. FOC-104) — tracks this repo's own tooling work.",
+      "ticketPrefix": "FOC"
     },
     {
       "linearProject": "Fenix v2",
       "workspace": "joi",
       "repo": "${GITHUB_ROOT}/linear-agents",
       "deploy": { "type": "none", "note": "pilot test project — no deploy target" },
-      "note": "Linear project used by team JOI (e.g. JOI-259) — same as FENIX above, tracks this repo."
+      "note": "Linear project used by team JOI (e.g. JOI-259) — same as FENIX above, tracks this repo.",
+      "ticketPrefix": "JOI"
     },
     {
       "linearProject": "PISI",
