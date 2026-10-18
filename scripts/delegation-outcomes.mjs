@@ -521,12 +521,12 @@ export function delegationsByTask(db) {
  * them apart splits a small sample into two smaller ones and invents a difference
  * (27% clean vs 100%) that is an artefact of the id, not of the model.
  */
-function normaliseModel(model) {
+export function normaliseModel(model) {
   return String(model || "?").replace(/-\d{8}$/, "");
 }
-const isNoiseModel = (m) => !m || m === "<synthetic>" || m === "synthetic";
+export const isNoiseModel = (m) => !m || m === "<synthetic>" || m === "synthetic";
 // Ephemeral sub-agent ids (`agent-a83cd8...`) are one-off handles, not roles.
-const isNoiseAgent = (a) => !a || /^agent-[0-9a-f]{8,}/i.test(a);
+export const isNoiseAgent = (a) => !a || /^agent-[0-9a-f]{8,}/i.test(a);
 
 /**
  * `claude-4.8-opus-20260528` (after date-strip: `claude-4.8-opus`) and `claude-opus-4.8` are
@@ -675,13 +675,16 @@ const ROLE_MAP = {
   digest: "digest",
 };
 
-function normalizeRole(agentKey) {
+export function normalizeRole(agentKey) {
   return ROLE_MAP[agentKey] || "other";
 }
 
 // ── all-squad usage volume, independent of REVIEW verdicts ─────────────────────────────────
 
-function loadUsageTurns(db) {
+// FOC-791: the Team screen reads its turns through `loadTeamTurns`
+// (team-routes.mjs, off the canonical_usage view) — the session_id column
+// lives there, not in this squad-volume loader.
+export function loadUsageTurns(db) {
   return db.prepare(`
     SELECT u.run_id AS runId, u.agent_key AS agentKey, u.model AS model, u.observed_at AS observedAt,
            u.input_tokens AS inputTokens, u.output_tokens AS outputTokens,
@@ -694,14 +697,14 @@ function loadUsageTurns(db) {
   `).all();
 }
 
-function loadPrimaryTaskLinks(db) {
+export function loadPrimaryTaskLinks(db) {
   return db.prepare(`
     SELECT run_id AS runId, task_id AS taskId, valid_from AS validFrom, valid_to AS validTo
     FROM run_task_links WHERE role = 'primary'
   `).all();
 }
 
-function indexLinksByRun(links) {
+export function indexLinksByRun(links) {
   const byRun = new Map();
   for (const l of links) {
     if (!byRun.has(l.runId)) byRun.set(l.runId, []);
@@ -710,7 +713,7 @@ function indexLinksByRun(links) {
   return byRun;
 }
 
-function taskIdForTurn(linksByRun, runId, observedAt) {
+export function taskIdForTurn(linksByRun, runId, observedAt) {
   for (const l of linksByRun.get(runId) || []) {
     if (observedAt >= l.validFrom && (l.validTo == null || observedAt < l.validTo)) return l.taskId;
   }

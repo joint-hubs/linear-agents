@@ -39,7 +39,10 @@ export const NAV_AREAS = [
     label: 'Team',
     defaultRoute: '/manager',
     icon: 'manager',
-    pages: [{ path: '/manager', label: 'Manager (v1)' }],
+    pages: [
+      { path: '/team', label: 'Team' },
+      { path: '/manager', label: 'Manager (v1)' },
+    ],
   },
   {
     id: 'costs',

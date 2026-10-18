@@ -513,6 +513,10 @@
       "reason": "isolation audit (task workspace P1): pure identity parsing with an injected readFile stub and literal platform fixtures; no fs writes, no ports, no child processes, no telemetry DB"
     },
     {
+      "file": "team-model.test.mjs",
+      "reason": "isolation audit (FOC-791 team line-ups, slice A): mkdtemp/tmpdir fixture only — the telemetry store is seeded at an explicit temp path and opened read-only for the AC1 cross-check; no ports, no socket binds, no real-repo-path writes"
+    },
+    {
       "file": "telemetry-analysis.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
@@ -757,6 +761,10 @@
     {
       "file": "task-sessions.test.mjs",
       "reason": "cross-process invariants raced through independent node child processes (execFile) against one SQLite file in a mkdtemp dir — conservative serial for processes (task workspace P1)"
+    },
+    {
+      "file": "team-routes.test.mjs",
+      "reason": "spawns the real telemetry-server on a fixed port (7393) against a seeded temp LA_TELEMETRY_DB and an isolated LA_SUPERVISOR_STATE_HOME (same harness as rewards-routes, FOC-840); one extra 503 case calls the handler in-process with a stub res"
     },
     {
       "file": "telemetry-analysis-api.test.mjs",

@@ -1,0 +1,362 @@
+/* Fenix Team screen — scoped styles (FOC-791). Everything lives under .team
+   and derives from the theme tokens in theme.css. No new global rules, no
+   external assets; static surfaces only, no animation. */
+
+.team {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 100%;
+}
+
+/* --- controls row --------------------------------------------------------- */
+
+.team-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.team-scope {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.team-scope-btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  border: 0;
+  background: var(--surface);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.team-scope-btn + .team-scope-btn {
+  border-left: 1px solid var(--border-strong);
+}
+
+.team-scope-btn.team-scope-active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.team-select,
+.team-input {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+
+.team-input:disabled {
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+.team-filters {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.team-note {
+  font-size: 11.5px;
+}
+
+/* --- diagram --------------------------------------------------------------- */
+/* Three tiers: You → Supervisor → the four lead columns (line-up cards +
+   bench card). The connectors are plain bordered divs — no assets. */
+
+.team-diagram {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+
+.team-tier {
+  display: flex;
+  justify-content: center;
+}
+
+/* The vertical drop between two tiers (You → Supervisor, Supervisor → rail). */
+.team-conn-v {
+  width: 2px;
+  height: 16px;
+  background: var(--border-strong);
+  margin: 0 auto;
+}
+
+/* One column per lead: the lead card, its line-up cards, the bench card. The
+   grid wraps 4 → 2 → 1 so the four leads stay readable at narrow widths. */
+.team-leads {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding-top: 18px;
+}
+
+/* The horizontal rail from the supervisor down to the lead columns; the stub
+   above each column connects the rail to the lead card. */
+.team-leads::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 12.5%;
+  right: 12.5%;
+  border-top: 2px solid var(--border-strong);
+}
+
+.team-squad-col {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.team-drop {
+  width: 2px;
+  height: 16px;
+  background: var(--border-strong);
+  margin: -18px auto 0;
+}
+
+.team-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  min-width: 0;
+}
+
+.team-card-you {
+  border-width: 2px;
+  text-align: center;
+  min-width: 90px;
+}
+
+.team-card-sup {
+  min-width: 200px;
+  text-align: center;
+}
+
+.team-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.team-card-title {
+  font-weight: 650;
+  font-size: 12.5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-card-pct {
+  font-size: 11px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.team-card-model {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+.team-card-cost {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+/* A squad with no run in scope is greyed but still legible; the "not run"
+   chip carries the meaning in text, never colour alone. */
+.team-greyed {
+  opacity: 0.45;
+}
+
+.team-notrun {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-2);
+  background: var(--surface);
+  white-space: nowrap;
+  flex: none;
+}
+
+/* The share bar — a plain two-div meter, width in %, labelled via aria-label. */
+.team-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  margin-top: 5px;
+  overflow: hidden;
+}
+
+.team-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  min-width: 2px;
+}
+
+.team-card-bench .team-bench-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+/* --- detail ----------------------------------------------------------------- */
+
+.team-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.team-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.team-tab {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.team-tab:hover {
+  color: var(--text);
+}
+
+.team-tab-active {
+  color: var(--accent-strong);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+.team-detail-head {
+  font-size: 12px;
+}
+
+.team-children {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.team-child {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+
+.team-table-wrap {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.team-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.team-table th,
+.team-table td {
+  text-align: left;
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.team-table thead th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.team-mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.team-insight {
+  font-size: 12.5px;
+  color: var(--text-2);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.team-links {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+
+.team-foot {
+  font-size: 11.5px;
+}
+
+/* --- responsive -------------------------------------------------------------- */
+
+@media (max-width: 1100px) {
+  .team-leads {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .team-leads {
+    grid-template-columns: 1fr;
+  }
+
+  /* One column: the rail spans the full width so every stub still meets it. */
+  .team-leads::before {
+    left: 50%;
+    right: 0;
+  }
+}

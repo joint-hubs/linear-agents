@@ -245,6 +245,22 @@ export async function postManagerRating(payload) {
   return data;
 }
 
+// Team screen (FOC-791) — GET /api/team (docs/plans/foc-791-team-lineups.md §2).
+// params: { scope, period, repo, milestone, type, epic, size, ticket } — empty
+// values are omitted so the URL stays clean. signal lets usePoll cancel
+// in-flight requests.
+export async function getTeam(params, signal) {
+  const p = params || {};
+  const q = new URLSearchParams();
+  if (p.scope) q.set('scope', p.scope);
+  if (p.period) q.set('period', p.period);
+  for (const k of ['repo', 'milestone', 'type', 'epic', 'size', 'ticket']) {
+    if (p[k]) q.set(k, p[k]);
+  }
+  const qs = q.toString();
+  return apiFetch('/api/team' + (qs ? '?' + qs : ''), signal);
+}
+
 // Squad config — read current squad model assignments + pricing table.
 export async function getSquadConfig() {
   return apiFetch('/api/squad-config');

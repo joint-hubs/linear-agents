@@ -1,4 +1,5 @@
 // Work board pure helpers (FOC-784). No React, no fetch, no env access —
+import { childrenSummary } from './teamModel.js';
 // everything takes what it needs as arguments so the plain-node tests
 // (_tests_work.mjs) can pin the behavior outside Vite. Fixtures are shaped
 // exactly like the plan's API payloads (docs/plans/dashboard-v2-work-costs.md,
@@ -436,4 +437,43 @@ function publishErrorText(error) {
   if (name === 'push-refused') return 'Push refused: ' + (detail || 'git did not accept the push.');
   if (name === 'pr-failed') return 'Could not open the PR: ' + (detail || 'the API refused.');
   return typeof error === 'string' ? error : ((error && error.message) || 'Publish failed.');
+}
+
+// ticketTeamSummary(payload) -> the compact "Team on this ticket" block (FOC-791
+// slice C): one row per squad in the fixed order plan, dev, review, test —
+// { key, label, ran, leadModel, costUsd, topPick: { role, pickShare } | null,
+// children: ["dev-1 running", …] }. Missing payload (the panel is open before
+// the poll answered) -> []. A squad absent from the payload or ran=false keeps
+// its row (greyed "not run" in the panel); the top pick is the highest-share
+// line-up role (the '_lead' row and bench roles never carry it).
+export function ticketTeamSummary(payload) {
+  const squads = Array.isArray(payload && payload.squads) ? payload.squads : [];
+  // Missing / malformed payload -> [] (the panel shows its own placeholder).
+  if (squads.length === 0) return [];
+  const byKey = new Map(squads.map((s) => [s && s.key, s]));
+  const rows = [];
+  for (const key of ['plan', 'dev', 'review', 'test']) {
+    const s = byKey.get(key) || {};
+    const ran = !!s.ran;
+    const roles = Array.isArray(s.roles) ? s.roles : [];
+    // A squad that did not run carries only zeroed config roles — no top pick.
+    let top = null;
+    if (ran) {
+      for (const r of roles) {
+        if (!r || r.role === '_lead' || r.placement === 'bench') continue;
+        if (typeof r.pickShare !== 'number') continue;
+        if (!top || r.pickShare > top.pickShare) top = { role: String(r.role), pickShare: r.pickShare };
+      }
+    }
+    rows.push({
+      key,
+      label: key.charAt(0).toUpperCase() + key.slice(1),
+      ran,
+      leadModel: (s.lead && s.lead.model) || null,
+      costUsd: typeof s.costUsd === 'number' ? s.costUsd : null,
+      topPick: top,
+      children: childrenSummary(s).map((c) => c.label),
+    });
+  }
+  return rows;
 }
