@@ -78,6 +78,12 @@ services:
   fenix-supervisor:
     <<: *fenix
     command: ["host"]
+    # FOC-808: the root-side child sweep (fenix-child-sweep via sudo) reads
+    # /proc/<pid>/environ of fenix-child processes; inside a container even
+    # root needs CAP_SYS_PTRACE for another uid's environ — Docker's default
+    # set lacks it. Supervisor only: the API never sweeps.
+    cap_add:
+      - SYS_PTRACE
     environment:
       LA_PROJECTS_FILE: /fenix-config/projects.json
       # The host HTTP server accepts requests only from this peer container.
