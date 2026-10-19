@@ -105,6 +105,12 @@ block (Supervisor, provider, telemetry freshness) at the bottom of the navigatio
   `filters.unsupported` until FOC-914 wires the Linear state. The ticket scope polls every 5 s (no
   server push); children come from the Supervisor registry (recent runs), costs from the telemetry
   task links.
+- **Status (2026-10-19, FOC-914):** all five group filters live — milestone, type (label name), epic
+  (the parent issue's identifier) and size (estimate) come from the Work board's Linear states lookup
+  (`fetchLinearStates` extended with `parent`/`estimate`; the 60 s cache shared through the same
+  seam). `filters.supported` reflects what the installation can really answer (Linear key present,
+  lookup answered); offline the four stay `unsupported` with the reason in
+  `filters.unsupportedReason` and a passed value narrows nothing — never a guess.
 
 ### 4.4 Costs & quality
 - Period toggle 7d / 30d / All. KPI tiles: children cost per ticket p50 with p20–p80, all-in average

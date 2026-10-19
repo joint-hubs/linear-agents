@@ -445,6 +445,26 @@ await test('fmtPct: fractions to whole percents, everything else to —', () => 
   eq(fmtPct('50%'), '—');
 });
 
+// --- FOC-914: the filter contract's new shape ---------------------------------
+
+await test('parseTeamQuery reads all five group filters (epic/size now first-class)', () => {
+  const s = parseTeamQuery('?scope=group&repo=fenix&milestone=M8&type=bug&epic=FOC-700&size=L');
+  eq({ repo: s.repo, milestone: s.milestone, type: s.type, epic: s.epic, size: s.size },
+    { repo: 'fenix', milestone: 'M8', type: 'bug', epic: 'FOC-700', size: 'L' });
+  // All five ride the group scope's query params.
+  eq(teamQueryParams({ scope: 'group', repo: 'r', milestone: 'M8', type: 'bug', epic: 'FOC-700', size: 'L' }),
+    { scope: 'group', period: '30d', repo: 'r', milestone: 'M8', type: 'bug', epic: 'FOC-700', size: 'L' });
+});
+
+await test('unsupportedReason: present when the payload carries it, absent -> undefined', () => {
+  // The screen reads data.filters.unsupportedReason directly (Team.jsx); the
+  // model contract: null when everything supported is really supported.
+  const warm = { ...FIXTURE, filters: { applied: {}, supported: ['repo', 'milestone', 'type', 'epic', 'size'], unsupported: [], unsupportedReason: null } };
+  eq(warm.filters.unsupportedReason, null);
+  const offline = { ...FIXTURE, filters: { applied: {}, supported: ['repo'], unsupported: ['milestone', 'type', 'epic', 'size'], unsupportedReason: 'Linear unavailable: LINEAR_API_KEY not set (check .env)' } };
+  eq(offline.filters.unsupportedReason.startsWith('Linear unavailable:'), true);
+});
+
 // --- Summary ----------------------------------------------------------------
 
 console.log(`\n${pass} passed, ${fail} failed`);
