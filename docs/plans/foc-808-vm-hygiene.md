@@ -93,6 +93,10 @@ Mateusz the same day (cost-aware: `fenix-vm` resized to e2-standard-2, started o
   service now has `cap_add: [SYS_PTRACE]` (verified: the same helper then lists and kills the stray). The
   `fenix-cache` volume was created `root:root` because the image had no `/home/node/.cache`; the image now ships
   it as `node:fenix 2775`, and `fenix up` / `fenix update` repair an older root-owned volume once.
+- **Second spawn path (FOC-917).** Follow-up turns (`supervisor-followup.mjs`) had no mark and no per-child
+  TMPDIR — the resumed `dev-2` on the VM left its Postgres behind. Both paths now use
+  `childTeardownIdentity` / `ensureChildTmpDir` from supervisor-lib, and the follow-up writes the current turn's
+  `mark` / `tmpDir` into the registry.
 
 ## 2. Slices (own files only, no git, ≤ 20 min, Flash)
 
