@@ -49,9 +49,9 @@ Supervisor and two task sessions side by side), and the tag moves from 11-19 to 
 | ~~10-29 → 10-30~~ done 10-17 | FOC-802 child isolation in the container (PR #83) |
 | done 10-17 | Not on the 10-15 plan, landed in the same merge round: FOC-848 task ownership (#76), FOC-840 flaky tests (#84), the FOC-898 multi-Supervisor isolation epic — FOC-899–906 + FOC-602 (#88–#97), M5 FOC-727–730 (#85–#87, #91); post-merge fix #98 (`test-run` sandbox), FOC-913 filed (watch-cost flake under load) |
 | 11-02 → 11-04 | FOC-791 Team → FOC-787 Insights |
-| 11-05 → 11-06 | FOC-808 VM resource hygiene |
+| ~~11-05 → 11-06~~ done 10-19 | FOC-808 VM resource hygiene (PR #105 + VM follow-ups #107): marked child sweep through a root helper + CAP_SYS_PTRACE, per-child tmp dirs, the fenix-cache volume + `fenix prune`, the idle-open fast path (store untouched while idle), `sup:` tags as Supervisor attribution; `fenix update` secrets guard |
 | 11-09 → 11-10 | FOC-839 task workspaces 1.0 hardening (legacy single-session compatibility suite, migration, QUICKSTART for task cockpits, FOC-816 residue) |
-| 11-12 | FOC-809 sizing on a dev-squad run (needs the VM and Mateusz's consent for the sampler) |
+| 11-12 (started 10-19) | FOC-809 sizing on a dev-squad run — sampler + p20/p50/p80 report landed (PR #108); the load run on fenix-vm (e2-standard-2) in progress, write-up to follow |
 | 11-13 → 11-16 | FOC-775 image on GHCR (release candidate) → FOC-777 `update` pulls the pinned image |
 | 11-17 → 11-27 | FOC-789 fresh-machine acceptance on the published image, both modes (snags become tasks) |
 | 11-30 → 12-01 | FOC-781 docs; buffer for acceptance snags |
