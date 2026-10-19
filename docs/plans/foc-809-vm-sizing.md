@@ -64,3 +64,33 @@ is a guess, and the e2-standard-2 resize of 2026-10-19 is exactly the question t
 
 cgroup accounting per child (FOC-808 gives the mark; a per-child cgroup is a later ticket); autoscaling; any
 machine type change beyond the recommendation (Mateusz decides; the VM is resized only while stopped).
+
+## 5. Results so far (2026-10-19, interim)
+
+Load run on `fenix-vm` (e2-standard-2, main b8f195c), sampler every 60 s from 12:40Z, 120 samples by 14:45Z:
+
+| phase | metric | n | p20 | p50 | p80 | peak |
+|---|---|---|---|---|---|---|
+| dev-child | load1 | 44 | 0.2 | 0.9 | 1.4 | 1.8 |
+| dev-child | mem_used_mb | 44 | 1281.6 | 1323.5 | 1407.6 | 5916.0 |
+| dev-child | supervisor_cpu_pct | 44 | 2.3 | 17.3 | 53.7 | 116.5 |
+| dev-child | supervisor_mem_mb | 44 | 602.4 | 807.4 | 876.2 | 940.0 |
+| idle | load1 | 60 | 0.0 | 0.1 | 0.2 | 3.3 |
+| idle | mem_used_mb | 60 | 1049.8 | 1069.5 | 1095.0 | 3494.0 |
+| idle | supervisor_cpu_pct | 60 | 1.3 | 1.4 | 1.9 | 4.6 |
+| image-build | load1 | 4 | 0.9 | 1.8 | 2.4 | 2.4 |
+| image-build | mem_used_mb | 4 | 1169.6 | 1226.5 | 1351.8 | 1485.0 |
+| supervisor-active | load1 | 12 | 0.0 | 0.1 | 0.2 | 0.4 |
+| supervisor-active | supervisor_cpu_pct | 12 | 6.1 | 7.5 | 15.9 | 39.3 |
+
+What ran: the Supervisor resumed its crashed `dev-2` on FOC-680 (the dev-child phase, 52 min, pinned to
+`xiaomi/mimo-v2.6-pro` by the pre-FOC-808 registry entry), then stalled on a Claude Code auto-mode classifier
+prompt for `linear-ops transition FOC-680` (FOC-918); a fresh session (GLM flash) took FOC-523 itself without
+delegating (the supervisor-active phase) and stalled on its own `Bash(rm -rf:*)` ask rule over a `/tmp` fixture
+(FOC-918). The `--no-cache` image build ran between marks (13:45:54–13:50:08Z). A stray `pgserver` Postgres from
+the resumed child survived its turn (FOC-917: the follow-up path sets no mark).
+
+Still open for AC1: two more tickets through squads (FOC-915, FOC-914 carry the `vm-sizing` label for the
+auto-pickup plan B; the owner-project rule is ambiguous for `linear-agents` — two projects.json entries map to
+the repo — so plan B needs a trimmed `/fenix-config/projects.json` or the ownership overlay); the sampler is
+still running on the VM, the three-ticket bands replace the interim table when the run completes.
