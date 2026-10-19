@@ -315,9 +315,11 @@ async function fetchIssue(identifier, workspace) {
  * fetchLinearStates — the batched GraphQL lookup with its own 60 s cache
  * (jointhubs first, then pisi); its `{ states, error, fetchedAt }` result
  * IS the linearMeta the board payload carries. A Linear failure degrades to
- * an error meta and no states — never a 5xx.
+ * an error meta and no states — never a 5xx. FOC-914: the states carry
+ * parent (epic) and estimate (size) too — the Team group filters read them
+ * through this same seam.
  */
-async function linearStatesFor(identifiers) {
+export async function linearStatesFor(identifiers) {
   const ids = [...new Set((Array.isArray(identifiers) ? identifiers : []).filter((id) => typeof id === "string"))];
   const fake = fakeLinearFixture();
   if (fake) {
@@ -332,6 +334,11 @@ async function linearStatesFor(identifiers) {
           url: issue.url ?? null,
           priority: issue.priority ?? null,
           milestone: issue.milestone ?? null,
+          labels: issue.labels ?? [],
+          // FOC-914: the fixture carries the same additive fields the real
+          // lookup returns — epic (parent identifier) and estimate (size).
+          parent: typeof issue.parent === "string" ? issue.parent : issue.parent?.identifier ?? null,
+          estimate: typeof issue.estimate === "number" ? issue.estimate : null,
         };
       }
     }

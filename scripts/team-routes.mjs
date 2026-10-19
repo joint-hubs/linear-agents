@@ -14,16 +14,20 @@
 // Group filters: `repo` is derivable offline — the task-key prefix (the team
 // prefix of the display id) mapped through config/projects.json, the same file
 // the deploy map documents per Linear project (the team prefixes are named in
-// each project's note, e.g. "team FOC (e.g. FOC-104)"). `milestone`/`type`
-// would need the Work board's Linear states lookup (network) and `epic`/`size`
-// are not in the cached state at all — without a cheap cached read the route
-// passes ticketFacts WITHOUT them and team-model lists them under
-// filters.unsupported instead of silently ignoring them (plan §2).
+// each project's note, e.g. "team FOC (e.g. FOC-104)"). FOC-914: the other
+// four (milestone, type = label name, epic = parent identifier, size =
+// estimate) come from the Work board's Linear states lookup — the same
+// `linearStatesFor` seam (fixture under the test env, fetchLinearStates's
+// 60 s cache in production), reached through the server's linearQueue
+// discipline. When the lookup fails (no Linear key, offline) the facts carry
+// none of the four and team-model lists them under filters.unsupported WITH
+// the reason — never a guess, never a silent ignore (plan §2).
 //
 // TEST-ONLY seam, the runtime-statistics convention: ctx may inject
-// loadTurns / loadLinks / squadConfig / registryChildren / ticketFacts to
-// replace the store/config reads in unit tests. Without them the defaults read
-// the real seams (LA_TELEMETRY_DB / LA_SUPERVISOR_STATE_HOME / repo root).
+// loadTurns / loadLinks / squadConfig / registryChildren / ticketFacts /
+// linearStatesFor to replace the store/config/Linear reads in unit tests.
+// Without them the defaults read the real seams (LA_TELEMETRY_DB /
+// LA_SUPERVISOR_STATE_HOME / repo root / the fake-file-or-Linear lookup).
 
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -36,6 +40,7 @@ import { loadPrimaryTaskLinks } from "./delegation-outcomes.mjs";
 import { collectChildren, recentRunIds } from "./cockpit.mjs";
 import { repoRefName } from "./fenix-projects.mjs";
 import { buildTeam, periodWindow, TICKET_ID_RE } from "./team-model.mjs";
+import { linearStatesFor as defaultLinearStatesFor } from "./work-routes.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = join(__dirname, "..");
@@ -173,6 +178,44 @@ export async function handleTeamRoute(req, res, url, ctx) {
     repoFilterAvailable = ticketFacts.some((f) => f.repo != null);
   }
 
+  // FOC-914: enrich the facts with the Linear-backed fields. Only the group
+  // scope reads Linear — the overall scope never filters and the ticket scope
+  // pins one id. The group scope asks the lookup EVEN with no filter values:
+  // filters.supported must reflect what the installation can really answer
+  // (the ticket says: "Linear key present, cache warm" — the payload reports
+  // it before the user fills an input). A lookup that failed leaves the facts
+  // untouched: team-model lists the four under unsupported with the reason
+  // ("Linear unavailable"), and a passed value is never applied on a guess.
+  let linearError = null;
+  let linearAvailable = false;
+  if (scope === "group") {
+    const lookup = ctx.linearStatesFor
+      ? await ctx.linearStatesFor(ticketFacts.map((f) => f.taskId))
+      : await defaultLinearStatesFor(ticketFacts.map((f) => f.taskId));
+    linearError = lookup?.meta?.error ?? null;
+    linearAvailable = Boolean(lookup?.meta?.ok) && lookup.meta.error == null;
+    if (linearAvailable) {
+      const states = lookup.states ?? {};
+      ticketFacts = ticketFacts.map((f) => {
+        const s = states[f.taskId];
+        return s
+          ? {
+              ...f,
+              milestone: s.milestone ?? null,
+              // Labels arrive as name strings (the fixture seam) or
+              // { id, name, color } rows (the real lookup) — both normalize
+              // to the name list the model's type filter matches against.
+              type: Array.isArray(s.labels) && s.labels.length
+                ? s.labels.map((l) => (typeof l === "string" ? l : l?.name)).filter((n) => typeof n === "string" && n)
+                : null,
+              epic: s.parent ?? null,
+              estimate: s.estimate ?? null,
+            }
+          : f; // a miss (the id is not in this workspace) carries no facts — the unknown-value rule applies in the model
+      });
+    }
+  }
+
   const payload = buildTeam({
     turns: loaded.turns,
     links: loaded.links,
@@ -185,6 +228,11 @@ export async function handleTeamRoute(req, res, url, ctx) {
     ticketFacts,
     now: Date.now(),
     repoFilterAvailable,
+    // FOC-914: what the Linear lookup could answer rides to the model —
+    // supported/unsupported must reflect the real capability, and the
+    // failure reason travels into the payload for the UI.
+    linearAvailable,
+    linearError,
   });
 
   // Live telemetry: a cached payload would lie about who is on the ticket right

@@ -462,6 +462,11 @@ const linearStateOf = (issue) => ({
   },
   milestone: issue?.projectMilestone?.name ?? null,
   labels: normalizeLabels(issue?.labels?.nodes),
+  // FOC-914: the Team group filters need the epic (the parent issue's
+  // identifier) and the estimate (the size) — additive fields the board
+  // payload ignores today, so no existing consumer changes shape.
+  parent: typeof issue?.parent?.identifier === "string" ? issue.parent.identifier : null,
+  estimate: typeof issue?.estimate === "number" ? issue.estimate : null,
 });
 
 /**
@@ -496,7 +501,7 @@ export function issueMissesOf(err, chunk) {
 }
 
 /**
- * Linear state (name/type/title/url/priority/milestone/labels) per identifier, one
+ * Linear state (name/type/title/url/priority/milestone/labels/parent/estimate) per identifier, one
  * batched alias request per chunk of ≤ 50 ids per workspace: jointhubs first,
  * then pisi for whatever jointhubs did not know (findIssueProject's order) —
  * the pisi pass only while the integration switch is on (FOC-772).
@@ -541,7 +546,7 @@ export async function fetchLinearStates(identifiers, { graphqlFor = defaultGraph
     const resolveChunk = async (chunk) => {
       const aliases = chunk.map(
         (id, n) =>
-          `a${n}: issue(id: ${JSON.stringify(id)}) { identifier title url priority priorityLabel state { name type } projectMilestone { name } labels(first: 20) { nodes { id name color } } }`,
+          `a${n}: issue(id: ${JSON.stringify(id)}) { identifier title url priority priorityLabel state { name type } projectMilestone { name } parent { identifier } estimate labels(first: 20) { nodes { id name color } } }`,
       );
       let data;
       try {
