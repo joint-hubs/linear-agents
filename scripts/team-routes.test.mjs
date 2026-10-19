@@ -371,6 +371,81 @@ await test("group scope with no filter values: supported still reflects the warm
   assert.equal(res.__body.filters.unsupportedReason, null);
 });
 
+await test("group scope: a repo value with no repo facts is reported unsupported and narrows nothing", async () => {
+  // In-process on the handler with an OK states lookup but ticket facts that
+  // carry NO repo field — repoFilterAvailable is false, so a caller-passed
+  // repo must show under unsupported AND narrow nothing (identical squads to
+  // the same call without the repo value).
+  if (setupError) throw setupError;
+  const buildDeps = (sink) => ({
+    json: (_r, status, payload) => { sink.__status = status; sink.__body = payload; },
+    log: () => {},
+    loadTurns: () => [],
+    loadLinks: () => [],
+    squadConfig: { squads: {} },
+    ticketFacts: [{ taskId: "FOC-100" }, { taskId: "FOC-200" }],
+    linearStatesFor: async () => ({
+      states: {
+        "FOC-100": { milestone: "M8", labels: [{ id: "l", name: "feature", color: null }], parent: "FOC-768", estimate: 2 },
+        "FOC-200": { milestone: "M8", labels: [{ id: "l", name: "feature", color: null }, { id: "l2", name: "bug", color: null }], parent: "FOC-768", estimate: 2 },
+      },
+      meta: { ok: true, error: null, fetchedAt: "2026-10-15T12:00:00.000Z" },
+    }),
+  });
+  const res = {};
+  const handled = await handleTeamRoute(
+    { method: "GET", headers: {} },
+    res,
+    new URL("/api/team?scope=group&repo=linear-agents", "http://127.0.0.1"),
+    buildDeps(res),
+  );
+  assert.equal(handled, true);
+  assert.equal(res.__status, 200, `status ${res.__status}: ${JSON.stringify(res.__body).slice(0, 300)}`);
+  assert.ok(res.__body.filters.unsupported.includes("repo"), `unsupported should include repo: ${JSON.stringify(res.__body.filters)}`);
+  assert.deepEqual(res.__body.filters.applied, {});
+  const first = res;
+
+  // Identical deps, no repo value — the repo value must have narrowed nothing.
+  const res2 = {};
+  const handled2 = await handleTeamRoute(
+    { method: "GET", headers: {} },
+    res2,
+    new URL("/api/team?scope=group", "http://127.0.0.1"),
+    buildDeps(res2),
+  );
+  assert.equal(handled2, true);
+  assert.equal(res2.__status, 200, `status ${res2.__status}: ${JSON.stringify(res2.__body).slice(0, 300)}`);
+  assert.deepEqual(first.__body.squads, res2.__body.squads);
+});
+
+await test("group scope: Linear answered but no ticket carries the fields → unsupported with the answered reason", async () => {
+  // In-process on the handler: the seam answered OK but the states map carries
+  // no entry for any ticket in scope — the filters stay unsupported with the
+  // "answered but empty" reason (never a silent guess).
+  if (setupError) throw setupError;
+  const res = {};
+  const handled = await handleTeamRoute(
+    { method: "GET", headers: {} },
+    res,
+    new URL("/api/team?scope=group&milestone=M8", "http://127.0.0.1"),
+    {
+      json: (_r, status, payload) => { res.__status = status; res.__body = payload; },
+      log: () => {},
+      loadTurns: () => [],
+      loadLinks: () => [],
+      squadConfig: { squads: {} },
+      ticketFacts: [{ taskId: "FOC-100", repo: "linear-agents" }],
+      linearStatesFor: async () => ({ states: {}, meta: { ok: true, error: null, fetchedAt: "2026-10-15T12:00:00.000Z" } }),
+    },
+  );
+  assert.equal(handled, true);
+  assert.equal(res.__status, 200, `status ${res.__status}: ${JSON.stringify(res.__body).slice(0, 300)}`);
+  assert.deepEqual(res.__body.filters.supported, ["repo"]);
+  assert.deepEqual(res.__body.filters.unsupported, ["milestone", "type", "epic", "size"]);
+  assert.equal(res.__body.filters.unsupportedReason, "Linear answered but no ticket in scope carries milestone/type/epic/size");
+  assert.deepEqual(res.__body.filters.applied, {}); // milestone was NOT applied
+});
+
 // ── teardown ─────────────────────────────────────────────────────────────────
 
 if (spawned) await spawned.stop();

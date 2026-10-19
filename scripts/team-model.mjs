@@ -370,10 +370,16 @@ export function buildTeam({ turns, links, squadConfig, period, scope, filters, t
       supported,
       unsupported,
       // FOC-914: WHY the Linear-backed filters are unsupported when they are —
-      // null when everything the payload lists as supported really is. One
-      // shared reason: the lookup fails as a whole (no key, offline), not per
-      // field.
-      unsupportedReason: unsupported.some((f) => f !== "repo") && linearError ? `Linear unavailable: ${linearError}` : null,
+      // null when everything the payload lists as supported really is. Two
+      // shared reasons: the lookup fails as a whole (no key, offline), or it
+      // answered but no ticket in scope carries the fields (every task id
+      // missed the workspace, or an empty id list) — either way the UI never
+      // shows a bare "not supported yet".
+      unsupportedReason: linearError
+        ? `Linear unavailable: ${linearError}`
+        : linearAvailable && unsupported.some((f) => f !== "repo")
+          ? "Linear answered but no ticket in scope carries milestone/type/epic/size"
+          : null,
     },
     groundTruth: "per-message priced usage (FOC-760/761)",
     generatedAt: new Date(now).toISOString(),

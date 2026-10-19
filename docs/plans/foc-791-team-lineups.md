@@ -115,10 +115,13 @@ Contract deltas (team-model.mjs, `filters` object):
 - `unsupported` lists the rest, and `unsupportedReason` (new, null when nothing is owed) carries WHY:
   `Linear unavailable: <error>` — the UI's inputs stay disabled with the reason visible, never a
   silent ignore, never a guess.
-- A value passed for an unsupported filter narrows NOTHING (the pre-914 contract kept); an unknown
-  value for a supported filter is an honest empty result. `type` matches a label NAME
-  (case-insensitive; a ticket may carry several), `size` matches the estimate's string form
-  (the URL carries strings, Linear numbers), milestone/epic by exact string.
+- A value passed for an unsupported filter narrows nothing and is reported under
+  `filters.unsupported` with a reason; before FOC-914 the repo / milestone / type filters were
+  applied regardless and an unsupported one produced an empty result — FOC-914 changed that
+  deliberately: an empty board would look like "no data", a reported-and-ignored filter does not.
+  An unknown value for a supported filter is still an honest empty result. `type` matches a label
+  NAME (case-insensitive; a ticket may carry several), `size` matches the estimate's string form
+  (the URL carries strings, Linear numbers), milestone/epic by case-insensitive string.
 
 Tests: team-routes.test.mjs spawns the server against the fake fixture file (per-issue facts distinct
 per ticket) and proves each filter narrows the turns, combines (AND), degrades offline (in-process,
