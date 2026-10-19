@@ -51,7 +51,9 @@ Supervisor and two task sessions side by side), and the tag moves from 11-19 to 
 | 11-02 → 11-04 | FOC-791 Team → FOC-787 Insights |
 | ~~11-05 → 11-06~~ done 10-19 | FOC-808 VM resource hygiene (PR #105 + VM follow-ups #107): marked child sweep through a root helper + CAP_SYS_PTRACE, per-child tmp dirs, the fenix-cache volume + `fenix prune`, the idle-open fast path (store untouched while idle), `sup:` tags as Supervisor attribution; `fenix update` secrets guard |
 | 11-09 → 11-10 | FOC-839 task workspaces 1.0 hardening (legacy single-session compatibility suite, migration, QUICKSTART for task cockpits, FOC-816 residue) |
-| 11-12 (started 10-19) | FOC-809 sizing on a dev-squad run — sampler + p20/p50/p80 report landed (PR #108); the load run on fenix-vm (e2-standard-2) in progress, write-up to follow |
+| ~~11-12~~ done 10-19 | FOC-809 sizing — sampler + p20/p50/p80 report (PR #108, #109), the load run on fenix-vm (e2-standard-2, four real tickets, 296 samples) and the write-up (PR #113): minimum 2 vCPU / 8 GB / 50 GB, recommended e2-standard-2 for one worker |
+| done 10-19 | Landed from the VM run (Supervisor-authored on fenix-vm, reviewed and fixed by the delivery owner): FOC-917 follow-up turns get the teardown mark (#110), FOC-523 integration deps install (#111), FOC-915 Insights task table precomputed in the cache (#112), FOC-914 Team filters honoured (#114) |
+| 10-20 | FOC-918 unattended Supervisor: permission prompts recognised with a reason, never invisible in Needs-you, aged into a `supervisor-parked` problem, a doctor line, a QUICKSTART paragraph (plan `docs/plans/foc-918-unattended-prompts.md`) |
 | 11-13 → 11-16 | FOC-775 image on GHCR (release candidate) → FOC-777 `update` pulls the pinned image |
 | 11-17 → 11-27 | FOC-789 fresh-machine acceptance on the published image, both modes (snags become tasks) |
 | 11-30 → 12-01 | FOC-781 docs; buffer for acceptance snags |
