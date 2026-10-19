@@ -326,7 +326,7 @@ function deriveInsightTables(cache) {
   cache.exec(`
     CREATE TABLE insight_task_table (
       task_id        TEXT PRIMARY KEY,
-      era            TEXT,
+      era            TEXT,            -- informational (SQL exploration); the panels re-derive era from first_ts
       first_ts       TEXT,
       last_ts        TEXT,
       msgs           INTEGER NOT NULL,
@@ -391,11 +391,11 @@ function deriveInsightTables(cache) {
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
-    INSERT INTO insight_meta (key, value) VALUES
-      ('dropped_sup_rows', '${built.droppedSup}'),
-      ('dropped_sup_usd', '${built.droppedUsd}'),
-      ('dropped_no_link_rows', '${built.droppedNoLink}');
   `);
+  const insMeta = cache.prepare("INSERT INTO insight_meta (key, value) VALUES (?, ?)");
+  insMeta.run("dropped_sup_rows", String(built.droppedSup));
+  insMeta.run("dropped_sup_usd", String(built.droppedUsd));
+  insMeta.run("dropped_no_link_rows", String(built.droppedNoLink));
 
   return {
     taskRows: built.tasks.size,

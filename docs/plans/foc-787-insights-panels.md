@@ -157,4 +157,5 @@ The cold-call numbers to record in the PR are the `all-history` rows — the 30-
 serves by default. FOC-915's contract: the panels keep byte-identical payloads on the fixture (the hand-computed
 tests pass unchanged), and the filters narrow per task `first_ts` (tickets, concentration) / per message time
 (spend) over the PRECOMPUTED rows instead of re-attributing the usage rows per request.
+FOC-915 changed the window semantics — tasks are selected by first_ts and carry their full-history cost (a `tasks_by_first_ts` caveat says so); the real-store comparison is therefore done over the full history (`from=2025-01-01`), where the old and new semantics coincide.
 3. Browser check of the three tabs on the offline acceptance instance (fixture cache), screenshots in the PR.

@@ -73,6 +73,7 @@ import {
   allocateSupervisorOverhead,
   addLoadedCost,
   ticketsPanel,
+  ticketsPanelFromRows,
   moneyPanel,
   outliersPanel,
 } from "./analysis-insights.mjs";
@@ -566,6 +567,30 @@ const FILTERS = { from: "2026-09-01T00:00:00.000Z", to: "2026-10-01T00:00:00.000
     pre.data.tasks === 1 && pre.data.flagged === 0 && pre.data.rows[0].madZ === null &&
     pre.data.rows[0].direction === "low",
     JSON.stringify(pre.data.rows[0]));
+}
+
+// ── 6. FOC-915 window semantics ──────────────────────────────────────────────
+
+// no_first_ts: a task row with no timestamp is excluded (no era can be
+// provable) and counted — the caveat the pre-FOC-915 panel emitted verbatim.
+{
+  const { caveats } = ticketsPanelFromRows(
+    [{ taskId: "T-1", firstTs: null, era: null, costUsd: 1, costLoaded: 1, msgs: 1, partial: false }],
+    FILTERS,
+  );
+  check("ticketsPanelFromRows: no_first_ts caveat counts the timestamp-less row",
+    caveats.some((c) => c.code === "no_first_ts" && c.count === 1), JSON.stringify(caveats));
+}
+
+// tasks_by_first_ts: the FOC-915 window semantics caveat fires unconditionally
+// on all three panels — tasks are selected by first message and carry their
+// full-history cost, even though spend by squad stays message-time windowed.
+{
+  for (const [name, panel] of [["tickets", ticketsPanel], ["money", moneyPanel], ["outliers", outliersPanel]]) {
+    const { caveats } = panel(db, FILTERS);
+    check(`${name}: tasks_by_first_ts caveat present`,
+      caveats.some((c) => c.code === "tasks_by_first_ts" && c.level === "info"), JSON.stringify(caveats));
+  }
 }
 
 db.close();

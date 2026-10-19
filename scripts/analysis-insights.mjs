@@ -562,21 +562,24 @@ function distributionStats(values) {
  * of re-attributing ~180k usage rows per request. The payload is the shape
  * the panel has always returned.
  *
- * The `usageRows`-based time window: a task is in scope when its first message
- * falls in [from, to] — the same window the panel documented when it computed
- * the table from filtered rows, now applied to the precomputed rows directly.
+ * Window semantics (FOC-915, stated explicitly): a task is in scope when its
+ * FIRST message falls in [from, to], and it carries its full-history cost —
+ * a ticket's price is not cut at a window edge. Before FOC-915 the panel
+ * summed only the messages inside the window, so a task straddling `from`
+ * was partially counted; that is the one behaviour change of the precompute
+ * and the `tasks_by_first_ts` caveat names it on every payload.
  */
 export function ticketsPanel(db, filters) {
   const f = normalizeFilters(filters);
   const meta = readInsightMeta(db);
-  return ticketsPanelFromRows(readTaskTable(db, f.eraBoundary), readSupervisorAlloc(db), f, meta);
+  return ticketsPanelFromRows(readTaskTable(db, f.eraBoundary), f, meta);
 }
 
 /**
- * The tickets panel over precomputed rows — exported for the cache-build
- * self-check and tests that pin the payload against hand-computed numbers.
+ * The tickets panel over precomputed rows — exported for the tests that pin
+ * the payload against hand-computed numbers.
  */
-export function ticketsPanelFromRows(taskRows, _allocRows, f, meta = { droppedSup: 0, droppedUsd: 0, droppedNoLink: 0 }) {
+export function ticketsPanelFromRows(taskRows, f, meta = { droppedSup: 0, droppedUsd: 0, droppedNoLink: 0 }) {
   // Era filters on the task's first_ts (D2); from/to narrow the same column.
   let tasks = taskRows.filter((t) =>
     (f.from == null || (t.firstTs != null && t.firstTs >= f.from)) &&
@@ -600,6 +603,19 @@ export function ticketsPanelFromRows(taskRows, _allocRows, f, meta = { droppedSu
 
   const unpricedTasks = inEra.filter((t) => t.costUsd == null).length;
   const caveats = [];
+  if (noTs > 0) {
+    caveats.push({
+      level: "info",
+      code: "no_first_ts",
+      message: `${noTs} task(s) whose first message has no timestamp are excluded (no era can be proven)`,
+      count: noTs,
+    });
+  }
+  caveats.push({
+    level: "info",
+    code: "tasks_by_first_ts",
+    message: "tasks are selected by their first message (first_ts in [from, to]) and carry their full-history cost; spend by squad stays message-time windowed",
+  });
   if (unpricedTasks > 0) {
     caveats.push({
       level: "warn",
@@ -673,7 +689,9 @@ export function ticketsPanelFromRows(taskRows, _allocRows, f, meta = { droppedSu
  * indexed WHERE as before — it was never the bottleneck. The supervisor split
  * reads the precomputed insight_supervisor_alloc rows (narrowed by message
  * time); concentration reads insight_task_table narrowed by task first_ts —
- * the windows the panel documents today.
+ * the windows the panel documents today. Tasks by first_ts, full-history
+ * cost per task (FOC-915) — see ticketsPanel. Spend by squad is message-time
+ * windowed.
  */
 export function moneyPanel(db, filters) {
   const f = normalizeFilters(filters);
@@ -707,10 +725,9 @@ export function moneyPanel(db, filters) {
     squad: undefined,
     model: undefined,
   });
-  const supCond = (extra) => (supWhere ? `${supWhere} AND (${extra})` : `WHERE ${extra}`);
   const allocRows = db.prepare(`
     SELECT usage_id AS usageId, run_id AS runId, observed_at AS observedAt, mode, cost_usd AS costUsd
-    FROM insight_supervisor_alloc ${supCond("mode IS NOT NULL")}
+    FROM insight_supervisor_alloc ${supWhere}
   `).all(...supParams);
 
   const supCost = allocRows.reduce((s, r) => s + (r.costUsd ?? 0), 0);
@@ -734,6 +751,11 @@ export function moneyPanel(db, filters) {
   };
 
   const caveats = [];
+  caveats.push({
+    level: "info",
+    code: "tasks_by_first_ts",
+    message: "tasks are selected by their first message (first_ts in [from, to]) and carry their full-history cost; spend by squad stays message-time windowed",
+  });
   // total/bySquad/supervisor filter the rows by observed_at, concentration
   // filters the tasks by first_ts — state the split so the two windows are
   // not read as one.
@@ -788,7 +810,8 @@ export function moneyPanel(db, filters) {
  * FOC-915: the detectors run over the PRECOMPUTED task table narrowed by
  * first_ts (from/to/era) instead of re-attributing the usage rows per request.
  * The detection itself is unchanged — the same detectOutliers over the same
- * per-task costs.
+ * per-task costs. Tasks by first_ts, full-history cost per task (FOC-915) —
+ * see ticketsPanel.
  */
 export function outliersPanel(db, filters) {
   const f = normalizeFilters(filters);
@@ -809,6 +832,11 @@ export function outliersPanel(db, filters) {
   const sortedWithout = without.map((t) => t.costUsd).sort((a, b) => a - b);
 
   const caveats = [];
+  caveats.push({
+    level: "info",
+    code: "tasks_by_first_ts",
+    message: "tasks are selected by their first message (first_ts in [from, to]) and carry their full-history cost; spend by squad stays message-time windowed",
+  });
   const unpricedCount = all.filter((t) => t.costUsd == null).length;
   if (unpricedCount > 0) {
     caveats.push({
