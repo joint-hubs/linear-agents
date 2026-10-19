@@ -28,7 +28,7 @@
 // Run: node scripts/vm-sampler-report.mjs --samples samples.jsonl [--registry <stateHome>]
 //      [--marks marks.jsonl] [--supervisor-cpu-threshold 5] [--json]
 
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -107,10 +107,17 @@ export function phaseOf(sample, {marks = [], turns = [], threshold = 5, openUnti
 
 // Read every <dir>/<runId>/children.json: {"children": {"<childId>": { childId, squad, status,
 // turns: [{ startedAt, endedAt? }] }}} → a flat [{ runId, childId, squad, startedAt, endedAt }].
-// A corrupt or missing children.json is skipped — one bad run must not sink the report.
+// A corrupt or missing children.json is skipped — one bad run must not sink the report. A
+// missing or unreadable registry directory yields [] — no child turns at all, not a crash.
 export function loadRegistryTurns(dir) {
   const turns = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     let parsed;
     try {
@@ -260,6 +267,9 @@ function main(argv) {
   }
   // timestamps become epoch ms at load time; unparseable ts → null (phaseOf classifies it idle)
   const samples = readJsonl(samplesPath).map((s) => ({ ...s, ts: toMs(s.ts) }));
+  if (registry && !existsSync(registry)) {
+    console.error(`registry: ${registry} not readable — no child turns (every sample is idle/supervisor-active/marked)`);
+  }
   const report = buildReport(samples, {
     marks: marksPath ? loadMarks(marksPath) : [],
     turns: registry ? loadRegistryTurns(registry) : [],
