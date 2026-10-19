@@ -22,6 +22,9 @@
 // claude_procs — each as n, p20, p50, p80, peak. Phases with n < 10 are listed as `thin`
 // evidence (the band is not trusted yet).
 //
+// mem_cache_mb and disk_used_mb are collected as raw evidence only — the report does not band
+// them; the cache/storage sizing decisions read them straight from samples.jsonl.
+//
 // Run: node scripts/vm-sampler-report.mjs --samples samples.jsonl [--registry <stateHome>]
 //      [--marks marks.jsonl] [--supervisor-cpu-threshold 5] [--json]
 
@@ -43,6 +46,16 @@ export function percentile(values, p) {
   return v[lo] + (v[Math.ceil(rank)] - v[lo]) * frac;
 }
 
+// Every timestamp comparison is done on epoch ms, never on the raw strings: ISO forms differ
+// (millis, an explicit +00:00 offset) yet are equal on the timeline. Unparseable → null: a
+// sample with an unparseable ts is classified `idle` (phaseOf), a turn with an unparseable
+// startedAt/endedAt is skipped (loadRegistryTurns).
+function toMs(value) {
+  if (typeof value === "number") return value;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+
 // Collapse the mark events per phase into windows (open the latest start, close it at the
 // next end of the same phase). A window covers the closed interval start ≤ ts ≤ end.
 function markWindows(marks) {
@@ -50,7 +63,7 @@ function markWindows(marks) {
   for (const m of marks) (byPhase[m.phase] ??= []).push(m);
   const windows = [];
   for (const [phase, events] of Object.entries(byPhase)) {
-    events.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+    events.sort((a, b) => a.ts - b.ts);
     let open = null;
     for (const e of events) {
       if (e.event === "start") open = e.ts;
@@ -63,24 +76,31 @@ function markWindows(marks) {
   return windows;
 }
 
-export function phaseOf(sample, { marks = [], turns = [], threshold = 5 } = {}) {
-  if (marks.length) {
-    for (const w of markWindows(marks)) {
-      if (sample.ts >= w.startTs && sample.ts <= w.endTs) return w.phase;
-    }
+export function phaseOf(sample, {marks = [], turns = [], threshold = 5, openUntil = null, windows} = {}) {
+  const ts = toMs(sample.ts);
+  if (ts === null) return "idle"; // unparseable sample timestamp — nothing to classify against
+  // buildReport passes prebuilt windows; a direct call falls back to building them once here.
+  for (const w of windows ?? markWindows(marks)) {
+    if (ts >= w.startTs && ts <= w.endTs) return w.phase;
   }
+  // endedAt null/undefined/"" = the turn is still open; an open turn is capped at openUntil
+  // (the newest sample ts) so a never-closed turn cannot swallow samples from after the report.
+  const cap = openUntil ?? Number.POSITIVE_INFINITY;
   let best = null;
   for (const t of turns) {
+    const startedAt = toMs(t.startedAt);
+    if (startedAt === null) continue;
+    const open = t.endedAt == null || t.endedAt === "";
     if (
-      sample.ts >= t.startedAt &&
-      (t.endedAt === undefined || sample.ts <= t.endedAt) &&
-      (!best || t.startedAt > best.startedAt)
+      ts >= startedAt &&
+      (open ? ts <= cap : ts <= toMs(t.endedAt)) &&
+      (!best || startedAt > best.startedAt)
     ) {
-      best = t;
+      best = { squad: t.squad, startedAt };
     }
   }
   if (best) return `${best.squad}-child`;
-  const supervisor = (sample.containers ?? []).find((c) => c.name.includes("supervisor"));
+  const supervisor = findContainer(sample, "supervisor");
   if (supervisor && supervisor.cpu_pct >= threshold) return "supervisor-active";
   return "idle";
 }
@@ -101,12 +121,16 @@ export function loadRegistryTurns(dir) {
     for (const child of Object.values(parsed?.children ?? {})) {
       for (const turn of child?.turns ?? []) {
         if (!turn?.startedAt) continue;
+        const startedAt = toMs(turn.startedAt);
+        if (startedAt === null) continue; // unparseable startedAt — the turn cannot be placed on the timeline
+        const rawEnd = turn.endedAt;      // null/undefined/"" = the turn is still open
+        if (rawEnd != null && rawEnd !== "" && toMs(rawEnd) === null) continue; // unparseable endedAt
         turns.push({
           runId: entry.name,
           childId: child.childId ?? "",
           squad: child.squad ?? "",
-          startedAt: turn.startedAt,
-          endedAt: turn.endedAt,
+          startedAt,
+          endedAt: rawEnd == null || rawEnd === "" ? null : toMs(rawEnd),
         });
       }
     }
@@ -115,18 +139,34 @@ export function loadRegistryTurns(dir) {
 }
 
 export function loadMarks(file) {
-  return readJsonl(file);
+  return readJsonl(file)
+    .map((m) => ({ ...m, ts: toMs(m.ts) }))
+    .filter((m) => m.ts !== null); // a mark whose ts cannot be parsed has no place on the timeline
 }
 
-function readJsonl(file) {
+// Tolerant loader: a line that does not parse is skipped, not fatal — a live-appended
+// samples.jsonl can carry a truncated tail line when read mid-write.
+export function readJsonl(file) {
   return readFileSync(file, "utf8")
     .split("\n")
     .filter((line) => line.trim())
-    .map((line) => JSON.parse(line));
+    .flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
 }
 
-function findContainer(sample, needle) {
-  return (sample.containers ?? []).find((c) => c.name.includes(needle));
+// Anchored role match: the supervisor container is the one whose name ENDS with "supervisor"
+// (optionally followed by a replica suffix: "fenix-fenix-supervisor-1", "fenix-supervisor"),
+// so a container like "fenix-supervisor-log-tail" must not match. The `includes` fallback
+// applies only when no anchored name exists.
+function findContainer(sample, role) {
+  const containers = sample.containers ?? [];
+  const re = new RegExp(`(^|-)${role}(-\\d+)?$`);
+  return containers.find((c) => re.test(c.name)) ?? containers.find((c) => c.name.includes(role));
 }
 
 function metricValue(sample, metric) {
@@ -144,8 +184,14 @@ function metricValue(sample, metric) {
 export function buildReport(samples, { marks = [], turns = [], threshold = 5 } = {}) {
   const counts = {};
   const vectors = {};
+  const windows = markWindows(marks); // built once, not per sample
+  let openUntil = null;               // newest sample ts — the cap for open turns
+  for (const s of samples) {
+    const ms = toMs(s.ts);
+    if (ms !== null && (openUntil === null || ms > openUntil)) openUntil = ms;
+  }
   for (const sample of samples) {
-    const phase = phaseOf(sample, { marks, turns, threshold });
+    const phase = phaseOf(sample, { turns, threshold, openUntil, windows });
     counts[phase] = (counts[phase] ?? 0) + 1;
     for (const metric of METRICS) {
       const value = metricValue(sample, metric);
@@ -174,12 +220,14 @@ export function buildReport(samples, { marks = [], turns = [], threshold = 5 } =
 
 export function renderMarkdown(report) {
   const fmt = (v) => (v === null || v === undefined ? "null" : v.toFixed(1));
+  // a phase name is user data — escape it so it stays one table cell
+  const cell = (s) => String(s).replace(/\|/g, "\\|").replace(/\n/g, " ");
   const lines = ["| phase | metric | n | p20 | p50 | p80 | peak |", "|---|---|---|---|---|---|---|"];
   for (const phase of Object.keys(report.phases).sort()) {
     const { n, metrics } = report.phases[phase];
     for (const metric of METRICS) {
       const m = metrics[metric];
-      lines.push(`| ${phase} | ${metric} | ${m.n} | ${fmt(m.p20)} | ${fmt(m.p50)} | ${fmt(m.p80)} | ${fmt(m.peak)} |`);
+      lines.push(`| ${cell(phase)} | ${metric} | ${m.n} | ${fmt(m.p20)} | ${fmt(m.p50)} | ${fmt(m.p80)} | ${fmt(m.peak)} |`);
     }
   }
   const thin = report.thin.length ? report.thin.join(", ") : "none";
@@ -210,7 +258,8 @@ function main(argv) {
     console.error("usage: node scripts/vm-sampler-report.mjs --samples <jsonl> [--registry <stateHome>] [--marks <jsonl>] [--supervisor-cpu-threshold 5] [--json]");
     return 2;
   }
-  const samples = readJsonl(samplesPath);
+  // timestamps become epoch ms at load time; unparseable ts → null (phaseOf classifies it idle)
+  const samples = readJsonl(samplesPath).map((s) => ({ ...s, ts: toMs(s.ts) }));
   const report = buildReport(samples, {
     marks: marksPath ? loadMarks(marksPath) : [],
     turns: registry ? loadRegistryTurns(registry) : [],

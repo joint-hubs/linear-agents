@@ -18,6 +18,7 @@ import {
   loadRegistryTurns,
   percentile,
   phaseOf,
+  readJsonl,
   renderMarkdown,
 } from "./vm-sampler-report.mjs";
 
@@ -159,9 +160,89 @@ test("loadRegistryTurns: skips a corrupt children.json without throwing", () => 
   assert.ok(all.every((t) => t.runId !== "run-bad"));
 });
 
+// ── reviewer findings: tolerance, open-turn cap, escapes, timestamp forms ────
+
+// A second sample set limited to the report's tail (10:09 … 10:11) for the open-turn cap cases.
+const tailSamples = [T("10:09"), T("10:10"), T("10:11")].map((ts) => ({ ts, containers: [] }));
+
+// A registry with an open-null turn and a turn whose timestamps carry millis + an explicit
+// +00:00 offset — separate dir so the earlier count tests stay untouched.
+const openRegistryDir = mkdtempSync(path.join(tmpdir(), "vm-sampler-open-"));
+mkdirSync(path.join(openRegistryDir, "run-b"), { recursive: true });
+writeFileSync(
+  path.join(openRegistryDir, "run-b", "children.json"),
+  JSON.stringify({
+    children: {
+      "qa-1": { childId: "qa-1", squad: "qa", status: "running", turns: [{ startedAt: T("10:09"), endedAt: null }] },
+      "dev-2": {
+        childId: "dev-2",
+        squad: "dev",
+        status: "exited",
+        turns: [{ startedAt: "2026-10-19T10:03:00.000+00:00", endedAt: "2026-10-19T10:06:00.000+00:00" }],
+      },
+    },
+  }),
+);
+
+test("readJsonl: a truncated tail line is skipped, the report still builds from 12 good samples", () => {
+  const samplesDir = mkdtempSync(path.join(tmpdir(), "vm-sampler-samples-"));
+  const good = samples.map((s) => `${JSON.stringify(s)}\n`).join("");
+  writeFileSync(path.join(samplesDir, "samples.jsonl"), `${good}{"ts":"2026-10-19T10:12:00Z","load1":0.`);
+  const loaded = readJsonl(path.join(samplesDir, "samples.jsonl"));
+  assert.equal(loaded.length, 12);
+  const report = buildReport(loaded, ctx);
+  assert.equal(Object.values(report.phases).reduce((sum, p) => sum + p.n, 0), 12);
+  assert.equal(report.phases["dev-child"].n, 4);
+  rmSync(samplesDir, { recursive: true, force: true });
+});
+
+test("buildReport: an open turn is capped at the newest sample of the report", () => {
+  // open from 10:09 → covers 10:09–10:11 only (capped at the newest sample, 10:11)
+  const openAt09 = [{ runId: "r", childId: "c", squad: "ops", startedAt: T("10:09"), endedAt: undefined }];
+  const covered = buildReport(tailSamples, { turns: openAt09 });
+  assert.equal(covered.phases["ops-child"].n, 3);
+  assert.equal(covered.phases.idle, undefined);
+  // open from 10:14 — after the last sample at 10:11 → classifies nothing
+  const openAt14 = [{ runId: "r", childId: "c", squad: "ops", startedAt: T("10:14"), endedAt: undefined }];
+  const after = buildReport(tailSamples, { turns: openAt14 });
+  assert.equal(after.phases["ops-child"], undefined);
+  assert.equal(after.phases.idle.n, 3);
+});
+
+test("loadRegistryTurns: endedAt null is an open turn; +00:00/millis stamps normalize to ms", () => {
+  const turnsB = loadRegistryTurns(openRegistryDir);
+  assert.equal(turnsB.length, 2);
+  const qa = turnsB.find((t) => t.childId === "qa-1");
+  const dev2 = turnsB.find((t) => t.childId === "dev-2");
+  assert.equal(qa.endedAt, null); // JSON null = open, not a dropped turn
+  assert.equal(typeof qa.startedAt, "number");
+  assert.equal(typeof dev2.startedAt, "number");
+  // a turn written with millis and an explicit +00:00 offset matches the plain-Z samples
+  assert.equal(phaseOf(samples[4], { turns: [dev2] }), "dev-child"); // 10:04 inside 10:03–10:06
+  assert.equal(phaseOf(samples[2], { turns: [dev2] }), "idle"); // 10:02 outside the turn
+  // the open-null turn classifies the tail samples up to the cap
+  const report = buildReport(tailSamples, { turns: [qa] });
+  assert.equal(report.phases["qa-child"].n, 3);
+});
+
+test("renderMarkdown: a `|` in a phase name is escaped in the table", () => {
+  const marksDir = mkdtempSync(path.join(tmpdir(), "vm-sampler-marks-"));
+  writeFileSync(
+    path.join(marksDir, "marks.jsonl"),
+    `${JSON.stringify({ ts: T("10:00"), phase: "a|b", event: "start" })}\n${JSON.stringify({ ts: T("10:00"), phase: "a|b", event: "end" })}\n`,
+  );
+  const report = buildReport([samples[0]], { marks: loadMarks(path.join(marksDir, "marks.jsonl")) });
+  assert.equal(report.phases["a|b"].n, 1);
+  const md = renderMarkdown(report);
+  assert.ok(md.includes("| a\\|b |"), "escaped pipe in the phase cell");
+  assert.ok(!md.includes("| a|b |"), "a raw pipe would split the cell");
+  rmSync(marksDir, { recursive: true, force: true });
+});
+
 // ── cleanup + summary ────────────────────────────────────────────────────────
 
 rmSync(registryDir, { recursive: true, force: true });
+rmSync(openRegistryDir, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) {
   for (const failure of failures) console.error(`  - ${failure}`);

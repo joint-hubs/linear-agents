@@ -25,6 +25,10 @@
 SAMPLER_DIR=${FENIX_SAMPLER_DIR:-$HOME/fenix-sampler}
 FENIX_DIR=${FENIX_DIR:-$HOME/fenix}
 
+# awk printf honours LC_NUMERIC and `free` output is translated under other locales — the
+# sampler's own number formats and parsing must not depend on the VM's locale.
+export LC_ALL=C
+
 usage() {
   echo "usage: $0 once | start [interval_s] | stop | purge" >&2
   exit 2
@@ -74,13 +78,17 @@ sample_once() {
 
   claude_procs=null
   top_rss='[]'
-  # ONE exec: line 1 = claude process count, lines 2-4 = the three biggest RSS processes
-  census=$(cd "$FENIX_DIR" 2>/dev/null \
-    && docker compose exec -T fenix-supervisor sh -c 'pgrep -c -x claude; ps -eo rss,comm --sort=-rss | sed -n 2,4p' 2>/dev/null)
+  # ONE exec: a tagged census line `count=<n|null>`, then the three biggest RSS processes —
+  # the parse trusts the `count=` tag, not line position.
+  census=$( ( cd "$FENIX_DIR" 2>/dev/null \
+    && docker compose exec -T fenix-supervisor sh -c 'echo "count=$(pgrep -c -x claude 2>/dev/null || echo null)"; ps -eo rss,comm --sort=-rss | sed -n 2,4p' ) 2>/dev/null)
   if [ -n "$census" ]; then
-    count=$(printf '%s\n' "$census" | awk 'NR == 1 && $1 ~ /^[0-9]+$/ { print $1 }')
-    [ -n "$count" ] && claude_procs=$count
-    frag=$(printf '%s\n' "$census" | awk 'NR > 1 {
+    count=$(printf '%s\n' "$census" | awk '$1 ~ /^count=/ { sub(/^count=/, "", $1); print $1 }')
+    case "$count" in
+      ''|null) ;;  # no census line, or pgrep answered null — leave claude_procs null
+      *) claude_procs=$count ;;
+    esac
+    frag=$(printf '%s\n' "$census" | awk '$1 !~ /^count=/ {
       rss = $1;
       if (rss !~ /^[0-9]+$/) next;
       comm = $0; sub(/^[ ]*[0-9]+[ ]+/, "", comm);
@@ -104,34 +112,67 @@ case "${1:-}" in
   start)
     interval=${2:-60}
     case "$interval" in ''|*[!0-9]*) usage;; esac
+    if [ "$interval" -lt 5 ]; then
+      echo "sampler: interval must be >= 5 seconds" >&2
+      exit 2
+    fi
     mkdir -p "$SAMPLER_DIR"
+    SAMPLER_DIR=$(cd "$SAMPLER_DIR" && pwd)  # the loop must not depend on the caller's cwd
     if [ -f "$SAMPLER_DIR/sampler.pid" ] && kill -0 "$(cat "$SAMPLER_DIR/sampler.pid")" 2>/dev/null; then
       echo "sampler: already running (pid $(cat "$SAMPLER_DIR/sampler.pid"))" >&2
       exit 1
     fi
     : >"$SAMPLER_DIR/sampler.log"
-    nohup "$0" __loop "$interval" >>"$SAMPLER_DIR/sampler.log" 2>&1 &
+    nohup "$0" __loop "$interval" </dev/null >>"$SAMPLER_DIR/sampler.log" 2>&1 &
     echo $! >"$SAMPLER_DIR/sampler.pid"
     echo "sampler: started (pid $(cat "$SAMPLER_DIR/sampler.pid"), interval ${interval}s, log $SAMPLER_DIR/sampler.log)"
     ;;
   stop)
     if [ -f "$SAMPLER_DIR/sampler.pid" ]; then
       pid=$(cat "$SAMPLER_DIR/sampler.pid")
-      kill "$pid" 2>/dev/null || echo "sampler: pid $pid was not alive" >&2
-      rm -f "$SAMPLER_DIR/sampler.pid"
-      echo "sampler: stopped"
+      cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)
+      case "$cmd" in
+        *sample.sh*)
+          kill "$pid" 2>/dev/null || echo "sampler: pid $pid was not alive" >&2
+          rm -f "$SAMPLER_DIR/sampler.pid"
+          echo "sampler: stopped"
+          ;;
+        *)
+          # a pid that is not the sampler is someone else's — never kill it, just drop the stale file
+          rm -f "$SAMPLER_DIR/sampler.pid"
+          echo "sampler: stale pid file: pid $pid is not the sampler (${cmd:-not running}) — removed without killing" >&2
+          ;;
+      esac
     else
       echo "sampler: not running (no $SAMPLER_DIR/sampler.pid)" >&2
       exit 1
     fi
     ;;
   purge)
+    # rm -rf runs on $SAMPLER_DIR verbatim — refuse anything that is not an absolute,
+    # non-root, non-$HOME directory named fenix-sampler.
+    case "$SAMPLER_DIR" in
+      /*) ;;
+      *)
+        echo "sampler: purge refused — SAMPLER_DIR is not an absolute path: $SAMPLER_DIR" >&2
+        exit 2
+        ;;
+    esac
+    if [ "$SAMPLER_DIR" = "/" ] || [ "$SAMPLER_DIR" = "$HOME" ] || [ "$(basename "$SAMPLER_DIR")" != "fenix-sampler" ]; then
+      echo "sampler: purge refused — refusing to remove $SAMPLER_DIR (must be <dir>/fenix-sampler, not / or \$HOME)" >&2
+      exit 2
+    fi
     "$0" stop >/dev/null 2>&1 || true
     rm -rf "$SAMPLER_DIR"
     echo "sampler: purged ($SAMPLER_DIR removed)"
     ;;
   __loop)
-    interval=$2
+    interval=${2:-60}
+    case "$interval" in ''|*[!0-9]*) usage;; esac
+    if [ "$interval" -lt 5 ]; then
+      echo "sampler: interval must be >= 5 seconds" >&2
+      exit 2
+    fi
     while :; do
       sample_once >>"$SAMPLER_DIR/samples.jsonl"
       sleep "$interval"
