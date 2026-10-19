@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 
 import { openTelemetryDb } from "./telemetry-store.mjs";
 import { ensureViews } from "./telemetry-canonical.mjs";
-import { buildCache } from "./analysis-cache.mjs";
+import { buildCache, CACHE_SCHEMA_VERSION } from "./analysis-cache.mjs";
 import { spawnTestServer } from "./test-spawn.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -500,6 +500,48 @@ try {
       check("panel includes the extra row after the rebuild",
         costFresh.status === 200 && costFresh.body?.data?.totals?.turns === 4,
         `status ${costFresh.status} totals ${JSON.stringify(costFresh.body?.data?.totals)}`);
+    }
+
+    // ── old-schema cache → treated as absent: 503 + auto-build ────────────
+
+    // FOC-915: after a schema bump (2→3 added the insight tables) the cache
+    // FILE still exists — but every panel would 500 on "no such table" if it
+    // were served. The panels treat a foreign-schema cache as missing: 503
+    // cache_building + an auto-build child writes a current-schema cache.
+    {
+      const { DatabaseSync } = await import("node:sqlite");
+      const odb = new DatabaseSync(cacheFile, { readOnly: false });
+      odb.prepare("UPDATE cache_meta SET cache_schema_version = cache_schema_version - 1").run();
+      odb.close();
+
+      // The status route still DESCRIBES the old file: exists, stale, named
+      // schema version — the UI's staleness display must not go blank.
+      const st = await getJson("/api/analysis/cache");
+      check("status on an old-schema cache: exists true, stale true",
+        st.status === 200 && st.body?.exists === true && st.body?.stale === true
+          && typeof st.body?.schemaVersion === "number",
+        `status ${st.status} body ${JSON.stringify(st.body).slice(0, 300)}`);
+
+      const miss = await getJson("/api/analysis/cost?era=all");
+      check("panel against an old-schema cache -> 503 code cache_building",
+        miss.status === 503 && miss.body?.code === "cache_building",
+        `status ${miss.status} body ${JSON.stringify(miss.body)}`);
+
+      let restored = false;
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        const st2 = await getJson("/api/analysis/cache");
+        if (st2.body?.building === false && st2.body?.stale === false
+          && st2.body?.schemaVersion === CACHE_SCHEMA_VERSION) { restored = true; break; }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      check("auto-build restores the old-schema cache within 60 s", restored,
+        "cache still old-schema or building after 60 s");
+
+      const costRestored = await getJson("/api/analysis/cost?era=all");
+      check("panel serves again after the schema-triggered auto-build",
+        costRestored.status === 200 && costRestored.body?.data?.totals?.turns === 4,
+        `status ${costRestored.status} totals ${JSON.stringify(costRestored.body?.data?.totals)}`);
     }
 
     // ── missing cache → 503 cache_building + auto-build ───────────────────

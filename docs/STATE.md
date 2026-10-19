@@ -7,6 +7,7 @@
 ## Task journals (generated)
 
 - FOC-914 — in progress — last entry 2026-10-19 17:41 — foc-914-team-group-filters — -
+- FOC-915 — in progress — last entry 2026-10-19 17:12 — foc-915-insights-task-table — -
 - FOC-523 — in progress — last entry 2026-10-19 15:51 — foc-523-merge-deps — -
 <!-- state-index:end -->
 

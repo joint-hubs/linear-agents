@@ -58,9 +58,20 @@ import {
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { telemetryDbPath, telemetryHome } from "./telemetry-store.mjs";
+import { ERA_BOUNDARY } from "./telemetry-analysis.mjs";
+// FOC-915: the Insights task table and supervisor allocation are DERIVED at
+// cache build time with the SAME JS functions the panels use — the build reads
+// the freshly copied relations through loadTasksUnfiltered and persists what
+// the panels would otherwise recompute on every request.
+import {
+  buildTaskTable,
+  allocateSupervisorOverhead,
+  addLoadedCost,
+  loadTasksUnfiltered,
+} from "./analysis-insights.mjs";
 
 /** Bump when the cache layout changes in a way old files must not satisfy. */
-export const CACHE_SCHEMA_VERSION = 2;
+export const CACHE_SCHEMA_VERSION = 3;
 
 // A lock older than this is considered abandoned (crashed builder) even if its
 // pid cannot be probed.
@@ -93,6 +104,32 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function cachePath() {
   return process.env.LA_ANALYSIS_CACHE || join(telemetryHome(), "analysis-cache.sqlite");
+}
+
+/**
+ * Cheap, cache-meta-only probe: does the cache file exist AND carry the
+ * schema the running code expects? Reads only cache_meta (no store watermark
+ * — staleness must stay out of the per-request path). Absent, unreadable, or
+ * wrong-schema all return false: FOC-915 — a cache written by an older
+ * schema (e.g. the 2→3 bump that added the insight tables) must be treated
+ * as ABSENT by the server's panels, not served and not silently 500-ing with
+ * "no such table" on every request. The rebuild child writes the current
+ * version, so the auto-build restores a serviceable cache.
+ */
+export function cacheMatchesSchema(p = cachePath()) {
+  if (!existsSync(p)) return false;
+  let db = null;
+  try {
+    db = openReadOnly(p);
+    const meta = db.prepare(
+      "SELECT cache_schema_version FROM cache_meta LIMIT 1",
+    ).get();
+    return meta?.cache_schema_version === CACHE_SCHEMA_VERSION;
+  } catch {
+    return false; // unreadable/incomplete cache — treated as absent
+  } finally {
+    db?.close();
+  }
 }
 
 /**
@@ -255,6 +292,119 @@ function createCacheIndexes(cache) {
   `);
 }
 
+// ── FOC-915: the Insights tables, derived at build time ──────────────────────
+
+/**
+ * Derive the Insights task table and supervisor allocation into the cache,
+ * with the SAME JS functions the panels use (analysis-insights.mjs) — so the
+ * definitions live in one place and the panels read indexed rows instead of
+ * recomputing the run→task attribution of ~180k canonical rows per request.
+ *
+ * The inputs are read from the JUST-COPIED relations in the .building cache
+ * (one connection, no second pass over the store) with NO filters: the
+ * per-task / per-message filters apply at read time, over the precomputed
+ * rows — per task first_ts (tickets, concentration) and per message time
+ * (spend), the windows the panels document today.
+ *
+ * Tables:
+ *   insight_task_table — one row per task: first_ts, era, msgs, direct cost,
+ *     unpriced share, supervisor active/adjacent cost, loaded cost, partial.
+ *   insight_supervisor_alloc — one row per supervisor message: mode, the
+ *     comma-separated task ids it was allocated over, cost_usd.
+ *
+ * Read errors fail the build (the cache must never ship half-derived): the
+ * caller's try/finally deletes the .building file.
+ */
+function deriveInsightTables(cache) {
+  const inputs = loadTasksUnfiltered(cache);
+  const built = buildTaskTable(inputs.usageRows, inputs.links, { eraBoundary: ERA_BOUNDARY });
+  const alloc = allocateSupervisorOverhead(inputs.supRows, inputs.childRuns, inputs.tasksByRun, {
+    horizon: inputs.horizon,
+  });
+  addLoadedCost(built.tasks, alloc);
+
+  cache.exec(`
+    CREATE TABLE insight_task_table (
+      task_id        TEXT PRIMARY KEY,
+      era            TEXT,            -- informational (SQL exploration); the panels re-derive era from first_ts
+      first_ts       TEXT,
+      last_ts        TEXT,
+      msgs           INTEGER NOT NULL,
+      cost_usd       REAL,
+      unpriced_share REAL NOT NULL,
+      sup_active     REAL NOT NULL,
+      sup_adjacent   REAL NOT NULL,
+      cost_loaded    REAL,
+      partial        INTEGER NOT NULL
+    );
+    CREATE TABLE insight_supervisor_alloc (
+      usage_id    TEXT PRIMARY KEY,
+      run_id      TEXT,
+      observed_at TEXT,
+      mode        TEXT NOT NULL,
+      cost_usd    REAL,
+      tasks_json  TEXT NOT NULL
+    );
+    CREATE INDEX idx_cache_sta_observed_at ON insight_supervisor_alloc(observed_at);
+  `);
+  const insertTask = cache.prepare(`
+    INSERT INTO insight_task_table
+      (task_id, era, first_ts, last_ts, msgs, cost_usd, unpriced_share,
+       sup_active, sup_adjacent, cost_loaded, partial)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  cache.exec("BEGIN");
+  try {
+    for (const t of built.tasks.values()) {
+      insertTask.run(
+        t.taskId, t.era ?? null, t.firstTs ?? null, t.lastTs ?? null,
+        t.msgs, t.costUsd ?? null, t.unpricedShare,
+        t.supActive ?? 0, t.supAdjacent ?? 0, t.costLoaded ?? null, t.partial ? 1 : 0,
+      );
+    }
+    cache.exec("COMMIT");
+  } catch (err) {
+    try { cache.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    throw err;
+  }
+
+  const insertAlloc = cache.prepare(`
+    INSERT INTO insight_supervisor_alloc (usage_id, run_id, observed_at, mode, cost_usd, tasks_json)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  cache.exec("BEGIN");
+  try {
+    for (const a of alloc) {
+      insertAlloc.run(a.usageId, a.runId, a.observedAt ?? null, a.mode, a.costUsd ?? null, JSON.stringify(a.tasks ?? []));
+    }
+    cache.exec("COMMIT");
+  } catch (err) {
+    try { cache.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    throw err;
+  }
+
+  // The attribution-drop counts the tickets panel reports as caveats — they
+  // are properties of the BUILD-TIME attribution (full history), so they are
+  // persisted here rather than recomputed per request.
+  cache.exec(`
+    CREATE TABLE insight_meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+  const insMeta = cache.prepare("INSERT INTO insight_meta (key, value) VALUES (?, ?)");
+  insMeta.run("dropped_sup_rows", String(built.droppedSup));
+  insMeta.run("dropped_sup_usd", String(built.droppedUsd));
+  insMeta.run("dropped_no_link_rows", String(built.droppedNoLink));
+
+  return {
+    taskRows: built.tasks.size,
+    droppedSup: built.droppedSup,
+    droppedNoLink: built.droppedNoLink,
+    allocRows: alloc.length,
+  };
+}
+
 // The swap target must not be open by this process when renaming — connections
 // are closed by the caller before swapIntoPlace runs.
 // Retry budget: a SQL console query on the cache can hold the file open for up
@@ -349,7 +499,8 @@ export function cacheStatus({ storePath = telemetryDbPath(), cachePath: p = cach
  * strictly read-only; writes only the cache files (.building → atomic rename).
  *
  * → { builtAt, buildMs, rows: { canonical_usage, canonical_tool_facts, runs,
- *     delegation_links, data_quality_issues }, watermark }
+ *     delegation_links, data_quality_issues, insight_task_table,
+ *     insight_supervisor_alloc }, watermark }
  */
 export async function buildCache({ storePath = telemetryDbPath(), cachePath: p = cachePath(), onProgress } = {}) {
   const lockPath = `${p}.lock`;
@@ -383,6 +534,13 @@ export async function buildCache({ storePath = telemetryDbPath(), cachePath: p =
       rows[name] = copyRelation(store, cache, name, onProgress);
     }
     createCacheIndexes(cache);
+
+    // FOC-915: derive the Insights task table + supervisor allocation from the
+    // just-copied relations, with the panels' own JS functions. A failure here
+    // fails the whole build — the cache must never ship half-derived.
+    const insights = deriveInsightTables(cache);
+    rows.insight_task_table = insights.taskRows;
+    rows.insight_supervisor_alloc = insights.allocRows;
 
     const builtAt = new Date().toISOString();
     const buildMs = Date.now() - startedAt;
