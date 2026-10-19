@@ -2,6 +2,9 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { getAnalysisMeta, getAnalysisCache, postAnalysisCacheRebuild } from '../api';
 import CostPanel from './analysis/CostPanel.jsx';
+import TicketsPanel from './analysis/TicketsPanel.jsx';
+import MoneyPanel from './analysis/MoneyPanel.jsx';
+import OutliersPanel from './analysis/OutliersPanel.jsx';
 import ToolsPanel from './analysis/ToolsPanel.jsx';
 import DecisionsPanel from './analysis/DecisionsPanel.jsx';
 import HandoffsPanel from './analysis/HandoffsPanel.jsx';
@@ -17,6 +20,9 @@ import SqlConsole from './analysis/SqlConsole.jsx';
 
 const TABS = [
   { key: 'cost', label: 'Cost', comp: CostPanel },
+  { key: 'tickets', label: 'Tickets', comp: TicketsPanel },
+  { key: 'money', label: 'Money', comp: MoneyPanel },
+  { key: 'outliers', label: 'Outliers', comp: OutliersPanel },
   { key: 'tools', label: 'Tools', comp: ToolsPanel },
   { key: 'decisions', label: 'Decisions', comp: DecisionsPanel },
   { key: 'handoffs', label: 'Handoffs', comp: HandoffsPanel },

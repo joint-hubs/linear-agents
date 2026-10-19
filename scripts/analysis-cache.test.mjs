@@ -116,7 +116,12 @@ const cachePath = join(temp, "analysis-cache.sqlite");
 }
 
 // Expected canonical shape: 7 usage rows (u1..u6 + the u7 island), 5 tool calls.
-const EXPECTED = { canonical_usage: 7, canonical_tool_facts: 5, runs: 3, delegation_links: 6, data_quality_issues: 2 };
+// FOC-787: the cache also copies run_task_links and work_items; this fixture
+// defines neither, so both copy as empty tables (still created, 0 rows).
+const EXPECTED = {
+  canonical_usage: 7, canonical_tool_facts: 5, runs: 3, delegation_links: 6,
+  data_quality_issues: 2, run_task_links: 0, work_items: 0,
+};
 
 const opts = { storePath, cachePath };
 
@@ -168,6 +173,7 @@ const built = await buildCache(opts);
     "idx_cache_cu_observed_at", "idx_cache_cu_squad", "idx_cache_cu_model", "idx_cache_cu_run_agent",
     "idx_cache_ctf_observed_at", "idx_cache_ctf_squad", "idx_cache_ctf_model", "idx_cache_ctf_run_agent",
     "idx_cache_runs_run_id", "idx_cache_dl_parent", "idx_cache_dl_observed_at",
+    "idx_cache_rtl_run", "idx_cache_wi_task",
   ]) {
     check(`index ${index} present`, indexNames.has(index));
   }

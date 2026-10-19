@@ -281,6 +281,33 @@ try {
     check("bad date -> 400 with code bad_filter", badDate.status === 400 && badDate.body?.code === "bad_filter",
       `status ${badDate.status} body ${JSON.stringify(badDate.body)}`);
 
+    // ── FOC-787 Insights panels: tickets / money / outliers ─────────────
+
+    // 200 + the contract's top-level keys on each route (the fixture store has
+    // no run_task_links rows, so the panels answer empty-but-well-shaped).
+    for (const [route, key] of [["tickets", "tasks"], ["money", "total"], ["outliers", "tasks"]]) {
+      const res = await getJson(`/api/analysis/${route}?era=all`);
+      check(`GET /api/analysis/${route} -> 200`, res.status === 200, `got ${res.status}: ${JSON.stringify(res.body).slice(0, 300)}`);
+      check(`${route} envelope: filters + data.definition + data.${key} + caveats`,
+        res.body?.filters && typeof res.body?.data?.definition === "string" &&
+        res.body?.data?.[key] !== undefined && Array.isArray(res.body?.caveats),
+        JSON.stringify(res.body).slice(0, 300));
+    }
+
+    for (const route of ["tickets", "money", "outliers"]) {
+      const bad = await getJson(`/api/analysis/${route}?era=nope`);
+      check(`${route} bad era -> 400 bad_filter`, bad.status === 400 && bad.body?.code === "bad_filter",
+        `status ${bad.status} body ${JSON.stringify(bad.body)}`);
+    }
+
+    // AC2 / P3.1: each panel answers in < 500 ms on the fixture cache.
+    for (const route of ["tickets", "money", "outliers"]) {
+      const started = Date.now();
+      await getJson(`/api/analysis/${route}?era=all`);
+      const ms = Date.now() - started;
+      check(`${route} answers < 500 ms on the fixture (P3.1)`, ms < 500, `${ms} ms`);
+    }
+
     // ── POST /api/analysis/sql ───────────────────────────────────────────
 
     const sel = await fetch(`${BASE}/api/analysis/sql`, {

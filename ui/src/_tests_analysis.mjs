@@ -265,6 +265,112 @@ await test('topN: no aggregation when n covers all rows; non-finite keys sort la
   eq(topN(null, 'v', 3), []);
 });
 
+// --- insightsModel helpers (FOC-787 slice B) -----------------------------------
+// Fixtures mirror docs/plans/foc-787-insights-panels.md §2 exactly.
+
+import {
+  eraColumns,
+  supervisorSplit,
+  lorenzPath,
+  consensusRows,
+  fmtDirection,
+  workLink,
+} from './screens/analysis/insightsModel.js';
+
+const ticketsFixture = {
+  definition: 'direct = priced cost …',
+  tasks: 264,
+  priced: 240,
+  unpriced: 24,
+  eras: [
+    {
+      era: 'pre',
+      tasks: 120,
+      direct: { p20: 1.1, p50: 4.36, p80: 12.2, medianCi: [3.9, 5.1] },
+      loaded: { p20: 0, p50: 0, p80: 0, medianCi: [0, 0] },
+      partial: 7,
+    },
+  ],
+  rows: [{ taskId: 'FOC-123', era: 'post', firstTs: 't', msgs: 41, costUsd: 4.1, costLoaded: 6.9, supActive: 2.0, supAdjacent: 0.8, unpricedShare: 0, partial: false }],
+};
+
+await test('eraColumns: pre/post labels with p20/p50/p80 and the CI as text', () => {
+  const direct = eraColumns(ticketsFixture);
+  eq(direct.length, 1);
+  eq(direct[0].label, 'pre');
+  eq(direct[0].p20, 1.1);
+  eq(direct[0].p50, 4.36);
+  eq(direct[0].p80, 12.2);
+  eq(direct[0].ci, '$3.90–$5.10');
+  eq(direct[0].tasks, 120);
+  const loaded = eraColumns(ticketsFixture, 'loaded');
+  eq(loaded[0].p50, 0);
+  eq(loaded[0].ci, '$0.00–$0.00');
+});
+
+await test('eraColumns: missing payload / empty eras / missing fields stay null-safe', () => {
+  eq(eraColumns(null), []);
+  eq(eraColumns({}), []);
+  eq(eraColumns({ eras: [{}] }), [{ label: '—', p20: null, p50: null, p80: null, ci: '—', tasks: null }]);
+  eq(eraColumns({ eras: [null, 3, { era: 'post' }] })[0].label, 'post');
+  eq(eraColumns({ eras: [{ era: 'post', direct: { p50: 2, medianCi: [1] } }] })[0].ci, '—');
+});
+
+const moneyFixture = {
+  total: 1978.0,
+  bySquad: [{ squad: 'supervisor', costUsd: 1017.0, share: 0.51 }],
+  supervisor: { costUsd: 1017.0, active: 40.1, adjacent: 20.3, idle: 956.6, idleShare: 0.94 },
+  concentration: { gini: 0.71, top: [{ k: 0.05, share: 0.4 }, { k: 0.1, share: 0.55 }, { k: 0.2, share: 0.72 }], lorenz: [[0, 0], [0.1, 0.01], [1, 1]] },
+};
+
+await test('supervisorSplit: active / adjacent / idle parts from the contract fixture', () => {
+  const parts = supervisorSplit(moneyFixture);
+  eq(parts.map((p) => p.label), ['active', 'adjacent', 'idle']);
+  eq(parts.map((p) => p.value), [40.1, 20.3, 956.6]);
+  eq(supervisorSplit(null).map((p) => p.value), [null, null, null]);
+  eq(supervisorSplit({ supervisor: { active: 1 } }).map((p) => p.value), [1, null, null]);
+});
+
+await test('lorenzPath: SVG y flip, the equality diagonal, and degenerate inputs → null', () => {
+  const r = lorenzPath(moneyFixture.concentration.lorenz, 100, 100);
+  eq(r.curve, 'M 0 100 L 10 99 L 100 0');
+  eq(r.diagonal, 'M 0 100 L 100 0');
+  eq(lorenzPath(null, 100, 100), null);
+  eq(lorenzPath(moneyFixture.concentration.lorenz, 0, 100), null);
+  eq(lorenzPath([[0, 0], ['x', 1]], 100, 100).curve, 'M 0 100');
+  eq(lorenzPath([[0, 0]], 100, 100).diagonal, 'M 0 100 L 100 0');
+});
+
+const outliersFixture = {
+  tasks: 264,
+  flagged: 8,
+  detectors: ['mad', 'tukey'],
+  consensusMin: 2,
+  rows: [
+    { taskId: 'A', madZ: -4.5, consensus: false },
+    { taskId: 'B', madZ: 4.3, consensus: true },
+    { taskId: 'C', madZ: 1.2, consensus: false },
+    { taskId: 'D', madZ: 5.9, consensus: true },
+  ],
+};
+
+await test('consensusRows: consensus first, then |madZ| desc within each group', () => {
+  eq(consensusRows(outliersFixture).map((r) => r.taskId), ['D', 'B', 'A', 'C']);
+  eq(consensusRows(null), []);
+  // Empty objects are kept (they render as em dashes) — only non-objects drop.
+  eq(consensusRows({ rows: [null, {}, { consensus: true, madZ: 2 }] }), [{ consensus: true, madZ: 2 }, {}]);
+});
+
+await test('fmtDirection and workLink', () => {
+  eq(fmtDirection('high'), 'high ▲');
+  eq(fmtDirection('low'), 'low ▼');
+  eq(fmtDirection('unpriced'), 'unpriced');
+  eq(fmtDirection(undefined), '—');
+  eq(workLink('FOC-226'), '/work/FOC-226');
+  eq(workLink(''), null);
+  eq(workLink(null), null);
+});
+
 // --- Summary ------------------------------------------------------------------
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -33,6 +33,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "analysis-insights.test.mjs",
+      "reason": "isolation audit FOC-787: mkdtemp/tmpdir fixtures only (a fixture store built at an explicit temp path and the real buildCache into a temp cache file, both passed explicitly); pure helper unit tests over literal vectors; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "analysis-sql.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
