@@ -49,6 +49,7 @@
 //   sensitivity: median all 3, without consensus [1,2,4] → 2; totals 110 / 10.
 
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -270,16 +271,75 @@ await buildCache({ storePath: dbPath, cachePath: cacheFile });
 
 const db = openAnalysisDb(cacheFile);
 
+const FILTERS = { from: "2026-09-01T00:00:00.000Z", to: "2026-10-01T00:00:00.000Z", era: "all" };
+
+// ── 2b. the precomputed insight tables (FOC-915) ─────────────────────────────
+
+{
+  // The build derived the SAME task table the panels used to compute per
+  // request — same rows, same numbers, from the same JS functions.
+  const tt = db.prepare("SELECT * FROM insight_task_table ORDER BY task_id").all();
+  check("insight_task_table: 6 tasks", tt.length === 6, JSON.stringify(tt.map((r) => r.task_id)));
+  const t105 = tt.find((r) => r.task_id === "FOC-105");
+  check("insight_task_table FOC-105: msgs 3, cost 3, sup 0.5/0.25, loaded 3.75, partial 1",
+    t105.msgs === 3 && t105.cost_usd === 3 && t105.sup_active === 0.5 &&
+    t105.sup_adjacent === 0.25 && t105.cost_loaded === 3.75 && t105.partial === 1,
+    JSON.stringify(t105));
+  const t104 = tt.find((r) => r.task_id === "FOC-104");
+  check("insight_task_table FOC-104: unpriced (cost null, loaded null, share 1)",
+    t104.cost_usd === null && t104.cost_loaded === null && t104.unpriced_share === 1,
+    JSON.stringify(t104));
+  check("insight_task_table FOC-101 era pre", tt.find((r) => r.task_id === "FOC-101").era === "pre");
+
+  const sa = db.prepare("SELECT * FROM insight_supervisor_alloc ORDER BY usage_id").all();
+  check("insight_supervisor_alloc: 4 supervisor messages", sa.length === 4, JSON.stringify(sa.map((r) => r.usage_id)));
+  const u9 = sa.find((r) => r.usage_id === "u9");
+  check("insight_supervisor_alloc u9: active, tasks [FOC-105,FOC-106]",
+    u9.mode === "active" && JSON.parse(u9.tasks_json).join(",") === "FOC-105,FOC-106", JSON.stringify(u9));
+  const u8 = sa.find((r) => r.usage_id === "u8");
+  check("insight_supervisor_alloc u8: idle, empty tasks", u8.mode === "idle" && JSON.parse(u8.tasks_json).length === 0);
+
+  const meta = Object.fromEntries(db.prepare("SELECT key, value FROM insight_meta").all().map((r) => [r.key, r.value]));
+  check("insight_meta: 1 SUP row dropped ($0.5), 1 unlinked",
+    meta.dropped_sup_rows === "1" && meta.dropped_sup_usd === "0.5" && meta.dropped_no_link_rows === "1",
+    JSON.stringify(meta));
+
+  // The panels must READ the precomputed rows, not recompute: the panel is
+  // fed a SECOND cache built from a store whose FOC-105 row costs differently
+  // — readTaskTable is the only source the panel has, so the numbers must
+  // follow the table (a panel that recomputed from canonical_usage would be
+  // identical on both caches only if it ignored the table — it does not: the
+  // poisoned table is the panel's input here, proved by the payload change).
+  const poisonDb = new DatabaseSync(cacheFile, { readOnly: false });
+  try {
+    poisonDb.exec("UPDATE insight_task_table SET cost_usd = 999.0 WHERE task_id = 'FOC-105'");
+  } finally {
+    poisonDb.close();
+  }
+  const poisoned = ticketsPanel(db, FILTERS);
+  const p105 = poisoned.data.rows.find((r) => r.taskId === "FOC-105");
+  check("tickets panel reads the precomputed table (poisoned cost surfaces)",
+    p105.costUsd === 999, JSON.stringify(p105));
+  const healDb = new DatabaseSync(cacheFile, { readOnly: false });
+  try {
+    healDb.exec("UPDATE insight_task_table SET cost_usd = 3.0 WHERE task_id = 'FOC-105'");
+  } finally {
+    healDb.close();
+  }
+  const restored = ticketsPanel(db, FILTERS);
+  check("tickets panel back to the real number after restoring the row",
+    restored.data.rows.find((r) => r.taskId === "FOC-105").costUsd === 3, "");
+}
+
 // The cache must carry the two new link tables (schema v2 copy list).
 {
   const names = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
   check("cache carries run_task_links + work_items", names.has("run_task_links") && names.has("work_items"));
-  check("cache schema version bumped to 2", CACHE_SCHEMA_VERSION === 2, String(CACHE_SCHEMA_VERSION));
+  check("cache schema version bumped to 3 (FOC-915 adds the insight tables)", CACHE_SCHEMA_VERSION === 3, String(CACHE_SCHEMA_VERSION));
   const rtl = db.prepare("SELECT COUNT(*) AS n FROM run_task_links").get().n;
   check("cache run_task_links rows copied (8)", rtl === 8, String(rtl));
 }
 
-const FILTERS = { from: "2026-09-01T00:00:00.000Z", to: "2026-10-01T00:00:00.000Z", era: "all" };
 
 // ── 3. ticketsPanel ──────────────────────────────────────────────────────────
 
@@ -348,6 +408,20 @@ const FILTERS = { from: "2026-09-01T00:00:00.000Z", to: "2026-10-01T00:00:00.000
     postOnly.data.eras.length === 1 && postOnly.data.eras[0].era === "post" && postOnly.data.tasks === 5,
     JSON.stringify(postOnly.data.eras));
   check("tickets era=post: FOC-101 absent", !postOnly.data.rows.some((r) => r.taskId === "FOC-101"));
+
+  // A CUSTOM eraBoundary re-derives the era at READ time from first_ts (the
+  // persisted era column holds the build-time default): a boundary after
+  // FOC-101's first message (2026-09-20) but before the next (2026-09-24)
+  // pushes FOC-101 into "pre" — already true — while one BEFORE it flips the
+  // whole table to post. Both checked against the read-time derivation.
+  const early = ticketsPanel(db, { ...FILTERS, eraBoundary: "2026-09-19T00:00:00.000Z" });
+  check("tickets custom eraBoundary 09-19: FOC-101 era flips to post",
+    early.data.rows.find((r) => r.taskId === "FOC-101").era === "post", JSON.stringify(early.data.rows.find((r) => r.taskId === "FOC-101")));
+  const postEarly = ticketsPanel(db, { ...FILTERS, era: "all", eraBoundary: "2026-09-19T00:00:00.000Z" });
+  check("tickets custom eraBoundary 09-19: pre era is empty (all tasks post)",
+    postEarly.data.eras.find((e) => e.era === "pre").tasks === 0 &&
+    postEarly.data.eras.find((e) => e.era === "post").tasks === 6,
+    JSON.stringify(postEarly.data.eras));
 
   // squad=test keeps the supervisor split alive (the sup rows ignore squad/
   // model): u9 active + u10 adjacent still land on FOC-105 (0.5 + 0.25) and
@@ -424,6 +498,19 @@ const FILTERS = { from: "2026-09-01T00:00:00.000Z", to: "2026-10-01T00:00:00.000
     JSON.stringify(devMoney.caveats));
   check("money no squad/model → no supervisor_rows_unfiltered caveat",
     !caveats.some((c) => c.code === "supervisor_rows_unfiltered"), JSON.stringify(caveats));
+
+  // era=pre narrows CONCENTRATION to the pre task (FOC-101), but the supervisor
+  // split stays message-time-windowed only — the era is a property of the
+  // ticket's first_ts, not of the sup rows (the old loadTasks forced era:'all'
+  // on them; FOC-915 keeps that). All 4 sup messages are 09-27 (post-eraness
+  // aside), so the split stays 2.0 total / active 1 / adjacent 0.5 / idle 0.5.
+  const preMoney = moneyPanel(db, { ...FILTERS, era: "pre" });
+  check("money era=pre: supervisor split unaffected by the era filter",
+    preMoney.data.supervisor.costUsd === 2 && preMoney.data.supervisor.active === 1 &&
+    preMoney.data.supervisor.adjacent === 0.5 && preMoney.data.supervisor.idle === 0.5,
+    JSON.stringify(preMoney.data.supervisor));
+  check("money era=pre: concentration narrowed to the 1 pre task",
+    close(preMoney.data.concentration.gini, 0, 1e-3), JSON.stringify(preMoney.data.concentration));
 }
 
 // ── 5. outliersPanel ─────────────────────────────────────────────────────────

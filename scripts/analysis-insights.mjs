@@ -260,7 +260,7 @@ export function detectOutliers(tasks, { madZ = MAD_Z, consensusMin = MIN_CONSENS
 // ---------------------------------------------------------------------------
 
 /** Era of a timestamp against the boundary; null timestamps have no era. */
-function eraOf(ts, boundary) {
+export function eraOf(ts, boundary) {
   if (ts == null) return null;
   return Date.parse(ts) < Date.parse(boundary) ? "pre" : "post";
 }
@@ -445,37 +445,30 @@ const DEFINITION_OUTLIERS =
   "task cost on log10; modified z-score (MAD, |z| > 3.5) and Tukey far fence (3·IQR); consensus = both; " +
   "isolation forest and MCD stay in the notebook";
 
-/** Read the task table + allocation off the cache, honoring the shared filters. */
-function loadTasks(db, filters) {
-  // from/to/squad/model bind to the usage rows; `era` is applied per task on
-  // first_ts afterwards (D2) — so build the row WHERE without the era clause.
-  const fRows = { ...filters, era: "all" };
-  const { where, params } = filterSql(fRows);
-  const cond = (extra) => (where ? `${where} AND (${extra})` : `WHERE ${extra}`);
-
-  // The supervisor rows must NOT inherit the squad/model parts: the supervisor
-  // allocation is a property of the ticket, not of the filter (a squad=dev
-  // filter would otherwise silently zero every task's supActive/supAdjacent).
-  // The time parts stay. Panels state this in a supervisor_rows_unfiltered
-  // caveat whenever squad/model is set.
-  const fSup = { ...fRows };
-  delete fSup.squad;
-  delete fSup.model;
-  const { where: supWhere, params: supParams } = filterSql(fSup);
-  const supCond = (extra) => (supWhere ? `${supWhere} AND (${extra})` : `WHERE ${extra}`);
-
+/**
+ * Read the task-attribution inputs off the cache WITHOUT any filters — the
+ * full-history inputs the cache build runs the same attribution the panels
+ * would run per request (FOC-915: the derived task_table + supervisor_alloc
+ * are built ONCE here, so the panels read indexed rows instead of recomputing
+ * the run→task attribution of ~180k rows on every call).
+ *
+ * Same selects as loadTasks below, with no filter WHERE on the usage rows and
+ * no era narrowing — the caller filters afterwards, per task first_ts
+ * (tickets, concentration) or per message time (spend).
+ */
+export function loadTasksUnfiltered(db) {
   const usageRows = db.prepare(`
     SELECT usage_id AS usageId, run_id AS runId, observed_at AS observedAt,
            cost_usd AS costUsd, model, input_tokens AS inputTokens,
            output_tokens AS outputTokens, cache_read_tokens AS cacheReadTokens,
            cache_creation_tokens AS cacheCreationTokens
-    FROM canonical_usage ${cond(`squad IN (${TASK_SQUADS.map((s) => `'${s}'`).join(", ")})`)}
-  `).all(...params);
+    FROM canonical_usage WHERE squad IN (${TASK_SQUADS.map((s) => `'${s}'`).join(", ")})
+  `).all();
 
   const supRows = db.prepare(`
     SELECT usage_id AS usageId, run_id AS runId, observed_at AS observedAt, cost_usd AS costUsd
-    FROM canonical_usage ${supCond(`squad = '${SUP_SQUAD}'`)}
-  `).all(...supParams);
+    FROM canonical_usage WHERE squad = '${SUP_SQUAD}'
+  `).all();
 
   const links = db.prepare(
     "SELECT run_id AS runId, task_id AS taskId, valid_from AS validFrom FROM run_task_links",
@@ -496,7 +489,61 @@ function loadTasks(db, filters) {
   }
   const tasksByRunArr = new Map([...tasksByRun].map(([k, v]) => [k, [...v].sort()]));
 
-  return { fRows, usageRows, supRows, links, childRuns, horizon, tasksByRun: tasksByRunArr };
+  return { usageRows, supRows, links, childRuns, horizon, tasksByRun: tasksByRunArr };
+}
+
+/**
+ * The precomputed task table, as persisted by the cache build (FOC-915):
+ * one row per task with its direct cost, supervisor split and loaded cost.
+ * Column names follow the tickets panel's row shape so the panels can consume
+ * the rows with the same mapping they already apply.
+ *
+ * `era` is RE-DERIVED at read time from first_ts against the caller's
+ * boundary (the query may carry a custom eraBoundary; the persisted column
+ * holds the build-time default only). One Date.parse per task, no recompute
+ * of the attribution itself.
+ */
+function readTaskTable(db, boundary) {
+  const rows = db.prepare(`
+    SELECT task_id AS taskId, first_ts AS firstTs, msgs,
+           cost_usd AS costUsd, unpriced_share AS unpricedShare,
+           sup_active AS supActive, sup_adjacent AS supAdjacent,
+           cost_loaded AS costLoaded, partial
+    FROM insight_task_table
+  `).all();
+  // SQLite has no boolean type: partial is stored as 0/1 and round-tripped
+  // through JSON as a number — the panels emit `partial: true/false`, so the
+  // row is normalized here, at the read boundary.
+  for (const r of rows) {
+    r.partial = Boolean(r.partial);
+    r.era = eraOf(r.firstTs, boundary);
+  }
+  return rows;
+}
+
+/** The precomputed supervisor allocation, as persisted by the cache build. */
+function readSupervisorAlloc(db) {
+  return db.prepare(`
+    SELECT usage_id AS usageId, run_id AS runId, observed_at AS observedAt,
+           mode, cost_usd AS costUsd, tasks_json AS tasksJson
+    FROM insight_supervisor_alloc
+  `).all();
+}
+
+/**
+ * The build-time attribution-drop counts (insight_meta), for the caveats the
+ * tickets panel emits: rows attributed to SUP: ids and rows of runs with no
+ * link. Absent (older cache, or a cache whose build predates the table) →
+ * zeros — the caveats simply do not fire.
+ */
+function readInsightMeta(db) {
+  const rows = db.prepare("SELECT key, value FROM insight_meta").all();
+  const m = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  return {
+    droppedSup: Number(m.dropped_sup_rows ?? 0),
+    droppedUsd: Number(m.dropped_sup_usd ?? 0),
+    droppedNoLink: Number(m.dropped_no_link_rows ?? 0),
+  };
 }
 
 function distributionStats(values) {
@@ -508,17 +555,33 @@ function distributionStats(values) {
 /**
  * GET /api/analysis/tickets — the price of a ticket. Era filters on the
  * task's first_ts; era=all gives both eras side by side.
+ *
+ * FOC-915: the task table is PRECOMPUTED in the cache (insight_task_table);
+ * this panel reads those rows and narrows them by the filters — per task
+ * first_ts (from/to via the era-carrying window, era per first_ts) — instead
+ * of re-attributing ~180k usage rows per request. The payload is the shape
+ * the panel has always returned.
+ *
+ * The `usageRows`-based time window: a task is in scope when its first message
+ * falls in [from, to] — the same window the panel documented when it computed
+ * the table from filtered rows, now applied to the precomputed rows directly.
  */
 export function ticketsPanel(db, filters) {
   const f = normalizeFilters(filters);
-  const { usageRows, supRows, links, childRuns, horizon, tasksByRun } = loadTasks(db, f);
+  const meta = readInsightMeta(db);
+  return ticketsPanelFromRows(readTaskTable(db, f.eraBoundary), readSupervisorAlloc(db), f, meta);
+}
 
-  const built = buildTaskTable(usageRows, links, { eraBoundary: f.eraBoundary });
-  const alloc = allocateSupervisorOverhead(supRows, childRuns, tasksByRun, { horizon });
-  addLoadedCost(built.tasks, alloc);
-
-  let tasks = [...built.tasks.values()];
-  const noTs = tasks.filter((t) => t.firstTs == null).length;
+/**
+ * The tickets panel over precomputed rows — exported for the cache-build
+ * self-check and tests that pin the payload against hand-computed numbers.
+ */
+export function ticketsPanelFromRows(taskRows, _allocRows, f, meta = { droppedSup: 0, droppedUsd: 0, droppedNoLink: 0 }) {
+  // Era filters on the task's first_ts (D2); from/to narrow the same column.
+  let tasks = taskRows.filter((t) =>
+    (f.from == null || (t.firstTs != null && t.firstTs >= f.from)) &&
+    (f.to == null || (t.firstTs != null && t.firstTs <= f.to)));
+  const noTs = taskRows.filter((t) => t.firstTs == null).length;
   tasks = tasks.filter((t) => t.firstTs != null); // D1: no timestamp → no era → excluded, counted
   const inEra = f.era === "all" ? tasks : tasks.filter((t) => t.era === f.era);
 
@@ -545,28 +608,20 @@ export function ticketsPanel(db, filters) {
       count: unpricedTasks,
     });
   }
-  if (built.droppedSup > 0) {
+  if (meta.droppedSup > 0) {
     caveats.push({
       level: "info",
       code: "sup_links_dropped",
-      message: `${built.droppedSup} message(s) attributed to a SUP: supervisor-session id ($${round4(built.droppedUsd)}) are not counted as tickets`,
-      count: built.droppedSup,
+      message: `${meta.droppedSup} message(s) attributed to a SUP: supervisor-session id ($${round4(meta.droppedUsd)}) are not counted as tickets`,
+      count: meta.droppedSup,
     });
   }
-  if (built.droppedNoLink > 0) {
+  if (meta.droppedNoLink > 0) {
     caveats.push({
       level: "info",
       code: "unattributed_rows",
-      message: `${built.droppedNoLink} message(s) of runs with no task link are unattributed`,
-      count: built.droppedNoLink,
-    });
-  }
-  if (noTs > 0) {
-    caveats.push({
-      level: "info",
-      code: "no_first_ts",
-      message: `${noTs} task(s) whose first message has no timestamp are excluded (no era can be proven)`,
-      count: noTs,
+      message: `${meta.droppedNoLink} message(s) of runs with no task link are unattributed`,
+      count: meta.droppedNoLink,
     });
   }
   if (inEra.length === 0) {
@@ -613,6 +668,12 @@ export function ticketsPanel(db, filters) {
  * GET /api/analysis/money — where the money goes: per-squad cost, the
  * supervisor active/adjacent/idle split, and the concentration of direct
  * ticket cost.
+ *
+ * FOC-915: spend (total, bySquad) reads canonical_usage through the SAME
+ * indexed WHERE as before — it was never the bottleneck. The supervisor split
+ * reads the precomputed insight_supervisor_alloc rows (narrowed by message
+ * time); concentration reads insight_task_table narrowed by task first_ts —
+ * the windows the panel documents today.
  */
 export function moneyPanel(db, filters) {
   const f = normalizeFilters(filters);
@@ -635,19 +696,35 @@ export function moneyPanel(db, filters) {
     share: total > 0 ? round4((r.usd ?? 0) / total) : 0,
   }));
 
-  const { usageRows, supRows, links, childRuns, horizon, tasksByRun } = loadTasks(db, f);
-  const built = buildTaskTable(usageRows, links, { eraBoundary: f.eraBoundary });
-  // Concentration is over the tasks IN SCOPE — the same first_ts era rule the
-  // tickets panel applies (D2); total/bySquad above filter the rows directly.
-  const inEra = f.era === "all"
-    ? [...built.tasks.values()]
-    : [...built.tasks.values()].filter((t) => t.era === f.era);
-  const supCost = supRows.reduce((s, r) => s + (r.costUsd ?? 0), 0);
-  const alloc = allocateSupervisorOverhead(supRows, childRuns, tasksByRun, { horizon });
-  // w sums to 1 across a message's tasks (idle carries w = 1), so the mode
-  // split is just the cost sum per mode.
+  // The supervisor split, from the precomputed allocation narrowed by message
+  // time. The sup rows carry no squad/model/era — exactly what the old
+  // loadTasks did (fRows forced era:'all' and deleted squad/model): the
+  // allocation is a property of the ticket, not of the filter — the caveat
+  // below says so when one is set. The time parts (from/to) stay.
+  const { where: supWhere, params: supParams } = filterSql({
+    ...f,
+    era: "all",
+    squad: undefined,
+    model: undefined,
+  });
+  const supCond = (extra) => (supWhere ? `${supWhere} AND (${extra})` : `WHERE ${extra}`);
+  const allocRows = db.prepare(`
+    SELECT usage_id AS usageId, run_id AS runId, observed_at AS observedAt, mode, cost_usd AS costUsd
+    FROM insight_supervisor_alloc ${supCond("mode IS NOT NULL")}
+  `).all(...supParams);
+
+  const supCost = allocRows.reduce((s, r) => s + (r.costUsd ?? 0), 0);
   const byMode = { active: 0, adjacent: 0, idle: 0 };
-  for (const a of alloc) byMode[a.mode] += a.costUsd ?? 0;
+  for (const a of allocRows) byMode[a.mode] += a.costUsd ?? 0;
+
+  // Concentration over the tasks IN SCOPE — precomputed rows narrowed by
+  // first_ts (D2: the same first_ts era rule; from/to on first_ts).
+  const taskRows = readTaskTable(db, f.eraBoundary).filter((t) =>
+    (f.from == null || (t.firstTs != null && t.firstTs >= f.from)) &&
+    (f.to == null || (t.firstTs != null && t.firstTs <= f.to)));
+  const inEra = f.era === "all"
+    ? taskRows
+    : taskRows.filter((t) => t.era === f.era);
 
   const pricedCosts = inEra.filter((t) => t.costUsd != null).map((t) => t.costUsd);
   const concentration = {
@@ -707,16 +784,21 @@ export function moneyPanel(db, filters) {
  * GET /api/analysis/outliers — the outlier ledger. Every task is listed with
  * its detector columns so the evidence behind a point is one click away
  * (/work/<taskId>).
+ *
+ * FOC-915: the detectors run over the PRECOMPUTED task table narrowed by
+ * first_ts (from/to/era) instead of re-attributing the usage rows per request.
+ * The detection itself is unchanged — the same detectOutliers over the same
+ * per-task costs.
  */
 export function outliersPanel(db, filters) {
   const f = normalizeFilters(filters);
-  const { usageRows, links, tasksByRun } = loadTasks(db, f);
-  const built = buildTaskTable(usageRows, links, { eraBoundary: f.eraBoundary });
-
+  const taskRows = readTaskTable(db, f.eraBoundary).filter((t) =>
+    (f.from == null || (t.firstTs != null && t.firstTs >= f.from)) &&
+    (f.to == null || (t.firstTs != null && t.firstTs <= f.to)));
   // Era filters on the task's first_ts, like the tickets panel (D2).
   const all = f.era === "all"
-    ? [...built.tasks.values()]
-    : [...built.tasks.values()].filter((t) => t.era === f.era);
+    ? taskRows
+    : taskRows.filter((t) => t.era === f.era);
   const detected = detectOutliers(all.map((t) => ({ taskId: t.taskId, era: t.era, costUsd: t.costUsd, msgs: t.msgs })));
   const consensusRows = detected.filter((r) => r.consensus);
 

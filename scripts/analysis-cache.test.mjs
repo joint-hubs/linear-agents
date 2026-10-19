@@ -6,9 +6,10 @@
 // here guards the mechanics: atomic build, staleness detection, lock rules,
 // leftover cleanup, and the hard rule that the store is never written.
 
-import { mkdtempSync, rmSync, statSync, existsSync, writeFileSync, renameSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, existsSync, writeFileSync, renameSync, copyFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { openTelemetryDb } from "./telemetry-store.mjs";
 import { ensureViews } from "./telemetry-canonical.mjs";
 import { openAnalysisDb } from "./telemetry-analysis.mjs";
@@ -19,7 +20,7 @@ import {
   costPanel,
   handoffsPanel,
 } from "./telemetry-analysis.mjs";
-import { CACHE_SCHEMA_VERSION, buildCache, cacheStatus, swapIntoPlace } from "./analysis-cache.mjs";
+import { CACHE_SCHEMA_VERSION, buildCache, cacheStatus, swapIntoPlace, cacheMatchesSchema } from "./analysis-cache.mjs";
 
 let passed = 0;
 let failed = 0;
@@ -118,9 +119,13 @@ const cachePath = join(temp, "analysis-cache.sqlite");
 // Expected canonical shape: 7 usage rows (u1..u6 + the u7 island), 5 tool calls.
 // FOC-787: the cache also copies run_task_links and work_items; this fixture
 // defines neither, so both copy as empty tables (still created, 0 rows).
+// FOC-915: the Insights tables are derived, not copied — also empty here (no
+// run_task_links rows → no tasks; the zero-dep alloc still carries one row per
+// supervisor message… and this fixture has none, so both derived tables are 0).
 const EXPECTED = {
   canonical_usage: 7, canonical_tool_facts: 5, runs: 3, delegation_links: 6,
   data_quality_issues: 2, run_task_links: 0, work_items: 0,
+  insight_task_table: 0, insight_supervisor_alloc: 0,
 };
 
 const opts = { storePath, cachePath };
@@ -311,6 +316,44 @@ const built = await buildCache(opts);
   const status = cacheStatus({ storePath: join(temp, "no-such-store.sqlite"), cachePath });
   check("missing store: current is null and cache is stale",
     status.current === null && status.stale === true, JSON.stringify(status));
+}
+
+// --- schema probe: absent/unreadable/old-schema cache is treated as absent ----
+
+// FOC-915: the server serves the panels from the cache only when it matches
+// the running code's schema. A cache written by an older schema (the 2→3 bump
+// that added the insight tables) would 500 on every panel with "no such
+// table" — so cacheMatchesSchema() must say false for it, and the server
+// answers 503 cache_building + auto-builds instead.
+{
+  check("schema probe: fresh cache matches",
+    cacheMatchesSchema(cachePath) === true);
+
+  const foreign = join(temp, "foreign-cache.sqlite");
+  writeFileSync(foreign, "not a database");
+  check("schema probe: unreadable file does not match", cacheMatchesSchema(foreign) === false);
+
+  // An old-schema cache: a real build with a LOWER version stamped in
+  // cache_meta — what the running code finds after a schema bump.
+  const oldPath = join(temp, "old-schema-cache.sqlite");
+  copyFileSync(cachePath, oldPath);
+  {
+    const odb = new DatabaseSync(oldPath, { readOnly: false });
+    odb.prepare("UPDATE cache_meta SET cache_schema_version = ? WHERE cache_schema_version = ?")
+      .run(CACHE_SCHEMA_VERSION - 1, CACHE_SCHEMA_VERSION);
+    odb.close();
+  }
+  check("schema probe: older-schema cache does not match",
+    cacheMatchesSchema(oldPath) === false);
+  // ...while cacheStatus still reports it as existing-but-stale (the status
+  // route must keep describing the file, not pretend it is gone).
+  const oldStatus = cacheStatus({ storePath, cachePath: oldPath });
+  check("status on an old-schema cache: exists, stale, schemaVersion reported",
+    oldStatus.exists === true && oldStatus.stale === true
+      && oldStatus.schemaVersion === CACHE_SCHEMA_VERSION - 1, JSON.stringify(oldStatus));
+
+  check("schema probe: absent file does not match",
+    cacheMatchesSchema(join(temp, "no-such-cache.sqlite")) === false);
 }
 
 // --- swap retries outlast a slow reader -------------------------------------------
