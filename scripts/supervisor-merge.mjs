@@ -4,6 +4,7 @@
 //   node scripts/supervisor-merge.mjs --run <id> --verify "<command>"
 //        [--child <id> ...] [--base <rev>] [--keep] [--json]
 //        [--decision-event <eventId> ...] [--decision-run <runId> ...]
+//        [--no-deps-install]
 //
 // WHY (FOC-160). Two candidates can each pass their own tests and fail when
 // combined. Verification therefore has to happen TWICE — once per candidate in
@@ -32,6 +33,26 @@
 // inconvenience. A merge node that guesses the test command is a merge node
 // that can report green by running nothing, and a green from a command that
 // does not exist is the worst outcome this script could produce.
+//
+// DEPENDENCIES IN THE SCRATCH TREE (FOC-523). The integration worktree is cut
+// fresh from the base on every run, so it never has node_modules — and a
+// verify command that imports a package then fails on module resolution, not
+// on the candidates (FOC-513: REJECTED in 108 ms with ERR_MODULE_NOT_FOUND
+// while each candidate passed alone). Before the combined verify this script
+// therefore installs dependencies in the INTEGRATION TREE ONLY: `npm ci`
+// when a lockfile is present, `npm install` when only a package.json is.
+// It reports the install in its output and in the report (`depsInstall`),
+// and a failed install is a TOOL failure (no verdict), not a rejection —
+// a tree nobody could build has no verification verdict to give.
+//
+//   · Candidates' worktrees are NOT touched. Their trees were provisioned by
+//     the children themselves; step 1 already re-verified them as they are.
+//   · The install is skipped when node_modules already exists in the tree
+//     — a base that ships it vendored or committed — and skipped entirely
+//     with --no-deps-install — for a verify command that
+//     installs its own dependencies, e.g.
+//       --verify "npm ci && node --test scripts/x.test.mjs"
+//     so the tool does not pay for the same install twice.
 //
 // WHAT IT NEVER TOUCHES: a child's worktree. Those are removed only through
 // supervisor-cleanup.mjs, behind TEST-pass and a human yes (FOC-167). The only
@@ -72,7 +93,11 @@ if (!verifyCmd || verifyCmd === true) {
   failJson('--verify "<command>" is required', {
     hint:
       "a merge node that guesses the test command can report green by running nothing. " +
-      'Name it explicitly, e.g. --verify "node scripts/test-all.mjs".',
+      'Name it explicitly, e.g. --verify "node scripts/test-all.mjs". ' +
+      "The command runs in the integration tree, which has no node_modules — " +
+      "this script installs dependencies there first (npm ci with a lockfile, " +
+      'npm install without), or pass a self-sufficient command such as ' +
+      '--verify "npm ci && node --test scripts/x.test.mjs" with --no-deps-install.',
   });
 }
 
@@ -121,6 +146,72 @@ const gitRoot = (() => {
 // trees resolve to themselves, and integrating from inside one of them would
 // operate on a checkout somebody's work is sitting in.
 const mainRepo = resolve(listWorktrees(gitRoot)[0]?.path ?? gitRoot);
+
+// ── dependencies in the integration tree (FOC-523) ──────────────────────────
+
+/**
+ * Install dependencies in the scratch integration tree before the combined
+ * verify runs there. The tree is cut fresh from the base on every run, so it
+ * never has node_modules — a verify command that imports a package then fails
+ * on module resolution, which reads like a combined-merge failure but is not
+ * one (FOC-513).
+ *
+ * The tree is recreated on every run (makeIntegrationTree removes any previous
+ * tree before `worktree add -B`), so nothing pre-installed survives. Skipped
+ * when node_modules already exists — a base that ships it vendored or
+ * committed — and with --no-deps-install, for a verify command that installs
+ * its own dependencies.
+ *
+ * Returns a depsInstall record for the report. A failed install is a TOOL
+ * failure, not a verification result: the combined suite is not run and no
+ * candidate is rejected on it.
+ */
+function installIntegrationDeps(tree) {
+  if (args["no-deps-install"]) {
+    return { skipped: true, reason: "no-deps-install" };
+  }
+  if (existsSync(join(tree, "node_modules"))) {
+    return { skipped: true, reason: "node_modules already present" };
+  }
+  const hasLockfile = existsSync(join(tree, "package-lock.json"));
+  const hasPackage = existsSync(join(tree, "package.json"));
+  if (!hasPackage) {
+    return { skipped: true, reason: "no package.json in the integration tree" };
+  }
+  const installCmd = hasLockfile ? "npm ci" : "npm install";
+  console.error(
+    `[merge] ${installCmd} --no-audit --no-fund (installing dependencies in the integration tree)`,
+  );
+  // Without a lockfile npm resolves the ranges live, so the verdict can differ
+  // run to run; say so rather than let it pass silently.
+  if (!hasLockfile) {
+    console.error(
+      "[merge] npm install without a lockfile — the verify result depends on the current registry state",
+    );
+  }
+  const res = spawnSync(installCmd, ["--no-audit", "--no-fund"], {
+    cwd: tree,
+    encoding: "utf8",
+    shell: true,
+    timeout: Number(args["timeout-ms"] ?? 900_000),
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const tail = `${res.stdout ?? ""}${res.stderr ?? ""}`.split("\n").filter(Boolean).slice(-20);
+  return {
+    skipped: false,
+    ok: res.status === 0,
+    command: installCmd,
+    exitCode: res.status,
+    error: res.error ? res.error.message.split("\n")[0] : null,
+    timedOut: Boolean(res.error && /ETIMEDOUT|timed out/i.test(res.error.message)),
+    ...(hasLockfile
+      ? {}
+      : {
+          note: "npm install without a lockfile — the verify result depends on the current registry state",
+        }),
+    tail,
+  };
+}
 
 // ── the verify command ───────────────────────────────────────────────────────
 
@@ -499,10 +590,34 @@ for (const child of candidates) {
 const conflicted = replays.some((r) => !r.ok && r.conflicts.length > 0);
 const toolFailure = replays.some((r) => !r.ok && r.conflicts.length === 0);
 let combined = null;
+let depsInstall = null;
 if (!conflicted && !toolFailure) {
-  combined = verify(tree, "combined");
-  if (!combined.ok) {
-    findings.push(`the combined suite failed (exit ${combined.exitCode}) — each candidate passed alone`);
+  // FOC-523: the tree was just cut from the base, so it has no node_modules.
+  // Install dependencies in the integration tree BEFORE the combined verify,
+  // or a verify command that imports a package fails on module resolution
+  // and reads as a combined-merge failure that never was one.
+  depsInstall = installIntegrationDeps(tree);
+  if (!depsInstall.skipped && !depsInstall.ok) {
+    // A failed install is a TOOL failure, not a rejection: the tree was never
+    // buildable, so the combined suite says nothing about the candidates.
+    // Same classification as a tree git could not assemble (above).
+    // Phrase the failure the way the verify path phrases spawn errors: an
+    // error on the record means the process never started, timedOut means the
+    // timeout budget ran out, anything else is a non-zero exit.
+    const detail = depsInstall.error
+      ? `could not be started: ${depsInstall.error}`
+      : depsInstall.timedOut
+        ? `timed out after ${Number(args["timeout-ms"] ?? 900_000)} ms`
+        : `exited ${depsInstall.exitCode}`;
+    findings.push(
+      `the combined suite was not run: dependencies could not be installed in the integration tree ` +
+        `(${depsInstall.command} ${detail})`,
+    );
+  } else {
+    combined = verify(tree, "combined");
+    if (!combined.ok) {
+      findings.push(`the combined suite failed (exit ${combined.exitCode}) — each candidate passed alone`);
+    }
   }
 } else if (conflicted) {
   findings.push("the combined suite was not run: the candidates could not be replayed together");
@@ -512,8 +627,15 @@ if (!conflicted && !toolFailure) {
 
 // Step 6 — one verdict per candidate. `accepted: null` on a tool failure is the
 // point of the classification: no tree was tested, so no candidate can be
-// reported as having failed verification — but none passes either.
-const accepted = conflicted || !toolFailure ? findings.length === 0 : null;
+// reported as having failed verification — but none passes either. FOC-523:
+// a dependency install that failed is the same class of tool failure — the
+// combined suite never ran, so nothing was verified and nobody is rejected.
+const depsFailed = depsInstall !== null && !depsInstall.skipped && !depsInstall.ok;
+const accepted = depsFailed
+  ? null
+  : conflicted || !toolFailure
+    ? findings.length === 0
+    : null;
 const status = accepted === null ? "tool_error" : accepted ? "accepted" : "rejected";
 
 const verdicts = candidates.map((c) => ({
@@ -548,6 +670,10 @@ const report = {
   allowedPathDrift: drift,
   replays,
   combined,
+  // FOC-523: the dependency install this tool ran (or skipped) in the
+  // integration tree before the combined verify. null on a tool error
+  // before step 5 — the tree was never assembled.
+  depsInstall,
   findings,
   // Non-verdict observations (FOC-904): a failed index regen on an otherwise
   // accepted integration is reported here, not as a finding.
@@ -564,9 +690,14 @@ const report = {
   // clean up after a child. Both are decisions for the Supervisor and Mateusz.
   next:
     accepted === null
-      ? "TOOL ERROR, not a verification result: the integration tree could not be assembled, " +
-        "so the combined suite never ran. No candidate is rejected. No retry was attempted; " +
-        "the tree is kept for inspection — report the failure to Mateusz."
+      ? depsFailed
+        ? "TOOL ERROR, not a verification result: dependencies could not be installed in the " +
+          "integration tree, so the combined suite never ran. No candidate is rejected. No retry " +
+          "was attempted; the tree is kept for inspection — report the failure to Mateusz. " +
+          "If the verify command installs its own dependencies, pass --no-deps-install."
+        : "TOOL ERROR, not a verification result: the integration tree could not be assembled, " +
+          "so the combined suite never ran. No candidate is rejected. No retry was attempted; " +
+          "the tree is kept for inspection — report the failure to Mateusz."
       : accepted
         ? "integration verified — the Supervisor may proceed; child worktrees are untouched"
         : "REJECTED. No candidate is accepted. No retry was attempted and no worktree was cleaned; " +

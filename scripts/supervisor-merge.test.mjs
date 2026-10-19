@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { ROOT, fixtureRepo, fixtureRun, harness, parse, runScript } from "./supervisor-test-fixtures.mjs";
-import { runDir, writeRegistry } from "./supervisor-lib.mjs";
+import { readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
 
 const { test, fail, summary } = harness();
 const MERGE = join(ROOT, "scripts", "supervisor-merge.mjs");
@@ -66,8 +66,8 @@ function fixture(candidates) {
   return { base, repo, runId, baseRevision };
 }
 
-const merge = (runId, extra = [], cmd = VERIFY) =>
-  runScript(MERGE, ["--run", runId, "--verify", cmd, ...extra]);
+const merge = (runId, extra = [], cmd = VERIFY, env = {}) =>
+  runScript(MERGE, ["--run", runId, "--verify", cmd, ...extra], env);
 
 // Two features that each work alone and are mutually exclusive: the check allows
 // at most one .feature file. No textual conflict — different files, different
@@ -616,6 +616,260 @@ test("an index regen failure on an accepted integration is a note, not a rejecti
     JSON.stringify(out.notes),
   );
   assert.ok(out.findings.length === 0, JSON.stringify(out.findings));
+});
+
+// ── 6. dependencies in the fresh integration tree (FOC-523) ─────────────────
+console.log("\nświeże drzewo integracyjne nie ma node_modules");
+
+// A package.json whose preinstall writes a module into node_modules/. `npm ci`
+// runs lifecycle scripts even with zero dependencies, and what preinstall
+// writes into node_modules survives — so the fixture exercises the real
+// install path with no network and no registry: if the tool did not install
+// deps in the integration tree, the combined verify would fail on module
+// resolution (the exact FOC-513 symptom) rather than on the candidates.
+const PREINSTALL_PKG = {
+  name: "fixture",
+  version: "1.0.0",
+  private: true,
+  scripts: {
+    preinstall: `node -e "const fs=require('fs');fs.mkdirSync('node_modules/fake-dep',{recursive:true});fs.writeFileSync('node_modules/fake-dep/package.json',JSON.stringify({name:'fake-dep',version:'1.0.0',main:'index.js'}));fs.writeFileSync('node_modules/fake-dep/index.js','module.exports=42;')"`,
+  },
+};
+// Zero-dependency lockfile: `npm ci` accepts it offline.
+const EMPTY_LOCK = {
+  name: "fixture",
+  version: "1.0.0",
+  lockfileVersion: 3,
+  requires: true,
+  packages: { "": { name: "fixture", version: "1.0.0", license: "ISC" } },
+};
+const REQUIRE_DEP =
+  'node -e "process.exit(require(\'fake-dep\')===42?0:1)"';
+
+function fixtureWithPackage(candidates, { lock = JSON.stringify(EMPTY_LOCK) } = {}) {
+  // The package manifest must be part of the BASE commit: the integration tree
+  // is cut from the candidates' recorded baseRevision, so a manifest committed
+  // after the candidates were created would never reach it — the tool would
+  // skip the install ("no package.json") and the fixture would test nothing.
+  // `lock` is the raw lockfile content, for a fixture that needs a broken one.
+  const { base, repo } = fixtureRepo();
+  writeFileSync(join(repo, "value.txt"), "ok\n");
+  writeFileSync(join(repo, "package.json"), JSON.stringify(PREINSTALL_PKG));
+  if (lock !== null) writeFileSync(join(repo, "package-lock.json"), lock);
+  gitIn(repo, "add", "-A");
+  gitIn(repo, "commit", "-m", "base: value is ok, package.json with a preinstall that provides fake-dep");
+  const baseRevision = gitIn(repo, "rev-parse", "HEAD");
+
+  const children = {};
+  for (const [i, c] of candidates.entries()) {
+    const branch = c.branch ?? `foc-${100 + i}-dev`;
+    const worktree = resolve(join(repo, "..", "la-wt", branch));
+    gitIn(repo, "worktree", "add", "-b", branch, worktree, baseRevision);
+    c.write?.(worktree);
+    if (c.commit !== false) {
+      gitIn(worktree, "add", "-A");
+      gitIn(worktree, "commit", "-m", `${branch}: work`);
+    }
+    children[`dev-${i + 1}`] = {
+      childId: `dev-${i + 1}`,
+      squad: "dev",
+      taskId: `FOC-${100 + i}`,
+      status: "exited",
+      turns: [{ pid: 1 }],
+      costUsd: 0,
+      worktree,
+      branch,
+      baseRevision,
+      allowedPaths: c.allowedPaths ?? [],
+    };
+  }
+
+  const runId = fixtureRun();
+  writeRegistry(runId, { runId, children, rounds: {} });
+  return { base, repo, runId, baseRevision };
+}
+
+test("the tool installs deps in the integration tree before the combined verify", () => {
+  // Each candidate has an UNCOMMITTED node_modules in its worktree — the shape
+  // a real child leaves behind after installing deps (untracked, so it never
+  // reaches the diff or the integration). The same verify command runs in step
+  // 1 and on the integration; it requires fake-dep, which exists in the
+  // worktrees but NOT in the freshly cut integration tree. Without the tool's
+  // install this is the FOC-513 rejection: Cannot find package, each
+  // candidate green alone.
+  const f = fixtureWithPackage([
+    { write: (w) => writeFileSync(join(w, "a.txt"), "a\n") },
+    { write: (w) => writeFileSync(join(w, "b.txt"), "b\n") },
+  ]);
+  for (const c of Object.values(readRegistry(f.runId).children)) {
+    mkdirSync(join(c.worktree, "node_modules", "fake-dep"), { recursive: true });
+    writeFileSync(join(c.worktree, "node_modules", "fake-dep", "package.json"), JSON.stringify({ name: "fake-dep", version: "1.0.0", main: "index.js" }));
+    writeFileSync(join(c.worktree, "node_modules", "fake-dep", "index.js"), "module.exports = 42;\n");
+  }
+  const r = merge(f.runId, [], REQUIRE_DEP);
+  const out = parse(r, fail);
+  assert.equal(out.accepted, true, JSON.stringify({ findings: out.findings, depsInstall: out.depsInstall }));
+  assert.equal(r.status, 0);
+  assert.ok(out.isolation.every((i) => i.ok), JSON.stringify(out.isolation));
+  assert.equal(out.depsInstall.skipped, false);
+  assert.equal(out.depsInstall.ok, true, JSON.stringify(out.depsInstall));
+  assert.equal(out.depsInstall.command, "npm ci");
+  assert.ok(out.combined.ok);
+});
+
+test("npm install is used when only a package.json is present", () => {
+  // Same fixture as above but the base commit carries NO lockfile, so the
+  // integration tree has a package.json only and the tool must fall back to
+  // `npm install`.
+  const { base, repo } = fixtureRepo();
+  writeFileSync(join(repo, "value.txt"), "ok\n");
+  writeFileSync(join(repo, "package.json"), JSON.stringify(PREINSTALL_PKG));
+  gitIn(repo, "add", "-A");
+  gitIn(repo, "commit", "-m", "base: value is ok, package.json without a lockfile");
+  const baseRevision = gitIn(repo, "rev-parse", "HEAD");
+
+  const children = {};
+  for (const [i, c] of [
+    { write: (w) => writeFileSync(join(w, "a.txt"), "a\n") },
+    { write: (w) => writeFileSync(join(w, "b.txt"), "b\n") },
+  ].entries()) {
+    const branch = `foc-${100 + i}-dev`;
+    const worktree = resolve(join(repo, "..", "la-wt", branch));
+    gitIn(repo, "worktree", "add", "-b", branch, worktree, baseRevision);
+    c.write(worktree);
+    gitIn(worktree, "add", "-A");
+    gitIn(worktree, "commit", "-m", `${branch}: work`);
+    children[`dev-${i + 1}`] = {
+      childId: `dev-${i + 1}`,
+      squad: "dev",
+      taskId: `FOC-${100 + i}`,
+      status: "exited",
+      turns: [{ pid: 1 }],
+      costUsd: 0,
+      worktree,
+      branch,
+      baseRevision,
+      allowedPaths: [],
+    };
+  }
+  const runId = fixtureRun();
+  writeRegistry(runId, { runId, children, rounds: {} });
+
+  // Pinned npm config: inherited npm config must not reach the network for
+  // this fallback (npm install resolves ranges live from the registry).
+  const r = merge(runId, [], 'node -e "process.exit(0)"', {
+    npm_config_audit: "false",
+    npm_config_fund: "false",
+    npm_config_update_notifier: "false",
+  });
+  const out = parse(r, fail);
+  assert.equal(out.accepted, true, JSON.stringify({ findings: out.findings, depsInstall: out.depsInstall }));
+  assert.equal(out.depsInstall.command, "npm install");
+  assert.equal(
+    out.depsInstall.note,
+    "npm install without a lockfile — the verify result depends on the current registry state",
+  );
+});
+
+test("a failed dependency install is a tool error, not a rejection", () => {
+  // A lockfile npm ci cannot parse: the install fails, so the combined suite
+  // never runs. That is a tool failure — no candidate is rejected, none
+  // accepted, exit 2 — the same class as a tree git could not assemble.
+  // The broken lockfile must be in the BASE commit: the tree is cut from the
+  // candidates' recorded baseRevision, not from the main checkout's HEAD.
+  const f = fixtureWithPackage(
+    [
+      { write: (w) => writeFileSync(join(w, "a.txt"), "a\n") },
+      { write: (w) => writeFileSync(join(w, "b.txt"), "b\n") },
+    ],
+    { lock: "not json" },
+  );
+  const r = merge(f.runId);
+  const out = parse(r, fail);
+  assert.equal(out.accepted, null);
+  assert.equal(out.status, "tool_error");
+  assert.equal(r.status, 2);
+  assert.equal(out.depsInstall.ok, false);
+  assert.ok(
+    out.findings.some((x) => /dependencies could not be installed/.test(x)),
+    JSON.stringify(out.findings),
+  );
+  assert.match(out.next, /TOOL ERROR/);
+  assert.match(out.next, /--no-deps-install/);
+  // No verdict either way: no candidate failed verification, none passed.
+  assert.ok(out.candidates.every((c) => c.accepted === null));
+});
+
+test("--no-deps-install skips the install and reports it", () => {
+  // For a verify command that installs its own dependencies, e.g.
+  // --verify "npm ci && node --test ...". Here the command cannot succeed
+  // without the install, so the merge is REJECTED on the candidates — but the
+  // depsInstall record must show the skip and the rejection must be a
+  // verification result (exit 1), not a tool error (exit 2).
+  const f = fixtureWithPackage([
+    { write: (w) => writeFileSync(join(w, "a.txt"), "a\n") },
+    { write: (w) => writeFileSync(join(w, "b.txt"), "b\n") },
+  ]);
+  const r = merge(f.runId, ["--no-deps-install"], REQUIRE_DEP);
+  const out = parse(r, fail);
+  assert.equal(out.depsInstall.skipped, true);
+  assert.equal(out.depsInstall.reason, "no-deps-install");
+  // A verify failure on the combined tree is a real verification result.
+  assert.equal(out.accepted, false);
+  assert.equal(r.status, 1);
+  assert.ok(out.findings.some((x) => /combined suite failed/.test(x)), JSON.stringify(out.findings));
+});
+
+test("the install is skipped when node_modules already exists in the tree", () => {
+  // The tree is cut from the base rev, so a node_modules COMMITTED to the
+  // base arrives in the integration tree already present — the skip branch.
+  // (Unrealistic as a repo habit, but it is exactly the state a caller that
+  // pre-installs or a vendored repo produces.) The preinstall must NOT have
+  // run: fake-dep is absent, and a verify requiring it would fail.
+  const { base, repo } = fixtureRepo();
+  writeFileSync(join(repo, "value.txt"), "ok\n");
+  writeFileSync(join(repo, "package.json"), JSON.stringify(PREINSTALL_PKG));
+  writeFileSync(join(repo, "package-lock.json"), JSON.stringify(EMPTY_LOCK));
+  mkdirSync(join(repo, "node_modules", "placeholder"), { recursive: true });
+  writeFileSync(join(repo, "node_modules", "placeholder", "index.js"), "// vendored\n");
+  gitIn(repo, "add", "-A");
+  gitIn(repo, "commit", "-m", "base: value is ok, committed node_modules");
+  const baseRevision = gitIn(repo, "rev-parse", "HEAD");
+
+  const children = {};
+  for (const [i, c] of [
+    { write: (w) => writeFileSync(join(w, "a.txt"), "a\n") },
+    { write: (w) => writeFileSync(join(w, "b.txt"), "b\n") },
+  ].entries()) {
+    const branch = `foc-${100 + i}-dev`;
+    const worktree = resolve(join(repo, "..", "la-wt", branch));
+    gitIn(repo, "worktree", "add", "-b", branch, worktree, baseRevision);
+    c.write(worktree);
+    gitIn(worktree, "add", "-A");
+    gitIn(worktree, "commit", "-m", `${branch}: work`);
+    children[`dev-${i + 1}`] = {
+      childId: `dev-${i + 1}`,
+      squad: "dev",
+      taskId: `FOC-${100 + i}`,
+      status: "exited",
+      turns: [{ pid: 1 }],
+      costUsd: 0,
+      worktree,
+      branch,
+      baseRevision,
+      allowedPaths: [],
+    };
+  }
+  const runId = fixtureRun();
+  writeRegistry(runId, { runId, children, rounds: {} });
+
+  // The verify does NOT require fake-dep: the preinstall never ran, so it
+  // could not exist. A passing verify here proves only the skip itself.
+  const r = merge(runId, [], 'node -e "process.exit(0)"');
+  const out = parse(r, fail);
+  assert.equal(out.accepted, true, JSON.stringify(out.findings));
+  assert.equal(out.depsInstall.skipped, true);
+  assert.match(out.depsInstall.reason, /already present/);
 });
 
 summary();
