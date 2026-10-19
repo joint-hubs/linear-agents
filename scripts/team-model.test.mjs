@@ -177,7 +177,9 @@ export function seedRegistryFixture(stateHome) {
   };
   run("run-test-1", {
     children: {
-      "test-1": { childId: "test-1", taskId: "FOC-200", squad: "test", status: "exited", pid: null, endedAt: "2026-10-18T10:00:00.000Z" },
+      // Ended ONE HOUR before the real clock: the route's collectChildren keeps
+      // ended children for 24 h of Date.now(), so a fixed date silently expires.
+      "test-1": { childId: "test-1", taskId: "FOC-200", squad: "test", status: "exited", pid: null, endedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() },
     },
   }, { issue: "FOC-200" });
   run("run-dev-1", {
