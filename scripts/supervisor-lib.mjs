@@ -16,6 +16,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -2526,6 +2527,28 @@ function parseSweepHelperLines(stdout) {
     if (m) out.push({ pid: Number(m[1]), comm: m[2] ?? "" });
   }
   return out;
+}
+
+// ── FOC-917: the child's teardown identity, shared by BOTH spawn paths ───────
+// supervisor-spawn.mjs (turn 0) and supervisor-followup.mjs (turns 1..n) must
+// agree on the mark the sweep matches and the tmp dir the turn end removes —
+// the attempt id changes per turn, so the mark does too.
+export function childTeardownIdentity({ runId, childId, attemptId, tmpRoot = tmpdir() }) {
+  return {
+    mark: `${runId}/${childId}/${attemptId}`,
+    tmpDir: join(tmpRoot, "fenix-child", childId),
+  };
+}
+
+// One tmp dir per child under the os tmp root. Inside the container the child
+// uid helper (FOC-802) runs claude as fenix-child, so the dir is setgid
+// group-writable 0o2770 (the shared-run-dir pattern); elsewhere 0o700.
+export function ensureChildTmpDir(tmpDir) {
+  mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32" && process.env.FENIX_IN_CONTAINER === "1") {
+    chmodSync(tmpDir, 0o2770);
+  }
+  return tmpDir;
 }
 
 /**
