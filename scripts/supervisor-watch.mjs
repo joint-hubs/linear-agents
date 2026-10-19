@@ -30,8 +30,7 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { join, resolve, sep } from "node:path";
-import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { calculateCost, priceThreshold, pricingSnapshot } from "./telemetry-store.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
 import { squadConfigDir } from "./fenix-paths.mjs";
@@ -713,11 +712,18 @@ function finalizeTurn(code, signal) {
     // recorded it) or the env TMPDIR, and only when it sits under
     // <os tmpdir>/fenix-child/. A watcher run by hand with an ambient TMPDIR
     // (/tmp, the operator's own dir) must never have it rm -rf'd.
-    const childTmpRoot = resolve(tmpdir(), "fenix-child");
+    // The per-child dir is always <tmp root>/fenix-child/<childId> — spawn made
+    // it so. os.tmpdir() cannot name that root here: on POSIX it honours TMPDIR,
+    // which for this very process IS the per-child dir. The shape is the guard:
+    // a parent named exactly fenix-child and a non-empty leaf.
     const childTmpCandidate = entry.tmpDir || process.env.TMPDIR || null;
     const childTmpDir = childTmpCandidate ? resolve(childTmpCandidate) : null;
+    const childTmpRoot = childTmpDir !== null ? dirname(childTmpDir) : null;
     const childTmpUnderRoot =
-      childTmpDir !== null && childTmpDir.startsWith(childTmpRoot + sep) && childTmpDir.length > childTmpRoot.length + 1;
+      childTmpDir !== null &&
+      basename(childTmpRoot) === "fenix-child" &&
+      basename(childTmpDir).length > 0 &&
+      dirname(childTmpRoot) !== childTmpRoot;
     if (mark && childTmpDir && process.env.LA_KEEP_CHILD_TMP !== "1") {
       if (childTmpUnderRoot) {
         try {
@@ -728,7 +734,7 @@ function finalizeTurn(code, signal) {
       } else {
         note({
           subtype: "child_tmpdir_skipped",
-          message: `child tmpdir not under ${childTmpRoot}: ${childTmpDir} — left in place`,
+          message: `child tmpdir is not a fenix-child dir: ${childTmpDir} — left in place`,
         });
       }
     }

@@ -456,6 +456,12 @@ try {
       return err.code === "EPERM";
     }
   };
+  const reaped = (pid, ms = 3000) =>
+    new Promise((resolve) => {
+      const t0 = Date.now();
+      const tick = () => (!strayAlive(pid) || Date.now() - t0 > ms ? resolve() : setTimeout(tick, 50));
+      setTimeout(tick, 0);
+    });
   process.on("exit", () => {
     for (const pid of strays) {
       try {
@@ -497,6 +503,7 @@ try {
       },
     });
     process.env.LA_PROC_ROOT = procRoot;
+    let deadStray2 = null;
     try {
       const { lines, code } = capture(() =>
         runOrphansCli({ argv: ["--container", "--json"], containerStart: CONTAINER_START }),
@@ -505,15 +512,14 @@ try {
       const report = JSON.parse(lines[0]);
       eq(report.sweptPids.length, 1, `exactly one stray swept: ${JSON.stringify(report.sweptPids)}`);
       eq(report.sweptPids[0].pid, deadStray, "the dead child's stray was swept");
+      await reaped(deadStray);
       ok(!strayAlive(deadStray), "the dead child's stray survived the sweep");
       eq(report.sweptPids[0].childId, "child-dead", "the swept entry names the child");
       eq(report.sweptPids[0].runId, "run-sweep", "the swept entry names the run");
       eq(report.sweptPids[0].comm, "pgserver", "the swept entry carries the comm");
 
-      // The first run killed the stray; the text run needs a fresh one (the
-      // old fixture entry goes, so a reused pid can never be matched).
-      rmSync(join(procRoot, String(deadStray)), { recursive: true, force: true });
-      const deadStray2 = spawnStray(`LA_CHILD_MARK=${DEAD_MARK}\0`, "pgserver");
+      // The first run killed the stray; the text run needs a fresh one.
+      deadStray2 = spawnStray(`LA_CHILD_MARK=${DEAD_MARK}\0`, "pgserver");
       const { lines: textLines } = capture(() =>
         runOrphansCli({ argv: ["--container"], containerStart: CONTAINER_START }),
       );
@@ -521,10 +527,12 @@ try {
         textLines.some((l) => l.includes("orphans: killed 1 stray helper(s)")),
         `the text output carries no sweep line: ${JSON.stringify(textLines)}`,
       );
+      await reaped(deadStray2);
       ok(!strayAlive(deadStray2), "the second stray survived the sweep");
-      rmSync(join(procRoot, String(deadStray2)), { recursive: true, force: true });
     } finally {
       delete process.env.LA_PROC_ROOT;
+      rmSync(join(procRoot, String(deadStray)), { recursive: true, force: true });
+      if (deadStray2 !== null) rmSync(join(procRoot, String(deadStray2)), { recursive: true, force: true });
     }
   });
 
@@ -550,6 +558,7 @@ try {
       eq(report.sweptPids[0].pid, deadStray3, "the marked run's stray again, the markless entry contributed nothing");
     } finally {
       delete process.env.LA_PROC_ROOT;
+      rmSync(join(procRoot, String(deadStray3)), { recursive: true, force: true });
     }
   });
 

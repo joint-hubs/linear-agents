@@ -2563,7 +2563,13 @@ export function sweepChildProcesses({
   graceMs = 2000,
   procRoot,
   kill = process.kill,
-  useHelper = process.platform === "linux" && process.env.FENIX_IN_CONTAINER === "1" && existsSync(CHILD_SWEEP_HELPER),
+  // A fixture root (procRoot / LA_PROC_ROOT — tests) always takes the
+  // in-process scan: the helper reads the real /proc and knows no fixture.
+  useHelper = !procRoot &&
+    !process.env.LA_PROC_ROOT &&
+    process.platform === "linux" &&
+    process.env.FENIX_IN_CONTAINER === "1" &&
+    existsSync(CHILD_SWEEP_HELPER),
   helper = runChildSweepHelper,
 } = {}) {
   if (useHelper) {

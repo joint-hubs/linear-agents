@@ -951,6 +951,23 @@ const makeProc = (root, pid, { environ, comm = "helper" }) => {
   writeFileSync(join(dir, "comm"), `${comm}\n`, "utf8");
 };
 
+// A stray spawned by THIS process is a zombie after the kill until the event
+// loop reaps it (POSIX): a liveness probe is only meaningful after a tick.
+const strayAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+};
+const reaped = (pid, ms = 3000) =>
+  new Promise((resolve) => {
+    const t0 = Date.now();
+    const tick = () => (!strayAlive(pid) || Date.now() - t0 > ms ? resolve() : setTimeout(tick, 50));
+    setTimeout(tick, 0);
+  });
+
 test("sweepChildProcesses signals exactly the processes carrying the mark", () => {
   const procRoot = join(base, "proc-unit");
   const MARK = "run-x/dev-1/dev-1:turn:0";
@@ -1199,19 +1216,12 @@ const resultSweep = runWatcher(
   },
 );
 
-test("finalizeTurn swept the marked stray and recorded sweptPids on the turn", () => {
+test("finalizeTurn swept the marked stray and recorded sweptPids on the turn", async () => {
   assert.equal(resultSweep.status, 0, `watcher exit ${resultSweep.status}: ${resultSweep.stderr}`);
   const turn = readRegistry(runIdSweep).children["dev-1"].turns[0];
   assert.deepEqual(turn.sweptPids, [sweepStray.pid], `sweptPids was ${JSON.stringify(turn.sweptPids)}`);
-  const strayAlive = (() => {
-    try {
-      process.kill(sweepStray.pid, 0);
-      return true;
-    } catch (err) {
-      return err.code === "EPERM";
-    }
-  })();
-  assert.ok(!strayAlive, `the stray ${sweepStray.pid} survived the sweep`);
+  await reaped(sweepStray.pid);
+  assert.ok(!strayAlive(sweepStray.pid), `the stray ${sweepStray.pid} survived the sweep`);
   assert.ok(
     readFileSync(teeOf(runIdSweep), "utf8").includes("child sweep: killed 1 stray process(es)"),
     "the tee does not carry the sweep line",
@@ -1290,21 +1300,18 @@ if (process.platform !== "win32") {
       FAKE_ARGV_PATH: join(base, "argv-sweep-real.json"),
       FAKE_SESSION_ID: `watch-sweep-real-${process.pid}`,
       LA_CHILD_MARK: REAL_MARK,
+      FENIX_IN_CONTAINER: "",
     },
   );
-  test("a real detached stray carrying the mark is swept through the real /proc", () => {
+  test("a real detached stray carrying the mark is swept through the real /proc", async () => {
     assert.equal(resultReal.status, 0, `watcher exit ${resultReal.status}: ${resultReal.stderr}`);
     const turn = readRegistry(runIdReal).children["dev-1"].turns[0];
     assert.ok(
       turn.sweptPids.includes(stray.pid),
       `sweptPids ${JSON.stringify(turn.sweptPids)} misses the stray ${stray.pid}`,
     );
-    let gone = false;
-    try {
-      process.kill(stray.pid, 0);
-    } catch {
-      gone = true;
-    }
+    await reaped(stray.pid);
+    const gone = !strayAlive(stray.pid);
     assert.ok(gone, "the stray process survived the sweep");
   });
 } else {
