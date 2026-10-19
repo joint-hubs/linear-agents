@@ -11,9 +11,11 @@ name: publish-image
 #
 # The image is built for uid/gid 1000 (the Dockerfile's FENIX_UID/FENIX_GID
 # defaults); a host with another uid builds its thin layer on top at
-# `fenix up` / `fenix update` time (FOC-777). The smoke step runs the tools the
-# doctor lists so a broken layer never gets a tag; the job summary carries the
-# image size for the release notes.
+# `fenix up` / `fenix update` time (FOC-777). One build, loaded locally; the
+# smoke step fails on any tool that is missing, crashes or prints nothing, and
+# only then every tag is pushed with plain `docker push` — a broken layer never
+# reaches the registry; the job summary carries the image size for the release
+# notes.
 
 on:
   push:
@@ -57,7 +59,7 @@ jobs:
             type=semver,pattern={{version}}
             type=ref,event=branch
             type=sha,prefix=sha-
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') && !contains(github.ref, '+') }}
           labels: |
             org.opencontainers.image.title=Fenix
             org.opencontainers.image.description=Fenix — Linear-driven agent squads with a Supervisor, dashboard and telemetry, every dependency inside
@@ -65,54 +67,67 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build (load locally for the smoke step)
+      - name: Build (loaded locally; pushed only after the smoke step)
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           load: true
-          tags: ${{ env.IMAGE }}:smoke
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
 
       - name: Smoke — every tool the doctor lists answers with a version
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          docker run --rm --entrypoint sh "$IMAGE:smoke" -c '
+          image=$(printf '%s\n' "$TAGS" | head -n1)
+          echo "smoke image: $image"
+          docker run --rm --entrypoint sh "$image" -c '
             set -e
-            echo "node     $(node --version)"
-            echo "git      $(git --version)"
-            echo "gh       $(gh --version | head -1)"
-            echo "claude   $(claude --version)"
-            echo "codegraph $(codegraph --version)"
-            echo "semgrep  $(semgrep --version)"
-            echo "uv       $(uv --version)"
-            echo "python   $(python3 --version)"
-            echo "tmux     $(tmux -V)"
-            echo "user     $(id)"
+            for t in node git gh claude codegraph semgrep uv python3 tmux; do
+              command -v "$t" >/dev/null 2>&1 || { echo "missing: $t" >&2; exit 1; }
+            done
+            v() { out=$("$@" 2>&1) || { echo "failed: $*" >&2; exit 1; }; [ -n "$out" ] || { echo "empty version: $*" >&2; exit 1; }; printf "%-10s %s\n" "$1" "$(printf "%s" "$out" | head -n1)"; }
+            v node --version
+            v git --version
+            v gh --version
+            v claude --version
+            v codegraph --version
+            v semgrep --version
+            v uv --version
+            v python3 --version
+            v tmux -V
+            echo "user       $(id)"
           ' | tee smoke.txt
           # Fenix never runs as root (Dockerfile FENIX_UID guard) — the image
-          # must not either.
+          # must not either. The pipeline above fails the step on any tool
+          # failure: GitHub runs this script with bash -eo pipefail.
           ! grep -q 'uid=0(' smoke.txt
 
-      - name: Push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          provenance: false
+      - name: Push every tag
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          echo "$TAGS" | while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker push "$tag"
+          done
 
       - name: Report
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          size=$(docker image inspect "$IMAGE:smoke" --format '{{.Size}}')
+          image=$(printf '%s\n' "$TAGS" | head -n1)
+          size=$(docker image inspect "$image" --format '{{.Size}}')
           {
             echo "## Fenix image published"
             echo
             echo "Tags:"
             echo '```'
-            echo "${{ steps.meta.outputs.tags }}"
+            echo "$TAGS"
             echo '```'
             echo "Size (uncompressed): $((size / 1024 / 1024)) MB"
             echo
