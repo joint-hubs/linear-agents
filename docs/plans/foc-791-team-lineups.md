@@ -99,3 +99,32 @@ browser-checks the three scopes on the acceptance instance, full Windows suite, 
    shares with raw SQL over `canonical_usage` on the fixture DB and compares to the route payload byte for byte.
 2. AC2 (lower bound label) — superseded: FOC-761 Done; the payload carries `groundTruth`.
 3. Three scopes visible and working in the browser; Work ticket detail shows "Team on this ticket".
+
+## 6. Follow-up — FOC-914 (2026-10-19): the four Linear-backed group filters
+
+Milestone, type (label name), epic (the parent issue's identifier) and size (estimate) now narrow the
+group scope. Facts come from the Work board's Linear states seam: `fetchLinearStates` (work-board.mjs)
+asks `parent { identifier }` and `estimate` alongside the fields it already fetched and carries them in
+each state; work-routes' `linearStatesFor` (the TEST-ONLY fake-file seam + the 60 s cache in
+production) passes them through; team-routes enriches the offline `ticketFacts` with the four fields
+for the group scope and reports availability to the model (`linearAvailable`, `linearError`).
+
+Contract deltas (team-model.mjs, `filters` object):
+- `supported` lists a Linear-backed filter only when the lookup ANSWERED and at least one fact carries
+  the field — `repo` unchanged (offline-derived, `repoFilterAvailable`).
+- `unsupported` lists the rest, and `unsupportedReason` (new, null when nothing is owed) carries WHY:
+  `Linear unavailable: <error>` — the UI's inputs stay disabled with the reason visible, never a
+  silent ignore, never a guess.
+- A value passed for an unsupported filter narrows nothing and is reported under
+  `filters.unsupported` with a reason; before FOC-914 the repo / milestone / type filters were
+  applied regardless and an unsupported one produced an empty result — FOC-914 changed that
+  deliberately: an empty board would look like "no data", a reported-and-ignored filter does not.
+  An unknown value for a supported filter is still an honest empty result. `type` matches a label
+  NAME (case-insensitive; a ticket may carry several), `size` matches the estimate's string form
+  (the URL carries strings, Linear numbers), milestone/epic by case-insensitive string.
+
+Tests: team-routes.test.mjs spawns the server against the fake fixture file (per-issue facts distinct
+per ticket) and proves each filter narrows the turns, combines (AND), degrades offline (in-process,
+failed lookup seam → unsupported + reason, passed value not applied); team-model.test.mjs keeps the
+fixture contract (facts without the four fields stay unsupported). Out of scope held: pick/cost
+definitions (D1) untouched, no new filters.

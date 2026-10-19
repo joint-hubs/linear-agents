@@ -28,7 +28,10 @@ const SCOPES = [
   ['ticket', 'Ticket'],
 ];
 const PERIODS = ['7d', '30d', '90d', 'all'];
-const TEXT_FILTERS = ['repo', 'milestone', 'type'];
+// The five group filters, in the payload contract's order (§2). Each input
+// disables itself from the payload's filters.unsupported — FOC-914 wired
+// milestone/type/epic/size to the Linear state, repo stays offline-derived.
+const FILTER_KEYS = ['repo', 'milestone', 'type', 'epic', 'size'];
 
 export default function Team() {
   const location = useLocation();
@@ -146,18 +149,11 @@ export default function Team() {
 
         {state.scope === 'group' && (
           <div className="team-filters">
-            {TEXT_FILTERS.map((k) => (
-              <input
-                key={k}
-                className="team-input"
-                placeholder={k}
-                aria-label={'Filter by ' + k}
-                value={draft[k]}
-                onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}
-                onKeyDown={(e) => { if (e.key === 'Enter') applyFilters(); }}
-              />
-            ))}
-            {['epic', 'size'].map((k) => (
+            {/* All five inputs gate on the payload's unsupported list —
+                supported ones enable, the rest stay disabled with the
+                "not supported yet" hint (FOC-914 wired the Linear-backed
+                four; the reason travels in filters.unsupportedReason). */}
+            {FILTER_KEYS.map((k) => (
               <input
                 key={k}
                 className="team-input"
@@ -197,6 +193,14 @@ export default function Team() {
       {error && (
         <div className="banner banner-warn" style={{ marginTop: 10 }}>
           Team unavailable: {error.data?.error || error.message}
+        </div>
+      )}
+
+      {/* Why the Linear-backed filters are off (FOC-914): the payload's
+          reason travels here so "not supported yet" is never a mystery. */}
+      {!error && state.scope === 'group' && data?.filters?.unsupportedReason && (
+        <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+          {data.filters.unsupportedReason} — group filters beyond repo stay off.
         </div>
       )}
 

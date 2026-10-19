@@ -211,6 +211,16 @@ function aggregate(scopeTurns, { squadConfig }) {
 }
 
 const matches = (factValue, filter) => typeof factValue === "string" && factValue.toLowerCase() === String(filter).toLowerCase();
+// The `type` filter matches a LABEL NAME (the Work board's label filter
+// convention): the fact carries an array of names, and a ticket with no
+// labels can never match a named type — the unknown-value rule, applied to
+// labels (FOC-914).
+const matchesLabel = (factLabels, filter) =>
+  Array.isArray(factLabels) && factLabels.some((name) => matches(name, filter));
+// `size` matches the estimate number in its string form ("3" ↔ estimate 3) —
+// the URL carries strings, the Linear state carries numbers.
+const matchesEstimate = (factEstimate, filter) =>
+  typeof factEstimate === "number" && String(factEstimate) === String(filter);
 
 // Local copies of the delegation-outcomes normalisation rules (kept tiny and
 // local so this file stays PURE — importing delegation-outcomes would drag in
@@ -233,7 +243,7 @@ const isNoiseAgent = (a) => !a || /^agent-[0-9a-f]{8,}/i.test(a);
  *   ticketFacts      — per-task facts derivable offline: { taskId, repo? , milestone?, type?, epic?, estimate? }
  *   now              — ms; the caller's clock (the payload must be reproducible in tests)
  */
-export function buildTeam({ turns, links, squadConfig, period, scope, filters, ticket, registryChildren, ticketFacts, now, repoFilterAvailable = true }) {
+export function buildTeam({ turns, links, squadConfig, period, scope, filters, ticket, registryChildren, ticketFacts, now, repoFilterAvailable = true, linearAvailable = false, linearError = null }) {
   const linksByRun = index(links);
   const factsByTask = new Map((ticketFacts || []).map((f) => [f.taskId, f]));
   const enriched = turns
@@ -263,15 +273,18 @@ export function buildTeam({ turns, links, squadConfig, period, scope, filters, t
   // unsupported — never silently listed as working when it cannot.
   const supported = repoFilterAvailable ? ["repo"] : [];
   const unsupported = repoFilterAvailable ? [] : ["repo"];
-  if (factsCarry("milestone")) supported.push("milestone");
-  if (factsCarry("type")) supported.push("type");
-  for (const f of ["milestone", "type"]) if (!supported.includes(f)) unsupported.push(f);
-  // epic/size are unsupported unless the facts actually carry them — listed
-  // whether or not the caller passed them, so the UI can say up front what
-  // this screen cannot honour (never silently ignored, plan §2).
-  for (const [f, factField] of [["epic", "epic"], ["size", "estimate"]]) {
-    if (!factsCarry(factField)) unsupported.push(f);
+  // FOC-914: the four Linear-backed filters are supported when the caller's
+  // states lookup actually ANSWERED (linearAvailable) — not merely because
+  // some fact happens to carry a field. When it failed, each keeps its
+  // unsupported slot and the shared reason ("Linear unavailable: …") travels
+  // in filters.unsupportedReason, so the UI can say WHY the inputs are off.
+  if (linearAvailable) {
+    if (factsCarry("milestone")) supported.push("milestone");
+    if (factsCarry("type")) supported.push("type");
+    if (factsCarry("epic")) supported.push("epic");
+    if (factsCarry("estimate")) supported.push("size");
   }
+  for (const f of ["milestone", "type", "epic", "size"]) if (!supported.includes(f)) unsupported.push(f);
 
   let scopeTurns;
   let childRows = [];
@@ -292,13 +305,25 @@ export function buildTeam({ turns, links, squadConfig, period, scope, filters, t
     ticketPayload = { id: ticket, runs: [...new Set(scopeTurns.map((t) => t.runId))].sort((a, b) => String(b).localeCompare(String(a))) };
   } else if (scope === "group") {
     const applied = {};
+    // FOC-914: a filter listed under `unsupported` is NEVER applied — the
+    // model decides support up front (facts + lookup availability), so a
+    // passed value that cannot be honoured narrows nothing (the pre-914
+    // contract: "reported, never silently applied"). An UNKNOWN VALUE for a
+    // SUPPORTED filter is still an honest empty result, not an ignore.
+    const honourable = new Set(supported);
     scopeTurns = enriched.filter((t) => {
       if (!inWindow(t)) return false;
       if (!Object.keys(filters || {}).length) return true;
       const fact = t.taskId ? factsByTask.get(t.taskId) : null;
-      for (const f of ["repo", "milestone", "type"]) {
-        if (filters[f] == null) continue;
-        if (!fact || !matches(fact[f], filters[f])) return false;
+      for (const f of ["repo", "milestone", "type", "epic", "size"]) {
+        if (filters[f] == null || !honourable.has(f)) continue;
+        // milestone/epic match by string (the unknown-value rule — a fact
+        // without the field can never equal the asked value), type by label
+        // NAME (array), size by the estimate's string form.
+        const ok = f === "type" ? matchesLabel(fact?.type, filters[f])
+          : f === "size" ? matchesEstimate(fact?.estimate, filters[f])
+          : matches(fact?.[f], filters[f]);
+        if (!ok) return false;
         applied[f] = filters[f];
       }
       return true;
@@ -344,6 +369,17 @@ export function buildTeam({ turns, links, squadConfig, period, scope, filters, t
       applied: scope === "group" ? appliedFilters : {},
       supported,
       unsupported,
+      // FOC-914: WHY the Linear-backed filters are unsupported when they are —
+      // null when everything the payload lists as supported really is. Two
+      // shared reasons: the lookup fails as a whole (no key, offline), or it
+      // answered but no ticket in scope carries the fields (every task id
+      // missed the workspace, or an empty id list) — either way the UI never
+      // shows a bare "not supported yet".
+      unsupportedReason: linearError
+        ? `Linear unavailable: ${linearError}`
+        : linearAvailable && unsupported.some((f) => f !== "repo")
+          ? "Linear answered but no ticket in scope carries milestone/type/epic/size"
+          : null,
     },
     groundTruth: "per-message priced usage (FOC-760/761)",
     generatedAt: new Date(now).toISOString(),
