@@ -17,6 +17,7 @@ import { readActiveSessions, taskSessionsDbPath } from './task-sessions.mjs';
 import { readSettings, readTaskSessionsSettings } from './fenix-settings.mjs';
 import { INTEGRATIONS, prerequisites, readIntegrations } from './fenix-integrations.mjs';
 import { cachedRetention, resolveRetention } from './fenix-retention.mjs';
+import { CACHE_MAX_GB_DEFAULT, cacheToolSizes, childTmpSizes } from './fenix-prune.mjs';
 import { currentOwner, listRunOwners, ownerRelation, supervisorStateRoot } from './run-owner.mjs';
 
 const GIB = 1024 ** 3;
@@ -140,6 +141,22 @@ function resolveRetentionSafe(settings) {
   }
 }
 
+// FOC-808: the caches check's cap — the overlay's retention.cacheMaxGb when it
+// is a valid integer, else the prune CLI's default (single source:
+// fenix-prune.mjs). A settings failure falls back to the default with the
+// error attached, like the disk check.
+function resolveCacheMaxGbSafe(settings) {
+  const DEFAULT = CACHE_MAX_GB_DEFAULT;
+  try {
+    const obj = settings ?? readSettings();
+    const raw = obj && typeof obj === 'object' && !Array.isArray(obj) ? obj.retention?.cacheMaxGb : undefined;
+    if (Number.isInteger(raw) && raw >= 1) return { cacheMaxGb: raw, settingsError: null };
+    return { cacheMaxGb: DEFAULT, settingsError: null };
+  } catch (err) {
+    return { cacheMaxGb: DEFAULT, settingsError: String(err?.message || err).split('\n')[0] };
+  }
+}
+
 function checkDisk(env, fsImpl, { minFreeGiB, settingsError }) {
   // Free space of the volume holding the telemetry store — its parent, or
   // cwd when that path does not exist yet (fresh dev checkout).
@@ -212,6 +229,38 @@ async function checkLogsUsage(retentionReader) {
     status: notes.length ? 'warn' : 'ok',
     detail: `${parts.join(' · ')}${notes.length ? ` — ${notes.join('; ')}` : ''}`,
   };
+}
+
+/**
+ * FOC-808: the cache volume and the per-child tmp root. Warns over the cap
+ * (the overlay's retention.cacheMaxGb, default 5) with the prune CLI as the
+ * fix. sizesReader is injectable for tests — it returns the fenix-prune
+ * report shape ({ tools, totalBytes, childTmpBytes }) for the given roots.
+ */
+export async function checkCaches({ env = process.env, fsImpl = fs, cacheMaxGb = CACHE_MAX_GB_DEFAULT, sizesReader } = {}) {
+  const cacheRoot = env.LA_CACHE_ROOT || '/home/node/.cache';
+  const childTmpRoot = env.LA_CHILD_TMP_ROOT || '/tmp/fenix-child';
+  const capBytes = cacheMaxGb * 1024 ** 3;
+  let sizes;
+  try {
+    sizes = sizesReader
+      ? sizesReader()
+      : (() => {
+          const tools = cacheToolSizes(cacheRoot, fsImpl);
+          return {
+            tools,
+            totalBytes: tools.reduce((sum, t) => sum + t.bytes, 0),
+            childTmpBytes: childTmpSizes(childTmpRoot, fsImpl).reduce((sum, c) => sum + c.bytes, 0),
+          };
+        })();
+  } catch (err) {
+    return { name: 'caches', status: 'warn', detail: `cache sizes unavailable: ${String(err?.message || err).split('\n')[0]}` };
+  }
+  const detail = `cache ${sizes.totalBytes ? humanBytes(sizes.totalBytes) : 'none'} · child tmp ${sizes.childTmpBytes ? humanBytes(sizes.childTmpBytes) : 'none'} · cap ${cacheMaxGb} GB (retention.cacheMaxGb)`;
+  if (sizes.totalBytes > capBytes) {
+    return { name: 'caches', status: 'warn', detail, fix: `fenix prune --max-gb ${cacheMaxGb}` };
+  }
+  return { name: 'caches', status: 'ok', detail };
 }
 
 async function checkApi(fetchImpl, env) {
@@ -476,6 +525,7 @@ function checkIntegrations(env, settings) {
  */
 export async function runChecks({ env = process.env, withApi = false, spawn = spawnSync, fsImpl = fs, fetchImpl = fetch, settings, secretsDir, projectsFile, retention = () => cachedRetention() } = {}) {
   const policy = resolveRetentionSafe(settings);
+  const cachePolicy = resolveCacheMaxGbSafe(settings);
   const checks = [
     checkNode(),
     ...REQUIRED_TOOLS.map(([name, args]) => checkTool(spawn, name, args, 'fail')),
@@ -485,6 +535,7 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     ...checkDirs(env, fsImpl),
     checkDisk(env, fsImpl, policy),
     await checkLogsUsage(retention),
+    await checkCaches({ env, fsImpl, cacheMaxGb: cachePolicy.cacheMaxGb }),
     checkCockpitHooks(env, fsImpl),
     checkTaskSessions({ env, fsImpl }),
     checkRunOwners({ env }),

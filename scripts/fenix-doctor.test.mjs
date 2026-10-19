@@ -16,6 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  checkCaches,
   checkProjectsDir,
   checkRunOwners,
   checkSecretsReadable,
@@ -795,6 +796,40 @@ test("logs usage line: a failed snapshot warns, never throws", async () => {
   const line = checks.find((c) => c.name === "logs usage");
   assert.equal(line.status, "warn");
   assert.match(line.detail, /retention snapshot failed: boom/);
+});
+
+// FOC-808: the caches check — sizes + the retention.cacheMaxGb cap.
+const GB = 1024 ** 3;
+
+test("caches line: sizes under the cap are ok, fixture roots via override envs", async () => {
+  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fenix-doctor-cache-"));
+  const childTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fenix-doctor-tmp-"));
+  try {
+    fs.mkdirSync(path.join(cacheRoot, "npm"), { recursive: true });
+    fs.writeFileSync(path.join(cacheRoot, "npm", "cacache"), "x".repeat(100));
+    fs.mkdirSync(path.join(childTmpRoot, "child-x"), { recursive: true });
+    fs.writeFileSync(path.join(childTmpRoot, "child-x", "scratch"), "y".repeat(50));
+    const check = await checkCaches({
+      env: { LA_CACHE_ROOT: cacheRoot, LA_CHILD_TMP_ROOT: childTmpRoot },
+      fsImpl: fs,
+    });
+    assert.equal(check.name, "caches");
+    assert.equal(check.status, "ok");
+    assert.match(check.detail, /cache \d+ B · child tmp \d+ B · cap 5 GB \(retention\.cacheMaxGb\)/);
+  } finally {
+    fs.rmSync(cacheRoot, { recursive: true, force: true });
+    fs.rmSync(childTmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("caches line: over the cap warns with the fenix prune fix", async () => {
+  const check = await checkCaches({
+    cacheMaxGb: 5,
+    sizesReader: () => ({ tools: [{ name: "npm", bytes: 6 * GB }], totalBytes: 6 * GB, childTmpBytes: 0 }),
+  });
+  assert.equal(check.status, "warn");
+  assert.match(check.detail, /cache 6\.0 GiB/);
+  assert.equal(check.fix, "fenix prune --max-gb 5");
 });
 
 console.log(`\nfenix-doctor: ${passed} passed, ${skipped} skipped, ${failures.length} failed`);

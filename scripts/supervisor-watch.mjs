@@ -30,7 +30,8 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { calculateCost, priceThreshold, pricingSnapshot } from "./telemetry-store.mjs";
 import { priceChildTranscripts } from "./transcript-cost.mjs";
 import { squadConfigDir } from "./fenix-paths.mjs";
@@ -47,6 +48,7 @@ import {
   parseArgs,
   readRegistry,
   stallSilenceMs,
+  sweepChildProcesses,
   teeAbsPath,
   turnEndCostPatch,
   updateChild,
@@ -664,6 +666,74 @@ function finalizeTurn(code, signal) {
   const isolationRefused = isolated && code === 97;
   if (isolationRefused) status = "crashed";
 
+  // ── FOC-808 (slice B): sweep the helpers the child left behind ─────────────
+  // The group kill (the signal path above) reaches the child's own process
+  // group; a helper that called setsid left it. Everything the child started
+  // inherited LA_CHILD_MARK, so the environment identifies exactly this
+  // turn's strays — the group is dead, these are not in it. After the sweep
+  // the child's own TMPDIR goes too, unless LA_KEEP_CHILD_TMP=1 keeps it for
+  // debugging. All best effort: a failure is a note in the tee, never a crash.
+  let sweptPids = [];
+  {
+    // The registry record (spawn wrote it) is authoritative; the env copy and
+    // the attemptId derivation are fallbacks for entries from older spawns.
+    const mark =
+      entry.mark ??
+      process.env.LA_CHILD_MARK ??
+      (entry.attemptId ? `${runId}/${childId}/${entry.attemptId}` : null);
+    if (mark) {
+      try {
+        const sweep = sweepChildProcesses({ mark, excludePids: [process.pid] });
+        sweptPids = (sweep.killed ?? []).map((k) => k.pid);
+        if (sweep.skipped && sweep.skipped !== "no /proc") {
+          note({ subtype: "child_sweep_skipped", message: `child sweep skipped: ${sweep.skipped}` });
+        }
+        if (sweep.unsignalled?.length) {
+          note({
+            subtype: "child_sweep_unsignalled",
+            message:
+              `child sweep: ${sweep.unsignalled.length} marked process(es) could not be signalled ` +
+              `[${sweep.unsignalled.map((u) => `${u.pid} ${u.comm || "unknown"} ${u.code}`).join(", ")}]`,
+          });
+        }
+        if (sweptPids.length) {
+          note({
+            subtype: "child_sweep",
+            message:
+              `child sweep: killed ${sweptPids.length} stray process(es) ` +
+              `[${sweep.killed.map((k) => `${k.pid} ${k.comm || "unknown"}`).join(", ")}]`,
+          });
+        }
+      } catch (err) {
+        note({ subtype: "child_sweep_failed", message: err.message });
+      }
+    }
+    // The tmp dir removal is guarded twice: on the mark (this watcher genuinely
+    // being a spawn child) AND on the path — the registry's tmpDir (spawn
+    // recorded it) or the env TMPDIR, and only when it sits under
+    // <os tmpdir>/fenix-child/. A watcher run by hand with an ambient TMPDIR
+    // (/tmp, the operator's own dir) must never have it rm -rf'd.
+    const childTmpRoot = resolve(tmpdir(), "fenix-child");
+    const childTmpCandidate = entry.tmpDir || process.env.TMPDIR || null;
+    const childTmpDir = childTmpCandidate ? resolve(childTmpCandidate) : null;
+    const childTmpUnderRoot =
+      childTmpDir !== null && childTmpDir.startsWith(childTmpRoot + sep) && childTmpDir.length > childTmpRoot.length + 1;
+    if (mark && childTmpDir && process.env.LA_KEEP_CHILD_TMP !== "1") {
+      if (childTmpUnderRoot) {
+        try {
+          rmSync(childTmpDir, { recursive: true, force: true });
+        } catch (err) {
+          note({ subtype: "child_tmpdir_remove_failed", message: err.message });
+        }
+      } else {
+        note({
+          subtype: "child_tmpdir_skipped",
+          message: `child tmpdir not under ${childTmpRoot}: ${childTmpDir} — left in place`,
+        });
+      }
+    }
+  }
+
   const turns = entry.turns || [];
   // FOC-607: the turn closes with what was requested vs what actually served —
   // initModel is null when the child never emitted system/init.
@@ -673,6 +743,9 @@ function finalizeTurn(code, signal) {
     exitCode: code,
     requestedModel,
     initModel,
+    // FOC-808 (slice B): the pids the sweep killed — the registry record the
+    // plan names, so a turn's teardown is auditable without the tee.
+    sweptPids,
     ...(isolationRefused
       ? { isolationError: "spawn refused by the isolation helper (exit 97) — no unisolated fallback" }
       : {}),

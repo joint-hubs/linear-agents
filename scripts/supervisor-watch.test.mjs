@@ -28,7 +28,14 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ensureRunDir, installEnvFileSignalHandlers, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
+import {
+  ensureRunDir,
+  installEnvFileSignalHandlers,
+  readRegistry,
+  runDir,
+  sweepChildProcesses,
+  writeRegistry,
+} from "./supervisor-lib.mjs";
 import { openAgentState, setFact } from "./agent-state.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -929,6 +936,406 @@ test("no system/init: requestedModel is kept, initModel stays null", () => {
   const turn = readRegistry(runIdNoInit).children["dev-1"].turns[0];
   assert.equal(turn.requestedModel, "requested/model");
   assert.equal(turn.initModel, null);
+});
+
+// ── FOC-808 (slice B): the child sweep and the child TMPDIR ──────────────────
+console.log("\nFOC-808: stray helpers swept at turn end, the child TMPDIR removed");
+
+// A fixture /proc tree: <root>/<pid>/environ (NUL-separated) + comm. The
+// production scan reads the real /proc (Linux container); the seam makes the
+// same code testable here.
+const makeProc = (root, pid, { environ, comm = "helper" }) => {
+  const dir = join(root, String(pid));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "environ"), environ, "utf8");
+  writeFileSync(join(dir, "comm"), `${comm}\n`, "utf8");
+};
+
+test("sweepChildProcesses signals exactly the processes carrying the mark", () => {
+  const procRoot = join(base, "proc-unit");
+  const MARK = "run-x/dev-1/dev-1:turn:0";
+  makeProc(procRoot, 4210001, { environ: `PATH=/usr/bin\0LA_CHILD_MARK=${MARK}\0`, comm: "sleep" });
+  makeProc(procRoot, 4210002, { environ: `LA_CHILD_MARK=${MARK}\0LANG=C`, comm: "postgres" });
+  makeProc(procRoot, 4210003, { environ: `LA_CHILD_MARK=other/run/r:turn:0`, comm: "other" });
+  makeProc(procRoot, 4210004, { environ: `LA_CHILD_MARK=${MARK}\0`, comm: "excluded" });
+  const calls = [];
+  const probes = new Map();
+  const kill = (pid, sig) => {
+    calls.push({ pid, sig });
+    if (sig === 0) {
+      const n = (probes.get(pid) ?? 0) + 1;
+      probes.set(pid, n);
+      // 4210001 dies (ESRCH) from its third liveness probe on; 4210002 ignores
+      // SIGTERM and must be SIGKILLed after the grace.
+      if (pid === 4210001 && n >= 3) {
+        const err = new Error("no such process");
+        err.code = "ESRCH";
+        throw err;
+      }
+    }
+  };
+  const res = sweepChildProcesses({ mark: MARK, excludePids: [4210004], graceMs: 250, procRoot, kill });
+  assert.deepEqual(res.skipped, null, "a fixture scan is not a skip");
+  assert.deepEqual(
+    res.killed.map((k) => k.pid).sort((a, b) => a - b),
+    [4210001, 4210002],
+    `the matched set was wrong: ${JSON.stringify(res.killed)}`,
+  );
+  assert.deepEqual(res.killed.find((k) => k.pid === 4210002)?.comm, "postgres", "the comm did not come along");
+  const got = (pid, sig) => calls.some((c) => c.pid === pid && c.sig === sig);
+  assert.ok(got(4210001, "SIGTERM"), "the first match got no SIGTERM");
+  assert.ok(got(4210002, "SIGTERM"), "the second match got no SIGTERM");
+  assert.ok(!calls.some((c) => c.pid === 4210003), "the non-matching pid was signalled");
+  assert.ok(!calls.some((c) => c.pid === 4210004), "the excluded pid was signalled");
+  assert.ok(got(4210002, "SIGKILL"), "the SIGTERM survivor got no SIGKILL after the grace");
+  assert.ok(!got(4210001, "SIGKILL"), "a pid that died inside the grace was SIGKILLed anyway");
+});
+
+test("an empty /proc and a non-Linux host with the real /proc default both skip", () => {
+  assert.deepEqual(sweepChildProcesses({ mark: "a/b/c", procRoot: join(base, "proc-not-there") }), {
+    killed: [],
+    skipped: "no /proc",
+  });
+  if (process.platform === "win32") {
+    assert.deepEqual(sweepChildProcesses({ mark: "a/b/c" }), { killed: [], skipped: "no /proc" });
+  }
+});
+
+test("sweepChildProcesses takes the root helper path when asked: TERM, grace, KILL for the survivors", () => {
+  const helperCalls = [];
+  const helper = (args) => {
+    helperCalls.push(args);
+    return args[1] === "TERM"
+      ? { status: 0, stdout: "4242 postgres\n4243 sleep\n", stderr: "", error: null }
+      : { status: 0, stdout: "4242 postgres\n", stderr: "", error: null };
+  };
+  const kill = (pid, sig) => {
+    if (sig !== 0) return;
+    if (pid === 4242) {
+      const e = new Error("perm");
+      e.code = "EPERM";
+      throw e;
+    }
+    const e = new Error("gone");
+    e.code = "ESRCH";
+    throw e;
+  };
+  const res = sweepChildProcesses({
+    mark: "run-x/dev-1/dev-1:turn:0",
+    excludePids: [4210004],
+    graceMs: 250,
+    useHelper: true,
+    helper,
+    kill,
+  });
+  assert.deepEqual(res.via, "helper", "the helper path was not taken");
+  assert.deepEqual(res.skipped, null, "a ran helper scan is not a skip");
+  assert.deepEqual(
+    res.killed.map((k) => k.pid).sort((a, b) => a - b),
+    [4242, 4243],
+    `the reported set was wrong: ${JSON.stringify(res.killed)}`,
+  );
+  assert.deepEqual(res.killed.find((k) => k.pid === 4242)?.comm, "postgres", "the comm did not come along");
+  assert.deepEqual(helperCalls.length, 2, `expected TERM then KILL, got ${helperCalls.length} calls`);
+  assert.deepEqual(helperCalls[0][0], "run-x/dev-1/dev-1:turn:0", "the mark was not passed to the helper");
+  assert.deepEqual(helperCalls[0][1], "TERM", "the first sweep was not TERM");
+  assert.deepEqual(helperCalls[1][1], "KILL", "the survivor got no KILL after the grace");
+  assert.ok(helperCalls[0].includes(String(process.pid)), "the watcher pid was not excluded");
+  assert.ok(helperCalls[0].includes("4210004"), "the given exclude pid was not passed to the helper");
+});
+
+test("a failing helper is a skip, never a throw", () => {
+  const helper = () => ({ status: 1, stdout: "", stderr: "sudo: a password is required", error: null });
+  const res = sweepChildProcesses({ mark: "run-x/dev-1/dev-1:turn:0", useHelper: true, helper });
+  assert.deepEqual(res.via, "helper", "a failing helper still reports its path");
+  assert.deepEqual(res.killed, [], "a failing helper reported kills");
+  assert.ok(
+    res.skipped.startsWith("helper failed"),
+    `the skip did not name the helper: ${JSON.stringify(res.skipped)}`,
+  );
+});
+
+test("the /proc path drops a pid that vanished before its first signal", () => {
+  const procRoot = join(base, "proc-esrch");
+  const MARK = "run-x/dev-1/dev-1:turn:0";
+  makeProc(procRoot, 4220001, { environ: `LA_CHILD_MARK=${MARK}\0`, comm: "a" });
+  makeProc(procRoot, 4220002, { environ: `LA_CHILD_MARK=${MARK}\0`, comm: "b" });
+  const kill = (pid, sig) => {
+    if (pid === 4220001) {
+      if (sig === "SIGTERM" || sig === 0) {
+        const e = new Error("no such process");
+        e.code = "ESRCH";
+        throw e;
+      }
+      return;
+    }
+    if (sig === 0) {
+      const e = new Error("no such process");
+      e.code = "ESRCH";
+      throw e; // 4220002 died after its SIGTERM — not a first-signal failure
+    }
+  };
+  const res = sweepChildProcesses({ mark: MARK, graceMs: 100, procRoot, kill });
+  assert.deepEqual(res.via, "proc", "the /proc path was not taken");
+  assert.deepEqual(res.killed.map((k) => k.pid), [4220002], `the gone pid stayed in the report: ${JSON.stringify(res.killed)}`);
+});
+
+test("sweepChildProcesses takes the root helper path when asked: TERM, grace, KILL for the survivors", () => {
+  const helperCalls = [];
+  const helper = (args) => {
+    helperCalls.push(args);
+    return args[1] === "TERM"
+      ? { status: 0, stdout: "4242 postgres\n4243 sleep\n", stderr: "", error: null }
+      : { status: 0, stdout: "4242 postgres\n", stderr: "", error: null };
+  };
+  const kill = (pid, sig) => {
+    if (sig !== 0) return;
+    if (pid === 4242) {
+      const e = new Error("perm");
+      e.code = "EPERM";
+      throw e;
+    }
+    const e = new Error("gone");
+    e.code = "ESRCH";
+    throw e;
+  };
+  const res = sweepChildProcesses({
+    mark: "run-x/dev-1/dev-1:turn:0",
+    excludePids: [4210004],
+    graceMs: 250,
+    useHelper: true,
+    helper,
+    kill,
+  });
+  assert.deepEqual(res.via, "helper", "the helper path did not serve the sweep");
+  assert.deepEqual(res.skipped, null, "a ran helper scan is not a skip");
+  assert.deepEqual(
+    res.killed.map((k) => k.pid).sort((a, b) => a - b),
+    [4242, 4243],
+    `the reported set was wrong: ${JSON.stringify(res.killed)}`,
+  );
+  assert.deepEqual(res.killed.find((k) => k.pid === 4242)?.comm, "postgres", "the comm did not come along");
+  assert.deepEqual(helperCalls.length, 2, `expected TERM + KILL helper calls, got ${JSON.stringify(helperCalls)}`);
+  assert.deepEqual(helperCalls[0][0], "run-x/dev-1/dev-1:turn:0", "the mark was not passed to the helper");
+  assert.deepEqual(helperCalls[0][1], "TERM", "the first helper call was not TERM");
+  assert.deepEqual(helperCalls[1][1], "KILL", "the survivor follow-up was not KILL");
+  assert.ok(helperCalls[0].includes(String(process.pid)), "the watcher's own pid was not excluded");
+  assert.ok(helperCalls[0].includes("4210004"), "the caller's excludes were not forwarded");
+});
+
+test("a failing helper is a skip, never a throw", () => {
+  const res = sweepChildProcesses({
+    mark: "run-x/dev-1/dev-1:turn:0",
+    useHelper: true,
+    helper: () => ({ status: 1, stdout: "", stderr: "sudo: a password is required", error: null }),
+    kill: () => {},
+  });
+  assert.deepEqual(res.via, "helper", "the failure should still report the helper path");
+  assert.deepEqual(res.killed, [], "a failed helper must not report kills");
+  assert.ok(res.skipped.startsWith("helper failed"), `skip reason was wrong: ${JSON.stringify(res.skipped)}`);
+});
+
+test("the /proc path drops a pid that vanished before its first signal", () => {
+  const procRoot = join(base, "proc-esrch");
+  const MARK = "run-x/dev-2/dev-2:turn:0";
+  makeProc(procRoot, 4220001, { environ: `LA_CHILD_MARK=${MARK}\0`, comm: "a" });
+  makeProc(procRoot, 4220002, { environ: `LA_CHILD_MARK=${MARK}\0`, comm: "b" });
+  const kill = (pid, sig) => {
+    if (pid === 4220001) {
+      if (sig === "SIGTERM" || sig === 0) {
+        const e = new Error("no such process");
+        e.code = "ESRCH";
+        throw e;
+      }
+      return;
+    }
+    if (sig === 0) {
+      const e = new Error("no such process");
+      e.code = "ESRCH";
+      throw e;
+    }
+  };
+  const res = sweepChildProcesses({ mark: MARK, graceMs: 250, procRoot, kill });
+  assert.deepEqual(res.via, "proc", "the /proc path did not serve the sweep");
+  assert.deepEqual(
+    res.killed.map((k) => k.pid),
+    [4220002],
+    `the vanished pid should have left the report: ${JSON.stringify(res.killed)}`,
+  );
+});
+
+// ── end-to-end: finalizeTurn sweeps and removes the child TMPDIR ─────────────
+const runIdSweep = `test-watch-sweep-${process.pid}`;
+fixtureChild(runIdSweep);
+const sweepProcRoot = join(base, "proc-e2e");
+const SWEEP_MARK = `${runIdSweep}/dev-1/dev-1:turn:0`;
+// The stray is a REAL process: the watcher sweeps with the real process.kill,
+// and a pid that does not exist is (correctly) reported as not killed. The
+// fixture /proc tree only tells the scan whom to look at; the signal is real,
+// and so is the "it is dead afterwards" check below. unref + ignored stdio so
+// a surviving stray can never keep this test process alive; the exit hook is
+// the belt and braces.
+const sweepStray = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+sweepStray.unref();
+process.on("exit", () => {
+  try {
+    process.kill(sweepStray.pid, "SIGKILL");
+  } catch {}
+});
+makeProc(sweepProcRoot, sweepStray.pid, { environ: `LA_CHILD_MARK=${SWEEP_MARK}\0`, comm: "pgserver" });
+makeProc(sweepProcRoot, 4220002, { environ: `LA_CHILD_MARK=unrelated/mark`, comm: "other" });
+mkdirSync(join(tmpdir(), "fenix-child"), { recursive: true });
+const childTmp = mkdtempSync(join(tmpdir(), "fenix-child", "watch-e2e-"));
+writeFileSync(join(childTmp, "scratch.txt"), "x", "utf8");
+const resultSweep = runWatcher(
+  runIdSweep,
+  [],
+  {
+    FAKE_ARGV_PATH: join(base, "argv-sweep.json"),
+    FAKE_SESSION_ID: `watch-sweep-${process.pid}`,
+    LA_CHILD_MARK: SWEEP_MARK,
+    LA_PROC_ROOT: sweepProcRoot,
+    TMPDIR: childTmp,
+  },
+);
+
+test("finalizeTurn swept the marked stray and recorded sweptPids on the turn", () => {
+  assert.equal(resultSweep.status, 0, `watcher exit ${resultSweep.status}: ${resultSweep.stderr}`);
+  const turn = readRegistry(runIdSweep).children["dev-1"].turns[0];
+  assert.deepEqual(turn.sweptPids, [sweepStray.pid], `sweptPids was ${JSON.stringify(turn.sweptPids)}`);
+  const strayAlive = (() => {
+    try {
+      process.kill(sweepStray.pid, 0);
+      return true;
+    } catch (err) {
+      return err.code === "EPERM";
+    }
+  })();
+  assert.ok(!strayAlive, `the stray ${sweepStray.pid} survived the sweep`);
+  assert.ok(
+    readFileSync(teeOf(runIdSweep), "utf8").includes("child sweep: killed 1 stray process(es)"),
+    "the tee does not carry the sweep line",
+  );
+});
+
+test("the child TMPDIR is removed at turn end", () => {
+  assert.ok(!existsSync(childTmp), "the child TMPDIR outlived the turn");
+});
+
+// LA_KEEP_CHILD_TMP=1 keeps the directory for debugging.
+const runIdKeep = `test-watch-sweep-keep-${process.pid}`;
+fixtureChild(runIdKeep);
+const keepTmp = mkdtempSync(join(tmpdir(), "fenix-child", "watch-keep-"));
+const resultKeep = runWatcher(
+  runIdKeep,
+  [],
+  {
+    FAKE_ARGV_PATH: join(base, "argv-sweep-keep.json"),
+    FAKE_SESSION_ID: `watch-sweep-keep-${process.pid}`,
+    LA_CHILD_MARK: `${runIdKeep}/dev-1/dev-1:turn:0`,
+    LA_PROC_ROOT: sweepProcRoot,
+    TMPDIR: keepTmp,
+    LA_KEEP_CHILD_TMP: "1",
+  },
+);
+
+test("LA_KEEP_CHILD_TMP=1 keeps the child TMPDIR", () => {
+  assert.equal(resultKeep.status, 0, `watcher exit ${resultKeep.status}: ${resultKeep.stderr}`);
+  assert.ok(existsSync(keepTmp), "LA_KEEP_CHILD_TMP=1 did not keep the tmp dir");
+  try {
+    rmSync(keepTmp, { recursive: true, force: true });
+  } catch {}
+});
+
+// A watcher without the mark (not spawned by supervisor-spawn) must never
+// remove the ambient TMPDIR.
+const runIdNoMark = `test-watch-sweep-nomark-${process.pid}`;
+fixtureChild(runIdNoMark);
+const ambientTmp = join(base, "ambient-tmp");
+mkdirSync(ambientTmp, { recursive: true });
+const resultNoMark = runWatcher(
+  runIdNoMark,
+  [],
+  {
+    FAKE_ARGV_PATH: join(base, "argv-sweep-nomark.json"),
+    FAKE_SESSION_ID: `watch-sweep-nomark-${process.pid}`,
+    TMPDIR: ambientTmp,
+  },
+);
+
+test("no LA_CHILD_MARK: no sweep, the ambient TMPDIR is untouched", () => {
+  assert.equal(resultNoMark.status, 0, `watcher exit ${resultNoMark.status}: ${resultNoMark.stderr}`);
+  assert.deepEqual(readRegistry(runIdNoMark).children["dev-1"].turns[0].sweptPids, []);
+  assert.ok(existsSync(ambientTmp), "the ambient TMPDIR was removed by a markless watcher");
+});
+
+// POSIX only: a REAL detached stray (its own session, the setsid shape) whose
+// env carries the mark is swept by the production /proc path.
+if (process.platform !== "win32") {
+  const runIdReal = `test-watch-sweep-real-${process.pid}`;
+  fixtureChild(runIdReal);
+  const REAL_MARK = `${runIdReal}/dev-1/dev-1:turn:0`;
+  const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const stray = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, LA_CHILD_MARK: REAL_MARK },
+  });
+  stray.unref();
+  sleepSync(300); // let the stray land in /proc before the watcher sweeps
+  const resultReal = runWatcher(
+    runIdReal,
+    [],
+    {
+      FAKE_ARGV_PATH: join(base, "argv-sweep-real.json"),
+      FAKE_SESSION_ID: `watch-sweep-real-${process.pid}`,
+      LA_CHILD_MARK: REAL_MARK,
+    },
+  );
+  test("a real detached stray carrying the mark is swept through the real /proc", () => {
+    assert.equal(resultReal.status, 0, `watcher exit ${resultReal.status}: ${resultReal.stderr}`);
+    const turn = readRegistry(runIdReal).children["dev-1"].turns[0];
+    assert.ok(
+      turn.sweptPids.includes(stray.pid),
+      `sweptPids ${JSON.stringify(turn.sweptPids)} misses the stray ${stray.pid}`,
+    );
+    let gone = false;
+    try {
+      process.kill(stray.pid, 0);
+    } catch {
+      gone = true;
+    }
+    assert.ok(gone, "the stray process survived the sweep");
+  });
+} else {
+  console.log("SKIP real detached-stray sweep — win32 has no setsid/process-group semantics for this fixture");
+}
+
+// The second guard: even WITH the mark, a TMPDIR that does not sit under
+// <os tmpdir>/fenix-child/ must be left in place (and noted as skipped) — the
+// path guard is what protects a hand-run watcher's ambient TMPDIR.
+const runIdOutside = `test-watch-sweep-outside-${process.pid}`;
+fixtureChild(runIdOutside);
+const outsideTmp = mkdtempSync(join(base, "tmp-outside-"));
+const resultOutside = runWatcher(
+  runIdOutside,
+  [],
+  {
+    FAKE_ARGV_PATH: join(base, "argv-sweep-outside.json"),
+    FAKE_SESSION_ID: `watch-sweep-outside-${process.pid}`,
+    LA_CHILD_MARK: `${runIdOutside}/dev-1/dev-1:turn:0`,
+    LA_PROC_ROOT: sweepProcRoot,
+    TMPDIR: outsideTmp,
+  },
+);
+
+test("finalizeTurn leaves a TMPDIR outside <tmpdir>/fenix-child in place", () => {
+  assert.equal(resultOutside.status, 0, `watcher exit ${resultOutside.status}: ${resultOutside.stderr}`);
+  assert.ok(existsSync(outsideTmp), "a TMPDIR outside fenix-child was removed anyway");
+  assert.ok(
+    readFileSync(teeOf(runIdOutside), "utf8").includes("child_tmpdir_skipped"),
+    "the tee carries no child_tmpdir_skipped note",
+  );
 });
 
 console.log("");

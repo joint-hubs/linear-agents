@@ -62,6 +62,12 @@ export const MIGRATION_VERSIONS = {
   // Deliberately a SEPARATE TABLE: it is projected from supervisor.focus
   // events, never joined into the fact tables the v5 rebuild would recreate.
   supervisorFocus: 10,
+  // FOC-808: applyTaskLinked now accepts the Supervisor's SUP:<runId>
+  // attribution (role='supervisor', no quality issue). This one-shot resolves
+  // the task_id_malformed issues the old guard raised for exactly those ids —
+  // data_quality_issues has no note column, so resolution is resolved_at only;
+  // the why lives here and in the FOC-808 plan.
+  supervisorAttribution: 11,
 };
 
 export function sqliteAvailable() {
@@ -781,6 +787,63 @@ function ensureRunFocus(db) {
   db.exec("CREATE INDEX IF NOT EXISTS idx_run_focus_run ON run_focus(run_id, valid_from)");
 }
 
+// FOC-808 one-shot: the old applyTaskLinked guard raised task_id_malformed for
+// every `SUP:<runId>` tag the supervisor-spawn manifest path emitted — ids the
+// store itself now accepts as supervisor attributions. Resolve those open
+// issues on store open (resolved_at = now); a REAL malformed id (no SUP:
+// prefix) stays open. JSON1 is not guaranteed on every Node build, so the
+// details_json scan runs in JS instead of LIKE '%SUP:%' against the raw blob
+// — the table is small (issues are rare) and this runs once per database.
+function resolveSupervisorMalformedIssues(db) {
+  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(MIGRATION_VERSIONS.supervisorAttribution)) return;
+  const open = db.prepare(
+    "SELECT issue_id, details_json FROM data_quality_issues WHERE issue_type='task_id_malformed' AND resolved_at IS NULL",
+  ).all();
+  const stamp = now();
+  const resolve = db.prepare("UPDATE data_quality_issues SET resolved_at=? WHERE issue_id=?");
+  let resolved = 0;
+  for (const row of open) {
+    const details = parseJson(row.details_json, {});
+    if (!details || typeof details !== "object") continue;
+    if (typeof details.taskId !== "string" || !details.taskId.startsWith(PSEUDO_TASK_PREFIX)) continue;
+    resolve.run(stamp, row.issue_id);
+    resolved++;
+  }
+  return resolved;
+}
+
+// FOC-808: an idle open must not write. When every migration marker is
+// present AND both canonical views already carry the exact current SQL, no
+// step in migrate() can change the schema — every guarded step no-ops and the
+// additive CREATE ... IF NOT EXISTS steps match — so the drop/recreate pair
+// (two content-identical write transactions on EVERY open; measured as the
+// tick-path WAL churn, ~1.5 MB/min on the VM) is skipped. A fresh store, a
+// mid-migration file, or a view whose stored body differs from the current
+// SQL (this file changed its definition without a marker — exactly the case
+// the DROP+CREATE-below comment warns about) takes the original path.
+// sqlite_master stores the CREATE text verbatim; whitespace-normalized so the
+// template literals' leading newlines do not matter.
+function canonicalViewsCurrent(db) {
+  // schema_migrations is created by createBaseSchema further down in migrate();
+  // a store without it is a fresh file — take the full path.
+  const markerTable = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+  ).get();
+  if (!markerTable) return false;
+  const hasMarker = db.prepare("SELECT 1 FROM schema_migrations WHERE version=?");
+  for (const v of Object.values(MIGRATION_VERSIONS)) {
+    if (!hasMarker.get(v)) return false;
+  }
+  const rows = db.prepare(
+    "SELECT name, sql FROM sqlite_master WHERE type='view' AND name IN ('canonical_usage','canonical_tool_facts')",
+  ).all();
+  if (rows.length !== 2) return false;
+  const norm = (sql) => sql.replace(/\s+/g, " ").trim();
+  const byName = new Map(rows.map((r) => [r.name, norm(r.sql)]));
+  return byName.get("canonical_usage") === norm(CANONICAL_USAGE_SQL)
+    && byName.get("canonical_tool_facts") === norm(CANONICAL_TOOL_SQL);
+}
+
 export function migrate(db, path) {
   // Views are dropped first and recreated at the end: the migrations below
   // rebuild the fact tables they select from (DROP + RENAME), and SQLite
@@ -788,8 +851,13 @@ export function migrate(db, path) {
   // mid-rebuild fails the migration with "error in view". A view holds no
   // data, so dropping it up front is free. One unit of work: a concurrent
   // opener must never see one canonical view gone while the other is still
-  // there.
-  transaction(db, () => dropCanonicalViews(db));
+  // there. Skipped entirely when nothing can change (canonicalViewsCurrent):
+  // if the views are current, all markers are present, so no rebuild step
+  // below runs and nothing can leave a view dangling mid-migration.
+  const viewsCurrent = canonicalViewsCurrent(db);
+  if (!viewsCurrent) {
+    transaction(db, () => dropCanonicalViews(db));
+  }
   createBaseSchema(db);
   addRunColumns(db);
   addModelPriceColumns(db);
@@ -812,7 +880,11 @@ export function migrate(db, path) {
   // FOC-769: run_focus is a side table the same way — additive, immune to the
   // rebuilds, so it goes anywhere in this sequence too.
   ensureRunFocus(db);
-  ensureCanonicalViews(db);
+  resolveSupervisorMalformedIssues(db);
+  // Recreate skipped when current (see canonicalViewsCurrent): the store keeps
+  // the views it has — which are by definition the current definitions — and
+  // spends no write transaction on rewriting them identically.
+  if (!viewsCurrent) ensureCanonicalViews(db);
   // Record every migration marker. Each step guards itself above; this loop
   // just persists the paper trail. INSERT OR IGNORE keeps it idempotent across
   // re-opens.
@@ -1596,6 +1668,33 @@ function applyTaskLinked(db, event) {
   const source = payload.source || "manual";
   const confidence = payload.confidence ?? (source === "launch" || source === "agent_pick" || source === "manual" ? 1 : 0.5);
   db.prepare("INSERT OR IGNORE INTO runs (run_id, status, updated_at) VALUES (?, 'running', ?)").run(runId, now());
+  // FOC-808: `sup:<runId>` (any case on input — normalizeTaskId uppercased it)
+  // is the Supervisor's own pseudo-task attribution, not a Linear ticket; the
+  // store already knows the prefix as PSEUDO_TASK_PREFIX (the billing
+  // exclusion). Normalise to SUP:<runId>, store the work item under the
+  // supervisor workspace, and link with role='supervisor' — every reader that
+  // selects primary links keeps ignoring it. NO quality issue: the old guard
+  // below rejected the id as task_id_malformed, which flagged every child run
+  // as bad data (the one-shot migration resolves the stockpile).
+  if (taskId.startsWith(PSEUDO_TASK_PREFIX)) {
+    const supTaskId = `${PSEUDO_TASK_PREFIX}${runId}`;
+    db.prepare(
+      "INSERT OR IGNORE INTO work_items (task_id, provider, workspace, identifier, created_at) VALUES (?, 'fenix', 'supervisor', ?, ?)",
+    ).run(supTaskId, supTaskId, now());
+    const supFrom = payload.validFrom || event.observedAt || now();
+    // Idempotent: one open supervisor link per run. A re-tag (the spawn path
+    // tags on every launch attempt) must not stack duplicate rows.
+    const supExisting = db
+      .prepare("SELECT link_id FROM run_task_links WHERE run_id=? AND task_id=? AND role='supervisor' AND valid_to IS NULL LIMIT 1")
+      .get(runId, supTaskId);
+    if (supExisting) return { duplicate: true, runId, taskId: supTaskId, role: "supervisor", linkId: supExisting.link_id };
+    const supLinkId = payload.linkId || randomUUID();
+    db.prepare(
+      `INSERT OR IGNORE INTO run_task_links (link_id, run_id, task_id, role, valid_from, valid_to, source, confidence, supersedes_link_id, created_at)
+       VALUES (?, ?, ?, 'supervisor', ?, ?, ?, ?, ?, ?)`,
+    ).run(supLinkId, runId, supTaskId, supFrom, payload.validTo || null, source, confidence, payload.supersedesLinkId || null, now());
+    return { runId, taskId: supTaskId, role: "supervisor", linkId: supLinkId };
+  }
   // FOC-221: a link is only as good as its id. An id that does not look like a
   // Linear identifier (TEAM-123) would otherwise create a work_items row and
   // silently bill usage against garbage — reject it and raise a visible

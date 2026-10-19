@@ -37,6 +37,11 @@ x-fenix: &fenix
     LA_PROJECTS_FILE: /fenix-config/projects.json
   volumes:
     - fenix-data:/data
+    # FOC-808: package caches on a named volume so they survive `fenix update`
+    # (which rebuilds the image and throws the container layer away) instead of
+    # being re-downloaded on every rebuild. Env vars pointing tools there are
+    # set in the Dockerfile ENV block. Never touches /data.
+    - fenix-cache:/home/node/.cache
     - ./.fenix/config:/fenix-config
   restart: unless-stopped
 
@@ -58,6 +63,7 @@ services:
     volumes:
       # Volumes must be restated: the << merge is shallow (see the anchor note).
       - fenix-data:/data
+      - fenix-cache:/home/node/.cache
       - ./.fenix/config:/fenix-config
       - ./.fenix/secrets:/fenix-secrets
     ports:
@@ -79,6 +85,11 @@ services:
       # FOC-802 — not as this container's user; `FENIX_CHILD_ISOLATION=off`
       # disables the drop (children then run as node again, unisolated).
       FENIX_HOST_PEER: fenix-api
+    volumes:
+      # Restated (shallow merge — see the anchor note).
+      - fenix-data:/data
+      - fenix-cache:/home/node/.cache
+      - ./.fenix/config:/fenix-config
     stdin_open: true
     tty: true
     healthcheck:
@@ -107,3 +118,5 @@ secrets:
 
 volumes:
   fenix-data: {}
+  # FOC-808: package caches (npm, pip, uv, playwright) — see the anchor note.
+  fenix-cache: {}

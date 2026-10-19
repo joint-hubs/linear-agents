@@ -35,7 +35,15 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { LIVE_STATUSES, readRegistry, supervisorStateHome, updateChild } from "./supervisor-lib.mjs";
+import {
+  LIVE_STATUSES,
+  TERMINAL_STATUSES,
+  processAlive,
+  readRegistry,
+  supervisorStateHome,
+  sweepChildProcesses,
+  updateChild,
+} from "./supervisor-lib.mjs";
 import { readSessionRows, taskSessionsDbPath } from "./task-sessions.mjs";
 import { containerStartMs, currentOwner, ownerRelation, readRunOwner } from "./run-owner.mjs";
 
@@ -198,6 +206,63 @@ export function runOrphansCli({ argv = process.argv.slice(2), containerStart, st
     all: all && yes,
   });
 
+  // ── FOC-808 (slice B): sweep the strays of children that are no longer live ─
+  // After marking, every registry child that is NOT live — a terminal status,
+  // or a live status whose recorded pid is gone — has nothing left that owns
+  // its helpers. Everything such a child started inherited LA_CHILD_MARK, so
+  // the environment identifies the strays; entries from before FOC-808 carry
+  // no mark and are skipped. Best effort: a sweep failure is a WARN line, the
+  // container start is never blocked.
+  const sweptPids = [];
+  const sweepWarnings = [];
+  const sweepRoot = stateRoot ?? supervisorStateHome();
+  let sweepRuns = [];
+  try {
+    sweepRuns = readdirSync(sweepRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && existsSync(join(sweepRoot, e.name, "children.json")))
+      .map((e) => e.name);
+  } catch (err) {
+    sweepWarnings.push(`state root ${sweepRoot} could not be read for the sweep: ${err.message}`);
+  }
+  // Same ownership rule as the marking above, judged here for EVERY run the
+  // sweep visits (markOrphans judges only runs with a live child): a run owned
+  // by another host/container is not swept without --all --yes — its owner
+  // may be mid-finalize on exactly these processes. No owner record (a legacy
+  // run) reads as "unknown" and is swept, as the marking would mark it.
+  const sweepCurrent = current ?? currentOwner();
+  const sweepAll = all && yes;
+  for (const sweepRunId of sweepRuns) {
+    if (!sweepAll) {
+      const { relation } = ownerRelation(readRunOwner(join(sweepRoot, sweepRunId)), sweepCurrent);
+      if (relation === "foreign") continue;
+    }
+    let registry;
+    try {
+      registry = readRegistry(sweepRunId);
+    } catch {
+      continue; // already reported by markOrphans above
+    }
+    for (const child of Object.values(registry.children || {})) {
+      if (!child.mark) continue; // a pre-FOC-808 entry — nothing to match on
+      // Terminal, or live by status with a recorded pid that is provably gone.
+      // A live-status entry WITHOUT a pid (the spawn window) is unknown, not
+      // dead — never swept.
+      const pidRecorded = Number.isInteger(child.pid) && child.pid > 0;
+      const notLive =
+        TERMINAL_STATUSES.includes(child.status) ||
+        (LIVE_STATUSES.includes(child.status) && pidRecorded && !processAlive(child.pid));
+      if (!notLive) continue;
+      try {
+        const sweep = sweepChildProcesses({ mark: child.mark, excludePids: [process.pid] });
+        for (const k of sweep.killed ?? []) {
+          sweptPids.push({ runId: sweepRunId, childId: child.childId, pid: k.pid, comm: k.comm });
+        }
+      } catch (err) {
+        sweepWarnings.push(`sweep ${sweepRunId}/${child.childId} failed: ${err.message}`);
+      }
+    }
+  }
+
   if (json) {
     console.log(
       JSON.stringify(
@@ -206,6 +271,7 @@ export function runOrphansCli({ argv = process.argv.slice(2), containerStart, st
           marked: marked.map(({ runId, childId, relation }) => ({ runId, childId, relation })),
           skipped,
           unknown: unknown.length,
+          sweptPids,
         },
         null,
         2,
@@ -225,6 +291,12 @@ export function runOrphansCli({ argv = process.argv.slice(2), containerStart, st
   }
   for (const e of errors) {
     console.log(`WARN ${e.runId ?? "(state root)"}: ${e.error}`);
+  }
+  for (const w of sweepWarnings) {
+    console.log(`WARN ${w}`);
+  }
+  if (sweptPids.length) {
+    console.log(`orphans: killed ${sweptPids.length} stray helper(s)`);
   }
   console.log(`orphans: ${marked.length} marked, ${skipped.length} skipped in ${runsScanned} run(s)`);
   if (all && !yes) {

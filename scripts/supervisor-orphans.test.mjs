@@ -12,6 +12,7 @@
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import os, { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 
 const stateHome = mkdtempSync(join(tmpdir(), "supervisor-orphans-"));
 process.env.LA_SUPERVISOR_STATE_HOME = stateHome;
@@ -423,6 +424,169 @@ try {
     eq(code, 2, "usage refusal exits 2");
     ok(errLines.some((l) => l.includes("usage:")), "the usage line is printed");
   });
+  console.log("\nsupervisor-orphans: FOC-808 container sweep of dead children's strays");
+
+  // The sweep's proc root is the LA_PROC_ROOT seam (sweepChildProcesses reads
+  // it); a fixture tree of environ/comm files stands in for /proc here.
+  const sweepTmp = mkdtempSync(join(tmpdir(), "supervisor-orphans-sweep-"));
+  const procRoot = join(sweepTmp, "proc");
+  const mkProc = (pid, env, comm) => {
+    mkdirSync(join(procRoot, String(pid)), { recursive: true });
+    writeFileSync(join(procRoot, String(pid), "environ"), env, "utf8");
+    writeFileSync(join(procRoot, String(pid), "comm"), `${comm}\n`, "utf8");
+  };
+  const DEAD_MARK = "run-sweep/child-dead/child-dead:turn:0";
+  const LIVE_MARK = "run-sweep/child-live/child-live:turn:0";
+  // The sweep signals with the real process.kill and reports a pid that is not
+  // a real process as not killed — so every stray that must be swept is a live
+  // idle node process whose pid the fixture /proc tree names.
+  const strays = [];
+  const spawnStray = (env, comm) => {
+    const p = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+    p.unref();
+    strays.push(p.pid);
+    mkProc(p.pid, env, comm);
+    return p.pid;
+  };
+  const strayAlive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      return err.code === "EPERM";
+    }
+  };
+  process.on("exit", () => {
+    for (const pid of strays) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+    }
+  });
+  const deadStray = spawnStray(`LA_CHILD_MARK=${DEAD_MARK}\0PATH=/usr/bin`, "pgserver");
+  mkProc(4310002, `LA_CHILD_MARK=${LIVE_MARK}\0`, "liveserver");
+
+  await test("a dead child's marked stray is swept; a live child's is not", async () => {
+    registry("run-sweep", {
+      // "running" but started before the container → markOrphans marks it
+      // crashed, so the sweep then sees a terminal child and kills its stray.
+      "child-dead": {
+        childId: "child-dead",
+        status: "running",
+        pid: 4242,
+        startedAt: BEFORE,
+        turns: [{ startedAt: BEFORE }],
+        mark: DEAD_MARK,
+      },
+      // Genuinely live: status running, pid alive (this test process).
+      "child-live": {
+        childId: "child-live",
+        status: "running",
+        pid: process.pid,
+        startedAt: AFTER,
+        turns: [{ startedAt: AFTER }],
+        mark: LIVE_MARK,
+      },
+      // Terminal with a mark but no fixture process: swept, nothing matched.
+      "child-gone": {
+        childId: "child-gone",
+        status: "exited",
+        startedAt: AFTER,
+        turns: [{ startedAt: AFTER }],
+        mark: "run-sweep/child-gone/child-gone:turn:0",
+      },
+    });
+    process.env.LA_PROC_ROOT = procRoot;
+    try {
+      const { lines, code } = capture(() =>
+        runOrphansCli({ argv: ["--container", "--json"], containerStart: CONTAINER_START }),
+      );
+      eq(code, 0, "the scan still exits 0");
+      const report = JSON.parse(lines[0]);
+      eq(report.sweptPids.length, 1, `exactly one stray swept: ${JSON.stringify(report.sweptPids)}`);
+      eq(report.sweptPids[0].pid, deadStray, "the dead child's stray was swept");
+      ok(!strayAlive(deadStray), "the dead child's stray survived the sweep");
+      eq(report.sweptPids[0].childId, "child-dead", "the swept entry names the child");
+      eq(report.sweptPids[0].runId, "run-sweep", "the swept entry names the run");
+      eq(report.sweptPids[0].comm, "pgserver", "the swept entry carries the comm");
+
+      // The first run killed the stray; the text run needs a fresh one (the
+      // old fixture entry goes, so a reused pid can never be matched).
+      rmSync(join(procRoot, String(deadStray)), { recursive: true, force: true });
+      const deadStray2 = spawnStray(`LA_CHILD_MARK=${DEAD_MARK}\0`, "pgserver");
+      const { lines: textLines } = capture(() =>
+        runOrphansCli({ argv: ["--container"], containerStart: CONTAINER_START }),
+      );
+      ok(
+        textLines.some((l) => l.includes("orphans: killed 1 stray helper(s)")),
+        `the text output carries no sweep line: ${JSON.stringify(textLines)}`,
+      );
+      ok(!strayAlive(deadStray2), "the second stray survived the sweep");
+      rmSync(join(procRoot, String(deadStray2)), { recursive: true, force: true });
+    } finally {
+      delete process.env.LA_PROC_ROOT;
+    }
+  });
+
+  await test("a pre-FOC-808 entry without a mark is skipped by the sweep", async () => {
+    registry("run-sweep-legacy", {
+      "child-old": {
+        childId: "child-old",
+        status: "exited",
+        startedAt: BEFORE,
+        turns: [{ startedAt: BEFORE }],
+        // no mark field
+      },
+    });
+    process.env.LA_PROC_ROOT = procRoot;
+    const deadStray3 = spawnStray(`LA_CHILD_MARK=${DEAD_MARK}\0`, "pgserver");
+    try {
+      const { lines, code } = capture(() =>
+        runOrphansCli({ argv: ["--container", "--json"], containerStart: CONTAINER_START }),
+      );
+      eq(code, 0);
+      const report = JSON.parse(lines[0]);
+      eq(report.sweptPids.length, 1, `only the earlier fixture stray again: ${JSON.stringify(report.sweptPids)}`);
+      eq(report.sweptPids[0].pid, deadStray3, "the marked run's stray again, the markless entry contributed nothing");
+    } finally {
+      delete process.env.LA_PROC_ROOT;
+    }
+  });
+
+  await test("a foreign run's dead child is not swept without --all --yes", async () => {
+    const FOREIGN_MARK = "run-sweep-foreign/child-dead/child-dead:turn:0";
+    registry("run-sweep-foreign", {
+      "child-dead": {
+        childId: "child-dead",
+        status: "exited",
+        startedAt: BEFORE,
+        turns: [{ startedAt: BEFORE }],
+        mark: FOREIGN_MARK,
+      },
+    });
+    writeOwner("run-sweep-foreign", { hostname: "other-container" });
+    const foreignStray = spawnStray(`LA_CHILD_MARK=${FOREIGN_MARK}\0`, "foreignserver");
+    process.env.LA_PROC_ROOT = procRoot;
+    try {
+      const { lines, code } = capture(() =>
+        runOrphansCli({ argv: ["--container", "--json"], containerStart: CONTAINER_START }),
+      );
+      eq(code, 0);
+      const report = JSON.parse(lines[0]);
+      ok(
+        !report.sweptPids.some((s) => s.pid === foreignStray),
+        `the foreign run's stray was swept: ${JSON.stringify(report.sweptPids)}`,
+      );
+      ok(strayAlive(foreignStray), "the foreign run's stray was killed");
+    } finally {
+      delete process.env.LA_PROC_ROOT;
+      try {
+        process.kill(foreignStray, "SIGKILL");
+      } catch {}
+    }
+  });
+
+  rmSync(sweepTmp, { recursive: true, force: true });
 } finally {
   rmSync(stateHome, { recursive: true, force: true });
 }

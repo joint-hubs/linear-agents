@@ -2507,6 +2507,171 @@ export function killTree(pid, mode = "graceful") {
   }
 }
 
+// FOC-808 (slice B): the root-side sweep helper (docker/fenix-child-sweep.sh,
+// installed by the Dockerfile, allowed to node through sudoers-fenix-child).
+// Inside the container the child tree runs as fenix-child, so node cannot read
+// its /proc/<pid>/environ — the helper does the same scan as root and prints
+// `pid comm` lines before signalling.
+export const CHILD_SWEEP_HELPER = "/usr/local/sbin/fenix-child-sweep";
+
+function runChildSweepHelper(args) {
+  const r = spawnSync("sudo", ["-n", CHILD_SWEEP_HELPER, ...args], { encoding: "utf8", timeout: 15_000 });
+  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", error: r.error ?? null };
+}
+
+function parseSweepHelperLines(stdout) {
+  const out = [];
+  for (const line of String(stdout).split("\n")) {
+    const m = /^(\d+)\s*(.*)$/.exec(line.trim());
+    if (m) out.push({ pid: Number(m[1]), comm: m[2] ?? "" });
+  }
+  return out;
+}
+
+/**
+ * Sweep the stray helper processes one child left behind (FOC-808, slice B).
+ *
+ * The child's process group dies with killTree, but a helper that called
+ * setsid (pgserver's Postgres, any daemonizing tool) left the group. Everything
+ * the child started inherited `LA_CHILD_MARK=<runId>/<childId>/<attemptId>`,
+ * so the ENVIRONMENT identifies the strays where the process tree cannot:
+ * every /proc/<pid>/environ whose LA_CHILD_MARK entry equals `mark` exactly is
+ * this child's.
+ *
+ * Linux only — `/proc` is the source. Two seams keep it testable elsewhere:
+ *   · `procRoot` (or the env `LA_PROC_ROOT`) points the scan at a fixture tree
+ *     of `<root>/<pid>/environ` + `comm` files — on a non-Linux host the REAL
+ *     /proc default is refused with `skipped: "no /proc"`, a fixture is not;
+ *   · `kill` (default process.kill) is injectable, so tests record the signals
+ *     instead of delivering them.
+ *
+ * The grace wait is a synchronous Atomics.wait poll (same pattern as the waker
+ * lease lock above) — the callers (finalizeTurn, the orphan CLI) are
+ * synchronous by construction. EPERM on a liveness probe means "alive, not
+ * ours to signal" — the same reading processAlive gives it.
+ *
+ * @returns {{ killed: Array<{pid: number, comm: string}>, skipped: string|null, via?: "helper"|"proc" }}
+ *   `skipped: "no /proc"` when there is nothing to scan (no /proc, no fixture,
+ *   non-Linux with the default root); `skipped: null` when a scan ran; on a ran
+ *   scan `via` says which path served it — `"helper"` (the root-side
+ *   fenix-child-sweep helper) or `"proc"` (the in-process /proc scan).
+ */
+export function sweepChildProcesses({
+  mark,
+  excludePids = [],
+  signal = "SIGTERM",
+  graceMs = 2000,
+  procRoot,
+  kill = process.kill,
+  useHelper = process.platform === "linux" && process.env.FENIX_IN_CONTAINER === "1" && existsSync(CHILD_SWEEP_HELPER),
+  helper = runChildSweepHelper,
+} = {}) {
+  if (useHelper) {
+    const sigName = String(signal).replace(/^SIG/, "") === "KILL" ? "KILL" : "TERM";
+    const excludes = [...new Set([...excludePids, process.pid].map(Number))].map(String);
+    const first = helper([mark, sigName, ...excludes]);
+    if (first.error || first.status !== 0) {
+      const why = first.error?.message ?? `exit ${first.status}`;
+      return { killed: [], skipped: `helper failed: ${why} ${String(first.stderr ?? "").trim()}`.trim(), via: "helper" };
+    }
+    const listed = parseSweepHelperLines(first.stdout);
+    if (!listed.length) return { killed: [], skipped: null, via: "helper" };
+    // Liveness probes stay in-process: EPERM is "alive, fenix-child's" — the
+    // same reading processAlive gives it; ESRCH is gone.
+    const stillAlive = () =>
+      listed.filter((m) => {
+        try {
+          kill(m.pid, 0);
+          return true;
+        } catch (err) {
+          return err.code === "EPERM";
+        }
+      });
+    const until = Date.now() + graceMs;
+    while (stillAlive().length && Date.now() < until) waitSync(50);
+    if (sigName !== "KILL" && stillAlive().length) helper([mark, "KILL", ...excludes]);
+    return { killed: listed, skipped: null, via: "helper" };
+  }
+  const root = procRoot ?? process.env.LA_PROC_ROOT ?? "/proc";
+  if (root === "/proc" && process.platform !== "linux") return { killed: [], skipped: "no /proc" };
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return { killed: [], skipped: "no /proc" };
+  }
+  if (!entries.length) return { killed: [], skipped: "no /proc" };
+
+  const wanted = `LA_CHILD_MARK=${mark}`;
+  const exclude = new Set([...excludePids, process.pid].map(Number));
+  const matches = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    const pid = Number(entry.name);
+    if (exclude.has(pid)) continue;
+    let envRaw;
+    try {
+      envRaw = readFileSync(join(root, entry.name, "environ")); // NUL-separated
+    } catch {
+      continue; // a vanished or unreadable pid is not a match we can prove
+    }
+    if (!envRaw.toString("latin1").split("\0").includes(wanted)) continue;
+    let comm = "";
+    try {
+      comm = readFileSync(join(root, entry.name, "comm"), "utf8").trim();
+    } catch {
+      /* the name is display-only */
+    }
+    matches.push({ pid, comm });
+  }
+  if (!matches.length) return { killed: [], skipped: null };
+
+  // A pid that is already gone at the first signal (ESRCH) was never killed by
+  // this sweep — it leaves the report; any other failure keeps it listed.
+  const gone = new Set();
+  const unsignalled = [];
+  for (const m of matches) {
+    try {
+      kill(m.pid, signal);
+    } catch (err) {
+      if (err?.code === "ESRCH") {
+        gone.add(m.pid);
+      } else {
+        // EPERM and friends: the process is there but not ours to signal (a
+        // fenix-child stray seen without the root helper). It was never
+        // killed — report it as such instead of claiming it.
+        gone.add(m.pid);
+        unsignalled.push({ pid: m.pid, comm: m.comm, code: err?.code ?? "unknown" });
+      }
+    }
+  }
+  const alive = () =>
+    matches.filter((m) => {
+      if (gone.has(m.pid)) return false;
+      try {
+        kill(m.pid, 0);
+        return true;
+      } catch (err) {
+        return err.code === "EPERM"; // alive, just not ours to signal
+      }
+    });
+  const deadline = Date.now() + graceMs;
+  while (alive().length && Date.now() < deadline) waitSync(50);
+  for (const m of alive()) {
+    try {
+      kill(m.pid, "SIGKILL");
+    } catch {
+      /* gone after all — the sweep wanted it dead either way */
+    }
+  }
+  return {
+    killed: matches.filter((m) => !gone.has(m.pid)),
+    skipped: null,
+    via: "proc",
+    ...(unsignalled.length ? { unsignalled } : {}),
+  };
+}
+
 // ── claude binary ────────────────────────────────────────────────────────────
 
 // LA_CLAUDE_BIN is a TEST SEAM. The suite points it at scripts/mock-claude.mjs
