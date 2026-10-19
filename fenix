@@ -30,6 +30,10 @@ Usage: fenix [command]
                    default; nebul is chosen through the provider (fenix keys)
   retention [show|apply|prune] [--dry-run]
                    inspect or change log retention (default: show)
+  prune [--max-gb N] [--dry-run] [--json] [--builder]
+                   size and prune the cache volume and dead child tmp dirs
+                   (--max-gb: cap in GB, default from retention.cacheMaxGb);
+                   --builder also prunes the host's docker build cache (y/N)
   keys [name]      run the key wizard (no argument) or rotate one key:
                    openrouter | provider | linear | github
   attach [--new]   open the Supervisor (Ctrl-b d detaches; it keeps running in the container)
@@ -771,6 +775,32 @@ case "$cmd" in
     fi
     in_container_node scripts/fenix-retention.mjs "$verb" "$@"
     ;;
+  prune)
+    # FOC-808: cache hygiene. The node CLI reports (default) or prunes
+    # (--max-gb / --dry-run); it never touches /data. --builder is the only
+    # host-side piece: docker build cache lives outside the container (no
+    # socket inside), so root fenix asks and runs `docker builder prune -f`
+    # after the in-container part — skipped under --dry-run/--json.
+    in_container_node scripts/fenix-prune.mjs "$@"
+    rc=$?
+    [ $rc -eq 0 ] || exit $rc
+    case " $* " in
+      *" --builder "*)
+        case " $* " in
+          *" --dry-run "*|*" --json "*)
+            ;;
+          *)
+            printf 'Prune the host docker build cache too? [y/N] '
+            read -r ans
+            case "$ans" in
+              [yY]|[yY][eE][sS]) docker builder prune -f ;;
+              *) printf 'skipped build cache\n' ;;
+            esac
+            ;;
+        esac
+        ;;
+    esac
+    ;;
   attach)
     exec docker compose exec fenix-supervisor "$ENTRYPOINT" attach "$@"
     ;;
@@ -781,6 +811,10 @@ case "$cmd" in
   update)
     git pull --ff-only
     docker compose build --pull
+    # A newer compose file may mount a secret file this install never had
+    # (FOC-786's optional provider_api_key) — `docker compose up` fails on the
+    # missing bind source. Same guarantee `up` gives, before the recreate.
+    ensure_secret_files
     exec docker compose up -d
     ;;
   repo)

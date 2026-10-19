@@ -1,4 +1,10 @@
-# FOC-802: node (the Supervisor's user) may run exactly one root command —
-# the child-spawn helper. No tty required (spawns come from detached watchers).
+# FOC-802: node (the Supervisor's user) may run exactly two root commands —
+# the child-spawn helper and the child-sweep helper. No tty required (spawns
+# and sweeps come from detached watchers).
 node ALL=(root) NOPASSWD: /usr/local/sbin/fenix-spawn-as-child
 Defaults!/usr/local/sbin/fenix-spawn-as-child !requiretty
+# FOC-808 slice B: the sweep helper runs as root because /proc/<pid>/environ
+# of a fenix-child stray is unreadable to node; the helper validates mark and
+# signal itself and signals only marked processes.
+node ALL=(root) NOPASSWD: /usr/local/sbin/fenix-child-sweep
+Defaults!/usr/local/sbin/fenix-child-sweep !requiretty

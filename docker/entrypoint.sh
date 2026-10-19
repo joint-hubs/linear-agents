@@ -126,10 +126,37 @@ fix_permissions() {
 
 load_secrets
 mkdir -p "$LA_TELEMETRY_HOME" "$LA_SUPERVISOR_STATE_HOME" "$LA_SQUAD_HOME" "$GITHUB_ROOT" "$LA_WORKTREE_HOME"
+# FOC-808: cache subdirs (env from the Dockerfile), the per-child tmp root and
+# the docker-socket dir when a socket is mounted.
+mkdir -p "$XDG_CACHE_HOME" "$npm_config_cache" "$PIP_CACHE_DIR" "$UV_CACHE_DIR" \
+    "$PLAYWRIGHT_BROWSERS_PATH" /tmp/fenix-child 2>/dev/null || true
+
+# FOC-808: make the cache volume and the child tmp root group-writable for
+# `fenix-child` with the same setgid pattern fix_permissions uses on the /data
+# shared trees (FOC-802). Top level + one level only — a full -R walk over a
+# years-old npm cache would stall every start. Best effort, like fix_permissions.
+fix_cache_permissions() {
+    try() {
+        "$@" || printf 'fenix: fix_cache_permissions: failed: %s\n' "$*" >&2
+    }
+    for tree in "${XDG_CACHE_HOME:-/home/node/.cache}" /tmp/fenix-child; do
+        [ -d "$tree" ] || continue
+        try chgrp fenix "$tree"
+        try chmod 0775 "$tree"
+        try chmod g+s "$tree"
+        for sub in "$tree"/*; do
+            [ -d "$sub" ] || continue
+            try chgrp fenix "$sub"
+            try chmod 0775 "$sub"
+            try chmod g+s "$sub"
+        done
+    done
+}
 
 case "${1:-api}" in
     api)
         fix_permissions
+        fix_cache_permissions
         seed_agents
         init_claude_configs
         # FOC-779: regenerate the registered start/watch artifacts before the
@@ -147,6 +174,7 @@ case "${1:-api}" in
         # and one isolated controller per managed task session. Same startup
         # work the old idle/supervisor cases ran before holding the container up.
         fix_permissions
+        fix_cache_permissions
         resolve_provider
         configure_git
         mark_orphans
@@ -327,9 +355,11 @@ case "${1:-api}" in
         exec node scripts/agent-tools.mjs "$@"
         ;;
     fix-permissions)
-        # Test/ops entry to the FOC-802 surface applier without starting any
-        # service: `docker/entrypoint.sh fix-permissions` applies it and exits.
+        # Test/ops entry to the FOC-802/FOC-808 surface appliers without
+        # starting any service: `docker/entrypoint.sh fix-permissions` applies
+        # them and exits.
         fix_permissions
+        fix_cache_permissions
         ;;
     shell)
         exec /bin/bash

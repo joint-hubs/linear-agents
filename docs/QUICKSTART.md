@@ -324,6 +324,17 @@ tickets is off by default (`taskSessions.autoPickup` — see
     `/data/workspaces/la-wt/<repo>/<branch>`
 - Project map: `.fenix/config/projects.json` on the host, mounted at
   `/fenix-config` (see "Your repositories").
+- Cache volume `fenix_fenix-cache`, mounted at `/home/node/.cache` in both
+  containers: package caches (npm, pip, uv, playwright) — they survive
+  `fenix update`, so a rebuild no longer re-downloads everything. Prune with
+  `fenix prune` (sizes; `--max-gb N` deletes oldest-by-atime down to the cap —
+  the overlay's `retention.cacheMaxGb`, default 5; note that "oldest" uses
+  atime, which under `relatime`/`noatime` mounts is coarse (last write at
+  worst) — good enough for LRU; `--dry-run` previews;
+  `--builder` also prunes the host's docker build cache). `fenix doctor`
+  shows a `caches` line and warns above the cap.
+- `/tmp/fenix-child/<childId>` — each spawned child's tmp dir; removed at
+  child end and by `fenix prune` when the child is no longer live.
 - Logs and transcripts are kept by default: retention is asked once on the
   first `fenix up` (keeping everything is the default) and can be changed
   later in Settings → Retention or with `fenix retention`.

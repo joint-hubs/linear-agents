@@ -187,11 +187,50 @@ handover "$config_dir"
 chown --no-dereference "$CHILD_USER:$CHILD_GROUP" "$env_file"
 chmod 0640 "$env_file"
 
-# Private scratch dir for the child (Claude Code temp files).
+# Private scratch dir for the child (Claude Code temp files). When the env
+# file carries its own TMPDIR under /tmp/fenix-child/ (the per-child dir the
+# watcher makes, FOC-808 slice B), that value wins: validate the prefix and
+# that no path component is "..", then create/hand it over exactly like the
+# default. Anything else — unset, outside the prefix, containing .. — falls
+# back to today's default /tmp/fenix-child-<uid> scratch. Without this the
+# forced TMPDIR below would override the per-child dir and every child would
+# share one scratch.
 child_tmp="/tmp/fenix-child-$child_uid"
+child_tmp_mode=0700
+env_tmpdir=$(sed -n 's/^TMPDIR=//p' "$env_file" | head -n 1)
+if [ -n "$env_tmpdir" ] &&
+   case $env_tmpdir in /tmp/fenix-child/*) true ;; *) false ;; esac &&
+   ! has_dotdot "$env_tmpdir"; then
+    child_tmp=$env_tmpdir
+    # The per-child dir is setgid + group-writable: the watcher (node, a member
+    # of group fenix) removes it at turn end, and the child's umask 0002 keeps
+    # what it creates inside group-accessible. The default scratch stays 0700.
+    child_tmp_mode=2770
+    # The parent is normally made by the entrypoint (fix_cache_permissions:
+    # group fenix, setgid, 0775). When the watcher had to create it, node's
+    # 0700 would stop fenix-child from entering its own dir — normalise it.
+    [ -L /tmp/fenix-child ] && refuse 'child tmp root is a symlink'
+    mkdir -p /tmp/fenix-child
+    chgrp "$CHILD_GROUP" /tmp/fenix-child
+    chmod 2775 /tmp/fenix-child
+fi
+# chmod follows symlinks (there is no lchmod): a planted link would get its
+# TARGET re-moded as root. Refuse a link, never follow it.
+[ -L "$child_tmp" ] && refuse 'child tmp dir is a symlink'
 mkdir -p "$child_tmp"
 chown "$CHILD_USER:$CHILD_GROUP" "$child_tmp"
-chmod 0700 "$child_tmp"
+chmod "$child_tmp_mode" "$child_tmp"
+
+# FOC-808: the child's package caches live on the fenix-cache volume like
+# node's (so they survive `fenix update` and `fenix prune` sizes them), but in
+# a subtree fenix-child owns — shared with nothing, so neither side trips over
+# the other's 0755 directories. The image-wide cache env (Dockerfile ENV) would
+# otherwise point the child at node-owned paths.
+child_cache=/home/node/.cache/fenix-child
+[ -L "$child_cache" ] && refuse 'child cache dir is a symlink'
+mkdir -p "$child_cache"
+chown "$CHILD_USER:$CHILD_GROUP" "$child_cache"
+chmod 2770 "$child_cache"
 
 # ── exec: drop to the child identity with a clean env ────────────────────────
 # The env file is KEY=VALUE lines written by the watcher (values may contain
@@ -200,8 +239,12 @@ chmod 0700 "$child_tmp"
 # exports each line as one argument — no eval, no word splitting on values.
 # It is removed as soon as it has been sourced: it holds provider keys, the
 # launch dir is owned by fenix-child by then, so the unlink succeeds (the
-# watcher keeps its own cleanup as belt and braces). HOME/TMPDIR/umask are
-# forced last so the env file cannot override them. Any env failure exits 97
+# watcher keeps its own cleanup as belt and braces). HOME/umask are forced
+# last so the env file cannot override them; TMPDIR is forced to the dir
+# chosen above — the env file's own TMPDIR when it validated under
+# /tmp/fenix-child/, the default scratch otherwise. The five cache variables
+# are forced to the child's own subtree of the cache volume (see child_cache
+# above). Any env failure exits 97
 # — the watcher's fail-closed signal, unambiguous against claude's own 2.
 exec setpriv --reuid="$CHILD_USER" --regid="$CHILD_GROUP" --init-groups \
     --inh-caps=-all --no-new-privs \
@@ -216,7 +259,15 @@ exec setpriv --reuid="$CHILD_USER" --regid="$CHILD_GROUP" --init-groups \
         shift
         child_tmp_dir=$1
         shift
+        child_cache_dir=$1
+        shift
         : "${PATH:=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
         export PATH
-        HOME=/home/fenix-child TMPDIR="$child_tmp_dir" exec "$@"
-    ' sh "$env_file" "$child_tmp" "$@"
+        HOME=/home/fenix-child TMPDIR="$child_tmp_dir" \
+        XDG_CACHE_HOME="$child_cache_dir" \
+        npm_config_cache="$child_cache_dir/npm" \
+        PIP_CACHE_DIR="$child_cache_dir/pip" \
+        UV_CACHE_DIR="$child_cache_dir/uv" \
+        PLAYWRIGHT_BROWSERS_PATH="$child_cache_dir/ms-playwright" \
+        exec "$@"
+    ' sh "$env_file" "$child_tmp" "$child_cache" "$@"
