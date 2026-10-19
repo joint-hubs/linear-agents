@@ -88,6 +88,11 @@ Mateusz the same day (cost-aware: `fenix-vm` resized to e2-standard-2, started o
 - **Store idle-open fast path** named by measurement: `openTelemetryDb` dropped and recreated the two canonical
   views on every open (two write transactions per 15 s tick); `canonicalViewsCurrent()` skips that when the stored
   SQL already matches.
+- **Found on the VM after the merge (PR follow-up).** Even root cannot read another uid's `/proc/<pid>/environ`
+  inside a container without `CAP_SYS_PTRACE` — the helper got EACCES on every `fenix-child` process; the Supervisor
+  service now has `cap_add: [SYS_PTRACE]` (verified: the same helper then lists and kills the stray). The
+  `fenix-cache` volume was created `root:root` because the image had no `/home/node/.cache`; the image now ships
+  it as `node:fenix 2775`, and `fenix up` / `fenix update` repair an older root-owned volume once.
 
 ## 2. Slices (own files only, no git, ≤ 20 min, Flash)
 
