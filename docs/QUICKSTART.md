@@ -448,23 +448,25 @@ Sizing. Two measurements on `fenix-vm`, both real tickets, one Supervisor:
   ~1.2 GB used; one child at work peaks ~38 % (≈1.5 vCPU) and 2–3 GB above idle; first image build peaks
   ~41 % and ~10 GB incl. page cache; 9.7 GB disk after the first ticket.
 - 2026-10-19, `e2-standard-2` (2 vCPU / 8 GB), the FOC-809 sampler (one line a minute, p20 / p50 / p80 + peak
-  per phase; `tools/vm-sampler/`, `scripts/vm-sampler-report.mjs`): one dev-squad child on a real ticket
-  (52 min), a ticket worked by the Supervisor itself, a `--no-cache` image build (4 min 14 s), idle. Memory is
+  per phase; `tools/vm-sampler/`, `scripts/vm-sampler-report.mjs`): four real tickets — FOC-680 as a dev-squad child (52 min), FOC-523 / FOC-915 / FOC-914 worked by the Supervisor
+  itself (plan, code, test lanes, no child) — a `--no-cache` image build (4 min 14 s), idle; 296 samples over
+  5 h 7 min. Memory is
   `free` "used" (page cache excluded); CPU is the Supervisor container's share of one core.
 
 | phase (n samples) | host load1 p50 / p80 / peak | host memory used p50 / p80 / peak | Supervisor container CPU p50 / p80 / peak | Supervisor container memory p80 |
 |---|---|---|---|---|
-| idle (60) | 0.1 / 0.2 / 3.3 | 1.07 / 1.10 / 3.49 GB | 1 % / 2 % / 5 % | 0.59 GB |
-| Supervisor active, no child (12) | 0.1 / 0.2 / 0.4 | 1.08 / 1.10 / 1.13 GB | 8 % / 16 % / 39 % | 0.59 GB |
+| idle (172) | 0.1 / 0.2 / 3.3 | 1.14 / 1.21 / 3.49 GB | 1 % / 4 % / 5 % | 0.74 GB |
+| Supervisor working a ticket itself, no child (76) | 0.2 / 1.8 / 13.3 | 1.22 / 1.30 / 1.74 GB | 28 % / 158 % / 198 % | 0.83 GB |
 | dev child at work (44) | 0.9 / 1.4 / 1.8 | 1.32 / 1.41 / 5.92 GB | 17 % / 54 % / 117 % | 0.88 GB |
 | image build, no cache (4 — thin) | 1.8 / 2.4 / 2.4 | 1.23 / 1.35 / 1.49 GB | 1 % / 14 % / 34 % | 0.63 GB |
 
 Disk on 2026-10-19: 11.4 GB used on the 100 GB disk (image 2 GB, build cache, the data and cache volumes).
-**Minimum** (evidence 2026-10-19, preliminary — one dev run): 2 vCPU, 8 GB RAM, 50 GB disk — the dev child's
-p80 load sits at 1.4 of 2 cores and its memory peak (5.9 GB, a test/build spike) needs the 8 GB; 4 GB is not
-enough. **Recommended**: `e2-standard-2` for one child at a time (Fenix's default); `e2-standard-4` when two
-children or a child and an image build run at once, or when the no-cache build time (4 min on 2 vCPU)
-matters. The bands get re-stated when FOC-809's three-ticket run completes.
+**Minimum** (evidence 2026-10-19): 2 vCPU, 8 GB RAM, 50 GB disk — a dev child sits at p80 load 1.4 of 2 cores
+and its memory peak (5.9 GB, a test/build spike) needs the 8 GB; 4 GB is not enough. The heaviest phase was not the
+child but the Supervisor working a ticket itself (running test lanes and `npm ci` in its clone): p80 CPU 158 % of
+one core, load1 peak 13.3 — both cores saturated for minutes at a time, and the runs still completed.
+**Recommended**: `e2-standard-2` for one worker at a time (Fenix's default); `e2-standard-4` when a child and the
+Supervisor's own test runs (or an image build) overlap, or when the no-cache build time (4 min on 2 vCPU) matters.
 
 The VM runs (and costs) until you stop it:
 `gcloud compute instances stop fenix-vm --zone=europe-central2-a`. Data stays on
