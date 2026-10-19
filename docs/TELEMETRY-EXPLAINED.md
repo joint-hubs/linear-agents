@@ -451,6 +451,13 @@ i decyzja powinna być widoczna.
 | Graph decisions | volume / confidence / koszt / zgoda z zapisanym outcome per `decisionId` | `decisions.jsonl` |
 | Handoffs & delegation | delegacja parent→child i jej koszt | `delegation_links`, `canonical_usage` |
 | Data quality | unpriced per model, mix pewności atrybucji, coverage | widoki kanoniczne, `data_quality_issues` |
+| Tickets (FOC-787) | cena ticketu per era: direct (wiadomości plan/dev/review/test przypisane linkami run→task) i loaded (+ wiadomości Supervisora active/adjacent ≤ 30 min wokół runów ticketu), p20/p50/p80 + bootstrap CI mediany (seed 42) | `canonical_usage`, `run_task_links`, `runs` |
+| Money (FOC-787) | dokąd idą pieniądze per squad; podział Supervisora active/adjacent/idle; koncentracja kosztu ticketów: Gini, Lorenz, udział top 5/10/20 % | `canonical_usage`, `run_task_links`, `runs` |
+| Outliers (FOC-787) | ledger outlierów ticketów: zmodyfikowany z-score na log10 kosztu (MAD, \|z\| > 3,5) i płot Tukeya (3·IQR), konsensus ≥ 2; isolation forest i MCD zostają w notatniku; wrażliwość mediany/sumy bez outlierów | `canonical_usage`, `run_task_links` |
+
+Definicje trzech paneli FOC-787 są portem 1:1 z pakietu `fenix/` notatnika analizy (`tasks.py`,
+`outliers.py`, `stats.py`, `config.py`); plan i kontrakt JSON: `docs/plans/foc-787-insights-panels.md`.
+Od FOC-787 cache kopiuje także `run_task_links` i `work_items` (bump wersji schematu → jedna odbudowa).
 
 **Wszystko czyta z derived analysis cache** — `analysis-cache.sqlite` obok store'a (override:
 `LA_ANALYSIS_CACHE`). Powód: widoki kanoniczne to widoki z funkcjami okna — na prawdziwym

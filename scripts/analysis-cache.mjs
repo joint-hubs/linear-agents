@@ -60,7 +60,7 @@ import { pathToFileURL } from "node:url";
 import { telemetryDbPath, telemetryHome } from "./telemetry-store.mjs";
 
 /** Bump when the cache layout changes in a way old files must not satisfy. */
-export const CACHE_SCHEMA_VERSION = 1;
+export const CACHE_SCHEMA_VERSION = 2;
 
 // A lock older than this is considered abandoned (crashed builder) even if its
 // pid cannot be probed.
@@ -77,6 +77,10 @@ const COPY_RELATIONS = [
   "runs",
   "delegation_links",
   "data_quality_issues",
+  // FOC-787: the Insights panels attribute cost to tickets through the
+  // run→task links, so the cache must carry both link tables too.
+  "run_task_links",
+  "work_items",
 ];
 
 function fail(code, message) {
@@ -246,6 +250,8 @@ function createCacheIndexes(cache) {
     CREATE INDEX idx_cache_runs_run_id     ON runs(run_id);
     CREATE INDEX idx_cache_dl_parent       ON delegation_links(parent_run_id);
     CREATE INDEX idx_cache_dl_observed_at  ON delegation_links(observed_at);
+    CREATE INDEX idx_cache_rtl_run         ON run_task_links(run_id, valid_from);
+    CREATE INDEX idx_cache_wi_task         ON work_items(task_id);
   `);
 }
 

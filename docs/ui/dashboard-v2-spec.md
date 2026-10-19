@@ -122,6 +122,13 @@ block (Supervisor, provider, telemetry freshness) at the bottom of the navigatio
   source revision, "Open in draw.io").
 - Each panel: definition line, evidence link, data age. Analyses that need a local model (topic
   naming) stay in the notebook.
+- **Status (2026-10-19, FOC-787):** the Money group is live on the Analysis screen (`/analysis?tab=`
+  `tickets` | `money` | `outliers`) on the derived cache: price of a ticket per era (direct / loaded with
+  the Supervisor allocation rule, p20/p50/p80 + bootstrap median CI), where the money goes (squads,
+  Supervisor active/adjacent/idle, Gini / Lorenz / top-k) and the outlier ledger (MAD z + Tukey far,
+  consensus ≥ 2; isolation forest and MCD stay in the notebook). Definitions ported 1:1 from the
+  notebook's `fenix/` package; plan `docs/plans/foc-787-insights-panels.md`. Behaviour (loop episodes),
+  Human steering and Flow stay in the notebook — they need text similarity / embeddings.
 
 ### 4.6 Settings
 - **Keys**: OpenRouter, Linear, GitHub — masked, state, last check, Validate, Rotate.

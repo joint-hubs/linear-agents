@@ -114,6 +114,13 @@ import {
   handoffsPanel,
   qualityPanel,
 } from './telemetry-analysis.mjs';
+// FOC-787 Insights panels: tickets / money / outliers — the notebook analyses
+// (tasks.py, outliers.py, stats.py) ported to plain JS over the derived cache.
+import {
+  ticketsPanel,
+  moneyPanel,
+  outliersPanel,
+} from './analysis-insights.mjs';
 import { resolveRunsDir, readDecisionLog, decisionsPanel, decisionTables } from './decision-analytics.mjs';
 import { runReadOnlyQuery } from './analysis-sql.mjs';
 // FOC-811: the state root comes from the shared path seam (one LA_STATE_ROOT
@@ -1842,20 +1849,26 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      // GET /api/analysis/cost|tools|handoffs|quality — filtered panels.
-      // Each opens its own read-only connection so one request's failure
-      // never leaves a handle behind for the others.
+      // GET /api/analysis/cost|tools|handoffs|quality|tickets|money|outliers —
+      // filtered panels. Each opens its own read-only connection so one
+      // request's failure never leaves a handle behind for the others.
       if (method === 'GET' && (
         path === '/api/analysis/cost' ||
         path === '/api/analysis/tools' ||
         path === '/api/analysis/handoffs' ||
-        path === '/api/analysis/quality'
+        path === '/api/analysis/quality' ||
+        path === '/api/analysis/tickets' ||
+        path === '/api/analysis/money' ||
+        path === '/api/analysis/outliers'
       )) {
         const panel = {
           '/api/analysis/cost': costPanel,
           '/api/analysis/tools': toolsPanel,
           '/api/analysis/handoffs': handoffsPanel,
           '/api/analysis/quality': qualityPanel,
+          '/api/analysis/tickets': ticketsPanel,
+          '/api/analysis/money': moneyPanel,
+          '/api/analysis/outliers': outliersPanel,
         }[path];
         let db;
         try {
