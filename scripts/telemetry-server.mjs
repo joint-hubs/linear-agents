@@ -12,7 +12,7 @@ import { handleTeamRoute } from './team-routes.mjs';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, readdir, stat, rename } from 'node:fs/promises';
-import { readFileSync as readFileSyncNode, existsSync } from 'node:fs';
+import { readFileSync as readFileSyncNode } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
 // Reuse the shared Linear GraphQL client (linear-client.mjs) — the same layer
@@ -129,7 +129,7 @@ import { stateRoot as resolveStateRoot } from './fenix-paths.mjs';
 // The derived analysis cache: the panels' data source (see analysis-cache.mjs
 // for why the store's views are too slow to query live). The server only
 // reads it and spawns builds as a CHILD process — never in-process.
-import { cachePath, cacheStatus } from './analysis-cache.mjs';
+import { cachePath, cacheStatus, cacheMatchesSchema } from './analysis-cache.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
@@ -951,8 +951,12 @@ function startAnalysisCacheBuild() {
 // response is sent. A STALE cache still serves: the UI shows staleness from
 // GET /api/analysis/cache and rebuild is manual — the store changes every 15 s
 // with the ingest timer, so auto-rebuild on staleness would never catch up.
+// A cache built by a DIFFERENT schema counts as missing (FOC-915): it would
+// 500 on every panel with "no such table: insight_task_table" after a schema
+// bump, so it triggers the auto-build instead. The probe reads only
+// cache_meta — no store watermark in the per-request path.
 function openAnalysisCache(res, method, path) {
-  if (!existsSync(cachePath())) {
+  if (!cacheMatchesSchema()) {
     startAnalysisCacheBuild(); // no-op when this server already runs one
     json(res, 503, { error: 'Analysis cache is being built', code: 'cache_building' });
     log(method, path, 503);
@@ -1988,7 +1992,7 @@ const server = createServer(async (req, res) => {
           log(method, path, 400);
           return;
         }
-        if (target === 'cache' && !existsSync(cachePath())) {
+        if (target === 'cache' && !cacheMatchesSchema()) {
           startAnalysisCacheBuild(); // same missing-cache contract as the panels
           json(res, 503, { error: 'Analysis cache is being built', code: 'cache_building' });
           log(method, path, 503);

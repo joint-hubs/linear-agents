@@ -118,4 +118,44 @@ transcripts), isolation forest / MCD detectors, a notebook runtime in the contai
    outliers by `mad`+`tukey`).
 2. AC2 performance budget P3.1: the API test asserts each panel answers < 500 ms on the fixture; the snapshot run
    records real timings.
+
+## 6. Performance measurement (FOC-915 follow-up, 2026-10-19)
+
+The P3.1 budget (p95 < 500 ms) is asserted by the API test on the FIXTURE cache only — a fixture answers in
+single-digit milliseconds and proves the code path, not the budget. The real-store numbers that motivated
+FOC-915 were measured on a snapshot copy of the live store (2026-10-19, 1.27 GB, ~180k canonical usage rows):
+
+| What | Before FOC-915 (recompute per request) | After (precomputed `insight_task_table` + `insight_supervisor_alloc`) |
+|---|---|---|
+| Tickets / Money / Outliers, default 30-day window, in-process | 0.25–0.6 s | single-digit ms (indexed reads + O(tasks)) |
+| Whole history (`from` = epoch), in-process | 0.9–1.0 s | single-digit ms |
+| Over HTTP under suite load | 0.7–2.4 s | unchanged for `money`'s spend part (indexed SQL), ms for the rest |
+
+How to reproduce the measurement (the snapshot timings above come from this):
+
+```bash
+# 1. snapshot the live store (read-only copy — never point the tooling at the live file):
+cp ~/.fenix/telemetry/telemetry.sqlite /tmp/snap.sqlite
+# 2. build the cache against the snapshot:
+node scripts/analysis-cache.mjs build --store /tmp/snap.sqlite --cache /tmp/analysis-cache.sqlite
+# 3. time the panels in-process on the built cache:
+node -e '
+import("./scripts/analysis-insights.mjs").then(async (m) => {
+  const { openAnalysisDb } = await import("./scripts/telemetry-analysis.mjs");
+  const db = openAnalysisDb("/tmp/analysis-cache.sqlite");
+  for (const [name, panel] of [["tickets", m.ticketsPanel], ["money", m.moneyPanel], ["outliers", m.outliersPanel]]) {
+    for (const [label, filters] of [["30d", {}], ["all-history", { from: "1970-01-01T00:00:00.000Z" }]]) {
+      const t0 = performance.now();
+      panel(db, filters);
+      console.log(name, label, (performance.now() - t0).toFixed(0), "ms");
+    }
+  }
+});'
+```
+
+The cold-call numbers to record in the PR are the `all-history` rows — the 30-day window is what the dashboard
+serves by default. FOC-915's contract: the panels keep byte-identical payloads on the fixture (the hand-computed
+tests pass unchanged), and the filters narrow per task `first_ts` (tickets, concentration) / per message time
+(spend) over the PRECOMPUTED rows instead of re-attributing the usage rows per request.
+FOC-915 changed the window semantics — tasks are selected by first_ts and carry their full-history cost (a `tasks_by_first_ts` caveat says so); the real-store comparison is therefore done over the full history (`from=2025-01-01`), where the old and new semantics coincide.
 3. Browser check of the three tabs on the offline acceptance instance (fixture cache), screenshots in the PR.
