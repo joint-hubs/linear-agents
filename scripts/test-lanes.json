@@ -637,6 +637,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "vm-sampler-report.test.mjs",
+      "reason": "isolation audit FOC-809: mkdtemp/tmpdir fixtures only (a fixture registry's children.json and marks.jsonl under a temp dir); pure unit tests over literal sample vectors; no child processes, no docker, no ports, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "work-board.test.mjs",
       "reason": "isolation audit FOC-784: pure derivations over a mkdtemp state home with an injected Linear fetcher; no network, no ports, no real-repo-path writes, no telemetry DB"
     },
