@@ -114,6 +114,15 @@ RUN chown root:root /usr/local/sbin/fenix-spawn-as-child /usr/local/sbin/fenix-c
     && chmod 0440 /etc/sudoers.d/fenix-child \
     && visudo -cf /etc/sudoers.d/fenix-child
 
+# FOC-808: the cache volume (compose `fenix-cache` at /home/node/.cache) takes
+# this directory's ownership when Docker creates the volume on first mount —
+# the entrypoint runs as node and cannot repair a root-owned mount point.
+# node:fenix + setgid so the Supervisor, its squads and the children (group
+# fenix) share it; the per-tool subdirs match the ENV block below.
+RUN mkdir -p /home/node/.cache/npm /home/node/.cache/pip /home/node/.cache/uv /home/node/.cache/ms-playwright \
+    && chown -R node:fenix /home/node/.cache \
+    && chmod 2775 /home/node/.cache /home/node/.cache/npm /home/node/.cache/pip /home/node/.cache/uv /home/node/.cache/ms-playwright
+
 WORKDIR /opt/fenix
 USER node
 

@@ -332,9 +332,13 @@ tickets is off by default (`taskSessions.autoPickup` — see
   atime, which under `relatime`/`noatime` mounts is coarse (last write at
   worst) — good enough for LRU; `--dry-run` previews;
   `--builder` also prunes the host's docker build cache). `fenix doctor`
-  shows a `caches` line and warns above the cap.
+  shows a `caches` line and warns above the cap. A volume created by an image
+  older than this one is root-owned; `fenix up` / `fenix update` repair its
+  ownership once (a throwaway root container, logged).
 - `/tmp/fenix-child/<childId>` — each spawned child's tmp dir; removed at
-  child end and by `fenix prune` when the child is no longer live.
+  child end and by `fenix prune` when the child is no longer live. The
+  Supervisor container runs with `CAP_SYS_PTRACE` so the root-side sweep can
+  read the environment of `fenix-child` processes.
 - Logs and transcripts are kept by default: retention is asked once on the
   first `fenix up` (keeping everything is the default) and can be changed
   later in Settings → Retention or with `fenix retention`.

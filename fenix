@@ -624,6 +624,23 @@ keys_ok() {
 # missing file mount (FOC-786). Create missing ones empty, owner-only —
 # provider_api_key is optional (an empty file just means unauthenticated), and
 # keys_ok above keeps requiring only the three required keys.
+# FOC-808: the cache volume must be writable by node. Docker gives a NEW named
+# volume the image directory's ownership (node:fenix since this image), but a
+# volume created by an earlier image is root-owned and the entrypoint (uid
+# node) cannot repair it. One-off repair in a throwaway container as root —
+# the only root step fenix runs, and only when the check fails. Skipped while
+# no image exists yet (first install: the volume is then created correctly).
+ensure_cache_volume() {
+  [ -n "$(docker compose images -q fenix-api 2>/dev/null)" ] || return 0
+  if docker compose run --rm --no-deps -T --entrypoint sh fenix-api -c 'test -w /home/node/.cache' >/dev/null 2>&1; then
+    return 0
+  fi
+  printf 'fenix: cache volume is not writable by node — repairing its ownership once (root, throwaway container)\n'
+  docker compose run --rm --no-deps -T --user root --entrypoint sh fenix-api \
+    -c 'chown node:fenix /home/node/.cache && chmod 2775 /home/node/.cache' \
+    || printf 'fenix: cache volume repair failed — run by hand: docker compose run --rm --user root --entrypoint sh fenix-api -c "chown node:fenix /home/node/.cache"\n' >&2
+}
+
 ensure_secret_files() {
   mkdir -p "$SECRET_DIR"
   chmod 700 "$SECRET_DIR" 2>/dev/null || true
@@ -674,6 +691,7 @@ cmd_up() {
 
   printf 'Building and starting the stack...\n'
   docker compose up -d --build
+  ensure_cache_volume
 
   if ! wait_healthy; then
     printf 'FAIL fenix-api health — not healthy after 180 s — fix: fenix logs fenix-api\n'
@@ -815,6 +833,7 @@ case "$cmd" in
     # (FOC-786's optional provider_api_key) — `docker compose up` fails on the
     # missing bind source. Same guarantee `up` gives, before the recreate.
     ensure_secret_files
+    ensure_cache_volume
     exec docker compose up -d
     ;;
   repo)
