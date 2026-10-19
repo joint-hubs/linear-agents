@@ -2776,7 +2776,11 @@ server.listen(PORT, HOST, () => {
   );
 
   void bootstrapTelemetry().catch((error) => console.error(`[telemetry] bootstrap failed: ${error.message}`));
-  const ingestTimer = isSmoke ? null : setInterval(ingestTelemetry, 15_000);
+  // FOC-808: the default cadence stays 15 s; the env seam exists for the
+  // idle-tick test (telemetry-idle-tick.test.mjs) to shrink it and observe
+  // many ticks in seconds. A production override is allowed but pointless.
+  const INGEST_INTERVAL_MS = Number(process.env.LA_TELEMETRY_INGEST_MS) || 15_000;
+  const ingestTimer = isSmoke ? null : setInterval(ingestTelemetry, INGEST_INTERVAL_MS);
   ingestTimer?.unref();
   const sweepTimer = isSmoke ? null : setInterval(() => sweepTelemetry({ maxAgeDays: 14 }), SWEEP_INTERVAL_MS);
   sweepTimer?.unref();

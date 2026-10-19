@@ -13,7 +13,10 @@ import { settingsPath } from "./fenix-paths.mjs";
 // Retention (FOC-780): keepDays null (or absent) means keep everything —
 // logs are training data, deletion is always opt-in. cleanupPeriodDays is
 // capped at 36500 ("keep everything" for Claude Code), so keepDays is too.
-const RETENTION_KEYS = ["keepDays", "minFreeGiB"];
+const RETENTION_KEYS = ["keepDays", "minFreeGiB", "cacheMaxGb"];
+// FOC-808: the cache prune cap (GB) — `fenix prune` and the doctor's caches
+// line read it; the 5 GB default lives in fenix-prune.mjs (single source).
+const RETENTION_MAX_CACHE_GB = 1024;
 const RETENTION_MAX_DAYS = 36500;
 const RETENTION_MIN_FREE_GIB = 0.5;
 
@@ -202,6 +205,13 @@ function checkRetention(retention, errors) {
     const v = retention.minFreeGiB;
     if (typeof v !== "number" || !Number.isFinite(v) || v < RETENTION_MIN_FREE_GIB) {
       errors.push(`retention.minFreeGiB: must be a number >= ${RETENTION_MIN_FREE_GIB}`);
+    }
+  }
+  // FOC-808: the cache prune cap, GB.
+  if (retention.cacheMaxGb !== undefined && retention.cacheMaxGb !== null) {
+    const v = retention.cacheMaxGb;
+    if (!Number.isInteger(v) || v < 1 || v > RETENTION_MAX_CACHE_GB) {
+      errors.push(`retention.cacheMaxGb: must be null or an integer between 1 and ${RETENTION_MAX_CACHE_GB}`);
     }
   }
 }

@@ -32,7 +32,7 @@
 
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
@@ -909,6 +909,28 @@ if (modelSource !== "--model") {
   );
 }
 
+// ── FOC-808 (slice B): the child's teardown identity and its own TMPDIR ──────
+// LA_CHILD_MARK rides the child env and is INHERITED by everything the child
+// starts, so a helper that escapes the process group (setsid — pgserver's
+// Postgres, any daemonizing tool) is still identifiable by its environment.
+// finalizeTurn sweeps /proc for the mark after the group kill; the
+// container-start orphan sweep matches the marks of children no longer live.
+// The mark is the same triple the registry already records per turn.
+const childMark = `${runId}/${childId}/${attemptIdFor(childId, launchTurn)}`;
+// One tmp dir per child under the os tmp root: finalizeTurn removes it
+// wholesale after the sweep (LA_KEEP_CHILD_TMP=1 keeps it for debugging).
+// Inside the container the child uid helper (FOC-802) runs claude as
+// fenix-child, so the dir is setgid group-writable 0o2770 — the same mode
+// pattern ensureRunDir uses for the shared run subdirs — or the child uid
+// could not use it at all; outside the container the child's own uid owns it,
+// 0o700. mkdirSync ignores `mode` on Windows and chmod to setgid is
+// POSIX-only, mirroring ensureRunDir.
+const childTmpDir = join(tmpdir(), "fenix-child", childId);
+mkdirSync(childTmpDir, { recursive: true, mode: 0o700 });
+if (process.platform !== "win32" && process.env.FENIX_IN_CONTAINER === "1") {
+  chmodSync(childTmpDir, 0o2770);
+}
+
 registry.children[childId] = {
   childId,
   squad,
@@ -962,6 +984,12 @@ registry.children[childId] = {
   supervisorSessionId,
   actorId: actorIdFor(runId, childId),
   attemptId: attemptIdFor(childId, launchTurn),
+  // FOC-808 (slice B): the teardown identity and the per-child tmp dir — what
+  // finalizeTurn sweeps on and removes, and what the container-start orphan
+  // sweep matches. Recorded so the sweep can run even when the watcher's own
+  // env is gone (a restart between spawn and sweep).
+  mark: childMark,
+  tmpDir: childTmpDir,
   toolProfileRevision: launch.profile.revision,
   launchConfigDir: launch.configDir,
   // What THIS launch captured: the CLI args and the profile diff against the
@@ -1146,6 +1174,15 @@ const childEnv = {
   // FOC-848: the child knows its owner explicitly, not by inference — the
   // same value the ownership gate above verified the triage stamp against.
   LA_TASK_OWNER: taskOwner,
+  // FOC-808 (slice B): the teardown mark. Inherited by everything the child
+  // starts, so a helper that escapes the process group (setsid) is still
+  // identifiable by its environment — finalizeTurn and the container-start
+  // orphan sweep match strays on exactly this string.
+  LA_CHILD_MARK: childMark,
+  // The child's own tmp dir (created above): scoped per child so turn end can
+  // remove it wholesale instead of leaving .npm/.cache debris in the shared
+  // /tmp (FOC-808 finding 2).
+  TMPDIR: childTmpDir,
   // The child inherits the Supervisor's environment, and bin/supervisor.bat sets
   // RUN_ID/LA_RUN_ID to the SUPERVISOR's telemetry run. telemetry-hook.mjs reads
   // exactly those on SessionStart, so without this override the child's session,

@@ -1,6 +1,7 @@
 // Contract test for the central telemetry store.
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -30,6 +31,7 @@ import {
   ORPHAN_RUN_IDLE_MS,
   SCHEMA_VERSION,
   MIGRATION_VERSIONS,
+  CANONICAL_USAGE_SQL,
 } from "./telemetry-store.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1063,6 +1065,130 @@ test("assertStateWritable: LA_STATE_READ_ONLY=1 refuses a state-tree write", () 
     if (saved === undefined) delete process.env.LA_STATE_READ_ONLY;
     else process.env.LA_STATE_READ_ONLY = saved;
   }
+});
+
+// FOC-808 supervisor attribution + idle open
+
+test("FOC-808: a lower-case sup:<runId> tag links the supervisor workspace without a quality issue", () => {
+  const runId = "run-sup-tag";
+  const result = recordTaskLink(runId, `sup:${runId}`, "manual", { db });
+  assert(result.ingested === true, `result=${JSON.stringify(result)}`);
+  assert(result.result.taskId === `SUP:${runId}`, `taskId=${result.result.taskId} (expected SUP:<runId>, normalised from lower-case input)`);
+  assert(result.result.role === "supervisor", `role=${result.result.role}`);
+  const link = db.prepare(
+    "SELECT task_id, role, valid_to FROM run_task_links WHERE run_id=? AND role='supervisor'",
+  ).get(runId);
+  assert(link != null, "supervisor link row missing");
+  assert(link.task_id === `SUP:${runId}`, `task_id=${link.task_id} (expected SUP:<runId>)`);
+  assert(link.valid_to === null, `valid_to=${link.valid_to} (expected NULL — the link stays open)`);
+  const item = db.prepare("SELECT provider, workspace FROM work_items WHERE task_id=?").get(`SUP:${runId}`);
+  assert(item != null, "work_items row missing for the supervisor pseudo-task");
+  assert(item.provider === "fenix", `provider=${item.provider}`);
+  assert(item.workspace === "supervisor", `workspace=${item.workspace}`);
+  const issues = db.prepare(
+    "SELECT issue_id FROM data_quality_issues WHERE run_id=? AND issue_type='task_id_malformed'",
+  ).all(runId);
+  assert(issues.length === 0, `task_id_malformed raised for a valid SUP: tag (${issues.length} rows)`);
+});
+
+test("FOC-808: the supervisor link never becomes primary — attribution still resolves to FOC-123", () => {
+  const runId = "run-sup-mixed";
+  applyEvent(db, makeEvent("task.linked", { runId, taskId: "FOC-123", source: "manual", confidence: 1 },
+    { runId, observedAt: "2026-10-19T10:00:00.000Z", sourceKind: "test" }));
+  recordTaskLink(runId, `sup:${runId}`, "manual", { db });
+  // getRunTaskLinks is the exported reader behind taskForTimestamp: it filters role='primary'.
+  const links = getRunTaskLinks(db, runId);
+  assert(links.current != null, "primary attribution lost");
+  assert(links.current.taskId === "FOC-123", `current.taskId=${links.current.taskId} (expected FOC-123)`);
+  assert(links.history.every((h) => h.taskId === "FOC-123"),
+    `a SUP: link leaked into primary history: ${JSON.stringify(links.history)}`);
+  const supPrimary = db.prepare(
+    "SELECT 1 FROM run_task_links WHERE run_id=? AND role='primary' AND task_id LIKE 'SUP:%'",
+  ).get(runId);
+  assert(supPrimary == null, "a SUP: id was stored with role='primary'");
+});
+
+test("FOC-808: a genuinely malformed task id is still rejected with task_id_malformed", () => {
+  const runId = "run-sup-garbage";
+  const result = applyEvent(db, makeEvent("task.linked", { runId, taskId: "garbage", source: "manual", confidence: 1 },
+    { runId, observedAt: "2026-10-19T10:30:00.000Z", sourceKind: "test" }));
+  assert(result.rejected === true, `result=${JSON.stringify(result)}`);
+  assert(result.reason === "task_id_malformed", `reason=${result.reason}`);
+  const issue = db.prepare(
+    "SELECT details_json FROM data_quality_issues WHERE run_id=? AND issue_type='task_id_malformed' AND resolved_at IS NULL",
+  ).get(runId);
+  assert(issue != null, "no open task_id_malformed issue for the garbage id");
+  const details = JSON.parse(issue.details_json);
+  assert(details.taskId === "GARBAGE", `details.taskId=${details.taskId}`);
+  assert(db.prepare("SELECT 1 FROM run_task_links WHERE run_id=?").get(runId) == null,
+    "a garbage id must not create a run_task_links row");
+});
+
+test("FOC-808: a second sup: tag for the same run is idempotent (one link row)", () => {
+  const runId = "run-sup-idempotent";
+  recordTaskLink(runId, `sup:${runId}`, "manual", { db });
+  recordTaskLink(runId, `sup:${runId}`, "manual", { db });
+  const n = db.prepare(
+    "SELECT COUNT(*) AS n FROM run_task_links WHERE run_id=? AND role='supervisor'",
+  ).get(runId).n;
+  assert(n === 1, `a second sup: tag created ${n} supervisor link rows (expected 1) — the SUP branch mints a fresh link_id per event, so INSERT OR IGNORE never collides`);
+});
+
+test("FOC-808 migration: one-shot resolves the SUP: stockpile, garbage stays open, marker idempotent", () => {
+  const migrationPath = join(temp, "telemetry-foc808-migration.sqlite");
+  const seed = openTelemetryDb(migrationPath);
+  seed.prepare("DELETE FROM schema_migrations WHERE version=?").run(MIGRATION_VERSIONS.supervisorAttribution);
+  const ins = seed.prepare(
+    "INSERT INTO data_quality_issues (issue_id, run_id, issue_type, severity, details_json, opened_at) VALUES (?, NULL, 'task_id_malformed', 'warning', ?, ?)",
+  );
+  ins.run("iss-sup", JSON.stringify({ taskId: "SUP:2026-10-06T15-09-19-713-supervisor-26c7" }), "2026-10-06T15:10:00.000Z");
+  ins.run("iss-garbage", JSON.stringify({ taskId: "garbage" }), "2026-10-06T15:11:00.000Z");
+  seed.close();
+
+  const reopened = openTelemetryDb(migrationPath);
+  const sup = reopened.prepare("SELECT resolved_at FROM data_quality_issues WHERE issue_id='iss-sup'").get();
+  assert(sup != null && sup.resolved_at != null, `SUP: issue not resolved (resolved_at=${sup && sup.resolved_at})`);
+  const garbage = reopened.prepare("SELECT resolved_at FROM data_quality_issues WHERE issue_id='iss-garbage'").get();
+  assert(garbage != null && garbage.resolved_at === null, `garbage issue must stay open (resolved_at=${garbage && garbage.resolved_at})`);
+  assert(reopened.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(MIGRATION_VERSIONS.supervisorAttribution),
+    "supervisorAttribution marker missing after reopen");
+  const resolvedAt = sup.resolved_at;
+  reopened.close();
+
+  const again = openTelemetryDb(migrationPath);
+  const sup2 = again.prepare("SELECT resolved_at FROM data_quality_issues WHERE issue_id='iss-sup'").get();
+  assert(sup2.resolved_at === resolvedAt, `a second reopen changed resolved_at (${resolvedAt} -> ${sup2.resolved_at})`);
+  again.close();
+});
+
+test("FOC-808 idle open: reopening a current store performs no write transaction", () => {
+  const idlePath = join(temp, "telemetry-foc808-idle.sqlite");
+  openTelemetryDb(idlePath).close();
+  const reader = new DatabaseSync(idlePath);
+  const v1 = reader.prepare("PRAGMA data_version").get().data_version;
+  const size1 = statSync(idlePath).size;
+  openTelemetryDb(idlePath).close();
+  const v2 = reader.prepare("PRAGMA data_version").get().data_version;
+  const size2 = statSync(idlePath).size;
+  reader.close();
+  assert(v1 === v2, `data_version moved on an idle reopen (${v1} -> ${v2})`);
+  assert(size1 === size2, `file size changed on an idle reopen (${size1} -> ${size2})`);
+});
+
+test("FOC-808 idle open: a stale canonical view forces the recreate on reopen", () => {
+  const stalePath = join(temp, "telemetry-foc808-stale-view.sqlite");
+  openTelemetryDb(stalePath).close();
+  const raw = new DatabaseSync(stalePath);
+  raw.exec("DROP VIEW canonical_usage");
+  raw.exec("CREATE VIEW canonical_usage AS SELECT 1 AS x");
+  raw.close();
+  const norm = (sql) => sql.replace(/\s+/g, " ").trim();
+  const reopened = openTelemetryDb(stalePath);
+  const body = reopened.prepare("SELECT sql FROM sqlite_master WHERE type='view' AND name='canonical_usage'").get();
+  reopened.close();
+  assert(body != null, "canonical_usage view missing after reopen");
+  assert(norm(body.sql) === norm(CANONICAL_USAGE_SQL),
+    `the view body was not restored to the current definition: ${body.sql.slice(0, 80)}`);
 });
 
 // FOC-351: await the async pair before exit so their pass/fail is counted.

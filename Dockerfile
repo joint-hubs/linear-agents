@@ -106,9 +106,11 @@ RUN set -eu; \
 # the helper and the sudoers drop-in are never node-writable; the sudoers file
 # is syntax-checked at build time (visudo -cf) so a typo cannot break boot.
 COPY docker/fenix-spawn-as-child.sh /usr/local/sbin/fenix-spawn-as-child
+# FOC-808: the root-side child sweep (same trust path, same rules as above).
+COPY docker/fenix-child-sweep.sh /usr/local/sbin/fenix-child-sweep
 COPY docker/sudoers-fenix-child /etc/sudoers.d/fenix-child
-RUN chown root:root /usr/local/sbin/fenix-spawn-as-child /etc/sudoers.d/fenix-child \
-    && chmod 0755 /usr/local/sbin/fenix-spawn-as-child \
+RUN chown root:root /usr/local/sbin/fenix-spawn-as-child /usr/local/sbin/fenix-child-sweep /etc/sudoers.d/fenix-child \
+    && chmod 0755 /usr/local/sbin/fenix-spawn-as-child /usr/local/sbin/fenix-child-sweep \
     && chmod 0440 /etc/sudoers.d/fenix-child \
     && visudo -cf /etc/sudoers.d/fenix-child
 
@@ -126,7 +128,16 @@ RUN cd ui && npm ci
 COPY --chown=node:node . .
 RUN cd ui && npm run build && rm -rf node_modules && chmod +x /opt/fenix/docker/entrypoint.sh
 
+# FOC-808: package caches live on the fenix-cache volume (/home/node/.cache,
+# mounted by compose) so they survive `fenix update` instead of sitting in the
+# container layer. entrypoint.sh creates the subdirs; `fenix prune` sizes and
+# prunes them.
 ENV LA_ROOT=/opt/fenix \
+    XDG_CACHE_HOME=/home/node/.cache \
+    npm_config_cache=/home/node/.cache/npm \
+    PIP_CACHE_DIR=/home/node/.cache/pip \
+    UV_CACHE_DIR=/home/node/.cache/uv \
+    PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright \
     LA_TELEMETRY_HOME=/data/telemetry \
     LA_STATE_ROOT=/data/state \
     LA_SUPERVISOR_STATE_HOME=/data/state/supervisor \

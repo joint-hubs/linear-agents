@@ -202,6 +202,19 @@ test("validateSettings: retention invalid types and ranges refused", () => {
   assert.equal(validateSettings({ retention: [30] }).ok, false);
 });
 
+// FOC-808: the cache prune cap, GB — `fenix prune` and the doctor's caches
+// line read it; 5 GB default lives in fenix-prune.mjs.
+test("validateSettings: retention.cacheMaxGb — integer 1..1024 accepted, else refused", () => {
+  assert.equal(validateSettings({ retention: { cacheMaxGb: 5 } }).ok, true);
+  assert.equal(validateSettings({ retention: { keepDays: 30, cacheMaxGb: 1024 } }).ok, true);
+  assert.equal(validateSettings({ retention: { cacheMaxGb: null } }).ok, true);
+  for (const bad of ["5", true, 0, -1, 1025, 1.5]) {
+    const r = validateSettings({ retention: { cacheMaxGb: bad } });
+    assert.equal(r.ok, false, `cacheMaxGb ${JSON.stringify(bad)} must be refused`);
+    assert.ok(r.errors.some((e) => e.includes("retention.cacheMaxGb")));
+  }
+});
+
 test("validateSettings: retention unknown sub-keys refused", () => {
   const { ok, errors } = validateSettings({ retention: { keepDays: 30, maxRuns: 5 } });
   assert.equal(ok, false);

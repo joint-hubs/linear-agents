@@ -679,6 +679,10 @@
       "reason": "spawns the real telemetry-server on fixed port 7391"
     },
     {
+      "file": "telemetry-idle-tick.test.mjs",
+      "reason": "spawns the real telemetry-server (LA_TELEMETRY_INGEST_MS=300) against a fixture store and polls sqlite file sizes — real server child on a port (spawnTestServer), conservative serial like the other telemetry-server spawns (FOC-808)"
+    },
+    {
       "file": "runtime-otel.test.mjs",
       "reason": "binds an ephemeral loopback port via the collector's node:http server (listen(0, '127.0.0.1')) and exercises it with real fetch — the static audit cannot clear it (task workspace PRD §10)"
     },
@@ -801,6 +805,10 @@
     {
       "file": "work-routes.test.mjs",
       "reason": "spawns the real telemetry-server and fake hosts on ephemeral ports (createServer + .listen, raw net.connect sockets for the upgrade tests) (same harness as cockpit-routes, FOC-784/785)"
+    },
+    {
+      "file": "fenix-prune.test.mjs",
+      "reason": "fenix-prune CLI children over mkdtemp fixture trees (spawnSync node) — conservative serial for child processes, same pattern as the other CLI-children suites (FOC-808 slice C registration union, owned by slice C, listed here so the runner's lane-coverage check passes; slice C may re-home it)"
     },
     {
       "file": "workspace-claims.test.mjs",
