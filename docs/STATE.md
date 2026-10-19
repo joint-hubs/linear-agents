@@ -6,6 +6,7 @@
 <!-- state-index:start -->
 ## Task journals (generated)
 
+- FOC-523 — in progress — last entry 2026-10-19 15:51 — foc-523-merge-deps — -
 <!-- state-index:end -->
 
 ## Stałe zasady — od 2026-09-29 (dyrektywa Mateusza, „obowiązują od teraz")
