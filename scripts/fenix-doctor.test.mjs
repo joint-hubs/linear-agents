@@ -20,6 +20,7 @@ import {
   checkProjectsDir,
   checkRunOwners,
   checkSecretsReadable,
+  checkSupervisorPrompt,
   checkTaskSessions,
   runChecks,
   summarize,
@@ -544,6 +545,115 @@ test("runChecks includes the task sessions check", async () => {
     const c = checks.find((c) => c.name === "task sessions");
     assert.ok(c, "task sessions check missing");
     assert.equal(c.status, "ok");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+console.log("\nfenix-doctor: supervisor prompt line (FOC-918)");
+
+test("supervisor prompt: no host, no session record → ok", async () => {
+  const dir = tempDir();
+  try {
+    const c = await checkSupervisorPrompt({ env: { LA_DATA_HOME: dir }, fsImpl: fs, readHostState: async () => null });
+    assert.equal(c.status, "ok");
+    assert.match(c.detail, /no Supervisor session record/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The hook writes session.json WITHOUT a pid (sessionId, transcriptPath, cwd,
+// state, notification, updatedAt) — the fixture keeps that real shape.
+test("supervisor prompt: no host, session.json needs-input for 11 min → warn with the since timestamp, the caveat and the fix", async () => {
+  const dir = tempDir();
+  const sessionFile = path.join(dir, "supervisor", "session.json");
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  const fixedNow = Date.parse("2026-10-19T12:00:00.000Z");
+  const updatedAt = new Date(fixedNow - 11 * 60000).toISOString();
+  fs.writeFileSync(sessionFile, JSON.stringify({ state: "needs-input", updatedAt }));
+  try {
+    const c = await checkSupervisorPrompt({
+      env: { LA_DATA_HOME: dir },
+      fsImpl: fs,
+      now: () => fixedNow,
+      parkedAfterMs: 10 * 60 * 1000,
+      readHostState: async () => null,
+    });
+    assert.equal(c.status, "warn");
+    assert.match(c.detail, /since 2026-.* \(11 min\)/);
+    assert.match(c.detail, /stale after an Esc/);
+    assert.match(c.fix, /fenix attach/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supervisor prompt: no host, needs-input for 2 min → ok, under the threshold", async () => {
+  const dir = tempDir();
+  const sessionFile = path.join(dir, "supervisor", "session.json");
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  const fixedNow = Date.parse("2026-10-19T12:00:00.000Z");
+  const updatedAt = new Date(fixedNow - 2 * 60000).toISOString();
+  fs.writeFileSync(sessionFile, JSON.stringify({ state: "needs-input", updatedAt }));
+  try {
+    const c = await checkSupervisorPrompt({
+      env: { LA_DATA_HOME: dir },
+      fsImpl: fs,
+      now: () => fixedNow,
+      parkedAfterMs: 10 * 60 * 1000,
+      readHostState: async () => null,
+    });
+    assert.equal(c.status, "ok");
+    assert.match(c.detail, /waiting on a prompt for 2 min/);
+    assert.match(c.detail, /under the 10-min threshold/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supervisor prompt: no host, needs-input with an unreadable updatedAt → warn", async () => {
+  const dir = tempDir();
+  const sessionFile = path.join(dir, "supervisor", "session.json");
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  fs.writeFileSync(sessionFile, JSON.stringify({ state: "needs-input", updatedAt: "garbage" }));
+  try {
+    const c = await checkSupervisorPrompt({ env: { LA_DATA_HOME: dir }, fsImpl: fs, readHostState: async () => null });
+    assert.equal(c.status, "warn");
+    assert.match(c.detail, /since-timestamp is unreadable/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supervisor prompt: host answers needs-input with needsInputSince 11 min ago → warn without the session.json caveat", async () => {
+  const dir = tempDir();
+  const fixedNow = Date.parse("2026-10-19T12:00:00.000Z");
+  try {
+    const c = await checkSupervisorPrompt({
+      env: { LA_DATA_HOME: dir },
+      fsImpl: fs,
+      now: () => fixedNow,
+      parkedAfterMs: 10 * 60 * 1000,
+      readHostState: async () => ({ state: "needs-input", needsInputSince: new Date(fixedNow - 11 * 60000).toISOString() }),
+    });
+    assert.equal(c.status, "warn");
+    assert.match(c.detail, /\(11 min\)/);
+    assert.doesNotMatch(c.detail, /session\.json/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supervisor prompt: host unreachable → warn 'cannot tell'; host idle → ok 'nothing waiting'", async () => {
+  const dir = tempDir();
+  try {
+    const unreachable = await checkSupervisorPrompt({ env: { LA_DATA_HOME: dir }, fsImpl: fs, readHostState: async () => ({ unreachable: true }) });
+    assert.equal(unreachable.status, "warn");
+    assert.match(unreachable.detail, /did not answer/);
+    const idle = await checkSupervisorPrompt({ env: { LA_DATA_HOME: dir }, fsImpl: fs, readHostState: async () => ({ state: "idle", needsInputSince: null }) });
+    assert.equal(idle.status, "ok");
+    assert.equal(idle.detail, "nothing waiting");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

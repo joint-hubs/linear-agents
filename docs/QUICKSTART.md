@@ -442,6 +442,16 @@ with Debian 12 on `e2-standard-4` (4 vCPU / 16 GB) and a 100 GB disk.
    PowerShell script there and swallows a bare `--`. On Windows the tunnel runs
    in a PuTTY window — leave it open.
 
+**When nobody is attached.** The Supervisor runs in auto mode, but seven `ask` rules in
+`agents/supervisor/settings.json` (`git push`, `gh pr merge`, `git reset --hard`, `git clean`,
+`git branch -D`, `rm -rf`, `WebFetch`) and the auto-mode classifier (three blocked actions in a
+row) still stop it on a `Do you want to proceed?` prompt until a person answers — nothing times
+out. The prompt shows on the dashboard as a Needs-you card (answer there: *Yes* once, or *No*)
+and in the Terminal tab; after 10 minutes it becomes a *supervisor-parked* problem and
+`fenix doctor` prints a `supervisor prompt` warn line. On the VM itself: `./fenix attach`, answer
+in tmux, detach with `Ctrl-b d`. Look at the dashboard at least once a day while the Supervisor
+works unattended.
+
 Sizing. Two measurements on `fenix-vm`, both real tickets, one Supervisor:
 
 - 2026-10-12, `e2-standard-4` (4 vCPU / 16 GB), one test-squad child — a single sample: idle ~1 % CPU /

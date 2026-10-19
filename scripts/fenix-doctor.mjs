@@ -19,6 +19,8 @@ import { INTEGRATIONS, prerequisites, readIntegrations } from './fenix-integrati
 import { cachedRetention, resolveRetention } from './fenix-retention.mjs';
 import { CACHE_MAX_GB_DEFAULT, cacheToolSizes, childTmpSizes } from './fenix-prune.mjs';
 import { currentOwner, listRunOwners, ownerRelation, supervisorStateRoot } from './run-owner.mjs';
+import { hostBase, hostRequest, FAST_TIMEOUT_MS } from './supervisor-host-client.mjs';
+import { stallSilenceMs } from './supervisor-lib.mjs';
 
 const GIB = 1024 ** 3;
 // FOC-780: the disk check's warn threshold comes from the overlay's
@@ -386,6 +388,62 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   };
 }
 
+// FOC-918: one line when the Supervisor sits on a permission prompt (an
+// `ask` rule or the auto-mode classifier) — an unattended run stops there
+// until a person answers, and nothing times out. The Supervisor host is the
+// source of truth (it reads the pane, like the dashboard); without a host
+// (native mode) the hook's session.json stands in, with the caveat that an
+// Esc-cancelled turn leaves it saying needs-input until the next turn. The
+// record carries no pid, so liveness is not something it can prove.
+export async function checkSupervisorPrompt({ env = process.env, fsImpl = fs, now = Date.now, parkedAfterMs = stallSilenceMs(), readHostState = defaultHostState } = {}) {
+  const name = 'supervisor prompt';
+  const host = await readHostState(env);
+  if (host && host.unreachable) return { name, status: 'warn', detail: 'the Supervisor host did not answer GET /state — cannot tell whether a prompt waits', fix: 'fenix doctor again once the stack is up (fenix up)' };
+  let state = null;
+  let since = null;
+  let source = 'host';
+  if (host) {
+    state = typeof host.state === 'string' ? host.state : null;
+    since = typeof host.needsInputSince === 'string' ? host.needsInputSince : null;
+  } else {
+    source = 'session.json';
+    let sessionFile = null;
+    try { sessionFile = path.join(dataHome(env), 'supervisor', 'session.json'); } catch { sessionFile = null; }
+    if (!sessionFile || !fsImpl.existsSync(sessionFile)) return { name, status: 'ok', detail: 'no Supervisor session record' };
+    let record = null;
+    try { record = JSON.parse(fsImpl.readFileSync(sessionFile, 'utf8')); } catch { record = null; }
+    if (!record || typeof record !== 'object') return { name, status: 'ok', detail: 'session.json unreadable' };
+    state = typeof record.state === 'string' ? record.state : null;
+    since = typeof record.updatedAt === 'string' ? record.updatedAt : null;
+  }
+  if (state !== 'needs-input') return { name, status: 'ok', detail: 'nothing waiting' };
+  const sinceMs = since === null ? NaN : Date.parse(since);
+  if (!Number.isFinite(sinceMs)) {
+    return { name, status: 'warn', detail: `the Supervisor waits on a prompt (${source}) but the since-timestamp is unreadable`, fix: 'look at the dashboard Needs-you list or fenix attach' };
+  }
+  const ageMs = Math.max(0, now() - sinceMs);
+  const minutes = Math.round(ageMs / 60000);
+  const caveat = source === 'session.json' ? ' (from session.json — stale after an Esc-cancelled turn; the dashboard reads the pane)' : '';
+  if (ageMs >= parkedAfterMs) {
+    return {
+      name,
+      status: 'warn',
+      detail: `the Supervisor has waited on a permission prompt since ${since} (${minutes} min) — an unattended run stops here${caveat}`,
+      fix: 'answer it: the Needs-you card on the dashboard, the Terminal tab, or fenix attach',
+    };
+  }
+  return { name, status: 'ok', detail: `waiting on a prompt for ${minutes} min (under the ${Math.round(parkedAfterMs / 60000)}-min threshold)${caveat}` };
+}
+
+// The host's GET /state, or null when no host is configured (native mode);
+// { unreachable: true } when the host is configured but does not answer 200.
+async function defaultHostState(env) {
+  if (!hostBase(env)) return null;
+  const res = await hostRequest('GET', '/state', null, { timeoutMs: FAST_TIMEOUT_MS, env });
+  if (res && res.status === 200 && res.body && typeof res.body === 'object') return res.body;
+  return { unreachable: true };
+}
+
 // FOC-905: one line about who owns the runs in this state home. The read is a
 // small injectable seam (readOwners) so tests can fake it — like
 // checkTaskSessions's readSessions — and the default walks the run dirs of
@@ -538,6 +596,7 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     await checkCaches({ env, fsImpl, cacheMaxGb: cachePolicy.cacheMaxGb }),
     checkCockpitHooks(env, fsImpl),
     checkTaskSessions({ env, fsImpl }),
+    await checkSupervisorPrompt({ env, fsImpl }),
     checkRunOwners({ env }),
   ];
   // FOC-803 uid checks: only meaningful in the container, where the process

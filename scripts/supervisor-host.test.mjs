@@ -498,6 +498,42 @@ test("hook needs-input beside a drawn prompt (stale after an Esc) → effective 
   eq(w.state, "needs-input", "hook needs-input without pane proof stays");
 });
 
+test("needsInputSince: first observed on the pane, stable across polls, cleared when the prompt is gone", () => {
+  const { host, clk } = build({
+    tmux: fakeTmux({ present: true, capture: DIALOG_PANE }),
+    stateNow: () => ({ state: "idle", updatedAt: iso(clk), notification: null }),
+  });
+  const firstAt = iso(clk);
+  const s1 = host.getState();
+  eq(s1.state, "needs-input", "dialog on the pane");
+  eq(s1.needsInputSince, firstAt, "anchored at the first poll that saw the prompt");
+  clk.t += 60_000;
+  const s2 = host.getState();
+  eq(s2.needsInputSince, s1.needsInputSince, "stable across polls (not re-anchored)");
+  // A host whose pane shows a free prompt (no dialog, hook idle) has never
+  // been in needs-input — the field starts null, not invented.
+  const free = build({
+    tmux: fakeTmux({ present: true }),
+    stateNow: () => ({ state: "idle", updatedAt: iso(clk), notification: null }),
+  });
+  eq(free.host.getState().needsInputSince, null, "no prompt → null");
+});
+
+test("needsInputSince: the hook's updatedAt wins when the hook itself says needs-input", () => {
+  const { host } = build({
+    tmux: fakeTmux({ present: true, capture: "" }), // readable pane, no prompt, no dialog
+    stateNow: () => ({ state: "needs-input", updatedAt: "2026-10-19T10:00:00.000Z", notification: null }),
+  });
+  const s = host.getState();
+  eq(s.state, "needs-input", "state");
+  eq(s.needsInputSince, "2026-10-19T10:00:00.000Z", "the hook wrote the record as the prompt appeared");
+});
+
+test("needsInputSince: absent session → null", () => {
+  const { host } = build({ tmux: fakeTmux({ present: false }) });
+  eq(host.getState().needsInputSince, null, "absent");
+});
+
 // ── sendMessage: validation ───────────────────────────────────────────────────
 
 console.log("\nsupervisor-host: sendMessage validation");
