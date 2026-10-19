@@ -160,6 +160,10 @@ test("loadRegistryTurns: skips a corrupt children.json without throwing", () => 
   assert.ok(all.every((t) => t.runId !== "run-bad"));
 });
 
+test("loadRegistryTurns: a missing registry directory returns [] instead of throwing", () => {
+  assert.deepEqual(loadRegistryTurns(path.join(tmpdir(), "vm-sampler-test-does-not-exist")), []);
+});
+
 // ── reviewer findings: tolerance, open-turn cap, escapes, timestamp forms ────
 
 // A second sample set limited to the report's tail (10:09 … 10:11) for the open-turn cap cases.
