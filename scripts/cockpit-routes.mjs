@@ -34,7 +34,7 @@ import net from "node:net";
 import { hostBase, hostRequest, hostSessionPath, sessionScopedEnv, redactSessionRecord, FAST_TIMEOUT_MS, SLOW_TIMEOUT_MS } from "./supervisor-host-client.mjs";
 import { collectNeedsYou, collectChildren, cockpitCounts, focusTicket, recentRunIds } from "./cockpit.mjs";
 import { readConversation } from "./supervisor-conversation.mjs";
-import { gatePath, processAlive, readHolds, readWakeAck, readWakeQueue, readWakerLease, redactDeep, runDir, wakerState } from "./supervisor-lib.mjs";
+import { gatePath, processAlive, readHolds, readWakeAck, readWakeQueue, readWakerLease, redactDeep, runDir, stallSilenceMs, wakerState } from "./supervisor-lib.mjs";
 import { isLegacyReadOnly } from "./supervisor-migrate-legacy.mjs";
 import { freshRows, formatWakeMessage } from "./supervisor-wake.mjs";
 import { answerGate, answerHold } from "./supervisor-gate.mjs";
@@ -505,6 +505,7 @@ async function buildCockpitSnapshot() {
         sessionId: typeof session.sessionId === "string" ? session.sessionId : null,
         state: typeof session.state === "string" ? session.state : null,
         notification: session.notification ?? null,
+        needsInputSince: session.state === "needs-input" && typeof session.updatedAt === "string" ? session.updatedAt : null,
       };
     }
   } else {
@@ -523,6 +524,7 @@ async function buildCockpitSnapshot() {
         sessionId: typeof body.hook?.sessionId === "string" ? body.hook.sessionId : null,
         state: typeof body.state === "string" ? body.state : null,
         notification: body.hook?.notification ?? null,
+        needsInputSince: typeof body.needsInputSince === "string" ? body.needsInputSince : null,
       };
       if (body.clients !== undefined) sessionInfo.clients = body.clients;
       // The Supervisor session's own transcript (FOC-810): the pending ask is
@@ -563,7 +565,7 @@ async function buildCockpitSnapshot() {
   const pendingAsk = dialog && (dialog.kind === "ask" || dialog.kind === "ask-review") && supTranscript
     ? readPendingAsk(supTranscript)
     : null;
-  const needsYou = [...supervisorSessionItems({ dialog, pendingAsk, supRunId, focus }), ...collectNeedsYou({ runIds })];
+  const needsYou = [...supervisorSessionItems({ dialog, pendingAsk, supRunId, focus, sessionState: sessionInfo?.state ?? null, needsInputSince: sessionInfo?.needsInputSince ?? null, now: snapshotClock() }), ...collectNeedsYou({ runIds })];
   const children = await collectChildren({ runIds, probe });
   const backlog = wakeBacklog(runIds, supRunId);
   const supervisor = {
@@ -583,6 +585,8 @@ async function buildCockpitSnapshot() {
     wakeOldestAt: backlog.oldestAt,
     dialog,
     pendingAsk,
+    needsInputSince: sessionInfo?.needsInputSince ?? null,
+    parkedSince: parkedSinceOf({ sessionState: sessionInfo?.state ?? null, needsInputSince: sessionInfo?.needsInputSince ?? null, now: snapshotClock() }),
   };
   return redactDeep({
     supervisor,
@@ -593,6 +597,14 @@ async function buildCockpitSnapshot() {
   });
 }
 
+/** FOC-918: the ISO instant the Supervisor was parked on a prompt past the stall SLA, else null. */
+function parkedSinceOf({ sessionState, needsInputSince, now }) {
+  if (sessionState !== "needs-input" || typeof needsInputSince !== "string") return null;
+  const since = Date.parse(needsInputSince);
+  if (!Number.isFinite(since)) return null;
+  return now - since >= stallSilenceMs() ? needsInputSince : null;
+}
+
 /**
  * The Needs-you items the LIVE Supervisor session contributes (FOC-810),
  * prepended ahead of the run-store items: the pending ask (category "ask")
@@ -600,8 +612,14 @@ async function buildCockpitSnapshot() {
  * the pane is showing. Both are answerable from the dashboard, so the counts
  * include them as-is. An ask-review dialog is covered by the pending ask —
  * never by a dialog item.
+ *
+ * FOC-918 adds two non-answerable problem items, so a waiting prompt can
+ * never read as "nothing needs you": when the session waits for input the
+ * parser could not read, an "unrecognised-prompt" problem shows it; and when
+ * that wait has held longer than the stall SLA, a "supervisor-parked"
+ * problem flags the parking.
  */
-function supervisorSessionItems({ dialog, pendingAsk, supRunId, focus }) {
+function supervisorSessionItems({ dialog, pendingAsk, supRunId, focus, sessionState, needsInputSince, now }) {
   const shared = {
     runId: supRunId ?? null,
     taskId: focus?.taskId ?? null,
@@ -611,8 +629,9 @@ function supervisorSessionItems({ dialog, pendingAsk, supRunId, focus }) {
     state: "pending",
     answerable: true,
   };
+  const items = [];
   if (pendingAsk) {
-    return [{
+    items.push({
       ...shared,
       id: `ask:${pendingAsk.toolUseId}`,
       category: "ask",
@@ -621,10 +640,9 @@ function supervisorSessionItems({ dialog, pendingAsk, supRunId, focus }) {
       summary: pendingAsk.questions[0]?.question ?? "",
       toolUseId: pendingAsk.toolUseId,
       questions: pendingAsk.questions,
-    }];
-  }
-  if (dialog && (dialog.kind === "permission" || dialog.kind === "select")) {
-    return [{
+    });
+  } else if (dialog && (dialog.kind === "permission" || dialog.kind === "select")) {
+    items.push({
       ...shared,
       id: `dialog:${dialog.id}`,
       category: "dialog",
@@ -632,9 +650,33 @@ function supervisorSessionItems({ dialog, pendingAsk, supRunId, focus }) {
       answerKind: "dialog",
       summary: dialog.title ?? "",
       dialog,
-    }];
+    });
   }
-  return [];
+  // FOC-918: a prompt the parser could not read must still show — and count.
+  if (sessionState === "needs-input" && items.length === 0) {
+    const askWithoutTranscript = !!dialog && (dialog.kind === "ask" || dialog.kind === "ask-review");
+    const ageMs = typeof needsInputSince === "string" && Number.isFinite(Date.parse(needsInputSince)) ? Math.max(0, now - Date.parse(needsInputSince)) : null;
+    items.push({
+      ...shared, id: "problem:supervisor:unrecognised-prompt", category: "problem", kind: "unrecognised-prompt",
+      answerKind: null, answerable: false, state: "open", createdAt: needsInputSince ?? null, ageMs,
+      summary: askWithoutTranscript
+        ? "the Supervisor asks a question the dashboard could not read from its transcript — answer it in the Terminal tab or with fenix attach"
+        : "the Supervisor pane waits for input the dashboard could not read — answer it in the Terminal tab or with fenix attach",
+    });
+  }
+  const parkedSince = parkedSinceOf({ sessionState, needsInputSince, now });
+  if (parkedSince) {
+    const ageMs = Math.max(0, now - Date.parse(parkedSince));
+    const what = dialog?.reason
+      ? `${dialog.reason.type}${dialog.reason.detail ? `: ${dialog.reason.detail}` : ""}`
+      : (dialog?.title ? dialog.title : "an unrecognised prompt");
+    items.push({
+      ...shared, id: "problem:supervisor:parked", category: "problem", kind: "supervisor-parked",
+      answerKind: null, answerable: false, state: "open", createdAt: parkedSince, ageMs,
+      summary: `the Supervisor has been parked on a prompt for ${Math.round(ageMs / 60000)} min — ${what}; answer it from the Needs-you card, the Terminal tab or fenix attach`,
+    });
+  }
+  return items;
 }
 
 /**

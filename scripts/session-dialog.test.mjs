@@ -391,3 +391,30 @@ test("extractCommandOutput: /context and /cost scrollback", () => {
   assert.equal(extractCommandOutput(readFixture("slash-cost-scrollback.txt"), "/context"), "");
   assert.equal(extractCommandOutput(readFixture("slash-context-scrollback.txt"), "/rm"), "");
 });
+
+test("ask-rule-override: permission with reason ask-rule", () => {
+  const d = parseDialog(readFixture("ask-rule-override.txt"));
+  assert.ok(d, "dialog must parse");
+  assert.equal(d.kind, "permission");
+  assert.equal(d.title, "Bash command");
+  assert.equal(d.command, "rm -rf /tmp/fenix-child/dev-2/node_modules; ls node_modules 2>/dev/null");
+  assert.deepEqual(d.options.map((o) => o.label), ["Yes", "No"]);
+  assert.deepEqual(d.options.map((o) => o.choice), ["allow-once", "deny"]);
+  assert.equal(d.footer, "Esc to cancel · Tab to amend");
+  assert.deepEqual(d.reason, { type: "ask-rule", detail: "Bash(rm -rf:*)" });
+});
+
+test("classifier-blocked: permission with reason classifier", () => {
+  const d = parseDialog(readFixture("classifier-blocked.txt"));
+  assert.ok(d, "dialog must parse");
+  assert.equal(d.kind, "permission");
+  assert.equal(d.title, "Bash command");
+  assert.equal(d.command, "node scripts/test-run.mjs team 2>&1 | tail -8");
+  assert.deepEqual(d.options.map((o) => o.choice), ["allow-once", "deny"]);
+  assert.deepEqual(d.reason, { type: "classifier", detail: "External System Writes" });
+});
+
+test("reason is null on an ordinary permission and on ask dialogs", () => {
+  assert.equal(parseDialog(readFixture("permission-bash.txt")).reason, null);
+  assert.equal(parseDialog(readFixture("ask-single.txt")).reason, null);
+});

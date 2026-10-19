@@ -271,6 +271,12 @@ export function createHost(deps = {}) {
   const wsMaxBufferedBytes = deps.wsMaxBufferedBytes ?? WS_MAX_BUFFERED_BYTES;
   const wsHeartbeatIntervalMs = deps.wsHeartbeatIntervalMs ?? WS_HEARTBEAT_INTERVAL_MS;
 
+  // FOC-918: when the effective state became needs-input. The hook's own
+  // updatedAt when the hook itself says needs-input (it wrote the record as
+  // the prompt appeared), else the first poll that saw the prompt on the
+  // pane. Cleared the moment the state is anything else.
+  let needsInputSince = null;
+
   // ── the pane is the second source of truth ────────────────────────────────
   // session.json can lag or lie: an Esc-cancelled turn never fires the Stop
   // hook (the file stays "needs-input" forever), and the SessionStart write
@@ -394,9 +400,10 @@ export function createHost(deps = {}) {
     if (panes.status !== 0) {
       // A dead or missing pane means "absent" whatever session.json says (no
       // SessionEnd after a kill or OOM) — the hook file is never trusted alone.
+      needsInputSince = null;
       return {
         session: "absent", panePid: null, paneDead: null, clients: [], hook,
-        dialog: false, promptReady: false, state: "absent",
+        dialog: false, promptReady: false, state: "absent", needsInputSince: null,
       };
     }
     const first = (panes.stdout || "").split("\n").map((l) => l.trim()).filter(Boolean)[0] ?? "";
@@ -418,9 +425,15 @@ export function createHost(deps = {}) {
     else if (pane.dialog) state = "needs-input";
     else if (hook?.state === "needs-input" && pane.promptReady) state = "idle";
     else state = hook?.state ?? "unknown";
+    if (state === "needs-input") {
+      const hookSince = hook?.state === "needs-input" && typeof hook.updatedAt === "string" ? hook.updatedAt : null;
+      if (needsInputSince === null) needsInputSince = hookSince ?? new Date(now()).toISOString();
+    } else {
+      needsInputSince = null;
+    }
     return {
       session: "running", panePid, paneDead, clients: clientList, hook,
-      dialog: pane.dialog, promptReady: pane.promptReady, state,
+      dialog: pane.dialog, promptReady: pane.promptReady, state, needsInputSince,
     };
   };
 

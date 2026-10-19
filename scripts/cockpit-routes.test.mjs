@@ -707,12 +707,13 @@ try {
     check("scoped gate answer audit row notified:true", scopedRow?.notified === true, JSON.stringify(scopedRow));
 
     // ── FOC-810: the Supervisor's dialogs in the snapshot and the answer routes ──
-    const hostStateBehavior = (state, transcriptPath) => ({
+    const hostStateBehavior = (state, transcriptPath, needsInputSince = null) => ({
       status: 200,
       body: {
         session: "running", panePid: 4242, paneDead: false, clients: ["tmux-dash-1"],
         hook: { sessionId: "sess-host-1", transcriptPath, cwd: dir, state, notification: null, updatedAt: NOW },
         state,
+        needsInputSince,
       },
     });
     const PERM_DIALOG = {
@@ -899,6 +900,74 @@ try {
     const askNone = await call(P, "POST", "/api/supervisor/ask", { body: { toolUseId: ASK_TOOL_ID, answers: [{ choices: [0] }] } });
     check("ask with no pending ask -> 409 ask-changed", askNone.status === 409 && askNone.body?.error === "ask-changed",
       JSON.stringify(askNone));
+
+    // ── FOC-918: a waiting prompt is never "nothing needs you" ──────────────
+    // needs-input with NO parsable dialog: an unrecognised-prompt problem
+    // item that counts; the wait is fresh, so nothing is parked yet.
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", new Date().toISOString());
+    fakeHostBehavior.dialog = { status: 200, body: { dialog: null } };
+    await new Promise((r) => setTimeout(r, 2100)); // the 2 s TTL cache
+    const snapUnrec = await call(P, "GET", "/api/cockpit");
+    const unrecItem = (snapUnrec.body?.needsYou ?? []).find((it) => it.id === "problem:supervisor:unrecognised-prompt");
+    check("FOC-918: needs-input with no parsable dialog -> an unrecognised-prompt problem item that counts",
+      unrecItem?.category === "problem" && unrecItem?.kind === "unrecognised-prompt" && unrecItem?.answerable === false
+      && (snapUnrec.body?.counts?.needsYou ?? 0) >= 1
+      && snapUnrec.body?.supervisor?.needsInputSince === unrecItem.createdAt
+      && snapUnrec.body?.supervisor?.parkedSince === null
+      && !(snapUnrec.body?.needsYou ?? []).some((it) => it.id === "problem:supervisor:parked"),
+      JSON.stringify({ item: unrecItem, sup: snapUnrec.body?.supervisor, counts: snapUnrec.body?.counts }));
+
+    // The same wait held past the stall SLA (10 min default): the parked
+    // problem appears too, and the unrecognised item stays.
+    const parkedIso = new Date(Date.now() - 11 * 60_000).toISOString();
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", parkedIso);
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapParked = await call(P, "GET", "/api/cockpit");
+    const parkedItem = (snapParked.body?.needsYou ?? []).find((it) => it.id === "problem:supervisor:parked");
+    check("FOC-918: needs-input older than the stall SLA -> a supervisor-parked problem item",
+      parkedItem?.category === "problem" && parkedItem?.kind === "supervisor-parked" && parkedItem?.answerable === false
+      && parkedItem?.ageMs >= 11 * 60_000 - 5000
+      && /parked on a prompt for 1[12] min/.test(parkedItem?.summary ?? "") && /an unrecognised prompt/.test(parkedItem?.summary ?? "")
+      && snapParked.body?.supervisor?.parkedSince === parkedIso
+      && (snapParked.body?.needsYou ?? []).some((it) => it.id === "problem:supervisor:unrecognised-prompt"),
+      JSON.stringify({ item: parkedItem, sup: snapParked.body?.supervisor }));
+
+    // A parsed permission dialog: only the dialog item while the prompt is
+    // fresh; the parked problem joins it once the wait passes the SLA, with
+    // the dialog reason in the summary.
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", new Date().toISOString());
+    const PERM_DIALOG_918 = { ...PERM_DIALOG, reason: { type: "ask-rule", detail: "Bash(rm -rf:*)" } };
+    fakeHostBehavior.dialog = { status: 200, body: { dialog: PERM_DIALOG_918 } };
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapFreshDlg = await call(P, "GET", "/api/cockpit");
+    check("FOC-918: a parsed permission dialog with a fresh prompt -> only the dialog item",
+      (snapFreshDlg.body?.needsYou ?? []).some((it) => it.id === "dialog:dlg-perm-1")
+      && !(snapFreshDlg.body?.needsYou ?? []).some((it) => it.id === "problem:supervisor:unrecognised-prompt")
+      && !(snapFreshDlg.body?.needsYou ?? []).some((it) => it.id === "problem:supervisor:parked"),
+      JSON.stringify((snapFreshDlg.body?.needsYou ?? []).map((it) => it.id)));
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", new Date(Date.now() - 11 * 60_000).toISOString());
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapParkedDlg = await call(P, "GET", "/api/cockpit");
+    const parkedDlgItem = (snapParkedDlg.body?.needsYou ?? []).find((it) => it.id === "problem:supervisor:parked");
+    check("FOC-918: a parsed permission dialog past the SLA -> the parked item names the dialog reason",
+      parkedDlgItem?.kind === "supervisor-parked" && /ask-rule: Bash\(rm -rf:\*\)/.test(parkedDlgItem?.summary ?? ""),
+      JSON.stringify(parkedDlgItem));
+
+    // An ask dialog is visible but the transcript cannot be read (no
+    // transcriptPath, so pendingAsk stays null): the unrecognised-prompt
+    // item shows and says the transcript could not be read.
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", new Date().toISOString());
+    fakeHostBehavior.dialog = { status: 200, body: { dialog: { id: "ask1", kind: "ask", title: "Pick one", lines: [], command: null, question: "Pick one?", tabs: null, options: [], reason: null, footer: null } } };
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapAskUnread = await call(P, "GET", "/api/cockpit");
+    const askUnreadItem = (snapAskUnread.body?.needsYou ?? []).find((it) => it.id === "problem:supervisor:unrecognised-prompt");
+    check("FOC-918: an ask dialog whose transcript cannot be read -> the unrecognised-prompt item says so",
+      !!askUnreadItem && /could not read from its transcript/.test(askUnreadItem?.summary ?? "")
+      && !(snapAskUnread.body?.needsYou ?? []).some((it) => it.id?.startsWith("dialog:")),
+      JSON.stringify({ item: askUnreadItem, items: (snapAskUnread.body?.needsYou ?? []).map((it) => it.id) }));
+    delete fakeHostBehavior.state;
+    delete fakeHostBehavior.dialog;
+    await new Promise((r) => setTimeout(r, 2100));
 
     // Foreign Origin → 403 on every POST route.
     for (const [p, body] of [

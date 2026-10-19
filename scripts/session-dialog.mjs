@@ -54,9 +54,10 @@ const leadingWs = (line) => line.length - line.trimStart().length;
  * bottom rules yields no options and parses as nothing.
  *
  * Returns null, or:
- *   { id, kind, title, lines, command, question, tabs, options, footer }
+ *   { id, kind, title, lines, command, question, tabs, options, reason, footer }
  *   kind: "permission" | "ask" | "ask-review" | "select"
  *   options: [{ key, label, description, focused, checked, choice }]
+ *   reason: null | { type: "ask-rule" | "classifier", detail } (permission only)
  */
 export function parseDialog(paneText) {
   if (typeof paneText !== "string") return null;
@@ -84,6 +85,7 @@ export function parseDialog(paneText) {
         question: dialog.question,
         tabs: dialog.tabs,
         options: dialog.options,
+        reason: dialog.reason ?? null,
         footer: dialog.footer,
       };
     }
@@ -133,9 +135,11 @@ function parseDialogBlock(block) {
   let question = null;
   let command = null;
   let options = [];
+  let reason = null;
 
   if (kind === "permission") {
     title = firstLine;
+    reason = permissionReason(textLines);
     if (dashPos.length >= 2) {
       const between = trimmed
         .slice(dashPos[0] + 1, dashPos[dashPos.length - 1])
@@ -168,7 +172,7 @@ function parseDialogBlock(block) {
     if (options.length < 2) return null;
   }
 
-  return { kind, title, lines: textLines, command, question, tabs, options, footer: footerIdx >= 0 ? trimmed[footerIdx].trim() : null };
+  return { kind, title, lines: textLines, command, question, tabs, options, reason, footer: footerIdx >= 0 ? trimmed[footerIdx].trim() : null };
 }
 
 /**
@@ -311,6 +315,25 @@ function permissionChoice(label) {
   if (/^Yes, and don[`'’]t ask again/.test(label)) return "allow-always";
   if (label.includes("auto mode")) return "auto-mode";
   if (label === "No") return "deny";
+  return null;
+}
+
+/**
+ * Why a permission prompt appeared while auto mode is on (FOC-918):
+ * an `ask` rule from settings.json overriding auto mode, or the auto-mode
+ * classifier blocking consecutive actions. null for an ordinary prompt.
+ * Returns { type: "ask-rule", detail: "<rule>" } | { type: "classifier", detail: "<latest blocked action>" | null } | null.
+ */
+function permissionReason(textLines) {
+  const plain = textLines.map((l) => l.replace(/^│\s*/, "").trim());
+  for (const l of plain) {
+    const m = l.match(/^Ask rule (.+?) overrides auto mode/);
+    if (m) return { type: "ask-rule", detail: m[1] };
+  }
+  if (plain.some((l) => /^Auto mode classifier requires confirmation/.test(l))) {
+    const hit = plain.map((l) => l.match(/^Latest blocked action:\s*\[?(.+?)\]?\s*$/)).find(Boolean);
+    return { type: "classifier", detail: hit ? hit[1] : null };
+  }
   return null;
 }
 
