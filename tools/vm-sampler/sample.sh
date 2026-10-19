@@ -99,7 +99,7 @@ sample_once() {
     [ -n "$frag" ] && top_rss="[$frag]"
   fi
 
-  printf '{"ts":"%s","load1":%s,"load5":%s,"mem_used_mb":%s,"mem_avail_mb":%s,"mem_cache_mb":%s,"disk_used_mb":%s,"containers":[%s],"claude_procs":%s,"top_rss":[%s]}\n' \
+  printf '{"ts":"%s","load1":%s,"load5":%s,"mem_used_mb":%s,"mem_avail_mb":%s,"mem_cache_mb":%s,"disk_used_mb":%s,"containers":%s,"claude_procs":%s,"top_rss":%s}\n' \
     "$ts" "$load1" "$load5" "$mem_used" "$mem_avail" "$mem_cache" "$disk" "$containers" "$claude_procs" "$top_rss"
 }
 
