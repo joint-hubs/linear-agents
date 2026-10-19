@@ -66,8 +66,8 @@ function fixture(candidates) {
   return { base, repo, runId, baseRevision };
 }
 
-const merge = (runId, extra = [], cmd = VERIFY) =>
-  runScript(MERGE, ["--run", runId, "--verify", cmd, ...extra]);
+const merge = (runId, extra = [], cmd = VERIFY, env = {}) =>
+  runScript(MERGE, ["--run", runId, "--verify", cmd, ...extra], env);
 
 // Two features that each work alone and are mutually exclusive: the check allows
 // at most one .feature file. No textual conflict — different files, different
@@ -755,10 +755,20 @@ test("npm install is used when only a package.json is present", () => {
   const runId = fixtureRun();
   writeRegistry(runId, { runId, children, rounds: {} });
 
-  const r = merge(runId, [], 'node -e "process.exit(0)"');
+  // Pinned npm config: inherited npm config must not reach the network for
+  // this fallback (npm install resolves ranges live from the registry).
+  const r = merge(runId, [], 'node -e "process.exit(0)"', {
+    npm_config_audit: "false",
+    npm_config_fund: "false",
+    npm_config_update_notifier: "false",
+  });
   const out = parse(r, fail);
   assert.equal(out.accepted, true, JSON.stringify({ findings: out.findings, depsInstall: out.depsInstall }));
   assert.equal(out.depsInstall.command, "npm install");
+  assert.equal(
+    out.depsInstall.note,
+    "npm install without a lockfile — the verify result depends on the current registry state",
+  );
 });
 
 test("a failed dependency install is a tool error, not a rejection", () => {

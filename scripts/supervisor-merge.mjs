@@ -48,8 +48,8 @@
 //   · Candidates' worktrees are NOT touched. Their trees were provisioned by
 //     the children themselves; step 1 already re-verified them as they are.
 //   · The install is skipped when node_modules already exists in the tree
-//     (a kept tree from --keep, or a caller that pre-installed), and
-//     skipped entirely with --no-deps-install — for a verify command that
+//     — a base that ships it vendored or committed — and skipped entirely
+//     with --no-deps-install — for a verify command that
 //     installs its own dependencies, e.g.
 //       --verify "npm ci && node --test scripts/x.test.mjs"
 //     so the tool does not pay for the same install twice.
@@ -156,9 +156,11 @@ const mainRepo = resolve(listWorktrees(gitRoot)[0]?.path ?? gitRoot);
  * on module resolution, which reads like a combined-merge failure but is not
  * one (FOC-513).
  *
- * Skipped when node_modules already exists (a --keep tree from an earlier
- * attempt, or a caller that pre-installed) and with --no-deps-install, for a
- * verify command that installs its own dependencies.
+ * The tree is recreated on every run (makeIntegrationTree removes any previous
+ * tree before `worktree add -B`), so nothing pre-installed survives. Skipped
+ * when node_modules already exists — a base that ships it vendored or
+ * committed — and with --no-deps-install, for a verify command that installs
+ * its own dependencies.
  *
  * Returns a depsInstall record for the report. A failed install is a TOOL
  * failure, not a verification result: the combined suite is not run and no
@@ -178,9 +180,16 @@ function installIntegrationDeps(tree) {
   }
   const installCmd = hasLockfile ? "npm ci" : "npm install";
   console.error(
-    `[merge] ${installCmd} (installing dependencies in the integration tree)`,
+    `[merge] ${installCmd} --no-audit --no-fund (installing dependencies in the integration tree)`,
   );
-  const res = spawnSync(installCmd, {
+  // Without a lockfile npm resolves the ranges live, so the verdict can differ
+  // run to run; say so rather than let it pass silently.
+  if (!hasLockfile) {
+    console.error(
+      "[merge] npm install without a lockfile — the verify result depends on the current registry state",
+    );
+  }
+  const res = spawnSync(installCmd, ["--no-audit", "--no-fund"], {
     cwd: tree,
     encoding: "utf8",
     shell: true,
@@ -195,6 +204,11 @@ function installIntegrationDeps(tree) {
     exitCode: res.status,
     error: res.error ? res.error.message.split("\n")[0] : null,
     timedOut: Boolean(res.error && /ETIMEDOUT|timed out/i.test(res.error.message)),
+    ...(hasLockfile
+      ? {}
+      : {
+          note: "npm install without a lockfile — the verify result depends on the current registry state",
+        }),
     tail,
   };
 }
@@ -587,9 +601,17 @@ if (!conflicted && !toolFailure) {
     // A failed install is a TOOL failure, not a rejection: the tree was never
     // buildable, so the combined suite says nothing about the candidates.
     // Same classification as a tree git could not assemble (above).
+    // Phrase the failure the way the verify path phrases spawn errors: an
+    // error on the record means the process never started, timedOut means the
+    // timeout budget ran out, anything else is a non-zero exit.
+    const detail = depsInstall.error
+      ? `could not be started: ${depsInstall.error}`
+      : depsInstall.timedOut
+        ? `timed out after ${Number(args["timeout-ms"] ?? 900_000)} ms`
+        : `exited ${depsInstall.exitCode}`;
     findings.push(
       `the combined suite was not run: dependencies could not be installed in the integration tree ` +
-        `(${depsInstall.command} exited ${depsInstall.exitCode})`,
+        `(${depsInstall.command} ${detail})`,
     );
   } else {
     combined = verify(tree, "combined");
@@ -649,7 +671,7 @@ const report = {
   replays,
   combined,
   // FOC-523: the dependency install this tool ran (or skipped) in the
-  // integration tree before the combined verify. Absent on a tool error
+  // integration tree before the combined verify. null on a tool error
   // before step 5 — the tree was never assembled.
   depsInstall,
   findings,
