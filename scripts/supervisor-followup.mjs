@@ -36,7 +36,9 @@ import {
   TURN_END_CONTRACT,
   assertStageBudget,
   assertWithinBudget,
+  childTeardownIdentity,
   comparableProgress,
+  ensureChildTmpDir,
   failJson,
   gatePath,
   killTree,
@@ -313,6 +315,12 @@ if (providerEnv.error) {
 const turns = entry.turns || [];
 const turnIndex = turns.length;
 
+// FOC-917: the teardown identity of THIS turn — the same helper spawn uses.
+// The mark carries the attempt id, so each turn gets its own; the tmp dir is
+// per child and is recreated here because the previous turn end removed it.
+const teardown = childTeardownIdentity({ runId, childId, attemptId: attemptIdFor(childId, turnIndex) });
+ensureChildTmpDir(teardown.tmpDir);
+
 const prevLaunchDir = entry.launchConfigDir && existsSync(entry.launchConfigDir) ? entry.launchConfigDir : null;
 const historyMode = prevLaunchDir ? "tree" : entry.sessionId ? "session" : null;
 // The session id is preserved from the entry; a legacy entry picks the env's
@@ -402,6 +410,11 @@ updateChild(runId, childId, {
   supervisorSessionId,
   actorId: entry.actorId ?? actorIdFor(runId, childId),
   attemptId: attemptIdFor(childId, turnIndex),
+  // FOC-917: the teardown identity of THIS turn — the sweep matches the mark,
+  // the turn end removes the tmp dir. The previous turn's pair is overwritten
+  // here, the same way the attempt id is.
+  mark: teardown.mark,
+  tmpDir: teardown.tmpDir,
   toolProfileRevision: launch.profile.revision,
   launchConfigDir: launch.configDir,
   launch: {
@@ -485,6 +498,10 @@ const watcher = spawn(process.execPath, watcherArgs, {
     LA_SUPERVISOR_RUN: runId,
     LA_SUPERVISOR_CHILD: childId,
     LA_TASK_ID: entry.taskId,
+    // FOC-917: the sweep identity and the per-child tmp dir — the same two
+    // values supervisor-spawn gives turn 0 (see childTeardownIdentity).
+    LA_CHILD_MARK: teardown.mark,
+    TMPDIR: teardown.tmpDir,
     // FOC-848: same carrier spawn sets — the child's ownership gates (triage,
     // spawn) must attribute its work to the owner this follow-up acts for.
     LA_TASK_OWNER: taskOwner,

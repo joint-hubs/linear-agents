@@ -63,7 +63,9 @@ import {
   assertStageBudget,
   assertWithinBudget,
   buildChildSettings,
+  childTeardownIdentity,
   childSettingsPath,
+  ensureChildTmpDir,
   ensureRunDir,
   ensureWorktree,
   failJson,
@@ -916,20 +918,14 @@ if (modelSource !== "--model") {
 // finalizeTurn sweeps /proc for the mark after the group kill; the
 // container-start orphan sweep matches the marks of children no longer live.
 // The mark is the same triple the registry already records per turn.
-const childMark = `${runId}/${childId}/${attemptIdFor(childId, launchTurn)}`;
-// One tmp dir per child under the os tmp root: finalizeTurn removes it
-// wholesale after the sweep (LA_KEEP_CHILD_TMP=1 keeps it for debugging).
-// Inside the container the child uid helper (FOC-802) runs claude as
-// fenix-child, so the dir is setgid group-writable 0o2770 — the same mode
-// pattern ensureRunDir uses for the shared run subdirs — or the child uid
-// could not use it at all; outside the container the child's own uid owns it,
-// 0o700. mkdirSync ignores `mode` on Windows and chmod to setgid is
-// POSIX-only, mirroring ensureRunDir.
-const childTmpDir = join(tmpdir(), "fenix-child", childId);
-mkdirSync(childTmpDir, { recursive: true, mode: 0o700 });
-if (process.platform !== "win32" && process.env.FENIX_IN_CONTAINER === "1") {
-  chmodSync(childTmpDir, 0o2770);
-}
+// finalizeTurn removes the tmp dir wholesale after the sweep (LA_KEEP_CHILD_TMP=1
+// keeps it for debugging); the mode details live in the helper.
+const { mark: childMark, tmpDir: childTmpDir } = childTeardownIdentity({
+  runId,
+  childId,
+  attemptId: attemptIdFor(childId, launchTurn),
+});
+ensureChildTmpDir(childTmpDir);
 
 registry.children[childId] = {
   childId,

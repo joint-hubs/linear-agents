@@ -14,6 +14,7 @@ import { isAbsolute, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { PRINT_BG_WAIT_CEILING_MS, PRINT_BG_WAIT_ENV, TURN_END_CONTRACT, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
+import { attemptIdFor } from "./agent-launch-profile.mjs";
 import { waitForStatus } from "./supervisor-test-fixtures.mjs";
 import { readFocus } from "./supervisor-focus.mjs";
 
@@ -535,6 +536,45 @@ test("the resumed turn's env carries the same ceiling — the second carrier (FO
     if (env.LA_TASK_OWNER !== "supervisor") {
       fail(`turn ${turn} env carried LA_TASK_OWNER=${JSON.stringify(env.LA_TASK_OWNER)}`);
     }
+  }
+});
+
+test("the resumed turn carries the teardown identity and the registry records it (FOC-917)", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const envFile = join(runDir(runId), "env.log");
+  const child = spawnChild(runId, repo, { MOCK_CLAUDE_ENV_FILE: envFile });
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  // The pre-FOC-808 shape the sweep has to keep working with: an entry with no
+  // teardown identity. Today's spawn records turn 0's pair (FOC-808), so strip
+  // it to model the legacy entry this fix must write into fresh.
+  const reg0 = readRegistry(runId);
+  const { mark: _turn0Mark, tmpDir: _turn0TmpDir, ...legacyEntry } = reg0.children[child.childId];
+  writeRegistry(runId, { ...reg0, children: { ...reg0.children, [child.childId]: legacyEntry } });
+
+  const out = parseOk(followup(runId, child.childId, [], { MOCK_CLAUDE_ENV_FILE: envFile }));
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const envs = readFileSync(envFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  if (envs.length !== 2) fail(`expected 2 claude invocations, got ${envs.length}`);
+  const resumed = envs[1];
+  // The mark carries the attempt id, so resumed turn 1 carries turn 1's.
+  const wantedMark = `${runId}/${child.childId}/${attemptIdFor(child.childId, 1)}`;
+  if (resumed.LA_CHILD_MARK !== wantedMark) {
+    fail(`resumed env carried LA_CHILD_MARK=${JSON.stringify(resumed.LA_CHILD_MARK)}, wanted ${JSON.stringify(wantedMark)}`);
+  }
+  if (!resumed.TMPDIR || !resumed.TMPDIR.endsWith(join("fenix-child", child.childId))) {
+    fail(`resumed env carried TMPDIR=${JSON.stringify(resumed.TMPDIR)}`);
+  }
+  // And the registry records the CURRENT turn's identity — the sweep matches
+  // the mark, the turn end removes the tmp dir.
+  const entry = readRegistry(runId).children[child.childId];
+  if (entry.mark !== resumed.LA_CHILD_MARK) {
+    fail(`registry mark=${JSON.stringify(entry.mark)}, env carried ${JSON.stringify(resumed.LA_CHILD_MARK)}`);
+  }
+  if (entry.tmpDir !== resumed.TMPDIR) {
+    fail(`registry tmpDir=${JSON.stringify(entry.tmpDir)}, env carried ${JSON.stringify(resumed.TMPDIR)}`);
   }
 });
 
