@@ -75,7 +75,7 @@ export default function MoneyPanel({ filters, reloadKey }) {
           >
             <div className="section">
               <div className="section-h">Spend by squad</div>
-              <HBarChart rows={bySquad} valueKey="costUsd" format={fmtUsd} secondaryText={shareSecondary} />
+              <HBarChart rows={bySquad} labelKey="squad" valueKey="costUsd" format={fmtUsd} secondaryText={shareSecondary} />
               <details style={{ marginTop: 8 }}>
                 <summary className="muted" style={{ cursor: 'pointer', fontSize: 11.5, userSelect: 'none' }}>
                   table
