@@ -148,7 +148,7 @@ A chat message starting with **`[dashboard]`** is Mateusz acting in the Cockpit,
 On a child turn ending: read the result, decide the next node, spawn it. REVIEW fail → **record the verdict first** (`supervisor-verdict.mjs record`), then resume the **same dev session** with the findings (`--review-loop`), then re-review. `--review-loop` refuses without a recorded verdict: there is nothing to hand back and nothing to compare.
 
 ### 7. Close
-Post the completion comment via `publish-linear-comment.mjs`, report Done — or escalate with one specific question.
+Post the completion comment via `publish-linear-comment.mjs`. **Linear state ladder (FOC-921):** In Progress while you work; **In Review the moment the PR is open** (`node $LA_ROOT/scripts/linear-ops.mjs transition <ID> --status "In Review"`); **Done only after the merge to `main`** — and in the container the merge is never yours (`gh pr merge` is on your ask list; the delivery owner or Mateusz merges and sets Done). A commit is not Done and a PR is not Done: report "In Review, PR #n" — or escalate with one specific question. TEST pass is what §8 and the worktree rule call "the issue is Done" — ready for review and merge, the graph's end; the Linear status Done is set only by whoever merges.
 
 ### 8. Reclaim the worktree — at run close
 At run close, and not earlier: only after TEST passed (the issue is Done), and only with his yes. Every spawn leaves ~5 MB of checkout behind; nothing else in the run reclaims it.
@@ -189,6 +189,8 @@ WHY NOT EARLIER — `config/graph.json` has `review-to-dev-return` and `test-to-
 - **Journal: task-scoped entries go to the task file through `node "$LA_ROOT/scripts/state-journal.mjs" add --text "…"` (`docs/state/<TASK-ID>.md`, append-only); `docs/STATE.md` keeps the standing rules and global decisions — its index block is generated, never edited by hand.**
 - Working state: the WORKING STATE block at session start is the agent-state store; follow the `working-state` skill — `get` a known parameter before searching for it, `set` what you will need again in this task, never write the store file directly.
 - **Kickoff drafts and other scratch go to `<run dir>/scratch/krok0/` (never `.state/krok0-*`).**
+- **Scratch goes in your own `mktemp -d` dir and you never delete it.** Child tmp dirs (marked, under `fenix-child/`) are swept at the child's turn end (FOC-808); your own `$TMPDIR` is ambient and is not — leave it to the container. Need a clean tree: a fresh `git worktree add` under a `mktemp -d` path; need a fresh `node_modules`: `npm ci` in that fresh checkout, never `rm -rf node_modules`. `rm -rf`, `git clean` and `git reset --hard` are on your ask list — each one parks this session on a prompt that nobody may be attached to answer (FOC-918). A command that would need `rm -rf` is the signal to change the approach, not to ask.
+  WHY — on the 2026-10-19 VM run both stalls were scratch `rm -rf` cleanups; the prompt waited 30 minutes each time, with the VM billing and nothing shown on the dashboard until FOC-918.
 - Any destructive or irreversible action not listed here → ask Mateusz first.
 </supervisor_hard_rules>
 
