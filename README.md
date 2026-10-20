@@ -57,7 +57,9 @@ cd linear-agents
 ```
 
 `fenix up` checks Docker, asks once for the OpenRouter, Linear and GitHub keys,
-builds the image and opens the dashboard at http://localhost:4600. `./fenix attach`
+pulls the pinned image (`ghcr.io/joint-hubs/fenix:<version>`; `./fenix up
+--source` builds from the clone instead) and opens the dashboard at
+http://localhost:4600. `./fenix attach`
 attaches to the Supervisor — it already runs in the container (the Cockpit's
 Chat and Terminal talk to the same session). Details in
 [docs/QUICKSTART.md](docs/QUICKSTART.md).
