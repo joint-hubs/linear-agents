@@ -27,3 +27,9 @@ jobs:
         run: docker run --rm -v "$GITHUB_WORKSPACE:/src:ro" fenix:dev sh /src/docker/test-in-container.sh
       - name: Child isolation lane (FOC-802)
         run: docker run --rm --user root -v "$GITHUB_WORKSPACE:/src:ro" fenix:dev sh /src/docker/test-isolation.sh
+      - name: Thin uid layer on top of the image (FOC-777)
+        run: |
+          docker build -f docker/Dockerfile.uid --build-arg BASE=fenix:dev --build-arg FENIX_UID=1234 --build-arg FENIX_GID=1234 -t fenix:uid1234 .
+          docker run --rm --entrypoint sh fenix:uid1234 -c 'id; test "$(id -u)" = 1234 && test "$(id -g)" = 1234 && test "$(id -u fenix-child)" = 2234 && test "$(stat -c %u /opt/fenix)" = 1234'
+      - name: Child isolation lane on the thin layer (FOC-777)
+        run: docker run --rm --user root -v "$GITHUB_WORKSPACE:/src:ro" fenix:uid1234 sh /src/docker/test-isolation.sh

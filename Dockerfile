@@ -47,21 +47,10 @@ RUN mkdir -p /opt/fenix /data && chown node:node /opt/fenix /data
 # unreadable/unwritable inside the container. Kept as late as possible so a
 # different uid only rebuilds from here — but it must run BEFORE the
 # COPY --chown=node:node steps below, which resolve `node` against /etc/passwd.
+COPY docker/set-uid.sh /usr/local/sbin/fenix-set-uid
 ARG FENIX_UID=1000
 ARG FENIX_GID=1000
-RUN if [ "${FENIX_UID}:${FENIX_GID}" != "$(id -u node):$(id -g node)" ]; then \
-      if [ "$FENIX_UID" = "0" ]; then \
-        echo "FENIX_UID=0 refused — Fenix never runs as root; run ./fenix as your normal user" >&2; \
-        exit 1; \
-      fi; \
-      if [ "$FENIX_GID" = "0" ]; then \
-        echo "FENIX_GID=0 refused — Fenix never runs as root; run ./fenix as your normal user" >&2; \
-        exit 1; \
-      fi; \
-      groupmod -o -g "$FENIX_GID" node \
-      && usermod -o -u "$FENIX_UID" -g "$FENIX_GID" node \
-      && chown -R node:node /home/node /opt/fenix /data; \
-    fi
+ARG FENIX_CHILD_UID
 
 # FOC-802: an unprivileged child identity so spawned agents do not run as the
 # Supervisor's user. `fenix` is the shared group: children and the Supervisor
@@ -71,29 +60,7 @@ RUN if [ "${FENIX_UID}:${FENIX_GID}" != "$(id -u node):$(id -g node)" ]; then \
 # primary group, so groupadd assigns the next free gid; that is fine, nothing
 # keys on the fenix gid itself. Children keep a supplementary-group-free
 # identity of their own.
-ARG FENIX_CHILD_UID
-RUN set -eu; \
-    CHILD_UID="${FENIX_CHILD_UID:-$((FENIX_UID + 1000))}"; \
-    if [ "$CHILD_UID" = "0" ] || [ "$CHILD_UID" = "$FENIX_UID" ]; then \
-      echo "FENIX_CHILD_UID=$CHILD_UID refused — the child uid must differ from node's and never be root" >&2; \
-      exit 1; \
-    fi; \
-    if getent passwd "$CHILD_UID" >/dev/null; then \
-      echo "FENIX_CHILD_UID=$CHILD_UID is already taken by $(getent passwd "$CHILD_UID" | cut -d: -f1)" >&2; \
-      exit 1; \
-    fi; \
-    if ! getent group fenix >/dev/null; then \
-      if getent group "$FENIX_GID" >/dev/null; then \
-        groupadd fenix; \
-      else \
-        groupadd -g "$FENIX_GID" fenix; \
-      fi; \
-    fi; \
-    useradd -u "$CHILD_UID" -g fenix -d /home/fenix-child -m -s /usr/sbin/nologin fenix-child \
-    && chmod 0700 /home/fenix-child \
-    && usermod -aG fenix node \
-    && printf '[safe]\n\tdirectory = *\n' > /home/fenix-child/.gitconfig \
-    && chown fenix-child:fenix /home/fenix-child/.gitconfig
+RUN sh /usr/local/sbin/fenix-set-uid
 # The child commits through gitdirs inside the node-owned main clones
 # (.git/worktrees/<name>), so git's dubious-ownership check needs the child's
 # own global safe.directory; the handover already scopes what it may touch.

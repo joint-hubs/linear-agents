@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1
+# FOC-777: a thin layer on top of the published image for a Linux host whose
+# uid/gid is not 1000:1000. The launcher builds it as fenix:local-<uid>-<gid>
+# (fenix up / fenix update) and points FENIX_IMAGE_REF at it. Same script as
+# the main build — docker/set-uid.sh — so the two paths cannot drift.
+#   docker build -f docker/Dockerfile.uid --build-arg BASE=ghcr.io/joint-hubs/fenix:<tag> \
+#     --build-arg FENIX_UID=$(id -u) --build-arg FENIX_GID=$(id -g) -t fenix:local-$(id -u)-$(id -g) .
+ARG BASE=ghcr.io/joint-hubs/fenix:main
+FROM ${BASE}
+USER root
+ARG FENIX_UID=1000
+ARG FENIX_GID=1000
+ARG FENIX_CHILD_UID
+# The script also ships inside the base image; copying it again lets the layer
+# build on a base published before FOC-777.
+COPY docker/set-uid.sh /usr/local/sbin/fenix-set-uid
+RUN sh /usr/local/sbin/fenix-set-uid
+USER node

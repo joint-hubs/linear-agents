@@ -115,8 +115,13 @@ What `fenix up` does:
 2. Key wizard, if any key file is missing or empty: hidden input, each key
    validated live, max 3 tries per key. Then it asks for the Linear team key,
    saved as `LINEAR_TEAM_KEY` in `.fenix/fenix.env`.
-3. `docker compose up -d --build` — the first build takes several minutes;
-   later runs reuse the layers and start in seconds.
+3. Pulls the published image `ghcr.io/joint-hubs/fenix:<version>` (the version
+   is pinned in the `VERSION` file — about 1 GB on first pull, seconds later)
+   and starts the stack. On Linux, when your uid/gid is not 1000:1000, a thin
+   layer is built on top (a few seconds) so files in `.fenix/` stay yours.
+   Developers and CI build from the clone instead: `./fenix up --source` (or
+   `FENIX_SOURCE=1`); the launcher also falls back to a source build, with a
+   warning, when the pinned tag is not published yet or you are offline.
 4. Waits up to 180 s for `fenix-api` to become healthy.
 5. Prints and opens http://localhost:4600.
 
@@ -394,8 +399,10 @@ Common cases:
 ./fenix update
 ```
 
-Runs `git pull --ff-only`, rebuilds the image with fresh base images
-(`docker compose build --pull`) and restarts the stack. Keys and the data
+Runs `git pull --ff-only`, pulls the image version the updated checkout pins
+(prints the digest before and after), and restarts the stack.
+`./fenix update --source` rebuilds from the clone with fresh base images
+instead (`docker compose build --pull`). Keys and the data
 volume are untouched; on start the squad config is re-seeded from the image
 with the same dpkg rule as every other start (see "Where things live").
 
