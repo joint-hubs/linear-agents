@@ -465,6 +465,14 @@ and in the Terminal tab; after 10 minutes it becomes a *supervisor-parked* probl
 in tmux, detach with `Ctrl-b d`. Look at the dashboard at least once a day while the Supervisor
 works unattended.
 
+By default a parked prompt just waits for you — `taskSessions.parkedPrompt` is `"wait"`. With
+`"deny-after"` (Settings overlay `.fenix/config/settings.json`, key `taskSessions.parkedPrompt`,
+minutes in `taskSessions.parkedPromptMinutes`, default 30, range 5–240) the host answers a parked
+*permission* prompt `"No"` after that many minutes, pastes a note into the session so the
+Supervisor's next turn reports the denial, writes `parked-denials.jsonl` under the session's state
+dir, and the Needs-you inbox shows a `supervisor-auto-denied` problem for 24 h. Questions the
+Supervisor asks you (select dialogs) are never auto-answered. Mind the blast radius: a denied
+`git push` leaves the branch local until someone pushes it.
 Sizing. Two measurements on `fenix-vm`, both real tickets, one Supervisor:
 
 - 2026-10-12, `e2-standard-4` (4 vCPU / 16 GB), one test-squad child — a single sample: idle ~1 % CPU /
