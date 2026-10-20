@@ -44,6 +44,10 @@ const FAKE_DOCKER = `#!/bin/sh
 printf '%s\\n' "docker $*" >> "\$FENIX_SHIM_LOG"
 case " \$* " in
   *" image inspect "*) exit 0 ;;
+  # FOC-777: the image pre-steps of fenix up (pull / compose build / the thin uid layer build) are no-ops here — the tests are about keys and prompts, not images.
+  *" pull "*) exit 0 ;;
+  *" compose build"*) exit 0 ;;
+  " build "*) exit 0 ;;
   *" info "*) exit 0 ;;
   *" compose version "*) exit 0 ;;
   *" up "*) printf 'fake docker: refusing to start the stack\\n' >&2; exit 1 ;;
@@ -393,12 +397,15 @@ test("provider wizard restores the old key when the overlay cannot be saved", ()
 // --- fenix integrations (FOC-772) -------------------------------------------
 
 function dockerCalls(dir) {
-  // The shim also logs the launcher's `docker image inspect` pre-check —
-  // only the actual in-container node invocations matter here.
+  // The shim also logs the launcher's image pre-steps: the `docker image
+  // inspect` probe and, since FOC-777, the `fenix up` pre-steps (`pull`,
+  // `compose build`, the thin uid layer `build`) — only the actual
+  // in-container node invocations matter here.
   return readFileSync(join(dir, "shim.log"), "utf8")
     .split("\n")
     .filter(Boolean)
-    .filter((l) => !l.includes(" image inspect "));
+    .filter((l) => !l.includes(" image inspect "))
+    .filter((l) => !/^docker (pull|compose build|build)/.test(l));
 }
 
 test("fenix integrations (show) forwards to the node CLI and passes the exit code through", () => {
@@ -564,7 +571,7 @@ test("FOC-780: `fenix up` skips the retention question when stdin is not a TTY",
     assert.match(res.stderr, /refusing to start the stack/);
     const log = readFileSync(join(dir, "shim.log"), "utf8");
     // The stack start was reached, i.e. the flow got past the question point…
-    assert.ok(log.includes("compose up -d --build"), log);
+    assert.ok(log.includes("compose up -d"), log);
     // …and the retention question never touched the settings overlay.
     assert.equal(forwardCalls(dir, "fenix-settings.mjs").length, 0, log);
     assert.equal(forwardCalls(dir, "fenix-retention.mjs").length, 0, log);
