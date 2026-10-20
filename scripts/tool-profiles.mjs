@@ -28,7 +28,8 @@
 //     optional launch-time override layer on top.
 //   - Only the Thoughtmap MCP server is registered today (config/mcp-tools.json);
 //     anything else under mcp__<server>__ is refused so the registry cannot be
-//     silently widened.
+//     silently widened. (The Supervisor's hardcoded fenix-linear / fenix-github
+//     stdio adapters are outside the registry — see fenixStdioConfig.)
 //   - No secrets: values shaped like credentials are refused outright, and no
 //     field in this schema is ever a secret carrier (URLs must not embed
 //     credentials, paths point at the approved mount only).
@@ -522,6 +523,20 @@ export function thoughtmapStdioConfig(cfg, tools = null) {
 }
 
 /**
+ * The always-on stdio config for the hardcoded Fenix MCP adapters (FOC-943):
+ * the Supervisor's container cwd is the WORK repo, so the linear-agents project
+ * .mcp.json never loads there — these ride the launch snapshot's --mcp-config
+ * instead. Paths only, never secrets: auth stays in the launch env
+ * (LINEAR_API_KEY, gh), which the child inherits.
+ */
+function fenixStdioConfig(scriptName) {
+  return {
+    command: "node",
+    args: [fileURLToPath(new URL(`./mcp/${scriptName}`, import.meta.url))],
+  };
+}
+
+/**
  * When does the resolved profile attach the thoughtmap MCP server?
  *   - server disabled            → never (a disabled server can never be enabled implicitly)
  *   - explicit list (non-empty)  → only when the list itself names a thoughtmap tool
@@ -586,6 +601,13 @@ export function resolveToolProfile({ squad, role = "lead", env = process.env } =
 
   const mcpServers = {};
   if (serverIncluded(cfg, tools)) mcpServers[MCP_SERVER] = thoughtmapStdioConfig(cfg, tools);
+  // The Supervisor's Fenix write adapters are always-on (FOC-943): not
+  // registry-controlled, so even a default/disabled registry exposes them —
+  // and to the supervisor squad alone.
+  if (squad === "supervisor") {
+    mcpServers["fenix-linear"] = fenixStdioConfig("server-fenix-linear.mjs");
+    mcpServers["fenix-github"] = fenixStdioConfig("server-fenix-github.mjs");
+  }
 
   return {
     revision: config.revision,

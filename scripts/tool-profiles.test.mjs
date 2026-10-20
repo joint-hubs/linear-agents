@@ -6,9 +6,9 @@
 //
 // Run: node --test scripts/tool-profiles.test.mjs
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { test } from "node:test";
 import {
   emptyToolProfiles,
@@ -448,6 +448,59 @@ test("resolveToolProfile: bad squad / role names are refused", () => {
     assert.throws(() => resolveToolProfile({ squad: "dev", role: "LEAD!" }, opts(dir)), /role must be/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveToolProfile: the Supervisor alone gets the always-on Fenix adapters (FOC-943)", () => {
+  const dir = tempDir();
+  try {
+    const sup = resolveToolProfile({ squad: "supervisor" }, opts(dir));
+    for (const name of ["fenix-linear", "fenix-github"]) {
+      const cfg = sup.mcpServers[name];
+      assert.ok(cfg, `the supervisor profile is missing ${name}`);
+      assert.equal(cfg.command, "node");
+      assert.equal(cfg.args.length, 1);
+      assert.ok(isAbsolute(cfg.args[0]), `${name} arg is not absolute: ${cfg.args[0]}`);
+      assert.ok(existsSync(cfg.args[0]), `${name} script does not exist on disk: ${cfg.args[0]}`);
+    }
+    // No env block — auth travels through the launch env, never the snapshot.
+    assert.equal(sup.mcpServers["fenix-linear"].env, undefined);
+    assert.equal(sup.mcpServers["fenix-github"].env, undefined);
+    // Every other squad gets nothing new: a default registry exposes no servers.
+    for (const squad of ["dev", "plan", "review", "test", "cadence"]) {
+      assert.deepEqual(
+        resolveToolProfile({ squad }, opts(dir)).mcpServers,
+        {},
+        `${squad} must not receive the Fenix adapters`,
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("snapshotToolProfile: the supervisor's written mcp.json carries the Fenix adapters; thoughtmap behaviour unchanged", () => {
+  const dir = tempDir();
+  const out = tempDir();
+  try {
+    const result = snapshotToolProfile({ squad: "supervisor", outputDir: out }, opts(dir));
+    const mcpConfig = JSON.parse(readFileSync(join(out, "mcp.json"), "utf8"));
+    for (const name of ["fenix-linear", "fenix-github"]) {
+      const cfg = mcpConfig.mcpServers[name];
+      assert.ok(cfg, `the written mcp.json is missing ${name}`);
+      assert.equal(cfg.command, "node");
+      assert.ok(isAbsolute(cfg.args[0]), `${name} arg is not absolute: ${cfg.args[0]}`);
+      assert.ok(existsSync(cfg.args[0]), `${name} script does not exist on disk: ${cfg.args[0]}`);
+    }
+    // The thoughtmap contract is untouched: still absent while disabled, and
+    // no thoughtmap env leaks into the launch env.
+    assert.equal(mcpConfig.mcpServers.thoughtmap, undefined);
+    assert.equal(result.env.THOUGHTMAP_API_URL, undefined);
+    // --strict-mcp-config stays banned: --mcp-config must keep ADDING servers.
+    assert.equal(result.cliArgs.includes("--strict-mcp-config"), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(out, { recursive: true, force: true });
   }
 });
 

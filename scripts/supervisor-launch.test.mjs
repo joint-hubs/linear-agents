@@ -123,7 +123,7 @@ function launchProfile(root) {
 // ---------------------------------------------------------------------------
 
 async function runTests() {
-  const { prepareSupervisorLaunch } = await import(MODULE_PATH);
+  const { prepareSupervisorLaunch, resolveSupervisorPermissionMode, supervisorClaudeArgv } = await import(MODULE_PATH);
 
   // ---- Test 1: refuses without CLAUDE_CONFIG_DIR ----
   {
@@ -162,10 +162,13 @@ async function runTests() {
       "legacy: no --disallowedTools — a global deny would also block tools granted to native workers"
     );
     const legacyMcp = JSON.parse(readFileSync(mcpConfigPath, "utf8"));
+    // The registry-controlled thoughtmap server stays off in the legacy flow
+    // (FOC-943: the Supervisor's fenix-linear / fenix-github adapters are
+    // always-on and NOT registry-controlled — they are the only servers here).
     assertEq(
-      Object.keys(legacyMcp.mcpServers ?? {}).length,
-      0,
-      "legacy: a disabled server is exposed to no one"
+      Object.keys(legacyMcp.mcpServers ?? {}).sort().join(","),
+      "fenix-github,fenix-linear",
+      "legacy: a disabled registry server is exposed to no one (only the always-on Fenix adapters ride the snapshot)",
     );
     assert(
       !JSON.stringify(legacyMcp).includes("THOUGHTMAP_ALLOWED_TOOLS"),
@@ -374,6 +377,120 @@ async function runTests() {
     assert(Array.isArray(snap.cliArgs), "shape: cliArgs is an array");
     assertEq(typeof snap.revision, "number", "shape: registry revision recorded");
     rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 10b (FOC-943): the declared permission mode — resolver ----
+  {
+    assertEq(
+      JSON.stringify(resolveSupervisorPermissionMode({})),
+      JSON.stringify({ mode: "auto", source: "default" }),
+      "permission mode: unset → auto (default)"
+    );
+    assertEq(
+      JSON.stringify(resolveSupervisorPermissionMode({ FENIX_SUPERVISOR_PERMISSION_MODE: "plan" })),
+      JSON.stringify({ mode: "plan", source: "env" }),
+      "permission mode: env override honoured"
+    );
+    for (const value of ["bypassPermissions", "garbage"]) {
+      let error = null;
+      try {
+        resolveSupervisorPermissionMode({ FENIX_SUPERVISOR_PERMISSION_MODE: value });
+      } catch (err) {
+        error = err;
+      }
+      assert(error !== null, `permission mode: "${value}" is refused`);
+      assert(
+        /auto\|default\|acceptEdits\|plan/.test(error?.message ?? ""),
+        `permission mode: the "${value}" refusal names the allowed values`
+      );
+    }
+  }
+
+  // ---- Test 10c (FOC-943): the declared permission mode — the claude argv ----
+  {
+    const root = buildFixture();
+    const env = launchEnv(root);
+    const launch = prepareSupervisorLaunch(env);
+    assertEq(
+      argValue(supervisorClaudeArgv([], launch.cliArgs, resolveSupervisorPermissionMode(env).mode), "--permission-mode"),
+      "auto",
+      "argv: --permission-mode auto appended by default"
+    );
+    assertEq(
+      argValue(supervisorClaudeArgv([], launch.cliArgs, resolveSupervisorPermissionMode({ FENIX_SUPERVISOR_PERMISSION_MODE: "plan" }).mode), "--permission-mode"),
+      "plan",
+      "argv: the env override reaches the argv"
+    );
+    assertEq(
+      supervisorClaudeArgv(["--permission-mode", "acceptEdits"], launch.cliArgs, "auto").filter((a) => a === "--permission-mode").length,
+      1,
+      "argv: an existing --permission-mode is never duplicated"
+    );
+    assertEq(
+      argValue(supervisorClaudeArgv([], launch.cliArgs, "plan"), "--permission-mode"),
+      "plan",
+      "argv: the mode lands after the launch's cliArgs"
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // ---- Test 10d (FOC-943 W6): the caller's --permission-mode in both forms ----
+  {
+    // `--permission-mode=<v>` counts as present too — never a duplicate flag.
+    assertEq(
+      supervisorClaudeArgv(["--permission-mode=default"], [], "auto").filter((a) => a === "--permission-mode" || a.startsWith("--permission-mode=")).length,
+      1,
+      "argv: an existing --permission-mode=default is never duplicated"
+    );
+    assertEq(
+      supervisorClaudeArgv(["--permission-mode=default"], [], "auto").indexOf("--permission-mode=default"),
+      0,
+      "argv: the = form is kept verbatim (the caller's value wins)"
+    );
+    // A caller-declared bypassPermissions is refused in either spelling.
+    for (const argvOnce of [["--permission-mode", "bypassPermissions"], ["--permission-mode=bypassPermissions"]]) {
+      let error = null;
+      try {
+        supervisorClaudeArgv(argvOnce, [], "auto");
+      } catch (err) {
+        error = err;
+      }
+      assert(error !== null, `argv: ${JSON.stringify(argvOnce)} is refused`);
+      assert(
+        /auto\|default\|acceptEdits\|plan/.test(error?.message ?? ""),
+        "argv: the refusal names the allowed values"
+      );
+    }
+    // The appended flag stays a claude flag: before a bare `--` separator.
+    const withSeparator = supervisorClaudeArgv(["--version"], ["--mcp-config", "/x/mcp.json", "--", "extra"], "auto");
+    assertEq(
+      withSeparator.indexOf("--"),
+      withSeparator.indexOf("--permission-mode") + 2,
+      "argv: the appended flag sits right before the -- separator"
+    );
+    assertEq(
+      withSeparator[withSeparator.indexOf("--permission-mode") + 1],
+      "auto",
+      "argv: the declared mode rides with the appended flag"
+    );
+    // A --permission-mode past the separator is positional data, not a flag:
+    // the launcher still appends its own declared mode and never validates it.
+    const pastSeparator = supervisorClaudeArgv(["--", "--permission-mode", "bypassPermissions"], [], "auto");
+    assertEq(
+      pastSeparator.indexOf("--"),
+      2,
+      "argv: the launcher's flag was inserted before the -- separator"
+    );
+    assertEq(
+      pastSeparator[1],
+      "auto",
+      "argv: the declared mode rides with the launcher's flag"
+    );
+    assertEq(
+      pastSeparator[4],
+      "bypassPermissions",
+      "argv: a --permission-mode past -- is not scanned and left untouched"
+    );
   }
 
   // ---- Test 11: a removed source role is pruned from the canonical agents dir ----
