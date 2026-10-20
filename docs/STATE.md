@@ -6,6 +6,7 @@
 <!-- state-index:start -->
 ## Task journals (generated)
 
+- FOC-775 — in progress — last entry 2026-10-19 23:05 — foc-775-ghcr — -
 - FOC-918 — in review — last entry 2026-10-19 21:10 — foc-918-unattended-prompts — -
 - FOC-914 — in progress — last entry 2026-10-19 17:41 — foc-914-team-group-filters — -
 - FOC-915 — in progress — last entry 2026-10-19 17:12 — foc-915-insights-task-table — -
