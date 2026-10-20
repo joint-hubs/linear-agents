@@ -6,13 +6,13 @@
 <!-- state-index:start -->
 ## Task journals (generated)
 
-- FOC-777 — in review — last entry 2026-10-20 09:10 — foc-777-pinned-image — -
-- FOC-775 — in progress — last entry 2026-10-19 23:05 — foc-775-ghcr — -
-- FOC-918 — in review — last entry 2026-10-19 21:10 — foc-918-unattended-prompts — -
-- FOC-914 — in progress — last entry 2026-10-19 17:41 — foc-914-team-group-filters — -
-- FOC-915 — in progress — last entry 2026-10-19 17:12 — foc-915-insights-task-table — -
-- FOC-523 — in progress — last entry 2026-10-19 15:51 — foc-523-merge-deps — -
-- FOC-921 — in review — last entry - — foc-921-prompt-hygiene — -
+- FOC-775 — done — last entry 2026-10-20 21:13 — foc-775-ghcr — #116
+- FOC-777 — merged — AC1 pending (FOC-789) — last entry 2026-10-20 21:13 — foc-777-pinned-image — #117
+- FOC-918 — done — last entry 2026-10-19 21:10 — foc-918-unattended-prompts — #115
+- FOC-914 — done — last entry 2026-10-19 17:41 — foc-914-team-group-filters — #114
+- FOC-915 — done — last entry 2026-10-19 17:12 — foc-915-insights-task-table — #112
+- FOC-523 — done — last entry 2026-10-19 15:51 — foc-523-merge-deps — #111
+- FOC-921 — done — last entry - — foc-921-prompt-hygiene — #118
 <!-- state-index:end -->
 
 ## Stałe zasady — od 2026-09-29 (dyrektywa Mateusza, „obowiązują od teraz")
