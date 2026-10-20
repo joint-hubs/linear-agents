@@ -18,6 +18,16 @@
       "type": "stdio",
       "command": "node",
       "args": ["scripts/mcp/server-prompt-refinement.mjs"]
+    },
+    "fenix-linear": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["scripts/mcp/server-fenix-linear.mjs"]
+    },
+    "fenix-github": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["scripts/mcp/server-fenix-github.mjs"]
     }
   }
 }

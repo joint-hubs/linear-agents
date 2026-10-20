@@ -1,6 +1,6 @@
 # Supervisor — manual e2e checklist (FOC-116, spec §8.12)
 
-The scripted suite (`node scripts/test-all.mjs`, 204 files) proves the parts against a mock
+The scripted suite (`node scripts/test-all.mjs`, 206 files) proves the parts against a mock
 `claude`. It cannot prove the one thing this epic is actually about: that **Mateusz never opens a
 child terminal**. That is a claim about a human session, so it gets walked by hand, once, on a
 throwaway issue, before first real use.
@@ -245,7 +245,7 @@ into their per-run homes: `node scripts/supervisor-migrate-scratch.mjs` (dry run
 `docs/scratch-and-fixtures.md`).
 
 ### Verification
-- `node scripts/test-all.mjs` → 204 files (the registered lane count: 164 parallel + 40 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
+- `node scripts/test-all.mjs` → 206 files (the registered lane count: 166 parallel + 40 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
   load-sensitive and has been observed red at base `e3dea40` as well — see §0 before reading a red
   security-scan as a regression.
 - The runner sweeps its spawn registry after both lanes (FOC-840): a server a test file left alive is tree-killed and reported as `test orphans left running: <file> pid N port P (killed)`, and the run fails even when every file passed.

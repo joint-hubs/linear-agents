@@ -6,6 +6,7 @@
 <!-- state-index:start -->
 ## Task journals (generated)
 
+- FOC-943 — in review — last entry 2026-10-20 22:24 — foc-943-fenix-mcp-writes — -
 - FOC-775 — done — last entry 2026-10-20 21:13 — foc-775-ghcr — #116
 - FOC-777 — merged — AC1 pending (FOC-789) — last entry 2026-10-20 21:13 — foc-777-pinned-image — #117
 - FOC-918 — done — last entry 2026-10-19 21:10 — foc-918-unattended-prompts — #115

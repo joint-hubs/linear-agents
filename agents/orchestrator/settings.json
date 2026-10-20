@@ -1,4 +1,10 @@
 {
   "cleanupPeriodDays": 36500,
-  "theme": "dark"
+  "theme": "dark",
+  "permissions": {
+    "deny": [
+      "mcp__fenix-linear__*",
+      "mcp__fenix-github__*"
+    ]
+  }
 }

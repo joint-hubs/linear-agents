@@ -279,13 +279,60 @@ test("zaden settings.json nie deklaruje mcpServers", () => {
 test("kazdy serwer z .mcp.json jest dozwolony w allow-liscie skladow", () => {
   // Serwer podłączony, ale nieprzepuszczony przez uprawnienia, znaczy monit w
   // środku headlessowej tury — czyli dziecko, które wisi.
+  //
+  // FOC-943: external-write servers are the Supervisor's only; children deny them.
+  const SUPERVISOR_ONLY_MCP = ["fenix-linear", "fenix-github"];
+  // Pinned: the exact tools the Supervisor may call on the supervisor-only servers.
+  const SUPERVISOR_ONLY_EXPECTED = [
+    "mcp__fenix-linear__transition",
+    "mcp__fenix-linear__comment",
+    "mcp__fenix-linear__comment_replace",
+    "mcp__fenix-github__pr_create",
+    "mcp__fenix-github__pr_edit",
+    "mcp__fenix-github__pr_comment",
+  ];
   const servers = Object.keys(readJson(".mcp.json").mcpServers || {});
   const missing = [];
   for (const squad of SQUADS) {
-    const allow = readJson(`agents/${squad}/settings.json`).permissions?.allow || [];
+    const perms = readJson(`agents/${squad}/settings.json`).permissions || {};
+    const allow = perms.allow || [];
+    const deny = perms.deny || [];
     for (const name of servers) {
+      if (SUPERVISOR_ONLY_MCP.includes(name)) {
+        if (squad === "supervisor") {
+          const expected = SUPERVISOR_ONLY_EXPECTED.filter((r) => r.startsWith(`mcp__${name}__`));
+          for (const rule of expected) {
+            if (!allow.includes(rule)) missing.push(`supervisor: brak ${rule}`);
+          }
+          // Exactly the pinned tools, nothing more: no wildcard allow and no
+          // extra mcp__<name>__* rule beyond the pinned list.
+          if (allow.includes(`mcp__${name}__*`)) missing.push(`supervisor: wildcard allow mcp__${name}__* na serwerze tylko-dla-Supervisora`);
+          const actual = allow.filter((r) => r.startsWith(`mcp__${name}__`));
+          for (const rule of actual) {
+            if (!expected.includes(rule)) missing.push(`supervisor: nadprogramowe allow ${rule}`);
+          }
+        } else {
+          if (!deny.includes(`mcp__${name}__*`)) missing.push(`${squad}: brak deny mcp__${name}__*`);
+          if (allow.some((r) => r.startsWith(`mcp__${name}__`))) {
+            missing.push(`${squad}: allow na serwerze tylko-dla-Supervisora (${name})`);
+          }
+        }
+        continue;
+      }
       const ok = allow.some((r) => r === `mcp__${name}__*` || r.startsWith(`mcp__${name}__`));
       if (!ok) missing.push(`${squad}: brak mcp__${name}__*`);
+    }
+  }
+  // The orchestrator is NOT in SQUADS (AC-10 FOC-116 keeps it out of the squad
+  // checks), but the supervisor-only servers must be denied there too — it is
+  // the one other interactive session that must never reach them. Checked
+  // separately, never by adding it to the global list.
+  const orchestratorPerms = readJson("agents/orchestrator/settings.json").permissions || {};
+  const orchestratorDeny = orchestratorPerms.deny || [];
+  for (const name of SUPERVISOR_ONLY_MCP) {
+    if (!orchestratorDeny.includes(`mcp__${name}__*`)) missing.push(`orchestrator: brak deny mcp__${name}__*`);
+    if ((orchestratorPerms.allow || []).some((r) => r.startsWith(`mcp__${name}__`))) {
+      missing.push(`orchestrator: allow na serwerze tylko-dla-Supervisora (${name})`);
     }
   }
   if (missing.length) fail(`serwer bez uprawnienia:\n       ${missing.join("\n       ")}`);

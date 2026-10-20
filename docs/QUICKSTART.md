@@ -449,7 +449,13 @@ with Debian 12 on `e2-standard-4` (4 vCPU / 16 GB) and a 100 GB disk.
    PowerShell script there and swallows a bare `--`. On Windows the tunnel runs
    in a PuTTY window — leave it open.
 
-**When nobody is attached.** The Supervisor runs in auto mode, but seven `ask` rules in
+**When nobody is attached.** The Supervisor's permission mode is declared by the launcher:
+`scripts/supervisor-launch.mjs` starts claude with `--permission-mode auto` — the mode is on the
+argv, not inherited from whatever Claude Code persisted after a dialog answer.
+`FENIX_SUPERVISOR_PERMISSION_MODE` overrides it (`auto|default|acceptEdits|plan`;
+`bypassPermissions` is refused — the launch fails loudly instead of falling back). `fenix doctor`
+prints a `permission mode` line telling you which mode is declared and from where. The Supervisor
+runs in auto mode, but seven `ask` rules in
 `agents/supervisor/settings.json` (`git push`, `gh pr merge`, `git reset --hard`, `git clean`,
 `git branch -D`, `rm -rf`, `WebFetch`) and the auto-mode classifier (three blocked actions in a
 row) still stop it on a `Do you want to proceed?` prompt until a person answers — nothing times

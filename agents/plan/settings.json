@@ -116,6 +116,8 @@
       "ListAgents",
       "Monitor",
       "mcp__claude_ai_Linear__*",
+      "mcp__fenix-linear__*",
+      "mcp__fenix-github__*",
       "Bash(git worktree remove:*)",
       "Bash(git worktree prune:*)"
     ],
