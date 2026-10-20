@@ -43,6 +43,44 @@ function pruneStaleCopiedAgents(configDir,launch){
  return removed;
 }
 
+// FOC-943: the Supervisor's permission mode is DECLARED by the launcher, not
+// inherited from whatever Claude Code persisted after a dialog answer. auto by
+// default for the lead; bypassPermissions is refused outright — an unattended
+// Supervisor must never run without the ask rules and the auto-mode classifier.
+const ALLOWED_PERMISSION_MODES=['auto','default','acceptEdits','plan'];
+export function resolveSupervisorPermissionMode(env = process.env) {
+ const raw=env.FENIX_SUPERVISOR_PERMISSION_MODE;
+ if(raw===undefined)return {mode:'auto',source:'default'};
+ if(ALLOWED_PERMISSION_MODES.includes(raw))return {mode:raw,source:'env'};
+ throw Error('FENIX_SUPERVISOR_PERMISSION_MODE="'+raw+'" is not a Supervisor permission mode — allowed: auto|default|acceptEdits|plan (bypassPermissions is refused for the Supervisor)');
+}
+
+// The claude argv: the caller's args, then the launch's cliArgs, then the
+// declared mode — but never a second --permission-mode when one is already
+// present (a caller-provided flag wins over the launcher's default). The
+// caller's flag is validated the same way the env var is: bypassPermissions
+// or any unknown value is refused loudly, not silently inherited. Scanning
+// stops at a bare `--` (past it everything is positional), and the appended
+// flag lands BEFORE that separator so it stays a real claude flag.
+export function supervisorClaudeArgv(userArgs,cliArgs,mode){
+ const argv=[...userArgs,...cliArgs];
+ const separator=argv.indexOf('--');
+ const scanned=separator===-1?argv.length:separator;
+ for(let i=0;i<scanned;i++){
+  const arg=argv[i];
+  let value=null;
+  if(arg==='--permission-mode')value=argv[i+1];
+  else if(arg.startsWith('--permission-mode='))value=arg.slice('--permission-mode='.length);
+  else continue;
+  if(!ALLOWED_PERMISSION_MODES.includes(value)){
+   throw Error('--permission-mode "'+value+'" is not a Supervisor permission mode — allowed: auto|default|acceptEdits|plan (bypassPermissions is refused for the Supervisor)');
+  }
+  return argv;
+ }
+ const flag=['--permission-mode',mode];
+ return separator===-1?[...argv,...flag]:[...argv.slice(0,separator),...flag,...argv.slice(separator)];
+}
+
 // A Supervisor keeps one private native history; each process gets immutable
 // MCP/tool snapshots and refreshed settings only before that process starts.
 export function prepareSupervisorLaunch(env = process.env) {
@@ -82,7 +120,8 @@ export function prepareSupervisorLaunch(env = process.env) {
 if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href){
  try{
   const launch=prepareSupervisorLaunch();
-  const child=spawn(process.env.LA_CLAUDE_BIN||'claude',[...process.argv.slice(2),...launch.cliArgs],{env:launch.env,stdio:'inherit'});
+  const {mode}=resolveSupervisorPermissionMode();
+  const child=spawn(process.env.LA_CLAUDE_BIN||'claude',supervisorClaudeArgv(process.argv.slice(2),launch.cliArgs,mode),{env:launch.env,stdio:'inherit'});
   for(const signal of ['SIGTERM','SIGINT']) process.on(signal,()=>child.kill(signal));
   child.on('error',()=>{console.error('Supervisor process could not start');process.exitCode=1;});
   child.on('exit',(code)=>{process.exitCode=code??1;});

@@ -21,6 +21,7 @@ import { CACHE_MAX_GB_DEFAULT, cacheToolSizes, childTmpSizes } from './fenix-pru
 import { currentOwner, listRunOwners, ownerRelation, supervisorStateRoot } from './run-owner.mjs';
 import { hostBase, hostRequest, FAST_TIMEOUT_MS } from './supervisor-host-client.mjs';
 import { stallSilenceMs } from './supervisor-lib.mjs';
+import { resolveSupervisorPermissionMode } from './supervisor-launch.mjs';
 
 const GIB = 1024 ** 3;
 // FOC-780: the disk check's warn threshold comes from the overlay's
@@ -435,6 +436,32 @@ export async function checkSupervisorPrompt({ env = process.env, fsImpl = fs, no
   return { name, status: 'ok', detail: `waiting on a prompt for ${minutes} min (under the ${Math.round(parkedAfterMs / 60000)}-min threshold)${caveat}` };
 }
 
+// FOC-943: one line about the Supervisor's DECLARED permission mode — the
+// launcher passes --permission-mode on the claude argv, so the session's mode
+// is never whatever Claude Code persisted from a dialog answer. A bad env
+// value is a warn (the launch itself fails loudly; the doctor must still
+// answer), never a silent pass.
+export function checkPermissionMode({ env = process.env } = {}) {
+  const name = 'permission mode';
+  try {
+    const { mode, source } = resolveSupervisorPermissionMode(env);
+    return {
+      name,
+      status: 'ok',
+      detail: source === 'env'
+        ? `${mode} (declared via FENIX_SUPERVISOR_PERMISSION_MODE; not read from the running session)`
+        : 'auto (declared launch default for the container Supervisor; not read from the running session)',
+    };
+  } catch (err) {
+    return {
+      name,
+      status: 'warn',
+      detail: String(err?.message || err).split('\n')[0],
+      fix: 'set FENIX_SUPERVISOR_PERMISSION_MODE to auto|default|acceptEdits|plan or unset it',
+    };
+  }
+}
+
 // The host's GET /state, or null when no host is configured (native mode);
 // { unreachable: true } when the host is configured but does not answer 200.
 async function defaultHostState(env) {
@@ -597,6 +624,7 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     checkCockpitHooks(env, fsImpl),
     checkTaskSessions({ env, fsImpl }),
     await checkSupervisorPrompt({ env, fsImpl }),
+    checkPermissionMode({ env }),
     checkRunOwners({ env }),
   ];
   // FOC-803 uid checks: only meaningful in the container, where the process

@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   checkCaches,
+  checkPermissionMode,
   checkProjectsDir,
   checkRunOwners,
   checkSecretsReadable,
@@ -657,6 +658,36 @@ test("supervisor prompt: host unreachable → warn 'cannot tell'; host idle → 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+console.log("\nfenix-doctor: permission mode line (FOC-943)");
+
+test("permission mode: unset → ok 'auto (declared launch default...)'", () => {
+  const c = checkPermissionMode({ env: {} });
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /^auto \(declared launch default/);
+  assert.match(c.detail, /not read from the running session/);
+});
+
+test("permission mode: env override → ok, the detail names the env var", () => {
+  const c = checkPermissionMode({ env: { FENIX_SUPERVISOR_PERMISSION_MODE: "default" } });
+  assert.equal(c.status, "ok");
+  assert.match(c.detail, /^default \(declared via FENIX_SUPERVISOR_PERMISSION_MODE/);
+  assert.match(c.detail, /not read from the running session/);
+});
+
+test("permission mode: bypassPermissions → warn with the fix", () => {
+  const c = checkPermissionMode({ env: { FENIX_SUPERVISOR_PERMISSION_MODE: "bypassPermissions" } });
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /auto\|default\|acceptEdits\|plan/);
+  assert.match(c.fix, /FENIX_SUPERVISOR_PERMISSION_MODE/);
+});
+
+test("permission mode: garbage value → warn with the fix", () => {
+  const c = checkPermissionMode({ env: { FENIX_SUPERVISOR_PERMISSION_MODE: "garbage" } });
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /garbage/);
+  assert.match(c.fix, /set FENIX_SUPERVISOR_PERMISSION_MODE to auto\|default\|acceptEdits\|plan or unset it/);
 });
 
 console.log("\nfenix-doctor: run owners (FOC-905)");
