@@ -406,8 +406,8 @@ async function runTests() {
     let config = readSquadConfig(root);
     assertEq(
       config.squads.supervisor.lead,
-      "xiaomi/mimo-v2.6-pro",
-      "supervisor falls back to xiaomi/mimo-v2.6-pro"
+      "x-ai/grok-4.7",
+      "supervisor falls back to x-ai/grok-4.7"
     );
     assertEq(config.squads.supervisor.leadSource, "fallback", "supervisor fallback source");
     assertEq(config.squads.supervisor.leadFiles, [], "supervisor fallback names no file");
@@ -418,7 +418,7 @@ async function runTests() {
     models.routing.supervisor = { default: "glm", worker: "minimax" };
     writeModelsConfig(root, models);
     config = readSquadConfig(root);
-    assertEq(config.squads.supervisor.lead, "xiaomi/mimo-v2.6-pro", "supervisor ignores routing.supervisor.default (children's alias)");
+    assertEq(config.squads.supervisor.lead, "x-ai/grok-4.7", "supervisor ignores routing.supervisor.default (children's alias)");
     assertEq(config.squads.supervisor.leadSource, "fallback", "supervisor stays on fallback with only the table's default");
     assertEq(config.squads.supervisor.leadFiles, [], "supervisor fallback names no file");
 

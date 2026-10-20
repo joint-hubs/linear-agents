@@ -80,7 +80,7 @@ function atomicWriteText(filePath, content, eol) {
 // The Supervisor's model when nothing else decides it — the same built-in
 // fallback the Node entry point uses (SUPERVISOR_MODEL env > the settings
 // overlay's routing.supervisor.lead > this).
-const SUPERVISOR_FALLBACK_MODEL = "xiaomi/mimo-v2.6-pro";
+const SUPERVISOR_FALLBACK_MODEL = "x-ai/grok-4.7";
 
 // fenix-settings' routing-key rule (provider side). A squad name that cannot
 // live in settings.json cannot have its lead written there — refuse up front

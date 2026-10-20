@@ -5,7 +5,7 @@
       "baseUrl": "https://openrouter.ai/api",
       "authEnv": "OPENROUTER_API_KEY",
       "authStyle": "token",
-      "defaultModel": "xiaomi/mimo-v2.6-pro",
+      "defaultModel": "x-ai/grok-4.7",
       "tiers": {
         "opus": "z-ai/glm-5.3-flash",
         "sonnet": "google/gemini-2.5-flash-lite",
@@ -297,6 +297,12 @@
         "output": 0.87,
         "cacheRead": 0.0036,
         "provenance": "OpenRouter GET /api/v1/models, checked 2026-09-23: prompt $0.435/M, completion $0.870/M. input_cache_read $0.0036/M, checked 2026-09-24."
+      },
+      "x-ai/grok-4.7": {
+        "input": 2,
+        "output": 6,
+        "cacheRead": 0.5,
+        "provenance": "OpenRouter GET /api/v1/models, checked 2026-10-20: prompt $2/M, completion $6/M, input_cache_read $0.5/M (base tier; prompts over 200K tokens bill $4/$12/$1 per M). Context 500K."
       }
     },
     "nebul": {

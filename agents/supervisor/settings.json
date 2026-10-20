@@ -267,6 +267,9 @@
   "modelSettings": {
     "xiaomi/mimo-v2.6-pro": {
       "autoCompactWindow": 500000
+    },
+    "x-ai/grok-4.7": {
+      "autoCompactWindow": 500000
     }
   }
 }
