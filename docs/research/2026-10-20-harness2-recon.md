@@ -86,8 +86,10 @@ recursion with human promotion", FOC-223 the library retrieval, FOC-459 the turn
 FOC-398 (GEPA) stays the optimiser for the structured [J] prompts that have labels — Harness² is the optimiser for
 the free-text squad prompts that do not. FOC-477's arm measurement is the template for proving a gain.
 
-Three tickets, in order: (1) fingerprint + trajectory renderer; (2) reflector + library + kickoff injection +
-`harness-promotion` gate; (3) `harness-probe` graph mode measured on 10 tickets.
+Tickets (filed 2026-10-20, M6, parent FOC-944 under the M6 epic FOC-471): FOC-945 fingerprint + trajectory renderer;
+FOC-946 reflector + library + kickoff injection + `harness-promotion` gate (CADENCE reactivated, FOC-224/223);
+FOC-947 `harness-probe` graph mode (k = 1) judged by REVIEW/TEST, measured on 10 tickets. The classifier /
+Linear-writes finding from the same day is FOC-943 (M8).
 
 ## 5. Risks, and what Fenix does about them
 
