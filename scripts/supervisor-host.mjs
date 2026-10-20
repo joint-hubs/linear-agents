@@ -26,21 +26,24 @@
 // holds; these two gates are defense in depth, not the only wall.
 //
 // Everything external is a seam (runTmux, readSessionState, readToken,
-// resolvePeer, ptyFactory, processAlive, sleep, now) so tests can drive the
-// whole surface without tmux, a pty or the network.
+// resolvePeer, ptyFactory, processAlive, sleep, now, readParkedPolicy,
+// parkedCheckMs) so tests can drive the whole surface without tmux, a pty or
+// the network.
 
 import { spawnSync } from "node:child_process";
 import { timingSafeEqual, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import dns from "node:dns";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { WebSocketServer } from "ws";
 
 import { hostTokenPath, supervisorSessionHome, supervisorSessionPath, SUPERVISOR_SESSION_ID_PATTERN } from "./fenix-paths.mjs";
+import { readTaskSessionsSettings } from "./fenix-settings.mjs";
 import { readProcessIdentity, matchesProcess } from "./task-process-identity.mjs";
-import { processAlive as defaultProcessAlive } from "./supervisor-lib.mjs";
+import { processAlive as defaultProcessAlive, redact } from "./supervisor-lib.mjs";
+import { scanEgress } from "./egress-screen.mjs";
 import { askKeyPlan, extractCommandOutput, parseDialog, slashCommandPolicy } from "./session-dialog.mjs";
 
 // Legacy single-session identity — the module constants keep their exact
@@ -268,6 +271,12 @@ export function createHost(deps = {}) {
   const processAlive = deps.processAlive ?? defaultProcessAlive;
   const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const now = deps.now ?? (() => Date.now());
+  // FOC-920: the deny-after clock never counts time from before THIS host
+  // existed. A dialog anchored on a stale hook updatedAt older than the host
+  // (or first seen right after a restart) is denied at the earliest N minutes
+  // after host start, never immediately — the reported needsInputSince keeps
+  // the hook's timestamp, only the wait computation is floored here.
+  const hostStartedAt = now();
   const wsMaxBufferedBytes = deps.wsMaxBufferedBytes ?? WS_MAX_BUFFERED_BYTES;
   const wsHeartbeatIntervalMs = deps.wsHeartbeatIntervalMs ?? WS_HEARTBEAT_INTERVAL_MS;
 
@@ -404,6 +413,7 @@ export function createHost(deps = {}) {
       return {
         session: "absent", panePid: null, paneDead: null, clients: [], hook,
         dialog: false, promptReady: false, state: "absent", needsInputSince: null,
+        autoDenial: lastAutoDenial, parkedPolicy: parkedPolicyOf(),
       };
     }
     const first = (panes.stdout || "").split("\n").map((l) => l.trim()).filter(Boolean)[0] ?? "";
@@ -434,6 +444,7 @@ export function createHost(deps = {}) {
     return {
       session: "running", panePid, paneDead, clients: clientList, hook,
       dialog: pane.dialog, promptReady: pane.promptReady, state, needsInputSince,
+      autoDenial: lastAutoDenial, parkedPolicy: parkedPolicyOf(),
     };
   };
 
@@ -815,6 +826,185 @@ export function createHost(deps = {}) {
 
   const answerAsk = (payload) => serialized(() => answerAskLocked(payload ?? {}));
 
+  // ── parked-prompt auto-deny (FOC-920) ─────────────────────────────────────
+  // An unattended Supervisor parked on a permission prompt is answered "No"
+  // by the host once the prompt has waited past taskSessions.parkedPrompt
+  // minutes (mode "deny-after"); mode "wait" (the default) changes nothing —
+  // a human still answers every dialog. Only permission dialogs qualify:
+  // select nudges and AskUserQuestion screens are never auto-answered. Every
+  // auto-deny is appended to parked-denials.jsonl in the session home (this
+  // host is its single writer) and surfaced on GET /state, so the dashboard
+  // can show what the host answered while nobody was attached.
+  const sessionHome = supervisorSessionHome(env);
+  const denialsPath = join(sessionHome, "parked-denials.jsonl");
+  const DEFAULT_PARKED_POLICY = { mode: "wait", minutes: 30 };
+
+  const readParkedPolicy = deps.readParkedPolicy ?? (() => {
+    // The settings reader normalizes parkedPrompt to { mode, minutes } and
+    // never throws; the guards here only keep a foreign seam or a future
+    // shape change from crashing the watchdog.
+    try {
+      const p = readTaskSessionsSettings(env, { quiet: true }).parkedPrompt;
+      if (!p || typeof p !== "object") return { ...DEFAULT_PARKED_POLICY };
+      return {
+        mode: p.mode === "deny-after" ? "deny-after" : "wait",
+        minutes: Number.isFinite(p.minutes) && p.minutes > 0 ? p.minutes : 30,
+      };
+    } catch {
+      return { ...DEFAULT_PARKED_POLICY };
+    }
+  });
+
+  // A failure anywhere in the watchdog is logged to stderr ONCE per distinct
+  // message and swallowed — a broken check must never take the host down or
+  // flood its log.
+  let lastParkedMessage = null;
+  const logParkedOnce = (msg) => {
+    if (msg === lastParkedMessage) return;
+    lastParkedMessage = msg;
+    console.error(`[supervisor-host] parked-prompt ${msg}`);
+  };
+  const logParkedError = (err) => logParkedOnce(`check failed: ${err?.message ?? String(err)}`);
+
+  const parkedPolicyOf = () => {
+    try {
+      return readParkedPolicy();
+    } catch (err) {
+      logParkedError(err);
+      return { ...DEFAULT_PARKED_POLICY };
+    }
+  };
+
+  // Last recorded denial, reloaded from the file at startup so GET /state
+  // keeps showing the most recent auto-deny across a host restart. A missing
+  // or torn file reads as null (a torn trailing line falls back to the
+  // previous complete one).
+  const readLastDenial = () => {
+    try {
+      const lines = readFileSync(denialsPath, "utf8").split("\n").filter((l) => l.trim());
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const parsed = JSON.parse(lines[i]);
+          if (parsed && typeof parsed === "object") return parsed;
+        } catch { /* torn line — fall back to the previous one */ }
+      }
+    } catch { /* no file yet */ }
+    return null;
+  };
+  let lastAutoDenial = readLastDenial();
+
+  // Never deny the same dialog twice: the dialog id plus the anchor it was
+  // parked under is remembered across checks.
+  let lastDeniedKey = null;
+
+  // The denial record and the pasted note are operator-facing (the jsonl row
+  // and GET /state) — a secret echoed into a dialog reason must not survive
+  // into either. redact() covers the known denylist shapes; scanEgress() adds
+  // the wider secret-shape families (e.g. a ghp_ token) as [redacted] spans.
+  const redactParkedReason = (reason) => {
+    const scrub = (text) => maskEgressHits(redact(text));
+    if (reason === null || reason === undefined) return null;
+    if (typeof reason === "string") return scrub(reason);
+    if (typeof reason !== "object") return reason;
+    return {
+      ...reason,
+      ...(typeof reason.detail === "string" ? { detail: scrub(reason.detail) } : {}),
+    };
+  };
+
+  // Replace every egress-screen hit span in `text` with "[redacted]". scanEgress
+  // reports hits as 1-based line/column (never the value), so each hit is mapped
+  // back to its offset and extended to the end of its non-whitespace run — a
+  // token glued into a sentence loses the whole token, not a prefix.
+  const maskEgressHits = (text) => {
+    const hits = scanEgress(text);
+    if (hits.length === 0) return text;
+    const lines = text.split("\n");
+    const lineStart = [0];
+    for (let i = 0; i < lines.length; i++) lineStart.push(lineStart[i] + lines[i].length + 1);
+    const spans = hits
+      .map((h) => {
+        const start = lineStart[h.line - 1] === undefined ? NaN : lineStart[h.line - 1] + h.column - 1;
+        if (!Number.isInteger(start) || start < 0 || start >= text.length) return null;
+        if (h.family === "pem") return [start, text.length]; // a PEM block crosses lines — hide the rest
+        let end = start;
+        while (end < text.length && !/\s/.test(text[end])) end++;
+        return [start, end];
+      })
+      .filter(Boolean)
+      .sort((a, b) => a[0] - b[0]);
+    let out = "";
+    let pos = 0;
+    for (const [s, e] of spans) {
+      if (s < pos) continue;
+      out += `${text.slice(pos, s)}[redacted]`;
+      pos = e;
+    }
+    return out + text.slice(pos);
+  };
+
+  const checkParkedPrompt = async () => {
+    try {
+      const policy = parkedPolicyOf();
+      if (policy.mode !== "deny-after") return { action: "none" };
+      const state = getState(); // refreshes the needs-input anchor
+      if (state.state !== "needs-input" || needsInputSince === null) return { action: "none" };
+      const since = needsInputSince; // FOC-920: captured BEFORE the await — the anchor must not drift under the answer
+      // The anchor says "needs-input", but only a PERMISSION dialog may be
+      // answered — re-read the pane and let the parser decide.
+      const cap = runTmux(["capture-pane", "-p", "-t", tmux.session]);
+      if (cap.status !== 0) return { action: "none" };
+      const dialog = parseDialog(cap.stdout ?? "");
+      if (!dialog || dialog.kind !== "permission") return { action: "none" };
+      // The deny clock starts no earlier than this host: a stale hook
+      // updatedAt older than the host (or a dialog first seen right after a
+      // restart) must wait its full N minutes HERE, not inherit them.
+      const sinceMs = Date.parse(since);
+      const anchorMs = Number.isFinite(sinceMs) ? Math.max(sinceMs, hostStartedAt) : NaN;
+      const waitedMs = Number.isFinite(anchorMs) ? now() - anchorMs : NaN;
+      if (!(waitedMs >= policy.minutes * 60_000)) return { action: "none" };
+      const denialKey = `${dialog.id}@${since}`;
+      if (lastDeniedKey === denialKey) return { action: "none" };
+      const reason = redactParkedReason(dialog.reason);
+      const reasonText = !reason
+        ? "unrecognised"
+        : typeof reason === "string"
+          ? reason
+          : [reason.type, reason.detail].filter(Boolean).join(": ");
+      const note = `FOC-920 auto-deny: this permission prompt (${reasonText}) waited ${policy.minutes} min with nobody attached and was answered No by the host (taskSessions.parkedPrompt = deny-after). Record it in your report; if the denied action was needed, leave the work in a resumable state and escalate it as one specific question.`;
+      const result = await answerDialog({ id: dialog.id, choice: "deny", note });
+      if (result.status !== 200) {
+        // Nothing was pressed (409: the pane changed between the parse and the
+        // locked re-capture; 503: tmux unreadable). Record nothing and do not
+        // latch the key — the next tick retries the same dialog.
+        logParkedOnce(`auto-deny not applied: ${result.status} ${result.body?.error ?? ""}`);
+        return { action: "retry", status: result.status };
+      }
+      lastDeniedKey = denialKey;
+      const record = {
+        ts: new Date(now()).toISOString(),
+        since,
+        minutes: policy.minutes,
+        dialogId: dialog.id,
+        kind: dialog.kind,
+        reason,
+        status: result.status,
+        closed: result.body?.closed === true,
+      };
+      try {
+        mkdirSync(sessionHome, { recursive: true });
+        appendFileSync(denialsPath, `${JSON.stringify(record)}\n`);
+      } catch (err) {
+        logParkedError(err);
+      }
+      lastAutoDenial = record;
+      return { action: "denied", denial: record };
+    } catch (err) {
+      logParkedError(err);
+      return { action: "none" };
+    }
+  };
+
   const alive = (pids) => {
     const out = {};
     if (!Array.isArray(pids)) return out;
@@ -1143,7 +1333,14 @@ export function createHost(deps = {}) {
     });
   });
 
-  return { server, ensureSession, sendMessage, getState, alive, answerDialog, answerAsk };
+  // The parked-prompt watchdog ticks only while the host serves and is
+  // cleared on close, like the WS heartbeat. checkParkedPrompt never throws
+  // (its own catch), so the timer cannot take the host down.
+  const parkedTimer = setInterval(() => void checkParkedPrompt(), deps.parkedCheckMs ?? 30_000);
+  parkedTimer.unref?.();
+  server.on("close", () => clearInterval(parkedTimer));
+
+  return { server, ensureSession, sendMessage, getState, alive, answerDialog, answerAsk, checkParkedPrompt };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
