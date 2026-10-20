@@ -199,21 +199,29 @@ const analysis = openAnalysisDb(storePath);
 
 // Expected canonical fixture shape: 5 turns (pre@10, pre@20, post@10,
 // post@20 [line_count 2], shared@5 [claim_count 2]) and 5 tool calls.
+// The panels default to the last 30 days; the fixture lives in 2026-09 — pin
+// the window so the tests never rot (red on 2026-10-20).
+const FIXTURE_FROM = "2026-01-01T00:00:00.000Z";
 const countUsage = (filters) => {
   const { where, params } = filterSql(normalizeFilters(filters));
   return analysis.prepare(`SELECT COUNT(*) AS n FROM canonical_usage ${where}`).get(...params).n;
 };
 
-// Default filters end at "now" with era=post — the two post-boundary turns.
-check("fixture: default window + era post counts the post turns", countUsage({}) === 2, `got ${countUsage({})}`);
+// The default (no from/to) must equal an explicit "last 30 days, era post"
+// window — stated as an equality so the fixture's calendar position never
+// matters (the fixed count of 2 would rot on 2026-10-24).
+const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+check("fixture: default window + era post equals the explicit 30-day post window",
+  countUsage({}) === countUsage({ from: thirtyDaysAgo, era: "post" }),
+  `got ${countUsage({})} vs ${countUsage({ from: thirtyDaysAgo, era: "post" })}`);
 check("filterSql from-to restricts the window",
   countUsage({ from: "2026-09-24T00:00:00.000Z", era: "all" }) === 2, `got ${countUsage({ from: "2026-09-24T00:00:00.000Z", era: "all" })}`);
-check("filterSql squad filters (alpha)", countUsage({ squad: "alpha", era: "all" }) === 3);
-check("filterSql squad filters (beta)", countUsage({ squad: "beta", era: "all" }) === 2);
-check("filterSql model filters", countUsage({ model: "mX", era: "all" }) === 1);
-check("era pre counts the pre-boundary turns", countUsage({ era: "pre" }) === 3, `got ${countUsage({ era: "pre" })}`);
-check("era post counts the post-boundary turns", countUsage({ era: "post" }) === 2, `got ${countUsage({ era: "post" })}`);
-check("era all counts everything", countUsage({ era: "all" }) === 5, `got ${countUsage({ era: "all" })}`);
+check("filterSql squad filters (alpha)", countUsage({ squad: "alpha", era: "all", from: FIXTURE_FROM }) === 3);
+check("filterSql squad filters (beta)", countUsage({ squad: "beta", era: "all", from: FIXTURE_FROM }) === 2);
+check("filterSql model filters", countUsage({ model: "mX", era: "all", from: FIXTURE_FROM }) === 1);
+check("era pre counts the pre-boundary turns", countUsage({ era: "pre", from: FIXTURE_FROM }) === 3, `got ${countUsage({ era: "pre", from: FIXTURE_FROM })}`);
+check("era post counts the post-boundary turns", countUsage({ era: "post", from: FIXTURE_FROM }) === 2, `got ${countUsage({ era: "post", from: FIXTURE_FROM })}`);
+check("era all counts everything", countUsage({ era: "all", from: FIXTURE_FROM }) === 5, `got ${countUsage({ era: "all", from: FIXTURE_FROM })}`);
 // A date-only from/to pair covers the WHOLE chosen day — the two post.jsonl
 // turns of 2026-09-24 survive a `to` of "2026-09-24" (midnight would drop them).
 check("date-only window keeps the whole chosen day",
