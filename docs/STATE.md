@@ -12,6 +12,7 @@
 - FOC-914 — in progress — last entry 2026-10-19 17:41 — foc-914-team-group-filters — -
 - FOC-915 — in progress — last entry 2026-10-19 17:12 — foc-915-insights-task-table — -
 - FOC-523 — in progress — last entry 2026-10-19 15:51 — foc-523-merge-deps — -
+- FOC-921 — in review — last entry - — foc-921-prompt-hygiene — -
 <!-- state-index:end -->
 
 ## Stałe zasady — od 2026-09-29 (dyrektywa Mateusza, „obowiązują od teraz")
