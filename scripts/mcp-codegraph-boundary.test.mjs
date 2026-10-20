@@ -177,8 +177,12 @@ await test(".mcp.json routes codegraph through the boundary adapter (node + proj
 
 await test(".mcp.json leaves the fenix servers untouched", async () => {
   const cfg = JSON.parse(readFileSync(join(REPO, ".mcp.json"), "utf8"));
+  // FOC-943 added fenix-linear / fenix-github (the Supervisor's external writes).
+  const expected = ["fenix-decision-extraction", "fenix-decision-prompt-refinement", "fenix-github", "fenix-linear"];
   const names = Object.keys(cfg.mcpServers).filter((n) => n.startsWith("fenix-"));
-  if (names.length !== 2) fail("expected 2 fenix servers, got " + names.length);
+  if (JSON.stringify([...names].sort()) !== JSON.stringify(expected)) {
+    fail("expected fenix servers " + expected.join(", ") + ", got " + names.join(", "));
+  }
   for (const n of names) {
     const s = cfg.mcpServers[n];
     if (s.command !== "node" || !Array.isArray(s.args) || !s.args[0]?.startsWith("scripts/mcp/")) {

@@ -149,6 +149,8 @@ deny:
 | `ListAgents` |  |
 | `Monitor` |  |
 | `mcp__claude_ai_Linear__*` |  |
+| `mcp__fenix-linear__*` |  |
+| `mcp__fenix-github__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
 
@@ -170,6 +172,8 @@ deny:
 | codegraph | yes | `mcp__codegraph__*` |
 | fenix-decision-extraction | yes | `mcp__fenix-decision-extraction__*` |
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
+| fenix-linear | no | — |
+| fenix-github | no | — |
 
 ### Skills
 
@@ -335,6 +339,8 @@ deny:
 | `ListAgents` |  |
 | `Monitor` |  |
 | `mcp__claude_ai_Linear__*` |  |
+| `mcp__fenix-linear__*` |  |
+| `mcp__fenix-github__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
 
@@ -356,6 +362,8 @@ deny:
 | codegraph | yes | `mcp__codegraph__*` |
 | fenix-decision-extraction | yes | `mcp__fenix-decision-extraction__*` |
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
+| fenix-linear | no | — |
+| fenix-github | no | — |
 
 ### Skills
 
@@ -380,7 +388,10 @@ ask:
 
 deny:
 
-(none)
+| rule | note |
+|---|---|
+| `mcp__fenix-linear__*` |  |
+| `mcp__fenix-github__*` |  |
 
 ### Other settings
 
@@ -398,6 +409,8 @@ deny:
 | codegraph | no | — |
 | fenix-decision-extraction | no | — |
 | fenix-decision-prompt-refinement | no | — |
+| fenix-linear | no | — |
+| fenix-github | no | — |
 
 ### Skills
 
@@ -545,6 +558,8 @@ deny:
 | `ListAgents` |  |
 | `Monitor` |  |
 | `mcp__claude_ai_Linear__*` |  |
+| `mcp__fenix-linear__*` |  |
+| `mcp__fenix-github__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
 
@@ -566,6 +581,8 @@ deny:
 | codegraph | yes | `mcp__codegraph__*` |
 | fenix-decision-extraction | yes | `mcp__fenix-decision-extraction__*` |
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
+| fenix-linear | no | — |
+| fenix-github | no | — |
 
 ### Skills
 
@@ -724,6 +741,8 @@ deny:
 | `ListAgents` |  |
 | `Monitor` |  |
 | `mcp__claude_ai_Linear__*` |  |
+| `mcp__fenix-linear__*` |  |
+| `mcp__fenix-github__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
 
@@ -745,6 +764,8 @@ deny:
 | codegraph | yes | `mcp__codegraph__*` |
 | fenix-decision-extraction | yes | `mcp__fenix-decision-extraction__*` |
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
+| fenix-linear | no | — |
+| fenix-github | no | — |
 
 ### Skills
 
@@ -785,6 +806,12 @@ allow:
 | `mcp__codegraph__*` |  |
 | `mcp__fenix-decision-extraction__*` |  |
 | `mcp__fenix-decision-prompt-refinement__*` |  |
+| `mcp__fenix-linear__transition` |  |
+| `mcp__fenix-linear__comment` |  |
+| `mcp__fenix-linear__comment_replace` |  |
+| `mcp__fenix-github__pr_create` |  |
+| `mcp__fenix-github__pr_edit` |  |
+| `mcp__fenix-github__pr_comment` |  |
 | `Bash(codegraph:*)` |  |
 | `Edit` |  |
 | `Bash(ls:*)` |  |
@@ -946,12 +973,16 @@ deny:
 | codegraph | yes | `mcp__codegraph__*` |
 | fenix-decision-extraction | yes | `mcp__fenix-decision-extraction__*` |
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
+| fenix-linear | yes | `mcp__fenix-linear__transition` |
+| fenix-github | yes | `mcp__fenix-github__pr_create` |
 
 ### Skills
 
 | name | source |
 |---|---|
+| archify | own |
 | codegraph-expert | both |
+| diagram-design | own |
 | grill-me | both |
 | grilling | both |
 | working-state | both |
@@ -1105,6 +1136,8 @@ deny:
 | `Monitor` |  |
 | `mcp__claude_ai_Linear__*` |  |
 | `mcp__linear__*` |  |
+| `mcp__fenix-linear__*` |  |
+| `mcp__fenix-github__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
 
@@ -1126,6 +1159,8 @@ deny:
 | codegraph | yes | `mcp__codegraph__*` |
 | fenix-decision-extraction | yes | `mcp__fenix-decision-extraction__*` |
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
+| fenix-linear | no | — |
+| fenix-github | no | — |
 
 ### Skills
 
