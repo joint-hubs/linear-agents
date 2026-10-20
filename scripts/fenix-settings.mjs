@@ -170,10 +170,22 @@ function taskSessionsErrors(value) {
     return errors;
   }
   for (const key of Object.keys(value)) {
-    if (key !== "maxActive" && key !== "autoPickup") errors.push(`taskSessions.${key}: unknown key`);
+    if (key !== "maxActive" && key !== "autoPickup" && key !== "parkedPrompt" && key !== "parkedPromptMinutes")
+      errors.push(`taskSessions.${key}: unknown key`);
   }
   if (value.maxActive !== undefined && (!Number.isInteger(value.maxActive) || value.maxActive < 1 || value.maxActive > 8)) {
     errors.push("taskSessions.maxActive: must be an integer between 1 and 8");
+  }
+  // FOC-920: the parked-prompt policy — "wait" keeps waiting for the reply,
+  // "deny-after" denies the task once the parked window elapses.
+  if (value.parkedPrompt !== undefined && value.parkedPrompt !== "wait" && value.parkedPrompt !== "deny-after") {
+    errors.push('taskSessions.parkedPrompt: must be "wait" or "deny-after"');
+  }
+  if (
+    value.parkedPromptMinutes !== undefined &&
+    (!Number.isInteger(value.parkedPromptMinutes) || value.parkedPromptMinutes < 5 || value.parkedPromptMinutes > 240)
+  ) {
+    errors.push("taskSessions.parkedPromptMinutes: integer 5..240");
   }
   if (value.autoPickup !== undefined) {
     if (!isPlainObject(value.autoPickup)) errors.push("taskSessions.autoPickup: must be an object");
@@ -351,7 +363,8 @@ export function validateSettings(obj) {
 
 // ---------------------------------------------------------------------------
 // Read side for non-CLI callers (task-session-host, fenix-doctor): the
-// task-session cap and the FOC-902 auto-pickup config from the overlay.
+// task-session cap, the FOC-902 auto-pickup config and the FOC-920
+// parked-prompt policy from the overlay.
 // Never throws — a missing, unreadable or invalid overlay reads as
 // { maxActive: null, autoPickup: null } and the caller falls back to its
 // default. Exactly one stderr line names what was ignored and why —
@@ -360,8 +373,10 @@ export function validateSettings(obj) {
 // surface where it fits.
 // autoPickup, when configured, is returned NORMALIZED with the documented
 // defaults filled in: { enabled: false, pollSeconds: 300, states: ["Backlog"],
-// label: null, workspace: null }. An invalid overlay discards the whole
-// taskSessions section — never half a config.
+// label: null, workspace: null }. parkedPrompt is ALWAYS an object —
+// { mode: "wait", minutes: 30 } when unset or when the section is invalid
+// (the safe behaviour: an invalid overlay discards the whole taskSessions
+// section — never half a config — and waiting is the parked-prompt default).
 // ---------------------------------------------------------------------------
 
 const AUTO_PICKUP_DEFAULTS = { enabled: false, pollSeconds: 300, states: ["Backlog"], label: null, workspace: null };
@@ -376,10 +391,24 @@ export function normalizeAutoPickup(raw) {
   };
 }
 
+// FOC-920: the parked-prompt policy defaults — keep waiting, 30 minutes.
+export const PARKED_PROMPT_DEFAULTS = { mode: "wait", minutes: 30 };
+
+export function normalizeParkedPrompt(section) {
+  return {
+    mode: section.parkedPrompt ?? PARKED_PROMPT_DEFAULTS.mode,
+    minutes: section.parkedPromptMinutes ?? PARKED_PROMPT_DEFAULTS.minutes,
+  };
+}
+
+const PARKED_PROMPT_FALLBACK = () => ({ ...PARKED_PROMPT_DEFAULTS });
+
 export function readTaskSessionsSettings(env = process.env, { quiet = false } = {}) {
   const fail = (message) => {
     if (!quiet) console.error(message);
-    return quiet ? { maxActive: null, autoPickup: null, error: message } : { maxActive: null, autoPickup: null };
+    return quiet
+      ? { maxActive: null, autoPickup: null, parkedPrompt: PARKED_PROMPT_FALLBACK(), error: message }
+      : { maxActive: null, autoPickup: null, parkedPrompt: PARKED_PROMPT_FALLBACK() };
   };
   let settings;
   try {
@@ -388,7 +417,7 @@ export function readTaskSessionsSettings(env = process.env, { quiet = false } = 
     return fail(`settings: ${err?.message ?? err} — taskSessions settings ignored`);
   }
   const value = isPlainObject(settings) ? settings.taskSessions : undefined;
-  if (value === undefined) return { maxActive: null, autoPickup: null };
+  if (value === undefined) return { maxActive: null, autoPickup: null, parkedPrompt: PARKED_PROMPT_FALLBACK() };
   const errors = taskSessionsErrors(value);
   if (errors.length > 0) {
     return fail(`settings ${errors[0]} — ignoring the taskSessions section`);
@@ -396,6 +425,7 @@ export function readTaskSessionsSettings(env = process.env, { quiet = false } = 
   return {
     maxActive: value.maxActive ?? null,
     autoPickup: value.autoPickup !== undefined ? normalizeAutoPickup(value.autoPickup) : null,
+    parkedPrompt: normalizeParkedPrompt(value),
   };
 }
 

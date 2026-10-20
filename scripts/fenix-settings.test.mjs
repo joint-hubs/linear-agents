@@ -13,7 +13,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { readSettings, readTaskSessionsSettings, validateSettings, writeSettings } from "./fenix-settings.mjs";
+import {
+  PARKED_PROMPT_DEFAULTS,
+  normalizeParkedPrompt,
+  readSettings,
+  readTaskSessionsSettings,
+  validateSettings,
+  writeSettings,
+} from "./fenix-settings.mjs";
 
 const execFileP = promisify(execFile);
 const CLI = fileURLToPath(new URL("./fenix-settings.mjs", import.meta.url));
@@ -669,7 +676,11 @@ test("writeSettings round-trips taskSessions.maxActive and the set CLI works", a
     const path = settingsFile(dir);
     await runSet(path, "taskSessions.maxActive", "4");
     assert.deepEqual(readSettings({ path }).taskSessions, { maxActive: 4 });
-    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), { maxActive: 4, autoPickup: null });
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), {
+      maxActive: 4,
+      autoPickup: null,
+      parkedPrompt: { mode: "wait", minutes: 30 },
+    });
     await assert.rejects(runSet(path, "taskSessions.maxActive", "9"), (err) => {
       assert.equal(err.code, 1);
       assert.ok(err.stderr.includes("taskSessions.maxActive: must be an integer between 1 and 8"));
@@ -684,7 +695,11 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
   const dir = tempDir();
   try {
     // Missing file.
-    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: settingsFile(dir) }), { maxActive: null, autoPickup: null });
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: settingsFile(dir) }), {
+      maxActive: null,
+      autoPickup: null,
+      parkedPrompt: { mode: "wait", minutes: 30 },
+    });
     // Invalid JSON.
     const bad = settingsFile(dir);
     writeFileSync(bad, "{ not json", "utf8");
@@ -692,7 +707,11 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
     const orig = console.error;
     console.error = (msg) => errs.push(String(msg));
     try {
-      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: bad }), { maxActive: null, autoPickup: null });
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: bad }), {
+        maxActive: null,
+        autoPickup: null,
+        parkedPrompt: { mode: "wait", minutes: 30 },
+      });
       assert.equal(errs.length, 1);
       assert.match(errs[0], /taskSessions settings ignored/);
     } finally {
@@ -704,7 +723,11 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
     const errs2 = [];
     console.error = (msg) => errs2.push(String(msg));
     try {
-      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: wrong }), { maxActive: null, autoPickup: null });
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: wrong }), {
+        maxActive: null,
+        autoPickup: null,
+        parkedPrompt: { mode: "wait", minutes: 30 },
+      });
       assert.equal(errs2.length, 1);
       assert.match(errs2[0], /must be an integer between 1 and 8/);
     } finally {
@@ -716,7 +739,11 @@ test("readTaskSessionsSettings: missing or invalid overlay → null (with one st
     const errs3 = [];
     console.error = (msg) => errs3.push(String(msg));
     try {
-      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: quiet }), { maxActive: null, autoPickup: null });
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: quiet }), {
+        maxActive: null,
+        autoPickup: null,
+        parkedPrompt: { mode: "wait", minutes: 30 },
+      });
       assert.equal(errs3.length, 0);
     } finally {
       console.error = orig;
@@ -741,7 +768,7 @@ test("readTaskSessionsSettings: quiet swallows the stderr line and returns the r
       assert.equal(errs.length, 0, "quiet must not print to stderr");
       // A missing overlay is not an error — quiet or not, no reason attached.
       const missing = readTaskSessionsSettings({ LA_SETTINGS_FILE: join(dir, "nope.json") }, { quiet: true });
-      assert.deepEqual(missing, { maxActive: null, autoPickup: null });
+      assert.deepEqual(missing, { maxActive: null, autoPickup: null, parkedPrompt: { mode: "wait", minutes: 30 } });
     } finally {
       console.error = orig;
     }
@@ -806,6 +833,7 @@ test("readTaskSessionsSettings: autoPickup is normalized with the documented def
     assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), {
       maxActive: 3,
       autoPickup: { enabled: true, pollSeconds: 300, states: ["Backlog"], label: null, workspace: null },
+      parkedPrompt: { mode: "wait", minutes: 30 },
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -821,12 +849,149 @@ test("readTaskSessionsSettings: an invalid autoPickup discards the whole taskSes
     const orig = console.error;
     console.error = (msg) => errs.push(String(msg));
     try {
-      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), { maxActive: null, autoPickup: null });
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), {
+        maxActive: null,
+        autoPickup: null,
+        parkedPrompt: { mode: "wait", minutes: 30 },
+      });
       assert.equal(errs.length, 1);
       assert.match(errs[0], /taskSessions\.autoPickup\.pollSeconds/);
     } finally {
       console.error = orig;
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- taskSessions.parkedPrompt / parkedPromptMinutes (FOC-920) ---------------
+
+test("validateSettings: taskSessions.parkedPrompt accepts the documented shapes", () => {
+  assert.deepEqual(validateSettings({ taskSessions: { parkedPrompt: "wait" } }), { ok: true, errors: [] });
+  assert.deepEqual(validateSettings({ taskSessions: { parkedPrompt: "deny-after" } }), { ok: true, errors: [] });
+  assert.deepEqual(validateSettings({ taskSessions: { parkedPromptMinutes: 5 } }), { ok: true, errors: [] });
+  assert.deepEqual(validateSettings({ taskSessions: { parkedPromptMinutes: 240 } }), { ok: true, errors: [] });
+  assert.deepEqual(
+    validateSettings({ taskSessions: { parkedPrompt: "deny-after", parkedPromptMinutes: 45 } }),
+    { ok: true, errors: [] },
+  );
+  assert.deepEqual(validateSettings({ ...VALID, taskSessions: { parkedPrompt: "deny-after", parkedPromptMinutes: 240 } }), {
+    ok: true,
+    errors: [],
+  });
+});
+
+test("validateSettings: taskSessions.parkedPrompt bad values refused with the documented messages", () => {
+  const enumCases = ["nope", "", "WAIT", 1, true, null];
+  for (const parkedPrompt of enumCases) {
+    const { ok, errors } = validateSettings({ taskSessions: { parkedPrompt } });
+    assert.equal(ok, false, `${JSON.stringify(parkedPrompt)} must be refused`);
+    assert.ok(
+      errors.includes('taskSessions.parkedPrompt: must be "wait" or "deny-after"'),
+      `${JSON.stringify(parkedPrompt)}: ${JSON.stringify(errors)}`,
+    );
+  }
+  const minutesCases = [4, 241, 0, -30, 2.5, "30", null, true];
+  for (const parkedPromptMinutes of minutesCases) {
+    const { ok, errors } = validateSettings({ taskSessions: { parkedPromptMinutes } });
+    assert.equal(ok, false, `${JSON.stringify(parkedPromptMinutes)} must be refused`);
+    assert.ok(
+      errors.includes("taskSessions.parkedPromptMinutes: integer 5..240"),
+      `${JSON.stringify(parkedPromptMinutes)}: ${JSON.stringify(errors)}`,
+    );
+  }
+  const extra = validateSettings({ taskSessions: { parkedPrompt: "wait", parkedPromptMinutes: 30, nope: 1 } });
+  assert.equal(extra.ok, false);
+  assert.ok(extra.errors.some((e) => e.includes("taskSessions.nope") && e.includes("unknown key")));
+});
+
+test("normalizeParkedPrompt fills the documented defaults", () => {
+  assert.deepEqual(normalizeParkedPrompt({}), { mode: "wait", minutes: 30 });
+  assert.deepEqual(normalizeParkedPrompt({ parkedPrompt: "deny-after", parkedPromptMinutes: 45 }), {
+    mode: "deny-after",
+    minutes: 45,
+  });
+  assert.deepEqual(normalizeParkedPrompt({ parkedPrompt: "deny-after" }), { mode: "deny-after", minutes: 30 });
+  assert.deepEqual(normalizeParkedPrompt({ parkedPromptMinutes: 90 }), { mode: "wait", minutes: 90 });
+  assert.deepEqual(PARKED_PROMPT_DEFAULTS, { mode: "wait", minutes: 30 });
+});
+
+test("readTaskSessionsSettings: parkedPrompt returns the configured values, defaults when absent", () => {
+  const dir = tempDir();
+  try {
+    // Configured.
+    const path = settingsFile(dir);
+    writeFileSync(path, JSON.stringify({ taskSessions: { parkedPrompt: "deny-after", parkedPromptMinutes: 120 } }), "utf8");
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), {
+      maxActive: null,
+      autoPickup: null,
+      parkedPrompt: { mode: "deny-after", minutes: 120 },
+    });
+    // A file without taskSessions reads the defaults without noise.
+    const quiet = join(dir, "quiet.json");
+    writeFileSync(quiet, JSON.stringify({ routing: {} }), "utf8");
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: quiet }), {
+      maxActive: null,
+      autoPickup: null,
+      parkedPrompt: { mode: "wait", minutes: 30 },
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readTaskSessionsSettings: an invalid parkedPrompt discards the whole section, parkedPrompt reads as defaults", () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    writeFileSync(
+      path,
+      JSON.stringify({ taskSessions: { maxActive: 2, parkedPrompt: "deny-after", parkedPromptMinutes: 3 } }),
+      "utf8",
+    );
+    const errs = [];
+    const orig = console.error;
+    console.error = (msg) => errs.push(String(msg));
+    try {
+      assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), {
+        maxActive: null,
+        autoPickup: null,
+        parkedPrompt: { mode: "wait", minutes: 30 },
+      });
+      assert.equal(errs.length, 1);
+      assert.match(errs[0], /taskSessions\.parkedPromptMinutes/);
+    } finally {
+      console.error = orig;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeSettings round-trips parkedPrompt keys via the set CLI with the right types", async () => {
+  const dir = tempDir();
+  try {
+    const path = settingsFile(dir);
+    await runSet(path, "taskSessions.parkedPromptMinutes", "45");
+    await runSet(path, "taskSessions.parkedPrompt", "deny-after");
+    assert.deepEqual(readSettings({ path }).taskSessions, { parkedPromptMinutes: 45, parkedPrompt: "deny-after" });
+    assert.equal(readSettings({ path }).taskSessions.parkedPromptMinutes, 45, "minutes must be stored as a number");
+    assert.equal(readSettings({ path }).taskSessions.parkedPrompt, "deny-after", "mode must be stored as a string");
+    assert.deepEqual(readTaskSessionsSettings({ LA_SETTINGS_FILE: path }), {
+      maxActive: null,
+      autoPickup: null,
+      parkedPrompt: { mode: "deny-after", minutes: 45 },
+    });
+    await assert.rejects(runSet(path, "taskSessions.parkedPrompt", "nope"), (err) => {
+      assert.equal(err.code, 1);
+      assert.ok(err.stderr.includes('taskSessions.parkedPrompt: must be "wait" or "deny-after"'));
+      return true;
+    });
+    await assert.rejects(runSet(path, "taskSessions.parkedPromptMinutes", "241"), (err) => {
+      assert.equal(err.code, 1);
+      assert.ok(err.stderr.includes("taskSessions.parkedPromptMinutes: integer 5..240"));
+      return true;
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
