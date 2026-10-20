@@ -980,9 +980,7 @@ deny:
 
 | name | source |
 |---|---|
-| archify | own |
 | codegraph-expert | both |
-| diagram-design | own |
 | grill-me | both |
 | grilling | both |
 | working-state | both |
