@@ -51,6 +51,11 @@ function check(name, condition, detail = "") {
   failures.push(`${name}${detail ? ` — ${detail}` : ""}`);
 }
 
+// The panels default to the last 30 days; the fixture lives in 2026-09 — pin
+// the window on every whole-fixture request so the tests never rot
+// (red on 2026-10-20).
+const FIXTURE_FROM = "2026-01-01T00:00:00.000Z";
+
 // ── fixture: telemetry store ─────────────────────────────────────────────────
 
 const dir = mkdtempSync(join(tmpdir(), "telemetry-analysis-api-"));
@@ -209,7 +214,7 @@ try {
       JSON.stringify(meta.body?.data?.counts));
 
     // era=post default keeps only the post-boundary turns; era=all sees all.
-    const cost = await getJson("/api/analysis/cost?era=all");
+    const cost = await getJson(`/api/analysis/cost?era=all&from=${FIXTURE_FROM}`);
     check("GET /api/analysis/cost -> 200", cost.status === 200, `got ${cost.status}`);
     check("cost envelope: filters + data + caveats",
       cost.body && cost.body.filters && cost.body.data && Array.isArray(cost.body.caveats),
@@ -218,7 +223,7 @@ try {
       cost.body?.data?.totals?.turns === 3 && Math.abs(cost.body?.data?.totals?.usd - 4.0) < 1e-9,
       JSON.stringify(cost.body?.data?.totals));
 
-    const tools = await getJson("/api/analysis/tools?era=post");
+    const tools = await getJson(`/api/analysis/tools?era=post&from=${FIXTURE_FROM}`);
     check("GET /api/analysis/tools -> 200", tools.status === 200, `got ${tools.status}`);
     check("tools envelope: totals + byTool",
       tools.body?.data?.totals && Array.isArray(tools.body?.data?.byTool),
@@ -227,7 +232,7 @@ try {
       tools.body?.data?.totals?.calls === 3 && tools.body?.data?.totals?.errors === 1,
       JSON.stringify(tools.body?.data?.totals));
 
-    const handoffs = await getJson("/api/analysis/handoffs?era=all");
+    const handoffs = await getJson(`/api/analysis/handoffs?era=all&from=${FIXTURE_FROM}`);
     check("GET /api/analysis/handoffs -> 200", handoffs.status === 200, `got ${handoffs.status}`);
     check("handoffs envelope: totals + byPair + bySquad",
       handoffs.body?.data?.totals && Array.isArray(handoffs.body?.data?.byPair) &&
@@ -237,7 +242,7 @@ try {
       handoffs.body?.data?.totals?.links === 1 && handoffs.body?.data?.totals?.resolved === 1,
       JSON.stringify(handoffs.body?.data?.totals));
 
-    const quality = await getJson("/api/analysis/quality?era=all");
+    const quality = await getJson(`/api/analysis/quality?era=all&from=${FIXTURE_FROM}`);
     check("GET /api/analysis/quality -> 200", quality.status === 200, `got ${quality.status}`);
     check("quality envelope: canonCoverage + openIssues",
       quality.body?.data?.canonCoverage && Array.isArray(quality.body?.data?.openIssues),
@@ -246,7 +251,7 @@ try {
       quality.body?.data?.openIssues?.some((r) => r.issue_type === "pricing_missing" && r.n === 1),
       JSON.stringify(quality.body?.data?.openIssues));
 
-    const decisions = await getJson("/api/analysis/decisions");
+    const decisions = await getJson(`/api/analysis/decisions?from=${FIXTURE_FROM}`);
     check("GET /api/analysis/decisions -> 200", decisions.status === 200, `got ${decisions.status}`);
     check("decisions envelope: totals + decisions[]",
       decisions.body?.data?.totals && Array.isArray(decisions.body?.data?.decisions),
@@ -263,7 +268,7 @@ try {
 
     // squad/model mean nothing for decision events — the route must SAY so
     // (a silently dropped filter lies in the numbers), not just ignore them.
-    const decisionsFiltered = await getJson("/api/analysis/decisions?squad=alpha&model=m1");
+    const decisionsFiltered = await getJson(`/api/analysis/decisions?squad=alpha&model=m1&from=${FIXTURE_FROM}`);
     check("decisions with squad/model -> 200", decisionsFiltered.status === 200, `got ${decisionsFiltered.status}`);
     check("decisions with squad/model -> info caveat filter_not_applied",
       decisionsFiltered.body?.caveats?.some(
@@ -286,7 +291,7 @@ try {
     // 200 + the contract's top-level keys on each route (the fixture store has
     // no run_task_links rows, so the panels answer empty-but-well-shaped).
     for (const [route, key] of [["tickets", "tasks"], ["money", "total"], ["outliers", "tasks"]]) {
-      const res = await getJson(`/api/analysis/${route}?era=all`);
+      const res = await getJson(`/api/analysis/${route}?era=all&from=${FIXTURE_FROM}`);
       check(`GET /api/analysis/${route} -> 200`, res.status === 200, `got ${res.status}: ${JSON.stringify(res.body).slice(0, 300)}`);
       check(`${route} envelope: filters + data.definition + data.${key} + caveats`,
         res.body?.filters && typeof res.body?.data?.definition === "string" &&
@@ -303,7 +308,7 @@ try {
     // AC2 / P3.1: each panel answers in < 500 ms on the fixture cache.
     for (const route of ["tickets", "money", "outliers"]) {
       const started = Date.now();
-      await getJson(`/api/analysis/${route}?era=all`);
+      await getJson(`/api/analysis/${route}?era=all&from=${FIXTURE_FROM}`);
       const ms = Date.now() - started;
       check(`${route} answers < 500 ms on the fixture (P3.1)`, ms < 500, `${ms} ms`);
     }
@@ -393,7 +398,7 @@ try {
         db.close();
       }
 
-      const costStale = await getJson("/api/analysis/cost?era=all");
+      const costStale = await getJson(`/api/analysis/cost?era=all&from=${FIXTURE_FROM}`);
       check("stale cache still serves: panel totals unchanged after a store insert",
         costStale.status === 200 && costStale.body?.data?.totals?.turns === 3,
         `status ${costStale.status} totals ${JSON.stringify(costStale.body?.data?.totals)}`);
@@ -496,7 +501,7 @@ try {
         settled?.stale === false && settled?.lastBuild?.ok === true,
         JSON.stringify(settled).slice(0, 300));
 
-      const costFresh = await getJson("/api/analysis/cost?era=all");
+      const costFresh = await getJson(`/api/analysis/cost?era=all&from=${FIXTURE_FROM}`);
       check("panel includes the extra row after the rebuild",
         costFresh.status === 200 && costFresh.body?.data?.totals?.turns === 4,
         `status ${costFresh.status} totals ${JSON.stringify(costFresh.body?.data?.totals)}`);
@@ -522,7 +527,7 @@ try {
           && typeof st.body?.schemaVersion === "number",
         `status ${st.status} body ${JSON.stringify(st.body).slice(0, 300)}`);
 
-      const miss = await getJson("/api/analysis/cost?era=all");
+      const miss = await getJson(`/api/analysis/cost?era=all&from=${FIXTURE_FROM}`);
       check("panel against an old-schema cache -> 503 code cache_building",
         miss.status === 503 && miss.body?.code === "cache_building",
         `status ${miss.status} body ${JSON.stringify(miss.body)}`);
@@ -538,7 +543,7 @@ try {
       check("auto-build restores the old-schema cache within 60 s", restored,
         "cache still old-schema or building after 60 s");
 
-      const costRestored = await getJson("/api/analysis/cost?era=all");
+      const costRestored = await getJson(`/api/analysis/cost?era=all&from=${FIXTURE_FROM}`);
       check("panel serves again after the schema-triggered auto-build",
         costRestored.status === 200 && costRestored.body?.data?.totals?.turns === 4,
         `status ${costRestored.status} totals ${JSON.stringify(costRestored.body?.data?.totals)}`);
@@ -552,7 +557,7 @@ try {
     {
       rmSync(cacheFile, { force: true });
 
-      const miss = await getJson("/api/analysis/cost?era=all");
+      const miss = await getJson(`/api/analysis/cost?era=all&from=${FIXTURE_FROM}`);
       check("panel with a missing cache -> 503 code cache_building",
         miss.status === 503 && miss.body?.code === "cache_building",
         `status ${miss.status} body ${JSON.stringify(miss.body)}`);
@@ -569,7 +574,7 @@ try {
       check("auto-build restores the missing cache within 60 s", restored,
         "cache still missing or building after 60 s");
 
-      const costRestored = await getJson("/api/analysis/cost?era=all");
+      const costRestored = await getJson(`/api/analysis/cost?era=all&from=${FIXTURE_FROM}`);
       check("panel serves again after the auto-build",
         costRestored.status === 200 && costRestored.body?.data?.totals?.turns === 4,
         `status ${costRestored.status} totals ${JSON.stringify(costRestored.body?.data?.totals)}`);
