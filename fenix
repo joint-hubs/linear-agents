@@ -12,6 +12,13 @@ API_SERVICE="fenix-api"
 ENTRYPOINT="/opt/fenix/docker/entrypoint.sh"
 SECRET_DIR=".fenix/secrets"
 ENV_FILE=".fenix/fenix.env"
+# FOC-777: the published image and its pin. `fenix up` / `fenix update` pull
+# $IMAGE_REPO:$(cat VERSION) unless the source mode is on (--source or
+# FENIX_SOURCE=1), which builds fenix:dev from this clone as before. An explicit
+# FENIX_IMAGE_REF wins over the pin (a sha tag, a mirror).
+IMAGE_REPO="ghcr.io/joint-hubs/fenix"
+VERSION_FILE="VERSION"
+SOURCE_MODE="${FENIX_SOURCE:-0}"
 
 usage() {
   cat <<'EOF'
@@ -19,7 +26,7 @@ Fenix launcher.
 
 Usage: fenix [command]
 
-  up               preflight, set up missing keys, build and start the stack
+  up [--source]    preflight, set up missing keys, pull the pinned image (or build with --source) and start the stack
   stop             stop the stack
   down             stop and remove containers (the data volume is kept)
   logs [service]   follow logs (default: all services)
@@ -41,8 +48,10 @@ Usage: fenix [command]
   repo add <url|owner/name> [--project <Linear project>]
                    clone a repository into the workspaces volume (optionally map a Linear project)
   repo list        repositories in the workspaces volume and the project map
-  update           git pull --ff-only, rebuild with fresh base images, restart
+  update [--source] git pull --ff-only, pull the pinned image (or rebuild with --source), restart
   test [args]      lint and the full test suite on Linux, inside the image
+
+Environment: FENIX_SOURCE=1 (build from this clone), FENIX_IMAGE_REF (use this image instead of the pin), FENIX_PORT.
 
 Exit codes: 0 ok | 2 usage | 3 preflight failed | 4 health timeout | 5 key rejected
 EOF
@@ -72,6 +81,119 @@ set_build_uid() {
   export FENIX_UID FENIX_GID
 }
 set_build_uid
+
+# --- image reference (FOC-777) ----------------------------------------------
+
+pinned_version() {
+  if [ -r "$VERSION_FILE" ]; then
+    tr -d '\r\n ' < "$VERSION_FILE"
+  fi
+}
+
+image_ref() {
+  if [ -n "${FENIX_IMAGE_REF:-}" ]; then
+    printf '%s\n' "$FENIX_IMAGE_REF"
+    return 0
+  fi
+  v="$(pinned_version)"
+  if [ -z "$v" ]; then
+    printf 'fenix:dev\n'
+    return 0
+  fi
+  printf '%s:%s\n' "$IMAGE_REPO" "$v"
+}
+
+needs_uid_layer() {
+  case "$(uname -s)" in
+    Linux) ;;
+    *) return 1 ;;
+  esac
+  [ "${FENIX_UID:-1000}:${FENIX_GID:-1000}" != "1000:1000" ]
+}
+
+image_digest() {
+  docker image inspect "$1" --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' 2>/dev/null | sed 's/.*@//' | cut -c1-19
+}
+
+# Make the stack's image present and export FENIX_IMAGE_REF for compose.
+# Modes: "" (fenix up — fresh: pull, or build in source mode), --pull
+# (fenix update — same, with fresh base images for a source build),
+# --if-missing (helpers such as fenix keys / doctor — touch nothing when the
+# image is already on this machine; the old code built only when fenix:dev
+# was missing, and this keeps that promise for the pulled image too).
+# Source mode (or no VERSION pin): build fenix:dev from this clone. Otherwise
+# pull the pinned ref; a pull that fails uses the local copy when there is one
+# and says so, else builds from source — loudly, never silently. On a Linux
+# host with another uid, add the thin remapped layer on top of the pulled
+# image (seconds: only the uid layer is new).
+ensure_image() {
+  mode="${1:-}"
+  build_flags=""
+  if [ "$mode" = "--pull" ]; then
+    build_flags="--pull"
+  fi
+  ref="$(image_ref)"
+  uid="${FENIX_UID:-1000}"
+  gid="${FENIX_GID:-1000}"
+  if [ "$SOURCE_MODE" = "1" ] || [ "$ref" = "fenix:dev" ]; then
+    FENIX_IMAGE_REF="fenix:dev"
+    export FENIX_IMAGE_REF
+    if [ "$mode" = "--if-missing" ] && docker image inspect fenix:dev >/dev/null 2>&1; then
+      return 0
+    fi
+    printf 'Building the image from this clone (source mode)...\n'
+    # shellcheck disable=SC2086
+    docker compose build $build_flags
+    return 0
+  fi
+  want="$ref"
+  if needs_uid_layer; then
+    want="fenix:local-${uid}-${gid}"
+  fi
+  if [ "$mode" = "--if-missing" ] && docker image inspect "$want" >/dev/null 2>&1; then
+    FENIX_IMAGE_REF="$want"
+    export FENIX_IMAGE_REF
+    return 0
+  fi
+  printf 'Pulling %s ...\n' "$ref"
+  if ! docker pull "$ref"; then
+    if docker image inspect "$ref" >/dev/null 2>&1; then
+      printf 'WARN %s could not be pulled (offline?) — using the copy already on this machine\n' "$ref"
+    else
+      printf 'WARN %s could not be pulled (not published yet, or offline) — building from this clone instead; fenix up --source skips the pull\n' "$ref"
+      FENIX_IMAGE_REF="fenix:dev"
+      export FENIX_IMAGE_REF
+      # shellcheck disable=SC2086
+      docker compose build $build_flags
+      return 0
+    fi
+  fi
+  if needs_uid_layer; then
+    printf 'Host uid %s:%s differs from the image (1000:1000) — building the thin uid layer %s ...\n' "$uid" "$gid" "$want"
+    docker build -f docker/Dockerfile.uid \
+      --build-arg "BASE=$ref" \
+      --build-arg "FENIX_UID=$uid" \
+      --build-arg "FENIX_GID=$gid" \
+      --build-arg "FENIX_CHILD_UID=${FENIX_CHILD_UID:-}" \
+      -t "$want" .
+  fi
+  FENIX_IMAGE_REF="$want"
+  export FENIX_IMAGE_REF
+}
+
+image_line() {
+  ref="$(image_ref)"
+  if [ "$SOURCE_MODE" = "1" ] || [ "$ref" = "fenix:dev" ]; then
+    printf 'image: fenix:dev (built from this clone)\n'
+    return 0
+  fi
+  d="$(image_digest "$ref")"
+  if needs_uid_layer; then
+    printf 'image: %s (thin uid layer fenix:local-%s-%s, digest %s)\n' "$ref" "${FENIX_UID:-1000}" "${FENIX_GID:-1000}" "${d:-not pulled yet}"
+  else
+    printf 'image: %s (digest %s)\n' "$ref" "${d:-not pulled yet}"
+  fi
+}
 
 # --- preflight ---------------------------------------------------------------
 
@@ -175,10 +297,7 @@ in_container_node() {
   # docker command line. Builds the image first when it is missing.
   script="$1"
   shift
-  if ! docker image inspect fenix:dev >/dev/null 2>&1; then
-    printf 'Building the image first...\n'
-    docker compose build fenix-api
-  fi
+  ensure_image --if-missing
   docker compose run --rm --no-deps -T --entrypoint node fenix-api "/opt/fenix/$script" "$@"
 }
 
@@ -689,8 +808,9 @@ cmd_up() {
 
   retention_step
 
-  printf 'Building and starting the stack...\n'
-  docker compose up -d --build
+  ensure_image
+  printf 'Starting the stack...\n'
+  docker compose up -d
   ensure_cache_volume
 
   if ! wait_healthy; then
@@ -710,6 +830,7 @@ cmd_up() {
 }
 
 cmd_doctor() {
+  image_line
   rc=0
   if ! preflight full; then
     rc=1
@@ -726,6 +847,9 @@ cmd_doctor() {
 }
 
 cmd_test() {
+  # Tests always build fenix:dev from source; SOURCE_MODE=1 keeps a later
+  # helper call from pulling instead.
+  SOURCE_MODE=1
   # Docker on Windows needs a Windows path for the bind mount; Git Bash gives
   # one with pwd -W (path conversion is off for this script).
   src=$(pwd -W 2>/dev/null || pwd)
@@ -741,6 +865,18 @@ cmd_test() {
 cmd="${1:-}"
 if [ $# -gt 0 ]; then
   shift
+fi
+
+# `fenix up --source` / `fenix update --source`: build from this clone.
+# After the shift above, $1 is the first argument after the command.
+if [ "${1:-}" = "--source" ]; then
+  case "$cmd" in
+    up|update) SOURCE_MODE=1 ;;
+    *)
+      printf 'fenix %s: --source is only for up and update\n' "$cmd" >&2
+      exit 2
+      ;;
+  esac
 fi
 
 case "$cmd" in
@@ -827,8 +963,13 @@ case "$cmd" in
     exec docker compose exec "$svc" "$ENTRYPOINT" shell
     ;;
   update)
+    old_ref="$(image_ref)"
+    before="$(image_digest "$old_ref")"
     git pull --ff-only
-    docker compose build --pull
+    ensure_image --pull
+    new_ref="$(image_ref)"
+    printf 'image before: %s %s\n' "$old_ref" "${before:-none}"
+    printf 'image after:  %s %s\n' "$new_ref" "$(image_digest "$new_ref")"
     # A newer compose file may mount a secret file this install never had
     # (FOC-786's optional provider_api_key) — `docker compose up` fails on the
     # missing bind source. Same guarantee `up` gives, before the recreate.

@@ -6,7 +6,8 @@
 name: fenix
 
 x-fenix: &fenix
-  image: fenix:dev
+  # FOC-777: the launcher exports FENIX_IMAGE_REF (the pulled pinned image, or its thin uid layer); unset = the local source build.
+  image: ${FENIX_IMAGE_REF:-fenix:dev}
   build:
     context: .
     dockerfile: Dockerfile

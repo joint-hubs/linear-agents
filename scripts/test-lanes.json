@@ -201,6 +201,10 @@
       "reason": "isolation audit FOC-778: the docker runner is an injected fake; the canary reaches grep only via stdin; canary file in a mkdtemp dir; no network, no ports, no socket binds, no telemetry DB"
     },
     {
+      "file": "image-ref.test.mjs",
+      "reason": "FOC-777: pure file reads over the checkout (VERSION, compose.yaml, fenix, the Dockerfiles) — no docker, no ports, no writes"
+    },
+    {
       "file": "launcher-wrappers.test.mjs",
       "reason": "isolation audit FOC-771: reads bin/*.bat only; the one spawn runs the pure --print-plan path of scripts/squad-start.mjs (guarded by existsSync Ă˘â‚¬â€ť prints JSON and exits before any manifest/env side effect), no network, no ports, no socket binds, no telemetry DB"
     },
