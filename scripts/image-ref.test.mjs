@@ -94,6 +94,25 @@ test("the uid logic lives only in docker/set-uid.sh, run by both Dockerfiles", (
   if (!setUid.includes("fenix-child")) fail("docker/set-uid.sh is missing 'fenix-child'");
 });
 
+// ── 5. launcher preflight memory threshold ────────────────────────────────────
+console.log("\nlauncher preflight memory threshold");
+
+test("fenix launcher preflight warns below 8 GB docker memory (WARN, not FAIL)", () => {
+  const text = read("fenix");
+  if (!text.includes("m >= 8589934592")) fail("memory threshold is not 8 GB (8589934592 bytes)");
+  if (!text.includes("docker memory >= 8 GB")) fail("missing the OK line 'docker memory >= 8 GB'");
+  if (!text.includes("below the 8 GB minimum")) fail("the WARN text does not say the minimum is 8 GB");
+  if (/below 4 GB/.test(text)) fail("stale 'below 4 GB' wording left in the launcher");
+  if (text.includes("4294967296")) fail("the old 4 GB threshold (4294967296) is still referenced");
+  // It stays a WARN: the memory branch calls pf_warn, and pf_fail counting /
+  // exit-3 paths belong to the disk check above it.
+  const memIdx = text.indexOf("# Docker memory >=");
+  if (memIdx === -1) fail("missing the '# Docker memory >=' comment");
+  const memBlock = text.slice(memIdx, text.indexOf("if [ \"$pf_fail\" -gt 0 ]"));
+  if (!memBlock.includes("pf_warn")) fail("the memory branch does not use pf_warn");
+  if (memBlock.includes("pf_fail_line")) fail("the memory branch must not FAIL");
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 if (failures.length) {
   console.error(`\nFAILED (${failures.length}):\n  - ${failures.join("\n  - ")}`);
