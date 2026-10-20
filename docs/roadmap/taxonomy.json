@@ -1,0 +1,120 @@
+{
+  "title": "Fenix roadmap by capability",
+  "subtitle": "What Fenix does, what is shipped, what comes next — tickets hang under capabilities, not the other way round.",
+  "updated": "2026-10-20",
+  "principle": "Pull-based: every next feature is justified by friction observed while running real tasks. One delivery owner since 2026-10-15; Mateusz answers gates.",
+  "areas": [
+    {
+      "id": "delivery-loop",
+      "name": "Delivery loop: squads and the graph",
+      "what": "A Linear ticket becomes code through PLAN → DEV → REVIEW → TEST, run as a graph of deterministic, generator, judge and human nodes; the Supervisor is the frontman, children are separate Claude processes in their own worktrees.",
+      "now": "PLAN runs as a graph (intent map, DoR/AC/DoD generators, duplicate search, final gate); DEV/REVIEW/TEST still run as squads; verdicts and review rounds are recorded with lineage; the integration tree installs its own deps before verify.",
+      "next": "FOC-477 decides whether the graph beats the squad (10 real issues, Mateusz at plan.gate1); then REVIEW and TEST become graphs (M4).",
+      "tickets": ["FOC-467", "FOC-477", "FOC-712", "FOC-469", "FOC-478", "FOC-382", "FOC-390", "FOC-617", "FOC-456", "FOC-393", "FOC-453", "FOC-117", "FOC-618", "FOC-397", "FOC-396", "FOC-448", "FOC-449", "FOC-451", "FOC-452", "FOC-474", "FOC-475", "FOC-476", "FOC-515", "FOC-516", "FOC-517", "FOC-519", "FOC-520", "FOC-518", "FOC-513", "FOC-758", "FOC-801", "FOC-596", "FOC-473", "FOC-406", "FOC-271", "FOC-523", "FOC-726", "FOC-759", "FOC-219", "FOC-218", "FOC-217", "FOC-116", "FOC-159", "FOC-102"]
+    },
+    {
+      "id": "supervisor-runtime",
+      "name": "Supervisor runtime: sessions, isolation, unattended operation",
+      "what": "The Supervisor session host (tmux, hooks, wake queue), many autonomous Supervisors on one repository without mixing state, children isolated from the Supervisor inside the container, orphan sweeps, and what happens when nobody is attached.",
+      "now": "Multi-Supervisor isolation shipped (leases, scoped autonomy, journals per task, orphan scan by owner); children run as their own uid behind one root helper; per-child tmp dirs are swept; a parked permission prompt is visible, aged and answerable from the dashboard.",
+      "next": "A parked-prompt policy for unattended runs (after 1.0) and per-run child identity (after 1.0); the Supervisor's own prompt hygiene keeps it off its ask list.",
+      "tickets": ["FOC-920", "FOC-454", "FOC-610", "FOC-898", "FOC-899", "FOC-901", "FOC-902", "FOC-903", "FOC-904", "FOC-905", "FOC-816", "FOC-839", "FOC-848", "FOC-802", "FOC-807", "FOC-808", "FOC-917", "FOC-918", "FOC-921", "FOC-608", "FOC-609", "FOC-522", "FOC-600", "FOC-649"]
+    },
+    {
+      "id": "linear-integration",
+      "name": "Linear integration and ticket ownership",
+      "what": "Reading and writing Linear from the Supervisor and the dashboard: intake, leases, the state ladder (In Progress → In Review → Done after merge), ownership scopes per installation, and the write path that must not stall on a classifier.",
+      "now": "Writes go through screened scripts (linear-ops, publish-linear-comment); foreign tickets are refused and held; the ladder is in the Supervisor's contract.",
+      "next": "External writes through a Fenix MCP server with exact-name allow rules and the permission mode declared (M8); Linear hygiene report and the roadmap rendered from Linear (M7).",
+      "tickets": ["FOC-943", "FOC-717", "FOC-606", "FOC-716", "FOC-577", "FOC-605", "FOC-815"]
+    },
+    {
+      "id": "dashboard",
+      "name": "Dashboard v2",
+      "what": "Six areas: Work board, Cockpit (chat, terminal, Needs-you), Team line-ups, Insights, Costs and quality, Settings — plus one cockpit per task session.",
+      "now": "All six areas shipped for 1.0; questions and permission prompts are answered in the dashboard; push and PR from the dashboard with explicit confirm; Insights under its latency budget.",
+      "next": "After 1.0: the Lab screen (fine-tuning) and a dark theme.",
+      "tickets": ["FOC-792", "FOC-793", "FOC-782", "FOC-804", "FOC-784", "FOC-783", "FOC-810", "FOC-795", "FOC-785", "FOC-786", "FOC-787", "FOC-791", "FOC-914", "FOC-915", "FOC-788", "FOC-800", "FOC-225", "FOC-545"]
+    },
+    {
+      "id": "telemetry",
+      "name": "Telemetry and one cost truth",
+      "what": "Every run, child, turn, tool call and token is ingested into one store with canonical views; costs are priced per model and attributed to tickets; the analysis notebook and the Insights panels read from it.",
+      "now": "Usage deduplicated at ingest, resumed turns kept, Supervisor turns charged to the declared ticket, registry cost no longer fabricated; the analysis cache precomputes the task table.",
+      "next": "Generation-aware dedup for rotated transcripts, the duplicated-messages cause, corpus-wide turn classification.",
+      "tickets": ["FOC-466", "FOC-666", "FOC-732", "FOC-604", "FOC-459", "FOC-381", "FOC-165", "FOC-760", "FOC-761", "FOC-769", "FOC-598", "FOC-597", "FOC-547", "FOC-514", "FOC-164", "FOC-221", "FOC-220", "FOC-811", "FOC-599"]
+    },
+    {
+      "id": "portable-release",
+      "name": "Portable release: Docker, launcher, VM (Fenix 1.0.0)",
+      "what": "Only Docker on the host: one image with every dependency, a compose stack with volumes and resume, the fenix launcher (up / update / doctor / keys / attach), sizing for a VM, and the fresh-machine acceptance that proves it.",
+      "now": "Image on GHCR (public), compose stack, key wizard, retention, Linux CI, VM sizing published (2 vCPU / 8 GB / 50 GB minimum); the launcher pulls the pinned image with a thin uid layer (in review).",
+      "next": "Fresh-machine acceptance on the published image (both modes), release notes and the v1.0.0 tag — target 2026-12-03.",
+      "tickets": ["FOC-768", "FOC-775", "FOC-777", "FOC-781", "FOC-789", "FOC-790", "FOC-776", "FOC-774", "FOC-770", "FOC-771", "FOC-773", "FOC-778", "FOC-779", "FOC-780", "FOC-772", "FOC-799", "FOC-803", "FOC-809", "FOC-922"]
+    },
+    {
+      "id": "security",
+      "name": "Security, secrets and trust boundaries",
+      "what": "Nothing that looks like a secret leaves the machine; deny lists that cannot be bypassed; children cannot reach the Supervisor's files, token or socket; every agent's permissions are one validated, readable view.",
+      "now": "Egress screen enforced on PR bodies, decision calls and Linear comments; deny-list gaps closed; model overrides fail closed; agent-tools show/diff/check/allow/ask/deny.",
+      "next": "Child-to-child isolation per run, an ingress screen for prompt injection, an irreversible-command judge, a budgeted security audit and a security REVIEW lane.",
+      "tickets": ["FOC-878", "FOC-458", "FOC-394", "FOC-616", "FOC-619", "FOC-450", "FOC-512", "FOC-511", "FOC-607", "FOC-643", "FOC-646", "FOC-733", "FOC-576", "FOC-667", "FOC-900", "FOC-906"]
+    },
+    {
+      "id": "jev",
+      "name": "Jev: decisions at the gates",
+      "what": "Small, cheap, structured decisions ([J] nodes) with a registry, a decision log with real outcomes as labels, holds with a recommendation, typed autonomy grants — advisory first, calibrated, then autonomy by policy.",
+      "now": "Registry and I/O log shipped; holds and the precedence ladder shipped; every decision call passes the egress screen.",
+      "next": "Gate pre-screener (advisory), calibration harness on recorded labels, shadow-run certainty, then auto-answer behind a calibrated threshold (M3, after the FOC-477 verdict).",
+      "tickets": ["FOC-468", "FOC-391", "FOC-387", "FOC-410", "FOC-384", "FOC-392", "FOC-419", "FOC-420", "FOC-418", "FOC-612", "FOC-613"]
+    },
+    {
+      "id": "agent-context",
+      "name": "Agent context and working state",
+      "what": "What an agent knows and carries: the working-state store that survives compaction, must-have keys per role, context selection for DEV units, the Supervisor's contract kept short and trigger-loaded.",
+      "now": "Working state 1–4/5 shipped (store, base keys, re-injection at SessionStart, the skill); the handoff compressor spike measured the biggest cost lever.",
+      "next": "5/5 measurement (facts lost after compaction), context selection [J], DEV in small units, the Supervisor contract word ceiling and fleet digest.",
+      "tickets": ["FOC-470", "FOC-731", "FOC-455", "FOC-479", "FOC-611", "FOC-727", "FOC-728", "FOC-729", "FOC-730", "FOC-283"]
+    },
+    {
+      "id": "codegraph",
+      "name": "CodeGraph and code intelligence",
+      "what": "Structural code navigation for every agent: explore, impact, affected tests; measured retrieval quality; a CodeGraph-expert skill and, later, model.",
+      "now": "CodeGraph reaches subagents; the eval set and harness exist; trajectory capture fixed.",
+      "next": "The expert skill (in progress), CodeGraph-native REVIEW/TEST inputs, usage measurement and nudges, CodeGraph for children in external repos.",
+      "tickets": ["FOC-621", "FOC-622", "FOC-623", "FOC-635", "FOC-764", "FOC-625", "FOC-114", "FOC-620", "FOC-624", "FOC-627", "FOC-640", "FOC-641", "FOC-603"]
+    },
+    {
+      "id": "models-routing",
+      "name": "Models, routing and cost control",
+      "what": "Which model runs which node or squad, at what tier, through which provider — and what it costs; fail closed on unpriced ids; the escalation tier for high-stakes decisions.",
+      "now": "Child model comes from config routing, never inherited; provider switchable; unpriced ids refused.",
+      "next": "Model tier routing per node, candidate-model benchmarks on Fenix eval sets, the escalation tier, overlay routing winning on resume.",
+      "tickets": ["FOC-457", "FOC-389", "FOC-388", "FOC-395", "FOC-763", "FOC-691", "FOC-762"]
+    },
+    {
+      "id": "learning",
+      "name": "Learning and harness evolution",
+      "what": "How Fenix gets better at its own job: CADENCE proposing evaluated improvements with human promotion, prompt optimisation for [J] nodes, Harness²-style recursive harness refinement grounded in Fenix's own trajectories and verdicts, fine-tuning feasibility.",
+      "now": "Data first: the pi harness recon and the FT handoff-compressor spike are done; the Harness² reconnaissance (2026-10-20) ranked the ways in.",
+      "next": "After the 1.0 tag: harness fingerprint + trajectory renderer, the reflector/library loop as CADENCE with a promotion gate, the opt-in harness-probe mode measured on 10 tickets; GEPA for the [J] prompts that have labels.",
+      "tickets": ["FOC-471", "FOC-944", "FOC-945", "FOC-946", "FOC-947", "FOC-224", "FOC-223", "FOC-222", "FOC-398", "FOC-399", "FOC-273", "FOC-281", "FOC-282", "FOC-110", "FOC-647", "FOC-794"]
+    },
+    {
+      "id": "release-discipline",
+      "name": "Release discipline and living docs",
+      "what": "Scoped releases, out-of-scope → backlog, the architecture dossier generated from CodeGraph (DrawIO), the roadmap rendered from Linear instead of edited by hand.",
+      "now": "Hand-written roadmap and journals per task; create-child inherits project and milestone.",
+      "next": "After the tag: planning templates, hygiene report, roadmap from Linear, architecture views and deltas, the release audit and the 1.1 dossier (M7).",
+      "tickets": ["FOC-714", "FOC-715", "FOC-718", "FOC-719", "FOC-720", "FOC-721", "FOC-722", "FOC-723", "FOC-724", "FOC-765", "FOC-725"]
+    },
+    {
+      "id": "quality",
+      "name": "Codebase quality: tests, CI, maintenance",
+      "what": "The parallel test runner with isolation proof, the Linux lane in CI, flake hunting, and the standing nits epic that never blocks the roadmap.",
+      "now": "Parallel lanes with per-file timing and a wall-clock budget; Linux CI green; the known flakes under load fixed; the stability campaign for AC1 in progress.",
+      "next": "Automatic pruning of merged la-merge trees, the serial-lane migration, small test and docs nits.",
+      "tickets": ["FOC-472", "FOC-626", "FOC-615", "FOC-642", "FOC-461", "FOC-415", "FOC-405", "FOC-270", "FOC-734", "FOC-521", "FOC-546", "FOC-614", "FOC-840", "FOC-913", "FOC-602", "FOC-601", "FOC-407"]
+    }
+  ]
+}

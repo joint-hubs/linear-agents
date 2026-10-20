@@ -1,0 +1,1617 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fenix roadmap by capability</title>
+<meta name="description" content="What Fenix does, what is shipped, what comes next — tickets hang under capabilities, not the other way round.">
+<style>
+:root{--bg:#f7f6f2;--card:#ffffff;--ink:#1d1d1b;--muted:#6b6a66;--line:#e4e2dc;--accent:#b4521a;--shipped:#2f7d4f;--flight:#1f5fa8;--next:#b4521a;--later:#7a7873;--meter:#dcd9d1;--chip:#f1efe9}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15161a;--card:#1d1f25;--ink:#ecebe7;--muted:#a09e98;--line:#2c2f37;--accent:#e6894b;--shipped:#5fbf86;--flight:#6ea5ea;--next:#e6894b;--later:#9c9a94;--meter:#2c2f37;--chip:#262932}}
+:root[data-theme="dark"]{--bg:#15161a;--card:#1d1f25;--ink:#ecebe7;--muted:#a09e98;--line:#2c2f37;--accent:#e6894b;--shipped:#5fbf86;--flight:#6ea5ea;--next:#e6894b;--later:#9c9a94;--meter:#2c2f37;--chip:#262932}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:0 16px 64px}
+main{max-width:1100px;margin:0 auto}
+h1{font-size:28px;margin:32px 0 4px;letter-spacing:-0.01em}
+.sub{color:var(--muted);margin:0 0 20px;max-width:70ch}
+.principle{border-left:3px solid var(--accent);padding:6px 12px;color:var(--muted);margin:0 0 24px;max-width:80ch}
+.summary{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 20px}
+.summary .k{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;min-width:120px}
+.summary .k b{display:block;font-size:22px}
+.summary .k span{color:var(--muted);font-size:13px}
+.filters{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:0 0 24px;color:var(--muted);font-size:14px}
+.filters label{display:inline-flex;gap:6px;align-items:center;cursor:pointer}
+.layout{display:grid;grid-template-columns:240px 1fr;gap:28px}
+nav.toc{position:sticky;top:16px;align-self:start;font-size:14px}
+nav.toc ol{margin:0;padding-left:18px}
+nav.toc li{margin:4px 0}
+nav.toc a{color:var(--ink);text-decoration:none}
+nav.toc a:hover{color:var(--accent)}
+table.ms-table{border-collapse:collapse;width:100%;font-size:13px;margin:12px 0 0}
+table.ms-table td{padding:4px 6px;border-top:1px solid var(--line);vertical-align:top}
+.area{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:0 0 20px;scroll-margin-top:16px}
+.area header{display:grid;grid-template-columns:1fr auto;gap:4px 16px;align-items:center}
+.area h2{font-size:20px;margin:0}
+.meter{grid-column:1/-1;height:6px;background:var(--meter);border-radius:3px;overflow:hidden}
+.meter span{display:block;height:100%;background:var(--shipped)}
+.counts{grid-column:1/-1;color:var(--muted);font-size:13px;margin:0}
+dl.narrative{display:grid;grid-template-columns:52px 1fr;gap:4px 12px;margin:14px 0 6px;font-size:14px}
+dl.narrative dt{color:var(--muted);font-weight:600}
+dl.narrative dd{margin:0}
+.buckets{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px 24px;margin-top:10px}
+.bucket h4{margin:10px 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.bucket h4 .n{display:inline-block;min-width:20px;text-align:center;background:var(--chip);border-radius:10px;padding:0 6px;margin-left:4px;color:var(--ink)}
+.bucket ul{list-style:none;margin:0;padding:0}
+.t{display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline;padding:5px 0;border-top:1px solid var(--line);font-size:13.5px}
+.t:first-child{border-top:0}
+.t .id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;color:var(--accent);text-decoration:none;white-space:nowrap}
+.t .id:hover{text-decoration:underline}
+.t .title{color:var(--ink);flex:1 1 200px;min-width:0}
+.t .meta{display:inline-flex;gap:6px;align-items:baseline;margin-left:auto;white-space:nowrap}
+.bucket-shipped .st,.bucket-later .st,.bucket-next .st{display:none}
+.t-shipped .title{color:var(--muted)}
+.t-epic .title{font-weight:600}
+.ms{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;padding:1px 6px;border-radius:8px;background:var(--chip);color:var(--muted);white-space:nowrap}
+.pri{font-family:ui-monospace,monospace;font-size:11px;color:var(--next);font-weight:700}
+.st{font-size:11px;white-space:nowrap;padding:1px 7px;border-radius:8px;color:#fff}
+.st-shipped{background:var(--shipped)}.st-flight{background:var(--flight)}.st-next{background:var(--next)}.st-later{background:var(--later)}
+body.hide-shipped .t-shipped,body.hide-flight .t-flight,body.hide-next .t-next,body.hide-later .t-later{display:none}
+body.hide-shipped .bucket-shipped,body.hide-flight .bucket-flight,body.hide-next .bucket-next,body.hide-later .bucket-later{display:none}
+footer{color:var(--muted);font-size:13px;margin-top:28px;max-width:80ch}
+@media (max-width:860px){.layout{grid-template-columns:1fr}nav.toc{position:static}.area header{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<h1>Fenix roadmap by capability</h1>
+<p class="sub">What Fenix does, what is shipped, what comes next — tickets hang under capabilities, not the other way round.</p>
+<p class="principle">Pull-based: every next feature is justified by friction observed while running real tasks. One delivery owner since 2026-10-15; Mateusz answers gates.</p>
+<div class="summary">
+  <div class="k"><b>14</b><span>capabilities</span></div>
+  <div class="k"><b>132</b><span>shipped (Done, last 45 days)</span></div>
+  <div class="k"><b>12</b><span>in flight</span></div>
+  <div class="k"><b>1</b><span>next (Todo)</span></div>
+  <div class="k"><b>87</b><span>later (Backlog)</span></div>
+</div>
+<div class="filters" id="filters">
+  <span>Show:</span>
+  <label><input type="checkbox" data-bucket="flight" checked> In flight</label>
+  <label><input type="checkbox" data-bucket="next" checked> Next</label>
+  <label><input type="checkbox" data-bucket="later" checked> Later</label>
+  <label><input type="checkbox" data-bucket="shipped" checked> Shipped</label>
+</div>
+<div class="layout">
+<nav class="toc" aria-label="Capabilities">
+  <ol>
+<li><a href="#delivery-loop">Delivery loop: squads and the graph</a></li>
+<li><a href="#supervisor-runtime">Supervisor runtime: sessions, isolation, unattended operation</a></li>
+<li><a href="#linear-integration">Linear integration and ticket ownership</a></li>
+<li><a href="#dashboard">Dashboard v2</a></li>
+<li><a href="#telemetry">Telemetry and one cost truth</a></li>
+<li><a href="#portable-release">Portable release: Docker, launcher, VM (Fenix 1.0.0)</a></li>
+<li><a href="#security">Security, secrets and trust boundaries</a></li>
+<li><a href="#jev">Jev: decisions at the gates</a></li>
+<li><a href="#agent-context">Agent context and working state</a></li>
+<li><a href="#codegraph">CodeGraph and code intelligence</a></li>
+<li><a href="#models-routing">Models, routing and cost control</a></li>
+<li><a href="#learning">Learning and harness evolution</a></li>
+<li><a href="#release-discipline">Release discipline and living docs</a></li>
+<li><a href="#quality">Codebase quality: tests, CI, maintenance</a></li>
+  </ol>
+  <table class="ms-table" aria-label="Milestones">
+    <thead><tr><td colspan="4" style="border-top:0;color:var(--muted);font-weight:600">Milestones</td></tr></thead>
+    <tbody>
+<tr><td><span class="ms ms-M1">M1</span></td><td>Foundations</td><td>2026-11-15</td><td><a href="https://linear.app/jointhubs/issue/FOC-466" target="_blank" rel="noopener">FOC-466</a></td></tr>
+<tr><td><span class="ms ms-M2">M2</span></td><td>Graph engine + PLAN graph</td><td>2026-11-20</td><td><a href="https://linear.app/jointhubs/issue/FOC-467" target="_blank" rel="noopener">FOC-467</a></td></tr>
+<tr><td><span class="ms ms-M8">M8</span></td><td>Fenix 1.0.0 — portable release</td><td>2026-12-03</td><td><a href="https://linear.app/jointhubs/issue/FOC-768" target="_blank" rel="noopener">FOC-768</a></td></tr>
+<tr><td><span class="ms ms-M7">M7</span></td><td>Release discipline and living docs</td><td>2027-01-15</td><td><a href="https://linear.app/jointhubs/issue/FOC-714" target="_blank" rel="noopener">FOC-714</a></td></tr>
+<tr><td><span class="ms ms-M3">M3</span></td><td>Jev at the gates</td><td>2027-01-16</td><td><a href="https://linear.app/jointhubs/issue/FOC-468" target="_blank" rel="noopener">FOC-468</a></td></tr>
+<tr><td><span class="ms ms-M4">M4</span></td><td>Delivery loop as a graph</td><td>2027-03-31</td><td><a href="https://linear.app/jointhubs/issue/FOC-469" target="_blank" rel="noopener">FOC-469</a></td></tr>
+<tr><td><span class="ms ms-M5">M5</span></td><td>Slim DEV and Supervisor</td><td>2027-05-31</td><td><a href="https://linear.app/jointhubs/issue/FOC-470" target="_blank" rel="noopener">FOC-470</a></td></tr>
+<tr><td><span class="ms ms-M6">M6</span></td><td>Optimization and learning</td><td>2027-10-31</td><td><a href="https://linear.app/jointhubs/issue/FOC-471" target="_blank" rel="noopener">FOC-471</a></td></tr>
+    </tbody>
+  </table>
+</nav>
+<div class="areas">
+<section class="area" id="delivery-loop">
+  <header>
+    <h2>Delivery loop: squads and the graph</h2>
+    <div class="meter" title="31 of 44 tickets shipped"><span style="width:70%"></span></div>
+    <p class="counts"><b>31</b> shipped · <b>2</b> in flight · <b>0</b> next · <b>11</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>A Linear ticket becomes code through PLAN → DEV → REVIEW → TEST, run as a graph of deterministic, generator, judge and human nodes; the Supervisor is the frontman, children are separate Claude processes in their own worktrees.</dd>
+    <dt>Now</dt><dd>PLAN runs as a graph (intent map, DoR/AC/DoD generators, duplicate search, final gate); DEV/REVIEW/TEST still run as squads; verdicts and review rounds are recorded with lineage; the integration tree installs its own deps before verify.</dd>
+    <dt>Next</dt><dd>FOC-477 decides whether the graph beats the squad (10 real issues, Mateusz at plan.gate1); then REVIEW and TEST become graphs (M4).</dd>
+  </dl>
+  <div class="buckets">
+<div class="bucket bucket-flight">
+  <h4>In flight <span class="n">2</span></h4>
+  <ul><li class="t t-flight t-epic" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-467" target="_blank" rel="noopener">FOC-467</a>
+  <span class="title">[EPIC] M2 — Graph engine + PLAN as the first squad decomposed into nodes</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="pri pri-1" title="Urgent">!!</span><span class="st st-flight">In Progress</span></span>
+</li>
+<li class="t t-flight" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-477" target="_blank" rel="noopener">FOC-477</a>
+  <span class="title">Measure: PLAN graph vs PLAN squad on 10 real issues → go/no-go for M4</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="pri pri-1" title="Urgent">!!</span><span class="st st-flight">In Progress</span></span>
+</li></ul>
+</div>
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">11</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-117" target="_blank" rel="noopener">FOC-117</a>
+  <span class="title">Verify interrupted-run recovery without losing state or workflow cycles</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-382" target="_blank" rel="noopener">FOC-382</a>
+  <span class="title">DEV turn exit record — typed, validated, mirrors the verdict record</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-390" target="_blank" rel="noopener">FOC-390</a>
+  <span class="title">REVIEW node [J]: finding verifier (severity + grounded)</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-393" target="_blank" rel="noopener">FOC-393</a>
+  <span class="title">REVIEW node [J]: review-round repeat classifier</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-453" target="_blank" rel="noopener">FOC-453</a>
+  <span class="title">TEST node [J]: test-failure cause classifier</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-456" target="_blank" rel="noopener">FOC-456</a>
+  <span class="title">REVIEW gates [J]: acceptance-criteria coverage and review depth</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later t-epic" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-469" target="_blank" rel="noopener">FOC-469</a>
+  <span class="title">[EPIC] M4 — Delivery loop as a graph: DEV exit record → REVIEW → TEST</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-478" target="_blank" rel="noopener">FOC-478</a>
+  <span class="title">graph.json — REVIEW and TEST node graphs (design)</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-712" target="_blank" rel="noopener">FOC-712</a>
+  <span class="title">plan.ready [J]: read DoR facts + estimate/labels (AC1 input set)</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-617" target="_blank" rel="noopener">FOC-617</a>
+  <span class="title">REVIEW: anchor findings by quote + per-file coverage manifest in the verdict</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-618" target="_blank" rel="noopener">FOC-618</a>
+  <span class="title">Spike: open-code-review as a second-opinion REVIEW lane</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">31</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-271" target="_blank" rel="noopener">FOC-271</a>
+  <span class="title">supervisor-followup returned ok without a spawned child (zombie turn)</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-406" target="_blank" rel="noopener">FOC-406</a>
+  <span class="title">supervisor-spawn pinned the REVIEW worktree at base instead of the DEV candidate</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-396" target="_blank" rel="noopener">FOC-396</a>
+  <span class="title">graph.json v2 — node-level graph and contract, PLAN first (design)</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-397" target="_blank" rel="noopener">FOC-397</a>
+  <span class="title">Graph runner — executes [D]/[G]/[J]/[H] nodes; frontman only for exceptions</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-448" target="_blank" rel="noopener">FOC-448</a>
+  <span class="title">Node and decision registry — every node and Jev decision is config, not code</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-449" target="_blank" rel="noopener">FOC-449</a>
+  <span class="title">Node I/O log — full input, output, cost and actual outcome as the label</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-451" target="_blank" rel="noopener">FOC-451</a>
+  <span class="title">Intake gate [J]: triage node + task size → which graph runs</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-452" target="_blank" rel="noopener">FOC-452</a>
+  <span class="title">PLAN gates [J]: Definition of Ready, type/risk/estimate, AC testable, duplicates</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-473" target="_blank" rel="noopener">FOC-473</a>
+  <span class="title">ADR-0012 amendment: [G] generator nodes, one node contract, honest guarantees</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-474" target="_blank" rel="noopener">FOC-474</a>
+  <span class="title">PLAN node [G]: Definition of Done generator</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-475" target="_blank" rel="noopener">FOC-475</a>
+  <span class="title">PLAN node [G]: Acceptance Criteria generator</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-476" target="_blank" rel="noopener">FOC-476</a>
+  <span class="title">PLAN final gate [J]: plan ready → draft-approval [H] → publish [D]</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-513" target="_blank" rel="noopener">FOC-513</a>
+  <span class="title">supervisor-triage printed [object Object]</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-515" target="_blank" rel="noopener">FOC-515</a>
+  <span class="title">PLAN node [G] plan.intent: interpretation map in one call</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-516" target="_blank" rel="noopener">FOC-516</a>
+  <span class="title">PLAN [J]+[D] plan.intent.select: Jev scores each interpretation</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-517" target="_blank" rel="noopener">FOC-517</a>
+  <span class="title">plan.gate1 [H] becomes the intent conversation; gate2 approves spec + tasks</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-518" target="_blank" rel="noopener">FOC-518</a>
+  <span class="title">graph-runner record fixes from the 09-23 audit</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-519" target="_blank" rel="noopener">FOC-519</a>
+  <span class="title">[D] Linear search of duplicate candidates → plan.duplicate_of</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-520" target="_blank" rel="noopener">FOC-520</a>
+  <span class="title">plan.render [D] — deterministic issue-text renderer</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-596" target="_blank" rel="noopener">FOC-596</a>
+  <span class="title">plan.intent latency: p90 toward the 30 s bar</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-758" target="_blank" rel="noopener">FOC-758</a>
+  <span class="title">plan.intent regeneration was blind: no violations, no retry, no event line</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-759" target="_blank" rel="noopener">FOC-759</a>
+  <span class="title">FOC-477: arm-B cost baseline recomputed from transcripts</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-801" target="_blank" rel="noopener">FOC-801</a>
+  <span class="title">plan.intent gate1 fold validated against the map, not the presented round</span>
+  <span class="meta"><span class="ms ms-M2" title="Graph engine + PLAN graph · target 2026-11-20">M2</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-102" target="_blank" rel="noopener">FOC-102</a>
+  <span class="title">Fenix 1.0: stabilize delivery and trustworthy evidence (epic, closed)</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-116" target="_blank" rel="noopener">FOC-116</a>
+  <span class="title">Supervisor agent</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-159" target="_blank" rel="noopener">FOC-159</a>
+  <span class="title">Supervisor: parallelism and grounded verification</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-217" target="_blank" rel="noopener">FOC-217</a>
+  <span class="title">Stabilize the preserved baseline and verify GLM squad delivery</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-218" target="_blank" rel="noopener">FOC-218</a>
+  <span class="title">Legacy review outcomes explicit: PASS, FAIL or UNKNOWN</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-219" target="_blank" rel="noopener">FOC-219</a>
+  <span class="title">Unify Supervisor and legacy verdict evidence with round lineage</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-523" target="_blank" rel="noopener">FOC-523</a>
+  <span class="title">supervisor-merge: the fresh integration worktree installs its deps before verify</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-726" target="_blank" rel="noopener">FOC-726</a>
+  <span class="title">supervisor-merge: combined suite never ran when the base had merge commits</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="supervisor-runtime">
+  <header>
+    <h2>Supervisor runtime: sessions, isolation, unattended operation</h2>
+    <div class="meter" title="21 of 24 tickets shipped"><span style="width:88%"></span></div>
+    <p class="counts"><b>21</b> shipped · <b>0</b> in flight · <b>0</b> next · <b>3</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>The Supervisor session host (tmux, hooks, wake queue), many autonomous Supervisors on one repository without mixing state, children isolated from the Supervisor inside the container, orphan sweeps, and what happens when nobody is attached.</dd>
+    <dt>Now</dt><dd>Multi-Supervisor isolation shipped (leases, scoped autonomy, journals per task, orphan scan by owner); children run as their own uid behind one root helper; per-child tmp dirs are swept; a parked permission prompt is visible, aged and answerable from the dashboard.</dd>
+    <dt>Next</dt><dd>A parked-prompt policy for unattended runs (after 1.0) and per-run child identity (after 1.0); the Supervisor&#39;s own prompt hygiene keeps it off its ask list.</dd>
+  </dl>
+  <div class="buckets">
+
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">3</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-454" target="_blank" rel="noopener">FOC-454</a>
+  <span class="title">Supervisor monitoring [J]: stuck / working / waiting, notification urgency</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-920" target="_blank" rel="noopener">FOC-920</a>
+  <span class="title">Parked-prompt policy for unattended runs: deny-after with a recorded reason, scratch exemptions</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-610" target="_blank" rel="noopener">FOC-610</a>
+  <span class="title">Supervisor: fleet digest from disk + outcome-first reporting rules</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">21</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-802" target="_blank" rel="noopener">FOC-802</a>
+  <span class="title">Child agents isolated from the Supervisor inside the container (own uid, root helper)</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-807" target="_blank" rel="noopener">FOC-807</a>
+  <span class="title">Docker Supervisor without LA_SUPERVISOR_RUN: waker, guard and briefing were off</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-808" target="_blank" rel="noopener">FOC-808</a>
+  <span class="title">Fenix on a VM: resource hygiene and telemetry noise (orphans, /tmp, idle store writes)</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-816" target="_blank" rel="noopener">FOC-816</a>
+  <span class="title">Task workspaces and concurrent Supervisors (P1–P4)</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-839" target="_blank" rel="noopener">FOC-839</a>
+  <span class="title">Task workspaces 1.0 hardening: legacy compatibility suite, migration, QUICKSTART</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-848" target="_blank" rel="noopener">FOC-848</a>
+  <span class="title">Task ownership: a Supervisor acts only on tickets its installation owns</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-917" target="_blank" rel="noopener">FOC-917</a>
+  <span class="title">Child sweep missed resumed turns: follow-up sets the mark and TMPDIR</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-918" target="_blank" rel="noopener">FOC-918</a>
+  <span class="title">Unattended Supervisor prompts visible, aged and answerable from the dashboard</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-921" target="_blank" rel="noopener">FOC-921</a>
+  <span class="title">Supervisor prompt hygiene: scratch without rm -rf, Linear Done only after merge</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-608" target="_blank" rel="noopener">FOC-608</a>
+  <span class="title">Supervisor: durable wake queue from the watcher instead of in-turn --wait chains</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-609" target="_blank" rel="noopener">FOC-609</a>
+  <span class="title">Supervisor: Stop-hook turn-end guard + session-start briefing</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-522" target="_blank" rel="noopener">FOC-522</a>
+  <span class="title">Premature turn end killed in-flight background work</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-600" target="_blank" rel="noopener">FOC-600</a>
+  <span class="title">atomicWriteJSON: bounded retry on Windows rename EPERM</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-649" target="_blank" rel="noopener">FOC-649</a>
+  <span class="title">supervisor-cleanup: remove deleted git-ignored files while reporting none</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped t-epic" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-898" target="_blank" rel="noopener">FOC-898</a>
+  <span class="title">[EPIC] Multi-Supervisor isolation — N autonomous Supervisors on one repository</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-899" target="_blank" rel="noopener">FOC-899</a>
+  <span class="title">Grilling skill vendored and provisioned to children and the Supervisor</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-901" target="_blank" rel="noopener">FOC-901</a>
+  <span class="title">Scoped-only autonomy: an unscoped session never adopts a managed run; cap in the overlay</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-902" target="_blank" rel="noopener">FOC-902</a>
+  <span class="title">Ticket lease before intake: claim, &quot;claimed by&quot; comment, lease in the briefing</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-903" target="_blank" rel="noopener">FOC-903</a>
+  <span class="title">Scratch under run dirs: reviews, rounds, krok0 move into the run directory</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-904" target="_blank" rel="noopener">FOC-904</a>
+  <span class="title">Journal per task: docs/state/&lt;TASK&gt;.md by the owning Supervisor, STATE.md generated index</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-905" target="_blank" rel="noopener">FOC-905</a>
+  <span class="title">Orphan scan by container identity: a session sweeps only what it owns</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="linear-integration">
+  <header>
+    <h2>Linear integration and ticket ownership</h2>
+    <div class="meter" title="5 of 7 tickets shipped"><span style="width:71%"></span></div>
+    <p class="counts"><b>5</b> shipped · <b>0</b> in flight · <b>1</b> next · <b>1</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>Reading and writing Linear from the Supervisor and the dashboard: intake, leases, the state ladder (In Progress → In Review → Done after merge), ownership scopes per installation, and the write path that must not stall on a classifier.</dd>
+    <dt>Now</dt><dd>Writes go through screened scripts (linear-ops, publish-linear-comment); foreign tickets are refused and held; the ladder is in the Supervisor&#39;s contract.</dd>
+    <dt>Next</dt><dd>External writes through a Fenix MCP server with exact-name allow rules and the permission mode declared (M8); Linear hygiene report and the roadmap rendered from Linear (M7).</dd>
+  </dl>
+  <div class="buckets">
+
+<div class="bucket bucket-next">
+  <h4>Next <span class="n">1</span></h4>
+  <ul><li class="t t-next" data-bucket="next">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-943" target="_blank" rel="noopener">FOC-943</a>
+  <span class="title">Supervisor writes to Linear/GitHub through a Fenix MCP server; permission mode declared</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="pri pri-2" title="High">!</span><span class="st st-next">Todo</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">1</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-717" target="_blank" rel="noopener">FOC-717</a>
+  <span class="title">Linear hygiene report [D]: orphans, missing estimates, status drift vs landed commits</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="pri pri-2" title="High">!</span><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">5</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-815" target="_blank" rel="noopener">FOC-815</a>
+  <span class="title">Work board: one unknown Linear id poisoned the batched state lookup</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-716" target="_blank" rel="noopener">FOC-716</a>
+  <span class="title">linear-ops create-child: inherit project + milestone from the parent chain</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-577" target="_blank" rel="noopener">FOC-577</a>
+  <span class="title">supervisor-triage: AC heading variants not detected</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-605" target="_blank" rel="noopener">FOC-605</a>
+  <span class="title">Triage AC detector misses the bare &quot;## AC&quot; heading</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-606" target="_blank" rel="noopener">FOC-606</a>
+  <span class="title">linear-ops: verb priority</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="dashboard">
+  <header>
+    <h2>Dashboard v2</h2>
+    <div class="meter" title="16 of 18 tickets shipped"><span style="width:89%"></span></div>
+    <p class="counts"><b>16</b> shipped · <b>0</b> in flight · <b>0</b> next · <b>2</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>Six areas: Work board, Cockpit (chat, terminal, Needs-you), Team line-ups, Insights, Costs and quality, Settings — plus one cockpit per task session.</dd>
+    <dt>Now</dt><dd>All six areas shipped for 1.0; questions and permission prompts are answered in the dashboard; push and PR from the dashboard with explicit confirm; Insights under its latency budget.</dd>
+    <dt>Next</dt><dd>After 1.0: the Lab screen (fine-tuning) and a dark theme.</dd>
+  </dl>
+  <div class="buckets">
+
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">2</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-792" target="_blank" rel="noopener">FOC-792</a>
+  <span class="title">Dashboard Lab: fine-tune screen on the v2 stack (after 1.0)</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-793" target="_blank" rel="noopener">FOC-793</a>
+  <span class="title">Dashboard v2 dark theme (after 1.0)</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">16</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-545" target="_blank" rel="noopener">FOC-545</a>
+  <span class="title">rewards: bound GET /api/manager/rewards over real supervisor state</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-782" target="_blank" rel="noopener">FOC-782</a>
+  <span class="title">Dashboard v2 UX spec: information architecture, flows, design system</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-783" target="_blank" rel="noopener">FOC-783</a>
+  <span class="title">Dashboard v2 Cockpit: Supervisor chat + web terminal + Needs-you inbox</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-784" target="_blank" rel="noopener">FOC-784</a>
+  <span class="title">Dashboard v2 Work board: tickets plan to landed, with cost, rounds and evidence</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-785" target="_blank" rel="noopener">FOC-785</a>
+  <span class="title">Dashboard v2 Costs and quality: per-ticket cost, rework, first-time-right, interventions</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-786" target="_blank" rel="noopener">FOC-786</a>
+  <span class="title">Dashboard v2 Settings: keys, repositories, provider and routing, squads and prompts, retention</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-787" target="_blank" rel="noopener">FOC-787</a>
+  <span class="title">Dashboard v2 Insights: curated analyses from the telemetry notebook</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-788" target="_blank" rel="noopener">FOC-788</a>
+  <span class="title">Human push and open PR from the dashboard, with explicit confirm</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-791" target="_blank" rel="noopener">FOC-791</a>
+  <span class="title">Dashboard v2 Team: agent architecture as line-ups (whom each lead picks)</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-795" target="_blank" rel="noopener">FOC-795</a>
+  <span class="title">Dashboard v2: view and edit the agent&#39;s persisted records while it works</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-800" target="_blank" rel="noopener">FOC-800</a>
+  <span class="title">Dashboard write endpoints refused every request in Docker (gateway address)</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-804" target="_blank" rel="noopener">FOC-804</a>
+  <span class="title">Dashboard v2 navigation: six areas, v1 screens parked under them</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-810" target="_blank" rel="noopener">FOC-810</a>
+  <span class="title">Cockpit without the terminal: questions and permission prompts answered in the dashboard</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-225" target="_blank" rel="noopener">FOC-225</a>
+  <span class="title">Fenix Manager: tactical board and agent profiles</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-914" target="_blank" rel="noopener">FOC-914</a>
+  <span class="title">Team group filters from the Linear state: milestone, type, epic, size</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-915" target="_blank" rel="noopener">FOC-915</a>
+  <span class="title">Insights panels under the P3.1 budget: task table precomputed in the analysis cache</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="telemetry">
+  <header>
+    <h2>Telemetry and one cost truth</h2>
+    <div class="meter" title="14 of 19 tickets shipped"><span style="width:74%"></span></div>
+    <p class="counts"><b>14</b> shipped · <b>2</b> in flight · <b>0</b> next · <b>3</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>Every run, child, turn, tool call and token is ingested into one store with canonical views; costs are priced per model and attributed to tickets; the analysis notebook and the Insights panels read from it.</dd>
+    <dt>Now</dt><dd>Usage deduplicated at ingest, resumed turns kept, Supervisor turns charged to the declared ticket, registry cost no longer fabricated; the analysis cache precomputes the task table.</dd>
+    <dt>Next</dt><dd>Generation-aware dedup for rotated transcripts, the duplicated-messages cause, corpus-wide turn classification.</dd>
+  </dl>
+  <div class="buckets">
+<div class="bucket bucket-flight">
+  <h4>In flight <span class="n">2</span></h4>
+  <ul><li class="t t-flight t-epic" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-466" target="_blank" rel="noopener">FOC-466</a>
+  <span class="title">[EPIC] M1 — Foundations: review the right candidate, one cost truth, no secret egress</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="pri pri-1" title="Urgent">!!</span><span class="st st-flight">In Progress</span></span>
+</li>
+<li class="t t-flight" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-666" target="_blank" rel="noopener">FOC-666</a>
+  <span class="title">Telemetry analysis (marimo notebook, sections, gap analysis)</span>
+  <span class="meta"><span class="st st-flight">In Progress</span></span>
+</li></ul>
+</div>
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">3</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-732" target="_blank" rel="noopener">FOC-732</a>
+  <span class="title">telemetry-ingest: generation-aware dedup keys for rotated/truncated transcripts</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-459" target="_blank" rel="noopener">FOC-459</a>
+  <span class="title">Corpus analytics: classify every logged turn and every bad turn</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-604" target="_blank" rel="noopener">FOC-604</a>
+  <span class="title">Telemetry: duplicated lead/subagent messages (crossFileDuplicates) — cause, then fix</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">14</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-381" target="_blank" rel="noopener">FOC-381</a>
+  <span class="title">Telemetry: dedup usage by message id at ingest (one cost truth)</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-514" target="_blank" rel="noopener">FOC-514</a>
+  <span class="title">42x cost divergence data point + missing cacheRead rate for mimo-v2.6-pro</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-547" target="_blank" rel="noopener">FOC-547</a>
+  <span class="title">telemetry: background ingest blocked the event loop on MB-sized transcripts</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-597" target="_blank" rel="noopener">FOC-597</a>
+  <span class="title">telemetry-ingest: unterminated EOF tail dropped (fact loss)</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-598" target="_blank" rel="noopener">FOC-598</a>
+  <span class="title">telemetry-ingest: byte_offset=MAX defeated shrink/rotation recovery</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-760" target="_blank" rel="noopener">FOC-760</a>
+  <span class="title">Registry child cost summed cumulative result events (5x ground truth)</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-761" target="_blank" rel="noopener">FOC-761</a>
+  <span class="title">Telemetry dropped resumed child turns (second run.ended deduplicated)</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-769" target="_blank" rel="noopener">FOC-769</a>
+  <span class="title">Supervisor declares its active ticket; telemetry charges Supervisor turns to it</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-811" target="_blank" rel="noopener">FOC-811</a>
+  <span class="title">Docker: LA_STATE_ROOT on the /data volume so ingest sees run manifests</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-164" target="_blank" rel="noopener">FOC-164</a>
+  <span class="title">Provider baseUrl override from env (no local endpoints in models.json)</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-165" target="_blank" rel="noopener">FOC-165</a>
+  <span class="title">Supervisor cost accounting fabricated; the documented budget cap did not exist</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-220" target="_blank" rel="noopener">FOC-220</a>
+  <span class="title">Measure tool behaviour without labelling necessary reruns as waste</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-221" target="_blank" rel="noopener">FOC-221</a>
+  <span class="title">Qualify canonical usage and task attribution with uncertainty</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-599" target="_blank" rel="noopener">FOC-599</a>
+  <span class="title">FOC-547 review residuals: turn_index re-scan, composite UPDATE, budgets</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="portable-release">
+  <header>
+    <h2>Portable release: Docker, launcher, VM (Fenix 1.0.0)</h2>
+    <div class="meter" title="12 of 19 tickets shipped"><span style="width:63%"></span></div>
+    <p class="counts"><b>12</b> shipped · <b>3</b> in flight · <b>0</b> next · <b>4</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>Only Docker on the host: one image with every dependency, a compose stack with volumes and resume, the fenix launcher (up / update / doctor / keys / attach), sizing for a VM, and the fresh-machine acceptance that proves it.</dd>
+    <dt>Now</dt><dd>Image on GHCR (public), compose stack, key wizard, retention, Linux CI, VM sizing published (2 vCPU / 8 GB / 50 GB minimum); the launcher pulls the pinned image with a thin uid layer (in review).</dd>
+    <dt>Next</dt><dd>Fresh-machine acceptance on the published image (both modes), release notes and the v1.0.0 tag — target 2026-12-03.</dd>
+  </dl>
+  <div class="buckets">
+<div class="bucket bucket-flight">
+  <h4>In flight <span class="n">3</span></h4>
+  <ul><li class="t t-flight" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-775" target="_blank" rel="noopener">FOC-775</a>
+  <span class="title">Fenix Docker image (Linux) with every dependency inside, published to GHCR</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="pri pri-2" title="High">!</span><span class="st st-flight">In Progress</span></span>
+</li>
+<li class="t t-flight" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-777" target="_blank" rel="noopener">FOC-777</a>
+  <span class="title">fenix CLI: one command for the user (up / stop / update / logs / doctor / keys / attach)</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="pri pri-2" title="High">!</span><span class="st st-flight">In Progress</span></span>
+</li>
+<li class="t t-flight" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-781" target="_blank" rel="noopener">FOC-781</a>
+  <span class="title">Quickstart docs: README quick start, troubleshooting, upgrade</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-flight">In Review</span></span>
+</li></ul>
+</div>
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">4</span></h4>
+  <ul><li class="t t-later t-epic" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-768" target="_blank" rel="noopener">FOC-768</a>
+  <span class="title">[EPIC] M8 — Fenix 1.0.0: one-command Docker quick start, dashboard v2, one cost truth</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="pri pri-2" title="High">!</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-790" target="_blank" rel="noopener">FOC-790</a>
+  <span class="title">Release notes and tag v1.0.0</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="pri pri-2" title="High">!</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-789" target="_blank" rel="noopener">FOC-789</a>
+  <span class="title">Fresh-machine acceptance run for 1.0.0 (Docker-only, real Linear issue end to end)</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-922" target="_blank" rel="noopener">FOC-922</a>
+  <span class="title">supervisor-merge tests leave la-merge-test-* trees under the real GITHUB_ROOT in the container</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">12</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-770" target="_blank" rel="noopener">FOC-770</a>
+  <span class="title">One paths/config module — no LOCALAPPDATA or user paths in runtime code</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-771" target="_blank" rel="noopener">FOC-771</a>
+  <span class="title">Node entry points replace the .bat launchers (cross-platform)</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-772" target="_blank" rel="noopener">FOC-772</a>
+  <span class="title">Optional integrations off by default: Atlas, Nebul, pisi workspace, personal memory</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-773" target="_blank" rel="noopener">FOC-773</a>
+  <span class="title">Pluggable provider: OpenRouter by default, switchable to any compatible endpoint</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-774" target="_blank" rel="noopener">FOC-774</a>
+  <span class="title">Linux CI: full test suite green on Linux</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-776" target="_blank" rel="noopener">FOC-776</a>
+  <span class="title">Compose stack: api + supervisor, volumes, healthchecks, auto-restart, session resume</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-778" target="_blank" rel="noopener">FOC-778</a>
+  <span class="title">First-run key wizard: live validation, Compose secrets, provider choice</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-779" target="_blank" rel="noopener">FOC-779</a>
+  <span class="title">Generated artifacts gitignored, regenerated on start and kept fresh</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-780" target="_blank" rel="noopener">FOC-780</a>
+  <span class="title">Log and transcript retention: keep everything by default, configurable, disk usage visible</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-799" target="_blank" rel="noopener">FOC-799</a>
+  <span class="title">Docker follow-ups: children orphaned by a container restart, MCP approval on the volume</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-803" target="_blank" rel="noopener">FOC-803</a>
+  <span class="title">Linux hosts with a uid other than 1000: keys and config readable for the container user</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-809" target="_blank" rel="noopener">FOC-809</a>
+  <span class="title">Fenix sizing: a dev-squad run on the VM measured (p20/p50/p80), minimum and recommended machine</span>
+  <span class="meta"><span class="ms ms-M8" title="Fenix 1.0.0 — portable release · target 2026-12-03">M8</span><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="security">
+  <header>
+    <h2>Security, secrets and trust boundaries</h2>
+    <div class="meter" title="11 of 16 tickets shipped"><span style="width:69%"></span></div>
+    <p class="counts"><b>11</b> shipped · <b>0</b> in flight · <b>0</b> next · <b>5</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>Nothing that looks like a secret leaves the machine; deny lists that cannot be bypassed; children cannot reach the Supervisor&#39;s files, token or socket; every agent&#39;s permissions are one validated, readable view.</dd>
+    <dt>Now</dt><dd>Egress screen enforced on PR bodies, decision calls and Linear comments; deny-list gaps closed; model overrides fail closed; agent-tools show/diff/check/allow/ask/deny.</dd>
+    <dt>Next</dt><dd>Child-to-child isolation per run, an ingress screen for prompt injection, an irreversible-command judge, a budgeted security audit and a security REVIEW lane.</dd>
+  </dl>
+  <div class="buckets">
+
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">5</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-394" target="_blank" rel="noopener">FOC-394</a>
+  <span class="title">Irreversible-command judge [J] before tool execution (PreToolUse hook)</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-458" target="_blank" rel="noopener">FOC-458</a>
+  <span class="title">Ingress safety [J]: prompt-injection screen and scope-drift check</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-878" target="_blank" rel="noopener">FOC-878</a>
+  <span class="title">Per-run child identity in the container: a child of run A must not write run B&#39;s state</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-616" target="_blank" rel="noopener">FOC-616</a>
+  <span class="title">Security audit of linear-agents (cloudflare security-audit-skill, budgeted)</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-619" target="_blank" rel="noopener">FOC-619</a>
+  <span class="title">REVIEW: security lane for diffs that touch trust boundaries</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">11</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-450" target="_blank" rel="noopener">FOC-450</a>
+  <span class="title">Egress secret screen, local first — nothing that looks like a secret leaves</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-511" target="_blank" rel="noopener">FOC-511</a>
+  <span class="title">Deny-list gap: relative-path and PowerShell invocations bypassed the Linear helper deny</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-512" target="_blank" rel="noopener">FOC-512</a>
+  <span class="title">Egress screen enforced on the PR-body path (gh wrapper)</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-576" target="_blank" rel="noopener">FOC-576</a>
+  <span class="title">security-scan: a dead semgrep read as a clean scan</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-607" target="_blank" rel="noopener">FOC-607</a>
+  <span class="title">supervisor-spawn: ban --model overrides on named DEV roles, fail closed on unpriced ids</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-643" target="_blank" rel="noopener">FOC-643</a>
+  <span class="title">decision-call: egress screen before the provider call</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-646" target="_blank" rel="noopener">FOC-646</a>
+  <span class="title">shadow-run live mode bypassed the decision-call egress screen</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-667" target="_blank" rel="noopener">FOC-667</a>
+  <span class="title">security-scan: a blocked scanner is one honest state, not 13 red assertions</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-733" target="_blank" rel="noopener">FOC-733</a>
+  <span class="title">egress screen: family E flagged Linear issue-URL slugs</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-900" target="_blank" rel="noopener">FOC-900</a>
+  <span class="title">fenix agent-tools show|diff|check|docs: one validated view of every agent&#39;s permissions</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-906" target="_blank" rel="noopener">FOC-906</a>
+  <span class="title">fenix agent-tools allow|ask|deny: validated edits + read-only Agent tools panel</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="jev">
+  <header>
+    <h2>Jev: decisions at the gates</h2>
+    <div class="meter" title="2 of 11 tickets shipped"><span style="width:18%"></span></div>
+    <p class="counts"><b>2</b> shipped · <b>1</b> in flight · <b>0</b> next · <b>8</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>Small, cheap, structured decisions ([J] nodes) with a registry, a decision log with real outcomes as labels, holds with a recommendation, typed autonomy grants — advisory first, calibrated, then autonomy by policy.</dd>
+    <dt>Now</dt><dd>Registry and I/O log shipped; holds and the precedence ladder shipped; every decision call passes the egress screen.</dd>
+    <dt>Next</dt><dd>Gate pre-screener (advisory), calibration harness on recorded labels, shadow-run certainty, then auto-answer behind a calibrated threshold (M3, after the FOC-477 verdict).</dd>
+  </dl>
+  <div class="buckets">
+<div class="bucket bucket-flight">
+  <h4>In flight <span class="n">1</span></h4>
+  <ul><li class="t t-flight t-epic" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-468" target="_blank" rel="noopener">FOC-468</a>
+  <span class="title">[EPIC] M3 — Jev at the gates: advisory first, calibrated, then autonomy by policy</span>
+  <span class="meta"><span class="ms ms-M3" title="Jev at the gates · target 2027-01-16">M3</span><span class="pri pri-2" title="High">!</span><span class="st st-flight">In Progress</span></span>
+</li></ul>
+</div>
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">8</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-384" target="_blank" rel="noopener">FOC-384</a>
+  <span class="title">ADR-0013: gate auto-answer policy (A0/A1/A2)</span>
+  <span class="meta"><span class="ms ms-M3" title="Jev at the gates · target 2027-01-16">M3</span><span class="pri pri-2" title="High">!</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-387" target="_blank" rel="noopener">FOC-387</a>
+  <span class="title">Decision eval + calibration harness on recorded labels</span>
+  <span class="meta"><span class="ms ms-M3" title="Jev at the gates · target 2027-01-16">M3</span><span class="pri pri-2" title="High">!</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-391" target="_blank" rel="noopener">FOC-391</a>
+  <span class="title">Gate pre-screener [J], advisory: Jev suggestion + probability on every gate</span>
+  <span class="meta"><span class="ms ms-M3" title="Jev at the gates · target 2027-01-16">M3</span><span class="pri pri-2" title="High">!</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-392" target="_blank" rel="noopener">FOC-392</a>
+  <span class="title">Gate auto-answer behind a calibrated threshold (A1)</span>
+  <span class="meta"><span class="ms ms-M3" title="Jev at the gates · target 2027-01-16">M3</span><span class="pri pri-2" title="High">!</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-410" target="_blank" rel="noopener">FOC-410</a>
+  <span class="title">MCP shadow-run artifact: record per-answer certainty values</span>
+  <span class="meta"><span class="ms ms-M3" title="Jev at the gates · target 2027-01-16">M3</span><span class="pri pri-2" title="High">!</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-418" target="_blank" rel="noopener">FOC-418</a>
+  <span class="title">decision-call: retry/fallback call-path nits</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-419" target="_blank" rel="noopener">FOC-419</a>
+  <span class="title">decision-call metering: cacheRead:0 is derived, not measured</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-420" target="_blank" rel="noopener">FOC-420</a>
+  <span class="title">decision-call: seam-level schema_invalid regression test</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">2</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-612" target="_blank" rel="noopener">FOC-612</a>
+  <span class="title">Decisions as non-blocking hold records, presented one at a time with a recommendation</span>
+  <span class="meta"><span class="ms ms-M3" title="Jev at the gates · target 2027-01-16">M3</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-613" target="_blank" rel="noopener">FOC-613</a>
+  <span class="title">Precedence ladder + typed autonomy grants (config/autonomy.json)</span>
+  <span class="meta"><span class="ms ms-M3" title="Jev at the gates · target 2027-01-16">M3</span><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="agent-context">
+  <header>
+    <h2>Agent context and working state</h2>
+    <div class="meter" title="5 of 10 tickets shipped"><span style="width:50%"></span></div>
+    <p class="counts"><b>5</b> shipped · <b>1</b> in flight · <b>0</b> next · <b>4</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>What an agent knows and carries: the working-state store that survives compaction, must-have keys per role, context selection for DEV units, the Supervisor&#39;s contract kept short and trigger-loaded.</dd>
+    <dt>Now</dt><dd>Working state 1–4/5 shipped (store, base keys, re-injection at SessionStart, the skill); the handoff compressor spike measured the biggest cost lever.</dd>
+    <dt>Next</dt><dd>5/5 measurement (facts lost after compaction), context selection [J], DEV in small units, the Supervisor contract word ceiling and fleet digest.</dd>
+  </dl>
+  <div class="buckets">
+<div class="bucket bucket-flight">
+  <h4>In flight <span class="n">1</span></h4>
+  <ul><li class="t t-flight t-epic" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-470" target="_blank" rel="noopener">FOC-470</a>
+  <span class="title">[EPIC] M5 — Slim DEV and Supervisor: small units, context selection, routing, monitoring</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-flight">In Progress</span></span>
+</li></ul>
+</div>
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">4</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-455" target="_blank" rel="noopener">FOC-455</a>
+  <span class="title">Context selection [J]: which candidate files a DEV unit gets</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-479" target="_blank" rel="noopener">FOC-479</a>
+  <span class="title">DEV in small units: one agentic node per acceptance criterion</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-731" target="_blank" rel="noopener">FOC-731</a>
+  <span class="title">Agent working state 5/5: measure — facts lost after compaction, lookups vs re-search</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-611" target="_blank" rel="noopener">FOC-611</a>
+  <span class="title">Supervisor contract: word ceiling for CLAUDE.md + trigger-loaded procedures</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">5</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-727" target="_blank" rel="noopener">FOC-727</a>
+  <span class="title">Agent working state 1/5: SQLite fact store + CLI</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-728" target="_blank" rel="noopener">FOC-728</a>
+  <span class="title">Agent working state 2/5: must-have base keys per role + deterministic resolvers</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-729" target="_blank" rel="noopener">FOC-729</a>
+  <span class="title">Agent working state 3/5: survive compaction — WORKING STATE re-injected at SessionStart</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-730" target="_blank" rel="noopener">FOC-730</a>
+  <span class="title">Agent working state 4/5: working-state skill, contract lines, auto-prune at task close</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-283" target="_blank" rel="noopener">FOC-283</a>
+  <span class="title">FT: handoff compressor — the biggest cost lever (spike)</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="codegraph">
+  <header>
+    <h2>CodeGraph and code intelligence</h2>
+    <div class="meter" title="7 of 13 tickets shipped"><span style="width:54%"></span></div>
+    <p class="counts"><b>7</b> shipped · <b>1</b> in flight · <b>0</b> next · <b>5</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>Structural code navigation for every agent: explore, impact, affected tests; measured retrieval quality; a CodeGraph-expert skill and, later, model.</dd>
+    <dt>Now</dt><dd>CodeGraph reaches subagents; the eval set and harness exist; trajectory capture fixed.</dd>
+    <dt>Next</dt><dd>The expert skill (in progress), CodeGraph-native REVIEW/TEST inputs, usage measurement and nudges, CodeGraph for children in external repos.</dd>
+  </dl>
+  <div class="buckets">
+<div class="bucket bucket-flight">
+  <h4>In flight <span class="n">1</span></h4>
+  <ul><li class="t t-flight" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-621" target="_blank" rel="noopener">FOC-621</a>
+  <span class="title">CodeGraph-expert skill for recon, review and planning agents</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-flight">In Progress</span></span>
+</li></ul>
+</div>
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">5</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-764" target="_blank" rel="noopener">FOC-764</a>
+  <span class="title">CodeGraph for every child: guarded MCP in external repos, visible navigation block, usage metric</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-622" target="_blank" rel="noopener">FOC-622</a>
+  <span class="title">CodeGraph-native REVIEW/TEST steps: blast radius and affected tests as inputs</span>
+  <span class="meta"><span class="ms ms-M4" title="Delivery loop as a graph · target 2027-03-31">M4</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-623" target="_blank" rel="noopener">FOC-623</a>
+  <span class="title">Measure and nudge CodeGraph-first behaviour (metric + advisory hook)</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-635" target="_blank" rel="noopener">FOC-635</a>
+  <span class="title">Measure CodeGraph share for dev/review subagents over 10 real tasks</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-625" target="_blank" rel="noopener">FOC-625</a>
+  <span class="title">Fine-tune a CodeGraph-expert model — feasibility and first run</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">7</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-620" target="_blank" rel="noopener">FOC-620</a>
+  <span class="title">CodeGraph unreachable for subagents: mcp__codegraph__* added to recon/review/plan</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-624" target="_blank" rel="noopener">FOC-624</a>
+  <span class="title">Dataset + eval for a CodeGraph-expert model: log query trajectories, score retrieval</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-627" target="_blank" rel="noopener">FOC-627</a>
+  <span class="title">CodeGraph eval set + harness</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-640" target="_blank" rel="noopener">FOC-640</a>
+  <span class="title">codegraph-trajectory: capture vocabulary recognised only explore renders</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-641" target="_blank" rel="noopener">FOC-641</a>
+  <span class="title">codegraph-trajectory: stale banner matched a bare warning emoji</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-114" target="_blank" rel="noopener">FOC-114</a>
+  <span class="title">Verify code navigation correctness and CodeGraph effectiveness</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-603" target="_blank" rel="noopener">FOC-603</a>
+  <span class="title">code-intel test: native crash in the codegraph binary under suite load</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="models-routing">
+  <header>
+    <h2>Models, routing and cost control</h2>
+    <div class="meter" title="1 of 7 tickets shipped"><span style="width:14%"></span></div>
+    <p class="counts"><b>1</b> shipped · <b>0</b> in flight · <b>0</b> next · <b>6</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>Which model runs which node or squad, at what tier, through which provider — and what it costs; fail closed on unpriced ids; the escalation tier for high-stakes decisions.</dd>
+    <dt>Now</dt><dd>Child model comes from config routing, never inherited; provider switchable; unpriced ids refused.</dd>
+    <dt>Next</dt><dd>Model tier routing per node, candidate-model benchmarks on Fenix eval sets, the escalation tier, overlay routing winning on resume.</dd>
+  </dl>
+  <div class="buckets">
+
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">6</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-388" target="_blank" rel="noopener">FOC-388</a>
+  <span class="title">Research: OpenRouter model landscape — task fit, cost, capabilities</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-389" target="_blank" rel="noopener">FOC-389</a>
+  <span class="title">Benchmark candidate models on Fenix eval sets → routing recommendations</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-395" target="_blank" rel="noopener">FOC-395</a>
+  <span class="title">High-stakes escalation tier — triggers, budget, second opinion</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-457" target="_blank" rel="noopener">FOC-457</a>
+  <span class="title">Model tier routing per node / unit (cheap / standard / frontier)</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-763" target="_blank" rel="noopener">FOC-763</a>
+  <span class="title">Children: model tiers resolve to the squad model; requested vs served recorded; overlay wins on resume</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-691" target="_blank" rel="noopener">FOC-691</a>
+  <span class="title">plan.intent latency: lever-1 model/tier policy decision (reasoning effort)</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">1</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-762" target="_blank" rel="noopener">FOC-762</a>
+  <span class="title">supervisor-spawn: child model from config routing, never inherited from the Supervisor</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="learning">
+  <header>
+    <h2>Learning and harness evolution</h2>
+    <div class="meter" title="1 of 16 tickets shipped"><span style="width:6%"></span></div>
+    <p class="counts"><b>1</b> shipped · <b>1</b> in flight · <b>0</b> next · <b>14</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>How Fenix gets better at its own job: CADENCE proposing evaluated improvements with human promotion, prompt optimisation for [J] nodes, Harness²-style recursive harness refinement grounded in Fenix&#39;s own trajectories and verdicts, fine-tuning feasibility.</dd>
+    <dt>Now</dt><dd>Data first: the pi harness recon and the FT handoff-compressor spike are done; the Harness² reconnaissance (2026-10-20) ranked the ways in.</dd>
+    <dt>Next</dt><dd>After the 1.0 tag: harness fingerprint + trajectory renderer, the reflector/library loop as CADENCE with a promotion gate, the opt-in harness-probe mode measured on 10 tickets; GEPA for the [J] prompts that have labels.</dd>
+  </dl>
+  <div class="buckets">
+<div class="bucket bucket-flight">
+  <h4>In flight <span class="n">1</span></h4>
+  <ul><li class="t t-flight t-epic" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-471" target="_blank" rel="noopener">FOC-471</a>
+  <span class="title">[EPIC] M6 — Optimization and learning (GEPA, open weights, fine-tuning)</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-flight">In Progress</span></span>
+</li></ul>
+</div>
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">14</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-944" target="_blank" rel="noopener">FOC-944</a>
+  <span class="title">Harness² in Fenix: recursive harness refinement with Fenix&#39;s evidence and human promotion</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-945" target="_blank" rel="noopener">FOC-945</a>
+  <span class="title">Harness² 1/3 — harness fingerprint on every run, trajectory renderer</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-946" target="_blank" rel="noopener">FOC-946</a>
+  <span class="title">Harness² 2/3 — reflector → per-domain library → kickoff injection, human promotion (CADENCE)</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-947" target="_blank" rel="noopener">FOC-947</a>
+  <span class="title">Harness² 3/3 — opt-in harness-probe graph mode (k = 1) judged by REVIEW/TEST, measured</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-110" target="_blank" rel="noopener">FOC-110</a>
+  <span class="title">Capture reproducible and private episode provenance for learning</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-222" target="_blank" rel="noopener">FOC-222</a>
+  <span class="title">Human feedback and a task-grouped frozen evaluation set</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-223" target="_blank" rel="noopener">FOC-223</a>
+  <span class="title">Pilot bounded verified experience retrieval for one role</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-224" target="_blank" rel="noopener">FOC-224</a>
+  <span class="title">CADENCE proposes evaluated improvements, humans promote</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-273" target="_blank" rel="noopener">FOC-273</a>
+  <span class="title">Fine-tuning feasibility: what is trainable from the Fenix corpus</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-281" target="_blank" rel="noopener">FOC-281</a>
+  <span class="title">Verify the training-data census before anything is trained</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-282" target="_blank" rel="noopener">FOC-282</a>
+  <span class="title">FT pilot: verdict parser (review prose to structured findings)</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-398" target="_blank" rel="noopener">FOC-398</a>
+  <span class="title">Offline prompt optimization (GEPA) for [J]/[G] node instructions</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-399" target="_blank" rel="noopener">FOC-399</a>
+  <span class="title">Open-weights + constrained decoding tier for high-volume decisions</span>
+  <span class="meta"><span class="ms ms-M6" title="Optimization and learning · target 2027-10-31">M6</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-647" target="_blank" rel="noopener">FOC-647</a>
+  <span class="title">Harness strategy: lighter alternatives to Claude Code (pi, dsh, OpenShell)</span>
+  <span class="meta"><span class="ms ms-M5" title="Slim DEV and Supervisor · target 2027-05-31">M5</span><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">1</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-794" target="_blank" rel="noopener">FOC-794</a>
+  <span class="title">Recon: pi (earendil-works/pi) as the agent harness instead of Claude Code</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+<section class="area" id="release-discipline">
+  <header>
+    <h2>Release discipline and living docs</h2>
+    <div class="meter" title="0 of 11 tickets shipped"><span style="width:0%"></span></div>
+    <p class="counts"><b>0</b> shipped · <b>0</b> in flight · <b>0</b> next · <b>11</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>Scoped releases, out-of-scope → backlog, the architecture dossier generated from CodeGraph (DrawIO), the roadmap rendered from Linear instead of edited by hand.</dd>
+    <dt>Now</dt><dd>Hand-written roadmap and journals per task; create-child inherits project and milestone.</dd>
+    <dt>Next</dt><dd>After the tag: planning templates, hygiene report, roadmap from Linear, architecture views and deltas, the release audit and the 1.1 dossier (M7).</dd>
+  </dl>
+  <div class="buckets">
+
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">11</span></h4>
+  <ul><li class="t t-later t-epic" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-714" target="_blank" rel="noopener">FOC-714</a>
+  <span class="title">[EPIC] M7 — Release discipline and living docs: scoped releases, CodeGraph → DrawIO dossier</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="pri pri-2" title="High">!</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-715" target="_blank" rel="noopener">FOC-715</a>
+  <span class="title">Planning templates: milestone / epic / release / release-scope; M1–M7 rewritten to them</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="pri pri-2" title="High">!</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-718" target="_blank" rel="noopener">FOC-718</a>
+  <span class="title">ROADMAP.md rendered from Linear [D] + STATE.md compaction</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-719" target="_blank" rel="noopener">FOC-719</a>
+  <span class="title">codegraph-drawio.mjs: deterministic CodeGraph → DrawIO with manifest</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-720" target="_blank" rel="noopener">FOC-720</a>
+  <span class="title">Fenix architecture views + stale-view checks</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-721" target="_blank" rel="noopener">FOC-721</a>
+  <span class="title">Architecture delta between two releases [D]: manifest diff → delta.md</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-722" target="_blank" rel="noopener">FOC-722</a>
+  <span class="title">Release scope graph: release.scope [G] → release-approval [H] → release.push [D]</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-723" target="_blank" rel="noopener">FOC-723</a>
+  <span class="title">Release audit + dossier generator: deterministic checks, diagram-claim verifier</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-724" target="_blank" rel="noopener">FOC-724</a>
+  <span class="title">Release Fenix 1.1: scope, architecture pages, audit, dossier — the M7 acceptance run</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-765" target="_blank" rel="noopener">FOC-765</a>
+  <span class="title">draw.io for agents: official jgraph plugin, Agents365 drift spike</span>
+  <span class="meta"><span class="ms ms-M7" title="Release discipline and living docs · target 2027-01-15">M7</span><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-725" target="_blank" rel="noopener">FOC-725</a>
+  <span class="title">post-fraud-model: adopt the Fenix CodeGraph → DrawIO converter, retire the Python pilot</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+
+  </div>
+</section>
+<section class="area" id="quality">
+  <header>
+    <h2>Codebase quality: tests, CI, maintenance</h2>
+    <div class="meter" title="6 of 17 tickets shipped"><span style="width:35%"></span></div>
+    <p class="counts"><b>6</b> shipped · <b>1</b> in flight · <b>0</b> next · <b>10</b> later</p>
+  </header>
+  <dl class="narrative">
+    <dt>What</dt><dd>The parallel test runner with isolation proof, the Linux lane in CI, flake hunting, and the standing nits epic that never blocks the roadmap.</dd>
+    <dt>Now</dt><dd>Parallel lanes with per-file timing and a wall-clock budget; Linux CI green; the known flakes under load fixed; the stability campaign for AC1 in progress.</dd>
+    <dt>Next</dt><dd>Automatic pruning of merged la-merge trees, the serial-lane migration, small test and docs nits.</dd>
+  </dl>
+  <div class="buckets">
+<div class="bucket bucket-flight">
+  <h4>In flight <span class="n">1</span></h4>
+  <ul><li class="t t-flight" data-bucket="flight">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-626" target="_blank" rel="noopener">FOC-626</a>
+  <span class="title">AC1 stability-volume campaign: 100/100 standalone + 50/50 under load</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-flight">In Progress</span></span>
+</li></ul>
+</div>
+
+<div class="bucket bucket-later">
+  <h4>Later <span class="n">10</span></h4>
+  <ul><li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-270" target="_blank" rel="noopener">FOC-270</a>
+  <span class="title">Review verdict recording: docs contradict behaviour</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-405" target="_blank" rel="noopener">FOC-405</a>
+  <span class="title">Doc-sync: --kind examples in squad CLAUDE.md miss two approvals</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-415" target="_blank" rel="noopener">FOC-415</a>
+  <span class="title">docs: restate zero-runtime-dependency claims after ajv</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-461" target="_blank" rel="noopener">FOC-461</a>
+  <span class="title">mcp: cosmetic nits collector</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later t-epic" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-472" target="_blank" rel="noopener">FOC-472</a>
+  <span class="title">[EPIC] Maintenance and nits (standing, never blocks the roadmap)</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-521" target="_blank" rel="noopener">FOC-521</a>
+  <span class="title">supervisor-verdict record --dry-run writes a round record (poisons the repeated-round guard)</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-546" target="_blank" rel="noopener">FOC-546</a>
+  <span class="title">Delegation transport + CodeGraph prompt hook: minimal repro and root cause</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-615" target="_blank" rel="noopener">FOC-615</a>
+  <span class="title">Landed check + automatic pruning of merged la-merge branches and worktrees</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-642" target="_blank" rel="noopener">FOC-642</a>
+  <span class="title">Migrate the serial-lane supervisor tests onto the state-dir seam (parallel lane)</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li>
+<li class="t t-later" data-bucket="later">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-734" target="_blank" rel="noopener">FOC-734</a>
+  <span class="title">composeState flattens the J state onto one line, blinding a detector</span>
+  <span class="meta"><span class="st st-later">Backlog</span></span>
+</li></ul>
+</div>
+<div class="bucket bucket-shipped">
+  <h4>Shipped <span class="n">6</span></h4>
+  <ul><li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-407" target="_blank" rel="noopener">FOC-407</a>
+  <span class="title">Watcher-liveness test flaky under parallel load</span>
+  <span class="meta"><span class="ms ms-M1" title="Foundations · target 2026-11-15">M1</span><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-601" target="_blank" rel="noopener">FOC-601</a>
+  <span class="title">verdict-evidence test: hermetic real-corpus A/B</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-602" target="_blank" rel="noopener">FOC-602</a>
+  <span class="title">Test fixtures wrote into the live .state/supervisor corpus</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-614" target="_blank" rel="noopener">FOC-614</a>
+  <span class="title">Test runner: parallel lanes with isolation proof, per-file timing, wall-clock budget</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-840" target="_blank" rel="noopener">FOC-840</a>
+  <span class="title">Flaky tests under suite load: wake superseded mid-wait, mcp-enable key, test orphans</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li>
+<li class="t t-shipped" data-bucket="shipped">
+  <a class="id" href="https://linear.app/jointhubs/issue/FOC-913" target="_blank" rel="noopener">FOC-913</a>
+  <span class="title">Flaky under suite load: supervisor-watch-cost reads undefined</span>
+  <span class="meta"><span class="st st-shipped">Done</span></span>
+</li></ul>
+</div>
+  </div>
+</section>
+</div>
+</div>
+<footer>
+Generated 2026-10-20 by <code>scripts/roadmap-html.mjs</code> from <code>docs/roadmap/taxonomy.json</code> (capabilities, hand-curated) and <code>docs/roadmap/linear-snapshot.json</code> (Linear project FENIX, fetched 2026-10-20: every open ticket plus tickets completed in the previous 45 days — older shipped work is not listed). Ticket ids link to Linear. Status words are Linear's; "shipped" = Done, "in flight" = In Progress or In Review, "next" = Todo, "later" = Backlog. Milestone targets from <code>docs/ROADMAP.md</code> (2026-10-15 revision).
+</footer>
+</main>
+<script>
+(function(){
+  var b=document.body, f=document.getElementById('filters');
+  if(!f) return;
+  f.addEventListener('change', function(e){
+    var cb=e.target; if(!cb || !cb.dataset || !cb.dataset.bucket) return;
+    b.classList.toggle('hide-'+cb.dataset.bucket, !cb.checked);
+  });
+})();
+</script>
+</body>
+</html>
