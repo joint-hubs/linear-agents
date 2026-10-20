@@ -49,7 +49,7 @@ import { childModelFor } from "./child-model.mjs";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const SQUADS = ["plan", "dev", "review", "test", "cadence", "supervisor"];
-const SUPERVISOR_FALLBACK_MODEL = "xiaomi/mimo-v2.6-pro";
+const SUPERVISOR_FALLBACK_MODEL = "x-ai/grok-4.7";
 const AGENT_DEFAULT_MODEL = "z-ai/glm-5.2"; // agent.bat's `set "M=..."` fallback
 // The anthropic tiers agent.bat hardcodes (verbatim).
 const AGENT_TIERS = {
