@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Routing modeli Fenix</title>
+<style>
+:root{
+  --bg:#f7f7f5; --card:#ffffff; --ink:#1d1f23; --muted:#5c6270; --line:#e3e4e8;
+  --accent:#2f5fd0; --accent-soft:#e8eefc; --ok:#1f7a4d; --ok-soft:#e5f4ec;
+  --warn:#9a5b00; --warn-soft:#fdf2df; --bad:#a3271f; --bad-soft:#fbe8e6;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#121417; --card:#1a1d22; --ink:#e7e9ee; --muted:#9aa1ad; --line:#2a2f37;
+    --accent:#7ea2ff; --accent-soft:#1f2a45; --ok:#5cc791; --ok-soft:#163327;
+    --warn:#e6ad4f; --warn-soft:#3a2c12; --bad:#ff8a80; --bad-soft:#3d1c1a;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#121417; --card:#1a1d22; --ink:#e7e9ee; --muted:#9aa1ad; --line:#2a2f37;
+  --accent:#7ea2ff; --accent-soft:#1f2a45; --ok:#5cc791; --ok-soft:#163327;
+  --warn:#e6ad4f; --warn-soft:#3a2c12; --bad:#ff8a80; --bad-soft:#3d1c1a;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1080px;margin:0 auto;padding:28px 16px 64px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;justify-content:space-between;margin-bottom:20px}
+h1{font-size:26px;margin:0 0 4px}
+h2{font-size:19px;margin:0 0 12px}
+h3{font-size:15px;margin:18px 0 8px}
+p{margin:0 0 10px}
+.sub{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:0 0 18px}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
+.tag{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.tag.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.tag.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.tag.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+.tag.acc{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+code,.mono{font-family:var(--mono);font-size:13px}
+code{background:var(--accent-soft);padding:1px 5px;border-radius:5px}
+.tbl{width:100%;overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:620px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:600}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+tr.base td{background:var(--ok-soft)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0}
+.chain span{border:1px solid var(--line);border-radius:8px;padding:4px 9px;background:var(--bg);font-size:13px}
+.chain b{color:var(--muted);font-weight:400}
+.when{border-left:3px solid var(--accent);padding:6px 12px;background:var(--accent-soft);border-radius:0 8px 8px 0;margin:8px 0}
+.note{border-left:3px solid var(--warn);padding:6px 12px;background:var(--warn-soft);border-radius:0 8px 8px 0;margin:10px 0}
+ol,ul{margin:6px 0 10px;padding-left:22px}
+li{margin:3px 0}
+.kpi{display:flex;flex-direction:column;gap:2px}
+.kpi .v{font-size:24px;font-weight:650}
+.kpi .l{color:var(--muted);font-size:13px}
+.theme{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:8px;padding:6px 10px;cursor:pointer;font:inherit}
+footer{color:var(--muted);font-size:13px;margin-top:24px}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div>
+    <h1>Routing modeli Fenix — stan i kampania testów</h1>
+    <div class="sub">Stan na 2026-10-21 · ustawienia z PR #130 (FOC-964) · testy: FOC-965 · dostawcy i fp4/fp8: FOC-966</div>
+  </div>
+  <button class="theme" id="theme" type="button" aria-label="Przełącz motyw">motyw</button>
+</header>
+
+<section class="card">
+  <h2>W skrócie</h2>
+  <div class="grid">
+    <div class="kpi"><span class="v">$302</span><span class="l">koszt floty z telemetrii, 30 dni (21.09–20.10)</span></div>
+    <div class="kpi"><span class="v">≈ $2 158</span><span class="l">ten sam ruch z Supervisorem na Grok 4.7 — dlatego wycofany</span></div>
+    <div class="kpi"><span class="v">≈ $205–433</span><span class="l">ten sam ruch po PR #130 (cennik najtańszego dostawcy fp4 ↔ pierwotnego fp8)</span></div>
+    <div class="kpi"><span class="v">≈ $290</span><span class="l">koszt całej kampanii testów (5 ticketów na wariant, wszystkie sloty)</span></div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>1. Co jest ustawione teraz (po PR #130)</h2>
+  <p class="sub">Domyślne modele każdego slotu (to, co działa, gdy nie trwa żaden test). Źródło: <span class="mono">config/models.json</span> i <span class="mono">agents/&lt;skład&gt;/agents/*.md</span>.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Skład</th><th>Slot</th><th>Model</th><th>Dlaczego</th></tr></thead>
+    <tbody>
+      <tr><td>Supervisor</td><td>lead (frontman) + subagenci <code>general-purpose</code></td><td class="mono">xiaomi/mimo-v2.6-pro</td><td>najlepszy długi kontekst w katalogu (86,3), cache $0,0036/M — 92% tokenów Supervisora to odczyt z cache; 212 sesji historii</td></tr>
+      <tr><td>Supervisor</td><td>aliasy <code>default/worker/flash</code>, <code>Explore</code></td><td class="mono">z-ai/glm-5.3-flash</td><td>najtańszy sensowny model, najlepszy w klasie na „bez halucynacji” (72,4)</td></tr>
+      <tr><td>PLAN</td><td>lead, <code>spec</code>, <code>spec-review</code></td><td class="mono">xiaomi/mimo-v2.6-pro</td><td>błąd planu rozlewa się na wszystkie dalsze składy; lead czytany z <code>routing.plan.lead</code></td></tr>
+      <tr><td>PLAN</td><td><code>discovery</code>, <code>decomposer</code>, <code>push</code>, <code>worker</code>, <code>flash</code></td><td class="mono">z-ai/glm-5.3-flash</td><td>praca mechaniczna / krótkie konteksty</td></tr>
+      <tr><td>DEV</td><td>lead, <code>implementer</code>, <code>recon</code>, <code>worker</code>, <code>flash</code></td><td class="mono">z-ai/glm-5.3-flash</td><td>implementer to największy slot dzieci; glm-5.3 dałby +3 pkt coding za +$129/mies.</td></tr>
+      <tr><td>DEV</td><td><code>debugger</code> (hard), <code>refactorer</code> (multifile)</td><td class="mono">z-ai/glm-5.3</td><td>trudne błędy i zmiany wieloplikowe — coding 74,8, agentic 53,1</td></tr>
+      <tr><td>REVIEW</td><td><code>deep</code>, <code>security</code></td><td class="mono">z-ai/glm-5.3</td><td>bramka jakości; mocniejszy model tam, gdzie ocena ma znaczenie</td></tr>
+      <tr><td>REVIEW</td><td>lead, <code>first-pass</code>, <code>worker</code>, <code>flash</code></td><td class="mono">z-ai/glm-5.3-flash</td><td>lint, styl, inwentarz</td></tr>
+      <tr><td>TEST</td><td><code>root-cause</code></td><td class="mono">z-ai/glm-5.3</td><td>diagnoza porażek bez ślepych powtórek</td></tr>
+      <tr><td>TEST</td><td>lead, <code>deployer</code>, <code>scenario-gen</code>, <code>runner</code>, <code>worker</code>, <code>flash</code></td><td class="mono">z-ai/glm-5.3-flash</td><td>wykonanie i raporty</td></tr>
+      <tr><td>CADENCE</td><td>lead / <code>collector</code>, <code>worker</code>, <code>flash</code></td><td class="mono">z-ai/glm-5.3-flash</td><td>zamiast minimax-m3 / deepseek-v4-flash</td></tr>
+      <tr><td>CADENCE</td><td><code>retro</code>, <code>digest</code></td><td class="mono">xiaomi/mimo-v2.6-pro</td><td>zamiast glm-5.2 i deepseek-v4-pro (5,9 pkt „bez halucynacji” — dyskwalifikacja dla raportu)</td></tr>
+      <tr><td>Claude Code</td><td>tier <code>sonnet</code></td><td class="mono">google/gemini-2.5-flash-lite</td><td><b>klasyfikator auto mode</b> — krótkie wywołania; benchmarki ogólne nie mają tu znaczenia (nie ruszać)</td></tr>
+      <tr><td>Claude Code</td><td>tiery <code>opus</code>, <code>haiku</code>, <code>smallFast</code></td><td class="mono">z-ai/glm-5.3-flash</td><td>wewnętrzne wywołania harnessu</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section class="card">
+  <h2>2. Jak Fenix wybiera model — i kiedy zmiana zaczyna działać</h2>
+  <p>Nic nie zmienia się „w locie” w środku rozmowy z modelem. Model jest wybierany w trzech momentach, za każdym razem według stałej kolejności — wygrywa pierwsze źródło, które coś ustawia.</p>
+
+  <h3>Supervisor — przy starcie sesji</h3>
+  <div class="chain"><span>zmienna <code>SUPERVISOR_MODEL</code></span><b>→</b><span>Settings: <code>routing.supervisor.lead</code></span><b>→</b><span><code>defaultModel</code> dostawcy w models.json</span><b>→</b><span>wbudowany fallback (mimo)</span></div>
+  <div class="when">Zmiana działa od <b>następnej sesji Supervisora</b>: <code>fenix attach --new</code>, restart stosu albo — w trybie task workspaces — następne zadanie (każde zadanie ma własną sesję Supervisora). Trwająca sesja zostaje na modelu, z którym wystartowała.</div>
+
+  <h3>Lead składu (PLAN / DEV / REVIEW / TEST / CADENCE) — przy każdym uruchomieniu dziecka</h3>
+  <div class="chain"><span>Settings: <code>routing.&lt;skład&gt;.lead</code></span><b>→</b><span>models.json <code>routing.&lt;skład&gt;.lead</code> / <code>default</code> / <code>worker</code></span><b>→</b><span><code>defaultModel</code> dostawcy</span></div>
+  <div class="when">Supervisor uruchamia dziecko dla każdego ticketu osobno, więc zmiana w Settings działa <b>od następnego ticketu</b> (a dokładniej: od następnego uruchomienia tego składu). Wznowiona tura dziecka trzyma dostawcę ze swojej pierwszej tury.</div>
+
+  <h3>Role (subagenci) i tiery Claude Code — przy starcie procesu</h3>
+  <div class="chain"><span>frontmatter <code>model:</code> w <code>agents/&lt;skład&gt;/agents/&lt;rola&gt;.md</code></span><b>+</b><span>tiery <code>opus/sonnet/haiku/smallFast</code> z models.json → zmienne <code>ANTHROPIC_DEFAULT_*_MODEL</code></span></div>
+  <div class="when">Pliki ról i tiery są częścią obrazu / repo — zmieniają się commitem i <code>fenix update</code>, nie z dashboardu. Dlatego w testach zmieniamy tylko <b>leady</b> i <b>Supervisora</b>.</div>
+
+  <div class="note">Każda wiadomość modelu trafia do telemetrii z nazwą modelu i ticketem (<span class="mono">usage_facts.model</span>, <span class="mono">run_task_links</span>). Wyniki testów da się więc policzyć z danych, które już zbieramy — nie trzeba niczego dopisywać ręcznie.</div>
+</section>
+
+<section class="card">
+  <h2>3. Kampania testów modeli (FOC-965)</h2>
+  <p>To nie jest klasyczne A/B, tylko test kilku wariantów na tym samym slocie. Zasady:</p>
+  <ul>
+    <li><b>5 ticketów na wariant</b> (minimum, żeby zobaczyć rząd wielkości; p20/p50/p80 liczymy od 5).</li>
+    <li><b>Na jednym tickecie zmienia się tylko jeden slot „Supervisora”</b> — Supervisor i leady testujemy w osobnych fazach, żeby nie mieszać przyczyn.</li>
+    <li>Leady różnych składów mogą iść równolegle: każdy skład ma własne metryki (np. REVIEW — czy ustalenia się potwierdzają), więc mieszają się słabo.</li>
+    <li>Wariant przypisany do ticketu <b>zostaje na nim do końca</b> (wznowienia, kolejne rundy).</li>
+    <li>Tickety porównywalnej wielkości; najlepiej z tej samej kolejki i tygodnia.</li>
+  </ul>
+
+  <h3>Supervisor — 6 wariantów (faza 1, ok. 30 ticketów)</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Model</th><th class="num">≈ $ / ticket</th><th class="num">Intel</th><th class="num">Długi kontekst</th><th class="num">Bez halucynacji</th><th>Po co w teście</th></tr></thead>
+    <tbody>
+      <tr class="base"><td class="mono">xiaomi/mimo-v2.6-pro</td><td class="num">$1,29</td><td class="num">46,3</td><td class="num">86,3</td><td class="num">59,4</td><td>baseline <span class="tag ok">domyślny</span></td></tr>
+      <tr><td class="mono">z-ai/glm-5.3-flash</td><td class="num">$1,29 (fp4: $0,22)</td><td class="num">41,8</td><td class="num">80,0</td><td class="num">72,4</td><td>tanie dno: czy słabszy, ale uczciwszy i agentowy model wystarczy</td></tr>
+      <tr><td class="mono">meta/muse-spark-1.3</td><td class="num">$8,07</td><td class="num">48,1</td><td class="num">83,0</td><td class="num">67,1</td><td>najlepszy agentic (55,5) i coding (75,8) wśród mocnych</td></tr>
+      <tr><td class="mono">google/gemini-4-argon</td><td class="num">$10,40</td><td class="num">52,6</td><td class="num">79,7</td><td class="num">84,9</td><td>największy skok jakości i najuczciwszy w katalogu</td></tr>
+      <tr><td class="mono">openai/gpt-6.1-sol (high)</td><td class="num">$12,90*</td><td class="num">50,2</td><td class="num">82,3</td><td class="num">50,6</td><td>szósty wariant w widełkach Sonneta <span class="tag warn">patrz uwaga</span></td></tr>
+      <tr><td class="mono">anthropic/claude-sonnet-5.5</td><td class="num">$12,90</td><td class="num">56,0</td><td class="num">82,7</td><td class="num">53,0</td><td>najwyższa inteligencja, natywny model Claude Code</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note">* GPT-6.1 Sol ma ten sam cennik za token co Sonnet 5.5 ($2 / $10, zapis do cache $2,50/M), więc taniej wychodzi tylko przy niższym wysiłku (high zamiast max). W widełkach „tańszy od Sonneta” nie ma innego mocnego modelu: Kimi K3 ($10,18/ticket) ma niższą inteligencję niż mimo (43,6) i słabą uczciwość (46,8). W rezerwie: <span class="mono">anthropic/claude-haiku-5.5</span> ($0,78/ticket, intel 43,4).</div>
+
+  <h3>Lead PLAN — 3 warianty (ok. 15 ticketów)</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Model</th><th class="num">≈ $ / ticket</th><th>Uwagi</th></tr></thead>
+    <tbody>
+      <tr class="base"><td class="mono">xiaomi/mimo-v2.6-pro</td><td class="num">$0,24</td><td>baseline po PR #130</td></tr>
+      <tr><td class="mono">google/gemini-4-argon</td><td class="num">$1,91</td><td>jakość + uczciwość; ≈ $32/mies. przy obecnym ruchu PLAN</td></tr>
+      <tr><td class="mono">anthropic/claude-sonnet-5.5</td><td class="num">$2,18</td><td>najwyższa inteligencja i GDPval (praca koncepcyjna)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Lead DEV — 3 warianty (ok. 15 ticketów)</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Model</th><th class="num">≈ $ / ticket</th><th>Uwagi</th></tr></thead>
+    <tbody>
+      <tr class="base"><td class="mono">z-ai/glm-5.3-flash</td><td class="num">$0,27</td><td>baseline</td></tr>
+      <tr><td class="mono">xiaomi/mimo-v2.6-pro</td><td class="num">$0,33</td><td>prawie ta sama cena, wyższa inteligencja i długi kontekst</td></tr>
+      <tr><td class="mono">meta/muse-spark-1.3</td><td class="num">$1,77</td><td>najlepszy agentic/coding</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Lead REVIEW i lead TEST — propozycja (po ok. 15 ticketów)</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Slot</th><th>Warianty (≈ $ / ticket)</th><th>Co ma pokazać</th></tr></thead>
+    <tbody>
+      <tr><td>lead REVIEW</td><td><span class="mono">glm-5.3-flash</span> $0,25 (baseline) · <span class="mono">mimo-v2.6-pro</span> $0,32 · <span class="mono">glm-5.3</span> $2,22</td><td>czy werdykty i ustalenia się potwierdzają (fałszywe alarmy vs przeoczenia złapane później w TEST)</td></tr>
+      <tr><td>lead TEST</td><td><span class="mono">glm-5.3-flash</span> $0,17 (baseline) · <span class="mono">mimo-v2.6-pro</span> $0,19 · <span class="mono">glm-5.3</span> $1,50</td><td>czy porażki są poprawnie diagnozowane bez powtórek; czas do werdyktu</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Koszt kampanii (5 ticketów na wariant)</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Faza</th><th class="num">Tickety</th><th class="num">≈ koszt testowanych slotów</th></tr></thead>
+    <tbody>
+      <tr><td>Supervisor (6 wariantów)</td><td class="num">30</td><td class="num">$234</td></tr>
+      <tr><td>lead PLAN (3)</td><td class="num">15</td><td class="num">$22</td></tr>
+      <tr><td>lead DEV (3)</td><td class="num">15</td><td class="num">$12</td></tr>
+      <tr><td>lead REVIEW (3)</td><td class="num">15</td><td class="num">$14</td></tr>
+      <tr><td>lead TEST (3)</td><td class="num">15</td><td class="num">$9</td></tr>
+      <tr><td><b>Razem</b></td><td class="num"><b>≈ 30 ticketów + leady równolegle</b></td><td class="num"><b>≈ $291</b></td></tr>
+    </tbody>
+  </table></div>
+  <p class="sub">Przy obecnym tempie (~107 ticketów / 30 dni) faza Supervisora to ok. 1,5 tygodnia; leady mogą iść w tym samym czasie. Do tego normalny koszt reszty składów, który płacimy i tak.</p>
+</section>
+
+<section class="card">
+  <h2>4. Jak przełączamy modele w testach</h2>
+  <div class="grid">
+    <div>
+      <h3>Teraz — ręcznie, bez zmian w kodzie</h3>
+      <ol>
+        <li>Dashboard → <b>Settings → Provider &amp; routing</b>.</li>
+        <li>W wierszu Supervisora albo leada składu wybierz model wariantu i zapisz.</li>
+        <li>Supervisor: rozpocznij nową sesję (<code>fenix attach --new</code>) albo poczekaj na następne zadanie. Lead: działa od następnego ticketu.</li>
+        <li>Po 5 ticketach przełącz na kolejny wariant.</li>
+      </ol>
+      <p class="sub">Wady: trzeba pamiętać o przełączaniu i o tym, który ticket szedł na czym (telemetria to zapamięta, ale łatwo się pomylić z momentem zmiany).</p>
+    </div>
+    <div>
+      <h3>Propozycja — automatycznie (nowy ticket, najpierw PRD)</h3>
+      <ol>
+        <li>W Settings definiujesz eksperyment: slot, lista wariantów, liczba ticketów na wariant.</li>
+        <li>Przy starcie sesji Supervisora / uruchomieniu leada Fenix sam przypisuje wariant ticketowi (po kolei), zapisuje przypisanie i trzyma je do końca ticketu.</li>
+        <li>Dashboard pokazuje postęp („Gemini 4 Argon: 3/5”) i bieżące wyniki.</li>
+        <li>Po komplecie wraca do modelu domyślnego i generuje raport z telemetrii.</li>
+      </ol>
+      <p class="sub">To jest właśnie „dynamicznie przy uruchamianiu Supervisora” — model nadal nie zmienia się w trakcie sesji, tylko wybór przy starcie robi się sam.</p>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>5. Co mierzymy</h2>
+  <div class="tbl"><table>
+    <thead><tr><th>Metryka</th><th>Skąd</th><th>Dla jakich slotów</th></tr></thead>
+    <tbody>
+      <tr><td>Koszt na ticket (slot i całość)</td><td>telemetria: <span class="mono">usage_facts</span> × cennik, dashboard → Costs &amp; quality</td><td>wszystkie</td></tr>
+      <tr><td>Czas do wylądowanej gałęzi</td><td>run manifesty, Work board</td><td>Supervisor, leady</td></tr>
+      <tr><td>Interwencje: Needs-you, zaparkowane prompty, auto-odmowy</td><td>kokpit, <span class="mono">parked-denials.jsonl</span></td><td>Supervisor</td></tr>
+      <tr><td>First-time-right: review/test zielone w 1. rundzie</td><td>werdykty REVIEW/TEST, rundy na tickecie</td><td>Supervisor, PLAN, DEV</td></tr>
+      <tr><td>Uczciwość raportów: komentarz w Linearze vs stan faktyczny</td><td>ręczny przegląd (próbka na wariant)</td><td>Supervisor</td></tr>
+      <tr><td>Trafność ustaleń review</td><td>ustalenia potwierdzone / odrzucone / złapane później</td><td>lead REVIEW</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section class="card">
+  <h2>6. Zastrzeżenia</h2>
+  <ul>
+    <li><b>Cena zależy od dostawcy (FOC-966).</b> OpenRouter pokazuje cenę najtańszego endpointu, często fp4 (glm-5.3: $0,079/M u Wafer fp4 vs $1,40/M u Z.AI fp8). Benchmarki AA dotyczą wersji pierwotnego dostawcy. mimo, Gemini, Muse, Sonnet, GPT i Haiku mają jednego dostawcę lub tę samą cenę wszędzie — ich koszt jest stabilny.</li>
+    <li><b>Szacunki zakładają obecny profil tokenów.</b> Modele na wysokim wysiłku (max/xhigh) piszą więcej — realny koszt może być wyższy.</li>
+    <li><b>Harness.</b> Gemini, Muse i GPT nie pracowały jeszcze w naszym Claude Code przez OpenRouter jako Supervisor — test sprawdzi też, czy wywołania narzędzi działają poprawnie.</li>
+    <li><b>Mała próba.</b> 5 ticketów to sygnał, nie dowód; decyzja o zmianie domyślnego modelu — dopiero gdy różnica jest wyraźna.</li>
+  </ul>
+</section>
+
+<footer>
+  Źródła: <span class="mono">docs/research/model-routing-2026-10-21.md</span> (analiza i liczby) · <span class="mono">docs/ui/model-explorer.html</span> (porównywarka, snapshot AA 2026-10-21) · telemetria 21.09–20.10 (107 ticketów, 82 tys. wiadomości floty). Tickety: FOC-964 (routing), FOC-965 (testy), FOC-966 (dostawcy).
+</footer>
+</main>
+<script>
+(() => {
+  const root = document.documentElement, btn = document.getElementById("theme");
+  let saved = null;
+  try { saved = localStorage.getItem("fenix-routing-theme"); } catch (e) {}
+  if (saved) root.setAttribute("data-theme", saved);
+  btn.addEventListener("click", () => {
+    const dark = root.getAttribute("data-theme") ? root.getAttribute("data-theme") === "dark"
+      : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const next = dark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("fenix-routing-theme", next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

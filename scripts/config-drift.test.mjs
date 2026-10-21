@@ -427,7 +427,7 @@ test("lead model każdego składu z routingu ma cenę", () => {
   // The Supervisor's hard floor when the sources resolve nothing for it —
   // duplicated in scripts/squad-start.mjs and scripts/squad-config.mjs; if the
   // id changes there, change it here too.
-  const SUPERVISOR_FALLBACK_MODEL = "x-ai/grok-4.7";
+  const SUPERVISOR_FALLBACK_MODEL = "xiaomi/mimo-v2.6-pro";
   for (const squad of squads) {
     // routing.supervisor.default is the CHILDREN's alias, not the frontman's
     // model (FOC-771): the supervisor runs on the overlay's

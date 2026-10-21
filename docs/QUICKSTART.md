@@ -197,7 +197,8 @@ The Settings area in the left navigation covers what used to require a
   from the active provider's pricing scope; a model without a price row is
   allowed and labelled "unpriced". The benchmark column uses the recorded AA
   Intelligence Index snapshot in `config/model-benchmarks.json` (currently
-  2026-09-03); unknown models and other provider scopes show a dash.
+  2026-10-21, refreshed with `docs/ui/refresh-model-data.py`); unknown models and other provider scopes show a dash.
+  The Supervisor row sets the frontman model (`routing.supervisor.lead`); it applies the next time the Supervisor session starts (`fenix attach --new` or a stack restart), not mid-session.
   A provider or routing change takes effect on the next spawn: each child
   resolves the current overlay and mounted key, while a resumed turn pins the
   provider name recorded at its first turn. An explicit `LA_PROVIDER` still

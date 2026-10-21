@@ -171,11 +171,11 @@ test("planLaunch supervisor — LA_SUPERVISOR_REPO, fallback model, SUPERVISOR_M
     assert.equal(plan.env.LA_SUPERVISOR_REPO, cwd);
     // routing.supervisor.default=glm is the CHILDREN's alias — the frontman
     // runs on the built-in fallback when neither env nor the overlay decides.
-    assert.equal(plan.model, "x-ai/grok-4.7");
+    assert.equal(plan.model, "xiaomi/mimo-v2.6-pro");
     assert.ok(!plan.steps.some((s) => s.kind === "cost-guard")); // the frontman is the intervention channel
     const record = plan.steps.find((s) => s.kind === "record-current-run");
     assert.ok(record, "record-current-run step present");
-    assert.deepEqual(record.args, ["record", "RUN_ID", "--model", "x-ai/grok-4.7"]);
+    assert.deepEqual(record.args, ["record", "RUN_ID", "--model", "xiaomi/mimo-v2.6-pro"]);
 
     const overridden = planLaunch({ squad: "supervisor", env: { ...baseEnv(root), SUPERVISOR_MODEL: "fixture/super-model" }, cwd, root });
     assert.equal(overridden.model, "fixture/super-model");
@@ -349,7 +349,7 @@ test("runLaunch supervisor — LA_SUPERVISOR_RUN defaults to the run id, record 
     assert.equal(claude.opts.env.LA_SUPERVISOR_REPO, cwd);
     const record = calls.find((c) => c.args[1] === "record");
     assert.ok(record, "supervisor-current-run record executed");
-    assert.deepEqual(record.args.slice(1), ["record", "RUN-SUP", "--model", "x-ai/grok-4.7"]);
+    assert.deepEqual(record.args.slice(1), ["record", "RUN-SUP", "--model", "xiaomi/mimo-v2.6-pro"]);
     assert.ok(logs.some((l) => l.includes("run=RUN-SUP issue=FOC-771")));
     assert.ok(logs.some((l) => l.includes(`CLAUDE_CONFIG_DIR=${join(root, "agents", "supervisor")}`)));
   } finally {

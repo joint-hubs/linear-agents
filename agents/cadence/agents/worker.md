@@ -1,7 +1,7 @@
 ---
 name: worker
-description: CADENCE squad — cheap helper: issue/comment summaries, weekly aggregates, digest section drafts. MiniMax M3.
-model: minimax/minimax-m3
+description: CADENCE squad — cheap helper: issue/comment summaries, weekly aggregates, digest section drafts. GLM-5.3 Flash.
+model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write
 ---
 <role>

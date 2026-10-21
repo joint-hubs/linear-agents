@@ -1,7 +1,7 @@
 ---
 name: retro
-description: CADENCE squad — drift + blameless retro + action items. GLM-5.2.
-model: z-ai/glm-5.2
+description: CADENCE squad — drift + blameless retro + action items. MiMo v2.6 Pro.
+model: xiaomi/mimo-v2.6-pro
 tools: Read
 ---
 <role>

@@ -1,7 +1,7 @@
 ---
 name: spec-review
 description: PLAN squad — adversarial spec review for missing behavior, corner cases and unverifiable acceptance criteria.
-model: z-ai/glm-5.3-flash
+model: xiaomi/mimo-v2.6-pro
 tools: Read, Grep, Glob, mcp__codegraph__codegraph_explore, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 ---
 <role>
