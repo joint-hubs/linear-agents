@@ -52,7 +52,7 @@ Host prerequisites:
 
 - Docker Desktop (Windows/macOS) or Docker Engine + Compose v2 (Linux)
 - Docker memory >= 8 GB (Docker Desktop: Settings > Resources)
-- >= 50 GB free disk
+- a 50 GB disk (the measured minimum; the preflight itself only stops below 10 GB free)
 - git
 - (curl is no longer needed: key validation runs inside the `fenix-api`
   image through `scripts/key-check.mjs`)
@@ -61,7 +61,7 @@ Host prerequisites:
 
 Both resource numbers are the evidence-based minimum from the Sizing section
 at the bottom of this file (a dev child's memory peak needs 8 GB; 4 GB is not
-enough). The `fenix up` preflight itself only warns below 8 GB — it does not
+enough). The `fenix up` preflight warns below ~7.5 GiB (a nominal 8 GB machine reports ~7.7 GiB to Docker) — it does not
 check for the size you will actually need.
 
 On Linux hosts where your uid/gid is not 1000:1000, `./fenix up` builds a
@@ -120,7 +120,7 @@ Windows: `fenix up` in cmd, `.\fenix.cmd up` in PowerShell.
 What `fenix up` does:
 
 1. Preflight: docker on PATH, daemon running, compose available, free disk
-   >= 10 GB, Docker memory >= 8 GB (memory below 8 GB is a warning, not a stop).
+   >= 10 GB, Docker memory >= 8 GB nominal (below ~7.5 GiB is a warning, not a stop).
 2. Key wizard, if any key file is missing or empty: hidden input, each key
    validated live, max 3 tries per key. Then it asks for the Linear team key,
    saved as `LINEAR_TEAM_KEY` in `.fenix/fenix.env`.

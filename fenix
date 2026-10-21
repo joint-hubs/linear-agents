@@ -252,14 +252,14 @@ preflight() {
     pf_warn "free disk" "could not read free space (df failed) — continuing"
   fi
 
-  # Docker memory >= 8 GB (WARN, not FAIL, if lower or unreadable) — the
+  # Docker memory >= 8 GB nominal (WARN, not FAIL, if lower or unreadable) — the
   # evidence-based minimum from the Sizing section in docs/QUICKSTART.md.
   mem=$(docker info --format '{{.MemTotal}}' 2>/dev/null) || mem=""
   if [ -n "$mem" ]; then
-    if awk -v m="$mem" 'BEGIN { exit !(m >= 8589934592) }'; then
+    if awk -v m="$mem" 'BEGIN { exit !(m >= 8053063680) }'; then
       pf_ok "docker memory >= 8 GB"
     else
-      pf_warn "docker memory" "$(awk -v m="$mem" 'BEGIN { printf "%.1f", m / 1073741824 }') GB — below the 8 GB minimum (see Sizing in docs/QUICKSTART.md), the build may fail"
+      pf_warn "docker memory" "$(awk -v m="$mem" 'BEGIN { printf "%.1f", m / 1073741824 }') GB — below the 8 GB minimum (a nominal 8 GB machine reports ~7.7 GiB; see Sizing in docs/QUICKSTART.md), the build may fail"
     fi
   else
     pf_warn "docker memory" "could not read MemTotal from docker info — continuing"
