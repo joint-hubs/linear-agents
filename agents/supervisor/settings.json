@@ -138,7 +138,13 @@
       "Bash(git clean:*)",
       "Bash(git branch -D:*)",
       "Bash(rm -rf:*)",
-      "WebFetch"
+      "WebFetch",
+      "Bash(git -C * push*)",
+      "Bash(git -c * push*)",
+      "Bash(git -C * reset --hard*)",
+      "Bash(git -C * clean*)",
+      "Bash(git -C * branch -D*)",
+      "Bash(gh * pr merge*)"
     ],
     "deny": [
       "mcp__linear__*",
@@ -170,6 +176,18 @@
     ]
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$LA_ROOT/scripts/supervisor-ask-guard.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

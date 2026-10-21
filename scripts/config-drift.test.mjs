@@ -354,6 +354,14 @@ test("supervisor ask/deny match the pinned child baseline (FOC-900)", () => {
     "Bash(git branch -D:*)",
     "Bash(rm -rf:*)",
     "WebFetch",
+    // FOC-978: prefix spellings the plain prefix rules let through the
+    // auto-mode classifier — the -C / -c / wrapper forms of the same ops.
+    "Bash(git -C * push*)",
+    "Bash(git -c * push*)",
+    "Bash(git -C * reset --hard*)",
+    "Bash(git -C * clean*)",
+    "Bash(git -C * branch -D*)",
+    "Bash(gh * pr merge*)",
   ];
   if (JSON.stringify(perms.ask || []) !== JSON.stringify(expectedAsk)) {
     fail(`supervisor permissions.ask drifted from the pinned list: ${JSON.stringify(perms.ask)}`);
@@ -366,7 +374,24 @@ test("supervisor ask/deny match the pinned child baseline (FOC-900)", () => {
     "Bash(git worktree prune:*)",
   ];
   const missingDeny = requiredDeny.filter((rule) => !deny.includes(rule));
-  if (missingDeny.length) fail(`supervisor permissions.deny is missing: ${missingDeny.join(", ")}`);
+  if (missingDeny.length)
+    fail(`supervisor permissions.deny is missing rules: ${JSON.stringify(missingDeny)}`);
+});
+
+test("supervisor PreToolUse guard hook is wired (FOC-978)", () => {
+  const hooks = readJson("agents/supervisor/settings.json").hooks || {};
+  const preToolUse = hooks.PreToolUse || [];
+  const found = preToolUse.some((entry) =>
+    (entry.hooks || []).some(
+      (h) =>
+        h.type === "command" &&
+        String(h.command || "").includes("supervisor-ask-guard.mjs")
+    )
+  );
+  if (!found)
+    fail(
+      "agents/supervisor/settings.json: no PreToolUse hook running supervisor-ask-guard.mjs"
+    );
 });
 
 // ── 4. Model routing must be internally consistent ────────────────────────────
