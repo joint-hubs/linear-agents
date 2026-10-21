@@ -281,11 +281,14 @@ test("kazdy serwer z .mcp.json jest dozwolony w allow-liscie skladow", () => {
   // środku headlessowej tury — czyli dziecko, które wisi.
   //
   // FOC-943: external-write servers are the Supervisor's only; children deny them.
-  // fenix-control joins them (FOC-958): its answer tools write HUMAN decisions
-  // (gate/ask/dialog) — a child holding fenix_gate_answer could self-answer its
-  // own HITL gate, so the control plane is the Supervisor's and the operator's
-  // local client, never a squad child's.
-  const SUPERVISOR_ONLY_MCP = ["fenix-linear", "fenix-github", "fenix-control"];
+  // FOC-958: fenix-control is denied for ALL roles (including the Supervisor) —
+  // its answer tools write HUMAN decisions (gate/ask/dialog); a Supervisor with
+  // fenix_gate_answer could self-answer its own HITL gate.
+  const SUPERVISOR_ONLY_MCP = ["fenix-linear", "fenix-github"];
+  // Denied for EVERY role including the Supervisor (FOC-958): its answer tools
+  // write HUMAN decisions (gate/ask/dialog) — no process may self-answer a
+  // HITL gate.  The transport is stdio, driven by a local operator client.
+  const DENIED_FOR_ALL_MCP = ["fenix-control"];
   // Pinned: the exact tools the Supervisor may call on the supervisor-only servers.
   const SUPERVISOR_ONLY_EXPECTED = [
     "mcp__fenix-linear__transition",
@@ -295,16 +298,6 @@ test("kazdy serwer z .mcp.json jest dozwolony w allow-liscie skladow", () => {
     "mcp__fenix-github__pr_create",
     "mcp__fenix-github__pr_edit",
     "mcp__fenix-github__pr_comment",
-    "mcp__fenix-control__fenix_status",
-    "mcp__fenix-control__fenix_inbox",
-    "mcp__fenix-control__fenix_sessions",
-    "mcp__fenix-control__fenix_conversation",
-    "mcp__fenix-control__fenix_queue",
-    "mcp__fenix-control__fenix_costs",
-    "mcp__fenix-control__fenix_message",
-    "mcp__fenix-control__fenix_ask_answer",
-    "mcp__fenix-control__fenix_dialog_answer",
-    "mcp__fenix-control__fenix_gate_answer",
   ];
   const servers = Object.keys(readJson(".mcp.json").mcpServers || {});
   const missing = [];
@@ -313,6 +306,14 @@ test("kazdy serwer z .mcp.json jest dozwolony w allow-liscie skladow", () => {
     const allow = perms.allow || [];
     const deny = perms.deny || [];
     for (const name of servers) {
+      if (DENIED_FOR_ALL_MCP.includes(name)) {
+        // Every role, Supervisor included, carries deny mcp__<name>__*.
+        if (!deny.includes(`mcp__${name}__*`)) missing.push(`${squad}: brak deny mcp__${name}__*`);
+        if (allow.some((r) => r.startsWith(`mcp__${name}__`))) {
+          missing.push(`${squad}: allow na serwerze zabronionym dla wszystkich (${name})`);
+        }
+        continue;
+      }
       if (SUPERVISOR_ONLY_MCP.includes(name)) {
         if (squad === "supervisor") {
           const expected = SUPERVISOR_ONLY_EXPECTED.filter((r) => r.startsWith(`mcp__${name}__`));
@@ -339,12 +340,12 @@ test("kazdy serwer z .mcp.json jest dozwolony w allow-liscie skladow", () => {
     }
   }
   // The orchestrator is NOT in SQUADS (AC-10 FOC-116 keeps it out of the squad
-  // checks), but the supervisor-only servers must be denied there too — it is
-  // the one other interactive session that must never reach them. Checked
-  // separately, never by adding it to the global list.
+  // checks), but the supervisor-only and denied-for-all servers must be denied
+  // there too — it is the one other interactive session that must never reach
+  // them. Checked separately, never by adding it to the global list.
   const orchestratorPerms = readJson("agents/orchestrator/settings.json").permissions || {};
   const orchestratorDeny = orchestratorPerms.deny || [];
-  for (const name of SUPERVISOR_ONLY_MCP) {
+  for (const name of [...SUPERVISOR_ONLY_MCP, ...DENIED_FOR_ALL_MCP]) {
     if (!orchestratorDeny.includes(`mcp__${name}__*`)) missing.push(`orchestrator: brak deny mcp__${name}__*`);
     if ((orchestratorPerms.allow || []).some((r) => r.startsWith(`mcp__${name}__`))) {
       missing.push(`orchestrator: allow na serwerze tylko-dla-Supervisora (${name})`);
@@ -374,6 +375,10 @@ test("supervisor ask/deny match the pinned child baseline (FOC-900)", () => {
   }
   const deny = perms.deny || [];
   const requiredDeny = [
+    // FOC-958: fenix-control is denied for every role INCLUDING the Supervisor —
+    // its answer tools write human decisions (gate/ask/dialog); a Supervisor with
+    // fenix_gate_answer could self-answer its own HITL gate.
+    "mcp__fenix-control__*",
     "mcp__linear__*",
     "mcp__claude_ai_Linear__*",
     "Bash(git worktree remove:*)",

@@ -823,16 +823,6 @@ allow:
 | `mcp__fenix-github__pr_create` |  |
 | `mcp__fenix-github__pr_edit` |  |
 | `mcp__fenix-github__pr_comment` |  |
-| `mcp__fenix-control__fenix_status` |  |
-| `mcp__fenix-control__fenix_inbox` |  |
-| `mcp__fenix-control__fenix_sessions` |  |
-| `mcp__fenix-control__fenix_conversation` |  |
-| `mcp__fenix-control__fenix_queue` |  |
-| `mcp__fenix-control__fenix_costs` |  |
-| `mcp__fenix-control__fenix_message` |  |
-| `mcp__fenix-control__fenix_ask_answer` |  |
-| `mcp__fenix-control__fenix_dialog_answer` |  |
-| `mcp__fenix-control__fenix_gate_answer` |  |
 | `Bash(codegraph:*)` |  |
 | `Edit` |  |
 | `Bash(ls:*)` |  |
@@ -949,6 +939,7 @@ deny:
 
 | rule | note |
 |---|---|
+| `mcp__fenix-control__*` |  |
 | `mcp__linear__*` |  |
 | `Artifact` |  |
 | `PushNotification` |  |
@@ -996,7 +987,7 @@ deny:
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
 | fenix-linear | yes | `mcp__fenix-linear__transition` |
 | fenix-github | yes | `mcp__fenix-github__pr_create` |
-| fenix-control | yes | `mcp__fenix-control__fenix_status` |
+| fenix-control | no | — |
 
 ### Skills
 
