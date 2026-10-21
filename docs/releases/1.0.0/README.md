@@ -133,6 +133,6 @@ Includes the FOC-783 Cockpit-hooks merge note.
 
 - Provider: OpenRouter as the shipped default, pluggable (FOC-773).
 - Image published publicly on GHCR (FOC-775, 2026-10-19).
-- Supervisor model: `x-ai/grok-4.7` (2026-10-20, PR #122).
+- Supervisor model: `xiaomi/mimo-v2.6-pro` (grok-4.7 tried 2026-10-20, ~12× the cost at equal AA intelligence; A/B candidates FOC-965).
 - Permission mode `auto` declared at the Supervisor launch (FOC-943).
 - Task workspaces as a 1.0 pillar (2026-10-15, FOC-839 hardening).

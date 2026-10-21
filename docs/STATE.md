@@ -6,6 +6,7 @@
 <!-- state-index:start -->
 ## Task journals (generated)
 
+- FOC-964 — in review — last entry 2026-10-21 10:10 — model-routing-v2 — -
 - FOC-920 — in review — last entry 2026-10-20 23:06 — foc-920-parked-prompt — -
 - FOC-943 — in review — last entry 2026-10-20 22:24 — foc-943-fenix-mcp-writes — -
 - FOC-775 — done — last entry 2026-10-20 21:13 — foc-775-ghcr — #116
