@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { runDir, teeAbsPath, writeRegistry } from "./supervisor-lib.mjs";
 import { createTaskSessionStore } from "./task-sessions.mjs";
+import { scrubbedEnv } from "./supervisor-test-fixtures.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -380,7 +381,7 @@ test("returns reason=exit when a live child finishes during the wait", () => {
       [SPAWN, "--run", runId, "--squad", "dev", "--task", "FOC-123", "--prompt", "k", "--repo", repo],
       {
         encoding: "utf8",
-        env: { ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key", LA_CLAUDE_BIN: MOCK, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1", MOCK_CLAUDE_HANG_MS: "1500" },
+        env: { ...scrubbedEnv(), OPENROUTER_API_KEY: "test-supervisor-provider-key", LA_CLAUDE_BIN: MOCK, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1", MOCK_CLAUDE_HANG_MS: "1500" },
       },
     ),
   );

@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 process.env.LA_TELEMETRY_DB = join(mkdtempSync(join(tmpdir(), "la-runtime-wf-store-")), "telemetry.sqlite");
 
 import { readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
-import { waitForStatus } from "./supervisor-test-fixtures.mjs";
+import { scrubbedEnv, waitForStatus } from "./supervisor-test-fixtures.mjs";
 import { queryRuntimeEvents } from "./runtime-events.mjs";
 import { recordHookEvent, recordRuntimeChoice } from "./runtime-hook.mjs";
 import { completeWorkflow } from "./runtime-workflow.mjs";
@@ -211,7 +211,7 @@ function fixtureRepo() {
 }
 
 const baseEnv = (extra = {}) => ({
-  ...process.env,
+  ...scrubbedEnv(),
   OPENROUTER_API_KEY: "test-supervisor-provider-key",
   LA_CLAUDE_BIN: MOCK,
   LA_SUPERVISOR_NO_TELEMETRY: "1",
