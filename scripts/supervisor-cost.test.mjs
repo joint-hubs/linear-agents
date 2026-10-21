@@ -38,6 +38,7 @@ import {
 } from "./supervisor-lib.mjs";
 import { calculateCost, priceThreshold, pricingSnapshot } from "./telemetry-store.mjs";
 import { comparePrices } from "./price-check.mjs";
+import { scrubbedEnv } from "./supervisor-test-fixtures.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -333,7 +334,7 @@ function sandboxRepo() {
 }
 
 const baseEnv = (env) => ({
-  ...process.env,
+  ...scrubbedEnv(),
   LA_SUPERVISOR_NO_TELEMETRY: "1",
   LA_SUPERVISOR_NO_CODEGRAPH: "1",
   LA_CLAUDE_BIN: join(ROOT, "scripts", "mock-claude.mjs"),

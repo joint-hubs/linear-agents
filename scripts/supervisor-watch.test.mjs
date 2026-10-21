@@ -36,9 +36,11 @@ import {
   runDir,
   shareChildTranscripts,
   sweepChildProcesses,
+  sweepMarkFor,
   writeRegistry,
 } from "./supervisor-lib.mjs";
 import { openAgentState, setFact } from "./agent-state.mjs";
+import { scrubbedEnv } from "./supervisor-test-fixtures.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WATCH = join(ROOT, "scripts", "supervisor-watch.mjs");
@@ -85,6 +87,75 @@ process.on("exit", () => {
   try {
     rmSync(base, { recursive: true, force: true });
   } catch {}
+});
+
+// ── FOC-979: the sweep mark selection (sweepMarkFor, unit level) ──────────────
+console.log("\nFOC-979: wybór marki do sweepa (unit)");
+
+const SWEEP_RUN = "test-sweep-mark-run";
+const SWEEP_CHILD = "dev-1";
+
+test("FOC-979: entry.mark wins over anything in the environment", () => {
+  const entry = { mark: `${SWEEP_RUN}/${SWEEP_CHILD}/at-entry`, attemptId: "at-entry-fallback" };
+  const res = sweepMarkFor(entry, {
+    env: { LA_CHILD_MARK: `${SWEEP_RUN}/${SWEEP_CHILD}/at-env` },
+    runId: SWEEP_RUN,
+    childId: SWEEP_CHILD,
+  });
+  assert.equal(res.mark, `${SWEEP_RUN}/${SWEEP_CHILD}/at-entry`);
+  assert.equal(res.foreignEnvMark, null, "a proper entry mark means no foreign mark to report");
+});
+
+test("FOC-979: a matching env mark is used when the entry carries none", () => {
+  const res = sweepMarkFor(
+    {},
+    {
+      env: { LA_CHILD_MARK: `${SWEEP_RUN}/${SWEEP_CHILD}/at-env` },
+      runId: SWEEP_RUN,
+      childId: SWEEP_CHILD,
+    },
+  );
+  assert.equal(res.mark, `${SWEEP_RUN}/${SWEEP_CHILD}/at-env`);
+  assert.equal(res.foreignEnvMark, null);
+});
+
+test("FOC-979: a foreign env mark is rejected and reported", () => {
+  const res = sweepMarkFor(
+    {},
+    {
+      env: { LA_CHILD_MARK: "other-run/other-child/at-turn" },
+      runId: SWEEP_RUN,
+      childId: SWEEP_CHILD,
+    },
+  );
+  assert.equal(res.mark, null, "a foreign mark must never be swept with");
+  assert.equal(res.foreignEnvMark, "other-run/other-child/at-turn");
+});
+
+test("FOC-979: the attemptId fallback still applies after a foreign mark", () => {
+  const res = sweepMarkFor(
+    { attemptId: "dev-1:turn:0" },
+    {
+      env: { LA_CHILD_MARK: "other-run/other-child/at-turn" },
+      runId: SWEEP_RUN,
+      childId: SWEEP_CHILD,
+    },
+  );
+  assert.equal(res.mark, `${SWEEP_RUN}/${SWEEP_CHILD}/dev-1:turn:0`, "the entry's own attemptId builds a mark");
+  assert.equal(res.foreignEnvMark, "other-run/other-child/at-turn");
+});
+
+test("FOC-979: no mark anywhere yields null", () => {
+  const res = sweepMarkFor(
+    {},
+    {
+      env: {},
+      runId: SWEEP_RUN,
+      childId: SWEEP_CHILD,
+    },
+  );
+  assert.equal(res.mark, null);
+  assert.equal(res.foreignEnvMark, null, "an absent mark is not a foreign mark");
 });
 
 // The fake claude: dump the argv it was ACTUALLY invoked with, then behave well
@@ -212,7 +283,7 @@ function runWatcher(runId, extraArgs = [], env = {}) {
       cwd: ROOT,
       encoding: "utf8",
       env: {
-        ...process.env,
+        ...scrubbedEnv(),
         // Deterministic isolation state for every run below: not in a container,
         // so each spawn takes today's unisolated path unless a test opts in.
         FENIX_IN_CONTAINER: "",
@@ -661,7 +732,7 @@ if (process.platform !== "win32") {
       cwd: ROOT,
       stdio: "ignore",
       env: {
-        ...process.env,
+        ...scrubbedEnv(),
         FENIX_IN_CONTAINER: "1",
         LA_CHILD_SPAWN_HELPER: HELPER_PATH,
         LA_SUDO_BIN: FAKE_SUDO,
@@ -737,7 +808,7 @@ if (process.platform !== "win32") {
       cwd: ROOT,
       stdio: "ignore",
       env: {
-        ...process.env,
+        ...scrubbedEnv(),
         // Unisolated on purpose: the drop-privilege helper sits between the
         // watcher and claude, and the holder would then inherit the pipe INTO
         // the helper — the helper's own exit would close the watcher's pipe
@@ -802,35 +873,62 @@ if (process.platform !== "win32") {
 
 // ── unit: the signal handler removes the file, then re-raises exactly once ───
 // Runs on every platform: the re-raise is injected, so nothing here kills the
-// test process.
+// test process. The emits are IN-PROCESS, so the fixture drain-and-re-raise
+// handlers (supervisor-test-fixtures.mjs installs them module-wide) must step
+// aside for the duration: their re-raise kills the process unconditionally on
+// win32 and would re-enter the test on POSIX.
+const suspendForeignSignalHandlers = () => {
+  const saved = {};
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    saved[signal] = process.listeners(signal);
+    for (const listener of saved[signal]) process.removeListener(signal, listener);
+  }
+  return saved;
+};
+const restoreSignalHandlers = (saved) => {
+  for (const [signal, listeners] of Object.entries(saved)) {
+    for (const listener of listeners) process.on(signal, listener);
+  }
+};
+
 test("installEnvFileSignalHandlers removes the file and re-raises, once per signal", () => {
-  const removed = [];
-  const raised = [];
-  const handlers = installEnvFileSignalHandlers(() => removed.push("x"), { raise: (sig) => raised.push(sig) });
+  const saved = suspendForeignSignalHandlers();
   try {
-    process.emit("SIGTERM");
-    process.emit("SIGINT");
-    assert.deepEqual(raised, ["SIGTERM", "SIGINT"], `the re-raise went missing: ${JSON.stringify(raised)}`);
-    // The listener removed itself before re-raising — a second signal of the
-    // same kind takes the default action, not the handler again.
-    process.emit("SIGTERM");
-    assert.deepEqual(removed, ["x", "x"], `the file was not removed once per handled signal: ${JSON.stringify(removed)}`);
+    const removed = [];
+    const raised = [];
+    const handlers = installEnvFileSignalHandlers(() => removed.push("x"), { raise: (sig) => raised.push(sig) });
+    try {
+      process.emit("SIGTERM");
+      process.emit("SIGINT");
+      assert.deepEqual(raised, ["SIGTERM", "SIGINT"], `the re-raise went missing: ${JSON.stringify(raised)}`);
+      // The listener removed itself before re-raising — a second signal of the
+      // same kind takes the default action, not the handler again.
+      process.emit("SIGTERM");
+      assert.deepEqual(removed, ["x", "x"], `the file was not removed once per handled signal: ${JSON.stringify(removed)}`);
+    } finally {
+      for (const [sig, handler] of Object.entries(handlers)) process.removeListener(sig, handler);
+    }
   } finally {
-    for (const [sig, handler] of Object.entries(handlers)) process.removeListener(sig, handler);
+    restoreSignalHandlers(saved);
   }
 });
 
 test("a remove failure never swallows the re-raise", () => {
-  const raised = [];
-  const handlers = installEnvFileSignalHandlers(
-    () => { throw new Error("unlink failed"); },
-    { raise: (sig) => raised.push(sig) },
-  );
+  const saved = suspendForeignSignalHandlers();
   try {
-    assert.doesNotThrow(() => process.emit("SIGHUP"));
-    assert.deepEqual(raised, ["SIGHUP"], "a failing remove stopped the re-raise");
+    const raised = [];
+    const handlers = installEnvFileSignalHandlers(
+      () => { throw new Error("unlink failed"); },
+      { raise: (sig) => raised.push(sig) },
+    );
+    try {
+      assert.doesNotThrow(() => process.emit("SIGHUP"));
+      assert.deepEqual(raised, ["SIGHUP"], "a failing remove stopped the re-raise");
+    } finally {
+      for (const [sig, handler] of Object.entries(handlers)) process.removeListener(sig, handler);
+    }
   } finally {
-    for (const [sig, handler] of Object.entries(handlers)) process.removeListener(sig, handler);
+    restoreSignalHandlers(saved);
   }
 });
 
@@ -1367,7 +1465,7 @@ if (process.platform !== "win32") {
   const stray = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
     detached: true,
     stdio: "ignore",
-    env: { ...process.env, LA_CHILD_MARK: REAL_MARK },
+    env: scrubbedEnv({ LA_CHILD_MARK: REAL_MARK }),
   });
   stray.unref();
   sleepSync(300); // let the stray land in /proc before the watcher sweeps
@@ -1422,6 +1520,58 @@ test("finalizeTurn leaves a TMPDIR outside <tmpdir>/fenix-child in place", () =>
     "the tee carries no child_tmpdir_skipped note",
   );
 });
+
+// FOC-979 regression, POSIX only: the suite itself can run inside a Fenix DEV
+// child, so a watcher a test spawns carries that OUTER child's mark in its env.
+// At turn end the watcher must refuse a mark that does not belong to its own
+// entry (the `<runId>/<childId>/` prefix) — pre-fix it swept /proc for the outer
+// mark and killed the very child that ran the suite: its claude, its MCP
+// servers, the test itself (the repro was this file exiting 143 inside a child).
+// The sentinel is a REAL detached process carrying the outer mark on its real
+// environ; after the fixture turn ends it must still be alive, and the tee must
+// carry the foreign-mark note.
+if (process.platform !== "win32") {
+  const runIdForeign = `test-watch-sweep-foreign-${process.pid}`;
+  fixtureChild(runIdForeign);
+  const OUTER_MARK = "foc-979-outer/outer-dev/outer-attempt";
+  const sleepSyncForeign = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  // The sentinel stands in for the outer child: a live process whose environ
+  // the production /proc sweep would match on the foreign mark.
+  const sentinel = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: true,
+    stdio: "ignore",
+    env: scrubbedEnv({ LA_CHILD_MARK: OUTER_MARK }),
+  });
+  sentinel.unref();
+  process.on("exit", () => {
+    try {
+      process.kill(sentinel.pid, "SIGKILL");
+    } catch {}
+  });
+  sleepSyncForeign(300); // let the sentinel land in /proc before the watcher runs
+  const resultForeign = runWatcher(
+    runIdForeign,
+    [],
+    {
+      FAKE_ARGV_PATH: join(base, "argv-sweep-foreign.json"),
+      FAKE_SESSION_ID: `watch-sweep-foreign-${process.pid}`,
+      // The foreign mark, exactly as the outer child would leak it to a
+      // test-spawned watcher through the inherited environ.
+      LA_CHILD_MARK: OUTER_MARK,
+    },
+  );
+  test("a foreign env mark is refused: no sweep, the outer child's process survives", async () => {
+    assert.equal(resultForeign.status, 0, `watcher exit ${resultForeign.status}: ${resultForeign.stderr}`);
+    assert.deepEqual(readRegistry(runIdForeign).children["dev-1"].turns[0].sweptPids, []);
+    assert.ok(strayAlive(sentinel.pid), `the sentinel carrying ${OUTER_MARK} was killed by the sweep`);
+    assert.ok(
+      readFileSync(teeOf(runIdForeign), "utf8").includes("child_sweep_foreign_mark"),
+      "the tee does not carry the foreign-mark note",
+    );
+  });
+} else {
+  console.log("SKIP foreign-env-mark sweep guard — win32 has no /proc environ for this fixture to sweep");
+}
 
 console.log("");
 await Promise.all(pending);

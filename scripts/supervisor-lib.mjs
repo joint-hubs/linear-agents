@@ -2577,6 +2577,34 @@ export function childTeardownIdentity({ runId, childId, attemptId, tmpRoot = tmp
   };
 }
 
+/**
+ * FOC-979: the sweep mark a watcher turn end may use — with a guard the raw
+ * fallback chain never had. The registry record (`entry.mark`) is authoritative
+ * as before. The env copy (`LA_CHILD_MARK`) is only a fallback for entries from
+ * older spawns, and it must BELONG to this entry: a watcher running inside a
+ * foreign child — the repro was a Fenix DEV child executing the test suite —
+ * carries that child's mark on its own environ, and sweeping on it kills the
+ * child that runs the watcher (its claude, its MCP servers, the test itself).
+ * So the env mark is trusted only when it starts with `<runId>/<childId>/`;
+ * a present-but-foreign mark is rejected and reported, and the attemptId
+ * derivation still applies after it.
+ *
+ * @returns {{ mark: string|null, foreignEnvMark: string|null }}
+ *   `foreignEnvMark` is set only when an env mark was present but rejected.
+ */
+export function sweepMarkFor(entry, { env = process.env, runId, childId } = {}) {
+  if (entry?.mark) return { mark: entry.mark, foreignEnvMark: null };
+  const envMark = env?.LA_CHILD_MARK ?? null;
+  const envUsable = Boolean(
+    envMark && runId && childId && envMark.startsWith(`${runId}/${childId}/`),
+  );
+  if (envUsable) return { mark: envMark, foreignEnvMark: null };
+  if (entry?.attemptId) {
+    return { mark: `${runId}/${childId}/${entry.attemptId}`, foreignEnvMark: envMark };
+  }
+  return { mark: null, foreignEnvMark: envMark };
+}
+
 // One tmp dir per child under the os tmp root. Inside the container the child
 // uid helper (FOC-802) runs claude as fenix-child, so the dir is setgid
 // group-writable 0o2770 (the shared-run-dir pattern); elsewhere 0o700.

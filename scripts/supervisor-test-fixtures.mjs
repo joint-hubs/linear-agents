@@ -282,6 +282,24 @@ export const fixtureChild = (over = {}) => ({
 
 // ── running the scripts ──────────────────────────────────────────────────────
 
+// ── FOC-979: the outer child's sweep mark never reaches a spawned supervisor ──
+//
+// When the suite itself runs inside a Fenix DEV child, THIS process carries
+// LA_CHILD_MARK — and every supervisor-{watch,spawn,followup}.mjs subprocess a
+// suite spawns would inherit it through `...process.env`. A watcher so spawned
+// sweeps /proc for the mark at turn end and kills the very child that runs the
+// suite: its claude, its MCP servers, the test itself (the repro was
+// supervisor-watch.test.mjs exiting 143 inside a child). Every env a suite
+// builds for a supervisor subprocess therefore goes through this scrub; a
+// test that deliberately sets LA_CHILD_MARK for its own fixture passes it in
+// `extra` and keeps it (extra wins after the scrub).
+
+export const scrubbedEnv = (extra = {}) => {
+  const env = { ...process.env, ...extra };
+  if (!("LA_CHILD_MARK" in extra)) delete env.LA_CHILD_MARK;
+  return env;
+};
+
 /**
  * The env every supervisor test needs. LA_CLAUDE_BIN keeps a real model out of
  * the suite; LA_SUPERVISOR_NO_TELEMETRY keeps test runs out of the cost ledger;
@@ -301,7 +319,7 @@ export const baseEnv = (extra = {}) => {
     ? join(dirname(stateHome), "agent-state.sqlite")
     : join(tmpdir(), `la-agent-state-${process.pid}`, "agent-state.sqlite");
   return {
-    ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key",
+    ...scrubbedEnv(), OPENROUTER_API_KEY: "test-supervisor-provider-key",
     LA_CLAUDE_BIN: MOCK,
     LA_SUPERVISOR_NO_TELEMETRY: "1",
     LA_SUPERVISOR_NO_CODEGRAPH: "1",

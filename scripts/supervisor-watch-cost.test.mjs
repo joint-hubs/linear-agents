@@ -26,6 +26,7 @@ import { cwdToHashName } from "./ledger.mjs";
 import { calculateCost, pricingSnapshot } from "./telemetry-store.mjs";
 import { costFromResult, ensureRunDir, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
 import { priceTranscripts } from "./transcript-cost.mjs";
+import { scrubbedEnv } from "./supervisor-test-fixtures.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WATCH = join(ROOT, "scripts", "supervisor-watch.mjs");
@@ -129,7 +130,7 @@ const result = spawnSync(
     cwd: ROOT,
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...scrubbedEnv(),
       LA_SUPERVISOR_STATE_HOME: stateHome,
       LA_SQUAD_HOME: squadHome,
       CLAUDE_CONFIG_DIR: configDir,
@@ -241,7 +242,7 @@ const result2 = spawnSync(
     cwd: ROOT,
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...scrubbedEnv(),
       LA_SUPERVISOR_STATE_HOME: stateHome,
       LA_SQUAD_HOME: squadHome,
       LA_STATE_ROOT: stateRoot,
@@ -325,7 +326,7 @@ const result3 = spawnSync(
     cwd: ROOT,
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...scrubbedEnv(),
       LA_SUPERVISOR_STATE_HOME: stateHome,
       LA_SQUAD_HOME: squadHome,
       CLAUDE_CONFIG_DIR: configDir,
@@ -433,7 +434,7 @@ const result4 = spawnSync(
     cwd: ROOT,
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...scrubbedEnv(),
       LA_SUPERVISOR_STATE_HOME: stateHome,
       LA_SQUAD_HOME: squadHome,
       CLAUDE_CONFIG_DIR: configDir,

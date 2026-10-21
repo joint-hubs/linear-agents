@@ -429,6 +429,10 @@
       "reason": "isolation audit FOC-904: mkdtemp/tmpdir fixtures only; writes only under the temp root's docs/state/; state-journal init runs `git rev-parse` read-only inside the temp root (never the real repo); no ports, no socket binds, no telemetry DB"
     },
     {
+      "file": "supervisor-ask-guard.test.mjs",
+      "reason": "pure classifier + child process, no shared state (FOC-978)"
+    },
+    {
       "file": "supervisor-autonomy.test.mjs",
       "reason": "isolation audit FOC-613: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam set at module load (spawned cleanup processes inherit it); autonomy config via the LA_AUTONOMY_CONFIG seam pointed at temp files; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
