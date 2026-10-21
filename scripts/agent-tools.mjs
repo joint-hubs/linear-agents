@@ -4,7 +4,9 @@
 // Verbs over <agent>/settings.json plus the repo's .mcp.json. The agents root
 // is the effective config root by default ($LA_SQUAD_HOME when set, else
 // <repo>/agents); `docs` always renders the repository tree so the committed
-// file documents the image baseline.
+// file documents the image baseline, and it enumerates agents/skills from the
+// git index only (FOC-963) — a local or gitignored dir a dev checkout happens
+// to have never reaches the doc CI compares against.
 //
 //   show   <agent>                  one agent's effective settings (permissions,
 //                                   MCP reachability, skills) — JSON with --json
@@ -161,17 +163,21 @@ function isCompoundHelper(rule) {
 
 // ── shared readers ───────────────────────────────────────────────────────────
 
-/** Agent dirs under agentsDir that have a settings.json, sorted. */
-export function listAgents(agentsDir) {
-  let entries;
-  try {
-    entries = readdirSync(agentsDir);
-  } catch {
-    return [];
-  }
-  return entries
+/**
+ * Agent dirs under agentsDir that have a settings.json, sorted.
+ * With `trackedOnly`, the list comes from the git index instead of the disk
+ * (FOC-963: the docs baseline must not see local or gitignored dirs a dev
+ * checkout happens to have) — a name is kept only when `<name>/settings.json`
+ * is tracked.
+ */
+export function listAgents(agentsDir, { trackedOnly = false, env = process.env } = {}) {
+  const names = trackedOnly
+    ? listTrackedDirNames(agentsDir, env, "settings.json")
+    : listFsDirNames(agentsDir);
+  return names
     .filter((name) => {
       if (name.startsWith("_") || name === "") return false;
+      if (trackedOnly) return true; // the index already pinned settings.json
       const settings = join(agentsDir, name, "settings.json");
       return existsSync(settings) && statSync(join(agentsDir, name)).isDirectory();
     })
@@ -189,10 +195,18 @@ function readJsonOrThrow(path, what) {
   }
 }
 
-/** Skill dirs: own = agents/<agent>/skills/<name>, shared = agents/_shared/skills/<name>. */
-export function collectSkills(agent, agentsDir) {
-  const own = new Set(listDirNames(join(agentsDir, agent, "skills")));
-  const shared = new Set(listDirNames(join(agentsDir, "_shared", "skills")));
+/**
+ * Skill dirs: own = agents/<agent>/skills/<name>, shared = agents/_shared/skills/<name>.
+ * With `trackedOnly`, only skill dirs git tracks a file under are counted
+ * (FOC-963 — a local or gitignored skill is invisible to the docs baseline).
+ */
+export function collectSkills(agent, agentsDir, { trackedOnly = false, env = process.env } = {}) {
+  const own = new Set(
+    listDirNames(join(agentsDir, agent, "skills"), { trackedOnly, env }),
+  );
+  const shared = new Set(
+    listDirNames(join(agentsDir, "_shared", "skills"), { trackedOnly, env }),
+  );
   const names = [...new Set([...own, ...shared])].sort();
   return names.map((name) => ({
     name,
@@ -200,7 +214,12 @@ export function collectSkills(agent, agentsDir) {
   }));
 }
 
-function listDirNames(dir) {
+function listDirNames(dir, { trackedOnly = false, env = process.env } = {}) {
+  if (trackedOnly) return listTrackedDirNames(dir, env, null);
+  return listFsDirNames(dir);
+}
+
+function listFsDirNames(dir) {
   try {
     return readdirSync(dir, { withFileTypes: true })
       .filter((e) => e.isDirectory())
@@ -208,6 +227,31 @@ function listDirNames(dir) {
   } catch {
     return [];
   }
+}
+
+/**
+ * Names of the subdirs of `dir` that the git index knows about (FOC-963).
+ * `git ls-files` runs with cwd = dir, so its lines are dir-relative; a name is
+ * kept when some tracked file lives under `<name>/` — or, when `file` is given
+ * (an agent's `settings.json`), when that exact file is tracked. Local and
+ * gitignored dirs are not in the index and therefore never listed: that is the
+ * point of the filter. Outside a git repository git fails and we fall back to
+ * the disk, the same list the non-tracked walk would have produced.
+ */
+function listTrackedDirNames(dir, env, file) {
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) return [];
+  const res = gitRun(["ls-files"], dir, env);
+  if (res.status !== 0) return listFsDirNames(dir);
+  const names = new Set();
+  for (const line of res.stdout.split("\n")) {
+    if (!line) continue;
+    const slash = line.indexOf("/");
+    if (slash === -1) continue; // a loose file, not a dir
+    const name = line.slice(0, slash);
+    if (file !== null && line !== `${name}/${file}`) continue;
+    names.add(name);
+  }
+  return [...names];
 }
 
 /** Command-hook count per event (nested `{ matcher, hooks: [...] }` or flat). */
@@ -255,11 +299,19 @@ export function mcpEntry(server, allow, deny) {
 
 // ── show ─────────────────────────────────────────────────────────────────────
 
-export function showAgent(agent, { agentsDir = squadConfigRoot(), mcpPath = DEFAULT_MCP_PATH } = {}) {
+export function showAgent(
+  agent,
+  {
+    agentsDir = squadConfigRoot(),
+    mcpPath = DEFAULT_MCP_PATH,
+    trackedOnly = false,
+    env = process.env,
+  } = {},
+) {
   const dir = join(agentsDir, agent);
   const settingsPath = join(dir, "settings.json");
   if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-    const known = listAgents(agentsDir);
+    const known = listAgents(agentsDir, { trackedOnly, env });
     const err = new Error(
       `unknown agent: ${agent} — agents with a settings.json: ${known.join(", ") || "(none)"}`,
     );
@@ -283,7 +335,7 @@ export function showAgent(agent, { agentsDir = squadConfigRoot(), mcpPath = DEFA
     defaultMode: perms.defaultMode ?? null,
     hooks: hookCounts(settings),
     mcp,
-    skills: collectSkills(agent, agentsDir),
+    skills: collectSkills(agent, agentsDir, { trackedOnly, env }),
   };
 }
 
@@ -827,7 +879,12 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
  * rules in file order. Notes reuse the check logic (interpreter / compound
  * helper for allow rules, overlap for ask/deny rules).
  */
-export function renderDocs({ agentsDir = REPO_AGENTS_DIR, mcpPath = DEFAULT_MCP_PATH } = {}) {
+export function renderDocs({
+  agentsDir = REPO_AGENTS_DIR,
+  mcpPath = DEFAULT_MCP_PATH,
+  trackedOnly = true,
+  env = process.env,
+} = {}) {
   const out = [];
   out.push("# Agent settings — generated reference");
   out.push("");
@@ -885,8 +942,8 @@ export function renderDocs({ agentsDir = REPO_AGENTS_DIR, mcpPath = DEFAULT_MCP_
   );
   out.push("this file in the same step.");
   out.push("");
-  for (const agent of listAgents(agentsDir)) {
-    const data = showAgent(agent, { agentsDir, mcpPath });
+  for (const agent of listAgents(agentsDir, { trackedOnly, env })) {
+    const data = showAgent(agent, { agentsDir, mcpPath, trackedOnly, env });
     out.push(`## ${agent}`);
     out.push("");
     out.push("### Permissions");
@@ -1045,6 +1102,10 @@ export function runCli(argv, { stdout = process.stdout, stderr = process.stderr,
   }
   const agentsDir = opts.root ? resolve(cwd, opts.root) : squadConfigRoot(env);
   const mcpPath = opts.mcp ? resolve(cwd, opts.mcp) : DEFAULT_MCP_PATH;
+  // `docs` always renders the repository tree (the image baseline) unless
+  // --root says otherwise — never the effective root, which may be an operator
+  // checkout holding local/gitignored skills (FOC-963).
+  const docsAgentsDir = opts.root ? agentsDir : repoAgentsDir;
   const io = { stdout, stderr, cwd, env };
   try {
     if (verb === "show") {
@@ -1079,7 +1140,7 @@ export function runCli(argv, { stdout = process.stdout, stderr = process.stderr,
     }
     if (verb === "docs") {
       if (opts.positional.length) return usageError("docs takes no arguments");
-      const markdown = renderDocs({ agentsDir, mcpPath }) + "\n";
+      const markdown = renderDocs({ agentsDir: docsAgentsDir, mcpPath }) + "\n";
       if (opts.write) {
         const outPath = opts.out ? resolve(cwd, opts.out) : join(REPO_ROOT, "docs", "agent-tools.md");
         writeFileSync(outPath, markdown);
