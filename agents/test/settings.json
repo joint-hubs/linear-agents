@@ -138,6 +138,7 @@
       "mcp__linear__*",
       "mcp__fenix-linear__*",
       "mcp__fenix-github__*",
+      "mcp__fenix-control__*",
       "Bash(git worktree remove:*)",
       "Bash(git worktree prune:*)"
     ],

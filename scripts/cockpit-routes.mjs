@@ -192,6 +192,22 @@ export function writeGuards(req, res, path, ctx) {
 }
 
 /**
+ * The audit actor for the answer routes (FOC-958 B2): "dashboard" by default,
+ * or the caller's `remote:<client>` when the request carries a well-formed
+ * x-fenix-actor header. Only the remote: shape is honoured — a spoofed or
+ * foreign value ("ai", "dashboard", anything else) falls back to the dashboard
+ * default, so the header can never forge another actor kind. The libraries
+ * already accept a dynamic value (answerGate/answerHold answeredBy,
+ * recordAnswerRow who); the dialog routes write no local audit row, so there
+ * is nothing to thread there.
+ */
+const REMOTE_ACTOR_RE = /^remote:[A-Za-z0-9._-]{1,64}$/;
+function actorOf(req) {
+  const raw = req.headers["x-fenix-actor"];
+  return typeof raw === "string" && REMOTE_ACTOR_RE.test(raw) ? raw : "dashboard";
+}
+
+/**
  * Forward one call to the session host and pass its status/body through.
  * Native mode and an unreachable host are answered HERE, in the shape every
  * host-backed route shares. Returns the host result, or null when answered.
@@ -880,6 +896,9 @@ export async function handleCockpitRoute(req, res, url, ctx) {
   const method = req.method;
   const path = url.pathname;
   const { readJsonBody, respondBodyError, json, log } = ctx;
+  // FOC-958: the audit actor for every answer route below — "dashboard" unless
+  // the caller carries a well-formed remote: header (actorOf).
+  const actor = actorOf(req);
 
   // FOC-839: the run-targeted global write routes refuse any run that the
   // legacy migration marked read-only. Returns true when the 409 was sent.
@@ -1280,7 +1299,7 @@ export async function handleCockpitRoute(req, res, url, ctx) {
               kind: "ask-answer",
               id: pending.toolUseId,
               text: summary,
-              who: "dashboard",
+              who: actor,
               notified: true,
               payload: askAnswerPayload(pending, body.answers),
             });
@@ -1501,7 +1520,7 @@ export async function handleCockpitRoute(req, res, url, ctx) {
             kind: "ask-answer",
             id: pending.toolUseId,
             text: summary,
-            who: "dashboard",
+            who: actor,
             notified: true, // the answer went into the pane — already delivered
             payload: askAnswerPayload(pending, body.answers),
           });
@@ -1598,7 +1617,7 @@ export async function handleCockpitRoute(req, res, url, ctx) {
         gateId,
         text,
         note: typeof note === "string" && note.trim() ? note : null,
-        answeredBy: "dashboard",
+        answeredBy: actor,
         // Never block the API server on the answer lock: a held lock throws
         // "busy" immediately and the UI retries, instead of every poll of the
         // server freezing for up to 2 s behind Atomics.wait.
@@ -1632,7 +1651,7 @@ export async function handleCockpitRoute(req, res, url, ctx) {
     const notify = await notifyGateAnswered(gate, gateId, answerSid);
     let rowError = null;
     try {
-      recordAnswerRow({ runId, kind: "gate-answer", id: gateId, text, who: "dashboard", notified: notify.notified });
+      recordAnswerRow({ runId, kind: "gate-answer", id: gateId, text, who: actor, notified: notify.notified });
     } catch (err) {
       // The answer IS recorded; the audit row is the only thing that failed.
       // The response still says recorded:true — a 500 would make the UI hide
@@ -1694,7 +1713,7 @@ export async function handleCockpitRoute(req, res, url, ctx) {
     }
     let hold;
     try {
-      hold = answerHold({ runId, holdId, text, answeredBy: "dashboard", lockWaitMs: 0 });
+      hold = answerHold({ runId, holdId, text, answeredBy: actor, lockWaitMs: 0 });
     } catch (err) {
       const status = answerErrorStatus(err?.code);
       if (status === 500) console.error("[holds/answer]", err?.message || err);
@@ -1709,7 +1728,7 @@ export async function handleCockpitRoute(req, res, url, ctx) {
     );
     let rowError = null;
     try {
-      recordAnswerRow({ runId, kind: "hold-answer", id: holdId, text, who: "dashboard", notified: notify.notified });
+      recordAnswerRow({ runId, kind: "hold-answer", id: holdId, text, who: actor, notified: notify.notified });
     } catch (err) {
       rowError = err?.message ?? String(err);
       console.error("[holds/answer] edit row failed:", rowError);

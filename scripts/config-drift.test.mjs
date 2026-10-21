@@ -281,7 +281,11 @@ test("kazdy serwer z .mcp.json jest dozwolony w allow-liscie skladow", () => {
   // środku headlessowej tury — czyli dziecko, które wisi.
   //
   // FOC-943: external-write servers are the Supervisor's only; children deny them.
-  const SUPERVISOR_ONLY_MCP = ["fenix-linear", "fenix-github"];
+  // fenix-control joins them (FOC-958): its answer tools write HUMAN decisions
+  // (gate/ask/dialog) — a child holding fenix_gate_answer could self-answer its
+  // own HITL gate, so the control plane is the Supervisor's and the operator's
+  // local client, never a squad child's.
+  const SUPERVISOR_ONLY_MCP = ["fenix-linear", "fenix-github", "fenix-control"];
   // Pinned: the exact tools the Supervisor may call on the supervisor-only servers.
   const SUPERVISOR_ONLY_EXPECTED = [
     "mcp__fenix-linear__transition",
@@ -291,6 +295,16 @@ test("kazdy serwer z .mcp.json jest dozwolony w allow-liscie skladow", () => {
     "mcp__fenix-github__pr_create",
     "mcp__fenix-github__pr_edit",
     "mcp__fenix-github__pr_comment",
+    "mcp__fenix-control__fenix_status",
+    "mcp__fenix-control__fenix_inbox",
+    "mcp__fenix-control__fenix_sessions",
+    "mcp__fenix-control__fenix_conversation",
+    "mcp__fenix-control__fenix_queue",
+    "mcp__fenix-control__fenix_costs",
+    "mcp__fenix-control__fenix_message",
+    "mcp__fenix-control__fenix_ask_answer",
+    "mcp__fenix-control__fenix_dialog_answer",
+    "mcp__fenix-control__fenix_gate_answer",
   ];
   const servers = Object.keys(readJson(".mcp.json").mcpServers || {});
   const missing = [];

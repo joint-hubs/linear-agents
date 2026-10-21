@@ -151,6 +151,7 @@ deny:
 | `mcp__claude_ai_Linear__*` |  |
 | `mcp__fenix-linear__*` |  |
 | `mcp__fenix-github__*` |  |
+| `mcp__fenix-control__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
 
@@ -174,6 +175,7 @@ deny:
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
 | fenix-linear | no | — |
 | fenix-github | no | — |
+| fenix-control | no | — |
 
 ### Skills
 
@@ -341,6 +343,7 @@ deny:
 | `mcp__claude_ai_Linear__*` |  |
 | `mcp__fenix-linear__*` |  |
 | `mcp__fenix-github__*` |  |
+| `mcp__fenix-control__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
 
@@ -364,6 +367,7 @@ deny:
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
 | fenix-linear | no | — |
 | fenix-github | no | — |
+| fenix-control | no | — |
 
 ### Skills
 
@@ -392,6 +396,7 @@ deny:
 |---|---|
 | `mcp__fenix-linear__*` |  |
 | `mcp__fenix-github__*` |  |
+| `mcp__fenix-control__*` |  |
 
 ### Other settings
 
@@ -411,6 +416,7 @@ deny:
 | fenix-decision-prompt-refinement | no | — |
 | fenix-linear | no | — |
 | fenix-github | no | — |
+| fenix-control | no | — |
 
 ### Skills
 
@@ -560,6 +566,7 @@ deny:
 | `mcp__claude_ai_Linear__*` |  |
 | `mcp__fenix-linear__*` |  |
 | `mcp__fenix-github__*` |  |
+| `mcp__fenix-control__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
 
@@ -583,6 +590,7 @@ deny:
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
 | fenix-linear | no | — |
 | fenix-github | no | — |
+| fenix-control | no | — |
 
 ### Skills
 
@@ -743,6 +751,7 @@ deny:
 | `mcp__claude_ai_Linear__*` |  |
 | `mcp__fenix-linear__*` |  |
 | `mcp__fenix-github__*` |  |
+| `mcp__fenix-control__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
 
@@ -766,6 +775,7 @@ deny:
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
 | fenix-linear | no | — |
 | fenix-github | no | — |
+| fenix-control | no | — |
 
 ### Skills
 
@@ -813,6 +823,16 @@ allow:
 | `mcp__fenix-github__pr_create` |  |
 | `mcp__fenix-github__pr_edit` |  |
 | `mcp__fenix-github__pr_comment` |  |
+| `mcp__fenix-control__fenix_status` |  |
+| `mcp__fenix-control__fenix_inbox` |  |
+| `mcp__fenix-control__fenix_sessions` |  |
+| `mcp__fenix-control__fenix_conversation` |  |
+| `mcp__fenix-control__fenix_queue` |  |
+| `mcp__fenix-control__fenix_costs` |  |
+| `mcp__fenix-control__fenix_message` |  |
+| `mcp__fenix-control__fenix_ask_answer` |  |
+| `mcp__fenix-control__fenix_dialog_answer` |  |
+| `mcp__fenix-control__fenix_gate_answer` |  |
 | `Bash(codegraph:*)` |  |
 | `Edit` |  |
 | `Bash(ls:*)` |  |
@@ -976,6 +996,7 @@ deny:
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
 | fenix-linear | yes | `mcp__fenix-linear__transition` |
 | fenix-github | yes | `mcp__fenix-github__pr_create` |
+| fenix-control | yes | `mcp__fenix-control__fenix_status` |
 
 ### Skills
 
@@ -1137,6 +1158,7 @@ deny:
 | `mcp__linear__*` |  |
 | `mcp__fenix-linear__*` |  |
 | `mcp__fenix-github__*` |  |
+| `mcp__fenix-control__*` |  |
 | `Bash(git worktree remove:*)` |  |
 | `Bash(git worktree prune:*)` |  |
 
@@ -1160,6 +1182,7 @@ deny:
 | fenix-decision-prompt-refinement | yes | `mcp__fenix-decision-prompt-refinement__*` |
 | fenix-linear | no | — |
 | fenix-github | no | — |
+| fenix-control | no | — |
 
 ### Skills
 
