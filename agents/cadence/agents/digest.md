@@ -1,7 +1,7 @@
 ---
 name: digest
-description: CADENCE squad — weekly PL digest for Mateusz. DeepSeek V4 Pro.
-model: deepseek/deepseek-v4-pro
+description: CADENCE squad — weekly PL digest for Mateusz. MiMo v2.6 Pro.
+model: xiaomi/mimo-v2.6-pro
 tools: Read, Write
 ---
 <role>

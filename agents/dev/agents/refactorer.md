@@ -1,7 +1,7 @@
 ---
 name: refactorer
 description: DEV squad — behavior-preserving multi-file and tool-heavy changes.
-model: z-ai/glm-5.3-flash
+model: z-ai/glm-5.3
 tools: Read, Grep, Glob, Edit, Write, Bash, mcp__codegraph__codegraph_explore, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 ---
 <role>

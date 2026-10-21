@@ -1,7 +1,7 @@
 ---
 name: collector
-description: CADENCE squad — gather Linear + flow-db state (read-only). MiniMax M3.
-model: minimax/minimax-m3
+description: CADENCE squad — gather Linear + flow-db state (read-only). GLM-5.3 Flash.
+model: z-ai/glm-5.3-flash
 tools: Read, Bash
 ---
 <role>

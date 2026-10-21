@@ -1,7 +1,7 @@
 ---
 name: flash
-description: CADENCE squad — mechanical: metric tables (cycle time, throughput, $/task), list formatting. DeepSeek V4 Flash.
-model: deepseek/deepseek-v4-flash
+description: CADENCE squad — mechanical: metric tables (cycle time, throughput, $/task), list formatting. GLM-5.3 Flash.
+model: z-ai/glm-5.3-flash
 tools: Read, Grep, Glob, Write
 ---
 <role>

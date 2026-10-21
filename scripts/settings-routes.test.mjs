@@ -986,8 +986,8 @@ try {
       && Number.isFinite(dev?.benchmark), JSON.stringify(dev));
     const sup = g.body?.rows?.find((row) => row.squad === "supervisor");
     check("int routing supervisor row = provider default, not models.json routing",
-      sup?.lead === "x-ai/grok-4.7" && sup?.source === "provider-default"
-      && sup?.price?.input === 2 && sup?.unpriced === false, JSON.stringify(sup));
+      sup?.lead === "xiaomi/mimo-v2.6-pro" && sup?.source === "provider-default"
+      && sup?.price?.input === 0.435 && sup?.unpriced === false, JSON.stringify(sup));
     check("int routing models from the openrouter scope",
       (g.body?.models || []).some((mm) => mm.id === "z-ai/glm-5.3-flash" && mm.price?.input === 0.075 && Number.isFinite(mm.benchmark)));
 

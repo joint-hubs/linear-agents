@@ -258,11 +258,11 @@ case "${1:-api}" in
         # Evaluated after resolve_provider: LA_PROVIDER_DEFAULT_MODEL comes from
         # the provider entry's defaultModel (FOC-773). The Settings overlay's
         # routing.supervisor.lead sits between SUPERVISOR_MODEL and it; the old
-        # hard-coded x-ai/grok-4.7 stays the last-resort fallback. A
+        # hard-coded xiaomi/mimo-v2.6-pro stays the last-resort fallback. A
         # broken settings.json is ignored — the CLI fails loudly and the chain
         # falls through.
         settings_model="$(node "$LA_ROOT/scripts/fenix-settings.mjs" get routing.supervisor.lead 2>/dev/null || true)"
-        ANTHROPIC_MODEL="${SUPERVISOR_MODEL:-${settings_model:-${LA_PROVIDER_DEFAULT_MODEL:-x-ai/grok-4.7}}}"
+        ANTHROPIC_MODEL="${SUPERVISOR_MODEL:-${settings_model:-${LA_PROVIDER_DEFAULT_MODEL:-xiaomi/mimo-v2.6-pro}}}"
         export ANTHROPIC_MODEL
         node "$LA_ROOT/scripts/fenix-claude-prefs.mjs" --config-dir "$CLAUDE_CONFIG_DIR" --trust "$LA_SUPERVISOR_REPO"
         # FOC-807: the waker, guard, briefing and telemetry hooks read the run id

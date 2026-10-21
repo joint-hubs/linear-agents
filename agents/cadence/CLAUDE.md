@@ -44,11 +44,11 @@ explicit slug in their own frontmatter.
 
 | role | model | routing |
 |------|-------|---------|
-| collector | minimax-m3 | linear-query JSON + flow-db patterns |
-| retro | glm-5.2 | drift + blameless retro |
-| digest | deepseek-v4-pro | Polish weekly digest composition |
-| worker | minimax-m3 | summaries |
-| flash | deepseek-v4-flash | metrics / tables |
+| collector | glm-5.3-flash | linear-query JSON + flow-db patterns |
+| retro | mimo-v2.6-pro | drift + blameless retro |
+| digest | mimo-v2.6-pro | Polish weekly digest composition |
+| worker | glm-5.3-flash | summaries |
+| flash | glm-5.3-flash | metrics / tables |
 
 **Pipeline:** `collector` → `retro` → `digest`. 1 digest/week.
 </cadence_squad>

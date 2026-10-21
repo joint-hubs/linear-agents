@@ -1,7 +1,7 @@
 ---
 name: root-cause
 description: TEST squad — reproduce and diagnose verification or deployment failures without blind retries.
-model: z-ai/glm-5.3-flash
+model: z-ai/glm-5.3
 tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_explore, mcp__codegraph__codegraph_node, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_impact, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_files, mcp__codegraph__codegraph_status
 ---
 <role>
