@@ -1056,6 +1056,17 @@ const makeProc = (root, pid, { environ, comm = "helper" }) => {
 const strayAlive = (pid) => {
   try {
     process.kill(pid, 0);
+    // A killed child of this process stays a zombie until libuv reaps it, and
+    // process.kill(pid, 0) still succeeds on a zombie.
+    if (process.platform !== "win32") {
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        const state = stat.slice(stat.lastIndexOf(")") + 1).match(/\S/)?.[0];
+        if (state === "Z") return false;
+      } catch {
+        // unreadable /proc: keep the kill(0) answer
+      }
+    }
     return true;
   } catch (err) {
     return err.code === "EPERM";
@@ -1063,8 +1074,13 @@ const strayAlive = (pid) => {
 };
 const reaped = (pid, ms = 3000) =>
   new Promise((resolve) => {
-    const t0 = Date.now();
-    const tick = () => (!strayAlive(pid) || Date.now() - t0 > ms ? resolve() : setTimeout(tick, 50));
+    // Module-level synchronous work (spawnSync, Atomics.wait) can delay the
+    // first tick past a creation-time deadline; start the clock at that tick.
+    let t0 = null;
+    const tick = () => {
+      t0 ??= Date.now();
+      return !strayAlive(pid) || Date.now() - t0 > ms ? resolve() : setTimeout(tick, 50);
+    };
     setTimeout(tick, 0);
   });
 
