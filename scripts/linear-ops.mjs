@@ -20,6 +20,9 @@
  *     Creates a NEW issue as a real Linear sub-issue (parentId) of an EXISTING
  *     issue — e.g. adding a follow-up under an epic like JOI-73. Distinct from
  *     linear-push.mjs, which always creates a brand-new top-level parent.
+ *   attach-link <id|identifier> --url <url> --title <text> [--dry-run]
+ *     Attach an external URL (PR, doc, etc.) to an existing issue (FOC-962).
+ *     Egress screen on both title and URL; ownership gate like every write.
  *
  *     Project + milestone are INHERITED from the parent chain (FOC-716): the
  *     first ancestor that carries a project supplies both, so a child always
@@ -269,6 +272,8 @@ function parseArgs(argv) {
       args.ownerOverride = true;
     } else if (a === "--title" && i + 1 < argv.length) {
       args.title = argv[++i];
+    } else if (a === "--url" && i + 1 < argv.length) {
+      args.url = argv[++i];
     } else if (a === "--type" && i + 1 < argv.length) {
       args.type = argv[++i];
     } else if (a === "--label" && i + 1 < argv.length) {
@@ -302,6 +307,7 @@ function printUsage() {
   console.error("  node scripts/linear-ops.mjs priority <id|identifier> --priority <P0|P1|P2|P3> [--dry-run]   (issue may also be given as --issue <id>)");
   console.error("  node scripts/linear-ops.mjs due-date <id|identifier> --date <YYYY-MM-DD> [--clear] [--dry-run]");
   console.error("  node scripts/linear-ops.mjs create-child <parentId|parentIdentifier> --title <text> (--body <text> | --body-file <path>) [--type feat|bug|spike|tech] [--estimate <XS|S|M|L|XL>] [--label <l> ...] [--project <id|name>] [--milestone <id|name>] [--no-milestone] [--dry-run]");
+  console.error("  node scripts/linear-ops.mjs attach-link <id|identifier> --url <url> --title <text> [--dry-run]");
 }
 
 // ---------------------------------------------------------------------------
@@ -777,6 +783,56 @@ async function handleCommentReplace(identifier, args, dryRunCtx) {
       console.error(`Error: comment creation failed for ${issue.identifier}`);
       process.exit(1);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: attach-link — attach an external URL to an issue (FOC-962)
+// ---------------------------------------------------------------------------
+
+async function handleAttachLink(identifier, args, dryRunCtx) {
+  // Validate flags BEFORE anything else — the egress screen below must not
+  // run on values that are about to be refused for shape anyway.
+  if (!args.url || !args.title) {
+    console.error("Error: --url <url> and --title <text> are both required for attach-link");
+    process.exit(2);
+  }
+
+  // Egress screen (FOC-450): fail closed before any network call. Both the
+  // URL and the title leave the machine, so both are screened.
+  assertEgressClean(args.title, "attach-link title");
+  assertEgressClean(args.url, "attach-link URL");
+
+  if (dryRunCtx.dryRun) {
+    const issue = resolveIssueFromFixture(dryRunCtx.fixture, identifier);
+    console.log(`[dry-run:${dryRunCtx.squad}] ${issue.identifier}: would attach link:`);
+    console.log(`  title: ${args.title}`);
+    console.log(`  url:   ${args.url}`);
+    return;
+  }
+
+  const { issue } = await resolveIssueWithTeam(identifier);
+  assertOwnershipForWrite(issue, { verb: "attach-link", args });
+
+  if (args.dryRun) {
+    console.log(`[dry-run] ${issue.identifier}: would attach link:`);
+    console.log(`  title: ${args.title}`);
+    console.log(`  url:   ${args.url}`);
+    return;
+  }
+
+  const result = await graphql(
+    `mutation($input:AttachmentLinkURLInput!){
+      attachmentLinkURL(input:$input){ success attachment{ id } }
+    }`,
+    { input: { issueId: issue.id, url: args.url, title: args.title } },
+  );
+
+  if (result.attachmentLinkURL?.success) {
+    console.log(`${issue.identifier}: link attached (id=${result.attachmentLinkURL.attachment.id})`);
+  } else {
+    console.error(`Error: attach-link failed for ${issue.identifier}`);
+    process.exit(1);
   }
 }
 
@@ -1403,6 +1459,9 @@ async function main() {
       break;
     case "comment-replace":
       await handleCommentReplace(identifier, args, dryRunCtx);
+      break;
+    case "attach-link":
+      await handleAttachLink(identifier, args, dryRunCtx);
       break;
     case "update-description":
       await handleUpdateDescription(identifier, args, dryRunCtx);

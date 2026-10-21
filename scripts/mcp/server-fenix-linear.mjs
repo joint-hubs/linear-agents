@@ -84,6 +84,21 @@ export const TOOLS = [
       },
     },
   },
+  {
+    name: "attach_link",
+    description:
+      "Attach an external URL (PR, doc, etc.) to a Linear issue; goes through linear-ops with the egress screen and the ownership gate.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["issue", "url", "title"],
+      properties: {
+        issue: ISSUE_SCHEMA,
+        url: { type: "string", description: "URL to attach (https:// or http://). Screened for secrets.", minLength: 1, maxLength: 2048 },
+        title: { type: "string", description: "Human-readable title for the link.", minLength: 1, maxLength: 256 },
+      },
+    },
+  },
 ];
 
 const ISSUE_RE = /^[A-Z][A-Z0-9]*-\d+$/;
@@ -92,12 +107,24 @@ const DEDUP_TAG_RE = /^[A-Za-z0-9._:-]{1,80}$/;
 /** Hand-rolled validation (the schema is documentation; the gate is here). Returns null or a reason. */
 function validateArgs(name, args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) return "arguments must be an object";
-  const allowed = name === "transition" ? ["issue", "status"] : name === "comment" ? ["issue", "body", "dedup_tag"] : ["issue", "dedup_tag", "body"];
+  const allowed = name === "transition"
+    ? ["issue", "status"]
+    : name === "comment"
+      ? ["issue", "body", "dedup_tag"]
+      : name === "attach_link"
+        ? ["issue", "url", "title"]
+        : ["issue", "dedup_tag", "body"];
   for (const key of Object.keys(args)) {
     if (!allowed.includes(key)) return `unknown property: ${key}`;
   }
   // required: everything the tool declares except the optional dedup_tag on comment
-  const required = name === "transition" ? ["issue", "status"] : name === "comment" ? ["issue", "body"] : ["issue", "dedup_tag", "body"];
+  const required = name === "transition"
+    ? ["issue", "status"]
+    : name === "comment"
+      ? ["issue", "body"]
+      : name === "attach_link"
+        ? ["issue", "url", "title"]
+        : ["issue", "dedup_tag", "body"];
   for (const key of required) {
     const value = args[key];
     if (typeof value !== "string" || value.length === 0) return `${key} is required`;
@@ -109,6 +136,11 @@ function validateArgs(name, args) {
   if (args.body !== undefined) {
     if (typeof args.body !== "string") return "body must be a string";
     if (args.body.length < 1 || args.body.length > 60000) return "body must be 1..60000 characters";
+  }
+  if (name === "attach_link") {
+    if (typeof args.url !== "string" || !/^https?:\/\//.test(args.url)) return "url must start with https:// or http://";
+    if (args.url.length > 2048) return "url must be at most 2048 characters";
+    if (typeof args.title !== "string" || args.title.length < 1 || args.title.length > 256) return "title must be 1..256 characters";
   }
   return null;
 }
@@ -172,6 +204,19 @@ async function runBodyTool(runOps, tool, args) {
 async function dispatch(runOps, name, args) {
   if (name === "transition") {
     return mapResult(name, args.issue, await runOps(["transition", args.issue, "--status", args.status]));
+  }
+  if (name === "attach_link") {
+    // Egress screen both values before the runner (same discipline as body).
+    try {
+      assertEgressClean(args.title, `fenix-linear attach_link title`);
+      assertEgressClean(args.url, `fenix-linear attach_link URL`);
+    } catch (err) {
+      if (err && err.code === EGRESS_BLOCKED) {
+        return { ok: false, tool: name, error: { code: "egress_blocked", message: err.message } };
+      }
+      throw err;
+    }
+    return mapResult(name, args.issue, await runOps(["attach-link", args.issue, "--url", args.url, "--title", args.title]));
   }
   return runBodyTool(runOps, name, args);
 }

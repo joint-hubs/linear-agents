@@ -65,11 +65,11 @@ await test("initialize reports the fenix-linear server info", async () => {
   if (response.result.serverInfo.version !== SERVER_INFO.version) fail("version mismatch");
 });
 
-await test("tools/list returns exactly transition, comment, comment_replace", async () => {
+await test("tools/list returns exactly transition, comment, comment_replace, attach_link", async () => {
   const server = createFenixLinearServer({});
   const response = await server.handleMessage({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
   const names = response.result.tools.map((t) => t.name);
-  if (JSON.stringify(names) !== JSON.stringify(["transition", "comment", "comment_replace"])) {
+  if (JSON.stringify(names) !== JSON.stringify(["transition", "comment", "comment_replace", "attach_link"])) {
     fail("tools: " + JSON.stringify(names));
   }
   for (const tool of response.result.tools) {
@@ -188,6 +188,56 @@ await test("comment_replace without dedup_tag → invalid_input, runner not call
   if (envelope.error.code !== "invalid_input") fail("code: " + envelope.error.code);
   if (envelope.tool !== "comment_replace") fail("tool: " + envelope.tool);
   if (fake.calls.length !== 0) fail("runner called on invalid input");
+});
+
+console.log("\nfenix-linear: attach_link");
+
+await test("attach_link passes exactly [attach-link, issue, --url, url, --title, title] to the runner", async () => {
+  const fake = fakeRunner({ default: () => ({ exitCode: 0, stdout: "link attached (id=att-1)\n", stderr: "" }) });
+  const server = createFenixLinearServer({ runOps: fake.run });
+  const response = await call(server, "attach_link", { issue: "FOC-9", url: "https://github.com/org/repo/pull/123", title: "PR #123" });
+  if (fake.calls.length !== 1) fail("runner calls: " + fake.calls.length);
+  if (JSON.stringify(fake.calls[0]) !== JSON.stringify(["attach-link", "FOC-9", "--url", "https://github.com/org/repo/pull/123", "--title", "PR #123"])) {
+    fail("argv: " + JSON.stringify(fake.calls[0]));
+  }
+  if (response.result.isError !== false) fail("isError on a valid call");
+  const envelope = envelopeOf(response);
+  if (envelope.ok !== true) fail("envelope: " + JSON.stringify(envelope));
+  if (envelope.tool !== "attach_link" || envelope.issue !== "FOC-9") fail("meta: " + JSON.stringify(envelope));
+});
+
+await test("attach_link requires url and title; url must be http(s)", async () => {
+  const fake = fakeRunner({});
+  const server = createFenixLinearServer({ runOps: fake.run });
+  const e1 = envelopeOf(await call(server, "attach_link", { issue: "FOC-9", url: "https://x.com" }));
+  if (e1.error?.code !== "invalid_input") fail("missing title accepted");
+  const e2 = envelopeOf(await call(server, "attach_link", { issue: "FOC-9", url: "ftp://x.com", title: "t" }));
+  if (e2.error?.code !== "invalid_input") fail("non-http url accepted");
+  const e3 = envelopeOf(await call(server, "attach_link", { issue: "FOC-9", url: "https://x.com", title: "" }));
+  if (e3.error?.code !== "invalid_input") fail("empty title accepted");
+  if (fake.calls.length !== 0) fail("runner called on invalid input");
+});
+
+await test("attach_link egress screen blocks a secret-shaped title, runner never called", async () => {
+  const canary = "ghp_".concat("9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c", "3fXX");
+  const fake = fakeRunner({ default: () => fail("runner must not run behind an egress refusal") });
+  const server = createFenixLinearServer({ runOps: fake.run });
+  const response = await call(server, "attach_link", { issue: "FOC-9", url: "https://x.com", title: "token " + canary });
+  if (response.result.isError !== true) fail("egress refusal must be isError:true");
+  const envelope = JSON.parse(response.result.content[0].text);
+  if (envelope.error?.code !== "egress_blocked") fail("code: " + envelope.error?.code);
+  if (fake.calls.length !== 0) fail("runner called despite the screen");
+});
+
+await test("attach_link egress screen blocks a secret-shaped URL, runner never called", async () => {
+  const canary = "ghp_".concat("9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c", "3fXX");
+  const fake = fakeRunner({ default: () => fail("runner must not run behind an egress refusal") });
+  const server = createFenixLinearServer({ runOps: fake.run });
+  const response = await call(server, "attach_link", { issue: "FOC-9", url: "https://x.com/" + canary, title: "clean" });
+  if (response.result.isError !== true) fail("egress refusal must be isError:true");
+  const envelope = JSON.parse(response.result.content[0].text);
+  if (envelope.error?.code !== "egress_blocked") fail("code: " + envelope.error?.code);
+  if (fake.calls.length !== 0) fail("runner called despite the screen");
 });
 
 console.log("\nfenix-linear: input validation");
