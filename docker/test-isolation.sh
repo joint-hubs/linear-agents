@@ -240,23 +240,33 @@ pass 'helper refuses a gitdir pointing at another repo .git, store stays node-ow
 # raced-in symlink can only touch files the child could chmod anyway. The
 # fixture proves both halves of that design: filenames the child controls
 # reach chmod as single find arguments (the old `for f in $(find …)` loop
-# would have word-split the newline name into /etc/passwd and glob-expanded
-# the star name), and a symlink to a root-owned 0600 file is never followed.
+# would have word-split the newline-carrying path so that one token is
+# $SHARE_TARGET itself — the `root 600` assertion below proves that split
+# never happens — and would have glob-expanded the star name), and a symlink
+# to a root-owned 0600 file is never followed.
 SHARE_RUN=/data/state/supervisor/t980run
 SHARE_DIR=$SHARE_RUN/launch/dev-9/turn-0
 SHARE_PROJECT=$SHARE_DIR/projects/p
 SHARE_TARGET=/data/state/supervisor/t980share-target
 mkdir -p "$SHARE_PROJECT" || fail 'share fixture setup failed'
 printf '{"transcript":true}' > "$SHARE_PROJECT/s.jsonl"
-weird="$SHARE_PROJECT/evil
-/etc/passwd.jsonl"
+# The real word-splitting attack is a child-created DIRECTORY whose name
+# contains a newline: split on it, one token of the find output is exactly
+# $SHARE_TARGET below — the chmod would then land on a root-owned file.
+NL='
+'
+weird_dir="$SHARE_PROJECT/zz${NL}/data/state/supervisor"
+mkdir -p "$weird_dir" || fail 'share fixture setup failed (weird dir)'
+weird="$weird_dir/t980share-target${NL}.jsonl"
 printf 'x' > "$weird"
 printf 'x' > "$SHARE_PROJECT/star-*.jsonl"
 chmod 0600 "$SHARE_PROJECT/s.jsonl" "$weird" "$SHARE_PROJECT/star-*.jsonl"
 printf 'root-secret' > "$SHARE_TARGET"
 chmod 0600 "$SHARE_TARGET"
 ln -s "$SHARE_TARGET" "$SHARE_PROJECT/link.jsonl"
-chown -R fenix-child:fenix-child "$SHARE_DIR"
+# fenix-child's primary group in the image is fenix (the group node belongs
+# to and the share helper widens for) — there is no fenix-child group.
+chown -R fenix-child:fenix "$SHARE_DIR"
 pass 'share fixture created (0600 fenix-child files, newline/star names, symlink)'
 
 rc=0
@@ -287,7 +297,9 @@ run_as_node "sudo -n -u fenix-child $SHARE_HELPER $SHARE_DIR/../turn-0" 2>/dev/n
 [ "$rc" = "2" ] || fail "share helper accepted a .. path (rc=$rc)"
 # A symlinked launch dir: the lexical name matches the run regex, the
 # canonical path does not — the realpath check must trip.
-run_as_node "ln -s $SHARE_DIR $SHARE_RUN/launch/dev-evil" || fail 'symlink fixture setup failed'
+# The launch dir is root-created, so this symlink must be made by root —
+# a node-run ln -s here cannot create it.
+ln -s "$SHARE_DIR" "$SHARE_RUN/launch/dev-evil" || fail 'symlink fixture setup failed'
 rc=0
 run_as_node "sudo -n -u fenix-child $SHARE_HELPER $SHARE_RUN/launch/dev-evil" 2>/dev/null || rc=$?
 [ "$rc" = "2" ] || fail "share helper accepted a symlinked launch dir (rc=$rc)"

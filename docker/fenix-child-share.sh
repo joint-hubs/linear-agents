@@ -85,10 +85,11 @@ fi
 # No shell word-splitting: the filenames are the child's, so they reach chmod
 # only as find's own arguments (a name with a newline or a `*` is data, never
 # a second path or a glob — the old `for f in $(find …)` would have made this
-# helper chmod arbitrary files for root). If a file vanishes between find's
-# traversal and the chmod, the whole batch exits non-zero and prints nothing —
-# the count errs toward zero, never inflates. Best effort by design.
-changed=$(find -P "$dir" -type f -name '*.jsonl' ! -perm -g+r -exec chmod g+r -- {} + -print | wc -l)
+# helper chmod arbitrary files for root). The count is one dot per file
+# selected for the chmod: with `-exec … {} +` the -exec primary is always
+# true, so this is best effort, not proof each chmod succeeded — and
+# -printf '.' keeps a newline inside a filename from inflating the count.
+changed=$(find -P "$dir" -type f -name '*.jsonl' ! -perm -g+r -exec chmod g+r -- {} + -printf '.' | wc -c)
 
 printf '%s\n' "$changed"
 exit 0
