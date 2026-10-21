@@ -470,7 +470,10 @@ runs in auto mode, but seven `ask` rules in
 `agents/supervisor/settings.json` (`git push`, `gh pr merge`, `git reset --hard`, `git clean`,
 `git branch -D`, `rm -rf`, `WebFetch`) and the auto-mode classifier (three blocked actions in a
 row) still stop it on a `Do you want to proceed?` prompt until a person answers — nothing times
-out. The prompt shows on the dashboard as a Needs-you card (answer there: *Yes* once, or *No*)
+out. In auto mode an allow rule does not keep a Bash external write (e.g. `gh-screened.mjs pr
+create`) out of the auto-mode classifier; the Fenix MCP tools (`fenix-linear`, `fenix-github`) are
+the prompt-free path for Linear/GitHub writes. The prompt shows on the dashboard as a Needs-you
+card (answer there: *Yes* once, or *No*)
 and in the Terminal tab; after 10 minutes it becomes a *supervisor-parked* problem and
 `fenix doctor` prints a `supervisor prompt` warn line. On the VM itself: `./fenix attach`, answer
 in tmux, detach with `Ctrl-b d`. Look at the dashboard at least once a day while the Supervisor

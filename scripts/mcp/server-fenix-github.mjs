@@ -4,13 +4,16 @@
 // egress screen applies unchanged, and there is deliberately no merge tool —
 // merging stays impossible through this surface.
 //
-// Flow per call: hand-validated arguments → in-process egress screen on the
-// title/body (assertEgressClean, before anything leaves the process) → body
-// through a temp file (--body-file, no shell) → gh-screened subprocess →
-// typed envelope out. Fail-closed end to end: callTool never throws, a block
-// is a typed egress_blocked envelope and the runner is never invoked.
+// Flow per call: hand-validated arguments → repo_dir check (FOC-977: the PR
+// tools take the absolute path of the checkout the PR belongs to — gh must
+// start there, or it dies with "fatal: not a git repository" in the server's
+// cwd) → in-process egress screen on the title/body (assertEgressClean, before
+// anything leaves the process) → body through a temp file (--body-file, no
+// shell) → gh-screened subprocess with cwd = repo_dir → typed envelope out.
+// Fail-closed end to end: callTool never throws, a block is a typed
+// egress_blocked envelope and the runner is never invoked.
 
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -24,6 +27,14 @@ const BRANCH_RE = /^[A-Za-z0-9._/-]{1,200}$/;
 const PULL_URL_RE = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
 const BODY_TMP_PREFIX = "fenix-github-";
 
+// FOC-977: repo_dir is the absolute path of the checkout the PR belongs to
+// (e.g. /data/workspaces/<repo> or the child's worktree) — gh starts there.
+const REPO_DIR_SCHEMA = {
+  type: "string",
+  description:
+    "Absolute path of the git checkout the PR belongs to (e.g. /data/workspaces/<repo> or the child's worktree); gh runs with it as its cwd.",
+};
+
 export const TOOLS = [
   {
     name: "pr_create",
@@ -32,13 +43,14 @@ export const TOOLS = [
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["title", "body"],
+      required: ["title", "body", "repo_dir"],
       properties: {
         title: { type: "string", minLength: 1, maxLength: 256 },
         body: { type: "string", minLength: 1, maxLength: 60000 },
         base: { type: "string", pattern: "^[A-Za-z0-9._/-]{1,200}$" },
         head: { type: "string", pattern: "^[A-Za-z0-9._/-]{1,200}$" },
         draft: { type: "boolean" },
+        repo_dir: REPO_DIR_SCHEMA,
       },
     },
   },
@@ -49,11 +61,12 @@ export const TOOLS = [
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["number"],
+      required: ["number", "repo_dir"],
       properties: {
         number: { type: "integer", minimum: 1 },
         title: { type: "string", minLength: 1, maxLength: 256 },
         body: { type: "string", minLength: 1, maxLength: 60000 },
+        repo_dir: REPO_DIR_SCHEMA,
       },
     },
   },
@@ -64,19 +77,20 @@ export const TOOLS = [
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["number", "body"],
+      required: ["number", "body", "repo_dir"],
       properties: {
         number: { type: "integer", minimum: 1 },
         body: { type: "string", minLength: 1, maxLength: 60000 },
+        repo_dir: REPO_DIR_SCHEMA,
       },
     },
   },
 ];
 
 const ALLOWED_ARGS = {
-  pr_create: new Set(["title", "body", "base", "head", "draft"]),
-  pr_edit: new Set(["number", "title", "body"]),
-  pr_comment: new Set(["number", "body"]),
+  pr_create: new Set(["title", "body", "base", "head", "draft", "repo_dir"]),
+  pr_edit: new Set(["number", "title", "body", "repo_dir"]),
+  pr_comment: new Set(["number", "body", "repo_dir"]),
 };
 
 function isPlainObject(value) {
@@ -111,6 +125,65 @@ function checkNumber(tool, value) {
   return null;
 }
 
+// FOC-977: repo_dir validation. gh must start inside the checkout the PR
+// belongs to, so the path is checked before anything runs: absolute (no ".."
+// segments), an existing git work tree (real `git rev-parse` — repo_dir may be
+// a subdirectory of the checkout and a linked worktree carries a .git FILE),
+// and — only when an allowed-root env is set (FENIX_WORKSPACES/GITHUB_ROOT) —
+// under one of those roots. With no root env set (local dev) any git work
+// tree is accepted. Returns { real } on success or { invalid } on rejection.
+const REPO_ROOT_ENVS = ["FENIX_WORKSPACES", "GITHUB_ROOT"];
+
+function allowedRoots() {
+  const roots = [];
+  for (const envName of REPO_ROOT_ENVS) {
+    const value = process.env[envName];
+    if (!value) continue;
+    try {
+      roots.push(fs.realpathSync(value));
+    } catch {
+      // a root env pointing at a missing dir constrains nothing
+    }
+  }
+  return roots;
+}
+
+function isWithin(root, target) {
+  const rel = path.relative(root, target);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+async function checkRepoDir(tool, value) {
+  if (typeof value !== "string" || value.trim() === "") {
+    return { invalid: invalid(tool, "repo_dir is required: the absolute path of the checkout the PR belongs to (e.g. /data/workspaces/<repo> or the child's worktree)") };
+  }
+  if (!path.isAbsolute(value)) {
+    return { invalid: invalid(tool, "repo_dir must be an absolute path") };
+  }
+  if (value.split(/[\\/]/).includes("..")) {
+    return { invalid: invalid(tool, 'repo_dir must not contain ".."') };
+  }
+  let real;
+  try {
+    real = fs.realpathSync(value);
+  } catch {
+    return { invalid: invalid(tool, "repo_dir does not exist") };
+  }
+  const roots = allowedRoots();
+  if (roots.length > 0 && !roots.some((root) => isWithin(root, real))) {
+    return { invalid: invalid(tool, "repo_dir is outside the allowed roots (FENIX_WORKSPACES/GITHUB_ROOT)") };
+  }
+  const git = spawnSync("git", ["-C", real, "rev-parse", "--is-inside-work-tree"], {
+    encoding: "utf8",
+    timeout: 10000,
+    windowsHide: true,
+  });
+  if (git.status !== 0 || String(git.stdout ?? "").trim() !== "true") {
+    return { invalid: invalid(tool, "repo_dir is not inside a git work tree") };
+  }
+  return { real };
+}
+
 function screenOrBlock(tool, parts) {
   // In-process and FIRST: a blocked value never reaches the runner, the temp
   // file, or the gh subprocess. The assert's message never contains the value.
@@ -122,17 +195,17 @@ function screenOrBlock(tool, parts) {
   }
 }
 
-// Default runner: gh-screened as a child process, argv only (no shell).
-// Never rejects — a spawn failure surfaces as exit 127 (gh_missing), a
-// timeout as exit 124 with timedOut (gh_timeout): a hung gh is not a
-// missing gh.
-function defaultRunGh(argv) {
+// Default runner: gh-screened as a child process, argv only (no shell), run
+// with cwd = the validated repo_dir (FOC-977). Never rejects — a spawn failure
+// surfaces as exit 127 (gh_missing), a timeout as exit 124 with timedOut
+// (gh_timeout): a hung gh is not a missing gh.
+function defaultRunGh(argv, { cwd } = {}) {
   const ghScreened = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "gh-screened.mjs");
   return new Promise((resolve) => {
     execFile(
       process.execPath,
       [ghScreened, ...argv],
-      { env: process.env, timeout: 180000, maxBuffer: 4 * 1024 * 1024 },
+      { cwd, env: process.env, timeout: 180000, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (!err) return resolve({ exitCode: 0, stdout: String(stdout), stderr: String(stderr) });
         // A timeout kills the child: err.killed carries the signal, ETIMEDOUT
@@ -192,7 +265,7 @@ export function createFenixGithubServer({ runGh } = {}) {
   // whether the run succeeded, failed, or was mapped to an error envelope.
   // The --body-file flag sits right after the prefix (title/pr number); the
   // suffix carries the optional flags (--base/--head/--draft/--title edit).
-  async function runWithBody(tool, argvPrefix, body, argvSuffix = []) {
+  async function runWithBody(tool, argvPrefix, body, argvSuffix = [], cwd) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), BODY_TMP_PREFIX));
     try {
       const argv = [...argvPrefix];
@@ -202,7 +275,7 @@ export function createFenixGithubServer({ runGh } = {}) {
         argv.push("--body-file", bodyFile);
       }
       argv.push(...argvSuffix);
-      return mapResult(tool, await runner(argv));
+      return mapResult(tool, await runner(argv, { cwd }));
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -220,6 +293,13 @@ export function createFenixGithubServer({ runGh } = {}) {
         if (!ALLOWED_ARGS[name].has(key)) return invalid(name, `unknown argument: ${key}`);
       }
 
+      // FOC-977: the PR tools must name the checkout they belong to — gh
+      // starts there. Validated (and resolved to its realpath) before anything
+      // else runs; a rejection is a typed invalid_input envelope.
+      const repo = await checkRepoDir(name, args.repo_dir);
+      if (repo.invalid) return repo.invalid;
+      const cwd = repo.real;
+
       if (name === "pr_create") {
         let bad = checkText(name, "title", args.title, 256) || checkText(name, "body", args.body, 60000);
         if (bad) return bad;
@@ -234,7 +314,7 @@ export function createFenixGithubServer({ runGh } = {}) {
         if (args.base !== undefined) argvSuffix.push("--base", args.base);
         if (args.head !== undefined) argvSuffix.push("--head", args.head);
         if (args.draft) argvSuffix.push("--draft");
-        return await runWithBody(name, ["pr", "create", "--title", args.title], args.body, argvSuffix);
+        return await runWithBody(name, ["pr", "create", "--title", args.title], args.body, argvSuffix, cwd);
       }
 
       if (name === "pr_edit") {
@@ -251,14 +331,14 @@ export function createFenixGithubServer({ runGh } = {}) {
         if (bad) return bad;
         const argvSuffix = [];
         if (args.title !== undefined) argvSuffix.push("--title", args.title);
-        return await runWithBody(name, ["pr", "edit", String(args.number)], args.body, argvSuffix);
+        return await runWithBody(name, ["pr", "edit", String(args.number)], args.body, argvSuffix, cwd);
       }
 
       // pr_comment
       if (checkNumber(name, args.number)) return checkNumber(name, args.number);
       const bad = checkText(name, "body", args.body, 60000) || screenOrBlock(name, [args.body]);
       if (bad) return bad;
-      return await runWithBody(name, ["pr", "comment", String(args.number)], args.body, []);
+      return await runWithBody(name, ["pr", "comment", String(args.number)], args.body, [], cwd);
     } catch (err) {
       // Fail-closed: a crash in validation or the runner is a typed envelope,
       // never a throw across the protocol boundary.
