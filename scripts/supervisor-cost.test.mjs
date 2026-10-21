@@ -617,6 +617,55 @@ test("no transcript and no results keeps what the entry has", () => {
   assert.deepEqual(patch, {}, "an empty patch must not wipe the entry's existing fields");
 });
 
+// FOC-980: a transcript that priced ZERO messages is not transcript cost. The
+// real case: the child's file was still at 0600 when the share had not landed,
+// so priceChildTranscripts returned (or priced as) an empty transcript — and
+// trusting that `{costUsd: 0, messages: 0}` shape would overwrite a real result
+// snapshot with a fake $0.
+test("a zero-message transcript falls through to result-max — the fake $0 never wins", () => {
+  const patch = turnEndCostPatch({
+    entry: { costUsd: 0 },
+    transcriptCost: { costUsd: 0, messages: 0 },
+    results: [{ computed: 0.098, reported: 6.23, unpriced: [] }],
+  });
+  assert.equal(patch.costUsd, 0.098);
+  assert.equal(patch.costSource, "result-max");
+  assert.equal(patch.costMessages, undefined, "the empty transcript's message count must not ride the patch");
+});
+
+test("a transcript that priced at least one message still wins over the results", () => {
+  const patch = turnEndCostPatch({
+    entry: { costUsd: 0 },
+    transcriptCost: { costUsd: 1.2, messages: 1, unpricedModels: [] },
+    results: [{ computed: 0.098, reported: 6.23, unpriced: [] }],
+  });
+  assert.equal(patch.costUsd, 1.2);
+  assert.equal(patch.costSource, "transcript");
+  assert.equal(patch.costMessages, 1);
+});
+
+test("an unreadable transcript prices as null transcriptCost — result-max applies (FOC-980)", () => {
+  // priceChildTranscripts now returns null for a located-but-unreadable
+  // transcript, so the patch sees exactly the no-transcript shape.
+  const patch = turnEndCostPatch({
+    entry: { costUsd: 0 },
+    transcriptCost: null,
+    results: [{ computed: 0.098, reported: 6.23, unpriced: [] }],
+  });
+  assert.equal(patch.costUsd, 0.098);
+  assert.equal(patch.costSource, "result-max");
+});
+
+test("a zero-message transcript does not mask an unknown result snapshot", () => {
+  const patch = turnEndCostPatch({
+    entry: { costUsd: 0 },
+    transcriptCost: { costUsd: 0, messages: 0 },
+    results: [{ computed: null, reported: 6.23, unpriced: ["acme/unknown"] }],
+  });
+  assert.equal(patch.costUsd, null, "unknown stays unknown — the fake $0 must not cover it");
+  assert.equal(patch.costSource, "result-max");
+});
+
 // ── (g) turn 2: the two shapes the four above do not cover.
 //
 // One guards each side of the rule. `zero-tokens-one-zero-key` is the shape that

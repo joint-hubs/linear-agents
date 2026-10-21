@@ -10,9 +10,11 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, unlinkSync, writeFileSync, appendFileSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, unlinkSync, writeFileSync, appendFileSync, statSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { platform } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { makeEvent, openTelemetryDb, applyEvent } from "./telemetry-store.mjs";
 import { ingestTranscript, ingestKnownRuns, sweepSettledGrowth } from "./telemetry-ingest.mjs";
@@ -199,5 +201,93 @@ test("(f) a running run is not touched", async () => {
     assert.equal(result.grown, 0);
     assert.equal(sourceRow(db, "run-sweep-f").parse_status, "parsed");
     unlinkSync(transcript);
+  });
+});
+
+// FOC-980: one unreadable transcript must not stop the 15 s tick. Observed in
+// the api container on EVERY tick: ingestTranscript threw EACCES on one run's
+// transcript and ingestKnownRuns aborted, so every run after it was never
+// ingested. The fix wraps the per-run work: an fs error (EACCES/EPERM/…) is
+// data quality — `transcript_unreadable`, once per run — and the loop moves on.
+//
+// Reproducing the real permission failure on both platforms, against the REAL
+// fs (no seam): POSIX chmod 000; win32 denies only FILE_READ_DATA via icacls —
+// denying generic Read would also strip read-attributes and `existsSync` would
+// report the file gone, which is the transcript_missing path, not this one.
+// Both leave stat working and fail the open with an fs code, exactly like the
+// container saw.
+const denyRead = (path) => {
+  if (platform() === "win32") {
+    execFileSync("icacls", [path, "/deny", `${process.env.USERNAME}:(RD)`], { stdio: "ignore" });
+  } else {
+    chmodSync(path, 0o000);
+  }
+};
+const allowRead = (path) => {
+  if (platform() === "win32") {
+    execFileSync("icacls", [path, "/remove:d", process.env.USERNAME], { stdio: "ignore" });
+  } else {
+    chmodSync(path, 0o644);
+  }
+};
+
+test("(g) an unreadable transcript does not stop the tick — the other runs still ingest (FOC-980)", async () => {
+  await withTempStore(async ({ db, dbPath }) => {
+    const buildRunningRun = (runId, sessionId, transcript, startedAt) => {
+      applyEvent(db, makeEvent("run.started", { runId, squad: "dev", startedAt, cwd: "C:/repos/x" }, { runId }));
+      applyEvent(db, makeEvent("session.linked", { runId, sessionId, transcriptPath: transcript }, { runId }));
+    };
+    const paths = ["a", "b", "c"].map((tag) => join(tmpdir(), `la-sweep-g-${tag}-${Date.now()}.jsonl`));
+    try {
+      writeJsonl(paths[0], [assistantLine("sess-g-a", "2026-10-13T08:00:00.000Z", 100)]);
+      writeJsonl(paths[1], [assistantLine("sess-g-b", "2026-10-13T08:00:00.000Z", 200)]);
+      writeJsonl(paths[2], [assistantLine("sess-g-c", "2026-10-13T08:00:00.000Z", 300)]);
+      buildRunningRun("run-sweep-g-a", "sess-g-a", paths[0], "2026-10-13T08:00:00.000Z");
+      buildRunningRun("run-sweep-g-b", "sess-g-b", paths[1], "2026-10-13T07:59:00.000Z");
+      buildRunningRun("run-sweep-g-c", "sess-g-c", paths[2], "2026-10-13T07:58:00.000Z");
+      denyRead(paths[1]);
+
+      const first = await ingestKnownRuns({ dbPath });
+      // The loop survived: runs a and c are ingested...
+      assert.equal(usageCount(db, "run-sweep-g-a"), 1, "the run before the unreadable one still ingested");
+      assert.equal(usageCount(db, "run-sweep-g-c"), 1, "the run after the unreadable one still ingested");
+      assert.equal(usageCount(db, "run-sweep-g-b"), 0, "the unreadable run contributed nothing");
+      // ...the failure is counted and raised as ONE open issue...
+      assert.equal(first.unreadableTranscripts, 1, "summary.unreadableTranscripts counts the run");
+      assert.equal(first.runs, 2, "the two readable runs count as ingested");
+      const issue = db.prepare(
+        "SELECT details_json FROM data_quality_issues WHERE run_id=? AND issue_type='transcript_unreadable' AND resolved_at IS NULL",
+      ).get("run-sweep-g-b");
+      assert.ok(issue, "one open transcript_unreadable issue for the unreadable run");
+      const details = JSON.parse(issue.details_json);
+      assert.equal(details.code, platform() === "win32" ? "EPERM" : "EACCES", "the issue names the fs error code");
+      assert.ok(details.path, "the issue names the transcript path");
+
+      // ...and a second tick must not duplicate the issue.
+      const second = await ingestKnownRuns({ dbPath });
+      assert.equal(second.unreadableTranscripts, 1, "the second tick still counts the run");
+      const issueCount = db.prepare(
+        "SELECT COUNT(*) AS c FROM data_quality_issues WHERE run_id=? AND issue_type='transcript_unreadable'",
+      ).get("run-sweep-g-b").c;
+      assert.equal(issueCount, 1, "the issue is raised once per run, not once per tick");
+
+      // Permission restored → the next pass reads the file and auto-closes the
+      // issue (mirroring the transcript_missing auto-close), so a later
+      // re-denial can raise a fresh one.
+      allowRead(paths[1]);
+      const third = await ingestKnownRuns({ dbPath });
+      assert.equal(usageCount(db, "run-sweep-g-b"), 1, "the recovered run ingests once readable");
+      assert.equal(third.runs, 3, "all three runs count as ingested");
+      assert.equal(third.unreadableTranscripts, 0, "nothing unreadable on the recovered tick");
+      const resolved = db.prepare(
+        "SELECT resolved_at FROM data_quality_issues WHERE run_id=? AND issue_type='transcript_unreadable'",
+      ).get("run-sweep-g-b");
+      assert.ok(resolved.resolved_at, "the issue auto-closes once the transcript is readable again");
+    } finally {
+      // The cleanup rmSync below must never meet a denied file.
+      for (const path of paths) {
+        try { allowRead(path); } catch { /* already allowed or gone */ }
+      }
+    }
   });
 });

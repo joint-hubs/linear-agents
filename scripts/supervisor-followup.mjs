@@ -47,6 +47,7 @@ import {
   readRegistry,
   roundsFor,
   runDir,
+  shareChildTranscripts,
   teeAbsPath,
   teeRelPath,
   updateChild,
@@ -322,6 +323,18 @@ const teardown = childTeardownIdentity({ runId, childId, attemptId: attemptIdFor
 ensureChildTmpDir(teardown.tmpDir);
 
 const prevLaunchDir = entry.launchConfigDir && existsSync(entry.launchConfigDir) ? entry.launchConfigDir : null;
+// FOC-980: the previous turn's transcripts may still be fenix-child 0600 files
+// (created DURING that turn, after the launch-time handover) — the history copy
+// below would fail or silently copy nothing, and the resume would start blank
+// ("no_init"). Best effort: share them first (the root helper widens g+r on the
+// launch dir's *.jsonl). A failure is a stderr note; the copy is attempted
+// regardless — its own failure is handled where it happens.
+if (prevLaunchDir) {
+  const share = shareChildTranscripts(prevLaunchDir);
+  if (share.skipped && share.skipped !== "not in container") {
+    console.error(`[followup] transcript share failed: ${share.skipped}`);
+  }
+}
 const historyMode = prevLaunchDir ? "tree" : entry.sessionId ? "session" : null;
 // The session id is preserved from the entry; a legacy entry picks the env's
 // up ONLY when it is a valid runtime token — an invalid env value is never

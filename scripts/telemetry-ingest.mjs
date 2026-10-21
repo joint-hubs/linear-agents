@@ -637,6 +637,11 @@ export async function ingestTranscript(db, runId, transcriptPath, sessionId = nu
   // this, the issue opened by an earlier failed ingest cycle stays open
   // forever and ingest cycles keep reporting it as still missing.
   resolveQualityIssue(db, runId, "transcript_missing");
+  // FOC-980: the same auto-close for the unreadable-transcript issue — once the
+  // permission problem is gone and a pass reads the file again, the issue must
+  // not stay open forever (an open issue would also suppress the re-raise if
+  // the file ever becomes unreadable again).
+  resolveQualityIssue(db, runId, "transcript_unreadable");
   // FOC-761: sweepSettledGrowth raises transcript_grew_after_settle once per
   // run; it is resolved here, once the run's transcript has been re-read. Only
   // a COMPLETE pass closes it — a pass that stopped mid-file (failed chunk, no
@@ -971,6 +976,14 @@ export async function backfill(options = {}) {
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed"]);
 const REINGEST_GRACE_MS = 5 * 60 * 1000;
 
+// FOC-980: an error carrying an fs-style code (EACCES, EPERM, EISDIR, …) is a
+// data-quality condition for the run it hit — the tick must survive it and the
+// run must stay visible as an issue. Anything else is a bug in the ingest path
+// itself, not something the operator can fix on the file.
+function isFsError(error) {
+  return Boolean(error) && typeof error.code === "string" && /^E/.test(error.code);
+}
+
 /**
  * True when this run is finished, past the flush grace, and already has its
  * transcript parsed — so anything the file gained since belongs to someone
@@ -993,7 +1006,7 @@ function settledRun(db, run) {
 
 export async function ingestKnownRuns(options = {}) {
   const db = openTelemetryDb(options.dbPath);
-  const summary = { runs: 0, transcripts: 0, usageEvents: 0, missingTranscripts: 0, settled: 0 };
+  const summary = { runs: 0, transcripts: 0, usageEvents: 0, missingTranscripts: 0, unreadableTranscripts: 0, settled: 0 };
   try {
     // This loop runs on a 15s timer in telemetry-server, so every run whose
     // transcript is gone is re-checked ~5 700 times a day. Report the issue
@@ -1004,11 +1017,22 @@ export async function ingestKnownRuns(options = {}) {
       if (hasOpenQualityIssue(db, runId, "transcript_missing")) return;
       reportDataQuality(runId, "transcript_missing", details, options);
     };
+    // FOC-980: a transcript that exists but cannot be READ (EACCES/EPERM on
+    // the file — observed in the api container on every tick) is data quality,
+    // not a tick crash. Report it once per run, count it, keep the loop alive.
+    const reportUnreadable = (runId, details) => {
+      summary.unreadableTranscripts++;
+      if (hasOpenQualityIssue(db, runId, "transcript_unreadable")) return;
+      reportDataQuality(runId, "transcript_unreadable", details, options);
+    };
     // FOC-547 (AC2): for settled runs this loop is pure synchronous SQL plus
     // microtask awaits — measured as one multi-second continuous block per
     // tick with no loop iteration at all (the phase histogram missed it
     // because its resume sample landed after the stats were read). Pace it.
     const pacer = createPacer();
+    // FOC-980: first non-fs error of the tick — logged exactly once (a real
+    // bug would otherwise repeat every 15 s), never swallowed silently.
+    let nonFsError = null;
     for (const run of await queryRunsForIngest(db)) {
       await pacer();
       // Checked before transcriptForSession: that helper stats the path and
@@ -1018,17 +1042,29 @@ export async function ingestKnownRuns(options = {}) {
         summary.settled++;
         continue;
       }
-      const transcriptPath = await transcriptForSession(run);
-      if (!transcriptPath) {
-        reportMissing(run.runId, { sessionId: run.sessionId || null });
-        continue;
+      let transcriptPath = null;
+      try {
+        transcriptPath = await transcriptForSession(run);
+        if (!transcriptPath) {
+          reportMissing(run.runId, { sessionId: run.sessionId || null });
+          continue;
+        }
+        const result = await ingestTranscript(db, run.runId, transcriptPath, run.sessionId);
+        summary.runs++;
+        if (result.missing) {
+          reportMissing(run.runId, { sessionId: run.sessionId || null });
+        }
+        else { summary.transcripts += result.files; summary.usageEvents += result.events; }
+      } catch (error) {
+        if (isFsError(error)) {
+          reportUnreadable(run.runId, { path: transcriptPath, code: error.code });
+        } else if (!nonFsError) {
+          nonFsError = error;
+          console.error(
+            `[telemetry] ingest tick skipped ${run.runId} on a non-fs error: ${error && error.message ? error.message : error}`,
+          );
+        }
       }
-      const result = await ingestTranscript(db, run.runId, transcriptPath, run.sessionId);
-      summary.runs++;
-      if (result.missing) {
-        reportMissing(run.runId, { sessionId: run.sessionId || null });
-      }
-      else { summary.transcripts += result.files; summary.usageEvents += result.events; }
     }
   } finally {
     await db.close();

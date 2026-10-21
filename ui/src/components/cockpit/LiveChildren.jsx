@@ -2,8 +2,7 @@
 // only when the process is alive AND the tee grew recently, everything else
 // labelled. Squad colour is always paired with a text label (spec §7).
 
-import { statusChip, formatAge } from '../../cockpitModel';
-import { fmtUSD } from '../../utils';
+import { statusChip, formatAge, childCostLabel } from '../../cockpitModel';
 
 // Squad ids seen in the registry; anything else renders uncoloured. Existing
 // --sq-* tokens from theme.css — colour never the only signal.
@@ -30,6 +29,19 @@ function SquadTag({ squad }) {
 function StatusChip({ child }) {
   const { label, tone } = statusChip(child);
   return <span className={`ck-chip ck-tone-${tone}`}>{label}</span>;
+}
+
+// FOC-980: the cost cell never fabricates "$0.00 est." for a cost we do not
+// have — the label rules live in cockpitModel.childCostLabel (pure, tested).
+function CostCell({ row }) {
+  const label = childCostLabel(row);
+  if (!label) return <span className="muted">—</span>;
+  return (
+    <span className={label.muted ? 'muted' : undefined} title={label.title}>
+      {label.text}
+      {label.chip && <span> <span className="chip">{label.chip}</span></span>}
+    </span>
+  );
 }
 
 // "checked 4 s ago" — the age of the check itself, recomputed per render. The
@@ -78,13 +90,7 @@ export default function LiveChildren({ items }) {
                   </td>
                   <td className="ck-num">{formatAge(c.ageMs)}</td>
                   <td className="ck-num">
-                    {c.costUsd != null ? (
-                      <>
-                        {fmtUSD(c.costUsd)} <span className="chip">est.</span>
-                      </>
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
+                    <CostCell row={c} />
                   </td>
                   <td className="muted ck-checked">{checkedAgo(c.checkedAt)}</td>
                 </tr>

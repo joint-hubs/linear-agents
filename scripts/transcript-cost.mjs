@@ -137,14 +137,17 @@ function defaultPricing() {
  * message that priceOne cannot price leaves the total null and is named in
  * unpricedModels exactly like supervisor-lib costFromResult names them.
  *
- * @param {string[]} paths transcript files (missing/unreadable ones are skipped)
+ * @param {string[]} paths transcript files (missing ones are skipped)
  * @param {{ priceOne?: (usage, model) => number|null, thresholdOne?: (model) => {minPromptTokens}|null }} [opts]
  * @returns {{ costUsd: number|null, knownUsd: number, messages: number,
  *   unpricedModels: string[], byModel: Record<string, { messages: number, usd: number|null }>,
- *   files: number }}
+ *   files: number, unreadable: number }}
  *   costUsd is null when ANY message is unpriced; knownUsd sums only the priced ones;
  *   byModel.usd is null when any of that model's messages is unpriced; files counts
- *   the files actually read.
+ *   the files actually read. `unreadable` counts paths that EXIST but could not be
+ *   read (FOC-980: a fenix-child transcript still at 0600) — a caller must treat
+ *   any unreadable file as "no transcript priced", never as an empty $0 transcript,
+ *   because the unreadable file may well hold messages its $0 shape hides.
  */
 export function priceTranscripts(paths, { priceOne, thresholdOne } = {}) {
   if (priceOne === undefined || thresholdOne === undefined) {
@@ -155,12 +158,17 @@ export function priceTranscripts(paths, { priceOne, thresholdOne } = {}) {
 
   const messages = new Map();
   let files = 0;
+  let unreadable = 0;
   for (const path of paths || []) {
     let text;
     try {
       text = readFileSync(path, "utf8");
     } catch {
-      continue; // missing or unreadable — not part of this child
+      // existsSync separates "missing — not part of this child" from "located
+      // but unreadable — a 0600 fenix-child transcript": the latter must not
+      // silently price as an empty transcript.
+      if (existsSync(path)) unreadable++;
+      continue;
     }
     files++;
     const lines = text.split("\n");
@@ -235,6 +243,7 @@ export function priceTranscripts(paths, { priceOne, thresholdOne } = {}) {
     unpricedModels: [...unpriced].sort(),
     byModel,
     files,
+    unreadable,
   };
 }
 
@@ -253,7 +262,11 @@ export function priceTranscripts(paths, { priceOne, thresholdOne } = {}) {
  * @param {object} [opts] priceTranscripts options
  * @returns {object|null} priceTranscripts' result plus `transcriptPath` (the
  *   lead of the FIRST id found) and `transcriptPaths` (every lead found), or
- *   null when no transcript for any id is found.
+ *   null when no transcript for any id is found — and also null when a found
+ *   transcript EXISTS but could not be read (FOC-980: the child's fenix-child
+ *   0600 file before the share helper lands): a transcript that cannot be
+ *   opened may hold priced messages its $0 shape would hide, so "no transcript
+ *   cost" (the caller's result-max fallback) is the honest read, never $0.
  */
 export function priceChildTranscripts(args, opts) {
   const ids = [args?.sessionId, ...(args?.sessionIds ?? [])].filter(
@@ -268,8 +281,10 @@ export function priceChildTranscripts(args, opts) {
     paths.push(found.lead, ...found.subagents);
   }
   if (paths.length === 0) return null;
+  const priced = priceTranscripts(paths, opts);
+  if (priced.unreadable > 0) return null;
   return {
-    ...priceTranscripts(paths, opts),
+    ...priced,
     transcriptPath: leads[0],
     transcriptPaths: leads,
   };

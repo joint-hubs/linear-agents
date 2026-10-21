@@ -11,7 +11,7 @@
 // banner, FOC-807) and the Supervisor ask/dialog helpers (dialogActions,
 // dialogTextLines, askAnswers, the card-aware chatDisabledReason and
 // inboxPrimaryAction,
-// FOC-810) and the inbox list shapers (inboxQuestionLines / inboxFactLines —
+// FOC-810), the inbox list shapers (inboxQuestionLines / inboxFactLines —
 // the generic lists render strings only; the ask category never leaks its
 // question objects into a <li>, React error #31). Fixtures only — no network,
 // no DOM.
@@ -39,6 +39,7 @@ import {
   dialogTextLines,
   askAnswers,
   answerResultText,
+  childCostLabel,
 } from './cockpitModel.js';
 
 // --- Minimal test harness (same shape as _test_utils.mjs) -------------------
@@ -101,6 +102,43 @@ await test('statusChip unrecognized status -> unknown/neutral (never running)', 
 
 await test('statusChip(null) -> unknown/neutral', () => {
   eq(statusChip(null), { label: 'unknown', tone: 'neutral' });
+});
+
+// --- childCostLabel (FOC-980: never a fabricated "$0.00 est.") ---------------
+
+await test('childCostLabel running child without costSource -> pending, muted, turn-end title', () => {
+  eq(childCostLabel({ status: 'running', costUsd: null, costSource: null }), {
+    text: 'pending', chip: null, muted: true, title: 'cost is recorded at turn end',
+  });
+  // Even a stale costUsd is not shown for a turn that has not ended.
+  eq(childCostLabel({ status: 'running', costUsd: 0.42, costSource: null }).text, 'pending');
+});
+
+await test('childCostLabel live statuses (starting/stalled/waiting-gate) without costSource -> pending', () => {
+  for (const status of ['starting', 'running', 'stalled', 'waiting-gate']) {
+    eq(childCostLabel({ status, costUsd: null, costSource: null }).text, 'pending', status);
+  }
+});
+
+await test('childCostLabel ended child without costUsd -> unknown, muted, cost-source title', () => {
+  eq(childCostLabel({ status: 'exited', costUsd: null, costSource: null }), {
+    text: 'unknown', chip: null, muted: true, title: 'no readable cost source',
+  });
+  eq(childCostLabel({ status: 'stopped', costUsd: null, costSource: 'transcript' }).text, 'unknown');
+  // A crashed/unknown-status child must not read as running either.
+  eq(childCostLabel({ status: 'unknown', costUsd: null, costSource: null }).text, 'unknown');
+});
+
+await test('childCostLabel with a cost -> the current $x.xx est. cell', () => {
+  eq(childCostLabel({ status: 'running', costUsd: 1.5, costSource: 'transcript' }), {
+    text: '$1.50', chip: 'est.', muted: false, title: null,
+  });
+  // An ended child with a cost but no recorded source keeps the estimate.
+  eq(childCostLabel({ status: 'exited', costUsd: 0, costSource: null }).text, '$0.00');
+});
+
+await test('childCostLabel(null) -> unknown (never $0.00)', () => {
+  eq(childCostLabel(null), { text: 'unknown', chip: null, muted: true, title: 'no readable cost source' });
 });
 
 // --- formatAge --------------------------------------------------------------
