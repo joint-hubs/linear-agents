@@ -809,6 +809,7 @@ allow:
 | `mcp__fenix-linear__transition` |  |
 | `mcp__fenix-linear__comment` |  |
 | `mcp__fenix-linear__comment_replace` |  |
+| `mcp__fenix-linear__attach_link` |  |
 | `mcp__fenix-github__pr_create` |  |
 | `mcp__fenix-github__pr_edit` |  |
 | `mcp__fenix-github__pr_comment` |  |
