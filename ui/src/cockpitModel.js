@@ -3,6 +3,8 @@
 // pin the behavior outside Vite. Status vocabulary: dashboard-v2-spec §5;
 // colours live in screens/cockpit.css as the --ck-* tokens.
 
+import { fmtUSD } from './utils.js';
+
 // statusChip(child) -> { label, tone } with tone in running|waiting|ok|danger|
 // neutral. The label never relies on colour alone (spec §7 accessibility).
 export function statusChip(child) {
@@ -28,6 +30,30 @@ export function statusChip(child) {
       // running (spec §5).
       return { label: 'unknown', tone: 'neutral' };
   }
+}
+
+// ===== Live children cost cell (FOC-980) =====
+
+// The board statuses whose child has not finished the turn whose cost would be
+// recorded (the registry writes costUsd only at turn end — FOC-760). 'unknown'
+// is deliberately NOT here: for an unknown child we do not even know a turn is
+// running, so "pending" would promise a cost that may never arrive.
+const LIVE_COST_STATUSES = ['starting', 'running', 'stalled', 'waiting-gate'];
+
+// childCostLabel(row) -> null (render "—") | { text, chip, muted, title }.
+// The honest cost cell: a running child with no costSource has simply not
+// finished a turn yet ("pending", muted — never a fabricated $0.00 est.); an
+// ended child with no costUsd has no readable cost source ("unknown", muted);
+// anything with a number keeps the current estimate chip.
+export function childCostLabel(row) {
+  const costUsd = row ? row.costUsd : null;
+  if (row && LIVE_COST_STATUSES.includes(row.status) && row.costSource == null) {
+    return { text: 'pending', chip: null, muted: true, title: 'cost is recorded at turn end' };
+  }
+  if (costUsd == null) {
+    return { text: 'unknown', chip: null, muted: true, title: 'no readable cost source' };
+  }
+  return { text: fmtUSD(costUsd), chip: 'est.', muted: false, title: null };
 }
 
 // formatAge(ms) -> "42s" | "3m 05s" | "2h 07m" | "5d 03h" | "—" when not a

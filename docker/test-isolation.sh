@@ -19,6 +19,13 @@
 # helper-refusal cases (worktree outside the root, root-owned env file,
 # symlinked worktree / config dir, out-of-scope gitdir) must all exit 97 —
 # the helper's dedicated refusal code — without starting anything.
+#
+# FOC-980: the transcript-share helper is exercised directly through its
+# production sudo path (node -> sudo -n -u fenix-child) against a hostile
+# fixture: child-controlled filenames (a newline with /etc/passwd-like text,
+# a glob character), a symlink to a root-owned file, and refusals for /etc,
+# a ".." path, a symlinked launch dir and a root run (the share helper's
+# refusal code is 2).
 set -eu
 
 SRC=${FENIX_TEST_SRC:-/src}
@@ -39,6 +46,10 @@ pass() {
 [ "$(id -u)" = "0" ] || fail 'this script must run as the container root (--user root)'
 [ -x "$ENTRYPOINT" ] || fail "no $ENTRYPOINT in the image — rebuild it"
 [ -x "$HELPER" ] || fail "no $HELPER in the image — rebuild it"
+# FOC-980: the transcript-share helper must be installed and root-owned like
+# the spawn helper — the sudoers check below keys on its path.
+SHARE_HELPER=/usr/local/sbin/fenix-child-share
+[ -x "$SHARE_HELPER" ] || fail "no $SHARE_HELPER in the image — rebuild it"
 
 run_as_node() {
     # Mirror the entrypoint's umask 0002 — production node processes inherit it.
@@ -221,5 +232,72 @@ run_as_node "sudo -n $HELPER $REFUSAL_ENV /data/workspaces/la-wt/evil-wt $CONFIG
 [ "$(stat -c '%U' /data/workspaces/seed-repo/.git)" = "node" ] \
     || fail "the seed repo's .git root got chowned through an out-of-scope gitdir"
 pass 'helper refuses a gitdir pointing at another repo .git, store stays node-owned (exit 97)'
+
+# ── FOC-980: the transcript-share helper, against a hostile fixture ──────────
+# Production path: node -> sudo -n -u fenix-child -> fenix-child-share <dir>.
+# The helper runs as the child user, never root: the transcripts are
+# fenix-child-owned files and the owner may chmod its own files, so a
+# raced-in symlink can only touch files the child could chmod anyway. The
+# fixture proves both halves of that design: filenames the child controls
+# reach chmod as single find arguments (the old `for f in $(find …)` loop
+# would have word-split the newline name into /etc/passwd and glob-expanded
+# the star name), and a symlink to a root-owned 0600 file is never followed.
+SHARE_RUN=/data/state/supervisor/t980run
+SHARE_DIR=$SHARE_RUN/launch/dev-9/turn-0
+SHARE_PROJECT=$SHARE_DIR/projects/p
+SHARE_TARGET=/data/state/supervisor/t980share-target
+mkdir -p "$SHARE_PROJECT" || fail 'share fixture setup failed'
+printf '{"transcript":true}' > "$SHARE_PROJECT/s.jsonl"
+weird="$SHARE_PROJECT/evil
+/etc/passwd.jsonl"
+printf 'x' > "$weird"
+printf 'x' > "$SHARE_PROJECT/star-*.jsonl"
+chmod 0600 "$SHARE_PROJECT/s.jsonl" "$weird" "$SHARE_PROJECT/star-*.jsonl"
+printf 'root-secret' > "$SHARE_TARGET"
+chmod 0600 "$SHARE_TARGET"
+ln -s "$SHARE_TARGET" "$SHARE_PROJECT/link.jsonl"
+chown -R fenix-child:fenix-child "$SHARE_DIR"
+pass 'share fixture created (0600 fenix-child files, newline/star names, symlink)'
+
+rc=0
+SHARE_COUNT=$(run_as_node "sudo -n -u fenix-child $SHARE_HELPER $SHARE_DIR") || rc=$?
+[ "$rc" = "0" ] || fail "the share helper failed (rc=$rc)"
+[ "$SHARE_COUNT" = "3" ] || fail "share helper reported $SHARE_COUNT files changed, expected 3"
+[ "$(stat -c '%a' "$SHARE_PROJECT/s.jsonl")" = "640" ] \
+    || fail "s.jsonl is not 0640 after the share ($(stat -c '%a' "$SHARE_PROJECT/s.jsonl"))"
+[ "$(stat -c '%a' "$weird")" = "640" ] \
+    || fail 'the newline-named file was not widened as a single path'
+[ "$(stat -c '%a' "$SHARE_PROJECT/star-*.jsonl")" = "640" ] \
+    || fail 'the glob-named file was not widened as a single path'
+[ "$(stat -c '%U' "$SHARE_PROJECT/s.jsonl")" = "fenix-child" ] \
+    || fail 'the share changed the file ownership'
+[ "$(stat -c '%U %a' "$SHARE_TARGET")" = "root 600" ] \
+    || fail "the root-owned symlink target was touched ($(stat -c '%U %a' "$SHARE_TARGET"))"
+pass 'share helper widened only the real fenix-child files, root target untouched'
+
+# Refusals — each must exit 2 (the share helper's refusal code) before any
+# chmod runs. First /etc: not a supervisor launch dir.
+rc=0
+run_as_node "sudo -n -u fenix-child $SHARE_HELPER /etc" 2>/dev/null || rc=$?
+[ "$rc" = "2" ] || fail "share helper accepted /etc (rc=$rc)"
+# A path with ..: refused even though realpath would canonicalize it back to
+# the same directory — the lexical argument is never trusted.
+rc=0
+run_as_node "sudo -n -u fenix-child $SHARE_HELPER $SHARE_DIR/../turn-0" 2>/dev/null || rc=$?
+[ "$rc" = "2" ] || fail "share helper accepted a .. path (rc=$rc)"
+# A symlinked launch dir: the lexical name matches the run regex, the
+# canonical path does not — the realpath check must trip.
+run_as_node "ln -s $SHARE_DIR $SHARE_RUN/launch/dev-evil" || fail 'symlink fixture setup failed'
+rc=0
+run_as_node "sudo -n -u fenix-child $SHARE_HELPER $SHARE_RUN/launch/dev-evil" 2>/dev/null || rc=$?
+[ "$rc" = "2" ] || fail "share helper accepted a symlinked launch dir (rc=$rc)"
+# A root run would resurrect the arbitrary-file chmod the runas design exists
+# to prevent — refused outright, even on a perfectly valid directory.
+rc=0
+"$SHARE_HELPER" "$SHARE_DIR" 2>/dev/null || rc=$?
+[ "$rc" = "2" ] || fail "share helper accepted a root run (rc=$rc)"
+pass 'share helper refuses /etc, .., a symlinked launch dir, and a root run'
+
+rm -rf "$SHARE_RUN" "$SHARE_TARGET"
 
 printf 'FOC-802 isolation lane: ALL GREEN\n'

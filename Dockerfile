@@ -75,9 +75,13 @@ RUN sh /usr/local/sbin/fenix-set-uid
 COPY docker/fenix-spawn-as-child.sh /usr/local/sbin/fenix-spawn-as-child
 # FOC-808: the root-side child sweep (same trust path, same rules as above).
 COPY docker/fenix-child-sweep.sh /usr/local/sbin/fenix-child-sweep
+# FOC-980: the transcript share, run as the child user — the transcripts are
+# fenix-child-owned and the owner may chmod its own files, so root rights are
+# neither needed nor granted (root-owned 0755: the child must not edit it).
+COPY docker/fenix-child-share.sh /usr/local/sbin/fenix-child-share
 COPY docker/sudoers-fenix-child /etc/sudoers.d/fenix-child
-RUN chown root:root /usr/local/sbin/fenix-spawn-as-child /usr/local/sbin/fenix-child-sweep /etc/sudoers.d/fenix-child \
-    && chmod 0755 /usr/local/sbin/fenix-spawn-as-child /usr/local/sbin/fenix-child-sweep \
+RUN chown root:root /usr/local/sbin/fenix-spawn-as-child /usr/local/sbin/fenix-child-sweep /usr/local/sbin/fenix-child-share /etc/sudoers.d/fenix-child \
+    && chmod 0755 /usr/local/sbin/fenix-spawn-as-child /usr/local/sbin/fenix-child-sweep /usr/local/sbin/fenix-child-share \
     && chmod 0440 /etc/sudoers.d/fenix-child \
     && visudo -cf /etc/sudoers.d/fenix-child
 

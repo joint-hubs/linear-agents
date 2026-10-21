@@ -1089,6 +1089,9 @@ export function costFromResult(event, fallbackModel, priceOne, thresholdOne = nu
  *     transcripts, one row per assistant message: whole-session truth, so it is
  *     SET, never added to what the entry had. `costUsd` null here still means
  *     unknown (a transcript message on an unpriceable model), not free.
+ *     A transcript that priced ZERO messages (unreadable or not yet flushed,
+ *     FOC-980) is not transcript cost at all — the patch falls through to the
+ *     result snapshots.
  *   · otherwise `results` (the turn's costFromResult outputs, in order) — each
  *     one is a session-cumulative SNAPSHOT, so the honest read is the MAX, never
  *     the sum. Zero-token wake-up shapes price to $0 and sit below the real
@@ -1107,7 +1110,14 @@ export function costFromResult(event, fallbackModel, priceOne, thresholdOne = nu
 export function turnEndCostPatch({ entry, transcriptCost, results }) {
   const patch = {};
   const seen = Array.isArray(results) ? results : [];
-  if (transcriptCost) {
+  // FOC-980: a transcript that priced ZERO messages is not transcript cost —
+  // an unreadable transcript (the child's file still at 0600 when the share
+  // did not land) or one not yet flushed prices as `{costUsd: 0, messages: 0}`,
+  // and trusting it would overwrite a real result snapshot with a fake $0.
+  // Only a transcript that priced at least one message is whole-session truth;
+  // everything else falls through to the result-max read below.
+  const transcriptUsed = !!transcriptCost && Number(transcriptCost.messages ?? 0) > 0;
+  if (transcriptUsed) {
     patch.costUsd = transcriptCost.costUsd;
     patch.costSource = "transcript";
     patch.costMessages = transcriptCost.messages;
@@ -2529,6 +2539,33 @@ function parseSweepHelperLines(stdout) {
   return out;
 }
 
+// FOC-980: inside the container the child's claude writes its transcripts
+// (<configDir>/projects/<slug>/<session>.jsonl) as fenix-child with mode 0600 —
+// the launch-time handover covered only what existed at spawn, so files created
+// DURING the turn are unreadable to node (the watcher's cost pricing, followup's
+// history copy, telemetry ingest all hit EACCES). This helper runs as the
+// child user (via `sudo -u fenix-child`, not root — the transcripts are
+// fenix-child-owned files and the owner may chmod its own files, so a raced
+// symlink can only touch files the child could chmod anyway) and grants ONLY
+// g+r on the launch dir's *.jsonl files. Same trust path
+// as CHILD_SWEEP_HELPER: the helper validates its inputs itself and refuses
+// anything that is not exactly one supervisor launch dir.
+export const CHILD_SHARE_HELPER = "/usr/local/sbin/fenix-child-share";
+// FOC-980: the runas identity, the same name as CHILD_USER in
+// docker/fenix-spawn-as-child.sh — the sudoers entry keys on it.
+export const CHILD_SHARE_RUNAS = "fenix-child";
+
+// Exported so tests can pin the exact argv the production spawn passes to
+// sudo — the sudoers entry only matches this shape.
+export function childShareHelperArgv(args) {
+  return ["-n", "-u", CHILD_SHARE_RUNAS, CHILD_SHARE_HELPER, ...args];
+}
+
+function runChildShareHelper(args) {
+  const r = spawnSync("sudo", childShareHelperArgv(args), { encoding: "utf8", timeout: 15_000 });
+  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", error: r.error ?? null };
+}
+
 // ── FOC-917: the child's teardown identity, shared by BOTH spawn paths ───────
 // supervisor-spawn.mjs (turn 0) and supervisor-followup.mjs (turns 1..n) must
 // agree on the mark the sweep matches and the tmp dir the turn end removes —
@@ -2699,6 +2736,61 @@ export function sweepChildProcesses({
     via: "proc",
     ...(unsignalled.length ? { unsignalled } : {}),
   };
+}
+
+/**
+ * Best-effort group-read on a launch dir's transcript files (FOC-980).
+ *
+ * Inside the container the child's transcripts created during the turn are
+ * fenix-child 0600 files node cannot read; the fenix-child-share helper (run
+ * as the child user — the owner may chmod its own files, so no root rights)
+ * widens exactly those to g+r. The caller decides when: the watcher at
+ * turn end (before pricing) plus a 30 s timer while the turn runs, and
+ * supervisor-followup before copying the previous launch's history.
+ *
+ * The default `useHelper` matches sweepChildProcesses': Linux, in container,
+ * helper installed, no LA_PROC_ROOT fixture. Everywhere else the call is a
+ * structured no-op — never a throw, never a crash: the share is a convenience
+ * over the launch-time handover, and a failure is the caller's note, not a
+ * dead turn.
+ *
+ * @param {string|null} launchDir the launch config dir whose *.jsonl files get g+r
+ * @param {{ useHelper?: boolean, helper?: (args: string[]) => { status: number|null, stdout: string, stderr: string, error: Error|null } }} [opts]
+ *   `helper` is injectable for tests, shaped like runChildShareHelper's return.
+ * @returns {{ ok: boolean, changed: number, skipped: string|null }}
+ *   `skipped: "not in container"` when the helper path was not taken (no Docker,
+ *   no helper, or a LA_PROC_ROOT fixture); `skipped: "helper failed: …"` when it
+ *   ran and failed; `skipped: "no launch dir"` when there is nothing to share.
+ *   On a ran helper, `changed` is the count of files the helper chmodded.
+ */
+export function shareChildTranscripts(
+  launchDir,
+  {
+    useHelper =
+      !process.env.LA_PROC_ROOT &&
+      process.platform === "linux" &&
+      process.env.FENIX_IN_CONTAINER === "1" &&
+      existsSync(CHILD_SHARE_HELPER),
+    helper = runChildShareHelper,
+  } = {},
+) {
+  if (!useHelper) return { ok: false, changed: 0, skipped: "not in container" };
+  if (typeof launchDir !== "string" || !launchDir) {
+    return { ok: false, changed: 0, skipped: "no launch dir" };
+  }
+  let r;
+  try {
+    r = helper([launchDir]);
+  } catch (err) {
+    return { ok: false, changed: 0, skipped: `helper failed: ${err?.message ?? err}` };
+  }
+  if (r.error || r.status !== 0) {
+    const why = r.error?.message ?? `exit ${r.status}`;
+    return { ok: false, changed: 0, skipped: `helper failed: ${why} ${String(r.stderr ?? "").trim()}`.trim() };
+  }
+  // The helper prints exactly the number of files it chmodded on stdout.
+  const m = /\d+/.exec(String(r.stdout ?? ""));
+  return { ok: true, changed: m ? Number(m[0]) : 0, skipped: null };
 }
 
 // ── claude binary ────────────────────────────────────────────────────────────

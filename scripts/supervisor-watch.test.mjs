@@ -29,10 +29,12 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  childShareHelperArgv,
   ensureRunDir,
   installEnvFileSignalHandlers,
   readRegistry,
   runDir,
+  shareChildTranscripts,
   sweepChildProcesses,
   writeRegistry,
 } from "./supervisor-lib.mjs";
@@ -1070,6 +1072,82 @@ test("a failing helper is a skip, never a throw", () => {
     res.skipped.startsWith("helper failed"),
     `the skip did not name the helper: ${JSON.stringify(res.skipped)}`,
   );
+});
+
+// ── FOC-980: the fenix-child-share helper widens the child's transcripts ─────
+console.log("\nFOC-980: the child's transcripts are group-shared before anyone reads them");
+
+test("shareChildTranscripts passes the launch dir to the helper and reports the change count", () => {
+  const calls = [];
+  const helper = (args) => {
+    calls.push(args);
+    return { status: 0, stdout: "3\n", stderr: "", error: null };
+  };
+  const res = shareChildTranscripts("/data/state/supervisor/run-1/launch/dev-1", {
+    useHelper: true,
+    helper,
+  });
+  assert.deepEqual(res, { ok: true, changed: 3, skipped: null });
+  assert.deepEqual(calls.length, 1, `expected one helper call, got ${calls.length}`);
+  assert.deepEqual(
+    calls[0],
+    ["/data/state/supervisor/run-1/launch/dev-1"],
+    "the launch dir was not the helper's only argument",
+  );
+});
+
+// The production spawn is `sudo -n -u fenix-child /usr/local/sbin/fenix-child-share <dir>`
+// — the sudoers entry (docker/sudoers-fenix-child) only matches that exact
+// shape, so it is pinned here by value, not via the constants it would change
+// with (a silent constant change would break every share until sudo starts
+// refusing).
+test("childShareHelperArgv pins the production sudo argv shape (FOC-980)", () => {
+  assert.deepEqual(childShareHelperArgv(["/data/state/supervisor/run-1/launch/dev-1"]), [
+    "-n",
+    "-u",
+    "fenix-child",
+    "/usr/local/sbin/fenix-child-share",
+    "/data/state/supervisor/run-1/launch/dev-1",
+  ]);
+});
+
+test("shareChildTranscripts never throws on a failing helper — a structured skip instead", () => {
+  const helper = () => ({ status: 2, stdout: "", stderr: "fenix-child-share: refused: not a supervisor launch dir", error: null });
+  const res = shareChildTranscripts("/etc/passwd", { useHelper: true, helper });
+  assert.deepEqual(res, { ok: false, changed: 0, skipped: "helper failed: exit 2 fenix-child-share: refused: not a supervisor launch dir" });
+  // A helper that itself throws (sudo vanished mid-call) is folded the same way.
+  const throwing = () => {
+    throw new Error("spawn sudo ENOENT");
+  };
+  assert.deepEqual(shareChildTranscripts("/data/state/supervisor/r/launch/c", { useHelper: true, helper: throwing }), {
+    ok: false,
+    changed: 0,
+    skipped: "helper failed: spawn sudo ENOENT",
+  });
+});
+
+test("shareChildTranscripts outside the container is a no-op skip", () => {
+  const helper = () => {
+    throw new Error("the helper must never be called outside the container");
+  };
+  const res = shareChildTranscripts("/data/state/supervisor/r/launch/c", { useHelper: false, helper });
+  assert.deepEqual(res, { ok: false, changed: 0, skipped: "not in container" });
+});
+
+test("shareChildTranscripts without a launch dir has nothing to share", () => {
+  const helper = () => {
+    throw new Error("the helper must not be called without a dir");
+  };
+  assert.deepEqual(shareChildTranscripts(null, { useHelper: true, helper }), {
+    ok: false,
+    changed: 0,
+    skipped: "no launch dir",
+  });
+  assert.deepEqual(shareChildTranscripts("", { useHelper: true, helper }), {
+    ok: false,
+    changed: 0,
+    skipped: "no launch dir",
+  });
 });
 
 test("the /proc path drops a pid that vanished before its first signal", () => {
