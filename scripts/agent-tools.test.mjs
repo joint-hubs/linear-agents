@@ -447,6 +447,126 @@ test("the committed docs/agent-tools.md is current (render with the real root)",
   assert.equal(renderDocs() + "\n", committed);
 });
 
+// FOC-963: `docs --write` on a dev checkout listed gitignored local skills
+// (archify, diagram-design) and CI — rendering a clean tree — rejected the
+// committed file. The render enumerates from the git index, so a skill the
+// repo does not track is invisible to it.
+
+function makeSkillsGitFixture() {
+  const dir = makeTemp("agent-tools-skills-");
+  const agentsDir = mkdirp(path.join(dir, "agents"));
+  writeAgent(agentsDir, "supervisor", { permissions: { allow: ["Read"] } });
+  writeAgent(agentsDir, "dev", { permissions: { allow: ["Read"] } });
+  const skill = (agent, name, file = "SKILL.md") => {
+    const skillDir = mkdirp(path.join(agentsDir, agent, "skills", name));
+    fs.writeFileSync(path.join(skillDir, file), `# ${name}\n`);
+    return skillDir;
+  };
+  skill("supervisor", "committed-skill");
+  skill("supervisor", "local-skill");
+  skill("dev", "dev-skill");
+  skill("_shared", "shared-skill");
+  fs.writeFileSync(path.join(dir, ".gitignore"), "agents/supervisor/skills/local-skill/\n");
+  const git = (args) => {
+    const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+    assert.equal(r.status, 0, `git ${args.join(" ")} failed: ${r.stderr}`);
+    return r;
+  };
+  git(["init", "-q"]);
+  git(["-c", "user.email=t@example.com", "-c", "user.name=t", "add", "-A"]);
+  git(["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+  // after the commit: local-skill is ignored, these two are untracked
+  skill("supervisor", "untracked-skill");
+  skill("supervisor", "another-untracked");
+  return { dir, agentsDir };
+}
+
+test("renderDocs lists only git-tracked skills, not local or untracked ones", () => {
+  const repo = makeSkillsGitFixture();
+  const docs = renderDocs({ agentsDir: repo.agentsDir, trackedOnly: true });
+
+  // the committed skill and the shared one are the image baseline
+  assert.match(docs, /\| committed-skill \| own \|/);
+  assert.match(docs, /\| shared-skill \| shared \|/);
+  assert.match(docs, /\| dev-skill \| own \|/);
+
+  // FOC-963: a gitignored local skill and an untracked one must not appear
+  assert.doesNotMatch(docs, /local-skill/);
+  assert.doesNotMatch(docs, /untracked-skill/);
+  assert.doesNotMatch(docs, /another-untracked/);
+
+  // a whole agent dir the repo does not track is absent too
+  fs.mkdirSync(path.join(repo.agentsDir, "localagent"), { recursive: true });
+  fs.writeFileSync(
+    path.join(repo.agentsDir, "localagent", "settings.json"),
+    JSON.stringify({ permissions: { allow: ["Read"] } }, null, 2),
+  );
+  const withLocalAgent = renderDocs({ agentsDir: repo.agentsDir, trackedOnly: true });
+  assert.doesNotMatch(withLocalAgent, /## localagent/);
+  assert.match(withLocalAgent, /## supervisor/);
+});
+
+test("renderDocs on a non-git tree falls back to the filesystem walk", () => {
+  // a synthetic agents root outside any repository: nothing to index against,
+  // so the render still sees every dir on disk (the pre-FOC-963 behaviour)
+  const docs = renderDocs(fixture);
+  assert.match(docs, /\| shared-skill \| both \|/);
+  assert.match(docs, /\| alpha-own \| own \|/);
+});
+
+test("show keeps the filesystem view; trackedOnly is a docs-only filter", () => {
+  const repo = makeSkillsGitFixture();
+  const live = showAgent("supervisor", { agentsDir: repo.agentsDir });
+  assert.deepEqual(live.skills.map((s) => s.name), [
+    "another-untracked",
+    "committed-skill",
+    "local-skill",
+    "shared-skill",
+    "untracked-skill",
+  ]);
+  const baseline = showAgent("supervisor", { agentsDir: repo.agentsDir, trackedOnly: true });
+  assert.deepEqual(baseline.skills.map((s) => s.name), ["committed-skill", "shared-skill"]);
+});
+
+test("docs via the CLI never lists untracked skills", () => {
+  const repo = makeSkillsGitFixture();
+  const io = capture();
+  const code = runCli(["docs", "--root", repo.agentsDir], {
+    stdout: io.stdout,
+    stderr: io.stderr,
+    env: process.env,
+  });
+  assert.equal(code, 0);
+  const rendered = io.out.join("");
+  assert.doesNotMatch(rendered, /local-skill/);
+  assert.doesNotMatch(rendered, /untracked-skill/);
+  assert.match(rendered, /\| committed-skill \| own \|/);
+});
+
+test("docs without --root renders the repository tree, not $LA_SQUAD_HOME", () => {
+  // FOC-963: the operator checkout in $LA_SQUAD_HOME holds local skills the
+  // image baseline does not track. `docs` must ignore that root entirely.
+  const repo = makeSkillsGitFixture();
+  const operatorRoot = makeTemp("agent-tools-operator-");
+  const operatorAgents = mkdirp(path.join(operatorRoot, "agents"));
+  writeAgent(operatorAgents, "supervisor", { permissions: { allow: ["Read"] } });
+  const skill = mkdirp(path.join(operatorAgents, "supervisor", "skills", "archify"));
+  fs.writeFileSync(path.join(skill, "SKILL.md"), "# archify\n");
+
+  const io = capture();
+  const code = runCli(["docs"], {
+    stdout: io.stdout,
+    stderr: io.stderr,
+    env: { ...process.env, LA_SQUAD_HOME: operatorRoot },
+    repoAgentsDir: repo.agentsDir,
+  });
+  assert.equal(code, 0);
+  const rendered = io.out.join("");
+  // the repository tree's skills are in, the operator checkout's are not
+  assert.match(rendered, /\| committed-skill \| own \|/);
+  assert.doesNotMatch(rendered, /archify/);
+});
+
 // ── edit (FOC-906) ───────────────────────────────────────────────────────────
 
 const readRaw = (p) => fs.readFileSync(p, "utf8");
