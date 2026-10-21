@@ -48,6 +48,7 @@ import {
   readRegistry,
   stallSilenceMs,
   sweepChildProcesses,
+  sweepMarkFor,
   teeAbsPath,
   turnEndCostPatch,
   updateChild,
@@ -676,10 +677,19 @@ function finalizeTurn(code, signal) {
   {
     // The registry record (spawn wrote it) is authoritative; the env copy and
     // the attemptId derivation are fallbacks for entries from older spawns.
-    const mark =
-      entry.mark ??
-      process.env.LA_CHILD_MARK ??
-      (entry.attemptId ? `${runId}/${childId}/${entry.attemptId}` : null);
+    // FOC-979: the env mark is trusted only when it belongs to THIS entry —
+    // a watcher run inside a foreign child (e.g. the test suite executing
+    // inside a Fenix DEV child) inherits that child's mark, and sweeping on
+    // it would kill the child that runs the watcher.
+    const { mark, foreignEnvMark } = sweepMarkFor(entry, { runId, childId });
+    if (foreignEnvMark) {
+      note({
+        subtype: "child_sweep_foreign_mark",
+        message:
+          `child sweep ignored a foreign LA_CHILD_MARK (does not belong to ` +
+          `${runId}/${childId}): ${foreignEnvMark}`,
+      });
+    }
     if (mark) {
       try {
         const sweep = sweepChildProcesses({ mark, excludePids: [process.pid] });

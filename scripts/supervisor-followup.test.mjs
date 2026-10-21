@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 import { PRINT_BG_WAIT_CEILING_MS, PRINT_BG_WAIT_ENV, TURN_END_CONTRACT, readRegistry, runDir, writeRegistry } from "./supervisor-lib.mjs";
 import { attemptIdFor } from "./agent-launch-profile.mjs";
-import { waitForStatus } from "./supervisor-test-fixtures.mjs";
+import { scrubbedEnv, waitForStatus } from "./supervisor-test-fixtures.mjs";
 import { readFocus } from "./supervisor-focus.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -74,7 +74,7 @@ function fixtureRun({ runId } = {}) {
 const validRunId = (n) => `2026-10-13T10-00-00-000-supervisor-000${n}`;
 
 const baseEnv = (extra = {}) => ({
-  ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key",
+  ...scrubbedEnv(), OPENROUTER_API_KEY: "test-supervisor-provider-key",
   LA_CLAUDE_BIN: MOCK,
   LA_SUPERVISOR_NO_TELEMETRY: "1",
   LA_SUPERVISOR_NO_CODEGRAPH: "1",

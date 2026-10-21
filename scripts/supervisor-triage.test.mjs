@@ -681,8 +681,15 @@ test("re-recording the SAME issue is allowed; a different issue takes --force", 
 console.log("\nintegracja ze spawnem");
 
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
-const spawnCli = (args, env = {}) =>
-  spawnSync(process.execPath, [SPAWN, ...args], { cwd: ROOT, encoding: "utf8", env: { ...process.env, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1", ...env } });
+const spawnCli = (args, env = {}) => {
+  // FOC-979: the outer child's sweep mark must never reach a spawned supervisor
+  // script. Inline scrub rather than supervisor-test-fixtures.mjs's helper —
+  // that module's load-time LA_SUPERVISOR_STATE_HOME takeover would redirect
+  // these CLI runs away from the repo .state paths the tests read back.
+  const childEnv = { ...process.env, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1", ...env };
+  if (!("LA_CHILD_MARK" in env)) delete childEnv.LA_CHILD_MARK;
+  return spawnSync(process.execPath, [SPAWN, ...args], { cwd: ROOT, encoding: "utf8", env: childEnv });
+};
 
 test("no triage.json → spawn refuses (AC-2, fail-closed)", () => {
   const runId = withRun();

@@ -248,6 +248,13 @@ for (const key of Object.keys(suiteEnv)) {
 // child env — never ambiently through the runner.
 delete suiteEnv.LA_TASK_OWNERSHIP_CONFIG;
 delete suiteEnv.LA_TASK_OWNER;
+// FOC-979: the outer child's sweep mark must never reach a suite process. The
+// runner usually executes inside a Fenix DEV child (LA_CHILD_MARK on this very
+// process), and a supervisor-* suite spawning a REAL watcher would otherwise
+// inherit the mark and sweep the very child that runs the suite — its claude,
+// its MCP servers, the test itself. Suite processes get no mark; a test that
+// needs one sets it explicitly on its own child env.
+delete suiteEnv.LA_CHILD_MARK;
 
 // ── child env: pin the settings overlay seam ─────────────────────────────────
 
