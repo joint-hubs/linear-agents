@@ -3,7 +3,9 @@
 Fenix runs as two Docker containers: `fenix-api` (dashboard + telemetry API)
 and `fenix-supervisor` (the Supervisor, running permanently in a tmux session
 inside the container).
-Everything needed at runtime is inside the image `fenix:dev` (~2 GB on disk):
+Everything needed at runtime is inside the image `./fenix up` pulls —
+`ghcr.io/joint-hubs/fenix:<version>`, the version pinned in the `VERSION` file
+(~2 GB on disk):
 Node 22, git, Claude Code 2.1.296, CodeGraph 1.6.0, semgrep 1.172.0, uv,
 Python 3.11. The container runs as the non-root user `node`.
 Children spawned by the Supervisor run as a separate user (`fenix-child`) inside the container, so
@@ -49,28 +51,35 @@ keys now live in the Settings overlay instead, which does (see "Settings").
 Host prerequisites:
 
 - Docker Desktop (Windows/macOS) or Docker Engine + Compose v2 (Linux)
-- Docker memory >= 4 GB (Docker Desktop: Settings > Resources)
-- >= 10 GB free disk
+- Docker memory >= 8 GB (Docker Desktop: Settings > Resources)
+- >= 50 GB free disk
 - git
 - (curl is no longer needed: key validation runs inside the `fenix-api`
   image through `scripts/key-check.mjs`)
 - Windows only: Git for Windows — the `fenix.cmd` / `fenix.ps1` shims run the
   `fenix` script with Git Bash. WSL users run `./fenix` inside WSL instead.
 
-On Linux hosts, `./fenix` builds the image for your user's uid/gid
-automatically (FOC-803), so the bind-mounted host files — `.fenix/secrets/`
-and `.fenix/config/` — stay readable and writable inside the container. Run
-`./fenix` as your normal user, not root: as root the container keeps uid 1000
-and cannot read your keys. If your user (or uid) changes, rebuild once:
-`./fenix up`.
+Both resource numbers are the evidence-based minimum from the Sizing section
+at the bottom of this file (a dev child's memory peak needs 8 GB; 4 GB is not
+enough). The `fenix up` preflight itself only warns below 8 GB — it does not
+check for the size you will actually need.
 
-A rebuild does not touch the `fenix_fenix-data` volume, though: it keeps the
+On Linux hosts where your uid/gid is not 1000:1000, `./fenix up` builds a
+thin layer `fenix:local-<uid>-<gid>` on top of the pulled image (a few
+seconds — only the uid layer is new), so the bind-mounted host files —
+`.fenix/secrets/` and `.fenix/config/` — stay readable and writable inside
+the container. Run
+`./fenix` as your normal user, not root: as root the container keeps uid 1000
+and cannot read your keys. If your user (or uid) changes, `./fenix up` builds
+the layer for the new uid once.
+
+A layer rebuild does not touch the `fenix_fenix-data` volume, though: it keeps the
 uid it was first created with, so after a uid change `/data` stays unwritable
 and the supervisor's health checks and the telemetry store fail. Re-own the
 volume once:
 
 ```bash
-docker run --rm -u 0 -v fenix_fenix-data:/data --entrypoint chown fenix:dev -R $(id -u):$(id -g) /data
+docker run --rm -u 0 -v fenix_fenix-data:/data --entrypoint chown ghcr.io/joint-hubs/fenix:$(cat VERSION) -R $(id -u):$(id -g) /data
 ```
 
 `fenix doctor` names this fix on every failing `/data` check.
@@ -111,7 +120,7 @@ Windows: `fenix up` in cmd, `.\fenix.cmd up` in PowerShell.
 What `fenix up` does:
 
 1. Preflight: docker on PATH, daemon running, compose available, free disk
-   >= 10 GB, Docker memory >= 4 GB (memory below 4 GB is a warning, not a stop).
+   >= 10 GB, Docker memory >= 8 GB (memory below 8 GB is a warning, not a stop).
 2. Key wizard, if any key file is missing or empty: hidden input, each key
    validated live, max 3 tries per key. Then it asks for the Linear team key,
    saved as `LINEAR_TEAM_KEY` in `.fenix/fenix.env`.
@@ -382,7 +391,7 @@ Common cases:
   on its next fresh session. Use `fenix attach --new` when the Supervisor
   itself should adopt the new key; running children keep their existing turn.
 - **`fenix up` exits 4 / the supervisor is unhealthy after your uid changed** —
-  the image was rebuilt for the new uid, but the data volume still belongs to
+  the uid layer was built for the new uid, but the data volume still belongs to
   the old one, so `/data` stays unwritable. Re-own the volume once (see
   "Before you start"), then `./fenix up` again.
 - **A config file has a `.fenix-new` twin** — you edited the file (e.g. in the
@@ -435,8 +444,9 @@ with Debian 12 on `e2-standard-4` (4 vCPU / 16 GB) and a 100 GB disk.
    git clone https://github.com/joint-hubs/linear-agents.git ~/fenix && cd ~/fenix && ./fenix up
    ```
 
-   Any host user works: `./fenix` builds the image for your uid/gid
-   automatically (see "Before you start"). Run it as yourself, not root.
+   Any host user works: when your uid/gid is not 1000:1000, `./fenix up` builds
+   a thin uid layer on top of the pulled image (see "Before you start"). Run it
+   as yourself, not root.
 
 3. The tunnel, from your machine — keep it open while you use the dashboard,
    then open `http://localhost:4600`:
@@ -507,7 +517,9 @@ the disk; after `start` the stack comes back by itself.
 
 ```bash
 ./fenix down                 # stop and remove containers (the volume is kept)
-docker image rm fenix:dev    # remove the image (~2 GB)
+docker image rm ghcr.io/joint-hubs/fenix:$(cat VERSION)    # remove the image (~2 GB)
+# on Linux with a non-default uid/gid, also the thin uid layer:
+docker image rm fenix:local-$(id -u)-$(id -g)
 # optional, irreversible (telemetry, state, transcripts):
 docker volume rm fenix_fenix-data
 ```
