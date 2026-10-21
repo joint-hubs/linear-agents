@@ -525,6 +525,11 @@ async function buildCockpitSnapshot() {
         state: typeof body.state === "string" ? body.state : null,
         notification: body.hook?.notification ?? null,
         needsInputSince: typeof body.needsInputSince === "string" ? body.needsInputSince : null,
+        // FOC-920: the deny-after policy and the last automatic "No" the host
+        // answered on a parked prompt — an older host simply omits both, and
+        // that reads as null, not as an error.
+        autoDenial: body.autoDenial && typeof body.autoDenial === "object" ? body.autoDenial : null,
+        parkedPolicy: body.parkedPolicy && typeof body.parkedPolicy === "object" ? body.parkedPolicy : null,
       };
       if (body.clients !== undefined) sessionInfo.clients = body.clients;
       // The Supervisor session's own transcript (FOC-810): the pending ask is
@@ -565,7 +570,7 @@ async function buildCockpitSnapshot() {
   const pendingAsk = dialog && (dialog.kind === "ask" || dialog.kind === "ask-review") && supTranscript
     ? readPendingAsk(supTranscript)
     : null;
-  const needsYou = [...supervisorSessionItems({ dialog, pendingAsk, supRunId, focus, sessionState: sessionInfo?.state ?? null, needsInputSince: sessionInfo?.needsInputSince ?? null, now: snapshotClock() }), ...collectNeedsYou({ runIds })];
+  const needsYou = [...supervisorSessionItems({ dialog, pendingAsk, supRunId, focus, sessionState: sessionInfo?.state ?? null, needsInputSince: sessionInfo?.needsInputSince ?? null, autoDenial: sessionInfo?.autoDenial ?? null, parkedPolicy: sessionInfo?.parkedPolicy ?? null, now: snapshotClock() }), ...collectNeedsYou({ runIds })];
   const children = await collectChildren({ runIds, probe });
   const backlog = wakeBacklog(runIds, supRunId);
   const supervisor = {
@@ -587,6 +592,10 @@ async function buildCockpitSnapshot() {
     pendingAsk,
     needsInputSince: sessionInfo?.needsInputSince ?? null,
     parkedSince: parkedSinceOf({ sessionState: sessionInfo?.state ?? null, needsInputSince: sessionInfo?.needsInputSince ?? null, now: snapshotClock() }),
+    // FOC-920: the deny-after policy and the last automatic "No" the host
+    // answered on a parked permission prompt (null on an older host).
+    autoDenial: sessionInfo?.autoDenial ?? null,
+    parkedPolicy: sessionInfo?.parkedPolicy ?? null,
   };
   return redactDeep({
     supervisor,
@@ -618,8 +627,13 @@ function parkedSinceOf({ sessionState, needsInputSince, now }) {
  * parser could not read, an "unrecognised-prompt" problem shows it; and when
  * that wait has held longer than the stall SLA, a "supervisor-parked"
  * problem flags the parking.
+ *
+ * FOC-920 adds the deny-after policy: a recent automatic "No" the host
+ * answered on a parked permission prompt (within 24 h) shows as its own
+ * "supervisor-auto-denied" problem, and when the policy is deny-after the
+ * parked item counts down the minutes to the next auto-deny.
  */
-function supervisorSessionItems({ dialog, pendingAsk, supRunId, focus, sessionState, needsInputSince, now }) {
+function supervisorSessionItems({ dialog, pendingAsk, supRunId, focus, sessionState, needsInputSince, autoDenial, parkedPolicy, now }) {
   const shared = {
     runId: supRunId ?? null,
     taskId: focus?.taskId ?? null,
@@ -670,10 +684,41 @@ function supervisorSessionItems({ dialog, pendingAsk, supRunId, focus, sessionSt
     const what = dialog?.reason
       ? `${dialog.reason.type}${dialog.reason.detail ? `: ${dialog.reason.detail}` : ""}`
       : (dialog?.title ? dialog.title : "an unrecognised prompt");
+    let summary = `the Supervisor has been parked on a prompt for ${Math.round(ageMs / 60000)} min — ${what}; answer it from the Needs-you card, the Terminal tab or fenix attach`;
+    // FOC-920: under deny-after the parked prompt is on a countdown — say
+    // how much of the window is left before the host answers "No" itself.
+    if (parkedPolicy && parkedPolicy.mode === "deny-after" && Number.isFinite(Number(parkedPolicy.minutes))) {
+      const remaining = Math.max(0, Math.ceil(Number(parkedPolicy.minutes) - ageMs / 60000));
+      summary += ` — auto-deny in ${remaining} min (taskSessions.parkedPrompt = deny-after)`;
+    }
     items.push({
       ...shared, id: "problem:supervisor:parked", category: "problem", kind: "supervisor-parked",
       answerKind: null, answerable: false, state: "open", createdAt: parkedSince, ageMs,
-      summary: `the Supervisor has been parked on a prompt for ${Math.round(ageMs / 60000)} min — ${what}; answer it from the Needs-you card, the Terminal tab or fenix attach`,
+      summary,
+    });
+  }
+  // FOC-920: the host answered a parked permission prompt "No" by itself —
+  // show it for 24 h so the denial is never silent. Only a CONFIRMED denial
+  // (the locked answer returned 200) renders; an older host's rows carry no
+  // status at all and still render, but a 409/503 row (nothing was pressed)
+  // must not read as an answer the host gave.
+  if (autoDenial && typeof autoDenial === "object" && typeof autoDenial.ts === "string"
+    && Number.isFinite(Date.parse(autoDenial.ts))
+    && (autoDenial.status === undefined || autoDenial.status === 200)
+    && now - Date.parse(autoDenial.ts) < 24 * 60 * 60_000) {
+    const reasonLabel = typeof autoDenial.reason === "string" && autoDenial.reason
+      ? autoDenial.reason
+      : (autoDenial.reason && typeof autoDenial.reason === "object" && autoDenial.reason.type
+        ? `${autoDenial.reason.type}${autoDenial.reason.detail ? `: ${autoDenial.reason.detail}` : ""}`
+        : "unrecognised prompt");
+    items.push({
+      ...shared,
+      id: `problem:supervisor:auto-denied:${autoDenial.dialogId ?? "unknown"}`,
+      category: "problem", kind: "supervisor-auto-denied",
+      answerKind: null, answerable: false, state: "open",
+      createdAt: autoDenial.ts,
+      ageMs: Math.max(0, now - Date.parse(autoDenial.ts)),
+      summary: `the host answered a parked permission prompt "No" after ${autoDenial.minutes} min with nobody attached (${reasonLabel}) — check the Supervisor's next turn; set taskSessions.parkedPrompt to "wait" to keep prompts open`,
     });
   }
   return items;

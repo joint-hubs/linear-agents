@@ -707,13 +707,17 @@ try {
     check("scoped gate answer audit row notified:true", scopedRow?.notified === true, JSON.stringify(scopedRow));
 
     // ── FOC-810: the Supervisor's dialogs in the snapshot and the answer routes ──
-    const hostStateBehavior = (state, transcriptPath, needsInputSince = null) => ({
+    const hostStateBehavior = (state, transcriptPath, needsInputSince = null, autoDenial = undefined, parkedPolicy = undefined) => ({
       status: 200,
       body: {
         session: "running", panePid: 4242, paneDead: false, clients: ["tmux-dash-1"],
         hook: { sessionId: "sess-host-1", transcriptPath, cwd: dir, state, notification: null, updatedAt: NOW },
         state,
         needsInputSince,
+        // FOC-920: `undefined` (the default) omits both fields entirely —
+        // that is the "old host without the fields" shape.
+        ...(autoDenial !== undefined ? { autoDenial } : {}),
+        ...(parkedPolicy !== undefined ? { parkedPolicy } : {}),
       },
     });
     const PERM_DIALOG = {
@@ -952,6 +956,99 @@ try {
     check("FOC-918: a parsed permission dialog past the SLA -> the parked item names the dialog reason",
       parkedDlgItem?.kind === "supervisor-parked" && /ask-rule: Bash\(rm -rf:\*\)/.test(parkedDlgItem?.summary ?? ""),
       JSON.stringify(parkedDlgItem));
+
+    // ── FOC-920: the deny-after policy and the host's automatic "No" ─────────
+    // A recent autoDenial shows as its own problem item for 24 h. The REAL
+    // host shape: reason {type, detail}, status 200 (the locked answer
+    // succeeded), closed true — the summary names the rule as ask-rule: detail.
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", new Date().toISOString(), {
+      ts: new Date().toISOString(), since: new Date(Date.now() - 30 * 60_000).toISOString(), minutes: 30,
+      dialogId: "dlg-920", kind: "permission", reason: { type: "ask-rule", detail: "Bash(git push:*)" }, status: 200, closed: true,
+    }, { mode: "wait", minutes: 30 });
+    fakeHostBehavior.dialog = { status: 200, body: { dialog: null } };
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapAutoDenied = await call(P, "GET", "/api/cockpit");
+    const autoDeniedItem = (snapAutoDenied.body?.needsYou ?? []).find((it) => it.id === "problem:supervisor:auto-denied:dlg-920");
+    check("FOC-920: a recent autoDenial -> a supervisor-auto-denied problem item with the policy echoed",
+      autoDeniedItem?.category === "problem" && autoDeniedItem?.kind === "supervisor-auto-denied" && autoDeniedItem?.answerable === false
+      && /answered a parked permission prompt "No" after 30 min with nobody attached \(ask-rule: Bash\(git push:\*\)\)/.test(autoDeniedItem?.summary ?? "")
+      && /set taskSessions\.parkedPrompt to "wait" to keep prompts open/.test(autoDeniedItem?.summary ?? "")
+      && snapAutoDenied.body?.supervisor?.autoDenial?.dialogId === "dlg-920"
+      && snapAutoDenied.body?.supervisor?.autoDenial?.status === 200
+      && snapAutoDenied.body?.supervisor?.parkedPolicy?.mode === "wait",
+      JSON.stringify({ item: autoDeniedItem, sup: snapAutoDenied.body?.supervisor }));
+
+    // An OLDER row (a host before the status field) still renders — the
+    // string reason passes through as-is.
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", new Date().toISOString(), {
+      ts: new Date().toISOString(), since: new Date(Date.now() - 30 * 60_000).toISOString(), minutes: 30,
+      dialogId: "dlg-920-legacy", kind: "permission", reason: "Bash(git push:*)", closed: true,
+    }, { mode: "wait", minutes: 30 });
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapLegacyDenial = await call(P, "GET", "/api/cockpit");
+    const legacyDenialItem = (snapLegacyDenial.body?.needsYou ?? []).find((it) => it.id === "problem:supervisor:auto-denied:dlg-920-legacy");
+    check("FOC-920: an older row without a status still renders; a string reason renders as-is",
+      legacyDenialItem?.kind === "supervisor-auto-denied"
+      && /\(Bash\(git push:\*\)\)/.test(legacyDenialItem?.summary ?? ""),
+      JSON.stringify(legacyDenialItem));
+
+    // A row whose status is NOT 200 was never an answer the host gave
+    // (409: the pane changed between the parse and the locked re-capture)
+    // — it renders no auto-denied item.
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", new Date().toISOString(), {
+      ts: new Date().toISOString(), since: new Date(Date.now() - 30 * 60_000).toISOString(), minutes: 30,
+      dialogId: "dlg-920-unapplied", kind: "permission", reason: "Bash(git push:*)", status: 409, closed: false,
+    }, { mode: "wait", minutes: 30 });
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapUnappliedDenial = await call(P, "GET", "/api/cockpit");
+    check("FOC-920: a 409 autoDenial row (nothing pressed) -> no auto-denied item",
+      !(snapUnappliedDenial.body?.needsYou ?? []).some((it) => it.id === "problem:supervisor:auto-denied:dlg-920-unapplied"),
+      JSON.stringify((snapUnappliedDenial.body?.needsYou ?? []).map((it) => it.id)));
+
+    // The same denial 25 h old is no longer shown.
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", new Date().toISOString(), {
+      ts: new Date(Date.now() - 25 * 60 * 60_000).toISOString(), since: new Date(Date.now() - 25 * 60 * 60_000).toISOString(), minutes: 30,
+      dialogId: "dlg-920", kind: "permission", reason: "Bash(git push:*)", status: 200, closed: true,
+    }, { mode: "wait", minutes: 30 });
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapAutoDeniedOld = await call(P, "GET", "/api/cockpit");
+    check("FOC-920: a 25 h old autoDenial -> no auto-denied item",
+      !(snapAutoDeniedOld.body?.needsYou ?? []).some((it) => it.id?.startsWith("problem:supervisor:auto-denied:"))
+      && snapAutoDeniedOld.body?.supervisor?.autoDenial?.dialogId === "dlg-920",
+      JSON.stringify({ items: (snapAutoDeniedOld.body?.needsYou ?? []).map((it) => it.id), sup: snapAutoDeniedOld.body?.supervisor }));
+
+    // An old host without the fields at all: no item, no crash, nulls in the
+    // snapshot.
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", new Date().toISOString());
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapOldHost = await call(P, "GET", "/api/cockpit");
+    check("FOC-920: an old host without autoDenial/parkedPolicy -> no item, nulls, no crash",
+      snapOldHost.status === 200
+      && !(snapOldHost.body?.needsYou ?? []).some((it) => it.id?.startsWith("problem:supervisor:auto-denied:"))
+      && snapOldHost.body?.supervisor?.autoDenial === null
+      && snapOldHost.body?.supervisor?.parkedPolicy === null,
+      JSON.stringify({ sup: snapOldHost.body?.supervisor, items: (snapOldHost.body?.needsYou ?? []).map((it) => it.id) }));
+
+    // Parked + deny-after: the parked item counts the minutes to the
+    // auto-deny (30 min window, ~11 min parked -> ~19 left).
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", new Date(Date.now() - 11 * 60_000).toISOString(), null, { mode: "deny-after", minutes: 30 });
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapParkedDeny = await call(P, "GET", "/api/cockpit");
+    const parkedDenyItem = (snapParkedDeny.body?.needsYou ?? []).find((it) => it.id === "problem:supervisor:parked");
+    check("FOC-920: parked under deny-after -> the parked item counts down to the auto-deny",
+      parkedDenyItem?.kind === "supervisor-parked"
+      && / — auto-deny in 19 min \(taskSessions\.parkedPrompt = deny-after\)$/.test(parkedDenyItem?.summary ?? "")
+      && snapParkedDeny.body?.supervisor?.parkedPolicy?.mode === "deny-after",
+      JSON.stringify(parkedDenyItem));
+
+    // Parked + wait: the parked item keeps its exact old text.
+    fakeHostBehavior.state = hostStateBehavior("needs-input", "", new Date(Date.now() - 11 * 60_000).toISOString(), null, { mode: "wait", minutes: 30 });
+    await new Promise((r) => setTimeout(r, 2100));
+    const snapParkedWait = await call(P, "GET", "/api/cockpit");
+    const parkedWaitItem = (snapParkedWait.body?.needsYou ?? []).find((it) => it.id === "problem:supervisor:parked");
+    check("FOC-920: parked under wait -> the parked item summary is unchanged",
+      parkedWaitItem?.summary === `the Supervisor has been parked on a prompt for ${Math.round(parkedWaitItem?.ageMs / 60000)} min — an unrecognised prompt; answer it from the Needs-you card, the Terminal tab or fenix attach`,
+      JSON.stringify(parkedWaitItem));
 
     // An ask dialog is visible but the transcript cannot be read (no
     // transcriptPath, so pendingAsk stays null): the unrecognised-prompt

@@ -34,6 +34,16 @@
 //   · slash commands are gated by the policy: /context and /cost are sent and
 //     their scrollback output returned (a modal is Esc-closed), anything else
 //     is 400 with the allowed list;
+//   · a permission prompt parked past taskSessions.parkedPrompt minutes
+//     (deny-after) is answered No by the host itself: Escape, the note pasted
+//     once the prompt is back, one row in parked-denials.jsonl, autoDenial on
+//     /state — and never twice for the same dialog; the deny clock is floored
+//     at the host's start (a stale hook anchor never inherits old minutes)
+//     and an answerDialog that did not press anything (409/503) records
+//     nothing and is retried on the next tick; the denial's reason is
+//     redacted (denylist + egress shapes) before it reaches the jsonl or
+//     /state; select/ask dialogs are never auto-answered and a failure in
+//     the watchdog never takes the host down;
 //   · every non-healthz request passes TWO gates in order — peer (403) then
 //     token (401; a missing token FILE is 503) — and the token is re-read per
 //     request so a supervisor restart rotates it;
@@ -55,7 +65,7 @@
 
 import assert from "node:assert/strict";
 import net from "node:net";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -171,6 +181,8 @@ const build = (opts = {}) => {
   if (opts.ptyFactory !== undefined) deps.ptyFactory = opts.ptyFactory;
   if (opts.wsMaxBufferedBytes !== undefined) deps.wsMaxBufferedBytes = opts.wsMaxBufferedBytes;
   if (opts.wsHeartbeatIntervalMs !== undefined) deps.wsHeartbeatIntervalMs = opts.wsHeartbeatIntervalMs;
+  if (opts.readParkedPolicy !== undefined) deps.readParkedPolicy = opts.readParkedPolicy;
+  if (opts.parkedCheckMs !== undefined) deps.parkedCheckMs = opts.parkedCheckMs;
   return { host: createHost(deps), tmux, clk };
 };
 
@@ -1560,6 +1572,305 @@ test("slash: an allowed command still hits the dialog check → 409", async () =
   eq(r.status, 409, "status");
   eq(r.body.error, "needs-input", "error");
   eq(tmux.calls.map((c) => c.args[0]), ["has-session", "capture-pane"], "refused before any paste");
+});
+
+// ── parked-prompt auto-deny (FOC-920) ────────────────────────────────────────
+
+console.log("\nsupervisor-host: parked-prompt auto-deny (FOC-920)");
+
+// A permission dialog the parser actually frames (bottom rule) — the inline
+// DIALOG_PANE above carries the markers but no rule, so parseDialog gives
+// null for it and the watchdog (which re-parses the pane) must not see it.
+const PARK_RULE = "─".repeat(60);
+const PARK_PANE = [
+  "",
+  PARK_RULE,
+  " Ask rule Bash(git push:*) overrides auto mode for this command.",
+  " Do you want to proceed?",
+  " ❯ 1. Yes",
+  "   2. No",
+  " Esc to cancel · Tab to amend",
+  "",
+].join("\n");
+const PARK_DIALOG = parseDialog(PARK_PANE);
+
+const parkedNote = (reasonText, minutes) =>
+  `FOC-920 auto-deny: this permission prompt (${reasonText}) waited ${minutes} min with nobody attached and was answered No by the host (taskSessions.parkedPrompt = deny-after). Record it in your report; if the denied action was needed, leave the work in a resumable state and escalate it as one specific question.`;
+
+// One host pointed at a throwaway session home; the watchdog interval is
+// parked far out — tests drive checkParkedPrompt() directly. The clock is
+// advanced AFTER the host exists (FOC-920: the deny clock is floored at the
+// host's start, so the wait only accrues while THIS host has been running);
+// the hook file reports needs-input with updatedAt `sinceMs` in the past of
+// the CURRENT clock tick, so the anchor needs no warm-up call.
+const parkedHost = ({ tmuxInit = {}, policy, sinceMs = 0, advanceMs = sinceMs, env: extraEnv = {} } = {}) => {
+  const dir = mkdtempSync(join(tmpdir(), "la-host-parked-"));
+  const clk = fakeClock();
+  const built = build({
+    tmux: fakeTmux({ present: true, ...tmuxInit }),
+    clk,
+    env: { LA_DATA_HOME: dir, ...extraEnv },
+    parkedCheckMs: 3_600_000,
+    readParkedPolicy: policy
+      ? () => policy
+      : () => { throw new Error("no policy configured for this test"); },
+    stateNow: () => ({
+      state: "needs-input",
+      updatedAt: new Date(clk.t - sinceMs).toISOString(),
+      notification: null,
+    }),
+  });
+  clk.t += advanceMs;
+  return { ...built, dir };
+};
+
+const denialRows = (dir) =>
+  readFileSync(join(dir, "supervisor", "parked-denials.jsonl"), "utf8")
+    .trim().split("\n").map((l) => JSON.parse(l));
+
+test("parked: mode wait → no keys, no paste, no jsonl; /state shows the policy and a null autoDenial", async () => {
+  const { host, tmux, dir } = parkedHost({
+    tmuxInit: { capture: PARK_PANE },
+    policy: { mode: "wait", minutes: 30 },
+    sinceMs: 60 * 60_000, // parked an hour — still never answered in wait mode
+  });
+  try {
+    eq(await host.checkParkedPrompt(), { action: "none" }, "no action");
+    eq(sendKeysArgs(tmux), [], "no keystrokes");
+    assert.ok(!tmux.calls.some((c) => c.args[0] === "load-buffer"), "no paste");
+    assert.ok(!existsSync(join(dir, "supervisor", "parked-denials.jsonl")), "no jsonl");
+    const port = await listen(host);
+    const s = await call(port, "GET", "/state");
+    eq(s.json.autoDenial, null, "no denial on /state");
+    eq(s.json.parkedPolicy, { mode: "wait", minutes: 30 }, "policy on /state");
+    await closeServer(host);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parked: deny-after at 29 of 30 min → nothing yet", async () => {
+  const { host, tmux, dir } = parkedHost({
+    tmuxInit: { capture: PARK_PANE },
+    policy: { mode: "deny-after", minutes: 30 },
+    sinceMs: 29 * 60_000,
+  });
+  try {
+    eq(await host.checkParkedPrompt(), { action: "none" }, "still inside the window");
+    eq(sendKeysArgs(tmux), [], "no keystrokes");
+    assert.ok(!existsSync(join(dir, "supervisor", "parked-denials.jsonl")), "no jsonl");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parked: deny-after at 31 min → Escape, the note pasted, one jsonl row, /state autoDenial", async () => {
+  // getState's pane probe, the watchdog's re-read and answerDialog's own
+  // capture all see the dialog; the close-poll and the note's prompt wait
+  // see the free pane.
+  const tmuxInit = { captureSeq: [PARK_PANE, PARK_PANE, PARK_PANE, READY_PANE] };
+  const { host, tmux, dir } = parkedHost({
+    tmuxInit,
+    policy: { mode: "deny-after", minutes: 30 },
+    sinceMs: 31 * 60_000,
+  });
+  try {
+    const r = await host.checkParkedPrompt();
+    eq(r.action, "denied", "denied");
+    eq(r.denial.dialogId, PARK_DIALOG.id, "the parsed dialog's id");
+    const keys = sendKeysArgs(tmux);
+    assert.ok(keys.some((a) => a[3] === "Escape"), "Escape dismissed the dialog");
+    eq(keys[keys.length - 1], ["send-keys", "-t", "supervisor", "Enter"], "note submitted with Enter");
+    const load = tmux.calls.find((c) => c.args[0] === "load-buffer");
+    eq(load.input, parkedNote("ask-rule: Bash(git push:*)", 30), "the exact note text");
+    const rows = denialRows(dir);
+    eq(rows.length, 1, "one jsonl row");
+    eq(rows[0], {
+      ts: rows[0].ts,
+      since: rows[0].since,
+      minutes: 30,
+      dialogId: PARK_DIALOG.id,
+      kind: "permission",
+      reason: PARK_DIALOG.reason,
+      status: 200,
+      closed: true,
+    }, "row shape");
+    const port = await listen(host);
+    const s = await call(port, "GET", "/state");
+    eq(s.json.autoDenial, rows[0], "autoDenial surfaced on /state");
+    eq(s.json.parkedPolicy, { mode: "deny-after", minutes: 30 }, "policy on /state");
+    await closeServer(host);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parked: answerDialog 409 (pane changed) → nothing recorded, no key latch; the next tick denies", async () => {
+  // Captures 1-2: the watchdog sees the dialog; capture 3: answerDialog's
+  // locked re-capture sees a free pane (the pane changed between the parse
+  // and the re-capture) → 409 nothing-pressed. Capture 4 is the test's own
+  // getState assertion; the next tick re-reads the same dialog and denies it
+  // for real (captures 5-7, then the close-poll sees the free pane).
+  const tmuxInit = { captureSeq: [PARK_PANE, PARK_PANE, READY_PANE, PARK_PANE, PARK_PANE, PARK_PANE, PARK_PANE, READY_PANE] };
+  const { host, tmux, dir } = parkedHost({
+    tmuxInit,
+    policy: { mode: "deny-after", minutes: 30 },
+    sinceMs: 31 * 60_000,
+  });
+  try {
+    eq(await host.checkParkedPrompt(), { action: "retry", status: 409 }, "reported as a retry, not a denial");
+    eq(sendKeysArgs(tmux), [], "nothing was pressed");
+    assert.ok(!tmux.calls.some((c) => c.args[0] === "load-buffer"), "no note pasted");
+    assert.ok(!existsSync(join(dir, "supervisor", "parked-denials.jsonl")), "no jsonl row for a 409");
+    eq(host.getState().autoDenial, null, "no autoDenial on /state after a 409");
+    const r = await host.checkParkedPrompt();
+    eq(r.action, "denied", "the same dialog (same id) is denied on the next tick — the key was not latched");
+    eq(denialRows(dir).length, 1, "exactly one jsonl row");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parked: a stale hook anchor older than the host waits from host start (FOC-920 F2)", async () => {
+  // The hook says the prompt has been there for 2.5 h — longer than the host
+  // has existed. The deny clock is floored at the host's start: nothing at
+  // host start + 1 min, denied only at host start + 31 min.
+  const tmuxInit = { captureSeq: [PARK_PANE, PARK_PANE, PARK_PANE, PARK_PANE, PARK_PANE, READY_PANE] };
+  const { host, tmux, dir, clk } = parkedHost({
+    tmuxInit,
+    policy: { mode: "deny-after", minutes: 30 },
+    sinceMs: 2 * 60 * 60_000 + 31 * 60_000,
+    advanceMs: 60_000,
+  });
+  try {
+    eq(await host.checkParkedPrompt(), { action: "none" }, "nothing at host start + 1 min despite the 2.5 h hook anchor");
+    eq(sendKeysArgs(tmux), [], "no keystrokes yet");
+    clk.t += 30 * 60_000;
+    const r = await host.checkParkedPrompt();
+    eq(r.action, "denied", "denied at host start + 31 min");
+    const rows = denialRows(dir);
+    eq(rows.length, 1, "one jsonl row");
+    // The reported anchor keeps the hook's timestamp (host start + 1 min
+    // minus the 2 h 31 min hook age = 2.5 h before the host started).
+    eq(rows[0].since, new Date(1_700_000_000_000 + 60_000 - (2 * 60 * 60_000 + 31 * 60_000)).toISOString(),
+      "the record anchors on the hook timestamp, not the host start");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parked: a secret in reason.detail is redacted in the jsonl row, on /state and in the note", async () => {
+  // Built at runtime so the canary cannot match a scanner over this file.
+  const canary = "ghp_".concat("9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c", "3fXX");
+  const pane = [
+    "",
+    PARK_RULE,
+    ` Ask rule Bash(echo ${canary}:*) overrides auto mode for this command.`,
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. No",
+    " Esc to cancel · Tab to amend",
+    "",
+  ].join("\n");
+  const { host, tmux, dir } = parkedHost({
+    tmuxInit: { captureSeq: [pane, pane, pane, READY_PANE] },
+    policy: { mode: "deny-after", minutes: 30 },
+    sinceMs: 31 * 60_000,
+  });
+  try {
+    const r = await host.checkParkedPrompt();
+    eq(r.action, "denied", "denied");
+    const rows = denialRows(dir);
+    assert.ok(!JSON.stringify(rows).includes(canary), "the canary never lands in the jsonl");
+    assert.ok(rows[0].reason.detail.includes("[redacted]"), "the detail carries the [redacted] span");
+    const port = await listen(host);
+    const s = await call(port, "GET", "/state");
+    assert.ok(!JSON.stringify(s.json.autoDenial).includes(canary), "the canary never lands on /state");
+    await closeServer(host);
+    const load = tmux.calls.find((c) => c.args[0] === "load-buffer");
+    assert.ok(!load.input.includes(canary), "the pasted note carries no secret either");
+    assert.ok(load.input.includes("[redacted]"), "the note shows the redacted span");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parked: the same dialog still on screen → no second deny, one row", async () => {
+  // The dialog never closes (capture repeats), so the second check must be
+  // held back by the last-denied key alone.
+  const { host, tmux, dir } = parkedHost({
+    tmuxInit: { capture: PARK_PANE },
+    policy: { mode: "deny-after", minutes: 30 },
+    sinceMs: 31 * 60_000,
+  });
+  try {
+    const r1 = await host.checkParkedPrompt();
+    eq(r1.action, "denied", "first deny");
+    eq(r1.denial.closed, false, "reported honestly: the dialog never closed");
+    const escapes = () => sendKeysArgs(tmux).filter((a) => a[3] === "Escape").length;
+    eq(escapes(), 1, "one Escape");
+    const r2 = await host.checkParkedPrompt();
+    eq(r2.action, "none", "no re-deny of the same dialog");
+    eq(escapes(), 1, "still one Escape");
+    eq(denialRows(dir).length, 1, "still one row");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parked: a select dialog parked 60 min is never auto-answered", async () => {
+  const { host, tmux, dir } = parkedHost({
+    tmuxInit: { capture: NUDGE },
+    policy: { mode: "deny-after", minutes: 30 },
+    sinceMs: 60 * 60_000,
+  });
+  try {
+    eq(host.getState().state, "needs-input", "the select dialog does park the session");
+    eq(await host.checkParkedPrompt(), { action: "none" }, "select is never denied");
+    eq(sendKeysArgs(tmux), [], "no keystrokes");
+    assert.ok(!existsSync(join(dir, "supervisor", "parked-denials.jsonl")), "no jsonl");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parked: a throwing policy reader is swallowed once logged; the host keeps serving", async () => {
+  const { host, tmux, dir } = parkedHost({
+    tmuxInit: { capture: PARK_PANE },
+    sinceMs: 60 * 60_000,
+  });
+  // parkedHost without a policy injects a throwing reader.
+  try {
+    eq(await host.checkParkedPrompt(), { action: "none" }, "swallowed");
+    eq(sendKeysArgs(tmux), [], "no keystrokes");
+    assert.ok(!existsSync(join(dir, "supervisor", "parked-denials.jsonl")), "no jsonl");
+    const port = await listen(host);
+    eq((await call(port, "GET", "/healthz")).status, 200, "healthz fine");
+    await closeServer(host);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parked: after a restart the last jsonl row is autoDenial on /state; a torn last line falls back", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "la-host-parked-"));
+  try {
+    mkdirSync(join(dir, "supervisor"), { recursive: true });
+    const path = join(dir, "supervisor", "parked-denials.jsonl");
+    const mk = (env) => build({
+      tmux: fakeTmux({ present: true }),
+      env,
+      parkedCheckMs: 3_600_000,
+    }).host;
+    writeFileSync(path, '{"ts":"2026-10-19T10:00:00.000Z","dialogId":"a"}\n{"ts":"2026-10-19T11:00:00.000Z","dialogId":"b"}\n');
+    eq(mk({ LA_DATA_HOME: dir }).getState().autoDenial.dialogId, "b", "last row wins");
+    writeFileSync(path, '{"dialogId":"a"}\n{"dialogId":"b"\n'); // torn trailing line
+    eq(mk({ LA_DATA_HOME: dir }).getState().autoDenial.dialogId, "a", "torn last line → previous row");
+    writeFileSync(path, "not json at all\n");
+    eq(mk({ LA_DATA_HOME: dir }).getState().autoDenial, null, "unparseable file → null");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── runner ────────────────────────────────────────────────────────────────────
