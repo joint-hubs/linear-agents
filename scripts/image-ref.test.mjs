@@ -99,7 +99,7 @@ console.log("\nlauncher preflight memory threshold");
 
 test("fenix launcher preflight warns below 8 GB docker memory (WARN, not FAIL)", () => {
   const text = read("fenix");
-  if (!text.includes("m >= 8589934592")) fail("memory threshold is not 8 GB (8589934592 bytes)");
+  if (!text.includes("m >= 8053063680")) fail("memory threshold is not 7.5 GiB (8053063680 bytes) — a nominal 8 GB machine reports ~7.7 GiB");
   if (!text.includes("docker memory >= 8 GB")) fail("missing the OK line 'docker memory >= 8 GB'");
   if (!text.includes("below the 8 GB minimum")) fail("the WARN text does not say the minimum is 8 GB");
   if (/below 4 GB/.test(text)) fail("stale 'below 4 GB' wording left in the launcher");
