@@ -934,6 +934,12 @@ ask:
 | `Bash(git branch -D:*)` | overlap |
 | `Bash(rm -rf:*)` |  |
 | `WebFetch` |  |
+| `Bash(git -C * push*)` | overlap |
+| `Bash(git -c * push*)` |  |
+| `Bash(git -C * reset --hard*)` | overlap |
+| `Bash(git -C * clean*)` | overlap |
+| `Bash(git -C * branch -D*)` | overlap |
+| `Bash(gh * pr merge*)` |  |
 
 deny:
 
@@ -971,6 +977,7 @@ deny:
 
 | event | command hooks |
 |---|---|
+| PreToolUse | 1 |
 | SessionStart | 4 |
 | Stop | 3 |
 | UserPromptSubmit | 2 |

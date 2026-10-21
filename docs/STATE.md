@@ -3,6 +3,25 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Fenix supervisor contract: `agents/supervisor/CLAUDE.md`. Squad model routing: `config/models.json`. Execution plan: `docs/BUILD-BACKLOG.md`. Atlas delegation is a separate mechanism.
 
+## 2026-10-21 — FOC-978: guard ask-spellings (dev, worktree `foc-978-ask-spellings`)
+
+Stan długiej pracy: implementacja bramki FOC-978. Nowy PreToolUse hook `scripts/supervisor-ask-guard.mjs`
+przed każdym Bash-em klasyfikuje polecenie bez uruchamiania shella (tokenizer + podział na simple commands,
+bez wykonania) i przy operacji z listy bramek (`git push`, `gh pr merge`, `git reset --hard`, `git clean`,
+`git branch -D`, `rm -rf`) wymusza `permissionDecision: "ask"` — niezależnie od prefixu (`git -C`, `-c`,
+`env`, `sudo`, `sh -c '…'`). Powód powstania: na VM przepuszczony `git -C /data/workspaces/linear-agents
+push -u origin <branch>` — ask-reguły prefiksowe nic nie złapały.
+
+Zmiany: `scripts/supervisor-ask-guard.mjs` (nowy), `scripts/supervisor-ask-guard.test.mjs` (nowy; tabela
+spellingów 26 MUST-ask / 13 MUST-NOT-ask + e2e na prawdziwym hooku), `agents/supervisor/settings.json`
+(PreToolUse + 6 nowych reguł ask), `scripts/config-drift.test.mjs` (pin rozszerzonej ask-listy + asercja
+hooka), `scripts/test-lanes.json` (rejestracja w linii równoległej), `docs/supervisor-e2e-checklist.md`
+(liczniki 207 / 167 równolegle + 40 serialnie), `agents/supervisor/CLAUDE.md` (klauzula push/PR:
+tylko po push-approval, nigdy przez `git -C`/`-c`/prefiksy env), `docs/agent-tools.md` (regenerowany).
+
+Weryfikacja: ask-guard 4/4, config-drift 28/28, agent-tools 40/40, docs-count-guard OK (207 plików),
+lint 903 plików / 0 naruszeń — wszystko zielone.
+
 <!-- state-index:start -->
 ## Task journals (generated)
 

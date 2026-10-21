@@ -38,6 +38,7 @@ import {
   writeRegistry,
 } from "./supervisor-lib.mjs";
 import { KINDS } from "./supervisor-gate.mjs";
+import { scrubbedEnv } from "./supervisor-test-fixtures.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const GATE = join(ROOT, "scripts", "supervisor-gate.mjs");
@@ -112,7 +113,7 @@ function fixtureRepo() {
 
 const cli = (script, args, env = {}) =>
   spawnSync(process.execPath, [script, ...args], {
-    cwd: ROOT, encoding: "utf8", env: { ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key", LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1", ...env },
+    cwd: ROOT, encoding: "utf8", env: { ...scrubbedEnv(), OPENROUTER_API_KEY: "test-supervisor-provider-key", LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1", ...env },
   });
 const gate = (args, env) => cli(GATE, args, env);
 const parse = (r) => JSON.parse(r.stdout);

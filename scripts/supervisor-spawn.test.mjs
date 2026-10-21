@@ -37,6 +37,7 @@ import {
 import { openAgentState } from "./agent-state.mjs";
 import { makeFakeCodegraphCli } from "./fixtures/codegraph-fake-cli.mjs";
 import { readFocus } from "./supervisor-focus.mjs";
+import { scrubbedEnv } from "./supervisor-test-fixtures.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -119,7 +120,7 @@ function runSpawn(runId, repo, extra = [], env = {}) {
     {
       encoding: "utf8",
       env: {
-        ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key",
+        ...scrubbedEnv(), OPENROUTER_API_KEY: "test-supervisor-provider-key",
         LA_CLAUDE_BIN: MOCK,
         LA_AGENT_STATE_DB: join(AGENT_STATE_DB_DIR, "agent-state.sqlite"),
         LA_SUPERVISOR_NO_TELEMETRY: "1",
@@ -180,7 +181,7 @@ test("rejects a task id that is not a Linear identifier", () => {
   const r = spawnSync(
     process.execPath,
     [SPAWN, "--run", runId, "--squad", "dev", "--task", "not-an-id", "--prompt", "x", "--repo", repo],
-    { encoding: "utf8", env: { ...process.env, OPENROUTER_API_KEY: "test-supervisor-provider-key", LA_CLAUDE_BIN: MOCK, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1" } },
+    { encoding: "utf8", env: { ...scrubbedEnv(), OPENROUTER_API_KEY: "test-supervisor-provider-key", LA_CLAUDE_BIN: MOCK, LA_SUPERVISOR_NO_TELEMETRY: "1", LA_SUPERVISOR_NO_CODEGRAPH: "1" } },
   );
   if (r.status !== 1) fail(`expected exit 1, got ${r.status}`);
   if (!parse(r).error.includes("TEAM-NUM")) fail("error did not explain the expected format");
