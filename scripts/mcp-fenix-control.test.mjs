@@ -14,6 +14,15 @@
 //   - the canary: a secret planted in the Linear title (a surface the routes
 //     do NOT redact), a gate summary and the conversation transcript never
 //     appears in ANY tool result — the tool layer masks per string field;
+//   - the egress-shape canaries (FOC-958 review): a GitHub token shape, a
+//     short-segment JWT and a PEM block — shapes redactDeep does NOT catch —
+//     planted in the transcript and in the queue, and none of them appears in
+//     any tool result; the tool layer masks them via the egress families;
+//   - the error path: a 500 whose body carries a canary surfaces it masked,
+//     and a route layer that explodes still answers the fenix_control_failed
+//     envelope (callTool never throws);
+//   - the transport: a hung route is bounded by timeoutMs (typed
+//     api_unreachable), and the base URL is loopback-only at construction.
 //   - the write tools: message forwarded verbatim, dialog forwarded, ask
 //     refused 409 ask-changed on a stale toolUseId, the ask answer's audit row
 //     recorded with who "remote:test", the gate answer's gate record carries
@@ -86,6 +95,25 @@ const NOW = new Date().toISOString();
 // after the sk- prefix to also trip the egress screen's 16+-char token rule.
 const CANARY = "sk-CANARYabcdef0123456789";
 
+// FOC-958 review point 1: canary SHAPES the routes' redactDeep does NOT catch
+// (redact() knows Bearer / api_key= / password= / sk- / lin_api_ — nothing
+// else), planted beside the sk- canary in the transcript and in the queue:
+//   · a GitHub classic-PAT shape — the egress key-prefix family owns it;
+//   · a JWT with every segment UNDER 32 chars — the generic opaque-run rules
+//     (redactDeep, scrubMask's 32+) all miss it; only the egress JWT family;
+//   · a PEM private-key block — redactDeep masks the base64 body but leaves
+//     the BEGIN/END markers; only the egress PEM family masks it whole.
+// Assembled from fragments — fake by construction, authenticating to nothing.
+const GHP_CANARY = "ghp_" + "CANARYabcdef0123456789ABCDEFGHIJ";
+const JWT_CANARY = "eyJ" + "hbGciOiJjYW5hcnkifQ" + ".eyJ" + "zdWIiOiJjYW5hcnkifQ" + "." + "c2lnQ0FOQVJZ";
+const PEM_CANARY = "-----BEGIN " + "CANARY PRIVATE KEY" + "-----\n"
+  + "Y2FuYXJ5IHNlY3JldA==\n"
+  + "-----END " + "CANARY PRIVATE KEY" + "-----";
+// The error path's own canary: a DIFFERENT short-segment JWT, so an accidental
+// pass-through cannot hide behind the transcript sweep's earlier masking.
+const ERR_JWT_CANARY = "eyJ" + "hbGciOiJlcnIifQ" + ".eyJ" + "ZXJyb3ItY2FuYXJ5" + "." + "ZXJyc2ln";
+const SECRET_SHAPES = [CANARY, GHP_CANARY, JWT_CANARY, PEM_CANARY];
+
 // The Supervisor session + a 30-entry transcript so the tool's default tail
 // (20) is distinguishable from the route's default (200).
 const transcriptPath = join(squadHome, "supervisor", "projects", "sess-1.jsonl");
@@ -93,7 +121,9 @@ const transcriptLines = [];
 for (let i = 1; i <= 30; i++) {
   const role = i % 2 === 1 ? "user" : "assistant";
   const content = role === "user"
-    ? `turn ${i} check status with token ${CANARY}`
+    // turn 12 (inside the tool's 20-entry tail) additionally carries the
+    // egress-shape canaries — the transcript is one surface for point 1.
+    ? `turn ${i} check status with token ${CANARY}${i === 12 ? ` ${GHP_CANARY} ${JWT_CANARY} ${PEM_CANARY}` : ""}`
     : [{ type: "text", text: `turn ${i} reply` }];
   transcriptLines.push(JSON.stringify({ type: role, uuid: `u${i}`, timestamp: NOW, message: { content } }));
 }
@@ -158,8 +188,14 @@ const linearFixturePath = join(dir, "linear-fake.json");
 writeFileSync(linearFixturePath, JSON.stringify({
   queue: {
     tasks: [{
-      identifier: "WORK-3", title: `Ready ticket (${CANARY})`, url: "https://linear.app/jointhubs/issue/WORK-3",
+      identifier: "WORK-3",
+      // The queue's second surface for the egress-shape canaries: the board
+      // payload carries the title (and the description) unredacted — only the
+      // tool layer may mask them.
+      title: `Ready ticket (${CANARY}) ${GHP_CANARY} ${JWT_CANARY}`,
+      url: "https://linear.app/jointhubs/issue/WORK-3",
       team: "FEN", state: "Todo", stateType: "unstarted", priority: 2, estimate: 3,
+      description: `Ready to start. ${PEM_CANARY}`,
       updatedAt: NOW, assignee: null, labels: ["fenix"], parent: null, suggestedSquad: "dev",
     }],
     error: null,
@@ -205,8 +241,9 @@ const fakeHost = createServer(async (req, res) => {
     return;
   }
   if (req.url === "/message") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ sent: true, confirmed: true, queued: false }));
+    const b = fakeHostBehavior.message ?? { status: 200, body: { sent: true, confirmed: true, queued: false } };
+    res.writeHead(b.status, { "content-type": "application/json" });
+    res.end(JSON.stringify(b.body));
     return;
   }
   if (req.url === "/session") {
@@ -341,14 +378,17 @@ try {
       conv.ok === true && conv.data?.entries?.length === 20 && conv.data?.offset > 0,
       JSON.stringify({ n: conv.data?.entries?.length, offset: conv.data?.offset }));
     check("fenix_conversation masks the transcript canary",
-      conv.data?.entries?.[0]?.text === "turn 11 check status with token sk-***",
+      conv.data?.entries?.[0]?.text?.startsWith("turn 11 check status with token ")
+      && conv.data?.entries?.[0]?.text?.includes("[REDACTED]")
+      && !conv.data?.entries?.[0]?.text?.includes(CANARY),
       JSON.stringify(conv.data?.entries?.[0]));
     // The default call is a TAIL read — its offset is EOF. Forward paging
     // starts from after=0: the head, then the next page from its offset.
     const convHead = envelopeOf(await callTool(server, "fenix_conversation", { after: 0, limit: 5 }));
     check("fenix_conversation after=0 reads from the top",
       convHead.ok === true && convHead.data?.entries?.length === 5
-        && convHead.data?.entries?.[0]?.text === "turn 1 check status with token sk-***",
+        && convHead.data?.entries?.[0]?.text?.startsWith("turn 1 check status with token ")
+        && convHead.data?.entries?.[0]?.text?.includes("[REDACTED]"),
       JSON.stringify(convHead.data?.entries?.[0]));
     const convNext = envelopeOf(await callTool(server, "fenix_conversation", { after: convHead.data.offset, limit: 5 }));
     check("fenix_conversation after=offset continues forward",
@@ -397,9 +437,35 @@ try {
     check("canary: the planted secret appears in NO read tool result",
       readEnvelopes.every((e) => !JSON.stringify(e).includes(CANARY)),
       readEnvelopes.map((e) => JSON.stringify(e).includes(CANARY)).join(","));
+    // FOC-958 review point 1: the shapes redactDeep does NOT catch — GitHub
+    // PAT, short-segment JWT, PEM block — are masked by the tool layer too.
+    check("canary: the egress-shape secrets (ghp_/JWT/PEM) appear in NO read tool result",
+      readEnvelopes.every((e) => SECRET_SHAPES.every((s) => !JSON.stringify(e).includes(s))),
+      readEnvelopes.map((e) => SECRET_SHAPES.filter((s) => JSON.stringify(e).includes(s)).join("+")).join(","));
     check("canary: the queue's Linear title is masked by the TOOL layer (the routes do not redact the board)",
-      JSON.stringify(readEnvelopes.find((e) => e.tool === "fenix_queue")).includes("sk-***"),
+      JSON.stringify(readEnvelopes.find((e) => e.tool === "fenix_queue")).includes("[REDACTED]"),
       JSON.stringify(readEnvelopes.find((e) => e.tool === "fenix_queue")).slice(0, 200));
+    check("canary: the queue's PEM block is masked whole (BEGIN/END markers gone)",
+      !JSON.stringify(readEnvelopes.find((e) => e.tool === "fenix_queue")).includes("PRIVATE KEY"),
+      JSON.stringify(readEnvelopes.find((e) => e.tool === "fenix_queue")).slice(0, 200));
+
+    // ── the error path masks too (FOC-958 review point 4) ──────────────────
+    // A 500 whose body carries a canary: the surfaced error text is masked —
+    // the tool layer treats an error body as payload-shaped, not prose-shaped.
+    // The message route passes the host's error status/body through verbatim
+    // (the snapshot route folds a host failure into host:"unreachable" and
+    // never forwards a body), so the canary rides the message path.
+    fakeHostBehavior.message = {
+      status: 500,
+      body: { error: "session host exploded", reason: `queue full since ${ERR_JWT_CANARY}` },
+    };
+    const errEnv = envelopeOf(await callTool(server, "fenix_message", { text: "hello" }));
+    check("error path: a 500 carrying a canary surfaces it masked",
+      errEnv.ok === false && errEnv.error?.code === "route_failed"
+        && !JSON.stringify(errEnv).includes(ERR_JWT_CANARY)
+        && JSON.stringify(errEnv).includes("[REDACTED]"),
+      JSON.stringify(errEnv));
+    delete fakeHostBehavior.message;
 
     // ── the write tools ────────────────────────────────────────────────────
     hostCalls.length = 0;
@@ -548,6 +614,60 @@ try {
     const deadStatus = envelopeOf(await callTool(dead, "fenix_status", {}));
     check("API unreachable -> typed api_unreachable, callTool did not throw",
       deadStatus.ok === false && deadStatus.error?.code === "api_unreachable", JSON.stringify(deadStatus));
+
+    // FOC-958 review point 2: a hung route is bounded — timeoutMs (default
+    // 10 s, pinned short here) surfaces through the same api_unreachable
+    // envelope, and the abort does not wedged the client's turn.
+    const hung = createServer(() => {}); // accepts connections, never answers
+    await new Promise((r) => hung.listen(0, "127.0.0.1", r));
+    const hungServer = createFenixControlServer({
+      baseUrl: `http://127.0.0.1:${hung.address().port}`,
+      client: "test",
+      timeoutMs: 250,
+    });
+    const t0 = Date.now();
+    const hungStatus = envelopeOf(await callTool(hungServer, "fenix_status", {}));
+    const elapsed = Date.now() - t0;
+    check("hung route -> typed api_unreachable within timeoutMs",
+      hungStatus.ok === false && hungStatus.error?.code === "api_unreachable"
+        && elapsed < 5000 && elapsed >= 200,
+      JSON.stringify({ code: hungStatus.error?.code, ms: elapsed }));
+    hung.close();
+    hung.closeAllConnections?.();
+
+    // FOC-958 review point 4b: something below the mapping that EXPLODES while
+    // the envelope is built (here: an error body whose `error` field throws on
+    // access — makeApi's own json()/transport failures are already typed) is
+    // still a typed envelope — the fenix_control_failed catch, never a crash.
+    const throwing = createFenixControlServer({
+      baseUrl: "http://127.0.0.1:1",
+      client: "test",
+      fetchImpl: async () => ({
+        status: 500,
+        json: async () => ({ get error() { throw new Error("route layer exploded (simulated)"); } }),
+      }),
+    });
+    const thrown = envelopeOf(await callTool(throwing, "fenix_queue", {}));
+    check("exploding route layer -> typed fenix_control_failed, callTool did not throw",
+      thrown.ok === false && thrown.error?.code === "fenix_control_failed"
+        && thrown.error?.message.includes("simulated"),
+      JSON.stringify(thrown));
+
+    // FOC-958 review point 3: the base URL is loopback-only at construction —
+    // a non-loopback host is a wiring error that throws before a single call.
+    for (const bad of ["http://10.0.0.5:7331", "http://fenix.internal:7331", "https://example.com"]) {
+      let threw = null;
+      try { createFenixControlServer({ baseUrl: bad }); } catch (err) { threw = err; }
+      check(`non-loopback base URL refused at construction: ${bad}`,
+        threw instanceof Error && /loopback/.test(threw.message),
+        String(threw?.message ?? "no throw"));
+    }
+    // Loopback aliases are accepted, and a trailing "/" is stripped.
+    for (const good of ["http://localhost:7331", "http://127.0.0.1:7331/", "http://127.0.0.1:7331///"]) {
+      let threw = null;
+      try { createFenixControlServer({ baseUrl: good, fetchImpl: async () => ({ status: 200, json: async () => ({}) }) }); } catch (err) { threw = err; }
+      check(`loopback base URL accepted: ${good}`, threw === null, String(threw?.message ?? ""));
+    }
 
     await spawned.stop();
   }

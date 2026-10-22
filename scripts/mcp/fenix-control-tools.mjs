@@ -8,13 +8,17 @@
 // typed-envelope mapping; the route layer stays the single owner of behaviour.
 //
 // Two redaction layers, on purpose:
-//   · READ results are masked per string field with the routes' own redaction
-//     (supervisor-lib redactDeep — the same denylist the dashboard shows),
-//     WITHOUT any truncation: a read payload that lost its run ids to a
-//     length cap could not be answered, and scrubMask's 32+-char opaque-run
-//     rule would mask exactly those ids (runId, toolUseId) the answer tools
-//     need back. Error TEXT uses scrub.mjs's scrub() (mask + cap) — an error
-//     path is a bounded message, not a payload.
+//   · READ results are masked per string field, WITHOUT truncation, by
+//     maskString(): the FOC-450 egress families first (egressSpans — PEM
+//     blocks whole including the BEGIN/END markers, JWTs, known key prefixes,
+//     env-style assignments, high-entropy runs), then scrub.mjs's scrubMask
+//     for the generic long opaque runs the entropy gate deliberately lets
+//     through. ONLY the identifier fields the answer tools need round-trip
+//     verbatim: runId, gateId, toolUseId, sessionId — everything else is
+//     subject to the long-string / high-entropy redaction (PRD §5: every
+//     tool result is scrubbed; §8-C2 is the audit track, not a redaction
+//     deferral). Error TEXT additionally keeps scrub()'s MAX_ERROR_TEXT cap —
+//     an error path is a bounded message, not a payload.
 //   · WRITE inputs (message text, answer texts, notes) pass the FOC-450
 //     egress screen before they are sent: injecting secret-shaped material
 //     into the Supervisor's transcript would launder it toward every later
@@ -22,8 +26,7 @@
 //
 // The routes do not run the egress screen on their RESPONSES (it is wired at
 // the Linear/GitHub chokepoints only) — the masking above is the tool layer's
-// own, and the residual families the denylist does not name (JWT, PEM,
-// raw high-entropy runs) stay a phase-C item (PRD §8-C2 output redaction).
+// own.
 //
 // The handler is exported programmatically on purpose: tests exercise the real
 // message path against a spawned telemetry server, never spawning stdio. Only
@@ -31,9 +34,8 @@
 // everything it logs goes to stderr — stdout is protocol, never log.
 
 import { createMcpHandler } from "./jsonrpc.mjs";
-import { scrub } from "./scrub.mjs";
-import { assertEgressClean, EGRESS_BLOCKED } from "../egress-screen.mjs";
-import { redactDeep } from "../supervisor-lib.mjs";
+import { scrub, scrubMask } from "./scrub.mjs";
+import { assertEgressClean, EGRESS_BLOCKED, egressSpans } from "../egress-screen.mjs";
 
 export const SERVER_INFO = { name: "fenix-control", version: "0.1.0" };
 
@@ -236,12 +238,43 @@ export function validateArgs(name, args) {
 }
 
 /**
- * Read-side scrub: the routes' own redaction vocabulary, applied per string
- * field, mask only — see the header comment for why NOT scrubMask's opaque-run
- * rule here.
+ * The identifier fields the answer tools round-trip verbatim (PRD §5): a read
+ * payload that lost its run/gate/toolUse/session ids to the opaque-run rule
+ * could not be answered back. Exempt from the long-string AND the egress
+ * masking — every other string field is masked.
  */
-function scrubRead(value) {
-  return redactDeep(value);
+const IDENT_FIELDS = new Set(["runId", "gateId", "toolUseId", "sessionId"]);
+
+/**
+ * Mask one string: the egress families' spans first (PEM blocks whole with
+ * their BEGIN/END markers, JWTs, key prefixes, env-style assignments,
+ * high-entropy runs), then scrubMask's generic long opaque runs — the entropy
+ * gate deliberately lets low-entropy 32+ runs through, and those are exactly
+ * the runs scrubMask exists for.
+ */
+function maskString(text) {
+  let out = "";
+  let pos = 0;
+  for (const [start, end] of egressSpans(text)) {
+    out += text.slice(pos, start) + "[REDACTED]";
+    pos = end;
+  }
+  out += text.slice(pos);
+  return scrubMask(out);
+}
+
+/**
+ * Read-side scrub: every string field of a read payload is masked (maskString)
+ * except the identifier fields, which round-trip verbatim — see the header
+ * comment for the two-layer design.
+ */
+function scrubRead(value, key) {
+  if (typeof value === "string") return IDENT_FIELDS.has(key) ? value : maskString(value);
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((v) => scrubRead(v));
+  const out = {};
+  for (const [k, v] of Object.entries(value)) out[k] = scrubRead(v, k);
+  return out;
 }
 
 // A route error label is a typed code when it is the route's kebab shape
@@ -272,13 +305,13 @@ function mapResult(tool, status, body, pick = (b) => b) {
   return {
     ok: false,
     tool,
-    error: { code, message: scrub(detail || `route answered ${status}`), status },
+    error: { code, message: scrub(maskString(detail || `route answered ${status}`)), status },
   };
 }
 
 /** The connection-level failure: the API server is not there (yet). */
 function unreachable(tool, err) {
-  return { ok: false, tool, error: { code: "api_unreachable", message: scrub(String(err?.message ?? err)) } };
+  return { ok: false, tool, error: { code: "api_unreachable", message: scrub(maskString(String(err?.message ?? err))) } };
 }
 
 /** One api() result → envelope: a transport failure (status 0) is typed
@@ -346,14 +379,17 @@ const READ_SHAPES = {
 
 /**
  * Build the API caller. Every call carries the actor header; the body is
- * JSON when present. A transport failure is a status-0 result, never a throw.
+ * JSON when present. A transport failure is a status-0 result, never a throw —
+ * a hung route surfaces the same way, bounded by timeoutMs (default 10 s,
+ * FOC-958: a stuck API server must not wedge the MCP client's turn).
  */
-function makeApi({ fetchImpl, baseUrl, actor }) {
+function makeApi({ fetchImpl, baseUrl, actor, timeoutMs }) {
   return async function api(method, path, body) {
     let res;
     try {
       res = await fetchImpl(`${baseUrl}${path}`, {
         method,
+        signal: AbortSignal.timeout(timeoutMs),
         headers: {
           [ACTOR_HEADER]: actor(),
           ...(body !== undefined ? { "content-type": "application/json" } : {}),
@@ -437,20 +473,39 @@ function sanitizeClient(name) {
 }
 
 /**
+ * The resolved base URL, loopback-only (FOC-958: the tool table talks to the
+ * telemetry server on this machine — the stdio transport is local by design,
+ * the remote HTTP transport is phase C). A trailing "/" is stripped so path
+ * joins stay "//"-free. Anything non-loopback (or unparseable) is an error at
+ * construction time, before a single call is made.
+ */
+function resolveBaseUrl(baseUrl) {
+  const raw = baseUrl
+    ?? process.env.FENIX_CONTROL_API_URL
+    ?? `http://127.0.0.1:${parseInt(process.env.TELEMETRY_PORT, 10) || 7331}`;
+  const url = new URL(String(raw).replace(/\/+$/, ""));
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+  if (!loopback) {
+    throw new Error(`fenix-control base URL must be loopback (127.0.0.1 / localhost / ::1), got: ${url.hostname}`);
+  }
+  return url.href.replace(/\/+$/, "");
+}
+
+/**
  * Programmatic factory — tests inject fetchImpl (and pin the client); the
  * stdio entry uses global fetch and the env/default client. callTool never
  * throws: every failure crosses the protocol boundary as a typed envelope.
+ * (Construction can throw — a non-loopback base URL is a wiring error, not a
+ * tool result.)
  */
-export function createFenixControlServer({ baseUrl, fetchImpl, client } = {}) {
-  const url = baseUrl
-    ?? process.env.FENIX_CONTROL_API_URL
-    ?? `http://127.0.0.1:${parseInt(process.env.TELEMETRY_PORT, 10) || 7331}`;
+export function createFenixControlServer({ baseUrl, fetchImpl, client, timeoutMs = 10_000 } = {}) {
+  const url = resolveBaseUrl(baseUrl);
   const fetchFn = fetchImpl ?? globalThis.fetch;
   let clientName = (typeof client === "string" && CLIENT_RE.test(client) && client)
     || sanitizeClient(process.env.FENIX_CONTROL_CLIENT)
     || "mcp";
   const actor = () => `remote:${clientName}`;
-  const api = makeApi({ fetchImpl: fetchFn, baseUrl: url, actor });
+  const api = makeApi({ fetchImpl: fetchFn, baseUrl: url, actor, timeoutMs });
 
   async function callTool(name, args) {
     try {
@@ -458,7 +513,7 @@ export function createFenixControlServer({ baseUrl, fetchImpl, client } = {}) {
       if (invalid) return { ok: false, tool: name, error: { code: "invalid_input", message: invalid } };
       return await dispatch(api, name, args);
     } catch (err) {
-      return { ok: false, tool: name, error: { code: "fenix_control_failed", message: scrub(String(err?.message ?? err)) } };
+      return { ok: false, tool: name, error: { code: "fenix_control_failed", message: scrub(maskString(String(err?.message ?? err))) } };
     }
   }
 
