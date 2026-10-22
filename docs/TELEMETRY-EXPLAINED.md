@@ -260,8 +260,10 @@ delegacja % = koszt tur z agent_key ≠ "_lead"  /  koszt wszystkich tur w runie
 ### Jakość danych zamiast cichych zer
 
 `data_quality_issues` łapie przypadki, które kiedyś ginęły: model spoza cennika
-(`unpricedUsageCount`), brakujący transkrypt, run bez sesji. Dashboard pokazuje je jako
-ostrzeżenia. Zasada: **lepiej pokazać „nie wiem" niż `$0.00`.**
+(`unpricedUsageCount`), brakujący transkrypt, run bez sesji — oraz transkrypt nieczytelny
+na poziomie fs (FOC-980: `transcript_unreadable`, z kodem błędu i ścieżką; tick 15 s
+pomija taki run i wędruje do kolejnych, zamiast zatrzymywać cały ingest). Dashboard pokazuje
+je jako ostrzeżenia. Zasada: **lepiej pokazać „nie wiem" niż `$0.00`.**
 
 ---
 

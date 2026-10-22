@@ -46,6 +46,7 @@ import {
   installEnvFileSignalHandlers,
   parseArgs,
   readRegistry,
+  shareChildTranscripts,
   stallSilenceMs,
   sweepChildProcesses,
   sweepMarkFor,
@@ -545,6 +546,27 @@ const scanner = setInterval(() => {
 }, GATE_SCAN_MS);
 scanner.unref(); // the child's pipes own this process's lifetime, not the timer
 
+// FOC-980: the child's Claude Code writes its transcripts as fenix-child with
+// mode 0600 — files created DURING the turn stay unreadable to node (pricing,
+// telemetry ingest, the follow-up's history copy all hit EACCES). The
+// fenix-child-share helper widens the launch dir's *.jsonl files to g+r; the
+// watcher shares every 30 s so the api ingests live cost, and once more at
+// turn end (finalizeTurn, before pricing). Only when the helper is usable —
+// the first call's skip reason is the probe: "not in container" means the
+// launch-time handover is all there is, and no timer runs.
+const shareConfigDir = process.env.CLAUDE_CONFIG_DIR || null;
+const shareProbe = shareChildTranscripts(shareConfigDir);
+if (shareProbe.skipped && shareProbe.skipped !== "not in container") {
+  note({ subtype: "transcript_share_failed", message: `transcript share skipped: ${shareProbe.skipped}` });
+}
+const shareTimer = shareProbe.skipped === null && shareConfigDir ? setInterval(() => {
+  const r = shareChildTranscripts(shareConfigDir);
+  if (r.skipped && r.skipped !== "not in container") {
+    note({ subtype: "transcript_share_failed", message: `transcript share skipped: ${r.skipped}` });
+  }
+}, 30_000) : null;
+if (shareTimer) shareTimer.unref(); // the child's pipes own the lifetime, not this timer
+
 // stream-json is NDJSON, but a chunk boundary can land mid-line — buffer until a
 // newline or the tee gets corrupt records that nothing downstream can parse.
 let buffer = "";
@@ -783,6 +805,14 @@ function finalizeTurn(code, signal) {
   // is a note, not a dead turn — the fallback still applies.
   let transcriptCost = null;
   try {
+    // FOC-980: share the transcripts the child created during THIS turn before
+    // pricing reads them — the 30 s timer may not have caught the last writes.
+    // Best effort: a failure is a tee note, never a dead turn, and the
+    // zero-message guard in turnEndCostPatch still falls through to result-max.
+    const share = shareChildTranscripts(process.env.CLAUDE_CONFIG_DIR || squadConfigDir(entry.squad));
+    if (share.skipped && share.skipped !== "not in container") {
+      note({ subtype: "transcript_share_failed", message: `transcript share skipped: ${share.skipped}` });
+    }
     // Both the pre-turn registry id (captured before init overwrote it) and
     // this turn's init id — filtered, distinct. A resume that forked a new
     // session id prices BOTH transcripts; an unchanged one dedupes to one.
@@ -848,6 +878,7 @@ function finalizeTurn(code, signal) {
   // included. The gate itself got its own row from the final scan above; the
   // exit is a separate event with its own dedup key.
   clearInterval(scanner);
+  if (shareTimer) clearInterval(shareTimer); // FOC-980: the turn is over — stop the 30 s share
   scanGates();
   wake({ event: "exit", childId, turn: turnIndex, detail: { status, exitCode: code } });
 

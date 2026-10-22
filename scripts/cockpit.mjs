@@ -584,6 +584,10 @@ export async function collectChildren({
         ageMs: ageMsOf(now, startedAt),
         teeSilentMs,
         costUsd: entry.costUsd ?? null,
+        // FOC-980: WHERE the cost number came from (registry-cost-recompute's
+        // "transcript" / "result-max") — the UI needs it to tell "recorded at
+        // turn end" apart from "no readable cost source".
+        costSource: entry.costSource ?? null,
         checkedAt: new Date(now).toISOString(),
         _rank: CHILDREN_LIVE_RANK[status] ?? 10,
         _endedMs: endedMs ?? 0,

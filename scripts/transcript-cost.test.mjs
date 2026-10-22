@@ -346,3 +346,31 @@ test("sessionIds: duplicates between sessionId and sessionIds dedupe to one look
   assert.equal(result.costUsd, 10 / 1_000_000);
   assert.deepEqual(result.transcriptPaths, [lead]);
 });
+
+// FOC-980: an existing-but-unreadable transcript must never price as an empty
+// $0 shape. A directory named *.jsonl is the portable stand-in for the
+// fenix-child 0600 file the share helper has not widened yet — existsSync finds
+// it, readFileSync throws (EISDIR) on every platform.
+test("priceTranscripts counts an existing-but-unreadable path in unreadable and skips it", () => {
+  const root = tempRoot("unreadable");
+  const file = writeJsonl(join(root, "lead.jsonl"), [assistant("msg_a", usage(10, 0))]);
+  const locked = mkdirSync(join(root, "locked.jsonl"), { recursive: true });
+  const result = priceTranscripts([file, locked], { priceOne, thresholdOne });
+  assert.equal(result.files, 1, "only the readable file counts");
+  assert.equal(result.unreadable, 1, "the located-but-unreadable file is named");
+  assert.equal(result.costUsd, 10 / 1_000_000);
+});
+
+test("priceChildTranscripts returns null when the located transcript exists but is unreadable (FOC-980)", () => {
+  const configDir = tempRoot("cfg-child-locked");
+  const cwd = tempRoot("cwd-child-locked");
+  const dir = sessionDir(configDir, cwd, "sess-locked");
+  mkdirSync(join(dir, "sess-locked.jsonl"), { recursive: true });
+  // null — "no transcript cost", the caller's result-max fallback — is the
+  // honest read; a $0 empty-transcript object would hide whatever the unreadable
+  // file holds.
+  assert.equal(
+    priceChildTranscripts({ configDir, cwd, sessionId: "sess-locked" }, { priceOne, thresholdOne }),
+    null,
+  );
+});

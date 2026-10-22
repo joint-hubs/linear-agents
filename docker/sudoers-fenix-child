@@ -8,3 +8,10 @@ Defaults!/usr/local/sbin/fenix-spawn-as-child !requiretty
 # signal itself and signals only marked processes.
 node ALL=(root) NOPASSWD: /usr/local/sbin/fenix-child-sweep
 Defaults!/usr/local/sbin/fenix-child-sweep !requiretty
+# FOC-980: the transcript-share helper runs as the child user (fenix-child),
+# not root: the transcripts are fenix-child-owned files and the owner may
+# chmod its own files, so even a raced-in symlink can only touch files the
+# child could chmod anyway. The helper validates the launch dir itself and
+# grants only g+r on *.jsonl files.
+node ALL=(fenix-child) NOPASSWD: /usr/local/sbin/fenix-child-share
+Defaults!/usr/local/sbin/fenix-child-share !requiretty
