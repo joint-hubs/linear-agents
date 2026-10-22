@@ -120,3 +120,4 @@ Pełny zestaw testów tylko jako `node scripts/test-run.mjs` (na rc.4 bezpieczne
 - pr_edit failed: image gh 2.23.0 vs the sunset classic-Projects API -> FOC-1000; operator updated the body from the host (gh 2.89) with the route table corrected against the code; the Supervisor opened hold-2 instead of working around (FOC-988 rule respected)
 - the Supervisor tried CronCreate and a background poll to wait for the merge — both refused by the auto-mode classifier (Unauthorized Persistence / Create Unsafe Agents); it did not work around
 - #139 CI green; merged by Mateusz
+- 15:3x UTC cleanup: 3 cleanup-approval gates answered yes; Supervisor's supervisor-cleanup.mjs remove refused by the classifier [Irreversible Local Destruction] (auto mode ignores Bash(node:*)); operator docker-exec run lacks the Linear key -> FOC-1007; worktrees left on disk; VM stopped (no live child)
