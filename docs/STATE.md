@@ -3,6 +3,28 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Fenix supervisor contract: `agents/supervisor/CLAUDE.md`. Squad model routing: `config/models.json`. Execution plan: `docs/BUILD-BACKLOG.md`. Atlas delegation is a separate mechanism.
 
+## 2026-10-22 — FOC-789 acceptance run, part 1 (legacy single Supervisor) done; rc.4 out
+
+Run log (timeline, costs, snags S1–S21): `docs/releases/1.0.0/foc-789-run-log.md`. VM `fenix-accept` (gcloud
+dochubs, europe-central2-a) is **stopped**; the stack comes back by itself on start (`cd ~/fenix`, then
+`git pull && ./fenix update` for a new rc). Dashboard tunnel from PowerShell:
+`gcloud compute ssh fenix-accept --project dochubs --zone=europe-central2-a --ssh-flag="-N" --ssh-flag="-L 4600:localhost:4600"`.
+
+- Tickets run: FOC-963 ($0.195), FOC-962 ($0.092), FOC-958 (medium, DEV+TEST+review loop, ≈$2) — all merged/Done.
+- Fixed + verified on **v1.0.0-rc.4** (tag on 5b09e42): FOC-977, FOC-978, FOC-979, FOC-980 (all Done).
+- Open before the 1.0 tag: **FOC-988** (urgent — Supervisor patched /opt/fenix; make it read-only + deny + doctor
+  drift check), **FOC-1001** (urgent — no git inside child worktrees, no safe.directory), FOC-989 (EPERM on a re-used
+  launch dir), FOC-990 (a child's suite writes test-triage-* runs into the real state → fake Needs-you holds),
+  FOC-1000 (image gh 2.23 breaks pr_edit), FOC-1007 (approved cleanup blocked), FOC-981 (liveness powershell in the container; PID-namespace note).
+- Next: fix the five above → rc.5 → FOC-789 part 2 (two task sessions side by side) → snags S1–S21 as backlog
+  tasks (AC2) → FOC-790 dossier + tag 1.0.0.
+- FOC-958 worktrees (dev-1, test-2, test-3) are approved for removal (3× cleanup-approval yes) but still on disk:
+  the Supervisor's `supervisor-cleanup.mjs remove` was refused by the auto-mode classifier and the operator
+  `docker exec` run lacks the Linear key -> FOC-1007. Remove them on the next start (inside the session, or via FOC-1007).
+- VM leftovers to clear on the next start: `/data/state/supervisor/test-triage-*` (fixture junk, root-owned
+  removal), `/tmp/foc958-base` (a TEST child's comparison worktree), the main checkout
+  `/data/workspaces/linear-agents` still on branch `foc-962-attach-link` (Supervisor should switch it to main).
+
 ## 2026-10-21 — FOC-978: guard ask-spellings (dev, worktree `foc-978-ask-spellings`)
 
 Stan długiej pracy: implementacja bramki FOC-978. Nowy PreToolUse hook `scripts/supervisor-ask-guard.mjs`
