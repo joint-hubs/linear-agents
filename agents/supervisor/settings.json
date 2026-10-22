@@ -147,6 +147,7 @@
       "Bash(gh * pr merge*)"
     ],
     "deny": [
+      "mcp__fenix-control__*",
       "mcp__linear__*",
       "Artifact",
       "PushNotification",

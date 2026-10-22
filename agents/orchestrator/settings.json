@@ -4,7 +4,8 @@
   "permissions": {
     "deny": [
       "mcp__fenix-linear__*",
-      "mcp__fenix-github__*"
+      "mcp__fenix-github__*",
+      "mcp__fenix-control__*"
     ]
   }
 }

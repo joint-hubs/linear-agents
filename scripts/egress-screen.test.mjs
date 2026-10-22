@@ -27,7 +27,7 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = join(__dirname, "..");
 const NODE = process.execPath;
 
-const { scanEgress, assertEgressClean, egressLeaves, EgressBlockedError, EGRESS_BLOCKED } = await import(
+const { scanEgress, assertEgressClean, egressLeaves, EgressBlockedError, EGRESS_BLOCKED, egressSpans } = await import(
   pathToFileURL(join(__dirname, "egress-screen.mjs")).href
 );
 const { SYNTHETIC_SET } = await import(
@@ -109,6 +109,35 @@ console.log("unit: five shape families detected");
     assert(hit.line >= 1 && hit.column >= 1, `${family}: 1-based line/column reported`);
     assert(!hits.some((h) => h.shape.includes("Zx9qWm3NbR7") || h.shape.includes("Nq7Zx4mK")), `${family}: shape carries no value fragment`);
   }
+}
+
+console.log("unit: egressSpans — the same families as [start, end) spans (FOC-958)");
+{
+  // Same five-family corpus as the scanEgress shape test, asserted as spans:
+  // every family produces a span that covers the secret-shaped material, the
+  // spans are sorted and merged, and masking them leaves readable prose.
+  const cases = [
+    ["key-prefix", `token ${FAKE_SK_OR} for the run`],
+    ["pem", FAKE_PEM],
+    ["env-assignment", FAKE_ENV],
+    ["jwt", `bearer ${FAKE_JWT} expired`],
+    ["high-entropy", `secret ${FAKE_ENTROPY} rotated`],
+  ];
+  for (const [family, text] of cases) {
+    const spans = egressSpans(text);
+    assert(spans.length >= 1, `${family}: at least one span`);
+    assert(spans.every(([s, e]) => Number.isInteger(s) && Number.isInteger(e) && e > s), `${family}: well-formed [start, end)`);
+    const masked = spans.reverse().reduce((acc, [s, e]) => acc.slice(0, s) + "[REDACTED]" + acc.slice(e), text);
+    assert(!masked.includes("[REDACTED][REDACTED]"), `${family}: spans sorted+merged (no double mask)`);
+  }
+  // Clean hard negatives produce no spans — the exemptions scanEgress honours
+  // (public certificates, commit SHAs, UUIDs) are not masked.
+  const clean = SYNTHETIC_SET.filter((e) => e.label === "clean");
+  const offenders = clean.filter((e) => egressSpans(e.text).length > 0);
+  assert(offenders.length === 0, `all ${clean.length} labelled-clean texts are span-free (offenders: ${offenders.map((o) => o.id).join(", ") || "none"})`);
+  // Empty / non-string input: the same degenerate contract as scanEgress.
+  assert(egressSpans("").length === 0, "empty text → no spans");
+  assert(egressSpans(undefined).length === 0, "undefined text → no spans");
 }
 
 console.log("unit: PEM spans multiple lines and reports its line count");

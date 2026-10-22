@@ -28,6 +28,11 @@
       "type": "stdio",
       "command": "node",
       "args": ["scripts/mcp/server-fenix-github.mjs"]
+    },
+    "fenix-control": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["scripts/mcp/server-fenix-control.mjs"]
     }
   }
 }

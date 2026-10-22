@@ -683,6 +683,10 @@
       "reason": "writes fixture run logs into the repo's real .state/runs/"
     },
     {
+      "file": "mcp-fenix-control.test.mjs",
+      "reason": "spawns the real telemetry-server (docker mode against a fake session host, then native mode) plus an in-process fake host on 127.0.0.1:0 — same harness family as cockpit-routes, conservative serial for socket binds and child processes (FOC-958)"
+    },
+    {
       "file": "key-check.test.mjs",
       "reason": "binds ephemeral ports via node:http createServer probes (the fake HTTP check hosts); spawned key-check children are real node processes over mkdtemp fixtures"
     },

@@ -511,6 +511,39 @@ export function scanEgress(text) {
   return hits.sort((a, b) => a.line - b.line || a.column - b.column);
 }
 
+/**
+ * The egress families' masked spans — the same detection pipeline scanEgress
+ * runs, returning the secret-shaped [start, end) ranges instead of hit
+ * descriptors (FOC-958 B1 redaction). Family A–D detectors push their own
+ * spans; family E skips runs already spanned and adds the rest, with the same
+ * public-material / Linear-slug / managed-ref exemptions scanEgress honours.
+ * Sorted ascending and overlap-merged, so a consumer can mask left to right.
+ *
+ * Consumers (fenix-control tool layer) mask these ranges with the family
+ * neutral `[REDACTED]`; a span carries position, never the value — no hit
+ * descriptor is produced here, the caller needs coverage, not a report.
+ *
+ * @param {string} text
+ * @returns {Array<[number, number]>} sorted, overlap-merged [start, end) spans.
+ */
+export function egressSpans(text) {
+  if (typeof text !== "string" || text.length === 0) return [];
+  const spans = [];
+  detectKeyPrefixes(text, spans);
+  detectPem(text, spans);
+  detectEnvAssignments(text, spans);
+  detectJwt(text, spans);
+  detectHighEntropy(text, spans, publicBlockSpans(text).concat(linearIssueSlugSpans(text), managedGitRefSpans(text)));
+  spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged = [];
+  for (const [start, end] of spans) {
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
+
 /** Spans of ANY delimited PEM-style region (certificates, public keys, …) —
  * public material whose base64 body must not read as a high-entropy hit. */
 function publicBlockSpans(text) {
