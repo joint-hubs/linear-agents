@@ -91,6 +91,38 @@ function checkTool(spawn, name, args, status) {
   return { name, status, detail, fix: TOOL_FIX };
 }
 
+// FOC-1000: the gh the squads call. Debian's package (2.23) runs `gh pr edit`
+// against the sunset Projects (classic) GraphQL API and fails on every PR; the
+// image installs gh from GitHub's own apt repo instead and checks this same
+// floor at build time (Dockerfile ARG GH_MIN_VERSION — a test pins the two
+// together). 2.89.0 is the release verified to edit PRs.
+export const GH_MIN_VERSION = '2.89.0';
+
+/** true / false for a `gh version X.Y.Z …` line against the floor, null when the line is not one. */
+export function ghBelowFloor(firstLine, floor = GH_MIN_VERSION) {
+  const m = /^gh version (\d+)\.(\d+)\.(\d+)/.exec(String(firstLine ?? ''));
+  if (!m) return null;
+  const have = [m[1], m[2], m[3]].map(Number);
+  const want = floor.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (have[i] !== want[i]) return have[i] < want[i];
+  }
+  return false;
+}
+
+// A gh below the floor is a FAIL in the container (the image decides it: the
+// Debian fallback slipped in) and a WARN on a dev machine; the version itself
+// is already in the line, so this adds no check of its own.
+export function applyGhFloor(check, env) {
+  if (check.name !== 'gh' || check.status !== 'ok' || ghBelowFloor(check.detail) !== true) return check;
+  return {
+    ...check,
+    status: env.FENIX_IN_CONTAINER === '1' ? 'fail' : 'warn',
+    detail: `${check.detail} — below the supported ${GH_MIN_VERSION} (gh pr edit breaks on the sunset Projects (classic) API)`,
+    fix: env.FENIX_IN_CONTAINER === '1' ? TOOL_FIX : `upgrade gh to >= ${GH_MIN_VERSION} (cli.github.com/packages)`,
+  };
+}
+
 function checkKeys(env) {
   return ['OPENROUTER_API_KEY', 'LINEAR_API_KEY', 'GITHUB_TOKEN'].map((key) =>
     env[key]
@@ -613,7 +645,7 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
   const cachePolicy = resolveCacheMaxGbSafe(settings);
   const checks = [
     checkNode(),
-    ...REQUIRED_TOOLS.map(([name, args]) => checkTool(spawn, name, args, 'fail')),
+    ...REQUIRED_TOOLS.map(([name, args]) => applyGhFloor(checkTool(spawn, name, args, 'fail'), env)),
     ...OPTIONAL_TOOLS.map(([name, args]) => checkTool(spawn, name, args, 'warn')),
     ...checkKeys(env),
     checkIntegrations(env, settings),

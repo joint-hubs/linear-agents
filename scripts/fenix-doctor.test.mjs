@@ -16,7 +16,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  GH_MIN_VERSION,
+  applyGhFloor,
   checkCaches,
+  ghBelowFloor,
   checkPermissionMode,
   checkProjectsDir,
   checkRunOwners,
@@ -971,6 +974,47 @@ test("caches line: over the cap warns with the fenix prune fix", async () => {
   assert.equal(check.status, "warn");
   assert.match(check.detail, /cache 6\.0 GiB/);
   assert.equal(check.fix, "fenix prune --max-gb 5");
+});
+
+// ── gh floor (FOC-1000) ──────────────────────────────────────────────────────
+console.log("\nfenix-doctor: gh version floor (FOC-1000)");
+
+test("ghBelowFloor: Debian's 2.23 is below, the floor and newer are not, a foreign line is unknown", () => {
+  assert.equal(ghBelowFloor("gh version 2.23.0 (2023-02-27)"), true);
+  assert.equal(ghBelowFloor("gh version 2.88.9 (2026-01-01)"), true);
+  assert.equal(ghBelowFloor(`gh version ${GH_MIN_VERSION} (2026-01-01)`), false);
+  assert.equal(ghBelowFloor("gh version 2.103.0 (2026-10-01)"), false);
+  assert.equal(ghBelowFloor("gh version 3.0.0 (2027-01-01)"), false);
+  assert.equal(ghBelowFloor("fake 1.0"), null);
+});
+
+test("applyGhFloor: below the floor FAILs in the container with the rebuild fix, WARNs elsewhere", () => {
+  const old = { name: "gh", status: "ok", detail: "gh version 2.23.0 (2023-02-27)" };
+  const inImage = applyGhFloor(old, IN_CONTAINER);
+  assert.equal(inImage.status, "fail");
+  assert.match(inImage.detail, /gh version 2\.23\.0.*below the supported 2\.89\.0/);
+  assert.equal(inImage.fix, "rebuild the image: fenix update");
+  const onHost = applyGhFloor(old, {});
+  assert.equal(onHost.status, "warn");
+  assert.match(onHost.fix, /upgrade gh to >= 2\.89\.0/);
+});
+
+test("applyGhFloor leaves a current gh, a missing gh and other tools untouched", () => {
+  const ok = { name: "gh", status: "ok", detail: "gh version 2.103.0 (2026-10-01)" };
+  assert.deepEqual(applyGhFloor(ok, IN_CONTAINER), ok);
+  const missing = { name: "gh", status: "fail", detail: "spawn gh ENOENT", fix: "rebuild the image: fenix update" };
+  assert.deepEqual(applyGhFloor(missing, IN_CONTAINER), missing);
+  const git = { name: "git", status: "ok", detail: "gh version 1.0.0" };
+  assert.deepEqual(applyGhFloor(git, IN_CONTAINER), git);
+});
+
+test("the Dockerfile's build-time floor is the doctor's floor", () => {
+  const dockerfile = fs.readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
+  const arg = /^ARG GH_MIN_VERSION=(\S+)\s*$/m.exec(dockerfile);
+  assert.ok(arg, "the Dockerfile has no ARG GH_MIN_VERSION");
+  assert.equal(arg[1], GH_MIN_VERSION);
+  assert.match(dockerfile, /cli\.github\.com\/packages/, "gh must come from GitHub's own apt repo");
+  assert.doesNotMatch(dockerfile, /apt-get install[^\n]*\bgh\b[^\n]*tini/, "gh must not be installed from Debian's package in the base apt line");
 });
 
 console.log(`\nfenix-doctor: ${passed} passed, ${skipped} skipped, ${failures.length} failed`);

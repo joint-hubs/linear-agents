@@ -21,10 +21,32 @@ FROM node:22-bookworm-slim
 ARG CLAUDE_CODE_VERSION=2.1.296
 ARG CODEGRAPH_VERSION=1.6.0
 ARG SEMGREP_VERSION=1.172.0
+# FOC-1000: the oldest gh the image accepts — scripts/fenix-doctor.mjs
+# GH_MIN_VERSION is the same number (a test pins the pair).
+ARG GH_MIN_VERSION=2.89.0
 
-# System deps: git/gh/curl for tooling (squads call `gh`), procps for `ps` (stability tests), tini as init, python3 for semgrep, tmux for the Supervisor session host (FOC-783), passwd for usermod/groupmod (FOC-803 uid match), sudo for the child-spawn helper (FOC-802), util-linux for setpriv (FOC-802 — present in Debian's required set, kept explicit) — not in bookworm-slim.
+# System deps: git/curl for tooling, procps for `ps` (stability tests), tini as init, python3 for semgrep, tmux for the Supervisor session host (FOC-783), passwd for usermod/groupmod (FOC-803 uid match), sudo for the child-spawn helper (FOC-802), util-linux for setpriv (FOC-802 — present in Debian's required set, kept explicit) — not in bookworm-slim.
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends git gh ca-certificates curl tini procps tmux passwd sudo util-linux python3 python3-venv python3-pip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl tini procps tmux passwd sudo util-linux python3 python3-venv python3-pip && rm -rf /var/lib/apt/lists/*
+
+# FOC-1000: gh (squads call it) comes from GitHub's own apt repo, verified by
+# its signed keyring, not from Debian. Bookworm's package is 2.23: its
+# `gh pr edit` queries the sunset Projects (classic) GraphQL API and fails on
+# every PR, so fenix-github pr_edit never worked in the image. The repo carries
+# only its current release, so the version cannot be pinned in apt; the floor is
+# checked right after the install (the build fails if Debian's gh slipped in)
+# and again by `fenix doctor` at run time.
+RUN apt-get update \
+    && mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && gh_version="$(gh --version | sed -n '1s/^gh version \([0-9][0-9.]*\).*/\1/p')" \
+    && echo "gh ${gh_version} (floor ${GH_MIN_VERSION})" \
+    && dpkg --compare-versions "${gh_version}" ge "${GH_MIN_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
 
 # Python tools (semgrep, uv) in an isolated venv, on PATH ahead of system python.
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" uv
