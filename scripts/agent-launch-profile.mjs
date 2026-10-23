@@ -30,6 +30,8 @@ import { installRuntimeHooks } from './runtime-hook-config.mjs';
 //     historyMode, previousSessionId, env, context})
 //       -> { configDir, cliArgs, env, profile, changes, copied, history }
 //   launchDirFor(runDirAbs, childId, turn) -> the per-turn launch dir path
+//   freshLaunchDir(runDirAbs, childId, turn) -> that path, or `<path>-r<k>` when
+//     something already sits there (FOC-989: never re-prepare a handed-over dir)
 //   attemptIdFor(childId, turn) -> `${childId}:turn:${turn}`
 //   actorIdFor(runId, childId) -> `${runId}:${childId}` (stable for the child's
 //     whole life; the attempt id is what increments per turn)
@@ -73,6 +75,42 @@ export const attemptIdFor = (childId, turn) => `${childId}:turn:${turn}`;
 export const actorIdFor = (runId, childId) => `${runId}:${childId}`;
 export const launchDirFor = (runDirAbs, childId, turn) =>
   join(runDirAbs, "launch", childId, `turn-${turn}`);
+
+const FRESH_LAUNCH_DIR_MAX_RETRIES = 1000;
+
+// Anything at the path counts — a dir, a file, a dangling link. A stat error
+// other than "not there" reads as taken: the safe answer is another name.
+function pathTaken(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (err) {
+    return err?.code !== "ENOENT";
+  }
+}
+
+/**
+ * FOC-989: the launch dir for a turn, guaranteed not to exist yet.
+ *
+ * A launch dir is handed over to the child uid when its watcher starts
+ * (docker/fenix-spawn-as-child.sh); after that the Supervisor (uid node) can no
+ * longer fchmod the files in it, and libuv's copyfile onto an existing
+ * destination does exactly that — EPERM. The registry's turn count and the dirs
+ * on disk can diverge (a launch that died after the handover, a child entry
+ * that was replaced), so the registry index alone is not a safe name. The
+ * canonical `turn-<n>` is used when free, otherwise the first free
+ * `turn-<n>-r<k>`. The occupied dir is left exactly as it is — it is the audit
+ * trail of the failed attempt.
+ */
+export function freshLaunchDir(runDirAbs, childId, turn) {
+  const canonical = launchDirFor(runDirAbs, childId, turn);
+  if (!pathTaken(canonical)) return canonical;
+  for (let k = 1; k <= FRESH_LAUNCH_DIR_MAX_RETRIES; k++) {
+    const candidate = `${canonical}-r${k}`;
+    if (!pathTaken(candidate)) return candidate;
+  }
+  throw new Error(`no free launch dir for ${childId} turn ${turn} after ${FRESH_LAUNCH_DIR_MAX_RETRIES} attempts under ${dirname(canonical)}`);
+}
 
 /** The fields a snapshot.json carries that a profile diff is computed over. */
 function snapshotProjection(snap) {

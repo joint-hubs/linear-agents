@@ -21,6 +21,7 @@ import { join } from "node:path";
 import {
   actorIdFor,
   attemptIdFor,
+  freshLaunchDir,
   launchDirFor,
   prepareAgentLaunch,
 } from "./agent-launch-profile.mjs";
@@ -454,6 +455,61 @@ test("attemptId is per-turn, actorId is stable for the child's life", () => {
   if (launchDirFor("/state/run-1", "dev-1", 2).split(/[\\/]/).slice(-3).join("/") !== "launch/dev-1/turn-2") {
     fail(`launchDirFor: ${launchDirFor("/state/run-1", "dev-1", 2)}`);
   }
+});
+
+// ── a launch dir is never re-used (FOC-989) ──────────────────────────────────
+console.log("\nfresh launch dir");
+
+test("freshLaunchDir is the canonical dir while it is free", () => {
+  const run = base("fresh-free");
+  if (freshLaunchDir(run, "dev-1", 1) !== launchDirFor(run, "dev-1", 1)) {
+    fail(`a free turn dir was renamed: ${freshLaunchDir(run, "dev-1", 1)}`);
+  }
+});
+
+test("freshLaunchDir skips an occupied dir and leaves it exactly as it was", () => {
+  const run = base("fresh-taken");
+  const taken = launchDirFor(run, "dev-1", 1);
+  mkdirSync(join(taken, "skills"), { recursive: true });
+  writeFileSync(join(taken, "skills", "SKILL.md"), "child-owned in production");
+
+  const next = freshLaunchDir(run, "dev-1", 1);
+  if (next !== `${taken}-r1`) fail(`expected ${taken}-r1, got ${next}`);
+  if (readFileSync(join(taken, "skills", "SKILL.md"), "utf8") !== "child-owned in production") {
+    fail("the occupied dir was touched");
+  }
+
+  mkdirSync(next, { recursive: true });
+  if (freshLaunchDir(run, "dev-1", 1) !== `${taken}-r2`) {
+    fail(`the second retry did not advance: ${freshLaunchDir(run, "dev-1", 1)}`);
+  }
+  // Another child, or another turn, is unaffected.
+  if (freshLaunchDir(run, "dev-2", 1) !== launchDirFor(run, "dev-2", 1)) fail("another child's dir was renamed");
+  if (freshLaunchDir(run, "dev-1", 2) !== launchDirFor(run, "dev-1", 2)) fail("another turn's dir was renamed");
+});
+
+test("a plain file at the canonical path also counts as taken", () => {
+  const run = base("fresh-file");
+  const taken = launchDirFor(run, "dev-1", 0);
+  mkdirSync(join(taken, ".."), { recursive: true });
+  writeFileSync(taken, "stray");
+  if (freshLaunchDir(run, "dev-1", 0) !== `${taken}-r1`) fail(`got ${freshLaunchDir(run, "dev-1", 0)}`);
+});
+
+test("prepareAgentLaunch into the dir freshLaunchDir picked leaves the occupied one alone", () => {
+  const dir = base("fresh-prepare");
+  fixtureSquad(dir);
+  const run = join(dir, "run");
+  const taken = launchDirFor(run, "dev-1", 1);
+  mkdirSync(join(taken, "skills"), { recursive: true });
+  writeFileSync(join(taken, "skills", "run.md"), "stale attempt");
+  // In production the occupied dir holds files the Supervisor uid does not own;
+  // preparing INTO it would overwrite them (EPERM). Preparing into the dir
+  // freshLaunchDir picked never touches it.
+  const out = prepareAgentLaunch({ squad: "dev", role: "lead", outputDir: freshLaunchDir(run, "dev-1", 1), env: launchEnv(dir) });
+  if (out.configDir === taken) fail("the launch was prepared into the occupied dir");
+  if (readFileSync(join(taken, "skills", "run.md"), "utf8") !== "stale attempt") fail("the stale attempt was overwritten");
+  if (!existsSync(join(out.configDir, "skills", "run.md"))) fail("the fresh dir was not assembled");
 });
 
 test("a missing squad or outputDir is a caller bug", () => {

@@ -212,6 +212,29 @@ test("a second live child is HELD by the semaphore, not refused (FOC-161)", () =
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", first.childId], { encoding: "utf8" });
 });
 
+test("a launch dir left by an earlier attempt for this child id is skipped, not re-prepared (FOC-989)", () => {
+  // In Docker the earlier attempt's dir was handed over to fenix-child, so
+  // preparing INTO it died on EPERM. The behaviour that makes that irrelevant:
+  // the occupied dir is left alone and the child launches from the next free one.
+  const { repo } = fixtureRepo();
+  const runId = fixtureRun();
+  const occupied = join(runDir(runId), "launch", "dev-9", "turn-0");
+  mkdirSync(occupied, { recursive: true });
+  writeFileSync(join(occupied, "CLAUDE.md"), "left by the failed attempt");
+
+  const r = runSpawn(runId, repo, ["--child", "dev-9"]);
+  const out = parse(r);
+  if (!out.ok) fail(`spawn failed: ${out.error}`);
+
+  const entry = readRegistry(runId).children[out.childId];
+  if (entry.launchConfigDir === occupied) fail("the launch was prepared into the occupied dir");
+  if (!/turn-0-r1$/.test(entry.launchConfigDir)) fail(`unexpected launch dir: ${entry.launchConfigDir}`);
+  if (readFileSync(join(occupied, "CLAUDE.md"), "utf8") !== "left by the failed attempt") fail("the occupied dir was modified");
+  if (!/already exists/.test(r.stderr)) fail(`the reuse avoidance was silent: ${r.stderr}`);
+
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
 // ── worktree isolation ───────────────────────────────────────────────────────
 console.log("\nworktree isolation");
 

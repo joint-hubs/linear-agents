@@ -846,6 +846,39 @@ test("a pending runtimeReturn is retained across the follow-up, not cleared at l
   if (out.status !== "running" && out.status !== "exited") fail(`unexpected follow-up status: ${out.status}`);
 });
 
+// ── a launch dir left by an earlier attempt is never re-used (FOC-989) ───────
+// FOC-958 on the VM: a followup failed after its launch dir was handed over to
+// fenix-child, the registry never learned of that attempt, and the next followup
+// computed the same turn index — it re-prepared INTO the child-owned dir and
+// died on EPERM (copyfile → fchmod). The ownership half cannot be built on a
+// dev machine, so the test pins the behaviour that makes it irrelevant: the
+// occupied dir is skipped and left untouched, and the registry points at the
+// fresh one.
+console.log("\nan occupied launch dir");
+
+test("a followup whose turn dir already exists starts in a fresh dir and leaves the old one alone", () => {
+  const repo = fixtureRepo();
+  const runId = fixtureRun();
+  const child = spawnChild(runId, repo);
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const occupied = join(runDir(runId), "launch", child.childId, "turn-1");
+  mkdirSync(join(occupied, "skills", "codegraph-expert"), { recursive: true });
+  const marker = join(occupied, "skills", "codegraph-expert", "SKILL.md");
+  writeFileSync(marker, "left by the failed attempt");
+
+  const r = followup(runId, child.childId);
+  const out = parseOk(r);
+  if (out.turn !== 1) fail(`expected registry turn 1, got ${out.turn}`);
+  waitForStatus(runId, child.childId, ["exited", "crashed"]);
+
+  const entry = readRegistry(runId).children[child.childId];
+  if (entry.launchConfigDir === occupied) fail("the follow-up was prepared into the occupied dir");
+  if (!/turn-1-r1$/.test(entry.launchConfigDir)) fail(`unexpected launch dir: ${entry.launchConfigDir}`);
+  if (readFileSync(marker, "utf8") !== "left by the failed attempt") fail("the occupied dir was modified");
+  if (!/already exists/.test(r.stderr)) fail(`the reuse avoidance was silent: ${r.stderr}`);
+});
+
 // ── summary ──────────────────────────────────────────────────────────────────
 for (const dir of cleanup) {
   try {
