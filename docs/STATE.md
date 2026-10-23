@@ -5,6 +5,22 @@
 
 > **Hand-off for the next engineer: `docs/HANDOFF.md` (2026-10-23)** — state, blockers in order, VM ops, gotchas.
 
+## 2026-10-23 — the 1.0 blockers are in code; rc.5 next (VM stays stopped until then)
+
+Per-ticket state, what each one shipped and what to verify on the VM: `docs/HANDOFF.md` §3.1. In short: FOC-990
+(#143), FOC-989 (#144), FOC-1000 (#145) and FOC-1007 (#146) are on `main` (CI green); FOC-988 + FOC-1001 are #147
+(open). All six are **In Review** in Linear, not Done — their acceptance lines are VM checks, so Done waits for the
+rc.5 run. The VMs (`fenix-accept`, `fenix-vm`, `neo-ac4-1`) are TERMINATED.
+
+- Verification style used: each branch's full `node scripts/test-run.mjs` in a Linux container with the image's ENV,
+  before/after `find /data`. Clean `main` there: 194/208 and ~490 stray entries under `/data`; with FOC-990:
+  208/208 and none. The isolation lane (base image and thin uid layer) carries the FOC-1001/988 assertions.
+- Decisions (Mateusz): `/opt/fenix` stays writable (deny + ask guard + manifest/`fenix doctor` are the controls); the
+  guard asks rather than denies; follow-ups filed: FOC-1008 (Cockpit drift line), FOC-1009 (read-only Supervisor
+  gitconfig), FOC-1010 (followup test flake under load).
+- Next: #147 merged + green `main` → PR `VERSION` = `1.0.0-rc.5` → merge → tag `v1.0.0-rc.5` (needs his OK) → start
+  `fenix-accept` → walk the §3.1 table → FOC-789 part 2 → snags S1–S21 as backlog (AC2) → FOC-790.
+
 ## 2026-10-22 — FOC-789 acceptance run, part 1 (legacy single Supervisor) done; rc.4 out
 
 Run log (timeline, costs, snags S1–S21): `docs/releases/1.0.0/foc-789-run-log.md`. VM `fenix-accept` (gcloud
