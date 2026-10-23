@@ -970,6 +970,10 @@ deny:
 | `Bash(node --eval *agent-state*)` | overlap |
 | `Edit(//**/agent-state.sqlite)` |  |
 | `Write(//**/agent-state.sqlite)` |  |
+| `Edit(//opt/fenix/**)` |  |
+| `Write(//opt/fenix/**)` |  |
+| `MultiEdit(//opt/fenix/**)` |  |
+| `NotebookEdit(//opt/fenix/**)` |  |
 | `Bash(gh pr create*)` |  |
 | `Bash(gh pr edit*)` |  |
 | `Bash(gh pr comment*)` |  |

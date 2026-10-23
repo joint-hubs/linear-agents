@@ -394,6 +394,13 @@ test("supervisor ask/deny match the pinned child baseline (FOC-900)", () => {
     "mcp__claude_ai_Linear__*",
     "Bash(git worktree remove:*)",
     "Bash(git worktree prune:*)",
+    // FOC-988: Fenix's own code in the image is never the Supervisor's to edit
+    // (it patched /opt/fenix four times on the FOC-789 run). `//` = an absolute
+    // path from the filesystem root; a single `/` would mean the project root.
+    "Edit(//opt/fenix/**)",
+    "Write(//opt/fenix/**)",
+    "MultiEdit(//opt/fenix/**)",
+    "NotebookEdit(//opt/fenix/**)",
   ];
   const missingDeny = requiredDeny.filter((rule) => !deny.includes(rule));
   if (missingDeny.length)

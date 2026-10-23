@@ -312,4 +312,97 @@ pass 'share helper refuses /etc, .., a symlinked launch dir, and a root run'
 
 rm -rf "$SHARE_RUN" "$SHARE_TARGET"
 
+# FOC-1001/988: production node processes run with HOME=/home/node; this lane's
+# root shell has HOME=/root, which node cannot read (git would warn about it).
+as_node_home() {
+    run_as_node "export HOME=/home/node; $1"
+}
+
+# ── FOC-1001: the Supervisor reads a child-owned worktree without trusting it ─
+# By now the worktree and its per-worktree gitdir belong to fenix-child (the
+# real handover). git run there as node stops at "dubious ownership"; the
+# workaround the Supervisor used on the FOC-789 run — a safe.directory — lets
+# whatever the child planted run as node. The scripts read such a tree through
+# supervisor-lib's one-shot, sanitised invocation instead.
+WT_GITDIR=/data/workspaces/seed-repo/.git/worktrees/t1
+[ "$(stat -c %U "$WORKTREE")" = "fenix-child" ] || fail "the worktree is not child-owned ($(stat -c %U "$WORKTREE")) — the handover precondition is gone"
+[ -d "$WT_GITDIR" ] || fail "no per-worktree gitdir at $WT_GITDIR"
+rc=0
+out=$(as_node_home "git -C $WORKTREE status --porcelain 2>&1") || rc=$?
+[ "$rc" != "0" ] && printf '%s' "$out" | grep -q 'dubious ownership' \
+    || fail "plain git in a child-owned worktree did not stop at dubious ownership (rc=$rc): $out"
+pass 'plain git in a child-owned worktree stops at dubious ownership'
+
+# What a hostile child plants: a command in the per-worktree config. It is only
+# read when the repository enables extensions.worktreeConfig, so enable it —
+# the worst case — and make the planted file the child's.
+as_node_home 'git -C /data/workspaces/seed-repo config extensions.worktreeConfig true' || fail 'could not enable extensions.worktreeConfig'
+printf '[core]\n\tfsmonitor = "echo planted > /tmp/iso-fsmonitor; true"\n' > "$WT_GITDIR/config.worktree"
+chown fenix-child:fenix "$WT_GITDIR/config.worktree"
+
+# Control: trusting the tree by hand (what the Supervisor did) runs the plant.
+rm -f /tmp/iso-fsmonitor
+as_node_home "git -c safe.directory=$WORKTREE -C $WORKTREE status --porcelain >/dev/null 2>&1" || true
+if [ -f /tmp/iso-fsmonitor ]; then
+    pass 'control: safe.directory alone executes the child-planted core.fsmonitor as node (the hazard is real)'
+else
+    printf 'INFO control: this git did not run the planted fsmonitor — the sanctioned path is asserted below regardless\n'
+fi
+rm -f /tmp/iso-fsmonitor
+
+# The sanctioned path: supervisor-lib's git() — safe.directory for this call and
+# this tree only, hooks and fsmonitor off. It must read the tree and run nothing.
+rc=0
+head=$(as_node_home "node --input-type=module -e \"import { git } from '/opt/fenix/scripts/supervisor-lib.mjs'; process.stdout.write(git(['rev-parse', 'HEAD'], '$WORKTREE'))\"") || rc=$?
+[ "$rc" = "0" ] && [ "${#head}" = "40" ] || fail "supervisor-lib git() could not read the child-owned worktree (rc=$rc): $head"
+rc=0
+as_node_home "node --input-type=module -e \"import { git, dirtyTreeReport } from '/opt/fenix/scripts/supervisor-lib.mjs'; git(['status', '--porcelain'], '$WORKTREE'); const d = dirtyTreeReport('$WORKTREE'); if (d.some((l) => l.startsWith('<git status failed'))) { console.error(d.join('\n')); process.exit(3); }\"" || rc=$?
+[ "$rc" = "0" ] || fail "status / dirtyTreeReport through the sanctioned path failed (rc=$rc)"
+[ ! -f /tmp/iso-fsmonitor ] || fail 'the sanctioned read EXECUTED the child-planted core.fsmonitor'
+pass 'supervisor-lib reads the child-owned worktree (rev-parse, status, dirtyTreeReport) and runs nothing the child planted'
+
+rc=0
+trusted=$(as_node_home 'git config --global --get-all safe.directory 2>&1') || rc=$?
+[ "$rc" != "0" ] && [ -z "$trusted" ] || fail "a persistent safe.directory exists after the reads: $trusted"
+pass 'no safe.directory was written anywhere by the reads'
+
+# The Supervisor's own Bash hook, in the real image: both boundary classes ask.
+hook() { printf '%s' "$1" | FENIX_IN_CONTAINER=1 LA_ROOT=/opt/fenix LA_WORKTREE_HOME=/data/workspaces/la-wt node /opt/fenix/scripts/supervisor-ask-guard.mjs; }
+hook "{\"tool_name\":\"Bash\",\"cwd\":\"/data/workspaces\",\"tool_input\":{\"command\":\"git config --global --add safe.directory $WORKTREE\"}}" | grep -q 'FOC-1001: git safe.directory' \
+    || fail 'the guard did not ask for git config safe.directory'
+hook "{\"tool_name\":\"Bash\",\"cwd\":\"/data/workspaces\",\"tool_input\":{\"command\":\"git -C $WORKTREE push -u origin iso-t1\"}}" | grep -q 'FOC-1001: git in a child worktree' \
+    || fail 'the guard did not ask for git inside a child worktree'
+[ -z "$(hook '{"tool_name":"Bash","cwd":"/data/workspaces","tool_input":{"command":"git -C /data/workspaces/seed-repo log --oneline"}}')" ] \
+    || fail 'the guard spoke for git in the main checkout'
+pass 'the ask guard raises FOC-1001 for safe.directory and for git in a child worktree, and stays silent for the main checkout'
+
+# ── FOC-988: Fenix's own code — the guard asks, the manifest detects ─────────
+hook "{\"tool_name\":\"Bash\",\"cwd\":\"/data/workspaces\",\"tool_input\":{\"command\":\"sed -i s/a/b/ /opt/fenix/scripts/supervisor-spawn.mjs\"}}" | grep -q "FOC-988: write to Fenix's own code" \
+    || fail 'the guard did not ask for a Bash write into /opt/fenix'
+pass 'the ask guard raises FOC-988 for a Bash write into /opt/fenix'
+
+MANIFEST=/usr/local/share/fenix/manifest.json
+[ -f "$MANIFEST" ] || fail "no $MANIFEST in the image — the drift check has nothing to compare with"
+[ "$(stat -c '%U:%a' "$MANIFEST")" = "root:444" ] || fail "the manifest is not root:0444 ($(stat -c '%U:%a' "$MANIFEST"))"
+as_node_home "test ! -w $(dirname "$MANIFEST") && test ! -w $MANIFEST" || fail 'the runtime user can write the manifest or its directory'
+pass 'the image manifest is root-owned and not writable by the runtime user'
+
+# On a fresh image (and on the thin uid layer — content hashes only) it is clean.
+rc=0
+out=$(as_node_home 'node /opt/fenix/scripts/fenix-manifest.mjs check 2>&1') || rc=$?
+[ "$rc" = "0" ] || fail "a fresh image does not match its own manifest (rc=$rc): $out"
+pass 'fenix-manifest check is clean on the fresh image'
+
+# The tree is writable by design (Edit/Write are denied and Bash asks, the
+# filesystem is not the control) — so a patch made anyway must be DETECTED.
+as_node_home 'printf "\n// patched at runtime\n" >> /opt/fenix/scripts/supervisor-spawn.mjs' || fail 'could not simulate a runtime patch'
+rc=0
+out=$(as_node_home 'node /opt/fenix/scripts/fenix-manifest.mjs check 2>&1') || rc=$?
+[ "$rc" = "1" ] && printf '%s' "$out" | grep -q 'modified  scripts/supervisor-spawn.mjs' \
+    || fail "a patched file was not reported (rc=$rc): $out"
+doctor=$(as_node_home 'cd /opt/fenix && node scripts/fenix-doctor.mjs --json 2>/dev/null' || true)
+printf '%s' "$doctor" | node -e 'let s = ""; process.stdin.on("data", (d) => { s += d; }).on("end", () => { const c = JSON.parse(s).checks.find((x) => x.name === "fenix code"); process.exit(c && c.status === "fail" && /supervisor-spawn\.mjs \(modified\)/.test(c.detail) ? 0 : 1); });' \
+    || fail "fenix doctor did not report the patched file: $doctor"
+pass 'a runtime patch to /opt/fenix is reported by fenix-manifest check and by fenix doctor'
+
 printf 'FOC-802 isolation lane: ALL GREEN\n'
