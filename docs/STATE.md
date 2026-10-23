@@ -3,6 +3,8 @@
 > Stan długiej pracy. Sesje wypadają z kontekstu — ten plik to tani start. Aktualizuj po każdej fazie.
 > Fenix supervisor contract: `agents/supervisor/CLAUDE.md`. Squad model routing: `config/models.json`. Execution plan: `docs/BUILD-BACKLOG.md`. Atlas delegation is a separate mechanism.
 
+> **Hand-off for the next engineer: `docs/HANDOFF.md` (2026-10-23)** — state, blockers in order, VM ops, gotchas.
+
 ## 2026-10-22 — FOC-789 acceptance run, part 1 (legacy single Supervisor) done; rc.4 out
 
 Run log (timeline, costs, snags S1–S21): `docs/releases/1.0.0/foc-789-run-log.md`. VM `fenix-accept` (gcloud
