@@ -130,6 +130,18 @@ RUN cd ui && npm ci
 COPY --chown=node:node . .
 RUN cd ui && npm run build && rm -rf node_modules && chmod +x /opt/fenix/docker/entrypoint.sh
 
+# FOC-988: a manifest of SHA-256 sums of this image's own code, for the drift
+# check in `fenix doctor` (scripts/fenix-manifest.mjs). The Supervisor patched
+# /opt/fenix four times on the FOC-789 run; the tree stays writable by design
+# (Edit/Write are denied and the Bash guard asks), so the evidence is kept where
+# the runtime user cannot rewrite it: root-owned, outside /opt/fenix, read-only.
+# It hashes content only, so the uid layer (docker/Dockerfile.uid) leaves it valid.
+USER root
+RUN mkdir -p /usr/local/share/fenix \
+    && node /opt/fenix/scripts/fenix-manifest.mjs write --root /opt/fenix --out /usr/local/share/fenix/manifest.json \
+    && chmod 0444 /usr/local/share/fenix/manifest.json
+USER node
+
 # FOC-808: package caches live on the fenix-cache volume (/home/node/.cache,
 # mounted by compose) so they survive `fenix update` instead of sitting in the
 # container layer. entrypoint.sh creates the subdirs; `fenix prune` sizes and

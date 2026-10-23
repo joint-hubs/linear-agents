@@ -20,6 +20,7 @@ import {
   applyGhFloor,
   checkCaches,
   ghBelowFloor,
+  checkFenixCode,
   checkPermissionMode,
   checkProjectsDir,
   checkRunOwners,
@@ -29,6 +30,7 @@ import {
   runChecks,
   summarize,
 } from "./fenix-doctor.mjs";
+import { buildManifest, compareToManifest, listCodeFiles, readManifest } from "./fenix-manifest.mjs";
 import { pidAlive } from "./supervisor-current-run.mjs";
 import { currentOwner } from "./run-owner.mjs";
 
@@ -253,6 +255,8 @@ test("with FENIX_IN_CONTAINER=1 both uid checks run, with injected paths", async
     // After the existing checks, before anything else.
     assert.equal(checks[checks.length - 2].name, "secrets readable");
     assert.equal(checks[checks.length - 1].name, "config writable");
+    // FOC-988: the drift check runs in the container too, just ahead of them.
+    assert.equal(checks[checks.length - 3].name, "fenix code");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1015,6 +1019,155 @@ test("the Dockerfile's build-time floor is the doctor's floor", () => {
   assert.equal(arg[1], GH_MIN_VERSION);
   assert.match(dockerfile, /cli\.github\.com\/packages/, "gh must come from GitHub's own apt repo");
   assert.doesNotMatch(dockerfile, /apt-get install[^\n]*\bgh\b[^\n]*tini/, "gh must not be installed from Debian's package in the base apt line");
+});
+
+// ── fenix code drift (FOC-988) ───────────────────────────────────────────────
+console.log("\nfenix-doctor: fenix code vs the image manifest (FOC-988)");
+
+// A tiny stand-in for /opt/fenix: the covered dirs and files, plus things the
+// manifest must ignore (node_modules, build output, caches).
+function fakeFenixTree() {
+  const root = tempDir();
+  const put = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), text);
+  };
+  put("scripts/supervisor-spawn.mjs", "export const guard = 'duplicate-child-id';\n");
+  put("scripts/supervisor-lib.mjs", "export const x = 1;\n");
+  put("config/models.json", "{}\n");
+  put("agents/supervisor/CLAUDE.md", "# supervisor\n");
+  put("docker/entrypoint.sh", "#!/bin/sh\n");
+  put("package.json", "{}\n");
+  put("VERSION", "1.0.0-rc.4\n");
+  // ignored: dependencies, build output, caches
+  put("node_modules/x/index.js", "x");
+  put("ui/dist/app.js", "x");
+  put("scripts/__pycache__/a.pyc", "x");
+  put("scripts/run.log", "x");
+  return { root, put };
+}
+
+test("manifest: covers the code dirs and files, ignores node_modules, ui/dist and caches", () => {
+  const { root } = fakeFenixTree();
+  try {
+    assert.deepEqual(listCodeFiles(root), [
+      "VERSION",
+      "agents/supervisor/CLAUDE.md",
+      "config/models.json",
+      "docker/entrypoint.sh",
+      "package.json",
+      "scripts/supervisor-lib.mjs",
+      "scripts/supervisor-spawn.mjs",
+    ]);
+    const manifest = buildManifest(root);
+    assert.equal(manifest.version, 1);
+    assert.match(manifest.files["scripts/supervisor-spawn.mjs"], /^[0-9a-f]{64}$/);
+    assert.deepEqual(compareToManifest(manifest, root), { modified: [], missing: [], added: [] });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("manifest: an edited file is 'modified', a deleted one 'missing', a new one 'added'", () => {
+  const { root, put } = fakeFenixTree();
+  try {
+    const manifest = buildManifest(root);
+    put("scripts/supervisor-spawn.mjs", "export const guard = null; // duplicate-child-id disabled\n");
+    fs.rmSync(path.join(root, "config/models.json"));
+    put("scripts/fenix-patch.mjs", "// new\n");
+    assert.deepEqual(compareToManifest(manifest, root), {
+      modified: ["scripts/supervisor-spawn.mjs"],
+      missing: ["config/models.json"],
+      added: ["scripts/fenix-patch.mjs"],
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("manifest: reading — absent is null, garbage and foreign versions are errors", () => {
+  const dir = tempDir();
+  try {
+    assert.equal(readManifest(path.join(dir, "nope.json")), null);
+    const bad = path.join(dir, "bad.json");
+    fs.writeFileSync(bad, "{not json");
+    assert.match(readManifest(bad).error, /not valid JSON/);
+    fs.writeFileSync(bad, JSON.stringify({ version: 99, files: {} }));
+    assert.match(readManifest(bad).error, /not a version 1 manifest/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("fenix code: natively there is nothing to check", () => {
+  assert.equal(checkFenixCode({ env: {} }), null);
+});
+
+test("fenix code: clean tree is ok, an edit FAILs naming the file, a new file only WARNs, no manifest WARNs", () => {
+  const { root, put } = fakeFenixTree();
+  const dir = tempDir();
+  const manifestPath = path.join(dir, "manifest.json");
+  try {
+    const noManifest = checkFenixCode({ env: IN_CONTAINER, manifestPath, root });
+    assert.equal(noManifest.status, "warn");
+    assert.match(noManifest.detail, /no manifest in this image/);
+
+    fs.writeFileSync(manifestPath, JSON.stringify(buildManifest(root)));
+    const clean = checkFenixCode({ env: IN_CONTAINER, manifestPath, root });
+    assert.equal(clean.status, "ok");
+    assert.match(clean.detail, /7 files match the image manifest/);
+
+    put("scripts/fenix-patch.mjs", "// stray\n");
+    const added = checkFenixCode({ env: IN_CONTAINER, manifestPath, root });
+    assert.equal(added.status, "warn");
+    assert.match(added.detail, /1 file\(s\) not in the image: scripts\/fenix-patch\.mjs/);
+
+    put("scripts/supervisor-spawn.mjs", "// patched by the Supervisor\n");
+    const drift = checkFenixCode({ env: IN_CONTAINER, manifestPath, root });
+    assert.equal(drift.status, "fail");
+    assert.match(drift.detail, /1 file\(s\) differ from the image: scripts\/supervisor-spawn\.mjs \(modified\)/);
+    assert.match(drift.detail, /raise a hold, never patch it/);
+    assert.match(drift.fix, /fenix update restores the image/);
+
+    fs.rmSync(path.join(root, "scripts/supervisor-lib.mjs"));
+    const both = checkFenixCode({ env: IN_CONTAINER, manifestPath, root });
+    assert.equal(both.status, "fail");
+    assert.match(both.detail, /2 file\(s\) differ/);
+    assert.match(both.detail, /supervisor-lib\.mjs \(missing\)/);
+
+    fs.writeFileSync(manifestPath, "garbage");
+    assert.equal(checkFenixCode({ env: IN_CONTAINER, manifestPath, root }).status, "fail", "an unreadable manifest is not 'fine'");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("fenix code: the list in the detail is capped, the count is not", () => {
+  const { root, put } = fakeFenixTree();
+  const dir = tempDir();
+  const manifestPath = path.join(dir, "manifest.json");
+  try {
+    fs.writeFileSync(manifestPath, JSON.stringify(buildManifest(root)));
+    for (let i = 0; i < 8; i++) put(`config/m${i}.json`, "{}"); // added: warn
+    for (const f of ["scripts/supervisor-spawn.mjs", "scripts/supervisor-lib.mjs", "config/models.json", "agents/supervisor/CLAUDE.md", "docker/entrypoint.sh", "package.json", "VERSION"]) put(f, "changed\n");
+    const c = checkFenixCode({ env: IN_CONTAINER, manifestPath, root });
+    assert.equal(c.status, "fail");
+    assert.match(c.detail, /^7 file\(s\) differ from the image: .*, … \+2 —/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the Dockerfile bakes the manifest outside /opt/fenix, root-owned and read-only (FOC-988)", () => {
+  const dockerfile = fs.readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
+  assert.match(dockerfile, /fenix-manifest\.mjs write --root \/opt\/fenix --out \/usr\/local\/share\/fenix\/manifest\.json/);
+  assert.match(dockerfile, /chmod 0444 \/usr\/local\/share\/fenix\/manifest\.json/);
+  // written as root, then back to the runtime user
+  const at = dockerfile.indexOf("fenix-manifest.mjs write");
+  assert.ok(dockerfile.lastIndexOf("USER root", at) > dockerfile.lastIndexOf("USER node", at), "the manifest step must run as root");
+  assert.ok(dockerfile.indexOf("USER node", at) > at, "the image must return to USER node after it");
 });
 
 console.log(`\nfenix-doctor: ${passed} passed, ${skipped} skipped, ${failures.length} failed`);

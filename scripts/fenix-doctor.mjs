@@ -22,6 +22,7 @@ import { currentOwner, listRunOwners, ownerRelation, supervisorStateRoot } from 
 import { hostBase, hostRequest, FAST_TIMEOUT_MS } from './supervisor-host-client.mjs';
 import { stallSilenceMs } from './supervisor-lib.mjs';
 import { resolveSupervisorPermissionMode } from './supervisor-launch.mjs';
+import { DEFAULT_MANIFEST_PATH, compareToManifest, readManifest } from './fenix-manifest.mjs';
 
 const GIB = 1024 ** 3;
 // FOC-780: the disk check's warn threshold comes from the overlay's
@@ -548,6 +549,41 @@ export function checkRunOwners({ env = process.env, readOwners } = {}) {
 // so tests can point them at temp files. Exported for those tests.
 const DEFAULT_SECRETS_DIR = '/run/secrets';
 
+/**
+ * FOC-988: is the code in the container the code in the image? The build bakes
+ * a manifest of SHA-256 sums (scripts/fenix-manifest.mjs) outside the writable
+ * tree; this re-hashes the live tree. A file that differs or is gone is a FAIL —
+ * the Supervisor patched Fenix four times on the FOC-789 run and told nobody; a
+ * file the image does not have is a WARN. Container only (natively the checkout
+ * is meant to change); null elsewhere.
+ */
+export function checkFenixCode({ env = process.env, fsImpl = fs, manifestPath, root } = {}) {
+  if (env.FENIX_IN_CONTAINER !== '1') return null;
+  const name = 'fenix code';
+  const manifest = readManifest(manifestPath || env.LA_FENIX_MANIFEST || DEFAULT_MANIFEST_PATH, fsImpl);
+  if (manifest === null) {
+    return { name, status: 'warn', detail: 'no manifest in this image (built before FOC-988) — drift cannot be checked', fix: TOOL_FIX };
+  }
+  if (manifest.error) {
+    return { name, status: 'fail', detail: manifest.error, fix: TOOL_FIX };
+  }
+  const drift = compareToManifest(manifest, path.resolve(root || env.LA_ROOT || '/opt/fenix'), fsImpl);
+  const changed = [...drift.modified.map((f) => `${f} (modified)`), ...drift.missing.map((f) => `${f} (missing)`)];
+  const list = (items) => `${items.slice(0, 5).join(', ')}${items.length > 5 ? `, … +${items.length - 5}` : ''}`;
+  if (changed.length) {
+    return {
+      name,
+      status: 'fail',
+      detail: `${changed.length} file(s) differ from the image: ${list(changed)} — Fenix's own code was changed at runtime; the Supervisor must raise a hold, never patch it`,
+      fix: 'fenix update restores the image; read the Supervisor transcript for what it changed and why',
+    };
+  }
+  if (drift.added.length) {
+    return { name, status: 'warn', detail: `${drift.added.length} file(s) not in the image: ${list(drift.added)}`, fix: 'check what created them; fenix update restores the image' };
+  }
+  return { name, status: 'ok', detail: `${Object.keys(manifest.files).length} files match the image manifest` };
+}
+
 /** Every file under secretsDir that exists must be readable by this process. */
 export function checkSecretsReadable(env, fsImpl, secretsDir = DEFAULT_SECRETS_DIR) {
   let names;
@@ -662,6 +698,10 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
   // FOC-803 uid checks: only meaningful in the container, where the process
   // runs as the image's user against host-owned bind mounts.
   if (env.FENIX_IN_CONTAINER === '1') {
+    // FOC-988 first: the two uid checks stay the last two lines of the container
+    // block (a test pins their position).
+    const code = checkFenixCode({ env, fsImpl });
+    if (code) checks.push(code);
     checks.push(checkSecretsReadable(env, fsImpl, secretsDir), checkProjectsDir(env, fsImpl, projectsFile));
   }
   if (withApi) checks.push(await checkApi(fetchImpl, env));
