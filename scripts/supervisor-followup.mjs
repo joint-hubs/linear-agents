@@ -23,6 +23,7 @@ import { childProviderEnv } from "./child-model.mjs";
 import {
   actorIdFor,
   attemptIdFor,
+  freshLaunchDir,
   launchDirFor,
   prepareAgentLaunch,
 } from "./agent-launch-profile.mjs";
@@ -355,10 +356,19 @@ const telemetryContext = (() => {
   const valid = Object.values(wanted).every((value) => isRuntimeToken(value));
   return valid ? wanted : null;
 })();
+// FOC-989: never prepare into a dir that is already there. An earlier launch
+// that died after the child-uid handover leaves fenix-child-owned files the
+// Supervisor cannot fchmod, so re-using its dir fails with EPERM — and the
+// registry's turn count does not always know about that attempt. The occupied
+// dir stays untouched as the record of the failed attempt.
+const launchOutputDir = freshLaunchDir(runDir(runId), childId, turnIndex);
+if (launchOutputDir !== launchDirFor(runDir(runId), childId, turnIndex)) {
+  console.error(`[followup] ${launchDirFor(runDir(runId), childId, turnIndex)} already exists (an earlier launch attempt) — preparing ${launchOutputDir} instead`);
+}
 const launch = prepareAgentLaunch({
   squad: entry.squad,
   role: "lead",
-  outputDir: launchDirFor(runDir(runId), childId, turnIndex),
+  outputDir: launchOutputDir,
   previousConfigDir: prevLaunchDir ?? (historyMode === "session" ? squadConfigDir(entry.squad) : null),
   historyMode,
   previousSessionId: entry.sessionId ?? null,

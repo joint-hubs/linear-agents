@@ -39,6 +39,7 @@ import { basename, join, resolve } from "node:path";
 import {
   actorIdFor,
   attemptIdFor,
+  freshLaunchDir,
   launchDirFor,
   prepareAgentLaunch,
 } from "./agent-launch-profile.mjs";
@@ -795,10 +796,16 @@ const telemetryContext = (() => {
   const valid = Object.values(wanted).every((value) => isRuntimeToken(value));
   return valid ? wanted : null;
 })();
+// FOC-989: a dir left by an earlier attempt for this child id (handed over to
+// the child uid, so not writable as the Supervisor) is never re-prepared.
+const launchOutputDir = freshLaunchDir(runDir(runId), childId, launchTurn);
+if (launchOutputDir !== launchDirFor(runDir(runId), childId, launchTurn)) {
+  console.error(`[spawn] ${launchDirFor(runDir(runId), childId, launchTurn)} already exists (an earlier launch attempt) — preparing ${launchOutputDir} instead`);
+}
 const launch = prepareAgentLaunch({
   squad,
   role: "lead",
-  outputDir: launchDirFor(runDir(runId), childId, launchTurn),
+  outputDir: launchOutputDir,
   env: process.env,
   context: telemetryContext,
 });
