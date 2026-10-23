@@ -257,6 +257,10 @@
       "reason": "in-process MCP handler, injected runner, mkdtemp only (FOC-943)"
     },
     {
+      "file": "mcp-fenix-lifecycle.test.mjs",
+      "reason": "in-process MCP handler, injected runner, mkdtemp state/worktree fixtures; one stdio server process over a pipe and the real supervisor-cleanup.mjs against a temp LA_SUPERVISOR_STATE_HOME (refusal only, Linear key cleared); no ports, no socket binds, no real-repo-path writes (FOC-1007)"
+    },
+    {
       "file": "mcp-fenix-linear.test.mjs",
       "reason": "in-process MCP handler, injected runner, mkdtemp only (FOC-943)"
     },

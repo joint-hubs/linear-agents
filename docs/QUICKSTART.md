@@ -249,6 +249,7 @@ Cockpit, bodies capped at 8 KB, and no response ever carries a key value.
 | `fenix repo list` | repositories in the workspaces volume and the project map |
 | `fenix attach [--new]` | attach to the Supervisor (Claude Code) running in tmux in `fenix-supervisor`; Ctrl-b d detaches and the Supervisor keeps running, `--new` starts a fresh session (kills the current one) |
 | `fenix shell [service]` | shell in a service (default: `fenix-supervisor`) |
+| `fenix cleanup <list\|propose\|remove> [--run <runId>] [--child <id>] [--repo <path>]` | reclaim a finished child's worktree from the host, with the Linear key the script needs. `remove` still refuses unless TEST made the issue Done and you answered the cleanup-approval gate yes; the branch and its commits stay. The Supervisor does the same itself through its `fenix-lifecycle` tool |
 | `fenix update` | `git pull --ff-only`, rebuild with fresh base images, restart |
 | `fenix test [pattern]` | lint and the test suite on Linux, inside the image, on a throwaway copy of this checkout (uncommitted changes included) — the same job CI runs on every PR |
 

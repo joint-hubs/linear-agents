@@ -167,7 +167,7 @@ async function runTests() {
     // always-on and NOT registry-controlled — they are the only servers here).
     assertEq(
       Object.keys(legacyMcp.mcpServers ?? {}).sort().join(","),
-      "fenix-github,fenix-linear",
+      "fenix-github,fenix-lifecycle,fenix-linear",
       "legacy: a disabled registry server is exposed to no one (only the always-on Fenix adapters ride the snapshot)",
     );
     assert(

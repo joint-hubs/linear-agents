@@ -48,6 +48,9 @@ Usage: fenix [command]
   repo add <url|owner/name> [--project <Linear project>]
                    clone a repository into the workspaces volume (optionally map a Linear project)
   repo list        repositories in the workspaces volume and the project map
+  cleanup <list|propose|remove> [--run <runId>] [--child <id>] [--repo <path>]
+                   worktree cleanup of a finished child, with the Linear key the
+                   script needs (remove still needs TEST's Done and your yes)
   update [--source] git pull --ff-only, pull the pinned image (or rebuild with --source), restart
   test [args]      lint and the full test suite on Linux, inside the image
 
@@ -962,6 +965,16 @@ case "$cmd" in
   shell)
     svc="${1:-fenix-supervisor}"
     exec docker compose exec "$svc" "$ENTRYPOINT" shell
+    ;;
+  cleanup)
+    # FOC-1007: through the entrypoint so the script gets the Linear key the
+    # container loads from its secrets (a bare `docker exec node …` has none).
+    # Verbs, flags and refusals are supervisor-cleanup.mjs's own.
+    if [ $# -lt 1 ]; then
+      printf 'usage: fenix cleanup <list|propose|remove> [--run <runId>] [--child <id>] [--repo <path>]\n' >&2
+      exit 2
+    fi
+    exec docker compose exec -T fenix-supervisor "$ENTRYPOINT" cleanup "$@"
     ;;
   update)
     old_ref="$(image_ref)"

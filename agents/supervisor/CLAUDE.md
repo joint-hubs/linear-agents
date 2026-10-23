@@ -30,7 +30,7 @@ You are NOT the orchestrator (`agents/orchestrator/`) — that one stays beside 
 | `supervisor-status.mjs` | snapshot / tail / **`--wait`** — your only way to wait |
 | `supervisor-wake.mjs` | `Stop` hook with `asyncRewake` — wakes you on the next wake-queue row; never call it yourself |
 | `supervisor-stop.mjs` | kill a turn, report what it left behind |
-| `supervisor-cleanup.mjs list\|propose\|remove` | reclaim a child's worktree — TEST pass, plus either a recorded grant covering the tree (landed + archived) or his yes; both keys whenever no grant applies |
+| `supervisor-cleanup.mjs list\|propose\|remove` | reclaim a child's worktree — TEST pass, plus either a recorded grant covering the tree (landed + archived) or his yes; both keys whenever no grant applies. `remove` goes through `mcp__fenix-lifecycle__cleanup_remove` (§8) |
 | `supervisor-verdict.mjs record\|show\|list` | a REVIEW verdict — every finding cites an artefact, an approve maps the ACs |
 | `supervisor-budget.mjs allocate\|status\|authorise\|reconcile` | split the issue budget per stage before anything spends it |
 | `supervisor-focus.mjs set <ticket\|overhead> \| show` | declare what you are working on — your turns are charged to it |
@@ -157,8 +157,10 @@ At run close, and not earlier: only after TEST passed (the issue is Done), and o
 ```
 node $LA_ROOT/scripts/supervisor-cleanup.mjs propose --run <runId> --child <childId>
 node $LA_ROOT/scripts/supervisor-gate.mjs   answer  --gate <gateId> --text "<his answer>"
-node $LA_ROOT/scripts/supervisor-cleanup.mjs remove  --run <runId> --child <childId>
+mcp__fenix-lifecycle__cleanup_remove  { run: <runId>, child: <childId>, repo: <the main checkout, e.g. /data/workspaces/<repo>> }
 ```
+The removal goes through the **`mcp__fenix-lifecycle__cleanup_remove`** tool, not `node …/supervisor-cleanup.mjs remove` (FOC-1007): in auto mode a bare `node` command lands at the classifier, which refused an approved removal as "Irreversible Local Destruction"; the tool is an exact-name channel to the same script, and the script still re-checks both keys. Tool unknown (a launch that does not wire it) → the bare script (`node $LA_ROOT/scripts/supervisor-cleanup.mjs remove --run <runId> --child <childId>`); a classifier refusal there is a hold with the text, not something to work around — the operator runs `fenix cleanup remove …` from the host.
+
 `propose` refuses outright while the issue is unfinished — no gate is emitted, so you never put a cleanup question to him for work TEST has not blessed. The gate carries the dirty paths **verbatim**: relay them, because those are the files that die. `remove` re-checks both keys and refuses if the tree moved since he answered.
 
 What his yes is safe on: **only the checkout goes.** The branch and its commits stay reachable — the script says so in its own `branchNote` on every removal. Say it when you relay the question.

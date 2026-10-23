@@ -607,6 +607,7 @@ export function resolveToolProfile({ squad, role = "lead", env = process.env } =
   if (squad === "supervisor") {
     mcpServers["fenix-linear"] = fenixStdioConfig("server-fenix-linear.mjs");
     mcpServers["fenix-github"] = fenixStdioConfig("server-fenix-github.mjs");
+    mcpServers["fenix-lifecycle"] = fenixStdioConfig("server-fenix-lifecycle.mjs");
   }
 
   return {
