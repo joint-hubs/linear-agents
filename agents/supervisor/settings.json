@@ -31,6 +31,7 @@
       "mcp__fenix-github__pr_create",
       "mcp__fenix-github__pr_edit",
       "mcp__fenix-github__pr_comment",
+      "mcp__fenix-lifecycle__cleanup_remove",
       "Bash(codegraph:*)",
       "Edit",
       "Bash(ls:*)",

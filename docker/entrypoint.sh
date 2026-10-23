@@ -344,6 +344,16 @@ case "${1:-api}" in
         done
         node "$LA_ROOT/scripts/fenix-projects.mjs" list || true
         ;;
+    cleanup)
+        # FOC-1007: the operator's path to the worktree cleanup (`fenix cleanup`).
+        # `remove` re-reads the issue from Linear (key 1 of the two), and the
+        # Linear key reaches this process only through load_secrets above — a
+        # bare `docker exec node …` has none. Same script, same two keys: this
+        # only supplies the environment.
+        shift
+        cd "$LA_ROOT"
+        exec node scripts/supervisor-cleanup.mjs "$@"
+        ;;
     doctor)
         shift
         cd "$LA_ROOT"

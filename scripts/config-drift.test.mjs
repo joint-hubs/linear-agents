@@ -284,7 +284,9 @@ test("kazdy serwer z .mcp.json jest dozwolony w allow-liscie skladow", () => {
   // FOC-958: fenix-control is denied for ALL roles (including the Supervisor) —
   // its answer tools write HUMAN decisions (gate/ask/dialog); a Supervisor with
   // fenix_gate_answer could self-answer its own HITL gate.
-  const SUPERVISOR_ONLY_MCP = ["fenix-linear", "fenix-github"];
+  // FOC-1007: fenix-lifecycle is the Supervisor's worktree-cleanup channel — one
+  // exact tool; the script behind it re-checks both keys (TEST pass + the human's yes).
+  const SUPERVISOR_ONLY_MCP = ["fenix-linear", "fenix-github", "fenix-lifecycle"];
   // Denied for EVERY role including the Supervisor (FOC-958): its answer tools
   // write HUMAN decisions (gate/ask/dialog) — no process may self-answer a
   // HITL gate.  The transport is stdio, driven by a local operator client.
@@ -298,6 +300,7 @@ test("kazdy serwer z .mcp.json jest dozwolony w allow-liscie skladow", () => {
     "mcp__fenix-github__pr_create",
     "mcp__fenix-github__pr_edit",
     "mcp__fenix-github__pr_comment",
+    "mcp__fenix-lifecycle__cleanup_remove",
   ];
   const servers = Object.keys(readJson(".mcp.json").mcpServers || {});
   const missing = [];

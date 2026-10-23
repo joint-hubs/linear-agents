@@ -29,6 +29,11 @@
       "command": "node",
       "args": ["scripts/mcp/server-fenix-github.mjs"]
     },
+    "fenix-lifecycle": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["scripts/mcp/server-fenix-lifecycle.mjs"]
+    },
     "fenix-control": {
       "type": "stdio",
       "command": "node",
