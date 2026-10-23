@@ -177,6 +177,21 @@ test("a run with none of children.json / gates/ / holds.json is skipped", () => 
   if (recentRunIds({}).includes(runId)) fail("signal-less run listed");
 });
 
+test("a leaked test-* fixture run is ignored, its holds never become Needs-you cards (FOC-990)", () => {
+  // The FOC-789 VM run: supervisor-triage.test left test-triage-<pid>-<n> dirs in
+  // the real state home and their ownership holds showed up as 7 phantom cards.
+  const leaked = fixtureRun("test-triage");
+  writeHolds(leaked, [holdRecord()]);
+  const real = fixtureRun();
+  writeHolds(real, [holdRecord()]);
+  const ids = recentRunIds({});
+  if (ids.includes(leaked)) fail(`fixture run listed: ${leaked}`);
+  if (!ids.includes(real)) fail("a real run dropped");
+  const items = collectNeedsYou({ stateHome: HOME, now: Date.now() });
+  if (items.some((i) => i.runId === leaked)) fail("a fixture run's hold surfaced in Needs-you");
+  if (!items.some((i) => i.runId === real)) fail("a real run's hold went missing");
+});
+
 test("one fresh signal keeps a run in (holds.json fresh, registry old)", () => {
   const runId = fixtureRun();
   writeRegistry(runId, {});
