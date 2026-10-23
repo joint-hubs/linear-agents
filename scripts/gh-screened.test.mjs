@@ -20,7 +20,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const NODE = process.execPath;
 const WRAPPER = join(__dirname, "gh-screened.mjs");
 
-const { classifyVerb, collectText, unscreenedSourceFlag } = await import(pathToFileURL(WRAPPER).href);
+const { classifyVerb, collectText, restEditNumber, unscreenedSourceFlag } = await import(pathToFileURL(WRAPPER).href);
 
 // Fake constructions — NOT credentials. Split literals, never contiguous.
 const FAKE_SK_OR = "sk-or-".concat("v1-", "0123456789abcdef", "0123456789abcdef", "0123456789abcdef", "0123456789abcdef");
@@ -48,8 +48,17 @@ function makeFakeGh(dir) {
   writeFileSync(
     fakePath,
     [
-      'import { appendFileSync } from "node:fs";',
-      'appendFileSync(process.env.FAKE_GH_LOG, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");',
+      'import { appendFileSync, existsSync, readFileSync } from "node:fs";',
+      "const argv = process.argv.slice(2);",
+      'appendFileSync(process.env.FAKE_GH_LOG, JSON.stringify(argv) + "\\n", "utf8");',
+      // FOC-1000: `-F body=@file` — keep what was in the file and whether it still exists later.
+      'const bodyArg = argv.find((a) => a.startsWith("body=@"));',
+      'if (bodyArg) appendFileSync(process.env.FAKE_GH_LOG + ".body", readFileSync(bodyArg.slice(6), "utf8"), "utf8");',
+      // FOC-1000: one verb can be made to fail with a given stderr (the sunset-API message).
+      'if (process.env.FAKE_GH_FAIL_VERB && process.env.FAKE_GH_FAIL_VERB === argv.slice(0, 2).join(" ")) {',
+      '  process.stderr.write(process.env.FAKE_GH_FAIL_STDERR || "failed\\n");',
+      "  process.exit(1);",
+      "}",
       "process.exit(Number(process.env.FAKE_GH_EXIT || 0));",
     ].join("\n"),
     "utf8",
@@ -400,6 +409,78 @@ console.log("spawn: pr create ... -- -f passes through (-f after -- is a positio
   const r = runWrapper(args);
   assert(r.status === 0, "exit 0 (the -f after -- is a positional)");
   assert(JSON.stringify(lastLogArgv(r.log())) === JSON.stringify(args), "fake gh received exactly that argv");
+}
+
+// ---------------------------------------------------------------------------
+// 16. FOC-1000: an old gh fails `pr edit` on the sunset Projects (classic) API —
+//     the wrapper retries it as a REST PATCH, screened text only
+// ---------------------------------------------------------------------------
+
+const CLASSIC_ERR = "GraphQL: Projects (classic) is being deprecated in favor of the new Projects experience (repository.pullRequest.projectCards)\n";
+const classicFail = { FAKE_GH_FAIL_VERB: "pr edit", FAKE_GH_FAIL_STDERR: CLASSIC_ERR };
+
+console.log("unit: restEditNumber");
+{
+  assert(restEditNumber(["pr", "edit", "139", "--title", "T", "--body-file", "b.md"]) === "139", "number + title + body-file");
+  assert(restEditNumber(["pr", "edit", "7", "-t", "T", "-b", "B"]) === "7", "short separated flags");
+  assert(restEditNumber(["pr", "edit", "7", "--title=T", "-bB", "-F=b.md"]) === "7", "inline and attached spellings");
+  assert(restEditNumber(["pr", "edit", "7", "--add-label", "x"]) === null, "a label edit has no REST equivalent here");
+  assert(restEditNumber(["pr", "edit", "7", "--base", "main", "--title", "T"]) === null, "--base is not mapped");
+  assert(restEditNumber(["pr", "edit", "my-branch", "--title", "T"]) === null, "a branch instead of a number is not mapped");
+  assert(restEditNumber(["pr", "edit", "https://github.com/o/r/pull/7", "--title", "T"]) === null, "a URL instead of a number is not mapped");
+  assert(restEditNumber(["pr", "edit", "7", "--title", "8"]) === "7", "a numeric title value is a flag value, not the number");
+}
+
+console.log("spawn: pr edit on the sunset-API failure retries as a REST PATCH");
+{
+  const bodyFile = join(TEMP_DIR, "rest-body.md");
+  writeFileSync(bodyFile, "Line one.\n\nLine two with `code`.\n", "utf8");
+  const r = runWrapper(["pr", "edit", "139", "--title", "New title", "--body-file", bodyFile], { env: classicFail });
+  const lines = (r.log() ?? "").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  assert(r.status === 0, "exit 0 (the REST retry succeeded)");
+  assert(lines.length === 2, "gh ran twice: pr edit, then the REST call");
+  assert(lines[0]?.[0] === "pr" && lines[0]?.[1] === "edit", "first the original pr edit, argv untouched");
+  const api = lines[1] ?? [];
+  assert(api[0] === "api" && api.includes("PATCH"), "second call is gh api -X PATCH");
+  assert(api.includes("repos/{owner}/{repo}/pulls/139"), "targets the PR by number, repo from gh's placeholders");
+  assert(api.includes("title=New title"), "the title travels as -f title=...");
+  const bodyArg = api.find((a) => a.startsWith("body=@")) ?? "";
+  assert(bodyArg !== "" && !bodyArg.includes(bodyFile), "the body travels as a temp file, not the caller's file");
+  assert(readFileSync(`${join(TEMP_DIR, "gh-log-" + runSeq + ".txt")}.body`, "utf8") === "Line one.\n\nLine two with `code`.\n", "the temp file held the exact body");
+  assert(!existsSync(bodyArg.slice(6)), "the temp body file is removed after the run");
+  assert(r.err.includes("Projects (classic)"), "gh's own error is still shown");
+  assert(r.err.includes("retrying #139 as REST PATCH"), "the retry is announced on stderr");
+}
+
+console.log("spawn: the REST retry works for a title-only edit and a --body literal");
+{
+  const t = runWrapper(["pr", "edit", "5", "--title", "Only title"], { env: classicFail });
+  const tApi = lastLogArgv(t.log());
+  assert(t.status === 0 && tApi[0] === "api", "title-only: retried via api");
+  assert(tApi.includes("title=Only title") && !tApi.some((a) => a.startsWith("body=@")), "title-only: no body field");
+  const b = runWrapper(["pr", "edit", "5", "--body", "Literal body"], { env: classicFail });
+  const bApi = lastLogArgv(b.log());
+  assert(b.status === 0 && bApi[0] === "api" && !bApi.some((a) => a.startsWith("title=")), "body-only: no title field");
+  assert(readFileSync(`${join(TEMP_DIR, "gh-log-" + runSeq + ".txt")}.body`, "utf8") === "Literal body", "body-only: literal body in the temp file");
+}
+
+console.log("spawn: no REST retry for other failures, other flags, or a clean run");
+{
+  const other = runWrapper(["pr", "edit", "5", "--title", "T"], { env: { FAKE_GH_FAIL_VERB: "pr edit", FAKE_GH_FAIL_STDERR: "GraphQL: Could not resolve to a PullRequest\n" } });
+  assert(other.status === 1, "another gh failure keeps its exit code");
+  assert((other.log() ?? "").trim().split("\n").length === 1, "and is not retried");
+  const labels = runWrapper(["pr", "edit", "5", "--title", "T", "--add-label", "x"], { env: classicFail });
+  assert(labels.status === 1 && (labels.log() ?? "").trim().split("\n").length === 1, "classic error + a label flag: no REST equivalent, gh's failure stands");
+  const clean = runWrapper(["pr", "edit", "5", "--title", "T"]);
+  assert(clean.status === 0 && (clean.log() ?? "").trim().split("\n").length === 1, "a clean pr edit runs once");
+  const view = runWrapper(["pr", "view", "5"], { env: { FAKE_GH_FAIL_VERB: "pr view", FAKE_GH_FAIL_STDERR: CLASSIC_ERR } });
+  assert(view.status === 1 && (view.log() ?? "").trim().split("\n").length === 1, "other verbs never retry");
+}
+
+console.log("spawn: the egress screen still comes first on the pr edit path");
+{
+  const r = runWrapper(["pr", "edit", "5", "--body", `see ${FAKE_SK_OR}`], { env: classicFail });
+  assert(r.status === 1 && r.log() === null, "a secret-shaped body is blocked before any gh call, retry included");
 }
 
 // ---------------------------------------------------------------------------

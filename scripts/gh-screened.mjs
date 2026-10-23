@@ -32,7 +32,9 @@
  * LA_GH_COMMAND env seam (a JSON array, e.g. ["node","C:/x/fake-gh.mjs"]); default ["gh"].
  */
 
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { assertEgressClean, EgressBlockedError } from "./egress-screen.mjs";
@@ -146,8 +148,48 @@ export function collectText(argv, { readFile, readStdin }) {
   return { title, body };
 }
 
+// FOC-1000: `gh pr edit` of gh < 2.4x asks GraphQL for repository.pullRequest
+// .projectCards, which GitHub sunset ("Projects (classic) is being deprecated"),
+// so it fails on every PR. The image now installs a current gh; this is the
+// defense in depth for an old binary that still gets there.
+const CLASSIC_PROJECTS_RE = /Projects \(classic\)|projectCards/;
+
+/**
+ * The PR number when this `pr edit` is expressible as a plain REST
+ * `PATCH /repos/{owner}/{repo}/pulls/{n}` — a numeric PR plus only
+ * --title/--body/--body-file in any spelling — else null. Labels, reviewers,
+ * --base, a branch or URL instead of a number: no REST equivalent here, so no
+ * fallback and gh's own failure stands.
+ */
+export function restEditNumber(argv) {
+  let number = null;
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (number === null && /^\d+$/.test(a)) { number = a; continue; }
+    if (["--title", "--body", "--body-file", "-t", "-b", "-F"].includes(a)) { i++; continue; }
+    if (/^--(?:title|body|body-file)=/.test(a) || /^-[tbF]./.test(a)) continue;
+    return null;
+  }
+  return number;
+}
+
+/** The REST PATCH, as gh api argv; the body travels as a file (-F body=@file) so a
+ * 60 KB body never rides the command line. Returns { argv, dir } — dir is removed by the caller. */
+function restEditArgv(number, { title, body }) {
+  const args = ["api", "-X", "PATCH", `repos/{owner}/{repo}/pulls/${number}`, "--jq", ".html_url"];
+  let dir = null;
+  if (title !== null) args.push("-f", `title=${title}`);
+  if (body !== null) {
+    dir = mkdtempSync(join(tmpdir(), "gh-screened-"));
+    const bodyFile = join(dir, "body.md");
+    writeFileSync(bodyFile, body, "utf8");
+    args.push("-F", `body=@${bodyFile}`);
+  }
+  return { argv: args, dir };
+}
+
 /** Collect, validate and join the screenable text; exits 2 on an unscreened
- * source, returns null when there is no text (pr edit, labels only). */
+ * source. `text` is null when there is none (pr edit, labels only). */
 function readScreenedText(argv, verb) {
   const unscreened = unscreenedSourceFlag(argv);
   if (unscreened !== null) {
@@ -170,7 +212,7 @@ function readScreenedText(argv, verb) {
     const parts = [];
     if (title !== null) parts.push(title);
     if (body !== null) parts.push(body);
-    return parts.length > 0 ? parts.join("\n\n") : null;
+    return { text: parts.length > 0 ? parts.join("\n\n") : null, title, body };
   } catch (err) {
     console.error(`gh-screened: ${err.message}`);
     process.exit(2);
@@ -205,7 +247,7 @@ function runCli(argv) {
   }
   // Pass-through verbs carry no PR text: their flags (--web on pr view, ...)
   // are gh's business, so the text parser never sees them.
-  const text = kind === "screened" ? readScreenedText(argv, verb) : null;
+  const { text, title, body } = kind === "screened" ? readScreenedText(argv, verb) : { text: null, title: null, body: null };
   if (text !== null) {
     try {
       assertEgressClean(text, `gh ${verb} title+body`);
@@ -218,12 +260,37 @@ function runCli(argv) {
     }
   }
   const cmd = ghCommand();
-  const res = spawnSync(cmd[0], [...cmd.slice(1), ...argv], { stdio: "inherit" });
+  // `pr edit` with text is the one verb with a fallback (FOC-1000), so its
+  // stderr is captured to recognise the sunset-API failure and re-emitted as is.
+  const restNumber = verb === "pr edit" && (title !== null || body !== null) ? restEditNumber(argv) : null;
+  const res = spawnSync(cmd[0], [...cmd.slice(1), ...argv], {
+    stdio: restNumber === null ? "inherit" : ["inherit", "inherit", "pipe"],
+    encoding: "utf8",
+  });
   if (res.error) {
     console.error(`gh-screened: gh not found (${res.error.message})`);
     process.exit(127);
   }
+  if (restNumber !== null && res.stderr) process.stderr.write(res.stderr);
   if (res.signal) process.exit(1);
+  if (restNumber !== null && res.status !== 0 && CLASSIC_PROJECTS_RE.test(res.stderr ?? "")) {
+    console.error(`gh-screened: gh pr edit hit the sunset Projects (classic) API (old gh binary) — retrying #${restNumber} as REST PATCH /pulls/${restNumber}; the text above was screened already`);
+    const rest = restEditArgv(restNumber, { title, body });
+    let code;
+    try {
+      const retry = spawnSync(cmd[0], [...cmd.slice(1), ...rest.argv], { stdio: "inherit" });
+      if (retry.error) {
+        console.error(`gh-screened: gh not found (${retry.error.message})`);
+        code = 127;
+      } else {
+        code = retry.signal ? 1 : (retry.status ?? 1);
+      }
+    } finally {
+      // process.exit skips finally blocks — the exit is after the cleanup.
+      if (rest.dir) rmSync(rest.dir, { recursive: true, force: true });
+    }
+    process.exit(code);
+  }
   process.exit(res.status ?? 1);
 }
 
