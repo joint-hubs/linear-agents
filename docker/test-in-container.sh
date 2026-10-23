@@ -44,7 +44,12 @@ else
 fi
 
 # The image points these at the /data volume; the suite must use its own temp state.
-unset LA_DATA_HOME LA_TELEMETRY_HOME LA_SUPERVISOR_STATE_HOME LA_SQUAD_HOME LA_WORKTREE_HOME GITHUB_ROOT FENIX_IN_CONTAINER TELEMETRY_HOST
+# The list lives in scripts/test-runtime-env.json (FOC-990) — scripts/test-run.mjs
+# strips the same one, so a child running the suite directly matches CI. A plain
+# assignment, so `set -e` stops the script if the list cannot be read.
+runtime_env="$(node -p "JSON.parse(require('fs').readFileSync('scripts/test-runtime-env.json','utf8')).unset.join(' ')")"
+# shellcheck disable=SC2086
+unset $runtime_env
 export LA_ROOT="$WORK"
 
 rc=0

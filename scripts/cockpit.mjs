@@ -185,6 +185,11 @@ export function recentRunIds({ stateHome = supervisorStateHome(), now = Date.now
   const runs = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
+    // FOC-990: `test-*` dirs are suite fixtures (supervisor-test-fixtures, the
+    // triage test). A suite that leaks one into the real state home must not
+    // surface its holds as Needs-you cards. No real run id starts with `test-`:
+    // run ids are `<timestamp>-supervisor-<hex>`.
+    if (entry.name.startsWith("test-")) continue;
     const newest = newestRunMtimeMs(home, entry.name);
     if (newest > 0 && newest >= cutoff) runs.push({ runId: entry.name, newest });
   }

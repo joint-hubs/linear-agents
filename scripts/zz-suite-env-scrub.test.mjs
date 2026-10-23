@@ -12,6 +12,10 @@
 //
 // Run: node scripts/test-all.mjs zz-suite-env-scrub
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 let passed = 0;
 const failures = [];
 
@@ -32,7 +36,14 @@ test("no LA_SUPERVISOR* variable in the suite environment", () => {
   if (leaked.length) fail(`leaked into the suite env: ${leaked.join(", ")}`);
 });
 
-console.log(`\n${passed}/1 passed.`);
+// FOC-990: the runtime path/state env list shared with docker/test-in-container.sh.
+test("no runtime path/state variable (scripts/test-runtime-env.json) in the suite environment", () => {
+  const { unset } = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "test-runtime-env.json"), "utf8"));
+  const leaked = unset.filter((k) => k in process.env);
+  if (leaked.length) fail(`leaked into the suite env: ${leaked.join(", ")}`);
+});
+
+console.log(`\n${passed}/2 passed.`);
 if (failures.length > 0) {
   console.error(`${failures.length} test(s) failed.`);
   process.exit(1);

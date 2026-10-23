@@ -144,6 +144,9 @@ function sandbox(lanes, files) {
   // real one so module resolution walks from the sandbox and finds it.
   symlinkSync(join(HERE, "..", "node_modules"), join(root, "node_modules"), "junction");
   writeFileSync(join(scripts, "test-lanes.json"), JSON.stringify(lanes, null, 2));
+  // The runner reads this list at start (FOC-990) — it is data, not an import,
+  // so the dependency closure above does not carry it.
+  copyFileSync(join(HERE, "test-runtime-env.json"), join(scripts, "test-runtime-env.json"));
   for (const [name, body] of Object.entries(files)) writeFileSync(join(scripts, name), body);
   return root;
 }

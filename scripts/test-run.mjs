@@ -255,6 +255,16 @@ delete suiteEnv.LA_TASK_OWNER;
 // its MCP servers, the test itself. Suite processes get no mark; a test that
 // needs one sets it explicitly on its own child env.
 delete suiteEnv.LA_CHILD_MARK;
+// FOC-990: the runtime's path/state env (LA_DATA_HOME, LA_STATE_ROOT, GITHUB_ROOT,
+// ...). In the Fenix container the image points them at the /data volume, so a
+// suite file that honours one writes into the live install — fixture runs under
+// /data/state, seed repos under /data/workspaces. docker/test-in-container.sh
+// unsets the same list for CI; reading it from one file keeps a child that runs
+// `node scripts/test-run.mjs` directly exactly as hermetic as CI. A test that
+// needs one sets it on its own child env.
+for (const key of JSON.parse(readFileSync(join(SCRIPTS_DIR, 'test-runtime-env.json'), 'utf8')).unset) {
+  delete suiteEnv[key];
+}
 
 // ── child env: pin the settings overlay seam ─────────────────────────────────
 

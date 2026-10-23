@@ -65,6 +65,21 @@ const clone = () => JSON.parse(JSON.stringify(GRAPH));
 const tmp = mkdtempSync(join(tmpdir(), "la-triage-test-"));
 process.on("exit", () => { try { rmSync(tmp, { recursive: true, force: true }); } catch {} });
 
+// ── state isolation (FOC-990) ─────────────────────────────────────────────────
+// This file deliberately does not take supervisor-test-fixtures.mjs's load-time
+// takeover (FOC-979 note at spawnCli), so it must pin its own state seams:
+// without them the CLI under test honours whatever the caller exported. In a
+// Fenix container that is LA_SUPERVISOR_STATE_HOME=/data/state/supervisor and
+// LA_STATE_ROOT=/data/state — a child running this file directly left
+// `test-triage-<pid>-<n>` run dirs (with their holds) in the REAL state, and
+// the Cockpit showed them as Needs-you cards. Every read-back below goes
+// through these two constants, never through the repo's `.state`.
+const STATE_ROOT = join(tmp, "state");
+const SUP_HOME = join(STATE_ROOT, "supervisor");
+mkdirSync(SUP_HOME, { recursive: true });
+process.env.LA_STATE_ROOT = STATE_ROOT;
+process.env.LA_SUPERVISOR_STATE_HOME = SUP_HOME;
+
 // ── ownership isolation (FOC-848) ─────────────────────────────────────────────
 // Every CLI child below must see a KNOWN ownership config: a developer's real
 // settings overlay (which may carry a restricted `ownership` key) must never
@@ -513,10 +528,11 @@ const uuidIssueFile = (identifier) => {
   return path;
 };
 const run = (args, env = {}) => {
-  const childEnv = { ...process.env, LA_DATA_HOME: storeHome, ...env };
-  // Tests below read the repo-root .state/runs and .state/supervisor paths —
-  // an exported dev LA_STATE_ROOT would redirect the child elsewhere.
-  delete childEnv.LA_STATE_ROOT;
+  // The tests below read STATE_ROOT/runs and SUP_HOME back; both seams are
+  // pinned explicitly so nothing the caller exported can redirect the child.
+  const childEnv = {
+    ...process.env, LA_DATA_HOME: storeHome, LA_STATE_ROOT: STATE_ROOT, LA_SUPERVISOR_STATE_HOME: SUP_HOME, ...env,
+  };
   return spawnSync(process.execPath, [CLI, ...args], { cwd: ROOT, encoding: "utf8", env: childEnv });
 };
 
@@ -573,7 +589,7 @@ console.log("\nrecord");
 
 let runN = 0;
 const freshRun = () => `test-triage-${process.pid}-${runN++}`;
-const runDirOf = (id) => join(ROOT, ".state", "supervisor", id);
+const runDirOf = (id) => join(SUP_HOME, id);
 const cleanup = [];
 process.on("exit", () => {
   for (const d of cleanup) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
@@ -831,7 +847,7 @@ test("intake refuses without --run, before any network or file write", () => {
 
 test("intake with no API key fails closed, visibly, and still writes the sibling record", () => {
   const runId = withRun();
-  cleanup.push(join(ROOT, ".state", "runs", runId)); // the caller's shadow log
+  cleanup.push(join(STATE_ROOT, "runs", runId)); // the caller's shadow log
   const r = run(
     ["intake", "--issue", "FOC-999", "--issue-file", fixture({ body: AC_BODY, title: "T" }), "--run", runId],
     { OPENROUTER_API_KEY: "" },
@@ -851,7 +867,7 @@ test("intake with no API key fails closed, visibly, and still writes the sibling
   assert.equal(rec.runId, runId);
   assert.equal(rec.issue, "FOC-999");
   assert.equal(rec.decisions["intake.triage_node"].code, "auth_missing");
-  assert.ok(existsSync(join(ROOT, ".state", "runs", runId, "decisions.jsonl")), "the shadow events exist even for failed calls");
+  assert.ok(existsSync(join(STATE_ROOT, "runs", runId, "decisions.jsonl")), "the shadow events exist even for failed calls");
   if (process.platform !== "win32") {
     // POSIX mode bits only; the Windows run asserts the write succeeded above.
     const mode = statSync(join(runDirOf(runId), "intake.json")).mode & 0o777;
@@ -994,7 +1010,7 @@ test("an intake without eventIds labels nothing and warns nobody", () => {
 
 test("record labels the final verdict against the offline intake's eventId (end to end)", () => {
   const runId = withRun();
-  const runsDir = join(ROOT, ".state", "runs");
+  const runsDir = join(STATE_ROOT, "runs");
   cleanup.push(join(runsDir, runId));
   // intake — offline (no key): the events exist, the answers do not.
   const i = run(
@@ -1029,7 +1045,7 @@ console.log("\nintake należy do jednego zagadnienia (FOC-451)");
 function foreignIntake(runId) {
   const dir = runDirOf(runId);
   mkdirSync(dir, { recursive: true });
-  const logDir = join(ROOT, ".state", "runs", runId);
+  const logDir = join(STATE_ROOT, "runs", runId);
   mkdirSync(logDir, { recursive: true });
   cleanup.push(logDir); // the caller's shadow log, same as the intake tests above
   writeFileSync(
@@ -1123,7 +1139,7 @@ test("intake records the invoked --issue identity, not a payload-derived uuid (t
   // a uuid in intake.json would not be comparable to the --issue the record
   // step is invoked with, enabling and masking the cross-issue mismatch.
   const runId = withRun();
-  cleanup.push(join(ROOT, ".state", "runs", runId));
+  cleanup.push(join(STATE_ROOT, "runs", runId));
   const path = join(tmp, `issue-uuid-${fixtureN++}.json`);
   writeFileSync(
     path,
