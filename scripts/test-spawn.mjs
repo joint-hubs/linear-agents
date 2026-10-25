@@ -73,8 +73,22 @@ function appendTombstone(pid) {
 
 // ── pid probing ───────────────────────────────────────────────────────────────
 
+/** Linux: has the pid exited without its parent (or init) having reaped it yet? kill(pid, 0) still
+ * succeeds on such a zombie although nothing runs. The state letter follows the LAST ") " of
+ * /proc/<pid>/stat (the command name in between may itself hold spaces and parens). */
+function isZombie(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat[stat.lastIndexOf(") ") + 2] === "Z";
+  } catch {
+    return false; // no /proc (macOS) or already gone
+  }
+}
+
 /** Is a pid alive? win32: `tasklist /FI` token match; POSIX: kill(pid, 0) —
- * EPERM counts alive, ESRCH does not. */
+ * EPERM counts alive, ESRCH does not — and a zombie is not alive: an orphan the sweep just SIGKILLed
+ * stays a zombie until PID 1 of a container gets scheduled to reap it, and under a loaded CI runner
+ * that is long enough for a check right after the run to see it (FOC-840 flake on PR #152). */
 export function probePid(pid) {
   if (!pid) return false;
   if (process.platform === "win32") {
@@ -83,10 +97,10 @@ export function probePid(pid) {
   }
   try {
     process.kill(pid, 0);
-    return true;
   } catch (err) {
     return err.code === "EPERM"; // alive, just not ours to signal
   }
+  return !isZombie(pid);
 }
 
 // ── process-wide handlers ─────────────────────────────────────────────────────

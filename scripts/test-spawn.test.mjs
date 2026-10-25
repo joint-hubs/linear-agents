@@ -14,7 +14,7 @@
 //
 // Run: node scripts/test-spawn.test.mjs
 
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -152,6 +152,47 @@ await test("probePid: live pid true, dead pid false", async () => {
   await gone;
   if (!probePid(process.pid)) fail("probePid reported this very process as dead");
   if (!(await pollUntil(() => !probePid(child.pid)))) fail(`probePid reported dead pid ${child.pid} as alive`);
+});
+
+// A zombie answers kill(pid, 0) but runs nothing. Make a real one: the parent spawns a child that exits at
+// once, then blocks its own event loop (Atomics.wait) so libuv cannot reap it — the child stays a zombie
+// until the parent ends. Linux only (the state is read from /proc).
+await test("probePid: a zombie (exited, not yet reaped) is not alive", async () => {
+  if (process.platform !== "linux") return;
+  const parent = spawn(
+    process.execPath,
+    [
+      "-e",
+      "const c = require('node:child_process').spawn('true'); console.log(c.pid);" +
+        "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8000);",
+    ],
+    { stdio: ["ignore", "pipe", "ignore"] },
+  );
+  try {
+    const zombiePid = await new Promise((resolve, reject) => {
+      let out = "";
+      parent.stdout.on("data", (d) => {
+        out += d;
+        const m = /^(\d+)\n/.exec(out);
+        if (m) resolve(Number(m[1]));
+      });
+      parent.once("exit", () => reject(new Error("the parent ended before printing the zombie pid")));
+    });
+    const state = () => {
+      try {
+        const stat = readFileSync(`/proc/${zombiePid}/stat`, "utf8");
+        return stat[stat.lastIndexOf(") ") + 2];
+      } catch {
+        return null;
+      }
+    };
+    if (!(await pollUntil(() => state() === "Z"))) fail(`the fixture never became a zombie (state ${state()})`);
+    process.kill(zombiePid, 0); // the premise: the plain signal probe still says "alive"
+    if (probePid(zombiePid)) fail(`probePid reported zombie pid ${zombiePid} as alive`);
+    if (!probePid(parent.pid)) fail("probePid reported the live parent as dead");
+  } finally {
+    parent.kill("SIGKILL");
+  }
 });
 
 await test("inheritEnv: false — the child does not see the parent shell's extra keys", async () => {
