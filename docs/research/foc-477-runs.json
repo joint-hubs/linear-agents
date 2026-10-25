@@ -578,5 +578,77 @@
   "qualityAxisReason": "bodyDelta has no source in the Linear API (IssueHistory carries no body text) and arm B has no body-edit surface; gate friction exists on both arms but is not monotone in plan quality (FOC-403 = 0 plan gates is \"nobody asked\", not \"the plan was perfect\")",
   "gateFrictionDefinition": "count of plan-phase gate rounds. Arm B: gates/gate-plan-*.json (childId prefix \"plan\"). Arm A: gates/*.json with kind plan.gate1 or draft-approval. Implementation review verdicts (verdicts/*-roundN.json) are EXCLUDED — they review code, not the plan. Descriptive only (§4.3b); never a go/no-go axis.",
   "armBGateFrictionMedian": 1,
-  "armBGateFrictionNote": "frozen 2026-10-07 before any arm-A run; median 1 (sorted 0,1,1,1,1,1,2,2,2,3)"
+  "armBGateFrictionNote": "frozen 2026-10-07 before any arm-A run; median 1 (sorted 0,1,1,1,1,1,2,2,2,3)",
+  "planSpecPin": {
+    "kind": "instrument parameter + boundary record - the model the arm-A plan.spec PLAN child runs on, and the exact instrument it runs on, recorded BEFORE the first counted run",
+    "model": "z-ai/glm-5.3-flash",
+    "decidedBy": "Mateusz - protocol section 7 Q10 (2026-10-10); reaffirmed 2026-10-25: 'plan.spec w kampanii FOC-477 ma iść na glm-5.3-flash, jak w baseline ramienia B'",
+    "recordedAt": "2026-10-25",
+    "why": "Arm B's PLAN children (the historical squad, September) ran on glm-5.3-flash, and Q5 prices the arm-A plan.spec child exactly like an arm-B PLAN child. The model is therefore part of the instrument, held for all 10 counted runs. mimo-v2.6-pro lists at 5.8x the input and 3.5x the output rate of glm-5.3-flash (0.435/0.87 vs 0.075/0.25 USD per M), so letting arm A drift to it would bias the cost axis against the graph for a reason that has nothing to do with graph-vs-squad.",
+    "conflict": "Model routing v2 (FOC-964, 117cb59, 2026-10-21) moved the PLAN lead, spec, spec_review and pl to xiaomi/mimo-v2.6-pro in config/models.json routing.plan, and the plan subagents' frontmatter model: follows it. At the previous boundary (e0f8b40) routing.plan.spec was glm53flash. An arm-A plan.spec child spawned with no further care would price on mimo.",
+    "notAMove": "No counted arm-A run exists (armARuns holds 7 attempts, all excluded under C1), so holding the model is not a move of the boundary relative to any counted run - same reasoning as Q10 itself.",
+    "holdsAtFiveLayers": [
+      "1. explicit --model on supervisor-spawn: always z-ai/glm-5.3-flash for the plan.spec child (strongest; the operating rule of Q10)",
+      "2. settings overlay routing.plan.lead (install-local, gitignored .fenix/config/settings.json): the safety net for a spawn that forgets --model. Set with 'node scripts/fenix-settings.mjs set routing.plan.lead z-ai/glm-5.3-flash'; REMOVE after the campaign with 'node scripts/fenix-settings.mjs set routing.plan.lead null' (null deletes the key). While it is set EVERY plan child on that install runs on the pin, not only the campaign's.",
+      "3. models.json routing.plan: not touched - production routing stays v2, layers 1-2 override it",
+      "4. plan subagents' frontmatter model: (the spec author is a subagent): only a campaign squad home can change it without editing tracked files - 'node scripts/foc-477-pin-check.mjs squad-home --out <dir>', then spawn with LA_SQUAD_HOME=<dir>",
+      "5. CLAUDE_CODE_SUBAGENT_MODEL in the environment: must be unset or the pin"
+    ],
+    "enforcement": "scripts/foc-477-pin-check.mjs: 'preflight' (every layer + the boundary below, exit 1 = do not start the run) before each counted run; 'verify --run <id> --child <id>' after the child ended (the models its transcripts, lead + subagents, actually used; exit 1 mismatch, 3 unknown - never a pass). Both read THIS entry; neither guesses.",
+    "boundary": {
+      "recordedAt": "2026-10-25",
+      "baseCommit": "ea9b81e",
+      "rule": "A counted arm-A run starts only when 'preflight' is green: every file below hashes (git blob sha) to the value recorded here, the [G] nodes resolve to gNode.id behind gNode.providerPin, and the price rows match. Any change to one of them is a boundary move: it is recorded in this file with its why BEFORE the next run, exactly like foc801Landing20261015.",
+      "files": {
+        "scripts/graph-runner.mjs": "e7de39c8ba864616d10d759e008a8b7c43f636ef",
+        "scripts/plan-intent.mjs": "7a1537e3e179729958267bfc03bb554959af95f6",
+        "scripts/plan-intent-select.mjs": "6f81cf2dc92e71115b4241a55b1407a3311f7232",
+        "scripts/plan-intent-gate.mjs": "136a9f12e3a9bb22172ae015c2e3f9d76b149cee",
+        "scripts/plan-gates.mjs": "58b46fa9337ad77b8c878583f995db1711916736",
+        "scripts/plan-ac.mjs": "4dfb1c42385d6be624ce413a2e07debd800e78f5",
+        "scripts/plan-ready.mjs": "1ad7d0c9dd0361d9d3a5e5238baf5650c796ca70",
+        "scripts/plan-render.mjs": "12b75d3c39cbdcb23cbda823dd6fcf9fbe4ea2ac",
+        "scripts/plan-duplicate-retrieval.mjs": "d42c53a14e3df81b6e9e9cd30748d2450393f14a",
+        "scripts/egress-screen.mjs": "da1d50d20095eb9f437398ebbc3909c82e5c1014",
+        "scripts/decision-call.mjs": "ce8cca517898f891d61295f1003e21d7f8b8b8ec",
+        "scripts/foc-477-armA-launch.mjs": "43ea17aa21bb483cd653683cc99bb5d856b4ea51",
+        "config/graph.json": "a333c0844c0257172fbf3014ea3a3ac98f2a9e9e",
+        "config/decisions.json": "68f6386f5a1db0ea0ae01a65be2a9b2a02475c07"
+      },
+      "gNode": {
+        "alias": "glm53flash",
+        "id": "z-ai/glm-5.3-flash",
+        "providerPin": {
+          "order": [
+            "wafer",
+            "fireworks"
+          ],
+          "allowFallbacks": false
+        },
+        "source": "config/models.json routing.plan.discovery -> ids, providerPins['plan.discovery'] (protocol Q8)"
+      },
+      "prices": {
+        "z-ai/glm-5.3-flash": {
+          "input": 0.075,
+          "output": 0.25,
+          "cacheRead": 0.015
+        }
+      },
+      "notBlobPinned": "config/models.json itself is NOT blob-pinned: it carries rows for every model on the install and changes for reasons unrelated to this campaign (a new price row, another squad's routing). What feeds an arm-A number from it is held directly: the [G] model, its provider pin and the price rows above."
+    }
+  },
+  "instrumentBoundary20261025": {
+    "kind": "instrument-boundary record - the state of the instrument after the last counted-run-free stretch, taken before the first counted run",
+    "at": "2026-10-25",
+    "reference": "e0f8b40 (the FOC-801 boundary, attempt 6's base) -> ea9b81e (main at this entry)",
+    "verdict": "Nothing here moves the boundary relative to a counted run: there is none. This entry fixes what the ten counted runs will share.",
+    "changesSinceFoc801Boundary": {
+      "graphRunnerAndPlanNodes": "unchanged - graph-runner.mjs, plan-intent*.mjs, plan-gates/ac/ready/render/duplicate-retrieval, decision-call.mjs, config/graph.json and config/decisions.json have no net change between e0f8b40 and ea9b81e (git diff --stat over the instrument files touches only config/models.json and scripts/egress-screen.mjs); the blob shas in planSpecPin.boundary.files are the same bytes attempt 6 ran; graph-runner.mjs e7de39c8 is attempt 6's runnerSha).",
+      "egressScreen": "two commits. 3613beb (FOC-512, gh-screened as the Supervisor's only PR-text path) widened what the screen treats as a slug terminator = behaviour widening; 14b6568 (FOC-958) added the egressSpans export = additive. Because the first can only match MORE, the frozen corpus was rescanned on 2026-10-25 with the current screen: all 10 inputs, 0 hits (scan-corpus-egress.mjs, rows[].hitCount) - the screen still passes the exact bytes the arm-A runs feed it.",
+      "modelsJson": "routing v2 (FOC-964): routing.plan.lead/spec/spec_review/pl -> mimo; discovery, dor_gate, decompose, enrich, push, worker, flash stay glm53flash. The [G] nodes read routing.plan.discovery = glm53flash, unchanged. providerPins['plan.discovery'] unchanged. The glm-5.3-flash price row is numerically unchanged (0.075 / 0.25 / 0.015); only a provenance string was added. New rows (grok-4.7, gemini-4-argon, gpt-6.1-sol, kimi-k3.1-pro, ...) touch no arm-A call.",
+      "launcher": "scripts/foc-477-armA-launch.mjs unchanged since attempt 6 (launcherSha 43ea17aa). Its frozen RUNNER_SHA_EXPECTED (a1f8577e) is stale against the FOC-758 / FOC-801 runner, so it reports runnerDrift true on every run - known, harmless, and the reason runnerSha is recorded per run from the actual blob."
+    },
+    "planSpecChild": "the one thing that DID drift (routing v2, see planSpecPin.conflict) is held by planSpecPin, not accepted.",
+    "next": "run 'node scripts/foc-477-pin-check.mjs preflight' with LA_SQUAD_HOME pointing at a squad home built by the same script; start attempt 7 (FOC-236, Mateusz at the gates) only on exit 0; after the child ends run 'verify'."
+  }
 }

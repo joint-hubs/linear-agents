@@ -5,6 +5,34 @@
 
 > **Hand-off for the next engineer: `docs/HANDOFF.md` (2026-10-23)** — state, blockers in order, VM ops, gotchas.
 
+## 2026-10-25 — FOC-477: `plan.spec` pinned to glm-5.3-flash, instrument boundary recorded before attempt 7
+
+Mateusz (reaffirming protocol Q10): the arm-A `plan.spec` child runs on `z-ai/glm-5.3-flash`, as arm B's PLAN
+children did. Routing v2 (FOC-964) had moved the PLAN lead/`spec`/`spec_review`/`pl` to mimo in `config/models.json`
+and in the plan subagents' frontmatter, so a plain checkout failed three layers of the new `preflight` (the lead,
+`spec.md`, `spec-review.md`). Held without touching production routing or a frozen instrument file:
+
+- `docs/research/foc-477-runs.json`: `planSpecPin` (model, the five layers, the boundary: blob sha of 14 instrument
+  files + the `[G]` model, its provider pin and the glm-5.3-flash price row) and `instrumentBoundary20261025`
+  (what changed since the FOC-801 boundary `e0f8b40`: only `models.json` routing/price rows and the egress screen;
+  graph-runner and the plan nodes are byte-identical). The frozen corpus was rescanned with the current screen:
+  10/10 inputs, 0 hits. Protocol Q10 amended.
+- `scripts/foc-477-pin-check.mjs` (+ test, 22 cases): `squad-home`, `preflight`, `verify`. Found and fixed while
+  proving it: the squad-home rewrite doubled the CR of every CRLF subagent file (a Windows checkout).
+- Lanes + checklist: 210 test files (169 parallel + 41 serial).
+
+**Not done on purpose:** the install-local overlay `routing.plan.lead` is NOT set — while it is, every plan child on
+that install runs on glm-5.3-flash, not only the campaign's (the Kimi Supervisor test included). Run order for
+attempt 7 (FOC-236, Mateusz at the gates, one run per sitting):
+
+1. `node scripts/fenix-settings.mjs set routing.plan.lead z-ai/glm-5.3-flash`
+2. `node scripts/foc-477-pin-check.mjs squad-home --out .state/foc-477-armA/squad-home`
+3. `LA_SQUAD_HOME=<that dir> node scripts/foc-477-pin-check.mjs preflight` → exit 0, else do not start
+4. spawn the `plan.spec` child with `LA_SQUAD_HOME=<that dir>` and `--model z-ai/glm-5.3-flash`
+5. after it ended: `node scripts/foc-477-pin-check.mjs verify --run <id> --child <id>` → exit 0
+6. after the campaign: `node scripts/fenix-settings.mjs set routing.plan.lead null`
+
+
 ## 2026-10-23 — the 1.0 blockers are in code; rc.5 next (VM stays stopped until then)
 
 Per-ticket state, what each one shipped and what to verify on the VM: `docs/HANDOFF.md` §3.1. In short: FOC-990
