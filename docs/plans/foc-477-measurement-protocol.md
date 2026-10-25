@@ -557,6 +557,30 @@ rejected after one regeneration is a *landable* outcome, not a failure. The oper
 `foc758LandingCriterion20261010` in `docs/research/foc-477-runs.json` and the FOC-758 issue
 description. Q9 is left as written; it records what was decided on 2026-10-08.
 
+**2026-10-25 — how the pin is held, and the boundary recorded before the first counted run.**
+Mateusz reaffirmed Q10: *"plan.spec w kampanii FOC-477 ma iść na glm-5.3-flash, jak w baseline ramienia
+B."* Since Q10 was written, model routing v2 (FOC-964, 2026-10-21) moved the PLAN lead, `spec`,
+`spec_review` and `pl` to `xiaomi/mimo-v2.6-pro` — in `config/models.json` **and** in the plan
+subagents' frontmatter — so "the model `config/models.json` routes `plan` to" no longer names
+glm-5.3-flash, and a plain checkout would price arm A on a model 5.8x (input) / 3.5x (output) dearer
+than arm B's. The pin therefore lives in the register (`planSpecPin.model` in
+`docs/research/foc-477-runs.json`), not in routing, and `scripts/foc-477-pin-check.mjs` holds it at
+five layers: an explicit `--model` on the spawn; the install-local settings overlay
+`routing.plan.lead`; `models.json` left as v2 (the two above override it); a campaign squad home
+(`LA_SQUAD_HOME`) for the subagents' frontmatter, built from the tracked files with only the `model:`
+lines changed; and no `CLAUDE_CODE_SUBAGENT_MODEL` in the environment. Production routing and every
+frozen instrument file stay as they are.
+
+The same entry records the **instrument boundary** (`planSpecPin.boundary`, narrative
+`instrumentBoundary20261025`): the git blob sha of the 14 files that feed an arm-A number, the model
+the `[G]` nodes resolve to with its provider pin (Q8), and the price rows of the pinned model.
+`preflight` must exit 0 before each counted run; `verify` must exit 0 after the `plan.spec` child
+ended — every priced message in its lead and subagent transcripts on the pin, an unreadable transcript
+is *unknown* (exit 3), never a pass. There is still no counted run, so recording this is not a
+boundary move; from the first counted run on, a change to any recorded value is, and goes into the
+register with its why before the next run.
+
+
 ### Corpus → **confirmed**
 §3.2 list of 10 stands. No swaps.
 

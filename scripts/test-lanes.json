@@ -185,6 +185,10 @@
       "reason": "isolation audit FOC-477: mkdtemp/tmpdir fixtures only (corpus + children.json + fake worktree/.git-pointer trees synthesized under os.tmpdir and removed after each case); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
+      "file": "foc-477-pin-check.test.mjs",
+      "reason": "isolation audit FOC-477 (plan.spec pin): mkdtemp/tmpdir fixtures only (registers, squad roots, squad homes, settings overlays and a run state dir via LA_SUPERVISOR_STATE_HOME all under os.tmpdir); the CLI is spawned as a local child with LA_SQUAD_HOME/LA_SETTINGS_FILE pointed at temp paths; the only repo access is READ-ONLY (git hash-object on tracked files, the real register's planSpecPin); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
       "file": "gh-screened.test.mjs",
       "reason": "isolation audit (FOC-512): mkdtemp/tmpdir fixtures only; the fake gh is a temp Node script appended to a log file and spawned by the WRAPPER as a local child, never a real GitHub call; no network, no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
