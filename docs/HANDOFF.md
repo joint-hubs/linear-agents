@@ -11,7 +11,7 @@ values) is in `docs/ACCESS.md`.
 | `main` | `f1c0ad5` (2026-10-25) — all six blockers merged (#143–#147), rc.5 pin (#150), FOC-477 plan.spec pin (#151); CI green (`linux` workflow: suite in the image + isolation lanes) |
 | Latest release candidate | **`v1.0.0-rc.5`** on `ea9b81e`, image `ghcr.io/joint-hubs/fenix:1.0.0-rc.5` (digest `sha256:82f88f0f2da8…`) |
 | Open PRs | #152 — three snags from the rc.5 VM walk (FOC-1047 cleanup repo resolution, FOC-1048 doctor false WARN, FOC-1049 `LA_PROJECTS_FILE` in the suite) → rc.6 |
-| Acceptance VM | `fenix-accept` (gcloud project `dochubs`, `europe-central2-a`, e2-standard-2) — see the last line of §3.1 for its state |
+| Acceptance VM | `fenix-accept` (gcloud project `dochubs`, `europe-central2-a`, e2-standard-2) — **stopped** 2026-10-25 (no live child; the Supervisor's tmux session is resumed with `--continue` on the next start). Three cleanup gates wait in Needs-you (§3.1, FOC-1007) |
 | Old dev VM | `fenix-vm` — stopped. `neo-ac4-1` is not ours; never touch it |
 | Linear | project "Fenix — wydanie 1.0 i kontrola kosztów", milestone **M8 Fenix 1.0.0 — portable release** |
 

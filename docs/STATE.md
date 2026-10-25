@@ -19,6 +19,7 @@ FOC-1001's guard verified (real Claude Code prompts), FOC-989 and FOC-1007 partl
 - The three cleanup approvals of 2026-10-22 were void (given while every git read failed). Fresh gates
   `gate-dev-1-2`, `gate-test-2-2`, `gate-test-3-2` wait in Needs-you; after the answers the Supervisor removes the
   FOC-958 worktrees. 74 old `test-*` run dirs (fenix-child-owned) need root and Mateusz's OK.
+- VM `fenix-accept` stopped after the walk (no live child, the Supervisor idle); the gates stay for the next start.
 - Next: Mateusz answers the gates and merges #152 → rc.6 → FOC-789 part 2 (two task sessions; also the real
   push/review/verdict flow for FOC-1001 and a real followup for FOC-989) → snags S1–S30 as backlog (AC2) → FOC-790.
 
