@@ -8,10 +8,10 @@ values) is in `docs/ACCESS.md`.
 
 | What | State |
 |---|---|
-| `main` | `6f670d0` — FOC-990 / 989 / 1000 / 1007 merged (#143–#146), CI green (`linux` workflow: suite in the image + isolation lanes) |
-| Latest release candidate | **`v1.0.0-rc.4`** on `5b09e42`, image `ghcr.io/joint-hubs/fenix:1.0.0-rc.4` |
-| Open PRs | #147 — FOC-988 + FOC-1001 (the last two blockers) |
-| Acceptance VM | `fenix-accept` (gcloud project `dochubs`, `europe-central2-a`, e2-standard-2) — **stopped** |
+| `main` | `f1c0ad5` (2026-10-25) — all six blockers merged (#143–#147), rc.5 pin (#150), FOC-477 plan.spec pin (#151); CI green (`linux` workflow: suite in the image + isolation lanes) |
+| Latest release candidate | **`v1.0.0-rc.5`** on `ea9b81e`, image `ghcr.io/joint-hubs/fenix:1.0.0-rc.5` (digest `sha256:82f88f0f2da8…`) |
+| Open PRs | #152 — three snags from the rc.5 VM walk (FOC-1047 cleanup repo resolution, FOC-1048 doctor false WARN, FOC-1049 `LA_PROJECTS_FILE` in the suite) → rc.6 |
+| Acceptance VM | `fenix-accept` (gcloud project `dochubs`, `europe-central2-a`, e2-standard-2) — see the last line of §3.1 for its state |
 | Old dev VM | `fenix-vm` — stopped. `neo-ac4-1` is not ours; never touch it |
 | Linear | project "Fenix — wydanie 1.0 i kontrola kosztów", milestone **M8 Fenix 1.0.0 — portable release** |
 
@@ -38,7 +38,7 @@ MCP tool table, PRD phase B).
 
 ## 3. What to do next (in this order)
 
-### 3.1 Blockers before the 1.0 tag — code done 2026-10-23, VM acceptance pending
+### 3.1 Blockers before the 1.0 tag — code done 2026-10-23, VM walk on rc.5 done 2026-10-25
 
 | Ticket | State | What shipped | Check on the VM (rc.5) |
 |---|---|---|---|
@@ -49,6 +49,17 @@ MCP tool table, PRD phase B).
 | **FOC-988** | #147 open | deny `Edit/Write/MultiEdit/NotebookEdit(//opt/fenix/**)`; the ask guard asks on Bash writes into `$LA_ROOT` (container only); image manifest + `fenix doctor` check `fenix code`; CLAUDE.md rule | a Supervisor Edit to `/opt/fenix/scripts/x.mjs` is **refused by real Claude Code**, `sed -i … /opt/fenix/…` asks; `fenix doctor` reports a manual change |
 | **FOC-1001** | #147 open | the guard asks on `safe.directory` and on git under `LA_WORKTREE_HOME`; `supervisor-lib` `git()` reads child trees one-shot and sanitised; CLAUDE.md rules (push from the main checkout) | `git config --global --add safe.directory …` and `git -C /data/workspaces/la-wt/<x> push` raise the guard; the push/review/verdict flow works on a recreated container without any `safe.directory` |
 | FOC-981 | untouched, Medium | — | **Do not** "fix" with a plain POSIX pid probe — the api and Supervisor containers have separate PID namespaces (design note in the ticket). Can wait for after rc.5 |
+
+**Result of the walk (2026-10-25, `fenix-accept` on rc.5; evidence in `foc-789-run-log.md` "Day 3"):**
+
+| Ticket | Result |
+|---|---|
+| FOC-990 | **Verified → Done.** The full suite as `fenix-child` with the container env: 0 new entries in `/data/state/supervisor` (763 → 763), `/data/telemetry` (208 → 208), `/data/workspaces` (10685 → 10685); Cockpit needs-you 0 with 74 old `test-*` run dirs present. Residual: `LA_PROJECTS_FILE` leaked into the suite (`team-routes.test` red) → FOC-1049 / #152 |
+| FOC-1000 | **Verified → Done.** Image `gh` 2.103.2 (floor 2.89), printed by `fenix doctor`; `mcp__fenix-github__pr_edit` on PR #151 executed through the real Supervisor session |
+| FOC-988 | **Verified → Done.** Real Claude Code: `Write` and `Edit` on `/opt/fenix/scripts/…` → "File is in a directory that is denied by your permission settings"; `sed -i` on `/opt/fenix/…` is **denied** by a Bash rule (stricter than the "asks" above); nothing was written, manifest 578/578. `fenix doctor` reports a tampered file as FAIL and a planted one as WARN. Found: it also WARNs on `config/models.map` after every healthy start → FOC-1048 / #152 |
+| FOC-1001 | **Guard verified; end-to-end flow still open (In Review).** `git config --global --add safe.directory …` and `git -C <child worktree> push --dry-run` both raised an approval prompt in the real session (answered No, nothing ran); reads of child trees work with no `safe.directory` (`dirtyCount`, `commitsAhead`, a readable HEAD). Not exercised: a real push/review/verdict flow on a recreated container → FOC-789 part 2 |
+| FOC-989 | **Partly verified (In Review).** `freshLaunchDir` on the real stale launch dirs of run `…8cf1`: `dev-1` turn 1 → `turn-1-r1`, turn 2 stays `turn-2`. A real followup after an `exit 1` launch was not run (it needs a model turn) |
+| FOC-1007 | **Tool verified, removal open (In Review).** `cleanup_remove` is allowed with no classifier refusal and re-checks both keys. Found: the default repo resolution fails from a child tree (FOC-1047 / #152; works with `repo`). The three 2026-10-22 approvals are void (they were given while every read failed — the question said "<git status failed…>"); fresh gates `gate-dev-1-2`, `gate-test-2-2`, `gate-test-3-2` wait in Needs-you |
 
 Decisions of 2026-10-23 (Mateusz) that shape #147: `/opt/fenix` is **not** made read-only (the controls are the deny
 rules, the Bash guard and the manifest check — so `node some-script.mjs` writing there is the known residual,
@@ -62,7 +73,7 @@ does not. The isolation lane asserts both.
 
 ### 3.2 Then
 
-1. Once #147 is merged and `main` CI is green: a PR bumping `VERSION` to `1.0.0-rc.5`, Mateusz merges, green `main` CI, then (with his OK) the annotated tag `v1.0.0-rc.5`; start `fenix-accept` only then (procedure in §5, VM in §4) and walk the table in §3.1. The VM leftovers in §4 are removed in the same session.
+1. ~~rc.5 and the walk of §3.1~~ — done 2026-10-25 (results above). Still open from it: Mateusz answers the three cleanup gates (then the Supervisor removes the FOC-958 worktrees), #152 merged (→ rc.6), FOC-1001's end-to-end flow and FOC-989's real followup ride on part 2.
 2. **FOC-789 part 2:** two task sessions side by side (board → task cockpit → push from the dashboard with a
    human confirm). Part 1 only covered the legacy single Supervisor.
 3. Turn the minor snags **S1–S21** from the run log into backlog tasks (FOC-789 AC2).
@@ -93,14 +104,17 @@ FOC-957 remote control epic, phases C–E (remote transport, gateway + on-demand
   (e.g. `fenix:local-1002-1005`) it builds `fenix:dev` from source and crash-loops the Supervisor. Recreate a
   single service with `FENIX_IMAGE_REF=fenix:local-1002-1005 docker compose up -d --force-recreate --no-deps <service>`.
 
-**Leftovers to clear on the next VM start:**
-* the three FOC-958 worktrees (`/data/workspaces/la-wt/linear-agents/foc-958-*`). Removal is approved (3×
-  cleanup-approval "yes") but blocked by FOC-1007. Remove them inside the Supervisor session once FOC-1007 lands,
-  or by hand with Mateusz's OK.
-* `/data/state/supervisor/test-triage-*` fixture junk (FOC-990), fenix-child-owned → needs root.
-* `/tmp/foc958-base`, a TEST child's comparison worktree, registered in the main repo's worktree list.
-* The main checkout `/data/workspaces/linear-agents` is still on branch `foc-962-attach-link`. Have the
-  Supervisor switch it back to `main`.
+**Leftovers (state after the 2026-10-25 walk):**
+* the three FOC-958 worktrees (`/data/workspaces/la-wt/linear-agents/foc-958-*`): the 2026-10-22 approvals are
+  void (see the FOC-1007 line in §3.1); fresh gates wait in Needs-you. After Mateusz answers them: the Supervisor
+  calls `cleanup_remove` for each child (pass `repo: /data/workspaces/linear-agents` until #152 is in the image),
+  or `./fenix cleanup remove --run 2026-10-21T09-09-28-146-supervisor-8cf1 --child <id> --repo /data/workspaces/linear-agents`.
+  dev-1's only "uncommitted" path is an untracked `node_modules`.
+* `/data/state/supervisor/test-*` fixture junk from before FOC-990: 74 run dirs, fenix-child-owned → needs root and
+  Mateusz's OK; the Cockpit ignores them, so it is only clutter.
+* ~~`/tmp/foc958-base`~~ — the directory was gone; the dead entry is pruned (`git worktree prune`).
+* ~~main checkout on `foc-962-attach-link`~~ — back on `main` (`f1c0ad5`), clean.
+* the checkout `~/fenix` on the VM has two stray untracked files, `=` and `unpacking` (a shell redirect typo).
 
 ## 5. Working on the code
 
