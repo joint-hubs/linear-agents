@@ -194,6 +194,12 @@
         "output": 13.282724,
         "cacheRead": 0.3
       },
+      "moonshotai/kimi-k3.1-pro": {
+        "input": 2,
+        "output": 10,
+        "cacheRead": 0.2,
+        "provenance": "OpenRouter GET /api/v1/models, checked 2026-10-25: prompt $2/M, completion $10/M, input_cache_read $0.2/M; context 1,048,576; tools supported."
+      },
       "anthropic/claude-haiku-4.5": {
         "input": 1,
         "output": 5,
