@@ -1939,12 +1939,16 @@ export function childTreeRoot(cwd, env = process.env) {
 export function childTreeGitArgs(args, cwd, env = process.env) {
   const tree = childTreeRoot(cwd, env);
   if (tree === null) return args;
-  let sub = null;
+  let at = -1;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "-c" || args[i] === "-C") { i++; continue; }
-    if (!args[i].startsWith("-")) { sub = args[i]; break; }
+    if (!args[i].startsWith("-")) { at = i; break; }
   }
-  if (sub === null || !CHILD_TREE_READ_SUBCOMMANDS.has(sub)) return args;
+  if (at < 0) return args;
+  // `worktree list` reads (it is how the main checkout is found from a child's tree: the first entry);
+  // `worktree add|remove|prune|lock|move` write and stay untouched.
+  const readsOnly = CHILD_TREE_READ_SUBCOMMANDS.has(args[at]) || (args[at] === "worktree" && args[at + 1] === "list");
+  if (!readsOnly) return args;
   return [
     "--no-optional-locks",
     "-c", `safe.directory=${tree}`,

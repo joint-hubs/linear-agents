@@ -696,10 +696,15 @@ test("childTreeGitArgs: a read in a child tree gets the one-shot prefix; nothing
   for (const read of ["rev-parse", "status", "diff", "log", "rev-list", "merge-base", "ls-files", "show"]) {
     assert.ok(childTreeGitArgs([read], TREE, CONTAINER).length > 1, `${read} is a read`);
   }
+  // `worktree list` is a read too: it is how the main checkout is found from a child's tree
+  // (listWorktrees(entry.worktree)[0]); without the prefix `fenix cleanup` and the Supervisor's
+  // cleanup tool could not resolve the repository on a VM with no persistent safe.directory
+  assert.deepEqual(childTreeGitArgs(["worktree", "list", "--porcelain"], TREE, CONTAINER).slice(-3), ["worktree", "list", "--porcelain"]);
+  assert.ok(childTreeGitArgs(["worktree", "list", "--porcelain"], TREE, CONTAINER).includes(`safe.directory=${TREE}`));
 });
 
 test("childTreeGitArgs: writes, other trees and the host stay exactly as they were", () => {
-  for (const write of [["merge", "--no-ff", "x"], ["checkout", "--", "."], ["commit", "-m", "m"], ["add", "-A"], ["worktree", "remove", "x"], ["push"], ["config", "--global", "safe.directory", "x"]]) {
+  for (const write of [["merge", "--no-ff", "x"], ["checkout", "--", "."], ["commit", "-m", "m"], ["add", "-A"], ["worktree", "remove", "x"], ["worktree", "add", "-b", "b", "x"], ["worktree", "prune"], ["worktree", "lock", "x"], ["worktree"], ["push"], ["config", "--global", "safe.directory", "x"]]) {
     assert.deepEqual(childTreeGitArgs(write, TREE, CONTAINER), write, `${write[0]} must not be rewritten`);
   }
   assert.deepEqual(childTreeGitArgs(["status"], "/data/workspaces/linear-agents", CONTAINER), ["status"]);
