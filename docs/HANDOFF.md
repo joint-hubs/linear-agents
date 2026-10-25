@@ -8,9 +8,9 @@ values) is in `docs/ACCESS.md`.
 
 | What | State |
 |---|---|
-| `main` | `92f7739`, CI green (`linux` workflow: suite in the image + isolation lanes) |
+| `main` | `6f670d0` — FOC-990 / 989 / 1000 / 1007 merged (#143–#146), CI green (`linux` workflow: suite in the image + isolation lanes) |
 | Latest release candidate | **`v1.0.0-rc.4`** on `5b09e42`, image `ghcr.io/joint-hubs/fenix:1.0.0-rc.4` |
-| Open PRs | none |
+| Open PRs | #147 — FOC-988 + FOC-1001 (the last two blockers) |
 | Acceptance VM | `fenix-accept` (gcloud project `dochubs`, `europe-central2-a`, e2-standard-2) — **stopped** |
 | Old dev VM | `fenix-vm` — stopped. `neo-ac4-1` is not ours; never touch it |
 | Linear | project "Fenix — wydanie 1.0 i kontrola kosztów", milestone **M8 Fenix 1.0.0 — portable release** |
@@ -38,23 +38,31 @@ MCP tool table, PRD phase B).
 
 ## 3. What to do next (in this order)
 
-### 3.1 Blockers before the 1.0 tag
+### 3.1 Blockers before the 1.0 tag — code done 2026-10-23, VM acceptance pending
 
-| Ticket | Prio | Problem | Suggested fix (details in the ticket) |
+| Ticket | State | What shipped | Check on the VM (rc.5) |
 |---|---|---|---|
-| **FOC-988** | Urgent | The Supervisor **edited Fenix's own code** in `/opt/fenix` four times (one edit disabled the `duplicate-child-id` guard). `/opt/fenix` is writable by the runtime uid. | root-owned, read-only `/opt/fenix` in the image (check why FOC-777's thin layer chowns it); `deny Edit/Write/MultiEdit(/opt/fenix/**)`; guard refuses Bash writes into `$LA_ROOT`; CLAUDE.md rule "a failing Fenix script is a hold, not a patch"; `fenix doctor` hash-drift check |
-| **FOC-1001** | Urgent | The Supervisor ran git **inside child-owned worktrees** and worked around "dubious ownership" with a global `safe.directory`, which lets child-planted hooks/config run as the Supervisor. | push/log/diff only from the node-owned main checkout (branch refs are shared); guard refuses `safe.directory` and git under `/data/workspaces/la-wt/` |
-| FOC-989 | High | A spawn/followup into an existing child-owned launch dir fails with EPERM (`copyFileSync` → `fchmod` on fenix-child files). | always a fresh `turn-N` dir (max existing + 1), record failed launch attempts |
-| FOC-990 | High | A child running `node scripts/test-run.mjs` writes `test-triage-*` fixture runs into the **real** `/data/state/supervisor` → fake Needs-you holds. | `test-run.mjs` scrubs the same runtime env as `docker/test-in-container.sh`; give `supervisor-triage.test.mjs` its own state home |
-| FOC-1000 | High | Image ships Debian `gh` 2.23 → `gh pr edit` (and `fenix-github pr_edit`) fails on the sunset classic-Projects API. | install `gh` from GitHub's apt repo (pinned); REST `PATCH` fallback in `pr_edit` |
-| FOC-1007 | High | Approved worktree cleanup cannot run: auto mode **ignores `Bash(node:*)`**, so `supervisor-cleanup.mjs remove` hits the classifier; outside the session it lacks the Linear key. | exact-name MCP tools (like FOC-943) for lifecycle writes (cleanup, verdict record) |
-| FOC-981 | Medium | Telemetry liveness check spawns `powershell` in the Linux container. | **Do not** "fix" with a plain POSIX pid probe — the api and Supervisor containers have separate PID namespaces (design note in the ticket) |
+| FOC-990 | #143 merged | `supervisor-triage.test` pins its own state; `scripts/test-runtime-env.json` is the one runtime-env list for `test-run.mjs` and `test-in-container.sh`; the Cockpit ignores `test-*` run dirs | a child running `node scripts/test-run.mjs` leaves nothing in `/data/state/supervisor`, `/data/workspaces`, `/data/telemetry` (before/after `ls`); Needs-you count unchanged |
+| FOC-989 | #144 merged | `freshLaunchDir`: spawn/followup never prepare into an existing launch dir (`turn-N`, else `turn-N-rK`) | a followup re-run after an `exit 1` launch starts without a manual step |
+| FOC-1000 | #145 merged | `gh` from GitHub's apt repo (floor 2.89.0 checked at build), REST `PATCH` retry for `pr edit` in `gh-screened`, `fenix doctor` flags a gh below the floor | `mcp__fenix-github__pr_edit` updates a PR body; `fenix doctor` prints the gh version |
+| FOC-1007 | #146 merged | MCP tool `mcp__fenix-lifecycle__cleanup_remove` (one exact allow rule), `fenix cleanup <list\|propose\|remove>` for the operator | the three FOC-958 worktrees go: the Supervisor's cleanup runs with no classifier refusal; `./fenix cleanup remove …` works from the host |
+| **FOC-988** | #147 open | deny `Edit/Write/MultiEdit/NotebookEdit(//opt/fenix/**)`; the ask guard asks on Bash writes into `$LA_ROOT` (container only); image manifest + `fenix doctor` check `fenix code`; CLAUDE.md rule | a Supervisor Edit to `/opt/fenix/scripts/x.mjs` is **refused by real Claude Code**, `sed -i … /opt/fenix/…` asks; `fenix doctor` reports a manual change |
+| **FOC-1001** | #147 open | the guard asks on `safe.directory` and on git under `LA_WORKTREE_HOME`; `supervisor-lib` `git()` reads child trees one-shot and sanitised; CLAUDE.md rules (push from the main checkout) | `git config --global --add safe.directory …` and `git -C /data/workspaces/la-wt/<x> push` raise the guard; the push/review/verdict flow works on a recreated container without any `safe.directory` |
+| FOC-981 | untouched, Medium | — | **Do not** "fix" with a plain POSIX pid probe — the api and Supervisor containers have separate PID namespaces (design note in the ticket). Can wait for after rc.5 |
 
-FOC-988 and FOC-1001 are security-boundary changes: get Mateusz's OK on the approach before coding.
+Decisions of 2026-10-23 (Mateusz) that shape #147: `/opt/fenix` is **not** made read-only (the controls are the deny
+rules, the Bash guard and the manifest check — so `node some-script.mjs` writing there is the known residual,
+caught by `fenix doctor`); the guard **asks**, it does not deny; the Cockpit drift line is [FOC-1008], a read-only
+Supervisor gitconfig is [FOC-1009]. Also filed: [FOC-1010], `supervisor-followup.test` "legacy registry entry
+without provider" flakes under load (registry race in the test; quiet runs are green).
+
+Measured while building FOC-1001: with `extensions.worktreeConfig` on, `safe.directory=<tree>` alone **executes a
+child-planted `core.fsmonitor` as `node`**; the one-shot form (`core.hooksPath=/dev/null`, `core.fsmonitor=false`)
+does not. The isolation lane asserts both.
 
 ### 3.2 Then
 
-1. Release **rc.5** (procedure in §5) and update the VM.
+1. Once #147 is merged and `main` CI is green: a PR bumping `VERSION` to `1.0.0-rc.5`, Mateusz merges, green `main` CI, then (with his OK) the annotated tag `v1.0.0-rc.5`; start `fenix-accept` only then (procedure in §5, VM in §4) and walk the table in §3.1. The VM leftovers in §4 are removed in the same session.
 2. **FOC-789 part 2:** two task sessions side by side (board → task cockpit → push from the dashboard with a
    human confirm). Part 1 only covered the legacy single Supervisor.
 3. Turn the minor snags **S1–S21** from the run log into backlog tasks (FOC-789 AC2).
