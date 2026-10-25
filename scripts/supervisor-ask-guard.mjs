@@ -30,8 +30,30 @@
 // spawning git, scripts that push internally. The human gate on the
 // push-approval is the real control; this hook only widens the net.
 //
+// Two more classes guard the Supervisor's boundary INSIDE the Fenix container
+// only (FENIX_IN_CONTAINER=1 — natively the Supervisor works in the very repo
+// whose code it edits and there is no child uid to protect):
+//   · FOC-988 — Fenix's own code (LA_ROOT, /opt/fenix in the image). The
+//     Supervisor patched it four times on the FOC-789 run, once disabling the
+//     duplicate-child-id guard. Bash writes into that tree ask: redirects,
+//     sed -i, tee, cp/mv/install/ln/rsync onto it, rm/chmod/touch/patch/truncate
+//     of it, dd of=, and an inline interpreter (node -e, python -c, perl -e …)
+//     that names the tree next to a write call. Edit/Write are denied in
+//     settings.json. The filesystem is deliberately NOT read-only (Mateusz,
+//     2026-10-23), so `node script.mjs` writing there is the residual gap —
+//     `fenix doctor` reports the drift.
+//   · FOC-1001 — git inside a child-owned worktree (LA_WORKTREE_HOME). The child
+//     controls the tree and its per-worktree gitdir; a Supervisor git there with
+//     safe.directory set runs child-planted config (core.fsmonitor was shown to
+//     execute) as the Supervisor. `git config … safe.directory`, `-c
+//     safe.directory=…`, GIT_CONFIG_* naming it, and any git whose `-C`,
+//     `--git-dir`, `--work-tree`, preceding `cd`, or session cwd is under the
+//     worktree root ask. The sanctioned way to READ such a tree is the scripts'
+//     own sanitised invocation (supervisor-lib childTreeGit); pushes go from the
+//     main checkout, where the branch ref is shared.
+//
 // Contract with the harness:
-//   · stdin  : `{ tool_name, tool_input: { command } }`
+//   · stdin  : `{ tool_name, cwd?, tool_input: { command } }`
 //   · stdout : on a match, one ask decision JSON; otherwise nothing. Ever.
 //   · exit   : 0 always — an internal error must not block the Supervisor, but
 //     it fails toward asking when the raw input clearly names `git` and `push`.
@@ -39,6 +61,7 @@
 // Run: wired in agents/supervisor/settings.json as
 //   node "$LA_ROOT/scripts/supervisor-ask-guard.mjs"
 
+import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ── heredoc stripping ──────────────────────────────────────────────────────────
@@ -210,21 +233,33 @@ function basename(path) {
   return base.replace(/\.(exe|cmd|bat)$/i, "").toLowerCase();
 }
 
-// Drop git's global options before the subcommand. Returns the index of the
-// first token that is not a global option (or an option's value).
-function skipGitGlobals(tokens) {
+// Walk git's global options before the subcommand. Returns the index of the
+// first token that is not a global option (or an option's value), plus the
+// values the FOC-1001 boundary check needs: every -C directory in order, the
+// --git-dir / --work-tree values, and every -c key=value.
+function parseGitGlobals(tokens) {
+  const out = { subIdx: 1, dirs: [], gitDirs: [], configs: [] };
   let i = 1;
   while (i < tokens.length) {
     const t = tokens[i];
     if (t === "-C" || t === "-c" || t === "--git-dir" || t === "--work-tree" || t === "--namespace" || t === "--exec-path") {
+      const value = tokens[i + 1];
+      if (value !== undefined) {
+        if (t === "-C") out.dirs.push(value);
+        else if (t === "-c") out.configs.push(value);
+        else if (t === "--git-dir" || t === "--work-tree") out.gitDirs.push(value);
+      }
       i += 2; // both take one value
       continue;
     }
     if (t.startsWith("--git-dir=") || t.startsWith("--work-tree=") || t.startsWith("--namespace=") || t.startsWith("--exec-path=")) {
+      if (t.startsWith("--git-dir=") || t.startsWith("--work-tree=")) out.gitDirs.push(t.slice(t.indexOf("=") + 1));
       i += 1;
       continue;
     }
     if (/^-[Cc]./.test(t)) {
+      if (t[1] === "C") out.dirs.push(t.slice(2));
+      else out.configs.push(t.slice(2));
       i += 1; // attached value: -C<path>, -c<key=val>
       continue;
     }
@@ -232,9 +267,144 @@ function skipGitGlobals(tokens) {
       i += 1; // flagless global: more options may follow
       continue;
     }
-    return i; // first non-global token = the subcommand position
+    break; // first non-global token = the subcommand position
   }
-  return i;
+  out.subIdx = i;
+  return out;
+}
+
+// Drop git's global options before the subcommand. Returns the index of the
+// first token that is not a global option (or an option's value).
+function skipGitGlobals(tokens) {
+  return parseGitGlobals(tokens).subIdx;
+}
+
+// ── the container boundary (FOC-988 / FOC-1001) ───────────────────────────────
+// Everything below is inert unless the caller says it is inside the Fenix
+// container (ctx.container) — see the header.
+
+const CODE_ROOT_DEFAULT = "/opt/fenix";
+const WORKTREE_ROOT_DEFAULT = "/data/workspaces/la-wt";
+
+const trimRoot = (p) => posix.normalize(String(p)).replace(/\/+$/, "") || "/";
+const codeRootOf = (ctx) => trimRoot(ctx?.env?.LA_ROOT || CODE_ROOT_DEFAULT);
+const worktreeRootOf = (ctx) => trimRoot(ctx?.env?.LA_WORKTREE_HOME || WORKTREE_ROOT_DEFAULT);
+
+// `$LA_ROOT` / `${LA_ROOT}` (and the worktree home) are the spellings the
+// Supervisor actually types; expand them, leave every other variable alone.
+function expandKnownVars(token, ctx) {
+  return token
+    .replace(/\$\{?LA_ROOT\}?/g, codeRootOf(ctx))
+    .replace(/\$\{?LA_WORKTREE_HOME\}?/g, worktreeRootOf(ctx));
+}
+
+// Absolute posix path of `token` relative to `cwd`, or null when it cannot be
+// resolved (an unknown variable, ~, command substitution residue).
+function resolveAgainst(token, cwd, ctx) {
+  if (typeof token !== "string" || token === "") return null;
+  const expanded = expandKnownVars(token, ctx);
+  if (/[$~`]/.test(expanded)) return null;
+  const base = typeof cwd === "string" && cwd.startsWith("/") ? cwd : null;
+  if (!expanded.startsWith("/") && base === null) return null;
+  return posix.resolve(base ?? "/", expanded);
+}
+
+const isUnder = (abs, root) => abs !== null && (abs === root || abs.startsWith(`${root}/`));
+const strictlyUnder = (abs, root) => abs !== null && abs.startsWith(`${root}/`);
+
+const underCode = (token, ctx) => isUnder(resolveAgainst(token, ctx.cwd, ctx), codeRootOf(ctx));
+
+// Redirect targets in a simple command: `> f`, `>f`, `>> f`, `2>f`, `&>f`, `>| f`.
+// An fd duplication (`2>&1`, `>&2`) names no file.
+function redirectTargets(tokens) {
+  const targets = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    const bare = /^(?:[0-9]*|&)>>?\|?$/.exec(t);
+    if (bare) {
+      if (tokens[i + 1] !== undefined) targets.push(tokens[i + 1]);
+      continue;
+    }
+    const attached = /^(?:[0-9]*|&)>>?\|?(.+)$/.exec(t);
+    if (attached && !attached[1].startsWith("&")) targets.push(attached[1]);
+  }
+  return targets;
+}
+
+const WRITE_ANY_ARG = new Set(["rm", "unlink", "rmdir", "truncate", "chmod", "chown", "chgrp", "touch", "patch", "shred", "mkdir", "tee", "mv"]);
+const WRITE_DEST_LAST = new Set(["cp", "install", "rsync", "ln"]);
+const INLINE_INTERPRETERS = new Set(["node", "nodejs", "python", "python3", "py", "perl", "ruby", "php"]);
+const INLINE_FLAGS = new Set(["-e", "--eval", "-c", "-p", "-E", "-r"]);
+// open() only counts with a write/append/exclusive mode as its second argument.
+const MUTATING_CALL = /(?:write|append|unlink|rename|copyfile|rmdir|mkdir|truncate|chmod|symlink|\brm\b|sed\s+-i|fs\.rm|shutil|os\.remove|open\s*\([^)]*,\s*(?:mode\s*=\s*)?['"][^'"]*[wax+])/i;
+
+// FOC-988: does this simple command (wrappers already stripped; `args` follow
+// `program`) write into Fenix's own code?
+function writesIntoCode(tokens, start, program, ctx) {
+  for (const target of redirectTargets(tokens)) {
+    if (underCode(target, ctx)) return true;
+  }
+  const args = tokens.slice(start + 1);
+  const plain = args.filter((a) => !a.startsWith("-") && !/^\w+=/.test(a));
+  if (program === "sed") {
+    const inPlace = args.some((a) => a === "--in-place" || a.startsWith("--in-place=") || (/^-[A-Za-z]+/.test(a) && !a.startsWith("--") && a.slice(1).includes("i")));
+    return inPlace && plain.some((a) => underCode(a, ctx));
+  }
+  if (program === "dd") return args.some((a) => a.startsWith("of=") && underCode(a.slice(3), ctx));
+  if (WRITE_ANY_ARG.has(program)) return plain.some((a) => underCode(a, ctx));
+  if (WRITE_DEST_LAST.has(program)) {
+    const targetDir = args.findIndex((a) => a === "-t" || a === "--target-directory");
+    if (targetDir !== -1 && args[targetDir + 1] !== undefined && underCode(args[targetDir + 1], ctx)) return true;
+    const attached = args.find((a) => a.startsWith("--target-directory="));
+    if (attached && underCode(attached.slice(attached.indexOf("=") + 1), ctx)) return true;
+    return plain.length > 0 && underCode(plain[plain.length - 1], ctx);
+  }
+  // perl -pi / ruby -i edit the named files in place.
+  if ((program === "perl" || program === "ruby") && args.some((a) => /^-[A-Za-z]*i/.test(a)) && plain.some((a) => underCode(a, ctx))) return true;
+  if (INLINE_INTERPRETERS.has(program)) {
+    const flagAt = args.findIndex((a) => INLINE_FLAGS.has(a) || /^-[A-Za-z]*[epc]$/.test(a));
+    const code = flagAt === -1 ? "" : args.slice(flagAt + 1).join(" ");
+    const names = code.includes(codeRootOf(ctx)) || /\bLA_ROOT\b/.test(code);
+    return names && MUTATING_CALL.test(code);
+  }
+  return false;
+}
+
+// FOC-1001: a git command that crosses the child-worktree boundary. `assigns`
+// are the leading VAR=value tokens the caller stripped.
+function gitBoundaryVerdict(gitTokens, assigns, ctx) {
+  const globals = parseGitGlobals(gitTokens);
+  const safeDirKey = /^safe\.directory/i;
+  const mentionsSafeDir =
+    globals.configs.some((c) => safeDirKey.test(c)) ||
+    assigns.some((a) => /safe\.directory/i.test(a)) ||
+    (gitTokens[globals.subIdx] === "config" && gitTokens.slice(globals.subIdx + 1).some((a) => /safe\.directory/i.test(a)));
+  if (mentionsSafeDir) {
+    return {
+      ticket: "FOC-1001",
+      op: "git safe.directory",
+      reason: "trusting a directory lets whatever its owner planted (core.fsmonitor, hooks) run as the Supervisor — push and read from the main checkout instead",
+    };
+  }
+  const root = worktreeRootOf(ctx);
+  let dir = ctx.cwd;
+  for (const d of globals.dirs) dir = resolveAgainst(d, dir, ctx) ?? dir;
+  const candidates = [dir, ...globals.gitDirs.map((g) => resolveAgainst(g, ctx.cwd, ctx))];
+  if (candidates.some((c) => strictlyUnder(typeof c === "string" ? posix.normalize(c) : null, root))) {
+    return {
+      ticket: "FOC-1001",
+      op: "git in a child worktree",
+      reason: "a child owns that tree and its gitdir; git run there executes child-controlled config as the Supervisor — read it through the supervisor-* scripts, push from the main checkout",
+    };
+  }
+  return null;
+}
+
+// Track `cd <dir>` across the simple commands of one command line.
+function trackCd(tokens, state) {
+  if (tokens[0] !== "cd" || tokens[1] === undefined || tokens[1] === "-") return;
+  const target = resolveAgainst(tokens[1], state.cwd, state);
+  state.cwd = target ?? state.cwd;
 }
 
 // Drop gh's repo selectors. Returns the index of the first non-selector token.
@@ -249,15 +419,19 @@ function skipGhGlobals(tokens) {
   return i;
 }
 
-function classifySimple(tokens, depth) {
+function classifySimple(tokens, depth, ctx) {
   if (!tokens.length) return null;
 
   // Strip leading wrappers (with their flags), VAR=value assignments and
   // env-style assignments until the real command. Wrappers nest, so re-test.
+  // The assignments are kept: GIT_CONFIG_* naming safe.directory is a boundary
+  // crossing too (FOC-1001).
   let start = 0;
+  const assigns = [];
   while (start < tokens.length) {
     const t = tokens[start];
     if (VAR_ASSIGN.test(t)) {
+      assigns.push(t);
       start++;
       continue;
     }
@@ -286,7 +460,7 @@ function classifySimple(tokens, depth) {
   if (depth < 3) {
     if (cmd === "eval") {
       const inner = tokens.slice(start + 1).join(" ");
-      return inner ? classifyDangerous(inner, depth + 1) : null;
+      return inner ? classifyDangerous(inner, depth + 1, ctx) : null;
     }
     if (SHELLS.has(basename(cmd))) {
       for (let j = start + 1; j < tokens.length; j++) {
@@ -294,7 +468,7 @@ function classifySimple(tokens, depth) {
         if (t === "--") break;
         if (/^-[A-Za-z]*c[A-Za-z]*$/.test(t)) {
           const inner = tokens.slice(j + 1).join(" ");
-          return inner ? classifyDangerous(inner, depth + 1) : null;
+          return inner ? classifyDangerous(inner, depth + 1, ctx) : null;
         }
         if (!t.startsWith("-")) break; // first operand without -c: no inner command
       }
@@ -303,7 +477,21 @@ function classifySimple(tokens, depth) {
 
   const program = basename(cmd);
 
+  // FOC-988: a write into Fenix's own code, whatever the program (container only).
+  if (ctx.container === true && writesIntoCode(tokens, start, program, ctx)) {
+    return {
+      ticket: "FOC-988",
+      op: "write to Fenix's own code",
+      reason: `${codeRootOf(ctx)} is the image's code, never yours to change — a failing Fenix script is a hold with the error, not a patch`,
+    };
+  }
+
   if (program === "git") {
+    // FOC-1001: crossing into a child-owned worktree / trusting a directory.
+    if (ctx.container === true) {
+      const boundary = gitBoundaryVerdict(tokens.slice(start), assigns, ctx);
+      if (boundary) return boundary;
+    }
     const subIdx = skipGitGlobals(tokens.slice(start));
     if (subIdx >= tokens.slice(start).length) return null;
     const rest = tokens.slice(start).slice(subIdx);
@@ -360,22 +548,27 @@ function classifySimple(tokens, depth) {
   return null;
 }
 
-// classifyDangerous(command) → null | { op, reason }
-export function classifyDangerous(command, depth = 0) {
+// classifyDangerous(command, depth?, ctx?) → null | { op, reason, ticket? }
+//   ctx = { container: bool, cwd?: string, env?: object } — the FOC-988 /
+//   FOC-1001 boundary classes run only with container === true. The caller's
+//   object is not mutated: `cd` tracking works on a copy.
+export function classifyDangerous(command, depth = 0, ctx = {}) {
+  const state = { ...ctx };
   const simpleCommands = tokenize(stripHeredocs(command));
   for (const tokens of simpleCommands) {
-    const verdict = classifySimple(tokens, depth);
+    const verdict = classifySimple(tokens, depth, state);
     if (verdict) return verdict;
+    trackCd(tokens, state);
   }
   return null;
 }
 
 // ── hook entry point ───────────────────────────────────────────────────────────
 
-function askDecision(op, reason) {
+function askDecision(op, reason, ticket = "FOC-978") {
   return (
     '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask",' +
-    `"permissionDecisionReason":"FOC-978: ${op} needs your approval (${reason})"}}`
+    `"permissionDecisionReason":${JSON.stringify(`${ticket}: ${op} needs your approval (${reason})`)}}}`
   );
 }
 
@@ -392,9 +585,17 @@ async function main() {
   const command = hook?.tool_input?.command;
   if (typeof command !== "string" || command === "") return;
 
+  // FOC-988 / FOC-1001: the boundary classes know where they are from the
+  // hook's own environment and the session cwd the harness reports.
+  const ctx = {
+    container: process.env.FENIX_IN_CONTAINER === "1",
+    cwd: typeof hook.cwd === "string" ? hook.cwd : undefined,
+    env: process.env,
+  };
+
   let verdict = null;
   try {
-    verdict = classifyDangerous(command);
+    verdict = classifyDangerous(command, 0, ctx);
   } catch {
     // internal error: fail toward asking only when the input clearly names
     // both git and push — otherwise stay silent and let the harness decide.
@@ -402,7 +603,7 @@ async function main() {
     if (lowered.includes("push") && lowered.includes("git"))
       verdict = { op: "git push (?)", reason: "guard internal error — failing toward asking" };
   }
-  if (verdict) process.stdout.write(askDecision(verdict.op, verdict.reason) + "\n");
+  if (verdict) process.stdout.write(askDecision(verdict.op, verdict.reason, verdict.ticket) + "\n");
 }
 
 // Run only when executed directly (not when imported by the test).

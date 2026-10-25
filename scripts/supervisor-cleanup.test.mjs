@@ -31,6 +31,8 @@ import {
 import {
   SUPERVISOR_DENY,
   buildChildSettings,
+  childTreeGitArgs,
+  childTreeRoot,
   gatePath,
   readRegistry,
   supervisorStateHome,
@@ -655,6 +657,54 @@ test("run retention drops the run's namespaces and reports them in the summary",
     "active",
     "a selected-but-skipped run (no artifacts) had its namespaces dropped",
   );
+});
+
+// ── reading a child's worktree without a persistent safe.directory (FOC-1001) ──
+// In the container a child's worktree and its gitdir belong to fenix-child, so
+// git run there as the Supervisor stops at "dubious ownership". The scripts read
+// such trees (dirty state, base diff, HEAD, branch) through a one-shot, sanitised
+// invocation: safe.directory for this call and this tree only, hooks and
+// fsmonitor off. The ownership half is exercised in docker/test-isolation.sh
+// (it needs a second uid); this pins the argv and where it applies.
+const CONTAINER = { FENIX_IN_CONTAINER: "1", LA_WORKTREE_HOME: "/data/workspaces/la-wt" };
+const TREE = "/data/workspaces/la-wt/linear-agents/foc-958-dev-x";
+
+test("childTreeRoot: the worktree is <root>/<repo>/<branch>, inside the container only", () => {
+  assert.equal(childTreeRoot(TREE, CONTAINER), TREE);
+  assert.equal(childTreeRoot(`${TREE}/scripts/deep`, CONTAINER), TREE, "a subdirectory resolves to its worktree root");
+  assert.equal(childTreeRoot("/data/workspaces/linear-agents", CONTAINER), null, "the main checkout is not a child tree");
+  assert.equal(childTreeRoot("/data/workspaces/la-wt-notes/a/b", CONTAINER), null, "a sibling that only shares the prefix");
+  assert.equal(childTreeRoot("/data/workspaces/la-wt", CONTAINER), null, "the root itself");
+  assert.equal(childTreeRoot(TREE, { LA_WORKTREE_HOME: "/data/workspaces/la-wt" }), null, "natively there is no child uid to protect");
+  assert.equal(childTreeRoot("/srv/wt/r/b", { FENIX_IN_CONTAINER: "1", LA_WORKTREE_HOME: "/srv/wt/" }), "/srv/wt/r/b", "a configured root, trailing slash tolerated");
+});
+
+test("childTreeGitArgs: a read in a child tree gets the one-shot prefix; nothing is persisted or writable", () => {
+  const args = childTreeGitArgs(["status", "--porcelain"], TREE, CONTAINER);
+  assert.deepEqual(args, [
+    "--no-optional-locks",
+    "-c", `safe.directory=${TREE}`,
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "core.fsmonitor=false",
+    "status", "--porcelain",
+  ]);
+  assert.ok(!args.includes("--global") && !args.includes("config"), "no config write is ever issued");
+  // safe.directory names the worktree root even when the call runs in a subdirectory
+  assert.ok(childTreeGitArgs(["rev-parse", "HEAD"], `${TREE}/sub`, CONTAINER).includes(`safe.directory=${TREE}`));
+  // -c / -C values before the subcommand are skipped when finding it
+  assert.ok(childTreeGitArgs(["-c", "core.quotepath=off", "ls-files", "--others"], TREE, CONTAINER).includes("core.fsmonitor=false"));
+  for (const read of ["rev-parse", "status", "diff", "log", "rev-list", "merge-base", "ls-files", "show"]) {
+    assert.ok(childTreeGitArgs([read], TREE, CONTAINER).length > 1, `${read} is a read`);
+  }
+});
+
+test("childTreeGitArgs: writes, other trees and the host stay exactly as they were", () => {
+  for (const write of [["merge", "--no-ff", "x"], ["checkout", "--", "."], ["commit", "-m", "m"], ["add", "-A"], ["worktree", "remove", "x"], ["push"], ["config", "--global", "safe.directory", "x"]]) {
+    assert.deepEqual(childTreeGitArgs(write, TREE, CONTAINER), write, `${write[0]} must not be rewritten`);
+  }
+  assert.deepEqual(childTreeGitArgs(["status"], "/data/workspaces/linear-agents", CONTAINER), ["status"]);
+  assert.deepEqual(childTreeGitArgs(["status"], TREE, {}), ["status"], "natively the argv is untouched");
+  assert.deepEqual(childTreeGitArgs(["status"], undefined, CONTAINER), ["status"]);
 });
 
 summary();

@@ -17,7 +17,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, resolve, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { atomicWriteJSON } from "./utils.mjs";
@@ -1909,8 +1909,53 @@ export function liveChildren(registry) {
 
 // ── git / worktree ───────────────────────────────────────────────────────────
 
+// FOC-1001: reading a CHILD's worktree from the Supervisor. In the container the
+// handover chowns a child's worktree and its per-worktree gitdir to fenix-child,
+// so git run there as `node` stops at "dubious ownership" — and the workaround
+// (a persistent safe.directory) lets whatever the child planted run as the
+// Supervisor: core.fsmonitor in the gitdir's config was shown to execute. The
+// sanctioned way in is the one-shot form below: safe.directory for THIS call and
+// THIS tree only (command-line scope, nothing is written anywhere), with the
+// config-driven code paths switched off (hooks, fsmonitor) and no optional index
+// refresh in a tree we cannot write. Read subcommands only — everything that
+// writes runs in trees the Supervisor owns. The Supervisor's own Bash `git`
+// there is gated by supervisor-ask-guard.mjs; this is the audited path.
+const CHILD_TREE_READ_SUBCOMMANDS = new Set([
+  "rev-parse", "status", "diff", "log", "rev-list", "merge-base", "ls-files",
+  "show", "cat-file", "symbolic-ref", "describe", "name-rev", "for-each-ref", "ls-tree",
+]);
+
+/** The worktree root (`<LA_WORKTREE_HOME>/<repo>/<branch>`) `cwd` sits in, inside the container; else null. */
+export function childTreeRoot(cwd, env = process.env) {
+  if (env.FENIX_IN_CONTAINER !== "1" || typeof cwd !== "string" || cwd === "") return null;
+  const root = String(env.LA_WORKTREE_HOME || "/data/workspaces/la-wt").replace(/\\/g, "/").replace(/\/+$/, "");
+  const abs = posix.resolve(cwd.replace(/\\/g, "/"));
+  if (!abs.startsWith(`${root}/`)) return null;
+  const parts = abs.slice(root.length + 1).split("/");
+  return parts.length >= 2 ? `${root}/${parts[0]}/${parts[1]}` : abs;
+}
+
+/** git argv for `cwd`: the one-shot sanitised prefix for a read in a child's worktree, else `args` unchanged. */
+export function childTreeGitArgs(args, cwd, env = process.env) {
+  const tree = childTreeRoot(cwd, env);
+  if (tree === null) return args;
+  let sub = null;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "-c" || args[i] === "-C") { i++; continue; }
+    if (!args[i].startsWith("-")) { sub = args[i]; break; }
+  }
+  if (sub === null || !CHILD_TREE_READ_SUBCOMMANDS.has(sub)) return args;
+  return [
+    "--no-optional-locks",
+    "-c", `safe.directory=${tree}`,
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "core.fsmonitor=false",
+    ...args,
+  ];
+}
+
 export function git(args, cwd) {
-  return execFileSync("git", args, {
+  return execFileSync("git", childTreeGitArgs(args, cwd), {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
     encoding: "utf8",
@@ -2395,7 +2440,7 @@ export function progressFingerprint({ worktree, baseRevision, failingTests = [] 
       // spawnSync has no maxBuffer limit — execFileSync throws at 1 MiB
       // (ERR_CHILD_PROCESS_STDIO_MAXBUFFER) which makes the guard fail
       // open on large commits. Hash the full diff regardless of size.
-      const _diffResult = spawnSync("git", ["diff", baseRevision], {
+      const _diffResult = spawnSync("git", childTreeGitArgs(["diff", baseRevision], worktree), {
         cwd: worktree,
         encoding: "utf8",
       });

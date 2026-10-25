@@ -403,6 +403,23 @@ Common cases:
   differs from yours, it is written again on the next start.
 - **`repo add` says the repository already exists** (exit 3) — it is already
   cloned into the workspaces volume; `fenix repo list` shows what is there.
+- **`fenix doctor` says `FAIL fenix code`** — a file under `/opt/fenix` differs
+  from the image (the image keeps a SHA-256 manifest of its own code in
+  `/usr/local/share/fenix/manifest.json`, outside the writable tree). Fenix's
+  code is not the Supervisor's to change: its Edit/Write on `/opt/fenix` are
+  denied and a Bash write there asks, and a failing Fenix script is meant to
+  become a hold, not a patch. The line names the files; `fenix update` restores
+  the image, and the Supervisor transcript
+  (`/data/agents/supervisor/projects/…/<session>.jsonl`) shows what changed and
+  why. A `WARN` only means a file the image does not have appeared.
+- **The Supervisor asks about `git` in a child's worktree, or about
+  `safe.directory`** — say no. A child owns its worktree and the gitdir behind
+  it, and git run there as the Supervisor can execute whatever the child planted
+  in it. "dubious ownership" is that boundary working. The Supervisor reads
+  children through the `supervisor-*` scripts (a one-shot, sanitised git
+  invocation — nothing is trusted persistently), looks at a child's work with
+  `git -C /data/workspaces/<repo> diff <base>..<branch>`, and pushes from the
+  main checkout, where the branch ref is shared.
 
 ## Upgrade
 
