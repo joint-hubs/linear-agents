@@ -65,7 +65,9 @@ export function containerStartMs({ readFile = readFileSync, clkTck } = {}) {
 let clkTckCache; // undefined = not probed yet
 let _probeClkTck = () => {
   try {
-    const conf = spawnSync("getconf", ["CLK_TCK"], { encoding: "utf8" });
+    // windowsHide: this runs inside the console-less watcher too; without it
+    // every probe flashes a terminal window on a Windows desktop.
+    const conf = spawnSync("getconf", ["CLK_TCK"], { encoding: "utf8", windowsHide: true });
     const n = Number((conf.stdout || "").trim());
     if (conf.status === 0 && Number.isFinite(n) && n > 0) return n;
   } catch {

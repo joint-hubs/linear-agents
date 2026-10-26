@@ -49,7 +49,8 @@ function localImportClosure(entry) {
     if (seen.has(file)) continue;
     seen.add(file);
     const src = readFileSync(join(HERE, file), "utf8");
-    for (const m of src.matchAll(/from\s+["']\.\/([^"']+\.mjs)["']/g)) queue.push(m[1]);
+    // `from "./x.mjs"` and the side-effect form `import "./x.mjs"` alike.
+    for (const m of src.matchAll(/(?:from|import)\s+["']\.\/([^"']+\.mjs)["']/g)) queue.push(m[1]);
     for (const m of src.matchAll(/import\(\s*["']\.\/([^"']+\.mjs)["']\s*\)/g)) queue.push(m[1]);
   }
   seen.delete(entry);

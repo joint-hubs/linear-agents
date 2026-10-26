@@ -403,7 +403,9 @@ test("returns reason=gate when a pending gate appears mid-wait", () => {
       "-e",
       `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(gateFile)}, JSON.stringify({gateId:'g-new',status:'pending',kind:'question',summary:'need an answer',questions:['?']})),800)`,
     ],
-    { detached: true, stdio: "ignore" },
+    // windowsHide: a detached console process gets its own visible window on
+    // win32 otherwise — one black box per run of this file on the desktop.
+    { detached: true, stdio: "ignore", windowsHide: true },
   );
   writer.unref();
 

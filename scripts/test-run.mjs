@@ -42,11 +42,15 @@
 //                      file count) and require all green. The pattern filter
 //                      and --jobs are ignored for this mode.
 
-import { readdirSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
+// First, before anything spawns: the runner's own children get windowsHide by
+// default on win32 (and the same module reaches every suite process through
+// NODE_OPTIONS, see suiteEnv below).
+import './spawn-windows-hide.mjs';
+import { existsSync, readdirSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { killTree } from './supervisor-lib.mjs';
 import { probePid, openRegistryRows } from './test-spawn.mjs';
 
@@ -247,6 +251,18 @@ if (!process.env.LA_SUPERVISOR_STATE_HOME) {
 const suiteEnv = { ...process.env };
 for (const key of Object.keys(suiteEnv)) {
   if (key.startsWith('LA_SUPERVISOR')) delete suiteEnv[key];
+}
+// win32: every suite process — and every node process it spawns, since
+// NODE_OPTIONS is inherited — loads spawn-windows-hide.mjs first, so a child
+// started without a console (a hidden watcher, a detached test server) does
+// not open one terminal window per git/getconf/taskkill it runs. See that
+// file for the mechanism; this runner imports it too, for its own spawns.
+if (process.platform === 'win32') {
+  const preload = join(SCRIPTS_DIR, 'spawn-windows-hide.mjs');
+  if (existsSync(preload)) {
+    const flag = `--import=${pathToFileURL(preload).href}`;
+    suiteEnv.NODE_OPTIONS = [suiteEnv.NODE_OPTIONS, flag].filter(Boolean).join(' ');
+  }
 }
 // Task-ownership seams: a caller who wants them sets them inside the test's own
 // child env — never ambiently through the runner.

@@ -1963,6 +1963,9 @@ export function git(args, cwd) {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
     encoding: "utf8",
+    // Callers include the console-less watcher; a bare git there opens a
+    // terminal window per call on a Windows desktop.
+    windowsHide: true,
   }).trim();
 }
 
@@ -2547,7 +2550,9 @@ export function killTree(pid, mode = "graceful") {
     if (process.platform === "win32") {
       const args = ["/PID", String(pid), "/T"];
       if (mode === "force") args.push("/F");
-      execFileSync("taskkill", args, { stdio: "ignore" });
+      // windowsHide: when the caller itself runs without a console (a detached
+      // watcher, a hidden test server), taskkill would otherwise flash a window.
+      execFileSync("taskkill", args, { stdio: "ignore", windowsHide: true });
     } else {
       const signal = mode === "force" ? "SIGKILL" : "SIGTERM";
       try {
