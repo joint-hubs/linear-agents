@@ -839,6 +839,10 @@ const childEnv = {
   // OpenRouter base URL moves to the fake endpoint.
   LA_PROVIDER: "",
   LA_PROVIDER_ENV_FILE: join(dir, "missing.env"),
+  // The server's Linear client also merges the repo's .env (linear-client
+  // loadEnv) — on a developer machine that file carries a real
+  // OPENROUTER_API_KEY, which flipped the "present" flag below. Opt out.
+  LA_LINEAR_NO_ENV_FILE: "1",
   LA_PROVIDER_CONFIG: "",
   LA_PROVIDER_BASEURL_OPENROUTER: CHECKS_URL,
   LA_LINEAR_CHECK_URL: `${CHECKS_URL}/linear`,

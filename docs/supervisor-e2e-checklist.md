@@ -245,7 +245,7 @@ into their per-run homes: `node scripts/supervisor-migrate-scratch.mjs` (dry run
 `docs/scratch-and-fixtures.md`).
 
 ### Verification
-- `node scripts/test-all.mjs` → 210 files (the registered lane count: 169 parallel + 41 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
+- `node scripts/test-all.mjs` → 210 files (the registered lane count: 196 parallel + 14 serial), all green (§8.1–8.11); `security-scan.test.mjs` is
   load-sensitive and has been observed red at base `e3dea40` as well — see §0 before reading a red
   security-scan as a regression.
 - The runner sweeps its spawn registry after both lanes (FOC-840): a server a test file left alive is tree-killed and reported as `test orphans left running: <file> pid N port P (killed)`, and the run fails even when every file passed.
