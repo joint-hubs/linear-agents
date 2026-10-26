@@ -25,7 +25,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ensureRunDir, readRegistry, runDir, supervisorStateHome, teeAbsPath, worktreePathFor, writeRegistry } from "./supervisor-lib.mjs";
+import { ensureRunDir, readRegistry, readWakeQueue, runDir, supervisorStateHome, teeAbsPath, worktreePathFor, writeRegistry } from "./supervisor-lib.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const SPAWN = join(ROOT, "scripts", "supervisor-spawn.mjs");
@@ -392,12 +392,41 @@ export function waitForStatus(runId, childId, statuses, timeoutMs = 15_000) {
           (tail ? `\n  tee tail: ...${tail}` : "\n  (no tee to read)"),
       );
     }
-    if (entry && statuses.includes(entry.status)) return entry;
+    if (entry && statuses.includes(entry.status)) {
+      return TERMINAL_TURN_STATUSES.has(entry.status) ? waitForTurnQuiescent(runId, childId, entry, deadline) : entry;
+    }
     sleepSync(120);
   }
   throw new Error(
     `child ${childId} never reached ${statuses.join("|")} within ${timeoutMs} ms (last: ${entry?.status ?? "no entry"})`,
   );
+}
+
+// Statuses the WATCHER writes when a turn ends (finalizeTurn in
+// supervisor-watch.mjs), each followed by the exit wake row. `stopped` is not
+// here: supervisor-stop writes it before the kill lands, and a force-stopped
+// watcher may never finalize — a wait for its wake row would only time out.
+const TERMINAL_TURN_STATUSES = new Set(["exited", "crashed", "waiting_gate"]);
+
+/**
+ * FOC-1010. A terminal status is the watcher's last REGISTRY write for the turn,
+ * but the watcher is still alive after it (wake row, telemetry end, exit), and
+ * updateChild is an unlocked read-modify-write. A test that edits the registry
+ * the moment it sees `exited` races whatever the watcher still does — under
+ * load that race was lost (a deleted `provider` came back). The exit wake row
+ * is appended AFTER every registry write of the turn, so its presence is the
+ * quiescence signal: wait for `exit:<childId>:<turn>` before handing the entry
+ * back. Bounded by the caller's deadline; a run without a wake queue (none of
+ * the fixtures disable it) would fall through to the same timeout error.
+ */
+function waitForTurnQuiescent(runId, childId, entry, deadline) {
+  const turn = Math.max((entry.turns?.length ?? 1) - 1, 0);
+  const key = `exit:${childId}:${turn}`;
+  while (Date.now() < deadline) {
+    if (readWakeQueue(runId).some((row) => row.dedupKey === key)) return readRegistry(runId).children[childId];
+    sleepSync(60);
+  }
+  throw new Error(`child ${childId} reached ${entry.status} but the watcher never enqueued ${key} before the deadline`);
 }
 
 // A blocking sleep in a synchronous test body. `Atomics.wait` on a throwaway
