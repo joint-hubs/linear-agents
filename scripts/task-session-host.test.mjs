@@ -40,7 +40,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 
 import { createTaskSessionStore, OWNER_STATUSES } from "./task-sessions.mjs";
-import { createTaskSessionHost, ownershipKeeps, seedSessionConfig } from "./task-session-host.mjs";
+import { createTaskSessionHost, ownershipKeeps, seedSessionConfig, sessionHomePath } from "./task-session-host.mjs";
 import { checkOwnership } from "./task-ownership.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -937,7 +937,8 @@ test('pickupTick enqueues by priority then age, skips candidates already in the 
     assert.equal(host.pickupState.lastError, null);
     // A won over B and C; the cap (2 minus the queued TAKEN row) stopped the
     // loop before B.
-    assert.equal(store.getByTask('workspace:ISSUE-A').status, 'queued');
+    // FOC-1081: the tick arms the prompt and pumps, so the row leaves 'queued' at once (the fakes start it).
+    assert.notEqual(store.getByTask('workspace:ISSUE-A').status, 'queued');
     assert.equal(store.getByTask('workspace:ISSUE-B'), null);
     assert.equal(store.getByTask('workspace:ISSUE-C'), null);
     assert.equal(store.getByTask('workspace:ISSUE-D'), null);
@@ -963,7 +964,7 @@ test('a throwing listCandidates is logged as lastError and the next tick still r
     const second = await host.pickupTick();
     assert.deepEqual(second, { candidates: 1, enqueued: ['workspace:ISSUE-OK'], skipped: 0 });
     assert.equal(host.pickupState.lastError, null);
-    assert.equal(store.getByTask('workspace:ISSUE-OK').status, 'queued');
+    assert.notEqual(store.getByTask('workspace:ISSUE-OK').status, 'queued'); // FOC-1081: pumped right after enqueue
   } finally { host.close(); store.close(); }
 });
 
@@ -1088,4 +1089,31 @@ test("FOC-1081: ownershipKeeps keeps what the real checkOwnership allows, counts
   });
   assert.deepEqual(throwing.kept.map((i) => i.identifier), ["FOC-1053"]);
   assert.deepEqual(throwing.verdicts, { unrestricted: 1, error: 1 });
+});
+
+test("FOC-1081 (second half): auto-pickup arms the Work-board hand-off text as the durable initial prompt and pumps the queue, so a picked ticket does not stay queued", async () => {
+  const store = createTaskSessionStore({ dbPath: join(mkdtempSync(join(tmpdir(), "la-pickup-arm-")), "s.sqlite"), maxActive: 2 });
+  const issue = { ...pickupIssue("ARM"), url: "https://linear.app/x/issue/ISSUE-ARM", description: "Do the thing.\n\nAC: it works." };
+  const { host, tmp } = build({
+    store,
+    maxActive: 2,
+    autoPickup: { enabled: true, workspace: "workspace" },
+    pickupDeps: fakeTimers(),
+    listCandidates: async () => [issue],
+  });
+  try {
+    const result = await host.pickupTick();
+    assert.deepEqual(result.enqueued, ["workspace:ISSUE-ARM"]);
+    const record = store.getByTask("workspace:ISSUE-ARM");
+    // The durable prompt is on disk, armed, with the same text the dashboard's Start shows.
+    const pendingPath = join(sessionHomePath({ LA_DATA_HOME: tmp }, record.sessionId), "pending-prompt.json");
+    assert.ok(existsSync(pendingPath), `no pending prompt at ${pendingPath}`);
+    const pending = JSON.parse(readFileSync(pendingPath, "utf8"));
+    assert.equal(pending.source, "auto-pickup");
+    assert.ok(["armed", "delivering", "delivered"].includes(pending.state), `unexpected prompt state ${pending.state}`);
+    assert.ok(pending.text.startsWith("Start ticket ISSUE-ARM: Ticket ARM\nhttps://linear.app/x/issue/ISSUE-ARM\n\nDo the thing."), pending.text);
+    // The pump ran: the session left `queued` (the fakes make it start) instead of waiting for a POST nobody sends.
+    await host.settled();
+    assert.notEqual(store.get(record.sessionId).status, "queued", JSON.stringify(store.get(record.sessionId)));
+  } finally { host.close(); store.close(); }
 });

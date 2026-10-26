@@ -78,6 +78,7 @@ import { readProcessIdentity, matchesProcess } from "./task-process-identity.mjs
 import { readCurrentRun } from "./supervisor-current-run.mjs";
 import { readTaskSessionsSettings, normalizeAutoPickup } from "./fenix-settings.mjs";
 import { repoRefName } from "./fenix-projects.mjs";
+import { startText } from "./work-board.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const platform = process.platform;
@@ -447,6 +448,22 @@ export function createTaskSessionHost(deps = {}) {
           issueId,
           title: typeof issue?.title === "string" ? issue.title.slice(0, 300) : undefined,
         });
+        // FOC-1081 (second half): a queued session only starts once the pump
+        // claims it, and the pump refuses a session without an ARMED durable
+        // initial prompt. The dashboard start (POST /sessions) arms one; the
+        // pickup never did, so every picked ticket sat `queued` forever. Arm
+        // the same hand-off text the Work board shows (startText), once — a
+        // prompt already on record is never overwritten — then pump below.
+        const sessionHome = sessionHomePath(baseEnv, record.sessionId);
+        if (!readPendingPrompt(sessionHome)) {
+          armPendingPrompt(sessionHome, {
+            sessionId: record.sessionId,
+            taskKey: record.taskKey,
+            text: startText(issue),
+            armedAt: new Date().toISOString(),
+            source: "auto-pickup",
+          });
+        }
         enqueued.push(record.taskKey);
         active++;
       }
@@ -456,6 +473,10 @@ export function createTaskSessionHost(deps = {}) {
         `auto-pickup: ${ordered.length} candidates, ${enqueued.length} enqueued` +
           (skipped > 0 ? `, skipped ${skipped} (in store)` : ""),
       );
+      // Hand the queue to the pump: claimNext promotes the oldest queued
+      // sessions up to the cap and starts them. Fire-and-forget like the stop
+      // path — the tick's result is about the queue, not about readiness.
+      if (enqueued.length > 0) void pump();
       return { candidates: ordered.length, enqueued, skipped };
     } catch (err) {
       const reason = String(err?.message ?? err);
