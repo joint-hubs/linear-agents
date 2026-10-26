@@ -5,6 +5,25 @@
 
 > **Hand-off for the next engineer: `docs/HANDOFF.md` (2026-10-23)** — state, blockers in order, VM ops, gotchas.
 
+## 2026-10-25 (evening) — rc.5 out; the HANDOFF §3.1 table walked on `fenix-accept`; three snags → #152
+
+Tag `v1.0.0-rc.5` is on `ea9b81e` (Mateusz's OK), `publish-image` green, `fenix update` on the VM, `fenix doctor` mostly
+green. Per-ticket results and the evidence: `docs/HANDOFF.md` §3.1 ("Result of the walk") and the "Day 3" section of
+`docs/releases/1.0.0/foc-789-run-log.md`. In short: FOC-990, FOC-1000 and FOC-988 verified on the real install;
+FOC-1001's guard verified (real Claude Code prompts), FOC-989 and FOC-1007 partly — they stay **In Review**.
+
+- Found on the VM, fixed in #152 (→ rc.6): FOC-1047 (`fenix cleanup` and the Supervisor's `cleanup_remove` could not
+  find the main checkout from a child tree — `git worktree list` was not a sanitised read), FOC-1048 (`fenix doctor`
+  WARNed on the generated `config/models.map` after every healthy start), FOC-1049 (`LA_PROJECTS_FILE` leaked into the
+  suite a child runs; `team-routes.test` red).
+- The three cleanup approvals of 2026-10-22 were void (given while every git read failed). Fresh gates
+  `gate-dev-1-2`, `gate-test-2-2`, `gate-test-3-2` wait in Needs-you; after the answers the Supervisor removes the
+  FOC-958 worktrees. 74 old `test-*` run dirs (fenix-child-owned) need root and Mateusz's OK.
+- VM `fenix-accept` stopped after the walk (no live child, the Supervisor idle); the gates stay for the next start.
+- Next: Mateusz answers the gates and merges #152 → rc.6 → FOC-789 part 2 (two task sessions; also the real
+  push/review/verdict flow for FOC-1001 and a real followup for FOC-989) → snags S1–S30 as backlog (AC2) → FOC-790.
+
+
 ## 2026-10-25 — FOC-477: `plan.spec` pinned to glm-5.3-flash, instrument boundary recorded before attempt 7
 
 Mateusz (reaffirming protocol Q10): the arm-A `plan.spec` child runs on `z-ai/glm-5.3-flash`, as arm B's PLAN

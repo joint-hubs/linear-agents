@@ -1085,6 +1085,52 @@ test("manifest: an edited file is 'modified', a deleted one 'missing', a new one
   }
 });
 
+test("manifest: a registered generated output (config/models.map) is not 'added'; a forged registry excuses nothing", () => {
+  const { root, put } = fakeFenixTree();
+  try {
+    put("config/artifacts.json", JSON.stringify({
+      version: 1,
+      artifacts: [
+        { id: "models-map", output: "config/models.map", committed: false },
+        { id: "gen-dir", output: "config/generated", committed: false },
+        { id: "diagrams", output: "docs/diagrams/*.png", committed: true },
+      ],
+    }));
+    const manifest = buildManifest(root);
+    // what the entrypoint's artifact refresh writes on every healthy start
+    put("config/models.map", "KEY=VALUE\n");
+    put("config/generated/a.json", "{}\n");
+    assert.deepEqual(compareToManifest(manifest, root).added, [], "a healthy start reports nothing");
+    const doctor = tempDir();
+    try {
+      const manifestPath = path.join(doctor, "manifest.json");
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+      assert.equal(checkFenixCode({ env: IN_CONTAINER, manifestPath, root }).status, "ok", "fenix doctor stays green on a healthy start");
+    } finally {
+      fs.rmSync(doctor, { recursive: true, force: true });
+    }
+
+    // a stray script and a lookalike name are still named
+    put("scripts/fenix-patch.mjs", "// stray\n");
+    put("config/models.map.bak", "x");
+    assert.deepEqual(compareToManifest(manifest, root).added, ["config/models.map.bak", "scripts/fenix-patch.mjs"]);
+
+    // the registry edited to excuse a planted file: its hash no longer matches the image's, so nothing is excused
+    put("config/artifacts.json", JSON.stringify({
+      version: 1,
+      artifacts: [
+        { id: "x", output: "scripts/fenix-patch.mjs", committed: false },
+        { id: "models-map", output: "config/models.map", committed: false },
+      ],
+    }));
+    const forged = compareToManifest(manifest, root);
+    assert.deepEqual(forged.modified, ["config/artifacts.json"]);
+    assert.deepEqual(forged.added, ["config/generated/a.json", "config/models.map", "config/models.map.bak", "scripts/fenix-patch.mjs"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("manifest: reading — absent is null, garbage and foreign versions are errors", () => {
   const dir = tempDir();
   try {

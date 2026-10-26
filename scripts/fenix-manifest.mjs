@@ -16,7 +16,9 @@
 // config/, agents/, docker/, package.json, package-lock.json, VERSION. Not
 // node_modules, not ui/dist (build output), not caches. A file that differs or is
 // gone is drift (FAIL); a file that is not in the image is a WARN (a stray new
-// script is worth a look, a cache a tool dropped is not an emergency).
+// script is worth a look, a cache a tool dropped is not an emergency) — except an
+// output the runtime regenerates by design (config/artifacts.json, committed:false),
+// e.g. config/models.map written at every container start.
 //
 // Usage:
 //   node scripts/fenix-manifest.mjs write [--root <dir>] --out <manifest.json>
@@ -77,10 +79,39 @@ export function buildManifest(root = DEFAULT_ROOT, fsImpl = fs) {
   return { version: MANIFEST_VERSION, files };
 }
 
+const ARTIFACT_REGISTRY = "config/artifacts.json";
+
+/**
+ * Outputs the runtime itself regenerates under a covered dir (FOC-779: `config/models.map`, written by the
+ * entrypoint's artifact refresh at every start). They are not in the image, they are not a patch, and a doctor
+ * that WARNs about them on every healthy start teaches the operator to ignore the check.
+ *
+ * Only the registry the IMAGE shipped is trusted: it is hashed in the manifest like any other file, so if it
+ * was edited (to hide a planted file behind a fake "generated output") its hash differs, this returns nothing,
+ * and both the edit and the planted file are reported.
+ * @returns {(rel: string) => boolean}
+ */
+export function generatedOutputMatcher(manifest, root = DEFAULT_ROOT, fsImpl = fs) {
+  const none = () => false;
+  const want = manifest?.files?.[ARTIFACT_REGISTRY];
+  if (!want) return none;
+  try {
+    const file = path.join(root, ARTIFACT_REGISTRY);
+    if (sha256(file, fsImpl) !== want) return none;
+    const outputs = (JSON.parse(fsImpl.readFileSync(file, "utf8")).artifacts ?? [])
+      .filter((a) => a && a.committed === false && typeof a.output === "string" && !/[*?]/.test(a.output))
+      .map((a) => a.output.replace(/\/+$/, ""));
+    return (rel) => outputs.some((out) => rel === out || rel.startsWith(`${out}/`));
+  } catch {
+    return none;
+  }
+}
+
 /** { modified, missing, added } — sorted relative paths — of the live tree against `manifest`. */
 export function compareToManifest(manifest, root = DEFAULT_ROOT, fsImpl = fs) {
   const expected = manifest?.files ?? {};
   const live = new Set(listCodeFiles(root, fsImpl));
+  const isGenerated = generatedOutputMatcher(manifest, root, fsImpl);
   const modified = [];
   const missing = [];
   for (const [rel, want] of Object.entries(expected)) {
@@ -97,7 +128,7 @@ export function compareToManifest(manifest, root = DEFAULT_ROOT, fsImpl = fs) {
     }
     if (have !== want) modified.push(rel);
   }
-  const added = [...live].filter((rel) => !(rel in expected));
+  const added = [...live].filter((rel) => !(rel in expected) && !isGenerated(rel));
   return { modified: modified.sort(), missing: missing.sort(), added: added.sort() };
 }
 

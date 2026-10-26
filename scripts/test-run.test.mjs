@@ -279,6 +279,18 @@ test("the runner strips LA_SUPERVISOR* from every spawned child (FOC-295)", () =
   if (r.status !== 0) fail(`the probe saw a LA_SUPERVISOR* variable:\n${r.stderr}`);
 });
 
+test("the runner strips the whole runtime-env list from every spawned child (FOC-990), the projects map included", () => {
+  const listed = JSON.parse(readFileSync(join(HERE, "test-runtime-env.json"), "utf8")).unset;
+  if (!listed.includes("LA_PROJECTS_FILE")) fail("LA_PROJECTS_FILE is not in the list: the image points it at the user's real projects map and a suite file must not read it");
+  const PROBE =
+    `const leaked = ${JSON.stringify(listed)}.filter((k) => k in process.env);\n` +
+    'if (leaked.length) { console.error("leaked: " + leaked.join(",")); process.exit(1); }\n' +
+    OK;
+  const root = sandbox({ parallel: [lane("a.test.mjs")], serial: [] }, { "a.test.mjs": PROBE });
+  const r = run(root, [], { ...process.env, ...Object.fromEntries(listed.map((k) => [k, "/data/leak"])) });
+  if (r.status !== 0) fail(`the probe saw runtime env:\n${r.stdout}\n${r.stderr}`);
+});
+
 // ── orphan sweep (FOC-840) ───────────────────────────────────────────────────
 
 test("a test file that never stops its spawned server fails the run with the sweep", () => {

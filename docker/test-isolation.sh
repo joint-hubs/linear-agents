@@ -361,6 +361,15 @@ as_node_home "node --input-type=module -e \"import { git, dirtyTreeReport } from
 [ ! -f /tmp/iso-fsmonitor ] || fail 'the sanctioned read EXECUTED the child-planted core.fsmonitor'
 pass 'supervisor-lib reads the child-owned worktree (rev-parse, status, dirtyTreeReport) and runs nothing the child planted'
 
+# `fenix cleanup` and the Supervisor's cleanup tool find the main checkout from a child's tree: the
+# first entry of `git worktree list`. It is a read, so it takes the same one-shot form (rc.5 VM walk:
+# without it the default repo resolution died on "dubious ownership").
+rc=0
+main=$(as_node_home "node --input-type=module -e \"import { listWorktrees } from '/opt/fenix/scripts/supervisor-lib.mjs'; process.stdout.write(listWorktrees('$WORKTREE')[0].path)\"") || rc=$?
+[ "$rc" = "0" ] && [ "$main" = "/data/workspaces/seed-repo" ] || fail "listWorktrees from the child-owned worktree did not resolve the main checkout (rc=$rc): $main"
+[ ! -f /tmp/iso-fsmonitor ] || fail 'listWorktrees EXECUTED the child-planted core.fsmonitor'
+pass 'listWorktrees from a child-owned worktree resolves the main checkout, running nothing the child planted'
+
 rc=0
 trusted=$(as_node_home 'git config --global --get-all safe.directory 2>&1') || rc=$?
 [ "$rc" != "0" ] && [ -z "$trusted" ] || fail "a persistent safe.directory exists after the reads: $trusted"
