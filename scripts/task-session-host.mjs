@@ -161,6 +161,35 @@ const STATUS_TEXT = { 400: "Bad Request", 404: "Not Found", 409: "Conflict", 500
  * controller's createHost deps, or a function (sessionId) → deps — the seam
  * tests use to give each session its own fake tmux/pty/clock.
  */
+/**
+ * The owner-scope filter of auto-pickup, over task-ownership's verdict
+ * function. `checkOwnership(issue, opts)` returns `{ verdict, allowed, … }`
+ * (see task-ownership.mjs) — the candidate is kept iff `allowed === true`; a
+ * throwing check excludes it (never a guessed scope) and is counted as
+ * `error`. Exported so the test exercises it against the REAL module.
+ *
+ * FOC-1081: the first wiring called `checkOwnership({ issue, workspace, env })`
+ * and kept a candidate when the result `=== true` — an object never is, and the
+ * wrapped issue read as "no project" — so auto-pickup enqueued nothing on every
+ * installation that ships task-ownership.mjs (all of them).
+ */
+export function ownershipKeeps(issues, checkOwnership) {
+  const kept = [];
+  const verdicts = {};
+  for (const issue of issues) {
+    let verdict = "error";
+    try {
+      const result = checkOwnership(issue);
+      verdict = typeof result?.verdict === "string" ? result.verdict : "malformed";
+      if (result?.allowed === true) kept.push(issue);
+    } catch {
+      /* excluded — counted below */
+    }
+    verdicts[verdict] = (verdicts[verdict] ?? 0) + 1;
+  }
+  return { kept, verdicts };
+}
+
 export function createTaskSessionHost(deps = {}) {
   const baseEnv = deps.env ?? process.env;
   // FOC-901: where the cap comes from — deps.maxActive (tests / embedders) →
@@ -357,14 +386,10 @@ export function createTaskSessionHost(deps = {}) {
       }
     }
     if (typeof taskOwnership?.checkOwnership === "function") {
-      const workspace = pickupWorkspace();
-      const kept = [];
-      for (const issue of issues) {
-        try {
-          if ((await taskOwnership.checkOwnership({ issue, workspace, env: baseEnv })) === true) kept.push(issue);
-        } catch {
-          /* a throwing check excludes the candidate — never a guessed scope */
-        }
+      const { kept, verdicts } = ownershipKeeps(issues, taskOwnership.checkOwnership);
+      pickup.lastOwnership = verdicts;
+      if (kept.length !== issues.length) {
+        console.log(`auto-pickup: ownership kept ${kept.length} of ${issues.length} candidate(s) — ${JSON.stringify(verdicts)}`);
       }
       return kept;
     }

@@ -40,7 +40,8 @@ import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 
 import { createTaskSessionStore, OWNER_STATUSES } from "./task-sessions.mjs";
-import { createTaskSessionHost, seedSessionConfig } from "./task-session-host.mjs";
+import { createTaskSessionHost, ownershipKeeps, seedSessionConfig } from "./task-session-host.mjs";
+import { checkOwnership } from "./task-ownership.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, "task-session-host.mjs");
@@ -1041,4 +1042,50 @@ test('a throwing legacy migration never blocks serving', async () => {
     host.close();
     store.close();
   }
+});
+
+// ── auto-pickup owner scope (FOC-1081) ───────────────────────────────────────
+// Against the REAL task-ownership module: the first wiring called
+// checkOwnership with a wrapped issue and compared its object result to
+// `true`, so no candidate ever survived the filter on a real installation.
+
+test("FOC-1081: ownershipKeeps keeps what the real checkOwnership allows, counts verdicts, never compares an object to true", () => {
+  const fenix = { identifier: "FOC-1053", project: { name: "Fenix — wydanie 1.0 i kontrola kosztów" } };
+  const other = { identifier: "WSKM-1", project: { name: "WSKM — dydaktyka" } };
+  const bare = { identifier: "FOC-9", project: null };
+
+  // Unrestricted install (the shipped config: no owners): everything is kept.
+  const unrestricted = { version: 1, owners: {}, unlisted: "allow" };
+  const u = ownershipKeeps([fenix, other, bare], (issue) => checkOwnership(issue, { config: unrestricted, owner: "supervisor" }));
+  assert.deepEqual(u.kept.map((i) => i.identifier), ["FOC-1053", "WSKM-1", "FOC-9"]);
+  assert.deepEqual(u.verdicts, { unrestricted: 3 });
+
+  // Scoped install: the acting owner lists the Fenix project; another owner
+  // lists WSKM; the bare one is unlisted and the policy says ask.
+  const scoped = {
+    version: 1,
+    owners: {
+      supervisor: { linearProjects: ["Fenix — wydanie 1.0 i kontrola kosztów"] },
+      orchestrator: { linearProjects: ["WSKM — dydaktyka"] },
+    },
+    unlisted: "ask",
+  };
+  const s = ownershipKeeps([fenix, other, bare], (issue) => checkOwnership(issue, { config: scoped, owner: "supervisor" }));
+  assert.deepEqual(s.kept.map((i) => i.identifier), ["FOC-1053"]);
+  assert.deepEqual(s.verdicts, { owned: 1, foreign: 1, unlisted: 1 });
+
+  // The bug's shape: a checker that answers a bare `true` (not the module's
+  // contract) keeps nothing and is counted as malformed — the filter trusts
+  // `allowed`, never truthiness.
+  const bareTrue = ownershipKeeps([fenix], () => true);
+  assert.deepEqual(bareTrue.kept, []);
+  assert.deepEqual(bareTrue.verdicts, { malformed: 1 });
+
+  // A throwing check excludes the candidate and is counted, never thrown.
+  const throwing = ownershipKeeps([fenix, other], (issue) => {
+    if (issue === other) throw new Error("ambiguous");
+    return checkOwnership(issue, { config: unrestricted, owner: "supervisor" });
+  });
+  assert.deepEqual(throwing.kept.map((i) => i.identifier), ["FOC-1053"]);
+  assert.deepEqual(throwing.verdicts, { unrestricted: 1, error: 1 });
 });
