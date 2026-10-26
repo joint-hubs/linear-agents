@@ -512,6 +512,60 @@ test("provider wizard hides nebul from the listing unless it is already active",
   }
 });
 
+test("FOC-1053: fresh install — the provider prompt defaults to openrouter, never the string \"null\"", () => {
+  // `settings_get provider.active` prints the literal "null" for the unset
+  // value (fenix-settings.mjs get serialises a stored JSON null that way, so
+  // `retention` can tell "keepDays: null" from an absent key). The wizard must
+  // treat that word as "no value": the prompt shows [openrouter] and Enter
+  // picks openrouter — not the unknown provider "null".
+  const { dir, bin } = makeHome("wizard-fresh-default");
+  try {
+    // Fresh install: no settings overlay on disk at all.
+    const settingsPath = join(dir, "settings.json");
+    assert.equal(existsSync(settingsPath), false);
+    const res = runKeysWizard({
+      home: dir,
+      bin,
+      settingsPath,
+      input: ["", "fixture-provider-key", "fixture-linear-key", "fixture-github-token", "FOC"],
+    });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.match(res.stdout, /Provider \[openrouter\]:/, res.stdout);
+    assert.ok(!res.stdout.includes("Provider [null]"), `the literal "null" was offered:\n${res.stdout}`);
+    assert.ok(!/Unknown provider: null/.test(res.stdout), res.stdout);
+    // Enter really chose openrouter: the live check ran against it.
+    const calls = keyCheckCalls(dir);
+    assert.ok(calls.some((c) => c.includes("--provider openrouter")), calls.join("\n"));
+    assert.ok(!calls.some((c) => c.includes("--provider null")), calls.join("\n"));
+    // …and the choice was committed.
+    assert.equal(readSettingsFile(dir).provider.active, "openrouter");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // Same promise for a stored literal "null" (valid by provider.active's
+  // pattern, but never a real provider): it is not offered and not selectable.
+  const stored = makeHome("wizard-stored-null");
+  try {
+    const settingsPath = writeSettingsFile(stored.dir, {
+      provider: { active: "null", custom: null },
+      routing: {},
+    });
+    const res = runKeysWizard({
+      home: stored.dir,
+      bin: stored.bin,
+      settingsPath,
+      input: ["", "fixture-provider-key", "fixture-linear-key", "fixture-github-token", "FOC"],
+    });
+    assert.equal(res.status, 0, `exit ${res.status}\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
+    assert.match(res.stdout, /Provider \[openrouter\]:/, res.stdout);
+    assert.ok(!/Unknown provider: null/.test(res.stdout), res.stdout);
+    const calls = keyCheckCalls(stored.dir);
+    assert.ok(calls.some((c) => c.includes("--provider openrouter")), calls.join("\n"));
+  } finally {
+    rmSync(stored.dir, { recursive: true, force: true });
+  }
+});
+
 test("FOC-780: `fenix retention` with no verb forwards `show` to the in-container node CLI", () => {
   const { dir, bin } = makeHome("retention-default");
   try {

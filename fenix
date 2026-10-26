@@ -427,9 +427,17 @@ esc_json() {
 }
 
 settings_get() {
-  # $1 = dotted path; prints the string value or nothing. The overlay lives at
+  # $1 = dotted path; prints the value or nothing. The overlay lives at
   # /fenix-config/settings.json in Docker (= host .fenix/config/settings.json).
-  in_container_node scripts/fenix-settings.mjs get "$1" 2>/dev/null || true
+  # The node CLI prints a stored JSON null as the literal "null" (so a key like
+  # retention is distinguishable from an unset one). That word means "no value"
+  # HERE: a caller's ${x:-default} must fire on a fresh install instead of the
+  # string "null" being taken as a real choice (FOC-1053).
+  v=$(in_container_node scripts/fenix-settings.mjs get "$1" 2>/dev/null) || true
+  case "$v" in
+    ""|null|undefined) return 0 ;;
+  esac
+  printf '%s\n' "$v"
 }
 
 settings_set() {

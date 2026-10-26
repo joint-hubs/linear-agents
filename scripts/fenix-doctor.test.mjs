@@ -12,9 +12,11 @@
 // Run: node scripts/fenix-doctor.test.mjs   (also: node --test <this file>)
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   GH_MIN_VERSION,
   applyGhFloor,
@@ -1203,6 +1205,51 @@ test("fenix code: the list in the detail is capped, the count is not", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// S29 / FOC-1068: deleting a helper the doctor imports used to kill it on
+// import (ERR_MODULE_NOT_FOUND) before checkFenixCode could print anything. The
+// manifest pass must still answer: a FAIL line naming the deleted file, never a
+// stack trace.
+test("a deleted helper module is a FAIL line from the manifest pass, not ERR_MODULE_NOT_FOUND", () => {
+  const root = tempDir();
+  const dataDir = tempDir();
+  try {
+    // A working copy of the real doctor tree, so the dynamic imports resolve
+    // the same way they do in the image.
+    const realScripts = path.dirname(fileURLToPath(new URL("./fenix-doctor.mjs", import.meta.url)));
+    const scripts = path.join(root, "scripts");
+    fs.cpSync(realScripts, scripts, { recursive: true });
+    fs.rmSync(path.join(scripts, "supervisor-lib.mjs"), { force: true });
+
+    const manifestPath = path.join(root, "manifest.json");
+    // The manifest names the deleted file, so compareToManifest reports it as
+    // missing — that is the FAIL line we expect the doctor to print.
+    fs.writeFileSync(manifestPath, JSON.stringify({ version: 1, files: { "scripts/supervisor-lib.mjs": "0".repeat(64) } }));
+
+    const r = spawnSync(process.execPath, [path.join(scripts, "fenix-doctor.mjs")], {
+      encoding: "utf8",
+      timeout: 60000,
+      env: {
+        ...process.env,
+        FENIX_IN_CONTAINER: "1",
+        LA_ROOT: root,
+        LA_FENIX_MANIFEST: manifestPath,
+        LA_DATA_HOME: path.join(dataDir, "data"),
+        LA_TELEMETRY_HOME: path.join(dataDir, "telemetry"),
+        LA_SUPERVISOR_STATE_HOME: path.join(dataDir, "state"),
+        FENIX_WORKSPACES: path.join(dataDir, "workspaces"),
+      },
+    });
+    const out = `${r.stdout}\n${r.stderr}`;
+    assert.ok(!/ERR_MODULE_NOT_FOUND/.test(out), `doctor must not die on import:\n${out}`);
+    assert.ok(!/Cannot find module/.test(r.stderr), `import errors must not reach stderr:\n${r.stderr}`);
+    assert.match(r.stdout, /FAIL fenix code — .*supervisor-lib\.mjs \(missing\)/);
+    assert.equal(r.status, 1, `a FAIL must exit 1:\n${out}`);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
 
