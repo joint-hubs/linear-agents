@@ -18,6 +18,9 @@
 // Not invoked by hand. supervisor-spawn.mjs (and later supervisor-followup.mjs)
 // start it with { detached: true, stdio: 'ignore' } + unref.
 
+// First: this watcher owns no console on win32 (spawned with windowsHide), so
+// every helper it runs would otherwise open a terminal window — see the module.
+import "./spawn-windows-hide.mjs";
 import { spawn, execFileSync } from "node:child_process";
 import {
   appendFileSync,
@@ -79,6 +82,9 @@ function endTelemetryRun(telemetryRunId, exitCode) {
     execFileSync(process.execPath, [`${ROOT}/scripts/run-manifest.mjs`, "end", telemetryRunId, String(exitCode ?? 0)], {
       cwd,
       stdio: "ignore",
+      // The watcher owns no console (see spawnOpts below): without windowsHide
+      // every helper it runs opens a terminal window on a Windows desktop.
+      windowsHide: true,
     });
   } catch (err) {
     note({ subtype: "telemetry_end_failed", message: err.message });
@@ -313,7 +319,7 @@ function reopenTelemetryRun(telemetryRunId, turn) {
     execFileSync(
       process.execPath,
       [`${ROOT}/scripts/run-manifest.mjs`, "reopen", telemetryRunId, String(turn)],
-      { cwd, stdio: "ignore" },
+      { cwd, stdio: "ignore", windowsHide: true },
     );
   } catch (err) {
     note({ subtype: "telemetry_reopen_failed", message: err.message });

@@ -13,6 +13,12 @@
       "runtimeArgs": ["scripts/serve-docs.mjs", "7445"],
       "env": { "LA_SERVE_ROOT": "report" },
       "port": 7445
+    },
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/telemetry-server.mjs"],
+      "port": 7331
     }
   ]
 }

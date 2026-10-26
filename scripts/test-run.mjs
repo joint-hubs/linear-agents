@@ -19,8 +19,10 @@
 //
 // What the isolation proof does and does not show:
 //   - The static audit is a regex scan of the parallel lane for known markers
-//     (server binds, fixed-port constants, repo-root-anchored writes, the live
-//     DB seam being unset, spawning the real telemetry-server). It is a text
+//     (fixed-port binds and constants, repo-root-anchored writes, the live
+//     DB seam being unset, spawning the real telemetry-server). Ephemeral
+//     binds (`listen(0, …)`) are not markers: a kernel-assigned port cannot
+//     collide with another file's. It is a text
 //     scan, not a dataflow guarantee: a write through a variable assigned from
 //     a repo-root join elsewhere in the file would be missed.
 //   - `--prove-isolation` runs every parallel-lane file at once and requires
@@ -40,11 +42,15 @@
 //                      file count) and require all green. The pattern filter
 //                      and --jobs are ignored for this mode.
 
-import { readdirSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
+// First, before anything spawns: the runner's own children get windowsHide by
+// default on win32 (and the same module reaches every suite process through
+// NODE_OPTIONS, see suiteEnv below).
+import './spawn-windows-hide.mjs';
+import { existsSync, readdirSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { killTree } from './supervisor-lib.mjs';
 import { probePid, openRegistryRows } from './test-spawn.mjs';
 
@@ -65,8 +71,8 @@ never runs two files at once.
 
 Isolation proof — what it does and does not show:
   - The static audit (always on) regex-scans every parallel-lane file for
-    known disqualifying markers: server binds, socket connects, listen(port),
-    dgram/WebSocket servers, fixed-port constants, spawns of the real
+    known disqualifying markers: listen(<fixed port>) calls (ephemeral
+    listen(0) binds are allowed), dgram/WebSocket servers, fixed-port constants, spawns of the real
     telemetry-server, writes whose destination is anchored to the real repo
     root, and unsetting of the LA_TELEMETRY_DB/HOME seam (which puts the live
     default DB path in play). It is a text scan, not a dataflow guarantee —
@@ -178,10 +184,12 @@ const stripCommentLines = (src) =>
     .filter((line) => !line.trim().startsWith('//'))
     .join('\n');
 
+// Ephemeral binds are not a shared resource: `.listen(0, …)` takes a kernel-assigned
+// port, so a createServer/net.connect pair over such a port cannot collide with
+// another file. The markers therefore target what CAN collide — a literal
+// non-zero port, a PORT constant, the live telemetry seam — not the bind itself.
 const AUDIT_MARKERS = [
-  { name: 'server bind (createServer)', re: /\bcreateServer\s*\(/ },
-  { name: 'socket connect (net.connect/createConnection)', re: /\bnet\s*\.\s*(?:connect|createConnection)\b|\bcreateConnection\s*\(/ },
-  { name: 'listen(port) call', re: /\.listen\s*\(\s*\d/ },
+  { name: 'listen(fixed port) call', re: /\.listen\s*\(\s*[1-9]\d*/ },
   { name: 'dgram socket', re: /\bdgram\b/ },
   { name: 'WebSocket server', re: /\bWebSocketServer\b/ },
   { name: 'fixed-port constant (PORT = n / port: n)', re: /\bPORT\s*[:=]\s*\d{3,}|\bport\s*[:=]\s*\d{3,}/ },
@@ -243,6 +251,18 @@ if (!process.env.LA_SUPERVISOR_STATE_HOME) {
 const suiteEnv = { ...process.env };
 for (const key of Object.keys(suiteEnv)) {
   if (key.startsWith('LA_SUPERVISOR')) delete suiteEnv[key];
+}
+// win32: every suite process — and every node process it spawns, since
+// NODE_OPTIONS is inherited — loads spawn-windows-hide.mjs first, so a child
+// started without a console (a hidden watcher, a detached test server) does
+// not open one terminal window per git/getconf/taskkill it runs. See that
+// file for the mechanism; this runner imports it too, for its own spawns.
+if (process.platform === 'win32') {
+  const preload = join(SCRIPTS_DIR, 'spawn-windows-hide.mjs');
+  if (existsSync(preload)) {
+    const flag = `--import=${pathToFileURL(preload).href}`;
+    suiteEnv.NODE_OPTIONS = [suiteEnv.NODE_OPTIONS, flag].filter(Boolean).join(' ');
+  }
 }
 // Task-ownership seams: a caller who wants them sets them inside the test's own
 // child env — never ambiently through the runner.

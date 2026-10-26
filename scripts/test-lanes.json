@@ -65,6 +65,14 @@
       "reason": "isolation audit FOC-762/773: pure unit fixtures over literal config objects; no fs, no ports, no socket binds, no telemetry DB"
     },
     {
+      "file": "cockpit-legacy-mode.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: spawns the real telemetry-server (native mode and docker mode against a fake session host) on ephemeral ports — createServer + .listen (FOC-839 legacy compatibility suite)"
+    },
+    {
+      "file": "cockpit-routes.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: spawns the real telemetry-server and fake hosts on ephemeral ports (createServer + .listen, raw net.connect sockets for the upgrade tests)"
+    },
+    {
       "file": "cockpit.test.mjs",
       "reason": "isolation audit FOC-783: mkdtemp/tmpdir fixtures only; cockpit state via the LA_SUPERVISOR_STATE_HOME seam pointed at temp paths (poll tuning via LA_SUPERVISOR_POLL_MS); the probe is an injected stub, no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
@@ -201,12 +209,16 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
-      "file": "key-leak-check.test.mjs",
-      "reason": "isolation audit FOC-778: the docker runner is an injected fake; the canary reaches grep only via stdin; canary file in a mkdtemp dir; no network, no ports, no socket binds, no telemetry DB"
-    },
-    {
       "file": "image-ref.test.mjs",
       "reason": "FOC-777: pure file reads over the checkout (VERSION, compose.yaml, fenix, the Dockerfiles) — no docker, no ports, no writes"
+    },
+    {
+      "file": "key-check.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: binds ephemeral ports via node:http createServer probes (the fake HTTP check hosts); spawned key-check children are real node processes over mkdtemp fixtures"
+    },
+    {
+      "file": "key-leak-check.test.mjs",
+      "reason": "isolation audit FOC-778: the docker runner is an injected fake; the canary reaches grep only via stdin; canary file in a mkdtemp dir; no network, no ports, no socket binds, no telemetry DB"
     },
     {
       "file": "launcher-wrappers.test.mjs",
@@ -255,6 +267,10 @@
     {
       "file": "mcp-extraction.test.mjs",
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
+    },
+    {
+      "file": "mcp-fenix-control.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: spawns the real telemetry-server (docker mode against a fake session host, then native mode) plus an in-process fake host on 127.0.0.1:0 — same harness family as cockpit-routes, conservative serial for socket binds and child processes (FOC-958)"
     },
     {
       "file": "mcp-fenix-github.test.mjs",
@@ -385,6 +401,10 @@
       "reason": "isolation audit (task workspace P1 events): hook recording over an injected env and an explicit temp sqlite path only; no child processes, no ports, no socket binds, no telemetry DB — the word 'spawn' in the file is test-title text about FENIX_RUNTIME_RETURN"
     },
     {
+      "file": "runtime-otel.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: binds an ephemeral loopback port via the collector's node:http server (listen(0, '127.0.0.1')) and exercises it with real fetch — the static audit cannot clear it (task workspace PRD §10)"
+    },
+    {
       "file": "runtime-statistics-routes.test.mjs",
       "reason": "isolation audit (task workspace PRD §10): the route handler runs on stub req/res with INJECTED loaders (no server child, no ports); the one integration block exercises the default loaders through the LA_TELEMETRY_DB seam set before the store import and never deleted, under one mkdtemp dir; no real-repo-path writes, no real network"
     },
@@ -399,6 +419,10 @@
     {
       "file": "session-dialog.test.mjs",
       "reason": "isolation audit FOC-810: pure parsers over checked-in fixture text (scripts/fixtures/session-dialogs read read-only); the only writes are the mkdtemp transcript for the tail-read test; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
+      "file": "settings-routes.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: spawns the real telemetry-server and fake check hosts on ephemeral ports (createServer + .listen; work-routes style harness, FOC-786)"
     },
     {
       "file": "shared-skills.test.mjs",
@@ -445,12 +469,24 @@
       "reason": "isolation audit FOC-613: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam set at module load (spawned cleanup processes inherit it); autonomy config via the LA_AUTONOMY_CONFIG seam pointed at temp files; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
+      "file": "supervisor-budget.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
+    },
+    {
       "file": "supervisor-cleanup-prune.test.mjs",
       "reason": "isolation audit FOC-649: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam passed per invocation (spawned prune processes inherit it); run ages pinned with fs.utimesSync; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
     },
     {
+      "file": "supervisor-cleanup.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
+    },
+    {
       "file": "supervisor-conversation.test.mjs",
       "reason": "isolation audit FOC-783: mkdtemp/tmpdir fixtures only (transcript fixtures under temp paths); a pure reader over literal JSONL shapes; no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
+      "file": "supervisor-cost.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
     },
     {
       "file": "supervisor-current-run.test.mjs",
@@ -469,8 +505,16 @@
       "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
     },
     {
+      "file": "supervisor-followup.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
+    },
+    {
       "file": "supervisor-gate-answer.test.mjs",
       "reason": "isolation audit FOC-783: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam set per invocation (spawned gate-answer processes inherit it; offline codegraph/telemetry seams set in the child env); no ports, no socket binds, no real-repo-path writes; no telemetry DB"
+    },
+    {
+      "file": "supervisor-gate.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
     },
     {
       "file": "supervisor-guard.test.mjs",
@@ -489,8 +533,16 @@
       "reason": "isolation audit (task workspace P1c): pure functions over literal inputs; sessionScopedEnv returns a copy so global process.env is never mutated; no fs, no ports, no socket binds, no telemetry DB"
     },
     {
+      "file": "supervisor-host.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: binds the host's HTTP server on an ephemeral port (.listen) and exercises WebSocket upgrade handling — the static audit cannot clear it, and the file itself says it belongs in the serial lane"
+    },
+    {
       "file": "supervisor-launch.test.mjs",
       "reason": "isolation audit (task workspace, Supervisor launch wrapper): mkdtemp/tmpdir fixtures only — never real repo files; no child processes, no ports, no socket binds, no process.env mutation, no telemetry DB"
+    },
+    {
+      "file": "supervisor-merge.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
     },
     {
       "file": "supervisor-migrate-legacy.test.mjs",
@@ -505,8 +557,40 @@
       "reason": "isolation audit FOC-799: LA_SUPERVISOR_STATE_HOME pointed at a mkdtemp dir before import; registry fixtures only; no ports, no socket binds, no telemetry DB; FOC-905 adds one single-process temp task-sessions SQLite store for the terminal-session case (read-only seam, no cross-process racing)"
     },
     {
+      "file": "supervisor-pinned-state.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
+    },
+    {
+      "file": "supervisor-repo.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
+    },
+    {
+      "file": "supervisor-semaphore.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
+    },
+    {
       "file": "supervisor-session-hook.test.mjs",
       "reason": "isolation audit FOC-783: LA_DATA_HOME pointed at a mkdtemp dir; the hook runs as a child process over fixture payloads (same pattern as supervisor-edits-hook.test.mjs); no ports, no socket binds, no telemetry DB"
+    },
+    {
+      "file": "supervisor-spawn.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
+    },
+    {
+      "file": "supervisor-status.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
+    },
+    {
+      "file": "supervisor-stop.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
+    },
+    {
+      "file": "supervisor-triage.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
+    },
+    {
+      "file": "supervisor-verdict.test.mjs",
+      "reason": "imports supervisor-test-fixtures.mjs, which points LA_SUPERVISOR_STATE_HOME at a per-process mkdtemp home (FOC-602/608) — spawned supervisor scripts inherit it, so no real-repo .state writes; moved from the serial lane 2026-10-26 (its reason predated the seam)"
     },
     {
       "file": "supervisor-wait-budget.test.mjs",
@@ -529,6 +613,14 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "task-cockpit-routes.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: spawns the real telemetry-server plus a fake session host on 127.0.0.1:0 (createServer + .listen, raw WebSocket upgrade) — same harness family as cockpit-routes; all seams isolated under one tmp dir (task workspace P1c)"
+    },
+    {
+      "file": "task-map-routes.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: binds an ephemeral port via a node:http createServer harness (listen(0, '127.0.0.1')) that serves the route handlers; map instance and corpus loader injected; seams set and left set (task workspace P4)"
+    },
+    {
       "file": "task-map.test.mjs",
       "reason": "isolation audit (task workspace P4): embed/project fakes injected — no production network, no real model calls, no python spawn (the only 'spawn' hit is prose); mkdtemp/tmpdir cache dirs; no ports, no socket binds, no telemetry DB"
     },
@@ -541,8 +633,16 @@
       "reason": "isolation audit (task workspace P1): pure identity parsing with an injected readFile stub and literal platform fixtures; no fs writes, no ports, no child processes, no telemetry DB"
     },
     {
+      "file": "task-session-host.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: binds 127.0.0.1:0 servers and uses the real ws client over WebSocket upgrade; tmux/pty children via injected seams (spawnSync) — the file's own NOTE says serial, same as supervisor-host.test.mjs (task workspace PRD §5-6)"
+    },
+    {
       "file": "team-model.test.mjs",
       "reason": "isolation audit (FOC-791 team line-ups, slice A): mkdtemp/tmpdir fixture only — the telemetry store is seeded at an explicit temp path and opened read-only for the AC1 cross-check; no ports, no socket binds, no real-repo-path writes"
+    },
+    {
+      "file": "telemetry-analysis-api.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: binds an ephemeral port via a node:http createServer probe"
     },
     {
       "file": "telemetry-analysis.test.mjs",
@@ -641,6 +741,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "test-spawn.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: exercises scripts/test-spawn.mjs end to end: a real node HTTP server child binds an ephemeral 127.0.0.1 port (probed free, no fixed ports) and is health-polled with fetch (FOC-840) Ă˘â‚¬â€ť exactly what the parallel-lane static audit refuses, so conservative serial for socket binds and child processes"
+    },
+    {
       "file": "ticket-cost.test.mjs",
       "reason": "isolation audit FOC-760/761/769: mkdtemp/tmpdir fixtures only (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME, LA_STATE_ROOT, LA_DATA_HOME pointed at temp dirs); no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB / LA_TELEMETRY_HOME seams pointed at temp paths"
     },
@@ -669,6 +773,10 @@
       "reason": "isolation audit FOC-784: pure derivations over a mkdtemp state home with an injected Linear fetcher; no network, no ports, no real-repo-path writes, no telemetry DB"
     },
     {
+      "file": "work-routes.test.mjs",
+      "reason": "ephemeral ports only (listen(0) / spawnTestServer free-port probe), temp telemetry seams; a kernel-assigned port cannot collide with another file — moved from the serial lane 2026-10-26. Former reason: spawns the real telemetry-server and fake hosts on ephemeral ports (createServer + .listen, raw net.connect sockets for the upgrade tests) (same harness as cockpit-routes, FOC-784/785)"
+    },
+    {
       "file": "worker-tool-profiles.test.mjs",
       "reason": "isolation audit (task workspace, worker markdown stamper): mkdtemp/tmpdir fixtures only — rewrites only the copies under a temp launch config dir; no child processes, no ports, no socket binds, no process.env mutation, no telemetry DB"
     },
@@ -679,24 +787,8 @@
   ],
   "serial": [
     {
-      "file": "cockpit-legacy-mode.test.mjs",
-      "reason": "spawns the real telemetry-server (native mode and docker mode against a fake session host) on ephemeral ports — createServer + .listen (FOC-839 legacy compatibility suite)"
-    },
-    {
-      "file": "cockpit-routes.test.mjs",
-      "reason": "spawns the real telemetry-server and fake hosts on ephemeral ports (createServer + .listen, raw net.connect sockets for the upgrade tests)"
-    },
-    {
       "file": "decision-log.test.mjs",
       "reason": "writes fixture run logs into the repo's real .state/runs/"
-    },
-    {
-      "file": "mcp-fenix-control.test.mjs",
-      "reason": "spawns the real telemetry-server (docker mode against a fake session host, then native mode) plus an in-process fake host on 127.0.0.1:0 — same harness family as cockpit-routes, conservative serial for socket binds and child processes (FOC-958)"
-    },
-    {
-      "file": "key-check.test.mjs",
-      "reason": "binds ephemeral ports via node:http createServer probes (the fake HTTP check hosts); spawned key-check children are real node processes over mkdtemp fixtures"
     },
     {
       "file": "launch.test.mjs",
@@ -711,92 +803,12 @@
       "reason": "spawns the real telemetry-server (LA_TELEMETRY_INGEST_MS=300) against a fixture store and polls sqlite file sizes — real server child on a port (spawnTestServer), conservative serial like the other telemetry-server spawns (FOC-808)"
     },
     {
-      "file": "runtime-otel.test.mjs",
-      "reason": "binds an ephemeral loopback port via the collector's node:http server (listen(0, '127.0.0.1')) and exercises it with real fetch — the static audit cannot clear it (task workspace PRD §10)"
-    },
-    {
       "file": "runtime-workflow.test.mjs",
       "reason": "end-to-end: spawns real supervisor-spawn and supervisor-followup children (spawnSync/execFileSync) against fixture git repos and writes run state; env seams are set globally and left set (task workspace P1 events)"
     },
     {
-      "file": "settings-routes.test.mjs",
-      "reason": "spawns the real telemetry-server and fake check hosts on ephemeral ports (createServer + .listen; work-routes style harness, FOC-786)"
-    },
-    {
-      "file": "supervisor-budget.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
-    },
-    {
-      "file": "supervisor-cleanup.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
-    },
-    {
-      "file": "supervisor-cost.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
-    },
-    {
-      "file": "supervisor-followup.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
-    },
-    {
-      "file": "supervisor-gate.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
-    },
-    {
-      "file": "supervisor-host.test.mjs",
-      "reason": "binds the host's HTTP server on an ephemeral port (.listen) and exercises WebSocket upgrade handling — the static audit cannot clear it, and the file itself says it belongs in the serial lane"
-    },
-    {
-      "file": "supervisor-merge.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect) and builds real .state/runs candidates"
-    },
-    {
-      "file": "supervisor-pinned-state.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
-    },
-    {
-      "file": "supervisor-repo.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
-    },
-    {
-      "file": "supervisor-semaphore.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
-    },
-    {
-      "file": "supervisor-spawn.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
-    },
-    {
-      "file": "supervisor-status.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
-    },
-    {
-      "file": "supervisor-stop.test.mjs",
-      "reason": "spawned supervisor scripts write .state/supervisor/<runId>/ in the real repo (supervisor-lib.mjs runDir is repo-anchored, no env redirect)"
-    },
-    {
-      "file": "supervisor-triage.test.mjs",
-      "reason": "spawned supervisor-triage writes .state/supervisor/<runId>/triage.json in the real repo"
-    },
-    {
-      "file": "supervisor-verdict.test.mjs",
-      "reason": "writes real .state/mock fixtures and reads/writes real .state/supervisor/<runId>/verdicts"
-    },
-    {
       "file": "supervisor-watch.test.mjs",
       "reason": "end-to-end through the real supervisor-watch.mjs child (spawnSync, fake claude behind the LA_CLAUDE_BIN seam); LA_SUPERVISOR_STATE_HOME/LA_SQUAD_HOME seams set at module load and inherited by the child — conservative serial for processes (launch profile --claude-args)"
-    },
-    {
-      "file": "task-cockpit-routes.test.mjs",
-      "reason": "spawns the real telemetry-server plus a fake session host on 127.0.0.1:0 (createServer + .listen, raw WebSocket upgrade) — same harness family as cockpit-routes; all seams isolated under one tmp dir (task workspace P1c)"
-    },
-    {
-      "file": "task-map-routes.test.mjs",
-      "reason": "binds an ephemeral port via a node:http createServer harness (listen(0, '127.0.0.1')) that serves the route handlers; map instance and corpus loader injected; seams set and left set (task workspace P4)"
-    },
-    {
-      "file": "task-session-host.test.mjs",
-      "reason": "binds 127.0.0.1:0 servers and uses the real ws client over WebSocket upgrade; tmux/pty children via injected seams (spawnSync) — the file's own NOTE says serial, same as supervisor-host.test.mjs (task workspace PRD §5-6)"
     },
     {
       "file": "task-sessions.test.mjs",
@@ -807,10 +819,6 @@
       "reason": "spawns the real telemetry-server on a fixed port (7393) against a seeded temp LA_TELEMETRY_DB and an isolated LA_SUPERVISOR_STATE_HOME (same harness as rewards-routes, FOC-840); one extra 503 case calls the handler in-process with a stub res"
     },
     {
-      "file": "telemetry-analysis-api.test.mjs",
-      "reason": "binds an ephemeral port via a node:http createServer probe"
-    },
-    {
       "file": "telemetry-settled.test.mjs",
       "reason": "deletes the LA_TELEMETRY_DB seam when it was never set (env restore) — the static audit cannot distinguish a restore from putting the live default DB path in play"
     },
@@ -819,20 +827,12 @@
       "reason": "unsets the LA_TELEMETRY_DB seam to exercise the live default telemetry DB path (refusal guard)"
     },
     {
-      "file": "test-spawn.test.mjs",
-      "reason": "exercises scripts/test-spawn.mjs end to end: a real node HTTP server child binds an ephemeral 127.0.0.1 port (probed free, no fixed ports) and is health-polled with fetch (FOC-840) Ă˘â‚¬â€ť exactly what the parallel-lane static audit refuses, so conservative serial for socket binds and child processes"
-    },
-    {
       "file": "tool-profiles.test.mjs",
       "reason": "env restore deletes previously-unset seams (FENIX_INTEGRATIONS_ROOT, LA_SQUAD_HOME) — the static audit cannot distinguish a restore from putting the live default path in play (same pattern as telemetry-settled; task workspace P2)"
     },
     {
       "file": "tool-routes.test.mjs",
       "reason": "env restore deletes LA_TOOL_PROFILES_FILE when it was never set — same env-restore pattern as telemetry-settled; conservative serial for env (task workspace P2)"
-    },
-    {
-      "file": "work-routes.test.mjs",
-      "reason": "spawns the real telemetry-server and fake hosts on ephemeral ports (createServer + .listen, raw net.connect sockets for the upgrade tests) (same harness as cockpit-routes, FOC-784/785)"
     },
     {
       "file": "fenix-prune.test.mjs",
