@@ -5,6 +5,20 @@
 
 > **Hand-off for the next engineer: `docs/HANDOFF.md` (2026-10-23)** — state, blockers in order, VM ops, gotchas.
 
+## 2026-10-26 (evening) — rc.6 → rc.8 on `fenix-accept`; FOC-789 part 2 run: two task sessions side by side
+
+Run log Day 4: `docs/releases/1.0.0/foc-789-run-log.md`. Shipped today: FOC-1010 (#157), FOC-1077 symlinked
+`node_modules` in cleanup (#159), FOC-1081 auto-pickup ownership + arm/pump (#160, #162), releases rc.6/rc.7/rc.8
+(#158, #161, #163). Part 1 (FOC-1007 cleanup gates) closed on the VM: three worktrees removed by the Supervisor.
+Part 2: auto-pickup took FOC-1053 and FOC-1068, both Supervisors fixed their tickets alone → **PR #164** (two
+commits, both tickets In Review). Two P1 findings block FOC-1076: **FOC-1088** — small-ticket sessions share the
+main checkout (branch switch under the other session, a commit landed on the other ticket's branch); **FOC-1089** —
+a task session's permission dialog is invisible in the task cockpit (scoped snapshot reads the record, not `/state`;
+parked policy `wait` = forever). Snags S31–S39 filed under FOC-1051 (FOC-1078/1079/1080/1082/1086–1090).
+Next: merge #164 after CI, mark FOC-1053/1068 Done, FOC-789 → In Review with the Day 4 evidence, stop the VM
+(check live children first), delete the stale origin branch `foc-1053-key-wizard-default-provider`, then FOC-1088
+and FOC-1089 before any FOC-1076 scale run.
+
 ## 2026-10-26 — suite 18 min → 6 min on Windows; console-window flood fixed at the source
 
 Review with numbers: `docs/reviews/2026-10-26-code-quality-and-suite.md` (code metrics from CodeGraph, the lane
