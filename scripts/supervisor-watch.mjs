@@ -836,33 +836,29 @@ function finalizeTurn(code, signal) {
     transcriptCost = null;
   }
 
-  updateChild(runId, childId, {
-    status,
-    exitCode: code,
-    signal: signal || null,
-    endedAt,
-    // FOC-802: the refusal is a clear error at entry level too, so a reader
-    // that never opens `turns` still sees why the child crashed.
-    ...(isolationRefused
-      ? { error: "isolated spawn refused by fenix-spawn-as-child (exit 97) — child not launched, no unisolated fallback" }
-      : {}),
-    ...turnEndCostPatch({ entry, transcriptCost, results: resultCosts }),
-    turns,
-  });
-
   // FOC-730: retire this turn's turn-scoped facts and record it on the child.
-  // Best effort on both counts: a store failure writes one stderr line plus a
-  // tee note and never blocks the wake; the registry write rides in its own
-  // try so a failed record cannot turn a clean exit into a crash.
+  // Best effort: a store failure writes one stderr line plus a tee note and
+  // never blocks the wake or the status write below.
+  //
+  // FOC-1010: the prune runs BEFORE the status write, and its record rides in
+  // the same registry patch. updateChild is an unlocked read-modify-write whose
+  // safety rests on "after spawn, only the watcher writes this entry" — but
+  // anyone who waits for `status: exited` (the Supervisor, a test editing the
+  // entry) treats that status as the end of the watcher's writes. A second
+  // updateChild after it re-read the entry and could land AFTER a writer that
+  // keyed off `exited`, silently restoring whatever that writer had changed
+  // (the provider deletion in supervisor-followup.test). With one write, the
+  // terminal status IS the watcher's last registry write.
+  let workingStatePrunedPatch = {};
   try {
     const retired = pruneTurnWorkingState();
     if (retired != null) {
-      updateChild(runId, childId, {
+      workingStatePrunedPatch = {
         workingStatePruned: {
           ...(entry.workingStatePruned ?? {}),
           turn: { at: endedAt, retired },
         },
-      });
+      };
     }
   } catch (err) {
     const reason = err?.message ?? String(err);
@@ -875,6 +871,24 @@ function finalizeTurn(code, signal) {
     }
     note({ subtype: "agent_state_prune_skipped", message: reason });
   }
+
+  // The watcher's LAST registry write for this turn (see the FOC-1010 note
+  // above): terminal status, exit details, cost, the closed turn record and the
+  // prune record, in one read-modify-write.
+  updateChild(runId, childId, {
+    status,
+    exitCode: code,
+    signal: signal || null,
+    endedAt,
+    // FOC-802: the refusal is a clear error at entry level too, so a reader
+    // that never opens `turns` still sees why the child crashed.
+    ...(isolationRefused
+      ? { error: "isolated spawn refused by fenix-spawn-as-child (exit 97) — child not launched, no unisolated fallback" }
+      : {}),
+    ...turnEndCostPatch({ entry, transcriptCost, results: resultCosts }),
+    turns,
+    ...workingStatePrunedPatch,
+  });
 
   if (!sawInit) {
     note({ subtype: "no_init", message: "child exited before emitting system/init — no session_id, not resumable" });
