@@ -5,6 +5,27 @@
 
 > **Hand-off for the next engineer: `docs/HANDOFF.md` (2026-10-23)** — state, blockers in order, VM ops, gotchas.
 
+## 2026-10-26 — suite 18 min → 6 min on Windows; console-window flood fixed at the source
+
+Review with numbers: `docs/reviews/2026-10-26-code-quality-and-suite.md` (code metrics from CodeGraph, the lane
+analysis, the FOC-789 VM record). Changes in the tree (uncommitted at the time of writing):
+
+- `scripts/test-lanes.json`: 27 files → parallel (14 `supervisor-*` suites whose serial reasons predated the
+  `LA_SUPERVISOR_STATE_HOME` seam of FOC-608, 13 ephemeral-port suites). Lanes 196 parallel / 14 serial; the serial
+  lane fell from 1 083 s to 62 s, wall from 1 082 s to 357 s at `--jobs 8`. Audit in `test-run.mjs` flags only
+  `listen(<non-zero literal>)` and fixed-port constants. Checklist counts updated.
+- `scripts/spawn-windows-hide.mjs` (new): win32 preload defaulting `windowsHide: true` for every `child_process`
+  call; loaded by `test-run.mjs` (+ `NODE_OPTIONS=--import` for every suite process) and first thing in
+  `supervisor-watch.mjs`. Cause: a console-less parent (hidden watcher, detached test server, a server started from a
+  GUI tool) gives each un-flagged child its own visible console; one suite run left ~240 "Terminal" windows.
+  Also `windowsHide` at the hot sites (`supervisor-lib` `git()`/`killTree`, `run-owner` getconf, watcher's
+  run-manifest calls). Final full run: 0 new windows.
+- `settings-routes.test.mjs`: `LA_LINEAR_NO_ENV_FILE` for the server under test (red on a machine with a filled
+  `.env` before).
+- Open: `--prove-isolation` (196 at once) not run here — too heavy for a desktop; do it in the Linux container.
+  `supervisor-followup.test` "provider resolution failure on resume" flaked once under parallel load (FOC-1010
+  family). Next speed lever: jobs = `os.availableParallelism()`, longest-first queue, split `supervisor-spawn.test`.
+
 ## 2026-10-25 (evening) — rc.5 out; the HANDOFF §3.1 table walked on `fenix-accept`; three snags → #152
 
 Tag `v1.0.0-rc.5` is on `ea9b81e` (Mateusz's OK), `publish-image` green, `fenix update` on the VM, `fenix doctor` mostly
