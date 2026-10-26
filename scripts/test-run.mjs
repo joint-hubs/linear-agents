@@ -334,6 +334,14 @@ process.on('exit', () => {
 // The probe is pid-only: a pid reused by an unrelated process inside one run
 // would be tree-killed. The window is one suite run; rows carry `startedAt`
 // if a start-time comparison is ever needed.
+// SIGKILL / taskkill are delivered asynchronously: right after killTree the
+// orphan may still be scheduled, or sit as a zombie until PID 1 reaps it. The
+// sweep waits (bounded) until every survivor is gone, so "(killed)" below is a
+// statement of fact and a probe right after the run — test-run.test's, or the
+// next run's — cannot see a corpse that is still on its way out (FOC-840 flake
+// on PR #152 and again on #153, both on a loaded CI runner).
+const ORPHAN_DEATH_WAIT_MS = 3000;
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const sweepOrphans = (report = false) => {
   const survivors = [];
   for (const row of openRegistryRows(suiteEnv.LA_TEST_SPAWN_REGISTRY)) {
@@ -342,6 +350,8 @@ const sweepOrphans = (report = false) => {
       killTree(row.pid, 'force');
     }
   }
+  const deadline = Date.now() + ORPHAN_DEATH_WAIT_MS;
+  while (survivors.some((row) => probePid(row.pid)) && Date.now() < deadline) sleepSync(50);
   if (report) {
     for (const row of survivors) {
       console.error(`  test orphans left running: ${row.file} pid ${row.pid} port ${row.port} (killed)`);
