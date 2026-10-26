@@ -15,7 +15,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve, posix } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2199,8 +2199,12 @@ export const REBUILDABLE_CACHE_PREFIXES = [
   { prefix: "coverage/", regenerate: "npm test -- --coverage" },
 ];
 
+// A real cache directory reaches us expanded by git into `node_modules/<file>`
+// paths; a SYMLINK named node_modules (a child that linked the main checkout's
+// tree instead of running `npm ci` — seen on fenix-accept, FOC-958 dev-1)
+// arrives as the bare entry `node_modules`, so the bare name matches too.
 const cacheEntryFor = (rel) =>
-  REBUILDABLE_CACHE_PREFIXES.find((c) => rel.startsWith(c.prefix)) ?? null;
+  REBUILDABLE_CACHE_PREFIXES.find((c) => rel.startsWith(c.prefix) || rel === c.prefix.slice(0, -1)) ?? null;
 
 /**
  * Enumerate the worktree's git-ignored and untracked files; report which of
@@ -2240,16 +2244,43 @@ export function unarchivedIgnoredContent(worktree, archiveDir) {
   // Sentinels and cache paths are both kept out of the work-product lists, but
   // for opposite reasons: the cache is SAFE to drop, the sentinel is a failure
   // that must reach `unarchived` so `covered` reads false (fail-closed).
-  const isWork = (p) => p.startsWith("<git ls-files failed") || !cacheEntryFor(p);
+  // Symlinks are never work product to COPY: copyFileSync follows the link
+  // (EISDIR on a directory target; a file target would silently pull content
+  // from outside the worktree into the archive), and removing the tree only
+  // removes the link. They are inventoried by name + target in `skippedLinks`
+  // so the removal report says what was left behind, and excluded from the
+  // coverage predicate like the rebuildable cache is.
+  const isSymlink = (p) => {
+    if (p.startsWith("<git ls-files failed")) return false;
+    try {
+      return lstatSync(join(worktree, p)).isSymbolicLink();
+    } catch {
+      return false; // vanished between listing and stat — the copy step reports it
+    }
+  };
+  const isWork = (p) => p.startsWith("<git ls-files failed") || (!cacheEntryFor(p) && !isSymlink(p));
   const raw = { ignored: list(["--ignored"]), untracked: list([]) };
   const ignored = raw.ignored.filter(isWork);
   const untracked = raw.untracked.filter(isWork);
+  const skippedLinks = [...raw.ignored, ...raw.untracked]
+    .filter((p) => !cacheEntryFor(p) && isSymlink(p))
+    .map((p) => {
+      let target = null;
+      try {
+        target = readlinkSync(join(worktree, p));
+      } catch {
+        /* unreadable link — the path alone is the record */
+      }
+      return { path: p, target };
+    });
   const cacheFiles = [...raw.ignored, ...raw.untracked].filter((p) => cacheEntryFor(p));
   const skippedCache = REBUILDABLE_CACHE_PREFIXES
     .map(({ prefix, regenerate }) => ({
       prefix,
       regenerate,
-      files: cacheFiles.filter((p) => p.startsWith(prefix)).length,
+      // Counted with the same predicate that classified the entry, so the
+      // bare `node_modules` link is counted under `node_modules/`.
+      files: cacheFiles.filter((p) => cacheEntryFor(p)?.prefix === prefix).length,
     }))
     .filter((e) => e.files > 0);
   const failed = [...ignored, ...untracked].filter((p) => p.startsWith("<git ls-files failed"));
@@ -2259,7 +2290,7 @@ export function unarchivedIgnoredContent(worktree, archiveDir) {
       .filter((p) => !p.startsWith("<git ls-files failed"))
       .filter((rel) => !existsSync(join(archiveDir, rel))),
   ];
-  return { ignored, untracked, unarchived, skippedCache, archiveDir, covered: unarchived.length === 0 };
+  return { ignored, untracked, unarchived, skippedCache, skippedLinks, archiveDir, covered: unarchived.length === 0 };
 }
 
 // ── pinned state (FOC-286) ───────────────────────────────────────────────────

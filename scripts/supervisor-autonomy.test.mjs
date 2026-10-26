@@ -38,7 +38,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -615,6 +615,44 @@ test("AC1: rebuildable cache is skipped by name, never archived", () => {
     `the report must name what was skipped and why: ${JSON.stringify(out.skippedCache)}`,
   );
   assert.ok(!existsSync(archivePath(s, "node_modules")), "cache must not be copied into the archive");
+});
+
+test("AC1b: a symlinked node_modules and any other symlink are never copied — the link dies, the target is untouched (fenix-accept rc.6, FOC-958 dev-1)", () => {
+  const s = scenario({ ignored: [".state/cache.json"] });
+  // A DEV child that linked the main checkout's node_modules instead of running
+  // `npm ci` (git lists the link as the bare entry `node_modules`, which the
+  // `node_modules/` prefix did not match → copyFileSync → EISDIR, removal
+  // refused), plus an untracked symlink to a file outside the tree (copyFile
+  // would have pulled that file into the archive).
+  const outside = mkdtempSync(join(tmpdir(), "la-outside-"));
+  mkdirSync(join(outside, "nm"));
+  writeFileSync(join(outside, "nm", "dep.js"), "module.exports = 1;\n");
+  writeFileSync(join(outside, "escape.txt"), "outside the worktree\n");
+  try {
+    symlinkSync(join(outside, "nm"), join(s.worktree, "node_modules"), "dir");
+    symlinkSync(join(outside, "escape.txt"), join(s.worktree, "escape.txt"), "file");
+  } catch (err) {
+    console.log(`SKIP AC1b — this host cannot create symlinks (${err.code}); the Linux CI job covers it`);
+    return;
+  }
+
+  const rep = unarchivedIgnoredContent(s.worktree, archivePath(s));
+  assert.ok(!rep.untracked.includes("node_modules") && !rep.ignored.includes("node_modules"), "the node_modules link is cache, not work product");
+  assert.ok(!rep.untracked.includes("escape.txt"), "a symlink is never work product to copy");
+  assert.deepEqual(rep.skippedLinks.map((l) => l.path), ["escape.txt"], JSON.stringify(rep.skippedLinks));
+  assert.equal(rep.skippedLinks[0].target, join(outside, "escape.txt"));
+  assert.deepEqual(rep.skippedCache.map((e) => [e.prefix, e.files]), [["node_modules/", 1]]);
+  assert.deepEqual([...rep.unarchived].sort(), [".state/cache.json"], "only the real work product needs the archive");
+
+  const proposed = parse(cleanup(["propose", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  parse(gate(["answer", "--run", s.runId, "--gate", proposed.gateId, "--text", "yes"]), fail);
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.deepEqual([...out.archived.paths].sort(), [".state/cache.json"]);
+  assert.match(out.skippedLinks.join("\n"), /^escape\.txt — symlink → .*escape\.txt, skipped/m, JSON.stringify(out.skippedLinks));
+  assert.ok(!existsSync(archivePath(s, "node_modules")) && !existsSync(archivePath(s, "escape.txt")), "links are not copied into the archive");
+  assert.ok(!existsSync(s.worktree), "the worktree is gone");
+  assert.ok(existsSync(join(outside, "nm", "dep.js")) && existsSync(join(outside, "escape.txt")), "the link targets are untouched");
 });
 
 test("AC2 negative: a blocked archive destination refuses the whole removal, having deleted nothing", () => {

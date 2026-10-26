@@ -879,7 +879,7 @@ function cmdRemove(args) {
           : `${grantVerdict.archive.count} ignored/untracked file(s) covered by ${grantVerdict.archive.archiveDir}`,
         fingerprint: state.fingerprint,
       },
-      archive: { ...archived, skippedCache: inventory.skippedCache },
+      archive: { ...archived, skippedCache: inventory.skippedCache, skippedLinks: inventory.skippedLinks },
       registryExtra: { cleanupGrant: grantVerdict.grantId },
     });
     closeChildWorkingState({ runId, childId, entry });
@@ -963,7 +963,7 @@ function cmdRemove(args) {
       human: `gate ${gate.gateId} answered "${gate.answer?.text}" at ${gate.answer?.answeredAt}`,
       fingerprint: state.fingerprint,
     },
-    archive: { ...archived, skippedCache: inventory.skippedCache },
+    archive: { ...archived, skippedCache: inventory.skippedCache, skippedLinks: inventory.skippedLinks },
   });
   closeChildWorkingState({ runId, childId, entry });
 }
@@ -1026,6 +1026,11 @@ function performRemoval({ runId, childId, entry, repo, state, forced, keys, arch
         // List 3: rebuildable cache, skipped by name with the command that regrows it.
         skippedCache: (archive.skippedCache ?? []).map(
           (e) => `${e.prefix} — ${e.files} file(s), skipped: rebuildable by ${e.regenerate}`,
+        ),
+        // List 4: symlinks — never copied (copyFile would follow the link out of
+        // the tree; EISDIR on a directory target), only the link itself dies.
+        skippedLinks: (archive.skippedLinks ?? []).map(
+          (l) => `${l.path} — symlink${l.target ? ` → ${l.target}` : ""}, skipped: the link is removed, its target is untouched`,
         ),
         keys,
       },
