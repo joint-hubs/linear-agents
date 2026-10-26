@@ -11,17 +11,10 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dataHome, squadConfigDir } from './fenix-paths.mjs';
-import { pidAlive } from './supervisor-current-run.mjs';
-import { readActiveSessions, taskSessionsDbPath } from './task-sessions.mjs';
-import { readSettings, readTaskSessionsSettings } from './fenix-settings.mjs';
-import { INTEGRATIONS, prerequisites, readIntegrations } from './fenix-integrations.mjs';
-import { cachedRetention, resolveRetention } from './fenix-retention.mjs';
-import { CACHE_MAX_GB_DEFAULT, cacheToolSizes, childTmpSizes } from './fenix-prune.mjs';
-import { currentOwner, listRunOwners, ownerRelation, supervisorStateRoot } from './run-owner.mjs';
-import { hostBase, hostRequest, FAST_TIMEOUT_MS } from './supervisor-host-client.mjs';
-import { stallSilenceMs } from './supervisor-lib.mjs';
-import { resolveSupervisorPermissionMode } from './supervisor-launch.mjs';
+// FOC-1068: fenix-manifest.mjs is the one helper the manifest pass needs and
+// stays static. Every other helper loads behind try/catch (see loadHelper) so a
+// deleted module surfaces as a FAIL line from checkFenixCode — not as
+// ERR_MODULE_NOT_FOUND taking the whole doctor down before any check runs.
 import { DEFAULT_MANIFEST_PATH, compareToManifest, readManifest } from './fenix-manifest.mjs';
 
 const GIB = 1024 ** 3;
@@ -57,6 +50,61 @@ const DIRS = [
   ['LA_SUPERVISOR_STATE_HOME', '/data/state/supervisor'],
   ['FENIX_WORKSPACES', '/data/workspaces'],
 ];
+
+// FOC-1068: helpers the checks need beyond the manifest. Each one is loaded
+// through import() behind its own try/catch, so a single deleted module degrades
+// its check instead of killing the doctor on load. The load happens at module
+// init (top-level await) because several checks below are sync and tests call
+// them directly; the manifest pass does not touch any of these and is always
+// able to answer.
+async function loadHelper(specifier) {
+  try {
+    return { specifier, mod: await import(specifier), error: null };
+  } catch (error) {
+    return { specifier, mod: null, error };
+  }
+}
+
+const [
+  pathsH,
+  curRunH,
+  taskSessionsH,
+  settingsH,
+  integrationsH,
+  retentionH,
+  pruneH,
+  runOwnersH,
+  hostClientH,
+  supervisorLibH,
+  supervisorLaunchH,
+] = await Promise.all([
+  loadHelper('./fenix-paths.mjs'),
+  loadHelper('./supervisor-current-run.mjs'),
+  loadHelper('./task-sessions.mjs'),
+  loadHelper('./fenix-settings.mjs'),
+  loadHelper('./fenix-integrations.mjs'),
+  loadHelper('./fenix-retention.mjs'),
+  loadHelper('./fenix-prune.mjs'),
+  loadHelper('./run-owner.mjs'),
+  loadHelper('./supervisor-host-client.mjs'),
+  loadHelper('./supervisor-lib.mjs'),
+  loadHelper('./supervisor-launch.mjs'),
+]);
+
+/** The first of the given helpers that did not load, else null. */
+function firstUnloaded(...hs) {
+  return hs.find((h) => !h.mod) ?? null;
+}
+
+/** A check line for a check that cannot run because a helper module is gone. */
+function helperFail(name, h) {
+  return {
+    name,
+    status: 'fail',
+    detail: `helper ${h.specifier} did not load (${String(h.error?.message ?? h.error).split('\n')[0]})`,
+    fix: TOOL_FIX,
+  };
+}
 
 /** One check → one printable line. */
 export function formatLine(check) {
@@ -170,7 +218,9 @@ function checkDirs(env, fsImpl) {
  */
 function resolveRetentionSafe(settings) {
   try {
-    const resolved = resolveRetention(settings ?? readSettings());
+    const missing = firstUnloaded(retentionH, settingsH);
+    if (missing) throw missing.error;
+    const resolved = retentionH.mod.resolveRetention(settings ?? settingsH.mod.readSettings());
     return { minFreeGiB: resolved.minFreeGiB, settingsError: null };
   } catch (err) {
     return { minFreeGiB: MIN_FREE_GIB_DEFAULT, settingsError: String(err?.message || err).split('\n')[0] };
@@ -182,14 +232,16 @@ function resolveRetentionSafe(settings) {
 // fenix-prune.mjs). A settings failure falls back to the default with the
 // error attached, like the disk check.
 function resolveCacheMaxGbSafe(settings) {
-  const DEFAULT = CACHE_MAX_GB_DEFAULT;
   try {
-    const obj = settings ?? readSettings();
+    const missing = firstUnloaded(pruneH, settingsH);
+    if (missing) throw missing.error;
+    const DEFAULT = pruneH.mod.CACHE_MAX_GB_DEFAULT;
+    const obj = settings ?? settingsH.mod.readSettings();
     const raw = obj && typeof obj === 'object' && !Array.isArray(obj) ? obj.retention?.cacheMaxGb : undefined;
     if (Number.isInteger(raw) && raw >= 1) return { cacheMaxGb: raw, settingsError: null };
     return { cacheMaxGb: DEFAULT, settingsError: null };
   } catch (err) {
-    return { cacheMaxGb: DEFAULT, settingsError: String(err?.message || err).split('\n')[0] };
+    return { cacheMaxGb: null, settingsError: String(err?.message || err).split('\n')[0] };
   }
 }
 
@@ -273,30 +325,37 @@ async function checkLogsUsage(retentionReader) {
  * fix. sizesReader is injectable for tests — it returns the fenix-prune
  * report shape ({ tools, totalBytes, childTmpBytes }) for the given roots.
  */
-export async function checkCaches({ env = process.env, fsImpl = fs, cacheMaxGb = CACHE_MAX_GB_DEFAULT, sizesReader } = {}) {
+export async function checkCaches({ env = process.env, fsImpl = fs, cacheMaxGb, sizesReader } = {}) {
+  const name = 'caches';
+  const capGb = cacheMaxGb ?? pruneH.mod?.CACHE_MAX_GB_DEFAULT;
+  if (!Number.isFinite(capGb)) {
+    return helperFail(name, pruneH);
+  }
   const cacheRoot = env.LA_CACHE_ROOT || '/home/node/.cache';
   const childTmpRoot = env.LA_CHILD_TMP_ROOT || '/tmp/fenix-child';
-  const capBytes = cacheMaxGb * 1024 ** 3;
+  const capBytes = capGb * 1024 ** 3;
   let sizes;
   try {
     sizes = sizesReader
       ? sizesReader()
       : (() => {
-          const tools = cacheToolSizes(cacheRoot, fsImpl);
+          const missing = firstUnloaded(pruneH);
+          if (missing) throw missing.error;
+          const tools = pruneH.mod.cacheToolSizes(cacheRoot, fsImpl);
           return {
             tools,
             totalBytes: tools.reduce((sum, t) => sum + t.bytes, 0),
-            childTmpBytes: childTmpSizes(childTmpRoot, fsImpl).reduce((sum, c) => sum + c.bytes, 0),
+            childTmpBytes: pruneH.mod.childTmpSizes(childTmpRoot, fsImpl).reduce((sum, c) => sum + c.bytes, 0),
           };
         })();
   } catch (err) {
-    return { name: 'caches', status: 'warn', detail: `cache sizes unavailable: ${String(err?.message || err).split('\n')[0]}` };
+    return { name, status: 'warn', detail: `cache sizes unavailable: ${String(err?.message || err).split('\n')[0]}` };
   }
-  const detail = `cache ${sizes.totalBytes ? humanBytes(sizes.totalBytes) : 'none'} · child tmp ${sizes.childTmpBytes ? humanBytes(sizes.childTmpBytes) : 'none'} · cap ${cacheMaxGb} GB (retention.cacheMaxGb)`;
+  const detail = `cache ${sizes.totalBytes ? humanBytes(sizes.totalBytes) : 'none'} · child tmp ${sizes.childTmpBytes ? humanBytes(sizes.childTmpBytes) : 'none'} · cap ${capGb} GB (retention.cacheMaxGb)`;
   if (sizes.totalBytes > capBytes) {
-    return { name: 'caches', status: 'warn', detail, fix: `fenix prune --max-gb ${cacheMaxGb}` };
+    return { name, status: 'warn', detail, fix: `fenix prune --max-gb ${capGb}` };
   }
-  return { name: 'caches', status: 'ok', detail };
+  return { name, status: 'ok', detail };
 }
 
 async function checkApi(fetchImpl, env) {
@@ -317,13 +376,15 @@ async function checkApi(fetchImpl, env) {
 // cannot see or talk to the session. Warn, never fail: the Supervisor itself
 // works without the hooks.
 function checkCockpitHooks(env, fsImpl) {
-  const settingsPath = path.join(squadConfigDir('supervisor', env), 'settings.json');
+  const name = 'cockpit hooks';
+  if (!pathsH.mod) return helperFail(name, pathsH);
+  const settingsPath = path.join(pathsH.mod.squadConfigDir('supervisor', env), 'settings.json');
   const hooks = ['supervisor-session-hook.mjs', 'supervisor-edits-hook.mjs'];
   let src;
   try {
     src = fsImpl.readFileSync(settingsPath, 'utf8');
   } catch (err) {
-    return { name: 'cockpit hooks', status: 'warn', detail: `${settingsPath} not readable (${err.message})`, fix: VOLUME_FIX };
+    return { name, status: 'warn', detail: `${settingsPath} not readable (${err.message})`, fix: VOLUME_FIX };
   }
   const missing = hooks.filter((hook) => !src.includes(hook));
   if (missing.length) {
@@ -342,12 +403,16 @@ function checkCockpitHooks(env, fsImpl) {
 // the injected fsImpl. Best-effort liveness for the unscoped neighbour: the
 // global session.json carries no pid today, so a present file whose state is
 // not "ended" counts as live unless it names a pid that is provably dead.
-export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions = readActiveSessions } = {}) {
-  const dbPath = taskSessionsDbPath(env);
+export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions } = {}) {
+  const name = 'task sessions';
+  const missing = firstUnloaded(taskSessionsH, settingsH, curRunH, pathsH);
+  if (missing) return helperFail(name, missing);
+  const read = readSessions ?? taskSessionsH.mod.readActiveSessions;
+  const dbPath = taskSessionsH.mod.taskSessionsDbPath(env);
   // The overlay is read quiet: the doctor prints its own lines, so a stray
   // stderr write mid-run would land between them — an invalid overlay is
   // surfaced in this check's detail instead.
-  const settings = readTaskSessionsSettings(env, { quiet: true });
+  const settings = settingsH.mod.readTaskSessionsSettings(env, { quiet: true });
   const cap = settings.maxActive ?? 2;
   const overlayNote = settings.error ? ` — settings overlay ignored (${settings.error})` : "";
   // FOC-902: the autonomous-pickup note rides on every detail branch — the
@@ -362,7 +427,7 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   } catch {}
   if (!exists) return { name: 'task sessions', status: 'ok', detail: 'no managed sessions yet' + autoNote };
 
-  const { sessions, unknown } = readSessions(dbPath);
+  const { sessions, unknown } = read(dbPath);
   if (unknown) {
     const hotWal = /wal-recovery-needed/.test(unknown);
     return {
@@ -376,8 +441,8 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   }
   // Partition by pid liveness like the resolve guard: a provably dead session
   // is stale — it does not count against the cap and cannot block anything.
-  const live = sessions.filter((s) => pidAlive(s.pid));
-  const stale = sessions.filter((s) => !pidAlive(s.pid));
+  const live = sessions.filter((s) => curRunH.mod.pidAlive(s.pid));
+  const stale = sessions.filter((s) => !curRunH.mod.pidAlive(s.pid));
   const ids = live.map((s) => s.sessionId).join(', ');
   const counts = stale.length > 0
     ? `${live.length} live / cap ${cap} (${stale.length} stale: ${stale.map((s) => s.sessionId).join(', ')})`
@@ -386,7 +451,7 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   let unscoped = null;
   let sessionFile = null;
   try {
-    sessionFile = path.join(dataHome(env), 'supervisor', 'session.json');
+    sessionFile = path.join(pathsH.mod.dataHome(env), 'supervisor', 'session.json');
   } catch {
     sessionFile = null;
   }
@@ -395,7 +460,7 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
     try {
       record = JSON.parse(fsImpl.readFileSync(sessionFile, 'utf8'));
     } catch {}
-    if (record && record.state !== 'ended' && pidAlive(record?.pid)) unscoped = record;
+    if (record && record.state !== 'ended' && curRunH.mod.pidAlive(record?.pid)) unscoped = record;
   }
 
   const capReached = live.length >= cap;
@@ -429,8 +494,11 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
 // (native mode) the hook's session.json stands in, with the caveat that an
 // Esc-cancelled turn leaves it saying needs-input until the next turn. The
 // record carries no pid, so liveness is not something it can prove.
-export async function checkSupervisorPrompt({ env = process.env, fsImpl = fs, now = Date.now, parkedAfterMs = stallSilenceMs(), readHostState = defaultHostState } = {}) {
+export async function checkSupervisorPrompt({ env = process.env, fsImpl = fs, now = Date.now, parkedAfterMs, readHostState = defaultHostState } = {}) {
   const name = 'supervisor prompt';
+  const silenceMs = parkedAfterMs ?? supervisorLibH.mod?.stallSilenceMs();
+  if (!Number.isFinite(silenceMs)) return helperFail(name, supervisorLibH);
+  if (readHostState === defaultHostState && !hostClientH.mod) return helperFail(name, hostClientH);
   const host = await readHostState(env);
   if (host && host.unreachable) return { name, status: 'warn', detail: 'the Supervisor host did not answer GET /state — cannot tell whether a prompt waits', fix: 'fenix doctor again once the stack is up (fenix up)' };
   let state = null;
@@ -442,7 +510,7 @@ export async function checkSupervisorPrompt({ env = process.env, fsImpl = fs, no
   } else {
     source = 'session.json';
     let sessionFile = null;
-    try { sessionFile = path.join(dataHome(env), 'supervisor', 'session.json'); } catch { sessionFile = null; }
+    try { sessionFile = pathsH.mod ? path.join(pathsH.mod.dataHome(env), 'supervisor', 'session.json') : null; } catch { sessionFile = null; }
     if (!sessionFile || !fsImpl.existsSync(sessionFile)) return { name, status: 'ok', detail: 'no Supervisor session record' };
     let record = null;
     try { record = JSON.parse(fsImpl.readFileSync(sessionFile, 'utf8')); } catch { record = null; }
@@ -458,7 +526,7 @@ export async function checkSupervisorPrompt({ env = process.env, fsImpl = fs, no
   const ageMs = Math.max(0, now() - sinceMs);
   const minutes = Math.round(ageMs / 60000);
   const caveat = source === 'session.json' ? ' (from session.json — stale after an Esc-cancelled turn; the dashboard reads the pane)' : '';
-  if (ageMs >= parkedAfterMs) {
+  if (ageMs >= silenceMs) {
     return {
       name,
       status: 'warn',
@@ -466,7 +534,7 @@ export async function checkSupervisorPrompt({ env = process.env, fsImpl = fs, no
       fix: 'answer it: the Needs-you card on the dashboard, the Terminal tab, or fenix attach',
     };
   }
-  return { name, status: 'ok', detail: `waiting on a prompt for ${minutes} min (under the ${Math.round(parkedAfterMs / 60000)}-min threshold)${caveat}` };
+  return { name, status: 'ok', detail: `waiting on a prompt for ${minutes} min (under the ${Math.round(silenceMs / 60000)}-min threshold)${caveat}` };
 }
 
 // FOC-943: one line about the Supervisor's DECLARED permission mode — the
@@ -476,8 +544,9 @@ export async function checkSupervisorPrompt({ env = process.env, fsImpl = fs, no
 // answer), never a silent pass.
 export function checkPermissionMode({ env = process.env } = {}) {
   const name = 'permission mode';
+  if (!supervisorLaunchH.mod) return helperFail(name, supervisorLaunchH);
   try {
-    const { mode, source } = resolveSupervisorPermissionMode(env);
+    const { mode, source } = supervisorLaunchH.mod.resolveSupervisorPermissionMode(env);
     return {
       name,
       status: 'ok',
@@ -498,8 +567,9 @@ export function checkPermissionMode({ env = process.env } = {}) {
 // The host's GET /state, or null when no host is configured (native mode);
 // { unreachable: true } when the host is configured but does not answer 200.
 async function defaultHostState(env) {
-  if (!hostBase(env)) return null;
-  const res = await hostRequest('GET', '/state', null, { timeoutMs: FAST_TIMEOUT_MS, env });
+  if (!hostClientH.mod) return { unreachable: true };
+  if (!hostClientH.mod.hostBase(env)) return null;
+  const res = await hostClientH.mod.hostRequest('GET', '/state', null, { timeoutMs: hostClientH.mod.FAST_TIMEOUT_MS, env });
   if (res && res.status === 200 && res.body && typeof res.body === 'object') return res.body;
   return { unreachable: true };
 }
@@ -512,14 +582,17 @@ async function defaultHostState(env) {
 // fail: they are unsupported but must not be destructive, and the scan never
 // sweeps them without the explicit override.
 export function checkRunOwners({ env = process.env, readOwners } = {}) {
-  const stateRoot = supervisorStateRoot(env);
-  const entries = (readOwners ?? (() => listRunOwners(stateRoot)))(stateRoot);
+  const name = 'run owners';
+  const missing = firstUnloaded(runOwnersH);
+  if (missing) return helperFail(name, missing);
+  const stateRoot = runOwnersH.mod.supervisorStateRoot(env);
+  const entries = (readOwners ?? (() => runOwnersH.mod.listRunOwners(stateRoot)))(stateRoot);
   if (entries.length === 0) return { name: 'run owners', status: 'ok', detail: 'no supervisor runs yet' };
-  const current = currentOwner(env);
+  const current = runOwnersH.mod.currentOwner(env);
   const counts = { mine: 0, restarted: 0, foreign: 0, unknown: 0 };
   const foreignHostnames = new Set();
   for (const { owner } of entries) {
-    const { relation } = ownerRelation(owner, current);
+    const { relation } = runOwnersH.mod.ownerRelation(owner, current);
     counts[relation]++;
     if (relation === 'foreign' && owner?.hostname) foreignHostnames.add(owner.hostname);
   }
@@ -637,29 +710,31 @@ export function checkProjectsDir(env, fsImpl, projectsFile) {
 // degrades gracefully when its prerequisite is absent. Settings come in
 // through the runChecks seam so tests need no real overlay.
 function checkIntegrations(env, settings) {
+  const name = 'integrations';
+  if (!integrationsH.mod) return helperFail(name, integrationsH);
   let integrations;
   try {
-    integrations = readIntegrations({ settings, env });
+    integrations = integrationsH.mod.readIntegrations({ settings, env });
   } catch (err) {
     return {
-      name: 'integrations',
+      name,
       status: 'warn',
       detail: `settings invalid (${String(err.message).split('\n')[0]})`,
       fix: 'fix settings.json, then re-run fenix doctor',
     };
   }
-  const enabled = INTEGRATIONS.filter((name) => integrations[name]);
-  if (!enabled.length) return { name: 'integrations', status: 'ok', detail: 'none enabled' };
+  const enabled = integrationsH.mod.INTEGRATIONS.filter((name) => integrations[name]);
+  if (!enabled.length) return { name, status: 'ok', detail: 'none enabled' };
 
   let anyMissing = false;
   const parts = enabled.map((name) => {
-    const { ok, missing, required } = prerequisites(name, env);
+    const { ok, missing, required } = integrationsH.mod.prerequisites(name, env);
     if (ok) return required.length ? `${name} (${required.join(', ')})` : name;
     anyMissing = true;
     return `${name} enabled but missing ${missing.join(', ')}`;
   });
   return {
-    name: 'integrations',
+    name,
     status: anyMissing ? 'warn' : 'ok',
     detail: parts.join('; '),
     ...(anyMissing ? { fix: 'set the missing variables in .env, or run fenix keys for API keys' } : {}),
@@ -676,9 +751,17 @@ function checkIntegrations(env, settings) {
  * projectsFile.
  * @returns {Promise<Array<{ name, status: 'ok'|'warn'|'fail', detail, fix? }>>}
  */
-export async function runChecks({ env = process.env, withApi = false, spawn = spawnSync, fsImpl = fs, fetchImpl = fetch, settings, secretsDir, projectsFile, retention = () => cachedRetention() } = {}) {
+export async function runChecks({ env = process.env, withApi = false, spawn = spawnSync, fsImpl = fs, fetchImpl = fetch, settings, secretsDir, projectsFile, retention } = {}) {
+  // FOC-1068: the manifest pass first. It is the check that names a deleted
+  // module and it needs no helper beyond fenix-manifest.mjs, so it must be able
+  // to answer even when a helper below did not load. Its output position is
+  // unchanged (a test pins it): it is computed early, not printed early.
+  const code = checkFenixCode({ env, fsImpl });
   const policy = resolveRetentionSafe(settings);
   const cachePolicy = resolveCacheMaxGbSafe(settings);
+  const retentionReader =
+    retention ??
+    (retentionH.mod ? () => retentionH.mod.cachedRetention() : () => Promise.reject(retentionH.error));
   const checks = [
     checkNode(),
     ...REQUIRED_TOOLS.map(([name, args]) => applyGhFloor(checkTool(spawn, name, args, 'fail'), env)),
@@ -687,8 +770,8 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
     checkIntegrations(env, settings),
     ...checkDirs(env, fsImpl),
     checkDisk(env, fsImpl, policy),
-    await checkLogsUsage(retention),
-    await checkCaches({ env, fsImpl, cacheMaxGb: cachePolicy.cacheMaxGb }),
+    await checkLogsUsage(retentionReader),
+    await checkCaches({ env, fsImpl, cacheMaxGb: cachePolicy.cacheMaxGb ?? undefined }),
     checkCockpitHooks(env, fsImpl),
     checkTaskSessions({ env, fsImpl }),
     await checkSupervisorPrompt({ env, fsImpl }),
@@ -700,7 +783,6 @@ export async function runChecks({ env = process.env, withApi = false, spawn = sp
   if (env.FENIX_IN_CONTAINER === '1') {
     // FOC-988 first: the two uid checks stay the last two lines of the container
     // block (a test pins their position).
-    const code = checkFenixCode({ env, fsImpl });
     if (code) checks.push(code);
     checks.push(checkSecretsReadable(env, fsImpl, secretsDir), checkProjectsDir(env, fsImpl, projectsFile));
   }
