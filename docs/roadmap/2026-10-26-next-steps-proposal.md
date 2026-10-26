@@ -121,6 +121,42 @@ Guardrails that make this safe: proposals can only touch `agents/**`, `config/gr
 6. Code hygiene: ESLint + helper extraction as one ticket in Phase 1 — yes/no.
 7. Who merges to `main` going forward (ROADMAP says delivery owner since 10-17, HANDOFF says Mateusz).
 
+## 4a. Many Supervisors, many repositories (added 2026-10-26 after Mateusz's question)
+
+Requirement as stated: several Supervisors working on different repositories, possibly several on one repository,
+without getting in each other's way.
+
+**What exists today (one installation = one `fenix up` stack):**
+- A Supervisor is a **task session** bound to one ticket (`workspace:issueId`); `task-sessions.mjs` keeps one active
+  session per task in SQLite with a process-safe cap (`maxActive`, default **2**, overlay `taskSessions.maxActive`);
+  `task-session-host.mjs` multiplexes them on one internal port, each with its own tmux, state dir and Claude config dir.
+- **One repository, several Supervisors:** per-task git worktrees under `la-wt/`, a durable **workspace claim** per
+  branch plus a repo-wide integration lock (`workspace-claims.mjs`), a **ticket lease** at pickup (FOC-902), SCOPED-only
+  run identity (no adoption of a foreign run, FOC-901), scratch under run dirs (FOC-903), per-task journals (FOC-904),
+  run owners (FOC-905). Epic FOC-898 — all Done on `main` since 2026-10-17.
+- **Several repositories:** shared clones under `/data/workspaces` (`fenix repo add`), a Linear project → repo map
+  (`config/projects.json` / Settings → Repositories); a ticket's project decides the repo its session works in.
+- **Several installations on one Linear project:** task ownership scopes (FOC-848) — an installation acts only on
+  tickets its owner scope lists.
+
+**What is not proven or not there yet:**
+1. **N = 2 on one repo has never been accepted on the VM** — that is FOC-789 part 2 (board → task cockpit → push from
+   the dashboard, two sessions side by side). Until it runs, the isolation is proven by the suite and the isolation
+   lane only.
+2. **N > 2 is a sizing question, not a code change:** the cap is a number, but a DEV child peaks at ~8 GB
+   (QUICKSTART sizing), so 4 concurrent sessions need a 32 GB class host; the PRD's target was N = 4.
+3. **Children of different runs share one uid in the container** (FOC-878): a child of run A can still write run B's
+   gates/verdicts. For "several on one repo" this is the real residual isolation gap.
+4. **Several containers over one `/data` is unsupported** (run-owner.mjs) — "many Supervisors" means many task
+   sessions in one stack, or several stacks each with its own volume and owner scope, never two stacks on one volume.
+5. **Unattended policy** (FOC-920): N sessions multiply the permission prompts; with the default `wait` policy a
+   session parks until a human answers.
+
+**Proposed addition to Phase 1 (one ticket):** an acceptance run with ≥ 3 task sessions on two repositories at once
+(two on one repo, one on another) on a sized host, with the cap raised in the overlay; pass = no shared files touched
+across sessions (claims, run dirs, journals), board and Costs attribute each ticket to its own session, and the
+isolation lane extended with the FOC-878 assertions. Depends on FOC-789 part 2; pulls FOC-878 and FOC-920 forward.
+
 ## 5. What this does not cover
 Remote-control phases C and E (phone steering) and GEPA/FT are deferred by the docs themselves; nothing here contradicts that.
 No headline release metrics exist yet (1.0 PRD "not now") — Phase 1 item 3 is where they would come from.
