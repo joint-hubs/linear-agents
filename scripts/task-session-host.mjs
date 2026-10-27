@@ -80,6 +80,7 @@ import { readCurrentRun } from "./supervisor-current-run.mjs";
 import { readTaskSessionsSettings, normalizeAutoPickup } from "./fenix-settings.mjs";
 import { repoRefName } from "./fenix-projects.mjs";
 import { startText } from "./work-board.mjs";
+import { SESSION_ANSWER_ROUTES } from "./task-session-routes.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const platform = process.platform;
@@ -995,7 +996,10 @@ export function createTaskSessionHost(deps = {}) {
         delegateRequest(ctl, req, res, "/message");
         return;
       }
-      if (sub === "/ask" && method === "POST") {
+      // FOC-1112: the API forwards answers on SESSION_ANSWER_ROUTES (the
+      // controller's own /dialog/answer and /dialog/ask). The older /ask and
+      // POST /dialog spellings stay as aliases so nothing that used them breaks.
+      if ((sub === SESSION_ANSWER_ROUTES.ask || sub === "/ask") && method === "POST") {
         delegateRequest(ctl, req, res, "/dialog/ask");
         return;
       }
@@ -1003,7 +1007,7 @@ export function createTaskSessionHost(deps = {}) {
         delegateRequest(ctl, req, res, "/dialog");
         return;
       }
-      if (sub === "/dialog" && method === "POST") {
+      if ((sub === SESSION_ANSWER_ROUTES.dialog || sub === "/dialog") && method === "POST") {
         delegateRequest(ctl, req, res, "/dialog/answer");
         return;
       }
