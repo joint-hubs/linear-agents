@@ -287,18 +287,31 @@ const fetchHostSession = (sid) => hostRequest("GET", hostSessionPath(sid), null,
  */
 async function fetchScopedHostState(sid) {
   if (!hostBase()) return { hostState: "not-docker", state: null, taskSession: null };
-  const result = await fetchHostSession(sid);
+  // FOC-1089: the EFFECTIVE state (pane dialog, needs-input clock, parked
+  // policy) lives in GET /sessions/:sid/state — the bare /sessions/:sid
+  // answers only { session: record }, which has no `state`, so reading it
+  // here left every task-session permission prompt invisible in the task
+  // cockpit. The record route stays the fallback for an older host.
+  let result = await hostRequest("GET", hostSessionPath(sid, "/state"), null, { timeoutMs: FAST_TIMEOUT_MS });
+  if (result.status !== 0 && result.status !== 200) result = await fetchHostSession(sid);
   if (result.status === 0) return { hostState: "unreachable", state: null, taskSession: null, error: result.error };
   if (result.status !== 200 || !result.body || typeof result.body !== "object") {
     return { hostState: "error", state: null, taskSession: null, status: result.status };
   }
   const body = result.body;
+  // The state body carries the record under `taskSession`; the record route
+  // under `session` (an object). The state body's `session` is a string
+  // ("running"), never a record.
+  const record = body.taskSession ?? (body.session && typeof body.session === "object" ? body.session : null);
   return {
     hostState: "reachable",
     state: typeof body.state === "string" ? body.state : null,
-    taskSession: redactSessionRecord(body.taskSession ?? body.session),
+    taskSession: redactSessionRecord(record),
     hook: body.hook && typeof body.hook === "object" ? body.hook : null,
     clients: body.clients,
+    needsInputSince: typeof body.needsInputSince === "string" ? body.needsInputSince : null,
+    autoDenial: body.autoDenial && typeof body.autoDenial === "object" ? body.autoDenial : null,
+    parkedPolicy: body.parkedPolicy && typeof body.parkedPolicy === "object" ? body.parkedPolicy : null,
   };
 }
 
@@ -365,7 +378,16 @@ async function buildScopedCockpitSnapshot({ sessionId, taskKey, env = process.en
     : null;
 
   const needsYou = [
-    ...supervisorSessionItems({ dialog, pendingAsk, supRunId, focus }),
+    // FOC-1089: the same live-session inputs the global build passes, so an
+    // unreadable prompt or a parked session shows as a problem card here too.
+    ...supervisorSessionItems({
+      dialog, pendingAsk, supRunId, focus,
+      sessionState: host.state ?? null,
+      needsInputSince: host.needsInputSince ?? null,
+      autoDenial: host.autoDenial ?? null,
+      parkedPolicy: host.parkedPolicy ?? null,
+      now: snapshotClock(),
+    }),
     ...(runIds.length ? collectNeedsYou({ stateHome: supervisorStateHome(scopedEnv), runIds }) : []),
   ];
   const probe = hostBase()
