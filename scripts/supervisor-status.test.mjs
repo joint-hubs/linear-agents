@@ -528,7 +528,7 @@ function leaseHome() {
 }
 
 function seedHolder(home, taskKey, pid) {
-  const store = createTaskSessionStore({ dbPath: join(home, "supervisor", "task-sessions.sqlite") });
+  const store = createTaskSessionStore({ dbPath: join(home, "supervisor", "task-sessions.sqlite"), maxActive: 2 });
   try {
     const s = store.ensure({
       taskKey,

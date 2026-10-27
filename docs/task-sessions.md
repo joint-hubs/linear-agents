@@ -45,15 +45,18 @@ Start the Supervisor scoped with the command above, or set FENIX_SUPERVISOR_LEGA
 ## The cap: `taskSessions.maxActive`
 
 The cap on concurrently active (`starting|running|waiting`) sessions defaults
-to **2**. Precedence:
+to **1** (`DEFAULT_MAX_ACTIVE` in `scripts/task-sessions.mjs`). Two small-ticket
+sessions on one repository still share the main checkout (FOC-1088), so running
+more than one at a time is opt-in until that lands. Precedence:
 
 1. `deps.maxActive` (embedders/tests),
 2. env `FENIX_MAX_ACTIVE_SUPERVISORS` (integer ≥ 1 — the operational override),
 3. the Settings overlay `taskSessions.maxActive` (survives `fenix update`):
-   `fenix settings set taskSessions.maxActive 4`,
-4. 2.
+   `fenix settings set taskSessions.maxActive 2`,
+4. 1.
 
-Raise it only after a measured resource spike — the cap=2 benchmark
+Raise it to 2 only when the concurrent sessions work on different repositories
+(or after FOC-1088), and beyond 2 only after a measured resource spike — the cap=2 benchmark
 (2026-10-14, `docs/plans/task-workspace-delivery.md`) is the baseline; 4 is the
 documented next step once a spike justifies it. The chosen source is logged
 once at host start: `maxActive=<n> (<source>)`.

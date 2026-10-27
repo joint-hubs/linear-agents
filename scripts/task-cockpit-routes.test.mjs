@@ -203,7 +203,18 @@ const hostRecordB = JSON.parse(readFileSync(join(dataHome, "supervisor", "sessio
 
 const hostCalls = []; // { method, url, token, body }
 const hostUpgrades = []; // { url, headers }
-const fakeHostBehavior = {}; // { sessionsList, state404 }
+const fakeHostBehavior = {}; // { sessionsList, state404, needsInput: { [sid]: sinceIso } }
+const PERM_DIALOG_1089 = {
+  id: "dlg-1089", kind: "permission", title: "Bash command",
+  lines: ["Bash command", "git push -u origin foc-1053-key-wizard", "Do you want to proceed?"],
+  command: "git push -u origin foc-1053-key-wizard", question: null, tabs: null,
+  reason: { type: "ask-rule", detail: "Bash(git push:*)" },
+  options: [
+    { key: "1", label: "Yes", description: null, focused: true, checked: null, choice: "allow-once" },
+    { key: "2", label: "No", description: null, focused: false, checked: null, choice: "deny" },
+  ],
+  footer: "Esc to cancel",
+};
 
 const fakeHost = createServer(async (req, res) => {
   const chunks = [];
@@ -232,6 +243,16 @@ const fakeHost = createServer(async (req, res) => {
     if (suffix === "" && req.method === "GET") return json(200, { session: record });
     if (suffix === "/state" && req.method === "GET") {
       if (fakeHostBehavior.state404) return json(404, { error: "unknown session" });
+      // FOC-1089: the real host's effective state — a permission prompt on
+      // the pane: top-level state needs-input + dialog + the parked clock.
+      if (fakeHostBehavior.needsInput?.[sid]) {
+        return json(200, {
+          taskSession: record, session: "running", panePid: 4243, paneDead: false, clients: [],
+          hook: { sessionId: `claude-${sid}`, cwd: dir, state: "needs-input", notification: { type: "permission_prompt" }, updatedAt: NOW },
+          dialog: true, promptReady: false, state: "needs-input",
+          needsInputSince: fakeHostBehavior.needsInput[sid], autoDenial: null, parkedPolicy: { mode: "wait", minutes: 30 },
+        });
+      }
       return json(200, {
         taskSession: record, // the contract shape: record under taskSession
         session: "running",
@@ -249,7 +270,9 @@ const fakeHost = createServer(async (req, res) => {
     if (suffix === "/message" && req.method === "POST") return json(200, { sent: true, to: sid });
     if (suffix === "/session" && req.method === "POST") return json(200, { ready: true, to: sid });
     if (suffix === "/stop" && req.method === "POST") return json(200, { stopped: true, to: sid });
-    if (suffix === "/dialog" && req.method === "GET") return json(200, { dialog: null });
+    if (suffix === "/dialog" && req.method === "GET") {
+      return json(200, { dialog: fakeHostBehavior.needsInput?.[sid] ? PERM_DIALOG_1089 : null });
+    }
     return json(404, { error: "not found" });
   }
 
@@ -467,6 +490,37 @@ try {
       && snapB.body?.children?.some((c) => c.childId === "child-b1")
       && !snapB.body?.children?.some((c) => c.childId === "child-a1"),
       JSON.stringify(snapB.body?.children));
+  }
+
+  // ── Case 3b (FOC-1089) — a task session waiting on a permission prompt
+  // shows it in ITS scoped snapshot: state needs-input, the dialog, and a
+  // dialog Needs-you item; session B (idle) gets none of it.
+  {
+    fakeHostBehavior.needsInput = { [SID_A]: new Date(Date.now() - 60_000).toISOString() };
+    await new Promise((r) => setTimeout(r, 2100)); // past the 2 s snapshot TTL
+    hostCalls.length = 0;
+    const snapA = await call("GET", `/api/cockpit?sessionId=${SID_A}&taskKey=${TASK_A}`);
+    check("3b. scoped snapshot reads the host's /sessions/:sid/state",
+      hostCalls.some((c) => c.method === "GET" && c.url === `/sessions/${SID_A}/state`),
+      JSON.stringify(hostCalls.map((c) => c.url)));
+    check("3b. scoped snapshot: supervisor.state needs-input",
+      snapA.body?.supervisor?.state === "needs-input", String(snapA.body?.supervisor?.state));
+    check("3b. scoped snapshot carries the pane dialog",
+      snapA.body?.supervisor?.dialog?.id === "dlg-1089", JSON.stringify(snapA.body?.supervisor?.dialog ?? null).slice(0, 200));
+    const item = (snapA.body?.needsYou ?? []).find((it) => it.id === "dialog:dlg-1089");
+    check("3b. scoped Needs-you has an answerable dialog card",
+      item?.category === "dialog" && item?.answerKind === "dialog" && item?.answerable === true,
+      JSON.stringify(snapA.body?.needsYou ?? []).slice(0, 400));
+    check("3b. the dialog card counts in needsYou",
+      (snapA.body?.counts?.needsYou ?? 0) >= 1, JSON.stringify(snapA.body?.counts));
+    check("3b. the task binding survives the /state read (taskSession from the state body)",
+      snapA.body?.taskSession?.taskKey === TASK_A, JSON.stringify(snapA.body?.taskSession));
+    const snapB = await call("GET", `/api/cockpit?sessionId=${SID_B}`);
+    check("3b. idle session B shows no dialog card",
+      !(snapB.body?.needsYou ?? []).some((it) => it.category === "dialog") && snapB.body?.supervisor?.state !== "needs-input",
+      JSON.stringify({ state: snapB.body?.supervisor?.state, ny: snapB.body?.needsYou }).slice(0, 300));
+    delete fakeHostBehavior.needsInput;
+    await new Promise((r) => setTimeout(r, 2100));
   }
 
   // ── Case 4 — a scoped conversation cannot read another session's

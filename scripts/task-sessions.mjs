@@ -273,6 +273,16 @@ function createSchema(db) {
 const MUTABLE_FIELDS = new Set(["status", "runId", "pid", "processStartedAt", "lastError", "title"]);
 
 /**
+ * The default cap on concurrently active task sessions: ONE for 1.0. Two
+ * small-ticket sessions on one repository still share the main checkout
+ * (FOC-1088: no per-session worktree, a branch switch lands under the other
+ * session), so concurrency is opt-in until that lands:
+ * `fenix settings set taskSessions.maxActive 2` or FENIX_MAX_ACTIVE_SUPERVISORS.
+ * The host, the store and `fenix doctor` all read this one constant.
+ */
+export const DEFAULT_MAX_ACTIVE = 1;
+
+/**
  * Durable task/session store. Each instance holds one independent SQLite
  * connection; the ownership invariant and the active cap are safe across
  * instances and processes because both are enforced by SQLite inside a single
@@ -281,9 +291,9 @@ const MUTABLE_FIELDS = new Set(["status", "runId", "pid", "processStartedAt", "l
  *
  * @param {{dbPath?: string, maxActive?: number}} [options]
  * @param {string} [options.dbPath] defaults to dataHome()/supervisor/task-sessions.sqlite
- * @param {number} [options.maxActive=2] cap on concurrently active (starting|running|waiting) sessions
+ * @param {number} [options.maxActive=DEFAULT_MAX_ACTIVE] cap on concurrently active (starting|running|waiting) sessions
  */
-export function createTaskSessionStore({ dbPath, maxActive = 2 } = {}) {
+export function createTaskSessionStore({ dbPath, maxActive = DEFAULT_MAX_ACTIVE } = {}) {
   if (!sqliteAvailable()) {
     throw new Error(`node:sqlite is required for task sessions (current: ${process.version})`);
   }

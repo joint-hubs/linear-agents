@@ -68,6 +68,7 @@ import {
 import { SUPERVISOR_SESSION_ID_PATTERN, dataHome, projectsConfigPath } from "./fenix-paths.mjs";
 import { migrateLegacy as realMigrateLegacy } from "./supervisor-migrate-legacy.mjs";
 import {
+  DEFAULT_MAX_ACTIVE,
   OWNER_STATUSES,
   TERMINAL_STATUSES,
   createTaskSessionStore,
@@ -195,7 +196,8 @@ export function createTaskSessionHost(deps = {}) {
   const baseEnv = deps.env ?? process.env;
   // FOC-901: where the cap comes from — deps.maxActive (tests / embedders) →
   // env FENIX_MAX_ACTIVE_SUPERVISORS (the operational override, integer >= 1)
-  // → overlay taskSessions.maxActive (survives `fenix update`) → 2. The
+  // → overlay taskSessions.maxActive (survives `fenix update`) →
+  // DEFAULT_MAX_ACTIVE (1 for 1.0, FOC-1088). The
   // chosen source is exposed (and logged once at serve start) so an operator
   // can see which layer decided.
   const envRaw = baseEnv.FENIX_MAX_ACTIVE_SUPERVISORS;
@@ -218,7 +220,7 @@ export function createTaskSessionHost(deps = {}) {
     maxActive = overlayMaxActive;
     maxActiveSource = "settings taskSessions.maxActive";
   } else {
-    maxActive = 2;
+    maxActive = DEFAULT_MAX_ACTIVE;
     maxActiveSource = "default";
   }
   const processIdentity = deps.processIdentity ?? readProcessIdentity;

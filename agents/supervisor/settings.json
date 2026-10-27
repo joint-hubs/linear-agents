@@ -1,5 +1,6 @@
 {
   "cleanupPeriodDays": 36500,
+  "promptSuggestionEnabled": false,
   "permissions": {
     "allow": [
       "Read",

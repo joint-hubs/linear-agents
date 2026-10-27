@@ -1011,7 +1011,7 @@ const server = createServer(async (req, res) => {
     // --- Team line-ups (FOC-791 slice A): read-only, next to the other read routes ---
     if (await handleTeamRoute(req, res, url, { json, log })) return;
     if (method === 'GET' && path === '/api/environment') {
-      json(res, 200, { ...launchEnvironment(), mode: process.env.FENIX_ENVIRONMENT || (process.env.NODE_ENV === 'test' || process.env.FENIX_SUPERVISOR_CMD || process.env.LA_CLAUDE_BIN ? 'test' : 'live'), maxActive: Number(process.env.FENIX_MAX_ACTIVE_SUPERVISORS || 2) }); return;
+      json(res, 200, { ...launchEnvironment(), mode: process.env.FENIX_ENVIRONMENT || (process.env.NODE_ENV === 'test' || process.env.FENIX_SUPERVISOR_CMD || process.env.LA_CLAUDE_BIN ? 'test' : 'live'), maxActive: Number(process.env.FENIX_MAX_ACTIVE_SUPERVISORS || 1) /* task-sessions DEFAULT_MAX_ACTIVE (FOC-1088) */ }); return;
     }
 
     // --- Settings routes (FOC-786 slice G) ---
