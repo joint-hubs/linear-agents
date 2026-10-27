@@ -559,6 +559,57 @@ test("real CLI --print-plan with a positional — the dashboard JOI-69 path, no 
   assert.equal(printed.claudeArgs[0], "hello world");
 });
 
+// FOC-1105: the FOC-771 port echoed CLAUDE_CONFIG_DIR but never set it, and the
+// only assertion matched the echo. These check the env the claude child gets.
+test("CLAUDE_CONFIG_DIR is set in the child env for every squad (FOC-1105)", () => {
+  const root = makeRoot();
+  try {
+    for (const squad of ["plan", "dev", "review", "test", "cadence", "supervisor"]) {
+      const plan = planLaunch({ squad, env: baseEnv(root), cwd: join(root, "cwd"), root, tty: false });
+      assert.equal(plan.env.CLAUDE_CONFIG_DIR, join(root, "agents", squad), `${squad}: child env`);
+      assert.equal(plan.env.CLAUDE_CONFIG_DIR, plan.configDir, `${squad}: matches the echoed dir`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("CLAUDE_CONFIG_DIR — --agent uses the area dir; an inherited value never wins (FOC-1105)", () => {
+  const root = makeRoot();
+  try {
+    const inherited = { ...baseEnv(root), CLAUDE_CONFIG_DIR: join(root, "operator-home", ".claude") };
+    const agent = planLaunch({ agent: { area: "dev", role: "implementer" }, env: inherited, cwd: join(root, "cwd"), root });
+    assert.equal(agent.env.CLAUDE_CONFIG_DIR, join(root, "agents", "dev"));
+    const sup = planLaunch({ squad: "supervisor", env: inherited, cwd: join(root, "cwd"), root, tty: false });
+    assert.equal(sup.env.CLAUDE_CONFIG_DIR, join(root, "agents", "supervisor"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runLaunch hands CLAUDE_CONFIG_DIR to the spawned claude, not just the log (FOC-1105)", async () => {
+  const root = makeRoot();
+  try {
+    const plan = planLaunch({ squad: "dev", env: baseEnv(root), cwd: join(root, "cwd"), root, tty: false });
+    const calls = [];
+    const spawn = (command, args, opts) => {
+      calls.push({ command, args, opts });
+      return { status: 0, stdout: args[1] === "gen-id" ? "RUN-1105\n" : "", stderr: "" };
+    };
+    const spawnAsync = (command, args, opts) => {
+      calls.push({ command, args, opts });
+      return fakeChild(0);
+    };
+    const code = await runLaunch(plan, { spawn, spawnAsync, log: () => {} });
+    assert.equal(code, 0);
+    const claude = calls.find((c) => isClaude(c.command));
+    assert.ok(claude, "claude spawned");
+    assert.equal(claude.opts.env.CLAUDE_CONFIG_DIR, join(root, "agents", "dev"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("LA_ROOT and ROOT are exported into the child env (telemetry-hook MCP, CLAUDE.md commands, supervisor-spawn)", () => {
   const root = makeRoot();
   try {
