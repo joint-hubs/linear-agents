@@ -314,6 +314,8 @@ test("absent → exact start argv (focus-events on); ready on two consecutive re
   eq(argv[0], ["has-session", "-t", "supervisor"], "probe");
   eq(argv[1], [
     "start-server", ";",
+    // FOC-1080: prompt suggestions off for the pane (ghost text breaks promptReady)
+    "set-environment", "-g", "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false", ";",
     "set-option", "-g", "history-limit", "50000", ";",
     "set-option", "-g", "default-size", "200x50", ";",
     "set-option", "-g", "window-size", "latest", ";",

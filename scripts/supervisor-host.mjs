@@ -348,9 +348,18 @@ export function createHost(deps = {}) {
           "set-environment", "-g", "LA_SUPERVISOR_SESSION_HOME", env.LA_SUPERVISOR_SESSION_HOME ?? "", ";",
         ]
       : [];
+    // FOC-1080: Claude Code's prompt suggestion (grey ghost text on the empty
+    // `❯` line after a turn) reads as a NON-empty prompt to paneState, so the
+    // Cockpit chat answered `not-ready` until someone typed in the pane — and
+    // the suggestion echoed the Supervisor's own recommendation back at the
+    // human. Off for every pane this host starts, legacy and scoped alike;
+    // the env wins over a session's seeded settings.json (seeding never
+    // overwrites, so sessions created before this fix keep their old file).
+    const suggestionOffArgs = ["set-environment", "-g", "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false", ";"];
     const cmd = fresh ? [...startCmd, "--new"] : startCmd;
     const started = runTmux([
       "start-server", ";",
+      ...suggestionOffArgs,
       ...paneEnvArgs,
       "set-option", "-g", "history-limit", "50000", ";",
       "set-option", "-g", "default-size", "200x50", ";",
