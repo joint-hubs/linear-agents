@@ -5,6 +5,22 @@
 
 > **Hand-off for the next engineer: `docs/HANDOFF.md` (2026-10-23)** — state, blockers in order, VM ops, gotchas.
 
+## 2026-10-27 — rc.9 on `fenix-accept`; FOC-789 Day 5: one task session
+
+Run log Day 5: `docs/releases/1.0.0/foc-789-run-log.md`. Shipped: **#166** (FOC-1089 display — scoped cockpit
+reads `/sessions/:sid/state`; FOC-1080 prompt suggestions off; default task-session cap **1** as the FOC-1088
+stop-gap), #165 (FOC-1105, other session), release **1.0.0-rc.9** (#167, tag `v1.0.0-rc.9`, image published).
+On the VM: overlay `taskSessions.maxActive` reset 2 → 1 (Supervisor container restarted; the host reads the cap
+only at start), the two Day 4 sessions stopped, rc.2–rc.7 images removed. Auto-pickup took FOC-1055 as the only
+session → **PR #168** (Supervisor only, ≈3 h). Verified: cap 1, FOC-1080 (Done), FOC-1089 *display*. Broken:
+answering a task session's dialog from the card (API → host route mismatch, 404) → **FOC-1108 (P1, blocks
+FOC-1076)**; FOC-1089 stays open until it lands. New snags S40–S44: FOC-1107 (`fenix settings` missing from the
+launcher), FOC-1108, FOC-1109 (hold "Provide the values" has no text field), FOC-1110 (Work board card of a
+running session), FOC-1111 (chat queued silently while busy).
+Next: Mateusz reviews/merges PR #168; the card-answer fix FOC-1112 / **PR #169** is merged (`71b047a`; FOC-1108 is its duplicate,
+left for Mateusz) → rc.10 → recheck the card answer on the VM; then FOC-1088. VM stopped (0 children). The FOC-1055
+session still holds the only slot and comes back `waiting` on the next start — stop it scoped after #168.
+
 ## 2026-10-26 (evening) — rc.6 → rc.8 on `fenix-accept`; FOC-789 part 2 run: two task sessions side by side
 
 Run log Day 4: `docs/releases/1.0.0/foc-789-run-log.md`. Shipped today: FOC-1010 (#157), FOC-1077 symlinked
