@@ -148,11 +148,21 @@ const doctor = join(ROOT, "scripts", "fenix-doctor.mjs");
 if (!existsSync(doctor)) {
   console.log("  SKIP live doctor check — scripts/fenix-doctor.mjs not on disk");
 } else {
-  test("the flagged doctor prints no ExperimentalWarning", () => {
-    const r = spawnSync(process.execPath, [FLAG, doctor], { encoding: "utf8", timeout: 120000 });
-    if (r.status !== 0) {
-      fail(`exit ${r.status}\n       stderr: ${r.stderr}`);
+  // The doctor's exit code reports the HOST's health (exit 1 on any FAIL line:
+  // no Docker in CI, no data home on a fresh box), not the flag. These checks
+  // assert only what the flag controls: stderr, and that a report was printed.
+  // A spawn that never ran (error, timeout, signal) is still a failure.
+  const ran = (r) => {
+    if (r.error || r.status === null) {
+      fail(`doctor did not run: ${r.error?.message ?? `signal ${r.signal}`}\n       stderr: ${r.stderr ?? ""}`);
+      return false;
     }
+    return true;
+  };
+
+  test("the flagged doctor prints no ExperimentalWarning", () => {
+    const r = spawnSync(process.execPath, [FLAG, doctor], { encoding: "utf8", timeout: 120000, windowsHide: true });
+    if (!ran(r)) return;
     if (/ExperimentalWarning/.test(r.stderr ?? "")) {
       fail(`flagged doctor still warns:\n       ${(r.stderr ?? "").slice(0, 400)}`);
     }
@@ -162,10 +172,8 @@ if (!existsSync(doctor)) {
   });
 
   test("the bare doctor still warns (the suite's view of the same code)", () => {
-    const r = spawnSync(process.execPath, [doctor], { encoding: "utf8", timeout: 120000 });
-    if (r.status !== 0) {
-      fail(`exit ${r.status}\n       stderr: ${r.stderr}`);
-    }
+    const r = spawnSync(process.execPath, [doctor], { encoding: "utf8", timeout: 120000, windowsHide: true });
+    if (!ran(r)) return;
     if (!/ExperimentalWarning/.test(r.stderr ?? "")) {
       fail("the bare doctor no longer warns — the suite's stderr assertions would rot");
     }
