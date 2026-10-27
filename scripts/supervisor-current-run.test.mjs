@@ -548,7 +548,7 @@ const DEAD_PID = 2 ** 22 + 12345;
 /** One managed session in a temp store, claimed and driven to `status` with the given pid. */
 function startManagedSession(home, { status = "running", pid = process.pid, issueId = "ISSUE-1" } = {}) {
   const dbPath = join(home, "supervisor", "task-sessions.sqlite");
-  const store = createTaskSessionStore({ dbPath });
+  const store = createTaskSessionStore({ dbPath, maxActive: 2 }); // two live sessions at once (default cap is 1)
   const taskKey = `workspace:${issueId}`;
   const created = store.ensure({ taskKey, taskId: issueId, workspace: "workspace", issueId });
   const claimed = store.claimNext(); // queued admission requires claimNext()

@@ -341,7 +341,7 @@ test("no store file → ok 'no managed sessions yet'", () => {
   }
 });
 
-test("2 active / cap 2 → warn 'cap reached' with the ids and the key fix", () => {
+test("2 active / cap 1 (the default) → warn 'cap reached' with the ids and the key fix", () => {
   const dir = tempDir();
   const dbPath = path.join(dir, "supervisor", "task-sessions.sqlite");
   const sessions = [
@@ -356,7 +356,7 @@ test("2 active / cap 2 → warn 'cap reached' with the ids and the key fix", () 
     });
     assert.equal(c.status, "warn");
     assert.match(c.detail, /cap reached/);
-    assert.match(c.detail, /2 active \/ cap 2/);
+    assert.match(c.detail, /2 active \/ cap 1/);
     assert.ok(c.detail.includes("sup-" + "a".repeat(32)));
     assert.match(c.fix, /taskSessions\.maxActive/);
   } finally {
@@ -399,9 +399,11 @@ test("a session.json whose pid is provably dead does not count as live", () => {
   const sessions = [
     { sessionId: "sup-" + "d".repeat(32), taskKey: "workspace:ISSUE-4", status: "running", pid: process.pid },
   ];
+  fs.writeFileSync(path.join(dir, "cap2.json"), JSON.stringify({ taskSessions: { maxActive: 2 } }), "utf8");
+  // the counting logic under test, at an explicit cap of 2 (the default is 1 since FOC-1088)
   try {
     const c = checkTaskSessions({
-      env: { LA_DATA_HOME: dir },
+      env: { LA_DATA_HOME: dir, LA_SETTINGS_FILE: path.join(dir, "cap2.json") },
       fsImpl: fsWithStoreFile(dbPath),
       readSessions: fakeSessions(sessions),
     });
@@ -453,9 +455,11 @@ test("a stale (provably dead) session does not count against the cap and is name
     { sessionId: "sup-" + "e".repeat(32), taskKey: "workspace:ISSUE-5", status: "running", pid: process.pid },
     { sessionId: "sup-" + "f".repeat(32), taskKey: "workspace:ISSUE-6", status: "running", pid: deadPid },
   ];
+  fs.writeFileSync(path.join(dir, "cap2.json"), JSON.stringify({ taskSessions: { maxActive: 2 } }), "utf8");
+  // the counting logic under test, at an explicit cap of 2 (the default is 1 since FOC-1088)
   try {
     const c = checkTaskSessions({
-      env: { LA_DATA_HOME: dir },
+      env: { LA_DATA_HOME: dir, LA_SETTINGS_FILE: path.join(dir, "cap2.json") },
       fsImpl: fsWithStoreFile(dbPath),
       readSessions: fakeSessions(sessions),
     });
@@ -510,8 +514,8 @@ test("an invalid settings overlay is surfaced in the detail, not printed to stde
       fsImpl: fsWithStoreFile(dbPath),
       readSessions: fakeSessions(sessions),
     });
-    assert.equal(c.status, "ok");
-    assert.match(c.detail, /cap 2/, "the invalid overlay falls back to the default cap");
+    assert.equal(c.status, "warn", "one running session at the default cap of 1 is cap reached");
+    assert.match(c.detail, /cap 1/, "the invalid overlay falls back to the default cap (1)");
     assert.match(c.detail, /settings overlay ignored/);
     assert.equal(errs.length, 0, "quiet — the doctor must not print to stderr mid-run");
   } finally {

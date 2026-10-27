@@ -289,8 +289,10 @@ One active Supervisor per task: a duplicate start lands on the same cockpit,
 not a second session.
 
 At most `taskSessions.maxActive` sessions are active at once (`starting`,
-`running` or `waiting`) — 2 by default. Raise it in the settings overlay,
-`fenix settings set taskSessions.maxActive 4` (survives `fenix update`), or
+`running` or `waiting`) — 1 by default in 1.0. Two sessions on the same
+repository still share its main checkout (FOC-1088), so raise the cap only for
+sessions on different repositories: `fenix settings set taskSessions.maxActive 2`
+(survives `fenix update`), or
 per-process with the env override `FENIX_MAX_ACTIVE_SUPERVISORS`. Excess
 tickets queue — visible in the cockpit's Tasks switcher; a queued start or
 resume answers 409 `queued`. The store, the `fenix doctor` line and

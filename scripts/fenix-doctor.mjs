@@ -413,7 +413,7 @@ export function checkTaskSessions({ env = process.env, fsImpl = fs, readSessions
   // stderr write mid-run would land between them — an invalid overlay is
   // surfaced in this check's detail instead.
   const settings = settingsH.mod.readTaskSessionsSettings(env, { quiet: true });
-  const cap = settings.maxActive ?? 2;
+  const cap = settings.maxActive ?? taskSessionsH.mod.DEFAULT_MAX_ACTIVE ?? 1;
   const overlayNote = settings.error ? ` — settings overlay ignored (${settings.error})` : "";
   // FOC-902: the autonomous-pickup note rides on every detail branch — the
   // doctor line answers both "how full is the cap" and "is pickup on" in one

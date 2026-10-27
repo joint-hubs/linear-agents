@@ -363,10 +363,10 @@ test("FENIX_MAX_ACTIVE_SUPERVISORS=1 beats the overlay's 4", async () => {
   }
 });
 
-test("no deps, no env, no overlay → the default cap of 2", async () => {
+test("no deps, no env, no overlay → the default cap of 1 (DEFAULT_MAX_ACTIVE, FOC-1088)", async () => {
   const { host } = build({ resolveMaxActive: true });
   try {
-    assert.equal(host.maxActive, 2);
+    assert.equal(host.maxActive, 1);
     assert.equal(host.maxActiveSource, "default");
   } finally {
     host.close();
@@ -380,7 +380,7 @@ test("an empty FENIX_MAX_ACTIVE_SUPERVISORS is unset — no warning; a non-empty
   console.error = (msg) => errs.push(String(msg));
   const withEmpty = build({ resolveMaxActive: true, env: { FENIX_MAX_ACTIVE_SUPERVISORS: "" } });
   try {
-    assert.equal(withEmpty.host.maxActive, 2);
+    assert.equal(withEmpty.host.maxActive, 1);
     assert.equal(withEmpty.host.maxActiveSource, "default");
     assert.equal(errs.length, 0, "an empty value must read as unset, silently");
   } finally {
@@ -390,7 +390,7 @@ test("an empty FENIX_MAX_ACTIVE_SUPERVISORS is unset — no warning; a non-empty
   errs.length = 0;
   const withBad = build({ resolveMaxActive: true, env: { FENIX_MAX_ACTIVE_SUPERVISORS: "zero" } });
   try {
-    assert.equal(withBad.host.maxActive, 2);
+    assert.equal(withBad.host.maxActive, 1);
     assert.equal(withBad.host.maxActiveSource, "default");
     assert.equal(errs.length, 1, "a non-empty invalid value warns once");
     assert.match(errs[0], /FENIX_MAX_ACTIVE_SUPERVISORS/);
@@ -770,7 +770,7 @@ test("CLI attach-target: legacy when empty, the single active session, else sele
   });
 
   const two = tempDir("attach-two");
-  const storeTwo = createTaskSessionStore({ dbPath: join(two, "supervisor", "task-sessions.sqlite") });
+  const storeTwo = createTaskSessionStore({ dbPath: join(two, "supervisor", "task-sessions.sqlite"), maxActive: 2 });
   const r1 = storeTwo.ensure({ taskKey: "w:ISSUE-1", taskId: "ISSUE-1", workspace: "w", issueId: "ISSUE-1" });
   const r2 = storeTwo.ensure({ taskKey: "w:ISSUE-2", taskId: "ISSUE-2", workspace: "w", issueId: "ISSUE-2" });
   storeTwo.claimNext();
