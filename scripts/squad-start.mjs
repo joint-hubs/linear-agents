@@ -373,6 +373,12 @@ export function planLaunch({
   delete childEnv.CLAUDE_CODE_SUBAGENT_MODEL;
   childEnv.API_TIMEOUT_MS = API_TIMEOUT_MS;
   const configDir = squadConfigDir(label, env);
+  // FOC-1105: the bats SET this before `claude` (`set "CLAUDE_CONFIG_DIR=%ROOT%\agents\<squad>"`);
+  // the FOC-771 port only echoed it, so every native launch ran on the
+  // operator's default ~/.claude (personal CLAUDE.md, memory, MCP servers,
+  // permissions) instead of the squad's. Unconditional, like the bats: an
+  // inherited CLAUDE_CONFIG_DIR from the launching shell never wins.
+  childEnv.CLAUDE_CONFIG_DIR = configDir;
 
   // 6. Dry-run: the squad's dry-run env var, the fixed kickoff args and the
   // post steps (parity with *-dry.bat; dev/review/test/cadence verify with
