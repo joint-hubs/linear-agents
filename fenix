@@ -299,10 +299,14 @@ in_container_node() {
   # Run `node <script>` inside the fenix-api image (repo baked at /opt/fenix).
   # stdin passes through, so keys travel ONLY via stdin — never argv/env of a
   # docker command line. Builds the image first when it is missing.
+  # FOC-1055: operator-facing CLIs are quiet about Node's experimental warnings
+  # (`node:sqlite` prints one the moment a helper opens the store, in the middle
+  # of `fenix doctor`'s report). The test suite runs the same scripts without
+  # the flag and keeps its warnings.
   script="$1"
   shift
   ensure_image --if-missing
-  docker compose run --rm --no-deps -T --entrypoint node fenix-api "/opt/fenix/$script" "$@"
+  docker compose run --rm --no-deps -T --entrypoint node fenix-api --disable-warning=ExperimentalWarning "/opt/fenix/$script" "$@"
 }
 
 check_key() {

@@ -476,7 +476,10 @@ for (const abs of dryBatFiles) {
     .split('\n')
     .map((l) => l.trim())
     .find((l) => l.startsWith('node '));
-  const prefix = `node "%~dp0..\\scripts\\squad-start.mjs" ${squad}`;
+  // FOC-1055: operator-facing wrappers carry Node's experimental-warning silencer
+  // before the script path. The shape check accepts the flag; the flag itself is
+  // pinned by operator-warning-suppression.test.mjs.
+  const prefix = `node --disable-warning=ExperimentalWarning "%~dp0..\\scripts\\squad-start.mjs" ${squad}`;
   if (!nodeLine || !(nodeLine === prefix || nodeLine.startsWith(prefix + ' '))) {
     report(rel, `not a squad-start.mjs wrapper for '${squad}' and no \`set "${envVar}=1"\` line`);
     continue;

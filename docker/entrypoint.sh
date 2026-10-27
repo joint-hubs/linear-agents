@@ -10,6 +10,14 @@
 # are exported into the environment only — never printed, logged, or echoed.
 set -eu
 
+# FOC-1055: every operator-facing CLI below runs node with
+# `--disable-warning=ExperimentalWarning`. `node:sqlite` is experimental and
+# prints `ExperimentalWarning` on stderr the moment a helper opens the store —
+# in the middle of `fenix doctor`'s OK/WARN/FAIL report. The flag belongs at the
+# launch boundary, never in the scripts: the same scripts run inside the test
+# suite, which keeps its warnings on purpose. Node 22 supports the flag; the
+# project's floor is 22.5+ (README).
+
 # Export secret files into env vars. A missing or empty file is skipped
 # silently — the affected provider simply stays unauthenticated.
 load_secrets() {
@@ -334,7 +342,7 @@ case "${1:-api}" in
         configure_git
         git clone "$repo_url" "$GITHUB_ROOT/$repo_name"
         if [ -n "$project" ]; then
-            node "$LA_ROOT/scripts/fenix-projects.mjs" add --linear-project "$project" --repo "\${GITHUB_ROOT}/$repo_name"
+            node --disable-warning=ExperimentalWarning "$LA_ROOT/scripts/fenix-projects.mjs" add --linear-project "$project" --repo "\${GITHUB_ROOT}/$repo_name"
         fi
         ;;
     repo-list)
@@ -342,7 +350,7 @@ case "${1:-api}" in
             [ -d "$d.git" ] || continue
             printf '%s\t%s\t%s\n' "$(basename "$d")" "$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" "$(git -C "$d" remote get-url origin 2>/dev/null)"
         done
-        node "$LA_ROOT/scripts/fenix-projects.mjs" list || true
+        node --disable-warning=ExperimentalWarning "$LA_ROOT/scripts/fenix-projects.mjs" list || true
         ;;
     cleanup)
         # FOC-1007: the operator's path to the worktree cleanup (`fenix cleanup`).
@@ -352,17 +360,17 @@ case "${1:-api}" in
         # only supplies the environment.
         shift
         cd "$LA_ROOT"
-        exec node scripts/supervisor-cleanup.mjs "$@"
+        exec node --disable-warning=ExperimentalWarning scripts/supervisor-cleanup.mjs "$@"
         ;;
     doctor)
         shift
         cd "$LA_ROOT"
-        exec node scripts/fenix-doctor.mjs "$@"
+        exec node --disable-warning=ExperimentalWarning scripts/fenix-doctor.mjs "$@"
         ;;
     agent-tools)
         shift
         cd "$LA_ROOT"
-        exec node scripts/agent-tools.mjs "$@"
+        exec node --disable-warning=ExperimentalWarning scripts/agent-tools.mjs "$@"
         ;;
     fix-permissions)
         # Test/ops entry to the FOC-802/FOC-808 surface appliers without

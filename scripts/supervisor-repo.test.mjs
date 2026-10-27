@@ -138,7 +138,9 @@ test("the launcher captures its start directory before anything can cd", () => {
   // first thing in the file that could change the directory, so the capture
   // must precede it.
   const capture = bat.indexOf("LA_SUPERVISOR_REPO=%CD%");
-  const node = bat.indexOf('node "%~dp0..\\scripts\\squad-start.mjs"');
+  // FOC-1055: the node line carries --disable-warning=ExperimentalWarning before
+  // the script path, so the entry point is matched on the squad-start.mjs call.
+  const node = bat.indexOf("squad-start.mjs");
   assert.ok(node !== -1, "supervisor.bat no longer calls squad-start.mjs");
   assert.ok(capture !== -1 && capture < node, "LA_SUPERVISOR_REPO must be captured BEFORE the node entry point runs");
 });

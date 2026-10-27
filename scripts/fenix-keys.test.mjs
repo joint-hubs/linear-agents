@@ -575,7 +575,7 @@ test("FOC-780: `fenix retention` with no verb forwards `show` to the in-containe
     assert.equal(calls.length, 1, calls.join("\n"));
     assert.match(
       calls[0],
-      /compose run --rm --no-deps -T --entrypoint node fenix-api \/opt\/fenix\/scripts\/fenix-retention\.mjs show$/,
+      /compose run --rm --no-deps -T --entrypoint node fenix-api --disable-warning=ExperimentalWarning \/opt\/fenix\/scripts\/fenix-retention\.mjs show$/,
       calls[0],
     );
   } finally { rmSync(dir, { recursive: true, force: true }); }
