@@ -54,6 +54,7 @@ import { openTelemetryDb } from "./telemetry-store.mjs";
 import { ensureViews } from "./telemetry-canonical.mjs";
 import { hostTokenPath } from "./fenix-paths.mjs";
 import { spawnTestServer } from "./test-spawn.mjs";
+import { SESSION_ANSWER_ROUTES } from "./task-session-routes.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -273,6 +274,10 @@ const fakeHost = createServer(async (req, res) => {
     if (suffix === "/dialog" && req.method === "GET") {
       return json(200, { dialog: fakeHostBehavior.needsInput?.[sid] ? PERM_DIALOG_1089 : null });
     }
+    // FOC-1112: the answer routes exist ONLY under the shared suffixes the
+    // real host routes — the API forwarding anywhere else gets the host's 404.
+    if (suffix === SESSION_ANSWER_ROUTES.dialog && req.method === "POST") return json(200, { answered: true, to: sid, kind: "dialog" });
+    if (suffix === SESSION_ANSWER_ROUTES.ask && req.method === "POST") return json(200, { answered: true, to: sid, kind: "ask" });
     return json(404, { error: "not found" });
   }
 
@@ -580,6 +585,24 @@ try {
       `${forged.status} ${JSON.stringify(forged.body)}`);
     check("5. forged-taskKey message was not forwarded",
       !hostCalls.some((c) => c.url === `/sessions/${SID_A}/message`),
+      JSON.stringify(hostCalls));
+  }
+
+  // ── Case 5b (FOC-1112) — a dialog answer from the task cockpit reaches the
+  // host on the shared answer route, and the host's answer comes back. On rc.9
+  // the API forwarded to a path the host did not route: every card click 404.
+  {
+    hostCalls.length = 0;
+    const ans = await call("POST", `/api/supervisor/sessions/${SID_A}/dialog`, { body: { id: "dlg-1112", choice: "allow-once" } });
+    check("5b. scoped dialog answer -> host 200 pass-through",
+      ans.status === 200 && ans.body?.answered === true && ans.body?.to === SID_A && ans.body?.kind === "dialog",
+      `${ans.status} ${JSON.stringify(ans.body)}`);
+    check("5b. forwarded to /sessions/:sid + SESSION_ANSWER_ROUTES.dialog with id and choice",
+      hostCalls.some((c) => c.method === "POST" && c.url === `/sessions/${SID_A}${SESSION_ANSWER_ROUTES.dialog}`
+        && c.body?.id === "dlg-1112" && c.body?.choice === "allow-once"),
+      JSON.stringify(hostCalls));
+    check("5b. never touched session B or a global dialog route",
+      !hostCalls.some((c) => c.url.includes(SID_B) || c.url.startsWith("/dialog")),
       JSON.stringify(hostCalls));
   }
 

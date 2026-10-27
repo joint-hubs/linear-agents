@@ -41,6 +41,7 @@ import { WebSocket } from "ws";
 
 import { createTaskSessionStore, OWNER_STATUSES } from "./task-sessions.mjs";
 import { createTaskSessionHost, ownershipKeeps, seedSessionConfig, sessionHomePath } from "./task-session-host.mjs";
+import { SESSION_ANSWER_ROUTES } from "./task-session-routes.mjs";
 import { checkOwnership } from "./task-ownership.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -461,6 +462,35 @@ test("message and state are isolated between two controllers", async () => {
   }
 });
 
+// FOC-1112: the API (cockpit-routes.mjs) forwards a task cockpit's answers to
+// these exact suffixes. Each must reach the session's controller — its own
+// validation answering (400 bad-choice / bad-answers), never the
+// multiplexer's 404 not-found that every card answer got on rc.9.
+test("the API's answer routes reach the controller; the old spellings stay aliases (FOC-1112)", async () => {
+  const { host, store } = build({ maxActive: 2 });
+  const port = await listen(host);
+  try {
+    const a = await request(port, "POST", "/sessions", { body: startBody("A") });
+    await host.settled();
+    const sid = a.json.session.sessionId;
+    for (const suffix of [SESSION_ANSWER_ROUTES.dialog, "/dialog"]) {
+      const r = await request(port, "POST", `/sessions/${sid}${suffix}`, { body: { id: "dlg-x", choice: "not-a-choice" } });
+      assert.equal(r.status, 400, `${suffix}: ${JSON.stringify(r.json)}`);
+      assert.equal(r.json.error, "bad-choice", `${suffix} reached the controller's dialog answer`);
+    }
+    for (const suffix of [SESSION_ANSWER_ROUTES.ask, "/ask"]) {
+      const r = await request(port, "POST", `/sessions/${sid}${suffix}`, { body: { questions: "not-a-list", answers: null } });
+      assert.equal(r.status, 400, `${suffix}: ${JSON.stringify(r.json)}`);
+      assert.equal(r.json.error, "bad-answers", `${suffix} reached the controller's ask answer`);
+    }
+    const unknown = await request(port, "POST", `/sessions/${sid}/dialog/nope`, { body: {} });
+    assert.equal(unknown.status, 404, "an unknown suffix is still 404");
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
 // ── validation, auth ordering, unknown ids ───────────────────────────────────
 
 test("auth runs BEFORE any store operation: a bad token never creates a claim", async () => {
@@ -819,7 +849,7 @@ test('failed terminal generation rejects mutations instead of bypassing admissio
  try {
   const a=await request(port,'POST','/sessions',{body:startBody('A')});await host.settled();
   const sid=a.json.session.sessionId;store.update(sid,{status:'failed'});
-  for (const action of ['session','message','ask','dialog']) {
+  for (const action of ['session','message','ask','dialog','dialog/answer','dialog/ask']) {
     const response=await request(port,'POST','/sessions/'+sid+'/'+action,{body:{text:'must not send'}});
     assert.equal(response.status,409,action);
   }

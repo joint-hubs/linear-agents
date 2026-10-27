@@ -52,6 +52,7 @@ import {
   SUPERVISOR_SESSION_ID_PATTERN,
 } from "./fenix-paths.mjs";
 import { supervisorStateHome } from "./supervisor-lib.mjs";
+import { SESSION_ANSWER_ROUTES } from "./task-session-routes.mjs";
 
 // The body cap for the cockpit POSTs: chat messages and gate/hold answers are
 // control payloads, not documents — 16 KB like the contract, above the 8 KB
@@ -1245,7 +1246,7 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       }
       const payload = { id: body.id, choice: body.choice };
       if (typeof body.note === "string" && body.note.trim()) payload.note = body.note;
-      const result = await hostRequest("POST", hostSessionPath(sid, "/dialog/answer"), payload, { timeoutMs: SLOW_TIMEOUT_MS });
+      const result = await hostRequest("POST", hostSessionPath(sid, SESSION_ANSWER_ROUTES.dialog), payload, { timeoutMs: SLOW_TIMEOUT_MS });
       const status = result.status === 0 ? 503 : result.status;
       json(res, status, result.status === 0 ? { error: "host-unreachable", reason: result.error } : result.body);
       log(method, path, status);
@@ -1298,7 +1299,7 @@ export async function handleCockpitRoute(req, res, url, ctx) {
         log(method, path, 409);
         return true;
       }
-      const result = await hostRequest("POST", hostSessionPath(sid, "/dialog/ask"), {
+      const result = await hostRequest("POST", hostSessionPath(sid, SESSION_ANSWER_ROUTES.ask), {
         questions: pending.questions.map((q) => ({
           question: q.question,
           multiSelect: q.multiSelect,
