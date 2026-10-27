@@ -1,3 +1,3 @@
 @echo off
-node "%~dp0..\scripts\squad-start.mjs" test %*
+node --disable-warning=ExperimentalWarning "%~dp0..\scripts\squad-start.mjs" test %*
 exit /b %errorlevel%

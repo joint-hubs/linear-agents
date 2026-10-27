@@ -301,6 +301,10 @@
       "reason": "Read-only snapshot plus temp JSON fixtures; no processes, ports or shared writes."
     },
     {
+      "file": "operator-warning-suppression.test.mjs",
+      "reason": "isolation audit FOC-1055: reads fenix / docker/entrypoint.sh / bin/*.bat read-only; the two live spawns run scripts/fenix-doctor.mjs with and without --disable-warning=ExperimentalWarning (read-only checks, no writes to the repo or /data); no network, no ports, no socket binds, no telemetry DB"
+    },
+    {
       "file": "permission-rules.test.mjs",
       "reason": "isolation audit (FOC-511): pure unit tests over literal rule strings (a model of the documented Claude Code permission matcher); no fs, no ports, no socket binds, no telemetry DB"
     },

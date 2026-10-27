@@ -76,8 +76,15 @@ for (const [file, expectedArgs] of Object.entries(WRAPPERS)) {
       fail(`expected @echo off + 1 node line + exit /b (comments aside), got ${code.length} code lines:\n       ${code.join("\n       ")}`);
     }
     const nodeLine = code[1];
-    const m = nodeLine.match(/^node "%~dp0\.\.\\scripts\\squad-start\.mjs" (.+)$/);
-    if (!m) fail(`node line does not call squad-start.mjs: ${nodeLine}`);
+    const m = nodeLine.match(
+      /^node --disable-warning=ExperimentalWarning "%~dp0\.\.\\scripts\\squad-start\.mjs" (.+)$/,
+    );
+    if (!m) {
+      fail(
+        `node line must call squad-start.mjs with --disable-warning=ExperimentalWarning ` +
+          `(FOC-1055 — keep node:sqlite's ExperimentalWarning out of the operator's terminal): ${nodeLine}`,
+      );
+    }
     if (m[1] !== expectedArgs) fail(`flags drift: expected "${expectedArgs}", got "${m[1]}"`);
     if (!m[1].endsWith("%*")) fail(`user args (%*) not forwarded: ${nodeLine}`);
     if (code[2] !== "exit /b %errorlevel%") fail(`exit code pass-through missing: ${code[2]}`);
