@@ -1,0 +1,552 @@
+<title>Gantt Fenix · 1.0 i dalej</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Public+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: header + legend, one horizontally scrolling Gantt (sticky task column, SVG dependency overlay), unscheduled list below. */
+:root {
+  --bg: #f5f6f7;
+  --surface: #ffffff;
+  --fg: #18212b;
+  --muted: #5d6874;
+  --line: #e1e5e9;
+  --line-strong: #c9d0d6;
+  --lane: #eef1f3;
+  --claude: #0f6b6e;
+  --claude-soft: #d7eeed;
+  --sup: #5b4bb5;
+  --sup-soft: #e5e1f7;
+  --owner: #a3620a;
+  --owner-soft: #f6e8d2;
+  --vv: #607080;
+  --vv-soft: #e3e8ec;
+  --crit: #c2412b;
+  --done: #2c7a3f;
+  --today: #c2412b;
+  --shade: rgba(96, 112, 128, 0.08);
+  --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Public Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11161b; --surface: #182027; --fg: #e5e9ed; --muted: #97a3ae; --line: #26303a; --line-strong: #34404b; --lane: #1d262e;
+    --claude: #5fc6c2; --claude-soft: #183a3b; --sup: #a99bf0; --sup-soft: #2b2650; --owner: #e3ae5c; --owner-soft: #3a2d17;
+    --vv: #9fb0bf; --vv-soft: #26313a; --crit: #f08a72; --done: #74c487; --today: #f08a72; --shade: rgba(159, 176, 191, 0.07);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11161b; --surface: #182027; --fg: #e5e9ed; --muted: #97a3ae; --line: #26303a; --line-strong: #34404b; --lane: #1d262e;
+  --claude: #5fc6c2; --claude-soft: #183a3b; --sup: #a99bf0; --sup-soft: #2b2650; --owner: #e3ae5c; --owner-soft: #3a2d17;
+  --vv: #9fb0bf; --vv-soft: #26313a; --crit: #f08a72; --done: #74c487; --today: #f08a72; --shade: rgba(159, 176, 191, 0.07);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 14px/1.5 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 56px;
+}
+.wrap { max-width: 1500px; margin: 0 auto; display: grid; gap: 20px; }
+h1, h2 { font-family: var(--font-display); margin: 0; line-height: 1.15; text-wrap: balance; }
+h1 { font-size: clamp(26px, 3.6vw, 36px); font-weight: 700; }
+h2 { font-size: 19px; font-weight: 700; }
+p { margin: 0; max-width: 72ch; }
+.eyebrow { font: 500 12px/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.muted { color: var(--muted); }
+.mono { font-family: var(--font-mono); }
+header { display: grid; gap: 10px; }
+
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 500 12.5px/1 var(--font-body); padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--fg); cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.chip:focus-visible { outline: 2px solid var(--claude); outline-offset: 2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--muted); align-items: center; }
+.legend span { display: inline-flex; gap: 6px; align-items: center; }
+.sw { display: inline-block; width: 22px; height: 11px; border-radius: 3px; }
+
+/* Gantt */
+.scroller { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+.chart { position: relative; }
+.row { display: flex; height: 30px; }
+.row.lane { height: 34px; }
+.cell-label {
+  position: sticky; left: 0; z-index: 3; flex: 0 0 var(--label-w);
+  background: var(--surface); border-right: 1px solid var(--line);
+  display: flex; align-items: center; gap: 8px; padding: 0 10px 0 14px; min-width: 0;
+}
+.row.lane .cell-label { background: var(--lane); font: 600 12px/1 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.row.lane .track { background: var(--lane); }
+.id { font: 500 11.5px/1 var(--font-mono); color: var(--muted); flex: 0 0 66px; }
+.id a { color: inherit; text-decoration: none; }
+.id a:hover, .id a:focus-visible { color: var(--fg); text-decoration: underline; }
+.crit .id, .crit .id a { color: var(--crit); font-weight: 600; }
+.name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; flex: 1 1 auto; min-width: 0; }
+.who { font: 600 10.5px/1 var(--font-mono); padding: 3px 6px; border-radius: 4px; flex: 0 0 auto; }
+.who.claude { color: var(--claude); background: var(--claude-soft); }
+.who.sup { color: var(--sup); background: var(--sup-soft); }
+.who.owner { color: var(--owner); background: var(--owner-soft); }
+.who.vv { color: var(--vv); background: var(--vv-soft); }
+.track { position: relative; flex: 0 0 auto; border-bottom: 1px solid var(--line); }
+.row:not(.lane) .cell-label { border-bottom: 1px solid var(--line); }
+.bar {
+  position: absolute; top: 7px; height: 16px; border-radius: 4px; z-index: 2;
+  border: 1.5px solid var(--c); background: var(--c-soft); cursor: pointer;
+  transition: opacity .15s;
+}
+.bar.claude { --c: var(--claude); --c-soft: var(--claude-soft); }
+.bar.sup { --c: var(--sup); --c-soft: var(--sup-soft); }
+.bar.owner { --c: var(--owner); --c-soft: var(--owner-soft); }
+.bar.vv { --c: var(--vv); --c-soft: var(--vv-soft); }
+.bar.progress { background: var(--c); }
+.bar.review { background: repeating-linear-gradient(135deg, var(--c) 0 5px, var(--c-soft) 5px 10px); }
+.bar.backlog { border-style: dashed; background: transparent; }
+.bar.done { background: var(--done); border-color: var(--done); }
+.bar.crit { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--crit); }
+.bar:focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
+.ms { position: absolute; top: 8px; width: 13px; height: 13px; transform: translateX(-50%) rotate(45deg); background: var(--fg); z-index: 2; }
+.ms.red { background: var(--crit); }
+.ms-label { position: absolute; top: 7px; font: 600 11.5px/16px var(--font-mono); white-space: nowrap; z-index: 2; }
+.grid-v { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); z-index: 0; pointer-events: none; }
+.grid-v.month { background: var(--line-strong); }
+.shade { position: absolute; top: 0; bottom: 0; background: var(--shade); z-index: 0; pointer-events: none; }
+.shade-label { position: absolute; top: 4px; font: 500 10.5px/1.2 var(--font-mono); color: var(--muted); white-space: nowrap; }
+.today { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--today); z-index: 2; pointer-events: none; }
+.axis { position: sticky; top: 0; z-index: 5; }
+.axis .track { height: 44px; background: var(--surface); border-bottom: 1px solid var(--line-strong); }
+.axis .cell-label { height: 44px; border-bottom: 1px solid var(--line-strong); font: 500 11.5px/1 var(--font-mono); color: var(--muted); z-index: 6; }
+.axis .row { height: 44px; }
+.mlabel { position: absolute; top: 6px; font: 600 12px/1 var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; padding-left: 6px; white-space: nowrap; }
+.wlabel { position: absolute; top: 26px; font: 400 10.5px/1 var(--font-mono); color: var(--muted); padding-left: 3px; white-space: nowrap; }
+svg.edges { position: absolute; top: 0; left: 0; z-index: 1; pointer-events: none; overflow: visible; }
+svg.edges path { fill: none; stroke: var(--line-strong); stroke-width: 1.4; transition: opacity .15s, stroke .15s; }
+svg.edges path.seq { stroke-dasharray: 4 3; }
+svg.edges path.critedge { stroke: var(--crit); stroke-width: 1.6; }
+svg.edges path.late { stroke: var(--crit); stroke-dasharray: 2 2; }
+svg.edges path.hot { stroke: var(--fg); stroke-width: 2; }
+.chart.focus .bar:not(.hot), .chart.focus .cell-label.task:not(.hot) { opacity: 0.28; }
+.chart.focus svg.edges path:not(.hot) { opacity: 0.12; }
+.dim .bar, .dim .cell-label.task { opacity: 0.22; }
+
+.tip {
+  position: fixed; z-index: 20; max-width: 340px; pointer-events: none;
+  background: var(--fg); color: var(--bg); border-radius: 8px; padding: 10px 12px;
+  font-size: 12.5px; line-height: 1.45; box-shadow: 0 8px 24px rgba(0,0,0,.18);
+}
+.tip b { font-family: var(--font-mono); font-weight: 600; }
+.tip .t-title { font-weight: 600; margin: 2px 0 6px; }
+.tip .t-meta { opacity: .8; font-family: var(--font-mono); font-size: 11.5px; }
+
+.below { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.panel ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; font-size: 13.5px; }
+.panel li { display: flex; gap: 10px; align-items: baseline; }
+.panel li .id { flex: 0 0 72px; }
+.panel a { color: inherit; }
+footer { font-size: 12.5px; color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .bar, svg.edges path { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="eyebrow">Fenix · Linear FOC, projekt „Fenix — wydanie 1.0 i kontrola kosztów” · stan na 29.10.2026</span>
+    <h1>Fenix 1.0.0 na 3 grudnia, potem pomiar, koszt i jakość</h1>
+    <p class="muted">Plan od dziś do kwietnia 2027. Najpierw zamykamy 1.0: izolacja sesji (FOC-1088), rc.10, akceptacja na VM z dwiema sesjami i tag. Potem idziemy w kolejności z propozycji z 26.10: pomiar → tańszy Supervisor → jakość dostawy → samodoskonalenie. Ciągłe strzałki to relacje „blokuje” z Linear, przerywane to kolejność z planu. Daty są planem. Termin jest wpisany w Linear jako Due date, a planowany start jako pierwsza linia opisu taska, bo Linear nie ma pola startu. Kliknij numer, żeby otworzyć task, a najedź na pasek, żeby zobaczyć zależności.</p>
+  </header>
+
+  <div class="toolbar">
+    <div class="chips" role="group" aria-label="Filtr właściciela">
+      <button type="button" class="chip" id="f-all" data-owner="" aria-pressed="true">Wszyscy</button>
+      <button type="button" class="chip" id="f-claude" data-owner="claude" aria-pressed="false">Claude</button>
+      <button type="button" class="chip" id="f-sup" data-owner="sup" aria-pressed="false">Supervisor na VM</button>
+      <button type="button" class="chip" id="f-owner" data-owner="owner" aria-pressed="false">Mateusz</button>
+      <button type="button" class="chip" id="f-crit" data-crit="1" aria-pressed="false">Tylko ścieżka krytyczna</button>
+    </div>
+    <div class="legend" aria-label="Legenda">
+      <span><i class="sw" style="background:var(--claude)"></i>w toku</span>
+      <span><i class="sw" style="background:repeating-linear-gradient(135deg,var(--claude) 0 4px,var(--claude-soft) 4px 8px);border:1px solid var(--claude)"></i>w review</span>
+      <span><i class="sw" style="background:var(--claude-soft);border:1.5px solid var(--claude)"></i>Todo</span>
+      <span><i class="sw" style="border:1.5px dashed var(--claude)"></i>Backlog</span>
+            <span><i class="sw" style="background:var(--claude-soft);border:1.5px solid var(--claude);box-shadow:0 0 0 2px var(--surface),0 0 0 3.5px var(--crit)"></i>ścieżka krytyczna</span>
+    </div>
+  </div>
+
+  <div class="scroller" id="scroller">
+    <div class="chart" id="chart"></div>
+  </div>
+
+  <div class="below">
+    <section class="panel" aria-labelledby="h-dec">
+      <h2 id="h-dec">Do Twojej decyzji</h2>
+      <ul>
+        <li><span class="id mono"><a href="https://linear.app/jointhubs/issue/FOC-477" target="_blank" rel="noopener">FOC-477</a></span><span>Przesunięty za tag: 7–23.12, termin w Linear 23.12. Cel kamienia M2 w Linear też 23.12.</span></li>
+        <li><span class="id mono"><a href="https://linear.app/jointhubs/issue/FOC-1108" target="_blank" rel="noopener">FOC-1108</a></span><span>Zamknąć jako duplikat FOC-1112 (naprawione w #169).</span></li>
+        <li><span class="id mono"><a href="https://linear.app/jointhubs/issue/FOC-1076" target="_blank" rel="noopener">FOC-1076</a></span><span>Trzy sesje naraz potrzebują VM klasy 32 GB na tydzień 4–8.01. To dodatkowy koszt.</span></li>
+        <li><span class="id mono"><a href="https://linear.app/jointhubs/issue/FOC-965" target="_blank" rel="noopener">FOC-965</a></span><span>Lista ramion kampanii modeli: PRD i research się różnią. Wybór do 25.01.</span></li>
+        <li><span class="id mono">T0.8</span><span>Indeks precedensów: „go, zawężone” albo porzucić. Czeka od 29.09.</span></li>
+      </ul>
+    </section>
+    <section class="panel" aria-labelledby="h-hyg">
+      <h2 id="h-hyg">Posprzątane w Linear 29.10</h2>
+      <p class="muted">Kod był na main, a status w Linear został w tyle. Teraz Done, z komentarzem o PR.</p>
+      <ul id="hygiene"></ul>
+    </section>
+    <section class="panel" aria-labelledby="h-nodate">
+      <h2 id="h-nodate">Później, bez terminu</h2>
+      <p class="muted">Otwarte w Linear, poza planem do kwietnia.</p>
+      <ul id="nodate"></ul>
+    </section>
+    <section class="panel" aria-labelledby="h-epics">
+      <h2 id="h-epics">Epiki</h2>
+      <ul id="epics"></ul>
+    </section>
+    <section class="panel" aria-labelledby="h-notes">
+      <h2 id="h-notes">Jak czytać</h2>
+      <ul>
+        <li>Kolor paska to właściciel: <span class="who claude">Claude</span> <span class="who sup">Supervisor</span> <span class="who owner">Mateusz</span></li>
+        <li>Claude to delivery owner z workerami Flash. Supervisor na VM robi prawdziwe tickety w ramach akceptacji. Mateusz to bramki, VM i decyzje.</li>
+        <li>Czerwona obwódka i numer: ścieżka krytyczna do tagu 3.12.</li>
+        <li>Szare tło: 11.11 święto, 1–4.12 i 14–18.12 tydzień JW, 24.12–1.01 święta. Wtedy nie planuję Twoich sesji przy VM.</li>
+        <li>Czerwona pionowa linia to dzisiaj.</li>
+      </ul>
+    </section>
+  </div>
+
+  <footer>Źródło: Linear GraphQL, projekt „Fenix — wydanie 1.0 i kontrola kosztów” (team FOC), otwarte taski i zamknięte w ostatnich 14 dniach, pobrane 29.10.2026. Kolejność faz z docs/roadmap/2026-10-26-next-steps-proposal.md. Planowane daty wpisane do Linear 29.10.2026.</footer>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+(function () {
+  var LINEAR = 'https://linear.app/jointhubs/issue/';
+  var START = '2026-10-26', END = '2027-04-11', TODAY = '2026-10-29';
+  var PX = 9, LABEL_W = 400;
+  var STATUS = { progress: 'W toku', review: 'W review', todo: 'Todo', backlog: 'Backlog', done: 'Zrobione' };
+  var OWNER = { claude: 'Claude (delivery)', sup: 'Supervisor na VM', owner: 'Mateusz', vv: 'Ktoś z zewnątrz' };
+
+  // [id, title, owner, start, end, Linear status, critical]
+  var lanes = [
+ [ "1.0 · izolacja i snagi przed rc.10",
+  [
+   [ "FOC-1088", "Własny worktree dla każdej sesji małego taska", "claude", "2026-10-30", "2026-11-05", "backlog", 1 ],
+   [ "FOC-1090", "Egress: 36-znakowa nazwa gałęzi to nie sekret", "claude", "2026-10-30", "2026-11-02", "backlog", 0 ],
+   [ "FOC-1111", "Czat podczas pracy: widoczna kolejka, bez duplikatów", "claude", "2026-11-02", "2026-11-04", "backlog", 0 ],
+   [ "FOC-1066", "Popup „Teach auto mode” blokuje TUI Supervisora", "claude", "2026-11-03", "2026-11-05", "backlog", 0 ],
+   [ "FOC-1062", "`verdict record` blokowany przez klasyfikator", "claude", "2026-11-04", "2026-11-06", "backlog", 0 ] ] ],
+ [ "1.0 · CLI i dokumentacja",
+  [
+   [ "FOC-1107", "`fenix settings set` w launcherze", "claude", "2026-11-02", "2026-11-03", "backlog", 0 ],
+   [ "FOC-1065", "`fenix restart <service>`", "claude", "2026-11-02", "2026-11-03", "backlog", 0 ],
+   [ "FOC-777", "CLI fenix: domknięcie (po 1107 i 1065)", "claude", "2026-11-04", "2026-11-06", "progress", 0 ],
+   [ "FOC-1050", "ROADMAP.md od nowa + sprzeczności w docs", "claude", "2026-11-09", "2026-11-13", "backlog", 0 ],
+   [ "FOC-1056", "Świeża instalacja: bez holdu przy pierwszym runie", "claude", "2026-11-16", "2026-11-18", "backlog", 0 ],
+   [ "FOC-1075", "attach-link w linear-ops i MCP", "claude", "2026-11-18", "2026-11-19", "backlog", 0 ] ] ],
+ [ "1.0 · akceptacja na VM i tag",
+  [
+   [ "FOC-789", "Akceptacja: dzień 6 (rc.10) → 2 sesje + push → finał", "owner", "2026-11-09", "2026-11-24", "progress", 1 ],
+   [ "FOC-1109", "Hold „Provide the values” z polem tekstowym", "sup", "2026-11-10", "2026-11-12", "backlog", 0 ],
+   [ "FOC-1110", "Karta Work: link do kokpitu sesji", "sup", "2026-11-10", "2026-11-12", "backlog", 0 ],
+   [ "FOC-781", "Quickstart: przejście przez kogoś innego", "owner", "2026-11-25", "2026-11-30", "review", 1 ],
+   [ "FOC-790", "Release notes, dossier, tag v1.0.0", "claude", "2026-12-01", "2026-12-03", "progress", 1 ] ] ],
+ [ "M2 · pomiar grafu PLAN",
+  [
+   [ "FOC-477", "10 runów: graf PLAN vs squad → go/no-go", "owner", "2026-12-07", "2026-12-23", "progress", 0 ],
+   [ "FOC-712", "plan.ready [J]: fakty DoR + estymata", "claude", "2027-01-04", "2027-01-08", "backlog", 0 ] ] ],
+ [ "Faza 1 · pomiar przed nauką",
+  [
+   [ "FOC-1074", "test-run --affected + równoległość", "claude", "2026-12-07", "2026-12-09", "backlog", 0 ],
+   [ "FOC-1071", "Cele na tablicy: first-time-right, $/ticket, interwencje", "claude", "2026-12-07", "2026-12-14", "backlog", 0 ],
+   [ "FOC-878", "Tożsamość dziecka per run w kontenerze", "claude", "2026-12-10", "2026-12-16", "backlog", 0 ],
+   [ "FOC-1072", "Limit outputu Basha (11,7% rachunku)", "claude", "2026-12-15", "2026-12-21", "backlog", 0 ],
+   [ "FOC-1076", "Akceptacja: 3 sesje na dwóch repo (większa VM)", "owner", "2027-01-04", "2027-01-08", "backlog", 0 ],
+   [ "FOC-1073", "Higiena kodu: ESLint + wspólne helpery", "claude", "2027-01-11", "2027-01-15", "backlog", 0 ],
+   [ "FOC-1051", "Pozostałe snagi S1–S36 (zbiorczo)", "claude", "2027-01-11", "2027-01-22", "backlog", 0 ] ] ],
+ [ "M7 · dyscyplina wydań → 1.1",
+  [
+   [ "FOC-715", "Szablony planowania: milestone, epik, release", "claude", "2027-01-18", "2027-01-20", "backlog", 0 ],
+   [ "FOC-717", "Raport higieny Linear", "claude", "2027-01-21", "2027-01-22", "backlog", 0 ],
+   [ "FOC-718", "ROADMAP.md renderowany z Linear", "claude", "2027-01-25", "2027-01-27", "backlog", 0 ],
+   [ "FOC-719", "codegraph-drawio.mjs (port do Node)", "claude", "2027-01-28", "2027-02-01", "backlog", 0 ],
+   [ "FOC-720", "Widoki architektury + kontrola nieaktualnych", "claude", "2027-02-02", "2027-02-04", "backlog", 0 ],
+   [ "FOC-721", "Delta architektury między wydaniami", "claude", "2027-02-05", "2027-02-09", "backlog", 0 ],
+   [ "FOC-722", "Graf zakresu wydania", "claude", "2027-02-10", "2027-02-12", "backlog", 0 ],
+   [ "FOC-723", "Audyt wydania + generator dossier", "claude", "2027-02-15", "2027-02-18", "backlog", 0 ],
+   [ "FOC-724", "Wydanie Fenix 1.1", "claude", "2027-02-19", "2027-02-26", "backlog", 0 ] ] ],
+ [ "Faza 2 · tańszy Supervisor (72% kosztu)",
+  [
+   [ "FOC-967", "Eksperymenty modeli w Settings (ramiona, sticky)", "claude", "2027-01-25", "2027-02-05", "backlog", 0 ],
+   [ "FOC-960", "VM na żądanie: gateway + autostop", "claude", "2027-02-01", "2027-02-10", "backlog", 0 ],
+   [ "FOC-965", "Kampania modeli na prawdziwych ticketach", "sup", "2027-02-08", "2027-03-05", "backlog", 0 ],
+   [ "FOC-457", "Tier modelu per węzeł", "claude", "2027-02-15", "2027-02-24", "backlog", 0 ] ] ],
+ [ "Faza 3 · jakość dostawy (68% poprawek)",
+  [
+   [ "FOC-382", "Rekord wyjścia tury DEV (typowany)", "claude", "2027-02-22", "2027-02-26", "backlog", 0 ],
+   [ "FOC-387", "Kalibracja decyzji na zapisanych etykietach", "claude", "2027-03-01", "2027-03-08", "backlog", 0 ],
+   [ "FOC-456", "Bramka REVIEW: pokrycie kryteriów akceptacji", "claude", "2027-03-01", "2027-03-08", "backlog", 0 ],
+   [ "FOC-390", "Weryfikator findingów REVIEW", "claude", "2027-03-09", "2027-03-16", "backlog", 0 ],
+   [ "FOC-393", "Klasyfikator powtarzanych rund REVIEW", "claude", "2027-03-17", "2027-03-22", "backlog", 0 ] ] ],
+ [ "Faza 4 · samodoskonalenie v1",
+  [
+   [ "FOC-945", "Harness² 1/3: odcisk harnessu na każdym runie", "claude", "2027-03-15", "2027-03-24", "backlog", 0 ],
+   [ "FOC-946", "Harness² 2/3: reflektor → lekcje → PR-y propozycji", "claude", "2027-03-25", "2027-04-09", "backlog", 0 ] ] ]
+];
+
+  // Linear "blocks" relations among the shown tasks (fetched 2026-10-29).
+  var edges = [["FOC-1088","FOC-1076"],
+    ["FOC-777","FOC-790"],
+    ["FOC-777","FOC-789"],
+    ["FOC-789","FOC-1076"],
+    ["FOC-789","FOC-790"],
+    ["FOC-789","FOC-724"],
+    ["FOC-789","FOC-781"],
+    ["FOC-781","FOC-790"],
+    ["FOC-790","FOC-715"],
+    ["FOC-477","FOC-712"],
+    ["FOC-477","FOC-724"],
+    ["FOC-1071","FOC-965"],
+    ["FOC-715","FOC-717"],
+    ["FOC-715","FOC-722"],
+    ["FOC-717","FOC-718"],
+    ["FOC-718","FOC-719"],
+    ["FOC-719","FOC-721"],
+    ["FOC-719","FOC-720"],
+    ["FOC-720","FOC-721"],
+    ["FOC-720","FOC-723"],
+    ["FOC-721","FOC-722"],
+    ["FOC-721","FOC-723"],
+    ["FOC-722","FOC-723"],
+    ["FOC-722","FOC-724"],
+    ["FOC-723","FOC-724"],
+    ["FOC-382","FOC-390"],
+    ["FOC-387","FOC-393"],
+    ["FOC-387","FOC-390"],
+    ["FOC-456","FOC-393"]];
+  // Order from the plan, not recorded in Linear.
+  var seq = [["FOC-1088","FOC-789"],
+    ["FOC-1107","FOC-777"],
+    ["FOC-1065","FOC-777"],
+    ["FOC-967","FOC-965"],
+    ["FOC-1071","FOC-945"],
+    ["FOC-878","FOC-1076"],
+    ["FOC-477","FOC-382"]];
+  var nodate = [
+    ['FOC-468', 'M3 Jev przy bramkach: FOC-391, 384, 410, 392. Po werdykcie M2 i po FOC-387'],
+    ['FOC-469', 'M4 reszta: FOC-478, 617, 622, 453, 117, 618, 619. Po werdykcie M2'],
+    ['FOC-470', 'M5 smukły DEV i Supervisor: FOC-479, 455, 454, 458, 394, 395, 388, 389, 610, 611, 731, 763, 764'],
+    ['FOC-471', 'M6 reszta: GEPA, open weights, fine-tuning, FOC-222/223/224, FOC-947. Najpierw dane'],
+    ['FOC-957', 'Zdalne sterowanie C i E (FOC-959, 961). D jest w fazie 2'],
+    ['FOC-966', 'Polityka providerów i kwantyzacji OpenRouter'],
+    ['FOC-472', 'Utrzymanie i drobiazgi (stały epik, nie blokuje planu)']
+  ];
+  var epics = [
+    ['FOC-768', 'M8 Fenix 1.0.0, przenośne wydanie (3.12)'],
+    ['FOC-1051', 'Snagi z akceptacji FOC-789'],
+    ['FOC-467', 'M2 silnik grafu + graf PLAN'],
+    ['FOC-1070', 'Faza 1 po 1.0: pomiar przed nauką'],
+    ['FOC-714', 'M7 dyscyplina wydań i żywa dokumentacja'],
+    ['FOC-944', 'Harness²: samodoskonalenie na dowodach Fenixa']
+  ];
+  // [date, label, red, label side]
+  var milestones = [
+    ['2026-11-06', 'rc.10', 0, 'left'],
+    ['2026-11-20', 'rc.11 kandydat', 0, 'right'],
+    ['2026-12-03', 'v1.0.0', 1, 'right'],
+    ['2026-12-23', 'werdykt M2', 0, 'left'],
+    ['2027-01-11', 'JW: 1. klient', 0, 'right'],
+    ['2027-02-26', 'v1.1', 1, 'right']
+  ];
+  var shades = [['2026-11-11', '2026-11-11', 'święto'], ['2026-12-01', '2026-12-04', 'JW: payroll Ady, decyzja v1/v2'], ['2026-12-14', '2026-12-18', 'JW: próba generalna'], ['2026-12-24', '2027-01-01', 'święta']];
+
+  function day(s) { var p = s.split('-'); return Date.UTC(+p[0], +p[1] - 1, +p[2]) / 864e5; }
+  var D0 = day(START), DAYS = day(END) - D0 + 1, W = DAYS * PX;
+  function x(s) { return (day(s) - D0) * PX; }
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+
+  var chart = document.getElementById('chart');
+  chart.style.setProperty('--label-w', LABEL_W + 'px');
+  chart.style.width = (LABEL_W + W) + 'px';
+
+  var tasks = {};
+  lanes.forEach(function (l) { l[1].forEach(function (t) { tasks[t[0]] = { id: t[0], title: t[1], owner: t[2], s: t[3], e: t[4], st: t[5], crit: !!t[6], lane: l[0] }; }); });
+  var allEdges = edges.map(function (e) { return { a: e[0], b: e[1], seq: false }; }).concat(seq.map(function (e) { return { a: e[0], b: e[1], seq: true }; }));
+  allEdges.forEach(function (e) { e.crit = !e.seq && tasks[e.a].crit && tasks[e.b].crit; e.late = !e.seq && day(tasks[e.a].e) >= day(tasks[e.b].s); });
+
+  // Background layer: grid, shades, today
+  var bg = '';
+  for (var d = 0; d < DAYS; d++) {
+    var date = new Date((D0 + d) * 864e5);
+    if (date.getUTCDate() === 1) bg += '<div class="grid-v month" style="left:' + (LABEL_W + d * PX) + 'px"></div>';
+    else if (date.getUTCDay() === 1) bg += '<div class="grid-v" style="left:' + (LABEL_W + d * PX) + 'px"></div>';
+  }
+  shades.forEach(function (s) { bg += '<div class="shade" style="left:' + (LABEL_W + x(s[0])) + 'px;width:' + ((day(s[1]) - day(s[0]) + 1) * PX) + 'px"></div>'; });
+  bg += '<div class="today" style="left:' + (LABEL_W + x(TODAY) + PX / 2) + 'px"></div>';
+
+  // Axis
+  var months = ['sty', 'lut', 'mar', 'kwi', 'maj', 'cze', 'lip', 'sie', 'wrz', 'paź', 'lis', 'gru'];
+  var axis = '';
+  for (var k = 0; k < DAYS; k++) {
+    var dt = new Date((D0 + k) * 864e5);
+    if (dt.getUTCDate() === 1) axis +='<span class="mlabel" style="left:' + (k * PX) + 'px">' + months[dt.getUTCMonth()] + (dt.getUTCMonth() === 0 || k === 0 ? ' ' + dt.getUTCFullYear() : '') + '</span>';
+    if (dt.getUTCDay() === 1) axis += '<span class="wlabel" style="left:' + (k * PX) + 'px">' + dt.getUTCDate() + '</span>';
+  }
+  var html = bg + '<div class="axis"><div class="row"><div class="cell-label">Task · właściciel</div><div class="track" style="width:' + W + 'px">' + axis + '</div></div></div>';
+
+  // Milestones row
+  var msHtml = '';
+  milestones.forEach(function (m) {
+    var cx = x(m[0]) + PX / 2;
+    var pos = m[3] === 'left' ? 'right:' + (W - cx + 10) + 'px' : 'left:' + (cx + 10) + 'px';
+    msHtml += '<span class="ms' + (m[2] ? ' red' : '') + '" style="left:' + cx + 'px"></span><span class="ms-label" style="' + pos + '">' + m[1] + '</span>';
+  });
+  html += '<div class="row lane"><div class="cell-label">Kamienie milowe</div><div class="track" style="width:' + W + 'px">' + msHtml + '</div></div>';
+
+  lanes.forEach(function (l) {
+    var labelShade = '';
+    html += '<div class="row lane"><div class="cell-label">' + esc(l[0]) + '</div><div class="track" style="width:' + W + 'px"></div></div>';
+    l[1].forEach(function (t) {
+      var T = tasks[t[0]];
+      html += '<div class="row" data-id="' + T.id + '" data-owner="' + T.owner + '" data-crit="' + (T.crit ? 1 : 0) + '">' +
+        '<div class="cell-label task' + (T.crit ? ' crit' : '') + '" data-id="' + T.id + '"><span class="id"><a href="' + LINEAR + T.id + '" target="_blank" rel="noopener">' + T.id + '</a></span>' +
+        '<span class="name" title="' + esc(T.title) + '">' + esc(T.title) + '</span><span class="who ' + T.owner + '">' + OWNER[T.owner].split(' ')[0] + '</span></div>' +
+        '<div class="track" style="width:' + W + 'px"><a class="bar ' + T.owner + ' ' + T.st + (T.crit ? ' crit' : '') + '" id="bar-' + T.id + '" data-id="' + T.id + '" href="' + LINEAR + T.id + '" target="_blank" rel="noopener" aria-label="' + esc(T.id + ' ' + T.title) + '" style="left:' + x(T.s) + 'px;width:' + ((day(T.e) - day(T.s) + 1) * PX - 2) + 'px"></a></div></div>';
+    });
+  });
+  html += '<svg class="edges" id="edges"><defs>' +
+    '<marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" style="fill:var(--line-strong);stroke:none"></path></marker>' +
+    '<marker id="arr-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" style="fill:var(--crit);stroke:none"></path></marker>' +
+    '<marker id="arr-h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" style="fill:var(--fg);stroke:none"></path></marker>' +
+    '</defs></svg>';
+  chart.innerHTML = html;
+
+  var svg = document.getElementById('edges');
+  function drawEdges() {
+    var base = chart.getBoundingClientRect();
+    svg.setAttribute('width', chart.scrollWidth); svg.setAttribute('height', chart.scrollHeight);
+    svg.querySelectorAll('path.e').forEach(function (p) { p.remove(); });
+    allEdges.forEach(function (e) {
+      var A = document.getElementById('bar-' + e.a).getBoundingClientRect();
+      var B = document.getElementById('bar-' + e.b).getBoundingClientRect();
+      var x1 = A.right - base.left, y1 = A.top + A.height / 2 - base.top;
+      var x2 = B.left - base.left, y2 = B.top + B.height / 2 - base.top;
+      var up = y2 < y1, d;
+      if (x2 - x1 >= 14) {
+        var mx = x1 + 7;
+        d = 'M' + x1 + ',' + y1 + ' H' + mx + ' V' + y2 + ' H' + (x2 - 1);
+      } else {
+        var yMid = up ? B.bottom - base.top + 4 : B.top - base.top - 4;
+        d = 'M' + x1 + ',' + y1 + ' H' + (x1 + 6) + ' V' + yMid + ' H' + (x2 - 8) + ' V' + y2 + ' H' + (x2 - 1);
+      }
+      var p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      p.setAttribute('d', d);
+      p.setAttribute('class', 'e' + (e.seq ? ' seq' : '') + (e.crit ? ' critedge' : '') + (e.late ? ' late' : ''));
+      p.setAttribute('marker-end', e.crit || e.late ? 'url(#arr-c)' : 'url(#arr)');
+      p.dataset.a = e.a; p.dataset.b = e.b;
+      svg.appendChild(p);
+    });
+  }
+  drawEdges();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawEdges);
+  window.addEventListener('resize', drawEdges);
+
+  // Hover / focus: highlight a task and its direct dependencies
+  var tip = document.getElementById('tip');
+  function fmt(s) { var p = s.split('-'); return +p[2] + '.' + p[1]; }
+  function rel(id) {
+    var before = [], after = [];
+    allEdges.forEach(function (e) { if (e.b === id) before.push(e.a + (e.seq ? '*' : '')); if (e.a === id) after.push(e.b + (e.seq ? '*' : '')); });
+    return { before: before, after: after };
+  }
+  function focus(id) {
+    chart.classList.add('focus');
+    var r = rel(id), set = {}; set[id] = 1;
+    r.before.concat(r.after).forEach(function (i) { set[i.replace('*', '')] = 1; });
+    chart.querySelectorAll('.bar, .cell-label.task').forEach(function (el) { el.classList.toggle('hot', !!set[el.dataset.id]); });
+    svg.querySelectorAll('path.e').forEach(function (p) {
+      var hot = p.dataset.a === id || p.dataset.b === id;
+      p.classList.toggle('hot', hot);
+      if (hot) p.setAttribute('marker-end', 'url(#arr-h)');
+    });
+    return r;
+  }
+  function blur() {
+    chart.classList.remove('focus');
+    chart.querySelectorAll('.hot').forEach(function (el) { el.classList.remove('hot'); });
+    svg.querySelectorAll('path.e').forEach(function (p) {
+      var crit = p.classList.contains('critedge') || p.classList.contains('late');
+      p.setAttribute('marker-end', crit ? 'url(#arr-c)' : 'url(#arr)');
+    });
+    tip.hidden = true;
+  }
+  function showTip(id, ev) {
+    var T = tasks[id], r = focus(id);
+    tip.innerHTML = '<b>' + id + '</b> · ' + esc(T.lane) +
+      '<div class="t-title">' + esc(T.title) + '</div>' +
+      '<div class="t-meta">' + OWNER[T.owner] + ' · ' + STATUS[T.st] + ' · ' + fmt(T.s) + '–' + fmt(T.e) + (T.crit ? ' · ścieżka krytyczna' : '') + '</div>' +
+      (r.before.length ? '<div class="t-meta">czeka na: ' + r.before.join(', ') + '</div>' : '') +
+      (r.after.length ? '<div class="t-meta">blokuje: ' + r.after.join(', ') + '</div>' : '') +
+      ((r.before.concat(r.after)).some(function (i) { return i.indexOf('*') > 0; }) ? '<div class="t-meta">* kolejność etapów z opisu</div>' : '');
+    tip.hidden = false;
+    var px = ev && ev.clientX != null ? ev.clientX : 40, py = ev && ev.clientY != null ? ev.clientY : 40;
+    var w = tip.offsetWidth, h = tip.offsetHeight;
+    tip.style.left = Math.min(px + 14, window.innerWidth - w - 12) + 'px';
+    tip.style.top = (py + h + 24 > window.innerHeight ? py - h - 12 : py + 16) + 'px';
+  }
+  chart.addEventListener('mousemove', function (ev) {
+    var el = ev.target.closest('.bar, .cell-label.task');
+    if (el) showTip(el.dataset.id, ev); else blur();
+  });
+  chart.addEventListener('mouseleave', blur);
+  chart.addEventListener('focusin', function (ev) {
+    var el = ev.target.closest('[data-id]');
+    if (el) { var r = el.getBoundingClientRect(); showTip(el.dataset.id, { clientX: r.left, clientY: r.bottom }); }
+  });
+  chart.addEventListener('focusout', blur);
+
+  // Filters
+  var chips = document.querySelectorAll('.chip');
+  var state = { owner: '', crit: false };
+  function applyFilter() {
+    chart.querySelectorAll('.row[data-id]').forEach(function (row) {
+      var ok = (!state.owner || row.dataset.owner === state.owner) && (!state.crit || row.dataset.crit === '1');
+      row.classList.toggle('dim', !ok);
+    });
+    chips.forEach(function (c) {
+      if (c.dataset.crit) c.setAttribute('aria-pressed', String(state.crit));
+      else c.setAttribute('aria-pressed', String(c.dataset.owner === state.owner));
+    });
+  }
+  chips.forEach(function (c) {
+    c.addEventListener('click', function () {
+      if (c.dataset.crit) state.crit = !state.crit; else state.owner = c.dataset.owner;
+      applyFilter();
+    });
+  });
+
+  function list(elId, rows) {
+    document.getElementById(elId).innerHTML = rows.map(function (r) {
+      return '<li><span class="id mono"><a href="' + LINEAR + r[0] + '" target="_blank" rel="noopener">' + r[0] + '</a></span><span>' + esc(r[1]) + '</span></li>';
+    }).join('');
+  }
+  list('nodate', nodate);
+  list('epics', epics);
+  list('hygiene', [
+    ['FOC-1089', 'Dialog sesji widoczny: w rc.9, w Linear Backlog'],
+    ['FOC-1081', 'Auto-pickup: w rc.7 i rc.8, w Linear Backlog'],
+    ['FOC-1077', 'Archiwum cleanup bez symlinków: w rc.7, In Review'],
+    ['FOC-920', 'Polityka zaparkowanych promptów: #127, In Review'],
+    ['FOC-1001', 'Git w worktree dziecka: w rc.5, In Review'],
+    ['FOC-989', 'Świeży katalog startowy dziecka: #144, In Review'],
+    ['FOC-1007', 'Narzędzie cleanup w MCP: #146, In Review'],
+    ['FOC-1010', 'Flake watchera: #157, In Review']
+  ]);
+
+  // Start scrolled so that today is near the left edge of the timeline.
+  var sc = document.getElementById('scroller');
+  sc.scrollLeft = Math.max(0, x(TODAY) - 3 * PX);
+})();
+</script>
