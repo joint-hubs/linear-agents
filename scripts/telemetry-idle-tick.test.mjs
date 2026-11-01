@@ -102,6 +102,17 @@ function storeState() {
   try { walSize = statSync(`${dbPath}-wal`).size; } catch { /* no wal file yet */ }
   const ro = new DatabaseSync(dbPath, { readOnly: true });
   try {
+    // Wait out the tick's transient locks instead of failing on them
+    // (FOC-1157): each ingest tick (300 ms here) legitimately opens its own
+    // connection on this same file — migrate()'s schema_migrations stamp on
+    // every open, the WAL checkpoint + wal/shm cleanup on its close — so
+    // brief exclusive windows exist even while idle. This raw open carries
+    // SQLite's default busy_timeout=0, so a read-lock attempt landing inside
+    // one of those windows surfaced as an instant SQLITE_BUSY flake in CI.
+    // Waiting changes nothing about WHAT is observed: dbSize/walSize are
+    // statSync'd before any locking, and data_version moves only on real
+    // commits — a genuine idle write still fails this test.
+    ro.exec("PRAGMA busy_timeout = 10000");
     const dataVersion = ro.prepare("PRAGMA data_version").get().data_version;
     return { dbSize, walSize, dataVersion };
   } finally {
