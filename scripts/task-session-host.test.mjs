@@ -35,14 +35,22 @@ import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 
 import { createTaskSessionStore, OWNER_STATUSES } from "./task-sessions.mjs";
-import { createTaskSessionHost, ownershipKeeps, seedSessionConfig, sessionHomePath } from "./task-session-host.mjs";
+import {
+  createTaskSessionHost,
+  ownershipKeeps,
+  seedSessionConfig,
+  sessionBranchFor,
+  sessionHomePath,
+} from "./task-session-host.mjs";
 import { SESSION_ANSWER_ROUTES } from "./task-session-routes.mjs";
 import { checkOwnership } from "./task-ownership.mjs";
+import { fixtureRepo, gitIn } from "./supervisor-test-fixtures.mjs";
+import { readWorkspaceClaims } from "./workspace-claims.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, "task-session-host.mjs");
@@ -206,6 +214,13 @@ const build = (opts = {}) => {
     ...(opts.pickupDeps ?? {}),
     autoPickup: opts.autoPickup,
     listCandidates: opts.listCandidates,
+    // FOC-1088: the per-task worktree lane — `repo` (the explicit repository
+    // candidate the real lane resolves first) and a wholesale
+    // `sessionWorkspace` replacement (or `null` to disable) forward verbatim;
+    // unset keeps the lane off, because the harness env never sets
+    // FENIX_TASK_WORKTREES.
+    ...(opts.repo !== undefined ? { repo: opts.repo } : {}),
+    ...(opts.sessionWorkspace !== undefined ? { sessionWorkspace: opts.sessionWorkspace } : {}),
     // FOC-839: the legacy-migration hook is injectable; null (the default
     // here) skips it so existing tests are unaffected.
     ...(opts.migrateLegacy !== undefined ? { migrateLegacy: opts.migrateLegacy } : { migrateLegacy: null }),
@@ -1146,4 +1161,185 @@ test("FOC-1081 (second half): auto-pickup arms the Work-board hand-off text as t
     await host.settled();
     assert.notEqual(store.get(record.sessionId).status, "queued", JSON.stringify(store.get(record.sessionId)));
   } finally { host.close(); store.close(); }
+});
+
+// ── FOC-1088: the per-task worktree lane ─────────────────────────────────────
+//
+// The properties worth protecting:
+//   · two managed sessions on ONE repository get DISTINCT worktrees on
+//     DISTINCT task-derived branches, each controller env carries its own
+//     FENIX_REPO_DIR, and the main checkout's HEAD and status are untouched;
+//   · the branch/worktree pair is derived from the TASK only — a resumed
+//     generation reuses the same branch and tree (and its predecessor's
+//     commits), never a start-point re-pin;
+//   · stop releases the workspace claim but never removes the tree;
+//   · when the repository cannot be resolved the start fails CLOSED with the
+//     reason — never a silent fallback to a shared checkout.
+
+const laneBody = (id, text = `initial prompt for ${id}`) => ({
+  taskKey: `workspace:${id}`,
+  taskId: id,
+  workspace: "workspace",
+  issueId: id,
+  title: `Task ${id}`,
+  text,
+});
+
+const laneEnv = { FENIX_TASK_WORKTREES: "1" };
+
+// A fixture repo with an origin whose HEAD is set — the lane's start-point
+// resolution pins a NEW branch at the origin default branch, so the fixture
+// must provide one (fixtureRepo has no remote).
+const laneRepo = () => {
+  const { base, repo } = fixtureRepo();
+  const origin = join(base, "origin.git");
+  gitIn(repo, "clone", "--bare", repo, origin);
+  gitIn(repo, "remote", "add", "origin", origin);
+  gitIn(repo, "fetch", "origin");
+  gitIn(repo, "remote", "set-head", "origin", "-a");
+  return { base, repo, origin };
+};
+
+test("sessionBranchFor derives the branch from the task, never the session id", () => {
+  assert.equal(sessionBranchFor({ issueId: "FOC-1088", taskKey: "j:FOC-1088" }), "foc-1088-task");
+  assert.equal(sessionBranchFor({ issueId: "joi-70" }), "joi-70-task");
+  // A non TEAM-NUM identifier is refused (buildBranchName's own parser would
+  // process.exit the host) rather than deriving a garbage branch.
+  assert.throws(() => sessionBranchFor({ issueId: "ISSUE-A" }), /TEAM-NUM/);
+});
+
+test("FOC-1088 lane: two sessions on one repo get distinct worktrees and branches; the main checkout is untouched", async () => {
+  const { repo } = laneRepo();
+  const { host, store, fakeFor } = build({ maxActive: 2, env: laneEnv, repo });
+  const headBefore = gitIn(repo, "rev-parse", "HEAD");
+  const port = await listen(host);
+  try {
+    const a = await request(port, "POST", "/sessions", { body: laneBody("TST-1") });
+    const b = await request(port, "POST", "/sessions", { body: laneBody("TST-2") });
+    assert.equal(a.status, 202);
+    assert.equal(b.status, 202);
+    await host.settled();
+    const list = await request(port, "GET", "/sessions");
+    const byId = new Map(list.json.sessions.map((s) => [s.sessionId, s]));
+    assert.equal(byId.get(a.json.session.sessionId).status, "running", JSON.stringify(byId.get(a.json.session.sessionId)));
+    assert.equal(byId.get(b.json.session.sessionId).status, "running", JSON.stringify(byId.get(b.json.session.sessionId)));
+
+    const ctlA = await host.controllerFor(a.json.session.sessionId);
+    const ctlB = await host.controllerFor(b.json.session.sessionId);
+    const dirA = ctlA.env.FENIX_REPO_DIR;
+    const dirB = ctlB.env.FENIX_REPO_DIR;
+    assert.ok(dirA, "session A's controller env must carry FENIX_REPO_DIR");
+    assert.ok(dirB, "session B's controller env must carry FENIX_REPO_DIR");
+    assert.notEqual(resolve(dirA), resolve(dirB), "the two sessions must not share a worktree");
+    // Each value is a REAL worktree of the fixture repo on its OWN task
+    // branch — never the main checkout. (The base tree trivially satisfies
+    // "env has a repo var" by handing over the main checkout; these
+    // assertions are the ones it fails.)
+    assert.notEqual(resolve(dirA), resolve(repo));
+    assert.equal(gitIn(dirA, "rev-parse", "--abbrev-ref", "HEAD"), "tst-1-task");
+    assert.equal(gitIn(dirB, "rev-parse", "--abbrev-ref", "HEAD"), "tst-2-task");
+    // The pane inherits the same value, stamped into its session's OWN tmux
+    // server environment.
+    const startA = fakeFor(a.json.session.sessionId).tmux.calls.find((c) => c.args[0] === "start-server");
+    const stampAt = startA.args.indexOf("FENIX_REPO_DIR");
+    assert.ok(stampAt !== -1, `the pane env must stamp FENIX_REPO_DIR, got ${JSON.stringify(startA.args)}`);
+    assert.equal(startA.args[stampAt + 1], dirA);
+    // The main checkout is untouched: same HEAD, clean status.
+    assert.equal(gitIn(repo, "rev-parse", "HEAD"), headBefore);
+    assert.equal(gitIn(repo, "status", "--porcelain"), "");
+    // Both workspaces are claimed in the registry under their task owners.
+    const claims = readWorkspaceClaims({ gitRoot: repo }).claims;
+    assert.deepEqual(
+      claims.map((c) => [c.branch, c.ownerId]).sort(),
+      [["tst-1-task", "task-session:workspace:TST-1"], ["tst-2-task", "task-session:workspace:TST-2"]],
+    );
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
+test("FOC-1088 lane: stop releases the claim but keeps the tree; the next generation reuses branch and worktree", async () => {
+  const { repo } = laneRepo();
+  const { host, store, tmp } = build({ maxActive: 2, env: laneEnv, repo });
+  const port = await listen(host);
+  try {
+    const started = await request(port, "POST", "/sessions", { body: laneBody("TST-3") });
+    assert.equal(started.status, 202);
+    await host.settled();
+    const sessionId = started.json.session.sessionId;
+    const dir = (await host.controllerFor(sessionId)).env.FENIX_REPO_DIR;
+    assert.ok(dir, "the first generation must carry FENIX_REPO_DIR");
+    // Generation 1 leaves work behind: a commit on the task branch.
+    writeFileSync(join(dir, "work.txt"), "generation 1\n");
+    gitIn(dir, "add", "-A");
+    gitIn(dir, "commit", "-m", "generation 1");
+    const stopped = await request(port, "POST", `/sessions/${sessionId}/stop`);
+    assert.equal(stopped.status, 200);
+    assert.equal(stopped.json.stopped, true, JSON.stringify(stopped.json));
+    // The claim is released; the tree is NEVER auto-removed.
+    assert.equal(readWorkspaceClaims({ gitRoot: repo }).claims.length, 0);
+    assert.ok(existsSync(dir), "the worktree stays on disk — cleanup is the operator's");
+    // The next generation re-ensures from scratch: same branch, same tree,
+    // generation 1's commit intact — never re-pinned to the origin base (a
+    // start-point mismatch there would throw). Resume goes through the same
+    // transaction the POST /resume route drives: the marker file first, then
+    // the store, then the pump.
+    const home = sessionHomePath({ LA_DATA_HOME: tmp }, sessionId);
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "resume-request.json"), JSON.stringify({ at: new Date().toISOString() }));
+    store.resume(sessionId);
+    await host.pump();
+    await host.settled();
+    assert.equal(store.get(sessionId).status, "running", JSON.stringify(store.get(sessionId)));
+    const dir2 = (await host.controllerFor(sessionId)).env.FENIX_REPO_DIR;
+    assert.equal(resolve(dir2), resolve(dir), "the resumed generation reuses the SAME worktree");
+    assert.equal(gitIn(dir2, "rev-parse", "--abbrev-ref", "HEAD"), "tst-3-task");
+    assert.equal(gitIn(dir2, "status", "--porcelain"), "");
+    assert.ok(existsSync(join(dir2, "work.txt")), "generation 1's work survives the stop");
+    // The live generation's workspace is claimed again.
+    assert.deepEqual(
+      readWorkspaceClaims({ gitRoot: repo }).claims.map((c) => [c.branch, c.ownerId]),
+      [["tst-3-task", "task-session:workspace:TST-3"]],
+    );
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
+test("FOC-1088 lane: an unresolvable repository fails the start closed with the reason", async () => {
+  // Lane on, but nothing resolves: no deps.repo, no FENIX_REPO_DIR, no
+  // LA_SUPERVISOR_REPO — the host deliberately has NO cwd fallback (it runs
+  // from the fenix stack checkout, never the task's repository).
+  const { host, store } = build({ maxActive: 1, env: laneEnv });
+  const port = await listen(host);
+  try {
+    const started = await request(port, "POST", "/sessions", { body: laneBody("TST-4") });
+    assert.equal(started.status, 202);
+    await host.settled();
+    const record = store.get(started.json.session.sessionId);
+    assert.equal(record.status, "waiting", JSON.stringify(record));
+    assert.match(record.lastError, /could not determine which repository/);
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
+test("FOC-1088 lane: a non TEAM-NUM issueId fails the start instead of killing the host", async () => {
+  const { repo } = laneRepo();
+  const { host, store } = build({ maxActive: 1, env: laneEnv, repo });
+  const port = await listen(host);
+  try {
+    const started = await request(port, "POST", "/sessions", { body: laneBody("NOT-A-NUM") });
+    assert.equal(started.status, 202);
+    await host.settled();
+    const record = store.get(started.json.session.sessionId);
+    assert.equal(record.status, "waiting", JSON.stringify(record));
+    assert.match(record.lastError, /TEAM-NUM/);
+  } finally {
+    host.close();
+    store.close();
+  }
 });
