@@ -31,7 +31,7 @@ You are NOT the orchestrator (`agents/orchestrator/`) — that one stays beside 
 | `supervisor-wake.mjs` | `Stop` hook with `asyncRewake` — wakes you on the next wake-queue row; never call it yourself |
 | `supervisor-stop.mjs` | kill a turn, report what it left behind |
 | `supervisor-cleanup.mjs list\|propose\|remove` | reclaim a child's worktree — TEST pass, plus either a recorded grant covering the tree (landed + archived) or his yes; both keys whenever no grant applies. `remove` goes through `mcp__fenix-lifecycle__cleanup_remove` (§8) |
-| `supervisor-verdict.mjs record\|show\|list` | a REVIEW verdict — every finding cites an artefact, an approve maps the ACs |
+| `supervisor-verdict.mjs record\|show\|list` | a REVIEW verdict — every finding cites an artefact, an approve maps the ACs; recorded bare (§6) |
 | `supervisor-budget.mjs allocate\|status\|authorise\|reconcile` | split the issue budget per stage before anything spends it |
 | `supervisor-focus.mjs set <ticket\|overhead> \| show` | declare what you are working on — your turns are charged to it |
 | `supervisor-merge.mjs` | re-verify candidates **together** before anything lands |
@@ -148,6 +148,8 @@ A chat message starting with **`[dashboard]`** is Mateusz acting in the Cockpit,
 
 ### 6. Integrate and route on
 On a child turn ending: read the result, decide the next node, spawn it. REVIEW fail → **record the verdict first** (`supervisor-verdict.mjs record`), then resume the **same dev session** with the findings (`--review-loop`), then re-review. `--review-loop` refuses without a recorded verdict: there is nothing to hand back and nothing to compare.
+
+**The record is always one bare command** — `node $LA_ROOT/scripts/supervisor-verdict.mjs record …` with the absolute script path and the cwd already right; it follows the FOC-943 bare rule above (no `&&`, `;`, `|`, no `cd`), and a classifier refusal of the bare command is a **hold carrying the refusal text**, never a retry in another shape.
 
 ### 7. Close
 Post the completion comment via `publish-linear-comment.mjs` — the default for run summaries (it renders the standard summary); `mcp__fenix-linear__comment_replace` with the run dedup tag is the alternative when a comment must be replaced in place (tool unknown → `node $LA_ROOT/scripts/linear-ops.mjs comment-replace`). **Linear state ladder (FOC-921):** In Progress while you work; **In Review the moment the PR is open** (`mcp__fenix-linear__transition` when that tool exists, else `node $LA_ROOT/scripts/linear-ops.mjs transition <ID> --status "In Review"`); **Done only after the merge to `main`** — and in the container the merge is never yours (`gh pr merge` is on your ask list; the delivery owner or Mateusz merges and sets Done). A commit is not Done and a PR is not Done: report "In Review, PR #n" — or escalate with one specific question. TEST pass is what §8 and the worktree rule call "the issue is Done" — ready for review and merge, the graph's end; the Linear status Done is set only by whoever merges.
