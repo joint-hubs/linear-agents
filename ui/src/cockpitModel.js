@@ -506,3 +506,37 @@ export function pendingChip(state) {
   if (state === 'delivered') return 'delivered';
   return 'sent — not confirmed yet';
 }
+
+// newPendingEntry({ id, text, entries }) -> a pending chat line carrying the
+// uuids of the user entries with the SAME text the transcript already holds
+// at send time. The pending-drop rule may only react to a delivery that
+// happens AFTER the send: an identical line delivered EARLIER in the session
+// (a repeated question is a normal conversation) must never drop a queued
+// copy before it is delivered — matching by text alone did exactly that
+// (FOC-1111 review F2). Entries are uuid-keyed (mergeConversation dedupes by
+// uuid, the transcript is append-only), so a uuid is the stable "already
+// there" marker.
+export function newPendingEntry({ id, text, entries }) {
+  const seenUserUuids = new Set();
+  for (const en of entries || []) {
+    if (en && en.role === 'user' && en.text === text && en.uuid != null) seenUserUuids.add(en.uuid);
+  }
+  return { id, text, state: 'sent', seenUserUuids };
+}
+
+// dropDeliveredPending(pending, entries) -> the pending lines still waiting
+// for delivery. A line drops when the transcript now holds a user entry with
+// its text that the line had NOT already seen at send time — a uuid outside
+// the snapshot is a new delivery; re-reads of older history (the same uuids)
+// never drop anything. A line without the send-time snapshot (defensive)
+// falls back to the text-only rule.
+export function dropDeliveredPending(pending, entries) {
+  const es = entries || [];
+  return (pending || []).filter((p) => {
+    if (!p) return false;
+    const sameText = es.filter((en) => en && en.role === 'user' && en.text === p.text);
+    const seen = p.seenUserUuids;
+    if (!(seen instanceof Set)) return sameText.length === 0;
+    return !sameText.some((en) => en.uuid != null && !seen.has(en.uuid));
+  });
+}

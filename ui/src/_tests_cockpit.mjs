@@ -46,6 +46,8 @@ import {
   pendingAfterSend,
   duplicateWarning,
   pendingChip,
+  newPendingEntry,
+  dropDeliveredPending,
 } from './cockpitModel.js';
 
 // --- Minimal test harness (same shape as _test_utils.mjs) -------------------
@@ -943,7 +945,7 @@ await test('sendFeedback plain sent -> sent (pasted, no confirmation yet)', () =
 });
 
 await test('sendFeedback duplicate -> duplicate with no line state', () => {
-  eq(sendFeedback({ sent: false, duplicate: true, queued: true }), { kind: 'duplicate', state: null });
+  eq(sendFeedback({ sent: false, duplicate: true, queued: false }), { kind: 'duplicate', state: null });
 });
 
 await test('sendFeedback(null) / unrecognized shape -> honest sent fallback', () => {
@@ -969,16 +971,16 @@ await test('pendingAfterSend moves the sent line to its response state', () => {
 
 await test('pendingAfterSend duplicate removes the line — never a second queued copy', () => {
   const prev = [{ id: 'b', text: 'mine', state: 'sent' }];
-  eq(pendingAfterSend(prev, { sent: false, duplicate: true, queued: true }, 'b'), []);
+  eq(pendingAfterSend(prev, { sent: false, duplicate: true, queued: false }, 'b'), []);
 });
 
 await test('pendingAfterSend tolerates a null prev', () => {
   eq(pendingAfterSend(null, { sent: true, confirmed: true, queued: false }, 'b'), []);
-  eq(pendingAfterSend(null, { sent: false, duplicate: true, queued: true }, 'b'), []);
+  eq(pendingAfterSend(null, { sent: false, duplicate: true, queued: false }, 'b'), []);
 });
 
 await test('duplicateWarning duplicate -> the banner payload; anything else -> null', () => {
-  eq(duplicateWarning({ sent: false, duplicate: true, queued: true }), {
+  eq(duplicateWarning({ sent: false, duplicate: true, queued: false }), {
     text: 'Already queued — it will be delivered when the current turn ends.',
   });
   eq(duplicateWarning({ sent: true, confirmed: true, queued: false }), null);
@@ -990,6 +992,54 @@ await test('pendingChip labels queued, delivered and the sent fallback', () => {
   eq(pendingChip('delivered'), 'delivered');
   eq(pendingChip('sent'), 'sent — not confirmed yet');
   eq(pendingChip(undefined), 'sent — not confirmed yet');
+});
+
+// --- pending-drop with a repeated text (FOC-1111 review F2) ------------------
+// The drop rule may only react to a delivery that happens AFTER the send: an
+// identical line delivered EARLIER in the session must never drop a queued
+// copy before it is delivered. Entries are uuid-keyed, so the send-time
+// snapshot of already-seen uuids is the "already there" marker.
+
+await test('newPendingEntry snapshots the uuids of same-text user entries at send time', () => {
+  const entries = [
+    { uuid: 'u1', role: 'user', text: 'same question' },
+    { uuid: 'u2', role: 'assistant', text: 'same question' }, // not a user line
+    { uuid: 'u3', role: 'user', text: 'other' },
+  ];
+  const p = newPendingEntry({ id: 'p1', text: 'same question', entries });
+  eq(p.id, 'p1');
+  eq(p.text, 'same question');
+  eq(p.state, 'sent');
+  eq([...p.seenUserUuids], ['u1'], 'only the earlier SAME-TEXT user line is pre-seen');
+});
+
+await test('dropDeliveredPending keeps a queued copy whose text was delivered EARLIER (F2)', () => {
+  const entries = [{ uuid: 'u1', role: 'user', text: 'same question' }];
+  const p = newPendingEntry({ id: 'p1', text: 'same question', entries });
+  // Any later entries update — the transcript re-read, unrelated lines — must
+  // NOT drop the line while only the pre-seen copy exists.
+  eq(dropDeliveredPending([p], entries), [p], 'the earlier copy never drops the queued line');
+  eq(dropDeliveredPending([p], [...entries, { uuid: 'u9', role: 'assistant', text: 'same question' }]), [p],
+    'an assistant line with the same text is not a delivery');
+});
+
+await test('dropDeliveredPending drops on a NEW user entry with the text — the actual delivery', () => {
+  const entries = [{ uuid: 'u1', role: 'user', text: 'same question' }];
+  const p = newPendingEntry({ id: 'p1', text: 'same question', entries });
+  const delivered = [...entries, { uuid: 'u2', role: 'user', text: 'same question' }];
+  eq(dropDeliveredPending([p], delivered), [], 'the new uuid is the delivery — the line drops');
+});
+
+await test('dropDeliveredPending without a snapshot falls back to the text-only rule', () => {
+  const entries = [{ uuid: 'u1', role: 'user', text: 'hi' }];
+  eq(dropDeliveredPending([{ id: 'p1', text: 'hi', state: 'sent' }], entries), [],
+    'no snapshot: the old text-only rule applies');
+});
+
+await test('dropDeliveredPending tolerates null pending and null entries', () => {
+  eq(dropDeliveredPending(null, [{ uuid: 'u1', role: 'user', text: 'x' }]), []);
+  eq(dropDeliveredPending([newPendingEntry({ id: 'p', text: 'x', entries: [] })], null),
+    [newPendingEntry({ id: 'p', text: 'x', entries: [] })]);
 });
 
 // --- Summary ----------------------------------------------------------------

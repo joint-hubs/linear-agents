@@ -18,8 +18,10 @@ import {
   buildConversationQuery,
   chatDisabledReason,
   CONVERSATION_LIMIT,
+  dropDeliveredPending,
   duplicateWarning,
   mergeConversation,
+  newPendingEntry,
   pendingAfterSend,
   pendingChip,
   shouldFollowBurst,
@@ -159,12 +161,13 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
     };
   }, []);
 
-  // A sent message drops off the pending list once the transcript shows the
-  // user line (same text) — until then it keeps its status label.
+  // A sent message drops off the pending list once the transcript shows a NEW
+  // user line with its text — one the line had not already seen at send time
+  // (dropDeliveredPending). An identical line delivered EARLIER in the
+  // session never drops a queued copy (FOC-1111 review F2); until delivery
+  // the line keeps its status label.
   useEffect(() => {
-    setPending((ps) =>
-      ps.filter((p) => !entries.some((en) => en.role === 'user' && en.text === p.text)),
-    );
+    setPending((ps) => dropDeliveredPending(ps, entries));
   }, [entries]);
 
   // Keep the newest entries in view.
@@ -180,7 +183,7 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
     setSendError(null);
     setDupWarn(null);
     const id = Date.now() + ':' + Math.random();
-    setPending((ps) => [...ps, { id, text, state: 'sent' }]);
+    setPending((ps) => [...ps, newPendingEntry({ id, text, entries })]);
     onDraftChange('');
     // A slash command (/context, /cost, /compact) never appears in the
     // transcript, so its pending line would wait forever for a user entry

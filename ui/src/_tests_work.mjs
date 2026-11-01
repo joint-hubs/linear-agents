@@ -528,6 +528,13 @@ await test('startDialogModel queued -> "Queued"', () => {
   eq(startDialogModel(preview, { result: { sent: false, confirmed: false, queued: true } }).disabledReason, 'Already sent.');
 });
 
+await test('startDialogModel duplicate -> "Already queued…", not a sent/queued mislabel (FOC-1111 F6)', () => {
+  const m = startDialogModel(preview, { result: { sent: false, duplicate: true, queued: false } });
+  eq(m.resultText, 'Already queued — it will be delivered when the current turn ends.');
+  eq(m.disabled, true);
+  eq(m.disabledReason, 'Already sent.');
+});
+
 await test('startDialogModel error -> the error text is the result text, retry allowed', () => {
   const m = startDialogModel(preview, { error: 'The session host is not reachable.' });
   eq(m.resultText, 'The session host is not reachable.');
