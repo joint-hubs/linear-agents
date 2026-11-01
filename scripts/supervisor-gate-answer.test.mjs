@@ -273,6 +273,26 @@ test("hold note and answeredBy behave like the gate's", () => {
   assert.deepEqual(a.answer, { text: "wznów", note: "TEST passed", answeredBy: "dashboard", answeredAt: NOW_ISO });
 });
 
+// FOC-1109: the Cockpit names the chosen option alongside the values, so the
+// delivery side can tell a real answer from the bare label the old one-click
+// submit produced. Optional — the CLI passes nothing and the record keeps its
+// exact historical shape.
+test("hold optionLabel: stored when given, absent when not, garbage refused", () => {
+  const runId = freshRun();
+  seedHold(runId);
+  const labelled = answerHold({ runId, holdId: "hold-1", text: "milestone=M1", optionLabel: "Provide the values", now: NOW });
+  assert.deepEqual(labelled.answer, { text: "milestone=M1", optionLabel: "Provide the values", answeredAt: NOW_ISO });
+
+  const bare = freshRun();
+  seedHold(bare);
+  const plain = answerHold({ runId: bare, holdId: "hold-1", text: "wznów", now: NOW });
+  assert.equal("optionLabel" in plain.answer, false, "no optionLabel given — the record keeps its shape");
+
+  throwWith(() => answerHold({ runId: bare, holdId: "hold-1", text: "x", optionLabel: 42, now: NOW }), "invalid-answer", "non-string optionLabel");
+  throwWith(() => answerHold({ runId: bare, holdId: "hold-1", text: "x", optionLabel: "  ", now: NOW }), "invalid-answer", "blank optionLabel");
+  throwWith(() => answerHold({ runId: bare, holdId: "hold-1", text: "x", optionLabel: "x".repeat(201), now: NOW }), "invalid-answer", "over-long optionLabel");
+});
+
 test("hold errors: not-found, already-answered, invalid-answer, unreadable, bad-id", () => {
   const runId = freshRun();
   seedHold(runId);

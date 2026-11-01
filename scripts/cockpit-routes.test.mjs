@@ -583,6 +583,47 @@ try {
       .filter((r) => r.type === "hold-answer");
     check("hold answer audit row notified:true", holdRow.length === 1 && holdRow[0].notified === true, JSON.stringify(holdRow));
 
+    // FOC-1109: an option marked needsText must never be answered with its own
+    // bare label — that is exactly the payload the old one-click submit
+    // produced and applyHoldAnswers silently dropped. The bare label is a 400
+    // before anything is recorded; the real values ride in text with
+    // optionLabel naming the chosen option.
+    const holdsNt = JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8"));
+    holdsNt.holds.push({
+      id: "hold-3", origin: "test", question: "provide the working-state values?",
+      recommendation: "Provide the values",
+      options: [{ label: "Provide the values", model: "user", costUsd: 0, needsText: true }],
+      impact: "low", state: "open", createdAt: NOW, presentedAt: null, until: null,
+      answer: null, history: [{ event: "created", at: NOW }], blocks: null, resolution: null,
+    });
+    writeFileSync(join(supState, "run-1", "holds.json"), JSON.stringify(holdsNt), "utf8");
+    const bareLabel = await call(P, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-3", text: "Provide the values" } });
+    check("needsText hold answered with its bare option label -> 400", bareLabel.status === 400, JSON.stringify(bareLabel));
+    check("needsText 400 wrote nothing (hold still open)",
+      JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8")).holds.find((h) => h.id === "hold-3")?.state === "open",
+      "hold-3 state after the 400");
+    // Values with no optionLabel are a real (if label-less) answer — the route
+    // only refuses the exact legacy bare-label payload.
+    const valuesNoLabel = await call(P, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-3", text: "milestone=M0" } });
+    check("needsText hold answered with values but no optionLabel -> 200",
+      valuesNoLabel.status === 200 && valuesNoLabel.body?.recorded === true, JSON.stringify(valuesNoLabel).slice(0, 300));
+    const holdsNtAgain = JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8"));
+    holdsNtAgain.holds.push({
+      id: "hold-4", origin: "test", question: "provide the values again?",
+      recommendation: "Provide the values",
+      options: [{ label: "Provide the values", model: "user", costUsd: 0, needsText: true }],
+      impact: "low", state: "open", createdAt: NOW, presentedAt: null, until: null,
+      answer: null, history: [{ event: "created", at: NOW }], blocks: null, resolution: null,
+    });
+    writeFileSync(join(supState, "run-1", "holds.json"), JSON.stringify(holdsNtAgain), "utf8");
+    const withLabel = await call(P, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-4", text: "epic=E1", optionLabel: "Provide the values" } });
+    check("needsText hold answered with values + optionLabel -> 200",
+      withLabel.status === 200 && withLabel.body?.recorded === true, JSON.stringify(withLabel).slice(0, 300));
+    const holdNt = JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8")).holds.find((h) => h.id === "hold-4");
+    check("needsText answer record carries optionLabel and the values",
+      holdNt?.state === "answered" && holdNt?.answer?.text === "epic=E1" && holdNt?.answer?.optionLabel === "Provide the values",
+      JSON.stringify(holdNt?.answer));
+
     // POST /api/gates/notify with holdId — the "Tell the Supervisor" fallback
     // after a hold answer whose notice failed. An OPEN hold has no answer to
     // deliver (409); the answered one is re-notified with /api/holds/answer's

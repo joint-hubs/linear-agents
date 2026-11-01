@@ -1717,9 +1717,25 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       selectionRequired(res, path, json, log, method);
       return true;
     }
-    const { runId, holdId, text } = body;
+    const { runId, holdId, text, optionLabel } = body;
     if (!runId || !holdId || typeof text !== "string" || !text.trim()) {
       json(res, 400, { error: "runId, holdId and text (string) are required" });
+      log(method, path, 400);
+      return true;
+    }
+    // FOC-1109: an option marked needsText must never be answered with its own
+    // bare label — that is exactly the payload the old one-click submit
+    // produced, and applyHoldAnswers silently drops lines without "=", so the
+    // values never arrive. Refuse before anything is recorded; the real answer
+    // carries the values in text with optionLabel naming the chosen option.
+    // A store that cannot be read changes nothing here — answerHold reports it
+    // with its own code below.
+    const needsTextOption = readHoldQuietly(runId, holdId)?.options?.find((o) => o && o.needsText) ?? null;
+    if (!optionLabel && needsTextOption && needsTextOption.label === text.trim()) {
+      json(res, 400, {
+        error: `"${needsTextOption.label}" needs the values as text — ` +
+          "type them in the answer field instead of submitting the bare option label",
+      });
       log(method, path, 400);
       return true;
     }
@@ -1736,7 +1752,7 @@ export async function handleCockpitRoute(req, res, url, ctx) {
     }
     let hold;
     try {
-      hold = answerHold({ runId, holdId, text, answeredBy: actor, lockWaitMs: 0 });
+      hold = answerHold({ runId, holdId, text, optionLabel, answeredBy: actor, lockWaitMs: 0 });
     } catch (err) {
       const status = answerErrorStatus(err?.code);
       if (status === 500) console.error("[holds/answer]", err?.message || err);

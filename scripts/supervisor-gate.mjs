@@ -641,10 +641,17 @@ export function answerGate({ runId, gateId, text, note = null, answeredBy = null
  * store through patchHold, so the history stays append-only. Returns the
  * updated hold.
  */
-export function answerHold({ runId, holdId, text, note = null, answeredBy = null, now = new Date(), lockWaitMs = LOCK_TIMEOUT_MS }) {
+export function answerHold({ runId, holdId, text, note = null, answeredBy = null, optionLabel = null, now = new Date(), lockWaitMs = LOCK_TIMEOUT_MS }) {
   if (invalidId(runId)) throw answerError("bad-id", `invalid runId: ${JSON.stringify(runId ?? null)}`);
   if (invalidId(holdId)) throw answerError("bad-id", `invalid holdId: ${JSON.stringify(holdId ?? null)}`);
   if (invalidText(text)) throw answerError("invalid-answer", '--text "..." is required');
+  // FOC-1109: the Cockpit names the chosen option alongside the values, so the
+  // delivery side can tell a real answer from the bare label the old one-click
+  // submit produced. Optional — the CLI and older callers pass nothing and the
+  // record keeps its exact historical shape.
+  if (optionLabel !== null && (typeof optionLabel !== "string" || !optionLabel.trim() || optionLabel.length > 200)) {
+    throw answerError("invalid-answer", "optionLabel must be a non-empty string of at most 200 characters when given");
+  }
 
   // One lock for the WHOLE holds store, not per hold: holds.json is one
   // versioned file, so two answers to two different holds still race on the
@@ -681,6 +688,7 @@ export function answerHold({ runId, holdId, text, note = null, answeredBy = null
       text,
       ...(note ? { note } : {}),
       ...(answeredBy ? { answeredBy } : {}),
+      ...(optionLabel ? { optionLabel } : {}),
       answeredAt: at,
     };
     // An answer is a new history entry, never an overwrite — the file read back

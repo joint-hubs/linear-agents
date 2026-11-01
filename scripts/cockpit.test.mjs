@@ -297,7 +297,11 @@ section("cockpit: collectNeedsYou — holds");
 
 test("an open hold shows options, recommendation, impact; answerKind option", () => {
   const runId = fixtureRun();
-  writeHolds(runId, [holdRecord()]);
+  // FOC-1109: the option's needsText flag must reach the UI verbatim — the
+  // inbox decides from it whether clicking submits the label or opens a field.
+  writeHolds(runId, [holdRecord({
+    options: [{ label: "glm", model: "z-ai/glm-5.3-flash", costUsd: 0.01, needsText: true }],
+  })]);
   const [item] = collectNeedsYou({ stateHome: HOME, now: Date.now(), runIds: [runId] });
   eq(item.category, "hold", "category");
   eq(item.kind, "hold", "kind");
@@ -308,6 +312,7 @@ test("an open hold shows options, recommendation, impact; answerKind option", ()
   eq(item.recommendation, "glm", "recommendation copied");
   eq(item.impact, "high", "impact copied");
   eq(item.options.length, 1, "options copied");
+  eq(item.options[0].needsText, true, "needsText copied");
   eq(item.summary, "Which model for dev?", "summary is the question");
 });
 

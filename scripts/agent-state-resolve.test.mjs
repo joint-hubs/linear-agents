@@ -633,6 +633,10 @@ test("without the Linear fixture the ask-keys hold: exactly one hold, a second r
       assert.ok(hold.question.includes(key), `question names ${key}`);
     }
     assert.equal(hold.options[0].costUsd, 0);
+    // FOC-1109: the only way to answer this hold is with values, so the option
+    // must say so — the Cockpit opens a text field instead of submitting the
+    // bare label (which applyHoldAnswers would silently drop).
+    assert.equal(hold.options[0].needsText, true);
 
     const second = runCliSync(args, env);
     assert.equal(second.status, 0, `stderr: ${second.stderr}`);
