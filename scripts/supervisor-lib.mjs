@@ -2360,6 +2360,27 @@ function runBoundedInstall(dir, command, args) {
  *
  * @returns {Promise<{ worktree: string, ok: boolean, locations: object[] }>}
  */
+/**
+ * r3 N1: does the root package.json declare npm workspaces? When it does, the
+ * root `npm ci` writes `ui/node_modules` itself (workspace trees install
+ * through the root's node_modules), so the concurrent ui/ install would race
+ * the root one over the same tree — `npm ci` deletes node_modules outright,
+ * so the loser of that race fails on a vanished directory. Not triggerable on
+ * linear-agents (no workspaces key), but any other `--repo` target can be a
+ * workspaces monorepo. An unreadable or absent root manifest answers false:
+ * both installs run, which is the pre-r3 behavior and cannot under-provision.
+ */
+function rootWorkspacesCover(root) {
+  let pkg = null;
+  try {
+    pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  } catch {
+    return false;
+  }
+  const ws = pkg.workspaces;
+  return Array.isArray(ws) ? ws.length > 0 : Boolean(ws);
+}
+
 export async function installWorktreeDeps(worktree) {
   // r2 N8: the two locations are independent trees, so the installs run
   // concurrently — worst-case spawn block halves. Failure attribution is
@@ -2368,7 +2389,19 @@ export async function installWorktreeDeps(worktree) {
   // (and a rejection — which installDepsAt does not produce short of a
   // programming error — would reject the whole Promise.all exactly as a
   // sequential await would have thrown).
-  const locations = await Promise.all([installDepsAt(worktree, "root"), installDepsAt(join(worktree, "ui"), "ui")]);
+  // r3 N1: EXCEPT on a workspaces monorepo, where the two installs are NOT
+  // independent — the root one writes ui/node_modules. There the ui/ install
+  // is skipped (the root install already covers it) and the record carries the
+  // skip with its reason, so the report stays complete.
+  const uiJob = rootWorkspacesCover(worktree)
+    ? Promise.resolve({
+        location: "ui",
+        path: join(worktree, "ui"),
+        skipped: true,
+        reason: "root package.json declares workspaces — the root install covers ui/",
+      })
+    : installDepsAt(join(worktree, "ui"), "ui");
+  const locations = await Promise.all([installDepsAt(worktree, "root"), uiJob]);
   return {
     worktree,
     ok: locations.every((l) => l.skipped || l.ok),

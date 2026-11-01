@@ -1078,6 +1078,14 @@ export function unlinkReparsePoints(worktree) {
       rmSync(abs); // the link only; rmSync does not follow a reparse point
       removed.push({ path, target });
     } catch (err) {
+      // r3 N2: the link can vanish between the pre-scan and this unlink — a
+      // concurrent cleaner, or the target's own teardown. ENOENT here means
+      // the incident shape is already gone: there is nothing left for `git
+      // worktree remove` to follow, so aborting the whole removal buys
+      // nothing and only makes cleanup unrunnable over a benign race. It is
+      // NOT added to `removed` — this loop did not remove it, and the report
+      // must not overclaim. Every other error stays fail-closed.
+      if (err.code === "ENOENT") continue;
       failJson(
         `refusing the removal: ${path} is a reparse point that could not be unlinked ` +
           `(${err.message.split("\n")[0]}) — git worktree remove would follow it`,

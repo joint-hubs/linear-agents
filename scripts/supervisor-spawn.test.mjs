@@ -34,6 +34,7 @@ import {
   readHolds,
   readRegistry,
   registryPath,
+  redact,
   runDir,
 } from "./supervisor-lib.mjs";
 import { openAgentState } from "./agent-state.mjs";
@@ -564,6 +565,27 @@ testAsync("the install record redacts npm's legacy _auth and query-token shapes 
   if (!record.includes("token=***")) fail(`the query-string token was not redacted: ${record}`);
 });
 
+// r3 N4: the install record applies `redact` to the WHOLE spawnError, but no
+// test pinned its behavior across newlines — a spawnError whose credential
+// sits on the second line would leak if any REDACTIONS pattern were
+// line-anchored. A real multi-line spawnError is not producible here (node's
+// spawn failure messages are single-line, `spawn npm ENOENT`), so the
+// property is pinned on redact itself — the exact function the record path
+// applies. The token is assembled at runtime (r2 N1): a literal sk- token in
+// this source trips secretlint and fails the security scan.
+test("redact scrubs every line of a multi-line error, not only the first (FOC-1153 r3)", () => {
+  const token = "sk-" + ["multi", "line", "secret", "0123456789"].join("");
+  const before = "npm ERR! install started\n" + `npm ERR! request failed with ${token}\n` + "npm ERR! install ended";
+  const after = redact(before);
+  const lines = after.split("\n");
+  if (lines.length !== 3) fail(`the multi-line shape did not survive: ${JSON.stringify(after)}`);
+  if (after.includes(token)) fail(`a credential survived redaction on a later line: ${JSON.stringify(after)}`);
+  if (!lines[1].includes("sk-***")) fail(`the credential's line was not redacted: ${JSON.stringify(lines[1])}`);
+  if (lines[0] !== "npm ERR! install started" || lines[2] !== "npm ERR! install ended") {
+    fail(`innocent lines were altered: ${JSON.stringify(lines)}`);
+  }
+});
+
 // r2 N9: the skip branches of installDepsAt had no coverage — only the
 // replacement branch was driven directly.
 testAsync("skips the install when there is no package.json (FOC-1153 r2)", async () => {
@@ -591,6 +613,38 @@ testAsync("skips the install when a real node_modules is already present (FOC-11
   if (!existsSync(join(dir, "node_modules", "sentinel.txt"))) {
     fail("npm ran over an existing node_modules — the skip branch did not hold");
   }
+});
+
+// r3 N1: on a workspaces monorepo the root install writes ui/node_modules
+// itself and even runs the ui workspace's lifecycle scripts (probed: a root
+// `npm install` with workspaces executes ui's preinstall) — so the concurrent
+// ui/ install races it over the same tree. linear-agents carries no workspaces
+// key (review-verified), but any other `--repo` target can, so the ui/
+// install must be skipped when the root manifest declares workspaces. The
+// record is the assertion: a root-driven ui preinstall would plant any
+// sentinel we checked, so a file cannot witness WHICH install ran.
+// No lockfile in the fixture — `npm ci`'s lockfile-sync check would reject
+// the hand-written one; `npm install` has no such gate and runs offline here
+// (the workspace carries no dependencies).
+testAsync("skips the ui/ install when the root package.json declares workspaces (FOC-1153 r3)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "la-sup-ws-"));
+  cleanup.push(dir);
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ name: "fixture-ws", version: "1.0.0", private: true, workspaces: ["ui"] }),
+  );
+  mkdirSync(join(dir, "ui"));
+  writeFileSync(join(dir, "ui", "package.json"), JSON.stringify({ name: "fixture-ui", version: "1.0.0", private: true }));
+
+  const out = await installWorktreeDeps(dir);
+  const root = (out.locations ?? []).find((l) => l.location === "root");
+  if (!root || root.skipped) fail(`the root install did not run: ${JSON.stringify(root)}`);
+  if (root.ok !== true) fail(`the root install failed: ${JSON.stringify(root)}`);
+  const ui = (out.locations ?? []).find((l) => l.location === "ui");
+  if (!ui) fail("no ui location on the record");
+  if (ui.skipped !== true) fail(`the ui install must be skipped under workspaces: ${JSON.stringify(ui)}`);
+  if (!/workspaces/.test(ui.reason ?? "")) fail(`the ui skip reason does not name workspaces: ${JSON.stringify(ui)}`);
+  if (out.ok !== true) fail(`a skipped ui install must not fail the run: ${JSON.stringify(out)}`);
 });
 
 // Run a93f, 2026-09-12: four children spawned without --model ran on the
