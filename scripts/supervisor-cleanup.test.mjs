@@ -12,7 +12,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -710,6 +710,43 @@ test("childTreeGitArgs: writes, other trees and the host stay exactly as they we
   assert.deepEqual(childTreeGitArgs(["status"], "/data/workspaces/linear-agents", CONTAINER), ["status"]);
   assert.deepEqual(childTreeGitArgs(["status"], TREE, {}), ["status"], "natively the argv is untouched");
   assert.deepEqual(childTreeGitArgs(["status"], undefined, CONTAINER), ["status"]);
+});
+
+// ── reparse points: the removal never follows a link out of the tree (FOC-1153) ──
+// The 2026-11-01 incident, twice in one day: a child left a node_modules JUNCTION
+// into the main checkout in its worktree, and `git worktree remove --force`
+// followed it — the main checkout's node_modules was emptied. Probed on this
+// platform (win32, node 22): git DOES follow junctions, at the worktree root and
+// nested (ui/node_modules), so the links are unlinked AS LINKS before the
+// destructive act runs, and the report names them.
+console.log("\nreparse points — removal never follows a link (FOC-1153)");
+
+test("remove unlinks junctions inside the worktree and keeps their targets intact", () => {
+  const s = scenario();
+  // The targets live OUTSIDE the worktree — that is the shape that kills. Two
+  // of them: the incident's exact shape at the root, and a nested one to keep
+  // the scan honest about depth.
+  const outside = join(s.base, "outside-target");
+  mkdirSync(join(outside, "dep-a"), { recursive: true });
+  writeFileSync(join(outside, "dep-a", "sentinel.txt"), "keep\n");
+  // "junction" is win32-only; a POSIX directory symlink is unprivileged and the
+  // same lstat-visible shape this guard acts on.
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  symlinkSync(outside, join(s.worktree, "node_modules"), linkType);
+  symlinkSync(join(outside, "dep-a"), join(s.worktree, "linked-dep"), linkType);
+
+  approved(s);
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, true, out.error);
+  assert.ok(!existsSync(s.worktree), "the worktree was not removed");
+  assert.ok(
+    existsSync(join(outside, "dep-a", "sentinel.txt")),
+    "the junction target lost its content — the removal followed the link",
+  );
+  assert.ok(
+    (out.removedLinks ?? []).some((l) => l.includes("node_modules")),
+    `the report does not name the handled links: ${JSON.stringify(out.removedLinks)}`,
+  );
 });
 
 summary();

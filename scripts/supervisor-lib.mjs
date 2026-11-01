@@ -2137,6 +2137,104 @@ function withOwnership(gitRoot, result, ownerId) {
   };
 }
 
+// ── dependency provisioning in a worktree about to be handed out (FOC-1153) ──
+//
+// Spawn blocks the child launch on this, but must not hang on it: bounded well
+// under the merge tool's 900 s install/verify ceiling (supervisor-merge.mjs),
+// comfortably above this repo's own installs, which measure in seconds.
+const DEPS_INSTALL_TIMEOUT_MS = 300_000;
+
+/**
+ * One install location (root or ui/). Tolerant by design: a directory without a
+ * package.json is skipped, not an error — not every tree a child works in has
+ * dependencies, and provisioning must be a no-op there.
+ *
+ * The skip rule is lstat-shaped on purpose: existsSync follows the link, and a
+ * junction very much "exists" — the 2026-11-01 incident had a junction standing
+ * where a real node_modules should have been, because a child improvised the
+ * install itself. A reparse point (win32 junctions report isSymbolicLink on
+ * this node) is unlinked AS A LINK — never its target's content — and the
+ * install runs fresh into a real directory.
+ */
+function installDepsAt(dir, location) {
+  const record = { location, path: dir };
+  if (!existsSync(join(dir, "package.json"))) {
+    return { ...record, skipped: true, reason: "no package.json" };
+  }
+  const nm = join(dir, "node_modules");
+  let st = null;
+  try {
+    st = lstatSync(nm);
+  } catch {
+    st = null; // absent — nothing to skip and nothing to replace
+  }
+  if (st && !st.isSymbolicLink() && st.isDirectory()) {
+    return { ...record, skipped: true, reason: "node_modules already present" };
+  }
+  if (st) {
+    try {
+      rmSync(nm); // link or stray file; rmSync does not follow a reparse point
+      record.replacedReparsePoint = true;
+    } catch (err) {
+      return {
+        ...record,
+        ok: false,
+        error: `could not remove the node_modules reparse point: ${err.message.split("\n")[0]}`,
+      };
+    }
+  }
+  // npm ci with a lockfile; npm install where there is none — the merge tool's
+  // split, because resolving ranges live makes the result depend on the current
+  // registry state and that is worth naming in the record.
+  const hasLockfile = existsSync(join(dir, "package-lock.json"));
+  const command = hasLockfile ? "npm ci" : "npm install";
+  const res = spawnSync(command, ["--no-audit", "--no-fund"], {
+    cwd: dir,
+    encoding: "utf8",
+    shell: true,
+    timeout: DEPS_INSTALL_TIMEOUT_MS,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return {
+    ...record,
+    skipped: false,
+    ok: res.status === 0,
+    command,
+    exitCode: res.status,
+    timedOut: Boolean(res.error && /ETIMEDOUT|timed out/i.test(res.error.message)),
+    error: res.error ? res.error.message.split("\n")[0] : null,
+    tail: `${res.stdout ?? ""}${res.stderr ?? ""}`.split("\n").filter(Boolean).slice(-5),
+  };
+}
+
+/**
+ * Install dependencies in a worktree a child is about to work in (FOC-1153):
+ * the worktree root, and `ui/` whenever it carries a package.json. Called by
+ * the spawn path (and the task-session host) after the tree is ensured —
+ * OUTSIDE the integration lock, unlike ensureWorktree itself: an install
+ * running under the repo-wide lock would serialize every concurrent spawn
+ * behind one package manager.
+ *
+ * ui/ is unconditional-when-present, deliberately not ticket-aware: a child
+ * whose task names only the root still needs the ui tree buildable, and the
+ * cost of an extra skip-or-install is seconds.
+ *
+ * A timed-out or failed install leaves a node_modules behind that a later
+ * ensure would SKIP as "already present" — the same accepted trade the merge
+ * tool makes (it skips on existsSync). Freshness is re-established by the
+ * child's own build, and the failure is in the record, never silent.
+ *
+ * @returns {{ worktree: string, ok: boolean, locations: object[] }}
+ */
+export function installWorktreeDeps(worktree) {
+  const locations = [installDepsAt(worktree, "root"), installDepsAt(join(worktree, "ui"), "ui")];
+  return {
+    worktree,
+    ok: locations.every((l) => l.skipped || l.ok),
+    locations,
+  };
+}
+
 // ── repository / start-point resolution (FOC-1088) ───────────────────────────
 //
 // The DEV-child path used to resolve these inline in supervisor-spawn.mjs.

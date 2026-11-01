@@ -12,7 +12,7 @@
 // Run: node scripts/supervisor-spawn.test.mjs
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -311,6 +311,69 @@ test("records allowedPaths as a declaration when given", () => {
   const out = parse(runSpawn(runId, repo, ["--allowed-path", "src/auth/", "--allowed-path", "src/session/"]));
   const entry = readRegistry(runId).children[out.childId];
   if (entry.allowedPaths.length !== 2) fail(`expected 2 declared paths, got ${JSON.stringify(entry.allowedPaths)}`);
+  spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
+});
+
+// FOC-1153: on 2026-11-01 a child created a node_modules JUNCTION into the main
+// checkout and `git worktree remove --force` followed it, emptying the main
+// checkout's node_modules — twice in one day. Spawn provisions the deps itself,
+// as real directories, so a child never has a reason to link one in. The
+// offline fixture is the merge suite's (supervisor-merge.test.mjs §6): a
+// preinstall that writes fake-dep, plus an empty lockfile `npm ci` accepts with
+// no network. The manifests must be part of the BASE commit: the worktree is cut
+// from HEAD, so a manifest left uncommitted in the fixture repo never reaches it
+// and the install would be skipped as "no package.json" — testing nothing.
+const DEPS_FIXTURE_PKG = {
+  name: "fixture",
+  version: "1.0.0",
+  private: true,
+  scripts: {
+    preinstall: `node -e "const fs=require('fs');fs.mkdirSync('node_modules/fake-dep',{recursive:true});fs.writeFileSync('node_modules/fake-dep/package.json',JSON.stringify({name:'fake-dep',version:'1.0.0',main:'index.js'}));fs.writeFileSync('node_modules/fake-dep/index.js','module.exports=42;')"`,
+  },
+};
+const DEPS_FIXTURE_LOCK = {
+  name: "fixture",
+  version: "1.0.0",
+  lockfileVersion: 3,
+  requires: true,
+  packages: { "": { name: "fixture", version: "1.0.0", license: "ISC" } },
+};
+
+test("provisions dependencies in the fresh worktree — real node_modules, never a reparse point (FOC-1153)", () => {
+  const { repo } = fixtureRepo();
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  mkdirSync(join(repo, "ui"));
+  for (const dir of [repo, join(repo, "ui")]) {
+    writeFileSync(join(dir, "package.json"), JSON.stringify(DEPS_FIXTURE_PKG));
+    writeFileSync(join(dir, "package-lock.json"), JSON.stringify(DEPS_FIXTURE_LOCK));
+  }
+  git("add", "-A");
+  git("commit", "-m", "base: offline-npm manifests for the provisioning fixture");
+
+  const runId = fixtureRun();
+  const out = parse(runSpawn(runId, repo));
+  if (!out.ok) fail(`spawn failed: ${out.error}`);
+
+  for (const rel of [["node_modules"], ["ui", "node_modules"]]) {
+    const where = rel.length === 1 ? "the worktree root" : "ui/";
+    const dir = join(out.worktree, ...rel);
+    if (!existsSync(dir)) fail(`no node_modules in ${where} — deps were not provisioned`);
+    const st = lstatSync(dir);
+    if (st.isSymbolicLink()) fail(`node_modules in ${where} is a reparse point — the 2026-11-01 incident shape`);
+    if (!st.isDirectory()) fail(`node_modules in ${where} is neither a real directory nor a link`);
+  }
+  // The install actually RAN: the fixture's preinstall provides fake-dep, and a
+  // skipped install would leave nothing to resolve.
+  const dep = spawnSync(process.execPath, ["-e", "process.exit(require('fake-dep') === 42 ? 0 : 1)"], {
+    cwd: out.worktree,
+  });
+  if (dep.status !== 0) fail("fake-dep does not resolve from the worktree root — the install did not run");
+
+  if (!out.depsInstall) fail("spawn output carries no depsInstall record");
+  if (out.depsInstall.ok !== true) fail(`depsInstall is not ok: ${JSON.stringify(out.depsInstall)}`);
+  const ui = (out.depsInstall.locations ?? []).find((l) => l.location === "ui");
+  if (!ui || ui.skipped) fail(`the ui/ install is missing or was skipped: ${JSON.stringify(out.depsInstall)}`);
+
   spawnSync(process.execPath, [STOP, "--run", runId, "--child", out.childId], { encoding: "utf8" });
 });
 

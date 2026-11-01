@@ -51,7 +51,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, isAbsolute } from "node:path";
 
 import {
@@ -969,6 +969,76 @@ function cmdRemove(args) {
 }
 
 /**
+ * Unlink the reparse points (win32 junctions and symlinks) the removal would
+ * otherwise DELETE THROUGH. `git worktree remove --force` follows them: the
+ * 2026-11-01 incident emptied the MAIN checkout's node_modules twice in one
+ * day, because a child had left a junction where its worktree's node_modules
+ * should have been. Each link is removed as a link — its target (typically the
+ * main checkout) keeps its files.
+ *
+ * The walk is bounded, and depth 3 is evidence, not a cap of convenience: on
+ * win32 git follows a nested junction (ui/node_modules) exactly as happily as a
+ * root-level one, so a top-level-only scan would protect one of the two
+ * locations this repo actually provisions. Descent into real `node_modules`
+ * directories is pruned — what lives under them is a package manager's domain
+ * (and its internal link structure is recreated by every install), which is
+ * what keeps this a handful of lstat calls per directory instead of a walk of
+ * the dependency tree.
+ *
+ * Runs BEFORE `git worktree remove` and refuses the removal when a link cannot
+ * be unlinked: a git remove that follows an unremovable link is the incident
+ * itself. As with the existing git failure path, the archive step has already
+ * run at that point — it is additive and the tree is left standing.
+ *
+ * @returns {{ path: string, target: string|null }[]} paths relative to the worktree root
+ */
+function unlinkReparsePoints(worktree) {
+  const removed = [];
+  const visit = (dir, rel, depth) => {
+    let entries;
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return; // unreadable — `git worktree remove` will surface its own error
+    }
+    for (const name of entries) {
+      const abs = join(dir, name);
+      const path = rel ? `${rel}/${name}` : name;
+      let st = null;
+      try {
+        st = lstatSync(abs);
+      } catch {
+        continue; // vanished between readdir and lstat — nothing to remove
+      }
+      if (st.isSymbolicLink()) {
+        let target = null;
+        try {
+          target = readlinkSync(abs);
+        } catch {
+          /* unreadable link — the path alone is the record */
+        }
+        try {
+          rmSync(abs); // the link only; rmSync does not follow a reparse point
+          removed.push({ path, target });
+        } catch (err) {
+          failJson(
+            `refusing the removal: ${path} is a reparse point that could not be unlinked ` +
+              `(${err.message.split("\n")[0]}) — git worktree remove would follow it`,
+            { worktree, link: path },
+          );
+        }
+        continue;
+      }
+      if (st.isDirectory() && depth < 3 && name !== "node_modules") {
+        visit(abs, path, depth + 1);
+      }
+    }
+  };
+  visit(worktree, "", 1);
+  return removed;
+}
+
+/**
  * The one destructive act, shared by both paths (FOC-613): `git worktree
  * remove`, the registry timestamp, and a report that says what was kept.
  *
@@ -977,9 +1047,15 @@ function cmdRemove(args) {
  * tracked-dirty set (unchanged meaning — `git status --porcelain`, what the
  * approval covered); `archived` is the ignored/untracked work product that was
  * copied out first; `skippedCache` is the rebuildable cache left to die by name.
+ * `removedLinks` (FOC-1153) names the reparse points unlinked as links first —
+ * they die here too, but their TARGETS are the point of the list.
  * Skipping is fine; skipping silently is not.
  */
 function performRemoval({ runId, childId, entry, repo, state, forced, keys, archive, registryExtra = {} }) {
+  // FOC-1153 ordering: the links come out before the one destructive act, so
+  // git never sees them. The verdict/archive steps above ran on the tree AS
+  // FOUND — the links are untracked, unarchivable shapes, not work product.
+  const removedLinks = unlinkReparsePoints(entry.worktree);
   const gitArgs = ["worktree", "remove", entry.worktree, ...(forced ? ["--force"] : [])];
   try {
     git(gitArgs, repo);
@@ -1031,6 +1107,12 @@ function performRemoval({ runId, childId, entry, repo, state, forced, keys, arch
         // the tree; EISDIR on a directory target), only the link itself dies.
         skippedLinks: (archive.skippedLinks ?? []).map(
           (l) => `${l.path} — symlink${l.target ? ` → ${l.target}` : ""}, skipped: the link is removed, its target is untouched`,
+        ),
+        // List 5 (FOC-1153): reparse points unlinked as links before the remove,
+        // so git could not follow them out of the tree. The link dies with the
+        // worktree; what the list is FOR is the target that kept its content.
+        removedLinks: removedLinks.map(
+          (l) => `${l.path} — reparse point${l.target ? ` → ${l.target}` : ""}, unlinked before removal: git worktree remove follows junctions`,
         ),
         keys,
       },
