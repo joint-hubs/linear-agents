@@ -1273,8 +1273,13 @@ test("FOC-1147: a pickup error echoing credentials (a tried repo URL with userin
     autoPickup: { enabled: true, workspace: "workspace" },
     pickupDeps: fakeTimers(),
     listCandidates: async () => {
+      // Assembled at runtime (same precedent as supervisor-spawn.test.mjs):
+      // a literal user:pass@ URL in this source trips secretlint's basicauth
+      // rule and fails the security scan; the assertion runs against the
+      // assembled string.
+      const credUrl = ["https://user:secret", "@github.com/owner/repo"].join("");
       throw new Error(
-        "no repository for managed task 'workspace:FEN-9': tried https://user:secret@github.com/owner/repo and https://api.github.com/repos/owner/repo?token=abc123",
+        `no repository for managed task 'workspace:FEN-9': tried ${credUrl} and https://api.github.com/repos/owner/repo?token=abc123`,
       );
     },
   });

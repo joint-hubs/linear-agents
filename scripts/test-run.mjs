@@ -249,16 +249,19 @@ if (!process.env.LA_SUPERVISOR_STATE_HOME) {
 // (LA_SUPERVISOR_NO_CODEGRAPH=1) in their own env builders — see baseEnv in
 // supervisor-test-fixtures.mjs.
 const suiteEnv = { ...process.env };
+// Case-insensitive: win32 env lookup is case-insensitive, so `la_supervisor`
+// would survive an exact-case match.
 for (const key of Object.keys(suiteEnv)) {
-  if (key.startsWith('LA_SUPERVISOR')) delete suiteEnv[key];
+  if (/^la_supervisor/i.test(key)) delete suiteEnv[key];
 }
 // FOC-1147: the suite never reads Linear — a real key in the env would let a
 // leaking suite file reach the live workspace. Same prefix rule as
-// LA_SUPERVISOR* (there are suffixed variants, e.g. LINEAR_API_KEY_PISI).
-// Nothing LINEAR_API_KEY* is added back — zz-suite-env-scrub.test.mjs holds
+// LA_SUPERVISOR* (there are suffixed variants, e.g. LINEAR_API_KEY_PISI),
+// matched case-insensitively for the same win32 reason. Nothing
+// LINEAR_API_KEY* is added back — zz-suite-env-scrub.test.mjs holds
 // that line too.
 for (const key of Object.keys(suiteEnv)) {
-  if (key.startsWith('LINEAR_API_KEY')) delete suiteEnv[key];
+  if (/^linear_api_key/i.test(key)) delete suiteEnv[key];
 }
 // win32: every suite process — and every node process it spawns, since
 // NODE_OPTIONS is inherited — loads spawn-windows-hide.mjs first, so a child
