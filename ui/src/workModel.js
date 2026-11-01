@@ -431,6 +431,40 @@ export function claimTag(ticket) {
   };
 }
 
+// sessionClaim(ticket) -> the board ticket's session lease spelled out for the
+// detail panel (FOC-1110), or null when the payload carries no claim. Unlike
+// claimTag (the card head's narrow tag) the panel shows the whole state: the
+// full session id, the store status and — when the owning pid is provably
+// alive — "live". The panel reads `live` too: a ticket a live task session
+// already owns must not offer the Start flow again.
+export function sessionClaim(ticket) {
+  const c = ticket && ticket.claimedBy;
+  if (!c || typeof c.sessionId !== 'string' || !c.sessionId) return null;
+  const status = typeof c.status === 'string' && c.status ? c.status : null;
+  const live = c.live === true;
+  const state = [status, live ? 'live' : null].filter(Boolean).join(', ');
+  return {
+    sessionId: c.sessionId,
+    status,
+    live,
+    text: `claimed by ${c.sessionId}${state ? ` (${state})` : ''}`,
+  };
+}
+
+// sessionTimelineNote(ticket) -> the one-line honesty note for the panel's
+// Timeline area while a live task session owns the ticket (FOC-1110 round 2),
+// or null otherwise — "No events yet." stays for every other case. The
+// session's turns are not Fenix run facts, so the timeline itself stays empty;
+// the note says where the events actually are instead of claiming there are
+// none. The cockpit link on the note is the JSX's job (it needs the ticket's
+// taskKey, which the payload carries next to the claim).
+export function sessionTimelineNote(ticket) {
+  const c = ticket && ticket.claimedBy;
+  return c && c.live === true
+    ? "This ticket is run by a task session — its events are in the session's cockpit"
+    : null;
+}
+
 // Every publish failure is spelled out by its contract name (plan §5):
 // no-checkout, stale-preview, push-refused, pr-failed — with the scrubbed
 // detail when the server sent one.
