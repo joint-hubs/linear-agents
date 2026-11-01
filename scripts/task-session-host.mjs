@@ -956,6 +956,18 @@ export function createTaskSessionHost(deps = {}) {
         });
         return;
       }
+      if (sent.body?.sent === false) {
+        // A 200 that pasted nothing (FOC-1111: the duplicate guard refused —
+        // the same text is already queued in this pane) is NOT delivery
+        // proof. The durable prompt stays 'delivering' (unproven, never
+        // resent — the same fail-closed rule as every other unproven
+        // delivery) and the reason is surfaced.
+        store.update(sessionId, {
+          status: "waiting",
+          lastError: "initial prompt NOT pasted (refused as a duplicate of a queued copy); delivery unproven — NOT resent, deliver manually if the queued copy is lost",
+        });
+        return;
+      }
       markPendingPrompt(ctl.sessionHome, { ...pending, state: "delivering" }, {
         state: "delivered",
         deliveredAt: new Date().toISOString(),

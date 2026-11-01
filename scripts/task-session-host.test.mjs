@@ -149,12 +149,25 @@ const build = (opts = {}) => {
   const fakes = new Map(); // sessionId → { tmux, pty, ptyArgs, clock }
   const fakeFor = (sessionId) => {
     if (!fakes.has(sessionId)) {
+      const clock = fakeClock();
+      if (opts.macrotaskSleep) {
+        // The default sleep resolves in microtasks only; tests that stage an
+        // HTTP race against the send chain need the event loop between the
+        // readiness polls, so this variant yields a real macrotask first.
+        clock.sleep = async (ms) => {
+          await new Promise((r) => setTimeout(r, 0));
+          clock.t += ms;
+        };
+      }
       fakes.set(sessionId, {
         tmux: fakeTmuxFor(opts.tmuxInit?.[sessionId]),
         pty: fakePty(),
         ptyArgs: null,
-        clock: fakeClock(),
+        clock,
       });
+      // Optional per-fake hook, installed at CREATION time — before the first
+      // tmux call — so a test can stage an event that must fire mid-start.
+      if (opts.onFake) opts.onFake(sessionId, fakes.get(sessionId));
     }
     return fakes.get(sessionId);
   };
@@ -163,7 +176,7 @@ const build = (opts = {}) => {
     const f = fakeFor(sessionId);
     return {
       runTmux: f.tmux.run,
-      readSessionState: () => null,
+      readSessionState: opts.hookState ? () => opts.hookState() : () => null,
       readToken: () => TOKEN,
       resolvePeer: async () => new Set(["127.0.0.1"]),
       processAlive: () => true,
@@ -447,6 +460,70 @@ test("duplicate start lands on the same session and NEVER redelivers the initial
       readFileSync(join(tmp, "supervisor", "sessions", sid, "pending-prompt.json"), "utf8"),
       pendingBefore,
       "the armed prompt text was not replaced",
+    );
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
+test("FOC-1111: an initial prompt refused as a duplicate (200, sent:false) is never marked delivered", async () => {
+  // The pane's hook sits busy with a STALE updatedAt, so a paste comes back
+  // queued (unconfirmed) and the host holds the duplicate key. The race the
+  // guard can actually refuse a START through: while startSession's
+  // ensureSession is still in the send chain (readiness loop), a chat message
+  // with the SAME text arrives and queues first — the start's own send is
+  // then refused as a duplicate. Round 1 marked the durable prompt
+  // `delivered` exactly there.
+  const staleBusy = () => ({ state: "busy", updatedAt: "1970-01-01T00:00:00.000Z", notification: null });
+  let port = null;
+  const chats = new Map();
+  const { host, store, fakeFor, tmp } = build({
+    maxActive: 2,
+    hookState: staleBusy,
+    macrotaskSleep: true,
+    // The racing chat send is installed at fake CREATION and fires on the
+    // session's first pane capture — inside the start's readiness loop,
+    // strictly before the start's own sendMessage. The readiness loop's fake
+    // sleeps yield macrotasks (macrotaskSleep), so the POST is received and
+    // its send enters the serialized chain while the ensure still owns it.
+    onFake: (sid, f) => {
+      // fakeTmuxFor has no onCall seam — wrap run. The first capture-pane is
+      // inside the start's readiness loop, strictly before the start's own
+      // sendMessage; the loop's fake sleeps yield macrotasks
+      // (macrotaskSleep), so the POST is received and its send enters the
+      // serialized chain while the ensure still owns it.
+      const prevRun = f.tmux.run;
+      f.tmux.run = (args, o) => {
+        if (args[0] === "capture-pane" && port !== null && !chats.has(sid)) {
+          chats.set(sid, request(port, "POST", `/sessions/${sid}/message`, {
+            body: { text: "initial prompt for A" },
+          }));
+        }
+        return prevRun(args, o);
+      };
+    },
+  });
+  port = await listen(host);
+  try {
+    const started = await request(port, "POST", "/sessions", { body: startBody("A") });
+    const sid = started.json.session.sessionId;
+    await host.settled();
+    assert.ok(chats.has(sid), "the racing chat send was staged");
+    const chatRes = await chats.get(sid);
+    assert.equal(chatRes.status, 200);
+    assert.equal(chatRes.json.queued, true, "the chat send queued behind the busy turn (it holds the key)");
+    // The start's send was refused by the guard — nothing was pasted twice.
+    assert.deepEqual(fakeFor(sid).tmux.pastes, ["initial prompt for A"], "exactly one paste: the chat's");
+    const rec = store.get(sid);
+    assert.equal(rec.status, "waiting");
+    assert.match(rec.lastError, /NOT pasted/);
+    assert.match(rec.lastError, /deliver manually/);
+    const pendingPath = join(tmp, "supervisor", "sessions", sid, "pending-prompt.json");
+    assert.equal(
+      JSON.parse(readFileSync(pendingPath, "utf8")).state,
+      "delivering",
+      "the delivery state was never advanced to delivered",
     );
   } finally {
     host.close();

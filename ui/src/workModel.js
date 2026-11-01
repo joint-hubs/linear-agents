@@ -316,8 +316,8 @@ export function labelNames(tickets) {
 // (no session host) the dialog opens the Cockpit with the text prefilled
 // instead of sending (plan, Start). The button is disabled while sending,
 // after it landed, and when there is nothing to send — always with a written
-// reason. resultText is honest about what happened: sent, queued, or the
-// error text itself.
+// reason. resultText is honest about what happened: sent, queued, a duplicate
+// refusal (nothing was pasted again), or the error text itself.
 export function startDialogModel(preview, { sending, result, error, loading } = {}) {
   const p = preview || null;
   const issue = (p && p.issue) || null;
@@ -330,12 +330,17 @@ export function startDialogModel(preview, { sending, result, error, loading } = 
   } else if (sending) {
     disabled = true;
     disabledReason = 'Sending…';
-  } else if (result && (result.sent || result.queued)) {
+  } else if (result && (result.sent || result.queued || result.duplicate)) {
     disabled = true;
     disabledReason = 'Already sent.';
   }
   let resultText = null;
   if (error) resultText = error;
+  else if (result && result.duplicate) {
+    // A duplicate is a REFUSED send (the host pasted nothing — the same text
+    // is already queued), so it must not read as "Sent"/"Queued" (FOC-1111 F6).
+    resultText = 'Already queued — it will be delivered when the current turn ends.';
+  }
   else if (result && result.sent) resultText = 'Sent — the Supervisor has it';
   else if (result && result.queued) resultText = 'Queued';
   return {
