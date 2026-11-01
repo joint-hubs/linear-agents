@@ -529,6 +529,10 @@
       "reason": "isolation audit FOC-614: mkdtemp/tmpdir fixtures only; no ports, no socket binds, no real-repo-path writes; telemetry DB only via the LA_TELEMETRY_DB seam pointed at temp paths"
     },
     {
+      "file": "supervisor-headless-env.test.mjs",
+      "reason": "isolation audit FOC-1066: reads docker/entrypoint.sh read-only and asserts the supervisor-run branch's env exports as text; no fs writes, no ports, no socket binds, no real-repo-path writes, no telemetry DB"
+    },
+    {
       "file": "supervisor-holds.test.mjs",
       "reason": "isolation audit FOC-612: mkdtemp/tmpdir fixtures only; supervisor state via the LA_SUPERVISOR_STATE_HOME seam set at module load (spawned gate processes inherit it); pricing via the LA_MODELS_ROOT seam pointed at a fixture table; graph-runner completion tests inject their graph and dependencies; no ports, no socket binds, no real-repo-path writes, no telemetry DB"
     },
