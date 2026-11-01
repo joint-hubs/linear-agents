@@ -230,6 +230,9 @@
 .ck-card-q-text {
   margin-top: 4px;
   font-size: 12.5px;
+  /* Ask questions may be multiline — same reason as the inbox summary. */
+  white-space: pre-line;
+  overflow-wrap: anywhere;
 }
 
 .ck-card-options {
@@ -352,12 +355,19 @@
 .ck-inbox-summary {
   margin-top: 6px;
   font-size: 12.5px;
+  /* Hold summaries and question hints are multiline — keep their line
+     breaks (FOC-1056 UI fixup). */
+  white-space: pre-line;
+  overflow-wrap: anywhere;
 }
 
 .ck-inbox-list {
   margin: 6px 0 0;
   padding-left: 18px;
   font-size: 12px;
+  /* Question/fact lines may be multiline — same reason as the summary. */
+  white-space: pre-line;
+  overflow-wrap: anywhere;
 }
 
 .ck-inbox-facts { color: var(--muted); }
