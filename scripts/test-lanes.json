@@ -823,6 +823,10 @@
       "reason": "end-to-end through the real supervisor-watch.mjs child (spawnSync, fake claude behind the LA_CLAUDE_BIN seam); LA_SUPERVISOR_STATE_HOME/LA_SQUAD_HOME seams set at module load and inherited by the child — conservative serial for processes, same harness as supervisor-watch (FOC-1154)"
     },
     {
+      "file": "supervisor-watch-linger-short-reap.test.mjs",
+      "reason": "end-to-end through the real supervisor-watch.mjs child (fake claude behind the LA_CLAUDE_BIN seam); LA_SUPERVISOR_STATE_HOME/LA_SQUAD_HOME seams set at module load and inherited by the child — conservative serial for processes, same harness as supervisor-watch-linger (FOC-1160)"
+    },
+    {
       "file": "task-sessions.test.mjs",
       "reason": "cross-process invariants raced through independent node child processes (execFile) against one SQLite file in a mkdtemp dir — conservative serial for processes (task workspace P1)"
     },

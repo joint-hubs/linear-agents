@@ -440,6 +440,13 @@ let sawInit = false;
 // off and normal stall behaviour resumes.
 let lastEventIsResult = false;
 let lastEventAt = 0;
+// FOC-1160: whether a terminal `result` has been parsed at all this turn, and
+// whether the LAST parsed event is the empty-registry proof that may only
+// follow one. Both reset with the stream: every parsed event re-derives the
+// proof (so any event after it disarms it), and the state is per-turn by
+// construction — a follow-up turn is a new watcher process.
+let sawResult = false;
+let lastEventProvesEmptyRegistry = false;
 
 // One read of config/models.json for the whole turn. A missing or broken price
 // table must not stop the child: cost becomes unknown (null), which is exactly
@@ -564,6 +571,42 @@ function scanStall() {
   }
 }
 
+// ── FOC-1160: short reap — the registry is PROVABLY empty after the result ───
+// Run-3409: on win32 a turn whose background task was force-killed at turn end
+// leaves the CLI in its print-mode bg-wait drain (a wait that will never
+// resolve), emitting nothing after the teardown tail: result → task_updated →
+// task_notification → `background_tasks_changed` with `tasks: []` → silence
+// until the CLI's own 600 s ceiling expires. The FOC-1154 gate cannot see that
+// shape — the teardown events flip `lastEventIsResult` off, so the SLA path
+// stands down and the child lingers the full SLA.
+//
+// The approved rule is deliberately narrow: the short reap fires ONLY when the
+// stream PROVES the background-task registry is empty after the last result —
+// the LAST parsed event is `background_tasks_changed` with an empty `tasks`
+// array, or a `task_summary` with no live task, and a `result` was seen before
+// it. A bare terminal result is NEVER short-reaped (it stays on the 600 s SLA —
+// the FOC-1154 guarantee: a healthy child re-emits cumulative results mid-turn
+// and can sit tee-silent for a background task's duration). Any event after the
+// proof disarms it; a second proof re-arms it.
+const REAP_GRACE_MS = 60_000;
+// TEST SEAM, shaped like LA_SUPERVISOR_POLL_MS: the suite shrinks the grace so
+// the e2e scenarios stay around seconds; production leaves it unset.
+const lingerGraceMs = () => {
+  const raw = Number(process.env.LA_SUPERVISOR_LINGER_GRACE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : REAP_GRACE_MS;
+};
+// The proof, per the shapes run-3409 and the foc-1160 probes captured: `tasks`
+// is a top-level array on background_tasks_changed; `detail` is null/"" on a
+// task_summary emitted with no live task and a description when one runs.
+// Anything the stream does not spell out as empty reads as NOT a proof —
+// fail-safe, the SLA path stays in charge.
+const emptyRegistryProof = (event) => {
+  if (event?.type !== "system") return false;
+  if (event.subtype === "background_tasks_changed") return Array.isArray(event.tasks) && event.tasks.length === 0;
+  if (event.subtype === "task_summary") return !event.detail;
+  return false;
+};
+
 // ── FOC-1154: reap a turn that ended but whose process lingers ───────────────
 // The turn's work is done (the tee's last event is a terminal `result`) and the
 // child will not exit on its own — on win32 never. The reap REPLACES the false
@@ -581,23 +624,45 @@ function scanStall() {
 // (registry status, gate handling, cost patch, the `exit` wake row) and the
 // watcher exits — no new wake class, no second finalizer to keep in sync.
 let lingerReaped = false; // a reap LANDED — the exit row carries finishedLingering
+let lingerReapShort = false; // the reap that landed was the FOC-1160 short path
 let lingerReapFailed = false; // both kill attempts failed — noted once, never faked
 let lingerFinalizeTimer = null;
 
 function scanLinger() {
-  if (finalized || lingerReaped || lingerReapFailed || !lastEventIsResult) return;
+  if (finalized || lingerReaped || lingerReapFailed) return;
+  // Two triggers, one mechanism: the FOC-1154 SLA path (the last event is a
+  // bare terminal result) and the FOC-1160 short-reap path (the last event is
+  // the empty-registry proof that came after a result). Everything else — a
+  // bare result inside the grace window, a proof with a non-empty registry,
+  // any event after the proof — is left to the stall SLA exactly as before.
+  const shortReap = lastEventProvesEmptyRegistry;
+  if (!shortReap && !lastEventIsResult) return;
   // Liveness before the force-kill: 'exit' may have fired with the
   // TAIL_DRAIN_MS finalize still pending — killing that pid could hit a
   // RECYCLED process on win32. A child that demonstrably already exited needs
   // no reap; its own finalizer is at most TAIL_DRAIN_MS away.
   if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
-  // Silence is measured past the terminal result itself (the event time, not
-  // the tee mtime — a watcher note must not move this anchor).
-  if (Date.now() - lastEventAt < STALL_AFTER_MS) return;
-  note({
-    subtype: "result_linger_reap",
-    message: `last stream event was a terminal result ${Math.round((Date.now() - lastEventAt) / 1000)}s ago with no exit — reaping the lingering child (FOC-1154)`,
-  });
+  // Silence is measured past the last parsed event itself (the event time, not
+  // the tee mtime — a watcher note must not move this anchor): the SLA on the
+  // FOC-1154 path, the shorter FOC-1160 grace on the short path.
+  if (shortReap) {
+    // A pending gate means the Supervisor is already engaged on this turn —
+    // the short reap stands down and the ordinary stall machinery owns the
+    // silence (the proof shape is a non-result last event, so scanStall is
+    // not suppressed). The approved 60 s grace must also fully elapse.
+    if (hasPendingGate(runId, childId)) return;
+    if (Date.now() - lastEventAt < lingerGraceMs()) return;
+    note({
+      subtype: "result_linger_reap_short",
+      message: `last stream event proved the background-task registry empty ${Math.round((Date.now() - lastEventAt) / 1000)}s ago with no exit — reaping the lingering child (FOC-1160)`,
+    });
+  } else {
+    if (Date.now() - lastEventAt < STALL_AFTER_MS) return;
+    note({
+      subtype: "result_linger_reap",
+      message: `last stream event was a terminal result ${Math.round((Date.now() - lastEventAt) / 1000)}s ago with no exit — reaping the lingering child (FOC-1154)`,
+    });
+  }
   // killTree reports false for an already-gone tree. The liveness probe above
   // has already filtered the cases it can see, so a false here is either a tree
   // that died in the gap (its own exit finalizes normally — no failure to
@@ -607,6 +672,7 @@ function scanLinger() {
   const reaped = killTree(child.pid, "force") || killTree(child.pid, "force");
   if (reaped) {
     lingerReaped = true;
+    if (shortReap) lingerReapShort = true;
   } else {
     lingerReapFailed = true;
     note({
@@ -682,6 +748,11 @@ child.stdout.on("data", (chunk) => {
     // FOC-1154: this is the gate's heartbeat — every parsed event refreshes it,
     // so the linger scan below only acts while the LAST event is a `result`.
     lastEventIsResult = event.type === "result";
+    // FOC-1160: the short-reap proof arm/disarm. A `result` must have been
+    // seen first, and the proof must BE the last parsed event — every other
+    // event clears it here, a second proof re-arms it in the same step.
+    sawResult = sawResult || lastEventIsResult;
+    lastEventProvesEmptyRegistry = sawResult && emptyRegistryProof(event);
     lastEventAt = Date.now();
 
     if (!sawInit && event.type === "system" && event.subtype === "init" && event.session_id) {
@@ -1012,6 +1083,10 @@ function finalizeTurn(code, signal) {
       status,
       exitCode: code,
       ...(lingerReaped ? { finishedLingering: true } : {}),
+      // FOC-1160: which reap landed — `finishedLingeringShort` only ever rides
+      // a short reap, so the exit row distinguishes the two without a new
+      // event class (the drain logic sees the `exit` row it always saw).
+      ...(lingerReapShort ? { finishedLingeringShort: true } : {}),
       ...(lingerReapFailed ? { lingerReapFailed: true } : {}),
     },
   });
