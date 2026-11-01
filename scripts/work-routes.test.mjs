@@ -122,11 +122,23 @@ mkdirSync(runsDir, { recursive: true });
   store.close();
 }
 
-const NOW = "2026-10-13T12:00:00.000Z";
-const T1 = "2026-10-13T08:00:00.000Z"; // dev-1 turn 1 start
-const T2 = "2026-10-13T09:00:00.000Z"; // dev-1 turn 1 end
-const T3 = "2026-10-13T10:00:00.000Z"; // dev-1 turn 2 start — the rework cutoff
-const T4 = "2026-10-13T11:00:00.000Z"; // dev-1 turn 2 end
+// FOC-1150: the fixture clock is DERIVED from the real Date.now() at module
+// load — every seeded timestamp sits a fixed offset behind it (the same
+// deltas the original fixed dates carried), so the 30d windows the server
+// and the cost-snapshot child compute can never age the data out, however
+// late this file runs. (The earlier fixed 2026-10-13 dates aged out around
+// 2026-11-12 — the same class the team-routes FOC-1150 fix addresses; the
+// injected-clock seam does not reach this pipeline's several Date.now()
+// consumers — collectTicketFacts' 30d facts window, the snapshot windows and
+// the stale label — so relative dates are the self-consistent fix here.)
+const HOUR_MS = 60 * 60 * 1000;
+const NOW_MS = Date.now();
+const atOffset = (offsetMs) => new Date(NOW_MS + offsetMs).toISOString();
+const NOW = atOffset(0);
+const T1 = atOffset(-4 * HOUR_MS); // dev-1 turn 1 start
+const T2 = atOffset(-3 * HOUR_MS); // dev-1 turn 1 end
+const T3 = atOffset(-2 * HOUR_MS); // dev-1 turn 2 start — the rework cutoff
+const T4 = atOffset(-1 * HOUR_MS); // dev-1 turn 2 end
 
 // ── the FOC-788 publish fixture: wt-work-1 is a REAL checkout ────────────────
 //
@@ -242,8 +254,8 @@ function usage(db, runId, at, inputTokens, { model = "deepseek-v4-flash" } = {})
   applyEvent(db, makeEvent("task.linked", { runId: "tel-1", taskId: "WORK-1", source: "launch", confidence: 1 }, {
     runId: "tel-1", observedAt: T1, sourceKind: "test",
   }));
-  usage(db, "tel-1", "2026-10-13T09:30:00.000Z", 100_000); // turn 1
-  usage(db, "tel-1", "2026-10-13T10:30:00.000Z", 50_000);  // turn 2 — rework
+  usage(db, "tel-1", atOffset(-2.5 * HOUR_MS), 100_000); // turn 1 (between T2 and T3)
+  usage(db, "tel-1", atOffset(-1.5 * HOUR_MS), 50_000);  // turn 2 — rework (at/after T3)
   db.close();
 }
 
