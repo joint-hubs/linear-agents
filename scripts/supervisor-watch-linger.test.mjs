@@ -28,7 +28,7 @@
 // Everything runs in temp dirs (LA_SUPERVISOR_STATE_HOME, LA_SQUAD_HOME,
 // CLAUDE_CONFIG_DIR, LA_SUPERVISOR_NO_TELEMETRY=1, LA_SUPERVISOR_NO_CODEGRAPH=1)
 // and the stall SLA is shrunk through the existing LA_SUPERVISOR_POLL_MS seam
-// ("1000" → stallSilenceMs() = 5 s; the re-emit scenario uses "4000" → 20 s to
+// ("1000" → stallSilenceMs() = 5 s; the re-emit scenario uses "5000" → 25 s to
 // outrun the rejected sub-SLA grace), so the whole file stays around two
 // minutes. Test pids come ONLY from the fixtures' own registry entries — the
 // suite never scans for or kills processes it did not spawn.
@@ -258,9 +258,13 @@ async function waitForExitRow(runId, timeoutMs = 60_000) {
 }
 
 const EXIT_KEY = `exit:dev-1:0`;
+// Exact-subtype match: `result_linger_reap` is a PREFIX of
+// `result_linger_reap_failed`, so a bare includes() would conflate a failed
+// reap with a landed one (review round 2, N3). The note JSON has no spaces, so
+// the quote-delimited key is exact.
 const reapNotedIn = (runId) => {
   try {
-    return readFileSync(teeAbsPath(runId, "dev-1"), "utf8").includes("result_linger_reap");
+    return readFileSync(teeAbsPath(runId, "dev-1"), "utf8").includes('"subtype":"result_linger_reap"');
   } catch {
     return false;
   }
@@ -443,10 +447,18 @@ test("a second terminal result re-arms the linger gate — reap at the SLA, neve
 // ── The healthy mid-turn re-emit (review round 1 #1) ─────────────────────────
 console.log("\nAC-1d: result -> dlugie tlo -> re-emit -> praca -> normalny koniec (FOC-1154)");
 
-// LA_SUPERVISOR_POLL_MS=4000 → SLA 20 s: the 16 s background wait stays under
-// the SLA (no reap) while sitting far past the rejected 10 s grace, which would
-// have force-killed this healthy child before its re-emit.
+// LA_SUPERVISOR_POLL_MS=5000 → SLA 25 s: the 16 s background wait stays under
+// the SLA (nominal margin 9 s — even a slow CI box cannot burn it, since the
+// elapsed time is measured from the result's parse, which only ever shrinks it)
+// while sitting far past the rejected 10 s grace, which would have force-killed
+// this healthy child before its re-emit.
 fixtureChild("test-watch-linger-reemit");
+// spawnSync blocks this module's event loop for the scenario's whole wall
+// time (~20 s, hard timeout 90 s as the bound) — safe by construction: this
+// is the LAST scenario, and it runs during module evaluation, before any of
+// the async polls above has had its first tick, so no deadline is eroded
+// (their Date.now() anchors are taken when the async fns first run, after
+// module eval). Review round 2, N2.
 const resultReemit = spawnSync(
   process.execPath,
   [WATCH, "--run", "test-watch-linger-reemit", "--child", "dev-1", "--cwd", cwd, "--prompt-file", promptFile, "--turn", "0"],
@@ -463,7 +475,7 @@ const resultReemit = spawnSync(
       CLAUDE_CONFIG_DIR: configDir,
       LA_SUPERVISOR_NO_TELEMETRY: "1",
       LA_SUPERVISOR_NO_CODEGRAPH: "1",
-      LA_SUPERVISOR_POLL_MS: "4000",
+      LA_SUPERVISOR_POLL_MS: "5000",
       LA_CLAUDE_BIN: FAKE_CLAUDE_REEMIT,
       FAKE_SESSION_ID: "test-watch-linger-reemit-session",
     },
@@ -477,7 +489,8 @@ test("a healthy child re-emitting after a long background wait finishes normally
   assert.equal(entry.exitCode, 0, "the child's own exit code was replaced by a kill artifact");
   const tee = readFileSync(teeAbsPath("test-watch-linger-reemit", "dev-1"), "utf8");
   assert.ok(tee.includes("post-rewake"), "the child never got to do work after the re-emit");
-  assert.ok(!tee.includes("result_linger_reap"), "the linger path reaped a healthy background-wait child");
+  // Exact subtype (N3 — `result_linger_reap` prefixes the `_failed` variant).
+  assert.ok(!tee.includes('"subtype":"result_linger_reap"'), "the linger path reaped a healthy background-wait child");
   const exit = readWakeQueue("test-watch-linger-reemit").find((r) => r.dedupKey === EXIT_KEY);
   assert.ok(exit, "the exit wake row is missing");
   assert.equal(

@@ -598,27 +598,33 @@ function scanLinger() {
     subtype: "result_linger_reap",
     message: `last stream event was a terminal result ${Math.round((Date.now() - lastEventAt) / 1000)}s ago with no exit — reaping the lingering child (FOC-1154)`,
   });
-  // killTree reports false for an already-gone tree. One retry; a double
-  // failure is recorded honestly and the child's own exit stays the finalizer —
-  // finalizeTurn(0) here would fabricate a clean exit for a tree that was not
-  // reaped.
-  if (!killTree(child.pid, "force") && !killTree(child.pid, "force")) {
+  // killTree reports false for an already-gone tree. The liveness probe above
+  // has already filtered the cases it can see, so a false here is either a tree
+  // that died in the gap (its own exit finalizes normally — no failure to
+  // report) or a live tree the kill could not land on. One retry; a double
+  // failure is recorded honestly — finalizeTurn(0) here would fabricate a
+  // clean exit for a tree that was not reaped.
+  const reaped = killTree(child.pid, "force") || killTree(child.pid, "force");
+  if (reaped) {
+    lingerReaped = true;
+  } else {
     lingerReapFailed = true;
     note({
       subtype: "result_linger_reap_failed",
-      message: `two force kills of pid ${child.pid} failed — leaving the child's own exit as the finalizer (FOC-1154)`,
+      message: `two force kills of pid ${child.pid} did not land (the tree may already be gone) — arming the bounded last-resort finalize (FOC-1154)`,
     });
-    return;
   }
-  lingerReaped = true;
-  // The kill normally lands through the child's own exit/close handlers within
-  // TAIL_DRAIN_MS. The bound covers the case where neither fires (a kill that
-  // failed on an already-detached tree): without it the watcher would outlive
-  // the turn forever, the exact waste this fix removes. Same shape and window
-  // as the terminator's timer, cleared by finalizeTurn the moment it starts,
-  // and NOT unref'd — it is the last thing keeping the watcher alive.
+  // Bounded last resort (review round 2, S1): the scanner must never leave the
+  // turn without a consumable signal. On a landed kill the child's own
+  // exit/close normally finalizes within TAIL_DRAIN_MS and this timer is a
+  // no-op; after a double kill failure nothing else will ever fire, so the
+  // bound runs the NORMAL finalizeTurn with the truthful code — null when the
+  // child may still be alive (status crashed, exitCode null, lingerReapFailed
+  // on the turn record and the wake row). Same shape and window as the
+  // terminator's timer, cleared by finalizeTurn the moment it starts, and NOT
+  // unref'd — it is the last thing keeping the watcher alive.
   lingerFinalizeTimer = setTimeout(() => {
-    if (!finalized) finalizeTurn(0, null);
+    if (!finalized) finalizeTurn(reaped ? 0 : null, null);
   }, TAIL_DRAIN_MS + 1500);
 }
 
@@ -880,6 +886,10 @@ function finalizeTurn(code, signal) {
     // FOC-808 (slice B): the pids the sweep killed — the registry record the
     // plan names, so a turn's teardown is auditable without the tee.
     sweptPids,
+    // FOC-1154: the last-resort finalize after both force kills failed — the
+    // child may still be alive; the Supervisor should see why this turn closed
+    // without an exit.
+    ...(lingerReapFailed ? { lingerReapFailed: true } : {}),
     ...(isolationRefused
       ? { isolationError: "spawn refused by the isolation helper (exit 97) — no unisolated fallback" }
       : {}),
@@ -991,13 +1001,19 @@ function finalizeTurn(code, signal) {
   if (shareTimer) clearInterval(shareTimer); // FOC-980: the turn is over — stop the 30 s share
   scanGates();
   // FOC-1154: `finishedLingering` marks the exit as a reap after a terminal
-  // result — the event type stays `exit`, so drain logic and quiescence waits
-  // see exactly the row they always saw.
+  // result; `lingerReapFailed` marks the last-resort finalize where both kills
+  // failed and the child may still be alive. The event type stays `exit`, so
+  // drain logic and quiescence waits see exactly the row they always saw.
   wake({
     event: "exit",
     childId,
     turn: turnIndex,
-    detail: { status, exitCode: code, ...(lingerReaped ? { finishedLingering: true } : {}) },
+    detail: {
+      status,
+      exitCode: code,
+      ...(lingerReaped ? { finishedLingering: true } : {}),
+      ...(lingerReapFailed ? { lingerReapFailed: true } : {}),
+    },
   });
 
   endTelemetryRun(args["telemetry-run"], code ?? 1);
