@@ -45,9 +45,7 @@ Start the Supervisor scoped with the command above, or set FENIX_SUPERVISOR_LEGA
 ## The cap: `taskSessions.maxActive`
 
 The cap on concurrently active (`starting|running|waiting`) sessions defaults
-to **1** (`DEFAULT_MAX_ACTIVE` in `scripts/task-sessions.mjs`). Two small-ticket
-sessions on one repository still share the main checkout (FOC-1088), so running
-more than one at a time is opt-in until that lands. Precedence:
+to **1** (`DEFAULT_MAX_ACTIVE` in `scripts/task-sessions.mjs`). Precedence:
 
 1. `deps.maxActive` (embedders/tests),
 2. env `FENIX_MAX_ACTIVE_SUPERVISORS` (integer ≥ 1 — the operational override),
@@ -55,11 +53,49 @@ more than one at a time is opt-in until that lands. Precedence:
    `fenix settings set taskSessions.maxActive 2`,
 4. 1.
 
-Raise it to 2 only when the concurrent sessions work on different repositories
-(or after FOC-1088), and beyond 2 only after a measured resource spike — the cap=2 benchmark
+After FOC-1088 the operator MAY raise the cap to 2 with
+`fenix settings set taskSessions.maxActive 2` + `fenix restart supervisor`
+(both exist on main since #170) — the two concurrent sessions must then either
+run on different repositories per session, or the per-task worktree lane below
+must have been live-verified first. Beyond 2 only after a measured resource spike — the cap=2 benchmark
 (2026-10-14, `docs/plans/task-workspace-delivery.md`) is the baseline; 4 is the
 documented next step once a spike justifies it. The chosen source is logged
 once at host start: `maxActive=<n> (<source>)`.
+
+## Per-task worktrees (FOC-1088, opt-in)
+
+With `FENIX_TASK_WORKTREES=1` on the host, every managed session works in its
+OWN git worktree of the task's repository instead of a shared checkout — two
+concurrent sessions on one repo no longer collide on `git checkout -b` or
+commits (seen live on the FOC-789 acceptance run). Off by default: a host that
+cannot resolve a repository fails sessions closed rather than silently keeping
+the shared-checkout behaviour.
+
+- **Branch** — derived deterministically from the task only:
+  `buildBranchName(issueId, "task")` → `foc-<n>-task`. The session id never
+  appears in the name, so a resumed generation (stopped → resume) reuses the
+  SAME branch and worktree, its predecessor's commits included. A new branch
+  starts at the origin default branch (`git remote set-head origin -a` must
+  resolve there; the start fails closed otherwise).
+- **Claim** — the workspace is claimed in the workspace-claims registry under
+  the owner `task-session:<taskKey>` (task-scoped, so a resumed generation
+  re-claims its own branch as the same owner). The pane inherits the worktree
+  through `FENIX_REPO_DIR` — the entrypoint's supervisor-run branch already
+  resolves `LA_SUPERVISOR_REPO` from it and cds there, so no entrypoint change.
+- **Repository resolution** — candidates in order: an explicit repository
+  (embedders/tests), `FENIX_REPO_DIR`, `LA_SUPERVISOR_REPO` on the host
+  process. There is deliberately NO cwd fallback (the host runs from the fenix
+  stack checkout, never the task's repository); with no resolvable candidate
+  every session start fails closed, naming what was tried.
+- **Release** — stop (including its queued and terminal early returns) and
+  failed starts release the claim; a `waiting` session keeps it, because the
+  generation continues after recovery in the same tree. The worktree itself is
+  NEVER removed automatically — cleanup is the operator's (`git worktree
+  remove`).
+- **Crash recovery** — a session that crashes mid-flight may leave a claimed
+  worktree behind. The registry names the owner; release is explicit:
+  `node scripts/workspace-claims.mjs release --git-root <dir> --branch <b>
+  --owner task-session:<taskKey>`.
 
 ## Doctor line
 
