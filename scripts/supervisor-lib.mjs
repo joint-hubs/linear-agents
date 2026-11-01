@@ -1841,6 +1841,14 @@ const REDACTIONS = [
   [/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1***@"],
   // npm's credential shape in .npmrc-backed error output.
   [/\b(_?authToken)\s*[=:]\s*\S+/gi, "$1=***"],
+  // r2 N3: npm's legacy single-credential field, and registry URLs that carry
+  // the token in the QUERY STRING (?token=…, &auth=…) — shapes the authority
+  // redaction above cannot see. Ordered after the authToken rule: by the time
+  // this runs, `_authToken=x` is already `_authToken=***`, and the pattern
+  // below cannot match it anyway (`_auth` must be followed by `=`/`:`, not the
+  // `T` of `_authToken`).
+  [/\b(_auth)\s*[=:]\s*\S+/gi, "$1=***"],
+  [/([?&](?:access[_-]?token|auth|token)=)[^\s&]+/gi, "$1***"],
 ];
 
 export function redact(text) {
@@ -2164,6 +2172,12 @@ const installTimeoutMs = () => {
 // the whole 64 MB in memory.
 const INSTALL_OUTPUT_KEEP_BYTES = 1024 * 1024;
 
+// r2 N2: after the timeout fires and the tree kill is issued, this is how long
+// the shell gets to exit on its own before the install result is resolved
+// anyway. `taskkill /F` lands in milliseconds when it lands at all, so in the
+// normal case `close` wins this race long before the timer fires.
+const INSTALL_KILL_GRACE_MS = 10_000;
+
 /**
  * True when the entry is a reparse point of ANY win32 tag, not merely a symlink
  * or junction (FOC-1153 r1, nit 4). lstat alone cannot see the attribute: it
@@ -2220,12 +2234,14 @@ async function installDepsAt(dir, location) {
   if (st) {
     try {
       rmSync(nm); // link or stray file; rmSync does not follow a reparse point
-      record.replacedReparsePoint = true;
+      // r2 N6: renamed from `replacedReparsePoint` — this branch also fires for
+      // a node_modules that is a stray FILE, and the old name overclaimed.
+      record.replacedObstruction = true;
     } catch (err) {
       return {
         ...record,
         ok: false,
-        error: `could not remove the node_modules reparse point: ${err.message.split("\n")[0]}`,
+        error: `could not remove the node_modules reparse point or stray file: ${err.message.split("\n")[0]}`,
       };
     }
   }
@@ -2235,6 +2251,11 @@ async function installDepsAt(dir, location) {
   const hasLockfile = existsSync(join(dir, "package-lock.json"));
   const command = hasLockfile ? "npm ci" : "npm install";
   const run = await runBoundedInstall(dir, command, ["--no-audit", "--no-fund"]);
+  // r2 N12: the streams arrive decoded and separate. The tail is stderr-first
+  // — npm's diagnosis lives there; a run whose failure printed nothing on
+  // stderr falls back to stdout.
+  const stderrLines = run.stderr.split("\n").filter(Boolean);
+  const stdoutLines = run.stdout.split("\n").filter(Boolean);
   return {
     ...record,
     skipped: false,
@@ -2242,11 +2263,16 @@ async function installDepsAt(dir, location) {
     command,
     exitCode: run.code,
     timedOut: run.timedOut,
-    // nit 6: the record lands in the registry entry and the spawn result, so it
-    // is scrubbed HERE, where every consumer inherits it — npm scrubs its own
-    // error lines, but an install script's output passes through raw.
-    error: run.spawnError ? redact(run.spawnError.split("\n")[0]) : null,
-    tail: run.output.split("\n").filter(Boolean).slice(-5).map(redact),
+    // r2 N2: set only when the timeout's tree kill did not land and the result
+    // was resolved by the grace timer — `exitCode: null` plus this field says
+    // the npm tree may still be running.
+    ...(run.killFailed ? { killFailed: true } : {}),
+    // r1 nit 6 / r2 N4: the record lands in the registry entry and the spawn
+    // result, so it is scrubbed HERE, where every consumer inherits it — npm
+    // scrubs its own error lines, but an install script's output passes through
+    // raw. The spawn error is redacted on EVERY line, not just the first.
+    error: run.spawnError ? redact(run.spawnError) : null,
+    tail: (stderrLines.length ? stderrLines : stdoutLines).slice(-5).map(redact),
   };
 }
 
@@ -2269,18 +2295,39 @@ function runBoundedInstall(dir, command, args) {
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let output = "";
+    // r2 N12: the streams are decoded (setEncoding carries a UTF-8 sequence
+    // split across pipe chunks) and kept SEPARATE — merging them chunk-wise
+    // interleaves the two streams nondeterministically and is what made the
+    // 1 MiB tail slice unreliable.
+    let stdout = "";
+    let stderr = "";
     let spawnError = null;
     let timedOut = false;
+    let killGrace = null;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      output = `${output}${chunk}`.slice(-INSTALL_OUTPUT_KEEP_BYTES);
+      stdout = `${stdout}${chunk}`.slice(-INSTALL_OUTPUT_KEEP_BYTES);
     });
     child.stderr.on("data", (chunk) => {
-      output = `${output}${chunk}`.slice(-INSTALL_OUTPUT_KEEP_BYTES);
+      stderr = `${stderr}${chunk}`.slice(-INSTALL_OUTPUT_KEEP_BYTES);
     });
     const timer = setTimeout(() => {
       timedOut = true;
+      // r2 N2: killTree swallows its own failure (its `false` also covers the
+      // benign "already gone" race, which is why it is not branched on here).
+      // If the tree kill did NOT land, `close` never fires and the spawn
+      // blocks on this promise forever — so a grace timer is armed on every
+      // timeout and resolves with the timeout result regardless; in the normal
+      // case `close` wins the race and clears it.
       killTree(child.pid, "force");
+      killGrace = setTimeout(() => {
+        console.error(
+          `[supervisor-lib] install in ${dir} timed out and the tree kill of pid ${child.pid} did not land — ` +
+            "resolving with the timeout result; the npm tree may still be running",
+        );
+        resolve({ code: null, timedOut, spawnError, stdout, stderr, killFailed: true });
+      }, INSTALL_KILL_GRACE_MS);
     }, installTimeoutMs());
     child.on("error", (err) => {
       spawnError = spawnError ?? err.message;
@@ -2288,7 +2335,8 @@ function runBoundedInstall(dir, command, args) {
     // `close` always follows `error` (node contract), so this is the one exit.
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ code, timedOut, spawnError, output });
+      if (killGrace) clearTimeout(killGrace);
+      resolve({ code, timedOut, spawnError, stdout, stderr });
     });
   });
 }
@@ -2313,7 +2361,14 @@ function runBoundedInstall(dir, command, args) {
  * @returns {Promise<{ worktree: string, ok: boolean, locations: object[] }>}
  */
 export async function installWorktreeDeps(worktree) {
-  const locations = [await installDepsAt(worktree, "root"), await installDepsAt(join(worktree, "ui"), "ui")];
+  // r2 N8: the two locations are independent trees, so the installs run
+  // concurrently — worst-case spawn block halves. Failure attribution is
+  // unchanged: each installDepsAt call owns its record and its own try/catch,
+  // so a failure in one lands in that location's record, never the other's
+  // (and a rejection — which installDepsAt does not produce short of a
+  // programming error — would reject the whole Promise.all exactly as a
+  // sequential await would have thrown).
+  const locations = await Promise.all([installDepsAt(worktree, "root"), installDepsAt(join(worktree, "ui"), "ui")]);
   return {
     worktree,
     ok: locations.every((l) => l.skipped || l.ok),

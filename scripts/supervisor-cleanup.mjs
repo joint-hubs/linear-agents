@@ -69,11 +69,11 @@ import {
   LIVE_STATUSES,
   ROOT,
   dirtyTreeReport,
-  isReparsePoint,
   failJson,
   git,
   isAffirmative,
   isNegative,
+  isReparsePoint,
   listWorktrees,
   parseArgs,
   readRegistry,
@@ -1005,6 +1005,13 @@ function cmdRemove(args) {
  * incident class unprotected — the worst case for a tracked link lost that way
  * is a dirty tree whose removal git itself then refuses.
  *
+ * The refusal is a PRE-SCAN (r2 N7): every reparse point is collected first and
+ * the tracked check runs over the complete set BEFORE anything is unlinked, so
+ * a refused removal leaves the tree exactly as found.
+ *
+ * Exported for the suites: the git-failure fallback (r2 N10) is pinned directly
+ * by walking a directory that is not a git repo.
+ *
  * Runs BEFORE `git worktree remove` and refuses the removal when a link cannot
  * be unlinked: a git remove that follows an unremovable link is the incident
  * itself. As with the existing git failure path, the archive step has already
@@ -1012,10 +1019,19 @@ function cmdRemove(args) {
  *
  * @returns {{ path: string, target: string|null }[]} paths relative to the worktree root
  */
-function unlinkReparsePoints(worktree) {
-  const removed = [];
+export function unlinkReparsePoints(worktree) {
+  // r2 N7: the tracked refusal used to fire MID-WALK, after earlier untracked
+  // links had already been unlinked — tree mutation under an approval that
+  // never happened, with the partial `removed` list dropped from the failure
+  // payload. So the walk is split in two: one traversal COLLECTS every reparse
+  // point without touching anything, the tracked check runs over the complete
+  // set, and only a clean scan proceeds to unlinking. A refused removal now
+  // leaves the tree exactly as found. (Chosen over the alternative of carrying
+  // the partial list in the payload: with a pre-scan the refusal is
+  // order-independent — no reliance on readdir order, nothing to lose.)
   const trackedLinks = trackedSymlinkPaths(worktree);
-  const visit = (dir, rel) => {
+  const links = [];
+  const scan = (dir, rel) => {
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -1032,36 +1048,43 @@ function unlinkReparsePoints(worktree) {
         continue; // vanished between readdir and lstat — nothing to remove
       }
       if (isReparsePoint(st, entry)) {
-        if (trackedLinks?.has(path)) {
-          failJson(
-            `refusing the removal: ${path} is a git-tracked symlink (mode 120000) — ` +
-              `unlinking it would change tracked content the approval never showed, and leaving it ` +
-              `would let git worktree remove follow it out of the tree; resolve the link, then re-propose`,
-            { worktree, link: path },
-          );
-        }
-        let target = null;
-        try {
-          target = readlinkSync(abs);
-        } catch {
-          /* unreadable link — the path alone is the record */
-        }
-        try {
-          rmSync(abs); // the link only; rmSync does not follow a reparse point
-          removed.push({ path, target });
-        } catch (err) {
-          failJson(
-            `refusing the removal: ${path} is a reparse point that could not be unlinked ` +
-              `(${err.message.split("\n")[0]}) — git worktree remove would follow it`,
-            { worktree, link: path },
-          );
-        }
-        continue;
+        links.push({ path, abs });
+        continue; // never descend through a link — that is the incident itself
       }
-      if (st.isDirectory()) visit(abs, path);
+      if (st.isDirectory()) scan(abs, path);
     }
   };
-  visit(worktree, "");
+  scan(worktree, "");
+
+  const tracked = trackedLinks ? links.find((l) => trackedLinks.has(l.path)) : null;
+  if (tracked) {
+    failJson(
+      `refusing the removal: ${tracked.path} is a git-tracked symlink (mode 120000) — ` +
+        `unlinking it would change tracked content the approval never showed, and leaving it ` +
+        `would let git worktree remove follow it out of the tree; resolve the link, then re-propose`,
+      { worktree, link: tracked.path },
+    );
+  }
+
+  const removed = [];
+  for (const { path, abs } of links) {
+    let target = null;
+    try {
+      target = readlinkSync(abs);
+    } catch {
+      /* unreadable link — the path alone is the record */
+    }
+    try {
+      rmSync(abs); // the link only; rmSync does not follow a reparse point
+      removed.push({ path, target });
+    } catch (err) {
+      failJson(
+        `refusing the removal: ${path} is a reparse point that could not be unlinked ` +
+          `(${err.message.split("\n")[0]}) — git worktree remove would follow it`,
+        { worktree, link: path, removedLinks: removed },
+      );
+    }
+  }
   return removed;
 }
 

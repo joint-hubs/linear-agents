@@ -50,6 +50,7 @@ import {
   supervisorStateHome,
   writeRegistry,
 } from "./supervisor-lib.mjs";
+import { unlinkReparsePoints } from "./supervisor-cleanup.mjs";
 import { openAgentState, setFact } from "./agent-state.mjs";
 
 const { test, fail, summary } = harness();
@@ -852,6 +853,96 @@ test("a git-TRACKED symlink is content, not the incident shape — the removal r
     existsSync(join(outside, "sentinel.txt")),
     "the tracked junction's target lost its content",
   );
+});
+
+test("the tracked-link refusal is a pre-scan — nothing is unlinked before it fires (r2 N7)", () => {
+  // N7: the refusal used to fire mid-walk, so an untracked junction that
+  // happened to come up earlier in readdir order was already unlinked — tree
+  // mutation under an approval that never happened, and the partial removed
+  // list dropped from the failure payload. The walk now scans for tracked
+  // links over the complete set BEFORE touching anything, so the refusal is
+  // order-independent: EVERY link, tracked or not, is still in place after it.
+  const { base, repo } = fixtureRepo();
+  const sha = spawnSync("git", ["hash-object", "-w", "--stdin"], {
+    cwd: repo,
+    input: "../tracked-target",
+    encoding: "utf8",
+  }).stdout.trim();
+  gitIn(repo, "update-index", "--add", "--cacheinfo", `120000,${sha},tracked-link`);
+  gitIn(repo, "commit", "-m", "tracked symlink");
+
+  const wt = fixtureWorktree(repo);
+  const runId = fixtureRun();
+  writeRegistry(runId, {
+    runId,
+    children: {
+      "dev-1": {
+        childId: "dev-1",
+        squad: "dev",
+        taskId: "FOC-123",
+        sessionId: "11111111-2222-3333-4444-555555555555",
+        status: "exited",
+        turns: [{ pid: 1 }],
+        worktree: wt.worktree,
+        branch: wt.branch,
+        baseRevision: wt.baseRevision,
+        allowedPaths: [],
+      },
+    },
+    rounds: {},
+  });
+
+  const trackedTarget = join(base, "tracked-target");
+  mkdirSync(trackedTarget, { recursive: true });
+  writeFileSync(join(trackedTarget, "sentinel.txt"), "keep\n");
+  const untrackedTarget = join(base, "untracked-target");
+  mkdirSync(untrackedTarget, { recursive: true });
+  writeFileSync(join(untrackedTarget, "sentinel.txt"), "keep\n");
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  // The incident shape, untracked — the link the OLD walk would have unlinked
+  // before hitting the tracked one (readdir order dependent, hence flaky).
+  symlinkSync(untrackedTarget, join(wt.worktree, "node_modules"), linkType);
+  rmSync(join(wt.worktree, "tracked-link"));
+  symlinkSync(trackedTarget, join(wt.worktree, "tracked-link"), linkType);
+
+  const s = { base, repo, runId, ...wt, done: issueFile(base, "Done", "completed") };
+  approved(s);
+  const out = parse(cleanup(["remove", "--run", s.runId, "--child", "dev-1", "--issue-file", s.done]), fail);
+  assert.equal(out.ok, false, "the removal must refuse over the tracked link");
+  assert.match(out.error, /git-tracked symlink/);
+  assert.ok(
+    existsSync(join(wt.worktree, "node_modules")),
+    "the untracked junction was unlinked before the refusal fired — the pre-scan did not hold",
+  );
+  assert.ok(existsSync(join(untrackedTarget, "sentinel.txt")), "the untracked junction's target lost content");
+  assert.ok(existsSync(join(trackedTarget, "sentinel.txt")), "the tracked junction's target lost content");
+});
+
+test("trackedSymlinkPaths git failure falls back to all-untracked — links unlinked, never refused (r2 N10)", () => {
+  // The documented fallback (git cannot be asked → treat every link as
+  // untracked) lived only in prose. A directory that is NOT a git repo makes
+  // `git ls-files` fail exactly as the fallback anticipates; the walk must
+  // still unlink both links AS LINKS and report them, not refuse.
+  const base = mkdtempSync(join(tmpdir(), "la-cleanup-gitfail-"));
+  cleanupLater(base);
+  const outside = join(base, "target");
+  mkdirSync(join(outside, "dep"), { recursive: true });
+  writeFileSync(join(outside, "dep", "sentinel.txt"), "keep\n");
+  mkdirSync(join(base, "tree", "sub"), { recursive: true });
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  symlinkSync(outside, join(base, "tree", "node_modules"), linkType);
+  symlinkSync(join(outside, "dep"), join(base, "tree", "sub", "linked-dep"), linkType);
+  assert.ok(!existsSync(join(base, ".git")), "the fixture must not be a git repo");
+
+  const removed = unlinkReparsePoints(join(base, "tree"));
+  const paths = removed.map((l) => l.path).sort();
+  assert.deepEqual(paths, ["node_modules", "sub/linked-dep"], `the walk did not report both links: ${JSON.stringify(removed)}`);
+  assert.ok(
+    existsSync(join(outside, "dep", "sentinel.txt")),
+    "the walk followed a link out of the tree — the target lost its content",
+  );
+  assert.ok(!existsSync(join(base, "tree", "node_modules")), "the root link survived the walk");
+  assert.ok(!existsSync(join(base, "tree", "sub", "linked-dep")), "the nested link survived the walk");
 });
 
 test("isReparsePoint sees a junction by lstat and by dirent — and never a real directory", () => {

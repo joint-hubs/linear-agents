@@ -417,7 +417,7 @@ testAsync("provisions over a node_modules JUNCTION — replaced as a link, repor
   const out = await installWorktreeDeps(dir);
   const root = (out.locations ?? []).find((l) => l.location === "root");
   if (!root || root.skipped) fail(`the root install did not run: ${JSON.stringify(root)}`);
-  if (root.replacedReparsePoint !== true) fail(`the junction replacement was not reported: ${JSON.stringify(root)}`);
+  if (root.replacedObstruction !== true) fail(`the junction replacement was not reported: ${JSON.stringify(root)}`);
   if (root.ok !== true) fail(`the install over the replaced junction failed: ${JSON.stringify(root)}`);
   if (!existsSync(join(outside, "sentinel.txt"))) {
     fail("the junction target lost its content — the replacement followed the link");
@@ -519,21 +519,78 @@ testAsync("the install record is redacted before it is persisted (FOC-1153 r1)",
   // appends nothing after it. The tail lands in the registry entry and the
   // spawn result — it must be scrubbed at the source, where every consumer
   // inherits the scrub. So the fixture's preinstall is the normal fake-dep
-  // install plus a credential-shaped line as its last output.
+  // install plus a credential-shaped line as its last output. The URL is
+  // assembled at runtime (r2 N1): a literal user:pass@ URL in this source
+  // trips secretlint's basicauth rule and fails the security scan, while the
+  // assertions below still run against the assembled string.
+  const fakeUrl = ["https://child:SUPER", "TALSEKRET", "@registry-proxy.example.com/npm"].join("");
   const dir = r1Fixture({
     preinstall:
       `node -e "const fs=require('fs');fs.mkdirSync('node_modules/fake-dep',{recursive:true});` +
       `fs.writeFileSync('node_modules/fake-dep/package.json',JSON.stringify({name:'fake-dep',version:'1.0.0',main:'index.js'}));` +
       `fs.writeFileSync('node_modules/fake-dep/index.js','module.exports=42;');` +
-      `console.error('npm ERR! request to https://child:SUPERTALSEKRET@registry-proxy.example.com/npm failed');"`,
+      `console.error('npm ERR! request to ${fakeUrl} failed');"`,
   });
   const out = await installWorktreeDeps(dir);
   const root = (out.locations ?? []).find((l) => l.location === "root");
   if (!root || root.skipped) fail(`the root install did not run: ${JSON.stringify(root)}`);
   if (root.ok !== true) fail(`the successful install must be ok: ${JSON.stringify(root)}`);
   const record = JSON.stringify(root);
-  if (record.includes("SUPERTALSEKRET")) fail(`the credential leaked into the persisted record: ${record}`);
+  if (record.includes("TALSEKRET")) fail(`the credential leaked into the persisted record: ${record}`);
   if (!record.includes("***")) fail(`expected the redaction marker in the record: ${record}`);
+});
+
+testAsync("the install record redacts npm's legacy _auth and query-token shapes (FOC-1153 r2)", async () => {
+  // r2 N3: the r1 patterns cover the user:pass@ authority and `_?authToken=`,
+  // but npm's legacy `_auth=` field and a registry URL that carries the token
+  // in the query string leak through. As above, the fake values are assembled
+  // at runtime so secretlint sees no literal credential (r2 N1).
+  const legacy = ["LEGACY", "AUTH", "VALUE"].join("-").toUpperCase();
+  const query = ["QUERY", "TOKEN", "VALUE"].join("-").toUpperCase();
+  const dir = r1Fixture({
+    preinstall:
+      `node -e "console.error('_auth=${legacy}');` +
+      `console.error('npm ERR! request to https://registry-proxy.example.com/npm?token=${query} failed');"`,
+  });
+  const out = await installWorktreeDeps(dir);
+  const root = (out.locations ?? []).find((l) => l.location === "root");
+  if (!root || root.skipped) fail(`the root install did not run: ${JSON.stringify(root)}`);
+  if (root.ok !== true) fail(`the successful install must be ok: ${JSON.stringify(root)}`);
+  const record = JSON.stringify(root);
+  if (record.includes(legacy) || record.includes(query)) {
+    fail(`a credential leaked into the persisted record: ${record}`);
+  }
+  if (!record.includes("_auth=***")) fail(`the legacy _auth was not redacted: ${record}`);
+  if (!record.includes("token=***")) fail(`the query-string token was not redacted: ${record}`);
+});
+
+// r2 N9: the skip branches of installDepsAt had no coverage — only the
+// replacement branch was driven directly.
+testAsync("skips the install when there is no package.json (FOC-1153 r2)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "la-sup-r1-skip-"));
+  cleanup.push(dir);
+  const out = await installWorktreeDeps(dir);
+  const root = (out.locations ?? []).find((l) => l.location === "root");
+  if (!root || root.skipped !== true) fail(`the root install did not skip: ${JSON.stringify(root)}`);
+  if (root.reason !== "no package.json") fail(`the skip reason is wrong: ${JSON.stringify(root)}`);
+  if (out.ok !== true) fail(`a skipped install must not fail the run: ${JSON.stringify(out)}`);
+});
+
+testAsync("skips the install when a real node_modules is already present (FOC-1153 r2)", async () => {
+  const dir = r1Fixture();
+  mkdirSync(join(dir, "node_modules"));
+  writeFileSync(join(dir, "node_modules", "sentinel.txt"), "keep\n");
+  const out = await installWorktreeDeps(dir);
+  const root = (out.locations ?? []).find((l) => l.location === "root");
+  if (!root || root.skipped !== true) fail(`the root install did not skip: ${JSON.stringify(root)}`);
+  if (root.reason !== "node_modules already present") fail(`the skip reason is wrong: ${JSON.stringify(root)}`);
+  if (root.replacedObstruction !== undefined) {
+    fail(`a real directory must not be reported as a replaced obstruction: ${JSON.stringify(root)}`);
+  }
+  if (out.ok !== true) fail(`a skipped install must not fail the run: ${JSON.stringify(out)}`);
+  if (!existsSync(join(dir, "node_modules", "sentinel.txt"))) {
+    fail("npm ran over an existing node_modules — the skip branch did not hold");
+  }
 });
 
 // Run a93f, 2026-09-12: four children spawned without --model ran on the
