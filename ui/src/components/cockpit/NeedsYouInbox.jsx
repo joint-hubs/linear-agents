@@ -68,6 +68,7 @@ function AnswerResult({ result, item, scope, onTold }) {
 function NeedsYouItem({ item, scope, onAskSupervisor, onRefresh }) {
   const [answerText, setAnswerText] = useState('');
   const [note, setNote] = useState('');
+  const [textOption, setTextOption] = useState(null); // the needsText option whose field is open (FOC-1109)
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null); // { recorded, notified }
@@ -93,18 +94,21 @@ function NeedsYouItem({ item, scope, onAskSupervisor, onRefresh }) {
   const factLines = inboxFactLines(item);
 
   // Gates go through the gate library (text + optional note); holds through the
-  // hold library (option label or free text, no separate note field).
-  const answer = async (text, noteArg) => {
+  // hold library (option label or free text, no separate note field). A
+  // needsText hold option (FOC-1109) sends the values typed into the field plus
+  // the optionLabel naming the chosen option.
+  const answer = async (text, noteArg, optionLabel) => {
     setBusy(true);
     setError(null);
     try {
       const body = item.category === 'hold'
-        ? { runId: item.runId, holdId: item.holdId, text }
+        ? { runId: item.runId, holdId: item.holdId, text, ...(optionLabel ? { optionLabel } : {}) }
         : { runId: item.runId, gateId: item.gateId, text, note: noteArg || undefined };
       const res = item.category === 'hold' ? await postHoldAnswer(body, scope) : await postGateAnswer(body, scope);
       setResult({ recorded: !!res.recorded, notified: !!res.notified });
       setAnswerText('');
       setNote('');
+      setTextOption(null);
     } catch (e) {
       setError(e.data?.error || e.message || String(e));
     } finally {
@@ -201,7 +205,7 @@ function NeedsYouItem({ item, scope, onAskSupervisor, onRefresh }) {
         </div>
       )}
 
-      {action.kind === 'option' && (
+      {(action.kind === 'option' || action.kind === 'option-text') && (
         <div className="ck-inbox-options">
           {(item.options || []).map((o, i) => {
             const recommended = item.recommendation != null && o.label === item.recommendation;
@@ -211,7 +215,10 @@ function NeedsYouItem({ item, scope, onAskSupervisor, onRefresh }) {
                 type="button"
                 className={recommended ? 'launch-btn ck-option' : 'btn-secondary ck-option'}
                 disabled={busy || !!result}
-                onClick={() => answer(o.label)}
+                // FOC-1109: a needsText option does not submit its own label —
+                // clicking reveals the values field below; a plain option
+                // submits its label as before.
+                onClick={() => (o.needsText ? setTextOption(o) : answer(o.label))}
                 title={[o.model, o.costUsd != null ? '$' + o.costUsd : null].filter(Boolean).join(' · ')}
               >
                 {recommended ? '★ ' : ''}
@@ -224,6 +231,28 @@ function NeedsYouItem({ item, scope, onAskSupervisor, onRefresh }) {
           {(item.options || []).length === 0 && (
             <span className="muted" style={{ fontSize: 12 }}>No options listed — answer in text below the item or in the Terminal.</span>
           )}
+        </div>
+      )}
+
+      {action.kind === 'option-text' && textOption && (
+        <div className="ck-inbox-actions">
+          <textarea
+            className="filter-search"
+            style={{ flex: 1, minHeight: 56, fontFamily: 'var(--mono)', fontSize: 11.5, resize: 'vertical' }}
+            value={answerText}
+            onChange={(e) => setAnswerText(e.target.value)}
+            placeholder={`Values for "${textOption.label}", one key=value per line…`}
+            aria-label={`Values for ${textOption.label} (${item.taskId || 'item'} ${item.holdId || ''})`}
+            disabled={busy || !!result}
+          />
+          <button
+            type="button"
+            className="launch-btn"
+            disabled={busy || !!result || !answerText.trim()}
+            onClick={() => answer(answerText.trim(), undefined, textOption.label)}
+          >
+            {busy ? 'Recording…' : textOption.label}
+          </button>
         </div>
       )}
 

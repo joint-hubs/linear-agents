@@ -103,7 +103,9 @@ export function mergeConversation(prevEntries, page, { reset } = {}) {
 
 // inboxPrimaryAction(item) -> { kind, label }. kind drives which control the
 // inbox item renders: text (textarea + Answer), yesno (Approve/Reject),
-// option (one button per option), ask ("Ask the Supervisor" → chat prefill),
+// option (one button per option), option-text (FOC-1109: the hold carries a
+// needsText option — clicking it opens a values field instead of submitting
+// the bare label), ask ("Ask the Supervisor" → chat prefill),
 // notify ("Tell the Supervisor" — answered but not delivered), none.
 export function inboxPrimaryAction(item) {
   if (!item) return { kind: 'none', label: '' };
@@ -113,8 +115,15 @@ export function inboxPrimaryAction(item) {
       return { kind: 'text', label: 'Answer' };
     case 'yesno':
       return { kind: 'yesno', label: 'Approve / Reject' };
-    case 'option':
-      return { kind: 'option', label: 'Choose an option' };
+    case 'option': {
+      // FOC-1109: an option marked needsText ("Provide the values") must not
+      // submit its own label — applyHoldAnswers drops lines without "=", so
+      // the values would never arrive. The hold answers through a text field.
+      const needsText = Array.isArray(item.options) && item.options.some((o) => o && o.needsText);
+      return needsText
+        ? { kind: 'option-text', label: 'Choose an option' }
+        : { kind: 'option', label: 'Choose an option' };
+    }
     // Supervisor interactivity (FOC-810): an AskUserQuestion (answerKind ask)
     // and a TUI dialog (answerKind dialog) are answered in place with their
     // own card — distinct kinds so the read-only "ask the Supervisor" path

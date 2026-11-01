@@ -315,6 +315,32 @@ await test('inboxPrimaryAction answerKind option -> option/Choose an option', ()
   });
 });
 
+// FOC-1109: an option that needsText ("Provide the values") must not submit
+// its own label — the hold answers through a text field instead.
+await test('inboxPrimaryAction hold option with needsText -> option-text (field, not the bare label)', () => {
+  eq(inboxPrimaryAction({
+    state: 'pending',
+    answerKind: 'option',
+    answerable: true,
+    options: [{ label: 'Provide the values', model: 'user', costUsd: 0, needsText: true }],
+  }), {
+    kind: 'option-text',
+    label: 'Choose an option',
+  });
+});
+
+await test('inboxPrimaryAction hold options without needsText -> option, unchanged', () => {
+  eq(inboxPrimaryAction({
+    state: 'pending',
+    answerKind: 'option',
+    answerable: true,
+    options: [{ label: 'glm', model: 'glm', costUsd: 1 }],
+  }), {
+    kind: 'option',
+    label: 'Choose an option',
+  });
+});
+
 await test('inboxPrimaryAction answerKind null + answerable -> ask', () => {
   eq(inboxPrimaryAction({ state: 'pending', answerKind: null, answerable: true, category: 'problem' }), {
     kind: 'ask',
