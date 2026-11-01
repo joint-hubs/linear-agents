@@ -624,6 +624,21 @@ try {
       holdNt?.state === "answered" && holdNt?.answer?.text === "epic=E1" && holdNt?.answer?.optionLabel === "Provide the values",
       JSON.stringify(holdNt?.answer));
 
+    // FOC-1109 fixup regression guard: the bare-label refusal must never fire
+    // on a hold WITHOUT needsText — there an option label as text is a normal,
+    // recordable answer (that is how every pre-needsText hold still works).
+    const holdsLegacy = JSON.parse(readFileSync(join(supState, "run-1", "holds.json"), "utf8"));
+    holdsLegacy.holds.push({
+      id: "hold-5", origin: "test", question: "a legacy hold without needsText?", recommendation: "wait",
+      options: [{ label: "wait", model: "m1", costUsd: 0 }],
+      impact: "low", state: "open", createdAt: NOW, presentedAt: null, until: null,
+      answer: null, history: [{ event: "created", at: NOW }], blocks: null, resolution: null,
+    });
+    writeFileSync(join(supState, "run-1", "holds.json"), JSON.stringify(holdsLegacy), "utf8");
+    const legacyLabel = await call(P, "POST", "/api/holds/answer", { body: { runId: "run-1", holdId: "hold-5", text: "wait" } });
+    check("legacy hold (no needsText) answered with its option label as text -> 200",
+      legacyLabel.status === 200 && legacyLabel.body?.recorded === true, JSON.stringify(legacyLabel).slice(0, 300));
+
     // POST /api/gates/notify with holdId — the "Tell the Supervisor" fallback
     // after a hold answer whose notice failed. An OPEN hold has no answer to
     // deliver (409); the answered one is re-notified with /api/holds/answer's

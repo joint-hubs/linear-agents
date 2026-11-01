@@ -293,6 +293,51 @@ test("hold optionLabel: stored when given, absent when not, garbage refused", ()
   throwWith(() => answerHold({ runId: bare, holdId: "hold-1", text: "x", optionLabel: "x".repeat(201), now: NOW }), "invalid-answer", "over-long optionLabel");
 });
 
+test("needsText hold: the bare option label is refused at answerHold, real values pass (FOC-1109 fixup)", () => {
+  const bareRun = freshRun();
+  seedHold(bareRun, {
+    options: [
+      { label: "wznów", model: "test/model", costUsd: null, unpricedModel: "test/model" },
+      { label: "Provide the values", model: "user", costUsd: 0, needsText: true },
+    ],
+  });
+  const bare = throwWith(
+    () => answerHold({ runId: bareRun, holdId: "hold-1", text: "Provide the values", now: NOW }),
+    "invalid-answer",
+    "bare needsText label refused",
+  );
+  assert.match(bare.message, /needs the values as text/);
+  assert.equal(readHolds(bareRun).holds[0].state, "open", "nothing was written");
+
+  const valuesRun = freshRun();
+  seedHold(valuesRun, {
+    options: [{ label: "Provide the values", model: "user", costUsd: 0, needsText: true }],
+  });
+  const values = answerHold({ runId: valuesRun, holdId: "hold-1", text: "milestone=M1", now: NOW });
+  assert.equal(values.answer.text, "milestone=M1", "values without optionLabel are a real answer");
+  assert.equal("optionLabel" in values.answer, false, "label-less values keep the historical shape");
+
+  const labelledRun = freshRun();
+  seedHold(labelledRun, {
+    options: [{ label: "Provide the values", model: "user", costUsd: 0, needsText: true }],
+  });
+  const labelled = answerHold({ runId: labelledRun, holdId: "hold-1", text: "epic=E1", optionLabel: "Provide the values", now: NOW });
+  assert.equal(labelled.answer.optionLabel, "Provide the values", "values + optionLabel are a real answer");
+});
+
+test("CLI answer --hold hits the same needsText refusal through answerHold (FOC-1109 fixup)", () => {
+  const runId = freshRun();
+  seedHold(runId, {
+    options: [{ label: "Provide the values", model: "user", costUsd: 0, needsText: true }],
+  });
+  const r = cli(["answer", "--run", runId, "--hold", "hold-1", "--text", "Provide the values"]);
+  assert.equal(r.status, 1, r.stdout);
+  const err = JSON.parse(r.stdout);
+  assert.equal(err.ok, false);
+  assert.match(err.error, /needs the values as text/);
+  assert.equal(readHolds(runId).holds[0].state, "open", "the CLI refusal wrote nothing");
+});
+
 test("hold errors: not-found, already-answered, invalid-answer, unreadable, bad-id", () => {
   const runId = freshRun();
   seedHold(runId);

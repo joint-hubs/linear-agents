@@ -1723,22 +1723,11 @@ export async function handleCockpitRoute(req, res, url, ctx) {
       log(method, path, 400);
       return true;
     }
-    // FOC-1109: an option marked needsText must never be answered with its own
-    // bare label — that is exactly the payload the old one-click submit
-    // produced, and applyHoldAnswers silently drops lines without "=", so the
-    // values never arrive. Refuse before anything is recorded; the real answer
-    // carries the values in text with optionLabel naming the chosen option.
-    // A store that cannot be read changes nothing here — answerHold reports it
-    // with its own code below.
-    const needsTextOption = readHoldQuietly(runId, holdId)?.options?.find((o) => o && o.needsText) ?? null;
-    if (!optionLabel && needsTextOption && needsTextOption.label === text.trim()) {
-      json(res, 400, {
-        error: `"${needsTextOption.label}" needs the values as text — ` +
-          "type them in the answer field instead of submitting the bare option label",
-      });
-      log(method, path, 400);
-      return true;
-    }
+    // FOC-1109: the bare-label refusal for needsText options lives in
+    // answerHold — the single choke point the CLI shares with this route, so
+    // the rule is enforced after validation/ownership with one message and no
+    // hold-existence probe here. invalid-answer maps to 400 below
+    // (answerErrorStatus), so the Cockpit's refusal status is unchanged.
     // FOC-839: refuse runs marked read-only by the legacy migration.
     if (denyIfLegacyReadOnly(res, runId, method, path)) return true;
     // Cross-session guard: same ownership rule as the gate answer.

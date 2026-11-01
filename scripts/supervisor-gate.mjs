@@ -371,6 +371,11 @@ function parseOption(raw) {
     // refuses a hold whose options are all UNKNOWN).
     unpricedModel = parsed.model;
   }
+  // FOC-1109: a needsText flag on an --option JSON is silently dropped here —
+  // the CLI-created hold would not carry it and answerHold would not enforce
+  // the bare-label refusal for it. Documented limitation, deliberately not
+  // extended: no CLI-created hold currently needs text; extend this return
+  // shape if one ever does.
   return { label: parsed.label, model: parsed.model, costUsd, ...(unpricedModel ? { unpricedModel } : {}) };
 }
 
@@ -680,6 +685,23 @@ export function answerHold({ runId, holdId, text, note = null, answeredBy = null
         "already-answered",
         `hold ${holdId} is already answered — the answer in force is "${hold.answer.text}" (recorded ${hold.answer.answeredAt})`,
         { hint: "a hold is answered once; to change course, raise a new hold" },
+      );
+    }
+
+    // FOC-1109: an option marked needsText must never be answered with its own
+    // bare label — that is exactly the payload the old one-click submit
+    // produced, and applyHoldAnswers silently drops lines without "=", so the
+    // values never arrive. ONE refusal, here at the choke point both the CLI
+    // and the Cockpit route go through: the hold is already read, validated
+    // and owned when this fires. optionLabel (the Cockpit names the chosen
+    // option) marks a real values answer; label-less values pass too. The
+    // label match scans EVERY needsText option, not just the first.
+    const bareNeedsText = (hold.options ?? []).find((o) => o && o.needsText && o.label === text.trim()) ?? null;
+    if (bareNeedsText && !optionLabel) {
+      throw answerError(
+        "invalid-answer",
+        `"${bareNeedsText.label}" needs the values as text — ` +
+          "type them in the answer field instead of submitting the bare option label",
       );
     }
 
