@@ -288,7 +288,7 @@ function isManagedGitRef(run) {
 //     segment is not a word at >99.9% and stays screened.
 //   - at least one vowel AND no run of more than 4 consecutive consonants.
 //     A random pure-lowercase 20+ char segment has no vowel at all with
-//     ~(21/26)^20 < 0.005% probability, and almost certainly carries a
+//     (21/26)^20 ≈ 1.39% probability, and almost certainly carries a
 //     5-consonant run — the two checks together reject a random
 //     pure-lowercase segment at ~99.99%, while every real word passes both.
 //   - number = exactly 1-4 digits (issue numbers, ports, small counts; a
@@ -588,9 +588,9 @@ export function scanEgressGitRef(text) {
 }
 
 /**
- * The families A–D pipeline scanEgress, scanEgressGitRef and egressSpans
- * share — one detector set so the screened shapes cannot drift (same seam
- * reasoning as egressLeaves).
+ * The families A–D detector set behind scanEgress and scanEgressGitRef; the
+ * same detectors are invoked inline in egressSpans — one detector set so the
+ * screened shapes cannot drift (same seam reasoning as egressLeaves).
  */
 function detectFamiliesAD(text, spans) {
   return [

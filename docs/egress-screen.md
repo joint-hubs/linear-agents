@@ -131,7 +131,7 @@ human word slug, not a secret:
   Each rule is a frequency argument against token material: real words are pure
   lowercase letters while real token alphabets are alphanumeric (a random
   lowercase+digit segment fails the pure-letters rule at >99.9%); a random
-  pure-lowercase segment has no vowel at all with ~(21/26)^20 < 0.005%
+  pure-lowercase segment has no vowel at all with (21/26)^20 ≈ 1.39%
   probability and almost certainly carries a 5-consonant run — the vowel and
   consonant-run checks together reject a random pure-lowercase segment at
   ~99.99%, while every real word passes both.
