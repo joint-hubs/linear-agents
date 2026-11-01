@@ -252,6 +252,14 @@ const suiteEnv = { ...process.env };
 for (const key of Object.keys(suiteEnv)) {
   if (key.startsWith('LA_SUPERVISOR')) delete suiteEnv[key];
 }
+// FOC-1147: the suite never reads Linear — a real key in the env would let a
+// leaking suite file reach the live workspace. Same prefix rule as
+// LA_SUPERVISOR* (there are suffixed variants, e.g. LINEAR_API_KEY_PISI).
+// Nothing LINEAR_API_KEY* is added back — zz-suite-env-scrub.test.mjs holds
+// that line too.
+for (const key of Object.keys(suiteEnv)) {
+  if (key.startsWith('LINEAR_API_KEY')) delete suiteEnv[key];
+}
 // win32: every suite process — and every node process it spawns, since
 // NODE_OPTIONS is inherited — loads spawn-windows-hide.mjs first, so a child
 // started without a console (a hidden watcher, a detached test server) does

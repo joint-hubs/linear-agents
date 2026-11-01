@@ -182,8 +182,14 @@ The host can fill its queue by itself. Off by default; turn it on in the setting
 `pollSeconds` (first tick 10 s after start): it queries each configured state
 (`node linear-query.mjs issues --status <state> [--label <l>] --json`), keeps only the owner scope's project, orders
 by priority (urgent first) then age, and enqueues every candidate that has NO row in the task-sessions store —
-queued, active and terminal rows alike, so a completed or failed ticket is never re-picked. Enqueuing stops at
-`taskSessions.maxActive`; the ordinary scheduler (`claimNext`) starts sessions from the queue as usual. The host
+queued, active and terminal rows alike, so a completed or failed ticket is never re-picked. The owner scope:
+when the task-ownership module is present its `checkOwnership` decides (FOC-902 §D); otherwise the scope resolves
+through the projects map — the entries whose own `workspace` field names the pickup workspace must agree on exactly
+one `linearProject` (FOC-1147; the workspace half of a task key is a Linear workspace name, never a repo dir name,
+so it is never matched against a repo ref). Any gap — unreadable map, no entry for the workspace, no
+`linearProject`, an ambiguous one — fails the tick closed with the remedy in `GET /pickup`'s `lastError`.
+Enqueuing stops at `taskSessions.maxActive`; the ordinary scheduler (`claimNext`) starts sessions from the queue as
+usual. The host
 never writes to Linear — the claim comment stays with the Supervisor's triage. `GET /pickup` on the host reports
 `{ enabled, pollSeconds, states, lastTickAt, lastError, lastEnqueued }`, and the doctor's `task sessions` line ends
 with `auto-pickup: off` or `auto-pickup: on (every <n>s, states <a,b>)`.
