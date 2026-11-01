@@ -96,6 +96,15 @@ const loadLib = async () => {
   return libRef;
 };
 
+// The Linear issue-facts resolver loads lazily too (it pulls its own module
+// graph; only the FOC-1088 lane resolving a repository through Linear needs
+// it) — the same one-promise-memo pattern as loadLib.
+let issueFactsRef = null;
+const loadIssueFacts = async () => {
+  if (!issueFactsRef) issueFactsRef = await import("./agent-state-resolve.mjs");
+  return issueFactsRef.fetchIssueFacts;
+};
+
 // FOC-902 §D: when the task-ownership helper exists (branch
 // fenix-task-ownership), its checkOwnership decides the pickup owner scope;
 // until it lands, the projects.json rule in createTaskSessionHost applies.
@@ -134,6 +143,12 @@ export function sessionHomePath(env, sessionId) {
 // never kill itself.
 const TASK_IDENTIFIER_RE = /^[A-Za-z]+-\d+$/;
 
+// The ticket prefix of a TEAM-NUM identifier — FOC in FOC-1080 — matched
+// against the STRUCTURED projects.json `ticketPrefix` field only. A guess
+// from free text (the note-text fallback repoPrefixMap accepts) must never
+// pick a repository here.
+const TICKET_PREFIX_RE = /^([A-Za-z]+)-\d+$/;
+
 /**
  * The per-task branch a managed session works on, derived DETERMINISTICALLY
  * from the task — buildBranchName's shape (`<team>-<n>-<slug>`) with the fixed
@@ -153,28 +168,39 @@ export function sessionBranchFor(record) {
 }
 
 /**
- * The projects.json entries whose `repo` ref names `workspace` — the ONE
- * matching rule behind both workspace→map consumers: the auto-pickup owner
- * scope (which Linear project the workspace maps to) and the FOC-1088 lane
- * (which repository it maps to). repoRefName normalizes the
- * `${GITHUB_ROOT}/<name>` template, a full path and a bare name to the repo
- * dir name, so the match is against the workspace half of a task key.
- *
- * @returns {Array<object>|null} the matching entries, or null when the map is
- *   missing or unreadable — a deployment without a project map, for which the
- *   workspace rule is simply not applicable. A READABLE map with no matching
- *   entry is an empty array, not null: a mapping gap fails closed, it does not
- *   fall through to the host env.
+ * Every projects.json entry, or null when the map is missing or unreadable —
+ * a deployment without a project map, for which map-based resolution rules
+ * are simply not applicable.
  */
-function projectEntriesForWorkspace(env, workspace) {
+function projectEntries(env) {
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(projectsConfigPath(env), "utf8"));
   } catch {
     return null;
   }
-  const entries = Array.isArray(parsed?.projects) ? parsed.projects : [];
-  return entries.filter((entry) => repoRefName(entry?.repo) === workspace);
+  return Array.isArray(parsed?.projects) ? parsed.projects : [];
+}
+
+/**
+ * The projects.json entries whose `repo` ref names `workspace` — the matching
+ * rule behind the auto-pickup owner scope (which Linear project the workspace
+ * maps to). repoRefName normalizes the `${GITHUB_ROOT}/<name>` template, a
+ * full path and a bare name to the repo dir name, so the match is against the
+ * workspace half of a task key.
+ *
+ * The FOC-1088 worktree lane does NOT resolve by this rule (round 3: the
+ * workspace half is the Linear workspace name — "jointhubs" — never a
+ * repository name); it resolves through the issue's Linear project instead.
+ *
+ * @returns {Array<object>|null} the matching entries, or null when the map is
+ *   missing or unreadable. A READABLE map with no matching entry is an empty
+ *   array, not null: a mapping gap fails closed, it does not fall through to
+ *   the host env.
+ */
+function projectEntriesForWorkspace(env, workspace) {
+  const entries = projectEntries(env);
+  return entries === null ? null : entries.filter((entry) => repoRefName(entry?.repo) === workspace);
 }
 
 /**
@@ -201,10 +227,14 @@ function repoRefPath(repo, env) {
  *
  * `loadLib` is the host's lazy supervisor-lib loader — the lane only runs when
  * it is enabled, so the git helpers load on first use, not at module import.
+ * `fetchIssueFacts` is the Linear facts seam (tests inject a stub; the default
+ * lazy-loads the real resolver, same pattern as loadLib).
  *
- * @param {{ repo?: string|null, env: object, loadLib: () => Promise<object> }} args
+ * @param {{ repo?: string|null, env: object, loadLib: () => Promise<object>, fetchIssueFacts?: ((identifier: string, opts?: { env?: object }) => Promise<object|null>)|null }} args
  */
-function createRealSessionWorkspace({ repo = null, env, loadLib }) {
+function createRealSessionWorkspace({ repo = null, env, loadLib, fetchIssueFacts = null }) {
+  // Linear facts: the injected seam, or the lazily imported real resolver.
+  const factsFor = fetchIssueFacts ?? (async (identifier, opts) => (await loadIssueFacts())(identifier, opts));
   // Resolved repositories, memoized PER CANDIDATE LIST — never one gitRoot
   // for the whole host: two sessions mapped to different repositories must
   // not share a resolution. Only successes are memoized; a failure re-resolves
@@ -248,11 +278,18 @@ function createRealSessionWorkspace({ repo = null, env, loadLib }) {
    *   (a) a repository carried on the session record (no writer produces one
    *       today — the forward-compatible hook);
    *   (b) deps.repo, the embedder's explicit pin (tests, single-repo hosts);
-   *   (c) the projects.json entry matching the record's workspace — exactly
-   *       one distinct repository required; ambiguous or missing fails closed;
-   *   (d) env FENIX_REPO_DIR / LA_SUPERVISOR_REPO — only when the project map
-   *       does not exist or is unreadable (the workspace rule is then not
+   *   (c) the projects.json entry whose `linearProject` equals the issue's
+   *       Linear project (fetchIssueFacts) — exactly one distinct repository
+   *       required, ambiguous fails closed;
+   *   (d) only when (c) found no project or no matching entry: the STRUCTURED
+   *       `ticketPrefix` field equal to the issue id's prefix (FOC in
+   *       FOC-1080) — never a guess from note text; exactly one distinct
+   *       repository required;
+   *   (e) env FENIX_REPO_DIR / LA_SUPERVISOR_REPO — only when the project map
+   *       does not exist or is unreadable (the map rules are then not
    *       applicable and the env decides, first resolvable wins).
+   * A readable map that matches neither rule fails closed, naming what was
+   * tried — it does not fall through to the host env.
    */
   const resolveGitRootFor = async (record) => {
     const taskKey = String(record?.taskKey ?? "(no taskKey)");
@@ -264,34 +301,70 @@ function createRealSessionWorkspace({ repo = null, env, loadLib }) {
     const workspace = workspaceOf(record);
     if (!workspace) {
       throw new Error(
-        `no repository for managed task '${taskKey}': the record names no workspace, so the project map cannot be consulted`,
+        `no repository for managed task '${taskKey}': the record names no workspace, so even the pisi routing of the Linear lookup is undecidable`,
       );
     }
-    const entries = projectEntriesForWorkspace(env, workspace);
+    const entries = projectEntries(env);
     if (entries !== null) {
-      const paths = new Set();
-      for (const entry of entries) {
-        const value = repoRefPath(entry?.repo, env);
-        if (value) paths.add(value);
-      }
-      if (paths.size === 1) {
-        // The mapped repository is authoritative for this workspace: an
-        // explicit candidate that fails LOUDLY (repo not cloned, not a git
-        // repo) — falling through to the host env could only hand the session
-        // the WRONG repository, the FOC-172 bug class this lane exists to
-        // prevent.
-        const [value] = [...paths];
-        return resolveFrom([{ value, from: `projects.json repo for workspace '${workspace}'`, explicit: true }]);
-      }
-      if (paths.size > 1) {
-        throw new Error(
-          `no repository for managed task '${taskKey}': the project map maps workspace '${workspace}' to ` +
-            `${paths.size} repositories (${[...paths].join(", ")}) — ambiguous`,
+      // The ISSUE drives the map match, not the workspace half of the task
+      // key (round 3: that half is the Linear workspace name — "jointhubs" —
+      // never a repository name). The workspace matters only as the pisi
+      // routing flag for the Linear call (the pisi workspace reads
+      // LINEAR_API_KEY_PISI); it is passed through unchanged otherwise.
+      const issueId = typeof record?.issueId === "string" ? record.issueId.trim() : "";
+      const prefixMatch = TICKET_PREFIX_RE.exec(issueId);
+      const prefix = prefixMatch ? prefixMatch[1] : null;
+      const facts = issueId
+        ? await factsFor(issueId, { env: workspace === "pisi" ? { ...env, LINEAR_WORKSPACE: "pisi" } : env })
+        : null;
+      const project = typeof facts?.project === "string" && facts.project.trim() ? facts.project.trim() : null;
+      // Match a set of map entries to ONE distinct expanded repository path —
+      // or fail closed when they disagree (ambiguous). Matching entries whose
+      // repo refs cannot expand count as no match: the fallback rule decides,
+      // and if neither rule names a repository the failure lists what was
+      // tried.
+      const oneRepoFor = (matching, label) => {
+        const paths = new Set();
+        for (const entry of matching) {
+          const value = repoRefPath(entry?.repo, env);
+          if (value) paths.add(value);
+        }
+        if (paths.size > 1) {
+          throw new Error(
+            `no repository for managed task '${taskKey}': the project map maps ${label} to ` +
+              `${paths.size} repositories (${[...paths].join(", ")}) — ambiguous`,
+          );
+        }
+        if (paths.size === 1) {
+          // The mapped repository is authoritative: an explicit candidate
+          // that fails LOUDLY (repo not cloned, not a git repo) — falling
+          // through to the host env could only hand the session the WRONG
+          // repository, the FOC-172 bug class this lane exists to prevent.
+          const [value] = [...paths];
+          return { value, from: `projects.json repo for ${label}`, explicit: true };
+        }
+        return null;
+      };
+      const projectMatches = project ? entries.filter((entry) => entry?.linearProject === project) : [];
+      const byProject = project ? oneRepoFor(projectMatches, `Linear project '${project}'`) : null;
+      if (byProject) return resolveFrom([byProject]);
+      const prefixMatches = prefix ? entries.filter((entry) => entry?.ticketPrefix === prefix) : [];
+      const byPrefix = prefix ? oneRepoFor(prefixMatches, `ticket prefix '${prefix}'`) : null;
+      if (byPrefix) return resolveFrom([byPrefix]);
+      // Fail closed, naming WHAT WAS TRIED — the project Linear gave (or why
+      // it gave none) and the ticket prefix — so the remedy is actionable.
+      const tried = [];
+      if (facts === null) tried.push(`Linear is unavailable (no facts for '${issueId || "no issueId"}')`);
+      else if (project) {
+        tried.push(
+          projectMatches.length
+            ? `the projects.json entries matching Linear project '${project}' name no resolvable repository`
+            : `Linear project '${project}' matches no projects.json entry`,
         );
-      }
-      throw new Error(
-        `no repository for managed task '${taskKey}': the project map has no entry whose repo maps to workspace '${workspace}'`,
-      );
+      } else tried.push("the issue has no Linear project in Linear");
+      if (prefix) tried.push(`no projects.json entry carries ticket prefix '${prefix}'`);
+      else tried.push(`the issue id '${issueId || "(none)"}' carries no TEAM-NUM ticket prefix`);
+      throw new Error(`no repository for managed task '${taskKey}': ${tried.join("; ")}`);
     }
     try {
       return await resolveFrom(
@@ -534,7 +607,12 @@ export function createTaskSessionHost(deps = {}) {
   const sessionWorkspace = deps.sessionWorkspace !== undefined
     ? deps.sessionWorkspace
     : worktrees
-      ? createRealSessionWorkspace({ repo: deps.repo ?? null, env: baseEnv, loadLib })
+      ? createRealSessionWorkspace({
+          repo: deps.repo ?? null,
+          env: baseEnv,
+          loadLib,
+          fetchIssueFacts: deps.fetchIssueFacts ?? null,
+        })
       : null;
   const workspaces = new Map(); // sessionId → lane ensure() result, derived once per session
   const ensureWorkspace = async (sessionId, record) => {
@@ -614,9 +692,10 @@ export function createTaskSessionHost(deps = {}) {
   const pickupWorkspace = () => autoPickup.workspace || baseEnv.FENIX_WORK_WORKSPACE || "jointhubs";
 
   // The owner scope's Linear project: the projects.json entries whose repo
-  // name matches the workspace (projectEntriesForWorkspace — the SAME rule
-  // the FOC-1088 lane resolves the session repository by), yielding exactly
-  // one distinct project. No mapping or an ambiguous one → null: auto-pickup
+  // name matches the workspace (projectEntriesForWorkspace — the auto-pickup
+  // owner-scope rule; the FOC-1088 lane resolves the session repository
+  // through the issue's Linear project instead), yielding exactly one
+  // distinct project. No mapping or an ambiguous one → null: auto-pickup
   // never picks tickets outside a proven owner scope.
   const linearProjectForWorkspace = (workspace) => {
     const entries = projectEntriesForWorkspace(baseEnv, workspace);

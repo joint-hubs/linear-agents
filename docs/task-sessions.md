@@ -99,13 +99,29 @@ A change takes effect at host start — run `fenix restart supervisor` after
      today — the forward-compatible hook), then the embedder's explicit pin
      (`deps.repo` — tests, single-repo hosts); an explicit value decides on
      its own and fails loudly when it is not a git repo;
-  2. the projects.json entry whose `repoRefName(repo)` equals the task key's
-     workspace half — exactly one distinct repository required; ambiguous or
-     missing mapping fails closed. The `${GITHUB_ROOT}/<name>` template the
-     `fenix repo add` mapping writes expands against env `GITHUB_ROOT`
-     (`/data/workspaces` in the container);
-  3. env `FENIX_REPO_DIR`, then `LA_SUPERVISOR_REPO` on the host process —
-     only when no project map exists or is unreadable.
+  2. the projects.json entry matching the issue's **Linear project**: the
+     issue's facts come from `fetchIssueFacts` (fixture first, then the
+     GraphQL API; any failure there is "Linear unavailable", never a crash),
+     and the issue's project name is matched exactly against each entry's
+     `linearProject` field — exactly one distinct repository required, an
+     ambiguous mapping fails closed. The pisi workspace's lookup is routed
+     with `LINEAR_WORKSPACE=pisi` (it reads `LINEAR_API_KEY_PISI`). The
+     `${GITHUB_ROOT}/<name>` template the `fenix repo add` mapping writes
+     expands against env `GITHUB_ROOT` (`/data/workspaces` in the container);
+  3. only when Linear gave no project (or none matched): the entry whose
+     STRUCTURED `ticketPrefix` field equals the issue id's prefix (`FOC` in
+     `FOC-1080`) — the structured field only, never the note-text fallback
+     `repoPrefixMap` accepts (a guess from free text must not pick a
+     repository); exactly one distinct repository required;
+  4. env `FENIX_REPO_DIR`, then `LA_SUPERVISOR_REPO` on the host process —
+     only when no project map exists or is unreadable. A READABLE map that
+     matches neither rule fails closed, naming what was tried (the Linear
+     project found — or that Linear was unreachable — and the ticket prefix);
+     it does not fall through to the env.
+
+  The task key's workspace half (`jointhubs`) is the LINEAR WORKSPACE NAME,
+  never a repository name — round 2 matched `repoRefName(repo)` against it
+  and failed every real session closed (fixed in round 3).
   There is deliberately NO cwd fallback (the host runs from the fenix stack
   checkout, never the task's repository). Resolutions are memoized per
   repository, never one root for the whole host; a FAILED resolution is not

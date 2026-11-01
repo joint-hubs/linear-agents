@@ -222,6 +222,7 @@ const build = (opts = {}) => {
     // that exercise the REAL switch pass `resolveWorktrees: true`, which
     // drops the dep so the host reads the overlay/env itself.
     ...(opts.repo !== undefined ? { repo: opts.repo } : {}),
+    ...(opts.fetchIssueFacts !== undefined ? { fetchIssueFacts: opts.fetchIssueFacts } : {}),
     ...(opts.sessionWorkspace !== undefined ? { sessionWorkspace: opts.sessionWorkspace } : {}),
     ...(opts.resolveWorktrees ? { worktrees: undefined } : { worktrees: opts.worktrees ?? false }),
     // FOC-839: the legacy-migration hook is injectable; null (the default
@@ -1363,16 +1364,18 @@ test("FOC-1088 lane: stop releases the claim but keeps the tree; the next genera
   }
 });
 
-test("FOC-1088 lane: an unmapped workspace fails the start closed with the operator remedy", async () => {
-  // Lane on, but the project map has no entry for the session's workspace:
-  // the mapping gap fails closed — it must NOT fall through to the host env,
-  // which could only name the WRONG repository (the FOC-172 bug class).
+test("FOC-1088 lane: Linear unavailable and no ticketPrefix entry fails the start closed with the operator remedy", async () => {
+  // Lane on, the project map is readable, but Linear yields no facts and no
+  // entry carries the issue's ticket prefix: the mapping gap fails closed —
+  // it must NOT fall through to the host env, which could only name the
+  // WRONG repository (the FOC-172 bug class).
   const projects = projectsFixture([
-    { linearProject: "Other", workspace: "other", repo: "${GITHUB_ROOT}/other", deploy: { type: "none" } },
+    { linearProject: "Other", repo: "${GITHUB_ROOT}/other", deploy: { type: "none" } },
   ]);
   const { host, store } = build({
     maxActive: 1,
     resolveWorktrees: true,
+    fetchIssueFacts: async () => null,
     env: { LA_SETTINGS_FILE: noSettingsFile(), LA_PROJECTS_FILE: projects },
   });
   const port = await listen(host);
@@ -1382,7 +1385,10 @@ test("FOC-1088 lane: an unmapped workspace fails the start closed with the opera
     await host.settled();
     const record = store.get(started.json.session.sessionId);
     assert.equal(record.status, "waiting", JSON.stringify(record));
-    assert.match(record.lastError, /no entry whose repo maps to workspace 'workspace'/);
+    // The error says WHAT WAS TRIED: Linear was unreachable and the issue's
+    // ticket prefix matched no structured entry.
+    assert.match(record.lastError, /Linear is unavailable/);
+    assert.match(record.lastError, /ticket prefix 'TST'/);
     // The remedy names BOTH operator fixes, copy-pasteable.
     assert.match(record.lastError, /fenix repo add <repository url> --project/);
     assert.match(record.lastError, /fenix settings set taskSessions\.worktrees false/);
@@ -1410,23 +1416,37 @@ test("FOC-1088 lane: a non TEAM-NUM issueId fails the start instead of killing t
   }
 });
 
-// ── FOC-1088 round 2: per-session repository resolution + the settings switch ─
+// ── FOC-1088 round 3: the issue's Linear project resolves the repository ────
+// The workspace half of a task key is the LINEAR WORKSPACE NAME ("jointhubs",
+// workspaceNameFor's output), not a repository name — the round-2 rule that
+// matched repoRefName(entry.repo) against it could never match a real task
+// key and failed every real session closed. The map is matched by the issue's
+// LINEAR PROJECT instead (fetchIssueFacts), with the STRUCTURED ticketPrefix
+// field as the fallback when Linear yields no project.
 
-test("FOC-1088 round 2: the project map resolves PER SESSION — workspace beta's session works in beta's repository, not alpha's", async () => {
+// THE REGRESSION TEST for the round-2 mistake: it was RED on commit 301174f
+// (evidence: .state/foc-1088-round3/red-on-301174f.txt — both sessions failed
+// closed with "no entry whose repo maps to workspace 'jointhubs'").
+test("FOC-1088 round 3: the issue's Linear project picks the repository — jointhubs:FOC-1 works in FENIX's repo, jointhubs:NEO-2 in Neo's", async () => {
   const { base, repos } = laneRepos("alpha", "beta");
   const projects = projectsFixture([
-    { linearProject: "Alpha", workspace: "alpha", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } },
-    { linearProject: "Beta", workspace: "beta", repo: "${GITHUB_ROOT}/beta", deploy: { type: "none" } },
+    { linearProject: "FENIX", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } },
+    { linearProject: "Neo", repo: "${GITHUB_ROOT}/beta", deploy: { type: "none" } },
   ]);
+  const facts = {
+    "FOC-1": { title: "Fenix task", team: "FOC", project: "FENIX", projectMilestone: null, parent: null },
+    "NEO-2": { title: "Neo task", team: "NEO", project: "Neo", projectMilestone: null, parent: null },
+  };
   const { host, store } = build({
     maxActive: 2,
     resolveWorktrees: true,
+    fetchIssueFacts: async (id) => facts[id] ?? null,
     env: { LA_SETTINGS_FILE: noSettingsFile(), LA_PROJECTS_FILE: projects, GITHUB_ROOT: base },
   });
   const port = await listen(host);
   try {
-    const a = await request(port, "POST", "/sessions", { body: mappedBody("alpha", "MAP-1") });
-    const b = await request(port, "POST", "/sessions", { body: mappedBody("beta", "MAP-2") });
+    const a = await request(port, "POST", "/sessions", { body: mappedBody("jointhubs", "FOC-1") });
+    const b = await request(port, "POST", "/sessions", { body: mappedBody("jointhubs", "NEO-2") });
     assert.equal(a.status, 202);
     assert.equal(b.status, 202);
     await host.settled();
@@ -1436,24 +1456,21 @@ test("FOC-1088 round 2: the project map resolves PER SESSION — workspace beta'
     assert.equal(byId.get(b.json.session.sessionId).status, "running", JSON.stringify(byId.get(b.json.session.sessionId)));
     const dirA = resolve((await host.controllerFor(a.json.session.sessionId)).env.FENIX_REPO_DIR);
     const dirB = resolve((await host.controllerFor(b.json.session.sessionId)).env.FENIX_REPO_DIR);
-    // Each session's worktree lives under ITS OWN repository's worktree root
-    // (the la-wt/<repo>/<branch> layout) — the resolution is memoized per
-    // resolved repository, never one root for the whole host.
-    assert.equal(dirA, join(base, "la-wt", "alpha", "map-1-task"), dirA);
-    assert.equal(dirB, join(base, "la-wt", "beta", "map-2-task"), dirB);
-    assert.equal(gitIn(dirA, "rev-parse", "--abbrev-ref", "HEAD"), "map-1-task");
-    assert.equal(gitIn(dirB, "rev-parse", "--abbrev-ref", "HEAD"), "map-2-task");
-    // The repos were found through the map alone — the ${GITHUB_ROOT}
-    // template expanded against env GITHUB_ROOT, no deps.repo pin involved.
-    assert.ok(existsSync(dirB), "beta's worktree must exist");
+    // Each session works in ITS OWN project's repository's worktree — the
+    // resolution is per session, memoized per resolved repository, never one
+    // root for the whole host.
+    assert.equal(dirA, join(base, "la-wt", "alpha", "foc-1-task"), dirA);
+    assert.equal(dirB, join(base, "la-wt", "beta", "neo-2-task"), dirB);
+    assert.equal(gitIn(dirA, "rev-parse", "--abbrev-ref", "HEAD"), "foc-1-task");
+    assert.equal(gitIn(dirB, "rev-parse", "--abbrev-ref", "HEAD"), "neo-2-task");
     // Claims live in EACH repo's own registry, owner task-scoped.
     assert.deepEqual(
       readWorkspaceClaims({ gitRoot: repos.alpha }).claims.map((c) => [c.branch, c.ownerId]),
-      [["map-1-task", "task-session:alpha:MAP-1"]],
+      [["foc-1-task", "task-session:jointhubs:FOC-1"]],
     );
     assert.deepEqual(
       readWorkspaceClaims({ gitRoot: repos.beta }).claims.map((c) => [c.branch, c.ownerId]),
-      [["map-2-task", "task-session:beta:MAP-2"]],
+      [["neo-2-task", "task-session:jointhubs:NEO-2"]],
     );
   } finally {
     host.close();
@@ -1461,31 +1478,111 @@ test("FOC-1088 round 2: the project map resolves PER SESSION — workspace beta'
   }
 });
 
-test("FOC-1088 round 2: an ambiguous project mapping fails closed with the operator remedy", async () => {
-  const { base } = laneRepos("beta");
-  // Two entries match workspace 'beta' and disagree on WHERE the repository
-  // lives (the clones root vs a full path elsewhere) — the map cannot name
-  // one repository, so the session fails closed instead of guessing.
+test("FOC-1088 round 3: Linear down, a STRUCTURED ticketPrefix entry resolves the repository", async () => {
+  const { base, repos } = laneRepos("alpha");
+  // Linear yields no facts, but an entry carries the issue's structured
+  // ticket prefix — FOC for FOC-5 — and that maps the repository. (The
+  // note-text fallback repoPrefixMap accepts is deliberately NOT consulted
+  // here: a guess from free text must never pick a repository.)
   const projects = projectsFixture([
-    { linearProject: "Beta", workspace: "beta", repo: "${GITHUB_ROOT}/beta", deploy: { type: "none" } },
-    { linearProject: "Beta alias", workspace: "beta", repo: join(base, "elsewhere", "beta"), deploy: { type: "none" } },
+    { ticketPrefix: "FOC", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } },
   ]);
   const { host, store } = build({
     maxActive: 1,
     resolveWorktrees: true,
+    fetchIssueFacts: async () => null,
     env: { LA_SETTINGS_FILE: noSettingsFile(), LA_PROJECTS_FILE: projects, GITHUB_ROOT: base },
   });
   const port = await listen(host);
   try {
-    const started = await request(port, "POST", "/sessions", { body: mappedBody("beta", "MAP-3") });
+    const started = await request(port, "POST", "/sessions", { body: mappedBody("jointhubs", "FOC-5") });
+    assert.equal(started.status, 202);
+    await host.settled();
+    const record = store.get(started.json.session.sessionId);
+    assert.equal(record.status, "running", JSON.stringify(record));
+    const dir = resolve((await host.controllerFor(started.json.session.sessionId)).env.FENIX_REPO_DIR);
+    assert.equal(dir, join(base, "la-wt", "alpha", "foc-5-task"), dir);
+    assert.deepEqual(
+      readWorkspaceClaims({ gitRoot: repos.alpha }).claims.map((c) => [c.branch, c.ownerId]),
+      [["foc-5-task", "task-session:jointhubs:FOC-5"]],
+    );
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
+test("FOC-1088 round 3: one Linear project mapped to two repositories fails closed as ambiguous", async () => {
+  const { base } = laneRepos("alpha", "beta");
+  // Two entries claim the SAME Linear project and disagree on WHERE the
+  // repository lives — the map cannot name one repository, so the session
+  // fails closed instead of guessing.
+  const projects = projectsFixture([
+    { linearProject: "FENIX", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } },
+    { linearProject: "FENIX", repo: "${GITHUB_ROOT}/beta", deploy: { type: "none" } },
+  ]);
+  const { host, store } = build({
+    maxActive: 1,
+    resolveWorktrees: true,
+    fetchIssueFacts: async (id) => (id === "FOC-6" ? { project: "FENIX" } : null),
+    env: { LA_SETTINGS_FILE: noSettingsFile(), LA_PROJECTS_FILE: projects, GITHUB_ROOT: base },
+  });
+  const port = await listen(host);
+  try {
+    const started = await request(port, "POST", "/sessions", { body: mappedBody("jointhubs", "FOC-6") });
     assert.equal(started.status, 202);
     await host.settled();
     const record = store.get(started.json.session.sessionId);
     assert.equal(record.status, "waiting", JSON.stringify(record));
+    assert.match(record.lastError, /Linear project 'FENIX'/);
     assert.match(record.lastError, /ambiguous/);
     assert.match(record.lastError, /fenix repo add <repository url> --project/);
     assert.match(record.lastError, /fenix settings set taskSessions\.worktrees false/);
     assert.match(record.lastError, /fenix restart supervisor/);
+  } finally {
+    host.close();
+    store.close();
+  }
+});
+
+test("FOC-1088 round 3: the pisi workspace's Linear lookup routes LINEAR_WORKSPACE=pisi — no other workspace does", async () => {
+  const { base, repos } = laneRepos("alpha");
+  const projects = projectsFixture([
+    { linearProject: "Pisi Project", repo: "${GITHUB_ROOT}/alpha", deploy: { type: "none" } },
+  ]);
+  const seen = [];
+  const { host, store } = build({
+    maxActive: 2,
+    resolveWorktrees: true,
+    fetchIssueFacts: async (id, { env: callEnv } = {}) => {
+      seen.push({ id, workspace: callEnv?.LINEAR_WORKSPACE });
+      return { project: "Pisi Project" };
+    },
+    env: { LA_SETTINGS_FILE: noSettingsFile(), LA_PROJECTS_FILE: projects, GITHUB_ROOT: base },
+  });
+  const port = await listen(host);
+  try {
+    const pisi = await request(port, "POST", "/sessions", { body: mappedBody("pisi", "PIS-1") });
+    const jointhubs = await request(port, "POST", "/sessions", { body: mappedBody("jointhubs", "JOIN-2") });
+    assert.equal(pisi.status, 202);
+    assert.equal(jointhubs.status, 202);
+    await host.settled();
+    // ONLY the pisi workspace's lookup is routed to the pisi key; every other
+    // workspace's env passes through untouched.
+    assert.deepEqual(
+      seen.find((s) => s.id === "PIS-1"),
+      { id: "PIS-1", workspace: "pisi" },
+    );
+    assert.deepEqual(
+      seen.find((s) => s.id === "JOIN-2"),
+      { id: "JOIN-2", workspace: undefined },
+    );
+    // And the resolution itself worked for both (the pisi routing does not
+    // change which repository the map names).
+    const dirP = resolve((await host.controllerFor(pisi.json.session.sessionId)).env.FENIX_REPO_DIR);
+    assert.equal(dirP, join(base, "la-wt", "alpha", "pis-1-task"), dirP);
+    const dirJ = resolve((await host.controllerFor(jointhubs.json.session.sessionId)).env.FENIX_REPO_DIR);
+    assert.equal(dirJ, join(base, "la-wt", "alpha", "join-2-task"), dirJ);
   } finally {
     host.close();
     store.close();
