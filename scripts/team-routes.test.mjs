@@ -16,6 +16,13 @@
 // (NODE_ENV=test + FENIX_LINEAR_FAKE_FILE) — the same TEST-ONLY seam the Work
 // board routes use — so this file never touches the real Linear API even
 // where a key exists.
+//
+// FOC-1150: ONE clock for the whole file. FENIX_TEAM_CLOCK_MS (optional env)
+// is read BOTH by the fixture seeding (the store's dates are relative to it —
+// seedTeamFixture re-anchors its offsets) and by the spawned server through
+// the TEST-ONLY seam in team-routes.mjs, so the 30d-default path is covered
+// end-to-end for any wall-clock date. Unset, the clock is the fixture's NOW
+// (2026-10-18T12:00Z) — a pinned value, never Date.now().
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -25,7 +32,7 @@ import { fileURLToPath } from "node:url";
 
 import { spawnTestServer } from "./test-spawn.mjs";
 import { repoPrefixMap, handleTeamRoute } from "./team-routes.mjs";
-import { seedTeamFixture, seedRegistryFixture } from "./team-model.test.mjs";
+import { seedTeamFixture, seedRegistryFixture, NOW } from "./team-model.test.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -47,7 +54,9 @@ async function test(name, fn) {
 
 const dir = mkdtempSync(join(tmpdir(), "team-routes-"));
 const dbPath = join(dir, "telemetry.sqlite");
-seedTeamFixture(dbPath);
+const clockEnv = Number(process.env.FENIX_TEAM_CLOCK_MS);
+const CLOCK = Number.isInteger(clockEnv) && clockEnv > 0 ? clockEnv : NOW;
+seedTeamFixture(dbPath, { now: CLOCK });
 const stateHome = join(dir, "supervisor-state");
 seedRegistryFixture(stateHome);
 
@@ -83,6 +92,8 @@ const env = {
   LA_TELEMETRY_HOME: join(dir, "telemetry-home"),
   LA_SUPERVISOR_STATE_HOME: stateHome,
   LA_STATE_ROOT: join(dir, "state-root"),
+  // FOC-1150: the SAME clock the fixture was seeded relative to (above).
+  FENIX_TEAM_CLOCK_MS: String(CLOCK),
 };
 
 const PORT = 7393;
@@ -444,6 +455,58 @@ await test("group scope: Linear answered but no ticket carries the fields → un
   assert.deepEqual(res.__body.filters.unsupported, ["milestone", "type", "epic", "size"]);
   assert.equal(res.__body.filters.unsupportedReason, "Linear answered but no ticket in scope carries milestone/type/epic/size");
   assert.deepEqual(res.__body.filters.applied, {}); // milestone was NOT applied
+});
+
+await test("production env shape (NODE_ENV unset): the FENIX_TEAM_CLOCK_MS seam is ignored and now is the real clock", async () => {
+  // In-process on the handler: the spawned checks always run the child with
+  // NODE_ENV=test, so the seam's guard itself is only exercised here — with
+  // the production env shape the injected clock must be ignored and `now`
+  // must be the real wall clock, never the env value.
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevClock = process.env.FENIX_TEAM_CLOCK_MS;
+  const INJECTED = NOW + 365 * 24 * 60 * 60 * 1000; // one year past the fixture's NOW
+  delete process.env.NODE_ENV;
+  process.env.FENIX_TEAM_CLOCK_MS = String(INJECTED);
+  try {
+    const deps = (sink) => ({
+      json: (_r, status, payload) => { sink.__status = status; sink.__body = payload; },
+      log: () => {},
+      loadTurns: () => [],
+      loadLinks: () => [],
+      squadConfig: { squads: {} },
+      ticketFacts: [{ taskId: "FOC-100", repo: "linear-agents" }],
+      linearStatesFor: async () => ({ states: {}, meta: { ok: true, error: null, fetchedAt: "2026-10-15T12:00:00.000Z" } }),
+    });
+    const res = {};
+    const handled = await handleTeamRoute(
+      { method: "GET", headers: {} },
+      res,
+      new URL("/api/team?scope=group", "http://127.0.0.1"),
+      deps(res),
+    );
+    assert.equal(handled, true);
+    assert.equal(res.__status, 200, `status ${res.__status}: ${JSON.stringify(res.__body).slice(0, 300)}`);
+    // the payload carries the clock as generatedAt (ISO) — the real wall clock
+    assert.ok(Math.abs(Date.parse(res.__body.generatedAt) - Date.now()) < 60_000, `generatedAt should be the real clock: ${res.__body.generatedAt}`);
+    assert.notEqual(res.__body.generatedAt, new Date(INJECTED).toISOString());
+
+    // The positive shape in one call — NODE_ENV=test turns the seam on.
+    process.env.NODE_ENV = "test";
+    const res2 = {};
+    const handled2 = await handleTeamRoute(
+      { method: "GET", headers: {} },
+      res2,
+      new URL("/api/team?scope=group", "http://127.0.0.1"),
+      deps(res2),
+    );
+    assert.equal(handled2, true);
+    assert.equal(res2.__body.generatedAt, new Date(INJECTED).toISOString());
+  } finally {
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = prevNodeEnv;
+    if (prevClock === undefined) delete process.env.FENIX_TEAM_CLOCK_MS;
+    else process.env.FENIX_TEAM_CLOCK_MS = prevClock;
+  }
 });
 
 // ── teardown ─────────────────────────────────────────────────────────────────
