@@ -47,6 +47,7 @@ import {
   gatesDir,
   hasPendingGate,
   installEnvFileSignalHandlers,
+  killTree,
   parseArgs,
   readRegistry,
   shareChildTranscripts,
@@ -430,6 +431,15 @@ let sessionId = null;
 const resultCosts = [];
 let initModel = null;
 let sawInit = false;
+// FOC-1154: the state of the tee's LAST parsed stream event. A turn whose last
+// event is a terminal `result` has finished its work even when the process
+// keeps running — on win32 claude never exits on its own after the result —
+// but `result` can arrive more than once per turn (background-task wake-ups
+// re-emit cumulative results), so "a result was seen" is NOT the gate. Every
+// parsed event refreshes both fields: a non-result event flips the gate back
+// off and normal stall behaviour resumes.
+let lastEventIsResult = false;
+let lastEventAt = 0;
 
 // One read of config/models.json for the whole turn. A missing or broken price
 // table must not stop the child: cost becomes unknown (null), which is exactly
@@ -532,6 +542,14 @@ function scanStall() {
   try {
     if (!existsSync(tee)) return;
     const { size, mtimeMs } = statSync(tee);
+    // FOC-1154: a tee whose LAST parsed event is a terminal `result` is not a
+    // silent turn — it is a FINISHED turn whose process lingers. Silence after
+    // a result is the linger itself, never a stall, so no stall row is ever
+    // queued for it; the linger scan below reaps the child instead.
+    if (lastEventIsResult) {
+      lastTeeSize = size;
+      return;
+    }
     // FOC-271: silence runs from the LATEST of the tee write and the turn start.
     // FOC-621: `episode` = the tee size at silence onset — stable across re-polls
     // of the same silence (a silent tee does not grow), new after any output, so
@@ -546,9 +564,41 @@ function scanStall() {
   }
 }
 
+// ── FOC-1154: reap a turn that ended but whose process lingers ───────────────
+// The turn's work is done (the tee's last event is a terminal `result`) and the
+// child will not exit on its own — on win32 never, anywhere after a bounded
+// grace. Killing through the NORMAL exit path is what makes this cheap: the
+// kill fires the child's own exit/close handlers, finalizeTurn runs unchanged
+// (registry status, gate handling, cost patch, the `exit` wake row) and the
+// watcher exits — no new wake class, no second finalizer to keep in sync.
+const LINGER_GRACE_MS = 10_000;
+let lingerReaped = false;
+let lingerFinalizeTimer = null;
+
+function scanLinger() {
+  if (finalized || lingerReaped || !lastEventIsResult) return;
+  if (Date.now() - lastEventAt < LINGER_GRACE_MS) return;
+  lingerReaped = true;
+  note({
+    subtype: "result_linger_reap",
+    message: `last stream event was a terminal result ${Math.round((Date.now() - lastEventAt) / 1000)}s ago with no exit — reaping the lingering child (FOC-1154)`,
+  });
+  killTree(child.pid, "force");
+  // The kill normally lands through the child's own exit/close handlers within
+  // TAIL_DRAIN_MS. The bound covers the case where neither fires (a kill that
+  // failed on an already-detached tree): without it the watcher would outlive
+  // the turn forever, the exact waste this fix removes. Same shape and window
+  // as the terminator's timer, cleared by finalizeTurn the moment it starts,
+  // and NOT unref'd — it is the last thing keeping the watcher alive.
+  lingerFinalizeTimer = setTimeout(() => {
+    if (!finalized) finalizeTurn(0, null);
+  }, TAIL_DRAIN_MS + 1500);
+}
+
 const scanner = setInterval(() => {
   scanGates();
   scanStall();
+  scanLinger();
 }, GATE_SCAN_MS);
 scanner.unref(); // the child's pipes own this process's lifetime, not the timer
 
@@ -595,6 +645,11 @@ child.stdout.on("data", (chunk) => {
     } catch {
       continue; // not every line is guaranteed to be JSON; the tee keeps it regardless
     }
+
+    // FOC-1154: this is the gate's heartbeat — every parsed event refreshes it,
+    // so the linger scan below only acts while the LAST event is a `result`.
+    lastEventIsResult = event.type === "result";
+    lastEventAt = Date.now();
 
     if (!sawInit && event.type === "system" && event.subtype === "init" && event.session_id) {
       sessionId = event.session_id;
@@ -660,6 +715,9 @@ function finalizeTurn(code, signal) {
   // must be allowed to land (FOC-913 — the old 2 s-from-signal terminator
   // fired first whenever the tail drain was what delayed `close`).
   if (terminatorTimer) clearTimeout(terminatorTimer);
+  // FOC-1154: the linger path's own bound dies with the finalization it guards,
+  // exactly like the terminator above.
+  if (lingerFinalizeTimer) clearTimeout(lingerFinalizeTimer);
   {
   if (buffer.trim()) {
     try {
@@ -683,6 +741,11 @@ function finalizeTurn(code, signal) {
   // gate behind as debris, not as a question anyone should answer, and dressing
   // a crash up as "waiting for Mateusz" would park a dead child in the queue.
   let status = entry.status === "stopped" ? "stopped" : code === 0 ? "exited" : "crashed";
+  // FOC-1154: a child reaped after its own terminal `result` did not fail — its
+  // work was done, and the non-zero exit code is the artifact of the force kill
+  // (taskkill /F on win32), not of the turn. The turn reads as the clean exit
+  // it functionally was; `waiting_gate` below still applies to it.
+  if (status === "crashed" && lingerReaped) status = "exited";
   if (status === "exited" && hasPendingGate(runId, childId)) status = "waiting_gate";
 
   // FOC-802, fail closed: the helper refused the launch (exit 97). The turn is
@@ -900,7 +963,15 @@ function finalizeTurn(code, signal) {
   clearInterval(scanner);
   if (shareTimer) clearInterval(shareTimer); // FOC-980: the turn is over — stop the 30 s share
   scanGates();
-  wake({ event: "exit", childId, turn: turnIndex, detail: { status, exitCode: code } });
+  // FOC-1154: `finishedLingering` marks the exit as a reap after a terminal
+  // result — the event type stays `exit`, so drain logic and quiescence waits
+  // see exactly the row they always saw.
+  wake({
+    event: "exit",
+    childId,
+    turn: turnIndex,
+    detail: { status, exitCode: code, ...(lingerReaped ? { finishedLingering: true } : {}) },
+  });
 
   endTelemetryRun(args["telemetry-run"], code ?? 1);
   process.exit(signalTerminated ?? 0);
