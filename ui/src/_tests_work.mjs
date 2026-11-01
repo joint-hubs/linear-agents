@@ -29,6 +29,7 @@ import {
   publishDialogModel,
   claimTag,
   sessionClaim,
+  sessionTimelineNote,
   ticketLabels,
   labelNames,
 } from './workModel.js';
@@ -717,6 +718,20 @@ await test('sessionClaim: queued claim is not live; missing status stays readabl
   eq(sessionClaim({ claimedBy: null }), null);
   eq(sessionClaim({}), null);
   eq(sessionClaim(null), null);
+});
+
+// --- sessionTimelineNote (FOC-1110 round 2: the Timeline honesty line) -------
+
+await test('sessionTimelineNote: live claim -> the honesty line; no live session -> null', () => {
+  eq(
+    sessionTimelineNote({ claimedBy: { sessionId: 'sup-abcdef1234567890', status: 'running', live: true } }),
+    "This ticket is run by a task session — its events are in the session's cockpit",
+  );
+  eq(sessionTimelineNote({ claimedBy: { sessionId: 'sup-abcdef1234567890', status: 'queued', live: false } }), null);
+  eq(sessionTimelineNote({ claimedBy: { sessionId: 'sup-abcdef1234567890', status: 'running' } }), null);
+  eq(sessionTimelineNote({ claimedBy: null }), null);
+  eq(sessionTimelineNote({}), null);
+  eq(sessionTimelineNote(null), null);
 });
 
 // --- Summary ----------------------------------------------------------------

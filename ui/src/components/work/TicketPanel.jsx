@@ -23,6 +23,7 @@ import { fmtUsd, fmtPct, teamQueryString } from '../../teamModel';
 import StartDialog from './StartDialog';
 import PublishDialog from './PublishDialog';
 import LabelChip from './LabelChip';
+import { cockpitUrl } from '../../taskCockpitModel';
 
 // The payload's timeline is chronological; a defensive sort by `at` (missing
 // timestamps last) keeps it that way even when an entry arrives late.
@@ -152,7 +153,7 @@ function TeamOnTicket({ id }) {
   );
 }
 
-export default function TicketPanel({ id, taskKey, claim, onClose, onAskSupervisor }) {
+export default function TicketPanel({ id, taskKey, claim, timelineNote, onClose, onAskSupervisor }) {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -308,7 +309,24 @@ export default function TicketPanel({ id, taskKey, claim, onClose, onAskSupervis
           <div className="wk-section">
             <div className="wk-section-h">Timeline</div>
             {rows.length === 0 ? (
-              <div className="muted" style={{ fontSize: 12 }}>No events yet.</div>
+              timelineNote ? (
+                /* FOC-1110 round 2: a live task session owns the ticket — the
+                    empty timeline must not read "No events". The link goes to
+                    where the session's events actually are. */
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {timelineNote}
+                  {taskKey && (
+                    <>
+                      {' '}
+                      <Link className="link" to={cockpitUrl(taskKey)}>
+                        Open cockpit →
+                      </Link>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="muted" style={{ fontSize: 12 }}>No events yet.</div>
+              )
             ) : (
               <ul className="wk-timeline">
                 {rows.map((r, i) => (

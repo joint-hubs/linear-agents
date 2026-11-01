@@ -23,6 +23,7 @@ import {
   filtersFromQuery,
   queryFromFilters,
   sessionClaim,
+  sessionTimelineNote,
 } from '../workModel';
 import { cockpitUrl } from '../taskCockpitModel';
 import PanelBoundary from '../components/cockpit/PanelBoundary';
@@ -110,6 +111,7 @@ export default function Work() {
   const panelTicket = tickets.find((x) => x && x.taskId === ticketId) || null;
   const panelTaskKey = panelTicket?.taskKey || null;
   const panelClaim = sessionClaim(panelTicket);
+  const panelTimelineNote = sessionTimelineNote(panelTicket);
 
   return (
     <div className="work">
@@ -218,6 +220,7 @@ export default function Work() {
             id={ticketId}
             taskKey={panelTaskKey}
             claim={panelClaim}
+            timelineNote={panelTimelineNote}
             onClose={closePanel}
             onAskSupervisor={askSupervisor}
           />

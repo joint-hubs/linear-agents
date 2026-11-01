@@ -507,9 +507,12 @@ const readTaskClaims = (env = process.env) => {
 // never a guess.
 // The canonical taskKey for a board ticket id, from the SERVER's own
 // workspace — the same resolution the Start-preview identity (taskKeyOf) and
-// claimFor use (FOC-1110). A non-canonical id ("SUP:" pseudo ids, uuids,
-// prose) does not resolve: null, the same tolerance claimFor applies, never a
-// guess.
+// claimFor use (FOC-1110). resolveTaskKey itself only enforces a charset
+// (uuids pass it); what makes this the display identifier is upstream — the
+// touched facts carry TICKET_ID_RE ids only (work-board.mjs skips everything
+// else) and the Ready column rides the queue's identifiers. An id that
+// violates the charset ("SUP:" pseudo ids, prose) throws -> null, the same
+// tolerance claimFor applies, never a guess.
 const taskKeyFor = (taskId, ws) => {
   try {
     return resolveTaskKey({ workspace: ws, issueId: taskId });
