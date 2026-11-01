@@ -457,6 +457,58 @@ await test("group scope: Linear answered but no ticket carries the fields → un
   assert.deepEqual(res.__body.filters.applied, {}); // milestone was NOT applied
 });
 
+await test("production env shape (NODE_ENV unset): the FENIX_TEAM_CLOCK_MS seam is ignored and now is the real clock", async () => {
+  // In-process on the handler: the spawned checks always run the child with
+  // NODE_ENV=test, so the seam's guard itself is only exercised here — with
+  // the production env shape the injected clock must be ignored and `now`
+  // must be the real wall clock, never the env value.
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevClock = process.env.FENIX_TEAM_CLOCK_MS;
+  const INJECTED = NOW + 365 * 24 * 60 * 60 * 1000; // one year past the fixture's NOW
+  delete process.env.NODE_ENV;
+  process.env.FENIX_TEAM_CLOCK_MS = String(INJECTED);
+  try {
+    const deps = (sink) => ({
+      json: (_r, status, payload) => { sink.__status = status; sink.__body = payload; },
+      log: () => {},
+      loadTurns: () => [],
+      loadLinks: () => [],
+      squadConfig: { squads: {} },
+      ticketFacts: [{ taskId: "FOC-100", repo: "linear-agents" }],
+      linearStatesFor: async () => ({ states: {}, meta: { ok: true, error: null, fetchedAt: "2026-10-15T12:00:00.000Z" } }),
+    });
+    const res = {};
+    const handled = await handleTeamRoute(
+      { method: "GET", headers: {} },
+      res,
+      new URL("/api/team?scope=group", "http://127.0.0.1"),
+      deps(res),
+    );
+    assert.equal(handled, true);
+    assert.equal(res.__status, 200, `status ${res.__status}: ${JSON.stringify(res.__body).slice(0, 300)}`);
+    // the payload carries the clock as generatedAt (ISO) — the real wall clock
+    assert.ok(Math.abs(Date.parse(res.__body.generatedAt) - Date.now()) < 60_000, `generatedAt should be the real clock: ${res.__body.generatedAt}`);
+    assert.notEqual(res.__body.generatedAt, new Date(INJECTED).toISOString());
+
+    // The positive shape in one call — NODE_ENV=test turns the seam on.
+    process.env.NODE_ENV = "test";
+    const res2 = {};
+    const handled2 = await handleTeamRoute(
+      { method: "GET", headers: {} },
+      res2,
+      new URL("/api/team?scope=group", "http://127.0.0.1"),
+      deps(res2),
+    );
+    assert.equal(handled2, true);
+    assert.equal(res2.__body.generatedAt, new Date(INJECTED).toISOString());
+  } finally {
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = prevNodeEnv;
+    if (prevClock === undefined) delete process.env.FENIX_TEAM_CLOCK_MS;
+    else process.env.FENIX_TEAM_CLOCK_MS = prevClock;
+  }
+});
+
 // ── teardown ─────────────────────────────────────────────────────────────────
 
 if (spawned) await spawned.stop();
