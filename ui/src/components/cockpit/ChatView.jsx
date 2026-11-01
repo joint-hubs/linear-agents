@@ -163,8 +163,9 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
 
   // A sent message drops off the pending list once the transcript shows a NEW
   // user line with its text — one the line had not already seen at send time
-  // (dropDeliveredPending). An identical line delivered EARLIER in the
-  // session never drops a queued copy (FOC-1111 review F2); until delivery
+  // and stamped after the send (dropDeliveredPending). An identical line
+  // delivered EARLIER in the session (or one the stale send-time snapshot
+  // missed) never drops a queued copy (FOC-1111 review F2); until delivery
   // the line keeps its status label.
   useEffect(() => {
     setPending((ps) => dropDeliveredPending(ps, entries));
@@ -182,8 +183,9 @@ export default function ChatView({ supervisor, scope, readOnly = false, draft, o
     setBusy(true);
     setSendError(null);
     setDupWarn(null);
-    const id = Date.now() + ':' + Math.random();
-    setPending((ps) => [...ps, newPendingEntry({ id, text, entries })]);
+    const sentAt = Date.now();
+    const id = sentAt + ':' + Math.random();
+    setPending((ps) => [...ps, newPendingEntry({ id, text, entries, sentAt })]);
     onDraftChange('');
     // A slash command (/context, /cost, /compact) never appears in the
     // transcript, so its pending line would wait forever for a user entry

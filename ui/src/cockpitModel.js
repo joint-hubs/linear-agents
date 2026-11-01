@@ -507,36 +507,52 @@ export function pendingChip(state) {
   return 'sent — not confirmed yet';
 }
 
-// newPendingEntry({ id, text, entries }) -> a pending chat line carrying the
-// uuids of the user entries with the SAME text the transcript already holds
-// at send time. The pending-drop rule may only react to a delivery that
-// happens AFTER the send: an identical line delivered EARLIER in the session
-// (a repeated question is a normal conversation) must never drop a queued
-// copy before it is delivered — matching by text alone did exactly that
-// (FOC-1111 review F2). Entries are uuid-keyed (mergeConversation dedupes by
-// uuid, the transcript is append-only), so a uuid is the stable "already
-// there" marker.
-export function newPendingEntry({ id, text, entries }) {
+// newPendingEntry({ id, text, entries, sentAt }) -> a pending chat line
+// carrying what the drop rule needs to react only to a delivery that happens
+// AFTER this send: seenUserUuids — the uuids of the user entries with the
+// SAME text the local transcript view already holds at send time (a repeated
+// question is a normal conversation; matching by text alone dropped a queued
+// copy on an earlier identical line — FOC-1111 review F2) — and sentAt, the
+// client clock at the send. The snapshot can be STALE: the local view lags
+// the server (first page still loading, or the 2 s poll mid-flight), so an
+// identical line delivered just BEFORE the send may merge in later with a
+// uuid outside the snapshot. The ts floor closes that: the transcript is
+// append-only and server-stamped, so an entry stamped at or before sentAt
+// existed before the send and is never this send's delivery — only a line
+// stamped AFTER it can drop the pending copy. Trade-off (clock skew): a
+// client clock ahead of the server delays the drop until the queued copy's
+// own entry lands (the chip then disappears at the true delivery, never
+// early); same-host compose clocks make this negligible.
+export function newPendingEntry({ id, text, entries, sentAt }) {
   const seenUserUuids = new Set();
   for (const en of entries || []) {
     if (en && en.role === 'user' && en.text === text && en.uuid != null) seenUserUuids.add(en.uuid);
   }
-  return { id, text, state: 'sent', seenUserUuids };
+  return { id, text, state: 'sent', seenUserUuids, sentAt };
 }
 
 // dropDeliveredPending(pending, entries) -> the pending lines still waiting
 // for delivery. A line drops when the transcript now holds a user entry with
-// its text that the line had NOT already seen at send time — a uuid outside
-// the snapshot is a new delivery; re-reads of older history (the same uuids)
-// never drop anything. A line without the send-time snapshot (defensive)
-// falls back to the text-only rule.
+// its text that the line had NOT already seen at send time AND that is
+// stamped after the send (see newPendingEntry for why the uuid snapshot alone
+// is not enough). Re-reads of older history (the same uuids) never drop
+// anything; a ts-less entry (defensive) still counts as a new delivery. A
+// line without the send-time snapshot (defensive) falls back to the uuid-only
+// rule, and without either to the text-only rule.
 export function dropDeliveredPending(pending, entries) {
   const es = entries || [];
+  const stampedAfter = (en, sentAt) => {
+    if (typeof en.ts !== 'string') return true; // defensive: no stamp — count it
+    const at = Date.parse(en.ts);
+    return !Number.isFinite(at) ? true : at > sentAt;
+  };
   return (pending || []).filter((p) => {
     if (!p) return false;
     const sameText = es.filter((en) => en && en.role === 'user' && en.text === p.text);
     const seen = p.seenUserUuids;
     if (!(seen instanceof Set)) return sameText.length === 0;
-    return !sameText.some((en) => en.uuid != null && !seen.has(en.uuid));
+    const isNew = (en) => en.uuid != null && !seen.has(en.uuid)
+      && (typeof p.sentAt !== 'number' ? true : stampedAfter(en, p.sentAt));
+    return !sameText.some(isNew);
   });
 }

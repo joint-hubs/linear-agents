@@ -998,36 +998,74 @@ await test('pendingChip labels queued, delivered and the sent fallback', () => {
 // The drop rule may only react to a delivery that happens AFTER the send: an
 // identical line delivered EARLIER in the session must never drop a queued
 // copy before it is delivered. Entries are uuid-keyed, so the send-time
-// snapshot of already-seen uuids is the "already there" marker.
+// snapshot of already-seen uuids is the "already there" marker — and the
+// send-time ts (sentAt) is the floor: the transcript is append-only and
+// server-stamped, so an entry stamped at or before sentAt existed before the
+// send even if the stale snapshot missed it (first page still loading, or the
+// 2 s poll mid-flight).
+
+const iso = (ms) => new Date(ms).toISOString();
 
 await test('newPendingEntry snapshots the uuids of same-text user entries at send time', () => {
   const entries = [
-    { uuid: 'u1', role: 'user', text: 'same question' },
-    { uuid: 'u2', role: 'assistant', text: 'same question' }, // not a user line
-    { uuid: 'u3', role: 'user', text: 'other' },
+    { uuid: 'u1', role: 'user', text: 'same question', ts: iso(5_000) },
+    { uuid: 'u2', role: 'assistant', text: 'same question', ts: iso(6_000) }, // not a user line
+    { uuid: 'u3', role: 'user', text: 'other', ts: iso(7_000) },
   ];
-  const p = newPendingEntry({ id: 'p1', text: 'same question', entries });
+  const p = newPendingEntry({ id: 'p1', text: 'same question', entries, sentAt: 10_000 });
   eq(p.id, 'p1');
   eq(p.text, 'same question');
   eq(p.state, 'sent');
+  eq(p.sentAt, 10_000, 'the send-time clock is carried for the ts floor');
   eq([...p.seenUserUuids], ['u1'], 'only the earlier SAME-TEXT user line is pre-seen');
 });
 
 await test('dropDeliveredPending keeps a queued copy whose text was delivered EARLIER (F2)', () => {
-  const entries = [{ uuid: 'u1', role: 'user', text: 'same question' }];
-  const p = newPendingEntry({ id: 'p1', text: 'same question', entries });
+  const entries = [{ uuid: 'u1', role: 'user', text: 'same question', ts: iso(5_000) }];
+  const p = newPendingEntry({ id: 'p1', text: 'same question', entries, sentAt: 10_000 });
   // Any later entries update — the transcript re-read, unrelated lines — must
-  // NOT drop the line while only the pre-seen copy exists.
+  // NOT drop the line while only the pre-send copy exists.
   eq(dropDeliveredPending([p], entries), [p], 'the earlier copy never drops the queued line');
-  eq(dropDeliveredPending([p], [...entries, { uuid: 'u9', role: 'assistant', text: 'same question' }]), [p],
+  eq(dropDeliveredPending([p], [...entries, { uuid: 'u9', role: 'assistant', text: 'same question', ts: iso(12_000) }]), [p],
     'an assistant line with the same text is not a delivery');
 });
 
 await test('dropDeliveredPending drops on a NEW user entry with the text — the actual delivery', () => {
-  const entries = [{ uuid: 'u1', role: 'user', text: 'same question' }];
-  const p = newPendingEntry({ id: 'p1', text: 'same question', entries });
-  const delivered = [...entries, { uuid: 'u2', role: 'user', text: 'same question' }];
+  const entries = [{ uuid: 'u1', role: 'user', text: 'same question', ts: iso(5_000) }];
+  const p = newPendingEntry({ id: 'p1', text: 'same question', entries, sentAt: 10_000 });
+  const delivered = [...entries, { uuid: 'u2', role: 'user', text: 'same question', ts: iso(12_000) }];
   eq(dropDeliveredPending([p], delivered), [], 'the new uuid is the delivery — the line drops');
+});
+
+await test('dropDeliveredPending keeps the queued copy when a STALE snapshot missed a pre-send twin (F-todo)', () => {
+  // The composer is usable while the first transcript page is still loading or
+  // mid-poll, so the send-time snapshot can miss an identical line delivered
+  // just BEFORE the send. When it merges in later (uuid unseen), its ts is at
+  // or before sentAt — it is NOT this send's delivery and must not drop the
+  // queued copy; the copy's own entry (stamped after the send) does.
+  const p = newPendingEntry({ id: 'p1', text: 'same question', entries: [], sentAt: 10_000 });
+  const staleMerge = [{ uuid: 'u0', role: 'user', text: 'same question', ts: iso(10_000) }]; // delivered at the send instant
+  eq(dropDeliveredPending([p], staleMerge), [p], 'a pre-send twin (ts <= sentAt) never drops the line');
+  const delivered = [...staleMerge, { uuid: 'u2', role: 'user', text: 'same question', ts: iso(12_000) }];
+  eq(dropDeliveredPending([p], delivered), [], 'the queued copy itself (ts after the send) drops it');
+});
+
+await test('dropDeliveredPending treats a ts-less or unparseable-stamp entry as a new delivery (defensive)', () => {
+  const p = newPendingEntry({ id: 'p1', text: 'hi', entries: [], sentAt: 10_000 });
+  eq(dropDeliveredPending([p], [{ uuid: 'u1', role: 'user', text: 'hi' }]), [],
+    'no stamp: the uuid rule alone decides');
+  eq(dropDeliveredPending([p], [{ uuid: 'u1', role: 'user', text: 'hi', ts: 'not-a-date' }]), [],
+    'an unparseable stamp cannot prove the entry predates the send');
+  eq(dropDeliveredPending([p], [{ uuid: 'u1', role: 'user', text: 'hi', ts: iso(9_000) }]), [p],
+    'a parseable pre-send stamp is honored');
+});
+
+await test('dropDeliveredPending without sentAt falls back to the uuid-only rule (defensive)', () => {
+  const entries = [{ uuid: 'u1', role: 'user', text: 'hi' }];
+  const p = { id: 'p1', text: 'hi', state: 'sent', seenUserUuids: new Set(['u0']) };
+  eq(dropDeliveredPending([p], entries), [], 'an unseen uuid drops the line regardless of ts');
+  eq(dropDeliveredPending([p], [{ uuid: 'u0', role: 'user', text: 'hi' }]), [p],
+    'a pre-seen uuid never drops the line');
 });
 
 await test('dropDeliveredPending without a snapshot falls back to the text-only rule', () => {
@@ -1038,8 +1076,8 @@ await test('dropDeliveredPending without a snapshot falls back to the text-only 
 
 await test('dropDeliveredPending tolerates null pending and null entries', () => {
   eq(dropDeliveredPending(null, [{ uuid: 'u1', role: 'user', text: 'x' }]), []);
-  eq(dropDeliveredPending([newPendingEntry({ id: 'p', text: 'x', entries: [] })], null),
-    [newPendingEntry({ id: 'p', text: 'x', entries: [] })]);
+  eq(dropDeliveredPending([newPendingEntry({ id: 'p', text: 'x', entries: [], sentAt: 10_000 })], null),
+    [newPendingEntry({ id: 'p', text: 'x', entries: [], sentAt: 10_000 })]);
 });
 
 // --- Summary ----------------------------------------------------------------
