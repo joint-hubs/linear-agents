@@ -431,6 +431,26 @@ export function claimTag(ticket) {
   };
 }
 
+// sessionClaim(ticket) -> the board ticket's session lease spelled out for the
+// detail panel (FOC-1110), or null when the payload carries no claim. Unlike
+// claimTag (the card head's narrow tag) the panel shows the whole state: the
+// full session id, the store status and — when the owning pid is provably
+// alive — "live". The panel reads `live` too: a ticket a live task session
+// already owns must not offer the Start flow again.
+export function sessionClaim(ticket) {
+  const c = ticket && ticket.claimedBy;
+  if (!c || typeof c.sessionId !== 'string' || !c.sessionId) return null;
+  const status = typeof c.status === 'string' && c.status ? c.status : null;
+  const live = c.live === true;
+  const state = [status, live ? 'live' : null].filter(Boolean).join(', ');
+  return {
+    sessionId: c.sessionId,
+    status,
+    live,
+    text: `claimed by ${c.sessionId}${state ? ` (${state})` : ''}`,
+  };
+}
+
 // Every publish failure is spelled out by its contract name (plan §5):
 // no-checkout, stale-preview, push-refused, pr-failed — with the scrubbed
 // detail when the server sent one.

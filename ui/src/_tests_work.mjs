@@ -28,6 +28,7 @@ import {
   startDialogModel,
   publishDialogModel,
   claimTag,
+  sessionClaim,
   ticketLabels,
   labelNames,
 } from './workModel.js';
@@ -694,6 +695,28 @@ await test('claimTag: missing status still names the session; malformed or absen
   eq(claimTag({ claimedBy: null }), null);
   eq(claimTag({}), null);
   eq(claimTag(null), null);
+});
+
+// --- sessionClaim (FOC-1110: the panel's session-state line) -----------------
+
+await test('sessionClaim: running live claim -> full session id, live flag and the spelled-out text', () => {
+  const c = sessionClaim({ claimedBy: { sessionId: 'sup-abcdef1234567890', status: 'running', live: true } });
+  eq(c.sessionId, 'sup-abcdef1234567890');
+  eq(c.live, true);
+  eq(c.text, 'claimed by sup-abcdef1234567890 (running, live)');
+});
+
+await test('sessionClaim: queued claim is not live; missing status stays readable; malformed or absent -> null', () => {
+  const c = sessionClaim({ claimedBy: { sessionId: 'sup-abcdef1234567890', status: 'queued', live: false } });
+  eq(c.live, false);
+  eq(c.text, 'claimed by sup-abcdef1234567890 (queued)');
+  const noStatus = sessionClaim({ claimedBy: { sessionId: 'sup-abcdef1234567890', live: true } });
+  eq(noStatus.live, true);
+  eq(noStatus.text, 'claimed by sup-abcdef1234567890 (live)');
+  eq(sessionClaim({ claimedBy: { status: 'running', live: true } }), null);
+  eq(sessionClaim({ claimedBy: null }), null);
+  eq(sessionClaim({}), null);
+  eq(sessionClaim(null), null);
 });
 
 // --- Summary ----------------------------------------------------------------
