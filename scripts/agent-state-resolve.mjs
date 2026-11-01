@@ -314,7 +314,9 @@ export function applyHoldAnswers(store, { namespace, env = process.env, now, act
 
 // The question format is strictly parseable so hold dedup can recover which
 // keys a hold asked: the comma-separated tokens between "no deterministic
-// source for " and ". Answer" are the key list.
+// source for " and ". Answer" are the key list. Everything a hold adds after
+// that marker (the per-key "where" hints below) stays out of the parsed
+// region, so old and new wordings dedup against each other.
 export function askedKeysOf(hold) {
   const question = String(hold?.question ?? "");
   const marker = "no deterministic source for ";
@@ -328,6 +330,27 @@ export function askedKeysOf(hold) {
     .split(",")
     .map((token) => token.trim())
     .filter((token) => token.length > 0);
+}
+
+// FOC-1056: per-kind "where the value belongs" hints for the hold question —
+// a fresh install must not leave a human guessing where active_issue or
+// queue_head live. Each hint is derived from the key's own registry resolvers
+// (the label, env name or issue reference the resolver reads), so the wording
+// follows config/agent-state.json instead of duplicating it; kinds without a
+// place of their own fall through to the generic answer-here line.
+const WHERE_HINTS = {
+  "state-md": (resolver) => `docs/STATE.md line "- ${resolver.label}: <value>"`,
+  env: (resolver) => `environment variable ${resolver.name}`,
+  linear: (resolver) =>
+    `Linear (issue ${resolver.issueKey} → ${resolver.field}), once a Linear API key is available`,
+};
+
+function whereHint(entry) {
+  for (const resolver of entry?.resolvers ?? []) {
+    const hint = WHERE_HINTS[resolver.kind]?.(resolver);
+    if (hint) return hint;
+  }
+  return "answer here as key=value";
 }
 
 /**
@@ -382,7 +405,9 @@ export async function resolveRole(store, { registry, role, namespace, env = proc
   const resolved = [];
   const missing = [];
   const unresolved = new Set();
-  for (const [key, entry] of keysForRole(registry, role)) {
+  const roleKeys = keysForRole(registry, role);
+  const entryByKey = new Map(roleKeys);
+  for (const [key, entry] of roleKeys) {
     const stored = rowByKey.get(key);
     if (stored && entry.refresh === "once") continue;
     let hit = null;
@@ -466,11 +491,17 @@ export async function resolveRole(store, { registry, role, namespace, env = proc
       const neverAsked = askKeys.filter((key) => !asked.has(key));
       if (neverAsked.length > 0) {
         const id = nextHoldId(nsRunId);
+        // FOC-1056: each asked key also gets a line saying where its value
+        // belongs, derived from the key's own resolvers. The hints sit after
+        // the ". Answer" marker, so askedKeysOf keeps parsing the key list
+        // out of the first line and dedup is unchanged.
+        const hints = neverAsked.map((key) => `- ${key}: ${whereHint(entryByKey.get(key))}`);
         const record = {
           id,
           origin,
           question: `Working state (${role}, ${namespace}): no deterministic source for ` +
-            `${neverAsked.join(", ")}. Answer with one key=value per line.`,
+            `${neverAsked.join(", ")}. Answer with one key=value per line.` +
+            (hints.length > 0 ? `\n${hints.join("\n")}` : ""),
           // FOC-1109: the only meaningful answer here is the values themselves,
           // so the option asks for text — the Cockpit opens a field instead of
           // submitting the bare label (which applyHoldAnswers would drop).

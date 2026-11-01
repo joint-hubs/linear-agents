@@ -790,6 +790,16 @@ test("the briefing lists the run's open holds with id and origin", () => {
   if (out.holdsError) fail(`holdsError on a valid store: ${out.holdsError}`);
 });
 
+test("the briefing carries the hold question in full — no 160-char cut", () => {
+  const runId = fixtureRun();
+  const longQuestion = `${"q".repeat(160)}tail past the old cut`;
+  writeHoldsFixture(runId, [holdFixture({ question: longQuestion })]);
+  const out = parse(status(runId, ["--briefing"]));
+  if (out.holds[0].question !== longQuestion) {
+    fail(`question was cut to ${JSON.stringify(out.holds[0].question)}`);
+  }
+});
+
 test("a run with no holds.json briefs an empty holds list", () => {
   const runId = fixtureRun();
   const out = parse(status(runId, ["--briefing"]));

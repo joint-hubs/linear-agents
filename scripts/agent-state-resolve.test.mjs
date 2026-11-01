@@ -285,10 +285,15 @@ function makeFixture() {
 
   // Fixture-driven resolution must never reach the network, even on a machine
   // with a Linear key in its OS environment: strip the credential seams first.
+  // FOC-1161: the state seams this fixture does not own are pinned to the
+  // fixture root too — a host's live current-run.json pointer (read through
+  // LA_DATA_HOME, scoped by FENIX_SUPERVISOR_SESSION_ID) must never be
+  // resolved or adopted from a test.
   const env = { ...process.env };
   delete env.LINEAR_API_KEY;
   delete env.LINEAR_API_KEY_PISI;
   delete env.LINEAR_WORKSPACE;
+  delete env.FENIX_SUPERVISOR_SESSION_ID;
   Object.assign(env, {
     LA_SUPERVISOR_STATE_HOME: stateHome,
     LA_AGENT_STATE_DB: dbPath,
@@ -300,6 +305,8 @@ function makeFixture() {
     LA_SUPERVISOR_RUN: RUN,
     LA_SUPERVISOR_CHILD: "c1",
     LA_TASK_ID: "FOC-9",
+    LA_DATA_HOME: join(root, "data-home"),
+    LA_STATE_ROOT: join(root, "state-root"),
   });
 
   return { root, repo, stateHome, laRoot, sha, dbPath, registryFile, env };
@@ -886,6 +893,145 @@ test("resolve --role supervisor reads STATE.md labels and Linear facts for the a
     assert.equal(resolved.cost_basis.source, "config");
     assert.deepEqual(json.missing || [], []);
     assert.equal(json.hold ?? null, null);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("fresh install: keys with a deterministic source resolve, only the unseedable ones hold", async () => {
+  const fixture = makeFixture();
+  try {
+    const { resolveMod } = await loadMods();
+    // Fresh state home (no facts in the supervisor namespace yet), STATE.md
+    // carrying every labelled line, Linear reachable through the fixture:
+    // every supervisor key has a real deterministic source, so nothing is
+    // asked and no hold exists.
+    const res = runCliSync(
+      ["resolve", "--role", "supervisor", "--namespace", `supervisor:${RUN}`, "--cwd", fixture.repo, "--json"],
+      fixture.env,
+    );
+    assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+    const json = JSON.parse(res.stdout);
+    assert.deepEqual((json.missing || []).map((m) => m.key), [], "nothing missing");
+    assert.equal(json.hold ?? null, null, "no hold");
+    assert.equal(json.holdSkipped ?? null, null, "not even a skipped hold");
+    assert.equal(existsSync(join(fixture.stateHome, RUN, "holds.json")), false, "no holds store created");
+
+    // The offline variant — what the SessionStart hook actually sees (the hook
+    // strips every Linear credential). A second fresh namespace in its own run
+    // dir: STATE.md still resolves its three keys, but the Linear-derived keys
+    // cannot resolve without credentials — those, and only those, hold.
+    const OFF = `${RUN}-offline`;
+    mkdirSync(join(fixture.stateHome, OFF), { recursive: true });
+    const offlineEnv = envWithoutLinear(fixture.env);
+    const offlineArgs = [
+      "resolve",
+      "--role",
+      "supervisor",
+      "--namespace",
+      `supervisor:${OFF}`,
+      "--cwd",
+      fixture.repo,
+      "--json",
+    ];
+    const offline = runCliSync(offlineArgs, offlineEnv);
+    assert.equal(offline.status, 0, `stderr: ${offline.stderr}`);
+    const offlineJson = JSON.parse(offline.stdout);
+    const offlineMissing = (offlineJson.missing || []).map((m) => m.key).sort();
+    assert.deepEqual(
+      offlineMissing,
+      ["active_epic", "active_milestone"],
+      "only the Linear-derived keys are missing offline",
+    );
+    // Exactly one hold, asking only the two keys nothing offline can produce —
+    // with the place their values come from (Linear, once online).
+    assert.deepEqual(offlineJson.hold, { id: "hold-1", created: true });
+    const offlineHold = JSON.parse(readFileSync(join(fixture.stateHome, OFF, "holds.json"), "utf8")).holds[0];
+    assert.deepEqual(resolveMod.askedKeysOf(offlineHold), ["active_milestone", "active_epic"]);
+    assert.ok(
+      offlineHold.question.includes("once a Linear API key is available"),
+      `question says where Linear values come from: ${offlineHold.question}`,
+    );
+    // askedKeysOf above already proves active_issue is not asked — the hint
+    // text may still NAME it (it is the issue the Linear keys hang off).
+    assert.equal(offlineHold.options[0].needsText, true);
+
+    // Dedup survives the new wording: a second resolve adds no hold.
+    const again = runCliSync(offlineArgs, offlineEnv);
+    assert.equal(again.status, 0, `stderr: ${again.stderr}`);
+    assert.equal(JSON.parse(again.stdout).hold.id, "hold-1");
+    assert.equal(
+      JSON.parse(readFileSync(join(fixture.stateHome, OFF, "holds.json"), "utf8")).holds.length,
+      1,
+      "still exactly one hold",
+    );
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("fresh install without any source: the hold names each key and where its value belongs", async () => {
+  const fixture = makeFixture();
+  try {
+    const { resolveMod } = await loadMods();
+    // A pristine install: docs/STATE.md ships without the labelled lines, so
+    // the state-md keys have no deterministic source either, and no Linear
+    // credentials exist. Nothing may be invented — the hold must say where
+    // each value belongs (file + label, or Linear once online).
+    writeFileSync(join(fixture.laRoot, "docs", "STATE.md"), "# State\n\nNo resolved keys yet.\n\n");
+    const env = envWithoutLinear(fixture.env);
+    const args = [
+      "resolve",
+      "--role",
+      "supervisor",
+      "--namespace",
+      `supervisor:${RUN}`,
+      "--cwd",
+      fixture.repo,
+      "--json",
+    ];
+
+    const res = runCliSync(args, env);
+    assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+    const json = JSON.parse(res.stdout);
+    assert.equal(json.hold.id, "hold-1");
+    assert.equal(json.hold.created, true);
+
+    const hold = readHoldsFile(fixture).holds[0];
+    const asked = resolveMod.askedKeysOf(hold);
+    // The askable keys in registry order — parseability intact after the
+    // wording change (dedup reads exactly this list back).
+    assert.deepEqual(
+      asked,
+      ["active_issue", "active_milestone", "active_epic", "queue_head", "known_reds"],
+    );
+    for (const key of asked) {
+      assert.ok(hold.question.includes(key), `question names ${key}`);
+    }
+    // Where each value belongs, derived from the key's own resolvers.
+    for (const [key, where] of [
+      ["active_issue", '- active_issue: docs/STATE.md line "- Active issue: <value>"'],
+      ["queue_head", '- queue_head: docs/STATE.md line "- Queue head: <value>"'],
+      ["known_reds", '- known_reds: docs/STATE.md line "- Known reds: <value>"'],
+      ["active_milestone", "- active_milestone: Linear (issue active_issue → projectMilestone)"],
+      ["active_epic", "- active_epic: Linear (issue active_issue → parent)"],
+    ]) {
+      assert.ok(
+        hold.question.includes(where),
+        `question says where ${key} belongs:\n${JSON.stringify(hold.question)}`,
+      );
+    }
+    assert.ok(hold.question.includes("once a Linear API key is available"), "Linear keys say when");
+    assert.equal(hold.options[0].needsText, true);
+    // No guessed values anywhere in the question — the issue identifiers a
+    // fresh install cannot know must not appear.
+    assert.ok(!/FOC-\d+/.test(hold.question), `question invents no issue id: ${hold.question}`);
+
+    // Dedup on the second resolve: same hold, nothing new asked.
+    const second = runCliSync(args, env);
+    assert.equal(second.status, 0, `stderr: ${second.stderr}`);
+    assert.equal(JSON.parse(second.stdout).hold.id, "hold-1");
+    assert.equal(readHoldsFile(fixture).holds.length, 1, "still exactly one hold");
   } finally {
     cleanup(fixture);
   }

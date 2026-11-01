@@ -113,6 +113,8 @@ function makeFixture() {
   // Fixture-driven resolution must never reach the network, even on a machine
   // with a Linear key in its OS environment: strip the credential seams and no
   // fixture is mounted (the hook strips them again itself — both belts).
+  // FOC-1161: the data home and state root are pinned to the fixture root, so
+  // the hook can never resolve or adopt a host's live run pointer.
   const env = { ...process.env };
   delete env.LINEAR_API_KEY;
   delete env.LINEAR_API_KEY_PISI;
@@ -129,6 +131,8 @@ function makeFixture() {
     LA_SUPERVISOR_CHILD: CHILD,
     FENIX_STAGE: "dev",
     LA_TASK_ID: "FOC-9",
+    LA_DATA_HOME: join(root, "data-home"),
+    LA_STATE_ROOT: join(root, "state-root"),
   });
 
   return { root, repo, stateHome, laRoot, sha, dbPath, registryFile, env };

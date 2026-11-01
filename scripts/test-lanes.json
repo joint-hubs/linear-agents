@@ -17,6 +17,10 @@
       "reason": "isolation audit FOC-729: mkdtemp fixtures only (run dir, store via LA_AGENT_STATE_DB, registry copy); hook spawned with a stdin payload; no ports, no network"
     },
     {
+      "file": "agent-state-isolation.test.mjs",
+      "reason": "isolation audit FOC-1161: spawns the agent-state suites as node --test children against a fake live host (temp LA_DATA_HOME + LA_SUPERVISOR_STATE_HOME carrying a live current-run.json pointer and a holds.json run dir) and asserts a byte snapshot is unchanged; no ports, no network, no real-repo writes"
+    },
+    {
       "file": "agent-state-resolve.test.mjs",
       "reason": "isolation audit FOC-728: mkdtemp fixtures only (git repo, run dir, registry copy, Linear fixture JSON); store via LA_AGENT_STATE_DB; no ports, no network (LA_AGENT_STATE_LINEAR_FIXTURE), no real-repo writes"
     },
