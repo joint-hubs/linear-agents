@@ -28,6 +28,14 @@
 // linearStatesFor to replace the store/config/Linear reads in unit tests.
 // Without them the defaults read the real seams (LA_TELEMETRY_DB /
 // LA_SUPERVISOR_STATE_HOME / repo root / the fake-file-or-Linear lookup).
+//
+// FOC-1150: a spawned server child cannot reach module-level clock setters,
+// so the payload's `now` also has a TEST-ONLY env seam — FENIX_TEAM_CLOCK_MS
+// (an integer of ms) pins it so the routes tests can seed the store relative
+// to the SAME clock the server windows against (30d default included). Like
+// FENIX_LINEAR_FAKE_FILE it is guarded by NODE_ENV=test: unset, or set
+// outside a test run, the payload's now is Date.now() — production behavior
+// is unchanged.
 
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -113,6 +121,13 @@ async function defaultLoaders() {
   } finally {
     db.close(); // never accumulate open DB handles across requests
   }
+}
+
+/** FOC-1150: the TEST-ONLY injected clock (see the seam note above), or null. */
+function teamClockNow() {
+  if (process.env.NODE_ENV !== "test") return null;
+  const ms = Number(process.env.FENIX_TEAM_CLOCK_MS);
+  return Number.isInteger(ms) && ms > 0 ? ms : null;
 }
 
 /**
@@ -226,7 +241,7 @@ export async function handleTeamRoute(req, res, url, ctx) {
     ticket,
     registryChildren,
     ticketFacts,
-    now: Date.now(),
+    now: teamClockNow() ?? Date.now(),
     repoFilterAvailable,
     // FOC-914: what the Linear lookup could answer rides to the model —
     // supported/unsupported must reflect the real capability, and the

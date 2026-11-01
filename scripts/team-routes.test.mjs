@@ -16,6 +16,13 @@
 // (NODE_ENV=test + FENIX_LINEAR_FAKE_FILE) — the same TEST-ONLY seam the Work
 // board routes use — so this file never touches the real Linear API even
 // where a key exists.
+//
+// FOC-1150: ONE clock for the whole file. FENIX_TEAM_CLOCK_MS (optional env)
+// is read BOTH by the fixture seeding (the store's dates are relative to it —
+// seedTeamFixture re-anchors its offsets) and by the spawned server through
+// the TEST-ONLY seam in team-routes.mjs, so the 30d-default path is covered
+// end-to-end for any wall-clock date. Unset, the clock is the fixture's NOW
+// (2026-10-18T12:00Z) — a pinned value, never Date.now().
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -25,7 +32,7 @@ import { fileURLToPath } from "node:url";
 
 import { spawnTestServer } from "./test-spawn.mjs";
 import { repoPrefixMap, handleTeamRoute } from "./team-routes.mjs";
-import { seedTeamFixture, seedRegistryFixture } from "./team-model.test.mjs";
+import { seedTeamFixture, seedRegistryFixture, NOW } from "./team-model.test.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -47,7 +54,9 @@ async function test(name, fn) {
 
 const dir = mkdtempSync(join(tmpdir(), "team-routes-"));
 const dbPath = join(dir, "telemetry.sqlite");
-seedTeamFixture(dbPath);
+const clockEnv = Number(process.env.FENIX_TEAM_CLOCK_MS);
+const CLOCK = Number.isInteger(clockEnv) && clockEnv > 0 ? clockEnv : NOW;
+seedTeamFixture(dbPath, { now: CLOCK });
 const stateHome = join(dir, "supervisor-state");
 seedRegistryFixture(stateHome);
 
@@ -83,6 +92,8 @@ const env = {
   LA_TELEMETRY_HOME: join(dir, "telemetry-home"),
   LA_SUPERVISOR_STATE_HOME: stateHome,
   LA_STATE_ROOT: join(dir, "state-root"),
+  // FOC-1150: the SAME clock the fixture was seeded relative to (above).
+  FENIX_TEAM_CLOCK_MS: String(CLOCK),
 };
 
 const PORT = 7393;
