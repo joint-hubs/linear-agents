@@ -23,6 +23,7 @@ import { fmtUsd, fmtPct, teamQueryString } from '../../teamModel';
 import StartDialog from './StartDialog';
 import PublishDialog from './PublishDialog';
 import LabelChip from './LabelChip';
+import { cockpitUrl } from '../../taskCockpitModel';
 
 // The payload's timeline is chronological; a defensive sort by `at` (missing
 // timestamps last) keeps it that way even when an entry arrives late.
@@ -152,7 +153,7 @@ function TeamOnTicket({ id }) {
   );
 }
 
-export default function TicketPanel({ id, taskKey, onClose, onAskSupervisor }) {
+export default function TicketPanel({ id, taskKey, claim, timelineNote, onClose, onAskSupervisor }) {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -259,6 +260,16 @@ export default function TicketPanel({ id, taskKey, onClose, onAskSupervisor }) {
         </a>
       )}
 
+      {/* The ticket's session lease (FOC-1110): a task session already owns
+          this ticket — the panel says so instead of showing Ready / Start as
+          if nothing were running. The timeline stays the run facts' truth
+          (a task session's turns are not Fenix runs); nothing is invented. */}
+      {claim && (
+        <div className="muted" style={{ fontSize: 12, marginTop: 8 }} title={claim.sessionId}>
+          {claim.text}
+        </div>
+      )}
+
       {/* Team on this ticket (FOC-791 slice C) — before the long sections, its
           own poll; a failure never blocks or banners the panel. */}
       <TeamOnTicket id={id} />
@@ -298,7 +309,24 @@ export default function TicketPanel({ id, taskKey, onClose, onAskSupervisor }) {
           <div className="wk-section">
             <div className="wk-section-h">Timeline</div>
             {rows.length === 0 ? (
-              <div className="muted" style={{ fontSize: 12 }}>No events yet.</div>
+              timelineNote ? (
+                /* FOC-1110 round 2: a live task session owns the ticket — the
+                    empty timeline must not read "No events". The link goes to
+                    where the session's events actually are. */
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {timelineNote}
+                  {taskKey && (
+                    <>
+                      {' '}
+                      <Link className="link" to={cockpitUrl(taskKey)}>
+                        Open cockpit →
+                      </Link>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="muted" style={{ fontSize: 12 }}>No events yet.</div>
+              )
             ) : (
               <ul className="wk-timeline">
                 {rows.map((r, i) => (
@@ -361,7 +389,9 @@ export default function TicketPanel({ id, taskKey, onClose, onAskSupervisor }) {
           </div>
 
           <div className="wk-actions">
-            {stage === 'ready' && (
+            {/* Start (FOC-1110): only when no live task session owns the
+                ticket already — a live claim means the work is running. */}
+            {stage === 'ready' && !(claim && claim.live) && (
               <button type="button" className="launch-btn" onClick={() => setStartOpen(true)}>
                 Start
               </button>

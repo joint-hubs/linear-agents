@@ -471,7 +471,10 @@ export async function resolveRole(store, { registry, role, namespace, env = proc
           origin,
           question: `Working state (${role}, ${namespace}): no deterministic source for ` +
             `${neverAsked.join(", ")}. Answer with one key=value per line.`,
-          options: [{ label: "Provide the values", model: "user", costUsd: 0 }],
+          // FOC-1109: the only meaningful answer here is the values themselves,
+          // so the option asks for text — the Cockpit opens a field instead of
+          // submitting the bare label (which applyHoldAnswers would drop).
+          options: [{ label: "Provide the values", model: "user", costUsd: 0, needsText: true }],
           recommendation: "Add the values to docs/STATE.md or answer here; agent keys stay unaffected.",
           impact: "low",
           resolution: null,

@@ -13,7 +13,7 @@
 //   wake-ack.json        the persisted drain watermark (FOC-608; status writes)
 //   triage.json          the recorded verdict (FOC-123, read here, never written)
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1834,6 +1834,21 @@ const REDACTIONS = [
   [/\b(api[_-]?key)\s*[=:]\s*\S+/gi, "$1=***"],
   [/\bBearer\s+\S+/gi, "Bearer ***"],
   [/\b(password)\s*[=:]\s*\S+/gi, "$1=***"],
+  // FOC-1153 r1 (nit 6): an npm failure echoes the configured registry/proxy
+  // URL, and a private registry's URL carries its credentials in the authority
+  // — https://user:pass@registry.example/ — which none of the shapes above
+  // matched. The scheme is kept so the line still reads as a URL.
+  [/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1***@"],
+  // npm's credential shape in .npmrc-backed error output.
+  [/\b(_?authToken)\s*[=:]\s*\S+/gi, "$1=***"],
+  // r2 N3: npm's legacy single-credential field, and registry URLs that carry
+  // the token in the QUERY STRING (?token=…, &auth=…) — shapes the authority
+  // redaction above cannot see. Ordered after the authToken rule: by the time
+  // this runs, `_authToken=x` is already `_authToken=***`, and the pattern
+  // below cannot match it anyway (`_auth` must be followed by `=`/`:`, not the
+  // `T` of `_authToken`).
+  [/\b(_auth)\s*[=:]\s*\S+/gi, "$1=***"],
+  [/([?&](?:access[_-]?token|auth|token)=)[^\s&]+/gi, "$1***"],
 ];
 
 export function redact(text) {
@@ -2134,6 +2149,263 @@ function withOwnership(gitRoot, result, ownerId) {
     ...result,
     owner: ownerId,
     claim: { status: claim.status, claimedAt: claim.claim.claimedAt, updatedAt: claim.claim.updatedAt },
+  };
+}
+
+// ── dependency provisioning in a worktree about to be handed out (FOC-1153) ──
+//
+// Spawn blocks the child launch on this, but must not hang on it: bounded well
+// under the merge tool's 900 s install/verify ceiling (supervisor-merge.mjs),
+// comfortably above this repo's own installs, which measure in seconds.
+const DEPS_INSTALL_TIMEOUT_MS = 300_000;
+
+/** Test seam for the production budget above — the r1 orphan test needs a
+ * timeout a test can afford. Ignored when unset or not a positive number. */
+const installTimeoutMs = () => {
+  const raw = Number(process.env.LA_DEPS_INSTALL_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEPS_INSTALL_TIMEOUT_MS;
+};
+
+// Only the tail of an install's output is ever used (the record keeps 5 lines),
+// so the accumulated stream is kept to a 1 MiB tail rather than unbounded —
+// the same bounded-output intent spawnSync's maxBuffer had, without holding
+// the whole 64 MB in memory.
+const INSTALL_OUTPUT_KEEP_BYTES = 1024 * 1024;
+
+// r2 N2: after the timeout fires and the tree kill is issued, this is how long
+// the shell gets to exit on its own before the install result is resolved
+// anyway. `taskkill /F` lands in milliseconds when it lands at all, so in the
+// normal case `close` wins this race long before the timer fires.
+const INSTALL_KILL_GRACE_MS = 10_000;
+
+/**
+ * True when the entry is a reparse point of ANY win32 tag, not merely a symlink
+ * or junction (FOC-1153 r1, nit 4). lstat alone cannot see the attribute: it
+ * resolves a reparse point whose tag is neither IO_REPARSE_TAG_SYMLINK nor
+ * MOUNT_POINT (a OneDrive cloud placeholder) to its target shape, so
+ * `isSymbolicLink()` misses it. The readdir dirent CAN see it — libuv's win32
+ * scandir marks every FILE_ATTRIBUTE_REPARSE_POINT entry as a link whatever
+ * its tag (probed here for junctions; the placeholder-tag shape is that same
+ * marker, not plantable on this machine to probe directly). On POSIX the
+ * dirent and lstat agree, so callers without a dirent lose nothing there.
+ */
+export function isReparsePoint(st, dirent = null) {
+  if (st.isSymbolicLink()) return true;
+  return process.platform === "win32" && Boolean(dirent?.isSymbolicLink());
+}
+
+/**
+ * One install location (root or ui/). Tolerant by design: a directory without a
+ * package.json is skipped, not an error — not every tree a child works in has
+ * dependencies, and provisioning must be a no-op there.
+ *
+ * The skip rule is lstat-shaped on purpose: existsSync follows the link, and a
+ * junction very much "exists" — the 2026-11-01 incident had a junction standing
+ * where a real node_modules should have been, because a child improvised the
+ * install itself. A reparse point — by lstat, or by the dirent check that
+ * catches the tags lstat resolves away (nit 4) — is unlinked AS A LINK, never
+ * its target's content, and the install runs fresh into a real directory.
+ */
+async function installDepsAt(dir, location) {
+  const record = { location, path: dir };
+  if (!existsSync(join(dir, "package.json"))) {
+    return { ...record, skipped: true, reason: "no package.json" };
+  }
+  const nm = join(dir, "node_modules");
+  let st = null;
+  try {
+    st = lstatSync(nm);
+  } catch {
+    st = null; // absent — nothing to skip and nothing to replace
+  }
+  let dirent = null;
+  if (st && process.platform === "win32") {
+    // The one look that sees a non-symlink reparse tag (nit 4); an unreadable
+    // parent leaves lstat's answer as all we have.
+    try {
+      dirent = readdirSync(dir, { withFileTypes: true }).find((e) => e.name === "node_modules") ?? null;
+    } catch {
+      dirent = null;
+    }
+  }
+  if (st && !isReparsePoint(st, dirent) && st.isDirectory()) {
+    return { ...record, skipped: true, reason: "node_modules already present" };
+  }
+  if (st) {
+    try {
+      rmSync(nm); // link or stray file; rmSync does not follow a reparse point
+      // r2 N6: renamed from `replacedReparsePoint` — this branch also fires for
+      // a node_modules that is a stray FILE, and the old name overclaimed.
+      record.replacedObstruction = true;
+    } catch (err) {
+      return {
+        ...record,
+        ok: false,
+        error: `could not remove the node_modules reparse point or stray file: ${err.message.split("\n")[0]}`,
+      };
+    }
+  }
+  // npm ci with a lockfile; npm install where there is none — the merge tool's
+  // split, because resolving ranges live makes the result depend on the current
+  // registry state and that is worth naming in the record.
+  const hasLockfile = existsSync(join(dir, "package-lock.json"));
+  const command = hasLockfile ? "npm ci" : "npm install";
+  const run = await runBoundedInstall(dir, command, ["--no-audit", "--no-fund"]);
+  // r2 N12: the streams arrive decoded and separate. The tail is stderr-first
+  // — npm's diagnosis lives there; a run whose failure printed nothing on
+  // stderr falls back to stdout.
+  const stderrLines = run.stderr.split("\n").filter(Boolean);
+  const stdoutLines = run.stdout.split("\n").filter(Boolean);
+  return {
+    ...record,
+    skipped: false,
+    ok: run.code === 0,
+    command,
+    exitCode: run.code,
+    timedOut: run.timedOut,
+    // r2 N2: set only when the timeout's tree kill did not land and the result
+    // was resolved by the grace timer — `exitCode: null` plus this field says
+    // the npm tree may still be running.
+    ...(run.killFailed ? { killFailed: true } : {}),
+    // r1 nit 6 / r2 N4: the record lands in the registry entry and the spawn
+    // result, so it is scrubbed HERE, where every consumer inherits it — npm
+    // scrubs its own error lines, but an install script's output passes through
+    // raw. The spawn error is redacted on EVERY line, not just the first.
+    error: run.spawnError ? redact(run.spawnError) : null,
+    tail: (stderrLines.length ? stderrLines : stdoutLines).slice(-5).map(redact),
+  };
+}
+
+/**
+ * The bounded install run, as a child_process.spawn instead of spawnSync —
+ * the r1 finding (nit 5): spawnSync's timeout kills only the DIRECT child,
+ * which with shell:true is cmd.exe, so the npm grandchild it launched survives
+ * as an orphan holding locks in the tree. Here the timeout fires our own timer,
+ * which calls the repo's existing tree kill on the shell's pid — taskkill /T /F
+ * on win32; on POSIX the child is spawned detached (its own process group) so
+ * killTree's group kill lands. shell:true stays: npm is a .cmd on win32, and
+ * node refuses to spawn .cmd without a shell.
+ */
+function runBoundedInstall(dir, command, args) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd: dir,
+      shell: true,
+      windowsHide: true,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    // r2 N12: the streams are decoded (setEncoding carries a UTF-8 sequence
+    // split across pipe chunks) and kept SEPARATE — merging them chunk-wise
+    // interleaves the two streams nondeterministically and is what made the
+    // 1 MiB tail slice unreliable.
+    let stdout = "";
+    let stderr = "";
+    let spawnError = null;
+    let timedOut = false;
+    let killGrace = null;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout = `${stdout}${chunk}`.slice(-INSTALL_OUTPUT_KEEP_BYTES);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = `${stderr}${chunk}`.slice(-INSTALL_OUTPUT_KEEP_BYTES);
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // r2 N2: killTree swallows its own failure (its `false` also covers the
+      // benign "already gone" race, which is why it is not branched on here).
+      // If the tree kill did NOT land, `close` never fires and the spawn
+      // blocks on this promise forever — so a grace timer is armed on every
+      // timeout and resolves with the timeout result regardless; in the normal
+      // case `close` wins the race and clears it.
+      killTree(child.pid, "force");
+      killGrace = setTimeout(() => {
+        console.error(
+          `[supervisor-lib] install in ${dir} timed out and the tree kill of pid ${child.pid} did not land — ` +
+            "resolving with the timeout result; the npm tree may still be running",
+        );
+        resolve({ code: null, timedOut, spawnError, stdout, stderr, killFailed: true });
+      }, INSTALL_KILL_GRACE_MS);
+    }, installTimeoutMs());
+    child.on("error", (err) => {
+      spawnError = spawnError ?? err.message;
+    });
+    // `close` always follows `error` (node contract), so this is the one exit.
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (killGrace) clearTimeout(killGrace);
+      resolve({ code, timedOut, spawnError, stdout, stderr });
+    });
+  });
+}
+
+/**
+ * Install dependencies in a worktree a child is about to work in (FOC-1153):
+ * the worktree root, and `ui/` whenever it carries a package.json. Called by
+ * the spawn path (and the task-session host) after the tree is ensured —
+ * OUTSIDE the integration lock, unlike ensureWorktree itself: an install
+ * running under the repo-wide lock would serialize every concurrent spawn
+ * behind one package manager.
+ *
+ * ui/ is unconditional-when-present, deliberately not ticket-aware: a child
+ * whose task names only the root still needs the ui tree buildable, and the
+ * cost of an extra skip-or-install is seconds.
+ *
+ * A timed-out or failed install leaves a node_modules behind that a later
+ * ensure would SKIP as "already present" — the same accepted trade the merge
+ * tool makes (it skips on existsSync). Freshness is re-established by the
+ * child's own build, and the failure is in the record, never silent.
+ *
+ * @returns {Promise<{ worktree: string, ok: boolean, locations: object[] }>}
+ */
+/**
+ * r3 N1: does the root package.json declare npm workspaces? When it does, the
+ * root `npm ci` writes `ui/node_modules` itself (workspace trees install
+ * through the root's node_modules), so the concurrent ui/ install would race
+ * the root one over the same tree — `npm ci` deletes node_modules outright,
+ * so the loser of that race fails on a vanished directory. Not triggerable on
+ * linear-agents (no workspaces key), but any other `--repo` target can be a
+ * workspaces monorepo. An unreadable or absent root manifest answers false:
+ * both installs run, which is the pre-r3 behavior and cannot under-provision.
+ */
+function rootWorkspacesCover(root) {
+  let pkg = null;
+  try {
+    pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  } catch {
+    return false;
+  }
+  const ws = pkg.workspaces;
+  return Array.isArray(ws) ? ws.length > 0 : Boolean(ws);
+}
+
+export async function installWorktreeDeps(worktree) {
+  // r2 N8: the two locations are independent trees, so the installs run
+  // concurrently — worst-case spawn block halves. Failure attribution is
+  // unchanged: each installDepsAt call owns its record and its own try/catch,
+  // so a failure in one lands in that location's record, never the other's
+  // (and a rejection — which installDepsAt does not produce short of a
+  // programming error — would reject the whole Promise.all exactly as a
+  // sequential await would have thrown).
+  // r3 N1: EXCEPT on a workspaces monorepo, where the two installs are NOT
+  // independent — the root one writes ui/node_modules. There the ui/ install
+  // is skipped (the root install already covers it) and the record carries the
+  // skip with its reason, so the report stays complete.
+  const uiJob = rootWorkspacesCover(worktree)
+    ? Promise.resolve({
+        location: "ui",
+        path: join(worktree, "ui"),
+        skipped: true,
+        reason: "root package.json declares workspaces — the root install covers ui/",
+      })
+    : installDepsAt(join(worktree, "ui"), "ui");
+  const locations = await Promise.all([installDepsAt(worktree, "root"), uiJob]);
+  return {
+    worktree,
+    ok: locations.every((l) => l.skipped || l.ok),
+    locations,
   };
 }
 

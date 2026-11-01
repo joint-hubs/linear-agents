@@ -22,6 +22,8 @@ import {
   labelNames,
   filtersFromQuery,
   queryFromFilters,
+  sessionClaim,
+  sessionTimelineNote,
 } from '../workModel';
 import { cockpitUrl } from '../taskCockpitModel';
 import PanelBoundary from '../components/cockpit/PanelBoundary';
@@ -103,9 +105,13 @@ export default function Work() {
     openTicket(id);
   };
 
-  // The detail panel's canonical key, when the board payload enriched the
-  // ticket with one (historical tickets may not carry it — PRD §3).
-  const panelTaskKey = (tickets.find((x) => x && x.taskId === ticketId) || {}).taskKey || null;
+  // The detail panel's canonical key and session lease, when the board payload
+  // enriched the ticket with them (historical tickets may not carry them —
+  // PRD §3; the claim is the task-sessions store's active owner, FOC-1110).
+  const panelTicket = tickets.find((x) => x && x.taskId === ticketId) || null;
+  const panelTaskKey = panelTicket?.taskKey || null;
+  const panelClaim = sessionClaim(panelTicket);
+  const panelTimelineNote = sessionTimelineNote(panelTicket);
 
   return (
     <div className="work">
@@ -213,6 +219,8 @@ export default function Work() {
           <TicketPanel
             id={ticketId}
             taskKey={panelTaskKey}
+            claim={panelClaim}
+            timelineNote={panelTimelineNote}
             onClose={closePanel}
             onAskSupervisor={askSupervisor}
           />
